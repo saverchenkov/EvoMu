@@ -86,7 +86,100 @@ pub fn deposit_mined_ore_and_record_ledger(
     );
 }
 
-pub fn deposit_mined_ore_and_record_ledger_with_waste(
+/// Resolves the specific online Upwell Refinery (`group_id == 1406`, excluding Metenox `81826`,
+/// `state != "Destroyed"`, online Moon Drill) eligible to observe mining from `asteroid_id` /
+/// `ast_pos` in `sys_id`. Returns `None` for non-moon ores (belts, anomalies, ice, gas),
+/// non-Refinery structures, offline/destroyed Refineries, or non-matching moon fields.
+pub fn resolve_moon_observer_structure_id(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    sys_id: u32,
+    ore_type_id: u32,
+    asteroid_id: Option<i64>,
+    ast_pos: Option<[f64; 3]>,
+) -> Option<i64> {
+    let is_moon_ore = ctx
+        .sde
+        .types
+        .get(&ore_type_id)
+        .is_some_and(|t| matches!(t.group_id, 1884 | 1920..=1923));
+    if !is_moon_ore {
+        return None;
+    }
+
+    let is_eligible_refinery = |st: &eve_db::UpwellStructureRecord| -> bool {
+        if st.solar_system_id != sys_id || st.state == "Destroyed" || st.type_id == 81826 {
+            return false;
+        }
+        let is_refinery_group = ctx
+            .sde
+            .types
+            .get(&st.type_id)
+            .map_or_else(|| matches!(st.type_id, 35835 | 35836), |t| t.group_id == 1406);
+        is_refinery_group
+            && crate::services::mining_advanced::structure_has_online_moon_drill(
+                snap,
+                st.structure_id,
+            )
+    };
+
+    if let Some(aid) = asteroid_id {
+        if let Some(ext) = snap
+            .moon_extractions
+            .values()
+            .find(|ext| ext.spawned_asteroid_ids.contains(&aid))
+        {
+            return snap
+                .structures
+                .get(&ext.structure_id)
+                .filter(|st| is_eligible_refinery(st))
+                .map(|st| st.structure_id);
+        }
+        if let Some(ast) = snap.asteroids.get(&aid) {
+            if ast.belt_id > 0 {
+                if snap.structures.contains_key(&ast.belt_id) {
+                    return snap
+                        .structures
+                        .get(&ast.belt_id)
+                        .filter(|st| is_eligible_refinery(st))
+                        .map(|st| st.structure_id);
+                }
+                // Asteroid belongs to a regular asteroid belt or anomaly, not a structure moon field.
+                return None;
+            }
+        }
+    }
+
+    let pos = ast_pos.or_else(|| {
+        asteroid_id.and_then(|aid| {
+            snap.asteroids
+                .get(&aid)
+                .map(|a| [a.position.0, a.position.1, a.position.2])
+        })
+    })?;
+    const MAX_MOON_FIELD_DIST_SQ: f64 = 250_000.0 * 250_000.0;
+    snap.structures
+        .values()
+        .filter(|st| is_eligible_refinery(st))
+        .filter_map(|st| {
+            let dx = st.position[0] - pos[0];
+            let dy = st.position[1] - pos[1];
+            let dz = st.position[2] - pos[2];
+            let dist_sq = dx * dx + dy * dy + dz * dz;
+            (dist_sq <= MAX_MOON_FIELD_DIST_SQ).then_some((dist_sq, st.structure_id))
+        })
+        .min_by(|(d1, id1), (d2, id2)| {
+            d1.partial_cmp(d2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| id1.cmp(id2))
+        })
+        .map(|(_, id)| id)
+}
+
+/// Deposits mined ore (and residue waste) into ship inventory, records the character mining
+/// ledger, and writes an observer mining ledger entry only when harvesting a moon-ore asteroid
+/// from an eligible online Upwell Refinery's moon field.
+pub fn deposit_mined_ore_for_asteroid_and_record_ledger_with_waste(
     ctx: &ServerContext,
     char_id: i64,
     ship_id: i64,
@@ -95,6 +188,8 @@ pub fn deposit_mined_ore_and_record_ledger_with_waste(
     ore_type_id: u32,
     mined_units: u64,
     wasted_units: u64,
+    asteroid_id: Option<i64>,
+    ast_pos: Option<[f64; 3]>,
 ) {
     if mined_units > 0
         && ctx
@@ -111,29 +206,45 @@ pub fn deposit_mined_ore_and_record_ledger_with_waste(
             wasted_units as i64,
             now_unix,
         );
-        ctx.db.with_mut_snapshot(|snap| {
-            let belt_obs = snap
-                .asteroids
-                .values()
-                .find(|a| a.solar_system_id == sys_id && a.type_id == ore_type_id && a.belt_id > 0)
-                .map(|a| a.belt_id)
-                .filter(|id| !snap.structures.get(id).is_some_and(|s| s.solar_system_id == sys_id));
-            if let Some(obs_id) = belt_obs {
-                let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                snap.observer_mining_ledger.entry(obs_id).or_default().push(eve_db::ObserverMiningRecord {
-                    observer_id: obs_id,
-                    character_id: char_id,
-                    recorded_corporation_id: corp_id,
-                    type_id: ore_type_id,
-                    quantity: mined_units as i64,
-                    last_updated_date: eve_db::unix_secs_to_date_string(now_unix),
-                    timestamp_unix: now_unix,
-                });
-            }
+        let obs_id = ctx.db.with_snapshot(|snap| {
+            resolve_moon_observer_structure_id(ctx, snap, sys_id, ore_type_id, asteroid_id, ast_pos)
         });
+        if let Some(obs_id) = obs_id {
+            let _ = ctx.db.record_observer_mining_ledger_entry(
+                obs_id,
+                char_id,
+                ore_type_id,
+                mined_units as i64,
+                now_unix,
+            );
+        }
         dispatch_mining_gameplay_events(ctx, char_id, mined_units, sys_id, ore_type_id);
         crate::services::wormhole_pve_escalations::on_asteroid_mined_in_system(ctx, sys_id, char_id);
     }
+}
+
+pub fn deposit_mined_ore_and_record_ledger_with_waste(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+    target_flag: eve_db::InventoryFlag,
+    ore_type_id: u32,
+    mined_units: u64,
+    wasted_units: u64,
+) {
+    deposit_mined_ore_for_asteroid_and_record_ledger_with_waste(
+        ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        target_flag,
+        ore_type_id,
+        mined_units,
+        wasted_units,
+        None,
+        None,
+    );
 }
 
 /// Seeds or respawns the regional `"IceBelt"` cosmic anomaly and its SDE ice asteroids in a

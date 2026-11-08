@@ -86,7 +86,8 @@ fn deposit_mined_ore_structure_belt_filtering_and_wormhole_class_tables() {
                 ..Default::default()
             },
         );
-        // Asteroid whose belt_id matches an Upwell structure in the same system -> should NOT record in observer_mining_ledger
+        // Moon Refinery without quantum core / fuel is offline and must not record observer ledger,
+        // while a non-moon belt asteroid or call without moon asteroid identity also must not record.
         snap.structures.insert(
             struct_belt_id,
             UpwellStructureRecord {
@@ -97,6 +98,8 @@ fn deposit_mined_ore_structure_belt_filtering_and_wormhole_class_tables() {
                 name: "Athanor".into(),
                 position: [0.0, 0.0, 0.0],
                 state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
                 ..Default::default()
             },
         );
@@ -115,6 +118,7 @@ fn deposit_mined_ore_structure_belt_filtering_and_wormhole_class_tables() {
         );
     });
 
+    // Generic deposit without asteroid context must NOT mirror to system structures
     deposit_mined_ore_and_record_ledger(
         &ctx,
         char_id,
@@ -123,6 +127,23 @@ fn deposit_mined_ore_structure_belt_filtering_and_wormhole_class_tables() {
         InventoryFlag::Cargo,
         ore_tid,
         25,
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.observer_mining_ledger.contains_key(&struct_belt_id));
+    });
+
+    // Moon asteroid deposit scoped to eligible online Refinery DOES record in its observer ledger
+    deposit_mined_ore_for_asteroid_and_record_ledger_with_waste(
+        &ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        InventoryFlag::Cargo,
+        ore_tid,
+        25,
+        0,
+        Some(1_095_000_050),
+        Some([0.0, 0.0, 0.0]),
     );
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.observer_mining_ledger[&struct_belt_id].len(), 1);

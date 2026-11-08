@@ -549,8 +549,18 @@ pub async fn step_repeating_drone_mining(ctx: &ServerContext, now_unix: u64) {
         }
 
         if extraction.mined_units > 0 {
-            crate::services::space_mining_harvest::deposit_mined_ore_and_record_ledger_with_waste(
-                ctx, m.owner_char_id, m.ship_id, m.solar_system_id, m.destination_flag, m.ore_type_id, extraction.mined_units, extraction.wasted_units,
+            let ast_pos_arr = ast_pos_opt.map(|p| [p.x, p.y, p.z]);
+            crate::services::space_mining_harvest::deposit_mined_ore_for_asteroid_and_record_ledger_with_waste(
+                ctx,
+                m.owner_char_id,
+                m.ship_id,
+                m.solar_system_id,
+                m.destination_flag,
+                m.ore_type_id,
+                extraction.mined_units,
+                extraction.wasted_units,
+                Some(m.asteroid_id),
+                ast_pos_arr,
             );
         }
 

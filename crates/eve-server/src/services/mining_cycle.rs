@@ -526,6 +526,7 @@ async fn resolve_cycle(ctx: &ServerContext, cycle: &ActiveMiningCycle, fraction:
     ctx.systems
         .get_or_spawn(cycle.solar_system_id)
         .sync_asteroid_quantity(cycle.target_id, remaining.max(0) as u64, due_unix);
+    let now_unix = ctx.now_unix_secs();
     if delivered > 0 || residue_units > 0 {
         let _ = ctx.db.record_mining_ledger_entry_with_waste(
             cycle.char_id,
@@ -533,10 +534,29 @@ async fn resolve_cycle(ctx: &ServerContext, cycle: &ActiveMiningCycle, fraction:
             asteroid.type_id,
             delivered,
             residue_units,
-            ctx.now_unix_secs(),
+            now_unix,
         );
     }
     if delivered > 0 {
+        let obs_id = ctx.db.with_snapshot(|snap| {
+            crate::services::space_mining_harvest::resolve_moon_observer_structure_id(
+                ctx,
+                snap,
+                cycle.solar_system_id,
+                asteroid.type_id,
+                Some(asteroid.asteroid_id),
+                Some([asteroid.position.0, asteroid.position.1, asteroid.position.2]),
+            )
+        });
+        if let Some(obs_id) = obs_id {
+            let _ = ctx.db.record_observer_mining_ledger_entry(
+                obs_id,
+                cycle.char_id,
+                asteroid.type_id,
+                delivered,
+                now_unix,
+            );
+        }
         crate::services::space_mining_harvest::dispatch_mining_gameplay_events(
             ctx,
             cycle.char_id,

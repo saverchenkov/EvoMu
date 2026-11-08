@@ -145,7 +145,7 @@ fn character_dock_respawn_structure_and_pod_remap_and_mining_ledger() {
         .remap_neural_attributes(cid, 19, 23, 22, 18, 17, 1_700_002_000)
         .is_err());
 
-    // Mining ledger + waste + observer structure mirroring.
+    // Mining ledger + waste must not mirror character belt mining to arbitrary observers.
     repo.record_mining_ledger_entry(cid, jita_sys, 1230, 5_000, 1_700_000_000)
         .expect("mining entry");
     repo.record_mining_ledger_entry_with_waste(cid, jita_sys, 1230, 4_200, 350, 1_700_000_060)
@@ -154,7 +154,13 @@ fn character_dock_respawn_structure_and_pod_remap_and_mining_ledger() {
     let with_waste = repo.get_mining_ledger_with_waste(cid);
     assert_eq!(with_waste.len(), 2);
     assert_eq!(with_waste[1].1, 350);
-    assert_eq!(repo.get_observer_mining_ledger(struct_id).len(), 2);
+    assert!(repo.get_observer_mining_ledger(struct_id).is_empty());
+    assert!(repo.get_observers_with_mining_events().is_empty());
+
+    // Scoped observer ledger entry records only explicitly observed mining.
+    repo.record_observer_mining_ledger_entry(struct_id, cid, 45492, 4_200, 1_700_000_060)
+        .expect("scoped observer mining entry");
+    assert_eq!(repo.get_observer_mining_ledger(struct_id).len(), 1);
     assert_eq!(repo.get_observers_with_mining_events(), vec![struct_id]);
 }
 

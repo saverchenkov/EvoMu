@@ -362,17 +362,63 @@ async fn test_mn15_corp_mining_ledger_service_and_observer_tracking() {
     let observer_id = 1_040_000_000_151_i64;
     let corp_id = 1_000_170_i64;
     let system_id = 30_000_142_u32;
-    let now = ctx.now_unix();
+    let _now = ctx.now_unix();
 
+    let unrelated_structure_id = 1_040_000_000_152_i64;
+    let ship_id = 1_040_000_000_251_i64;
+    let moon_ast_id = 1_040_000_000_351_i64;
+    let belt_ast_id = 1_040_000_000_352_i64;
     ctx.db.with_mut_snapshot(|snap| {
+        let mut st = make_structure(observer_id, 35835, corp_id, system_id, "Jita Mining Observer", [150_000.0, 20_000.0, -80_000.0], 500);
+        st.quantum_core_installed = true;
+        snap.structures.insert(observer_id, st);
+        snap.items.insert(1_040_000_000_951, make_item(1_040_000_000_951, 45009, corp_id, observer_id, InventoryFlag::ServiceSlot0, 1, true));
+        snap.module_online_states.insert(1_040_000_000_951, true);
         snap.structures.insert(
-            observer_id,
-            make_structure(observer_id, 35835, corp_id, system_id, "Jita Mining Observer", [150_000.0, 20_000.0, -80_000.0], 500),
+            unrelated_structure_id,
+            make_structure(unrelated_structure_id, 35832, 1_000_009, system_id, "Rival Astrahus", [9_000_000.0, 0.0, 0.0], 500),
+        );
+        snap.items.insert(ship_id, make_item(ship_id, 17478, 90_000_001, system_id as i64, InventoryFlag::None, 1, true));
+        snap.asteroids.insert(
+            belt_ast_id,
+            eve_db::AsteroidRecord {
+                asteroid_id: belt_ast_id,
+                type_id: 1230,
+                solar_system_id: system_id,
+                belt_id: 40_000_001,
+                quantity: 5_000,
+                initial_quantity: 5_000,
+                position: (150_100.0, 20_000.0, -80_000.0),
+                radius: 100.0,
+            },
+        );
+        snap.asteroids.insert(
+            moon_ast_id,
+            eve_db::AsteroidRecord {
+                asteroid_id: moon_ast_id,
+                type_id: 45492,
+                solar_system_id: system_id,
+                belt_id: observer_id,
+                quantity: 5_000,
+                initial_quantity: 5_000,
+                position: (160_000.0, 20_000.0, -80_000.0),
+                radius: 100.0,
+            },
         );
     });
 
-    let _ = ctx.db.record_mining_ledger_entry(90_000_001, system_id, 1230, 2_500, now);
-    let _ = ctx.db.record_mining_ledger_entry(90_000_001, system_id, 45492, 1_200, now);
+    // Belt Veldspar must NOT appear on any structure observer ledger, whereas moon ore harvested
+    // from observer_id's field records only on observer_id (never on unrelated_structure_id).
+    eve_server::services::space_mining_harvest::deposit_mined_ore_for_asteroid_and_record_ledger_with_waste(
+        &ctx, 90_000_001, ship_id, system_id, InventoryFlag::Cargo, 1230, 2_500, 0, Some(belt_ast_id), Some([150_100.0, 20_000.0, -80_000.0]),
+    );
+    eve_server::services::space_mining_harvest::deposit_mined_ore_for_asteroid_and_record_ledger_with_waste(
+        &ctx, 90_000_001, ship_id, system_id, InventoryFlag::Cargo, 45492, 1_200, 0, Some(moon_ast_id), Some([160_000.0, 20_000.0, -80_000.0]),
+    );
+    assert!(
+        ctx.db.get_observer_mining_ledger(unrelated_structure_id).is_empty(),
+        "Non-refinery structure must never observe mining events"
+    );
 
     sess.corp_role = 0;
     let role_err = ctx
@@ -395,11 +441,9 @@ async fn test_mn15_corp_mining_ledger_service_and_observer_tracking() {
     assert!(ledger_res.is_crowset(), "GetObserverLedger must return CRowset");
 
     let ledger = ctx.db.get_observer_mining_ledger(observer_id);
-    assert_eq!(ledger.len(), 2, "Observer should track both mining events");
-    assert_eq!(ledger[0].type_id, 1230);
-    assert_eq!(ledger[0].quantity, 2_500);
-    assert_eq!(ledger[1].type_id, 45492);
-    assert_eq!(ledger[1].quantity, 1_200);
+    assert_eq!(ledger.len(), 1, "Observer must track only the scoped moon-ore mining event");
+    assert_eq!(ledger[0].type_id, 45492);
+    assert_eq!(ledger[0].quantity, 1_200);
 }
 
 // ============================================================================

@@ -567,8 +567,50 @@ async fn test_r5_218_219_220_221_223_224_mining_moon_drill_asset_safety_fw_insur
     let low_shield = ctx.db.with_snapshot(|s| s.structures.get(&refinery_id).unwrap().shield_hp);
     assert!(low_shield < full_shield, "Offlining last service module must clamp shield_hp to LowPower max");
 
-    // #218: Observer ledger records moon ore mining
-    eve_server::services::space_mining_harvest::deposit_mined_ore_and_record_ledger_with_waste(
+    // #218: Observer ledger rejects offline Moon Drill and records moon ore only when Drill is online
+    let moon_ast_id = 1_045_999_001_i64;
+    let ref_pos = ctx.db.with_snapshot(|s| s.structures[&refinery_id].position);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.asteroids.insert(
+            moon_ast_id,
+            eve_db::AsteroidRecord {
+                asteroid_id: moon_ast_id,
+                type_id: 45492,
+                solar_system_id: sys_id,
+                belt_id: refinery_id,
+                quantity: 2_000,
+                initial_quantity: 2_000,
+                position: (ref_pos[0] + 5_000.0, ref_pos[1], ref_pos[2]),
+                radius: 80.0,
+            },
+        );
+    });
+    eve_server::services::space_mining_harvest::deposit_mined_ore_for_asteroid_and_record_ledger_with_waste(
+        &ctx,
+        char_id,
+        100_000_001,
+        sys_id,
+        InventoryFlag::Cargo,
+        45492, // Ubiquitous Moon Ore
+        50,
+        5,
+        Some(moon_ast_id),
+        Some([ref_pos[0] + 5_000.0, ref_pos[1], ref_pos[2]]),
+    );
+    assert!(
+        ctx.db.with_snapshot(|s| s.observer_mining_ledger.get(&refinery_id).is_none_or(|v| v.is_empty())),
+        "Offline Moon Drill must not record observer ledger entries"
+    );
+
+    eve_server::services::station_structure::structure_lifecycle_rpc::handle_structure_module_online(
+        &ctx,
+        &mut sess,
+        refinery_id,
+        drill_mod_id,
+        true,
+    )
+    .unwrap();
+    eve_server::services::space_mining_harvest::deposit_mined_ore_for_asteroid_and_record_ledger_with_waste(
         &ctx,
         char_id,
         100_000_001,
@@ -577,6 +619,8 @@ async fn test_r5_218_219_220_221_223_224_mining_moon_drill_asset_safety_fw_insur
         45492, // Ubiquitous Moon Ore
         100,
         10,
+        Some(moon_ast_id),
+        Some([ref_pos[0] + 5_000.0, ref_pos[1], ref_pos[2]]),
     );
     let obs_entries = ctx.db.with_snapshot(|s| s.observer_mining_ledger.get(&refinery_id).cloned().unwrap_or_default());
     assert_eq!(obs_entries.len(), 1);

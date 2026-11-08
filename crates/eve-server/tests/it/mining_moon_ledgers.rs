@@ -875,6 +875,237 @@ async fn test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger() {
     assert_eq!(matching_rows[0].get(3).and_then(|v| v.as_i64()), Some(mined_moon_qty));
 }
 
+#[tokio::test]
+async fn test_observer_ledger_scoped_to_origin_moon_refinery_only() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let corp_a = 1_000_009_i64;
+    let corp_b = 1_000_170_i64;
+
+    let astrahus_id = 1_046_000_001_i64;
+    let destroyed_ref_id = 1_046_000_002_i64;
+    let offline_drill_ref_id = 1_046_000_003_i64;
+    let metenox_id = 1_046_000_004_i64;
+    let ref_b1_id = 1_046_000_005_i64;
+    let ref_b2_id = 1_046_000_006_i64;
+    let ship_id = 1_046_000_010_i64;
+
+    let belt_ast_id = 1_046_000_101_i64;
+    let ice_ast_id = 1_046_000_102_i64;
+    let moon_b1_ast_id = 1_046_000_103_i64;
+    let moon_b2_ast_id = 1_046_000_104_i64;
+
+    let b1_pos = [100_000.0, 0.0, 0.0];
+    let b2_pos = [1_000_000_000.0, 0.0, 0.0];
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_b;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+        }
+        snap.items.insert(
+            ship_id,
+            make_item(ship_id, 17478, char_id, sys_id as i64, InventoryFlag::None, 1, true),
+        );
+        // Corp A Astrahus next to Moon B1 must never observe any mining
+        snap.structures.insert(astrahus_id, eve_db::UpwellStructureRecord {
+            structure_id: astrahus_id,
+            type_id: 35832,
+            owner_corp_id: corp_a,
+            solar_system_id: sys_id,
+            name: "Corp A Astrahus".into(),
+            position: [105_000.0, 0.0, 0.0],
+            state: "ShieldVulnerable".into(),
+            quantum_core_installed: true,
+            fuel_blocks: 500,
+            ..Default::default()
+        });
+        // Destroyed Athanor right on top of Moon B1
+        snap.structures.insert(destroyed_ref_id, eve_db::UpwellStructureRecord {
+            structure_id: destroyed_ref_id,
+            type_id: 35835,
+            owner_corp_id: corp_a,
+            solar_system_id: sys_id,
+            name: "Destroyed Athanor".into(),
+            position: [101_000.0, 0.0, 0.0],
+            state: "Destroyed".into(),
+            quantum_core_installed: true,
+            fuel_blocks: 500,
+            ..Default::default()
+        });
+        // Athanor with an offline Moon Drill module
+        snap.structures.insert(offline_drill_ref_id, eve_db::UpwellStructureRecord {
+            structure_id: offline_drill_ref_id,
+            type_id: 35835,
+            owner_corp_id: corp_a,
+            solar_system_id: sys_id,
+            name: "Offline Drill Athanor".into(),
+            position: [102_000.0, 0.0, 0.0],
+            state: "ShieldVulnerable".into(),
+            quantum_core_installed: true,
+            fuel_blocks: 500,
+            ..Default::default()
+        });
+        snap.items.insert(
+            1_046_000_020,
+            make_item(1_046_000_020, 35894, corp_a, offline_drill_ref_id, InventoryFlag::ServiceSlot0, 1, true),
+        );
+        snap.module_online_states.insert(1_046_000_020, false);
+
+        // Automated Metenox Moon Drill must not collect manual pilot observer entries
+        snap.structures.insert(metenox_id, eve_db::UpwellStructureRecord {
+            structure_id: metenox_id,
+            type_id: 81826,
+            owner_corp_id: corp_a,
+            solar_system_id: sys_id,
+            name: "Corp A Metenox".into(),
+            position: [103_000.0, 0.0, 0.0],
+            state: "ShieldVulnerable".into(),
+            quantum_core_installed: true,
+            fuel_blocks: 500,
+            ..Default::default()
+        });
+
+        // Two operational Corp B Moon Refineries at different moons
+        snap.structures.insert(ref_b1_id, eve_db::UpwellStructureRecord {
+            structure_id: ref_b1_id,
+            type_id: 35835,
+            owner_corp_id: corp_b,
+            solar_system_id: sys_id,
+            name: "Corp B Athanor Moon 1".into(),
+            position: b1_pos,
+            state: "ShieldVulnerable".into(),
+            quantum_core_installed: true,
+            fuel_blocks: 500,
+            ..Default::default()
+        });
+        snap.items.insert(1_046_000_021, make_item(1_046_000_021, 45009, corp_b, ref_b1_id, InventoryFlag::ServiceSlot0, 1, true));
+        snap.module_online_states.insert(1_046_000_021, true);
+        snap.structures.insert(ref_b2_id, eve_db::UpwellStructureRecord {
+            structure_id: ref_b2_id,
+            type_id: 35836,
+            owner_corp_id: corp_b,
+            solar_system_id: sys_id,
+            name: "Corp B Tatara Moon 20".into(),
+            position: b2_pos,
+            state: "ShieldVulnerable".into(),
+            quantum_core_installed: true,
+            fuel_blocks: 500,
+            ..Default::default()
+        });
+        snap.items.insert(1_046_000_022, make_item(1_046_000_022, 45009, corp_b, ref_b2_id, InventoryFlag::ServiceSlot0, 1, true));
+        snap.module_online_states.insert(1_046_000_022, true);
+
+        snap.moon_extractions.insert(
+            ref_b1_id,
+            eve_db::MoonExtractionRecord {
+                structure_id: ref_b1_id,
+                moon_id: 40_009_001,
+                extraction_start_unix: ctx.now_unix(),
+                chunk_arrival_unix: ctx.now_unix(),
+                natural_decay_unix: ctx.now_unix() + 10_800,
+                status: "Fractured".into(),
+                auto_fracture: false,
+                event_id: 0,
+                moon_ores: Vec::new(),
+                spawned_asteroid_ids: vec![moon_b1_ast_id],
+            },
+        );
+        snap.moon_extractions.insert(
+            ref_b2_id,
+            eve_db::MoonExtractionRecord {
+                structure_id: ref_b2_id,
+                moon_id: 40_009_020,
+                extraction_start_unix: ctx.now_unix(),
+                chunk_arrival_unix: ctx.now_unix(),
+                natural_decay_unix: ctx.now_unix() + 10_800,
+                status: "Fractured".into(),
+                auto_fracture: false,
+                event_id: 0,
+                moon_ores: Vec::new(),
+                spawned_asteroid_ids: vec![moon_b2_ast_id],
+            },
+        );
+
+        snap.asteroids.insert(belt_ast_id, eve_db::AsteroidRecord {
+            asteroid_id: belt_ast_id,
+            type_id: 1230, // Veldspar
+            solar_system_id: sys_id,
+            belt_id: 40_000_001,
+            quantity: 10_000,
+            initial_quantity: 10_000,
+            position: (b1_pos[0] + 5_000.0, 0.0, 0.0),
+            radius: 100.0,
+        });
+        snap.asteroids.insert(ice_ast_id, eve_db::AsteroidRecord {
+            asteroid_id: ice_ast_id,
+            type_id: 16264, // Blue Ice
+            solar_system_id: sys_id,
+            belt_id: 40_000_002,
+            quantity: 100,
+            initial_quantity: 100,
+            position: (b1_pos[0] + 6_000.0, 0.0, 0.0),
+            radius: 100.0,
+        });
+        snap.asteroids.insert(moon_b1_ast_id, eve_db::AsteroidRecord {
+            asteroid_id: moon_b1_ast_id,
+            type_id: 45492, // Bitumens
+            solar_system_id: sys_id,
+            belt_id: ref_b1_id,
+            quantity: 10_000,
+            initial_quantity: 10_000,
+            position: (b1_pos[0] + 20_000.0, 0.0, 0.0),
+            radius: 120.0,
+        });
+        snap.asteroids.insert(moon_b2_ast_id, eve_db::AsteroidRecord {
+            asteroid_id: moon_b2_ast_id,
+            type_id: 45490, // Zeolites
+            solar_system_id: sys_id,
+            belt_id: ref_b2_id,
+            quantity: 10_000,
+            initial_quantity: 10_000,
+            position: (b2_pos[0] + 20_000.0, 0.0, 0.0),
+            radius: 120.0,
+        });
+    });
+
+    // 1. Mine belt Veldspar & Ice near Corp A/B structures -> ZERO observer ledger entries anywhere
+    eve_server::services::space_mining_harvest::deposit_mined_ore_for_asteroid_and_record_ledger_with_waste(
+        &ctx, char_id, ship_id, sys_id, InventoryFlag::Cargo, 1230, 500, 20, Some(belt_ast_id), Some([b1_pos[0] + 5_000.0, 0.0, 0.0]),
+    );
+    eve_server::services::space_mining_harvest::deposit_mined_ore_for_asteroid_and_record_ledger_with_waste(
+        &ctx, char_id, ship_id, sys_id, InventoryFlag::Cargo, 16264, 4, 0, Some(ice_ast_id), Some([b1_pos[0] + 6_000.0, 0.0, 0.0]),
+    );
+    assert!(ctx.db.get_observers_with_mining_events().is_empty(), "Belt ore and ice must never create observer entries");
+
+    // 2. Mine moon ore spawned by ref_b1 -> ONLY ref_b1 observes it
+    eve_server::services::space_mining_harvest::deposit_mined_ore_for_asteroid_and_record_ledger_with_waste(
+        &ctx, char_id, ship_id, sys_id, InventoryFlag::Cargo, 45492, 250, 0, Some(moon_b1_ast_id), Some([b1_pos[0] + 20_000.0, 0.0, 0.0]),
+    );
+    assert!(ctx.db.get_observer_mining_ledger(astrahus_id).is_empty());
+    assert!(ctx.db.get_observer_mining_ledger(destroyed_ref_id).is_empty());
+    assert!(ctx.db.get_observer_mining_ledger(offline_drill_ref_id).is_empty());
+    assert!(ctx.db.get_observer_mining_ledger(metenox_id).is_empty());
+    assert!(ctx.db.get_observer_mining_ledger(ref_b2_id).is_empty());
+    let b1_obs = ctx.db.get_observer_mining_ledger(ref_b1_id);
+    assert_eq!(b1_obs.len(), 1);
+    assert_eq!(b1_obs[0].type_id, 45492);
+    assert_eq!(b1_obs[0].quantity, 250);
+
+    // 3. Mine moon ore spawned by ref_b2 at Moon 20 -> ONLY ref_b2 observes it
+    eve_server::services::space_mining_harvest::deposit_mined_ore_for_asteroid_and_record_ledger_with_waste(
+        &ctx, char_id, ship_id, sys_id, InventoryFlag::Cargo, 45490, 400, 0, Some(moon_b2_ast_id), Some([b2_pos[0] + 20_000.0, 0.0, 0.0]),
+    );
+    assert_eq!(ctx.db.get_observer_mining_ledger(ref_b1_id).len(), 1);
+    let b2_obs = ctx.db.get_observer_mining_ledger(ref_b2_id);
+    assert_eq!(b2_obs.len(), 1);
+    assert_eq!(b2_obs[0].type_id, 45490);
+    assert_eq!(b2_obs[0].quantity, 400);
+}
+
 }
 
 #[allow(unused_imports, dead_code)]

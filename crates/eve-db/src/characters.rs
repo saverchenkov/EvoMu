@@ -777,35 +777,40 @@ impl WorldRepository {
                 }
             }
 
-            // Mirror to observers in the same solar system (MN-15 observer volume tracking)
+            Ok(())
+        })
+    }
+
+    /// Records a single observer mining ledger entry scoped explicitly to `observer_id`
+    /// (for example an Upwell Refinery observing moon-chunk ore harvested from its field).
+    pub fn record_observer_mining_ledger_entry(
+        &self,
+        observer_id: i64,
+        character_id: i64,
+        type_id: u32,
+        quantity: i64,
+        timestamp_unix: u64,
+    ) -> Result<(), DbError> {
+        let date = crate::types::unix_secs_to_date_string(timestamp_unix);
+        self.try_with_mut_snapshot(|guard| {
             let corp_id = guard
                 .characters
                 .get(&character_id)
                 .map(|c| c.corporation_id)
                 .unwrap_or(0);
-            let observer_ids: Vec<i64> = guard
-                .structures
-                .values()
-                .filter(|s| s.solar_system_id == solar_system_id)
-                .map(|s| s.structure_id)
-                .collect();
-
-            for obs_id in observer_ids {
-                guard
-                    .observer_mining_ledger
-                    .entry(obs_id)
-                    .or_default()
-                    .push(crate::types::ObserverMiningRecord {
-                        observer_id: obs_id,
-                        character_id,
-                        recorded_corporation_id: corp_id,
-                        type_id,
-                        quantity,
-                        last_updated_date: date.clone(),
-                        timestamp_unix,
-                    });
-            }
-
+            guard
+                .observer_mining_ledger
+                .entry(observer_id)
+                .or_default()
+                .push(crate::types::ObserverMiningRecord {
+                    observer_id,
+                    character_id,
+                    recorded_corporation_id: corp_id,
+                    type_id,
+                    quantity,
+                    last_updated_date: date,
+                    timestamp_unix,
+                });
             Ok(())
         })
     }

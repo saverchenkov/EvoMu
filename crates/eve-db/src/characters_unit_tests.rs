@@ -261,7 +261,8 @@ fn neural_remap_bounds_cooldown_and_mining_ledger_with_waste_and_observers() {
     assert_eq!(r2.neural.bonus_remaps, 0);
     assert_eq!(r2.neural.intelligence, 26);
 
-    // Mining ledger with waste & structure observer mirroring
+    // Mining ledger with waste does not leak system-wide to arbitrary structures,
+    // while explicit observer entries record scoped structure volume.
     let obs_id = 1_000_000_000_999_i64;
     repo.with_mut_snapshot(|snap| {
         snap.structures.insert(
@@ -287,6 +288,10 @@ fn neural_remap_bounds_cooldown_and_mining_ledger_with_waste_and_observers() {
     assert_eq!(with_waste[0].1, 0);
     assert_eq!(with_waste[1].1, 120);
 
+    assert!(repo.get_observers_with_mining_events().is_empty());
+    assert!(repo.get_observer_mining_ledger(obs_id).is_empty());
+
+    repo.record_observer_mining_ledger_entry(obs_id, cid, 45492, 300, 1_704_067_260).unwrap();
     assert_eq!(repo.get_observers_with_mining_events(), vec![obs_id]);
-    assert_eq!(repo.get_observer_mining_ledger(obs_id).len(), 2);
+    assert_eq!(repo.get_observer_mining_ledger(obs_id).len(), 1);
 }

@@ -35,7 +35,7 @@ pub(crate) fn resolve_structure_moon_id(sde: &eve_sde::SdeRegistry, solar_system
     }).map(|c| c.celestial_id)
 }
 
-fn structure_has_online_moon_drill(snap: &eve_db::WorldStateSnapshot, structure_id: i64) -> bool {
+pub(crate) fn structure_has_online_moon_drill(snap: &eve_db::WorldStateSnapshot, structure_id: i64) -> bool {
     let Some(st) = snap.structures.get(&structure_id) else {
         return false;
     };

@@ -59,10 +59,40 @@ fn deposit_mined_ore_records_personal_and_observer_ledgers_and_zero_units_noop()
     let char_id = 90_000_001;
     let ship_id = 1_090_000_001;
     let ore_tid = 996_001;
-    let belt_obs_id = 40_000_777;
+    let asteroid_id = 1_090_000_050;
+    let refinery_id = 1_090_000_777;
 
     ensure_type(&mut ctx.sde, ore_tid, 1884, 10.0, 50.0);
     ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            refinery_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: refinery_id,
+                type_id: 35835,
+                owner_corp_id: 1_000_009,
+                solar_system_id: sys_id,
+                name: "Moon Observer Athanor".into(),
+                position: [0.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            1_090_000_778,
+            InventoryItemRecord {
+                item_id: 1_090_000_778,
+                type_id: 45009,
+                owner_id: 1_000_009,
+                location_id: refinery_id,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(1_090_000_778, true);
         snap.items.insert(
             ship_id,
             InventoryItemRecord {
@@ -77,12 +107,12 @@ fn deposit_mined_ore_records_personal_and_observer_ledgers_and_zero_units_noop()
             },
         );
         snap.asteroids.insert(
-            1_090_000_050,
+            asteroid_id,
             AsteroidRecord {
-                asteroid_id: 1_090_000_050,
+                asteroid_id,
                 type_id: ore_tid,
                 solar_system_id: sys_id,
-                belt_id: belt_obs_id,
+                belt_id: refinery_id,
                 quantity: 5_000,
                 initial_quantity: 5_000,
                 position: (0.0, 0.0, 0.0),
@@ -91,12 +121,23 @@ fn deposit_mined_ore_records_personal_and_observer_ledgers_and_zero_units_noop()
         );
     });
 
-    deposit_mined_ore_and_record_ledger(&ctx, char_id, ship_id, sys_id, InventoryFlag::Cargo, ore_tid, 0);
+    deposit_mined_ore_for_asteroid_and_record_ledger_with_waste(
+        &ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        InventoryFlag::Cargo,
+        ore_tid,
+        0,
+        0,
+        Some(asteroid_id),
+        Some([0.0, 0.0, 0.0]),
+    );
     ctx.db.with_snapshot(|snap| {
-        assert!(!snap.observer_mining_ledger.contains_key(&belt_obs_id));
+        assert!(!snap.observer_mining_ledger.contains_key(&refinery_id));
     });
 
-    deposit_mined_ore_and_record_ledger_with_waste(
+    deposit_mined_ore_for_asteroid_and_record_ledger_with_waste(
         &ctx,
         char_id,
         ship_id,
@@ -105,6 +146,8 @@ fn deposit_mined_ore_records_personal_and_observer_ledgers_and_zero_units_noop()
         ore_tid,
         120,
         15,
+        Some(asteroid_id),
+        Some([0.0, 0.0, 0.0]),
     );
     ctx.db.with_snapshot(|snap| {
         let cargo_qty: i64 = snap
@@ -114,7 +157,7 @@ fn deposit_mined_ore_records_personal_and_observer_ledgers_and_zero_units_noop()
             .map(|i| i.quantity as i64)
             .sum();
         assert_eq!(cargo_qty, 120);
-        let obs = snap.observer_mining_ledger.get(&belt_obs_id).expect("observer ledger entry");
+        let obs = snap.observer_mining_ledger.get(&refinery_id).expect("observer ledger entry");
         assert_eq!(obs.len(), 1);
         assert_eq!(obs[0].quantity, 120);
         assert_eq!(obs[0].character_id, char_id);

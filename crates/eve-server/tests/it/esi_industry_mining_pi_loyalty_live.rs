@@ -335,8 +335,12 @@ async fn test_esi_live_mining_ledger_extractions_and_observers() {
     rpc(&ctx, &mut s1, "invbroker", "Add", &[PyRep::Integer(drill_item), PyRep::Integer(athanor_id), PyRep::Integer(164)]).await.expect("Moon Drill");
 
     rpc(&ctx, &mut s1, "moonExtractions", "StartNewExtraction", &[PyRep::Integer(athanor_id), PyRep::Integer(518_400)]).await.expect("StartNewExtraction");
+    ctx.advance_virtual_clock(518_410);
+    rpc(&ctx, &mut s1, "moonExtractions", "FractureChunkWithStructure", &[PyRep::Integer(athanor_id)]).await.expect("FractureChunkWithStructure");
+    let moon_rock_id = ctx.db.with_snapshot(|s| s.moon_extractions[&athanor_id].spawned_asteroid_ids[0]);
+    let moon_rock_tid = ctx.db.with_snapshot(|s| s.asteroids[&moon_rock_id].type_id);
 
-    // Return to Jita, board Venture with Miner I, return to Perimeter, and mine an asteroid
+    // Return to Jita, board Venture with Miner I, return to Perimeter, and mine the extracted moon asteroid
     let st_pos_jita = ctx.sde.stations[&JITA_STATION].position;
     common::slash_cmd(&ctx, &mut s1, "/tr 30000142").await;
     ctx.systems.get_or_spawn(JITA_SYS).set_ball_position(charon_id, st_pos_jita).await;
@@ -354,23 +358,21 @@ async fn test_esi_live_mining_ledger_extractions_and_observers() {
     common::slash_cmd(&ctx, &mut s1, "/tr 30000144").await;
     ctx.advance_secs(12);
 
-    let rocks = perim.populate_asteroid_belt_entities().await.expect("populate belts");
-    let rock = &rocks[0];
-    let rock_pos = perim.get_ball_snapshot(rock.asteroid_id).await.unwrap().unwrap().1.position;
+    let rock_pos = perim.get_ball_snapshot(moon_rock_id).await.unwrap().unwrap().1.position;
     perim.set_ball_position(venture_id, rock_pos).await;
 
     rpc(&ctx, &mut s1, "dogmaIM", "ShipOnlineModules", &[PyRep::Integer(venture_id)]).await.expect("Online");
-    rpc(&ctx, &mut s1, "dogmaIM", "AddTarget", &[PyRep::Integer(rock.asteroid_id)]).await.expect("AddTarget");
+    rpc(&ctx, &mut s1, "dogmaIM", "AddTarget", &[PyRep::Integer(moon_rock_id)]).await.expect("AddTarget");
     for _ in 0..10 {
         ctx.advance_secs(1);
         perim.step_manual(1.0).await.unwrap();
         if let Ok(locks) = perim.get_target_locks(venture_id).await {
-            if locks.iter().any(|l| l.target_id == rock.asteroid_id && l.locked) {
+            if locks.iter().any(|l| l.target_id == moon_rock_id && l.locked) {
                 break;
             }
         }
     }
-    rpc(&ctx, &mut s1, "dogmaIM", "Activate", &[PyRep::Integer(miner_id), PyRep::Integer(rock.asteroid_id)]).await.expect("Activate Miner I");
+    rpc(&ctx, &mut s1, "dogmaIM", "Activate", &[PyRep::Integer(miner_id), PyRep::Integer(moon_rock_id)]).await.expect("Activate Miner I");
     ctx.advance_secs(65);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
@@ -384,7 +386,7 @@ async fn test_esi_live_mining_ledger_extractions_and_observers() {
     let cm_arr = char_mine.as_array().unwrap();
     assert!(!cm_arr.is_empty());
     assert_eq!(cm_arr[0]["solar_system_id"], json!(PERIMETER_SYS));
-    assert_eq!(cm_arr[0]["type_id"], json!(rock.type_id));
+    assert_eq!(cm_arr[0]["type_id"], json!(moon_rock_tid));
     assert!(cm_arr[0]["quantity"].as_i64().unwrap() > 0);
 
     let (exts, _, _) = check_esi_200(&router, &spec, &format!("/v1/corporation/{corp_id}/mining/extractions/"), Some(&tok_p1));
@@ -398,7 +400,7 @@ async fn test_esi_live_mining_ledger_extractions_and_observers() {
     assert!(obs_detail.as_array().unwrap().iter().any(|e| {
         e["character_id"] == json!(PILOT_1)
             && e["recorded_corporation_id"] == json!(corp_id)
-            && e["type_id"] == json!(rock.type_id)
+            && e["type_id"] == json!(moon_rock_tid)
             && e["quantity"].as_i64().unwrap() > 0
     }));
 }
