@@ -169,6 +169,19 @@ pub(crate) fn spawn_ball_with_combat_in_actor(
     {
         cs.is_interdiction_nullified = true;
     }
+    let mut ball = ball;
+    if !cs.module_immobilized
+        && cs.external_velocity_multiplier.is_none()
+        && cs.cloud_velocity_multiplier.is_none()
+        && cs.cloak_velocity_multiplier.is_none()
+        && (cs.prop_velocity_multiplier - 1.0).abs() <= 1e-9
+        && (cs.hic_velocity_multiplier - 1.0).abs() <= 1e-9
+        && (cs.web_velocity_multiplier - 1.0).abs() <= 1e-9
+    {
+        if let Some(base_v) = cs.base_max_velocity.filter(|&v| v > 0.0) {
+            ball.max_velocity = base_v;
+        }
+    }
     ballpark.add_ball(ball);
     ballpark.combat_states.insert(ball_id, cs);
     if !active_module_cycles.is_empty() {
@@ -238,36 +251,73 @@ pub(crate) fn set_combat_state_in_actor(
         }
     }
     let mut cs = combat_state;
-    if let Some(prev_cs) = ballpark.combat_states.get(&ball_id) {
+    let prev_opt = ballpark.combat_states.get(&ball_id);
+    if cs.env_max_shield_multiplier.is_none()
+        && cs.base_max_shield_hp.is_some_and(|b| (cs.max_shield_hp - b).abs() > 1e-6)
+    {
+        cs.base_max_shield_hp = Some(cs.max_shield_hp.max(0.0));
+    } else if let Some(prev_cs) = prev_opt {
         if (cs.max_shield_hp - prev_cs.max_shield_hp).abs() > 1e-6
             && cs.base_max_shield_hp == prev_cs.base_max_shield_hp
         {
             let m = cs.env_max_shield_multiplier.unwrap_or(1.0).max(1e-6);
             cs.base_max_shield_hp = Some((cs.max_shield_hp / m).max(0.0));
         }
+    }
+    if cs.env_max_armor_multiplier.is_none()
+        && cs.base_max_armor_hp.is_some_and(|b| (cs.max_armor_hp - b).abs() > 1e-6)
+    {
+        cs.base_max_armor_hp = Some(cs.max_armor_hp.max(0.0));
+    } else if let Some(prev_cs) = prev_opt {
         if (cs.max_armor_hp - prev_cs.max_armor_hp).abs() > 1e-6
             && cs.base_max_armor_hp == prev_cs.base_max_armor_hp
         {
             let m = cs.env_max_armor_multiplier.unwrap_or(1.0).max(1e-6);
             cs.base_max_armor_hp = Some((cs.max_armor_hp / m).max(0.0));
         }
-        if (cs.max_structure_hp - prev_cs.max_structure_hp).abs() > 1e-6
-            && cs.base_max_structure_hp == prev_cs.base_max_structure_hp
-        {
-            cs.base_max_structure_hp = Some(cs.max_structure_hp.max(0.0));
-        }
+    }
+    if cs.base_max_structure_hp.is_some_and(|b| (cs.max_structure_hp - b).abs() > 1e-6) {
+        cs.base_max_structure_hp = Some(cs.max_structure_hp.max(0.0));
+    }
+    if cs.env_max_cap_multiplier.is_none()
+        && cs.base_max_capacitor.is_some_and(|b| (cs.max_capacitor - b).abs() > 1e-6)
+    {
+        cs.base_max_capacitor = Some(cs.max_capacitor.max(0.0));
+    } else if let Some(prev_cs) = prev_opt {
         if (cs.max_capacitor - prev_cs.max_capacitor).abs() > 1e-6
             && cs.base_max_capacitor == prev_cs.base_max_capacitor
         {
             let m = cs.env_max_cap_multiplier.unwrap_or(1.0).max(1e-6);
             cs.base_max_capacitor = Some((cs.max_capacitor / m).max(0.0));
         }
+    }
+    if cs.cloud_cap_recharge_multiplier.is_none()
+        && cs
+            .base_capacitor_recharge_time_ms
+            .is_some_and(|b| (cs.capacitor_recharge_time_ms - b).abs() > 1e-6)
+    {
+        cs.base_capacitor_recharge_time_ms = Some(cs.capacitor_recharge_time_ms.max(0.0));
+    } else if let Some(prev_cs) = prev_opt {
         if (cs.capacitor_recharge_time_ms - prev_cs.capacitor_recharge_time_ms).abs() > 1e-6
             && cs.base_capacitor_recharge_time_ms == prev_cs.base_capacitor_recharge_time_ms
         {
             let m = cs.cloud_cap_recharge_multiplier.unwrap_or(1.0).max(1e-6);
-            cs.base_capacitor_recharge_time_ms = Some((cs.capacitor_recharge_time_ms / m).max(1.0));
+            cs.base_capacitor_recharge_time_ms = Some((cs.capacitor_recharge_time_ms / m).max(0.0));
         }
+    }
+    let has_sig_mults = (cs.module_sig_multiplier - 1.0).abs() > 1e-6
+        || cs.mjfg_sig_multiplier.is_some()
+        || cs.tp_sig_multiplier.is_some()
+        || cs.external_sig_multiplier.is_some()
+        || cs.cloud_sig_multiplier.is_some()
+        || cs.env_sig_multiplier.is_some();
+    if !has_sig_mults
+        && cs
+            .base_signature_radius
+            .is_some_and(|b| (cs.signature_radius - b).abs() > 1e-6)
+    {
+        cs.base_signature_radius = Some(cs.signature_radius.max(1.0));
+    } else if let Some(prev_cs) = prev_opt {
         if (cs.signature_radius - prev_cs.signature_radius).abs() > 1e-6
             && cs.base_signature_radius == prev_cs.base_signature_radius
         {

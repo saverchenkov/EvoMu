@@ -1256,27 +1256,26 @@ pub(crate) async fn handle_dogma_im(
                 item_ids
                     .into_iter()
                     .map(|iid| {
-                        let (armor_dmg, hull_dmg, shield_cap) = snap
+                        let (armor_dmg, hull_dmg, shield_cur, shield_cap) = snap
                             .items
                             .get(&iid)
                             .filter(|it| it.owner_id == char_id || session.has_gm_role())
                             .map(|it| {
-                                let ad = it.dynamic_attributes.get(&attr_ids::ARMOR_DAMAGE).copied().unwrap_or(0.0);
-                                let hd = it.dynamic_attributes.get(&attr_ids::DAMAGE).copied().unwrap_or(0.0);
-                                let sc = ctx
-                                    .sde
-                                    .types
-                                    .get(&it.type_id)
-                                    .and_then(|t| t.default_attributes.get(&attr_ids::SHIELD_CAPACITY).copied())
-                                    .unwrap_or(400.0);
-                                (ad, hd, sc)
+                                let state = crate::sp6_lifecycle::read_unified_ship_damage_state(
+                                    ctx,
+                                    snap,
+                                    iid,
+                                    it.type_id,
+                                    None,
+                                );
+                                (state.armor_damage, state.hull_damage, state.shield_hp, state.max_shield)
                             })
-                            .unwrap_or((0.0, 0.0, 400.0));
+                            .unwrap_or((0.0, 0.0, 400.0, 400.0));
                         let kv = PyRep::keyval([
                             (
                                 "shieldInfo",
                                 PyRep::Tuple(vec![
-                                    PyRep::Real(shield_cap),
+                                    PyRep::Real(shield_cur),
                                     PyRep::Real(shield_cap),
                                     PyRep::Integer(now_ft),
                                 ]),

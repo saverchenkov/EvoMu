@@ -408,3 +408,193 @@ async fn abyssal_automated_pylons_pulse_probe_prune_and_ballpark_step() {
     assert!(bp.balls.values().any(|b| b.type_id == 670));
     assert!(bp.balls.values().any(|b| b.type_id == 25));
 }
+
+#[tokio::test]
+async fn arch_585_abyssal_boundary_enforces_invuln_preserves_events_and_step_hook_death_pipeline() {
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::new_empty());
+    let char_id: i64 = 90_050_585;
+    let ship_id: i64 = 1_050_585_001;
+    let ab_sys: SolarSystemId = 32_000_001;
+
+    db.provision_gm_account("abyss_585", "pw", char_id, "Abyss585");
+    let ctx = ServerContext::with_sde_and_repository(sde.clone(), db.clone());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_660_000)));
+
+    let make_room = |idx: u8| AbyssalRoomRecord {
+        room_index: idx,
+        dungeon_id: 2100 + idx as u32,
+        dungeon_name: "Abyss Room".into(),
+        npc_ball_ids: Vec::new(),
+        cache_item_id: 0,
+        cleared: true,
+        gate_unlocked_at_sec: Some(1_775_660_000),
+    };
+    with_pve_special_reg(&ctx, |reg| {
+        reg.abyssal_pockets.insert(
+            char_id,
+            AbyssalPocketSession {
+                pocket_id: 585,
+                character_id: char_id,
+                ship_id,
+                origin_solar_system_id: 30_000_142,
+                abyssal_solar_system_id: ab_sys,
+                origin_position: [0.0; 3],
+                grid_offset: [0.0; 3],
+                filament_type_id: 56131,
+                tier: 1,
+                weather: AbyssalWeatherKind::Electrical,
+                weather_penalty_pct: 30.0,
+                weather_bonus_pct: 50.0,
+                npc_difficulty_mult: 1.0,
+                current_room: 0,
+                rooms: [make_room(0), make_room(1), make_room(2)],
+                started_at_sec: 1_775_660_000,
+                collapse_at_sec: 1_775_661_200,
+                completed: false,
+                collapsed_destroyed: false,
+                trace_ball_id: 0,
+                fleet_ship_ids: vec![ship_id],
+                ship_room: HashMap::from([(ship_id, 0)]),
+                max_ships: 1,
+            },
+        );
+    });
+
+    let start_isk = db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: ab_sys as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.item_positions.insert(ship_id, [100_000.0, 0.0, 0.0]);
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.solar_system_id = ab_sys;
+            ch.station_id = None;
+            ch.balance.to_wire_f64()
+        } else {
+            0.0
+        }
+    });
+
+    let now_u = ctx.now_unix();
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.insurance_contracts.insert(
+            ship_id,
+            crate::services::combat_crimewatch::InsuranceContractState {
+                ship_id,
+                ship_type_id: 587,
+                owner_id: char_id,
+                level_name: "Platinum".into(),
+                level_fraction: 1.0,
+                cost_isk: 100_000.0,
+                payout_isk: 500_000.0,
+                start_unix: now_u.saturating_sub(10),
+                end_unix: now_u + 86_400,
+            },
+        );
+    });
+
+    // Invulnerability guard check on boundary tick in Ballpark
+    let mut bp = Ballpark::new(ab_sys);
+    bp.add_ball(Ball {
+        id: ship_id,
+        type_id: 587,
+        position: DVec3::new(100_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 200.0,
+        inertia: 1.0,
+        mass: 500_000.0,
+        radius: 35.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    });
+    bp.combat_states.insert(
+        ship_id,
+        eve_destiny::CombatState {
+            structure_hp: 1.0,
+            max_structure_hp: 100.0,
+            structure_resonance: [1.0; 4],
+            warp_exit_invulnerable_remaining_ticks: 3,
+            ..Default::default()
+        },
+    );
+    let shielded = step_abyssal_hazards_and_pylons_in_ballpark_for_tick(
+        &mut bp,
+        Some(&sde),
+        Some(&db),
+        ab_sys,
+    );
+    assert!(shielded.is_empty());
+    assert!((bp.combat_states[&ship_id].structure_hp - 1.0).abs() < 1e-6);
+
+    // Live system step destroys low-HP ship on Abyssal boundary and routes through execute_death_pipeline_sync
+    let sys = ctx.systems.get_or_spawn(ab_sys);
+    let _ = sys
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::new(100_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 200.0,
+            inertia: 1.0,
+            mass: 500_000.0,
+            radius: 35.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    let _ = sys
+        .set_combat_state(
+            ship_id,
+            eve_destiny::CombatState {
+                structure_hp: 1.0,
+                max_structure_hp: 100.0,
+                structure_resonance: [1.0; 4],
+                ..Default::default()
+            },
+        )
+        .await;
+
+    let tick_res = sys.step_manual(1.2).await.unwrap();
+    let has_term_explosion = tick_res
+        .observer_events
+        .values()
+        .flatten()
+        .chain(tick_res.events.iter())
+        .any(|ev| matches!(ev, &eve_destiny::DestinyEvent::TerminalExplosion { ball_id, .. } if ball_id == ship_id))
+        || sys
+            .drain_observer_updates(ship_id)
+            .await
+            .map(|(_, evs, _)| evs)
+            .unwrap_or_default()
+            .iter()
+            .any(|ev| matches!(ev, &eve_destiny::DestinyEvent::TerminalExplosion { ball_id, .. } if ball_id == ship_id));
+    assert!(has_term_explosion, "TerminalExplosion must be emitted on Abyssal boundary destruction");
+
+    db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&ship_id));
+        let ch = snap.characters.get(&char_id).unwrap();
+        let cap_id = ch.active_ship_id;
+        assert_ne!(cap_id, ship_id);
+        assert_eq!(snap.items[&cap_id].type_id, 670);
+        assert!(ch.balance.to_wire_f64() > start_isk);
+        assert!(snap.killmails.values().any(|k| k.victim_character_id == char_id));
+        let ticks: HashMap<i64, u32> = snap
+            .service_state_blobs
+            .get("abyssal_boundary_ticks")
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        assert!(ticks.contains_key(&cap_id), "escalated tick must carry over to ejected capsule");
+    });
+}

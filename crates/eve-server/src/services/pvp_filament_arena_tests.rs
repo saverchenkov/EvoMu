@@ -186,3 +186,228 @@ async fn test_pvp_filament_arena_rewards_combat_hazards_and_end_gate() {
     );
     assert_eq!(destroyed, vec![ship_b]);
 }
+
+#[tokio::test]
+async fn arch_585_arena_hazard_enforces_invuln_preserves_events_and_step_hook_pays_insurance() {
+    let ctx = test_ctx();
+    let cid_a = 90_000_001_i64;
+    let cid_b = 90_000_002_i64;
+    let arena_oob_x = PROVING_ARENA_BOUNDARY_RADIUS_M + 20_000.0;
+
+    let (ship_a, ship_b, start_isk_b) = ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 2;
+        let sa = snap.next_entity_id - 1;
+        let sb = snap.next_entity_id;
+        for (sid, cid) in [(sa, cid_a), (sb, cid_b)] {
+            snap.items.insert(
+                sid,
+                eve_db::InventoryItemRecord {
+                    item_id: sid,
+                    type_id: 587,
+                    owner_id: cid,
+                    location_id: 32_000_001,
+                    flag: eve_db::InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.item_positions.insert(sid, [0.0, 0.0, 0.0]);
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.active_ship_id = sid;
+                ch.solar_system_id = 32_000_001;
+                ch.station_id = None;
+            }
+        }
+        let mut store = load_pvp_store(snap);
+        store.active_matches.insert(
+            77_702,
+            PvpArenaMatchInstance {
+                match_id: 77_702,
+                event_id: 171,
+                arena_solar_system_id: 32_000_001,
+                end_gate_id: 1_900_990_002,
+                team_a: vec![cid_a],
+                team_b: vec![cid_b],
+                origin_systems: HashMap::from([(cid_a, 30_000_142), (cid_b, 30_000_142)]),
+                exited_pilots: HashSet::new(),
+                winner_char_id: None,
+                active: true,
+                started_unix: ctx.now_unix(),
+            },
+        );
+        save_pvp_store(snap, &store);
+        let bal = snap.characters.get(&cid_b).map(|c| c.balance.to_wire_f64()).unwrap_or(0.0);
+        (sa, sb, bal)
+    });
+
+    // Insure ship_b so non-self-destruct hazard death pays out via execute_death_pipeline_sync.
+    let now_u = ctx.now_unix();
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.insurance_contracts.insert(
+            ship_b,
+            crate::services::combat_crimewatch::InsuranceContractState {
+                ship_id: ship_b,
+                ship_type_id: 587,
+                owner_id: cid_b,
+                level_name: "Platinum".into(),
+                level_fraction: 1.0,
+                cost_isk: 100_000.0,
+                payout_isk: 750_000.0,
+                start_unix: now_u.saturating_sub(10),
+                end_unix: now_u + 86_400,
+            },
+        );
+    });
+
+    // Subcase A: Ballpark-level invuln guard & observer_events preservation on lethal boundary damage.
+    {
+        let ctx_a = test_ctx();
+        let ship_a_test = 1_900_880_001_i64;
+        ctx_a.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                ship_a_test,
+                eve_db::InventoryItemRecord {
+                    item_id: ship_a_test,
+                    type_id: 587,
+                    owner_id: cid_b,
+                    location_id: 32_000_001,
+                    flag: eve_db::InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            if let Some(ch) = snap.characters.get_mut(&cid_b) {
+                ch.active_ship_id = ship_a_test;
+                ch.solar_system_id = 32_000_001;
+                ch.station_id = None;
+            }
+            let mut store = load_pvp_store(snap);
+            store.active_matches.insert(
+                77_701,
+                PvpArenaMatchInstance {
+                    match_id: 77_701,
+                    event_id: 171,
+                    arena_solar_system_id: 32_000_001,
+                    end_gate_id: 1_900_990_001,
+                    team_a: vec![cid_a],
+                    team_b: vec![cid_b],
+                    origin_systems: HashMap::from([(cid_a, 30_000_142), (cid_b, 30_000_142)]),
+                    exited_pilots: HashSet::new(),
+                    winner_char_id: None,
+                    active: true,
+                    started_unix: ctx_a.now_unix(),
+                },
+            );
+            save_pvp_store(snap, &store);
+        });
+        let mut bp = Ballpark::new(32_000_001);
+        bp.add_ball(Ball {
+            id: ship_a_test,
+            type_id: 587,
+            position: DVec3::new(arena_oob_x, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 200.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        });
+        bp.combat_states.insert(
+            ship_a_test,
+            CombatState {
+                shield_hp: 10.0,
+                max_shield_hp: 100.0,
+                armor_hp: 10.0,
+                max_armor_hp: 100.0,
+                structure_hp: 10.0,
+                max_structure_hp: 100.0,
+                is_tethered: true,
+                ..Default::default()
+            },
+        );
+        let shielded = step_proving_grounds_arena_hazards_in_ballpark_for_tick(
+            &mut bp,
+            Some(&ctx_a.sde),
+            Some(&ctx_a.db),
+            32_000_001,
+            Some(&ctx_a.pending_notifications),
+            Some(&ctx_a.notify_tx),
+        );
+        assert!(shielded.is_empty());
+        assert!((bp.combat_states[&ship_a_test].shield_hp - 10.0).abs() < 1e-6);
+
+        bp.combat_states.get_mut(&ship_a_test).unwrap().is_tethered = false;
+        let killed = step_proving_grounds_arena_hazards_in_ballpark_for_tick(
+            &mut bp,
+            Some(&ctx_a.sde),
+            Some(&ctx_a.db),
+            32_000_001,
+            Some(&ctx_a.pending_notifications),
+            Some(&ctx_a.notify_tx),
+        );
+        assert_eq!(killed, vec![ship_a_test]);
+        let obs = bp.drain_observer_events(ship_a_test);
+        assert!(obs
+            .iter()
+            .any(|ev| matches!(ev, &eve_destiny::DestinyEvent::TerminalExplosion { ball_id, .. } if ball_id == ship_a_test)));
+    }
+
+    // Subcase B: Full live SystemActor tick routes deferred ship kill through execute_death_pipeline_sync.
+    let sys = ctx.systems.get_or_spawn(32_000_001);
+    for (sid, pos) in [
+        (ship_a, DVec3::ZERO),
+        (ship_b, DVec3::new(arena_oob_x, 0.0, 0.0)),
+    ] {
+        let _ = sys
+            .spawn_ball(Ball {
+                id: sid,
+                type_id: 587,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            })
+            .await;
+    }
+    let _ = sys
+        .set_combat_state(
+            ship_b,
+            CombatState {
+                shield_hp: 10.0,
+                max_shield_hp: 100.0,
+                armor_hp: 10.0,
+                max_armor_hp: 100.0,
+                structure_hp: 10.0,
+                max_structure_hp: 100.0,
+                ..Default::default()
+            },
+        )
+        .await;
+
+    let _ = sys.step_manual(1.2).await;
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&ship_b));
+        let ch = snap.characters.get(&cid_b).unwrap();
+        assert_ne!(ch.active_ship_id, ship_b);
+        assert_eq!(snap.items[&ch.active_ship_id].type_id, 670);
+        assert!(
+            ch.balance.to_wire_f64() > start_isk_b,
+            "insured arena boundary kill must pay insurance via execute_death_pipeline_sync"
+        );
+        assert!(snap.killmails.values().any(|k| k.victim_character_id == cid_b));
+        assert!(snap
+            .items
+            .values()
+            .any(|it| it.owner_id == cid_b && it.location_id == 32_000_001 && it.type_id != 670));
+    });
+}

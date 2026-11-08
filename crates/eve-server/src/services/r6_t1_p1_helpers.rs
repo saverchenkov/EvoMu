@@ -157,7 +157,7 @@ pub(crate) async fn step_active_breacher_dots(
         let Some(mut dot) = with_combat_runtime(ctx, |rt| rt.active_breacher_dots.get(&tid).cloned()) else {
             continue;
         };
-        let Ok(Some(mut cs)) = sys_handle.get_combat_state(tid).await else {
+        let Ok(Some(cs)) = sys_handle.get_combat_state(tid).await else {
             continue;
         };
         let now_unix = ctx.now_unix();
@@ -173,50 +173,43 @@ pub(crate) async fn step_active_breacher_dots(
             continue;
         }
 
-        let mut destroyed_by_dot = false;
         let total_max_hp = (cs.max_shield_hp + cs.max_armor_hp + cs.max_structure_hp).max(1.0);
         let dps = crate::formulas::breacher_pod_tick_damage(total_max_hp, dot.pct_cap_fraction, dot.flat_cap_dps);
         let step_s = dt.min(dot.remaining_s).max(0.0);
         let raw_dmg = dps * step_s;
         dot.tick_damage = dps;
 
-        let mut rem = raw_dmg;
-        if cs.shield_hp > 0.0 {
-            let take = cs.shield_hp.min(rem);
-            cs.shield_hp -= take;
-            rem -= take;
-        }
-        if rem > 0.0 && cs.armor_hp > 0.0 {
-            let take = cs.armor_hp.min(rem);
-            cs.armor_hp -= take;
-            rem -= take;
-        }
-        if rem > 0.0 && cs.structure_hp > 0.0 {
-            let take = cs.structure_hp.min(rem);
-            cs.structure_hp -= take;
-        }
-        if cs.structure_hp <= 1e-6 {
-            cs.structure_hp = 0.0;
-            destroyed_by_dot = true;
-        }
-        let shield_ratio = if cs.max_shield_hp > 0.0 {
-            (cs.shield_hp / cs.max_shield_hp).clamp(0.0, 1.0)
+        let (applied_dmg, destroyed_by_dot, ball_snap_opt) = sys_handle
+            .apply_true_damage(tid, raw_dmg)
+            .await
+            .ok()
+            .flatten()
+            .map(|(app, dest, b)| (app, dest, Some(b)))
+            .unwrap_or((0.0, false, None));
+        let (shield_ratio, armor_ratio, hull_ratio) = if destroyed_by_dot {
+            (0.0, 0.0, 0.0)
+        } else if let Ok(Some(after_cs)) = sys_handle.get_combat_state(tid).await {
+            let sr = if after_cs.max_shield_hp > 0.0 {
+                (after_cs.shield_hp / after_cs.max_shield_hp).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let ar = if after_cs.max_armor_hp > 0.0 {
+                (after_cs.armor_hp / after_cs.max_armor_hp).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let hr = if after_cs.max_structure_hp > 0.0 {
+                (after_cs.structure_hp / after_cs.max_structure_hp).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            (sr, ar, hr)
         } else {
-            0.0
+            (0.0, 0.0, 0.0)
         };
-        let armor_ratio = if cs.max_armor_hp > 0.0 {
-            (cs.armor_hp / cs.max_armor_hp).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let hull_ratio = if cs.max_structure_hp > 0.0 {
-            (cs.structure_hp / cs.max_structure_hp).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let _ = sys_handle.set_combat_state(tid, cs).await;
 
-        if raw_dmg > 0.0 && dot.source_char_id > 0 {
+        if applied_dmg > 0.0 && dot.source_char_id > 0 {
             let (attacker_ship_type, victim_owner_char) = ctx.db.with_snapshot(|snap| {
                 let s_type = snap.items.get(&dot.source_ship_id).map(|i| i.type_id).unwrap_or(0);
                 let v_char = snap
@@ -237,7 +230,7 @@ pub(crate) async fn step_active_breacher_dots(
                 dot.source_char_id,
                 attacker_ship_type,
                 dot.weapon_type_id.max(1),
-                raw_dmg,
+                applied_dmg,
                 false,
                 now_unix,
             );
@@ -248,7 +241,7 @@ pub(crate) async fn step_active_breacher_dots(
                 dot.source_ship_id,
                 tid,
                 dot.weapon_type_id,
-                raw_dmg,
+                applied_dmg,
                 false,
                 shield_ratio,
                 armor_ratio,
@@ -265,12 +258,8 @@ pub(crate) async fn step_active_breacher_dots(
             }
         });
         if destroyed_by_dot {
-            let (ball_type_id, ball_pos) = sys_handle
-                .get_ball_snapshot(tid)
-                .await
-                .ok()
-                .flatten()
-                .map(|(_, b)| (b.type_id, b.position))
+            let (ball_type_id, ball_pos) = ball_snap_opt
+                .map(|b| (b.type_id, b.position))
                 .unwrap_or_else(|| {
                     let stid = ctx
                         .db

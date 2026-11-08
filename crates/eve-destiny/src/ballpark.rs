@@ -548,6 +548,28 @@ impl Ballpark {
         Some((applied, destroyed, ball_snap))
     }
 
+    /// Applies resistance-ignoring true damage (e.g., Breacher Pod DoT, Arena hazard boundary) to `ball_id`
+    /// while enforcing tether/gate-cloak/invulnerability guards, emitting `OnDamageStateChange` /
+    /// `TerminalExplosion`, and preserving `observer_events` upon destruction (`#585`).
+    pub fn apply_true_damage_to_ball(
+        &mut self,
+        ball_id: BallId,
+        amount: f64,
+    ) -> Option<(f64, bool, Option<Ball>)> {
+        let ball_snap = self.balls.get(&ball_id).cloned();
+        let grid_id = self.ball_grid_ids.get(&ball_id).copied();
+        let (applied, destroyed, s_ratio, a_ratio, h_ratio) = {
+            let cs = self.combat_states.entry(ball_id).or_default();
+            let (applied, destroyed) = cs.apply_true_damage(amount);
+            let s = if cs.max_shield_hp > 0.0 { (cs.shield_hp / cs.max_shield_hp).clamp(0.0, 1.0) } else { 0.0 };
+            let a = if cs.max_armor_hp > 0.0 { (cs.armor_hp / cs.max_armor_hp).clamp(0.0, 1.0) } else { 0.0 };
+            let h = if cs.max_structure_hp > 0.0 { (cs.structure_hp / cs.max_structure_hp).clamp(0.0, 1.0) } else { 0.0 };
+            (applied, destroyed, s, a, h)
+        };
+        self.emit_damage_and_destruction_events(ball_id, grid_id, s_ratio, a_ratio, h_ratio, destroyed);
+        Some((applied, destroyed, ball_snap))
+    }
+
     /// Applies unresisted direct structure/hull HP damage to `ball_id`, leaving shield and armor
     /// completely untouched (`feat:navigation.gravity-hazard-safe-zones`).
     pub fn apply_direct_structure_damage_to_ball(

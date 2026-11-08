@@ -389,6 +389,45 @@ pub fn step_proving_grounds_arena_hazards_in_ballpark(
     pending_notifications_opt: Option<&std::sync::RwLock<std::collections::HashMap<i64, Vec<crate::router::PendingMachoNotification>>>>,
     notify_tx_opt: Option<&tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
 ) -> Vec<i64> {
+    step_proving_grounds_arena_hazards_in_ballpark_with_options(
+        ballpark,
+        sde_opt,
+        db_opt,
+        solar_system_id,
+        pending_notifications_opt,
+        notify_tx_opt,
+        false,
+    )
+}
+
+pub(crate) fn step_proving_grounds_arena_hazards_in_ballpark_for_tick(
+    ballpark: &mut eve_destiny::Ballpark,
+    sde_opt: Option<&eve_sde::SdeRegistry>,
+    db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
+    solar_system_id: eve_sde::SolarSystemId,
+    pending_notifications_opt: Option<&std::sync::RwLock<std::collections::HashMap<i64, Vec<crate::router::PendingMachoNotification>>>>,
+    notify_tx_opt: Option<&tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
+) -> Vec<i64> {
+    step_proving_grounds_arena_hazards_in_ballpark_with_options(
+        ballpark,
+        sde_opt,
+        db_opt,
+        solar_system_id,
+        pending_notifications_opt,
+        notify_tx_opt,
+        true,
+    )
+}
+
+fn step_proving_grounds_arena_hazards_in_ballpark_with_options(
+    ballpark: &mut eve_destiny::Ballpark,
+    sde_opt: Option<&eve_sde::SdeRegistry>,
+    db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
+    solar_system_id: eve_sde::SolarSystemId,
+    pending_notifications_opt: Option<&std::sync::RwLock<std::collections::HashMap<i64, Vec<crate::router::PendingMachoNotification>>>>,
+    notify_tx_opt: Option<&tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
+    defer_ship_death_to_step_hook: bool,
+) -> Vec<i64> {
     let mut destroyed_balls = Vec::new();
     if solar_system_id != 32_000_001 {
         return destroyed_balls;
@@ -404,7 +443,7 @@ pub fn step_proving_grounds_arena_hazards_in_ballpark(
     let mut ejected_pods: Vec<(i64, i64, i64)> = Vec::new();
     let mut concluded_matches: Vec<(i64, Vec<i64>)> = Vec::new();
 
-    crate::sp6_lifecycle::with_mut_sp6_state(db, |sp6, snap| {
+    crate::sp6_lifecycle::with_mut_sp6_state(db, |_sp6, snap| {
         let mut store = load_pvp_store(snap);
         if store.active_matches.is_empty() {
             return;
@@ -472,28 +511,10 @@ pub fn step_proving_grounds_arena_hazards_in_ballpark(
                 store.hazard_ticks.insert(ship_id, next_tick);
                 store_dirty = true;
 
-                let mut rem_dmg =
+                let rem_dmg =
                     PROVING_HAZARD_BASE_DPS * (1.0 + PROVING_HAZARD_RAMP_PER_TICK * f64::from(next_tick - 1));
-                let mut ship_dead = false;
-                if let Some(cs) = ballpark.combat_states.get_mut(&ship_id) {
-                    let sh = rem_dmg.min(cs.shield_hp.max(0.0));
-                    cs.shield_hp = (cs.shield_hp - sh).max(0.0);
-                    rem_dmg -= sh;
-                    if rem_dmg > 0.0 {
-                        let ar = rem_dmg.min(cs.armor_hp.max(0.0));
-                        cs.armor_hp = (cs.armor_hp - ar).max(0.0);
-                        rem_dmg -= ar;
-                    }
-                    if rem_dmg > 0.0 {
-                        cs.structure_hp = (cs.structure_hp - rem_dmg).max(0.0);
-                    }
-                    if cs.structure_hp <= 0.0 {
-                        ship_dead = true;
-                    }
-                }
-                if ship_dead {
+                if let Some((_, true, _)) = ballpark.apply_true_damage_to_ball(ship_id, rem_dmg) {
                     store.hazard_ticks.remove(&ship_id);
-                    ballpark.remove_ball(ship_id);
                     destroyed_balls.push(ship_id);
                     newly_eliminated.push((cid, ship_id, ship_type_id, ship_pos));
                 }
@@ -503,104 +524,109 @@ pub fn step_proving_grounds_arena_hazards_in_ballpark(
                 continue;
             }
             for (cid, ship_id, ship_type_id, pos) in newly_eliminated {
-                let base_price = sde_opt
-                    .and_then(|sde| sde.types.get(&ship_type_id))
-                    .map(|t| t.base_price)
-                    .unwrap_or(250_000.0);
-                snap.items.remove(&ship_id);
-                snap.item_positions.remove(&ship_id);
-                snap.module_online_states.remove(&ship_id);
-                sp6.ship_combat_hp.remove(&ship_id);
-                snap.items.retain(|_, it| it.location_id != ship_id);
-                if ship_type_id != 670 {
-                    snap.next_entity_id += 1;
-                    let kid = snap.next_entity_id;
-                    snap.record_killmail(
-                        eve_db::KillmailRecord {
-                            kill_id: kid,
-                            victim_character_id: cid,
-                            attacker_character_id: 0,
-                            attacker_corp_id: 1_000_298,
-                            solar_system_id: 32_000_001,
-                            ship_type_id,
-                            total_value_isk: base_price,
-                            ..Default::default()
-                        },
-                        now_unix,
-                    );
-                    snap.next_entity_id += 1;
-                    let cap_id = snap.next_entity_id;
-                    snap.items.insert(
-                        cap_id,
-                        eve_db::InventoryItemRecord {
-                            item_id: cap_id,
-                            type_id: 670,
-                            owner_id: cid,
-                            location_id: 32_000_001,
-                            flag: eve_db::InventoryFlag::None,
-                            quantity: 1,
-                            singleton: true,
-                            ..Default::default()
-                        },
-                    );
-                    snap.item_positions.insert(cap_id, [pos.x, pos.y, pos.z]);
-                    if let Some(ch) = snap.characters.get_mut(&cid) {
-                        ch.active_ship_id = cap_id;
-                    }
-                    let (mass, radius, inertia, max_vel, shield, armor, hull, sig) = sde_opt
-                        .and_then(|sde| sde.types.get(&670))
-                        .map(|t| {
-                            let a = &t.default_attributes;
-                            (
-                                t.mass.max(12_000.0),
-                                t.radius.max(18.0),
-                                a.get(&eve_sde::attr_ids::AGILITY).copied().unwrap_or(0.5),
-                                a.get(&eve_sde::attr_ids::MAX_VELOCITY).copied().unwrap_or(250.0),
-                                a.get(&eve_sde::attr_ids::SHIELD_CAPACITY).copied().unwrap_or(250.0),
-                                a.get(&eve_sde::attr_ids::ARMOR_HP).copied().unwrap_or(250.0),
-                                a.get(&eve_sde::attr_ids::HP_STRUCT).copied().unwrap_or(250.0),
-                                a.get(&eve_sde::attr_ids::SIGNATURE_RADIUS).copied().unwrap_or(25.0),
-                            )
-                        })
-                        .unwrap_or((12_000.0, 18.0, 0.5, 250.0, 250.0, 250.0, 250.0, 25.0));
-                    ballpark.add_ball(Ball {
-                        id: cap_id,
-                        type_id: 670,
-                        position: pos,
-                        velocity: DVec3::ZERO,
-                        max_velocity: max_vel,
-                        inertia,
-                        mass,
-                        radius,
-                        speed_fraction: 0.0,
-                        mode: MovementMode::Stop,
-                    });
-                    ballpark.combat_states.insert(
-                        cap_id,
-                        eve_destiny::CombatState {
-                            shield_hp: shield,
-                            max_shield_hp: shield,
-                            armor_hp: armor,
-                            max_armor_hp: armor,
-                            structure_hp: hull,
-                            max_structure_hp: hull,
-                            signature_radius: sig,
-                            base_signature_radius: Some(sig),
-                            ..eve_destiny::CombatState::default()
-                        },
-                    );
-                    ejected_pods.push((cid, ship_id, cap_id));
-                } else {
-                    let (home_station_id, home_sys_id, corvette_id, _, _) =
-                        destroy_pod_and_respawn_faction_corvette_in_snap(
-                            snap,
-                            sde_opt,
-                            cid,
-                            32_000_001,
-                            [pos.x, pos.y, pos.z],
+                let will_run_step_hook = defer_ship_death_to_step_hook
+                    && snap.items.contains_key(&ship_id)
+                    && snap.characters.values().any(|c| c.active_ship_id == ship_id);
+                if !will_run_step_hook {
+                    let base_price = sde_opt
+                        .and_then(|sde| sde.types.get(&ship_type_id))
+                        .map(|t| t.base_price)
+                        .unwrap_or(250_000.0);
+                    crate::sp6_lifecycle::clear_ship_combat_damage_in_snap(snap, ship_id);
+                    snap.items.remove(&ship_id);
+                    snap.item_positions.remove(&ship_id);
+                    snap.module_online_states.remove(&ship_id);
+                    snap.items.retain(|_, it| it.location_id != ship_id);
+                    if ship_type_id != 670 {
+                        snap.next_entity_id += 1;
+                        let kid = snap.next_entity_id;
+                        snap.record_killmail(
+                            eve_db::KillmailRecord {
+                                kill_id: kid,
+                                victim_character_id: cid,
+                                attacker_character_id: 0,
+                                attacker_corp_id: 1_000_298,
+                                solar_system_id: 32_000_001,
+                                ship_type_id,
+                                total_value_isk: base_price,
+                                ..Default::default()
+                            },
                             now_unix,
                         );
-                    respawned_pilots.push((cid, ship_id, home_station_id, home_sys_id, corvette_id));
+                        snap.next_entity_id += 1;
+                        let cap_id = snap.next_entity_id;
+                        snap.items.insert(
+                            cap_id,
+                            eve_db::InventoryItemRecord {
+                                item_id: cap_id,
+                                type_id: 670,
+                                owner_id: cid,
+                                location_id: 32_000_001,
+                                flag: eve_db::InventoryFlag::None,
+                                quantity: 1,
+                                singleton: true,
+                                ..Default::default()
+                            },
+                        );
+                        snap.item_positions.insert(cap_id, [pos.x, pos.y, pos.z]);
+                        if let Some(ch) = snap.characters.get_mut(&cid) {
+                            ch.active_ship_id = cap_id;
+                        }
+                        let (mass, radius, inertia, max_vel, shield, armor, hull, sig) = sde_opt
+                            .and_then(|sde| sde.types.get(&670))
+                            .map(|t| {
+                                let a = &t.default_attributes;
+                                (
+                                    t.mass.max(12_000.0),
+                                    t.radius.max(18.0),
+                                    a.get(&eve_sde::attr_ids::AGILITY).copied().unwrap_or(0.5),
+                                    a.get(&eve_sde::attr_ids::MAX_VELOCITY).copied().unwrap_or(250.0),
+                                    a.get(&eve_sde::attr_ids::SHIELD_CAPACITY).copied().unwrap_or(250.0),
+                                    a.get(&eve_sde::attr_ids::ARMOR_HP).copied().unwrap_or(250.0),
+                                    a.get(&eve_sde::attr_ids::HP_STRUCT).copied().unwrap_or(250.0),
+                                    a.get(&eve_sde::attr_ids::SIGNATURE_RADIUS).copied().unwrap_or(25.0),
+                                )
+                            })
+                            .unwrap_or((12_000.0, 18.0, 0.5, 250.0, 250.0, 250.0, 250.0, 25.0));
+                        ballpark.add_ball(Ball {
+                            id: cap_id,
+                            type_id: 670,
+                            position: pos,
+                            velocity: DVec3::ZERO,
+                            max_velocity: max_vel,
+                            inertia,
+                            mass,
+                            radius,
+                            speed_fraction: 0.0,
+                            mode: MovementMode::Stop,
+                        });
+                        ballpark.combat_states.insert(
+                            cap_id,
+                            eve_destiny::CombatState {
+                                shield_hp: shield,
+                                max_shield_hp: shield,
+                                armor_hp: armor,
+                                max_armor_hp: armor,
+                                structure_hp: hull,
+                                max_structure_hp: hull,
+                                signature_radius: sig,
+                                base_signature_radius: Some(sig),
+                                ..eve_destiny::CombatState::default()
+                            },
+                        );
+                        ejected_pods.push((cid, ship_id, cap_id));
+                    } else {
+                        let (home_station_id, home_sys_id, corvette_id, _, _) =
+                            destroy_pod_and_respawn_faction_corvette_in_snap(
+                                snap,
+                                sde_opt,
+                                cid,
+                                32_000_001,
+                                [pos.x, pos.y, pos.z],
+                                now_unix,
+                            );
+                        respawned_pilots.push((cid, ship_id, home_station_id, home_sys_id, corvette_id));
+                    }
                 }
                 store.match_eliminated.entry(mid).or_default().insert(cid);
                 store.queue.remove(&cid);

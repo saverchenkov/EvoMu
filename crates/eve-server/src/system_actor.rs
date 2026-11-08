@@ -928,6 +928,31 @@ impl SystemRegistry {
                                     let _ = reply.send(None);
                                 }
                             }
+                            SystemCommand::ApplyTrueDamage { ball_id, amount, reply } => {
+                                if let Some((applied, destroyed, ball_opt)) = ballpark.apply_true_damage_to_ball(ball_id, amount) {
+                                    if destroyed {
+                                        let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
+                                        remove_all_ship_module_cycles(&mut ballpark, active_module_cycles, &base_scramble_strengths, &base_core_strengths, &db_opt, ball_id, deact_guard.as_ref());
+                                        crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
+                                            &mut ballpark,
+                                            &db_opt,
+                                            tactical_state,
+                                            ball_id,
+                                        );
+                                    }
+                                    if let (Some(db), Some(cs)) = (&db_opt, ballpark.combat_states.get(&ball_id)) {
+                                        crate::sp6_lifecycle::persist_ship_combat_hp_in_db(db, ball_id, cs);
+                                    }
+                                    sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
+                                    if let Some(ball_snap) = ball_opt {
+                                        let _ = reply.send(Some((applied, destroyed, ball_snap)));
+                                    } else {
+                                        let _ = reply.send(None);
+                                    }
+                                } else {
+                                    let _ = reply.send(None);
+                                }
+                            }
                             SystemCommand::StepManual { dt, reply } => {
                                 let raw_tidi = f64::from_bits(tidi_factor_bits_actor.load(std::sync::atomic::Ordering::Relaxed));
                                 let tidi = if raw_tidi.is_finite() { raw_tidi.clamp(0.10, 1.0) } else { 1.0 };
@@ -1002,7 +1027,7 @@ impl SystemRegistry {
                                         );
                                     }
                                 }
-                                for bid in crate::services::pve_special_sites_abyssal::step_abyssal_hazards_and_pylons_in_ballpark(
+                                for bid in crate::services::pve_abyssal_pylons::step_abyssal_hazards_and_pylons_in_ballpark_for_tick(
                                     &mut ballpark,
                                     sde_opt.as_deref(),
                                     db_opt.as_ref(),
@@ -1010,7 +1035,7 @@ impl SystemRegistry {
                                 ) {
                                     destroyed_balls.push((bid, None));
                                 }
-                                for bid in crate::services::pvp_filament_arena::step_proving_grounds_arena_hazards_in_ballpark(
+                                for bid in crate::services::pvp_filament_arena::step_proving_grounds_arena_hazards_in_ballpark_for_tick(
                                     &mut ballpark,
                                     sde_opt.as_deref(),
                                     db_opt.as_ref(),

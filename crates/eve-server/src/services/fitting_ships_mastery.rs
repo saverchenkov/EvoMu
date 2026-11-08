@@ -1073,8 +1073,15 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     .values()
                     .filter(|i| i.owner_id == char_id && (i.item_id == ship_id || i.location_id == ship_id))
                     .map(|i| {
-                        i.dynamic_attributes.get(&attr_ids::DAMAGE).copied().unwrap_or(0.0)
-                            + i.dynamic_attributes.get(&attr_ids::ARMOR_DAMAGE).copied().unwrap_or(0.0)
+                        if ctx.sde.get_type_category(i.type_id) == Some(6) {
+                            let unified = crate::sp6_lifecycle::read_unified_ship_damage_state(
+                                ctx, snap, i.item_id, i.type_id, None,
+                            );
+                            unified.hull_damage + unified.armor_damage
+                        } else {
+                            i.dynamic_attributes.get(&attr_ids::DAMAGE).copied().unwrap_or(0.0)
+                                + i.dynamic_attributes.get(&attr_ids::ARMOR_DAMAGE).copied().unwrap_or(0.0)
+                        }
                     })
                     .sum()
             });

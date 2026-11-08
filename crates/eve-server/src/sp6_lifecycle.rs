@@ -221,8 +221,9 @@ pub fn persist_ship_combat_hp_in_db(
     persist_ship_combat_hp_batch_in_db(db, [(ball_id, cs)]);
 }
 
-/// Persists multiple ship combat HPs into `snap.sp6_lifecycle.ship_combat_hp` in a single mutation,
-/// skipping snapshot lock/write entirely if none of the ship HP values changed.
+/// Persists multiple ship combat HPs into `snap.sp6_lifecycle.ship_combat_hp` AND mirrors hull/armor
+/// deficits into `snap.items[ship_id].dynamic_attributes[DAMAGE | ARMOR_DAMAGE]` in a single mutation,
+/// keeping all three ship HP representations synchronized (`#585`), and skipping snapshot write if unchanged.
 pub fn persist_ship_combat_hp_batch_in_db<'a, I>(
     db: &Arc<WorldRepository>,
     updates: I,
@@ -250,7 +251,7 @@ fn persist_ship_combat_hp_batch_inner<'a, I>(
 ) where
     I: IntoIterator<Item = (i64, &'a CombatState)>,
 {
-    let to_update: Vec<(i64, PersistedCombatHp)> = db.with_snapshot(|snap| {
+    let to_update: Vec<(i64, PersistedCombatHp, f64, f64)> = db.with_snapshot(|snap| {
         updates
             .into_iter()
             .filter_map(|(bid, cs)| {
@@ -265,8 +266,37 @@ fn persist_ship_combat_hp_batch_inner<'a, I>(
                     armor_hp: cs.armor_hp.max(0.0),
                     hull_hp: cs.structure_hp.max(0.0),
                 };
-                if snap.sp6_lifecycle.ship_combat_hp.get(&bid) != Some(&new_hp) {
-                    Some((bid, new_hp))
+                let armor_dmg = if cs.max_armor_hp > 0.0 {
+                    (cs.max_armor_hp - cs.armor_hp).clamp(0.0, cs.max_armor_hp)
+                } else {
+                    0.0
+                };
+                let hull_dmg = if cs.max_structure_hp > 0.0 {
+                    (cs.max_structure_hp - cs.structure_hp).clamp(0.0, cs.max_structure_hp)
+                } else {
+                    0.0
+                };
+                let hp_changed = snap.sp6_lifecycle.ship_combat_hp.get(&bid) != Some(&new_hp);
+                let item_changed = snap.items.get(&bid).is_some_and(|it| {
+                    let cur_a = it
+                        .dynamic_attributes
+                        .get(&eve_sde::attr_ids::ARMOR_DAMAGE)
+                        .copied();
+                    let cur_h = it
+                        .dynamic_attributes
+                        .get(&eve_sde::attr_ids::DAMAGE)
+                        .copied();
+                    let want_a = (armor_dmg > 1e-6).then_some(armor_dmg);
+                    let want_h = (hull_dmg > 1e-6).then_some(hull_dmg);
+                    let diff = |x: Option<f64>, y: Option<f64>| match (x, y) {
+                        (None, None) => false,
+                        (Some(a), Some(b)) => (a - b).abs() > 1e-6,
+                        _ => true,
+                    };
+                    diff(cur_a, want_a) || diff(cur_h, want_h)
+                });
+                if hp_changed || item_changed {
+                    Some((bid, new_hp, armor_dmg, hull_dmg))
                 } else {
                     None
                 }
@@ -279,14 +309,200 @@ fn persist_ship_combat_hp_batch_inner<'a, I>(
     }
 
     let _ = db.try_with_mut_snapshot(|snap| -> Result<(), String> {
-        for (bid, hp) in to_update {
+        for (bid, hp, armor_dmg, hull_dmg) in to_update {
             snap.sp6_lifecycle.ship_combat_hp.insert(bid, hp);
+            if let Some(it) = snap.items.get_mut(&bid) {
+                let mut touched = false;
+                if armor_dmg > 1e-6 {
+                    if it
+                        .dynamic_attributes
+                        .get(&eve_sde::attr_ids::ARMOR_DAMAGE)
+                        .copied()
+                        .is_none_or(|v| (v - armor_dmg).abs() > 1e-6)
+                    {
+                        it.dynamic_attributes
+                            .insert(eve_sde::attr_ids::ARMOR_DAMAGE, armor_dmg);
+                        touched = true;
+                    }
+                } else if it
+                    .dynamic_attributes
+                    .remove(&eve_sde::attr_ids::ARMOR_DAMAGE)
+                    .is_some()
+                {
+                    touched = true;
+                }
+                if hull_dmg > 1e-6 {
+                    if it
+                        .dynamic_attributes
+                        .get(&eve_sde::attr_ids::DAMAGE)
+                        .copied()
+                        .is_none_or(|v| (v - hull_dmg).abs() > 1e-6)
+                    {
+                        it.dynamic_attributes
+                            .insert(eve_sde::attr_ids::DAMAGE, hull_dmg);
+                        touched = true;
+                    }
+                } else if it
+                    .dynamic_attributes
+                    .remove(&eve_sde::attr_ids::DAMAGE)
+                    .is_some()
+                {
+                    touched = true;
+                }
+                if touched {
+                    it.version += 1;
+                }
+            }
         }
         Ok(())
     });
 }
 
-/// Restores persisted shield/armor/hull HP from `snap.sp6_lifecycle.ship_combat_hp` onto `cs`.
+/// Clears ship hull/armor dynamic damage attributes and persisted `sp6_lifecycle.ship_combat_hp`
+/// together when a ship is repaired or healed (`#585`).
+pub fn clear_ship_combat_damage_in_snap(snap: &mut eve_db::WorldStateSnapshot, ship_id: i64) {
+    if let Some(it) = snap.items.get_mut(&ship_id) {
+        let removed_h = it
+            .dynamic_attributes
+            .remove(&eve_sde::attr_ids::DAMAGE)
+            .is_some();
+        let removed_a = it
+            .dynamic_attributes
+            .remove(&eve_sde::attr_ids::ARMOR_DAMAGE)
+            .is_some();
+        if removed_h || removed_a {
+            it.version += 1;
+        }
+    }
+    snap.sp6_lifecycle.ship_combat_hp.remove(&ship_id);
+}
+
+/// Unified ship HP & damage view reconciled across `Ballpark::combat_states`,
+/// `snap.sp6_lifecycle.ship_combat_hp`, and `item.dynamic_attributes` (`#585`).
+#[derive(Debug, Clone, Copy)]
+pub struct UnifiedShipDamageState {
+    pub max_shield: f64,
+    pub shield_hp: f64,
+    pub shield_damage: f64,
+    pub max_armor: f64,
+    pub armor_damage: f64,
+    pub max_hull: f64,
+    pub hull_damage: f64,
+}
+
+pub fn read_unified_ship_damage_state(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    ship_id: i64,
+    type_id: u32,
+    fallback_maxes_hull_armor_shield: Option<(f64, f64, f64)>,
+) -> UnifiedShipDamageState {
+    let t_opt = ctx.sde.types.get(&type_id);
+    let (def_hull, def_armor, def_shield) = fallback_maxes_hull_armor_shield.unwrap_or_else(|| {
+        (
+            t_opt
+                .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied())
+                .unwrap_or(0.0),
+            t_opt
+                .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::ARMOR_HP).copied())
+                .unwrap_or(0.0),
+            t_opt
+                .and_then(|t| {
+                    t.default_attributes
+                        .get(&eve_sde::attr_ids::SHIELD_CAPACITY)
+                        .copied()
+                })
+                .unwrap_or(400.0),
+        )
+    });
+    let live_cs = ctx.systems.find_ball_system_sync(ship_id).and_then(|sys_id| {
+        let handle = ctx.systems.get_or_spawn(sys_id);
+        let bp = handle.ballpark.read().ok()?;
+        let cs = bp.combat_states.get(&ship_id)?;
+        Some((
+            cs.max_structure_hp,
+            cs.structure_hp,
+            cs.max_armor_hp,
+            cs.armor_hp,
+            cs.max_shield_hp,
+            cs.shield_hp,
+        ))
+    });
+    let eff_hull = live_cs.map(|c| c.0).unwrap_or(def_hull).max(def_hull);
+    let eff_armor = live_cs.map(|c| c.2).unwrap_or(def_armor).max(def_armor);
+    let eff_shield = live_cs.map(|c| c.4).unwrap_or(def_shield).max(def_shield);
+
+    let live_hull_dmg = live_cs
+        .map(|(mh, h, _, _, _, _)| if mh > 0.0 { (mh - h).max(0.0) } else { 0.0 })
+        .unwrap_or(0.0);
+    let live_armor_dmg = live_cs
+        .map(|(_, _, ma, a, _, _)| if ma > 0.0 { (ma - a).max(0.0) } else { 0.0 })
+        .unwrap_or(0.0);
+    let live_shield_dmg = live_cs
+        .map(|(_, _, _, _, ms, s)| if ms > 0.0 { (ms - s).max(0.0) } else { 0.0 })
+        .unwrap_or(0.0);
+
+    let persisted = snap.sp6_lifecycle.ship_combat_hp.get(&ship_id);
+    let p_hull_dmg = persisted
+        .map(|hp| {
+            if eff_hull > 0.0 {
+                (eff_hull - hp.hull_hp).max(0.0)
+            } else {
+                0.0
+            }
+        })
+        .unwrap_or(0.0);
+    let p_armor_dmg = persisted
+        .map(|hp| {
+            if eff_armor > 0.0 {
+                (eff_armor - hp.armor_hp).max(0.0)
+            } else {
+                0.0
+            }
+        })
+        .unwrap_or(0.0);
+    let p_shield_dmg = persisted
+        .map(|hp| {
+            if eff_shield > 0.0 {
+                (eff_shield - hp.shield_hp).max(0.0)
+            } else {
+                0.0
+            }
+        })
+        .unwrap_or(0.0);
+
+    let item_opt = snap.items.get(&ship_id);
+    let dyn_hull_dmg = item_opt
+        .and_then(|it| it.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE).copied())
+        .unwrap_or(0.0)
+        .max(0.0);
+    let dyn_armor_dmg = item_opt
+        .and_then(|it| {
+            it.dynamic_attributes
+                .get(&eve_sde::attr_ids::ARMOR_DAMAGE)
+                .copied()
+        })
+        .unwrap_or(0.0)
+        .max(0.0);
+
+    let hull_damage = live_hull_dmg.max(p_hull_dmg).max(dyn_hull_dmg);
+    let armor_damage = live_armor_dmg.max(p_armor_dmg).max(dyn_armor_dmg);
+    let shield_damage = live_shield_dmg.max(p_shield_dmg);
+    let shield_hp = (eff_shield - shield_damage).clamp(0.0, eff_shield);
+
+    UnifiedShipDamageState {
+        max_shield: eff_shield,
+        shield_hp,
+        shield_damage,
+        max_armor: eff_armor,
+        armor_damage,
+        max_hull: eff_hull,
+        hull_damage,
+    }
+}
+
+/// Restores persisted shield/armor/hull HP from `snap.sp6_lifecycle.ship_combat_hp` (falling back
+/// to item `DAMAGE`/`ARMOR_DAMAGE` attributes if needed) onto `cs`.
 pub fn apply_persisted_hp_to_combat_state(
     ctx: &ServerContext,
     ship_id: i64,
@@ -298,6 +514,17 @@ pub fn apply_persisted_hp_to_combat_state(
             cs.armor_hp = hp.armor_hp.clamp(0.0, cs.max_armor_hp);
             if hp.hull_hp > 0.0 {
                 cs.structure_hp = hp.hull_hp.clamp(0.0, cs.max_structure_hp);
+            }
+        } else if let Some(it) = snap.items.get(&ship_id) {
+            if let Some(&ad) = it.dynamic_attributes.get(&eve_sde::attr_ids::ARMOR_DAMAGE) {
+                if ad > 0.0 {
+                    cs.armor_hp = (cs.max_armor_hp - ad).clamp(0.0, cs.max_armor_hp);
+                }
+            }
+            if let Some(&hd) = it.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE) {
+                if hd > 0.0 {
+                    cs.structure_hp = (cs.max_structure_hp - hd).clamp(0.0, cs.max_structure_hp);
+                }
             }
         }
     });

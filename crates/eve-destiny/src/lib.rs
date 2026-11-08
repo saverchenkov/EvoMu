@@ -567,8 +567,11 @@ impl CombatState {
         let base_cap_ms = self
             .base_capacitor_recharge_time_ms
             .unwrap_or(self.capacitor_recharge_time_ms);
-        self.capacitor_recharge_time_ms =
-            (base_cap_ms * self.cloud_cap_recharge_multiplier.unwrap_or(1.0)).max(1_000.0);
+        self.capacitor_recharge_time_ms = if base_cap_ms <= 0.0 {
+            0.0
+        } else {
+            (base_cap_ms * self.cloud_cap_recharge_multiplier.unwrap_or(1.0)).max(1_000.0)
+        };
 
         if let Some(base_ms) = self.base_max_shield_hp {
             self.max_shield_hp = (base_ms * self.env_max_shield_multiplier.unwrap_or(1.0)).max(0.0);

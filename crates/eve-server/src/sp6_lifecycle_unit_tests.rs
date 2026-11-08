@@ -574,3 +574,87 @@ async fn safe_logoff_disconnect_reconnect_and_drone_lifecycle_work_end_to_end() 
             && rt.active_drones_in_space[&drone_ball_far].is_abandoned
     }));
 }
+
+#[test]
+fn arch_585_three_way_ship_hp_sync_and_unified_repair_clear() {
+    let ctx = test_ctx();
+    let char_id = 90_585_001_i64;
+    let ship_id = 885_585_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: 30_000_142,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut cs = make_combat_state(1_000.0, 2_000.0, 3_000.0, 500.0);
+    cs.shield_hp = 400.0;
+    cs.armor_hp = 1_200.0;
+    cs.structure_hp = 2_500.0;
+    persist_ship_combat_hp_in_db(&ctx.db, ship_id, &cs);
+
+    let (dyn_hull_dmg, dyn_armor_dmg, persisted_hp) = ctx.db.with_snapshot(|snap| {
+        let item = &snap.items[&ship_id];
+        (
+            item.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE).copied(),
+            item.dynamic_attributes.get(&eve_sde::attr_ids::ARMOR_DAMAGE).copied(),
+            snap.sp6_lifecycle.ship_combat_hp.get(&ship_id).cloned(),
+        )
+    });
+    assert_eq!(dyn_hull_dmg, Some(500.0));
+    assert_eq!(dyn_armor_dmg, Some(800.0));
+    assert_eq!(
+        persisted_hp,
+        Some(PersistedCombatHp {
+            shield_hp: 400.0,
+            armor_hp: 1_200.0,
+            hull_hp: 2_500.0,
+        })
+    );
+
+    let unified = ctx.db.with_snapshot(|snap| {
+        read_unified_ship_damage_state(&ctx, snap, ship_id, 587, Some((3_000.0, 2_000.0, 1_000.0)))
+    });
+    assert!((unified.shield_hp - 400.0).abs() < 1e-6);
+    assert!((unified.shield_damage - 600.0).abs() < 1e-6);
+    assert!((unified.armor_damage - 800.0).abs() < 1e-6);
+    assert!((unified.max_armor - 2_000.0).abs() < 1e-6);
+    assert!((unified.hull_damage - 500.0).abs() < 1e-6);
+    assert!((unified.max_hull - 3_000.0).abs() < 1e-6);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        clear_ship_combat_damage_in_snap(snap, ship_id);
+    });
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.sp6_lifecycle.ship_combat_hp.contains_key(&ship_id));
+        assert!(!snap.items[&ship_id]
+            .dynamic_attributes
+            .contains_key(&eve_sde::attr_ids::DAMAGE));
+        assert!(!snap.items[&ship_id]
+            .dynamic_attributes
+            .contains_key(&eve_sde::attr_ids::ARMOR_DAMAGE));
+    });
+
+    // Dynamic-attributes-only fallback (e.g. legacy docked repair / Damage state) restores cleanly
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(it) = snap.items.get_mut(&ship_id) {
+            it.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, 250.0);
+            it.dynamic_attributes.insert(eve_sde::attr_ids::ARMOR_DAMAGE, 400.0);
+        }
+    });
+    let mut restored = make_combat_state(1_000.0, 2_000.0, 3_000.0, 500.0);
+    apply_persisted_hp_to_combat_state(&ctx, ship_id, &mut restored);
+    assert!((restored.shield_hp - 1_000.0).abs() < 1e-6);
+    assert!((restored.armor_hp - 1_600.0).abs() < 1e-6);
+    assert!((restored.structure_hp - 2_750.0).abs() < 1e-6);
+}

@@ -530,8 +530,9 @@ pub async fn handle_gm_slash_ext(
             }
         }
 
-        // Clear module and hull dynamic damage + heat attributes in DB and fitting cache
+        // Clear module and hull dynamic damage + heat attributes in DB, SP6 HP, and fitting cache
         ctx.db.with_mut_snapshot(|snap| {
+            crate::sp6_lifecycle::clear_ship_combat_damage_in_snap(snap, target_ship_id);
             for item in snap.items.values_mut() {
                 if item.item_id == target_ship_id || item.location_id == target_ship_id {
                     item.dynamic_attributes.remove(&eve_sde::attr_ids::DAMAGE);

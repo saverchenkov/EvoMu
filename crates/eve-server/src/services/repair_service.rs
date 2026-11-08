@@ -19,44 +19,18 @@ fn ship_combat_damage(
     max_armor: f64,
     max_shield: f64,
 ) -> (f64, bool) {
-    let live_cs = ctx.systems.find_ball_system_sync(ship_id).and_then(|sys_id| {
-        let handle = ctx.systems.get_or_spawn(sys_id);
-        let bp = handle.ballpark.read().ok()?;
-        let cs = bp.combat_states.get(&ship_id)?;
-        Some((
-            cs.max_structure_hp,
-            cs.structure_hp,
-            cs.max_armor_hp,
-            cs.armor_hp,
-            cs.max_shield_hp,
-            cs.shield_hp,
-        ))
-    });
-    let eff_hull = live_cs.map(|c| c.0).unwrap_or(max_hull).max(max_hull);
-    let eff_armor = live_cs.map(|c| c.2).unwrap_or(max_armor).max(max_armor);
-    let eff_shield = live_cs.map(|c| c.4).unwrap_or(max_shield).max(max_shield);
-    let live_shield_dmg = live_cs
-        .map(|(_, _, _, _, ms, s)| if ms > 0.0 { (ms - s).max(0.0) } else { 0.0 })
-        .unwrap_or(0.0);
-    let live_dmg = live_cs
-        .map(|(mh, h, ma, a, _, _)| {
-            let hd = if mh > 0.0 { (mh - h).max(0.0) } else { 0.0 };
-            let ad = if ma > 0.0 { (ma - a).max(0.0) } else { 0.0 };
-            hd + ad + live_shield_dmg
-        })
-        .unwrap_or(0.0);
-    let (persisted_dmg, persisted_shield_dmg) = snap
-        .sp6_lifecycle
-        .ship_combat_hp
-        .get(&ship_id)
-        .map(|hp| {
-            let hd = if eff_hull > 0.0 { (eff_hull - hp.hull_hp).max(0.0) } else { 0.0 };
-            let ad = if eff_armor > 0.0 { (eff_armor - hp.armor_hp).max(0.0) } else { 0.0 };
-            let sd = if eff_shield > 0.0 { (eff_shield - hp.shield_hp).max(0.0) } else { 0.0 };
-            (hd + ad + sd, sd)
-        })
-        .unwrap_or((0.0, 0.0));
-    (live_dmg.max(persisted_dmg), live_shield_dmg > 0.0 || persisted_shield_dmg > 0.0)
+    let type_id = snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(0);
+    let unified = crate::sp6_lifecycle::read_unified_ship_damage_state(
+        ctx,
+        snap,
+        ship_id,
+        type_id,
+        Some((max_hull, max_armor, max_shield)),
+    );
+    (
+        unified.hull_damage + unified.armor_damage + unified.shield_damage,
+        unified.shield_damage > 0.0,
+    )
 }
 
 fn item_repair_metrics(
@@ -736,12 +710,7 @@ pub fn handle_repair_items_in_location(
         }
         let bal = snap.characters.get(&char_id).map(|c| c.balance.to_wire_f64()).unwrap_or(0.0);
         for tid in &target_ids {
-            if let Some(it) = snap.items.get_mut(tid) {
-                it.dynamic_attributes.remove(&eve_sde::attr_ids::DAMAGE);
-                it.dynamic_attributes.remove(&eve_sde::attr_ids::ARMOR_DAMAGE);
-                it.version += 1;
-            }
-            snap.sp6_lifecycle.ship_combat_hp.remove(tid);
+            crate::sp6_lifecycle::clear_ship_combat_damage_in_snap(snap, *tid);
         }
         Ok((target_ids, total_cents.to_f64_isk(), bal))
     })?;

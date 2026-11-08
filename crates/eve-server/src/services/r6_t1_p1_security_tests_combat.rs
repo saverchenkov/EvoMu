@@ -395,3 +395,84 @@ async fn issue_369_sleeper_and_drifter_npcs_are_capacitor_immune_to_neut_and_nos
     assert!((sleeper_after.capacitor - 2_500.0).abs() < 1e-6);
     assert!((drifter_after.capacitor - 5_000.0).abs() < 1e-6);
 }
+
+#[tokio::test]
+async fn arch_585_breacher_dot_respects_invuln_guards_and_preserves_destruction_events() {
+    let (ctx, _) = test_ctx_at(1_700_008_000);
+    let sys_id = 30_000_142;
+    let attacker_char = 91_008_001;
+    let victim_char = 91_008_002;
+    let attacker_ship = 1_100_008_001;
+    let victim_ship = 1_100_008_002;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters
+            .insert(attacker_char, make_char(attacker_char, 98_001, attacker_ship, sys_id));
+        snap.characters
+            .insert(victim_char, make_char(victim_char, 98_002, victim_ship, sys_id));
+        snap.items.insert(
+            attacker_ship,
+            make_item(attacker_ship, attacker_char, sys_id as i64, InventoryFlag::None, 587, 1),
+        );
+        snap.items.insert(
+            victim_ship,
+            make_item(victim_ship, victim_char, sys_id as i64, InventoryFlag::None, 587, 1),
+        );
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys.spawn_ball(make_ship_ball(attacker_ship, 587, DVec3::ZERO)).await;
+    let _ = sys
+        .spawn_ball(make_ship_ball(victim_ship, 587, DVec3::new(500.0, 0.0, 0.0)))
+        .await;
+
+    let mut vcs = CombatState::default();
+    vcs.shield_hp = 100.0;
+    vcs.max_shield_hp = 100.0;
+    vcs.armor_hp = 100.0;
+    vcs.max_armor_hp = 100.0;
+    vcs.structure_hp = 1.0;
+    vcs.max_structure_hp = 100.0;
+    vcs.is_tethered = true;
+    let _ = sys.set_combat_state(victim_ship, vcs.clone()).await;
+
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.active_breacher_dots.insert(
+            victim_ship,
+            ActiveBreacherDot {
+                target_ball_id: victim_ship,
+                source_char_id: attacker_char,
+                source_ship_id: attacker_ship,
+                weapon_type_id: 81_280,
+                charge_type_id: 81_282,
+                flat_cap_dps: 1_000.0,
+                pct_cap_fraction: 1.0,
+                remaining_s: 3.0,
+                tick_damage: 1_000.0,
+            },
+        );
+    });
+
+    // Tethered victim must take zero true damage from Breacher DoT.
+    step_missiles_and_breachers(&ctx, sys_id, 1.0).await;
+    let guarded = sys.get_combat_state(victim_ship).await.unwrap().unwrap();
+    assert!((guarded.shield_hp - 100.0).abs() < 1e-6);
+    assert!((guarded.structure_hp - 1.0).abs() < 1e-6);
+
+    // Clear tether and apply lethal tick: victim should be destroyed while preserving TerminalExplosion.
+    vcs.is_tethered = false;
+    vcs.shield_hp = 0.0;
+    vcs.armor_hp = 0.0;
+    vcs.structure_hp = 1.0;
+    let _ = sys.set_combat_state(victim_ship, vcs).await;
+    step_missiles_and_breachers(&ctx, sys_id, 1.0).await;
+
+    assert!(sys.get_combat_state(victim_ship).await.unwrap().is_none());
+    let (_, events, _) = sys.drain_observer_updates(victim_ship).await.unwrap();
+    assert!(events
+        .iter()
+        .any(|ev| matches!(ev, &eve_destiny::DestinyEvent::TerminalExplosion { ball_id, .. } if ball_id == victim_ship)));
+    assert!(events
+        .iter()
+        .any(|ev| matches!(ev, &eve_destiny::DestinyEvent::OnDamageStateChange { ball_id, .. } if ball_id == victim_ship)));
+}

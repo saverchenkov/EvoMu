@@ -276,7 +276,9 @@ impl ServerContext {
                         }).unwrap_or(0);
                         Some((vc.character_id, acid, s.item_positions.get(&tid).copied().unwrap_or([0.0; 3])))
                     }) {
-                        let _ = crate::combat::death_pipeline::execute_death_pipeline_sync(&ctx, sys_id, vcid, tid, acid, glam::DVec3::from_array(pos), ctx.now_unix());
+                        if let Ok(death_res) = crate::combat::death_pipeline::execute_death_pipeline_sync(&ctx, sys_id, vcid, tid, acid, glam::DVec3::from_array(pos), ctx.now_unix()) {
+                            crate::services::pve_abyssal_pylons::on_abyssal_boundary_death_hook(&ctx, sys_id, vcid, tid, death_res.ejected_capsule_id);
+                        }
                     }
                 }
                 crate::services::combat_weapons_spool::step_system_entropic_spools(&ctx, sys_id, dt).await;

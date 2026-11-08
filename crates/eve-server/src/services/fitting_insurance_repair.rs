@@ -16,66 +16,6 @@ fn rpc_err(code: &str, msg: impl Into<String>) -> BridgeRpcError {
     }
 }
 
-fn ship_combat_hull_armor_deficit(
-    ctx: &ServerContext,
-    snap: &eve_db::WorldStateSnapshot,
-    ship_id: i64,
-    type_id: eve_sde::TypeId,
-) -> (f64, f64) {
-    let t_opt = ctx.sde.types.get(&type_id);
-    let max_hull = t_opt
-        .and_then(|t| t.default_attributes.get(&attr_ids::HP_STRUCT).copied())
-        .unwrap_or(0.0);
-    let max_armor = t_opt
-        .and_then(|t| t.default_attributes.get(&attr_ids::ARMOR_HP).copied())
-        .unwrap_or(0.0);
-    let live_cs = ctx.systems.find_ball_system_sync(ship_id).and_then(|sys_id| {
-        let handle = ctx.systems.get_or_spawn(sys_id);
-        let bp = handle.ballpark.read().ok()?;
-        let cs = bp.combat_states.get(&ship_id)?;
-        Some((
-            cs.max_structure_hp,
-            cs.structure_hp,
-            cs.max_armor_hp,
-            cs.armor_hp,
-        ))
-    });
-    let eff_hull = live_cs.map(|c| c.0).unwrap_or(max_hull).max(max_hull);
-    let eff_armor = live_cs.map(|c| c.2).unwrap_or(max_armor).max(max_armor);
-    let live_dmg = live_cs
-        .map(|(mh, h, ma, a)| {
-            let hd = if mh > 0.0 { (mh - h).max(0.0) } else { 0.0 };
-            let ad = if ma > 0.0 { (ma - a).max(0.0) } else { 0.0 };
-            hd + ad
-        })
-        .unwrap_or(0.0);
-    let persisted_dmg = snap
-        .sp6_lifecycle
-        .ship_combat_hp
-        .get(&ship_id)
-        .map(|hp| {
-            let hd = if eff_hull > 0.0 {
-                (eff_hull - hp.hull_hp).max(0.0)
-            } else {
-                0.0
-            };
-            let ad = if eff_armor > 0.0 {
-                (eff_armor - hp.armor_hp).max(0.0)
-            } else {
-                0.0
-            };
-            hd + ad
-        })
-        .unwrap_or(0.0);
-    let dmg = live_dmg.max(persisted_dmg);
-    let base_price = t_opt
-        .map(|t| t.base_price)
-        .filter(|p| *p > 0.0)
-        .unwrap_or(10_000.0);
-    let cpu = (base_price * 7.5e-6).max(1.0);
-    (dmg, cpu)
-}
-
 fn resolve_upwell_repair_access_and_tax_bps(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
@@ -580,21 +520,39 @@ pub(super) fn handle_repair_all(
             let mut combat_cost = 0.0;
             for &id in &ids {
                 if let Some(i) = snap.items.get(&id) {
-                    dyn_hp += i
-                        .dynamic_attributes
-                        .get(&attr_ids::DAMAGE)
-                        .copied()
-                        .unwrap_or(0.0)
-                        + i.dynamic_attributes
-                            .get(&attr_ids::ARMOR_DAMAGE)
-                            .copied()
-                            .unwrap_or(0.0);
                     if ctx.sde.get_type_category(i.type_id) == Some(6) {
-                        let (cdmg, cpu) = ship_combat_hull_armor_deficit(ctx, snap, id, i.type_id);
+                        let t_opt = ctx.sde.types.get(&i.type_id);
+                        let max_hull = t_opt
+                            .and_then(|t| t.default_attributes.get(&attr_ids::HP_STRUCT).copied())
+                            .unwrap_or(0.0);
+                        let max_armor = t_opt
+                            .and_then(|t| t.default_attributes.get(&attr_ids::ARMOR_HP).copied())
+                            .unwrap_or(0.0);
+                        let max_shield = t_opt
+                            .and_then(|t| t.default_attributes.get(&attr_ids::SHIELD_CAPACITY).copied())
+                            .unwrap_or(0.0);
+                        let unified = crate::sp6_lifecycle::read_unified_ship_damage_state(
+                            ctx,
+                            snap,
+                            id,
+                            i.type_id,
+                            Some((max_hull, max_armor, max_shield)),
+                        );
+                        let cdmg = unified.hull_damage + unified.armor_damage;
                         if cdmg > 0.0 {
                             combat_hp += cdmg;
-                            combat_cost += (cdmg.ceil() * cpu).max(1.0);
+                            combat_cost += cdmg * 500.0;
                         }
+                    } else {
+                        dyn_hp += i
+                            .dynamic_attributes
+                            .get(&attr_ids::DAMAGE)
+                            .copied()
+                            .unwrap_or(0.0)
+                            + i.dynamic_attributes
+                                .get(&attr_ids::ARMOR_DAMAGE)
+                                .copied()
+                                .unwrap_or(0.0);
                     }
                 }
             }
@@ -642,12 +600,8 @@ pub(super) fn handle_repair_all(
             }
         }
         for &id in &target_item_ids {
-            if let Some(item) = snap.items.get_mut(&id) {
-                if item.owner_id == char_id {
-                    item.dynamic_attributes.remove(&attr_ids::DAMAGE);
-                    item.dynamic_attributes.remove(&attr_ids::ARMOR_DAMAGE);
-                    snap.sp6_lifecycle.ship_combat_hp.remove(&id);
-                }
+            if snap.items.get(&id).is_some_and(|item| item.owner_id == char_id) {
+                crate::sp6_lifecycle::clear_ship_combat_damage_in_snap(snap, id);
             }
         }
         Ok(())

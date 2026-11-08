@@ -487,15 +487,39 @@ pub fn apply_abyssal_weather_to_combat_and_nav(
             cs.armor_resonance[0] = pen_res(cs.armor_resonance[0]);
             cs.structure_resonance[0] = pen_res(cs.structure_resonance[0]);
             cs.capacitor_recharge_time_ms = (cs.capacitor_recharge_time_ms * (1.0 - bon)).max(1_000.0);
+            if let Some(base) = cs.base_shield_resonance.as_mut() {
+                base[0] = cs.shield_resonance[0];
+            }
+            if let Some(base) = cs.base_armor_resonance.as_mut() {
+                base[0] = cs.armor_resonance[0];
+            }
+            if let Some(base) = cs.base_structure_resonance.as_mut() {
+                base[0] = cs.structure_resonance[0];
+            }
+            if cs.base_capacitor_recharge_time_ms.is_some() {
+                cs.base_capacitor_recharge_time_ms = Some(cs.capacitor_recharge_time_ms);
+            }
         }
         AbyssalWeatherKind::Dark => {
-            *max_velocity *= 1.0 + bon;
+            let v_mult = 1.0 + bon;
+            *max_velocity *= v_mult;
+            cs.external_velocity_multiplier =
+                Some(cs.external_velocity_multiplier.unwrap_or(1.0) * v_mult);
             *optimal_range *= (1.0 - pen).max(0.1);
         }
         AbyssalWeatherKind::Exotic => {
             cs.shield_resonance[2] = pen_res(cs.shield_resonance[2]);
             cs.armor_resonance[2] = pen_res(cs.armor_resonance[2]);
             cs.structure_resonance[2] = pen_res(cs.structure_resonance[2]);
+            if let Some(base) = cs.base_shield_resonance.as_mut() {
+                base[2] = cs.shield_resonance[2];
+            }
+            if let Some(base) = cs.base_armor_resonance.as_mut() {
+                base[2] = cs.armor_resonance[2];
+            }
+            if let Some(base) = cs.base_structure_resonance.as_mut() {
+                base[2] = cs.structure_resonance[2];
+            }
         }
         AbyssalWeatherKind::Firestorm => {
             cs.max_armor_hp *= 1.0 + bon;
@@ -503,6 +527,18 @@ pub fn apply_abyssal_weather_to_combat_and_nav(
             cs.shield_resonance[1] = pen_res(cs.shield_resonance[1]);
             cs.armor_resonance[1] = pen_res(cs.armor_resonance[1]);
             cs.structure_resonance[1] = pen_res(cs.structure_resonance[1]);
+            if cs.base_max_armor_hp.is_some() {
+                cs.base_max_armor_hp = Some(cs.max_armor_hp);
+            }
+            if let Some(base) = cs.base_shield_resonance.as_mut() {
+                base[1] = cs.shield_resonance[1];
+            }
+            if let Some(base) = cs.base_armor_resonance.as_mut() {
+                base[1] = cs.armor_resonance[1];
+            }
+            if let Some(base) = cs.base_structure_resonance.as_mut() {
+                base[1] = cs.structure_resonance[1];
+            }
         }
         AbyssalWeatherKind::Gamma => {
             cs.max_shield_hp *= 1.0 + bon;
@@ -510,6 +546,18 @@ pub fn apply_abyssal_weather_to_combat_and_nav(
             cs.shield_resonance[3] = pen_res(cs.shield_resonance[3]);
             cs.armor_resonance[3] = pen_res(cs.armor_resonance[3]);
             cs.structure_resonance[3] = pen_res(cs.structure_resonance[3]);
+            if cs.base_max_shield_hp.is_some() {
+                cs.base_max_shield_hp = Some(cs.max_shield_hp);
+            }
+            if let Some(base) = cs.base_shield_resonance.as_mut() {
+                base[3] = cs.shield_resonance[3];
+            }
+            if let Some(base) = cs.base_armor_resonance.as_mut() {
+                base[3] = cs.armor_resonance[3];
+            }
+            if let Some(base) = cs.base_structure_resonance.as_mut() {
+                base[3] = cs.structure_resonance[3];
+            }
         }
     }
 }

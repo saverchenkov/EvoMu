@@ -368,6 +368,11 @@ pub enum SystemCommand {
         damage: DamageVector,
         reply: oneshot::Sender<Option<(f64, bool, Ball)>>,
     },
+    ApplyTrueDamage {
+        ball_id: BallId,
+        amount: f64,
+        reply: oneshot::Sender<Option<(f64, bool, Ball)>>,
+    },
     StepManual {
         dt: f64,
         reply: oneshot::Sender<(TickBroadcast, Vec<(BallId, Option<CharacterId>)>)>,

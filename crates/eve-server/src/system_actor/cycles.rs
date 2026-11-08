@@ -1295,10 +1295,10 @@ impl SystemHandle {
                 }
             }
         }
-        let sup_dead = crate::services::pve_special_sites_abyssal::step_abyssal_hazards_and_pylons_in_ballpark(
+        let sup_dead = crate::services::pve_abyssal_pylons::step_abyssal_hazards_and_pylons_in_ballpark_for_tick(
             &mut bp, sde_opt.as_deref(), db_opt.as_ref(), self.solar_system_id,
         );
-        let pg_dead = crate::services::pvp_filament_arena::step_proving_grounds_arena_hazards_in_ballpark(
+        let pg_dead = crate::services::pvp_filament_arena::step_proving_grounds_arena_hazards_in_ballpark_for_tick(
             &mut bp, sde_opt.as_deref(), db_opt.as_ref(), self.solar_system_id,
             pending_notifications_opt.as_deref(), notify_tx_opt.as_ref(),
         );

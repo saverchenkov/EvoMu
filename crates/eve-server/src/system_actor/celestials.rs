@@ -979,6 +979,15 @@ impl SystemHandle {
         self.apply_damage_with_attacker(ball_id, damage, None).await
     }
 
+    pub async fn apply_true_damage(&self, ball_id: BallId, amount: f64) -> Result<Option<(f64, bool, Ball)>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::ApplyTrueDamage { ball_id, amount, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
+    }
+
     pub async fn apply_damage_with_attacker(
         &self,
         ball_id: BallId,
