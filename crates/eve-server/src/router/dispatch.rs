@@ -280,6 +280,13 @@ impl ServerContext {
                     }
                 }
             }
+            if service == "fleetObjectHandler" && method == "CreateFleet" {
+                if let Ok(PyRep::Integer(fleet_id)) = res {
+                    res = self
+                        .bind_verified_sub_object(session, "fleetObjectHandler", fleet_id)
+                        .map(|bid| self.bound_object_rep(bid, caller_trace));
+                }
+            }
             res = crate::router::client_compat::normalize_macho_rpc_reply(service, method, res);
         }
 

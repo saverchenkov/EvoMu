@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
+use eve_proto::{BridgeRpcError, DBRowDescriptor, DbColumnType, PyRep};
 
 fn kv_int(entries: &HashMap<String, PyRep>, key: &str, default: i64) -> i64 {
     match entries.get(key) {
@@ -298,6 +298,65 @@ pub fn normalize_macho_rpc_reply(
             return Ok(PyRep::List(Vec::new()));
         }
     }
+    if service == "marketProxy"
+        && matches!(method, "CharGetTransactions" | "CorpGetTransactions")
+    {
+        if let Ok(PyRep::Rowset { columns, rows }) = rpc_res {
+            let desc = DBRowDescriptor::new(
+                columns
+                    .into_iter()
+                    .map(|col| {
+                        let ctype = market_tx_column_type(&col);
+                        (col, ctype)
+                    })
+                    .collect::<Vec<(String, DbColumnType)>>(),
+            );
+            return Ok(desc.build_crowset(rows));
+        }
+    }
+    if service == "facilityManager" && matches!(method, "GetFacilities" | "GetFacilitiesByID") {
+        if let Ok(PyRep::List(items)) = rpc_res {
+            return Ok(PyRep::List(
+                items.into_iter().map(normalize_facility_rep).collect(),
+            ));
+        }
+    }
+    if service == "facilityManager" && method == "GetFacility" {
+        if let Ok(rep) = rpc_res {
+            return Ok(normalize_facility_rep(rep));
+        }
+    }
+    if service == "map" && method == "GetIncursionGlobalReport" {
+        if let Ok(PyRep::List(items)) = rpc_res {
+            return Ok(PyRep::List(
+                items.into_iter().map(normalize_incursion_report_rep).collect(),
+            ));
+        }
+    }
+    if service == "dungeonInstanceCacheMgr" && method == "GetSignatureInstances" {
+        if let Ok(PyRep::Dict(entries)) = rpc_res {
+            let out = entries
+                .into_iter()
+                .map(|(sys_key, val)| {
+                    let count = match val {
+                        PyRep::Integer(n) => n,
+                        PyRep::List(items) => items.len() as i64,
+                        PyRep::Dict(by_dungeon) => by_dungeon
+                            .into_iter()
+                            .map(|(_, v)| match v {
+                                PyRep::List(iids) => iids.len() as i64,
+                                PyRep::Integer(n) => n,
+                                _ => 1,
+                            })
+                            .sum(),
+                        _ => 0,
+                    };
+                    (sys_key, PyRep::Integer(count))
+                })
+                .collect();
+            return Ok(PyRep::Dict(out));
+        }
+    }
     if (matches!(service, "corpRegistry" | "machoNet") && method == "GetCorporation")
         || (service == "corpmgr" && matches!(method, "GetCorporations" | "GetPublicInfo"))
     {
@@ -315,6 +374,116 @@ pub fn normalize_macho_rpc_reply(
         }
     }
     crate::quasar_grpc::normalize_macho_rpc_reply(service, method, rpc_res)
+}
+
+fn market_tx_column_type(col: &str) -> DbColumnType {
+    match col {
+        "price" | "credit" => DbColumnType::R8,
+        "transactionDate" | "date" => DbColumnType::FileTime,
+        "typeID" | "quantity" | "buyerAccountID" | "sellerAccountID" | "accountKey" | "keyID" => {
+            DbColumnType::I4
+        }
+        "transactionID"
+        | "stationID"
+        | "buyerID"
+        | "sellerID"
+        | "accountID"
+        | "clientID"
+        | "journalRefID"
+        | "journalTransactionID"
+        | "characterID"
+        | "corporationID"
+        | "regionID"
+        | "solarSystemID"
+        | "locationID" => DbColumnType::I8,
+        _ => DbColumnType::WStr,
+    }
+}
+
+fn normalize_facility_rep(rep: PyRep) -> PyRep {
+    let PyRep::KeyVal(mut entries) = rep else {
+        return rep;
+    };
+    const INDUSTRY_CATEGORIES: &[i64] = &[
+        4, 5, 6, 7, 8, 9, 16, 17, 18, 20, 22, 23, 24, 25, 32, 34, 35, 39, 40, 41, 42, 43, 46, 65,
+        66, 87, 91,
+    ];
+    if let Some(acts) = entries.get("activities").cloned() {
+        if let PyRep::List(act_list) = acts {
+            let cats: Vec<PyRep> = INDUSTRY_CATEGORIES
+                .iter()
+                .map(|&c| PyRep::Integer(c))
+                .collect();
+            let act_dict = act_list
+                .into_iter()
+                .filter_map(|v| v.as_i64())
+                .map(|act_id| {
+                    let tuple = PyRep::Tuple(vec![
+                        PyRep::List(Vec::new()),
+                        PyRep::List(Vec::new()),
+                        PyRep::List(Vec::new()),
+                        PyRep::List(cats.clone()),
+                        PyRep::List(Vec::new()),
+                        PyRep::List(Vec::new()),
+                    ]);
+                    (PyRep::Integer(act_id), tuple)
+                })
+                .collect();
+            entries.insert("activities".into(), PyRep::Dict(act_dict));
+        }
+    }
+    entries
+        .entry("serviceAccess".into())
+        .or_insert_with(|| PyRep::Dict(Vec::new()));
+    entries
+        .entry("sccTaxModifier".into())
+        .or_insert(PyRep::Real(1.0));
+    entries
+        .entry("rigModifiers".into())
+        .or_insert_with(|| PyRep::Dict(Vec::new()));
+    entries
+        .entry("globalModifiers".into())
+        .or_insert_with(|| {
+            PyRep::Dict(vec![
+                (PyRep::String("faction".into()), PyRep::Real(1.0)),
+                (PyRep::String("system".into()), PyRep::Dict(Vec::new())),
+            ])
+        });
+    PyRep::KeyVal(entries)
+}
+
+fn normalize_incursion_report_rep(rep: PyRep) -> PyRep {
+    let PyRep::KeyVal(mut entries) = rep else {
+        return rep;
+    };
+    if let Some(state_val) = entries.get("state").cloned() {
+        if let PyRep::String(s) = state_val {
+            let code = match s.as_str() {
+                "Withdrawing" | "withdrawing" => 0,
+                "Mobilizing" | "mobilizing" => 1,
+                _ => 2,
+            };
+            entries.insert("state".into(), PyRep::Integer(code));
+        }
+    }
+    let faction_id = entries
+        .get("factionID")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(500_019);
+    entries
+        .entry("aggressorFactionID".into())
+        .or_insert(PyRep::Integer(faction_id));
+    let has_boss = entries
+        .get("hasBoss")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    entries
+        .entry("hasFinalEncounter".into())
+        .or_insert(PyRep::Bool(has_boss));
+    entries
+        .entry("effects".into())
+        .or_insert_with(|| PyRep::List(Vec::new()));
+    PyRep::KeyVal(entries)
 }
 
 fn normalize_damage_state_tuple(rep: PyRep) -> PyRep {
@@ -813,5 +982,200 @@ mod client_compat_tests {
                 Some(&&PyRep::String("Demo Corp".into()))
             );
         }
+    }
+
+    #[test]
+    fn market_transactions_normalize_to_crowset_with_float_prices_for_live_client() {
+        let rowset = PyRep::rowset(
+            vec![
+                "transactionID",
+                "transactionDate",
+                "typeID",
+                "quantity",
+                "price",
+                "stationID",
+                "buyerID",
+                "sellerID",
+                "accountID",
+                "buyerAccountID",
+                "sellerAccountID",
+                "clientID",
+                "credit",
+                "journalRefID",
+                "journalTransactionID",
+            ],
+            vec![vec![
+                PyRep::Integer(9001),
+                PyRep::Integer(134_384_360_643_585_500),
+                PyRep::Integer(34),
+                PyRep::Integer(100),
+                PyRep::Real(5.25),
+                PyRep::Integer(60_003_760),
+                PyRep::Integer(90_000_001),
+                PyRep::Integer(90_000_002),
+                PyRep::Integer(90_000_001),
+                PyRep::Integer(1000),
+                PyRep::Integer(1000),
+                PyRep::Integer(90_000_002),
+                PyRep::Real(-525.0),
+                PyRep::Integer(777),
+                PyRep::Integer(777),
+            ]],
+        );
+        for method in ["CharGetTransactions", "CorpGetTransactions"] {
+            let res = normalize_macho_rpc_reply("marketProxy", method, Ok(rowset.clone())).unwrap();
+            let PyRep::ObjectEx {
+                header,
+                list,
+                ..
+            } = res
+            else {
+                panic!("expected CRowset ObjectEx for {method}");
+            };
+            let PyRep::Tuple(h_parts) = *header else {
+                panic!("expected header tuple");
+            };
+            let PyRep::Tuple(class_parts) = &h_parts[0] else {
+                panic!("expected class tuple");
+            };
+            assert_eq!(
+                class_parts[0],
+                PyRep::Token("carbon.common.script.sys.crowset.CRowset".into())
+            );
+            assert_eq!(list.len(), 1);
+            let PyRep::DBRow { columns, .. } = &list[0] else {
+                panic!("expected packed blue.DBRow inside CRowset");
+            };
+            let by_col: HashMap<&str, &PyRep> =
+                columns.iter().map(|(k, v)| (k.as_str(), v)).collect();
+            assert_eq!(by_col.get("transactionID"), Some(&&PyRep::Integer(9001)));
+            assert_eq!(by_col.get("typeID"), Some(&&PyRep::Integer(34)));
+            assert_eq!(by_col.get("quantity"), Some(&&PyRep::Integer(100)));
+            assert_eq!(by_col.get("price"), Some(&&PyRep::Real(5.25)));
+            assert_eq!(by_col.get("credit"), Some(&&PyRep::Real(-525.0)));
+        }
+        // Negative / non-rowset passthrough
+        assert_eq!(
+            normalize_macho_rpc_reply("marketProxy", "CharGetTransactions", Ok(PyRep::None))
+                .unwrap(),
+            PyRep::None
+        );
+    }
+
+    #[test]
+    fn facility_replies_normalize_activities_to_dict_of_six_tuples_for_live_client() {
+        let facility_kv = PyRep::keyval([
+            ("facilityID", PyRep::Integer(60_003_760)),
+            ("typeID", PyRep::Integer(35835)),
+            ("ownerID", PyRep::Integer(98_000_001)),
+            ("solarSystemID", PyRep::Integer(30_000_142)),
+            ("online", PyRep::Bool(true)),
+            ("tax", PyRep::Real(0.01)),
+            (
+                "activities",
+                PyRep::List(vec![PyRep::Integer(1), PyRep::Integer(3), PyRep::Integer(9)]),
+            ),
+        ]);
+        let list_res = normalize_macho_rpc_reply(
+            "facilityManager",
+            "GetFacilities",
+            Ok(PyRep::List(vec![facility_kv.clone()])),
+        )
+        .unwrap();
+        let PyRep::List(items) = list_res else {
+            panic!("expected List");
+        };
+        assert_eq!(items.len(), 1);
+        let single_res =
+            normalize_macho_rpc_reply("facilityManager", "GetFacility", Ok(facility_kv)).unwrap();
+        for fac in [&items[0], &single_res] {
+            assert!(matches!(fac.dict_get("rigModifiers"), Some(PyRep::Dict(_))));
+            assert!(matches!(fac.dict_get("serviceAccess"), Some(PyRep::Dict(_))));
+            assert_eq!(fac.dict_get("sccTaxModifier"), Some(&PyRep::Real(1.0)));
+            assert!(matches!(fac.dict_get("globalModifiers"), Some(PyRep::Dict(_))));
+            let Some(PyRep::Dict(acts)) = fac.dict_get("activities") else {
+                panic!("expected activities dict on live client");
+            };
+            assert_eq!(acts.len(), 3);
+            for (k, v) in acts {
+                assert!(k.as_i64().is_some());
+                let PyRep::Tuple(six) = v else {
+                    panic!("expected 6-tuple per activity");
+                };
+                assert_eq!(six.len(), 6);
+                let PyRep::List(cats) = &six[3] else {
+                    panic!("expected category list");
+                };
+                assert!(!cats.is_empty());
+            }
+        }
+        // Negative / non-KeyVal passthrough
+        assert_eq!(
+            normalize_macho_rpc_reply("facilityManager", "GetFacility", Ok(PyRep::None)).unwrap(),
+            PyRep::None
+        );
+    }
+
+    #[test]
+    fn incursion_global_report_normalizes_state_to_integer_and_required_fields() {
+        let input = PyRep::List(vec![
+            PyRep::keyval([
+                ("taleID", PyRep::Integer(1)),
+                ("state", PyRep::String("Withdrawing".into())),
+                ("hasBoss", PyRep::Bool(false)),
+            ]),
+            PyRep::keyval([
+                ("taleID", PyRep::Integer(2)),
+                ("state", PyRep::String("Mobilizing".into())),
+                ("hasBoss", PyRep::Bool(false)),
+            ]),
+            PyRep::keyval([
+                ("taleID", PyRep::Integer(3)),
+                ("state", PyRep::String("Establishing".into())),
+                ("hasBoss", PyRep::Bool(true)),
+            ]),
+        ]);
+        let res = normalize_macho_rpc_reply("map", "GetIncursionGlobalReport", Ok(input)).unwrap();
+        let PyRep::List(rows) = res else {
+            panic!("expected List");
+        };
+        assert_eq!(rows[0].dict_get("state"), Some(&PyRep::Integer(0)));
+        assert_eq!(rows[1].dict_get("state"), Some(&PyRep::Integer(1)));
+        assert_eq!(rows[2].dict_get("state"), Some(&PyRep::Integer(2)));
+        assert_eq!(rows[2].dict_get("aggressorFactionID"), Some(&PyRep::Integer(500_019)));
+        assert_eq!(rows[2].dict_get("hasFinalEncounter"), Some(&PyRep::Bool(true)));
+        assert_eq!(rows[2].dict_get("effects"), Some(&PyRep::List(Vec::new())));
+    }
+
+    #[test]
+    fn signature_instances_normalize_nested_dungeon_map_to_system_counts() {
+        let input = PyRep::Dict(vec![
+            (
+                PyRep::Integer(30_000_142),
+                PyRep::Dict(vec![
+                    (
+                        PyRep::Integer(100),
+                        PyRep::List(vec![PyRep::Integer(1), PyRep::Integer(2)]),
+                    ),
+                    (PyRep::Integer(101), PyRep::List(vec![PyRep::Integer(3)])),
+                ]),
+            ),
+            (PyRep::Integer(30_002_187), PyRep::Dict(Vec::new())),
+        ]);
+        let res = normalize_macho_rpc_reply(
+            "dungeonInstanceCacheMgr",
+            "GetSignatureInstances",
+            Ok(input),
+        )
+        .unwrap();
+        let PyRep::Dict(entries) = res else {
+            panic!("expected Dict");
+        };
+        let by_sys: HashMap<i64, i64> = entries
+            .into_iter()
+            .filter_map(|(k, v)| Some((k.as_i64()?, v.as_i64()?)))
+            .collect();
+        assert_eq!(by_sys.get(&30_000_142), Some(&3));
+        assert_eq!(by_sys.get(&30_002_187), Some(&0));
     }
 }

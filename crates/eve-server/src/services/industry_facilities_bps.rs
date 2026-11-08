@@ -425,6 +425,7 @@ pub fn build_facility_pyrep(
         .get(&sys_id)
         .map(|s| s.security_status)
         .unwrap_or(1.0);
+    let supports_reactions = matches!(type_id, 35835 | 35836) && sec < 0.45;
     let mut acts = vec![
         PyRep::Integer(1),
         PyRep::Integer(3),
@@ -432,9 +433,42 @@ pub fn build_facility_pyrep(
         PyRep::Integer(5),
         PyRep::Integer(8),
     ];
-    if matches!(type_id, 35835 | 35836) && sec < 0.45 {
+    if supports_reactions {
         acts.push(PyRep::Integer(9));
     }
+    let tax_for_act = |act: u8| taxes.get(&act).copied().unwrap_or(mfg_tax);
+    let mut service_access = vec![
+        (PyRep::Integer(20), PyRep::Real(tax_for_act(1))),
+        (PyRep::Integer(21), PyRep::Real(tax_for_act(1))),
+        (PyRep::Integer(22), PyRep::Real(tax_for_act(1))),
+        (PyRep::Integer(23), PyRep::Real(tax_for_act(4))),
+        (PyRep::Integer(24), PyRep::Real(tax_for_act(3))),
+        (PyRep::Integer(25), PyRep::Real(tax_for_act(5))),
+        (PyRep::Integer(26), PyRep::Real(tax_for_act(8))),
+        (PyRep::Integer(30), PyRep::Real(tax_for_act(3))),
+        (PyRep::Integer(31), PyRep::Real(tax_for_act(4))),
+        (PyRep::Integer(32), PyRep::Real(tax_for_act(5))),
+        (PyRep::Integer(33), PyRep::Real(tax_for_act(8))),
+        (PyRep::Integer(34), PyRep::Real(tax_for_act(8))),
+    ];
+    if supports_reactions {
+        for sid in [27_i64, 28, 29, 40, 41, 42, 43] {
+            service_access.push((PyRep::Integer(sid), PyRep::Real(tax_for_act(9))));
+        }
+    }
+    let sys_sci_entries: Vec<(PyRep, PyRep)> = [1_u8, 3, 4, 5, 8, 9, 11]
+        .into_iter()
+        .map(|act| {
+            (
+                PyRep::Integer(i64::from(act)),
+                PyRep::Real(compute_canonical_system_cost_index(ctx, snap, sys_id, act)),
+            )
+        })
+        .collect();
+    let global_modifiers = PyRep::Dict(vec![
+        (PyRep::String("faction".into()), PyRep::Real(1.0)),
+        (PyRep::String("system".into()), PyRep::Dict(sys_sci_entries)),
+    ]);
     let online = is_structure_industry_service_online(snap, facility_id, 1);
     Some(PyRep::keyval([
         ("facilityID", PyRep::Integer(facility_id)),
@@ -444,6 +478,10 @@ pub fn build_facility_pyrep(
         ("regionID", PyRep::Integer(region_id as i64)),
         ("tax", PyRep::Real(mfg_tax)),
         ("taxRates", tax_kv),
+        ("serviceAccess", PyRep::Dict(service_access)),
+        ("sccTaxModifier", PyRep::Real(1.0)),
+        ("rigModifiers", PyRep::Dict(Vec::new())),
+        ("globalModifiers", global_modifiers),
         ("online", PyRep::Bool(online)),
         ("materialMultiplier", PyRep::Real(mat_mod * (1.0 - rig_mat))),
         ("timeMultiplier", PyRep::Real(time_mod)),

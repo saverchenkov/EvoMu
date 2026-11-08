@@ -369,47 +369,22 @@ async fn handle_get_full_state(
     let (sigs, anomalies) = ensure_system_signatures_and_anomalies(ctx, sys_id).await;
     let anom_entries: Vec<(PyRep, PyRep)> = anomalies
         .into_iter()
-        .enumerate()
-        .map(|(idx, a)| {
-            let pos = PyRep::Tuple(vec![
-                PyRep::Real(a.position[0]),
-                PyRep::Real(a.position[1]),
-                PyRep::Real(a.position[2]),
-            ]);
-            let val = PyRep::Tuple(vec![
-                PyRep::Integer((idx as i64) + 1),
-                PyRep::String(a.anomaly_id.clone()),
-                pos,
-                PyRep::Integer(1),
-                PyRep::Integer(1),
-                PyRep::Integer(885),
-            ]);
-            (PyRep::String(a.anomaly_id), val)
+        .map(|a| {
+            let kv = crate::services::fleet_social::fleet_social_scanning::build_signal_tracker_anomaly_kv(&a);
+            (PyRep::String(a.anomaly_id), kv)
         })
         .collect();
     let sig_entries: Vec<(PyRep, PyRep)> = sigs
         .into_iter()
-        .enumerate()
-        .map(|(idx, s)| {
+        .map(|mut s| {
             let eff_strength = if is_gm {
                 1.0
             } else {
                 ctx.effective_signature_signal_strength(char_id, sys_id, &s)
             };
-            let coords = if eff_strength >= 1.0 { s.position } else { [0.0, 0.0, 0.0] };
-            let pos = PyRep::Tuple(vec![
-                PyRep::Real(coords[0]),
-                PyRep::Real(coords[1]),
-                PyRep::Real(coords[2]),
-            ]);
-            let val = PyRep::Tuple(vec![
-                PyRep::Integer((idx as i64) + 1),
-                PyRep::String(s.signature_id.clone()),
-                pos,
-                PyRep::Integer(if eff_strength >= 1.0 { 1 } else { 0 }),
-                PyRep::Integer(if eff_strength >= 0.25 { 502 } else { 0 }),
-            ]);
-            (PyRep::String(s.signature_id), val)
+            s.signal_strength = eff_strength;
+            let kv = crate::services::fleet_social::fleet_social_scanning::build_signal_tracker_signature_kv(&ctx.sde, &s);
+            (PyRep::String(s.signature_id), kv)
         })
         .collect();
     Some(Ok(PyRep::Tuple(vec![

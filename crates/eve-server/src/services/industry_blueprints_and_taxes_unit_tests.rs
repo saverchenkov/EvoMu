@@ -242,7 +242,20 @@ fn facility_manager_limits_locations_and_set_facility_taxes_dict_keyval_and_role
         &kw,
     )
     .unwrap();
-    assert!(matches!(by_id, PyRep::List(ref l) if l.len() == 2));
+    let PyRep::List(ref fac_items) = by_id else {
+        panic!("expected List from GetFacilitiesByID");
+    };
+    assert_eq!(fac_items.len(), 2);
+    for fac in fac_items {
+        assert!(matches!(fac.dict_get("serviceAccess"), Some(PyRep::Dict(_))));
+        assert_eq!(fac.dict_get("sccTaxModifier"), Some(&PyRep::Real(1.0)));
+        assert!(matches!(fac.dict_get("rigModifiers"), Some(PyRep::Dict(_))));
+        let Some(PyRep::Dict(gm)) = fac.dict_get("globalModifiers") else {
+            panic!("expected globalModifiers dict");
+        };
+        assert!(gm.iter().any(|(k, _)| k.as_str() == Some("faction")));
+        assert!(gm.iter().any(|(k, v)| k.as_str() == Some("system") && matches!(v, PyRep::Dict(_))));
+    }
 
     let locs_list = call_ind_bps(
         &ctx,

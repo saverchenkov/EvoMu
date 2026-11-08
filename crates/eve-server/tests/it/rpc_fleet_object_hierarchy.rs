@@ -619,3 +619,83 @@ async fn test_fleet_object_membership_invites_and_roster() {
         assert!(!fleet.member_details.contains_key(&PILOT2));
     });
 }
+
+#[tokio::test]
+async fn test_create_fleet_returns_bound_moniker_for_live_machonet_client() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let mut sess1 = setup_pilot(&ctx, 1003, "demo", "demo-secret", PILOT1).await;
+    let empty = HashMap::new();
+
+    // Wire client (`machoNet:26000`) expects a bound SubStruct/SubStream moniker object, not raw int
+    let wire_rep = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            SERVICE,
+            None,
+            "CreateFleet",
+            &[],
+            &empty,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("CreateFleet on machoNet:26000");
+
+    let PyRep::SubStruct(inner) = wire_rep else {
+        panic!("expected SubStruct bound object ref, got {wire_rep:?}");
+    };
+    let PyRep::SubStream(payload) = *inner else {
+        panic!("expected SubStream inside SubStruct");
+    };
+    let PyRep::Tuple(parts) = *payload else {
+        panic!("expected (oid_bytes, ref_id) tuple inside SubStream");
+    };
+    let oid_bytes = match &parts[0] {
+        PyRep::Bytes(b) => std::str::from_utf8(b).expect("utf8 oid"),
+        PyRep::String(s) => s.as_str(),
+        other => panic!("unexpected oid representation {other:?}"),
+    };
+    let bound_id: u64 = oid_bytes
+        .split(':')
+        .last()
+        .and_then(|s| s.parse().ok())
+        .expect("numeric boundID in N=<node>:<boundID>");
+
+    // Subsequent bound calls on the returned bound object ID must succeed
+    let fleet_id_rep = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            SERVICE,
+            Some(bound_id),
+            "GetFleetID",
+            &[],
+            &empty,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("GetFleetID on bound fleetObjectHandler");
+    assert_eq!(fleet_id_rep, PyRep::Integer(sess1.fleet_id.unwrap()));
+
+    let init_state = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            SERVICE,
+            Some(bound_id),
+            "GetInitState",
+            &[],
+            &empty,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("GetInitState on bound fleetObjectHandler");
+    assert_eq!(init_state.dict_get("fleetID"), Some(&fleet_id_rep));
+
+    // Contrast: JSON/internal caller (`None`) still receives plain integer fleet_id
+    let mut sess2 = setup_pilot(&ctx, 1004, "other", "other-secret", PILOT2).await;
+    let plain_rep = ctx
+        .dispatch_rpc(&mut sess2, SERVICE, None, "CreateFleet", &[], &empty, None)
+        .await
+        .expect("CreateFleet for internal caller");
+    assert!(matches!(plain_rep, PyRep::Integer(_)));
+}

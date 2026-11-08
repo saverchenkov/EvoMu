@@ -452,6 +452,16 @@ fn deadspace_maps_incursions_extra_info_and_history_stat_types_cover_all_branche
         .unwrap();
     assert!(format!("{inc_rep:?}").contains("Kimotoro"));
     assert!(!format!("{inc_rep:?}").contains("Okomon"));
+    let PyRep::List(ref inc_rows) = inc_rep else {
+        panic!("expected List for GetIncursionGlobalReport");
+    };
+    let kimo = inc_rows
+        .iter()
+        .find(|r| r.dict_get("constellationName").and_then(|v| v.as_str()) == Some("Kimotoro"))
+        .expect("Kimotoro report row");
+    assert_eq!(kimo.dict_get("aggressorFactionID"), Some(&PyRep::Integer(500_019)));
+    assert_eq!(kimo.dict_get("hasFinalEncounter"), Some(&PyRep::Bool(true)));
+    assert_eq!(kimo.dict_get("effects"), Some(&PyRep::List(Vec::new())));
 
     let inc_sys = call_map_rpc(&ctx, &session, "GetSystemsInIncursions", &[])
         .unwrap()

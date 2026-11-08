@@ -328,7 +328,60 @@ async fn activate_scan_probe_launcher_and_scan_mgr_rpcs_end_to_end() {
     .await
     .unwrap()
     .expect("GetFullState");
-    assert!(matches!(full_state, PyRep::Tuple(_)));
+    let PyRep::Tuple(state_parts) = full_state else {
+        panic!("expected 4-tuple from GetFullState");
+    };
+    assert_eq!(state_parts.len(), 4);
+    let PyRep::Dict(anom_dict) = &state_parts[0] else {
+        panic!("expected anomaly dict");
+    };
+    assert!(
+        !anom_dict.is_empty(),
+        "seeded system should include anomalies in GetFullState"
+    );
+    for (_, val) in anom_dict {
+        assert!(matches!(val, PyRep::KeyVal(_)), "anomaly entry must be KeyVal");
+        for req_key in [
+            "instanceID",
+            "position",
+            "targetID",
+            "difficulty",
+            "dungeonID",
+            "archetypeID",
+            "dungeonNameID",
+            "factionID",
+            "scanStrengthAttribute",
+            "allowedTypes",
+        ] {
+            assert!(
+                val.dict_get(req_key).is_some(),
+                "anomaly KeyVal missing required V24 field `{req_key}`"
+            );
+        }
+    }
+    let PyRep::Dict(sig_dict) = &state_parts[1] else {
+        panic!("expected signature dict");
+    };
+    assert!(
+        !sig_dict.is_empty(),
+        "seeded system should include signatures in GetFullState"
+    );
+    for (_, val) in sig_dict {
+        assert!(matches!(val, PyRep::KeyVal(_)), "signature entry must be KeyVal");
+        for req_key in [
+            "position",
+            "targetID",
+            "difficulty",
+            "dungeonID",
+            "archetypeID",
+            "deviation",
+        ] {
+            assert!(
+                val.dict_get(req_key).is_some(),
+                "signature KeyVal missing required V24 field `{req_key}`"
+            );
+        }
+    }
 
     let act_state = handle_scan_and_wormhole_extras(
         &ctx,
