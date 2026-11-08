@@ -471,3 +471,79 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn save_flag_deep_clone_retention_rejects_amplification() {
+    use crate::marshal::{MarshalOpcode, MARSHAL_HEADER_BYTE, SAVE_FLAG};
+
+    // 1. 62 nested `SAVE_FLAG | PyOneTuple` wrappers retain O(N^2) cloned AST nodes in `saved_slots`,
+    //    which must be charged against `remaining_budget` (rejecting at bounded budgets).
+    let mut payload_one = vec![MARSHAL_HEADER_BYTE];
+    payload_one.extend_from_slice(&62u32.to_le_bytes()); // save_count = 62
+    for _ in 0..62 {
+        payload_one.push((MarshalOpcode::PyOneTuple as u8) | SAVE_FLAG);
+    }
+    payload_one.push(MarshalOpcode::PyNone as u8);
+    for idx in 1u32..=62u32 {
+        payload_one.extend_from_slice(&idx.to_le_bytes());
+    }
+    assert_eq!(
+        decode_with_limits(&payload_one, MAX_FRAME_SIZE, 1_000),
+        Err(ProtoError::NodeBudgetExceeded)
+    );
+
+    // 2. `SAVE_FLAG | PyTwoTuple` with back-references (`PySavedStreamElement`) produces exponential
+    //    O(2^k) clone retention in `saved_slots` using < 64 save slots; must trigger
+    //    NodeBudgetExceeded well within pre-auth and default post-auth limits.
+    let mut dag_payload = vec![MARSHAL_HEADER_BYTE];
+    dag_payload.extend_from_slice(&24u32.to_le_bytes());
+    dag_payload.push(MarshalOpcode::PyTuple as u8);
+    dag_payload.push(24);
+    dag_payload.push((MarshalOpcode::PyNone as u8) | SAVE_FLAG); // slot 1
+    for prev_slot in 1u8..=23u8 {
+        dag_payload.push((MarshalOpcode::PyTwoTuple as u8) | SAVE_FLAG);
+        dag_payload.push(MarshalOpcode::PySavedStreamElement as u8);
+        dag_payload.push(prev_slot);
+        dag_payload.push(MarshalOpcode::PySavedStreamElement as u8);
+        dag_payload.push(prev_slot);
+    }
+    for idx in 1u32..=24u32 {
+        dag_payload.extend_from_slice(&idx.to_le_bytes());
+    }
+    assert_eq!(
+        decode_with_limits(&dag_payload, 64 * 1024, 4_096),
+        Err(ProtoError::NodeBudgetExceeded)
+    );
+    assert_eq!(
+        decode_with_limits(&dag_payload, MAX_FRAME_SIZE, MAX_DECODED_NODES),
+        Err(ProtoError::NodeBudgetExceeded)
+    );
+    assert_eq!(decode(&dag_payload), Err(ProtoError::NodeBudgetExceeded));
+
+    // 3. `util.Row` fast path (`SAVE_FLAG | PyObjectEx2`) also clones into `saved_slots` and must
+    //    charge `val.node_count().saturating_sub(1)` against `remaining_budget`.
+    let row_rep = PyRep::Object {
+        type_name: "util.Row".into(),
+        args: Box::new(PyRep::Tuple(vec![PyRep::None; 4])),
+    };
+    let mut row_payload = encode(&row_rep);
+    row_payload[1..5].copy_from_slice(&1u32.to_le_bytes());
+    row_payload[5] |= SAVE_FLAG; // set SAVE_FLAG on root PyObjectEx2
+    row_payload.extend_from_slice(&1u32.to_le_bytes());
+    let no_save_row = encode(&row_rep);
+    let min_no_save_budget = (1usize..64)
+        .find(|&b| decode_with_limits(&no_save_row, MAX_FRAME_SIZE, b).is_ok())
+        .expect("row without SAVE_FLAG must decode within 64 nodes");
+    assert_eq!(
+        decode_with_limits(&row_payload, MAX_FRAME_SIZE, min_no_save_budget),
+        Err(ProtoError::NodeBudgetExceeded)
+    );
+    assert_eq!(
+        decode_with_limits(
+            &row_payload,
+            MAX_FRAME_SIZE,
+            min_no_save_budget + row_rep.node_count() - 1
+        ),
+        Ok(row_rep)
+    );
+}

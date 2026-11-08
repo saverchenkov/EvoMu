@@ -984,16 +984,18 @@ fn decode_inner(
                             if ctor_args.len() == 1
                                 && ctor_args[0] == PyRep::Token(V24_ROW_CLASS.into())
                             {
-                                return Ok({
-                                    let val = PyRep::Object {
-                                        type_name: "util.Row".into(),
-                                        args: Box::new(h_items[1].clone()),
-                                    };
-                                    if let Some(slot_idx) = storage_index {
-                                        saved_slots[slot_idx] = Some(val.clone());
-                                    }
-                                    val
-                                });
+                                let val = PyRep::Object {
+                                    type_name: "util.Row".into(),
+                                    args: Box::new(h_items[1].clone()),
+                                };
+                                if let Some(slot_idx) = storage_index {
+                                    let retained = val.node_count().saturating_sub(1);
+                                    *remaining_budget = remaining_budget
+                                        .checked_sub(retained)
+                                        .ok_or(ProtoError::NodeBudgetExceeded)?;
+                                    saved_slots[slot_idx] = Some(val.clone());
+                                }
+                                return Ok(val);
                             }
                         }
                     }
@@ -1073,6 +1075,10 @@ fn decode_inner(
     };
 
     if let Some(slot_idx) = storage_index {
+        let retained = value.node_count().saturating_sub(1);
+        *remaining_budget = remaining_budget
+            .checked_sub(retained)
+            .ok_or(ProtoError::NodeBudgetExceeded)?;
         saved_slots[slot_idx] = Some(value.clone());
     }
 
