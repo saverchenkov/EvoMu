@@ -99,7 +99,7 @@ async fn test_phase_0_s9_service_roles_bitmask_and_production_account_seed() {
         }
     });
 
-    let mut player_stream = TcpStream::connect(addr).await.expect("connect player");
+    let mut player_stream = connect_loopback_with_retry(addr).await;
     let _srv_ver = read_framed_pyrep(&mut player_stream)
         .await
         .unwrap()
@@ -181,7 +181,7 @@ async fn test_phase_0_s9_service_roles_bitmask_and_production_account_seed() {
     drop(player_stream);
 
     // 2. Verify persisted GM/Admin role over native machoNet handshake and inspect decoded SessionInitialStateNotification + SessionChangeNotification payloads
-    let mut gm_stream = TcpStream::connect(addr).await.expect("connect gm");
+    let mut gm_stream = connect_loopback_with_retry(addr).await;
     let _srv_ver = read_framed_pyrep(&mut gm_stream).await.unwrap().unwrap();
     write_framed_pyrep(&mut gm_stream, &VersionExchange::default().to_pyrep())
         .await
@@ -420,11 +420,12 @@ async fn test_phase_0_s9_service_roles_bitmask_and_production_account_seed() {
 }
 
 async fn connect_loopback_with_retry(addr: std::net::SocketAddr) -> TcpStream {
-    for attempt in 0..8 {
+    for attempt in 0u64..10 {
         match tokio::time::timeout(std::time::Duration::from_secs(3), TcpStream::connect(addr)).await {
             Ok(Ok(stream)) => return stream,
-            Ok(Err(_)) | Err(_) if attempt < 7 => {
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            Ok(Err(_)) | Err(_) if attempt < 9 => {
+                let backoff_ms = 25 * (attempt + 1).min(4);
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
             }
             Ok(Err(e)) => panic!("TcpStream::connect({addr}) failed after retries: {e:?}"),
             Err(e) => panic!("TcpStream::connect({addr}) timed out after retries: {e:?}"),
@@ -806,6 +807,7 @@ async fn test_phase_2_esi1_sso_oauth2_pkce_http_server_and_macho_sso_login() {
             });
         }
     });
+    tokio::task::yield_now().await;
 
     // 1. OAuth2 discovery metadata & JWKS endpoint
     let (disc_status, _, disc_json, _) = send_raw_http_request(
@@ -944,7 +946,7 @@ async fn test_phase_2_esi1_sso_oauth2_pkce_http_server_and_macho_sso_login() {
 
     // 5. Authenticate over native machoNet GPSTransport TCP using the SSO JWT (`EVE-SSO-CONNECTION`)
     {
-        let mut s = TcpStream::connect(macho_addr).await.unwrap();
+        let mut s = connect_loopback_with_retry(macho_addr).await;
         let _ = read_framed_pyrep(&mut s).await.unwrap().unwrap();
         write_framed_pyrep(&mut s, &VersionExchange::default().to_pyrep())
             .await

@@ -431,6 +431,16 @@ async fn invbroker_misc_and_encoded_items_decode_item() {
     };
     let char_id = sess.character_id.unwrap_or(90_000_001);
     let wrap_loc = sess.station_id.unwrap_or(60_003_760);
+    let secure_cont_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 340)
+        .expect("secure container type")
+        .type_id;
+    let planet_id = 40_000_006i64;
+    let poco_id = 880_200i64;
+    let spaceport_pin_id = 880_201i64;
     ctx.db.with_mut_snapshot(|s| {
         s.items.insert(
             880_102,
@@ -443,6 +453,58 @@ async fn invbroker_misc_and_encoded_items_decode_item() {
                 quantity: 1,
                 singleton: true,
                 version: 1,
+                ..Default::default()
+            },
+        );
+        s.items.insert(
+            880_103,
+            InventoryItemRecord {
+                item_id: 880_103,
+                type_id: secure_cont_tid,
+                owner_id: char_id,
+                location_id: wrap_loc,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        s.planetary_colonies.insert(
+            (char_id, planet_id),
+            eve_db::PlanetaryColonyRecord {
+                planet_id,
+                owner_id: char_id,
+                solar_system_id: 30_000_142,
+                command_center_level: 1,
+                pins_count: 1,
+                extracted_commodities: HashMap::new(),
+                last_extracted_unix: 1_775_400_000,
+            },
+        );
+        let net = crate::services::industry_pi::PiColonyNetworkState {
+            pins: vec![crate::services::industry_pi::PiPinState {
+                pin_id: spaceport_pin_id,
+                type_id: 2256,
+                latitude: 0.1,
+                longitude: 0.1,
+                contents: HashMap::from([(2268u32, 10)]),
+                ..Default::default()
+            }],
+            cpu_max: 5_000.0,
+            pg_max: 9_000.0,
+            ..Default::default()
+        };
+        crate::services::industry_pi::save_pi_network(s, char_id, planet_id, &net);
+        s.structures.insert(
+            poco_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: poco_id,
+                type_id: 2233,
+                owner_corp_id: sess.corporation_id.unwrap_or(1_000_009),
+                solar_system_id: 30_000_142,
+                name: format!("Orbital:{planet_id}"),
+                state: "ShieldVulnerable".into(),
                 ..Default::default()
             },
         );
@@ -459,12 +521,21 @@ async fn invbroker_misc_and_encoded_items_decode_item() {
         ("invbroker", "GetAssetWorth", vec![]),
         ("invbroker", "GetPriceForItems", vec![PyRep::List(vec![PyRep::Integer(100_000_001)])]),
         ("invbroker", "HasExistingPasswordSet", vec![PyRep::Integer(880_100), PyRep::Integer(1)]),
-        ("invbroker", "ImportExportWithPlanet", vec![]),
+        (
+            "invbroker",
+            "ImportExportWithPlanet",
+            vec![
+                PyRep::Integer(poco_id),
+                PyRep::Integer(spaceport_pin_id),
+                PyRep::Dict(Vec::new()),
+                PyRep::Dict(vec![(PyRep::Integer(2268), PyRep::Integer(2))]),
+            ],
+        ),
         ("invbroker", "ListIncludingContainers", vec![PyRep::Integer(60_003_760)]),
         ("invbroker", "ListStationItems", vec![PyRep::Integer(60_003_760)]),
         ("invbroker", "ListStations", vec![]),
         ("invbroker", "Reprocess", vec![]),
-        ("invbroker", "RetrievePassword", vec![]),
+        ("invbroker", "RetrievePassword", vec![PyRep::Integer(880_103), PyRep::Integer(1)]),
         ("encodedItems", "DecodeItem", vec![PyRep::String("100000001:587".into())]),
     ] {
         let res = handle_containers_ships_and_fitting(

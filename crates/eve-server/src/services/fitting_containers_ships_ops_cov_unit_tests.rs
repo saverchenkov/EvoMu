@@ -242,13 +242,171 @@ async fn ext_tail_covers_invbroker_item_locking_and_encoded_items() {
             .expect("has pw"),
         PyRep::Bool(false)
     );
+    // ImportExportWithPlanet rejects empty / missing pin args
+    let pi_err = handle_ext_tail(&ctx, &mut sess, None, "invbroker", "ImportExportWithPlanet", &[], &kw)
+        .await
+        .expect("handled")
+        .expect_err("empty PI transfer rejected");
+    assert_eq!(pi_err.code, "PinNotFound");
+
+    // Seed POCO + colony + launchpad + cargo for real ImportExportWithPlanet transfer + tax check
+    let planet_id = 40_000_005i64;
+    let poco_id = 97_200_301i64;
+    let spaceport_pin_id = 500_101i64;
+    let poco_cargo_item_id = 97_200_302i64;
+    let secure_cont_id = 97_200_303i64;
+    let secure_cont_type_id = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 340)
+        .expect("secure container type in canonical SDE")
+        .type_id;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = eve_db::IskCents(1_000_000_00);
+        }
+        snap.structures.insert(
+            poco_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: poco_id,
+                type_id: 2233,
+                owner_corp_id: 1_000_009,
+                solar_system_id: 30_000_142,
+                name: format!("Orbital:{planet_id}"),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        crate::services::industry_pi::save_orbital_settings(
+            snap,
+            poco_id,
+            &crate::services::industry_pi::OrbitalCustomsSettings {
+                planet_id,
+                orbital_type_id: 2233,
+                owner_corp_id: 1_000_009,
+                corporation_tax_rate: 0.05,
+                alliance_tax_rate: 0.05,
+                standing_high_tax_rate: 0.02,
+                standing_good_tax_rate: 0.05,
+                standing_neutral_tax_rate: 0.10,
+                allow_alliance: true,
+                allow_standings: true,
+                minimum_standing: -10.0,
+                ..Default::default()
+            },
+        );
+        snap.planetary_colonies.insert(
+            (char_id, planet_id),
+            eve_db::PlanetaryColonyRecord {
+                planet_id,
+                owner_id: char_id,
+                solar_system_id: 30_000_142,
+                command_center_level: 2,
+                pins_count: 1,
+                extracted_commodities: HashMap::new(),
+                last_extracted_unix: 1_775_400_000,
+            },
+        );
+        let net = crate::services::industry_pi::PiColonyNetworkState {
+            pins: vec![crate::services::industry_pi::PiPinState {
+                pin_id: spaceport_pin_id,
+                type_id: 2256,
+                latitude: 0.1,
+                longitude: 0.2,
+                contents: HashMap::from([(2268u32, 20)]),
+                ..Default::default()
+            }],
+            cpu_max: 5_000.0,
+            pg_max: 9_000.0,
+            ..Default::default()
+        };
+        crate::services::industry_pi::save_pi_network(snap, char_id, planet_id, &net);
+        snap.items.insert(
+            poco_cargo_item_id,
+            InventoryItemRecord {
+                item_id: poco_cargo_item_id,
+                type_id: 2268,
+                owner_id: char_id,
+                location_id: poco_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 15,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            secure_cont_id,
+            InventoryItemRecord {
+                item_id: secure_cont_id,
+                type_id: secure_cont_type_id,
+                owner_id: char_id,
+                location_id: 60_003_760,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        let mut st = crate::services::fitting_containers_ships::read_container_ship_state_snap(snap);
+        st.set_container_password(secure_cont_id, 1, "open-sesame".to_string());
+        crate::services::fitting_containers_ships::save_container_ship_state_snap(
+            snap,
+            ctx.now_unix(),
+            &st,
+        );
+    });
+
+    let poco_bound = BoundObjectEntry {
+        bound_id: 77,
+        session_id: sess.session_id,
+        user_id: 1,
+        character_id: char_id,
+        service: "invbroker".into(),
+        object_id: poco_id,
+        oid_str: format!("N=1:{poco_id}"),
+        ref_id: 77,
+    };
+    let bal_before = ctx.db.with_snapshot(|s| s.characters[&char_id].balance.0);
     assert_eq!(
-        handle_ext_tail(&ctx, &mut sess, None, "invbroker", "ImportExportWithPlanet", &[], &kw)
-            .await
-            .expect("handled")
-            .expect("pi"),
+        handle_ext_tail(
+            &ctx,
+            &mut sess,
+            Some(&poco_bound),
+            "invbroker",
+            "ImportExportWithPlanet",
+            &[
+                PyRep::Integer(spaceport_pin_id),
+                PyRep::Dict(vec![(PyRep::Integer(poco_cargo_item_id), PyRep::Integer(5))]),
+                PyRep::Dict(vec![(PyRep::Integer(2268), PyRep::Integer(10))]),
+                PyRep::Real(0.05),
+            ],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect("pi transfer"),
         PyRep::None
     );
+    ctx.db.with_snapshot(|s| {
+        // Started at 15, imported 5 (-> 10), then exported 10 merged into same POCO stack (-> 20)
+        assert_eq!(s.items.get(&poco_cargo_item_id).map(|i| i.quantity), Some(20));
+        let total_poco_qty: i64 = s
+            .items
+            .values()
+            .filter(|i| i.location_id == poco_id && i.owner_id == char_id && i.type_id == 2268)
+            .map(|i| i64::from(i.quantity))
+            .sum();
+        assert_eq!(total_poco_qty, 20);
+        let net = crate::services::industry_pi::load_pi_network(s, char_id, planet_id, 2);
+        let pad = net.pins.iter().find(|p| p.pin_id == spaceport_pin_id).unwrap();
+        // Started with 20, imported +5, exported -10 -> 15 left on pad
+        assert_eq!(pad.contents.get(&2268).copied(), Some(15));
+        assert!(s.characters[&char_id].balance.0 < bal_before);
+    });
+
     assert_eq!(
         handle_ext_tail(&ctx, &mut sess, None, "invbroker", "Reprocess", &[], &kw)
             .await
@@ -256,15 +414,67 @@ async fn ext_tail_covers_invbroker_item_locking_and_encoded_items() {
             .expect("reprocess"),
         PyRep::List(Vec::new())
     );
+
+    // RetrievePassword: empty args error, non-container error, unset slot None, valid slot string + audit log
+    let rp_empty = handle_ext_tail(&ctx, &mut sess, None, "invbroker", "RetrievePassword", &[], &kw)
+        .await
+        .expect("handled")
+        .expect_err("empty RetrievePassword rejected");
+    assert_eq!(rp_empty.code, "InvalidArguments");
+    let rp_ship = handle_ext_tail(
+        &ctx,
+        &mut sess,
+        None,
+        "invbroker",
+        "RetrievePassword",
+        &[PyRep::Integer(ship_id), PyRep::Integer(1)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("ship does not support container password");
+    assert_eq!(rp_ship.code, "ContainerDoesNotSupportPassword");
     assert_eq!(
-        handle_ext_tail(&ctx, &mut sess, None, "invbroker", "RetrievePassword", &[], &kw)
-            .await
-            .expect("handled")
-            .expect("ret pw"),
+        handle_ext_tail(
+            &ctx,
+            &mut sess,
+            None,
+            "invbroker",
+            "RetrievePassword",
+            &[PyRep::Integer(secure_cont_id), PyRep::Integer(2)],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect("unset config password"),
         PyRep::None
     );
+    assert_eq!(
+        handle_ext_tail(
+            &ctx,
+            &mut sess,
+            None,
+            "invbroker",
+            "RetrievePassword",
+            &[PyRep::Integer(secure_cont_id), PyRep::Integer(1)],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect("ret pw"),
+        PyRep::String("open-sesame".into())
+    );
+    ctx.db.with_snapshot(|s| {
+        let st = crate::services::fitting_containers_ships::read_container_ship_state_snap(s);
+        assert!(st.unlocked_containers.contains(&(secure_cont_id, char_id)));
+        assert!(
+            st.alsc_logs
+                .get(&secure_cont_id)
+                .is_some_and(|logs| logs.iter().any(|l| l.action == "ALSCActionRetrievePassword"))
+        );
+    });
 
-    // ListIncludingContainers & ListStations
+    // ListIncludingContainers & ListStations (including OF-33 empty-station CRowset check)
     let listed = handle_ext_tail(
         &ctx,
         &mut sess,
@@ -283,7 +493,17 @@ async fn ext_tail_covers_invbroker_item_locking_and_encoded_items() {
         .await
         .expect("handled")
         .expect("stations");
-    assert!(matches!(stations, PyRep::Rowset { .. }));
+    assert!(matches!(stations, PyRep::Rowset { ref rows, .. } if !rows.is_empty()));
+
+    let mut empty_sess = SessionState::new(97_199);
+    empty_sess.user_id = Some(999);
+    empty_sess.character_id = Some(90_999_999);
+    empty_sess.corporation_id = Some(1_000_009);
+    let empty_stations = handle_ext_tail(&ctx, &mut empty_sess, None, "invbroker", "ListStations", &[], &kw)
+        .await
+        .expect("handled")
+        .expect("empty stations");
+    assert!(matches!(empty_stations, PyRep::Rowset { ref rows, .. } if rows.is_empty()));
 
     // itemLocking
     let locked_locs = handle_ext_tail(

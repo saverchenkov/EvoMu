@@ -80,7 +80,7 @@ async fn call_login(
 
 fn call_cluster(
     ctx: &ServerContext,
-    sess: &SessionState,
+    sess: &mut SessionState,
     svc: &str,
     method: &str,
     args: &[PyRep],
@@ -263,64 +263,64 @@ fn cluster_mgmt_load_session_db2_debug_and_machonet_lifecycle() {
     let mut gm_sess = make_session(Some(1), Some(90_000_001), ROLE_GML, 202);
     let kw = HashMap::new();
 
-    assert_eq!(call_cluster(&ctx, &user_sess, "externalQueueMgr", "PublishProxyEvent", &[], &kw).unwrap(), PyRep::None);
-    assert!(call_cluster(&ctx, &user_sess, "tcpRawProxyService", "GetESPTunnelingAddressByNodeID", &[PyRep::Integer(1)], &kw).is_ok());
-    assert_eq!(call_cluster(&ctx, &user_sess, "machoNet", "GetEjabberdAddress", &[], &kw).unwrap(), PyRep::String("127.0.0.1".into()));
-    assert!(dict_get(&call_cluster(&ctx, &user_sess, "machoNet", "GetGlobalConfig", &[], &kw).unwrap(), "clusterName").is_some());
+    assert_eq!(call_cluster(&ctx, &mut user_sess, "externalQueueMgr", "PublishProxyEvent", &[], &kw).unwrap(), PyRep::None);
+    assert!(call_cluster(&ctx, &mut user_sess, "tcpRawProxyService", "GetESPTunnelingAddressByNodeID", &[PyRep::Integer(1)], &kw).is_ok());
+    assert_eq!(call_cluster(&ctx, &mut user_sess, "machoNet", "GetEjabberdAddress", &[], &kw).unwrap(), PyRep::String("127.0.0.1".into()));
+    assert!(dict_get(&call_cluster(&ctx, &mut user_sess, "machoNet", "GetGlobalConfig", &[], &kw).unwrap(), "clusterName").is_some());
 
     // Role gates
-    assert!(call_cluster(&ctx, &user_sess, "loadService", "StartLoad", &[PyRep::Integer(50)], &kw).is_err());
-    assert!(call_cluster(&ctx, &user_sess, "machoNet", "GetMetrics", &[], &kw).is_err());
-    assert!(call_cluster(&ctx, &user_sess, "debug", "Exec", &[PyRep::String("status".into())], &kw).is_err());
+    assert!(call_cluster(&ctx, &mut user_sess, "loadService", "StartLoad", &[PyRep::Integer(50)], &kw).is_err());
+    assert!(call_cluster(&ctx, &mut user_sess, "machoNet", "GetMetrics", &[], &kw).is_err());
+    assert!(call_cluster(&ctx, &mut user_sess, "debug", "Exec", &[PyRep::String("status".into())], &kw).is_err());
 
     // GM loadService clamping + config
-    assert!(call_cluster(&ctx, &gm_sess, "loadService", "StartLoad", &[PyRep::Real(150.0)], &kw).is_ok());
-    assert!(call_cluster(&ctx, &gm_sess, "loadService", "StopLoad", &[], &kw).is_ok());
-    assert!(call_cluster(&ctx, &gm_sess, "loadService", "SetConfig", &[PyRep::Dict(vec![(PyRep::String("tickHz".into()), PyRep::Integer(20))])], &kw).is_ok());
-    assert!(call_cluster(&ctx, &gm_sess, "loadService", "GetTotalStats", &[], &kw).is_ok());
+    assert!(call_cluster(&ctx, &mut gm_sess, "loadService", "StartLoad", &[PyRep::Real(150.0)], &kw).is_ok());
+    assert!(call_cluster(&ctx, &mut gm_sess, "loadService", "StopLoad", &[], &kw).is_ok());
+    assert!(call_cluster(&ctx, &mut gm_sess, "loadService", "SetConfig", &[PyRep::Dict(vec![(PyRep::String("tickHz".into()), PyRep::Integer(20))])], &kw).is_ok());
+    assert!(call_cluster(&ctx, &mut gm_sess, "loadService", "GetTotalStats", &[], &kw).is_ok());
 
     // SetConnectionProperty + GracefulShutdown + TerminateAllClients + ReloadClientCodeHash
-    assert!(call_cluster(&ctx, &gm_sess, "machoNet", "SetConnectionProperty", &[PyRep::String("badProp".into()), PyRep::Integer(1)], &kw).is_err());
-    assert!(call_cluster(&ctx, &gm_sess, "machoNet", "SetConnectionProperty", &[PyRep::String("clusterName".into()), PyRep::String("SINGULARITY".into())], &kw).is_ok());
-    assert_eq!(call_cluster(&ctx, &user_sess, "machoNet", "GetConnectedClusterName", &[], &kw).unwrap(), PyRep::String("SINGULARITY".into()));
-    assert!(!call_cluster(&ctx, &user_sess, "machoNet", "GetConnectedClusterMode", &[], &kw).unwrap().as_str().unwrap().is_empty());
-    assert!(dict_get(&call_cluster(&ctx, &gm_sess, "machoNet", "GetConnectionProperties", &[], &kw).unwrap(), "clusterName").is_some());
+    assert!(call_cluster(&ctx, &mut gm_sess, "machoNet", "SetConnectionProperty", &[PyRep::String("badProp".into()), PyRep::Integer(1)], &kw).is_err());
+    assert!(call_cluster(&ctx, &mut gm_sess, "machoNet", "SetConnectionProperty", &[PyRep::String("clusterName".into()), PyRep::String("SINGULARITY".into())], &kw).is_ok());
+    assert_eq!(call_cluster(&ctx, &mut user_sess, "machoNet", "GetConnectedClusterName", &[], &kw).unwrap(), PyRep::String("SINGULARITY".into()));
+    assert!(!call_cluster(&ctx, &mut user_sess, "machoNet", "GetConnectedClusterMode", &[], &kw).unwrap().as_str().unwrap().is_empty());
+    assert!(dict_get(&call_cluster(&ctx, &mut gm_sess, "machoNet", "GetConnectionProperties", &[], &kw).unwrap(), "clusterName").is_some());
 
-    assert!(call_cluster(&ctx, &gm_sess, "machoNet", "GracefulShutdown", &[PyRep::Integer(1), PyRep::String("Maint".into()), PyRep::Integer(30), PyRep::Bool(true)], &kw).is_ok());
+    assert!(call_cluster(&ctx, &mut gm_sess, "machoNet", "GracefulShutdown", &[PyRep::Integer(1), PyRep::String("Maint".into()), PyRep::Integer(30), PyRep::Bool(true)], &kw).is_ok());
     assert!(ctx.cluster_state.read().unwrap().shutdown_in_progress);
-    assert!(call_cluster(&ctx, &gm_sess, "machoNet", "GracefulShutdown", &[PyRep::Integer(1), PyRep::String("Cancel".into()), PyRep::Integer(0)], &kw).is_ok());
+    assert!(call_cluster(&ctx, &mut gm_sess, "machoNet", "GracefulShutdown", &[PyRep::Integer(1), PyRep::String("Cancel".into()), PyRep::Integer(0)], &kw).is_ok());
     assert!(!ctx.cluster_state.read().unwrap().shutdown_in_progress);
 
-    assert!(call_cluster(&ctx, &gm_sess, "machoNet", "GracefulShutdownStarted", &[], &kw).is_ok());
-    assert!(call_cluster(&ctx, &gm_sess, "machoNet", "GracefulShutdownComplete", &[PyRep::Integer(7)], &kw).is_ok());
-    assert!(call_cluster(&ctx, &gm_sess, "machoNet", "GracefulShutdownComplete", &[PyRep::Integer(7)], &kw).is_ok());
+    assert!(call_cluster(&ctx, &mut gm_sess, "machoNet", "GracefulShutdownStarted", &[], &kw).is_ok());
+    assert!(call_cluster(&ctx, &mut gm_sess, "machoNet", "GracefulShutdownComplete", &[PyRep::Integer(7)], &kw).is_ok());
+    assert!(call_cluster(&ctx, &mut gm_sess, "machoNet", "GracefulShutdownComplete", &[PyRep::Integer(7)], &kw).is_ok());
     assert_eq!(ctx.cluster_state.read().unwrap().shutdown_complete_nodes, vec![7]);
     assert_eq!(
-        call_cluster(&ctx, &gm_sess, "machoNet", "ReloadClientCodeHash", &[PyRep::String("deadbeef1234".into())], &kw).unwrap(),
+        call_cluster(&ctx, &mut gm_sess, "machoNet", "ReloadClientCodeHash", &[PyRep::String("deadbeef1234".into())], &kw).unwrap(),
         PyRep::String("deadbeef1234".into())
     );
-    assert!(call_cluster(&ctx, &gm_sess, "machoNet", "TerminateAllClients", &[PyRep::String("Reboot".into())], &kw).is_ok());
+    assert!(call_cluster(&ctx, &mut gm_sess, "machoNet", "TerminateAllClients", &[PyRep::String("Reboot".into())], &kw).is_ok());
     assert!(ctx.cluster_state.read().unwrap().clients_terminated);
 
     // sessionMgr & debug.Exec & DB2.CallProc rate-limit
-    assert!(call_cluster(&ctx, &gm_sess, "sessionMgr", "RemoveSessionsFromServer", &[PyRep::Integer(201)], &kw).is_ok());
-    assert!(call_cluster(&ctx, &gm_sess, "sessionMgr", "EndAllGameSessions", &[], &kw).is_ok());
-    assert!(call_cluster(&ctx, &gm_sess, "debug", "Exec", &[PyRep::String("status".into())], &kw).is_err());
+    assert!(call_cluster(&ctx, &mut gm_sess, "sessionMgr", "RemoveSessionsFromServer", &[PyRep::Integer(201)], &kw).is_ok());
+    assert!(call_cluster(&ctx, &mut gm_sess, "sessionMgr", "EndAllGameSessions", &[], &kw).is_ok());
+    assert!(call_cluster(&ctx, &mut gm_sess, "debug", "Exec", &[PyRep::String("status".into())], &kw).is_err());
     gm_sess.role |= ROLE_PROGRAMMER;
-    assert_eq!(list_len(&call_cluster(&ctx, &gm_sess, "debug", "Exec", &[PyRep::String("ping()".into())], &kw).unwrap()), 1);
+    assert_eq!(list_len(&call_cluster(&ctx, &mut gm_sess, "debug", "Exec", &[PyRep::String("ping()".into())], &kw).unwrap()), 1);
 
-    assert!(call_cluster(&ctx, &user_sess, "DB2", "CallProc", &[PyRep::String("zcluster.Nodes_PolarisID".into())], &kw).is_err());
-    assert_eq!(call_cluster(&ctx, &gm_sess, "DB2", "CallProc", &[PyRep::String("zcluster.Nodes_PolarisID".into())], &kw).unwrap(), PyRep::Integer(1));
-    assert!(list_len(&call_cluster(&ctx, &gm_sess, "DB2", "CallProc", &[PyRep::String("zuser.Users_SelectByRole".into())], &kw).unwrap()) >= 1);
+    assert!(call_cluster(&ctx, &mut user_sess, "DB2", "CallProc", &[PyRep::String("zcluster.Nodes_PolarisID".into())], &kw).is_err());
+    assert_eq!(call_cluster(&ctx, &mut gm_sess, "DB2", "CallProc", &[PyRep::String("zcluster.Nodes_PolarisID".into())], &kw).unwrap(), PyRep::Integer(1));
+    assert!(list_len(&call_cluster(&ctx, &mut gm_sess, "DB2", "CallProc", &[PyRep::String("zuser.Users_SelectByRole".into())], &kw).unwrap()) >= 1);
     user_sess.user_id = Some(777);
     for _ in 0..16 {
         assert_eq!(
-            call_cluster(&ctx, &user_sess, "DB2", "CallProc", &[PyRep::String("zcluster.Attacks_Insert".into()), PyRep::String("flood".into())], &kw).unwrap(),
+            call_cluster(&ctx, &mut user_sess, "DB2", "CallProc", &[PyRep::String("zcluster.Attacks_Insert".into()), PyRep::String("flood".into())], &kw).unwrap(),
             PyRep::None
         );
     }
     assert_eq!(
-        call_cluster(&ctx, &user_sess, "DB2", "CallProc", &[PyRep::String("zcluster.Attacks_Insert".into())], &kw).unwrap_err().message,
+        call_cluster(&ctx, &mut user_sess, "DB2", "CallProc", &[PyRep::String("zcluster.Attacks_Insert".into())], &kw).unwrap_err().message,
         "RateLimited"
     );
 }

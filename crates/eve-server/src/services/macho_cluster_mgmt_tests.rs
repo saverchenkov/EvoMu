@@ -73,22 +73,22 @@ fn cluster_queries_metrics_node_lookup_and_load_settings() {
     let ctx = test_ctx();
     reset_cluster_state(&ctx);
     let kw = HashMap::new();
-    let player_sess = SessionState::default();
+    let mut player_sess = SessionState::default();
 
     assert_eq!(
-        handle(&ctx, &player_sess, "machoNet", "GetConnectedClusterMode", &[], &kw)
+        handle(&ctx, &mut player_sess, "machoNet", "GetConnectedClusterMode", &[], &kw)
             .unwrap()
             .unwrap(),
         PyRep::String("LIVE".into())
     );
     assert_eq!(
-        handle(&ctx, &player_sess, "machoNet", "GetConnectedClusterName", &[], &kw)
+        handle(&ctx, &mut player_sess, "machoNet", "GetConnectedClusterName", &[], &kw)
             .unwrap()
             .unwrap(),
         PyRep::String("TRANQUILITY".into())
     );
     assert_eq!(
-        handle(&ctx, &player_sess, "machoNet", "GetEjabberdAddress", &[], &kw)
+        handle(&ctx, &mut player_sess, "machoNet", "GetEjabberdAddress", &[], &kw)
             .unwrap()
             .unwrap(),
         PyRep::String("127.0.0.1".into())
@@ -96,7 +96,7 @@ fn cluster_queries_metrics_node_lookup_and_load_settings() {
     assert_eq!(
         handle(
             &ctx,
-            &player_sess,
+            &mut player_sess,
             "machoNet",
             "GetPolarisExternalTunnelingAddress",
             &[],
@@ -107,12 +107,12 @@ fn cluster_queries_metrics_node_lookup_and_load_settings() {
         PyRep::String("127.0.0.1".into())
     );
 
-    let props = handle(&ctx, &player_sess, "machoNet", "GetConnectionProperties", &[], &kw)
+    let props = handle(&ctx, &mut player_sess, "machoNet", "GetConnectionProperties", &[], &kw)
         .unwrap()
         .unwrap();
     assert!(props.dict_get("vipMode").is_some());
 
-    let global_cfg = handle(&ctx, &player_sess, "machoNet", "GetGlobalConfig", &[], &kw)
+    let global_cfg = handle(&ctx, &mut player_sess, "machoNet", "GetGlobalConfig", &[], &kw)
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -122,7 +122,7 @@ fn cluster_queries_metrics_node_lookup_and_load_settings() {
 
     let node_id = handle(
         &ctx,
-        &player_sess,
+        &mut player_sess,
         "machoNet",
         "GetNodeFromAddress",
         &[PyRep::String("127.0.0.1:26001".into())],
@@ -132,13 +132,13 @@ fn cluster_queries_metrics_node_lookup_and_load_settings() {
     .unwrap();
     assert_eq!(node_id, PyRep::Integer(2));
 
-    let unauth_metrics = handle(&ctx, &player_sess, "machoNet", "GetMetrics", &[], &kw)
+    let unauth_metrics = handle(&ctx, &mut player_sess, "machoNet", "GetMetrics", &[], &kw)
         .unwrap()
         .unwrap_err();
     assert!(unauth_metrics.code.starts_with("Unauth"));
 
-    let admin = gm_session(940_001);
-    let metrics = handle(&ctx, &admin, "machoNet", "GetMetrics", &[], &kw)
+    let mut admin = gm_session(940_001);
+    let metrics = handle(&ctx, &mut admin, "machoNet", "GetMetrics", &[], &kw)
         .unwrap()
         .expect("GM GetMetrics");
     assert!(matches!(metrics, PyRep::List(ref items) if items.len() == 1));
@@ -154,26 +154,26 @@ fn cluster_shutdown_code_reload_and_auxiliary_services() {
 
     // Non-GM rejected on admin endpoints
     assert_eq!(
-        handle(&ctx, &non_gm, "machoNet", "GracefulShutdown", &[], &kw)
+        handle(&ctx, &mut non_gm, "machoNet", "GracefulShutdown", &[], &kw)
             .unwrap()
             .unwrap_err()
             .code,
         "InsufficientRole"
     );
     assert_eq!(
-        handle(&ctx, &non_gm, "machoNet", "ReloadClientCodeHash", &[], &kw)
+        handle(&ctx, &mut non_gm, "machoNet", "ReloadClientCodeHash", &[], &kw)
             .unwrap()
             .unwrap_err()
             .code,
         "UserError"
     );
 
-    let gm = gm_session(940_001);
+    let mut gm = gm_session(940_001);
 
     // GracefulShutdown + GracefulShutdownStarted + GracefulShutdownComplete
     handle(
         &ctx,
-        &gm,
+        &mut gm,
         "machoNet",
         "GracefulShutdown",
         &[
@@ -186,12 +186,12 @@ fn cluster_shutdown_code_reload_and_auxiliary_services() {
     )
     .unwrap()
     .expect("GracefulShutdown");
-    handle(&ctx, &gm, "machoNet", "GracefulShutdownStarted", &[], &kw)
+    handle(&ctx, &mut gm, "machoNet", "GracefulShutdownStarted", &[], &kw)
         .unwrap()
         .expect("GracefulShutdownStarted");
     handle(
         &ctx,
-        &gm,
+        &mut gm,
         "machoNet",
         "GracefulShutdownComplete",
         &[PyRep::Integer(2)],
@@ -208,7 +208,7 @@ fn cluster_shutdown_code_reload_and_auxiliary_services() {
     // TerminateAllClients sets clients_terminated
     handle(
         &ctx,
-        &gm,
+        &mut gm,
         "machoNet",
         "TerminateAllClients",
         &[PyRep::String("Restarting".into())],
@@ -221,7 +221,7 @@ fn cluster_shutdown_code_reload_and_auxiliary_services() {
     // ReloadClientCodeHash updates service_state_blobs
     let hash_rep = handle(
         &ctx,
-        &gm,
+        &mut gm,
         "machoNet",
         "ReloadClientCodeHash",
         &[PyRep::String("deadbeef01020304".into())],
@@ -234,7 +234,7 @@ fn cluster_shutdown_code_reload_and_auxiliary_services() {
     // externalQueueMgr.PublishProxyEvent & tcpRawProxyService.GetESPTunnelingAddressByNodeID
     handle(
         &ctx,
-        &non_gm,
+        &mut non_gm,
         "externalQueueMgr",
         "PublishProxyEvent",
         &[PyRep::String("player.login".into()), PyRep::Integer(940_002)],
@@ -244,7 +244,7 @@ fn cluster_shutdown_code_reload_and_auxiliary_services() {
     .expect("PublishProxyEvent");
     let tunnel = handle(
         &ctx,
-        &non_gm,
+        &mut non_gm,
         "tcpRawProxyService",
         "GetESPTunnelingAddressByNodeID",
         &[],
@@ -258,7 +258,7 @@ fn cluster_shutdown_code_reload_and_auxiliary_services() {
     assert_eq!(
         handle(
             &ctx,
-            &non_gm,
+            &mut non_gm,
             "sessionMgr",
             "ConnectToClientService",
             &[PyRep::String("chat".into())],
@@ -272,7 +272,7 @@ fn cluster_shutdown_code_reload_and_auxiliary_services() {
     assert_eq!(
         handle(
             &ctx,
-            &gm,
+            &mut gm,
             "sessionMgr",
             "ConnectToClientService",
             &[PyRep::String("chat".into())],
@@ -285,19 +285,43 @@ fn cluster_shutdown_code_reload_and_auxiliary_services() {
     assert_eq!(
         handle(
             &ctx,
-            &gm,
+            &mut gm,
             "sessionMgr",
             "UpdateSessionAttributes",
             &[],
             &kw,
         )
         .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidArguments"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut gm,
+            "sessionMgr",
+            "UpdateSessionAttributes",
+            &[PyRep::Dict(vec![
+                (PyRep::String("languageID".into()), PyRep::String("DE".into())),
+                (PyRep::String("warfactionid".into()), PyRep::Integer(500_001)),
+            ])],
+            &kw,
+        )
+        .unwrap()
         .unwrap(),
         PyRep::Bool(true)
     );
+    assert_eq!(gm.language_id, "DE");
+    assert_eq!(gm.war_faction_id, Some(500_001));
+    assert!(
+        gm.drain_notifications()
+            .into_iter()
+            .any(|(ev, _)| ev == "OnSessionChanged")
+    );
     handle(
         &ctx,
-        &gm,
+        &mut gm,
         "sessionMgr",
         "RemoveSessionsFromServer",
         &[PyRep::Integer(1), PyRep::List(vec![PyRep::Integer(999)])],
@@ -309,7 +333,7 @@ fn cluster_shutdown_code_reload_and_auxiliary_services() {
     // loadService.StartLoad + unknown service/method
     handle(
         &ctx,
-        &gm,
+        &mut gm,
         "loadService",
         "StartLoad",
         &[PyRep::Dict(vec![(PyRep::String("ticks".into()), PyRep::Integer(1))])],
@@ -318,8 +342,8 @@ fn cluster_shutdown_code_reload_and_auxiliary_services() {
     .unwrap()
     .expect("StartLoad");
 
-    assert!(handle(&ctx, &gm, "machoNet", "", &[], &kw).is_none());
-    assert!(handle(&ctx, &gm, "unhandledService", "", &[], &kw).is_none());
+    assert!(handle(&ctx, &mut gm, "machoNet", "", &[], &kw).is_none());
+    assert!(handle(&ctx, &mut gm, "unhandledService", "", &[], &kw).is_none());
 }
 
 #[test]
@@ -333,35 +357,35 @@ fn non_gm_permission_checks_and_cluster_property_defaults() {
     let kw = HashMap::new();
 
     // Non-GM callers cannot invoke privileged shutdown/reload/load operations
-    let shutdown_err = handle(&ctx, &non_gm, "machoNet", "GracefulShutdown", &[], &kw)
+    let shutdown_err = handle(&ctx, &mut non_gm, "machoNet", "GracefulShutdown", &[], &kw)
         .unwrap()
         .unwrap_err();
     assert_eq!(shutdown_err.code, "InsufficientRole");
 
-    let reload_err = handle(&ctx, &non_gm, "machoNet", "ReloadClientCodeHash", &[], &kw)
+    let reload_err = handle(&ctx, &mut non_gm, "machoNet", "ReloadClientCodeHash", &[], &kw)
         .unwrap()
         .unwrap_err();
     assert_eq!(reload_err.code, "UserError");
 
-    let load_err = handle(&ctx, &non_gm, "loadService", "StartLoad", &[], &kw)
+    let load_err = handle(&ctx, &mut non_gm, "loadService", "StartLoad", &[], &kw)
         .unwrap()
         .unwrap_err();
     assert_eq!(load_err.code, "UserError");
 
     // Cluster queries succeed for normal authenticated sessions
-    let mode = handle(&ctx, &non_gm, "machoNet", "GetConnectedClusterMode", &[], &kw)
+    let mode = handle(&ctx, &mut non_gm, "machoNet", "GetConnectedClusterMode", &[], &kw)
         .unwrap()
         .expect("GetConnectedClusterMode");
     assert!(mode.as_str().is_some());
 
-    let name = handle(&ctx, &non_gm, "machoNet", "GetConnectedClusterName", &[], &kw)
+    let name = handle(&ctx, &mut non_gm, "machoNet", "GetConnectedClusterName", &[], &kw)
         .unwrap()
         .expect("GetConnectedClusterName");
     assert!(name.as_str().is_some());
 
     let tunnel = handle(
         &ctx,
-        &non_gm,
+        &mut non_gm,
         "machoNet",
         "GetPolarisExternalTunnelingAddress",
         &[],

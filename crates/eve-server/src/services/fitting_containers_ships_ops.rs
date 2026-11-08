@@ -294,12 +294,7 @@ pub(crate) async fn handle_ext_tail(
         }
 
         ("invbroker", "ImportExportWithPlanet") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let _ = ctx.db.get_items_for_character(char_id);
-            Some(Ok(PyRep::None))
+            Some(handle_import_export_with_planet(ctx, session, bound_entry, args, kwargs))
         }
 
         ("invbroker", "ListIncludingContainers") | ("invbroker", "ListStationItems") => {
@@ -340,11 +335,33 @@ pub(crate) async fn handle_ext_tail(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let blueprint_only = args
+                .first()
+                .and_then(|a| a.as_bool().or_else(|| a.as_i64().map(|v| v != 0)))
+                .unwrap_or(false);
+            let is_corp = args
+                .get(1)
+                .and_then(|a| a.as_bool().or_else(|| a.as_i64().map(|v| v != 0)))
+                .unwrap_or(false);
+            let target_owner_id = if is_corp {
+                session.corporation_id.filter(|&cid| cid > 0).unwrap_or(char_id)
+            } else {
+                char_id
+            };
             let rows = ctx.db.with_snapshot(|snap| {
                 let mut counts_by_station: std::collections::BTreeMap<i64, (i64, i64, i64)> =
                     std::collections::BTreeMap::new();
                 for item in snap.items.values() {
-                    if item.owner_id != char_id {
+                    if item.owner_id != target_owner_id {
+                        continue;
+                    }
+                    if blueprint_only
+                        && !ctx
+                            .sde
+                            .types
+                            .get(&item.type_id)
+                            .is_some_and(|t| t.category_id == 9)
+                    {
                         continue;
                     }
                     let loc_id = item.location_id;
@@ -366,17 +383,6 @@ pub(crate) async fn handle_ext_tail(
                             .or_insert((sys_id, 0, st_type_id));
                         entry.1 += 1;
                     }
-                }
-                if counts_by_station.is_empty() {
-                    let st_id = session.station_id.unwrap_or(60_003_760);
-                    let sys_id = i64::from(session.solar_system_id.unwrap_or(30_000_142));
-                    let st_type_id = ctx
-                        .sde
-                        .stations
-                        .get(&st_id)
-                        .map(|s| i64::from(s.station_type_id))
-                        .unwrap_or(1529);
-                    counts_by_station.insert(st_id, (sys_id, 1, st_type_id));
                 }
                 counts_by_station
                     .into_iter()
@@ -406,12 +412,7 @@ pub(crate) async fn handle_ext_tail(
         }
 
         ("invbroker", "RetrievePassword") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let _ = ctx.db.get_items_for_character(char_id);
-            Some(Ok(PyRep::None))
+            Some(handle_retrieve_password(ctx, session, bound_entry, args, kwargs))
         }
 
         ("itemLocking", "GetLockedItemLocations") => {
@@ -521,6 +522,704 @@ pub(crate) async fn handle_ext_tail(
 
         _ => handle_ships_mastery_and_fitting_ext(ctx, session, bound_entry, service, method, args, kwargs).await,
     }
+}
+
+fn parse_pi_xfer_entries(
+    rep: Option<&PyRep>,
+    field_name: &str,
+) -> Result<std::collections::BTreeMap<i64, u64>, BridgeRpcError> {
+    let mut out = std::collections::BTreeMap::new();
+    match rep {
+        None | Some(PyRep::None) => Ok(out),
+        Some(PyRep::Dict(entries)) => {
+            for (k, v) in entries {
+                let key = k.as_i64().filter(|&id| id > 0).ok_or_else(|| BridgeRpcError {
+                    code: "InvalidCommodity".into(),
+                    message: format!("{field_name} keys must be positive integer item/type IDs"),
+                })?;
+                let qty = v.as_i64().filter(|&q| q > 0).ok_or_else(|| BridgeRpcError {
+                    code: "InvalidCommodityQuantity".into(),
+                    message: format!("{field_name} quantities must be positive integers"),
+                })?;
+                let slot = out.entry(key).or_insert(0);
+                *slot = slot.checked_add(qty as u64).ok_or_else(|| BridgeRpcError {
+                    code: "InvalidCommodityQuantity".into(),
+                    message: format!("{field_name} quantity overflow"),
+                })?;
+            }
+            Ok(out)
+        }
+        Some(PyRep::KeyVal(entries)) => {
+            for (k, v) in entries {
+                let key = k.parse::<i64>().ok().filter(|&id| id > 0).ok_or_else(|| BridgeRpcError {
+                    code: "InvalidCommodity".into(),
+                    message: format!("{field_name} keys must be positive integer item/type IDs"),
+                })?;
+                let qty = v.as_i64().filter(|&q| q > 0).ok_or_else(|| BridgeRpcError {
+                    code: "InvalidCommodityQuantity".into(),
+                    message: format!("{field_name} quantities must be positive integers"),
+                })?;
+                let slot = out.entry(key).or_insert(0);
+                *slot = slot.checked_add(qty as u64).ok_or_else(|| BridgeRpcError {
+                    code: "InvalidCommodityQuantity".into(),
+                    message: format!("{field_name} quantity overflow"),
+                })?;
+            }
+            Ok(out)
+        }
+        _ => Err(BridgeRpcError {
+            code: "InvalidTransferArguments".into(),
+            message: format!("{field_name} must be a dict or None"),
+        }),
+    }
+}
+
+fn handle_import_export_with_planet(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    use crate::formulas::compute_poco_export_tax;
+    use crate::services::industry_pi::{
+        is_launchpad_pin, load_orbital_settings, load_pi_network, pi_commodity_tier_base_cost,
+        pin_contents_volume_m3, pin_storage_capacity_m3, resolve_character_orbital_access_and_tax,
+        resolve_orbital_and_planet, save_pi_network,
+    };
+
+    let (_, char_id) = ServerContext::require_character(session)?;
+
+    let (co_id_opt, spaceport_pin_id, import_rep, export_rep) = if args.len() >= 3
+        && args.first().and_then(|a| a.as_i64()).is_some()
+        && args.get(1).and_then(|a| a.as_i64()).is_some()
+        && matches!(
+            args.get(2),
+            Some(PyRep::Dict(_) | PyRep::KeyVal(_) | PyRep::None)
+        ) {
+        (
+            args.first().and_then(|a| a.as_i64()),
+            args.get(1).and_then(|a| a.as_i64()).unwrap_or(0),
+            args.get(2),
+            args.get(3),
+        )
+    } else {
+        (
+            bound_entry
+                .map(|b| b.object_id)
+                .or_else(|| kwargs.get("customsOfficeID").and_then(|v| v.as_i64())),
+            args.first()
+                .and_then(|a| a.as_i64())
+                .or_else(|| kwargs.get("spaceportPinID").and_then(|v| v.as_i64()))
+                .unwrap_or(0),
+            args.get(1).or_else(|| kwargs.get("importData")),
+            args.get(2).or_else(|| kwargs.get("exportData")),
+        )
+    };
+
+    if spaceport_pin_id <= 0 {
+        return Err(BridgeRpcError {
+            code: "PinNotFound".into(),
+            message: "ImportExportWithPlanet requires a valid spaceportPinID".into(),
+        });
+    }
+
+    let import_map = parse_pi_xfer_entries(import_rep, "importData")?;
+    let export_map = parse_pi_xfer_entries(export_rep, "exportData")?;
+    if import_map.is_empty() && export_map.is_empty() {
+        return Err(BridgeRpcError {
+            code: "InvalidTransferArguments".into(),
+            message: "ImportExportWithPlanet requires non-empty importData or exportData".into(),
+        });
+    }
+
+    let current_sys_id = session.solar_system_id;
+    let ship_id_opt = session.ship_id;
+    let notify_loc_id = ctx.db.try_with_mut_snapshot(|snap| -> Result<i64, BridgeRpcError> {
+        let (orbital_id_opt, planet_id) = if let Some(raw_co_id) = co_id_opt {
+            let (orb_opt, pid) = resolve_orbital_and_planet(snap, raw_co_id);
+            if snap.planetary_colonies.contains_key(&(char_id, pid)) {
+                (orb_opt, pid)
+            } else {
+                // If bound to a customs office structure whose name is not `Orbital:<pid>`,
+                // try locating the caller's colony containing `spaceport_pin_id` on that planet or system.
+                let found_pid = snap
+                    .planetary_colonies
+                    .iter()
+                    .find(|&(&(cid, _), col)| {
+                        cid == char_id
+                            && load_pi_network(snap, char_id, col.planet_id, col.command_center_level)
+                                .pins
+                                .iter()
+                                .any(|p| p.pin_id == spaceport_pin_id)
+                    })
+                    .map(|(&(_, pid), _)| pid);
+                let Some(matched_pid) = found_pid else {
+                    return Err(BridgeRpcError {
+                        code: "ColonyNotFound".into(),
+                        message: format!(
+                            "No planetary colony found for character {char_id} matching customs office {raw_co_id}"
+                        ),
+                    });
+                };
+                if orb_opt.is_none()
+                    && !snap.structures.get(&raw_co_id).is_some_and(|st| {
+                        snap.planetary_colonies
+                            .get(&(char_id, matched_pid))
+                            .is_some_and(|c| c.solar_system_id == st.solar_system_id)
+                    })
+                    && raw_co_id != matched_pid
+                {
+                    return Err(BridgeRpcError {
+                        code: "InvalidCustomsOffice".into(),
+                        message: format!("Object {raw_co_id} is not a customs office for planet {matched_pid}"),
+                    });
+                }
+                (orb_opt.or_else(|| snap.structures.contains_key(&raw_co_id).then_some(raw_co_id)), matched_pid)
+            }
+        } else {
+            let found_pid = snap
+                .planetary_colonies
+                .iter()
+                .find(|&(&(cid, _), col)| {
+                    cid == char_id
+                        && load_pi_network(snap, char_id, col.planet_id, col.command_center_level)
+                            .pins
+                            .iter()
+                            .any(|p| p.pin_id == spaceport_pin_id)
+                })
+                .map(|(&(_, pid), _)| pid)
+                .ok_or_else(|| BridgeRpcError {
+                    code: "ColonyNotFound".into(),
+                    message: format!(
+                        "No planetary colony found for character {char_id} and spaceport pin {spaceport_pin_id}"
+                    ),
+                })?;
+            resolve_orbital_and_planet(snap, found_pid)
+        };
+
+        let Some(col) = snap.planetary_colonies.get(&(char_id, planet_id)).cloned() else {
+            return Err(BridgeRpcError {
+                code: "ColonyNotFound".into(),
+                message: format!("No colony found for character {char_id} on planet {planet_id}"),
+            });
+        };
+        if current_sys_id != Some(col.solar_system_id) {
+            return Err(BridgeRpcError {
+                code: "ColonyNotInCurrentSystem".into(),
+                message: format!(
+                    "Planetary colony {planet_id} is in solar system {}, not {:?}",
+                    col.solar_system_id, current_sys_id
+                ),
+            });
+        }
+
+        let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
+        let pin_idx = net
+            .pins
+            .iter()
+            .position(|p| p.pin_id == spaceport_pin_id)
+            .ok_or_else(|| BridgeRpcError {
+                code: "PinNotFound".into(),
+                message: format!("Spaceport pin {spaceport_pin_id} not found on planet {planet_id}"),
+            })?;
+        if !is_launchpad_pin(&ctx.sde, net.pins[pin_idx].type_id) {
+            return Err(BridgeRpcError {
+                code: "InvalidPinTypeForLaunch".into(),
+                message: format!(
+                    "Pin {spaceport_pin_id} (type {}) is not a planetary launchpad/spaceport",
+                    net.pins[pin_idx].type_id
+                ),
+            });
+        }
+
+        let customs_office_loc_id = orbital_id_opt.unwrap_or(planet_id);
+        let is_co_hangar_item = |it: &eve_db::InventoryItemRecord| -> bool {
+            it.owner_id == char_id
+                && it.quantity > 0
+                && it.flag != InventoryFlag::Locked
+                && !snap.is_item_locked_in_contract_or_job(it.item_id)
+                && ((it.location_id == customs_office_loc_id
+                    || it.location_id == planet_id
+                    || orbital_id_opt.is_some_and(|oid| it.location_id == oid))
+                    && it.flag == InventoryFlag::Hangar
+                    || ship_id_opt.is_some_and(|sid| it.location_id == sid)
+                        && matches!(
+                            it.flag,
+                            InventoryFlag::Cargo
+                                | InventoryFlag::SpecializedPlanetaryCommoditiesHold
+                        ))
+        };
+
+        // Plan & validate imports (`item_id -> qty` or `type_id -> qty`)
+        enum ImportSource {
+            ByItemId(i64, TypeId, u64),
+            ByTypeId(TypeId, u64, Vec<i64>),
+        }
+        let mut planned_imports = Vec::with_capacity(import_map.len());
+        let mut import_vol_m3 = 0.0_f64;
+        let mut import_base_isk = 0.0_f64;
+        for (&key_id, &qty) in &import_map {
+            let _ = i32::try_from(qty).map_err(|_| BridgeRpcError {
+                code: "InvalidCommodityQuantity".into(),
+                message: format!("Import quantity {qty} overflows i32"),
+            })?;
+            let tid = if let Some(item) = snap.items.get(&key_id) {
+                if item.owner_id != char_id {
+                    return Err(BridgeRpcError {
+                        code: "ItemNotFound".into(),
+                        message: format!("Import item {key_id} not found or not owned"),
+                    });
+                }
+                if item.flag == InventoryFlag::Locked
+                    || snap.is_item_locked_in_contract_or_job(item.item_id)
+                {
+                    return Err(BridgeRpcError {
+                        code: "ItemLocked".into(),
+                        message: format!("Import item {key_id} is locked"),
+                    });
+                }
+                if !is_co_hangar_item(item) {
+                    return Err(BridgeRpcError {
+                        code: "ColocationRequired".into(),
+                        message: format!(
+                            "Import item {key_id} must be in customs office hangar or active ship cargo"
+                        ),
+                    });
+                }
+                if (item.quantity as u64) < qty {
+                    return Err(BridgeRpcError {
+                        code: "InsufficientCommodityQuantity".into(),
+                        message: format!(
+                            "Import item {key_id} has quantity {}, cannot import {qty}",
+                            item.quantity
+                        ),
+                    });
+                }
+                planned_imports.push(ImportSource::ByItemId(key_id, item.type_id, qty));
+                item.type_id
+            } else if let Some(tid) =
+                u32::try_from(key_id).ok().filter(|t| ctx.sde.types.contains_key(t))
+            {
+                let mut matching_ids: Vec<i64> = snap
+                    .items
+                    .values()
+                    .filter(|it| it.type_id == tid && is_co_hangar_item(it))
+                    .map(|it| it.item_id)
+                    .collect();
+                matching_ids.sort();
+                let avail: u64 = matching_ids
+                    .iter()
+                    .filter_map(|iid| snap.items.get(iid))
+                    .map(|it| it.quantity.max(0) as u64)
+                    .sum();
+                if avail == 0 {
+                    return Err(BridgeRpcError {
+                        code: "ItemNotFound".into(),
+                        message: format!(
+                            "Commodity type {tid} not found in customs office hangar or ship cargo"
+                        ),
+                    });
+                }
+                if avail < qty {
+                    return Err(BridgeRpcError {
+                        code: "InsufficientCommodityQuantity".into(),
+                        message: format!(
+                            "Available quantity ({avail}) of type {tid} is less than import quantity ({qty})"
+                        ),
+                    });
+                }
+                planned_imports.push(ImportSource::ByTypeId(tid, qty, matching_ids));
+                tid
+            } else {
+                return Err(BridgeRpcError {
+                    code: "ItemNotFound".into(),
+                    message: format!("Import commodity/item {key_id} not found"),
+                });
+            };
+            let unit_vol = ctx
+                .sde
+                .types
+                .get(&tid)
+                .map(|t| t.volume.max(0.005))
+                .unwrap_or(0.38);
+            import_vol_m3 += unit_vol * (qty as f64);
+            import_base_isk += pi_commodity_tier_base_cost(&ctx.sde, tid) * (qty as f64);
+        }
+
+        // Plan & validate exports (`type_id -> qty`)
+        let mut planned_exports: Vec<(TypeId, u64)> = Vec::with_capacity(export_map.len());
+        let mut export_vol_m3 = 0.0_f64;
+        let mut export_base_isk = 0.0_f64;
+        for (&tid_raw, &qty) in &export_map {
+            let tid = u32::try_from(tid_raw)
+                .ok()
+                .filter(|t| ctx.sde.types.contains_key(t))
+                .ok_or_else(|| BridgeRpcError {
+                    code: "InvalidCommodity".into(),
+                    message: format!("Unknown commodity typeID {tid_raw}"),
+                })?;
+            let _ = i32::try_from(qty).map_err(|_| BridgeRpcError {
+                code: "InvalidCommodityQuantity".into(),
+                message: format!("Export quantity {qty} overflows i32"),
+            })?;
+            let avail = net.pins[pin_idx].contents.get(&tid).copied().unwrap_or(0);
+            if avail < qty {
+                return Err(BridgeRpcError {
+                    code: "InsufficientCommoditiesForRouting".into(),
+                    message: format!(
+                        "Spaceport pin {spaceport_pin_id} has {avail} of type {tid}, cannot export {qty}"
+                    ),
+                });
+            }
+            let unit_vol = ctx
+                .sde
+                .types
+                .get(&tid)
+                .map(|t| t.volume.max(0.005))
+                .unwrap_or(0.38);
+            export_vol_m3 += unit_vol * (qty as f64);
+            export_base_isk += pi_commodity_tier_base_cost(&ctx.sde, tid) * (qty as f64);
+            planned_exports.push((tid, qty));
+        }
+
+        // Capacity validation: launchpad (10,000 m3) and customs office hangar (35,000 m3)
+        let pin_cap_m3 = pin_storage_capacity_m3(&ctx.sde, net.pins[pin_idx].type_id);
+        let pin_cur_vol = pin_contents_volume_m3(&ctx.sde, &net.pins[pin_idx]);
+        if import_vol_m3 > 0.0 && (pin_cur_vol - export_vol_m3).max(0.0) + import_vol_m3 > pin_cap_m3 + 1e-6 {
+            return Err(BridgeRpcError {
+                code: "LaunchpadCapacityExceeded".into(),
+                message: format!(
+                    "Cannot import {import_vol_m3:.1} m3 into spaceport {spaceport_pin_id} (capacity {pin_cap_m3:.0} m3)"
+                ),
+            });
+        }
+        if export_vol_m3 > 0.0 {
+            let co_cur_vol: f64 = snap
+                .items
+                .values()
+                .filter(|it| {
+                    it.owner_id == char_id
+                        && (it.location_id == customs_office_loc_id
+                            || it.location_id == planet_id
+                            || orbital_id_opt.is_some_and(|oid| it.location_id == oid))
+                        && it.flag == InventoryFlag::Hangar
+                })
+                .map(|it| {
+                    let v = ctx.sde.types.get(&it.type_id).map(|t| t.volume).unwrap_or(0.38);
+                    v * (it.quantity.max(0) as f64)
+                })
+                .sum();
+            const CUSTOMS_OFFICE_CAPACITY_M3: f64 = 35_000.0;
+            if (co_cur_vol - import_vol_m3).max(0.0) + export_vol_m3 > CUSTOMS_OFFICE_CAPACITY_M3 + 1e-6 {
+                return Err(BridgeRpcError {
+                    code: "CustomsOfficeCapacityExceeded".into(),
+                    message: format!(
+                        "Cannot export {export_vol_m3:.1} m3 to customs office {customs_office_loc_id} (capacity {CUSTOMS_OFFICE_CAPACITY_M3:.0} m3)"
+                    ),
+                });
+            }
+        }
+
+        // POCO/Skyhook access & tax calculation
+        let (player_poco_rate, _) =
+            resolve_character_orbital_access_and_tax(snap, char_id, planet_id)?;
+        let customs_lvl = snap
+            .skills
+            .get(&char_id)
+            .and_then(|m| m.get(&33467))
+            .map(|s| s.level.clamp(0, 5))
+            .unwrap_or(0);
+        let npc_customs_tax_rate = if ctx
+            .sde
+            .solar_systems
+            .get(&col.solar_system_id)
+            .map(|s| s.security_status >= 0.45)
+            .unwrap_or(true)
+        {
+            0.10
+        } else {
+            0.0
+        };
+        let import_tax_isk = if import_base_isk > 0.0 {
+            0.5 * compute_poco_export_tax(import_base_isk, npc_customs_tax_rate, customs_lvl, player_poco_rate)
+        } else {
+            0.0
+        };
+        let export_tax_isk = if export_base_isk > 0.0 {
+            compute_poco_export_tax(export_base_isk, npc_customs_tax_rate, customs_lvl, player_poco_rate)
+        } else {
+            0.0
+        };
+        let total_tax_isk = import_tax_isk + export_tax_isk;
+        let tax_cents = IskCents::from_f64_isk(total_tax_isk);
+        if tax_cents.0 > 0 {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                let new_bal = ch.balance.checked_sub(tax_cents).ok_or_else(|| BridgeRpcError {
+                    code: "InsufficientFunds".into(),
+                    message: format!(
+                        "Insufficient ISK to pay POCO import/export tax ({total_tax_isk:.2} ISK)"
+                    ),
+                })?;
+                ch.balance = new_bal;
+                snap.append_journal(
+                    char_id,
+                    "CustomOfficeTax",
+                    tax_cents,
+                    new_bal,
+                    format!("POCO import/export tax on planet {planet_id}"),
+                );
+            }
+            if let Some(cfg) = load_orbital_settings(snap, planet_id) {
+                let player_share =
+                    IskCents::from_f64_isk((0.5 * import_base_isk + export_base_isk) * player_poco_rate);
+                if player_share.0 > 0 {
+                    if let Some(corp) = snap.corporations.get_mut(&cfg.owner_corp_id) {
+                        corp.ensure_wallet_divisions();
+                        corp.master_wallet = corp
+                            .master_wallet
+                            .checked_add(player_share)
+                            .unwrap_or(corp.master_wallet);
+                        if let Some(d0) = corp.wallet_divisions.first_mut() {
+                            d0.balance = corp.master_wallet;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply import deductions & pin additions
+        for src in planned_imports {
+            match src {
+                ImportSource::ByItemId(iid, tid, qty) => {
+                    let q_i32 = qty as i32;
+                    if let Some(it) = snap.items.get_mut(&iid) {
+                        if it.quantity <= q_i32 {
+                            snap.items.remove(&iid);
+                        } else {
+                            it.quantity -= q_i32;
+                            it.version += 1;
+                        }
+                    }
+                    *net.pins[pin_idx].contents.entry(tid).or_insert(0) += qty;
+                }
+                ImportSource::ByTypeId(tid, qty, matching_ids) => {
+                    let mut rem = qty as i32;
+                    for iid in matching_ids {
+                        let Some(it) = snap.items.get_mut(&iid) else { continue };
+                        if it.quantity <= rem {
+                            rem -= it.quantity;
+                            snap.items.remove(&iid);
+                        } else {
+                            it.quantity -= rem;
+                            it.version += 1;
+                            break;
+                        }
+                        if rem == 0 {
+                            break;
+                        }
+                    }
+                    *net.pins[pin_idx].contents.entry(tid).or_insert(0) += qty;
+                }
+            }
+        }
+
+        // Apply export deductions & customs office hangar spawns/merges
+        for (tid, qty) in planned_exports {
+            if let Some(cnt) = net.pins[pin_idx].contents.get_mut(&tid) {
+                if *cnt <= qty {
+                    net.pins[pin_idx].contents.remove(&tid);
+                } else {
+                    *cnt -= qty;
+                }
+            }
+            let existing_id = snap
+                .items
+                .values()
+                .find(|it| {
+                    it.owner_id == char_id
+                        && it.location_id == customs_office_loc_id
+                        && it.flag == InventoryFlag::Hangar
+                        && it.type_id == tid
+                        && !it.singleton
+                })
+                .map(|it| it.item_id);
+            if let Some(eid) = existing_id {
+                if let Some(stack) = snap.items.get_mut(&eid) {
+                    stack.quantity = stack.quantity.saturating_add(qty as i32);
+                    stack.version += 1;
+                }
+            } else {
+                snap.next_entity_id += 1;
+                let nid = snap.next_entity_id;
+                snap.items.insert(
+                    nid,
+                    eve_db::InventoryItemRecord {
+                        item_id: nid,
+                        type_id: tid,
+                        owner_id: char_id,
+                        location_id: customs_office_loc_id,
+                        flag: InventoryFlag::Hangar,
+                        quantity: qty as i32,
+                        singleton: false,
+                        version: 1,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+
+        save_pi_network(snap, char_id, planet_id, &net);
+        Ok(customs_office_loc_id)
+    })?;
+
+    crate::services::notify_emitters_fleet_combat::emit_invalidate_cache_for_locations(
+        ctx,
+        crate::router::NotificationTarget::Character(char_id),
+        &[notify_loc_id],
+    );
+    Ok(PyRep::None)
+}
+
+fn handle_retrieve_password(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let caller_loc = session
+        .station_id
+        .or(session.structure_id)
+        .or_else(|| session.solar_system_id.map(i64::from));
+    let explicit_container_arg = args.first().and_then(|a| a.as_i64()).is_some_and(|v| v > 2)
+        || kwargs.contains_key("containerID");
+    let item_bound = bound_entry.filter(|b| !explicit_container_arg && Some(b.object_id) != caller_loc);
+    let (container_id, which) = if let Some(b) = item_bound {
+        let w = args
+            .first()
+            .and_then(|a| a.as_i64())
+            .or_else(|| kwargs.get("which").and_then(|v| v.as_i64()))
+            .unwrap_or(1);
+        (b.object_id, w)
+    } else {
+        let cid = args
+            .first()
+            .and_then(|a| a.as_i64())
+            .or_else(|| kwargs.get("containerID").and_then(|v| v.as_i64()))
+            .unwrap_or(0);
+        let w = args
+            .get(1)
+            .and_then(|a| a.as_i64())
+            .or_else(|| kwargs.get("which").and_then(|v| v.as_i64()))
+            .unwrap_or(1);
+        (cid, w)
+    };
+    if !matches!(which, 1 | 2) {
+        return Err(BridgeRpcError {
+            code: "InvalidPasswordType".into(),
+            message: format!("Invalid container password slot {which}; expected 1 or 2"),
+        });
+    }
+    if container_id <= 0 {
+        return Err(BridgeRpcError {
+            code: "InvalidArguments".into(),
+            message: "RetrievePassword requires a valid containerID".into(),
+        });
+    }
+
+    let now_unix = ctx.now_unix_secs();
+    let pw_type_str = if which == 2 { "config" } else { "general" };
+    let pw_opt = ctx.db.try_with_mut_snapshot(|snap| -> Result<Option<String>, BridgeRpcError> {
+        let item = snap.items.get(&container_id).ok_or_else(|| BridgeRpcError {
+            code: "ItemNotFound".into(),
+            message: format!("Secure container {container_id} not found or not owned"),
+        })?;
+        let corp_id = session
+            .corporation_id
+            .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id))
+            .unwrap_or(0);
+        if item.owner_id != char_id {
+            if corp_id == 0 || item.owner_id != corp_id {
+                return Err(BridgeRpcError {
+                    code: "ItemNotFound".into(),
+                    message: format!("Secure container {container_id} not found or not owned"),
+                });
+            }
+            let is_ceo = snap
+                .corporations
+                .get(&corp_id)
+                .is_some_and(|c| c.ceo_id == char_id);
+            let eff_role = session.corp_role
+                | snap
+                    .corporations
+                    .get(&corp_id)
+                    .and_then(|c| c.member_roles.get(&char_id).copied())
+                    .unwrap_or(0);
+            if !is_ceo
+                && (eff_role
+                    & (eve_db::corp_roles::ROLE_DIRECTOR
+                        | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG))
+                    == 0
+            {
+                return Err(BridgeRpcError {
+                    code: "CorpRoleRequired".into(),
+                    message: "Corporation CEO/Director role required to retrieve container password"
+                        .into(),
+                });
+            }
+        }
+        let item_tid = item.type_id;
+        let grp_id = ctx.sde.types.get(&item_tid).map(|t| t.group_id).unwrap_or(0);
+        if !matches!(grp_id, 340 | 448) {
+            return Err(BridgeRpcError {
+                code: "ContainerDoesNotSupportPassword".into(),
+                message: format!("Container {container_id} (group {grp_id}) does not support passwords"),
+            });
+        }
+
+        let mut st = read_container_ship_state_snap(snap);
+        let pw = st
+            .get_container_password(container_id, which)
+            .filter(|p| !p.is_empty())
+            .map(str::to_string);
+        if which == 1 && pw.is_some() {
+            st.unlocked_containers.insert((container_id, char_id));
+        }
+        st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry {
+            timestamp_unix: now_unix,
+            actor_id: char_id,
+            action: "ALSCActionRetrievePassword".into(),
+            item_id: container_id,
+            item_type_id: item_tid,
+            quantity: 1,
+        });
+        save_container_ship_state_snap(snap, now_unix, &st);
+        if let Some((log_corp_id, _, loc_id, loc_flag)) =
+            resolve_corp_container_log_target(snap, container_id)
+        {
+            snap.corp_container_logs.entry(log_corp_id).or_default().push(
+                eve_db::CorpContainerLogEntry {
+                    logged_at_unix: now_unix,
+                    container_id,
+                    container_type_id: item_tid as i32,
+                    character_id: char_id,
+                    location_id: loc_id,
+                    location_flag: loc_flag,
+                    action: "retrieve_password".into(),
+                    password_type: Some(pw_type_str.into()),
+                    type_id: None,
+                    quantity: None,
+                    old_config_bitmask: None,
+                    new_config_bitmask: None,
+                },
+            );
+        }
+        Ok(pw)
+    })?;
+
+    Ok(pw_opt.map(PyRep::String).unwrap_or(PyRep::None))
 }
 
 #[cfg(test)]

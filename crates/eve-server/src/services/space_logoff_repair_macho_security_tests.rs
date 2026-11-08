@@ -376,7 +376,7 @@ fn r7_tb_05_machonet_and_cluster_admin_rpcs_reject_regular_players_and_work_for_
             let method_name = method.to_string();
             let err = crate::services::macho_cluster_mgmt::handle(
                 &ctx,
-                &player,
+                &mut player,
                 svc,
                 &method_name,
                 call_args,
@@ -390,7 +390,7 @@ fn r7_tb_05_machonet_and_cluster_admin_rpcs_reject_regular_players_and_work_for_
 
     // Read-only machoNet queries remain accessible to authenticated players
     assert!(crate::services::macho_cluster_mgmt::handle(
-        &ctx, &player, "machoNet", "GetConnectedClusterMode", &[], &kw
+        &ctx, &mut player, "machoNet", "GetConnectedClusterMode", &[], &kw
     )
     .unwrap()
     .is_ok());
@@ -399,7 +399,7 @@ fn r7_tb_05_machonet_and_cluster_admin_rpcs_reject_regular_players_and_work_for_
     assert_eq!(
         crate::services::macho_cluster_mgmt::handle(
             &ctx,
-            &gm,
+            &mut gm,
             "cluster",
             "AddClusterNode",
             &[PyRep::Integer(3), PyRep::String("127.0.0.1:26003".into())],
@@ -412,7 +412,7 @@ fn r7_tb_05_machonet_and_cluster_admin_rpcs_reject_regular_players_and_work_for_
     assert_eq!(
         crate::services::macho_cluster_mgmt::handle(
             &ctx,
-            &gm,
+            &mut gm,
             "cluster",
             "ReinforceNode",
             &[PyRep::Integer(30_000_142), PyRep::Integer(3)],
@@ -423,14 +423,14 @@ fn r7_tb_05_machonet_and_cluster_admin_rpcs_reject_regular_players_and_work_for_
         PyRep::Integer(3)
     );
     assert!(crate::services::macho_cluster_mgmt::handle(
-        &ctx, &gm, "cluster", "RebalanceNodes", &[], &kw
+        &ctx, &mut gm, "cluster", "RebalanceNodes", &[], &kw
     )
     .unwrap()
     .is_ok());
     assert_eq!(
         crate::services::macho_cluster_mgmt::handle(
             &ctx,
-            &gm,
+            &mut gm,
             "cluster",
             "SetServiceState",
             &[PyRep::String(target_svc), PyRep::Bool(false)],
@@ -443,7 +443,7 @@ fn r7_tb_05_machonet_and_cluster_admin_rpcs_reject_regular_players_and_work_for_
     assert_eq!(
         crate::services::macho_cluster_mgmt::handle(
             &ctx,
-            &gm,
+            &mut gm,
             "cluster",
             "AdminBroadcast",
             &[PyRep::String("Scheduled cluster maintenance in 5m".into())],
@@ -456,7 +456,7 @@ fn r7_tb_05_machonet_and_cluster_admin_rpcs_reject_regular_players_and_work_for_
     assert_eq!(
         crate::services::macho_cluster_mgmt::handle(
             &ctx,
-            &gm,
+            &mut gm,
             "cluster",
             "RemoveClusterNode",
             &[PyRep::Integer(3)],
