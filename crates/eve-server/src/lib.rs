@@ -5,6 +5,7 @@
 pub mod bug_reporting;
 pub mod combat;
 pub mod config;
+pub mod domain;
 pub mod esi;
 pub mod flight_recorder;
 pub mod formulas;

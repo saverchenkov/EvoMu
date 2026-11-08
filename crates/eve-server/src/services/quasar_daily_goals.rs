@@ -620,32 +620,20 @@ impl DailyGoalManager {
 
         let reward_cents = IskCents::from_isk(isk);
         let credit_res = db.try_with_mut_snapshot(|snap| {
-            let Some(ch) = snap.characters.get_mut(&(character_id as i64)) else {
-                return Err("Character not found".to_string());
-            };
-            let Some(new_bal) = ch.balance.checked_add(reward_cents) else {
-                return Err("Balance overflow".to_string());
-            };
-            ch.balance = new_bal;
-            ch.free_skill_points += sp;
-
-            // AIR Daily Goals: Each goal grants 500 EverMarks to character, duplicated to character's corp
-            let char_corp = ch.corporation_id;
-            let em_cur = ch.loyalty_points.entry(1_000_419).or_insert(0);
-            *em_cur = em_cur.saturating_add(500);
-            if char_corp > 0 {
-                let corp_em = snap.corp_lp_balances.entry((char_corp, 1_000_419)).or_insert(0);
-                *corp_em = corp_em.saturating_add(500);
-            }
-
-            snap.append_journal(
+            crate::domain::career_goals::credit_character_reward_in_snap(
+                snap,
                 character_id as i64,
-                "DailyGoalReward",
                 reward_cents,
-                new_bal,
-                format!("Daily goal reward ({})", res_goal.template.name_message),
-            );
-            Ok(())
+                sp,
+                500,
+                Some((
+                    "DailyGoalReward",
+                    format!("Daily goal reward ({})", res_goal.template.name_message),
+                    None,
+                )),
+            )
+            .map(|_| ())
+            .map_err(|e| e.message)
         });
         if credit_res.is_err() {
             let mut map = self

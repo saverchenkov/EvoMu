@@ -219,7 +219,7 @@ pub(super) fn handle_add_corporation(
         corp_rec.hq_station_id = session.station_id.or(char_station_id);
         snap.corporations.insert(cid, corp_rec);
         snap.chat_channels.insert(format!("corpid:{cid}"), ChatChannelRecord { channel_id: format!("corpid:{cid}"), name: name.to_string(), motd: String::new(), owner_id: Some(char_id), members: HashSet::from([char_id]), is_system_local: false, solar_system_id: None, is_private: false, operators: HashSet::from([char_id]), password: None, is_delayed_local: false });
-        let init_limit = snap.skills.get(&char_id).map(|sk| sk.values().map(|s| ctx.sde.types.get(&s.type_id).and_then(|t| t.default_attributes.get(&191).copied()).map_or(0, |b| (b.round() as i64) * i64::from(s.level))).sum::<i64>()).unwrap_or(0).max(10);
+        let init_limit = crate::domain::corp_governance::corp_member_limit_from_skills(&ctx.sde, snap, char_id);
         snap.corp_member_limits.insert(cid, init_limit);
         let state = snap.corp_governance.entry(cid).or_default();
         state.member_limit = Some(init_limit as usize);

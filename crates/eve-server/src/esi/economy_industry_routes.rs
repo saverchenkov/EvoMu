@@ -189,26 +189,19 @@ pub fn dispatch_economy_industry_route(
     let now = ctx.now_unix();
     match (method, path) {
         ("GET", "/industry/facilities") => Some(ctx.db.with_snapshot(|snap| {
-            const INDUSTRY_ACTIVITIES: [u8; 6] = [1, 3, 4, 5, 8, 9];
             let mut by_id: BTreeMap<i64, Value> = BTreeMap::new();
             for s in snap.structures.values().filter(|s| {
-                s.state != "Destroyed"
-                    && crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access(
-                        ctx,
-                        snap,
-                        s.structure_id,
-                        0,
-                    )
+                crate::domain::market_acl::can_caller_view_structure_acl(
+                    snap,
+                    0,
+                    s.structure_id,
+                    Some(now),
+                )
             }) {
                 // Only emit Upwell structures that have an online, fueled industry or reaction service module.
-                let online_act = INDUSTRY_ACTIVITIES.into_iter().find(|&act| {
-                    crate::services::industry_pi::industry_facilities_bps::is_structure_industry_service_online(
-                        snap,
-                        s.structure_id,
-                        act,
-                    )
-                });
-                let Some(primary_act) = online_act else {
+                let Some(primary_act) =
+                    crate::domain::market_acl::primary_online_industry_activity(snap, s)
+                else {
                     continue;
                 };
                 let Some(sys) = ctx.sde.solar_systems.get(&s.solar_system_id) else {

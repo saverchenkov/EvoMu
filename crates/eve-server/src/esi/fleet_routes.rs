@@ -12,188 +12,28 @@
 
 #![forbid(unsafe_code)]
 
+use crate::domain::fleets::{
+    self, InviteFleetMemberInput, MoveFleetMemberInput, UpdateFleetSettingsInput,
+};
+use crate::esi::domain_err_to_esi;
 use crate::esi::sample_routes::{format_iso8601_utc, parse_path_i64, RouteExecutionResult};
 use crate::router::cache_notifications::NotificationTarget;
 use crate::router::ServerContext;
-use eve_db::{
-    FleetMemberRecord, FleetRecord, FleetRole, FleetSquadRecord, FleetWingRecord, SsoTokenClaims,
-};
+use crate::services::fleet_social::fleet_social_notify as fleet_notify;
+use eve_db::SsoTokenClaims;
 use eve_proto::PyRep;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-fn fleet_role_to_str(role: FleetRole) -> (&'static str, &'static str) {
-    match role {
-        FleetRole::FleetCommander => ("fleet_commander", "Fleet Commander"),
-        FleetRole::WingCommander => ("wing_commander", "Wing Commander"),
-        FleetRole::SquadCommander => ("squad_commander", "Squad Commander"),
-        FleetRole::SquadMember => ("squad_member", "Squad Member"),
-    }
-}
-
-fn parse_fleet_role(role_str: &str) -> Option<FleetRole> {
-    match role_str {
-        "fleet_commander" => Some(FleetRole::FleetCommander),
-        "wing_commander" => Some(FleetRole::WingCommander),
-        "squad_commander" => Some(FleetRole::SquadCommander),
-        "squad_member" => Some(FleetRole::SquadMember),
-        _ => None,
-    }
-}
-
-fn is_fleet_member(f: &FleetRecord, char_id: i64) -> bool {
-    f.boss_id == char_id
-        || f.members.contains(&char_id)
-        || f.member_details.contains_key(&char_id)
-}
-
-fn is_fleet_boss_or_fc(f: &FleetRecord, char_id: i64) -> bool {
-    f.boss_id == char_id
-        || f.member_details
-            .get(&char_id)
-            .is_some_and(|md| md.role == FleetRole::FleetCommander)
-}
-
-fn squad_parent_wing_id(f: &FleetRecord, squad_id: i64) -> Option<i64> {
-    f.squad_details
-        .get(&squad_id)
-        .map(|s| s.wing_id)
-        .or_else(|| {
-            f.wing_details
-                .values()
-                .find(|w| w.squad_ids.contains(&squad_id))
-                .map(|w| w.wing_id)
-        })
-}
-
-fn can_manage_wing(f: &FleetRecord, char_id: i64, wing_id: i64) -> bool {
-    is_fleet_boss_or_fc(f, char_id)
-        || f.member_details.get(&char_id).is_some_and(|md| {
-            md.role == FleetRole::WingCommander && md.wing_id == Some(wing_id)
-        })
-}
-
-fn can_manage_squad(f: &FleetRecord, char_id: i64, squad_id: i64) -> bool {
-    if is_fleet_boss_or_fc(f, char_id) {
-        return true;
-    }
-    let Some(md) = f.member_details.get(&char_id) else {
-        return false;
-    };
-    match md.role {
-        FleetRole::FleetCommander => true,
-        FleetRole::WingCommander => {
-            let parent_wing = squad_parent_wing_id(f, squad_id);
-            parent_wing.is_some() && md.wing_id == parent_wing
-        }
-        FleetRole::SquadCommander => md.squad_id == Some(squad_id),
-        FleetRole::SquadMember => false,
-    }
-}
-
-fn member_effective_position(
-    f: &FleetRecord,
-    member_id: i64,
-) -> (FleetRole, Option<i64>, Option<i64>) {
-    if let Some(md) = f.member_details.get(&member_id) {
-        (md.role, md.wing_id, md.squad_id)
-    } else if f.boss_id == member_id {
-        (FleetRole::FleetCommander, None, None)
-    } else {
-        (
-            FleetRole::SquadMember,
-            f.wings.first().copied(),
-            f.squads.first().copied(),
-        )
-    }
-}
-
-fn can_invite_member(
-    f: &FleetRecord,
-    caller_id: i64,
-    role: FleetRole,
-    wing_id: Option<i64>,
-    squad_id: Option<i64>,
-) -> bool {
-    if f.boss_id == caller_id {
-        return true;
-    }
-    let Some(md) = f.member_details.get(&caller_id) else {
-        return false;
-    };
-    match md.role {
-        FleetRole::FleetCommander => role != FleetRole::FleetCommander,
-        FleetRole::WingCommander => {
-            matches!(role, FleetRole::SquadCommander | FleetRole::SquadMember)
-                && md.wing_id.is_some()
-                && wing_id == md.wing_id
-        }
-        FleetRole::SquadCommander => {
-            role == FleetRole::SquadMember
-                && md.squad_id.is_some()
-                && squad_id == md.squad_id
-                && (wing_id.is_none() || wing_id == md.wing_id)
-        }
-        FleetRole::SquadMember => false,
-    }
-}
-
-fn can_act_on_member(
-    f: &FleetRecord,
-    caller_id: i64,
-    member_id: i64,
-    new_pos: Option<(FleetRole, Option<i64>, Option<i64>)>,
-) -> bool {
-    if member_id == f.boss_id && caller_id != f.boss_id {
-        return false;
-    }
-    if f.boss_id == caller_id {
-        return true;
-    }
-    let (target_role, target_wing, target_squad) = member_effective_position(f, member_id);
-    let Some(caller_md) = f.member_details.get(&caller_id) else {
-        return false;
-    };
-    let can_act_on_current = match caller_md.role {
-        FleetRole::FleetCommander => target_role != FleetRole::FleetCommander,
-        FleetRole::WingCommander => {
-            matches!(
-                target_role,
-                FleetRole::SquadCommander | FleetRole::SquadMember
-            ) && caller_md.wing_id.is_some()
-                && target_wing == caller_md.wing_id
-        }
-        FleetRole::SquadCommander => {
-            target_role == FleetRole::SquadMember
-                && caller_md.squad_id.is_some()
-                && target_squad == caller_md.squad_id
-        }
-        FleetRole::SquadMember => false,
-    };
-    if !can_act_on_current {
-        return false;
-    }
-    if let Some((new_role, new_wing, new_squad)) = new_pos {
-        match caller_md.role {
-            FleetRole::FleetCommander => new_role != FleetRole::FleetCommander,
-            FleetRole::WingCommander => {
-                matches!(
-                    new_role,
-                    FleetRole::SquadCommander | FleetRole::SquadMember
-                ) && new_wing == caller_md.wing_id
-            }
-            FleetRole::SquadCommander => {
-                new_role == FleetRole::SquadMember
-                    && new_squad == caller_md.squad_id
-                    && (new_wing.is_none() || new_wing == caller_md.wing_id)
-            }
-            FleetRole::SquadMember => false,
-        }
-    } else {
-        true
-    }
-}
-
+#[cfg(test)]
+use eve_db::{FleetMemberRecord, FleetRecord, FleetRole, FleetSquadRecord, FleetWingRecord};
+#[cfg(test)]
+use crate::domain::fleets::{
+    can_act_on_member, can_invite_member, can_manage_squad, can_manage_wing,
+    fleet_role_to_esi_str as fleet_role_to_str, is_fleet_boss_or_fc, is_fleet_member,
+    parse_esi_fleet_role as parse_fleet_role, squad_parent_wing_id,
+};
+#[cfg(test)]
 fn validate_wing_and_squad(
     f: &FleetRecord,
     fleet_id: i64,
@@ -202,67 +42,8 @@ fn validate_wing_and_squad(
     squad_id: Option<i64>,
     is_move: bool,
 ) -> Result<(Option<i64>, Option<i64>), RouteExecutionResult> {
-    if let Some(wid) = wing_id {
-        if !f.wings.contains(&wid) && !f.wing_details.contains_key(&wid) {
-            return Err(RouteExecutionResult::error(
-                404,
-                format!("Wing {wid} not found in fleet {fleet_id}"),
-            ));
-        }
-    }
-    if let Some(sid) = squad_id {
-        if !f.squads.contains(&sid) && !f.squad_details.contains_key(&sid) {
-            return Err(RouteExecutionResult::error(
-                404,
-                format!("Squad {sid} not found in fleet {fleet_id}"),
-            ));
-        }
-        if let Some(wid) = wing_id {
-            if let Some(sq) = f.squad_details.get(&sid) {
-                if sq.wing_id != wid {
-                    return Err(RouteExecutionResult::error(
-                        400,
-                        format!("Squad {sid} does not belong to wing {wid} in fleet {fleet_id}"),
-                    ));
-                }
-            } else if let Some(w) = f.wing_details.get(&wid) {
-                if !w.squad_ids.is_empty() && !w.squad_ids.contains(&sid) {
-                    return Err(RouteExecutionResult::error(
-                        400,
-                        format!("Squad {sid} does not belong to wing {wid} in fleet {fleet_id}"),
-                    ));
-                }
-            }
-        }
-    }
-    match role {
-        FleetRole::FleetCommander => Ok((None, None)),
-        FleetRole::WingCommander => {
-            let resolved_wing =
-                wing_id.or_else(|| if is_move { None } else { f.wings.first().copied() });
-            if is_move && resolved_wing.is_none() {
-                return Err(RouteExecutionResult::error(
-                    400,
-                    "Moving a member to wing_commander requires a valid wing_id",
-                ));
-            }
-            Ok((resolved_wing, None))
-        }
-        FleetRole::SquadCommander | FleetRole::SquadMember => {
-            let resolved_squad =
-                squad_id.or_else(|| if is_move { None } else { f.squads.first().copied() });
-            let resolved_wing = wing_id
-                .or_else(|| resolved_squad.and_then(|s| squad_parent_wing_id(f, s)))
-                .or_else(|| if is_move { None } else { f.wings.first().copied() });
-            if is_move && (resolved_wing.is_none() || resolved_squad.is_none()) {
-                return Err(RouteExecutionResult::error(
-                    400,
-                    "Moving a member to squad_commander or squad_member requires wing_id and squad_id",
-                ));
-            }
-            Ok((resolved_wing, resolved_squad))
-        }
-    }
+    fleets::validate_wing_and_squad(f, fleet_id, role, wing_id, squad_id, is_move)
+        .map_err(domain_err_to_esi)
 }
 
 fn ensure_online_ui_session(
@@ -324,48 +105,22 @@ pub fn dispatch_fleet_routes(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
-            Some(ctx.db.with_snapshot(|snap| {
-                if !snap.characters.contains_key(&char_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
-                }
-                let fleet = snap
-                    .fleets
-                    .values()
-                    .find(|f| is_fleet_member(f, char_id));
-                let Some(f) = fleet else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} is not in a fleet"),
-                    );
-                };
-                let (role, wing_id, squad_id) = if let Some(md) = f.member_details.get(&char_id) {
-                    let (r_str, _) = fleet_role_to_str(md.role);
-                    (
-                        r_str,
-                        md.wing_id.unwrap_or(-1),
-                        md.squad_id.unwrap_or(-1),
+            Some(match fleets::get_character_fleet(ctx, char_id) {
+                Ok(m) => {
+                    let (role_str, _) = fleets::fleet_role_to_esi_str(m.role);
+                    RouteExecutionResult::ok_json(
+                        json!({
+                            "fleet_id": m.fleet_id,
+                            "fleet_boss_id": m.fleet_boss_id,
+                            "wing_id": m.wing_id.unwrap_or(-1),
+                            "squad_id": m.squad_id.unwrap_or(-1),
+                            "role": role_str,
+                        }),
+                        60,
                     )
-                } else if f.boss_id == char_id {
-                    ("fleet_commander", -1, -1)
-                } else {
-                    let wid = f.wings.first().copied().unwrap_or(-1);
-                    let sid = f.squads.first().copied().unwrap_or(-1);
-                    ("squad_member", wid, sid)
-                };
-                RouteExecutionResult::ok_json(
-                    json!({
-                        "fleet_id": f.fleet_id,
-                        "fleet_boss_id": f.boss_id,
-                        "wing_id": wing_id,
-                        "squad_id": squad_id,
-                        "role": role,
-                    }),
-                    60,
-                )
-            }))
+                }
+                Err(e) => domain_err_to_esi(e),
+            })
         }
 
         ("GET", "/fleets/{fleet_id}") => {
@@ -373,34 +128,20 @@ pub fn dispatch_fleet_routes(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
-            Some(ctx.db.with_snapshot(|snap| {
-                let Some(f) = snap.fleets.get(&fleet_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Fleet {fleet_id} not found"),
-                    );
-                };
-                if let Some(c) = claims {
-                    if !is_fleet_member(f, c.character_id) {
-                        return RouteExecutionResult::error(
-                            403,
-                            format!(
-                                "Character {} is not a member of fleet {fleet_id}",
-                                c.character_id
-                            ),
-                        );
-                    }
-                }
-                RouteExecutionResult::ok_json(
-                    json!({
-                        "motd": f.motd.clone(),
-                        "is_free_move": f.free_move,
-                        "is_registered": f.is_registered,
-                        "is_voice_enabled": false,
-                    }),
-                    5,
-                )
-            }))
+            Some(
+                match fleets::get_fleet_settings(ctx, fleet_id, claims.map(|c| c.character_id)) {
+                    Ok(s) => RouteExecutionResult::ok_json(
+                        json!({
+                            "motd": s.motd,
+                            "is_free_move": s.is_free_move,
+                            "is_registered": s.is_registered,
+                            "is_voice_enabled": s.is_voice_enabled,
+                        }),
+                        5,
+                    ),
+                    Err(e) => domain_err_to_esi(e),
+                },
+            )
         }
 
         ("PUT", "/fleets/{fleet_id}") => {
@@ -425,7 +166,7 @@ pub fn dispatch_fleet_routes(
                     "Invalid types for 'motd' or 'is_free_move'",
                 ));
             }
-            let new_motd = payload.get("motd").and_then(Value::as_str);
+            let new_motd = payload.get("motd").and_then(Value::as_str).map(str::to_string);
             let new_free_move = payload.get("is_free_move").and_then(Value::as_bool);
             if new_motd.is_none() && new_free_move.is_none() {
                 return Some(RouteExecutionResult::error(
@@ -433,36 +174,51 @@ pub fn dispatch_fleet_routes(
                     "Fleet update must specify 'motd' and/or 'is_free_move'",
                 ));
             }
-            let res: Result<(), RouteExecutionResult> = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(f) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(RouteExecutionResult::error(
-                        404,
-                        format!("Fleet {fleet_id} not found"),
-                    ));
-                };
-                if let Some(c) = claims {
-                    if !is_fleet_boss_or_fc(f, c.character_id) {
-                        return Err(RouteExecutionResult::error(
-                            403,
-                            format!(
-                                "Character {} lacks fleet commander/boss permissions for fleet {fleet_id}",
-                                c.character_id
-                            ),
-                        ));
+            Some(
+                match fleets::update_fleet_settings(
+                    ctx,
+                    UpdateFleetSettingsInput {
+                        fleet_id,
+                        caller_char_id: claims.map(|c| c.character_id),
+                        require_boss_only: false,
+                        motd: new_motd,
+                        is_free_move: new_free_move,
+                        is_registered: None,
+                        is_voice_enabled: None,
+                        is_loot_logging: None,
+                    },
+                ) {
+                    Ok(out) => {
+                        if let Some(ref motd) = out.updated_motd {
+                            fleet_notify::emit_motd(
+                                ctx,
+                                NotificationTarget::Fleet(fleet_id),
+                                motd,
+                                true,
+                            );
+                        }
+                        if out.old_free_move != out.new_free_move {
+                            fleet_notify::sync_fleet_options_to_db(ctx);
+                            fleet_notify::emit_options_changed(
+                                ctx,
+                                fleet_id,
+                                fleet_notify::options_keyval(
+                                    out.old_free_move,
+                                    out.old_registered,
+                                    out.auto_join_squad_id,
+                                ),
+                                fleet_notify::options_keyval(
+                                    out.new_free_move,
+                                    out.new_registered,
+                                    out.auto_join_squad_id,
+                                ),
+                            );
+                        }
+                        RouteExecutionResult::no_content(0)
                     }
-                }
-                if let Some(m) = new_motd {
-                    f.motd = m.to_string();
-                }
-                if let Some(fm) = new_free_move {
-                    f.free_move = fm;
-                }
-                Ok(())
-            });
-            Some(match res {
-                Ok(()) => RouteExecutionResult::no_content(0),
-                Err(e) => e,
-            })
+                    Err(e) => domain_err_to_esi(e),
+                },
+            )
         }
 
         ("GET", "/fleets/{fleet_id}/members") => {
@@ -470,81 +226,35 @@ pub fn dispatch_fleet_routes(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
-            Some(ctx.db.with_snapshot(|snap| {
-                let Some(f) = snap.fleets.get(&fleet_id) else {
-                    return RouteExecutionResult::error(404, format!("Fleet {fleet_id} not found"));
-                };
-                if let Some(c) = claims {
-                    if !is_fleet_member(f, c.character_id) {
-                        return RouteExecutionResult::error(
-                            403,
-                            format!("Character {} is not a member of fleet {fleet_id}", c.character_id),
-                        );
+            Some(
+                match fleets::list_fleet_members(ctx, fleet_id, claims.map(|c| c.character_id)) {
+                    Ok(members) => {
+                        let out: Vec<Value> = members
+                            .into_iter()
+                            .map(|m| {
+                                let (role_str, _) = fleets::fleet_role_to_esi_str(m.role);
+                                let mut obj = json!({
+                                    "character_id": m.character_id,
+                                    "ship_type_id": m.ship_type_id,
+                                    "wing_id": m.wing_id,
+                                    "squad_id": m.squad_id,
+                                    "role": role_str,
+                                    "role_name": m.role_name,
+                                    "join_time": format_iso8601_utc(m.join_time_unix),
+                                    "takes_fleet_warp": m.takes_fleet_warp,
+                                    "solar_system_id": m.solar_system_id,
+                                });
+                                if let Some(station_id) = m.station_id {
+                                    obj["station_id"] = json!(station_id);
+                                }
+                                obj
+                            })
+                            .collect();
+                        RouteExecutionResult::ok_json(json!(out), 5)
                     }
-                }
-                let mut member_ids = f.members.clone();
-                if !member_ids.contains(&f.boss_id) {
-                    member_ids.insert(0, f.boss_id);
-                }
-                let mut detail_ids: Vec<i64> = f.member_details.keys().copied().collect();
-                detail_ids.sort_unstable();
-                for cid in detail_ids {
-                    if !member_ids.contains(&cid) {
-                        member_ids.push(cid);
-                    }
-                }
-                let mut out = Vec::with_capacity(member_ids.len());
-                for cid in member_ids {
-                    let Some(ch) = snap.characters.get(&cid) else {
-                        continue;
-                    };
-                    let is_boss = cid == f.boss_id;
-                    let (role_str, role_name_str, wing_id, squad_id, takes_warp, join_time_unix) =
-                        if let Some(md) = f.member_details.get(&cid) {
-                            let (r_str, default_rname) = fleet_role_to_str(md.role);
-                            let rname = if md.role_name.is_empty() {
-                                default_rname.to_string()
-                            } else {
-                                md.role_name.clone()
-                            };
-                            (
-                                r_str,
-                                rname,
-                                md.wing_id.unwrap_or(-1),
-                                md.squad_id.unwrap_or(-1),
-                                md.takes_fleet_warp,
-                                md.join_time_unix,
-                            )
-                        } else if is_boss {
-                            ("fleet_commander", "Fleet Commander".to_string(), -1, -1, true, 0)
-                        } else {
-                            ("squad_member", "Squad Member".to_string(), -1, -1, true, 0)
-                        };
-                    // DERIVED: 670 is the SDE Capsule type ID when no ship item is active
-                    let ship_type_id = snap
-                        .items
-                        .get(&ch.active_ship_id)
-                        .map(|i| i.type_id as i64)
-                        .unwrap_or(670);
-                    let solar_system_id = ch.solar_system_id as i64;
-                    let mut obj = json!({
-                        "character_id": cid,
-                        "ship_type_id": ship_type_id,
-                        "wing_id": wing_id,
-                        "squad_id": squad_id,
-                        "role": role_str,
-                        "role_name": role_name_str,
-                        "join_time": format_iso8601_utc(join_time_unix),
-                        "takes_fleet_warp": takes_warp,
-                        "solar_system_id": solar_system_id,
-                    });
-                    if let Some(station_id) = ch.station_id {
-                        obj["station_id"] = json!(station_id);
-                    }
-                    out.push(obj);
-                }
-                RouteExecutionResult::ok_json(json!(out), 5)
-            }))
+                    Err(e) => domain_err_to_esi(e),
+                },
+            )
         }
 
         ("POST", "/fleets/{fleet_id}/members") => {
@@ -573,7 +283,7 @@ pub fn dispatch_fleet_routes(
                     "Missing required 'role' in fleet invite",
                 ));
             };
-            let Some(role) = parse_fleet_role(role_str) else {
+            let Some(role) = fleets::parse_esi_fleet_role(role_str) else {
                 return Some(RouteExecutionResult::error(
                     400,
                     format!("Invalid fleet role '{role_str}'"),
@@ -593,69 +303,41 @@ pub fn dispatch_fleet_routes(
                 },
                 _ => None,
             };
-            let now = ctx.now_unix();
-            let inviter_id = claims.map(|c| c.character_id).unwrap_or(0);
-            let res: Result<(i64, i64, i64), RouteExecutionResult> =
-                ctx.db.try_with_mut_snapshot(|snap| {
-                    let Some(f) = snap.fleets.get(&fleet_id) else {
-                        return Err(RouteExecutionResult::error(404, format!("Fleet {fleet_id} not found")));
-                    };
-                    let (resolved_wing, resolved_squad) =
-                        validate_wing_and_squad(f, fleet_id, role, wing_id, squad_id, false)?;
-                    if let Some(c) = claims {
-                        if !can_invite_member(f, c.character_id, role, resolved_wing, resolved_squad) {
-                            return Err(RouteExecutionResult::error(
-                                403,
-                                format!(
-                                    "Character {} lacks fleet commander/boss permissions for fleet {fleet_id}",
-                                    c.character_id
-                                ),
-                            ));
-                        }
+            let inviter_override = claims.map(|c| c.character_id).filter(|&id| id > 0);
+            Some(
+                match fleets::invite_fleet_member(
+                    ctx,
+                    InviteFleetMemberInput {
+                        fleet_id,
+                        caller_char_id: claims.map(|c| c.character_id),
+                        inviter_id_override: inviter_override,
+                        invitee_id,
+                        role,
+                        wing_id,
+                        squad_id,
+                        enforce_online_and_capacity_checks: false,
+                        validate_hierarchy_strict: true,
+                        now_unix: ctx.now_unix(),
+                    },
+                ) {
+                    Ok(out) => {
+                        ctx.notify(
+                            NotificationTarget::Character(out.invitee_id),
+                            "OnFleetInvite",
+                            "charid",
+                            vec![
+                                PyRep::Integer(out.fleet_id),
+                                PyRep::Integer(out.inviter_id),
+                                PyRep::Integer(out.wing_id),
+                                PyRep::Integer(out.squad_id),
+                                PyRep::Integer(out.role_num),
+                            ],
+                        );
+                        RouteExecutionResult::no_content(0)
                     }
-                    if !snap.characters.contains_key(&invitee_id) {
-                        return Err(RouteExecutionResult::error(
-                            404,
-                            format!("Invited character {invitee_id} not found"),
-                        ));
-                    }
-                    let f = snap.fleets.get_mut(&fleet_id).unwrap();
-                    let wid = resolved_wing.unwrap_or_else(|| f.wings.first().copied().unwrap_or(1));
-                    let sid = resolved_squad.unwrap_or_else(|| f.squads.first().copied().unwrap_or(1));
-                    let effective_inviter = if inviter_id > 0 { inviter_id } else { f.boss_id };
-                    f.invites.insert(invitee_id);
-                    Ok((wid, sid, effective_inviter))
-                });
-            Some(match res {
-                Ok((wid, sid, effective_inviter)) => {
-                    let role_num = match role {
-                        FleetRole::FleetCommander => 1,
-                        FleetRole::WingCommander => 2,
-                        FleetRole::SquadCommander => 3,
-                        FleetRole::SquadMember => 4,
-                    };
-                    {
-                        let mut ex = ctx.fleet_extras.lock().unwrap();
-                        ex.invite_details
-                            .insert((fleet_id, invitee_id), (wid, sid, role, effective_inviter));
-                        ex.invite_timestamps.insert((fleet_id, invitee_id), now);
-                    }
-                    ctx.notify(
-                        NotificationTarget::Character(invitee_id),
-                        "OnFleetInvite",
-                        "charid",
-                        vec![
-                            PyRep::Integer(fleet_id),
-                            PyRep::Integer(effective_inviter),
-                            PyRep::Integer(wid),
-                            PyRep::Integer(sid),
-                            PyRep::Integer(role_num),
-                        ],
-                    );
-                    RouteExecutionResult::no_content(0)
-                }
-                Err(e) => e,
-            })
+                    Err(e) => domain_err_to_esi(e),
+                },
+            )
         }
 
         ("PUT", "/fleets/{fleet_id}/members/{member_id}") => {
@@ -682,7 +364,7 @@ pub fn dispatch_fleet_routes(
                     "Missing required 'role' in member move request",
                 ));
             };
-            let Some(role) = parse_fleet_role(role_str) else {
+            let Some(role) = fleets::parse_esi_fleet_role(role_str) else {
                 return Some(RouteExecutionResult::error(
                     400,
                     format!("Invalid fleet role '{role_str}'"),
@@ -702,61 +384,41 @@ pub fn dispatch_fleet_routes(
                 },
                 _ => None,
             };
-            let res: Result<(), RouteExecutionResult> = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(f) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(RouteExecutionResult::error(404, format!("Fleet {fleet_id} not found")));
-                };
-                if !is_fleet_member(f, member_id) {
-                    return Err(RouteExecutionResult::error(
-                        404,
-                        format!("Member {member_id} not found in fleet {fleet_id}"),
-                    ));
-                }
-                let (resolved_wing, resolved_squad) =
-                    validate_wing_and_squad(f, fleet_id, role, wing_id, squad_id, true)?;
-                if let Some(c) = claims {
-                    if !can_act_on_member(
-                        f,
-                        c.character_id,
-                        member_id,
-                        Some((role, resolved_wing, resolved_squad)),
-                    ) {
-                        return Err(RouteExecutionResult::error(
-                            403,
-                            format!(
-                                "Character {} lacks fleet commander/boss permissions for fleet {fleet_id}",
-                                c.character_id
-                            ),
-                        ));
-                    }
-                }
-                let (_, rname) = fleet_role_to_str(role);
-                let (takes_fleet_warp, accepts_regroup, accepts_conduit_jumps, job, join_time_unix) = f
-                    .member_details
-                    .get(&member_id)
-                    .map(|md| (md.takes_fleet_warp, md.accepts_regroup, md.accepts_conduit_jumps, md.job, md.join_time_unix))
-                    .unwrap_or((true, true, true, 0, 0));
-                f.member_details.insert(
-                    member_id,
-                    FleetMemberRecord {
-                        character_id: member_id,
-                        role,
-                        wing_id: resolved_wing,
-                        squad_id: resolved_squad,
-                        takes_fleet_warp,
-                        accepts_regroup,
-                        accepts_conduit_jumps,
-                        job,
-                        role_name: rname.to_string(),
-                        join_time_unix,
+            Some(
+                match fleets::move_fleet_member(
+                    ctx,
+                    MoveFleetMemberInput {
+                        fleet_id,
+                        caller_char_id: claims.map(|c| c.character_id),
+                        target_id: member_id,
+                        new_role: role,
+                        wing_id,
+                        squad_id,
+                        strict_esi_wing_squad: true,
+                        allow_fallback_missing_wing_squad: true,
+                        enforce_session_change_timer: false,
+                        now_unix: ctx.now_unix(),
                     },
-                );
-                Ok(())
-            });
-            Some(match res {
-                Ok(()) => RouteExecutionResult::no_content(0),
-                Err(e) => e,
-            })
+                ) {
+                    Ok(out) => {
+                        fleet_notify::emit_member_changed(
+                            ctx,
+                            fleet_id,
+                            &out.before,
+                            &out.after,
+                            out.is_only_member,
+                        );
+                        ctx.notify(
+                            NotificationTarget::Character(member_id),
+                            "OnFleetMove",
+                            "charid",
+                            vec![],
+                        );
+                        RouteExecutionResult::no_content(0)
+                    }
+                    Err(e) => domain_err_to_esi(e),
+                },
+            )
         }
 
         ("DELETE", "/fleets/{fleet_id}/members/{member_id}") => {
@@ -768,48 +430,29 @@ pub fn dispatch_fleet_routes(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
-            let check: Result<(), RouteExecutionResult> = ctx.db.with_snapshot(|snap| {
-                let Some(f) = snap.fleets.get(&fleet_id) else {
-                    return Err(RouteExecutionResult::error(404, format!("Fleet {fleet_id} not found")));
-                };
-                if !is_fleet_member(f, member_id) {
-                    return Err(RouteExecutionResult::error(
-                        404,
-                        format!("Member {member_id} not found in fleet {fleet_id}"),
-                    ));
-                }
-                if member_id == f.boss_id {
-                    return Err(RouteExecutionResult::error(
-                        403,
-                        "Cannot kick or remove the fleet boss without transferring leadership",
-                    ));
-                }
-                if let Some(c) = claims {
-                    if c.character_id != member_id
-                        && !can_act_on_member(f, c.character_id, member_id, None)
-                    {
-                        return Err(RouteExecutionResult::error(
-                            403,
-                            format!(
-                                "Character {} lacks permission to kick member {member_id} from fleet {fleet_id}",
-                                c.character_id
-                            ),
-                        ));
+            Some(
+                match fleets::kick_or_remove_fleet_member(
+                    ctx,
+                    fleet_id,
+                    claims.map(|c| c.character_id),
+                    member_id,
+                    true,
+                ) {
+                    Ok(outcome) => {
+                        fleet_notify::emit_fleet_member_removed(ctx, &outcome);
+                        if outcome.was_member {
+                            fleet_notify::emit_fleet_session_cleared(
+                                ctx,
+                                fleet_id,
+                                member_id,
+                                outcome.old_role_num,
+                            );
+                        }
+                        RouteExecutionResult::no_content(0)
                     }
-                }
-                Ok(())
-            });
-            Some(match check {
-                Ok(()) => {
-                    crate::services::fleet_social::fleet_social_notify::remove_character_from_fleet(
-                        ctx,
-                        fleet_id,
-                        member_id,
-                    );
-                    RouteExecutionResult::no_content(0)
-                }
-                Err(e) => e,
-            })
+                    Err(e) => domain_err_to_esi(e),
+                },
+            )
         }
 
         ("GET", "/fleets/{fleet_id}/wings") => {
@@ -817,61 +460,25 @@ pub fn dispatch_fleet_routes(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
-            Some(ctx.db.with_snapshot(|snap| {
-                let Some(f) = snap.fleets.get(&fleet_id) else {
-                    return RouteExecutionResult::error(404, format!("Fleet {fleet_id} not found"));
-                };
-                if let Some(c) = claims {
-                    if !is_fleet_member(f, c.character_id) {
-                        return RouteExecutionResult::error(
-                            403,
-                            format!("Character {} is not a member of fleet {fleet_id}", c.character_id),
-                        );
+            Some(
+                match fleets::list_fleet_wings(ctx, fleet_id, claims.map(|c| c.character_id)) {
+                    Ok(wings) => {
+                        let out: Vec<Value> = wings
+                            .into_iter()
+                            .map(|w| {
+                                let squads: Vec<Value> = w
+                                    .squads
+                                    .into_iter()
+                                    .map(|s| json!({ "id": s.squad_id, "name": s.name }))
+                                    .collect();
+                                json!({ "id": w.wing_id, "name": w.name, "squads": squads })
+                            })
+                            .collect();
+                        RouteExecutionResult::ok_json(json!(out), 5)
                     }
-                }
-                let mut wings = Vec::new();
-                let mut wing_ids = f.wings.clone();
-                for &wid in f.wing_details.keys() {
-                    if !wing_ids.contains(&wid) {
-                        wing_ids.push(wid);
-                    }
-                }
-                wing_ids.sort_unstable();
-                for wid in wing_ids {
-                    let w_name = f
-                        .wing_details
-                        .get(&wid)
-                        .map(|w| w.name.clone())
-                        .unwrap_or_else(|| format!("Wing {wid}"));
-                    let mut squad_ids: Vec<i64> = f
-                        .wing_details
-                        .get(&wid)
-                        .map(|w| w.squad_ids.clone())
-                        .unwrap_or_default();
-                    for (sid, sq) in &f.squad_details {
-                        if sq.wing_id == wid && !squad_ids.contains(sid) {
-                            squad_ids.push(*sid);
-                        }
-                    }
-                    if squad_ids.is_empty() && f.squad_details.is_empty() {
-                        squad_ids.extend(f.squads.iter().copied());
-                    }
-                    squad_ids.sort_unstable();
-                    let squads: Vec<Value> = squad_ids
-                        .into_iter()
-                        .map(|sid| {
-                            let s_name = f
-                                .squad_details
-                                .get(&sid)
-                                .map(|s| s.name.clone())
-                                .unwrap_or_else(|| format!("Squad {sid}"));
-                            json!({ "id": sid, "name": s_name })
-                        })
-                        .collect();
-                    wings.push(json!({ "id": wid, "name": w_name, "squads": squads }));
-                }
-                RouteExecutionResult::ok_json(json!(wings), 5)
-            }))
+                    Err(e) => domain_err_to_esi(e),
+                },
+            )
         }
 
         ("POST", "/fleets/{fleet_id}/wings") => {
@@ -879,42 +486,28 @@ pub fn dispatch_fleet_routes(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
-            let res: Result<i64, RouteExecutionResult> = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(f) = snap.fleets.get(&fleet_id) else {
-                    return Err(RouteExecutionResult::error(404, format!("Fleet {fleet_id} not found")));
-                };
-                if let Some(c) = claims {
-                    if !is_fleet_boss_or_fc(f, c.character_id) {
-                        return Err(RouteExecutionResult::error(
-                            403,
-                            format!(
-                                "Character {} lacks fleet commander/boss permissions for fleet {fleet_id}",
-                                c.character_id
-                            ),
-                        ));
+            Some(
+                match fleets::create_fleet_wing(
+                    ctx,
+                    fleet_id,
+                    claims.map(|c| c.character_id),
+                    None,
+                    false,
+                    2001,
+                    false,
+                ) {
+                    Ok(created) => {
+                        ctx.notify(
+                            NotificationTarget::Fleet(fleet_id),
+                            "OnFleetWingAdded",
+                            "fleetid",
+                            vec![PyRep::Integer(created.wing_id)],
+                        );
+                        RouteExecutionResult::created_json(json!({ "wing_id": created.wing_id }))
                     }
-                }
-                snap.next_entity_id += 1;
-                let wing_id = snap.next_entity_id.max(2001);
-                snap.next_entity_id = wing_id;
-                let f = snap.fleets.get_mut(&fleet_id).unwrap();
-                let name = format!("Wing {}", f.wings.len() + 1);
-                f.wings.push(wing_id);
-                f.wing_details.insert(
-                    wing_id,
-                    FleetWingRecord {
-                        wing_id,
-                        name,
-                        commander_id: None,
-                        squad_ids: Vec::new(),
-                    },
-                );
-                Ok(wing_id)
-            });
-            Some(match res {
-                Ok(wing_id) => RouteExecutionResult::created_json(json!({ "wing_id": wing_id })),
-                Err(e) => e,
-            })
+                    Err(e) => domain_err_to_esi(e),
+                },
+            )
         }
 
         ("PUT", "/fleets/{fleet_id}/wings/{wing_id}") => {
@@ -938,44 +531,27 @@ pub fn dispatch_fleet_routes(
             let Some(name) = payload.get("name").and_then(Value::as_str) else {
                 return Some(RouteExecutionResult::error(400, "Missing wing 'name'"));
             };
-            let trimmed = name.trim();
-            if trimmed.is_empty() || trimmed.len() > 10 {
-                return Some(RouteExecutionResult::error(400, "Wing 'name' must be 1..=10 characters"));
-            }
-            let res: Result<(), RouteExecutionResult> = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(f) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(RouteExecutionResult::error(404, format!("Fleet {fleet_id} not found")));
-                };
-                if !f.wings.contains(&wing_id) && !f.wing_details.contains_key(&wing_id) {
-                    return Err(RouteExecutionResult::error(
-                        404,
-                        format!("Wing {wing_id} not found in fleet {fleet_id}"),
-                    ));
-                }
-                if let Some(c) = claims {
-                    if !can_manage_wing(f, c.character_id, wing_id) {
-                        return Err(RouteExecutionResult::error(
-                            403,
-                            format!(
-                                "Character {} lacks wing/fleet commander permissions for wing {wing_id}",
-                                c.character_id
-                            ),
-                        ));
-                    }
-                }
-                let entry = f.wing_details.entry(wing_id).or_insert_with(|| FleetWingRecord {
+            Some(
+                match fleets::rename_fleet_wing(
+                    ctx,
+                    fleet_id,
+                    claims.map(|c| c.character_id),
                     wing_id,
-                    name: trimmed.to_string(),
-                    commander_id: None,
-                    squad_ids: Vec::new(),
-                });
-                entry.name = trimmed.to_string();
-                Ok(())
-            });
-            Some(match res {
-                Ok(()) => RouteExecutionResult::no_content(0),
-                Err(e) => e,
-            })
+                    name,
+                    true,
+                ) {
+                    Ok(renamed) => {
+                        ctx.notify(
+                            NotificationTarget::Fleet(fleet_id),
+                            "OnFleetWingNameChanged",
+                            "fleetid",
+                            vec![PyRep::Integer(wing_id), PyRep::String(renamed)],
+                        );
+                        RouteExecutionResult::no_content(0)
+                    }
+                    Err(e) => domain_err_to_esi(e),
+                },
+            )
         }
 
         ("DELETE", "/fleets/{fleet_id}/wings/{wing_id}") => {
@@ -987,48 +563,26 @@ pub fn dispatch_fleet_routes(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
-            let res: Result<(), RouteExecutionResult> = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(f) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(RouteExecutionResult::error(404, format!("Fleet {fleet_id} not found")));
-                };
-                if let Some(c) = claims {
-                    if !is_fleet_boss_or_fc(f, c.character_id) {
-                        return Err(RouteExecutionResult::error(
-                            403,
-                            format!(
-                                "Character {} lacks fleet commander/boss permissions for fleet {fleet_id}",
-                                c.character_id
-                            ),
-                        ));
+            Some(
+                match fleets::delete_fleet_wing(
+                    ctx,
+                    fleet_id,
+                    claims.map(|c| c.character_id),
+                    wing_id,
+                    false,
+                ) {
+                    Ok(()) => {
+                        ctx.notify(
+                            NotificationTarget::Fleet(fleet_id),
+                            "OnFleetWingDeleted",
+                            "fleetid",
+                            vec![PyRep::Integer(wing_id)],
+                        );
+                        RouteExecutionResult::no_content(0)
                     }
-                }
-                if !f.wings.contains(&wing_id) && !f.wing_details.contains_key(&wing_id) {
-                    return Err(RouteExecutionResult::error(
-                        404,
-                        format!("Wing {wing_id} not found in fleet {fleet_id}"),
-                    ));
-                }
-                f.wings.retain(|&w| w != wing_id);
-                if let Some(removed_wing) = f.wing_details.remove(&wing_id) {
-                    for sid in removed_wing.squad_ids {
-                        f.squads.retain(|&s| s != sid);
-                        f.squad_details.remove(&sid);
-                    }
-                }
-                f.squad_details.retain(|sid, sq| {
-                    if sq.wing_id == wing_id {
-                        f.squads.retain(|&s| s != *sid);
-                        false
-                    } else {
-                        true
-                    }
-                });
-                Ok(())
-            });
-            Some(match res {
-                Ok(()) => RouteExecutionResult::no_content(0),
-                Err(e) => e,
-            })
+                    Err(e) => domain_err_to_esi(e),
+                },
+            )
         }
 
         ("POST", "/fleets/{fleet_id}/wings/{wing_id}/squads") => {
@@ -1040,57 +594,29 @@ pub fn dispatch_fleet_routes(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
-            let res: Result<i64, RouteExecutionResult> = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(f) = snap.fleets.get(&fleet_id) else {
-                    return Err(RouteExecutionResult::error(404, format!("Fleet {fleet_id} not found")));
-                };
-                if !f.wings.contains(&wing_id) && !f.wing_details.contains_key(&wing_id) {
-                    return Err(RouteExecutionResult::error(
-                        404,
-                        format!("Wing {wing_id} not found in fleet {fleet_id}"),
-                    ));
-                }
-                if let Some(c) = claims {
-                    if !can_manage_wing(f, c.character_id, wing_id) {
-                        return Err(RouteExecutionResult::error(
-                            403,
-                            format!(
-                                "Character {} lacks wing/fleet commander permissions for wing {wing_id}",
-                                c.character_id
-                            ),
-                        ));
-                    }
-                }
-                snap.next_entity_id += 1;
-                let squad_id = snap.next_entity_id.max(3001);
-                snap.next_entity_id = squad_id;
-                let f = snap.fleets.get_mut(&fleet_id).unwrap();
-                let s_name = format!("Squad {}", f.squads.len() + 1);
-                f.squads.push(squad_id);
-                f.squad_details.insert(
-                    squad_id,
-                    FleetSquadRecord {
-                        squad_id,
-                        wing_id,
-                        name: s_name,
-                        commander_id: None,
-                    },
-                );
-                let wing = f.wing_details.entry(wing_id).or_insert_with(|| FleetWingRecord {
+            Some(
+                match fleets::create_fleet_squad(
+                    ctx,
+                    fleet_id,
+                    claims.map(|c| c.character_id),
                     wing_id,
-                    name: format!("Wing {wing_id}"),
-                    commander_id: None,
-                    squad_ids: Vec::new(),
-                });
-                if !wing.squad_ids.contains(&squad_id) {
-                    wing.squad_ids.push(squad_id);
-                }
-                Ok(squad_id)
-            });
-            Some(match res {
-                Ok(squad_id) => RouteExecutionResult::created_json(json!({ "squad_id": squad_id })),
-                Err(e) => e,
-            })
+                    None,
+                    false,
+                    3001,
+                    false,
+                ) {
+                    Ok(created) => {
+                        ctx.notify(
+                            NotificationTarget::Fleet(fleet_id),
+                            "OnFleetSquadAdded",
+                            "fleetid",
+                            vec![PyRep::Integer(wing_id), PyRep::Integer(created.squad_id)],
+                        );
+                        RouteExecutionResult::created_json(json!({ "squad_id": created.squad_id }))
+                    }
+                    Err(e) => domain_err_to_esi(e),
+                },
+            )
         }
 
         ("PUT", "/fleets/{fleet_id}/squads/{squad_id}") => {
@@ -1114,51 +640,27 @@ pub fn dispatch_fleet_routes(
             let Some(name) = payload.get("name").and_then(Value::as_str) else {
                 return Some(RouteExecutionResult::error(400, "Missing squad 'name'"));
             };
-            let trimmed = name.trim();
-            if trimmed.is_empty() || trimmed.len() > 10 {
-                return Some(RouteExecutionResult::error(
-                    400,
-                    "Squad 'name' must be 1..=10 characters",
-                ));
-            }
-            let res: Result<(), RouteExecutionResult> = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(f) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(RouteExecutionResult::error(404, format!("Fleet {fleet_id} not found")));
-                };
-                if !f.squads.contains(&squad_id) && !f.squad_details.contains_key(&squad_id) {
-                    return Err(RouteExecutionResult::error(
-                        404,
-                        format!("Squad {squad_id} not found in fleet {fleet_id}"),
-                    ));
-                }
-                if let Some(c) = claims {
-                    if !can_manage_squad(f, c.character_id, squad_id) {
-                        return Err(RouteExecutionResult::error(
-                            403,
-                            format!(
-                                "Character {} lacks squad/wing/fleet commander permissions for squad {squad_id}",
-                                c.character_id
-                            ),
-                        ));
+            Some(
+                match fleets::rename_fleet_squad(
+                    ctx,
+                    fleet_id,
+                    claims.map(|c| c.character_id),
+                    squad_id,
+                    name,
+                    true,
+                ) {
+                    Ok(renamed) => {
+                        ctx.notify(
+                            NotificationTarget::Fleet(fleet_id),
+                            "OnFleetSquadNameChanged",
+                            "fleetid",
+                            vec![PyRep::Integer(squad_id), PyRep::String(renamed)],
+                        );
+                        RouteExecutionResult::no_content(0)
                     }
-                }
-                let default_wing = f.wings.first().copied().unwrap_or(1);
-                let sq = f
-                    .squad_details
-                    .entry(squad_id)
-                    .or_insert_with(|| FleetSquadRecord {
-                        squad_id,
-                        wing_id: default_wing,
-                        name: trimmed.to_string(),
-                        commander_id: None,
-                    });
-                sq.name = trimmed.to_string();
-                Ok(())
-            });
-            Some(match res {
-                Ok(()) => RouteExecutionResult::no_content(0),
-                Err(e) => e,
-            })
+                    Err(e) => domain_err_to_esi(e),
+                },
+            )
         }
 
         ("DELETE", "/fleets/{fleet_id}/squads/{squad_id}") => {
@@ -1170,38 +672,26 @@ pub fn dispatch_fleet_routes(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
-            let res: Result<(), RouteExecutionResult> = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(f) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(RouteExecutionResult::error(404, format!("Fleet {fleet_id} not found")));
-                };
-                if !f.squads.contains(&squad_id) && !f.squad_details.contains_key(&squad_id) {
-                    return Err(RouteExecutionResult::error(
-                        404,
-                        format!("Squad {squad_id} not found in fleet {fleet_id}"),
-                    ));
-                }
-                if let Some(c) = claims {
-                    if !can_manage_squad(f, c.character_id, squad_id) {
-                        return Err(RouteExecutionResult::error(
-                            403,
-                            format!(
-                                "Character {} lacks squad/wing/fleet commander permissions for squad {squad_id}",
-                                c.character_id
-                            ),
-                        ));
+            Some(
+                match fleets::delete_fleet_squad(
+                    ctx,
+                    fleet_id,
+                    claims.map(|c| c.character_id),
+                    squad_id,
+                    false,
+                ) {
+                    Ok(()) => {
+                        ctx.notify(
+                            NotificationTarget::Fleet(fleet_id),
+                            "OnFleetSquadDeleted",
+                            "fleetid",
+                            vec![PyRep::Integer(squad_id)],
+                        );
+                        RouteExecutionResult::no_content(0)
                     }
-                }
-                f.squads.retain(|&s| s != squad_id);
-                f.squad_details.remove(&squad_id);
-                for wing in f.wing_details.values_mut() {
-                    wing.squad_ids.retain(|&s| s != squad_id);
-                }
-                Ok(())
-            });
-            Some(match res {
-                Ok(()) => RouteExecutionResult::no_content(0),
-                Err(e) => e,
-            })
+                    Err(e) => domain_err_to_esi(e),
+                },
+            )
         }
 
         // Remote Client UI OpenWindow Routes (`ESI-7`)

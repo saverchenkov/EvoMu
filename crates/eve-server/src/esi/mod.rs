@@ -23,6 +23,12 @@ pub mod universe_routes;
 pub use openapi::OpenApiSpec;
 pub use router::EsiRouter;
 
+pub(crate) fn domain_err_to_esi(
+    err: crate::domain::DomainError,
+) -> sample_routes::RouteExecutionResult {
+    sample_routes::RouteExecutionResult::error(err.http_status(), err.message)
+}
+
 use crate::esi::sample_routes::civil_from_unix;
 use crate::router::ServerContext;
 use serde_json::Value;

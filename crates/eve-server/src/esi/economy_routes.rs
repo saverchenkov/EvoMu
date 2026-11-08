@@ -109,32 +109,10 @@ fn contract_retained_in_list(c: &eve_db::ContractRecord, now: u64) -> bool {
     true
 }
 
-fn is_public_available_contract(c: &eve_db::ContractRecord) -> bool {
-    (c.availability.is_empty() || c.availability.eq_ignore_ascii_case("Public"))
-        && c.assignee_id == 0
-}
-
-fn is_character_party_to_contract(
-    snap: &eve_db::WorldStateSnapshot,
-    char_id: i64,
-    c: &eve_db::ContractRecord,
-) -> bool {
-    if (c.issuer_id == char_id && !c.for_corp)
-        || c.acceptor_id == Some(char_id)
-        || c.assignee_id == char_id
-        || c.current_bidder_id == Some(char_id)
-        || c.bid_history.iter().any(|&(b, _, _)| b == char_id)
-    {
-        return true;
-    }
-    snap.characters.get(&char_id).is_some_and(|ch| {
-        (ch.corporation_id != 0
-            && (c.assignee_id == ch.corporation_id
-                || (c.availability.eq_ignore_ascii_case("Corporation")
-                    && c.issuer_corp_id == ch.corporation_id)))
-            || ch.alliance_id.is_some_and(|a| a != 0 && c.assignee_id == a)
-    })
-}
+use crate::domain::market_acl::{
+    contract_in_region as domain_contract_in_region, is_character_party_to_contract,
+    is_public_available_contract,
+};
 
 fn is_corp_contract(
     corp: &eve_db::CorporationRecord,
@@ -154,17 +132,7 @@ fn contract_in_region(
     c: &eve_db::ContractRecord,
     reg_u32: u32,
 ) -> bool {
-    if let Some(st) = ctx.sde.stations.get(&c.start_station_id) {
-        return st.region_id == reg_u32;
-    }
-    if let Some(upwell) = snap.structures.get(&c.start_station_id) {
-        return ctx
-            .sde
-            .solar_systems
-            .get(&upwell.solar_system_id)
-            .is_some_and(|sys| sys.region_id == reg_u32);
-    }
-    false
+    domain_contract_in_region(&ctx.sde, snap, c.start_station_id, reg_u32)
 }
 
 /// Contract item rows from live state: items the issuer put in escrow (`is_included: true`, only
@@ -597,17 +565,14 @@ pub fn dispatch_economy_route(
             };
             let caller_char_id = claims.map(|c| c.character_id).unwrap_or(0);
             Some(ctx.db.with_snapshot(|snap| {
-                if let Err(e) =
-                    crate::services::structure_profile_services::require_structure_service_access(
-                        ctx,
-                        snap,
-                        structure_id,
-                        caller_char_id,
-                        crate::services::structure_profile_services::StructureServiceKind::Market,
-                    )
-                {
-                    let status = if e.code == "StructureNotFound" { 404 } else { 403 };
-                    return RouteExecutionResult::error(status, e.message);
+                if let Err(e) = crate::domain::market_acl::verify_structure_market_query_access(
+                    Some(ctx),
+                    snap,
+                    caller_char_id,
+                    structure_id,
+                    true,
+                ) {
+                    return super::domain_err_to_esi(e);
                 }
                 let mut orders: Vec<_> = snap
                     .market_orders

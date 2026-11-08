@@ -651,3 +651,10 @@ mod corp_registry_ops_extra_unit_tests;
 mod corp_registry_actions_and_tracking_unit_tests;
 #[cfg(test)]
 mod r8_shard_h_security_tests;
+
+pub(crate) fn domain_err_to_rpc(err: crate::domain::DomainError) -> eve_proto::BridgeRpcError {
+    eve_proto::BridgeRpcError {
+        code: err.code,
+        message: err.message,
+    }
+}

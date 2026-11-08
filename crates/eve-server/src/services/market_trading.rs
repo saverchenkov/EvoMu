@@ -289,20 +289,13 @@ pub(crate) fn can_caller_view_upwell_market_orders(
     location_id: i64,
     now_unix: u64,
 ) -> bool {
-    let Some(st) = snap.structures.get(&location_id) else {
-        return true;
-    };
-    is_structure_market_online(snap, location_id)
-        && crate::esi::universe_routes::character_has_structure_acl_access(snap, char_id, st)
-        && crate::services::structure_profile_services::check_upwell_market_access_and_rate(
-            ctx,
-            snap,
-            location_id,
-            char_id,
-            now_unix,
-            "MarketHubOffline",
-        )
-        .is_ok()
+    crate::domain::market_acl::can_caller_view_market_location_at(
+        Some(ctx),
+        snap,
+        char_id,
+        location_id,
+        Some(now_unix),
+    )
 }
 
 pub(crate) fn resolve_structure_broker_rate(snap: &eve_db::WorldStateSnapshot, structure_id: i64) -> f64 {
@@ -558,12 +551,12 @@ pub fn handle(
                         o.type_id == type_id
                             && o.vol_remaining > 0
                             && o.region_id == region_id
-                            && can_caller_view_upwell_market_orders(
-                                ctx,
+                            && crate::domain::market_acl::can_caller_view_market_location_at(
+                                Some(ctx),
                                 snap,
                                 char_id,
                                 o.station_id,
-                                now_unix,
+                                Some(now_unix),
                             )
                     })
                     .collect();
@@ -610,12 +603,12 @@ pub fn handle(
                         && o.vol_remaining > 0
                         && o.region_id == region_id
                         && o.station_id == station_id
-                        && can_caller_view_upwell_market_orders(
-                            ctx,
+                        && crate::domain::market_acl::can_caller_view_market_location_at(
+                            Some(ctx),
                             snap,
                             char_id,
                             o.station_id,
-                            now_unix,
+                            Some(now_unix),
                         )
                 }))
             });
@@ -640,12 +633,12 @@ pub fn handle(
                     !o.is_bid
                         && o.vol_remaining > 0
                         && o.region_id == region_id
-                        && can_caller_view_upwell_market_orders(
-                            ctx,
+                        && crate::domain::market_acl::can_caller_view_market_location_at(
+                            Some(ctx),
                             snap,
                             char_id,
                             o.station_id,
-                            now_unix,
+                            Some(now_unix),
                         )
                 }))
             });

@@ -144,17 +144,7 @@ fn append_corp_journal(
         });
 }
 
-/// Computes `(is_ceo, effective_roles)` for `char_id` in `corp_id` from DB corporation state,
-/// delegating to [`eve_db::WorldStateSnapshot::effective_corp_roles_at`].
-pub(crate) fn effective_corp_member_roles(
-    snap: &eve_db::WorldStateSnapshot,
-    corp_id: i64,
-    char_id: i64,
-    session_roles: u64,
-    now_unix: u64,
-) -> (bool, u64) {
-    snap.effective_corp_roles_at(corp_id, char_id, None, session_roles, now_unix)
-}
+pub(crate) use crate::domain::corp_governance::effective_corp_member_roles;
 
 fn extract_first_positive_id_in_msg(msg: &DynamicQuasarMessage) -> Option<i64> {
     let mut keys: Vec<u32> = msg.fields.keys().copied().collect();

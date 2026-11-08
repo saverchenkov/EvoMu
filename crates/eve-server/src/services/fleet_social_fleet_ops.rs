@@ -393,25 +393,24 @@ pub(super) async fn handle_fleet_ops(
                 }
             };
             let motd = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
-                };
-                let Some(caller_m) = fleet.member_details.get(&char_id) else {
-                    return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() });
-                };
-                if fleet.boss_id != char_id && role_to_i64(caller_m.role) > 1 {
-                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Boss or Fleet Commander can set MOTD".into() });
-                }
-                fleet.motd = motd.clone();
-                Ok(())
-            });
-            match res {
-                Ok(()) => {
+            match crate::domain::fleets::update_fleet_settings(
+                ctx,
+                crate::domain::fleets::UpdateFleetSettingsInput {
+                    fleet_id,
+                    caller_char_id: Some(char_id),
+                    require_boss_only: false,
+                    motd: Some(motd.clone()),
+                    is_free_move: None,
+                    is_registered: None,
+                    is_voice_enabled: None,
+                    is_loot_logging: None,
+                },
+            ) {
+                Ok(_) => {
                     notify::emit_motd(ctx, NotificationTarget::Fleet(fleet_id), &motd, true);
                     Some(Ok(PyRep::keyval([("fleetID", PyRep::Integer(fleet_id)), ("motd", PyRep::String(motd))])))
                 }
-                Err(e) => Some(Err(e)),
+                Err(e) => Some(Err(crate::services::domain_err_to_rpc(e))),
             }
         }
 
@@ -423,20 +422,11 @@ pub(super) async fn handle_fleet_ops(
             let Some(fleet_id) = session.fleet_id else {
                 return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
             };
-            let res = ctx.db.with_snapshot(|snap| {
-                let Some(fleet) = snap.fleets.get(&fleet_id) else {
-                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
-                };
-                if !fleet.member_details.contains_key(&char_id) {
-                    return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not a member of this fleet".into() });
-                }
-                Ok(fleet.motd.clone())
-            });
-            match res {
-                Ok(motd) => Some(Ok(PyRep::String(motd))),
+            match crate::domain::fleets::get_fleet_settings(ctx, fleet_id, Some(char_id)) {
+                Ok(view) => Some(Ok(PyRep::String(view.motd))),
                 Err(e) => {
                     session.fleet_id = None;
-                    Some(Err(e))
+                    Some(Err(crate::services::domain_err_to_rpc(e)))
                 }
             }
         }
@@ -480,39 +470,27 @@ pub(super) async fn handle_fleet_ops(
                 Some(PyRep::Integer(i)) => Some(*i != 0),
                 _ => kv_bool("isLootLogging"),
             };
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
-                };
-                if fleet.boss_id != char_id {
-                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Boss can change fleet options".into() });
-                }
-                let old = (fleet.free_move, fleet.is_registered);
-                fleet.free_move = is_free_move;
-                if let Some(reg) = is_registered {
-                    fleet.is_registered = reg;
-                }
-                Ok((old, fleet.is_registered))
-            });
-            match res {
-                Ok(((old_free, old_reg), reg)) => {
-                    let auto = {
-                        let mut ex = ctx.fleet_extras.lock().unwrap();
-                        if let Some(ve) = is_voice_enabled {
-                            ex.voice_enabled.insert(fleet_id, ve);
-                        }
-                        if let Some(ll) = is_loot_logging {
-                            ex.loot_logging.insert(fleet_id, ll);
-                        }
-                        ex.auto_join_squads.get(&fleet_id).copied().flatten()
-                    };
+            match crate::domain::fleets::update_fleet_settings(
+                ctx,
+                crate::domain::fleets::UpdateFleetSettingsInput {
+                    fleet_id,
+                    caller_char_id: Some(char_id),
+                    require_boss_only: true,
+                    motd: None,
+                    is_free_move: Some(is_free_move),
+                    is_registered,
+                    is_voice_enabled,
+                    is_loot_logging,
+                },
+            ) {
+                Ok(out) => {
                     notify::sync_fleet_options_to_db(ctx);
-                    let old = notify::options_keyval(old_free, old_reg, auto);
-                    notify::emit_options_changed(ctx, fleet_id, old, notify::options_keyval(is_free_move, reg, auto));
+                    let old = notify::options_keyval(out.old_free_move, out.old_registered, out.auto_join_squad_id);
+                    notify::emit_options_changed(ctx, fleet_id, old, notify::options_keyval(out.new_free_move, out.new_registered, out.auto_join_squad_id));
                     crate::services::notify_emitters_character_services::emit_fleet_respawn_points_if_any(ctx, fleet_id);
-                    Some(Ok(PyRep::keyval([("isFreeMove", PyRep::Bool(is_free_move)), ("isRegistered", PyRep::Bool(reg))])))
+                    Some(Ok(PyRep::keyval([("isFreeMove", PyRep::Bool(out.new_free_move)), ("isRegistered", PyRep::Bool(out.new_registered))])))
                 }
-                Err(e) => Some(Err(e)),
+                Err(e) => Some(Err(crate::services::domain_err_to_rpc(e))),
             }
         }
 

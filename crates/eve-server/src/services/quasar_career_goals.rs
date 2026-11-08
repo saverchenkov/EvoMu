@@ -745,35 +745,26 @@ impl CareerGoalManager {
         };
 
         if isk > 0 || sp > 0.0 {
+            let now_unix = db.clock().now_unix_secs();
             let credit_res = db.try_with_mut_snapshot(|snap| {
-                let Some(ch) = snap.characters.get_mut(&(character_id as i64)) else {
-                    return Err("Character not found".to_string());
-                };
                 let isk_cents = IskCents::from_isk(isk);
-                let Some(new_bal) = ch.balance.checked_add(isk_cents) else {
-                    return Err("Balance overflow".to_string());
-                };
-                ch.balance = new_bal;
-                ch.free_skill_points += sp;
-                if isk > 0 {
-                    let now_unix = db.clock().now_unix_secs();
-                    snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
-                        owner_id: character_id as i64,
-                        entry_type: "CAREER_PROGRAM_REWARD",
-                        amount: isk_cents,
-                        balance_after: new_bal,
-                        reason: format!("AIR Career Program goal reward ({})", res_goal.def.name),
-                        meta: eve_db::ledger::JournalMeta {
-                            ref_type_id: 170, // CAREER_PROGRAM_REWARD
-                            first_party_id: 1000125, // CONCORD
-                            second_party_id: character_id as i64,
-                            account_key: eve_db::ledger::ACCOUNTING_KEY_CASH,
-                            date_unix: now_unix,
-                            ..Default::default()
-                        },
-                    });
-                }
-                Ok(())
+                let journal = (isk > 0).then(|| {
+                    (
+                        "CAREER_PROGRAM_REWARD",
+                        format!("AIR Career Program goal reward ({})", res_goal.def.name),
+                        Some((170, 1_000_125, now_unix)),
+                    )
+                });
+                crate::domain::career_goals::credit_character_reward_in_snap(
+                    snap,
+                    character_id as i64,
+                    isk_cents,
+                    sp,
+                    0,
+                    journal,
+                )
+                .map(|_| ())
+                .map_err(|e| e.message)
             });
             if credit_res.is_err() {
                 let mut map = self
@@ -908,15 +899,23 @@ impl CareerGoalManager {
         }
 
         db.try_with_mut_snapshot(|snap| {
-            if self.is_milestone_claimed(character_id, milestone_id, snap) {
-                return Err((STATUS_FORBIDDEN, "Career milestone reward already claimed".into()));
-            }
-            let Some(ch) = snap.characters.get_mut(&(character_id as i64)) else {
-                return Err((STATUS_BAD_REQUEST, "Unable to credit career milestone reward".into()));
-            };
-            ch.free_skill_points += milestone.sp_reward;
-            self.mark_milestone_claimed_in_snapshot(character_id, milestone_id, snap);
-            Ok(())
+            crate::domain::career_goals::claim_career_goal_or_milestone_in_snap(
+                snap,
+                self,
+                character_id as i64,
+                milestone_id,
+                u64::from(cp),
+                u64::from(milestone.required_points),
+                milestone.sp_reward,
+            )
+            .map(|_| ())
+            .map_err(|e| {
+                if e.kind == crate::domain::DomainErrorKind::Forbidden {
+                    (STATUS_FORBIDDEN, e.message)
+                } else {
+                    (STATUS_BAD_REQUEST, "Unable to credit career milestone reward".into())
+                }
+            })
         })?;
         self.save_to_db();
 

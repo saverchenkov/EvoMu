@@ -236,30 +236,12 @@ pub(super) async fn handle_fleets(
                 return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
             };
             let wing_name = args.first().and_then(|a| a.as_str()).unwrap_or("New Wing");
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
-                };
-                let Some(caller_m) = fleet.member_details.get(&char_id) else {
-                    return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() });
-                };
-                if char_id != fleet.boss_id && role_to_i64(caller_m.role) > 1 {
-                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Boss or Fleet Commander can create wings".into() });
+            match crate::domain::fleets::create_fleet_wing(ctx, fleet_id, Some(char_id), Some(wing_name), true, 1, true) {
+                Ok(created) => {
+                    ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetWingAdded", "fleetid", vec![PyRep::Integer(created.wing_id)]);
+                    Some(Ok(PyRep::keyval([("fleetID", PyRep::Integer(fleet_id)), ("wingID", PyRep::Integer(created.wing_id)), ("name", PyRep::String(created.name))])))
                 }
-                if fleet.wings.len() >= 5 {
-                    return Err(BridgeRpcError { code: "MaxWingsReached".into(), message: "Fleet already has the maximum of 5 wings".into() });
-                }
-                let wid = (fleet.wings.iter().max().copied().unwrap_or(0) + 1).max(1);
-                fleet.wings.push(wid);
-                fleet.wing_details.insert(wid, FleetWingRecord { wing_id: wid, name: wing_name.to_string(), commander_id: None, squad_ids: Vec::new() });
-                Ok(wid)
-            });
-            match res {
-                Ok(wid) => {
-                    ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetWingAdded", "fleetid", vec![PyRep::Integer(wid)]);
-                    Some(Ok(PyRep::keyval([("fleetID", PyRep::Integer(fleet_id)), ("wingID", PyRep::Integer(wid)), ("name", PyRep::String(wing_name.to_string()))])))
-                }
-                Err(e) => Some(Err(e)),
+                Err(e) => Some(Err(crate::services::domain_err_to_rpc(e))),
             }
         }
 
@@ -271,35 +253,12 @@ pub(super) async fn handle_fleets(
             let Some(wing_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "DeleteWing requires wingID".into() }));
             };
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
-                };
-                let Some(caller_m) = fleet.member_details.get(&char_id) else {
-                    return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() });
-                };
-                if char_id != fleet.boss_id && role_to_i64(caller_m.role) > 1 {
-                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Boss or Fleet Commander can delete wings".into() });
-                }
-                if fleet.member_details.values().any(|m| m.wing_id == Some(wing_id)) {
-                    return Err(BridgeRpcError { code: "WingNotEmpty".into(), message: "Cannot delete a wing that still contains members".into() });
-                }
-                let Some(removed_wing) = fleet.wing_details.remove(&wing_id) else {
-                    return Err(BridgeRpcError { code: "WingNotFound".into(), message: format!("Wing {wing_id} not found") });
-                };
-                fleet.wings.retain(|&w| w != wing_id);
-                for sid in removed_wing.squad_ids {
-                    fleet.squads.retain(|&s| s != sid);
-                    fleet.squad_details.remove(&sid);
-                }
-                Ok(())
-            });
-            match res {
+            match crate::domain::fleets::delete_fleet_wing(ctx, fleet_id, Some(char_id), wing_id, true) {
                 Ok(()) => {
                     ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetWingDeleted", "fleetid", vec![PyRep::Integer(wing_id)]);
                     Some(Ok(PyRep::keyval([("wingID", PyRep::Integer(wing_id)), ("deleted", PyRep::Bool(true))])))
                 }
-                Err(e) => Some(Err(e)),
+                Err(e) => Some(Err(crate::services::domain_err_to_rpc(e))),
             }
         }
 
@@ -312,28 +271,12 @@ pub(super) async fn handle_fleets(
                 return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "ChangeWingName requires wingID".into() }));
             };
             let new_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("Renamed Wing");
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
-                };
-                let Some(caller_m) = fleet.member_details.get(&char_id) else {
-                    return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() });
-                };
-                if char_id != fleet.boss_id && role_to_i64(caller_m.role) > 2 {
-                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Renaming a wing requires Wing/Fleet Commander or Boss".into() });
+            match crate::domain::fleets::rename_fleet_wing(ctx, fleet_id, Some(char_id), wing_id, new_name, false) {
+                Ok(name) => {
+                    ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetWingNameChanged", "fleetid", vec![PyRep::Integer(wing_id), PyRep::String(name.clone())]);
+                    Some(Ok(PyRep::keyval([("wingID", PyRep::Integer(wing_id)), ("name", PyRep::String(name))])))
                 }
-                let Some(wing) = fleet.wing_details.get_mut(&wing_id) else {
-                    return Err(BridgeRpcError { code: "WingNotFound".into(), message: format!("Wing {wing_id} not found") });
-                };
-                wing.name = new_name.to_string();
-                Ok(())
-            });
-            match res {
-                Ok(()) => {
-                    ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetWingNameChanged", "fleetid", vec![PyRep::Integer(wing_id), PyRep::String(new_name.to_string())]);
-                    Some(Ok(PyRep::keyval([("wingID", PyRep::Integer(wing_id)), ("name", PyRep::String(new_name.to_string()))])))
-                }
-                Err(e) => Some(Err(e)),
+                Err(e) => Some(Err(crate::services::domain_err_to_rpc(e))),
             }
         }
 
@@ -344,34 +287,12 @@ pub(super) async fn handle_fleets(
             };
             let wing_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
             let squad_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("New Squad");
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
-                };
-                let Some(caller_m) = fleet.member_details.get(&char_id) else {
-                    return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() });
-                };
-                if char_id != fleet.boss_id && role_to_i64(caller_m.role) > 2 {
-                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Boss, Fleet Commander, or Wing Commander can create squads".into() });
+            match crate::domain::fleets::create_fleet_squad(ctx, fleet_id, Some(char_id), wing_id, Some(squad_name), true, 1, true) {
+                Ok(created) => {
+                    ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetSquadAdded", "fleetid", vec![PyRep::Integer(wing_id), PyRep::Integer(created.squad_id)]);
+                    Some(Ok(PyRep::keyval([("fleetID", PyRep::Integer(fleet_id)), ("wingID", PyRep::Integer(wing_id)), ("squadID", PyRep::Integer(created.squad_id)), ("name", PyRep::String(created.name))])))
                 }
-                let Some(wing) = fleet.wing_details.get_mut(&wing_id) else {
-                    return Err(BridgeRpcError { code: "WingNotFound".into(), message: format!("Wing {wing_id} not found in fleet {fleet_id}") });
-                };
-                if wing.squad_ids.len() >= 5 {
-                    return Err(BridgeRpcError { code: "MaxSquadsReached".into(), message: "Wing already has the maximum of 5 squads".into() });
-                }
-                let sid = (fleet.squads.iter().max().copied().unwrap_or(0) + 1).max(1);
-                wing.squad_ids.push(sid);
-                fleet.squads.push(sid);
-                fleet.squad_details.insert(sid, FleetSquadRecord { squad_id: sid, wing_id, name: squad_name.to_string(), commander_id: None });
-                Ok(sid)
-            });
-            match res {
-                Ok(sid) => {
-                    ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetSquadAdded", "fleetid", vec![PyRep::Integer(wing_id), PyRep::Integer(sid)]);
-                    Some(Ok(PyRep::keyval([("fleetID", PyRep::Integer(fleet_id)), ("wingID", PyRep::Integer(wing_id)), ("squadID", PyRep::Integer(sid)), ("name", PyRep::String(squad_name.to_string()))])))
-                }
-                Err(e) => Some(Err(e)),
+                Err(e) => Some(Err(crate::services::domain_err_to_rpc(e))),
             }
         }
 
@@ -383,32 +304,12 @@ pub(super) async fn handle_fleets(
             let Some(squad_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "DeleteSquad requires squadID".into() }));
             };
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
-                };
-                let Some(caller_m) = fleet.member_details.get(&char_id) else {
-                    return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() });
-                };
-                if char_id != fleet.boss_id && role_to_i64(caller_m.role) > 2 {
-                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Deleting a squad requires Wing/Fleet Commander or Boss".into() });
-                }
-                if fleet.member_details.values().any(|m| m.squad_id == Some(squad_id)) {
-                    return Err(BridgeRpcError { code: "SquadNotEmpty".into(), message: "Cannot delete a squad that still contains members".into() });
-                }
-                if fleet.squad_details.remove(&squad_id).is_none() {
-                    return Err(BridgeRpcError { code: "SquadNotFound".into(), message: format!("Squad {squad_id} not found") });
-                }
-                fleet.squads.retain(|&s| s != squad_id);
-                for wing in fleet.wing_details.values_mut() { wing.squad_ids.retain(|&s| s != squad_id); }
-                Ok(())
-            });
-            match res {
+            match crate::domain::fleets::delete_fleet_squad(ctx, fleet_id, Some(char_id), squad_id, true) {
                 Ok(()) => {
                     ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetSquadDeleted", "fleetid", vec![PyRep::Integer(squad_id)]);
                     Some(Ok(PyRep::keyval([("squadID", PyRep::Integer(squad_id)), ("deleted", PyRep::Bool(true))])))
                 }
-                Err(e) => Some(Err(e)),
+                Err(e) => Some(Err(crate::services::domain_err_to_rpc(e))),
             }
         }
 
@@ -421,28 +322,12 @@ pub(super) async fn handle_fleets(
                 return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "ChangeSquadName requires squadID".into() }));
             };
             let new_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("Renamed Squad");
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
-                };
-                let Some(caller_m) = fleet.member_details.get(&char_id) else {
-                    return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() });
-                };
-                if char_id != fleet.boss_id && role_to_i64(caller_m.role) > 3 {
-                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Renaming a squad requires Squad/Wing/Fleet Commander or Boss".into() });
+            match crate::domain::fleets::rename_fleet_squad(ctx, fleet_id, Some(char_id), squad_id, new_name, false) {
+                Ok(name) => {
+                    ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetSquadNameChanged", "fleetid", vec![PyRep::Integer(squad_id), PyRep::String(name.clone())]);
+                    Some(Ok(PyRep::keyval([("squadID", PyRep::Integer(squad_id)), ("name", PyRep::String(name))])))
                 }
-                let Some(sq) = fleet.squad_details.get_mut(&squad_id) else {
-                    return Err(BridgeRpcError { code: "SquadNotFound".into(), message: format!("Squad {squad_id} not found") });
-                };
-                sq.name = new_name.to_string();
-                Ok(())
-            });
-            match res {
-                Ok(()) => {
-                    ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetSquadNameChanged", "fleetid", vec![PyRep::Integer(squad_id), PyRep::String(new_name.to_string())]);
-                    Some(Ok(PyRep::keyval([("squadID", PyRep::Integer(squad_id)), ("name", PyRep::String(new_name.to_string()))])))
-                }
-                Err(e) => Some(Err(e)),
+                Err(e) => Some(Err(crate::services::domain_err_to_rpc(e))),
             }
         }
 
@@ -470,121 +355,47 @@ pub(super) async fn handle_fleets(
             let wing_id_opt = args.get(1).and_then(|a| a.as_i64());
             let squad_id_opt = args.get(2).and_then(|a| a.as_i64());
             let role = i64_to_role(args.get(3).and_then(|a| a.as_i64()).unwrap_or(4));
-            let (max_size, has_pending_ts) = {
-                let ex = ctx.fleet_extras.lock().unwrap();
-                (
-                    ex.max_sizes.get(&fleet_id).copied().unwrap_or(256),
-                    ex.invite_timestamps.keys().any(|&(_, cid)| cid == target_char_id),
-                )
-            };
-            let target_online = notify::is_character_online_for_fleet(ctx, target_char_id);
-            let target_in_fleet = notify::character_active_fleet_id(ctx, target_char_id).is_some();
-
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let any_invite = snap.fleets.values().any(|f| f.invites.contains(&target_char_id));
-                let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(BridgeRpcError {
-                        code: "FleetNotFound".into(),
-                        message: format!("Fleet {fleet_id} not found"),
-                    });
-                };
-                let Some(caller_member) = fleet.member_details.get(&char_id) else {
-                    return Err(BridgeRpcError {
-                        code: "NotInFleet".into(),
-                        message: "Caller is not in fleet".into(),
-                    });
-                };
-                if char_id != fleet.boss_id && (role_to_i64(caller_member.role) > 3 || role_to_i64(caller_member.role) >= role_to_i64(role)) {
-                    return Err(BridgeRpcError {
-                        code: "FleetPermissionDenied".into(),
-                        message: "Only Fleet Boss or a higher-ranking Commander can invite to this role".into(),
-                    });
-                };
-                if fleet.members.len() >= max_size as usize {
-                    return Err(BridgeRpcError {
-                        code: "FleetFull".into(),
-                        message: format!("Fleet has reached its maximum size of {max_size}"),
-                    });
-                }
-                if !target_online {
-                    return Err(BridgeRpcError {
-                        code: "CharacterOffline".into(),
-                        message: "Cannot invite an offline character to a fleet".into(),
-                    });
-                }
-                if target_in_fleet {
-                    return Err(BridgeRpcError {
-                        code: "AlreadyInFleet".into(),
-                        message: "Target character is already in a fleet".into(),
-                    });
-                }
-                if has_pending_ts || any_invite {
-                    return Err(BridgeRpcError {
-                        code: "InviteAlreadyPending".into(),
-                        message: "Target character already has a pending fleet invitation".into(),
-                    });
-                }
-                let default_wing = fleet.wings.first().copied().unwrap_or(1);
-                let wid = wing_id_opt.unwrap_or(default_wing);
-                let sid = squad_id_opt.unwrap_or_else(|| {
-                    fleet
-                        .wing_details
-                        .get(&wid)
-                        .and_then(|w| w.squad_ids.first().copied())
-                        .or_else(|| fleet.squads.first().copied())
-                        .unwrap_or(1)
-                });
-                let pos_occupied = match role {
-                    FleetRole::FleetCommander => fleet.member_details.values().any(|m| m.role == FleetRole::FleetCommander),
-                    FleetRole::WingCommander => fleet.wing_details.get(&wid).and_then(|w| w.commander_id).is_some()
-                        || fleet.member_details.values().any(|m| m.role == FleetRole::WingCommander && m.wing_id == Some(wid)),
-                    FleetRole::SquadCommander => fleet.squad_details.get(&sid).and_then(|s| s.commander_id).is_some()
-                        || fleet.member_details.values().any(|m| m.role == FleetRole::SquadCommander && m.squad_id == Some(sid)),
-                    FleetRole::SquadMember => false,
-                };
-                if pos_occupied {
-                    return Err(BridgeRpcError {
-                        code: "PositionOccupied".into(),
-                        message: "The requested fleet commander position is already occupied".into(),
-                    });
-                }
-                fleet.invites.insert(target_char_id);
-                Ok((wid, sid))
-            });
-
+            let res = crate::domain::fleets::invite_fleet_member(
+                ctx,
+                crate::domain::fleets::InviteFleetMemberInput {
+                    fleet_id,
+                    caller_char_id: Some(char_id),
+                    inviter_id_override: Some(char_id),
+                    invitee_id: target_char_id,
+                    role,
+                    wing_id: wing_id_opt,
+                    squad_id: squad_id_opt,
+                    enforce_online_and_capacity_checks: true,
+                    validate_hierarchy_strict: false,
+                    now_unix: ctx.now_unix(),
+                },
+            );
             match res {
-                Ok((wid, sid)) => {
-                    {
-                        let mut ex = ctx.fleet_extras.lock().unwrap();
-                        ex.invite_details
-                            .insert((fleet_id, target_char_id), (wid, sid, role, char_id));
-                        ex.invite_timestamps
-                            .insert((fleet_id, target_char_id), ctx.now_unix());
-                    }
+                Ok(out) => {
                     ctx.notify(
-                        NotificationTarget::Character(target_char_id),
+                        NotificationTarget::Character(out.invitee_id),
                         "OnFleetInvite",
                         "charid",
                         vec![
-                            PyRep::Integer(fleet_id),
-                            PyRep::Integer(char_id),
-                            PyRep::Integer(wid),
-                            PyRep::Integer(sid),
-                            PyRep::Integer(role_to_i64(role)),
+                            PyRep::Integer(out.fleet_id),
+                            PyRep::Integer(out.inviter_id),
+                            PyRep::Integer(out.wing_id),
+                            PyRep::Integer(out.squad_id),
+                            PyRep::Integer(out.role_num),
                         ],
                     );
                     Some(Ok(PyRep::keyval([
-                        ("fleetID", PyRep::Integer(fleet_id)),
-                        ("invitedCharacterID", PyRep::Integer(target_char_id)),
-                        ("wingID", PyRep::Integer(wid)),
-                        ("squadID", PyRep::Integer(sid)),
+                        ("fleetID", PyRep::Integer(out.fleet_id)),
+                        ("invitedCharacterID", PyRep::Integer(out.invitee_id)),
+                        ("wingID", PyRep::Integer(out.wing_id)),
+                        ("squadID", PyRep::Integer(out.squad_id)),
                     ])))
                 }
                 Err(e) => {
                     if e.code == "NotInFleet" || e.code == "FleetNotFound" {
                         session.fleet_id = None;
                     }
-                    Some(Err(e))
+                    Some(Err(crate::services::domain_err_to_rpc(e)))
                 }
             }
         }
@@ -594,154 +405,34 @@ pub(super) async fn handle_fleets(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if notify::character_active_fleet_id(ctx, char_id).is_some() {
-                return Some(Err(BridgeRpcError {
-                    code: "AlreadyInFleet".into(),
-                    message: "Character is already in a fleet".into(),
-                }));
-            }
-            // FleetSvc.OnFleetInvite calls `GetFleet(fleetID).AcceptInvite(shipTypeID)` on the fleet
-            // moniker, so the fleet is the one holding this character's pending invite.
-            let fleet_id = invited_fleet(ctx, char_id, args.first().and_then(|a| a.as_i64()));
-            if fleet_id == 0 {
-                return Some(Err(BridgeRpcError {
-                    code: "InviteExpired".into(),
-                    message: "No active fleet invitation found or invitation expired".into(),
-                }));
-            }
-            let now_unix = ctx.now_unix();
-            if let Some(_active) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
-                return Some(Err(BridgeRpcError {
-                    code: "SessionChangeTimerActive".into(),
-                    message: "Session change timer is active".into(),
-                }));
-            }
-
-            let (max_size, auto_squad, invite_detail) = {
-                let ex = ctx.fleet_extras.lock().unwrap();
-                let ms = ex.max_sizes.get(&fleet_id).copied().unwrap_or(256);
-                let asq = ex.auto_join_squads.get(&fleet_id).copied().flatten();
-                // Read only: the inviter's wing/squad/role choice survives a failed accept.
-                let inv = ex.invite_details.get(&(fleet_id, char_id)).copied();
-                (ms, asq, inv)
-            };
-
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(BridgeRpcError {
-                        code: "FleetNotFound".into(),
-                        message: format!("Fleet {fleet_id} not found"),
-                    });
-                };
-                if fleet.members.len() >= max_size as usize {
-                    return Err(BridgeRpcError {
-                        code: "FleetFull".into(),
-                        message: format!("Fleet has reached its maximum size of {max_size}"),
-                    });
-                }
-                if !fleet.invites.remove(&char_id) {
-                    return Err(BridgeRpcError {
-                        code: "InviteExpired".into(),
-                        message: "No active fleet invitation found".into(),
-                    });
-                }
-                let (wid, sid, role) = invite_detail.map(|(w, s, r, _)| (w, s, r)).unwrap_or_else(|| {
-                    let w = fleet.wings.first().copied().unwrap_or(1);
-                    let s = auto_squad
-                        .or_else(|| {
-                            fleet
-                                .wing_details
-                                .get(&w)
-                                .and_then(|wing| wing.squad_ids.first().copied())
-                        })
-                        .or_else(|| fleet.squads.first().copied())
-                        .unwrap_or(1);
-                    (w, s, FleetRole::SquadMember)
-                });
-                let pos_occupied = match role {
-                    FleetRole::FleetCommander => fleet.member_details.values().any(|m| m.role == FleetRole::FleetCommander),
-                    FleetRole::WingCommander => fleet.wing_details.get(&wid).and_then(|w| w.commander_id).is_some()
-                        || fleet.member_details.values().any(|m| m.role == FleetRole::WingCommander && m.wing_id == Some(wid)),
-                    FleetRole::SquadCommander => fleet.squad_details.get(&sid).and_then(|s| s.commander_id).is_some()
-                        || fleet.member_details.values().any(|m| m.role == FleetRole::SquadCommander && m.squad_id == Some(sid)),
-                    FleetRole::SquadMember => false,
-                };
-                if pos_occupied {
-                    return Err(BridgeRpcError {
-                        code: "PositionOccupied".into(),
-                        message: "The invited fleet commander position is already occupied".into(),
-                    });
-                }
-
-                if role == FleetRole::WingCommander {
-                    if let Some(wing) = fleet.wing_details.get_mut(&wid) {
-                        wing.commander_id = Some(char_id);
-                    }
-                }
-                if role == FleetRole::SquadCommander {
-                    if let Some(sq) = fleet.squad_details.get_mut(&sid) {
-                        sq.commander_id = Some(char_id);
-                    }
-                }
-
-                if !fleet.members.contains(&char_id) {
-                    fleet.members.push(char_id);
-                }
-                fleet.member_details.insert(
+            notify::tick_fleet_lifecycle(ctx);
+            match crate::domain::fleets::accept_fleet_invite(
+                ctx,
+                crate::domain::fleets::AcceptFleetInviteInput {
                     char_id,
-                    FleetMemberRecord {
-                        character_id: char_id,
-                        role,
-                        wing_id: Some(wid),
-                        squad_id: Some(sid),
-                        takes_fleet_warp: true,
-                        accepts_regroup: true,
-                        accepts_conduit_jumps: true,
-                        job: 0,
-                        role_name: role_name_str(role).into(),
-                        join_time_unix: ctx.now_unix(),
-                    },
-                );
-                let motd = fleet.motd.clone();
-                let boss_id = fleet.boss_id;
-                ensure_fleet_channel_member(&mut snap.chat_channels, fleet_id, boss_id, char_id);
-                if let Some(ch) = snap.characters.get_mut(&char_id) { ch.fleet_id = Some(fleet_id); }
-                Ok((wid, sid, role, motd))
-            });
-
-            match res {
-                Ok((wid, sid, role, motd)) => {
-                    {
-                        let mut ex = ctx.fleet_extras.lock().unwrap();
-                        ex.invite_details.remove(&(fleet_id, char_id));
-                        ex.invite_timestamps.remove(&(fleet_id, char_id));
-                        if let Some(reqs) = ex.join_requests.get_mut(&fleet_id) {
-                            reqs.remove(&char_id);
-                        }
-                    }
+                    fleet_hint: args.first().and_then(|a| a.as_i64()),
+                    now_unix: ctx.now_unix(),
+                    current_solar_system_id: session.solar_system_id,
+                },
+            ) {
+                Ok(out) => {
                     notify::sync_fleet_join_requests_to_db(ctx);
-                    session.fleet_id = Some(fleet_id);
-                    notify::emit_join(ctx, fleet_id, char_id);
-                    crate::services::notify_emitters_character_services::emit_fleet_respawn_points_if_any(ctx, fleet_id);
-                    let sys_id = session.solar_system_id.or_else(|| {
-                        ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
-                    }).unwrap_or(0);
-                    crate::services::space_destiny::record_session_change_timer(
-                        ctx, char_id, now_unix, sys_id, 0, "fleet_change",
-                    );
-                    if !motd.is_empty() {
-                        notify::emit_motd(ctx, NotificationTarget::Character(char_id), &motd, false);
+                    session.fleet_id = Some(out.fleet_id);
+                    notify::emit_join(ctx, out.fleet_id, out.char_id);
+                    crate::services::notify_emitters_character_services::emit_fleet_respawn_points_if_any(ctx, out.fleet_id);
+                    if !out.motd.is_empty() {
+                        notify::emit_motd(ctx, NotificationTarget::Character(out.char_id), &out.motd, false);
                     }
                     Some(Ok(PyRep::keyval([
-                        ("fleetID", PyRep::Integer(fleet_id)),
-                        ("characterID", PyRep::Integer(char_id)),
-                        ("wingID", PyRep::Integer(wid)),
-                        ("squadID", PyRep::Integer(sid)),
-                        ("role", PyRep::Integer(role_to_i64(role))),
-                        ("motd", PyRep::String(motd)),
+                        ("fleetID", PyRep::Integer(out.fleet_id)),
+                        ("characterID", PyRep::Integer(out.char_id)),
+                        ("wingID", PyRep::Integer(out.wing_id)),
+                        ("squadID", PyRep::Integer(out.squad_id)),
+                        ("role", PyRep::Integer(role_to_i64(out.role))),
+                        ("motd", PyRep::String(out.motd)),
                     ])))
                 }
-                Err(e) => Some(Err(e)),
+                Err(e) => Some(Err(crate::services::domain_err_to_rpc(e))),
             }
         }
 
@@ -821,97 +512,30 @@ pub(super) async fn handle_fleets(
                 tid
             };
 
-            let check_res = ctx.db.with_snapshot(|snap| {
-                let Some(fleet) = snap.fleets.get(&fleet_id) else {
-                    return Err(BridgeRpcError {
-                        code: "FleetNotFound".into(),
-                        message: format!("Fleet {fleet_id} not found"),
-                    });
-                };
-                let Some(caller_m) = fleet.member_details.get(&char_id) else {
-                    return Err(BridgeRpcError {
-                        code: "NotInFleet".into(),
-                        message: "Caller is not in fleet".into(),
-                    });
-                };
-                let caller_role = role_to_i64(caller_m.role);
-                if target_id != char_id && char_id != fleet.boss_id && caller_role > 3 {
-                    return Err(BridgeRpcError {
-                        code: "FleetPermissionDenied".into(),
-                        message: "Only Fleet Boss or a Commander can kick fleet members".into(),
-                    });
-                }
-                if target_id == fleet.boss_id && target_id != char_id {
-                    return Err(BridgeRpcError {
-                        code: "CannotKickBoss".into(),
-                        message: "Cannot kick the fleet boss".into(),
-                    });
-                }
-                let Some(target_m) = fleet.member_details.get(&target_id) else {
-                    return Err(BridgeRpcError {
-                        code: "MemberNotFound".into(),
-                        message: format!("Character {target_id} is not in fleet {fleet_id}"),
-                    });
-                };
-                let target_role = role_to_i64(target_m.role);
-                let can_manage_target = char_id == fleet.boss_id
-                    || match caller_m.role {
-                        FleetRole::FleetCommander => target_role > 1,
-                        FleetRole::WingCommander => {
-                            target_role > 2 && target_m.wing_id == caller_m.wing_id
-                        }
-                        FleetRole::SquadCommander => {
-                            target_role > 3 && target_m.squad_id == caller_m.squad_id
-                        }
-                        FleetRole::SquadMember => false,
-                    };
-                if target_id != char_id && !can_manage_target {
-                    return Err(BridgeRpcError {
-                        code: "FleetPermissionDenied".into(),
-                        message: "Insufficient fleet hierarchy authority".into(),
-                    });
-                }
-                Ok(target_role)
-            });
-
-            match check_res {
-                Ok(old_role) => {
-                    let (disbanded, _) = notify::remove_character_from_fleet(ctx, fleet_id, target_id);
+            match crate::domain::fleets::kick_or_remove_fleet_member(
+                ctx,
+                fleet_id,
+                Some(char_id),
+                target_id,
+                false,
+            ) {
+                Ok(outcome) => {
+                    notify::emit_fleet_member_removed(ctx, &outcome);
                     if target_id == char_id {
                         session.fleet_id = None;
                     }
-                    let sess_change = PyRep::Dict(vec![
-                        (
-                            PyRep::String("fleetid".into()),
-                            PyRep::Tuple(vec![PyRep::Integer(fleet_id), PyRep::None]),
-                        ),
-                        (
-                            PyRep::String("fleetrole".into()),
-                            PyRep::Tuple(vec![PyRep::Integer(old_role), PyRep::None]),
-                        ),
-                    ]);
-                    let sess_rep = PyRep::keyval([
-                        ("charid", PyRep::Integer(target_id)),
-                        ("fleetid", PyRep::None),
-                        ("fleetrole", PyRep::None),
-                    ]);
-                    ctx.notify(
-                        NotificationTarget::Character(target_id),
-                        "OnSessionChanged",
-                        "charid",
-                        vec![PyRep::Bool(false), sess_rep, sess_change],
-                    );
+                    notify::emit_fleet_session_cleared(ctx, fleet_id, target_id, outcome.old_role_num);
                     Some(Ok(PyRep::keyval([
                         ("kickedCharacterID", PyRep::Integer(target_id)),
                         ("fleetID", PyRep::Integer(fleet_id)),
-                        ("disbanded", PyRep::Bool(disbanded)),
+                        ("disbanded", PyRep::Bool(outcome.disbanded)),
                     ])))
                 }
                 Err(e) => {
                     if e.code == "NotInFleet" || e.code == "FleetNotFound" {
                         session.fleet_id = None;
                     }
-                    Some(Err(e))
+                    Some(Err(crate::services::domain_err_to_rpc(e)))
                 }
             }
         }
@@ -955,66 +579,17 @@ pub(super) async fn handle_fleets(
                     }))
                 }
             };
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(fleet) = snap.fleets.get(&fleet_id) else {
-                    return Err(BridgeRpcError {
-                        code: "FleetNotFound".into(),
-                        message: format!("Fleet {fleet_id} not found"),
-                    });
-                };
-                if !fleet.member_details.contains_key(&char_id) {
-                    return Err(BridgeRpcError {
-                        code: "NotInFleet".into(),
-                        message: "Caller is not in fleet".into(),
-                    });
-                }
-                if fleet.boss_id != char_id {
-                    return Err(BridgeRpcError {
-                        code: "FleetPermissionDenied".into(),
-                        message: "Only the Fleet Boss can disband the fleet".into(),
-                    });
-                }
-                let member_ids = fleet.members.clone();
-                for mid in &member_ids {
-                    if let Some(ch) = snap.characters.get_mut(mid) {
-                        ch.fleet_id = None;
-                    }
-                }
-                snap.fleets.remove(&fleet_id);
-                snap.chat_channels.remove(&format!("fleetid:{fleet_id}"));
-                Ok(member_ids)
-            });
-            match res {
-                Ok(member_ids) => {
-                    {
-                        let mut ex = ctx.fleet_extras.lock().unwrap();
-                        ex.adverts.remove(&fleet_id);
-                        ex.fleet_names.remove(&fleet_id);
-                        ex.max_sizes.remove(&fleet_id);
-                        ex.auto_join_squads.remove(&fleet_id);
-                        ex.invite_details.retain(|&(fid, _), _| fid != fleet_id);
-                        ex.invite_timestamps.retain(|&(fid, _), _| fid != fleet_id);
-                        ex.target_tags.remove(&fleet_id);
-                        ex.watchlist.remove(&fleet_id);
-                        ex.join_requests.remove(&fleet_id);
-                        for mid in &member_ids {
-                            ex.disconnected_members.remove(mid);
-                            ex.watchlist.remove(mid);
-                        }
-                        ex.voice_enabled.remove(&fleet_id);
-                        ex.loot_logging.remove(&fleet_id);
-                        ex.options.remove(&fleet_id);
-                        ex.wing_squad_hierarchy.remove(&fleet_id);
-                    }
+            match crate::domain::fleets::disband_fleet(ctx, fleet_id, char_id) {
+                Ok(out) => {
                     notify::sync_fleet_join_requests_to_db(ctx);
                     notify::sync_fleet_watchlist_to_db(ctx);
                     notify::sync_fleet_options_to_db(ctx);
                     session.fleet_id = None;
-                    for mid in &member_ids {
+                    for mid in &out.former_member_ids {
                         notify::emit_leave(ctx, fleet_id, *mid);
                     }
-                    let ids = PyRep::List(member_ids.iter().map(|&m| PyRep::Integer(m)).collect());
-                    for mid in &member_ids {
+                    let ids = PyRep::List(out.former_member_ids.iter().map(|&m| PyRep::Integer(m)).collect());
+                    for mid in &out.former_member_ids {
                         ctx.notify(NotificationTarget::Character(*mid), "OnFleetDisbanded", "charid", vec![ids.clone()]);
                     }
                     ctx.notify(
@@ -1028,7 +603,7 @@ pub(super) async fn handle_fleets(
                         ("disbanded", PyRep::Bool(true)),
                     ])))
                 }
-                Err(e) => Some(Err(e)),
+                Err(e) => Some(Err(crate::services::domain_err_to_rpc(e))),
             }
         }
 
@@ -1069,165 +644,33 @@ pub(super) async fn handle_fleets(
             let new_role_num = args.get(3).and_then(|a| a.as_i64()).unwrap_or(4);
             let new_role = i64_to_role(new_role_num);
 
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(BridgeRpcError {
-                        code: "FleetNotFound".into(),
-                        message: format!("Fleet {fleet_id} not found"),
-                    });
-                };
-                let Some(caller_m) = fleet.member_details.get(&char_id).cloned() else {
-                    return Err(BridgeRpcError {
-                        code: "NotInFleet".into(),
-                        message: "Caller is not in fleet".into(),
-                    });
-                };
-                let caller_role = role_to_i64(caller_m.role);
-                let self_free_move =
-                    target_id == char_id && fleet.free_move && new_role == FleetRole::SquadMember;
-                if !self_free_move && char_id != fleet.boss_id && caller_role > 2 {
-                    return Err(BridgeRpcError {
-                        code: "FleetPermissionDenied".into(),
-                        message: "Moving members requires commander privileges or fleet free-move".into(),
-                    });
-                }
-                let Some(target_m) = fleet.member_details.get(&target_id).cloned() else {
-                    return Err(BridgeRpcError {
-                        code: "MemberNotFound".into(),
-                        message: format!("Character {target_id} is not in fleet {fleet_id}"),
-                    });
-                };
-                if !self_free_move && char_id != fleet.boss_id {
-                    let target_role = role_to_i64(target_m.role);
-                    let can_manage_target = match caller_m.role {
-                        FleetRole::FleetCommander => target_role > 1 && new_role_num > 1,
-                        FleetRole::WingCommander => {
-                            target_role > 2
-                                && target_m.wing_id == caller_m.wing_id
-                                && Some(new_wing_id) == caller_m.wing_id
-                                && new_role_num > 2
-                        }
-                        FleetRole::SquadCommander => {
-                            target_role > 3
-                                && target_m.squad_id == caller_m.squad_id
-                                && Some(new_squad_id) == caller_m.squad_id
-                                && Some(new_wing_id) == caller_m.wing_id
-                                && new_role_num > 3
-                        }
-                        FleetRole::SquadMember => false,
-                    };
-                    if !can_manage_target || (target_id == fleet.boss_id && target_id != char_id) {
-                        return Err(BridgeRpcError {
-                            code: "FleetPermissionDenied".into(),
-                            message: "Insufficient fleet hierarchy authority".into(),
-                        });
-                    }
-                }
-                if new_role == FleetRole::FleetCommander
-                    && fleet
-                        .member_details
-                        .values()
-                        .any(|m| m.character_id != target_id && m.role == FleetRole::FleetCommander)
-                {
-                    return Err(BridgeRpcError {
-                        code: "PositionOccupied".into(),
-                        message: "Fleet Commander slot is already occupied".into(),
-                    });
-                }
-                if new_role == FleetRole::WingCommander
-                    && fleet.member_details.values().any(|m| {
-                        m.character_id != target_id
-                            && m.wing_id == Some(new_wing_id)
-                            && m.role == FleetRole::WingCommander
-                    })
-                {
-                    return Err(BridgeRpcError {
-                        code: "PositionOccupied".into(),
-                        message: "Wing Commander slot in target wing is already occupied".into(),
-                    });
-                }
-                if new_role == FleetRole::SquadCommander
-                    && fleet.member_details.values().any(|m| {
-                        m.character_id != target_id
-                            && m.squad_id == Some(new_squad_id)
-                            && m.role == FleetRole::SquadCommander
-                    })
-                {
-                    return Err(BridgeRpcError {
-                        code: "PositionOccupied".into(),
-                        message: "Squad Commander slot in target squad is already occupied".into(),
-                    });
-                }
-                let Some(member) = fleet.member_details.get_mut(&target_id) else {
-                    return Err(BridgeRpcError {
-                        code: "MemberNotFound".into(),
-                        message: format!("Character {target_id} is not in fleet {fleet_id}"),
-                    });
-                };
-                if target_id == char_id {
-                    if let Some(_active) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
-                        return Err(BridgeRpcError {
-                            code: "SessionChangeTimerActive".into(),
-                            message: "Session change timer is active".into(),
-                        });
-                    }
-                }
-                let before = member.clone();
-                let old_wing = member.wing_id;
-                let old_squad = member.squad_id;
-                member.wing_id = Some(new_wing_id);
-                member.squad_id = Some(new_squad_id);
-                member.role = new_role;
-                member.role_name = role_name_str(new_role).into();
-                let after = member.clone();
-                let only = fleet.members.len() == 1;
-
-                if let Some(ow) = old_wing {
-                    if let Some(w) = fleet.wing_details.get_mut(&ow) {
-                        if w.commander_id == Some(target_id) {
-                            w.commander_id = None;
-                        }
-                    }
-                }
-                if let Some(os) = old_squad {
-                    if let Some(s) = fleet.squad_details.get_mut(&os) {
-                        if s.commander_id == Some(target_id) {
-                            s.commander_id = None;
-                        }
-                    }
-                }
-                if new_role == FleetRole::WingCommander {
-                    if let Some(w) = fleet.wing_details.get_mut(&new_wing_id) {
-                        w.commander_id = Some(target_id);
-                    }
-                }
-                if new_role == FleetRole::SquadCommander {
-                    if let Some(s) = fleet.squad_details.get_mut(&new_squad_id) {
-                        s.commander_id = Some(target_id);
-                    }
-                }
-                Ok((before, after, only))
-            });
-
-            match res {
-                Ok((before, after, only)) => {
-                    notify::emit_member_changed(ctx, fleet_id, &before, &after, only);
+            match crate::domain::fleets::move_fleet_member(
+                ctx,
+                crate::domain::fleets::MoveFleetMemberInput {
+                    fleet_id,
+                    caller_char_id: Some(char_id),
+                    target_id,
+                    new_role,
+                    wing_id: Some(new_wing_id),
+                    squad_id: Some(new_squad_id),
+                    strict_esi_wing_squad: false,
+                    allow_fallback_missing_wing_squad: false,
+                    enforce_session_change_timer: true,
+                    now_unix,
+                },
+            ) {
+                Ok(out) => {
+                    notify::emit_member_changed(ctx, fleet_id, &out.before, &out.after, out.is_only_member);
                     ctx.notify(
                         NotificationTarget::Character(target_id),
                         "OnFleetMove",
                         "charid",
                         vec![],
                     );
-                    if target_id == char_id {
-                        let target_sys = ctx.db.with_snapshot(|s| s.characters.get(&target_id).map(|c| c.solar_system_id)).unwrap_or(0);
-                        crate::services::space_destiny::record_session_change_timer(
-                            ctx, target_id, now_unix, target_sys, 0, "fleet_change",
-                        );
-                    }
                     Some(Ok(PyRep::keyval([
                         ("characterID", PyRep::Integer(target_id)),
-                        ("wingID", PyRep::Integer(new_wing_id)),
-                        ("squadID", PyRep::Integer(new_squad_id)),
+                        ("wingID", PyRep::Integer(out.resolved_wing_id.unwrap_or(new_wing_id))),
+                        ("squadID", PyRep::Integer(out.resolved_squad_id.unwrap_or(new_squad_id))),
                         ("role", PyRep::Integer(new_role_num)),
                     ])))
                 }
@@ -1238,7 +681,7 @@ pub(super) async fn handle_fleets(
                         "charid",
                         vec![PyRep::Integer(target_id), PyRep::Bool(false)],
                     );
-                    Some(Err(e))
+                    Some(Err(crate::services::domain_err_to_rpc(e)))
                 }
             }
         }

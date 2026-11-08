@@ -6,10 +6,10 @@ mod mailing_lists_ops;
 use super::fleet_social_chat::extract_id_list;
 use super::fleet_social_persistence::ensure_social_extras_mailing_lists_seeded;
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
-use eve_db::{IskCents, MailLabelRecord, MailRecord};
+use eve_db::MailLabelRecord;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 pub(super) fn handle_mail_and_calendar(
     ctx: &ServerContext,
@@ -32,381 +32,68 @@ pub(super) fn handle_mail_and_calendar(
     match (service, method) {
         ("mailMgr", "SendMail") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let mut recipient_ids: Vec<i64> = extract_id_list(args.first());
+            let raw_recipient_ids: Vec<i64> = extract_id_list(args.first());
             // Client layout (mailSvc.SendMail): (toCharacterIDs, toListID, toCorpOrAllianceID, title,
             // body, isReplyTo, isForwardedFrom); kept as sent for OnMailSent.
-            let to_character_ids = recipient_ids.clone();
-            let (to_list_id, to_corp_or_alliance_id) = if args.len() >= 5 {
-                (args.get(1).and_then(|a| a.as_i64()).filter(|&id| id > 0), args.get(2).and_then(|a| a.as_i64()))
-            } else {
-                (None, None)
-            };
-            let mut target_label = 1i64; // 1 = Inbox, 4 = Corp, 8 = Alliance
-            let mut ml_cost_transfer: Option<(i64, eve_db::IskCents)> = None;
-            let (subject, body) = if args.len() >= 5 {
-                if let Some(list_id) = args.get(1).and_then(|a| a.as_i64()).filter(|&id| id > 0) {
-                    let (ml_cost, ml_owner) = {
-                        let s = ctx.social_extras.lock().unwrap();
-                        let ml = match s.mailing_lists.get(&list_id) {
-                            Some(m) => m,
-                            None => {
-                                return Some(Err(BridgeRpcError {
-                                    code: "UserError".into(),
-                                    message: "MailingListNotFound".into(),
-                                }));
-                            }
-                        };
-                        let role = ml.members.get(&char_id).copied();
-                        if char_id != ml.owner_id {
-                            if role.is_none() {
-                                return Some(Err(BridgeRpcError {
-                                    code: "UserError".into(),
-                                    message: "MailingListAccessDenied".into(),
-                                }));
-                            }
-                            if role == Some(0) {
-                                return Some(Err(BridgeRpcError {
-                                    code: "UserError".into(),
-                                    message: "MutedInMailingList".into(),
-                                }));
-                            }
-                        }
-                        for &rid in ml.members.keys() {
-                            recipient_ids.push(rid);
-                        }
-                        (ml.cost, ml.owner_id)
-                    };
-                    let ml_cost_isk = ml_cost.clamp(0, 1_000_000_000);
-                    if ml_cost_isk > 0 && char_id != ml_owner {
-                        ml_cost_transfer = Some((ml_owner, eve_db::IskCents::from_isk(ml_cost_isk)));
-                    }
-                    recipient_ids.sort_unstable();
-                    recipient_ids.dedup();
-                }
-                if recipient_ids.is_empty() {
-                    if let Some(corp_or_alliance_id) = args.get(2).and_then(|a| a.as_i64()) {
-                        let members = ctx.db.with_snapshot(|snap| -> Result<Vec<i64>, BridgeRpcError> {
-                            let restrict = snap
-                                .corp_governance
-                                .get(&corp_or_alliance_id)
-                                .map(|g| g.restrict_corp_mails)
-                                .unwrap_or(false);
-                            if let Some(c) = snap.corporations.get(&corp_or_alliance_id) {
-                                let caller_corp = snap.characters.get(&char_id).map(|ch| ch.corporation_id);
-                                if caller_corp != Some(corp_or_alliance_id) && !c.members.contains(&char_id) {
-                                    return Err(BridgeRpcError {
-                                        code: "CorpMailAccessDenied".into(),
-                                        message: "Only corporation members can send corporation mail".into(),
-                                    });
-                                }
-                                let (is_ceo, role) = snap.effective_corp_roles_at(
-                                    corp_or_alliance_id,
-                                    char_id,
-                                    None,
-                                    0,
-                                    ctx.now_unix(),
-                                );
-                                let allowed_mail_roles = eve_db::corp_roles::ROLE_DIRECTOR
-                                    | eve_db::corp_roles::ROLE_PERSONNEL_MANAGER
-                                    | (1u64 << 55);
-                                if restrict && !is_ceo && (role & allowed_mail_roles) == 0 {
-                                    return Err(BridgeRpcError {
-                                        code: "CorpMailRestricted".into(),
-                                        message: "Corporation mail is restricted to leadership".into(),
-                                    });
-                                }
-                                target_label = 4;
-                                return Ok(c.members.iter().copied().collect());
-                            }
-                            if let Some(a) = snap.alliances.get(&corp_or_alliance_id) {
-                                let caller_al = snap.characters.get(&char_id).and_then(|ch| ch.alliance_id);
-                                let caller_corp = snap.characters.get(&char_id).map(|ch| ch.corporation_id).unwrap_or(0);
-                                if caller_al != Some(corp_or_alliance_id) && !a.member_corp_ids.contains(&caller_corp) {
-                                    return Err(BridgeRpcError {
-                                        code: "AllianceMailAccessDenied".into(),
-                                        message: "Only alliance members can send alliance mail".into(),
-                                    });
-                                }
-                                target_label = 8;
-                                let mut m = Vec::new();
-                                for cid in &a.member_corp_ids {
-                                    if let Some(c) = snap.corporations.get(cid) {
-                                        m.extend(c.members.iter().copied());
-                                    }
-                                }
-                                return Ok(m);
-                            }
-                            Ok(Vec::new())
-                        });
-                        match members {
-                            Ok(m) => recipient_ids.extend(m),
-                            Err(e) => return Some(Err(e)),
-                        }
-                    }
-                }
+            let to_character_ids = raw_recipient_ids.clone();
+            let (to_list_id, to_corp_or_alliance_id, subject, body) = if args.len() >= 5 {
                 (
+                    args.get(1).and_then(|a| a.as_i64()).filter(|&id| id > 0),
+                    args.get(2).and_then(|a| a.as_i64()),
                     args.get(3).and_then(|a| a.as_str()).unwrap_or("o7"),
                     args.get(4).and_then(|a| a.as_str()).unwrap_or("Fly safe!"),
                 )
             } else {
                 (
+                    None,
+                    None,
                     args.get(1).and_then(|a| a.as_str()).unwrap_or("o7"),
                     args.get(2).and_then(|a| a.as_str()).unwrap_or("Fly safe!"),
                 )
             };
-
-            if !recipient_ids.is_empty() {
-                let expanded = ctx.db.with_snapshot(|snap| -> Result<Option<(i64, Vec<i64>)>, BridgeRpcError> {
-                    let mut extra = Vec::new();
-                    let mut lbl = target_label;
-                    for &id in &recipient_ids {
-                        if let Some(c) = snap.corporations.get(&id) {
-                            let caller_corp = snap.characters.get(&char_id).map(|ch| ch.corporation_id);
-                            if caller_corp != Some(id) && !c.members.contains(&char_id) {
-                                return Err(BridgeRpcError {
-                                    code: "CorpMailAccessDenied".into(),
-                                    message: "Only corporation members can send corporation mail".into(),
-                                });
-                            }
-                            let restrict = snap
-                                .corp_governance
-                                .get(&id)
-                                .map(|g| g.restrict_corp_mails)
-                                .unwrap_or(false);
-                            let (is_ceo, role) = snap.effective_corp_roles_at(
-                                id,
-                                char_id,
-                                None,
-                                0,
-                                ctx.now_unix(),
-                            );
-                            let allowed_mail_roles = eve_db::corp_roles::ROLE_DIRECTOR
-                                | eve_db::corp_roles::ROLE_PERSONNEL_MANAGER
-                                | (1u64 << 55);
-                            if restrict && !is_ceo && (role & allowed_mail_roles) == 0 {
-                                return Err(BridgeRpcError {
-                                    code: "CorpMailRestricted".into(),
-                                    message: "Corporation mail is restricted to leadership".into(),
-                                });
-                            }
-                            lbl = 4;
-                            extra.extend(c.members.iter().copied());
-                        } else if let Some(a) = snap.alliances.get(&id) {
-                            let caller_al = snap.characters.get(&char_id).and_then(|ch| ch.alliance_id);
-                            let caller_corp = snap.characters.get(&char_id).map(|ch| ch.corporation_id).unwrap_or(0);
-                            if caller_al != Some(id) && !a.member_corp_ids.contains(&caller_corp) {
-                                return Err(BridgeRpcError {
-                                    code: "AllianceMailAccessDenied".into(),
-                                    message: "Only alliance members can send alliance mail".into(),
-                                });
-                            }
-                            lbl = 8;
-                            for cid in &a.member_corp_ids {
-                                if let Some(c) = snap.corporations.get(cid) {
-                                    extra.extend(c.members.iter().copied());
-                                }
-                            }
-                        }
-                    }
-                    if extra.is_empty() {
-                        Ok(None)
-                    } else {
-                        Ok(Some((lbl, extra)))
-                    }
-                });
-                match expanded {
-                    Ok(Some((lbl, members))) => {
-                        target_label = lbl;
-                        recipient_ids = members;
-                    }
-                    Ok(None) => {}
-                    Err(e) => return Some(Err(e)),
-                }
-            }
-            if recipient_ids.is_empty() {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidRecipient".into(),
-                    message: "SendMail requires at least one recipient".into(),
-                }));
-            }
-            for &rec_id in &recipient_ids {
-                if crate::services::character_contacts::is_blocked_by(ctx, rec_id, char_id) {
-                    return Some(Err(BridgeRpcError {
-                        code: "ContactBlocked".into(),
-                        message: format!("Recipient {rec_id} has blocked sender {char_id}"),
-                    }));
-                }
-            }
-            if subject.is_empty() || subject.chars().count() > 150 {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidMailSubject".into(),
-                    message: "Mail subject must be 1..=150 characters".into(),
-                }));
-            }
-            if body.chars().count() > 8_000 {
-                return Some(Err(BridgeRpcError {
-                    code: "MailBodyTooLong".into(),
-                    message: "Mail body exceeds 8,000 character limit".into(),
-                }));
-            }
-
-            let (extra_contacts, extra_blocked, extra_cspa) = {
-                let s = ctx.social_extras.lock().unwrap();
-                let mut contacts = HashMap::new();
-                let mut blocked = HashSet::new();
-                let mut cspa = HashMap::new();
-                for &rec_id in &recipient_ids {
-                    if rec_id == char_id {
-                        continue;
-                    }
-                    if let Some(m) = s.contacts.get(&rec_id) {
-                        if let Some(&(st, _, _)) = m.get(&char_id) {
-                            contacts.insert(rec_id, st);
-                        }
-                    }
-                    if s.blocked.get(&rec_id).is_some_and(|b| b.contains(&char_id)) {
-                        blocked.insert(rec_id);
-                    }
-                    if let Some(&ch) = s.cspa_charges.get(&rec_id) {
-                        cspa.insert(rec_id, ch);
-                    }
-                }
-                (contacts, blocked, cspa)
-            };
-
-            let mut total_cspa = IskCents(0);
-            for &rec_id in &recipient_ids {
-                if rec_id == char_id {
-                    continue;
-                }
-                let friendly_contact = extra_contacts.get(&rec_id).is_some_and(|&st| st > 0.0)
-                    || ctx.db.with_snapshot(|snap| {
-                        snap.char_contacts.get(&rec_id).is_some_and(|list| {
-                            list.iter()
-                                .any(|c| c.contact_id == char_id && !c.is_blocked && c.standing > 0.0)
-                        })
-                    });
-                if extra_blocked.contains(&rec_id) && !friendly_contact {
-                    return Some(Err(BridgeRpcError {
-                        code: "SenderBlockedByRecipient".into(),
-                        message: format!("Recipient {rec_id} has blocked you"),
-                    }));
-                }
-                if let Some(charge) = ctx
-                    .db
-                    .with_snapshot(|snap| snap.character_cspa_charges.get(&rec_id).copied())
-                    .or_else(|| extra_cspa.get(&rec_id).copied())
-                {
-                    if charge.0 > 0 && !friendly_contact && target_label == 1 {
-                        total_cspa = match total_cspa.checked_add(charge) {
-                            Some(val) => val,
-                            None => {
-                                return Some(Err(BridgeRpcError {
-                                    code: "InsufficientFundsForCSPA".into(),
-                                    message: "Insufficient ISK to cover CSPA / mailing list cost".into(),
-                                }));
-                            }
-                        };
-                    }
-                }
-            }
-
-            let now_unix = ctx.now_unix();
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                if recipient_ids.len() > 1 {
-                    for &rec_id in &recipient_ids {
-                        let char_mail_count = snap
-                            .mails
-                            .iter()
-                            .filter(|m| {
-                                m.recipient_id == rec_id
-                                    && !snap.deleted_mails.contains(&(rec_id, m.message_id))
-                            })
-                            .count();
-                        if char_mail_count >= 1_000 {
-                            return Err(BridgeRpcError {
-                                code: "MailQuotaExceeded".into(),
-                                message: "Mailbox limit reached".into(),
-                            });
-                        }
-                    }
-                }
-                    let sender_ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
-                        code: "CharacterNotFound".into(),
-                        message: format!("Character {char_id} not found"),
-                    })?;
-                    let ml_cost_cents = ml_cost_transfer.map(|(_, c)| c).unwrap_or(eve_db::IskCents(0));
-                    let total_cost = total_cspa.checked_add(ml_cost_cents).ok_or_else(|| BridgeRpcError {
-                        code: "InsufficientFundsForCSPA".into(),
-                        message: "Insufficient ISK to cover CSPA / mailing list cost".into(),
-                    })?;
-                    if sender_ch.balance < total_cost {
-                        return Err(BridgeRpcError {
-                            code: "InsufficientFundsForCSPA".into(),
-                            message: "Insufficient ISK to cover CSPA / mailing list cost".into(),
-                        });
-                    }
-                    if total_cspa.0 > 0 {
-                        sender_ch.balance = sender_ch
-                            .balance
-                            .checked_sub(total_cspa)
-                            .ok_or_else(|| BridgeRpcError {
-                                code: "InsufficientFundsForCSPA".into(),
-                                message: "Insufficient ISK to cover CSPA / mailing list cost".into(),
-                            })?;
-                    }
-                    if let Some((owner_id, cost)) = ml_cost_transfer {
-                        sender_ch.balance = sender_ch
-                            .balance
-                            .checked_sub(cost)
-                            .ok_or_else(|| BridgeRpcError {
-                                code: "InsufficientFundsForCSPA".into(),
-                                message: "Insufficient ISK to cover CSPA / mailing list cost".into(),
-                            })?;
-                        if let Some(owner_ch) = snap.characters.get_mut(&owner_id) {
-                            owner_ch.balance = owner_ch.balance.checked_add(cost).ok_or_else(|| BridgeRpcError {
-                                code: "InsufficientFundsForCSPA".into(),
-                                message: "Balance overflow on mailing list owner".into(),
-                            })?;
-                        }
-                    }
-                snap.next_entity_id += 1;
-                let id = snap.next_entity_id;
-                for &rec_id in &recipient_ids {
-                    snap.mails.push(MailRecord {
-                        message_id: id,
-                        sender_id: char_id,
-                        recipient_id: rec_id,
-                        subject: subject.to_string(),
-                        body: body.to_string(),
-                    });
-                    snap.mail_assigned_labels
-                        .insert((rec_id, id), vec![target_label]);
-                }
-                snap.mail_timestamps.insert(id, now_unix);
-                snap.mail_assigned_labels.insert((char_id, id), vec![2]);
-                snap.read_mails.insert((char_id, id));
-                if let Some(lid) = to_list_id {
-                    if let Some(ml) = snap.mailing_lists.get_mut(&lid) {
-                        ml.mail_ids.insert(id);
-                    }
-                }
-                Ok(id)
-            });
-
+            let recipients = raw_recipient_ids
+                .into_iter()
+                .map(|recipient_id| crate::domain::mail::MailRecipientSpec {
+                    recipient_id,
+                    kind: crate::domain::mail::MailRecipientKind::Character,
+                })
+                .collect();
+            let res = crate::domain::mail::send_mail(
+                ctx,
+                crate::domain::mail::SendMailInput {
+                    sender_id: char_id,
+                    recipients,
+                    to_list_id,
+                    to_corp_or_alliance_id,
+                    subject: subject.to_string(),
+                    body: body.to_string(),
+                    approved_cost_isk: None,
+                    max_subject_chars: 150,
+                    max_body_chars: 8_000,
+                    expand_org_recipients_in_db: true,
+                    record_cspa_journal: false,
+                    cspa_exempt_min_standing: 0.0,
+                    cspa_exempt_same_corp: false,
+                    now_unix: ctx.now_unix(),
+                },
+            );
             match res {
-                Ok(mid) => {
-                    crate::services::mail_notify::record_mail_meta(ctx, mid, &to_character_ids, to_list_id, to_corp_or_alliance_id);
-                    if let Some(lid) = to_list_id {
-                        let mut s = ctx.social_extras.lock().unwrap();
-                        if let Some(ml) = s.mailing_lists.get_mut(&lid) {
-                            ml.mail_ids.insert(mid);
-                        }
-                    }
+                Ok(out) => {
+                    crate::services::mail_notify::record_mail_meta(
+                        ctx,
+                        out.mail_id,
+                        &to_character_ids,
+                        to_list_id,
+                        to_corp_or_alliance_id,
+                    );
                     // The sender's own mailSvc.SendMail already calls OnMailSent locally.
-                    let others: Vec<i64> = recipient_ids.iter().copied().filter(|&r| r != char_id).collect();
+                    let others: Vec<i64> = out
+                        .notify_recipient_ids
+                        .into_iter()
+                        .filter(|&r| r != char_id)
+                        .collect();
                     let sent = crate::services::mail_notify::SentMail {
-                        message_id: mid,
+                        message_id: out.mail_id,
                         sender_id: char_id,
                         to_character_ids: &to_character_ids,
                         to_list_id,
@@ -415,9 +102,9 @@ pub(super) fn handle_mail_and_calendar(
                         status_mask: 0,
                     };
                     crate::services::mail_notify::emit_mail_sent(ctx, &sent, &others);
-                    Some(Ok(PyRep::Integer(mid)))
+                    Some(Ok(PyRep::Integer(out.mail_id)))
                 }
-                Err(e) => Some(Err(e)),
+                Err(e) => Some(Err(crate::services::domain_err_to_rpc(e))),
             }
         }
 

@@ -8,22 +8,9 @@ use crate::router::ServerContext;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 
-/// Canonical corporation role definitions `(bitmask, client_role_name, esi_role_name)`
-/// shared by MachoNet `cache.Rowset("roles")` and ESI role decoders.
-pub const CORP_ROLE_DEFINITIONS: &[(u64, &str, &str)] = eve_db::corp_roles::CORP_ROLE_NAMES;
-
-pub(crate) fn decode_corp_roles(mask: u64) -> Vec<&'static str> {
-    CORP_ROLE_DEFINITIONS
-        .iter()
-        .filter_map(|&(bit, _, esi_name)| {
-            ((mask & bit) != 0 && !esi_name.is_empty()).then_some(esi_name)
-        })
-        .collect()
-}
-
-pub(crate) fn encode_esi_corp_roles(names: &[String]) -> u64 {
-    eve_db::corp_roles::encode_corp_role_names(names)
-}
+pub use crate::domain::corp_governance::{
+    decode_corp_roles, encode_esi_corp_roles, CORP_ROLE_DEFINITIONS,
+};
 
 fn parse_path_i64(
     path_params: &HashMap<String, String>,
@@ -334,41 +321,16 @@ pub fn dispatch_corp_governance_route(
                 Err(e) => return Some(e),
             };
             Some(ctx.db.with_snapshot(|snap| {
-                let Some(corp) = snap.corporations.get(&corp_id) else {
+                let Some(limit) = crate::domain::corp_governance::resolve_corp_member_limit(
+                    Some(&ctx.sde),
+                    snap,
+                    corp_id,
+                ) else {
                     return RouteExecutionResult::error(
                         404,
                         format!("Corporation {corp_id} not found"),
                     );
                 };
-                if let Some(&stored_limit) = snap.corp_member_limits.get(&corp_id) {
-                    return RouteExecutionResult::ok_json(json!(stored_limit), 3600);
-                }
-                if let Some(gov_limit) = snap
-                    .corp_governance
-                    .get(&corp_id)
-                    .and_then(|g| g.member_limit)
-                {
-                    return RouteExecutionResult::ok_json(json!(gov_limit as i64), 3600);
-                }
-                // Compute from SDE dogma attribute 191 (maxCorporationMembersBonus) across CEO's trained skills,
-                // defaulting to EVE's base 10-member limit when CEO has no Corporation Management skills.
-                let mut limit: i64 = 0;
-                if let Some(ceo_skills) = snap.skills.get(&corp.ceo_id) {
-                    for skill in ceo_skills.values() {
-                        if let Some(bonus) = ctx
-                            .sde
-                            .types
-                            .get(&skill.type_id)
-                            .and_then(|t| t.default_attributes.get(&191))
-                            .copied()
-                        {
-                            limit += (bonus.round() as i64) * i64::from(skill.level);
-                        }
-                    }
-                }
-                if limit <= 0 {
-                    limit = 10;
-                }
                 RouteExecutionResult::ok_json(json!(limit), 3600)
             }))
         }

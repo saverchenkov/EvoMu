@@ -1069,28 +1069,25 @@ pub fn handle_season_manager(
                         message: format!("goal_id {raw_goal_id} is out of valid u32 range"),
                     }));
                 };
-                let milestone = crate::services::quasar_career_goals::default_career_milestones()
-                    .into_iter()
-                    .find(|m| m.milestone_id == goal_id);
-                let sde_goal = ctx.sde.career_goals.get(&goal_id);
-                if milestone.is_none() && sde_goal.is_none() {
+                let milestones = crate::services::quasar_career_goals::default_career_milestones();
+                let Some(resolved) = crate::domain::career_goals::resolve_career_goal_or_milestone(
+                    &ctx.sde,
+                    &ctx.quasar_gateway.progression.career_goals,
+                    &milestones,
+                    char_id,
+                    goal_id,
+                ) else {
                     return Some(Err(BridgeRpcError {
                         code: "ChallengeNotFound".into(),
                         message: format!("Goal or challenge {goal_id} not found"),
                     }));
-                }
-                let milestone_cp = milestone.as_ref().map(|m| {
-                    (
-                        u64::from(
-                            ctx.quasar_gateway
-                                .progression
-                                .career_goals
-                                .career_points_for_character(char_id as u32, m.career_id),
-                        ),
-                        u64::from(m.required_points),
-                    )
-                });
-                Some((goal_id, milestone_cp))
+                };
+                Some((
+                    goal_id,
+                    resolved
+                        .career_points_progress
+                        .map(|cp| (cp, resolved.required_progress)),
+                ))
             } else {
                 None
             };
@@ -1157,81 +1154,38 @@ pub fn handle_season_manager(
                 }));
             };
             let milestones = crate::services::quasar_career_goals::default_career_milestones();
-            let resolved = if let Some(m) = milestones.iter().find(|m| m.milestone_id == goal_id) {
-                let cp = u64::from(
-                    ctx.quasar_gateway
-                        .progression
-                        .career_goals
-                        .career_points_for_character(char_id as u32, m.career_id),
-                );
-                Some((u64::from(m.required_points).max(1), m.sp_reward, Some(cp)))
-            } else if let Some(g) = ctx.sde.career_goals.get(&goal_id) {
-                Some((g.target_progress.max(1), g.sp_reward as f64, None))
-            } else {
-                None
-            };
-            let Some((target_prog, sp_reward, cp_prog)) = resolved else {
+            let Some(resolved) = crate::domain::career_goals::resolve_career_goal_or_milestone(
+                &ctx.sde,
+                &ctx.quasar_gateway.progression.career_goals,
+                &milestones,
+                char_id,
+                goal_id,
+            ) else {
                 return Some(Err(BridgeRpcError {
                     code: "ChallengeNotFound".into(),
                     message: format!("Goal or challenge {goal_id} not found"),
                 }));
             };
+            let target_prog = resolved.required_progress;
+            let sp_reward = resolved.sp_reward;
+            let cp_prog = resolved.career_points_progress;
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                if ctx
-                    .quasar_gateway
-                    .progression
-                    .career_goals
-                    .is_milestone_claimed(char_id as u32, goal_id, snap)
-                {
-                    return Err(BridgeRpcError {
-                        code: "GoalAlreadyClaimed".into(),
-                        message: format!("Career goal {goal_id} has already been claimed"),
-                    });
-                }
                 let cur_prog = cp_prog.unwrap_or_else(|| {
                     snap.npe_progress
                         .get(&char_id)
                         .and_then(|n| n.career_goal_progress.get(&goal_id).copied())
                         .unwrap_or(0)
                 });
-                if cur_prog < target_prog {
-                    return Err(BridgeRpcError {
-                        code: "GoalProgressIncomplete".into(),
-                        message: format!(
-                            "Career goal {goal_id} requires progress {target_prog}, current is {cur_prog}"
-                        ),
-                    });
-                }
-                if !snap.characters.contains_key(&char_id) {
-                    return Err(BridgeRpcError {
-                        code: "CharacterNotFound".into(),
-                        message: format!("Character {char_id} not found"),
-                    });
-                }
-                let npe = snap.npe_progress.entry(char_id).or_insert_with(|| {
-                    eve_db::NpeProgressRecord {
-                        character_id: char_id,
-                        node_graph_id: 473,
-                        current_node_id: 1,
-                        completed: false,
-                        career_goal_progress: Default::default(),
-                        claimed_goals: Default::default(),
-                    }
-                });
-                if !npe.claimed_goals.insert(goal_id) {
-                    return Err(BridgeRpcError {
-                        code: "GoalAlreadyClaimed".into(),
-                        message: format!("Career goal {goal_id} has already been claimed"),
-                    });
-                }
-                let ch = snap.characters.get_mut(&char_id).unwrap();
-                ch.free_skill_points += sp_reward;
-                let new_sp = ch.free_skill_points;
-                ctx.quasar_gateway
-                    .progression
-                    .career_goals
-                    .mark_milestone_claimed_in_snapshot(char_id as u32, goal_id, snap);
-                Ok(new_sp)
+                crate::domain::career_goals::claim_career_goal_or_milestone_in_snap(
+                    snap,
+                    &ctx.quasar_gateway.progression.career_goals,
+                    char_id,
+                    goal_id,
+                    cur_prog,
+                    target_prog,
+                    sp_reward,
+                )
+                .map_err(super::domain_err_to_rpc)
             });
             match res {
                 Ok(new_free_sp) => Some(Ok(PyRep::keyval([

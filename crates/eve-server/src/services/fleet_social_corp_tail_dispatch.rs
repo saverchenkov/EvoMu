@@ -348,25 +348,11 @@ pub fn handle_corp_gov_tail(
                         skills_owner_id = corp.ceo_id;
                     }
                 }
-                let member_limit = snap
-                    .skills
-                    .get(&skills_owner_id)
-                    .map(|skills| {
-                        skills
-                            .values()
-                            .map(|s| {
-                                let per_lvl = ctx
-                                    .sde
-                                    .types
-                                    .get(&s.type_id)
-                                    .and_then(|t| t.default_attributes.get(&191).copied())
-                                    .unwrap_or(0.0);
-                                (per_lvl.round() as i64) * i64::from(s.level)
-                            })
-                            .sum::<i64>()
-                    })
-                    .unwrap_or(0)
-                    .max(10);
+                let member_limit = crate::domain::corp_governance::corp_member_limit_from_skills(
+                    &ctx.sde,
+                    snap,
+                    skills_owner_id,
+                );
                 snap.corp_governance
                     .entry(corp_id)
                     .or_default()

@@ -60,7 +60,7 @@ pub(crate) fn options_keyval(free_move: bool, registered: bool, auto_join: Optio
 
 /// `FleetSvc.OnFleetJoin(member)` to every fleet member (including the joiner, whose client runs
 /// `InitFleet` when `member.charID == session.charid`).
-pub(super) fn emit_join(ctx: &ServerContext, fleet_id: i64, char_id: i64) {
+pub(crate) fn emit_join(ctx: &ServerContext, fleet_id: i64, char_id: i64) {
     let member = ctx.db.with_snapshot(|snap| {
         snap.fleets.get(&fleet_id).and_then(|f| f.member_details.get(&char_id).cloned())
     });
@@ -71,7 +71,7 @@ pub(super) fn emit_join(ctx: &ServerContext, fleet_id: i64, char_id: i64) {
 
 /// `FleetSvc.OnFleetLeave(charID)` to the leaver (client `Clear()`s when `charID == session.charid`)
 /// and to the remaining members (already removed from `WorldRepository` when this runs).
-pub(super) fn emit_leave(ctx: &ServerContext, fleet_id: i64, char_id: i64) {
+pub(crate) fn emit_leave(ctx: &ServerContext, fleet_id: i64, char_id: i64) {
     let args = vec![PyRep::Integer(char_id)];
     ctx.notify(NotificationTarget::Character(char_id), "OnFleetLeave", "charid", args.clone());
     ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetLeave", "fleetid", args);
@@ -80,7 +80,7 @@ pub(super) fn emit_leave(ctx: &ServerContext, fleet_id: i64, char_id: i64) {
 /// `FleetSvc.OnFleetMemberChanged(charID, fleetID, oldWingID, oldSquadID, oldRole, oldJob,
 /// oldMemberOptOuts, newWingID, newSquadID, newRole, newJob, newMemberOptOuts, isOnlyMember)`.
 /// The client never reads `isOnlyMember`; DERIVED: sent as "this member is the fleet's only member".
-pub(super) fn emit_member_changed(
+pub(crate) fn emit_member_changed(
     ctx: &ServerContext,
     fleet_id: i64,
     old: &FleetMemberRecord,
@@ -107,13 +107,13 @@ pub(super) fn emit_member_changed(
 }
 
 /// `FleetSvc.OnFleetOptionsChanged(oldOptions, options)` to the whole fleet.
-pub(super) fn emit_options_changed(ctx: &ServerContext, fleet_id: i64, old: PyRep, new: PyRep) {
+pub(crate) fn emit_options_changed(ctx: &ServerContext, fleet_id: i64, old: PyRep, new: PyRep) {
     ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetOptionsChanged", "fleetid", vec![old, new]);
 }
 
 /// `FleetSvc.OnFleetMotdChanged(motd, reloadMotd)`; `reloadMotd` makes the client push the text into
 /// the fleet chat window (`SetMotd`).
-pub(super) fn emit_motd(ctx: &ServerContext, target: NotificationTarget, motd: &str, reload: bool) {
+pub(crate) fn emit_motd(ctx: &ServerContext, target: NotificationTarget, motd: &str, reload: bool) {
     let id_type = if matches!(target, NotificationTarget::Fleet(_)) { "fleetid" } else { "charid" };
     ctx.notify(target, "OnFleetMotdChanged", id_type, vec![PyRep::String(motd.to_string()), PyRep::Bool(reload)]);
 }
@@ -158,133 +158,35 @@ pub fn character_active_fleet_id(ctx: &ServerContext, char_id: i64) -> Option<i6
 
 /// Removes `char_id` from `fleet_id` (`members`, `member_details`, wing/squad commander slots,
 /// and `fleetid:{fleet_id}` chat channel), promotes a successor boss if needed, or deletes the
-/// fleet and its channel when empty. Emits `OnFleetLeave` and (on boss handover) `OnFleetMemberChanged`.
+/// fleet and its channel when empty. Emits `OnFleetLeave` and (on boss handover) `OnFleetMemberChanged`
+/// and invalidates bound `fleetObjectHandler` objects via `"fleet_change"`.
 pub fn remove_character_from_fleet(
     ctx: &ServerContext,
     fleet_id: i64,
     char_id: i64,
 ) -> (bool, Option<i64>) {
-    {
-        let mut ex = ctx.fleet_extras.lock().unwrap();
-        ex.disconnected_members.remove(&char_id);
-        ex.invite_details.remove(&(fleet_id, char_id));
-        ex.invite_timestamps.remove(&(fleet_id, char_id));
-        ex.watchlist.remove(&char_id);
-        for targets in ex.watchlist.values_mut() {
-            targets.remove(&char_id);
-        }
-        if let Some(reqs) = ex.join_requests.get_mut(&fleet_id) { reqs.remove(&char_id); }
-    }
-    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-        rt.authorized_shipping_storage.retain(|&(_, c)| c != char_id);
-    });
-    let (was_member, disbanded, hand_over) = ctx.db.with_mut_snapshot(|snap| {
-        let mut was_in_fleet = false;
-        let mut should_disband = false;
-        let mut hand_over: Option<(FleetMemberRecord, FleetMemberRecord, bool)> = None;
-        if let Some(fleet) = snap.fleets.get_mut(&fleet_id) {
-            fleet.invites.remove(&char_id);
-            let old_len = fleet.members.len();
-            fleet.members.retain(|&m| m != char_id);
-            if fleet.members.len() != old_len {
-                was_in_fleet = true;
-            }
-            if fleet.member_details.remove(&char_id).is_some() {
-                was_in_fleet = true;
-            }
-            for w in fleet.wing_details.values_mut() {
-                if w.commander_id == Some(char_id) {
-                    w.commander_id = None;
-                }
-            }
-            for s in fleet.squad_details.values_mut() {
-                if s.commander_id == Some(char_id) {
-                    s.commander_id = None;
-                }
-            }
-            if fleet.members.is_empty() && fleet.member_details.is_empty() {
-                should_disband = true;
-            } else if fleet.boss_id == char_id {
-                // parity: feat:fleet.boss-handover
-                let disconnected: std::collections::HashSet<i64> = ctx
-                    .fleet_extras
-                    .lock()
-                    .unwrap()
-                    .disconnected_members
-                    .keys()
-                    .copied()
-                    .collect();
-                let next_boss = fleet
-                    .member_details
-                    .values()
-                    .min_by_key(|m| {
-                        (
-                            disconnected.contains(&m.character_id),
-                            role_to_i64(m.role),
-                            m.wing_id.unwrap_or(i64::MAX),
-                            m.squad_id.unwrap_or(i64::MAX),
-                            m.join_time_unix,
-                            m.character_id,
-                        )
-                    })
-                    .map(|m| m.character_id)
-                    .or_else(|| fleet.members.iter().copied().find(|cid| !disconnected.contains(cid)))
-                    .or_else(|| fleet.members.first().copied())
-                    .unwrap_or(0);
-                if next_boss != 0 {
-                    fleet.boss_id = next_boss;
-                    let only = fleet.members.len() == 1;
-                    if let Some(m) = fleet.member_details.get_mut(&next_boss) {
-                        let old = m.clone();
-                        m.job |= FLEET_JOB_CREATOR;
-                        hand_over = Some((old, m.clone(), only));
-                    }
-                }
-            }
-        }
-        let chan_key = format!("fleetid:{fleet_id}");
-        if let Some(chan) = snap.chat_channels.get_mut(&chan_key) {
-            chan.members.remove(&char_id);
-        }
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.fleet_id = None;
-        }
-        if should_disband {
-            for ch in snap.characters.values_mut() {
-                if ch.fleet_id == Some(fleet_id) {
-                    ch.fleet_id = None;
-                }
-            }
-            snap.fleets.remove(&fleet_id);
-            snap.chat_channels.remove(&chan_key);
-        }
-        (was_in_fleet, should_disband, hand_over)
-    });
+    let outcome = crate::domain::fleets::remove_character_from_fleet_domain(ctx, fleet_id, char_id);
+    emit_fleet_member_removed(ctx, &outcome);
+    (
+        outcome.disbanded,
+        outcome.handover.map(|(_, n, _)| n.character_id),
+    )
+}
 
-    if disbanded {
-        let mut ex = ctx.fleet_extras.lock().unwrap();
-        ex.adverts.remove(&fleet_id);
-        ex.fleet_names.remove(&fleet_id);
-        ex.max_sizes.remove(&fleet_id);
-        ex.auto_join_squads.remove(&fleet_id);
-        ex.join_requests.remove(&fleet_id);
-        ex.invite_details.retain(|&(fid, _), _| fid != fleet_id);
-        ex.invite_timestamps.retain(|&(fid, _), _| fid != fleet_id);
-    } else if let Some((_, ref new_m, _)) = hand_over {
-        if let Some(ad) = ctx.fleet_extras.lock().unwrap().adverts.get_mut(&fleet_id) {
-            if ad.leader_id == char_id {
-                ad.leader_id = new_m.character_id;
-            }
-        }
-    }
+/// Persists fleet join/watchlist DB state and emits notifications after
+/// [`crate::domain::fleets::remove_character_from_fleet_domain`].
+pub(crate) fn emit_fleet_member_removed(
+    ctx: &ServerContext,
+    outcome: &crate::domain::fleets::RemoveFleetMemberOutcome,
+) {
     sync_fleet_join_requests_to_db(ctx);
     sync_fleet_watchlist_to_db(ctx);
 
-    if was_member {
+    if outcome.was_member {
         if let Ok(mut subs) = ctx.quasar_gateway.subscribers.write() {
             for sub in subs.values_mut() {
-                if sub.character_id == Some(char_id as u32)
-                    && (sub.fleet_id == Some(fleet_id) || disbanded)
+                if sub.character_id == Some(outcome.removed_char_id as u32)
+                    && (sub.fleet_id == Some(outcome.fleet_id) || outcome.disbanded)
                 {
                     sub.fleet_id = None;
                 }
@@ -292,28 +194,59 @@ pub fn remove_character_from_fleet(
         }
         let (c_sys, c_dock) = ctx.db.with_snapshot(|snap| {
             snap.characters
-                .get(&char_id)
+                .get(&outcome.removed_char_id)
                 .map(|ch| (ch.solar_system_id, ch.station_id))
                 .unwrap_or((30_000_142, None))
         });
         ctx.invalidate_bound_objects_for_session_transition(
-            char_id,
+            outcome.removed_char_id,
             c_sys,
             c_dock,
             "fleet_change",
         );
-        emit_leave(ctx, fleet_id, char_id);
-        if let Some((old, new, only)) = &hand_over {
-            emit_member_changed(ctx, fleet_id, old, new, *only);
+        emit_leave(ctx, outcome.fleet_id, outcome.removed_char_id);
+        if let Some((old, new, only)) = &outcome.handover {
+            emit_member_changed(ctx, outcome.fleet_id, old, new, *only);
             ctx.notify(
-                NotificationTarget::Fleet(fleet_id),
+                NotificationTarget::Fleet(outcome.fleet_id),
                 "OnChangeFleetBoss",
                 "fleetid",
-                vec![PyRep::Integer(char_id), PyRep::Integer(new.character_id)],
+                vec![
+                    PyRep::Integer(outcome.removed_char_id),
+                    PyRep::Integer(new.character_id),
+                ],
             );
         }
     }
-    (disbanded, hand_over.map(|(_, n, _)| n.character_id))
+}
+
+pub(crate) fn emit_fleet_session_cleared(
+    ctx: &ServerContext,
+    fleet_id: i64,
+    target_id: i64,
+    old_role: i64,
+) {
+    let sess_change = PyRep::Dict(vec![
+        (
+            PyRep::String("fleetid".into()),
+            PyRep::Tuple(vec![PyRep::Integer(fleet_id), PyRep::None]),
+        ),
+        (
+            PyRep::String("fleetrole".into()),
+            PyRep::Tuple(vec![PyRep::Integer(old_role), PyRep::None]),
+        ),
+    ]);
+    let sess_rep = PyRep::keyval([
+        ("charid", PyRep::Integer(target_id)),
+        ("fleetid", PyRep::None),
+        ("fleetrole", PyRep::None),
+    ]);
+    ctx.notify(
+        NotificationTarget::Character(target_id),
+        "OnSessionChanged",
+        "charid",
+        vec![PyRep::Bool(false), sess_rep, sess_change],
+    );
 }
 
 /// Removes `char_id` from all fleets and pending fleet invites.

@@ -797,9 +797,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         router.register_handler("eve.corporation.members.GetLimitRequest", Arc::new(move |ctx, _any, msg| {
             let corpid = resolve_authorized_corp(ctx, msg, 1, &d)?;
             let limit = d.with_snapshot(|s| {
-                s.corp_member_limits.get(&corpid).copied()
-                    .or_else(|| s.corp_governance.get(&corpid).and_then(|g| g.member_limit.map(|l| l as i64)))
-                    .unwrap_or(10)
+                crate::domain::corp_governance::resolve_corp_member_limit(None, s, corpid).unwrap_or(10)
             });
             let mut out = Vec::new();
             encode_varint_field(1, limit.max(0) as u64, &mut out);

@@ -151,20 +151,7 @@ fn check_contract_visibility(
     corp_id: i64,
     alliance_id: Option<i64>,
 ) -> bool {
-    if c.issuer_id == char_id { return true; }
-    let avail = if c.availability.is_empty() { "Public" } else { c.availability.as_str() };
-    if avail.eq_ignore_ascii_case("Public") && c.assignee_id == 0 { return true; }
-    if c.assignee_id != 0 {
-        return c.assignee_id == char_id
-            || c.assignee_id == corp_id
-            || alliance_id == Some(c.assignee_id);
-    }
-    match avail {
-        "Corporation" => c.issuer_corp_id != 0 && c.issuer_corp_id == corp_id,
-        "Alliance" => alliance_id.is_some() && alliance_id == Some(c.assignee_id),
-        "Personal" | "Private" => false,
-        _ => true,
-    }
+    crate::domain::market_acl::is_contract_visible_to_character(c, char_id, corp_id, alliance_id)
 }
 
 fn active_corp_acct_div(session: &SessionState) -> usize {
@@ -1571,10 +1558,19 @@ pub fn handle(
                     for cid in cids { let _ = snap.resolve_expired_contract(cid, now_unix); }
                     let mut list: Vec<ContractRecord> = snap.contracts.values().filter(|c| {
                             let region_ok = filter_region.map(|reg| {
-                                    ctx.sde.stations.get(&c.start_station_id)
-                                        .and_then(|st| ctx.sde.solar_systems.get(&st.solar_system_id))
-                                        .map(|sys| sys.region_id == reg).unwrap_or(true)
-                                }).unwrap_or(true);
+                                let loc_known = ctx.sde.stations.contains_key(&c.start_station_id)
+                                    || snap.structures.contains_key(&c.start_station_id);
+                                if loc_known {
+                                    crate::domain::market_acl::contract_in_region(
+                                        &ctx.sde,
+                                        snap,
+                                        c.start_station_id,
+                                        reg,
+                                    )
+                                } else {
+                                    true
+                                }
+                            }).unwrap_or(true);
                             let item_type_ok = filter_item_type.map(|tid| {
                                     c.item_ids.iter().any(|iid| snap.items.get(iid).map(|it| it.type_id == tid).unwrap_or(false))
                                         || c.requested_items.iter().any(|&(rtid, _)| rtid == tid)

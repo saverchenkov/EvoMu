@@ -440,73 +440,20 @@ pub(super) fn handle_contacts_notifications_calendar(
                     .into_iter()
                     .collect()
             };
-            let mut total_cspa = IskCents(0);
-            {
-                let s = ctx.social_extras.lock().unwrap();
-                for &rec_id in &target_ids {
-                    if rec_id == char_id || rec_id <= 0 {
-                        continue;
-                    }
-                    let friendly = s
-                        .contacts
-                        .get(&rec_id)
-                        .and_then(|m| m.get(&char_id))
-                        .is_some_and(|&(st, _, _)| st > 0.0)
-                        || ctx.db.with_snapshot(|snap| {
-                            if snap.char_contacts.get(&rec_id).is_some_and(|list| {
-                                list.iter().any(|c| {
-                                    c.contact_id == char_id && !c.is_blocked && c.standing > 0.0
-                                })
-                            }) {
-                                return true;
-                            }
-                            let c1 = snap.characters.get(&char_id);
-                            let c2 = snap.characters.get(&rec_id);
-                            match (c1, c2) {
-                                (Some(a), Some(b)) => {
-                                    a.corporation_id == b.corporation_id
-                                        || (a.alliance_id.is_some()
-                                            && a.alliance_id == b.alliance_id)
-                                }
-                                _ => false,
-                            }
-                        });
-                    if !friendly {
-                        let charge = ctx
-                            .db
-                            .with_snapshot(|snap| {
-                                snap.character_cspa_charges.get(&rec_id).copied()
-                            })
-                            .or_else(|| s.cspa_charges.get(&rec_id).copied())
-                            .unwrap_or_else(|| IskCents::from_f64_isk(2_950.0));
-                        if charge.0 > 0 {
-                            total_cspa = total_cspa.checked_add(charge).unwrap_or(total_cspa);
-                        }
-                    }
-                }
-            }
-            if total_cspa.0 > 0 {
-                let res = ctx.db.try_with_mut_snapshot(|snap| {
-                    let Some(ch) = snap.characters.get_mut(&char_id) else {
-                        return Err(BridgeRpcError {
-                            code: "CharacterNotFound".into(),
-                            message: format!("Character {char_id} not found"),
-                        });
-                    };
-                    ch.balance =
-                        ch.balance
-                            .checked_sub(total_cspa)
-                            .ok_or_else(|| BridgeRpcError {
-                                code: "InsufficientFundsForCSPA".into(),
-                                message: "Insufficient ISK to pay recipient CSPA charge".into(),
-                            })?;
-                    Ok(())
-                });
-                if let Err(e) = res {
-                    return Some(Err(e));
-                }
-            }
-            Some(Ok(PyRep::Real(total_cspa.to_wire_f64())))
+            let res = crate::domain::mail::charge_cspa_action(
+                ctx,
+                &crate::domain::mail::CspaCalculationInput {
+                    caller_id: char_id,
+                    target_ids: &target_ids,
+                    default_charge: IskCents::from_f64_isk(2_950.0),
+                    exempt_on_same_alliance: true,
+                    exempt_min_standing: 0.0,
+                },
+            );
+            Some(
+                res.map(|c| PyRep::Real(c.to_wire_f64()))
+                    .map_err(crate::services::domain_err_to_rpc),
+            )
         }
 
         ("charMgr", "SetNote") | ("charMgr", "GetNote") => {

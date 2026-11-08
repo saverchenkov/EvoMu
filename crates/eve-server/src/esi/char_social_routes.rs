@@ -379,42 +379,19 @@ pub fn dispatch_char_social_route_with_claims(
                     "CSPA character list must contain 1..=100 IDs",
                 ));
             }
-            Some(ctx.db.with_snapshot(|snap| {
-                let Some(caller) = snap.characters.get(&char_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
-                };
-                let contacts_guard = ctx
-                    .esi_state
-                    .char_contacts
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner());
-                let mut total_cents = 0i64;
-                for tid in &targets {
-                    if *tid == char_id {
-                        continue;
-                    }
-                    let same_corp = snap
-                        .characters
-                        .get(tid)
-                        .is_some_and(|t| t.corporation_id == caller.corporation_id);
-                    let is_exempt_contact = contacts_guard.get(tid).is_some_and(|list| {
-                        list.iter()
-                            .any(|c| c.contact_id == char_id && !c.is_blocked && c.standing > -10.0)
-                    });
-                    if !same_corp && !is_exempt_contact {
-                        let cspa = snap
-                            .character_cspa_charges
-                            .get(tid)
-                            .copied()
-                            .unwrap_or(IskCents(0));
-                        total_cents = total_cents.saturating_add(cspa.0.max(0));
-                    }
-                }
-                RouteExecutionResult::created_json(json!(IskCents(total_cents).to_wire_f64()))
-            }))
+            Some(match crate::domain::mail::calculate_cspa_fee(
+                ctx,
+                &crate::domain::mail::CspaCalculationInput {
+                    caller_id: char_id,
+                    target_ids: &targets,
+                    default_charge: IskCents(0),
+                    exempt_on_same_alliance: false,
+                    exempt_min_standing: -10.0,
+                },
+            ) {
+                Ok(total) => RouteExecutionResult::created_json(json!(total.to_wire_f64())),
+                Err(e) => super::domain_err_to_esi(e),
+            })
         }
 
         ("GET", "/characters/{character_id}/notifications") => {

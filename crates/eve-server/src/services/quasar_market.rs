@@ -138,21 +138,7 @@ fn can_caller_view_market_location(
     caller_char_id: i64,
     location_id: i64,
 ) -> bool {
-    let Some(st) = snap.structures.get(&location_id) else {
-        return true;
-    };
-    if caller_char_id > 0 && !crate::esi::universe_routes::character_has_structure_acl_access(snap, caller_char_id, st) {
-        return false;
-    }
-    crate::services::structure_profile_services::require_structure_service_access_in_snap(
-        None,
-        snap,
-        location_id,
-        caller_char_id.max(0),
-        crate::services::structure_profile_services::StructureServiceKind::Market,
-        0,
-    )
-    .is_ok()
+    crate::domain::market_acl::can_caller_view_market_location(snap, caller_char_id, location_id)
 }
 
 fn extract_u64_from_field(dyn_msg: &DynamicQuasarMessage, field_num: u32) -> u64 {
@@ -375,20 +361,14 @@ pub fn register_market_handlers(
             }
             let structure_id = extract_u64_from_field(dyn_msg, 1) as i64;
             let out = db_clone.with_snapshot(|snap| -> Result<Vec<u8>, (u32, String)> {
-                if snap.structures.contains_key(&structure_id) {
-                    if !crate::services::market_trading::is_structure_market_online(snap, structure_id) {
-                        return Err((
-                            STATUS_FORBIDDEN,
-                            format!("Structure {structure_id} does not have an online Standup Market Hub service"),
-                        ));
-                    }
-                    if !can_caller_view_market_location(snap, caller_cid, structure_id) {
-                        return Err((
-                            STATUS_FORBIDDEN,
-                            format!("Character {caller_cid} lacks ACL access to structure {structure_id}"),
-                        ));
-                    }
-                }
+                crate::domain::market_acl::verify_structure_market_query_access(
+                    None,
+                    snap,
+                    caller_cid,
+                    structure_id,
+                    false,
+                )
+                .map_err(|e| (STATUS_FORBIDDEN, e.message))?;
                 let mut buf = Vec::new();
                 for o in snap.market_orders.values() {
                     if o.station_id == structure_id && o.vol_remaining > 0 {

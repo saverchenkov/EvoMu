@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::esi::full_endpoint_catalog_tests::seed_full_esi_context;
+use eve_db::{IskCents, WalletJournalEntry};
 
 fn params(pairs: &[(&str, &str)]) -> HashMap<String, String> {
     pairs

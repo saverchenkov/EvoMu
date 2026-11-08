@@ -6,7 +6,7 @@ use crate::esi::sample_routes::{
 };
 use crate::router::cache_notifications::NotificationTarget;
 use crate::router::ServerContext;
-use eve_db::{SsoTokenClaims, UpwellStructureRecord, WorldStateSnapshot};
+use eve_db::SsoTokenClaims;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -39,51 +39,7 @@ pub(crate) fn cached_base_jump_adjacency(ctx: &ServerContext) -> Arc<JumpAdjacen
     arc_adj
 }
 
-/// Evaluates whether `char_id` is authorized by ACL to view or dock at `st`.
-/// Denies destroyed structures, pilots with negative standing toward `st.owner_corp_id`,
-/// or pilots whose corporation is in an active war with `st.owner_corp_id`.
-pub fn character_has_structure_acl_access(
-    snap: &WorldStateSnapshot,
-    char_id: i64,
-    st: &UpwellStructureRecord,
-) -> bool {
-    if st.state == "Destroyed" {
-        return false;
-    }
-    if snap
-        .structure_docking_acl_denied
-        .get(&st.structure_id)
-        .is_some_and(|set| set.contains(&char_id))
-    {
-        return false;
-    }
-    let Some(ch) = snap.characters.get(&char_id) else {
-        return false;
-    };
-    if ch.corporation_id == st.owner_corp_id {
-        return true;
-    }
-    if ch.alliance_id.is_some()
-        && snap
-            .corporations
-            .get(&st.owner_corp_id)
-            .and_then(|c| c.alliance_id)
-            == ch.alliance_id
-    {
-        return true;
-    }
-    let standing = ch.standings.get(&st.owner_corp_id).copied().unwrap_or(0.0);
-    if standing < 0.0 {
-        return false;
-    }
-    let at_war = snap.wars.values().any(|w| {
-        w.active
-            && ((w.aggressor_corp_id == ch.corporation_id && w.defender_corp_id == st.owner_corp_id)
-                || (w.aggressor_corp_id == st.owner_corp_id
-                    && w.defender_corp_id == ch.corporation_id))
-    });
-    !at_war
-}
+pub use crate::domain::market_acl::character_has_structure_acl_access;
 
 /// Dispatches Routes, Search, Sovereignty, Universe, and User Interface OpenAPI operations.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
