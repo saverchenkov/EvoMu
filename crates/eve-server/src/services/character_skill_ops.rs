@@ -612,6 +612,9 @@ fn strip_ship_fitting(
                 message: format!("Ship {ship_id} is locked in an active contract"),
             });
         }
+        crate::services::fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(
+            snap, ship,
+        )?;
 
         // Collect all fitted modules + charges (11..=34, 164..=171) and drone-bay drones (87).
         // Rigs (92..=94) and T3 subsystems (125..=132) remain fitted.
@@ -625,6 +628,13 @@ fn strip_ship_fitting(
             })
             .map(|i| (i.item_id, i.flag))
             .collect();
+        for (iid, _) in &candidate_ids {
+            if let Some(fitted_item) = snap.items.get(iid) {
+                crate::services::fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(
+                    snap, fitted_item,
+                )?;
+            }
+        }
 
         let mut moved = Vec::new();
         for (iid, old_flag) in candidate_ids {

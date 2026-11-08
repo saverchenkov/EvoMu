@@ -93,7 +93,7 @@ pub(super) async fn validate_in_space_ship_store_allowed(
             .await?;
     }
 
-    for &sid in &[target_ship_id, host_ship_id] {
+    for &sid in &warp_check_ids {
         if sys.is_ball_scrambled(sid).await.unwrap_or(false) {
             return Err(err(
                 "WarpScrambled",
@@ -251,6 +251,8 @@ pub(super) async fn handle_store_vessel(
             if target.location_id != dock || host.location_id != dock {
                 return Err(err("UserError", "ShipNotInSameHangar"));
             }
+            fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, target)?;
+            fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, host)?;
             let t_type = ctx
                 .sde
                 .types
@@ -259,34 +261,72 @@ pub(super) async fn handle_store_vessel(
             if t_type.category_id != 6 || target.type_id == 670 {
                 return Err(err("UserError", "OnlyShipsCanBeStoredInSMA"));
             }
-            let check_corp_role = || -> Result<(), BridgeRpcError> {
-                let req = eve_db::corp_roles::ROLE_DIRECTOR
-                    | eve_db::corp_roles::ROLE_STATION_MANAGER;
-                let has_role = (session.corp_role & req) != 0
-                    || snap
-                        .corporations
-                        .get(&caller_corp)
-                        .is_some_and(|c| c.ceo_id == char_id)
-                    || snap
-                        .corporations
-                        .get(&caller_corp)
-                        .and_then(|c| c.member_roles.get(&char_id))
-                        .is_some_and(|&r| (r & req) != 0);
-                if !has_role {
+            let check_docked_ship_access = |item: &eve_db::InventoryItemRecord,
+                                            label: &str,
+                                            require_station_mgr_for_corp: bool|
+             -> Result<(), BridgeRpcError> {
+                let is_corp = caller_corp > 0 && item.owner_id == caller_corp;
+                if item.owner_id != char_id && !is_corp {
                     return Err(err(
-                        "CorpRoleDenied",
-                        "Corporation-owned ship storage requires Director or Station Manager role",
+                        "OwnershipViolation",
+                        format!("Cannot store into or from another player's docked {label}"),
+                    ));
+                }
+                if is_corp {
+                    let flag_u16 = item.flag as u16;
+                    if !(116..=122).contains(&flag_u16) {
+                        return Err(err(
+                            "InvalidLocation",
+                            format!("Corporation-owned {label} must be in CorpSAG1..7"),
+                        ));
+                    }
+                    let (is_ceo, snap_roles) =
+                        crate::services::inventory_bound::get_effective_corp_roles_at_location_in_snap(
+                            snap,
+                            caller_corp,
+                            char_id,
+                            Some(dock),
+                        );
+                    let effective_roles = snap_roles | session.corp_role;
+                    let is_dir_or_ceo = is_ceo
+                        || eve_db::corp_roles::has_role(
+                            effective_roles,
+                            eve_db::corp_roles::ROLE_DIRECTOR,
+                        );
+                    let div_take_role = 1u64 << (13 + (flag_u16 - 116) as u32);
+                    if !is_dir_or_ceo
+                        && !eve_db::corp_roles::has_role(effective_roles, div_take_role)
+                    {
+                        return Err(err(
+                            "CorpRoleDenied",
+                            format!(
+                                "Character {char_id} lacks corporation hangar division {} take role for {label}",
+                                flag_u16 - 115
+                            ),
+                        ));
+                    }
+                    if require_station_mgr_for_corp
+                        && !is_dir_or_ceo
+                        && !eve_db::corp_roles::has_role(
+                            effective_roles,
+                            eve_db::corp_roles::ROLE_STATION_MANAGER,
+                        )
+                    {
+                        return Err(err(
+                            "CorpRoleDenied",
+                            "Corporation-owned ship storage requires Director or Station Manager role",
+                        ));
+                    }
+                } else if item.flag != InventoryFlag::Hangar {
+                    return Err(err(
+                        "InvalidLocation",
+                        format!("Personal {label} must be in station or structure Hangar"),
                     ));
                 }
                 Ok(())
             };
-            let is_corp = caller_corp > 0 && target.owner_id == caller_corp;
-            if target.owner_id != char_id && !is_corp {
-                return Err(err("OwnershipViolation", "Cannot store another player's ship"));
-            }
-            if is_corp {
-                check_corp_role()?;
-            }
+            check_docked_ship_access(target, "target ship", true)?;
+            check_docked_ship_access(host, "host ship", false)?;
             if !target.singleton {
                 return Err(err(
                     "OnlyAssembledShipsInSMA",
@@ -370,18 +410,14 @@ pub(super) async fn handle_store_vessel(
         ));
     }
     check_pos_forcefield_coverage(ctx, sys_id, char_id, active_ship_id, &[cp, hp]).await?;
-    if ctx
-        .crimewatch
-        .read()
-        .ok()
-        .and_then(|cw| cw.states.get(&char_id).map(|st| st.is_weapon_timer_active(ctx.now_unix())))
-        .unwrap_or(false)
-    {
-        return Err(err(
-            "CannotStoreShipActiveWeaponsTimer",
-            "UserError: Cannot store ship while Weapons Timer is active",
-        ));
-    }
+    crate::services::combat_crimewatch::check_crimewatch_action_restriction(
+        ctx,
+        char_id,
+        target_ship_id,
+        sys_id,
+        "store_ship",
+        ctx.now_unix(),
+    )?;
 
     if target_ship_id != active_ship_id {
         let target_pos = sys

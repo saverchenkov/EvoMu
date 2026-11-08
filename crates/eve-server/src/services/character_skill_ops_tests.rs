@@ -410,4 +410,70 @@ async fn omega_weekly_sp_abort_respec_strip_fitting_and_container_hooks() {
         "NotInSameSolarSystem"
     );
     post_inventory_fitting_hook(&ctx, &sess, None, "Drop", &[]).await;
+
+    // #549: StripFitting refuses impounded, blueprint-locked, and unpaid asset-safety ships/modules
+    let locked_ship_id = 890_549_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            locked_ship_id,
+            InventoryItemRecord {
+                item_id: locked_ship_id,
+                type_id: 587,
+                owner_id: cid,
+                location_id: station_id,
+                flag: InventoryFlag::Impounded,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+    assert_eq!(
+        handle(&ctx, &mut sess, "ship", "StripFitting", &[PyRep::Integer(locked_ship_id)], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "ImpoundedItem"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&locked_ship_id).unwrap().flag = InventoryFlag::Locked;
+    });
+    assert_eq!(
+        handle(&ctx, &mut sess, "dogmaIM", "StripFitting", &[PyRep::Integer(locked_ship_id)], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "ItemLocked"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&locked_ship_id).unwrap().flag = InventoryFlag::Hangar;
+        let mut ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        ext.asset_safety_wraps.insert(
+            890_999,
+            crate::services::station_structure::structure_upwell_ops::AssetSafetyWrapRecord {
+                wrap_id: 890_999,
+                owner_id: cid,
+                is_corp: false,
+                source_structure_id: 1_000_000_000_001,
+                source_structure_name: "Keepstar".into(),
+                solar_system_id: 30_000_142,
+                created_unix: 1,
+                deliverable_after_unix: 1,
+                delivered_to_id: Some(station_id),
+                item_ids: vec![locked_ship_id],
+                estimated_value_isk: 1_000.0,
+                nearest_npc_station_id: Some(station_id),
+                auto_delivered: true,
+                retrieval_fee_paid: false,
+            },
+        );
+        crate::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
+    });
+    assert_eq!(
+        handle(&ctx, &mut sess, "ship", "StripFitting", &[PyRep::Integer(locked_ship_id)], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "AssetSafetyLocked"
+    );
 }

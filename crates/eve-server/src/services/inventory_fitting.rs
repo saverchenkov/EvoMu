@@ -620,9 +620,13 @@ pub async fn handle(
                 if item_id == new_loc || snap.is_structure_controller_saved_ship(item_id) || (active_ship_id > 0 && item_id == active_ship_id && (snap.items.contains_key(&new_loc) || (116..=122).contains(&flag_u16))) {
                     return Err(BridgeRpcError { code: "CannotMoveActiveShip".into(), message: format!("Cannot move item {item_id} into {new_loc}") });
                 }
-                if flag == InventoryFlag::Locked || moving.flag == InventoryFlag::Locked || snap.is_item_locked_in_contract_or_job(item_id) {
-                    return Err(BridgeRpcError { code: "ItemLocked".into(), message: format!("Item {item_id} is locked by an active contract, industry job, or container") });
+                if matches!(flag_u16, 36 | 63 | 72) {
+                    return Err(BridgeRpcError {
+                        code: if flag_u16 == 72 { "ImpoundedItem" } else if flag_u16 == 36 { "AssetSafetyLocked" } else { "ItemLocked" }.into(),
+                        message: format!("Cannot move item {item_id} into restricted flag {flag_u16}"),
+                    });
                 }
+                fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, moving)?;
                 if let Some(exp_v) = expected_version {
                     if moving.version != exp_v {
                         return Err(BridgeRpcError { code: "ItemVersionMismatch".into(), message: format!("Item {item_id} version mismatch: expected {exp_v}, actual {}", moving.version) });
@@ -1046,8 +1050,7 @@ pub async fn handle(
                         || moving.is_blueprint_copy
                         || !moving.dynamic_attributes.is_empty()
                         || moving.source_mutaplasmid_id.is_some()
-                        || moving.flag == InventoryFlag::Locked
-                        || snap.is_item_locked_in_contract_or_job(item_id)
+                        || fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, &moving).is_err()
                     {
                         return Ok(None);
                     }
@@ -1160,6 +1163,18 @@ pub async fn handle(
                 .or_else(|msg| {
                     if msg.contains("is not authorized") || msg.contains("is not owned by character") {
                         ctx.db.try_with_mut_snapshot(|snap| {
+                            let dest_blocked = snap.items.get(&new_loc).is_some_and(|dest| {
+                                fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, dest).is_err()
+                            });
+                            if dest_blocked {
+                                return Err(format!("Destination {new_loc} is locked or impounded"));
+                            }
+                            let src_blocked = snap.items.get(&item_id).is_some_and(|it| {
+                                fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, it).is_err()
+                            });
+                            if src_blocked {
+                                return Err(format!("Item {item_id} is locked, impounded, or in asset safety"));
+                            }
                             let it = snap.items.get_mut(&item_id).ok_or_else(|| format!("Item {item_id} not found"))?;
                             it.location_id = new_loc;
                             it.flag = flag;

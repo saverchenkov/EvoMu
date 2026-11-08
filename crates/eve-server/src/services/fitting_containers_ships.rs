@@ -247,12 +247,20 @@ pub(crate) fn can_character_access_ship_bay_with_password_snap(
     let st = read_container_ship_state_snap(snap);
     let cfg = st.ship_configs.get(&host_ship_id).cloned().unwrap_or_default();
     let c1 = snap.characters.get(&char_id).map(|c| c.corporation_id);
-    let c2 = snap.characters.get(&host_owner_id).map(|c| c.corporation_id);
+    let c2 = snap
+        .characters
+        .get(&host_owner_id)
+        .map(|c| c.corporation_id)
+        .or_else(|| {
+            snap.corporations
+                .contains_key(&host_owner_id)
+                .then_some(host_owner_id)
+        });
     let in_same_fleet = snap
         .fleets
         .values()
         .any(|fl| fl.members.contains(&char_id) && fl.members.contains(&host_owner_id));
-    let same_corp = c1.is_some() && c1 == c2;
+    let same_corp = c1.is_some_and(|cid| cid > 0 && (cid == host_owner_id || c2 == Some(cid)));
     let base_allowed = if is_sma {
         (in_same_fleet && cfg.allow_fleet_smb) || (same_corp && cfg.allow_corp_smb)
     } else {
@@ -456,6 +464,58 @@ pub(crate) fn container_has_active_audit_log_snap(snap: &eve_db::WorldStateSnaps
     read_container_ship_state_snap(snap).alsc_logs.get(&container_id).map_or(false, |logs| logs.iter().any(|e| now_unix.saturating_sub(e.timestamp_unix) < 21 * 86_400))
 }
 
+/// Hard-refuses moves/takes/strips involving `Impounded` (72), `Locked` (63), contract/job-locked,
+/// `AssetSafety` (36), `AssetSafetyWrap` (`type_id == 60`), or active `ext.asset_safety_wraps` items
+/// or any ancestor container in one of those states (`#549`).
+pub(crate) fn check_item_lock_impound_asset_safety_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    item: &eve_db::InventoryItemRecord,
+) -> Result<(), BridgeRpcError> {
+    let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+    let in_active_wrap = |iid: i64, loc_id: i64| -> bool {
+        ext.asset_safety_wraps.values().any(|w| {
+            !w.retrieval_fee_paid
+                && (w.wrap_id == iid || w.wrap_id == loc_id || w.item_ids.contains(&iid))
+        })
+    };
+    let check_single = |rec: &eve_db::InventoryItemRecord| -> Result<(), BridgeRpcError> {
+        let raw_flag = rec.flag as u16;
+        if rec.flag == InventoryFlag::Impounded || raw_flag == 72 {
+            return Err(BridgeRpcError {
+                code: "ImpoundedItem".into(),
+                message: format!("Item {} is impounded and cannot be moved until impound fees are paid", rec.item_id),
+            });
+        }
+        if rec.flag as u16 == 36 || rec.type_id == 60 || in_active_wrap(rec.item_id, rec.location_id) {
+            return Err(BridgeRpcError {
+                code: "AssetSafetyLocked".into(),
+                message: format!("Item {} is sealed in Asset Safety until retrieval fees are paid", rec.item_id),
+            });
+        }
+        if rec.flag == InventoryFlag::Locked
+            || raw_flag == 63
+            || snap.is_item_locked_in_contract_or_job(rec.item_id)
+        {
+            return Err(BridgeRpcError {
+                code: "ItemLocked".into(),
+                message: format!("Item {} is locked by contract, job, or corporation lockdown", rec.item_id),
+            });
+        }
+        Ok(())
+    };
+
+    check_single(item)?;
+    let mut cur_loc = item.location_id;
+    for _ in 0..8 {
+        let Some(anc) = snap.items.get(&cur_loc) else {
+            break;
+        };
+        check_single(anc)?;
+        cur_loc = anc.location_id;
+    }
+    Ok(())
+}
+
 /// Validates container rules, ALSC locks/passwords, SMA (`flag 90`), and Fleet Hangar (`flag 155`) on item move.
 pub(crate) fn validate_container_and_bay_move(
     ctx: &ServerContext,
@@ -469,6 +529,33 @@ pub(crate) fn validate_container_and_bay_move(
     if item_id == new_loc {
         return Err(BridgeRpcError { code: "UserError".into(), message: "CannotStoreShipInItself".into() });
     }
+    if flag_u16 == 72 {
+        return Err(BridgeRpcError {
+            code: "ImpoundedItem".into(),
+            message: "Cannot move items into Impounded flag".into(),
+        });
+    }
+    if flag_u16 == 36 {
+        return Err(BridgeRpcError {
+            code: "AssetSafetyLocked".into(),
+            message: "Cannot move items into Asset Safety flag".into(),
+        });
+    }
+    if flag_u16 == 63 {
+        return Err(BridgeRpcError {
+            code: "ItemLocked".into(),
+            message: "Cannot move items into Locked flag".into(),
+        });
+    }
+    ctx.db.with_snapshot(|snap| {
+        if let Some(moving_item) = snap.items.get(&item_id) {
+            check_item_lock_impound_asset_safety_in_snap(snap, moving_item)?;
+        }
+        if let Some(dest_item) = snap.items.get(&new_loc) {
+            check_item_lock_impound_asset_safety_in_snap(snap, dest_item)?;
+        }
+        Ok(())
+    })?;
     let alsc_locked = read_container_ship_state(ctx)
         .alsc_locked_items
         .contains(&item_id);

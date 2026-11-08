@@ -224,4 +224,94 @@ async fn corp_gov_votes_sanctioned_actions_and_employment_record() {
     .await
     .unwrap();
     assert_eq!(rs_rows(&emp_fallback)[0][0].as_i64(), Some(98_000_001));
+
+    // #549: ActivateSanctionedAction refuses unlocking impounded/contract/safety items and refuses locking fitted/impounded items
+    let now_u = clock.now_unix_secs();
+    let imp_id = 77_000_549_i64;
+    let mod_id = 77_000_550_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            imp_id,
+            InventoryItemRecord {
+                item_id: imp_id,
+                type_id: 34,
+                owner_id: 98_000_001,
+                location_id: 60_003_760,
+                flag: InventoryFlag::Impounded,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mod_id,
+            InventoryItemRecord {
+                item_id: mod_id,
+                type_id: 487,
+                owner_id: 98_000_001,
+                location_id: 60_003_760,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        for (case_id, vote_type, text, param) in [
+            (951_i64, 7_i64, "Unlock Impounded", imp_id),
+            (952_i64, 6_i64, "Lock Fitted Module", mod_id),
+            (953_i64, 6_i64, "Lock Impounded", imp_id),
+        ] {
+            snap.corp_vote_cases.insert(
+                case_id,
+                CorpVoteCaseRecord {
+                    case_id,
+                    corporation_id: 98_000_001,
+                    vote_type,
+                    text: text.into(),
+                    description: text.into(),
+                    start_ts: now_u - 10,
+                    end_ts: now_u,
+                    parameter: param,
+                    executed: false,
+                    options: Vec::new(),
+                },
+            );
+            snap.corp_vote_ballots.insert(
+                (case_id, 90_000_001),
+                CorpVoteBallotRecord {
+                    case_id,
+                    voter_id: 90_000_001,
+                    option_id: 1,
+                    weight: 100,
+                    voted_at_unix: now_u - 5,
+                },
+            );
+        }
+    });
+    for case_id in [951_i64, 952, 953] {
+        let err = call_gov(
+            &ctx,
+            &mut member,
+            "voteManager",
+            "ActivateSanctionedAction",
+            vec![PyRep::Integer(case_id)],
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err.code.as_str(), "ImpoundedItem" | "ItemLocked" | "AssetSafetyLocked"),
+            "unexpected error for case {case_id}: {}",
+            err.code
+        );
+    }
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.items[&imp_id].flag),
+        InventoryFlag::Impounded
+    );
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.items[&mod_id].flag),
+        InventoryFlag::HiSlot0
+    );
 }

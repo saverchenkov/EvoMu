@@ -614,6 +614,9 @@ pub(crate) fn validate_corp_source_item_take_access_in_snap(
     corp_id: i64,
     src_item: &eve_db::InventoryItemRecord,
 ) -> Result<(), BridgeRpcError> {
+    crate::services::fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(
+        snap, src_item,
+    )?;
     let (mut root_loc, mut root_flag) = (src_item.location_id, src_item.flag);
     for _ in 0..8 {
         if (60_000_000..=69_999_999).contains(&root_loc) || root_loc >= 1_000_000_000_000 {

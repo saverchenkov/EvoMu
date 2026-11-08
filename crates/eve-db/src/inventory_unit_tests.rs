@@ -162,3 +162,139 @@ fn repackage_stack_split_delete_and_add_or_stack_edge_cases() {
     assert!(repo.get_item(box_id).is_none());
     assert!(repo.get_item(inner_id).is_none());
 }
+
+#[test]
+fn r9_p0_549_impounded_locked_and_asset_safety_blocks_db_mutations_but_allows_paid_deliveries() {
+    let repo = WorldRepository::with_demo_seed();
+    let cid = 90_000_001_i64;
+    let station_id = repo.get_character(cid).unwrap().station_id.unwrap();
+
+    let impounded_id = 200_700_101_i64;
+    let locked_id = 200_700_102_i64;
+    let wrap_box_id = 200_700_103_i64;
+    let wrap_child_id = 200_700_104_i64;
+    let paid_item_id = 200_700_105_i64;
+    let paid_wrap_id = 200_700_199_i64;
+    let unpaid_wrap_id = 200_700_198_i64;
+
+    repo.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            impounded_id,
+            InventoryItemRecord {
+                item_id: impounded_id,
+                type_id: 34,
+                owner_id: cid,
+                location_id: station_id,
+                flag: InventoryFlag::Impounded,
+                quantity: 100,
+                singleton: false,
+                version: 1,
+                ..InventoryItemRecord::default()
+            },
+        );
+        snap.items.insert(
+            locked_id,
+            InventoryItemRecord {
+                item_id: locked_id,
+                type_id: 34,
+                owner_id: cid,
+                location_id: station_id,
+                flag: InventoryFlag::Locked,
+                quantity: 100,
+                singleton: false,
+                version: 1,
+                ..InventoryItemRecord::default()
+            },
+        );
+        snap.items.insert(
+            wrap_box_id,
+            InventoryItemRecord {
+                item_id: wrap_box_id,
+                type_id: 60,
+                owner_id: cid,
+                location_id: station_id,
+                flag: InventoryFlag::Deliveries,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..InventoryItemRecord::default()
+            },
+        );
+        snap.items.insert(
+            wrap_child_id,
+            InventoryItemRecord {
+                item_id: wrap_child_id,
+                type_id: 34,
+                owner_id: cid,
+                location_id: wrap_box_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 50,
+                singleton: false,
+                version: 1,
+                ..InventoryItemRecord::default()
+            },
+        );
+        snap.items.insert(
+            paid_item_id,
+            InventoryItemRecord {
+                item_id: paid_item_id,
+                type_id: 34,
+                owner_id: cid,
+                location_id: station_id,
+                flag: InventoryFlag::Deliveries,
+                quantity: 20,
+                singleton: false,
+                version: 1,
+                ..InventoryItemRecord::default()
+            },
+        );
+        snap.item_custom_names.insert(
+            -7_700_001,
+            serde_json::json!({
+                "asset_safety_wraps": {
+                    unpaid_wrap_id.to_string(): {
+                        "wrap_id": unpaid_wrap_id,
+                        "retrieval_fee_paid": false,
+                        "item_ids": [wrap_child_id]
+                    },
+                    paid_wrap_id.to_string(): {
+                        "wrap_id": paid_wrap_id,
+                        "retrieval_fee_paid": true,
+                        "item_ids": [paid_item_id]
+                    }
+                }
+            })
+            .to_string(),
+        );
+    });
+
+    for blocked in [impounded_id, locked_id, wrap_box_id, wrap_child_id] {
+        assert_eq!(
+            repo.move_item_transactional(cid, blocked, station_id, InventoryFlag::Hangar, None, None),
+            Err(DbError::ItemLocked(blocked))
+        );
+        assert_eq!(repo.delete_item(cid, blocked), Err(DbError::ItemLocked(blocked)));
+    }
+    assert_eq!(
+        repo.split_stack(cid, impounded_id, 10),
+        Err(DbError::ItemLocked(impounded_id))
+    );
+    assert_eq!(
+        repo.split_stack(cid, wrap_child_id, 10),
+        Err(DbError::ItemLocked(wrap_child_id))
+    );
+    assert_eq!(
+        repo.repackage_item(cid, wrap_box_id),
+        Err(DbError::ItemLocked(wrap_box_id))
+    );
+    assert_eq!(
+        repo.move_item_transactional(cid, paid_item_id, station_id, InventoryFlag::Impounded, None, None),
+        Err(DbError::ItemLocked(paid_item_id))
+    );
+
+    // Paid asset safety item moved to Deliveries can legitimately move to Hangar
+    let moved = repo
+        .move_item_transactional(cid, paid_item_id, station_id, InventoryFlag::Hangar, None, None)
+        .expect("paid asset safety wrap item should move cleanly");
+    assert_eq!(moved.flag, InventoryFlag::Hangar);
+}

@@ -365,3 +365,204 @@ async fn bookmarks_self_destruct_corp_transfer_turbo_dock_and_telemetry() {
     assert_eq!(kv_field(&tdock, "docked").and_then(|v| v.as_bool()), Some(true));
     assert_eq!(sess.structure_id, Some(struct_id));
 }
+
+#[tokio::test]
+async fn r9_p0_561_cmd_goto_bookmark_enforces_warp_cloak_interdiction_and_subgrid_immobilization() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let corp_id = 98_000_001_i64;
+    let ship_id = 100_000_561_i64;
+    let mut sess = make_session(char_id, corp_id, Some(sys_id), Some(ship_id), service_roles::ROLE_PLAYER_DEFAULT);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+
+    let far_bm = 950_561_i64;
+    let near_bm = 950_562_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.bookmarks.insert(
+            far_bm,
+            BookmarkRecord {
+                bookmark_id: far_bm,
+                owner_id: char_id,
+                label: "Far Spot".into(),
+                solar_system_id: sys_id,
+                x: 500_000_000.0,
+                y: 0.0,
+                z: 0.0,
+                item_id: None,
+                memo: String::new(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        snap.bookmarks.insert(
+            near_bm,
+            BookmarkRecord {
+                bookmark_id: near_bm,
+                owner_id: char_id,
+                label: "Near Spot".into(),
+                solar_system_id: sys_id,
+                x: 50_000.0,
+                y: 0.0,
+                z: 0.0,
+                item_id: None,
+                memo: String::new(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+    });
+
+    // 1. Non-covert cloaked ship is rejected with CloakedCannotWarp and cloak remains intact
+    let cloak_mod_id = 100_950_561_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            cloak_mod_id,
+            InventoryItemRecord {
+                item_id: cloak_mod_id,
+                type_id: 11_370, // Prototype Cloaking Device I (non-covert)
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_active_states.insert(cloak_mod_id);
+    });
+    let _ = sys_handle
+        .spawn_ball_with_combat(
+            make_ball(ship_id, 587, DVec3::ZERO),
+            CombatState {
+                is_cloaked: true,
+                is_covert_cloak: false,
+                gate_cloak_remaining_ticks: 0,
+                capacitor: 500.0,
+                max_capacitor: 500.0,
+                ..Default::default()
+            },
+        )
+        .await;
+    assert_eq!(
+        handle(&ctx, &mut sess, None, "beyonce", "CmdGotoBookmark", &[PyRep::Integer(far_bm)], &HashMap::new())
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CloakedCannotWarp"
+    );
+    assert!(
+        sys_handle
+            .get_combat_state(ship_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_cloaked
+    );
+
+    // 2. Covert-ops cloaked ship warps cleanly while remaining cloaked
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&cloak_mod_id).unwrap().type_id = 11_578; // Covert Ops Cloaking Device II
+    });
+    let _ = sys_handle
+        .set_combat_state(
+            ship_id,
+            CombatState {
+                is_cloaked: true,
+                is_covert_cloak: true,
+                gate_cloak_remaining_ticks: 0,
+                capacitor: 500.0,
+                max_capacitor: 500.0,
+                ..Default::default()
+            },
+        )
+        .await;
+    handle(&ctx, &mut sess, None, "beyonce", "CmdGotoBookmark", &[PyRep::Integer(far_bm)], &HashMap::new())
+        .await
+        .unwrap()
+        .expect("covert cloak bookmark warp succeeds");
+    assert!(
+        sys_handle
+            .get_combat_state(ship_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_cloaked
+    );
+
+    // 3. Reset to stop, test sub-150km MJD/MJFG spooling, siege immobilization, & structure controller rejections
+    let _ = sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await;
+    let _ = sys_handle
+        .set_combat_state(
+            ship_id,
+            CombatState {
+                capacitor: 500.0,
+                max_capacitor: 500.0,
+                mjfg_spool_remaining_s: 5.0,
+                ..Default::default()
+            },
+        )
+        .await;
+    assert_eq!(
+        handle(&ctx, &mut sess, None, "beyonce", "CmdGotoBookmark", &[PyRep::Integer(near_bm)], &HashMap::new())
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CantMoveWhileModuleActive"
+    );
+    let _ = sys_handle
+        .set_combat_state(
+            ship_id,
+            CombatState {
+                capacitor: 500.0,
+                max_capacitor: 500.0,
+                ..Default::default()
+            },
+        )
+        .await;
+
+    {
+        let mut ts = ctx.tactical_state.write().unwrap();
+        ts.lance_caster_lock_until
+            .insert((ctx.instance_id as usize, ship_id), ctx.now_unix() + 60);
+    }
+    assert_eq!(
+        handle(&ctx, &mut sess, None, "beyonce", "CmdGotoBookmark", &[PyRep::Integer(near_bm)], &HashMap::new())
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "LanceFiringLockActive"
+    );
+    ctx.tactical_state.write().unwrap().lance_caster_lock_until.clear();
+
+    // Normal sub-150km approach succeeds, then structure control is rejected
+    handle(&ctx, &mut sess, None, "beyonce", "CmdGotoBookmark", &[PyRep::Integer(near_bm)], &HashMap::new())
+        .await
+        .unwrap()
+        .expect("sub-150km bookmark approach succeeds");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            ship_id,
+            UpwellStructureRecord {
+                structure_id: ship_id,
+                solar_system_id: sys_id,
+                owner_corp_id: corp_id,
+                type_id: 35832,
+                ..Default::default()
+            },
+        );
+    });
+    assert_eq!(
+        handle(&ctx, &mut sess, None, "beyonce", "CmdGotoBookmark", &[PyRep::Integer(near_bm)], &HashMap::new())
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "StructureCannotNavigate"
+    );
+}

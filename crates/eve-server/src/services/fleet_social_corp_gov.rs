@@ -982,13 +982,101 @@ pub(super) fn handle_corp_gov(
                     eval_vote_case_winner(vc, &snap.corp_vote_ballots)
                 };
                 if !passed { return Err(BridgeRpcError { code: "VoteDidNotPass".into(), message: "Sanctioned action did not pass shareholder vote".into() }); }
-                let vc = snap.corp_vote_cases.get_mut(&case_id).unwrap();
-                if vc.vote_type == 5 && win_param <= 0 {
+                let (vote_type, vote_text) = {
+                    let vc = snap.corp_vote_cases.get(&case_id).unwrap();
+                    (vc.vote_type, vc.text.clone())
+                };
+                if vote_type == 5 && win_param <= 0 {
                     return Err(BridgeRpcError {
                         code: "InvalidShareCount".into(),
                         message: "Sanctioned share creation requires a positive share count".into(),
                     });
                 }
+                let mut item_lock_flag_update: Option<eve_db::InventoryFlag> = None;
+                if vote_type == 6 || vote_type == 7 || (vote_type != 0 && vote_type != 5 && win_param > 0) {
+                    let is_explicit_item_vote = matches!(vote_type, 6 | 7);
+                    let is_unlock = vote_type == 7 || vote_text.to_ascii_lowercase().contains("unlock");
+                    if let Some(it) = snap.items.get(&win_param) {
+                        if it.owner_id != corp_id {
+                            if is_explicit_item_vote {
+                                return Err(BridgeRpcError {
+                                    code: "ItemLocked".into(),
+                                    message: format!("Item {win_param} is not owned by corporation {corp_id}"),
+                                });
+                            }
+                        } else {
+                            if snap.is_item_locked_in_contract_or_job(win_param) {
+                                return Err(BridgeRpcError {
+                                    code: "ItemLocked".into(),
+                                    message: format!("Item {win_param} is locked in an active contract or job"),
+                                });
+                            }
+                            if matches!(it.flag, eve_db::InventoryFlag::Impounded)
+                                || matches!(it.flag as u16, 36 | 72)
+                                || it.type_id == 60
+                            {
+                                return Err(BridgeRpcError {
+                                    code: if it.flag as u16 == 72 { "ImpoundedItem" } else { "AssetSafetyLocked" }.into(),
+                                    message: format!("Item {win_param} cannot be modified by vote while impounded or in asset safety"),
+                                });
+                            }
+                            if matches!(it.flag as u16, 11..=34 | 92..=94 | 125..=133 | 164..=172 | 180) {
+                                return Err(BridgeRpcError {
+                                    code: "ItemLocked".into(),
+                                    message: format!("Fitted/structural item {win_param} cannot be altered by item lock vote"),
+                                });
+                            }
+                            if let Some(parent) = snap.items.get(&it.location_id) {
+                                crate::services::fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, parent)?;
+                            }
+                            // Reject items in active unpaid asset safety wraps.
+                            let in_active_wrap = crate::services::fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, it);
+                            if is_unlock {
+                                // Only allow unlocking an item that is currently Locked (`63`) and not otherwise blocked
+                                // (ignore the direct `Locked` flag on `it` itself while enforcing contract/job/impound/asset-safety/ancestor).
+                                if it.flag != eve_db::InventoryFlag::Locked {
+                                    return Err(BridgeRpcError {
+                                        code: "ItemLocked".into(),
+                                        message: format!("Item {win_param} is not blueprint-locked"),
+                                    });
+                                }
+                                if let Err(err) = in_active_wrap {
+                                    if err.code != "ItemLocked" {
+                                        return Err(err);
+                                    }
+                                }
+                                let loc_safe = (60_000_000..=69_999_999).contains(&it.location_id)
+                                    || snap.structures.contains_key(&it.location_id)
+                                    || snap.items.get(&it.location_id).is_some_and(|p| {
+                                        p.owner_id == corp_id
+                                            && (p.type_id == 27 || (60_000_000..=69_999_999).contains(&p.location_id) || snap.structures.contains_key(&p.location_id))
+                                    });
+                                if !loc_safe {
+                                    return Err(BridgeRpcError {
+                                        code: "ItemLocked".into(),
+                                        message: format!("Item {win_param} location {} is not a safe corp hangar/office/container", it.location_id),
+                                    });
+                                }
+                                item_lock_flag_update = Some(eve_db::InventoryFlag::Hangar);
+                            } else {
+                                in_active_wrap?;
+                                if !matches!(it.flag as u16, 4 | 116..=122) {
+                                    return Err(BridgeRpcError {
+                                        code: "ItemLocked".into(),
+                                        message: format!("Item {win_param} must be in a corporation hangar to be locked"),
+                                    });
+                                }
+                                item_lock_flag_update = Some(eve_db::InventoryFlag::Locked);
+                            }
+                        }
+                    } else if is_explicit_item_vote {
+                        return Err(BridgeRpcError {
+                            code: "ItemNotFound".into(),
+                            message: format!("Item {win_param} not found"),
+                        });
+                    }
+                }
+                let vc = snap.corp_vote_cases.get_mut(&case_id).unwrap();
                 vc.executed = true;
                 vc.parameter = win_param;
                 if vc.vote_type == 5 {
@@ -1030,13 +1118,10 @@ pub(super) fn handle_corp_gov(
                     }
                     corp.ceo_id = new_ceo_id;
                     corp.member_roles.insert(new_ceo_id, u64::MAX);
-                } else if vc.vote_type != 5 && win_param > 0 {
+                } else if let Some(new_flag) = item_lock_flag_update {
                     if let Some(it) = snap.items.get_mut(&win_param) {
-                        if it.owner_id == corp_id {
-                            let is_unlock = vc.vote_type == 7 || vc.text.to_ascii_lowercase().contains("unlock");
-                            it.flag = if is_unlock { eve_db::InventoryFlag::Hangar } else { eve_db::InventoryFlag::Locked };
-                            it.version += 1;
-                        }
+                        it.flag = new_flag;
+                        it.version += 1;
                     }
                 }
                 Ok(())

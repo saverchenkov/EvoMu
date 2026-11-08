@@ -327,6 +327,9 @@ pub async fn handle(
             if let Err(e) = crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "align to bookmark") {
                 return Some(Err(e));
             }
+            if let Err(e) = crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "navigate to bookmark") {
+                return Some(Err(e));
+            }
             let bm_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let now_unix = ctx.now_unix();
             let bm_res = ctx.db.with_snapshot(|s| -> Result<eve_db::BookmarkRecord, BridgeRpcError> {
@@ -392,93 +395,51 @@ pub async fn handle(
             }
             let cur_pos = ball.position;
             let dist = (dest - cur_pos).length();
-            let _ = handle.break_gate_cloak(ship_id).await;
             if dist >= 150_000.0 {
-                if let Err(e) = crate::services::combat_crimewatch::check_crimewatch_action_restriction(
+                if let Err(e) = crate::services::nav_warp_interdiction::execute_agency_content_warp(
                     ctx,
+                    &handle,
                     char_id,
                     ship_id,
                     sys_id,
-                    "warp",
-                    now_unix,
-                ) {
+                    &ball,
+                    dest,
+                )
+                .await
+                {
                     return Some(Err(e));
                 }
-                if handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
+            } else {
+                if crate::services::tactical_modules::has_lance_caster_lock(ctx, ship_id) {
                     return Some(Err(BridgeRpcError {
-                        code: "WarpScrambled".into(),
-                        message: "WarpScrambled: Warp drive disabled by warp disruption/scrambler effect".into(),
+                        code: "CantMoveWhileModuleActive".into(),
+                        message: "Ship is immobilized while superweapon warmup or 5-minute Lance caster lock is active".into(),
                     }));
                 }
-                if let Ok(Some(mut cs_check)) = handle.get_combat_state(ship_id).await {
-                    if cs_check.is_cloaked && cs_check.gate_cloak_remaining_ticks == 0 && !cs_check.is_covert_cloak {
-                        cs_check.is_cloaked = false;
-                        let _ = handle.set_combat_state(ship_id, cs_check).await;
-                    }
+                if ball.max_velocity <= 1e-9
+                    && (crate::services::space_navigation_advanced::check_immobilizing_module_active(
+                        ctx,
+                        ship_id,
+                        "maneuver",
+                    )
+                    .is_err()
+                        || crate::services::inventory_fitting::fitting_cyno_portal::is_ship_cyno_active(
+                            ctx, ship_id,
+                        ))
+                {
+                    return Some(Err(BridgeRpcError {
+                        code: "CantMoveWhileModuleActive".into(),
+                        message: "Ship is immobilized while superweapon warmup, siege/bastion, or cynosural field is active".into(),
+                    }));
                 }
-                let warp_speed = crate::services::space_destiny::compute_pilot_warp_speed_au_s(ctx, char_id, sys_id, ball.type_id);
-                let warp_dir = (dest - cur_pos).normalize_or_zero();
-                let requested_dist_m = dist;
-                let (base_warp_cap_need, sde_max_cap) = ctx
-                    .sde
-                    .types
-                    .get(&ball.type_id)
-                    .map(|t| {
-                        let wcn = t.default_attributes.get(&153).copied().unwrap_or(1.24e-6);
-                        let cap = t
-                            .default_attributes
-                            .get(&eve_sde::attr_ids::CAPACITOR_CAPACITY)
-                            .copied()
-                            .unwrap_or(250.0);
-                        (wcn, cap)
-                    })
-                    .unwrap_or((1.24e-6, 250.0));
-                let wdo_lvl = ctx.db.with_snapshot(|snap| {
-                    snap.skills
-                        .get(&char_id)
-                        .and_then(|m| m.get(&3455))
-                        .map(|s| s.level.min(5))
-                        .unwrap_or(0)
-                });
-                let eff_warp_cap_need = base_warp_cap_need * (1.0 - 0.10 * (wdo_lvl as f64));
-                let cap_per_au = eff_warp_cap_need * ball.mass;
-                let cap_per_m = cap_per_au / crate::services::space_destiny::AU_IN_METERS;
-                let req_cap = cap_per_m * requested_dist_m;
-                let mut actual_dest = dest;
-                if let Ok(Some(mut cs)) = handle.get_combat_state(ship_id).await {
-                    if (cs.max_capacitor - 250.0).abs() < 1e-6
-                        && (cs.capacitor - 250.0).abs() < 1e-6
-                        && sde_max_cap > 250.0
-                    {
-                        cs.max_capacitor = sde_max_cap;
-                        cs.capacitor = sde_max_cap;
-                    }
-                    if cs.capacitor < req_cap {
-                        let affordable_dist_m = if cap_per_m > 0.0 {
-                            cs.capacitor / cap_per_m
-                        } else {
-                            requested_dist_m
-                        };
-                        if affordable_dist_m < 150_000.0 {
-                            return Some(Err(BridgeRpcError {
-                                code: "NotEnoughCapacitor".into(),
-                                message: format!(
-                                    "Insufficient capacitor ({:.3} GJ) to initiate minimum 150 km warp (affordable distance {:.1} m)",
-                                    cs.capacitor, affordable_dist_m
-                                ),
-                            }));
-                        }
-                        actual_dest = cur_pos + warp_dir * affordable_dist_m;
-                        cs.capacitor = 0.0;
-                    } else {
-                        cs.capacitor = (cs.capacitor - req_cap).max(0.0);
-                    }
-                    let _ = handle.set_capacitor(ship_id, cs.capacitor).await;
+                if let Err(e) = crate::services::space_destiny::space_nav_travel::ensure_not_mjd_spooling(
+                    &handle, ship_id,
+                )
+                .await
+                {
+                    return Some(Err(e));
                 }
-                let _ = handle
-                    .set_movement_mode(ship_id, MovementMode::new_warp(cur_pos, actual_dest, warp_speed))
-                    .await;
-            } else {
+                let _ = handle.break_gate_cloak(ship_id).await;
                 let _ = handle.goto_point(ship_id, dest).await;
             }
             Some(Ok(PyRep::None))

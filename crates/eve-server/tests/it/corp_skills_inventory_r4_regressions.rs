@@ -246,6 +246,32 @@ async fn r4_176_180_181_183_ship_bay_passwords_alsc_locks_and_container_roles() 
     .await
     .expect("SetShipPassword");
 
+    // #560: Docked StoreVessel into another player's personal Hangar ship is denied
+    let docked_foreign_host = ctx
+        .dispatch_rpc(
+            &mut mate_sess,
+            "ship",
+            None,
+            "StoreVessel",
+            &[PyRep::Integer(target_ship_id), PyRep::Integer(host_ship_id)],
+            &kw,
+            None,
+        )
+        .await;
+    assert!(
+        matches!(&docked_foreign_host, Err(e) if e.code == "OwnershipViolation"),
+        "expected OwnershipViolation for another player's docked personal host, got {docked_foreign_host:?}"
+    );
+
+    // Move host_ship_id into authorized CorpSAG1 for #176 SMA password check
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(h) = snap.items.get_mut(&host_ship_id) {
+            h.owner_id = corp_id;
+            h.flag = InventoryFlag::CorpSAG1;
+        }
+    });
+    mate_sess.corp_role |= eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[0];
+
     // #176: StoreVessel without password must be rejected with SMAAccessDenied
     let no_pw_res = ctx
         .dispatch_rpc(

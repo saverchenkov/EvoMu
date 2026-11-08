@@ -36,10 +36,16 @@ pub(crate) async fn board_stored_ship(
     };
     let dock_id = session.station_id.or(session.structure_id);
     let custom_flag = read_container_ship_state(ctx).custom_item_flags.get(&stored_id).copied();
-    let (stored, host_type, host_loc, host_owner) = ctx.db.with_snapshot(|snap| {
+    let (stored, host_type, host_loc, host_owner, host_flag) = ctx.db.with_snapshot(|snap| {
         let stored = snap.items.get(&stored_id).cloned();
         let host = stored.as_ref().and_then(|s| snap.items.get(&s.location_id).cloned());
-        (stored, host.as_ref().map(|h| h.type_id), host.as_ref().map(|h| h.location_id), host.as_ref().map(|h| h.owner_id).unwrap_or(0))
+        (
+            stored,
+            host.as_ref().map(|h| h.type_id),
+            host.as_ref().map(|h| h.location_id),
+            host.as_ref().map(|h| h.owner_id).unwrap_or(0),
+            host.as_ref().map(|h| h.flag),
+        )
     });
     let stored = stored.ok_or_else(|| err("ShipNotFound", format!("Stored ship {stored_id} not found")))?;
     let is_ship = ctx.sde.types.get(&stored.type_id).is_some_and(|t| t.category_id == 6);
@@ -47,6 +53,15 @@ pub(crate) async fn board_stored_ship(
         return Err(err("ShipNotBoardable", format!("Item {stored_id} is not an assembled ship")));
     }
     let host_id = if host_arg != 0 { host_arg } else { stored.location_id };
+    ctx.db.with_snapshot(|snap| {
+        if let Some(s) = snap.items.get(&stored_id) {
+            fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, s)?;
+        }
+        if let Some(h) = snap.items.get(&host_id) {
+            fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, h)?;
+        }
+        Ok::<(), BridgeRpcError>(())
+    })?;
     let is_feb = matches!(stored.flag as u16, 177 | 179) || matches!(custom_flag, Some(177 | 179));
     let in_bay = is_ship_bay_flag(stored.flag as u16) || custom_flag.is_some_and(is_ship_bay_flag) || is_feb;
     if stored.location_id != host_id || !in_bay {
@@ -67,6 +82,48 @@ pub(crate) async fn board_stored_ship(
             return Err(err("InvalidFrigateGroup", format!("Stored ship {stored_id} in FEB is not a frigate")));
         }
     }
+    let corp_id = session.corporation_id.unwrap_or(0);
+    if let Some(dock) = dock_id {
+        if !(host_id == dock || host_loc == Some(dock)) {
+            return Err(err("ShipOutOfBoardingRange", format!("Bay host {host_id} is not at your dock {dock}")));
+        }
+        if host_is_ship {
+            if host_owner == char_id {
+                if host_flag != Some(InventoryFlag::Hangar) {
+                    return Err(err("InvalidLocation", format!("Docked host ship {host_id} must be in Hangar")));
+                }
+            } else if corp_id != 0 && host_owner == corp_id {
+                let flag_u16 = host_flag.map(|f| f as u16).unwrap_or(0);
+                if !(116..=122).contains(&flag_u16) {
+                    return Err(err("InvalidLocation", format!("Corporation docked host ship {host_id} must be in CorpSAG1..7")));
+                }
+                ctx.db.with_snapshot(|snap| {
+                    let (is_ceo, snap_roles) =
+                        crate::services::inventory_bound::get_effective_corp_roles_at_location_in_snap(
+                            snap,
+                            corp_id,
+                            char_id,
+                            Some(dock),
+                        );
+                    let eff = snap_roles | session.corp_role;
+                    let is_dir_or_ceo = is_ceo || eve_db::corp_roles::has_role(eff, eve_db::corp_roles::ROLE_DIRECTOR);
+                    let div_take_role = 1u64 << (13 + (flag_u16 - 116) as u32);
+                    if !is_dir_or_ceo && !eve_db::corp_roles::has_role(eff, div_take_role) {
+                        return Err(err(
+                            "CorpRoleDenied",
+                            format!("Character {char_id} lacks corporation hangar division {} take role for host ship {host_id}", flag_u16 - 115),
+                        ));
+                    }
+                    Ok(())
+                })?;
+            } else {
+                return Err(err(
+                    "OwnershipViolation",
+                    format!("Cannot board stored ship from another player's docked host {host_id}"),
+                ));
+            }
+        }
+    }
     if host_is_ship {
         let has_bay_access = ctx.db.with_snapshot(|snap| {
             fitting_containers_ships::can_character_access_ship_bay_with_password_snap(
@@ -77,9 +134,19 @@ pub(crate) async fn board_stored_ship(
             return Err(err("SMAAccessDenied", "Ship Maintenance Bay access denied by ship configuration"));
         }
     }
-    let corp_id = session.corporation_id.unwrap_or(0);
     let can_board = stored.owner_id == char_id
-        || (corp_id != 0 && stored.owner_id == corp_id && (session.corp_role & eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG != 0));
+        || (corp_id != 0 && stored.owner_id == corp_id && {
+            let (is_ceo, snap_roles) = ctx.db.with_snapshot(|snap| {
+                crate::services::inventory_bound::get_effective_corp_roles_at_location_in_snap(
+                    snap,
+                    corp_id,
+                    char_id,
+                    dock_id,
+                )
+            });
+            let eff = snap_roles | session.corp_role;
+            is_ceo || (eff & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG)) != 0
+        });
     if !can_board {
         return Err(err("OwnershipViolation", format!("Ship {stored_id} is not owned by character {char_id}")));
     }

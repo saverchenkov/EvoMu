@@ -558,7 +558,14 @@ async fn test_ship_bays_access_configuration_and_capacity() {
     }
     make_fleet(&ctx, &[C1, C2]);
     assert_eq!(call(&ctx, &mut s2, "invbroker", "Add", fh_add(710_011, 710_001)).await.unwrap_err().code, "FleetHangarAccessDenied");
-    assert_eq!(call(&ctx, &mut s2, "ship", "StoreVessel", store(710_010, 710_001)).await.unwrap_err().code, "SMAAccessDenied");
+    assert_eq!(
+        call(&ctx, &mut s2, "invbroker", "Add", vec![PyRep::Integer(710_010), PyRep::Integer(710_001), PyRep::Integer(90)])
+            .await
+            .unwrap_err()
+            .code,
+        "SMAAccessDenied"
+    );
+    assert_eq!(call(&ctx, &mut s2, "ship", "StoreVessel", store(710_010, 710_001)).await.unwrap_err().code, "OwnershipViolation");
 
     // Only the owner may change the configuration.
     let e = call(&ctx, &mut s2, "ship", "ConfigureShip", vec![PyRep::Integer(710_001), flags(&[("SMB_AllowFleetAccess", true)])])
@@ -578,12 +585,61 @@ async fn test_ship_bays_access_configuration_and_capacity() {
     let cfg = call(&ctx, &mut s2, "ship", "GetShipConfiguration", vec![PyRep::Integer(710_001)]).await.unwrap();
     assert!(cfg_get(&cfg, "FleetHangar_AllowFleetAccess") && !cfg_get(&cfg, "FleetHangar_AllowCorpAccess"));
 
-    // Fleet member now uses the fleet hangar and the SMB.
+    // Fleet member now uses the fleet hangar and (in space) the SMB.
     call(&ctx, &mut s2, "invbroker", "Add", fh_add(710_011, 710_001)).await.expect("fleet hangar add");
     assert_eq!(item(&ctx, 710_011).unwrap().location_id, 710_001);
+    ctx.db.with_mut_snapshot(|sn| {
+        for sid in [710_001, 710_010] {
+            if let Some(it) = sn.items.get_mut(&sid) {
+                it.location_id = 30_000_142;
+                it.flag = InventoryFlag::None;
+            }
+            sn.item_positions.insert(sid, [0.0, 0.0, 0.0]);
+        }
+        if let Some(ch) = sn.characters.get_mut(&C2) {
+            ch.station_id = None;
+            ch.solar_system_id = 30_000_142;
+        }
+    });
+    s2.station_id = None;
+    s2.solar_system_id = Some(30_000_142);
+    let jita_sys = ctx.systems.get_or_spawn(30_000_142);
+    let s2_ship = s2.ship_id.unwrap_or(100_000_002);
+    for (bid, tid) in [(710_001_i64, orca), (710_010_i64, RIFTER), (s2_ship, RIFTER)] {
+        jita_sys
+            .spawn_ball(eve_destiny::Ball {
+                id: bid,
+                type_id: tid,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 100.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            })
+            .await
+            .expect("spawn ball for fleet SMB store");
+    }
     call(&ctx, &mut s2, "ship", "StoreVessel", store(710_010, 710_001)).await.expect("fleet SMB store");
+    for bid in [710_001_i64, s2_ship] {
+        let _ = jita_sys.remove_ball(bid).await;
+    }
     let stored = item(&ctx, 710_010).unwrap();
     assert_eq!((stored.location_id, stored.owner_id), (710_001, C2), "stored hull keeps its owner");
+    ctx.db.with_mut_snapshot(|sn| {
+        if let Some(it) = sn.items.get_mut(&710_001) {
+            it.location_id = JITA44;
+            it.flag = InventoryFlag::Hangar;
+        }
+        if let Some(ch) = sn.characters.get_mut(&C2) {
+            ch.station_id = Some(JITA44);
+        }
+        sn.item_positions.remove(&710_001);
+        sn.item_positions.remove(&710_010);
+    });
+    s2.station_id = Some(JITA44);
 
     // Out of the fleet: access is gone again; corp access follows the corp flag.
     make_fleet(&ctx, &[C1]);

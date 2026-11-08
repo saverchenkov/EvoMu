@@ -57,12 +57,26 @@ pub(crate) async fn handle_multi_add(
             message: "MultiAdd requires target location".into(),
         });
     };
-    let flag = args
+    let raw_flag_u16 = args
         .get(2)
         .and_then(|a| a.as_i64())
         .or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()))
-        .map(|v| InventoryFlag::from_u16(v as u16))
-        .unwrap_or(InventoryFlag::Cargo);
+        .map(|v| v as u16)
+        .unwrap_or(InventoryFlag::Cargo as u16);
+    if matches!(raw_flag_u16, 36 | 63 | 72) {
+        return Err(BridgeRpcError {
+            code: if raw_flag_u16 == 72 {
+                "ImpoundedItem"
+            } else if raw_flag_u16 == 36 {
+                "AssetSafetyLocked"
+            } else {
+                "ItemLocked"
+            }
+            .into(),
+            message: format!("Cannot MultiAdd items into restricted inventory flag {raw_flag_u16}"),
+        });
+    }
+    let flag = InventoryFlag::from_u16(raw_flag_u16);
     let flag_u16 = flag as u16;
     if matches!(flag_u16, 11..=34 | 89 | 92..=94 | 125..=132 | 164..=171) {
         return Err(BridgeRpcError {
@@ -186,14 +200,13 @@ pub(crate) async fn handle_multi_add(
                     message: format!("Cannot move item {item_id} into {new_loc}"),
                 });
             }
-            if flag == InventoryFlag::Locked
-                || item.flag == InventoryFlag::Locked
-                || snap.is_item_locked_in_contract_or_job(item_id)
-            {
-                return Err(BridgeRpcError {
-                    code: "ItemLocked".into(),
-                    message: format!("Item {item_id} is locked"),
-                });
+            crate::services::fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(
+                snap, item,
+            )?;
+            if let Some(dest_item) = snap.items.get(&new_loc) {
+                crate::services::fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(
+                    snap, dest_item,
+                )?;
             }
             if matches!(item.flag as u16, 92..=94) {
                 return Err(BridgeRpcError {

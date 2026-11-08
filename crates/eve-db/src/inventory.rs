@@ -6,6 +6,69 @@ use std::collections::{HashMap, HashSet};
 
 const MAX_IDEMPOTENCY_KEYS: usize = 4_096;
 
+fn is_item_in_active_asset_safety_wrap(
+    snap: &WorldStateSnapshot,
+    item_id: i64,
+    location_id: i64,
+) -> bool {
+    #[derive(serde::Deserialize, Default)]
+    #[serde(default)]
+    struct WrapRef {
+        wrap_id: i64,
+        #[serde(default)]
+        item_ids: Vec<i64>,
+        #[serde(default)]
+        retrieval_fee_paid: bool,
+    }
+    #[derive(serde::Deserialize, Default)]
+    #[serde(default)]
+    struct ExtWrapState {
+        asset_safety_wraps: HashMap<i64, WrapRef>,
+    }
+    snap.item_custom_names
+        .get(&-7_700_001)
+        .and_then(|raw| serde_json::from_str::<ExtWrapState>(raw).ok())
+        .is_some_and(|ext| {
+            ext.asset_safety_wraps.values().any(|w| {
+                !w.retrieval_fee_paid
+                    && (w.wrap_id == item_id
+                        || w.wrap_id == location_id
+                        || w.item_ids.contains(&item_id))
+            })
+        })
+}
+
+fn is_item_or_ancestor_locked_or_impounded(
+    snap: &WorldStateSnapshot,
+    item: &InventoryItemRecord,
+) -> bool {
+    if matches!(item.flag, InventoryFlag::Locked | InventoryFlag::Impounded)
+        || matches!(item.flag as u16, 36 | 63 | 72)
+        || item.type_id == 60
+        || snap.is_item_locked_in_contract_or_job(item.item_id)
+        || is_item_in_active_asset_safety_wrap(snap, item.item_id, item.location_id)
+    {
+        return true;
+    }
+    let mut cur_loc = item.location_id;
+    for _ in 0..8 {
+        let Some(anc) = snap.items.get(&cur_loc) else {
+            break;
+        };
+        if matches!(anc.flag, InventoryFlag::Locked | InventoryFlag::Impounded)
+            || matches!(anc.flag as u16, 36 | 63 | 72)
+            || anc.type_id == 60
+            || anc.type_id == 3_468
+            || snap.is_item_locked_in_contract_or_job(anc.item_id)
+            || is_item_in_active_asset_safety_wrap(snap, anc.item_id, anc.location_id)
+        {
+            return true;
+        }
+        cur_loc = anc.location_id;
+    }
+    false
+}
+
 impl WorldRepository {
     pub fn get_item(&self, item_id: i64) -> Option<InventoryItemRecord> {
         let guard = self.read_state();
@@ -52,7 +115,9 @@ impl WorldRepository {
                     location_id: new_location_id,
                 });
             }
-            if new_flag == InventoryFlag::Locked {
+            if matches!(new_flag, InventoryFlag::Locked | InventoryFlag::Impounded)
+                || matches!(new_flag as u16, 36 | 63 | 72)
+            {
                 return Err(DbError::ItemLocked(item_id));
             }
 
@@ -87,7 +152,14 @@ impl WorldRepository {
                     item_id,
                 });
             }
-            if existing_item.flag == InventoryFlag::Locked {
+            if is_item_or_ancestor_locked_or_impounded(guard, existing_item) {
+                return Err(DbError::ItemLocked(item_id));
+            }
+            if guard
+                .items
+                .get(&new_location_id)
+                .is_some_and(|dest| is_item_or_ancestor_locked_or_impounded(guard, dest))
+            {
                 return Err(DbError::ItemLocked(item_id));
             }
 
@@ -161,6 +233,20 @@ impl WorldRepository {
             if guard.is_item_locked_in_contract_or_job(item_id) {
                 return Err(DbError::ItemLocked(item_id));
             }
+            let item_snapshot = guard
+                .items
+                .get(&item_id)
+                .ok_or(DbError::ItemNotFound(item_id))?
+                .clone();
+            if item_snapshot.owner_id != character_id {
+                return Err(DbError::ItemOwnershipViolation {
+                    character_id,
+                    item_id,
+                });
+            }
+            if is_item_or_ancestor_locked_or_impounded(guard, &item_snapshot) {
+                return Err(DbError::ItemLocked(item_id));
+            }
             let has_contained = guard
                 .items
                 .values()
@@ -174,12 +260,6 @@ impl WorldRepository {
                 .items
                 .get_mut(&item_id)
                 .ok_or(DbError::ItemNotFound(item_id))?;
-            if item.owner_id != character_id {
-                return Err(DbError::ItemOwnershipViolation {
-                    character_id,
-                    item_id,
-                });
-            }
             if item.flag != InventoryFlag::Hangar {
                 return Err(DbError::ValidationError(
                     "Item must be in station Hangar to repackage".into(),
@@ -232,6 +312,23 @@ impl WorldRepository {
                     character_id,
                     item_id: source_item_id,
                 });
+            }
+            if is_item_or_ancestor_locked_or_impounded(guard, &src) {
+                return Err(DbError::ItemLocked(source_item_id));
+            }
+            let tgt_snapshot = guard
+                .items
+                .get(&target_item_id)
+                .ok_or(DbError::ItemNotFound(target_item_id))?
+                .clone();
+            if tgt_snapshot.owner_id != character_id {
+                return Err(DbError::ItemOwnershipViolation {
+                    character_id,
+                    item_id: target_item_id,
+                });
+            }
+            if is_item_or_ancestor_locked_or_impounded(guard, &tgt_snapshot) {
+                return Err(DbError::ItemLocked(target_item_id));
             }
             if src.singleton
                 || src.is_blueprint_copy
@@ -326,7 +423,8 @@ impl WorldRepository {
                     item_ref.flag,
                     InventoryFlag::Locked | InventoryFlag::Impounded
                 ) || matches!(item_ref.flag as u16, 36 | 63 | 72 | 159..=163)
-                    || item_ref.type_id == 3_468
+                    || matches!(item_ref.type_id, 60 | 3_468)
+                    || is_item_in_active_asset_safety_wrap(guard, item_id, item_ref.location_id)
                 {
                     return Err(DbError::ItemLocked(item_id));
                 }
@@ -350,10 +448,11 @@ impl WorldRepository {
                     let Some(anc) = guard.items.get(&cur_loc) else {
                         break;
                     };
-                    if anc.type_id == 3_468
+                    if matches!(anc.type_id, 60 | 3_468)
                         || guard.is_item_locked_in_contract_or_job(anc.item_id)
                         || matches!(anc.flag, InventoryFlag::Locked | InventoryFlag::Impounded)
                         || matches!(anc.flag as u16, 36 | 63 | 72)
+                        || is_item_in_active_asset_safety_wrap(guard, anc.item_id, anc.location_id)
                     {
                         return Err(DbError::ItemLocked(item_id));
                     }
@@ -417,6 +516,9 @@ impl WorldRepository {
                     character_id,
                     item_id,
                 });
+            }
+            if is_item_or_ancestor_locked_or_impounded(guard, item) {
+                return Err(DbError::ItemLocked(item_id));
             }
 
             let mut to_remove = HashSet::from([item_id]);
