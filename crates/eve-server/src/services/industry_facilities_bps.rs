@@ -571,11 +571,18 @@ pub fn handle_industry_facilities_bps(
                             | eve_db::corp_roles::ROLE_RENT_FACTORY_FACILITY
                             | eve_db::corp_roles::ROLE_RENT_RESEARCH_FACILITY;
                         let caller_corp_id = session.corporation_id.or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id)).unwrap_or(0);
+                        let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
+                            owner_id,
+                            char_id,
+                            facility_filter,
+                            session.corp_role,
+                            ctx.now_unix(),
+                        );
                         let has_corp_access = owner_id == caller_corp_id
                             && !(1_000_000..2_000_000).contains(&owner_id)
                             && ((session.corp_role & CORP_BP_ROLES) != 0
-                                || snap.corporations.get(&owner_id).is_some_and(|c| c.ceo_id == char_id || c.member_roles.get(&char_id).is_some_and(|&r| (r & CORP_BP_ROLES) != 0))
-                                || snap.corp_role_assignments.get(&(owner_id, char_id)).is_some_and(|a| (a.roles & CORP_BP_ROLES) != 0));
+                                || is_ceo
+                                || (eff_roles & CORP_BP_ROLES) != 0);
                         if !has_corp_access {
                             return Err(BridgeRpcError { code: "OwnerAccessDenied".into(), message: format!("Character {char_id} is not authorized to query blueprints for owner {owner_id}") });
                         }
@@ -962,9 +969,15 @@ pub fn handle_industry_facilities_bps(
                 }
                 let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
                 if corp_id > 0 && (owner_filter.is_none() || owner_filter == Some(corp_id)) {
-                    if let Some(corp) = snap.corporations.get(&corp_id) {
-                        let roles = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
-                        let full = char_id == corp.ceo_id || (roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_FACTORY_MANAGER)) != 0;
+                    if snap.corporations.contains_key(&corp_id) {
+                        let (is_ceo, roles) = snap.effective_corp_roles_at(
+                            corp_id,
+                            char_id,
+                            Some(fid),
+                            session.corp_role,
+                            ctx.now_unix(),
+                        );
+                        let full = is_ceo || (roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_FACTORY_MANAGER)) != 0;
                         for d in 0..7u8 {
                             let div_mask = (128u64 << d) | (1024u64 << d) | (1_048_576u64 << d) | (8_388_608u64 << d);
                             if full || (roles & div_mask) != 0 {

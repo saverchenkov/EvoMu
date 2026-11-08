@@ -326,16 +326,14 @@ pub fn handle_corp_gov_tail(
         }
 
         ("corpRegistry", "UpdateAttributes") | ("corpRegistry", "UpdateCorporationAbilities") => {
+            let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut skills_owner_id = char_id;
+                let (is_ceo, caller_role) =
+                    snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, now_unix);
                 if let Some(corp) = snap.corporations.get(&corp_id) {
-                    let caller_role = corp
-                        .member_roles
-                        .get(&char_id)
-                        .copied()
-                        .unwrap_or(session.corp_role);
                     if corp.ceo_id != 0
-                        && corp.ceo_id != char_id
+                        && !is_ceo
                         && !eve_db::corp_roles::has_role(
                             caller_role,
                             eve_db::corp_roles::ROLE_DIRECTOR,
@@ -392,17 +390,17 @@ pub fn handle_corp_gov_tail(
                 .or(session.station_id)
                 .or(session.structure_id)
                 .unwrap_or(0);
+            let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let (is_ceo, caller_role) =
+                    snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
                 let Some(corp) = snap.corporations.get_mut(&corp_id) else {
                     return Err(BridgeRpcError {
                         code: "CorporationNotFound".into(),
                         message: format!("Corporation {corp_id} not found"),
                     });
                 };
-                let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-                if char_id != corp.ceo_id
-                    && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR)
-                {
+                if !is_ceo && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR) {
                     return Err(BridgeRpcError {
                         code: "CorpRoleDenied".into(),
                         message: "Moving corporation HQ requires CEO or Director role".into(),
@@ -496,19 +494,21 @@ pub fn handle_corp_gov_tail(
             let min_qty_filter = (method == "SearchAssets")
                 .then(|| args.get(4 + search_offset).and_then(|a| a.as_i64()).filter(|&v| v > 0))
                 .flatten();
+            let now_unix = ctx.now_unix();
             let res = ctx.db.with_snapshot(|snap| {
-                let Some(corp) = snap.corporations.get(&req_corp_id) else {
+                if !snap.corporations.contains_key(&req_corp_id) {
                     return Err(BridgeRpcError {
                         code: "CorporationNotFound".into(),
                         message: format!("Corporation {req_corp_id} not found"),
                     });
-                };
-                let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+                }
+                let (is_ceo, caller_role) =
+                    snap.effective_corp_roles_at(req_corp_id, char_id, None, 0, now_unix);
                 let allowed_roles = corp_roles::ROLE_DIRECTOR
                     | corp_roles::ROLE_ACCOUNTANT
                     | corp_roles::ROLE_JUNIOR_ACCOUNTANT
                     | corp_roles::ROLE_TRADER;
-                if char_id != corp.ceo_id && caller_role != u64::MAX && (caller_role & allowed_roles) == 0 {
+                if !is_ceo && caller_role != u64::MAX && (caller_role & allowed_roles) == 0 {
                     return Err(BridgeRpcError {
                         code: "CorpRoleDenied".into(),
                         message: "Viewing corporation asset inventory requires Director, Accountant, or Trader role".into(),
@@ -687,13 +687,12 @@ pub fn handle_corp_gov_tail(
 
         ("corpRegistry", "RegisterNewAggressionSettings") => {
             let is_ceo_or_dir = ctx.db.with_snapshot(|snap| {
-                snap.corporations.get(&corp_id).is_some_and(|c| {
-                    char_id == c.ceo_id
-                        || corp_roles::has_role(
-                            c.member_roles.get(&char_id).copied().unwrap_or(0),
-                            corp_roles::ROLE_DIRECTOR,
-                        )
-                })
+                if !snap.corporations.contains_key(&corp_id) {
+                    return false;
+                }
+                let (is_ceo, roles) =
+                    snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
+                is_ceo || corp_roles::has_role(roles, corp_roles::ROLE_DIRECTOR)
             });
             if !is_ceo_or_dir {
                 return Some(Err(BridgeRpcError {

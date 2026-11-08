@@ -43,15 +43,11 @@ pub(crate) fn has_corp_bookmark_admin_role(
     char_id: i64,
     corp_id: i64,
 ) -> bool {
-    if let Some(corp) = snap.corporations.get(&corp_id) {
-        let role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-        char_id == corp.ceo_id
-            || corp_roles::has_role(role, corp_roles::ROLE_DIRECTOR)
-            || corp_roles::has_role(role, corp_roles::ROLE_PERSONNEL_MANAGER)
-    } else {
-        corp_roles::has_role(session.corp_role, corp_roles::ROLE_DIRECTOR)
-            || corp_roles::has_role(session.corp_role, corp_roles::ROLE_PERSONNEL_MANAGER)
-    }
+    let (is_ceo, role) =
+        snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, 0);
+    is_ceo
+        || corp_roles::has_role(role, corp_roles::ROLE_DIRECTOR)
+        || corp_roles::has_role(role, corp_roles::ROLE_PERSONNEL_MANAGER)
 }
 
 pub(super) async fn handle_bookmarks(
@@ -730,16 +726,18 @@ pub(super) async fn handle_bookmarks(
                     }
                 };
                 let acl_for_shared = acl_ids.clone();
+                let now_unix = ctx.now_unix();
                 let res = ctx.db.try_with_mut_snapshot(|snap| {
-                    let has_rights = if let Some(corp) = snap.corporations.get(&corp_id) {
-                        let role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-                        char_id == corp.ceo_id
-                            || corp_roles::has_role(role, corp_roles::ROLE_DIRECTOR)
-                            || corp_roles::has_role(role, corp_roles::ROLE_PERSONNEL_MANAGER)
-                    } else {
-                        corp_roles::has_role(session.corp_role, corp_roles::ROLE_DIRECTOR)
-                            || corp_roles::has_role(session.corp_role, corp_roles::ROLE_PERSONNEL_MANAGER)
-                    };
+                    let (is_ceo, role) = snap.effective_corp_roles_at(
+                        corp_id,
+                        char_id,
+                        None,
+                        session.corp_role,
+                        now_unix,
+                    );
+                    let has_rights = is_ceo
+                        || corp_roles::has_role(role, corp_roles::ROLE_DIRECTOR)
+                        || corp_roles::has_role(role, corp_roles::ROLE_PERSONNEL_MANAGER);
                     if !has_rights {
                         return Err(BridgeRpcError {
                             code: "BookmarkAccessDenied".into(),

@@ -280,14 +280,14 @@ pub(crate) fn handle_update_members(
     promote_due_pending_corp_grants(ctx, corp_id);
     let now_unix = ctx.now_unix();
     let res = ctx.db.try_with_mut_snapshot(|snap| {
+        let (is_ceo, caller_role) =
+            snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
         let Some(corp) = snap.corporations.get(&corp_id) else {
             return Err(BridgeRpcError {
                 code: "CorporationNotFound".into(),
                 message: format!("Corporation {corp_id} not found"),
             });
         };
-        let is_ceo = char_id == corp.ceo_id;
-        let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
         if !is_ceo && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR) {
             return Err(BridgeRpcError {
                 code: "CorpRoleDenied".into(),
@@ -1224,8 +1224,9 @@ pub(super) fn handle_insert_vote_case(
             if !corp.members.contains(&char_id) {
                 return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Caller is not a member of the corporation".into() });
             }
-            let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-            let is_ceo_or_dir = char_id == corp.ceo_id || corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR);
+            let (is_ceo, caller_role) =
+                snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
+            let is_ceo_or_dir = is_ceo || corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR);
             if vote_type == 0 {
                 let caller_shares = snap.corp_governance.get(&corp_id).and_then(|g| g.shares.get(&char_id).copied()).unwrap_or(0);
                 if !is_ceo_or_dir && caller_shares <= 0 {

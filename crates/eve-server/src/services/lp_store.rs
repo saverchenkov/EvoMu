@@ -1089,23 +1089,15 @@ pub fn handle(
                     | eve_db::corp_roles::ROLE_ACCOUNTANT
                     | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT
                     | eve_db::corp_roles::ROLE_BRAND_MANAGER;
-                let is_ceo = snap
-                    .corporations
-                    .get(&corp_id)
-                    .map(|c| c.ceo_id == char_id)
-                    .unwrap_or(false);
-                if !is_ceo {
-                    let mut roles = snap
-                        .corporations
-                        .get(&corp_id)
-                        .and_then(|c| c.member_roles.get(&char_id).copied())
-                        .unwrap_or(session.corp_role);
-                    if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
-                        roles |= ra.roles;
-                    }
-                    if (roles & allowed_view_roles) == 0 {
-                        return Err(BridgeRpcError::user_error("CrpAccessDenied"));
-                    }
+                let (is_ceo, roles) = snap.effective_corp_roles_at(
+                    corp_id,
+                    char_id,
+                    None,
+                    session.corp_role,
+                    ctx.now_unix(),
+                );
+                if !is_ceo && (roles & allowed_view_roles) == 0 {
+                    return Err(BridgeRpcError::user_error("CrpAccessDenied"));
                 }
                 let balances = load_corp_lp_balances(snap, corp_id);
                 let mut entries: Vec<(i64, i64)> = balances.into_iter().collect();

@@ -192,21 +192,7 @@ fn effective_corp_roles_at_location(
     location_id: Option<i64>,
     now_unix: u64,
 ) -> (bool, u64) {
-    let (is_ceo, global_roles) =
-        crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
-            snap, corp_id, char_id, 0, now_unix,
-        );
-    let (_, loc_roles) =
-        crate::services::inventory_bound::get_effective_corp_roles_at_location_in_snap_at(
-            snap, corp_id, char_id, location_id, now_unix,
-        );
-    let unmatured_title_bits = snap
-        .corp_governance
-        .get(&corp_id)
-        .and_then(|g| g.pending_title_role_grants.get(&char_id))
-        .filter(|&&(_, matured_at)| now_unix < matured_at)
-        .map_or(0, |&(bits, _)| bits);
-    (is_ceo, global_roles | (loc_roles & !unmatured_title_bits))
+    snap.effective_corp_roles_at(corp_id, char_id, location_id, 0, now_unix)
 }
 
 fn has_corp_contract_role(

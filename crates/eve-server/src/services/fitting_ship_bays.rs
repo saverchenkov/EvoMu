@@ -878,9 +878,16 @@ pub(crate) async fn ship_scoop_and_store(
             return Err(err("CannotScoopStructure", "Structures cannot be scooped into ship holds"));
         }
         let check_corp_role = || -> Result<(), BridgeRpcError> {
+            let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
+                caller_corp,
+                char_id,
+                None,
+                session.corp_role,
+                ctx.now_unix(),
+            );
             let has_role = (session.corp_role & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER)) != 0
-                || snap.corporations.get(&caller_corp).map(|c| c.ceo_id == char_id).unwrap_or(false)
-                || snap.corporations.get(&caller_corp).and_then(|c| c.member_roles.get(&char_id)).map(|&r| (r & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER)) != 0).unwrap_or(false);
+                || is_ceo
+                || (eff_roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER)) != 0;
             if !has_role {
                 return Err(err("CorpRoleDenied", "Scooping corporation-owned items requires Director or Station Manager role"));
             }

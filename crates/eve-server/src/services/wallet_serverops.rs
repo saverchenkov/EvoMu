@@ -43,11 +43,11 @@ fn check_starbase_auth(
         return Err(rpc_err("NotStarbaseOwner", format!("Structure {structure_id} owned by {owner_corp}, caller belongs to {char_corp}")));
     }
     if owner_corp == char_id { return Ok(()); }
-    let has_role = snap.corporations.get(&char_corp).map(|c| {
-        if c.ceo_id == char_id { return true; }
-        let r = c.member_roles.get(&char_id).copied().unwrap_or(0) | session.corp_role;
-        r & ((1 << 0) | (1 << 24) | (1 << 25) | (1 << 40)) != 0
-    }).unwrap_or(false) || (session.corp_role & ((1 << 0) | (1 << 24) | (1 << 25) | (1 << 40)) != 0);
+    let (is_ceo, eff_roles) =
+        snap.effective_corp_roles_at(char_corp, char_id, None, session.corp_role, 0);
+    let has_role = (snap.corporations.contains_key(&char_corp)
+        && (is_ceo || (eff_roles & ((1 << 0) | (1 << 24) | (1 << 25) | (1 << 40))) != 0))
+        || (session.corp_role & ((1 << 0) | (1 << 24) | (1 << 25) | (1 << 40)) != 0);
     if !has_role {
         return Err(rpc_err("RoleNotAuthorized", "Starbase operations require Director or Starbase Operator role"));
     }
@@ -642,7 +642,7 @@ pub fn handle(
                 let sys_id = sess_sys?;
                 let ship_id = session.ship_id.unwrap_or(0);
                 let has_ship = ship_id > 0 && snap.items.contains_key(&ship_id);
-                let it = snap.items.get_mut(&item_id).ok_or_else(|| rpc_err("OrbitalNotFound", format!("Orbital item {item_id} not found")))?;
+                let it_owner_id = snap.items.get(&item_id).ok_or_else(|| rpc_err("OrbitalNotFound", format!("Orbital item {item_id} not found")))?.owner_id;
                 if let Some(st) = snap.structures.get(&item_id) {
                     if st.solar_system_id != sys_id {
                         return Err(rpc_err("NotInSameSystem", format!("Orbital is located in system {}, caller in {sys_id}", st.solar_system_id)));
@@ -656,18 +656,25 @@ pub fn handle(
                     }
                 }
                 let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                if it.owner_id != char_id && it.owner_id != char_corp {
+                if it_owner_id != char_id && it_owner_id != char_corp {
                     return Err(rpc_err("NotOrbitalOwner", format!("Character {char_id} is not authorized to unanchor orbital {item_id}")));
                 }
-                if it.owner_id == char_corp {
-                    let has_dir = snap.corporations.get(&char_corp)
-                        .map(|c| c.ceo_id == char_id || c.member_roles.get(&char_id).copied().unwrap_or(0) & (1 << 0) != 0 || session.corp_role & (1 << 0) != 0)
-                        .unwrap_or(false);
+                if it_owner_id == char_corp {
+                    let (is_ceo, roles) = snap.effective_corp_roles_at(
+                        char_corp,
+                        char_id,
+                        None,
+                        session.corp_role,
+                        ctx.now_unix(),
+                    );
+                    let has_dir = snap.corporations.contains_key(&char_corp)
+                        && (is_ceo || (roles & (1 << 0)) != 0);
                     if !has_dir {
                         return Err(rpc_err("RoleNotAuthorized", "Unanchoring corporate orbital structures requires Director or CEO role"));
                     }
                 }
                 if let Some(st) = snap.structures.get_mut(&item_id) { st.state = "Unanchored".into(); }
+                let it = snap.items.get_mut(&item_id).ok_or_else(|| rpc_err("OrbitalNotFound", format!("Orbital item {item_id} not found")))?;
                 if has_ship {
                     it.location_id = ship_id;
                     it.flag = InventoryFlag::Cargo;
@@ -713,11 +720,8 @@ pub fn handle(
                     None => caller_corp,
                 };
                 if corp_id != 0 {
-                    let corp = snap.corporations.get(&corp_id);
-                    let is_ceo = corp.map(|c| c.ceo_id == char_id).unwrap_or(false);
-                    let roles = corp
-                        .and_then(|c| c.member_roles.get(&char_id).copied())
-                        .unwrap_or(0);
+                    let (is_ceo, roles) =
+                        snap.effective_corp_roles_at(corp_id, char_id, None, 0, ctx.now_unix());
                     let has_privs = is_ceo
                         || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR)
                         || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_ACCOUNTANT)

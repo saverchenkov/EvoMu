@@ -913,46 +913,13 @@ pub async fn handle(
             }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if station_id >= 1_000_000_000_000 {
-                    let Some(st) = snap.structures.get(&station_id) else {
-                        return Err(BridgeRpcError {
-                            code: "StructureNotFound".into(),
-                            message: format!("Structure {station_id} not found"),
-                        });
-                    };
-                    if st.fuel_blocks == 0
-                        || !structure_has_online_reprocessing_service(
-                            &ctx.sde,
-                            snap,
-                            station_id,
-                            st.type_id,
-                        )
-                    {
-                        return Err(BridgeRpcError {
-                            code: "ReprocessingServiceOffline".into(),
-                            message: format!(
-                                "Structure {station_id} does not have an online Reprocessing service"
-                            ),
-                        });
-                    }
-                    if !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap_at(
-                        snap, station_id, char_id, Some(now_unix),
-                    ) {
-                        return Err(BridgeRpcError {
-                            code: "AccessDenied".into(),
-                            message: format!(
-                                "Character {char_id} is denied access to structure {station_id} by its access profile"
-                            ),
-                        });
-                    }
-                    let _ = crate::services::structure_profile_services::check_service_domain_acl_and_tax(
+                    crate::services::structure_profile_services::require_structure_service_access_in_snap(
+                        Some(ctx),
                         snap,
                         station_id,
                         char_id,
-                        &[3, 35_899],
-                        false,
-                        Some(now_unix),
-                        "AccessDenied",
-                        "reprocessing",
+                        crate::services::structure_profile_services::StructureServiceKind::Reprocessing,
+                        now_unix,
                     )?;
                 } else if !crate::services::station_structure::npc_station_offers_service(&ctx.sde, station_id, 5) {
                     return Err(BridgeRpcError {

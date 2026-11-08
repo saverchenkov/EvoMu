@@ -1005,6 +1005,173 @@ impl WorldStateSnapshot {
         });
     }
 
+    /// Computes `(is_ceo, effective_roles)` for `char_id` in `corp_id` at `location_id` and `now_unix`.
+    /// Applies CEO immunity (`(true, u64::MAX)`), direct `corp.member_roles`, `corp_role_assignments`
+    /// (global + HQ/base/other location scopes), `gov.titles` / `corp_titles`, and 24-hour maturation
+    /// delays (`pending_role_grants`, `pending_scoped_role_grants`, `pending_title_role_grants`).
+    /// Falls back to `(false, session_roles)` when `corp_id` is absent from `self.corporations`.
+    pub fn effective_corp_roles_at(
+        &self,
+        corp_id: i64,
+        char_id: i64,
+        location_id: Option<i64>,
+        session_roles: u64,
+        now_unix: u64,
+    ) -> (bool, u64) {
+        let Some(corp) = self.corporations.get(&corp_id) else {
+            return (false, session_roles);
+        };
+        if corp.ceo_id == char_id {
+            return (true, u64::MAX);
+        }
+        let mut roles = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+
+        let char_home = self
+            .characters
+            .get(&char_id)
+            .and_then(|ch| {
+                ch.station_id
+                    .or(ch.structure_id)
+                    .or(Some(ch.home_station_id))
+                    .filter(|&id| id > 0)
+            })
+            .unwrap_or(0);
+        let hq_station_id = corp.hq_station_id.unwrap_or(char_home);
+        let mut loc_station_id = location_id
+            .or_else(|| {
+                self.characters
+                    .get(&char_id)
+                    .and_then(|ch| ch.station_id.or(ch.structure_id))
+            })
+            .unwrap_or(0);
+        for _ in 0..8 {
+            if loc_station_id <= 0
+                || (60_000_000..=69_999_999).contains(&loc_station_id)
+                || loc_station_id >= 1_000_000_000_000
+                || self.structures.contains_key(&loc_station_id)
+            {
+                break;
+            }
+            let Some(it) = self.items.get(&loc_station_id) else {
+                break;
+            };
+            if it.location_id <= 0 || it.location_id == loc_station_id {
+                break;
+            }
+            loc_station_id = it.location_id;
+        }
+        let gov_opt = self.corp_governance.get(&corp_id);
+        let base_id = gov_opt
+            .and_then(|g| g.member_bases.get(&char_id).copied())
+            .unwrap_or(0);
+
+        if let Some(ra) = self.corp_role_assignments.get(&(corp_id, char_id)) {
+            roles |= ra.roles;
+            if loc_station_id > 0 {
+                if loc_station_id == hq_station_id {
+                    roles |= ra.roles_at_hq;
+                }
+                if base_id > 0 && loc_station_id == base_id {
+                    roles |= ra.roles_at_base;
+                }
+                if loc_station_id != hq_station_id && (base_id <= 0 || loc_station_id != base_id) {
+                    roles |= ra.roles_at_other;
+                }
+            }
+        }
+
+        let mut unmatured_role_bits = 0u64;
+        let mut unmatured_title_bits = 0u64;
+        if let Some(gov) = gov_opt {
+            if let Some(&(p_mask, matured_at)) = gov.pending_role_grants.get(&char_id) {
+                if now_unix >= matured_at {
+                    roles |= p_mask;
+                } else {
+                    // Only roles subject to 24h stasis (`CORP_DELAYED_DIVISION_ROLE_MASK`, Director,
+                    // and Container Take bits) are suppressed while pending; `UpdateMember` also packs
+                    // immediate roles like Accountant/Trader into `pending_role_grants`.
+                    const DELAYED_STASIS_MASK: u64 =
+                        crate::corp_roles::CORP_DELAYED_DIVISION_ROLE_MASK
+                            | crate::corp_roles::ROLE_DIRECTOR
+                            | (0x7Fu64 << 42);
+                    unmatured_role_bits |= p_mask & DELAYED_STASIS_MASK;
+                }
+            }
+            if let Some(&(hq_p, base_p, other_p, matured_at)) =
+                gov.pending_scoped_role_grants.get(&char_id)
+            {
+                if loc_station_id > 0 {
+                    let mut scoped_p = 0u64;
+                    if loc_station_id == hq_station_id {
+                        scoped_p |= hq_p;
+                    }
+                    if base_id > 0 && loc_station_id == base_id {
+                        scoped_p |= base_p;
+                    }
+                    if loc_station_id != hq_station_id && (base_id <= 0 || loc_station_id != base_id)
+                    {
+                        scoped_p |= other_p;
+                    }
+                    if now_unix >= matured_at {
+                        roles |= scoped_p;
+                    } else {
+                        unmatured_role_bits |= scoped_p;
+                    }
+                }
+            }
+            if let Some(&(t_mask, matured_at)) = gov.pending_title_role_grants.get(&char_id) {
+                if now_unix >= matured_at {
+                    roles |= t_mask;
+                } else {
+                    unmatured_title_bits |= t_mask;
+                }
+            }
+            if let Some(&tmask) = gov.member_titles.get(&char_id) {
+                for (&tid, &(_, troles)) in &gov.titles {
+                    if (1..=64).contains(&tid) && (tmask & (1u64 << (tid - 1))) != 0 {
+                        roles |= troles & !unmatured_title_bits;
+                    }
+                }
+            }
+        }
+
+        if let (Some(tids), Some(titles)) = (
+            self.corp_member_titles.get(&(corp_id, char_id)),
+            self.corp_titles.get(&corp_id),
+        ) {
+            for t in titles.iter().filter(|t| tids.contains(&t.title_id)) {
+                roles |= crate::corp_roles::encode_corp_role_names(&t.roles) & !unmatured_title_bits;
+                if loc_station_id > 0 {
+                    if loc_station_id == hq_station_id {
+                        roles |= crate::corp_roles::encode_corp_role_names(&t.roles_at_hq)
+                            & !unmatured_title_bits;
+                    }
+                    if base_id > 0 && loc_station_id == base_id {
+                        roles |= crate::corp_roles::encode_corp_role_names(&t.roles_at_base)
+                            & !unmatured_title_bits;
+                    }
+                    if loc_station_id != hq_station_id
+                        && (base_id <= 0 || loc_station_id != base_id)
+                    {
+                        roles |= crate::corp_roles::encode_corp_role_names(&t.roles_at_other)
+                            & !unmatured_title_bits;
+                    }
+                }
+            }
+        }
+
+        roles &= !(unmatured_role_bits | unmatured_title_bits);
+        (false, roles)
+    }
+
+    /// Returns `true` if `char_id` is within the 24-hour (`86_400s`) role-drop stasis window in `corp_id`.
+    pub fn is_in_role_drop_stasis(&self, corp_id: i64, char_id: i64, now_unix: u64) -> bool {
+        self.corp_governance
+            .get(&corp_id)
+            .and_then(|g| g.role_drop_timestamps.get(&char_id).copied())
+            .is_some_and(|drop_ts| now_unix < drop_ts.saturating_add(86_400))
+    }
+
     /// Returns `true` if `item_id` is escrowed in an active contract, industry job, direct trade, or HyperNet raffle.
     pub fn is_item_locked_in_contract_or_job(&self, item_id: i64) -> bool {
         self.is_item_locked_excluding_trade(item_id, None)

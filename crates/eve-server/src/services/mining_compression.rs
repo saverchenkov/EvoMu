@@ -933,18 +933,15 @@ pub async fn handle_compression(
                         message: "Character does not belong to a corporation".into(),
                     });
                 }
-                let effective_role = snap
-                    .corporations
-                    .get(&caller_corp)
-                    .and_then(|c| {
-                        if char_id == c.ceo_id {
-                            Some(eve_db::corp_roles::ROLE_DIRECTOR)
-                        } else {
-                            c.member_roles.get(&char_id).copied()
-                        }
-                    })
-                    .unwrap_or(sess_role);
-                let has_ledger_role = eve_db::corp_roles::has_role(effective_role, eve_db::corp_roles::ROLE_DIRECTOR)
+                let (is_ceo, effective_role) = snap.effective_corp_roles_at(
+                    caller_corp,
+                    char_id,
+                    None,
+                    sess_role,
+                    ctx.now_unix(),
+                );
+                let has_ledger_role = is_ceo
+                    || eve_db::corp_roles::has_role(effective_role, eve_db::corp_roles::ROLE_DIRECTOR)
                     || eve_db::corp_roles::has_role(effective_role, eve_db::corp_roles::ROLE_ACCOUNTANT)
                     || eve_db::corp_roles::has_role(effective_role, eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT)
                     || eve_db::corp_roles::has_role(effective_role, eve_db::corp_roles::ROLE_STATION_MANAGER);
@@ -1019,18 +1016,15 @@ pub async fn handle_compression(
                         ),
                     });
                 }
-                let effective_role = snap
-                    .corporations
-                    .get(&caller_corp)
-                    .and_then(|c| {
-                        if char_id == c.ceo_id {
-                            Some(eve_db::corp_roles::ROLE_DIRECTOR)
-                        } else {
-                            c.member_roles.get(&char_id).copied()
-                        }
-                    })
-                    .unwrap_or(sess_role);
-                let has_ledger_role = eve_db::corp_roles::has_role(effective_role, eve_db::corp_roles::ROLE_DIRECTOR)
+                let (is_ceo, effective_role) = snap.effective_corp_roles_at(
+                    caller_corp,
+                    char_id,
+                    None,
+                    sess_role,
+                    ctx.now_unix(),
+                );
+                let has_ledger_role = is_ceo
+                    || eve_db::corp_roles::has_role(effective_role, eve_db::corp_roles::ROLE_DIRECTOR)
                     || eve_db::corp_roles::has_role(effective_role, eve_db::corp_roles::ROLE_ACCOUNTANT)
                     || eve_db::corp_roles::has_role(effective_role, eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT)
                     || eve_db::corp_roles::has_role(effective_role, eve_db::corp_roles::ROLE_STATION_MANAGER);
@@ -1238,7 +1232,9 @@ pub(crate) fn caller_has_structure_extraction_role(snap: &eve_db::WorldStateSnap
     if (session_corp_role & MOON_ROLES) != 0 { return true; }
     let Some(corp) = snap.corporations.get(&corp_id) else { return true };
     if corp.ceo_id == 0 || corp.ceo_id == char_id || corp.member_roles.is_empty() { return true; }
-    (corp.member_roles.get(&char_id).copied().unwrap_or(0) & MOON_ROLES) != 0
+    let (is_ceo, roles) =
+        snap.effective_corp_roles_at(corp_id, char_id, None, session_corp_role, 0);
+    is_ceo || (roles & MOON_ROLES) != 0
 }
 
 pub(crate) fn inspect_metenox_drill(

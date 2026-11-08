@@ -93,72 +93,18 @@ fn item_repair_metrics(
 fn validate_structure_repair_access(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
-    ext: &StructureExtendedState,
+    _ext: &StructureExtendedState,
     sid: i64,
     char_id: i64,
     now: u64,
 ) -> Result<(), BridgeRpcError> {
-    let st = snap.structures.get(&sid).ok_or_else(|| BridgeRpcError {
-        code: "StructureNotFound".into(),
-        message: format!("Structure {sid} not found"),
-    })?;
-    if !life::is_operational(&st.state) {
-        return Err(BridgeRpcError {
-            code: "StructureNotOperational".into(),
-            message: format!("Structure {sid} is not operational for repairs"),
-        });
-    }
-    let requires_core = life::structure_profile(ctx, st.type_id)
-        .map(|p| p.core_type_id.is_some())
-        .unwrap_or(true);
-    if requires_core && !st.quantum_core_installed {
-        return Err(BridgeRpcError {
-            code: "QuantumCoreRequired".into(),
-            message: format!("Structure {sid} requires a quantum core for repairs"),
-        });
-    }
-    match life::power_state(ctx, snap, ext, st, now) {
-        life::PowerState::FullPower | life::PowerState::LowPower => {}
-        // Forsaken Fortress (`Abandoned` state after 7 days without fuel): all Upwell service
-        // modules and structure services (including repair facilities) are offline until refueled.
-        life::PowerState::Abandoned => {
-            return Err(BridgeRpcError {
-                code: "StructureAbandoned".into(),
-                message: format!("Abandoned structure {sid} does not offer repair services"),
-            });
-        }
-        life::PowerState::NotOperational => {
-            return Err(BridgeRpcError {
-                code: "StructureNotOperational".into(),
-                message: format!(
-                    "Structure {sid} is not operational and cannot offer repair services"
-                ),
-            });
-        }
-    }
-    let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-    if caller_corp != st.owner_corp_id
-        && !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap_at(
-            snap,
-            sid,
-            char_id,
-            Some(now),
-        )
-    {
-        return Err(BridgeRpcError {
-            code: "StructureRepairAccessDenied".into(),
-            message: format!("Character {char_id} lacks ACL access to repair at structure {sid}"),
-        });
-    }
-    let _ = crate::services::structure_profile_services::check_service_domain_acl_and_tax(
+    crate::services::structure_profile_services::require_structure_service_access_in_snap(
+        Some(ctx),
         snap,
         sid,
         char_id,
-        &[13, 8],
-        false,
-        Some(now),
-        "StructureRepairAccessDenied",
-        "repair",
+        crate::services::structure_profile_services::StructureServiceKind::Repair,
+        now,
     )?;
     Ok(())
 }
@@ -286,24 +232,16 @@ fn resolve_structure_repair_tax_bps(
     if sid < 1_000_000_000_000 && !snap.structures.contains_key(&sid) {
         return Ok(0);
     }
-    let ext = load_ext_state(snap);
-    validate_structure_repair_access(ctx, snap, &ext, sid, char_id, now)?;
-    if let Some(bps) = crate::services::structure_profile_services::check_service_domain_acl_and_tax(
+    let bps = crate::services::structure_profile_services::require_structure_service_access_in_snap(
+        Some(ctx),
         snap,
         sid,
         char_id,
-        &[13, 8],
-        false,
-        Some(now),
-        "StructureRepairAccessDenied",
-        "repair",
-    )? {
-        return Ok(bps.max(0));
-    }
-    Ok(crate::services::structure_profile_services::effective_profile_for_structure(&ext, sid, Some(now))
-        .and_then(|p| p.service_settings.get(&13).or_else(|| p.service_settings.get(&0)).copied())
-        .unwrap_or(0)
-        .max(0))
+        crate::services::structure_profile_services::StructureServiceKind::Repair,
+        now,
+    )?
+    .unwrap_or(0);
+    Ok(bps.max(0))
 }
 
 /// `repairSvc.GetRepairQuotes(itemIDs)` (`base_repairshop.pyj:65`): returns a `Dict` mapping each

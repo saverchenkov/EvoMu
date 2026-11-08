@@ -16,10 +16,12 @@ fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
 
 pub(crate) fn has_structure_manager_role(snap: &eve_db::WorldStateSnapshot, session: &SessionState, char_id: i64, corp_id: i64) -> bool {
     let req_roles = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
+    let (is_ceo, eff_roles) =
+        snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, 0);
     session.has_gm_role()
         || (session.corp_role & req_roles) != 0
-        || snap.corporations.get(&corp_id).is_some_and(|c| c.ceo_id == char_id || c.member_roles.get(&char_id).is_some_and(|&r| (r & req_roles) != 0))
-        || snap.corp_role_assignments.get(&(corp_id, char_id)).is_some_and(|a| (a.roles & req_roles) != 0)
+        || is_ceo
+        || (eff_roles & req_roles) != 0
 }
 
 /// `structureDeployment.Anchor(typeID, name)`: deploys the structure at the anchoring ship's

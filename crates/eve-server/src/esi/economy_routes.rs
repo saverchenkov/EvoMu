@@ -26,7 +26,6 @@
 // parity: plan:ESI-6
 
 use crate::esi::sample_routes::{format_iso8601_utc, paginate_slice, RouteExecutionResult};
-use crate::esi::universe_routes::character_has_structure_acl_access;
 use crate::router::ServerContext;
 use eve_db::SsoTokenClaims;
 use serde_json::{json, Value};
@@ -598,41 +597,17 @@ pub fn dispatch_economy_route(
             };
             let caller_char_id = claims.map(|c| c.character_id).unwrap_or(0);
             Some(ctx.db.with_snapshot(|snap| {
-                let Some(st) = snap.structures.get(&structure_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Structure {structure_id} not found"),
-                    );
-                };
-                let market_online =
-                    crate::services::market_trading::is_structure_market_online(snap, structure_id)
-                        && crate::services::station_structure::structure_upwell_ops::structure_allows_market_orders(
-                            ctx,
-                            snap,
-                            structure_id,
-                        );
-                if !market_online {
-                    return RouteExecutionResult::error(
-                        403,
-                        format!(
-                            "Structure {structure_id} does not have an online Standup Market Hub service"
-                        ),
-                    );
-                }
-                let acl_ok = character_has_structure_acl_access(snap, caller_char_id, st)
-                    && crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access(
+                if let Err(e) =
+                    crate::services::structure_profile_services::require_structure_service_access(
                         ctx,
                         snap,
                         structure_id,
                         caller_char_id,
-                    );
-                if !acl_ok {
-                    return RouteExecutionResult::error(
-                        403,
-                        format!(
-                            "Character {caller_char_id} lacks docking ACL access to structure {structure_id}"
-                        ),
-                    );
+                        crate::services::structure_profile_services::StructureServiceKind::Market,
+                    )
+                {
+                    let status = if e.code == "StructureNotFound" { 404 } else { 403 };
+                    return RouteExecutionResult::error(status, e.message);
                 }
                 let mut orders: Vec<_> = snap
                     .market_orders

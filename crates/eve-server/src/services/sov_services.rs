@@ -509,7 +509,7 @@ pub async fn handle(
                 let effective_roles = if session.corp_role != 0 {
                     session.corp_role
                 } else {
-                    snap.corporations.get(&char_corp).and_then(|c| c.member_roles.get(&char_id).copied()).unwrap_or(0)
+                    snap.effective_corp_roles_at(char_corp, char_id, None, 0, ctx.now_unix()).1
                 };
                 can_access_sov_hub_fuel(
                     snap,
@@ -545,14 +545,18 @@ pub async fn handle(
                 }));
             };
 
+            let now_unix = ctx.now_unix();
             let is_corp_director = ctx.db.with_snapshot(|snap| {
                 let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                if let Some(corp) = snap.corporations.get(&corp_id) {
-                    let mut role = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
-                    if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
-                        role |= ra.roles | ra.roles_at_hq | ra.roles_at_base | ra.roles_at_other;
-                    }
-                    char_id == corp.ceo_id
+                if snap.corporations.contains_key(&corp_id) {
+                    let (is_ceo, role) = snap.effective_corp_roles_at(
+                        corp_id,
+                        char_id,
+                        None,
+                        session.corp_role,
+                        now_unix,
+                    );
+                    is_ceo
                         || (role
                             & (eve_db::corp_roles::ROLE_DIRECTOR
                                 | eve_db::corp_roles::ROLE_STATION_MANAGER))
@@ -954,11 +958,17 @@ pub fn handle_contract_delete_notif(
                     message: "Corporation contract notifications require a player corporation".into(),
                 });
             }
-            let allowed = snap.corporations.get(&caller_corp).is_some_and(|corp| {
-                let r = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
-                char_id == corp.ceo_id
+            let allowed = snap.corporations.contains_key(&caller_corp) && {
+                let (is_ceo, r) = snap.effective_corp_roles_at(
+                    caller_corp,
+                    char_id,
+                    None,
+                    session.corp_role,
+                    now_unix,
+                );
+                is_ceo
                     || (r & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_CONTRACT_MANAGER)) != 0
-            });
+            };
             if !allowed {
                 return Err(BridgeRpcError {
                     code: "CrpAccessDenied".into(),
@@ -1029,15 +1039,19 @@ pub fn handle_contract_delete_multiple(
         });
     }
     let caller_corp = session.corporation_id.unwrap_or(0);
+    let now_unix = ctx.now_unix();
     let (deleted, failed, item_changes) = ctx.db.try_with_mut_snapshot(|snap| {
-        let corp_mgr = snap.corporations.get(&caller_corp).is_some_and(|corp| {
-            let mut r = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
-            if let Some(ra) = snap.corp_role_assignments.get(&(caller_corp, char_id)) {
-                r |= ra.roles | ra.roles_at_hq | ra.roles_at_base | ra.roles_at_other;
-            }
-            char_id == corp.ceo_id
+        let corp_mgr = snap.corporations.contains_key(&caller_corp) && {
+            let (is_ceo, r) = snap.effective_corp_roles_at(
+                caller_corp,
+                char_id,
+                None,
+                session.corp_role,
+                now_unix,
+            );
+            is_ceo
                 || (r & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_CONTRACT_MANAGER)) != 0
-        });
+        };
         let mut del = Vec::new();
         let mut fail = Vec::new();
         let mut changes: Vec<(eve_db::InventoryItemRecord, i64, i64, eve_db::InventoryFlag)> = Vec::new();

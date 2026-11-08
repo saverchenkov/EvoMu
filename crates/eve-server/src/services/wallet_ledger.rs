@@ -215,10 +215,7 @@ fn give_cash_from_corp(
         if !snap.corporations.contains_key(&corp_id) {
             return Err(rpc_err("CorporationNotFound", format!("Corporation {corp_id} not found")));
         }
-        let (is_ceo, eff_roles) =
-            crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
-                snap, corp_id, char_id, 0, now,
-            );
+        let (is_ceo, eff_roles) = snap.effective_corp_roles_at(corp_id, char_id, None, 0, now);
         let take_role = corp_roles::ROLE_ACCOUNT_CAN_TAKE[(from_div - 1) as usize];
         if !is_ceo
             && !corp_roles::has_role(eff_roles, corp_roles::ROLE_DIRECTOR)
@@ -298,10 +295,7 @@ fn get_journal(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> R
             if !snap.corporations.contains_key(&corp_id) {
                 return Err(rpc_err("CorporationNotFound", "no corporation"));
             }
-            let (is_ceo, eff_roles) =
-                crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
-                    snap, corp_id, char_id, 0, now,
-                );
+            let (is_ceo, eff_roles) = snap.effective_corp_roles_at(corp_id, char_id, None, 0, now);
             let div_take = division_of(i64::from(account_key))
                 .map(|div| corp_roles::ROLE_ACCOUNT_CAN_TAKE[(div - 1) as usize])
                 .unwrap_or(0);
@@ -377,10 +371,7 @@ fn market_transactions(
             if !snap.corporations.contains_key(&corp_id) {
                 return Err(rpc_err("CorporationNotFound", "no corporation"));
             }
-            let (is_ceo, eff_roles) =
-                crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
-                    snap, corp_id, char_id, 0, now,
-                );
+            let (is_ceo, eff_roles) = snap.effective_corp_roles_at(corp_id, char_id, None, 0, now);
             let div_take = division_of(i64::from(corp_key))
                 .map(|div| corp_roles::ROLE_ACCOUNT_CAN_TAKE[(div - 1) as usize])
                 .unwrap_or(0);

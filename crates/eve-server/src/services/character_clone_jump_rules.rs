@@ -74,41 +74,13 @@ pub fn check_structure_clone_bay_access_at(
     char_id: i64,
     now_unix_opt: Option<u64>,
 ) -> Result<Option<IskCents>, BridgeRpcError> {
-    if !structure_upwell_ops::evaluate_character_structure_access_in_snap_at(
+    let bps_opt = crate::services::structure_profile_services::require_structure_service_access_in_snap(
+        None,
         snap,
         structure_id,
         char_id,
-        now_unix_opt,
-    ) {
-        return Err(BridgeRpcError {
-            code: "StructureAccessDenied".into(),
-            message: format!("Access to structure {structure_id} clone bay is denied by access list"),
-        });
-    }
-    let ext = structure_upwell_ops::load_ext_state(snap);
-    if let Some(prof) = crate::services::structure_profile_services::effective_profile_for_structure(
-        &ext,
-        structure_id,
-        now_unix_opt,
-    ) {
-        if prof.general_settings.get(&2) == Some(&false)
-            || prof.general_settings.get(&35894) == Some(&false)
-        {
-            return Err(BridgeRpcError {
-                code: "StructureAccessDenied".into(),
-                message: format!("Clone bay service on structure {structure_id} is denied by profile settings"),
-            });
-        }
-    }
-    let bps_opt = crate::services::structure_profile_services::check_service_domain_acl_and_tax(
-        snap,
-        structure_id,
-        char_id,
-        &[crate::services::structure_profile_services::SETTING_CLONINGBAY_TAX, 35_894, 2, 10, 6],
-        false,
-        now_unix_opt,
-        "StructureAccessDenied",
-        "clone bay",
+        crate::services::structure_profile_services::StructureServiceKind::CloneBay,
+        now_unix_opt.unwrap_or(0),
     )?;
     Ok(bps_opt.map(|bps| IskCents((bps / 100).max(0))))
 }

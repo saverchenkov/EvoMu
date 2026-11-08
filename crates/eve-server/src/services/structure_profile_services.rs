@@ -542,6 +542,428 @@ pub fn check_service_domain_acl_and_tax(
     Ok(None)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StructureServiceKind {
+    Docking,
+    Market,
+    Reprocessing,
+    CloneBay,
+    Repair,
+    Industry { activity_id: u8 },
+    JumpBridge,
+    StructureControl,
+    CorpManagement,
+}
+
+/// Evaluates unified Upwell structure lifecycle, online service module, access list, per-service
+/// ACL profile, and corp-role guards at `now_unix`. Returns `Ok(Some(bps))` when a service-level
+/// ACL/setting tax rate (in basis points) applies, `Ok(None)` when allowed without a basis-points rate,
+/// or `Err(BridgeRpcError)` when denied.
+pub fn require_structure_service_access_in_snap(
+    ctx: Option<&ServerContext>,
+    snap: &WorldStateSnapshot,
+    structure_id: i64,
+    char_id: i64,
+    service_kind: StructureServiceKind,
+    now_unix: u64,
+) -> Result<Option<i64>, BridgeRpcError> {
+    let Some(st) = snap.structures.get(&structure_id) else {
+        if service_kind == StructureServiceKind::CloneBay {
+            return Err(err(
+                "StructureAccessDenied",
+                format!("Access to structure {structure_id} clone bay is denied by access list"),
+            ));
+        }
+        return Err(err(
+            "StructureNotFound",
+            format!("Structure {structure_id} not found"),
+        ));
+    };
+
+    if st.state == "Destroyed" {
+        return Err(match service_kind {
+            StructureServiceKind::Market => err(
+                "StructureMarketOffline",
+                format!("Standup Market Hub I service module at structure {structure_id} is offline"),
+            ),
+            StructureServiceKind::Reprocessing => err(
+                "ReprocessingServiceOffline",
+                format!("Structure {structure_id} does not have an online Reprocessing service"),
+            ),
+            StructureServiceKind::Repair => err(
+                "StructureNotOperational",
+                format!("Structure {structure_id} is not operational for repairs"),
+            ),
+            StructureServiceKind::CloneBay => err(
+                "StructureAccessDenied",
+                format!("Access to structure {structure_id} clone bay is denied by access list"),
+            ),
+            StructureServiceKind::StructureControl | StructureServiceKind::CorpManagement => err(
+                "StructureDestroyed",
+                format!("Structure {structure_id} has been destroyed"),
+            ),
+            _ => err(
+                "StructureServiceAccessDenied",
+                format!("Structure {structure_id} has been destroyed"),
+            ),
+        });
+    }
+
+    let now_opt = (now_unix > 0).then_some(now_unix);
+
+    match service_kind {
+        StructureServiceKind::Docking => {
+            if !ops::evaluate_character_structure_access_in_snap_at(snap, structure_id, char_id, now_opt)
+            {
+                return Err(err(
+                    "StructureServiceAccessDenied",
+                    format!("Character {char_id} is denied docking access to structure {structure_id}"),
+                ));
+            }
+            Ok(None)
+        }
+        StructureServiceKind::Market => {
+            let market_online =
+                crate::services::market_trading::is_structure_market_online(snap, structure_id)
+                    && ctx.is_none_or(|c| ops::structure_allows_market_orders(c, snap, structure_id));
+            if !market_online {
+                return Err(err(
+                    "StructureMarketOffline",
+                    format!("Standup Market Hub I service module at structure {structure_id} is offline"),
+                ));
+            }
+            if !ops::evaluate_character_structure_access_in_snap_at(
+                snap,
+                structure_id,
+                char_id,
+                now_opt,
+            ) || (char_id > 0
+                && snap.characters.contains_key(&char_id)
+                && !crate::esi::universe_routes::character_has_structure_acl_access(
+                    snap, char_id, st,
+                ))
+            {
+                return Err(err(
+                    "StructureServiceAccessDenied",
+                    format!("Character {char_id} is excluded by structure {structure_id} access list"),
+                ));
+            }
+            let ext = load_ext_state(snap);
+            if let Some(prof) = effective_profile_for_structure(&ext, structure_id, now_opt) {
+                if prof.general_settings.get(&SETTING_MARKET_TAX) == Some(&false) {
+                    return Err(err(
+                        "StructureServiceAccessDenied",
+                        format!(
+                            "Character {char_id} is denied market service on structure {structure_id} by service access profile"
+                        ),
+                    ));
+                }
+            }
+            check_service_domain_acl_and_tax(
+                snap,
+                structure_id,
+                char_id,
+                &[SETTING_MARKET_TAX],
+                false,
+                now_opt,
+                "StructureServiceAccessDenied",
+                "market",
+            )
+        }
+        StructureServiceKind::Reprocessing => {
+            if st.fuel_blocks == 0
+                || ctx.is_some_and(|c| {
+                    !crate::services::mining_advanced::mining_compression::structure_has_online_reprocessing_service(
+                        &c.sde,
+                        snap,
+                        structure_id,
+                        st.type_id,
+                    )
+                })
+            {
+                return Err(err(
+                    "ReprocessingServiceOffline",
+                    format!("Structure {structure_id} does not have an online Reprocessing service"),
+                ));
+            }
+            if !ops::evaluate_character_structure_access_in_snap_at(
+                snap,
+                structure_id,
+                char_id,
+                now_opt,
+            ) {
+                return Err(err(
+                    "AccessDenied",
+                    format!(
+                        "Character {char_id} is denied access to structure {structure_id} by its access profile"
+                    ),
+                ));
+            }
+            check_service_domain_acl_and_tax(
+                snap,
+                structure_id,
+                char_id,
+                &[SETTING_REPROCESSING_TAX, 35_899],
+                false,
+                now_opt,
+                "AccessDenied",
+                "reprocessing",
+            )
+        }
+        StructureServiceKind::CloneBay => {
+            if !ops::evaluate_character_structure_access_in_snap_at(
+                snap,
+                structure_id,
+                char_id,
+                now_opt,
+            ) {
+                return Err(err(
+                    "StructureAccessDenied",
+                    format!("Access to structure {structure_id} clone bay is denied by access list"),
+                ));
+            }
+            let ext = load_ext_state(snap);
+            if let Some(prof) = effective_profile_for_structure(&ext, structure_id, now_opt) {
+                if prof.general_settings.get(&2) == Some(&false)
+                    || prof.general_settings.get(&35_894) == Some(&false)
+                {
+                    return Err(err(
+                        "StructureAccessDenied",
+                        format!(
+                            "Clone bay service on structure {structure_id} is denied by profile settings"
+                        ),
+                    ));
+                }
+            }
+            check_service_domain_acl_and_tax(
+                snap,
+                structure_id,
+                char_id,
+                &[SETTING_CLONINGBAY_TAX, 35_894, 2, 10, 6],
+                false,
+                now_opt,
+                "StructureAccessDenied",
+                "clone bay",
+            )
+        }
+        StructureServiceKind::Repair => {
+            if !life::is_operational(&st.state) {
+                return Err(err(
+                    "StructureNotOperational",
+                    format!("Structure {structure_id} is not operational for repairs"),
+                ));
+            }
+            if let Some(ctx) = ctx {
+                let requires_core = life::structure_profile(ctx, st.type_id)
+                    .map(|p| p.core_type_id.is_some())
+                    .unwrap_or(true);
+                if requires_core && !st.quantum_core_installed {
+                    return Err(err(
+                        "QuantumCoreRequired",
+                        format!("Structure {structure_id} requires a quantum core for repairs"),
+                    ));
+                }
+            } else if !st.quantum_core_installed {
+                return Err(err(
+                    "QuantumCoreRequired",
+                    format!("Structure {structure_id} requires a quantum core for repairs"),
+                ));
+            }
+            let ext = load_ext_state(snap);
+            if let Some(ctx) = ctx {
+                match life::power_state(ctx, snap, &ext, st, now_unix) {
+                    life::PowerState::FullPower | life::PowerState::LowPower => {}
+                    life::PowerState::Abandoned => {
+                        return Err(err(
+                            "StructureAbandoned",
+                            format!("Abandoned structure {structure_id} does not offer repair services"),
+                        ));
+                    }
+                    life::PowerState::NotOperational => {
+                        return Err(err(
+                            "StructureNotOperational",
+                            format!(
+                                "Structure {structure_id} is not operational and cannot offer repair services"
+                            ),
+                        ));
+                    }
+                }
+            }
+            let caller_corp = snap
+                .characters
+                .get(&char_id)
+                .map(|c| c.corporation_id)
+                .unwrap_or(0);
+            if caller_corp != st.owner_corp_id
+                && !ops::evaluate_character_structure_access_in_snap_at(
+                    snap,
+                    structure_id,
+                    char_id,
+                    Some(now_unix),
+                )
+            {
+                return Err(err(
+                    "StructureRepairAccessDenied",
+                    format!("Character {char_id} lacks ACL access to repair at structure {structure_id}"),
+                ));
+            }
+            if let Some(bps) = check_service_domain_acl_and_tax(
+                snap,
+                structure_id,
+                char_id,
+                &[13, 8],
+                false,
+                Some(now_unix),
+                "StructureRepairAccessDenied",
+                "repair",
+            )? {
+                return Ok(Some(bps.max(0)));
+            }
+            let default_bps = effective_profile_for_structure(&ext, structure_id, Some(now_unix))
+                .and_then(|p| p.service_settings.get(&13).or_else(|| p.service_settings.get(&0)).copied())
+                .unwrap_or(0)
+                .max(0);
+            Ok(Some(default_bps))
+        }
+        StructureServiceKind::Industry { activity_id } => {
+            if !ops::evaluate_character_structure_access_in_snap_at(
+                snap,
+                structure_id,
+                char_id,
+                now_opt,
+            ) {
+                return Err(err(
+                    "StructureServiceAccessDenied",
+                    format!("Character {char_id} is denied access to structure {structure_id}"),
+                ));
+            }
+            let (cands, any_of): (&[i64], bool) = match activity_id {
+                1 => (&[29, 30, 31, 24, 35_878], false),
+                3..=5 => (&[32, 24, 35_891], false),
+                8 => (&[33, 24, 35_886], false),
+                9 | 11 => (&[28, 26, 27, 24, 45_537, 45_538, 45_539, 7], true),
+                _ => (&[24, 29], true),
+            };
+            check_service_domain_acl_and_tax(
+                snap,
+                structure_id,
+                char_id,
+                cands,
+                any_of,
+                now_opt,
+                "StructureServiceAccessDenied",
+                "industry",
+            )
+        }
+        StructureServiceKind::JumpBridge => {
+            let ext = load_ext_state(snap);
+            if let Some(prof) = effective_profile_for_structure(&ext, structure_id, now_opt) {
+                if prof.blocked_characters.contains(&char_id) {
+                    return Err(err(
+                        "StructureServiceAccessDenied",
+                        format!("Character {char_id} is blocked from jump bridge {structure_id}"),
+                    ));
+                }
+                let (char_corp, char_ally) = pilot_corp_and_ally(snap, char_id);
+                if (char_corp > 0 && prof.blocked_corporations.contains(&char_corp))
+                    || (char_ally > 0 && prof.blocked_alliances.contains(&char_ally))
+                {
+                    return Err(err(
+                        "StructureServiceAccessDenied",
+                        format!("Character {char_id} is blocked from jump bridge {structure_id}"),
+                    ));
+                }
+                if let Some(res) = evaluate_domain_acl_on_profile(
+                    snap,
+                    &ext,
+                    prof,
+                    char_id,
+                    &[SETTING_JUMP_BRIDGE_ACTIVATION, 35_913, 35_841, SERVICE_JUMP_BRIDGE, 9],
+                    false,
+                ) {
+                    return match res {
+                        Ok(bps) => Ok(Some(bps)),
+                        Err(()) => Err(err(
+                            "StructureServiceAccessDenied",
+                            format!("Character {char_id} is denied jump bridge {structure_id}"),
+                        )),
+                    };
+                }
+            }
+            if !ops::evaluate_character_structure_access_in_snap_at(
+                snap,
+                structure_id,
+                char_id,
+                now_opt,
+            ) {
+                return Err(err(
+                    "StructureServiceAccessDenied",
+                    format!("Character {char_id} is denied jump bridge {structure_id}"),
+                ));
+            }
+            Ok(None)
+        }
+        StructureServiceKind::StructureControl => {
+            if !crate::services::structure_control_ops::is_structure_combat_operational(ctx, st) {
+                return Err(err(
+                    "StructureNotOperational",
+                    format!(
+                        "Structure {structure_id} is in state '{}' (cored={}) and cannot be controlled",
+                        st.state, st.quantum_core_installed
+                    ),
+                ));
+            }
+            let ext = load_ext_state(snap);
+            let prof_opt = effective_profile_for_structure(&ext, structure_id, now_opt);
+            crate::services::structure_control_ops::verify_control_acl_or_role_with_profile_at(
+                snap, &ext, st, prof_opt, char_id, now_unix,
+            )?;
+            Ok(None)
+        }
+        StructureServiceKind::CorpManagement => {
+            let char_corp = snap
+                .characters
+                .get(&char_id)
+                .map(|c| c.corporation_id)
+                .unwrap_or(0);
+            if st.owner_corp_id != 0 && char_corp != st.owner_corp_id {
+                return Err(err(
+                    "StructureOwnershipViolation",
+                    "Caller does not belong to the owning corporation",
+                ));
+            }
+            let req = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
+            let (is_ceo, roles) =
+                snap.effective_corp_roles_at(st.owner_corp_id, char_id, Some(structure_id), 0, now_unix);
+            if !is_ceo && (roles & req) == 0 {
+                return Err(err(
+                    "InsufficientCorpRoles",
+                    "Structure profile and ACL configuration requires Director or Station Manager role",
+                ));
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// Evaluates [`require_structure_service_access_in_snap`] using `ctx` and `ctx.now_unix()`.
+pub fn require_structure_service_access(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    structure_id: i64,
+    char_id: i64,
+    service_kind: StructureServiceKind,
+) -> Result<Option<i64>, BridgeRpcError> {
+    require_structure_service_access_in_snap(
+        Some(ctx),
+        snap,
+        structure_id,
+        char_id,
+        service_kind,
+        ctx.now_unix(),
+    )
+}
+
 /// Evaluates Industry activity service ACL (`1` Manufacturing, `3|4|5` Research/Copying, `8` Invention, `9|11` Reactions)
 /// and returns `Ok(Some(tax_rate_fraction))` when a per-ACL-group rate applies.
 pub fn check_industry_activity_acl_and_tax(
@@ -551,28 +973,13 @@ pub fn check_industry_activity_acl_and_tax(
     activity_id: u8,
     now_unix: u64,
 ) -> Result<Option<f64>, BridgeRpcError> {
-    if !ops::evaluate_character_structure_access_in_snap_at(snap, structure_id, char_id, Some(now_unix)) {
-        return Err(err(
-            "StructureServiceAccessDenied",
-            format!("Character {char_id} is denied access to structure {structure_id}"),
-        ));
-    }
-    let (cands, any_of): (&[i64], bool) = match activity_id {
-        1 => (&[29, 30, 31, 24, 35_878], false),
-        3..=5 => (&[32, 24, 35_891], false),
-        8 => (&[33, 24, 35_886], false),
-        9 | 11 => (&[28, 26, 27, 24, 45_537, 45_538, 45_539, 7], true),
-        _ => (&[24, 29], true),
-    };
-    let bps_opt = check_service_domain_acl_and_tax(
+    let bps_opt = require_structure_service_access_in_snap(
+        None,
         snap,
         structure_id,
         char_id,
-        cands,
-        any_of,
-        Some(now_unix),
-        "StructureServiceAccessDenied",
-        "industry",
+        StructureServiceKind::Industry { activity_id },
+        now_unix,
     )?;
     Ok(bps_opt.map(|bps| (bps.max(0) as f64 / 10_000.0).clamp(0.0, 1.0)))
 }
@@ -586,29 +993,15 @@ pub fn can_character_use_jump_bridge(
     char_id: i64,
     now_unix: u64,
 ) -> bool {
-    let ext = load_ext_state(snap);
-    if let Some(prof) = effective_profile_for_structure(&ext, structure_id, Some(now_unix)) {
-        if prof.blocked_characters.contains(&char_id) {
-            return false;
-        }
-        let (char_corp, char_ally) = pilot_corp_and_ally(snap, char_id);
-        if (char_corp > 0 && prof.blocked_corporations.contains(&char_corp))
-            || (char_ally > 0 && prof.blocked_alliances.contains(&char_ally))
-        {
-            return false;
-        }
-        if let Some(res) = evaluate_domain_acl_on_profile(
-            snap,
-            &ext,
-            prof,
-            char_id,
-            &[SETTING_JUMP_BRIDGE_ACTIVATION, 35_913, 35_841, SERVICE_JUMP_BRIDGE, 9],
-            false,
-        ) {
-            return res.is_ok();
-        }
-    }
-    ops::evaluate_character_structure_access_in_snap_at(snap, structure_id, char_id, Some(now_unix))
+    require_structure_service_access_in_snap(
+        None,
+        snap,
+        structure_id,
+        char_id,
+        StructureServiceKind::JumpBridge,
+        now_unix,
+    )
+    .is_ok()
 }
 
 /// Checks whether `structure_id` (if it is an Upwell structure in `snap.structures`) has an online
@@ -626,40 +1019,20 @@ pub fn check_upwell_market_access_and_rate(
     let Some(st) = snap.structures.get(&structure_id) else {
         return Ok(None);
     };
-    if st.state == "Destroyed"
-        || !crate::services::market_trading::is_structure_market_online(snap, structure_id)
-        || !ops::structure_allows_market_orders(ctx, snap, structure_id)
-    {
-        return Err(err(
-            offline_err_code,
-            format!("Standup Market Hub I service module at structure {structure_id} is offline"),
-        ));
-    }
-    if !ops::evaluate_character_structure_access_in_snap_at(snap, structure_id, char_id, Some(now_unix)) {
-        return Err(err(
-            "StructureServiceAccessDenied",
-            format!("Character {char_id} is excluded by structure {structure_id} access list"),
-        ));
-    }
-    let ext = load_ext_state(snap);
-    if let Some(prof) = effective_profile_for_structure(&ext, structure_id, Some(now_unix)) {
-        if prof.general_settings.get(&SETTING_MARKET_TAX) == Some(&false) {
-            return Err(err(
-                "StructureServiceAccessDenied",
-                format!("Character {char_id} is denied market service on structure {structure_id} by service access profile"),
-            ));
-        }
-    }
-    let pilot_bps = check_service_domain_acl_and_tax(
+    let pilot_bps = require_structure_service_access_in_snap(
+        Some(ctx),
         snap,
         structure_id,
         char_id,
-        &[SETTING_MARKET_TAX],
-        false,
-        Some(now_unix),
-        "StructureServiceAccessDenied",
-        "market",
-    )?;
+        StructureServiceKind::Market,
+        now_unix,
+    )
+    .map_err(|mut e| {
+        if e.code == "StructureMarketOffline" {
+            e.code = offline_err_code.into();
+        }
+        e
+    })?;
     let broker_rate = pilot_bps
         .map(|bps| 0.005 + (bps.max(0) as f64 / 10_000.0).clamp(0.0, 1.0))
         .unwrap_or_else(|| crate::services::market_trading::resolve_structure_broker_rate(snap, structure_id));

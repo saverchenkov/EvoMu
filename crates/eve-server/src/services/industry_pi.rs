@@ -972,10 +972,13 @@ pub(crate) fn handle_industry_job_queries(
 
                 if owner_id != char_id {
                     let is_corp = owner_id == char_corp && char_corp >= 2_000_000;
-                    let corp = snap.corporations.get(&char_corp);
-                    let caller_roles = corp
-                        .and_then(|c| c.member_roles.get(&char_id).copied())
-                        .unwrap_or(session.corp_role);
+                    let (is_ceo, caller_roles) = snap.effective_corp_roles_at(
+                        char_corp,
+                        char_id,
+                        None,
+                        session.corp_role,
+                        ctx.now_unix(),
+                    );
                     let div_bits = if (116..=122).contains(&flag_id) {
                         let div_idx = (flag_id as u16) - 116;
                         (1u64 << (13 + div_idx)) | (1u64 << (20 + div_idx))
@@ -983,7 +986,7 @@ pub(crate) fn handle_industry_job_queries(
                         0
                     };
                     let has_role = session.has_gm_role()
-                        || corp.is_some_and(|c| c.ceo_id == char_id)
+                        || is_ceo
                         || (caller_roles
                             & (eve_db::corp_roles::ROLE_DIRECTOR
                                 | eve_db::corp_roles::ROLE_FACTORY_MANAGER
@@ -1106,9 +1109,14 @@ pub(crate) fn handle_industry_job_queries(
                 let meta = load_job_cost_meta(snap, job_id).unwrap_or_default();
                 let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 if j.installer_id != char_id {
-                    let corp = snap.corporations.get(&char_corp);
-                    let caller_roles = corp.and_then(|c| c.member_roles.get(&char_id).copied()).unwrap_or(session.corp_role);
-                    let has_role = corp.is_some_and(|c| c.ceo_id == char_id)
+                    let (is_ceo, caller_roles) = snap.effective_corp_roles_at(
+                        char_corp,
+                        char_id,
+                        None,
+                        session.corp_role,
+                        ctx.now_unix(),
+                    );
+                    let has_role = is_ceo
                         || (caller_roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_FACTORY_MANAGER) != 0);
                     let is_corp_job = meta.use_corp && meta.owner_id == char_corp && char_corp >= 2_000_000;
                     if !is_corp_job || !has_role {

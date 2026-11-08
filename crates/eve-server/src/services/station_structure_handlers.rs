@@ -63,16 +63,11 @@ pub fn handle_upgrade_gantry(
             });
         }
         let req_roles = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
+        let (is_ceo, roles) =
+            snap.effective_corp_roles_at(char_corp, char_id, None, session.corp_role, ctx.now_unix());
         let has_role = session.has_gm_role()
             || (session.corp_role & req_roles) != 0
-            || snap.corporations.get(&char_corp).is_some_and(|c| {
-                c.ceo_id == char_id
-                    || c.member_roles.get(&char_id).is_some_and(|&r| (r & req_roles) != 0)
-            })
-            || snap
-                .corp_role_assignments
-                .get(&(char_corp, char_id))
-                .is_some_and(|a| (a.roles & req_roles) != 0);
+            || (snap.corporations.contains_key(&char_corp) && (is_ceo || (roles & req_roles) != 0));
         if !has_role {
             return Err(BridgeRpcError {
                 code: "CrpAccessDenied".into(),
@@ -297,15 +292,12 @@ pub fn handle_anchor_orbital(
             });
         }
         let req_roles = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
+        let (is_ceo, roles) =
+            snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, ctx.now_unix());
         let has_role = session.has_gm_role()
             || (session.corp_role & req_roles) != 0
-            || snap.corporations.get(&corp_id).is_some_and(|c| {
-                c.ceo_id == char_id || c.member_roles.get(&char_id).is_some_and(|&r| (r & req_roles) != 0)
-            })
-            || snap
-                .corp_role_assignments
-                .get(&(corp_id, char_id))
-                .is_some_and(|a| (a.roles & req_roles) != 0);
+            || is_ceo
+            || (roles & req_roles) != 0;
         if !has_role {
             return Err(BridgeRpcError {
                 code: "CrpAccessDenied".into(),

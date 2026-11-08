@@ -990,7 +990,14 @@ pub async fn handle(
                         }
                         use eve_db::corp_roles::{ROLE_DIRECTOR, ROLE_STATION_MANAGER};
                         let req = ROLE_DIRECTOR | ROLE_STATION_MANAGER;
-                        let has_role = (session.corp_role & req) != 0 || snap.corporations.get(&caller_corp).is_some_and(|c| c.ceo_id == char_id || c.member_roles.get(&char_id).is_some_and(|&r| (r & req) != 0));
+                        let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
+                            caller_corp,
+                            char_id,
+                            Some(new_loc),
+                            session.corp_role,
+                            ctx.now_unix(),
+                        );
+                        let has_role = (session.corp_role & req) != 0 || is_ceo || (eff_roles & req) != 0;
                         if !has_role {
                             return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Installing a quantum core requires Director or Station Manager role".into() });
                         }

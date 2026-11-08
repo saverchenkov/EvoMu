@@ -157,6 +157,7 @@ fn i2_is_primed_and_get_item_enforce_gm_and_cover_item_character_structure_stati
 fn invbroker_bound_methods_turret_slots_and_corp_roles_at_location() {
     let ctx = test_ctx();
     let char_id = 95_300_010;
+    let member_id = 95_300_012;
     let corp_id = 98_300_010;
     let hq_station = 60_003_760;
     let base_station = 60_008_494;
@@ -186,11 +187,11 @@ fn invbroker_bound_methods_turret_slots_and_corp_roles_at_location() {
             .entry(corp_id)
             .or_default()
             .member_bases
-            .insert(char_id, base_station);
+            .insert(member_id, base_station);
         snap.corp_role_assignments.insert(
-            (corp_id, char_id),
+            (corp_id, member_id),
             CorpMemberRoleAssignment {
-                character_id: char_id,
+                character_id: member_id,
                 roles: 1,
                 roles_at_hq: 2,
                 roles_at_base: 4,
@@ -321,12 +322,23 @@ fn invbroker_bound_methods_turret_slots_and_corp_roles_at_location() {
         "CharacterNotAtStation"
     );
 
-    // Corp roles at HQ (1|2=3), base (1|4=5), and other (1|8=9)
-    let (is_ceo, hq_roles) = get_effective_corp_roles_at_location(&ctx, corp_id, char_id, Some(hq_station));
-    assert!(is_ceo);
+    // CEO receives full role bitmask via #589 immunity; non-CEO member gets HQ (1|2=3), base (1|4=5), other (1|8=9)
+    assert_eq!(
+        get_effective_corp_roles_at_location(&ctx, corp_id, char_id, Some(hq_station)),
+        (true, u64::MAX)
+    );
+    let (is_ceo_mem, hq_roles) =
+        get_effective_corp_roles_at_location(&ctx, corp_id, member_id, Some(hq_station));
+    assert!(!is_ceo_mem);
     assert_eq!(hq_roles, 3);
-    assert_eq!(get_effective_corp_roles_at_location(&ctx, corp_id, char_id, Some(base_station)).1, 5);
-    assert_eq!(get_effective_corp_roles_at_location(&ctx, corp_id, char_id, Some(other_station)).1, 9);
+    assert_eq!(
+        get_effective_corp_roles_at_location(&ctx, corp_id, member_id, Some(base_station)).1,
+        5
+    );
+    assert_eq!(
+        get_effective_corp_roles_at_location(&ctx, corp_id, member_id, Some(other_station)).1,
+        9
+    );
 
     // Colocation & destination checks in space
     let mut space_sess = sess.clone();

@@ -782,16 +782,11 @@ pub fn has_structure_fuel_bay_role(
     };
     const FUEL_ROLES: u64 =
         ROLE_DIRECTOR | ROLE_STATION_MANAGER | ROLE_STARBASE_OPERATOR | ROLE_STARBASE_CONFIG;
+    let (is_ceo, eff_roles) = snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, 0);
     session.has_gm_role()
         || (session.corp_role & FUEL_ROLES) != 0
-        || snap.corporations.get(&corp_id).is_some_and(|c| {
-            c.ceo_id == char_id
-                || c.member_roles.get(&char_id).is_some_and(|&r| (r & FUEL_ROLES) != 0)
-        })
-        || snap
-            .corp_role_assignments
-            .get(&(corp_id, char_id))
-            .is_some_and(|a| (a.roles & FUEL_ROLES) != 0)
+        || is_ceo
+        || (eff_roles & FUEL_ROLES) != 0
 }
 
 pub fn is_fuel_block_type(ctx: &ServerContext, type_id: u32) -> bool {

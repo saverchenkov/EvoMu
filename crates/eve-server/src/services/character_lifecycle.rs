@@ -96,26 +96,18 @@ fn unix_to_filetime(unix_secs: u64) -> i64 {
 
 /// Returns `Some(result)` for RPCs fully handled here; `None` lets the regular handler run.
 fn has_corp_director_or_personnel_manager_role(snap: &eve_db::WorldStateSnapshot, caller_char_id: i64, target_corp_id: i64) -> bool {
-    if let Some(corp) = snap.corporations.get(&target_corp_id) {
-        if corp.ceo_id == caller_char_id {
-            return true;
-        }
-        let member_role = corp.member_roles.get(&caller_char_id).copied().unwrap_or(0);
-        let assigned_role = snap.corp_role_assignments.get(&(target_corp_id, caller_char_id)).map(|ra| ra.roles).unwrap_or(0);
-        let mut total_roles = member_role | assigned_role;
-        if let Some(scoped) = snap.char_scoped_roles.get(&caller_char_id) {
-            for r_name in &scoped.roles {
-                if r_name == "Director" {
-                    total_roles |= eve_db::corp_roles::ROLE_DIRECTOR;
-                } else if r_name == "Personnel_Manager" {
-                    total_roles |= eve_db::corp_roles::ROLE_PERSONNEL_MANAGER;
-                }
-            }
-        }
-        (total_roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_PERSONNEL_MANAGER)) != 0
-    } else {
-        false
+    if !snap.corporations.contains_key(&target_corp_id) {
+        return false;
     }
+    let (is_ceo, mut total_roles) =
+        snap.effective_corp_roles_at(target_corp_id, caller_char_id, None, 0, 0);
+    if is_ceo {
+        return true;
+    }
+    if let Some(scoped) = snap.char_scoped_roles.get(&caller_char_id) {
+        total_roles |= eve_db::corp_roles::encode_corp_role_names(&scoped.roles);
+    }
+    (total_roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_PERSONNEL_MANAGER)) != 0
 }
 
 pub fn handle(
@@ -1077,38 +1069,15 @@ fn handle_char_mgr(
                 } else {
                     ctx.now_blueos_filetime_ticks()
                 };
-                let mut role_mask = snap.corporations.get(&corp_id).map(|c| {
-                    if c.ceo_id == char_id {
-                        u64::MAX
-                    } else {
-                        c.member_roles.get(&char_id).copied().unwrap_or(0)
-                    }
-                }).unwrap_or(0);
-                if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
-                    role_mask |= ra.roles;
-                }
+                let (_, mut role_mask) = snap.effective_corp_roles_at(
+                    corp_id,
+                    char_id,
+                    None,
+                    0,
+                    ctx.now_unix(),
+                );
                 if let Some(scoped) = snap.char_scoped_roles.get(&char_id) {
-                    for r_name in &scoped.roles {
-                        let bit = match r_name.as_str() {
-                            "Director" => eve_db::corp_roles::ROLE_DIRECTOR,
-                            "Personnel_Manager" => eve_db::corp_roles::ROLE_PERSONNEL_MANAGER,
-                            "Accountant" => eve_db::corp_roles::ROLE_ACCOUNTANT,
-                            "Security_Officer" => eve_db::corp_roles::ROLE_SECURITY_OFFICER,
-                            "Factory_Manager" => eve_db::corp_roles::ROLE_FACTORY_MANAGER,
-                            "Station_Manager" => eve_db::corp_roles::ROLE_STATION_MANAGER,
-                            "Auditor" => eve_db::corp_roles::ROLE_AUDITOR,
-                            "Diplomat" => eve_db::corp_roles::ROLE_DIPLOMAT,
-                            "Config_Equipment" | "Equipment_Config" => eve_db::corp_roles::ROLE_CONFIG_EQUIPMENT,
-                            "Starbase_Config" => eve_db::corp_roles::ROLE_STARBASE_CONFIG,
-                            "Starbase_Operator" => eve_db::corp_roles::ROLE_STARBASE_OPERATOR,
-                            "Junior_Accountant" => eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT,
-                            "Trader" => eve_db::corp_roles::ROLE_TRADER,
-                            "Contract_Manager" => eve_db::corp_roles::ROLE_CONTRACT_MANAGER,
-                            "Project_Manager" => eve_db::corp_roles::ROLE_PROJECT_MANAGER,
-                            _ => 0,
-                        };
-                        role_mask |= bit;
-                    }
+                    role_mask |= eve_db::corp_roles::encode_corp_role_names(&scoped.roles);
                 }
                 (corp_id, role_mask, corp_join_ft)
             });

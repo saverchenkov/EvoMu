@@ -126,17 +126,23 @@ pub fn handle_pi_orbital_registry(
                             message: format!("Orbital at planet {planet_id} belongs to corporation {}", existing.owner_corp_id),
                         });
                     }
-                    let Some(corp) = snap.corporations.get(&char_corp) else {
+                    if !snap.corporations.contains_key(&char_corp) {
                         return Err(BridgeRpcError {
                             code: "CrpAccessDenied".into(),
                             message: "Updating orbital settings requires a player corporation".into(),
                         });
-                    };
-                    let role = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
+                    }
+                    let (is_ceo, role) = snap.effective_corp_roles_at(
+                        char_corp,
+                        char_id,
+                        None,
+                        session.corp_role,
+                        ctx.now_unix(),
+                    );
                     let allowed = eve_db::corp_roles::ROLE_DIRECTOR
                         | eve_db::corp_roles::ROLE_STATION_MANAGER
                         | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG;
-                    if corp.ceo_id != char_id && (role & allowed) == 0 {
+                    if !is_ceo && (role & allowed) == 0 {
                         return Err(BridgeRpcError {
                             code: "CrpAccessDenied".into(),
                             message: "Updating orbital settings requires Director or Station Manager role".into(),
@@ -290,15 +296,21 @@ pub fn handle_pi_orbital_registry(
                             message: "Only the owning corporation or a GM can revert orbital ownership to InterBus".into(),
                         });
                     }
-                    let Some(corp) = snap.corporations.get(&char_corp) else {
+                    if !snap.corporations.contains_key(&char_corp) {
                         return Err(BridgeRpcError {
                             code: "CrpAccessDenied".into(),
                             message: "Reverting orbital ownership to InterBus requires a player corporation Director or Station Manager role".into(),
                         });
-                    };
-                    let role = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
+                    }
+                    let (is_ceo, role) = snap.effective_corp_roles_at(
+                        char_corp,
+                        char_id,
+                        None,
+                        session.corp_role,
+                        ctx.now_unix(),
+                    );
                     let allowed = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
-                    if corp.ceo_id != char_id && (role & allowed) == 0 {
+                    if !is_ceo && (role & allowed) == 0 {
                         return Err(BridgeRpcError {
                             code: "CrpAccessDenied".into(),
                             message: "Reverting orbital ownership to InterBus requires Director or Station Manager role".into(),

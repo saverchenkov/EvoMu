@@ -325,6 +325,7 @@ pub(super) fn handle_get_wallet_divisions_info(
         Err(e) => return Some(Err(e)),
     };
     let corp_id = args.first().and_then(|a| a.as_i64()).or(session.corporation_id).unwrap_or(0);
+    let now_unix = ctx.now_unix();
     let res = ctx.db.with_snapshot(|snap| {
         let Some(corp) = snap.corporations.get(&corp_id) else {
             return Err(BridgeRpcError {
@@ -332,8 +333,9 @@ pub(super) fn handle_get_wallet_divisions_info(
                 message: format!("Corporation {corp_id} not found"),
             });
         };
-        let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-        if char_id != corp.ceo_id
+        let (is_ceo, caller_role) =
+            snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
+        if !is_ceo
             && !corp_roles::has_role(caller_role, corp_roles::ROLE_ACCOUNTANT)
             && !corp_roles::has_role(caller_role, corp_roles::ROLE_JUNIOR_ACCOUNTANT)
         {
@@ -604,11 +606,12 @@ pub(super) fn handle_corp_gov(
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let (cur_bal, member_ids) = {
+                    let (is_ceo, caller_role) =
+                        snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
                     let Some(corp) = snap.corporations.get_mut(&corp_id) else {
                         return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
                     };
-                    let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-                    if char_id != corp.ceo_id && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR) {
+                    if !is_ceo && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR) {
                         return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Paying dividends requires CEO or Director role".into() });
                     }
                     let cur_bal = corp.division_balance(div_id);
@@ -1167,10 +1170,11 @@ pub(super) fn handle_corp_gov(
 
         ("corpRecProxy", "CreateRecruitmentAd") | ("corpRecProxy", "UpdateRecruitmentAd") => {
             let has_role = ctx.db.with_snapshot(|snap| {
-                snap.corporations.get(&corp_id).is_some_and(|c| {
-                    let r = c.member_roles.get(&char_id).copied().unwrap_or(0);
-                    char_id == c.ceo_id || (r & (corp_roles::ROLE_PERSONNEL_MANAGER | corp_roles::ROLE_DIRECTOR)) != 0
-                })
+                if !snap.corporations.contains_key(&corp_id) {
+                    return false;
+                }
+                let (is_ceo, r) = snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
+                is_ceo || (r & (corp_roles::ROLE_PERSONNEL_MANAGER | corp_roles::ROLE_DIRECTOR)) != 0
             });
             if !has_role {
                 return deny_role("Managing recruitment ads requires Personnel Manager or Director role");
@@ -1273,10 +1277,11 @@ pub(super) fn handle_corp_gov(
 
         ("corpRecProxy", "DeleteRecruitmentAd") => {
             let has_role = ctx.db.with_snapshot(|snap| {
-                snap.corporations.get(&corp_id).is_some_and(|c| {
-                    let r = c.member_roles.get(&char_id).copied().unwrap_or(0);
-                    char_id == c.ceo_id || (r & (corp_roles::ROLE_PERSONNEL_MANAGER | corp_roles::ROLE_DIRECTOR)) != 0
-                })
+                if !snap.corporations.contains_key(&corp_id) {
+                    return false;
+                }
+                let (is_ceo, r) = snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
+                is_ceo || (r & (corp_roles::ROLE_PERSONNEL_MANAGER | corp_roles::ROLE_DIRECTOR)) != 0
             });
             if !has_role {
                 return deny_role("Deleting recruitment ads requires Personnel Manager or Director role");

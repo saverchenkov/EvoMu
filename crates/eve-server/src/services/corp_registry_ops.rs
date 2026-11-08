@@ -491,7 +491,6 @@ pub fn handle(
                         if !l.is_empty() && l.iter().all(|x| x.as_i64().is_some())
                 );
 
-            let now_unix = ctx.now_unix();
             if is_v24_member_batch {
                 let target_ids: Vec<i64> = match args.first() {
                     Some(PyRep::List(l)) | Some(PyRep::Tuple(l)) => {
@@ -504,15 +503,21 @@ pub fn handle(
                     Some(single) => vec![single.clone()],
                     None => Vec::new(),
                 };
+                let now_unix = ctx.now_unix();
                 let res = ctx.db.try_with_mut_snapshot(|snap| {
+                    let (is_ceo, caller_roles) = snap.effective_corp_roles_at(
+                        corp_id,
+                        char_id,
+                        None,
+                        session.corp_role,
+                        now_unix,
+                    );
                     let Some(corp) = snap.corporations.get(&corp_id) else {
                         return Err(BridgeRpcError {
                             code: "CorporationNotFound".into(),
                             message: format!("Corporation {corp_id} not found"),
                         });
                     };
-                    let is_ceo = corp.ceo_id == char_id;
-                    let caller_roles = corp.member_roles.get(&char_id).copied().unwrap_or(0);
                     let caller_is_director =
                         is_ceo || (caller_roles & eve_db::corp_roles::ROLE_DIRECTOR) != 0;
                     for &tid in &target_ids {
@@ -826,17 +831,21 @@ pub fn handle(
                 }
             };
 
+            let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let (is_ceo, is_director_or_ceo, members_set, member_roles_map) = snap
+                let (is_ceo, caller_roles) = snap.effective_corp_roles_at(
+                    corp_id,
+                    char_id,
+                    None,
+                    session.corp_role,
+                    now_unix,
+                );
+                let (is_director_or_ceo, members_set, member_roles_map) = snap
                     .corporations
                     .get(&corp_id)
                     .map(|c| {
-                        let ceo = c.ceo_id == char_id;
-                        let dir = ceo
-                            || (c.member_roles.get(&char_id).copied().unwrap_or(0)
-                                & eve_db::corp_roles::ROLE_DIRECTOR)
-                                != 0;
-                        (ceo, dir, c.members.clone(), c.member_roles.clone())
+                        let dir = is_ceo || (caller_roles & eve_db::corp_roles::ROLE_DIRECTOR) != 0;
+                        (dir, c.members.clone(), c.member_roles.clone())
                     })
                     .unwrap_or_default();
                 if !is_director_or_ceo {
@@ -989,15 +998,17 @@ pub(crate) fn handle_get_corp_market_info(
     let (_, caller_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
     let corp_id = args.first().and_then(|a| a.as_i64()).or(session.corporation_id).unwrap_or(0);
     crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
+    let now_unix = ctx.now_unix();
     let rows_res: Result<Vec<Vec<PyRep>>, BridgeRpcError> = ctx.db.with_snapshot(|snap| {
         let allowed = eve_db::corp_roles::ROLE_DIRECTOR
             | eve_db::corp_roles::ROLE_ACCOUNTANT
             | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT
             | eve_db::corp_roles::ROLE_TRADER;
         if let Some(corp) = snap.corporations.get(&corp_id) {
-            let caller_role = corp.member_roles.get(&caller_id).copied().unwrap_or(0);
+            let (is_ceo, caller_role) =
+                snap.effective_corp_roles_at(corp_id, caller_id, None, session.corp_role, now_unix);
             if !corp.members.contains(&caller_id)
-                || (caller_id != corp.ceo_id && caller_role != u64::MAX && (caller_role & allowed) == 0)
+                || (!is_ceo && caller_role != u64::MAX && (caller_role & allowed) == 0)
             {
                 return Err(BridgeRpcError::user_error("CrpAccessDenied"));
             }
@@ -1147,14 +1158,7 @@ pub(crate) fn handle_get_member(
             let ch = snap.characters.get(&target_char_id);
             let name = ch.map(|c| c.name.clone()).unwrap_or_else(|| format!("Pilot {target_char_id}"));
             let gov = snap.corp_governance.get(&corp_id);
-            let mut roles = corp.member_roles.get(&target_char_id).copied().unwrap_or(0);
-            if let Some(g) = gov {
-                if let Some(&(p_mask, eff)) = g.pending_role_grants.get(&target_char_id) {
-                    if now_unix >= eff {
-                        roles |= p_mask;
-                    }
-                }
-            }
+            let (_, roles) = snap.effective_corp_roles_at(corp_id, target_char_id, None, 0, now_unix);
             let ra = snap.corp_role_assignments.get(&(corp_id, target_char_id)).cloned().unwrap_or_default();
             let tmask = gov.and_then(|g| g.member_titles.get(&target_char_id).copied()).unwrap_or(0);
             let title_str = gov
@@ -1261,10 +1265,7 @@ pub(crate) fn handle_get_member_tracking_info(
             .filter_map(|mid| {
                 if filter_char_id.is_some_and(|fid| fid != mid) { return None; }
                 let ch = snap.characters.get(&mid)?;
-                let mut roles = corp.member_roles.get(&mid).copied().unwrap_or(0);
-                if let Some(&(p_mask, eff)) = gov.and_then(|g| g.pending_role_grants.get(&mid)) {
-                    if now_unix >= eff { roles |= p_mask; }
-                }
+                let (_, roles) = snap.effective_corp_roles_at(corp_id, mid, None, 0, now_unix);
                 let tmask = gov.and_then(|g| g.member_titles.get(&mid).copied()).unwrap_or(0);
                 let title = if mid == corp.ceo_id { "CEO".to_string() } else { "Member".to_string() };
                 let is_online = caller_char == Some(mid) || ctx.is_character_online(mid, ch.user_id);

@@ -924,16 +924,12 @@ async fn handle_cmd_unanchor(
                 return Ok(());
             }
             let cid = caller_corp_id.filter(|&cid| cid > 0 && item.owner_id == cid).ok_or_else(deny_access)?;
-            let mut role = session.corp_role;
-            if let Some(corp) = snap.corporations.get(&cid) {
-                if corp.ceo_id == char_id {
-                    return Ok(());
-                }
-                role |= corp.member_roles.get(&char_id).copied().unwrap_or(0);
+            let (is_ceo, corp_roles) =
+                snap.effective_corp_roles_at(cid, char_id, None, session.corp_role, ctx.now_unix());
+            if is_ceo {
+                return Ok(());
             }
-            if let Some(ra) = snap.corp_role_assignments.get(&(cid, char_id)) {
-                role |= ra.roles | ra.roles_at_hq | ra.roles_at_base | ra.roles_at_other;
-            }
+            let role = session.corp_role | corp_roles;
             const UNANCHOR_ROLES: u64 = eve_db::corp_roles::ROLE_DIRECTOR
                 | eve_db::corp_roles::ROLE_STATION_MANAGER
                 | eve_db::corp_roles::ROLE_STARBASE_CONFIG

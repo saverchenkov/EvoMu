@@ -1052,6 +1052,80 @@ pub mod corp_roles {
     pub fn has_role(role_mask: u64, required: u64) -> bool {
         role_mask == u64::MAX || (role_mask & ROLE_DIRECTOR) != 0 || (role_mask & required) == required
     }
+
+    /// Canonical corporation role definitions `(bitmask, client_role_name, esi_role_name)`
+    /// shared by MachoNet `cache.Rowset("roles")`, ESI role codecs, and title bitmask resolution.
+    pub const CORP_ROLE_NAMES: &[(u64, &str, &str)] = &[
+        (ROLE_DIRECTOR, "Director", "Director"),
+        (ROLE_DELIVERIES_HANGAR_TAKE, "Deliveries Hangar Take", "Deliveries_Take"),
+        (ROLE_DELIVERIES_HANGAR_QUERY, "Deliveries Hangar Query", "Deliveries_Query"),
+        (ROLE_DELIVERIES_HANGAR_CONTAINER_TAKE, "Deliveries Hangar Container Take", "Deliveries_Container_Take"),
+        (ROLE_PERSONNEL_MANAGER, "Personnel Manager", "Personnel_Manager"),
+        (ROLE_ACCOUNTANT, "Accountant", "Accountant"),
+        (ROLE_SECURITY_OFFICER, "Security Officer", "Security_Officer"),
+        (ROLE_FACTORY_MANAGER, "Factory Manager", "Factory_Manager"),
+        (ROLE_STATION_MANAGER, "Station Manager", "Station_Manager"),
+        (ROLE_AUDITOR, "Auditor", "Auditor"),
+        (ROLE_HANGAR_CAN_TAKE[0], "Hangar Can Take 1", "Hangar_Take_1"),
+        (ROLE_HANGAR_CAN_TAKE[1], "Hangar Can Take 2", "Hangar_Take_2"),
+        (ROLE_HANGAR_CAN_TAKE[2], "Hangar Can Take 3", "Hangar_Take_3"),
+        (ROLE_HANGAR_CAN_TAKE[3], "Hangar Can Take 4", "Hangar_Take_4"),
+        (ROLE_HANGAR_CAN_TAKE[4], "Hangar Can Take 5", "Hangar_Take_5"),
+        (ROLE_HANGAR_CAN_TAKE[5], "Hangar Can Take 6", "Hangar_Take_6"),
+        (ROLE_HANGAR_CAN_TAKE[6], "Hangar Can Take 7", "Hangar_Take_7"),
+        (ROLE_HANGAR_CAN_QUERY[0], "Hangar Can Query 1", "Hangar_Query_1"),
+        (ROLE_HANGAR_CAN_QUERY[1], "Hangar Can Query 2", "Hangar_Query_2"),
+        (ROLE_HANGAR_CAN_QUERY[2], "Hangar Can Query 3", "Hangar_Query_3"),
+        (ROLE_HANGAR_CAN_QUERY[3], "Hangar Can Query 4", "Hangar_Query_4"),
+        (ROLE_HANGAR_CAN_QUERY[4], "Hangar Can Query 5", "Hangar_Query_5"),
+        (ROLE_HANGAR_CAN_QUERY[5], "Hangar Can Query 6", "Hangar_Query_6"),
+        (ROLE_HANGAR_CAN_QUERY[6], "Hangar Can Query 7", "Hangar_Query_7"),
+        (ROLE_ACCOUNT_CAN_TAKE[0], "Account Can Take 1", "Account_Take_1"),
+        (ROLE_ACCOUNT_CAN_TAKE[1], "Account Can Take 2", "Account_Take_2"),
+        (ROLE_ACCOUNT_CAN_TAKE[2], "Account Can Take 3", "Account_Take_3"),
+        (ROLE_ACCOUNT_CAN_TAKE[3], "Account Can Take 4", "Account_Take_4"),
+        (ROLE_ACCOUNT_CAN_TAKE[4], "Account Can Take 5", "Account_Take_5"),
+        (ROLE_ACCOUNT_CAN_TAKE[5], "Account Can Take 6", "Account_Take_6"),
+        (ROLE_ACCOUNT_CAN_TAKE[6], "Account Can Take 7", "Account_Take_7"),
+        (ROLE_DIPLOMAT, "Diplomat", "Diplomat"),
+        (ROLE_BRAND_MANAGER, "Brand Manager", "Brand_Manager"),
+        (ROLE_EQUIPMENT_CONFIG, "Equipment Config", "Config_Equipment"),
+        (ROLE_CONTAINER_CAN_TAKE[0], "Container Can Take 1", "Container_Take_1"),
+        (ROLE_CONTAINER_CAN_TAKE[1], "Container Can Take 2", "Container_Take_2"),
+        (ROLE_CONTAINER_CAN_TAKE[2], "Container Can Take 3", "Container_Take_3"),
+        (ROLE_CONTAINER_CAN_TAKE[3], "Container Can Take 4", "Container_Take_4"),
+        (ROLE_CONTAINER_CAN_TAKE[4], "Container Can Take 5", "Container_Take_5"),
+        (ROLE_CONTAINER_CAN_TAKE[5], "Container Can Take 6", "Container_Take_6"),
+        (ROLE_CONTAINER_CAN_TAKE[6], "Container Can Take 7", "Container_Take_7"),
+        (ROLE_RENT_OFFICE, "Can Rent Office", "Rent_Office"),
+        (ROLE_RENT_FACTORY_FACILITY, "Can Rent Factory Slot", "Rent_Factory_Facility"),
+        (ROLE_RENT_RESEARCH_FACILITY, "Can Rent Research Slot", "Rent_Research_Facility"),
+        (ROLE_JUNIOR_ACCOUNTANT, "Junior Accountant", "Junior_Accountant"),
+        (ROLE_STARBASE_CONFIG, "Starbase Config", "Config_Starbase_Equipment"),
+        (ROLE_TRADER, "Trader", "Trader"),
+        (ROLE_CHAT_MANAGER, "Chat Manager", "Communications_Officer"),
+        (ROLE_CONTRACT_MANAGER, "Contract Manager", "Contract_Manager"),
+        (ROLE_INFRASTRUCTURE_TACTICIAN, "Infrastructure Tactical Officer", "Starbase_Defense_Operator"),
+        (ROLE_STARBASE_CARETAKER, "Starbase Caretaker", "Starbase_Fuel_Technician"),
+        (ROLE_FITTING_MANAGER, "Fitting Manager", "Fitting_Manager"),
+        (ROLE_PROJECT_MANAGER, "Project Manager", "Project_Manager"),
+        (ROLE_TERRESTRIAL_LOGISTICS_OFFICER, "Terrestrial Logistics Officer", ""),
+        (ROLE_SKILL_PLAN_MANAGER, "Skill Plan Manager", "Skill_Plan_Manager"),
+    ];
+
+    pub fn encode_corp_role_names(names: &[String]) -> u64 {
+        let mut mask = 0u64;
+        for name in names {
+            for &(bit, client_name, esi_name) in CORP_ROLE_NAMES {
+                if (!esi_name.is_empty() && name.eq_ignore_ascii_case(esi_name))
+                    || name.eq_ignore_ascii_case(client_name)
+                {
+                    mask |= bit;
+                }
+            }
+        }
+        mask
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -7,7 +7,7 @@
 use super::station_structure::structure_lifecycle::{structure_profile, HullClass};
 use super::station_structure::structure_upwell_ops::{
     self as ops, apply_pending_profile_applications_with_snap, emit_ship_session_change,
-    load_ext_state, require_structure_control_role, save_ext_state,
+    load_ext_state, save_ext_state,
 };
 use super::structure_acl_defense_rules::evaluate_auto_defense_target;
 use crate::router::{NotificationTarget, ServerContext};
@@ -79,6 +79,17 @@ fn verify_control_acl_or_role_with_profile(
     prof_opt: Option<&ops::StructureAccessProfile>,
     char_id: i64,
 ) -> Result<(), BridgeRpcError> {
+    verify_control_acl_or_role_with_profile_at(snap, ext, st, prof_opt, char_id, 0)
+}
+
+pub(crate) fn verify_control_acl_or_role_with_profile_at(
+    snap: &WorldStateSnapshot,
+    ext: &ops::StructureExtendedState,
+    st: &eve_db::UpwellStructureRecord,
+    prof_opt: Option<&ops::StructureAccessProfile>,
+    char_id: i64,
+    now_unix: u64,
+) -> Result<(), BridgeRpcError> {
     let caller_corp = snap
         .characters
         .get(&char_id)
@@ -138,7 +149,9 @@ fn verify_control_acl_or_role_with_profile(
                 ),
             ));
         }
-        require_structure_control_role(snap, char_id, st)?;
+        crate::services::station_structure::structure_upwell_ops::require_structure_control_role_at(
+            snap, char_id, st, now_unix,
+        )?;
     }
     Ok(())
 }
@@ -243,7 +256,14 @@ async fn engage_structure_control(
         }
         let mut ext = load_ext_state(snap);
         let released = apply_pending_profile_applications_with_snap(snap, &mut ext, now_unix);
-        if let Err(e) = verify_control_acl_or_role(snap, &ext, &st, char_id) {
+        if let Err(e) = crate::services::structure_profile_services::require_structure_service_access_in_snap(
+            Some(ctx),
+            snap,
+            structure_id,
+            char_id,
+            crate::services::structure_profile_services::StructureServiceKind::StructureControl,
+            now_unix,
+        ) {
             return Ok((released, Some(e)));
         }
         let already_ctrl = ext.active_pilot_by_structure.get(&structure_id) == Some(&char_id);
@@ -251,13 +271,10 @@ async fn engage_structure_control(
         if let Some(&pilot) = ext.active_pilot_by_structure.get(&structure_id) {
             if pilot != char_id {
                 let caller_is_manager = crate::services::station_structure::structure_lifecycle_rpc::has_structure_manager_role(snap, session, char_id, st.owner_corp_id);
-                let pilot_is_manager = snap.corporations.get(&st.owner_corp_id).is_some_and(|c| {
-                    let req_roles = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
-                    c.ceo_id == pilot || c.member_roles.get(&pilot).is_some_and(|&r| (r & req_roles) != 0)
-                }) || snap.corp_role_assignments.get(&(st.owner_corp_id, pilot)).is_some_and(|a| {
-                    let req_roles = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
-                    (a.roles & req_roles) != 0
-                });
+                let req_roles = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
+                let (pilot_is_ceo, pilot_roles) =
+                    snap.effective_corp_roles_at(st.owner_corp_id, pilot, Some(structure_id), 0, now_unix);
+                let pilot_is_manager = pilot_is_ceo || (pilot_roles & req_roles) != 0;
                 let can_takeover = !board_mode && caller_is_manager && !pilot_is_manager;
                 if !can_takeover {
                     return Err(err(

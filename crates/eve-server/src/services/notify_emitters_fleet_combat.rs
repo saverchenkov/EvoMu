@@ -297,14 +297,15 @@ pub(crate) async fn handle_set_password(
             message: format!("Secure container {container_id} not found or not owned"),
         })?;
         if item.owner_id != char_id {
-            let is_ceo = snap.corporations.get(&corp_id).map(|c| c.ceo_id == char_id).unwrap_or(false);
             if corp_id == 0 || item.owner_id != corp_id {
                 return Err(BridgeRpcError {
                     code: "ItemNotFound".into(),
                     message: format!("Secure container {container_id} not found or not owned"),
                 });
             }
-            let eff_role = session.corp_role | snap.corporations.get(&corp_id).and_then(|c| c.member_roles.get(&char_id).copied()).unwrap_or(0);
+            let (is_ceo, corp_roles) =
+                snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, ctx.now_unix());
+            let eff_role = session.corp_role | corp_roles;
             if !is_ceo && (eff_role & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG)) == 0 {
                 return Err(BridgeRpcError {
                     code: "CorpRoleRequired".into(),

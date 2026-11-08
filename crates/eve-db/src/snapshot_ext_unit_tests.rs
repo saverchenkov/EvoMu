@@ -362,3 +362,125 @@ fn contract_expiration_courier_failure_and_id_counter_reconciliation() {
     snap.reconcile_id_counters();
     assert!(snap.next_entity_id >= eid);
 }
+
+#[test]
+fn effective_corp_roles_at_enforces_24h_stasis_location_scoping_and_ceo_immunity() {
+    use crate::corp_roles::{
+        ROLE_ACCOUNTANT, ROLE_DIRECTOR, ROLE_HANGAR_CAN_TAKE, ROLE_PERSONNEL_MANAGER, ROLE_TRADER,
+    };
+
+    let role_take_1 = ROLE_HANGAR_CAN_TAKE[0];
+    let role_take_2 = ROLE_HANGAR_CAN_TAKE[1];
+    let role_take_3 = ROLE_HANGAR_CAN_TAKE[2];
+
+    let mut snap = WorldStateSnapshot::default();
+    let corp_id = 98_500_001;
+    let ceo_id = 91_001;
+    let member_id = 91_002;
+    let hq_id = 60_003_760;
+    let base_id = 60_003_761;
+    let other_id = 60_003_762;
+    let now = 1_800_000_000;
+
+    snap.characters.insert(ceo_id, sample_character(ceo_id, 1, corp_id, None));
+    snap.characters.insert(member_id, sample_character(member_id, 2, corp_id, None));
+    snap.items.insert(
+        500_001,
+        InventoryItemRecord {
+            item_id: 500_001,
+            type_id: 27,
+            owner_id: corp_id,
+            location_id: base_id,
+            flag: InventoryFlag::Hangar,
+            quantity: 1,
+            singleton: true,
+            ..InventoryItemRecord::default()
+        },
+    );
+
+    let mut corp = CorporationRecord {
+        corporation_id: corp_id,
+        name: "Test Corp".into(),
+        ticker: "TSTC".into(),
+        ceo_id,
+        hq_station_id: Some(hq_id),
+        members: HashSet::from([ceo_id, member_id]),
+        ..CorporationRecord::default()
+    };
+    // Direct grant also contains an unmatured role bit that must be masked before 24h.
+    corp.member_roles
+        .insert(member_id, ROLE_TRADER | role_take_1);
+    snap.corporations.insert(corp_id, corp);
+
+    snap.corp_role_assignments.insert(
+        (corp_id, member_id),
+        CorpMemberRoleAssignment {
+            roles: 0,
+            roles_at_hq: role_take_1,
+            roles_at_base: role_take_2,
+            roles_at_other: role_take_3,
+            ..CorpMemberRoleAssignment::default()
+        },
+    );
+
+    let mut gov = CorpGovState::default();
+    gov.member_bases.insert(member_id, base_id);
+    // ROLE_DIRECTOR + role_take_1 granted pending +24h; TITLE holds ROLE_ACCOUNTANT + ROLE_PERSONNEL_MANAGER
+    gov.titles.insert(1, ("Ops".into(), ROLE_ACCOUNTANT | ROLE_PERSONNEL_MANAGER));
+    gov.member_titles.insert(member_id, 1);
+    gov.pending_role_grants
+        .insert(member_id, (ROLE_DIRECTOR | role_take_1, now + 86_400));
+    gov.pending_title_role_grants
+        .insert(member_id, (ROLE_PERSONNEL_MANAGER, now + 86_400));
+    gov.pending_scoped_role_grants.insert(
+        member_id,
+        (0, role_take_3, 0, now + 86_400),
+    );
+    gov.role_drop_timestamps.insert(member_id, now);
+    snap.corp_governance.insert(corp_id, gov);
+
+    // 1. CEO always gets (true, u64::MAX) even without an entry in member_roles.
+    assert_eq!(
+        snap.effective_corp_roles_at(corp_id, ceo_id, Some(other_id), 0, now),
+        (true, u64::MAX)
+    );
+
+    // 2. Role-drop stasis is active within 24h and clears once 86,400s elapse.
+    assert!(snap.is_in_role_drop_stasis(corp_id, member_id, now + 3_600));
+    assert!(!snap.is_in_role_drop_stasis(corp_id, member_id, now + 86_400));
+
+    // 3. Before 24h maturation:
+    //    - stale session_roles MUST be ignored because corp exists in snapshot
+    //    - unmatured ROLE_DIRECTOR & role_take_1 are masked out even at HQ
+    //    - matured title role ROLE_ACCOUNTANT is active while unmatured ROLE_PERSONNEL_MANAGER is masked
+    //    - base location (including via corp office item 500_001) gets role_take_2
+    let (is_ceo, roles_before_at_hq) =
+        snap.effective_corp_roles_at(corp_id, member_id, Some(hq_id), ROLE_DIRECTOR, now + 3_600);
+    assert!(!is_ceo);
+    assert_eq!(roles_before_at_hq & ROLE_DIRECTOR, 0);
+    assert_eq!(roles_before_at_hq & ROLE_PERSONNEL_MANAGER, 0);
+    assert_eq!(roles_before_at_hq & role_take_1, 0);
+    assert_ne!(roles_before_at_hq & ROLE_ACCOUNTANT, 0);
+    assert_ne!(roles_before_at_hq & ROLE_TRADER, 0);
+
+    let (_, roles_before_at_base) =
+        snap.effective_corp_roles_at(corp_id, member_id, Some(500_001), 0, now + 3_600);
+    assert_ne!(roles_before_at_base & role_take_2, 0);
+    assert_eq!(roles_before_at_base & role_take_3, 0);
+
+    // 4. At maturation (now + 86_400): pending direct, title, and scoped roles all become active.
+    let (_, roles_after_at_base) =
+        snap.effective_corp_roles_at(corp_id, member_id, Some(base_id), 0, now + 86_400);
+    assert_ne!(roles_after_at_base & ROLE_DIRECTOR, 0);
+    assert_ne!(roles_after_at_base & ROLE_PERSONNEL_MANAGER, 0);
+    assert_ne!(roles_after_at_base & role_take_1, 0);
+    assert_ne!(roles_after_at_base & role_take_2, 0);
+    assert_ne!(roles_after_at_base & role_take_3, 0);
+
+    // 5. Location outside HQ/base gets roles_at_other.
+    let (_, roles_after_at_other) =
+        snap.effective_corp_roles_at(corp_id, member_id, Some(other_id), 0, now + 86_400);
+    assert_ne!(roles_after_at_other & role_take_3, 0);
+    assert_eq!(roles_after_at_other & role_take_2, 0);
+}
+

@@ -43,13 +43,11 @@ fn label_mask_from_ids(ids: &[i64]) -> u64 {
 fn require_corp_director(ctx: &ServerContext, session: &SessionState) -> Result<i64, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let corp_id = session.corporation_id.unwrap_or(0);
+    let now_unix = ctx.now_unix();
     let ok = ctx.db.with_snapshot(|snap| {
-        if let Some(c) = snap.corporations.get(&corp_id) {
-            c.ceo_id == char_id
-                || corp_roles::has_role(c.member_roles.get(&char_id).copied().unwrap_or(0), corp_roles::ROLE_DIRECTOR)
-        } else {
-            corp_roles::has_role(session.corp_role, corp_roles::ROLE_DIRECTOR)
-        }
+        let (is_ceo, roles) =
+            snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, now_unix);
+        is_ceo || corp_roles::has_role(roles, corp_roles::ROLE_DIRECTOR)
     });
     if !ok {
         return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Director or CEO role is required".into() });
@@ -983,8 +981,13 @@ pub async fn handle(
                 if method == "DeliverToCorpMember" && target_id_or_div != char_id && !corp.members.contains(&target_id_or_div) {
                     return Err(BridgeRpcError { code: "TargetNotInCorporation".into(), message: format!("Recipient {target_id_or_div} is not in corporation {corp_id}") });
                 }
-                let caller_roles = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-                let is_ceo = corp.ceo_id == char_id;
+                let (is_ceo, caller_roles) = snap.effective_corp_roles_at(
+                    corp_id,
+                    char_id,
+                    Some(docked_id),
+                    0,
+                    ctx.now_unix(),
+                );
                 let has_trader = is_ceo
                     || corp_roles::has_role(caller_roles, corp_roles::ROLE_DIRECTOR)
                     || corp_roles::has_role(caller_roles, corp_roles::ROLE_ACCOUNTANT)

@@ -179,11 +179,8 @@ pub async fn handle_hub_and_scan(
                 }
 
                 // Verify an online friendly sovereignty structure exists in sys_id and caller has director/station-manager/CEO role
-                let corp_rec = snap.corporations.get(&caller_corp_id);
-                let is_ceo = corp_rec.is_some_and(|c| c.ceo_id == char_id);
-                let member_role = corp_rec
-                    .and_then(|c| c.member_roles.get(&char_id).copied())
-                    .unwrap_or(caller_roles);
+                let (is_ceo, member_role) =
+                    snap.effective_corp_roles_at(caller_corp_id, char_id, None, caller_roles, 0);
                 if !is_ceo && (member_role & (1 | 128 | 1024 | eve_db::corp_roles::ROLE_STATION_MANAGER)) == 0 {
                     return Err(BridgeRpcError {
                         code: "InsufficientCorporationRole".into(),

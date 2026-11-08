@@ -275,3 +275,241 @@ fn domain_acl_evaluation_industry_tax_jump_bridge_and_owner_group_batch() {
         );
     });
 }
+
+#[test]
+fn require_structure_service_access_enforces_lifecycle_acl_and_corp_management() {
+    let ctx = test_ctx_with_clock(1_800_000_000);
+    let corp_id = 98_444_001;
+    let ceo_id = 94_001;
+    let pending_dir_id = 94_002;
+    let public_id = 94_003;
+    let blocked_id = 94_004;
+    let st_id = 1_000_000_044_001;
+    let destroyed_id = 1_000_000_044_002;
+    let now = ctx.now_unix();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord {
+            corporation_id: corp_id,
+            name: "ACL Guard Corp".into(),
+            ticker: "AGDC".into(),
+            ceo_id,
+            members: std::collections::HashSet::from([ceo_id, pending_dir_id]),
+            ..Default::default()
+        };
+        corp.member_roles
+            .insert(pending_dir_id, corp_roles::ROLE_DIRECTOR);
+        snap.corporations.insert(corp_id, corp);
+        // Pending 24h role stasis masks ROLE_DIRECTOR until now + 86_400
+        snap.corp_governance
+            .entry(corp_id)
+            .or_default()
+            .pending_role_grants
+            .insert(pending_dir_id, (corp_roles::ROLE_DIRECTOR, now + 86_400));
+
+        let c_ceo = clone_char_with(snap, ceo_id, "CEO", corp_id, 30_000_142, 0);
+        let c_pdir = clone_char_with(snap, pending_dir_id, "PendingDir", corp_id, 30_000_142, 0);
+        let c_pub = clone_char_with(snap, public_id, "Public", 1_000_009, 30_000_142, 0);
+        let c_blk = clone_char_with(snap, blocked_id, "Blocked", 1_000_009, 30_000_142, 0);
+        snap.characters.insert(ceo_id, c_ceo);
+        snap.characters.insert(pending_dir_id, c_pdir);
+        snap.characters.insert(public_id, c_pub);
+        snap.characters.insert(blocked_id, c_blk);
+
+        snap.structures.insert(
+            st_id,
+            UpwellStructureRecord {
+                structure_id: st_id,
+                type_id: 35_834, // Keepstar (market-capable)
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142,
+                name: "Guard Citadel".into(),
+                position: [0.0; 3],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 0, // Reprocessing requires fuel_blocks > 0
+                shield_hp: 1.0,
+                armor_hp: 1.0,
+                hull_hp: 1.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        snap.structures.insert(
+            destroyed_id,
+            UpwellStructureRecord {
+                structure_id: destroyed_id,
+                type_id: 35_834,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142,
+                name: "Wrecked Citadel".into(),
+                position: [0.0; 3],
+                state: "Destroyed".into(),
+                quantum_core_installed: false,
+                fuel_blocks: 0,
+                shield_hp: 0.0,
+                armor_hp: 0.0,
+                hull_hp: 0.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+
+        // Online Standup Market Hub I (35892) at slot 164 without allowing public docking yet? No, allow public docking + block blocked_id + grant CloneBay at 200 ISK
+        snap.items.insert(
+            800_001,
+            eve_db::InventoryItemRecord {
+                item_id: 800_001,
+                type_id: 35_892,
+                owner_id: corp_id,
+                location_id: st_id,
+                flag: eve_db::InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(800_001, true);
+
+        let mut ext = ops::load_ext_state(snap);
+        let mut prof = ops::StructureAccessProfile::default();
+        prof.allowed_characters.insert(public_id);
+        prof.blocked_characters.insert(blocked_id);
+        prof.service_settings.insert(13, 150); // Repair tax bps
+        ext.access_profiles.insert(st_id, prof);
+        ops::save_ext_state(snap, &ext);
+    });
+
+    ctx.db.with_snapshot(|snap| {
+        // 1. Destroyed structure rejects both CorpManagement and Repair/Docking
+        assert_eq!(
+            require_structure_service_access_in_snap(
+                Some(&ctx),
+                snap,
+                destroyed_id,
+                ceo_id,
+                StructureServiceKind::CorpManagement,
+                now
+            )
+            .unwrap_err()
+            .code,
+            "StructureDestroyed"
+        );
+        assert_eq!(
+            require_structure_service_access_in_snap(
+                Some(&ctx),
+                snap,
+                destroyed_id,
+                ceo_id,
+                StructureServiceKind::Repair,
+                now
+            )
+            .unwrap_err()
+            .code,
+            "StructureNotOperational"
+        );
+
+        // 2. Missing fuel fails Reprocessing check while Repair allows ACL member + returns 150 bps
+        assert_eq!(
+            require_structure_service_access_in_snap(
+                Some(&ctx),
+                snap,
+                st_id,
+                public_id,
+                StructureServiceKind::Reprocessing,
+                now
+            )
+            .unwrap_err()
+            .code,
+            "ReprocessingServiceOffline"
+        );
+        assert_eq!(
+            require_structure_service_access_in_snap(
+                Some(&ctx),
+                snap,
+                st_id,
+                public_id,
+                StructureServiceKind::Repair,
+                now
+            )
+            .unwrap(),
+            Some(150)
+        );
+
+        // 3. Blocked pilot is rejected for CloneBay and Docking; allowed pilot passes Docking
+        assert_eq!(
+            require_structure_service_access_in_snap(
+                Some(&ctx),
+                snap,
+                st_id,
+                blocked_id,
+                StructureServiceKind::CloneBay,
+                now
+            )
+            .unwrap_err()
+            .code,
+            "StructureAccessDenied"
+        );
+        assert!(require_structure_service_access_in_snap(
+            Some(&ctx),
+            snap,
+            st_id,
+            public_id,
+            StructureServiceKind::Docking,
+            now
+        )
+        .is_ok());
+
+        // 4. CorpManagement rejects external pilot AND rejects pending_dir_id before 24h stasis,
+        //    then allows pending_dir_id at now + 86_400 and always allows CEO.
+        assert_eq!(
+            require_structure_service_access_in_snap(
+                Some(&ctx),
+                snap,
+                st_id,
+                public_id,
+                StructureServiceKind::CorpManagement,
+                now
+            )
+            .unwrap_err()
+            .code,
+            "StructureOwnershipViolation"
+        );
+        assert_eq!(
+            require_structure_service_access_in_snap(
+                Some(&ctx),
+                snap,
+                st_id,
+                pending_dir_id,
+                StructureServiceKind::CorpManagement,
+                now
+            )
+            .unwrap_err()
+            .code,
+            "InsufficientCorpRoles"
+        );
+        assert!(require_structure_service_access_in_snap(
+            Some(&ctx),
+            snap,
+            st_id,
+            pending_dir_id,
+            StructureServiceKind::CorpManagement,
+            now + 86_400
+        )
+        .is_ok());
+        assert!(require_structure_service_access_in_snap(
+            Some(&ctx),
+            snap,
+            st_id,
+            ceo_id,
+            StructureServiceKind::CorpManagement,
+            now
+        )
+        .is_ok());
+    });
+}
+

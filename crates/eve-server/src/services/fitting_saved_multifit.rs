@@ -145,10 +145,13 @@ pub(crate) async fn handle_ships_and_services(
                     }));
                 }
                 let has_privs = ctx.db.with_snapshot(|snap| {
-                    let is_ceo = snap.corporations.get(&corp_id).is_some_and(|c| c.ceo_id == char_id);
-                    let roles = snap.corporations.get(&corp_id)
-                        .and_then(|c| c.member_roles.get(&char_id).copied())
-                        .unwrap_or(0) | session.corp_role;
+                    let (is_ceo, roles) = snap.effective_corp_roles_at(
+                        corp_id,
+                        char_id,
+                        None,
+                        session.corp_role,
+                        ctx.now_unix(),
+                    );
                     is_ceo
                         || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR)
                         || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_ACCOUNTANT)
@@ -1047,14 +1050,18 @@ pub(crate) async fn handle_ships_and_services(
                 if item.owner_id != char_id {
                     let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id);
                     let has_corp_rename_role = corp_id == Some(item.owner_id)
-                        && snap.corporations.get(&item.owner_id).is_some_and(|corp| {
-                            if corp.ceo_id == char_id {
-                                return true;
-                            }
-                            let roles = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+                        && snap.corporations.contains_key(&item.owner_id)
+                        && {
+                            let (is_ceo, roles) = snap.effective_corp_roles_at(
+                                item.owner_id,
+                                char_id,
+                                None,
+                                0,
+                                ctx.now_unix(),
+                            );
                             // corpRoleDirector (1) or corpRoleEquipmentConfig (2199023255552)
-                            (roles & (1 | 2_199_023_255_552)) != 0
-                        });
+                            is_ceo || (roles & (1 | 2_199_023_255_552)) != 0
+                        };
                     if !has_corp_rename_role {
                         return Err(BridgeRpcError {
                             code: "OwnershipViolation".into(),

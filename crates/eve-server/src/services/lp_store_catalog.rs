@@ -372,7 +372,7 @@ pub(crate) fn check_corp_lp_role(
     corp_id: i64,
     now_unix: u64,
 ) -> Result<(bool, u64), eve_proto::BridgeRpcError> {
-    let Some(corp) = snap.corporations.get(&corp_id) else {
+    let Some(_corp) = snap.corporations.get(&corp_id) else {
         let roles = session.corp_role;
         if (roles & eve_db::corp_roles::ROLE_DIRECTOR) == 0 {
             return Err(eve_proto::BridgeRpcError {
@@ -384,37 +384,10 @@ pub(crate) fn check_corp_lp_role(
         }
         return Ok((false, roles));
     };
-    if corp.ceo_id == char_id {
+    let (is_ceo, roles) =
+        snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, now_unix);
+    if is_ceo {
         return Ok((true, u64::MAX));
-    }
-    let mut roles = corp
-        .member_roles
-        .get(&char_id)
-        .copied()
-        .unwrap_or(session.corp_role);
-    if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
-        roles |= ra.roles;
-    }
-    if let Some(gov) = snap.corp_governance.get(&corp_id) {
-        if let Some(&(p_mask, matured_at)) = gov.pending_role_grants.get(&char_id) {
-            if now_unix >= matured_at {
-                roles |= p_mask;
-            } else {
-                roles &= !p_mask;
-            }
-        }
-        let unmatured_title_bits = gov
-            .pending_title_role_grants
-            .get(&char_id)
-            .filter(|&&(_, matured_at)| now_unix < matured_at)
-            .map_or(0, |&(bits, _)| bits);
-        if let Some(&tmask) = gov.member_titles.get(&char_id) {
-            for (&tid, &(_, troles)) in &gov.titles {
-                if (1..=64).contains(&tid) && (tmask & (1u64 << (tid - 1))) != 0 {
-                    roles |= troles & !unmatured_title_bits;
-                }
-            }
-        }
     }
     if (roles & eve_db::corp_roles::ROLE_DIRECTOR) == 0 {
         return Err(eve_proto::BridgeRpcError {

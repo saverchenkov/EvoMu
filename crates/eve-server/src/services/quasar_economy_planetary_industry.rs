@@ -164,15 +164,12 @@ fn authorize_corp_financial_access(
         .as_ref()
         .and_then(|id| id.roles.as_ref().map(|r| r.bitmask))
         .unwrap_or(0);
-    let mut roles = if caller_corp == target_corp { ctx_roles } else { 0 };
-    if let Some(corp) = snap.corporations.get(&target_corp) {
-        if corp.ceo_id == effective_cid {
-            return Ok(target_corp);
-        }
-        roles |= corp.member_roles.get(&effective_cid).copied().unwrap_or(0);
-    }
-    if let Some(ra) = snap.corp_role_assignments.get(&(target_corp, effective_cid)) {
-        roles |= ra.roles;
+    let session_roles = if caller_corp == target_corp { ctx_roles } else { 0 };
+    let (is_ceo, eff_roles) =
+        snap.effective_corp_roles_at(target_corp, effective_cid, None, session_roles, 0);
+    let roles = eff_roles | session_roles;
+    if is_ceo {
+        return Ok(target_corp);
     }
     if (roles & allowed_roles) == 0 {
         return Err((

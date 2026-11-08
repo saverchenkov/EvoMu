@@ -703,9 +703,10 @@ pub(crate) fn handle_market_transactions_rpc(
                         .map(|c| c.corporation_id)
                         .or(session.corporation_id)
                         .unwrap_or(0);
-                    if let Some(c) = snap.corporations.get(&corp_id) {
-                        let role = c.member_roles.get(&char_id).copied().unwrap_or(0);
-                        if char_id != c.ceo_id
+                    if snap.corporations.contains_key(&corp_id) {
+                        let (is_ceo, role) =
+                            snap.effective_corp_roles_at(corp_id, char_id, None, 0, ctx.now_unix());
+                        if !is_ceo
                             && !eve_db::corp_roles::has_role(
                                 role,
                                 eve_db::corp_roles::ROLE_ACCOUNTANT,

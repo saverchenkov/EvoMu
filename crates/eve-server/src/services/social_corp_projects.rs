@@ -144,9 +144,8 @@ fn append_corp_journal(
         });
 }
 
-/// Computes `(is_ceo, effective_roles)` for `char_id` in `corp_id` from DB corporation state
-/// (`corp.member_roles`, `corp_role_assignments`, and 1-based title bitmasks `1 << (tid - 1)`),
-/// masking unmatured 24h `pending_role_grants` and `pending_title_role_grants` on `HANGAR_DIV_MASK`.
+/// Computes `(is_ceo, effective_roles)` for `char_id` in `corp_id` from DB corporation state,
+/// delegating to [`eve_db::WorldStateSnapshot::effective_corp_roles_at`].
 pub(crate) fn effective_corp_member_roles(
     snap: &eve_db::WorldStateSnapshot,
     corp_id: i64,
@@ -154,42 +153,7 @@ pub(crate) fn effective_corp_member_roles(
     session_roles: u64,
     now_unix: u64,
 ) -> (bool, u64) {
-    let Some(corp) = snap.corporations.get(&corp_id) else {
-        return (false, session_roles);
-    };
-    let is_ceo = corp.ceo_id == char_id;
-    let mut roles = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-    if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
-        roles |= ra.roles;
-    }
-    if let Some(gov) = snap.corp_governance.get(&corp_id) {
-        if let Some(&(p_mask, matured_at)) = gov.pending_role_grants.get(&char_id) {
-            if now_unix >= matured_at {
-                roles |= p_mask;
-            } else {
-                // Only roles subject to 24h stasis (`CORP_DELAYED_DIVISION_ROLE_MASK`, Director,
-                // and Container Take bits) are suppressed while pending; `UpdateMember` also packs
-                // immediate roles like Accountant/Trader into `pending_role_grants`.
-                const DELAYED_STASIS_MASK: u64 = eve_db::corp_roles::CORP_DELAYED_DIVISION_ROLE_MASK
-                    | eve_db::corp_roles::ROLE_DIRECTOR
-                    | (0x7Fu64 << 42);
-                roles &= !(p_mask & DELAYED_STASIS_MASK);
-            }
-        }
-        let unmatured_title_bits = gov
-            .pending_title_role_grants
-            .get(&char_id)
-            .filter(|&&(_, matured_at)| now_unix < matured_at)
-            .map_or(0, |&(bits, _)| bits);
-        if let Some(&tmask) = gov.member_titles.get(&char_id) {
-            for (&tid, &(_, troles)) in &gov.titles {
-                if (1..=64).contains(&tid) && (tmask & (1u64 << (tid - 1))) != 0 {
-                    roles |= troles & !unmatured_title_bits;
-                }
-            }
-        }
-    }
-    (is_ceo, roles)
+    snap.effective_corp_roles_at(corp_id, char_id, None, session_roles, now_unix)
 }
 
 fn extract_first_positive_id_in_msg(msg: &DynamicQuasarMessage) -> Option<i64> {

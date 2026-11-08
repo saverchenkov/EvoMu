@@ -89,18 +89,20 @@ fn has_corp_chat_operator_rights(
     if !ch_in_corp {
         return false;
     }
-    let Some(corp) = snap.corporations.get(&corp_id) else {
+    let Some(_corp) = snap.corporations.get(&corp_id) else {
         return false;
     };
-    if corp.ceo_id == char_id {
+    let session_roles = if session.corporation_id == Some(corp_id) {
+        session.corp_role
+    } else {
+        0
+    };
+    let (is_ceo, eff_roles) =
+        snap.effective_corp_roles_at(corp_id, char_id, None, session_roles, 0);
+    if is_ceo {
         return true;
     }
-    let role_mask = corp.member_roles.get(&char_id).copied().unwrap_or(0)
-        | if session.corporation_id == Some(corp_id) {
-            session.corp_role
-        } else {
-            0
-        };
+    let role_mask = eff_roles | session_roles;
     (role_mask & (corp_roles::ROLE_DIRECTOR | CORP_ROLE_CHAT_MANAGER)) != 0
 }
 

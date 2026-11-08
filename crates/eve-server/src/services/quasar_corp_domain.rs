@@ -817,9 +817,13 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     if ch.corporation_id == corpid && !members.contains(&ch.character_id) { members.push(ch.character_id); }
                 }
                 members.sort_unstable();
-                let corp_opt = s.corporations.get(&corpid);
+                let has_corp = s.corporations.contains_key(&corpid);
                 members.into_iter().map(|cid| {
-                    let mask = corp_opt.and_then(|c| c.member_roles.get(&cid).copied().or_else(|| (c.ceo_id == cid).then_some(u64::MAX))).unwrap_or(0);
+                    let mask = if has_corp {
+                        s.effective_corp_roles_at(corpid, cid, None, 0, 0).1
+                    } else {
+                        0
+                    };
                     (cid, mask)
                 }).collect::<Vec<_>>()
             });

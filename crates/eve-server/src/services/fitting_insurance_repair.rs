@@ -4,9 +4,6 @@
 
 use super::*;
 use crate::services::station_structure::structure_lifecycle as life;
-use crate::services::station_structure::structure_upwell_ops::{
-    evaluate_character_structure_access_in_snap_at, load_ext_state,
-};
 
 #[inline]
 fn rpc_err(code: &str, msg: impl Into<String>) -> BridgeRpcError {
@@ -23,83 +20,16 @@ fn resolve_upwell_repair_access_and_tax_bps(
     char_id: i64,
     now_unix: u64,
 ) -> Result<i64, BridgeRpcError> {
-    let ext = load_ext_state(snap);
-    let st = snap.structures.get(&sid).ok_or_else(|| BridgeRpcError {
-        code: "StructureNotFound".into(),
-        message: format!("Structure {sid} not found"),
-    })?;
-    if !life::is_operational(&st.state) {
-        return Err(BridgeRpcError {
-            code: "StructureNotOperational".into(),
-            message: format!("Structure {sid} is not operational for repairs"),
-        });
-    }
-    let requires_core = life::structure_profile(ctx, st.type_id)
-        .map(|p| p.core_type_id.is_some())
-        .unwrap_or(true);
-    if requires_core && !st.quantum_core_installed {
-        return Err(BridgeRpcError {
-            code: "QuantumCoreRequired".into(),
-            message: format!("Structure {sid} requires a quantum core for repairs"),
-        });
-    }
-    match life::power_state(ctx, snap, &ext, st, now_unix) {
-        life::PowerState::FullPower | life::PowerState::LowPower => {}
-        life::PowerState::Abandoned => {
-            return Err(BridgeRpcError {
-                code: "StructureAbandoned".into(),
-                message: format!("Abandoned structure {sid} does not offer repair services"),
-            });
-        }
-        life::PowerState::NotOperational => {
-            return Err(BridgeRpcError {
-                code: "StructureNotOperational".into(),
-                message: format!(
-                    "Structure {sid} is not operational and cannot offer repair services"
-                ),
-            });
-        }
-    }
-    let caller_corp = snap
-        .characters
-        .get(&char_id)
-        .map(|c| c.corporation_id)
-        .unwrap_or(0);
-    if caller_corp != st.owner_corp_id
-        && !evaluate_character_structure_access_in_snap_at(snap, sid, char_id, Some(now_unix))
-    {
-        return Err(BridgeRpcError {
-            code: "StructureRepairAccessDenied".into(),
-            message: format!("Character {char_id} lacks ACL access to repair at structure {sid}"),
-        });
-    }
-    if let Some(bps) = crate::services::structure_profile_services::check_service_domain_acl_and_tax(
+    let bps = crate::services::structure_profile_services::require_structure_service_access_in_snap(
+        Some(ctx),
         snap,
         sid,
         char_id,
-        &[13, 8],
-        false,
-        Some(now_unix),
-        "StructureRepairAccessDenied",
-        "repair",
-    )? {
-        return Ok(bps.max(0));
-    }
-    Ok(
-        crate::services::structure_profile_services::effective_profile_for_structure(
-            &ext,
-            sid,
-            Some(now_unix),
-        )
-        .and_then(|p| {
-            p.service_settings
-                .get(&13)
-                .or_else(|| p.service_settings.get(&0))
-                .copied()
-        })
-        .unwrap_or(0)
-        .max(0),
-    )
+        crate::services::structure_profile_services::StructureServiceKind::Repair,
+        now_unix,
+    )?
+    .unwrap_or(0);
+    Ok(bps.max(0))
 }
 
 pub(super) fn handle_insure_ship(

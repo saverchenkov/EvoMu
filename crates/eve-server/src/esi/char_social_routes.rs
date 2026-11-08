@@ -238,7 +238,9 @@ fn esi_caller_in_corp(snap: &eve_db::WorldStateSnapshot, corp_id: i64, caller_ci
         .get(&caller_cid)
         .is_some_and(|ch| ch.corporation_id == corp_id)
         || snap.corporations.get(&corp_id).is_some_and(|corp| {
-            corp.ceo_id == caller_cid || corp.member_roles.contains_key(&caller_cid)
+            corp.ceo_id == caller_cid
+                || corp.members.contains(&caller_cid)
+                || corp.member_roles.contains_key(&caller_cid)
         })
 }
 

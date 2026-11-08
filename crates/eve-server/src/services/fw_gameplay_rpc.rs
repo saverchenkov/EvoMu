@@ -644,17 +644,17 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let now_unix = ctx.now_unix();
             let (cid, is_ceo, cur_fac) = ctx.db.with_snapshot(|snap| {
                 let cid = session
                     .corporation_id
                     .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id))
                     .unwrap_or(0);
-                let is_ceo = snap.corporations.get(&cid).is_some_and(|c| {
-                    c.ceo_id == char_id
-                        || (c.member_roles.get(&char_id).copied().unwrap_or(0)
-                            & eve_db::corp_roles::ROLE_DIRECTOR)
-                            != 0
-                }) || (session.corp_role & eve_db::corp_roles::ROLE_DIRECTOR != 0);
+                let (corp_ceo, corp_roles) =
+                    snap.effective_corp_roles_at(cid, char_id, None, session.corp_role, now_unix);
+                let is_ceo = corp_ceo
+                    || (corp_roles & eve_db::corp_roles::ROLE_DIRECTOR) != 0
+                    || (session.corp_role & eve_db::corp_roles::ROLE_DIRECTOR != 0);
                 let cur = snap.fw_runtime.corp_war_factions.get(&cid).copied();
                 (cid, is_ceo, cur)
             });
@@ -751,17 +751,17 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let now_unix = ctx.now_unix();
             let (cid, is_ceo, cur_fac, enlisted_on, alliance_block) = ctx.db.with_snapshot(|snap| {
                 let cid = session
                     .corporation_id
                     .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id))
                     .unwrap_or(0);
-                let is_ceo = snap.corporations.get(&cid).is_some_and(|c| {
-                    c.ceo_id == char_id
-                        || (c.member_roles.get(&char_id).copied().unwrap_or(0)
-                            & eve_db::corp_roles::ROLE_DIRECTOR)
-                            != 0
-                }) || (session.corp_role & eve_db::corp_roles::ROLE_DIRECTOR != 0);
+                let (corp_ceo, corp_roles) =
+                    snap.effective_corp_roles_at(cid, char_id, None, session.corp_role, now_unix);
+                let is_ceo = corp_ceo
+                    || (corp_roles & eve_db::corp_roles::ROLE_DIRECTOR) != 0
+                    || (session.corp_role & eve_db::corp_roles::ROLE_DIRECTOR != 0);
                 let cur = snap.fw_runtime.corp_war_factions.get(&cid).copied();
                 let enl = snap.fw_corp_enlisted_on.get(&cid).copied().unwrap_or(0);
                 let aid = session
@@ -1507,12 +1507,16 @@ fn handle_fw_withdraw_faction(
             .corporation_id
             .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id))
             .unwrap_or(0);
-        let is_corp_officer = snap.corporations.get(&cid).is_some_and(|c| {
-            c.ceo_id == char_id
-                || (c.member_roles.get(&char_id).copied().unwrap_or(0)
-                    & eve_db::corp_roles::ROLE_DIRECTOR)
-                    != 0
-        }) || (session.corp_role & eve_db::corp_roles::ROLE_DIRECTOR != 0);
+        let (corp_ceo, corp_roles) = snap.effective_corp_roles_at(
+            cid,
+            char_id,
+            None,
+            session.corp_role,
+            ctx.now_unix(),
+        );
+        let is_corp_officer = corp_ceo
+            || (corp_roles & eve_db::corp_roles::ROLE_DIRECTOR) != 0
+            || (session.corp_role & eve_db::corp_roles::ROLE_DIRECTOR != 0);
         if !is_corp_officer {
             return Err(BridgeRpcError {
                 code: "AccessDenied".into(),

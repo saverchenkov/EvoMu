@@ -99,11 +99,17 @@ pub(super) fn handle_mail_and_calendar(
                                         message: "Only corporation members can send corporation mail".into(),
                                     });
                                 }
-                                let role = c.member_roles.get(&char_id).copied().unwrap_or(0);
+                                let (is_ceo, role) = snap.effective_corp_roles_at(
+                                    corp_or_alliance_id,
+                                    char_id,
+                                    None,
+                                    0,
+                                    ctx.now_unix(),
+                                );
                                 let allowed_mail_roles = eve_db::corp_roles::ROLE_DIRECTOR
                                     | eve_db::corp_roles::ROLE_PERSONNEL_MANAGER
                                     | (1u64 << 55);
-                                if restrict && char_id != c.ceo_id && (role & allowed_mail_roles) == 0 {
+                                if restrict && !is_ceo && (role & allowed_mail_roles) == 0 {
                                     return Err(BridgeRpcError {
                                         code: "CorpMailRestricted".into(),
                                         message: "Corporation mail is restricted to leadership".into(),
@@ -167,11 +173,17 @@ pub(super) fn handle_mail_and_calendar(
                                 .get(&id)
                                 .map(|g| g.restrict_corp_mails)
                                 .unwrap_or(false);
-                            let role = c.member_roles.get(&char_id).copied().unwrap_or(0);
+                            let (is_ceo, role) = snap.effective_corp_roles_at(
+                                id,
+                                char_id,
+                                None,
+                                0,
+                                ctx.now_unix(),
+                            );
                             let allowed_mail_roles = eve_db::corp_roles::ROLE_DIRECTOR
                                 | eve_db::corp_roles::ROLE_PERSONNEL_MANAGER
                                 | (1u64 << 55);
-                            if restrict && char_id != c.ceo_id && (role & allowed_mail_roles) == 0 {
+                            if restrict && !is_ceo && (role & allowed_mail_roles) == 0 {
                                 return Err(BridgeRpcError {
                                     code: "CorpMailRestricted".into(),
                                     message: "Corporation mail is restricted to leadership".into(),

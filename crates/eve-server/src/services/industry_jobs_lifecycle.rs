@@ -58,6 +58,13 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                     });
                 }
                 if job.installer_id != char_id {
+                    let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
+                        char_corp,
+                        char_id,
+                        Some(job.facility_id),
+                        session.corp_role,
+                        now_unix,
+                    );
                     let can_cancel_corp = meta.use_corp
                         && meta.owner_id == char_corp
                         && (session.has_gm_role()
@@ -67,16 +74,13 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                                     | eve_db::corp_roles::ROLE_RENT_FACTORY_FACILITY
                                     | eve_db::corp_roles::ROLE_RENT_RESEARCH_FACILITY))
                                 != 0
-                            || snap.corporations.get(&char_corp).is_some_and(|c| {
-                                c.ceo_id == char_id
-                                    || c.member_roles.get(&char_id).is_some_and(|&r| {
-                                        (r & (eve_db::corp_roles::ROLE_DIRECTOR
-                                            | eve_db::corp_roles::ROLE_FACTORY_MANAGER
-                                            | eve_db::corp_roles::ROLE_RENT_FACTORY_FACILITY
-                                            | eve_db::corp_roles::ROLE_RENT_RESEARCH_FACILITY))
-                                            != 0
-                                    })
-                            }));
+                            || is_ceo
+                            || (eff_roles
+                                & (eve_db::corp_roles::ROLE_DIRECTOR
+                                    | eve_db::corp_roles::ROLE_FACTORY_MANAGER
+                                    | eve_db::corp_roles::ROLE_RENT_FACTORY_FACILITY
+                                    | eve_db::corp_roles::ROLE_RENT_RESEARCH_FACILITY))
+                                != 0);
                     if !can_cancel_corp {
                         return Err(BridgeRpcError {
                             code: "JobOwnershipViolation".into(),
