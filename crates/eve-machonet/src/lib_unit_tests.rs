@@ -84,6 +84,34 @@ fn wrapped_runtime_and_user_error_bodies_encode_valid_marshal_exceptions() {
             ]),
         ])
     );
+
+    let se = wrapped_slash_error_body(6, "Commands: ['heal', 'giveisk']");
+    let PyRep::Tuple(se_items) = se else {
+        panic!("expected tuple");
+    };
+    let PyRep::Tuple(se_payload) = &se_items[2] else {
+        panic!("expected inner tuple");
+    };
+    let PyRep::Bytes(se_bytes) = &se_payload[0] else {
+        panic!("expected marshaled bytes");
+    };
+    let decoded_se = marshal::decode(se_bytes).unwrap();
+    let PyRep::ObjectEx { header: se_hdr, .. } = decoded_se else {
+        panic!("expected ObjectEx");
+    };
+    assert_eq!(
+        *se_hdr,
+        PyRep::Tuple(vec![
+            PyRep::Token("eveexceptions.UserError".into()),
+            PyRep::Tuple(vec![
+                PyRep::ascii_bytes("SlashError"),
+                PyRep::Dict(vec![(
+                    PyRep::ascii_bytes("reason"),
+                    PyRep::ascii_bytes("Commands: ['heal', 'giveisk']"),
+                )]),
+            ]),
+        ])
+    );
 }
 
 #[test]

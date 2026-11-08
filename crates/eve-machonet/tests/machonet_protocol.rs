@@ -121,6 +121,42 @@ fn test_wrapped_runtime_and_user_error_bodies() {
         }
         other => panic!("unexpected user exc rep: {other:?}"),
     }
+
+    let slash_body = eve_machonet::wrapped_slash_error_body(6, "Commands: ['heal']");
+    let PyRep::Tuple(slash_items) = slash_body else {
+        panic!("expected tuple");
+    };
+    assert_eq!(slash_items[1], PyRep::Integer(MACHONETERR_WRAPPEDEXCEPTION));
+    let PyRep::Tuple(slash_sub) = &slash_items[2] else {
+        panic!("expected inner tuple");
+    };
+    let PyRep::Bytes(slash_bytes) = &slash_sub[0] else {
+        panic!("expected bytes");
+    };
+    let decoded_slash = marshal::decode(slash_bytes).expect("decode");
+    match decoded_slash {
+        PyRep::ObjectEx {
+            is_type_2: false,
+            header,
+            ..
+        } => {
+            let PyRep::Tuple(h) = *header else {
+                panic!("expected header tuple");
+            };
+            assert_eq!(h[0].as_str(), Some("eveexceptions.UserError"));
+            let PyRep::Tuple(args) = &h[1] else {
+                panic!("expected args tuple");
+            };
+            assert_eq!(args[0].as_str(), Some("SlashError"));
+            let PyRep::Dict(entries) = &args[1] else {
+                panic!("expected dict");
+            };
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].0.as_str(), Some("reason"));
+            assert_eq!(entries[0].1.as_str(), Some("Commands: ['heal']"));
+        }
+        other => panic!("unexpected slash exc rep: {other:?}"),
+    }
 }
 
 #[test]

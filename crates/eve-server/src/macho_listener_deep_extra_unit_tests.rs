@@ -448,3 +448,146 @@ async fn ballpark_update_state_docking_flush_session_change_and_disconnect_sync(
         }
     }
 }
+
+#[tokio::test]
+async fn slash_fetch_remote_command_list_and_unknown_cmd_return_slash_error_with_reason() {
+    let ctx = Arc::new(ServerContext::new());
+    let addr = spawn_listener(Arc::clone(&ctx)).await;
+    let char_id = 90_000_001_i64;
+
+    let decode_user_error = |pkt: MachoPacket| -> (String, Vec<(String, String)>) {
+        assert_eq!(pkt.packet_type, MachoPacketType::ErrorResponse);
+        let PyRep::Bytes(bytes) = &as_tuple(&as_tuple(&pkt.payload)[2])[0] else {
+            panic!("expected wrapped exception bytes");
+        };
+        let PyRep::ObjectEx { header, .. } = marshal::decode(bytes).unwrap() else {
+            panic!("expected ObjectEx UserError");
+        };
+        let hdr = as_tuple(&header);
+        assert_eq!(hdr[0], PyRep::Token("eveexceptions.UserError".into()));
+        let args = as_tuple(&hdr[1]);
+        let name = args[0].as_str().unwrap().to_string();
+        let PyRep::Dict(entries) = &args[1] else {
+            panic!("expected UserError dict");
+        };
+        let kv = entries
+            .iter()
+            .map(|(k, v)| (k.as_str().unwrap().to_string(), v.as_str().unwrap().to_string()))
+            .collect();
+        (name, kv)
+    };
+
+    // 0. Non-GM player calling slash.SlashCmd("/") receives SlashError with 'reason' (not CustomInfo/'info')
+    {
+        let (mut s_player, c_player, u_player) = connect_login(addr, "demo", "demo-secret").await;
+        let call_p = |cid: u64, svc: &str, m: &str, args: Vec<PyRep>| {
+            build_call_pkt(
+                c_player,
+                u_player,
+                cid,
+                MachoAddress::Node {
+                    node_id: MACHO_PROXY_NODE_ID,
+                    service: Some(svc.into()),
+                    call_id: 0,
+                },
+                None,
+                m,
+                args,
+            )
+        };
+        write_framed_pyrep(
+            &mut s_player,
+            &call_p(1, "charUnboundMgr", "SelectCharacterID", vec![PyRep::Integer(char_id)])
+                .to_pyrep(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(read_until_call_reply(&mut s_player).await.packet_type, MachoPacketType::CallRsp);
+        write_framed_pyrep(
+            &mut s_player,
+            &call_p(2, "slash", "SlashCmd", vec![PyRep::String("/".into())]).to_pyrep(),
+        )
+        .await
+        .unwrap();
+        let (err_name, dict) = decode_user_error(read_until_call_reply(&mut s_player).await);
+        assert_eq!(err_name, "SlashError");
+        assert_eq!(dict.len(), 1);
+        assert_eq!(dict[0].0, "reason");
+        assert!(dict[0].1.contains("InsufficientRole"), "got reason: {}", dict[0].1);
+        drop(s_player);
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    }
+
+    // Grant GM role for GM FetchRemoteCommandList + unknown slash tests
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(acc) = snap.accounts.get_mut("demo") {
+            acc.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
+        }
+    });
+    let (mut s, client_id, user_id) = connect_login(addr, "demo", "demo-secret").await;
+    let call = |cid: u64, svc: &str, m: &str, args: Vec<PyRep>| {
+        build_call_pkt(
+            client_id,
+            user_id,
+            cid,
+            MachoAddress::Node {
+                node_id: MACHO_PROXY_NODE_ID,
+                service: Some(svc.into()),
+                call_id: 0,
+            },
+            None,
+            m,
+            args,
+        )
+    };
+
+    write_framed_pyrep(
+        &mut s,
+        &call(1, "charUnboundMgr", "SelectCharacterID", vec![PyRep::Integer(char_id)]).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read_until_call_reply(&mut s).await.packet_type, MachoPacketType::CallRsp);
+
+    // 1. FetchRemoteCommandList: slash.SlashCmd("/") -> UserError('SlashError', {'reason': "Commands: [...]"})
+    write_framed_pyrep(
+        &mut s,
+        &call(2, "slash", "SlashCmd", vec![PyRep::String("/".into())]).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let (err_name, dict) = decode_user_error(read_until_call_reply(&mut s).await);
+    assert_eq!(err_name, "SlashError");
+    assert_eq!(dict.len(), 1);
+    assert_eq!(dict[0].0, "reason");
+    assert!(dict[0].1.starts_with("Commands: ["), "got reason: {}", dict[0].1);
+    assert!(dict[0].1.contains("'heal'"), "got reason: {}", dict[0].1);
+    assert!(dict[0].1.contains("'giveisk'"), "got reason: {}", dict[0].1);
+    assert!(dict[0].1.contains("'tr'"), "got reason: {}", dict[0].1);
+
+    // 2. Unknown slash command -> UserError('SlashError', {'reason': "UnknownSlashCommand: ..."})
+    write_framed_pyrep(
+        &mut s,
+        &call(3, "slash", "SlashCmd", vec![PyRep::String("/no_such_cmd".into())]).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let (err_name, dict) = decode_user_error(read_until_call_reply(&mut s).await);
+    assert_eq!(err_name, "SlashError");
+    assert_eq!(dict.len(), 1);
+    assert_eq!(dict[0].0, "reason");
+    assert!(dict[0].1.contains("UnknownSlashCommand"), "got reason: {}", dict[0].1);
+
+    // 3. Invalid slash argument -> UserError('SlashError', {'reason': "InvalidSlashArgument: ..."})
+    write_framed_pyrep(
+        &mut s,
+        &call(4, "slash", "SlashCmd", vec![PyRep::String("/giveisk nope".into())]).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let (err_name, dict) = decode_user_error(read_until_call_reply(&mut s).await);
+    assert_eq!(err_name, "SlashError");
+    assert_eq!(dict.len(), 1);
+    assert_eq!(dict[0].0, "reason");
+    assert!(dict[0].1.contains("InvalidSlashArgument"), "got reason: {}", dict[0].1);
+}

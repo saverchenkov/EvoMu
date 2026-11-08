@@ -820,6 +820,25 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                         "UnMachoDestination",
                                         &err_msg,
                                     )
+                                } else if err.code == "SlashError" {
+                                    eve_machonet::wrapped_slash_error_body(
+                                        MachoPacketType::CallReq as i64,
+                                        &err.message,
+                                    )
+                                } else if matches!(
+                                    err.code.as_str(),
+                                    "UnknownSlashCommand"
+                                        | "InvalidSlashArgument"
+                                        | "InvalidSlashArguments"
+                                ) || (matches!(
+                                    service.trim(),
+                                    "slash" | "publicQaToolsServer"
+                                ) && method == "SlashCmd")
+                                {
+                                    eve_machonet::wrapped_slash_error_body(
+                                        MachoPacketType::CallReq as i64,
+                                        &err_msg,
+                                    )
                                 } else {
                                     eve_machonet::wrapped_user_error_body(
                                         MachoPacketType::CallReq as i64,

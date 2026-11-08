@@ -91,13 +91,13 @@ pub fn wrapped_runtime_error_body(original_command: i64, message: &str) -> PyRep
 }
 
 /// Body of a V24 `machoNetPacket.ErrorResponse` carrying a wrapped `eveexceptions.UserError`
-/// (`UserError(user_error_name, {'info': message})`) so V24 client handlers (e.g., `moniker.py`
-/// retrying on `'UnMachoDestination'` or `autopilot.pyj` handling `'CustomInfo'`) process the
-/// protocol exception cleanly without logging an unhandled traceback.
-pub fn wrapped_named_user_error_body(
+/// with a custom argument key (`UserError(user_error_name, {dict_key: value})`), e.g.
+/// `UserError('SlashError', {'reason': ...})` expected by `eve/devtools/script/svc_slash.py`.
+pub fn wrapped_user_error_with_dict_key_body(
     original_command: i64,
     user_error_name: &str,
-    message: &str,
+    dict_key: &str,
+    value: &str,
 ) -> PyRep {
     let exc = PyRep::ObjectEx {
         is_type_2: false,
@@ -106,8 +106,8 @@ pub fn wrapped_named_user_error_body(
             PyRep::Tuple(vec![
                 PyRep::ascii_bytes(user_error_name),
                 PyRep::Dict(vec![(
-                    PyRep::ascii_bytes("info"),
-                    PyRep::ascii_bytes(message),
+                    PyRep::ascii_bytes(dict_key),
+                    PyRep::ascii_bytes(value),
                 )]),
             ]),
         ])),
@@ -122,9 +122,28 @@ pub fn wrapped_named_user_error_body(
 }
 
 /// Body of a V24 `machoNetPacket.ErrorResponse` carrying a wrapped `eveexceptions.UserError`
+/// (`UserError(user_error_name, {'info': message})`) so V24 client handlers (e.g., `moniker.py`
+/// retrying on `'UnMachoDestination'` or `autopilot.pyj` handling `'CustomInfo'`) process the
+/// protocol exception cleanly without logging an unhandled traceback.
+pub fn wrapped_named_user_error_body(
+    original_command: i64,
+    user_error_name: &str,
+    message: &str,
+) -> PyRep {
+    wrapped_user_error_with_dict_key_body(original_command, user_error_name, "info", message)
+}
+
+/// Body of a V24 `machoNetPacket.ErrorResponse` carrying a wrapped `eveexceptions.UserError`
+/// (`UserError('SlashError', {'reason': reason})`) expected by `svc_slash.FetchRemoteCommandList`
+/// and `svc_slash._SlashCmd`.
+pub fn wrapped_slash_error_body(original_command: i64, reason: &str) -> PyRep {
+    wrapped_user_error_with_dict_key_body(original_command, "SlashError", "reason", reason)
+}
+
+/// Body of a V24 `machoNetPacket.ErrorResponse` carrying a wrapped `eveexceptions.UserError`
 /// (`UserError('CustomInfo', {'info': message})`) so client call sites (`autopilot.pyj`,
-/// `movementFunctions.pyj`, `slash.py`) catch `UserError` cleanly instead of logging an
-/// unhandled `RuntimeError` stack trace.
+/// `movementFunctions.pyj`) catch `UserError` cleanly instead of logging an unhandled
+/// `RuntimeError` stack trace.
 pub fn wrapped_user_error_body(original_command: i64, message: &str) -> PyRep {
     wrapped_named_user_error_body(original_command, "CustomInfo", message)
 }

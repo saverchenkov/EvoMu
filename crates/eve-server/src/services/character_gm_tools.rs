@@ -1371,6 +1371,15 @@ pub async fn handle_gm_qa_rpcs(
                     message: format!("publicQaToolsServer.SlashCmd '{cmd}' requires role mask 0x{req_role:x}"),
                 }));
             }
+            if cmd == "/" {
+                crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, false);
+                return Some(Err(BridgeRpcError {
+                    code: "SlashError".into(),
+                    message: crate::services::auth_cache::format_remote_command_list_reason(
+                        session.role,
+                    ),
+                }));
+            }
             if let Some(ext_res) = handle_gm_slash_ext(ctx, session, cid, cmd).await {
                 crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, ext_res.is_ok());
                 return Some(ext_res);

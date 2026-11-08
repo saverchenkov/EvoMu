@@ -30,12 +30,85 @@ pub fn get_init_vals(ctx: &ServerContext) -> PyRep {
     ])
 }
 
+const ALL_REMOTE_SLASH_COMMANDS: &[&str] = &[
+    "achievements",
+    "autotidi",
+    "ban",
+    "campaign",
+    "chatban",
+    "chatunban",
+    "contact",
+    "createccpevent",
+    "createitem",
+    "despawn",
+    "downtime",
+    "energy",
+    "fastcheckout",
+    "fit",
+    "fwcapture",
+    "getattr",
+    "giveisk",
+    "giveitem",
+    "giveskill",
+    "heal",
+    "kick",
+    "kill",
+    "location",
+    "online",
+    "operation",
+    "pd",
+    "reinforce",
+    "role",
+    "season",
+    "secstatus",
+    "setattr",
+    "setomega",
+    "setskill",
+    "setunderage",
+    "shutdown",
+    "spawn",
+    "spawnanomaly",
+    "spawnnpc",
+    "standing",
+    "survey",
+    "suspend",
+    "teleport",
+    "tidi",
+    "tr",
+    "unban",
+    "unspawn",
+    "unsuspend",
+    "whoami",
+];
+
+pub fn remote_slash_commands_for_role(role: u64) -> Vec<&'static str> {
+    ALL_REMOTE_SLASH_COMMANDS
+        .iter()
+        .copied()
+        .filter(|cmd| {
+            let with_slash = format!("/{cmd}");
+            (role & required_slash_role(&with_slash)) != 0
+        })
+        .collect()
+}
+
+/// Formats the `UserError('SlashError', {'reason': ...})` payload expected by
+/// `eve/devtools/script/svc_slash.py` `FetchRemoteCommandList` when querying `slash.SlashCmd("/")`.
+pub fn format_remote_command_list_reason(role: u64) -> String {
+    let quoted: Vec<String> = remote_slash_commands_for_role(role)
+        .into_iter()
+        .map(|c| format!("'{c}'"))
+        .collect();
+    format!("Commands: [{}]", quoted.join(", "))
+}
+
 pub fn required_slash_role(cmd: &str) -> u64 {
     use eve_machonet::service_roles::{
         ROLE_ADMIN, ROLE_GMH, ROLE_GMS, ROLE_GM_MASK, ROLE_QA, ROLE_ROLEADMIN, ROLE_SPAWN,
     };
     let tok = cmd.split_whitespace().next().unwrap_or("");
     match tok {
+        "/" => ROLE_QA | ROLE_SPAWN | ROLE_ROLEADMIN | ROLE_GM_MASK,
         "/online" | "/location" | "/getattr" | "/survey" | "/moveme" | "/translocate"
         | "/whoami" => {
             ROLE_QA | ROLE_GM_MASK
@@ -623,6 +696,12 @@ pub async fn handle(
                 }));
             }
             let res: Option<Result<PyRep, BridgeRpcError>> = async {
+                if cmd == "/" {
+                    return Some(Err(BridgeRpcError {
+                        code: "SlashError".into(),
+                        message: format_remote_command_list_reason(session.role),
+                    }));
+                }
                 if let Some(rest) = cmd.strip_prefix("/giveisk ") {
                 let Ok(amount) = rest.trim().parse::<i64>() else {
                     return Some(Err(BridgeRpcError {

@@ -41,6 +41,27 @@ fn required_slash_role_and_gm_audit_cap_cover_all_branches() {
 
     assert_eq!(required_slash_role("/giveisk 500"), service_roles::ROLE_GM_MASK);
     assert_eq!(required_slash_role(""), service_roles::ROLE_GM_MASK);
+    assert_eq!(
+        required_slash_role("/"),
+        service_roles::ROLE_QA
+            | service_roles::ROLE_SPAWN
+            | service_roles::ROLE_ROLEADMIN
+            | service_roles::ROLE_GM_MASK
+    );
+
+    let qa_cmds = remote_slash_commands_for_role(service_roles::ROLE_QA);
+    assert!(qa_cmds.contains(&"whoami") && qa_cmds.contains(&"online"));
+    assert!(!qa_cmds.contains(&"giveisk"));
+    let spawn_cmds = remote_slash_commands_for_role(service_roles::ROLE_SPAWN);
+    assert!(spawn_cmds.contains(&"spawn") && spawn_cmds.contains(&"unspawn"));
+    assert!(!spawn_cmds.contains(&"giveisk"));
+    let gm_cmds = remote_slash_commands_for_role(service_roles::ROLE_GM_MASK);
+    for expected in ["giveisk", "heal", "tr", "setomega", "ban", "spawn", "whoami"] {
+        assert!(gm_cmds.contains(&expected), "missing {expected}");
+    }
+    let reason = format_remote_command_list_reason(service_roles::ROLE_GM_MASK);
+    assert!(reason.starts_with("Commands: ['"), "unexpected reason: {reason}");
+    assert!(reason.ends_with("']"));
 
     // Verify GM audit log ring buffer caps at 256 entries
     let ctx = test_ctx();
@@ -342,6 +363,16 @@ async fn slash_commands_error_branches_and_role_aliases() {
             Some(&PyRep::Integer(32_503_680_000))
         );
     }
+
+    let list_err = handle(&ctx, &mut sess, "slash", "SlashCmd", &[PyRep::String("/".into())], &kw)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(list_err.code, "SlashError");
+    assert!(list_err.message.starts_with("Commands: ["));
+    assert!(list_err.message.contains("'giveisk'"));
+    assert!(list_err.message.contains("'heal'"));
+    assert!(list_err.message.contains("'setomega'"));
 
     // Test error codes across slash commands
     for (bad_cmd, expected_code) in [
