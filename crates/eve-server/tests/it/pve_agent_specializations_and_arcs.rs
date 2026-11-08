@@ -64,21 +64,23 @@ async fn test_pve_agent_levels_standing_gates_and_faction_losses() {
     }
 
     // Level 5 agents exist in SDE; lowsec Level 5 agents exist (security < 0.45)
-    let l5_lowsec_agents: Vec<_> = ctx.sde.agents.values().filter(|a| {
+    let mut l5_lowsec_agents: Vec<_> = ctx.sde.agents.values().filter(|a| {
         if a.level != 5 { return false; }
         let Some(sys_id) = a.solar_system_id else { return false; };
         let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(0.0);
         sys_sec < 0.45
     }).collect();
+    l5_lowsec_agents.sort_by_key(|a| a.agent_id);
     assert!(!l5_lowsec_agents.is_empty(), "Level 5 lowsec agents must exist in SDE");
 
     // Highsec Level 5 agents (if any) cannot operate in high-security space per engine rule
-    let l5_highsec_agents: Vec<_> = ctx.sde.agents.values().filter(|a| {
+    let mut l5_highsec_agents: Vec<_> = ctx.sde.agents.values().filter(|a| {
         if a.level != 5 { return false; }
         let Some(sys_id) = a.solar_system_id else { return false; };
         let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(0.0);
         sys_sec >= 0.45
     }).collect();
+    l5_highsec_agents.sort_by_key(|a| a.agent_id);
     if let Some(hs_agent) = l5_highsec_agents.first() {
         let prev_sys = sess.solar_system_id;
         let prev_sta = sess.station_id;
@@ -115,9 +117,15 @@ async fn test_pve_agent_levels_standing_gates_and_faction_losses() {
     assert!(l5_err.code == "AgentNotCoLocated" || l5_err.code == "CantDoMission" || l5_err.code == "InsufficientAgentStanding");
 
     // 2. Standing Gates with Connections, Diplomacy & Criminal Connections (feat:pve.mission-standing-gate)
-    let l2_agent = ctx.sde.agents.values().find(|a| a.level == 2 && a.division_id == 24 && a.station_id.is_some()).expect("L2 Security agent");
+    let l2_agent = ctx.sde.agents.values()
+        .filter(|a| a.level == 2 && a.division_id == 24 && a.agent_type_id == 2 && a.station_id.is_some())
+        .min_by_key(|a| a.agent_id)
+        .expect("L2 Security agent");
     let l2_corp = l2_agent.corporation_id;
-    let l1_agent = ctx.sde.agents.values().find(|a| a.level == 1 && a.division_id == 24 && a.station_id.is_some()).expect("L1 Security agent");
+    let l1_agent = ctx.sde.agents.values()
+        .filter(|a| a.level == 1 && a.division_id == 24 && a.agent_type_id == 2 && a.station_id.is_some() && a.corporation_id != l2_corp)
+        .min_by_key(|a| a.agent_id)
+        .expect("L1 Security agent");
     let l1_corp = l1_agent.corporation_id;
 
     // Reset standings and skills
@@ -164,7 +172,8 @@ async fn test_pve_agent_levels_standing_gates_and_faction_losses() {
     // 3. 16-Mission Storyline Tally & Offer (feat:pve.mission-storyline)
     // 4. Opposing Faction Standing Loss on Completion (feat:pve.mission-faction-standing-loss)
     let caldari_agent = ctx.sde.agents.values()
-        .find(|a| a.level == 1 && a.division_id == 24 && a.agent_type_id == 2 && a.station_id.is_some() && a.solar_system_id.is_some() && ctx.sde.npc_corporations.get(&a.corporation_id).and_then(|c| c.faction_id) == Some(500_001))
+        .filter(|a| a.level == 1 && a.division_id == 24 && a.agent_type_id == 2 && a.station_id.is_some() && a.solar_system_id.is_some() && ctx.sde.npc_corporations.get(&a.corporation_id).and_then(|c| c.faction_id) == Some(500_001))
+        .min_by_key(|a| a.agent_id)
         .expect("Caldari L1 Security agent");
     let c_agent_id = caldari_agent.agent_id;
     let c_corp_id = caldari_agent.corporation_id;
@@ -256,7 +265,8 @@ async fn test_pve_mining_missions_career_and_data_centers() {
 
     // 1. Mining Missions (feat:pve.mission-mining)
     let mining_agent = ctx.sde.agents.values()
-        .find(|a| a.level == 1 && a.division_id == 23 && a.agent_type_id == 2 && a.station_id.is_some() && a.solar_system_id.is_some())
+        .filter(|a| a.level == 1 && a.division_id == 23 && a.agent_type_id == 2 && a.station_id.is_some() && a.solar_system_id.is_some())
+        .min_by_key(|a| a.agent_id)
         .expect("L1 Mining agent in SDE");
     let m_agent_id = mining_agent.agent_id;
     let m_corp_id = mining_agent.corporation_id;
@@ -315,7 +325,8 @@ async fn test_pve_mining_missions_career_and_data_centers() {
 
     // 2. Career Agents (feat:pve.career-agents)
     let career_agent = ctx.sde.agents.values()
-        .find(|a| a.agent_type_id == 12 && a.station_id.is_some() && a.solar_system_id.is_some())
+        .filter(|a| a.agent_type_id == 12 && a.station_id.is_some() && a.solar_system_id.is_some())
+        .min_by_key(|a| a.agent_id)
         .expect("Career agent in SDE");
     let car_aid = career_agent.agent_id;
     let car_cid = career_agent.corporation_id;
@@ -355,7 +366,8 @@ async fn test_pve_mining_missions_career_and_data_centers() {
 
     // 3. Data Center Agents (feat:pve.data-centers)
     let dc_agent = ctx.sde.agents.values()
-        .find(|a| a.agent_type_id == 5 && a.station_id.is_some() && a.solar_system_id.is_some())
+        .filter(|a| a.agent_type_id == 5 && a.station_id.is_some() && a.solar_system_id.is_some())
+        .min_by_key(|a| a.agent_id)
         .expect("Data Center agent in SDE");
     let dc_aid = dc_agent.agent_id;
     let dc_cid = dc_agent.corporation_id;
@@ -416,7 +428,8 @@ async fn test_pve_research_locator_and_epic_arcs() {
     // 1. R&D Research Agents (feat:pve.research-agents)
     let rnd_skill_id = 11_448_u32; // Mechanical Engineering
     let rnd_agent = ctx.sde.agents.values()
-        .find(|a| a.level == 1 && a.agent_type_id == 4 && a.station_id.is_some() && a.research_skills.contains(&rnd_skill_id))
+        .filter(|a| a.level == 1 && a.agent_type_id == 4 && a.station_id.is_some() && a.solar_system_id.is_some() && a.research_skills.contains(&rnd_skill_id))
+        .min_by_key(|a| a.agent_id)
         .expect("L1 R&D agent in SDE");
     let rnd_aid = rnd_agent.agent_id;
     let rnd_cid = rnd_agent.corporation_id;
@@ -473,7 +486,8 @@ async fn test_pve_research_locator_and_epic_arcs() {
 
     // 2. Locator Agents (feat:pve.locator-agents)
     let loc_agent = ctx.sde.agents.values()
-        .find(|a| a.is_locator && a.level == 1 && a.station_id.is_some() && a.solar_system_id.is_some())
+        .filter(|a| a.is_locator && a.level == 1 && a.station_id.is_some() && a.solar_system_id.is_some())
+        .min_by_key(|a| a.agent_id)
         .expect("L1 Locator agent in SDE");
     let loc_aid = loc_agent.agent_id;
     let loc_cid = loc_agent.corporation_id;
@@ -520,7 +534,8 @@ async fn test_pve_research_locator_and_epic_arcs() {
 
     // 3. Epic Arcs & Cooldown (feat:pve.epic-arcs)
     let epic_agent = ctx.sde.agents.values()
-        .find(|a| a.agent_type_id == 10 && a.solar_system_id.is_some())
+        .filter(|a| a.agent_type_id == 10 && a.solar_system_id.is_some())
+        .min_by_key(|a| a.agent_id)
         .expect("Epic Arc agent in SDE");
     let ep_aid = epic_agent.agent_id;
     let ep_sys = epic_agent.solar_system_id.unwrap();

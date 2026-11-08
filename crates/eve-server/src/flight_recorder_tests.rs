@@ -47,9 +47,9 @@ fn flight_recorder_records_entries_and_enforces_per_session_capacity() {
 
     // Relative offset_ms can be positive or negative depending on ref_timestamp_millis.
     let first_ts = all[0].timestamp_millis;
-    let pos_offsets = recorder.get_history(1, first_ts.saturating_sub(120), 2);
+    let pos_offsets = recorder.get_history(1, first_ts.saturating_sub(120), MAX_HISTORY_PER_SESSION);
     assert_eq!(pos_offsets[0].offset_ms, 120);
-    let neg_offsets = recorder.get_history(1, first_ts + 500, 2);
+    let neg_offsets = recorder.get_history(1, first_ts + 500, MAX_HISTORY_PER_SESSION);
     assert_eq!(neg_offsets[0].offset_ms, -500);
 }
 

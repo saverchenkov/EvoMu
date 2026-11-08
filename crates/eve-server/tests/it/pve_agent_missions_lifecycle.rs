@@ -518,9 +518,28 @@ async fn test_live_plan_e5_agent_missions_end_to_end() {
 
     let ship_id = ctx.db.with_snapshot(|s| s.characters[&char_id].active_ship_id);
 
+    let is_empire_agent = |a: &&eve_sde::AgentInfo| {
+        ctx.sde
+            .npc_corporations
+            .get(&a.corporation_id)
+            .and_then(|c| c.faction_id)
+            .is_some_and(|fid| matches!(fid, 500_001..=500_004))
+    };
+
     // 1. Level 2 agent rejects character at 0.0 standing
-    let l2_agent = ctx.sde.agents.values()
-        .find(|a| a.level == 2 && a.division_id == 24 && a.agent_type_id == 2 && a.station_id.is_some() && a.solar_system_id.is_some())
+    let l2_agent = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| {
+            a.level == 2
+                && a.division_id == 24
+                && a.agent_type_id == 2
+                && a.station_id.is_some()
+                && a.solar_system_id.is_some()
+                && is_empire_agent(a)
+        })
+        .min_by_key(|a| a.agent_id)
         .expect("L2 Security agent")
         .clone();
     dock_pilot_at_station(&ctx, &mut sess, char_id, ship_id, l2_agent.solar_system_id.unwrap(), l2_agent.station_id.unwrap()).await;
@@ -529,8 +548,19 @@ async fn test_live_plan_e5_agent_missions_end_to_end() {
     assert_eq!(gate_err.code, "InsufficientAgentStanding");
 
     // 2. Security encounter mission: skill scaling, ambient NPC non-interference, spawned NPC kills, and standing propagation
-    let sec_agent = ctx.sde.agents.values()
-        .find(|a| a.level == 1 && a.division_id == 24 && a.agent_type_id == 2 && a.station_id.is_some() && a.solar_system_id.is_some())
+    let sec_agent = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| {
+            a.level == 1
+                && a.division_id == 24
+                && a.agent_type_id == 2
+                && a.station_id.is_some()
+                && a.solar_system_id.is_some()
+                && is_empire_agent(a)
+        })
+        .min_by_key(|a| a.agent_id)
         .expect("L1 Security agent")
         .clone();
     let sec_sys = sec_agent.solar_system_id.unwrap();
@@ -612,10 +642,26 @@ async fn test_live_plan_e5_agent_missions_end_to_end() {
     let _ = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(sec_oid), "DoAction", &[PyRep::Integer(10)], &kw, None).await;
 
     // 2b. Connections V (3359) lifts positive standing above 1.0 to unlock Level 2 agent, plus Defer/Decline/Accept/Quit
-    let l2_same_fac = ctx.sde.agents.values()
-        .find(|a| a.level == 2 && a.agent_type_id == 2 && a.station_id.is_some() && a.solar_system_id.is_some()
-            && ctx.sde.npc_corporations.get(&a.corporation_id).and_then(|c| c.faction_id) == Some(fac_id as u32))
-        .unwrap_or(&l2_agent).clone();
+    let l2_same_fac = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| {
+            a.level == 2
+                && a.agent_type_id == 2
+                && a.station_id.is_some()
+                && a.solar_system_id.is_some()
+                && is_empire_agent(a)
+                && ctx
+                    .sde
+                    .npc_corporations
+                    .get(&a.corporation_id)
+                    .and_then(|c| c.faction_id)
+                    == Some(fac_id as u32)
+        })
+        .min_by_key(|a| a.agent_id)
+        .unwrap_or(&l2_agent)
+        .clone();
     dock_pilot_at_station(&ctx, &mut sess, char_id, ship_id, l2_same_fac.solar_system_id.unwrap(), l2_same_fac.station_id.unwrap()).await;
     let l2_fac_oid = bind_service_oid(&ctx, &mut sess, "agentMgr", PyRep::Integer(l2_same_fac.agent_id)).await;
     crate::common::slash_cmd(&ctx, &mut sess, "/giveskill 3359 5").await;
@@ -632,8 +678,19 @@ async fn test_live_plan_e5_agent_missions_end_to_end() {
     assert_eq!(quit_rep.dict_get("state").and_then(|v| v.as_str()), Some("Quit"));
 
     // 3. Courier mission requires delivery at destination station
-    let dist_agent = ctx.sde.agents.values()
-        .find(|a| a.level == 1 && a.division_id == 22 && a.agent_type_id == 2 && a.station_id.is_some() && a.solar_system_id.is_some())
+    let dist_agent = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| {
+            a.level == 1
+                && a.division_id == 22
+                && a.agent_type_id == 2
+                && a.station_id.is_some()
+                && a.solar_system_id.is_some()
+                && is_empire_agent(a)
+        })
+        .min_by_key(|a| a.agent_id)
         .expect("L1 Distribution agent")
         .clone();
     dock_pilot_at_station(&ctx, &mut sess, char_id, ship_id, dist_agent.solar_system_id.unwrap(), dist_agent.station_id.unwrap()).await;
@@ -657,7 +714,8 @@ async fn test_live_plan_e5_agent_missions_end_to_end() {
     let courier_iid = ctx.db.with_snapshot(|s| {
         s.item_custom_names
             .iter()
-            .find(|(iid, tag)| tag.starts_with(&format!("courier_cargo:{char_id}:")) && s.items.contains_key(iid))
+            .filter(|(iid, tag)| tag.starts_with(&format!("courier_cargo:{char_id}:")) && s.items.contains_key(iid))
+            .min_by_key(|(iid, _)| *iid)
             .map(|(iid, _)| *iid)
             .expect("Granted courier cargo item in station hangar")
     });

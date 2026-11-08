@@ -2138,7 +2138,7 @@ pub(crate) mod industry_eiv_scc_surcharge_alpha {
         let mut sess = setup_pilot(&ctx, 704, "demo", "demo-secret", char_id).await;
 
         let raitaru_id = 1_045_000_000_704_i64;
-        let (bpc_inv_base, bpc_inv_aug, bpc_inv_fail, bpo_pause, muta_id, wdis_id, incompat_id) =
+        let (svc_id, bpc_inv_base, bpc_inv_aug, bpc_inv_fail, bpo_pause, muta_id, wdis_id, incompat_id) =
             ctx.db.with_mut_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.corporation_id = corp_id;
@@ -2150,6 +2150,7 @@ pub(crate) mod industry_eiv_scc_surcharge_alpha {
                 );
                 let svc = seed_item(snap, 35878, corp_id, raitaru_id, InventoryFlag::ServiceSlot0, 1, true, false, None);
                 snap.items.get_mut(&svc).unwrap().dynamic_attributes.insert(2, 1.0);
+                snap.module_online_states.insert(svc, true);
                 let sk = snap.skills.entry(char_id).or_default();
                 for (stid, lvl) in [(3380, 5), (3387, 5), (3402, 5), (3406, 5), (24624, 5), (11442, 5), (11454, 5), (21790, 5)] {
                     sk.insert(stid, TrainedSkillRecord { type_id: stid, level: lvl, skill_points: 256_000.0 });
@@ -2170,6 +2171,7 @@ pub(crate) mod industry_eiv_scc_surcharge_alpha {
                 }
                 seed_item(snap, 34203, char_id, JITA_STATION_ID, InventoryFlag::Hangar, 2, false, false, None);
                 (
+                    svc,
                     seed_item(snap, RIFTER_BP_TYPE_ID, char_id, JITA_STATION_ID, InventoryFlag::Hangar, 1, true, true, Some(3)),
                     seed_item(snap, RIFTER_BP_TYPE_ID, char_id, JITA_STATION_ID, InventoryFlag::Hangar, 1, true, true, Some(2)),
                     seed_item(snap, SLASH_BP_TYPE_ID, char_id, JITA_STATION_ID, InventoryFlag::Hangar, 1, true, true, Some(2)),
@@ -2322,10 +2324,15 @@ pub(crate) mod industry_eiv_scc_surcharge_alpha {
             .expect("Install job at Raitaru");
         let pause_jid = pause_job.dict_get("jobID").and_then(|v| v.as_i64()).unwrap();
 
+        let pause_now = ctx.now_unix();
         ctx.db.with_mut_snapshot(|snap| {
             if let Some(st) = snap.structures.get_mut(&raitaru_id) {
                 st.fuel_blocks = 0;
             }
+            eve_server::services::industry_pi::industry_facilities_bps::sync_industry_job_pause_states_on_service_change(
+                snap,
+                pause_now,
+            );
         });
         ctx.advance_virtual_clock(20_000);
         let complete_paused_err = ctx
@@ -2334,10 +2341,16 @@ pub(crate) mod industry_eiv_scc_surcharge_alpha {
             .expect_err("Paused job cannot be delivered while structure service is offline");
         assert_eq!(complete_paused_err.code, "FacilityServiceOffline");
 
+        let resume_now = ctx.now_unix();
         ctx.db.with_mut_snapshot(|snap| {
             if let Some(st) = snap.structures.get_mut(&raitaru_id) {
                 st.fuel_blocks = 1_000;
             }
+            snap.module_online_states.insert(svc_id, true);
+            eve_server::services::industry_pi::industry_facilities_bps::sync_industry_job_pause_states_on_service_change(
+                snap,
+                resume_now,
+            );
         });
         ctx.advance_virtual_clock(20_000);
         ctx.dispatch_rpc(&mut sess, "industryManager", None, "CompleteJob", &[PyRep::Integer(pause_jid)], &kw, None)

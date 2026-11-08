@@ -354,3 +354,59 @@ async fn on_advance_secs_collapse_abyssal_and_tick_background_cluster() {
         .with_snapshot(|s| s.service_state_blobs.contains_key("cluster_tick_last_unix"));
     assert!(tick_recorded);
 }
+
+#[tokio::test]
+async fn cold_boot_inside_downtime_window_does_not_shutdown_but_day_crossing_does() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let dt_sec = ctx.systems.downtime_utc_secs_of_day();
+    // 2026-01-01 00:00:00 UTC + downtime window offset + 120s (11:02 UTC)
+    let base_day_start = 1_767_225_600_u64;
+    let in_window_unix = base_day_start + dt_sec + 120;
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(
+        in_window_unix,
+    )));
+    assert!(crate::services::serverops_cluster::is_scheduled_downtime_enabled(&ctx));
+
+    let char_id = 90_000_001_i64;
+    let _ = ctx.db.acquire_online_lock(1, 9_001, Some(char_id), false, 0);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // Cold boot: last_downtime_day_idx starts as None even inside 11:00..11:15 UTC.
+    let initial_day_idx = super::super::with_sp6_state(&ctx.db, |st| st.last_downtime_day_idx);
+    assert_eq!(initial_day_idx, None);
+
+    tick_background_cluster(&ctx).await;
+
+    let expected_day_idx = in_window_unix.saturating_sub(dt_sec) / 86_400;
+    let after_cold_boot_idx =
+        super::super::with_sp6_state(&ctx.db, |st| st.last_downtime_day_idx);
+    assert_eq!(after_cold_boot_idx, Some(expected_day_idx));
+    assert!(
+        !ctx.is_shutting_down(),
+        "cold boot inside 11:00..11:15 UTC must NOT trigger downtime shutdown"
+    );
+    assert!(
+        !ctx.drain_notifications_for_char(char_id)
+            .iter()
+            .any(|n| n.event == "OnClusterShutdownInitiated"),
+        "cold boot inside 11:00..11:15 UTC must NOT emit OnClusterShutdownInitiated"
+    );
+
+    // Advance 24h to next day's 11:02 UTC -> crossing day boundary triggers scheduled downtime.
+    ctx.advance_secs(86_400);
+    tick_background_cluster(&ctx).await;
+
+    let after_crossing_idx =
+        super::super::with_sp6_state(&ctx.db, |st| st.last_downtime_day_idx);
+    assert_eq!(after_crossing_idx, Some(expected_day_idx + 1));
+    assert!(
+        ctx.is_shutting_down(),
+        "day crossing into 11:00..11:15 UTC must trigger start_daily_downtime_window"
+    );
+    assert!(
+        ctx.drain_notifications_for_char(char_id)
+            .iter()
+            .any(|n| n.event == "OnClusterShutdownInitiated"),
+        "day crossing into 11:00..11:15 UTC must emit OnClusterShutdownInitiated"
+    );
+}

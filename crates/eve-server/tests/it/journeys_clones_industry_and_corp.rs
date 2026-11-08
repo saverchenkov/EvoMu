@@ -52,13 +52,110 @@ async fn test_journey_ship_loss() {
     let PyRep::List(clist) = contracts else { panic!("expected List from GetContracts") };
     assert_eq!(clist.len(), 1);
 
-    call_rpc(&ctx, &mut sess, "ship", "Undock", &[]).await.expect("ship.Undock");
-    let isk_before = ctx.db.with_snapshot(|s| s.characters[&90_000_001].balance.0);
-    let sd1 = call_rpc(&ctx, &mut sess, "ship", "SelfDestruct", &[])
+    let mut sess2 = SessionState::new(402);
+    crate::common::login_pilot(&ctx, &mut sess2, "other", "other-secret").await;
+    call_rpc(&ctx, &mut sess2, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_002)])
         .await
-        .expect("ship.SelfDestruct start");
-    assert_eq!(sd1.dict_get("countdownStarted"), Some(&PyRep::Bool(true)));
-    ctx.advance_secs(125);
+        .expect("SelectCharacterID other");
+    let att_ship = sess2.ship_id.expect("other ship_id");
+    let ammo_id = 100_000_599;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ammo_id,
+            InventoryItemRecord {
+                item_id: ammo_id,
+                type_id: 185,
+                owner_id: 90_000_002,
+                location_id: att_ship,
+                flag: InventoryFlag::Cargo,
+                quantity: 1_000,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+    call_rpc(
+        &ctx,
+        &mut sess2,
+        "dogmaIM",
+        "LoadAmmo",
+        &[PyRep::Integer(att_ship), PyRep::List(vec![PyRep::Integer(100_000_006)]), PyRep::List(vec![PyRep::Integer(ammo_id)])],
+    )
+    .await
+    .expect("LoadAmmo");
+    call_rpc(&ctx, &mut sess, "ship", "Undock", &[]).await.expect("ship.Undock");
+    call_rpc(&ctx, &mut sess2, "ship", "Undock", &[]).await.expect("other ship.Undock");
+    ctx.advance_secs(15);
+    let isk_before = ctx.db.with_snapshot(|s| s.characters[&90_000_001].balance.0);
+    let jita_h = ctx.systems.get_or_spawn(30_000_142);
+    let beyonce_vic = ctx.bind_object(&mut sess, "beyonce", 30_000_142).expect("bind beyonce victim");
+    let _ = ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_vic), "CmdStop", &[], &HashMap::new(), None).await;
+    let beyonce_att = ctx.bind_object(&mut sess2, "beyonce", 30_000_142).expect("bind beyonce other");
+    ctx.dispatch_rpc(
+        &mut sess2,
+        "beyonce",
+        Some(beyonce_att),
+        "CmdFollowBall",
+        &[PyRep::Integer(ship_id), PyRep::Real(1_000.0)],
+        &HashMap::new(),
+        None,
+    )
+    .await
+    .expect("CmdFollowBall");
+    let mut last_d = f64::MAX;
+    for _ in 0..1_200 {
+        last_d = match (jita_h.get_ball_snapshot(att_ship).await, jita_h.get_ball_snapshot(ship_id).await) {
+            (Ok(Some((_, a))), Ok(Some((_, b)))) => a.position.distance(b.position),
+            _ => 0.0,
+        };
+        if last_d <= 2_500.0 {
+            break;
+        }
+        jita_h.step_manual(1.0).await.expect("step approach");
+    }
+    assert!(last_d <= 2_500.0, "attacker failed to close range to victim: {last_d}m");
+    let _ = ctx.dispatch_rpc(&mut sess2, "beyonce", Some(beyonce_att), "CmdStop", &[], &HashMap::new(), None).await;
+    ctx.advance_secs(35);
+    call_rpc(&ctx, &mut sess2, "crimewatch", "StartDuelChallenge", &[PyRep::Integer(90_000_001)])
+        .await
+        .expect("StartDuelChallenge");
+    call_rpc(&ctx, &mut sess, "crimewatch", "RespondToDuelChallenge", &[PyRep::Integer(90_000_002), PyRep::Bool(true)])
+        .await
+        .expect("RespondToDuelChallenge");
+    call_rpc(&ctx, &mut sess2, "dogmaIM", "AddTarget", &[PyRep::Integer(ship_id)])
+        .await
+        .expect("AddTarget");
+    ctx.advance_secs(10);
+    jita_h.step_manual(10.0).await.expect("step lock");
+    call_rpc(
+        &ctx,
+        &mut sess2,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(100_000_006), PyRep::String("projectileFired".into()), PyRep::Integer(ship_id)],
+    )
+    .await
+    .expect("Activate projectileFired");
+    for _ in 0..120 {
+        if jita_h.get_ball_snapshot(ship_id).await.ok().flatten().is_none() {
+            break;
+        }
+        ctx.advance_secs(5);
+        jita_h.step_manual(5.0).await.expect("step combat");
+    }
+    let _ = call_rpc(
+        &ctx,
+        &mut sess2,
+        "dogmaIM",
+        "Deactivate",
+        &[PyRep::Integer(100_000_006), PyRep::String("projectileFired".into())],
+    )
+    .await;
     let pod_id = ctx.db.with_snapshot(|s| s.characters[&90_000_001].active_ship_id);
     assert_ne!(pod_id, ship_id, "pilot must be ejected into a capsule after ship destruction");
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&pod_id].type_id), 670);

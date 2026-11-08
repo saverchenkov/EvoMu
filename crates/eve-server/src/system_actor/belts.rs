@@ -266,7 +266,10 @@ pub(super) fn ensure_default_slim_meta(
         .as_ref()
         .and_then(|sde| sde.types.get(&ball.type_id))
         .map(|t| (t.group_id, t.category_id))
-        .unwrap_or((25, 6));
+        .unwrap_or_else(|| {
+            let fallback = eve_destiny::wire::resolve_slim_item_meta(None, ball);
+            (fallback.group_id, fallback.category_id)
+        });
     ballpark.set_ball_slim_meta(
         ball.id,
         SlimItemMeta {

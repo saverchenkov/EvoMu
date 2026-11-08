@@ -24,8 +24,14 @@ async fn bound_object_monikers_preserve_service_targets_and_evict_on_session_tra
         .sde
         .agents
         .values()
-        .find(|a| a.level == 1 && a.solar_system_id.is_some() && a.station_id.is_some())
-        .or_else(|| ctx.sde.agents.values().next())
+        .filter(|a| {
+            a.level == 1
+                && a.agent_type_id == 2
+                && a.solar_system_id.is_some()
+                && a.station_id.is_some()
+        })
+        .min_by_key(|a| a.agent_id)
+        .or_else(|| ctx.sde.agents.values().min_by_key(|a| a.agent_id))
         .expect("seeded agent in SDE");
     let jita_agent = agent.agent_id;
     let jita_sys = i64::from(agent.solar_system_id.unwrap_or(30_000_142));

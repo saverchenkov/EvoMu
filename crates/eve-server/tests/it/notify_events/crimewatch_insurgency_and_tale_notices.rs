@@ -30,6 +30,7 @@ const JITA_STATION: i64 = 60_003_760;
 fn new_ctx() -> ServerContext {
     let ctx = ServerContext::new();
     ctx.set_clock_paused(true);
+    eve_server::services::serverops_cluster::set_scheduled_downtime_enabled(&ctx, false);
     ctx
 }
 

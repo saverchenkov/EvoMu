@@ -437,11 +437,20 @@ async fn safe_logoff_disconnect_reconnect_and_drone_lifecycle_work_end_to_end() 
     assert!((dest.distance(start_pos) - EMERGENCY_WARP_DISTANCE_M).abs() < 1.0);
 
     // 4. Ungraceful disconnect in space initiates emergency warp and records DisconnectedShipEntry
+    let before_disc = ctx.now_unix();
     let disc = handle_character_logoff_or_disconnect(&ctx, char_id)
         .await
         .expect("should record disconnected ship");
+    let after_disc = ctx.now_unix();
     assert_eq!(disc.ship_id, ship_id);
-    assert_eq!(disc.remove_at_unix, now + UNAGGRESSED_LOGOFF_REMOVE_SECS);
+    assert!(
+        disc.remove_at_unix >= before_disc + UNAGGRESSED_LOGOFF_REMOVE_SECS
+            && disc.remove_at_unix <= after_disc + UNAGGRESSED_LOGOFF_REMOVE_SECS,
+        "expected remove_at_unix ({}) within [{}, {}]",
+        disc.remove_at_unix,
+        before_disc + UNAGGRESSED_LOGOFF_REMOVE_SECS,
+        after_disc + UNAGGRESSED_LOGOFF_REMOVE_SECS
+    );
     assert!(disc.emergency_warp_dest.is_some());
 
     // Reconnecting in space restores character and clears disconnected entry

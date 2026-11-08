@@ -944,11 +944,11 @@ async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands() {
     let char_id = 90_000_001i64;
     let ship_id = 105_000_101i64;
     let sec_office_svc = ctx.sde.station_services.values().find(|s| s.name == "Security Office").map(|s| s.service_id).unwrap_or(26);
-    let (lowsec_station, lowsec_sys) = ctx.sde.stations.values().find(|st| {
+    let (lowsec_station, lowsec_sys) = ctx.sde.stations.values().filter(|st| {
         (matches!(st.owner_corporation_id, 1_000_125 | 1_000_137) || st.owner_faction_id == Some(500_006))
-            && ctx.sde.solar_systems.get(&st.solar_system_id).is_some_and(|s| s.security_status > 0.0 && s.security_status < 0.45)
+            && ctx.sde.solar_systems.get(&st.solar_system_id).is_some_and(|s| s.security_status >= 0.25 && s.security_status < 0.45)
             && ctx.sde.station_operations.get(&st.operation_id).is_some_and(|op| op.services.contains(&sec_office_svc))
-    }).map(|st| (st.station_id, st.solar_system_id)).expect("lowsec CONCORD Security Office station");
+    }).min_by_key(|st| st.station_id).map(|st| (st.station_id, st.solar_system_id)).expect("lowsec CONCORD Security Office station");
 
     seed_ship_in_space(&ctx, char_id, ship_id, 587, lowsec_sys, DVec3::ZERO).await;
 

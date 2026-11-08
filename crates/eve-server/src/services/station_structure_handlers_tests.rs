@@ -319,4 +319,51 @@ async fn resolve_upwell_dock_target_denies_npc_fobs_and_non_dockable_groups_allo
             "dockable Upwell type {tid} should allow docking"
         );
     }
+
+    // Havoc Pirate Insurgency FOBs (79172 Guristas, 78260 Angel, group 4644):
+    // denied for non-enlisted / opposing pilots, allowed for matching pirate militia.
+    let guristas_fob = 1_000_000_960_200_i64;
+    let angel_fob = 1_000_000_960_201_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        for (sid, tid) in [(guristas_fob, 79_172_u32), (angel_fob, 78_260_u32)] {
+            snap.structures.insert(
+                sid,
+                UpwellStructureRecord {
+                    structure_id: sid,
+                    type_id: tid,
+                    owner_corp_id: 1_000_434,
+                    solar_system_id: sys_id,
+                    name: format!("Pirate FOB {tid}"),
+                    position: [90_000.0, 0.0, 0.0],
+                    state: "ShieldVulnerable".into(),
+                    quantum_core_installed: true,
+                    fuel_blocks: 100,
+                    shield_hp: 1.0,
+                    armor_hp: 1.0,
+                    hull_hp: 1.0,
+                    reinforced_until_unix: 0,
+                    last_damage_tick: 0,
+                    last_damage_unix: 0,
+                    self_destruct_at_unix: None,
+                },
+            );
+        }
+        snap.characters.get_mut(&char_id).unwrap().war_faction_id = Some(500_001);
+    });
+    assert_eq!(
+        resolve_upwell_dock_target(&ctx, guristas_fob, sys_id, char_id, 587, 25).unwrap_err().code,
+        "FobDockingRestrictedToPirateMilitia"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().war_faction_id = Some(500_010);
+    });
+    assert!(resolve_upwell_dock_target(&ctx, guristas_fob, sys_id, char_id, 587, 25).is_ok());
+    assert_eq!(
+        resolve_upwell_dock_target(&ctx, angel_fob, sys_id, char_id, 587, 25).unwrap_err().code,
+        "FobDockingRestrictedToPirateMilitia"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().war_faction_id = Some(500_011);
+    });
+    assert!(resolve_upwell_dock_target(&ctx, angel_fob, sys_id, char_id, 587, 25).is_ok());
 }

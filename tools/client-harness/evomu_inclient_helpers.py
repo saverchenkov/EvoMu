@@ -164,7 +164,7 @@ def _wait_view_settled(sm, timeout_sec=10.0):
         opening = getattr(vs, "isOpeningView", None)
         is_loading = bool(loading.IsLoading()) if loading is not None and hasattr(loading, "IsLoading") else False
         space_svc = getattr(sm, "services", {}).get("space")
-        lazy_cnt = getattr(space_svc, "lazyLoadQueueCount", 0) if (space_svc is not None and now <= start + 1.2) else 0
+        lazy_cnt = getattr(space_svc, "lazyLoadQueueCount", 0) if space_svc is not None else 0
         sess = getattr(__builtin__, "session", None)
         sess_busy = bool(sess is not None and (getattr(sess, "mutating", 0) or getattr(sess, "changing", None) is not None))
         sys_id = int(getattr(sess, "solarsystemid", 0) or 0) if sess is not None else 0

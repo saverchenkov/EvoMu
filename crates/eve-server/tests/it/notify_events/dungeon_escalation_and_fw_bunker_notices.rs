@@ -368,9 +368,13 @@ async fn test_batch2_facwar_bunker_vulnerable_and_incursion_influence_update() {
     let mut bunker_vuln_seen = false;
     for _attempt in 0..35 {
         let gate_opt = fw_ctx.db.with_snapshot(|s| {
-            s.fw_runtime.fw_complexes.iter().find_map(|(&gid, &(csys, ref tier, _, _, done))| {
-                (csys == warzone_sys && tier == "Novice" && !done).then_some(gid)
-            })
+            s.fw_runtime
+                .fw_complexes
+                .iter()
+                .filter_map(|(&gid, &(csys, ref tier, _, _, done))| {
+                    (csys == warzone_sys && tier == "Novice" && !done).then_some(gid)
+                })
+                .min()
         });
         let Some(gate_id) = gate_opt else {
             rpc(&fw_ctx, &mut sess_fw, "timeControl", "AdvanceClock", &[PyRep::Integer(1805)]).await.expect("AdvanceClock");
@@ -382,8 +386,16 @@ async fn test_batch2_facwar_bunker_vulnerable_and_incursion_influence_update() {
             &[PyRep::String("item".into()), PyRep::Integer(gate_id), PyRep::Real(0.0)],
             &HashMap::new(), None,
         ).await.expect("CmdWarpToStuff FW gate");
-        for _ in 0..4 {
-            wz_space.step_manual(15.0).await.unwrap();
+        for _ in 0..30 {
+            wz_space.step_manual(10.0).await.unwrap();
+            if wz_space
+                .get_ball_snapshot(fw_ship)
+                .await
+                .unwrap()
+                .is_some_and(|(_, b)| !matches!(b.mode, eve_destiny::MovementMode::Warp { .. }))
+            {
+                break;
+            }
         }
         let _ = rpc(&fw_ctx, &mut sess_fw, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(gate_id)])
             .await

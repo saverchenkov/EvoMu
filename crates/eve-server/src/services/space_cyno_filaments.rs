@@ -318,7 +318,12 @@ async fn handle_wormhole_jump(
         .spawn_ball_with_meta(new_ball, combat_state, slim_meta)
         .await
         .unwrap_or(0);
+    let _ = new_handle.push_set_state(ship_id).await;
     let now_unix = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_positions
+            .insert(ship_id, [arrival_pos.x, arrival_pos.y, arrival_pos.z]);
+    });
     crate::services::space_destiny::record_session_change_timer(
         ctx,
         char_id,
@@ -348,6 +353,7 @@ async fn handle_wormhole_jump(
     session.region_id = Some(updated_ch.region_id);
     session.station_id = None;
     session.structure_id = None;
+    ctx.quasar_gateway.on_session_changed(session, now_unix);
     crate::services::map_service::record_solar_system_jump(ctx, char_id, dest_sys_id);
     crate::services::combat_crimewatch::schedule_highsec_criminal_concord_if_needed(
         ctx,
@@ -598,9 +604,13 @@ async fn handle_random_jump_filament(
         crate::services::map_service::record_solar_system_jump(ctx, p_char, dest_sys_id);
 
         b.position = landing_base + DVec3::new((j_idx as f64) * 200.0, 0.0, 0.0);
+        let land_arr = b.position.to_array();
         b.velocity = DVec3::ZERO;
         b.speed_fraction = 0.0;
         b.mode = MovementMode::Stop;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.item_positions.insert(p_ship, land_arr);
+        });
         let mut combat_state = ctx.build_ship_combat_state(p_char, p_ship, b.type_id);
         crate::services::r6_t1_p1_helpers::apply_preserved_combat_state(&mut combat_state, prev_cs);
         combat_state.is_cloaked = true;
@@ -613,6 +623,7 @@ async fn handle_random_jump_filament(
             .spawn_ball_with_meta(b, combat_state, slim_meta)
             .await
             .unwrap_or(0);
+        let _ = new_handle.push_set_state(p_ship).await;
         crate::services::space_destiny::record_session_change_timer(
             ctx,
             p_char,
@@ -663,6 +674,7 @@ async fn handle_random_jump_filament(
     session.region_id = Some(dest_sys.region_id);
     session.station_id = None;
     session.structure_id = None;
+    ctx.quasar_gateway.on_session_changed(session, now_unix);
 
     let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, dest_sys_id as i64)?;
     Ok(PyRep::keyval([

@@ -2721,7 +2721,7 @@ async fn notify_batch8_ammo_drones_and_fleet_events() {
                 position: [200_000.0, 0.0, 0.0],
                 state: "ShieldVulnerable".into(),
                 quantum_core_installed: true,
-                fuel_blocks: 100,
+                fuel_blocks: 5_000,
                 shield_hp: 100_000.0,
                 armor_hp: 100_000.0,
                 hull_hp: 100_000.0,

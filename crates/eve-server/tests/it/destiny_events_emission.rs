@@ -636,6 +636,26 @@ async fn test_set_ball_free_radius_harmonic_sovereignty_and_controller_event() {
                 last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
+        snap.structures.insert(
+            1_049_500_002,
+            UpwellStructureRecord {
+                structure_id: 1_049_500_002,
+                type_id: 35_832, // Astrahus (dockable Citadel, group 1657)
+                name: "Sov Astrahus".into(),
+                solar_system_id: null_sys,
+                owner_corp_id: corp,
+                position: [ball.position.x + 500.0, ball.position.y - 250.0, ball.position.z + 100.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 50,
+                shield_hp: 50_000.0,
+                armor_hp: 50_000.0,
+                hull_hp: 50_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
+            },
+        );
         let sk = snap.skills.entry(PILOT).or_default();
         sk.insert(3_394, TrainedSkillRecord { type_id: 3_394, level: 5, skill_points: 256_000.0 });
         sk.insert(3_435, TrainedSkillRecord { type_id: 3_435, level: 5, skill_points: 256_000.0 });
@@ -659,14 +679,14 @@ async fn test_set_ball_free_radius_harmonic_sovereignty_and_controller_event() {
     assert_eq!(sov.len(), 1);
     assert_eq!(sov[0].as_slice(), &[PyRep::Integer(null_sys as i64), PyRep::Integer(99_000_123)]);
 
-    // Docking into structure 1_049_500_001 emits OnDockingAccepted([ship_x, ship_y, ship_z], [station_x, station_y, station_z], stationID).
+    // Docking into Citadel 1_049_500_002 emits OnDockingAccepted([ship_x, ship_y, ship_z], [station_x, station_y, station_z], stationID).
     ctx.advance_secs(12);
-    ctx.dispatch_rpc(&mut sess, "structureDocking", None, "Dock", &[PyRep::Integer(1_049_500_001)], &kw, None).await.expect("Dock");
+    ctx.dispatch_rpc(&mut sess, "structureDocking", None, "Dock", &[PyRep::Integer(1_049_500_002)], &kw, None).await.expect("Dock");
     let dock_acts = drain_actions(&null_handle, ship_id).await;
     let ship_pos_list = PyRep::List(vec![PyRep::Real(ball.position.x), PyRep::Real(ball.position.y), PyRep::Real(ball.position.z)]);
     let struct_pos_list = PyRep::List(vec![PyRep::Real(ball.position.x + 500.0), PyRep::Real(ball.position.y - 250.0), PyRep::Real(ball.position.z + 100.0)]);
     assert_eq!(
         find(&dock_acts, "OnDockingAccepted")[0].as_slice(),
-        &[ship_pos_list, struct_pos_list, PyRep::Integer(1_049_500_001)]
+        &[ship_pos_list, struct_pos_list, PyRep::Integer(1_049_500_002)]
     );
 }

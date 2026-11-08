@@ -10,7 +10,7 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, VecDeque};
 
 use eve_db::{ActiveMissionRecord, IskCents, OwnerNoteRecord, SolarSystemId, WorldStateSnapshot};
-use eve_destiny::{Ball, MovementMode};
+use eve_destiny::{Ball, MovementMode, SlimItemMeta};
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{AgentInfo, MissionTemplate, SdeRegistry, TypeId};
 use glam::DVec3;
@@ -599,8 +599,19 @@ pub async fn ensure_ess_intrusion_site_balls(ctx: &ServerContext, sys_id: SolarS
     } else {
         let pos = DVec3::new(50_000_000_000.0, 50_000_000_000.0, 0.0);
         let ess_id = ESS_BEACON_ID_BASE + i64::from(sys_id);
+        let ess_meta = SlimItemMeta {
+            group_id: 4079,
+            category_id: 2,
+            owner_id: 1,
+            char_id: None,
+            corp_id: -1,
+            alliance_id: -1,
+            security_status: 0.0,
+            is_cloaked: false,
+            ..Default::default()
+        };
         let _ = sys_handle
-            .spawn_ball_with_combat(
+            .spawn_ball_with_meta(
                 Ball {
                     id: ess_id,
                     type_id: ESS_BEACON_TYPE_ID,
@@ -614,6 +625,7 @@ pub async fn ensure_ess_intrusion_site_balls(ctx: &ServerContext, sys_id: SolarS
                     mode: MovementMode::Rigid,
                 },
                 ctx.build_type_combat_state(ESS_BEACON_TYPE_ID),
+                ess_meta,
             )
             .await;
         pos
@@ -622,8 +634,19 @@ pub async fn ensure_ess_intrusion_site_balls(ctx: &ServerContext, sys_id: SolarS
     let gate_id = ESS_GATE_ID_BASE + i64::from(sys_id);
     if !balls.iter().any(|b| b.id == gate_id) {
         let gate_pos = ess_pos + DVec3::new(200_000.0, 0.0, 0.0);
+        let gate_meta = SlimItemMeta {
+            group_id: 366,
+            category_id: 2,
+            owner_id: 1,
+            char_id: None,
+            corp_id: -1,
+            alliance_id: -1,
+            security_status: 0.0,
+            is_cloaked: false,
+            ..Default::default()
+        };
         let _ = sys_handle
-            .spawn_ball_with_combat(
+            .spawn_ball_with_meta(
                 Ball {
                     id: gate_id,
                     type_id: ESS_GATE_TYPE_ID,
@@ -637,6 +660,7 @@ pub async fn ensure_ess_intrusion_site_balls(ctx: &ServerContext, sys_id: SolarS
                     mode: MovementMode::Rigid,
                 },
                 ctx.build_type_combat_state(ESS_GATE_TYPE_ID),
+                gate_meta,
             )
             .await;
     }

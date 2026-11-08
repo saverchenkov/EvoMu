@@ -740,6 +740,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             }
                             subscribed_sys_id = session.solar_system_id;
                         }
+                        let was_ballpark_ready = ballpark_ready;
                         if (method == "UpdateStateRequest"
                             || (service == "beyonce" && method == "MachoBindObject"))
                             && session.station_id.is_none()
@@ -940,7 +941,12 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 if let Ok((tick, obs_evs, updates_pyrep)) =
                                     sys_handle.drain_observer_updates(ship_id).await
                                 {
-                                    if !obs_evs.is_empty() {
+                                    let has_set_state = obs_evs
+                                        .iter()
+                                        .any(|ev| matches!(ev, eve_destiny::DestinyEvent::SetState { .. }));
+                                    if !was_ballpark_ready && !has_set_state {
+                                        ballpark_ready = false;
+                                    } else if !obs_evs.is_empty() {
                                         last_destiny_tick = last_destiny_tick.max(tick);
                                         let norm_args = crate::router::client_compat::normalize_macho_notification(
                                             "DoDestinyUpdate",
@@ -962,6 +968,8 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                             }
                                         }
                                     }
+                                } else if !was_ballpark_ready {
+                                    ballpark_ready = false;
                                 }
                             }
                         }

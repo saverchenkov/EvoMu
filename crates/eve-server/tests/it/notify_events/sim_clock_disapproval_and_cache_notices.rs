@@ -34,6 +34,7 @@ fn new_ctx() -> ServerContext {
     let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
     let ctx = ServerContext::with_sde_and_repository(sde, db);
     ctx.set_clock_paused(true);
+    eve_server::services::serverops_cluster::set_scheduled_downtime_enabled(&ctx, false);
     ctx
 }
 

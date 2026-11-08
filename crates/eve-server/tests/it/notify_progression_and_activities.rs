@@ -134,6 +134,7 @@ async fn setup_pilot_in_space(
 #[tokio::test]
 async fn batch10_abyssal_void_whiteout_and_deathzone_notifications() {
     let ctx = ServerContext::new();
+    eve_server::services::serverops_cluster::set_scheduled_downtime_enabled(&ctx, false);
     let mut sess = setup_pilot_in_space(&ctx, PILOT_A, 700_001, 622, false).await;
 
     // 1. Abyssal filament deployment -> gate activation -> end gate activation
@@ -1206,6 +1207,7 @@ async fn batch10_progression_and_conversations() {
 #[tokio::test]
 async fn batch10_tales_storms_and_cosmic_anomalies() {
     let ctx = ServerContext::new();
+    eve_server::services::serverops_cluster::set_scheduled_downtime_enabled(&ctx, false);
     let mut sess = setup_pilot_in_space(&ctx, PILOT_A, 700_410, false).await;
 
     // 1. Seed world event tales via live taleMgr.GetGlobalWorldEventTales RPC
@@ -1681,6 +1683,7 @@ async fn setup_pilot_in_space(
 #[tokio::test]
 async fn batch10_ess_fw_hacking_security_dbs_and_mining() {
     let ctx = ServerContext::new();
+    eve_server::services::serverops_cluster::set_scheduled_downtime_enabled(&ctx, false);
     let null_sys = ctx
         .sde
         .solar_systems

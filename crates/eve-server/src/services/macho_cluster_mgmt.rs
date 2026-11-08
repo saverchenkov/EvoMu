@@ -1578,7 +1578,7 @@ fn handle_session_attribute_update(
         SessionState,
         Vec<(&'static str, PyRep, PyRep)>,
         Option<(i64, i64, Option<i64>, u64)>,
-    ) = ctx.db.with_mut_snapshot(|snap| {
+    ) = ctx.db.try_with_mut_snapshot(|snap| {
         let mut registry: HashMap<String, serde_json::Value> = snap
             .service_state_blobs
             .get("session_registry")

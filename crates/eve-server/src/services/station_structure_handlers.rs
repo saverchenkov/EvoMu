@@ -641,8 +641,16 @@ pub(crate) fn resolve_upwell_dock_target(
     }
     let st_group_id = ctx.sde.types.get(&st.type_id).map(|t| t.group_id).unwrap_or(0);
     // Allowlist dockable Upwell structure classes only (1657=Citadel, 1404=Engineering Complex,
-    // 1406=Refinery); deny NPC FOBs, FW hubs, FLEX, orbital skyhooks, Metenox, and depots (#569).
-    let is_dockable_upwell_group = matches!(st_group_id, 1657 | 1404 | 1406);
+    // 1406=Refinery) plus Havoc Pirate Insurgency FOBs (group 4644, types 79172/78260, gated
+    // to the matching pirate militia by `check_docking_allowed`); deny NPC Stronghold FOBs
+    // (46363/46364), FW hubs (32226), FLEX, orbital skyhooks, Metenox, and depots (#569).
+    let is_pirate_insurgency_fob =
+        st_group_id == 4644 || matches!(st.type_id, 79_172 | 78_260);
+    if is_pirate_insurgency_fob {
+        crate::services::fw_gameplay::check_docking_allowed(ctx, char_id, sys_id, dock_id, true)?;
+    }
+    let is_dockable_upwell_group =
+        matches!(st_group_id, 1657 | 1404 | 1406) || is_pirate_insurgency_fob;
     let is_explicit_non_dockable_type = matches!(
         st.type_id,
         35_840 | 35_841 | 37_534 | 81_826 | 2_233 | 3_962 | 46_363 | 46_364 | 32_226

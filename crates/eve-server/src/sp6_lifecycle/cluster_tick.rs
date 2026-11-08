@@ -1181,7 +1181,7 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
         }
         None => {
             st.last_downtime_day_idx = Some(now_day_idx);
-            if in_downtime_window { 2 } else { 0 }
+            0
         }
         _ => 0,
     });

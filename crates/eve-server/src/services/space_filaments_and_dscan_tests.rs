@@ -273,3 +273,151 @@ async fn fleet_beacon_jump_rejects_highsec_and_non_fleet_targets() {
         .unwrap_err();
     assert_eq!(hs_err.code, "CannotJumpToHighSecBeacon");
 }
+
+#[tokio::test]
+async fn random_jump_filament_queues_set_state_and_valid_nullsec_ess_slim_items() {
+    let mut ctx = test_ctx();
+    let cur_sys = 30_000_142_u32;
+    let char_id = 95_601_i64;
+    let ship_id = 77_601_i64;
+    let filament_tid = 99_621_u32;
+    clone_type_with(
+        &mut ctx.sde,
+        58958,
+        filament_tid,
+        4041,
+        30,
+        0.1,
+        0.0,
+        &[(3025, 4041.0)],
+    );
+
+    let fil_item_id = ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("demo char");
+        ch.character_id = char_id;
+        ch.solar_system_id = cur_sys;
+        ch.active_ship_id = ship_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        snap.characters.insert(char_id, ch);
+        snap.fleets.insert(
+            7601,
+            FleetRecord {
+                fleet_id: 7601,
+                boss_id: char_id,
+                members: vec![char_id],
+                wings: vec![],
+                squads: vec![],
+                free_move: true,
+                is_registered: false,
+                ..Default::default()
+            },
+        );
+        put_item(snap, ship_id, 588, char_id, i64::from(cur_sys), InventoryFlag::Hangar, 1, true);
+        put_item(
+            snap,
+            77_602,
+            filament_tid,
+            char_id,
+            ship_id,
+            InventoryFlag::Cargo,
+            1,
+            false,
+        )
+    });
+    let sys_h = ctx.systems.get_or_spawn(cur_sys);
+    spawn_ship(
+        &sys_h,
+        ship_id,
+        588,
+        25,
+        6,
+        DVec3::new(1.5e13, -2.1e13, 0.9e13),
+        DVec3::ZERO,
+        false,
+    )
+    .await;
+
+    let mut sess = make_session(char_id, 98_000_001, Some(cur_sys), Some(ship_id));
+    let kw = HashMap::new();
+    let res = handle(
+        &ctx,
+        &mut sess,
+        None,
+        "randomJumpMgr",
+        "ActivateRandomJumpFilament",
+        &[PyRep::Integer(fil_item_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("filament ok");
+
+    let PyRep::KeyVal(kv) = res else {
+        panic!("expected KeyVal");
+    };
+    let dest_sys = kv
+        .get("solarSystemID")
+        .and_then(|v| v.as_i64())
+        .expect("destination system id") as u32;
+    assert_ne!(dest_sys, cur_sys);
+    let dest_h = ctx.systems.get_or_spawn(dest_sys);
+
+    // 1. Destination ballpark must immediately have `SetState` queued at index 0 for the jumped ship
+    let (_tick, obs_evs, _updates) = dest_h
+        .drain_observer_updates(ship_id)
+        .await
+        .expect("drain observer updates");
+    assert!(
+        matches!(
+            obs_evs.first(),
+            Some(eve_destiny::DestinyEvent::SetState { observer_ball_id }) if *observer_ball_id == ship_id
+        ),
+        "expected SetState at index 0 immediately after ActivateRandomJumpFilament, got {obs_evs:?}"
+    );
+    assert!(
+        ctx.db
+            .with_snapshot(|snap| snap.item_positions.get(&ship_id).copied())
+            .is_some(),
+        "expected ship item_positions to be updated after filament jump"
+    );
+
+    // 2. Nullsec ESS query seeds ESS beacon + gate with valid non-Ship SlimItemMeta
+    let _ = crate::services::space_destiny::handle(
+        &ctx,
+        &mut sess,
+        None,
+        "essMgr",
+        "GetDataForClientSolarSystem",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("essMgr handled")
+    .expect("essMgr ok");
+
+    let bp = dest_h.ballpark.read().unwrap();
+    let visible = bp.visible_balls_for_observer(ship_id);
+    assert!(!visible.is_empty(), "expected visible destination balls");
+    for ball in visible {
+        let meta = eve_destiny::wire::resolve_slim_item_meta(Some(&bp), ball);
+        let slim = eve_destiny::wire::slim_item_dict(ball, &meta);
+        let tid = slim.dict_get("typeID").and_then(|v| v.as_i64()).unwrap_or(0);
+        let gid = slim.dict_get("groupID").and_then(|v| v.as_i64()).unwrap_or(0);
+        let cid = slim.dict_get("categoryID").and_then(|v| v.as_i64()).unwrap_or(0);
+        assert!(tid > 0 && gid > 0 && cid > 0, "invalid slim item for ball {}: {:?}", ball.id, slim);
+        if matches!(ball.mode, eve_destiny::MovementMode::Rigid) {
+            assert_ne!(cid, 6, "rigid ball {} ({tid}) must not be misclassified as category Ship", ball.id);
+        }
+        if ball.id == crate::services::pve_ess_reserve_banks::ESS_BEACON_ID_BASE + i64::from(dest_sys) {
+            assert_eq!((tid, gid, cid), (55914, 4079, 2));
+        }
+        if ball.id == crate::services::pve_ess_reserve_banks::ESS_GATE_ID_BASE + i64::from(dest_sys) {
+            assert_eq!((tid, gid, cid), (17831, 366, 2));
+        }
+    }
+    drop(bp);
+
+    let (_st_tick, set_state_rep, _up) = dest_h.get_set_state(ship_id).await.expect("get_set_state");
+    assert!(matches!(set_state_rep, PyRep::KeyVal(_)));
+}

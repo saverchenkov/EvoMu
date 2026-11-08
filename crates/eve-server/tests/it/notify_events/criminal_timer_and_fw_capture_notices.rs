@@ -22,6 +22,7 @@ use eve_server::sp6_lifecycle::tick_background_cluster;
 #[tokio::test]
 async fn test_parity_notify_criminal_timer_and_fw_capture_changed() {
     let ctx = new_ctx();
+    eve_server::services::serverops_cluster::set_scheduled_downtime_enabled(&ctx, false);
     let unix_to_ft = |u: u64| -> i64 { (u as i64 + 11_644_473_600) * 10_000_000 };
 
     // 1. OnCriminalTimerUpdate via unprovoked high-sec attack (301 -> 303 -> 300)
