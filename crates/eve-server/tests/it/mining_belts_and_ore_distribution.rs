@@ -9,15 +9,11 @@
 use std::collections::HashMap;
 
 use crate::common;
-use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::system_actor::populate_asteroid_belt_entities;
 
 const PILOT_1: i64 = 90_000_001;
-const PILOT_2: i64 = 90_000_002;
-const JITA_SYS: u32 = 30_000_142;
 const JITA_STATION: i64 = 60_003_760;
 const PERIMETER_SYS: u32 = 30_000_144;
 const AMAMAKE_SYS: u32 = 30_002_537;
@@ -203,8 +199,11 @@ async fn test_belt_ore_distribution_across_security_bands() {
     assert!(ls_ids.contains(&20) && ls_ids.contains(&1227));
     assert!(!ls_ids.contains(&1230) && !ls_ids.contains(&1228));
 
-    let mut low_bp = eve_destiny::Ballpark::new(AMAMAKE_SYS);
-    let low_states = populate_asteroid_belt_entities(&mut low_bp, AMAMAKE_SYS, &ctx.sde);
+    let amamake_handle = ctx.systems.get_or_spawn(AMAMAKE_SYS);
+    let low_states = amamake_handle
+        .populate_asteroid_belt_entities()
+        .await
+        .expect("Amamake belt asteroids");
     assert!(!low_states.is_empty(), "Amamake must generate belt asteroids");
     assert!(low_states.iter().all(|s| s.type_id != 1230 && s.type_id != 1228));
     assert!(low_states.iter().any(|s| matches!(s.type_id, 20 | 21 | 1226 | 1227 | 1231)));
@@ -221,8 +220,11 @@ async fn test_belt_ore_distribution_across_security_bands() {
     let high_ids = ores_for(-0.2, 10_000_014);
     assert!(high_ids.contains(&19) && !high_ids.contains(&1223) && !high_ids.contains(&22));
 
-    let mut null_bp = eve_destiny::Ballpark::new(LZ6SU_SYS);
-    let null_states = populate_asteroid_belt_entities(&mut null_bp, LZ6SU_SYS, &ctx.sde);
+    let lz6su_handle = ctx.systems.get_or_spawn(LZ6SU_SYS);
+    let null_states = lz6su_handle
+        .populate_asteroid_belt_entities()
+        .await
+        .expect("LZ-6SU belt asteroids");
     assert!(!null_states.is_empty(), "LZ-6SU must generate belt asteroids");
     assert!(null_states.iter().all(|s| s.type_id != 1230 && s.type_id != 1228));
 
@@ -265,43 +267,33 @@ async fn test_mining_market_ore_mineral_compressed() {
 
     let comp_tid = comp_veldspar.type_id;
 
-    // 2. Live market trading: Seller (PILOT_1) and Buyer (PILOT_2) docked at Jita 4-4
-    let mut s1 = select_pilot(&ctx, 60_001, "demo", "demo-secret", PILOT_1).await;
-    let mut s2 = select_pilot(&ctx, 60_002, "other", "other-secret", PILOT_2).await;
+    // 2. Live market trading: Seller and Buyer docked at Jita 4-4 via GM slash provisioning
+    const SELLER_ID: i64 = 95_600_001;
+    const BUYER_ID: i64 = 95_600_002;
+    ctx.db.provision_gm_account("belt_seller", "belt-seller-secret", SELLER_ID, "Belt Seller");
+    ctx.db.provision_gm_account("belt_buyer", "belt-buyer-secret", BUYER_ID, "Belt Buyer");
+    let mut s1 = select_pilot(&ctx, 60_001, "belt_seller", "belt-seller-secret", SELLER_ID).await;
+    let mut s2 = select_pilot(&ctx, 60_002, "belt_buyer", "belt-buyer-secret", BUYER_ID).await;
+    assert_eq!(s1.station_id, Some(JITA_STATION));
+    assert_eq!(s2.station_id, Some(JITA_STATION));
 
-    let veld_item_id = 890_001_i64;
-    let trit_item_id = 890_002_i64;
-    let comp_item_id = 890_003_i64;
-
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(c1) = snap.characters.get_mut(&PILOT_1) {
-            c1.station_id = Some(JITA_STATION);
-            c1.solar_system_id = JITA_SYS;
-            c1.balance = IskCents::from_isk(1_000_000);
-        }
-        if let Some(c2) = snap.characters.get_mut(&PILOT_2) {
-            c2.station_id = Some(JITA_STATION);
-            c2.solar_system_id = JITA_SYS;
-            c2.balance = IskCents::from_isk(50_000_000);
-        }
-        for (id, tid, qty) in [
-            (veld_item_id, 1230, 5_000),
-            (trit_item_id, 34, 20_000),
-            (comp_item_id, comp_tid, 200),
-        ] {
-            snap.items.insert(id, InventoryItemRecord {
-                item_id: id,
-                type_id: tid,
-                owner_id: PILOT_1,
-                location_id: JITA_STATION,
-                flag: InventoryFlag::Hangar,
-                quantity: qty,
-                ..Default::default()
-            });
-        }
-    });
-    s1.station_id = Some(JITA_STATION);
-    s2.station_id = Some(JITA_STATION);
+    common::slash_cmd(&ctx, &mut s1, "/giveisk 1000000").await;
+    common::slash_cmd(&ctx, &mut s2, "/giveisk 50000000").await;
+    let veld_item_id = common::slash_cmd(&ctx, &mut s1, "/createitem 1230 5000")
+        .await
+        .dict_get("itemID")
+        .and_then(|v| v.as_i64())
+        .expect("veld itemID");
+    let trit_item_id = common::slash_cmd(&ctx, &mut s1, "/createitem 34 20000")
+        .await
+        .dict_get("itemID")
+        .and_then(|v| v.as_i64())
+        .expect("trit itemID");
+    let comp_item_id = common::slash_cmd(&ctx, &mut s1, &format!("/createitem {comp_tid} 200"))
+        .await
+        .dict_get("itemID")
+        .and_then(|v| v.as_i64())
+        .expect("comp itemID");
 
     // Seller places multi sell orders for ore, mineral, and compressed ore
     let sell_orders = vec![
@@ -323,8 +315,16 @@ async fn test_mining_market_ore_mineral_compressed() {
     }
 
     // Buyer executes multi purchase across ore, mineral, and compressed ore
-    let buyer_balance_before = ctx.db.with_snapshot(|s| s.characters.get(&PILOT_2).unwrap().balance.to_f64_isk());
-    let seller_balance_before = ctx.db.with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.to_f64_isk());
+    let buyer_balance_before = rpc(&ctx, &mut s2, "account", "GetCashBalance", &[])
+        .await
+        .expect("buyer GetCashBalance before")
+        .as_f64()
+        .expect("buyer balance f64");
+    let seller_balance_before = rpc(&ctx, &mut s1, "account", "GetCashBalance", &[])
+        .await
+        .expect("seller GetCashBalance before")
+        .as_f64()
+        .expect("seller balance f64");
 
     let buy_entries = vec![
         PyRep::Tuple(vec![PyRep::Integer(1230), PyRep::Integer(500), PyRep::Real(10.0)]),
@@ -343,8 +343,16 @@ async fn test_mining_market_ore_mineral_compressed() {
     let expected_cost = 500.0 * 10.0 + 1_000.0 * 5.0 + 20.0 * 50.0;
     assert_eq!(buy_kv.get("totalCostISK"), Some(&PyRep::Real(expected_cost)));
 
-    let buyer_balance_after = ctx.db.with_snapshot(|s| s.characters.get(&PILOT_2).unwrap().balance.to_f64_isk());
-    let seller_balance_after = ctx.db.with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.to_f64_isk());
+    let buyer_balance_after = rpc(&ctx, &mut s2, "account", "GetCashBalance", &[])
+        .await
+        .expect("buyer GetCashBalance after")
+        .as_f64()
+        .expect("buyer balance after f64");
+    let seller_balance_after = rpc(&ctx, &mut s1, "account", "GetCashBalance", &[])
+        .await
+        .expect("seller GetCashBalance after")
+        .as_f64()
+        .expect("seller balance after f64");
 
     assert!((buyer_balance_before - buyer_balance_after - expected_cost).abs() < 1e-2);
     assert!(seller_balance_after > seller_balance_before);
@@ -355,7 +363,7 @@ async fn test_mining_market_ore_mineral_compressed() {
             let actual: i32 = snap
                 .items
                 .values()
-                .filter(|it| it.owner_id == PILOT_2 && it.location_id == JITA_STATION && it.type_id == tid)
+                .filter(|it| it.owner_id == BUYER_ID && it.location_id == JITA_STATION && it.type_id == tid)
                 .map(|it| it.quantity)
                 .sum();
             assert_eq!(actual, expected_qty, "Buyer hangar must have {expected_qty} of type {tid}");

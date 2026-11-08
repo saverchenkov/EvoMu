@@ -532,3 +532,4 @@ mod pve_seasons_hacking_crab_e2e;
 mod pve_homefront_incursions_e2e;
 mod pve_insurgency_wormholes_arena_e2e;
 mod corp_rbac_and_market_acl_regressions;
+mod live_e2e_parity_unblock;

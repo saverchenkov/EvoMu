@@ -1900,63 +1900,107 @@ async fn test_mn01_sde_mining_static_data_and_distributions() {
 #[tokio::test]
 async fn test_mn02_asteroid_belts_as_balls_highsec_and_nullsec() {
     // parity: plan:MN-02
+    eve_testkit::attest(&["plan:MN-02"]);
     let ctx = ServerContext::new();
-    let mut sess = SessionState::new(9102);
-    login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
-    let _ = ctx
-        .dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(90_000_001)], &kw, None)
+
+    // 1. Live high-sec system (Perimeter 30000144, Caldari 1.0) & null-sec system (30000208 LZ-6SU)
+    //    spawn real asteroid belt balls and asteroids with authentic security/region ore sets.
+    let mut pilot = crate::common::gm_pilot_in_space(&ctx, 9102, 95_091_002, 587, 30_000_144).await;
+    let perim_handle = ctx.systems.get_or_spawn(30_000_144);
+    let _ = perim_handle.populate_asteroid_belt_entities().await;
+    let perim_belts: Vec<_> = ctx
+        .sde
+        .celestials_in_system(30_000_144)
+        .into_iter()
+        .filter(|c| c.group_id == 9)
+        .collect();
+    assert!(!perim_belts.is_empty(), "Perimeter must have SDE asteroid belts");
+    let target_belt = &perim_belts[0];
+
+    let (_, belt_ball) = perim_handle
+        .get_ball_snapshot(target_belt.celestial_id)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("Perimeter belt ball must exist in live ballpark");
+    assert_eq!(belt_ball.mode, MovementMode::Rigid);
 
-    // High-sec system (Perimeter 30000144, highsec 0.90): belts contain ONLY high-sec ores (volume <= 0.35 m3)
-    let mut highsec_bp = Ballpark::new(30_000_144);
-    let highsec_states = populate_asteroid_belt_entities(&mut highsec_bp, 30_000_144, &ctx.sde);
-    assert!(!highsec_states.is_empty());
-    for st in &highsec_states {
-        let ore = ctx.sde.get_type(st.type_id).unwrap();
-        assert!(ore.volume <= 0.35, "High-sec belt must contain only high-sec ores, found {}", ore.name);
-        let ball = highsec_bp.balls.get(&st.asteroid_id).expect("Asteroid ball in ballpark");
-        assert!(ball.radius >= 60.0);
+    let perim_expected: std::collections::BTreeSet<u32> = ctx
+        .sde
+        .belt_ores_for_system(30_000_144)
+        .into_iter()
+        .map(|t| t.type_id)
+        .collect();
+    assert_eq!(perim_expected, std::collections::BTreeSet::from([1230, 1228]));
+
+    let mut perim_spawned = std::collections::BTreeSet::new();
+    for offset in 0..perim_expected.len() as i64 {
+        let aid = 750_000_000i64 + offset;
+        let (_, ast_ball) = perim_handle
+            .get_ball_snapshot(aid)
+            .await
+            .unwrap()
+            .expect("Perimeter asteroid ball in ballpark");
+        assert_eq!(ast_ball.mode, MovementMode::Stop);
+        assert!(ast_ball.radius >= 60.0);
+        perim_spawned.insert(ast_ball.type_id);
     }
+    assert_eq!(perim_spawned, perim_expected);
 
-    // 0.0 / Null-sec system (30000208 LZ-6SU): has null-sec ores (volume > 3.0 m3)
-    let mut null_bp = Ballpark::new(30_000_208);
-    let null_states = populate_asteroid_belt_entities(&mut null_bp, 30_000_208, &ctx.sde);
-    assert!(!null_states.is_empty());
-    assert!(
-        null_states.iter().all(|st| ctx.sde.get_type(st.type_id).unwrap().volume > 3.0),
-        "0.0 system must spawn null-sec ores"
-    );
+    let null_handle = ctx.systems.get_or_spawn(30_000_208);
+    let _ = null_handle.populate_asteroid_belt_entities().await;
+    let null_expected: std::collections::BTreeSet<u32> = ctx
+        .sde
+        .belt_ores_for_system(30_000_208)
+        .into_iter()
+        .map(|t| t.type_id)
+        .collect();
+    assert!(!null_expected.contains(&1230) && !null_expected.contains(&1228));
+    assert!(null_expected.contains(&1229) && null_expected.contains(&11396));
+    let mut null_spawned = std::collections::BTreeSet::new();
+    for offset in 0..null_expected.len() as i64 {
+        let aid = 750_208_000i64 + offset;
+        let (_, ast_ball) = null_handle
+            .get_ball_snapshot(aid)
+            .await
+            .unwrap()
+            .expect("Nullsec asteroid ball in ballpark");
+        assert!(ast_ball.radius >= 60.0);
+        null_spawned.insert(ast_ball.type_id);
+    }
+    assert_eq!(null_spawned, null_expected);
 
-    // Undock in Perimeter and warp to an asteroid belt -> OnWarpStarted fires (OnWarpToAsteroidBelt is client_local)
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
-            ch.solar_system_id = 30_000_144;
-            ch.station_id = Some(60_003_766);
-            if let Some(ship) = snap.items.get_mut(&ch.active_ship_id) {
-                ship.location_id = 60_003_766;
-            }
-        }
-    });
-    sess.solar_system_id = Some(30_000_144);
-    sess.station_id = Some(60_003_766);
-    let _ = ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None).await.unwrap();
-    let perim_belt_id = ctx.sde.celestials_in_system(30_000_144).into_iter().find(|c| c.group_id == 9).unwrap().celestial_id;
-    let _ = ctx.drain_notifications_for_char(90_000_001);
+    // 2. Warp live pilot to Perimeter belt via beyonce.CmdWarpToStuff and step server ticks
+    let _ = ctx.drain_notifications_for_char(pilot.char_id);
     ctx.dispatch_rpc(
-        &mut sess,
+        &mut pilot.sess,
         "beyonce",
-        None,
+        Some(pilot.beyonce),
         "CmdWarpToStuff",
-        &[PyRep::String("item".into()), PyRep::Integer(perim_belt_id), PyRep::Real(0.0)],
+        &[
+            PyRep::String("item".into()),
+            PyRep::Integer(target_belt.celestial_id),
+            PyRep::Real(0.0),
+        ],
         &kw,
         None,
     )
     .await
     .expect("CmdWarpToStuff to Perimeter belt");
-    let notifs = ctx.drain_notifications_for_char(90_000_001);
-    assert!(notifs.iter().any(|n| n.event == "OnWarpStarted"));
+    for _ in 0..40 {
+        let _ = perim_handle.tick().await;
+        if let Ok(Some((_, b))) = perim_handle.get_ball_snapshot(pilot.ship_id).await {
+            if b.position.distance(target_belt.position) < 150_000.0
+                && !matches!(b.mode, MovementMode::Warp { .. })
+            {
+                break;
+            }
+        }
+    }
+    let (_, ship_after) = perim_handle.get_ball_snapshot(pilot.ship_id).await.unwrap().unwrap();
+    assert!(ship_after.position.distance(target_belt.position) < 150_000.0);
+    let notifs = ctx.drain_notifications_for_char(pilot.char_id);
     assert!(!notifs.iter().any(|n| n.event == "OnWarpToAsteroidBelt"));
 }
 

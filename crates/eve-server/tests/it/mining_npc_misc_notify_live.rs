@@ -263,7 +263,7 @@ async fn test_live_crimewatch_system_criminal_and_disapproval_flag_notifications
     ctx.dispatch_rpc(&mut attacker.sess, "beyonce", Some(attacker.beyonce), "CmdDock", &[PyRep::Integer(JITA_STN)], &HashMap::new(), None)
         .await
         .expect("CmdDock Jita 4-4");
-    attacker.sess.station_id = Some(JITA_STN);
+    assert_eq!(attacker.sess.station_id, Some(JITA_STN));
     common::slash_cmd(&ctx, &mut attacker.sess, "/giveskill 3300 5").await;
     common::slash_cmd(&ctx, &mut attacker.sess, "/giveskill 3301 5").await;
     common::slash_cmd(&ctx, &mut attacker.sess, "/giveskill 12210 1").await;
@@ -271,8 +271,8 @@ async fn test_live_crimewatch_system_criminal_and_disapproval_flag_notifications
     let _ammo_id = common::stock_ship_bay(&ctx, &mut attacker, 222, 100, InventoryFlag::Cargo as i64).await;
     ctx.advance_secs(31);
     rpc(&ctx, &mut attacker.sess, "stationSvc", "Undock", &[]).await.unwrap();
-    attacker.sess.station_id = None;
-    attacker.sess.solar_system_id = Some(JITA_SYS);
+    assert_eq!(attacker.sess.station_id, None);
+    assert_eq!(attacker.sess.solar_system_id, Some(JITA_SYS));
     attacker.beyonce = bind_oid(&ctx, &mut attacker.sess, "beyonce", PyRep::Integer(JITA_SYS as i64)).await;
 
     let victim = common::gm_pilot_in_space(&ctx, 95_202, PILOT_B, 587, JITA_SYS).await;
@@ -322,77 +322,79 @@ async fn test_live_crimewatch_system_criminal_and_disapproval_flag_notifications
     assert!(rep_list(&crim_notif.args[2]).iter().any(|x| x.as_i64() == Some(PILOT_A)));
 
     // 2. Zarzakh (30100000) aggression -> OnSystemDisapprovalFlagUpdates
-    let mut attacker2 = common::gm_pilot_in_space(&ctx, 95_203, 95_000_003, 47466, JITA_SYS).await;
-    ctx.dispatch_rpc(&mut attacker2.sess, "beyonce", Some(attacker2.beyonce), "CmdDock", &[PyRep::Integer(JITA_STN)], &HashMap::new(), None)
-        .await
-        .expect("CmdDock Jita 4-4");
-    attacker2.sess.station_id = Some(JITA_STN);
-    common::slash_cmd(&ctx, &mut attacker2.sess, "/giveskill 3300 5").await;
-    common::slash_cmd(&ctx, &mut attacker2.sess, "/giveskill 3301 5").await;
-    common::slash_cmd(&ctx, &mut attacker2.sess, "/giveskill 12210 1").await;
-    let gun2_id = common::stock_ship_bay(&ctx, &mut attacker2, 3170, 1, InventoryFlag::HiSlot0 as i64).await;
-    let _ammo2_id = common::stock_ship_bay(&ctx, &mut attacker2, 222, 100, InventoryFlag::Cargo as i64).await;
-    ctx.advance_secs(31);
-    rpc(&ctx, &mut attacker2.sess, "stationSvc", "Undock", &[]).await.unwrap();
-    attacker2.sess.station_id = None;
-    attacker2.sess.ship_id = Some(attacker2.ship_id);
-    common::slash_cmd(&ctx, &mut attacker2.sess, &format!("/tr {ZARZAKH_SYS}")).await;
-    attacker2.sess.solar_system_id = Some(ZARZAKH_SYS);
-    attacker2.beyonce = bind_oid(&ctx, &mut attacker2.sess, "beyonce", PyRep::Integer(ZARZAKH_SYS as i64)).await;
-
-    let victim2 = common::gm_pilot_in_space(&ctx, 95_204, 95_000_004, 47466, ZARZAKH_SYS).await;
+    const FULCRUM_STATION: i64 = 60_015_187;
+    let mut attacker2 = common::gm_pilot_in_space(&ctx, 95_203, 95_000_003, 47466, ZARZAKH_SYS).await;
     let z_handle = ctx.systems.get_or_spawn(ZARZAKH_SYS);
-    let _ = z_handle.set_ball_position(victim2.ship_id, DVec3::new(15_000.0, 0.0, 0.0)).await;
-    let z_gate_id = ctx
-        .sde
-        .stargates()
-        .values()
-        .find(|g| g.from_solar_system_id == ZARZAKH_SYS)
-        .map(|g| g.stargate_id)
-        .expect("Zarzakh stargate");
     ctx.dispatch_rpc(
         &mut attacker2.sess,
         "beyonce",
         Some(attacker2.beyonce),
         "CmdWarpToStuff",
-        &[PyRep::String("item".into()), PyRep::Integer(z_gate_id), PyRep::Real(0.0)],
+        &[PyRep::String("item".into()), PyRep::Integer(FULCRUM_STATION), PyRep::Real(0.0)],
         &HashMap::new(),
         None,
     )
     .await
-    .expect("Warp attacker2 to Zarzakh gate");
+    .expect("Warp attacker2 to Fulcrum");
+    for _ in 0..80 {
+        ctx.advance_secs(1);
+        let _ = z_handle.tick().await;
+        if let Ok(Some((_, b))) = z_handle.get_ball_snapshot(attacker2.ship_id).await {
+            if !matches!(b.mode, MovementMode::Warp { .. }) {
+                break;
+            }
+        }
+    }
+    ctx.dispatch_rpc(&mut attacker2.sess, "beyonce", Some(attacker2.beyonce), "CmdDock", &[PyRep::Integer(FULCRUM_STATION)], &HashMap::new(), None)
+        .await
+        .expect("CmdDock Fulcrum");
+    assert_eq!(attacker2.sess.station_id, Some(FULCRUM_STATION));
+    common::slash_cmd(&ctx, &mut attacker2.sess, "/giveskill 3300 5").await;
+    common::slash_cmd(&ctx, &mut attacker2.sess, "/giveskill 3301 5").await;
+    common::slash_cmd(&ctx, &mut attacker2.sess, "/giveskill 12210 1").await;
+    let gun2_id = common::stock_ship_bay(&ctx, &mut attacker2, 3170, 1, InventoryFlag::HiSlot0 as i64).await;
+    let _ammo2_id = common::stock_ship_bay(&ctx, &mut attacker2, 222, 100, InventoryFlag::Cargo as i64).await;
+    rpc(&ctx, &mut attacker2.sess, "dogmaIM", "ShipOnlineModules", &[PyRep::Integer(attacker2.ship_id)]).await.unwrap();
+    ctx.advance_secs(31);
+    rpc(&ctx, &mut attacker2.sess, "stationSvc", "Undock", &[]).await.unwrap();
+    assert_eq!(attacker2.sess.station_id, None);
+    assert_eq!(attacker2.sess.ship_id, Some(attacker2.ship_id));
+    assert_eq!(attacker2.sess.solar_system_id, Some(ZARZAKH_SYS));
+    attacker2.beyonce = bind_oid(&ctx, &mut attacker2.sess, "beyonce", PyRep::Integer(ZARZAKH_SYS as i64)).await;
+
+    let victim2 = common::gm_pilot_in_space(&ctx, 95_204, 95_000_004, 47466, ZARZAKH_SYS).await;
     let mut v2_sess = victim2.sess.clone();
     ctx.dispatch_rpc(
         &mut v2_sess,
         "beyonce",
         Some(victim2.beyonce),
         "CmdWarpToStuff",
-        &[PyRep::String("item".into()), PyRep::Integer(z_gate_id), PyRep::Real(5_000.0)],
+        &[PyRep::String("item".into()), PyRep::Integer(FULCRUM_STATION), PyRep::Real(0.0)],
         &HashMap::new(),
         None,
     )
     .await
-    .expect("Warp victim2 to Zarzakh gate");
-    let (mut a_warped, mut v_warped) = (false, false);
-    for i in 0..150 {
+    .expect("Warp victim2 to Fulcrum safe zone");
+    for _ in 0..80 {
         ctx.advance_secs(1);
         let _ = z_handle.tick().await;
-        if let (Ok(Some((_, a_b))), Ok(Some((_, v_b)))) = (
-            z_handle.get_ball_snapshot(attacker2.ship_id).await,
-            z_handle.get_ball_snapshot(victim2.ship_id).await,
-        ) {
-            let aw = matches!(a_b.mode, MovementMode::Warp { .. });
-            let vw = matches!(v_b.mode, MovementMode::Warp { .. });
-            if aw { a_warped = true; }
-            if vw { v_warped = true; }
-            if !aw && !vw && ((a_warped && v_warped) || i > 40) {
+        if let Ok(Some((_, v_b))) = z_handle.get_ball_snapshot(victim2.ship_id).await {
+            if !matches!(v_b.mode, MovementMode::Warp { .. }) {
                 break;
             }
         }
     }
-    for _ in 0..15 {
-        ctx.advance_secs(1);
+    ctx.dispatch_rpc(&mut v2_sess, "beyonce", Some(victim2.beyonce), "CmdDock", &[PyRep::Integer(FULCRUM_STATION)], &HashMap::new(), None)
+        .await
+        .expect("CmdDock victim2 Fulcrum");
+    ctx.advance_secs(31);
+    rpc(&ctx, &mut v2_sess, "stationSvc", "Undock", &[]).await.unwrap();
+    let v2_pos = z_handle.get_ball_snapshot(victim2.ship_id).await.unwrap().unwrap().1.position;
+    let a2_pos = z_handle.get_ball_snapshot(attacker2.ship_id).await.unwrap().unwrap().1.position;
+    if a2_pos.distance(v2_pos) > 15_000.0 {
+        rpc(&ctx, &mut attacker2.sess, "beyonce", "CmdStop", &[]).await.ok();
         let _ = z_handle.tick().await;
+        common::fly_to(&ctx, &mut attacker2, v2_pos + DVec3::new(2_000.0, 0.0, 0.0)).await;
     }
 
     let z_dogma_oid = bind_oid(&ctx, &mut attacker2.sess, "dogmaIM", PyRep::Integer(ZARZAKH_SYS as i64)).await;
@@ -445,16 +447,20 @@ async fn test_live_campaign_enrollment_and_tournament_ban_notifications() {
     let mut s1 = SessionState::new(95_301);
     common::login_pilot(&ctx, &mut s1, "demo", "demo-secret").await;
     rpc(&ctx, &mut s1, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(DEMO_CHAR)]).await.unwrap();
-    s1.role |= eve_db::service_roles::ROLE_GM_DEFAULT;
 
-    ctx.db.provision_gm_account("pilotb", "pilotb-secret", PILOT_B, "Pilot B");
+    const OTHER_CHAR: i64 = 90_000_002;
     let mut s2 = SessionState::new(95_302);
-    common::login_pilot(&ctx, &mut s2, "pilotb", "pilotb-secret").await;
-    rpc(&ctx, &mut s2, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_B)]).await.unwrap();
-    s2.role = eve_db::service_roles::ROLE_PLAYER;
+    common::login_pilot(&ctx, &mut s2, "other", "other-secret").await;
+    rpc(&ctx, &mut s2, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(OTHER_CHAR)]).await.unwrap();
+
+    const GM_TOURNEY_CHAR: i64 = 95_000_010;
+    ctx.db.provision_gm_account("gm_tourney", "gm-tourney-secret", GM_TOURNEY_CHAR, "GM Tourney");
+    let mut gm = SessionState::new(95_303);
+    common::login_pilot(&ctx, &mut gm, "gm_tourney", "gm-tourney-secret").await;
+    rpc(&ctx, &mut gm, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(GM_TOURNEY_CHAR)]).await.unwrap();
 
     let _ = ctx.drain_notifications_for_char(DEMO_CHAR);
-    let _ = ctx.drain_notifications_for_char(PILOT_B);
+    let _ = ctx.drain_notifications_for_char(OTHER_CHAR);
 
     // 1. OnCampaignEnrollmentChanged via live facWarMgr.JoinFactionAsCharacter
     let joined = rpc(&ctx, &mut s1, "facWarMgr", "JoinFactionAsCharacter", &[PyRep::Integer(500_001)])
@@ -467,7 +473,7 @@ async fn test_live_campaign_enrollment_and_tournament_ban_notifications() {
     assert_eq!(camp_a.len(), 1);
     assert_eq!(camp_a[0].id_type, "charid");
     assert!(camp_a[0].args.is_empty());
-    assert!(!ctx.drain_notifications_for_char(PILOT_B).iter().any(|n| n.event == "OnCampaignEnrollmentChanged"));
+    assert!(!ctx.drain_notifications_for_char(OTHER_CHAR).iter().any(|n| n.event == "OnCampaignEnrollmentChanged"));
 
     // Verify per-character login campaign enrollment isolation via /campaign enroll + get_client_campaign_state
     let before_b_camp = rpc(&ctx, &mut s2, "loginCampaignManager", "get_client_campaign_state", &[])
@@ -478,7 +484,7 @@ async fn test_live_campaign_enrollment_and_tournament_ban_notifications() {
         .copied()
         .next()
         .unwrap_or(2261);
-    let _ = common::slash_cmd(&ctx, &mut s1, &format!("/campaign enroll {camp_id} {DEMO_CHAR}")).await;
+    let _ = common::slash_cmd(&ctx, &mut gm, &format!("/campaign enroll {camp_id} {DEMO_CHAR}")).await;
     assert_eq!(
         ctx.drain_notifications_for_char(DEMO_CHAR)
             .iter()
@@ -486,16 +492,16 @@ async fn test_live_campaign_enrollment_and_tournament_ban_notifications() {
             .count(),
         1
     );
-    assert!(!ctx.drain_notifications_for_char(PILOT_B).iter().any(|n| n.event == "OnCampaignEnrollmentChanged"));
+    assert!(!ctx.drain_notifications_for_char(OTHER_CHAR).iter().any(|n| n.event == "OnCampaignEnrollmentChanged"));
     let after_b_camp = rpc(&ctx, &mut s2, "loginCampaignManager", "get_client_campaign_state", &[])
         .await
         .expect("get_client_campaign_state B after");
-    assert_eq!(before_b_camp, after_b_camp, "per-character enrollment must not alter PILOT_B's campaign state");
+    assert_eq!(before_b_camp, after_b_camp, "per-character enrollment must not alter OTHER_CHAR's campaign state");
 
-    // 2. OnTournamentPerformBan via live tourneyMgr.CreateMatch + BanShip (captain ban) + StartAutobanning
+    // 2. OnTournamentPerformBan via live tourneyMgr.CreateMatch + BanShip (captain ban)
     rpc(
         &ctx,
-        &mut s1,
+        &mut gm,
         "tourneyMgr",
         "CreateMatch",
         &[
@@ -506,14 +512,14 @@ async fn test_live_campaign_enrollment_and_tournament_ban_notifications() {
             PyRep::Integer(0),
             PyRep::Integer(0),
             PyRep::List(vec![PyRep::Integer(1), PyRep::Integer(2)]),
-            PyRep::List(vec![PyRep::Integer(DEMO_CHAR), PyRep::Integer(PILOT_B)]),
+            PyRep::List(vec![PyRep::Integer(DEMO_CHAR), PyRep::Integer(OTHER_CHAR)]),
         ],
     )
     .await
     .expect("CreateMatch");
 
     let _ = ctx.drain_notifications_for_char(DEMO_CHAR);
-    let _ = ctx.drain_notifications_for_char(PILOT_B);
+    let _ = ctx.drain_notifications_for_char(OTHER_CHAR);
 
     let capt_ban = rpc(
         &ctx,
@@ -526,11 +532,11 @@ async fn test_live_campaign_enrollment_and_tournament_ban_notifications() {
     .expect("captain BanShip");
     assert_eq!(capt_ban, PyRep::Bool(true));
 
-    let ban_notifs_b = ctx.drain_notifications_for_char(PILOT_B);
+    let ban_notifs_b = ctx.drain_notifications_for_char(OTHER_CHAR);
     let ban_ev = ban_notifs_b
         .iter()
         .find(|n| n.event == "OnTournamentPerformBan")
-        .expect("blue captain PILOT_B must receive OnTournamentPerformBan");
+        .expect("blue captain OTHER_CHAR must receive OnTournamentPerformBan");
     assert_eq!(ban_ev.id_type, "charid");
     assert_eq!(ban_ev.args.len(), 6);
     assert_eq!(ban_ev.args[0].as_i64(), Some(7701));
@@ -552,20 +558,20 @@ async fn test_live_cache_setting_raffle_seeding_and_plan_e5_missions() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
-    ctx.db.provision_gm_account("pilotb2", "pilotb2-secret", PILOT_B, "Pilot B2");
+    const OTHER_CHAR: i64 = 90_000_002;
     let mut non_gm = SessionState::new(95_401);
-    common::login_pilot(&ctx, &mut non_gm, "pilotb2", "pilotb2-secret").await;
-    rpc(&ctx, &mut non_gm, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_B)]).await.unwrap();
-    non_gm.role = eve_db::service_roles::ROLE_PLAYER;
-    non_gm.solar_system_id = Some(JITA_SYS);
-    non_gm.station_id = Some(JITA_STN);
+    common::login_pilot(&ctx, &mut non_gm, "other", "other-secret").await;
+    rpc(&ctx, &mut non_gm, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(OTHER_CHAR)]).await.unwrap();
+    assert_eq!(non_gm.solar_system_id, Some(JITA_SYS));
+    assert_eq!(non_gm.station_id, Some(JITA_STN));
 
+    const GM_OPS_CHAR: i64 = 95_000_011;
+    ctx.db.provision_gm_account("gm_ops", "gm-ops-secret", GM_OPS_CHAR, "GM Ops");
     let mut gm = SessionState::new(95_402);
-    common::login_pilot(&ctx, &mut gm, "demo", "demo-secret").await;
-    rpc(&ctx, &mut gm, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(DEMO_CHAR)]).await.unwrap();
-    gm.role |= eve_db::service_roles::ROLE_GM_DEFAULT;
-    gm.solar_system_id = Some(JITA_SYS);
-    gm.station_id = Some(JITA_STN);
+    common::login_pilot(&ctx, &mut gm, "gm_ops", "gm-ops-secret").await;
+    rpc(&ctx, &mut gm, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(GM_OPS_CHAR)]).await.unwrap();
+    assert_eq!(gm.solar_system_id, Some(JITA_SYS));
+    assert_eq!(gm.station_id, Some(JITA_STN));
 
     // 1. rpc:cache.Setting: non-GM write rejected, GM write/read/clear persisted
     rpc(&ctx, &mut non_gm, "cache", "Setting", &[PyRep::String("zsystem".into()), PyRep::String("LiveTestKey".into()), PyRep::String("Blocked".into())])
@@ -598,19 +604,19 @@ async fn test_live_cache_setting_raffle_seeding_and_plan_e5_missions() {
         .expect_err("undocked QA_SeedRaffles must fail");
     assert_eq!(err_undocked.message, "CharacterNotDocked");
 
-    let _ = ctx.drain_notifications_for_char(DEMO_CHAR);
+    let _ = ctx.drain_notifications_for_char(GM_OPS_CHAR);
     let seeded = rpc(&ctx, &mut gm, "raffleMgr", "QA_SeedRaffles", &[PyRep::Integer(2), PyRep::Integer(587)])
         .await
         .expect("GM QA_SeedRaffles");
     let raffles = rep_list(&seeded);
     assert_eq!(raffles.len(), 2);
     for r in raffles {
-        assert_eq!(r.dict_get("owner_id").and_then(|v| v.as_i64()), Some(DEMO_CHAR));
+        assert_eq!(r.dict_get("owner_id").and_then(|v| v.as_i64()), Some(GM_OPS_CHAR));
         assert_eq!(r.dict_get("location_id").and_then(|v| v.as_i64()), Some(JITA_STN));
         assert_eq!(r.dict_get("type_id").and_then(|v| v.as_i64()), Some(587));
         assert_eq!(r.dict_get("ticket_count").and_then(|v| v.as_i64()), Some(8));
     }
-    assert_eq!(ctx.drain_notifications_for_char(DEMO_CHAR).iter().filter(|n| n.event == "OnRaffleCreatedServer").count(), 2, "OnRaffleCreatedServer emitted");
+    assert_eq!(ctx.drain_notifications_for_char(GM_OPS_CHAR).iter().filter(|n| n.event == "OnRaffleCreatedServer").count(), 2, "OnRaffleCreatedServer emitted");
 
     // 3. plan:E-5: Live Agent Finder, Conversation/Offer, Accept, Journal, and Quit
     let agents_rep = rpc(&ctx, &mut non_gm, "agentMgr", "GetAgents", &[])
@@ -627,54 +633,54 @@ async fn test_live_cache_setting_raffle_seeding_and_plan_e5_missions() {
     let agent_id = agent_row[0].as_i64().expect("agentID");
     let agent_sys = agent_row[5].as_i64().unwrap_or(JITA_SYS as i64) as u32;
     let agent_stn = agent_row[6].as_i64().unwrap_or(JITA_STN);
-    if agent_stn != JITA_STN {
-        non_gm.role |= eve_db::service_roles::ROLE_GM_DEFAULT;
-        rpc(&ctx, &mut non_gm, "stationSvc", "Undock", &[]).await.unwrap();
-        common::slash_cmd(&ctx, &mut non_gm, &format!("/tr {agent_sys}")).await;
-        ctx.advance_secs(31);
-        let b_oid = bind_oid(&ctx, &mut non_gm, "beyonce", PyRep::Integer(agent_sys as i64)).await;
-        ctx.dispatch_rpc(
-            &mut non_gm,
-            "beyonce",
-            Some(b_oid),
-            "CmdWarpToStuff",
-            &[PyRep::String("item".into()), PyRep::Integer(agent_stn), PyRep::Real(0.0)],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .expect("CmdWarpToStuff agent station");
-        let sys_h = ctx.systems.get_or_spawn(agent_sys);
-        for _ in 0..40 {
-            let _ = sys_h.tick().await;
+    let mut e5 = common::gm_pilot_in_space(&ctx, 95_404, 95_000_012, 587, agent_sys).await;
+    ctx.dispatch_rpc(
+        &mut e5.sess,
+        "beyonce",
+        Some(e5.beyonce),
+        "CmdWarpToStuff",
+        &[PyRep::String("item".into()), PyRep::Integer(agent_stn), PyRep::Real(0.0)],
+        &HashMap::new(),
+        None,
+    )
+    .await
+    .expect("CmdWarpToStuff agent station");
+    let sys_h = ctx.systems.get_or_spawn(agent_sys);
+    for _ in 0..80 {
+        let _ = sys_h.tick().await;
+        if let Ok(Some((_, b))) = sys_h.get_ball_snapshot(e5.ship_id).await {
+            if !matches!(b.mode, MovementMode::Warp { .. }) {
+                break;
+            }
         }
-        ctx.dispatch_rpc(&mut non_gm, "beyonce", Some(b_oid), "CmdDock", &[PyRep::Integer(agent_stn)], &HashMap::new(), None)
-            .await
-            .expect("CmdDock agent station");
-        non_gm.role = eve_db::service_roles::ROLE_PLAYER;
     }
+    ctx.dispatch_rpc(&mut e5.sess, "beyonce", Some(e5.beyonce), "CmdDock", &[PyRep::Integer(agent_stn)], &HashMap::new(), None)
+        .await
+        .expect("CmdDock agent station");
+    assert_eq!(e5.sess.station_id, Some(agent_stn));
 
-    let agent_oid = bind_oid(&ctx, &mut non_gm, "agentMgr", PyRep::Integer(agent_id)).await;
+    let agent_oid = bind_oid(&ctx, &mut e5.sess, "agentMgr", PyRep::Integer(agent_id)).await;
+
     let offer_rep = ctx
-        .dispatch_rpc(&mut non_gm, "agentMgr", Some(agent_oid), "DoAction", &[PyRep::Integer(2)], &HashMap::new(), None)
+        .dispatch_rpc(&mut e5.sess, "agentMgr", Some(agent_oid), "DoAction", &[PyRep::Integer(2)], &HashMap::new(), None)
         .await
         .expect("DoAction(2) RequestMission");
     assert!(!matches!(offer_rep, PyRep::None));
 
     let accept_rep = ctx
-        .dispatch_rpc(&mut non_gm, "agentMgr", Some(agent_oid), "DoAction", &[PyRep::Integer(4)], &HashMap::new(), None)
+        .dispatch_rpc(&mut e5.sess, "agentMgr", Some(agent_oid), "DoAction", &[PyRep::Integer(4)], &HashMap::new(), None)
         .await
         .expect("DoAction(4) AcceptMission");
     assert!(!matches!(accept_rep, PyRep::None));
 
-    let journal = rpc(&ctx, &mut non_gm, "agentMgr", "GetMyJournalDetails", &[])
+    let journal = rpc(&ctx, &mut e5.sess, "agentMgr", "GetMyJournalDetails", &[])
         .await
         .expect("GetMyJournalDetails");
     let missions_list = rep_list(&rep_list(&journal)[0]);
     assert!(!missions_list.is_empty(), "accepted mission must appear in GetMyJournalDetails");
 
     let _quit_rep = ctx
-        .dispatch_rpc(&mut non_gm, "agentMgr", Some(agent_oid), "DoAction", &[PyRep::Integer(11)], &HashMap::new(), None)
+        .dispatch_rpc(&mut e5.sess, "agentMgr", Some(agent_oid), "DoAction", &[PyRep::Integer(11)], &HashMap::new(), None)
         .await
         .expect("DoAction(11) QuitMission");
 }
