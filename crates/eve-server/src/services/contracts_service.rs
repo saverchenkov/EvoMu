@@ -674,6 +674,7 @@ pub fn handle(
                             item.flag = acceptor_flag;
                             item.version += 1;
                         }
+                        snap.sp6_lifecycle.self_destructs.remove(iid);
                     }
                     if let Some(c_mut) = snap.contracts.get_mut(&cid) {
                         c_mut.acceptor_id = Some(acceptor_entity_id);
@@ -847,6 +848,7 @@ pub fn handle(
                             item.flag = InventoryFlag::Hangar;
                             item.version += 1;
                         }
+                        snap.sp6_lifecycle.self_destructs.remove(iid);
                     }
                     new_status = "Completed";
                 }

@@ -382,3 +382,69 @@ async fn jump_bridge_and_group_jump_to_structure_beacon_execute() {
     assert_eq!(kv.get("solarSystemID").and_then(|v| v.as_i64()), Some(dst_sys as i64));
     assert_eq!(sess.solar_system_id, Some(dst_sys));
 }
+
+#[tokio::test]
+async fn criminal_wormhole_jump_from_lowsec_into_highsec_schedules_concord() {
+    let ctx = test_ctx();
+    let old_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| s.security_status < 0.0)
+        .map(|s| s.solar_system_id)
+        .expect("lowsec/nullsec system in SDE");
+    let dest_hs_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| s.security_status >= 0.45 && s.solar_system_id != old_sys)
+        .map(|s| s.solar_system_id)
+        .expect("highsec system in SDE");
+    let now_u = ctx.now_unix();
+    let char_id = 96_305_i64;
+    let ship_id = 96_399_i64;
+    let wh_ball_id = 750_000_001_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("char");
+        ch.character_id = char_id;
+        ch.corporation_id = 98_000_001;
+        ch.solar_system_id = old_sys;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        put_item(snap, ship_id, 588, char_id, old_sys as i64, InventoryFlag::None, 1, true);
+        let st_old = snap.system_states.entry(old_sys).or_default();
+        st_old.wormhole_destination_system_id = Some(dest_hs_sys);
+        st_old.wormhole_remaining_mass_kg = 1_000_000_000.0;
+        let st_dest = snap.system_states.entry(dest_hs_sys).or_default();
+        st_dest.wormhole_remaining_mass_kg = 1_000_000_000.0;
+    });
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.get_or_create(char_id).criminal_flag_until_unix = now_u + 900;
+    }
+
+    let old_h = ctx.systems.get_or_spawn(old_sys);
+    spawn_ship(&old_h, ship_id, 588, 25, 6, DVec3::ZERO, DVec3::ZERO, false).await;
+    spawn_ship(&old_h, wh_ball_id, 26272, 988, 2, DVec3::new(500.0, 0.0, 0.0), DVec3::ZERO, false).await;
+
+    let mut sess = make_session(char_id, 98_000_001, Some(old_sys), Some(ship_id));
+    let _ = handle(
+        &ctx,
+        &mut sess,
+        None,
+        "wormholeMgr",
+        "WormholeJump",
+        &[PyRep::Integer(wh_ball_id)],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("wormhole jump ok");
+
+    assert_eq!(sess.solar_system_id, Some(dest_hs_sys));
+    let pending = ctx.crimewatch.read().unwrap().states[&char_id].pending_concord_arrival;
+    assert_eq!(pending.map(|p| (p.0, p.2)), Some((dest_hs_sys, ship_id)));
+}

@@ -368,11 +368,15 @@ async fn test_structure_combat_state_ansiblex_acl_and_fitting_dropoff() {
     rpc(&ctx, &mut s1, "invbroker", "Add", &[PyRep::Integer(mod_item), PyRep::Integer(st_id), PyRep::Integer(InventoryFlag::ServiceSlot0 as i64)])
         .await.expect("Fit ServiceSlot0 module");
 
-    // Deploy Sov Hubs & Ansiblex Jump Gates in nearby sov-null pair VBPT-T <-> TTP-2B (< 5 LY) and link via RPC.
+    // Deploy Sov Hubs & Ansiblex Jump Gates in nearby sov-null pair VBPT-T <-> TTP-2B (< 5 LY)
+    // and link them via V24 `structureDeployment.Anchor` `extraVars["destinationSolarsystemID"]`.
     rpc(&ctx, &mut s1, "structureDocking", "Undock", &[PyRep::Integer(st_id)]).await.expect("Undock st_id");
     ctx.advance_secs(12);
     let mut jb_ids = Vec::new();
-    for (sys_id, hub_name, jb_name) in [(VBPT_T, "VBPT Hub", "JB VBPT"), (TTP_2B, "TTP Hub", "JB TTP")] {
+    for (sys_id, dest_sys_id, hub_name, jb_name) in [
+        (VBPT_T, TTP_2B, "VBPT Hub", "JB VBPT"),
+        (TTP_2B, VBPT_T, "TTP Hub", "JB TTP"),
+    ] {
         gm_tr(&ctx, &mut s1, "demo", P1, sys_id).await;
         let hub_pkg = create_item_as_gm(&ctx, &mut s1, "demo", P1, 32_458, 1).await;
         let hub_id = rpc(&ctx, &mut s1, "structureDeployment", "Anchor", &[PyRep::Integer(hub_pkg), PyRep::String(hub_name.into())])
@@ -386,7 +390,28 @@ async fn test_structure_combat_state_ansiblex_acl_and_fitting_dropoff() {
         settle_warp(&ctx, sys_id, P1_SHIP).await;
         let deep = DVec3::new(50_000_000.0, 50_000_000.0, 50_000_000.0);
         ctx.systems.get_or_spawn(sys_id).set_ball_position(P1_SHIP, deep).await;
-        let jb_id = rpc(&ctx, &mut s1, "structureDeployment", "Anchor", &[PyRep::Integer(jb_pkg), PyRep::String(jb_name.into())])
+        let extra_vars = PyRep::Dict(vec![(
+            PyRep::String("destinationSolarsystemID".into()),
+            PyRep::Integer(i64::from(dest_sys_id)),
+        )]);
+        let jb_id = rpc(
+            &ctx,
+            &mut s1,
+            "structureDeployment",
+            "Anchor",
+            &[
+                PyRep::Integer(jb_pkg),
+                PyRep::None,
+                PyRep::None,
+                PyRep::Real(0.0),
+                PyRep::Integer(0),
+                PyRep::String(jb_name.into()),
+                PyRep::String("".into()),
+                PyRep::Integer(2),
+                PyRep::Integer(18),
+                extra_vars,
+            ],
+        )
             .await.expect("Anchor Ansiblex").dict_get("structureID").and_then(|v| v.as_i64()).unwrap();
         let jb_pos = ctx.db.with_snapshot(|s| DVec3::from_array(s.structures[&jb_id].position));
         ctx.systems.get_or_spawn(sys_id).set_ball_position(P1_SHIP, jb_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
@@ -404,8 +429,13 @@ async fn test_structure_combat_state_ansiblex_acl_and_fitting_dropoff() {
         jb_ids.push(jb_id);
     }
     let (jb_a, jb_b) = (jb_ids[0], jb_ids[1]);
-    rpc(&ctx, &mut s1, "posMgr", "InstallJumpBridgeLink", &[PyRep::Integer(jb_a), PyRep::Integer(jb_b)])
-        .await.expect("InstallJumpBridgeLink");
+    let linked_b = rpc(&ctx, &mut s1, "structureJumpBridgeMgr", "GetLinkedStructure", &[PyRep::Integer(jb_a)])
+        .await.expect("GetLinkedStructure jb_a");
+    let linked_b_id = match linked_b {
+        PyRep::Tuple(items) => items.first().and_then(|v| v.as_i64()),
+        other => other.as_i64(),
+    };
+    assert_eq!(linked_b_id, Some(jb_b));
 
     // Block P2 via real ownerGroup + structureProfiles ACL rules.
     let g_blk = rpc(&ctx, &mut s1, "ownerGroupManager", "Create", &[PyRep::String("Blocked Pilots".into()), PyRep::String("".into())])

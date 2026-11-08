@@ -604,14 +604,6 @@ pub fn handle(
             Some(res.map(|()| PyRep::None))
         }
 
-        ("posMgr", "InstallJumpBridgeLink") => {
-            Some(crate::services::station_structure::structure_lifecycle_rpc::handle_install_jump_bridge_link(ctx, session, args))
-        }
-
-        ("posMgr", "UninstallJumpBridgeLink") => {
-            Some(crate::services::station_structure::structure_lifecycle_rpc::handle_uninstall_jump_bridge_link(ctx, session, args))
-        }
-
         // Legacy POS moon mining was superseded by Upwell Refineries in Lifeblood (V24.01);
         // intentionally returns UnimplementedRPC (`INTENTIONALLY_UNIMPLEMENTED_RPCS`).
         ("posMgr", "RunMoonProcessCycleforTower") => Some(Err(BridgeRpcError {

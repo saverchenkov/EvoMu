@@ -362,6 +362,7 @@ pub async fn step_missiles_and_breachers(
             .collect()
     });
     for cd in due_countdowns {
+        crate::sp6_lifecycle::abort_self_destruct_countdown(ctx, cd.ship_id);
         let pos = sys_handle
             .get_ball_snapshot(cd.ship_id)
             .await
@@ -369,84 +370,14 @@ pub async fn step_missiles_and_breachers(
             .flatten()
             .map(|(_, b)| b.position)
             .unwrap_or(DVec3::ZERO);
-        let (ship_type_id, _vic_corp, _vic_all) = ctx.db.with_snapshot(|snap| {
-            let stid = snap.items.get(&cd.ship_id).map(|i| i.type_id).unwrap_or(670);
-            let (corp, all) = snap
-                .characters
-                .get(&cd.char_id)
-                .map(|c| (c.corporation_id, c.alliance_id))
-                .unwrap_or((1_000_009, None));
-            (stid, corp, all)
-        });
-        if let Ok(death) = crate::combat::death_pipeline::execute_self_destruct(
+        let _ = crate::combat::death_pipeline::execute_live_self_destruct_sync(
             ctx,
             solar_system_id,
             cd.char_id,
             cd.ship_id,
             pos,
             now_unix,
-        )
-        .await
-        {
-            let recent_assists: Vec<AssistLogEntry> = with_mut_combat_runtime(ctx, |rt| {
-                let mut valid = Vec::new();
-                for key in [cd.ship_id, cd.char_id] {
-                    if let Some(list) = rt.aggression_assist_log.remove(&key) {
-                        for e in list {
-                            if now_unix.saturating_sub(e.last_action_unix)
-                                <= KILLMAIL_ASSIST_WINDOW_SECS
-                                && !valid
-                                    .iter()
-                                    .any(|v: &AssistLogEntry| v.attacker_char_id == e.attacker_char_id)
-                            {
-                                valid.push(e);
-                            }
-                        }
-                    }
-                }
-                valid
-            });
-            if !recent_assists.is_empty() {
-                let final_blow_char_id = recent_assists
-                    .last()
-                    .map(|a| a.attacker_char_id)
-                    .unwrap_or(cd.char_id);
-                let hull_cs = ctx.build_type_combat_state(ship_type_id);
-                let hull_hp = (hull_cs.max_shield_hp + hull_cs.max_armor_hp + hull_cs.max_structure_hp).max(1.0);
-                let mut km_attackers = Vec::new();
-                for a in &recent_assists {
-                    km_attackers.push(KillmailAttackerEntry {
-                        character_id: a.attacker_char_id,
-                        corporation_id: a.corporation_id,
-                        alliance_id: a.alliance_id,
-                        ship_type_id: a.ship_type_id,
-                        weapon_type_id: a.weapon_type_id,
-                        damage_done: a.damage_done,
-                        final_blow: a.attacker_char_id == final_blow_char_id,
-                        security_status: 0.0,
-                    });
-                }
-                let assist_dmg: f64 = km_attackers.iter().map(|a| a.damage_done).sum();
-                let km_hash = compute_killmail_esi_hash(
-                    cd.char_id,
-                    final_blow_char_id,
-                    ship_type_id,
-                    now_unix,
-                );
-                ctx.db.with_mut_snapshot(|snap| {
-                    if let Some(km) = snap.killmails.get_mut(&death.killmail_id) {
-                        km.attacker_character_id = final_blow_char_id;
-                    }
-                });
-                with_mut_combat_runtime(ctx, |rt| {
-                    if let Some(dkm) = rt.detailed_killmails.get_mut(&death.killmail_id) {
-                        dkm.victim_damage_taken = assist_dmg.max(hull_hp);
-                        dkm.attackers = km_attackers;
-                        dkm.killmail_hash = km_hash;
-                    }
-                });
-            }
-        }
+        );
     }
 
     completed

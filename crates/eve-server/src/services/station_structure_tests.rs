@@ -292,3 +292,141 @@ async fn pos_mgr_anchor_structure_validates_legacy_pos_and_deploys_mobile_depot(
     assert_eq!(dep_kv.get("itemID").and_then(|v| v.as_i64()), Some(depot_id));
     assert_eq!(dep_kv.get("state").and_then(|v| v.as_str()), Some("Anchoring"));
 }
+
+#[tokio::test]
+async fn criminal_undocking_in_highsec_schedules_concord() {
+    let ctx = test_ctx_with_clock(1_800_000_000);
+    let jita_station = 60_003_760_i64;
+    let jita_sys = 30_000_142_u32;
+    let char_id = 910_691_i64;
+    let corp_id = 98_600_691_i64;
+    let ship_id = 910_692_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = clone_char_with(snap, char_id, "Crim Undock", corp_id, jita_sys, ship_id);
+        ch.station_id = Some(jita_station);
+        snap.characters.insert(char_id, ch);
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: jita_station,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+    let now_u = ctx.now_unix();
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.get_or_create(char_id).criminal_flag_until_unix = now_u + 900;
+    }
+
+    let mut session = SessionState::new(1);
+    session.user_id = Some(char_id as u64);
+    session.character_id = Some(char_id);
+    session.corporation_id = Some(corp_id);
+    session.solar_system_id = Some(jita_sys);
+    session.station_id = Some(jita_station);
+    session.ship_id = Some(ship_id);
+
+    handle(&ctx, &mut session, "stationSvc", "Undock", &[], &HashMap::new())
+        .await
+        .expect("handled")
+        .expect("undock ok");
+
+    let pending = ctx.crimewatch.read().unwrap().states[&char_id].pending_concord_arrival;
+    assert_eq!(pending.map(|p| (p.0, p.2)), Some((jita_sys, ship_id)));
+}
+
+#[tokio::test]
+async fn docking_aborts_active_self_destruct_countdown() {
+    let ctx = test_ctx_with_clock(1_800_000_000);
+    let jita_station = 60_003_760_i64;
+    let jita_sys = 30_000_142_u32;
+    let char_id = 910_695_i64;
+    let corp_id = 98_600_695_i64;
+    let ship_id = 910_696_i64;
+    let station_pos = ctx.sde.stations.get(&jita_station).unwrap().position;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = clone_char_with(snap, char_id, "Dock Abort Pilot", corp_id, jita_sys, ship_id);
+        ch.station_id = None;
+        snap.characters.insert(char_id, ch);
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: jita_sys as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+    ctx.systems
+        .get_or_spawn(jita_sys)
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 587,
+            position: station_pos + DVec3::new(100.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 2.0,
+            mass: 1e6,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .expect("spawn ball");
+    let now_u = ctx.now_unix();
+    crate::sp6_lifecycle::register_self_destruct_countdown(&ctx, ship_id, char_id, jita_sys, now_u, now_u + 120);
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.self_destruct_countdowns.insert(
+            ship_id,
+            crate::services::combat_crimewatch::SelfDestructCountdown {
+                ship_id,
+                char_id,
+                solar_system_id: jita_sys,
+                started_unix: now_u,
+                detonate_at_unix: now_u + 120,
+            },
+        );
+    });
+
+    let mut session = SessionState::new(1);
+    session.user_id = Some(char_id as u64);
+    session.character_id = Some(char_id);
+    session.corporation_id = Some(corp_id);
+    session.solar_system_id = Some(jita_sys);
+    session.ship_id = Some(ship_id);
+    handle(&ctx, &mut session, "stationSvc", "Dock", &[PyRep::Integer(jita_station)], &HashMap::new())
+        .await
+        .expect("handled")
+        .expect("dock ok");
+
+    crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| {
+        assert!(!st.self_destructs.contains_key(&ship_id));
+    });
+    crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        assert!(!rt.self_destruct_countdowns.contains_key(&ship_id));
+    });
+}

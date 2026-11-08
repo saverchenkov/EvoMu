@@ -179,6 +179,10 @@ pub(crate) async fn board_stored_ship(
         st.custom_item_flags.remove(&stored_id);
     });
     ctx.invalidate_ship_fitting(stored_id);
+    if let Some(prev) = prev_ship_id {
+        crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, prev);
+    }
+    crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, stored_id);
     if let (Some(pos), Some(sys_id)) = (launch_pos, session.solar_system_id) {
         ctx.db.with_mut_snapshot(|snap| {
             snap.item_positions.insert(stored_id, [pos.x, pos.y, pos.z]);
@@ -227,6 +231,10 @@ pub(crate) async fn board_stored_ship(
     let old_ship = prev_ship_id.unwrap_or(0);
     session.ship_id = Some(stored_id);
     ctx.invalidate_ship_fitting(stored_id);
+    if let Some(prev) = prev_ship_id {
+        crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, prev);
+    }
+    crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, stored_id);
     if old_ship != 0 {
         ctx.invalidate_ship_fitting(old_ship);
     }

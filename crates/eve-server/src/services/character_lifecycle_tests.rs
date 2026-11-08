@@ -471,3 +471,41 @@ fn char_unbound_mgr_toggle_validation_persists_per_user_state() {
     });
     assert_eq!(persisted, Some(true));
 }
+
+#[test]
+fn biomass_prepare_blocked_when_ship_keyed_self_destruct_active() {
+    let ctx = test_ctx();
+    let char_id = 90_000_002_i64;
+    let ship_id = 990_001_001_i64;
+    let mut sess = auth_session(1, char_id, 98_000_001, 30_000_142);
+    let now_u = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.user_id = 1;
+            ch.station_id = Some(60_003_760);
+            ch.structure_id = None;
+        }
+        snap.sp6_lifecycle.self_destructs.insert(
+            ship_id,
+            eve_db::SelfDestructPersistedEntry {
+                ship_id,
+                char_id,
+                solar_system_id: 30_000_142,
+                started_unix: now_u,
+                detonate_at_unix: now_u + 120,
+            },
+        );
+    });
+
+    let err = handle(
+        &ctx,
+        &mut sess,
+        "charUnboundMgr",
+        "PrepareCharacterForDelete",
+        &[PyRep::Integer(char_id)],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err.code, "CharacterInSpace");
+}

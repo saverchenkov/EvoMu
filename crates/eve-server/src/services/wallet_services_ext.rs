@@ -964,6 +964,7 @@ fn handle_trade_action(
                         } else {
                             return Err(rpc_err("ItemNotFound", "Offered item missing"));
                         };
+                        snap.sp6_lifecycle.self_destructs.remove(&iid);
                         if let Some(mut new_it) = new_item {
                             snap.next_entity_id += 1;
                             let new_iid = snap.next_entity_id.max(snap.items.keys().copied().max().unwrap_or(1_000_000) + 1);
@@ -1003,6 +1004,7 @@ fn handle_trade_action(
                         } else {
                             return Err(rpc_err("ItemNotFound", "Offered item missing"));
                         };
+                        snap.sp6_lifecycle.self_destructs.remove(&iid);
                         if let Some(mut new_it) = new_item {
                             snap.next_entity_id += 1;
                             let new_iid = snap.next_entity_id.max(snap.items.keys().copied().max().unwrap_or(1_000_000) + 1);

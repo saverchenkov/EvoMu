@@ -1118,6 +1118,18 @@ pub fn abort_self_destruct_countdown(ctx: &ServerContext, ship_id: i64) -> bool 
     })
 }
 
+/// Aborts any active self-destruct countdown for `ship_id` across both persisted SP6 state
+/// and runtime combat state (#539).
+pub fn abort_self_destruct_for_ship(ctx: &ServerContext, ship_id: i64) -> bool {
+    let sp6_aborted = with_mut_sp6_state(&ctx.db, |st, _snap| {
+        st.self_destructs.remove(&ship_id).is_some()
+    });
+    let rt_aborted = crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+        rt.self_destruct_countdowns.remove(&ship_id).is_some()
+    });
+    sp6_aborted || rt_aborted
+}
+
 /// Persists an active Abyssal Deadspace pocket session (`20m` = `1200s` collapse timer)
 /// so the server collapses the pocket and destroys the ship + pod even if the pilot disconnects
 /// (`feat:lifecycle.abyssal-disconnect`).

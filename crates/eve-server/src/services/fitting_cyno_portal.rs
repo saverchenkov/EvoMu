@@ -786,6 +786,7 @@ pub async fn relocate_ship(
     let from = ctx.systems.get_or_spawn(from_sys);
     let prev_cs = from.get_combat_state(ship_id).await.ok().flatten();
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, from_sys);
+    crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
     crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     let old = from.remove_ball(ship_id).await;
     let dest_sys_rec = ctx.sde.solar_systems.get(&to_sys);

@@ -367,3 +367,162 @@ async fn anchor_validates_docked_ship_cargo_highsec_palatine_and_succeeds_v24() 
         .flatten();
     assert!(ball.is_some());
 }
+
+#[tokio::test]
+async fn anchor_ansiblex_with_v24_extra_vars_auto_links_reciprocal_gates() {
+    let ctx = test_ctx();
+    let sov_systems: Vec<u32> = ctx
+        .sde
+        .solar_systems
+        .keys()
+        .copied()
+        .filter(|&sid| {
+            crate::services::station_structure::structure_ansiblex_navigation::is_sovereign_nullsec_for_ansiblex(&ctx.sde, sid)
+        })
+        .take(80)
+        .collect();
+    let (sys_a, sys_b) = sov_systems
+        .iter()
+        .find_map(|&a| {
+            sov_systems.iter().find_map(|&b| {
+                let d = crate::services::space_destiny::space_nav_travel::distance_ly(&ctx, a, b);
+                (a != b && d > 0.0 && d <= 4.5).then_some((a, b))
+            })
+        })
+        .expect("pair of sov null systems within 4.5 LY");
+
+    let char_id = 920_101_i64;
+    let corp_id = 98_000_202_i64;
+    let ally_id = 99_000_202_i64;
+    let ship_id = 920_102_i64;
+    let item_a = 920_103_i64;
+    let item_b = 920_104_i64;
+    seed_char_corp_ship(&ctx, char_id, corp_id, sys_a, ship_id, true);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.alliance_id = Some(ally_id);
+        }
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.alliance_id = Some(ally_id);
+        }
+        for iid in [item_a, item_b] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: crate::services::station_structure::structure_ansiblex_navigation::ANSIBLEX_TYPE_ID,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        // Satisfy FLEX sov alliance + hub upgrade requirement in both systems.
+        for (idx, sys) in [sys_a, sys_b].into_iter().enumerate() {
+            let sys_state = snap.system_states.entry(sys).or_default();
+            sys_state.solar_system_id = sys;
+            sys_state.sov_alliance_id = Some(ally_id);
+            let hub_id = 1_000_000_920_100 + idx as i64;
+            snap.structures.insert(
+                hub_id,
+                UpwellStructureRecord {
+                    structure_id: hub_id,
+                    type_id: crate::services::sov_services::TYPE_SOVEREIGNTY_HUB,
+                    owner_corp_id: corp_id,
+                    solar_system_id: sys,
+                    name: format!("Hub {sys}"),
+                    position: [0.0, 0.0, 0.0],
+                    state: life::STATE_SHIELD_VULNERABLE.into(),
+                    quantum_core_installed: false,
+                    fuel_blocks: 100,
+                    shield_hp: 1.0,
+                    armor_hp: 1.0,
+                    hull_hp: 1.0,
+                    reinforced_until_unix: 0,
+                    last_damage_tick: 0,
+                    last_damage_unix: 0,
+                    self_destruct_at_unix: None,
+                },
+            );
+            let hub_rt = snap.sov_runtime.sov_hubs.entry(hub_id).or_default();
+            hub_rt.hub_id = hub_id;
+            hub_rt.upgrades.push(eve_db::PersistedHubUpgrade {
+                type_id: crate::services::sov_gameplay::UPGRADE_ADVANCED_LOGISTICS_NETWORK,
+                online: true,
+                low_power: false,
+            });
+        }
+    });
+    let mut sess = make_session(char_id, corp_id, sys_a, Some(ship_id), 1);
+    sess.alliance_id = Some(ally_id);
+    spawn_ship_ball(&ctx, sys_a, ship_id, DVec3::new(9_000_000_000.0, 0.0, 0.0)).await;
+    let res_a = handle_anchor(
+        &ctx,
+        &mut sess,
+        &[
+            PyRep::Integer(item_a),
+            PyRep::None,
+            PyRep::None,
+            PyRep::Real(0.0),
+            PyRep::Integer(0),
+            PyRep::String("Gate A".into()),
+            PyRep::String("".into()),
+            PyRep::Integer(1),
+            PyRep::Integer(12),
+            PyRep::Dict(vec![(
+                PyRep::String("destinationSolarsystemID".into()),
+                PyRep::Integer(i64::from(sys_b)),
+            )]),
+        ],
+    )
+    .await
+    .expect("anchor jb_a");
+    let jb_a = match res_a {
+        PyRep::KeyVal(kv) => kv.get("structureID").and_then(|v| v.as_i64()).unwrap(),
+        _ => panic!(),
+    };
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().solar_system_id = sys_b;
+        snap.items.get_mut(&ship_id).unwrap().location_id = sys_b as i64;
+    });
+    sess.solar_system_id = Some(sys_b);
+    spawn_ship_ball(&ctx, sys_b, ship_id, DVec3::new(9_000_000_000.0, 0.0, 0.0)).await;
+    let res_b = handle_anchor(
+        &ctx,
+        &mut sess,
+        &[
+            PyRep::Integer(item_b),
+            PyRep::None,
+            PyRep::None,
+            PyRep::Real(0.0),
+            PyRep::Integer(0),
+            PyRep::String("Gate B".into()),
+            PyRep::String("".into()),
+            PyRep::Integer(1),
+            PyRep::Integer(12),
+            PyRep::Dict(vec![(
+                PyRep::String("destinationSolarsystemID".into()),
+                PyRep::Integer(i64::from(sys_a)),
+            )]),
+        ],
+    )
+    .await
+    .expect("anchor jb_b");
+    let jb_b = match res_b {
+        PyRep::KeyVal(kv) => kv.get("structureID").and_then(|v| v.as_i64()).unwrap(),
+        _ => panic!(),
+    };
+
+    ctx.db.with_snapshot(|snap| {
+        let ext = load_ext_state(snap);
+        assert_eq!(ext.jump_bridge_desired_dest.get(&jb_a), Some(&sys_b));
+        assert_eq!(ext.jump_bridge_desired_dest.get(&jb_b), Some(&sys_a));
+        assert_eq!(ext.jump_bridge_links.get(&jb_a), Some(&jb_b));
+        assert_eq!(ext.jump_bridge_links.get(&jb_b), Some(&jb_a));
+    });
+}

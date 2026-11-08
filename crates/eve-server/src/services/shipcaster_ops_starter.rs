@@ -441,6 +441,7 @@ pub async fn execute_shipcaster_jump(
         .db
         .set_character_solar_system(char_id, dest_sys, &ctx.sde)
         .map_err(|e| rpc_err("SystemTransitionFailed", &e.to_string()))?;
+    crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
 
     let saved_heat = ctx
         .ship_fittings

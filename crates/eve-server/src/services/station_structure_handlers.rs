@@ -640,12 +640,17 @@ pub(crate) fn resolve_upwell_dock_target(
         return Err(err("StructureDestroyed", format!("Structure {dock_id} is destroyed")));
     }
     let st_group_id = ctx.sde.types.get(&st.type_id).map(|t| t.group_id).unwrap_or(0);
-    let is_non_dockable = matches!(st.type_id, 35_840 | 35_841 | 37_534 | 81_826 | 2_233 | 3_962)
-        || matches!(st_group_id, 1408 | 2016 | 2017 | 4744 | 4736 | 4747 | 4810);
-    if is_non_dockable {
+    // Allowlist dockable Upwell structure classes only (1657=Citadel, 1404=Engineering Complex,
+    // 1406=Refinery); deny NPC FOBs, FW hubs, FLEX, orbital skyhooks, Metenox, and depots (#569).
+    let is_dockable_upwell_group = matches!(st_group_id, 1657 | 1404 | 1406);
+    let is_explicit_non_dockable_type = matches!(
+        st.type_id,
+        35_840 | 35_841 | 37_534 | 81_826 | 2_233 | 3_962 | 46_363 | 46_364 | 32_226
+    );
+    if !is_dockable_upwell_group || is_explicit_non_dockable_type {
         return Err(err(
             "StructureDoesNotAllowDocking",
-            format!("Structure {} (type {}) does not allow ship docking", dock_id, st.type_id),
+            format!("Structure {} (type {}, group {}) does not allow ship docking", dock_id, st.type_id, st_group_id),
         ));
     }
     if matches!(st.state.as_str(), "Unanchored" | "AnchorVulnerable" | "Anchoring") {

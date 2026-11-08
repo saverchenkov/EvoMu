@@ -878,6 +878,7 @@ async fn handle_cmd_stargate_jump(
     }
 
     deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
+    crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
     let prev_combat_state = old_handle.get_combat_state(ship_id).await.ok().flatten();
     let updated_ch = ctx
         .db
@@ -950,19 +951,13 @@ async fn handle_cmd_stargate_jump(
         dest_sys_id as i64,
     );
     let _ = crate::services::combat_npc_police::check_and_spawn_faction_police(ctx, dest_sys_id).await;
-    let dest_sec = ctx.sde.solar_systems.get(&dest_sys_id).map(|s| s.security_status).unwrap_or(0.0);
-    let is_capsule_jump = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id == 670).unwrap_or(false));
-    if dest_sec >= 0.45
-        && !is_capsule_jump
-        && !crate::services::combat_crimewatch::is_concord_suppressed_in_system(ctx, dest_sys_id)
-    {
-        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-        let st = cw.get_or_create(char_id);
-        if st.is_criminal(now_unix) && st.pending_concord_arrival.is_none() {
-            let delay_sec = crate::combat::crimewatch::concord_delay_for_security(dest_sec);
-            st.pending_concord_arrival = Some((dest_sys_id, now_unix.saturating_add(delay_sec.ceil() as u64), ship_id, 0));
-        }
-    }
+    crate::services::combat_crimewatch::schedule_highsec_criminal_concord_if_needed(
+        ctx,
+        char_id,
+        ship_id,
+        dest_sys_id,
+        now_unix,
+    );
     ctx.quasar_gateway.on_session_changed(session, now_unix);
     if let Some(expiry) = zarzakh_lock_expiry {
         let _ = crate::services::quasar_sov_services::publish_stargate_lock_activated_notice(
@@ -1272,6 +1267,7 @@ async fn handle_dock(
                 ball.position.to_array(),
             );
             deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
+    crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
             crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, sys_id);
             let _ = handle.accept_docking(ship_id, dock_id, target_pos).await;
             if is_structure {

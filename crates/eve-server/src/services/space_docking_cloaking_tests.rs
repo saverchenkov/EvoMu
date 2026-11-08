@@ -429,3 +429,86 @@ async fn execute_cosmic_wormhole_jump_roundtrips_k162_and_handles_collapse_and_p
     });
     assert!(is_collapsed_after);
 }
+
+#[tokio::test]
+async fn criminal_cosmic_wormhole_jump_into_highsec_schedules_concord() {
+    let mut ctx = test_ctx();
+    let wh_type_id = 99_801_u32;
+    let ship_tid = 99_811_u32;
+    clone_type_with(&mut ctx.sde, 31_790, wh_type_id, 988, 2, 10.0, 0.0, 20_000_000.0);
+    clone_type_with(&mut ctx.sde, 588, ship_tid, 25, 6, 2500.0, 150.0, 2_000_000.0);
+
+    let host_sys = 31_000_005_u32; // Wormhole space
+    let dest_sys = 30_000_142_u32; // Jita (1.0 high-sec)
+    let char_id = 96_201_i64;
+    let ship_id = 78_201_i64;
+    let sig_id = "WHC-200".to_string();
+    let wh_pos = DVec3::new(10_000.0, 0.0, 0.0);
+    let now_u = ctx.now_unix();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("char");
+        ch.character_id = char_id;
+        ch.solar_system_id = host_sys;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: ship_tid,
+                owner_id: char_id,
+                location_id: host_sys as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.cosmic_signatures.insert(
+            host_sys,
+            vec![CosmicSignatureRecord {
+                signature_id: sig_id.clone(),
+                solar_system_id: host_sys,
+                sig_group: "Wormhole".to_string(),
+                type_name: "Wormhole Custom".to_string(),
+                signal_strength: 100.0,
+                position: [wh_pos.x, wh_pos.y, wh_pos.z],
+                wormhole_type_id: Some(wh_type_id),
+                destination_system_id: Some(dest_sys),
+                created_unix: now_u.saturating_sub(60),
+                lifetime_seconds: 86_400,
+                max_mass_kg: 100_000_000.0,
+                remaining_mass_kg: 100_000_000.0,
+                max_jump_mass_kg: 20_000_000.0,
+                collapsed: false,
+            }],
+        );
+    });
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.get_or_create(char_id).criminal_flag_until_unix = now_u + 900;
+    }
+
+    let near_ball = make_ship_ball(ship_id, ship_tid, 2_000_000.0, DVec3::new(11_000.0, 0.0, 0.0));
+    let _ = ctx.systems.get_or_spawn(host_sys).spawn_ball(near_ball.clone()).await;
+    let mut sess = make_session(char_id, 98000001, Some(host_sys), Some(ship_id));
+    execute_cosmic_wormhole_jump(
+        &ctx,
+        &mut sess,
+        char_id,
+        host_sys,
+        ship_id,
+        near_ball,
+        None,
+        Some(&sig_id),
+    )
+    .await
+    .expect("matched")
+    .expect("wormhole jump into highsec ok");
+
+    let pending = ctx.crimewatch.read().unwrap().states[&char_id].pending_concord_arrival;
+    assert_eq!(pending.map(|p| (p.0, p.2)), Some((dest_sys, ship_id)));
+}

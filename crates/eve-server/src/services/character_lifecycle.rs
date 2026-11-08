@@ -363,7 +363,11 @@ fn validate_character_safe_for_biomass(
         .get(&char_id)
         .is_some_and(|d| !d.removed_from_space && now < d.remove_at_unix)
         || snap.sp6_lifecycle.safe_logoffs.contains_key(&char_id)
-        || snap.sp6_lifecycle.self_destructs.contains_key(&char_id)
+        || snap
+            .sp6_lifecycle
+            .self_destructs
+            .values()
+            .any(|e| e.char_id == char_id)
         || snap.sp6_lifecycle.abyssal_sessions.contains_key(&char_id)
     {
         return Err(err(
@@ -470,7 +474,9 @@ fn handle_delete_character(ctx: &ServerContext, session: &mut SessionState, user
         save_store(snap, &store);
         snap.sp6_lifecycle.disconnected_ships.remove(&char_id);
         snap.sp6_lifecycle.safe_logoffs.remove(&char_id);
-        snap.sp6_lifecycle.self_destructs.remove(&char_id);
+        snap.sp6_lifecycle
+            .self_destructs
+            .retain(|_, e| e.char_id != char_id);
         snap.sp6_lifecycle.abyssal_sessions.remove(&char_id);
         Ok(sys_and_ship)
     })?;

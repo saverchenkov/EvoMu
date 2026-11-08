@@ -97,8 +97,9 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
         .map_err(|e| err("DestinyQueryFailed", e))?
         .ok_or_else(|| err("ShipNotInSpace", format!("Active ship {ship_id} is not spawned in space in system {sys_id}")))?;
     // Parse both V24 `StructureDeployment.ConfirmDeployment` 10-positional-arg calls
-    // `(itemID, x, z, yaw, profileID, reinforceWeekday, reinforceHour, name, description, extraVars)`
-    // (`client_expectations.json:101420-101446`) and `(itemID_or_typeID, [x, y, z], ...)` / `(itemID_or_typeID, name)` forms.
+    // `(itemID, x, z, yaw, profileID, structureName, bio, reinforceWeekday, reinforceHour, extraVars)`
+    // (`client_expectations.json:101420-101446`, as well as `(..., reinforceWeekday, reinforceHour, name, description, extraVars)`)
+    // and `(itemID_or_typeID, [x, y, z], ...)` / `(itemID_or_typeID, name, ...)` forms.
     let (explicit_pos, profile_id_arg, reinforce_window, name, description_opt) = match args.get(1) {
         Some(PyRep::List(coords)) | Some(PyRep::Tuple(coords)) if coords.len() >= 3 => {
             let (Some(x), Some(y), Some(z)) = (coords[0].as_f64(), coords[1].as_f64(), coords[2].as_f64()) else {
@@ -134,18 +135,71 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
                 _ => return Err(err("InvalidAnchorCoordinates", "Anchoring coordinates must be valid numbers")),
             };
             let prof_arg = args.get(4).and_then(|a| a.as_i64()).filter(|&p| p > 0);
-            let rw = match (args.get(6).and_then(|a| a.as_i64()), args.get(5).and_then(|a| a.as_i64())) {
-                (Some(h), Some(d)) if (0..24).contains(&h) && (0..7).contains(&d) => Some((h as u64, d as u64)),
-                _ => None,
-            };
-            let nm = args.get(7).and_then(|a| a.as_str()).map(str::trim).filter(|s| !s.is_empty()).unwrap_or("Upwell Structure").to_string();
-            let desc = args.get(8).and_then(|a| a.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
-            (pos_opt, prof_arg, rw, nm, desc)
+            if matches!(args.get(5), Some(PyRep::String(_))) {
+                let nm = args.get(5).and_then(|a| a.as_str()).map(str::trim).filter(|s| !s.is_empty()).unwrap_or("Upwell Structure").to_string();
+                let desc = args.get(6).and_then(|a| a.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+                let rw = match (args.get(8).and_then(|a| a.as_i64()), args.get(7).and_then(|a| a.as_i64())) {
+                    (Some(h), Some(d)) if (0..24).contains(&h) && (0..7).contains(&d) => Some((h as u64, d as u64)),
+                    _ => None,
+                };
+                (pos_opt, prof_arg, rw, nm, desc)
+            } else {
+                let rw = match (args.get(6).and_then(|a| a.as_i64()), args.get(5).and_then(|a| a.as_i64())) {
+                    (Some(h), Some(d)) if (0..24).contains(&h) && (0..7).contains(&d) => Some((h as u64, d as u64)),
+                    _ => None,
+                };
+                let nm = args.get(7).and_then(|a| a.as_str()).map(str::trim).filter(|s| !s.is_empty()).unwrap_or("Upwell Structure").to_string();
+                let desc = args.get(8).and_then(|a| a.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+                (pos_opt, prof_arg, rw, nm, desc)
+            }
         }
         _ => {
             let nm = args.iter().skip(1).filter_map(|a| a.as_str()).map(str::trim).find(|s| !s.is_empty()).unwrap_or("Upwell Structure").to_string();
             (None, None, None, nm, None)
         }
+    };
+    let ansiblex_dest_sys: Option<u32> = if type_id == super::structure_ansiblex_navigation::ANSIBLEX_TYPE_ID {
+        let raw_dest = args.iter().skip(1).find_map(|arg| match arg {
+            PyRep::Dict(entries) => entries.iter().find_map(|(k, v)| {
+                matches!(k.as_str(), Some("destinationSolarsystemID" | "destinationSolarSystemID"))
+                    .then(|| v.as_i64())
+                    .flatten()
+            }),
+            PyRep::KeyVal(entries) => ["destinationSolarsystemID", "destinationSolarSystemID"]
+                .iter()
+                .find_map(|&k| entries.get(k).and_then(|v| v.as_i64())),
+            _ => None,
+        });
+        if let Some(raw) = raw_dest.filter(|&v| v > 0) {
+            let dest_sys = u32::try_from(raw)
+                .map_err(|_| err("InvalidLinkTarget", format!("Invalid destinationSolarsystemID {raw}")))?;
+            if dest_sys == sys_id {
+                return Err(err("InvalidLinkTarget", "Cannot link an Ansiblex Jump Gate to the same solar system"));
+            }
+            if !super::structure_ansiblex_navigation::is_sovereign_nullsec_for_ansiblex(&ctx.sde, sys_id)
+                || !super::structure_ansiblex_navigation::is_sovereign_nullsec_for_ansiblex(&ctx.sde, dest_sys)
+            {
+                return Err(err(
+                    "JumpBridgeRequiresSovNull",
+                    "Ansiblex Jump Gates can only link between sovereign null-security systems",
+                ));
+            }
+            let dist_ly = crate::services::space_destiny::space_nav_travel::distance_ly(ctx, sys_id, dest_sys);
+            if dist_ly > super::structure_ansiblex_navigation::ANSIBLEX_MAX_RANGE_LY {
+                return Err(err(
+                    "JumpBridgeOutOfRange",
+                    format!(
+                        "Ansiblex link distance ({dist_ly:.2} LY) exceeds {:.1} LY maximum",
+                        super::structure_ansiblex_navigation::ANSIBLEX_MAX_RANGE_LY
+                    ),
+                ));
+            }
+            Some(dest_sys)
+        } else {
+            None
+        }
+    } else {
+        None
     };
     let now = ctx.now_unix();
     let (structure_id, owner_corp_id) = ctx.db.try_with_mut_snapshot(|snap| {
@@ -262,6 +316,40 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
             applied_defense = p.defense_settings.clone();
             ext.access_profiles.insert(id, p);
             ext.structure_profile_id.insert(id, pid);
+        }
+        if let Some(dest_sys) = ansiblex_dest_sys {
+            ext.jump_bridge_desired_dest.insert(id, dest_sys);
+            let from_ally = snap.corporations.get(&corp_id).and_then(|c| c.alliance_id);
+            if let Some(partner_id) = snap
+                .structures
+                .values()
+                .filter(|s| {
+                    if s.structure_id == id
+                        || s.type_id != super::structure_ansiblex_navigation::ANSIBLEX_TYPE_ID
+                        || s.state == life::STATE_DESTROYED
+                        || s.solar_system_id != dest_sys
+                    {
+                        return false;
+                    }
+                    let to_ally = snap.corporations.get(&s.owner_corp_id).and_then(|c| c.alliance_id);
+                    let same_owner = s.owner_corp_id == corp_id
+                        || (from_ally.is_some() && from_ally == to_ally);
+                    let reciprocal = ext.jump_bridge_desired_dest.get(&s.structure_id) == Some(&sys_id);
+                    let partner_busy = ext.jump_bridge_links.get(&s.structure_id).is_some_and(|pid| {
+                        *pid != id
+                            && snap
+                                .structures
+                                .get(pid)
+                                .is_some_and(|ps| ps.state != life::STATE_DESTROYED)
+                    });
+                    same_owner && reciprocal && !partner_busy
+                })
+                .map(|s| s.structure_id)
+                .min()
+            {
+                ext.jump_bridge_links.insert(id, partner_id);
+                ext.jump_bridge_links.insert(partner_id, id);
+            }
         }
         crate::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
         if let Some(mut ds) = applied_defense {

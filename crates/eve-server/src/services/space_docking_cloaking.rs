@@ -1180,6 +1180,7 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
         Ok(WormholeJumpTxOutcome::Jumped(dest_sys_id, wh_item_id, exit_wh_id, sig_id_str, remaining_mass, max_jump_mass, mass_stage, wh_size, life_stage, wh_age, is_collapsed, buckets)) => {
             let prev_cs = old_handle.get_combat_state(ship_id).await.ok().flatten();
             crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, old_sys);
+            crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
             crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
             let _ = old_handle.remove_ball(ship_id).await;
             let updated_ch = match ctx.db.set_character_solar_system(char_id, dest_sys_id, &ctx.sde) {
@@ -1288,6 +1289,13 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
             slim_meta.is_cloaked = true;
             let spawn_tick = new_handle.spawn_ball_with_meta(new_ball, combat_state, slim_meta).await.unwrap_or(0);
             record_session_change_timer(ctx, char_id, now_unix, dest_sys_id, spawn_tick, "wormhole_jump");
+            crate::services::combat_crimewatch::schedule_highsec_criminal_concord_if_needed(
+                ctx,
+                char_id,
+                ship_id,
+                dest_sys_id,
+                now_unix,
+            );
 
             let new_beyonce_id = match ctx.bind_object(session, BEYONCE_SVC, dest_sys_id as i64) {
                 Ok(b) => b,

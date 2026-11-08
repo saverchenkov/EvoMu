@@ -219,6 +219,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             }
 
             session.ship_id = Some(capsule_id);
+            crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, old_ship_id);
             ctx.invalidate_ship_fitting(old_ship_id);
             ctx.invalidate_ship_fitting(capsule_id);
             let changes = vec![(
@@ -400,6 +401,8 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     if let Some(prev) = prev_ship_id {
                         ctx.invalidate_ship_fitting(prev);
                         if prev != sid {
+                            crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, prev);
+                            crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, sid);
                             crate::services::space_navigation_advanced::deactivate_ship_modules_on_leave_space(
                                 ctx,
                                 char_id,

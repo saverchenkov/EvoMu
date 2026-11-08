@@ -405,3 +405,77 @@ async fn bounties_kill_rights_gm_actions_and_dynamic_bounty_rpc() {
     .unwrap();
     assert!(matches!(dbs_res, PyRep::Tuple(ref t) if t.len() == 2));
 }
+
+#[tokio::test]
+async fn schedule_highsec_criminal_concord_if_needed_covers_exemptions_and_system_switch() {
+    let ctx = ServerContext::new();
+    let now_unix = ctx.now_unix();
+    let highsec_sys = 30_000_142_u32; // Jita (1.0 -> 6s delay)
+    let second_highsec_sys = 30_000_144_u32; // Perimeter
+    let lowsec_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| s.security_status > 0.0 && s.security_status < 0.45 && s.solar_system_id < 31_000_000)
+        .map(|s| s.solar_system_id)
+        .expect("lowsec system");
+
+    let char_id = 975_001_i64;
+    let frigate_id = 975_002_i64;
+    let pod_id = 975_003_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("char");
+        ch.character_id = char_id;
+        ch.active_ship_id = frigate_id;
+        snap.characters.insert(char_id, ch);
+        for (iid, tid) in [(frigate_id, 587_u32), (pod_id, 670_u32)] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: char_id,
+                    location_id: highsec_sys as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    dynamic_attributes: HashMap::new(),
+                    source_mutaplasmid_id: None,
+                    insured_payout_isk: 0.0,
+                    is_blueprint_copy: false,
+                    blueprint_runs_remaining: None,
+                },
+            );
+        }
+    });
+
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.get_or_create(char_id).criminal_flag_until_unix = now_unix + 900;
+    }
+
+    // 1. Low-sec does not schedule CONCORD
+    schedule_highsec_criminal_concord_if_needed(&ctx, char_id, frigate_id, lowsec_sys, now_unix);
+    assert!(ctx.crimewatch.read().unwrap().states[&char_id].pending_concord_arrival.is_none());
+
+    // 2. Capsule (type 670) does not schedule CONCORD even in high-sec
+    schedule_highsec_criminal_concord_if_needed(&ctx, char_id, pod_id, highsec_sys, now_unix);
+    assert!(ctx.crimewatch.read().unwrap().states[&char_id].pending_concord_arrival.is_none());
+
+    // 3. Frigate in high-sec schedules CONCORD for highsec_sys
+    schedule_highsec_criminal_concord_if_needed(&ctx, char_id, frigate_id, highsec_sys, now_unix);
+    let sched = ctx.crimewatch.read().unwrap().states[&char_id]
+        .pending_concord_arrival
+        .expect("CONCORD scheduled in high-sec");
+    assert_eq!(sched.0, highsec_sys);
+    assert_eq!(sched.2, frigate_id);
+
+    // 4. Transitioning to another high-sec system updates pending_concord_arrival to the new system
+    schedule_highsec_criminal_concord_if_needed(&ctx, char_id, frigate_id, second_highsec_sys, now_unix);
+    let sched2 = ctx.crimewatch.read().unwrap().states[&char_id]
+        .pending_concord_arrival
+        .expect("CONCORD rescheduled in second high-sec");
+    assert_eq!(sched2.0, second_highsec_sys);
+}

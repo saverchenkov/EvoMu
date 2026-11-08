@@ -264,6 +264,12 @@ async fn on_advance_secs_safe_logoff_disconnect_warp_self_destruct_and_abyssal_c
             );
         }
         snap.zarzakh_gate_locks.insert(90_000_001, (500_000_001, base_now));
+        if let Some(ch) = snap.characters.get_mut(&90_000_002) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = sd_ship;
+        }
         record_wreck_or_container_meta_in_snap(snap, 999, base_now, false);
         record_anchor_meta_in_snap(snap, 998, base_now, 5.0, Some(20_000.0));
     });

@@ -581,6 +581,13 @@ pub async fn handle(
                     Err(e) => return Some(Err(e)),
                 };
             let _ = crate::services::combat_npc_police::check_and_spawn_faction_police(ctx, ch.solar_system_id).await;
+            crate::services::combat_crimewatch::schedule_highsec_criminal_concord_if_needed(
+                ctx,
+                char_id,
+                ship.item_id,
+                ch.solar_system_id,
+                ctx.now_unix(),
+            );
             // Entering space: send the pilot the SKIN states and structure paintworks around them.
             crate::services::quasar_cosmetics_live::publish_arrival_cosmetics(&ctx.quasar_gateway, &ctx.db, &ctx.sde, char_id, ctx.now_unix());
             Some(Ok(PyRep::keyval([
@@ -826,6 +833,7 @@ pub async fn handle(
                     }
                     let prev_sys = session.solar_system_id.unwrap_or(0);
                     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, prev_sys);
+                    crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
                     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
                         rt.authorized_shipping_storage.retain(|&(_, c)| c != char_id);
                     });

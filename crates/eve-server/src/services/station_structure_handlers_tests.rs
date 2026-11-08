@@ -256,3 +256,67 @@ async fn anchor_orbital_gantry_and_upgrade_to_customs_office() {
     assert_eq!(upg_kv.get("orbitalID").and_then(|v| v.as_i64()), Some(gantry_id));
     assert_eq!(upg_kv.get("typeID").and_then(|v| v.as_i64()), Some(2_233));
 }
+
+#[tokio::test]
+async fn resolve_upwell_dock_target_denies_npc_fobs_and_non_dockable_groups_allows_upwell_classes() {
+    let ctx = test_ctx_with_clock(1_800_000_000);
+    let sys_id = 30_000_142_u32;
+    let char_id = 960_101_i64;
+    let corp_id = 98_000_001_i64;
+
+    let denied_types = [
+        46_363_u32, // Blood Raider Sotiyo (group 1924 / FOB)
+        46_364_u32, // Guristas Sotiyo (group 1924 / FOB)
+        32_226_u32, // FW Infrastructure Hub
+        81_826_u32, // Metenox Moon Drill (group 4744)
+        35_841_u32, // Ansiblex Jump Gate
+    ];
+    let allowed_types = [
+        35_832_u32, // Astrahus (Citadel group 1657)
+        35_825_u32, // Raitaru (Engineering Complex group 1404)
+        35_835_u32, // Athanor (Refinery group 1406)
+    ];
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = clone_char_with(snap, char_id, "Dock Check Pilot", corp_id, sys_id, 960_102);
+        snap.characters.insert(char_id, ch);
+        for (idx, tid) in denied_types.iter().chain(allowed_types.iter()).enumerate() {
+            let sid = 1_000_000_960_100 + idx as i64;
+            snap.structures.insert(
+                sid,
+                UpwellStructureRecord {
+                    structure_id: sid,
+                    type_id: *tid,
+                    owner_corp_id: corp_id,
+                    solar_system_id: sys_id,
+                    name: format!("Struct {tid}"),
+                    position: [50_000.0 + (idx as f64) * 5_000.0, 0.0, 0.0],
+                    state: "ShieldVulnerable".into(),
+                    quantum_core_installed: true,
+                    fuel_blocks: 100,
+                    shield_hp: 1.0,
+                    armor_hp: 1.0,
+                    hull_hp: 1.0,
+                    reinforced_until_unix: 0,
+                    last_damage_tick: 0,
+                    last_damage_unix: 0,
+                    self_destruct_at_unix: None,
+                },
+            );
+        }
+    });
+
+    for (idx, tid) in denied_types.iter().enumerate() {
+        let sid = 1_000_000_960_100 + idx as i64;
+        let err = resolve_upwell_dock_target(&ctx, sid, sys_id, char_id, 587, 25)
+            .expect_err(&format!("type {tid} should not allow docking"));
+        assert_eq!(err.code, "StructureDoesNotAllowDocking", "type {tid}");
+    }
+    for (offset, tid) in allowed_types.iter().enumerate() {
+        let sid = 1_000_000_960_100 + (denied_types.len() + offset) as i64;
+        assert!(
+            resolve_upwell_dock_target(&ctx, sid, sys_id, char_id, 587, 25).is_ok(),
+            "dockable Upwell type {tid} should allow docking"
+        );
+    }
+}

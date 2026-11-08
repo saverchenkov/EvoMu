@@ -734,6 +734,7 @@ pub(crate) async fn handle_ships_and_services(
                     }
                     for &item_id in &normal_ids {
                         ctx.invalidate_ship_fitting(item_id);
+                        crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, item_id);
                         let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::void_ship_insurance_contract(ctx, item_id);
                     }
                     let total_count = normal_ids.len() + broken_wraps.len();

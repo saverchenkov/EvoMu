@@ -453,3 +453,121 @@ async fn self_destruct_assist_attribution_and_timer_boundaries() {
     assert!(detonated[0].1.is_ok());
     assert!(!mgr.is_self_destructing(ship2));
 }
+
+#[tokio::test]
+async fn live_self_destruct_sync_denies_uncontested_insurance_loot_validates_ownership_and_credits_aggressor() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let now = ctx.now_unix();
+    let victim = 90_000_001_i64;
+    let attacker = 90_000_002_i64;
+
+    // 1. Uncontested live self-destruct: 0 insurance payout & 0% loot drop (#539).
+    let uncontested_ship = 100_230_001_i64;
+    let cargo_item = 100_230_002_i64;
+    spawn_ship(&ctx, sys_id, uncontested_ship, victim, 587, DVec3::new(1_000.0, 0.0, 0.0), 500_000.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&victim) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = uncontested_ship;
+        }
+        snap.items.insert(
+            cargo_item,
+            make_item(cargo_item, 34, victim, uncontested_ship, InventoryFlag::Cargo, 500, 0.0),
+        );
+    });
+    let res_uncontested = execute_live_self_destruct_sync(
+        &ctx,
+        sys_id,
+        victim,
+        uncontested_ship,
+        DVec3::new(1_000.0, 0.0, 0.0),
+        now,
+    )
+    .expect("uncontested self-destruct succeeds")
+    .expect("ship executed");
+    assert_eq!(res_uncontested.insurance_payout_isk, 0.0);
+    assert_eq!(res_uncontested.loot_dropped_item_ids.len(), 0);
+    assert_eq!(res_uncontested.loot_destroyed_item_ids.len(), 1);
+
+    // 2. Ownership / docked / inactive-ship mismatch is refused cleanly without destroying ship.
+    let mismatch_ship = 100_230_003_i64;
+    spawn_ship(&ctx, sys_id, mismatch_ship, victim, 587, DVec3::new(2_000.0, 0.0, 0.0), 500_000.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&victim) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = Some(60_003_760);
+            ch.structure_id = None;
+            ch.active_ship_id = mismatch_ship;
+        }
+    });
+    assert!(
+        execute_live_self_destruct_sync(&ctx, sys_id, victim, mismatch_ship, DVec3::ZERO, now)
+            .expect("ok")
+            .is_none(),
+        "docked ship must NOT self-destruct"
+    );
+    assert!(ctx.db.with_snapshot(|s| s.items.contains_key(&mismatch_ship)));
+
+    // Changing owner also prevents self-destruct.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&victim) {
+            ch.station_id = None;
+        }
+        snap.items.get_mut(&mismatch_ship).unwrap().owner_id = attacker;
+    });
+    assert!(
+        execute_live_self_destruct_sync(&ctx, sys_id, victim, mismatch_ship, DVec3::ZERO, now)
+            .expect("ok")
+            .is_none(),
+        "transferred ship must NOT self-destruct for previous owner"
+    );
+    assert!(ctx.db.with_snapshot(|s| s.items.contains_key(&mismatch_ship)));
+
+    // 3. Tackled / aggressed self-destruct credits recent attacker on killmail + allows loot roll.
+    let tackled_ship = 100_230_004_i64;
+    let tackled_cargo = 100_230_005_i64;
+    spawn_ship(&ctx, sys_id, tackled_ship, victim, 587, DVec3::new(3_000.0, 0.0, 0.0), 0.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&victim) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = tackled_ship;
+        }
+        snap.items.insert(
+            tackled_cargo,
+            make_item(tackled_cargo, 34, victim, tackled_ship, InventoryFlag::Cargo, 500, 0.0),
+        );
+    });
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.aggression_assist_log.insert(
+            tackled_ship,
+            vec![AssistLogEntry {
+                attacker_char_id: attacker,
+                corporation_id: 98_000_001,
+                alliance_id: None,
+                ship_type_id: 587,
+                weapon_type_id: 2_905,
+                damage_done: 150.0,
+                is_ewar: false,
+                last_action_unix: now.saturating_sub(20),
+            }],
+        );
+    });
+    let res_tackled = execute_live_self_destruct_sync(
+        &ctx,
+        sys_id,
+        victim,
+        tackled_ship,
+        DVec3::new(3_000.0, 0.0, 0.0),
+        now,
+    )
+    .expect("tackled self-destruct succeeds")
+    .expect("tackled ship executed");
+    assert_ne!(res_tackled.wreck_item_id, 0);
+    let km = ctx.db.with_snapshot(|s| s.killmails[&res_tackled.killmail_id].clone());
+    assert_eq!(km.attacker_character_id, attacker);
+}

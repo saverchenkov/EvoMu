@@ -546,12 +546,11 @@ fn execute_due_self_destruct_sync(
         })
         .unwrap_or(DVec3::ZERO);
 
-    let _ = crate::combat::death_pipeline::execute_death_pipeline_sync(
+    let _ = crate::combat::death_pipeline::execute_live_self_destruct_sync(
         ctx,
         sys_id,
         char_id,
         ship_id,
-        char_id,
         pos,
         now_unix,
     );

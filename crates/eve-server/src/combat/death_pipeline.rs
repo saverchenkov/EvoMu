@@ -1271,6 +1271,70 @@ pub async fn execute_self_destruct(
     )
 }
 
+/// Validates live ship ownership, active ship, undocked state, and system presence before
+/// executing a scheduled self-destruct, denying uncontested self-destruct insurance & loot
+/// while crediting recent PvP aggressors within the assist window (#539).
+pub fn execute_live_self_destruct_sync(
+    ctx: &ServerContext,
+    sys_id: u32,
+    char_id: i64,
+    ship_id: i64,
+    pos: DVec3,
+    now_unix: u64,
+) -> Result<Option<DeathPipelineResult>, String> {
+    let still_valid = ctx.db.with_snapshot(|snap| {
+        let Some(ship) = snap.items.get(&ship_id) else {
+            return false;
+        };
+        if ship.owner_id != char_id || ship.location_id != i64::from(sys_id) {
+            return false;
+        }
+        let Some(ch) = snap.characters.get(&char_id) else {
+            return false;
+        };
+        ch.solar_system_id == sys_id
+            && ch.station_id.is_none()
+            && ch.structure_id.is_none()
+            && ch.active_ship_id == ship_id
+    });
+    if !still_valid {
+        return Ok(None);
+    }
+
+    let last_aggressor = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+        let mut latest: Option<(u64, i64)> = None;
+        for key in [ship_id, char_id] {
+            if let Some(list) = rt.aggression_assist_log.get(&key) {
+                for e in list {
+                    if now_unix.saturating_sub(e.last_action_unix)
+                        <= crate::services::combat_crimewatch::KILLMAIL_ASSIST_WINDOW_SECS
+                        && e.attacker_char_id > 0
+                        && e.attacker_char_id != char_id
+                        && latest.is_none_or(|(ts, _)| e.last_action_unix >= ts)
+                    {
+                        latest = Some((e.last_action_unix, e.attacker_char_id));
+                    }
+                }
+            }
+        }
+        latest.map(|(_, cid)| cid)
+    });
+    let effective_attacker = last_aggressor.unwrap_or(char_id);
+    let is_uncontested = last_aggressor.is_none();
+
+    execute_death_pipeline_sync_inner(
+        ctx,
+        sys_id,
+        char_id,
+        ship_id,
+        effective_attacker,
+        pos,
+        now_unix,
+        is_uncontested,
+    )
+    .map(Some)
+}
+
 /// Tracks 2-minute self-destruct countdown timers and cancellations (`feat:ships.self-destruct`).
 #[derive(Debug, Default, Clone)]
 pub struct SelfDestructManager {

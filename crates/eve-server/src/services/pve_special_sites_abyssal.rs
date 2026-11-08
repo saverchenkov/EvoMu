@@ -926,6 +926,7 @@ pub async fn enter_abyssal_pocket_with_trace(
         snap.chat_channels.remove(&format!("solarsystemid2:{abyssal_sys_id}"));
     });
     session.solar_system_id = Some(abyssal_sys_id);
+    crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
     (pocket_id, room1_npcs)
 }
 

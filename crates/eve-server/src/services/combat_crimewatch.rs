@@ -113,6 +113,54 @@ pub const KILLMAIL_ASSIST_WINDOW_SECS: u64 = 900;
 /// Self-destruct countdown duration in seconds (2 minutes = 120s).
 pub const SELF_DESTRUCT_COUNTDOWN_SECS: u64 = 120;
 
+/// Schedules a high-security CONCORD response if `char_id` enters high-sec space (`>= 0.45`)
+/// while flagged Criminal in a non-capsule ship and CONCORD is not suppressed in `sys_id` (#559).
+pub fn schedule_highsec_criminal_concord_if_needed(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+    now_unix: u64,
+) {
+    let sys_sec = with_combat_runtime(ctx, |rt| rt.modified_system_securities.get(&sys_id).copied())
+        .unwrap_or_else(|| {
+            ctx.sde
+                .solar_systems
+                .get(&sys_id)
+                .map(|s| s.security_status)
+                .unwrap_or(0.0)
+        });
+    if sys_sec < 0.45 || is_concord_suppressed_in_system(ctx, sys_id) {
+        return;
+    }
+    let is_capsule = ctx.db.with_snapshot(|s| {
+        s.items.get(&ship_id).is_some_and(|i| {
+            i.type_id == 670
+                || ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 29)
+        })
+    });
+    if is_capsule {
+        return;
+    }
+    let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+    let st = cw.get_or_create(char_id);
+    if st.is_criminal(now_unix) {
+        let needs_schedule = match st.pending_concord_arrival {
+            None => true,
+            Some((prev_sys, _, prev_ship, _)) => prev_sys != sys_id || prev_ship != ship_id,
+        };
+        if needs_schedule {
+            let delay_sec = crate::combat::crimewatch::concord_delay_for_security(sys_sec);
+            st.pending_concord_arrival = Some((
+                sys_id,
+                now_unix.saturating_add(delay_sec.ceil() as u64),
+                ship_id,
+                0,
+            ));
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct EntropicSpoolState {
     pub target_id: i64,
