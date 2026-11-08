@@ -334,6 +334,15 @@ pub(crate) async fn handle_cargo_dropoff(ctx: &ServerContext, session: &mut Sess
         return Err(err("OutsideCargoDropoffRange", "Ship is too far from the structure to drop off cargo"));
     }
     ctx.db.try_with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get(&char_id) {
+            if ch.station_id.is_some()
+                || ch.structure_id.is_some()
+                || ch.solar_system_id != sys_id
+                || ch.active_ship_id != ship_id
+            {
+                return Err(err("ShipNotInSpace", "Character ship is no longer undocked in system"));
+            }
+        }
         let st = snap
             .structures
             .get(&structure_id)

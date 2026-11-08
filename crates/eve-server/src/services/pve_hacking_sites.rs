@@ -436,7 +436,30 @@ pub async fn handle_pve_hacking(
                 .map(|t| t.clamp(min_difficulty, 5))
                 .unwrap_or(min_difficulty);
             let rng_seed = ctx.mechanic_rng.try_next_u64().unwrap_or(0);
-            let game = with_pve_exploration_reg(ctx, |reg| {
+            let game = match with_pve_exploration_reg(ctx, |reg| -> Result<HackingGameSession, BridgeRpcError> {
+                if struct_pos.is_some() {
+                    if reg.structure_char_failures.get(&(char_id, container_id)).copied().unwrap_or(0) >= 2 {
+                        return Err(BridgeRpcError { code: "HackingGameAlreadyFinished".into(), message: "You have failed to hack this structure twice and are locked out".into() });
+                    }
+                } else {
+                    let now = now_sec(reg);
+                    let sites = reg.sites_by_system.get(&sys_id).ok_or_else(|| BridgeRpcError { code: "TargetNotFound".into(), message: "Target container not found".into() })?;
+                    let s = sites.iter().find(|x| x.hackable_can_ids.contains(&container_id) && !x.cleared).ok_or_else(|| BridgeRpcError { code: "TargetNotFound".into(), message: "Target container not found".into() })?;
+                    let ghost_timer_expired = s.site_category == "Ghost"
+                        && !s.ghost_detonated
+                        && s.ghost_timer_started_at
+                            .is_some_and(|st| now >= st + s.ghost_detonate_after_sec.max(90));
+                    if !ghost_timer_expired
+                        && ((s.site_category == "Ghost" && s.ghost_detonated)
+                            || reg.hacked_containers.contains(&(sys_id, container_id))
+                            || reg.failure_counts.get(&(sys_id, container_id)).copied().unwrap_or(0) >= 2)
+                    {
+                        return Err(BridgeRpcError { code: "HackingGameAlreadyFinished".into(), message: "Container has already been hacked or emptied".into() });
+                    }
+                }
+                if reg.hacking_games.values().any(|g| g.container_id == container_id && g.status == "InProgress") {
+                    return Err(BridgeRpcError { code: "HackingGameAlreadyInProgress".into(), message: "Another pilot is already hacking this target".into() });
+                }
                 let game_id = 500_000 + next_pve_seq(reg);
                 let tiles = build_hacking_grid_procedural_with_sde(
                     Some(&ctx.sde),
@@ -466,8 +489,11 @@ pub async fn handle_pve_hacking(
                 };
                 reg.hacking_games.insert((char_id, container_id), g.clone());
                 reg.self_repair_turns.remove(&(char_id, container_id));
-                g
-            });
+                Ok(g)
+            }) {
+                Ok(g) => g,
+                Err(e) => return Some(Err(e)),
+            };
 
             let start_indicator = hacking_tile_distance_indicator(0, &game.tiles);
             let start_events = vec![PyRep::Dict(vec![

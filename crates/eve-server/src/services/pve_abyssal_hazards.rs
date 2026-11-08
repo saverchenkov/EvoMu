@@ -397,6 +397,18 @@ pub async fn validate_and_consume_abyssal_filaments(
     let _now_unix = ctx.now_unix();
     let (iid, filament_type_id, tier, origin_sec, opener_fleet_id) =
         ctx.db.try_with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get(&char_id) {
+                if ch.station_id.is_some()
+                    || ch.structure_id.is_some()
+                    || ch.solar_system_id != cur_sys
+                    || ch.active_ship_id != ship_id
+                {
+                    return Err(rpc_err(
+                        "MustBeInSpace",
+                        format!("Ship {ship_id} is no longer undocked in solar system {cur_sys}"),
+                    ));
+                }
+            }
             let active_fleet_id = snap
                 .fleets
                 .values()

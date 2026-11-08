@@ -408,6 +408,18 @@ pub async fn handle_in_space_compression_mgr(
     }
 
     let (iid, ctype, qty, rem) = ctx.db.try_with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get(&char_id) {
+            if ch.station_id.is_some()
+                || ch.structure_id.is_some()
+                || ch.solar_system_id != sys_id
+                || Some(ch.active_ship_id) != ship_id
+            {
+                return Err(BridgeRpcError {
+                    code: "ShipNotInSpace".into(),
+                    message: "Character ship state changed before compression completed".into(),
+                });
+            }
+        }
         if snap.is_item_locked_in_contract_or_job(item_id) {
             return Err(BridgeRpcError {
                 code: "ItemLocked".into(),
@@ -420,7 +432,14 @@ pub async fn handle_in_space_compression_mgr(
                 message: format!("Item {item_id} not found"),
             });
         };
-        if item.owner_id != char_id || Some(item.location_id) != ship_id || item.flag == InventoryFlag::Locked || item.quantity < 1 {
+        let in_mining_hold = matches!(
+            item.flag,
+            InventoryFlag::SpecializedOreHold
+                | InventoryFlag::SpecializedIceHold
+                | InventoryFlag::SpecializedGasHold
+                | InventoryFlag::SpecializedMineralHold
+        );
+        if item.owner_id != char_id || Some(item.location_id) != ship_id || !in_mining_hold || item.quantity < 1 {
             return Err(BridgeRpcError {
                 code: "CompressionFailed".into(),
                 message: "Item cannot be compressed in space".into(),

@@ -730,23 +730,72 @@ pub(crate) async fn handle_void_space_player_jump(
     )
     .await?;
 
-    if let Some(iid) = cargo_filament_iid {
-        ctx.db.try_with_mut_snapshot(|snap| {
-            let Some(item) = snap.items.get_mut(&iid) else {
+    // Server-validated target ID (filament or gate) is used as effective_content_id;
+    // client-supplied content_id is not trusted directly.
+    let effective_content_id = target_id;
+    ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+        let ch = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
+            code: "CharacterNotFound".into(),
+            message: format!("Character {char_id} not found"),
+        })?;
+        if ch.station_id.is_some()
+            || ch.structure_id.is_some()
+            || ch.solar_system_id != cur_sys
+            || ch.active_ship_id != ship_id
+        {
+            return Err(BridgeRpcError {
+                code: "SystemTransitionFailed".into(),
+                message: format!("Character {char_id} is no longer undocked in system {cur_sys}"),
+            });
+        }
+        if let Some(iid) = cargo_filament_iid {
+            let Some(item) = snap.items.get(&iid) else {
                 return Err(BridgeRpcError {
                     code: "ItemNotFound".into(),
                     message: format!("Filament {iid} no longer in cargo"),
                 });
             };
-            if item.quantity > 1 {
-                item.quantity -= 1;
-                item.version += 1;
-            } else {
-                snap.items.remove(&iid);
+            if item.owner_id != char_id
+                || item.location_id != ship_id
+                || item.flag != eve_db::InventoryFlag::Cargo
+                || item.quantity < 1
+            {
+                return Err(BridgeRpcError {
+                    code: "ItemNotFound".into(),
+                    message: format!("Filament {iid} no longer in cargo"),
+                });
             }
-            Ok(())
-        })?;
-    }
+            snap.consume_exact_item_quantity(
+                iid,
+                1,
+                eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id),
+            )
+            .map_err(|e| BridgeRpcError {
+                code: "ItemLocked".into(),
+                message: e.to_string(),
+            })?;
+        }
+        let _ = crate::router::apply_character_transition_in_snap(
+            snap,
+            &ctx.sde,
+            char_id,
+            crate::router::TransitionLocation::Space { solar_system_id: VOID_SPACE_SYSTEM_ID },
+            Some(ship_id),
+            true,
+            false,
+        );
+        snap.item_positions.insert(ship_id, [0.0, 0.0, 0.0]);
+        let old_chan_id = format!("solarsystemid2:{cur_sys}");
+        if let Some(chan) = snap.chat_channels.get_mut(&old_chan_id) {
+            chan.members.remove(&char_id);
+        }
+        snap.chat_channels
+            .remove(&format!("solarsystemid2:{VOID_SPACE_SYSTEM_ID}"));
+        snap.abyssal_state
+            .void_space_content
+            .insert(char_id, effective_content_id);
+        Ok(())
+    })?;
 
     let now_unix = ctx.now_unix();
     let void_session = crate::services::pve_special_sites::VoidSpaceSessionRecord {
@@ -773,32 +822,6 @@ pub(crate) async fn handle_void_space_player_jump(
 
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, cur_sys);
     origin_handle.try_remove_ball(ship_id);
-
-    // Server-validated target ID (filament or gate) is used as effective_content_id;
-    // client-supplied content_id is not trusted directly.
-    let effective_content_id = target_id;
-    let _ = ctx.db.try_with_mut_snapshot(|snap| {
-        let _ = crate::router::apply_character_transition_in_snap(
-            snap,
-            &ctx.sde,
-            char_id,
-            crate::router::TransitionLocation::Space { solar_system_id: VOID_SPACE_SYSTEM_ID },
-            Some(ship_id),
-            true,
-            false,
-        );
-        snap.item_positions.insert(ship_id, [0.0, 0.0, 0.0]);
-        let old_chan_id = format!("solarsystemid2:{cur_sys}");
-        if let Some(chan) = snap.chat_channels.get_mut(&old_chan_id) {
-            chan.members.remove(&char_id);
-        }
-        snap.chat_channels
-            .remove(&format!("solarsystemid2:{VOID_SPACE_SYSTEM_ID}"));
-        snap.abyssal_state
-            .void_space_content
-            .insert(char_id, effective_content_id);
-        Ok::<(), BridgeRpcError>(())
-    });
     let _ = crate::services::quasar_social_chat::on_character_leave_local_chat(
         &ctx.quasar_gateway,
         &ctx.db,

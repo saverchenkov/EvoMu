@@ -25,16 +25,16 @@ pub(super) async fn handle_loot_all(
             message: "Session has no active ship".into(),
         });
     };
-    let ship_docked_in_db = ctx.db.with_snapshot(|s| {
-        let ch_st = s
-            .characters
-            .get(&char_id)
-            .and_then(|c| c.station_id.or(c.structure_id));
-        ch_st.is_some_and(|st_id| {
+    let (ship_docked_in_db, entry_db_state) = ctx.db.with_snapshot(|s| {
+        let ch = s.characters.get(&char_id);
+        let ch_st = ch.and_then(|c| c.station_id.or(c.structure_id));
+        let docked = ch_st.is_some_and(|st_id| {
             s.items
                 .get(&ship_id)
                 .is_some_and(|si| si.location_id == st_id)
-        })
+        });
+        let db_st = ch.map(|c| (c.station_id, c.structure_id, c.solar_system_id, c.active_ship_id));
+        (docked, db_st)
     });
     if ship_docked_in_db {
         return Err(BridgeRpcError {
@@ -150,68 +150,76 @@ pub(super) async fn handle_loot_all(
         });
     }
 
-    let owner_is_criminal = ctx
+    let is_abandoned_rt = with_combat_runtime(ctx, |rt| {
+        rt.container_lifetimes
+            .get(&wreck_id)
+            .map(|c| c.is_abandoned)
+            .unwrap_or(false)
+    });
+    let safety = with_combat_runtime(ctx, |rt| {
+        rt.safety_levels
+            .get(&char_id)
+            .copied()
+            .unwrap_or(SafetyLevel::Red)
+    });
+    let wreck_owner_is_criminal = ctx
         .crimewatch
         .write()
         .unwrap_or_else(|e| e.into_inner())
         .get_or_create(wreck_item.owner_id)
         .is_criminal(now_unix);
-    let is_abandoned = owner_is_criminal
-        || wreck_item.owner_id == 0
-        || with_combat_runtime(ctx, |rt| {
-            rt.container_lifetimes
-                .get(&wreck_id)
-                .map(|c| c.is_abandoned)
-                .unwrap_or(false)
-        });
-    let same_corp_or_fleet = ctx.db.with_snapshot(|snap| {
+
+    let (looted_ids, remaining_ids, suspect_triggered, is_abandoned) = ctx.db.try_with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get(&char_id) {
+            let cur_db_state = (ch.station_id, ch.structure_id, ch.solar_system_id, ch.active_ship_id);
+            if entry_db_state.is_some_and(|e| cur_db_state != e) {
+                return Err(BridgeRpcError {
+                    code: "ShipNotInSpace".into(),
+                    message: format!("Ship {ship_id} is no longer undocked in solar system {sys_id}"),
+                });
+            }
+        }
+        let Some(live_wreck) = snap.items.get(&wreck_id).cloned() else {
+            return Err(BridgeRpcError {
+                code: "ContainerNotFound".into(),
+                message: format!("Wreck or container {wreck_id} no longer exists"),
+            });
+        };
+        if live_wreck.location_id != sys_id as i64 {
+            return Err(BridgeRpcError {
+                code: "ContainerNotInSpace".into(),
+                message: format!("Wreck or container {wreck_id} is no longer in space"),
+            });
+        }
+        if live_wreck.owner_id != wreck_item.owner_id {
+            return Err(BridgeRpcError {
+                code: "ContainerOwnerChanged".into(),
+                message: format!("Wreck or container {wreck_id} owner changed concurrently"),
+            });
+        }
+
+        let is_abandoned = wreck_owner_is_criminal || live_wreck.owner_id == 0 || is_abandoned_rt;
         let c1 = snap.characters.get(&char_id).map(|c| c.corporation_id);
-        let c2 = snap
-            .characters
-            .get(&wreck_item.owner_id)
-            .map(|c| c.corporation_id);
+        let c2 = snap.characters.get(&live_wreck.owner_id).map(|c| c.corporation_id);
         let same_corp = c1.is_some() && c1 == c2 && c1.unwrap_or(0) > 2_000_000;
         let same_fleet = snap
             .fleets
             .values()
-            .any(|f| f.members.contains(&char_id) && f.members.contains(&wreck_item.owner_id));
-        same_corp || same_fleet
-    });
-
-    let mut suspect_triggered = false;
-    if (wreck_item.owner_id != char_id || active_ball_id != ship_id)
-        && !is_abandoned
-        && !same_corp_or_fleet
-    {
-        let safety = with_combat_runtime(ctx, |rt| {
-            rt.safety_levels
-                .get(&char_id)
-                .copied()
-                .unwrap_or(SafetyLevel::Red)
-        });
-        if safety == SafetyLevel::Green {
+            .any(|f| f.members.contains(&char_id) && f.members.contains(&live_wreck.owner_id));
+        let same_corp_or_fleet = same_corp || same_fleet;
+        let needs_suspect = (live_wreck.owner_id != char_id || active_ball_id != ship_id)
+            && !is_abandoned
+            && !same_corp_or_fleet;
+        if needs_suspect && safety == SafetyLevel::Green {
             return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
         }
-        {
-            let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-            let st = cw.get_or_create(char_id);
-            st.suspect_flag_until_unix = now_unix.saturating_add(900);
-        }
-        let _ = ctx.notify_system_criminal_flag_updates(sys_id, &[], &[char_id], &[]);
-        suspect_triggered = true;
-    }
 
-    let ship_cap = ctx
-        .db
-        .with_snapshot(|snap| {
-            snap.items
-                .get(&ship_id)
-                .and_then(|s| ctx.sde.types.get(&s.type_id))
-                .map(|t| t.capacity)
-        })
-        .unwrap_or(400.0);
-
-    let (looted_ids, remaining_ids) = ctx.db.with_mut_snapshot(|snap| {
+        let ship_cap = snap
+            .items
+            .get(&ship_id)
+            .and_then(|s| ctx.sde.types.get(&s.type_id))
+            .map(|t| t.capacity)
+            .unwrap_or(400.0);
         let cs_state = crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state_snap(snap);
         let used_vol: f64 = snap
             .items
@@ -297,8 +305,17 @@ pub(super) async fn handle_loot_all(
                 remaining.push(cid);
             }
         }
-        (looted, remaining)
-    });
+        Ok((looted, remaining, needs_suspect, is_abandoned))
+    })?;
+
+    if suspect_triggered {
+        {
+            let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+            let st = cw.get_or_create(char_id);
+            st.suspect_flag_until_unix = now_unix.saturating_add(900);
+        }
+        let _ = ctx.notify_system_criminal_flag_updates(sys_id, &[], &[char_id], &[]);
+    }
 
     ctx.notify(
         NotificationTarget::Character(char_id),

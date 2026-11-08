@@ -423,6 +423,23 @@ async fn activate_trace(
         Ok(())
     });
     entry_check?;
+    let (const_id, reg_id) = match ctx
+        .db
+        .transition_character_solar_system_if_at(char_id, cur_sys, ABYSSAL_SPACE_SYSTEM_ID, &ctx.sde)
+    {
+        Ok(ch) => (ch.constellation_id, ch.region_id),
+        Err(e) => {
+            with_abyssal_state(ctx, |st| {
+                if let Some(t) = st.traces.get_mut(&trace.trace_ball_id) {
+                    t.entered_char_ids.retain(|&c| c != char_id);
+                }
+            });
+            return Err(BridgeRpcError {
+                code: "SystemTransitionFailed".into(),
+                message: e.to_string(),
+            });
+        }
+    };
 
     if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ship_id).await {
         ctx.db.with_mut_snapshot(|snap| {
@@ -493,18 +510,6 @@ async fn activate_trace(
             )
             .await;
     }
-    let (const_id, reg_id) = match ctx
-        .db
-        .set_character_solar_system(char_id, ABYSSAL_SPACE_SYSTEM_ID, &ctx.sde)
-    {
-        Ok(ch) => (ch.constellation_id, ch.region_id),
-        Err(_) => ctx
-            .sde
-            .solar_systems
-            .get(&ABYSSAL_SPACE_SYSTEM_ID)
-            .map(|s| (s.constellation_id, s.region_id))
-            .unwrap_or((20_000_020, 10_000_002)),
-    };
     let _ = (const_id, reg_id);
     let _ = entry_now;
     let _ = ctx.execute_session_transition_sync(
@@ -555,6 +560,15 @@ async fn activate_inventory_filament(
 
     let (_iid, filament_type_id, tier, max_ships, origin_sec, ship_pos, opener_fleet_id) =
         validate_and_consume_abyssal_filaments(ctx, char_id, ship_id, cur_sys, filament_arg).await?;
+
+    let (const_id, reg_id) = ctx
+        .db
+        .transition_character_solar_system_if_at(char_id, cur_sys, ABYSSAL_SPACE_SYSTEM_ID, &ctx.sde)
+        .map(|ch| (ch.constellation_id, ch.region_id))
+        .map_err(|e| BridgeRpcError {
+            code: "SystemTransitionFailed".into(),
+            message: e.to_string(),
+        })?;
 
     let now_unix = ctx.now_unix();
     let origin_handle = ctx.systems.get_or_spawn(cur_sys);
@@ -642,18 +656,6 @@ async fn activate_inventory_filament(
             )
             .await;
     }
-    let (const_id, reg_id) = match ctx
-        .db
-        .set_character_solar_system(char_id, ABYSSAL_SPACE_SYSTEM_ID, &ctx.sde)
-    {
-        Ok(ch) => (ch.constellation_id, ch.region_id),
-        Err(_) => ctx
-            .sde
-            .solar_systems
-            .get(&ABYSSAL_SPACE_SYSTEM_ID)
-            .map(|s| (s.constellation_id, s.region_id))
-            .unwrap_or((20_000_020, 10_000_002)),
-    };
     let _ = (const_id, reg_id);
     let _ = now_unix;
     let _ = ctx.execute_session_transition_sync(

@@ -885,7 +885,30 @@ pub async fn activate_clone_vat_bay(
         .unwrap_or(16_273);
     let needed = fuel_qty.max(1.0).ceil() as i32;
 
+    let duration_s = (duration_ms / 1000.0).max(1.0);
+    let now_unix = ctx.now_unix();
+    let until_unix = now_unix.saturating_add(duration_s.ceil() as u64);
+
     let consumed = ctx.db.try_with_mut_snapshot(|s| -> Result<(), BridgeRpcError> {
+        let mut st = load_clone_vat_bay_state(s);
+        if st.active_by_ship.get(&ship_id).is_some_and(|&(_, u)| now_unix < u) {
+            return Err(BridgeRpcError {
+                code: "ModuleAlreadyActive".into(),
+                message: format!("Clone Vat Bay is already active on ship {ship_id}"),
+            });
+        }
+        let Some(mod_it) = s.items.get(&module_id) else {
+            return Err(BridgeRpcError {
+                code: "ModuleNotFound".into(),
+                message: format!("Module {module_id} not found"),
+            });
+        };
+        if mod_it.location_id != ship_id || mod_it.owner_id != char_id {
+            return Err(BridgeRpcError {
+                code: "ModuleNotFitted".into(),
+                message: format!("Module {module_id} is no longer fitted to ship {ship_id}"),
+            });
+        }
         let mut stacks: Vec<(i64, InventoryFlag, i32)> = s
             .items
             .values()
@@ -918,14 +941,14 @@ pub async fn activate_clone_vat_bay(
                 it.quantity -= take;
             }
         }
+        s.module_online_states.insert(module_id, true);
+        st.active_by_ship.insert(ship_id, (module_id, until_unix));
+        save_clone_vat_bay_state(s, &st);
         Ok(())
     });
     consumed?;
 
-    let duration_s = (duration_ms / 1000.0).max(1.0);
-    let now_unix = ctx.now_unix();
-    let until_unix = now_unix.saturating_add(duration_s.ceil() as u64);
-    sys.add_module_cycle(crate::system_actor::ActiveModuleCycle {
+    if let Err(e) = sys.add_module_cycle(crate::system_actor::ActiveModuleCycle {
         ship_id,
         module_id,
         module_type_id: mod_type.type_id,
@@ -937,14 +960,21 @@ pub async fn activate_clone_vat_bay(
         ..Default::default()
     })
     .await
-    .map_err(|e| BridgeRpcError { code: "ModuleActivationFailed".into(), message: e })?;
+    {
+        ctx.db.with_mut_snapshot(|s| {
+            s.module_active_states.remove(&module_id);
+            let mut st = load_clone_vat_bay_state(s);
+            if st.active_by_ship.get(&ship_id).is_some_and(|&(mid, _)| mid == module_id) {
+                st.active_by_ship.remove(&ship_id);
+                save_clone_vat_bay_state(s, &st);
+            }
+        });
+        return Err(BridgeRpcError { code: "ModuleActivationFailed".into(), message: e });
+    }
 
     ctx.db.with_mut_snapshot(|s| {
         s.module_online_states.insert(module_id, true);
         s.module_active_states.insert(module_id);
-        let mut st = load_clone_vat_bay_state(s);
-        st.active_by_ship.insert(ship_id, (module_id, until_unix));
-        save_clone_vat_bay_state(s, &st);
     });
 
     Ok(PyRep::keyval([

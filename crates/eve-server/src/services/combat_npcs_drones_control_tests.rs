@@ -412,3 +412,99 @@ async fn tractor_beam_and_salvager_ownership_range_and_pull() {
         .unwrap();
     assert!(salv_ok.is_ok());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn toctou_concurrent_launch_and_scoop_drones() {
+    let (ctx, mut session, char_id, ship_id, sys_id) = make_drone_test_ctx();
+    let kwargs = HashMap::new();
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    spawn_test_ball(&ctx, sys_id, ship_id, 587, DVec3::ZERO, 2_000.0).await;
+
+    // Limit pilot to 1 active drone (`Drones` skill 3436 = level 1) and stock 2 drones in DroneBay
+    let d1 = 300_800_001i64;
+    let d2 = 300_800_002i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        snap.skills.entry(char_id).or_default().insert(
+            3436,
+            eve_db::TrainedSkillRecord { type_id: 3436, level: 1, skill_points: 250.0 },
+        );
+        for &did in &[d1, d2] {
+            snap.items.insert(
+                did,
+                eve_db::InventoryItemRecord {
+                    item_id: did,
+                    type_id: 2454, // Hobgoblin I
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::DroneBay,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let mut s1 = session.clone();
+    let mut s2 = session.clone();
+    let l_args1 = [PyRep::List(vec![PyRep::Integer(d1)])];
+    let l_args2 = [PyRep::List(vec![PyRep::Integer(d2)])];
+    let (r1, r2) = tokio::join!(
+        handle_npcs_drones(&ctx, &mut s1, "ship", "LaunchDrones", &l_args1, &kwargs),
+        handle_npcs_drones(&ctx, &mut s2, "ship", "LaunchDrones", &l_args2, &kwargs),
+    );
+    let ok1 = r1.as_ref().is_some_and(|r| r.is_ok());
+    let ok2 = r2.as_ref().is_some_and(|r| r.is_ok());
+    assert!(ok1 ^ ok2, "expected exactly 1 LaunchDrones to succeed with Drones=1, got r1={r1:?} r2={r2:?}");
+    let launched_count = with_combat_runtime(&ctx, |rt| {
+        rt.active_drones_in_space.values().filter(|d| d.parent_ship_id == ship_id && !d.is_abandoned).count()
+    });
+    assert_eq!(launched_count, 1);
+
+    // Abandon the launched drone and race two nearby ships calling ScoopToDroneBay
+    let launched_ball_id = with_combat_runtime(&ctx, |rt| *rt.active_drones_in_space.keys().next().unwrap());
+    with_mut_combat_runtime(&ctx, |rt| {
+        if let Some(d) = rt.active_drones_in_space.get_mut(&launched_ball_id) {
+            d.is_abandoned = true;
+        }
+    });
+    let char2 = char_id + 1;
+    let ship2 = ship_id + 1;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch2 = snap.characters[&char_id].clone();
+        ch2.character_id = char2;
+        ch2.active_ship_id = ship2;
+        snap.characters.insert(char2, ch2);
+        let mut sh2 = snap.items[&ship_id].clone();
+        sh2.item_id = ship2;
+        sh2.owner_id = char2;
+        snap.items.insert(ship2, sh2);
+    });
+    spawn_test_ball(&ctx, sys_id, ship2, 587, DVec3::new(100.0, 0.0, 0.0), 2_000.0).await;
+    let mut scoop1 = session.clone();
+    let mut scoop2 = SessionState::new(99_002);
+    scoop2.user_id = Some(char2 as u64);
+    scoop2.character_id = Some(char2);
+    scoop2.corporation_id = session.corporation_id;
+    scoop2.solar_system_id = Some(sys_id);
+    scoop2.ship_id = Some(ship2);
+
+    let sc_args1 = [PyRep::Integer(launched_ball_id)];
+    let sc_args2 = [PyRep::Integer(launched_ball_id)];
+    let (sc1, sc2) = tokio::join!(
+        handle_npcs_drones(&ctx, &mut scoop1, "ship", "ScoopToDroneBay", &sc_args1, &kwargs),
+        handle_npcs_drones(&ctx, &mut scoop2, "ship", "ScoopToDroneBay", &sc_args2, &kwargs),
+    );
+    let sok1 = sc1.as_ref().is_some_and(|r| r.is_ok());
+    let sok2 = sc2.as_ref().is_some_and(|r| r.is_ok());
+    assert!(sok1 ^ sok2, "expected exactly 1 ScoopToDroneBay winner, got sc1={sc1:?} sc2={sc2:?}");
+    let _ = sys_handle;
+    let _ = &mut session;
+}

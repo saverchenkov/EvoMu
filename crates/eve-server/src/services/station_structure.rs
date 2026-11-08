@@ -780,15 +780,15 @@ pub async fn handle(
             if is_structure && handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
                 return Some(Err(BridgeRpcError { code: "ShipWarpScrambled".into(), message: "Cannot dock at an Upwell structure while ship is warp scrambled".into() }));
             }
-            if arrived_at_warp_dest {
-                let _ = handle.force_stop_warp(ship_id);
-                ctx.active_warps
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&ship_id);
-            }
-            match ctx.db.dock_character(char_id, dock_id, is_structure) {
+            match ctx.db.dock_character_if_in_space(char_id, sys_id, dock_id, is_structure) {
                 Ok(_) => {
+                    if arrived_at_warp_dest {
+                        let _ = handle.force_stop_warp(ship_id);
+                        ctx.active_warps
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .remove(&ship_id);
+                    }
                     let active_mods: Vec<i64> = ctx.db.with_mut_snapshot(|snap| {
                         let mods: Vec<i64> = snap
                             .items
@@ -1214,12 +1214,48 @@ pub async fn handle(
                 .max(1.0);
             let now_unix = ctx.now_unix();
 
-            ctx.db.with_mut_snapshot(|snap| {
-                if let Some(it) = snap.items.get_mut(&item_id) {
-                    it.location_id = sys_id as i64;
-                    it.flag = InventoryFlag::Hangar;
-                    it.singleton = true;
+            if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                if let Some(ch) = snap.characters.get(&char_id) {
+                    if ch.station_id.is_some() || ch.structure_id.is_some() || ch.solar_system_id != sys_id || ch.active_ship_id != ship_id {
+                        return Err(BridgeRpcError {
+                            code: "ShipNotInSpace".into(),
+                            message: format!("Ship {ship_id} is no longer undocked in solar system {sys_id}"),
+                        });
+                    }
                 }
+                let item_locked_job = snap.is_item_locked_in_contract_or_job(item_id);
+                let it = snap.items.get_mut(&item_id).ok_or_else(|| BridgeRpcError {
+                    code: "ItemNotFound".into(),
+                    message: format!("Item {item_id} not found"),
+                })?;
+                if it.owner_id != char_id {
+                    return Err(BridgeRpcError {
+                        code: "ItemOwnershipViolation".into(),
+                        message: format!("Character {char_id} does not own item {item_id}"),
+                    });
+                }
+                if it.flag == InventoryFlag::Locked || item_locked_job {
+                    return Err(BridgeRpcError {
+                        code: "ItemLocked".into(),
+                        message: format!("Item {item_id} is locked and cannot be anchored"),
+                    });
+                }
+                if it.location_id != ship_id && it.location_id != sys_id as i64 {
+                    return Err(BridgeRpcError {
+                        code: "InvalidItemLocation".into(),
+                        message: format!("Item {item_id} must be in active ship cargo or unanchored in space in system {sys_id}"),
+                    });
+                }
+                if snap.sp6_lifecycle.space_object_meta.get(&item_id).is_some_and(|m| m.anchor_completed || m.anchor_start_unix.is_some()) {
+                    return Err(BridgeRpcError {
+                        code: "AlreadyAnchored".into(),
+                        message: format!("Item {item_id} is already anchored or anchoring"),
+                    });
+                }
+                it.location_id = sys_id as i64;
+                it.flag = InventoryFlag::Hangar;
+                it.singleton = true;
+                it.version += 1;
                 crate::sp6_lifecycle::record_anchor_meta_in_snap(
                     snap,
                     item_id,
@@ -1229,7 +1265,10 @@ pub async fn handle(
                 );
                 snap.item_positions
                     .insert(item_id, [anchor_pos.x, anchor_pos.y, anchor_pos.z]);
-            });
+                Ok(())
+            }) {
+                return Some(Err(e));
+            }
 
             let is_secure_container = item_type.capacity > 0.0 && !is_warp_disruptor && !is_mobile;
             if is_secure_container {

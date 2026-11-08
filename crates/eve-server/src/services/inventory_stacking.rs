@@ -175,232 +175,21 @@ pub(crate) async fn handle_multi_add(
     let pre_balls = crate::services::structure_acl_defense_rules::snapshot_system_balls_for_inventory(
         ctx, session, char_id,
     );
-    let mut fitted_unfit_ids: Vec<(i64, i64, u16)> = Vec::new();
-    ctx.db.with_snapshot(|snap| {
-        let ch = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
-            code: "CharacterNotFound".into(),
-            message: format!("Character {char_id} not found"),
-        })?;
-        let ch_dock = if session.station_id.is_none()
-            && session.structure_id.is_none()
-            && session.solar_system_id.is_some()
-        {
-            0
-        } else {
-            ch.station_id.or(ch.structure_id).unwrap_or(0)
-        };
-        let ch_sys = if ch.solar_system_id > 0 {
-            ch.solar_system_id as i64
-        } else {
-            session.solar_system_id.map(|s| s as i64).unwrap_or(0)
-        };
-        let caller_ship_id = session.ship_id.filter(|&id| id > 0).unwrap_or(ch.active_ship_id);
-
-        let foreign_dest = snap.items.get(&new_loc).is_some_and(|d| d.owner_id != char_id);
-        let dest_type_opt = snap.items.get(&new_loc).and_then(|d| ctx.sde.types.get(&d.type_id));
-
-        crate::services::inventory_bound::validate_multiadd_destination(
-            snap, session, ch, char_id, new_loc, dest_is_struct_fuel, &pre_balls,
-        )?;
-
-        let mut batch_vol = 0.0;
-        for &item_id in &item_ids {
-            let Some(item) = snap.items.get(&item_id) else {
-                return Err(BridgeRpcError {
-                    code: "ItemNotFound".into(),
-                    message: format!("Item {item_id} not found"),
-                });
-            };
-            let src_is_struct_fuel = crate::services::inventory_bound::validate_multiadd_structure_fuel_transfers(
-                ctx, snap, session, char_id, item, new_loc, dest_is_struct_fuel, ch_dock, ch_sys, caller_ship_id, &pre_balls,
-            )?;
-            let is_corp_item = ch.corporation_id > 0 && item.owner_id == ch.corporation_id;
-            if is_corp_item && !src_is_struct_fuel {
-                crate::services::inventory_bound::validate_corp_source_item_take_access_in_snap(
-                    ctx,
-                    snap,
-                    char_id,
-                    ch.corporation_id,
-                    item,
-                )?;
-            }
-            if !src_is_struct_fuel && item.owner_id != char_id && !is_corp_item && !looted_from_space_ids.contains(&item_id) {
-                return Err(BridgeRpcError {
-                    code: "ItemOwnershipViolation".into(),
-                    message: format!("Character {char_id} is not authorized to move item {item_id}"),
-                });
-            }
-            if item_id == new_loc
-                || snap.is_structure_controller_saved_ship(item_id)
-                || (ch.active_ship_id > 0
-                    && item_id == ch.active_ship_id
-                    && (snap.items.contains_key(&new_loc) || (116..=122).contains(&flag_u16)))
-            {
-                return Err(BridgeRpcError {
-                    code: "CannotMoveActiveShip".into(),
-                    message: format!("Cannot move item {item_id} into {new_loc}"),
-                });
-            }
-            crate::services::fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(
-                snap, item,
-            )?;
-            if let Some(dest_item) = snap.items.get(&new_loc) {
-                crate::services::fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(
-                    snap, dest_item,
-                )?;
-            }
-            if matches!(item.flag as u16, 92..=94) {
-                return Err(BridgeRpcError {
-                    code: "CannotUnfitRig".into(),
-                    message: "Fitted rigs cannot be moved via MultiAdd".into(),
-                });
-            }
-            if snap.structures.contains_key(&item.location_id)
-                && matches!(item.flag as u16, 11..=34 | 164..=171)
-            {
-                return Err(BridgeRpcError {
-                    code: "InvalidLocation".into(),
-                    message: "Structure modules must be unfitted individually".into(),
-                });
-            }
-            if matches!(item.flag as u16, 11..=34 | 125..=132) || matches!(flag_u16, 11..=34 | 125..=132) {
-                if ch_dock > 0 {
-                    crate::services::structure_acl_defense_rules::validate_docked_ship_fitting_facility_in_snap(
-                        ctx, snap, ch_dock,
-                    )?;
-                }
-                if matches!(item.flag as u16, 11..=34 | 125..=132) {
-                    fitted_unfit_ids.push((item.location_id, item_id, item.flag as u16));
-                }
-            }
-            let is_courier = snap
-                .item_custom_names
-                .get(&item_id)
-                .is_some_and(|s| s.starts_with("courier_cargo:"));
-            if is_courier && ((116..=122).contains(&flag_u16) || foreign_dest) {
-                return Err(BridgeRpcError {
-                    code: "CannotDeliverCourierCargo".into(),
-                    message: "Courier cargo cannot be moved into corporation hangar divisions or foreign containers/ships".into(),
-                });
-            }
-            if !src_is_struct_fuel && !crate::services::inventory_bound::is_inventory_location_colocated(
-                snap, session, ch, &pre_balls, item.location_id,
-            ) {
-                return Err(BridgeRpcError {
-                    code: "ItemOwnershipViolation".into(),
-                    message: format!("Item {item_id} location not reachable"),
-                });
-            }
-            if let Some(dest_type) = dest_type_opt {
-                if is_ship_hold && dest_type.category_id == 6 {
-                    let Some(item_type) = ctx.sde.types.get(&item.type_id) else {
-                        return Err(BridgeRpcError {
-                            code: "ItemNotFound".into(),
-                            message: format!("Type {} not found", item.type_id),
-                        });
-                    };
-                    if !crate::services::fitting_saved_apply::is_item_allowed_in_ship_hold(
-                        flag_u16, item_type, dest_type,
-                    ) {
-                        return Err(BridgeRpcError::user_error("InvalidItemTypeForHold"));
-                    }
-                }
-            }
-            batch_vol += fitting_containers_ships::effective_item_unit_volume(&ctx.sde, item)
-                * (item.quantity as f64);
-        }
-
-        if let Some(dest_type) = dest_type_opt {
-            if is_ship_hold && dest_type.category_id == 6 {
-                let hold_cap =
-                    crate::services::fitting_saved_apply::get_ship_hold_capacity(flag_u16, dest_type, eval_cargo_cap);
-                if flag_u16 != 5 && hold_cap <= 0.0 {
-                    return Err(super::inventory_fitting::ship_hold_capacity_error(
-                        flag_u16, 0.0, 0.0, batch_vol,
-                    ));
-                }
-                if hold_cap > 0.0 {
-                    let used_vol: f64 = snap
-                        .items
-                        .values()
-                        .filter(|i| {
-                            i.location_id == new_loc && (i.flag as u16) == flag_u16 && !item_ids.contains(&i.item_id)
-                        })
-                        .map(|i| {
-                            fitting_containers_ships::effective_item_unit_volume(&ctx.sde, i)
-                                * (i.quantity as f64)
-                        })
-                        .sum();
-                    if used_vol + batch_vol > hold_cap + 1e-4 {
-                        return Err(super::inventory_fitting::ship_hold_capacity_error(
-                            flag_u16, hold_cap, used_vol, batch_vol,
-                        ));
-                    }
-                }
-            } else if fitting_containers_ships::is_container_group(
-                dest_type.group_id,
-                dest_type.type_id,
-            ) {
-                let cap = dest_type.capacity;
-                if cap > 0.0 {
-                    let used: f64 = snap
-                        .items
-                        .values()
-                        .filter(|i| i.location_id == new_loc && !item_ids.contains(&i.item_id))
-                        .map(|i| {
-                            fitting_containers_ships::effective_item_unit_volume(&ctx.sde, i)
-                                * (i.quantity as f64)
-                        })
-                        .sum();
-                    if used + batch_vol > cap + 1e-4 {
-                        return Err(BridgeRpcError {
-                            code: "CapacityExceeded".into(),
-                            message: format!("Container capacity of {cap} m³ exceeded"),
-                        });
-                    }
-                }
-            } else if flag_u16 == 90 && dest_type.category_id == 6 {
-                let sma_cap = dest_type.default_attributes.get(&908).copied().unwrap_or(0.0);
-                if sma_cap > 0.0 {
-                    let used: f64 = snap
-                        .items
-                        .values()
-                        .filter(|i| {
-                            i.location_id == new_loc && matches!(i.flag as u16, 90 | 138) && !item_ids.contains(&i.item_id)
-                        })
-                        .map(|i| fitting_containers_ships::effective_item_unit_volume(&ctx.sde, i))
-                        .sum();
-                    if used + batch_vol > sma_cap + 1e-4 {
-                        return Err(BridgeRpcError {
-                            code: "CapacityExceeded".into(),
-                            message: format!("Ship Maintenance Bay capacity {sma_cap} m³ exceeded"),
-                        });
-                    }
-                }
-            } else if flag_u16 == 155 && dest_type.category_id == 6 {
-                let fh_cap = dest_type.default_attributes.get(&912).copied().unwrap_or(0.0);
-                if fh_cap > 0.0 {
-                    let used: f64 = snap
-                        .items
-                        .values()
-                        .filter(|i| {
-                            i.location_id == new_loc && (i.flag as u16) == 155 && !item_ids.contains(&i.item_id)
-                        })
-                        .map(|i| {
-                            fitting_containers_ships::effective_item_unit_volume(&ctx.sde, i)
-                                * (i.quantity as f64)
-                        })
-                        .sum();
-                    if used + batch_vol > fh_cap + 1e-4 {
-                        return Err(BridgeRpcError {
-                            code: "CapacityExceeded".into(),
-                            message: format!("Fleet Hangar capacity {fh_cap} m³ exceeded"),
-                        });
-                    }
-                }
-            }
-        }
-        Ok(())
+    let fitted_unfit_ids = ctx.db.with_snapshot(|snap| {
+        validate_multi_add_in_snap(
+            ctx,
+            snap,
+            session,
+            char_id,
+            new_loc,
+            flag_u16,
+            &item_ids,
+            &looted_from_space_ids,
+            dest_is_struct_fuel,
+            is_ship_hold,
+            eval_cargo_cap,
+            &pre_balls,
+        )
     })?;
     if !fitted_unfit_ids.is_empty() && session.station_id.is_none() && session.structure_id.is_none() {
         let now_unix = ctx.now_unix_secs();
@@ -507,6 +296,20 @@ pub(crate) async fn handle_multi_add(
         }
     }
     let (moved, old_containers) = ctx.db.try_with_mut_snapshot(|snap| {
+        validate_multi_add_in_snap(
+            ctx,
+            snap,
+            session,
+            char_id,
+            new_loc,
+            flag_u16,
+            &item_ids,
+            &looted_from_space_ids,
+            dest_is_struct_fuel,
+            is_ship_hold,
+            eval_cargo_cap,
+            &pre_balls,
+        )?;
         let mut moved = Vec::with_capacity(item_ids.len());
         let mut old_containers = HashSet::new();
         let dst_struct_corp = crate::services::structure_acl_defense_rules::is_structure_fuel_flag(flag)
@@ -1665,6 +1468,248 @@ pub async fn despawn_empty_jetcan_if_needed(
         );
     }
     true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_multi_add_in_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    new_loc: i64,
+    flag_u16: u16,
+    item_ids: &[i64],
+    looted_from_space_ids: &HashSet<i64>,
+    dest_is_struct_fuel: bool,
+    is_ship_hold: bool,
+    eval_cargo_cap: Option<f64>,
+    pre_balls: &HashMap<i64, (glam::DVec3, f64)>,
+) -> Result<Vec<(i64, i64, u16)>, BridgeRpcError> {
+    let mut fitted_unfit_ids: Vec<(i64, i64, u16)> = Vec::new();
+    let ch = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
+        code: "CharacterNotFound".into(),
+        message: format!("Character {char_id} not found"),
+    })?;
+    let ch_dock = if session.station_id.is_none()
+        && session.structure_id.is_none()
+        && session.solar_system_id.is_some()
+    {
+        0
+    } else {
+        ch.station_id.or(ch.structure_id).unwrap_or(0)
+    };
+    let ch_sys = if ch.solar_system_id > 0 {
+        ch.solar_system_id as i64
+    } else {
+        session.solar_system_id.map(|s| s as i64).unwrap_or(0)
+    };
+    let caller_ship_id = session.ship_id.filter(|&id| id > 0).unwrap_or(ch.active_ship_id);
+
+    let foreign_dest = snap.items.get(&new_loc).is_some_and(|d| d.owner_id != char_id);
+    let dest_type_opt = snap.items.get(&new_loc).and_then(|d| ctx.sde.types.get(&d.type_id));
+
+    crate::services::inventory_bound::validate_multiadd_destination(
+        snap, session, ch, char_id, new_loc, dest_is_struct_fuel, pre_balls,
+    )?;
+
+    let mut batch_vol = 0.0;
+    for &item_id in item_ids {
+        let Some(item) = snap.items.get(&item_id) else {
+            return Err(BridgeRpcError {
+                code: "ItemNotFound".into(),
+                message: format!("Item {item_id} not found"),
+            });
+        };
+        let src_is_struct_fuel = crate::services::inventory_bound::validate_multiadd_structure_fuel_transfers(
+            ctx, snap, session, char_id, item, new_loc, dest_is_struct_fuel, ch_dock, ch_sys, caller_ship_id, pre_balls,
+        )?;
+        let is_corp_item = ch.corporation_id > 0 && item.owner_id == ch.corporation_id;
+        if is_corp_item && !src_is_struct_fuel {
+            crate::services::inventory_bound::validate_corp_source_item_take_access_in_snap(
+                ctx,
+                snap,
+                char_id,
+                ch.corporation_id,
+                item,
+            )?;
+        }
+        if !src_is_struct_fuel && item.owner_id != char_id && !is_corp_item && !looted_from_space_ids.contains(&item_id) {
+            return Err(BridgeRpcError {
+                code: "ItemOwnershipViolation".into(),
+                message: format!("Character {char_id} is not authorized to move item {item_id}"),
+            });
+        }
+        if item_id == new_loc
+            || snap.is_structure_controller_saved_ship(item_id)
+            || (ch.active_ship_id > 0
+                && item_id == ch.active_ship_id
+                && (snap.items.contains_key(&new_loc) || (116..=122).contains(&flag_u16)))
+        {
+            return Err(BridgeRpcError {
+                code: "CannotMoveActiveShip".into(),
+                message: format!("Cannot move item {item_id} into {new_loc}"),
+            });
+        }
+        crate::services::fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(
+            snap, item,
+        )?;
+        if let Some(dest_item) = snap.items.get(&new_loc) {
+            crate::services::fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(
+                snap, dest_item,
+            )?;
+        }
+        if matches!(item.flag as u16, 92..=94) {
+            return Err(BridgeRpcError {
+                code: "CannotUnfitRig".into(),
+                message: "Fitted rigs cannot be moved via MultiAdd".into(),
+            });
+        }
+        if snap.structures.contains_key(&item.location_id)
+            && matches!(item.flag as u16, 11..=34 | 164..=171)
+        {
+            return Err(BridgeRpcError {
+                code: "InvalidLocation".into(),
+                message: "Structure modules must be unfitted individually".into(),
+            });
+        }
+        if matches!(item.flag as u16, 11..=34 | 125..=132) || matches!(flag_u16, 11..=34 | 125..=132) {
+            if ch_dock > 0 {
+                crate::services::structure_acl_defense_rules::validate_docked_ship_fitting_facility_in_snap(
+                    ctx, snap, ch_dock,
+                )?;
+            }
+            if matches!(item.flag as u16, 11..=34 | 125..=132) {
+                fitted_unfit_ids.push((item.location_id, item_id, item.flag as u16));
+            }
+        }
+        let is_courier = snap
+            .item_custom_names
+            .get(&item_id)
+            .is_some_and(|s| s.starts_with("courier_cargo:"));
+        if is_courier && ((116..=122).contains(&flag_u16) || foreign_dest) {
+            return Err(BridgeRpcError {
+                code: "CannotDeliverCourierCargo".into(),
+                message: "Courier cargo cannot be moved into corporation hangar divisions or foreign containers/ships".into(),
+            });
+        }
+        if !src_is_struct_fuel && !crate::services::inventory_bound::is_inventory_location_colocated(
+            snap, session, ch, pre_balls, item.location_id,
+        ) {
+            return Err(BridgeRpcError {
+                code: "ItemOwnershipViolation".into(),
+                message: format!("Item {item_id} location not reachable"),
+            });
+        }
+        if let Some(dest_type) = dest_type_opt {
+            if is_ship_hold && dest_type.category_id == 6 {
+                let Some(item_type) = ctx.sde.types.get(&item.type_id) else {
+                    return Err(BridgeRpcError {
+                        code: "ItemNotFound".into(),
+                        message: format!("Type {} not found", item.type_id),
+                    });
+                };
+                if !crate::services::fitting_saved_apply::is_item_allowed_in_ship_hold(
+                    flag_u16, item_type, dest_type,
+                ) {
+                    return Err(BridgeRpcError::user_error("InvalidItemTypeForHold"));
+                }
+            }
+        }
+        batch_vol += fitting_containers_ships::effective_item_unit_volume(&ctx.sde, item)
+            * (item.quantity as f64);
+    }
+
+    if let Some(dest_type) = dest_type_opt {
+        if is_ship_hold && dest_type.category_id == 6 {
+            let hold_cap =
+                crate::services::fitting_saved_apply::get_ship_hold_capacity(flag_u16, dest_type, eval_cargo_cap);
+            if flag_u16 != 5 && hold_cap <= 0.0 {
+                return Err(super::inventory_fitting::ship_hold_capacity_error(
+                    flag_u16, 0.0, 0.0, batch_vol,
+                ));
+            }
+            if hold_cap > 0.0 {
+                let used_vol: f64 = snap
+                    .items
+                    .values()
+                    .filter(|i| {
+                        i.location_id == new_loc && (i.flag as u16) == flag_u16 && !item_ids.contains(&i.item_id)
+                    })
+                    .map(|i| {
+                        fitting_containers_ships::effective_item_unit_volume(&ctx.sde, i)
+                            * (i.quantity as f64)
+                    })
+                    .sum();
+                if used_vol + batch_vol > hold_cap + 1e-4 {
+                    return Err(super::inventory_fitting::ship_hold_capacity_error(
+                        flag_u16, hold_cap, used_vol, batch_vol,
+                    ));
+                }
+            }
+        } else if fitting_containers_ships::is_container_group(
+            dest_type.group_id,
+            dest_type.type_id,
+        ) {
+            let cap = dest_type.capacity;
+            if cap > 0.0 {
+                let used: f64 = snap
+                    .items
+                    .values()
+                    .filter(|i| i.location_id == new_loc && !item_ids.contains(&i.item_id))
+                    .map(|i| {
+                        fitting_containers_ships::effective_item_unit_volume(&ctx.sde, i)
+                            * (i.quantity as f64)
+                    })
+                    .sum();
+                if used + batch_vol > cap + 1e-4 {
+                    return Err(BridgeRpcError {
+                        code: "CapacityExceeded".into(),
+                        message: format!("Container capacity of {cap} m³ exceeded"),
+                    });
+                }
+            }
+        } else if flag_u16 == 90 && dest_type.category_id == 6 {
+            let sma_cap = dest_type.default_attributes.get(&908).copied().unwrap_or(0.0);
+            if sma_cap > 0.0 {
+                let used: f64 = snap
+                    .items
+                    .values()
+                    .filter(|i| {
+                        i.location_id == new_loc && matches!(i.flag as u16, 90 | 138) && !item_ids.contains(&i.item_id)
+                    })
+                    .map(|i| fitting_containers_ships::effective_item_unit_volume(&ctx.sde, i))
+                    .sum();
+                if used + batch_vol > sma_cap + 1e-4 {
+                    return Err(BridgeRpcError {
+                        code: "CapacityExceeded".into(),
+                        message: format!("Ship Maintenance Bay capacity {sma_cap} m³ exceeded"),
+                    });
+                }
+            }
+        } else if flag_u16 == 155 && dest_type.category_id == 6 {
+            let fh_cap = dest_type.default_attributes.get(&912).copied().unwrap_or(0.0);
+            if fh_cap > 0.0 {
+                let used: f64 = snap
+                    .items
+                    .values()
+                    .filter(|i| {
+                        i.location_id == new_loc && (i.flag as u16) == 155 && !item_ids.contains(&i.item_id)
+                    })
+                    .map(|i| {
+                        fitting_containers_ships::effective_item_unit_volume(&ctx.sde, i)
+                            * (i.quantity as f64)
+                    })
+                    .sum();
+                if used + batch_vol > fh_cap + 1e-4 {
+                    return Err(BridgeRpcError {
+                        code: "CapacityExceeded".into(),
+                        message: format!("Fleet Hangar capacity {fh_cap} m³ exceeded"),
+                    });
+                }
+            }
+        }
+    }
+    Ok(fitted_unfit_ids)
 }
 
 #[cfg(test)]

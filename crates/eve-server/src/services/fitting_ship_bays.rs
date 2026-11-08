@@ -36,15 +36,20 @@ pub(crate) async fn board_stored_ship(
     };
     let dock_id = session.station_id.or(session.structure_id);
     let custom_flag = read_container_ship_state(ctx).custom_item_flags.get(&stored_id).copied();
-    let (stored, host_type, host_loc, host_owner, host_flag) = ctx.db.with_snapshot(|snap| {
+    let (stored, host_type, host_loc, host_owner, host_flag, entry_db_ship_id, entry_db_dock) = ctx.db.with_snapshot(|snap| {
         let stored = snap.items.get(&stored_id).cloned();
         let host = stored.as_ref().and_then(|s| snap.items.get(&s.location_id).cloned());
+        let db_ch = snap.characters.get(&char_id);
+        let db_ship = db_ch.map(|c| c.active_ship_id);
+        let db_dock = db_ch.and_then(|c| c.station_id.or(c.structure_id));
         (
             stored,
             host.as_ref().map(|h| h.type_id),
             host.as_ref().map(|h| h.location_id),
             host.as_ref().map(|h| h.owner_id).unwrap_or(0),
             host.as_ref().map(|h| h.flag),
+            db_ship,
+            db_dock,
         )
     });
     let stored = stored.ok_or_else(|| err("ShipNotFound", format!("Stored ship {stored_id} not found")))?;
@@ -225,12 +230,79 @@ pub(crate) async fn board_stored_ship(
         }
     }
     let capsule_group = ctx.sde.groups.values().find(|g| g.name == "Capsule").map(|g| g.group_id);
-    let (removed_capsule, prev_is_capsule) = ctx.db.with_mut_snapshot(|snap| {
-        if let Some(s) = snap.items.get_mut(&stored_id) {
-            s.owner_id = char_id;
-            s.location_id = dock_id.or(session.solar_system_id.map(|v| v as i64)).unwrap_or(s.location_id);
-            s.flag = if dock_id.is_some() { InventoryFlag::Hangar } else { InventoryFlag::None };
-            s.version += 1;
+    let req_sys_id = session.solar_system_id;
+    let (removed_capsule, prev_is_capsule) = ctx.db.try_with_mut_snapshot(|snap| {
+        let ch_snap = snap.characters.get(&char_id).ok_or_else(|| {
+            err("CharacterNotFound", format!("Character {char_id} not found"))
+        })?;
+        let snap_dock = ch_snap.station_id.or(ch_snap.structure_id);
+        if snap_dock != entry_db_dock {
+            return Err(err(
+                "SessionStateChanged",
+                "Docking state changed concurrently while boarding stored ship",
+            ));
+        }
+        if let Some(prev) = entry_db_ship_id {
+            if ch_snap.active_ship_id != prev {
+                return Err(err(
+                    "ActiveShipChanged",
+                    "Active ship changed concurrently while boarding stored ship",
+                ));
+            }
+        }
+        let Some(s) = snap.items.get(&stored_id).cloned() else {
+            return Err(err("ShipNotFound", format!("Stored ship {stored_id} not found")));
+        };
+        if s.location_id != host_id || !s.singleton {
+            return Err(err(
+                "ShipNotInMaintenanceBay",
+                format!("Ship {stored_id} is no longer stored in bay host {host_id}"),
+            ));
+        }
+        let custom_snap = fitting_containers_ships::read_container_ship_state_snap(snap)
+            .custom_item_flags
+            .get(&stored_id)
+            .copied();
+        let in_bay_snap = is_ship_bay_flag(s.flag as u16)
+            || custom_snap.is_some_and(is_ship_bay_flag)
+            || matches!(s.flag as u16, 177 | 179)
+            || matches!(custom_snap, Some(177 | 179));
+        if !in_bay_snap {
+            return Err(err(
+                "ShipNotInMaintenanceBay",
+                format!("Ship {stored_id} is no longer in a ship bay of {host_id}"),
+            ));
+        }
+        let still_owned = s.owner_id == char_id
+            || (corp_id != 0 && s.owner_id == corp_id && {
+                let (is_ceo, snap_roles) =
+                    crate::services::inventory_bound::get_effective_corp_roles_at_location_in_snap_at(
+                        snap,
+                        corp_id,
+                        char_id,
+                        dock_id,
+                        now_unix,
+                    );
+                let eff = snap_roles | session.corp_role;
+                is_ceo || (eff & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG)) != 0
+            });
+        if !still_owned {
+            return Err(err(
+                "OwnershipViolation",
+                format!("Ship {stored_id} ownership changed while boarding"),
+            ));
+        }
+        if snap.is_item_locked_in_contract_or_job(stored_id) {
+            return Err(err(
+                "ItemLocked",
+                format!("Ship {stored_id} is locked in a contract or industry job"),
+            ));
+        }
+        if let Some(s_mut) = snap.items.get_mut(&stored_id) {
+            s_mut.owner_id = char_id;
+            s_mut.location_id = dock_id.or(req_sys_id.map(|v| v as i64)).unwrap_or(s_mut.location_id);
+            s_mut.flag = if dock_id.is_some() { InventoryFlag::Hangar } else { InventoryFlag::None };
+            s_mut.version += 1;
         }
         let _ = crate::router::apply_character_transition_in_snap(
             snap,
@@ -250,8 +322,8 @@ pub(crate) async fn board_stored_ship(
         } else {
             None
         };
-        (rem, is_cap)
-    });
+        Ok((rem, is_cap))
+    })?;
     write_container_ship_state(ctx, |st| {
         st.custom_item_flags.remove(&stored_id);
     });
@@ -400,6 +472,11 @@ pub(crate) async fn ship_jettison(
     }
     let sys_id = session.solar_system_id.ok_or_else(|| err("NotInSpace", "Jettison can only be performed in space"))?;
     let ship_id = session.ship_id.ok_or_else(|| err("NoActiveShip", "Jettison requires an active ship"))?;
+    let entry_db_state = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .get(&char_id)
+            .map(|c| (c.station_id, c.structure_id, c.solar_system_id, c.active_ship_id))
+    });
     let mut item_ids: Vec<i64> = Vec::new();
     let parse_ids = |rep: &PyRep| match rep {
         PyRep::List(l) | PyRep::Tuple(l) => l.iter().filter_map(|x| x.as_i64()).collect::<Vec<_>>(),
@@ -418,24 +495,23 @@ pub(crate) async fn ship_jettison(
     }
     let now_unix = ctx.now_unix_secs();
     let note_key = -10_000_018 - char_id;
-    let last_jettison = ctx.db.with_snapshot(|snap| {
-        snap.owner_notes
-            .get(&note_key)
-            .and_then(|n| n.note.parse::<u64>().ok())
-    });
-    if let Some(last) = last_jettison {
-        if now_unix < last.saturating_add(180) {
-            return Err(err(
-                "JettisonCooldownActive",
-                format!(
-                    "Jettison is on 180s cooldown ({}s remaining)",
-                    last.saturating_add(180).saturating_sub(now_unix)
-                ),
-            ));
-        }
-    }
     let is_crim = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner()).states.get(&char_id).is_some_and(|st| st.is_criminal(now_unix));
     let jetcan_id = ctx.db.try_with_mut_snapshot(|snap| {
+        let last_jettison = snap
+            .owner_notes
+            .get(&note_key)
+            .and_then(|n| n.note.parse::<u64>().ok());
+        if let Some(last) = last_jettison {
+            if now_unix < last.saturating_add(180) {
+                return Err(err(
+                    "JettisonCooldownActive",
+                    format!(
+                        "Jettison is on 180s cooldown ({}s remaining)",
+                        last.saturating_add(180).saturating_sub(now_unix)
+                    ),
+                ));
+            }
+        }
         let mut total_vol = 0.0f64;
         for &iid in &item_ids {
             let Some(it) = snap.items.get(&iid) else {
@@ -487,6 +563,16 @@ pub(crate) async fn ship_jettison(
             }
             let item_vol = fitting_containers_ships::effective_item_unit_volume(&ctx.sde, it) * (it.quantity as f64);
             total_vol += item_vol;
+        }
+        let ch = snap.characters.get(&char_id).ok_or_else(|| {
+            err("CharacterNotFound", format!("Character {char_id} not found"))
+        })?;
+        let cur_db_state = (ch.station_id, ch.structure_id, ch.solar_system_id, ch.active_ship_id);
+        if entry_db_state.is_some_and(|e| cur_db_state != e) {
+            return Err(err(
+                "CantDoThatWhileDocked",
+                "Ship is no longer undocked in this solar system",
+            ));
         }
         let jetcan_cap = ctx.sde.types.get(&23).map(|t| t.capacity.max(55_000.0)).unwrap_or(55_000.0);
         if total_vol > jetcan_cap + 1e-4 {
@@ -571,6 +657,11 @@ pub(crate) async fn ship_drop(
     }
     let sys_id = session.solar_system_id.ok_or_else(|| err("NotInSpace", "Drop can only be performed in space"))?;
     let ship_id = session.ship_id.ok_or_else(|| err("NoActiveShip", "Drop requires an active ship"))?;
+    let entry_db_state = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .get(&char_id)
+            .map(|c| (c.station_id, c.structure_id, c.solar_system_id, c.active_ship_id))
+    });
     let mut items_to_drop: Vec<(i64, Option<i32>)> = Vec::new();
     let parse_el = |el: &PyRep| -> Option<(i64, Option<i32>)> {
         if let Some(id) = el.as_i64() {
@@ -644,6 +735,16 @@ pub(crate) async fn ship_drop(
     }
     let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(0.0);
     let dropped_items: Vec<(i64, i64, u32, DVec3)> = ctx.db.try_with_mut_snapshot(|snap| {
+        let ch = snap.characters.get(&char_id).ok_or_else(|| {
+            err("CharacterNotFound", format!("Character {char_id} not found"))
+        })?;
+        let cur_db_state = (ch.station_id, ch.structure_id, ch.solar_system_id, ch.active_ship_id);
+        if entry_db_state.is_some_and(|e| cur_db_state != e) {
+            return Err(err(
+                "CantDoThatWhileDocked",
+                "Ship is no longer undocked in this solar system",
+            ));
+        }
         let mut raw_list = Vec::new();
         for &(iid, qty_opt) in &items_to_drop {
             let Some(it) = snap.items.get(&iid) else {

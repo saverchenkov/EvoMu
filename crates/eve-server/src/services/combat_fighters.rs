@@ -23,6 +23,41 @@ fn fighter_class_and_slot_attr(sde: &eve_sde::SdeRegistry, fighter_type_id: u32)
     }
 }
 
+fn check_fighter_class_slot_limit_in_map(
+    active_map: &HashMap<i64, crate::router::context::ActiveFighterSquadron>,
+    ctx: &ServerContext,
+    ship_id: i64,
+    carrier_type_id: u32,
+    fighter_type_id: u32,
+    extra_squadrons: usize,
+) -> Result<(), BridgeRpcError> {
+    let Some((f_attr, s_attr)) = fighter_class_and_slot_attr(&ctx.sde, fighter_type_id) else {
+        return Ok(());
+    };
+    let Some(raw_max) = ctx.sde.types.get(&carrier_type_id).and_then(|t| t.default_attributes.get(&s_attr).copied()) else {
+        return Ok(());
+    };
+    let max_slots = raw_max.max(0.0) as usize;
+    if max_slots == 0 {
+        return Err(BridgeRpcError {
+            code: "CannotLaunchFighterNotEnoughTubesAvailableForClass".into(),
+            message: "UserError: No fighter launch tubes exist on this hull for that fighter class".into(),
+        });
+    }
+    let is_same_class = |tid: u32| fighter_class_and_slot_attr(&ctx.sde, tid).is_some_and(|(fa, _)| fa == f_attr);
+    let active_in_class = active_map
+        .values()
+        .filter(|f| f.parent_ship_id == ship_id && !f.is_abandoned && is_same_class(f.type_id))
+        .count();
+    if active_in_class + extra_squadrons > max_slots {
+        return Err(BridgeRpcError {
+            code: "CannotLaunchFighterNotEnoughTubesAvailableForClass".into(),
+            message: format!("UserError: Fighter class limit ({max_slots}) exceeded for hull {carrier_type_id}"),
+        });
+    }
+    Ok(())
+}
+
 fn check_fighter_class_slot_limit(
     ctx: &ServerContext, ship_id: i64, carrier_type_id: u32, fighter_type_id: u32,
     count_loaded_tubes: bool, extra_squadrons: usize, replace_tube_idx: Option<usize>,
@@ -552,6 +587,11 @@ async fn handle_fighters_inner(
                     message: "Session has no active solar system".into(),
                 }));
             };
+            let entry_db_state = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&char_id)
+                    .map(|c| (c.station_id, c.structure_id, c.solar_system_id, c.active_ship_id))
+            });
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let Some((_, ship_ball)) = (match sys_handle.get_ball_snapshot(ship_id).await {
                 Ok(v) => v,
@@ -698,64 +738,228 @@ async fn handle_fighters_inner(
                 }
             }
 
-            {
-                let mut per_class_launching: HashMap<u16, (u32, usize)> = HashMap::new();
-                let loads = ctx.fighter_tube_loads.read().unwrap().clone();
-                ctx.db.with_snapshot(|snap| {
-                    for &tidx in &tubes_to_launch {
-                        if let Some(&fid) = loads.get(&(ship_id, tidx)) {
-                            if let Some(it) = snap.items.get(&fid) {
-                                if let Some((f_attr, _)) = fighter_class_and_slot_attr(&ctx.sde, it.type_id) {
-                                    let entry = per_class_launching.entry(f_attr).or_insert((it.type_id, 0));
-                                    entry.1 += 1;
-                                }
-                            }
-                        }
+            static NEXT_FIGHTER_RES_ID: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-300_000);
+            let claimed_tubes: Vec<(usize, i64)> = {
+                let mut guard = ctx.fighter_tube_loads.write().unwrap();
+                tubes_to_launch
+                    .iter()
+                    .filter_map(|&tube_idx| guard.remove(&(ship_id, tube_idx)).map(|fid| (tube_idx, fid)))
+                    .collect()
+            };
+            let restore_tubes = |claimed: &[(usize, i64)]| {
+                let mut guard = ctx.fighter_tube_loads.write().unwrap();
+                for &(tidx, fid) in claimed {
+                    guard.insert((ship_id, tidx), fid);
+                }
+            };
+
+            let items_meta: Vec<(usize, i64, u32)> = match ctx.db.with_snapshot(|snap| -> Result<Vec<(usize, i64, u32)>, BridgeRpcError> {
+                let mut out = Vec::with_capacity(claimed_tubes.len());
+                for &(tube_idx, fighter_item_id) in &claimed_tubes {
+                    let Some(item) = snap.items.get(&fighter_item_id) else {
+                        return Err(BridgeRpcError {
+                            code: "ItemNotFound".into(),
+                            message: format!("Fighter item {fighter_item_id} in tube {tube_idx} no longer exists"),
+                        });
+                    };
+                    let tube_flag = InventoryFlag::from_u16(159 + tube_idx as u16);
+                    if item.owner_id != char_id
+                        || item.location_id != ship_id
+                        || (item.flag != InventoryFlag::FighterBay && item.flag != tube_flag)
+                        || item.quantity <= 0
+                    {
+                        return Err(BridgeRpcError {
+                            code: "ItemNotInFighterBay".into(),
+                            message: format!("Fighter item {fighter_item_id} is no longer owned by pilot in ship's fighter bay"),
+                        });
                     }
-                });
-                for (_, (sample_tid, count)) in per_class_launching {
-                    if let Err(e) = check_fighter_class_slot_limit(ctx, ship_id, carrier_type_id, sample_tid, false, count, None) {
+                    out.push((tube_idx, fighter_item_id, item.type_id));
+                }
+                Ok(out)
+            }) {
+                Ok(v) => v,
+                Err(e) => {
+                    restore_tubes(&claimed_tubes);
+                    return Some(Err(e));
+                }
+            };
+
+            let res_ids: Vec<(usize, i64)> = {
+                let mut active = ctx.active_fighters.write().unwrap();
+                let mut inserted = Vec::with_capacity(items_meta.len());
+                for &(tube_idx, fid, ftype) in &items_meta {
+                    if let Err(e) = check_fighter_class_slot_limit_in_map(&active, ctx, ship_id, carrier_type_id, ftype, 1) {
+                        for &(_, rid) in &inserted {
+                            active.remove(&rid);
+                        }
+                        drop(active);
+                        restore_tubes(&claimed_tubes);
                         return Some(Err(e));
                     }
+                    let rid = NEXT_FIGHTER_RES_ID.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    active.insert(rid, crate::router::context::ActiveFighterSquadron {
+                        ball_id: rid,
+                        item_id: fid,
+                        type_id: ftype,
+                        owner_char_id: char_id,
+                        parent_ship_id: ship_id,
+                        tube_index: tube_idx,
+                        squadron_size: 1,
+                        target_id: None,
+                        is_abandoned: false,
+                        mwd_active: false,
+                    });
+                    inserted.push((tube_idx, rid));
+                }
+                inserted
+            };
+            let rollback_launch_claims = || {
+                {
+                    let mut active = ctx.active_fighters.write().unwrap();
+                    for &(_, rid) in &res_ids {
+                        active.remove(&rid);
+                    }
+                }
+                restore_tubes(&claimed_tubes);
+            };
+
+            let db_committed = ctx.db.try_with_mut_snapshot(|snap| -> Result<Vec<(usize, i64, i64, u32, u32, [f64; 3])>, BridgeRpcError> {
+                if let Some(ch) = snap.characters.get(&char_id) {
+                    let cur_db_state = (ch.station_id, ch.structure_id, ch.solar_system_id, ch.active_ship_id);
+                    if entry_db_state.is_some_and(|e| cur_db_state != e) {
+                        return Err(BridgeRpcError {
+                            code: "ShipNotInSpace".into(),
+                            message: format!("Ship {ship_id} is no longer undocked in solar system {sys_id}"),
+                        });
+                    }
+                }
+                let mut committed = Vec::with_capacity(claimed_tubes.len());
+                for &(tube_idx, fighter_item_id) in &claimed_tubes {
+                    let item_type_id = snap
+                        .items
+                        .get(&fighter_item_id)
+                        .ok_or_else(|| BridgeRpcError {
+                            code: "ItemNotFound".into(),
+                            message: format!("Fighter item {fighter_item_id} in tube {tube_idx} no longer exists"),
+                        })?
+                        .type_id;
+                    let max_squadron_size = ctx
+                        .sde
+                        .types
+                        .get(&item_type_id)
+                        .map(|t| {
+                            t.default_attributes
+                                .get(&2215)
+                                .copied()
+                                .map(|v| v as u32)
+                                .unwrap_or(match t.group_id {
+                                    1537 | 4778 => 3,
+                                    1653 | 4779 => 6,
+                                    _ => 9,
+                                })
+                        })
+                        .unwrap_or(9);
+                    let cap = max_squadron_size.max(1) as i32;
+                    let tube_flag = InventoryFlag::from_u16(159 + tube_idx as u16);
+
+                    let (launched_units, rem_excess) = {
+                        let it = snap.items.get_mut(&fighter_item_id).unwrap();
+                        if it.owner_id != char_id
+                            || it.location_id != ship_id
+                            || (it.flag != InventoryFlag::FighterBay && it.flag != tube_flag)
+                            || it.quantity <= 0
+                        {
+                            return Err(BridgeRpcError {
+                                code: "ItemNotInFighterBay".into(),
+                                message: format!("Fighter item {fighter_item_id} is no longer owned by pilot in ship's fighter bay"),
+                            });
+                        }
+                        let rem = if it.quantity > cap {
+                            let excess = it.quantity - cap;
+                            let excess_rec = InventoryItemRecord {
+                                item_id: 0,
+                                type_id: it.type_id,
+                                owner_id: it.owner_id,
+                                location_id: ship_id,
+                                flag: InventoryFlag::FighterBay,
+                                quantity: excess,
+                                singleton: false,
+                                version: 1,
+                                dynamic_attributes: HashMap::new(),
+                                source_mutaplasmid_id: None,
+                                insured_payout_isk: 0.0,
+                                is_blueprint_copy: false,
+                                blueprint_runs_remaining: None,
+                            };
+                            it.quantity = cap;
+                            Some(excess_rec)
+                        } else {
+                            None
+                        };
+                        let units = (it.quantity.max(1) as u32).min(max_squadron_size);
+                        it.location_id = sys_id as i64;
+                        it.flag = eve_db::InventoryFlag::None;
+                        it.version += 1;
+                        (units, rem)
+                    };
+                    if let Some(mut rem_item) = rem_excess {
+                        snap.next_entity_id += 1;
+                        rem_item.item_id = snap.next_entity_id;
+                        snap.items.insert(rem_item.item_id, rem_item);
+                    }
+                    snap.next_entity_id += 1;
+                    let ball_id = snap.next_entity_id;
+                    let offset = DVec3::new((tube_idx as f64 + 1.0) * 50.0, 0.0, 0.0);
+                    let ball_pos = [
+                        ship_ball.position.x + offset.x,
+                        ship_ball.position.y + offset.y,
+                        ship_ball.position.z + offset.z,
+                    ];
+                    crate::sp6_lifecycle::record_drone_ball_meta_in_snap(snap, fighter_item_id, ball_id);
+                    snap.item_positions.insert(fighter_item_id, ball_pos);
+                    snap.item_positions.insert(ball_id, ball_pos);
+                    committed.push((tube_idx, fighter_item_id, ball_id, item_type_id, launched_units, ball_pos));
+                }
+                Ok(committed)
+            });
+            let committed_launches = match db_committed {
+                Ok(v) => v,
+                Err(e) => {
+                    rollback_launch_claims();
+                    return Some(Err(e));
+                }
+            };
+
+            {
+                let mut active = ctx.active_fighters.write().unwrap();
+                for &(_, rid) in &res_ids {
+                    active.remove(&rid);
+                }
+                for &(tube_idx, fighter_item_id, ball_id, item_type_id, launched_units, _) in &committed_launches {
+                    active.insert(
+                        ball_id,
+                        crate::router::context::ActiveFighterSquadron {
+                            ball_id,
+                            item_id: fighter_item_id,
+                            type_id: item_type_id,
+                            owner_char_id: char_id,
+                            parent_ship_id: ship_id,
+                            tube_index: tube_idx,
+                            squadron_size: launched_units,
+                            target_id: None,
+                            is_abandoned: false,
+                            mwd_active: false,
+                        },
+                    );
                 }
             }
-            let mut launched_ball_ids = Vec::new();
-            for tube_idx in tubes_to_launch {
-                let fighter_item_id = {
-                    let mut guard = ctx.fighter_tube_loads.write().unwrap();
-                    guard.remove(&(ship_id, tube_idx))
-                };
-                let Some(fighter_item_id) = fighter_item_id else { continue };
-                let item_opt = ctx
-                    .db
-                    .with_snapshot(|snap| snap.items.get(&fighter_item_id).cloned());
-                let Some(item) = item_opt else {
-                    return Some(Err(BridgeRpcError {
-                        code: "ItemNotFound".into(),
-                        message: format!("Fighter item {fighter_item_id} in tube {tube_idx} no longer exists"),
-                    }));
-                };
-                let tube_flag = InventoryFlag::from_u16(159 + tube_idx as u16);
-                if item.owner_id != char_id
-                    || item.location_id != ship_id
-                    || (item.flag != InventoryFlag::FighterBay && item.flag != tube_flag)
-                    || item.quantity <= 0
-                {
-                    return Some(Err(BridgeRpcError {
-                        code: "ItemNotInFighterBay".into(),
-                        message: format!("Fighter item {fighter_item_id} is no longer owned by pilot in ship's fighter bay"),
-                    }));
-                }
 
-                let ball_id = ctx.db.with_mut_snapshot(|snap| {
-                    snap.next_entity_id += 1;
-                    snap.next_entity_id
-                });
-                let offset = DVec3::new((tube_idx as f64 + 1.0) * 50.0, 0.0, 0.0);
+            let mut launched_ball_ids = Vec::new();
+            for (tube_idx, _fighter_item_id, ball_id, item_type_id, launched_units, ball_pos) in committed_launches {
                 let ball = eve_destiny::Ball {
                     id: ball_id,
-                    type_id: item.type_id,
-                    position: ship_ball.position + offset,
+                    type_id: item_type_id,
+                    position: DVec3::new(ball_pos[0], ball_pos[1], ball_pos[2]),
                     velocity: DVec3::ZERO,
                     max_velocity: 2_500.0,
                     inertia: 0.5,
@@ -767,32 +971,7 @@ async fn handle_fighters_inner(
                         range: 1_000.0,
                     },
                 };
-                let max_squadron_size = ctx
-                    .sde
-                    .types
-                    .get(&item.type_id)
-                    .map(|t| {
-                        t.default_attributes
-                            .get(&2215)
-                            .copied()
-                            .map(|v| v as u32)
-                            .unwrap_or(match t.group_id {
-                                1537 | 4778 => 3,
-                                1653 | 4779 => 6,
-                                _ => 9,
-                            })
-                    })
-                    .unwrap_or(9);
-                let item = crate::services::r6_t1_p0_helpers::prepare_tube_fighter_stack_for_launch(
-                    ctx,
-                    fighter_item_id,
-                    ship_id,
-                    max_squadron_size,
-                )
-                .unwrap_or(item);
-                let launched_units = (item.quantity.max(1) as u32).min(max_squadron_size);
-                let ball_pos = [ball.position.x, ball.position.y, ball.position.z];
-                let mut cs = ctx.build_type_combat_state(item.type_id);
+                let mut cs = ctx.build_type_combat_state(item_type_id);
                 let squad_size = launched_units as f64;
                 cs.shield_hp *= squad_size;
                 cs.max_shield_hp *= squad_size;
@@ -802,18 +981,6 @@ async fn handle_fighters_inner(
                 cs.max_structure_hp *= squad_size;
                 let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
 
-                let squad = crate::router::context::ActiveFighterSquadron {
-                    ball_id,
-                    item_id: fighter_item_id,
-                    type_id: item.type_id,
-                    owner_char_id: char_id,
-                    parent_ship_id: ship_id,
-                    tube_index: tube_idx,
-                    squadron_size: launched_units,
-                    target_id: None,
-                    is_abandoned: false,
-                    mwd_active: false,
-                };
                 let tube_flag = (159 + tube_idx) as i64;
                 let now_ft = ctx.now_blueos_filetime_ticks();
                 session.push_notification("OnFighterTubeTaskStatus", vec![PyRep::Integer(tube_flag), PyRep::String("INSPACE".into()), PyRep::Integer(now_ft), PyRep::Integer(now_ft), PyRep::None]);
@@ -822,22 +989,12 @@ async fn handle_fighters_inner(
                     "OnFighterAddedToController",
                     vec![
                         PyRep::Integer(ball_id),
-                        PyRep::Integer(item.type_id as i64),
+                        PyRep::Integer(item_type_id as i64),
                         PyRep::Integer(tube_flag),
-                        PyRep::Integer(squad.squadron_size as i64),
+                        PyRep::Integer(launched_units as i64),
                         PyRep::List(vec![]),
                     ],
                 );
-                ctx.db.with_mut_snapshot(|snap| {
-                    if let Some(it) = snap.items.get_mut(&fighter_item_id) {
-                        it.location_id = sys_id as i64;
-                        it.flag = eve_db::InventoryFlag::None;
-                    }
-                    crate::sp6_lifecycle::record_drone_ball_meta_in_snap(snap, fighter_item_id, ball_id);
-                    snap.item_positions.insert(fighter_item_id, ball_pos);
-                    snap.item_positions.insert(ball_id, ball_pos);
-                });
-                ctx.active_fighters.write().unwrap().insert(ball_id, squad);
                 launched_ball_ids.push(PyRep::Integer(ball_id));
             }
             if passed_flag_ids {
@@ -1281,6 +1438,11 @@ async fn handle_scoop_abandoned_fighter(
             message: "Session has no active solar system".into(),
         }));
     };
+    let entry_db_state = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .get(&char_id)
+            .map(|c| (c.station_id, c.structure_id, c.solar_system_id, c.active_ship_id))
+    });
     let target_fighter_id = match args.first().and_then(|a| a.as_i64()) {
         Some(id) if id > 0 => id,
         _ => {
@@ -1291,27 +1453,28 @@ async fn handle_scoop_abandoned_fighter(
         }
     };
     let squad = {
-        let fighters = ctx.active_fighters.read().unwrap();
-        let Some(squad) = fighters
-            .get(&target_fighter_id)
-            .or_else(|| fighters.values().find(|f| f.item_id == target_fighter_id))
-            .cloned()
-        else {
+        let mut fighters = ctx.active_fighters.write().unwrap();
+        let key = if fighters.contains_key(&target_fighter_id) {
+            target_fighter_id
+        } else if let Some((&k, _)) = fighters.iter().find(|(_, f)| f.item_id == target_fighter_id) {
+            k
+        } else {
             return Some(Err(BridgeRpcError {
                 code: "FighterNotFound".into(),
                 message: format!("Fighter squadron {target_fighter_id} not found in space"),
             }));
         };
-        if !squad.is_abandoned {
+        let squad_ref = &fighters[&key];
+        if !squad_ref.is_abandoned {
             return Some(Err(BridgeRpcError {
                 code: "FighterNotAbandoned".into(),
                 message: format!("Fighter squadron {target_fighter_id} is active and cannot be scooped"),
             }));
         }
-        if squad.owner_char_id != char_id {
+        if squad_ref.owner_char_id != char_id {
             let authorized = ctx.db.with_snapshot(|snap| {
                 let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                let owner_corp = snap.characters.get(&squad.owner_char_id).map(|c| c.corporation_id).unwrap_or(0);
+                let owner_corp = snap.characters.get(&squad_ref.owner_char_id).map(|c| c.corporation_id).unwrap_or(0);
                 caller_corp != 0 && caller_corp == owner_corp
             });
             if !authorized {
@@ -1321,7 +1484,10 @@ async fn handle_scoop_abandoned_fighter(
                 }));
             }
         }
-        squad
+        fighters.remove(&key).unwrap()
+    };
+    let restore_squad = |sq: crate::router::context::ActiveFighterSquadron| {
+        ctx.active_fighters.write().unwrap().insert(sq.ball_id, sq);
     };
 
     let in_caller_sys = ctx.db.with_snapshot(|snap| {
@@ -1330,9 +1496,11 @@ async fn handle_scoop_abandoned_fighter(
             .is_some_and(|it| it.location_id == sys_id as i64)
     });
     if !in_caller_sys {
+        let ball_id = squad.ball_id;
+        restore_squad(squad);
         return Some(Err(BridgeRpcError {
             code: "FighterNotInSystem".into(),
-            message: format!("Fighter squadron {} is not in solar system {sys_id}", squad.ball_id),
+            message: format!("Fighter squadron {ball_id} is not in solar system {sys_id}"),
         }));
     }
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -1349,12 +1517,15 @@ async fn handle_scoop_abandoned_fighter(
         .flatten()
         .map(|(_, b)| b.position);
     let Some(f_pos) = f_pos else {
+        let ball_id = squad.ball_id;
+        restore_squad(squad);
         return Some(Err(BridgeRpcError {
             code: "FighterNotInSystem".into(),
-            message: format!("Fighter ball {} not found in system {sys_id}", squad.ball_id),
+            message: format!("Fighter ball {ball_id} not found in system {sys_id}"),
         }));
     };
     let Some(s_pos) = s_pos else {
+        restore_squad(squad);
         return Some(Err(BridgeRpcError {
             code: "ShipNotInSystem".into(),
             message: format!("Ship ball {ship_id} not found in system {sys_id}"),
@@ -1362,6 +1533,7 @@ async fn handle_scoop_abandoned_fighter(
     };
     let dist = (f_pos - s_pos).length();
     if dist > 2500.0 {
+        restore_squad(squad);
         return Some(Err(BridgeRpcError {
             code: "FighterOutOfRange".into(),
             message: format!("Fighter squadron is {dist:.1}m away, must be within 2500m to scoop"),
@@ -1369,6 +1541,15 @@ async fn handle_scoop_abandoned_fighter(
     }
 
     let db_res = ctx.db.try_with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get(&char_id) {
+            let cur_db_state = (ch.station_id, ch.structure_id, ch.solar_system_id, ch.active_ship_id);
+            if entry_db_state.is_some_and(|e| cur_db_state != e) {
+                return Err(BridgeRpcError {
+                    code: "ShipNotInSystem".into(),
+                    message: format!("Ship {ship_id} is no longer undocked in system {sys_id}"),
+                });
+            }
+        }
         let ship_type = snap.items.get(&ship_id).map(|s| s.type_id).unwrap_or(0);
         let bay_capacity = ctx.sde.types.get(&ship_type).and_then(|t| {
             t.default_attributes.get(&2055).copied().or_else(|| t.default_attributes.get(&2216).copied())
@@ -1381,8 +1562,20 @@ async fn handle_scoop_abandoned_fighter(
                 message: "Caller ship has no fighter bay capacity".into(),
             });
         }
+        let Some(existing_item) = snap.items.get(&squad.item_id) else {
+            return Err(BridgeRpcError {
+                code: "FighterNotFound".into(),
+                message: format!("Fighter item {} no longer exists", squad.item_id),
+            });
+        };
+        if existing_item.location_id != sys_id as i64 || existing_item.flag != InventoryFlag::None {
+            return Err(BridgeRpcError {
+                code: "FighterNotInSystem".into(),
+                message: format!("Fighter squadron {} is no longer in space", squad.ball_id),
+            });
+        }
         let fighter_unit_vol = ctx.sde.types.get(&squad.type_id).map(|t| t.volume).unwrap_or(100.0);
-        let squad_size = snap.items.get(&squad.item_id).map(|it| it.quantity as f64).unwrap_or(1.0);
+        let squad_size = existing_item.quantity as f64;
         let total_fighter_vol = fighter_unit_vol * squad_size;
         let current_used_vol: f64 = snap.items.values()
             .filter(|it| it.location_id == ship_id && it.flag == InventoryFlag::FighterBay)
@@ -1398,7 +1591,6 @@ async fn handle_scoop_abandoned_fighter(
             });
         }
 
-        // DB update FIRST before in-memory active fighter removal
         if let Some(item) = snap.items.get_mut(&squad.item_id) {
             item.location_id = ship_id;
             item.owner_id = char_id;
@@ -1407,16 +1599,16 @@ async fn handle_scoop_abandoned_fighter(
         }
         snap.item_positions.remove(&squad.item_id);
         snap.item_positions.remove(&squad.ball_id);
+        if let Some(meta) = snap.sp6_lifecycle.space_object_meta.get_mut(&squad.item_id) {
+            meta.drone_ball_id = None;
+        }
         Ok(())
     });
     if let Err(e) = db_res {
+        restore_squad(squad);
         return Some(Err(e));
     }
 
-    {
-        let mut fighters = ctx.active_fighters.write().unwrap();
-        fighters.remove(&squad.ball_id);
-    }
     let _ = sys_handle.remove_ball(squad.ball_id).await;
     Some(Ok(PyRep::Bool(true)))
 }

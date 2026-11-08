@@ -775,16 +775,37 @@ pub async fn activate(
         cycle_start_ms: now_ms(ctx),
         duration_ms,
     };
-    let env = check_requirements(ctx, &cycle).await?;
-    consume_cycle_capacitor(ctx, &cycle).await?;
+    {
+        let mut cycles = ctx.mining_cycles.write().unwrap_or_else(|e| e.into_inner());
+        if cycles.contains_key(&module_id) {
+            return Err(BridgeRpcError { code: "EffectAlreadyActive".into(), message: format!("Module {module_id} is already active") });
+        }
+        cycles.insert(module_id, cycle.clone());
+    }
+    let env = match check_requirements(ctx, &cycle).await {
+        Ok(v) => v,
+        Err(e) => {
+            ctx.mining_cycles.write().unwrap_or_else(|e| e.into_inner()).remove(&module_id);
+            return Err(e);
+        }
+    };
+    if let Err(e) = consume_cycle_capacitor(ctx, &cycle).await {
+        ctx.mining_cycles.write().unwrap_or_else(|e| e.into_inner()).remove(&module_id);
+        return Err(e);
+    }
 
-    let mut fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id)?;
+    let mut fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
+        Ok(f) => f,
+        Err(e) => {
+            ctx.mining_cycles.write().unwrap_or_else(|e| e.into_inner()).remove(&module_id);
+            return Err(e);
+        }
+    };
     let _ = fit.activate_module(module_id, false, &ctx.sde);
     ctx.store_ship_fitting(ship_id, fit);
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.insert(module_id);
     });
-    ctx.mining_cycles.write().unwrap_or_else(|e| e.into_inner()).insert(module_id, cycle.clone());
     ctx.persist_server_runtime_to_db();
     ctx.notify(
         NotificationTarget::Character(char_id),

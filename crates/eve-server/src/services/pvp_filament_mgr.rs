@@ -869,12 +869,31 @@ pub async fn handle(
                 let _active_ship_id = session
                     .ship_id
                     .ok_or_else(|| BridgeRpcError::user_error("MustBeInSpace"))?;
+                if let Some(ch) = snap.characters.get(&char_id) {
+                    if ch.station_id.is_some()
+                        || ch.structure_id.is_some()
+                        || ch.solar_system_id != cur_sys_for_check
+                        || ch.active_ship_id != _active_ship_id
+                    {
+                        return Err(BridgeRpcError::user_error("MustBeInSpace"));
+                    }
+                }
                 let Some(it) = snap.items.get(&item_id) else {
                     return Err(BridgeRpcError {
                         code: "ItemNotFound".into(),
                         message: "Filament item not found in inventory".into(),
                     });
                 };
+                if it.owner_id != char_id
+                    || it.location_id != _active_ship_id
+                    || it.flag != eve_db::InventoryFlag::Cargo
+                    || it.quantity < 1
+                {
+                    return Err(BridgeRpcError {
+                        code: "ItemNotFound".into(),
+                        message: "Filament item is not available in active ship cargo".into(),
+                    });
+                }
                 if type_id > 0 && it.type_id != type_id as u32 {
                     return Err(BridgeRpcError {
                         code: "InvalidFilamentType".into(),

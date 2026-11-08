@@ -944,17 +944,43 @@ async fn handle_cmd_unanchor(
         .emit_destiny_event(target_id, eve_destiny::DestinyEvent::Stop { ball_id: target_id })
         .await;
 
-    let unanchored_drone = with_mut_combat_runtime(ctx, |rt| {
-        if let Some(d) = rt.active_drones_in_space.get_mut(&target_id) {
-            d.target_id = None;
-            true
-        } else {
-            false
-        }
+    let unanchored_drone = with_combat_runtime(ctx, |rt| {
+        rt.active_drones_in_space.get(&target_id).is_some_and(|d| d.owner_char_id == char_id)
     });
-
-    crate::services::notify_emitters_seasons_tactical::on_deployable_deactivated(ctx, session.fleet_id, target_id);
-    ctx.db.with_mut_snapshot(|snap| {
+    ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+        if snap.structures.contains_key(&target_id) {
+            return Err(BridgeRpcError {
+                code: "CannotUnanchorStructure".into(),
+                message: format!("Structure {target_id} must be unanchored via the structure unanchoring lifecycle"),
+            });
+        }
+        if !unanchored_drone {
+            let item = snap.items.get(&target_id).ok_or_else(deny_access)?;
+            if item.location_id != sys_id as i64 {
+                return Err(BridgeRpcError {
+                    code: "TargetNotFound".into(),
+                    message: format!("Target {target_id} is no longer in solar system {sys_id}"),
+                });
+            }
+            if item.owner_id != char_id {
+                let cid = caller_corp_id.filter(|&cid| cid > 0 && item.owner_id == cid).ok_or_else(deny_access)?;
+                let (is_ceo, corp_roles) =
+                    snap.effective_corp_roles_at(cid, char_id, None, session.corp_role, ctx.now_unix());
+                if !is_ceo {
+                    let role = session.corp_role | corp_roles;
+                    const UNANCHOR_ROLES: u64 = eve_db::corp_roles::ROLE_DIRECTOR
+                        | eve_db::corp_roles::ROLE_STATION_MANAGER
+                        | eve_db::corp_roles::ROLE_STARBASE_CONFIG
+                        | eve_db::corp_roles::ROLE_CONFIG_EQUIPMENT;
+                    if (role & UNANCHOR_ROLES) == 0 {
+                        return Err(BridgeRpcError {
+                            code: "CorpRoleDenied".into(),
+                            message: format!("Character {char_id} lacks corporate role required to unanchor entity {target_id}"),
+                        });
+                    }
+                }
+            }
+        }
         if let Some(meta) = snap.sp6_lifecycle.space_object_meta.get_mut(&target_id) {
             meta.anchor_start_unix = None;
             meta.anchor_completed = false;
@@ -966,7 +992,17 @@ async fn handle_cmd_unanchor(
                 r.is_unanchored = true;
             }
         });
+        Ok(())
+    })?;
+    let unanchored_drone = with_mut_combat_runtime(ctx, |rt| {
+        if let Some(d) = rt.active_drones_in_space.get_mut(&target_id) {
+            d.target_id = None;
+            true
+        } else {
+            false
+        }
     });
+    crate::services::notify_emitters_seasons_tactical::on_deployable_deactivated(ctx, session.fleet_id, target_id);
 
     Ok(PyRep::keyval([
         ("targetID", PyRep::Integer(target_id)),

@@ -599,36 +599,76 @@ async fn handle_random_jump_filament(
         }
     }
 
+    let committed_jumpers = ctx.db.try_with_mut_snapshot(|snap| -> Result<Vec<(i64, i64, Ball)>, BridgeRpcError> {
+        let caller_ch = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
+            code: "CharacterNotFound".into(),
+            message: format!("Character {char_id} not found"),
+        })?;
+        if caller_ch.station_id.is_some()
+            || caller_ch.structure_id.is_some()
+            || caller_ch.solar_system_id != old_sys
+            || caller_ch.active_ship_id != ship_id
+        {
+            return Err(BridgeRpcError {
+                code: "CannotActivateFilament".into(),
+                message: format!("Character {char_id} is no longer undocked in system {old_sys}"),
+            });
+        }
+        let item = snap.items.get(&fil_item_id).ok_or_else(|| {
+            BridgeRpcError::user_error("ItemNotFound")
+        })?;
+        if item.owner_id != char_id
+            || item.location_id != ship_id
+            || item.flag != eve_db::InventoryFlag::Cargo
+            || item.quantity < 1
+        {
+            return Err(BridgeRpcError::user_error("ItemNotFound"));
+        }
+        snap.consume_exact_item_quantity(
+            fil_item_id,
+            1,
+            eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id),
+        )
+        .map_err(|e| BridgeRpcError {
+            code: "FilamentLocked".into(),
+            message: e.to_string(),
+        })?;
+        let mut retained = Vec::with_capacity(jumpers.len());
+        for (p_char, p_ship, b) in &jumpers {
+            let valid = snap.characters.get(p_char).is_some_and(|ch| {
+                ch.station_id.is_none()
+                    && ch.structure_id.is_none()
+                    && ch.solar_system_id == old_sys
+                    && ch.active_ship_id == *p_ship
+            });
+            if !valid {
+                continue;
+            }
+            let _ = crate::router::apply_character_transition_in_snap(
+                snap,
+                &ctx.sde,
+                *p_char,
+                crate::router::TransitionLocation::Space { solar_system_id: dest_sys_id },
+                Some(*p_ship),
+                true,
+                false,
+            );
+            retained.push((*p_char, *p_ship, b.clone()));
+        }
+        if !retained.iter().any(|(c, _, _)| *c == char_id) {
+            return Err(BridgeRpcError {
+                code: "CannotActivateFilament".into(),
+                message: "Caller is no longer eligible for filament jump".into(),
+            });
+        }
+        Ok(retained)
+    })?;
+    let jumpers = committed_jumpers;
     for &(p_char, p_ship, _) in &jumpers {
         crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, p_char, p_ship, old_sys);
         crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, p_ship);
         crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, p_char, p_ship);
     }
-    ctx.db.try_with_mut_snapshot(|snap| {
-        if let Some(fil_owner) = snap.items.get(&fil_item_id).map(|i| i.owner_id) {
-            snap.consume_exact_item_quantity(
-                fil_item_id,
-                1,
-                eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), fil_owner),
-            )
-            .map_err(|e| BridgeRpcError {
-                code: "FilamentLocked".into(),
-                message: e.to_string(),
-            })?;
-        }
-        for &(p_char, _p_ship, _) in &jumpers {
-            let _ = crate::router::apply_character_transition_in_snap(
-                snap,
-                &ctx.sde,
-                p_char,
-                crate::router::TransitionLocation::Space { solar_system_id: dest_sys_id },
-                None,
-                true,
-                false,
-            );
-        }
-        Ok::<(), BridgeRpcError>(())
-    })?;
     let (old_const, old_reg) = ctx.sde.solar_systems.get(&old_sys).map(|s| (s.constellation_id, s.region_id)).unwrap_or((0, 0));
     let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
     let pvp_until = now_unix.saturating_add(crate::sp6_lifecycle::PVP_TIMER_SECS);
@@ -901,6 +941,7 @@ async fn handle_cmd_jump_to_structure_beacon(
     nav::check_jump_activation(ctx, char_id)?;
     let cap_ship_type = if nav::type_attr(ctx, db_type_id, "jumpDriveCapacitorNeed").is_some() { db_type_id } else { current_ball.type_id };
     let updated_cap_cs = nav::validate_and_prepare_jump_capacitor(ctx, char_id, ship_id, cur_sys_id, cap_ship_type).await?;
+    let prev_cs = cur_sys_handle.get_combat_state(ship_id).await.ok().flatten();
     nav::consume_jump_fuel(ctx, ship_id, &plan)?;
     if let Some(ref cap_cs) = updated_cap_cs {
         let _ = cur_sys_handle.set_combat_state(ship_id, cap_cs.clone()).await;
@@ -908,28 +949,18 @@ async fn handle_cmd_jump_to_structure_beacon(
     let dist_ly = plan.distance_ly;
     let (cd_min, fat_min) =
         nav::apply_jump_fatigue(ctx, char_id, plan.distance_ly);
-    let prev_cs = cur_sys_handle.get_combat_state(ship_id).await.ok().flatten();
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, cur_sys_id);
     crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
     crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     let _ = cur_sys_handle.remove_ball(ship_id).await;
     let (dest_const_id, dest_reg_id) = ctx
-        .sde
-        .solar_systems
-        .get(&target_sys_id)
-        .map(|s| (s.constellation_id, s.region_id))
-        .unwrap_or((0, 0));
-    ctx.db.with_mut_snapshot(|snap| {
-        let _ = crate::router::apply_character_transition_in_snap(
-            snap,
-            &ctx.sde,
-            char_id,
-            crate::router::TransitionLocation::Space { solar_system_id: target_sys_id },
-            Some(ship_id),
-            true,
-            false,
-        );
-    });
+        .db
+        .transition_character_solar_system_if_at(char_id, cur_sys_id, target_sys_id, &ctx.sde)
+        .map(|ch| (ch.constellation_id, ch.region_id))
+        .map_err(|e| BridgeRpcError {
+            code: "SystemTransitionFailed".into(),
+            message: e.to_string(),
+        })?;
     let target_pos = DVec3::from_array(target_struct.position) + DVec3::new(5_000.0, 0.0, 0.0);
     let dest_handle = ctx.systems.get_or_spawn(target_sys_id);
     let ball = Ball {
@@ -945,7 +976,10 @@ async fn handle_cmd_jump_to_structure_beacon(
         mode: MovementMode::Stop,
     };
     let mut combat_state = ctx.build_ship_combat_state(char_id, ship_id, current_ball.type_id);
-    crate::services::r6_t1_p1_helpers::apply_preserved_combat_state(&mut combat_state, prev_cs);
+    crate::services::r6_t1_p1_helpers::apply_preserved_combat_state(
+        &mut combat_state,
+        updated_cap_cs.or(prev_cs),
+    );
     combat_state.is_cloaked = true;
     combat_state.gate_cloak_remaining_ticks = 60;
     combat_state.undock_invulnerable_remaining_ticks = 60;
@@ -1423,7 +1457,10 @@ async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut Session
         radius: current_ball.radius, speed_fraction: 0.0, mode: MovementMode::Stop,
     };
     let mut combat_state = ctx.build_ship_combat_state(char_id, ship_id, current_ball.type_id);
-    crate::services::r6_t1_p1_helpers::apply_preserved_combat_state(&mut combat_state, prev_cs);
+    crate::services::r6_t1_p1_helpers::apply_preserved_combat_state(
+        &mut combat_state,
+        updated_cap_cs.or(prev_cs),
+    );
     combat_state.is_cloaked = true;
     combat_state.gate_cloak_remaining_ticks = 60;
     combat_state.undock_invulnerable_remaining_ticks = 60;

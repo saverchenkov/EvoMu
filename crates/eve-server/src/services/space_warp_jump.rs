@@ -701,6 +701,13 @@ async fn handle_cmd_stargate_jump(
             message: "Session has no active ship".into(),
         });
     };
+    let entry_db_state = ctx.db.with_snapshot(|s| {
+        s.characters
+            .get(&char_id)
+            .map(|c| (c.station_id, c.structure_id, c.solar_system_id))
+    });
+    let entry_db_sys = entry_db_state.map(|(_, _, sys)| sys).unwrap_or(old_sys);
+    let entry_db_undocked = entry_db_state.is_some_and(|(st, sr, _)| st.is_none() && sr.is_none());
     crate::services::space_nav_movement_guard::validate_pre_movement_locks(
         ctx,
         ship_id,
@@ -849,6 +856,8 @@ async fn handle_cmd_stargate_jump(
         .unwrap_or(DVec3::ZERO);
     let arrival_pos = dest_gate_pos + DVec3::new(gate_radius + 1_500.0, 0.0, 0.0);
 
+    let prev_combat_state = old_handle.get_combat_state(ship_id).await.ok().flatten();
+
     // Zarzakh Gate Toll & Gate Lock (`feat:navigation.zarzakh-gate-toll`):
     // Validated and debited BEFORE mutating character solar system state (`P2` rollback safety).
     if dest_sys_id == SOLAR_SYSTEM_ZARZAKH {
@@ -864,16 +873,56 @@ async fn handle_cmd_stargate_jump(
         )?;
     }
 
+    let updated_ch = if entry_db_undocked {
+        ctx.db
+            .transition_character_solar_system_if_at(char_id, entry_db_sys, dest_sys_id, &ctx.sde)
+            .map_err(|e| BridgeRpcError {
+                code: "SystemTransitionFailed".into(),
+                message: e.to_string(),
+            })?
+    } else {
+        ctx.db
+            .try_with_mut_snapshot(|snap| {
+                let (const_id, reg_id) = ctx
+                    .sde
+                    .solar_systems
+                    .get(&dest_sys_id)
+                    .map(|s| (s.constellation_id, s.region_id))
+                    .unwrap_or((20_000_020, 10_000_002));
+                let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
+                    code: "CharacterNotFound".into(),
+                    message: format!("Character {char_id} not found"),
+                })?;
+                if entry_db_state.is_some_and(|e| (ch.station_id, ch.structure_id, ch.solar_system_id) != e) {
+                    return Err(BridgeRpcError {
+                        code: "SystemTransitionFailed".into(),
+                        message: format!("Character {char_id} transitioned concurrently"),
+                    });
+                }
+                ch.solar_system_id = dest_sys_id;
+                ch.constellation_id = const_id;
+                ch.region_id = reg_id;
+                ch.station_id = None;
+                ch.structure_id = None;
+                ch.version += 1;
+                ch.system_epoch += 1;
+                let active_ship_id = ch.active_ship_id;
+                let res = ch.clone();
+                if let Some(sh) = snap.items.get_mut(&active_ship_id) {
+                    sh.location_id = dest_sys_id as i64;
+                    sh.version += 1;
+                }
+                if ship_id != active_ship_id {
+                    if let Some(sh) = snap.items.get_mut(&ship_id) {
+                        sh.location_id = dest_sys_id as i64;
+                        sh.version += 1;
+                    }
+                }
+                Ok(res)
+            })?
+    };
     deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
-    let prev_combat_state = old_handle.get_combat_state(ship_id).await.ok().flatten();
-    let updated_ch = ctx
-        .db
-        .set_character_solar_system(char_id, dest_sys_id, &ctx.sde)
-        .map_err(|e| BridgeRpcError {
-            code: "SystemTransitionFailed".into(),
-            message: e.to_string(),
-        })?;
 
     let mut zarzakh_lock_expiry = None;
     if dest_sys_id == SOLAR_SYSTEM_ZARZAKH {
@@ -1275,15 +1324,15 @@ async fn handle_dock(
             message: "Cannot dock at an Upwell structure while ship is warp scrambled".into(),
         });
     }
-    if arrived_at_warp_dest {
-        let _ = handle.force_stop_warp(ship_id);
-        ctx.active_warps
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&ship_id);
-    }
-    match ctx.db.dock_character(char_id, dock_id, is_structure) {
+    match ctx.db.dock_character_if_in_space(char_id, sys_id, dock_id, is_structure) {
         Ok(_) => {
+            if arrived_at_warp_dest {
+                let _ = handle.force_stop_warp(ship_id);
+                ctx.active_warps
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&ship_id);
+            }
             crate::services::notify_emitters_space_dungeons::emit_exiting_dungeon_on_warp_if_present(
                 ctx,
                 char_id,

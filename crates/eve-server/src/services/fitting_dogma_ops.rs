@@ -514,19 +514,43 @@ pub(crate) async fn handle_dogma_ops(
                     ctx, &fit,
                 );
 
-            ctx.store_ship_fitting(ship_id, fit);
-            if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                for &mid in &newly_onlined {
-                    snap.module_online_states.insert(mid, true);
+            let committed_onlined = match ctx.db.try_with_mut_snapshot(|snap| {
+                let ch_ship = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.active_ship_id)
+                    .unwrap_or(0);
+                if ch_ship != ship_id
+                    || snap
+                        .items
+                        .get(&ship_id)
+                        .is_none_or(|sh| sh.owner_id != char_id)
+                {
+                    return Err(BridgeRpcError {
+                        code: "ShipOwnershipViolation".into(),
+                        message: format!("Ship {ship_id} is no longer the active owned ship of {char_id}"),
+                    });
                 }
-                Ok(())
+                let mut valid = Vec::with_capacity(newly_onlined.len());
+                for &mid in &newly_onlined {
+                    let still_fitted = snap.items.get(&mid).is_some_and(|it| {
+                        it.location_id == ship_id && (11..=34).contains(&(it.flag as u16))
+                    });
+                    if still_fitted {
+                        snap.module_online_states.insert(mid, true);
+                        valid.push(mid);
+                    }
+                }
+                Ok::<Vec<i64>, BridgeRpcError>(valid)
             }) {
-                return Some(Err(e));
-            }
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            ctx.store_ship_fitting(ship_id, fit);
             ctx.invalidate_ship_fitting(ship_id);
 
-            let any_onlined = !newly_onlined.is_empty();
-            for mid in newly_onlined {
+            let any_onlined = !committed_onlined.is_empty();
+            for mid in committed_onlined {
                 let _ = ctx.notify_module_online_state(char_id, mid, true);
             }
             if any_onlined {

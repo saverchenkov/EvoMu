@@ -217,8 +217,10 @@ pub async fn activate_salvager_or_tractor_module(
         );
         let _ = sys_handle.set_ball_position(wreck_id, new_pos).await;
         ctx.db.with_mut_snapshot(|snap| {
-            snap.item_positions
-                .insert(wreck_id, [new_pos.x, new_pos.y, new_pos.z]);
+            if snap.items.contains_key(&wreck_id) {
+                snap.item_positions
+                    .insert(wreck_id, [new_pos.x, new_pos.y, new_pos.z]);
+            }
         });
         return Some(Ok(PyRep::keyval([
             ("moduleID", PyRep::Integer(module_id)),
@@ -466,19 +468,21 @@ pub async fn handle_npcs_drones(
                 .map(|(_, b)| b.position)
                 .unwrap_or(DVec3::ZERO);
 
-            let mut launched_ball_ids = Vec::new();
+            static NEXT_DRONE_RES_ID: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-200_000);
+            let mut prepared_drones = Vec::with_capacity(drone_records.len());
             for (idx, rec) in drone_records.into_iter().enumerate() {
                 if let Some(ref mut f) = ship_fit_opt {
                     if !f.drones.iter().any(|&(id, _)| id == rec.item_id) {
                         f.drones.push((rec.item_id, rec.type_id));
                     }
                 }
+                let rec_id = rec.item_id;
                 let sde_t = ctx.sde.types.get(&rec.type_id);
                 let attr = |aid: u16| -> Option<f64> {
                     let sde_base = sde_t.and_then(|t| t.default_attributes.get(&aid).copied());
                     let fit_eff = ship_fit_opt
                         .as_ref()
-                        .map(|f| f.get_drone_effective_attribute(rec.item_id, aid, &ctx.sde));
+                        .map(|f| f.get_drone_effective_attribute(rec_id, aid, &ctx.sde));
                     if let Some(&mut_val) = rec.dynamic_attributes.get(&aid) {
                         if let (Some(fe), Some(sb)) = (fit_eff, sde_base.filter(|b| b.abs() > 1e-9)) {
                             Some(mut_val * (fe / sb))
@@ -501,41 +505,152 @@ pub async fn handle_npcs_drones(
                     kinetic: attr(117).unwrap_or(0.0) * dmg_mult,
                     thermal: attr(118).unwrap_or(0.0) * dmg_mult,
                 };
-
                 let d_pos = ship_pos + DVec3::new(((idx as f64) * 50.0).cos() * 40.0, 0.0, ((idx as f64) * 50.0).sin() * 40.0);
-                let (ball_id, launched_drone_item_id) = ctx.db.with_mut_snapshot(|snap| {
+                let rof_ms = attr(68).unwrap_or(0.0);
+                let falloff_m = attr(84).unwrap_or(0.0);
+                let tracking = attr(83).unwrap_or(0.0);
+                let orb_vel = attr(20).unwrap_or(0.0);
+                let sig_res = attr(97).unwrap_or(0.0);
+                let orbit_dist = attr(238).or_else(|| attr(239)).or_else(|| attr(240)).or_else(|| attr(241)).unwrap_or(0.0);
+                let sig_rad = attr(554).unwrap_or(0.0);
+                prepared_drones.push((rec, sde_t, is_sentry, max_vel, bw_used, opt_range, dmg_vec, d_pos, rof_ms, falloff_m, tracking, orb_vel, sig_res, orbit_dist, sig_rad));
+            }
+
+            let res_ids: Vec<i64> = (0..prepared_drones.len())
+                .map(|_| NEXT_DRONE_RES_ID.fetch_sub(1, std::sync::atomic::Ordering::Relaxed))
+                .collect();
+            let reserve_res: Result<(), BridgeRpcError> = with_mut_combat_runtime(ctx, |rt| {
+                let (cur_count, cur_bw) = {
+                    let active: Vec<&DroneSpaceState> = rt
+                        .active_drones_in_space
+                        .values()
+                        .filter(|d| d.parent_ship_id == ship_id && !d.is_abandoned)
+                        .collect();
+                    (active.len(), active.iter().map(|d| d.bandwidth_used).sum::<f64>())
+                };
+                if cur_count + prepared_drones.len() > max_drones_allowed {
+                    let code = if max_drones_allowed == 0 {
+                        "NoDroneManagementAbilities"
+                    } else {
+                        "NoDroneManagementAbilitiesLeft"
+                    };
+                    return Err(BridgeRpcError::user_error(code));
+                }
+                if cur_bw + req_bw > ship_bw + 1e-4 {
+                    return Err(BridgeRpcError::user_error("MaxBandwidthExceeded"));
+                }
+                for (i, (rec, sde_t, is_sentry, max_vel, bw_used, opt_range, dmg_vec, _, sh_rep, ar_rep, hu_rep, web_f, neut_a, ecm_s, tp_s)) in prepared_drones.iter().enumerate() {
+                    let rid = res_ids[i];
+                    rt.active_drones_in_space.insert(rid, DroneSpaceState {
+                        ball_id: rid,
+                        drone_item_id: rec.item_id,
+                        type_id: rec.type_id,
+                        group_id: sde_t.map(|t| t.group_id).unwrap_or(100),
+                        owner_char_id: char_id,
+                        original_owner_char_id: char_id,
+                        parent_ship_id: ship_id,
+                        solar_system_id: sys_id,
+                        target_id: None,
+                        activity_state: 0,
+                        assist_char_id: None,
+                        guard_char_id: None,
+                        is_abandoned: false,
+                        is_sentry: *is_sentry,
+                        bandwidth_used: *bw_used,
+                        max_velocity: *max_vel,
+                        optimal_range: *opt_range,
+                        damage_vector: *dmg_vec,
+                        shield_repair_amount: *sh_rep,
+                        armor_repair_amount: *ar_rep,
+                        hull_repair_amount: *hu_rep,
+                        web_speed_factor: *web_f,
+                        neut_amount: *neut_a,
+                        ecm_strength: *ecm_s,
+                        tp_sig_bonus_pct: *tp_s,
+                    });
+                }
+                Ok(())
+            });
+            if let Err(e) = reserve_res {
+                return Some(Err(e));
+            }
+
+            let db_launch = ctx.db.try_with_mut_snapshot(|snap| {
+                if let Some(ch) = snap.characters.get(&char_id) {
+                    if ch.station_id.is_some() || ch.structure_id.is_some() || ch.solar_system_id != sys_id || ch.active_ship_id != ship_id {
+                        return Err(BridgeRpcError {
+                            code: "ShipNotInSpace".into(),
+                            message: format!("Ship {ship_id} is no longer undocked in system {sys_id}"),
+                        });
+                    }
+                }
+                let mut results = Vec::with_capacity(prepared_drones.len());
+                for (rec, _, _, _, _, _, _, d_pos, _, _, _, _, _, _, _) in &prepared_drones {
+                    let it = snap.items.get_mut(&rec.item_id).ok_or_else(|| BridgeRpcError {
+                        code: "DroneNotFound".into(),
+                        message: format!("Drone item {} not found", rec.item_id),
+                    })?;
+                    if it.owner_id != char_id || it.location_id != ship_id || it.flag != InventoryFlag::DroneBay || it.quantity <= 0 {
+                        return Err(BridgeRpcError {
+                            code: "DroneNotInBay".into(),
+                            message: format!("Drone {} is no longer in ship {ship_id}'s drone bay", rec.item_id),
+                        });
+                    }
                     snap.next_entity_id += 1;
                     let bid = snap.next_entity_id;
-                    let actual_item_id = if let Some(it) = snap.items.get_mut(&rec.item_id) {
-                        if it.quantity > 1 {
-                            it.quantity -= 1;
-                            it.version += 1;
-                            let mut split_rec = it.clone();
-                            snap.next_entity_id += 1;
-                            let split_id = snap.next_entity_id;
-                            split_rec.item_id = split_id;
-                            split_rec.location_id = sys_id as i64;
-                            split_rec.flag = InventoryFlag::None;
-                            split_rec.quantity = 1;
-                            split_rec.singleton = true;
-                            split_rec.version = 1;
-                            snap.items.insert(split_id, split_rec);
-                            split_id
-                        } else {
-                            it.location_id = sys_id as i64;
-                            it.flag = InventoryFlag::None;
-                            it.singleton = true;
-                            it.version += 1;
-                            rec.item_id
-                        }
+                    let actual_item_id = if it.quantity > 1 {
+                        it.quantity -= 1;
+                        it.version += 1;
+                        let mut split_rec = it.clone();
+                        snap.next_entity_id += 1;
+                        let split_id = snap.next_entity_id;
+                        split_rec.item_id = split_id;
+                        split_rec.location_id = sys_id as i64;
+                        split_rec.flag = InventoryFlag::None;
+                        split_rec.quantity = 1;
+                        split_rec.singleton = true;
+                        split_rec.version = 1;
+                        snap.items.insert(split_id, split_rec);
+                        split_id
                     } else {
+                        it.location_id = sys_id as i64;
+                        it.flag = InventoryFlag::None;
+                        it.singleton = true;
+                        it.version += 1;
                         rec.item_id
                     };
                     crate::sp6_lifecycle::record_drone_ball_meta_in_snap(snap, actual_item_id, bid);
                     snap.item_positions.insert(actual_item_id, [d_pos.x, d_pos.y, d_pos.z]);
                     snap.item_positions.insert(bid, [d_pos.x, d_pos.y, d_pos.z]);
-                    (bid, actual_item_id)
-                });
+                    results.push((bid, actual_item_id));
+                }
+                Ok(results)
+            });
+            let committed_launches = match db_launch {
+                Ok(v) => v,
+                Err(e) => {
+                    with_mut_combat_runtime(ctx, |rt| {
+                        for rid in &res_ids {
+                            rt.active_drones_in_space.remove(rid);
+                        }
+                    });
+                    return Some(Err(e));
+                }
+            };
+
+            with_mut_combat_runtime(ctx, |rt| {
+                for (i, &(bid, launched_drone_item_id)) in committed_launches.iter().enumerate() {
+                    if let Some(mut st) = rt.active_drones_in_space.remove(&res_ids[i]) {
+                        st.ball_id = bid;
+                        st.drone_item_id = launched_drone_item_id;
+                        rt.drone_next_ready_unix.remove(&bid);
+                        rt.active_drones_in_space.insert(bid, st);
+                    }
+                }
+            });
+
+            let mut launched_ball_ids = Vec::new();
+            for ((rec, sde_t, is_sentry, max_vel, _, _, _, d_pos, _, _, _, _, _, _, _), (ball_id, _launched_drone_item_id)) in prepared_drones.into_iter().zip(committed_launches.into_iter()) {
                 let mut cs = ctx.build_type_combat_state(rec.type_id);
                 if cs.structure_hp <= 0.0 {
                     cs.structure_hp = 200.0;
@@ -589,41 +704,6 @@ pub async fn handle_npcs_drones(
                     )
                     .await;
 
-                let st = DroneSpaceState {
-                    ball_id,
-                    drone_item_id: launched_drone_item_id,
-                    type_id: rec.type_id,
-                    group_id: sde_t.map(|t| t.group_id).unwrap_or(100),
-                    owner_char_id: char_id,
-                    original_owner_char_id: char_id,
-                    parent_ship_id: ship_id,
-                    solar_system_id: sys_id,
-                    target_id: None,
-                    activity_state: 0,
-                    assist_char_id: None,
-                    guard_char_id: None,
-                    is_abandoned: false,
-                    is_sentry,
-                    bandwidth_used: bw_used,
-                    max_velocity: max_vel,
-                    optimal_range: opt_range,
-                    damage_vector: dmg_vec,
-                    shield_repair_amount: attr(68).unwrap_or(0.0),
-                    armor_repair_amount: attr(84).unwrap_or(0.0),
-                    hull_repair_amount: attr(83).unwrap_or(0.0),
-                    web_speed_factor: attr(20).unwrap_or(0.0),
-                    neut_amount: attr(97).unwrap_or(0.0),
-                    ecm_strength: attr(238)
-                        .or_else(|| attr(239))
-                        .or_else(|| attr(240))
-                        .or_else(|| attr(241))
-                        .unwrap_or(0.0),
-                    tp_sig_bonus_pct: attr(554).unwrap_or(0.0),
-                };
-                with_mut_combat_runtime(ctx, |rt| {
-                    rt.drone_next_ready_unix.remove(&ball_id);
-                    rt.active_drones_in_space.insert(ball_id, st);
-                });
                 let notif_args = vec![
                     PyRep::Integer(ball_id), PyRep::Integer(char_id), PyRep::Integer(ship_id),
                     PyRep::Integer(0), PyRep::Integer(rec.type_id as i64), PyRep::Integer(char_id), PyRep::None,
@@ -1175,17 +1255,39 @@ pub async fn handle_npcs_drones(
                     message: "Drone must be within 2,500 m to scoop to drone bay".into(),
                 }));
             }
-            let drone_st_opt = with_combat_runtime(ctx, |rt| rt.active_drones_in_space.get(&drone_ball_id).cloned());
-            let drone_item_id = if let Some(ref drone_st) = drone_st_opt {
-                if !drone_st.is_abandoned && drone_st.owner_char_id != char_id {
-                    return Some(Err(BridgeRpcError { code: "DroneOwnedByOther".into(), message: "Cannot scoop an active drone controlled by another pilot".into() }));
+            let claimed_drone = match with_mut_combat_runtime(ctx, |rt| {
+                if let Some(drone_st) = rt.active_drones_in_space.get(&drone_ball_id) {
+                    if !drone_st.is_abandoned && drone_st.owner_char_id != char_id {
+                        return Err(BridgeRpcError {
+                            code: "DroneOwnedByOther".into(),
+                            message: "Cannot scoop an active drone controlled by another pilot".into(),
+                        });
+                    }
+                    Ok(rt.active_drones_in_space.remove(&drone_ball_id))
+                } else {
+                    Ok(None)
                 }
-                drone_st.drone_item_id
-            } else if let Some(iid) = ctx.db.with_snapshot(|snap| {
-                snap.items
+            }) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let db_res = ctx.db.try_with_mut_snapshot(|snap| -> Result<i64, BridgeRpcError> {
+                if let Some(ch) = snap.characters.get(&char_id) {
+                    if ch.station_id.is_some() || ch.structure_id.is_some() || ch.solar_system_id != sys_id || ch.active_ship_id != ship_id {
+                        return Err(BridgeRpcError {
+                            code: "DroneNotInSpace".into(),
+                            message: format!("Caller ship {ship_id} is not undocked in solar system {sys_id}"),
+                        });
+                    }
+                }
+                let drone_item_id = if let Some(ref drone_st) = claimed_drone {
+                    drone_st.drone_item_id
+                } else if let Some(iid) = snap
+                    .items
                     .values()
                     .find(|it| {
                         it.location_id == sys_id as i64
+                            && it.flag == InventoryFlag::None
                             && (it.item_id == drone_ball_id
                                 || snap
                                     .sp6_lifecycle
@@ -1195,18 +1297,26 @@ pub async fn handle_npcs_drones(
                                     == Some(drone_ball_id))
                     })
                     .map(|it| it.item_id)
-            }) {
-                iid
-            } else {
-                return Some(Err(BridgeRpcError { code: "DroneNotFound".into(), message: format!("Drone ball {drone_ball_id} is not a scoopable drone") }));
-            };
-            if let Err(e) = ctx.db.with_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                let Some(it) = snap.items.get(&drone_item_id) else {
+                {
+                    iid
+                } else {
+                    return Err(BridgeRpcError {
+                        code: "DroneNotFound".into(),
+                        message: format!("Drone ball {drone_ball_id} is not a scoopable drone"),
+                    });
+                };
+                let Some(it) = snap.items.get(&drone_item_id).cloned() else {
                     return Err(BridgeRpcError {
                         code: "DroneNotFound".into(),
                         message: format!("Drone item {drone_item_id} not found"),
                     });
                 };
+                if it.location_id != sys_id as i64 || it.flag != InventoryFlag::None {
+                    return Err(BridgeRpcError {
+                        code: "DroneNotInSpace".into(),
+                        message: format!("Drone item {drone_item_id} is no longer in space"),
+                    });
+                }
                 let Some(t) = ctx.sde.types.get(&it.type_id) else {
                     return Err(BridgeRpcError {
                         code: "NotADrone".into(),
@@ -1219,7 +1329,7 @@ pub async fn handle_npcs_drones(
                         message: format!("Item {drone_item_id} (type {}) is not a drone", it.type_id),
                     });
                 }
-                let is_abandoned_meta = drone_st_opt.as_ref().is_some_and(|d| d.is_abandoned)
+                let is_abandoned_meta = claimed_drone.as_ref().is_some_and(|d| d.is_abandoned)
                     || snap
                         .sp6_lifecycle
                         .space_object_meta
@@ -1260,23 +1370,34 @@ pub async fn handle_npcs_drones(
                         ),
                     });
                 }
-                Ok(())
-            }) {
-                return Some(Err(e));
-            }
+                if let Some(mut_it) = snap.items.get_mut(&drone_item_id) {
+                    mut_it.owner_id = char_id;
+                    mut_it.location_id = ship_id;
+                    mut_it.flag = InventoryFlag::DroneBay;
+                    mut_it.version += 1;
+                }
+                snap.item_positions.remove(&drone_item_id);
+                snap.item_positions.remove(&drone_ball_id);
+                if let Some(meta) = snap.sp6_lifecycle.space_object_meta.get_mut(&drone_item_id) {
+                    meta.drone_ball_id = None;
+                }
+                Ok(drone_item_id)
+            });
+            let drone_item_id = match db_res {
+                Ok(id) => id,
+                Err(e) => {
+                    if let Some(drone_st) = claimed_drone {
+                        with_mut_combat_runtime(ctx, |rt| {
+                            rt.active_drones_in_space.insert(drone_ball_id, drone_st);
+                        });
+                    }
+                    return Some(Err(e));
+                }
+            };
             with_mut_combat_runtime(ctx, |rt| {
-                rt.active_drones_in_space.remove(&drone_ball_id);
                 rt.drone_next_ready_unix.remove(&drone_ball_id);
             });
             let _ = sys_handle.remove_ball(drone_ball_id).await;
-            ctx.db.with_mut_snapshot(|snap| {
-                if let Some(it) = snap.items.get_mut(&drone_item_id) {
-                    it.owner_id = char_id;
-                    it.location_id = ship_id;
-                    it.flag = InventoryFlag::DroneBay;
-                    it.version += 1;
-                }
-            });
             Some(Ok(PyRep::keyval([
                 ("scoopedDroneItemID", PyRep::Integer(drone_item_id)),
                 ("newOwnerID", PyRep::Integer(char_id)),

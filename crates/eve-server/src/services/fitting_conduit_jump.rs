@@ -314,7 +314,38 @@ pub(crate) async fn bridge_to_resolved_beacon(
     };
     let duration_s = dur_ms / 1000.0;
     let sys = ctx.systems.get_or_spawn(sys_id);
-    sys.add_module_cycle(self_immobilizing_cycle(
+    let now_reserve = ctx.now_unix_secs();
+    {
+        let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
+        super::fitting_cyno_portal::purge_expired_bridges(&mut st, ctx_key(ctx), now_reserve);
+        if st.bridges.contains_key(&(ctx_key(ctx), ship_id)) {
+            return Err(err(
+                "JumpBridgeAlreadyActive",
+                "A jump portal bridge is already active on this ship",
+            ));
+        }
+        st.bridges.insert(
+            (ctx_key(ctx), ship_id),
+            ActiveJumpBridge {
+                bridger_char_id: char_id,
+                bridger_ship_id: ship_id,
+                portal_module_id: portal_id,
+                portal_module_type_id: portal_tid,
+                origin_system_id: sys_id,
+                beacon: beacon.clone(),
+                distance_ly: dist,
+                expires_at_unix: now_reserve + duration_s.round() as u64 + 60,
+                portal_ball_id: -ship_id,
+            },
+        );
+    }
+    let clear_bridge_claim = || {
+        let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
+        if st.bridges.get(&(ctx_key(ctx), ship_id)).is_some_and(|b| b.portal_ball_id == -ship_id) {
+            st.bridges.remove(&(ctx_key(ctx), ship_id));
+        }
+    };
+    if let Err(e) = sys.add_module_cycle(self_immobilizing_cycle(
         ship_id,
         portal_id,
         portal_tid,
@@ -322,11 +353,15 @@ pub(crate) async fn bridge_to_resolved_beacon(
         duration_s,
     ))
     .await
-    .map_err(|e| err("ModuleActivationFailed", e))?;
+    {
+        clear_bridge_claim();
+        return Err(err("ModuleActivationFailed", e));
+    }
     if act_type != 0 && act_qty > 0 {
         if let Err(e) = consume_or_err(ctx, ship_id, act_type, act_qty, |have| {
             format!("Portal activation requires {act_qty} x type {act_type}, ship holds {have}")
         }) {
+            clear_bridge_claim();
             let _ = sys.remove_module_cycle(ship_id, portal_id).await;
             return Err(e);
         }

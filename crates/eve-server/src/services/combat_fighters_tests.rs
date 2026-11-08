@@ -214,6 +214,8 @@ pub(in crate::services) fn make_fighter_ctx_and_session() -> (ServerContext, Ses
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.active_ship_id = ship_id;
             ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
         }
     });
     let mut session = SessionState::default();
@@ -496,4 +498,102 @@ async fn fighter_tube_load_unload_launch_and_recall_with_reserve_refill() {
             .sum();
         assert_eq!(reserve_qty, 4); // (3 split + 4 in 3002) - 3 refilled = 4 remaining
     });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn toctou_concurrent_scoop_abandoned_fighter_only_one_wins() {
+    let sde = make_fighter_sde_registry();
+    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
+
+    let char1 = 91_000_011i64;
+    let char2 = 91_000_012i64;
+    let ship1 = 91_000_111i64;
+    let ship2 = 91_000_112i64;
+    let sys_id = 30_000_142u32;
+    let fighter_item_id = 91_000_201i64;
+    let fighter_ball_id = 91_000_202i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base_ch = snap.characters.values().next().unwrap().clone();
+        for &(cid, sid) in &[(char1, ship1), (char2, ship2)] {
+            let mut ch = base_ch.clone();
+            ch.character_id = cid;
+            ch.corporation_id = 98_000_001;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = sid;
+            snap.characters.insert(cid, ch);
+            snap.items.insert(sid, make_fighter_item(sid, 23_915, cid, sys_id as i64, InventoryFlag::None, 1));
+        }
+        snap.items.insert(
+            fighter_item_id,
+            make_fighter_item(fighter_item_id, 23_057, char1, sys_id as i64, InventoryFlag::None, 5),
+        );
+    });
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    for sid in [ship1, ship2, fighter_ball_id] {
+        let tid = if sid == fighter_ball_id { 23_057 } else { 23_915 };
+        sys_h
+            .spawn_ball_with_combat(
+                Ball {
+                    id: sid,
+                    type_id: tid,
+                    position: DVec3::new(100.0, 0.0, 0.0),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 200.0,
+                    inertia: 1.0,
+                    mass: 10_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState::default(),
+            )
+            .await
+            .unwrap();
+    }
+    ctx.active_fighters.write().unwrap().insert(
+        fighter_ball_id,
+        crate::router::context::ActiveFighterSquadron {
+            ball_id: fighter_ball_id,
+            item_id: fighter_item_id,
+            type_id: 23_057,
+            owner_char_id: char1,
+            parent_ship_id: ship1,
+            tube_index: 0,
+            squadron_size: 5,
+            target_id: None,
+            is_abandoned: true,
+            mwd_active: false,
+        },
+    );
+
+    let mut s1 = SessionState::new(1);
+    s1.user_id = Some(1);
+    s1.character_id = Some(char1);
+    s1.corporation_id = Some(98_000_001);
+    s1.solar_system_id = Some(sys_id);
+    s1.ship_id = Some(ship1);
+    let mut s2 = SessionState::new(2);
+    s2.user_id = Some(2);
+    s2.character_id = Some(char2);
+    s2.corporation_id = Some(98_000_001);
+    s2.solar_system_id = Some(sys_id);
+    s2.ship_id = Some(ship2);
+
+    let kw = HashMap::new();
+    let f_args1 = [PyRep::Integer(fighter_ball_id)];
+    let f_args2 = [PyRep::Integer(fighter_ball_id)];
+    let (r1, r2) = tokio::join!(
+        handle_fighters(&ctx, &mut s1, "fighterMgr", "CmdScoopAbandonedFighterFromSpace", &f_args1, &kw),
+        handle_fighters(&ctx, &mut s2, "fighterMgr", "CmdScoopAbandonedFighterFromSpace", &f_args2, &kw),
+    );
+    let ok1 = r1.as_ref().is_some_and(|r| r.is_ok());
+    let ok2 = r2.as_ref().is_some_and(|r| r.is_ok());
+    assert!(ok1 ^ ok2, "expected exactly 1 ScoopAbandonedFighter winner, got r1={r1:?} r2={r2:?}");
+    let final_loc = ctx.db.with_snapshot(|s| s.items[&fighter_item_id].location_id);
+    let expected_winner_ship = if ok1 { ship1 } else { ship2 };
+    assert_eq!(final_loc, expected_winner_ship);
 }

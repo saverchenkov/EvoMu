@@ -609,10 +609,15 @@ pub async fn handle_dogma_set_module_online(
             ctx, session, ship_id, module_id, true,
         );
     }
-    let (owns_ship, mod_type_id) = ctx.db.with_snapshot(|s| {
+    let (owns_ship, mod_type_id, was_fitted_in_db) = ctx.db.with_snapshot(|s| {
         let owns = s.items.get(&ship_id).is_some_and(|sh| sh.owner_id == char_id);
-        let mtid = s.items.get(&module_id).map(|m| m.type_id).unwrap_or(0);
-        (owns, mtid)
+        let mod_it = s.items.get(&module_id);
+        let mtid = mod_it.map(|m| m.type_id).unwrap_or(0);
+        let fitted = mod_it.is_some_and(|m| {
+            m.location_id == ship_id
+                && matches!(m.flag as u16, 11..=34 | 92..=99 | 125..=132 | 164..=171)
+        });
+        (owns, mtid, fitted)
     });
     if !owns_ship {
         return Err(err(
@@ -665,18 +670,68 @@ pub async fn handle_dogma_set_module_online(
         return Err(err("FittingValidationFailed", e));
     }
     let after_ship_attrs = snapshot_ship_fitting_attrs(ctx, &fit);
-    ctx.store_ship_fitting(ship_id, fit);
-    ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+    let committed_mod_type_id = ctx.db.try_with_mut_snapshot(|snap| {
+        if !snap.items.get(&ship_id).is_some_and(|sh| sh.owner_id == char_id) {
+            return Err(err(
+                "ShipOwnershipViolation",
+                format!("Ship {ship_id} is not owned by character {char_id}"),
+            ));
+        }
+        let mut resolved_type_id = 0_u32;
+        if was_fitted_in_db {
+            let mod_it = snap.items.get(&module_id).ok_or_else(|| {
+                err(
+                    "ModuleNotFound",
+                    format!("Module {module_id} no longer fitted on ship {ship_id}"),
+                )
+            })?;
+            let flag_u16 = mod_it.flag as u16;
+            if mod_it.location_id != ship_id || !matches!(flag_u16, 11..=34 | 92..=99 | 125..=132 | 164..=171) {
+                return Err(err(
+                    "ModuleNotFound",
+                    format!("Module {module_id} is not fitted on ship {ship_id}"),
+                ));
+            }
+            let dmg = mod_it
+                .dynamic_attributes
+                .get(&eve_sde::attr_ids::DAMAGE)
+                .copied()
+                .unwrap_or(0.0);
+            let hp = mod_it
+                .dynamic_attributes
+                .get(&eve_sde::attr_ids::HP_STRUCT)
+                .copied()
+                .or_else(|| {
+                    ctx.sde
+                        .types
+                        .get(&mod_it.type_id)
+                        .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied())
+                })
+                .unwrap_or(40.0);
+            let ch_docked = snap
+                .characters
+                .get(&char_id)
+                .is_some_and(|c| c.station_id.is_some() || c.structure_id.is_some());
+            if dmg >= hp - 1e-6 && !ch_docked {
+                return Err(err(
+                    "ModuleBurnedOut",
+                    format!("Module {module_id} is burned out and cannot be onlined in space"),
+                ));
+            }
+            resolved_type_id = mod_it.type_id;
+        }
         snap.module_online_states.insert(module_id, true);
-        Ok(())
+        Ok(resolved_type_id)
     })?;
+    ctx.store_ship_fitting(ship_id, fit);
     ctx.invalidate_ship_fitting(ship_id);
 
     let _ = ctx.notify_module_online_state(char_id, module_id, true);
     emit_ship_fitting_attr_changes(ctx, char_id, ship_id, &before_ship_attrs, &after_ship_attrs);
-    if mod_type_id > 0 {
+    let eff_tid = if committed_mod_type_id > 0 { committed_mod_type_id } else { mod_type_id };
+    if eff_tid > 0 {
         let eff_id = ctx
-            .effect_id_for_module(mod_type_id, Some("online"))
+            .effect_id_for_module(eff_tid, Some("online"))
             .unwrap_or(16) as i32;
         let _ = ctx.notify_godma_ship_effect(
             NotificationTarget::Character(char_id),
@@ -691,7 +746,7 @@ pub async fn handle_dogma_set_module_online(
             char_id,
             ship_id,
             module_id,
-            mod_type_id,
+            eff_tid,
             "online",
             1.0,
             None,

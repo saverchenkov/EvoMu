@@ -1179,14 +1179,14 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
         Ok(WormholeJumpTxOutcome::Collapsed(err)) => return Some(Err(err)),
         Ok(WormholeJumpTxOutcome::Jumped(dest_sys_id, wh_item_id, exit_wh_id, sig_id_str, remaining_mass, max_jump_mass, mass_stage, wh_size, life_stage, wh_age, is_collapsed, buckets)) => {
             let prev_cs = old_handle.get_combat_state(ship_id).await.ok().flatten();
+            let updated_ch = match ctx.db.transition_character_solar_system_if_at(char_id, old_sys, dest_sys_id, &ctx.sde) {
+                Ok(c) => c,
+                Err(e) => return Some(Err(BridgeRpcError { code: "SystemTransitionFailed".into(), message: e.to_string() })),
+            };
             crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, old_sys);
             crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
             crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
             let _ = old_handle.remove_ball(ship_id).await;
-            let updated_ch = match ctx.db.set_character_solar_system(char_id, dest_sys_id, &ctx.sde) {
-                Ok(c) => c,
-                Err(e) => return Some(Err(BridgeRpcError { code: "SystemTransitionFailed".into(), message: e.to_string() })),
-            };
             ctx.sync_character_local_chat(char_id, Some(old_sys), dest_sys_id);
 
             let _ = ctx.execute_session_transition_sync(

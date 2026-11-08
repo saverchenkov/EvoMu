@@ -14,12 +14,14 @@ use eve_destiny::{Ball, DamageVector};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
+#[cfg(test)]
 use std::collections::HashMap;
 
 /// `R6-T1-01` (`#355`): Ensures a tube-loaded fighter stack has at most `max_squadron_size`
 /// units before spawning in space, splitting any unlaunched excess back into a separate
 /// `InventoryFlag::FighterBay` stack on `ship_id` so squadron HP can never be inflated
 /// above `max_squadron_size * unit_hp` and unit losses never wipe unlaunched reserves.
+#[cfg(test)]
 pub(crate) fn prepare_tube_fighter_stack_for_launch(
     ctx: &ServerContext,
     fighter_item_id: i64,

@@ -143,7 +143,7 @@ pub async fn handle(
             let Some(mut item_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Add requires itemID".into() }));
             };
-            let mut source_item_opt = ctx.db.with_snapshot(|snap| snap.items.get(&item_id).cloned());
+            let source_item_opt = ctx.db.with_snapshot(|snap| snap.items.get(&item_id).cloned());
             let Some(new_loc) = super::inventory_bound::resolve_inv_target_location(
                 ctx,
                 session,
@@ -424,9 +424,33 @@ pub async fn handle(
                         return Some(Err(e));
                     }
                     let old_loc = src_item.location_id;
-                    ctx.db.with_mut_snapshot(|snap| {
+                    if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| {
+                        let Some(it) = snap.items.get(&item_id) else {
+                            return Err(BridgeRpcError {
+                                code: "ItemNotFound".into(),
+                                message: format!("Rig {item_id} no longer exists"),
+                            });
+                        };
+                        if it.owner_id != char_id
+                            || it.location_id != old_loc
+                            || !matches!(it.flag as u16, 92..=94)
+                        {
+                            return Err(BridgeRpcError {
+                                code: "ItemOwnershipViolation".into(),
+                                message: format!("Rig {item_id} is no longer fitted on ship {old_loc}"),
+                            });
+                        }
+                        if snap.is_item_locked_in_contract_or_job(item_id) {
+                            return Err(BridgeRpcError {
+                                code: "ItemLocked".into(),
+                                message: format!("Rig {item_id} is locked"),
+                            });
+                        }
                         snap.remove_system_cleanup_item(item_id);
-                    });
+                        Ok(())
+                    }) {
+                        return Some(Err(e));
+                    }
                     ctx.invalidate_ship_fitting(old_loc);
                     let _ = ctx.get_or_rebuild_ship_fitting(char_id, old_loc);
                     // Rigs are destroyed on removal; the V24 client derives `OnModuleUnfitted`
@@ -1047,189 +1071,454 @@ pub async fn handle(
 
             let dest_is_struct_fuel = crate::services::structure_acl_defense_rules::is_structure_fuel_flag(flag) && ctx.db.with_snapshot(|s| s.structures.contains_key(&new_loc));
             let dest_is_ship_hold = !dest_is_struct_fuel && matches!(flag_u16, 5 | 87 | 158 | 133..=151 | 177 | 179 | 181 | 182 | 185);
-            if dest_is_ship_hold {
-                let eval_cargo_cap = (flag_u16 == 5).then(|| {
-                    ctx.get_or_rebuild_ship_fitting(char_id, new_loc).ok()
-                        .map(|f| f.evaluated_context(&ctx.sde).ship.get_attribute(38, &ctx.sde))
-                        .filter(|&c| c > 0.0)
-                }).flatten();
-                let cap_check = ctx.db.with_snapshot(|snap| {
-                    let Some(moving_item) = snap.items.get(&item_id) else { return Ok(()); };
-                    let Some(ship_item) = snap.items.get(&new_loc) else { return Ok(()); };
-                    let Some(ship_type) = ctx.sde.types.get(&ship_item.type_id) else { return Ok(()); };
-                    if ship_type.category_id != 6 { return Ok(()); }
-                    let Some(item_type) = ctx.sde.types.get(&moving_item.type_id) else { return Ok(()); };
-                    if !crate::services::fitting_saved_apply::is_item_allowed_in_ship_hold(flag_u16, item_type, ship_type) {
-                        return Err(BridgeRpcError::user_error("InvalidItemTypeForHold"));
-                    }
-                    if matches!(flag_u16, 177 | 179)
-                        && (ship_type.default_attributes.get(&3020).copied().unwrap_or(0.0) > 0.0 || matches!(ship_type.group_id, 27 | 898 | 900))
-                        && item_type.category_id == 6
-                    {
-                        if !moving_item.singleton || moving_item.quantity != 1 {
-                            return Err(BridgeRpcError { code: "ShipMustBeAssembled".into(), message: "UserError: Only an assembled frigate can be placed in the Frigate Escape Bay".into() });
-                        }
-                        let has_non_charge_cargo = snap.items.values().any(|c| {
-                            c.location_id == item_id && !matches!(c.flag as u16, 11..=34 | 92..=94 | 125..=132) && ctx.sde.types.get(&c.type_id).is_none_or(|t| t.category_id != 8)
-                        });
-                        if has_non_charge_cargo {
-                            return Err(BridgeRpcError { code: "ShipHasItemsInCargo".into(), message: "UserError: Frigate in Frigate Escape Bay cannot contain non-charge cargo items".into() });
-                        }
-                        let existing_frigate = snap.items.values().any(|i| {
-                            i.location_id == new_loc && matches!(i.flag as u16, 177 | 179) && i.item_id != item_id && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 6)
-                        });
-                        if existing_frigate {
-                            return Err(BridgeRpcError { code: "CapacityExceeded".into(), message: "UserError: Frigate Escape Bay can hold at most 1 assembled frigate".into() });
-                        }
-                    }
-                    let hold_capacity = crate::services::fitting_saved_apply::get_ship_hold_capacity(flag_u16, ship_type, eval_cargo_cap);
-                    let eff_qty = split_qty_opt.unwrap_or(moving_item.quantity);
-                    let item_vol = effective_item_unit_volume(&ctx.sde, moving_item) * (eff_qty as f64);
-                    if flag_u16 != 5 && hold_capacity <= 0.0 {
-                        return Err(ship_hold_capacity_error(flag_u16, 0.0, 0.0, item_vol));
-                    }
-                    if !matches!(flag_u16, 177 | 179) && hold_capacity > 0.0 {
-                        let used_vol: f64 = snap.items.values()
-                            .filter(|i| i.location_id == new_loc && (i.flag as u16) == flag_u16 && i.item_id != item_id)
-                            .map(|i| effective_item_unit_volume(&ctx.sde, i) * (i.quantity as f64)).sum();
-                        if used_vol + item_vol > hold_capacity + 1e-4 {
-                            return Err(ship_hold_capacity_error(flag_u16, hold_capacity, used_vol, item_vol));
-                        }
-                    }
-                    Ok(())
-                });
-                if let Err(e) = cap_check { return Some(Err(e)); }
+            let eval_cargo_cap = if dest_is_ship_hold && flag_u16 == 5 {
+                ctx.get_or_rebuild_ship_fitting(char_id, new_loc).ok()
+                    .map(|f| f.evaluated_context(&ctx.sde).ship.get_attribute(38, &ctx.sde))
+                    .filter(|&c| c > 0.0)
+            } else {
+                None
+            };
+            let corp_id_for_owner = session.corporation_id.unwrap_or(0);
+            let orig_item_id = item_id;
+            let active_ship_opt = session.ship_id;
+            let orig_source_snapshot = source_item_opt.clone();
+            let was_singleton_before_move = orig_source_snapshot.as_ref().map(|i| i.singleton).unwrap_or(false);
+            let unfit_ship_id = orig_source_snapshot
+                .as_ref()
+                .filter(|src| matches!(src.flag as u16, 11..=34 | 92..=94 | 125..=132))
+                .map(|src| src.location_id);
+            let old_fit_loads = if is_fitting_slot {
+                ctx.get_or_rebuild_ship_fitting(char_id, new_loc).ok().map(|f| {
+                    (
+                        f.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde),
+                        f.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde),
+                    )
+                })
+            } else if let Some(src_ship_id) = unfit_ship_id {
+                ctx.get_or_rebuild_ship_fitting(char_id, src_ship_id).ok().map(|f| {
+                    (
+                        f.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde),
+                        f.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde),
+                    )
+                })
+            } else {
+                None
+            };
+
+            #[allow(clippy::large_enum_variant)]
+            enum AddTxOutcome {
+                Merged {
+                    merged_item: eve_db::InventoryItemRecord,
+                    prev_qty: i32,
+                    effective_item_id: i64,
+                    moved_tid: u32,
+                    moved_qty: i32,
+                },
+                Moved {
+                    updated: eve_db::InventoryItemRecord,
+                    effective_item_id: i64,
+                    old_loc_id: i64,
+                    old_flag_id: i64,
+                    old_owner_id: i64,
+                    old_was_fitted: bool,
+                    st_fuel: Option<u32>,
+                    dst_corp_owner: i64,
+                },
             }
 
-            let was_singleton_before_move = source_item_opt.as_ref().map(|i| i.singleton).unwrap_or(false);
-            let mut did_split: Option<(i64, i32)> = None;
-            if looted_from_space {
-                let active_ship = session.ship_id.unwrap_or(new_loc);
-                if let Some(split_qty) = split_qty_opt {
-                    let orig_id = item_id;
-                    let split_res = ctx.db.try_with_mut_snapshot(|snap| {
-                        let mut spec = eve_db::TransferItemSpec::move_whole(
-                            None,
-                            None,
-                            Some(char_id),
-                            active_ship,
-                            flag,
-                        );
-                        spec.quantity = Some(split_qty);
-                        spec.reject_singleton = true;
-                        spec.active_ship_id = Some(active_ship);
-                        snap.transfer_inventory_item(item_id, spec)
-                            .map_err(|e| e.to_string())
+            let tx_res: Result<AddTxOutcome, BridgeRpcError> = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(orig_item) = snap.items.get(&orig_item_id).cloned() else {
+                    return Err(BridgeRpcError {
+                        code: "InventoryMoveFailed".into(),
+                        message: format!("Item {orig_item_id} not found"),
                     });
-                    match split_res {
-                        Ok(split_item) => { did_split = Some((orig_id, split_qty)); item_id = split_item.item_id; source_item_opt = Some(split_item); }
-                        Err(e) => return Some(Err(BridgeRpcError { code: "SplitFailed".into(), message: e })),
-                    }
-                } else {
-                    let prev_owner = source_item_opt.as_ref().map(|s| s.owner_id);
-                    if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| {
-                        let mut spec = eve_db::TransferItemSpec::move_whole(
-                            None,
-                            None,
-                            Some(char_id),
-                            active_ship,
-                            flag,
-                        );
-                        spec.reject_fitted = false;
-                        spec.active_ship_id = Some(active_ship);
-                        snap.transfer_inventory_item(item_id, spec)
-                    }) {
-                        return Some(Err(BridgeRpcError { code: "InventoryMoveFailed".into(), message: e.to_string() }));
-                    }
-                    if prev_owner.is_some_and(|owner_id| owner_id != char_id) {
-                        crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &[item_id]);
-                    }
-                    if let Some(src) = source_item_opt.as_mut() { src.owner_id = char_id; src.location_id = active_ship; src.flag = flag; }
-                }
-            } else if let Some(split_qty) = split_qty_opt {
-                let orig_id = item_id;
-                let split_owner = source_item_opt.as_ref().map(|i| i.owner_id).unwrap_or(char_id);
-                let corp_id = session.corporation_id.unwrap_or(0);
-                let struct_fuel_corp = (flag_u16 == 133 || flag_u16 == 172 || flag == InventoryFlag::StructureFuel).then(|| ctx.db.with_snapshot(|s| s.structures.get(&new_loc).map(|st| st.owner_corp_id))).flatten().unwrap_or(0);
-                let target_owner = if struct_fuel_corp > 0 { struct_fuel_corp } else if (116..=122).contains(&flag_u16) || flag_u16 == 180 || flag == InventoryFlag::StructureDeedBay { corp_id } else { char_id };
-                match ctx.db.split_stack(split_owner, item_id, split_qty) {
-                    Ok((_orig, mut split_item)) => {
-                        if split_item.owner_id != target_owner {
-                            ctx.db.with_mut_snapshot(|snap| {
-                                if let Some(it) = snap.items.get_mut(&split_item.item_id) {
-                                    it.owner_id = target_owner;
-                                }
-                            });
-                            split_item.owner_id = target_owner;
-                        }
-                        did_split = Some((orig_id, split_qty));
-                        item_id = split_item.item_id;
-                        source_item_opt = Some(split_item);
-                    }
-                    Err(e) => return Some(Err(BridgeRpcError { code: "SplitFailed".into(), message: e.to_string() })),
-                }
-            }
-            if is_fitting_slot {
-                ctx.db.with_mut_snapshot(|snap| {
-                    if let Some(it) = snap.items.get_mut(&item_id) {
-                        it.singleton = true;
-                    }
-                });
-            }
+                };
 
-            if dest_is_ship_hold {
-                // Stack merging if matching unstacked item exists at destination
-                let merged_opt: Result<Option<(eve_db::InventoryItemRecord, i32)>, eve_db::DbError> = ctx.db.try_with_mut_snapshot(|snap| {
-                    let Some(moving) = snap.items.get(&item_id).cloned() else {
-                        return Ok(None);
-                    };
-                    if moving.singleton
-                        || moving.is_blueprint_copy
-                        || !moving.dynamic_attributes.is_empty()
-                        || moving.source_mutaplasmid_id.is_some()
-                        || fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, &moving).is_err()
+                if orig_item.location_id != orig_source_loc_id {
+                    return Err(BridgeRpcError {
+                        code: "InventoryMoveFailed".into(),
+                        message: format!(
+                            "Item {orig_item_id} moved concurrently from location {orig_source_loc_id} to {}",
+                            orig_item.location_id
+                        ),
+                    });
+                }
+
+                if let Some(ch) = snap.characters.get(&char_id) {
+                    if orig_item_id == new_loc
+                        || orig_item_id == ch.active_ship_id
+                        || snap.is_structure_controller_saved_ship(orig_item_id)
+                        || flag == InventoryFlag::Locked
                     {
-                        return Ok(None);
+                        return Err(BridgeRpcError {
+                            code: "InventoryMoveFailed".into(),
+                            message: format!("Destination location {new_loc} is not authorized for character {char_id}"),
+                        });
                     }
-                    let is_courier = |id: i64| snap.item_custom_names.get(&id).is_some_and(|s| s.starts_with("courier_cargo:"));
-                    if is_courier(item_id) {
-                        return Ok(None);
-                    }
-                    let existing_target = snap.items.values().find(|i| {
-                        i.item_id != item_id
-                            && i.location_id == new_loc
-                            && i.flag == flag
-                            && i.type_id == moving.type_id
-                            && (i.owner_id == moving.owner_id || i.owner_id == char_id)
-                            && !i.singleton
-                            && !i.is_blueprint_copy
-                            && i.dynamic_attributes.is_empty()
-                            && i.source_mutaplasmid_id.is_none()
-                            && i.flag != InventoryFlag::Locked
-                            && !snap.is_item_locked_in_contract_or_job(i.item_id)
-                            && !is_courier(i.item_id)
-                    }).map(|i| i.item_id);
-                    if let Some(target_iid) = existing_target {
-                        let target_qty = snap
-                            .items
-                            .get(&target_iid)
-                            .and_then(|t| t.quantity.checked_add(moving.quantity).map(|nq| (t.quantity, nq)));
-                        if let Some((prev_qty, new_qty)) = target_qty {
-                            snap.remove_system_cleanup_item(item_id);
-                            let target_item = snap.items.get_mut(&target_iid).unwrap();
-                            target_item.quantity = new_qty;
-                            target_item.version += 1;
-                            Ok(Some((target_item.clone(), prev_qty)))
-                        } else {
-                            Ok(None)
+                    if let Some(dock_id) = session.station_id.or(session.structure_id) {
+                        if ch.station_id.or(ch.structure_id) != Some(dock_id) {
+                            return Err(BridgeRpcError {
+                                code: "InventoryMoveFailed".into(),
+                                message: format!("Character {char_id} is no longer docked at {dock_id}"),
+                            });
                         }
-                    } else {
-                        Ok(None)
+                    } else if let Some(sess_sys) = session.solar_system_id {
+                        if ch.station_id.is_some() || ch.structure_id.is_some() || ch.solar_system_id != sess_sys {
+                            return Err(BridgeRpcError {
+                                code: "InventoryMoveFailed".into(),
+                                message: format!("Character {char_id} changed location concurrently"),
+                            });
+                        }
                     }
-                });
-                if let Ok(Some((merged_item, prev_qty))) = merged_opt {
-                    let moved_tid = source_item_opt.as_ref().map(|i| i.type_id).unwrap_or(merged_item.type_id);
-                    let moved_qty = source_item_opt.as_ref().map(|i| i.quantity).unwrap_or(1);
+                } else if flag == InventoryFlag::Locked || orig_item_id == new_loc {
+                    return Err(BridgeRpcError {
+                        code: "InventoryMoveFailed".into(),
+                        message: format!("Item {orig_item_id} move is locked or invalid"),
+                    });
+                }
+
+                if matches!(flag_u16, 36 | 63 | 72) {
+                    return Err(BridgeRpcError {
+                        code: if flag_u16 == 72 { "ImpoundedItem" } else if flag_u16 == 36 { "AssetSafetyLocked" } else { "ItemLocked" }.into(),
+                        message: format!("Cannot move item {orig_item_id} into restricted flag {flag_u16}"),
+                    });
+                }
+                fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, &orig_item)?;
+                if let Some(dest_item) = snap.items.get(&new_loc) {
+                    fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, dest_item)?;
+                }
+
+                if is_fitting_slot {
+                    if orig_item.owner_id != char_id {
+                        return Err(BridgeRpcError {
+                            code: "ItemOwnershipViolation".into(),
+                            message: format!("Item {orig_item_id} is not owned by {char_id}"),
+                        });
+                    }
+                    let eff_qty = split_qty_opt.unwrap_or(orig_item.quantity);
+                    if eff_qty != 1 {
+                        return Err(BridgeRpcError {
+                            code: "CannotFitStackedModule".into(),
+                            message: format!("Item {orig_item_id} has quantity {eff_qty} and must be split to 1 before fitting"),
+                        });
+                    }
+                    let Some(ship_item) = snap.items.get(&new_loc) else {
+                        return Err(BridgeRpcError {
+                            code: "ShipNotFound".into(),
+                            message: format!("Target ship {new_loc} not found"),
+                        });
+                    };
+                    let ship_cat = ctx.sde.types.get(&ship_item.type_id).map(|t| t.category_id).unwrap_or(0);
+                    if ship_item.owner_id != char_id || ship_cat != 6 {
+                        return Err(BridgeRpcError {
+                            code: "InvalidFittingTarget".into(),
+                            message: format!("Target {new_loc} is not an owned ship"),
+                        });
+                    }
+                    if snap.items.values().any(|other| {
+                        other.item_id != orig_item_id
+                            && other.location_id == new_loc
+                            && other.flag == flag
+                            && ctx.sde.types.get(&other.type_id).map(|t| t.category_id == 7 || t.category_id == 32).unwrap_or(true)
+                    }) {
+                        return Err(BridgeRpcError {
+                            code: "SlotAlreadyOccupied".into(),
+                            message: format!("Slot {flag_u16} on ship {new_loc} is already occupied"),
+                        });
+                    }
+                    if let (Some(mod_t), Some(ship_t)) = (ctx.sde.types.get(&orig_item.type_id), ctx.sde.types.get(&ship_item.type_id)) {
+                        crate::services::tactical_module_mechanics::validate_module_fitting_constraints(
+                            ctx, snap, new_loc, orig_item_id, mod_t, ship_t,
+                        )?;
+                    }
+                }
+
+                if dest_is_ship_hold {
+                    if let (Some(ship_item), Some(item_type)) = (snap.items.get(&new_loc), ctx.sde.types.get(&orig_item.type_id)) {
+                        if let Some(ship_type) = ctx.sde.types.get(&ship_item.type_id) {
+                            if ship_type.category_id == 6 {
+                                if !crate::services::fitting_saved_apply::is_item_allowed_in_ship_hold(flag_u16, item_type, ship_type) {
+                                    return Err(BridgeRpcError::user_error("InvalidItemTypeForHold"));
+                                }
+                                if matches!(flag_u16, 177 | 179)
+                                    && (ship_type.default_attributes.get(&3020).copied().unwrap_or(0.0) > 0.0 || matches!(ship_type.group_id, 27 | 898 | 900))
+                                    && item_type.category_id == 6
+                                {
+                                    if !orig_item.singleton || orig_item.quantity != 1 {
+                                        return Err(BridgeRpcError { code: "ShipMustBeAssembled".into(), message: "UserError: Only an assembled frigate can be placed in the Frigate Escape Bay".into() });
+                                    }
+                                    let has_non_charge_cargo = snap.items.values().any(|c| {
+                                        c.location_id == orig_item_id && !matches!(c.flag as u16, 11..=34 | 92..=94 | 125..=132) && ctx.sde.types.get(&c.type_id).is_none_or(|t| t.category_id != 8)
+                                    });
+                                    if has_non_charge_cargo {
+                                        return Err(BridgeRpcError { code: "ShipHasItemsInCargo".into(), message: "UserError: Frigate in Frigate Escape Bay cannot contain non-charge cargo items".into() });
+                                    }
+                                    let existing_frigate = snap.items.values().any(|i| {
+                                        i.location_id == new_loc && matches!(i.flag as u16, 177 | 179) && i.item_id != orig_item_id && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 6)
+                                    });
+                                    if existing_frigate {
+                                        return Err(BridgeRpcError { code: "CapacityExceeded".into(), message: "UserError: Frigate Escape Bay can hold at most 1 assembled frigate".into() });
+                                    }
+                                }
+                                let hold_capacity = crate::services::fitting_saved_apply::get_ship_hold_capacity(flag_u16, ship_type, eval_cargo_cap);
+                                let eff_qty = split_qty_opt.unwrap_or(orig_item.quantity);
+                                let item_vol = effective_item_unit_volume(&ctx.sde, &orig_item) * (eff_qty as f64);
+                                if flag_u16 != 5 && hold_capacity <= 0.0 {
+                                    return Err(ship_hold_capacity_error(flag_u16, 0.0, 0.0, item_vol));
+                                }
+                                if !matches!(flag_u16, 177 | 179) && hold_capacity > 0.0 {
+                                    let used_vol: f64 = snap.items.values()
+                                        .filter(|i| i.location_id == new_loc && (i.flag as u16) == flag_u16 && i.item_id != orig_item_id)
+                                        .map(|i| effective_item_unit_volume(&ctx.sde, i) * (i.quantity as f64)).sum();
+                                    if used_vol + item_vol > hold_capacity + 1e-4 {
+                                        return Err(ship_hold_capacity_error(flag_u16, hold_capacity, used_vol, item_vol));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if split_qty_opt.is_none() {
+                    if let Some(key) = idem_key {
+                        if snap.committed_idempotency_keys.contains(&(char_id, key.to_string())) {
+                            return Ok(AddTxOutcome::Moved {
+                                updated: orig_item.clone(),
+                                effective_item_id: orig_item_id,
+                                old_loc_id: orig_item.location_id,
+                                old_flag_id: orig_item.flag as i64,
+                                old_owner_id: orig_item.owner_id,
+                                old_was_fitted: false,
+                                st_fuel: None,
+                                dst_corp_owner: 0,
+                            });
+                        }
+                    }
+                    if let Some(exp_v) = expected_version {
+                        if orig_item.version != exp_v {
+                            return Err(BridgeRpcError {
+                                code: "InventoryMoveFailed".into(),
+                                message: format!("Stale entity version (expected {exp_v}, found {})", orig_item.version),
+                            });
+                        }
+                    }
+                }
+
+                let struct_fuel_owner = (flag_u16 == 133 || flag_u16 == 172 || flag == InventoryFlag::StructureFuel)
+                    .then(|| snap.structures.get(&new_loc).map(|st| st.owner_corp_id))
+                    .flatten()
+                    .unwrap_or(0);
+                let dst_corp_owner = if struct_fuel_owner > 0 {
+                    struct_fuel_owner
+                } else if (116..=122).contains(&flag_u16) || flag_u16 == 180 || flag == InventoryFlag::StructureDeedBay {
+                    corp_id_for_owner
+                } else {
+                    0
+                };
+
+                let (effective_item_id, active_src_record) = if looted_from_space {
+                    let active_ship = active_ship_opt.unwrap_or(new_loc);
+                    if let Some(split_qty) = split_qty_opt {
+                        let orig = snap.items.get_mut(&orig_item_id).ok_or_else(|| BridgeRpcError {
+                            code: "SplitFailed".into(),
+                            message: format!("Item {orig_item_id} not found"),
+                        })?;
+                        if orig.singleton || split_qty <= 0 || split_qty >= orig.quantity {
+                            return Err(BridgeRpcError { code: "SplitFailed".into(), message: "Cannot split".into() });
+                        }
+                        orig.quantity -= split_qty;
+                        orig.version += 1;
+                        snap.next_entity_id += 1;
+                        let new_id = snap.next_entity_id;
+                        let split_rec = eve_db::InventoryItemRecord {
+                            item_id: new_id,
+                            type_id: orig.type_id,
+                            owner_id: char_id,
+                            location_id: active_ship,
+                            flag,
+                            quantity: split_qty,
+                            singleton: false,
+                            version: 1,
+                            ..Default::default()
+                        };
+                        snap.items.insert(new_id, split_rec.clone());
+                        (new_id, split_rec)
+                    } else {
+                        let it = snap.items.get_mut(&orig_item_id).ok_or_else(|| BridgeRpcError {
+                            code: "InventoryMoveFailed".into(),
+                            message: format!("Item {orig_item_id} not found"),
+                        })?;
+                        it.owner_id = char_id;
+                        it.location_id = active_ship;
+                        it.flag = flag;
+                        it.version += 1;
+                        (orig_item_id, it.clone())
+                    }
+                } else if let Some(split_qty) = split_qty_opt {
+                    let split_owner = orig_source_snapshot.as_ref().map(|i| i.owner_id).unwrap_or(orig_item.owner_id);
+                    let target_owner = if struct_fuel_owner > 0 {
+                        struct_fuel_owner
+                    } else if (116..=122).contains(&flag_u16) || flag_u16 == 180 || flag == InventoryFlag::StructureDeedBay {
+                        corp_id_for_owner
+                    } else {
+                        char_id
+                    };
+                    let orig = snap.items.get_mut(&orig_item_id).ok_or_else(|| BridgeRpcError {
+                        code: "SplitFailed".into(),
+                        message: format!("Item {orig_item_id} not found"),
+                    })?;
+                    if orig.owner_id != split_owner {
+                        return Err(BridgeRpcError {
+                            code: "SplitFailed".into(),
+                            message: format!("Item {orig_item_id} is not owned by character {split_owner}"),
+                        });
+                    }
+                    if orig.singleton || split_qty <= 0 || split_qty >= orig.quantity {
+                        return Err(BridgeRpcError { code: "SplitFailed".into(), message: "Cannot split".into() });
+                    }
+                    orig.quantity -= split_qty;
+                    orig.version += 1;
+                    let mut split_rec = orig.clone();
+                    snap.next_entity_id += 1;
+                    let new_id = snap.next_entity_id;
+                    split_rec.item_id = new_id;
+                    split_rec.owner_id = target_owner;
+                    split_rec.quantity = split_qty;
+                    split_rec.singleton = false;
+                    split_rec.version = 1;
+                    snap.items.insert(new_id, split_rec.clone());
+                    (new_id, split_rec)
+                } else {
+                    (orig_item_id, orig_item.clone())
+                };
+
+                if dest_is_ship_hold {
+                    let is_courier = |id: i64| snap.item_custom_names.get(&id).is_some_and(|s| s.starts_with("courier_cargo:"));
+                    let can_merge = !active_src_record.singleton
+                        && !active_src_record.is_blueprint_copy
+                        && active_src_record.dynamic_attributes.is_empty()
+                        && active_src_record.source_mutaplasmid_id.is_none()
+                        && fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, &active_src_record).is_ok()
+                        && !is_courier(effective_item_id);
+                    if can_merge {
+                        let existing_target = snap.items.values().find(|i| {
+                            i.item_id != effective_item_id
+                                && i.location_id == new_loc
+                                && i.flag == flag
+                                && i.type_id == active_src_record.type_id
+                                && (i.owner_id == active_src_record.owner_id || i.owner_id == char_id)
+                                && !i.singleton
+                                && !i.is_blueprint_copy
+                                && i.dynamic_attributes.is_empty()
+                                && i.source_mutaplasmid_id.is_none()
+                                && i.flag != InventoryFlag::Locked
+                                && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                                && !is_courier(i.item_id)
+                        }).map(|i| i.item_id);
+                        if let Some(target_iid) = existing_target {
+                            if let Some((prev_qty, new_qty)) = snap.items.get(&target_iid).and_then(|t| t.quantity.checked_add(active_src_record.quantity).map(|nq| (t.quantity, nq))) {
+                                snap.remove_system_cleanup_item(effective_item_id);
+                                let target_item = snap.items.get_mut(&target_iid).unwrap();
+                                target_item.quantity = new_qty;
+                                target_item.version += 1;
+                                return Ok(AddTxOutcome::Merged {
+                                    merged_item: target_item.clone(),
+                                    prev_qty,
+                                    effective_item_id,
+                                    moved_tid: active_src_record.type_id,
+                                    moved_qty: active_src_record.quantity,
+                                });
+                            }
+                        }
+                    }
+                }
+
+                let old_loc_id = orig_item.location_id;
+                let old_flag_id = orig_item.flag as i64;
+                let old_owner_id = orig_item.owner_id;
+                let old_was_fitted = matches!(orig_item.flag as u16, 11..=34 | 92..=94 | 125..=132);
+
+                if split_qty_opt.is_some() {
+                    if let Some(exp_v) = expected_version {
+                        if active_src_record.version != exp_v {
+                            return Err(BridgeRpcError {
+                                code: "InventoryMoveFailed".into(),
+                                message: format!("Stale entity version (expected {exp_v}, found {})", active_src_record.version),
+                            });
+                        }
+                    }
+                }
+
+                let active_cat = ctx
+                    .sde
+                    .types
+                    .get(&active_src_record.type_id)
+                    .map(|t| t.category_id)
+                    .unwrap_or(0);
+                let mut updated = {
+                    let it = snap.items.get_mut(&effective_item_id).ok_or_else(|| BridgeRpcError {
+                        code: "InventoryMoveFailed".into(),
+                        message: format!("Item {effective_item_id} not found"),
+                    })?;
+                    it.location_id = new_loc;
+                    it.flag = flag;
+                    if is_fitting_slot {
+                        it.singleton = true;
+                        if active_cat != 8 {
+                            it.quantity = 1;
+                        }
+                    }
+                    if dst_corp_owner > 0 {
+                        it.owner_id = dst_corp_owner;
+                    } else if matches!(flag, InventoryFlag::Hangar | InventoryFlag::Cargo)
+                        || dest_is_ship_hold
+                        || (116..=122).contains(&old_flag_id)
+                        || old_flag_id == 133
+                    {
+                        it.owner_id = char_id;
+                    }
+                    it.version += 1;
+                    it.clone()
+                };
+
+                if let Some(key) = idem_key {
+                    if snap.committed_idempotency_keys.len() >= 4_096 {
+                        snap.committed_idempotency_keys.clear();
+                    }
+                    snap.committed_idempotency_keys.insert((char_id, key.to_string()));
+                }
+
+                let (fin_opt, st_fuel) = crate::services::structure_acl_defense_rules::finalize_fuel_bay_move_in_snap(
+                    ctx, snap, updated.item_id, old_loc_id, InventoryFlag::from_u16(old_flag_id as u16), new_loc, flag, char_id, corp_id_for_owner,
+                );
+                if let Some(fin) = fin_opt {
+                    updated = fin;
+                }
+
+                if is_fitting_slot {
+                    snap.module_online_states.insert(effective_item_id, online);
+                } else if old_was_fitted {
+                    snap.module_online_states.remove(&effective_item_id);
+                    snap.module_active_states.remove(&effective_item_id);
+                    snap.module_active_charges.remove(&effective_item_id);
+                }
+
+                Ok(AddTxOutcome::Moved {
+                    updated,
+                    effective_item_id,
+                    old_loc_id,
+                    old_flag_id,
+                    old_owner_id,
+                    old_was_fitted,
+                    st_fuel,
+                    dst_corp_owner,
+                })
+            });
+
+            let did_split = split_qty_opt.map(|sq| (orig_item_id, sq));
+            match tx_res {
+                Ok(AddTxOutcome::Merged { merged_item, prev_qty, effective_item_id, moved_tid, moved_qty }) => {
+                    item_id = effective_item_id;
                     if looted_from_space {
                         let fid = session.fleet_id.or_else(|| crate::services::notify_emitters_seasons_tactical::char_fleet_id(ctx, char_id));
                         crate::services::notify_emitters_character_services::emit_fleet_loot_event_if_in_fleet(ctx, char_id, fid, &[(moved_tid, moved_qty)]);
@@ -1280,131 +1569,14 @@ pub async fn handle(
                     ctx.notify(crate::router::NotificationTarget::Character(char_id), "ProcessInventoryChange", "charid", vec![
                         PyRep::Integer(merged_item.item_id), PyRep::Integer(merged_item.location_id), PyRep::Integer(merged_item.flag as i64),
                     ]);
-                    return Some(Ok(PyRep::keyval([
+                    Some(Ok(PyRep::keyval([
                         ("itemID", PyRep::Integer(merged_item.item_id)), ("locationID", PyRep::Integer(merged_item.location_id)),
                         ("flagID", PyRep::Integer(merged_item.flag as i64)), ("quantity", PyRep::Integer(merged_item.quantity as i64)),
                         ("version", PyRep::Integer(merged_item.version as i64)), ("suspectFlagged", PyRep::Bool(looted_foreign_jetcan)),
-                    ])));
+                    ])))
                 }
-            }
-
-            let old_loc_id = source_item_opt.as_ref().map(|i| i.location_id).unwrap_or(0);
-            let old_flag_id = source_item_opt.as_ref().map(|i| i.flag as i64).unwrap_or(0);
-            let unfit_ship_id = source_item_opt
-                .as_ref()
-                .filter(|src| matches!(src.flag as u16, 11..=34 | 92..=94 | 125..=132))
-                .map(|src| src.location_id);
-            let old_fit_loads = if is_fitting_slot {
-                ctx.get_or_rebuild_ship_fitting(char_id, new_loc).ok().map(|f| {
-                    (
-                        f.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde),
-                        f.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde),
-                    )
-                })
-            } else if let Some(src_ship_id) = unfit_ship_id {
-                ctx.get_or_rebuild_ship_fitting(char_id, src_ship_id).ok().map(|f| {
-                    (
-                        f.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde),
-                        f.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde),
-                    )
-                })
-            } else {
-                None
-            };
-            let old_owner_id = source_item_opt.as_ref().map(|i| i.owner_id).unwrap_or_else(|| {
-                ctx.db.with_snapshot(|s| s.items.get(&item_id).map(|i| i.owner_id).unwrap_or(0))
-            });
-            let corp_id_for_owner = session.corporation_id.unwrap_or(0);
-            let struct_fuel_owner = (flag_u16 == 133 || flag_u16 == 172 || flag == InventoryFlag::StructureFuel).then(|| ctx.db.with_snapshot(|s| s.structures.get(&new_loc).map(|st| st.owner_corp_id))).flatten().unwrap_or(0);
-            let dst_corp_owner = if struct_fuel_owner > 0 { struct_fuel_owner } else if (116..=122).contains(&flag_u16) || flag_u16 == 180 || flag == InventoryFlag::StructureDeedBay { corp_id_for_owner } else { 0 };
-            let move_res: Result<eve_db::InventoryItemRecord, String> = ctx
-                .db
-                .move_item_transactional(char_id, item_id, new_loc, flag, expected_version, idem_key)
-                .map_err(|e| e.to_string())
-                .and_then(|mut rec| {
-                    if (dst_corp_owner > 0 && rec.owner_id != dst_corp_owner)
-                        || (is_fitting_slot && !rec.singleton)
-                    {
-                        ctx.db.with_mut_snapshot(|snap| {
-                            if let Some(it) = snap.items.get_mut(&item_id) {
-                                if dst_corp_owner > 0 {
-                                    it.owner_id = dst_corp_owner;
-                                }
-                                if is_fitting_slot {
-                                    it.singleton = true;
-                                }
-                            }
-                        });
-                        if dst_corp_owner > 0 {
-                            rec.owner_id = dst_corp_owner;
-                        }
-                        if is_fitting_slot {
-                            rec.singleton = true;
-                        }
-                    }
-                    Ok(rec)
-                })
-                .or_else(|msg| {
-                    if msg.contains("is not authorized") || msg.contains("is not owned by character") {
-                        ctx.db.try_with_mut_snapshot(|snap| {
-                            let dest_blocked = snap.items.get(&new_loc).is_some_and(|dest| {
-                                fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, dest).is_err()
-                            });
-                            if dest_blocked {
-                                return Err(format!("Destination {new_loc} is locked or impounded"));
-                            }
-                            let src_blocked = snap.items.get(&item_id).is_some_and(|it| {
-                                fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, it).is_err()
-                            });
-                            if src_blocked {
-                                return Err(format!("Item {item_id} is locked, impounded, or in asset safety"));
-                            }
-                            let it = snap.items.get_mut(&item_id).ok_or_else(|| format!("Item {item_id} not found"))?;
-                            it.location_id = new_loc;
-                            it.flag = flag;
-                            if is_fitting_slot {
-                                it.singleton = true;
-                            }
-                            if dst_corp_owner > 0 {
-                                it.owner_id = dst_corp_owner;
-                            } else if matches!(flag, InventoryFlag::Hangar | InventoryFlag::Cargo)
-                                || dest_is_ship_hold
-                                || (116..=122).contains(&old_flag_id)
-                                || old_flag_id == 133
-                            {
-                                it.owner_id = char_id;
-                            }
-                            it.version += 1;
-                            Ok(it.clone())
-                        })
-                    } else {
-                        Err(msg)
-                    }
-                });
-            match move_res {
-                Ok(mut updated) => {
-                    let updated_cat = ctx
-                        .sde
-                        .types
-                        .get(&updated.type_id)
-                        .map(|t| t.category_id)
-                        .unwrap_or(0);
-                    let st_fuel = ctx.db.with_mut_snapshot(|snap| {
-                        if is_fitting_slot && updated_cat != 8 && (!updated.singleton || updated.quantity != 1) {
-                            if let Some(it) = snap.items.get_mut(&updated.item_id) {
-                                it.singleton = true;
-                                it.quantity = 1;
-                                updated = it.clone();
-                            }
-                        }
-                        let (fin_opt, fb) = crate::services::structure_acl_defense_rules::finalize_fuel_bay_move_in_snap(
-                            ctx, snap, updated.item_id, old_loc_id, InventoryFlag::from_u16(old_flag_id as u16), new_loc, flag, char_id, corp_id_for_owner,
-                        );
-                        if let Some(fin) = fin_opt {
-                            updated = fin;
-                        }
-                        fb
-                    });
+                Ok(AddTxOutcome::Moved { updated, effective_item_id, old_loc_id, old_flag_id, old_owner_id, old_was_fitted, st_fuel, dst_corp_owner }) => {
+                    item_id = effective_item_id;
                     if updated.owner_id != old_owner_id {
                         crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &[updated.item_id]);
                     }
@@ -1510,7 +1682,6 @@ pub async fn handle(
                     );
 
                     if is_fitting_slot {
-                        ctx.db.with_mut_snapshot(|snap| { snap.module_online_states.insert(item_id, online); });
                         ctx.invalidate_ship_fitting(new_loc);
                         let new_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, new_loc).ok();
                         ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnModuleFitted", "charid", vec![PyRep::Integer(item_id), PyRep::Integer(flag as i64)]);
@@ -1522,14 +1693,9 @@ pub async fn handle(
                                 char_id, new_loc, old_cpu, new_cpu, old_pg, new_pg,
                             );
                         }
-                    } else if let Some(src_ship_id) = unfit_ship_id {
-                        ctx.db.with_mut_snapshot(|snap| {
-                            snap.module_online_states.remove(&item_id);
-                            snap.module_active_states.remove(&item_id);
-                            snap.module_active_charges.remove(&item_id);
-                        });
-                        ctx.invalidate_ship_fitting(src_ship_id);
-                        let new_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, src_ship_id).ok();
+                    } else if old_was_fitted {
+                        ctx.invalidate_ship_fitting(old_loc_id);
+                        let new_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, old_loc_id).ok();
                         let _ = ctx.notify_module_online_state(char_id, item_id, false);
                         let eff_id = ctx
                             .effect_id_for_module(updated.type_id, Some("online"))
@@ -1546,7 +1712,7 @@ pub async fn handle(
                             let new_cpu = new_fit.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde);
                             let new_pg = new_fit.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde);
                             let _ = ctx.notify_ship_fitting_load_changes(
-                                char_id, src_ship_id, old_cpu, new_cpu, old_pg, new_pg,
+                                char_id, old_loc_id, old_cpu, new_cpu, old_pg, new_pg,
                             );
                         }
                     } else {
@@ -1561,21 +1727,7 @@ pub async fn handle(
                         ("fuelBlocks", st_fuel.map(|f| PyRep::Integer(i64::from(f))).unwrap_or(PyRep::None)),
                     ])))
                 }
-                Err(e) => {
-                    if let Some((orig_id, sq)) = did_split {
-                        ctx.db.with_mut_snapshot(|snap| {
-                            snap.remove_system_cleanup_item(item_id);
-                            if let Some(orig) = snap.items.get_mut(&orig_id) {
-                                orig.quantity += sq;
-                                orig.version = orig.version.saturating_sub(1);
-                            }
-                        });
-                    }
-                    Some(Err(BridgeRpcError {
-                        code: "InventoryMoveFailed".into(),
-                        message: e.to_string(),
-                    }))
-                }
+                Err(e) => Some(Err(e)),
             }
         }
 

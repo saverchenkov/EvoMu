@@ -90,6 +90,18 @@ pub(crate) struct CynoPortalState {
     bridges: HashMap<(usize, i64), ActiveJumpBridge>,
 }
 
+pub(super) fn purge_expired(st: &mut CynoPortalState, ctx_id: usize, now_unix: u64) {
+    st.beacons
+        .retain(|&(ck, _), b| ck != ctx_id || b.expires_at_unix > now_unix);
+    st.destroyed_beacons
+        .retain(|&(ck, _), b| ck != ctx_id || b.expires_at_unix > now_unix);
+}
+
+pub(super) fn purge_expired_bridges(st: &mut CynoPortalState, ctx_id: usize, now_unix: u64) {
+    st.bridges
+        .retain(|&(ck, _), b| ck != ctx_id || b.expires_at_unix > now_unix);
+}
+
 pub fn is_covert_beacon_type(beacon_type_id: TypeId) -> bool {
     matches!(beacon_type_id, 28646 | 28650 | 59630 | 59631)
 }
@@ -580,7 +592,36 @@ async fn light_cyno(
         (raw_base * role_mult * cft_mult).max(min_floor).ceil() as i64
     };
     let duration_s = duration_ms / 1000.0;
-    sys.add_module_cycle(self_immobilizing_cycle(
+    let now_reserve = ctx.now_unix_secs();
+    {
+        let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
+        purge_expired(&mut st, ctx_key(ctx), now_reserve);
+        if st.beacons.contains_key(&(ctx_key(ctx), ship_id)) {
+            return Err(err(
+                "CannotLightCynoInSystem",
+                "A cynosural field is already active on this ship",
+            ));
+        }
+        st.beacons.insert(
+            (ctx_key(ctx), ship_id),
+            FleetModuleBeacon {
+                beacon_id: -ship_id,
+                char_id,
+                ship_id,
+                beacon_type_id,
+                solar_system_id: sys_id,
+                position: ship_pos.unwrap_or(DVec3::ZERO),
+                expires_at_unix: now_reserve + duration_s.round() as u64 + 60,
+            },
+        );
+    }
+    let clear_cyno_claim = || {
+        let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
+        if st.beacons.get(&(ctx_key(ctx), ship_id)).is_some_and(|b| b.beacon_id == -ship_id) {
+            st.beacons.remove(&(ctx_key(ctx), ship_id));
+        }
+    };
+    if let Err(e) = sys.add_module_cycle(self_immobilizing_cycle(
         ship_id,
         module_id,
         mod_type.type_id,
@@ -588,11 +629,15 @@ async fn light_cyno(
         duration_s,
     ))
     .await
-    .map_err(|e| err("ModuleActivationFailed", e))?;
+    {
+        clear_cyno_claim();
+        return Err(err("ModuleActivationFailed", e));
+    }
     if fuel_qty > 0 {
         if let Err(e) = consume_or_err(ctx, ship_id, fuel_type, fuel_qty, |have| {
             format!("Requires {fuel_qty} x type {fuel_type}, ship holds {have}")
         }) {
+            clear_cyno_claim();
             let _ = sys.remove_module_cycle(ship_id, module_id).await;
             return Err(e);
         }
@@ -785,16 +830,24 @@ pub async fn relocate_ship(
     let fat_secs = ((fat_min * 60.0).round() as u64).max(cd_secs + 1);
     let from = ctx.systems.get_or_spawn(from_sys);
     let prev_cs = from.get_combat_state(ship_id).await.ok().flatten();
-    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, from_sys);
-    crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
-    crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
-    let old = from.remove_ball(ship_id).await;
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.jump_fatigue_minutes = fat_min;
-            ch.jump_cooldown_until_unix = now + cd_secs;
-            ch.jump_fatigue_until_unix = now + fat_secs;
+    ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+        let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
+            code: "CharacterNotFound".into(),
+            message: format!("Character {char_id} not found"),
+        })?;
+        if ch.station_id.is_some()
+            || ch.structure_id.is_some()
+            || ch.solar_system_id != from_sys
+            || ch.active_ship_id != ship_id
+        {
+            return Err(BridgeRpcError {
+                code: "SystemTransitionFailed".into(),
+                message: format!("Character {char_id} is no longer undocked in solar system {from_sys}"),
+            });
         }
+        ch.jump_fatigue_minutes = fat_min;
+        ch.jump_cooldown_until_unix = now + cd_secs;
+        ch.jump_fatigue_until_unix = now + fat_secs;
         let _ = crate::router::apply_character_transition_in_snap(
             snap,
             &ctx.sde,
@@ -805,7 +858,12 @@ pub async fn relocate_ship(
             false,
         );
         snap.character_last_jump_unix.insert(char_id, now);
-    });
+        Ok(())
+    })?;
+    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, from_sys);
+    crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
+    crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
+    let old = from.remove_ball(ship_id).await;
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
         "OnJumpTimersUpdated",

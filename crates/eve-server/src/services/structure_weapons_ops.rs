@@ -785,8 +785,20 @@ pub async fn handle_structure_module_activate(
 
     let (seed_cap, _) = read_unified_structure_capacitor(ctx, &sys_handle, structure_id, st.type_id, now_unix).await;
 
-    // Atomically check capacitor, per-module cycle cooldown, and consume 1 charge if required.
+    // Atomically check structure state, module fit/online, capacitor, per-module cycle cooldown, and consume 1 charge if required.
     let (charge_tid_opt, new_cap_val) = ctx.db.try_with_mut_snapshot(|snap| {
+        let Some(live_st) = snap.structures.get(&structure_id) else {
+            return Err(err("StructureNotFound", format!("Structure {structure_id} not found")));
+        };
+        if live_st.state == "Destroyed" {
+            return Err(err("StructureDestroyed", format!("Structure {structure_id} is destroyed")));
+        }
+        let Some(live_mod) = snap.items.get(&module_id) else {
+            return Err(err("ModuleNotFound", format!("Module {module_id} no longer exists")));
+        };
+        if live_mod.location_id != structure_id || snap.module_online_states.get(&module_id) != Some(&true) {
+            return Err(err("ModuleOffline", format!("Module {module_id} is no longer fitted and online on structure {structure_id}")));
+        }
         let mut ext = load_ext_state(snap);
         if ext
             .standup_module_cycle_until_unix

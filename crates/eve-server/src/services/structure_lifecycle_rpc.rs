@@ -206,6 +206,9 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
     };
     let now = ctx.now_unix();
     let (structure_id, owner_corp_id) = ctx.db.try_with_mut_snapshot(|snap| {
+        if type_id == 40340 && snap.structures.values().any(|s| s.type_id == 40340 && s.state != "Destroyed") {
+            return Err(err("PalatineKeepstarLimitReached", "Only one Upwell Palatine Keepstar (type 40340) can exist in the universe"));
+        }
         let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
         if corp_id < 98_000_000 || !snap.corporations.contains_key(&corp_id) {
             return Err(err("NpcCorpCannotAnchorStructure", format!("Character {char_id} is in NPC corporation {corp_id}; only player corporations may anchor Upwell structures")));

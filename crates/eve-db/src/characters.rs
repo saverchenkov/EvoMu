@@ -405,6 +405,71 @@ impl WorldRepository {
         })
     }
 
+    /// Docks a character in a station or Upwell structure only if the character is currently
+    /// undocked in `expected_solar_system_id` (`[Arch-13]` TOCTOU guard against concurrent dock/jump).
+    pub fn dock_character_if_in_space(
+        &self,
+        character_id: i64,
+        expected_solar_system_id: SolarSystemId,
+        dock_location_id: i64,
+        is_structure: bool,
+    ) -> Result<CharacterRecord, DbError> {
+        self.try_with_mut_snapshot(|guard| {
+            let (active_ship_id, ch_solar_system_id) = {
+                let ch = guard
+                    .characters
+                    .get(&character_id)
+                    .ok_or(DbError::CharacterNotFound(character_id))?;
+                if ch.station_id.is_some() || ch.structure_id.is_some() {
+                    return Err(DbError::ValidationError(format!(
+                        "Character {character_id} is already docked"
+                    )));
+                }
+                if ch.solar_system_id != expected_solar_system_id {
+                    return Err(DbError::ValidationError(format!(
+                        "Character {character_id} moved to solar system {} concurrently",
+                        ch.solar_system_id
+                    )));
+                }
+                (ch.active_ship_id, ch.solar_system_id)
+            };
+            if is_structure {
+                let st = guard.structures.get(&dock_location_id).ok_or(
+                    DbError::InvalidDestinationLocation {
+                        character_id,
+                        location_id: dock_location_id,
+                    },
+                )?;
+                if st.solar_system_id != ch_solar_system_id || st.state == "Destroyed" {
+                    return Err(DbError::InvalidDestinationLocation {
+                        character_id,
+                        location_id: dock_location_id,
+                    });
+                }
+            }
+            {
+                let ch = guard.characters.get_mut(&character_id).unwrap();
+                if is_structure {
+                    ch.structure_id = Some(dock_location_id);
+                    ch.station_id = None;
+                } else {
+                    ch.station_id = Some(dock_location_id);
+                    ch.structure_id = None;
+                }
+                ch.version += 1;
+                ch.system_epoch += 1;
+            }
+            if let Some(ship) = guard.items.get_mut(&active_ship_id) {
+                if ship.location_id == ch_solar_system_id as i64 {
+                    ship.location_id = dock_location_id;
+                    ship.flag = InventoryFlag::Hangar;
+                    ship.version += 1;
+                }
+            }
+            Ok(guard.characters[&character_id].clone())
+        })
+    }
+
     /// Transactionally destroys `destroyed_ship_id` (and all fitted/contained items inside it),
     /// reuses or spawns a Capsule (`type_id = 670`) at `character.home_station_id`, and updates the
     /// character's active ship, docked station, and solar system/constellation/region from `sde`.
@@ -638,6 +703,67 @@ impl WorldRepository {
             };
             if let Some(ship) = guard.items.get_mut(&ship_id) {
                 ship.location_id = new_solar_system_id as i64;
+                ship.version += 1;
+            }
+            Ok(guard.characters[&character_id].clone())
+        })
+    }
+
+    /// Transitions a character to `new_solar_system_id` only if the character is currently undocked
+    /// in `expected_solar_system_id` (`[Arch-13]` TOCTOU guard against concurrent system jumps/docking).
+    pub fn transition_character_solar_system_if_at(
+        &self,
+        character_id: i64,
+        expected_solar_system_id: SolarSystemId,
+        new_solar_system_id: SolarSystemId,
+        sde: &SdeRegistry,
+    ) -> Result<CharacterRecord, DbError> {
+        self.try_with_mut_snapshot(|guard| {
+            let ship_id = {
+                let ch = guard
+                    .characters
+                    .get_mut(&character_id)
+                    .ok_or(DbError::CharacterNotFound(character_id))?;
+                if ch.station_id.is_some() || ch.structure_id.is_some() {
+                    return Err(DbError::ValidationError(format!(
+                        "Character {character_id} is docked and cannot transition in space"
+                    )));
+                }
+                if ch.solar_system_id != expected_solar_system_id {
+                    return Err(DbError::ValidationError(format!(
+                        "Character {character_id} moved to solar system {} concurrently",
+                        ch.solar_system_id
+                    )));
+                }
+                let (const_id, reg_id) = sde
+                    .solar_systems
+                    .get(&new_solar_system_id)
+                    .map(|s| (s.constellation_id, s.region_id))
+                    .unwrap_or_else(|| {
+                        let c = if ch.constellation_id != 0 {
+                            ch.constellation_id
+                        } else {
+                            20_000_020
+                        };
+                        let r = if ch.region_id != 0 {
+                            ch.region_id
+                        } else {
+                            10_000_002
+                        };
+                        (c, r)
+                    });
+                ch.solar_system_id = new_solar_system_id;
+                ch.constellation_id = const_id;
+                ch.region_id = reg_id;
+                ch.station_id = None;
+                ch.structure_id = None;
+                ch.version += 1;
+                ch.system_epoch += 1;
+                ch.active_ship_id
+            };
+            if let Some(ship) = guard.items.get_mut(&ship_id) {
+                ship.location_id = new_solar_system_id as i64;
+                ship.flag = InventoryFlag::None;
                 ship.version += 1;
             }
             Ok(guard.characters[&character_id].clone())

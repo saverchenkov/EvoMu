@@ -595,3 +595,84 @@ async fn set_activity_state_updates_probe_state_and_rejects_invalid_state() {
     .unwrap_err();
     assert_eq!(err.code, "InvalidProbeState");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn toctou_concurrent_activate_scan_probe_launcher_caps_at_8_probes() {
+    let (ctx, sess) = make_scan_ctx_and_session();
+    let char_id = 90_000_001;
+    let ship_id = 100_000_001;
+    let sys_id = 30_000_142;
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let launcher_id = 710_801;
+    let charge_id = 710_802;
+
+    sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            launcher_id,
+            InventoryItemRecord {
+                item_id: launcher_id,
+                type_id: 17_938,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            charge_id,
+            InventoryItemRecord {
+                item_id: charge_id,
+                type_id: 30_013, // Core Scanner Probe I
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 16,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut kw = HashMap::new();
+    kw.insert("probeCount".into(), PyRep::Integer(8));
+    let (r1, r2) = tokio::join!(
+        activate_scan_probe_launcher(
+            &ctx, &sess, &sys_handle, char_id, ship_id, sys_id,
+            launcher_id, 17_938, InventoryFlag::HiSlot0 as u16, "useMissiles", None, &kw,
+        ),
+        activate_scan_probe_launcher(
+            &ctx, &sess, &sys_handle, char_id, ship_id, sys_id,
+            launcher_id, 17_938, InventoryFlag::HiSlot0 as u16, "useMissiles", None, &kw,
+        ),
+    );
+    assert!(r1.is_ok() ^ r2.is_ok(), "expected exactly 1 launch of 8 probes, got r1={r1:?} r2={r2:?}");
+    let active_count = ctx
+        .active_scanner_probes
+        .read()
+        .unwrap()
+        .values()
+        .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id)
+        .count();
+    assert_eq!(active_count, 8);
+    let rem_qty = ctx.db.with_snapshot(|s| s.items.get(&charge_id).map(|i| i.quantity));
+    assert_eq!(rem_qty, Some(8), "probes in launcher must only be consumed once");
+}

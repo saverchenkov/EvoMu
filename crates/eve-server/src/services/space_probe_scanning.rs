@@ -162,44 +162,107 @@ pub async fn activate_scan_probe_launcher(
         });
     }
 
-    let existing_active_count = ctx
-        .active_scanner_probes
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .values()
-        .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
-        .count();
-    if existing_active_count >= 8 {
-        return Err(BridgeRpcError {
-            code: "MaxProbesLaunched".into(),
-            message: "Maximum of 8 active scanner probes already in space".into(),
-        });
-    }
+    let ship_pos = sys.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position).unwrap_or(DVec3::ZERO);
 
-    let max_can_launch = (8 - existing_active_count) as i32;
+    static NEXT_PROBE_RES_ID: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-100_000);
     let requested_count = kwargs.get("probeCount").and_then(|v| v.as_i64()).unwrap_or(loaded_qty as i64) as i32;
-    let to_launch = requested_count.clamp(1, max_can_launch).min(loaded_qty);
+    let reservation_ids: Vec<i64> = {
+        let mut probes = ctx.active_scanner_probes.write().unwrap_or_else(|e| e.into_inner());
+        let existing_active_count = probes
+            .values()
+            .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
+            .count();
+        if existing_active_count >= 8 {
+            return Err(BridgeRpcError {
+                code: "MaxProbesLaunched".into(),
+                message: "Maximum of 8 active scanner probes already in space".into(),
+            });
+        }
+        let max_can_launch = (8 - existing_active_count) as i32;
+        let to_reserve = requested_count.clamp(1, max_can_launch).min(loaded_qty);
+        let mut res_ids = Vec::with_capacity(to_reserve as usize);
+        for _ in 0..to_reserve {
+            let rid = NEXT_PROBE_RES_ID.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            probes.insert(
+                rid,
+                crate::router::ActiveScannerProbe {
+                    probe_id: rid,
+                    probe_type_id,
+                    owner_char_id: char_id,
+                    ship_id,
+                    launcher_module_id: module_id,
+                    solar_system_id: sys_id,
+                    position: [0.0; 3],
+                    destination: [0.0; 3],
+                    range_step: 4,
+                    scan_range_m: 0.0,
+                    base_sensor_strength: 0.0,
+                    max_flight_time_s: 0.0,
+                    launched_at_unix: 0,
+                    state: PROBE_STATE_IDLE,
+                    warp_end_ft: None,
+                },
+            );
+            res_ids.push(rid);
+        }
+        res_ids
+    };
 
-    let (allocated_probe_ids, remaining_in_launcher) = ctx.db.with_mut_snapshot(|snap| {
-        let rem = if let Some(owner) = snap.items.get(&charge_item_id).map(|ci| ci.owner_id) {
-            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), owner);
-            opts.reject_fitted = false;
-            opts.active_ship_id = Some(ship_id);
-            match snap.consume_exact_item_quantity(charge_item_id, to_launch, opts) {
-                Ok(Some(it)) => it.quantity,
-                Ok(None) => 0,
-                Err(_) => loaded_qty,
+    let db_res = ctx.db.try_with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get(&char_id) {
+            if ch.station_id.is_some() || ch.structure_id.is_some() || ch.solar_system_id != sys_id || ch.active_ship_id != ship_id {
+                return Err(BridgeRpcError {
+                    code: "ShipNotInSpace".into(),
+                    message: format!("Active ship {ship_id} is not in space in solar system {sys_id}"),
+                });
             }
-        } else {
-            0
+        }
+        let ci = snap
+            .items
+            .get(&charge_item_id)
+            .filter(|ci| ci.location_id == ship_id && (ci.flag as u16) == module_flag_id && ci.quantity > 0)
+            .cloned()
+            .ok_or_else(|| BridgeRpcError {
+                code: "NoProbesLoaded".into(),
+                message: "Scan probe launcher has no scanner probes loaded".into(),
+            })?;
+        let actual_launch = (reservation_ids.len() as i32).min(ci.quantity);
+        if actual_launch <= 0 {
+            return Err(BridgeRpcError {
+                code: "NoProbesLoaded".into(),
+                message: "Scan probe launcher has no scanner probes loaded".into(),
+            });
+        }
+        let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), ci.owner_id);
+        opts.reject_fitted = false;
+        opts.active_ship_id = Some(ship_id);
+        let rem = match snap.consume_exact_item_quantity(charge_item_id, actual_launch, opts) {
+            Ok(Some(it)) => it.quantity,
+            Ok(None) => 0,
+            Err(e) => {
+                return Err(BridgeRpcError {
+                    code: "ItemLocked".into(),
+                    message: e.to_string(),
+                });
+            }
         };
-        let mut ids = Vec::with_capacity(to_launch as usize);
-        for _ in 0..to_launch {
+        let mut ids = Vec::with_capacity(actual_launch as usize);
+        for _ in 0..actual_launch {
             snap.next_entity_id += 1;
             ids.push(snap.next_entity_id);
         }
-        (ids, rem)
+        Ok((ids, rem, actual_launch))
     });
+    let (allocated_probe_ids, remaining_in_launcher, to_launch) = match db_res {
+        Ok(v) => v,
+        Err(e) => {
+            let mut probes = ctx.active_scanner_probes.write().unwrap_or_else(|e| e.into_inner());
+            for rid in &reservation_ids {
+                probes.remove(rid);
+            }
+            return Err(e);
+        }
+    };
     ctx.invalidate_ship_fitting(ship_id);
 
     let probe_sde = ctx.sde.types.get(&probe_type_id);
@@ -212,7 +275,6 @@ pub async fn activate_scan_probe_launcher(
     let range_step = kwargs.get("rangeStep").and_then(|v| v.as_i64()).unwrap_or(4).clamp(1, 8) as i32;
     let scan_range_m = base_scan_range_au * (2.0_f64.powi(range_step - 1)) * AU_IN_METERS;
 
-    let ship_pos = sys.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position).unwrap_or(DVec3::ZERO);
     let formation_offsets: [[f64; 3]; 8] = [
         [1_000.0, 0.0, 0.0],
         [-1_000.0, 0.0, 0.0],
@@ -225,10 +287,40 @@ pub async fn activate_scan_probe_launcher(
     ];
 
     let mut spawned_probe_positions: Vec<(i64, DVec3)> = Vec::with_capacity(allocated_probe_ids.len());
-    for (idx, &probe_id) in allocated_probe_ids.iter().enumerate() {
-        let off = formation_offsets[idx % formation_offsets.len()];
-        let pos = DVec3::new(ship_pos.x + off[0], ship_pos.y + off[1], ship_pos.z + off[2]);
-        spawned_probe_positions.push((probe_id, pos));
+    {
+        let mut probes = ctx.active_scanner_probes.write().unwrap_or_else(|e| e.into_inner());
+        for rid in &reservation_ids {
+            probes.remove(rid);
+        }
+        for (idx, &probe_id) in allocated_probe_ids.iter().enumerate() {
+            let off = formation_offsets[idx % formation_offsets.len()];
+            let pos = DVec3::new(ship_pos.x + off[0], ship_pos.y + off[1], ship_pos.z + off[2]);
+            spawned_probe_positions.push((probe_id, pos));
+            probes.insert(
+                probe_id,
+                crate::router::ActiveScannerProbe {
+                    probe_id,
+                    probe_type_id,
+                    owner_char_id: char_id,
+                    ship_id,
+                    launcher_module_id: module_id,
+                    solar_system_id: sys_id,
+                    position: pos.to_array(),
+                    destination: pos.to_array(),
+                    range_step,
+                    scan_range_m,
+                    base_sensor_strength,
+                    max_flight_time_s,
+                    launched_at_unix: now_unix,
+                    state: PROBE_STATE_IDLE,
+                    warp_end_ft: None,
+                },
+            );
+        }
+    }
+    sync_scanner_probes_to_db(ctx);
+
+    for &(probe_id, pos) in &spawned_probe_positions {
         let ball = Ball {
             id: probe_id,
             type_id: probe_type_id,
@@ -257,30 +349,6 @@ pub async fn activate_scan_probe_launcher(
                 },
             )
             .await;
-        ctx.active_scanner_probes
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(
-                probe_id,
-                crate::router::ActiveScannerProbe {
-                    probe_id,
-                    probe_type_id,
-                    owner_char_id: char_id,
-                    ship_id,
-                    launcher_module_id: module_id,
-                    solar_system_id: sys_id,
-                    position: pos.to_array(),
-                    destination: pos.to_array(),
-                    range_step,
-                    scan_range_m,
-                    base_sensor_strength,
-                    max_flight_time_s,
-                    launched_at_unix: now_unix,
-                    state: PROBE_STATE_IDLE,
-                    warp_end_ft: None,
-                },
-            );
-        sync_scanner_probes_to_db(ctx);
     }
 
     let _ = ctx.notify_module_effect_started(char_id, ship_id, module_id, module_type_id, Some(effect_name), target_id_opt);

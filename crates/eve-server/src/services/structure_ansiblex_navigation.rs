@@ -280,7 +280,7 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
     let _dest_sys_info = ctx.sde.solar_systems.get(&dest_sys_id).ok_or_else(|| err("InvalidDestination", format!("Destination system {dest_sys_id} not in SDE")))?;
     let dist_ly = crate::services::space_destiny::space_nav_travel::distance_ly(ctx, sys_id, dest_sys_id).max(0.01);
     let ozone_cost = ((ship_ball.mass * dist_ly * 0.000003 + 50.0).round() as i64).max(50);
-    ctx.db.try_with_mut_snapshot(|snap| {
+    let committed_ch = ctx.db.try_with_mut_snapshot(|snap| {
         let mut stack_ids: Vec<i64> = snap
             .items
             .values()
@@ -300,8 +300,20 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
         if total_ozone < ozone_cost {
             return Err(err("InsufficientLiquidOzone", format!("Ansiblex gate requires at least {ozone_cost} units of Liquid Ozone in StructureFuel bay")));
         }
-        if !snap.characters.contains_key(&char_id) {
-            return Err(err("SystemTransitionFailed", format!("Character {char_id} not found")));
+        {
+            let ch = snap.characters.get(&char_id).ok_or_else(|| {
+                err("SystemTransitionFailed", format!("Character {char_id} not found"))
+            })?;
+            if ch.station_id.is_some()
+                || ch.structure_id.is_some()
+                || ch.solar_system_id != sys_id
+                || ch.active_ship_id != ship_id
+            {
+                return Err(err(
+                    "SystemTransitionFailed",
+                    format!("Character {char_id} is no longer undocked in system {sys_id}"),
+                ));
+            }
         }
         stack_ids.sort_unstable();
         let mut remaining = ozone_cost;
@@ -326,15 +338,7 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
         if remaining > 0 {
             return Err(err("InsufficientLiquidOzone", format!("Ansiblex gate requires at least {ozone_cost} units of Liquid Ozone in StructureFuel bay")));
         }
-        Ok(())
-    })?;
-    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, sys_id);
-    crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
-    crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
-    let prev_combat_state = old_handle.get_combat_state(ship_id).await.ok().flatten();
-    let existing_ball = old_handle.remove_ball(ship_id).await;
-    let updated_ch = ctx.db.with_mut_snapshot(|snap| {
-        crate::router::apply_character_transition_in_snap(
+        let updated_ch = crate::router::apply_character_transition_in_snap(
             snap,
             &ctx.sde,
             char_id,
@@ -343,8 +347,15 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
             true,
             false,
         )
-        .expect("character must exist for ansiblex jump")
-    });
+        .map_err(|e| err("SystemTransitionFailed", e.to_string()))?;
+        Ok(updated_ch)
+    })?;
+    let updated_ch = committed_ch;
+    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, sys_id);
+    crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
+    crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
+    let prev_combat_state = old_handle.get_combat_state(ship_id).await.ok().flatten();
+    let existing_ball = old_handle.remove_ball(ship_id).await;
     ctx.sync_character_local_chat(char_id, Some(sys_id), dest_sys_id);
     let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
     let mut new_ball = existing_ball.unwrap_or(ship_ball);
