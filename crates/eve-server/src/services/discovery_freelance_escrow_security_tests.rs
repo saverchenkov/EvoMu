@@ -45,6 +45,7 @@ fn uuid_req(uuid: &[u8]) -> DynamicQuasarMessage {
 #[test]
 fn r7_td_04_project_discovery_empty_polygons_and_same_second_rate_limit_blocked() {
     let ctx = test_ctx();
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
     let char_id = 90_000_001_i64;
     let mut sess = auth_session(1, char_id, 98_000_001, 30_000_142);
 
