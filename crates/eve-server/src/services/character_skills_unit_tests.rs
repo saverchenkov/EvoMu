@@ -291,34 +291,92 @@ fn skill_queue_save_inject_and_query_handlers_enforce_all_constraints() {
         .unwrap();
     assert!(rowset_len(&hist) > 0);
 
+    // Seed char has >5M SP, so Large injector yields 400k and Small yields 80k; <5M SP yields 500k and 100k.
     assert_eq!(
         handle(
             &ctx,
             &mut sess,
             "skillMgr2",
             "GetDiminishedSpFromInjectors",
-            &[],
+            &[PyRep::Integer(40520), PyRep::Integer(1), PyRep::Integer(0)],
+            &kw
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Integer(400_000)
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "skillMgr2",
+            "GetDiminishedSpFromInjectors",
+            &[PyRep::Integer(45635), PyRep::Integer(1), PyRep::Integer(0)],
+            &kw
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Integer(80_000)
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.skill_points = 1_000_000.0;
+        ch.free_skill_points = 0.0;
+    });
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "skillMgr2",
+            "GetDiminishedSpFromInjectors",
+            &[PyRep::Integer(40520), PyRep::Integer(1), PyRep::Integer(0)],
             &kw
         )
         .unwrap()
         .unwrap(),
         PyRep::Integer(500_000)
     );
-    assert!(
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "skillMgr2",
+            "GetDiminishedSpFromInjectors",
+            &[PyRep::Integer(45635), PyRep::Integer(1), PyRep::Integer(0)],
+            &kw
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Integer(100_000)
+    );
+    let sp_of_trained = handle(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "GetSkillPoints",
+        &[PyRep::Integer(new_skill_tid as i64)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap()
+    .as_f64()
+    .unwrap();
+    assert!(sp_of_trained >= 0.0);
+    // Untrained skill must return 0.0 SP and level 0 (not fake 50_000.0 or level 1).
+    assert_eq!(
         handle(
             &ctx,
             &mut sess,
             "skillMgr2",
             "GetSkillPoints",
-            &[PyRep::Integer(new_skill_tid as i64)],
+            &[PyRep::Integer(999_888)],
             &kw,
         )
         .unwrap()
-        .unwrap()
-        .as_f64()
-        .is_some()
+        .unwrap(),
+        PyRep::Real(0.0)
     );
-    assert!(
+    assert_eq!(
         handle(
             &ctx,
             &mut sess,
@@ -328,17 +386,39 @@ fn skill_queue_save_inject_and_query_handlers_enforce_all_constraints() {
             &kw,
         )
         .unwrap()
-        .unwrap()
-        .as_i64()
-        .is_some()
+        .unwrap(),
+        PyRep::Integer(0)
     );
-    assert!(
-        matches!(
-            handle(&ctx, &mut sess, "skillMgr2", "GetSkillBundleInfo", &[], &kw)
-                .unwrap()
-                .unwrap(),
-            PyRep::Tuple(_)
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "skillMgr2",
+            "GetSkillLevel",
+            &[PyRep::Integer(999_888)],
+            &kw,
         )
+        .unwrap()
+        .unwrap(),
+        PyRep::Integer(0)
+    );
+    let bundle_info = handle(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "GetSkillBundleInfo",
+        &[PyRep::Integer(39)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(matches!(bundle_info, PyRep::Tuple(ref els) if els.len() == 2 && els[0].as_str().is_some()));
+    assert_eq!(
+        handle(&ctx, &mut sess, "skillMgr2", "GetSkillBundleInfo", &[PyRep::Integer(999_999)], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "InvalidSkillBundle"
     );
 }
 

@@ -199,19 +199,167 @@ fn apply_free_sp_inject_stack_and_auxiliary_skill_rpcs_cover_all_branches() {
     assert_eq!(inj_ok.dict_get("injected"), Some(&PyRep::Bool(true)));
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&stack_book_id].quantity), 2);
 
-    for m in [
-        "ApplyFreeSkillPointsToQueue",
-        "ApplyFreeSkillPointsToSkills",
-        "CharStartTrainingSkill",
-        "CheckInjectionConstraints",
-        "CombineSkillInjector",
-        "SplitSkillInjector",
-    ] {
-        assert_eq!(call_skills(&ctx, &mut sess, "skillMgr2", m, &[]).unwrap().unwrap(), PyRep::None);
-    }
-    for m in ["GetFreeSkillPointsAppliedToQueue", "GetFreeSkillPointsAppliedToSkills"] {
-        assert!(matches!(call_skills(&ctx, &mut sess, "skillMgr2", m, &[]).unwrap().unwrap(), PyRep::Dict(_)));
-    }
+    // Free SP preview & application for skills
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().free_skill_points = 5_000.0;
+    });
+    let req_arg = PyRep::Dict(vec![(PyRep::Integer(sk_stack as i64), PyRep::Integer(2))]);
+    let preview_skills = call_skills(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "GetFreeSkillPointsAppliedToSkills",
+        &[req_arg.clone()],
+    )
+    .unwrap()
+    .unwrap();
+    let PyRep::Dict(prev_entries) = preview_skills else {
+        panic!("expected dict from GetFreeSkillPointsAppliedToSkills");
+    };
+    assert_eq!(prev_entries.len(), 1);
+    assert_eq!(
+        prev_entries[0].1.as_i64(),
+        Some(sp_for_skill_level(1.0, 2).round() as i64)
+    );
+    assert_eq!(
+        call_skills(
+            &ctx,
+            &mut sess,
+            "skillMgr2",
+            "ApplyFreeSkillPointsToSkills",
+            &[req_arg],
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::None
+    );
+    assert_eq!(
+        call_skills(
+            &ctx,
+            &mut sess,
+            "skillMgr2",
+            "GetSkillLevel",
+            &[PyRep::Integer(sk_stack as i64)],
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Integer(2)
+    );
+    assert_eq!(
+        call_skills(
+            &ctx,
+            &mut sess,
+            "skillMgr2",
+            "ApplyFreeSkillPointsToSkills",
+            &[PyRep::Dict(vec![(PyRep::Integer(999_777), PyRep::Integer(1))])],
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CannotApplyFreePointsDoNotHaveSkill"
+    );
+
+    // CharStartTrainingSkill starts training an injected skill at the queue head & GetFreeSkillPointsAppliedToQueue / ApplyFreeSkillPointsToQueue apply free SP to it
+    assert_eq!(
+        call_skills(
+            &ctx,
+            &mut sess,
+            "skillMgr2",
+            "CharStartTrainingSkill",
+            &[PyRep::Integer(sk_stack as i64)],
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::None
+    );
+    let q_preview = call_skills(&ctx, &mut sess, "skillMgr2", "GetFreeSkillPointsAppliedToQueue", &[])
+        .unwrap()
+        .unwrap();
+    assert!(matches!(q_preview, PyRep::Dict(ref d) if !d.is_empty()));
+    assert_eq!(
+        call_skills(&ctx, &mut sess, "skillMgr2", "ApplyFreeSkillPointsToQueue", &[])
+            .unwrap()
+            .unwrap(),
+        PyRep::None
+    );
+
+    // CheckInjectionConstraints, SplitSkillInjector, CombineSkillInjector
+    let large_inj_id = 941_950_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            large_inj_id,
+            eve_db::InventoryItemRecord {
+                item_id: large_inj_id,
+                type_id: 40520,
+                owner_id: char_id,
+                location_id: st_id,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    assert_eq!(
+        call_skills(
+            &ctx,
+            &mut sess,
+            "skillMgr2",
+            "CheckInjectionConstraints",
+            &[PyRep::Integer(large_inj_id), PyRep::Integer(1)],
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::None
+    );
+    assert_eq!(
+        call_skills(
+            &ctx,
+            &mut sess,
+            "skillMgr2",
+            "SplitSkillInjector",
+            &[PyRep::Integer(large_inj_id), PyRep::Integer(1)],
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::None
+    );
+    let small_id = ctx.db.with_snapshot(|s| {
+        s.items
+            .values()
+            .find(|it| it.owner_id == char_id && it.type_id == 45635 && it.quantity == 5)
+            .map(|it| it.item_id)
+            .expect("5 Small Skill Injectors created by SplitSkillInjector")
+    });
+    assert_eq!(
+        call_skills(
+            &ctx,
+            &mut sess,
+            "skillMgr2",
+            "CombineSkillInjector",
+            &[PyRep::Integer(small_id), PyRep::Integer(4)],
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CombineSkillInjectorTooFewInjectors"
+    );
+    assert_eq!(
+        call_skills(
+            &ctx,
+            &mut sess,
+            "skillMgr2",
+            "CombineSkillInjector",
+            &[PyRep::Integer(small_id), PyRep::Integer(5)],
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::None
+    );
+    assert!(ctx.db.with_snapshot(|s| {
+        s.items.values().any(|it| it.owner_id == char_id && it.type_id == 40520 && it.quantity == 1)
+    }));
+
     assert!(call_skills(&ctx, &mut sess, "skillMgr2", "GetEstimatedSkillPoints", &[]).unwrap().unwrap().as_f64().is_some());
     for m in ["GetRespecInfo", "GetImplants", "GetBoosters", "GetSkillChangesForISIS", "AbortTraining"] {
         assert!(call_skills(&ctx, &mut sess, "skillMgr2", m, &[]).unwrap().is_ok());

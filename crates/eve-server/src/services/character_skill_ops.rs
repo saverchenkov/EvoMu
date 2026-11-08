@@ -115,7 +115,9 @@ pub fn handle(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         // parity: feat:skills.direct-purchase-inject
-        ("skillMgr2", "PurchaseSkills") => Some(purchase_skills_direct(ctx, session, args, kwargs)),
+        ("skillMgr2", "PurchaseSkills") => {
+            Some(handle_purchase_skills_direct(ctx, session, args, kwargs))
+        }
 
         // parity: feat:skills.omega-weekly-free-sp
         ("storeManager", "can_purchase_offer") | ("storeManager", "buy_offer") => {
@@ -138,17 +140,28 @@ pub fn handle(
             }
         }
 
-        ("skillMgr2", "AbortTraining") => Some(abort_training(ctx, session)),
-        ("skillMgr2", "GetRespecInfo") => Some(get_respec_info(ctx, session)),
-        ("skillMgr2", "GetSkillChangesForISIS") => Some(get_skill_changes_for_isis(session)),
+        ("skillMgr2", "AbortTraining") => Some(handle_abort_training(ctx, session)),
+        ("skillMgr2", "GetRespecInfo") => Some(handle_get_respec_info(ctx, session)),
+        ("skillMgr2", "GetSkillChangesForISIS") => {
+            Some(handle_get_skill_changes_for_isis(ctx, session))
+        }
 
         // parity: feat:fitting.strip-fitting
         ("dogmaIM", "StripFitting") | ("ship", "StripFitting") | ("invbroker", "StripFitting") => {
-            Some(strip_ship_fitting(ctx, session, args, kwargs))
+            Some(handle_strip_ship_fitting(ctx, session, args, kwargs))
         }
 
         _ => None,
     }
+}
+
+fn handle_purchase_skills_direct(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    purchase_skills_direct(ctx, session, args, kwargs)
 }
 
 pub fn purchase_skills_direct_for_char(
@@ -407,6 +420,13 @@ pub(crate) fn handle_omega_weekly_free_sp_offer(
     ]))
 }
 
+pub fn handle_abort_training(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    abort_training(ctx, session)
+}
+
 pub fn abort_training(
     ctx: &ServerContext,
     session: &SessionState,
@@ -431,6 +451,13 @@ pub fn abort_training(
     });
     let _ = ctx.notify_skill_queue_paused_server(char_id);
     Ok(PyRep::Bool(true))
+}
+
+pub fn handle_get_respec_info(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    get_respec_info(ctx, session)
 }
 
 pub fn get_respec_info(
@@ -471,11 +498,62 @@ pub fn get_respec_info(
     ]))
 }
 
-pub fn get_skill_changes_for_isis(
+pub fn handle_get_skill_changes_for_isis(
+    ctx: &ServerContext,
     session: &SessionState,
 ) -> Result<PyRep, BridgeRpcError> {
-    let _ = ServerContext::require_character(session)?;
-    Ok(PyRep::List(Vec::new()))
+    let (_, char_id) = ServerContext::require_character(session)?;
+    super::character_skills::catch_up_skill_queue(ctx, char_id);
+    // Track positive SP deltas from training (37, 53) and free-SP application (307)
+    // within the past 7 days for `SkillsSvc.GetRecentlyTrainedSkills()` (pairs of `(typeID, pointChange)`).
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let cutoff_ft = now_ft.saturating_sub(7 * 86_400 * 10_000_000);
+    let changes = ctx.db.with_snapshot(|snap| {
+        let mut baseline: HashMap<u32, f64> = HashMap::new();
+        let mut recent: HashMap<u32, (f64, f64)> = HashMap::new();
+        if let Some(events) = snap.skill_history.get(&char_id) {
+            for ev in events {
+                let is_training_gain = matches!(ev.event_type_id, 37 | 53 | 307);
+                if is_training_gain && ev.log_date_ft >= cutoff_ft {
+                    let prev_sp = baseline.get(&ev.skill_type_id).copied().unwrap_or(0.0);
+                    let entry = recent
+                        .entry(ev.skill_type_id)
+                        .or_insert((prev_sp, ev.absolute_points));
+                    if ev.absolute_points > entry.1 {
+                        entry.1 = ev.absolute_points;
+                    }
+                } else {
+                    baseline.insert(ev.skill_type_id, ev.absolute_points);
+                }
+            }
+        }
+        let skills_map = snap.skills.get(&char_id);
+        let mut rows: Vec<(u32, f64)> = recent
+            .into_iter()
+            .filter_map(|(tid, (start_sp, hist_end_sp))| {
+                let cur_sp = skills_map
+                    .and_then(|m| m.get(&tid))
+                    .map(|s| s.skill_points.max(hist_end_sp))
+                    .unwrap_or(hist_end_sp);
+                let delta = cur_sp - start_sp;
+                (delta > 0.0).then_some((tid, delta))
+            })
+            .collect();
+        rows.sort_by_key(|(tid, _)| *tid);
+        rows.into_iter()
+            .map(|(tid, delta)| PyRep::Tuple(vec![PyRep::Integer(tid as i64), PyRep::Real(delta)]))
+            .collect::<Vec<PyRep>>()
+    });
+    Ok(PyRep::List(changes))
+}
+
+fn handle_strip_ship_fitting(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    strip_ship_fitting(ctx, session, args, kwargs)
 }
 
 fn strip_ship_fitting(

@@ -280,6 +280,34 @@ async fn omega_weekly_sp_abort_respec_strip_fitting_and_container_hooks() {
             .unwrap(),
         PyRep::List(Vec::new())
     );
+    // Applying free SP / completing training adds positive `(typeID, pointChange)` deltas for ISIS
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(cid).or_default().insert(
+            3399,
+            eve_db::TrainedSkillRecord {
+                type_id: 3399,
+                level: 2,
+                skill_points: 1415.0,
+            },
+        );
+        snap.skill_history.entry(cid).or_default().push(SkillHistoryEntry {
+            log_date_ft: now_ft,
+            event_type_id: 37,
+            skill_type_id: 3399,
+            skill_level: 2,
+            absolute_points: 1415.0,
+        });
+    });
+    assert_eq!(
+        handle(&ctx, &mut sess, "skillMgr2", "GetSkillChangesForISIS", &[], &kw)
+            .unwrap()
+            .unwrap(),
+        PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(3399),
+            PyRep::Real(1415.0),
+        ])])
+    );
 
     // StripFitting: undocked error, contract lock error, and stripping modules/drones while keeping rigs
     assert_eq!(
