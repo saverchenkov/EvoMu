@@ -97,13 +97,15 @@ pub(crate) async fn board_stored_ship(
                 if !(116..=122).contains(&flag_u16) {
                     return Err(err("InvalidLocation", format!("Corporation docked host ship {host_id} must be in CorpSAG1..7")));
                 }
+                let now_unix = ctx.now_unix();
                 ctx.db.with_snapshot(|snap| {
                     let (is_ceo, snap_roles) =
-                        crate::services::inventory_bound::get_effective_corp_roles_at_location_in_snap(
+                        crate::services::inventory_bound::get_effective_corp_roles_at_location_in_snap_at(
                             snap,
                             corp_id,
                             char_id,
                             Some(dock),
+                            now_unix,
                         );
                     let eff = snap_roles | session.corp_role;
                     let is_dir_or_ceo = is_ceo || eve_db::corp_roles::has_role(eff, eve_db::corp_roles::ROLE_DIRECTOR);
@@ -134,14 +136,16 @@ pub(crate) async fn board_stored_ship(
             return Err(err("SMAAccessDenied", "Ship Maintenance Bay access denied by ship configuration"));
         }
     }
+    let now_unix = ctx.now_unix();
     let can_board = stored.owner_id == char_id
         || (corp_id != 0 && stored.owner_id == corp_id && {
             let (is_ceo, snap_roles) = ctx.db.with_snapshot(|snap| {
-                crate::services::inventory_bound::get_effective_corp_roles_at_location_in_snap(
+                crate::services::inventory_bound::get_effective_corp_roles_at_location_in_snap_at(
                     snap,
                     corp_id,
                     char_id,
                     dock_id,
+                    now_unix,
                 )
             });
             let eff = snap_roles | session.corp_role;

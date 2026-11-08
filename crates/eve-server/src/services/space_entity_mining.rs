@@ -7,7 +7,8 @@
 
 use crate::router::{BoundObjectEntry, ServerContext};
 pub use crate::services::mining_advanced::mining_compression::{
-    caller_can_take_corp_hangar_item, compute_structure_reprocessing_base_yield,
+    caller_can_take_corp_hangar_item, caller_can_take_corp_hangar_item_at,
+    compute_structure_reprocessing_base_yield,
     compute_structure_rigged_base_yield, resolve_reprocessable_materials,
     resolve_reprocessable_materials_for_portions, structure_has_online_reprocessing_service,
 };
@@ -983,7 +984,14 @@ pub async fn handle(
                                 | InventoryFlag::CorpSAG6
                                 | InventoryFlag::CorpSAG7
                         )
-                        && caller_can_take_corp_hangar_item(snap, char_id, caller_corp, item.flag, 0);
+                        && caller_can_take_corp_hangar_item_at(
+                            snap,
+                            char_id,
+                            caller_corp,
+                            item.flag,
+                            Some(station_id),
+                            now_unix,
+                        );
                     if (!personal_ok && !corp_ok) || item.location_id != station_id || item.quantity <= 0 {
                         return Err(BridgeRpcError {
                             code: "OwnershipOrLocationViolation".into(),

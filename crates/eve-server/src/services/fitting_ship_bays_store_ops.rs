@@ -281,11 +281,12 @@ pub(super) async fn handle_store_vessel(
                         ));
                     }
                     let (is_ceo, snap_roles) =
-                        crate::services::inventory_bound::get_effective_corp_roles_at_location_in_snap(
+                        crate::services::inventory_bound::get_effective_corp_roles_at_location_in_snap_at(
                             snap,
                             caller_corp,
                             char_id,
                             Some(dock),
+                            ctx.now_unix(),
                         );
                     let effective_roles = snap_roles | session.corp_role;
                     let is_dir_or_ceo = is_ceo

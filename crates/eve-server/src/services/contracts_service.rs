@@ -167,8 +167,8 @@ fn effective_corp_roles_at_location(
             snap, corp_id, char_id, 0, now_unix,
         );
     let (_, loc_roles) =
-        crate::services::inventory_bound::get_effective_corp_roles_at_location_in_snap(
-            snap, corp_id, char_id, location_id,
+        crate::services::inventory_bound::get_effective_corp_roles_at_location_in_snap_at(
+            snap, corp_id, char_id, location_id, now_unix,
         );
     let unmatured_title_bits = snap
         .corp_governance

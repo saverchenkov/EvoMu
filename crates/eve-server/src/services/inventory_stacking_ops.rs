@@ -196,8 +196,7 @@ fn validate_split_stack_access(
                     char_id,
                     Some(anc.location_id),
                 );
-                let container_take = eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE[div_idx]
-                    | (1u64 << (43 + div_idx as u32));
+                let container_take = eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE[div_idx];
                 if !is_ceo
                     && !eve_db::corp_roles::has_role(role_mask, eve_db::corp_roles::ROLE_DIRECTOR)
                     && (role_mask & container_take) == 0

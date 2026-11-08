@@ -928,17 +928,67 @@ fn handle_alsc_lock_unlock(
         Some(PyRep::Integer(id)) if *id != container_id => vec![*id],
         _ => kwargs.get("itemIDs").and_then(|v| match v { PyRep::List(l) | PyRep::Tuple(l) => Some(l.iter().filter_map(|x| x.as_i64()).collect()), _ => None }).unwrap_or_default(),
     };
+    let now_unix = ctx.now_unix_secs();
+    let corp_for_promote = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0));
+    if corp_for_promote > 0 {
+        crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(
+            ctx,
+            corp_for_promote,
+        );
+    }
     ctx.db.with_snapshot(|snap| {
         let cont = snap.items.get(&container_id).ok_or_else(|| BridgeRpcError { code: "ContainerNotFound".into(), message: format!("Container {container_id} not found") })?;
         let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
         let ch_loc = snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id).or(Some(c.solar_system_id as i64))).unwrap_or(0);
         let ch_ship = snap.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0);
-        if cont.location_id != ch_loc && cont.location_id != ch_ship {
+
+        let (mut root_loc, mut root_flag) = (cont.location_id, cont.flag);
+        for _ in 0..8 {
+            if (60_000_000..=69_999_999).contains(&root_loc)
+                || root_loc >= 1_000_000_000_000
+                || snap.structures.contains_key(&root_loc)
+            {
+                break;
+            }
+            let Some(parent) = snap.items.get(&root_loc) else {
+                break;
+            };
+            if parent.type_id == 27 {
+                root_loc = parent.location_id;
+                break;
+            }
+            root_loc = parent.location_id;
+            root_flag = parent.flag;
+        }
+        if cont.location_id != ch_loc && cont.location_id != ch_ship && root_loc != ch_loc {
             return Err(BridgeRpcError { code: "ColocationRequired".into(), message: format!("Must be co-located with container {container_id} to lock/unlock items") });
         }
-        let is_ceo = snap.corporations.get(&corp_id).map(|c| c.ceo_id == char_id).unwrap_or(false);
-        let is_owner_or_corp = cont.owner_id == char_id || (corp_id > 0 && cont.owner_id == corp_id && (session.corp_role != 0 || is_ceo));
-        if !is_owner_or_corp {
+        let is_authorized = if cont.owner_id == char_id {
+            true
+        } else if corp_id > 0 && cont.owner_id == corp_id {
+            let (is_ceo, role_mask) =
+                crate::services::inventory_bound::get_effective_corp_roles_at_location_in_snap_at(
+                    snap,
+                    corp_id,
+                    char_id,
+                    Some(root_loc),
+                    now_unix,
+                );
+            let div_cont_take = if (116..=122).contains(&(root_flag as i64)) {
+                eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE[(root_flag as usize) - 116]
+            } else {
+                0
+            };
+            is_ceo
+                || eve_db::corp_roles::has_role(role_mask, eve_db::corp_roles::ROLE_DIRECTOR)
+                || eve_db::corp_roles::has_role(role_mask, eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG)
+                || (div_cont_take != 0 && eve_db::corp_roles::has_role(role_mask, div_cont_take))
+        } else {
+            false
+        };
+        if !is_authorized {
             return Err(BridgeRpcError { code: "ALSCAccessDenied".into(), message: format!("Not authorized to lock/unlock items in container {container_id}") });
         }
         for &iid in &item_ids {
@@ -949,7 +999,6 @@ fn handle_alsc_lock_unlock(
         }
         Ok(())
     })?;
-    let now_unix = ctx.now_unix_secs();
     let mut st = read_container_ship_state(ctx);
     let req_pw = st.container_passwords.get(&container_id).cloned().unwrap_or_default();
     if !req_pw.is_empty() {

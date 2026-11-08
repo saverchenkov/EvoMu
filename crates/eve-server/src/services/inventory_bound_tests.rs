@@ -340,3 +340,88 @@ fn invbroker_bound_methods_turret_slots_and_corp_roles_at_location() {
         assert!(is_inventory_location_colocated(snap, &space_sess, ch, &pre_balls, 30_000_142));
     });
 }
+
+#[test]
+fn issue_552_scoped_stasis_and_corp_office_container_take_rbacs() {
+    let ctx = test_ctx();
+    let (corp_id, ceo_id, mem_id) = (98_000_020_i64, 90_000_001_i64, 90_000_002_i64);
+    let hq = 60_003_760_i64;
+    let other_st = 60_003_761_i64;
+    let (office_id, cont_id, item_in_cont, item_in_office) = (81_100_001_i64, 81_100_002_i64, 81_100_003_i64, 81_100_004_i64);
+    let now = ctx.now_unix();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord {
+            corporation_id: corp_id,
+            ceo_id,
+            hq_station_id: Some(hq),
+            name: "ScopedCorp".into(),
+            ticker: "SCP".into(),
+            ..Default::default()
+        };
+        corp.members.insert(ceo_id);
+        corp.members.insert(mem_id);
+        corp.member_roles.insert(mem_id, 0);
+        snap.corporations.insert(corp_id, corp);
+        if let Some(ch) = snap.characters.get_mut(&mem_id) {
+            ch.corporation_id = corp_id;
+            ch.station_id = Some(hq);
+        }
+        snap.corp_role_assignments.insert(
+            (corp_id, mem_id),
+            CorpMemberRoleAssignment {
+                character_id: mem_id,
+                roles_at_hq: eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[0],
+                roles_at_other: eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[1],
+                ..Default::default()
+            },
+        );
+        // Unmatured scoped grant for Container Take 1 at HQ
+        snap.corp_governance.entry(corp_id).or_default().pending_scoped_role_grants.insert(
+            mem_id,
+            (eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE[0], 0, 0, now + 3_600),
+        );
+        // Corp office at HQ containing a loose item in CorpSAG1 and a corp container in CorpSAG1
+        snap.items.insert(office_id, InventoryItemRecord {
+            item_id: office_id, type_id: 27, owner_id: corp_id, location_id: hq,
+            flag: InventoryFlag::Hangar, quantity: 1, singleton: true, ..Default::default()
+        });
+        snap.items.insert(cont_id, InventoryItemRecord {
+            item_id: cont_id, type_id: 17366, owner_id: corp_id, location_id: office_id,
+            flag: InventoryFlag::CorpSAG1, quantity: 1, singleton: true, ..Default::default()
+        });
+        snap.items.insert(item_in_cont, InventoryItemRecord {
+            item_id: item_in_cont, type_id: 34, owner_id: corp_id, location_id: cont_id,
+            flag: InventoryFlag::Unlocked, quantity: 100, ..Default::default()
+        });
+        snap.items.insert(item_in_office, InventoryItemRecord {
+            item_id: item_in_office, type_id: 34, owner_id: corp_id, location_id: office_id,
+            flag: InventoryFlag::CorpSAG1, quantity: 100, ..Default::default()
+        });
+    });
+
+    // Scoped location check: at HQ, has Hangar Take 1 (not Hangar Take 2); Container Take 1 is still in stasis
+    let (_, r_hq) = get_effective_corp_roles_at_location(&ctx, corp_id, mem_id, Some(hq));
+    let (_, r_other) = get_effective_corp_roles_at_location(&ctx, corp_id, mem_id, Some(other_st));
+    assert_ne!(r_hq & eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[0], 0);
+    assert_eq!(r_hq & eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[1], 0);
+    assert_eq!(r_hq & eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE[0], 0, "unmatured scoped grant must be masked");
+    assert_ne!(r_other & eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[1], 0);
+
+    ctx.db.with_snapshot(|snap| {
+        // Direct child of corp office in CorpSAG1 checks Hangar Take 1 -> ALLOWED
+        let it_off = &snap.items[&item_in_office];
+        assert!(validate_corp_source_item_take_access_in_snap(&ctx, snap, mem_id, corp_id, it_off).is_ok());
+        // Child of corp container in CorpSAG1 requires Container Take 1 (still in stasis) -> DENIED
+        let it_cont = &snap.items[&item_in_cont];
+        let err = validate_corp_source_item_take_access_in_snap(&ctx, snap, mem_id, corp_id, it_cont).unwrap_err();
+        assert_eq!(err.code, "CorpRoleDenied");
+    });
+
+    // Advance past stasis -> Container Take 1 matures at HQ and container item take succeeds
+    ctx.advance_virtual_clock(3_601);
+    ctx.db.with_snapshot(|snap| {
+        let it_cont = &snap.items[&item_in_cont];
+        assert!(validate_corp_source_item_take_access_in_snap(&ctx, snap, mem_id, corp_id, it_cont).is_ok());
+    });
+}
