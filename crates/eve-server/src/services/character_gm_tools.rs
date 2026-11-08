@@ -1337,11 +1337,15 @@ pub async fn handle_gm_qa_rpcs(
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     if (service, method) == ("slash", "SlashCmd") {
+        let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("").trim();
+        if cmd == "/" {
+            // Defer remote command list query (`FetchRemoteCommandList`) to `auth_cache`.
+            return None;
+        }
         let (_, cid) = match ServerContext::require_character(session) {
             Ok(v) => v,
             Err(e) => return Some(Err(e)),
         };
-        let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("").trim();
         let req_role = crate::services::auth_cache::required_slash_role(cmd);
         if (session.role & req_role) == 0 {
             crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, false);

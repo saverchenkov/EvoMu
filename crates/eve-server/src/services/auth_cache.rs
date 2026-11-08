@@ -698,11 +698,20 @@ pub async fn handle(
         }
 
         ("slash", "SlashCmd") => {
+            let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("").trim();
+            if cmd == "/" {
+                if let Err(e) = ServerContext::require_auth(session) {
+                    return Some(Err(e));
+                }
+                return Some(Err(BridgeRpcError {
+                    code: "SlashError".into(),
+                    message: format_remote_command_list_reason(session.role),
+                }));
+            }
             let (_, cid) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("").trim();
             let req_role = required_slash_role(cmd);
             if (session.role & req_role) == 0 {
                 record_gm_audit(ctx, cid, cmd, false);
@@ -712,12 +721,6 @@ pub async fn handle(
                 }));
             }
             let res: Option<Result<PyRep, BridgeRpcError>> = async {
-                if cmd == "/" {
-                    return Some(Err(BridgeRpcError {
-                        code: "SlashError".into(),
-                        message: format_remote_command_list_reason(session.role),
-                    }));
-                }
                 if let Some(rest) = cmd.strip_prefix("/giveisk ") {
                 let Ok(amount) = rest.trim().parse::<i64>() else {
                     return Some(Err(BridgeRpcError {

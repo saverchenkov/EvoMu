@@ -498,7 +498,18 @@ impl ServerContext {
                         | eve_machonet::service_roles::ROLE_SPAWN
                         | eve_machonet::service_roles::ROLE_ROLEADMIN))
                     != 0;
-            if !session.has_gm_role() && !slash_subrole {
+            // V24.01 `svc_slash.FetchRemoteCommandList` calls `slash.SlashCmd("/")` for all
+            // `/localdevtools` sessions; denying it with `InsufficientRole` triggers `eval()`
+            // failure and a modal error popup, whereas `SlashError` `"Commands: []"` hides
+            // privileged commands cleanly without exposing any GM command names.
+            let slash_fetch_command_list = effective_service == "slash"
+                && method == "SlashCmd"
+                && args
+                    .first()
+                    .and_then(|a| a.as_str())
+                    .map(str::trim)
+                    == Some("/");
+            if !session.has_gm_role() && !slash_subrole && !slash_fetch_command_list {
                 return Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: format!(

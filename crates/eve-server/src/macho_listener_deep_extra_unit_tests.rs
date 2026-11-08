@@ -477,7 +477,9 @@ async fn slash_fetch_remote_command_list_and_unknown_cmd_return_slash_error_with
         (name, kv)
     };
 
-    // 0. Non-GM player calling slash.SlashCmd("/") receives SlashError with 'reason' (not CustomInfo/'info')
+    // 0. Non-GM player calling slash.SlashCmd("/") receives SlashError with 'reason': "Commands: []"
+    //    so V24.01 `svc_slash.FetchRemoteCommandList` evaluates `[]` without popping a modal error,
+    //    while real privileged slash commands still fail with InsufficientRole.
     {
         let (mut s_player, c_player, u_player) = connect_login(addr, "demo", "demo-secret").await;
         let call_p = |cid: u64, svc: &str, m: &str, args: Vec<PyRep>| {
@@ -495,9 +497,22 @@ async fn slash_fetch_remote_command_list_and_unknown_cmd_return_slash_error_with
                 args,
             )
         };
+        // Even before selecting a character, FetchRemoteCommandList ("/") returns empty list cleanly.
         write_framed_pyrep(
             &mut s_player,
-            &call_p(1, "charUnboundMgr", "SelectCharacterID", vec![PyRep::Integer(char_id)])
+            &call_p(1, "slash", "SlashCmd", vec![PyRep::String("/".into())]).to_pyrep(),
+        )
+        .await
+        .unwrap();
+        let (err_name, dict) = decode_user_error(read_until_call_reply(&mut s_player).await);
+        assert_eq!(err_name, "SlashError");
+        assert_eq!(dict.len(), 1);
+        assert_eq!(dict[0].0, "reason");
+        assert_eq!(dict[0].1, "Commands: []");
+
+        write_framed_pyrep(
+            &mut s_player,
+            &call_p(2, "charUnboundMgr", "SelectCharacterID", vec![PyRep::Integer(char_id)])
                 .to_pyrep(),
         )
         .await
@@ -505,7 +520,20 @@ async fn slash_fetch_remote_command_list_and_unknown_cmd_return_slash_error_with
         assert_eq!(read_until_call_reply(&mut s_player).await.packet_type, MachoPacketType::CallRsp);
         write_framed_pyrep(
             &mut s_player,
-            &call_p(2, "slash", "SlashCmd", vec![PyRep::String("/".into())]).to_pyrep(),
+            &call_p(3, "slash", "SlashCmd", vec![PyRep::String("/".into())]).to_pyrep(),
+        )
+        .await
+        .unwrap();
+        let (err_name, dict) = decode_user_error(read_until_call_reply(&mut s_player).await);
+        assert_eq!(err_name, "SlashError");
+        assert_eq!(dict.len(), 1);
+        assert_eq!(dict[0].0, "reason");
+        assert_eq!(dict[0].1, "Commands: []");
+
+        // Actual privileged slash commands must still be rejected for non-GM sessions.
+        write_framed_pyrep(
+            &mut s_player,
+            &call_p(4, "slash", "SlashCmd", vec![PyRep::String("/giveisk 100".into())]).to_pyrep(),
         )
         .await
         .unwrap();

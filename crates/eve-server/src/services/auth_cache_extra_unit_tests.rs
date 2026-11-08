@@ -419,6 +419,32 @@ async fn slash_commands_error_branches_and_role_aliases() {
     assert!(list_err.message.contains("'heal'"));
     assert!(list_err.message.contains("'setomega'"));
 
+    let mut player_sess = SessionState {
+        user_id: Some(99),
+        role: service_roles::ROLE_PLAYER_DEFAULT,
+        character_id: sess.character_id,
+        ..Default::default()
+    };
+    let player_list_err =
+        handle(&ctx, &mut player_sess, "slash", "SlashCmd", &[PyRep::String("/".into())], &kw)
+            .await
+            .unwrap()
+            .unwrap_err();
+    assert_eq!(player_list_err.code, "SlashError");
+    assert_eq!(player_list_err.message, "Commands: []");
+    let player_cmd_err = handle(
+        &ctx,
+        &mut player_sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/giveisk 100".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(player_cmd_err.code, "InsufficientRole");
+
     // Test error codes across slash commands
     for (bad_cmd, expected_code) in [
         ("", "UnknownSlashCommand"),
