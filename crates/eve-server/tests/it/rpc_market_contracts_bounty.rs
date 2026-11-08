@@ -1472,4 +1472,76 @@ async fn test_market_modify_order_margin_shortfall() {
     assert_eq!(err.code, "InsufficientFunds");
 }
 
+#[tokio::test]
+async fn test_issue_631_buy_order_escrow_deducts_wallet_and_emits_on_account_change() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let mut buyer_sess = setup_pilot(&ctx, 1631, "other", "other-secret", BUYER_CHAR_ID).await;
+    let start_isk = 500_000_000_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.market_orders.retain(|_, o| o.type_id != 483);
+        if let Some(ch) = snap.characters.get_mut(&BUYER_CHAR_ID) {
+            ch.balance = IskCents::from_isk(start_isk);
+            ch.station_id = Some(JITA_STATION_ID);
+            ch.solar_system_id = JITA_SYSTEM_ID;
+        }
+    });
+    let _ = ctx.drain_notifications_for_char(BUYER_CHAR_ID);
+
+    let empty_kw = HashMap::new();
+    let initial_bal = ctx
+        .dispatch_rpc(&mut buyer_sess, "account", None, "GetCashBalance", &[], &empty_kw, None)
+        .await
+        .expect("initial GetCashBalance")
+        .as_f64()
+        .unwrap();
+    assert_eq!(initial_bal, start_isk as f64);
+
+    // Client MarketQuote.BuyStuff passes 9 args (last is expectedBrokersFee=100.0)
+    let buy_res = ctx
+        .dispatch_rpc(
+            &mut buyer_sess,
+            "marketProxy",
+            None,
+            "PlaceBuyOrder",
+            &[
+                PyRep::Integer(JITA_STATION_ID),
+                PyRep::Integer(483), // Miner I
+                PyRep::Real(1.00),
+                PyRep::Integer(1),
+                PyRep::Integer(-1),
+                PyRep::Integer(1),
+                PyRep::Integer(90),
+                PyRep::Bool(false),
+                PyRep::Real(100.0),
+            ],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("PlaceBuyOrder Miner I @ 1.00");
+    let broker_fee = buy_res.dict_get("brokerFeeISK").and_then(|v| v.as_f64()).unwrap();
+    let escrow_isk = buy_res.dict_get("escrowISK").and_then(|v| v.as_f64()).unwrap();
+    let expected_bal = (start_isk as f64) - broker_fee - escrow_isk;
+    assert_eq!(broker_fee, 100.0);
+    assert_eq!(escrow_isk, 1.0);
+
+    let after_bal = ctx
+        .dispatch_rpc(&mut buyer_sess, "account", None, "GetCashBalance", &[], &empty_kw, None)
+        .await
+        .expect("after GetCashBalance")
+        .as_f64()
+        .unwrap();
+    assert_eq!(after_bal, expected_bal, "GetCashBalance must reflect broker fee + escrow deduction");
+
+    let notifs = ctx.drain_notifications_for_char(BUYER_CHAR_ID);
+    let acct_notif = notifs
+        .iter()
+        .find(|n| n.event == "OnAccountChange" && n.args.first() == Some(&PyRep::String("cash".into())))
+        .expect("PlaceBuyOrder must emit OnAccountChange for buyer wallet");
+    assert_eq!(acct_notif.args.get(1), Some(&PyRep::Integer(BUYER_CHAR_ID)));
+    assert_eq!(acct_notif.args.get(2), Some(&PyRep::Real(expected_bal)));
+}
+
 }

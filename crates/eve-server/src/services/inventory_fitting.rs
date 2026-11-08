@@ -987,6 +987,7 @@ pub async fn handle(
                 if let Err(e) = cap_check { return Some(Err(e)); }
             }
 
+            let was_singleton_before_move = source_item_opt.as_ref().map(|i| i.singleton).unwrap_or(false);
             let mut did_split: Option<(i64, i32)> = None;
             if looted_from_space {
                 let active_ship = session.ship_id.unwrap_or(new_loc);
@@ -1210,7 +1211,20 @@ pub async fn handle(
                 });
             match move_res {
                 Ok(mut updated) => {
+                    let updated_cat = ctx
+                        .sde
+                        .types
+                        .get(&updated.type_id)
+                        .map(|t| t.category_id)
+                        .unwrap_or(0);
                     let st_fuel = ctx.db.with_mut_snapshot(|snap| {
+                        if is_fitting_slot && updated_cat != 8 && (!updated.singleton || updated.quantity != 1) {
+                            if let Some(it) = snap.items.get_mut(&updated.item_id) {
+                                it.singleton = true;
+                                it.quantity = 1;
+                                updated = it.clone();
+                            }
+                        }
                         let (fin_opt, fb) = crate::services::structure_acl_defense_rules::finalize_fuel_bay_move_in_snap(
                             ctx, snap, updated.item_id, old_loc_id, InventoryFlag::from_u16(old_flag_id as u16), new_loc, flag, char_id, corp_id_for_owner,
                         );
@@ -1286,19 +1300,30 @@ pub async fn handle(
                     }
                     crate::services::operations_manager_helpers::record_invbroker_add_operation_event(ctx, char_id, orig_source_loc_id, new_loc, flag, updated.type_id, updated.quantity);
                     ctx.invalidate_ship_fitting(new_loc);
-                    ctx.notify(
-                        crate::router::NotificationTarget::Character(char_id),
-                        "OnItemChange",
-                        "charid",
-                        vec![
-                            PyRep::keyval([
-                                ("itemID", PyRep::Integer(updated.item_id)), ("typeID", PyRep::Integer(updated.type_id as i64)),
-                                ("locationID", PyRep::Integer(updated.location_id)), ("flagID", PyRep::Integer(updated.flag as i64)),
-                                ("quantity", PyRep::Integer(updated.quantity as i64)),
-                            ]),
-                            PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(old_loc_id)), (PyRep::Integer(4), PyRep::Integer(old_flag_id))]),
-                        ],
+                    if let Some((orig_id, split_qty)) = did_split {
+                        if let Some(orig_after) = ctx.db.with_snapshot(|snap| snap.items.get(&orig_id).cloned()) {
+                            let orig_row = eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(
+                                crate::services::inventory_bound::item_to_packed_cells(ctx, &orig_after),
+                            );
+                            ctx.notify_item_change(
+                                char_id,
+                                orig_row,
+                                vec![(9, PyRep::Integer((orig_after.quantity + split_qty) as i64))],
+                            );
+                        }
+                    }
+                    let item_row = eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(
+                        crate::services::inventory_bound::item_to_packed_cells(ctx, &updated),
                     );
+                    let mut item_changes = vec![
+                        (3, PyRep::Integer(old_loc_id)),
+                        (4, PyRep::Integer(old_flag_id)),
+                    ];
+                    if !was_singleton_before_move && updated.singleton {
+                        // ixSingleton (10): prior unpackaged item had quantity=1, singleton=False.
+                        item_changes.push((10, PyRep::Integer(1)));
+                    }
+                    ctx.notify_item_change(char_id, item_row, item_changes);
                     ctx.notify(
                         crate::router::NotificationTarget::Character(char_id),
                         "ProcessInventoryChange",

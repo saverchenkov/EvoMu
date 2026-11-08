@@ -3029,4 +3029,102 @@ async fn test_jump_drive_fatigue_and_titan_portal_bridge() {
     assert!(ctx.systems.get_or_spawn(sys_a).get_ball_snapshot(portal_ball_id).await.unwrap().is_none());
 }
 
+#[tokio::test]
+async fn test_issue_630_docked_fit_miner_sets_singleton_dbrow_and_survives_undock() {
+    let ctx = new_sqlite_ctx();
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(7630);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+    let char_id = sess.character_id.unwrap();
+    let station_id = sess.station_id.unwrap();
+    let ship_id = sess.ship_id.unwrap();
+    let miner_stack_id = 990_630_001i64;
+    // Miner I (typeID 483), qty=2, singleton=false in station hangar (matches #630 repro)
+    seed_item(&ctx, miner_stack_id, 483, char_id, station_id, InventoryFlag::Hangar, 2, false);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            3386, // Mining I
+            eve_db::TrainedSkillRecord { type_id: 3386, level: 5, skill_points: 256_000.0 },
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // Fit 2x Miner I into HiSlot1 (28) and HiSlot2 (29) while docked
+    let fit1 = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "Add",
+            &[PyRep::Integer(miner_stack_id), PyRep::Integer(ship_id), PyRep::Integer(28), PyRep::Integer(1)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("fit first Miner I");
+    let miner1_id = fit1.dict_get("itemID").and_then(PyRep::as_i64).unwrap();
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        None,
+        "Add",
+        &[PyRep::Integer(miner_stack_id), PyRep::Integer(ship_id), PyRep::Integer(29)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("fit second Miner I");
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    for fitted_id in [miner1_id, miner_stack_id] {
+        let chg = notifs
+            .iter()
+            .find(|n| {
+                n.event == "OnItemChange"
+                    && n.args.first().and_then(|r| r.dict_get("itemID")).and_then(PyRep::as_i64) == Some(fitted_id)
+                    && n.args.first().and_then(|r| r.dict_get("locationID")).and_then(PyRep::as_i64) == Some(ship_id)
+            })
+            .expect("OnItemChange for fitted Miner I");
+        assert!(matches!(chg.args.first(), Some(PyRep::DBRow { .. })));
+        assert_eq!(chg.args[0].dict_get("quantity").and_then(PyRep::as_i64), Some(-1));
+        assert_eq!(chg.args[0].dict_get("groupID").and_then(PyRep::as_i64), Some(54));
+        assert_eq!(chg.args[0].dict_get("categoryID").and_then(PyRep::as_i64), Some(7));
+    }
+
+    // Undock and confirm dogmaIM.GetAllInfo(True, True) lists both fitted Miner Is with invItem singleton quantity=-1
+    let _ = ctx
+        .dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock succeeds");
+    let all_info = ctx
+        .dispatch_rpc(&mut sess, "dogmaIM", None, "GetAllInfo", &[PyRep::Bool(true), PyRep::Bool(true)], &kw, None)
+        .await
+        .expect("dogmaIM.GetAllInfo after undock");
+    let fitted_slots: Vec<(i64, i64, i64)> = match all_info.dict_get("shipInfo") {
+        Some(PyRep::Dict(entries)) => entries
+            .iter()
+            .filter_map(|(k, v)| {
+                let id = k.as_i64()?;
+                let inv = v.dict_get("invItem")?;
+                Some((id, inv.dict_get("flagID")?.as_i64()?, inv.dict_get("quantity")?.as_i64()?))
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    assert!(fitted_slots.contains(&(miner1_id, 28, -1)), "GetAllInfo missing Miner I in slot 28: {fitted_slots:?}");
+    assert!(fitted_slots.contains(&(miner_stack_id, 29, -1)), "GetAllInfo missing Miner I in slot 29: {fitted_slots:?}");
+}
+
 }

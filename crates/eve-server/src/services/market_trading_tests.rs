@@ -591,3 +591,77 @@ fn issue_601_611_612_market_tick_same_system_buy_and_wallet_item_notifications()
         "StationMismatch"
     );
 }
+
+#[test]
+fn issue_631_resting_buy_order_deducts_wallet_and_emits_account_change() {
+    let ctx = test_ctx();
+    let buyer_id = 91_200_631i64;
+    let start_isk = 500_000_000_i64;
+    ctx.db.with_mut_snapshot(|s| {
+        s.market_orders.clear();
+        let mut buyer = s.characters.values().next().cloned().unwrap();
+        buyer.character_id = buyer_id;
+        buyer.user_id = 1;
+        buyer.balance = IskCents::from_isk(start_isk);
+        buyer.station_id = Some(JITA_STATION_ID);
+        s.characters.insert(buyer_id, buyer);
+    });
+    ctx.db
+        .acquire_online_lock(1, 9631, Some(buyer_id), true, ctx.now_unix())
+        .expect("buyer online");
+    let _ = ctx.drain_notifications_for_char(buyer_id);
+
+    let mut buyer_sess = jita_session(buyer_id, 1_000_009);
+    let kw = HashMap::new();
+
+    // Place resting buy order matching #631: 1x type 34 @ 1.00 ISK, duration 90, expectedBrokersFee=100.0
+    let res = handle(
+        &ctx,
+        &mut buyer_sess,
+        "marketProxy",
+        "PlaceBuyOrder",
+        &[
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::Integer(34),
+            PyRep::Real(1.0),
+            PyRep::Integer(1),
+            PyRep::Integer(-1),
+            PyRep::Integer(1),
+            PyRep::Integer(90),
+            PyRep::Bool(false),
+            PyRep::Real(100.0),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .expect("PlaceBuyOrder duration=90 succeeds");
+    assert_eq!(res.dict_get("filledImmediately").and_then(PyRep::as_bool), Some(false));
+    let broker_fee = res.dict_get("brokerFeeISK").and_then(PyRep::as_f64).unwrap();
+    let escrow_isk = res.dict_get("escrowISK").and_then(PyRep::as_f64).unwrap();
+    let expected_bal = (start_isk as f64) - broker_fee - escrow_isk;
+    assert_eq!(broker_fee, 100.0);
+    assert_eq!(escrow_isk, 1.0);
+
+    let notifs = ctx.drain_notifications_for_char(buyer_id);
+    let acct_notif = notifs
+        .iter()
+        .find(|n| n.event == "OnAccountChange" && n.args.first() == Some(&PyRep::String("cash".into())))
+        .expect("resting PlaceBuyOrder must emit OnAccountChange for buyer wallet");
+    assert_eq!(acct_notif.args.get(1), Some(&PyRep::Integer(buyer_id)));
+    assert_eq!(acct_notif.args.get(2), Some(&PyRep::Real(expected_bal)));
+    assert!(notifs.iter().any(|n| n.event == "OnOwnOrdersChanged"));
+
+    let live_bal = crate::services::market_contracts::handle(
+        &ctx,
+        &mut buyer_sess,
+        "account",
+        "GetCashBalance",
+        &[],
+        &kw,
+    )
+    .unwrap()
+    .expect("account.GetCashBalance ok")
+    .as_f64()
+    .unwrap();
+    assert_eq!(live_bal, expected_bal);
+}

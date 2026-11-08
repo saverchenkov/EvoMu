@@ -481,3 +481,201 @@ async fn r9_p0_549_director_take_and_invbroker_add_refuse_impounded_locked_and_u
         InventoryFlag::Hangar
     );
 }
+
+#[tokio::test]
+async fn issue_630_fitting_module_sets_singleton_and_emits_dbrow_item_change() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 96_500_630i64;
+    let station_id = 60_003_760i64;
+    let ship_id = 96_500_631i64;
+    let stack_mod_id = 96_500_632i64;
+    let single_mod_id = 96_500_633i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = 1;
+        ch.name = "Issue630Pilot".into();
+        ch.corporation_id = 1_000_009;
+        ch.station_id = Some(station_id);
+        ch.solar_system_id = 30_000_142;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587, // Rifter
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        // Stacked unpackaged modules (quantity=2, singleton=false) and single unpackaged module (quantity=1, singleton=false)
+        snap.items.insert(
+            stack_mod_id,
+            InventoryItemRecord {
+                item_id: stack_mod_id,
+                type_id: 484, // 125mm Gatling AutoCannon I
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 2,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            single_mod_id,
+            InventoryItemRecord {
+                item_id: single_mod_id,
+                type_id: 484,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        for &sk in &[3300u32, 3302, 3318, 3392, 3426] {
+            snap.skills.entry(char_id).or_default().insert(
+                sk,
+                TrainedSkillRecord {
+                    type_id: sk,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+    });
+    ctx.db
+        .acquire_online_lock(1, 9630, Some(char_id), true, ctx.now_unix())
+        .expect("char online");
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let mut session = SessionState {
+        session_id: 9630,
+        user_id: Some(1),
+        character_id: Some(char_id),
+        corporation_id: Some(1_000_009),
+        station_id: Some(station_id),
+        solar_system_id: Some(30_000_142),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let kw = HashMap::new();
+
+    // 1. Fit 1 module from the stack of 2 into HiSlot1 (28)
+    let rep1 = handle(
+        &ctx,
+        &mut session,
+        None,
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(stack_mod_id),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(28),
+            PyRep::Integer(1),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("fit split module");
+    let fitted1_id = rep1.dict_get("itemID").and_then(PyRep::as_i64).expect("itemID");
+    assert_ne!(fitted1_id, stack_mod_id);
+    ctx.db.with_snapshot(|s| {
+        let fitted = &s.items[&fitted1_id];
+        assert!(fitted.singleton, "fitted split module must have singleton=true");
+        assert_eq!(fitted.quantity, 1);
+        assert_eq!(fitted.flag, InventoryFlag::HiSlot1);
+        assert_eq!(s.items[&stack_mod_id].quantity, 1);
+    });
+
+    let notifs1 = ctx.drain_notifications_for_char(char_id);
+    let int_dict_get = |rep: Option<&PyRep>, k: i64| -> Option<i64> {
+        let Some(PyRep::Dict(entries)) = rep else { return None; };
+        entries.iter().find(|(dk, _)| dk.as_i64() == Some(k)).and_then(|(_, v)| v.as_i64())
+    };
+    let orig_change = notifs1
+        .iter()
+        .find(|n| {
+            n.event == "OnItemChange"
+                && n.args.first().and_then(|r| r.dict_get("itemID")).and_then(PyRep::as_i64) == Some(stack_mod_id)
+        })
+        .expect("remaining hangar stack must emit OnItemChange");
+    assert!(matches!(orig_change.args.first(), Some(PyRep::DBRow { .. })));
+    assert_eq!(orig_change.args[0].dict_get("quantity").and_then(PyRep::as_i64), Some(1));
+    assert_eq!(
+        int_dict_get(orig_change.args.get(1), 9),
+        Some(2),
+        "remaining hangar stack change dict must use ixStackSize=9 with old qty"
+    );
+
+    let fit_change1 = notifs1
+        .iter()
+        .find(|n| {
+            n.event == "OnItemChange"
+                && n.args.first().and_then(|r| r.dict_get("itemID")).and_then(PyRep::as_i64) == Some(fitted1_id)
+        })
+        .expect("fitted module must emit OnItemChange");
+    assert!(matches!(fit_change1.args.first(), Some(PyRep::DBRow { .. })));
+    assert_eq!(fit_change1.args[0].dict_get("ownerID").and_then(PyRep::as_i64), Some(char_id));
+    assert_eq!(fit_change1.args[0].dict_get("categoryID").and_then(PyRep::as_i64), Some(7));
+    assert_eq!(
+        fit_change1.args[0].dict_get("quantity").and_then(PyRep::as_i64),
+        Some(-1),
+        "fitted module DBRow quantity must be -1 so godma sees item.singleton == True"
+    );
+    assert_eq!(
+        int_dict_get(fit_change1.args.get(1), 10),
+        Some(1),
+        "fitted module OnItemChange must record ixSingleton=10 change"
+    );
+
+    // 2. Fit the standalone unpackaged module (qty=1, singleton=false) into HiSlot2 (29)
+    handle(
+        &ctx,
+        &mut session,
+        None,
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(single_mod_id),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(29),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("fit standalone unpackaged module");
+    ctx.db.with_snapshot(|s| {
+        let fitted2 = &s.items[&single_mod_id];
+        assert!(fitted2.singleton, "fitted standalone module must have singleton=true");
+        assert_eq!(fitted2.quantity, 1);
+        assert_eq!(fitted2.flag, InventoryFlag::HiSlot2);
+    });
+    let notifs2 = ctx.drain_notifications_for_char(char_id);
+    let fit_change2 = notifs2
+        .iter()
+        .find(|n| {
+            n.event == "OnItemChange"
+                && n.args.first().and_then(|r| r.dict_get("itemID")).and_then(PyRep::as_i64) == Some(single_mod_id)
+        })
+        .expect("fitted standalone module must emit OnItemChange");
+    assert_eq!(fit_change2.args[0].dict_get("quantity").and_then(PyRep::as_i64), Some(-1));
+    assert_eq!(fit_change2.args[0].dict_get("flagID").and_then(PyRep::as_i64), Some(29));
+}
