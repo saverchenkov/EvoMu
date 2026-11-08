@@ -252,9 +252,52 @@ fn corp_public_info_update_divisions_members_and_medals() {
     )
     .unwrap()
     .is_ok());
+
+    // Structured V24 GetMemberIDsByQuery: [property, op, val] with roles & characterID
+    let structured = handle_corps(
+        &ctx,
+        &mut ceo_sess,
+        "corpRegistry",
+        "GetMemberIDsByQuery",
+        &[PyRep::List(vec![PyRep::List(vec![
+            PyRep::String("characterID".into()),
+            PyRep::Integer(1),
+            PyRep::Integer(90_000_001),
+        ])])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let PyRep::Rowset { rows: q_rows, .. } = structured else { panic!() };
+    assert_eq!(q_rows, vec![vec![PyRep::Integer(90_000_001)]]);
+
     assert!(handle_corps(&ctx, &mut ceo_sess, "corpmgr", "AuditMember", &[], &kw)
         .unwrap()
         .is_ok());
+
+    with_corp_gov(&ctx, |g| {
+        let log = &mut g.entry(98_000_001).or_default().role_audit_log;
+        log.push((90_000_002, 90_000_001, 0, corp_roles::ROLE_ACCOUNTANT, 1_800_000_100));
+        log.push((90_000_002, 90_000_001, corp_roles::ROLE_ACCOUNTANT, corp_roles::ROLE_TRADER, 1_800_000_500));
+    });
+    let audit_filtered = handle_corps(
+        &ctx,
+        &mut ceo_sess,
+        "corpmgr",
+        "AuditMember",
+        &[
+            PyRep::Integer(90_000_002),
+            PyRep::Integer(1_800_000_200),
+            PyRep::Integer(1_800_000_600),
+            PyRep::Integer(1),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let PyRep::Rowset { rows: audit_rows, .. } = audit_filtered else { panic!() };
+    assert_eq!(audit_rows.len(), 1);
+    assert_eq!(audit_rows[0][4], PyRep::Integer(1_800_000_500));
 
     // promote_due_pending_corp_grants + get_character_medals_and_decorations helpers
     with_corp_gov(&ctx, |g| {

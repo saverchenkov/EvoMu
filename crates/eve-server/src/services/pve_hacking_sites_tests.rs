@@ -238,7 +238,8 @@ async fn hacking_minigame_start_click_utility_progress_and_quit_rpc() {
     .await
     .expect("handled")
     .expect("GetMyHackProgress succeeds");
-    assert!(!matches!(progress, PyRep::None));
+    assert_eq!(progress.dict_get("containerID").and_then(|v| v.as_i64()), Some(can_id));
+    assert_eq!(progress.dict_get("status").and_then(|v| v.as_str()), Some("InProgress"));
 
     // UsedUtilityElementOnVirus & QuitHackingAttempt
     with_pve_exploration_reg(&ctx, |reg| {

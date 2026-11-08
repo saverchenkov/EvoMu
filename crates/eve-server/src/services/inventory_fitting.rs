@@ -1317,11 +1317,11 @@ pub async fn handle(
         }
 
         ("ship", "Jettison") | ("invbroker", "Jettison") => {
-            Some(fitting_ship_bays::ship_jettison(ctx, session, args, kwargs).await)
+            Some(handle_ship_jettison(ctx, session, args, kwargs).await)
         }
 
         ("ship", "Drop") => {
-            Some(fitting_ship_bays::ship_drop(ctx, session, args, kwargs).await)
+            Some(handle_ship_drop(ctx, session, args, kwargs).await)
         }
         ("invbroker", "MultiAdd") => {
             Some(super::inventory_stacking::handle_multi_add(ctx, session, bound_entry, args, kwargs).await)
@@ -1345,6 +1345,24 @@ pub async fn handle(
             None
         }
     }
+}
+
+async fn handle_ship_jettison(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    fitting_ship_bays::ship_jettison(ctx, session, args, kwargs).await
+}
+
+async fn handle_ship_drop(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    fitting_ship_bays::ship_drop(ctx, session, args, kwargs).await
 }
 
 pub use super::fitting_saved_apply::{dna_to_fitting, fitting_to_dna, saved_fitting_to_dna};

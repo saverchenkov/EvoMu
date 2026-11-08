@@ -282,6 +282,18 @@ async fn test_pi_orbitals_flush_launch_import_and_program_rpcs() {
         .unwrap(),
         PyRep::Integer(planet_id)
     );
+    let forged_err = handle_pi_orbitals(
+        &ctx,
+        &mut session,
+        "planetMgr",
+        "planetID",
+        &[PyRep::Integer(99_999_999)],
+        &HashMap::new(),
+        None,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(forged_err.code, "InvalidPlanetID");
     assert_eq!(
         handle_pi_orbitals(&ctx, &mut session, "planetMgr", "append", &[], &HashMap::new(), None)
             .unwrap()

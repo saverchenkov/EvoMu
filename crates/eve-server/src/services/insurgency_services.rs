@@ -99,9 +99,20 @@ pub fn build_campaign_snapshot_for_system(c: &InsurgencyCampaign, sys_id: u32, n
     let s5 = c.suppression_points.values().filter(|&&pts| insurgency_stage(pts) >= 5).count();
     let sys_reps: Vec<PyRep> = c.systems.iter().map(|&s| PyRep::Integer(i64::from(s))).collect();
 
+    let warzone_id: i64 = if matches!(c.target_faction_id, 500_002 | 500_003)
+        || c.pirate_faction_id == FACTION_ANGEL_CARTEL
+    {
+        2
+    } else {
+        1
+    };
+
     PyRep::keyval([
         ("campaignID", PyRep::Integer(c.campaign_id)),
         ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+        ("originSolarsystemID", PyRep::Integer(i64::from(c.fob_solar_system_id))),
+        ("structureID", PyRep::Integer(unified_fob_id(c.campaign_id))),
+        ("warzoneID", PyRep::Integer(warzone_id)),
         ("pirateFactionID", PyRep::Integer(c.pirate_faction_id)),
         ("targetFactionID", PyRep::Integer(c.target_faction_id)),
         ("fobSolarSystemID", PyRep::Integer(i64::from(c.fob_solar_system_id))),
@@ -114,6 +125,8 @@ pub fn build_campaign_snapshot_for_system(c: &InsurgencyCampaign, sys_id: u32, n
         ("suppressionStage", PyRep::Integer(i64::from(s_stage))),
         ("corruptionPoints", PyRep::Integer(c_pts)),
         ("suppressionPoints", PyRep::Integer(s_pts)),
+        ("piratePointsRequired", PyRep::Integer(1_000)),
+        ("antipiratePointsRequired", PyRep::Integer(1_000)),
         ("coveredSolarsystemIDs", PyRep::List(sys_reps.clone())),
         ("systems", PyRep::List(sys_reps)),
     ])
@@ -1237,70 +1250,168 @@ pub async fn handle(
     let now = ctx.now_unix();
     match (service, method) {
         ("insurgencySolarsystem", "GetAllVisibleCampaigns") => {
-            let campaigns = read_insurgency_runtime(ctx, |rt| {
-                rt.campaigns.values().map(|c| {
-                    let (phase, end_time) = get_campaign_phase_and_timer(c, now);
-                    let emp_mod = rt.empire_ambition_modifier.get(&c.pirate_faction_id).copied().unwrap_or(0).min(5);
-                    let s5 = c.suppression_points.values().filter(|&&pts| insurgency_stage(pts) >= 5).count();
-                    let sys_reps: Vec<PyRep> = c.systems.iter().map(|&s| PyRep::Integer(i64::from(s))).collect();
-                    PyRep::keyval([
-                        ("campaignID", PyRep::Integer(c.campaign_id)),
-                        ("pirateFactionID", PyRep::Integer(c.pirate_faction_id)),
-                        ("targetFactionID", PyRep::Integer(c.target_faction_id)),
-                        ("fobSolarSystemID", PyRep::Integer(i64::from(c.fob_solar_system_id))),
-                        ("phase", PyRep::String(phase.into())),
-                        ("phaseEndTime", PyRep::Integer(end_time as i64)),
-                        ("systems", PyRep::List(sys_reps)),
-                        ("isFobVulnerable", PyRep::Bool(phase == PHASE_ACTIVE && s5 >= usize::from(5 + emp_mod))),
-                    ])
-                }).collect::<Vec<PyRep>>()
-            });
-            Some(Ok(PyRep::List(campaigns)))
+            Some(handle_get_all_visible_campaigns(ctx, now))
         }
         ("insurgencySolarsystem", "GetLocalCampaignClientSnapshot") => {
-            let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
-            };
-            let snapshot = read_insurgency_runtime(ctx, |rt| {
-                rt.campaigns.values().find(|c| c.systems.contains(&sys_id))
-                    .map(|c| build_campaign_snapshot_for_system(c, sys_id, now, rt.empire_ambition_modifier.get(&c.pirate_faction_id).copied().unwrap_or(0)))
-            });
-            Some(Ok(PyRep::Tuple(vec![PyRep::Integer(i64::from(sys_id)), snapshot.unwrap_or(PyRep::None)])))
+            Some(handle_get_local_campaign_snapshot(ctx, session, now))
         }
         ("dungeonInstanceCacheMgr", "GetPirateInsurgencyInstances") => {
-            let sys_id = match resolve_sys(args, session.solar_system_id) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let instances = read_insurgency_runtime(ctx, |rt| {
-                rt.insurgency_instances.iter().filter(|s| sys_id.map(|sys| s.solar_system_id == sys).unwrap_or(true)).map(|s| {
-                    PyRep::keyval([
-                        ("instanceID", PyRep::Integer(s.instance_id)),
-                        ("solarSystemID", PyRep::Integer(i64::from(s.solar_system_id))),
-                        ("siteType", PyRep::String(s.site_type.clone())),
-                        ("name", PyRep::String(s.name.clone())),
-                        ("corruptionReward", PyRep::Real(s.corruption_reward)),
-                        ("completed", PyRep::Bool(s.completed)),
-                    ])
-                }).collect::<Vec<PyRep>>()
-            });
-            Some(Ok(PyRep::List(instances)))
+            let sys_id = match resolve_sys(args, session.solar_system_id) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(handle_get_pirate_insurgency_instances(ctx, sys_id))
         }
         // parity: feat:pve.insurgency-ice-heist
         ("dungeonInstanceCacheMgr", "GetPirateInsurgencyIceHeistInstances") => {
-            let sys_id = match resolve_sys(args, session.solar_system_id) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let instances = read_insurgency_runtime(ctx, |rt| {
-                rt.ice_heist_instances.iter().filter(|h| sys_id.map(|sys| h.solar_system_id == sys).unwrap_or(true)).map(|h| {
-                    PyRep::keyval([
-                        ("instanceID", PyRep::Integer(h.instance_id)),
-                        ("solarSystemID", PyRep::Integer(i64::from(h.solar_system_id))),
-                        ("pirateTankersSaved", PyRep::Integer(i64::from(h.pirate_tankers_saved))),
-                        ("empireTankersSaved", PyRep::Integer(i64::from(h.empire_tankers_saved))),
-                        ("completed", PyRep::Bool(h.completed)),
-                    ])
-                }).collect::<Vec<PyRep>>()
-            });
-            Some(Ok(PyRep::List(instances)))
+            let sys_id = match resolve_sys(args, session.solar_system_id) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(handle_get_pirate_ice_heist_instances(ctx, sys_id))
         }
         _ => None,
     }
+}
+
+fn handle_get_all_visible_campaigns(
+    ctx: &ServerContext,
+    now: u64,
+) -> Result<PyRep, BridgeRpcError> {
+    let campaigns = read_insurgency_runtime(ctx, |rt| {
+        rt.campaigns
+            .values()
+            .map(|c| {
+                let (phase, end_time) = get_campaign_phase_and_timer(c, now);
+                let emp_mod = rt
+                    .empire_ambition_modifier
+                    .get(&c.pirate_faction_id)
+                    .copied()
+                    .unwrap_or(0)
+                    .min(5);
+                let s5 = c
+                    .suppression_points
+                    .values()
+                    .filter(|&&pts| insurgency_stage(pts) >= 5)
+                    .count();
+                let sys_reps: Vec<PyRep> = c
+                    .systems
+                    .iter()
+                    .map(|&s| PyRep::Integer(i64::from(s)))
+                    .collect();
+                let warzone_id: i64 = if matches!(c.target_faction_id, 500_002 | 500_003)
+                    || c.pirate_faction_id == FACTION_ANGEL_CARTEL
+                {
+                    2
+                } else {
+                    1
+                };
+                PyRep::keyval([
+                    ("campaignID", PyRep::Integer(c.campaign_id)),
+                    ("pirateFactionID", PyRep::Integer(c.pirate_faction_id)),
+                    ("targetFactionID", PyRep::Integer(c.target_faction_id)),
+                    ("warzoneID", PyRep::Integer(warzone_id)),
+                    ("originSolarsystemID", PyRep::Integer(i64::from(c.fob_solar_system_id))),
+                    ("fobSolarSystemID", PyRep::Integer(i64::from(c.fob_solar_system_id))),
+                    ("structureID", PyRep::Integer(unified_fob_id(c.campaign_id))),
+                    ("fsmState", PyRep::String(phase.into())),
+                    ("phase", PyRep::String(phase.into())),
+                    ("phaseEndTime", PyRep::Integer(end_time as i64)),
+                    ("coveredSolarsystemIDs", PyRep::List(sys_reps.clone())),
+                    ("systems", PyRep::List(sys_reps)),
+                    (
+                        "isFobVulnerable",
+                        PyRep::Bool(phase == PHASE_ACTIVE && s5 >= usize::from(5 + emp_mod)),
+                    ),
+                ])
+            })
+            .collect::<Vec<PyRep>>()
+    });
+    Ok(PyRep::List(campaigns))
+}
+
+fn handle_get_local_campaign_snapshot(
+    ctx: &ServerContext,
+    session: &SessionState,
+    now: u64,
+) -> Result<PyRep, BridgeRpcError> {
+    let Some(sys_id) = session.solar_system_id else {
+        return Err(BridgeRpcError {
+            code: "NoSolarSystem".into(),
+            message: "Session has no active solar system".into(),
+        });
+    };
+    let snapshot = read_insurgency_runtime(ctx, |rt| {
+        rt.campaigns
+            .values()
+            .find(|c| c.systems.contains(&sys_id))
+            .map(|c| {
+                build_campaign_snapshot_for_system(
+                    c,
+                    sys_id,
+                    now,
+                    rt.empire_ambition_modifier
+                        .get(&c.pirate_faction_id)
+                        .copied()
+                        .unwrap_or(0),
+                )
+            })
+    });
+    Ok(PyRep::Tuple(vec![
+        PyRep::Integer(i64::from(sys_id)),
+        snapshot.unwrap_or(PyRep::None),
+    ]))
+}
+
+fn handle_get_pirate_insurgency_instances(
+    ctx: &ServerContext,
+    sys_id: Option<u32>,
+) -> Result<PyRep, BridgeRpcError> {
+    let instances = read_insurgency_runtime(ctx, |rt| {
+        rt.insurgency_instances
+            .iter()
+            .filter(|s| sys_id.map(|sys| s.solar_system_id == sys).unwrap_or(true))
+            .map(|s| {
+                PyRep::keyval([
+                    ("instanceID", PyRep::Integer(s.instance_id)),
+                    ("solarSystemID", PyRep::Integer(i64::from(s.solar_system_id))),
+                    ("siteType", PyRep::String(s.site_type.clone())),
+                    ("name", PyRep::String(s.name.clone())),
+                    ("corruptionReward", PyRep::Real(s.corruption_reward)),
+                    ("completed", PyRep::Bool(s.completed)),
+                ])
+            })
+            .collect::<Vec<PyRep>>()
+    });
+    Ok(PyRep::List(instances))
+}
+
+fn handle_get_pirate_ice_heist_instances(
+    ctx: &ServerContext,
+    sys_id: Option<u32>,
+) -> Result<PyRep, BridgeRpcError> {
+    let instances = read_insurgency_runtime(ctx, |rt| {
+        rt.ice_heist_instances
+            .iter()
+            .filter(|h| sys_id.map(|sys| h.solar_system_id == sys).unwrap_or(true))
+            .map(|h| {
+                PyRep::keyval([
+                    ("instanceID", PyRep::Integer(h.instance_id)),
+                    ("solarSystemID", PyRep::Integer(i64::from(h.solar_system_id))),
+                    (
+                        "pirateTankersSaved",
+                        PyRep::Integer(i64::from(h.pirate_tankers_saved)),
+                    ),
+                    (
+                        "empireTankersSaved",
+                        PyRep::Integer(i64::from(h.empire_tankers_saved)),
+                    ),
+                    ("completed", PyRep::Bool(h.completed)),
+                ])
+            })
+            .collect::<Vec<PyRep>>()
+    });
+    Ok(PyRep::List(instances))
 }
 
 #[cfg(test)] #[path = "insurgency_services_tests.rs"] mod insurgency_services_tests;

@@ -1306,7 +1306,7 @@ pub fn handle_pi_orbitals(
         }
 
         ("planetMgr", "id") | ("planetMgr", "planetID") => {
-            let (_, _char_id) = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -1317,6 +1317,14 @@ pub fn handle_pi_orbitals(
                     message: "planetID requires bound planetMgr moniker or explicit planetID".into(),
                 }));
             };
+            let known_in_sde = ctx.sde.solar_systems.values().any(|s| s.planet_ids.contains(&planet_id));
+            let known_colony = ctx.db.with_snapshot(|snap| snap.planetary_colonies.contains_key(&(char_id, planet_id)));
+            if !known_in_sde && !known_colony {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidPlanetID".into(),
+                    message: format!("Unknown planetID {planet_id}"),
+                }));
+            }
             Some(Ok(PyRep::Integer(planet_id)))
         }
 

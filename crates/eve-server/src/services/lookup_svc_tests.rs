@@ -132,4 +132,51 @@ fn test_lookup_svc_bannedwords_and_all_lookup_rpcs() {
     } else {
         panic!("expected list");
     }
+
+    // Dynamic server-configured banned words stored in service_state_blobs
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs
+            .insert("bannedwords:words".into(), "forbiddenalpha,badbeta".into());
+        snap.service_state_blobs
+            .insert("bannedwords:regexes".into(), r"(?i)\bcustompat\b".into());
+    });
+    let regexes_after = handle(&ctx, &session, "bannedwords", "fetch_regexes", &[], &kw)
+        .unwrap()
+        .unwrap();
+    let PyRep::List(r_list) = regexes_after else { panic!("expected list"); };
+    assert!(r_list.iter().any(|r| r.as_str().unwrap_or("").contains("forbiddenalpha")));
+    assert!(r_list.contains(&PyRep::String(r"(?i)\bcustompat\b".into())));
+    assert!(handle(
+        &ctx,
+        &session,
+        "bannedwords",
+        "check_words_allowed",
+        &[PyRep::String("Station forbiddenalpha".into())],
+        &kw,
+    )
+    .unwrap()
+    .is_err());
+    assert!(handle(
+        &ctx,
+        &session,
+        "bannedwords",
+        "check_chat_words_allowed",
+        &[PyRep::String("hello badbeta".into())],
+        &kw,
+    )
+    .unwrap()
+    .is_err());
+    assert_eq!(
+        handle(
+            &ctx,
+            &session,
+            "bannedwords",
+            "check_search_words_allowed",
+            &[PyRep::String("forbiddenalpha".into())],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(false)
+    );
 }

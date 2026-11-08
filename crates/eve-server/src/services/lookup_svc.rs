@@ -31,15 +31,153 @@ fn parse_search_args(args: &[PyRep]) -> (String, bool) {
     (query, exact)
 }
 
+const DEFAULT_BANNED_WORDS: [&str; 6] = [
+    "badword",
+    "bannedword",
+    "exploit",
+    "scam",
+    "hack",
+    "profanity",
+];
+
+fn load_banned_words(ctx: &ServerContext) -> Vec<String> {
+    let mut words: Vec<String> = DEFAULT_BANNED_WORDS.iter().map(|w| (*w).to_string()).collect();
+    ctx.db.with_snapshot(|snap| {
+        if let Some(extra) = snap.service_state_blobs.get("bannedwords:words") {
+            for token in extra
+                .split(|c: char| c == ',' || c == '\n' || c == ';')
+                .map(|t| t.trim().to_ascii_lowercase())
+                .filter(|t| !t.is_empty())
+            {
+                if !words.contains(&token) {
+                    words.push(token);
+                }
+            }
+        }
+    });
+    words
+}
+
+fn load_banned_regexes(ctx: &ServerContext) -> Vec<String> {
+    let words = load_banned_words(ctx);
+    let mut regexes = vec![format!(r"(?i)\b(?:{})\b", words.join("|"))];
+    ctx.db.with_snapshot(|snap| {
+        if let Some(extra) = snap.service_state_blobs.get("bannedwords:regexes") {
+            for pat in extra
+                .lines()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+            {
+                if !regexes.iter().any(|r| r == pat) {
+                    regexes.push(pat.to_string());
+                }
+            }
+        }
+    });
+    regexes
+}
+
 pub fn is_word_allowed(s: &str) -> bool {
     let lower = s.to_lowercase();
-    let banned = ["badword", "bannedword", "exploit", "scam", "hack", "profanity"];
-    for b in &banned {
+    for b in &DEFAULT_BANNED_WORDS {
         if lower.contains(b) {
             return false;
         }
     }
     true
+}
+
+fn is_word_allowed_for_ctx(ctx: &ServerContext, s: &str) -> bool {
+    let lower = s.to_lowercase();
+    for b in load_banned_words(ctx) {
+        if lower.contains(&b) {
+            return false;
+        }
+    }
+    true
+}
+
+fn handle_bannedwords_fetch_regexes(ctx: &ServerContext) -> Result<PyRep, BridgeRpcError> {
+    let regexes: Vec<PyRep> = load_banned_regexes(ctx).into_iter().map(PyRep::String).collect();
+    Ok(PyRep::List(regexes))
+}
+
+fn handle_bannedwords_check_words_allowed(
+    ctx: &ServerContext,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let target_arg = args
+        .first()
+        .or_else(|| kwargs.get("words"))
+        .or_else(|| kwargs.get("word"));
+    match target_arg {
+        Some(PyRep::List(words)) | Some(PyRep::Tuple(words)) => {
+            let results: Vec<PyRep> = words
+                .iter()
+                .map(|w| PyRep::Bool(is_word_allowed_for_ctx(ctx, w.as_str().unwrap_or(""))))
+                .collect();
+            Ok(PyRep::List(results))
+        }
+        Some(PyRep::String(s)) => {
+            if is_word_allowed_for_ctx(ctx, s) {
+                Ok(PyRep::None)
+            } else {
+                Err(BridgeRpcError {
+                    code: "UserError".into(),
+                    message: "LocationNameInvalidBannedWord".into(),
+                })
+            }
+        }
+        // DERIVED: V24 check_words_allowed returns None when given null or empty input.
+        _ => Ok(PyRep::None),
+    }
+}
+
+fn handle_bannedwords_check_chat_words_allowed(
+    ctx: &ServerContext,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let target_arg = args
+        .first()
+        .or_else(|| kwargs.get("words"))
+        .or_else(|| kwargs.get("text"))
+        .or_else(|| kwargs.get("word"));
+    let is_allowed = match target_arg {
+        Some(PyRep::List(words)) | Some(PyRep::Tuple(words)) => words
+            .iter()
+            .all(|w| is_word_allowed_for_ctx(ctx, w.as_str().unwrap_or(""))),
+        Some(PyRep::String(s)) => is_word_allowed_for_ctx(ctx, s),
+        _ => true,
+    };
+    if is_allowed {
+        Ok(PyRep::None)
+    } else {
+        Err(BridgeRpcError {
+            code: "UserError".into(),
+            message: "ChatContentInvalidBannedWords".into(),
+        })
+    }
+}
+
+fn handle_bannedwords_check_search_words_allowed(
+    ctx: &ServerContext,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let target_arg = args
+        .first()
+        .or_else(|| kwargs.get("words"))
+        .or_else(|| kwargs.get("searchStr"));
+    let all_ok = match target_arg {
+        Some(PyRep::List(words)) | Some(PyRep::Tuple(words)) => words
+            .iter()
+            .all(|w| is_word_allowed_for_ctx(ctx, w.as_str().unwrap_or(""))),
+        Some(PyRep::String(s)) => is_word_allowed_for_ctx(ctx, s),
+        _ => true,
+    };
+    Ok(PyRep::Bool(all_ok))
 }
 
 pub fn handle(
@@ -509,67 +647,15 @@ pub fn handle(
             Some(Ok(PyRep::List(results.into_iter().map(|(_, rep)| rep).collect())))
         }
 
-        ("bannedwords", "fetch_regexes") => {
-            let regexes = vec![
-                PyRep::String(r"(?i)\b(?:badword|bannedword|exploit|scam|hack|profanity)\b".into()),
-            ];
-            Some(Ok(PyRep::List(regexes)))
-        }
-
+        ("bannedwords", "fetch_regexes") => Some(handle_bannedwords_fetch_regexes(ctx)),
         ("bannedwords", "check_words_allowed") => {
-            let target_arg = args.first().or_else(|| kwargs.get("words")).or_else(|| kwargs.get("word"));
-            match target_arg {
-                Some(PyRep::List(words)) | Some(PyRep::Tuple(words)) => {
-                    let results: Vec<PyRep> = words
-                        .iter()
-                        .map(|w| PyRep::Bool(is_word_allowed(w.as_str().unwrap_or(""))))
-                        .collect();
-                    Some(Ok(PyRep::List(results)))
-                }
-                Some(PyRep::String(s)) => {
-                    if is_word_allowed(s) {
-                        Some(Ok(PyRep::None))
-                    } else {
-                        Some(Err(BridgeRpcError {
-                            code: "UserError".into(),
-                            message: "LocationNameInvalidBannedWord".into(),
-                        }))
-                    }
-                }
-                // DERIVED: V24 check_words_allowed returns None when given null or empty input.
-                _ => Some(Ok(PyRep::None)),
-            }
+            Some(handle_bannedwords_check_words_allowed(ctx, args, kwargs))
         }
-
         ("bannedwords", "check_chat_words_allowed") => {
-            let target_arg = args.first().or_else(|| kwargs.get("words")).or_else(|| kwargs.get("text")).or_else(|| kwargs.get("word"));
-            let is_allowed = match target_arg {
-                Some(PyRep::List(words)) | Some(PyRep::Tuple(words)) => {
-                    words.iter().all(|w| is_word_allowed(w.as_str().unwrap_or("")))
-                }
-                Some(PyRep::String(s)) => is_word_allowed(s),
-                _ => true,
-            };
-            if is_allowed {
-                Some(Ok(PyRep::None))
-            } else {
-                Some(Err(BridgeRpcError {
-                    code: "UserError".into(),
-                    message: "ChatContentInvalidBannedWords".into(),
-                }))
-            }
+            Some(handle_bannedwords_check_chat_words_allowed(ctx, args, kwargs))
         }
-
         ("bannedwords", "check_search_words_allowed") => {
-            let target_arg = args.first().or_else(|| kwargs.get("words")).or_else(|| kwargs.get("searchStr"));
-            let all_ok = match target_arg {
-                Some(PyRep::List(words)) | Some(PyRep::Tuple(words)) => {
-                    words.iter().all(|w| is_word_allowed(w.as_str().unwrap_or("")))
-                }
-                Some(PyRep::String(s)) => is_word_allowed(s),
-                _ => true,
-            };
-            Some(Ok(PyRep::Bool(all_ok)))
+            Some(handle_bannedwords_check_search_words_allowed(ctx, args, kwargs))
         }
 
         ("search", "Query") => Some(handle_search_query(ctx, session, args, kwargs)),

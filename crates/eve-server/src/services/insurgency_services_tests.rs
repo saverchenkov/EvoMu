@@ -97,7 +97,13 @@ async fn insurgency_services_stages_campaigns_and_rpc_mutations() {
     .await
     .unwrap()
     .unwrap();
-    assert!(!visible.as_list().unwrap().is_empty());
+    let vis_list = visible.as_list().unwrap();
+    assert!(!vis_list.is_empty());
+    assert!(vis_list[0].dict_get("coveredSolarsystemIDs").is_some());
+    assert!(vis_list[0].dict_get("originSolarsystemID").is_some());
+    assert!(vis_list[0].dict_get("fsmState").is_some());
+    assert!(vis_list[0].dict_get("structureID").is_some());
+    assert!(vis_list[0].dict_get("warzoneID").is_some());
 
     sess.solar_system_id = Some(fob_sys);
     let local_snap = handle(

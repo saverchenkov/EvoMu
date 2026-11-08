@@ -198,6 +198,30 @@ fn handle_bounty_clear_memoized(
     Ok(PyRep::None)
 }
 
+fn handle_gm_bounty_admin(
+    ctx: &ServerContext,
+    session: &SessionState,
+    method: &str,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    ServerContext::require_character(session)?;
+    let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+    let set_amt = args.get(1).and_then(|a| a.as_f64());
+    let action = if method == "GMReimburseBounties" {
+        "reimburse"
+    } else if set_amt.is_some() {
+        "set"
+    } else {
+        "clear"
+    };
+    let amount = gm_admin_bounty_action(ctx, session, action, target_id, set_amt.unwrap_or(0.0))?;
+    Ok(PyRep::keyval([
+        ("action", PyRep::String(action.into())),
+        ("targetID", PyRep::Integer(target_id)),
+        ("amountISK", PyRep::Real(amount)),
+    ]))
+}
+
 fn handle_gm_clear_bounty_cache(
     ctx: &ServerContext,
     session: &SessionState,
@@ -613,19 +637,13 @@ pub fn handle_bounty_proxy(
             ))
         }
 
-        ("bountyProxy", "SearchCorpBounties") => Some(handle_search_bounties(
-            ctx,
-            session,
-            BountySearchType::Corporation,
-            args,
-        )),
+        ("bountyProxy", "SearchCorpBounties") => {
+            Some(handle_search_bounties(ctx, session, BountySearchType::Corporation, args))
+        }
 
-        ("bountyProxy", "SearchAllianceBounties") => Some(handle_search_bounties(
-            ctx,
-            session,
-            BountySearchType::Alliance,
-            args,
-        )),
+        ("bountyProxy", "SearchAllianceBounties") => {
+            Some(handle_search_bounties(ctx, session, BountySearchType::Alliance, args))
+        }
 
         ("bountyProxy", "clear_memoized") => {
             Some(handle_bounty_clear_memoized(ctx, session))
@@ -713,27 +731,7 @@ pub fn handle_bounty_proxy(
         }
 
         ("bountyProxy", "GMReimburseBounties") | ("bountyProxy", "ClearBounty") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let set_amt = args.get(1).and_then(|a| a.as_f64());
-            let action = if method == "GMReimburseBounties" {
-                "reimburse"
-            } else if set_amt.is_some() {
-                "set"
-            } else {
-                "clear"
-            };
-            match gm_admin_bounty_action(ctx, session, action, target_id, set_amt.unwrap_or(0.0)) {
-                Ok(amount) => Some(Ok(PyRep::keyval([
-                    ("action", PyRep::String(action.into())),
-                    ("targetID", PyRep::Integer(target_id)),
-                    ("amountISK", PyRep::Real(amount)),
-                ]))),
-                Err(e) => Some(Err(e)),
-            }
+            Some(handle_gm_bounty_admin(ctx, session, method, args))
         }
 
         _ => None,

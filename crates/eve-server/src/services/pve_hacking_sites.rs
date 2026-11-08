@@ -850,252 +850,307 @@ pub async fn handle_pve_hacking(
 
         // parity: rpc:hackingMgr.UsedUtilityElementOnVirus
         ("hackingMgr", "UsedUtilityElementOnVirus") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let (container_id, slot_idx) = match args {
-                [PyRep::Integer(a), PyRep::Integer(b), ..] => {
-                    if *a > 1000 { (*a, *b as usize) } else { (*b, *a as usize) }
-                }
-                [PyRep::Integer(a)] => {
-                    let active_cid = with_pve_exploration_reg(ctx, |reg| {
-                        reg.hacking_games.keys().find(|(cid, _)| *cid == char_id).map(|(_, cont_id)| *cont_id)
-                    });
-                    let Some(cid) = active_cid else {
-                        return Some(Err(BridgeRpcError {
-                            code: "TargetNotFound".into(),
-                            message: "Target container not specified".into(),
-                        }));
-                    };
-                    (cid, *a as usize)
-                }
-                _ => {
-                    return Some(Err(BridgeRpcError {
-                        code: "TargetNotFound".into(),
-                        message: "Target container not specified".into(),
-                    }));
-                }
-            };
-            let target_tile_opt = args.get(2).and_then(|a| a.as_i64());
-            if let Some(raw_t) = target_tile_opt {
-                if raw_t < 0 {
-                    return Some(Err(BridgeRpcError::user_error("InvalidTileIndex")));
-                }
-            }
-            if let Err(e) = validate_active_hacking_ship_and_range(ctx, session, char_id, container_id).await {
-                return Some(Err(e));
-            }
-            let target_tile_u32 = target_tile_opt.map(|t| t as u32);
-
-            let res = with_pve_exploration_reg(ctx, |reg| {
-                let Some(game) = reg.hacking_games.get_mut(&(char_id, container_id)) else {
-                    return Err(BridgeRpcError {
-                        code: "NoActiveHackingGame".into(),
-                        message: format!("No active hacking game on container {container_id}"),
-                    });
-                };
-                if game.status != "InProgress" && game.status != "active" {
-                    return Err(BridgeRpcError {
-                        code: "HackingGameAlreadyFinished".into(),
-                        message: format!("Hacking game on container {container_id} is already finished"),
-                    });
-                }
-                let Some(util) = game.utilities.get(slot_idx).and_then(|u| *u) else {
-                    return Err(BridgeRpcError {
-                        code: "UtilitySlotEmpty".into(),
-                        message: format!("Utility slot {slot_idx} is empty"),
-                    });
-                };
-                if matches!(util, HackingUtilityKind::KernelRot | HackingUtilityKind::SecondaryVector) {
-                    if let Some(tid) = target_tile_u32 {
-                        let Some(t) = game.tiles.get(tid as usize) else {
-                            return Err(BridgeRpcError::user_error("InvalidTileIndex"));
-                        };
-                        if !t.revealed || t.coherence <= 0 {
-                            return Err(BridgeRpcError::user_error("TargetTileNotRevealed"));
-                        }
-                    } else if !game.tiles.iter().any(|t| t.revealed && t.coherence > 0) {
-                        return Err(BridgeRpcError::user_error("TargetTileNotRevealed"));
-                    }
-                }
-                game.utilities[slot_idx] = None;
-                match util {
-                    HackingUtilityKind::SelfRepair => {
-                        reg.self_repair_turns.insert((char_id, container_id), 3);
-                    }
-                    HackingUtilityKind::KernelRot => {
-                        if let Some(tid) = target_tile_u32 {
-                            if let Some(t) = game.tiles.get_mut(tid as usize) {
-                                t.coherence = (t.coherence / 2).max(1);
-                            }
-                        } else if let Some(t) = game.tiles.iter_mut().find(|t| t.revealed && t.coherence > 0) {
-                            t.coherence = (t.coherence / 2).max(1);
-                        }
-                    }
-                    HackingUtilityKind::PolymorphicShield => {
-                        game.polymorphic_shield_charges += 2;
-                    }
-                    HackingUtilityKind::SecondaryVector => {
-                        let chosen_tile = target_tile_u32
-                            .or_else(|| game.tiles.iter().find(|t| t.revealed && t.coherence > 0).map(|t| t.tile_index))
-                            .unwrap_or(0);
-                        game.secondary_vector_target = Some((chosen_tile, 3));
-                    }
-                }
-                Ok(PyRep::keyval([
-                    ("containerID", PyRep::Integer(container_id)),
-                    ("usedSlot", PyRep::Integer(slot_idx as i64)),
-                    ("virusCoherence", PyRep::Integer(game.virus_coherence as i64)),
-                    ("polymorphicShieldCharges", PyRep::Integer(game.polymorphic_shield_charges as i64)),
-                ]))
-            });
-            Some(res)
+            Some(handle_hacking_used_utility_on_virus(ctx, session, args).await)
         }
 
-        ("hackingMgr", "values") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(container_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetNotFound".into(),
-                    message: "Target container not specified".into(),
-                }));
-            };
-            let tiles = with_pve_exploration_reg(ctx, |reg| {
-                reg.hacking_games.get(&(char_id, container_id)).map(|g| {
-                    g.tiles.iter().map(|t| {
-                        let node_type = if t.revealed { format!("{:?}", t.kind) } else { "Unrevealed".into() };
-                        let mut kv = vec![
-                            ("tileIndex", PyRep::Integer(t.tile_index as i64)),
-                            ("revealed", PyRep::Bool(t.revealed)),
-                            ("nodeType", PyRep::String(node_type)),
-                            ("coherence", PyRep::Integer(if t.revealed { t.coherence as i64 } else { 0 })),
-                            ("strength", PyRep::Integer(if t.revealed { t.strength as i64 } else { 0 })),
-                        ];
-                        if t.revealed {
-                            kv.push(("distanceIndicator", PyRep::Integer(hacking_tile_distance_indicator(t.tile_index, &g.tiles) as i64)));
-                        }
-                        PyRep::keyval(kv)
-                    }).collect::<Vec<_>>()
-                }).unwrap_or_default()
-            });
-            Some(Ok(PyRep::List(tiles)))
-        }
+        ("hackingMgr", "values") => Some(handle_hacking_values(ctx, session, args)),
 
         // parity: feat:pve.hacking-minigame
         ("hackingMgr", "UsedUtilityElement") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let (container_id, slot_idx, raw_tile_idx) = if args.len() >= 3 {
-                (
-                    args.first().and_then(|a| a.as_i64()).unwrap_or(1_870_000_000),
-                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(0).max(0) as usize,
-                    extract_tile_index(args.get(2)).unwrap_or(0),
-                )
-            } else {
-                let Some(cid) = find_active_hacking_container(ctx, char_id) else {
-                    return Some(Err(BridgeRpcError {
-                        code: "NoActiveHackingGame".into(),
-                        message: "No active hacking session for character".into(),
-                    }));
-                };
-                let slot = args.first().and_then(|a| a.as_i64()).unwrap_or(0).max(0) as usize;
-                let tile = extract_tile_index(args.get(1)).unwrap_or(0);
-                (cid, slot, tile)
-            };
-            if raw_tile_idx < 0 {
-                return Some(Err(BridgeRpcError::user_error("InvalidTileIndex")));
-            }
-            let target_tile_idx = raw_tile_idx as usize;
-            if let Err(e) = validate_active_hacking_ship_and_range(ctx, session, char_id, container_id).await {
-                return Some(Err(e));
-            }
-
-            let res = with_pve_exploration_reg(ctx, |reg| {
-                let Some(game) = reg.hacking_games.get_mut(&(char_id, container_id)) else {
-                    return Err(BridgeRpcError {
-                        code: "NoActiveHackingGame".into(),
-                        message: format!("No active hacking game on container {container_id}"),
-                    });
-                };
-                if game.status != "InProgress" {
-                    return Err(BridgeRpcError {
-                        code: "HackingGameAlreadyFinished".into(),
-                        message: format!("Hacking game on container {container_id} is already finished"),
-                    });
-                }
-                let Some(util) = game.utilities.get(slot_idx).and_then(|u| *u) else {
-                    return Err(BridgeRpcError {
-                        code: "UtilitySlotEmpty".into(),
-                        message: format!("Utility slot {slot_idx} is empty"),
-                    });
-                };
-                if matches!(util, HackingUtilityKind::KernelRot | HackingUtilityKind::SecondaryVector) {
-                    let Some(t) = game.tiles.get(target_tile_idx) else {
-                        return Err(BridgeRpcError::user_error("InvalidTileIndex"));
-                    };
-                    if !t.revealed || t.coherence <= 0 {
-                        return Err(BridgeRpcError::user_error("TargetTileNotRevealed"));
-                    }
-                }
-                game.utilities[slot_idx] = None;
-                match util {
-                    HackingUtilityKind::SelfRepair => {
-                        reg.self_repair_turns.insert((char_id, container_id), 3);
-                    }
-                    HackingUtilityKind::KernelRot => {
-                        if let Some(t) = game.tiles.get_mut(target_tile_idx) {
-                            t.coherence = (t.coherence / 2).max(1);
-                        }
-                    }
-                    HackingUtilityKind::PolymorphicShield => {
-                        game.polymorphic_shield_charges += 2;
-                    }
-                    HackingUtilityKind::SecondaryVector => {
-                        game.secondary_vector_target = Some((target_tile_idx as u32, 3));
-                    }
-                }
-                Ok(PyRep::keyval([
-                    ("containerID", PyRep::Integer(container_id)),
-                    ("usedSlot", PyRep::Integer(slot_idx as i64)),
-                    ("virusCoherence", PyRep::Integer(game.virus_coherence as i64)),
-                    ("polymorphicShieldCharges", PyRep::Integer(game.polymorphic_shield_charges as i64)),
-                ]))
-            });
-            Some(res)
+            Some(handle_hacking_used_utility(ctx, session, args).await)
         }
 
         ("hackingMgr", "GetMyHackProgress") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let container_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let res = with_pve_exploration_reg(ctx, |reg| {
-                if let Some(game) = reg.hacking_games.get(&(char_id, container_id)) {
-                    PyRep::keyval([
-                        ("containerID", PyRep::Integer(container_id)),
-                        ("status", PyRep::String(game.status.clone())),
-                        ("virusCoherence", PyRep::Integer(game.virus_coherence as i64)),
-                    ])
-                } else {
-                    PyRep::keyval([
-                        ("containerID", PyRep::Integer(container_id)),
-                        ("status", PyRep::String("NotStarted".into())),
-                        ("virusCoherence", PyRep::Integer(0)),
-                    ])
-                }
-            });
-            Some(Ok(res))
+            Some(handle_hacking_get_progress(ctx, session, args))
         }
 
         _ => None,
     }
+}
+
+async fn handle_hacking_used_utility_on_virus(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let (container_id, slot_idx) = match args {
+        [PyRep::Integer(a), PyRep::Integer(b), ..] => {
+            if *a > 1000 { (*a, *b as usize) } else { (*b, *a as usize) }
+        }
+        [PyRep::Integer(a)] => {
+            let active_cid = with_pve_exploration_reg(ctx, |reg| {
+                reg.hacking_games
+                    .keys()
+                    .find(|(cid, _)| *cid == char_id)
+                    .map(|(_, cont_id)| *cont_id)
+            });
+            let Some(cid) = active_cid else {
+                return Err(BridgeRpcError {
+                    code: "TargetNotFound".into(),
+                    message: "Target container not specified".into(),
+                });
+            };
+            (cid, *a as usize)
+        }
+        _ => {
+            return Err(BridgeRpcError {
+                code: "TargetNotFound".into(),
+                message: "Target container not specified".into(),
+            });
+        }
+    };
+    let target_tile_opt = args.get(2).and_then(|a| a.as_i64());
+    if let Some(raw_t) = target_tile_opt {
+        if raw_t < 0 {
+            return Err(BridgeRpcError::user_error("InvalidTileIndex"));
+        }
+    }
+    validate_active_hacking_ship_and_range(ctx, session, char_id, container_id).await?;
+    let target_tile_u32 = target_tile_opt.map(|t| t as u32);
+
+    with_pve_exploration_reg(ctx, |reg| {
+        let Some(game) = reg.hacking_games.get_mut(&(char_id, container_id)) else {
+            return Err(BridgeRpcError {
+                code: "NoActiveHackingGame".into(),
+                message: format!("No active hacking game on container {container_id}"),
+            });
+        };
+        if game.status != "InProgress" && game.status != "active" {
+            return Err(BridgeRpcError {
+                code: "HackingGameAlreadyFinished".into(),
+                message: format!("Hacking game on container {container_id} is already finished"),
+            });
+        }
+        let Some(util) = game.utilities.get(slot_idx).and_then(|u| *u) else {
+            return Err(BridgeRpcError {
+                code: "UtilitySlotEmpty".into(),
+                message: format!("Utility slot {slot_idx} is empty"),
+            });
+        };
+        if matches!(
+            util,
+            HackingUtilityKind::KernelRot | HackingUtilityKind::SecondaryVector
+        ) {
+            if let Some(tid) = target_tile_u32 {
+                let Some(t) = game.tiles.get(tid as usize) else {
+                    return Err(BridgeRpcError::user_error("InvalidTileIndex"));
+                };
+                if !t.revealed || t.coherence <= 0 {
+                    return Err(BridgeRpcError::user_error("TargetTileNotRevealed"));
+                }
+            } else if !game.tiles.iter().any(|t| t.revealed && t.coherence > 0) {
+                return Err(BridgeRpcError::user_error("TargetTileNotRevealed"));
+            }
+        }
+        game.utilities[slot_idx] = None;
+        match util {
+            HackingUtilityKind::SelfRepair => {
+                reg.self_repair_turns.insert((char_id, container_id), 3);
+            }
+            HackingUtilityKind::KernelRot => {
+                if let Some(tid) = target_tile_u32 {
+                    if let Some(t) = game.tiles.get_mut(tid as usize) {
+                        t.coherence = (t.coherence / 2).max(1);
+                    }
+                } else if let Some(t) = game.tiles.iter_mut().find(|t| t.revealed && t.coherence > 0)
+                {
+                    t.coherence = (t.coherence / 2).max(1);
+                }
+            }
+            HackingUtilityKind::PolymorphicShield => {
+                game.polymorphic_shield_charges += 2;
+            }
+            HackingUtilityKind::SecondaryVector => {
+                let chosen_tile = target_tile_u32
+                    .or_else(|| {
+                        game.tiles
+                            .iter()
+                            .find(|t| t.revealed && t.coherence > 0)
+                            .map(|t| t.tile_index)
+                    })
+                    .unwrap_or(0);
+                game.secondary_vector_target = Some((chosen_tile, 3));
+            }
+        }
+        Ok(PyRep::keyval([
+            ("containerID", PyRep::Integer(container_id)),
+            ("usedSlot", PyRep::Integer(slot_idx as i64)),
+            ("virusCoherence", PyRep::Integer(game.virus_coherence as i64)),
+            (
+                "polymorphicShieldCharges",
+                PyRep::Integer(game.polymorphic_shield_charges as i64),
+            ),
+        ]))
+    })
+}
+
+fn handle_hacking_values(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let Some(container_id) = args.first().and_then(|a| a.as_i64()) else {
+        return Err(BridgeRpcError {
+            code: "TargetNotFound".into(),
+            message: "Target container not specified".into(),
+        });
+    };
+    let tiles = with_pve_exploration_reg(ctx, |reg| {
+        reg.hacking_games
+            .get(&(char_id, container_id))
+            .map(|g| {
+                g.tiles
+                    .iter()
+                    .map(|t| {
+                        let node_type = if t.revealed {
+                            format!("{:?}", t.kind)
+                        } else {
+                            "Unrevealed".into()
+                        };
+                        let mut kv = vec![
+                            ("tileIndex", PyRep::Integer(t.tile_index as i64)),
+                            ("revealed", PyRep::Bool(t.revealed)),
+                            ("nodeType", PyRep::String(node_type)),
+                            (
+                                "coherence",
+                                PyRep::Integer(if t.revealed { t.coherence as i64 } else { 0 }),
+                            ),
+                            (
+                                "strength",
+                                PyRep::Integer(if t.revealed { t.strength as i64 } else { 0 }),
+                            ),
+                        ];
+                        if t.revealed {
+                            kv.push((
+                                "distanceIndicator",
+                                PyRep::Integer(hacking_tile_distance_indicator(t.tile_index, &g.tiles) as i64),
+                            ));
+                        }
+                        PyRep::keyval(kv)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
+    Ok(PyRep::List(tiles))
+}
+
+async fn handle_hacking_used_utility(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let (container_id, slot_idx, raw_tile_idx) = if args.len() >= 3 {
+        (
+            args.first().and_then(|a| a.as_i64()).unwrap_or(1_870_000_000),
+            args.get(1).and_then(|a| a.as_i64()).unwrap_or(0).max(0) as usize,
+            extract_tile_index(args.get(2)).unwrap_or(0),
+        )
+    } else {
+        let Some(cid) = find_active_hacking_container(ctx, char_id) else {
+            return Err(BridgeRpcError {
+                code: "NoActiveHackingGame".into(),
+                message: "No active hacking session for character".into(),
+            });
+        };
+        let slot = args.first().and_then(|a| a.as_i64()).unwrap_or(0).max(0) as usize;
+        let tile = extract_tile_index(args.get(1)).unwrap_or(0);
+        (cid, slot, tile)
+    };
+    if raw_tile_idx < 0 {
+        return Err(BridgeRpcError::user_error("InvalidTileIndex"));
+    }
+    let target_tile_idx = raw_tile_idx as usize;
+    validate_active_hacking_ship_and_range(ctx, session, char_id, container_id).await?;
+
+    with_pve_exploration_reg(ctx, |reg| {
+        let Some(game) = reg.hacking_games.get_mut(&(char_id, container_id)) else {
+            return Err(BridgeRpcError {
+                code: "NoActiveHackingGame".into(),
+                message: format!("No active hacking game on container {container_id}"),
+            });
+        };
+        if game.status != "InProgress" {
+            return Err(BridgeRpcError {
+                code: "HackingGameAlreadyFinished".into(),
+                message: format!("Hacking game on container {container_id} is already finished"),
+            });
+        }
+        let Some(util) = game.utilities.get(slot_idx).and_then(|u| *u) else {
+            return Err(BridgeRpcError {
+                code: "UtilitySlotEmpty".into(),
+                message: format!("Utility slot {slot_idx} is empty"),
+            });
+        };
+        if matches!(
+            util,
+            HackingUtilityKind::KernelRot | HackingUtilityKind::SecondaryVector
+        ) {
+            let Some(t) = game.tiles.get(target_tile_idx) else {
+                return Err(BridgeRpcError::user_error("InvalidTileIndex"));
+            };
+            if !t.revealed || t.coherence <= 0 {
+                return Err(BridgeRpcError::user_error("TargetTileNotRevealed"));
+            }
+        }
+        game.utilities[slot_idx] = None;
+        match util {
+            HackingUtilityKind::SelfRepair => {
+                reg.self_repair_turns.insert((char_id, container_id), 3);
+            }
+            HackingUtilityKind::KernelRot => {
+                if let Some(t) = game.tiles.get_mut(target_tile_idx) {
+                    t.coherence = (t.coherence / 2).max(1);
+                }
+            }
+            HackingUtilityKind::PolymorphicShield => {
+                game.polymorphic_shield_charges += 2;
+            }
+            HackingUtilityKind::SecondaryVector => {
+                game.secondary_vector_target = Some((target_tile_idx as u32, 3));
+            }
+        }
+        Ok(PyRep::keyval([
+            ("containerID", PyRep::Integer(container_id)),
+            ("usedSlot", PyRep::Integer(slot_idx as i64)),
+            ("virusCoherence", PyRep::Integer(game.virus_coherence as i64)),
+            (
+                "polymorphicShieldCharges",
+                PyRep::Integer(game.polymorphic_shield_charges as i64),
+            ),
+        ]))
+    })
+}
+
+fn handle_hacking_get_progress(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let container_id = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .or_else(|| find_active_hacking_container(ctx, char_id))
+        .unwrap_or(0);
+    Ok(with_pve_exploration_reg(ctx, |reg| {
+        if let Some(game) = reg.hacking_games.get(&(char_id, container_id)) {
+            PyRep::keyval([
+                ("containerID", PyRep::Integer(container_id)),
+                ("status", PyRep::String(game.status.clone())),
+                ("virusCoherence", PyRep::Integer(game.virus_coherence as i64)),
+            ])
+        } else {
+            PyRep::keyval([
+                ("containerID", PyRep::Integer(container_id)),
+                ("status", PyRep::String("NotStarted".into())),
+                ("virusCoherence", PyRep::Integer(0)),
+            ])
+        }
+    }))
 }
 
 #[cfg(test)]

@@ -1169,12 +1169,10 @@ pub async fn handle_legacy_and_ess(
             }
         }
 
-        ("essMgr", "AttemptLinkToMainBank") | ("essMgr", "AttemptLinkToReserveBank") => Some(
-            crate::services::encounter_surveillance_system::handle_ess_link(
-                ctx, session, method, args,
-            )
-            .await,
-        ),
+        ("essMgr", "AttemptLinkToMainBank") | ("essMgr", "AttemptLinkToReserveBank") => {
+            use crate::services::encounter_surveillance_system::handle_ess_link;
+            Some(handle_ess_link(ctx, session, method, args).await)
+        }
 
         _ => None,
     }

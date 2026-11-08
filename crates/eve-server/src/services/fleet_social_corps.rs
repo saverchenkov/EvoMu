@@ -283,6 +283,223 @@ fn handle_get_members_rpc(
     Some(Ok(PyRep::rowset(MEMBER_COLS.to_vec(), rows)))
 }
 
+fn handle_get_members_paged(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (target_cid, page, page_size) = if let Some(cid) = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || (1_000_000..2_000_000).contains(&id)) {
+        (Some(cid), args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).max(1) as usize, args.get(2).and_then(|a| a.as_i64()).unwrap_or(50).max(1) as usize)
+    } else {
+        (None, args.first().and_then(|a| a.as_i64()).unwrap_or(1).max(1) as usize, args.get(1).and_then(|a| a.as_i64()).unwrap_or(50).max(1) as usize)
+    };
+    let (corp_id, viewer_id, has_director) = match require_corp_caller(ctx, session, target_cid) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let members = get_corp_member_snapshot(ctx, corp_id, viewer_id, has_director);
+    let offset = (page.saturating_sub(1)) * page_size;
+    let rows: Vec<Vec<PyRep>> = members.iter().skip(offset).take(page_size).map(member_row_rep).collect();
+    Some(Ok(PyRep::rowset(MEMBER_COLS.to_vec(), rows)))
+}
+
+fn handle_get_members_by_ids(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let target_cid = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || (1_000_000..2_000_000).contains(&id));
+    let (corp_id, viewer_id, has_director) = match require_corp_caller(ctx, session, target_cid) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let target_ids: HashSet<i64> = match args.get(1).or_else(|| args.first()) {
+        Some(PyRep::List(l)) | Some(PyRep::Tuple(l)) => l.iter().filter_map(|x| x.as_i64()).collect(),
+        _ => HashSet::new(),
+    };
+    let members = get_corp_member_snapshot(ctx, corp_id, viewer_id, has_director);
+    let rows: Vec<Vec<PyRep>> = members.iter().filter(|m| target_ids.contains(&m.0)).map(member_row_rep).collect();
+    Some(Ok(PyRep::rowset(MEMBER_COLS.to_vec(), rows)))
+}
+
+fn eval_member_query_clause(
+    ctx: &ServerContext,
+    corp_id: i64,
+    member: &(i64, String, u64, String, i64, i64, i64, u64),
+    prop: &str,
+    op: &PyRep,
+    val: &PyRep,
+) -> bool {
+    let char_id = member.0;
+    let effective_roles = member.2 as i64;
+    let field_val = ctx.db.with_snapshot(|snap| {
+        let ra = snap.corp_role_assignments.get(&(corp_id, char_id));
+        let gov = snap.corp_governance.get(&corp_id);
+        let ch = snap.characters.get(&char_id);
+        match prop {
+            "roles" | "corpRole" => effective_roles,
+            "rolesAtHQ" => ra.map_or(0, |r| r.roles_at_hq as i64),
+            "rolesAtBase" => ra.map_or(0, |r| r.roles_at_base as i64),
+            "rolesAtOther" => ra.map_or(0, |r| r.roles_at_other as i64),
+            "grantableRoles" => ra.map_or(0, |r| r.grantable_roles as i64),
+            "grantableRolesAtHQ" => ra.map_or(0, |r| r.grantable_roles_at_hq as i64),
+            "grantableRolesAtBase" => ra.map_or(0, |r| r.grantable_roles_at_base as i64),
+            "grantableRolesAtOther" => ra.map_or(0, |r| r.grantable_roles_at_other as i64),
+            "titleMask" => gov.and_then(|g| g.member_titles.get(&char_id).copied()).unwrap_or(0) as i64,
+            "baseID" => gov.and_then(|g| g.member_bases.get(&char_id).copied()).unwrap_or(0),
+            "characterID" | "charID" => char_id,
+            "startDateTime" | "startDate" => {
+                snap.employment_history
+                    .get(&char_id)
+                    .and_then(|h| h.iter().rfind(|(cid, _, _)| *cid == corp_id))
+                    .map_or_else(|| ch.map_or(0, |c| c.create_date_unix as i64), |&(_, start, _)| start as i64)
+            }
+            _ => 0,
+        }
+    });
+    if matches!(prop, "name" | "characterName") {
+        let needle = val.as_str().unwrap_or("").to_ascii_lowercase();
+        let hay = member.1.to_ascii_lowercase();
+        return match op.as_i64().or_else(|| op.as_str().map(|_| 0)) {
+            Some(6) => hay != needle,
+            _ if op.as_str() == Some("!=") => hay != needle,
+            _ if op.as_str() == Some("==") || op.as_str() == Some("=") => hay == needle,
+            _ => hay.contains(&needle),
+        };
+    }
+    let rhs = val.as_i64().unwrap_or(0);
+    if let Some(code) = op.as_i64() {
+        match code {
+            1 => field_val == rhs,
+            2 => field_val > rhs,
+            3 => field_val >= rhs,
+            4 => field_val < rhs,
+            5 => field_val <= rhs,
+            6 => field_val != rhs,
+            7 => (field_val & rhs) == rhs,
+            8 => (field_val & rhs) == 0,
+            _ => field_val == rhs,
+        }
+    } else if let Some(s) = op.as_str() {
+        match s {
+            "=" | "==" => field_val == rhs,
+            "!=" | "<>" => field_val != rhs,
+            ">" => field_val > rhs,
+            ">=" => field_val >= rhs,
+            "<" => field_val < rhs,
+            "<=" => field_val <= rhs,
+            "&" => (field_val & rhs) == rhs,
+            "!&" => (field_val & rhs) == 0,
+            _ => field_val == rhs,
+        }
+    } else {
+        field_val == rhs
+    }
+}
+
+fn handle_get_member_ids_by_query(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let target_cid = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || (1_000_000..2_000_000).contains(&id));
+    let (corp_id, viewer_id, has_director) = match require_corp_caller(ctx, session, target_cid) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let query_arg = if target_cid.is_some() { args.get(1) } else { args.first() }
+        .or_else(|| kwargs.get("query"));
+    let members = get_corp_member_snapshot(ctx, corp_id, viewer_id, has_director);
+    let rows: Vec<Vec<PyRep>> = match query_arg {
+        Some(PyRep::List(clauses)) | Some(PyRep::Tuple(clauses)) if !clauses.is_empty() => {
+            members.into_iter().filter(|m| {
+                let mut acc = true;
+                let mut initialized = false;
+                for clause in clauses {
+                    let items = match clause {
+                        PyRep::List(v) | PyRep::Tuple(v) => v,
+                        _ => continue,
+                    };
+                    if items.len() == 3 {
+                        let prop = items[0].as_str().unwrap_or("");
+                        acc = eval_member_query_clause(ctx, corp_id, m, prop, &items[1], &items[2]);
+                        initialized = true;
+                    } else if items.len() >= 4 {
+                        let join_op = items[0].as_i64().unwrap_or(1);
+                        let prop = items[1].as_str().unwrap_or("");
+                        let res = eval_member_query_clause(ctx, corp_id, m, prop, &items[2], &items[3]);
+                        if !initialized {
+                            acc = res;
+                            initialized = true;
+                        } else if join_op == 2 || items[0].as_str().is_some_and(|s| s.eq_ignore_ascii_case("OR")) {
+                            acc = acc || res;
+                        } else {
+                            acc = acc && res;
+                        }
+                    }
+                }
+                acc
+            }).map(|m| vec![PyRep::Integer(m.0)]).collect()
+        }
+        _ => {
+            let query = args.iter().find_map(|a| match a { PyRep::String(s) => Some(s.to_lowercase()), _ => None })
+                .or_else(|| kwargs.get("query").and_then(|v| match v { PyRep::String(s) => Some(s.to_lowercase()), _ => None }))
+                .unwrap_or_default();
+            members.into_iter()
+                .filter(|m| query.is_empty() || m.1.to_lowercase().contains(&query) || m.0.to_string().contains(&query))
+                .map(|m| vec![PyRep::Integer(m.0)]).collect()
+        }
+    };
+    Some(Ok(PyRep::rowset(vec!["characterID"], rows)))
+}
+
+fn normalize_audit_timestamp_to_unix(raw: i64) -> Option<u64> {
+    if raw <= 0 {
+        return None;
+    }
+    if raw >= 116_444_736_000_000_000 {
+        Some(((raw - 116_444_736_000_000_000) / 10_000_000) as u64)
+    } else {
+        Some(raw as u64)
+    }
+}
+
+fn handle_audit_member(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+    let corp_id = session.corporation_id.unwrap_or(0);
+    let (is_ceo, roles) = crate::services::fleet_social::get_effective_corp_roles(ctx, corp_id, char_id);
+    if !is_ceo && !eve_db::corp_roles::has_role(session.corp_role | roles, eve_db::corp_roles::ROLE_DIRECTOR) {
+        return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only Directors and CEO can audit member roles and permissions".into() }));
+    }
+    let target_id = args.first().and_then(|a| a.as_i64()).or_else(|| kwargs.get("characterID").and_then(|a| a.as_i64()));
+    let from_ts = args.get(1).and_then(|a| a.as_i64()).or_else(|| kwargs.get("fromDate").and_then(|a| a.as_i64())).and_then(normalize_audit_timestamp_to_unix);
+    let to_ts = args.get(2).and_then(|a| a.as_i64()).or_else(|| kwargs.get("toDate").and_then(|a| a.as_i64())).and_then(normalize_audit_timestamp_to_unix);
+    let limit = args.get(3).and_then(|a| a.as_i64()).or_else(|| kwargs.get("rowsPerPage").and_then(|a| a.as_i64())).and_then(|n| (n > 0).then_some(n as usize));
+    let mut rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
+        snap.corp_governance.get(&corp_id).map(|g| {
+            g.role_audit_log.iter()
+                .filter(|&&(tid, _, _, _, ts)| {
+                    target_id.is_none_or(|t| t == tid)
+                        && from_ts.is_none_or(|f| ts >= f)
+                        && to_ts.is_none_or(|t| ts <= t)
+                })
+                .map(|&(tid, issuer_id, old_r, new_r, ts)| {
+                    vec![PyRep::Integer(tid), PyRep::Integer(issuer_id), PyRep::Integer(old_r as i64), PyRep::Integer(new_r as i64), PyRep::Integer(ts as i64)]
+                }).collect()
+        }).unwrap_or_default()
+    });
+    if let Some(max_rows) = limit {
+        rows.truncate(max_rows);
+    }
+    Some(Ok(PyRep::rowset(vec!["characterID", "issuerID", "oldRoles", "newRoles", "changeTime"], rows)))
+}
+
 pub(super) fn handle_corps(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -650,50 +867,15 @@ pub(super) fn handle_corps(
         }
 
         ("corpRegistry", "GetMembersPaged") => {
-            let (target_cid, page, page_size) = if let Some(cid) = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || (1_000_000..2_000_000).contains(&id)) {
-                (Some(cid), args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).max(1) as usize, args.get(2).and_then(|a| a.as_i64()).unwrap_or(50).max(1) as usize)
-            } else {
-                (None, args.first().and_then(|a| a.as_i64()).unwrap_or(1).max(1) as usize, args.get(1).and_then(|a| a.as_i64()).unwrap_or(50).max(1) as usize)
-            };
-            let (corp_id, viewer_id, has_director) = match require_corp_caller(ctx, session, target_cid) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let members = get_corp_member_snapshot(ctx, corp_id, viewer_id, has_director);
-            let offset = (page.saturating_sub(1)) * page_size;
-            let rows: Vec<Vec<PyRep>> = members.iter().skip(offset).take(page_size).map(member_row_rep).collect();
-            Some(Ok(PyRep::rowset(MEMBER_COLS.to_vec(), rows)))
+            handle_get_members_paged(ctx, session, args)
         }
 
         ("corpRegistry", "GetMembersByIds") => {
-            let target_cid = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || (1_000_000..2_000_000).contains(&id));
-            let (corp_id, viewer_id, has_director) = match require_corp_caller(ctx, session, target_cid) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let target_ids: HashSet<i64> = match args.get(1).or_else(|| args.first()) {
-                Some(PyRep::List(l)) | Some(PyRep::Tuple(l)) => l.iter().filter_map(|x| x.as_i64()).collect(),
-                _ => HashSet::new(),
-            };
-            let members = get_corp_member_snapshot(ctx, corp_id, viewer_id, has_director);
-            let rows: Vec<Vec<PyRep>> = members.iter().filter(|m| target_ids.contains(&m.0)).map(member_row_rep).collect();
-            Some(Ok(PyRep::rowset(MEMBER_COLS.to_vec(), rows)))
+            handle_get_members_by_ids(ctx, session, args)
         }
 
         ("corpRegistry", "GetMemberIDsByQuery") => {
-            let target_cid = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || (1_000_000..2_000_000).contains(&id));
-            let (corp_id, viewer_id, has_director) = match require_corp_caller(ctx, session, target_cid) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let query = args.iter().find_map(|a| match a { PyRep::String(s) => Some(s.to_lowercase()), _ => None })
-                .or_else(|| kwargs.get("query").and_then(|v| match v { PyRep::String(s) => Some(s.to_lowercase()), _ => None }))
-                .unwrap_or_default();
-            let members = get_corp_member_snapshot(ctx, corp_id, viewer_id, has_director);
-            let rows: Vec<Vec<PyRep>> = members.into_iter()
-                .filter(|m| query.is_empty() || m.1.to_lowercase().contains(&query) || m.0.to_string().contains(&query))
-                .map(|m| vec![PyRep::Integer(m.0)]).collect();
-            Some(Ok(PyRep::rowset(vec!["characterID"], rows)))
+            handle_get_member_ids_by_query(ctx, session, args, kwargs)
         }
 
         ("corpRegistry", "UpdateMember") | ("corpRegistry", "UpdateMembers") => {
@@ -701,23 +883,7 @@ pub(super) fn handle_corps(
         }
 
         ("corpmgr", "AuditMember") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let corp_id = session.corporation_id.unwrap_or(0);
-            let (is_ceo, roles) = crate::services::fleet_social::get_effective_corp_roles(ctx, corp_id, char_id);
-            if !is_ceo && !eve_db::corp_roles::has_role(session.corp_role | roles, eve_db::corp_roles::ROLE_DIRECTOR) {
-                return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only Directors and CEO can audit member roles and permissions".into() }));
-            }
-            let target_id = args.first().and_then(|a| a.as_i64()).or_else(|| kwargs.get("characterID").and_then(|a| a.as_i64()));
-            let rows: Vec<Vec<PyRep>> = read_corp_gov(ctx, |g| {
-                g.get(&corp_id).map(|g| {
-                    g.role_audit_log.iter()
-                        .filter(|(tid, _, _, _, _)| target_id.is_none_or(|t| t == *tid))
-                        .map(|&(tid, issuer_id, old_r, new_r, ts)| {
-                            vec![PyRep::Integer(tid), PyRep::Integer(issuer_id), PyRep::Integer(old_r as i64), PyRep::Integer(new_r as i64), PyRep::Integer(ts as i64)]
-                        }).collect()
-                }).unwrap_or_default()
-            });
-            Some(Ok(PyRep::rowset(vec!["characterID", "issuerID", "oldRoles", "newRoles", "changeTime"], rows)))
+            handle_audit_member(ctx, session, args, kwargs)
         }
 
         ("corpRegistry", "InsertApplication") | ("corpmgr", "ApplyForMembership") => {
