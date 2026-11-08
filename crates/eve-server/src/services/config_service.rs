@@ -474,15 +474,37 @@ pub fn handle(
                                 .map(|nc| nc.ticker_name.clone())
                         });
                     if let Some(ticker) = ticker_opt {
+                        let gov = snap.corp_governance.get(&id);
+                        let (s1, s2, s3, c1, c2, c3) = if let Some(g) =
+                            gov.filter(|g| g.logo != (0, 0, 0, 0) || g.logo_extra_colors != (0, 0))
+                        {
+                            (
+                                PyRep::Integer(g.logo.0),
+                                PyRep::Integer(g.logo.1),
+                                PyRep::Integer(g.logo.2),
+                                PyRep::Real(g.logo.3 as f64),
+                                PyRep::Real(g.logo_extra_colors.0 as f64),
+                                PyRep::Real(g.logo_extra_colors.1 as f64),
+                            )
+                        } else {
+                            (
+                                PyRep::None,
+                                PyRep::None,
+                                PyRep::None,
+                                PyRep::None,
+                                PyRep::None,
+                                PyRep::None,
+                            )
+                        };
                         rows.push(vec![
                             PyRep::Integer(id),
                             PyRep::String(ticker),
-                            PyRep::None,
-                            PyRep::None,
-                            PyRep::None,
-                            PyRep::None,
-                            PyRep::None,
-                            PyRep::None,
+                            s1,
+                            s2,
+                            s3,
+                            c1,
+                            c2,
+                            c3,
                         ]);
                     }
                 }

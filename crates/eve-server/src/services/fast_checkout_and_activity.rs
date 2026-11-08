@@ -478,7 +478,10 @@ fn handle_request_mining_details(
                 .filter(|it| {
                     it.location_id == structure_id
                         && it.owner_id == st.owner_corp_id
-                        && it.flag == InventoryFlag::SpecializedFuelBay
+                        && matches!(
+                            it.flag,
+                            InventoryFlag::SpecializedFuelBay | InventoryFlag::StructureFuel
+                        )
                         && it.quantity > 0
                         && ctx
                             .sde
@@ -526,8 +529,13 @@ fn handle_request_mining_details(
                 .sde
                 .types
                 .get(&st.type_id)
-                .map(|t| t.capacity)
-                .filter(|&c| c > 0.0)
+                .and_then(|t| {
+                    t.default_attributes
+                        .get(&5693)
+                        .copied()
+                        .filter(|&c| c > 0.0)
+                        .or_else(|| (t.capacity > 0.0).then_some(t.capacity))
+                })
                 .unwrap_or(50_000.0);
             let used_vol: f64 = snap
                 .items
@@ -535,6 +543,7 @@ fn handle_request_mining_details(
                 .filter(|it| {
                     it.location_id == structure_id
                         && (it.flag == InventoryFlag::SpecializedMineralHold
+                            || it.flag == InventoryFlag::SpecializedMaterialBay
                             || it.flag == InventoryFlag::CorpHangar
                             || (it.flag as u16 >= 116 && it.flag as u16 <= 122))
                 })

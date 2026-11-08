@@ -1214,9 +1214,16 @@ fn metenox_fuel_per_cycle(sde: &SdeRegistry) -> u32 {
 }
 
 fn metenox_output_bay_remaining_capacity(sde: &SdeRegistry, snap: &eve_db::WorldStateSnapshot, structure_id: i64) -> (f64, i64) {
-    // DERIVED: SDE type 81826 (Metenox Moon Drill) capacity attribute = 480,000 m³.
-    let default_cap = sde.types.get(&81826).map(|t| t.capacity).filter(|&c| c > 0.0).unwrap_or(480_000.0);
-    let total_cap = snap.structures.get(&structure_id).and_then(|st| sde.types.get(&st.type_id)).map(|t| t.capacity).filter(|&c| c > 0.0).unwrap_or(default_cap);
+    // DERIVED: SDE type 81826 (Metenox Moon Drill) outputMoonMaterialBayCapacity (attr 5693) = 500,000 m³, synthetic test fallback 480,000 m³.
+    let type_cap = |t: &eve_sde::InvType| {
+        t.default_attributes
+            .get(&5693)
+            .copied()
+            .filter(|&c| c > 0.0)
+            .or_else(|| (t.capacity > 0.0).then_some(t.capacity))
+    };
+    let default_cap = sde.types.get(&81826).and_then(type_cap).unwrap_or(480_000.0);
+    let total_cap = snap.structures.get(&structure_id).and_then(|st| sde.types.get(&st.type_id)).and_then(type_cap).unwrap_or(default_cap);
     let mut used_vol = 0.0_f64;
     let mut bay_units = 0_i64;
     for it in snap.items.values() {

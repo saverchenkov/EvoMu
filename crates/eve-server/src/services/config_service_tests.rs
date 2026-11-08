@@ -390,3 +390,59 @@ fn notification_mgr_lifecycle_and_unknown_dispatch() {
     assert!(handle(&ctx, &mut sess, "config", "", &[], &kw).is_none());
     assert!(handle(&ctx, &mut sess, "notificationMgr", "", &[], &kw).is_none());
 }
+
+#[test]
+fn config_corp_ticker_names_includes_governance_logo_fields() {
+    let ctx = ServerContext::new();
+    let mut sess = SessionState::new(102);
+    sess.user_id = Some(1);
+    sess.character_id = Some(90_000_001);
+    let corp_id = 98_440_001;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.insert(
+            corp_id,
+            eve_db::CorporationRecord {
+                corporation_id: corp_id,
+                name: "Logo Corp".into(),
+                ticker: "LOGO".into(),
+                ceo_id: 90_000_001,
+                alliance_id: None,
+                tax_rate: 0.05,
+                master_wallet: eve_db::IskCents(0),
+                wallet_divisions: vec![],
+                description: String::new(),
+                url: String::new(),
+                hq_station_id: None,
+                members: HashSet::new(),
+                member_roles: HashMap::new(),
+                applications: HashMap::new(),
+            },
+        );
+        let gov = snap.corp_governance.entry(corp_id).or_default();
+        gov.logo = (415, 416, 417, 671);
+        gov.logo_extra_colors = (672, 673);
+    });
+    let kw = HashMap::new();
+    let rep = handle(
+        &ctx,
+        &mut sess,
+        "config",
+        "GetMultiCorpTickerNamesEx",
+        &[PyRep::List(vec![PyRep::Integer(corp_id)])],
+        &kw,
+    )
+    .unwrap()
+    .expect("corp ticker lookup");
+    let PyRep::List(rows) = rep else {
+        panic!("Expected PackedRow list, got {rep:?}");
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].dbrow_get("corporationID"), Some(&PyRep::Integer(corp_id)));
+    assert_eq!(rows[0].dbrow_get("tickerName"), Some(&PyRep::String("LOGO".into())));
+    assert_eq!(rows[0].dbrow_get("shape1"), Some(&PyRep::Integer(415)));
+    assert_eq!(rows[0].dbrow_get("shape2"), Some(&PyRep::Integer(416)));
+    assert_eq!(rows[0].dbrow_get("shape3"), Some(&PyRep::Integer(417)));
+    assert_eq!(rows[0].dbrow_get("color1"), Some(&PyRep::Real(671.0)));
+    assert_eq!(rows[0].dbrow_get("color2"), Some(&PyRep::Real(672.0)));
+    assert_eq!(rows[0].dbrow_get("color3"), Some(&PyRep::Real(673.0)));
+}

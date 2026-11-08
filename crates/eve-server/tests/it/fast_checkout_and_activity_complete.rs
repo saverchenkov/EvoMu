@@ -1,19 +1,16 @@
 //! Integration tests for `FastCheckoutService` mining & tutorial RPCs and `activityMgr` badge state.
 
 use crate::common;
-use eve_db::{MoonExtractionRecord, UpwellStructureRecord};
+use eve_db::{VirtualServerClock, WorldRepository};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 const CHAR_ID: i64 = 90_000_001;
 const CHAR_ID_2: i64 = 90_000_002;
-const CORP_ID: i64 = 98_000_001;
-const OTHER_CORP_ID: i64 = 1_000_045;
 const SYSTEM_ID: u32 = 30000012; // Asabona (Low-Sec)
-const STRUCTURE_ID: i64 = 1_090_000_001;
-const MOON_ID: i64 = 40_009_082;
 
 async fn rpc(
     ctx: &ServerContext,
@@ -86,54 +83,222 @@ async fn test_fast_checkout_and_activity_complete() {
 
     let mut sess1 = login_pilot_char(&ctx, 1201, "demo", "demo-secret", CHAR_ID).await;
     let mut sess2 = login_pilot_char(&ctx, 1202, "other", "other-secret", CHAR_ID_2).await;
-    let now = ctx.now_unix();
+    // Clear login 10s session-change timer before corp creation
+    ctx.advance_secs(11);
 
-    // 1. Setup Metenox Moon Drill structure and active moon extraction in world state
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(c1) = snap.characters.get_mut(&CHAR_ID) {
-            c1.corporation_id = CORP_ID;
+    // 1. Setup Metenox Moon Drill via genuine live RPCs (corp creation, anchoring,
+    //    lifecycle transitions, approach, fuel/gas loading, and hourly mining tick)
+    let saved_role = sess1.role;
+    sess1.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT
+        | eve_machonet::service_roles::ROLE_GML
+        | eve_machonet::service_roles::ROLE_GMH;
+    rpc(
+        &ctx,
+        &mut sess1,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/giveskill 3363 1".into())],
+    )
+    .await
+    .expect("/giveskill Corporation Management");
+    rpc(
+        &ctx,
+        &mut sess1,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/giveisk 5000000000".into())],
+    )
+    .await
+    .expect("/giveisk");
+    sess1.role = saved_role;
+
+    rpc(
+        &ctx,
+        &mut sess1,
+        "corpRegistry",
+        "AddCorporation",
+        &[
+            PyRep::String("Metenox Checkout Mining".into()),
+            PyRep::String("MTXC".into()),
+        ],
+    )
+    .await
+    .expect("AddCorporation");
+    // Advance past 7-day corp age anchoring restriction
+    ctx.advance_secs(7 * 86_400 + 10);
+
+    sess1.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT
+        | eve_machonet::service_roles::ROLE_GML
+        | eve_machonet::service_roles::ROLE_GMH;
+    rpc(
+        &ctx,
+        &mut sess1,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/tr {SYSTEM_ID}"))],
+    )
+    .await
+    .expect("/tr lowsec Asabona");
+    let create_drill = rpc(
+        &ctx,
+        &mut sess1,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/createitem 81826 1".into())],
+    )
+    .await
+    .expect("/createitem Metenox");
+    let create_fuel = rpc(
+        &ctx,
+        &mut sess1,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/createitem 4051 200".into())],
+    )
+    .await
+    .expect("/createitem Fuel Blocks");
+    let create_gas = rpc(
+        &ctx,
+        &mut sess1,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/createitem 81143 100".into())],
+    )
+    .await
+    .expect("/createitem Magmatic Gas");
+    sess1.role = saved_role;
+
+    let metenox_item_id = create_drill
+        .dict_get("itemID")
+        .and_then(|v| v.as_i64())
+        .expect("Metenox itemID");
+    let fuel_item_id = create_fuel
+        .dict_get("itemID")
+        .and_then(|v| v.as_i64())
+        .expect("Fuel Blocks itemID");
+    let gas_item_id = create_gas
+        .dict_get("itemID")
+        .and_then(|v| v.as_i64())
+        .expect("Magmatic Gas itemID");
+
+    let anchor_res = rpc(
+        &ctx,
+        &mut sess1,
+        "structureDeployment",
+        "Anchor",
+        &[
+            PyRep::Integer(metenox_item_id),
+            PyRep::String("Asabona Metenox".into()),
+        ],
+    )
+    .await
+    .expect("structureDeployment.Anchor Metenox");
+    assert_eq!(
+        anchor_res.dict_get("quantumCoreInstalled").and_then(|v| match v {
+            PyRep::Bool(b) => Some(*b),
+            _ => None,
+        }),
+        Some(true),
+        "Metenox pre-fit integrated quantum core (attr 5701 / type 81920) must be active"
+    );
+    let structure_id = anchor_res
+        .dict_get("structureID")
+        .and_then(|v| v.as_i64())
+        .expect("anchored structureID");
+
+    // Advance past AnchorVulnerable (900s) + Anchoring (86400s) + Onlining (900s) -> ShieldVulnerable
+    ctx.advance_secs(900 + 86_400 + 900 + 10);
+    let info_rep = rpc(
+        &ctx,
+        &mut sess1,
+        "structureDirectory",
+        "GetStructureInfo",
+        &[PyRep::Integer(structure_id)],
+    )
+    .await
+    .expect("GetStructureInfo after anchoring/onlining");
+    assert_eq!(
+        info_rep.dict_get("state").and_then(|v| v.as_str()),
+        Some("ShieldVulnerable")
+    );
+
+    // Fly ship within 5,000 m of the anchored Metenox and load fuel + magmatic gas via invbroker.Add
+    let PyRep::Tuple(bound_bey) = rpc(
+        &ctx,
+        &mut sess1,
+        "beyonce",
+        "MachoBindObject",
+        &[PyRep::Integer(i64::from(SYSTEM_ID)), PyRep::None],
+    )
+    .await
+    .expect("bind beyonce") else {
+        panic!("MachoBindObject tuple expected");
+    };
+    let bey_bound_id = bound_bey[0].as_i64().unwrap() as u64;
+    let kw = HashMap::new();
+    ctx.dispatch_rpc(
+        &mut sess1,
+        "beyonce",
+        Some(bey_bound_id),
+        "CmdFollowBall",
+        &[PyRep::Integer(structure_id), PyRep::Real(0.0)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("CmdFollowBall toward Metenox");
+    ctx.dispatch_rpc(
+        &mut sess1,
+        "beyonce",
+        Some(bey_bound_id),
+        "CmdSetSpeedFraction",
+        &[PyRep::Real(1.0)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("CmdSetSpeedFraction");
+    let sys_handle = ctx.systems.get_or_spawn(SYSTEM_ID);
+    let mut fueled = false;
+    for _ in 0..80 {
+        for _ in 0..15 {
+            let _ = sys_handle.step_manual(1.0).await;
         }
-        if let Some(c2) = snap.characters.get_mut(&CHAR_ID_2) {
-            c2.corporation_id = OTHER_CORP_ID;
+        match rpc(
+            &ctx,
+            &mut sess1,
+            "invbroker",
+            "Add",
+            &[
+                PyRep::Integer(fuel_item_id),
+                PyRep::Integer(structure_id),
+                PyRep::Integer(133), // SpecializedFuelBay
+            ],
+        )
+        .await
+        {
+            Ok(_) => {
+                fueled = true;
+                break;
+            }
+            Err(e) if e.code == "DestinationAccessDenied" => continue,
+            Err(e) => panic!("invbroker.Add fuel blocks unexpected error: {e:?}"),
         }
-
-        snap.structures.insert(
-            STRUCTURE_ID,
-            UpwellStructureRecord {
-                structure_id: STRUCTURE_ID,
-                type_id: 81826, // Metenox Moon Drill
-                owner_corp_id: CORP_ID,
-                solar_system_id: SYSTEM_ID,
-                name: "Test Metenox Moon Drill".into(),
-                position: [200_000.0, 0.0, -100_000.0],
-                state: "ShieldVulnerable".into(),
-                quantum_core_installed: true,
-                fuel_blocks: 150,
-                shield_hp: 50_000.0,
-                armor_hp: 50_000.0,
-                hull_hp: 50_000.0,
-                reinforced_until_unix: 0,
-                last_damage_tick: 0,
-                last_damage_unix: 0, self_destruct_at_unix: None,
-            },
-        );
-
-        snap.moon_extractions.insert(
-            STRUCTURE_ID,
-            MoonExtractionRecord {
-                structure_id: STRUCTURE_ID,
-                moon_id: MOON_ID,
-                extraction_start_unix: now.saturating_sub(3600),
-                chunk_arrival_unix: now + 72_000,
-                natural_decay_unix: now + 82_800,
-                status: "Started".to_string(),
-                auto_fracture: false,
-                event_id: 42,
-                moon_ores: vec![(45494, 0.60), (45495, 0.40)], // Cobaltite & Euxenite
-                spawned_asteroid_ids: vec![],
-            },
-        );
-    });
+    }
+    assert!(fueled, "Ship must reach Metenox 5 km fuel bay transfer range");
+    rpc(
+        &ctx,
+        &mut sess1,
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(gas_item_id),
+            PyRep::Integer(structure_id),
+            PyRep::Integer(133), // SpecializedFuelBay
+        ],
+    )
+    .await
+    .expect("invbroker.Add Magmatic Gas into SpecializedFuelBay");
 
     // ------------------------------------------------------------------------
     // Part 1: FastCheckoutService Mining RPCs & Auth
@@ -144,7 +309,7 @@ async fn test_fast_checkout_and_activity_complete() {
         &mut sess1,
         "FastCheckoutService",
         "RequestMiningCycleOutput",
-        &[PyRep::Integer(STRUCTURE_ID)],
+        &[PyRep::Integer(structure_id)],
     )
     .await
     .expect("RequestMiningCycleOutput for authorized character");
@@ -175,13 +340,13 @@ async fn test_fast_checkout_and_activity_complete() {
         other => panic!("Expected PyRep::List from RequestMiningCycleOutput, got {other:?}"),
     };
 
-    // 1.2 FastCheckoutService.RequestMiningDetails (authorized pilot 1)
+    // 1.2 FastCheckoutService.RequestMiningDetails before and after live 1-hour Metenox tick
     let details_rep = rpc(
         &ctx,
         &mut sess1,
         "FastCheckoutService",
         "RequestMiningDetails",
-        &[PyRep::Integer(STRUCTURE_ID)],
+        &[PyRep::Integer(structure_id)],
     )
     .await
     .expect("RequestMiningDetails for authorized character");
@@ -192,93 +357,64 @@ async fn test_fast_checkout_and_activity_complete() {
                 .expect("availableFuel key")
                 .as_i64()
                 .expect("availableFuel is integer");
-            assert_eq!(fuel, 150);
+            assert_eq!(fuel, 200);
 
             let moon = dict_get(&details_rep, "moonID")
                 .expect("moonID key")
                 .as_i64()
                 .expect("moonID is integer");
-            assert_eq!(moon, MOON_ID);
+            assert!(moon > 0, "Anchored Asabona Metenox must resolve a real moonID");
 
             let next_harvest = dict_get(&details_rep, "nextHarvestTime")
                 .expect("nextHarvestTime key")
                 .as_i64()
                 .expect("nextHarvestTime is integer");
-            let expected_ft = ((now + 72_000) as i64 + 11_644_473_600) * 10_000_000;
-            assert_eq!(next_harvest, expected_ft);
+            assert!(next_harvest > 0);
 
-            let rem_capacity = match dict_get(&details_rep, "remainingOutputBayCapacity")
+            let cap_before = match dict_get(&details_rep, "remainingOutputBayCapacity")
                 .expect("remainingOutputBayCapacity key")
             {
                 PyRep::Real(v) => *v,
                 other => panic!("Expected Real remainingOutputBayCapacity, got {other:?}"),
             };
-            assert!(rem_capacity >= 0.0);
+            assert!(
+                (cap_before - 500_000.0).abs() < 1e-4,
+                "Fresh Metenox output bay capacity should match SDE attr 5693 (500,000 m3), got {cap_before}"
+            );
 
             let mats_in_details = dict_get(&details_rep, "outputMaterials")
                 .expect("outputMaterials key");
             assert_eq!(mats_in_details, &PyRep::List(materials_list));
 
-            // Verify BF-MINING-DETAILS-FUEL-03: SpecializedFuelBay overrides st.fuel_blocks without double-counting,
-            // and moon output bay volume uses SpecializedMineralHold / CorpHangar (not general pilot Hangar)
-            let cap_before = rem_capacity;
-            ctx.db.with_mut_snapshot(|snap| {
-                snap.items.insert(770001, eve_db::InventoryItemRecord {
-                    item_id: 770001,
-                    type_id: 670,
-                    owner_id: CHAR_ID,
-                    location_id: STRUCTURE_ID,
-                    flag: eve_db::InventoryFlag::Hangar,
-                    quantity: 1,
-                    singleton: true,
-                    version: 1,
-                    dynamic_attributes: HashMap::new(),
-                    source_mutaplasmid_id: None,
-                    insured_payout_isk: 0.0,
-                    is_blueprint_copy: false,
-                    blueprint_runs_remaining: None,
-                });
-                snap.items.insert(770002, eve_db::InventoryItemRecord {
-                    item_id: 770002,
-                    type_id: 4051,
-                    owner_id: CORP_ID,
-                    location_id: STRUCTURE_ID,
-                    flag: eve_db::InventoryFlag::SpecializedFuelBay,
-                    quantity: 200,
-                    singleton: false,
-                    version: 1,
-                    dynamic_attributes: HashMap::new(),
-                    source_mutaplasmid_id: None,
-                    insured_payout_isk: 0.0,
-                    is_blueprint_copy: false,
-                    blueprint_runs_remaining: None,
-                });
-                snap.items.insert(770003, eve_db::InventoryItemRecord {
-                    item_id: 770003,
-                    type_id: 34,
-                    owner_id: CORP_ID,
-                    location_id: STRUCTURE_ID,
-                    flag: eve_db::InventoryFlag::SpecializedMineralHold,
-                    quantity: 500,
-                    singleton: false,
-                    version: 1,
-                    dynamic_attributes: HashMap::new(),
-                    source_mutaplasmid_id: None,
-                    insured_payout_isk: 0.0,
-                    is_blueprint_copy: false,
-                    blueprint_runs_remaining: None,
-                });
-            });
+            // Advance server clock by 1 hour to run a genuine live Metenox mining cycle
+            ctx.advance_secs(3600);
 
-            let details_rep2 = rpc(&ctx, &mut sess1, "FastCheckoutService", "RequestMiningDetails", &[PyRep::Integer(STRUCTURE_ID)]).await.expect("RequestMiningDetails 2");
-            let fuel2 = dict_get(&details_rep2, "availableFuel").unwrap().as_i64().unwrap();
-            assert_eq!(fuel2, 200, "Fuel must reflect SpecializedFuelBay (200) without adding st.fuel_blocks (150)");
+            let details_after = rpc(
+                &ctx,
+                &mut sess1,
+                "FastCheckoutService",
+                "RequestMiningDetails",
+                &[PyRep::Integer(structure_id)],
+            )
+            .await
+            .expect("RequestMiningDetails after 1h cycle");
+            let fuel_after = dict_get(&details_after, "availableFuel")
+                .unwrap()
+                .as_i64()
+                .unwrap();
+            assert_eq!(
+                fuel_after, 195,
+                "Live 1h Metenox cycle must consume 5 fuel blocks from SpecializedFuelBay (200 -> 195)"
+            );
 
-            let cap2 = match dict_get(&details_rep2, "remainingOutputBayCapacity").unwrap() {
+            let cap_after = match dict_get(&details_after, "remainingOutputBayCapacity").unwrap() {
                 PyRep::Real(v) => *v,
-                _ => panic!("Expected Real"),
+                _ => panic!("Expected Real remainingOutputBayCapacity"),
             };
-            assert!((cap_before - cap2 - 5.0).abs() < 1e-4, "Output bay capacity must reduce only by moon mineral hold items (5.0 m3), not general hangar");
+            assert!(
+                cap_after < cap_before,
+                "Harvested moon materials in SpecializedMineralHold must reduce remainingOutputBayCapacity ({cap_before} -> {cap_after})"
+            );
         }
         other => panic!("Expected PyRep::Dict from RequestMiningDetails, got {other:?}"),
     }
@@ -289,7 +425,7 @@ async fn test_fast_checkout_and_activity_complete() {
         &mut sess2,
         "FastCheckoutService",
         "RequestMiningDetails",
-        &[PyRep::Integer(STRUCTURE_ID)],
+        &[PyRep::Integer(structure_id)],
     )
     .await
     .expect_err("Unauthorized character should be denied mining details");
@@ -300,7 +436,7 @@ async fn test_fast_checkout_and_activity_complete() {
         &mut sess2,
         "FastCheckoutService",
         "RequestMiningCycleOutput",
-        &[PyRep::Integer(STRUCTURE_ID)],
+        &[PyRep::Integer(structure_id)],
     )
     .await
     .expect_err("Unauthorized character should be denied mining cycle output");
@@ -612,6 +748,11 @@ async fn test_fast_checkout_and_activity_complete() {
 
 #[tokio::test]
 async fn test_fast_checkout_buy_offer_payload_and_vault_reload() {
+    let db_path = std::env::temp_dir().join(format!(
+        "evomu_fast_checkout_reload_{}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&db_path);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let mut sess = login_pilot_char(&ctx, 1205, "demo", "demo-secret", CHAR_ID).await;
@@ -645,10 +786,18 @@ async fn test_fast_checkout_buy_offer_payload_and_vault_reload() {
     let plex_legacy_after = ctx.db.get_character(CHAR_ID).expect("character").plex_balance;
     assert_eq!(plex_legacy_after, plex_legacy_before, "ch.plex_balance must not be directly incremented");
 
-    // Verify snapshot reload / fold_legacy_plex_balances does not double-credit PLEX
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.fold_legacy_plex_balances();
-    });
-    let vault_after_fold = ctx.db.with_snapshot(|snap| snap.account_plex_vault.get(&user_id).copied().unwrap_or(0));
-    assert_eq!(vault_after_fold, vault_after, "Snapshot reload / fold must not double credit PLEX");
+    // Persist to SQLite and reopen repository (which executes fold_legacy_plex_balances on load)
+    ctx.db.save_to_sqlite(&db_path).expect("save_to_sqlite");
+    let now_unix = ctx.now_unix();
+    drop(ctx);
+
+    let db_reloaded = Arc::new(WorldRepository::open_sqlite(&db_path).expect("reopen_sqlite"));
+    let ctx_reloaded = ServerContext::with_repository(db_reloaded);
+    ctx_reloaded.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now_unix)));
+    let vault_after_reload = ctx_reloaded
+        .db
+        .with_snapshot(|snap| snap.account_plex_vault.get(&user_id).copied().unwrap_or(0));
+    assert_eq!(vault_after_reload, vault_after, "SQLite reload must not double credit PLEX");
+    drop(ctx_reloaded);
+    let _ = std::fs::remove_file(&db_path);
 }

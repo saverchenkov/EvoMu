@@ -212,6 +212,11 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
                 snap.items.remove(&item_id);
             }
         }
+        let has_prefit_core = ctx
+            .sde
+            .types
+            .get(&type_id)
+            .is_some_and(|t| t.default_attributes.get(&5701).copied().unwrap_or(0.0) > 0.0);
         snap.next_entity_id += 1;
         let id = 1_000_000_000_000 + snap.next_entity_id;
         snap.structures.insert(
@@ -224,7 +229,7 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
                 name: name.clone(),
                 position: anchor_pos.to_array(),
                 state: STATE_ANCHOR_VULNERABLE.into(),
-                quantum_core_installed: false,
+                quantum_core_installed: has_prefit_core,
                 fuel_blocks: 0,
                 // Vulnerability.md: a freshly deployed structure has only structure (hull) HP.
                 shield_hp: 0.0,
@@ -298,12 +303,20 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
         "solarsystemid",
         state_args,
     );
+    let prefit_core_type = ctx
+        .sde
+        .types
+        .get(&type_id)
+        .and_then(|t| t.default_attributes.get(&5701).copied())
+        .filter(|&v| v > 0.0)
+        .map(|v| v as u32);
+    let core_type_id = profile.core_type_id.or(prefit_core_type);
     Ok(PyRep::keyval([
         ("structureID", PyRep::Integer(structure_id)),
         ("state", PyRep::String(STATE_ANCHOR_VULNERABLE.into())),
         ("stateTimerEndUnix", PyRep::Integer((now + life::ANCHOR_VULNERABLE_SECS) as i64)),
-        ("quantumCoreInstalled", PyRep::Bool(false)),
-        ("quantumCoreTypeID", profile.core_type_id.map(|c| PyRep::Integer(i64::from(c))).unwrap_or(PyRep::None)),
+        ("quantumCoreInstalled", PyRep::Bool(prefit_core_type.is_some())),
+        ("quantumCoreTypeID", core_type_id.map(|c| PyRep::Integer(i64::from(c))).unwrap_or(PyRep::None)),
         ("hullHP", PyRep::Real(profile.hull_hp)),
         ("fuelBlocks", PyRep::Integer(0)),
     ]))

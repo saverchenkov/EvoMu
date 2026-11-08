@@ -1005,6 +1005,16 @@ pub(crate) fn sync_structure_with_released(
         let Some((state, until)) = next else { break };
         let leaving = st.state.clone();
         if let Some(s) = snap.structures.get_mut(&structure_id) {
+            if leaving == STATE_ANCHORING
+                && state == STATE_ONLINING
+                && ctx
+                    .sde
+                    .types
+                    .get(&s.type_id)
+                    .is_some_and(|t| t.default_attributes.get(&5701).copied().unwrap_or(0.0) > 0.0)
+            {
+                s.quantum_core_installed = true;
+            }
             s.state = state.into();
             s.reinforced_until_unix = until;
         }
