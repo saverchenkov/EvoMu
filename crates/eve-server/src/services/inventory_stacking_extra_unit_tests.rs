@@ -528,3 +528,246 @@ async fn list_ownership_corp_roles_range_and_loot_abandonment_rules() {
         "OutOfRange"
     );
 }
+
+#[tokio::test]
+async fn ship_hold_capacity_errors_match_hold_specific_codes_for_add_and_multi_add() {
+    use crate::services::inventory_fitting::{ship_hold_capacity_error, ship_hold_capacity_error_code};
+
+    assert_eq!(ship_hold_capacity_error_code(5), "NotEnoughCargoSpace");
+    assert_eq!(ship_hold_capacity_error_code(87), "NotEnoughDroneBaySpace");
+    assert_eq!(ship_hold_capacity_error_code(158), "NotEnoughFighterBaySpace");
+    assert_eq!(ship_hold_capacity_error_code(134), "NotEnoughSpecialBaySpace");
+
+    let e = ship_hold_capacity_error(158, 1_000.0, 400.0, 800.0);
+    assert_eq!(e.code, "NotEnoughFighterBaySpace");
+    assert!(e.message.contains("free=600"), "msg={}", e.message);
+    assert!(e.message.contains("required=800"), "msg={}", e.message);
+
+    let ctx = ServerContext::new();
+    let char_id = 90_000_001;
+    let station_id = 60_003_760;
+    let venture_id = 1_100_000_501;
+    let rifter_id = 1_100_000_502;
+    let thanatos_id = 1_100_000_503;
+    let drone_id = 1_100_000_510;
+    let ore_id = 1_100_000_511;
+    let trit_id = 1_100_000_512;
+    let fighter_id = 1_100_000_513;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            venture_id,
+            InventoryItemRecord {
+                item_id: venture_id,
+                type_id: 32_880,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            rifter_id,
+            InventoryItemRecord {
+                item_id: rifter_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            thanatos_id,
+            InventoryItemRecord {
+                item_id: thanatos_id,
+                type_id: 23_911,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            drone_id,
+            InventoryItemRecord {
+                item_id: drone_id,
+                type_id: 2454,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 4, // 20 m3 > Venture 10 m3 DroneBay
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            ore_id,
+            InventoryItemRecord {
+                item_id: ore_id,
+                type_id: 1230,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 60_000, // 6,000 m3 > Venture 5,000 m3 OreHold
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            trit_id,
+            InventoryItemRecord {
+                item_id: trit_id,
+                type_id: 34,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 20_000, // 200 m3 > Venture 50 m3 Cargo
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            fighter_id,
+            InventoryItemRecord {
+                item_id: fighter_id,
+                type_id: 23_055, // Templar I (1000 m3 each)
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 100, // 100,000 m3 > Thanatos FighterBay
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut sess = SessionState::new(1);
+    let kw = HashMap::new();
+    ctx.dispatch_rpc(
+        &mut sess,
+        "authentication",
+        None,
+        "Login",
+        &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
+        &kw,
+        None,
+    )
+    .await
+    .unwrap();
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+        &kw,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // MultiAdd Cargo -> NotEnoughCargoSpace
+    let err = handle_multi_add(
+        &ctx,
+        &mut sess,
+        None,
+        &[
+            PyRep::List(vec![PyRep::Integer(trit_id)]),
+            PyRep::Integer(venture_id),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, "NotEnoughCargoSpace");
+    assert!(err.message.contains("free="));
+
+    // MultiAdd DroneBay on Venture -> NotEnoughDroneBaySpace
+    let err = handle_multi_add(
+        &ctx,
+        &mut sess,
+        None,
+        &[
+            PyRep::List(vec![PyRep::Integer(drone_id)]),
+            PyRep::Integer(venture_id),
+            PyRep::Integer(InventoryFlag::DroneBay as i64),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, "NotEnoughDroneBaySpace");
+
+    // MultiAdd DroneBay on Rifter (0 m3 drone bay) -> NotEnoughDroneBaySpace (not CapacityExceeded/CannotMoveIntoHold)
+    let err = handle_multi_add(
+        &ctx,
+        &mut sess,
+        None,
+        &[
+            PyRep::List(vec![PyRep::Integer(drone_id)]),
+            PyRep::Integer(rifter_id),
+            PyRep::Integer(InventoryFlag::DroneBay as i64),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, "NotEnoughDroneBaySpace");
+
+    // MultiAdd OreHold -> NotEnoughSpecialBaySpace
+    let err = handle_multi_add(
+        &ctx,
+        &mut sess,
+        None,
+        &[
+            PyRep::List(vec![PyRep::Integer(ore_id)]),
+            PyRep::Integer(venture_id),
+            PyRep::Integer(InventoryFlag::SpecializedOreHold as i64),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, "NotEnoughSpecialBaySpace");
+
+    // Add & MultiAdd FighterBay -> NotEnoughFighterBaySpace
+    let err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "Add",
+            &[
+                PyRep::Integer(fighter_id),
+                PyRep::Integer(thanatos_id),
+                PyRep::Integer(InventoryFlag::FighterBay as i64),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "NotEnoughFighterBaySpace");
+    let err = handle_multi_add(
+        &ctx,
+        &mut sess,
+        None,
+        &[
+            PyRep::List(vec![PyRep::Integer(fighter_id)]),
+            PyRep::Integer(thanatos_id),
+            PyRep::Integer(InventoryFlag::FighterBay as i64),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, "NotEnoughFighterBaySpace");
+}

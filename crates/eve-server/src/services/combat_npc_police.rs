@@ -509,6 +509,12 @@ pub fn scan_and_enforce_highsec_contraband(
 
     if char_id > 0 {
         for (removed_item, old_loc, old_flag, fine_isk) in confiscated {
+            let (group_id, category_id) = ctx
+                .sde
+                .types
+                .get(&removed_item.type_id)
+                .map(|t| (t.group_id, t.category_id))
+                .unwrap_or((0, 0));
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
                 "OnItemChange",
@@ -520,7 +526,17 @@ pub fn scan_and_enforce_highsec_contraband(
                         ("ownerID", eve_proto::PyRep::Integer(removed_item.owner_id)),
                         ("locationID", eve_proto::PyRep::Integer(removed_item.location_id)),
                         ("flagID", eve_proto::PyRep::Integer(removed_item.flag as i64)),
-                        ("quantity", eve_proto::PyRep::Integer(removed_item.quantity as i64)),
+                        (
+                            "quantity",
+                            eve_proto::PyRep::Integer(if removed_item.singleton {
+                                -1
+                            } else {
+                                removed_item.quantity as i64
+                            }),
+                        ),
+                        ("groupID", eve_proto::PyRep::Integer(i64::from(group_id))),
+                        ("categoryID", eve_proto::PyRep::Integer(i64::from(category_id))),
+                        ("singleton", eve_proto::PyRep::Bool(removed_item.singleton)),
                     ]),
                     eve_proto::PyRep::Dict(vec![
                         (eve_proto::PyRep::Integer(3), eve_proto::PyRep::Integer(old_loc)),

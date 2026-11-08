@@ -1656,7 +1656,7 @@ async fn test_drones_bandwidth_sentry_and_npc_aggro_switching_end_to_end() {
     seed_item(&ctx, garde_id, 23561, c1, vexor_id, InventoryFlag::DroneBay, 1, true);
     seed_item(&ctx, cargo_ogre, 2444, c1, vexor_id, InventoryFlag::Cargo, 1, true);
     let inv_bound = ctx.bind_object(&sess, "invbroker", vexor_id).unwrap();
-    assert_eq!(rpc(&ctx, &mut sess, "invbroker", Some(inv_bound), "Add", &[PyRep::Integer(cargo_ogre), PyRep::Integer(vexor_id), PyRep::Integer(87)]).await.unwrap_err().code, "CapacityExceeded");
+    assert_eq!(rpc(&ctx, &mut sess, "invbroker", Some(inv_bound), "Add", &[PyRep::Integer(cargo_ogre), PyRep::Integer(vexor_id), PyRep::Integer(87)]).await.unwrap_err().code, "NotEnoughDroneBaySpace");
 
     ctx.db.with_mut_snapshot(|s| { s.skills.entry(c1).or_default().remove(&3436); });
     ctx.invalidate_ship_fitting(vexor_id);

@@ -1378,6 +1378,12 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                         crate::services::contracts_service::notify_contract(ctx, issuer_id, "OnContractFailed", cid);
                     }
                     for item in &changed {
+                        let (group_id, category_id) = ctx
+                            .sde
+                            .types
+                            .get(&item.type_id)
+                            .map(|t| (t.group_id, t.category_id))
+                            .unwrap_or((0, 0));
                         ctx.notify(
                             crate::router::NotificationTarget::Character(char_id),
                             "OnItemChange",
@@ -1389,7 +1395,17 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                                     ("ownerID", PyRep::Integer(item.owner_id)),
                                     ("locationID", PyRep::Integer(item.location_id)),
                                     ("flagID", PyRep::Integer(item.flag as i64)),
-                                    ("quantity", PyRep::Integer(item.quantity as i64)),
+                                    (
+                                        "quantity",
+                                        PyRep::Integer(if item.singleton {
+                                            -1
+                                        } else {
+                                            item.quantity as i64
+                                        }),
+                                    ),
+                                    ("groupID", PyRep::Integer(i64::from(group_id))),
+                                    ("categoryID", PyRep::Integer(i64::from(category_id))),
+                                    ("singleton", PyRep::Bool(item.singleton)),
                                 ]),
                                 PyRep::Dict(vec![
                                     (PyRep::Integer(3), PyRep::Integer(wrap_id)),

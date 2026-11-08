@@ -242,7 +242,7 @@ async fn test_excavator_drones_live_bay_core_and_skill_scaling() {
     assert_eq!(qty_of(&ctx, &mut p.sess, p.ship_id, 41_030, Some(DRONE_BAY)).await, 8);
     let extra_drone = common::slash_cmd(&ctx, &mut p.sess, "/createitem 41030 1").await.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
     let bay_err = rpc(&ctx, &mut p.sess, "invbroker", "Add", &[int(extra_drone), int(p.ship_id), int(DRONE_BAY)]).await.unwrap_err();
-    assert_eq!(bay_err.code, "CapacityExceeded", "9th Excavator (9,900 m3 > 8,800 m3 bay) must fail with CapacityExceeded");
+    assert_eq!(bay_err.code, "NotEnoughDroneBaySpace", "9th Excavator (9,900 m3 > 8,800 m3 bay) must fail with NotEnoughDroneBaySpace");
 
     // Launching > 5 drones rejects over maxActiveDrones (5); launching 5 succeeds
     let over_launch = rpc(&ctx, &mut p.sess, "ship", "LaunchDrones", &[PyRep::List(d_ids.iter().copied().map(int).collect())]).await;

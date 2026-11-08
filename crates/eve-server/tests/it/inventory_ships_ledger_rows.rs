@@ -723,7 +723,7 @@ async fn test_cargo_capacity_move_items_and_packaged_volumes() {
         vec![PyRep::Integer(item_id), PyRep::Integer(dest_id), PyRep::Integer(flag as i64)]
     };
     // Assembled Rifter (27,289 m3) overflows the Iteron Mark V cargo hold.
-    assert_eq!(call(&ctx, &mut s1, "invbroker", "Add", add(720_002, 720_003, InventoryFlag::Cargo)).await.unwrap_err().code, "CapacityExceeded");
+    assert_eq!(call(&ctx, &mut s1, "invbroker", "Add", add(720_002, 720_003, InventoryFlag::Cargo)).await.unwrap_err().code, "NotEnoughCargoSpace");
     // Repackaging reduces Rifter volume to its 2,500 m3 packaged SDE volume so it fits inside Iteron Mark V.
     call(&ctx, &mut s1, "repackagingSvc", "RepackageItems", vec![PyRep::List(vec![PyRep::Integer(720_002)])]).await.unwrap();
     assert!(!item(&ctx, 720_002).unwrap().singleton);
@@ -737,7 +737,7 @@ async fn test_cargo_capacity_move_items_and_packaged_volumes() {
     seed(&ctx, 720_004, 34, C1, JITA44, InventoryFlag::Hangar, 4_000, false);
     seed(&ctx, 720_005, 34, C1, JITA44, InventoryFlag::Hangar, 2_000, false);
     call(&ctx, &mut s1, "invbroker", "Add", add(720_004, 720_001, InventoryFlag::Cargo)).await.unwrap();
-    assert_eq!(call(&ctx, &mut s1, "invbroker", "Add", add(720_005, 720_001, InventoryFlag::Cargo)).await.unwrap_err().code, "CapacityExceeded");
+    assert_eq!(call(&ctx, &mut s1, "invbroker", "Add", add(720_005, 720_001, InventoryFlag::Cargo)).await.unwrap_err().code, "NotEnoughCargoSpace");
 
     // Venture Ore Hold (flag 134) accepts Veldspar (1228) and rejects refined mineral Tritanium (34).
     seed(&ctx, 720_006, 1228, C1, JITA44, InventoryFlag::Hangar, 1_000, false);

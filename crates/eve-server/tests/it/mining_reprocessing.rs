@@ -258,7 +258,7 @@ async fn test_phase_5m_mn05_specialized_holds_volume_and_stack_merging() {
             None,
         )
         .await;
-    assert_eq!(cap_err.unwrap_err().code, "CapacityExceeded");
+    assert_eq!(cap_err.unwrap_err().code, "NotEnoughSpecialBaySpace");
     let untouched_c = ctx.db.get_item(item_c).expect("item_c untouched");
     assert_eq!(untouched_c.location_id, station_id);
     assert_eq!(untouched_c.quantity, 50_000);

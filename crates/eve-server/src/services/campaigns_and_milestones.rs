@@ -669,6 +669,12 @@ fn handle_login_campaign_claim_reward(
     })?;
     if res != PyRep::None {
         for item in &spawned_items {
+            let (group_id, category_id) = ctx
+                .sde
+                .types
+                .get(&item.type_id)
+                .map(|t| (t.group_id, t.category_id))
+                .unwrap_or((0, 0));
             let item_change_args = vec![
                 PyRep::keyval([
                     ("itemID", PyRep::Integer(item.item_id)),
@@ -676,7 +682,16 @@ fn handle_login_campaign_claim_reward(
                     ("ownerID", PyRep::Integer(char_id)),
                     ("locationID", PyRep::Integer(item.location_id)),
                     ("flagID", PyRep::Integer(eve_db::InventoryFlag::Hangar as i64)),
-                    ("quantity", PyRep::Integer(i64::from(item.quantity))),
+                    (
+                        "quantity",
+                        PyRep::Integer(if item.singleton {
+                            -1
+                        } else {
+                            i64::from(item.quantity)
+                        }),
+                    ),
+                    ("groupID", PyRep::Integer(i64::from(group_id))),
+                    ("categoryID", PyRep::Integer(i64::from(category_id))),
                     ("singleton", PyRep::Bool(item.singleton)),
                     ("stacksize", PyRep::Integer(i64::from(item.quantity))),
                 ]),

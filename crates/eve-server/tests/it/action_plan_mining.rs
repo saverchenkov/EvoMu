@@ -182,7 +182,7 @@ async fn test_action_plan_c5_mn01_to_mn07_mining_data_belts_lasers_holds_crystal
     let min_err = ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(mineral_id), PyRep::Integer(ship_id), PyRep::Integer(InventoryFlag::SpecializedOreHold as i64)], &kw, None).await.expect_err("Minerals rejected by SpecializedOreHold");
     assert_eq!(min_err.code, "InvalidItemTypeForHold");
     let cap_err = ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(oversized_id), PyRep::Integer(ship_id), PyRep::Integer(InventoryFlag::SpecializedOreHold as i64)], &kw, None).await.expect_err("Oversized ore rejected by SpecializedOreHold");
-    assert_eq!(cap_err.code, "CapacityExceeded");
+    assert_eq!(cap_err.code, "NotEnoughSpecialBaySpace");
 
     // 5. plan:MN-03: Depletion to 0, OnAsteroidTerminated, ball removal, and respawn tick
     ctx.db.with_mut_snapshot(|snap| {

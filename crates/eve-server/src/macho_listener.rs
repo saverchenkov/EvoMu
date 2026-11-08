@@ -314,9 +314,10 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 client_id,
                                 session.user_id,
                                 &notif.event,
-                                crate::router::client_compat::normalize_macho_notification(
+                                crate::router::client_compat::normalize_macho_notification_with_sde(
                                     &notif.event,
                                     notif.args,
+                                    Some(&ctx.sde),
                                 ),
                             );
                             if write_framed_pyrep(&mut writer, &notif_pkt.to_pyrep()).await.is_err() {
@@ -840,6 +841,36 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                         MachoPacketType::CallReq as i64,
                                         &err_msg,
                                     )
+                                } else if matches!(
+                                    err.code.as_str(),
+                                    "NotEnoughCargoSpace"
+                                        | "NotEnoughCargoSpaceOverload"
+                                        | "NotEnoughDroneBaySpace"
+                                        | "NotEnoughDroneBaySpaceOverload"
+                                        | "NotEnoughFighterBaySpace"
+                                        | "NotEnoughSpecialBaySpace"
+                                        | "NotEnoughSpecialBaySpaceOverload"
+                                        | "NotEnoughSpace"
+                                        | "NotEnoughChargeSpace"
+                                        | "NoSpaceForThat"
+                                        | "NoSpaceForThatOverload"
+                                ) {
+                                    let parse_val = |prefix: &str| -> Option<f64> {
+                                        let start = err.message.find(prefix)? + prefix.len();
+                                        let rest = &err.message[start..];
+                                        let end = rest.find(',').unwrap_or(rest.len());
+                                        rest[..end].trim().parse::<f64>().ok()
+                                    };
+                                    let free = parse_val("free=").unwrap_or(0.0);
+                                    let required = parse_val("required=").unwrap_or(0.0);
+                                    eve_machonet::wrapped_user_error_with_dict_body(
+                                        MachoPacketType::CallReq as i64,
+                                        err.code.trim(),
+                                        vec![
+                                            (PyRep::ascii_bytes("free"), PyRep::Real(free)),
+                                            (PyRep::ascii_bytes("required"), PyRep::Real(required)),
+                                        ],
+                                    )
                                 } else {
                                     eve_machonet::wrapped_user_error_body(
                                         MachoPacketType::CallReq as i64,
@@ -1010,9 +1041,10 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 client_id,
                                 session.user_id,
                                 &notif.event,
-                                crate::router::client_compat::normalize_macho_notification(
+                                crate::router::client_compat::normalize_macho_notification_with_sde(
                                     &notif.event,
                                     notif.args,
+                                    Some(&ctx.sde),
                                 ),
                             );
                             if write_framed_pyrep(&mut writer, &notif_pkt.to_pyrep())
@@ -1038,7 +1070,11 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                     client_id,
                                     session.user_id,
                                     &event,
-                                    crate::router::client_compat::normalize_macho_notification(&event, args),
+                                    crate::router::client_compat::normalize_macho_notification_with_sde(
+                                        &event,
+                                        args,
+                                        Some(&ctx.sde),
+                                    ),
                                 );
                                 if write_framed_pyrep(&mut writer, &notif_pkt.to_pyrep())
                                     .await

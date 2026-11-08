@@ -329,3 +329,183 @@ async fn test_319_320_daily_goals_includes_daily_bonus_job() {
         "GetAllCurrentRequest must return a CATEGORY_DAILY_BONUS (category=2) goal so daily_bonus_job is not None"
     );
 }
+
+#[tokio::test]
+async fn bounty_proxy_returns_zero_entries_for_requested_unlisted_targets() {
+    let ctx = ServerContext::new();
+    let mut sess = login_session(&ctx, 77).await;
+    let kw = HashMap::new();
+
+    let nonzero_id = 90_000_077_i64;
+    let unlisted_id = 90_000_001_i64;
+    let explicit_zero_id = 90_000_078_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .player_bounty_pool
+            .insert(nonzero_id, 500_000.0);
+        snap.combat_crimewatch_state
+            .player_bounty_pool
+            .insert(explicit_zero_id, 0.0);
+    });
+
+    for req_arg in [
+        PyRep::Set(vec![
+            PyRep::Integer(nonzero_id),
+            PyRep::Integer(unlisted_id),
+            PyRep::Integer(explicit_zero_id),
+        ]),
+        PyRep::PySet(vec![
+            PyRep::Integer(nonzero_id),
+            PyRep::Integer(unlisted_id),
+            PyRep::Integer(explicit_zero_id),
+        ]),
+        PyRep::Tuple(vec![
+            PyRep::Integer(nonzero_id),
+            PyRep::Integer(unlisted_id),
+            PyRep::Integer(explicit_zero_id),
+        ]),
+        PyRep::List(vec![
+            PyRep::Integer(nonzero_id),
+            PyRep::Integer(unlisted_id),
+            PyRep::Integer(explicit_zero_id),
+        ]),
+    ] {
+        let res = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "bountyProxy",
+                None,
+                "GetBounties",
+                &[req_arg],
+                &kw,
+                None,
+            )
+            .await
+            .unwrap();
+        let PyRep::List(rows) = res else {
+            panic!("expected List from GetBounties");
+        };
+        assert_eq!(rows.len(), 3, "every requested ID must be returned");
+        let mut by_id = HashMap::new();
+        for entry in rows {
+            let PyRep::Tuple(pair) = entry else {
+                panic!("expected (targetID, KeyVal) tuple");
+            };
+            let tid = pair[0].as_i64().unwrap();
+            let amt = pair[1].dict_get("bounty").and_then(|v| v.as_f64()).unwrap();
+            assert_eq!(pair[1].dict_get("bountyISK").and_then(|v| v.as_f64()), Some(amt));
+            assert_eq!(pair[1].dict_get("targetID").and_then(|v| v.as_i64()), Some(tid));
+            by_id.insert(tid, amt);
+        }
+        assert_eq!(by_id.get(&nonzero_id), Some(&500_000.0));
+        assert_eq!(by_id.get(&unlisted_id), Some(&0.0));
+        assert_eq!(by_id.get(&explicit_zero_id), Some(&0.0));
+    }
+
+    // Empty request returns only positive entries
+    let empty_res = ctx
+        .dispatch_rpc(&mut sess, "bountyProxy", None, "GetBounties", &[], &kw, None)
+        .await
+        .unwrap();
+    let PyRep::List(pos_rows) = empty_res else {
+        panic!("expected List");
+    };
+    assert_eq!(pos_rows.len(), 1);
+
+    // GetBountiesAndKillRights also includes requested 0.0 / unlisted IDs
+    let combined = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "bountyProxy",
+            None,
+            "GetBountiesAndKillRights",
+            &[
+                PyRep::Set(vec![
+                    PyRep::Integer(nonzero_id),
+                    PyRep::Integer(unlisted_id),
+                ]),
+                PyRep::Set(vec![PyRep::Integer(unlisted_id)]),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap();
+    let PyRep::Tuple(parts) = combined else {
+        panic!("expected (bounties, killRights) tuple");
+    };
+    let PyRep::List(bounties) = &parts[0] else {
+        panic!("expected bounty list");
+    };
+    assert_eq!(bounties.len(), 2);
+}
+
+#[tokio::test]
+async fn on_item_change_emitters_include_owner_group_category_and_singleton() {
+    let ctx = ServerContext::new();
+    let mut sess = login_session(&ctx, 78).await;
+    let kw = HashMap::new();
+    let char_id = PILOT;
+    let station_id = 60_003_760_i64;
+    let trash_ship_id = 99_668_001_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            trash_ship_id,
+            InventoryItemRecord {
+                item_id: trash_ship_id,
+                type_id: 587, // Rifter
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // TrashItems emitter
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        None,
+        "TrashItems",
+        &[PyRep::List(vec![PyRep::Integer(trash_ship_id)]), PyRep::Integer(station_id)],
+        &kw,
+        None,
+    )
+    .await
+    .unwrap();
+    let trash_notifs = ctx.drain_notifications_for_char(char_id);
+    let trash_ic = trash_notifs
+        .iter()
+        .find(|n| n.event == "OnItemChange")
+        .expect("OnItemChange on TrashItems");
+    assert_eq!(trash_ic.args[0].dict_get("ownerID").and_then(|v| v.as_i64()), Some(char_id));
+    assert!(trash_ic.args[0].dict_get("groupID").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+    assert_eq!(trash_ic.args[0].dict_get("categoryID").and_then(|v| v.as_i64()), Some(6));
+    assert_eq!(trash_ic.args[0].dict_get("quantity").and_then(|v| v.as_i64()), Some(-1));
+
+    // Mission item reward emitter
+    eve_server::services::agents_mission_rewards::emit_mission_item_reward_notification(
+        &ctx,
+        char_id,
+        eve_server::services::agents_mission_rewards::MintedMissionItemReward {
+            item_id: 99_668_002,
+            type_id: 587,
+            quantity: 1,
+            station_id,
+        },
+    );
+    let reward_notifs = ctx.drain_notifications_for_char(char_id);
+    let reward_ic = reward_notifs
+        .iter()
+        .find(|n| n.event == "OnItemChange")
+        .expect("OnItemChange on mission reward");
+    assert_eq!(reward_ic.args[0].dict_get("ownerID").and_then(|v| v.as_i64()), Some(char_id));
+    assert!(reward_ic.args[0].dict_get("groupID").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+    assert_eq!(reward_ic.args[0].dict_get("categoryID").and_then(|v| v.as_i64()), Some(6));
+    assert_eq!(reward_ic.args[0].dict_get("quantity").and_then(|v| v.as_i64()), Some(-1));
+}

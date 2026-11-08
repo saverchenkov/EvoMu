@@ -1105,13 +1105,21 @@ pub fn handle_contract_delete_multiple(
         Ok::<_, BridgeRpcError>((del, fail, changes))
     })?;
     for (it, prev_owner, prev_loc, prev_flag) in item_changes {
+        let (group_id, category_id) = ctx
+            .sde
+            .types
+            .get(&it.type_id)
+            .map(|t| (t.group_id, t.category_id))
+            .unwrap_or((0, 0));
         let row = PyRep::keyval([
             ("itemID", PyRep::Integer(it.item_id)),
             ("typeID", PyRep::Integer(i64::from(it.type_id))),
             ("ownerID", PyRep::Integer(it.owner_id)),
             ("locationID", PyRep::Integer(it.location_id)),
             ("flagID", PyRep::Integer(it.flag as i64)),
-            ("quantity", PyRep::Integer(i64::from(it.quantity))),
+            ("quantity", PyRep::Integer(if it.singleton { -1 } else { i64::from(it.quantity) })),
+            ("groupID", PyRep::Integer(i64::from(group_id))),
+            ("categoryID", PyRep::Integer(i64::from(category_id))),
             ("singleton", PyRep::Bool(it.singleton)),
         ]);
         let mut ch = Vec::new();

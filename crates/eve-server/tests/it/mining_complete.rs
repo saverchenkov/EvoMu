@@ -359,7 +359,7 @@ async fn test_mn05_special_holds_and_mining_to_jetcan() {
         )
         .await
         .expect_err("6,000 m3 ore must exceed Venture 5,000 m3 Ore Hold");
-    assert_eq!(err_overflow.code, "CapacityExceeded");
+    assert_eq!(err_overflow.code, "NotEnoughSpecialBaySpace");
 
     // Switch ship to Kryos (654, SpecializedMineralHold flag 136):
     ctx.db.with_mut_snapshot(|snap| {

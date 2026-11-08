@@ -988,14 +988,20 @@ pub(crate) fn extract_id_collection(rep: Option<&PyRep>) -> Vec<i64> {
         return Vec::new();
     };
     match rep {
-        PyRep::List(items) | PyRep::Tuple(items) => {
+        PyRep::List(items) | PyRep::Tuple(items) | PyRep::PySet(items) | PyRep::Set(items) => {
             items.iter().filter_map(|v| v.as_i64()).collect()
         }
         PyRep::ObjectEx { header, list, .. } => {
             let mut out: Vec<i64> = list.iter().filter_map(|v| v.as_i64()).collect();
             if let PyRep::Tuple(h) = header.as_ref() {
                 if let Some(PyRep::Tuple(ctor_args)) = h.get(1) {
-                    if let Some(PyRep::List(items) | PyRep::Tuple(items)) = ctor_args.first() {
+                    if let Some(
+                        PyRep::List(items)
+                        | PyRep::Tuple(items)
+                        | PyRep::PySet(items)
+                        | PyRep::Set(items),
+                    ) = ctor_args.first()
+                    {
                         out.extend(items.iter().filter_map(|v| v.as_i64()));
                     }
                 }
@@ -1018,19 +1024,16 @@ pub(crate) fn handle_get_bounties_and_kill_rights(
     let bounties = with_combat_runtime(ctx, |rt| {
         let mut list = Vec::new();
         if !bounty_ids.is_empty() {
-            for tid in &bounty_ids {
-                if let Some(&amt) = rt.player_bounty_pool.get(tid) {
-                    if amt > 0.0 {
-                        list.push(PyRep::Tuple(vec![
-                            PyRep::Integer(*tid),
-                            PyRep::keyval([
-                                ("targetID", PyRep::Integer(*tid)),
-                                ("bountyISK", PyRep::Real(amt)),
-                                ("bounty", PyRep::Real(amt)),
-                            ]),
-                        ]));
-                    }
-                }
+            for &tid in &bounty_ids {
+                let amt = rt.player_bounty_pool.get(&tid).copied().unwrap_or(0.0);
+                list.push(PyRep::Tuple(vec![
+                    PyRep::Integer(tid),
+                    PyRep::keyval([
+                        ("targetID", PyRep::Integer(tid)),
+                        ("bountyISK", PyRep::Real(amt)),
+                        ("bounty", PyRep::Real(amt)),
+                    ]),
+                ]));
             }
         } else {
             for (&tid, &amt) in &rt.player_bounty_pool {

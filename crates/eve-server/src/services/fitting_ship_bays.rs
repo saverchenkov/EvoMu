@@ -311,6 +311,12 @@ pub(crate) async fn board_stored_ship(
     }
     let new_loc_id = dock_id.or(session.solar_system_id.map(|v| v as i64)).unwrap_or(stored.location_id);
     let new_flag = if dock_id.is_some() { InventoryFlag::Hangar } else { InventoryFlag::None };
+    let (group_id, category_id) = ctx
+        .sde
+        .types
+        .get(&stored.type_id)
+        .map(|t| (t.group_id, t.category_id))
+        .unwrap_or((0, 0));
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
         "OnItemChange",
@@ -319,9 +325,13 @@ pub(crate) async fn board_stored_ship(
             PyRep::keyval([
                 ("itemID", PyRep::Integer(stored_id)),
                 ("typeID", PyRep::Integer(stored.type_id as i64)),
+                ("ownerID", PyRep::Integer(stored.owner_id)),
                 ("locationID", PyRep::Integer(new_loc_id)),
                 ("flagID", PyRep::Integer(new_flag as i64)),
-                ("quantity", PyRep::Integer(1)),
+                ("quantity", PyRep::Integer(if stored.singleton { -1 } else { stored.quantity as i64 })),
+                ("groupID", PyRep::Integer(i64::from(group_id))),
+                ("categoryID", PyRep::Integer(i64::from(category_id))),
+                ("singleton", PyRep::Bool(stored.singleton)),
             ]),
             PyRep::Dict(vec![
                 (PyRep::Integer(3), PyRep::Integer(stored.location_id)),

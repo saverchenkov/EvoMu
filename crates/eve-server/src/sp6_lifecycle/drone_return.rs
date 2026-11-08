@@ -243,6 +243,17 @@ async fn try_atomic_scoop_drone(
         0,
         None,
     );
+    let (group_id, category_id) = ctx
+        .sde
+        .types
+        .get(&claimed_drone.type_id)
+        .map(|t| (t.group_id, t.category_id))
+        .unwrap_or((0, 0));
+    let (owner_id, singleton, qty_wire) = ctx
+        .db
+        .get_item(claimed_drone.drone_item_id)
+        .map(|i| (i.owner_id, i.singleton, if i.singleton { -1 } else { i.quantity as i64 }))
+        .unwrap_or((claimed_drone.owner_char_id, true, -1));
     ctx.notify(
         NotificationTarget::Character(claimed_drone.owner_char_id),
         "OnItemChange",
@@ -251,9 +262,13 @@ async fn try_atomic_scoop_drone(
             PyRep::keyval([
                 ("itemID", PyRep::Integer(claimed_drone.drone_item_id)),
                 ("typeID", PyRep::Integer(claimed_drone.type_id as i64)),
+                ("ownerID", PyRep::Integer(owner_id)),
                 ("locationID", PyRep::Integer(target_ship_id)),
                 ("flagID", PyRep::Integer(eve_db::InventoryFlag::DroneBay as i64)),
-                ("quantity", PyRep::Integer(1)),
+                ("quantity", PyRep::Integer(qty_wire)),
+                ("groupID", PyRep::Integer(i64::from(group_id))),
+                ("categoryID", PyRep::Integer(i64::from(category_id))),
+                ("singleton", PyRep::Bool(singleton)),
             ]),
             PyRep::Dict(vec![
                 (

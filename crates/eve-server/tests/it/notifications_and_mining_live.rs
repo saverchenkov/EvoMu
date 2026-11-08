@@ -358,7 +358,7 @@ async fn test_live_excavator_drones_mining_goals_and_market_supply_chain() {
     ctx.advance_secs(11);
     add_inv(&ctx, &mut s1, miner_mod, venture_id, InventoryFlag::HiSlot0).await;
     let bay_args = [PyRep::Integer(exc_non_rorq), PyRep::Integer(venture_id), PyRep::Integer(InventoryFlag::DroneBay as i64)];
-    assert_eq!(rpc(&ctx, &mut s1, "invbroker", "Add", &bay_args).await.unwrap_err().code, "CapacityExceeded");
+    assert_eq!(rpc(&ctx, &mut s1, "invbroker", "Add", &bay_args).await.unwrap_err().code, "NotEnoughDroneBaySpace");
 
     let rorq_id = give_item(&ctx, &mut s1, 28_352, 1).await;
     let core_id = give_item(&ctx, &mut s1, 28_583, 1).await;

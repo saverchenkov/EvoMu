@@ -63,27 +63,59 @@ fn rowset_to_dict_by_key(rep: PyRep, key_col: &str) -> PyRep {
     PyRep::Dict(dict)
 }
 
-fn inv_keyval_to_dbrow(rep: PyRep) -> PyRep {
+fn inv_keyval_to_dbrow_with_sde(rep: PyRep, sde: Option<&eve_sde::SdeRegistry>) -> PyRep {
     let PyRep::KeyVal(entries) = rep else {
         return rep;
     };
-    let group_id = kv_int(&entries, "groupID", 25);
-    let category_id = kv_int(&entries, "categoryID", 7);
+    let type_id = kv_int(&entries, "typeID", 0);
+    let sde_type = u32::try_from(type_id)
+        .ok()
+        .and_then(|tid| sde.and_then(|s| s.types.get(&tid)));
+    let raw_group = kv_int(&entries, "groupID", 0);
+    let raw_cat = kv_int(&entries, "categoryID", 0);
+    let group_id = if raw_group > 0 {
+        raw_group
+    } else {
+        sde_type.map(|t| i64::from(t.group_id)).unwrap_or(0)
+    };
+    let category_id = if raw_cat > 0 {
+        raw_cat
+    } else {
+        sde_type.map(|t| i64::from(t.category_id)).unwrap_or(0)
+    };
+    let flag_id = if entries.contains_key("flagID") {
+        kv_int(&entries, "flagID", 0)
+    } else {
+        kv_int(&entries, "flag", 0)
+    };
+    let singleton = matches!(entries.get("singleton"), Some(PyRep::Bool(true)))
+        || matches!(entries.get("singleton"), Some(PyRep::Integer(n)) if *n != 0);
+    let raw_qty = if entries.contains_key("quantity") {
+        kv_int(&entries, "quantity", 0)
+    } else {
+        kv_int(&entries, "stacksize", 0)
+    };
+    let quantity = if singleton && raw_qty >= 0 { -1 } else { raw_qty };
     let cells = vec![
         PyRep::Integer(kv_int(&entries, "itemID", 0)),
-        PyRep::Integer(kv_int(&entries, "typeID", 0)),
+        PyRep::Integer(type_id),
         PyRep::Integer(kv_int(&entries, "ownerID", 0)),
         PyRep::Integer(kv_int(&entries, "locationID", 0)),
-        PyRep::Integer(kv_int(&entries, "flagID", 0)),
-        PyRep::Integer(kv_int(&entries, "quantity", 0)),
-        PyRep::Integer(if group_id > 0 { group_id } else { 25 }),
-        PyRep::Integer(if category_id > 0 { category_id } else { 7 }),
+        PyRep::Integer(flag_id),
+        PyRep::Integer(quantity),
+        PyRep::Integer(group_id),
+        PyRep::Integer(category_id),
         entries
             .get("customInfo")
             .cloned()
             .unwrap_or_else(|| PyRep::String(kv_str(&entries, "customInfo"))),
     ];
     DBRowDescriptor::inv_item_header().build_dbrow(cells)
+}
+
+#[allow(dead_code)]
+fn inv_keyval_to_dbrow(rep: PyRep) -> PyRep {
+    inv_keyval_to_dbrow_with_sde(rep, None)
 }
 
 fn ensure_scan_result_data(rep: PyRep) -> PyRep {
@@ -650,7 +682,16 @@ pub fn should_suppress_macho_notification(event: &str, args: &[PyRep]) -> bool {
 }
 
 /// Normalizes MachoNet broadcast notifications for live EVE V24.01 clients.
-pub fn normalize_macho_notification(event: &str, mut args: Vec<PyRep>) -> Vec<PyRep> {
+pub fn normalize_macho_notification(event: &str, args: Vec<PyRep>) -> Vec<PyRep> {
+    normalize_macho_notification_with_sde(event, args, None)
+}
+
+/// Normalizes MachoNet broadcast notifications for live EVE V24.01 clients using SDE lookups.
+pub fn normalize_macho_notification_with_sde(
+    event: &str,
+    mut args: Vec<PyRep>,
+    sde: Option<&eve_sde::SdeRegistry>,
+) -> Vec<PyRep> {
     match event {
         "OnContractCreated" => Vec::new(),
         "OnWarpFinished" => {
@@ -743,10 +784,26 @@ pub fn normalize_macho_notification(event: &str, mut args: Vec<PyRep>) -> Vec<Py
         "OnItemChange" => {
             if let Some(first) = args.first_mut() {
                 let old = std::mem::replace(first, PyRep::None);
-                *first = inv_keyval_to_dbrow(old);
+                *first = inv_keyval_to_dbrow_with_sde(old, sde);
             }
             if args.len() == 2 {
                 args.push(PyRep::None);
+            }
+            args
+        }
+        "OnMultipleItemChange" => {
+            if let Some(PyRep::List(items)) = args.first_mut() {
+                for entry in items.iter_mut() {
+                    if let PyRep::Tuple(pair) = entry {
+                        if let Some(first) = pair.first_mut() {
+                            let old = std::mem::replace(first, PyRep::None);
+                            *first = inv_keyval_to_dbrow_with_sde(old, sde);
+                        }
+                    } else {
+                        let old = std::mem::replace(entry, PyRep::None);
+                        *entry = inv_keyval_to_dbrow_with_sde(old, sde);
+                    }
+                }
             }
             args
         }

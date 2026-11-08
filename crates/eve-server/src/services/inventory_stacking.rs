@@ -274,10 +274,9 @@ pub(crate) async fn handle_multi_add(
                 let hold_cap =
                     crate::services::fitting_saved_apply::get_ship_hold_capacity(flag_u16, dest_type, eval_cargo_cap);
                 if flag_u16 != 5 && hold_cap <= 0.0 {
-                    return Err(BridgeRpcError {
-                        code: "CannotMoveIntoHold".into(),
-                        message: format!("Ship {} has no hold for flag {flag_u16}", dest_type.name),
-                    });
+                    return Err(super::inventory_fitting::ship_hold_capacity_error(
+                        flag_u16, 0.0, 0.0, batch_vol,
+                    ));
                 }
                 if hold_cap > 0.0 {
                     let used_vol: f64 = snap
@@ -292,12 +291,9 @@ pub(crate) async fn handle_multi_add(
                         })
                         .sum();
                     if used_vol + batch_vol > hold_cap + 1e-4 {
-                        return Err(BridgeRpcError {
-                            code: "NotEnoughCargoSpace".into(),
-                            message: format!(
-                                "Cumulative batch volume {batch_vol:.1} m³ exceeds remaining capacity of hold {flag_u16}"
-                            ),
-                        });
+                        return Err(super::inventory_fitting::ship_hold_capacity_error(
+                            flag_u16, hold_cap, used_vol, batch_vol,
+                        ));
                     }
                 }
             } else if fitting_containers_ships::is_container_group(

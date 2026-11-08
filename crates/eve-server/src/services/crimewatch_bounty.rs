@@ -556,26 +556,25 @@ pub fn handle_bounty_proxy(
                 let pool = &rt.player_bounty_pool;
                 let mut v = Vec::new();
                 let push_entry = |list: &mut Vec<PyRep>, tid: i64, amt: f64| {
-                    if amt > 0.0 {
-                        list.push(PyRep::Tuple(vec![
-                            PyRep::Integer(tid),
-                            PyRep::keyval([
-                                ("targetID", PyRep::Integer(tid)),
-                                ("bountyISK", PyRep::Real(amt)),
-                                ("bounty", PyRep::Real(amt)),
-                            ]),
-                        ]));
-                    }
+                    list.push(PyRep::Tuple(vec![
+                        PyRep::Integer(tid),
+                        PyRep::keyval([
+                            ("targetID", PyRep::Integer(tid)),
+                            ("bountyISK", PyRep::Real(amt)),
+                            ("bounty", PyRep::Real(amt)),
+                        ]),
+                    ]));
                 };
                 if !requested_ids.is_empty() {
                     for tid in requested_ids {
-                        if let Some(&amt) = pool.get(&tid) {
-                            push_entry(&mut v, tid, amt);
-                        }
+                        let amt = pool.get(&tid).copied().unwrap_or(0.0);
+                        push_entry(&mut v, tid, amt);
                     }
                 } else {
                     for (&tid, &amt) in pool {
-                        push_entry(&mut v, tid, amt);
+                        if amt > 0.0 {
+                            push_entry(&mut v, tid, amt);
+                        }
                     }
                 }
                 v
@@ -1050,6 +1049,7 @@ pub fn handle_apply_tags_for_sec_status(
                             ("quantity", PyRep::Integer(rem_qty as i64)),
                             ("groupID", PyRep::Integer(group_id)),
                             ("categoryID", PyRep::Integer(category_id)),
+                            ("singleton", PyRep::Bool(old_item.singleton)),
                             ("stacksize", PyRep::Integer(rem_qty as i64)),
                         ]),
                         PyRep::Dict(changes),

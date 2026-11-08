@@ -1030,6 +1030,12 @@ pub fn handle_season_manager(
                         );
                     }
                     if let Some((item_id, type_id, loc_id, qty)) = created_item_notif {
+                        let (group_id, category_id) = ctx
+                            .sde
+                            .types
+                            .get(&type_id)
+                            .map(|t| (t.group_id, t.category_id))
+                            .unwrap_or((0, 0));
                         ctx.notify(
                             NotificationTarget::Character(char_id),
                             "OnItemChange",
@@ -1038,9 +1044,14 @@ pub fn handle_season_manager(
                                 PyRep::keyval([
                                     ("itemID", PyRep::Integer(item_id)),
                                     ("typeID", PyRep::Integer(type_id as i64)),
+                                    ("ownerID", PyRep::Integer(char_id)),
                                     ("locationID", PyRep::Integer(loc_id)),
                                     ("flagID", PyRep::Integer(eve_db::InventoryFlag::Hangar as i64)),
                                     ("quantity", PyRep::Integer(qty as i64)),
+                                    ("stacksize", PyRep::Integer(qty as i64)),
+                                    ("groupID", PyRep::Integer(i64::from(group_id))),
+                                    ("categoryID", PyRep::Integer(i64::from(category_id))),
+                                    ("singleton", PyRep::Bool(false)),
                                 ]),
                                 PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))]),
                             ],

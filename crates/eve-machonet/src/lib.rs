@@ -91,13 +91,12 @@ pub fn wrapped_runtime_error_body(original_command: i64, message: &str) -> PyRep
 }
 
 /// Body of a V24 `machoNetPacket.ErrorResponse` carrying a wrapped `eveexceptions.UserError`
-/// with a custom argument key (`UserError(user_error_name, {dict_key: value})`), e.g.
-/// `UserError('SlashError', {'reason': ...})` expected by `eve/devtools/script/svc_slash.py`.
-pub fn wrapped_user_error_with_dict_key_body(
+/// with a custom dict (`UserError(user_error_name, dict_entries)`), e.g.
+/// `UserError('NotEnoughCargoSpace', {'free': 10.0, 'required': 25.0})`.
+pub fn wrapped_user_error_with_dict_body(
     original_command: i64,
     user_error_name: &str,
-    dict_key: &str,
-    value: &str,
+    dict_entries: Vec<(PyRep, PyRep)>,
 ) -> PyRep {
     let exc = PyRep::ObjectEx {
         is_type_2: false,
@@ -105,10 +104,7 @@ pub fn wrapped_user_error_with_dict_key_body(
             PyRep::Token("eveexceptions.UserError".into()),
             PyRep::Tuple(vec![
                 PyRep::ascii_bytes(user_error_name),
-                PyRep::Dict(vec![(
-                    PyRep::ascii_bytes(dict_key),
-                    PyRep::ascii_bytes(value),
-                )]),
+                PyRep::Dict(dict_entries),
             ]),
         ])),
         list: Vec::new(),
@@ -119,6 +115,22 @@ pub fn wrapped_user_error_with_dict_key_body(
         PyRep::Integer(MACHONETERR_WRAPPEDEXCEPTION),
         PyRep::Tuple(vec![PyRep::Bytes(eve_proto::marshal::encode(&exc))]),
     ])
+}
+
+/// Body of a V24 `machoNetPacket.ErrorResponse` carrying a wrapped `eveexceptions.UserError`
+/// with a custom argument key (`UserError(user_error_name, {dict_key: value})`), e.g.
+/// `UserError('SlashError', {'reason': ...})` expected by `eve/devtools/script/svc_slash.py`.
+pub fn wrapped_user_error_with_dict_key_body(
+    original_command: i64,
+    user_error_name: &str,
+    dict_key: &str,
+    value: &str,
+) -> PyRep {
+    wrapped_user_error_with_dict_body(
+        original_command,
+        user_error_name,
+        vec![(PyRep::ascii_bytes(dict_key), PyRep::ascii_bytes(value))],
+    )
 }
 
 /// Body of a V24 `machoNetPacket.ErrorResponse` carrying a wrapped `eveexceptions.UserError`

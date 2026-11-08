@@ -1055,6 +1055,12 @@ fn handle_trade_action(
                     for (old_owner, list) in [(tr.char_a, &tr.items_a), (tr.char_b, &tr.items_b)] {
                         for &(iid, _) in list {
                             if let Some(it) = snap.items.get(&iid) {
+                                let (group_id, category_id) = ctx
+                                    .sde
+                                    .types
+                                    .get(&it.type_id)
+                                    .map(|t| (t.group_id, t.category_id))
+                                    .unwrap_or((0, 0));
                                 let row = PyRep::keyval([
                                     ("itemID", PyRep::Integer(it.item_id)),
                                     ("typeID", PyRep::Integer(it.type_id as i64)),
@@ -1062,6 +1068,9 @@ fn handle_trade_action(
                                     ("locationID", PyRep::Integer(it.location_id)),
                                     ("flagID", PyRep::Integer(it.flag as i64)),
                                     ("quantity", PyRep::Integer(if it.singleton { -1 } else { it.quantity as i64 })),
+                                    ("groupID", PyRep::Integer(i64::from(group_id))),
+                                    ("categoryID", PyRep::Integer(i64::from(category_id))),
+                                    ("singleton", PyRep::Bool(it.singleton)),
                                 ]);
                                 item_notifs.push((old_owner, row));
                             }

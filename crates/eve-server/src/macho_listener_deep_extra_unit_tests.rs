@@ -619,3 +619,254 @@ async fn slash_fetch_remote_command_list_and_unknown_cmd_return_slash_error_with
     assert_eq!(dict[0].0, "reason");
     assert!(dict[0].1.contains("InvalidSlashArgument"), "got reason: {}", dict[0].1);
 }
+
+#[tokio::test]
+async fn wire_invbroker_capacity_overflow_returns_typed_user_error_with_free_and_required() {
+    let ctx = Arc::new(ServerContext::new());
+    let addr = spawn_listener(Arc::clone(&ctx)).await;
+    let char_id = 90_000_001_i64;
+    let station_id = 60_003_760_i64;
+    let venture_id = 99_667_001_i64;
+    let tritanium_id = 99_667_002_i64;
+    let drone_stack_id = 99_667_003_i64;
+    let ore_id = 99_667_004_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            venture_id,
+            eve_db::InventoryItemRecord {
+                item_id: venture_id,
+                type_id: 32_880, // Venture: 50m3 Cargo, 10m3 DroneBay, 5000m3 OreHold
+                owner_id: char_id,
+                location_id: station_id,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        // 10,000 Tritanium (0.01 m3 each) = 100 m3 -> overflows 50 m3 cargo hold (free=50.0, required=100.0)
+        snap.items.insert(
+            tritanium_id,
+            eve_db::InventoryItemRecord {
+                item_id: tritanium_id,
+                type_id: 34,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 10_000,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        // 4 Hobgoblin I (type 2454, 5 m3 each) = 20 m3 -> overflows 10 m3 DroneBay
+        snap.items.insert(
+            drone_stack_id,
+            eve_db::InventoryItemRecord {
+                item_id: drone_stack_id,
+                type_id: 2454,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 4,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        // 60,000 Veldspar (type 1230, 0.1 m3 each) = 6000 m3 -> overflows 5000 m3 SpecializedOreHold
+        snap.items.insert(
+            ore_id,
+            eve_db::InventoryItemRecord {
+                item_id: ore_id,
+                type_id: 1230,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 60_000,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+
+    let (mut s, client_id, user_id) = connect_login(addr, "demo", "demo-secret").await;
+    let call = |cid: u64, svc: &str, m: &str, args: Vec<PyRep>| {
+        build_call_pkt(
+            client_id,
+            user_id,
+            cid,
+            MachoAddress::Node {
+                node_id: MACHO_PROXY_NODE_ID,
+                service: Some(svc.into()),
+                call_id: 0,
+            },
+            None,
+            m,
+            args,
+        )
+    };
+    let decode_space_error = |pkt: MachoPacket| -> (String, f64, f64) {
+        assert_eq!(pkt.packet_type, MachoPacketType::ErrorResponse);
+        let PyRep::Bytes(bytes) = &as_tuple(&as_tuple(&pkt.payload)[2])[0] else {
+            panic!("expected wrapped exception bytes");
+        };
+        let PyRep::ObjectEx { header, .. } = marshal::decode(bytes).unwrap() else {
+            panic!("expected ObjectEx UserError");
+        };
+        let hdr = as_tuple(&header);
+        assert_eq!(hdr[0], PyRep::Token("eveexceptions.UserError".into()));
+        let args = as_tuple(&hdr[1]);
+        let name = args[0].as_str().unwrap().to_string();
+        let PyRep::Dict(entries) = &args[1] else {
+            panic!("expected UserError dict");
+        };
+        let mut free = None;
+        let mut required = None;
+        for (k, v) in entries {
+            match k.as_str() {
+                Some("free") => free = match v {
+                    PyRep::Real(x) => Some(*x),
+                    PyRep::Integer(n) => Some(*n as f64),
+                    _ => None,
+                },
+                Some("required") => required = match v {
+                    PyRep::Real(x) => Some(*x),
+                    PyRep::Integer(n) => Some(*n as f64),
+                    _ => None,
+                },
+                _ => {}
+            }
+        }
+        (
+            name,
+            free.expect("free param missing"),
+            required.expect("required param missing"),
+        )
+    };
+
+    write_framed_pyrep(
+        &mut s,
+        &call(1, "charUnboundMgr", "SelectCharacterID", vec![PyRep::Integer(char_id)]).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read_until_call_reply(&mut s).await.packet_type, MachoPacketType::CallRsp);
+
+    // 1. Cargo hold (flag 5) -> NotEnoughCargoSpace with free=50.0, required=100.0
+    write_framed_pyrep(
+        &mut s,
+        &call(
+            2,
+            "invbroker",
+            "Add",
+            vec![
+                PyRep::Integer(tritanium_id),
+                PyRep::Integer(venture_id),
+                PyRep::Integer(5),
+            ],
+        )
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let (name, free, req) = decode_space_error(read_until_call_reply(&mut s).await);
+    assert_eq!(name, "NotEnoughCargoSpace");
+    assert!((free - 50.0).abs() < 1e-6, "free={free}");
+    assert!((req - 100.0).abs() < 1e-6, "required={req}");
+
+    // 2. DroneBay (flag 87) -> NotEnoughDroneBaySpace with free=10.0, required=20.0
+    write_framed_pyrep(
+        &mut s,
+        &call(
+            3,
+            "invbroker",
+            "Add",
+            vec![
+                PyRep::Integer(drone_stack_id),
+                PyRep::Integer(venture_id),
+                PyRep::Integer(87),
+            ],
+        )
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let (name, free, req) = decode_space_error(read_until_call_reply(&mut s).await);
+    assert_eq!(name, "NotEnoughDroneBaySpace");
+    assert!((free - 10.0).abs() < 1e-6, "free={free}");
+    assert!((req - 20.0).abs() < 1e-6, "required={req}");
+
+    // 3. SpecializedOreHold (flag 134) -> NotEnoughSpecialBaySpace with free=5000.0, required=6000.0
+    write_framed_pyrep(
+        &mut s,
+        &call(
+            4,
+            "invbroker",
+            "Add",
+            vec![
+                PyRep::Integer(ore_id),
+                PyRep::Integer(venture_id),
+                PyRep::Integer(134),
+            ],
+        )
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let (name, free, req) = decode_space_error(read_until_call_reply(&mut s).await);
+    assert_eq!(name, "NotEnoughSpecialBaySpace");
+    assert!((free - 5000.0).abs() < 1e-6, "free={free}");
+    assert!((req - 6000.0).abs() < 1e-6, "required={req}");
+}
+
+#[test]
+fn on_item_change_and_multiple_item_change_resolve_sde_and_singleton_qty() {
+    let ctx = ServerContext::new();
+    let ship_type = ctx.sde.types.get(&587).expect("Rifter 587 in SDE");
+    let kv = PyRep::keyval([
+        ("itemID", PyRep::Integer(700_001)),
+        ("typeID", PyRep::Integer(587)),
+        ("ownerID", PyRep::Integer(90_000_001)),
+        ("locationID", PyRep::Integer(60_003_760)),
+        ("flag", PyRep::Integer(4)),
+        ("quantity", PyRep::Integer(1)),
+        ("singleton", PyRep::Bool(true)),
+    ]);
+
+    let single = crate::router::client_compat::normalize_macho_notification_with_sde(
+        "OnItemChange",
+        vec![kv.clone(), PyRep::Dict(Vec::new())],
+        Some(&ctx.sde),
+    );
+    assert_eq!(single.len(), 3);
+    assert_eq!(single[2], PyRep::None);
+    let PyRep::DBRow { columns, .. } = &single[0] else {
+        panic!("expected DBRow from OnItemChange");
+    };
+    let col = |cols: &[(String, PyRep)], name: &str| -> Option<i64> {
+        cols.iter().find(|(k, _)| k == name).and_then(|(_, v)| v.as_i64())
+    };
+    assert_eq!(col(columns, "itemID"), Some(700_001));
+    assert_eq!(col(columns, "typeID"), Some(587));
+    assert_eq!(col(columns, "ownerID"), Some(90_000_001));
+    assert_eq!(col(columns, "locationID"), Some(60_003_760));
+    assert_eq!(col(columns, "flagID"), Some(4));
+    assert_eq!(col(columns, "quantity"), Some(-1));
+    assert_eq!(col(columns, "groupID"), Some(i64::from(ship_type.group_id)));
+    assert_eq!(col(columns, "categoryID"), Some(i64::from(ship_type.category_id)));
+
+    let multi = crate::router::client_compat::normalize_macho_notification_with_sde(
+        "OnMultipleItemChange",
+        vec![PyRep::List(vec![kv]), PyRep::Dict(Vec::new())],
+        Some(&ctx.sde),
+    );
+    let PyRep::List(rows) = &multi[0] else {
+        panic!("expected List in OnMultipleItemChange");
+    };
+    let PyRep::DBRow { columns: m_cols, .. } = &rows[0] else {
+        panic!("expected DBRow element in OnMultipleItemChange");
+    };
+    assert_eq!(col(m_cols, "quantity"), Some(-1));
+    assert_eq!(col(m_cols, "groupID"), Some(i64::from(ship_type.group_id)));
+    assert_eq!(col(m_cols, "categoryID"), Some(i64::from(ship_type.category_id)));
+}

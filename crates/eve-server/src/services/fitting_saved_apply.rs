@@ -939,27 +939,15 @@ pub(crate) fn validate_and_apply_fitting(
     if fitted_count > 0 && !moved_items.is_empty() {
         if emit_single_item_change {
             for item in &moved_items {
-                ctx.notify(
-                    crate::router::NotificationTarget::Character(char_id),
-                    "OnItemChange",
-                    "charid",
+                let item_row = eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(
+                    crate::services::inventory_bound::item_to_packed_cells(ctx, item),
+                );
+                let _ = ctx.notify_item_change(
+                    char_id,
+                    item_row,
                     vec![
-                        PyRep::keyval([
-                            ("itemID", PyRep::Integer(item.item_id)),
-                            ("typeID", PyRep::Integer(item.type_id as i64)),
-                            ("ownerID", PyRep::Integer(char_id)),
-                            ("locationID", PyRep::Integer(item.location_id)),
-                            ("flagID", PyRep::Integer(item.flag as i64)),
-                            ("quantity", PyRep::Integer(item.quantity as i64)),
-                            ("singleton", PyRep::Bool(item.singleton)),
-                        ]),
-                        PyRep::Dict(vec![
-                            (PyRep::Integer(3), PyRep::Integer(station_id)),
-                            (
-                                PyRep::Integer(4),
-                                PyRep::Integer(eve_db::InventoryFlag::Hangar as i64),
-                            ),
-                        ]),
+                        (3, PyRep::Integer(station_id)),
+                        (4, PyRep::Integer(eve_db::InventoryFlag::Hangar as i64)),
                     ],
                 );
             }

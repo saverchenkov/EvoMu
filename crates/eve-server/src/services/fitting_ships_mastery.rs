@@ -666,6 +666,12 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 "solarsystemid",
                 vec![PyRep::Integer(item_id), PyRep::Integer(type_id as i64)],
             );
+            let (group_id, category_id) = ctx
+                .sde
+                .types
+                .get(&type_id)
+                .map(|t| (t.group_id, t.category_id))
+                .unwrap_or((0, 0));
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
                 "OnItemChange",
@@ -674,9 +680,13 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     PyRep::keyval([
                         ("itemID", PyRep::Integer(item_id)),
                         ("typeID", PyRep::Integer(type_id as i64)),
+                        ("ownerID", PyRep::Integer(item_owner)),
                         ("locationID", PyRep::Integer(sys_id as i64)),
                         ("flagID", PyRep::Integer(InventoryFlag::None as i64)),
-                        ("quantity", PyRep::Integer(1)),
+                        ("quantity", PyRep::Integer(-1)),
+                        ("groupID", PyRep::Integer(i64::from(group_id))),
+                        ("categoryID", PyRep::Integer(i64::from(category_id))),
+                        ("singleton", PyRep::Bool(true)),
                     ]),
                     PyRep::Dict(vec![
                         (PyRep::Integer(3), PyRep::Integer(old_loc)),
@@ -1198,7 +1208,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         .filter(|&id| id >= 60_000_000),
                 };
                 let current_sys = if char_sys > 0 { char_sys } else { session.solar_system_id.map(|s| s as i64).unwrap_or(0) };
-                let mut trashed: Vec<(i64, i64)> = Vec::with_capacity(item_ids.len());
+                let mut trashed: Vec<eve_db::InventoryItemRecord> = Vec::with_capacity(item_ids.len());
                 for &item_id in &item_ids {
                     let Some(item) = snap.items.get(&item_id) else {
                         return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Item {item_id} not found") });
@@ -1271,10 +1281,12 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     if snap.items.values().any(|child| child.location_id == item_id) {
                         return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Cannot trash non-empty container or fitted ship {item_id}") });
                     }
-                    trashed.push((item_id, item.location_id));
+                    trashed.push(item.clone());
                 }
                 let mut balls_to_remove: Vec<(u32, i64)> = Vec::new();
-                for &(item_id, old_location_id) in &trashed {
+                for old_item in &trashed {
+                    let item_id = old_item.item_id;
+                    let old_location_id = old_item.location_id;
                     snap.items.remove(&item_id);
                     snap.item_custom_names.remove(&item_id);
                     snap.item_positions.remove(&item_id);
@@ -1283,7 +1295,8 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         balls_to_remove.push((old_location_id as u32, item_id));
                     }
                 }
-                for &(_, old_location_id) in &trashed {
+                for old_item in &trashed {
+                    let old_location_id = old_item.location_id;
                     let is_empty_jetcan = snap
                         .items
                         .get(&old_location_id)
@@ -1314,7 +1327,15 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 let handle = ctx.systems.get_or_spawn(sys_id);
                 handle.try_remove_ball(ball_id);
             }
-            for &(item_id, old_location_id) in &trashed {
+            for old_item in &trashed {
+                let item_id = old_item.item_id;
+                let old_location_id = old_item.location_id;
+                let (group_id, category_id) = ctx
+                    .sde
+                    .types
+                    .get(&old_item.type_id)
+                    .map(|t| (t.group_id, t.category_id))
+                    .unwrap_or((0, 0));
                 ctx.invalidate_ship_fitting(item_id);
                 ctx.notify(
                     crate::router::NotificationTarget::Character(char_id),
@@ -1323,7 +1344,21 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     vec![
                         PyRep::keyval([
                             ("itemID", PyRep::Integer(item_id)),
+                            ("typeID", PyRep::Integer(old_item.type_id as i64)),
+                            ("ownerID", PyRep::Integer(old_item.owner_id)),
                             ("locationID", PyRep::Integer(6)),
+                            ("flagID", PyRep::Integer(old_item.flag as i64)),
+                            (
+                                "quantity",
+                                PyRep::Integer(if old_item.singleton {
+                                    -1
+                                } else {
+                                    old_item.quantity as i64
+                                }),
+                            ),
+                            ("groupID", PyRep::Integer(i64::from(group_id))),
+                            ("categoryID", PyRep::Integer(i64::from(category_id))),
+                            ("singleton", PyRep::Bool(old_item.singleton)),
                         ]),
                         PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(old_location_id))]),
                     ],

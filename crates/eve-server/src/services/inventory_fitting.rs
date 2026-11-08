@@ -1086,18 +1086,17 @@ pub async fn handle(
                         }
                     }
                     let hold_capacity = crate::services::fitting_saved_apply::get_ship_hold_capacity(flag_u16, ship_type, eval_cargo_cap);
+                    let eff_qty = split_qty_opt.unwrap_or(moving_item.quantity);
+                    let item_vol = effective_item_unit_volume(&ctx.sde, moving_item) * (eff_qty as f64);
                     if flag_u16 != 5 && hold_capacity <= 0.0 {
-                        return Err(BridgeRpcError { code: "CapacityExceeded".into(), message: format!("Ship {} does not have a specialized hold for flag {flag_u16} (capacity 0 m³)", ship_type.name) });
+                        return Err(ship_hold_capacity_error(flag_u16, 0.0, 0.0, item_vol));
                     }
                     if !matches!(flag_u16, 177 | 179) && hold_capacity > 0.0 {
                         let used_vol: f64 = snap.items.values()
                             .filter(|i| i.location_id == new_loc && (i.flag as u16) == flag_u16 && i.item_id != item_id)
                             .map(|i| effective_item_unit_volume(&ctx.sde, i) * (i.quantity as f64)).sum();
-                        let eff_qty = split_qty_opt.unwrap_or(moving_item.quantity);
-                        let item_vol = effective_item_unit_volume(&ctx.sde, moving_item) * (eff_qty as f64);
                         if used_vol + item_vol > hold_capacity + 1e-4 {
-                            let err_code = if looted_from_space { "NotEnoughCargoSpace" } else { "CapacityExceeded" };
-                            return Err(BridgeRpcError { code: err_code.into(), message: format!("Hold capacity of {hold_capacity}m³ exceeded") });
+                            return Err(ship_hold_capacity_error(flag_u16, hold_capacity, used_vol, item_vol));
                         }
                     }
                     Ok(())
@@ -1603,6 +1602,28 @@ async fn handle_ship_drop(
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
     fitting_ship_bays::ship_drop(ctx, session, args, kwargs).await
+}
+
+pub(crate) fn ship_hold_capacity_error_code(flag_u16: u16) -> &'static str {
+    match flag_u16 {
+        87 => "NotEnoughDroneBaySpace",
+        158 => "NotEnoughFighterBaySpace",
+        133..=151 | 177 | 179 | 181 | 182 | 185 => "NotEnoughSpecialBaySpace",
+        _ => "NotEnoughCargoSpace",
+    }
+}
+
+pub(crate) fn ship_hold_capacity_error(
+    flag_u16: u16,
+    hold_capacity: f64,
+    used_vol: f64,
+    required_vol: f64,
+) -> BridgeRpcError {
+    let free_vol = (hold_capacity - used_vol).max(0.0);
+    BridgeRpcError {
+        code: ship_hold_capacity_error_code(flag_u16).into(),
+        message: format!("free={free_vol}, required={required_vol}"),
+    }
 }
 
 pub use super::fitting_saved_apply::{dna_to_fitting, fitting_to_dna, saved_fitting_to_dna};

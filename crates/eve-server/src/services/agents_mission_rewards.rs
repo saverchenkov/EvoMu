@@ -108,14 +108,25 @@ pub fn emit_mission_item_reward_notification(
     char_id: i64,
     reward: MintedMissionItemReward,
 ) {
+    let (group_id, category_id, is_ship) = ctx
+        .sde
+        .types
+        .get(&reward.type_id)
+        .map(|t| (t.group_id, t.category_id, t.category_id == 6))
+        .unwrap_or((0, 0, false));
     let item_row = PyRep::keyval([
         ("itemID", PyRep::Integer(reward.item_id)),
         ("typeID", PyRep::Integer(reward.type_id as i64)),
         ("ownerID", PyRep::Integer(char_id)),
         ("locationID", PyRep::Integer(reward.station_id)),
         ("flagID", PyRep::Integer(InventoryFlag::Hangar as i64)),
-        ("quantity", PyRep::Integer(reward.quantity as i64)),
-        ("singleton", PyRep::Bool(false)),
+        (
+            "quantity",
+            PyRep::Integer(if is_ship { -1 } else { reward.quantity as i64 }),
+        ),
+        ("groupID", PyRep::Integer(i64::from(group_id))),
+        ("categoryID", PyRep::Integer(i64::from(category_id))),
+        ("singleton", PyRep::Bool(is_ship)),
     ]);
     ctx.notify(
         NotificationTarget::Character(char_id),
