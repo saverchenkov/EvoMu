@@ -738,6 +738,7 @@ pub enum DestinyEvent {
     OnDroneActivityChange {
         drone_id: BallId,
         activity_state: i64,
+        activity: Option<String>,
     },
     OnDroneControlLost {
         drone_id: BallId,

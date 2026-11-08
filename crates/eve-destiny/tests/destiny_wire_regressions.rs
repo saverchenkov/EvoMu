@@ -428,15 +428,40 @@ async fn test_destiny_dogma_buffs_dot_and_drone_events() {
     let PyRep::Tuple(dsc2_action) = &dsc2_outer[1] else { panic!("Expected action tuple") };
     assert_eq!(dsc2_action[0].as_str(), Some("OnDroneStateChange2"));
 
-    // 5. OnDroneActivityChange: ("OnDroneActivityChange", (drone_id, activity_state))
+    // 5. OnDroneActivityChange: ("OnDroneActivityChange", (drone_id, activity_state, activity))
     let dac_rep = encode_destiny_event(64, &DestinyEvent::OnDroneActivityChange {
         drone_id,
-        activity_state: 3, // Returning
+        activity_state: 4, // Returning
+        activity: Some("returning".into()),
     }, Some(&park));
     let PyRep::Tuple(dac_outer) = &dac_rep else { panic!("Expected tuple") };
     let PyRep::Tuple(dac_action) = &dac_outer[1] else { panic!("Expected action tuple") };
     assert_eq!(dac_action[0].as_str(), Some("OnDroneActivityChange"));
-    assert_eq!(dac_action[1], PyRep::Tuple(vec![PyRep::Integer(drone_id), PyRep::Integer(3)]));
+    assert_eq!(
+        dac_action[1],
+        PyRep::Tuple(vec![
+            PyRep::Integer(drone_id),
+            PyRep::Integer(4),
+            PyRep::String("returning".into()),
+        ])
+    );
+
+    let dac_idle_rep = encode_destiny_event(64, &DestinyEvent::OnDroneActivityChange {
+        drone_id,
+        activity_state: 0,
+        activity: None,
+    }, Some(&park));
+    let PyRep::Tuple(dac_idle_outer) = &dac_idle_rep else { panic!("Expected tuple") };
+    let PyRep::Tuple(dac_idle_action) = &dac_idle_outer[1] else { panic!("Expected action tuple") };
+    assert_eq!(dac_idle_action[0].as_str(), Some("OnDroneActivityChange"));
+    assert_eq!(
+        dac_idle_action[1],
+        PyRep::Tuple(vec![
+            PyRep::Integer(drone_id),
+            PyRep::Integer(0),
+            PyRep::None,
+        ])
+    );
 
     // 6. OnDroneControlLost: ("OnDroneControlLost", (drone_id,))
     let dcl_rep = encode_destiny_event(65, &DestinyEvent::OnDroneControlLost { drone_id }, Some(&park));

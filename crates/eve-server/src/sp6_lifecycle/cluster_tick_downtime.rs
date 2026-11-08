@@ -113,8 +113,241 @@ pub fn cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx: &ServerContext) ->
     }
 
     crate::services::fleet_social::execute_pending_auto_kicks_on_downtime(ctx);
+    let _bounty_flushed = flush_pending_bounty_ticks_on_downtime(ctx);
+    let _probes_recovered = recover_scanner_probes_on_downtime(ctx);
 
     (wrecks_removed_count, missions_reset_count)
+}
+
+/// Returns non-expired scanner probes to their ship launcher clip or cargo bay during daily
+/// downtime and purges already-expired probes instead of resurrecting them (`#543`).
+/// Returns `(returned_count, purged_expired_count)`.
+pub fn recover_scanner_probes_on_downtime(ctx: &ServerContext) -> (usize, usize) {
+    let now_unix = ctx.now_unix();
+    let mut candidates: Vec<crate::router::ActiveScannerProbe> = Vec::new();
+    let mut purged_expired: Vec<crate::router::ActiveScannerProbe> = Vec::new();
+
+    if let Ok(mut map) = ctx.active_scanner_probes.write() {
+        let mut all_ids: Vec<i64> = map.keys().copied().collect();
+        all_ids.sort_unstable();
+        for pid in all_ids {
+            if let Some(p) = map.remove(&pid) {
+                let is_expired = p.state < 0
+                    || now_unix
+                        >= p.launched_at_unix
+                            .saturating_add(p.max_flight_time_s.max(0.0) as u64);
+                if is_expired {
+                    purged_expired.push(p);
+                } else {
+                    candidates.push(p);
+                }
+            }
+        }
+    }
+
+    let (recovered, unrecovered) = if !candidates.is_empty() {
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut rec = Vec::new();
+            let mut unrec = Vec::new();
+            let add_stack = |items: &mut HashMap<i64, eve_db::InventoryItemRecord>,
+                             next_id: &mut i64,
+                             owner_id: i64,
+                             ship_id: i64,
+                             flag: eve_db::InventoryFlag,
+                             p_type_id: u32,
+                             qty: i32,
+                             exclude_id: i64| {
+                if let Some(st) = items.values_mut().find(|i| {
+                    i.owner_id == owner_id
+                        && i.location_id == ship_id
+                        && i.flag == flag
+                        && i.item_id != exclude_id
+                        && i.type_id == p_type_id
+                }) {
+                    st.quantity += qty;
+                    st.version += 1;
+                } else {
+                    *next_id += 1;
+                    let new_id = *next_id;
+                    items.insert(
+                        new_id,
+                        eve_db::InventoryItemRecord {
+                            item_id: new_id,
+                            type_id: p_type_id,
+                            owner_id,
+                            location_id: ship_id,
+                            flag,
+                            quantity: qty,
+                            singleton: false,
+                            version: 1,
+                            ..Default::default()
+                        },
+                    );
+                }
+            };
+
+            for mut p in candidates {
+                let (char_id, ship_id, launcher_id, p_type_id) = (
+                    p.owner_char_id,
+                    p.ship_id,
+                    p.launcher_module_id,
+                    p.probe_type_id,
+                );
+                if !snap.items.contains_key(&ship_id) {
+                    p.state = 0;
+                    p.warp_end_ft = None;
+                    unrec.push(p);
+                    continue;
+                }
+
+                let mut placed_in_launcher = false;
+                if let Some(li) = snap
+                    .items
+                    .get(&launcher_id)
+                    .cloned()
+                    .filter(|i| i.location_id == ship_id)
+                {
+                    let cur_clip: i32 = snap
+                        .items
+                        .values()
+                        .filter(|i| {
+                            i.owner_id == char_id
+                                && i.location_id == ship_id
+                                && i.flag == li.flag
+                                && i.item_id != launcher_id
+                        })
+                        .map(|i| i.quantity)
+                        .sum();
+                    let matching_clip = snap.items.values().any(|i| {
+                        i.owner_id == char_id
+                            && i.location_id == ship_id
+                            && i.flag == li.flag
+                            && i.item_id != launcher_id
+                            && i.type_id == p_type_id
+                    });
+                    if cur_clip == 0 || (cur_clip < 8 && matching_clip) {
+                        add_stack(
+                            &mut snap.items,
+                            &mut snap.next_entity_id,
+                            char_id,
+                            ship_id,
+                            li.flag,
+                            p_type_id,
+                            1,
+                            launcher_id,
+                        );
+                        placed_in_launcher = true;
+                    }
+                }
+
+                if placed_in_launcher {
+                    rec.push(p);
+                    continue;
+                }
+
+                let ship_cargo_cap = snap
+                    .items
+                    .get(&ship_id)
+                    .and_then(|si| {
+                        si.dynamic_attributes
+                            .get(&eve_sde::attr_ids::CAPACITY)
+                            .copied()
+                            .or_else(|| {
+                                ctx.sde.types.get(&si.type_id).map(|t| {
+                                    t.default_attributes
+                                        .get(&eve_sde::attr_ids::CAPACITY)
+                                        .copied()
+                                        .unwrap_or(t.capacity)
+                                })
+                            })
+                    })
+                    .unwrap_or(0.0);
+                let used_cargo_vol: f64 = snap
+                    .items
+                    .values()
+                    .filter(|i| {
+                        i.location_id == ship_id && i.flag == eve_db::InventoryFlag::Cargo
+                    })
+                    .map(|i| {
+                        ctx.sde
+                            .types
+                            .get(&i.type_id)
+                            .map(|t| t.volume)
+                            .unwrap_or(0.1)
+                            * (i.quantity.max(1) as f64)
+                    })
+                    .sum();
+                let probe_vol = ctx
+                    .sde
+                    .types
+                    .get(&p_type_id)
+                    .map(|t| t.volume)
+                    .filter(|&v| v > 0.0)
+                    .unwrap_or(0.1);
+                if ship_cargo_cap > 0.0 && used_cargo_vol + probe_vol <= ship_cargo_cap + 1e-6 {
+                    add_stack(
+                        &mut snap.items,
+                        &mut snap.next_entity_id,
+                        char_id,
+                        ship_id,
+                        eve_db::InventoryFlag::Cargo,
+                        p_type_id,
+                        1,
+                        0,
+                    );
+                    rec.push(p);
+                } else {
+                    p.state = 0;
+                    p.warp_end_ft = None;
+                    unrec.push(p);
+                }
+            }
+            (rec, unrec)
+        })
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    if !unrecovered.is_empty() {
+        if let Ok(mut map) = ctx.active_scanner_probes.write() {
+            for p in unrecovered {
+                map.insert(p.probe_id, p);
+            }
+        }
+    }
+    if !recovered.is_empty() || !purged_expired.is_empty() || ctx.db.with_snapshot(|s| !crate::sp6_lifecycle::load_sp6_state_from_snap(s).active_scanner_probes.is_empty()) {
+        crate::services::space_probe_scanning::sync_scanner_probes_to_db(ctx);
+    }
+
+    for p in recovered.iter().chain(purged_expired.iter()) {
+        let handle = ctx.systems.get_or_spawn(p.solar_system_id);
+        handle.try_remove_ball(p.probe_id);
+    }
+
+    (recovered.len(), purged_expired.len())
+}
+
+/// Flushes all pending 20-minute batched NPC bounty ticks during daily cluster downtime
+/// so ratting payouts (including corp tax and null-sec ESS splits) are never stranded across DT.
+pub fn flush_pending_bounty_ticks_on_downtime(ctx: &ServerContext) -> usize {
+    let mut pending_keys: Vec<(u32, i64)> =
+        crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+            rt.pending_bounty_ticks
+                .iter()
+                .filter(|&(_, &amount)| amount > 0.0)
+                .map(|(&key, _)| key)
+                .collect()
+        });
+    pending_keys.sort_unstable();
+    let mut flushed = 0usize;
+    for (sys_id, char_id) in pending_keys {
+        let (pilot, tax, ess) =
+            crate::services::combat_npc_encounters::flush_npc_bounty_tick(ctx, sys_id, char_id, 0.0);
+        if pilot > 0.0 || tax > 0.0 || ess > 0.0 {
+            flushed += 1;
+        }
+    }
+    flushed
 }
 
 /// Spawns the initial wave of SDE-backed pirate NPCs when a pilot warps to their accepted mission pocket

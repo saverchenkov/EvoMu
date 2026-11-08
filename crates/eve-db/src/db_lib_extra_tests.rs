@@ -102,6 +102,26 @@ fn test_sp6_persisted_state_and_entries_serde_defaults_and_roundtrip() {
         .insert("90000001:1001".to_string(), 5);
     full.mission_initial_npc_types
         .insert("90000001:1001".to_string(), vec![10_001, 10_002]);
+    full.active_scanner_probes.insert(
+        900_000_001,
+        crate::PersistedScannerProbe {
+            probe_id: 900_000_001,
+            probe_type_id: 30_013,
+            owner_char_id: 90_000_001,
+            ship_id: 100_000_001,
+            launcher_module_id: 100_000_002,
+            solar_system_id: 30_000_142,
+            position: [10.0, 20.0, 30.0],
+            destination: [40.0, 50.0, 60.0],
+            range_step: 4,
+            scan_range_m: 1_000_000.0,
+            base_sensor_strength: 40.0,
+            max_flight_time_s: 3_600.0,
+            launched_at_unix: 1_700_000_000,
+            state: 1,
+            warp_end_ft: None,
+        },
+    );
 
     let json = serde_json::to_string(&full).expect("serialize full Sp6PersistedState");
     let decoded: Sp6PersistedState =

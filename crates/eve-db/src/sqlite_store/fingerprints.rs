@@ -457,6 +457,7 @@ pub(crate) fn fp_sp6_lifecycle(st: &crate::Sp6PersistedState) -> u64 {
         missions_awaiting_downtime_respawn,
         mission_initial_npc_counts,
         mission_initial_npc_types,
+        active_scanner_probes,
     } = st;
     let mut h = FnvHasher::new();
     hash_map_xor(&mut h, safe_logoffs, |eh, &k, v| {
@@ -597,6 +598,24 @@ pub(crate) fn fp_sp6_lifecycle(st: &crate::Sp6PersistedState) -> u64 {
         for &tid in tids {
             eh.write_u32(tid);
         }
+    });
+    hash_map_xor(&mut h, active_scanner_probes, |eh, &k, p| {
+        eh.write_i64(k);
+        eh.write_i64(p.probe_id);
+        eh.write_u32(p.probe_type_id);
+        eh.write_i64(p.owner_char_id);
+        eh.write_i64(p.ship_id);
+        eh.write_i64(p.launcher_module_id);
+        eh.write_u32(p.solar_system_id);
+        write_vec3(eh, &p.position);
+        write_vec3(eh, &p.destination);
+        eh.write_i32(p.range_step);
+        eh.write_u64(p.scan_range_m.to_bits());
+        eh.write_u64(p.base_sensor_strength.to_bits());
+        eh.write_u64(p.max_flight_time_s.to_bits());
+        eh.write_u64(p.launched_at_unix);
+        eh.write_i32(p.state);
+        write_opt_i64(eh, p.warp_end_ft);
     });
     h.finish()
 }
@@ -830,7 +849,8 @@ mod tests {
     use super::fp_sp6_lifecycle;
     use crate::{
         AbyssalPersistedSession, DisconnectedShipEntry, PersistedCombatHp,
-        PersistedSpaceObjectMeta, SafeLogoffEntry, SelfDestructPersistedEntry, Sp6PersistedState,
+        PersistedScannerProbe, PersistedSpaceObjectMeta, SafeLogoffEntry,
+        SelfDestructPersistedEntry, Sp6PersistedState,
     };
     use std::collections::HashMap;
 
@@ -850,6 +870,7 @@ mod tests {
             missions_awaiting_downtime_respawn: vec![(90_000_001, 42), (90_000_002, 77)],
             mission_initial_npc_counts: HashMap::with_capacity(cap),
             mission_initial_npc_types: HashMap::with_capacity(cap),
+            active_scanner_probes: HashMap::with_capacity(cap),
         };
         if scramble {
             for dummy in 9_000..9_032 {
@@ -933,6 +954,26 @@ mod tests {
                     bubble_radius_m: Some(20_000.0),
                     drone_ball_id: Some(k + 70_000),
                     planet_id: Some(40_000_001),
+                },
+            );
+            st.active_scanner_probes.insert(
+                k + 80_000,
+                PersistedScannerProbe {
+                    probe_id: k + 80_000,
+                    probe_type_id: 30_013,
+                    owner_char_id: k,
+                    ship_id: k + 20_000,
+                    launcher_module_id: k + 25_000,
+                    solar_system_id: 30_000_142,
+                    position: [1.0, 2.0, 3.0],
+                    destination: [4.0, 5.0, 6.0],
+                    range_step: 4,
+                    scan_range_m: 1_000_000.0,
+                    base_sensor_strength: 40.0,
+                    max_flight_time_s: 3_600.0,
+                    launched_at_unix: 1_700_050_000 + u,
+                    state: 1,
+                    warp_end_ft: Some(123_456),
                 },
             );
         }
@@ -1020,5 +1061,7 @@ mod tests {
 
         check(&|s| s.missions_awaiting_downtime_respawn.reverse(), "missions_awaiting_downtime_respawn.order");
         check(&|s| s.missions_awaiting_downtime_respawn[0].1 += 1, "missions_awaiting_downtime_respawn.val");
+        check(&|s| s.active_scanner_probes.get_mut(&80_101).unwrap().state = 0, "active_scanner_probes.state");
+        check(&|s| s.active_scanner_probes.get_mut(&80_101).unwrap().warp_end_ft = None, "active_scanner_probes.warp_end_ft");
     }
 }

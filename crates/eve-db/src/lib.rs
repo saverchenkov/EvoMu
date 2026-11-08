@@ -140,6 +140,26 @@ pub struct PersistedSpaceObjectMeta {
     pub planet_id: Option<i64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PersistedScannerProbe {
+    pub probe_id: i64,
+    pub probe_type_id: u32,
+    pub owner_char_id: i64,
+    pub ship_id: i64,
+    pub launcher_module_id: i64,
+    pub solar_system_id: u32,
+    pub position: [f64; 3],
+    pub destination: [f64; 3],
+    pub range_step: i32,
+    pub scan_range_m: f64,
+    pub base_sensor_strength: f64,
+    pub max_flight_time_s: f64,
+    pub launched_at_unix: u64,
+    pub state: i32,
+    #[serde(default)]
+    pub warp_end_ft: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Sp6PersistedState {
     #[serde(default)]
@@ -170,6 +190,8 @@ pub struct Sp6PersistedState {
     pub mission_initial_npc_counts: HashMap<String, u32>,
     #[serde(default)]
     pub mission_initial_npc_types: HashMap<String, Vec<u32>>,
+    #[serde(default)]
+    pub active_scanner_probes: HashMap<i64, PersistedScannerProbe>,
 }
 
 #[cfg(test)] mod db_lib_extra_tests;

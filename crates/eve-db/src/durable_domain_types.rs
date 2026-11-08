@@ -720,6 +720,12 @@ pub struct PersistedCombatCrimewatchState {
     pub kill_right_restricted_to: HashMap<i64, i64>,
     #[serde(default)]
     pub detailed_killmails: HashMap<i64, DetailedKillmail>,
+    #[serde(default, with = "tuple_map_serde")]
+    pub pending_bounty_ticks: HashMap<(u32, i64), f64>,
+    #[serde(default, with = "tuple_map_serde")]
+    pub bounty_tick_next_flush_unix: HashMap<(u32, i64), u64>,
+    #[serde(default, with = "tuple_map_serde")]
+    pub pending_bounty_tick_started_unix: HashMap<(u32, i64), u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

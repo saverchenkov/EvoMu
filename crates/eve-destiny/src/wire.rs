@@ -1104,9 +1104,17 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
         DestinyEvent::OnDroneActivityChange {
             drone_id,
             activity_state,
+            activity,
         } => PyRep::Tuple(vec![
             PyRep::String("OnDroneActivityChange".into()),
-            PyRep::Tuple(vec![PyRep::Integer(*drone_id), PyRep::Integer(*activity_state)]),
+            PyRep::Tuple(vec![
+                PyRep::Integer(*drone_id),
+                PyRep::Integer(*activity_state),
+                activity
+                    .as_deref()
+                    .map(|s| PyRep::String(s.into()))
+                    .unwrap_or(PyRep::None),
+            ]),
         ]),
         DestinyEvent::OnDroneControlLost { drone_id } => PyRep::Tuple(vec![
             PyRep::String("OnDroneControlLost".into()),

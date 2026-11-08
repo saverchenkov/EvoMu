@@ -495,3 +495,181 @@ async fn nullsec_ess_bounty_split_wreck_eviction_lowsec_pvp_pod_and_ess_link() {
     // 3. essMgr dispatch reaches handle_ess_link
     assert!(handle_legacy_and_ess(&ctx, &mut session, "essMgr", "AttemptLinkToMainBank", &[], &HashMap::new()).await.is_some());
 }
+
+#[tokio::test]
+async fn issue_542_dogma_activate_safety_tether_and_entropic_target_switch_spool_reset() {
+    use crate::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
+
+    let (mut ctx, mut session, char_id, ship_id, high_sys) = make_fighter_ctx_and_session();
+    let low_sys = 30_002_537_u32;
+
+    let mut sde = (*ctx.sde).clone();
+    if let Some(ship_t) = sde.types.get_mut(&23_915) {
+        ship_t.default_attributes.insert(14, 8.0);
+        ship_t.default_attributes.insert(101, 8.0);
+        ship_t.default_attributes.insert(102, 8.0);
+        ship_t.default_attributes.insert(11, 50_000.0);
+        ship_t.default_attributes.insert(48, 50_000.0);
+    }
+    let mut wep_t = make_fighter_type(
+        49_722,
+        1986,
+        7,
+        5.0,
+        vec![
+            (51, 1_000.0),
+            (54, 15_000.0),
+            (158, 5_000.0),
+            (160, 100.0),
+            (64, 1.0),
+            (128, 1.0),
+            (604, 1987.0),
+        ],
+    );
+    wep_t.effect_ids = vec![12];
+    sde.types.insert(49_722, wep_t);
+    sde.types.insert(
+        49_723,
+        make_fighter_type(
+            49_723,
+            1987,
+            8,
+            0.01,
+            vec![(128, 1.0), (116, 100.0), (118, 100.0)],
+        ),
+    );
+    ctx.sde = Arc::new(sde);
+
+    let vic_char = 90_000_077_i64;
+    let vic_char_b = 90_000_078_i64;
+    let vic_ship_a = 200_000_771_i64;
+    let vic_ship_b = 200_000_772_i64;
+    let mod_id = 810_771_i64;
+    let charge_id = 810_772_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            mod_id,
+            make_fighter_item(mod_id, 49_722, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        snap.items.insert(
+            charge_id,
+            make_fighter_item(charge_id, 49_723, char_id, ship_id, InventoryFlag::HiSlot0, 20),
+        );
+        let mut vic = snap.characters.get(&char_id).cloned().unwrap();
+        vic.character_id = vic_char;
+        vic.corporation_id = 2_000_077;
+        vic.active_ship_id = vic_ship_a;
+        vic.solar_system_id = high_sys;
+        let mut vic_b = vic.clone();
+        vic_b.character_id = vic_char_b;
+        vic_b.active_ship_id = vic_ship_b;
+        vic_b.solar_system_id = low_sys;
+        snap.characters.insert(vic_char, vic);
+        snap.characters.insert(vic_char_b, vic_b);
+        snap.items.insert(
+            vic_ship_a,
+            make_fighter_item(vic_ship_a, 23_915, vic_char, high_sys as i64, InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            vic_ship_b,
+            make_fighter_item(vic_ship_b, 23_915, vic_char, low_sys as i64, InventoryFlag::None, 1),
+        );
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    spawn_combat_ball(&ctx, high_sys, ship_id, 23_915, DVec3::ZERO, 1_000.0).await;
+    spawn_combat_ball(&ctx, high_sys, vic_ship_a, 23_915, DVec3::new(1_000.0, 0.0, 0.0), 50_000.0).await;
+
+    // 1. High-sec Green & Yellow safety must reject illegal attack BEFORE ammo or spool mutation
+    for safety in [SafetyLevel::Green, SafetyLevel::Yellow] {
+        with_mut_combat_runtime(&ctx, |rt| {
+            rt.safety_levels.insert(char_id, safety);
+        });
+        let err = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(vic_ship_a)])
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.code, "CantDoInCurrentSafetyLevel");
+        assert_eq!(ctx.db.with_snapshot(|s| s.items[&charge_id].quantity), 20);
+        assert!(ctx.weapon_cycle_state.read().unwrap().is_empty());
+    }
+
+    // 2. Low-sec Green safety must reject suspect aggression BEFORE ammo or spool mutation
+    session.solar_system_id = Some(low_sys);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&vic_char).unwrap().solar_system_id = low_sys;
+    });
+    spawn_combat_ball(&ctx, low_sys, ship_id, 23_915, DVec3::ZERO, 1_000.0).await;
+    spawn_combat_ball(&ctx, low_sys, vic_ship_a, 23_915, DVec3::new(1_000.0, 0.0, 0.0), 50_000.0).await;
+    spawn_combat_ball(&ctx, low_sys, vic_ship_b, 23_915, DVec3::new(1_200.0, 0.0, 0.0), 50_000.0).await;
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, SafetyLevel::Green);
+    });
+    let low_green_err = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(vic_ship_a)])
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(low_green_err.code, "CantDoInCurrentSafetyLevel");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&charge_id].quantity), 20);
+    assert!(ctx.weapon_cycle_state.read().unwrap().is_empty());
+
+    // 3. Switch to Red safety in low-sec and build Entropic Disintegrator spool on Target A (2 cycles)
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, SafetyLevel::Red);
+    });
+    let low_handle = ctx.systems.get_or_spawn(low_sys);
+    let _ = low_handle.step_manual(2.0).await;
+    let hit1 = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(vic_ship_a)])
+        .await
+        .unwrap()
+        .unwrap();
+    let dmg1 = hit1.dict_get("appliedDamage").unwrap().as_f64().unwrap();
+    assert!(dmg1 > 0.0);
+    assert_eq!(ctx.weapon_cycle_state.read().unwrap()[&ship_id].1, 1);
+    assert_eq!(ctx.weapon_cycle_state.read().unwrap()[&ship_id].2, Some(vic_ship_a));
+
+    let _ = low_handle.step_manual(2.0).await;
+    let hit2 = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(vic_ship_a)])
+        .await
+        .unwrap()
+        .unwrap();
+    let dmg2 = hit2.dict_get("appliedDamage").unwrap().as_f64().unwrap();
+    assert!(dmg2 > 0.0);
+    assert_eq!(ctx.weapon_cycle_state.read().unwrap()[&ship_id].1, 2);
+    assert_eq!(ctx.weapon_cycle_state.read().unwrap()[&ship_id].2, Some(vic_ship_a));
+    let qty_before_rejections = ctx.db.with_snapshot(|s| s.items[&charge_id].quantity);
+    assert_eq!(qty_before_rejections, 18);
+
+    // 4. Failed shots due to attacker tether or target tether must preserve BOTH ammo and existing spool
+    let _ = low_handle.step_manual(2.0).await;
+    low_handle.try_update_combat_state(ship_id, |cs| cs.is_tethered = true);
+    let _ = low_handle.step_manual(1.0).await;
+    let att_teth = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(vic_ship_a)])
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(att_teth.code, "CantActivateWhileTethered");
+    low_handle.try_update_combat_state(ship_id, |cs| cs.is_tethered = false);
+    low_handle.try_update_combat_state(vic_ship_b, |cs| cs.is_tethered = true);
+    let _ = low_handle.step_manual(1.0).await;
+    let tgt_teth = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(vic_ship_b)])
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(tgt_teth.code, "TargetInvulnerable");
+    low_handle.try_update_combat_state(vic_ship_b, |cs| cs.is_tethered = false);
+    let _ = low_handle.step_manual(1.0).await;
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&charge_id].quantity), 18);
+    assert_eq!(ctx.weapon_cycle_state.read().unwrap()[&ship_id].1, 2);
+    assert_eq!(ctx.weapon_cycle_state.read().unwrap()[&ship_id].2, Some(vic_ship_a));
+
+    // 5. Switching target to Target B must reset Entropic Disintegrator spool back to cycle 1
+    let hit_b1 = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(vic_ship_b)])
+        .await
+        .unwrap()
+        .unwrap();
+    let dmg_b1 = hit_b1.dict_get("appliedDamage").unwrap().as_f64().unwrap();
+    assert!(dmg_b1 > 0.0);
+    assert_eq!(ctx.weapon_cycle_state.read().unwrap()[&ship_id].1, 1);
+    assert_eq!(ctx.weapon_cycle_state.read().unwrap()[&ship_id].2, Some(vic_ship_b));
+}

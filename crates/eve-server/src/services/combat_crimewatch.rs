@@ -514,6 +514,9 @@ impl CombatRuntimeState {
         self.kill_right_expires_unix = p.kill_right_expires_unix.clone();
         self.kill_right_restricted_to = p.kill_right_restricted_to.clone();
         self.detailed_killmails = p.detailed_killmails.clone();
+        self.pending_bounty_ticks = p.pending_bounty_ticks.clone();
+        self.bounty_tick_next_flush_unix = p.bounty_tick_next_flush_unix.clone();
+        self.pending_bounty_tick_started_unix = p.pending_bounty_tick_started_unix.clone();
     }
 
     pub fn to_persisted(&self) -> eve_db::PersistedCombatCrimewatchState {
@@ -540,6 +543,9 @@ impl CombatRuntimeState {
             kill_right_expires_unix: self.kill_right_expires_unix.clone(),
             kill_right_restricted_to: self.kill_right_restricted_to.clone(),
             detailed_killmails: self.detailed_killmails.clone(),
+            pending_bounty_ticks: self.pending_bounty_ticks.clone(),
+            bounty_tick_next_flush_unix: self.bounty_tick_next_flush_unix.clone(),
+            pending_bounty_tick_started_unix: self.pending_bounty_tick_started_unix.clone(),
         }
     }
 }

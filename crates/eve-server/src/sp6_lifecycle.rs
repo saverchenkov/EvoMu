@@ -28,7 +28,8 @@ pub use cluster_tick::{
 };
 pub use cluster_tick_downtime::{
     cleanup_npc_wrecks_and_reset_missions_on_downtime, clear_safe_logoff,
-    disconnect_safe_logoff_sessions, spawn_mission_wave_on_pocket_entry_if_needed,
+    disconnect_safe_logoff_sessions, recover_scanner_probes_on_downtime,
+    spawn_mission_wave_on_pocket_entry_if_needed,
 };
 pub use drone_return::{
     abandon_drones_and_fighters_for_ship_sync, abandon_drones_on_warp_sync,

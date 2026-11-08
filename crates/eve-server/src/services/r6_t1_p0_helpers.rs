@@ -103,14 +103,21 @@ pub(crate) async fn enforce_legacy_pvp_safety_and_concord(
     let lawful_target =
         has_legal_engagement || has_kill_right || has_limited_engagement || victim_is_suspect_or_crim;
 
-    if !lawful_target && sys_sec >= 0.45 {
+    if !lawful_target {
         let safety = with_combat_runtime(ctx, |rt| {
             rt.safety_levels
                 .get(&char_id)
                 .copied()
                 .unwrap_or(SafetyLevel::Red)
         });
-        if matches!(safety, SafetyLevel::Green | SafetyLevel::Yellow) {
+        let concord_suppressed = !is_pod_target
+            && crate::services::combat_npc_police::is_concord_suppressed_in_system(ctx, sys_id);
+        let would_be_criminal =
+            (sys_sec >= 0.45 && !concord_suppressed) || (sys_sec > 0.0 && is_pod_target);
+        let would_be_suspect = !would_be_criminal && sys_sec > 0.0;
+        if (safety == SafetyLevel::Green && (would_be_criminal || would_be_suspect))
+            || (safety == SafetyLevel::Yellow && would_be_criminal)
+        {
             return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
         }
     }
@@ -550,6 +557,7 @@ pub async fn expire_overdue_probes_for_char(
             }
         }
     }
+    crate::services::space_probe_scanning::sync_scanner_probes_to_db(ctx);
 
     (returned_ids, lost_ids)
 }

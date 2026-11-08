@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::quasar_gateway::{PublicGatewayRouter, STATUS_OK};
+use crate::services::quasar_cosmetics_skinr::SkinrStaticCatalog;
 use eve_db::{TrainedSkillRecord, WorldRepository};
 use eve_machonet::{service_roles, SessionState};
 use eve_proto::quasar::{
@@ -298,4 +299,124 @@ fn sequencing_pricing_durations_and_job_lifecycle() {
         .status_code,
         STATUS_OK
     );
+}
+
+#[tokio::test]
+async fn issue_545_cluster_tick_settles_matured_skinr_job_and_publishes_notices() {
+    let ctx = crate::router::ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let cid = 90_000_001_i64;
+    let uid = 1_u64;
+    let now = ctx.now_unix();
+    let mut gm = sess(Some(uid), Some(cid), service_roles::ROLE_GM_DEFAULT);
+    let mut player = sess(Some(uid), Some(cid), 0);
+    gm.solar_system_id = Some(30_000_142);
+    player.solar_system_id = Some(30_000_142);
+
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&cid) {
+            ch.balance = eve_db::IskCents(1_000_000_000_00);
+        }
+        s.adjust_unified_plex(cid, 50_000);
+        for sk in [82_478u32, 82_479, 82_480, 82_481, 82_482, 82_483] {
+            s.skills.entry(cid).or_default().insert(
+                sk,
+                TrainedSkillRecord {
+                    type_id: sk,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+    });
+
+    let coat_id = SkinrStaticCatalog::load(&shared_sde())
+        .components
+        .iter()
+        .find(|(_, c)| !c.is_pattern() && !c.disallowed_slots.contains(&1))
+        .map(|(&id, _)| id)
+        .expect("coating component");
+    let mut inf_grant = Vec::new();
+    encode_bytes_field(
+        1,
+        &super::super::quasar_cosmetics_skinr::encode_component_id(coat_id, false),
+        &mut inf_grant,
+    );
+    assert_eq!(
+        call(
+            &ctx.quasar_gateway,
+            &gm,
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.infinite.api.admin.GrantRequest",
+            inf_grant,
+            now
+        )
+        .status_code,
+        STATUS_OK
+    );
+
+    let mut rx = ctx.quasar_gateway.subscribe_session(&player, Vec::new(), now);
+
+    let mut slot_entry = encode_layout_slot(&SkinLayoutSlot {
+        slot_id: 1,
+        component_id: coat_id,
+        is_pattern: false,
+        primary_coating_id: None,
+        secondary_coating_id: None,
+    });
+    let mut ship_seq = Vec::new();
+    encode_varint_field(1, 587, &mut ship_seq);
+    let mut layout = Vec::new();
+    encode_bytes_field(1, &slot_entry, &mut layout);
+    encode_bytes_field(2, &ship_seq, &mut layout);
+    encode_varint_field(3, 1, &mut layout);
+    slot_entry.clear();
+
+    let mut init_req = Vec::new();
+    encode_string_field(1, "AutoSettle Rifter", &mut init_req);
+    encode_string_field(2, "Tick Line", &mut init_req);
+    encode_bytes_field(3, &layout, &mut init_req);
+    encode_varint_field(5, 1, &mut init_req);
+
+    let init_rsp = call(
+        &ctx.quasar_gateway,
+        &player,
+        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest",
+        init_req,
+        now,
+    );
+    assert_eq!(init_rsp.status_code, STATUS_OK);
+    // Drain any notices generated during InitiateRequest before advancing clock
+    while rx.try_recv().is_ok() {}
+
+    // Advance past any job duration without calling GetAllActive/CompleteEarly/etc.
+    ctx.advance_secs(7 * 86_400);
+    crate::sp6_lifecycle::tick_background_cluster(&ctx).await;
+
+    let mut notice_urls = Vec::new();
+    while let Ok(n) = rx.try_recv() {
+        if let Some(p) = n.payload {
+            notice_urls.push(p.type_url);
+        }
+    }
+    assert!(
+        notice_urls.iter().any(|u| u.ends_with("sequencing.job.api.CompletedNotice")),
+        "expected CompletedNotice emitted by background cluster tick, got {notice_urls:?}"
+    );
+    assert!(
+        notice_urls.iter().any(|u| u.ends_with("thirdparty.license.api.AddedNotice")),
+        "expected AddedNotice emitted by background cluster tick, got {notice_urls:?}"
+    );
+
+    // Calling GetAllActive afterward must see 0 active jobs (already settled)
+    let act_rsp = call(
+        &ctx.quasar_gateway,
+        &player,
+        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.GetAllActiveRequest",
+        Vec::new(),
+        ctx.now_unix(),
+    );
+    assert_eq!(act_rsp.status_code, STATUS_OK);
+    assert!(act_rsp.payload.unwrap().value.is_empty());
 }

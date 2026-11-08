@@ -8,6 +8,7 @@ use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
 use crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity;
+use crate::router::ServerContext;
 use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime};
 use crate::services::combat_npc_encounters::{
     create_encounter_wave_site, finalize_cycle_destroyed_npcs, flush_npc_bounty_tick,
@@ -291,4 +292,120 @@ async fn test_officer_fallback_faction_prefixes_archetypes_and_abyssal_finalize(
     // record_npc_kill_progression with killer_char_id <= 0 is a safe no-op
     record_npc_kill_progression(&ctx, 0, None);
     record_npc_kill_progression(&ctx, -1, Some(932_010));
+}
+
+#[tokio::test]
+async fn issue_544_pending_npc_bounty_persists_sqlite_and_flushes_on_downtime() {
+    let base_ctx = ServerContext::new();
+    let sde = Arc::clone(&base_ctx.sde);
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "evomu_issue_544_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let db_path = tmp_dir.join("world.sqlite");
+
+    let repo1 = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("open sqlite"));
+    let ctx1 = ServerContext::with_sde_and_repository(Arc::clone(&sde), repo1);
+    let char_id = 90_000_001_i64;
+    let mut base_char = base_ctx.db.with_snapshot(|s| s.characters[&char_id].clone());
+    let player_corp_id = 98_544_001_i64;
+    let null_sys_id = 30_004_759_u32;
+    let hs_sys_id = 30_000_142_u32;
+
+    let initial_bal = ctx1.db.with_mut_snapshot(|snap| {
+        base_char.security_status = 5.0; // old_sec >= 5.0 previously skipped persistence in handle_npc_destroyed_in_space
+        base_char.corporation_id = player_corp_id;
+        let bal = base_char.balance;
+        snap.characters.insert(char_id, base_char);
+        snap.corporations.insert(
+            player_corp_id,
+            CorporationRecord {
+                corporation_id: player_corp_id,
+                name: "DowntimeRatters".into(),
+                ticker: "DTR".into(),
+                ceo_id: char_id,
+                tax_rate: 0.10,
+                master_wallet: IskCents::ZERO,
+                ..Default::default()
+            },
+        );
+        snap.system_states.insert(
+            null_sys_id,
+            SystemDynamicState {
+                solar_system_id: null_sys_id,
+                dbs_multiplier: 1.25,
+                ..Default::default()
+            },
+        );
+        bal
+    });
+
+    // Kill normal NPC via handle_npc_destroyed_in_space AND specialized NPC via credit_specialized_npc_bounty_and_sec_status
+    let npc_ball_id = 954_001_i64;
+    with_mut_combat_runtime(&ctx1, |rt| {
+        let mut ent = make_test_npc_entity(npc_ball_id, 932_010, null_sys_id, "Pirate");
+        ent.bounty_isk = 800_000.0;
+        rt.npc_entities.insert(npc_ball_id, ent);
+    });
+    handle_npc_destroyed_in_space(
+        &ctx1.systems,
+        &ctx1.db,
+        &ctx1.sde,
+        &ctx1.combat_ephemeral,
+        null_sys_id,
+        npc_ball_id,
+        Some(char_id),
+    )
+    .await;
+    crate::combat::crimewatch::credit_specialized_npc_bounty_and_sec_status(
+        &ctx1,
+        hs_sys_id,
+        954_002,
+        char_id,
+        250_000.0,
+    );
+    drop(ctx1);
+
+    // Reopen fresh ServerContext from SQLite and verify pending bounty state survived restart
+    let repo2 = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("reopen sqlite"));
+    let ctx2 = ServerContext::with_sde_and_repository(Arc::clone(&sde), repo2);
+    crate::services::combat_crimewatch::with_combat_ephemeral(&ctx2, |rt| {
+        assert_eq!(rt.pending_bounty_ticks.get(&(null_sys_id, char_id)).copied(), Some(800_000.0));
+        assert_eq!(rt.pending_bounty_ticks.get(&(hs_sys_id, char_id)).copied(), Some(250_000.0));
+        assert!(rt.pending_bounty_tick_started_unix.contains_key(&(null_sys_id, char_id)));
+        assert!(rt.pending_bounty_tick_started_unix.contains_key(&(hs_sys_id, char_id)));
+        assert!(rt.bounty_tick_next_flush_unix.contains_key(&(null_sys_id, char_id)));
+        assert!(rt.bounty_tick_next_flush_unix.contains_key(&(hs_sys_id, char_id)));
+    });
+
+    // Run daily downtime cleanup -> must flush all pending bounty ticks with corp tax & null-sec ESS split
+    let _ = crate::sp6_lifecycle::cleanup_npc_wrecks_and_reset_missions_on_downtime(&ctx2);
+    drop(ctx2);
+
+    // Reopen once more to confirm flushed state & wallets persisted cleanly to SQLite
+    let repo3 = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("reopen sqlite 3"));
+    let ctx3 = ServerContext::with_sde_and_repository(sde, repo3);
+    with_combat_runtime(&ctx3, |rt| {
+        assert!(rt.pending_bounty_ticks.is_empty());
+        assert!(rt.pending_bounty_tick_started_unix.is_empty());
+        assert!(rt.bounty_tick_next_flush_unix.is_empty());
+    });
+    ctx3.db.with_snapshot(|snap| {
+        assert!(snap.characters[&char_id].balance > initial_bal);
+        let corp = snap.corporations.get(&player_corp_id).unwrap();
+        assert!(corp.master_wallet.raw_cents() > 0);
+        let sys_st = snap.system_states.get(&null_sys_id).unwrap();
+        assert!(sys_st.ess_main_bank.raw_cents() > 0);
+        assert!(snap
+            .wallet_journal
+            .iter()
+            .any(|j| j.character_id == char_id && j.entry_type == "bounty_prize_corporation_tax"));
+    });
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
 }

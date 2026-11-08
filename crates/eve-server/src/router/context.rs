@@ -54,7 +54,7 @@ pub struct ServerContext {
     pub projected_ewar: Arc<RwLock<HashMap<i64, Vec<eve_dogma::ProjectedEwarEffect>>>>,
     pub projected_ewar_sources: Arc<RwLock<HashMap<i64, i64>>>,
     pub active_ewar_starts: Arc<RwLock<HashMap<(i64, i64), Vec<(i64, &'static str)>>>>,
-    pub weapon_cycle_state: RwLock<HashMap<i64, (Option<u64>, u32)>>,
+    pub weapon_cycle_state: RwLock<HashMap<i64, (Option<u64>, u32, Option<i64>)>>,
     pub fighter_cooldown_state: RwLock<HashMap<(i64, u32), u64>>,
     pub fighter_charge_state: RwLock<HashMap<(i64, u32), u32>>,
     pub active_fighters: Arc<RwLock<HashMap<i64, ActiveFighterSquadron>>>,
@@ -103,14 +103,7 @@ pub struct ActiveFighterSquadron {
     pub tube_index: usize, pub squadron_size: u32, pub target_id: Option<i64>, pub is_abandoned: bool, pub mwd_active: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ActiveScannerProbe {
-    pub probe_id: i64, pub probe_type_id: u32, pub owner_char_id: i64, pub ship_id: i64, pub launcher_module_id: i64,
-    pub solar_system_id: u32, pub position: [f64; 3], pub destination: [f64; 3], pub range_step: i32,
-    pub scan_range_m: f64, pub base_sensor_strength: f64, pub max_flight_time_s: f64, pub launched_at_unix: u64, pub state: i32,
-    #[serde(default)]
-    pub warp_end_ft: Option<i64>,
-}
+pub type ActiveScannerProbe = eve_db::PersistedScannerProbe;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ActiveMoonSurveyProbe {
@@ -149,7 +142,11 @@ impl ServerContext {
                 .with_tactical_state(Arc::clone(&tactical_state))
                 .with_notifications(Arc::clone(&pending_notifications), notify_tx.clone()),
         );
-        let combat_ephemeral = Arc::new(RwLock::new(crate::services::combat_crimewatch::CombatRuntimeState::default()));
+        let combat_ephemeral = {
+            let mut rt = crate::services::combat_crimewatch::CombatRuntimeState::default();
+            db.with_snapshot(|snap| rt.sync_from_persisted(&snap.combat_crimewatch_state));
+            Arc::new(RwLock::new(rt))
+        };
         let quasar_gateway = Arc::new(crate::quasar_gateway::PublicGatewayRouter::new(
             eve_proto::quasar::QuasarDescriptorRegistry::open_default_or_empty(),
             Arc::clone(&db),
@@ -307,6 +304,22 @@ impl ServerContext {
         let persisted_global_config: HashMap<String, eve_proto::PyRep> = db.with_snapshot(|snap| {
             snap.service_state_blobs.get("macho_global_config").and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default()
         });
+        let persisted_probes: HashMap<i64, ActiveScannerProbe> = db.with_snapshot(|snap| {
+            crate::sp6_lifecycle::load_sp6_state_from_snap(snap)
+                .active_scanner_probes
+                .into_iter()
+                .filter(|(_, p)| p.state >= 0)
+                .map(|(id, mut p)| {
+                    // On cluster restart, launched probes lose connection (INACTIVE = 0) and
+                    // cancel any in-flight warp timer so ReconnectToLostProbes recovers them.
+                    if p.state > 0 {
+                        p.state = 0;
+                    }
+                    p.warp_end_ft = None;
+                    (id, p)
+                })
+                .collect()
+        });
         let ctx = Self {
             instance_id,
             sde,
@@ -334,7 +347,7 @@ impl ServerContext {
             fighter_charge_state: RwLock::new(HashMap::new()),
             active_fighters,
             fighter_tube_loads: RwLock::new(HashMap::new()),
-            active_scanner_probes: RwLock::new(HashMap::new()),
+            active_scanner_probes: RwLock::new(persisted_probes),
             active_moon_probes: RwLock::new(Vec::new()),
             scanned_signatures: RwLock::new(HashSet::new()),
             character_scan_progress: RwLock::new(HashMap::new()),

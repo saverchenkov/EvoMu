@@ -422,6 +422,22 @@ pub(crate) fn strip_applied_thirdparty_skins_in_memory(db_id: u64, ship_ids: &[u
     }
 }
 
+/// Periodically settles completed SKINR sequencing jobs for the given world repository (`#545`).
+pub fn settle_completed_skinr_jobs_for_db(db: &Arc<WorldRepository>, now: u64) {
+    let state_opt: Option<Arc<SkinrCosmeticsState>> = {
+        let mut map = db_skinr_state_map().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(list) = map.get_mut(&db.instance_id()) {
+            list.retain(|w| w.strong_count() > 0);
+            list.iter().find_map(|w| w.upgrade())
+        } else {
+            None
+        }
+    };
+    if let Some(state) = state_opt {
+        state.settle_completed_jobs(now);
+    }
+}
+
 impl SkinrCosmeticsState {
     pub fn load(db: Arc<WorldRepository>, sde: Arc<SdeRegistry>) -> Arc<Self> {
         let st = Self::load_unregistered(db, sde);
@@ -437,7 +453,7 @@ impl SkinrCosmeticsState {
                 .unwrap_or_default()
         });
         let catalog = SkinrStaticCatalog::load(&sde);
-        Arc::new(Self {
+        let st = Arc::new(Self {
             db,
             sde,
             catalog,
@@ -445,7 +461,12 @@ impl SkinrCosmeticsState {
             last_redeemed_gen: std::sync::atomic::AtomicU64::new(
                 super::quasar_entitlement_ledger::redeemed_skin_generation(),
             ),
-        })
+        });
+        st
+    }
+
+    pub(crate) fn settle_completed_jobs(&self, now: u64) {
+        super::quasar_cosmetics_skinr_seq::settle_completed_jobs(self, now);
     }
 
     pub fn sync_redeemed_skins_if_needed(&self) {

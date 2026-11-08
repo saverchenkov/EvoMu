@@ -9,7 +9,7 @@ use crate::quasar_gateway::{
     STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_OK, STATUS_PRECONDITION_FAILED,
 };
 use crate::services::quasar_cosmetics_skinr::{
-    SkinDesignRecord, SkinrCosmeticsState, ThirdPartySkinLicense,
+    SequencingJobRecord, SkinDesignRecord, SkinrCosmeticsState, ThirdPartySkinLicense,
 };
 use eve_db::IskCents;
 use eve_machonet::service_roles;
@@ -484,4 +484,77 @@ fn skin_listing_lifecycle_create_cancel_visibility_purchase_and_admin_expiration
         .status_code,
         STATUS_BAD_REQUEST
     );
+}
+
+#[test]
+fn issue_545_initiate_create_listing_settles_matured_sequencing_job() {
+    let (router, db, skinr, _state) = new_market_harness();
+    let now = 1_700_000_000u64;
+    let seller = 2_112_100_991i64;
+    let corp = 98_000_991i64;
+    make_char(&db, seller, corp, None, 50_000_000_00, 0, 0);
+
+    let skin_hex = "aabbccddeeff00112233445566778899".to_string();
+    let job_uuid = [0x42u8; 16];
+    let job_key: String = job_uuid.iter().map(|b| format!("{b:02x}")).collect();
+    {
+        let mut sd = skinr.data.write().unwrap();
+        sd.skins.insert(
+            skin_hex.clone(),
+            SkinDesignRecord {
+                skin_hex: skin_hex.clone(),
+                name: "MaturedUnpolledSkin".into(),
+                line_name: "Line".into(),
+                creator_id: seller as u32,
+                ship_type_id: 587,
+                pattern_blend_mode: 0,
+                slots: Vec::new(),
+                tier_level: 1,
+                first_sequenced_unix: None,
+            },
+        );
+        sd.sequencing_jobs.insert(
+            job_key.clone(),
+            SequencingJobRecord {
+                job_uuid,
+                sequencer_id: seller as u32,
+                skin_hex: skin_hex.clone(),
+                quantity: 2,
+                initiated_unix: now - 3_600,
+                planned_duration_secs: 1_800,
+                completed_unix: None,
+                failed_reason: None,
+            },
+        );
+        // Explicitly verify no license was pre-granted before Paragon Hub listing request
+        assert!(!sd.skin_licenses.contains_key(&SkinrCosmeticsState::skin_lic_key(seller as u32, &skin_hex)));
+    }
+
+    let seller_sess = make_sess(seller, corp, None, 0);
+    let mut shex_msg = Vec::new();
+    encode_string_field(1, &skin_hex, &mut shex_msg);
+    let mut lic_ok = Vec::new();
+    put_seq(1, seller as u64, &mut lic_ok);
+    encode_bytes_field(2, &shex_msg, &mut lic_ok);
+    let mut req = Vec::new();
+    encode_isk_msg(1, 1_000_000, &mut req);
+    encode_bytes_field(3, &lic_ok, &mut req);
+    put_seconds(4, 86_400, &mut req);
+    encode_varint_field(5, 1, &mut req);
+
+    let rsp = call(
+        &router,
+        &seller_sess,
+        "eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest",
+        req,
+        now,
+    );
+    assert_eq!(rsp.status_code, STATUS_OK);
+
+    let sd = skinr.data.read().unwrap();
+    let job = &sd.sequencing_jobs[&job_key];
+    assert_eq!(job.completed_unix, Some(now - 1_800));
+    let lic = &sd.skin_licenses[&SkinrCosmeticsState::skin_lic_key(seller as u32, &skin_hex)];
+    assert_eq!(lic.unactivated, 1);
+    assert_eq!(lic.escrowed, 1);
 }

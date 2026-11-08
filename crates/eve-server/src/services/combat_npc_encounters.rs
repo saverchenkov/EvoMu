@@ -355,60 +355,64 @@ pub async fn handle_npc_destroyed_in_space(
         let drop_cls = npc.sleeper_wh_class.max(5);
         let base_bounty = npc.bounty_isk;
         let npc_type_id = npc.type_id;
-        let mut credited = false;
-        {
-            let mut rt = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
-            if solar_system_id < 31_000_000
-                && npc.archetype != "Sleeper"
-                && eff_bounty > 0.0
-                && killer > 0
-                && rt.bounty_credited_balls.insert(killed_ball_id)
-            {
-                rt.pending_bounty_tick_started_unix
-                    .entry((solar_system_id, killer))
-                    .or_insert_with(|| db.clock().now_unix_secs());
-                *rt.pending_bounty_ticks
-                    .entry((solar_system_id, killer))
-                    .or_insert(0.0) += eff_bounty;
-                rt.bounty_tick_next_flush_unix
-                    .entry((solar_system_id, killer))
-                    .or_insert_with(|| db.clock().now_unix_secs().saturating_add(1_200));
-                credited = true;
-            }
-            rt.destroyed_npc_cache.insert(killed_ball_id, npc);
-        }
-        if credited {
+        let should_credit_bounty = solar_system_id < 31_000_000
+            && npc.archetype != "Sleeper"
+            && eff_bounty > 0.0
+            && killer > 0;
+        if should_credit_bounty {
+            // Acquire db snapshot BEFORE combat_ephemeral to match lock hierarchy and persist
+            // pending bounty ticks atomically even when killer sec status is already >= 5.0.
             db.with_mut_snapshot(|snap| {
-                let old_sec = snap
-                    .characters
-                    .get(&killer)
-                    .map(|c| c.security_status)
-                    .unwrap_or(0.0);
-                if old_sec < 5.0 {
-                    let gain = crate::combat::npc_ai::compute_sec_status_gain(old_sec, base_bounty) * supp_mult;
-                    let new_sec = (old_sec + gain).min(5.0).clamp(-10.0, 10.0);
-                    if let Some(ch) = snap.characters.get_mut(&killer) {
-                        ch.security_status = new_sec;
+                let mut rt = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
+                rt.sync_from_persisted(&snap.combat_crimewatch_state);
+                let credited = rt.bounty_credited_balls.insert(killed_ball_id);
+                if credited {
+                    let clock_now = db.clock().now_unix_secs();
+                    rt.pending_bounty_tick_started_unix
+                        .entry((solar_system_id, killer))
+                        .or_insert(clock_now);
+                    *rt.pending_bounty_ticks
+                        .entry((solar_system_id, killer))
+                        .or_insert(0.0) += eff_bounty;
+                    rt.bounty_tick_next_flush_unix
+                        .entry((solar_system_id, killer))
+                        .or_insert_with(|| clock_now.saturating_add(1_200));
+
+                    let old_sec = snap
+                        .characters
+                        .get(&killer)
+                        .map(|c| c.security_status)
+                        .unwrap_or(0.0);
+                    if old_sec < 5.0 {
+                        let gain =
+                            crate::combat::npc_ai::compute_sec_status_gain(old_sec, base_bounty)
+                                * supp_mult;
+                        let new_sec = (old_sec + gain).min(5.0).clamp(-10.0, 10.0);
+                        if let Some(ch) = snap.characters.get_mut(&killer) {
+                            ch.security_status = new_sec;
+                        }
+                        rt.sec_status_transactions
+                            .entry(killer)
+                            .or_default()
+                            .push(crate::services::combat_crimewatch::SecStatusTransaction {
+                                timestamp_unix: now,
+                                old_sec,
+                                new_sec,
+                                delta: new_sec - old_sec,
+                                reason: "NPC Pirate Bounty".into(),
+                                solar_system_id,
+                                event_type_id: crate::services::combat_crimewatch::crimewatch_timers::EVENT_SEC_STATUS_KILL_PIRATE_NPC,
+                                other_owner_id: None,
+                                other_type_id: Some(npc_type_id),
+                            });
                     }
-                    let mut rt = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
-                    rt.sync_from_persisted(&snap.combat_crimewatch_state);
-                    rt.sec_status_transactions
-                        .entry(killer)
-                        .or_default()
-                        .push(crate::services::combat_crimewatch::SecStatusTransaction {
-                            timestamp_unix: now,
-                            old_sec,
-                            new_sec,
-                            delta: new_sec - old_sec,
-                            reason: "NPC Pirate Bounty".into(),
-                            solar_system_id,
-                            event_type_id: crate::services::combat_crimewatch::crimewatch_timers::EVENT_SEC_STATUS_KILL_PIRATE_NPC,
-                            other_owner_id: None,
-                            other_type_id: Some(npc_type_id),
-                        });
                     snap.combat_crimewatch_state = rt.to_persisted();
                 }
+                rt.destroyed_npc_cache.insert(killed_ball_id, npc);
             });
+        } else {
+            let mut rt = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
+            rt.destroyed_npc_cache.insert(killed_ball_id, npc);
         }
         if drop_drifter_sleeper_loot && killer > 0 {
             let _ = crate::services::pve_exploration_sites::drop_sleeper_wreck_core(

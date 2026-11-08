@@ -960,6 +960,9 @@ fn skin_initiate_create(
     let broker_fee = checked_isk_cents(broker_fee_for_valuation(est_val, duration_secs, &target))
         .ok_or_else(|| (STATUS_BAD_REQUEST, "Broker fee overflows".to_string()))?;
     let now = ctx.now_unix();
+    // Settle matured SKINR sequencing jobs before checking unactivated licenses so
+    // finished skins can be listed on Paragon Hub without polling sequencing RPCs first (`#545`).
+    st.skinr.settle_completed_jobs(now);
 
     let (_, max_listings) = paragon_hub_skill_reductions(st, cid);
     let (tx_uuid, listing_key) = {

@@ -897,6 +897,9 @@ pub fn credit_specialized_npc_bounty_and_sec_status(
     let credited = crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
         let is_new = rt.bounty_credited_balls.insert(npc_ball_id);
         if is_new {
+            rt.pending_bounty_tick_started_unix
+                .entry((solar_system_id, killer_char_id))
+                .or_insert(now_unix);
             *rt.pending_bounty_ticks
                 .entry((solar_system_id, killer_char_id))
                 .or_insert(0.0) += effective_bounty;

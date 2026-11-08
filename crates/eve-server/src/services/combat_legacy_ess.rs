@@ -487,7 +487,7 @@ pub async fn handle_legacy_and_ess(
                     .weapon_cycle_state
                     .read()
                     .unwrap_or_else(|e| e.into_inner());
-                let (last_tick, _) = wguard.get(&ship_id).copied().unwrap_or((None, 0));
+                let (last_tick, _, _) = wguard.get(&ship_id).copied().unwrap_or((None, 0, None));
                 if let Some(prev_tick) = last_tick {
                     if attacker_tick >= prev_tick
                         && attacker_tick < prev_tick.saturating_add(cycle_ticks)
@@ -500,6 +500,102 @@ pub async fn handle_legacy_and_ess(
                             ),
                         }));
                     }
+                }
+            }
+
+            // Pre-validate attacker tether, target invulnerability/tether, and Crimewatch safety
+            // BEFORE mutating ammo or weapon_cycle_state (spool / cooldown).
+            if sys_handle
+                .get_combat_state(ship_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|cs| cs.is_tethered)
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "CantActivateWhileTethered".into(),
+                    message: "Cannot activate offensive modules while tethered".into(),
+                }));
+            }
+            if sys_handle
+                .get_combat_state(target_ball_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|tcs| tcs.is_tethered || tcs.is_invulnerable())
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "TargetInvulnerable".into(),
+                    message: format!(
+                        "Target {target_ball_id} is tethered or invulnerable to direct weapon fire"
+                    ),
+                }));
+            }
+
+            let sys_sec = with_combat_runtime(ctx, |rt| {
+                rt.modified_system_securities.get(&sys_id).copied()
+            })
+            .unwrap_or_else(|| {
+                ctx.sde
+                    .solar_systems
+                    .get(&sys_id)
+                    .map(|s| s.security_status)
+                    .unwrap_or(1.0)
+            });
+            let now_unix = ctx.now_unix();
+            let _attacker_ship_val = ctx
+                .sde
+                .types
+                .get(&attacker_ball.type_id)
+                .map(|t| t.base_price)
+                .unwrap_or(230_000.0);
+            let target_ship_val = ctx
+                .sde
+                .types
+                .get(&target_ball.type_id)
+                .map(|t| t.base_price)
+                .unwrap_or(230_000.0);
+
+            // If target is another player capsuleer, enforce location-change invulnerability,
+            // CrimeWatch 2.0 safety, Limited Engagements, Kill Rights, & CONCORD before consuming ammo/spool.
+            let mut has_legal_engagement = false;
+            if let Some((victim_char_id, _)) = player_target_info {
+                if crate::services::space_destiny::is_location_change_invulnerable(
+                    ctx,
+                    victim_char_id,
+                    now_unix,
+                ) {
+                    return Some(Err(BridgeRpcError {
+                        code: "TargetInvulnerable".into(),
+                        message: format!(
+                            "Target character {victim_char_id} is invulnerable due to recent location change"
+                        ),
+                    }));
+                }
+                match crate::services::r6_t1_p0_helpers::enforce_legacy_pvp_safety_and_concord(
+                    ctx,
+                    session,
+                    &sys_handle,
+                    char_id,
+                    ship_id,
+                    &attacker_ball,
+                    sys_id,
+                    sys_sec,
+                    target_id,
+                    &target_ball,
+                    victim_char_id,
+                    now_unix,
+                )
+                .await
+                {
+                    Ok((legal, Some(early_rep))) => {
+                        let _ = legal;
+                        return Some(Ok(early_rep));
+                    }
+                    Ok((legal, None)) => {
+                        has_legal_engagement = legal;
+                    }
+                    Err(e) => return Some(Err(e)),
                 }
             }
 
@@ -533,67 +629,29 @@ pub async fn handle_legacy_and_ess(
                 return Some(Err(e));
             }
 
-            // Record weapon cycle start and spool counter only after ammo consumption succeeded
+            // Record weapon cycle start and spool counter only after prechecks & ammo consumption succeeded.
+            // Entropic Disintegrators reset their spool when switching to a different target ball.
             let spool_cycles = {
                 let mut wguard = ctx
                     .weapon_cycle_state
                     .write()
                     .unwrap_or_else(|e| e.into_inner());
-                let (_, prev_spool) = wguard.get(&ship_id).copied().unwrap_or((None, 0));
-                let next_spool = prev_spool.saturating_add(1).min(30);
-                wguard.insert(ship_id, (Some(attacker_tick), next_spool));
+                let (_, prev_spool, prev_target) = wguard
+                    .get(&ship_id)
+                    .copied()
+                    .unwrap_or((None, 0, None));
+                let effective_prev_spool = if prev_target == Some(target_ball_id) {
+                    prev_spool
+                } else {
+                    0
+                };
+                let next_spool = effective_prev_spool.saturating_add(1).min(30);
+                wguard.insert(
+                    ship_id,
+                    (Some(attacker_tick), next_spool, Some(target_ball_id)),
+                );
                 next_spool
             };
-
-            let sys_sec = ctx
-                .sde
-                .solar_systems
-                .get(&sys_id)
-                .map(|s| s.security_status)
-                .unwrap_or(1.0);
-            let now_unix = ctx.now_unix();
-            let _attacker_ship_val = ctx
-                .sde
-                .types
-                .get(&attacker_ball.type_id)
-                .map(|t| t.base_price)
-                .unwrap_or(230_000.0);
-            let target_ship_val = ctx
-                .sde
-                .types
-                .get(&target_ball.type_id)
-                .map(|t| t.base_price)
-                .unwrap_or(230_000.0);
-
-            // If target is another player capsuleer, enforce CrimeWatch 2.0 safety, Limited Engagements, Kill Rights, & CONCORD
-            let mut has_legal_engagement = false;
-            if let Some((victim_char_id, _)) = player_target_info {
-                match crate::services::r6_t1_p0_helpers::enforce_legacy_pvp_safety_and_concord(
-                    ctx,
-                    session,
-                    &sys_handle,
-                    char_id,
-                    ship_id,
-                    &attacker_ball,
-                    sys_id,
-                    sys_sec,
-                    target_id,
-                    &target_ball,
-                    victim_char_id,
-                    now_unix,
-                )
-                .await
-                {
-                    Ok((legal, Some(early_rep))) => {
-                        let _ = legal;
-                        return Some(Ok(early_rep));
-                    }
-                    Ok((legal, None)) => {
-                        has_legal_engagement = legal;
-                    }
-                    Err(e) => return Some(Err(e)),
-                }
-            }
 
             let target_sig = if target_ball.radius > 0.0 {
                 target_ball.radius

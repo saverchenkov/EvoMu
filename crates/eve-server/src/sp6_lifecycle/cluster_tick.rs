@@ -392,6 +392,61 @@ pub fn populate_persisted_space_objects(
             }
             ballpark.combat_states.insert(disc.ship_id, cs);
         }
+
+        // 4. Persisted scanner probes in space (`#543`)
+        for p in sp6.active_scanner_probes.values() {
+            if p.solar_system_id != solar_system_id || p.state < 0 {
+                continue;
+            }
+            if ballpark.balls.contains_key(&p.probe_id) {
+                continue;
+            }
+            let (group_id, category_id, mass, radius) = sde
+                .types
+                .get(&p.probe_type_id)
+                .map(|t| (t.group_id, t.category_id, t.mass.max(1.0), t.radius.max(1.0)))
+                .unwrap_or((479, 8, 50.0, 5.0));
+            let (corp_id, alliance_id, sec_status) = snap
+                .characters
+                .get(&p.owner_char_id)
+                .map(|c| {
+                    (
+                        c.corporation_id,
+                        c.alliance_id.unwrap_or(-1),
+                        c.security_status,
+                    )
+                })
+                .unwrap_or((1_000_009, -1, 0.0));
+            ballpark.set_ball_slim_meta(
+                p.probe_id,
+                SlimItemMeta {
+                    group_id,
+                    category_id,
+                    owner_id: p.owner_char_id,
+                    char_id: Some(p.owner_char_id),
+                    corp_id,
+                    alliance_id,
+                    security_status: sec_status,
+                    is_cloaked: false,
+                    ..Default::default()
+                },
+            );
+            ballpark.add_ball(Ball {
+                id: p.probe_id,
+                type_id: p.probe_type_id,
+                position: DVec3::from_array(p.position),
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass,
+                radius,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            });
+            ballpark
+                .combat_states
+                .insert(p.probe_id, default_combat_state_for_type(sde, p.probe_type_id));
+        }
     });
 
     if !expired_item_ids.is_empty() || !expired_disconnected_chars.is_empty() {
@@ -1229,6 +1284,7 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     for (scope, payload) in pending_gw_notices {
         let _ = ctx.quasar_gateway.publish_notice(scope, payload, now_unix);
     }
+    crate::services::quasar_cosmetics_skinr::settle_completed_skinr_jobs_for_db(&ctx.db, now_unix);
     for (scope, payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
         let _ = ctx.quasar_gateway.publish_notice(scope, payload, ts);
     }

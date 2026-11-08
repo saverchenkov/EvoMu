@@ -548,3 +548,307 @@ async fn request_scans_dict_modes_combat_probes_and_launcher_clip_recovery() {
         warp_end_ft: None,
     };
 }
+
+#[tokio::test]
+async fn issue_543_scanner_probes_sqlite_restart_rehydration_and_downtime_recovery() {
+    let base_ctx = ServerContext::new();
+    let sde = Arc::clone(&base_ctx.sde);
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "evomu_issue_543_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let db_path = tmp_dir.join("world.sqlite");
+
+    let repo1 = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("open sqlite"));
+    let ctx1 = ServerContext::with_sde_and_repository(Arc::clone(&sde), repo1);
+    let char_id = 90_543_001_i64;
+    let ship_id = 100_543_001_i64;
+    let launcher_id = 100_543_010_i64;
+    let charge_id = 100_543_011_i64;
+    let sys_id = 30_000_142_u32;
+
+    let mut ch = base_ctx
+        .db
+        .with_snapshot(|s| s.characters.values().next().expect("demo char").clone());
+    ctx1.db.with_mut_snapshot(|snap| {
+        ch.character_id = char_id;
+        ch.user_id = 1;
+        ch.name = "ProbePersister".into();
+        ch.corporation_id = 98_000_001;
+        ch.alliance_id = None;
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 605, // Heron (has cargo capacity)
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            launcher_id,
+            InventoryItemRecord {
+                item_id: launcher_id,
+                type_id: 17_938, // Core Probe Launcher I
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            charge_id,
+            InventoryItemRecord {
+                item_id: charge_id,
+                type_id: 30_013, // Core Scanner Probe I
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 8,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut sess1 = SessionState::new(92_543);
+    sess1.user_id = Some(1);
+    sess1.character_id = Some(char_id);
+    sess1.corporation_id = Some(98_000_001);
+    sess1.solar_system_id = Some(sys_id);
+    sess1.ship_id = Some(ship_id);
+
+    let sys1 = ctx1.systems.get_or_spawn(sys_id);
+    let launch_kw = HashMap::from([("probeCount".to_string(), PyRep::Integer(2))]);
+    let launched = activate_scan_probe_launcher(
+        &ctx1,
+        &sess1,
+        &sys1,
+        char_id,
+        ship_id,
+        sys_id,
+        launcher_id,
+        17_938,
+        InventoryFlag::HiSlot0 as u16,
+        "launchForSelf",
+        None,
+        &launch_kw,
+    )
+    .await
+    .expect("launch 2 core probes");
+    assert_eq!(launched.dict_get("launchedCount"), Some(&PyRep::Integer(2)));
+    let pids1: Vec<i64> = ctx1.active_scanner_probes.read().unwrap().keys().copied().collect();
+    assert_eq!(pids1.len(), 2);
+    drop(ctx1);
+
+    // 1. Reopen fresh ServerContext from SQLite -> probes hydrate as INACTIVE (0) & spawn in Ballpark
+    let repo2 = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("reopen sqlite"));
+    let ctx2 = ServerContext::with_sde_and_repository(Arc::clone(&sde), repo2);
+    {
+        let map = ctx2.active_scanner_probes.read().unwrap();
+        assert_eq!(map.len(), 2);
+        for &pid in &pids1 {
+            let p = &map[&pid];
+            assert_eq!(p.state, PROBE_STATE_INACTIVE);
+            assert_eq!(p.warp_end_ft, None);
+        }
+    }
+    let sys2 = ctx2.systems.get_or_spawn(sys_id);
+    for &pid in &pids1 {
+        let (_sim_tick, ball) = sys2
+            .get_ball_snapshot(pid)
+            .await
+            .expect("ball query")
+            .expect("rehydrated probe ball must exist in Ballpark after restart");
+        assert_eq!(sys2.get_ball_group_id(pid).await.unwrap(), Some(479));
+        assert_eq!(ball.type_id, 30_013);
+    }
+
+    // ReconnectToLostProbes reclaims them -> RecoverProbes recovers 1 probe into launcher clip
+    let mut sess2 = SessionState::new(92_544);
+    sess2.user_id = Some(1);
+    sess2.character_id = Some(char_id);
+    sess2.corporation_id = Some(98_000_001);
+    sess2.solar_system_id = Some(sys_id);
+    sess2.ship_id = Some(ship_id);
+    let bound2 = BoundObjectEntry {
+        bound_id: 1,
+        session_id: 92_544,
+        user_id: 1,
+        character_id: char_id,
+        service: "scanMgr".into(),
+        object_id: sys_id as i64,
+        oid_str: format!("scanMgr:{sys_id}"),
+        ref_id: 1,
+    };
+    let kw = HashMap::new();
+    let rec_conn = handle_scan_and_wormhole_extras(
+        &ctx2,
+        &mut sess2,
+        Some(&bound2),
+        "scanMgr",
+        "ReconnectToLostProbes",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("ReconnectToLostProbes");
+    assert_eq!(rec_conn.dict_get("reconnectedCount"), Some(&PyRep::Integer(2)));
+
+    let rec_one = handle_scan_and_wormhole_extras(
+        &ctx2,
+        &mut sess2,
+        Some(&bound2),
+        "scanMgr",
+        "RecoverProbes",
+        &[PyRep::List(vec![PyRep::Integer(pids1[0])])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("RecoverProbes");
+    assert_eq!(rec_one.dict_get("returnedToLauncher"), Some(&PyRep::Integer(1)));
+
+    // 2. Also insert:
+    //    - an expired probe (must be purged by downtime rather than resurrected)
+    //    - a probe belonging to a second ship whose launcher is absent & cargo is full (must remain persisted!)
+    let expired_pid = 880_543_001_i64;
+    let blocked_pid = 880_543_002_i64;
+    let full_ship_id = 100_543_999_i64;
+    let now_u = ctx2.now_unix();
+    ctx2.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            full_ship_id,
+            InventoryItemRecord {
+                item_id: full_ship_id,
+                type_id: 605,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::from([(eve_sde::attr_ids::CAPACITY, 0.05)]),
+                ..Default::default()
+            },
+        );
+    });
+    let _ = sys2
+        .spawn_ball_with_meta(
+            Ball {
+                id: expired_pid,
+                type_id: 30_013,
+                position: DVec3::new(100.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 50.0,
+                radius: 5.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+            SlimItemMeta { group_id: 479, category_id: 8, owner_id: char_id, ..Default::default() },
+        )
+        .await;
+    {
+        let mut map = ctx2.active_scanner_probes.write().unwrap();
+        map.insert(
+            expired_pid,
+            ActiveScannerProbe {
+                probe_id: expired_pid,
+                probe_type_id: 30_013,
+                owner_char_id: char_id,
+                ship_id,
+                launcher_module_id: launcher_id,
+                solar_system_id: sys_id,
+                position: [100.0, 0.0, 0.0],
+                destination: [100.0, 0.0, 0.0],
+                range_step: 1,
+                scan_range_m: 1_000.0,
+                base_sensor_strength: 10.0,
+                max_flight_time_s: 60.0,
+                launched_at_unix: now_u.saturating_sub(120),
+                state: PROBE_STATE_IDLE,
+                warp_end_ft: None,
+            },
+        );
+        map.insert(
+            blocked_pid,
+            ActiveScannerProbe {
+                probe_id: blocked_pid,
+                probe_type_id: 30_013,
+                owner_char_id: char_id,
+                ship_id: full_ship_id,
+                launcher_module_id: 999_999_999,
+                solar_system_id: sys_id,
+                position: [200.0, 0.0, 0.0],
+                destination: [200.0, 0.0, 0.0],
+                range_step: 1,
+                scan_range_m: 1_000.0,
+                base_sensor_strength: 10.0,
+                max_flight_time_s: 3600.0,
+                launched_at_unix: now_u,
+                state: PROBE_STATE_IDLE,
+                warp_end_ft: None,
+            },
+        );
+    }
+    sync_scanner_probes_to_db(&ctx2);
+
+    // 3. Daily downtime sweeps probes:
+    //    - pids1[1] returns to launcher clip (making 8/8 in launcher clip)
+    //    - expired_pid is purged without being added to launcher/cargo
+    //    - blocked_pid stays persisted in DB with state == INACTIVE (0)
+    let (returned, purged) = crate::sp6_lifecycle::recover_scanner_probes_on_downtime(&ctx2);
+    assert_eq!(returned, 1);
+    assert_eq!(purged, 1);
+    drop(ctx2);
+
+    let repo3 = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("reopen sqlite 3"));
+    let ctx3 = ServerContext::with_sde_and_repository(sde, repo3);
+    {
+        let map3 = ctx3.active_scanner_probes.read().unwrap();
+        assert!(!map3.contains_key(&pids1[1]), "recovered probe must be cleared");
+        assert!(!map3.contains_key(&expired_pid), "expired probe must be purged");
+        assert_eq!(map3.get(&blocked_pid).map(|p| p.state), Some(PROBE_STATE_INACTIVE));
+    }
+    ctx3.db.with_snapshot(|snap| {
+        let clip_qty: i32 = snap
+            .items
+            .values()
+            .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::HiSlot0 && i.type_id == 30_013)
+            .map(|i| i.quantity)
+            .sum();
+        assert_eq!(clip_qty, 8, "both launched non-expired probes back in launcher, expired probe NOT resurrected");
+        let full_ship_cargo: i32 = snap
+            .items
+            .values()
+            .filter(|i| i.location_id == full_ship_id && i.flag == InventoryFlag::Cargo)
+            .map(|i| i.quantity)
+            .sum();
+        assert_eq!(full_ship_cargo, 0, "full cargo ship must not receive blocked probe");
+    });
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

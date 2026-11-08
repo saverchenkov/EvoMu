@@ -276,6 +276,7 @@ pub async fn activate_scan_probe_launcher(
                     warp_end_ft: None,
                 },
             );
+        sync_scanner_probes_to_db(ctx);
     }
 
     let _ = ctx.notify_module_effect_started(char_id, ship_id, module_id, module_type_id, Some(effect_name), target_id_opt);
@@ -442,6 +443,7 @@ fn handle_qa_override_probe_expiry(
             }
         }
     }
+    sync_scanner_probes_to_db(ctx);
     Some(Ok(PyRep::None))
 }
 
@@ -580,6 +582,9 @@ fn handle_set_activity_state(
                 }
             }
         }
+    }
+    if !changed.is_empty() {
+        sync_scanner_probes_to_db(ctx);
     }
     for (pid, st) in changed {
         let _ = ctx.notify(
@@ -1263,6 +1268,7 @@ async fn handle_request_scans(
         }
         for p in &active_probes { let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(p.probe_id), PyRep::Integer(PROBE_STATE_SCANNING as i64)]); }
     }
+    sync_scanner_probes_to_db(ctx);
     let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnSystemScanStarted", "charid", vec![PyRep::Integer(max_warp_end_ft), PyRep::Integer(scan_ms), PyRep::List(scan_probe_ids.clone())]);
     let p_ids: Vec<i64> = active_probes.iter().map(|p| p.probe_id).collect();
     ctx.db.with_mut_snapshot(|snap| {
@@ -1386,6 +1392,9 @@ async fn handle_recover_probes(
             }
         }
     }
+    if !recovered_probes.is_empty() {
+        sync_scanner_probes_to_db(ctx);
+    }
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     for p in &recovered_probes {
         let _ = sys_handle.remove_ball(p.probe_id).await;
@@ -1423,6 +1432,9 @@ async fn handle_reconnect_probes(ctx: &ServerContext, session: &mut SessionState
             }
         }
     }
+    if !reconnected_ids.is_empty() {
+        sync_scanner_probes_to_db(ctx);
+    }
     for &pid in &reconnected_ids {
         let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(PROBE_STATE_IDLE as i64)]);
     }
@@ -1447,6 +1459,9 @@ async fn handle_destroy_probe(ctx: &ServerContext, session: &mut SessionState, b
     for p in &destroyed_probes {
         let _ = sys_handle.remove_ball(p.probe_id).await;
         let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnRemoveProbe", "charid", vec![PyRep::Integer(p.probe_id)]);
+    }
+    if !destroyed_probes.is_empty() {
+        sync_scanner_probes_to_db(ctx);
     }
     let any_left = ctx.active_scanner_probes.read().ok().is_some_and(|m| m.values().any(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state >= 0));
     if !destroyed_probes.is_empty() && !any_left {
@@ -1474,6 +1489,7 @@ pub fn tick_probe_warp_end(ctx: &ServerContext) {
             }
         }
     }
+    let had_arrivals = !due_arrivals.is_empty();
     for (char_id, sys_id, pid, dest, was_warping) in due_arrivals {
         let sys_h = ctx.systems.get_or_spawn(sys_id);
         sys_h.try_set_ball_position(pid, DVec3::from_array(dest));
@@ -1492,6 +1508,7 @@ pub fn tick_probe_warp_end(ctx: &ServerContext) {
         if let Ok(js) = serde_json::to_string(&rem) { snap.service_state_blobs.insert("pending_probe_scans".into(), js); }
         done
     }) } else { Vec::new() };
+    let had_due_scans = !due_scans.is_empty();
     for (char_id, p_ids, scan_probe_ids, rows, idle_probes, _) in due_scans {
         if let Ok(mut probe_map) = ctx.active_scanner_probes.write() {
             for pid in &p_ids {
@@ -1508,4 +1525,21 @@ pub fn tick_probe_warp_end(ctx: &ServerContext) {
         let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnSystemScanStopped", "charid", vec![PyRep::List(scan_probe_ids), PyRep::List(rows), PyRep::List(Vec::new())]);
         let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbesIdle", "charid", vec![PyRep::List(idle_probes)]);
     }
+    if had_arrivals || had_due_scans {
+        sync_scanner_probes_to_db(ctx);
+    }
+}
+
+/// Persists non-expired tracked scanner probes (`state >= 0`) to `Sp6PersistedState`.
+/// Locks `db` before `active_scanner_probes.read()` to prevent stale out-of-order overwrites.
+pub(crate) fn sync_scanner_probes_to_db(ctx: &ServerContext) {
+    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _snap| {
+        if let Ok(map) = ctx.active_scanner_probes.read() {
+            st.active_scanner_probes = map
+                .iter()
+                .filter(|(_, p)| p.state >= 0)
+                .map(|(&id, p)| (id, p.clone()))
+                .collect();
+        }
+    });
 }

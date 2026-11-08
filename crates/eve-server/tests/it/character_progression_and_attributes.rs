@@ -255,8 +255,13 @@ async fn test_parity_misc_destiny_on_drone_activity_change() {
         engage_actions
             .iter()
             .any(|(name, args)| name == "OnDroneActivityChange"
-                && args.as_slice() == [PyRep::Integer(drone_ball_id), PyRep::Integer(1)]),
-        "expected OnDroneActivityChange(drone_id={drone_ball_id}, activity_state=1) in DoDestinyUpdate, got {engage_actions:?}"
+                && args.as_slice()
+                    == [
+                        PyRep::Integer(drone_ball_id),
+                        PyRep::Integer(1),
+                        PyRep::String("attack".into()),
+                    ]),
+        "expected OnDroneActivityChange(drone_id={drone_ball_id}, activity_state=1, activity='attack') in DoDestinyUpdate, got {engage_actions:?}"
     );
 
     let _ = ctx
@@ -280,8 +285,48 @@ async fn test_parity_misc_destiny_on_drone_activity_change() {
         return_actions
             .iter()
             .any(|(name, args)| name == "OnDroneActivityChange"
-                && args.as_slice() == [PyRep::Integer(drone_ball_id), PyRep::Integer(0)]),
-        "expected OnDroneActivityChange(drone_id={drone_ball_id}, activity_state=0) in DoDestinyUpdate, got {return_actions:?}"
+                && args.as_slice()
+                    == [
+                        PyRep::Integer(drone_ball_id),
+                        PyRep::Integer(0),
+                        PyRep::None,
+                    ]),
+        "expected OnDroneActivityChange(drone_id={drone_ball_id}, activity_state=0, activity=None) in DoDestinyUpdate, got {return_actions:?}"
+    );
+
+    // Mid-range CmdReturnBay (> 2500m) must emit the 3-tuple ("OnDroneActivityChange", (droneID, 4, "returning"))
+    let _ = handle
+        .set_ball_position(drone_ball_id, ship_ball.position + DVec3::new(5_000.0, 0.0, 0.0))
+        .await;
+    let _ = handle.drain_observer_updates(ship_id).await;
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "entity",
+            None,
+            "CmdReturnBay",
+            &[PyRep::List(vec![PyRep::Integer(drone_ball_id)])],
+            &kw,
+            None,
+        )
+        .await
+        .expect("entity.CmdReturnBay");
+    let (_tick, _evs, recall_updates) = handle
+        .drain_observer_updates(ship_id)
+        .await
+        .expect("drain observer updates after mid-range CmdReturnBay");
+    let recall_actions = extract_destiny_actions(&recall_updates);
+    assert!(
+        recall_actions
+            .iter()
+            .any(|(name, args)| name == "OnDroneActivityChange"
+                && args.as_slice()
+                    == [
+                        PyRep::Integer(drone_ball_id),
+                        PyRep::Integer(4),
+                        PyRep::String("returning".into()),
+                    ]),
+        "expected OnDroneActivityChange(drone_id={drone_ball_id}, activity_state=4, activity='returning') in DoDestinyUpdate, got {recall_actions:?}"
     );
 }
 

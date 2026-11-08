@@ -929,7 +929,7 @@ fn handle_job_initiate(
     ))
 }
 
-fn settle_completed_jobs(state: &SkinrCosmeticsState, now: u64) {
+pub(super) fn settle_completed_jobs(state: &SkinrCosmeticsState, now: u64) {
     state.sync_redeemed_skins_if_needed();
     let mut completed = Vec::new();
     {

@@ -94,6 +94,7 @@ pub async fn handle_cmd_return_bay(
                 eve_destiny::DestinyEvent::OnDroneActivityChange {
                     drone_id: d.ball_id,
                     activity_state: 4,
+                    activity: Some("returning".into()),
                 },
             ).await;
             let notif_args = vec![
@@ -363,12 +364,17 @@ pub fn abandon_drones_and_fighters_for_ship_sync(
 ) {
     abandon_drones_on_warp_sync(ctx, char_id, ship_id, sys_id);
 
+    let mut probes_changed = false;
     if let Ok(mut probes) = ctx.active_scanner_probes.write() {
         for p in probes.values_mut() {
             if p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0 {
                 p.state = 0;
+                probes_changed = true;
             }
         }
+    }
+    if probes_changed {
+        crate::services::space_probe_scanning::sync_scanner_probes_to_db(ctx);
     }
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
