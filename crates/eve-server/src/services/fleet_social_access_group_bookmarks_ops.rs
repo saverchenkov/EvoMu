@@ -509,11 +509,16 @@ pub(crate) async fn handle_update_bookmark(
                 message: format!("Bookmark {bm_id} not found"),
             });
         };
-        let can_edit = if bm_rec.owner_id == char_id {
+        let can_edit = if !bm_rec.is_shared && bm_rec.owner_id == char_id {
             true
         } else if let Some(fid) = bm_rec.folder_id {
             if let Some(f) = snap.bookmark_folders.get(&fid) {
-                folder_access_level(snap, session, char_id, f) >= AccessLevel::Manage
+                let level = folder_access_level(snap, session, char_id, f);
+                if bm_rec.owner_id == char_id {
+                    level >= AccessLevel::Use
+                } else {
+                    level >= AccessLevel::Manage
+                }
             } else {
                 false
             }
@@ -694,11 +699,16 @@ pub(crate) async fn handle_delete_bookmarks(
                     });
                 }
             }
-            let can_del = if bm.owner_id == char_id {
+            let can_del = if !bm.is_shared && bm.owner_id == char_id {
                 true
             } else if let Some(fid) = bm.folder_id {
                 if let Some(f) = snap.bookmark_folders.get(&fid) {
-                    folder_access_level(snap, session, char_id, f) >= AccessLevel::Manage
+                    let level = folder_access_level(snap, session, char_id, f);
+                    if bm.owner_id == char_id {
+                        level >= AccessLevel::Use
+                    } else {
+                        level >= AccessLevel::Manage
+                    }
                 } else {
                     false
                 }
@@ -860,14 +870,19 @@ pub(crate) async fn handle_copy_move_bookmarks(
                 });
             };
             let can_access = if is_move {
-                orig.owner_id == char_id
+                (!orig.is_shared && orig.owner_id == char_id)
                     || orig.folder_id.is_some_and(|fid| {
                         snap.bookmark_folders.get(&fid).is_some_and(|f| {
-                            folder_access_level(snap, session, char_id, f) >= AccessLevel::Manage
+                            let level = folder_access_level(snap, session, char_id, f);
+                            if orig.owner_id == char_id {
+                                level >= AccessLevel::Use
+                            } else {
+                                level >= AccessLevel::Manage
+                            }
                         })
                     })
             } else {
-                orig.owner_id == char_id
+                (!orig.is_shared && orig.owner_id == char_id)
                     || orig.folder_id.is_some_and(|fid| {
                         snap.bookmark_folders.get(&fid).is_some_and(|f| {
                             folder_access_level(snap, session, char_id, f) >= AccessLevel::View

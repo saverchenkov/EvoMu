@@ -257,9 +257,40 @@ async fn disconnect_grace_lifecycle_tick_select_sync_and_prune() {
 
     // sync_session_fleet clears fleet_id for kicked/expired member 90_000_004
     let mut kicked_sess = SessionState::new(3);
+    kicked_sess.character_id = Some(90_000_004);
     kicked_sess.fleet_id = Some(fleet_id);
+    let (tx, _rx) = tokio::sync::mpsc::channel(16);
+    ctx.quasar_gateway.subscribers.write().unwrap().insert(
+        33_001,
+        crate::quasar_gateway::GatewaySubscriber {
+            session_id: 33_001,
+            subscribed_at_unix: 1_700_000_000,
+            application_instance_uuid: vec![0; 16],
+            user_id: Some(1),
+            character_id: Some(90_000_004),
+            corporation_id: Some(1_000_009),
+            alliance_id: None,
+            solar_system_id: Some(30_000_142),
+            fleet_id: Some(fleet_id),
+            bubble_instance_uuid: None,
+            subscribed_notice_types: Vec::new(),
+            sender: tx,
+            inbox: std::collections::VecDeque::new(),
+        },
+    );
     sync_session_fleet(&ctx, &mut kicked_sess, 90_000_004);
     assert_eq!(kicked_sess.fleet_id, None);
+    assert_eq!(
+        ctx.quasar_gateway.subscribers.read().unwrap()[&33_001].fleet_id,
+        None
+    );
+
+    // sync_session_fleet also clears fleet_id when the fleet itself has been disbanded
+    let mut disbanded_sess = SessionState::new(33_002);
+    disbanded_sess.character_id = Some(90_000_004);
+    disbanded_sess.fleet_id = Some(999_999_999);
+    sync_session_fleet(&ctx, &mut disbanded_sess, 90_000_004);
+    assert_eq!(disbanded_sess.fleet_id, None);
 
     // on_character_select when NOT in grace and was_already_online == false removes stale membership
     let mut stale_sess = SessionState::new(4);

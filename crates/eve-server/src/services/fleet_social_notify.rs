@@ -281,6 +281,27 @@ pub fn remove_character_from_fleet(
     sync_fleet_watchlist_to_db(ctx);
 
     if was_member {
+        if let Ok(mut subs) = ctx.quasar_gateway.subscribers.write() {
+            for sub in subs.values_mut() {
+                if sub.character_id == Some(char_id as u32)
+                    && (sub.fleet_id == Some(fleet_id) || disbanded)
+                {
+                    sub.fleet_id = None;
+                }
+            }
+        }
+        let (c_sys, c_dock) = ctx.db.with_snapshot(|snap| {
+            snap.characters
+                .get(&char_id)
+                .map(|ch| (ch.solar_system_id, ch.station_id))
+                .unwrap_or((30_000_142, None))
+        });
+        ctx.invalidate_bound_objects_for_session_transition(
+            char_id,
+            c_sys,
+            c_dock,
+            "fleet_change",
+        );
         emit_leave(ctx, fleet_id, char_id);
         if let Some((old, new, only)) = &hand_over {
             emit_member_changed(ctx, fleet_id, old, new, *only);
@@ -625,10 +646,11 @@ pub fn sync_session_fleet(ctx: &ServerContext, session: &mut SessionState, char_
         let kicked_from_existing = ctx.db.with_snapshot(|snap| {
             snap.fleets
                 .get(&fid)
-                .is_some_and(|f| !f.member_details.contains_key(&char_id) && !f.members.contains(&char_id))
+                .is_none_or(|f| !f.member_details.contains_key(&char_id) && !f.members.contains(&char_id))
         });
         if kicked_from_existing {
             session.fleet_id = None;
+            let _ = ctx.quasar_gateway.on_session_changed(session, ctx.now_unix());
         }
     }
 }

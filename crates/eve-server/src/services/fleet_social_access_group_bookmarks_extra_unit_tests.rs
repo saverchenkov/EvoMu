@@ -547,3 +547,130 @@ async fn subfolder_and_known_folders_edge_cases_and_delegated_ops() {
     .await
     .is_ok());
 }
+
+#[tokio::test]
+async fn shared_bookmark_creator_revoked_or_view_only_cannot_bypass_acl() {
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let owner_id = 100_000_030_i64;
+    let creator_id = 100_000_031_i64;
+    let corp_id = 1_000_009_i64;
+    let other_corp_id = 1_000_010_i64;
+    let mut owner_sess = make_session(owner_id, corp_id, 0);
+    let mut creator_sess = make_session(creator_id, other_corp_id, 0);
+
+    // Owner creates shared folder with an ACL that initially gives creator_id Use access via char_acl
+    let added = call_agbm(
+        &ctx,
+        &mut owner_sess,
+        "AddFolder",
+        &[PyRep::Bool(false), PyRep::String("SharedACL".into())],
+    )
+    .await
+    .unwrap();
+    let shared_fid = added.dict_get("folderID").and_then(|v| v.as_i64()).unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.bookmark_folder_acls.insert(
+            shared_fid,
+            eve_db::BookmarkFolderAclRecord {
+                folder_id: shared_fid,
+                char_acl: HashMap::from([(creator_id, 2)]), // Use
+                ..Default::default()
+            },
+        );
+    });
+
+    let bm_res = call_agbm(
+        &ctx,
+        &mut creator_sess,
+        "BookmarkStaticLocation",
+        &[
+            PyRep::Integer(30_000_142),
+            PyRep::Integer(shared_fid),
+            PyRep::String("SharedSpot".into()),
+            PyRep::String("Memo".into()),
+            PyRep::Integer(1),
+        ],
+    )
+    .await
+    .unwrap();
+    let PyRep::Tuple(bm_tup) = bm_res else {
+        panic!("expected tuple");
+    };
+    let shared_bm_id = bm_tup[0].as_i64().unwrap();
+
+    // Downgrade creator_id to View (1): can copy, must NOT update/delete/move
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.bookmark_folder_acls
+            .get_mut(&shared_fid)
+            .unwrap()
+            .char_acl
+            .insert(creator_id, 1);
+    });
+    assert!(call_agbm(
+        &ctx,
+        &mut creator_sess,
+        "CopyBookmarksToFolderAndSubfolder",
+        &[
+            PyRep::Integer(shared_fid),
+            PyRep::None,
+            PyRep::List(vec![PyRep::Integer(shared_bm_id)]),
+        ],
+    )
+    .await
+    .is_ok());
+    assert!(call_agbm(
+        &ctx,
+        &mut creator_sess,
+        "UpdateBookmark",
+        &[
+            PyRep::Integer(shared_bm_id),
+            PyRep::Integer(shared_fid),
+            PyRep::String("Tamper".into()),
+            PyRep::String("Tamper".into()),
+        ],
+    )
+    .await
+    .is_err());
+    assert!(call_agbm(
+        &ctx,
+        &mut creator_sess,
+        "MoveBookmarksToFolderAndSubfolder",
+        &[
+            PyRep::Integer(shared_fid),
+            PyRep::None,
+            PyRep::List(vec![PyRep::Integer(shared_bm_id)]),
+        ],
+    )
+    .await
+    .is_err());
+    assert!(call_agbm(
+        &ctx,
+        &mut creator_sess,
+        "DeleteBookmarks",
+        &[PyRep::List(vec![PyRep::Integer(shared_bm_id)])],
+    )
+    .await
+    .is_err());
+
+    // Revoke creator_id completely (None = 0): even copy must now fail
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.bookmark_folder_acls
+            .get_mut(&shared_fid)
+            .unwrap()
+            .char_acl
+            .remove(&creator_id);
+    });
+    assert!(call_agbm(
+        &ctx,
+        &mut creator_sess,
+        "CopyBookmarksToFolderAndSubfolder",
+        &[
+            PyRep::Integer(shared_fid),
+            PyRep::None,
+            PyRep::List(vec![PyRep::Integer(shared_bm_id)]),
+        ],
+    )
+    .await
+    .is_err());
+    assert!(ctx.db.with_snapshot(|s| s.bookmarks.contains_key(&shared_bm_id)));
+}

@@ -473,3 +473,129 @@ fn is_fleet_operation_implemented_and_dispatch_fleet_wing_squad_and_ui_routes() 
         422
     );
 }
+
+#[test]
+fn esi_delete_fleet_member_clears_character_chat_commander_and_bound_objects() {
+    let (ctx, _token, char_id, corp_id, _planet_id) = seed_full_esi_context();
+    let claims = make_claims(char_id);
+    let member_id = 90_000_002_i64;
+    let fleet_id = 1_i64;
+    let squad_id = 100_i64;
+    let fleet_chan_id = format!("fleetid:{fleet_id}");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(fleet_id, build_test_fleet());
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.fleet_id = Some(fleet_id);
+        }
+        let base = snap.characters[&char_id].clone();
+        snap.characters.entry(member_id).or_insert_with(|| {
+            let mut ch = base;
+            ch.character_id = member_id;
+            ch.name = "FleetMate".into();
+            ch.corporation_id = corp_id;
+            ch
+        });
+        if let Some(ch) = snap.characters.get_mut(&member_id) {
+            ch.fleet_id = Some(fleet_id);
+        }
+        if let Some(f) = snap.fleets.get_mut(&fleet_id) {
+            if !f.members.contains(&member_id) {
+                f.members.push(member_id);
+            }
+            f.member_details.insert(
+                member_id,
+                FleetMemberRecord {
+                    character_id: member_id,
+                    role: FleetRole::SquadCommander,
+                    wing_id: Some(10),
+                    squad_id: Some(squad_id),
+                    takes_fleet_warp: true,
+                    accepts_regroup: true,
+                    accepts_conduit_jumps: true,
+                    job: 0,
+                    role_name: String::new(),
+                    join_time_unix: 0,
+                },
+            );
+            if let Some(sq) = f.squad_details.get_mut(&squad_id) {
+                sq.commander_id = Some(member_id);
+            }
+        }
+        snap.chat_channels.insert(
+            fleet_chan_id.clone(),
+            eve_db::ChatChannelRecord {
+                channel_id: fleet_chan_id.clone(),
+                name: fleet_chan_id.clone(),
+                motd: String::new(),
+                owner_id: Some(char_id),
+                members: std::collections::HashSet::from([char_id, member_id]),
+                is_system_local: false,
+                solar_system_id: None,
+                is_private: true,
+                operators: std::collections::HashSet::new(),
+                password: None,
+                is_delayed_local: false,
+            },
+        );
+    });
+
+    // Register a fleetObjectHandler bound object and quasar subscriber for member_id
+    let mut member_sess = eve_machonet::SessionState::new(9_999);
+    member_sess.user_id = Some(1);
+    member_sess.character_id = Some(member_id);
+    member_sess.fleet_id = Some(fleet_id);
+    let bound_id = ctx
+        .bind_verified_sub_object(&member_sess, "fleetObjectHandler", fleet_id)
+        .expect("bind fleetObjectHandler");
+    let (tx, _rx) = tokio::sync::mpsc::channel(16);
+    ctx.quasar_gateway.subscribers.write().unwrap().insert(
+        9_999,
+        crate::quasar_gateway::GatewaySubscriber {
+            session_id: 9_999,
+            subscribed_at_unix: 1_700_000_000,
+            application_instance_uuid: vec![0; 16],
+            user_id: Some(1),
+            character_id: Some(member_id as u32),
+            corporation_id: Some(corp_id as u32),
+            alliance_id: None,
+            solar_system_id: Some(30_000_142),
+            fleet_id: Some(fleet_id),
+            bubble_instance_uuid: None,
+            subscribed_notice_types: Vec::new(),
+            sender: tx,
+            inbox: std::collections::VecDeque::new(),
+        },
+    );
+
+    let res = dispatch_fleet_routes(
+        &ctx,
+        "DELETE",
+        "/fleets/{fleet_id}/members/{member_id}",
+        &params(&[("fleet_id", "1"), ("member_id", &member_id.to_string())]),
+        &HashMap::new(),
+        Some(&claims),
+        b"",
+    )
+    .unwrap();
+    assert_eq!(res.status_code, 204);
+
+    ctx.db.with_snapshot(|snap| {
+        let ch = &snap.characters[&member_id];
+        assert_eq!(ch.fleet_id, None);
+        let f = &snap.fleets[&fleet_id];
+        assert!(!f.members.contains(&member_id));
+        assert!(!f.member_details.contains_key(&member_id));
+        assert_eq!(f.squad_details[&squad_id].commander_id, None);
+        assert!(!snap.chat_channels[&fleet_chan_id].members.contains(&member_id));
+    });
+    assert!(
+        ctx.release_bound_object(&member_sess, bound_id).is_err(),
+        "fleetObjectHandler bound object must be evicted when kicked via ESI"
+    );
+    assert_eq!(
+        ctx.quasar_gateway.subscribers.read().unwrap()[&9_999].fleet_id,
+        None,
+        "quasar subscriber fleet_id must be cleared when kicked via ESI"
+    );
+}

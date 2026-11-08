@@ -768,8 +768,8 @@ pub fn dispatch_fleet_routes(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
-            let res: Result<(), RouteExecutionResult> = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(f) = snap.fleets.get_mut(&fleet_id) else {
+            let check: Result<(), RouteExecutionResult> = ctx.db.with_snapshot(|snap| {
+                let Some(f) = snap.fleets.get(&fleet_id) else {
                     return Err(RouteExecutionResult::error(404, format!("Fleet {fleet_id} not found")));
                 };
                 if !is_fleet_member(f, member_id) {
@@ -797,13 +797,17 @@ pub fn dispatch_fleet_routes(
                         ));
                     }
                 }
-                f.members.retain(|&m| m != member_id);
-                f.member_details.remove(&member_id);
-                f.invites.remove(&member_id);
                 Ok(())
             });
-            Some(match res {
-                Ok(()) => RouteExecutionResult::no_content(0),
+            Some(match check {
+                Ok(()) => {
+                    crate::services::fleet_social::fleet_social_notify::remove_character_from_fleet(
+                        ctx,
+                        fleet_id,
+                        member_id,
+                    );
+                    RouteExecutionResult::no_content(0)
+                }
                 Err(e) => e,
             })
         }

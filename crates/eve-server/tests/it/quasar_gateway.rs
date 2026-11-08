@@ -620,6 +620,18 @@ async fn q2_scoped_notice_fan_out_and_notice_routing_cache_flush_on_session_chan
     sess_c.solar_system_id = Some(30_000_142); // Jita (same system as A)
     sess_c.fleet_id = None;
 
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(
+            700_001,
+            eve_db::FleetRecord {
+                fleet_id: 700_001,
+                boss_id: 90_000_001,
+                members: vec![90_000_001, 90_000_002],
+                ..Default::default()
+            },
+        );
+    });
+
     for s in [&mut sess_a, &mut sess_b, &mut sess_c] {
         ctx.dispatch_rpc(s, "publicGatewaySvc", None, "Subscribe", &[], &empty_kw, None)
             .await

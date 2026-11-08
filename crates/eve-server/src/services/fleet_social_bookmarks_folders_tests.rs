@@ -376,3 +376,101 @@ async fn bookmark_scan_result_and_copy_move_batches() {
         Some(820_001)
     );
 }
+
+#[tokio::test]
+async fn bookmark_delete_folder_removes_folder_and_subfolder_bookmarks() {
+    let ctx = test_ctx_with_clock(1_800_004_000);
+    let mut session = SessionState::new(91);
+    session.user_id = Some(1);
+    session.character_id = Some(90_000_001);
+    session.corporation_id = Some(98_000_001);
+    session.corp_role = u64::MAX;
+    let kw = HashMap::new();
+
+    let fid = 820_100_i64;
+    let sfid = 820_101_i64;
+    let bm1 = 820_102_i64;
+    let bm2 = 820_103_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.bookmark_folders.insert(
+            fid,
+            BookmarkFolderRecord {
+                folder_id: fid,
+                folder_name: "RootFolder".into(),
+                owner_id: 90_000_001,
+                is_shared: true,
+                corporation_id: Some(98_000_001),
+                ..Default::default()
+            },
+        );
+        snap.bookmark_folders.insert(
+            sfid,
+            BookmarkFolderRecord {
+                folder_id: sfid,
+                folder_name: "SubFolder".into(),
+                owner_id: 90_000_001,
+                is_shared: true,
+                corporation_id: Some(98_000_001),
+                ..Default::default()
+            },
+        );
+        snap.bookmark_subfolder_parents.insert(sfid, fid);
+        snap.bookmarks.insert(
+            bm1,
+            BookmarkRecord {
+                bookmark_id: bm1,
+                owner_id: 90_000_001,
+                solar_system_id: 30_000_142,
+                folder_id: Some(fid),
+                label: "InRoot".into(),
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                item_id: None,
+                memo: String::new(),
+                is_shared: true,
+            },
+        );
+        snap.bookmarks.insert(
+            bm2,
+            BookmarkRecord {
+                bookmark_id: bm2,
+                owner_id: 90_000_001,
+                solar_system_id: 30_000_142,
+                folder_id: Some(sfid),
+                label: "InSub".into(),
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                item_id: None,
+                memo: String::new(),
+                is_shared: true,
+            },
+        );
+        snap.bookmark_subfolders.insert(bm2, sfid);
+        snap.bookmark_expiries.insert(bm1, 1_800_010_000);
+        snap.bookmark_expiries.insert(bm2, 1_800_010_000);
+    });
+
+    handle_bookmarks(
+        &ctx,
+        &mut session,
+        "bookmark",
+        "DeleteFolder",
+        &[PyRep::Integer(fid)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("DeleteFolder ok");
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.bookmark_folders.contains_key(&fid));
+        assert!(!snap.bookmark_folders.contains_key(&sfid));
+        assert!(!snap.bookmarks.contains_key(&bm1));
+        assert!(!snap.bookmarks.contains_key(&bm2));
+        assert!(!snap.bookmark_expiries.contains_key(&bm1));
+        assert!(!snap.bookmark_expiries.contains_key(&bm2));
+        assert!(!snap.bookmark_subfolders.contains_key(&bm2));
+    });
+}

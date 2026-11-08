@@ -855,18 +855,32 @@ pub(super) async fn handle_bookmarks(
                 for sfid in &child_sfs {
                     snap.bookmark_folders.remove(sfid);
                     snap.bookmark_subfolder_parents.remove(sfid);
+                    snap.bookmark_folder_acls.remove(sfid);
                 }
-                snap.bookmark_subfolders
-                    .retain(|_, sfid| !child_sfs.contains(sfid));
                 snap.bookmark_folders.remove(&folder_id);
                 snap.bookmark_folder_acls.remove(&folder_id);
                 snap.bookmark_folder_known_by
-                    .retain(|&(fid, _), _| fid != folder_id);
-                for bm in snap.bookmarks.values_mut() {
-                    if bm.folder_id == Some(folder_id) {
-                        bm.folder_id = None;
-                    }
+                    .retain(|&(fid, _), _| fid != folder_id && !child_sfs.contains(&fid));
+                let deleted_bm_ids: Vec<i64> = snap
+                    .bookmarks
+                    .iter()
+                    .filter(|(bm_id, bm)| {
+                        bm.folder_id == Some(folder_id)
+                            || bm.folder_id.is_some_and(|fid| child_sfs.contains(&fid))
+                            || snap
+                                .bookmark_subfolders
+                                .get(bm_id)
+                                .is_some_and(|sfid| child_sfs.contains(sfid))
+                    })
+                    .map(|(&bm_id, _)| bm_id)
+                    .collect();
+                for bm_id in deleted_bm_ids {
+                    snap.bookmarks.remove(&bm_id);
+                    snap.bookmark_expiries.remove(&bm_id);
+                    snap.bookmark_subfolders.remove(&bm_id);
                 }
+                snap.bookmark_subfolders
+                    .retain(|_, sfid| !child_sfs.contains(sfid));
                 Ok(f.corporation_id)
             });
             match res {
