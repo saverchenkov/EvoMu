@@ -42,10 +42,21 @@ impl Default for AlertTelemetryState {
 
 /// Returns the delivered occurrence count for `error_id` on `ctx` (0 when never delivered).
 pub fn delivered_bean_count(ctx: &ServerContext, error_id: i64) -> i64 {
-    ctx.alert_telemetry
+    let mem = ctx
+        .alert_telemetry
         .lock()
         .map(|st| st.bean_counts.get(&error_id).copied().unwrap_or(0))
-        .unwrap_or(0)
+        .unwrap_or(0);
+    if mem > 0 {
+        return mem;
+    }
+    ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs
+            .get("alert_bean_counts")
+            .and_then(|s| serde_json::from_str::<HashMap<String, i64>>(s).ok())
+            .and_then(|m| m.get(&error_id.to_string()).copied())
+            .unwrap_or(0)
+    })
 }
 
 fn log_mode_tuple(entry: Option<(i64, &'static str)>) -> PyRep {
@@ -55,6 +66,53 @@ fn log_mode_tuple(entry: Option<(i64, &'static str)>) -> PyRep {
         }
         None => PyRep::Tuple(vec![PyRep::None, PyRep::None]),
     }
+}
+
+fn log_mode_override(ctx: &ServerContext, error_id: i64) -> Option<String> {
+    ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs
+            .get("alert_log_modes")
+            .and_then(|s| serde_json::from_str::<HashMap<String, String>>(s).ok())
+            .and_then(|m| m.get(&error_id.to_string()).cloned())
+    })
+}
+
+fn persist_bean_counts(ctx: &ServerContext, beans: &[(i64, i64)]) {
+    if beans.is_empty() {
+        return;
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut persisted: HashMap<String, i64> = snap
+            .service_state_blobs
+            .get("alert_bean_counts")
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        for &(error_id, n) in beans {
+            let key = error_id.to_string();
+            if persisted.len() >= ALERT_REGISTRY_CAP && !persisted.contains_key(&key) {
+                if let Some(oldest) = persisted.keys().next().cloned() {
+                    persisted.remove(&oldest);
+                }
+            }
+            let c = persisted.entry(key).or_insert(0);
+            *c = c.saturating_add(n);
+        }
+        if let Ok(json) = serde_json::to_string(&persisted) {
+            snap.service_state_blobs
+                .insert("alert_bean_counts".into(), json);
+        }
+    });
+}
+
+fn handle_get_character_selection_data(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    crate::services::char_selection::get_character_selection_data(ctx, session)
+}
+
+fn handle_get_character_settings(ctx: &ServerContext, char_id: i64) -> PyRep {
+    crate::services::cluster_macho_misc_services::get_character_settings_dict(ctx, char_id)
 }
 
 
@@ -86,19 +144,7 @@ pub async fn handle(
             if let Err(e) = ServerContext::require_auth(session) {
                 return Some(Err(e));
             }
-            let Some(hash) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArguments".into(),
-                    message: "alert.BeanCount expects (stackIDHash,)".into(),
-                }));
-            };
-            let entry = ctx
-                .alert_telemetry
-                .lock()
-                .ok()
-                .and_then(|st| st.stack_traces.get(&hash).copied());
-            // (None, None) tells the client "the server wants a trace" (alert.pyj __SendStackTraceAlert).
-            Some(Ok(log_mode_tuple(entry)))
+            handle_alert_bean_count(ctx, args)
         }
         ("alert", "SendClientStackTraceAlert") => {
             if let Err(e) = ServerContext::require_auth(session) {
@@ -138,11 +184,37 @@ pub async fn handle(
                 }
             };
             drop(st);
-            if let Some((eid, mode_byte)) = newly_primed {
+            let effective_mode = log_mode_override(ctx, entry.0)
+                .unwrap_or_else(|| entry.1.to_string());
+            ctx.db.with_mut_snapshot(|snap| {
+                let mut traces: Vec<serde_json::Value> = snap
+                    .service_state_blobs
+                    .get("alert_client_traces")
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+                traces.push(serde_json::json!({
+                    "stack_id": hash,
+                    "stack_key": stack_key,
+                    "error_id": entry.0,
+                    "mode": effective_mode,
+                    "user_id": session.user_id,
+                    "trace_preview": trace.chars().take(200).collect::<String>(),
+                    "timestamp_unix": ctx.now_unix(),
+                }));
+                if traces.len() > 256 {
+                    let trim = traces.len() - 256;
+                    traces.drain(0..trim);
+                }
+                if let Ok(json) = serde_json::to_string(&traces) {
+                    snap.service_state_blobs
+                        .insert("alert_client_traces".into(), json);
+                }
+            });
+            if let Some((eid, _)) = newly_primed {
                 crate::services::notify_emitters_missing::emit_bean_prime(
                     ctx,
                     crate::router::NotificationTarget::All,
-                    vec![(hash, eid, mode_byte.to_string())],
+                    vec![(hash, eid, effective_mode.clone())],
                 );
             }
             // One line only: the client trace is diagnostic text, not a server fault.
@@ -165,45 +237,16 @@ pub async fn handle(
             );
             let queue_dir = Some(ctx.bug_reporting.effective_queue_dir());
             crate::bug_reporting::schedule_incident_capture(bundle, queue_dir, None);
-            Some(Ok(log_mode_tuple(Some(entry))))
+            Some(Ok(PyRep::Tuple(vec![
+                PyRep::Integer(entry.0),
+                PyRep::ascii_bytes(&effective_mode),
+            ])))
         }
         ("alert", "BeanDelivery") => {
             if let Err(e) = ServerContext::require_auth(session) {
                 return Some(Err(e));
             }
-            // beans: {errorID: (count, lastWallclockTime)}
-            let Some(PyRep::Dict(entries)) = args.first() else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArguments".into(),
-                    message: "alert.BeanDelivery expects ({errorID: (count, time)},)".into(),
-                }));
-            };
-            let mut beans = Vec::with_capacity(entries.len());
-            for (k, v) in entries {
-                let (Some(error_id), PyRep::Tuple(t) | PyRep::List(t)) = (k.as_i64(), v) else {
-                    continue;
-                };
-                let n = t.first().and_then(|c| c.as_i64()).unwrap_or(0);
-                if n < 0 {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidArguments".into(),
-                        message: format!("alert.BeanDelivery count for errorID {error_id} is negative"),
-                    }));
-                }
-                beans.push((error_id, n));
-            }
-            if let Ok(mut st) = ctx.alert_telemetry.lock() {
-                for (error_id, n) in beans {
-                    if st.bean_counts.len() >= ALERT_REGISTRY_CAP && !st.bean_counts.contains_key(&error_id) {
-                        if let Some(oldest) = st.bean_counts.keys().next().copied() {
-                            st.bean_counts.remove(&oldest);
-                        }
-                    }
-                    let c = st.bean_counts.entry(error_id).or_insert(0);
-                    *c = c.saturating_add(n);
-                }
-            }
-            Some(Ok(PyRep::None))
+            handle_alert_bean_delivery(ctx, args)
         }
         ("alert", "GetLogModeForError") => {
             if let Err(e) = ServerContext::require_auth(session) {
@@ -358,27 +401,61 @@ pub async fn handle(
             if let Err(e) = ServerContext::require_auth(session) {
                 return Some(Err(e));
             }
-            if let Some(PyRep::Dict(entries)) = args.first() {
-                if let Ok(mut st) = ctx.alert_telemetry.lock() {
+            let mut beans = Vec::new();
+            match args.first() {
+                Some(PyRep::Dict(entries)) => {
                     for (k, v) in entries {
                         if let (Some(err_id), Some(n)) = (k.as_i64(), v.as_i64()) {
-                            if st.bean_counts.len() >= ALERT_REGISTRY_CAP && !st.bean_counts.contains_key(&err_id) {
-                                if let Some(oldest) = st.bean_counts.keys().next().copied() {
-                                    st.bean_counts.remove(&oldest);
-                                }
+                            if n >= 0 {
+                                beans.push((err_id, n));
                             }
-                            let c = st.bean_counts.entry(err_id).or_insert(0);
-                            *c = c.saturating_add(n);
                         }
                     }
                 }
+                Some(PyRep::Bytes(raw)) => {
+                    ctx.db.with_mut_snapshot(|snap| {
+                        let prev: i64 = snap
+                            .service_state_blobs
+                            .get("alert_group_bean_bytes")
+                            .and_then(|s| s.parse::<i64>().ok())
+                            .unwrap_or(0);
+                        snap.service_state_blobs.insert(
+                            "alert_group_bean_bytes".into(),
+                            prev.saturating_add(raw.len() as i64).to_string(),
+                        );
+                    });
+                }
+                _ => {}
+            }
+            if !beans.is_empty() {
+                if let Ok(mut st) = ctx.alert_telemetry.lock() {
+                    for &(err_id, n) in &beans {
+                        if st.bean_counts.len() >= ALERT_REGISTRY_CAP && !st.bean_counts.contains_key(&err_id) {
+                            if let Some(oldest) = st.bean_counts.keys().next().copied() {
+                                st.bean_counts.remove(&oldest);
+                            }
+                        }
+                        let c = st.bean_counts.entry(err_id).or_insert(0);
+                        *c = c.saturating_add(n);
+                    }
+                }
+                persist_bean_counts(ctx, &beans);
             }
             Some(Ok(PyRep::None))
         }
         ("config", "GetBlackListedPlanets") => {
-            // const-ok: no planet is excluded from planetary interaction in EvoMu's world and the
-            // client static data has no blacklist source, so the client receives an empty list.
-            Some(Ok(PyRep::List(Vec::new())))
+            let mut planet_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
+                snap.service_state_blobs
+                    .get("blacklisted_planets")
+                    .or_else(|| snap.service_state_blobs.get("planet_blacklist"))
+                    .and_then(|s| serde_json::from_str::<Vec<i64>>(s).ok())
+                    .unwrap_or_default()
+            });
+            planet_ids.sort_unstable();
+            planet_ids.dedup();
+            Some(Ok(PyRep::List(
+                planet_ids.into_iter().map(PyRep::Integer).collect(),
+            )))
         }
         ("air_npe", "is_air_npe_enabled") => {
             // DERIVED: the AIR NPE runs on its node graphs, so it is enabled exactly when the
@@ -426,9 +503,9 @@ pub async fn handle(
                 .collect();
             Some(Ok(PyRep::Dict(entries)))
         }
-        ("charUnboundMgr", "GetCharacterSelectionData") => Some(
-            crate::services::char_selection::get_character_selection_data(ctx, session),
-        ),
+        ("charUnboundMgr", "GetCharacterSelectionData") => {
+            Some(handle_get_character_selection_data(ctx, session))
+        }
         ("charUnboundMgr", "GetCohortsForUser") => {
             let uid = match ServerContext::require_auth(session) {
                 Ok(u) => u,
@@ -463,31 +540,53 @@ pub async fn handle(
             Some(Ok(PyRep::List(cohorts)))
         }
         ("userSvc", "GetRedeemTokens") => {
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
-            // const-ok: redeemsvc counts/iterates the account's redeem queue; EvoMu has no redeem
-            // queue (no gifted or purchased items waiting), so the token list is empty.
-            Some(Ok(PyRep::List(Vec::new())))
+            handle_user_redeem_tokens(ctx, session, args, _kwargs).await
         }
         ("charUnboundMgr", "GetCharOmegaDowngradeStatus") => {
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
-            // const-ok: true only when an Omega subscription has lapsed; EvoMu accounts have no
-            // subscription expiry, so no account is ever in the lapsed (downgraded) state.
-            Some(Ok(PyRep::Bool(false)))
+            let uid = match ServerContext::require_auth(session) {
+                Ok(u) => u,
+                Err(e) => return Some(Err(e)),
+            };
+            let now_unix = ctx.now_unix();
+            let downgraded = ctx.db.with_snapshot(|snap| {
+                if let Some(flag) = snap.service_state_blobs.get(&format!("omega_downgraded:{uid}")) {
+                    return matches!(flag.trim().to_ascii_lowercase().as_str(), "1" | "true");
+                }
+                if let Some(expiry) =
+                    crate::services::account_services::subscription_expiry_for_user(snap, uid)
+                {
+                    return expiry <= now_unix;
+                }
+                false
+            });
+            Some(Ok(PyRep::Bool(downgraded)))
         }
         ("map", "GetSecurityModifiedSystems") => {
-            // characterSlots._GetSecurityModifierText calls `.Index('solarSystemID')` on a CRowset
-            // of (solarSystemID, security, modifiedSecurity). EvoMu applies no security modifiers
-            // (system security always comes from the SDE), so the rowset has no rows.
+            let sec_map = crate::services::security_mgr::compute_modified_systems(ctx);
+            let mut entries: Vec<(u32, f64)> = sec_map.into_iter().collect();
+            entries.sort_by_key(|(sid, _)| *sid);
+            let rows: Vec<Vec<PyRep>> = entries
+                .into_iter()
+                .map(|(sid, mod_sec)| {
+                    let base_sec = ctx
+                        .sde
+                        .solar_systems
+                        .get(&sid)
+                        .map(|s| s.security_status)
+                        .unwrap_or(0.0);
+                    vec![
+                        PyRep::Integer(i64::from(sid)),
+                        PyRep::Real(base_sec),
+                        PyRep::Real(mod_sec),
+                    ]
+                })
+                .collect();
             let desc = eve_proto::DBRowDescriptor::new([
                 ("solarSystemID", eve_proto::DbColumnType::I4),
                 ("security", eve_proto::DbColumnType::R8),
                 ("modifiedSecurity", eve_proto::DbColumnType::R8),
             ]);
-            Some(Ok(desc.build_crowset(Vec::new())))
+            Some(Ok(desc.build_crowset(rows)))
         }
         ("config", "GetOldStationData") => handle_get_old_station_data(ctx, session, args),
         ("populationCap", "GetCharacterLoadSlot") => {
@@ -729,18 +828,34 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            Some(Ok(
-                crate::services::cluster_macho_misc_services::get_character_settings_dict(
-                    ctx, char_id,
-                ),
-            ))
+            Some(Ok(handle_get_character_settings(ctx, char_id)))
         }
         ("charMgr", "GetPaperdollState") => {
-            if let Err(e) = ServerContext::require_character(session) {
-                return Some(Err(e));
-            }
-            // const-ok: `const.paperdollStateNoRecustomization = 0` read by `StationSvc.GetPaperdollStateCache`.
-            Some(Ok(PyRep::Integer(0)))
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            // `paperdoll.State`: 0 = no_recustomization, 1 = resculpting,
+            // 2 = no_existing_customization, 3 = full_recustomizing, 4 = force_recustomize.
+            let state = ctx.db.with_snapshot(|snap| {
+                if let Some(raw) = snap
+                    .service_state_blobs
+                    .get(&format!("paperdoll_state:{char_id}"))
+                {
+                    if let Ok(v) = raw.trim().parse::<i64>() {
+                        return v.clamp(0, 4);
+                    }
+                }
+                let is_resculpt_pending = crate::services::account_services::load_store(snap)
+                    .resculpt_pending
+                    .contains(&char_id)
+                    || snap
+                        .service_state_blobs
+                        .get(&format!("resculpt_pending:{char_id}"))
+                        .is_some_and(|s| matches!(s.trim(), "1" | "true"));
+                if is_resculpt_pending { 1 } else { 0 }
+            });
+            Some(Ok(PyRep::Integer(state)))
         }
         ("structureDirectory", "GetMyDockableStructures") => {
             Some(crate::services::station_structure::structure_profiles_directory::handle_get_my_dockable_structures(ctx, session, args))
@@ -882,6 +997,89 @@ fn handle_get_old_station_data(
     // result is truthy. EvoMu's universe has no retired stations (all stations come from
     // the current SDE), so there is no old-station recordset to send.
     Some(Ok(PyRep::None))
+}
+
+fn handle_alert_bean_count(
+    ctx: &ServerContext,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let Some(hash) = args.first().and_then(|a| a.as_i64()) else {
+        return Some(Err(BridgeRpcError {
+            code: "InvalidArguments".into(),
+            message: "alert.BeanCount expects (stackIDHash,)".into(),
+        }));
+    };
+    let entry = ctx
+        .alert_telemetry
+        .lock()
+        .ok()
+        .and_then(|st| st.stack_traces.get(&hash).copied());
+    if let Some((eid, default_mode)) = entry {
+        let mode = log_mode_override(ctx, eid).unwrap_or_else(|| default_mode.to_string());
+        return Some(Ok(PyRep::Tuple(vec![
+            PyRep::Integer(eid),
+            PyRep::ascii_bytes(&mode),
+        ])));
+    }
+    // (None, None) tells the client "the server wants a trace" (alert.pyj __SendStackTraceAlert).
+    Some(Ok(log_mode_tuple(None)))
+}
+
+fn handle_alert_bean_delivery(
+    ctx: &ServerContext,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    // beans: {errorID: (count, lastWallclockTime)}
+    let Some(PyRep::Dict(entries)) = args.first() else {
+        return Some(Err(BridgeRpcError {
+            code: "InvalidArguments".into(),
+            message: "alert.BeanDelivery expects ({errorID: (count, time)},)".into(),
+        }));
+    };
+    let mut beans = Vec::with_capacity(entries.len());
+    for (k, v) in entries {
+        let (Some(error_id), PyRep::Tuple(t) | PyRep::List(t)) = (k.as_i64(), v) else {
+            continue;
+        };
+        let n = t.first().and_then(|c| c.as_i64()).unwrap_or(0);
+        if n < 0 {
+            return Some(Err(BridgeRpcError {
+                code: "InvalidArguments".into(),
+                message: format!("alert.BeanDelivery count for errorID {error_id} is negative"),
+            }));
+        }
+        beans.push((error_id, n));
+    }
+    if let Ok(mut st) = ctx.alert_telemetry.lock() {
+        for &(error_id, n) in &beans {
+            if st.bean_counts.len() >= ALERT_REGISTRY_CAP && !st.bean_counts.contains_key(&error_id) {
+                if let Some(oldest) = st.bean_counts.keys().next().copied() {
+                    st.bean_counts.remove(&oldest);
+                }
+            }
+            let c = st.bean_counts.entry(error_id).or_insert(0);
+            *c = c.saturating_add(n);
+        }
+    }
+    persist_bean_counts(ctx, &beans);
+    Some(Ok(PyRep::None))
+}
+
+async fn handle_user_redeem_tokens(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    crate::services::account_services::handle(
+        ctx,
+        session,
+        "userSvc",
+        "GetRedeemTokens",
+        args,
+        kwargs,
+    )
+    .await
 }
 
 /// `(stack-trace registry size, bean-count registry size)` on `ctx`; both are bounded by `ALERT_REGISTRY_CAP`.

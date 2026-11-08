@@ -60,4 +60,32 @@ fn ingamereport_ops_dispatch_and_persistence_mutations() {
     assert!(reports.len() >= 9);
     assert!(reports.iter().any(|r| r.category == "exploit_abuse" && r.reason == "reason_exploit_abuse"));
     assert!(reports.iter().any(|r| r.reported_entity_id == 90_000_999 && r.details == "kw_comment"));
+
+    // V24.01 5-arg `report_inappropriate_language(charID, comments, chat_time, chat_channel, chat_content)`
+    assert_eq!(
+        handle(
+            &ctx,
+            &sess,
+            "report_inappropriate_language",
+            &[
+                PyRep::Integer(90_000_777),
+                PyRep::String("toxic local spam".into()),
+                PyRep::Integer(1_700_000_123),
+                PyRep::String("local_30000142".into()),
+                PyRep::String("bad message line".into()),
+            ],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::None
+    );
+    let reports_after = get_persisted_reports(&ctx);
+    assert!(reports_after.iter().any(|r| {
+        r.reported_entity_id == 90_000_777
+            && r.category == "inappropriate_language"
+            && r.reason == "toxic local spam"
+            && r.details.contains("chat_channel=local_30000142")
+            && r.details.contains("chat_content=bad message line")
+    }));
 }

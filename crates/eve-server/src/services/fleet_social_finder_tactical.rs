@@ -353,6 +353,296 @@ fn require_fleet_advert_auth(ctx: &ServerContext, session: &SessionState) -> Res
     Ok((char_id, fleet_id))
 }
 
+fn sync_fleet_advert_snapshot_to_db(ctx: &ServerContext, fleet_id: i64) {
+    let ad_opt = ctx.fleet_extras.lock().unwrap().adverts.get(&fleet_id).cloned();
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut adverts: HashMap<String, serde_json::Value> = snap
+            .service_state_blobs
+            .get("fleet_adverts")
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        if let Some(ad) = ad_opt {
+            let mut allowed: Vec<i64> = ad.allowed_entities.into_iter().collect();
+            allowed.sort_unstable();
+            adverts.insert(
+                fleet_id.to_string(),
+                serde_json::json!({
+                    "fleet_id": ad.fleet_id,
+                    "leader_id": ad.leader_id,
+                    "fleet_name": ad.fleet_name,
+                    "description": ad.description,
+                    "solar_system_id": ad.solar_system_id,
+                    "invite_scope": ad.invite_scope,
+                    "auto_join": ad.auto_join,
+                    "min_standing": ad.min_standing,
+                    "min_security": ad.min_security,
+                    "allowed_entities": allowed,
+                }),
+            );
+        } else {
+            adverts.remove(&fleet_id.to_string());
+        }
+        if let Ok(json) = serde_json::to_string(&adverts) {
+            snap.service_state_blobs.insert("fleet_adverts".into(), json);
+        }
+    });
+}
+
+fn extract_id_set(rep: Option<&PyRep>, out: &mut HashSet<i64>) {
+    if let Some(PyRep::List(items) | PyRep::Tuple(items)) = rep {
+        for v in items {
+            if let Some(id) = v.as_i64() {
+                out.insert(id);
+            }
+        }
+    }
+}
+
+fn handle_get_fleet_setups(ctx: &ServerContext, char_id: i64) -> PyRep {
+    ensure_fleet_setups_loaded(ctx);
+    let setups = ctx
+        .fleet_extras
+        .lock()
+        .unwrap()
+        .saved_setups
+        .get(&char_id)
+        .cloned()
+        .unwrap_or_default();
+    let mut entries = Vec::with_capacity(setups.len());
+    for (name, s) in setups {
+        let wings_rep: Vec<PyRep> = s
+            .wings
+            .into_iter()
+            .map(|(wn, sqs)| {
+                PyRep::keyval([
+                    ("name", PyRep::String(wn)),
+                    ("squads", PyRep::List(sqs.into_iter().map(PyRep::String).collect())),
+                ])
+            })
+            .collect();
+        entries.push((
+            PyRep::String(name.clone()),
+            PyRep::keyval([
+                ("setupName", PyRep::String(name)),
+                ("motd", PyRep::String(s.motd)),
+                ("isFreeMove", PyRep::Bool(s.is_free_move)),
+                ("maxSize", PyRep::Integer(s.max_size as i64)),
+                ("wings", PyRep::List(wings_rep)),
+            ]),
+        ));
+    }
+    PyRep::Dict(entries)
+}
+
+fn handle_delete_fleet_setup(ctx: &ServerContext, char_id: i64, setup_name: &str) -> PyRep {
+    ensure_fleet_setups_loaded(ctx);
+    let removed = ctx
+        .fleet_extras
+        .lock()
+        .unwrap()
+        .saved_setups
+        .get_mut(&char_id)
+        .map(|m| m.remove(setup_name).is_some())
+        .unwrap_or(false);
+    sync_fleet_setups_to_db(ctx);
+    if removed {
+        ctx.notify(
+            NotificationTarget::Character(char_id),
+            "OnFleetSetupChanged",
+            "charid",
+            vec![PyRep::String(setup_name.to_string())],
+        );
+    }
+    PyRep::keyval([
+        ("setupName", PyRep::String(setup_name.to_string())),
+        ("deleted", PyRep::Bool(removed)),
+    ])
+}
+
+fn handle_update_advert_info(
+    ctx: &ServerContext,
+    fleet_id: i64,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (fleet_name, description) = {
+        let mut ex = ctx.fleet_extras.lock().unwrap();
+        let Some(ad) = ex.adverts.get_mut(&fleet_id) else {
+            return Err(BridgeRpcError {
+                code: "AdvertNotFound".into(),
+                message: "Fleet advert not found".into(),
+            });
+        };
+        if let Some(s) = args.first().and_then(|a| a.as_str()) {
+            ad.fleet_name = s.to_string();
+        }
+        if let Some(s) = args.get(1).and_then(|a| a.as_str()) {
+            ad.description = s.to_string();
+        }
+        if let Some(s) = args.get(2).and_then(|a| a.as_i64()) {
+            ad.invite_scope = s as u8;
+        }
+        if let Some(diff) = args
+            .get(1)
+            .filter(|a| a.as_str().is_none())
+            .or_else(|| kwargs.get("allowedDiffKeyVal"))
+        {
+            if let Some(fn_name) = diff.dict_get("fleetName").and_then(|v| v.as_str()) {
+                ad.fleet_name = fn_name.to_string();
+            }
+            if let Some(desc) = diff.dict_get("description").and_then(|v| v.as_str()) {
+                ad.description = desc.to_string();
+            }
+            if let Some(scope) = diff.dict_get("inviteScope").and_then(|v| v.as_i64()) {
+                ad.invite_scope = scope as u8;
+            }
+            for key in ["membergroupsToAddToAllowed", "publicToAddToAllowed"] {
+                let mut add_ids = HashSet::new();
+                extract_id_set(diff.dict_get(key), &mut add_ids);
+                ad.allowed_entities.extend(add_ids);
+            }
+            for key in ["membergroupsToRemoveFromAllowed", "publicToRemoveFromAllowed"] {
+                let mut rem_ids = HashSet::new();
+                extract_id_set(diff.dict_get(key), &mut rem_ids);
+                for id in rem_ids {
+                    ad.allowed_entities.remove(&id);
+                }
+            }
+        }
+        (ad.fleet_name.clone(), ad.description.clone())
+    };
+    sync_fleet_advert_snapshot_to_db(ctx, fleet_id);
+    ctx.notify(
+        NotificationTarget::Fleet(fleet_id),
+        "OnFleetFinderAdvertChanged",
+        "fleetid",
+        vec![PyRep::Integer(fleet_id), PyRep::String(fleet_name.clone())],
+    );
+    Ok(PyRep::keyval([
+        ("fleetID", PyRep::Integer(fleet_id)),
+        ("fleetName", PyRep::String(fleet_name)),
+        ("description", PyRep::String(description)),
+    ]))
+}
+
+fn handle_update_advert_allowed_entities(
+    ctx: &ServerContext,
+    fleet_id: i64,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let mut entities = HashSet::new();
+    let payload = args
+        .first()
+        .or_else(|| kwargs.get("allowedInfoFromStandings"));
+    if let Some(rep) = payload {
+        match rep {
+            PyRep::List(_) | PyRep::Tuple(_) => {
+                extract_id_set(Some(rep), &mut entities);
+            }
+            PyRep::Dict(_) | PyRep::KeyVal(_) | PyRep::Object { .. } => {
+                for key in [
+                    "membergroupsAllowedEntities",
+                    "publicAllowedEntities",
+                    "allowedEntities",
+                ] {
+                    extract_id_set(rep.dict_get(key), &mut entities);
+                }
+                for key in [
+                    "membergroupsDisallowedEntities",
+                    "publicDisallowedEntities",
+                ] {
+                    let mut disallowed = HashSet::new();
+                    extract_id_set(rep.dict_get(key), &mut disallowed);
+                    for id in disallowed {
+                        entities.remove(&id);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let count = {
+        let mut ex = ctx.fleet_extras.lock().unwrap();
+        let Some(ad) = ex.adverts.get_mut(&fleet_id) else {
+            return Err(BridgeRpcError {
+                code: "AdvertNotFound".into(),
+                message: "Fleet advert not found".into(),
+            });
+        };
+        ad.allowed_entities = entities;
+        ad.allowed_entities.len() as i64
+    };
+    sync_fleet_advert_snapshot_to_db(ctx, fleet_id);
+    Ok(PyRep::keyval([
+        ("fleetID", PyRep::Integer(fleet_id)),
+        ("allowedCount", PyRep::Integer(count)),
+    ]))
+}
+
+fn handle_set_fleet_formation_settings(
+    ctx: &ServerContext,
+    char_id: i64,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> PyRep {
+    ensure_fleet_formations_loaded(ctx);
+    let (formation_id, resolved_name) = parse_formation_input(args, kwargs);
+    let default_spacing = match formation_id {
+        1 | 3 | 4 => 5_000.0,
+        2 => 10_000.0,
+        _ => 0.0,
+    };
+    let spacing = args
+        .get(1)
+        .and_then(|a| a.as_f64())
+        .or_else(|| kwargs.get("formationSpacing").and_then(|a| a.as_f64()))
+        .unwrap_or(default_spacing)
+        .clamp(0.0, 100_000.0);
+    let size = args
+        .get(2)
+        .and_then(|a| a.as_f64())
+        .or_else(|| kwargs.get("formationSize").and_then(|a| a.as_f64()))
+        .unwrap_or(spacing.max(10_000.0))
+        .clamp(0.0, 100_000.0);
+    ctx.fleet_extras
+        .lock()
+        .unwrap()
+        .stored_formations
+        .insert(char_id, (formation_id, spacing, size));
+    sync_fleet_formations_to_db(ctx);
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnFleetFormationWndChanged",
+        "charid",
+        vec![],
+    );
+    PyRep::keyval([
+        ("formationID", PyRep::Integer(formation_id)),
+        ("formationName", PyRep::String(resolved_name.into())),
+        ("formationSpacing", PyRep::Real(spacing)),
+        ("formationSize", PyRep::Real(size)),
+    ])
+}
+
+fn handle_get_formation_settings(ctx: &ServerContext, char_id: i64) -> PyRep {
+    ensure_fleet_formations_loaded(ctx);
+    let (fid, spacing, size) = ctx
+        .fleet_extras
+        .lock()
+        .unwrap()
+        .stored_formations
+        .get(&char_id)
+        .copied()
+        .unwrap_or((0, 0.0, 10_000.0));
+    PyRep::keyval([
+        ("formationID", PyRep::Integer(fid)),
+        ("formationName", PyRep::String(formation_name(fid).into())),
+        ("formationSpacing", PyRep::Real(spacing)),
+        ("formationSize", PyRep::Real(size)),
+    ])
+}
+
 pub(super) async fn handle_finder_and_tactical(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -439,34 +729,13 @@ pub(super) async fn handle_finder_and_tactical(
 
         ("fleetObjectHandler", "GetFleetSetups") | ("fleetMgr", "GetFleetSetups") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            ensure_fleet_setups_loaded(ctx);
-            let setups = ctx.fleet_extras.lock().unwrap().saved_setups.get(&char_id).cloned().unwrap_or_default();
-            let mut entries = Vec::with_capacity(setups.len());
-            for (name, s) in setups {
-                let wings_rep: Vec<PyRep> = s.wings.into_iter().map(|(wn, sqs)| {
-                    PyRep::keyval([("name", PyRep::String(wn)), ("squads", PyRep::List(sqs.into_iter().map(PyRep::String).collect()))])
-                }).collect();
-                entries.push((
-                    PyRep::String(name.clone()),
-                    PyRep::keyval([
-                        ("setupName", PyRep::String(name)),
-                        ("motd", PyRep::String(s.motd)),
-                        ("isFreeMove", PyRep::Bool(s.is_free_move)),
-                        ("maxSize", PyRep::Integer(s.max_size as i64)),
-                        ("wings", PyRep::List(wings_rep)),
-                    ]),
-                ));
-            }
-            Some(Ok(PyRep::Dict(entries)))
+            Some(Ok(handle_get_fleet_setups(ctx, char_id)))
         }
 
         ("fleetObjectHandler", "DeleteFleetSetup") | ("fleetMgr", "DeleteFleetSetup") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            ensure_fleet_setups_loaded(ctx);
             let setup_name = args.first().and_then(|a| a.as_str()).unwrap_or("");
-            let removed = ctx.fleet_extras.lock().unwrap().saved_setups.get_mut(&char_id).map(|m| m.remove(setup_name).is_some()).unwrap_or(false);
-            sync_fleet_setups_to_db(ctx);
-            Some(Ok(PyRep::keyval([("setupName", PyRep::String(setup_name.to_string())), ("deleted", PyRep::Bool(removed))])))
+            Some(Ok(handle_delete_fleet_setup(ctx, char_id, setup_name)))
         }
 
         ("fleetObjectHandler", "LoadFleetSetup") | ("fleetMgr", "LoadFleetSetup") => {
@@ -616,34 +885,13 @@ pub(super) async fn handle_finder_and_tactical(
         // parity: rpc:fleetProxy.UpdateAdvertInfo
         ("fleetProxy", "UpdateAdvertInfo") => {
             let (_, fleet_id) = match require_fleet_advert_auth(ctx, session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let mut ex = ctx.fleet_extras.lock().unwrap();
-            if let Some(ad) = ex.adverts.get_mut(&fleet_id) {
-                if let Some(s) = args.first().and_then(|a| a.as_str()) { ad.fleet_name = s.to_string(); }
-                if let Some(s) = args.get(1).and_then(|a| a.as_str()) { ad.description = s.to_string(); }
-                if let Some(s) = args.get(2).and_then(|a| a.as_i64()) { ad.invite_scope = s as u8; }
-                Some(Ok(PyRep::keyval([
-                    ("fleetID", PyRep::Integer(fleet_id)),
-                    ("fleetName", PyRep::String(ad.fleet_name.clone())),
-                    ("description", PyRep::String(ad.description.clone())),
-                ])))
-            } else {
-                Some(Err(BridgeRpcError { code: "AdvertNotFound".into(), message: "Fleet advert not found".into() }))
-            }
+            Some(handle_update_advert_info(ctx, fleet_id, args, kwargs))
         }
 
         // parity: rpc:fleetProxy.UpdateAdvertAllowedEntities
         ("fleetProxy", "UpdateAdvertAllowedEntities") => {
             let (_, fleet_id) = match require_fleet_advert_auth(ctx, session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let mut entities = HashSet::new();
-            if let Some(PyRep::List(list) | PyRep::Tuple(list)) = args.first() {
-                for v in list {
-                    if let Some(id) = v.as_i64() { entities.insert(id); }
-                }
-            }
-            if let Some(ad) = ctx.fleet_extras.lock().unwrap().adverts.get_mut(&fleet_id) {
-                ad.allowed_entities = entities.clone();
-            }
-            Some(Ok(PyRep::keyval([("fleetID", PyRep::Integer(fleet_id)), ("allowedCount", PyRep::Integer(entities.len() as i64))])))
+            Some(handle_update_advert_allowed_entities(ctx, fleet_id, args, kwargs))
         }
 
         // parity: rpc:fleetProxy.UpdateFleetAdvertWithNewLeader
@@ -1037,33 +1285,13 @@ pub(super) async fn handle_finder_and_tactical(
         | ("fleetMgr", "SetFleetFormationSettings") => {
             // parity: feat:fleet.stored-formations-and-warp-shapes
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            ensure_fleet_formations_loaded(ctx);
-            let (formation_id, resolved_name) = parse_formation_input(args, kwargs);
-            let default_spacing = match formation_id { 1 | 3 | 4 => 5_000.0, 2 => 10_000.0, _ => 0.0 };
-            let spacing = args.get(1).and_then(|a| a.as_f64()).or_else(|| kwargs.get("formationSpacing").and_then(|a| a.as_f64())).unwrap_or(default_spacing).clamp(0.0, 100_000.0);
-            let size = args.get(2).and_then(|a| a.as_f64()).or_else(|| kwargs.get("formationSize").and_then(|a| a.as_f64())).unwrap_or(spacing.max(10_000.0)).clamp(0.0, 100_000.0);
-            ctx.fleet_extras.lock().unwrap().stored_formations.insert(char_id, (formation_id, spacing, size));
-            sync_fleet_formations_to_db(ctx);
-            ctx.notify(NotificationTarget::Character(char_id), "OnFleetFormationWndChanged", "charid", vec![]);
-            Some(Ok(PyRep::keyval([
-                ("formationID", PyRep::Integer(formation_id)),
-                ("formationName", PyRep::String(resolved_name.into())),
-                ("formationSpacing", PyRep::Real(spacing)),
-                ("formationSize", PyRep::Real(size)),
-            ])))
+            Some(Ok(handle_set_fleet_formation_settings(ctx, char_id, args, kwargs)))
         }
 
         ("fleetObjectHandler", "GetFormationSettings")
         | ("fleetMgr", "GetFormationSettings") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            ensure_fleet_formations_loaded(ctx);
-            let (fid, spacing, size) = ctx.fleet_extras.lock().unwrap().stored_formations.get(&char_id).copied().unwrap_or((0, 0.0, 10_000.0));
-            Some(Ok(PyRep::keyval([
-                ("formationID", PyRep::Integer(fid)),
-                ("formationName", PyRep::String(formation_name(fid).into())),
-                ("formationSpacing", PyRep::Real(spacing)),
-                ("formationSize", PyRep::Real(size)),
-            ])))
+            Some(Ok(handle_get_formation_settings(ctx, char_id)))
         }
 
         ("fleetObjectHandler", "GetFleetID") => {

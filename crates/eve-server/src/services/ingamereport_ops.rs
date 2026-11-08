@@ -59,34 +59,34 @@ pub fn handle(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match ("ingamereport", method) {
         ("ingamereport", "report_exploit_abuse") => {
-            Some(submit_report(ctx, session, "exploit_abuse", args, kwargs))
+            Some(handle_submit_report(ctx, session, "exploit_abuse", args, kwargs))
         }
         ("ingamereport", "report_gambling") => {
-            Some(submit_report(ctx, session, "gambling", args, kwargs))
+            Some(handle_submit_report(ctx, session, "gambling", args, kwargs))
         }
         ("ingamereport", "report_inappropriate_character_name") => {
-            Some(submit_report(ctx, session, "inappropriate_character_name", args, kwargs))
+            Some(handle_submit_report(ctx, session, "inappropriate_character_name", args, kwargs))
         }
         ("ingamereport", "report_inappropriate_language") => {
-            Some(submit_report(ctx, session, "inappropriate_language", args, kwargs))
+            Some(handle_submit_report(ctx, session, "inappropriate_language", args, kwargs))
         }
         ("ingamereport", "report_macro_use") => {
-            Some(submit_report(ctx, session, "macro_use", args, kwargs))
+            Some(handle_submit_report(ctx, session, "macro_use", args, kwargs))
         }
         ("ingamereport", "report_offensive_mail") => {
-            Some(submit_report(ctx, session, "offensive_mail", args, kwargs))
+            Some(handle_submit_report(ctx, session, "offensive_mail", args, kwargs))
         }
         ("ingamereport", "report_other") => {
-            Some(submit_report(ctx, session, "other", args, kwargs))
+            Some(handle_submit_report(ctx, session, "other", args, kwargs))
         }
         ("ingamereport", "report_questionable_transaction") => {
-            Some(submit_report(ctx, session, "questionable_transaction", args, kwargs))
+            Some(handle_submit_report(ctx, session, "questionable_transaction", args, kwargs))
         }
         _ => None,
     }
 }
 
-fn submit_report(
+fn handle_submit_report(
     ctx: &ServerContext,
     session: &SessionState,
     category: &str,
@@ -105,20 +105,41 @@ fn submit_report(
         .or_else(|| kwargs.get("reportedID").and_then(|v| v.as_i64()))
         .unwrap_or(0);
 
-    // Extract reason text
+    // Extract reason / comments text (V24.01 `reportSvc.pyj` passes `(charID, comments)` or
+    // `(charID, comments, chat_time, chat_channel, chat_content)` for `report_inappropriate_language`).
     let reason = args.get(1).and_then(|a| a.as_str())
         .or_else(|| kwargs.get("reason").and_then(|v| v.as_str()))
+        .or_else(|| kwargs.get("comments").and_then(|v| v.as_str()))
         .or_else(|| kwargs.get("category").and_then(|v| v.as_str()))
         .unwrap_or("")
         .to_string();
 
-    // Extract details / comment text
-    let details = args.get(2).and_then(|a| a.as_str())
+    // Extract details / comment text, or assemble V24.01 chat evidence for `report_inappropriate_language`
+    let mut details = args.get(2).and_then(|a| a.as_str())
         .or_else(|| kwargs.get("details").and_then(|v| v.as_str()))
         .or_else(|| kwargs.get("comment").and_then(|v| v.as_str()))
         .or_else(|| kwargs.get("text").and_then(|v| v.as_str()))
         .unwrap_or("")
         .to_string();
+    if args.len() >= 4 || kwargs.contains_key("chat_channel") || kwargs.contains_key("chat_content") {
+        let chat_time = args.get(2)
+            .or_else(|| kwargs.get("chat_time"))
+            .and_then(|v| v.as_i64().map(|n| n.to_string()).or_else(|| v.as_str().map(str::to_string)))
+            .unwrap_or_default();
+        let chat_channel = args.get(3)
+            .or_else(|| kwargs.get("chat_channel"))
+            .and_then(|v| v.as_str().map(str::to_string).or_else(|| v.as_i64().map(|n| n.to_string())))
+            .unwrap_or_default();
+        let chat_content = args.get(4)
+            .or_else(|| kwargs.get("chat_content"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !chat_channel.is_empty() || !chat_content.is_empty() || !chat_time.is_empty() {
+            details = format!(
+                "chat_time={chat_time}; chat_channel={chat_channel}; chat_content={chat_content}"
+            );
+        }
+    }
 
     let now = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {

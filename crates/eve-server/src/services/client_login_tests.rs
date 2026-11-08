@@ -419,3 +419,171 @@ async fn login_config_cohorts_population_cap_portrait_and_skills() {
         .is_ok()
     );
 }
+
+#[tokio::test]
+async fn client_login_state_backed_hollow_arm_remediations() {
+    use crate::services::account_services;
+
+    let ctx = test_ctx();
+    let mut sess = auth_session(1, 90_000_001, 98_000_001, 30_000_142);
+    let kw = HashMap::new();
+
+    // 1. alert.BeanCount / SendClientStackTraceAlert honor alert_log_modes override and persist traces/beans
+    let st_res = handle(
+        &ctx,
+        &mut sess,
+        "alert",
+        "SendClientStackTraceAlert",
+        &[
+            PyRep::Tuple(vec![PyRep::Integer(555_111), PyRep::String("ValueError".into())]),
+            PyRep::String("Traceback: test".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let eid = match &st_res {
+        PyRep::Tuple(t) => t[0].as_i64().unwrap(),
+        other => panic!("expected tuple from SendClientStackTraceAlert, got {other:?}"),
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs.insert(
+            "alert_log_modes".into(),
+            serde_json::json!({ eid.to_string(): "db" }).to_string(),
+        );
+    });
+    let bc = handle(&ctx, &mut sess, "alert", "BeanCount", &[PyRep::Integer(555_111)], &kw, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(bc, PyRep::Tuple(vec![PyRep::Integer(eid), PyRep::ascii_bytes("db")]));
+    assert!(ctx.db.with_snapshot(|s| s.service_state_blobs.contains_key("alert_client_traces")));
+
+    let _ = handle(
+        &ctx,
+        &mut sess,
+        "alert",
+        "BeanDelivery",
+        &[PyRep::Dict(vec![(
+            PyRep::Integer(eid),
+            PyRep::Tuple(vec![PyRep::Integer(4), PyRep::Integer(1_700_000_000)]),
+        )])],
+        &kw,
+        None,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(ctx.db.with_snapshot(|s| {
+        s.service_state_blobs
+            .get("alert_bean_counts")
+            .is_some_and(|raw| raw.contains(&eid.to_string()))
+    }));
+
+    // 2. config.GetBlackListedPlanets reads sorted, deduped blacklisted_planets blob
+    assert_eq!(
+        handle(&ctx, &mut sess, "config", "GetBlackListedPlanets", &[], &kw, None)
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::List(vec![])
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs
+            .insert("blacklisted_planets".into(), "[40009080, 40009077, 40009080]".into());
+    });
+    assert_eq!(
+        handle(&ctx, &mut sess, "config", "GetBlackListedPlanets", &[], &kw, None)
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::List(vec![PyRep::Integer(40_009_077), PyRep::Integer(40_009_080)])
+    );
+
+    // 3. userSvc.GetRedeemTokens delegates to account_services state
+    ctx.db.with_mut_snapshot(|snap| {
+        account_services::enqueue_redeem_token_in_snapshot(
+            snap,
+            1,
+            34,
+            100,
+            "Tritanium Gift".into(),
+            Some(60_003_760),
+            None,
+        );
+    });
+    let tokens = handle(&ctx, &mut sess, "userSvc", "GetRedeemTokens", &[], &kw, None)
+        .await
+        .unwrap()
+        .unwrap();
+    let token_rows = match tokens {
+        PyRep::List(v) => v,
+        other => panic!("expected List from GetRedeemTokens, got {other:?}"),
+    };
+    assert_eq!(token_rows.len(), 1);
+
+    // 4. charUnboundMgr.GetCharOmegaDowngradeStatus reflects lapsed vs active Omega subscription
+    assert_eq!(
+        handle(&ctx, &mut sess, "charUnboundMgr", "GetCharOmegaDowngradeStatus", &[], &kw, None)
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::Bool(false)
+    );
+    account_services::with_store(&ctx, |_snap, store| {
+        store.subscription_expiry.insert(1, 1); // well in the past relative to ctx.now_unix()
+    });
+    assert_eq!(
+        handle(&ctx, &mut sess, "charUnboundMgr", "GetCharOmegaDowngradeStatus", &[], &kw, None)
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::Bool(true)
+    );
+
+    // 5. map.GetSecurityModifiedSystems reflects Corruption Stage 5 / securityMgr state
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.system_states.entry(30_000_142).or_default().insurgency_corruption_stage = 5;
+    });
+    let sec_mods = handle(&ctx, &mut sess, "map", "GetSecurityModifiedSystems", &[], &kw, None)
+        .await
+        .unwrap()
+        .unwrap();
+    let row_count = match sec_mods {
+        PyRep::ObjectEx { ref list, .. } => list.len(),
+        _ => 0,
+    };
+    assert!(row_count >= 1, "expected at least 1 modified system row");
+
+    // 6. charMgr.GetPaperdollState reads resculpt_pending and paperdoll_state:{char_id}
+    assert_eq!(
+        handle(&ctx, &mut sess, "charMgr", "GetPaperdollState", &[], &kw, None)
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::Integer(0)
+    );
+    account_services::with_store(&ctx, |_snap, store| {
+        store.resculpt_pending.insert(90_000_001);
+    });
+    assert_eq!(
+        handle(&ctx, &mut sess, "charMgr", "GetPaperdollState", &[], &kw, None)
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::Integer(1)
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs
+            .insert("paperdoll_state:90000001".into(), "4".into());
+    });
+    assert_eq!(
+        handle(&ctx, &mut sess, "charMgr", "GetPaperdollState", &[], &kw, None)
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::Integer(4)
+    );
+}

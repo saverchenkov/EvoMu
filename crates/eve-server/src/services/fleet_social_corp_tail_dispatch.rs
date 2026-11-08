@@ -7,7 +7,7 @@ use eve_db::corp_roles;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 
-use super::fleet_social_corps::{promote_due_pending_corp_grants, read_corp_gov, with_corp_gov};
+use super::fleet_social_corps::promote_due_pending_corp_grants;
 
 #[allow(clippy::too_many_arguments)]
 pub fn handle_corp_gov_tail(
@@ -43,11 +43,13 @@ pub fn handle_corp_gov_tail(
 
     match (service, method) {
         ("corpRegistry", "GetPendingAutoKicks") => {
-            let pending: Vec<(i64, u64)> = read_corp_gov(ctx, |g| {
-                g.get(&corp_id)
+            let mut pending: Vec<(i64, u64)> = ctx.db.with_snapshot(|snap| {
+                snap.corp_governance
+                    .get(&corp_id)
                     .map(|g| g.pending_auto_kicks.iter().map(|(&k, &v)| (k, v)).collect())
                     .unwrap_or_default()
             });
+            pending.sort_by_key(|(cid, _)| *cid);
             let rows: Vec<Vec<PyRep>> = pending
                 .into_iter()
                 .map(|(cid, ts)| vec![PyRep::Integer(cid), PyRep::Integer(ts as i64)])
@@ -111,8 +113,11 @@ pub fn handle_corp_gov_tail(
                     .unwrap_or(true);
                 (en, subj, txt)
             };
-            with_corp_gov(ctx, |g| {
-                g.entry(corp_id).or_default().welcome_mail = (enabled, subject.clone(), body.clone());
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.corp_governance
+                    .entry(corp_id)
+                    .or_default()
+                    .welcome_mail = (enabled, subject.clone(), body.clone());
             });
             ctx.notify(
                 NotificationTarget::Corporation(corp_id),
@@ -128,8 +133,9 @@ pub fn handle_corp_gov_tail(
         }
 
         ("corpRegistry", "GetCorpWelcomeMail") => {
-            let (enabled, subject, body) = read_corp_gov(ctx, |g| {
-                g.get(&corp_id)
+            let (enabled, subject, body) = ctx.db.with_snapshot(|snap| {
+                snap.corp_governance
+                    .get(&corp_id)
                     .map(|s| s.welcome_mail.clone())
                     .unwrap_or((false, String::new(), String::new()))
             });
@@ -150,8 +156,8 @@ pub fn handle_corp_gov_tail(
                 return deny_role("Updating corporation mail restriction settings requires Communications Officer or Director role");
             }
             let restricted = matches!(args.first(), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
-            let prev = with_corp_gov(ctx, |g| {
-                let s = g.entry(corp_id).or_default();
+            let prev = ctx.db.with_mut_snapshot(|snap| {
+                let s = snap.corp_governance.entry(corp_id).or_default();
                 std::mem::replace(&mut s.restrict_corp_mails, restricted)
             });
             let change = PyRep::Dict(vec![(
@@ -168,7 +174,11 @@ pub fn handle_corp_gov_tail(
         }
 
         ("corpRegistry", "DoesCorpRestrictCorpMails") => {
-            let restricted = read_corp_gov(ctx, |g| g.get(&corp_id).is_some_and(|s| s.restrict_corp_mails));
+            let restricted = ctx.db.with_snapshot(|snap| {
+                snap.corp_governance
+                    .get(&corp_id)
+                    .is_some_and(|s| s.restrict_corp_mails)
+            });
             Some(Ok(PyRep::Bool(restricted)))
         }
 
@@ -177,8 +187,8 @@ pub fn handle_corp_gov_tail(
                 return deny_role("Updating corporation structure transfer settings requires CEO or Director role");
             }
             let accept = matches!(args.first(), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
-            let prev = with_corp_gov(ctx, |g| {
-                let s = g.entry(corp_id).or_default();
+            let prev = ctx.db.with_mut_snapshot(|snap| {
+                let s = snap.corp_governance.entry(corp_id).or_default();
                 let old = if s.accept_structures_set { s.accept_structures } else { true };
                 s.accept_structures_set = true;
                 s.accept_structures = accept;
@@ -198,8 +208,9 @@ pub fn handle_corp_gov_tail(
         }
 
         ("corpRegistry", "DoesMyCorpAcceptStructures") => {
-            let accept = read_corp_gov(ctx, |g| {
-                g.get(&corp_id)
+            let accept = ctx.db.with_snapshot(|snap| {
+                snap.corp_governance
+                    .get(&corp_id)
                     .map(|s| if s.accept_structures_set { s.accept_structures } else { true })
                     .unwrap_or(true)
             });
@@ -212,8 +223,8 @@ pub fn handle_corp_gov_tail(
             }
             let hour = args.first().and_then(|a| a.as_i64()).unwrap_or(18).clamp(0, 23) as u8;
             let weekday = args.get(1).and_then(|a| a.as_i64()).unwrap_or(5).clamp(0, 6) as u8;
-            with_corp_gov(ctx, |g| {
-                let gov = g.entry(corp_id).or_default();
+            ctx.db.with_mut_snapshot(|snap| {
+                let gov = snap.corp_governance.entry(corp_id).or_default();
                 gov.reinforce_hour = hour;
                 gov.reinforce_weekday = weekday;
             });
@@ -222,10 +233,20 @@ pub fn handle_corp_gov_tail(
 
         ("corpRegistry", "GetStructureReinforceDefault") => {
             if args.first().and_then(|a| a.as_str()) == Some("weekday") {
-                let weekday = read_corp_gov(ctx, |g| g.get(&corp_id).map(|s| s.reinforce_weekday).unwrap_or(5));
+                let weekday = ctx.db.with_snapshot(|snap| {
+                    snap.corp_governance
+                        .get(&corp_id)
+                        .map(|s| s.reinforce_weekday)
+                        .unwrap_or(5)
+                });
                 Some(Ok(PyRep::Integer(weekday as i64)))
             } else {
-                let hour = read_corp_gov(ctx, |g| g.get(&corp_id).map(|s| s.reinforce_hour).unwrap_or(18));
+                let hour = ctx.db.with_snapshot(|snap| {
+                    snap.corp_governance
+                        .get(&corp_id)
+                        .map(|s| s.reinforce_hour)
+                        .unwrap_or(18)
+                });
                 Some(Ok(PyRep::Integer(hour as i64)))
             }
         }
@@ -598,8 +619,8 @@ pub fn handle_corp_gov_tail(
         | ("corpRegistry", "GetAggressionSettings") => {
             let resolve_corp_agg = |target_corp_id: i64| -> PyRep {
                 promote_due_pending_corp_grants(ctx, target_corp_id);
-                let (ff, pending_val, pending_until) = read_corp_gov(ctx, |g| {
-                    if let Some(s) = g.get(&target_corp_id) {
+                let (ff, pending_val, pending_until) = ctx.db.with_snapshot(|snap| {
+                    if let Some(s) = snap.corp_governance.get(&target_corp_id) {
                         if let Some((pending_ff, eff_unix)) = s.pending_friendly_fire {
                             if now_unix >= eff_unix {
                                 (pending_ff, None, None)
@@ -676,8 +697,11 @@ pub fn handle_corp_gov_tail(
             }
             let ff = matches!(args.first(), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
             let effective_at = now_unix + 86_400;
-            with_corp_gov(ctx, |g| {
-                g.entry(corp_id).or_default().pending_friendly_fire = Some((ff, effective_at));
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.corp_governance
+                    .entry(corp_id)
+                    .or_default()
+                    .pending_friendly_fire = Some((ff, effective_at));
             });
             let settings_kv = PyRep::keyval([
                 ("corporationID", PyRep::Integer(corp_id)),

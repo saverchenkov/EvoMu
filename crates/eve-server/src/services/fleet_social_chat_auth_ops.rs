@@ -352,7 +352,7 @@ pub(super) fn check_channel_or_global_mute(
 }
 
 #[inline]
-fn dispatch_char_contacts(
+fn handle_char_contacts(
     ctx: &ServerContext,
     session: &mut SessionState,
     method: &str,
@@ -374,18 +374,18 @@ pub(super) fn handle_contacts_notifications_calendar(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         // parity: rpc:charMgr.GetContactList
-        ("charMgr", "GetContactList") => dispatch_char_contacts(ctx, session, method, args, kwargs),
+        ("charMgr", "GetContactList") => handle_char_contacts(ctx, session, method, args, kwargs),
         // parity: rpc:charMgr.AddContact
-        ("charMgr", "AddContact") => dispatch_char_contacts(ctx, session, method, args, kwargs),
+        ("charMgr", "AddContact") => handle_char_contacts(ctx, session, method, args, kwargs),
         // parity: rpc:charMgr.EditContact, rpc:charMgr.EditContactsRelationshipID
         ("charMgr", "EditContact") | ("charMgr", "EditContactsRelationshipID") => {
-            dispatch_char_contacts(ctx, session, method, args, kwargs)
+            handle_char_contacts(ctx, session, method, args, kwargs)
         }
         // parity: rpc:charMgr.DeleteContacts
-        ("charMgr", "DeleteContacts") => dispatch_char_contacts(ctx, session, method, args, kwargs),
+        ("charMgr", "DeleteContacts") => handle_char_contacts(ctx, session, method, args, kwargs),
         // parity: rpc:charMgr.BlockOwners, rpc:charMgr.UnblockOwners
         ("charMgr", "BlockOwners") | ("charMgr", "UnblockOwners") => {
-            dispatch_char_contacts(ctx, session, method, args, kwargs)
+            handle_char_contacts(ctx, session, method, args, kwargs)
         }
 
         ("charMgr", "GetSettingsInfo") => Some(

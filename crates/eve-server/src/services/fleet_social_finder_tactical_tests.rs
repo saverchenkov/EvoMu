@@ -141,3 +141,126 @@ async fn watchlist_setups_formations_and_join_requests_ops() {
             .is_some_and(|m| m.contains_key(&999_888))
     );
 }
+
+#[tokio::test]
+async fn fleet_proxy_update_advert_v2401_and_persistence() {
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let (fleet_id, mut session) = seed_multi_member_fleet(&ctx).await;
+    let kw = HashMap::new();
+
+    // UpdateAdvertAllowedEntities before creating advert yields AdvertNotFound
+    let err = handle_finder_and_tactical(
+        &ctx,
+        &mut session,
+        "fleetProxy",
+        "UpdateAdvertAllowedEntities",
+        &[PyRep::Dict(vec![(
+            PyRep::String("membergroupsAllowedEntities".into()),
+            PyRep::List(vec![PyRep::Integer(98_000_001)]),
+        )])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err.code, "AdvertNotFound");
+
+    // Seed an advert via AddFleetFinderAdvert
+    let _ = handle_finder_and_tactical(
+        &ctx,
+        &mut session,
+        "fleetProxy",
+        "AddFleetFinderAdvert",
+        &[PyRep::keyval([
+            ("fleetName", PyRep::String("Test Fleet".into())),
+            ("description", PyRep::String("Public roam".into())),
+            ("inviteScope", PyRep::Integer(1)),
+        ])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    // V24.01 UpdateAdvertInfo(numMembers, allowedDiffKeyVal)
+    let diff = PyRep::keyval([
+        (
+            "membergroupsToAddToAllowed",
+            PyRep::List(vec![PyRep::Integer(98_000_111), PyRep::Integer(98_000_222)]),
+        ),
+        ("publicToAddToAllowed", PyRep::List(vec![PyRep::Integer(1)])),
+    ]);
+    handle_finder_and_tactical(
+        &ctx,
+        &mut session,
+        "fleetProxy",
+        "UpdateAdvertInfo",
+        &[PyRep::Integer(7), diff],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    // Remove one entity via V24.01 allowedDiffKeyVal
+    let diff_remove = PyRep::keyval([(
+        "membergroupsToRemoveFromAllowed",
+        PyRep::List(vec![PyRep::Integer(98_000_111)]),
+    )]);
+    handle_finder_and_tactical(
+        &ctx,
+        &mut session,
+        "fleetProxy",
+        "UpdateAdvertInfo",
+        &[PyRep::Integer(8), diff_remove],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    // Check DB snapshot persistence and allowed entities
+    let persisted = ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs
+            .get("fleet_adverts")
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+    });
+    assert!(persisted.is_some());
+    {
+        let ex = ctx.fleet_extras.lock().unwrap();
+        let adv = ex.adverts.get(&fleet_id).unwrap();
+        assert!(adv.allowed_entities.contains(&98_000_222));
+        assert!(adv.allowed_entities.contains(&1));
+        assert!(!adv.allowed_entities.contains(&98_000_111));
+        assert_eq!(adv.invite_scope, 1);
+    }
+
+    // V24.01 UpdateAdvertAllowedEntities(Dict/KeyVal)
+    handle_finder_and_tactical(
+        &ctx,
+        &mut session,
+        "fleetProxy",
+        "UpdateAdvertAllowedEntities",
+        &[PyRep::keyval([
+            (
+                "membergroupsAllowedEntities",
+                PyRep::List(vec![PyRep::Integer(98_000_333)]),
+            ),
+            ("publicAllowedEntities", PyRep::List(vec![])),
+        ])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let adv_entities = ctx
+        .fleet_extras
+        .lock()
+        .unwrap()
+        .adverts
+        .get(&fleet_id)
+        .unwrap()
+        .allowed_entities
+        .clone();
+    assert_eq!(adv_entities, HashSet::from([98_000_333]));
+}
