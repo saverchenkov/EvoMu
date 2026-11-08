@@ -1,0 +1,132 @@
+{
+  "personas": [
+    {
+      "id": "regression_and_critical_ui",
+      "title": "Critical Live-Client Regressions (Skills, PLEX Store, Warp Animation, Slash, Quasar)",
+      "description": "Immediately exercise the highest-risk live V24.01 UI flows that broke during manual playtesting: (1) Open Character Sheet & Skill Plans panel, prime personal plans, buy/inject a skillbook, and start/pause/reorder live skill training queue; (2) Open PLEX Vault & New Eden Store (aurumStoreView), verify Quasar BalanceRequest succeeds without TimeoutException, and test free PLEX pack & NES SKIN purchase; (3) Execute slash commands (/help, /, /giveskill, /heal) verifying FetchRemoteCommandList and SlashError reason dict; (4) Undock into space, initiate a real-time warp (WITHOUT skipping 240s of clock), capture 4 burst frames, and verify both Destiny ball.mode==3 (WARP), fxSequencer 'effects.Warping', warp_signals, and visible warp tunnel animation.",
+      "priority": 1
+    },
+    {
+      "id": "newbro_career_and_fitting",
+      "title": "Newbro Progression, Fitting, Inventory & Station Services",
+      "description": "Explore station hangar views, Inventory window (stack splitting, moving items between hangar and cargo), Ship Fitting window (online/offline/fit/unfit modules, verify CPU/PG and Dogma attributes update), Medical clone / home station, Repair shop, Insurance, and AIR Career Program / Daily Goals.",
+      "priority": 2
+    },
+    {
+      "id": "space_navigation_combat_and_ewar",
+      "title": "In-Space Navigation, Destiny Physics, Combat, Drones & EWAR",
+      "description": "Undock, test sub-warp navigation (Approach, Orbit, Keep at Range, Align, Stop), real-time Warp to celestials/belts/anomalies with burst screenshots, Stargate jump transitions, Target Locking, Weapon & EWAR module activation/cycling, Drone launch/engage/return, overview & D-Scan, probe scanner, and bookmark creation.",
+      "priority": 3
+    },
+    {
+      "id": "economy_market_contracts_and_industry",
+      "title": "Market, Contracts, Wallet, Industry & Reprocessing",
+      "description": "Open Regional Market (browse categories, view price history & orders, place buy/sell orders, modify/cancel orders), Wallet (ISK & PLEX transactions, journal, shares), Contracts (create/search/accept item exchange, auction, courier), Industry window (manufacturing, research, invention), and Reprocessing plant.",
+      "priority": 4
+    },
+    {
+      "id": "social_corp_fleet_and_sovereignty",
+      "title": "Corporation, Fleet, Upwell Structures, SKINR & Agency",
+      "description": "Open Corporation window (roles, wallets, bulletins, applications, corporation goals via Quasar), Fleet Finder & Fleet broadcasts/wings, Structure Browser & Upwell docking/tethering/Cosmetics (structureCosmeticStatesController), Paragon Hub / SKINR studio, Agency (encounters, incursions, insurgency, FW, homefront, exploration), and Mail/Calendar/Chat.",
+      "priority": 5
+    },
+    {
+      "id": "ui_chaos_and_edge_cases",
+      "title": "Adversarial UI Chaos & Multi-Window Stress Test",
+      "description": "Rapidly open/switch tabs across every Neocom window, right-click context menus on ships/items/celestials/characters, test invalid inputs, edge-case slash commands, rapid dock/undock, and mid-warp sub-warp commands.",
+      "priority": 6
+    }
+  ],
+  "initial_frontier": [
+    {
+      "feature_id": "ui.skills.queue_and_training",
+      "persona": "regression_and_critical_ui",
+      "title": "Skill Sheet, Skill Injection & Live Training Queue Start/Apply",
+      "acceptance": "Open Character Sheet -> Skills, inject/purchase skill if needed, add skill level to training queue, verify skillMgr2 / skillQueue RPCs succeed, OnSkillStarted / OnServerSkillsChanged fire, and active training progress renders with zero exceptions."
+    },
+    {
+      "feature_id": "ui.skills.skill_plans_quasar",
+      "persona": "regression_and_critical_ui",
+      "title": "Skill Plans Browser & Personal Plans Quasar Cache (#528)",
+      "acceptance": "Open Skill Plans window (personalPlansPanel / skillPlanService.GetAllPersonal), verify _PrimePersonalCache completes without SkillPlansErrorTimeout / SkillPlanConnectionError, and create/delete a personal skill plan."
+    },
+    {
+      "feature_id": "ui.store.plex_and_nes_aurum_view",
+      "persona": "regression_and_critical_ui",
+      "title": "New Eden Store / PLEX Balance Quasar Request & FastCheckout (#529)",
+      "acceptance": "Open New Eden Store (aurumStoreView.SetupStoreData) and PLEX Vault, verify eve_public.plex.vault.api.BalanceRequest succeeds without TimeoutException, browse offers, and redeem/buy an offer."
+    },
+    {
+      "feature_id": "ui.slash.remote_command_list_and_errors",
+      "persona": "regression_and_critical_ui",
+      "title": "Devtools Slash Service FetchRemoteCommandList & Error Dict (#530)",
+      "acceptance": "Invoke svc_slash.FetchRemoteCommandList / SlashCmd('/') and valid/invalid slash commands; verify no KeyError: 'reason' is raised."
+    },
+    {
+      "feature_id": "space.warp.realtime_tunnel_animation",
+      "persona": "regression_and_critical_ui",
+      "title": "Real-Time In-Space Warp Tunnel Animation & Destiny Mode 3 (#531)",
+      "acceptance": "Undock and initiate warp to a celestial/planet at >150km WITHOUT instant clock-skipping; capture burst screenshots and verify ego ball reaches mode=3 (WARP), fxSequencer activates 'effects.Warping', warp speed indicator animates, and ship decelerates smoothly at destination."
+    },
+    {
+      "feature_id": "quasar.cosmetics.structure_states",
+      "persona": "regression_and_critical_ui",
+      "title": "Structure Cosmetics Quasar get_all_in_solar_system_request (#527)",
+      "acceptance": "In space, verify structureCosmeticStatesController._get_all_in_solar_system completes via publicGatewaySvc without TimeoutException."
+    },
+    {
+      "feature_id": "ui.inventory.hangar_and_cargo_ops",
+      "persona": "newbro_career_and_fitting",
+      "title": "Inventory Window, Stack Split & Cargo Transfer",
+      "acceptance": "Open Inventory window, list ship cargo and item hangar, split an item stack, and move items between hangar and active ship."
+    },
+    {
+      "feature_id": "ui.fitting.equip_and_online_modules",
+      "persona": "newbro_career_and_fitting",
+      "title": "Fitting Window, Module Equip, Online/Offline & Dogma Stats",
+      "acceptance": "Open Fitting window, fit or toggle a module online/offline, verify Dogma CPU/powergrid and ship attributes update."
+    },
+    {
+      "feature_id": "space.combat.target_lock_and_weapons",
+      "persona": "space_navigation_combat_and_ewar",
+      "title": "In-Space Target Lock, Module Activation & Drone Control",
+      "acceptance": "In space, lock a target (NPC or structure/asteroid), activate a module/weapon, and verify OnGodmaShipEffect / damage or mining cycle."
+    },
+    {
+      "feature_id": "space.nav.stargate_jump_and_dock",
+      "persona": "space_navigation_combat_and_ewar",
+      "title": "Stargate Jump Session Change & Station Docking",
+      "acceptance": "Warp to a stargate, jump to adjacent solar system, verify session change and ballpark re-bind, then warp to station and dock."
+    },
+    {
+      "feature_id": "ui.market.orders_and_history",
+      "persona": "economy_market_contracts_and_industry",
+      "title": "Regional Market Window, Price History & Order Placement",
+      "acceptance": "Open Regional Market, inspect item orders and price history, place a buy or sell order, and verify wallet & order book update."
+    },
+    {
+      "feature_id": "ui.contracts.create_and_search",
+      "persona": "economy_market_contracts_and_industry",
+      "title": "Contracts Window Search & Creation",
+      "acceptance": "Open Contracts window, search available contracts, and create or inspect an item exchange contract."
+    },
+    {
+      "feature_id": "ui.industry.jobs_and_blueprints",
+      "persona": "economy_market_contracts_and_industry",
+      "title": "Industry Window & Reprocessing",
+      "acceptance": "Open Industry window, inspect blueprints/facilities, and verify job preview or submission."
+    },
+    {
+      "feature_id": "ui.corp.window_and_quasar_goals",
+      "persona": "social_corp_fleet_and_sovereignty",
+      "title": "Corporation Window & Quasar Corporation Goals",
+      "acceptance": "Open Corporation window and Goals tab, verifying get_unclaimed_goal_ids / Quasar goalMessenger responds without timeout."
+    },
+    {
+      "feature_id": "ui.agency.and_air_daily_goals",
+      "persona": "social_corp_fleet_and_sovereignty",
+      "title": "The Agency, Opportunities & AIR Daily Goals",
+      "acceptance": "Open The Agency / Opportunities window, switch tabs (Encounters, Exploration, Resource Harvesting, Daily Goals), verify zero exceptions."
+    }
+  ]
+}

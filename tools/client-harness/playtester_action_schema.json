@@ -1,0 +1,229 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "EvoMuPlaytesterDecision",
+  "description": "Structured decision, expectation verification, action, memory update, and bug report for the autonomous EvoMu live EVE.app playtester.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "observation",
+    "previous_action_verification",
+    "reasoning",
+    "current_goal",
+    "action",
+    "memory_update",
+    "bug_report"
+  ],
+  "properties": {
+    "observation": {
+      "type": "string",
+      "description": "Concise description of what is currently visible in the EVE.app screenshot, UI scene graph, state_diff, and flight-recorder telemetry."
+    },
+    "previous_action_verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expectation_met",
+        "discrepancy_summary"
+      ],
+      "properties": {
+        "expectation_met": {
+          "type": "boolean",
+          "description": "True if the previous action updated the UI, window state, skill queue, inventory, wallet, or space scene as expected in EVE Online (or if this is Step 1). False if the UI state failed to update when it should have, even if no Python exception was raised."
+        },
+        "discrepancy_summary": {
+          "type": "string",
+          "description": "If expectation_met is false, explain what UI element, state value, or game mechanic failed to update or behaved weirdly (e.g. 'Clicked Train Skill / added skill to queue, RPC returned without error, but Skill Queue UI list remained empty and no OnSkillQueueChanged scatter fired'). Empty string if expectation_met is true."
+        }
+      }
+    },
+    "reasoning": {
+      "type": "string",
+      "description": "Why the chosen action advances the current exploration goal, tests an unverified feature, uses GM commands to skip real-time timers, or verifies a suspected UI/mechanics bug."
+    },
+    "current_goal": {
+      "type": "string",
+      "description": "Active high-level gameplay goal (e.g., 'Queue a skill and use /completeskills to verify live Skill Queue & SP UI updates without waiting real-time')."
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "target",
+        "command",
+        "x",
+        "y",
+        "dest_x",
+        "dest_y",
+        "right_click",
+        "double_click",
+        "wait_ms",
+        "expected_ui_and_state_change"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "click_widget",
+            "click_xy",
+            "drag_widget",
+            "type_text",
+            "press_key",
+            "open_neocom",
+            "close_window",
+            "undock",
+            "dock",
+            "warp_to",
+            "approach",
+            "orbit",
+            "keep_at_range",
+            "lock_target",
+            "activate_module",
+            "train_skill",
+            "complete_skills",
+            "advance_upwell_timer",
+            "complete_industry_jobs",
+            "advance_server_time",
+            "clear_timers",
+            "open_plex_store",
+            "open_structure_cosmetics",
+            "slash_command",
+            "wait"
+          ],
+          "description": "Primitive or semantic in-client action to execute, including GM timer-acceleration actions (complete_skills, advance_upwell_timer, complete_industry_jobs, advance_server_time, clear_timers)."
+        },
+        "target": {
+          "type": ["string", "null"],
+          "description": "Widget name/path/label, Neocom button ID, overview item_id/name, skill typeID, structureID, seconds to advance, or key name."
+        },
+        "command": {
+          "type": ["string", "null"],
+          "description": "Text to type, or GM slash command (e.g., '/completeskills all', '/upwelltimer', '/completeindustry', '/advancetime 3600', '/cleartimers', '/giveskill 3300 5', '/createitem 587 1')."
+        },
+        "x": {
+          "type": ["integer", "null"],
+          "description": "Optional X coordinate for click_xy or fallback widget click."
+        },
+        "y": {
+          "type": ["integer", "null"],
+          "description": "Optional Y coordinate for click_xy or fallback widget click."
+        },
+        "dest_x": {
+          "type": ["integer", "null"],
+          "description": "Destination X coordinate for drag_widget."
+        },
+        "dest_y": {
+          "type": ["integer", "null"],
+          "description": "Destination Y coordinate for drag_widget."
+        },
+        "right_click": {
+          "type": "boolean",
+          "description": "True to open a context menu on the target widget or coordinate."
+        },
+        "double_click": {
+          "type": "boolean",
+          "description": "True to double-click the target widget or coordinate."
+        },
+        "wait_ms": {
+          "type": "integer",
+          "description": "Milliseconds to let the UI and MachoNet/Quasar calls settle after the action (typically 800 to 3000)."
+        },
+        "expected_ui_and_state_change": {
+          "type": "string",
+          "description": "Explicit prediction of how the EVE client UI, scene graph, and scatter events SHOULD change after this action (used on the next step to detect silent UI-state desyncs)."
+        }
+      }
+    },
+    "memory_update": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "working_memory",
+        "long_term_note_to_append",
+        "mark_tested_features",
+        "mark_buggy_features",
+        "new_frontier_features"
+      ],
+      "properties": {
+        "working_memory": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Updated short-term scratchpad (keep 3-10 concise bullet points)."
+        },
+        "long_term_note_to_append": {
+          "type": ["string", "null"],
+          "description": "Optional durable discovery about game state, character progression, or verified behavior to append to long-term notes."
+        },
+        "mark_tested_features": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Feature IDs or window names that were successfully verified during this step."
+        },
+        "mark_buggy_features": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Feature IDs or window names where an exception, timeout, missing animation, or silent UI-state desync was observed."
+        },
+        "new_frontier_features": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Newly discovered buttons, tabs, windows, or gameplay loops to add to the exploration frontier."
+        }
+      }
+    },
+    "bug_report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "should_file",
+        "category",
+        "title",
+        "severity",
+        "reproduction_steps",
+        "expected_behavior",
+        "actual_behavior",
+        "subsystem"
+      ],
+      "properties": {
+        "should_file": {
+          "type": "boolean",
+          "description": "Set true whenever a Python exception, Quasar/MachoNet timeout, missing animation, blank/stuck window, OR silent UI-state desync (where the UI failed to update after an action) was observed."
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "none",
+            "client_exception",
+            "protocol_timeout",
+            "ui_state_desync",
+            "missing_animation",
+            "blank_or_stuck_window",
+            "broken_game_mechanic"
+          ],
+          "description": "Classification of the bug (use ui_state_desync or broken_game_mechanic when no exception occurred but the UI or game mechanic did not update properly)."
+        },
+        "title": {
+          "type": "string",
+          "description": "Concise issue title if should_file is true, else empty string."
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["critical", "high", "medium", "low"]
+        },
+        "reproduction_steps": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "expected_behavior": {
+          "type": "string"
+        },
+        "actual_behavior": {
+          "type": "string"
+        },
+        "subsystem": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

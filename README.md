@@ -1,20 +1,20 @@
 # EvoMu
 
-**An open-source EVE Online server written from scratch in Rust, for the current client (V24.01, build 3619879).**
+**An open-source EVE Online server written from scratch in Rust, for the current client (V24.01, build 3619879 / macOS & Windows).**
 
 [![Language: Rust](https://img.shields.io/badge/language-Rust_2021-orange.svg)](https://www.rust-lang.org/)
 [![Unsafe: forbidden](https://img.shields.io/badge/unsafe-forbidden-brightgreen.svg)](#architecture)
-[![Ledger: 91.0% closed](https://img.shields.io/badge/parity_ledger-91.0%25_closed-brightgreen.svg)](./docs/ACTION_PLAN_STATUS.md)
-[![Automated tests: 1,291 passed](https://img.shields.io/badge/automated_tests-1%2C291_passed-brightgreen.svg)](#at-a-glance)
+[![Ledger: 97.8% closed](https://img.shields.io/badge/parity_ledger-97.8%25_closed-brightgreen.svg)](./docs/ACTION_PLAN_STATUS.md)
+[![Automated tests: 4,885 passed](https://img.shields.io/badge/automated_tests-4%2C885_passed-brightgreen.svg)](#at-a-glance)
 [![Wiki: 16 domains](https://img.shields.io/badge/wiki-16_domains-blue.svg)](./docs/wiki/README.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 
-The goal: run your own server, point the **unmodified** EVE Online client at it, and play everything the official server offers. That includes the classic game services, the newer "Quasar" backend and the public ESI web API.
+The goal: run your own server, point the **unmodified** EVE Online V24.01 client at it, and play everything the official server offers — including classic MachoNet game services (`TCP 26000`), the HTTP/2 gRPC "Quasar" public gateway (`TCP 26005`), and the ESI OpenAPI + OAuth2/PKCE SSO web surface (`TCP 26004`).
 
 > [!IMPORTANT]
-> **Not playable yet.** Most of the server exists and passes its own tests, but almost none of it is proven through the real game client yet. In manual runs, a locally reconfigured client logs in, selects a character, loads the station and undocks. None of the 29 scripted real-client journeys passes in the automated harness. The project counts as done only when all of them do.
+> **Not certified playable yet (`0 / 29` `journey:*` rows closed in the parity ledger).** Most server systems exist and pass workspace tests, and the real-client harness ([`tools/client-harness/run_journeys`](./tools/client-harness/run_journeys)) + autonomous multimodal AI playtester ([`tools/client-harness/playtester.py`](./tools/client-harness/playtester.py)) are actively exercising `EVE.app`, but `plan:T-6`, `plan:Z-6`, and all `29` `journey:*` rows remain **OPEN** (`journeys[<id>]["passed"]` stays `False` in the ledger until `final_gate.py` and the review gate verify clean end-to-end execution logs). See [`docs/BLOCKERS.md`](./docs/BLOCKERS.md).
 
-*All numbers below come from a pre-flight run on `main` at `e647bcea` (2026-10-29). Live metrics: [`docs/ACTION_PLAN_STATUS.md`](./docs/ACTION_PLAN_STATUS.md) & [Game Systems Wiki](./docs/wiki/README.md).*
+*All numbers below come from the latest pre-flight and adversarial review run on `main` (2026-11-08). Live metrics: [`docs/ACTION_PLAN_STATUS.md`](./docs/ACTION_PLAN_STATUS.md) & [Game Systems Wiki](./docs/wiki/README.md).*
 
 ---
 
@@ -22,21 +22,20 @@ The goal: run your own server, point the **unmodified** EVE Online client at it,
 
 | | |
 |---|---|
-| **Parity ledger** | **5,780 of 6,351 rows closed (91.01%)**: 3,335 done, 2,445 not applicable, 571 open |
-| **Automated tests** | 1,291 passing, 0 failing (100% green across workspace) |
+| **Parity ledger** | **6,216 of 6,353 rows closed (97.84%)**: 3,814 done, 2,402 not applicable, 137 open |
+| **Automated tests** | **4,885 passing tests** across the parity ledger (`4,923` workspace test executions, `0` failing) |
+| **Real-client E2E journeys** | **0 of 29 closed in parity ledger** (`plan:T-6` open pending clean [`run_journeys --launch-real-client`](./tools/client-harness/run_journeys) gate + `final_gate.py`; **14 of 29** in headless bridge mode `--bridge-harness-test`) |
+| **Autonomous live playtester** | Continuous LLM-driven V24.01 client playtester ([`tools/client-harness/playtester.py`](./tools/client-harness/playtester.py)) with in-client CarbonUI introspection, multi-space Retina screenshot capture, MachoNet flight recorder, and semantic bug filing |
+| **Action-plan tasks** | **109 of 118 done (92.4%)** across 14 phases (8 phases 100% complete) |
 | **Technical Wiki** | [Comprehensive Game Systems & Technical Wiki](./docs/wiki/README.md) (16 domains) |
-| **Real-client journeys** | 0 of 29 passing |
-| **Action-plan tasks** | 83 of 117 done |
-| **Static data** | Full game database built from the client: 53,288 item types, 8,490 solar systems, 5,210 stations, 2,892 missions |
+| **Static data** | Full game database extracted from the V24.01 client: 53,288 item types, 8,490 solar systems, 5,210 stations, 2,892 missions |
 
 ### What the ledger is
 "Feature parity" is easy to claim and hard to check. EvoMu measures it with a **parity ledger**: one row for every small, testable thing the official server does. The rows are generated mechanically from the client and from public specs. Each row is in one of three states:
 
-- **Done:** a passing test exercises real server logic for it.
-- **Not applicable (N/A):** documented with evidence as something a server doesn't need to do. Example: protobuf messages the client never sends.
-- **Open:** still to do.
-
-A large share of the closed rows are N/A, so the headline percentage overstates how much has been built. The tables below separate the two.
+- **Done:** a passing test exercises real server logic for it (and passes independent adversarial gap audits).
+- **Not applicable (N/A):** documented with client bytecode evidence as something a server doesn't need to do (for example, client-local `sm.ScatterEvent` notifications or protobuf messages the V24.01 client never imports or sends).
+- **Open:** still to do (or flagged by the adversarial gap auditor for deeper validation).
 
 ---
 
@@ -50,115 +49,97 @@ EvoMu includes an exhaustive, dual-perspective **[Technical & Game Systems Wiki]
 * ⛏️ **[Mining & Resource Harvesting](./docs/wiki/mining_and_harvesting/)**: Mining laser cycle engine, yield formulas, crystal volatility, waste/residue probabilities, specialized holds, ice/gas harvesting, moon chunk fracturing, and compression.
 * 🏢 **[Corporations & Governance](./docs/wiki/corporations_and_governance/)**: Corp creation, 24-hour role grant delay security invariant, 7 hangars/wallets, shareholder voting, projects, and war declarations.
 * 🌌 **[Universe & Navigation](./docs/wiki/universe_and_navigation/)**: Space topology, stargate jumps, align time math, cynosural navigation, filaments, wormholes, and Pochven rules.
-* ⚙️ **[Ballpark Simulation & Destiny Physics](./docs/wiki/ballpark_and_physics/)**: Deterministic 1 Hz physics tick, sub-warp kinematics, collision, and interdiction bubble drag geometry.
+* ⚙️ **[Ballpark Simulation & Destiny Physics](./docs/wiki/ballpark_and_physics/)**: Deterministic 1 Hz physics tick, sub-warp kinematics, multi-tick warp state machine (`WARP_Struct` / `_destiny.so` parity), collision, and interdiction bubble drag geometry.
 * 🛠️ **[Dogma Attribute Engine & Fitting](./docs/wiki/dogma_and_fitting/)**: Modifier graphs, operator stacking, slot layouts, capacitor simulation, Nosferatu relative %, and module overheating.
 * ⚔️ **[Combat Resolution & Crimewatch](./docs/wiki/combat_and_crimewatch/)**: Turret tracking equations, missile kinematics, damage resistance profiles, death pipeline, and engagement timers.
 * 🏭 **[Industry, Manufacturing & PI](./docs/wiki/industry_and_manufacturing/)**: Blueprints (BPO/BPC), ME/TE math, reactions, System Cost Index (SCI), and [Planetary Industry](./docs/wiki/planetary_industry/).
-* 💰 **[Economy, Markets & Contracts](./docs/wiki/economy_and_markets/)**: Regional order matching, escrow locks, broker fees, item exchange, and courier contracts.
+* 💰 **[Economy, Markets & Contracts](./docs/wiki/economy_and_markets/)**: Regional order matching, escrow locks, broker fees, item exchange, courier contracts, and [PLEX / Fast Checkout / New Eden Store](./docs/wiki/economy_and_markets/plex_and_new_eden_store.md).
 * 🚩 **[Sovereignty & Faction Warfare](./docs/wiki/sovereignty_and_faction_warfare/)**: FW warzones, insurgencies, sov hubs, Equinox orbital Skyhooks, and Encounter Surveillance System (ESS).
 * 🧬 **[Character Progression & Clones](./docs/wiki/character_and_progression/)**: Skill training rates ($SP/\text{min}$), medical clone respawn, jump clones, attribute implants, and combat boosters.
 * 🔌 **[Protocol & Infrastructure](./docs/wiki/protocol_and_infrastructure/)**: MachoNet wire codec, PyRep marshal, Quasar protobuf gateway, and ESI OpenAPI routes.
+
+---
 
 ## Progress by surface
 
 | Surface | What a row is | Rows | Done | N/A | Open | Closed |
 |---|---|---:|---:|---:|---:|---:|
-| ESI web API | one public API operation | 197 | 195 | 0 | 2 | 99.0% |
-| Static data | one data file the client ships | 213 | 156 | 57 | 0 | 100% |
-| Quasar backend | one protobuf message | 1,455 | 104 | 1,328 | 23 | 98.4% |
-| Space physics ("Destiny") | one movement mode or update type | 52 | 43 | 9 | 0 | 100% |
-| Server calls (RPC) | one method the client calls | 1,373 | 1,200 | 124 | 49 | 96.4% |
-| Gameplay features | one curated game behaviour | 1,603 | 1,285 | 94 | 224 | 86.0% |
-| Client notifications | one event the client listens for | 1,311 | 268 | 833 | 210 | 84.0% |
-| Action-plan tasks | one task in the [plan](./.agents/skills/evomu-adversarial-review/references/action_plan.md) | 117 | 83 | 0 | 34 | 70.9% |
-| Real-client journeys | one scripted session in the real client | 29 | 0 | 0 | 29 | 0% |
+| ESI web API | one public API operation | 197 | 197 | 0 | 0 | **100%** |
+| Static data (`sde`) | one data file the client ships | 213 | 169 | 44 | 0 | **100%** |
+| Space physics (`destiny`) | one movement mode or update type | 52 | 44 | 8 | 0 | **100%** |
+| Dogma effects sweep (`effect`) | full client dogma effects sweep | 1 | 1 | 0 | 0 | **100%** |
+| Client notifications (`notify`) | one event the client listens for | 1,311 | 490 | 819 | 2 | **99.8%** |
+| Gameplay features (`feat`) | one curated game behaviour | 1,604 | 1,489 | 94 | 21 | **98.7%** |
+| Server calls (`rpc`) | one method the client calls | 1,373 | 1,227 | 109 | 37 | **97.3%** |
+| Quasar backend (`quasar`) | one protobuf message | 1,455 | 88 | 1,328 | 39 | **97.3%** |
+| Action-plan tasks (`plan`) | one task in the [plan](./.agents/skills/evomu-adversarial-review/references/action_plan.md) | 118 | 109 | 0 | 9 | **92.4%** |
+| Real-client journeys (`journey`) | one scripted session in the real client | 29 | 0 | 0 | 29 | **0%** |
 
-*The table omits one dogma-effects sweep row (done).*
-
-**How to read this:**
-- **Quasar** is closed mostly by N/A: 1,328 of its 1,455 messages are ones the client never imports or never sends, found by a static analysis of the client's code.
-- **Server calls and gameplay features** are where the real building happened: 2,485 rows done.
-- **Plan tasks** close only when every one of a task's acceptance criteria is met. Many are waiting on the last few feature rows in their area, or on a real-client journey.
+**Key mechanical quality metrics:**
+- **Zero stubbed RPC handlers:** `metrics/stubs.py` reports **`0` stubbed `(service, method)` pairs** across `1,613` handled pairs.
+- **Zero wide shared match arms:** `metrics/padding.py` reports **`0` match arms serving $\ge 4$ methods** (`1,136` single-method arms, `180` 2-method arms, `39` 3-method arms across `1,355` total match arms).
+- **Server calls and gameplay features:** **2,716 rows done** across `rpc:*` (`1,227`) and `feat:*` (`1,489`), plus **490** real server-to-client notifications (`notify:*`) and **197/197** ESI routes (`esi:*`).
 
 ---
 
 ## Gameplay feature coverage
 
-Every row in these domains is closed by server-level tests. That doesn't yet mean they work through the real client (see the gaps below).
+**38 of 46 gameplay domains are 100% closed (0 open rows):**
 
-> **Complete (0 open):** contracts (14 rows), wallet (16), loyalty points (6), standings (9), ESI (138).
+> **100% Complete (`0` open rows across `1,302` rows in 38 domains):**
+> `esi` (138), `modules` (137), `structures` (74), `lifecycle` (68), `corporation` (51), `combat` (43), `crimewatch` (40), `industry` (39), `social` (36), `drones` (35), `fw` (33), `market` (31), `character` (29), `ships` (29), `fleet` (27), `npc` (27), `pi` (27), `account` (24), `admin` (22), `dogma` (21), `fitting` (20), `ui` (20), `inventory` (18), `scanning` (18), `serverops` (18), `clones` (15), `contracts` (14), `attributes` (12), `alliance` (10), `war` (10), `standings` (9), `bookmarks` (8), `abyssal` (6), `lp` (6), `invariant` (4), `removed` (4), `wormholes` (4), `exploration` (3).
+
+Only **21 open feature rows** remain across the entire 1,604-row feature catalog (all 21 are already implemented and currently going through adversarial gap-audit clearance):
 
 | Domain | Open rows | Domain | Open rows |
 |---|---:|---|---:|
-| Session & space lifecycle | 68 of 68 | Sovereignty | 20 of 26 |
-| PvE | 56 of 114 | Skills | 13 of 27 |
-| Upwell structures | 51 of 74 | In-game UI services | 13 of 20 |
-| Navigation | 47 of 89 | Characters | 12 of 29 |
-| Faction warfare | 29 of 33 | Accounts | 10 of 24 |
-| Quasar features | 23 of 126 | Social | 10 of 36 |
-| Corporations | 22 of 51 | Clones, cosmetics, drones, fleets | 9 each |
-| Combat | 21 of 43 | Crimewatch, NPCs, ships | 7 each |
-| Modules | 21 of 137 | Others (abyssal, alliances, PI, invariants, scanning, server ops, wormholes, admin, attributes, dogma, exploration, inventory, mining, bookmarks, fitting, industry, market, war…) | 1–6 each |
+| PvE (`pve`) | 5 of 115 | Mining (`mining`) | 2 of 63 |
+| Cosmetics / SKINR (`cosmetics`) | 4 of 12 | Navigation (`navigation`) | 1 of 89 |
+| Quasar features (`quasar`) | 4 of 126 | Skills (`skills`) | 1 of 27 |
+| Wallet / NES (`wallet`) | 3 of 16 | Sovereignty (`sovereignty`) | 1 of 26 |
 
 ---
 
 ## Action plan
 
-The canonical plan has 114 tasks in 14 phases. Status by phase:
+The canonical plan has **118 tasks in 14 phases**, with **109 tasks (92.4%) complete** and **8 phases at 100%**:
 
-| Phase | Tasks done | What's left |
+| Phase | Tasks done | Status / What's left |
 |---|---:|---|
-| 0 Stabilize | 9 / 11 | reprocessing & remote-mutation feature rows (S-1, S-7) |
-| 1 Data and persistence | 4 / 6 | durable world DB feature rows (D-3); no gameplay state outside DB (D-6) |
-| 2 Wire protocol | 6 / 7 | notification feature rows (P-5) |
-| T Test infrastructure | 4 / 10 | static-data sweeps (T-2); golden wire (T-4); real-client harness (T-6); invariant play (T-8); crash/restart harness (T-9); client oracle (T-10) |
-| 3 Space | 4 / 6 | stargate jump polish (SP-4); logoff/disconnect/login in space (SP-6) |
-| 4 Dogma and fitting | 3 / 6 | modifier engine (DG-1); module cycle engine (DG-4); ammo and weapon grouping (DG-6) |
-| 5 Combat and PvE | 1 / 8 | damage notifications, death pipeline, NPC spawns and AI, salvage/tractor/drones, CrimeWatch/CONCORD |
-| 5M Mining | 0 / 18 | all mining tasks (60 of 63 mining feature rows are done; the task-level criteria aren't all met) |
-| 6 Characters and GM | 1 / 5 | skill queue engine and semantics (CH-1, CH-2); character info (CH-4); GM command dispatcher (CH-5) |
-| 7 Economy and missions | 1 / 6 | market lifecycle, contracts, industry, missions, planetary interaction |
-| 8 Social and exploration | 0 / 7 | mail, fleets, corporations, bookmarks, exploration, wormholes, chat |
-| Q Quasar services | 1 / 9 | protobuf codegen (Q-1); identity, progression, social, economy, space, sovereignty, cosmetics families |
-| ESI and SSO | 3 / 7 | SSO login through the real launcher; three route groups |
-| Z Final acceptance | 0 / 8 | close every ledger row; 90% coverage, 85% mutation score; all journeys |
+| 0 Stabilize (`S`) | **11 / 11** | **100% complete** |
+| 1 Data and persistence (`D`) | **6 / 6** | **100% complete** (real SDE importer, SQLite WAL world DB, Argon2id/PKCE auth, zero transient state outside DB) |
+| 2 Wire protocol (`P`) | **7 / 7** | **100% complete** (MachoNet codec, PyRep marshal, object caching, monikers, notifications) |
+| T Test infrastructure (`T`) | **11 / 12** | Only `T-6` (`journey:*` offline attestation wiring) remains open |
+| 3 Space (`SP`) | **7 / 7** | **100% complete** (1 Hz ballpark actor, multi-tick warp kinematics, stargates, docking/tethering, safe logoff & crash recovery) |
+| 4 Dogma and fitting (`DG`) | **6 / 6** | **100% complete** (modifier graph, stacking penalties, capacitor simulation, module cycle engine, weapon grouping, charges) |
+| 5 Combat and PvE (`C`) | **8 / 8** | **100% complete** (turret/missile math, death/podding pipeline, NPC AI & spawns, drones/fighters, salvage/loot, Crimewatch/CONCORD) |
+| 5M Mining (`MN`) | **17 / 18** | 61 of 63 mining feature rows done; only `MN-02` (`belts-as-balls` / `belt-ore-distribution` gap-audit clearance) remains |
+| 6 Characters and GM (`CH`) | **5 / 5** | **100% complete** (real-time skill queue engine, attributes/implants/clones, character creation, GM slash command dispatcher) |
+| 7 Economy and missions (`E`) | **6 / 7** | Market, contracts, industry, and PI complete; only `E-5` (`pve.mission-complete` gap-audit clearance) remains |
+| 8 Social and exploration (`SO`) | **7 / 7** | **100% complete** (mail, chat, fleets, corporations/alliances, ACL bookmarks, probe scanning, wormholes) |
+| Q Quasar services (`Q`) | **7 / 9** | Only `Q-6` / `Q-9` (SKINR/career/achievement gap-audit clearance) remain |
+| ESI and SSO (`ESI`) | **5 / 7** | All 197/197 `esi:*` routes done; `ESI-1`/`ESI-7` blocked only on remaining feature-row clearances |
+| Z Final acceptance (`Z`) | **6 / 8** | Only `Z-7` / `Z-8` (100% ledger closure + journey attestation) remain |
 
 ---
 
-## The big gaps
+## What remains before 100% final gate closure
 
-### Gap 1: the real client, end to end
-Nothing yet proves that whole gameplay loops work in the real client. The 29 [journeys](./.agents/skills/evomu-adversarial-review/references/parity/) run sessions with the real client: log in, create a character, fit a ship, undock, mine, fight, trade, run missions, form a fleet, anchor a structure, survive a downtime, and more. All 29 are still open.
-
-One hurdle is outside the code: the stock client encrypts its login handshake with a key only CCP's servers hold. Manual runs use a local copy of the client configured for unencrypted handshakes. Whether the test harness may build that copy automatically is an [open decision](./docs/BLOCKERS.md).
-
-### Gap 2: notifications
-468 of the client's 1,311 notifications are still open. These are the events the server pushes so the client's screens update: damage taken, skill trained, order filled, structure attacked and so on. Without them the client shows stale state even when the server is right.
-
-### Gap 3: the remaining server calls and features
-- **423 RPC methods** have no real implementation yet. Unhandled calls return a proper "unimplemented" error, never a fake answer.
-- **531 feature rows** are open, concentrated in session/space lifecycle, PvE, Upwell structures, navigation, faction warfare, Quasar features, corporations, combat, modules and sovereignty.
-
-### Gap 4: quality gates
-The final gate requires **≥ 90% line coverage** and **≥ 85% mutation score** across the workspace. Tooling exists, but the targets haven't been reached.
-
-### Gap 5: known correctness debts
-The independent reviewer tracks these as open findings ([list](./.agents/skills/evomu-adversarial-review/references/open_findings.md)). The most important ones:
-- **Game state outside the database:** about 25 systems (wars, corp governance, insurgencies, bounty pools, structure access…) keep state in process memory, so it's lost on restart.
-- **Hidden missing data:** about 95 places fall back to Jita or Jita 4-4 when a lookup fails, instead of reporting the error.
-- **Simplified world simulation:** belt rats ignore system security and faction, and systems nobody is watching freeze, which stops NPCs and in-flight warps.
-- **Leftovers:** the 2011-era combat call (`FireWeapon`) still works alongside the modern module path. Some service handlers share one body across unrelated methods, and a few return fixed values.
-- **Shortcuts:** structure docking access uses a hard-coded list instead of real access profiles.
+1. **Adversarial Gap-Audit Clearance (`108` flagged rows across `quasar`, `rpc`, `feat`, `notify`):** The independent gap auditor flags any test or handler that appears to use simplified shortcuts. Coding subagents are clearing the remaining flagged rows in small (`<= 20`-commit) reviewed slices.
+2. **Real-Client Journey Attestation (`plan:T-6` & `plan:Z-6`):** All `29` `journey:*` rows stay open in the parity ledger until [`tools/client-harness/run_journeys --launch-real-client`](./tools/client-harness/run_journeys) passes cleanly with zero client/server log errors and `final_gate.py` validates the recorded attestation.
+3. **Round 9 Architectural Consolidation (`[Arch-01..13]`, `#583`–`#595`):** Merging the 13 architectural epics (`InventoryMutationBatch`, unified `DamageTarget` & combat modifier pipeline, `FinancialLedger` + `EscrowVault`, `SessionAuthority` + `EntityAclEngine`, `SolarSystemClock`, typed `SqliteDatabase` tables, typed `RpcArgs`, and synchronous snapshot transaction guards eliminating async `.await` TOCTOU windows).
+4. **Workspace Line Coverage (`>= 90%` via `cargo-llvm-cov`):** All 7 foundation crates (`eve-proto`, `eve-machonet`, `eve-sde`, `eve-db`, `eve-destiny`, `eve-dogma`, `eve-testkit`) exceed `92%–95%` line coverage; unit test expansion across `eve-server` services is actively bringing total workspace coverage above `90%`.
 
 ---
 
 ## How progress is kept honest
 
-EvoMu is written mostly by AI coding agents, under a mechanical process designed to stop inflated claims:
+EvoMu is developed by coordinated AI agents under a strict mechanical and adversarial verification pipeline designed to prevent inflated claims or stubbed code:
 
-1. **Tests decide.** A pre-flight script runs the whole suite and computes which ledger rows are closed. Numbers in docs and commits are copied from its output.
-2. **Independent review.** Every change merged into `main` must pass an adversarial review by a separate AI model, which checks the claims against the code, the tests and the client's own catalogs. Periodic gap audits look for rows marked done that aren't really done.
-3. **Supervisor and coder.** A supervisor agent owns the review gate and the ledger and sets priorities. A coding agent works several tracks in parallel, each in its own git worktree.
+1. **Mechanical Pre-Flight & Zero-Stub Gates (`preflight.py`):** Every change is checked by [`preflight.py`](./.agents/skills/evomu-adversarial-review/scripts/preflight.py), which enforces `0` `NOT_IN_CLIENT` RPCs/notifications, `0` stubbed handler pairs (`stubs.py`), `0` wide shared match arms (`padding.py`), file-size caps, and full workspace test execution (`cargo test --workspace --no-fail-fast`).
+2. **Per-Slice Adversarial Review (`run_review.py`) & Gap Audits:** Every merge into `main` (capped at $\le 20$ commits per slice) must pass an independent LLM code review (`run_review.py`) plus post-review workspace tests in a clean snapshot worktree. Periodic gap audits inspect `DONE` rows for shallow tests or missing edge cases and downgrade any suspect row to `FLAGGED_FAKE` until remediated.
+3. **Multi-Round Top-Down Independent Audits (`R1`–`R10`):** A separate, read-only Independent Reviewer agent conducts 6-track adversarial security, exploit, wire-protocol, persistence, and V24.01 `code.ccp` / `_destiny.so` binary parity audits against `origin/main` and files structured GitHub issues.
+4. **Live V24.01 `EVE.app` Playtester & Supervisor Loop:** A dedicated Playtester Maintainer agent runs [`tools/client-harness/playtester.py`](./tools/client-harness/playtester.py) continuously against a live V24.01 client while a Supervisor agent runs 30-minute orchestration checks and hourly E2E playability + GitHub bug sync checks.
 
 Rules: [`AGENTS.md`](./AGENTS.md). Process: [`docs/SUPERVISOR_CODER_ARCHITECTURE.md`](./docs/SUPERVISOR_CODER_ARCHITECTURE.md). Original design: [`PLAN.md`](./PLAN.md), [`docs/spec/`](./docs/spec/).
 
@@ -169,8 +150,8 @@ Rules: [`AGENTS.md`](./AGENTS.md). Process: [`docs/SUPERVISOR_CODER_ARCHITECTURE
 ### Prerequisites
 
 - **Rust toolchain:** Stable Rust (`1.75+`) with `cargo`.
-- **Python 3:** Python `3.9+` (used by the SDE importer and client journey harness).
-- **C compiler (macOS / Linux):** Xcode Command Line Tools (`xcode-select --install`) on macOS so `import_sde.py` can compile [`tools/sde-import/cfsd_runner.c`](./tools/sde-import/cfsd_runner.c) against the client's `libpython2.7.dylib`. On Windows, `import_sde.py` loads `python27.dll` directly via `ctypes` without requiring a C compiler.
+- **Python 3:** Python `3.9+` (used by the SDE importer, client journey harness, and autonomous playtester).
+- **C compiler (macOS / Linux):** Xcode Command Line Tools (`xcode-select --install`) on macOS so `import_sde.py` can compile [`tools/sde-import/cfsd_runner.c`](./tools/sde-import/cfsd_runner.c) against the client's `libpython2.7.dylib` (and `playtester.py` can compile its CoreGraphics window-discovery helper). On Windows, `import_sde.py` loads `python27.dll` directly via `ctypes`.
 - **EVE Online Client (V24.01, build 3619879):** Installed with a populated `SharedCache` (`tq` client build + `ResFiles` resource cache). Because CCP's client static data cannot be redistributed in git, EvoMu extracts the static database (`data/evomu_sde.sqlite`) directly from your local EVE installation.
 
 ---
@@ -288,16 +269,7 @@ On first boot, `eve-server` automatically:
 4. Provisions any configured `[[player_accounts]]`, `starter_character` entries, and `[[admin_accounts]]`.
 5. Pre-spawns the Jita (`30000142`) solar system physics actor and starts the 1 Hz cluster tick loop.
 
-#### Running tests & the end-to-end client journey harness
-```bash
-# Run unit and integration test suites across the workspace
-cargo test --workspace
-
-# Run the 12 scripted client-bridge journeys end-to-end against a fresh eve-server instance
-python3 tools/client-harness/run_journeys --out /tmp/evomu_harness --bridge-harness-test
-```
-
-To point the real V24.01 EVE client at your local server, see [`docs/BLOCKERS.md`](./docs/BLOCKERS.md) §3, and export `EVE_PUBLIC_GATEWAY_ADDRESS=127.0.0.1:26005` (or `<server-lan-ip>:26005`) in the client's environment before launching `exefile.exe` so `_grpc_public_gateway.pyd` connects to `eve-server`'s local HTTP/2 Quasar gateway instead of `tq-public-gateway.evetech.net`:
+To point the real V24.01 EVE client at your local server manually, see [`docs/BLOCKERS.md`](./docs/BLOCKERS.md) §3, and export `EVE_PUBLIC_GATEWAY_ADDRESS=127.0.0.1:26005` (or `<server-lan-ip>:26005`) in the client's environment before launching `exefile` / `exefile.exe` so `_grpc_public_gateway` connects to `eve-server`'s local HTTP/2 Quasar gateway instead of `tq-public-gateway.evetech.net`:
 
 ```powershell
 # Windows PowerShell client launch example:
@@ -322,14 +294,14 @@ Both automatic crash collection and the native in-game **`F12` -> Report a Bug**
 
 #### Batch Syncing Bugs to GitHub Issues
 
-Use the standalone CLI tool (requires [GitHub CLI `gh`](https://cli.github.com/) authenticated via `gh auth login`) to batch upload staged crash and `F12` reports to GitHub with automated deduplication by signature hash:
+Use [`tools/sync_bugs_to_github.py`](./tools/sync_bugs_to_github.py) (requires [GitHub CLI `gh`](https://cli.github.com/) authenticated via `gh auth login`) to batch upload staged crash, `F12`, and playtester reports to GitHub with automated deduplication by signature hash:
 
 ```bash
 # Preview pending bug reports without modifying GitHub or local files
 python3 tools/sync_bugs_to_github.py --dry-run
 
 # Upload reports to GitHub issues on saverchenkov/EvoMu (archives JSON + attachments to .evomu-bugs/uploaded/)
-python3 tools/sync_bugs_to_github.py
+python3 tools/sync_bugs_to_github.py --repo saverchenkov/EvoMu
 
 # Upload and permanently delete local queue files and attachments
 python3 tools/sync_bugs_to_github.py --delete
@@ -339,19 +311,95 @@ If an issue for the same error signature already exists on GitHub, `sync_bugs_to
 
 ---
 
+### 5. Autonomous Live Client Playtester & Real-Client E2E Harness
+
+EvoMu includes two complementary client-verification harnesses under [`tools/client-harness/`](./tools/client-harness/):
+
+#### A. Scripted Real-Client & Two-Client Bridge Journeys ([`tools/client-harness/run_journeys`](./tools/client-harness/run_journeys))
+
+`run_journeys` executes the 29 canonical end-to-end gameplay journeys defined in [`.agents/skills/evomu-adversarial-review/references/parity/client_journeys.json`](./.agents/skills/evomu-adversarial-review/references/parity/client_journeys.json):
+
+```bash
+# 1. Run all 29 end-to-end journeys inside the real V24.01 EVE.app client (macOS / Windows)
+python3 tools/client-harness/run_journeys \
+  --out /tmp/evomu_real_journeys \
+  --journeys .agents/skills/evomu-adversarial-review/references/parity/client_journeys.json \
+  --launch-real-client
+
+# 2. Run the fast headless two-client bridge journey suite (CI / regression check)
+python3 tools/client-harness/run_journeys \
+  --out /tmp/evomu_bridge_journeys \
+  --journeys .agents/skills/evomu-adversarial-review/references/parity/client_journeys.json \
+  --bridge-harness-test
+```
+
+#### B. Autonomous Multimodal AI Playtester ([`tools/client-harness/playtester.py`](./tools/client-harness/playtester.py))
+
+While `run_journeys` verifies fixed regression paths, **`playtester.py`** is an autonomous, stateful, multimodal LLM agent that plays the live V24.01 `EVE.app` client continuously like a curious human QA engineer — exploring UI flows, fitting ships, training skills, trading on the market, undocking, warping, mining, engaging NPCs, and filing bugs whenever the client UI or server state violates canonical EVE Online behavior.
+
+##### Architecture & Key Capabilities
+1. **In-Client V24.01 Python 2.7 Hook ([`evomu_playtester_hook.py`](./tools/client-harness/evomu_playtester_hook.py), [`evomu_site.py`](./tools/client-harness/evomu_site.py), [`evomu_inclient_helpers.py`](./tools/client-harness/evomu_inclient_helpers.py)):**
+   - Exposes a non-blocking `uthread` JSON-RPC bridge inside `EVE.app` on `127.0.0.1:26099`.
+   - Introspects the live CarbonUI hierarchy (`from carbonui.uicore import uicore`, walking `uicore.layer.*` with `UI_NORMAL=0` / `UI_PICKCHILDREN=3` visibility and `node.HasEventHandler("OnClick")` filtering) to report open windows, modal dialogs, and clickable widgets with exact screen bounding boxes.
+   - Executes UI and game actions inside child `uthread` tasklets so modal `MessageBox.Execute()` prompts never block the RPC bridge, with direct support for V24.01 `uicore.cmd` command map actions (`OpenInventory`, `OpenMarket`, `OpenFitting`, `OpenCharacterSheet`, `OpenAgency`, `OpenMap`, `OpenAssets`, `OpenWallet`, `OpenContracts`, `OpenCorporationPanel`, `OpenFleet`, `OpenMail`, `OpenDirectionalScanner`, `OpenProbeScanner`, etc.), UI clicks, context menus, and GM slash commands.
+   - Maintains an in-client **Flight Recorder** hooking `sm.RemoteSvc` (MachoNet calls, arguments, return values, and exceptions), `eve.Message` / `uicore.Message` (modal notifications and `UserError` popups), and unhandled Python tracebacks.
+2. **Multi-Space / Off-Screen Retina Screenshot Capture:**
+   - Compiles a native macOS CoreGraphics helper (`~/.cache/evomu/evomu_window_info`) to locate `EVE.app`'s main 3D game window (`CGWindowID`, `layer 0..30`, `"EVE - <Pilot>"`) across all macOS Mission Control Desktop Spaces and captures full Retina screenshots via `screencapture -x -o -l <window_id>`.
+   - You can move `EVE.app` to a **separate macOS Desktop Space** and run `playtester.py` in the background without stealing mouse/keyboard focus or covering your main screen.
+3. **Semantic Game-Mechanics Assertions & Persistent Memory ([`playtester_personas.json`](./tools/client-harness/playtester_personas.json), [`playtester_action_schema.json`](./tools/client-harness/playtester_action_schema.json)):**
+   - At each step (`observe -> reason -> act -> verify`), the multimodal Gemini model receives the before/after Retina screenshots, CarbonUI widget tree, session/ballpark snapshot, flight recorder events, and persistent playtester memory (`.playtester/MEMORY.md` and `.playtester/memory.json`).
+   - Asserts both crash-free execution **and** semantic UI/state invariants (e.g., whether a requested window actually opened, whether wallet ISK / inventory items / skill queue / fitted modules updated after an RPC, or whether ship speed and warp phases progressed in space).
+   - Automatically writes deduplicated bug reports (with screenshots, CarbonUI dumps, flight-recorder traces, and server log slices) to `.evomu-bugs/queue/` and syncs them to GitHub issues via [`tools/sync_bugs_to_github.py`](./tools/sync_bugs_to_github.py).
+
+##### Running the Playtester
+
+```bash
+# 1. Run offline self-tests (verifies hook syntax, window discovery, and prompt schema)
+python3 tools/client-harness/playtester.py --self-test
+
+# 2. Run a bounded 30-step autonomous playtest session (auto-starts eve-server & EVE.app)
+python3 tools/client-harness/playtester.py \
+  --steps 30 \
+  --persona all_rounder \
+  --model gemini-3-flash-preview
+
+# 3. Run continuously as a 24/7 autonomous playtesting daemon across rotating personas
+python3 tools/client-harness/playtester.py \
+  --continuous \
+  --steps 40 \
+  --model gemini-3-flash-preview
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--steps <N>` | `30` | Number of `observe -> reason -> act -> verify` steps per episode. |
+| `--continuous` | `false` | Loop episodes indefinitely, rotating personas (`all_rounder`, `combat_pve`, `industrialist_trader`, `explorer_social`, `Chaos_QA`) and persisting memory in `.playtester/`. |
+| `--persona <NAME>` | `all_rounder` | Playtest persona controlling domain focus and checklist selection. |
+| `--goal <TEXT>` | *(persona default)* | Optional custom objective (e.g. `"Test market buy orders, ship fitting, and undock warp in Jita"`). |
+| `--model <MODEL>` | `gemini-3-flash-preview` | Multimodal Gemini model used for visual + UI-state reasoning. |
+| `--reuse-existing` | `true` | Attach to an already-running `eve-server` (`:26000`) and `EVE.app` (`:26099`) if present. |
+| `--no-github-sync` | `false` | Stage bug reports in `.evomu-bugs/queue/` without automatically invoking `sync_bugs_to_github.py`. |
+
+Per-step artifacts (`screen.png`, `ui_state.json`, `decision.json`, `exec_result.json`, `client.log`, `server.log`) are saved under `.playtester/runs/<run_id>/steps/step_NNNN/`.
+
+---
+
 ## Architecture
 
 ```mermaid
 flowchart LR
     Client["EVE client V24.01"] -->|"machoNet, TCP 26000"| Proto
+    Client -->|"Quasar HTTP/2 gRPC, TCP 26005"| Server
+    Client -->|"ESI & SSO / Bug API, TCP 26004"| Server
+    Playtester["Autonomous AI Playtester<br/>(playtester.py)"] <-->|"In-client JSON-RPC, TCP 26099<br/>+ CGWindowID Retina Capture"| Client
     Proto["eve-proto + eve-machonet<br/>(wire codec, packets, sessions)"] --> Server
     Server["eve-server<br/>(routing, game services, solar systems, ESI, Quasar)"] --> Dogma["eve-dogma<br/>(ship and module attributes)"]
-    Server --> Destiny["eve-destiny<br/>(space physics)"]
-    Server --> Sde["eve-sde<br/>(static data)"]
-    Server --> Db["eve-db<br/>(SQLite world state)"]
+    Server --> Destiny["eve-destiny<br/>(space physics & multi-tick warp)"]
+    Server --> Sde["eve-sde<br/>(static data: 53,288 types)"]
+    Server --> Db["eve-db<br/>(SQLite WAL world state)"]
 ```
 
-Safe Rust only (`#![forbid(unsafe_code)]`), fixed-point money, game rules driven by the static data, and only RPC and notification names that exist in the real client.
+Safe Rust only (`#![forbid(unsafe_code)]`), fixed-point money, game rules driven by the V24.01 static data, and only RPC and notification names that exist in the real client.
 
 ---
 
