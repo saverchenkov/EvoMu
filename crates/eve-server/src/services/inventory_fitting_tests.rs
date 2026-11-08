@@ -679,3 +679,185 @@ async fn issue_630_fitting_module_sets_singleton_and_emits_dbrow_item_change() {
     assert_eq!(fit_change2.args[0].dict_get("quantity").and_then(PyRep::as_i64), Some(-1));
     assert_eq!(fit_change2.args[0].dict_get("flagID").and_then(PyRep::as_i64), Some(29));
 }
+
+#[tokio::test]
+async fn invbroker_add_bound_ship_ignores_source_arg_and_autofits_slot_0() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 96_510_001i64;
+    let station_id = 60_003_760i64;
+    let ship_id = 96_510_100i64;
+    let gun1_id = 96_510_201i64;
+    let gun2_id = 96_510_202i64;
+    let gun3_id = 96_510_203i64;
+    let gun4_id = 96_510_204i64;
+    let cargo_id = 96_510_205i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = 1;
+        ch.name = "AutoFitPilot".into();
+        ch.corporation_id = 1_000_009;
+        ch.station_id = Some(station_id);
+        ch.solar_system_id = 30_000_142;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+
+        let sk_map = snap.skills.entry(char_id).or_default();
+        for sk in [3300_u32, 3301, 3302, 3426] {
+            sk_map.insert(
+                sk,
+                TrainedSkillRecord {
+                    type_id: sk,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587, // Rifter (3 high slots)
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        for gid in [gun1_id, gun2_id, gun3_id, gun4_id] {
+            snap.items.insert(
+                gid,
+                InventoryItemRecord {
+                    item_id: gid,
+                    type_id: 484, // 125mm Gatling AutoCannon I
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.items.insert(
+            cargo_id,
+            InventoryItemRecord {
+                item_id: cargo_id,
+                type_id: 34, // Tritanium
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 25,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut session = SessionState::new(96_510);
+    session.user_id = Some(1);
+    session.character_id = Some(char_id);
+    session.corporation_id = Some(1_000_009);
+    session.station_id = Some(station_id);
+    session.solar_system_id = Some(30_000_142);
+    session.ship_id = Some(ship_id);
+
+    let ship_bound = crate::router::BoundObjectEntry {
+        bound_id: 1,
+        session_id: session.session_id,
+        user_id: 1,
+        character_id: char_id,
+        service: "invbroker".into(),
+        object_id: ship_id,
+        oid_str: "bound_ship".into(),
+        ref_id: 1,
+    };
+    let kw = HashMap::new();
+
+    // 1. Bound ship target ignores mismatched args[1] and resolves flag=0 to HiSlot0 (27), setting singleton=true
+    handle(
+        &ctx,
+        &mut session,
+        Some(&ship_bound),
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(gun1_id),
+            PyRep::Integer(station_id + 999),
+            PyRep::Integer(0),
+        ],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("autofit gun1");
+    ctx.db.with_snapshot(|snap| {
+        let g1 = &snap.items[&gun1_id];
+        assert_eq!(g1.location_id, ship_id);
+        assert_eq!(g1.flag, InventoryFlag::HiSlot0);
+        assert!(g1.singleton, "fitted module must be singleton");
+    });
+
+    // 2. Subsequent flag=0 calls advance to HiSlot1 (28) and HiSlot2 (29)
+    for (gid, expected_flag) in [
+        (gun2_id, InventoryFlag::HiSlot1),
+        (gun3_id, InventoryFlag::HiSlot2),
+    ] {
+        handle(
+            &ctx,
+            &mut session,
+            Some(&ship_bound),
+            "invbroker",
+            "Add",
+            &[PyRep::Integer(gid), PyRep::Integer(station_id), PyRep::Integer(0)],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect("autofit next gun");
+        assert_eq!(ctx.db.with_snapshot(|s| s.items[&gid].flag), expected_flag);
+    }
+
+    // 3. When all high slots on the Rifter are occupied, flag=0 returns NoFreeSlot
+    let full_err = handle(
+        &ctx,
+        &mut session,
+        Some(&ship_bound),
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(gun4_id), PyRep::Integer(ship_id), PyRep::Integer(0)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("full high rack must reject");
+    assert_eq!(full_err.code, "NoFreeSlot");
+
+    // 4. Non-module cargo item with flag=0 on ship resolves to Cargo (5)
+    handle(
+        &ctx,
+        &mut session,
+        Some(&ship_bound),
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(cargo_id), PyRep::Integer(ship_id), PyRep::Integer(0)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("autofit cargo");
+    assert_eq!(
+        ctx.db.with_snapshot(|s| (s.items[&cargo_id].location_id, s.items[&cargo_id].flag)),
+        (ship_id, InventoryFlag::Cargo)
+    );
+}

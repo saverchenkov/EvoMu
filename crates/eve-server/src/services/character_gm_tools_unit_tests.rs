@@ -530,3 +530,106 @@ async fn gm_slash_commands_and_qa_rpcs_execute_and_enforce_roles() {
         .unwrap_err();
     assert_eq!(load_bad.code, "InvalidSlashArgument");
 }
+
+#[tokio::test]
+async fn slash_fit_validates_online_state_and_emits_item_and_module_notifications() {
+    let ctx = test_ctx();
+    let char_id = 95_800_001_i64;
+    let ship_id = 95_800_100_i64;
+    let station_id = 60_003_760_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = 1;
+        ch.name = "SlashFitPilot".into();
+        ch.station_id = Some(station_id);
+        ch.solar_system_id = 30_000_142;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        snap.items.insert(
+            ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587, // Rifter
+                owner_id: char_id,
+                location_id: station_id,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let mut sess = gm_session(char_id, ship_id);
+    let _ = ctx.db.acquire_online_lock(1, sess.session_id, Some(char_id), false, ctx.now_unix());
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // Case A: Pilot lacks Gunnery / Small Projectile Turret -> fitted offline + notifications emitted
+    let offline_fit = handle_gm_slash_ext(&ctx, &mut sess, char_id, "/fit 484")
+        .await
+        .expect("handled")
+        .expect("/fit offline ok");
+    let mod1_id = offline_fit.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
+    assert_eq!(offline_fit.dict_get("online"), Some(&PyRep::Bool(false)));
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.module_online_states.get(&mod1_id).copied()),
+        Some(false)
+    );
+    let notifs1: Vec<String> = ctx
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .map(|n| n.event)
+        .collect();
+    assert!(notifs1.iter().any(|e| e == "OnItemChange"), "missing OnItemChange: {notifs1:?}");
+    assert!(notifs1.iter().any(|e| e == "OnModuleFitted"), "missing OnModuleFitted: {notifs1:?}");
+    assert!(
+        notifs1.iter().any(|e| e == "OnModuleAttributeChanges"),
+        "missing OnModuleAttributeChanges: {notifs1:?}"
+    );
+    assert!(
+        !notifs1.iter().any(|e| e == "OnGodmaShipEffect"),
+        "offline /fit must not emit OnGodmaShipEffect: {notifs1:?}"
+    );
+
+    // Case B: Grant skills -> fitted online + OnGodmaShipEffect emitted
+    ctx.db.with_mut_snapshot(|snap| {
+        let sk_map = snap.skills.entry(char_id).or_default();
+        for sk in [3300_u32, 3301, 3302] {
+            sk_map.insert(
+                sk,
+                eve_db::TrainedSkillRecord {
+                    type_id: sk,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    let online_fit = handle_gm_slash_ext(&ctx, &mut sess, char_id, "/fit 484")
+        .await
+        .expect("handled")
+        .expect("/fit online ok");
+    let mod2_id = online_fit.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
+    assert_eq!(online_fit.dict_get("online"), Some(&PyRep::Bool(true)));
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.module_online_states.get(&mod2_id).copied()),
+        Some(true)
+    );
+    let notifs2: Vec<String> = ctx
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .map(|n| n.event)
+        .collect();
+    assert!(notifs2.iter().any(|e| e == "OnItemChange"), "missing OnItemChange: {notifs2:?}");
+    assert!(notifs2.iter().any(|e| e == "OnModuleFitted"), "missing OnModuleFitted: {notifs2:?}");
+    assert!(
+        notifs2.iter().any(|e| e == "OnModuleAttributeChanges"),
+        "missing OnModuleAttributeChanges: {notifs2:?}"
+    );
+    assert!(
+        notifs2.iter().any(|e| e == "OnGodmaShipEffect"),
+        "online /fit must emit OnGodmaShipEffect: {notifs2:?}"
+    );
+}

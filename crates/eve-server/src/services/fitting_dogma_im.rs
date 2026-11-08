@@ -452,7 +452,15 @@ pub(crate) async fn handle_dogma_im(
             ship_attr_ids.insert(attr_ids::POWER_LOAD);
             let mut ship_attrs_map: HashMap<u16, f64> = HashMap::with_capacity(ship_attr_ids.len());
             for attr_id in ship_attr_ids {
-                let val = eval_ctx.ship.get_attribute(attr_id, &ctx.sde);
+                // V24 clientDogmaLocation primes shipDogmaItem baseValue from GetAllInfo shipInfo.attributes
+                // and then applies online effect modifiers; send 0.0 load here to prevent double-counting.
+                let val = if method == "GetAllInfo"
+                    && (attr_id == attr_ids::CPU_LOAD || attr_id == attr_ids::POWER_LOAD)
+                {
+                    0.0
+                } else {
+                    eval_ctx.ship.get_attribute(attr_id, &ctx.sde)
+                };
                 ship_attrs_map.insert(attr_id, val);
             }
             let dyn_attrs = ctx

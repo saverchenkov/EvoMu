@@ -144,9 +144,19 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Add requires itemID".into() }));
             };
             let mut source_item_opt = ctx.db.with_snapshot(|snap| snap.items.get(&item_id).cloned());
-            let Some(new_loc) = (match (args.get(1).and_then(|a| a.as_i64()), bound_entry.map(|b| b.object_id), source_item_opt.as_ref().map(|i| i.location_id)) {
-                (Some(a1), Some(bid), Some(sloc)) if a1 == sloc && bid != sloc => Some(bid),
-                (a1, bid, _) => a1.or(bid),
+            let bound_is_ship = bound_entry.is_some_and(|b| {
+                ctx.db
+                    .with_snapshot(|snap| snap.items.get(&b.object_id).map(|i| i.type_id))
+                    .and_then(|tid| ctx.sde.types.get(&tid))
+                    .is_some_and(|t| t.category_id == 6)
+            });
+            let Some(new_loc) = (if bound_is_ship {
+                bound_entry.map(|b| b.object_id)
+            } else {
+                match (args.get(1).and_then(|a| a.as_i64()), bound_entry.map(|b| b.object_id), source_item_opt.as_ref().map(|i| i.location_id)) {
+                    (Some(a1), Some(bid), Some(sloc)) if a1 == sloc && bid != sloc => Some(bid),
+                    (a1, bid, _) => a1.or(bid),
+                }
             }).or(session.ship_id).or(session.station_id).or(session.structure_id) else {
                 return Some(Err(BridgeRpcError { code: "InvalidLocation".into(), message: "Add requires a target locationID, bound inventory, or active ship/station".into() }));
             };
@@ -160,7 +170,101 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: "Fighter Bay only accepts fighters".into() }));
                 }
             }
-            let flag_u16 = raw_flag_opt.map(|v| v as u16).unwrap_or(InventoryFlag::Cargo as u16);
+            let mut flag_u16 = raw_flag_opt.map(|v| v as u16).unwrap_or(InventoryFlag::Cargo as u16);
+            if flag_u16 == 0 {
+                let target_ship_type_id = ctx
+                    .db
+                    .with_snapshot(|snap| snap.items.get(&new_loc).map(|i| i.type_id))
+                    .filter(|tid| ctx.sde.types.get(tid).is_some_and(|t| t.category_id == 6));
+                if let Some(ship_type_id) = target_ship_type_id {
+                    let mod_type_opt = source_item_opt
+                        .as_ref()
+                        .and_then(|src| ctx.sde.types.get(&src.type_id))
+                        .filter(|t| matches!(t.category_id, 7 | 32));
+                    if let Some(mod_type) = mod_type_opt {
+                        let rack = if mod_type.effect_ids.contains(&12) {
+                            Some((27_u16, Some(eve_dogma::attr_ids::HI_SLOTS), false))
+                        } else if mod_type.effect_ids.contains(&13) {
+                            Some((19_u16, Some(eve_dogma::attr_ids::MED_SLOTS), false))
+                        } else if mod_type.effect_ids.contains(&11) {
+                            Some((11_u16, Some(eve_dogma::attr_ids::LOW_SLOTS), false))
+                        } else if mod_type.effect_ids.contains(&2663) {
+                            Some((92_u16, Some(eve_dogma::attr_ids::RIG_SLOTS), false))
+                        } else if mod_type.category_id == 32 || mod_type.effect_ids.contains(&3772) {
+                            Some((125_u16, None, true))
+                        } else {
+                            None
+                        };
+                        if let Some((base_flag, slot_attr_opt, is_sub)) = rack {
+                            let max_slots = if is_sub {
+                                if ctx.sde.types.get(&ship_type_id).is_some_and(|t| t.group_id == 963) {
+                                    4_u16
+                                } else {
+                                    0_u16
+                                }
+                            } else if let Some(attr) = slot_attr_opt {
+                                if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(char_id, new_loc) {
+                                    let raw = fit.ship.get_attribute(attr, &ctx.sde).max(0.0) as u16;
+                                    if attr == eve_dogma::attr_ids::RIG_SLOTS {
+                                        raw.min(3)
+                                    } else {
+                                        raw.min(8)
+                                    }
+                                } else {
+                                    ctx.sde
+                                        .types
+                                        .get(&ship_type_id)
+                                        .and_then(|t| t.default_attributes.get(&attr))
+                                        .copied()
+                                        .unwrap_or(0.0)
+                                        .max(0.0) as u16
+                                }
+                            } else {
+                                0_u16
+                            };
+                            let occupied: std::collections::HashSet<u16> = ctx.db.with_snapshot(|snap| {
+                                snap.items
+                                    .values()
+                                    .filter(|i| {
+                                        i.location_id == new_loc
+                                            && i.item_id != item_id
+                                            && ctx
+                                                .sde
+                                                .types
+                                                .get(&i.type_id)
+                                                .is_some_and(|t| matches!(t.category_id, 7 | 32))
+                                    })
+                                    .map(|i| i.flag as u16)
+                                    .collect()
+                            });
+                            let preferred_sub = if is_sub {
+                                mod_type
+                                    .default_attributes
+                                    .get(&1366)
+                                    .map(|v| *v as u16)
+                                    .filter(|f| *f >= base_flag && *f < base_flag + max_slots)
+                            } else {
+                                None
+                            };
+                            let chosen = preferred_sub
+                                .filter(|f| !occupied.contains(f))
+                                .or_else(|| (base_flag..(base_flag + max_slots)).find(|f| !occupied.contains(f)));
+                            if let Some(resolved) = chosen {
+                                flag_u16 = resolved;
+                            } else {
+                                return Some(Err(BridgeRpcError {
+                                    code: "NoFreeSlot".into(),
+                                    message: format!("No free fitting slot available on ship {new_loc}"),
+                                }));
+                            }
+                        } else {
+                            flag_u16 = InventoryFlag::Cargo as u16;
+                        }
+                    } else {
+                        flag_u16 = InventoryFlag::Cargo as u16;
+                    }
+                }
+            }
             let mut flag = match flag_u16 {
                 90 => InventoryFlag::SpecializedShipHold,
                 155 => InventoryFlag::Cargo,
@@ -283,7 +387,21 @@ pub async fn handle(
                     }
                 }
                 if let Some(src_item) = &source_item_opt {
-                    if matches!(src_item.flag as u16, 125..=129) {
+                    if matches!(src_item.flag as u16, 125..=132) {
+                        let has_fitted_modules = ctx.db.with_snapshot(|snap| {
+                            snap.items.values().any(|other| {
+                                other.location_id == src_item.location_id
+                                    && other.item_id != item_id
+                                    && (11..=34).contains(&(other.flag as u16))
+                                    && ctx.sde.types.get(&other.type_id).is_none_or(|t| t.category_id != 8)
+                            })
+                        });
+                        if has_fitted_modules {
+                            return Some(Err(BridgeRpcError {
+                                code: "SubsystemHasFittedModules".into(),
+                                message: "Cannot unfit a T3 Strategic Cruiser subsystem while modules are fitted".into(),
+                            }));
+                        }
                         if let Ok(mut check_fit) = ctx.get_or_rebuild_ship_fitting(char_id, src_item.location_id) {
                             if let Err(msg) = check_fit.unfit_module(item_id, &ctx.sde) {
                                 return Some(Err(BridgeRpcError {
@@ -1050,6 +1168,13 @@ pub async fn handle(
                     }
                     Err(e) => return Some(Err(BridgeRpcError { code: "SplitFailed".into(), message: e.to_string() })),
                 }
+            }
+            if is_fitting_slot {
+                ctx.db.with_mut_snapshot(|snap| {
+                    if let Some(it) = snap.items.get_mut(&item_id) {
+                        it.singleton = true;
+                    }
+                });
             }
 
             if dest_is_ship_hold {

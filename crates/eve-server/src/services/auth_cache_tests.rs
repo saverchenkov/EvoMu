@@ -422,3 +422,60 @@ async fn gm_slash_commands_giveisk_ban_suspend_role_giveitem_setskill_teleport_a
         Some(&PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))]))
     );
 }
+
+#[tokio::test]
+async fn createitem_and_giveitem_set_singleton_for_single_modules_and_emit_on_item_change() {
+    let ctx = test_ctx();
+    let uid = 1_u64;
+    let cid = 90_000_001_i64;
+    let mut sess = auth_session(uid, cid, 98_000_001, 30_000_142);
+    sess.role = service_roles::ROLE_GM_MASK;
+    let kw = HashMap::new();
+    let _ = ctx.db.acquire_online_lock(uid, sess.session_id, Some(cid), false, ctx.now_unix());
+    let _ = ctx.drain_notifications_for_char(cid);
+
+    let mod_res = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/createitem 484 1".into())],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("createitem 484 1");
+    let mod_id = mod_res.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
+    assert!(
+        ctx.db.with_snapshot(|s| s.items[&mod_id].singleton),
+        "single created module must have singleton=true"
+    );
+    let mod_notifs = ctx.drain_notifications_for_char(cid);
+    assert!(
+        mod_notifs.iter().any(|n| n.event == "OnItemChange"),
+        "expected OnItemChange for /createitem, got: {:?}",
+        mod_notifs.iter().map(|n| &n.event).collect::<Vec<_>>()
+    );
+
+    let cargo_res = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/giveitem 34 50".into())],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("giveitem 34 50");
+    let cargo_id = cargo_res.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
+    ctx.db.with_snapshot(|s| {
+        assert!(!s.items[&cargo_id].singleton);
+        assert_eq!(s.items[&cargo_id].quantity, 50);
+    });
+    let cargo_notifs = ctx.drain_notifications_for_char(cid);
+    assert!(
+        cargo_notifs.iter().any(|n| n.event == "OnItemChange"),
+        "expected OnItemChange for /giveitem"
+    );
+}

@@ -469,3 +469,155 @@ async fn dogma_im_set_session_check_validates_updates_and_clears() {
     assert_eq!(cleared.dict_get("sessionCheck"), Some(&PyRep::None));
     assert_eq!(cleared.dict_get("checkCount"), Some(&PyRep::Integer(0)));
 }
+
+#[tokio::test]
+async fn get_all_info_includes_offline_missing_skill_modules_and_zeros_base_loads() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 96_399_001_i64;
+    let station_id = 60_003_760_i64;
+    let ship_id = 96_399_100_i64;
+    let dcu_id = 96_399_201_i64;
+    let gun_id = 96_399_202_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = 96_399;
+        ch.name = "GetAllInfoPilot".into();
+        ch.corporation_id = 1_000_009;
+        ch.station_id = Some(station_id);
+        ch.solar_system_id = 30_000_142;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+
+        // Grant Hull Upgrades 4 (3394) for DCU II (2048), but NOT Small Projectile Turret (3301) for 125mm AutoCannon (484)
+        snap.skills.entry(char_id).or_default().insert(
+            3394,
+            eve_db::TrainedSkillRecord {
+                type_id: 3394,
+                level: 4,
+                skill_points: 45_255.0,
+            },
+        );
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587, // Rifter
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            dcu_id,
+            InventoryItemRecord {
+                item_id: dcu_id,
+                type_id: 2048, // Damage Control II (onlineable)
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::LoSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            gun_id,
+            InventoryItemRecord {
+                item_id: gun_id,
+                type_id: 484, // 125mm Gatling AutoCannon I (missing skill 3301)
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(dcu_id, true);
+        snap.module_online_states.insert(gun_id, false);
+    });
+
+    let mut session = SessionState::new(96_399);
+    session.user_id = Some(96_399);
+    session.character_id = Some(char_id);
+    session.corporation_id = Some(1_000_009);
+    session.station_id = Some(station_id);
+    session.solar_system_id = Some(30_000_142);
+    session.ship_id = Some(ship_id);
+
+    let all_info = handle_dogma_im(
+        &ctx,
+        &mut session,
+        None,
+        "dogmaIM",
+        "GetAllInfo",
+        &[PyRep::Bool(true), PyRep::Bool(true), PyRep::Bool(false)],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("GetAllInfo ok");
+
+    // #649: Both online DCU and offline missing-skill gun must appear in shipInfo
+    let PyRep::Dict(ship_info) = all_info.dict_get("shipInfo").expect("shipInfo") else {
+        panic!("expected shipInfo Dict");
+    };
+    assert!(
+        ship_info.iter().any(|(k, _)| k.as_i64() == Some(dcu_id)),
+        "online DCU missing from shipInfo"
+    );
+    let (_, gun_entry) = ship_info
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(gun_id))
+        .expect("offline missing-skill gun omitted from shipInfo");
+    let PyRep::Dict(gun_attrs) = gun_entry.dict_get("attributes").expect("gun attributes") else {
+        panic!("expected gun attributes Dict");
+    };
+    assert_eq!(
+        gun_attrs
+            .iter()
+            .find(|(k, _)| k.as_i64() == Some(2))
+            .and_then(|(_, v)| v.as_f64()),
+        Some(0.0),
+        "missing-skill gun must report isOnline (attr 2) = 0.0 in GetAllInfo"
+    );
+
+    // #651: GetAllInfo shipInfo.attributes and shipAttributes prime CPU_LOAD (49) and POWER_LOAD (15) at 0.0
+    let (_, ship_entry) = ship_info
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(ship_id))
+        .expect("ship entry");
+    let PyRep::Dict(ship_attrs) = ship_entry.dict_get("attributes").expect("attributes") else {
+        panic!("expected attributes Dict");
+    };
+    let cpu_load_info = ship_attrs
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(attr_ids::CPU_LOAD as i64))
+        .and_then(|(_, v)| v.as_f64())
+        .expect("CPU_LOAD in GetAllInfo");
+    let pg_load_info = ship_attrs
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(attr_ids::POWER_LOAD as i64))
+        .and_then(|(_, v)| v.as_f64())
+        .expect("POWER_LOAD in GetAllInfo");
+    assert_eq!(cpu_load_info, 0.0, "GetAllInfo CPU_LOAD must be 0.0");
+    assert_eq!(pg_load_info, 0.0, "GetAllInfo POWER_LOAD must be 0.0");
+
+    // ShipFittingEngine itself still calculates positive evaluated CPU_LOAD and POWER_LOAD
+    let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
+    let eval_cpu_load = fit.ship.get_attribute(attr_ids::CPU_LOAD, &ctx.sde);
+    let eval_pg_load = fit.ship.get_attribute(attr_ids::POWER_LOAD, &ctx.sde);
+    assert!(eval_cpu_load > 0.0, "Evaluated ship CPU_LOAD should be > 0");
+    assert!(eval_pg_load > 0.0, "Evaluated ship POWER_LOAD should be > 0");
+}

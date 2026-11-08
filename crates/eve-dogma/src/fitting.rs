@@ -327,37 +327,9 @@ impl ShipFittingEngine {
             }
         }
 
-        // Validate required character skills (requiredSkill1..6 and requiredSkill1..6Level)
-        for (skill_attr, level_attr) in [
-            (attr_ids::REQUIRED_SKILL_1, attr_ids::REQUIRED_SKILL_1_LEVEL),
-            (attr_ids::REQUIRED_SKILL_2, attr_ids::REQUIRED_SKILL_2_LEVEL),
-            (attr_ids::REQUIRED_SKILL_3, attr_ids::REQUIRED_SKILL_3_LEVEL),
-            (1285, 1286),
-            (1289, 1287),
-            (1290, 1288),
-        ] {
-            if let Some(&req_skill_f) = mod_type.default_attributes.get(&skill_attr) {
-                let req_skill_id = req_skill_f as TypeId;
-                if req_skill_id > 0 {
-                    let req_level = mod_type
-                        .default_attributes
-                        .get(&level_attr)
-                        .copied()
-                        .unwrap_or(1.0)
-                        .max(1.0) as u8;
-                    let trained_level = self
-                        .character_skills
-                        .get(&req_skill_id)
-                        .copied()
-                        .unwrap_or(0);
-                    if trained_level < req_level {
-                        return Err(format!(
-                            "Missing required skill {req_skill_id} level {req_level} (trained: {trained_level}) for module {} (type {})",
-                            mod_type.name, module_type_id
-                        ));
-                    }
-                }
-            }
+        // Validate required character skills only when bringing/fitting online
+        if online {
+            self.check_required_skills(module_type_id, &mod_type.name, &mod_type.default_attributes)?;
         }
 
         // Validate calibration (for rigs)
@@ -601,10 +573,67 @@ impl ShipFittingEngine {
     }
 
     /// Brings an offline fitted module online, checking maxGroupOnline and CPU/PG.
+    fn check_required_skills(
+        &self,
+        module_type_id: TypeId,
+        mod_name: &str,
+        default_attributes: &HashMap<u16, f64>,
+    ) -> Result<(), String> {
+        for (skill_attr, level_attr) in [
+            (attr_ids::REQUIRED_SKILL_1, attr_ids::REQUIRED_SKILL_1_LEVEL),
+            (attr_ids::REQUIRED_SKILL_2, attr_ids::REQUIRED_SKILL_2_LEVEL),
+            (attr_ids::REQUIRED_SKILL_3, attr_ids::REQUIRED_SKILL_3_LEVEL),
+            (1285, 1286),
+            (1289, 1287),
+            (1290, 1288),
+        ] {
+            if let Some(&req_skill_f) = default_attributes.get(&skill_attr) {
+                let req_skill_id = req_skill_f as TypeId;
+                if req_skill_id > 0 {
+                    let req_level = default_attributes
+                        .get(&level_attr)
+                        .copied()
+                        .unwrap_or(1.0)
+                        .max(1.0) as u8;
+                    let trained_level = self
+                        .character_skills
+                        .get(&req_skill_id)
+                        .copied()
+                        .unwrap_or(0);
+                    if trained_level < req_level {
+                        return Err(format!(
+                            "Missing required skill {req_skill_id} level {req_level} (trained: {trained_level}) for module {mod_name} (type {module_type_id})"
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn set_module_online(
         &mut self,
         module_item_id: i64,
         sde: &SdeRegistry,
+    ) -> Result<(), String> {
+        self.set_module_online_inner(module_item_id, sde, true)
+    }
+
+    /// Brings an already-fitted module online during snapshot rebuild without re-checking skills
+    /// (preserves DB-seeded or undock-onlined state while still enforcing CPU/PG/burnout/maxGroupOnline).
+    pub fn set_module_online_skip_skills(
+        &mut self,
+        module_item_id: i64,
+        sde: &SdeRegistry,
+    ) -> Result<(), String> {
+        self.set_module_online_inner(module_item_id, sde, false)
+    }
+
+    fn set_module_online_inner(
+        &mut self,
+        module_item_id: i64,
+        sde: &SdeRegistry,
+        check_skills: bool,
     ) -> Result<(), String> {
         let (mod_type_id, _flag_id) = {
             let m = self
@@ -622,6 +651,9 @@ impl ShipFittingEngine {
             .types
             .get(&mod_type_id)
             .ok_or_else(|| format!("Unknown module type {mod_type_id}"))?;
+        if check_skills {
+            self.check_required_skills(mod_type_id, &mod_type.name, &mod_type.default_attributes)?;
+        }
 
         let mut max_group_online = mod_type
             .default_attributes

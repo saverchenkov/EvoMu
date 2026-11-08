@@ -1233,4 +1233,221 @@ async fn test_structure_ops_and_asset_safety_audit() {
         "50,000.00 ISK in cents"
     );
 }
+
+#[tokio::test]
+async fn playtest_batch_i_autofit_slash_notifications_and_dogma_get_all_info() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let uid = ctx.db.provision_player_account("batch_i_tester", "sec123");
+    let char_id = ctx
+        .db
+        .create_character(uid, "BatchI Tester", 1, 1, 11, 17, &ctx.sde)
+        .expect("create_character")
+        .character_id;
+    let rifter_id = 945_000_100_i64;
+    let station_id = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        let st = ch.station_id.expect("starter station");
+        ch.active_ship_id = rifter_id;
+        snap.items.insert(
+            rifter_id,
+            InventoryItemRecord {
+                item_id: rifter_id,
+                type_id: 587, // Rifter (3 Hi, 3 Med, 3 Lo)
+                owner_id: char_id,
+                location_id: st,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        st
+    });
+    let mut sess = setup_pilot(&ctx, 77_001, "batch_i_tester", "sec123", char_id).await;
+    sess.role |= eve_machonet::service_roles::ROLE_GM_MASK;
+    let kw = HashMap::new();
+    let ship_id = rifter_id;
+
+    // Clear initial login notifications
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // #648: /createitem <module> 1 creates singleton module and emits OnItemChange
+    let created = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/createitem 484 1".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/createitem");
+    let gun_id = created.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
+    assert!(ctx.db.with_snapshot(|s| s.items[&gun_id].singleton));
+    let item_notifs: Vec<String> = ctx
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .map(|n| n.event)
+        .collect();
+    assert!(
+        item_notifs.iter().any(|e| e == "OnItemChange"),
+        "expected OnItemChange from /createitem, got {item_notifs:?}"
+    );
+
+    // #647: Train turret skill so gun fits online, bind ship inventory via invbroker, and call Add with mismatched args[1] and flag=0 (flagAutoFit)
+    ctx.dispatch_rpc(
+        &mut sess,
+        "slash",
+        None,
+        "SlashCmd",
+        &[PyRep::String("/giveskill 3302 5".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("/giveskill 3302");
+    let bind = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[PyRep::Tuple(vec![PyRep::Integer(station_id), PyRep::Integer(15)]), PyRep::None],
+            &kw,
+            None,
+        )
+        .await
+        .expect("MachoBindObject");
+    let PyRep::Tuple(parts) = &bind else { panic!("MachoBindObject 2-tuple") };
+    let mgr = parts[0].as_i64().expect("mgr bound id") as u64;
+    let ship_inv = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            Some(mgr),
+            "GetInventoryFromId",
+            &[PyRep::Integer(ship_id), PyRep::Integer(0)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetInventoryFromId(ship)");
+    let ship_bid = ship_inv.as_i64().expect("ship bound id") as u64;
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        Some(ship_bid),
+        "Add",
+        &[
+            PyRep::Integer(gun_id),
+            PyRep::Integer(station_id + 123),
+            PyRep::Integer(0),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("autofit bound Add");
+    ctx.db.with_snapshot(|snap| {
+        let g = &snap.items[&gun_id];
+        assert_eq!(g.location_id, ship_id);
+        assert_eq!(g.flag, InventoryFlag::HiSlot0);
+    });
+
+    // #648: Train Hull Upgrades 4 and /fit DCU II (2048); verify online=true and notifications emitted
+    ctx.dispatch_rpc(
+        &mut sess,
+        "slash",
+        None,
+        "SlashCmd",
+        &[PyRep::String("/giveskill 3394 4".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("/giveskill 3394");
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let fit_dcu = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/fit 2048".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/fit 2048");
+    let dcu_id = fit_dcu.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
+    assert_eq!(fit_dcu.dict_get("online"), Some(&PyRep::Bool(true)));
+    let fit_notifs: Vec<String> = ctx
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .map(|n| n.event)
+        .collect();
+    assert!(fit_notifs.iter().any(|e| e == "OnItemChange"));
+    assert!(fit_notifs.iter().any(|e| e == "OnModuleFitted"));
+    assert!(fit_notifs.iter().any(|e| e == "OnModuleAttributeChanges"));
+    assert!(fit_notifs.iter().any(|e| e == "OnGodmaShipEffect"));
+
+    // #649 + #651: Remove turret skills (if any) so gun_id is offline, then call dogmaIM.GetAllInfo
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sk) = snap.skills.get_mut(&char_id) {
+            sk.remove(&3301);
+            sk.remove(&3302);
+        }
+        snap.module_online_states.insert(gun_id, false);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    let all_info = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "GetAllInfo",
+            &[PyRep::Bool(true), PyRep::Bool(true), PyRep::Bool(false)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("dogmaIM.GetAllInfo");
+    let PyRep::Dict(ship_info) = all_info.dict_get("shipInfo").expect("shipInfo") else {
+        panic!("shipInfo dict");
+    };
+    assert!(
+        ship_info.iter().any(|(k, _)| k.as_i64() == Some(gun_id)),
+        "offline fitted gun must still be present in shipInfo"
+    );
+    assert!(
+        ship_info.iter().any(|(k, _)| k.as_i64() == Some(dcu_id)),
+        "online DCU must be present in shipInfo"
+    );
+    let (_, ship_entry) = ship_info
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(ship_id))
+        .expect("ship entry");
+    let PyRep::Dict(attrs) = ship_entry.dict_get("attributes").expect("attributes") else {
+        panic!("attributes dict");
+    };
+    let cpu_load = attrs
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(eve_dogma::attr_ids::CPU_LOAD as i64))
+        .and_then(|(_, v)| v.as_f64())
+        .unwrap();
+    let pg_load = attrs
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(eve_dogma::attr_ids::POWER_LOAD as i64))
+        .and_then(|(_, v)| v.as_f64())
+        .unwrap();
+    assert_eq!(cpu_load, 0.0, "GetAllInfo shipInfo.attributes CPU_LOAD must be 0.0");
+    assert_eq!(pg_load, 0.0, "GetAllInfo shipInfo.attributes POWER_LOAD must be 0.0");
+}
 }

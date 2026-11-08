@@ -1155,7 +1155,8 @@ pub async fn handle(
                         message: format!("Type ID {type_id} not found in SDE"),
                     }));
                 };
-                let is_ship = inv_type.category_id == 6;
+                let is_singleton = inv_type.category_id == 6
+                    || (qty == 1 && matches!(inv_type.category_id, 7 | 32));
                 let res = ctx.db.try_with_mut_snapshot(|snap| {
                     let ch = snap.characters.get(&cid).ok_or_else(|| BridgeRpcError {
                         code: "CharacterNotFound".into(),
@@ -1175,7 +1176,7 @@ pub async fn handle(
                         location_id,
                         flag,
                         quantity: qty,
-                        singleton: is_ship && qty == 1,
+                        singleton: is_singleton,
                         version: 1,
                         dynamic_attributes: HashMap::new(),
                         source_mutaplasmid_id: None,

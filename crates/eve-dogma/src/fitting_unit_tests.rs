@@ -428,3 +428,54 @@ fn test_issue_424_heat_cycle_single_thermodynamics_and_per_slot_rolls() {
     }
     assert!(split_observed, "Symmetric neighbors must roll independently per slot");
 }
+
+#[test]
+fn offline_fitting_allows_missing_skills_while_online_enforces_skills() {
+    let mut sde = SdeRegistry::default();
+    sde.types.insert(
+        587,
+        make_type(
+            587,
+            25,
+            6,
+            &[
+                (attr_ids::LOW_SLOTS, 3.0),
+                (attr_ids::CPU_OUTPUT, 200.0),
+                (attr_ids::POWER_OUTPUT, 200.0),
+            ],
+            &[],
+        ),
+    );
+    sde.types.insert(
+        2048,
+        make_type(
+            2048,
+            60,
+            7,
+            &[
+                (attr_ids::CPU, 30.0),
+                (attr_ids::POWER, 1.0),
+                (attr_ids::REQUIRED_SKILL_1, 3300.0),
+                (attr_ids::REQUIRED_SKILL_1_LEVEL, 3.0),
+            ],
+            &[11, 16],
+        ),
+    );
+
+    let mut eng = ShipFittingEngine::from_sde(100, 587, &sde);
+    // Online fitting must still enforce required skills
+    let err = eng.fit_module(5001, 2048, 11, &sde).unwrap_err();
+    assert!(err.contains("Missing required skill"), "got: {err}");
+
+    // Offline fitting succeeds even without the skill (needed for GetAllInfo parity)
+    eng.fit_module_with_state(5001, 2048, 11, false, &sde).unwrap();
+    assert_eq!(eng.modules.get(&5001).map(|m| m.state), Some(ModuleState::Offline));
+
+    // Onlining still rejects until the skill is trained
+    let online_err = eng.set_module_online(5001, &sde).unwrap_err();
+    assert!(online_err.contains("Missing required skill"), "got: {online_err}");
+
+    eng.set_character_skills(HashMap::from([(3300, 3)]));
+    eng.set_module_online(5001, &sde).unwrap();
+    assert_eq!(eng.modules.get(&5001).map(|m| m.state), Some(ModuleState::Online));
+}

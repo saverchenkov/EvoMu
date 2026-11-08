@@ -1340,7 +1340,7 @@ impl ServerContext {
             if !want_online {
                 continue;
             }
-            match fit.set_module_online(item_id, &self.sde) {
+            match fit.set_module_online_skip_skills(item_id, &self.sde) {
                 Ok(()) => {
                     if active_states.contains(&item_id) {
                         let _ = fit.activate_module(item_id, false, &self.sde);

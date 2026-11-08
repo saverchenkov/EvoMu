@@ -999,17 +999,33 @@ pub async fn handle_gm_slash_ext(
                 blueprint_runs_remaining: None,
             };
             snap.items.insert(item_id, rec.clone());
-            snap.module_online_states.insert(item_id, true);
+            snap.module_online_states.insert(item_id, false);
             Ok((rec, chosen_flag))
         });
 
         return match res {
             Ok((rec, chosen_flag)) => {
                 ctx.invalidate_ship_fitting(ship_id);
-                let _ = ctx.get_or_rebuild_ship_fitting(rec.owner_id, ship_id);
-                let item_row = eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(
-                    crate::services::inventory_bound::item_to_packed_cells(ctx, &rec),
-                );
+                let flag_u16 = chosen_flag as u16;
+                let is_fitting_slot = matches!(flag_u16, 11..=34 | 92..=94 | 125..=132);
+                let mut is_online = false;
+                if is_fitting_slot {
+                    if let Ok(mut fit) = ctx.get_or_rebuild_ship_fitting(rec.owner_id, ship_id) {
+                        if fit.modules.contains_key(&rec.item_id)
+                            && fit.set_module_online(rec.item_id, &ctx.sde).is_ok()
+                        {
+                            is_online = true;
+                        }
+                    }
+                    if is_online {
+                        ctx.db.with_mut_snapshot(|snap| {
+                            snap.module_online_states.insert(rec.item_id, true);
+                        });
+                        ctx.invalidate_ship_fitting(ship_id);
+                    }
+                }
+                let item_row = eve_proto::DBRowDescriptor::inv_item_header()
+                    .build_dbrow(crate::services::inventory_bound::item_to_packed_cells(ctx, &rec));
                 // ixLocationID (3) = 0, ixFlag (4) = 0 notifies `invCache`, `godma`, and `dogmaLocation`
                 // of the newly fitted module on `ship_id` at `chosen_flag`.
                 let _ = ctx.notify_item_change(
@@ -1017,13 +1033,33 @@ pub async fn handle_gm_slash_ext(
                     item_row,
                     vec![(3, PyRep::Integer(0)), (4, PyRep::Integer(0))],
                 );
+                if is_fitting_slot {
+                    ctx.notify(
+                        crate::router::NotificationTarget::Character(rec.owner_id),
+                        "OnModuleFitted",
+                        "charid",
+                        vec![PyRep::Integer(rec.item_id), PyRep::Integer(chosen_flag as i64)],
+                    );
+                    let _ = ctx.notify_module_online_state(rec.owner_id, rec.item_id, is_online);
+                    if is_online {
+                        let eff_id = ctx.effect_id_for_module(type_id, Some("online")).unwrap_or(16) as i32;
+                        ctx.notify_godma_ship_effect(
+                            crate::router::NotificationTarget::Character(rec.owner_id),
+                            rec.item_id,
+                            eff_id,
+                            true,
+                            0,
+                            0,
+                        );
+                    }
+                }
                 Some(Ok(PyRep::keyval([
                     ("command", PyRep::String(cmd.to_string())),
                     ("shipID", PyRep::Integer(ship_id)),
                     ("itemID", PyRep::Integer(rec.item_id)),
                     ("typeID", PyRep::Integer(type_id as i64)),
                     ("flagID", PyRep::Integer(chosen_flag as i64)),
-                    ("online", PyRep::Bool(true)),
+                    ("online", PyRep::Bool(is_online)),
                 ])))
             }
             Err(e) => Some(Err(e)),
