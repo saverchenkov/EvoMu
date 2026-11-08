@@ -612,7 +612,7 @@ async fn test_blueprint_manager_get_blueprint_data_by_owner_market_research_copy
     let PyRep::List(after_bps) = &after_pair[0] else { panic!("Expected List") };
     assert_eq!(
         count_for_facility(&after_pair[1], station_id),
-        Some((initial_bps.len() + 1) as i64)
+        Some((initial_bps.len() + 2) as i64)
     );
     let final_bpo = after_bps
         .iter()

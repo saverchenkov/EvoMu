@@ -834,20 +834,20 @@ async fn test_esi5_corporation_divisions_blueprints_and_standings() {
         true,
     );
     let bp_arr = bps.as_array().expect("blueprints array");
-    assert_eq!(bp_arr.len(), 2);
-    assert_eq!(bp_arr[0]["item_id"], json!(bpo_id));
-    assert_eq!(bp_arr[0]["type_id"], json!(688));
-    assert_eq!(bp_arr[0]["location_flag"], json!("CorpSAG1"));
-    assert_eq!(bp_arr[0]["quantity"], json!(-1));
-    assert_eq!(bp_arr[0]["runs"], json!(-1));
-    assert_eq!(bp_arr[0]["material_efficiency"], json!(8));
-    assert_eq!(bp_arr[0]["time_efficiency"], json!(16));
-    assert_eq!(bp_arr[1]["item_id"], json!(bpc_id));
-    assert_eq!(bp_arr[1]["location_flag"], json!("CorpSAG1"));
-    assert_eq!(bp_arr[1]["quantity"], json!(-2));
-    assert_eq!(bp_arr[1]["runs"], json!(5));
-    assert_eq!(bp_arr[1]["material_efficiency"], json!(8));
-    assert_eq!(bp_arr[1]["time_efficiency"], json!(16));
+    assert_eq!(bp_arr.len(), 6);
+    let bpo_entry = bp_arr.iter().find(|bp| bp["item_id"] == json!(bpo_id)).expect("BPO entry");
+    assert_eq!(bpo_entry["type_id"], json!(688));
+    assert_eq!(bpo_entry["location_flag"], json!("CorpSAG1"));
+    assert_eq!(bpo_entry["quantity"], json!(-1));
+    assert_eq!(bpo_entry["runs"], json!(-1));
+    assert_eq!(bpo_entry["material_efficiency"], json!(8));
+    assert_eq!(bpo_entry["time_efficiency"], json!(16));
+    let bpc_entry = bp_arr.iter().find(|bp| bp["item_id"] == json!(bpc_id)).expect("created BPC entry");
+    assert_eq!(bpc_entry["location_flag"], json!("CorpSAG1"));
+    assert_eq!(bpc_entry["quantity"], json!(-2));
+    assert_eq!(bpc_entry["runs"], json!(5));
+    assert_eq!(bpc_entry["material_efficiency"], json!(8));
+    assert_eq!(bpc_entry["time_efficiency"], json!(16));
     assert_eq!(
         check_cached_get(
             &router,

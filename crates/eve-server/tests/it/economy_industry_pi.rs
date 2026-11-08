@@ -681,7 +681,6 @@ async fn test_industry_blueprint_data_facilities_jobs() {
         ("activityID", PyRep::Integer(1)),
         ("runs", PyRep::Integer(2)),
         ("productTypeID", PyRep::Integer(587)),
-        ("licensedRuns", PyRep::Integer(2)),
         ("status", PyRep::Integer(1)),
     ]);
 

@@ -360,12 +360,55 @@ async fn test_project_discovery_rpcs_ak_notify_and_login_campaigns_e2e() {
         .or_else(|| kv_get(&camp_state, "campaign_id"))
         .and_then(|v| v.as_i64())
     {
+        let enroll_rpc_err = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "loginCampaignManager",
+                None,
+                "enroll_in_campaign",
+                &[PyRep::Integer(camp_id)],
+                &HashMap::new(),
+                None,
+            )
+            .await
+            .expect_err("non-catalog enroll_in_campaign RPC must be rejected");
+        assert_eq!(enroll_rpc_err.code, "UnimplementedRPC");
+
+        let select_rpc_err = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "loginCampaignManager",
+                None,
+                "select_campaign",
+                &[PyRep::Integer(camp_id)],
+                &HashMap::new(),
+                None,
+            )
+            .await
+            .expect_err("non-catalog select_campaign RPC must be rejected");
+        assert_eq!(select_rpc_err.code, "UnimplementedRPC");
+    }
+
+    let claim1 = rpc_ok(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[]).await;
+    assert!(!matches!(claim1, PyRep::None));
+
+    // GM /campaign enroll into another campaign must emit OnCampaignEnrollmentChanged
+    // without resetting the character-global daily claim cooldown.
+    let sde_campaigns = eve_server::services::campaigns_and_milestones::get_sde_login_campaigns(&ctx.sde);
+    if let Some(&alt_camp_id) = sde_campaigns
+        .keys()
+        .find(|&&id| Some(id) != kv_get(&camp_state, "campaign_id").and_then(|v| v.as_i64()))
+        .or_else(|| sde_campaigns.keys().next())
+    {
+        let (mut gm_sess, _) =
+            login_existing_player(&ctx, 5104, "demo", "demo-secret", 90_000_001).await;
+        gm_sess.role = eve_machonet::service_roles::ROLE_ADMIN;
         let _ = rpc_ok(
             &ctx,
-            &mut sess,
-            "loginCampaignManager",
-            "enroll_in_campaign",
-            &[PyRep::Integer(camp_id)],
+            &mut gm_sess,
+            "slash",
+            "SlashCmd",
+            &[PyRep::String(format!("/campaign enroll {alt_camp_id} {char_id}"))],
         )
         .await;
         let notifs_camp = drain_all_notifications(&ctx, &mut sess, char_id);
@@ -374,9 +417,20 @@ async fn test_project_discovery_rpcs_ak_notify_and_login_campaigns_e2e() {
             "Expected OnCampaignEnrollmentChanged notification, got {notifs_camp:?}"
         );
     }
-
-    let claim1 = rpc_ok(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[]).await;
-    assert!(!matches!(claim1, PyRep::None));
+    let same_day_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "loginCampaignManager",
+            None,
+            "claim_reward",
+            &[],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect_err("same-day claim after campaign switch must be rejected");
+    const ALREADY_CLAIMED_ERR: &str = "DailyRewardAlreadyClaimedToday";
+    assert_eq!(same_day_err.code, ALREADY_CLAIMED_ERR);
 
     // Advance clock 24h + 5s and claim Day 2 reward
     ctx.advance_secs(86_405);

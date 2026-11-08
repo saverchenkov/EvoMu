@@ -376,10 +376,6 @@ pub async fn handle(
         ("loginCampaignManager", "claim_reward") => {
             Some(handle_login_campaign_claim_reward(ctx, session))
         }
-        ("loginCampaignManager", "enroll_in_campaign")
-        | ("loginCampaignManager", "select_campaign") => {
-            Some(playtime::handle_login_campaign_enroll(ctx, session, args))
-        }
         // parity: rpc:seasonalLoginCampaignManager.get_active_campaign
         ("seasonalLoginCampaignManager", "get_active_campaign") => {
             Some(handle_seasonal_login_get_active_campaign(ctx, session))
@@ -451,7 +447,8 @@ fn handle_login_campaign_get_state(
             .get(&(char_id, campaign_id))
             .cloned()
             .unwrap_or_default();
-        let already_claimed_today = claimed_days.contains(&today);
+        let already_claimed_today = claimed_days.contains(&today)
+            || ext.last_login_reward_claim_day_by_char.get(&char_id).copied() == Some(today);
         let num_claimed = claimed_days.len() as i64;
         let next_reward_idx = num_claimed + 1;
 
@@ -557,6 +554,13 @@ fn handle_login_campaign_claim_reward(
             })
             .ok_or_else(|| err("CharacterNotFound", format!("Character {char_id} not found")))?;
 
+        if ext.last_login_reward_claim_day_by_char.get(&char_id).copied() == Some(today) {
+            return Err(err(
+                "DailyRewardAlreadyClaimedToday",
+                "Daily login reward already claimed today",
+            ));
+        }
+
         let claimed_days = ext
             .login_campaign_claimed_days
             .entry((char_id, campaign_id))
@@ -612,6 +616,7 @@ fn handle_login_campaign_claim_reward(
 
         claimed_days.push(today);
         let reward_index = claimed_days.len() as i64;
+        ext.last_login_reward_claim_day_by_char.insert(char_id, today);
         let claimed_reps: Vec<PyRep> = (1..=reward_index).map(PyRep::Integer).collect();
         snap.next_entity_id += 1;
         let claim_event_id = snap.next_entity_id;

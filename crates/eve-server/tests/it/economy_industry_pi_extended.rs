@@ -208,7 +208,7 @@ async fn test_industry_blueprint_copying_me_te_and_repackage() {
 
     let copy_skilled_5 = ctx.dispatch_rpc(&mut sess, "industryManager", None, "InstallJob", &[PyRep::keyval([
         ("blueprintID", PyRep::Integer(bpo_copy_2)), ("facilityID", PyRep::Integer(JITA_STATION_ID)),
-        ("activityID", PyRep::Integer(5)), ("runs", PyRep::Integer(5)),
+        ("activityID", PyRep::Integer(5)), ("runs", PyRep::Integer(1)), ("licensedRuns", PyRep::Integer(5)),
     ])], &kw, None).await.expect("Install skilled 5-run copy job");
     let copy_dur_skilled_5 = copy_skilled_5.dict_get("durationSeconds").and_then(|v| v.as_i64()).unwrap();
     let expected_copy_1 = ((copy_dur_unskilled_1 as f64) * 0.75 * 0.85).round() as i64;

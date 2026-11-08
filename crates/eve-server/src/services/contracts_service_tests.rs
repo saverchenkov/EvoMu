@@ -354,3 +354,402 @@ fn test_courier_contract_complete_and_break_plastic_wrap() {
     .unwrap();
     assert_eq!(dict_str(&broken, "status"), Some("Failed"));
 }
+
+#[test]
+fn test_contract_item_flags_asset_safety_alsc_and_corp_rbac_security() {
+    use eve_db::corp_roles;
+    let (ctx, mut issuer_sess, issuer_id, mut acceptor_sess, acceptor_id, station_id, _dest_id) =
+        setup_contracts_ctx();
+    let kwargs = HashMap::new();
+    let corp_id = 98_900_001_i64;
+    let other_ceo = 90_000_999_i64;
+    let buyer_corp_id = 98_900_002_i64;
+    let fitted_rig_id = 820_001_i64;
+    let qcore_id = 820_002_i64;
+    let wrap_item_id = 820_003_i64;
+    let alsc_item_id = 820_004_i64;
+    let corp_sag2_item_id = 820_005_i64;
+    let corp_sag2_item_2 = 820_006_i64;
+    let buyer_sag2_req_id = 820_007_i64;
+    let personal_offer_id = 820_008_i64;
+    let auc_item_id = 820_009_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord {
+            corporation_id: corp_id,
+            name: "Security Test Corp".into(),
+            ticker: "SEC".into(),
+            ceo_id: other_ceo,
+            master_wallet: IskCents::from_isk(50_000_000),
+            members: [other_ceo, issuer_id].into_iter().collect(),
+            ..Default::default()
+        };
+        corp.ensure_wallet_divisions();
+        corp.set_division_balance(1, IskCents::from_isk(50_000_000));
+        snap.corporations.insert(corp_id, corp);
+
+        let mut buyer_corp = eve_db::CorporationRecord {
+            corporation_id: buyer_corp_id,
+            name: "Buyer Corp".into(),
+            ticker: "BUY".into(),
+            ceo_id: other_ceo,
+            master_wallet: IskCents::from_isk(50_000_000),
+            members: [other_ceo, acceptor_id].into_iter().collect(),
+            ..Default::default()
+        };
+        buyer_corp.ensure_wallet_divisions();
+        buyer_corp.set_division_balance(1, IskCents::from_isk(50_000_000));
+        snap.corporations.insert(buyer_corp_id, buyer_corp);
+
+        if let Some(ch) = snap.characters.get_mut(&issuer_id) {
+            ch.corporation_id = corp_id;
+            ch.balance = IskCents::from_isk(50_000_000);
+        }
+        if let Some(ch) = snap.characters.get_mut(&acceptor_id) {
+            ch.corporation_id = buyer_corp_id;
+            ch.balance = IskCents::from_isk(50_000_000);
+        }
+
+        snap.items.insert(
+            fitted_rig_id,
+            make_fighter_item(fitted_rig_id, 34, issuer_id, station_id, InventoryFlag::RigSlot0, 1),
+        );
+        snap.items.insert(
+            qcore_id,
+            make_fighter_item(qcore_id, 42_685, corp_id, station_id, InventoryFlag::QuantumCoreRoom, 1),
+        );
+        snap.items.insert(
+            wrap_item_id,
+            make_fighter_item(wrap_item_id, 60, issuer_id, station_id, InventoryFlag::Hangar, 1),
+        );
+        snap.items.insert(
+            alsc_item_id,
+            make_fighter_item(alsc_item_id, 34, issuer_id, station_id, InventoryFlag::Hangar, 5),
+        );
+        snap.items.insert(
+            corp_sag2_item_id,
+            make_fighter_item(corp_sag2_item_id, 34, corp_id, station_id, InventoryFlag::CorpSAG2, 10),
+        );
+        snap.items.insert(
+            corp_sag2_item_2,
+            make_fighter_item(corp_sag2_item_2, 34, corp_id, station_id, InventoryFlag::CorpSAG2, 10),
+        );
+        snap.items.insert(
+            buyer_sag2_req_id,
+            make_fighter_item(buyer_sag2_req_id, 35, buyer_corp_id, station_id, InventoryFlag::CorpSAG2, 20),
+        );
+        snap.items.insert(
+            personal_offer_id,
+            make_fighter_item(personal_offer_id, 34, issuer_id, station_id, InventoryFlag::Hangar, 5),
+        );
+        snap.items.insert(
+            auc_item_id,
+            make_fighter_item(auc_item_id, 34, issuer_id, station_id, InventoryFlag::Hangar, 5),
+        );
+    });
+    crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(
+        &ctx,
+        |cs| {
+            cs.alsc_locked_items.insert(alsc_item_id);
+        },
+    );
+
+    // 1. Fitted rig/module rejected for personal contract
+    let err_rig = handle(
+        &ctx,
+        &mut issuer_sess,
+        "contractProxy",
+        "CreateContract",
+        &[PyRep::keyval([
+            ("contractType", PyRep::String("ItemExchange".into())),
+            ("startStationID", PyRep::Integer(station_id)),
+            ("price", PyRep::Real(100_000.0)),
+            ("itemList", PyRep::List(vec![PyRep::Integer(fitted_rig_id)])),
+        ])],
+        &kwargs,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_rig.code, "ContractItemFlagInvalid");
+
+    // 2. AssetSafetyWrap (type_id 60) rejected
+    let err_wrap = handle(
+        &ctx,
+        &mut issuer_sess,
+        "contractProxy",
+        "CreateContract",
+        &[PyRep::keyval([
+            ("contractType", PyRep::String("ItemExchange".into())),
+            ("startStationID", PyRep::Integer(station_id)),
+            ("price", PyRep::Real(100_000.0)),
+            ("itemList", PyRep::List(vec![PyRep::Integer(wrap_item_id)])),
+        ])],
+        &kwargs,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_wrap.code, "ItemCannotBeContracted");
+
+    // 3. ALSC locked item rejected
+    let err_alsc = handle(
+        &ctx,
+        &mut issuer_sess,
+        "contractProxy",
+        "CreateContract",
+        &[PyRep::keyval([
+            ("contractType", PyRep::String("ItemExchange".into())),
+            ("startStationID", PyRep::Integer(station_id)),
+            ("price", PyRep::Real(100_000.0)),
+            ("itemList", PyRep::List(vec![PyRep::Integer(alsc_item_id)])),
+        ])],
+        &kwargs,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_alsc.code, "ContractItemLocked");
+
+    // 4. Stale session.corp_role ignored when DB has no corp role; QuantumCoreRoom rejected even for Director
+    issuer_sess.corporation_id = Some(corp_id);
+    issuer_sess.corp_role = corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_CONTRACT_MANAGER;
+    let err_stale = handle(
+        &ctx,
+        &mut issuer_sess,
+        "contractProxy",
+        "CreateContract",
+        &[PyRep::keyval([
+            ("contractType", PyRep::String("ItemExchange".into())),
+            ("forCorp", PyRep::Bool(true)),
+            ("startStationID", PyRep::Integer(station_id)),
+            ("price", PyRep::Real(100_000.0)),
+            ("itemList", PyRep::List(vec![PyRep::Integer(corp_sag2_item_id)])),
+        ])],
+        &kwargs,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_stale.code, "CrpAccessDenied");
+
+    // Grant ROLE_CONTRACT_MANAGER + ROLE_ACCOUNT_CAN_TAKE[0] + ROLE_HANGAR_CAN_TAKE[0] (wrong div!) + pending 24h ROLE_HANGAR_CAN_TAKE[1]
+    let now = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.corporations.get_mut(&corp_id) {
+            c.member_roles.insert(
+                issuer_id,
+                corp_roles::ROLE_CONTRACT_MANAGER
+                    | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]
+                    | corp_roles::ROLE_HANGAR_CAN_TAKE[0],
+            );
+        }
+        snap.corp_governance.entry(corp_id).or_default().pending_role_grants.insert(
+            issuer_id,
+            (corp_roles::ROLE_HANGAR_CAN_TAKE[1], now + 86_400),
+        );
+    });
+
+    // QuantumCoreRoom rejected even with roles
+    let err_qcore = handle(
+        &ctx,
+        &mut issuer_sess,
+        "contractProxy",
+        "CreateContract",
+        &[PyRep::keyval([
+            ("contractType", PyRep::String("ItemExchange".into())),
+            ("forCorp", PyRep::Bool(true)),
+            ("startStationID", PyRep::Integer(station_id)),
+            ("price", PyRep::Real(100_000.0)),
+            ("itemList", PyRep::List(vec![PyRep::Integer(qcore_id)])),
+        ])],
+        &kwargs,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_qcore.code, "ContractItemFlagInvalid");
+
+    // 24h stasis blocks CorpSAG2 take role before maturation
+    let err_stasis = handle(
+        &ctx,
+        &mut issuer_sess,
+        "contractProxy",
+        "CreateContract",
+        &[PyRep::keyval([
+            ("contractType", PyRep::String("ItemExchange".into())),
+            ("forCorp", PyRep::Bool(true)),
+            ("startStationID", PyRep::Integer(station_id)),
+            ("price", PyRep::Real(100_000.0)),
+            ("itemList", PyRep::List(vec![PyRep::Integer(corp_sag2_item_id)])),
+        ])],
+        &kwargs,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_stasis.code, "CrpAccessDenied");
+
+    // Advance clock 24h + 1s -> pending grant matures -> CreateContract succeeds, and DeleteContract restores CorpSAG2!
+    ctx.advance_virtual_clock(86_401);
+    let created_del = handle(
+        &ctx,
+        &mut issuer_sess,
+        "contractProxy",
+        "CreateContract",
+        &[PyRep::keyval([
+            ("contractType", PyRep::String("ItemExchange".into())),
+            ("forCorp", PyRep::Bool(true)),
+            ("startStationID", PyRep::Integer(station_id)),
+            ("price", PyRep::Real(100_000.0)),
+            ("itemList", PyRep::List(vec![PyRep::Integer(corp_sag2_item_id)])),
+        ])],
+        &kwargs,
+    )
+    .unwrap()
+    .unwrap();
+    let cid_del = dict_i64(&created_del, "contractID").unwrap();
+    handle(&ctx, &mut issuer_sess, "contractProxy", "DeleteContract", &[PyRep::Integer(cid_del)], &kwargs)
+        .unwrap()
+        .unwrap();
+    assert_eq!(ctx.db.get_item(corp_sag2_item_id).unwrap().flag, InventoryFlag::CorpSAG2);
+
+    // Expiry ALSO restores CorpSAG2!
+    let created_exp = handle(
+        &ctx,
+        &mut issuer_sess,
+        "contractProxy",
+        "CreateContract",
+        &[PyRep::keyval([
+            ("contractType", PyRep::String("ItemExchange".into())),
+            ("forCorp", PyRep::Bool(true)),
+            ("startStationID", PyRep::Integer(station_id)),
+            ("price", PyRep::Real(100_000.0)),
+            ("itemList", PyRep::List(vec![PyRep::Integer(corp_sag2_item_2)])),
+        ])],
+        &kwargs,
+    )
+    .unwrap()
+    .unwrap();
+    let cid_exp = dict_i64(&created_exp, "contractID").unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.contracts.get_mut(&cid_exp).unwrap().expiration_unix = 1;
+        assert_eq!(snap.resolve_expired_contract(cid_exp, ctx.now_unix()), Some("Expired"));
+    });
+    assert_eq!(ctx.db.get_item(corp_sag2_item_2).unwrap().flag, InventoryFlag::CorpSAG2);
+
+    // 5. Corp AcceptContract requires division take role for requested_items & ROLE_ACCOUNT_CAN_TAKE for required_isk
+    let personal_req = handle(
+        &ctx,
+        &mut issuer_sess,
+        "contractProxy",
+        "CreateContract",
+        &[PyRep::keyval([
+            ("contractType", PyRep::String("ItemExchange".into())),
+            ("forCorp", PyRep::Bool(false)),
+            ("startStationID", PyRep::Integer(station_id)),
+            ("price", PyRep::Real(250_000.0)),
+            ("itemList", PyRep::List(vec![PyRep::Integer(personal_offer_id)])),
+            ("requestedItems", PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(35), PyRep::Integer(5)])])),
+        ])],
+        &kwargs,
+    )
+    .unwrap()
+    .unwrap();
+    let cid_req = dict_i64(&personal_req, "contractID").unwrap();
+
+    acceptor_sess.corporation_id = Some(buyer_corp_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.corporations.get_mut(&buyer_corp_id) {
+            c.member_roles.insert(acceptor_id, corp_roles::ROLE_CONTRACT_MANAGER);
+        }
+    });
+    let err_acc_div = handle(
+        &ctx,
+        &mut acceptor_sess,
+        "contractProxy",
+        "AcceptContract",
+        &[PyRep::Integer(cid_req), PyRep::Bool(true)],
+        &kwargs,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_acc_div.code, "MissingRequestedContractItems");
+
+    // Grant CorpSAG2 take role, still missing ROLE_ACCOUNT_CAN_TAKE[0] -> CrpAccessDenied
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.corporations.get_mut(&buyer_corp_id) {
+            c.member_roles.insert(
+                acceptor_id,
+                corp_roles::ROLE_CONTRACT_MANAGER | corp_roles::ROLE_HANGAR_CAN_TAKE[1],
+            );
+        }
+    });
+    let err_acc_acct = handle(
+        &ctx,
+        &mut acceptor_sess,
+        "contractProxy",
+        "AcceptContract",
+        &[PyRep::Integer(cid_req), PyRep::Bool(true)],
+        &kwargs,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_acc_acct.code, "CrpAccessDenied");
+
+    // 6. PlaceBid(forCorp = true) requires ROLE_ACCOUNT_CAN_TAKE[0], then succeeds when granted
+    let auc_res = handle(
+        &ctx,
+        &mut issuer_sess,
+        "contractProxy",
+        "CreateContract",
+        &[PyRep::keyval([
+            ("contractType", PyRep::String("Auction".into())),
+            ("forCorp", PyRep::Bool(false)),
+            ("startStationID", PyRep::Integer(station_id)),
+            ("price", PyRep::Real(100_000.0)),
+            ("collateral", PyRep::Real(500_000.0)),
+            ("itemList", PyRep::List(vec![PyRep::Integer(auc_item_id)])),
+        ])],
+        &kwargs,
+    )
+    .unwrap()
+    .unwrap();
+    let auc_cid = dict_i64(&auc_res, "contractID").unwrap();
+    let err_bid_acct = handle(
+        &ctx,
+        &mut acceptor_sess,
+        "contractProxy",
+        "PlaceBid",
+        &[PyRep::Integer(auc_cid), PyRep::Real(150_000.0), PyRep::Bool(true)],
+        &kwargs,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_bid_acct.code, "CrpAccessDenied");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.corporations.get_mut(&buyer_corp_id) {
+            c.member_roles.insert(
+                acceptor_id,
+                corp_roles::ROLE_CONTRACT_MANAGER
+                    | corp_roles::ROLE_HANGAR_CAN_TAKE[1]
+                    | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0],
+            );
+        }
+    });
+    handle(
+        &ctx,
+        &mut acceptor_sess,
+        "contractProxy",
+        "AcceptContract",
+        &[PyRep::Integer(cid_req), PyRep::Bool(true)],
+        &kwargs,
+    )
+    .unwrap()
+    .unwrap();
+    handle(
+        &ctx,
+        &mut acceptor_sess,
+        "contractProxy",
+        "PlaceBid",
+        &[PyRep::Integer(auc_cid), PyRep::Real(150_000.0), PyRep::Bool(true)],
+        &kwargs,
+    )
+    .unwrap()
+    .unwrap();
+}

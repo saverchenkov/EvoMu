@@ -84,7 +84,9 @@ pub fn handle_industry_jobs(
             let raw_input_container = lookup_first("inputLocationID").or_else(|| lookup_first("inputContainerID")).or_else(|| lookup_first("containerID")).and_then(|v| v.as_i64()).filter(|&id| id > 0);
             let raw_output_location = lookup_first("outputLocationID").or_else(|| lookup_first("outputContainerID")).and_then(|v| v.as_i64()).filter(|&id| id > 0);
             let explicit_output_flag = lookup_first("outputFlag").and_then(|v| v.as_i64()).and_then(|f| u16::try_from(f).ok()).map(InventoryFlag::from_u16);
-            let explicit_licensed_runs = lookup_first("licensedRuns").or_else(|| lookup_first("licensed_runs")).and_then(|v| v.as_i64()).filter(|&n| n > 0).map(|n| n as u32);
+            let raw_licensed_runs = lookup_first("licensedRuns")
+                .or_else(|| lookup_first("licensed_runs"))
+                .filter(|v| !matches!(v, PyRep::None));
 
             let (raw_bp_type_id, raw_activity_id, runs_raw) = match args.first() {
                 Some(PyRep::KeyVal(_) | PyRep::Dict(_)) => {
@@ -150,6 +152,61 @@ pub fn handle_industry_jobs(
                     code: "UnknownBlueprint".into(),
                     message: format!("Blueprint type {bp_type_id} not found in SDE"),
                 }));
+            };
+            if activity_id != 5 && raw_licensed_runs.is_some() {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidIndustryJobParameters".into(),
+                    message: "licensedRuns is only allowed for copying jobs (activityID 5)".into(),
+                }));
+            }
+            let copy_licensed_runs: u32 = if activity_id == 5 {
+                let parsed = match raw_licensed_runs {
+                    Some(raw) => {
+                        let Some(val) = raw.as_i64().filter(|&n| n >= 1) else {
+                            return Some(Err(BridgeRpcError {
+                                code: "InvalidIndustryJobParameters".into(),
+                                message: "licensedRuns must be a positive integer".into(),
+                            }));
+                        };
+                        let (Ok(u_val), Ok(_)) = (u32::try_from(val), i32::try_from(val)) else {
+                            return Some(Err(BridgeRpcError {
+                                code: "MaxRunsPerCopyExceeded".into(),
+                                message: "Requested licensedRuns exceeds maximum allowed copy runs".into(),
+                            }));
+                        };
+                        u_val
+                    }
+                    None => runs,
+                };
+                if bp.max_production_limit > 0 && parsed > bp.max_production_limit {
+                    return Some(Err(BridgeRpcError {
+                        code: "MaxRunsPerCopyExceeded".into(),
+                        message: format!(
+                            "Requested {parsed} copy runs exceeds blueprint maxProductionLimit {}",
+                            bp.max_production_limit
+                        ),
+                    }));
+                }
+                if bp.max_production_limit == 0 && parsed > 1_000 {
+                    return Some(Err(BridgeRpcError {
+                        code: "MaxRunsPerCopyExceeded".into(),
+                        message: "Requested copy runs exceeds maximum limit 1000".into(),
+                    }));
+                }
+                parsed
+            } else {
+                0
+            };
+            let total_copy_runs: u32 = if activity_id == 5 {
+                let Some(total) = runs.checked_mul(copy_licensed_runs).filter(|&t| t <= 500_000) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidIndustryJobParameters".into(),
+                        message: "Total copy runs (runs * licensedRuns) exceeds maximum allowed cap".into(),
+                    }));
+                };
+                total
+            } else {
+                runs
             };
             let is_ancient_relic = ctx.sde.types.get(&bp_type_id).map(|t| t.group_id == 971).unwrap_or(false);
 
@@ -526,18 +583,6 @@ pub fn handle_industry_jobs(
                         message: "Blueprint Material Efficiency cannot exceed 10%".into(),
                     });
                 }
-                if activity_id == 5
-                    && bp.max_production_limit > 0
-                    && runs > bp.max_production_limit
-                {
-                    return Err(BridgeRpcError {
-                        code: "MaxRunsPerCopyExceeded".into(),
-                        message: format!(
-                            "Requested {runs} copy runs exceeds blueprint maxProductionLimit {}",
-                            bp.max_production_limit
-                        ),
-                    });
-                }
 
                 let adv_ind_mult = 1.0 - 0.03 * f64::from(adv_industry_lvl.min(5));
                 let te_skill_mult = (1.0 - 0.05 * f64::from(skill_lvl(3403).min(5))) * adv_ind_mult;
@@ -567,7 +612,7 @@ pub fn handle_industry_jobs(
                     5 => (((bp.copy_time_sec.max(1) as f64) * copy_skill_mult * eff_time_mod)
                         .round()
                         .max(1.0) as u64)
-                        .saturating_mul(runs as u64),
+                        .saturating_mul(u64::from(total_copy_runs)),
                     8 => (((bp.invention_time_sec.max(1) as f64) * eff_time_mod).round().max(1.0) as u64)
                         .saturating_mul(runs as u64),
                     9 => {
@@ -601,6 +646,7 @@ pub fn handle_industry_jobs(
                 } else {
                     0
                 };
+                let cost_runs = if activity_id == 5 { total_copy_runs } else { runs };
                 let mut cost_meta = super::industry_facilities_bps::compute_industry_job_costs_with_step(
                     ctx,
                     snap,
@@ -608,7 +654,7 @@ pub fn handle_industry_jobs(
                     bp_type_id,
                     activity_id,
                     research_step,
-                    runs,
+                    cost_runs,
                     station_id,
                     is_alpha_clone,
                 )?;
@@ -1012,7 +1058,7 @@ pub fn handle_industry_jobs(
                     bp_iid = split_id;
                 }
 
-                let licensed_runs = if activity_id == 8 && cost_meta.invented_runs > 0 { Some(cost_meta.invented_runs as u32) } else if activity_id == 5 { Some(explicit_licensed_runs.unwrap_or(runs)) } else { None };
+                let licensed_runs = if activity_id == 8 && cost_meta.invented_runs > 0 { Some(cost_meta.invented_runs as u32) } else if activity_id == 5 { Some(copy_licensed_runs) } else { None };
                 snap.industry_jobs.insert(jid, IndustryJobRecord {
                     job_id: jid, installer_id: char_id, facility_id: station_id, blueprint_item_id: bp_iid,
                     blueprint_type_id: bp_type_id, activity_id, runs, product_type_id, status: "Active".into(),

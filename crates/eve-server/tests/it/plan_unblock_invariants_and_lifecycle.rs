@@ -309,9 +309,9 @@ async fn test_e3_corp_contract_wallet_roles_and_issuer_departure() {
             InventoryItemRecord {
                 item_id,
                 type_id: 34,
-                owner_id: 90_000_001,
+                owner_id: corp_id,
                 location_id: JITA_STATION_ID,
-                flag: InventoryFlag::Hangar,
+                flag: InventoryFlag::CorpSAG1,
                 quantity: 1_000,
                 singleton: false,
                 version: 1,
@@ -354,8 +354,12 @@ async fn test_e3_corp_contract_wallet_roles_and_issuer_departure() {
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-            corp.member_roles
-                .insert(90_000_001, corp_roles::ROLE_CONTRACT_MANAGER);
+            corp.member_roles.insert(
+                90_000_001,
+                corp_roles::ROLE_CONTRACT_MANAGER
+                    | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]
+                    | corp_roles::ROLE_HANGAR_CAN_TAKE[0],
+            );
             if let Some(div) = corp.wallet_divisions.first_mut() {
                 div.balance = IskCents(0); // empty division 1 to test short funds
             }
@@ -411,8 +415,8 @@ async fn test_e3_corp_contract_wallet_roles_and_issuer_departure() {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) { ch.corporation_id = corp_id; }
         for iid in [880_002_002_i64, 880_002_003_i64] {
             snap.items.insert(iid, InventoryItemRecord {
-                item_id: iid, type_id: 34, owner_id: 90_000_001, location_id: JITA_STATION_ID,
-                flag: InventoryFlag::Hangar, quantity: 100, singleton: false, version: 1, ..Default::default()
+                item_id: iid, type_id: 34, owner_id: corp_id, location_id: JITA_STATION_ID,
+                flag: InventoryFlag::CorpSAG1, quantity: 100, singleton: false, version: 1, ..Default::default()
             });
         }
     });

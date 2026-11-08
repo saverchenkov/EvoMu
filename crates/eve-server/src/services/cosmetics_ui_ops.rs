@@ -99,6 +99,8 @@ pub struct CosmeticsUiExtendedState {
     #[serde(default, with = "claimed_days_by_char_campaign_serde")]
     pub login_campaign_claimed_days: HashMap<(i64, i64), Vec<u64>>,
     #[serde(default)]
+    pub last_login_reward_claim_day_by_char: HashMap<i64, u64>,
+    #[serde(default)]
     pub seasonal_claimed_days: HashMap<i64, Vec<u64>>,
     #[serde(default)]
     pub active_login_campaign_id: Option<i64>,

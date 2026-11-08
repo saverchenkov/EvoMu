@@ -1119,19 +1119,33 @@ impl WorldStateSnapshot {
                                 self.credit_contract_issuer(&c, IskCents(dep_raw));
                             }
                         }
+                        let winner_flag = if self.corporations.contains_key(&winner_id) {
+                            InventoryFlag::CorpDeliveries
+                        } else {
+                            InventoryFlag::Hangar
+                        };
                         for iid in &c.item_ids {
+                            self.service_state_blobs.remove(&format!("contract_orig_flag:{contract_id}:{iid}"));
                             if let Some(item) = self.items.get_mut(iid) {
                                 item.owner_id = winner_id;
                                 item.location_id = c.start_station_id;
-                                item.flag = InventoryFlag::Hangar;
+                                item.flag = winner_flag;
                                 item.version += 1;
                             }
                         }
-                        for item in self.items.values_mut() {
-                            if item.location_id == contract_id {
+                        let mut extra_ids: Vec<i64> = self
+                            .items
+                            .values()
+                            .filter(|item| item.location_id == contract_id)
+                            .map(|item| item.item_id)
+                            .collect();
+                        extra_ids.sort_unstable();
+                        for iid in extra_ids {
+                            self.service_state_blobs.remove(&format!("contract_orig_flag:{contract_id}:{iid}"));
+                            if let Some(item) = self.items.get_mut(&iid) {
                                 item.owner_id = winner_id;
                                 item.location_id = c.start_station_id;
-                                item.flag = InventoryFlag::Hangar;
+                                item.flag = winner_flag;
                                 item.version += 1;
                             }
                         }
@@ -1149,18 +1163,39 @@ impl WorldStateSnapshot {
                     }
                 }
                 for iid in &c.item_ids {
+                    let orig_flag = self
+                        .service_state_blobs
+                        .remove(&format!("contract_orig_flag:{contract_id}:{iid}"))
+                        .and_then(|s| s.parse::<u16>().ok())
+                        .map(InventoryFlag::from_u16)
+                        .filter(|f| *f != InventoryFlag::Locked)
+                        .unwrap_or(InventoryFlag::Hangar);
                     if let Some(item) = self.items.get_mut(iid) {
                         item.owner_id = issuer_entity_id;
                         item.location_id = c.start_station_id;
-                        item.flag = InventoryFlag::Hangar;
+                        item.flag = orig_flag;
                         item.version += 1;
                     }
                 }
-                for item in self.items.values_mut() {
-                    if item.location_id == contract_id {
+                let mut extra_ids: Vec<i64> = self
+                    .items
+                    .values()
+                    .filter(|item| item.location_id == contract_id)
+                    .map(|item| item.item_id)
+                    .collect();
+                extra_ids.sort_unstable();
+                for iid in extra_ids {
+                    let orig_flag = self
+                        .service_state_blobs
+                        .remove(&format!("contract_orig_flag:{contract_id}:{iid}"))
+                        .and_then(|s| s.parse::<u16>().ok())
+                        .map(InventoryFlag::from_u16)
+                        .filter(|f| *f != InventoryFlag::Locked)
+                        .unwrap_or(InventoryFlag::Hangar);
+                    if let Some(item) = self.items.get_mut(&iid) {
                         item.owner_id = issuer_entity_id;
                         item.location_id = c.start_station_id;
-                        item.flag = InventoryFlag::Hangar;
+                        item.flag = orig_flag;
                         item.version += 1;
                     }
                 }

@@ -407,3 +407,86 @@ async fn info_gathering_milestones_and_community_tracks() {
         PyRep::Bool(true)
     );
 }
+
+#[tokio::test]
+async fn login_campaign_rejects_non_catalog_rpcs_and_prevents_campaign_switch_cooldown_reset() {
+    let ctx = test_ctx();
+    let uid = 1_u64;
+    let cid = 90_000_001_i64;
+    let mut sess = auth_session(uid, cid, 98_000_001, 30_000_142);
+    sess.station_id = Some(60_003_760);
+    let kw = HashMap::new();
+
+    // 1. Non-catalog enroll_in_campaign / select_campaign are NOT exposed via MachoNet RPC
+    assert!(handle(&ctx, &mut sess, "loginCampaignManager", "enroll_in_campaign", &[PyRep::Integer(1)], &kw)
+        .await
+        .is_none());
+    assert!(handle(&ctx, &mut sess, "loginCampaignManager", "select_campaign", &[PyRep::Integer(1)], &kw)
+        .await
+        .is_none());
+
+    let campaigns = get_sde_login_campaigns(&ctx.sde);
+    let mut camp_ids: Vec<i64> = campaigns.keys().copied().collect();
+    camp_ids.sort_unstable();
+    let camp_a = camp_ids[0];
+    let camp_b = *camp_ids.get(1).unwrap_or(&camp_a);
+
+    // Enroll in camp_a internally and claim today's reward
+    crate::services::campaigns_and_milestones::playtime::handle_login_campaign_enroll(
+        &ctx,
+        &mut sess,
+        &[PyRep::Integer(camp_a)],
+    )
+    .unwrap();
+    let claim1 = handle(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(claim1, PyRep::Tuple(ref v) if v.len() == 4));
+
+    // Switch to camp_b and back to camp_a: claimed days must NOT be wiped and character-global
+    // day gate blocks claiming on the same UTC downtime day
+    if camp_b != camp_a {
+        crate::services::campaigns_and_milestones::playtime::handle_login_campaign_enroll(
+            &ctx,
+            &mut sess,
+            &[PyRep::Integer(camp_b)],
+        )
+        .unwrap();
+        let state_b = handle(&ctx, &mut sess, "loginCampaignManager", "get_client_campaign_state", &[], &kw)
+            .await
+            .unwrap()
+            .unwrap();
+        let prog_b = state_b.dict_get("item_progress").expect("item_progress");
+        assert!(
+            prog_b.dict_get("next_reward_timestamp").and_then(|v| v.as_i64()).unwrap_or(0) > 0,
+            "switching campaign same-day must preserve daily cooldown timestamp"
+        );
+        let switch_err = handle(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[], &kw)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(switch_err.code, ALREADY_CLAIMED_ERR);
+
+        crate::services::campaigns_and_milestones::playtime::handle_login_campaign_enroll(
+            &ctx,
+            &mut sess,
+            &[PyRep::Integer(camp_a)],
+        )
+        .unwrap();
+        let state_a = handle(&ctx, &mut sess, "loginCampaignManager", "get_client_campaign_state", &[], &kw)
+            .await
+            .unwrap()
+            .unwrap();
+        let prog_a = state_a.dict_get("item_progress").expect("item_progress");
+        assert_eq!(prog_a.dict_get("num_claimed_rewards"), Some(&PyRep::Integer(1)));
+    }
+
+    // Advance clock to next UTC downtime day -> claim succeeds
+    ctx.advance_virtual_clock(86_405);
+    let claim_next_day = handle(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(claim_next_day, PyRep::Tuple(ref v) if v.len() == 4));
+}

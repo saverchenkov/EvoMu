@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::router::ServerContext;
 use crate::services::campaigns_and_milestones::{get_sde_login_campaigns, SdeLoginCampaign};
 use crate::services::cosmetics_ui_ops::{
-    load_cosmetics_ui_state, save_cosmetics_ui_state, SeasonalCampaignSchedule,
+    load_cosmetics_ui_state, SeasonalCampaignSchedule,
 };
 
 /// V24 `milestones/common/constants.pyj`: `MILESTONE_HUNDRED_AND_TWENTY_MINUTES_ID = 1`.
@@ -190,7 +190,8 @@ pub fn resolve_daily_campaign<'a>(
 /// Enrolls only `session.character_id` into a specific SDE daily login campaign without mutating
 /// global campaign schedules or other characters' state, and emits `OnCampaignEnrollmentChanged`
 /// scoped to that character.
-pub fn handle_login_campaign_enroll(
+#[allow(dead_code)]
+pub(crate) fn handle_login_campaign_enroll(
     ctx: &ServerContext,
     session: &mut SessionState,
     args: &[PyRep],
@@ -215,15 +216,10 @@ pub fn handle_login_campaign_enroll(
             .get("login_campaign_enrollments")
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default();
-        let prev = enrollments.insert(char_id, campaign_id);
+        enrollments.insert(char_id, campaign_id);
         if let Ok(json) = serde_json::to_string(&enrollments) {
             snap.service_state_blobs
                 .insert("login_campaign_enrollments".to_string(), json);
-        }
-        if prev != Some(campaign_id) {
-            let mut ext = load_cosmetics_ui_state(snap);
-            ext.login_campaign_claimed_days.remove(&(char_id, campaign_id));
-            save_cosmetics_ui_state(snap, &ext);
         }
     });
 

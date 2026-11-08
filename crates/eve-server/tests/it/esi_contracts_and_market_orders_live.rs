@@ -291,6 +291,12 @@ async fn test_esi_live_contracts_character_corporation_and_public() {
     let ie_id = ie_rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
 
     // 3. Create Corporation contract
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(it) = snap.items.get_mut(&rifter_corp_id) {
+            it.owner_id = corp_id;
+            it.flag = eve_db::InventoryFlag::CorpSAG1;
+        }
+    });
     let corp_c_rep = rpc(
         &ctx,
         &mut s1,

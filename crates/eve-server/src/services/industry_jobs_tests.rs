@@ -275,3 +275,228 @@ fn install_job_validation_errors_are_enforced() {
     .unwrap_err();
     assert_eq!(err_no_mat.code, "InsufficientManufacturingMaterials");
 }
+
+#[test]
+fn test_copy_licensed_runs_validation_scaling_and_multi_bpc_mint() {
+    let mut sde = SdeRegistry::with_canonical_seed();
+    sde.types.insert(688, make_inv_type(688, 105, "Rifter Blueprint", 0.01, 100_000.0));
+    sde.types.insert(587, make_inv_type(587, 25, "Rifter", 27_500.0, 500_000.0));
+    sde.blueprints.insert(
+        688,
+        BlueprintInfo {
+            blueprint_type_id: 688,
+            product_type_id: 587,
+            product_quantity: 1,
+            max_production_limit: 10,
+            manufacturing_time_sec: 100,
+            research_me_time_sec: 105,
+            research_te_time_sec: 105,
+            copy_time_sec: 100,
+            invention_time_sec: 100,
+            invention_base_probability: 0.30,
+            materials: vec![BlueprintMaterial { type_id: 34, quantity: 100 }],
+            activities: HashMap::new(),
+        },
+    );
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
+    let char_id = 90_000_001;
+    let corp_id = 98_000_001;
+    let station_id = 60_003_760;
+    let mut session = char_session(char_id, corp_id);
+
+    let (bpo_1, bpo_2, bpo_3) = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = IskCents::from_f64_isk(1_000_000_000.0);
+        }
+        snap.skills.entry(char_id).or_default().insert(
+            3380,
+            TrainedSkillRecord { type_id: 3380, level: 5, skill_points: 256_000.0 },
+        );
+        snap.skills.entry(char_id).or_default().insert(
+            3406,
+            TrainedSkillRecord { type_id: 3406, level: 5, skill_points: 256_000.0 },
+        );
+        snap.items.insert(
+            99_101,
+            InventoryItemRecord {
+                item_id: 99_101,
+                type_id: 34,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 10_000,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        for id in [99_201_i64, 99_202, 99_203] {
+            snap.items.insert(
+                id,
+                InventoryItemRecord {
+                    item_id: id,
+                    type_id: 688,
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        (99_201_i64, 99_202_i64, 99_203_i64)
+    });
+
+    // 1. Explicit licensedRuns rejected on non-copying activity (activityID = 1)
+    let err_non_copy = handle_industry_jobs(
+        &ctx,
+        &mut session,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(bpo_1)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(1)),
+            ("licensedRuns", PyRep::Integer(2)),
+        ])],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_non_copy.code, "InvalidIndustryJobParameters");
+
+    // 2. Explicit licensedRuns > max_production_limit (11 > 10) rejected even with runs = 1
+    let err_over_limit = handle_industry_jobs(
+        &ctx,
+        &mut session,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(bpo_1)),
+            ("activityID", PyRep::Integer(5)),
+            ("runs", PyRep::Integer(1)),
+            ("licensedRuns", PyRep::Integer(11)),
+        ])],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_over_limit.code, "MaxRunsPerCopyExceeded");
+
+    // 3. Zero / non-positive / i64::MAX licensedRuns rejected
+    let err_zero = handle_industry_jobs(
+        &ctx,
+        &mut session,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(bpo_1)),
+            ("activityID", PyRep::Integer(5)),
+            ("runs", PyRep::Integer(1)),
+            ("licensedRuns", PyRep::Integer(0)),
+        ])],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_zero.code, "InvalidIndustryJobParameters");
+
+    let err_huge = handle_industry_jobs(
+        &ctx,
+        &mut session,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(bpo_1)),
+            ("activityID", PyRep::Integer(5)),
+            ("runs", PyRep::Integer(1)),
+            ("licensedRuns", PyRep::Integer(i64::MAX)),
+        ])],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_huge.code, "MaxRunsPerCopyExceeded");
+
+    // 4. Positive regression: runs=1, licensedRuns=1 baseline vs runs=3, licensedRuns=5
+    let base_rep = handle_industry_jobs(
+        &ctx,
+        &mut session,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(bpo_2)),
+            ("activityID", PyRep::Integer(5)),
+            ("runs", PyRep::Integer(1)),
+            ("licensedRuns", PyRep::Integer(1)),
+        ])],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap();
+    let base_jid = base_rep.dict_get("jobID").unwrap().as_i64().unwrap();
+    let base_dur = base_rep.dict_get("durationSeconds").unwrap().as_i64().unwrap();
+    let base_cost = base_rep.dict_get("totalJobCost").unwrap().as_f64().unwrap();
+    // Cancel base job so it does not skew system_cost_index (0.01 -> 0.50) for the scaled job comparison.
+    handle_industry_jobs(&ctx, &mut session, "industryManager", "CancelJob", &[PyRep::Integer(base_jid)], &HashMap::new())
+        .unwrap()
+        .unwrap();
+
+    let scaled_rep = handle_industry_jobs(
+        &ctx,
+        &mut session,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(bpo_3)),
+            ("activityID", PyRep::Integer(5)),
+            ("runs", PyRep::Integer(3)),
+            ("licensedRuns", PyRep::Integer(5)),
+        ])],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap();
+    let scaled_jid = scaled_rep.dict_get("jobID").unwrap().as_i64().unwrap();
+    let scaled_dur = scaled_rep.dict_get("durationSeconds").unwrap().as_i64().unwrap();
+    let scaled_cost = scaled_rep.dict_get("totalJobCost").unwrap().as_f64().unwrap();
+    assert_eq!(scaled_dur, base_dur * 15);
+    assert!(
+        (scaled_cost - base_cost * 15.0).abs() < 0.01,
+        "Expected 15x copy cost ({} * 15 = {}), got {}",
+        base_cost,
+        base_cost * 15.0,
+        scaled_cost
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.industry_jobs.get_mut(&scaled_jid).unwrap().start_unix = 0;
+    });
+    handle_industry_jobs(
+        &ctx,
+        &mut session,
+        "industryManager",
+        "CompleteJob",
+        &[PyRep::Integer(scaled_jid)],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap();
+
+    ctx.db.with_snapshot(|snap| {
+        let bpcs: Vec<_> = snap
+            .items
+            .values()
+            .filter(|i| i.owner_id == char_id && i.type_id == 688 && i.is_blueprint_copy)
+            .collect();
+        assert_eq!(bpcs.len(), 3, "runs=3 must mint 3 distinct BPCs, got {}", bpcs.len());
+        for bpc in bpcs {
+            assert!(bpc.singleton);
+            assert_eq!(bpc.quantity, 1);
+            assert_eq!(bpc.blueprint_runs_remaining, Some(5));
+        }
+    });
+}

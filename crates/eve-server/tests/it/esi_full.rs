@@ -2373,7 +2373,12 @@ async fn test_esi_p6_corp_contracts_live_rpc_auth_and_sqlite_persistence() {
     );
     let _sess_member = setup_session(&ctx, member_char, corp1, station_id, 0);
     let mut sess2 = setup_session(&ctx, char2, corp2, station_id, ROLE_DIRECTOR);
-    let item_id = seed_hangar_item(&ctx, char1, station_id, 35, 250);
+    let item_id = seed_hangar_item(&ctx, corp1, station_id, 35, 250);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(it) = snap.items.get_mut(&item_id) {
+            it.flag = InventoryFlag::CorpSAG1;
+        }
+    });
     let personal_item_id = seed_hangar_item(&ctx, char1, station_id, 34, 100);
 
     let mut kwargs = HashMap::new();
@@ -3022,7 +3027,12 @@ async fn test_esi_p6_char_contract_party_isolation_and_bidder_privacy() {
     let _sess3 = setup_session(&ctx, char3, corp3, station_id, 0);
 
     let personal_item = seed_hangar_item(&ctx, char1, station_id, 34, 400);
-    let corp_item = seed_hangar_item(&ctx, char1, station_id, 35, 300);
+    let corp_item = seed_hangar_item(&ctx, corp1, station_id, 35, 300);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(it) = snap.items.get_mut(&corp_item) {
+            it.flag = InventoryFlag::CorpSAG1;
+        }
+    });
 
     // 1. Personal public auction issued by char1 (`forCorp == false`) with bid by char2
     let personal_cid = create_contract_rpc(
@@ -3195,7 +3205,12 @@ async fn test_esi_p6_public_contract_204_on_accept_and_expiry_and_30d_retention(
     let exchange_item = seed_hangar_item(&ctx, char1, start_station, 34, 200);
     let expiring_item = seed_hangar_item(&ctx, char1, start_station, 35, 150);
     let courier_item = seed_hangar_item(&ctx, char1, start_station, 36, 50);
-    let corp_exchange_item = seed_hangar_item(&ctx, char1, start_station, 37, 100);
+    let corp_exchange_item = seed_hangar_item(&ctx, corp1, start_station, 37, 100);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(it) = snap.items.get_mut(&corp_exchange_item) {
+            it.flag = InventoryFlag::CorpSAG1;
+        }
+    });
 
     let accepted_cid = create_contract_rpc(
         &ctx,

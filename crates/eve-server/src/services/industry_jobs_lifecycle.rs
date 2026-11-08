@@ -500,29 +500,36 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                         );
                         Ok(Ok((prod_item_id, job.product_type_id, job)))
                     } else if job.activity_id == 5 {
-                        snap.next_entity_id += 1;
-                        let copy_item_id = snap.next_entity_id;
-                        snap.items.insert(
-                            copy_item_id,
-                            InventoryItemRecord {
-                                item_id: copy_item_id,
-                                type_id: job.blueprint_type_id,
-                                owner_id: out_owner_id,
-                                location_id: out_loc_id,
-                                flag: out_flag,
-                                quantity: 1,
-                                singleton: true,
-                                version: 1,
-                                dynamic_attributes: parent_dyn_attrs,
-                                source_mutaplasmid_id: None,
-                                insured_payout_isk: 0.0,
-                                is_blueprint_copy: true,
-                                blueprint_runs_remaining: Some(
-                                    job.licensed_runs.unwrap_or(job.runs) as i32,
-                                ),
-                            },
-                        );
-                        Ok(Ok((copy_item_id, job.blueprint_type_id, job)))
+                        let copy_runs = i32::try_from(job.licensed_runs.unwrap_or(1).max(1))
+                            .unwrap_or(i32::MAX);
+                        let copy_count = job.runs.max(1);
+                        let mut first_copy_id = 0_i64;
+                        for idx in 0..copy_count {
+                            snap.next_entity_id += 1;
+                            let copy_item_id = snap.next_entity_id;
+                            if idx == 0 {
+                                first_copy_id = copy_item_id;
+                            }
+                            snap.items.insert(
+                                copy_item_id,
+                                InventoryItemRecord {
+                                    item_id: copy_item_id,
+                                    type_id: job.blueprint_type_id,
+                                    owner_id: out_owner_id,
+                                    location_id: out_loc_id,
+                                    flag: out_flag,
+                                    quantity: 1,
+                                    singleton: true,
+                                    version: 1,
+                                    dynamic_attributes: parent_dyn_attrs.clone(),
+                                    source_mutaplasmid_id: None,
+                                    insured_payout_isk: 0.0,
+                                    is_blueprint_copy: true,
+                                    blueprint_runs_remaining: Some(copy_runs),
+                                },
+                            );
+                        }
+                        Ok(Ok((first_copy_id, job.blueprint_type_id, job)))
                     } else {
                         Ok(Ok((job.blueprint_item_id, job.blueprint_type_id, job)))
                     }

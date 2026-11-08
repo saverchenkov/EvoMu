@@ -137,24 +137,151 @@ fn check_contract_visibility(
     }
 }
 
+fn active_corp_acct_div(session: &SessionState) -> usize {
+    (session.corp_account_key - 1000).clamp(0, 6) as usize
+}
+
+fn is_corp_contract_flag(flag: InventoryFlag) -> bool {
+    matches!(
+        flag,
+        InventoryFlag::CorpDeliveries
+            | InventoryFlag::CorpSAG1
+            | InventoryFlag::CorpSAG2
+            | InventoryFlag::CorpSAG3
+            | InventoryFlag::CorpSAG4
+            | InventoryFlag::CorpSAG5
+            | InventoryFlag::CorpSAG6
+            | InventoryFlag::CorpSAG7
+    )
+}
+
+fn effective_corp_roles_at_location(
+    snap: &eve_db::WorldStateSnapshot,
+    corp_id: i64,
+    char_id: i64,
+    location_id: Option<i64>,
+    now_unix: u64,
+) -> (bool, u64) {
+    let (is_ceo, global_roles) =
+        crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+            snap, corp_id, char_id, 0, now_unix,
+        );
+    let (_, loc_roles) =
+        crate::services::inventory_bound::get_effective_corp_roles_at_location_in_snap(
+            snap, corp_id, char_id, location_id,
+        );
+    let unmatured_title_bits = snap
+        .corp_governance
+        .get(&corp_id)
+        .and_then(|g| g.pending_title_role_grants.get(&char_id))
+        .filter(|&&(_, matured_at)| now_unix < matured_at)
+        .map_or(0, |&(bits, _)| bits);
+    (is_ceo, global_roles | (loc_roles & !unmatured_title_bits))
+}
+
 fn has_corp_contract_role(
     snap: &eve_db::WorldStateSnapshot,
-    session: Option<&SessionState>,
     char_id: i64,
     corp_id: i64,
+    now_unix: u64,
 ) -> bool {
     const CONTRACT_ROLES: u64 =
         eve_db::corp_roles::ROLE_CONTRACT_MANAGER | eve_db::corp_roles::ROLE_DIRECTOR;
-    if corp_id == 0 {
+    if corp_id == 0 || !snap.corporations.contains_key(&corp_id) {
         return false;
     }
-    if session.is_some_and(|s| s.corporation_id == Some(corp_id) && (s.corp_role & CONTRACT_ROLES) != 0) {
+    let (is_ceo, roles) = effective_corp_roles_at_location(snap, corp_id, char_id, None, now_unix);
+    is_ceo || (roles & CONTRACT_ROLES) != 0
+}
+
+fn has_corp_wallet_take_role(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    corp_id: i64,
+    acct_div_idx: usize,
+    now_unix: u64,
+) -> bool {
+    if corp_id == 0 || !snap.corporations.contains_key(&corp_id) {
+        return false;
+    }
+    let (is_ceo, roles) = effective_corp_roles_at_location(snap, corp_id, char_id, None, now_unix);
+    let take_role = eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[acct_div_idx.min(6)];
+    is_ceo
+        || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR)
+        || eve_db::corp_roles::has_role(roles, take_role)
+}
+
+fn has_corp_flag_take_role_at_location(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    corp_id: i64,
+    location_id: i64,
+    flag: InventoryFlag,
+    now_unix: u64,
+) -> bool {
+    if corp_id == 0 || !snap.corporations.contains_key(&corp_id) {
+        return false;
+    }
+    let (is_ceo, roles) =
+        effective_corp_roles_at_location(snap, corp_id, char_id, Some(location_id), now_unix);
+    if is_ceo || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR) {
         return true;
     }
-    snap.corporations.get(&corp_id).is_some_and(|corp| {
-        corp.ceo_id == char_id
-            || corp.member_roles.get(&char_id).is_some_and(|&r| (r & CONTRACT_ROLES) != 0)
-    })
+    match flag {
+        InventoryFlag::CorpDeliveries => {
+            eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_TAKE)
+        }
+        InventoryFlag::CorpSAG1 => {
+            eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[0])
+        }
+        InventoryFlag::CorpSAG2 => {
+            eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[1])
+        }
+        InventoryFlag::CorpSAG3 => {
+            eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[2])
+        }
+        InventoryFlag::CorpSAG4 => {
+            eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[3])
+        }
+        InventoryFlag::CorpSAG5 => {
+            eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[4])
+        }
+        InventoryFlag::CorpSAG6 => {
+            eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[5])
+        }
+        InventoryFlag::CorpSAG7 => {
+            eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[6])
+        }
+        _ => false,
+    }
+}
+
+fn is_item_in_asset_safety_wrap(
+    ext: &crate::services::station_structure::structure_upwell_ops::StructureExtendedState,
+    item_id: i64,
+    item_location_id: i64,
+    item_type_id: u32,
+) -> bool {
+    item_type_id == 60
+        || ext.asset_safety_wraps.values().any(|w| {
+            !w.retrieval_fee_paid
+                && (w.wrap_id == item_id
+                    || w.wrap_id == item_location_id
+                    || w.item_ids.contains(&item_id))
+        })
+}
+
+fn pop_escrowed_item_orig_flag(
+    snap: &mut eve_db::WorldStateSnapshot,
+    cid: i64,
+    iid: i64,
+) -> InventoryFlag {
+    snap.service_state_blobs
+        .remove(&format!("contract_orig_flag:{cid}:{iid}"))
+        .and_then(|s| s.parse::<u16>().ok())
+        .map(InventoryFlag::from_u16)
+        .filter(|f| *f != InventoryFlag::Locked)
+        .unwrap_or(InventoryFlag::Hangar)
 }
 
 pub fn handle(
@@ -304,6 +431,18 @@ pub fn handle(
                 .any(|s| s.stations.iter().any(|st| st.station_id == end_station_id));
             let now_unix = ctx.now_unix();
             let active_ship = session.ship_id;
+            let acct_div_idx = active_corp_acct_div(session);
+            if for_corp {
+                if let Some(corp_id) = ctx
+                    .db
+                    .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
+                    .or(session.corporation_id)
+                    .filter(|&id| id > 0)
+                {
+                    crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
+                }
+            }
+            let cs_state = crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state(ctx);
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let start_valid = start_sde_valid
@@ -363,12 +502,10 @@ pub fn handle(
                     return Err(rpc_err("CharacterNotFound", format!("Character {char_id} not found")));
                 };
                 if for_corp {
-                    let Some(corp) = snap.corporations.get(&issuer_corp_id) else {
+                    if !snap.corporations.contains_key(&issuer_corp_id) {
                         return Err(rpc_err("CrpAccessDenied", "Corporation contracts require a player corporation"));
-                    };
-                    let roles = corp.member_roles.get(&char_id).copied().unwrap_or(0) | session.corp_role;
-                    let mask = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_CONTRACT_MANAGER;
-                    if corp.ceo_id != char_id && (roles & mask) == 0 {
+                    }
+                    if !has_corp_contract_role(snap, char_id, issuer_corp_id, now_unix) {
                         return Err(rpc_err("CrpAccessDenied", "Creating corporation contracts requires ROLE_CONTRACT_MANAGER or ROLE_DIRECTOR"));
                     }
                 }
@@ -378,15 +515,32 @@ pub fn handle(
                     .ok_or_else(|| rpc_err("InvalidContractParameters", "Contract reward and fee overflow"))?;
                 if total_upfront.0 > 0 {
                     if for_corp {
+                        if !has_corp_wallet_take_role(snap, char_id, issuer_corp_id, acct_div_idx, now_unix) {
+                            return Err(rpc_err(
+                                "CrpAccessDenied",
+                                format!(
+                                    "Funded corporation contracts require ROLE_DIRECTOR or ROLE_ACCOUNT_CAN_TAKE for division {}",
+                                    acct_div_idx + 1
+                                ),
+                            ));
+                        }
                         let corp = snap.corporations.get_mut(&issuer_corp_id).unwrap();
-                        let new_bal = corp.master_wallet.checked_sub(total_upfront)
-                            .ok_or_else(|| rpc_err("InsufficientFunds", "Not enough corporation ISK to escrow contract reward"))?;
-                        corp.master_wallet = new_bal;
-                        // Fixes R1-P1-2: prevent division-1 balance inflation on insufficient funds
-                        if let Some(div) = corp.wallet_divisions.first_mut() {
-                            let new_div_bal = div.balance.checked_sub(total_upfront)
-                                .ok_or_else(|| rpc_err("InsufficientFunds", "Not enough funds in corporation wallet division 1 to escrow contract reward"))?;
-                            div.balance = new_div_bal;
+                        let div_num = (acct_div_idx + 1) as u8;
+                        if div_num == 1 {
+                            let new_bal = corp.master_wallet.checked_sub(total_upfront)
+                                .ok_or_else(|| rpc_err("InsufficientFunds", "Not enough corporation ISK to escrow contract reward"))?;
+                            corp.master_wallet = new_bal;
+                            // Fixes R1-P1-2: prevent division-1 balance inflation on insufficient funds
+                            if let Some(div) = corp.wallet_divisions.first_mut() {
+                                let new_div_bal = div.balance.checked_sub(total_upfront)
+                                    .ok_or_else(|| rpc_err("InsufficientFunds", "Not enough funds in corporation wallet division 1 to escrow contract reward"))?;
+                                div.balance = new_div_bal;
+                            }
+                        } else {
+                            let cur = corp.division_balance(div_num);
+                            let new_bal = cur.checked_sub(total_upfront)
+                                .ok_or_else(|| rpc_err("InsufficientFunds", format!("Not enough funds in corporation wallet division {div_num} to escrow contract reward")))?;
+                            corp.set_division_balance(div_num, new_bal);
                         }
                     } else if let Some(ch) = snap.characters.get_mut(&char_id) {
                         ch.balance = ch.balance.checked_sub(total_upfront)
@@ -394,6 +548,7 @@ pub fn handle(
                     }
                 }
 
+                let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
                 snap.next_entity_id += 1;
                 let id = snap.next_entity_id;
                 let mut escrowed_items = Vec::new();
@@ -413,6 +568,12 @@ pub fn handle(
                             format!("Cannot escrow item {iid} while it contains items"),
                         ));
                     }
+                    if cs_state.alsc_locked_items.contains(&iid) {
+                        return Err(rpc_err(
+                            "ContractItemLocked",
+                            format!("Item {iid} is locked inside an Audit Log Secure Container"),
+                        ));
+                    }
                     let already_locked = snap.is_item_locked_in_contract_or_job(iid);
                     if snap.item_custom_names.get(&iid).is_some_and(|name| name.starts_with("courier_cargo:")) {
                         return Err(rpc_err(
@@ -420,32 +581,73 @@ pub fn handle(
                             "Courier mission items cannot be placed in contracts",
                         ));
                     }
-                    let Some(item_loc) = snap.items.get(&iid).map(|i| i.location_id) else {
+                    let Some(item_snap) = snap.items.get(&iid).cloned() else {
                         return Err(rpc_err("ContractItemNotFound", format!("Contract item {iid} not found")));
                     };
-                    if snap.items.get(&item_loc).is_some_and(|p| crate::services::inventory_fitting::fitting_containers_ships::is_container_group(ctx.sde.types.get(&p.type_id).map(|t| t.group_id).unwrap_or(0), p.type_id)) {
+                    if snap.items.get(&item_snap.location_id).is_some_and(|p| p.type_id == 60 || crate::services::inventory_fitting::fitting_containers_ships::is_container_group(ctx.sde.types.get(&p.type_id).map(|t| t.group_id).unwrap_or(0), p.type_id)) {
                         return Err(rpc_err("ItemInsideContainer", format!("Item {iid} is inside a container and must be moved to item hangar before adding to contract")));
                     }
-                    let Some(item) = snap.items.get_mut(&iid) else {
-                        return Err(rpc_err("ContractItemNotFound", format!("Contract item {iid} not found")));
+                    if is_item_in_asset_safety_wrap(&ext, iid, item_snap.location_id, item_snap.type_id) {
+                        return Err(rpc_err(
+                            "ItemCannotBeContracted",
+                            format!("Item {iid} is an Asset Safety wrap or sealed inside one"),
+                        ));
+                    }
+                    let valid_item_owner = if for_corp {
+                        issuer_corp_id != 0 && item_snap.owner_id == issuer_corp_id
+                    } else {
+                        item_snap.owner_id == char_id
                     };
-                    let valid_item_owner = item.owner_id == char_id
-                        || (for_corp && issuer_corp_id != 0 && item.owner_id == issuer_corp_id);
-                    if !valid_item_owner || item.location_id != start_station_id {
+                    if !valid_item_owner || item_snap.location_id != start_station_id {
                         return Err(rpc_err(
                             "ContractItemOwnershipOrLocationInvalid",
                             format!("Item {iid} must be owned by issuer at station {start_station_id}"),
                         ));
                     }
-                    if item.flag == InventoryFlag::Locked || already_locked {
+                    if item_snap.flag == InventoryFlag::Locked || already_locked {
                         return Err(rpc_err(
                             "ContractItemLocked",
                             format!("Item {iid} is currently locked in an active job or contract"),
                         ));
                     }
-                    item.location_id = id;
-                    item.flag = InventoryFlag::Locked;
-                    item.version += 1;
+                    if for_corp {
+                        if !is_corp_contract_flag(item_snap.flag) {
+                            return Err(rpc_err(
+                                "ContractItemFlagInvalid",
+                                format!("Corporate contract item {iid} must be in a corporate hangar division or CorpDeliveries (flag {:?})", item_snap.flag),
+                            ));
+                        }
+                        if !has_corp_flag_take_role_at_location(
+                            snap,
+                            char_id,
+                            issuer_corp_id,
+                            start_station_id,
+                            item_snap.flag,
+                            now_unix,
+                        ) {
+                            return Err(rpc_err(
+                                "CrpAccessDenied",
+                                format!("Lacks corporation hangar take role for {:?} at location {start_station_id}", item_snap.flag),
+                            ));
+                        }
+                    } else if item_snap.flag != InventoryFlag::Hangar {
+                        return Err(rpc_err(
+                            "ContractItemFlagInvalid",
+                            format!("Contract item {iid} must be in personal hangar (flag {:?} is not contractable)", item_snap.flag),
+                        ));
+                    }
+                    let orig_flag = item_snap.flag;
+                    if let Some(item) = snap.items.get_mut(&iid) {
+                        item.location_id = id;
+                        item.flag = InventoryFlag::Locked;
+                        item.version += 1;
+                    }
+                    if for_corp {
+                        snap.service_state_blobs.insert(
+                            format!("contract_orig_flag:{id}:{iid}"),
+                            (orig_flag as u16).to_string(),
+                        );
+                    }
                     escrowed_items.push(iid);
                 }
 
@@ -506,6 +708,16 @@ pub fn handle(
             let caller_corp = session.corporation_id.unwrap_or(0);
             let caller_alliance = session.alliance_id;
             let now_unix = ctx.now_unix();
+            let acct_div_idx = active_corp_acct_div(session);
+            if let Some(corp_id) = ctx
+                .db
+                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
+                .or(session.corporation_id)
+                .filter(|&id| id > 0)
+            {
+                crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
+            }
+            let cs_state = crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state(ctx);
 
             let expired_resolved = ctx.db.try_with_mut_snapshot(|snap| {
                 Ok::<_, std::convert::Infallible>(snap.resolve_expired_contract(cid, now_unix))
@@ -524,7 +736,12 @@ pub fn handle(
                 if !matches!(c.contract_type.as_str(), "Courier" | "ItemExchange") {
                     return Err(rpc_err("InvalidContractType", format!("Contract type '{}' cannot be directly accepted via AcceptContract", c.contract_type)));
                 }
-                let effective_caller_corp = if caller_corp != 0 { caller_corp } else { snap.characters.get(&char_id).map(|ch| ch.corporation_id).unwrap_or(0) };
+                let effective_caller_corp = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|ch| ch.corporation_id)
+                    .filter(|&id| id != 0)
+                    .unwrap_or(caller_corp);
                 let is_corp_accept = accept_for_corp
                     || (c.assignee_id != 0
                         && c.assignee_id == effective_caller_corp
@@ -540,7 +757,7 @@ pub fn handle(
                 if !check_contract_visibility(&c, char_id, effective_caller_corp, caller_alliance) {
                     return Err(rpc_err("ContractAccessDenied", format!("Character {char_id} is not authorized to accept private contract {cid}")));
                 }
-                if is_corp_accept && !has_corp_contract_role(snap, Some(session), char_id, effective_caller_corp) {
+                if is_corp_accept && !has_corp_contract_role(snap, char_id, effective_caller_corp, now_unix) {
                     return Err(rpc_err("CrpAccessDenied", "Accepting a contract on behalf of a corporation requires ROLE_CONTRACT_MANAGER or ROLE_DIRECTOR"));
                 }
                 if caller_station != Some(c.start_station_id) {
@@ -556,6 +773,7 @@ pub fn handle(
                     return Err(rpc_err("NoActiveShip", "Accepting a Courier contract requires an active ship to load the courier package"));
                 }
 
+                let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
                 let mut requested_transfers: Vec<(i64, i32)> = Vec::new();
                 if c.contract_type == "ItemExchange" && !c.requested_items.is_empty() {
                     let mut aggregated_reqs: Vec<(u32, i32)> = Vec::new();
@@ -572,12 +790,16 @@ pub fn handle(
                         let mut needed = req_qty;
                         let mut candidate_ids: Vec<(i64, i32)> = snap.items.values().filter(|it| {
                             let owner_flag_ok = if is_corp_accept {
-                                it.owner_id == effective_caller_corp && matches!(
-                                    it.flag,
-                                    InventoryFlag::Hangar | InventoryFlag::CorpDeliveries | InventoryFlag::CorpSAG1
-                                        | InventoryFlag::CorpSAG2 | InventoryFlag::CorpSAG3 | InventoryFlag::CorpSAG4
-                                        | InventoryFlag::CorpSAG5 | InventoryFlag::CorpSAG6 | InventoryFlag::CorpSAG7
-                                )
+                                it.owner_id == effective_caller_corp
+                                    && is_corp_contract_flag(it.flag)
+                                    && has_corp_flag_take_role_at_location(
+                                        snap,
+                                        char_id,
+                                        effective_caller_corp,
+                                        c.start_station_id,
+                                        it.flag,
+                                        now_unix,
+                                    )
                             } else {
                                 it.owner_id == char_id && it.flag == InventoryFlag::Hangar
                             };
@@ -589,6 +811,8 @@ pub fn handle(
                                 && it.dynamic_attributes.get(&3).copied().unwrap_or(0.0) <= 0.0
                                 && it.source_mutaplasmid_id.is_none()
                                 && Some(it.item_id) != active_ship
+                                && !cs_state.alsc_locked_items.contains(&it.item_id)
+                                && !is_item_in_asset_safety_wrap(&ext, it.item_id, it.location_id, it.type_id)
                                 && !snap.is_item_locked_in_contract_or_job(it.item_id)
                                 && !snap.items.values().any(|child| child.item_id != it.item_id && child.location_id == it.item_id && child.quantity > 0)
                                 && !snap.item_custom_names.get(&it.item_id).is_some_and(|name| name.starts_with("courier_cargo:"))
@@ -608,15 +832,27 @@ pub fn handle(
 
                 let required_isk = c.collateral.checked_add(c.price).ok_or_else(|| rpc_err("ContractOverflow", "Collateral + price overflow"))?;
                 if is_corp_accept {
+                    if required_isk.0 > 0
+                        && !has_corp_wallet_take_role(snap, char_id, effective_caller_corp, acct_div_idx, now_unix)
+                    {
+                        return Err(rpc_err(
+                            "CrpAccessDenied",
+                            format!(
+                                "Accepting funded corporate contracts requires ROLE_DIRECTOR or ROLE_ACCOUNT_CAN_TAKE for division {}",
+                                acct_div_idx + 1
+                            ),
+                        ));
+                    }
+                    let div_num = (acct_div_idx + 1) as u8;
                     let Some(corp) = snap.corporations.get_mut(&effective_caller_corp) else {
                         return Err(rpc_err("CorpNotFound", format!("Corporation {effective_caller_corp} not found")));
                     };
-                    let cur = corp.division_balance(1);
+                    let cur = corp.division_balance(div_num);
                     let mut new_bal = cur.checked_sub(required_isk).ok_or_else(|| rpc_err("InsufficientFunds", "Not enough corporation ISK to cover contract collateral and price"))?;
                     if c.contract_type == "ItemExchange" && c.reward.0 > 0 {
                         new_bal = new_bal.checked_add(c.reward).unwrap_or(new_bal);
                     }
-                    corp.set_division_balance(1, new_bal);
+                    corp.set_division_balance(div_num, new_bal);
                 } else {
                     let Some(ch) = snap.characters.get_mut(&char_id) else {
                         return Err(rpc_err("CharacterNotFound", format!("Character {char_id} not found")));
@@ -640,6 +876,11 @@ pub fn handle(
                         snap.credit_contract_issuer(&c, IskCents(dep_raw));
                     }
                     let issuer_entity_id = if c.for_corp && c.issuer_corp_id != 0 { c.issuer_corp_id } else { c.issuer_id };
+                    let req_dest_flag = if c.for_corp && c.issuer_corp_id != 0 {
+                        InventoryFlag::CorpDeliveries
+                    } else {
+                        InventoryFlag::Hangar
+                    };
                     let (acceptor_entity_id, acceptor_flag) = if is_corp_accept {
                         (effective_caller_corp, InventoryFlag::CorpDeliveries)
                     } else {
@@ -651,7 +892,7 @@ pub fn handle(
                             if let Some(it) = snap.items.get_mut(&cand_id) {
                                 it.owner_id = issuer_entity_id;
                                 it.location_id = c.start_station_id;
-                                it.flag = InventoryFlag::Hangar;
+                                it.flag = req_dest_flag;
                                 it.version += 1;
                             }
                         } else if let Some(it) = snap.items.get_mut(&cand_id) {
@@ -662,12 +903,13 @@ pub fn handle(
                             let split_id = snap.next_entity_id;
                             snap.items.insert(split_id, InventoryItemRecord {
                                 item_id: split_id, type_id: tid, owner_id: issuer_entity_id, location_id: c.start_station_id,
-                                flag: InventoryFlag::Hangar, quantity: take_qty, singleton: false, version: 1, ..Default::default()
+                                flag: req_dest_flag, quantity: take_qty, singleton: false, version: 1, ..Default::default()
                             });
                         }
                     }
 
                     for iid in &c.item_ids {
+                        snap.service_state_blobs.remove(&format!("contract_orig_flag:{cid}:{iid}"));
                         if let Some(item) = snap.items.get_mut(iid) {
                             item.owner_id = acceptor_entity_id;
                             item.location_id = c.start_station_id;
@@ -696,6 +938,7 @@ pub fn handle(
                     flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default()
                 });
                 for iid in &c.item_ids {
+                    snap.service_state_blobs.remove(&format!("contract_orig_flag:{cid}:{iid}"));
                     if let Some(item) = snap.items.get_mut(iid) {
                         item.location_id = wrap_id;
                         item.flag = InventoryFlag::Locked;
@@ -736,12 +979,28 @@ pub fn handle(
             };
             let cid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let bid_isk = args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0);
+            let bid_for_corp = args
+                .get(2)
+                .map(|a| a.as_bool().unwrap_or(false) || a.as_i64().unwrap_or(0) != 0)
+                .or_else(|| kwargs.get("forCorp").and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|n| n != 0))))
+                .unwrap_or(false);
             if !bid_isk.is_finite() || bid_isk <= 0.0 {
                 return Some(Err(rpc_err("InvalidBidAmount", "Auction bid must be a positive finite ISK amount",)));
             }
             let caller_corp = session.corporation_id.unwrap_or(0);
             let caller_alliance = session.alliance_id;
             let now_unix = ctx.now_unix();
+            let acct_div_idx = active_corp_acct_div(session);
+            if bid_for_corp {
+                if let Some(corp_id) = ctx
+                    .db
+                    .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
+                    .or(session.corporation_id)
+                    .filter(|&id| id > 0)
+                {
+                    crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
+                }
+            }
 
             let expired_resolved = ctx.db.try_with_mut_snapshot(|snap| {
                     Ok::<_, std::convert::Infallible>(snap.resolve_expired_contract(cid, now_unix))
@@ -760,14 +1019,37 @@ pub fn handle(
                 if c.status != "Outstanding" {
                     return Err(rpc_err("InvalidContractState", format!("Auction {cid} is no longer Outstanding")));
                 }
-                if c.issuer_id == char_id {
+                let effective_caller_corp = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|ch| ch.corporation_id)
+                    .filter(|&id| id != 0)
+                    .unwrap_or(caller_corp);
+                if c.issuer_id == char_id || (bid_for_corp && c.for_corp && c.issuer_corp_id == effective_caller_corp) {
                     return Err(rpc_err("CannotBidOnOwnContract", "Issuer cannot bid on their own auction"));
                 }
-                if !check_contract_visibility(&c, char_id, caller_corp, caller_alliance) {
+                if !check_contract_visibility(&c, char_id, effective_caller_corp, caller_alliance) {
                     return Err(rpc_err(
                         "ContractAccessDenied",
                         format!("Character {char_id} cannot bid on private auction {cid}"),
                     ));
+                }
+                if bid_for_corp {
+                    if effective_caller_corp == 0 || !snap.corporations.contains_key(&effective_caller_corp) {
+                        return Err(rpc_err("CrpAccessDenied", "Corporate auction bids require a player corporation"));
+                    }
+                    if !has_corp_contract_role(snap, char_id, effective_caller_corp, now_unix) {
+                        return Err(rpc_err("CrpAccessDenied", "Bidding for a corporation requires ROLE_CONTRACT_MANAGER or ROLE_DIRECTOR"));
+                    }
+                    if !has_corp_wallet_take_role(snap, char_id, effective_caller_corp, acct_div_idx, now_unix) {
+                        return Err(rpc_err(
+                            "CrpAccessDenied",
+                            format!(
+                                "Corporate auction bids require ROLE_DIRECTOR or ROLE_ACCOUNT_CAN_TAKE for division {}",
+                                acct_div_idx + 1
+                            ),
+                        ));
+                    }
                 }
 
                 let raw_bid = IskCents::from_f64_isk(bid_isk);
@@ -801,18 +1083,44 @@ pub fn handle(
                     }
                 }
 
-                let prev_self_refund = if c.current_bidder_id == Some(char_id) { c.current_bid } else { IskCents(0) };
-                let bidder_avail = snap.characters.get(&char_id)
-                    .map(|ch| ch.balance.checked_add(prev_self_refund).unwrap_or(ch.balance))
-                    .ok_or_else(|| rpc_err("CharacterNotFound", format!("Character {char_id} not found")))?;
-                if bidder_avail.0 < effective_bid.0 {
-                    return Err(rpc_err("InsufficientFunds", "Insufficient ISK to place auction bid"));
+                let bidder_entity_id = if bid_for_corp { effective_caller_corp } else { char_id };
+                let bidder_div_num = (acct_div_idx + 1) as u8;
+                let prev_self_refund = if c.current_bidder_id == Some(bidder_entity_id) { c.current_bid } else { IskCents(0) };
+                if bid_for_corp {
+                    let corp = snap
+                        .corporations
+                        .get(&effective_caller_corp)
+                        .ok_or_else(|| rpc_err("CorpNotFound", format!("Corporation {effective_caller_corp} not found")))?;
+                    let bidder_avail = corp
+                        .division_balance(bidder_div_num)
+                        .checked_add(prev_self_refund)
+                        .unwrap_or_else(|| corp.division_balance(bidder_div_num));
+                    if bidder_avail.0 < effective_bid.0 {
+                        return Err(rpc_err("InsufficientFunds", "Insufficient corporation ISK to place auction bid"));
+                    }
+                } else {
+                    let bidder_avail = snap.characters.get(&char_id)
+                        .map(|ch| ch.balance.checked_add(prev_self_refund).unwrap_or(ch.balance))
+                        .ok_or_else(|| rpc_err("CharacterNotFound", format!("Character {char_id} not found")))?;
+                    if bidder_avail.0 < effective_bid.0 {
+                        return Err(rpc_err("InsufficientFunds", "Insufficient ISK to place auction bid"));
+                    }
                 }
 
                 let prev_bidder_opt = c.current_bidder_id;
                 if let Some(prev_bidder) = prev_bidder_opt {
                     if c.current_bid.0 > 0 {
-                        if let Some(prev_ch) = snap.characters.get_mut(&prev_bidder) {
+                        if let Some(prev_corp) = snap.corporations.get_mut(&prev_bidder) {
+                            let prev_div = snap
+                                .service_state_blobs
+                                .remove(&format!("contract_bid_div:{cid}:{prev_bidder}"))
+                                .and_then(|s| s.parse::<u8>().ok())
+                                .filter(|&d| (1..=7).contains(&d))
+                                .unwrap_or(1);
+                            let refunded = prev_corp.division_balance(prev_div).checked_add(c.current_bid).unwrap_or(prev_corp.division_balance(prev_div));
+                            prev_corp.set_division_balance(prev_div, refunded);
+                            snap.append_journal(prev_bidder, "ContractAuctionBidRefund", c.current_bid, refunded, format!("Outbid refund on auction contract {cid}"));
+                        } else if let Some(prev_ch) = snap.characters.get_mut(&prev_bidder) {
                             prev_ch.balance = prev_ch.balance.checked_add(c.current_bid).unwrap_or(prev_ch.balance);
                             let bal_after = prev_ch.balance;
                             snap.append_journal(prev_bidder, "ContractAuctionBidRefund", c.current_bid, bal_after, format!("Outbid refund on auction contract {cid}"));
@@ -820,7 +1128,17 @@ pub fn handle(
                     }
                 }
 
-                if let Some(bidder_ch) = snap.characters.get_mut(&char_id) {
+                if bid_for_corp {
+                    if let Some(corp) = snap.corporations.get_mut(&effective_caller_corp) {
+                        let new_bal = corp.division_balance(bidder_div_num).checked_sub(effective_bid).unwrap_or(IskCents(0));
+                        corp.set_division_balance(bidder_div_num, new_bal);
+                        snap.service_state_blobs.insert(
+                            format!("contract_bid_div:{cid}:{effective_caller_corp}"),
+                            bidder_div_num.to_string(),
+                        );
+                        snap.append_journal(effective_caller_corp, "ContractAuctionBid", effective_bid, new_bal, format!("Corporate bid placed on auction contract {cid}"));
+                    }
+                } else if let Some(bidder_ch) = snap.characters.get_mut(&char_id) {
                     bidder_ch.balance = bidder_ch.balance.checked_sub(effective_bid).unwrap_or(IskCents(0));
                     let bal_after = bidder_ch.balance;
                     snap.append_journal(char_id, "ContractAuctionBid", effective_bid, bal_after, format!("Bid placed on auction contract {cid}"));
@@ -836,16 +1154,18 @@ pub fn handle(
                     }
                     if c.for_corp {
                         let bal_after = snap.corporations.get(&c.issuer_corp_id).map(|corp| corp.master_wallet).unwrap_or(IskCents(0));
-                        snap.append_journal(c.issuer_corp_id, "ContractAuctionSold", effective_bid, bal_after, format!("Auction contract {cid} bought out by {char_id}"));
+                        snap.append_journal(c.issuer_corp_id, "ContractAuctionSold", effective_bid, bal_after, format!("Auction contract {cid} bought out by {bidder_entity_id}"));
                     } else if let Some(issuer_ch) = snap.characters.get(&c.issuer_id) {
                         let bal_after = issuer_ch.balance;
-                        snap.append_journal(c.issuer_id, "ContractAuctionSold", effective_bid, bal_after, format!("Auction contract {cid} bought out by {char_id}"));
+                        snap.append_journal(c.issuer_id, "ContractAuctionSold", effective_bid, bal_after, format!("Auction contract {cid} bought out by {bidder_entity_id}"));
                     }
+                    let win_flag = if bid_for_corp { InventoryFlag::CorpDeliveries } else { InventoryFlag::Hangar };
                     for iid in &c.item_ids {
+                        snap.service_state_blobs.remove(&format!("contract_orig_flag:{cid}:{iid}"));
                         if let Some(item) = snap.items.get_mut(iid) {
-                            item.owner_id = char_id;
+                            item.owner_id = bidder_entity_id;
                             item.location_id = c.start_station_id;
-                            item.flag = InventoryFlag::Hangar;
+                            item.flag = win_flag;
                             item.version += 1;
                         }
                         snap.sp6_lifecycle.self_destructs.remove(iid);
@@ -855,9 +1175,9 @@ pub fn handle(
 
                 if let Some(c_mut) = snap.contracts.get_mut(&cid) {
                     c_mut.current_bid = effective_bid;
-                    c_mut.current_bidder_id = Some(char_id);
-                    c_mut.bid_history.push((char_id, effective_bid, now_unix));
-                    if is_buyout { c_mut.acceptor_id = Some(char_id); c_mut.status = "Completed".into(); }
+                    c_mut.current_bidder_id = Some(bidder_entity_id);
+                    c_mut.bid_history.push((bidder_entity_id, effective_bid, now_unix));
+                    if is_buyout { c_mut.acceptor_id = Some(bidder_entity_id); c_mut.status = "Completed".into(); }
                 }
                 Ok((new_status, effective_bid, is_buyout, prev_bidder_opt, c.issuer_id))
             });
@@ -891,6 +1211,14 @@ pub fn handle(
             let caller_ship = session.ship_id;
             let caller_corp = session.corporation_id.unwrap_or(0);
             let now_unix = ctx.now_unix();
+            if let Some(corp_id) = ctx
+                .db
+                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
+                .or(session.corporation_id)
+                .filter(|&id| id > 0)
+            {
+                crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
+            }
             let expired_in_progress = ctx.db.try_with_mut_snapshot(|snap| {
                     Ok::<_, std::convert::Infallible>(snap.resolve_expired_contract(cid, now_unix))
                 }).unwrap();
@@ -904,8 +1232,13 @@ pub fn handle(
                 let Some(c) = snap.contracts.get(&cid).cloned() else {
                     return Err(rpc_err("ContractNotFound", format!("Contract {cid} does not exist")));
                 };
-                let effective_corp = if caller_corp != 0 { caller_corp } else { snap.characters.get(&char_id).map(|ch| ch.corporation_id).unwrap_or(0) };
-                let is_corp_acceptor = effective_corp != 0 && c.acceptor_id == Some(effective_corp) && has_corp_contract_role(snap, Some(session), char_id, effective_corp);
+                let effective_corp = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|ch| ch.corporation_id)
+                    .filter(|&id| id != 0)
+                    .unwrap_or(caller_corp);
+                let is_corp_acceptor = effective_corp != 0 && c.acceptor_id == Some(effective_corp) && has_corp_contract_role(snap, char_id, effective_corp, now_unix);
                 if c.status != "InProgress" || (c.acceptor_id != Some(char_id) && !is_corp_acceptor) {
                     return Err(rpc_err("InvalidContractState", format!("Contract {cid} is not InProgress for character {char_id}")));
                 }
@@ -1039,6 +1372,14 @@ pub fn handle(
             let cid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let caller_corp = session.corporation_id.unwrap_or(0);
             let now_unix = ctx.now_unix();
+            if let Some(corp_id) = ctx
+                .db
+                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
+                .or(session.corporation_id)
+                .filter(|&id| id > 0)
+            {
+                crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
+            }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(c) = snap.contracts.get(&cid).cloned() else {
                     return Err(rpc_err("ContractNotFound", format!("Contract {cid} does not exist")));
@@ -1048,13 +1389,14 @@ pub fn handle(
                 } else {
                     c.issuer_id
                 };
-                let effective_corp = if caller_corp != 0 {
-                    caller_corp
-                } else {
-                    snap.characters.get(&char_id).map(|ch| ch.corporation_id).unwrap_or(0)
-                };
+                let effective_corp = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|ch| ch.corporation_id)
+                    .filter(|&id| id != 0)
+                    .unwrap_or(caller_corp);
                 let has_caller_corp_contract_role =
-                    has_corp_contract_role(snap, Some(session), char_id, effective_corp);
+                    has_corp_contract_role(snap, char_id, effective_corp, now_unix);
                 if method == "RejectContract" {
                     let is_assignee = c.assignee_id != 0
                         && (c.assignee_id == char_id || c.assignee_id == effective_corp);
@@ -1071,10 +1413,11 @@ pub fn handle(
                         }
                     }
                     for iid in &c.item_ids {
+                        let orig_flag = pop_escrowed_item_orig_flag(snap, cid, *iid);
                         if let Some(item) = snap.items.get_mut(iid) {
                             item.owner_id = issuer_entity_id;
                             item.location_id = c.start_station_id;
-                            item.flag = InventoryFlag::Hangar;
+                            item.flag = orig_flag;
                             item.version += 1;
                         }
                     }
@@ -1101,19 +1444,29 @@ pub fn handle(
                             snap.credit_contract_issuer(&c, IskCents(dep_raw));
                         }
                         for iid in &c.item_ids {
+                            let orig_flag = pop_escrowed_item_orig_flag(snap, cid, *iid);
                             if let Some(item) = snap.items.get_mut(iid) {
                                 item.owner_id = issuer_entity_id;
                                 item.location_id = c.start_station_id;
-                                item.flag = InventoryFlag::Hangar;
+                                item.flag = orig_flag;
                                 item.version += 1;
                             }
                         }
                     }
-                    for item in snap.items.values_mut().filter(|item| item.location_id == cid) {
-                        item.owner_id = issuer_entity_id;
-                        item.location_id = c.start_station_id;
-                        item.flag = InventoryFlag::Hangar;
-                        item.version += 1;
+                    let extra_ids: Vec<i64> = snap
+                        .items
+                        .values()
+                        .filter(|item| item.location_id == cid)
+                        .map(|item| item.item_id)
+                        .collect();
+                    for iid in extra_ids {
+                        let orig_flag = pop_escrowed_item_orig_flag(snap, cid, iid);
+                        if let Some(item) = snap.items.get_mut(&iid) {
+                            item.owner_id = issuer_entity_id;
+                            item.location_id = c.start_station_id;
+                            item.flag = orig_flag;
+                            item.version += 1;
+                        }
                     }
                     if let Some(c_mut) = snap.contracts.get_mut(&cid) { c_mut.status = "Deleted".into(); }
                     return Ok(("Deleted", c.issuer_id));
@@ -1264,10 +1617,8 @@ pub fn handle(
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<Vec<PyRep>, BridgeRpcError> {
                 if owner_id != char_id {
                     let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
-                    let allowed = owner_id == caller_corp && snap.corporations.get(&caller_corp).is_some_and(|corp| {
-                        let r = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
-                        char_id == corp.ceo_id || (r & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_CONTRACT_MANAGER)) != 0
-                    });
+                    let allowed = owner_id == caller_corp
+                        && has_corp_contract_role(snap, char_id, caller_corp, now_unix);
                     if !allowed {
                         return Err(rpc_err("CorpRoleDenied", "Viewing corporation auction bids requires Contract Manager or Director role"));
                     }
@@ -1339,7 +1690,7 @@ pub fn break_courier_plastic_wrap(
     };
     let can_break = wrap_item.type_id == 3468
         && (wrap_item.owner_id == char_id
-            || has_corp_contract_role(snap, None, char_id, wrap_item.owner_id));
+            || has_corp_contract_role(snap, char_id, wrap_item.owner_id, now_unix));
     if !can_break {
         return Err(rpc_err("InvalidPlasticWrap", format!("Item {wrap_id} is not a Courier Plastic Wrap accessible to {char_id}")));
     }
@@ -1354,7 +1705,7 @@ pub fn break_courier_plastic_wrap(
             && c.status == "InProgress"
             && (c.acceptor_id == Some(char_id)
                 || c.acceptor_id.is_some_and(|aid| {
-                    aid == wrap_item.owner_id && has_corp_contract_role(snap, None, char_id, aid)
+                    aid == wrap_item.owner_id && has_corp_contract_role(snap, char_id, aid, now_unix)
                 }))
             && c.item_ids.iter().any(|iid| snap.items.get(iid).is_some_and(|it| it.location_id == wrap_id))
     }).map(|c| (c.contract_id, c.issuer_id, c.acceptor_id.unwrap_or(char_id), c.item_ids.clone()));

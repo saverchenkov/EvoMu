@@ -244,7 +244,7 @@ fn create_contract_validation_and_for_corp_role_and_slot_branches() {
     .unwrap_err();
     assert_eq!(err.code, "ContractSlotLimitReached");
 
-    // Train Corporation Contracting (25233) to level 1 (allows 20 slots), empty corp division 1 wallet -> InsufficientFunds
+    // Train Corporation Contracting (25233) to level 1 (allows 20 slots), funded forCorp without ROLE_ACCOUNT_CAN_TAKE[0] -> CrpAccessDenied
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(issuer_id).or_default().insert(
             25233,
@@ -252,6 +252,34 @@ fn create_contract_validation_and_for_corp_role_and_slot_branches() {
         );
         if let Some(c) = snap.corporations.get_mut(&corp_id) {
             c.set_division_balance(1, IskCents(0));
+        }
+    });
+    let err_no_acct = handle(
+        &ctx,
+        &mut sess,
+        "contractProxy",
+        "CreateContract",
+        &[PyRep::keyval([
+            ("type", PyRep::String("ItemExchange".into())),
+            ("forCorp", PyRep::Bool(true)),
+            ("availability", PyRep::Integer(0)),
+            ("startStationID", PyRep::Integer(JITA_STATION_ID)),
+            ("price", PyRep::Real(1_000_000.0)),
+            ("requestedItems", req_kv.clone()),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_no_acct.code, "CrpAccessDenied");
+
+    // Grant ROLE_ACCOUNT_CAN_TAKE[0]; with empty corp division 1 wallet -> InsufficientFunds
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.corporations.get_mut(&corp_id) {
+            c.member_roles.insert(
+                issuer_id,
+                eve_db::corp_roles::ROLE_CONTRACT_MANAGER | eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[0],
+            );
         }
     });
     let err = handle(

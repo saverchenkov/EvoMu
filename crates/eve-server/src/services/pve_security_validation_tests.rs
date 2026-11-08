@@ -20,6 +20,8 @@ use eve_proto::quasar::{
 };
 use std::collections::HashMap;
 
+const DAILY_REWARD_COOLDOWN_ERR: &str = "DailyRewardAlreadyClaimedToday";
+
 /// `#464`: Masks all unmatured 24h title role bits (`ROLE_DIRECTOR`, `ROLE_PROJECT_MANAGER`,
 /// `ROLE_ACCOUNT_CAN_TAKE`) in `effective_corp_member_roles` and rejects assembled singleton ships/containers
 /// or items containing nested child items during project item delivery.
@@ -263,8 +265,28 @@ async fn r7_465_login_reward_packaging_expiry_item_change_and_campaign_scoped_cl
     .unwrap();
     let prog_b = state_b.dict_get("item_progress").expect("item_progress");
     assert_eq!(prog_b.dict_get("num_claimed_rewards"), Some(&PyRep::Integer(0)));
-    assert_eq!(prog_b.dict_get("next_reward_timestamp"), Some(&PyRep::Integer(0)));
+    assert!(
+        prog_b
+            .dict_get("next_reward_timestamp")
+            .and_then(|v| v.as_i64())
+            .is_some_and(|ts| ts > 0),
+        "character-global daily claim cooldown must still apply across campaign switches (#566)"
+    );
 
+    let blocked_b = campaigns_and_milestones::handle(
+        &ctx,
+        &mut sess,
+        "loginCampaignManager",
+        "claim_reward",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(blocked_b.code, DAILY_REWARD_COOLDOWN_ERR);
+
+    ctx.advance_secs(86_405);
     let rep_b = campaigns_and_milestones::handle(
         &ctx,
         &mut sess,

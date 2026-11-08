@@ -196,9 +196,12 @@ async fn test_r5_238_243_244_245_contracts_fingerprint_deposit_corp_accept_and_t
         .await.expect_err("Member without Contract Manager role cannot accept for corp");
     assert_eq!(role_err.code, "CrpAccessDenied");
 
-    s_acceptor.corp_role = corp_roles::ROLE_CONTRACT_MANAGER;
+    let role_mask = corp_roles::ROLE_CONTRACT_MANAGER
+        | corp_roles::ROLE_HANGAR_CAN_TAKE[0]
+        | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0];
+    s_acceptor.corp_role = role_mask;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations.get_mut(&corp_id).unwrap().member_roles.insert(90_000_002, corp_roles::ROLE_CONTRACT_MANAGER);
+        snap.corporations.get_mut(&corp_id).unwrap().member_roles.insert(90_000_002, role_mask);
     });
     let tradein_err = ctx
         .dispatch_rpc(&mut s_acceptor, "contractProxy", None, "AcceptContract", &[PyRep::Integer(ie_cid)], &accept_corp_kw, None)
