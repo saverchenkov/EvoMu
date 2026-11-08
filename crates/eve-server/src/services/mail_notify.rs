@@ -531,11 +531,26 @@ pub fn is_mail_authorized(
             .map(|meta| meta.to_character_ids.contains(&char_id))
             .unwrap_or(false)
     };
-    let is_list_member = snap
-        .mailing_lists
-        .values()
-        .any(|ml| ml.mail_ids.contains(&mid) && ml.members.contains_key(&char_id));
-    is_sender || is_recipient || is_meta_recipient || is_list_member
+    let is_list_member = snap.mailing_lists.values().any(|ml| {
+        (ml.mail_ids.contains(&mid)
+            || matching.iter().any(|m| m.recipient_id == ml.list_id))
+            && ml.members.contains_key(&char_id)
+    });
+    let has_label = snap.mail_assigned_labels.contains_key(&(char_id, mid));
+    let is_org_member = matching.iter().any(|m| {
+        snap.corporations
+            .get(&m.recipient_id)
+            .is_some_and(|c| c.members.contains(&char_id) || c.ceo_id == char_id)
+            || snap.characters.get(&char_id).is_some_and(|ch| {
+                ch.corporation_id == m.recipient_id
+                    || snap.alliances.get(&m.recipient_id).is_some_and(|al| {
+                        ch.alliance_id == Some(m.recipient_id)
+                            || (ch.corporation_id > 0
+                                && al.member_corp_ids.contains(&ch.corporation_id))
+                    })
+            })
+    });
+    is_sender || is_recipient || is_meta_recipient || is_list_member || has_label || is_org_member
 }
 
 pub fn check_mails_authorized(

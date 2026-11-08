@@ -274,6 +274,12 @@ fn mail_list_post_detail_and_delete_cover_cspa_labels_and_validation() {
     let p_char = params(&[("character_id", &char_str)]);
     let empty_q = HashMap::new();
     ctx.db.with_mut_snapshot(|snap| {
+        let mut rec = snap.characters[&char_id].clone();
+        rec.character_id = 90_000_777;
+        rec.name = "CSPA Recipient".into();
+        rec.corporation_id = 1_000_009;
+        rec.alliance_id = None;
+        snap.characters.insert(90_000_777, rec);
         snap.character_cspa_charges
             .insert(90_000_777, IskCents::from_isk(2_950));
     });
@@ -419,4 +425,218 @@ fn mail_list_post_detail_and_delete_cover_cspa_labels_and_validation() {
         .status_code,
         404
     );
+}
+
+#[test]
+fn esi_post_mail_entity_validation_and_mailing_list_acl_parity() {
+    let (ctx, _token, char_id, corp_id, _planet_id) = seed_full_esi_context();
+    let char_str = char_id.to_string();
+    let p_char = params(&[("character_id", &char_str)]);
+    let empty_q = HashMap::new();
+    let blocker_id = 90_000_778_i64;
+    let list_owner_id = 90_000_779_i64;
+    let member2_id = 90_000_002_i64;
+    let list_id = 77_001_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base = snap.characters[&char_id].clone();
+        for (cid, name) in [(blocker_id, "Blocker"), (list_owner_id, "ListOwner")] {
+            let mut ch = base.clone();
+            ch.character_id = cid;
+            ch.name = name.into();
+            ch.corporation_id = corp_id;
+            ch.balance = IskCents::from_isk(100_000);
+            snap.characters.insert(cid, ch);
+        }
+        snap.char_contacts.insert(
+            blocker_id,
+            vec![eve_db::SocialContactRecord {
+                contact_id: char_id,
+                standing: -10.0,
+                is_blocked: true,
+                is_watched: false,
+                label_ids: Vec::new(),
+                contact_type: "character".into(),
+            }],
+        );
+        let mut members = HashMap::new();
+        members.insert(list_owner_id, 2);
+        members.insert(char_id, 1);
+        members.insert(member2_id, 1);
+        snap.mailing_lists.insert(
+            list_id,
+            eve_db::MailingListRecord {
+                list_id,
+                name: "ESI Op List".into(),
+                owner_id: list_owner_id,
+                default_access: 1,
+                default_role: 1,
+                cost: 500,
+                members,
+                entity_access: HashMap::new(),
+                welcome_mail: None,
+                mail_ids: std::collections::HashSet::new(),
+            },
+        );
+    });
+
+    // Entity-type mismatch / non-existent entities -> 400
+    for bad_recip in [
+        json!({"recipient_id": blocker_id, "recipient_type": "corporation"}),
+        json!({"recipient_id": corp_id, "recipient_type": "character"}),
+        json!({"recipient_id": 99_999_999, "recipient_type": "alliance"}),
+        json!({"recipient_id": 88_888_888, "recipient_type": "mailing_list"}),
+    ] {
+        let res = dispatch_character_mail_routes(
+            &ctx,
+            "POST",
+            "/characters/{character_id}/mail",
+            &p_char,
+            &empty_q,
+            None,
+            1,
+            &serde_json::to_vec(&json!({
+                "subject": "Bad Type",
+                "body": "Test",
+                "recipients": [bad_recip]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(res.status_code, 400, "expected 400 for {bad_recip}");
+    }
+
+    // NPC corp cannot be targeted as corporation -> 403
+    let npc_res = dispatch_character_mail_routes(
+        &ctx,
+        "POST",
+        "/characters/{character_id}/mail",
+        &p_char,
+        &empty_q,
+        None,
+        1,
+        &serde_json::to_vec(&json!({
+            "subject": "NPC",
+            "body": "Test",
+            "recipients": [{"recipient_id": 1_000_035, "recipient_type": "corporation"}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(npc_res.status_code, 403);
+
+    // Mailing list cost check against approved_cost -> 400
+    let low_cost = dispatch_character_mail_routes(
+        &ctx,
+        "POST",
+        "/characters/{character_id}/mail",
+        &p_char,
+        &empty_q,
+        None,
+        1,
+        &serde_json::to_vec(&json!({
+            "approved_cost": 100,
+            "subject": "Costly",
+            "body": "Test",
+            "recipients": [{"recipient_id": list_id, "recipient_type": "mailing_list"}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(low_cost.status_code, 400);
+
+    // Muted member -> 403
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.mailing_lists.get_mut(&list_id).unwrap().members.insert(char_id, 0);
+    });
+    let muted_res = dispatch_character_mail_routes(
+        &ctx,
+        "POST",
+        "/characters/{character_id}/mail",
+        &p_char,
+        &empty_q,
+        None,
+        1,
+        &serde_json::to_vec(&json!({
+            "approved_cost": 500,
+            "subject": "Muted",
+            "body": "Test",
+            "recipients": [{"recipient_id": list_id, "recipient_type": "mailing_list"}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(muted_res.status_code, 403);
+
+    // Non-member -> 403
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.mailing_lists.get_mut(&list_id).unwrap().members.remove(&char_id);
+    });
+    let nonmember_res = dispatch_character_mail_routes(
+        &ctx,
+        "POST",
+        "/characters/{character_id}/mail",
+        &p_char,
+        &empty_q,
+        None,
+        1,
+        &serde_json::to_vec(&json!({
+            "approved_cost": 500,
+            "subject": "Nonmember",
+            "body": "Test",
+            "recipients": [{"recipient_id": list_id, "recipient_type": "mailing_list"}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(nonmember_res.status_code, 403);
+
+    // Restore role 1 -> sends 201, transfers 500 ISK to owner, updates ml.mail_ids & mail_headers_meta
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.mailing_lists.get_mut(&list_id).unwrap().members.insert(char_id, 1);
+    });
+    let owner_bal_before = ctx.db.with_snapshot(|s| s.characters[&list_owner_id].balance.0);
+    let sent_ml = dispatch_character_mail_routes(
+        &ctx,
+        "POST",
+        "/characters/{character_id}/mail",
+        &p_char,
+        &empty_q,
+        None,
+        1,
+        &serde_json::to_vec(&json!({
+            "approved_cost": 500,
+            "subject": "List Broadcast",
+            "body": "Hello list",
+            "recipients": [{"recipient_id": list_id, "recipient_type": "mailing_list"}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(sent_ml.status_code, 201);
+    let ml_mail_id = body(&sent_ml).as_i64().unwrap();
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.characters[&list_owner_id].balance.0 - owner_bal_before,
+            IskCents::from_isk(500).0
+        );
+        assert!(snap.mailing_lists[&list_id].mail_ids.contains(&ml_mail_id));
+        assert!(crate::services::mail_notify::is_mail_authorized(
+            &ctx, snap, ml_mail_id, member2_id
+        ));
+    });
+    let member2_str = member2_id.to_string();
+    let member_detail = dispatch_character_mail_routes(
+        &ctx,
+        "GET",
+        "/characters/{character_id}/mail/{mail_id}",
+        &params(&[("character_id", &member2_str), ("mail_id", &ml_mail_id.to_string())]),
+        &empty_q,
+        None,
+        1,
+        b"",
+    )
+    .unwrap();
+    assert_eq!(member_detail.status_code, 200);
+    assert_eq!(body(&member_detail)["recipients"][0]["recipient_type"], "mailing_list");
 }

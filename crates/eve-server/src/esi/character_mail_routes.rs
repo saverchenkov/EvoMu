@@ -11,6 +11,41 @@ use eve_db::{IskCents, MailRecord, SsoTokenClaims, WalletJournalEntry};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
+pub(crate) fn mail_record_accessible_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    m: &MailRecord,
+) -> bool {
+    if m.recipient_id == char_id || m.sender_id == char_id {
+        return true;
+    }
+    if snap.mail_assigned_labels.contains_key(&(char_id, m.message_id)) {
+        return true;
+    }
+    if snap
+        .corporations
+        .get(&m.recipient_id)
+        .is_some_and(|c| c.members.contains(&char_id) || c.ceo_id == char_id)
+    {
+        return true;
+    }
+    if let Some(ch) = snap.characters.get(&char_id) {
+        if ch.corporation_id == m.recipient_id {
+            return true;
+        }
+        if snap.alliances.get(&m.recipient_id).is_some_and(|al| {
+            ch.alliance_id == Some(m.recipient_id)
+                || (ch.corporation_id > 0 && al.member_corp_ids.contains(&ch.corporation_id))
+        }) {
+            return true;
+        }
+    }
+    snap.mailing_lists.values().any(|ml| {
+        (ml.list_id == m.recipient_id || ml.mail_ids.contains(&m.message_id))
+            && ml.members.contains_key(&char_id)
+    })
+}
+
 fn parse_optional_from_id(
     query_params: &HashMap<String, String>,
 ) -> Result<Option<i64>, RouteExecutionResult> {
@@ -487,7 +522,7 @@ pub fn dispatch_character_mail_routes(
                     .mails
                     .iter()
                     .filter(|m| {
-                        (m.recipient_id == char_id || m.sender_id == char_id)
+                        mail_record_accessible_in_snap(snap, char_id, m)
                             && !snap.deleted_mails.contains(&(char_id, m.message_id))
                             && !snap.trashed_mails.contains(&(char_id, m.message_id))
                             && !ctx.esi_state.is_mail_deleted(char_id, m.message_id)
@@ -528,6 +563,8 @@ pub fn dispatch_character_mail_routes(
                                     || ctx.sde.npc_corporations.contains_key(&m.recipient_id)
                                 {
                                     "corporation"
+                                } else if snap.mailing_lists.contains_key(&m.recipient_id) {
+                                    "mailing_list"
                                 } else {
                                     "character"
                                 };
@@ -631,7 +668,7 @@ pub fn dispatch_character_mail_routes(
                         format!("Invalid recipient_type '{rtype}'"),
                     ));
                 }
-                if !recipient_specs.iter().any(|&(id, _)| id == rid) {
+                if !recipient_specs.iter().any(|&(id, ref t)| id == rid && t == rtype) {
                     recipient_specs.push((rid, rtype.to_string()));
                 }
             }
@@ -697,8 +734,11 @@ pub fn dispatch_character_mail_routes(
                     }
                 }
             }
+            if recipient_specs.iter().any(|(_, t)| t == "mailing_list") {
+                crate::services::fleet_social::fleet_social_persistence::ensure_social_extras_mailing_lists_seeded(ctx);
+            }
             let specs_for_notify = recipient_specs.clone();
-            let res: Result<(i64, Vec<(i64, i64)>), RouteExecutionResult> = ctx.db.try_with_mut_snapshot(|snap| {
+            let res: Result<(i64, Vec<(i64, i64)>, Vec<i64>), RouteExecutionResult> = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(sender) = snap.characters.get(&char_id).cloned() else {
                     return Err(RouteExecutionResult::error(
                         404,
@@ -710,47 +750,54 @@ pub fn dispatch_character_mail_routes(
                     | eve_db::corp_roles::ROLE_CHAT_MANAGER
                     | eve_db::corp_roles::ROLE_DIPLOMAT;
                 let mut total_cspa_cents = 0i64;
+                let mut ml_cost_transfers: Vec<(i64, i64, i64)> = Vec::new();
                 for &(rid, ref rtype) in &recipient_specs {
                     if rtype == "corporation" {
-                        let Some(corp) = snap.corporations.get(&rid) else {
-                            return Err(RouteExecutionResult::error(
-                                404,
-                                format!("Corporation {rid} not found"),
-                            ));
-                        };
-                        if sender.corporation_id != rid
-                            && !corp.members.contains(&char_id)
-                            && corp.ceo_id != char_id
-                        {
-                            return Err(RouteExecutionResult::error(
-                                403,
-                                format!(
-                                    "Character {char_id} is not a member of corporation {rid}"
-                                ),
-                            ));
-                        }
-                        let restrict = snap
-                            .corp_governance
-                            .get(&rid)
-                            .is_some_and(|g| g.restrict_corp_mails);
-                        if restrict {
-                            let eff = super::router::effective_esi_corp_role_breakdown(
-                                snap, rid, char_id, now,
-                            );
-                            if !eff.is_ceo && (eff.any_active_roles() & allowed_mail_roles) == 0 {
+                        if let Some(corp) = snap.corporations.get(&rid) {
+                            if sender.corporation_id != rid
+                                && !corp.members.contains(&char_id)
+                                && corp.ceo_id != char_id
+                            {
                                 return Err(RouteExecutionResult::error(
                                     403,
                                     format!(
-                                        "Corporation {rid} restricts corporation mail to leadership"
+                                        "Character {char_id} is not a member of corporation {rid}"
                                     ),
                                 ));
                             }
+                            let restrict = snap
+                                .corp_governance
+                                .get(&rid)
+                                .is_some_and(|g| g.restrict_corp_mails);
+                            if restrict {
+                                let eff = super::router::effective_esi_corp_role_breakdown(
+                                    snap, rid, char_id, now,
+                                );
+                                if !eff.is_ceo && (eff.any_active_roles() & allowed_mail_roles) == 0 {
+                                    return Err(RouteExecutionResult::error(
+                                        403,
+                                        format!(
+                                            "Corporation {rid} restricts corporation mail to leadership"
+                                        ),
+                                    ));
+                                }
+                            }
+                        } else if ctx.sde.npc_corporations.contains_key(&rid) {
+                            return Err(RouteExecutionResult::error(
+                                403,
+                                format!("Cannot send corporation mail to NPC corporation {rid}"),
+                            ));
+                        } else {
+                            return Err(RouteExecutionResult::error(
+                                400,
+                                format!("Corporation recipient {rid} not found"),
+                            ));
                         }
                     } else if rtype == "alliance" {
                         let Some(al) = snap.alliances.get(&rid) else {
                             return Err(RouteExecutionResult::error(
-                                404,
-                                format!("Alliance {rid} not found"),
+                                400,
+                                format!("Alliance recipient {rid} not found"),
                             ));
                         };
                         let in_alliance = sender.alliance_id == Some(rid)
@@ -787,33 +834,76 @@ pub fn dispatch_character_mail_routes(
                                 ));
                             }
                         }
-                    } else if rtype == "character" && rid != char_id {
-                        let same_corp = snap
-                            .characters
-                            .get(&rid)
-                            .is_some_and(|rc| rc.corporation_id == sender.corporation_id);
-                        let is_exempt_contact = extra_contacts.contains_key(&rid)
-                            || snap
-                                .char_contacts
-                                .get(&rid)
-                                .and_then(|list| list.iter().find(|c| c.contact_id == char_id))
-                                .is_some_and(|c| !c.is_blocked && c.standing > -10.0)
-                            || ctx
-                                .esi_state
-                                .char_contacts
-                                .read()
-                                .ok()
-                                .and_then(|map| map.get(&rid).cloned())
-                                .and_then(|list| list.into_iter().find(|c| c.contact_id == char_id))
-                                .is_some_and(|c| !c.is_blocked && c.standing > -10.0);
-                        if !same_corp && !is_exempt_contact {
-                            let cspa = snap
-                                .character_cspa_charges
-                                .get(&rid)
+                    } else if rtype == "mailing_list" {
+                        let Some(ml) = snap.mailing_lists.get(&rid) else {
+                            return Err(RouteExecutionResult::error(
+                                400,
+                                format!("Mailing list recipient {rid} not found"),
+                            ));
+                        };
+                        if char_id != ml.owner_id {
+                            let entity_acc = ml
+                                .entity_access
+                                .get(&char_id)
+                                .or_else(|| ml.entity_access.get(&sender.corporation_id))
+                                .or_else(|| sender.alliance_id.and_then(|aid| ml.entity_access.get(&aid)))
                                 .copied()
-                                .or_else(|| extra_cspa.get(&rid).copied())
-                                .unwrap_or(IskCents(0));
-                            total_cspa_cents = total_cspa_cents.saturating_add(cspa.0.max(0));
+                                .unwrap_or(ml.default_access);
+                            let role = ml.members.get(&char_id).copied();
+                            if role.is_none() || entity_acc <= 0 {
+                                return Err(RouteExecutionResult::error(
+                                    403,
+                                    format!("Character {char_id} is not permitted to mail list {rid}"),
+                                ));
+                            }
+                            if role == Some(0) {
+                                return Err(RouteExecutionResult::error(
+                                    403,
+                                    format!("Character {char_id} is muted in mailing list {rid}"),
+                                ));
+                            }
+                        }
+                        let ml_cost_isk = ml.cost.clamp(0, 1_000_000_000);
+                        if ml_cost_isk > 0 && char_id != ml.owner_id {
+                            let cost_cents = IskCents::from_isk(ml_cost_isk).0;
+                            total_cspa_cents = total_cspa_cents.saturating_add(cost_cents);
+                            ml_cost_transfers.push((rid, ml.owner_id, cost_cents));
+                        }
+                    } else if rtype == "character" {
+                        if !snap.characters.contains_key(&rid) {
+                            return Err(RouteExecutionResult::error(
+                                400,
+                                format!("Character recipient {rid} not found"),
+                            ));
+                        }
+                        if rid != char_id {
+                            let same_corp = snap
+                                .characters
+                                .get(&rid)
+                                .is_some_and(|rc| rc.corporation_id == sender.corporation_id);
+                            let is_exempt_contact = extra_contacts.contains_key(&rid)
+                                || snap
+                                    .char_contacts
+                                    .get(&rid)
+                                    .and_then(|list| list.iter().find(|c| c.contact_id == char_id))
+                                    .is_some_and(|c| !c.is_blocked && c.standing > -10.0)
+                                || ctx
+                                    .esi_state
+                                    .char_contacts
+                                    .read()
+                                    .ok()
+                                    .and_then(|map| map.get(&rid).cloned())
+                                    .and_then(|list| list.into_iter().find(|c| c.contact_id == char_id))
+                                    .is_some_and(|c| !c.is_blocked && c.standing > -10.0);
+                            if !same_corp && !is_exempt_contact {
+                                let cspa = snap
+                                    .character_cspa_charges
+                                    .get(&rid)
+                                    .copied()
+                                    .or_else(|| extra_cspa.get(&rid).copied())
+                                    .unwrap_or(IskCents(0));
+                                total_cspa_cents = total_cspa_cents.saturating_add(cspa.0.max(0));
+                            }
                         }
                     }
                 }
@@ -831,12 +921,17 @@ pub fn dispatch_character_mail_routes(
                     if sender.balance.0 < total_cspa_cents {
                         return Err(RouteExecutionResult::error(
                             400,
-                            "Insufficient wallet balance to cover CSPA charge",
+                            "Insufficient wallet balance to cover CSPA / mailing list charge",
                         ));
                     }
                     let new_balance = IskCents(sender.balance.0 - total_cspa_cents);
                     if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
                         ch_mut.balance = new_balance;
+                    }
+                    for (_lid, owner_id, cost_cents) in ml_cost_transfers {
+                        if let Some(owner_ch) = snap.characters.get_mut(&owner_id) {
+                            owner_ch.balance = IskCents(owner_ch.balance.0.saturating_add(cost_cents));
+                        }
                     }
                     snap.next_entity_id += 1;
                     let tx_id = snap.next_entity_id;
@@ -855,6 +950,7 @@ pub fn dispatch_character_mail_routes(
                 snap.read_mails.insert((char_id, mail_id));
                 snap.mail_assigned_labels.insert((char_id, mail_id), vec![2]);
                 let mut recip_metas = Vec::new();
+                let mut updated_list_ids = Vec::new();
                 for (rid, rtype) in recipient_specs {
                     snap.mails.push(MailRecord {
                         message_id: mail_id,
@@ -863,20 +959,67 @@ pub fn dispatch_character_mail_routes(
                         subject: subject.to_string(),
                         body: body.to_string(),
                     });
-                    if rid != char_id {
-                        let label_id = match rtype.as_str() {
-                            "corporation" => 4,
-                            "alliance" => 8,
-                            _ => 1,
-                        };
-                        snap.mail_assigned_labels
-                            .insert((rid, mail_id), vec![label_id]);
-                        recip_metas.push((rid, label_id));
+                    match rtype.as_str() {
+                        "corporation" => {
+                            let members: Vec<i64> = snap
+                                .corporations
+                                .get(&rid)
+                                .into_iter()
+                                .flat_map(|c| c.members.iter().copied())
+                                .filter(|&m_id| m_id != char_id)
+                                .collect();
+                            for m_id in members {
+                                snap.mail_assigned_labels.insert((m_id, mail_id), vec![4]);
+                                recip_metas.push((m_id, 4));
+                            }
+                        }
+                        "alliance" => {
+                            let corp_ids: Vec<i64> = snap
+                                .alliances
+                                .get(&rid)
+                                .map(|a| a.member_corp_ids.iter().copied().collect())
+                                .unwrap_or_default();
+                            for cid in corp_ids {
+                                let members: Vec<i64> = snap
+                                    .corporations
+                                    .get(&cid)
+                                    .into_iter()
+                                    .flat_map(|c| c.members.iter().copied())
+                                    .filter(|&m_id| m_id != char_id)
+                                    .collect();
+                                for m_id in members {
+                                    snap.mail_assigned_labels.insert((m_id, mail_id), vec![8]);
+                                    recip_metas.push((m_id, 8));
+                                }
+                            }
+                        }
+                        "mailing_list" => {
+                            if let Some(ml) = snap.mailing_lists.get_mut(&rid) {
+                                ml.mail_ids.insert(mail_id);
+                                updated_list_ids.push(rid);
+                                let members: Vec<i64> = ml
+                                    .members
+                                    .keys()
+                                    .copied()
+                                    .filter(|&m_id| m_id != char_id)
+                                    .collect();
+                                for m_id in members {
+                                    snap.mail_assigned_labels.insert((m_id, mail_id), vec![1]);
+                                    recip_metas.push((m_id, 1));
+                                }
+                            }
+                        }
+                        _ => {
+                            if rid != char_id {
+                                snap.mail_assigned_labels.insert((rid, mail_id), vec![1]);
+                                recip_metas.push((rid, 1));
+                            }
+                        }
                     }
                 }
-                Ok((mail_id, recip_metas))
+                Ok((mail_id, recip_metas, updated_list_ids))
             });
-            if let Ok((mail_id, ref recip_metas)) = res {
+            if let Ok((mail_id, ref recip_metas, ref updated_list_ids)) = res {
                 ctx.esi_state.set_mail_meta(
                     char_id,
                     mail_id,
@@ -895,10 +1038,35 @@ pub fn dispatch_character_mail_routes(
                         },
                     );
                 }
+                let to_chars: Vec<i64> = specs_for_notify
+                    .iter()
+                    .filter(|(_, t)| t == "character")
+                    .map(|(id, _)| *id)
+                    .collect();
+                let to_list = specs_for_notify
+                    .iter()
+                    .find(|(_, t)| t == "mailing_list")
+                    .map(|(id, _)| *id);
+                let to_org = specs_for_notify
+                    .iter()
+                    .find(|(_, t)| t == "corporation" || t == "alliance")
+                    .map(|(id, _)| *id);
+                crate::services::mail_notify::record_mail_meta(
+                    ctx, mail_id, &to_chars, to_list, to_org,
+                );
+                if !updated_list_ids.is_empty() {
+                    if let Ok(mut s) = ctx.social_extras.lock() {
+                        for &lid in updated_list_ids {
+                            if let Some(ml) = s.mailing_lists.get_mut(&lid) {
+                                ml.mail_ids.insert(mail_id);
+                            }
+                        }
+                    }
+                }
                 notify_esi_mail_sent(ctx, char_id, mail_id, subject, &specs_for_notify);
             }
             Some(match res {
-                Ok((mail_id, _)) => RouteExecutionResult::created_json(json!(mail_id)),
+                Ok((mail_id, _, _)) => RouteExecutionResult::created_json(json!(mail_id)),
                 Err(e) => e,
             })
         }
@@ -934,7 +1102,7 @@ pub fn dispatch_character_mail_routes(
                 if rows.is_empty()
                     || !rows
                         .iter()
-                        .any(|m| m.recipient_id == char_id || m.sender_id == char_id)
+                        .any(|m| mail_record_accessible_in_snap(snap, char_id, m))
                 {
                     return RouteExecutionResult::error(
                         404,
@@ -961,6 +1129,8 @@ pub fn dispatch_character_mail_routes(
                             || ctx.sde.npc_corporations.contains_key(&m.recipient_id)
                         {
                             "corporation"
+                        } else if snap.mailing_lists.contains_key(&m.recipient_id) {
+                            "mailing_list"
                         } else {
                             "character"
                         };
@@ -1009,7 +1179,7 @@ pub fn dispatch_character_mail_routes(
                     ));
                 }
                 let authorized = snap.mails.iter().any(|m| {
-                    m.message_id == mail_id && (m.recipient_id == char_id || m.sender_id == char_id)
+                    m.message_id == mail_id && mail_record_accessible_in_snap(snap, char_id, m)
                 });
                 if !authorized {
                     return Err(RouteExecutionResult::error(
@@ -1052,6 +1222,11 @@ fn notify_esi_mail_sent(ctx: &ServerContext, sender_id: i64, mail_id: i64, subje
                 "alliance" => {
                     for corp in snap.alliances.get(id).into_iter().flat_map(|a| a.member_corp_ids.iter()) {
                         recipients.extend(snap.corporations.get(corp).into_iter().flat_map(|c| c.members.iter().copied()));
+                    }
+                }
+                "mailing_list" => {
+                    if let Some(ml) = snap.mailing_lists.get(id) {
+                        recipients.extend(ml.members.keys().copied());
                     }
                 }
                 _ => {}

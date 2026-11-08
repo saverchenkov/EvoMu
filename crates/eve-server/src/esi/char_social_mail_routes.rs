@@ -545,7 +545,8 @@ pub fn dispatch_char_social_mail_route(
                     ));
                 }
                 let Some(first) = snap.mails.iter().find(|m| {
-                    m.message_id == mail_id && (m.recipient_id == char_id || m.sender_id == char_id)
+                    m.message_id == mail_id
+                        && super::character_mail_routes::mail_record_accessible_in_snap(snap, char_id, m)
                 }) else {
                     return Err(RouteExecutionResult::error(
                         404,
