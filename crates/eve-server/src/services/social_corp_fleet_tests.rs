@@ -301,3 +301,99 @@ async fn social_alliance_lifecycle_timers_and_executor() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn update_application_rejects_and_gm_force_accepts_immediately() {
+    let (ctx, _clock, mut exec, mut applicant, _) = setup_alliance_sandbox();
+    let created = call_social(
+        &ctx,
+        &mut exec,
+        "allianceRegistry",
+        "CreateAlliance",
+        vec![
+            PyRep::String("Rejection Test Alliance".into()),
+            PyRep::String("RTAL".into()),
+        ],
+    )
+    .await
+    .unwrap();
+    let aid = kv(&created, "allianceID").as_i64().unwrap();
+    exec.alliance_id = Some(aid);
+    call_social(
+        &ctx,
+        &mut applicant,
+        "corpRegistry",
+        "ApplyToJoinAlliance",
+        vec![PyRep::Integer(aid), PyRep::String("Please let us in".into())],
+    )
+    .await
+    .unwrap();
+
+    // State 3 / "Rejected" rejects the application without scheduling membership.
+    let rej = call_social(
+        &ctx,
+        &mut exec,
+        "allianceRegistry",
+        "UpdateApplication",
+        vec![
+            PyRep::Integer(98_100_002),
+            PyRep::String("No thanks".into()),
+            PyRep::Integer(3),
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(kv(&rej, "status"), &PyRep::String("Rejected".into()));
+    assert_eq!(kv(&rej, "joinEffectiveTime"), &PyRep::None);
+
+    let apps = call_social(
+        &ctx,
+        &mut exec,
+        "allianceRegistry",
+        "GetAllianceApplications",
+        vec![PyRep::Integer(aid)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rs_rows(&apps)[0][4], PyRep::String("Rejected".into()));
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.alliances[&aid].member_corp_ids.contains(&98_100_002));
+    });
+
+    // Re-apply and test GMForceAcceptApplication with GM role.
+    call_social(
+        &ctx,
+        &mut applicant,
+        "corpRegistry",
+        "DeleteAllianceApplication",
+        vec![PyRep::Integer(aid)],
+    )
+    .await
+    .unwrap();
+    call_social(
+        &ctx,
+        &mut applicant,
+        "corpRegistry",
+        "ApplyToJoinAlliance",
+        vec![PyRep::Integer(aid), PyRep::String("GM fast-track".into())],
+    )
+    .await
+    .unwrap();
+    exec.role |= eve_machonet::service_roles::ROLE_GMH;
+    assert_eq!(
+        call_social(
+            &ctx,
+            &mut exec,
+            "allianceRegistry",
+            "GMForceAcceptApplication",
+            vec![PyRep::Integer(98_100_002)],
+        )
+        .await
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.alliances[&aid].member_corp_ids.contains(&98_100_002));
+        assert_eq!(snap.corporations[&98_100_002].alliance_id, Some(aid));
+    });
+}

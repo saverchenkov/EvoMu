@@ -591,4 +591,21 @@ fn pos_mgr_and_cluster_telemetry_handlers_work() {
     )
     .unwrap()
     .unwrap();
+
+    // AnchorOrbital delegates to real orbital gantry validation rather than returning a static stub.
+    let anchor_missing = handle(&ctx, &mut sess, "posMgr", "AnchorOrbital", &[], &HashMap::new())
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(anchor_missing.code, "MissingArgument");
+    let anchor_non_gantry = handle(
+        &ctx,
+        &mut sess,
+        "posMgr",
+        "AnchorOrbital",
+        &[PyRep::Integer(tower_id), PyRep::Integer(1), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0)],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(anchor_non_gantry.code, "StarbaseRemoved");
 }

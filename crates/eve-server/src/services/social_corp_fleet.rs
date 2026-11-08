@@ -418,98 +418,15 @@ pub async fn handle(
         }
 
         ("allianceRegistry", "UpdateApplication") | ("corpRegistry", "UpdateApplication") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let aid = match require_executor(ctx, session) { Ok(a) => a, Err(e) => return Some(Err(e)) };
-            let applicant_corp_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let now_unix = ctx.now_unix();
-            let eff_unix = now_unix + 86_400;
-            let found = with_alliance_war_state(ctx, |st| {
-                let meta = st.alliances.entry(aid).or_default();
-                if let Some(app) = meta.applications.iter_mut().find(|a| a.0 == applicant_corp_id && a.3 == "Pending") {
-                    app.3 = "Accepted".into();
-                    app.4 = Some(eff_unix);
-                    true
-                } else {
-                    false
-                }
-            });
-            if !found {
-                return Some(Err(BridgeRpcError { code: "ApplicationNotFound".into(), message: format!("No pending application from corporation {applicant_corp_id}") }));
-            }
-            let _ = sync_alliance_timers(ctx, aid);
-            let app_change = PyRep::Dict(vec![
-                (PyRep::String(("state").into()), PyRep::Tuple(vec![PyRep::String(("Pending").into()), PyRep::String(("Accepted").into())])),
-                (PyRep::String(("joinEffectiveTime").into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(eff_unix as i64)])),
-            ]);
-            let app_args = vec![PyRep::Integer(aid), PyRep::Integer(applicant_corp_id), app_change];
-            ctx.notify(NotificationTarget::Alliance(aid), "OnAllianceApplicationChanged", "allianceid", app_args.clone());
-            ctx.notify(NotificationTarget::Corporation(applicant_corp_id), "OnAllianceApplicationChanged", "corpid", app_args);
-            Some(Ok(PyRep::keyval([
-                ("allianceID", PyRep::Integer(aid)),
-                ("corporationID", PyRep::Integer(applicant_corp_id)),
-                ("status", PyRep::String("Accepted".into())),
-                ("joinEffectiveTime", PyRep::Integer(eff_unix as i64)),
-                ("delaySeconds", PyRep::Integer(86_400)),
-            ])))
+            Some(handle_update_alliance_application(ctx, session, args, _kwargs))
         }
 
         ("corpRegistry", "GetAllianceApplications") | ("allianceRegistry", "GetAllianceApplications") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let target_aid = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0);
-            let caller_corp = session.corporation_id.filter(|&id| id > 0);
-            let caller_alliance = session.alliance_id.filter(|&id| id > 0);
-            if let Some(aid) = target_aid.or(caller_alliance) {
-                let _ = sync_alliance_timers(ctx, aid);
-            } else {
-                sync_all_alliance_timers(ctx);
-            }
-            let rows: Vec<Vec<PyRep>> = read_alliance_war_state(ctx, |st| {
-                let mut out = Vec::new();
-                let mut alliance_ids: Vec<i64> = match target_aid {
-                    Some(aid) => vec![aid],
-                    None => st.alliances.keys().copied().collect(),
-                };
-                alliance_ids.sort_unstable();
-                for aid in alliance_ids {
-                    let Some(m) = st.alliances.get(&aid) else {
-                        continue;
-                    };
-                    let is_own_alliance = caller_alliance == Some(aid);
-                    for (cid, msg, ts, status, eff) in &m.applications {
-                        let is_own_corp = caller_corp == Some(*cid);
-                        if !is_own_alliance && !is_own_corp {
-                            continue;
-                        }
-                        out.push(vec![
-                            PyRep::Integer(aid),
-                            PyRep::Integer(*cid),
-                            PyRep::String(msg.clone()),
-                            PyRep::Integer(*ts as i64),
-                            PyRep::String(status.clone()),
-                            eff.map(|e| PyRep::Integer(e as i64)).unwrap_or(PyRep::None),
-                        ]);
-                    }
-                }
-                out
-            });
-            Some(Ok(PyRep::rowset(
-                vec!["allianceID", "corporationID", "applicationText", "applicationDateTime", "status", "joinEffectiveTime"],
-                rows,
-            )))
+            Some(handle_get_alliance_applications(ctx, session, args))
         }
 
         ("corpRegistry", "DeleteAllianceApplication") => {
-            let corp_id = match require_corp_director(ctx, session) {
-                Ok(c) => c,
-                Err(e) => return Some(Err(e)),
-            };
-            let aid = args.first().and_then(|a| a.as_i64()).or(session.alliance_id).unwrap_or(0);
-            with_alliance_war_state(ctx, |st| {
-                if let Some(m) = st.alliances.get_mut(&aid) {
-                    m.applications.retain(|a| a.0 != corp_id);
-                }
-            });
-            Some(Ok(PyRep::keyval([("deleted", PyRep::Bool(true))])))
+            Some(handle_delete_alliance_application(ctx, session, args))
         }
 
         ("allianceRegistry", "allianceID" | "shortName" | "executorCorpID" | "creatorCorpID" | "creatorCharID" | "allowWar") => {
@@ -579,17 +496,7 @@ pub async fn handle(
         }
 
         ("allianceRegistry", "GetEmploymentRecord") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let aid = args.first().and_then(|a| a.as_i64()).or(session.alliance_id).unwrap_or(0);
-            let _ = sync_alliance_timers(ctx, aid);
-            let rows: Vec<Vec<PyRep>> = read_alliance_war_state(ctx, |st| {
-                st.alliances.get(&aid).map(|m| {
-                    m.employment_history.iter().map(|(cid, start, end)| {
-                        vec![PyRep::Integer(aid), PyRep::Integer(*cid), PyRep::Integer(*start as i64), end.map(|e| PyRep::Integer(e as i64)).unwrap_or(PyRep::None)]
-                    }).collect()
-                }).unwrap_or_default()
-            });
-            Some(Ok(PyRep::rowset(vec!["allianceID", "corporationID", "startDate", "endDate"], rows)))
+            Some(handle_get_alliance_employment_record(ctx, session, args))
         }
 
         ("allianceRegistry", "GetRankedAlliances") => {
@@ -1021,93 +928,19 @@ pub async fn handle(
         }
 
         ("allianceRegistry", "AddBulletin") | ("allianceRegistry", "UpdateBulletin") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let aid = match require_executor(ctx, session) { Ok(a) => a, Err(e) => return Some(Err(e)) };
-            let off = usize::from(method == "UpdateBulletin");
-            let target = if off == 1 { args.first().and_then(|a| a.as_i64()) } else { None };
-            let title = args.get(off).and_then(|a| a.as_str()).unwrap_or("").to_string();
-            let body = args.get(off + 1).and_then(|a| a.as_str()).unwrap_or("").to_string();
-            if title.is_empty() {
-                return Some(Err(BridgeRpcError { code: "BulletinTitleRequired".into(), message: "A bulletin needs a title".into() }));
-            }
-            let now_unix = ctx.now_unix();
-            let bid_res = with_alliance_war_state(ctx, |st| {
-                let meta = st.alliances.entry(aid).or_default();
-                match target {
-                    Some(id) => match meta.bulletins.iter_mut().find(|b| b.0 == id) {
-                        Some(b) => {
-                            *b = (id, title.clone(), body.clone(), char_id, now_unix);
-                            Ok(id)
-                        }
-                        None => Err(BridgeRpcError { code: "BulletinNotFound".into(), message: format!("Bulletin {id} not found") }),
-                    },
-                    None => {
-                        let id = meta.bulletins.iter().map(|b| b.0).max().unwrap_or(0) + 1;
-                        meta.bulletins.push((id, title.clone(), body.clone(), char_id, now_unix));
-                        Ok(id)
-                    }
-                }
-            });
-            let bid = match bid_res {
-                Ok(id) => id,
-                Err(e) => return Some(Err(e)),
-            };
-            Some(Ok(PyRep::keyval([("bulletinID", PyRep::Integer(bid)), ("title", PyRep::String(title)), ("body", PyRep::String(body))])))
+            Some(handle_upsert_alliance_bulletin(ctx, session, method, args))
         }
 
         ("allianceRegistry", "GetBulletins") | ("allianceRegistry", "GetAllianceBulletins") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let aid = session.alliance_id.unwrap_or(0);
-            let rows: Vec<Vec<PyRep>> = read_alliance_war_state(ctx, |st| {
-                st.alliances.get(&aid).map(|m| {
-                    m.bulletins.iter().map(|(bid, title, body, author, ts)| {
-                        vec![PyRep::Integer(*bid), PyRep::String(title.clone()), PyRep::String(body.clone()), PyRep::Integer(*author), PyRep::Integer(*ts as i64)]
-                    }).collect()
-                }).unwrap_or_default()
-            });
-            Some(Ok(PyRep::rowset(vec!["bulletinID", "title", "body", "editCharacterID", "editDateTime"], rows)))
+            Some(handle_get_alliance_bulletins(ctx, session))
         }
 
         ("allianceRegistry", "DeleteBulletin") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let aid = match require_executor(ctx, session) { Ok(a) => a, Err(e) => return Some(Err(e)) };
-            let bid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let removed = with_alliance_war_state(ctx, |st| {
-                st.alliances.get_mut(&aid).map(|m| {
-                    let before = m.bulletins.len();
-                    m.bulletins.retain(|b| b.0 != bid);
-                    before != m.bulletins.len()
-                }).unwrap_or(false)
-            });
-            Some(Ok(PyRep::Bool(removed)))
+            Some(handle_delete_alliance_bulletin(ctx, session, args))
         }
 
         ("allianceRegistry", "UpdateAlliance") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let aid = match require_executor(ctx, session) { Ok(a) => a, Err(e) => return Some(Err(e)) };
-            let description = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
-            let url = args.get(1).and_then(|a| a.as_str()).unwrap_or("").to_string();
-            let dict_opt = args.get(3).and_then(|a| a.as_bool()).or_else(|| _kwargs.get("dictatorial").and_then(|a| a.as_bool()));
-            let (old_desc, old_url, dictatorial) = with_alliance_war_state(ctx, |st| {
-                let meta = st.alliances.entry(aid).or_default();
-                if let Some(d) = dict_opt {
-                    meta.dictatorial = d;
-                }
-                (
-                    std::mem::replace(&mut meta.description, description.clone()),
-                    std::mem::replace(&mut meta.url, url.clone()),
-                    meta.dictatorial,
-                )
-            });
-            let change = PyRep::Dict(vec![
-                (PyRep::String(("description").into()), PyRep::Tuple(vec![PyRep::String(old_desc), PyRep::String(description.clone())])),
-                (PyRep::String(("url").into()), PyRep::Tuple(vec![PyRep::String(old_url), PyRep::String(url.clone())])),
-            ]);
-            ctx.notify(NotificationTarget::Alliance(aid), "OnAllianceChanged", "allianceid", vec![PyRep::Integer(aid), change]);
-            if let Some(allow_war) = args.get(2).and_then(|a| a.as_bool()) {
-                crate::services::notify_emitters_character_services::emit_allow_war_updated_for_alliance(ctx, aid, allow_war);
-            }
-            Some(Ok(PyRep::keyval([("allianceID", PyRep::Integer(aid)), ("description", PyRep::String(description)), ("url", PyRep::String(url)), ("dictatorial", PyRep::Bool(dictatorial))])))
+            Some(handle_update_alliance(ctx, session, args, _kwargs))
         }
 
         // =====================================================================
@@ -1303,63 +1136,1176 @@ pub async fn handle(
             social_wars::handle_wars(ctx, session, "warRegistry", "DeclareWarAgainst", args, bound_obj_id)
         }
         ("allianceRegistry", "GetCapitalSystemInfo") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let sys_id = ctx.db.with_snapshot(|snap| {
-                snap.characters
-                    .get(&char_id)
-                    .map(|c| c.solar_system_id as i64)
-                    .unwrap_or(session.solar_system_id.unwrap_or(30_000_142) as i64)
-            });
-            Some(Ok(PyRep::keyval([
-                ("currentCapitalSystem", PyRep::Integer(sys_id)),
-                ("newCapitalSystem", PyRep::None),
-                ("newCapitalSystemValidAfter", PyRep::Integer(0)),
-            ])))
+            Some(handle_get_capital_system_info(ctx, session, bound_obj_id))
+        }
+        ("allianceRegistry", "SetCapitalSystem") => {
+            Some(handle_set_capital_system(ctx, session, args))
+        }
+        ("allianceRegistry", "CancelCapitalSystemTransition") => {
+            Some(handle_cancel_capital_system_transition(ctx, session))
         }
         ("allianceRegistry", "GetPrimeTimeInfo") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let _ = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&char_id));
-            Some(Ok(PyRep::keyval([
-                ("currentPrimeHour", PyRep::Integer(18)),
-                ("newPrimeHour", PyRep::Integer(18)),
-                ("newPrimeHourValidAfter", PyRep::Integer(0)),
-            ])))
+            Some(handle_get_prime_time_info(ctx, session, bound_obj_id))
+        }
+        ("allianceRegistry", "SetPrimeHour") => {
+            Some(handle_set_prime_hour(ctx, session, args))
         }
         ("allianceRegistry", "GetAllianceSovereigntyStructuresInfo") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let _ = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&char_id));
-            Some(Ok(PyRep::Tuple(vec![
-                PyRep::List(Vec::new()),
-                PyRep::List(Vec::new()),
-                PyRep::List(Vec::new()),
-            ])))
+            Some(handle_get_alliance_sov_structures_info(ctx, session, bound_obj_id))
         }
         ("allianceRegistry", "GetBillBalance") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let _ = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&char_id));
-            Some(Ok(PyRep::Real(0.0)))
+            Some(handle_get_alliance_bill_balance(ctx, session, args, bound_obj_id))
         }
-        ("allianceRegistry", "GetBills" | "GetBillsReceivable") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let _ = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&char_id));
-            Some(Ok(PyRep::List(Vec::new())))
+        ("allianceRegistry", "GetBills") | ("allianceRegistry", "GetBillsReceivable") => {
+            Some(handle_get_alliance_bills(ctx, session, method == "GetBillsReceivable", bound_obj_id))
         }
-        (
-            "allianceRegistry",
-            "CancelCapitalSystemTransition"
-            | "GMForceAcceptApplication"
-            | "PayBill"
-            | "SetCapitalSystem"
-            | "SetPrimeHour"
-            | "UpdateBulletinOrder",
-        ) => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let _ = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&char_id));
-            Some(Ok(PyRep::Bool(true)))
+        ("allianceRegistry", "PayBill") => {
+            Some(handle_pay_alliance_bill(ctx, session, args, _kwargs))
+        }
+        ("allianceRegistry", "GMForceAcceptApplication") => {
+            Some(handle_gm_force_accept_application(ctx, session, args, bound_obj_id))
+        }
+        ("allianceRegistry", "UpdateBulletinOrder") => {
+            Some(handle_update_alliance_bulletin_order(ctx, session, args))
         }
 
         _ => social_wars::handle_wars(ctx, session, service, method, args, bound_obj_id),
     }
+}
+
+fn handle_update_alliance_application(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let _ = ServerContext::require_character(session)?;
+    let aid = require_executor(ctx, session)?;
+    let applicant_corp_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+    let is_rejected = args.get(2).is_some_and(|a| {
+        a.as_i64() == Some(3)
+            || a.as_str()
+                .is_some_and(|s| s.eq_ignore_ascii_case("rejected") || s.eq_ignore_ascii_case("declined"))
+    }) || args.get(1).and_then(|a| a.as_str()).is_some_and(|s| {
+        s.eq_ignore_ascii_case("rejected") || s.eq_ignore_ascii_case("declined")
+    }) || kwargs.get("state").is_some_and(|a| {
+        a.as_i64() == Some(3)
+            || a.as_str()
+                .is_some_and(|s| s.eq_ignore_ascii_case("rejected") || s.eq_ignore_ascii_case("declined"))
+    });
+    let now_unix = ctx.now_unix();
+    let eff_unix = now_unix + 86_400;
+    let found = with_alliance_war_state(ctx, |st| {
+        let meta = st.alliances.entry(aid).or_default();
+        if let Some(app) = meta
+            .applications
+            .iter_mut()
+            .find(|a| a.0 == applicant_corp_id && a.3 == "Pending")
+        {
+            if is_rejected {
+                app.3 = "Rejected".into();
+                app.4 = None;
+            } else {
+                app.3 = "Accepted".into();
+                app.4 = Some(eff_unix);
+            }
+            true
+        } else {
+            false
+        }
+    });
+    if !found {
+        return Err(BridgeRpcError {
+            code: "ApplicationNotFound".into(),
+            message: format!("No pending application from corporation {applicant_corp_id}"),
+        });
+    }
+    let _ = sync_alliance_timers(ctx, aid);
+    let new_status = if is_rejected { "Rejected" } else { "Accepted" };
+    let mut change_entries = vec![(
+        PyRep::String("state".into()),
+        PyRep::Tuple(vec![
+            PyRep::String("Pending".into()),
+            PyRep::String(new_status.into()),
+        ]),
+    )];
+    if !is_rejected {
+        change_entries.push((
+            PyRep::String("joinEffectiveTime".into()),
+            PyRep::Tuple(vec![PyRep::None, PyRep::Integer(eff_unix as i64)]),
+        ));
+    }
+    let app_change = PyRep::Dict(change_entries);
+    let app_args = vec![
+        PyRep::Integer(aid),
+        PyRep::Integer(applicant_corp_id),
+        app_change,
+    ];
+    ctx.notify(
+        NotificationTarget::Alliance(aid),
+        "OnAllianceApplicationChanged",
+        "allianceid",
+        app_args.clone(),
+    );
+    ctx.notify(
+        NotificationTarget::Corporation(applicant_corp_id),
+        "OnAllianceApplicationChanged",
+        "corpid",
+        app_args,
+    );
+    Ok(PyRep::keyval([
+        ("allianceID", PyRep::Integer(aid)),
+        ("corporationID", PyRep::Integer(applicant_corp_id)),
+        ("status", PyRep::String(new_status.into())),
+        (
+            "joinEffectiveTime",
+            if is_rejected {
+                PyRep::None
+            } else {
+                PyRep::Integer(eff_unix as i64)
+            },
+        ),
+        (
+            "delaySeconds",
+            PyRep::Integer(if is_rejected { 0 } else { 86_400 }),
+        ),
+    ]))
+}
+
+fn handle_get_alliance_applications(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let _ = ServerContext::require_character(session)?;
+    let target_aid = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0);
+    let caller_corp = session.corporation_id.filter(|&id| id > 0);
+    let caller_alliance = session.alliance_id.filter(|&id| id > 0);
+    if let Some(aid) = target_aid.or(caller_alliance) {
+        let _ = sync_alliance_timers(ctx, aid);
+    } else {
+        sync_all_alliance_timers(ctx);
+    }
+    let rows: Vec<Vec<PyRep>> = read_alliance_war_state(ctx, |st| {
+        let mut out = Vec::new();
+        let mut alliance_ids: Vec<i64> = match target_aid {
+            Some(aid) => vec![aid],
+            None => st.alliances.keys().copied().collect(),
+        };
+        alliance_ids.sort_unstable();
+        for aid in alliance_ids {
+            let Some(m) = st.alliances.get(&aid) else {
+                continue;
+            };
+            let is_own_alliance = caller_alliance == Some(aid);
+            for (cid, msg, ts, status, eff) in &m.applications {
+                let is_own_corp = caller_corp == Some(*cid);
+                if !is_own_alliance && !is_own_corp {
+                    continue;
+                }
+                out.push(vec![
+                    PyRep::Integer(aid),
+                    PyRep::Integer(*cid),
+                    PyRep::String(msg.clone()),
+                    PyRep::Integer(*ts as i64),
+                    PyRep::String(status.clone()),
+                    eff.map(|e| PyRep::Integer(e as i64)).unwrap_or(PyRep::None),
+                ]);
+            }
+        }
+        out
+    });
+    Ok(PyRep::rowset(
+        vec![
+            "allianceID",
+            "corporationID",
+            "applicationText",
+            "applicationDateTime",
+            "status",
+            "joinEffectiveTime",
+        ],
+        rows,
+    ))
+}
+
+fn handle_delete_alliance_application(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let corp_id = require_corp_director(ctx, session)?;
+    let aid = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .or(session.alliance_id)
+        .unwrap_or(0);
+    with_alliance_war_state(ctx, |st| {
+        if let Some(m) = st.alliances.get_mut(&aid) {
+            m.applications.retain(|a| a.0 != corp_id);
+        }
+    });
+    Ok(PyRep::keyval([("deleted", PyRep::Bool(true))]))
+}
+
+fn handle_get_alliance_employment_record(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let _ = ServerContext::require_character(session)?;
+    let aid = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .or(session.alliance_id)
+        .unwrap_or(0);
+    let _ = sync_alliance_timers(ctx, aid);
+    let rows: Vec<Vec<PyRep>> = read_alliance_war_state(ctx, |st| {
+        st.alliances
+            .get(&aid)
+            .map(|m| {
+                m.employment_history
+                    .iter()
+                    .map(|(cid, start, end)| {
+                        vec![
+                            PyRep::Integer(aid),
+                            PyRep::Integer(*cid),
+                            PyRep::Integer(*start as i64),
+                            end.map(|e| PyRep::Integer(e as i64)).unwrap_or(PyRep::None),
+                        ]
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    Ok(PyRep::rowset(
+        vec!["allianceID", "corporationID", "startDate", "endDate"],
+        rows,
+    ))
+}
+
+fn handle_upsert_alliance_bulletin(
+    ctx: &ServerContext,
+    session: &SessionState,
+    method: &str,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let aid = require_executor(ctx, session)?;
+    let off = usize::from(method == "UpdateBulletin");
+    let target = if off == 1 {
+        args.first().and_then(|a| a.as_i64())
+    } else {
+        None
+    };
+    let title = args.get(off).and_then(|a| a.as_str()).unwrap_or("").to_string();
+    let body = args.get(off + 1).and_then(|a| a.as_str()).unwrap_or("").to_string();
+    if title.is_empty() {
+        return Err(BridgeRpcError {
+            code: "BulletinTitleRequired".into(),
+            message: "A bulletin needs a title".into(),
+        });
+    }
+    let now_unix = ctx.now_unix();
+    let bid = with_alliance_war_state(ctx, |st| {
+        let meta = st.alliances.entry(aid).or_default();
+        match target {
+            Some(id) => match meta.bulletins.iter_mut().find(|b| b.0 == id) {
+                Some(b) => {
+                    *b = (id, title.clone(), body.clone(), char_id, now_unix);
+                    Ok(id)
+                }
+                None => Err(BridgeRpcError {
+                    code: "BulletinNotFound".into(),
+                    message: format!("Bulletin {id} not found"),
+                }),
+            },
+            None => {
+                let id = meta.bulletins.iter().map(|b| b.0).max().unwrap_or(0) + 1;
+                meta.bulletins
+                    .push((id, title.clone(), body.clone(), char_id, now_unix));
+                Ok(id)
+            }
+        }
+    })?;
+    Ok(PyRep::keyval([
+        ("bulletinID", PyRep::Integer(bid)),
+        ("title", PyRep::String(title)),
+        ("body", PyRep::String(body)),
+    ]))
+}
+
+fn handle_get_alliance_bulletins(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    let _ = ServerContext::require_character(session)?;
+    let aid = session.alliance_id.unwrap_or(0);
+    let rows: Vec<Vec<PyRep>> = read_alliance_war_state(ctx, |st| {
+        st.alliances
+            .get(&aid)
+            .map(|m| {
+                m.bulletins
+                    .iter()
+                    .map(|(bid, title, body, author, ts)| {
+                        vec![
+                            PyRep::Integer(*bid),
+                            PyRep::String(title.clone()),
+                            PyRep::String(body.clone()),
+                            PyRep::Integer(*author),
+                            PyRep::Integer(*ts as i64),
+                        ]
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    Ok(PyRep::rowset(
+        vec![
+            "bulletinID",
+            "title",
+            "body",
+            "editCharacterID",
+            "editDateTime",
+        ],
+        rows,
+    ))
+}
+
+fn handle_delete_alliance_bulletin(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let _ = ServerContext::require_character(session)?;
+    let aid = require_executor(ctx, session)?;
+    let bid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+    let removed = with_alliance_war_state(ctx, |st| {
+        st.alliances
+            .get_mut(&aid)
+            .map(|m| {
+                let before = m.bulletins.len();
+                m.bulletins.retain(|b| b.0 != bid);
+                before != m.bulletins.len()
+            })
+            .unwrap_or(false)
+    });
+    Ok(PyRep::Bool(removed))
+}
+
+fn handle_update_alliance(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let _ = ServerContext::require_character(session)?;
+    let aid = require_executor(ctx, session)?;
+    let description = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
+    let url = args.get(1).and_then(|a| a.as_str()).unwrap_or("").to_string();
+    let dict_opt = args
+        .get(3)
+        .and_then(|a| a.as_bool())
+        .or_else(|| kwargs.get("dictatorial").and_then(|a| a.as_bool()));
+    let (old_desc, old_url, dictatorial) = with_alliance_war_state(ctx, |st| {
+        let meta = st.alliances.entry(aid).or_default();
+        if let Some(d) = dict_opt {
+            meta.dictatorial = d;
+        }
+        (
+            std::mem::replace(&mut meta.description, description.clone()),
+            std::mem::replace(&mut meta.url, url.clone()),
+            meta.dictatorial,
+        )
+    });
+    let change = PyRep::Dict(vec![
+        (
+            PyRep::String("description".into()),
+            PyRep::Tuple(vec![
+                PyRep::String(old_desc),
+                PyRep::String(description.clone()),
+            ]),
+        ),
+        (
+            PyRep::String("url".into()),
+            PyRep::Tuple(vec![PyRep::String(old_url), PyRep::String(url.clone())]),
+        ),
+    ]);
+    ctx.notify(
+        NotificationTarget::Alliance(aid),
+        "OnAllianceChanged",
+        "allianceid",
+        vec![PyRep::Integer(aid), change],
+    );
+    if let Some(allow_war) = args.get(2).and_then(|a| a.as_bool()) {
+        crate::services::notify_emitters_character_services::emit_allow_war_updated_for_alliance(
+            ctx, aid, allow_war,
+        );
+    }
+    Ok(PyRep::keyval([
+        ("allianceID", PyRep::Integer(aid)),
+        ("description", PyRep::String(description)),
+        ("url", PyRep::String(url)),
+        ("dictatorial", PyRep::Bool(dictatorial)),
+    ]))
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct AllianceSovConfig {
+    #[serde(default)]
+    capital_system_id: Option<i64>,
+    #[serde(default)]
+    pending_capital_system_id: Option<i64>,
+    #[serde(default)]
+    capital_valid_after_unix: u64,
+    #[serde(default = "default_alliance_prime_hour")]
+    current_prime_hour: i64,
+    #[serde(default = "default_alliance_prime_hour")]
+    new_prime_hour: i64,
+    #[serde(default)]
+    prime_valid_after_unix: u64,
+}
+
+fn default_alliance_prime_hour() -> i64 {
+    18
+}
+
+impl Default for AllianceSovConfig {
+    fn default() -> Self {
+        Self {
+            capital_system_id: None,
+            pending_capital_system_id: None,
+            capital_valid_after_unix: 0,
+            current_prime_hour: 18,
+            new_prime_hour: 18,
+            prime_valid_after_unix: 0,
+        }
+    }
+}
+
+fn alliance_sov_cfg_key(aid: i64) -> String {
+    format!("alliance_sov_cfg:{aid}")
+}
+
+fn read_alliance_sov_cfg(snap: &eve_db::WorldStateSnapshot, aid: i64, now_unix: u64) -> AllianceSovConfig {
+    let mut cfg: AllianceSovConfig = snap
+        .service_state_blobs
+        .get(&alliance_sov_cfg_key(aid))
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or_default();
+    if cfg.capital_valid_after_unix > 0 && now_unix >= cfg.capital_valid_after_unix {
+        if let Some(pending) = cfg.pending_capital_system_id.take() {
+            cfg.capital_system_id = Some(pending);
+        }
+        cfg.capital_valid_after_unix = 0;
+    }
+    if cfg.prime_valid_after_unix > 0 && now_unix >= cfg.prime_valid_after_unix {
+        cfg.current_prime_hour = cfg.new_prime_hour;
+        cfg.prime_valid_after_unix = 0;
+    }
+    cfg
+}
+
+fn write_alliance_sov_cfg(snap: &mut eve_db::WorldStateSnapshot, aid: i64, cfg: &AllianceSovConfig) {
+    if let Ok(json) = serde_json::to_string(cfg) {
+        snap.service_state_blobs.insert(alliance_sov_cfg_key(aid), json);
+    }
+}
+
+fn resolve_alliance_id(session: &SessionState, bound_obj_id: Option<i64>) -> Result<i64, BridgeRpcError> {
+    bound_obj_id
+        .filter(|&id| id > 0)
+        .or(session.alliance_id)
+        .filter(|&id| id > 0)
+        .ok_or_else(|| BridgeRpcError {
+            code: "NotInAlliance".into(),
+            message: "Character is not in an alliance".into(),
+        })
+}
+
+fn handle_get_capital_system_info(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_obj_id: Option<i64>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let aid = resolve_alliance_id(session, bound_obj_id)?;
+    let now_unix = ctx.now_unix();
+    let cfg = ctx.db.with_snapshot(|snap| {
+        let mut cfg = read_alliance_sov_cfg(snap, aid, now_unix);
+        if cfg.capital_system_id.is_none() {
+            let sov_sys = snap
+                .system_states
+                .iter()
+                .filter(|(_, st)| st.sov_alliance_id == Some(aid))
+                .map(|(&sys_id, _)| sys_id as i64)
+                .min();
+            cfg.capital_system_id = sov_sys.or_else(|| {
+                Some(
+                    snap.characters
+                        .get(&char_id)
+                        .map(|c| c.solar_system_id as i64)
+                        .unwrap_or(session.solar_system_id.unwrap_or(30_000_142) as i64),
+                )
+            });
+        }
+        cfg
+    });
+    let valid_after = if cfg.capital_valid_after_unix > 0 {
+        super::market_trading::unix_to_filetime(cfg.capital_valid_after_unix)
+    } else {
+        0
+    };
+    Ok(PyRep::keyval([
+        (
+            "currentCapitalSystem",
+            cfg.capital_system_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+        ),
+        (
+            "newCapitalSystem",
+            cfg.pending_capital_system_id
+                .map(PyRep::Integer)
+                .unwrap_or(PyRep::None),
+        ),
+        ("newCapitalSystemValidAfter", PyRep::Integer(valid_after)),
+    ]))
+}
+
+fn handle_set_capital_system(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let _ = ServerContext::require_character(session)?;
+    let aid = require_executor(ctx, session)?;
+    let Some(sys_id) = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
+        return Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "SetCapitalSystem requires solarSystemID".into(),
+        });
+    };
+    if !ctx.sde.solar_systems.contains_key(&(sys_id as u32)) {
+        return Err(BridgeRpcError {
+            code: "InvalidSolarSystem".into(),
+            message: format!("Unknown solar system {sys_id}"),
+        });
+    }
+    let now_unix = ctx.now_unix();
+    let old_cap = ctx.db.try_with_mut_snapshot(|snap| -> Result<Option<i64>, BridgeRpcError> {
+        let mut cfg = read_alliance_sov_cfg(snap, aid, now_unix);
+        let prev = cfg.capital_system_id;
+        cfg.pending_capital_system_id = Some(sys_id);
+        cfg.capital_valid_after_unix = now_unix + 7 * 86_400;
+        write_alliance_sov_cfg(snap, aid, &cfg);
+        Ok(prev)
+    })?;
+    ctx.notify(
+        NotificationTarget::Alliance(aid),
+        "OnUpdateCapitalInfo",
+        "allianceid",
+        Vec::new(),
+    );
+    ctx.notify(
+        NotificationTarget::Alliance(aid),
+        "OnCapitalSystemChanged",
+        "allianceid",
+        vec![PyRep::Tuple(vec![
+            PyRep::Integer(aid),
+            old_cap.map(PyRep::Integer).unwrap_or(PyRep::None),
+            PyRep::Integer(sys_id),
+        ])],
+    );
+    Ok(PyRep::Bool(true))
+}
+
+fn handle_cancel_capital_system_transition(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    let _ = ServerContext::require_character(session)?;
+    let aid = require_executor(ctx, session)?;
+    let now_unix = ctx.now_unix();
+    ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+        let mut cfg = read_alliance_sov_cfg(snap, aid, now_unix);
+        if cfg.pending_capital_system_id.is_none() {
+            return Err(BridgeRpcError {
+                code: "NoCapitalSystemTransition".into(),
+                message: "No pending capital system transition to cancel".into(),
+            });
+        }
+        cfg.pending_capital_system_id = None;
+        cfg.capital_valid_after_unix = 0;
+        write_alliance_sov_cfg(snap, aid, &cfg);
+        Ok(())
+    })?;
+    ctx.notify(
+        NotificationTarget::Alliance(aid),
+        "OnUpdateCapitalInfo",
+        "allianceid",
+        Vec::new(),
+    );
+    Ok(PyRep::Bool(true))
+}
+
+fn handle_get_prime_time_info(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_obj_id: Option<i64>,
+) -> Result<PyRep, BridgeRpcError> {
+    let _ = ServerContext::require_character(session)?;
+    let aid = resolve_alliance_id(session, bound_obj_id)?;
+    let now_unix = ctx.now_unix();
+    let cfg = ctx.db.with_snapshot(|snap| read_alliance_sov_cfg(snap, aid, now_unix));
+    let valid_after = if cfg.prime_valid_after_unix > 0 {
+        super::market_trading::unix_to_filetime(cfg.prime_valid_after_unix)
+    } else {
+        0
+    };
+    Ok(PyRep::keyval([
+        ("currentPrimeHour", PyRep::Integer(cfg.current_prime_hour)),
+        ("newPrimeHour", PyRep::Integer(cfg.new_prime_hour)),
+        ("newPrimeHourValidAfter", PyRep::Integer(valid_after)),
+    ]))
+}
+
+fn handle_set_prime_hour(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let _ = ServerContext::require_character(session)?;
+    let aid = require_executor(ctx, session)?;
+    let Some(hour) = args.first().and_then(|a| a.as_i64()) else {
+        return Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "SetPrimeHour requires hour".into(),
+        });
+    };
+    if !(0..=23).contains(&hour) {
+        return Err(BridgeRpcError {
+            code: "InvalidPrimeHour".into(),
+            message: format!("Prime hour must be 0..=23, got {hour}"),
+        });
+    }
+    let now_unix = ctx.now_unix();
+    ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+        let mut cfg = read_alliance_sov_cfg(snap, aid, now_unix);
+        cfg.new_prime_hour = hour;
+        cfg.prime_valid_after_unix = now_unix + 48 * 3600;
+        write_alliance_sov_cfg(snap, aid, &cfg);
+        Ok(())
+    })?;
+    ctx.notify(
+        NotificationTarget::Alliance(aid),
+        "OnUpdateCapitalInfo",
+        "allianceid",
+        Vec::new(),
+    );
+    Ok(PyRep::Bool(true))
+}
+
+fn handle_get_alliance_sov_structures_info(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_obj_id: Option<i64>,
+) -> Result<PyRep, BridgeRpcError> {
+    let _ = ServerContext::require_character(session)?;
+    let aid = resolve_alliance_id(session, bound_obj_id)?;
+    let now_unix = ctx.now_unix();
+    let (structures_list, campaigns_list, scores_list) = ctx.db.with_snapshot(|snap| {
+        let member_corps: HashSet<i64> = snap
+            .alliances
+            .get(&aid)
+            .map(|a| a.member_corp_ids.clone())
+            .unwrap_or_default();
+        let mut sov_struct_ids = HashSet::new();
+        let mut sov_structs: Vec<&eve_db::UpwellStructureRecord> = snap
+            .structures
+            .values()
+            .filter(|s| {
+                let owned_by_alliance = member_corps.contains(&s.owner_corp_id)
+                    || snap
+                        .system_states
+                        .get(&s.solar_system_id)
+                        .is_some_and(|st| st.sov_alliance_id == Some(aid));
+                let is_sov_type = matches!(s.type_id, 32226 | 32458 | 81242)
+                    || snap.sov_runtime.sov_hubs.contains_key(&s.structure_id);
+                owned_by_alliance && is_sov_type
+            })
+            .collect();
+        sov_structs.sort_by_key(|s| s.structure_id);
+
+        let mut structures_out = Vec::with_capacity(sov_structs.len());
+        for s in sov_structs {
+            sov_struct_ids.insert(s.structure_id);
+            let (vuln_start, vuln_end) = snap
+                .sov_runtime
+                .adm_vulnerability_windows
+                .get(&s.structure_id)
+                .map(|&(st, en)| {
+                    (
+                        super::market_trading::unix_to_filetime(st),
+                        super::market_trading::unix_to_filetime(en),
+                    )
+                })
+                .unwrap_or((0, 0));
+            let adm = snap
+                .system_states
+                .get(&s.solar_system_id)
+                .map(|st| {
+                    1.0 + f64::from(st.military_index.min(5)) * 0.4
+                        + f64::from(st.industrial_index.min(5)) * 0.4
+                        + f64::from(st.strategic_index.min(5)) * 0.2
+                })
+                .unwrap_or(1.0);
+            structures_out.push(PyRep::keyval([
+                ("itemID", PyRep::Integer(s.structure_id)),
+                ("typeID", PyRep::Integer(i64::from(s.type_id))),
+                ("solarSystemID", PyRep::Integer(i64::from(s.solar_system_id))),
+                ("allianceID", PyRep::Integer(aid)),
+                ("vulnerabilityOccupancyLevel", PyRep::Real(adm)),
+                ("vulnerableStartTime", PyRep::Integer(vuln_start)),
+                ("vulnerableEndTime", PyRep::Integer(vuln_end)),
+            ]));
+        }
+
+        let mut seen_campaigns = std::collections::BTreeMap::<i64, (u32, i64)>::new();
+        for &(hub_id, sys_id, cap_aid) in snap.sov_runtime.command_nodes.values() {
+            if sov_struct_ids.contains(&hub_id)
+                || snap
+                    .system_states
+                    .get(&sys_id)
+                    .is_some_and(|st| st.sov_alliance_id == Some(aid))
+            {
+                seen_campaigns.entry(hub_id).or_insert((sys_id, cap_aid));
+            }
+        }
+        let mut campaigns_out = Vec::with_capacity(seen_campaigns.len());
+        let mut scores_out = Vec::new();
+        for (hub_id, (sys_id, _cap_aid)) in seen_campaigns {
+            campaigns_out.push(PyRep::keyval([
+                ("campaignID", PyRep::Integer(hub_id)),
+                ("sourceItemID", PyRep::Integer(hub_id)),
+                ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+                ("eventType", PyRep::Integer(8)),
+                (
+                    "startTime",
+                    PyRep::Integer(super::market_trading::unix_to_filetime(now_unix)),
+                ),
+            ]));
+        }
+        let mut score_hub_ids: Vec<i64> = snap
+            .sov_runtime
+            .command_node_scores
+            .keys()
+            .copied()
+            .filter(|hub_id| {
+                sov_struct_ids.contains(hub_id)
+                    || snap
+                        .structures
+                        .get(hub_id)
+                        .is_some_and(|s| member_corps.contains(&s.owner_corp_id))
+            })
+            .collect();
+        score_hub_ids.sort_unstable();
+        for hub_id in score_hub_ids {
+            if let Some(entries) = snap.sov_runtime.command_node_scores.get(&hub_id) {
+                for &(team_id, score) in entries {
+                    scores_out.push(PyRep::keyval([
+                        ("sourceItemID", PyRep::Integer(hub_id)),
+                        ("teamID", PyRep::Integer(team_id)),
+                        ("score", PyRep::Real(score)),
+                    ]));
+                }
+            }
+        }
+        (structures_out, campaigns_out, scores_out)
+    });
+    Ok(PyRep::Tuple(vec![
+        PyRep::List(structures_list),
+        PyRep::List(campaigns_list),
+        PyRep::List(scores_list),
+    ]))
+}
+
+fn handle_get_alliance_bill_balance(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    bound_obj_id: Option<i64>,
+) -> Result<PyRep, BridgeRpcError> {
+    let _ = ServerContext::require_character(session)?;
+    let aid = resolve_alliance_id(session, bound_obj_id)?;
+    let bill_id_opt = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0);
+    ctx.db.with_snapshot(|snap| {
+        if let Some(bill_id) = bill_id_opt {
+            let Some(note) = snap
+                .owner_notes
+                .get(&super::wallet_services_ext::bill_note_id(bill_id))
+            else {
+                return Err(BridgeRpcError {
+                    code: "BillNotFound".into(),
+                    message: format!("Bill {bill_id} not found"),
+                });
+            };
+            let bill: super::wallet_services_ext::CorpBillRecord =
+                serde_json::from_str(&note.note).map_err(|_| BridgeRpcError {
+                    code: "BillNotFound".into(),
+                    message: "Corrupt bill record".into(),
+                })?;
+            if bill.debtor_id != aid && bill.creditor_id != aid {
+                return Err(BridgeRpcError {
+                    code: "AccessDenied".into(),
+                    message: "Bill does not belong to caller alliance".into(),
+                });
+            }
+            let bal = if bill.paid {
+                0.0
+            } else {
+                eve_db::IskCents(bill.amount_cents).to_wire_f64()
+            };
+            Ok(PyRep::Real(bal))
+        } else {
+            let total_cents: i64 = snap
+                .owner_notes
+                .values()
+                .filter(|n| n.character_id == -71)
+                .filter_map(|n| {
+                    serde_json::from_str::<super::wallet_services_ext::CorpBillRecord>(&n.note)
+                        .ok()
+                })
+                .filter(|b| !b.paid && b.debtor_id == aid)
+                .map(|b| b.amount_cents)
+                .sum();
+            Ok(PyRep::Real(eve_db::IskCents(total_cents).to_wire_f64()))
+        }
+    })
+}
+
+fn handle_get_alliance_bills(
+    ctx: &ServerContext,
+    session: &SessionState,
+    receivable: bool,
+    bound_obj_id: Option<i64>,
+) -> Result<PyRep, BridgeRpcError> {
+    let _ = ServerContext::require_character(session)?;
+    let aid = resolve_alliance_id(session, bound_obj_id)?;
+    let rows = ctx.db.with_snapshot(|snap| {
+        let mut bills: Vec<super::wallet_services_ext::CorpBillRecord> = snap
+            .owner_notes
+            .values()
+            .filter(|n| n.character_id == -71)
+            .filter_map(|n| {
+                serde_json::from_str::<super::wallet_services_ext::CorpBillRecord>(&n.note).ok()
+            })
+            .filter(|b| {
+                if receivable {
+                    b.creditor_id == aid
+                } else {
+                    !b.paid && b.debtor_id == aid
+                }
+            })
+            .collect();
+        bills.sort_by_key(|b| b.bill_id);
+        bills
+            .iter()
+            .map(super::wallet_serverops::bill_to_row)
+            .collect::<Vec<_>>()
+    });
+    Ok(PyRep::rowset(super::wallet_serverops::bill_columns(), rows))
+}
+
+fn handle_pay_alliance_bill(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let aid = require_executor(ctx, session)?;
+    let Some(bill_id) = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
+        return Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "PayBill requires billID".into(),
+        });
+    };
+    let from_account_key = args
+        .get(1)
+        .and_then(|a| a.as_i64())
+        .or_else(|| kwargs.get("fromAccountKey").and_then(|v| v.as_i64()))
+        .unwrap_or(1000)
+        .clamp(1000, 1006) as u16;
+    let div_id = (from_account_key - 999) as u8;
+    let now_unix = ctx.now_unix();
+    ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+        let corp_id = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.corporation_id)
+            .unwrap_or(0);
+        let nid = super::wallet_services_ext::bill_note_id(bill_id);
+        let Some(note) = snap.owner_notes.get(&nid) else {
+            return Err(BridgeRpcError {
+                code: "BillNotFound".into(),
+                message: format!("Bill {bill_id} not found"),
+            });
+        };
+        let mut bill: super::wallet_services_ext::CorpBillRecord =
+            serde_json::from_str(&note.note).map_err(|_| BridgeRpcError {
+                code: "BillNotFound".into(),
+                message: "Corrupt bill record".into(),
+            })?;
+        if bill.paid {
+            return Err(BridgeRpcError {
+                code: "BillAlreadyPaid".into(),
+                message: "Bill is already paid".into(),
+            });
+        }
+        if bill.debtor_id != aid {
+            return Err(BridgeRpcError {
+                code: "AccessDenied".into(),
+                message: "Bill does not belong to caller alliance".into(),
+            });
+        }
+        super::market_trading::market_orders_corp_auth::require_corp_accountant_spend_role(
+            snap,
+            corp_id,
+            char_id,
+            from_account_key,
+            now_unix,
+            "CorpRoleRequired",
+        )?;
+        let amt = eve_db::IskCents(bill.amount_cents);
+        let corp = snap
+            .corporations
+            .get_mut(&corp_id)
+            .ok_or_else(|| BridgeRpcError {
+                code: "CorporationNotFound".into(),
+                message: "Executor corporation not found".into(),
+            })?;
+        corp.ensure_wallet_divisions();
+        let div_bal = corp
+            .wallet_divisions
+            .iter()
+            .find(|d| d.division_id == div_id)
+            .map(|d| {
+                if div_id == 1 {
+                    d.balance.min(corp.master_wallet)
+                } else {
+                    d.balance
+                }
+            })
+            .unwrap_or(eve_db::IskCents(0));
+        if div_bal.0 < amt.0 {
+            return Err(BridgeRpcError {
+                code: "NotEnoughMoney".into(),
+                message: "Insufficient corporation division ISK to pay alliance bill".into(),
+            });
+        }
+        if div_id == 1 {
+            corp.master_wallet = corp
+                .master_wallet
+                .checked_sub(amt)
+                .unwrap_or(eve_db::IskCents(0));
+        }
+        let mut bal_after = corp.master_wallet;
+        if let Some(d) = corp
+            .wallet_divisions
+            .iter_mut()
+            .find(|d| d.division_id == div_id)
+        {
+            d.balance = d.balance.checked_sub(amt).unwrap_or(eve_db::IskCents(0));
+            bal_after = d.balance;
+        }
+        snap.append_journal(
+            corp_id,
+            "BillPayment",
+            amt,
+            bal_after,
+            format!("Paid alliance bill {bill_id}"),
+        );
+        let cred_corp = snap
+            .alliances
+            .get(&bill.creditor_id)
+            .map(|a| a.executor_corp_id)
+            .unwrap_or(bill.creditor_id);
+        if let Some(cred) = snap.corporations.get_mut(&cred_corp) {
+            cred.credit_division(1, amt);
+        }
+        bill.paid = true;
+        bill.paid_by_division = Some(from_account_key);
+        super::wallet_services_ext::save_json_note(
+            snap,
+            nid,
+            -71,
+            bill_id,
+            format!("bill:{bill_id}"),
+            &bill,
+            now_unix,
+        );
+        Ok(())
+    })?;
+    ctx.notify(
+        NotificationTarget::Alliance(aid),
+        "OnCorpWalletBillsChanged",
+        "allianceid",
+        Vec::new(),
+    );
+    Ok(PyRep::Bool(true))
+}
+
+fn handle_gm_force_accept_application(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    bound_obj_id: Option<i64>,
+) -> Result<PyRep, BridgeRpcError> {
+    let _ = ServerContext::require_character(session)?;
+    if !session.has_gm_role() {
+        return Err(BridgeRpcError {
+            code: "GMRoleRequired".into(),
+            message: "GMForceAcceptApplication requires GM privileges".into(),
+        });
+    }
+    let aid = resolve_alliance_id(session, bound_obj_id)?;
+    let Some(applicant_corp_id) = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
+        return Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "GMForceAcceptApplication requires corporationID".into(),
+        });
+    };
+    let now_unix = ctx.now_unix();
+    ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+        if !snap.alliances.contains_key(&aid) {
+            return Err(BridgeRpcError {
+                code: "AllianceNotFound".into(),
+                message: format!("Alliance {aid} not found"),
+            });
+        }
+        if !snap.corporations.contains_key(&applicant_corp_id) {
+            return Err(BridgeRpcError {
+                code: "CorpNotFound".into(),
+                message: format!("Corporation {applicant_corp_id} not found"),
+            });
+        }
+        let meta = snap.alliance_war_state.alliances.entry(aid).or_default();
+        let Some(app) = meta
+            .applications
+            .iter_mut()
+            .find(|a| a.0 == applicant_corp_id && a.3 == "Pending")
+        else {
+            return Err(BridgeRpcError {
+                code: "ApplicationNotFound".into(),
+                message: format!("No pending application from corporation {applicant_corp_id}"),
+            });
+        };
+        app.3 = "Accepted".into();
+        app.4 = Some(now_unix);
+        if !meta
+            .employment_history
+            .iter()
+            .any(|e| e.0 == applicant_corp_id && e.2.is_none())
+        {
+            meta.employment_history.push((applicant_corp_id, now_unix, None));
+        }
+        if let Some(al) = snap.alliances.get_mut(&aid) {
+            al.member_corp_ids.insert(applicant_corp_id);
+        }
+        let mut members = Vec::new();
+        if let Some(corp) = snap.corporations.get_mut(&applicant_corp_id) {
+            corp.alliance_id = Some(aid);
+            members.extend(corp.members.iter().copied());
+        }
+        for mid in members {
+            if let Some(ch) = snap.characters.get_mut(&mid) {
+                ch.alliance_id = Some(aid);
+            }
+        }
+        Ok(())
+    })?;
+    let app_change = PyRep::Dict(vec![(
+        PyRep::String("state".into()),
+        PyRep::Tuple(vec![
+            PyRep::String("Pending".into()),
+            PyRep::String("Accepted".into()),
+        ]),
+    )]);
+    let app_args = vec![
+        PyRep::Integer(aid),
+        PyRep::Integer(applicant_corp_id),
+        app_change,
+    ];
+    ctx.notify(
+        NotificationTarget::Alliance(aid),
+        "OnAllianceApplicationChanged",
+        "allianceid",
+        app_args.clone(),
+    );
+    ctx.notify(
+        NotificationTarget::Corporation(applicant_corp_id),
+        "OnAllianceApplicationChanged",
+        "corpid",
+        app_args,
+    );
+    let member_change = PyRep::Dict(vec![(
+        PyRep::String("corporationID".into()),
+        PyRep::Tuple(vec![PyRep::None, PyRep::Integer(applicant_corp_id)]),
+    )]);
+    ctx.notify(
+        NotificationTarget::Alliance(aid),
+        "OnAllianceMemberChanged",
+        "allianceid",
+        vec![
+            PyRep::Integer(aid),
+            PyRep::Integer(applicant_corp_id),
+            member_change,
+        ],
+    );
+    Ok(PyRep::Bool(true))
+}
+
+fn handle_update_alliance_bulletin_order(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let _ = ServerContext::require_character(session)?;
+    let aid = require_executor(ctx, session)?;
+    let order_pairs: Vec<(i64, i64)> = match args.first() {
+        Some(PyRep::List(l)) | Some(PyRep::Tuple(l)) => l
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, item)| match item {
+                PyRep::List(p) | PyRep::Tuple(p) => Some((
+                    p.first()?.as_i64()?,
+                    p.get(1).and_then(|x| x.as_i64()).unwrap_or(idx as i64),
+                )),
+                PyRep::Integer(bid) => Some((*bid, idx as i64)),
+                _ => None,
+            })
+            .collect(),
+        _ => args
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, x)| x.as_i64().map(|bid| (bid, idx as i64)))
+            .collect(),
+    };
+    if order_pairs.is_empty() {
+        return Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "UpdateBulletinOrder requires a non-empty order list".into(),
+        });
+    }
+    with_alliance_war_state(ctx, |st| {
+        let meta = st.alliances.entry(aid).or_default();
+        meta.bulletins.sort_by_key(|b| {
+            order_pairs
+                .iter()
+                .find(|&&(id, _)| id == b.0)
+                .map(|&(_, ord)| ord)
+                .unwrap_or(i64::MAX)
+        });
+    });
+    Ok(PyRep::Bool(true))
 }
 
 #[cfg(test)]

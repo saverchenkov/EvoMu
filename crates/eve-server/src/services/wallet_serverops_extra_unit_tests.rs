@@ -148,7 +148,13 @@ fn pos_mgr_moon_lookup_permissions_sentry_notifications_password_and_links() {
 
     // 2. SetSessionCheck, AnchorOrbital, RunMoonProcessCycleforTower, GetSiloCapacityByItemID, GetConsumptionFactor (1.0)
     assert_eq!(call_ws(&ctx, &mut ceo_sess, "posMgr", "SetSessionCheck", &[]).unwrap(), PyRep::Bool(true));
-    assert_eq!(call_ws(&ctx, &mut ceo_sess, "posMgr", "AnchorOrbital", &[]).unwrap_err().code, "StarbaseRemoved");
+    assert_eq!(call_ws(&ctx, &mut ceo_sess, "posMgr", "AnchorOrbital", &[]).unwrap_err().code, "MissingArgument");
+    assert_eq!(
+        call_ws(&ctx, &mut ceo_sess, "posMgr", "AnchorOrbital", &[PyRep::Integer(item_moon_attr)])
+            .unwrap_err()
+            .code,
+        "StarbaseRemoved"
+    );
     assert_eq!(
         call_ws(&ctx, &mut ceo_sess, "posMgr", "RunMoonProcessCycleforTower", &[]).unwrap_err().code,
         "UnimplementedRPC"

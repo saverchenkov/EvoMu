@@ -257,7 +257,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             }
         }
 
-        ("ship", "BoardStoredShip") => Some(board_stored_ship(ctx, session, args, kwargs).await),
+        ("ship", "BoardStoredShip") => Some(handle_board_stored_ship(ctx, session, args, kwargs).await),
 
         ("ship", "Board") => {
             let (_, char_id) = match ServerContext::require_character(session) {
@@ -482,33 +482,21 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             }
         }
 
-        ("ship", "StoreVessel") => {
-            Some(fitting_ship_bays::ship_scoop_and_store(ctx, session, method, args, kwargs).await)
+        ("ship", "StoreVessel")
+        | ("ship", "Scoop")
+        | ("ship", "ScoopToSMA") => {
+            Some(handle_ship_scoop_and_store(ctx, session, method, args, kwargs).await)
         }
-        ("ship", "ScoopToSMA") => {
-            Some(fitting_ship_bays::ship_scoop_and_store(ctx, session, method, args, kwargs).await)
-        }
-        ("ship", "ScoopToFleetHangar") => {
-            Some(fitting_ship_bays::ship_scoop_and_store(ctx, session, method, args, kwargs).await)
-        }
-        ("ship", "Scoop") => {
-            Some(fitting_ship_bays::ship_scoop_and_store(ctx, session, method, args, kwargs).await)
-        }
-        ("ship", "ScoopToInfrastructureHold") => {
-            Some(fitting_ship_bays::ship_scoop_and_store(ctx, session, method, args, kwargs).await)
-        }
-        ("ship", "ScoopToMobileDepotHold") => {
-            Some(fitting_ship_bays::ship_scoop_and_store(ctx, session, method, args, kwargs).await)
+        ("ship", "ScoopToFleetHangar")
+        | ("ship", "ScoopToInfrastructureHold")
+        | ("ship", "ScoopToMobileDepotHold") => {
+            Some(handle_ship_scoop_and_store(ctx, session, method, args, kwargs).await)
         }
 
-        ("ship", "GetShipConfiguration") => {
-            Some(ship_configuration(ctx, session, method, args))
-        }
-        ("ship", "ConfigureShip") => {
-            Some(ship_configuration(ctx, session, method, args))
-        }
-        ("ship", "SetShipPassword") => {
-            Some(ship_configuration(ctx, session, method, args))
+        ("ship", "GetShipConfiguration")
+        | ("ship", "ConfigureShip")
+        | ("ship", "SetShipPassword") => {
+            Some(handle_ship_configuration(ctx, session, method, args))
         }
 
         ("eject", "LaunchShipOrContainerFromWreckOrContainer")
@@ -861,9 +849,9 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             ])))
         }
 
-        ("dogmaIM", "GetMyCertificates") => Some(
-            crate::services::character_certificates::get_my_certificates_pyrep(ctx, session),
-        ),
+        ("dogmaIM", "GetMyCertificates") => {
+            Some(handle_get_my_certificates(ctx, session))
+        }
 
         ("dogmaIM", "GetCurrCharMasteryLevel") | ("ship", "GetCurrCharMasteryLevel") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
@@ -1323,16 +1311,47 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             Some(crate::sp6_lifecycle::handle_safe_logoff(ctx, session).await)
         }
 
-        ("ship", "AbortSafeLogoff") => Some(
-            crate::sp6_lifecycle::handle_abort_safe_logoff(
-                ctx,
-                session,
-                "SAFE_LOGOFF_ABORT_GENERIC",
-            ),
-        ),
+        ("ship", "AbortSafeLogoff") => {
+            Some(crate::sp6_lifecycle::handle_abort_safe_logoff(ctx, session, "SAFE_LOGOFF_ABORT_GENERIC"))
+        }
 
         _ => None,
     }
+}
+
+async fn handle_board_stored_ship(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    board_stored_ship(ctx, session, args, kwargs).await
+}
+
+async fn handle_ship_scoop_and_store(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    fitting_ship_bays::ship_scoop_and_store(ctx, session, method, args, kwargs).await
+}
+
+fn handle_ship_configuration(
+    ctx: &ServerContext,
+    session: &SessionState,
+    method: &str,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    ship_configuration(ctx, session, method, args)
+}
+
+fn handle_get_my_certificates(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    crate::services::character_certificates::get_my_certificates_pyrep(ctx, session)
 }
 
 #[cfg(test)]

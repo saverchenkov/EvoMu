@@ -160,19 +160,217 @@ async fn alliance_getters_kick_war_and_last_corp_close_and_auxiliary_rpcs() {
         "BulletinNotFound"
     );
 
-    for m in [
-        "GetAllianceBulletins",
-        "GetAllianceSovereigntyStructuresInfo",
-        "GetBills",
-        "GetBillsReceivable",
-        "CancelCapitalSystemTransition",
-        "GMForceAcceptApplication",
-        "PayBill",
-        "SetPrimeHour",
-        "UpdateBulletinOrder",
-    ] {
-        assert!(call_social(&ctx, &mut exec, "allianceRegistry", m, vec![]).await.is_ok());
+    // Test real allianceRegistry governance, sovereignty, bills, bulletin ordering, and GM force-accept semantics.
+    let bulletins_empty = call_social(&ctx, &mut exec, "allianceRegistry", "GetAllianceBulletins", vec![])
+        .await
+        .unwrap();
+    assert!(matches!(bulletins_empty, PyRep::Rowset { .. }));
+    let b1 = call_social(
+        &ctx,
+        &mut exec,
+        "allianceRegistry",
+        "AddBulletin",
+        vec![PyRep::String("First".into()), PyRep::String("Body 1".into())],
+    )
+    .await
+    .unwrap();
+    let b2 = call_social(
+        &ctx,
+        &mut exec,
+        "allianceRegistry",
+        "AddBulletin",
+        vec![PyRep::String("Second".into()), PyRep::String("Body 2".into())],
+    )
+    .await
+    .unwrap();
+    let b1_id = b1.dict_get("bulletinID").and_then(|v| v.as_i64()).unwrap();
+    let b2_id = b2.dict_get("bulletinID").and_then(|v| v.as_i64()).unwrap();
+    assert_eq!(
+        call_social(
+            &ctx,
+            &mut exec,
+            "allianceRegistry",
+            "UpdateBulletinOrder",
+            vec![PyRep::List(vec![PyRep::Integer(b2_id), PyRep::Integer(b1_id)])],
+        )
+        .await
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    let ordered = call_social(&ctx, &mut exec, "allianceRegistry", "GetAllianceBulletins", vec![])
+        .await
+        .unwrap();
+    if let PyRep::Rowset { rows, .. } = ordered {
+        assert_eq!(rows.first().and_then(|r| r.first()).and_then(|v| v.as_i64()), Some(b2_id));
+    } else {
+        panic!("expected Rowset from GetAllianceBulletins");
     }
+
+    let aid = exec.alliance_id.unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            1_050_000_001,
+            eve_db::UpwellStructureRecord {
+                structure_id: 1_050_000_001,
+                type_id: 81_242,
+                owner_corp_id: 98_100_001,
+                solar_system_id: 30_000_142,
+                name: "Alliance Sov Hub".into(),
+                position: [0.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 1.0,
+                armor_hp: 1.0,
+                hull_hp: 1.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        snap.sov_runtime.adm_vulnerability_windows.insert(1_050_000_001, (1_700_001_000, 1_700_004_600));
+        snap.sov_runtime.command_node_scores.insert(1_050_000_001, vec![(aid, 0.75)]);
+    });
+    let sov_info = call_social(
+        &ctx,
+        &mut exec,
+        "allianceRegistry",
+        "GetAllianceSovereigntyStructuresInfo",
+        vec![],
+    )
+    .await
+    .unwrap();
+    if let PyRep::Tuple(parts) = sov_info {
+        assert_eq!(parts.len(), 3);
+        assert!(matches!(&parts[0], PyRep::List(l) if l.len() == 1));
+        assert!(matches!(&parts[2], PyRep::List(l) if l.len() == 1));
+    } else {
+        panic!("expected 3-tuple from GetAllianceSovereigntyStructuresInfo");
+    }
+
+    assert_eq!(
+        call_social(&ctx, &mut exec, "allianceRegistry", "SetCapitalSystem", vec![PyRep::Integer(30_000_142)])
+            .await
+            .unwrap(),
+        PyRep::Bool(true)
+    );
+    let cap_pending = call_social(&ctx, &mut exec, "allianceRegistry", "GetCapitalSystemInfo", vec![])
+        .await
+        .unwrap();
+    assert_eq!(cap_pending.dict_get("newCapitalSystem"), Some(&PyRep::Integer(30_000_142)));
+    assert_eq!(
+        call_social(&ctx, &mut exec, "allianceRegistry", "CancelCapitalSystemTransition", vec![])
+            .await
+            .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(
+        call_social(&ctx, &mut exec, "allianceRegistry", "CancelCapitalSystemTransition", vec![])
+            .await
+            .unwrap_err()
+            .code,
+        "NoCapitalSystemTransition"
+    );
+
+    assert_eq!(
+        call_social(&ctx, &mut exec, "allianceRegistry", "SetPrimeHour", vec![PyRep::Integer(21)])
+            .await
+            .unwrap(),
+        PyRep::Bool(true)
+    );
+    let prime_info = call_social(&ctx, &mut exec, "allianceRegistry", "GetPrimeTimeInfo", vec![])
+        .await
+        .unwrap();
+    assert_eq!(prime_info.dict_get("newPrimeHour"), Some(&PyRep::Integer(21)));
+    assert_eq!(
+        call_social(&ctx, &mut exec, "allianceRegistry", "SetPrimeHour", vec![PyRep::Integer(25)])
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidPrimeHour"
+    );
+
+    let bill_id = 77_001_i64;
+    let creditor_corp_id = 98_100_099_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut cred = snap.corporations.get(&98_100_001).unwrap().clone();
+        cred.corporation_id = creditor_corp_id;
+        cred.alliance_id = None;
+        cred.master_wallet = eve_db::IskCents(0);
+        cred.wallet_divisions = eve_db::CorporationRecord::default_wallet_divisions(eve_db::IskCents(0));
+        snap.corporations.insert(creditor_corp_id, cred);
+        let bill = crate::services::wallet_services_ext::CorpBillRecord {
+            bill_id,
+            bill_type_id: 2,
+            debtor_id: aid,
+            creditor_id: creditor_corp_id,
+            amount_cents: eve_db::IskCents::from_isk(2_500_000).0,
+            due_unix: 1_700_100_000,
+            interest: 0.0,
+            external_id: aid,
+            paid: false,
+            external_id2: -1,
+            paid_by_division: None,
+        };
+        let nid = crate::services::wallet_services_ext::bill_note_id(bill_id);
+        snap.owner_notes.insert(
+            nid,
+            eve_db::OwnerNoteRecord {
+                note_id: nid,
+                character_id: -71,
+                item_id: bill_id,
+                label: format!("bill:{bill_id}"),
+                note: serde_json::to_string(&bill).unwrap(),
+                timestamp_unix: 1_700_000_000,
+            },
+        );
+    });
+    assert_eq!(
+        call_social(&ctx, &mut exec, "allianceRegistry", "GetBillBalance", vec![PyRep::Integer(bill_id)])
+            .await
+            .unwrap(),
+        PyRep::Real(2_500_000.0)
+    );
+    let bills_rs = call_social(&ctx, &mut exec, "allianceRegistry", "GetBills", vec![]).await.unwrap();
+    assert!(matches!(bills_rs, PyRep::Rowset { ref rows, .. } if rows.len() == 1));
+    assert!(matches!(
+        call_social(&ctx, &mut exec, "allianceRegistry", "GetBillsReceivable", vec![]).await.unwrap(),
+        PyRep::Rowset { .. }
+    ));
+    assert_eq!(
+        call_social(&ctx, &mut exec, "allianceRegistry", "PayBill", vec![PyRep::Integer(bill_id), PyRep::Integer(1000)])
+            .await
+            .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(
+        call_social(&ctx, &mut exec, "allianceRegistry", "GetBillBalance", vec![PyRep::Integer(bill_id)])
+            .await
+            .unwrap(),
+        PyRep::Real(0.0)
+    );
+    assert_eq!(
+        call_social(&ctx, &mut exec, "allianceRegistry", "PayBill", vec![PyRep::Integer(bill_id), PyRep::Integer(1000)])
+            .await
+            .unwrap_err()
+            .code,
+        "BillAlreadyPaid"
+    );
+
+    assert_eq!(
+        call_social(
+            &ctx,
+            &mut exec,
+            "allianceRegistry",
+            "GMForceAcceptApplication",
+            vec![PyRep::Integer(98_100_002)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "GMRoleRequired"
+    );
 
     // 3. CannotLeaveAllianceDuringWar when active war exists; removing war and deleting last member closes alliance
     ctx.db.with_mut_snapshot(|snap| {

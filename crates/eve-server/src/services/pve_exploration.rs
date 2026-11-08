@@ -1048,94 +1048,12 @@ pub async fn handle_pve_exploration(
     match (service, method) {
         // parity: feat:pve.combat-anomalies, feat:pve.wormhole-sites
         ("scanSvc", "GetCombatAnomalyInstances") => {
-            if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
-            let sys_id = match args.first().and_then(|a| a.as_i64()).map(|v| v as SolarSystemId).map(Ok).unwrap_or_else(|| resolve_session_system_id(ctx, session)) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            ensure_system_pve_sites_seeded(ctx, sys_id).await;
-
-            let char_id = session.character_id.unwrap_or(0);
-            let list = with_pve_exploration_reg(ctx, |reg| {
-                let now = now_sec(reg);
-                let owned_exp_ids: std::collections::HashSet<i64> = reg
-                    .escalations_by_char
-                    .get(&char_id)
-                    .map(|list| list.iter().map(|e| e.instance_id).collect())
-                    .unwrap_or_default();
-                reg.sites_by_system
-                    .get(&sys_id)
-                    .map(|sites| {
-                        sites
-                            .iter()
-                            .filter(|s| {
-                                !s.probe_required
-                                    && !s.cleared
-                                    && (s.site_category != "Expedition"
-                                        || s.expedition_instance_id
-                                            .is_some_and(|id| owned_exp_ids.contains(&id)))
-                                    && (s.lifetime_seconds == 0 || now < s.created_unix.saturating_add(s.lifetime_seconds))
-                            })
-                            .map(|s| {
-                                PyRep::keyval([
-                                    ("siteID", PyRep::String(s.site_id.clone())),
-                                    ("dungeonID", PyRep::Integer(s.dungeon_id as i64)),
-                                    ("dungeonName", PyRep::String(s.dungeon_name.clone())),
-                                    ("siteCategory", PyRep::String(s.site_category.clone())),
-                                    (
-                                        "wormholeClass",
-                                        s.wormhole_class.map(|c| PyRep::Integer(c as i64)).unwrap_or(PyRep::None),
-                                    ),
-                                    ("currentWave", PyRep::Integer(s.current_wave as i64)),
-                                    ("totalWaves", PyRep::Integer(s.total_waves as i64)),
-                                    (
-                                        "activeNpcBallIDs",
-                                        PyRep::List(s.active_npc_ball_ids.iter().copied().map(PyRep::Integer).collect()),
-                                    ),
-                                    ("probeRequired", PyRep::Bool(false)),
-                                    ("overviewVisible", PyRep::Bool(true)),
-                                ])
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default()
-            });
-            Some(Ok(PyRep::List(list)))
+            Some(handle_get_combat_anomaly_instances(ctx, session, args).await)
         }
 
         // parity: feat:pve.combat-anomalies, feat:pve.wormhole-sites, feat:pve.escalations, feat:pve.expeditions
         ("scanSvc", "EnterCombatAnomaly") => {
-            if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
-            let sys_id = match resolve_session_system_id(ctx, session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            ensure_system_pve_sites_seeded(ctx, sys_id).await;
-            let site_id = args
-                .first()
-                .and_then(|a| a.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("PVE-ANOM-{sys_id}-1"));
-            let advance_wave = args.get(1).and_then(|a| a.as_bool()).unwrap_or(false);
-            if advance_wave {
-                return Some(
-                    crate::services::pve_expeditions::validate_and_advance_pve_site_room(
-                        ctx, session, sys_id, &site_id,
-                    )
-                    .await,
-                );
-            }
-            let char_id = session.character_id.unwrap_or(0);
-            let res = crate::services::pve_expeditions::enter_combat_anomaly_site(
-                ctx, char_id, sys_id, &site_id,
-            );
-            if res.is_ok() {
-                crate::services::wormhole_pve_escalations::step_wormhole_pve_system(
-                    ctx, sys_id, 1.0,
-                )
-                .await;
-            }
-            Some(res)
+            Some(handle_enter_combat_anomaly(ctx, session, args).await)
         }
 
         // parity: feat:pve.ded-complexes, feat:pve.sleeper-caches
@@ -1222,172 +1140,295 @@ pub async fn handle_pve_exploration(
         ("keeper", "ActivateAccelerationGate")
         | ("beyonce", "ActivateAccelerationGate")
         | ("keeper", "EnterNextDungeonRoom") => {
-            if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
-            if let Ok(sys) = resolve_session_system_id(ctx, session) {
-                if let Some(gate_id) = args.first().and_then(|a| a.as_i64()) {
-                    if let Some(res) = crate::services::pve_fob_observatory::try_activate_observatory_gate(
-                        ctx, session, sys, gate_id,
-                    )
-                    .await
-                    {
-                        return Some(res);
-                    }
-                }
-                if let Some(res) =
-                    crate::services::pve_dungeon_runtime::try_activate_dungeon_runtime_gate(
-                        ctx, session, sys, args,
-                    )
-                    .await
-                {
-                    return Some(res);
-                }
-            }
-            let mut site_id = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
-            let special_id_arg = args.first().and_then(|a| a.as_i64()).or_else(|| {
-                crate::services::r6_t1_p0_helpers::resolve_special_site_string_instance_id(
-                    ctx, &site_id,
-                )
-            });
-            if let Some(item_id) = special_id_arg {
-                // Integer argument: a DED acceleration gate ball in the pilot's system resolves to its site;
-                // any other gate item belongs to the in-space gate / mission handlers.
-                let gate_site = match resolve_session_system_id(ctx, session) {
-                    Ok(sys) => {
-                        ensure_system_pve_sites_seeded(ctx, sys).await;
-                        with_pve_exploration_reg(ctx, |reg| {
-                            reg.sites_by_system.get(&sys).and_then(|l| {
-                                l.iter().find(|s| s.gate_ball_id == Some(item_id)).map(|s| s.site_id.clone())
-                            })
-                        })
-                    }
-                    Err(_) => None,
-                };
-                match gate_site {
-                    Some(sid) => site_id = sid,
-                    None if method == "EnterNextDungeonRoom"
-                        || crate::services::r6_t1_p0_helpers::is_known_special_site_instance_id(
-                            ctx, item_id,
-                        ) =>
-                    {
-                        let fleet_count = args.get(1).and_then(|a| a.as_i64()).unwrap_or(5).clamp(1, 10) as usize;
-                        let res = crate::services::pve_special_sites::complete_special_dungeon_instance(ctx, session, item_id, fleet_count).await;
-                        if let Ok(ref rep) = res {
-                            let is_done = rep.dict_get("completed").or_else(|| rep.dict_get("cleared")) == Some(&PyRep::Bool(true));
-                            if is_done {
-                                if let Ok(sys_id) = resolve_session_system_id(ctx, session) {
-                                    let cat = if (720_000..730_000).contains(&item_id) { "Triglavian" } else if (710_000..720_000).contains(&item_id) { "Homefront" } else { "DrifterHive" };
-                                    let did = rep
-                                        .dict_get("dungeonID")
-                                        .and_then(|v| v.as_i64())
-                                        .and_then(|v| u32::try_from(v).ok())
-                                        .or_else(|| {
-                                            crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-                                                reg.homefront_sites
-                                                    .get(&sys_id)
-                                                    .and_then(|l| l.iter().find(|s| s.instance_id == item_id).map(|s| s.dungeon_id))
-                                                    .or_else(|| {
-                                                        reg.triglavian_sites
-                                                            .get(&sys_id)
-                                                            .and_then(|l| l.iter().find(|s| s.instance_id == item_id).map(|s| s.dungeon_id))
-                                                    })
-                                            })
-                                        })
-                                        .unwrap_or(0);
-                                    ctx.quasar_gateway.progression.extra.on_system_tale_encounter_completed(sys_id, cat, did, 1, ctx.now_unix(), &ctx.quasar_gateway);
-                                }
-                            }
-                        }
-                        return Some(res);
-                    }
-                    None => return None,
-                }
-            }
-            let sys_id = match resolve_session_system_id(ctx, session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            if site_id.starts_with("INC-") {
-                let res = crate::services::pve_incursion_sites::process_incursion_site_completion_and_payout(
-                    ctx, session.character_id, session.fleet_id, sys_id, &site_id, None,
-                ).await.map(|r| {
-                    PyRep::keyval([
-                        ("siteID", PyRep::String(r.site_id)), ("tier", PyRep::String(r.tier)),
-                        ("fleetSize", PyRep::Integer(r.fleet_size as i64)), ("fleetScaleFactor", PyRep::Real(r.fleet_scale_factor)),
-                        ("iskPerPilot", PyRep::Integer(r.isk_per_pilot)), ("concordLpPerPilot", PyRep::Integer(r.concord_lp_per_pilot)),
-                        ("influence", PyRep::Real(r.influence)), ("state", PyRep::String(r.state)),
-                        ("mothershipSpawned", PyRep::Bool(r.mothership_spawned)), ("incursionEnded", PyRep::Bool(r.incursion_ended)),
-                    ])
-                });
-                return Some(res);
-            }
-            ensure_system_pve_sites_seeded(ctx, sys_id).await;
-            Some(
-                crate::services::pve_expeditions::validate_and_advance_pve_site_room(
-                    ctx, session, sys_id, &site_id,
-                )
-                .await,
-            )
+            handle_activate_acceleration_gate(ctx, session, method, args).await
         }
 
         // parity: feat:pve.sleeper-caches, feat:pve.ded-complexes
         ("keeper", "GetDungeonInfo") | ("keeper", "GetDungeonObjectivesData") => {
-            if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
-            let sys_id = match resolve_session_system_id(ctx, session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            ensure_system_pve_sites_seeded(ctx, sys_id).await;
-            let site_id = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
-            let res = with_pve_exploration_reg(ctx, |reg| {
-                let Some(site) = reg.sites_by_system.get(&sys_id).and_then(|l| l.iter().find(|s| s.site_id == site_id)) else {
-                    return Err(BridgeRpcError {
-                        code: "DungeonNotFound".into(),
-                        message: format!("Dungeon site {site_id} not found"),
-                    });
-                };
-                Ok(PyRep::keyval([
-                    ("siteID", PyRep::String(site.site_id.clone())),
-                    ("dungeonID", PyRep::Integer(site.dungeon_id as i64)),
-                    ("dungeonName", PyRep::String(site.dungeon_name.clone())),
-                    ("siteCategory", PyRep::String(site.site_category.clone())),
-                    ("currentRoom", PyRep::Integer(site.current_room as i64)),
-                    ("totalRooms", PyRep::Integer(site.total_rooms as i64)),
-                    ("currentWave", PyRep::Integer(site.current_wave as i64)),
-                    ("totalWaves", PyRep::Integer(site.total_waves as i64)),
-                    ("sleeperRiftStabilized", PyRep::Bool(site.sleeper_rift_stabilized)),
-                    ("sleeperSentryDisabled", PyRep::Bool(site.sleeper_sentry_disabled)),
-                    ("sleeperGasCloudActive", PyRep::Bool(site.sleeper_gas_cloud_active)),
-                    ("cleared", PyRep::Bool(site.cleared)),
-                ]))
-            });
-            Some(res)
+            Some(handle_get_dungeon_info(ctx, session, args).await)
         }
 
         // parity: feat:pve.escalations, feat:pve.expeditions, rpc:dungeonExplorationMgr.GetMyEscalatingPathDetails
         ("dungeonExplorationMgr", "GetMyEscalatingPathDetails")
         | ("scanSvc", "GetMyEscalatingPathDetails")
         | ("dungeonExplorationMgr", "GetEscalations") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            if !args.is_empty() {
-                return Some(Err(BridgeRpcError::user_error("InvalidArguments")));
-            }
-            Some(Ok(
-                crate::services::pve_expeditions::get_my_escalating_path_details_rowset(ctx, char_id),
-            ))
+            Some(handle_get_escalating_path_details(ctx, session, args))
         }
 
         // parity: feat:pve.escalations, feat:pve.expeditions
         ("dungeonExplorationMgr", "GetEscalatingPathDungeonsEntered")
         | ("scanSvc", "GetEscalatingPathDungeonsEntered") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let entered = with_pve_exploration_reg(ctx, |reg| {
-                crate::services::pve_expeditions::get_escalating_path_dungeons_entered(reg, char_id)
-            });
-            Some(Ok(PyRep::List(entered)))
+            Some(handle_get_escalating_path_dungeons_entered(ctx, session))
         }
 
         _ => None,
     }
+}
+
+async fn handle_get_combat_anomaly_instances(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    ServerContext::require_character(session)?;
+    let sys_id = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .map(|v| v as SolarSystemId)
+        .map(Ok)
+        .unwrap_or_else(|| resolve_session_system_id(ctx, session))?;
+    ensure_system_pve_sites_seeded(ctx, sys_id).await;
+
+    let char_id = session.character_id.unwrap_or(0);
+    let list = with_pve_exploration_reg(ctx, |reg| {
+        let now = now_sec(reg);
+        let owned_exp_ids: std::collections::HashSet<i64> = reg
+            .escalations_by_char
+            .get(&char_id)
+            .map(|list| list.iter().map(|e| e.instance_id).collect())
+            .unwrap_or_default();
+        reg.sites_by_system
+            .get(&sys_id)
+            .map(|sites| {
+                sites
+                    .iter()
+                    .filter(|s| {
+                        !s.probe_required
+                            && !s.cleared
+                            && (s.site_category != "Expedition"
+                                || s.expedition_instance_id
+                                    .is_some_and(|id| owned_exp_ids.contains(&id)))
+                            && (s.lifetime_seconds == 0 || now < s.created_unix.saturating_add(s.lifetime_seconds))
+                    })
+                    .map(|s| {
+                        PyRep::keyval([
+                            ("siteID", PyRep::String(s.site_id.clone())),
+                            ("dungeonID", PyRep::Integer(s.dungeon_id as i64)),
+                            ("dungeonName", PyRep::String(s.dungeon_name.clone())),
+                            ("siteCategory", PyRep::String(s.site_category.clone())),
+                            (
+                                "wormholeClass",
+                                s.wormhole_class.map(|c| PyRep::Integer(c as i64)).unwrap_or(PyRep::None),
+                            ),
+                            ("currentWave", PyRep::Integer(s.current_wave as i64)),
+                            ("totalWaves", PyRep::Integer(s.total_waves as i64)),
+                            (
+                                "activeNpcBallIDs",
+                                PyRep::List(s.active_npc_ball_ids.iter().copied().map(PyRep::Integer).collect()),
+                            ),
+                            ("probeRequired", PyRep::Bool(false)),
+                            ("overviewVisible", PyRep::Bool(true)),
+                        ])
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
+    Ok(PyRep::List(list))
+}
+
+async fn handle_enter_combat_anomaly(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    ServerContext::require_character(session)?;
+    let sys_id = resolve_session_system_id(ctx, session)?;
+    ensure_system_pve_sites_seeded(ctx, sys_id).await;
+    let site_id = args
+        .first()
+        .and_then(|a| a.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("PVE-ANOM-{sys_id}-1"));
+    let advance_wave = args.get(1).and_then(|a| a.as_bool()).unwrap_or(false);
+    if advance_wave {
+        return crate::services::pve_expeditions::validate_and_advance_pve_site_room(
+            ctx, session, sys_id, &site_id,
+        )
+        .await;
+    }
+    let char_id = session.character_id.unwrap_or(0);
+    let res = crate::services::pve_expeditions::enter_combat_anomaly_site(
+        ctx, char_id, sys_id, &site_id,
+    );
+    if res.is_ok() {
+        crate::services::wormhole_pve_escalations::step_wormhole_pve_system(
+            ctx, sys_id, 1.0,
+        )
+        .await;
+    }
+    res
+}
+
+async fn handle_activate_acceleration_gate(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    method: &str,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if let Err(e) = ServerContext::require_character(session) {
+        return Some(Err(e));
+    }
+    if let Ok(sys) = resolve_session_system_id(ctx, session) {
+        if let Some(gate_id) = args.first().and_then(|a| a.as_i64()) {
+            if let Some(res) = crate::services::pve_fob_observatory::try_activate_observatory_gate(
+                ctx, session, sys, gate_id,
+            )
+            .await
+            {
+                return Some(res);
+            }
+        }
+        if let Some(res) =
+            crate::services::pve_dungeon_runtime::try_activate_dungeon_runtime_gate(
+                ctx, session, sys, args,
+            )
+            .await
+        {
+            return Some(res);
+        }
+    }
+    let mut site_id = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
+    let special_id_arg = args.first().and_then(|a| a.as_i64()).or_else(|| {
+        crate::services::r6_t1_p0_helpers::resolve_special_site_string_instance_id(
+            ctx, &site_id,
+        )
+    });
+    if let Some(item_id) = special_id_arg {
+        // Integer argument: a DED acceleration gate ball in the pilot's system resolves to its site;
+        // any other gate item belongs to the in-space gate / mission handlers.
+        let gate_site = match resolve_session_system_id(ctx, session) {
+            Ok(sys) => {
+                ensure_system_pve_sites_seeded(ctx, sys).await;
+                with_pve_exploration_reg(ctx, |reg| {
+                    reg.sites_by_system.get(&sys).and_then(|l| {
+                        l.iter().find(|s| s.gate_ball_id == Some(item_id)).map(|s| s.site_id.clone())
+                    })
+                })
+            }
+            Err(_) => None,
+        };
+        match gate_site {
+            Some(sid) => site_id = sid,
+            None if method == "EnterNextDungeonRoom"
+                || crate::services::r6_t1_p0_helpers::is_known_special_site_instance_id(
+                    ctx, item_id,
+                ) =>
+            {
+                let fleet_count = args.get(1).and_then(|a| a.as_i64()).unwrap_or(5).clamp(1, 10) as usize;
+                let res = crate::services::pve_special_sites::complete_special_dungeon_instance(ctx, session, item_id, fleet_count).await;
+                if let Ok(ref rep) = res {
+                    let is_done = rep.dict_get("completed").or_else(|| rep.dict_get("cleared")) == Some(&PyRep::Bool(true));
+                    if is_done {
+                        if let Ok(sys_id) = resolve_session_system_id(ctx, session) {
+                            let cat = if (720_000..730_000).contains(&item_id) { "Triglavian" } else if (710_000..720_000).contains(&item_id) { "Homefront" } else { "DrifterHive" };
+                            let did = rep
+                                .dict_get("dungeonID")
+                                .and_then(|v| v.as_i64())
+                                .and_then(|v| u32::try_from(v).ok())
+                                .or_else(|| {
+                                    crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+                                        reg.homefront_sites
+                                            .get(&sys_id)
+                                            .and_then(|l| l.iter().find(|s| s.instance_id == item_id).map(|s| s.dungeon_id))
+                                            .or_else(|| {
+                                                reg.triglavian_sites
+                                                    .get(&sys_id)
+                                                    .and_then(|l| l.iter().find(|s| s.instance_id == item_id).map(|s| s.dungeon_id))
+                                            })
+                                    })
+                                })
+                                .unwrap_or(0);
+                            ctx.quasar_gateway.progression.extra.on_system_tale_encounter_completed(sys_id, cat, did, 1, ctx.now_unix(), &ctx.quasar_gateway);
+                        }
+                    }
+                }
+                return Some(res);
+            }
+            None => return None,
+        }
+    }
+    let sys_id = match resolve_session_system_id(ctx, session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    if site_id.starts_with("INC-") {
+        let res = crate::services::pve_incursion_sites::process_incursion_site_completion_and_payout(
+            ctx, session.character_id, session.fleet_id, sys_id, &site_id, None,
+        ).await.map(|r| {
+            PyRep::keyval([
+                ("siteID", PyRep::String(r.site_id)), ("tier", PyRep::String(r.tier)),
+                ("fleetSize", PyRep::Integer(r.fleet_size as i64)), ("fleetScaleFactor", PyRep::Real(r.fleet_scale_factor)),
+                ("iskPerPilot", PyRep::Integer(r.isk_per_pilot)), ("concordLpPerPilot", PyRep::Integer(r.concord_lp_per_pilot)),
+                ("influence", PyRep::Real(r.influence)), ("state", PyRep::String(r.state)),
+                ("mothershipSpawned", PyRep::Bool(r.mothership_spawned)), ("incursionEnded", PyRep::Bool(r.incursion_ended)),
+            ])
+        });
+        return Some(res);
+    }
+    ensure_system_pve_sites_seeded(ctx, sys_id).await;
+    Some(
+        crate::services::pve_expeditions::validate_and_advance_pve_site_room(
+            ctx, session, sys_id, &site_id,
+        )
+        .await,
+    )
+}
+
+async fn handle_get_dungeon_info(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    ServerContext::require_character(session)?;
+    let sys_id = resolve_session_system_id(ctx, session)?;
+    ensure_system_pve_sites_seeded(ctx, sys_id).await;
+    let site_id = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
+    with_pve_exploration_reg(ctx, |reg| {
+        let Some(site) = reg.sites_by_system.get(&sys_id).and_then(|l| l.iter().find(|s| s.site_id == site_id)) else {
+            return Err(BridgeRpcError {
+                code: "DungeonNotFound".into(),
+                message: format!("Dungeon site {site_id} not found"),
+            });
+        };
+        Ok(PyRep::keyval([
+            ("siteID", PyRep::String(site.site_id.clone())),
+            ("dungeonID", PyRep::Integer(site.dungeon_id as i64)),
+            ("dungeonName", PyRep::String(site.dungeon_name.clone())),
+            ("siteCategory", PyRep::String(site.site_category.clone())),
+            ("currentRoom", PyRep::Integer(site.current_room as i64)),
+            ("totalRooms", PyRep::Integer(site.total_rooms as i64)),
+            ("currentWave", PyRep::Integer(site.current_wave as i64)),
+            ("totalWaves", PyRep::Integer(site.total_waves as i64)),
+            ("sleeperRiftStabilized", PyRep::Bool(site.sleeper_rift_stabilized)),
+            ("sleeperSentryDisabled", PyRep::Bool(site.sleeper_sentry_disabled)),
+            ("sleeperGasCloudActive", PyRep::Bool(site.sleeper_gas_cloud_active)),
+            ("cleared", PyRep::Bool(site.cleared)),
+        ]))
+    })
+}
+
+fn handle_get_escalating_path_details(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    if !args.is_empty() {
+        return Err(BridgeRpcError::user_error("InvalidArguments"));
+    }
+    Ok(crate::services::pve_expeditions::get_my_escalating_path_details_rowset(ctx, char_id))
+}
+
+fn handle_get_escalating_path_dungeons_entered(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let entered = with_pve_exploration_reg(ctx, |reg| {
+        crate::services::pve_expeditions::get_escalating_path_dungeons_entered(reg, char_id)
+    });
+    Ok(PyRep::List(entered))
 }
 
 #[cfg(test)]

@@ -199,7 +199,7 @@ pub fn process_due_automatic_bills(ctx: &ServerContext) -> usize {
 }
 
 
-fn bill_to_row(b: &CorpBillRecord) -> Vec<PyRep> {
+pub(super) fn bill_to_row(b: &CorpBillRecord) -> Vec<PyRep> {
     vec![
         PyRep::Integer(b.bill_id),
         PyRep::Integer(b.bill_type_id),
@@ -214,7 +214,7 @@ fn bill_to_row(b: &CorpBillRecord) -> Vec<PyRep> {
     ]
 }
 
-fn bill_columns() -> Vec<&'static str> {
+pub(super) fn bill_columns() -> Vec<&'static str> {
     vec![
         "billID",
         "billTypeID",
@@ -333,10 +333,9 @@ pub fn handle(
                 && ctx.db.with_snapshot(|snap| snap.characters.contains_key(&char_id));
             Some(Ok(PyRep::Bool(session_valid)))
         }
-        ("posMgr", "AnchorOrbital") => Some(Err(rpc_err(
-            "StarbaseRemoved",
-            "Legacy POS starbases and control towers are superseded by Upwell structures in V24.01",
-        ))),
+        ("posMgr", "AnchorOrbital") => {
+            Some(crate::services::station_structure_handlers::handle_anchor_orbital(ctx, session, args))
+        }
 
         ("posMgr", "AssumeStructureControl") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
@@ -605,6 +604,8 @@ pub fn handle(
             Some(res.map(|()| PyRep::None))
         }
 
+        // Legacy POS moon mining was superseded by Upwell Refineries in Lifeblood (V24.01);
+        // intentionally returns UnimplementedRPC (`INTENTIONALLY_UNIMPLEMENTED_RPCS`).
         ("posMgr", "RunMoonProcessCycleforTower") => Some(Err(BridgeRpcError {
             code: "UnimplementedRPC".into(),
             message: "posMgr.RunMoonProcessCycleforTower is not implemented".into(),
@@ -953,45 +954,19 @@ pub fn handle(
             let _ = process_due_automatic_bills(ctx);
             Some(Ok(PyRep::Bool(true)))
         }
-        ("account", "GiveCash") => Some(give_cash(ctx, session, args)),
-        ("account", "SetContactCost") => Some(set_contact_cost(ctx, session, args)),
-        ("account", "GetDefaultContactCost") => Some(get_default_contact_cost(ctx, session)),
-        ("machoNet", "GetClusterGameStatisticsForClient") => Some(Ok(cluster_statistics(ctx))),
+        ("account", "GiveCash") => Some(handle_give_cash(ctx, session, args)),
+        ("account", "SetContactCost") => Some(handle_set_contact_cost(ctx, session, args)),
+        ("account", "GetDefaultContactCost") => Some(handle_get_default_contact_cost(ctx, session)),
+        ("machoNet", "GetClusterGameStatisticsForClient") => Some(Ok(handle_cluster_statistics(ctx))),
+        // Authoritative server wallclock latency probe (`blue.os.GetWallclockTime()`).
         ("pingService", "Ping") => Some(Ok(PyRep::Integer(ctx.now_blueos_filetime_ticks()))),
-        ("localizationServer", "GetAllTextChanges") => Some(
-            crate::services::notify_emitters_skills_trade_godma::handle_get_all_text_changes(ctx, session, args),
-        ),
-        ("localizationServer", "UpdateLocalizationQAWrap") => Some(
-            crate::services::notify_emitters_skills_trade_godma::handle_update_localization_qa_wrap(ctx, session, args),
-        ),
-        ("localizationServer", "ReloadFSDPickle") => {
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
-            let qa = eve_db::service_roles::ROLE_GMH
-                | eve_db::service_roles::ROLE_GML
-                | eve_machonet::service_roles::ROLE_PROGRAMMER
-                | eve_machonet::service_roles::ROLE_CONTENT;
-            if !session.has_gm_role() && (session.role & qa) == 0 {
-                return Some(Err(BridgeRpcError {
-                    code: "RoleRequired".into(),
-                    message: "localizationServer.ReloadFSDPickle requires GM or Content/Programmer role".into(),
-                }));
-            }
-            if args.is_empty() {
-                crate::services::notify_emitters_missing2::emit_update_localization_text_cache(
-                    ctx,
-                    crate::router::NotificationTarget::All,
-                    None,
-                );
-                Some(Ok(PyRep::Bool(true)))
-            } else {
-                Some(Err(BridgeRpcError {
-                    code: "UnimplementedRPC".into(),
-                    message: "FSD pickle hot-reloading is not implemented".into(),
-                }))
-            }
+        ("localizationServer", "GetAllTextChanges") => {
+            Some(crate::services::notify_emitters_skills_trade_godma::handle_get_all_text_changes(ctx, session, args))
         }
+        ("localizationServer", "UpdateLocalizationQAWrap") => {
+            Some(crate::services::notify_emitters_skills_trade_godma::handle_update_localization_qa_wrap(ctx, session, args))
+        }
+        ("localizationServer", "ReloadFSDPickle") => Some(handle_reload_fsd_pickle(ctx, session, args)),
         ("clientStatLogger", "LogString") => {
             if let Err(e) = ServerContext::require_auth(session) {
                 return Some(Err(e));
@@ -1023,7 +998,38 @@ pub fn handle(
     }
 }
 
-fn give_cash(
+fn handle_reload_fsd_pickle(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    ServerContext::require_auth(session)?;
+    let qa = eve_db::service_roles::ROLE_GMH
+        | eve_db::service_roles::ROLE_GML
+        | eve_machonet::service_roles::ROLE_PROGRAMMER
+        | eve_machonet::service_roles::ROLE_CONTENT;
+    if !session.has_gm_role() && (session.role & qa) == 0 {
+        return Err(BridgeRpcError {
+            code: "RoleRequired".into(),
+            message: "localizationServer.ReloadFSDPickle requires GM or Content/Programmer role".into(),
+        });
+    }
+    if args.is_empty() {
+        crate::services::notify_emitters_missing2::emit_update_localization_text_cache(
+            ctx,
+            crate::router::NotificationTarget::All,
+            None,
+        );
+        Ok(PyRep::Bool(true))
+    } else {
+        Err(BridgeRpcError {
+            code: "UnimplementedRPC".into(),
+            message: "FSD pickle hot-reloading is not implemented".into(),
+        })
+    }
+}
+
+fn handle_give_cash(
     ctx: &ServerContext,
     session: &SessionState,
     args: &[PyRep],
@@ -1090,7 +1096,7 @@ fn give_cash(
     Ok(PyRep::Real(sender_bal.to_wire_f64()))
 }
 
-fn set_contact_cost(
+fn handle_set_contact_cost(
     ctx: &ServerContext,
     session: &SessionState,
     args: &[PyRep],
@@ -1113,7 +1119,7 @@ fn set_contact_cost(
     Ok(PyRep::None)
 }
 
-fn get_default_contact_cost(
+fn handle_get_default_contact_cost(
     ctx: &ServerContext,
     session: &SessionState,
 ) -> Result<PyRep, BridgeRpcError> {
@@ -1127,7 +1133,7 @@ fn get_default_contact_cost(
 
 /// `(pilotsPerSystem, dockedPerSystem, statDivisor)` built from the live online-session registry.
 /// DERIVED shape: mirrors the cluster session statistics tuple (total + docked per solarSystemID).
-fn cluster_statistics(ctx: &ServerContext) -> PyRep {
+fn handle_cluster_statistics(ctx: &ServerContext) -> PyRep {
     let mut totals: BTreeMap<i64, (i64, i64)> = BTreeMap::new();
     ctx.db.with_snapshot(|snap| {
         for ch in snap.characters.values() {
