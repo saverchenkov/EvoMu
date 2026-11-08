@@ -561,3 +561,170 @@ async fn quasar_local_dev_client_jwt_requires_flag_active_macho_session_and_matc
         Some("16")
     );
 }
+
+#[tokio::test]
+async fn evomu_toml_local_dev_jwt_and_persistent_bidi_requests_resolve_527_528_529() {
+    // 1. Default ServerConfig keeps `allow_local_dev_gateway_jwt == false`, while tracked `evomu.toml`
+    // enables it so direct `/server:<host>` V24.01 playtests work out of the box.
+    assert!(!crate::config::ServerConfig::default()
+        .feature_flags
+        .allow_local_dev_gateway_jwt);
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace root")
+        .to_path_buf();
+    let cfg = crate::config::ServerConfig::load_from_toml(root.join("evomu.toml"))
+        .expect("load tracked evomu.toml");
+    assert!(cfg.feature_flags.allow_local_dev_gateway_jwt);
+
+    let mut raw_ctx = ServerContext::new();
+    raw_ctx.feature_flags.allow_local_dev_gateway_jwt = cfg.feature_flags.allow_local_dev_gateway_jwt;
+    let ctx = Arc::new(raw_ctx);
+    let now_u = ctx.now_unix();
+    let uid = ctx.db.provision_player_account("live_v24_pilot", "pass123");
+    let cid = 92_300_001i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters[&90_000_001].clone();
+        ch.character_id = cid;
+        ch.user_id = uid;
+        ch.corporation_id = 1_000_009;
+        snap.characters.insert(cid, ch);
+    });
+    ctx.db
+        .acquire_online_lock(uid, 70_901, Some(cid), true, now_u)
+        .unwrap();
+    ctx.db
+        .set_online_session_peer_ip(uid, 70_901, "127.0.0.1:51234");
+
+    // Exact V24.01 `jwt.fabricate_local_dev_user_token(tenant, user_id)` payload (no `exp`).
+    let client_dev_jwt = sign_hs256(
+        r#"{"alg":"HS256","typ":"JWT"}"#,
+        &format!(r#"{{"sub":"USER:EVE:{uid}","tenant":"tranquility","tier":"dev","region":"local"}}"#),
+        b"dev",
+    );
+
+    // Loopback family duality (`::1` vs `127.0.0.1`) is accepted while `127.0.0.2` is rejected.
+    assert!(ctx
+        .db
+        .verify_local_dev_client_jwt(&client_dev_jwt, "::1".parse().unwrap(), now_u)
+        .is_ok());
+    assert!(ctx
+        .db
+        .verify_local_dev_client_jwt(&client_dev_jwt, "127.0.0.2".parse().unwrap(), now_u)
+        .is_err());
+
+    let addr = spawn_grpc_server(Arc::clone(&ctx)).await;
+    let (mut client, conn) = h2::client::handshake(TcpStream::connect(addr).await.unwrap())
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+
+    // Open ONE persistent bidi-streaming `/eve_public.gateway.Requests/Send` stream like `CqrsBroker`.
+    let req = Request::builder()
+        .method("POST")
+        .uri("http://127.0.0.1/eve_public.gateway.Requests/Send")
+        .header("content-type", "application/grpc")
+        .header("authorization", format!("Bearer {client_dev_jwt}"))
+        .body(())
+        .unwrap();
+    let (rsp_fut, mut send_stream) = client.send_request(req, false).unwrap();
+    let rsp_head = rsp_fut.await.unwrap();
+    assert_eq!(rsp_head.status(), StatusCode::OK);
+    let mut recv_body = rsp_head.into_body();
+    let mut recv_buf = BytesMut::new();
+
+    let next_frame = |send_stream: &mut h2::SendStream<Bytes>,
+                          pub_req: EvePublicRequest,
+                          end_stream: bool| {
+        send_stream
+            .send_data(frame_grpc_message(&pub_req.encode_proto()), end_stream)
+            .unwrap();
+    };
+
+    async fn recv_next_rsp(
+        recv_body: &mut h2::RecvStream,
+        recv_buf: &mut BytesMut,
+    ) -> EvePublicResponse {
+        loop {
+            if recv_buf.len() >= 5 {
+                let len =
+                    u32::from_be_bytes([recv_buf[1], recv_buf[2], recv_buf[3], recv_buf[4]])
+                        as usize;
+                if recv_buf.len() >= 5 + len {
+                    recv_buf.advance(5);
+                    let raw = recv_buf.split_to(len);
+                    return EvePublicResponse::decode_proto(&raw).expect("decode EvePublicResponse");
+                }
+            }
+            let chunk = recv_body
+                .data()
+                .await
+                .expect("stream chunk")
+                .expect("valid chunk");
+            recv_buf.extend_from_slice(&chunk);
+        }
+    }
+
+    // #527: `eve_public.cosmetic.structure.paintwork.api.GetAllInSolarSystemRequest`
+    let req_527 = EvePublicRequest {
+        correlation_uuid: vec![1; 16],
+        authoritative_context: Some(auth_ctx_opt(uid, Some(cid), Some(1_000_009), now_u)),
+        payload: Some(GoogleAny {
+            type_url: format!(
+                "{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.structure.paintwork.api.GetAllInSolarSystemRequest"
+            ),
+            value: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    next_frame(&mut send_stream, req_527, false);
+    let rsp_527 = recv_next_rsp(&mut recv_body, &mut recv_buf).await;
+    assert_eq!(rsp_527.status_code, STATUS_OK, "#527 failed: {}", rsp_527.status_message);
+    assert_eq!(
+        rsp_527.payload.unwrap().normalized_type_name(),
+        "eve_public.cosmetic.structure.paintwork.api.GetAllInSolarSystemResponse"
+    );
+
+    // #528: `eve_public.character.skill.plan.GetAllRequest`
+    let req_528 = EvePublicRequest {
+        correlation_uuid: vec![2; 16],
+        authoritative_context: Some(auth_ctx_opt(uid, Some(cid), Some(1_000_009), now_u)),
+        payload: Some(GoogleAny {
+            type_url: format!(
+                "{TYPE_GOOGLEAPIS_PREFIX}eve_public.character.skill.plan.GetAllRequest"
+            ),
+            value: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    next_frame(&mut send_stream, req_528, false);
+    let rsp_528 = recv_next_rsp(&mut recv_body, &mut recv_buf).await;
+    assert_eq!(rsp_528.status_code, STATUS_OK, "#528 failed: {}", rsp_528.status_message);
+    assert_eq!(
+        rsp_528.payload.unwrap().normalized_type_name(),
+        "eve_public.character.skill.plan.GetAllResponse"
+    );
+
+    // #529: `eve_public.plex.vault.api.BalanceRequest` via user-scoped `no_active_identity` context
+    let user_only_ctx = auth_ctx_opt(uid, None, None, now_u);
+    assert!(user_only_ctx.no_active_identity);
+    let req_529 = EvePublicRequest {
+        correlation_uuid: vec![3; 16],
+        authoritative_context: Some(user_only_ctx),
+        payload: Some(GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.plex.vault.api.BalanceRequest"),
+            value: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    next_frame(&mut send_stream, req_529, true);
+    let rsp_529 = recv_next_rsp(&mut recv_body, &mut recv_buf).await;
+    assert_eq!(rsp_529.status_code, STATUS_OK, "#529 failed: {}", rsp_529.status_message);
+    assert_eq!(
+        rsp_529.payload.unwrap().normalized_type_name(),
+        "eve_public.plex.vault.api.BalanceResponse"
+    );
+}

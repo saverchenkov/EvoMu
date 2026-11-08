@@ -390,3 +390,158 @@ fn save_skill_queue_mct_prereqs_alpha_caps_and_input_shapes() {
     .unwrap_err();
     assert_eq!(alpha_sp_err.code, "AlphaCloneSpCapExceeded");
 }
+
+#[test]
+fn save_new_queue_accepts_v24_dict_payload_activate_flag_and_paused_timestamps() {
+    let mut ctx = test_ctx();
+    let base_sk = 99_441u32;
+    let adv_sk = 99_442u32;
+    let char_id = 90_000_001i64;
+    let now = 1_750_000_000u64;
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(now)));
+
+    clone_skill_type(&mut ctx.sde, base_sk, 1.0, None);
+    clone_skill_type(&mut ctx.sde, adv_sk, 1.0, Some((base_sk, 1)));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2;
+        }
+        snap.skills.entry(char_id).or_default().remove(&base_sk);
+        snap.skills.entry(char_id).or_default().remove(&adv_sk);
+        snap.skill_queues.remove(&char_id);
+        snap.paused_skill_queues.remove(&char_id);
+    });
+
+    let mut sess = SessionState::new(911);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+
+    // 1. V24.01 `CommitTransaction` sends `{idx: (trainingTypeID, trainingToLevel)}` + `activate=False`.
+    // Keys provided out of order (1 before 0) to verify position-key sorting & prereq ordering.
+    let mut kw_pause = HashMap::new();
+    kw_pause.insert("activate".to_string(), PyRep::Bool(false));
+    let paused_dict = PyRep::Dict(vec![
+        (
+            PyRep::Integer(1),
+            PyRep::Tuple(vec![PyRep::Integer(adv_sk as i64), PyRep::Integer(1)]),
+        ),
+        (
+            PyRep::Integer(0),
+            PyRep::Tuple(vec![PyRep::Integer(base_sk as i64), PyRep::Integer(1)]),
+        ),
+    ]);
+    let saved_paused = handle(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "SaveNewQueue",
+        &[paused_dict],
+        &kw_pause,
+    )
+    .unwrap()
+    .expect("SaveNewQueue dict with activate=False must succeed");
+    assert_eq!(
+        saved_paused.dict_get("typeID"),
+        Some(&PyRep::Integer(adv_sk as i64))
+    );
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.paused_skill_queues.contains(&char_id));
+        let q = &snap.skill_queues[&char_id];
+        assert_eq!(q.len(), 2);
+        assert_eq!(q[0].type_id, base_sk);
+        assert_eq!(q[1].type_id, adv_sk);
+        assert!(q.iter().all(|e| e.started_at_unix.is_none()));
+    });
+    let eot_paused = handle(&ctx, &mut sess, "skillMgr2", "GetEndOfTraining", &[], &HashMap::new())
+        .unwrap()
+        .unwrap();
+    assert_eq!(eot_paused, PyRep::None);
+
+    let PyRep::Rowset { columns, rows } =
+        handle(&ctx, &mut sess, "skillMgr2", "GetSkillQueue", &[], &HashMap::new())
+            .unwrap()
+            .unwrap()
+    else {
+        panic!("expected Rowset from GetSkillQueue");
+    };
+    let start_col = columns.iter().position(|c| c == "trainingStartTime").unwrap();
+    let end_col = columns.iter().position(|c| c == "trainingEndTime").unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0][start_col], PyRep::None);
+    assert_eq!(rows[0][end_col], PyRep::None);
+
+    // 2. V24.01 `CommitTransaction` with `activate=True` activates training on index 0.
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let mut kw_active = HashMap::new();
+    kw_active.insert("activate".to_string(), PyRep::Bool(true));
+    let active_dict = PyRep::Dict(vec![
+        (
+            PyRep::Integer(0),
+            PyRep::Tuple(vec![PyRep::Integer(base_sk as i64), PyRep::Integer(1)]),
+        ),
+        (
+            PyRep::Integer(1),
+            PyRep::Tuple(vec![PyRep::Integer(adv_sk as i64), PyRep::Integer(1)]),
+        ),
+    ]);
+    handle(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "SaveNewQueue",
+        &[active_dict],
+        &kw_active,
+    )
+    .unwrap()
+    .expect("SaveNewQueue dict with activate=True must succeed");
+
+    let eot_active = handle(&ctx, &mut sess, "skillMgr2", "GetEndOfTraining", &[], &HashMap::new())
+        .unwrap()
+        .unwrap();
+    assert!(eot_active.as_i64().is_some());
+
+    let PyRep::Tuple(qf) = handle(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "GetSkillQueueAndFreePoints",
+        &[],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap()
+    else {
+        panic!("expected Tuple");
+    };
+    let PyRep::Rowset {
+        columns: qf_cols,
+        rows: qf_rows,
+    } = &qf[0]
+    else {
+        panic!("expected Rowset in GetSkillQueueAndFreePoints[0]");
+    };
+    let s_idx = qf_cols.iter().position(|c| c == "trainingStartTime").unwrap();
+    let e_idx = qf_cols.iter().position(|c| c == "trainingEndTime").unwrap();
+    assert_eq!(qf_rows.len(), 2);
+    let t0_start = qf_rows[0][s_idx].as_i64().expect("active trainingStartTime");
+    let t0_end = qf_rows[0][e_idx].as_i64().expect("active trainingEndTime");
+    let t1_start = qf_rows[1][s_idx].as_i64().expect("queued entry 1 trainingStartTime");
+    assert_eq!(t1_start, t0_end);
+    assert!(t0_end > t0_start);
+
+    // 3. Advancing virtual clock past completion trains base_sk to level 1!
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(
+        now + 10_000,
+    )));
+    catch_up_skill_queue(&ctx, char_id);
+    ctx.db.with_snapshot(|snap| {
+        let sk = snap
+            .skills
+            .get(&char_id)
+            .and_then(|m| m.get(&base_sk))
+            .expect("base_sk trained");
+        assert!(sk.level >= 1);
+    });
+}

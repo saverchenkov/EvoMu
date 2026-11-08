@@ -979,18 +979,41 @@ pub fn lookup_effective_attr_from_tuple(attrs: (f64, f64, f64, f64, f64), attr_i
 /// Skill queue rowset as returned by `skillMgr2.GetSkillQueue`; also the `newQueue` payload of
 /// `OnNewSkillQueueSaved` (`skillQueueSvc.OnNewSkillQueueSaved(newQueue)` stores it as the queue).
 pub(crate) fn skill_queue_rowset(ctx: &ServerContext, char_id: i64) -> PyRep {
+    let now_unix = ctx.now_unix();
     let rows = ctx.db.with_snapshot(|snap| {
+        let paused = snap.paused_skill_queues.contains(&char_id);
         snap.skill_queues
             .get(&char_id)
             .map(|q| {
+                let active_base_unix = if paused {
+                    None
+                } else {
+                    q.first()
+                        .and_then(|head| head.started_at_unix.or(Some(now_unix)))
+                };
+                let mut cur_ft = active_base_unix
+                    .map(|u| (u as i64 * 10_000_000) + 116_444_736_000_000_000);
                 q.iter()
-                    .map(|e| {
+                    .enumerate()
+                    .map(|(idx, e)| {
+                        let (start_rep, end_rep) = match cur_ft {
+                            Some(start_ft) => {
+                                let dur_ft = (e.duration_seconds.max(1.0) * 10_000_000.0) as i64;
+                                let end_ft = start_ft + dur_ft;
+                                cur_ft = Some(end_ft);
+                                (PyRep::Integer(start_ft), PyRep::Integer(end_ft))
+                            }
+                            None => (PyRep::None, PyRep::None),
+                        };
                         vec![
                             PyRep::Integer(e.type_id as i64),
                             PyRep::Integer(e.target_level as i64),
                             PyRep::Real(e.start_sp),
                             PyRep::Real(e.end_sp),
                             PyRep::Real(e.duration_seconds),
+                            PyRep::Integer(idx as i64),
+                            start_rep,
+                            end_rep,
                         ]
                     })
                     .collect()
@@ -1004,6 +1027,9 @@ pub(crate) fn skill_queue_rowset(ctx: &ServerContext, char_id: i64) -> PyRep {
             "trainingStartSP",
             "trainingDestinationSP",
             "durationSeconds",
+            "queuePosition",
+            "trainingStartTime",
+            "trainingEndTime",
         ],
         rows,
     )

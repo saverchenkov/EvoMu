@@ -304,7 +304,7 @@ pub fn handle(
     service: &str,
     method: &str,
     args: &[PyRep],
-    _kwargs: &HashMap<String, PyRep>,
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         ("skillMgr2", "GetAllSkills") => {
@@ -460,40 +460,86 @@ pub fn handle(
             };
             catch_up_skill_queue(ctx, char_id);
             let is_add_to_end = false;
+            let activate = match kwargs.get("activate") {
+                Some(PyRep::Bool(b)) => *b,
+                Some(PyRep::Integer(n)) => *n != 0,
+                _ => true,
+            };
+
+            let parse_queue_pair = |rep: &PyRep| -> Option<(TypeId, u8)> {
+                match rep {
+                    PyRep::Tuple(pair) | PyRep::List(pair) => {
+                        let tid = pair.first().and_then(|a| a.as_i64())?;
+                        let lvl = pair
+                            .get(1)
+                            .and_then(|a| a.as_i64())
+                            .unwrap_or(1)
+                            .clamp(1, 5) as u8;
+                        Some((tid as TypeId, lvl))
+                    }
+                    PyRep::Dict(_) | PyRep::KeyVal(_) => {
+                        let tid = rep
+                            .dict_get("trainingTypeID")
+                            .or_else(|| rep.dict_get("typeID"))
+                            .and_then(|a| a.as_i64())?;
+                        let lvl = rep
+                            .dict_get("trainingToLevel")
+                            .or_else(|| rep.dict_get("targetLevel"))
+                            .and_then(|a| a.as_i64())
+                            .unwrap_or(1)
+                            .clamp(1, 5) as u8;
+                        Some((tid as TypeId, lvl))
+                    }
+                    _ => None,
+                }
+            };
 
             let mut skills_to_queue: Vec<(TypeId, u8)> = Vec::new();
             match args.first() {
                 Some(PyRep::List(items) | PyRep::Tuple(items)) => {
                     for it in items {
-                        match it {
-                            PyRep::Tuple(pair) | PyRep::List(pair) => {
-                                if let Some(tid) = pair.first().and_then(|a| a.as_i64()) {
-                                    skills_to_queue.push((
-                                        tid as TypeId,
-                                        pair.get(1)
-                                            .and_then(|a| a.as_i64())
-                                            .unwrap_or(1)
-                                            .clamp(1, 5)
-                                            as u8,
-                                    ));
-                                }
-                            }
-                            single_val => {
-                                if let Some(tid) = single_val.as_i64() {
-                                    skills_to_queue.push((
-                                        tid as TypeId,
-                                        items
-                                            .get(1)
-                                            .and_then(|a| a.as_i64())
-                                            .unwrap_or(1)
-                                            .clamp(1, 5)
-                                            as u8,
-                                    ));
-                                    break;
-                                }
-                            }
+                        if let Some(pair) = parse_queue_pair(it) {
+                            skills_to_queue.push(pair);
+                        } else if let Some(tid) = it.as_i64() {
+                            skills_to_queue.push((
+                                tid as TypeId,
+                                items
+                                    .get(1)
+                                    .and_then(|a| a.as_i64())
+                                    .unwrap_or(1)
+                                    .clamp(1, 5) as u8,
+                            ));
+                            break;
                         }
                     }
+                }
+                // V24.01 `SkillQueueService.CommitTransaction` sends `{idx: (trainingTypeID, trainingToLevel), ...}`.
+                Some(PyRep::Dict(entries)) => {
+                    let mut indexed: Vec<(i64, usize, (TypeId, u8))> = entries
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(ord, (k, v))| {
+                            let pos = k
+                                .as_i64()
+                                .or_else(|| k.as_str().and_then(|s| s.parse::<i64>().ok()))
+                                .unwrap_or(ord as i64);
+                            parse_queue_pair(v).map(|pair| (pos, ord, pair))
+                        })
+                        .collect();
+                    indexed.sort_by_key(|&(pos, ord, _)| (pos, ord));
+                    skills_to_queue.extend(indexed.into_iter().map(|(_, _, pair)| pair));
+                }
+                Some(PyRep::KeyVal(entries)) => {
+                    let mut indexed: Vec<(i64, usize, (TypeId, u8))> = entries
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(ord, (k, v))| {
+                            let pos = k.parse::<i64>().unwrap_or(ord as i64);
+                            parse_queue_pair(v).map(|pair| (pos, ord, pair))
+                        })
+                        .collect();
+                    indexed.sort_by_key(|&(pos, ord, _)| (pos, ord));
+                    skills_to_queue.extend(indexed.into_iter().map(|(_, _, pair)| pair));
                 }
                 _ => {
                     if let Some(tid) = args.first().and_then(|a| a.as_i64()) {
@@ -544,7 +590,7 @@ pub fn handle(
                     });
                 };
                 let now = ctx.now_unix();
-                if ch.user_id > 0 {
+                if activate && ch.user_id > 0 {
                     let other_training = snap.characters.values().filter(|o| {
                         o.user_id == ch.user_id && o.character_id != char_id
                             && snap.skill_queues.get(&o.character_id).is_some_and(|q| q.first().and_then(|e| e.started_at_unix).is_some())
@@ -584,7 +630,11 @@ pub fn handle(
                             });
                         }
                     }
-                    snap.paused_skill_queues.remove(&char_id);
+                    if activate {
+                        snap.paused_skill_queues.remove(&char_id);
+                    } else {
+                        snap.paused_skill_queues.insert(char_id);
+                    }
                 }
 
                 let mut last_ret = (0 as TypeId, 1 as u8, 0.0, 0.0);
@@ -725,7 +775,7 @@ pub fn handle(
                     let clone_mult = if ch.clone_grade == 2 { 1.0 } else { 0.5 };
                     let duration_sec = skill_training_time_seconds(start_sp, end_sp, primary_attr, secondary_attr, clone_mult);
                     let is_first = snap.skill_queues.get(&char_id).map(|q| q.is_empty()).unwrap_or(true);
-                    let started_at = if is_first { Some(now) } else { None };
+                    let started_at = if activate && is_first { Some(now) } else { None };
                     snap.skill_queues.entry(char_id).or_default().push(SkillQueueEntry {
                         type_id: skill_type_id, target_level, start_sp, end_sp, duration_seconds: duration_sec, started_at_unix: started_at,
                     });
@@ -742,23 +792,27 @@ pub fn handle(
                 Ok((tid, lvl, esp, dur)) => {
                     let _ =
                         ctx.notify_new_skill_queue_saved(char_id, skill_queue_rowset(ctx, char_id));
-                    let (sk_gid, sk_cid) = ctx
-                        .sde
-                        .types
-                        .get(&tid)
-                        .map(|t| (t.group_id, t.category_id))
-                        .unwrap_or((0, 0));
-                    crate::services::operations_manager_helpers::record_server_operation_event(
-                        ctx,
-                        char_id,
-                        "skillTrainingStarted",
-                        &[
-                            ("typeID", tid.to_string()),
-                            ("groupID", sk_gid.to_string()),
-                            ("categoryID", sk_cid.to_string()),
-                        ],
-                        1,
-                    );
+                    if activate {
+                        let (sk_gid, sk_cid) = ctx
+                            .sde
+                            .types
+                            .get(&tid)
+                            .map(|t| (t.group_id, t.category_id))
+                            .unwrap_or((0, 0));
+                        crate::services::operations_manager_helpers::record_server_operation_event(
+                            ctx,
+                            char_id,
+                            "skillTrainingStarted",
+                            &[
+                                ("typeID", tid.to_string()),
+                                ("groupID", sk_gid.to_string()),
+                                ("categoryID", sk_cid.to_string()),
+                            ],
+                            1,
+                        );
+                    } else {
+                        let _ = ctx.notify_skill_queue_paused_server(char_id);
+                    }
                     Some(Ok(PyRep::keyval([
                         ("typeID", PyRep::Integer(tid as i64)),
                         ("targetLevel", PyRep::Integer(lvl as i64)),
@@ -1331,7 +1385,7 @@ pub fn handle(
         }
 
         _ => character_skills_helpers::handle_skill_tail(
-            ctx, session, service, method, args, _kwargs,
+            ctx, session, service, method, args, kwargs,
         ),
     }
 }

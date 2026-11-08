@@ -570,6 +570,9 @@ async fn test_ch2_skill_handling_and_prerequisites() {
             "trainingStartSP",
             "trainingDestinationSP",
             "durationSeconds",
+            "queuePosition",
+            "trainingStartTime",
+            "trainingEndTime",
         ]
     );
 

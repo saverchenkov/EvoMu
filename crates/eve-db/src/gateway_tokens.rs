@@ -517,9 +517,15 @@ impl WorldRepository {
             .online_sessions
             .get(&uid)
             .ok_or(DbError::InvalidCredentials)?;
-        if rt.displaced_sessions.contains_key(&os.session_id)
-            || rt.online_session_ips.get(&uid) != Some(&(os.session_id, norm_peer_ip))
-        {
+        let peer_ip_matches = rt.online_session_ips.get(&uid).is_some_and(|&(sid, rec_ip)| {
+            sid == os.session_id
+                && (rec_ip == norm_peer_ip
+                    || (rec_ip == IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+                        && norm_peer_ip == IpAddr::V6(std::net::Ipv6Addr::LOCALHOST))
+                    || (rec_ip == IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+                        && norm_peer_ip == IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)))
+        });
+        if rt.displaced_sessions.contains_key(&os.session_id) || !peer_ip_matches {
             return Err(DbError::InvalidCredentials);
         }
         let acc = guard

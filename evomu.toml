@@ -16,6 +16,7 @@ enable_living_world = true
 seed_demo = false
 free_fast_checkout_plex = true
 starter_plex_balance = 50000
+allow_local_dev_gateway_jwt = true
 
 # Example operator-provisioned accounts (passwords are hashed at rest with Argon2id):
 # [[admin_accounts]]
