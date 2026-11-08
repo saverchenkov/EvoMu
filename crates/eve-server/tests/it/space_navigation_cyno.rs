@@ -1175,25 +1175,104 @@ async fn test_s3_pharolux_cyno_beacon_jump_bridge_and_group_jump() {
     });
     assert!(rem_fuel < 10_000);
 
-    let bridge_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "structureCynoBeaconMgr",
-            None,
-            "CmdBridgeToStructureBeacon",
-            &[
-                PyRep::Integer(dest_sys_id as i64),
-                PyRep::Integer(beacon_struct_id),
-            ],
-            &kw,
-            None,
-        )
-        .await
-        .expect("CmdBridgeToStructureBeacon");
-    let PyRep::KeyVal(b_kv) = bridge_res else {
-        panic!("Expected KeyVal from CmdBridgeToStructureBeacon");
-    };
-    assert_eq!(b_kv.get("bridgeActive").unwrap(), &PyRep::Bool(true));
+    // Re-position Archon back to origin Jita for Conduit Group Jump (`CmdGroupJumpToStructureBeacon`),
+    // then deploy an Erebus Titan with Jump Portal Generator I for `CmdBridgeToStructureBeacon`.
+    ctx.advance_secs(600);
+    let wingman_id = 90_000_002i64;
+    let wingman_ship_id = 100_000_002i64;
+    let jita_handle = ctx.systems.get_or_spawn(30_000_142);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = 30_000_142;
+            ch.jump_cooldown_until_unix = 0;
+            ch.jump_fatigue_until_unix = 0;
+            ch.jump_fatigue_minutes = 0.0;
+        }
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = 30_000_142;
+        }
+        if let Some(fuel) = snap.items.get_mut(&88_000_001) {
+            fuel.quantity = 50_000;
+        }
+        let mut wing = snap.characters.get(&90_000_001).cloned().unwrap();
+        wing.character_id = wingman_id;
+        wing.solar_system_id = 30_000_142;
+        wing.active_ship_id = wingman_ship_id;
+        snap.characters.insert(wingman_id, wing);
+        snap.items.insert(
+            wingman_ship_id,
+            InventoryItemRecord {
+                item_id: wingman_ship_id,
+                type_id: 587, // Rifter passenger
+                owner_id: wingman_id,
+                location_id: 30_000_142,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.fleets.insert(
+            910_001,
+            eve_db::types::FleetRecord {
+                fleet_id: 910_001,
+                boss_id: 90_000_001,
+                members: vec![90_000_001, wingman_id],
+                wings: vec![],
+                squads: vec![],
+                free_move: true,
+                is_registered: false,
+                member_details: [(
+                    wingman_id,
+                    eve_db::types::FleetMemberRecord {
+                        character_id: wingman_id,
+                        role: eve_db::types::FleetRole::SquadMember,
+                        wing_id: None,
+                        squad_id: None,
+                        takes_fleet_warp: true,
+                        accepts_regroup: true,
+                        accepts_conduit_jumps: true,
+                        job: 0,
+                        role_name: String::new(),
+                        join_time_unix: 0,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+        );
+    });
+    sess.solar_system_id = Some(30_000_142);
+    let _ = jita_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: 23757,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 80.0,
+            inertia: 0.04,
+            mass: 1_230_000_000.0,
+            radius: 1_600.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+    let _ = jita_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: wingman_ship_id,
+            type_id: 587,
+            position: DVec3::new(1_500.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 30.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
 
     let group_res = ctx
         .dispatch_rpc(
@@ -1214,6 +1293,123 @@ async fn test_s3_pharolux_cyno_beacon_jump_bridge_and_group_jump() {
         panic!("Expected KeyVal from CmdGroupJumpToStructureBeacon");
     };
     assert_eq!(g_kv.get("groupJumpActive").unwrap(), &PyRep::Bool(true));
+    assert_eq!(g_kv.get("jumpedCount").unwrap(), &PyRep::Integer(2));
+    assert_eq!(sess.solar_system_id, Some(dest_sys_id));
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.characters.get(&wingman_id).map(|c| c.solar_system_id)),
+        Some(dest_sys_id),
+        "Conduit jump to Pharolux must relocate eligible fleetmates too"
+    );
+
+    // Bridge to Pharolux using an Erebus (671) fitted with Jump Portal Generator I (23953) & Strontium (16275).
+    ctx.advance_secs(600);
+    let titan_ship_id = 100_000_003i64;
+    let portal_mod_id = 100_000_004i64;
+    let stront_id = 88_000_002i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = 30_000_142;
+            ch.active_ship_id = titan_ship_id;
+            ch.jump_cooldown_until_unix = 0;
+            ch.jump_fatigue_until_unix = 0;
+            ch.jump_fatigue_minutes = 0.0;
+        }
+        snap.items.insert(
+            titan_ship_id,
+            InventoryItemRecord {
+                item_id: titan_ship_id,
+                type_id: 671,
+                owner_id: 90_000_001,
+                location_id: 30_000_142,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            portal_mod_id,
+            InventoryItemRecord {
+                item_id: portal_mod_id,
+                type_id: 23953,
+                owner_id: 90_000_001,
+                location_id: titan_ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            stront_id,
+            InventoryItemRecord {
+                item_id: stront_id,
+                type_id: 16275,
+                owner_id: 90_000_001,
+                location_id: titan_ship_id,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 10_000,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    ctx.invalidate_ship_fitting(titan_ship_id);
+    sess.solar_system_id = Some(30_000_142);
+    sess.ship_id = Some(titan_ship_id);
+    let _ = jita_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: titan_ship_id,
+            type_id: 671,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 70.0,
+            inertia: 0.037,
+            mass: 2_400_000_000.0,
+            radius: 3_000.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+
+    let bridge_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "structureCynoBeaconMgr",
+            None,
+            "CmdBridgeToStructureBeacon",
+            &[
+                PyRep::Integer(dest_sys_id as i64),
+                PyRep::Integer(beacon_struct_id),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("CmdBridgeToStructureBeacon");
+    let PyRep::KeyVal(b_kv) = bridge_res else {
+        panic!("Expected KeyVal from CmdBridgeToStructureBeacon");
+    };
+    assert_eq!(b_kv.get("bridgeActive").unwrap(), &PyRep::Bool(true));
+    let portal_ball_id = b_kv.get("portalBallID").and_then(|v| v.as_i64()).expect("portalBallID");
+    assert!(jita_handle.get_ball_snapshot(portal_ball_id).await.unwrap().is_some(), "Portal ball must spawn in origin system");
+    let rem_stront = ctx.db.with_snapshot(|s| s.items.get(&stront_id).map(|i| i.quantity).unwrap_or(0));
+    assert!(rem_stront < 10_000, "Pharolux bridge must deduct Strontium Clathrates");
+    ctx.advance_secs(600);
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = Some(dest_sys_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.active_ship_id = ship_id;
+            ch.solar_system_id = dest_sys_id;
+            ch.jump_cooldown_until_unix = 0;
+            ch.jump_fatigue_until_unix = 0;
+            ch.jump_fatigue_minutes = 0.0;
+        }
+    });
 
     let highsec_beacon_id = 1_040_000_000_201_i64;
     ctx.db.with_mut_snapshot(|snap| {

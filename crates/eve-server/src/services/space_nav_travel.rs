@@ -445,6 +445,12 @@ pub fn plan_jump_drive(
             format!("Jump drives cannot operate in or into wormhole space ({cur_sys} -> {tgt_sys})"),
         ));
     }
+    if (32_000_000..=32_999_999).contains(&cur_sys) || (32_000_000..=32_999_999).contains(&tgt_sys) {
+        return Err(err(
+            "JumpDriveForbiddenInAbyssalSpace",
+            format!("Jump drives cannot operate in or into Abyssal Deadspace ({cur_sys} -> {tgt_sys})"),
+        ));
+    }
     if cur_sys == 30_100_000 || tgt_sys == 30_100_000 {
         return Err(err(
             "JumpDriveForbiddenInZarzakh",
@@ -455,6 +461,12 @@ pub fn plan_jump_drive(
         return Err(err(
             "CannotJumpToPochven",
             format!("Region-wide cyno jammer prevents jump drives from entering Pochven system {tgt_sys}"),
+        ));
+    }
+    if ctx.sde.solar_systems.get(&cur_sys).map(|s| s.region_id) == Some(10_000_070) {
+        return Err(err(
+            "JumpDriveForbiddenInPochven",
+            format!("Jump drives cannot initiate from Pochven system {cur_sys}"),
         ));
     }
     if type_attr(ctx, ship_type_id, "canJump").unwrap_or(0.0) == 0.0 {

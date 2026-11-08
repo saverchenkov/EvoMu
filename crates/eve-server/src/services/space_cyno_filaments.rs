@@ -41,10 +41,10 @@ pub(crate) async fn handle(
             Some(handle_cmd_jump_to_structure_beacon(ctx, session, args).await)
         }
         ("structureCynoBeaconMgr", "CmdBridgeToStructureBeacon") => {
-            Some(handle_cmd_bridge_to_structure_beacon(ctx, session, args))
+            Some(handle_cmd_bridge_to_structure_beacon(ctx, session, args).await)
         }
         ("structureCynoBeaconMgr", "CmdGroupJumpToStructureBeacon") => {
-            Some(handle_cmd_group_jump_to_structure_beacon(ctx, session, args))
+            Some(handle_cmd_group_jump_to_structure_beacon(ctx, session, args).await)
         }
         // rpc-lint: allow live crucible:src/eve-server/ship/BeyonceService.h CmdBeaconJumpFleet
         ("beyonce", "CmdBeaconJumpFleet") => {
@@ -683,7 +683,7 @@ async fn handle_random_jump_filament(
     ]))
 }
 
-fn validate_structure_cyno_beacon(
+pub(crate) fn validate_structure_cyno_beacon(
     snap: &eve_db::WorldStateSnapshot,
     char_id: i64,
     target_struct_id: i64,
@@ -793,6 +793,18 @@ async fn handle_cmd_jump_to_structure_beacon(
             message: "Cannot jump while in warp".into(),
         });
     }
+    if cur_sys_handle
+        .get_combat_state(ship_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|cs| cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0)
+    {
+        return Err(BridgeRpcError {
+            code: "CannotJumpWhileCloaked".into(),
+            message: "Cannot jump while cloaked".into(),
+        });
+    }
     if cur_sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
         return Err(BridgeRpcError {
             code: "WarpScrambled".into(),
@@ -815,30 +827,41 @@ async fn handle_cmd_jump_to_structure_beacon(
     {
         return Err(BridgeRpcError { code: "JumpDriveForbiddenInWormholeSpace".into(), message: "Jump drive and cynosural beacon operations are prohibited in wormhole space".into() });
     }
+    if (32_000_000..=32_999_999).contains(&cur_sys_id)
+        || (32_000_000..=32_999_999).contains(&target_sys_id)
+    {
+        return Err(BridgeRpcError { code: "JumpDriveForbiddenInAbyssalSpace".into(), message: "Jump drive and cynosural beacon operations are prohibited in Abyssal Deadspace".into() });
+    }
+    if cur_sys_id == 30_100_000 || target_sys_id == 30_100_000 {
+        return Err(BridgeRpcError { code: "JumpDriveForbiddenInZarzakh".into(), message: "Jump drive and cynosural beacon operations are prohibited in Zarzakh".into() });
+    }
+    if ctx.sde.solar_systems.get(&target_sys_id).map(|s| s.region_id) == Some(10_000_070) {
+        return Err(BridgeRpcError { code: "CannotJumpToPochven".into(), message: format!("Region-wide cyno jammer prevents jump drives from entering Pochven system {target_sys_id}") });
+    }
+    if crate::services::inventory_fitting::fitting_cyno_portal::active_cyno_jammer(ctx, target_sys_id).is_some() {
+        return Err(BridgeRpcError { code: "CynoJammed".into(), message: format!("Cynosural jammer in system {target_sys_id} blocks jumping to structure beacon {target_struct_id}") });
+    }
     // Jump-drive range, isotope fuel, high-sec restriction and fatigue are SDE-driven
     // (`feat:navigation.jump-drive`, `feat:navigation.jump-fatigue`, `feat:navigation.jump-range-restrictions`).
     use super::space_nav_travel as nav;
     let db_type_id = ctx.db.get_item(ship_id).map(|i| i.type_id).unwrap_or(current_ball.type_id);
-    let plan = match nav::plan_jump_drive(ctx, char_id, db_type_id, cur_sys_id, target_sys_id) {
-        Ok(p) => p,
+    let plan_res = match nav::plan_jump_drive(ctx, char_id, db_type_id, cur_sys_id, target_sys_id) {
+        Ok(p) => Ok(p),
         Err(_) if current_ball.type_id != 0 && current_ball.type_id != db_type_id => {
-            match nav::plan_jump_drive(ctx, char_id, current_ball.type_id, cur_sys_id, target_sys_id) {
-                Ok(p) => p,
-                Err(_) => {
-                    let distance_ly = nav::distance_ly(ctx, cur_sys_id, target_sys_id);
-                    if distance_ly > 7.0 {
-                        return Err(BridgeRpcError { code: "JumpDistanceOutOfRange".into(), message: format!("Distance {distance_ly:.2} LY exceeds jump range 7.00 LY") });
-                    }
-                    nav::JumpDrivePlan { distance_ly, fuel_type_id: 16274, fuel_units: (distance_ly * 150.0).round().max(50.0) as i32, fatigue_multiplier: 1.0 }
-                }
-            }
+            nav::plan_jump_drive(ctx, char_id, current_ball.type_id, cur_sys_id, target_sys_id)
         }
-        Err(e) => return Err(e),
+        Err(e) => Err(e),
     };
     let target_sec = ctx.sde.solar_systems.get(&target_sys_id).map(|s| s.security_status).unwrap_or(0.0);
     if target_sec >= 0.45 {
+        if let Err(ref e) = plan_res {
+            if e.code == "JumpDriveHighSecForbidden" {
+                return Err(e.clone());
+            }
+        }
         return Err(BridgeRpcError { code: "CannotJumpToHighSecBeacon".into(), message: format!("Pharolux Cyno Beacon cannot operate in high-security system {target_sys_id} (security {target_sec:.2} >= 0.45)") });
     }
+    let plan = plan_res?;
 
     let now_unix = ctx.now_unix();
     if let Some(_active) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
@@ -928,66 +951,95 @@ async fn handle_cmd_jump_to_structure_beacon(
     ]))
 }
 
-fn validate_beacon_and_distance(
-    ctx: &ServerContext,
-    session: &SessionState,
-    args: &[PyRep],
-) -> Result<(eve_db::types::UpwellStructureRecord, i64, f64), BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let ship_id = session.ship_id.ok_or_else(|| BridgeRpcError { code: "NoActiveShip".into(), message: "Session has no active ship".into() })?;
-    if session.station_id.is_some() || session.structure_id.is_some() {
-        return Err(BridgeRpcError { code: "ShipDocked".into(), message: "Cannot bridge or jump to cyno beacon while docked".into() });
-    }
-    let cur_sys_id = session.solar_system_id.ok_or_else(|| BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solarSystemID".into() })?;
-    let cur_sys_handle = ctx.systems.get_or_spawn(cur_sys_id);
-    if cur_sys_handle.is_ball_scrambled_sync(ship_id) {
-        return Err(BridgeRpcError { code: "WarpScrambled".into(), message: "Cannot bridge or jump while warp scrambled".into() });
-    }
-    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
-    crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "jump")?;
-    let now_check = ctx.now_unix();
-    crate::services::combat_crimewatch::check_crimewatch_action_restriction(
-        ctx, char_id, ship_id, cur_sys_id, "jump_drive", now_check,
-    )?;
-    let (target_sys_hint, target_struct_id) = if args.len() >= 2 {
+fn parse_structure_beacon_args(args: &[PyRep]) -> (Option<u32>, i64) {
+    if args.len() >= 2 {
         (args.first().and_then(|a| a.as_i64()).map(|s| s as u32), args.get(1).and_then(|a| a.as_i64()).unwrap_or(0))
     } else {
         (None, args.first().and_then(|a| a.as_i64()).unwrap_or(0))
-    };
-    let target_struct = ctx.db.with_snapshot(|snap| validate_structure_cyno_beacon(snap, char_id, target_struct_id, target_sys_hint))?;
-    if (31_000_000..32_000_000).contains(&cur_sys_id) || (31_000_000..32_000_000).contains(&target_struct.solar_system_id) {
+    }
+}
+
+fn build_structure_beacon_record(
+    ctx: &ServerContext,
+    target_struct: &eve_db::types::UpwellStructureRecord,
+) -> crate::services::inventory_fitting::fitting_cyno_portal::FleetModuleBeacon {
+    crate::services::inventory_fitting::fitting_cyno_portal::FleetModuleBeacon {
+        beacon_id: target_struct.structure_id,
+        char_id: target_struct.owner_corp_id,
+        ship_id: target_struct.structure_id,
+        beacon_type_id: target_struct.type_id,
+        solar_system_id: target_struct.solar_system_id,
+        position: DVec3::from_array(target_struct.position),
+        expires_at_unix: ctx.now_unix().saturating_add(300),
+    }
+}
+
+async fn validate_pharolux_beacon_target(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    allow_bubbled: bool,
+) -> Result<(u32, eve_db::types::UpwellStructureRecord, i64), BridgeRpcError> {
+    use crate::services::inventory_fitting::fitting_cyno_portal as portal;
+    let (char_id, _, cur_sys_id, _) = portal::caller_in_space(ctx, session, allow_bubbled).await?;
+    let (target_sys_hint, target_struct_id) = parse_structure_beacon_args(args);
+    let target_struct = ctx
+        .db
+        .with_snapshot(|snap| validate_structure_cyno_beacon(snap, char_id, target_struct_id, target_sys_hint))?;
+    let target_sys_id = target_struct.solar_system_id;
+    if (31_000_000..32_000_000).contains(&cur_sys_id)
+        || (31_000_000..32_000_000).contains(&target_sys_id)
+    {
         return Err(BridgeRpcError { code: "JumpDriveForbiddenInWormholeSpace".into(), message: "Jump drive and cynosural beacon operations are prohibited in wormhole space".into() });
     }
-    let target_sec = ctx.sde.solar_systems.get(&target_struct.solar_system_id).map(|s| s.security_status).unwrap_or(0.0);
+    if (32_000_000..=32_999_999).contains(&cur_sys_id)
+        || (32_000_000..=32_999_999).contains(&target_sys_id)
+    {
+        return Err(BridgeRpcError { code: "JumpDriveForbiddenInAbyssalSpace".into(), message: "Jump drive and cynosural beacon operations are prohibited in Abyssal Deadspace".into() });
+    }
+    if cur_sys_id == 30_100_000 || target_sys_id == 30_100_000 {
+        return Err(BridgeRpcError { code: "JumpDriveForbiddenInZarzakh".into(), message: "Jump drive and cynosural beacon operations are prohibited in Zarzakh".into() });
+    }
+    if ctx.sde.solar_systems.get(&target_sys_id).map(|s| s.region_id) == Some(10_000_070) {
+        return Err(BridgeRpcError { code: "CannotJumpToPochven".into(), message: format!("Region-wide cyno jammer prevents jump drives from entering Pochven system {target_sys_id}") });
+    }
+    let target_sec = ctx.sde.solar_systems.get(&target_sys_id).map(|s| s.security_status).unwrap_or(0.0);
     if target_sec >= 0.45 {
-        return Err(BridgeRpcError { code: "CannotJumpToHighSecBeacon".into(), message: format!("Pharolux Cyno Beacon cannot operate in high-security system {}", target_struct.solar_system_id) });
+        return Err(BridgeRpcError { code: "CannotJumpToHighSecBeacon".into(), message: format!("Pharolux Cyno Beacon cannot operate in high-security system {target_sys_id}") });
     }
-    let dist_ly = super::space_nav_travel::distance_ly(ctx, cur_sys_id, target_struct.solar_system_id);
-    if dist_ly > 6.0 {
-        return Err(BridgeRpcError { code: "JumpDistanceOutOfRange".into(), message: format!("Distance {dist_ly:.2} LY exceeds maximum range 6.0 LY") });
+    if portal::active_cyno_jammer(ctx, target_sys_id).is_some() {
+        return Err(BridgeRpcError { code: "CynoJammed".into(), message: format!("Cynosural jammer in system {target_sys_id} blocks bridging or conduit jumping to structure beacon {target_struct_id}") });
     }
-    Ok((target_struct, target_struct_id, dist_ly))
+    Ok((cur_sys_id, target_struct, target_struct_id))
 }
 
-fn handle_cmd_bridge_to_structure_beacon(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
-    let (target_struct, target_struct_id, dist_ly) = validate_beacon_and_distance(ctx, session, args)?;
-    Ok(PyRep::keyval([
-        ("bridgeActive", PyRep::Bool(true)),
-        ("solarSystemID", PyRep::Integer(target_struct.solar_system_id as i64)),
-        ("structureID", PyRep::Integer(target_struct_id)),
-        ("durationSeconds", PyRep::Integer(60)),
-        ("distanceLY", PyRep::Real(dist_ly)),
-    ]))
+async fn handle_cmd_bridge_to_structure_beacon(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    use crate::services::inventory_fitting::fitting_cyno_portal as portal;
+    let (_, target_struct, target_struct_id) = validate_pharolux_beacon_target(ctx, session, args, true).await?;
+    let beacon = build_structure_beacon_record(ctx, &target_struct);
+    portal::bridge_to_resolved_beacon(ctx, session, beacon, Some(target_struct_id)).await
 }
 
-fn handle_cmd_group_jump_to_structure_beacon(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
-    let (target_struct, target_struct_id, dist_ly) = validate_beacon_and_distance(ctx, session, args)?;
+async fn handle_cmd_group_jump_to_structure_beacon(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    use crate::services::inventory_fitting::fitting_cyno_portal as portal;
+    let (cur_sys_id, target_struct, target_struct_id) = validate_pharolux_beacon_target(ctx, session, args, false).await?;
+    let dest_sys_id = target_struct.solar_system_id;
+    if dest_sys_id == cur_sys_id {
+        return Err(BridgeRpcError { code: "InvalidJumpDestination".into(), message: format!("Already in beacon system {dest_sys_id}") });
+    }
+    let beacon = build_structure_beacon_record(ctx, &target_struct);
+    let (outcome, jumped_count) = portal::group_jump_to_resolved_beacon(ctx, session, beacon, false).await?;
     Ok(PyRep::keyval([
         ("groupJumpActive", PyRep::Bool(true)),
-        ("solarSystemID", PyRep::Integer(target_struct.solar_system_id as i64)),
+        ("solarSystemID", PyRep::Integer(dest_sys_id as i64)),
         ("structureID", PyRep::Integer(target_struct_id)),
-        ("jumpedCount", PyRep::Integer(1)),
-        ("distanceLY", PyRep::Real(dist_ly)),
+        ("jumpedCount", PyRep::Integer(jumped_count as i64)),
+        ("beyonceBoundID", PyRep::Integer(outcome.beyonce_bound_id as i64)),
+        ("distanceLY", PyRep::Real(outcome.dist_ly)),
+        ("fuelTypeID", PyRep::Integer(i64::from(outcome.fuel_type))),
+        ("fuelQuantity", PyRep::Integer(outcome.fuel_qty)),
+        ("jumpFatigueMinutes", PyRep::Real(outcome.fatigue_min)),
+        ("jumpCooldownMinutes", PyRep::Real(outcome.cooldown_min)),
     ]))
 }
 
@@ -1241,6 +1293,15 @@ async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut Session
         .map_err(|e| BridgeRpcError { code: "DestinyCommandFailed".into(), message: e })?
         .ok_or_else(|| BridgeRpcError { code: "ShipNotInSpace".into(), message: "Active ship is not spawned in space".into() })?;
 
+    if cur_sys_handle
+        .get_combat_state(ship_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|cs| cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0)
+    {
+        return Err(BridgeRpcError { code: "CannotJumpWhileCloaked".into(), message: "Cannot jump while cloaked".into() });
+    }
     if matches!(current_ball.mode, MovementMode::Warp { .. }) {
         return Err(BridgeRpcError { code: "ShipInWarp".into(), message: "Cannot jump while in warp".into() });
     }
@@ -1267,6 +1328,15 @@ async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut Session
     if (31_000_000..32_000_000).contains(&cur_sys_id) || (31_000_000..32_000_000).contains(&target_sys_id) {
         return Err(BridgeRpcError { code: "JumpDriveForbiddenInWormholeSpace".into(), message: "Jump drive operations are prohibited in wormhole space".into() });
     }
+    if (32_000_000..=32_999_999).contains(&cur_sys_id) || (32_000_000..=32_999_999).contains(&target_sys_id) {
+        return Err(BridgeRpcError { code: "JumpDriveForbiddenInAbyssalSpace".into(), message: "Jump drive operations are prohibited in Abyssal Deadspace".into() });
+    }
+    if cur_sys_id == 30_100_000 || target_sys_id == 30_100_000 {
+        return Err(BridgeRpcError { code: "JumpDriveForbiddenInZarzakh".into(), message: "Jump drive operations are prohibited in Zarzakh".into() });
+    }
+    if ctx.sde.solar_systems.get(&target_sys_id).map(|s| s.region_id) == Some(10_000_070) {
+        return Err(BridgeRpcError { code: "CannotJumpToPochven".into(), message: format!("Region-wide cyno jammer prevents jump drives from entering Pochven system {target_sys_id}") });
+    }
     let target_sec = ctx.sde.solar_systems.get(&target_sys_id).map(|s| s.security_status).unwrap_or(0.0);
     if target_sec >= 0.45 {
         return Err(BridgeRpcError { code: "CannotJumpToHighSecBeacon".into(), message: format!("Cynosural beacon cannot operate in high-security system {target_sys_id}") });
@@ -1274,6 +1344,7 @@ async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut Session
 
     let beacon = crate::services::inventory_fitting::fitting_cyno_portal::live_beacon(ctx, target_char_id, 0, target_sys_id)
         .map_err(|e| BridgeRpcError { code: "NoActiveBeacon".into(), message: e.message })?;
+    crate::services::inventory_fitting::fitting_cyno_portal::check_cyno_jammer_for_beacon(ctx, &beacon)?;
 
     use super::space_nav_travel as nav;
     let db_type_id = ctx.db.get_item(ship_id).map(|i| i.type_id).unwrap_or(current_ball.type_id);

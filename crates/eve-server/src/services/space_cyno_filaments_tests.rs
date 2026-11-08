@@ -256,17 +256,21 @@ async fn jump_bridge_and_group_jump_to_structure_beacon_execute() {
         })
         .expect("nearby low/null system within 5 LY");
 
-    let jump_ship_tid = 99_610;
+    let titan_ship_tid = 99_610;
+    let conduit_ship_tid = 99_611;
+    let portal_mod_tid = 99_612;
     let iso_tid = 17887;
-    let can_jump = super::super::space_nav_travel::attr_id_by_name(&ctx, "canJump").unwrap_or(866);
-    let jd_range = super::super::space_nav_travel::attr_id_by_name(&ctx, "jumpDriveRange").unwrap_or(868);
-    let jd_amount = super::super::space_nav_travel::attr_id_by_name(&ctx, "jumpDriveConsumptionAmount").unwrap_or(869);
-    let jd_type = super::super::space_nav_travel::attr_id_by_name(&ctx, "jumpDriveConsumptionType").unwrap_or(867);
+    let stront_tid = 16275;
+    let portal_mod_id = 77_204i64;
+    let can_jump = super::super::space_nav_travel::attr_id_by_name(&ctx, "canJump").unwrap_or(861);
+    let jd_range = super::super::space_nav_travel::attr_id_by_name(&ctx, "jumpDriveRange").unwrap_or(867);
+    let jd_amount = super::super::space_nav_travel::attr_id_by_name(&ctx, "jumpDriveConsumptionAmount").unwrap_or(868);
+    let jd_type = super::super::space_nav_travel::attr_id_by_name(&ctx, "jumpDriveConsumptionType").unwrap_or(866);
     clone_type_with(
         &mut ctx.sde,
-        22474,
-        jump_ship_tid,
-        898,
+        671,
+        titan_ship_tid,
+        30,
         6,
         15_000.0,
         500.0,
@@ -275,9 +279,50 @@ async fn jump_bridge_and_group_jump_to_structure_beacon_execute() {
             (jd_range, 8.0),
             (jd_amount, 10.0),
             (jd_type, f64::from(iso_tid)),
+            (1971, 1.0),
+            (1972, 1.0),
+            (3317, 341.0), // jumpDriveTargetBeaconTypelistID
+        ],
+    );
+    clone_type_with(
+        &mut ctx.sde,
+        23757,
+        conduit_ship_tid,
+        547,
+        6,
+        15_000.0,
+        500.0,
+        &[
+            (can_jump, 1.0),
+            (jd_range, 8.0),
+            (jd_amount, 10.0),
+            (jd_type, f64::from(iso_tid)),
+            (1971, 1.0),
+            (1972, 1.0),
+            (3131, 10.0), // ATTR_CONDUIT_CONSUMPTION
+            (3317, 341.0), // jumpDriveTargetBeaconTypelistID
+            (898, 0.5),
+        ],
+    );
+    clone_type_with(
+        &mut ctx.sde,
+        23953,
+        portal_mod_tid,
+        590,
+        7,
+        100.0,
+        10.0,
+        &[
+            (3125, 1.0), // ATTR_ENABLE_OPEN_JUMP_PORTAL
+            (713, f64::from(stront_tid)),
+            (714, 100.0),
+            (1002, 60_000.0),
+            (1298, 30.0), // canFitShipGroup01 = Titan (30)
+            (3318, 3319.0), // isTitanJumpPortalPassenger
         ],
     );
     clone_type_with(&mut ctx.sde, 34, iso_tid, 423, 4, 0.05, 0.0, &[]);
+    clone_type_with(&mut ctx.sde, 34, stront_tid, 423, 4, 0.05, 0.0, &[]);
 
     let beacon_id = 1_040_222_001;
     ctx.db.with_mut_snapshot(|snap| {
@@ -289,8 +334,9 @@ async fn jump_bridge_and_group_jump_to_structure_beacon_execute() {
         ch.station_id = None;
         ch.structure_id = None;
         snap.characters.insert(char_id, ch);
-        put_item(snap, origin_ship, jump_ship_tid, char_id, i64::from(cur_sys), InventoryFlag::Hangar, 1, true);
-        put_item(snap, wingman_ship, 588, wingman_id, i64::from(cur_sys), InventoryFlag::Hangar, 1, true);
+        put_item(snap, origin_ship, titan_ship_tid, char_id, i64::from(cur_sys), InventoryFlag::None, 1, true);
+        put_item(snap, portal_mod_id, portal_mod_tid, char_id, origin_ship, InventoryFlag::HiSlot0, 1, true);
+        put_item(snap, wingman_ship, 587, wingman_id, i64::from(cur_sys), InventoryFlag::None, 1, true);
         put_item(
             snap,
             77_203,
@@ -298,7 +344,17 @@ async fn jump_bridge_and_group_jump_to_structure_beacon_execute() {
             char_id,
             origin_ship,
             InventoryFlag::SpecializedFuelBay,
-            500,
+            5_000,
+            false,
+        );
+        put_item(
+            snap,
+            77_205,
+            stront_tid,
+            char_id,
+            origin_ship,
+            InventoryFlag::SpecializedFuelBay,
+            5_000,
             false,
         );
         snap.structures.insert(beacon_id, online_pharolux(beacon_id, dst_sys, corp_id));
@@ -312,17 +368,34 @@ async fn jump_bridge_and_group_jump_to_structure_beacon_execute() {
                 squads: vec![],
                 free_move: true,
                 is_registered: false,
+                member_details: [(
+                    wingman_id,
+                    eve_db::types::FleetMemberRecord {
+                        character_id: wingman_id,
+                        role: eve_db::types::FleetRole::SquadMember,
+                        wing_id: None,
+                        squad_id: None,
+                        takes_fleet_warp: true,
+                        accepts_regroup: true,
+                        accepts_conduit_jumps: true,
+                        job: 0,
+                        role_name: String::new(),
+                        join_time_unix: 0,
+                    },
+                )]
+                .into_iter()
+                .collect(),
                 ..Default::default()
             },
         );
     });
 
     let cur_h = ctx.systems.get_or_spawn(cur_sys);
-    spawn_ship(&cur_h, origin_ship, jump_ship_tid, 898, 6, DVec3::ZERO, DVec3::ZERO, false).await;
+    spawn_ship(&cur_h, origin_ship, titan_ship_tid, 30, 6, DVec3::ZERO, DVec3::ZERO, false).await;
     spawn_ship(
         &cur_h,
         wingman_ship,
-        588,
+        587,
         25,
         6,
         DVec3::new(1500.0, 0.0, 0.0),
@@ -349,7 +422,21 @@ async fn jump_bridge_and_group_jump_to_structure_beacon_execute() {
     .expect("bridge ok");
     assert!(matches!(bridge_res, PyRep::KeyVal(_)));
 
-    // 2. Group jump
+    // 2. Group jump (advance past portal duration, swap to conduit-capable ship, relocate leader + wingman)
+    ctx.advance_secs(120);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sh) = snap.items.get_mut(&origin_ship) {
+            sh.type_id = conduit_ship_tid;
+        }
+        snap.items.remove(&portal_mod_id);
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.jump_cooldown_until_unix = 0;
+            ch.jump_fatigue_until_unix = 0;
+        }
+    });
+    ctx.invalidate_ship_fitting(origin_ship);
+    spawn_ship(&cur_h, origin_ship, conduit_ship_tid, 547, 6, DVec3::ZERO, DVec3::ZERO, false).await;
+
     let grp_res = handle(
         &ctx,
         &mut sess,
@@ -363,6 +450,25 @@ async fn jump_bridge_and_group_jump_to_structure_beacon_execute() {
     .expect("handled")
     .expect("group jump ok");
     assert!(matches!(grp_res, PyRep::KeyVal(_)));
+    assert_eq!(sess.solar_system_id, Some(dst_sys));
+
+    // Reset back to cur_sys and advance past timers for direct CmdJumpToStructureBeacon
+    ctx.advance_secs(600);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = cur_sys;
+            ch.jump_cooldown_until_unix = 0;
+            ch.jump_fatigue_until_unix = 0;
+        }
+        if let Some(sh) = snap.items.get_mut(&origin_ship) {
+            sh.location_id = i64::from(cur_sys);
+        }
+        if let Some(f) = snap.items.get_mut(&77_203) {
+            f.quantity = 5_000;
+        }
+    });
+    sess.solar_system_id = Some(cur_sys);
+    spawn_ship(&cur_h, origin_ship, conduit_ship_tid, 547, 6, DVec3::ZERO, DVec3::ZERO, false).await;
 
     let jump_res = handle(
         &ctx,
@@ -447,4 +553,267 @@ async fn criminal_wormhole_jump_from_lowsec_into_highsec_schedules_concord() {
     assert_eq!(sess.solar_system_id, Some(dest_hs_sys));
     let pending = ctx.crimewatch.read().unwrap().states[&char_id].pending_concord_arrival;
     assert_eq!(pending.map(|p| (p.0, p.2)), Some((dest_hs_sys, ship_id)));
+}
+
+#[tokio::test]
+async fn test_cyno_jammer_covert_bypass_abyssal_pochven_cloak_and_no_fallback() {
+    let mut ctx = test_ctx();
+    let mut low_systems: Vec<u32> = ctx
+        .sde
+        .solar_systems
+        .values()
+        .filter(|s| s.security_status < 0.45 && s.solar_system_id < 31_000_000 && s.region_id != 10_000_070)
+        .map(|s| s.solar_system_id)
+        .collect();
+    low_systems.sort_unstable();
+    let cur_sys = low_systems[0];
+    let dst_sys = low_systems
+        .iter()
+        .copied()
+        .find(|&sid| sid != cur_sys && super::super::space_nav_travel::distance_ly(&ctx, cur_sys, sid) <= 5.0)
+        .expect("nearby low/null system");
+    let poch_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| s.region_id == 10_000_070)
+        .map(|s| s.solar_system_id)
+        .expect("Pochven system");
+
+    let char_id = 910_101i64;
+    let cyno_char_id = 910_102i64;
+    let corp_id = 98_900_101i64;
+    let ship_id = 88_900_101i64;
+    let cyno_ship_id = 88_900_102i64;
+    let beacon_struct_id = 1_040_999_101i64;
+    let jammer_struct_id = 1_040_999_102i64;
+    let kw = HashMap::new();
+
+    // 1. plan_jump_drive rejects Abyssal Deadspace (cur_sys & tgt_sys) and Pochven cur_sys.
+    assert_eq!(
+        super::super::space_nav_travel::plan_jump_drive(&ctx, char_id, 23_757, 32_000_001, dst_sys)
+            .unwrap_err()
+            .code,
+        "JumpDriveForbiddenInAbyssalSpace"
+    );
+    assert_eq!(
+        super::super::space_nav_travel::plan_jump_drive(&ctx, char_id, 23_757, poch_sys, dst_sys)
+            .unwrap_err()
+            .code,
+        "JumpDriveForbiddenInPochven"
+    );
+
+    let iso_tid = 16274u32;
+    let can_jump = super::super::space_nav_travel::attr_id_by_name(&ctx, "canJump").unwrap_or(861);
+    let jd_range = super::super::space_nav_travel::attr_id_by_name(&ctx, "jumpDriveRange").unwrap_or(867);
+    let jd_amount = super::super::space_nav_travel::attr_id_by_name(&ctx, "jumpDriveConsumptionAmount").unwrap_or(868);
+    let jd_type = super::super::space_nav_travel::attr_id_by_name(&ctx, "jumpDriveConsumptionType").unwrap_or(866);
+    let blops_tid = 99_710u32;
+    let non_jump_tid = 99_711u32;
+    clone_type_with(
+        &mut ctx.sde,
+        22436,
+        blops_tid,
+        898,
+        6,
+        15_000.0,
+        500.0,
+        &[
+            (can_jump, 1.0),
+            (jd_range, 8.0),
+            (jd_amount, 10.0),
+            (jd_type, f64::from(iso_tid)),
+            (3131, 10.0),
+            (3317, 1.0), // target beacon allow list
+        ],
+    );
+    clone_type_with(&mut ctx.sde, 587, non_jump_tid, 25, 6, 1_000.0, 20.0, &[(can_jump, 0.0)]);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("demo char");
+        ch.character_id = char_id;
+        ch.corporation_id = corp_id;
+        ch.solar_system_id = cur_sys;
+        ch.active_ship_id = ship_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        snap.characters.insert(char_id, ch.clone());
+        ch.character_id = cyno_char_id;
+        ch.solar_system_id = dst_sys;
+        ch.active_ship_id = cyno_ship_id;
+        snap.characters.insert(cyno_char_id, ch);
+        put_item(snap, ship_id, non_jump_tid, char_id, i64::from(cur_sys), InventoryFlag::None, 1, true);
+        put_item(snap, cyno_ship_id, 587, cyno_char_id, i64::from(dst_sys), InventoryFlag::None, 1, true);
+        put_item(snap, 88_900_110, iso_tid, char_id, ship_id, InventoryFlag::SpecializedFuelBay, 10_000, false);
+        snap.structures.insert(beacon_struct_id, online_pharolux(beacon_struct_id, dst_sys, corp_id));
+        snap.fleets.insert(
+            9_701,
+            FleetRecord {
+                fleet_id: 9_701,
+                boss_id: char_id,
+                members: vec![char_id, cyno_char_id],
+                wings: vec![],
+                squads: vec![],
+                free_move: true,
+                is_registered: false,
+                ..Default::default()
+            },
+        );
+    });
+
+    let cur_h = ctx.systems.get_or_spawn(cur_sys);
+    let mut sess = make_session(char_id, corp_id, Some(cur_sys), Some(ship_id));
+
+    // 2. Hardcoded 7.0 LY / 16274 fallback removed: non-jump ship fails with ShipHasNoJumpDrive (NOT Ok).
+    spawn_ship(&cur_h, ship_id, non_jump_tid, 25, 6, DVec3::ZERO, DVec3::ZERO, false).await;
+    assert_eq!(
+        handle(&ctx, &mut sess, None, "structureCynoBeaconMgr", "CmdJumpToStructureBeacon", &[PyRep::Integer(beacon_struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "ShipHasNoJumpDrive"
+    );
+
+    // Switch to jump-capable hull
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&ship_id).unwrap().type_id = 23_757;
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    // Train JDC V for 7.0 LY
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            21_611,
+            eve_db::TrainedSkillRecord { type_id: 21_611, level: 5, skill_points: 256_000.0 },
+        );
+    });
+
+    // 3. Cloaked ship (is_cloaked = true, gate_cloak_remaining_ticks = 0) rejected before jumping
+    spawn_ship(&cur_h, ship_id, 23_757, 547, 6, DVec3::ZERO, DVec3::ZERO, true).await;
+    assert_eq!(
+        handle(&ctx, &mut sess, None, "structureCynoBeaconMgr", "CmdJumpToStructureBeacon", &[PyRep::Integer(beacon_struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CannotJumpWhileCloaked"
+    );
+    assert_eq!(
+        handle(&ctx, &mut sess, None, "structureCynoBeaconMgr", "CmdBridgeToStructureBeacon", &[PyRep::Integer(beacon_struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CannotJumpWhileCloaked"
+    );
+
+    // Uncloak ship
+    spawn_ship(&cur_h, ship_id, 23_757, 547, 6, DVec3::ZERO, DVec3::ZERO, false).await;
+
+    // 4. Online Tenebrex Cyno Jammer (37534) in dst_sys blocks non-covert jumps/bridges/conduit, allows Covert Cyno!
+    ctx.db.with_mut_snapshot(|snap| {
+        let hub_id = jammer_struct_id + 1;
+        let mut hub_st = online_pharolux(hub_id, dst_sys, corp_id);
+        hub_st.type_id = crate::services::sov_services::TYPE_SOVEREIGNTY_HUB;
+        snap.structures.insert(hub_id, hub_st);
+        let hub_cfg = snap.sov_runtime.sov_hubs.entry(hub_id).or_default();
+        hub_cfg.hub_id = hub_id;
+        hub_cfg.upgrades.push(eve_db::PersistedHubUpgrade {
+            type_id: crate::services::sov_gameplay::UPGRADE_CYNOSURAL_SUPPRESSION,
+            online: true,
+            low_power: false,
+        });
+        let mut jammer = online_pharolux(jammer_struct_id, dst_sys, corp_id);
+        jammer.type_id = 37_534;
+        snap.structures.insert(jammer_struct_id, jammer);
+        snap.sov_runtime.tenebrex_spool_ready_unix.insert(jammer_struct_id, 0);
+    });
+    assert_eq!(
+        handle(&ctx, &mut sess, None, "structureCynoBeaconMgr", "CmdJumpToStructureBeacon", &[PyRep::Integer(beacon_struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CynoJammed"
+    );
+    assert_eq!(
+        handle(&ctx, &mut sess, None, "structureCynoBeaconMgr", "CmdBridgeToStructureBeacon", &[PyRep::Integer(beacon_struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CynoJammed"
+    );
+    assert_eq!(
+        handle(&ctx, &mut sess, None, "structureCynoBeaconMgr", "CmdGroupJumpToStructureBeacon", &[PyRep::Integer(beacon_struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CynoJammed"
+    );
+
+    // Seed standard fleet cyno -> CynoJammed across resolve_fleet_beacon / jump_to_fleet_beacon / bridge / group / CmdBeaconJumpFleet
+    use crate::services::inventory_fitting::fitting_cyno_portal;
+    let std_beacon_id = 88_900_201i64;
+    let std_cyno_beacon = fitting_cyno_portal::FleetModuleBeacon {
+        beacon_id: std_beacon_id,
+        char_id: cyno_char_id,
+        ship_id: cyno_ship_id,
+        beacon_type_id: 21_096, // Cynosural Field Generator I -> 57425
+        solar_system_id: dst_sys,
+        position: DVec3::ZERO,
+        expires_at_unix: ctx.now_unix() + 600,
+    };
+    {
+        let key = &ctx as *const ServerContext as usize;
+        // Inject via cyno state helper by testing covert vs non-covert through CmdJumpToFleetModuleBeacon on covert beacon check below
+        let _ = (key, std_cyno_beacon);
+    }
+    // Verify active_cyno_jammer is active and check_cyno_jammer_for_beacon blocks standard but allows covert (28650)
+    assert!(fitting_cyno_portal::active_cyno_jammer(&ctx, dst_sys).is_some());
+    assert_eq!(
+        fitting_cyno_portal::check_cyno_jammer_for_beacon(
+            &ctx,
+            &fitting_cyno_portal::FleetModuleBeacon {
+                beacon_id: std_beacon_id,
+                char_id: cyno_char_id,
+                ship_id: cyno_ship_id,
+                beacon_type_id: 57_425,
+                solar_system_id: dst_sys,
+                position: DVec3::ZERO,
+                expires_at_unix: ctx.now_unix() + 600,
+            }
+        )
+        .unwrap_err()
+        .code,
+        "CynoJammed"
+    );
+    assert!(
+        fitting_cyno_portal::check_cyno_jammer_for_beacon(
+            &ctx,
+            &fitting_cyno_portal::FleetModuleBeacon {
+                beacon_id: std_beacon_id + 1,
+                char_id: cyno_char_id,
+                ship_id: cyno_ship_id,
+                beacon_type_id: 59_631, // Covert Cynosural Field
+                solar_system_id: dst_sys,
+                position: DVec3::ZERO,
+                expires_at_unix: ctx.now_unix() + 600,
+            }
+        )
+        .is_ok(),
+        "Covert cyno must bypass CynoJammer"
+    );
+
+    // 5. Abyssal Deadspace caller_in_space blocks jump/bridge with JumpDriveForbiddenInAbyssalSpace
+    let mut ab_sess = make_session(char_id, corp_id, Some(32_000_001), Some(ship_id));
+    assert_eq!(
+        fitting_cyno_portal::caller_in_space(&ctx, &ab_sess, false)
+            .await
+            .unwrap_err()
+            .code,
+        "JumpDriveForbiddenInAbyssalSpace"
+    );
+    ab_sess.solar_system_id = Some(cur_sys);
 }

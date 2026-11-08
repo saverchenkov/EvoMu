@@ -156,6 +156,12 @@ pub(super) async fn bridge_to_fleet_beacon(
             format!("Jump drives cannot target wormhole system {target_sys}"),
         ));
     }
+    if (32_000_000..=32_999_999).contains(&target_sys) {
+        return Err(err(
+            "JumpDriveForbiddenInAbyssalSpace",
+            format!("Jump drives cannot target Abyssal Deadspace system {target_sys}"),
+        ));
+    }
     let (char_id, ship_id, sys_id, _) = caller_in_space(ctx, session, true).await?;
     if sys_id == 30_100_000 || target_sys == 30_100_000 {
         return Err(err("JumpDriveForbiddenInZarzakh", "Jump portals cannot operate in or into Zarzakh"));
@@ -177,6 +183,21 @@ pub(super) async fn bridge_to_fleet_beacon(
         }
     }
     let beacon = resolve_fleet_beacon(ctx, char_id, cyno_char, beacon_id, target_sys, is_deployable).await?;
+    bridge_to_resolved_beacon(ctx, session, beacon, None).await
+}
+
+/// Opens an active jump portal (`ActiveJumpBridge`) toward an already-resolved fleet, deployable,
+/// or Pharolux structure beacon.
+pub(crate) async fn bridge_to_resolved_beacon(
+    ctx: &ServerContext,
+    session: &SessionState,
+    beacon: FleetModuleBeacon,
+    structure_id_opt: Option<i64>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (char_id, ship_id, sys_id, _) = caller_in_space(ctx, session, true).await?;
+    if sys_id == 30_100_000 || beacon.solar_system_id == 30_100_000 {
+        return Err(err("JumpDriveForbiddenInZarzakh", "Jump portals cannot operate in or into Zarzakh"));
+    }
     let dest_sec = ctx
         .sde
         .solar_systems
@@ -195,8 +216,11 @@ pub(super) async fn bridge_to_fleet_beacon(
             format!("Jump drives cannot target wormhole system {}", beacon.solar_system_id),
         ));
     }
-    if beacon.solar_system_id == 30_100_000 {
-        return Err(err("JumpDriveForbiddenInZarzakh", "Jump portals cannot target Zarzakh"));
+    if (32_000_000..=32_999_999).contains(&beacon.solar_system_id) {
+        return Err(err(
+            "JumpDriveForbiddenInAbyssalSpace",
+            format!("Jump portals cannot target Abyssal Deadspace system {}", beacon.solar_system_id),
+        ));
     }
     if ctx.sde.solar_systems.get(&beacon.solar_system_id).map(|s| s.region_id) == Some(10_000_070) {
         return Err(err(
@@ -204,6 +228,7 @@ pub(super) async fn bridge_to_fleet_beacon(
             format!("Region-wide cyno jammer prevents bridging into Pochven system {}", beacon.solar_system_id),
         ));
     }
+    check_cyno_jammer_for_beacon(ctx, &beacon)?;
     let (ship_type_id, portal) = ctx.db.with_snapshot(|s| {
         let st = s.items.get(&ship_id).map(|i| i.type_id).unwrap_or(0);
         let portal = s
@@ -358,7 +383,7 @@ pub(super) async fn bridge_to_fleet_beacon(
             ],
         );
     }
-    Ok(PyRep::keyval([
+    let mut entries = vec![
         ("shipID", PyRep::Integer(ship_id)),
         ("moduleID", PyRep::Integer(portal_id)),
         ("beaconID", PyRep::Integer(beacon.beacon_id)),
@@ -369,7 +394,12 @@ pub(super) async fn bridge_to_fleet_beacon(
         ("activationConsumptionTypeID", PyRep::Integer(act_type as i64)),
         ("activationConsumptionQuantity", PyRep::Integer(if act_type != 0 { act_qty } else { 0 })),
         ("durationSeconds", PyRep::Real(duration_s)),
-    ]))
+        ("bridgeActive", PyRep::Bool(true)),
+    ];
+    if let Some(sid) = structure_id_opt {
+        entries.push(("structureID", PyRep::Integer(sid)));
+    }
+    Ok(PyRep::keyval(entries))
 }
 
 /// `beyonce.CmdGroupJumpToFleetModuleBeacon` / `beyonce.CmdGroupJumpToFleetDeployableBeacon`: conduit jump leader + nearby fleet members.
@@ -389,6 +419,12 @@ pub(super) async fn group_jump_to_fleet_beacon(
             format!("Jump drives cannot target wormhole system {target_sys}"),
         ));
     }
+    if (32_000_000..=32_999_999).contains(&target_sys) {
+        return Err(err(
+            "JumpDriveForbiddenInAbyssalSpace",
+            format!("Jump drives cannot target Abyssal Deadspace system {target_sys}"),
+        ));
+    }
     if target_sys != 0
         && (!ctx.sde.solar_systems.contains_key(&target_sys)
             || Some(target_sys) == session.solar_system_id)
@@ -398,7 +434,7 @@ pub(super) async fn group_jump_to_fleet_beacon(
             format!("Invalid jump destination solar system {target_sys}"),
         ));
     }
-    let (char_id, ship_id, sys_id, caller_ball) = caller_in_space(ctx, session, false).await?;
+    let (char_id, ship_id, sys_id, _) = caller_in_space(ctx, session, false).await?;
     if sys_id == 30_100_000 || target_sys == 30_100_000 {
         return Err(err("JumpDriveForbiddenInZarzakh", "Conduit jumps cannot operate in or into Zarzakh"));
     }
@@ -420,6 +456,31 @@ pub(super) async fn group_jump_to_fleet_beacon(
     }
     let (beacon, landed_at_star) =
         resolve_fleet_beacon_or_destroyed(ctx, char_id, cyno_char, beacon_id, target_sys, is_deployable).await?;
+    group_jump_to_resolved_beacon(ctx, session, beacon, landed_at_star)
+        .await
+        .map(|(outcome, _)| outcome)
+}
+
+/// Executes conduit jump for the caller + eligible nearby fleet members toward an already-resolved
+/// fleet, deployable, or Pharolux structure beacon. Returns `(JumpOutcome, total_jumped_count)`.
+pub(crate) async fn group_jump_to_resolved_beacon(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    beacon: FleetModuleBeacon,
+    landed_at_star: bool,
+) -> Result<(JumpOutcome, usize), BridgeRpcError> {
+    let (char_id, ship_id, sys_id, caller_ball) = caller_in_space(ctx, session, false).await?;
+    if !ctx.sde.solar_systems.contains_key(&beacon.solar_system_id)
+        || beacon.solar_system_id == sys_id
+    {
+        return Err(err(
+            "InvalidJumpDestination",
+            format!("Invalid jump destination solar system {}", beacon.solar_system_id),
+        ));
+    }
+    if sys_id == 30_100_000 || beacon.solar_system_id == 30_100_000 {
+        return Err(err("JumpDriveForbiddenInZarzakh", "Conduit jumps cannot operate in or into Zarzakh"));
+    }
     let dest_sec = ctx
         .sde
         .solar_systems
@@ -438,8 +499,11 @@ pub(super) async fn group_jump_to_fleet_beacon(
             format!("Jump drives cannot target wormhole system {}", beacon.solar_system_id),
         ));
     }
-    if beacon.solar_system_id == 30_100_000 {
-        return Err(err("JumpDriveForbiddenInZarzakh", "Conduit jumps cannot target Zarzakh"));
+    if (32_000_000..=32_999_999).contains(&beacon.solar_system_id) {
+        return Err(err(
+            "JumpDriveForbiddenInAbyssalSpace",
+            format!("Conduit jumps cannot target Abyssal Deadspace system {}", beacon.solar_system_id),
+        ));
     }
     if ctx.sde.solar_systems.get(&beacon.solar_system_id).map(|s| s.region_id) == Some(10_000_070) {
         return Err(err(
@@ -447,6 +511,7 @@ pub(super) async fn group_jump_to_fleet_beacon(
             format!("Region-wide cyno jammer prevents conduit jumps into Pochven system {}", beacon.solar_system_id),
         ));
     }
+    check_cyno_jammer_for_beacon(ctx, &beacon)?;
     let ship_type_id = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0);
     let ship_type = ctx.sde.types.get(&ship_type_id).ok_or_else(|| err("ShipNotFound", "Ship type unknown"))?;
     if ship_type.group_id == 30 {
@@ -740,14 +805,18 @@ pub(super) async fn group_jump_to_fleet_beacon(
             let _ = dest_sys.set_combat_state(ship_id, dcs).await;
         }
     }
-    Ok(JumpOutcome {
-        dist_ly: dist,
-        fuel_type,
-        fuel_qty,
-        cooldown_min,
-        fatigue_min,
-        beyonce_bound_id: bound,
-    })
+    let total_jumped = 1 + jumped_passengers.len();
+    Ok((
+        JumpOutcome {
+            dist_ly: dist,
+            fuel_type,
+            fuel_qty,
+            cooldown_min,
+            fatigue_min,
+            beyonce_bound_id: bound,
+        },
+        total_jumped,
+    ))
 }
 
 /// `beyonce.CmdJumpThroughFleet(otherCharID, otherShipID, beaconID?, toSolarsystemID?)`: passenger jumps through an open portal.
@@ -813,30 +882,42 @@ pub(super) async fn jump_through_fleet(
         ));
     }
     let mut landed_at_star = false;
-    let beacon = match live_beacon(
-        ctx,
-        bridge.beacon.char_id,
-        bridge.beacon.beacon_id,
-        bridge.beacon.solar_system_id,
-    ) {
-        Ok(b) => b,
-        Err(_) if bridge.beacon.ship_id == 0 => bridge.beacon.clone(),
-        Err(e) => {
-            let destroyed_b = cyno_state()
-                .read()
-                .unwrap_or_else(|p| p.into_inner())
-                .destroyed_beacons
-                .get(&(ctx_key(ctx), bridge.beacon.ship_id))
-                .cloned();
-            if let Some(db_b) = destroyed_b.filter(|b| {
-                b.beacon_id == bridge.beacon.beacon_id
-                    && b.solar_system_id == bridge.beacon.solar_system_id
-                    && b.expires_at_unix > now
-            }) {
-                landed_at_star = true;
-                db_b
-            } else {
-                return Err(e);
+    let beacon = if bridge.beacon.beacon_type_id == 35_840 {
+        ctx.db.with_snapshot(|snap| {
+            crate::services::space_destiny::space_cyno_filaments::validate_structure_cyno_beacon(
+                snap,
+                char_id,
+                bridge.beacon.beacon_id,
+                Some(bridge.beacon.solar_system_id),
+            )
+        })?;
+        bridge.beacon.clone()
+    } else {
+        match live_beacon(
+            ctx,
+            bridge.beacon.char_id,
+            bridge.beacon.beacon_id,
+            bridge.beacon.solar_system_id,
+        ) {
+            Ok(b) => b,
+            Err(_) if bridge.beacon.ship_id == 0 => bridge.beacon.clone(),
+            Err(e) => {
+                let destroyed_b = cyno_state()
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .destroyed_beacons
+                    .get(&(ctx_key(ctx), bridge.beacon.ship_id))
+                    .cloned();
+                if let Some(db_b) = destroyed_b.filter(|b| {
+                    b.beacon_id == bridge.beacon.beacon_id
+                        && b.solar_system_id == bridge.beacon.solar_system_id
+                        && b.expires_at_unix > now
+                }) {
+                    landed_at_star = true;
+                    db_b
+                } else {
+                    return Err(e);
+                }
             }
         }
     };
@@ -846,6 +927,22 @@ pub(super) async fn jump_through_fleet(
             format!("Jump drives cannot target wormhole system {}", beacon.solar_system_id),
         ));
     }
+    if (32_000_000..=32_999_999).contains(&beacon.solar_system_id) {
+        return Err(err(
+            "JumpDriveForbiddenInAbyssalSpace",
+            format!("Jump portals cannot target Abyssal Deadspace system {}", beacon.solar_system_id),
+        ));
+    }
+    if beacon.solar_system_id == 30_100_000 {
+        return Err(err("JumpDriveForbiddenInZarzakh", "Jump portals cannot target Zarzakh"));
+    }
+    if ctx.sde.solar_systems.get(&beacon.solar_system_id).map(|s| s.region_id) == Some(10_000_070) {
+        return Err(err(
+            "CannotJumpToPochven",
+            format!("Region-wide cyno jammer prevents bridging into Pochven system {}", beacon.solar_system_id),
+        ));
+    }
+    check_cyno_jammer_for_beacon(ctx, &beacon)?;
     let ship_type_id = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0);
     let ship_type = ctx.sde.types.get(&ship_type_id).ok_or_else(|| err("ShipNotFound", "Ship type unknown"))?;
     let portal_type = ctx

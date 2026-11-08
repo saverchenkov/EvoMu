@@ -355,6 +355,11 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
             ch.jump_fatigue_until_unix = 0;
             ch.jump_fatigue_minutes = 0.0;
         }
+        snap.skills.entry(90_000_001).or_default().insert(21611, eve_db::TrainedSkillRecord {
+            type_id: 21611,
+            level: 5,
+            skill_points: 1_280_000.0,
+        });
         snap.structures.insert(
             jump_beacon_id,
             UpwellStructureRecord {
@@ -383,7 +388,7 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
                 owner_id: 90_000_001,
                 location_id: jump_ship_id,
                 flag: InventoryFlag::SpecializedFuelBay,
-                quantity: 5_000,
+                quantity: 20_000,
                 singleton: false,
                 ..Default::default()
             },
