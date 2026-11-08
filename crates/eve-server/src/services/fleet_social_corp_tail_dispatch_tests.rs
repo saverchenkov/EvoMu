@@ -164,6 +164,19 @@ fn corp_gov_tail_settings_assets_and_applications() {
         .unwrap()
         .unwrap();
     assert!(matches!(divs, PyRep::KeyVal(_)));
+    let deny_divs = handle_corp_gov_tail(
+        &ctx,
+        &mut session,
+        svc_reg,
+        "GetDivisionNames",
+        &[PyRep::Integer(corp_id + 99)],
+        corp_id,
+        char_id,
+        1000,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(deny_divs.code, "CrpAccessDenied");
 
     let attrs = handle_corp_gov_tail(&ctx, &mut session, svc_reg, "UpdateAttributes", &[], corp_id, char_id, 1000)
         .unwrap()

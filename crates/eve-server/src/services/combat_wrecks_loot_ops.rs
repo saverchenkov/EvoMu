@@ -343,12 +343,126 @@ pub(super) async fn handle_loot_all(
     ]))
 }
 
+pub(crate) fn authorize_killmail_read(
+    session: &SessionState,
+    char_id: i64,
+    snap: &eve_db::WorldStateSnapshot,
+    expected_hash: &str,
+    requested_hash: Option<&str>,
+    kill_id: i64,
+    victim_char_id: i64,
+    victim_corp_id: i64,
+    victim_ally_id: Option<i64>,
+    attackers: &[(i64, i64, Option<i64>)],
+    kill_time_unix: u64,
+) -> Result<(), BridgeRpcError> {
+    if let Some(req_h) = requested_hash.filter(|h| !h.is_empty()) {
+        if req_h != expected_hash {
+            return Err(BridgeRpcError {
+                code: "InvalidKillmailHash".into(),
+                message: format!("Killmail hash mismatch for kill {kill_id}"),
+            });
+        }
+        return Ok(());
+    }
+    if session.has_gm_role() {
+        return Ok(());
+    }
+    if char_id > 0 && (victim_char_id == char_id || attackers.iter().any(|&(c, _, _)| c == char_id)) {
+        return Ok(());
+    }
+    let is_npc_corp = |cid: i64| (1_000_000..2_000_000).contains(&cid);
+    let caller_corp = session
+        .corporation_id
+        .filter(|&c| c > 0)
+        .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id))
+        .unwrap_or(0);
+    let resolve_corp = |cid: i64, explicit: i64| {
+        if explicit > 0 {
+            explicit
+        } else {
+            snap.characters.get(&cid).map(|c| c.corporation_id).unwrap_or(0)
+        }
+    };
+    let vic_corp = resolve_corp(victim_char_id, victim_corp_id);
+    let att_corps: Vec<i64> = attackers
+        .iter()
+        .map(|&(ac, acorp, _)| resolve_corp(ac, acorp))
+        .collect();
+    if caller_corp > 0
+        && !is_npc_corp(caller_corp)
+        && (caller_corp == vic_corp || att_corps.contains(&caller_corp))
+    {
+        return Ok(());
+    }
+    let caller_ally = session
+        .alliance_id
+        .filter(|&a| a > 0)
+        .or_else(|| snap.characters.get(&char_id).and_then(|c| c.alliance_id))
+        .or_else(|| {
+            (caller_corp > 0)
+                .then(|| snap.corporations.get(&caller_corp).and_then(|c| c.alliance_id))
+                .flatten()
+        })
+        .filter(|&a| a > 0);
+    if let Some(c_ally) = caller_ally {
+        let resolve_ally = |explicit_ally: Option<i64>, corp_id: i64| {
+            explicit_ally
+                .filter(|&a| a > 0)
+                .or_else(|| snap.corporations.get(&corp_id).and_then(|c| c.alliance_id))
+        };
+        if resolve_ally(victim_ally_id, vic_corp) == Some(c_ally)
+            || attackers
+                .iter()
+                .zip(att_corps.iter())
+                .any(|(&(_, _, aally), &rc)| resolve_ally(aally, rc) == Some(c_ally))
+        {
+            return Ok(());
+        }
+    }
+    if caller_corp > 0 && !is_npc_corp(caller_corp) {
+        for (war_id, w) in &snap.wars {
+            let meta = snap.war_state.wars.get(war_id);
+            if kill_time_unix > 0 {
+                if kill_time_unix < w.started_unix {
+                    continue;
+                }
+                if meta.and_then(|m| m.finish_at_unix).is_some_and(|fin| kill_time_unix > fin) {
+                    continue;
+                }
+            }
+            let (agg, def) = (w.aggressor_corp_id, w.defender_corp_id);
+            let allies: Vec<i64> = snap
+                .war_state
+                .negotiations
+                .iter()
+                .filter(|n| {
+                    n.war_id == *war_id
+                        && n.kind == eve_db::PersistedNegKind::Ally
+                        && n.status == "Accepted"
+                })
+                .map(|n| n.from_corp)
+                .collect();
+            let is_def_side = |cid: i64| cid == def || allies.contains(&cid);
+            let is_war_kill = (vic_corp == agg && att_corps.iter().any(|&c| is_def_side(c)))
+                || (is_def_side(vic_corp) && att_corps.contains(&agg));
+            if is_war_kill && (caller_corp == agg || is_def_side(caller_corp)) {
+                return Ok(());
+            }
+        }
+    }
+    Err(BridgeRpcError {
+        code: "KillmailAccessDenied".into(),
+        message: format!("Not authorized to view killmail {kill_id} without a valid killmail hash"),
+    })
+}
+
 pub(super) fn handle_get_killmail(
     ctx: &ServerContext,
     session: &SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let _ = ServerContext::require_character(session)?;
+    let (_, char_id) = ServerContext::require_character(session)?;
     let Some(kill_id) = args.first().and_then(|a| a.as_i64()) else {
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
@@ -359,14 +473,26 @@ pub(super) fn handle_get_killmail(
 
     let detailed_opt = with_combat_runtime(ctx, |rt| rt.detailed_killmails.get(&kill_id).cloned());
     if let Some(dkm) = detailed_opt {
-        if let Some(req_h) = requested_hash {
-            if !req_h.is_empty() && req_h != dkm.killmail_hash {
-                return Err(BridgeRpcError {
-                    code: "InvalidKillmailHash".into(),
-                    message: format!("Killmail hash mismatch for kill {kill_id}"),
-                });
-            }
-        }
+        let attackers_ref: Vec<(i64, i64, Option<i64>)> = dkm
+            .attackers
+            .iter()
+            .map(|a| (a.character_id, a.corporation_id, a.alliance_id))
+            .collect();
+        ctx.db.with_snapshot(|snap| {
+            authorize_killmail_read(
+                session,
+                char_id,
+                snap,
+                &dkm.killmail_hash,
+                requested_hash,
+                kill_id,
+                dkm.victim_character_id,
+                dkm.victim_corporation_id,
+                dkm.victim_alliance_id,
+                &attackers_ref,
+                dkm.kill_time_unix,
+            )
+        })?;
         let attackers_list: Vec<PyRep> = dkm
             .attackers
             .iter()
@@ -478,14 +604,21 @@ pub(super) fn handle_get_killmail(
         km.ship_type_id,
         kill_ts,
     );
-    if let Some(req_h) = requested_hash {
-        if !req_h.is_empty() && req_h != hash {
-            return Err(BridgeRpcError {
-                code: "InvalidKillmailHash".into(),
-                message: format!("Killmail hash mismatch for kill {kill_id}"),
-            });
-        }
-    }
+    ctx.db.with_snapshot(|snap| {
+        authorize_killmail_read(
+            session,
+            char_id,
+            snap,
+            &hash,
+            requested_hash,
+            kill_id,
+            km.victim_character_id,
+            km.victim_corp_id,
+            None,
+            &[(km.attacker_character_id, km.attacker_corp_id, None)],
+            km.killed_unix,
+        )
+    })?;
     Ok(PyRep::keyval([
         ("killID", PyRep::Integer(km.kill_id)),
         ("killTime", PyRep::Integer(kill_ts as i64)),

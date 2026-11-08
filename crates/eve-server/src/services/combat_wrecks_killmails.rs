@@ -7,6 +7,8 @@ use super::*;
 #[path = "combat_wrecks_loot_ops.rs"]
 mod combat_wrecks_loot_ops;
 
+pub(crate) use combat_wrecks_loot_ops::authorize_killmail_read;
+
 pub const INSURANCE_CONTRACT_DURATION_SECS: u64 = 84 * 86_400; // 12 weeks (84 days)
 
 /// Computes the 6-level insurance quote table (`0.5` Basic .. `1.0` Platinum) for a ship type (`feat:combat.insurance-quote`).

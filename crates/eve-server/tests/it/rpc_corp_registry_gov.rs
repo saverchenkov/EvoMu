@@ -150,17 +150,33 @@ async fn test_corp_shares_dividends_and_ceo_transition() {
     assert!(s_cols.contains(&"shareholderID".to_string()));
     assert_eq!(s_rows.len(), 4, "zero-share entry omitted");
 
-    // 4. GetSharesByShareholder: verify exact holdings
+    // 4. GetSharesByShareholder: verify exact own/corp holdings & reject third-party spying
     let by_sh_corp = rpc(&ctx, &mut sess1, "corpRegistry", "GetSharesByShareholder", &[PyRep::Integer(corp_id), PyRep::Integer(corp_id)]).await.expect("GetSharesByShareholder corp");
     assert_eq!(rowset_data(&by_sh_corp).1[0][2], PyRep::Integer(470));
     let by_sh_p1 = rpc(&ctx, &mut sess1, "corpRegistry", "GetSharesByShareholder", &[PyRep::Integer(corp_id), PyRep::Integer(PILOT_1)]).await.expect("GetSharesByShareholder PILOT_1");
     assert_eq!(rowset_data(&by_sh_p1).1[0][2], PyRep::Integer(280));
-    let by_sh = rpc(&ctx, &mut sess1, "corpRegistry", "GetSharesByShareholder", &[PyRep::Integer(corp_id), PyRep::Integer(PILOT_2)]).await.expect("GetSharesByShareholder PILOT_2");
+    let mut sess_p2 = SessionState::new(61_097);
+    sess_p2.user_id = Some(2);
+    sess_p2.character_id = Some(PILOT_2);
+    sess_p2.corporation_id = Some(corp_id);
+    let by_sh = rpc(&ctx, &mut sess_p2, "corpRegistry", "GetSharesByShareholder", &[PyRep::Bool(false)]).await.expect("GetSharesByShareholder PILOT_2 self");
     assert_eq!(rowset_data(&by_sh).1[0][2], PyRep::Integer(200));
-    let by_sh_p3 = rpc(&ctx, &mut sess1, "corpRegistry", "GetSharesByShareholder", &[PyRep::Integer(corp_id), PyRep::Integer(PILOT_3)]).await.expect("GetSharesByShareholder PILOT_3");
-    assert_eq!(rowset_data(&by_sh_p3).1[0][2], PyRep::Integer(50));
-    let by_sh_none = rpc(&ctx, &mut sess1, "corpRegistry", "GetSharesByShareholder", &[PyRep::Integer(corp_id), PyRep::Integer(999_999)]).await.expect("GetSharesByShareholder non-holder");
-    assert!(rowset_data(&by_sh_none).1.is_empty());
+    assert_eq!(
+        rpc(&ctx, &mut sess_p2, "corpRegistry", "GetSharesByShareholder", &[PyRep::Bool(true)]).await.unwrap_err().code,
+        "CrpAccessDenied"
+    );
+    assert_eq!(
+        rpc(&ctx, &mut sess1, "corpRegistry", "GetSharesByShareholder", &[PyRep::Integer(corp_id), PyRep::Integer(PILOT_2)]).await.unwrap_err().code,
+        "CrpAccessDenied"
+    );
+    assert_eq!(
+        rpc(&ctx, &mut sess1, "corpRegistry", "GetSharesByShareholder", &[PyRep::Integer(corp_id), PyRep::Integer(PILOT_3)]).await.unwrap_err().code,
+        "CrpAccessDenied"
+    );
+    assert_eq!(
+        rpc(&ctx, &mut sess1, "corpRegistry", "GetSharesByShareholder", &[PyRep::Integer(corp_id), PyRep::Integer(999_999)]).await.unwrap_err().code,
+        "CrpAccessDenied"
+    );
 
     // 4b. GetSharesByShareholder 1-arg form (corpShares: bool / int)
     let by_sh_bf = rpc(&ctx, &mut sess1, "corpRegistry", "GetSharesByShareholder", &[PyRep::Bool(false)]).await.expect("GetSharesByShareholder false");

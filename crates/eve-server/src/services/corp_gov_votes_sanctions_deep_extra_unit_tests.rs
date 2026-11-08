@@ -159,7 +159,21 @@ fn corp_shares_dividends_titles_medals_bulletins_ads_and_contacts() {
                     .code,
                 "InsufficientShares"
             );
-            assert!(corp_call(&ctx, &mut ceo_sess, "corpRegistry", "GetSharesByShareholder", &[PyRep::Integer(mem_a)], &empty_kw).await.is_ok());
+            assert!(corp_call(&ctx, &mut mem_sess, "corpRegistry", "GetSharesByShareholder", &[PyRep::Integer(mem_a)], &empty_kw).await.is_ok());
+            assert_eq!(
+                corp_call(&ctx, &mut ceo_sess, "corpRegistry", "GetSharesByShareholder", &[PyRep::Integer(mem_a)], &empty_kw)
+                    .await
+                    .unwrap_err()
+                    .code,
+                "CrpAccessDenied"
+            );
+            assert_eq!(
+                corp_call(&ctx, &mut mem_sess, "corpRegistry", "GetSharesByShareholder", &[PyRep::Bool(true)], &empty_kw)
+                    .await
+                    .unwrap_err()
+                    .code,
+                "CrpAccessDenied"
+            );
             assert!(corp_call(&ctx, &mut ceo_sess, "corpRegistry", "GetMemberIDsWithMoreThanAvgShares", &[], &empty_kw).await.is_ok());
 
             // Dividends: non-director denied, insufficient wallet rejected, shareholders vs members payout

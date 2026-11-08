@@ -307,12 +307,39 @@ async fn test_war_registry_unbind_stats_and_wars_info() {
     assert_eq!(field(&km_rep, "victimCharacterID"), PyRep::Integer(PILOT_2));
     assert_eq!(field(&km_rep, "finalCharacterID"), PyRep::Integer(PILOT_1));
 
-    // 5. warsInfoMgr: GetPublicWarInfo, GetTop50 (active-only & ranked by kills/ISK), GetWarsByOwnerID, GetWarsByOwners
+    // Uninvolved non-GM outsider (in an unrelated corp) cannot view war killmail without valid shareable hash (#555)
+    let km_hash = match field(&km_rep, "hash") {
+        PyRep::String(h) => h,
+        _ => String::new(),
+    };
+    let mut outsider_sess = SessionState::new(64_999);
+    outsider_sess.user_id = Some(64_999);
+    outsider_sess.character_id = Some(90_000_099);
+    outsider_sess.corporation_id = Some(1_000_009);
+    let denied_km = rpc(&ctx, &mut outsider_sess, "warStatisticMgr", "GetKillMail", &[PyRep::Integer(km_id)])
+        .await
+        .expect_err("Outsider GetKillMail without hash must be rejected");
+    assert_eq!(denied_km.code, "KillmailAccessDenied");
+    if !km_hash.is_empty() {
+        let via_hash = rpc(
+            &ctx,
+            &mut outsider_sess,
+            "warStatisticMgr",
+            "GetKillMail",
+            &[PyRep::Integer(km_id), PyRep::String(km_hash)],
+        )
+        .await
+        .expect("Outsider GetKillMail with valid hash succeeds");
+        assert_eq!(field(&via_hash, "killID"), PyRep::Integer(km_id));
+    }
+
     ctx.db.provision_gm_account("p3_top50", "p3-secret", PILOT_3, "Pilot Three");
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(PILOT_3).or_default().insert(3363, eve_db::TrainedSkillRecord { type_id: 3363, level: 1, skill_points: 250.0 });
     });
     let mut sess3 = select_pilot(&ctx, 64_003, "p3_top50", "p3-secret", PILOT_3).await;
+
+    // 5. warsInfoMgr: GetPublicWarInfo, GetTop50 (active-only & ranked by kills/ISK), GetWarsByOwnerID, GetWarsByOwners
     let c3 = rpc(&ctx, &mut sess3, "corpRegistry", "AddCorporation", &[
         PyRep::String("Zero Kill Corp".into()), PyRep::String("ZKC".into()), PyRep::Real(0.05),
     ]).await.expect("AddCorp 3");

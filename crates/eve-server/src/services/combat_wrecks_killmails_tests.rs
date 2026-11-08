@@ -358,7 +358,7 @@ async fn container_decay_crystal_damage_deactivate_loot_all_and_self_destruct_ki
         &mut session,
         "warStatisticMgr",
         "GetKillMail",
-        &[PyRep::Integer(km_id), PyRep::String(km_hash)],
+        &[PyRep::Integer(km_id), PyRep::String(km_hash.clone())],
         &kwargs,
     )
     .await
@@ -369,4 +369,49 @@ async fn container_decay_crystal_damage_deactivate_loot_all_and_self_destruct_ki
         km_rep.dict_get("finalCharacterID"),
         Some(&PyRep::Integer(90_000_009))
     );
+
+    // Uninvolved third party (even sharing an NPC corp) cannot read killmail without a valid hash
+    let mut outsider = session.clone();
+    outsider.session_id = 99_901;
+    outsider.user_id = Some(99_901);
+    outsider.character_id = Some(90_099_901);
+    let denied_no_hash = handle_wrecks_killmails(
+        &ctx,
+        &mut outsider,
+        "warStatisticMgr",
+        "GetKillMail",
+        &[PyRep::Integer(km_id)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(denied_no_hash.code, "KillmailAccessDenied");
+
+    let denied_empty_hash = handle_wrecks_killmails(
+        &ctx,
+        &mut outsider,
+        "warStatisticMgr",
+        "GetKillMail",
+        &[PyRep::Integer(km_id), PyRep::String(String::new())],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(denied_empty_hash.code, "KillmailAccessDenied");
+
+    // Passing valid shareable killmail hash grants read access to outsider
+    let granted_with_hash = handle_wrecks_killmails(
+        &ctx,
+        &mut outsider,
+        "warStatisticMgr",
+        "GetKillMail",
+        &[PyRep::Integer(km_id), PyRep::String(km_hash)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(granted_with_hash.dict_get("killID"), Some(&PyRep::Integer(km_id)));
 }

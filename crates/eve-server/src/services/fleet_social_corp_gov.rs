@@ -583,7 +583,7 @@ pub(super) fn handle_corp_gov(
         }
 
         ("corpRegistry", "GetSharesByShareholder") => {
-            handle_get_shares_by_shareholder(ctx, char_id, corp_id, args)
+            handle_get_shares_by_shareholder(ctx, session.has_gm_role(), char_id, corp_id, args)
         }
 
         ("corpRegistry", "GetShareholders")
@@ -1432,17 +1432,54 @@ pub(super) fn handle_corp_gov(
 
 fn handle_get_shares_by_shareholder(
     ctx: &ServerContext,
+    is_gm: bool,
     char_id: i64,
     corp_id: i64,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let target_sh_id = match args {
-        [PyRep::Bool(true) | PyRep::Integer(1)] => corp_id,
-        [PyRep::Bool(false) | PyRep::Integer(0)] => char_id,
-        [PyRep::Integer(n)] => *n,
-        [_, second, ..] => second.as_i64().unwrap_or(char_id),
-        _ => char_id,
+    let (target_sh_id, corp_shares) = match args {
+        [PyRep::Bool(true) | PyRep::Integer(1)] => (corp_id, true),
+        [PyRep::Bool(false) | PyRep::Integer(0)] | [] | [PyRep::None] => (char_id, false),
+        [PyRep::Integer(n)] => (*n, *n == corp_id),
+        [first, second, ..] => {
+            let req_corp = matches!(first, PyRep::Bool(true) | PyRep::Integer(1));
+            let explicit = second.as_i64().unwrap_or(if req_corp { corp_id } else { char_id });
+            (explicit, req_corp || explicit == corp_id)
+        }
+        _ => (char_id, false),
     };
+    if !is_gm {
+        if corp_shares {
+            if target_sh_id != corp_id || corp_id <= 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "CrpAccessDenied".into(),
+                    message: format!("Cannot view shares for entity {target_sh_id}"),
+                }));
+            }
+            let now_unix = ctx.now_unix();
+            let can_view_corp_shares = ctx.db.with_snapshot(|snap| {
+                if !snap.corporations.contains_key(&corp_id) {
+                    return false;
+                }
+                let (is_ceo, eff_roles) =
+                    crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+                        snap, corp_id, char_id, 0, now_unix,
+                    );
+                is_ceo || (eff_roles & corp_roles::ROLE_DIRECTOR) != 0
+            });
+            if !can_view_corp_shares {
+                return Some(Err(BridgeRpcError {
+                    code: "CrpAccessDenied".into(),
+                    message: "Only CEO or Directors can view corporation-held shares".into(),
+                }));
+            }
+        } else if target_sh_id != char_id {
+            return Some(Err(BridgeRpcError {
+                code: "CrpAccessDenied".into(),
+                message: format!("Cannot view shares held by third-party entity {target_sh_id}"),
+            }));
+        }
+    }
     let rows: Vec<Vec<PyRep>> = with_corp_gov(ctx, |g| {
         let mut out = Vec::new();
         for (&cid, cgov) in g.iter() {

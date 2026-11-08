@@ -349,3 +349,62 @@ fn test_mutual_war_invites_and_retraction() {
     .unwrap();
     assert_eq!(dict_i64(&retracted, "warID"), Some(wid));
 }
+
+#[test]
+fn war_statistic_get_killmail_denies_uninvolved_without_hash() {
+    let (ctx, agg_sess, agg_char, _def_sess, def_char, ally_sess, _ally_char, _war_id) =
+        setup_wars_ctx();
+    let kill_id = 602_i64;
+    let killed_unix = 1_750_000_000_u64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.killmails.insert(
+            kill_id,
+            KillmailRecord {
+                kill_id,
+                solar_system_id: 30_000_142,
+                victim_character_id: def_char,
+                victim_corp_id: 98_000_102,
+                victim_alliance_id: None,
+                attacker_character_id: agg_char,
+                attacker_corp_id: 98_000_101,
+                attacker_alliance_id: None,
+                ship_type_id: 587,
+                killed_unix,
+                total_value_isk: 500_000.0,
+            },
+        );
+    });
+
+    // Uninvolved outsider corp (ally_sess before any war match for this non-war kill)
+    let mut bystander = ally_sess;
+    bystander.corporation_id = Some(98_000_999);
+    bystander.character_id = Some(90_000_999);
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut bystander,
+            "warStatisticMgr",
+            "GetKillMail",
+            &[PyRep::Integer(kill_id)],
+            None,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "KillmailAccessDenied"
+    );
+
+    let mut att = agg_sess;
+    assert!(
+        handle_wars(
+            &ctx,
+            &mut att,
+            "warStatisticMgr",
+            "GetKillMail",
+            &[PyRep::Integer(kill_id)],
+            None,
+        )
+        .unwrap()
+        .is_ok()
+    );
+}

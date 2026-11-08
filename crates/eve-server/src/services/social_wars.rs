@@ -1181,9 +1181,42 @@ pub(super) fn handle_wars(
         }
 
         ("warStatisticMgr", "GetKillMail") => {
-            let kill_id = arg_i64(0).unwrap_or(0);
-            let Some(km) = ctx.db.with_snapshot(|snap| snap.killmails.get(&kill_id).cloned()) else {
-                return err("KillmailNotFound", format!("Killmail {kill_id} not found"));
+            let Some(kill_id) = arg_i64(0) else {
+                return err("InvalidArgument", "GetKillMail requires killID");
+            };
+            let requested_hash = args.get(1).and_then(|a| a.as_str());
+            let km = match ctx.db.with_snapshot(|snap| {
+                let Some(km) = snap.killmails.get(&kill_id).cloned() else {
+                    return Err(BridgeRpcError {
+                        code: "KillmailNotFound".into(),
+                        message: format!("Killmail {kill_id} not found"),
+                    });
+                };
+                let kill_ts = if km.killed_unix > 0 { km.killed_unix } else { now };
+                let expected_hash =
+                    crate::services::combat_crimewatch::combat_wrecks_killmails::compute_killmail_esi_hash(
+                        km.victim_character_id,
+                        km.attacker_character_id,
+                        km.ship_type_id,
+                        kill_ts,
+                    );
+                crate::services::combat_crimewatch::combat_wrecks_killmails::authorize_killmail_read(
+                    session,
+                    char_id,
+                    snap,
+                    &expected_hash,
+                    requested_hash,
+                    kill_id,
+                    km.victim_character_id,
+                    km.victim_corp_id,
+                    None,
+                    &[(km.attacker_character_id, km.attacker_corp_id, None)],
+                    km.killed_unix,
+                )?;
+                Ok(km)
+            }) {
+                Ok(km) => km,
+                Err(e) => return Some(Err(e)),
             };
             Some(Ok(PyRep::keyval([
                 ("killID", PyRep::Integer(km.kill_id)),

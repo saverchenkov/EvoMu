@@ -125,20 +125,50 @@ fn share_transfers_dividend_variants_and_title_delayed_grants() {
     .unwrap();
     assert_eq!(rs_rows(&sh_corp)[0][2].as_i64(), Some(600));
 
-    let sh_ext = call_corp_gov(
-        &ctx,
-        &mut ceo,
-        "corpRegistry",
-        "GetSharesByShareholder",
-        &[PyRep::Integer(98_000_002)],
-        &kw,
-    )
-    .unwrap();
-    assert_eq!(rs_rows(&sh_ext)[0][2].as_i64(), Some(200));
+    // Third-party corporation/character and non-director corp share queries must be denied
+    assert_eq!(
+        call_corp_gov(
+            &ctx,
+            &mut ceo,
+            "corpRegistry",
+            "GetSharesByShareholder",
+            &[PyRep::Integer(98_000_002)],
+            &kw,
+        )
+        .unwrap_err()
+        .code,
+        "CrpAccessDenied"
+    );
+    assert_eq!(
+        call_corp_gov(
+            &ctx,
+            &mut member,
+            "corpRegistry",
+            "GetSharesByShareholder",
+            &[PyRep::None, PyRep::Integer(90_000_001)],
+            &kw,
+        )
+        .unwrap_err()
+        .code,
+        "CrpAccessDenied"
+    );
+    assert_eq!(
+        call_corp_gov(
+            &ctx,
+            &mut member,
+            "corpRegistry",
+            "GetSharesByShareholder",
+            &[PyRep::Bool(true)],
+            &kw,
+        )
+        .unwrap_err()
+        .code,
+        "CrpAccessDenied"
+    );
 
     let sh_two = call_corp_gov(
         &ctx,
-        &mut member,
+        &mut ceo,
         "corpRegistry",
         "GetSharesByShareholder",
         &[PyRep::None, PyRep::Integer(90_000_001)],
@@ -146,6 +176,15 @@ fn share_transfers_dividend_variants_and_title_delayed_grants() {
     )
     .unwrap();
     assert_eq!(rs_rows(&sh_two)[0][2].as_i64(), Some(200));
+    assert!(call_corp_gov(
+        &ctx,
+        &mut member,
+        "corpRegistry",
+        "GetSharesByShareholder",
+        &[PyRep::Bool(false)],
+        &kw,
+    )
+    .is_ok());
 
     // PayoutDividend error branches & (Real, Bool, Integer) form crediting both character and corporate shareholder!
     assert_eq!(

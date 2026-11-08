@@ -144,9 +144,24 @@ async fn test_b22_corp_governance_shares_dividends_ceo_divisions_autokick() {
     .await
     .expect("MoveCompanyShares");
 
-    let sh_p2 = rpc(&ctx, &mut sess1, "corpRegistry", "GetSharesByShareholder", &[PyRep::Integer(PILOT_2)])
+    assert_eq!(
+        rpc(&ctx, &mut sess2, "corpRegistry", "GetDivisionNames", &[PyRep::Integer(corp_id + 1)])
+            .await
+            .unwrap_err()
+            .code,
+        "CrpAccessDenied"
+    );
+
+    assert_eq!(
+        rpc(&ctx, &mut sess1, "corpRegistry", "GetSharesByShareholder", &[PyRep::Integer(PILOT_2)])
+            .await
+            .unwrap_err()
+            .code,
+        "CrpAccessDenied"
+    );
+    let sh_p2 = rpc(&ctx, &mut sess2, "corpRegistry", "GetSharesByShareholder", &[PyRep::Bool(false)])
         .await
-        .expect("GetSharesByShareholder PILOT_2");
+        .expect("GetSharesByShareholder PILOT_2 self");
     assert_eq!(
         rowset_rows(&sh_p2),
         vec![vec![PyRep::Integer(PILOT_2), PyRep::Integer(corp_id), PyRep::Integer(400)]]
@@ -162,7 +177,7 @@ async fn test_b22_corp_governance_shares_dividends_ceo_divisions_autokick() {
     .await
     .expect("MovePrivateShares");
 
-    let sh_p2_after = rpc(&ctx, &mut sess1, "corpRegistry", "GetSharesByShareholder", &[PyRep::Integer(PILOT_2)])
+    let sh_p2_after = rpc(&ctx, &mut sess2, "corpRegistry", "GetSharesByShareholder", &[PyRep::Integer(PILOT_2)])
         .await
         .expect("GetSharesByShareholder PILOT_2 after");
     assert_eq!(

@@ -255,6 +255,12 @@ pub fn handle_corp_gov_tail(
         | ("corpmgr", "GetDivisionNames")
         | ("corporationSvc", "GetDivisionNames") => {
             let target_cid = args.first().and_then(|a| a.as_i64()).unwrap_or(corp_id);
+            if target_cid != corp_id && !session.has_gm_role() {
+                return Some(Err(BridgeRpcError {
+                    code: "CrpAccessDenied".into(),
+                    message: format!("Cannot inspect division names for corporation {target_cid}"),
+                }));
+            }
             let default_h = [
                 "1st Division",
                 "2nd Division",
