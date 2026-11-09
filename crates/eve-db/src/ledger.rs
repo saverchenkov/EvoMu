@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 pub mod ref_types {
     pub const MARKET_TRANSACTION: i32 = 2;
     pub const PLAYER_DONATION: i32 = 10;
+    pub const INSURANCE: i32 = 19;
     pub const CORPORATION_ACCOUNT_WITHDRAWAL: i32 = 37;
     pub const MARKET_ESCROW: i32 = 42;
     pub const BROKER_FEE: i32 = 46;

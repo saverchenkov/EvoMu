@@ -4,7 +4,7 @@
 
 use crate::formulas::compute_insurance_quote;
 use crate::router::ServerContext;
-use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, KillmailRecord, WalletJournalEntry};
+use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, KillmailRecord};
 use eve_destiny::{Ball, MovementMode, SlimItemMeta};
 use glam::DVec3;
 use std::collections::HashMap;
@@ -473,6 +473,7 @@ pub fn execute_death_pipeline_sync_inner(
         att_corp,
         att_all,
         att_ship_type_id,
+        ins_notify,
     ) = ctx.db.try_with_mut_snapshot(|snap| {
         snap.next_entity_id += 1;
         let wreck_id = snap.next_entity_id;
@@ -743,7 +744,7 @@ pub fn execute_death_pipeline_sync_inner(
             None
         };
 
-        if calculated_insurance_payout > 0.0 {
+        let ins_notify = if calculated_insurance_payout > 0.0 {
             let payout_cents = IskCents::from_f64_isk(calculated_insurance_payout);
             let (journal_char_id, bal_after) = if ins_is_corp {
                 if let Some(corp) = snap.corporations.get_mut(&ins_owner_id) {
@@ -761,23 +762,28 @@ pub fn execute_death_pipeline_sync_inner(
             } else {
                 (ins_owner_id, payout_cents)
             };
-            snap.next_entity_id += 1;
-            let jid = snap.next_entity_id;
-            snap.wallet_journal.push(WalletJournalEntry {
-                entry_id: jid,
-                character_id: journal_char_id,
-                entry_type: "insurance_payout".to_string(),
+            snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
+                owner_id: journal_char_id,
+                entry_type: "insurance_payout",
                 amount: payout_cents,
                 balance_after: bal_after,
                 reason: format!("Insurance payout for loss of ship {victim_ship_id}"),
+                meta: eve_db::ledger::JournalMeta::new(
+                    eve_db::ledger::ref_types::INSURANCE,
+                    1_000_132,
+                    journal_char_id,
+                    now_unix,
+                )
+                .with_context(eve_db::ledger::JournalContext::Character, victim_char_id),
             });
             snap.next_entity_id += 1;
             let mid = snap.next_entity_id;
+            let subject = format!("Insurance Payout for Ship {victim_ship_id}");
             snap.mails.push(eve_db::MailRecord {
                 message_id: mid,
                 sender_id: 1_000_132,
                 recipient_id: victim_char_id,
-                subject: format!("Insurance Payout for Ship {victim_ship_id}"),
+                subject: subject.clone(),
                 body: format!(
                     "Pend Insurance has credited {:.2} ISK to your account following the destruction of ship {}.",
                     calculated_insurance_payout, victim_ship_id
@@ -785,7 +791,10 @@ pub fn execute_death_pipeline_sync_inner(
             });
             snap.mail_timestamps.insert(mid, now_unix);
             snap.mail_assigned_labels.insert((victim_char_id, mid), vec![1]);
-        }
+            Some((ins_is_corp, journal_char_id, bal_after.to_wire_f64(), mid, subject))
+        } else {
+            None
+        };
 
         let total_val = hull_base_isk + items_isk;
         let (vic_c, vic_a) = snap
@@ -835,8 +844,36 @@ pub fn execute_death_pipeline_sync_inner(
             att_c,
             att_a,
             att_stid,
+            ins_notify,
         ))
     })?;
+
+    if let Some((ins_corp, owner_id, bal_wire, mid, subject)) = ins_notify {
+        if ins_corp {
+            let _ = ctx.notify(
+                crate::router::NotificationTarget::Corporation(owner_id),
+                "OnAccountChange",
+                "corpid",
+                vec![
+                    eve_proto::PyRep::String("cash".into()),
+                    eve_proto::PyRep::Integer(owner_id),
+                    eve_proto::PyRep::Real(bal_wire),
+                ],
+            );
+        } else {
+            let _ = ctx.notify_account_change(owner_id, "cash", owner_id, bal_wire);
+        }
+        let sent = crate::services::mail_notify::SentMail {
+            message_id: mid,
+            sender_id: 1_000_132,
+            to_character_ids: &[victim_char_id],
+            to_list_id: None,
+            to_corp_or_alliance_id: None,
+            title: &subject,
+            status_mask: crate::services::mail_notify::MAIL_STATUS_AUTOMATED,
+        };
+        crate::services::mail_notify::emit_mail_sent(ctx, &sent, &[victim_char_id]);
+    }
 
     if !is_self_destruct && attacker_char_id > 0 && victim_char_id > 0 && attacker_char_id != victim_char_id {
         let _ = crate::services::combat_crimewatch::claim_player_bounty_on_kill(
@@ -1092,7 +1129,9 @@ pub fn execute_death_pipeline_sync_inner(
             corp_id: -1,
             alliance_id: -1,
             security_status: 0.0,
-            is_cloaked: false, ..Default::default()
+            is_cloaked: false,
+            name: ctx.sde.types.get(&wreck_type_id).map(|t| t.name.clone()),
+            ..Default::default()
         },
     );
     if let Some(cid) = ejected_cap_id {
@@ -1101,7 +1140,7 @@ pub fn execute_death_pipeline_sync_inner(
             .with_snapshot(|s| s.items.get(&cid).map(|i| i.type_id))
             .unwrap_or(670);
         let esc_sde = ctx.sde.types.get(&esc_type_id);
-        let esc_grp = esc_sde.map(|t| t.group_id).unwrap_or(29);
+        let esc_slim = ctx.build_ship_slim_meta(victim_char_id, esc_type_id);
         sys_handle.try_spawn_ball_with_meta(
             Ball {
                 id: cid,
@@ -1120,17 +1159,9 @@ pub fn execute_death_pipeline_sync_inner(
                 mode: MovementMode::Stop,
             },
             ctx.build_ship_combat_state(victim_char_id, cid, esc_type_id),
-            SlimItemMeta {
-                group_id: esc_grp,
-                category_id: 6,
-                owner_id: victim_char_id,
-                char_id: Some(victim_char_id),
-                corp_id: -1,
-                alliance_id: -1,
-                security_status: 0.0,
-                is_cloaked: false, ..Default::default()
-            },
+            esc_slim,
         );
+        sys_handle.try_push_set_state(cid);
     }
 
     let (new_sys_id, new_dock_id) = ctx

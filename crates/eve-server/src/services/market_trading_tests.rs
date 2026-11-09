@@ -1188,3 +1188,92 @@ fn v24_immediate_place_buy_order_and_cancel_buy_order_emit_wallet_and_item_notif
         "CancelCharOrder must emit OnOwnOrdersChanged (#714)"
     );
 }
+
+#[test]
+fn place_buy_order_v24_mining_laser_immediate_crosses_seeded_sell_order_issue_731() {
+    let ctx = test_ctx();
+    let buyer_id = 90_000_001;
+    let seller_id = 90_000_002;
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(buyer) = snap.characters.get_mut(&buyer_id) {
+            buyer.balance = IskCents::from_isk(1_000_000);
+        }
+        if !snap.characters.contains_key(&seller_id) {
+            let mut seller = snap.characters[&buyer_id].clone();
+            seller.character_id = seller_id;
+            seller.name = "MiningLaserSeller".into();
+            seller.station_id = Some(JITA_STATION_ID);
+            seller.solar_system_id = 30_000_142;
+            snap.characters.insert(seller_id, seller);
+        }
+        snap.market_orders.insert(
+            99_001_731,
+            eve_db::MarketOrderRecord {
+                order_id: 99_001_731,
+                type_id: 483, // Mining Laser I
+                owner_id: seller_id,
+                station_id: JITA_STATION_ID,
+                region_id: 10_000_002,
+                price: IskCents::from_f64_isk(12_566.15),
+                vol_entered: 10,
+                vol_remaining: 10,
+                is_bid: false,
+                is_npc: false,
+                min_volume: 1,
+                escrow: IskCents(0),
+            },
+        );
+    });
+
+    let mut buyer_sess = jita_session(buyer_id, 1_000_009);
+    ctx.db.acquire_online_lock(1, 9731, Some(buyer_id), true, ctx.now_unix()).unwrap();
+    let _ = ctx.drain_notifications_for_char(buyer_id);
+
+    // Live V24.01 payload: PlaceBuyOrder(60003760, 483, 12570.0, 1, -1, 1, 1, False, 0.03)
+    let buy_res = handle(
+        &ctx,
+        &mut buyer_sess,
+        "marketProxy",
+        "PlaceBuyOrder",
+        &[
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::Integer(483),
+            PyRep::Real(12_570.0),
+            PyRep::Integer(1),
+            PyRep::Integer(-1),
+            PyRep::Integer(1),
+            PyRep::Integer(1),
+            PyRep::Bool(false),
+            PyRep::Real(0.03),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(
+        buy_res.dict_get("filledImmediately").and_then(PyRep::as_bool),
+        Some(true),
+        "Immediate V24.01 PlaceBuyOrder must cross resting Mining Laser I sell order (#731)"
+    );
+    let bal_after = ctx.db.get_character(buyer_id).unwrap().balance;
+    assert!(
+        bal_after < IskCents::from_isk(1_000_000),
+        "Immediate buy must deduct ISK from buyer wallet: {bal_after:?}"
+    );
+    let has_laser = ctx.db.with_snapshot(|snap| {
+        snap.items.values().any(|it| {
+            it.owner_id == buyer_id
+                && it.type_id == 483
+                && it.location_id == JITA_STATION_ID
+                && it.quantity >= 1
+        })
+    });
+    assert!(has_laser, "Immediate buy must deliver Mining Laser I to buyer hangar");
+
+    let notifs = ctx.drain_notifications_for_char(buyer_id);
+    assert!(notifs.iter().any(|n| n.event == "OnAccountChange"));
+    assert!(notifs.iter().any(|n| n.event == "OnItemChange"));
+}

@@ -450,7 +450,7 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
         let Some(PyRep::Rowset { rows: anom_rows, .. }) = tracker_after.dict_get("anomalies") else { panic!("Expected anomalies rowset") };
         assert_eq!(anom_rows.iter().filter(|r| r[1].as_str() == Some("Combat")).count(), 1);
         assert_eq!(anom_rows[0][0].as_str(), Some("PVE-ANOM-30000142-2"));
-        assert_eq!([anom_rows[0][4].as_f64().unwrap(), anom_rows[0][5].as_f64().unwrap(), anom_rows[0][6].as_f64().unwrap()], [30_000_000.0, 12_000_000.0, -8_000_000.0]);
+        assert_eq!([anom_rows[0][4].as_f64().unwrap(), anom_rows[0][5].as_f64().unwrap(), anom_rows[0][6].as_f64().unwrap()], [30_000_000_000.0, 12_000_000_000.0, -8_000_000_000.0]);
         let anoms_cache = call(&ctx, &mut sess_p1, "dungeonInstanceCacheMgr", "GetCombatAnomalyInstances", &[]).await.expect("GetCombatAnomalyInstances after restart");
         assert!(!format!("{anoms_cache:?}").contains("2134") && format!("{anoms_cache:?}").contains("1215"));
 

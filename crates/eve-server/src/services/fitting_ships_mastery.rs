@@ -180,6 +180,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         .map(|(_, b)| b.position)
                         .unwrap_or(DVec3::ZERO);
                     let pod_pos = DVec3::new(old_pos.x + 150.0, old_pos.y, old_pos.z);
+                    let pod_slim = ctx.build_ship_slim_meta(char_id, 670);
                     let _ = sys
                         .spawn_ball_with_meta(
                             eve_destiny::Ball {
@@ -195,18 +196,10 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                                 mode: eve_destiny::MovementMode::Stop,
                             },
                             eve_destiny::CombatState::default(),
-                            eve_destiny::SlimItemMeta {
-                                group_id: 29,
-                                category_id: 6,
-                                owner_id: char_id,
-                                char_id: Some(char_id),
-                                corp_id: session.corporation_id.unwrap_or(-1),
-                                alliance_id: session.alliance_id.unwrap_or(-1),
-                                security_status: 0.0,
-                                is_cloaked: false, ..Default::default()
-                            },
+                            pod_slim,
                         )
                         .await;
+                    let _ = sys.push_set_state(capsule_id).await;
                     let slim_ev = eve_destiny::DestinyEvent::OnSlimItemChange { ball_id: old_ship_id };
                     let inter_ev = eve_destiny::DestinyEvent::SetBallInteractive {
                         ball_id: old_ship_id,

@@ -983,7 +983,7 @@ async fn test_so2_fleet_manager_hierarchy_broadcast_and_fleet_warp() {
         )
         .await
         .expect("AddFleetFinderAdvert");
-    assert!(is_keyval(&ad_rep));
+    assert!(matches!(ad_rep, PyRep::Dict(_)));
     let ads_rep = ctx
         .dispatch_rpc(
             &mut sess2,
@@ -996,7 +996,7 @@ async fn test_so2_fleet_manager_hierarchy_broadcast_and_fleet_warp() {
         )
         .await
         .expect("GetAvailableFleetAds");
-    assert!(is_rowset(&ads_rep));
+    assert!(matches!(ads_rep, PyRep::Dict(ref d) if !d.is_empty()));
     let wl_rep = ctx
         .dispatch_rpc(
             &mut sess1,

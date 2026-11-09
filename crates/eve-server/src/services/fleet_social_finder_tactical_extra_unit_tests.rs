@@ -256,17 +256,24 @@ async fn join_requests_advert_filtering_and_application_lifecycle() {
         });
     });
 
-    let _ = call_fleet_proxy(&ctx, &mut boss_sess, "AddFleetFinderAdvert", &[
+    let add_ad = call_fleet_proxy(&ctx, &mut boss_sess, "AddFleetFinderAdvert", &[
         PyRep::String("Corp Standing Fleet".into()), PyRep::String("Corp only".into()),
         PyRep::Integer(1), PyRep::Bool(false), PyRep::Real(1.0), PyRep::Real(0.0),
     ], &kw).await.unwrap();
+    assert!(matches!(add_ad, PyRep::Dict(_)), "AddFleetFinderAdvert must return Dict (#732)");
+    assert_eq!(add_ad.dict_get("fleetName").and_then(PyRep::as_str), Some("Corp Standing Fleet"));
 
     let my_ad = call_fleet_proxy(&ctx, &mut boss_sess, "GetMyFleetFinderAdvert", &[], &kw).await.unwrap();
+    assert!(matches!(my_ad, PyRep::Dict(_)), "GetMyFleetFinderAdvert must return Dict (#732)");
     assert!(format!("{my_ad:?}").contains("Corp Standing Fleet"));
 
     let mut sess_low_sec = make_session(applicant_low_sec, None, Some(30_000_142), None);
     let ads_low = call_fleet_proxy(&ctx, &mut sess_low_sec, "GetAvailableFleetAds", &[], &kw).await.unwrap();
+    assert!(matches!(ads_low, PyRep::Dict(_)));
     assert!(!format!("{ads_low:?}").contains("Corp Standing Fleet"));
+    let ads_low_char = call_fleet_proxy(&ctx, &mut sess_low_sec, "GetFleetAdsForChar", &[], &kw).await.unwrap();
+    assert!(matches!(ads_low_char, PyRep::Dict(_)));
+    assert!(!format!("{ads_low_char:?}").contains("Corp Standing Fleet"));
     assert_eq!(call_fleet_proxy(&ctx, &mut sess_low_sec, "ApplyToJoinFleet", &[PyRep::Integer(fleet_id)], &kw).await.unwrap_err().code, "FleetJoinDenied");
 
     let mut sess_other_corp = make_session(applicant_other_corp, None, Some(30_000_142), None);
@@ -282,6 +289,14 @@ async fn join_requests_advert_filtering_and_application_lifecycle() {
     let mut sess_ok = make_session(applicant_ok, None, Some(30_000_142), None);
     let ads_ok = call_fleet_proxy(&ctx, &mut sess_ok, "GetAvailableFleetAds", &[], &kw).await.unwrap();
     assert!(format!("{ads_ok:?}").contains("Corp Standing Fleet"));
+    let ads_ok_char = call_fleet_proxy(&ctx, &mut sess_ok, "GetFleetAdsForChar", &[], &kw).await.unwrap();
+    assert!(matches!(ads_ok_char, PyRep::Dict(ref d) if !d.is_empty()), "GetFleetAdsForChar must return Dict of Dicts (#732)");
+    if let PyRep::Dict(entries) = &ads_ok_char {
+        assert!(entries.iter().any(|(k, v)| *k == PyRep::Integer(fleet_id) && matches!(v, PyRep::Dict(_))));
+    }
+
+    let upd_ad = call_fleet_proxy(&ctx, &mut boss_sess, "UpdateAdvertInfo", &[PyRep::Integer(0)], &kw).await.unwrap();
+    assert!(matches!(upd_ad, PyRep::Dict(_)), "UpdateAdvertInfo must return Dict (#732)");
 
     let app_res = call_fleet_proxy(&ctx, &mut sess_ok, "ApplyToJoinFleet", &[PyRep::Integer(fleet_id)], &kw).await.unwrap();
     assert_eq!(app_res.dict_get("joined"), Some(&PyRep::Bool(false)));
@@ -303,7 +318,10 @@ async fn join_requests_advert_filtering_and_application_lifecycle() {
 
     assert_eq!(call_fleet_proxy(&ctx, &mut sq_member, "RemoveFleetFinderAdvert", &[], &kw).await.unwrap_err().code, "FleetPermissionDenied");
     let rem_ad = call_fleet_proxy(&ctx, &mut boss_sess, "RemoveFleetFinderAdvert", &[], &kw).await.unwrap();
+    assert!(matches!(rem_ad, PyRep::Dict(_)), "RemoveFleetFinderAdvert must return Dict (#732)");
     assert_eq!(rem_ad.dict_get("removed"), Some(&PyRep::Bool(true)));
+    let my_ad_after = call_fleet_proxy(&ctx, &mut boss_sess, "GetMyFleetFinderAdvert", &[], &kw).await.unwrap();
+    assert_eq!(my_ad_after, PyRep::None);
 
     let umi = call_fleet_obj(&ctx, &mut boss_sess, "UpdateMemberInfo", &[], &kw).await.unwrap();
     assert_eq!(umi.dict_get("fleetID"), Some(&PyRep::Integer(fleet_id)));

@@ -131,3 +131,156 @@ async fn test_ensure_system_pve_sites_seeded_highsec_lowsec_nullsec_and_wh() {
         }
     });
 }
+
+#[tokio::test]
+async fn signal_tracker_register_seeds_offgrid_anoms_warp_works_and_cleared_sites_stay_cleared() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id = 90_000_001_i64;
+    let ship_id = 995_001_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.cosmic_anomalies.remove(&sys_id);
+    });
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle.try_spawn_ball_with_meta(
+        Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.0,
+            mass: 1_100_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        ctx.build_ship_combat_state(char_id, ship_id, 587),
+        ctx.build_ship_slim_meta(char_id, 587),
+    );
+
+    let mut sess = eve_machonet::SessionState {
+        user_id: Some(1),
+        character_id: Some(char_id),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let kw = std::collections::HashMap::new();
+
+    // SignalTrackerRegister triggers seeding for the active system (#730)
+    let _ = crate::services::fleet_social::handle(
+        &ctx,
+        &mut sess,
+        "scanMgr",
+        "SignalTrackerRegister",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("SignalTrackerRegister");
+
+    let anoms = ctx.db.with_snapshot(|s| {
+        s.cosmic_anomalies
+            .get(&sys_id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|a| a.anomaly_id.starts_with("PVE-ANOM-"))
+            .collect::<Vec<_>>()
+    });
+    assert!(!anoms.is_empty(), "SignalTrackerRegister must seed PVE-ANOM sites");
+    for a in &anoms {
+        let dist = DVec3::from_array(a.position).length();
+        assert!(
+            dist >= 10_000_000_000.0,
+            "PVE-ANOM {} must be off-grid (>= 10e9 m), got {dist}",
+            a.anomaly_id
+        );
+    }
+
+    // CmdWarpToStuff("ep_instance", anom_id) succeeds (#730)
+    let target_anom_id = anoms[0].anomaly_id.clone();
+    let warp_rep = crate::services::space_warp_jump::handle(
+        &ctx,
+        &mut sess,
+        None,
+        "beyonce",
+        "CmdWarpToStuff",
+        &[
+            eve_proto::PyRep::String("ep_instance".into()),
+            eve_proto::PyRep::String(target_anom_id.clone()),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("CmdWarpToStuff ep_instance");
+    assert!(warp_rep.as_i64().is_some());
+
+    // Cleared anomaly stays cleared on re-seed, and legacy near-Sun anomaly gets moved off-grid
+    let second_anom_id = anoms.get(1).map(|a| a.anomaly_id.clone());
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(list) = snap.cosmic_anomalies.get_mut(&sys_id) {
+            if let Some(first) = list.iter_mut().find(|a| a.anomaly_id == target_anom_id) {
+                first.cleared = true;
+            }
+            if let Some(sec_id) = &second_anom_id {
+                if let Some(sec) = list.iter_mut().find(|a| a.anomaly_id == *sec_id) {
+                    sec.position = [150_000.0, 0.0, 0.0];
+                }
+            }
+        }
+    });
+    with_pve_exploration_reg(&ctx, |reg| {
+        reg.seeded_systems.remove(&sys_id);
+        reg.sites_by_system.remove(&sys_id);
+    });
+    ensure_system_pve_sites_seeded(&ctx, sys_id).await;
+
+    with_pve_exploration_reg(&ctx, |reg| {
+        let sites = reg.sites_by_system.get(&sys_id).expect("re-seeded sites");
+        assert!(
+            !sites.iter().any(|s| s.site_id == target_anom_id),
+            "cleared anomaly {target_anom_id} must not respawn"
+        );
+    });
+    if let Some(sec_id) = second_anom_id {
+        let upgraded_pos = ctx.db.with_snapshot(|s| {
+            s.cosmic_anomalies
+                .get(&sys_id)
+                .and_then(|l| l.iter().find(|a| a.anomaly_id == sec_id))
+                .map(|a| DVec3::from_array(a.position).length())
+                .unwrap_or(0.0)
+        });
+        assert!(
+            upgraded_pos >= 10_000_000_000.0,
+            "legacy near-Sun anomaly must be upgraded off-grid, got {upgraded_pos}"
+        );
+    }
+}

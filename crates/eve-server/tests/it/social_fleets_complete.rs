@@ -936,7 +936,7 @@ async fn test_so_fleets_motd_options_wings_squads_broadcasts_watchlist_formation
     ctx.dispatch_rpc(&mut sess1, "fleetProxy", None, "AddFleetFinderAdvert", &[PyRep::String("Apex Public".into()), PyRep::String("Autojoin".into()), PyRep::Integer(3), PyRep::Bool(true)], &kw, None).await.unwrap();
     ctx.dispatch_rpc(&mut sess1, "fleetProxy", None, "UpdateAdvertAllowedEntities", &[PyRep::List(vec![PyRep::Integer(90_000_002)])], &kw, None).await.unwrap();
     let denied_ads = ctx.dispatch_rpc(&mut sess3, "fleetProxy", None, "GetAvailableFleetAds", &[], &kw, None).await.unwrap();
-    if let PyRep::Rowset { rows, .. } = &denied_ads { assert!(rows.is_empty(), "Unlisted entity must not see restricted advert"); }
+    if let PyRep::Dict(entries) = &denied_ads { assert!(entries.is_empty(), "Unlisted entity must not see restricted advert"); } else { panic!("Expected Dict from GetAvailableFleetAds"); }
     assert_eq!(ctx.dispatch_rpc(&mut sess3, "fleetProxy", None, "ApplyToJoinFleet", &[PyRep::Integer(fid)], &kw, None).await.unwrap_err().code, "FleetJoinDenied");
     ctx.dispatch_rpc(&mut sess1, "fleetProxy", None, "UpdateAdvertAllowedEntities", &[PyRep::List(vec![PyRep::Integer(p3_char)])], &kw, None).await.unwrap();
     let p3_join = ctx.dispatch_rpc(&mut sess3, "fleetProxy", None, "ApplyToJoinFleet", &[PyRep::Integer(fid)], &kw, None).await.unwrap();
@@ -1154,9 +1154,20 @@ async fn test_so_bookmarks_expiry_copy_move_corp_bookmarks_and_scanning_features
     let PyRep::KeyVal(tr_kv) = &tracker_rep else { panic!() };
     let PyRep::Rowset { rows: struct_rows, .. } = &tr_kv["structures"] else { panic!() };
     assert!(struct_rows.iter().any(|r| r[0] == PyRep::Integer(990_000_777)), "SignalTrackerRegister must return structure signals");
+    let PyRep::Rowset { rows: anom_rows, .. } = &tr_kv["anomalies"] else { panic!() };
+    assert!(!anom_rows.is_empty(), "SignalTrackerRegister must seed and return anomalies (#730)");
     assert!(!ctx.drain_notifications_for_char(90_000_001).iter().any(|n| matches!(n.event.as_str(), "OnSignalTrackerSignatureUpdate" | "OnSignalTrackerAnomalyUpdate" | "OnSignalTrackerStructureUpdate")), "SignalTrackerRegister must not emit empty initial spam");
 
     // Trigger real anomaly, structure, and expired-signature deltas (`feat:scanning.anomalies`, `feat:scanning.structure-signals`, `feat:scanning.sig-despawn`)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(list) = snap.cosmic_anomalies.get_mut(&scan_sys_id) {
+            list.retain(|a| !a.anomaly_id.starts_with("PVE-ANOM-"));
+        }
+    });
+    eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+        reg.seeded_systems.remove(&scan_sys_id);
+        reg.sites_by_system.remove(&scan_sys_id);
+    });
     eve_server::services::pve_exploration_seeding::ensure_system_pve_sites_seeded(&ctx, scan_sys_id).await;
     let anchor_rep = ctx.dispatch_rpc(&mut sess1, "structureDeployment", None, "Anchor", &[PyRep::Integer(35_832), PyRep::String("Perimeter Scanner Citadel".into())], &kw, None).await.unwrap();
     let anchored_id = anchor_rep.dict_get("structureID").and_then(|v| v.as_i64()).unwrap();

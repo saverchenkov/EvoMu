@@ -337,3 +337,97 @@ async fn ships_mastery_leave_ship_corvette_mastery_killmarks_repair_simulation_t
     .expect_err("CreateNewbieShip while already in corvette must fail");
     assert_eq!(err_already_corv.code, "AlreadyInNewbieShip");
 }
+
+#[tokio::test]
+async fn eject_in_space_sets_capsule_name_and_queues_set_state() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 96_500_201_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = 96_500_202_i64;
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|s| {
+        let mut ch = s.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = 1;
+        ch.name = "EjectPilot".into();
+        ch.corporation_id = 98_000_001;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.solar_system_id = sys_id;
+        ch.active_ship_id = ship_id;
+        s.characters.insert(char_id, ch);
+        s.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.try_spawn_ball_with_meta(
+        eve_destiny::Ball {
+            id: ship_id,
+            type_id: 587,
+            position: glam::DVec3::new(10_000.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.0,
+            mass: 1_100_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        },
+        eve_destiny::CombatState::default(),
+        ctx.build_ship_slim_meta(char_id, 587),
+    );
+
+    let mut sess = SessionState::new(9_729);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(98_000_001);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
+    let _ = handle_ships_mastery_and_fitting_ext(&ctx, &mut sess, None, "ship", "Eject", &[], &kw)
+        .await
+        .unwrap()
+        .expect("ship.Eject in space");
+
+    let cap_id = sess.ship_id.expect("new capsule id");
+    assert_ne!(cap_id, ship_id);
+
+    let cap_slim = sys
+        .get_ball_slim_item(cap_id)
+        .await
+        .unwrap()
+        .expect("capsule slim item");
+    assert!(
+        !cap_slim
+            .dict_get("name")
+            .and_then(PyRep::as_str)
+            .unwrap_or("")
+            .is_empty(),
+        "ejected capsule must carry non-empty name (#728/#729)"
+    );
+
+    let (_tick, events, _rep) = sys.drain_observer_updates(cap_id).await.unwrap();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            eve_destiny::DestinyEvent::SetState { observer_ball_id } if *observer_ball_id == cap_id
+        )),
+        "ship.Eject must queue SetState for new capsule (#729)"
+    );
+}

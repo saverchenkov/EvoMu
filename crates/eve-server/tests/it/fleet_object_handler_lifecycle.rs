@@ -100,12 +100,11 @@ async fn test_fleet_object_and_manager_lifecycle() {
     let init_ad_rep = ctx.dispatch_rpc(&mut sess1, "fleetObjectHandler", None, "Init", &[PyRep::Integer(606)], &ad_kwargs, None).await.expect("Init with adInfoData");
     assert_eq!(init_ad_rep, PyRep::None);
     let my_ad = ctx.dispatch_rpc(&mut sess1, "fleetProxy", None, "GetMyFleetFinderAdvert", &[], &kw, None).await.expect("GetMyFleetFinderAdvert");
-    let PyRep::Rowset { rows: ad_rows, .. } = &my_ad else { panic!("expected Rowset from GetMyFleetFinderAdvert") };
-    assert_eq!(ad_rows.len(), 1);
-    assert_eq!(ad_rows[0][0], PyRep::Integer(fid1));
-    assert_eq!(ad_rows[0][1], PyRep::Integer(PILOT1));
-    assert_eq!(ad_rows[0][2], PyRep::String("Init Advert".into()));
-    assert_eq!(ad_rows[0][4], PyRep::Integer(sess1.solar_system_id.unwrap() as i64));
+    assert!(matches!(my_ad, PyRep::Dict(_)), "expected Dict from GetMyFleetFinderAdvert, got {my_ad:?}");
+    assert_eq!(my_ad.dict_get("fleetID"), Some(&PyRep::Integer(fid1)));
+    assert_eq!(my_ad.dict_get("leaderID"), Some(&PyRep::Integer(PILOT1)));
+    assert_eq!(my_ad.dict_get("fleetName"), Some(&PyRep::String("Init Advert".into())));
+    assert_eq!(my_ad.dict_get("solarSystemID"), Some(&PyRep::Integer(sess1.solar_system_id.unwrap() as i64)));
 
     // Extract initial unique wingID and squadID from GetWings
     let initial_wings_rep = ctx.dispatch_rpc(&mut sess1, "fleetObjectHandler", None, "GetWings", &[], &kw, None).await.expect("GetWings initial");

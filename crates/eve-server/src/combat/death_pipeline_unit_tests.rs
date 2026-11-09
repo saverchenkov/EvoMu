@@ -571,3 +571,97 @@ async fn live_self_destruct_sync_denies_uncontested_insurance_loot_validates_own
     let km = ctx.db.with_snapshot(|s| s.killmails[&res_tackled.killmail_id].clone());
     assert_eq!(km.attacker_character_id, attacker);
 }
+
+#[tokio::test]
+async fn death_pipeline_sets_wreck_and_capsule_names_queues_set_state_and_emits_insurance_journal_and_mail() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let victim = 90_000_001_i64;
+    let attacker = 90_000_002_i64;
+    let ship_id = 100_240_001_i64;
+
+    spawn_ship(&ctx, sys_id, ship_id, victim, 587, DVec3::new(5_000.0, 0.0, 0.0), 150_000.0);
+    ctx.db
+        .acquire_online_lock(1, 9_729, Some(victim), true, ctx.now_unix())
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(victim);
+
+    let res = execute_death_pipeline_sync(
+        &ctx,
+        sys_id,
+        victim,
+        ship_id,
+        attacker,
+        DVec3::new(5_000.0, 0.0, 0.0),
+        1,
+    )
+    .expect("death pipeline succeeds");
+
+    assert_ne!(res.wreck_item_id, 0);
+    let cap_id = res.ejected_capsule_id.expect("ejected capsule id");
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let wreck_slim = sys_handle
+        .get_ball_slim_item(res.wreck_item_id)
+        .await
+        .unwrap()
+        .expect("wreck slim item");
+    assert!(
+        !wreck_slim
+            .dict_get("name")
+            .and_then(eve_proto::PyRep::as_str)
+            .unwrap_or("")
+            .is_empty(),
+        "wreck slim item must have non-empty name (#728)"
+    );
+
+    let cap_slim = sys_handle
+        .get_ball_slim_item(cap_id)
+        .await
+        .unwrap()
+        .expect("capsule slim item");
+    assert!(
+        !cap_slim
+            .dict_get("name")
+            .and_then(eve_proto::PyRep::as_str)
+            .unwrap_or("")
+            .is_empty(),
+        "ejected capsule slim item must have non-empty name (#728/#729)"
+    );
+
+    let (_tick, events, _rep) = sys_handle.drain_observer_updates(cap_id).await.unwrap();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            eve_destiny::DestinyEvent::SetState { observer_ball_id } if *observer_ball_id == cap_id
+        )),
+        "death pipeline must queue SetState for ejected capsule (#729)"
+    );
+
+    // #731: Insurance payout records ref_types::INSURANCE in wallet_journal_meta and emits notifications + EVE mail
+    let has_insurance_journal = ctx.db.with_snapshot(|snap| {
+        snap.wallet_journal.iter().any(|entry| {
+            entry.character_id == victim
+                && entry.amount == eve_db::IskCents::from_f64_isk(res.insurance_payout_isk)
+                && snap
+                    .wallet_journal_meta
+                    .get(&entry.entry_id)
+                    .map(|m| m.ref_type_id == eve_db::ledger::ref_types::INSURANCE)
+                    .unwrap_or(false)
+        })
+    });
+    assert!(
+        has_insurance_journal,
+        "insurance payout must persist wallet_journal_meta with ref_types::INSURANCE (#731)"
+    );
+
+    let notifs = ctx.drain_notifications_for_char(victim);
+    assert!(
+        notifs.iter().any(|n| n.event == "OnAccountChange"),
+        "insurance payout must emit OnAccountChange (#731)"
+    );
+    assert!(
+        notifs.iter().any(|n| n.event == "OnMailSent"),
+        "insurance payout must emit OnMailSent mail notification (#731)"
+    );
+}

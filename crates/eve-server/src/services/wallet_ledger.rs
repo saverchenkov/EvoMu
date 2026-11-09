@@ -117,6 +117,7 @@ fn handle_get_entry_types() -> Result<PyRep, BridgeRpcError> {
         (ref_types::MARKET_TRANSACTION, "Market Transaction", "Market buy or sell transaction"),
         (ref_types::PLAYER_DONATION, "Player Donation", "Direct ISK transfer between players"),
         (17, "Bounty Prize", "NPC bounty payout"),
+        (ref_types::INSURANCE, "Insurance", "Insurance payout"),
         (33, "Agent Mission Reward", "Agent mission reward"),
         (34, "Agent Mission Time Bonus Reward", "Agent mission time bonus reward"),
         (ref_types::CORPORATION_ACCOUNT_WITHDRAWAL, "Corporation Account Withdrawal", "Corporation wallet transfer"),

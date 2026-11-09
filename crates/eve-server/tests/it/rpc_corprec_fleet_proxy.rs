@@ -219,16 +219,12 @@ async fn test_fleet_proxy_and_fleet_mgr_rpcs() {
         .await
         .expect("GetMyFleetFinderAdvert");
     match my_ad {
-        PyRep::Rowset { rows, columns, .. } => {
-            assert_eq!(rows.len(), 1);
-            let fid_idx = columns.iter().position(|h| h == "fleetID").expect("fleetID col");
-            let name_idx = columns.iter().position(|h| h == "fleetName").expect("fleetName col");
-            let lead_idx = columns.iter().position(|h| h == "leaderID").expect("leaderID col");
-            assert_eq!(rows[0][fid_idx].as_i64(), Some(fleet_id));
-            assert_eq!(rows[0][name_idx].as_str(), Some("Jita Standing Defense"));
-            assert_eq!(rows[0][lead_idx].as_i64(), Some(PILOT_1));
+        PyRep::Dict(_) => {
+            assert_eq!(field(&my_ad, "fleetID").as_i64(), Some(fleet_id));
+            assert_eq!(field(&my_ad, "fleetName").as_str(), Some("Jita Standing Defense"));
+            assert_eq!(field(&my_ad, "leaderID").as_i64(), Some(PILOT_1));
         }
-        other => panic!("expected Rowset from GetMyFleetFinderAdvert, got {other:?}"),
+        other => panic!("expected Dict from GetMyFleetFinderAdvert, got {other:?}"),
     }
 
     // 5. fleetProxy.UpdateAdvertInfo: updates name and description
@@ -247,11 +243,10 @@ async fn test_fleet_proxy_and_fleet_mgr_rpcs() {
         .await
         .expect("GetMyFleetFinderAdvert v2");
     match my_ad_v2 {
-        PyRep::Rowset { rows, columns, .. } => {
-            let name_idx = columns.iter().position(|h| h == "fleetName").unwrap();
-            assert_eq!(rows[0][name_idx].as_str(), Some("Jita Incursion Wing"));
+        PyRep::Dict(_) => {
+            assert_eq!(field(&my_ad_v2, "fleetName").as_str(), Some("Jita Incursion Wing"));
         }
-        other => panic!("expected Rowset from GetMyFleetFinderAdvert, got {other:?}"),
+        other => panic!("expected Dict from GetMyFleetFinderAdvert, got {other:?}"),
     }
 
     // 6. fleetProxy.UpdateFleetAdvertWithNewLeader: updates leader in advert
@@ -332,11 +327,10 @@ async fn test_fleet_proxy_and_fleet_mgr_rpcs() {
         .await
         .expect("GetMyFleetFinderAdvert v3");
     match my_ad_v3 {
-        PyRep::Rowset { rows, columns, .. } => {
-            let lead_idx = columns.iter().position(|h| h == "leaderID").unwrap();
-            assert_eq!(rows[0][lead_idx].as_i64(), Some(PILOT_2));
+        PyRep::Dict(_) => {
+            assert_eq!(field(&my_ad_v3, "leaderID").as_i64(), Some(PILOT_2));
         }
-        other => panic!("expected Rowset from GetMyFleetFinderAdvert, got {other:?}"),
+        other => panic!("expected Dict from GetMyFleetFinderAdvert, got {other:?}"),
     }
 
     // 7. fleetMgr.BroadcastToBubble: broadcasts tactical alert to local bubble
@@ -386,8 +380,5 @@ async fn test_fleet_proxy_and_fleet_mgr_rpcs() {
     let my_ad_empty = rpc(&ctx, &mut sess1, "fleetProxy", "GetMyFleetFinderAdvert", &[])
         .await
         .expect("GetMyFleetFinderAdvert empty");
-    match my_ad_empty {
-        PyRep::Rowset { rows, .. } => assert!(rows.is_empty()),
-        other => panic!("expected empty Rowset from GetMyFleetFinderAdvert, got {other:?}"),
-    }
+    assert_eq!(my_ad_empty, PyRep::None);
 }

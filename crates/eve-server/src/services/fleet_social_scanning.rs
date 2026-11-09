@@ -32,6 +32,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                 _ => return Some(Err(BridgeRpcError::user_error("NoSolarSystem"))),
             };
             let now_unix = ctx.now_unix();
+            crate::services::pve_exploration::ensure_system_pve_sites_seeded(ctx, sys_id).await;
             let sigs = ensure_system_signatures(ctx, sys_id).await;
             let (anom_count, anom_rows, struct_rows) = ctx.db.with_snapshot(|snap| {
                 let a_rows: Vec<Vec<PyRep>> = snap

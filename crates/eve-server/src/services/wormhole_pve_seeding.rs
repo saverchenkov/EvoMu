@@ -373,9 +373,9 @@ pub async fn seed_special_wormhole_pve_sites(
             .unwrap_or_else(|| default_name.to_string());
         let site_id = format!("PVE-ANOM-{solar_system_id}-{}", idx + 1);
         let pos = [
-            25_000_000.0 + (idx as f64) * 5_000_000.0,
-            12_000_000.0,
-            -8_000_000.0,
+            25_000_000_000.0 + (idx as f64) * 5_000_000_000.0,
+            12_000_000_000.0,
+            -8_000_000_000.0,
         ];
         let npc_ids = crate::services::pve_exploration_sites::spawn_sleeper_wave_in_system(
             ctx,

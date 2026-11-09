@@ -401,9 +401,19 @@ pub fn slim_item_dict(ball: &Ball, meta: &SlimItemMeta) -> PyRep {
         ("skinID", meta.skin_id.map(|s| PyRep::Integer(i64::from(s))).unwrap_or(PyRep::None)),
         ("skinMaterialSetID", meta.skin_material_set_id.map(|m| PyRep::Integer(i64::from(m))).unwrap_or(PyRep::None)),
     ];
-    if let Some(name) = meta.name.as_deref().filter(|n| !n.is_empty()) {
-        entries.push(("name", PyRep::String(name.to_string())));
-    }
+    let slim_name = meta
+        .name
+        .as_deref()
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if meta.category_id == 6 {
+                format!("Ship {}", ball.id)
+            } else {
+                format!("Item {}", ball.id)
+            }
+        });
+    entries.push(("name", PyRep::String(slim_name)));
     if meta.group_id == 10 {
         // DERIVED: V24.01 `StargateSetup` indexes corruption/suppression 2-tuples directly.
         let zero_of_five = PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Integer(5)]);

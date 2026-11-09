@@ -610,3 +610,35 @@ fn encode_destiny_events_and_hoist_set_state_in_updates() {
         }
     }
 }
+
+#[test]
+fn slim_item_dict_always_emits_non_empty_name_for_capsules_and_objects() {
+    let cap_ball = sample_ball(777_001, MovementMode::Stop);
+    let cap_dict = slim_item_dict(
+        &cap_ball,
+        &SlimItemMeta {
+            group_id: 29,
+            category_id: 6,
+            owner_id: 90_000_001,
+            char_id: Some(90_000_001),
+            name: None,
+            ..Default::default()
+        },
+    );
+    assert_eq!(cap_dict.dict_get("name"), Some(&PyRep::String("Ship 777001".into())));
+
+    let empty_name_obj = slim_item_dict(
+        &sample_ball(777_002, MovementMode::Stop),
+        &SlimItemMeta {
+            group_id: 186,
+            category_id: 2,
+            owner_id: 90_000_001,
+            name: Some(String::new()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        empty_name_obj.dict_get("name"),
+        Some(&PyRep::String("Item 777002".into()))
+    );
+}

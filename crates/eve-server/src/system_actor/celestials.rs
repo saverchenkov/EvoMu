@@ -565,6 +565,11 @@ impl SystemHandle {
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
     }
 
+    pub fn try_push_set_state(&self, observer_ball_id: BallId) -> bool {
+        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        bp.queue_set_state(observer_ball_id)
+    }
+
     pub fn try_spawn_ball_with_combat(&self, ball: Ball, combat_state: CombatState) {
         let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
         let ball_id = ball.id;

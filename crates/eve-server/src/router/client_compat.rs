@@ -57,8 +57,13 @@ fn rowset_to_dict_by_key(rep: PyRep, key_col: &str) -> PyRep {
             .get(key_idx)
             .cloned()
             .unwrap_or(PyRep::Integer(dict.len() as i64 + 1));
-        let entries: HashMap<String, PyRep> = columns.iter().cloned().zip(row).collect();
-        dict.push((row_key, PyRep::KeyVal(entries)));
+        let entries: Vec<(PyRep, PyRep)> = columns
+            .iter()
+            .cloned()
+            .zip(row)
+            .map(|(k, v)| (PyRep::String(k), v))
+            .collect();
+        dict.push((row_key, PyRep::Dict(entries)));
     }
     PyRep::Dict(dict)
 }
@@ -316,7 +321,7 @@ pub fn normalize_macho_rpc_reply(
             }
         }
     }
-    if service == "fleetProxy" && method == "GetAvailableFleetAds" {
+    if service == "fleetProxy" && matches!(method, "GetAvailableFleetAds" | "GetFleetAdsForChar") {
         if let Ok(rep) = rpc_res {
             return Ok(rowset_to_dict_by_key(rep, "fleetID"));
         }

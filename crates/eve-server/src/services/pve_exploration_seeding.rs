@@ -265,11 +265,22 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
     let wh_class = wormhole_class_for_system(solar_system_id);
 
     let now = ctx.now_unix();
+    let existing_anoms: std::collections::HashMap<String, (bool, [f64; 3])> = ctx.db.with_snapshot(|snap| {
+        snap.cosmic_anomalies
+            .get(&solar_system_id)
+            .map(|list| {
+                list.iter()
+                    .map(|a| (a.anomaly_id.clone(), (a.cleared, a.position)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
     let mut sites = Vec::new();
     let mut new_anoms = Vec::new();
     let mut new_sigs = Vec::new();
     let mut cans_to_insert = Vec::new();
     let mut balls_to_spawn = Vec::new();
+    let mut updated_anom_positions: Vec<(String, [f64; 3])> = Vec::new();
 
     // 1. True-Sec Combat Anomalies (or Wormhole Sleeper Combat Anomalies)
     for (idx, (did, default_name, cat, waves, wh_c)) in
@@ -282,7 +293,24 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
             .map(|d| d.name.trim().to_string())
             .unwrap_or_else(|| default_name.to_string());
         let site_id = format!("PVE-ANOM-{solar_system_id}-{}", idx + 1);
-        let pos = [25_000_000.0 + (idx as f64) * 5_000_000.0, 12_000_000.0, -8_000_000.0];
+        let default_pos = [
+            25_000_000_000.0 + (idx as f64) * 5_000_000_000.0,
+            12_000_000_000.0,
+            -8_000_000_000.0,
+        ];
+        let pos = match existing_anoms.get(&site_id) {
+            Some((true, _)) => continue,
+            Some((false, prev_pos)) => {
+                let r_sq = prev_pos[0] * prev_pos[0] + prev_pos[1] * prev_pos[1] + prev_pos[2] * prev_pos[2];
+                if r_sq < 1_000_000_000.0 * 1_000_000_000.0 {
+                    updated_anom_positions.push((site_id.clone(), default_pos));
+                    default_pos
+                } else {
+                    *prev_pos
+                }
+            }
+            None => default_pos,
+        };
         // W-space Sleeper combat sites: wave 1 (trigger NPC first) spawned with zero-bounty Sleeper AI entities;
         // later waves are spawned by `handle_pve_site_npc_destruction_core` when the trigger NPC dies.
         let npc_ids: Vec<i64> = if let Some(wh_class) = wh_c {
@@ -508,6 +536,11 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
     let (added_anoms, added_sigs) = ctx.db.with_mut_snapshot(|snap| {
         let mut added_a = Vec::new();
         let sys_anoms = snap.cosmic_anomalies.entry(solar_system_id).or_default();
+        for (aid, next_pos) in updated_anom_positions {
+            if let Some(a) = sys_anoms.iter_mut().find(|x| x.anomaly_id == aid) {
+                a.position = next_pos;
+            }
+        }
         for a in new_anoms {
             if !sys_anoms.iter().any(|x| x.anomaly_id == a.anomaly_id) {
                 added_a.push(a.clone());

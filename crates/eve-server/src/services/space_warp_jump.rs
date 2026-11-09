@@ -224,6 +224,23 @@ async fn handle_cmd_warp_to_stuff(
         });
     };
 
+    let needs_pve_seed = matches!(
+        stuff_type,
+        "epinstance" | "ep_instance" | "site" | "anomaly" | "dungeon" | "location"
+    ) || target_str_opt.is_some_and(|s| {
+        s.starts_with("PVE-ANOM-")
+            || s.starts_with("EXP-")
+            || s.starts_with("DED-")
+            || s.starts_with("DSG-")
+            || s.starts_with("DAT-")
+            || s.starts_with("REL-")
+            || s.starts_with("GHO-")
+            || s.starts_with("SLC-")
+    });
+    if needs_pve_seed {
+        crate::services::pve_exploration::ensure_system_pve_sites_seeded(ctx, sys_id).await;
+    }
+
     let mut resolved_pos: Option<DVec3> = None;
     let mut fleet_ship_ball_id: Option<i64> = None;
     match stuff_type {
@@ -262,17 +279,50 @@ async fn handle_cmd_warp_to_stuff(
             };
             resolved_pos = Some(pos);
         }
-        "mission" | "dungeon" | "location" | "epinstance" | "site" => {
+        "mission" | "dungeon" | "location" | "epinstance" | "ep_instance" | "site" | "anomaly" => {
+            let deadspace_type = if stuff_type == "ep_instance" {
+                "epinstance"
+            } else {
+                stuff_type
+            };
             resolved_pos =
                 crate::services::pve_dungeon_runtime::resolve_deadspace_or_escalation_warp_target(
                     ctx,
                     char_id,
                     sys_id,
-                    stuff_type,
+                    deadspace_type,
                     target_id,
                     target_str_opt,
                 )?;
-            if resolved_pos.is_none() && stuff_type != "epinstance" {
+            if resolved_pos.is_none() && target_str_opt.is_some() {
+                resolved_pos = ctx.db.with_snapshot(|snap| {
+                    if let Some(anoms) = snap.cosmic_anomalies.get(&sys_id) {
+                        for a in anoms {
+                            if target_str_opt == Some(a.anomaly_id.as_str()) && !a.cleared {
+                                return Some(DVec3::from_array(a.position));
+                            }
+                        }
+                    }
+                    if let Some(sigs) = snap.cosmic_signatures.get(&sys_id) {
+                        for s in sigs {
+                            let eff_strength =
+                                ctx.effective_signature_signal_strength(char_id, sys_id, s);
+                            if target_str_opt == Some(s.signature_id.as_str())
+                                && eff_strength >= 1.0
+                                && !s.collapsed
+                            {
+                                return Some(
+                                    crate::services::space_destiny::space_pochven_wormholes::pochven_wormhole_ball_position(
+                                        &ctx.sde, s,
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    None
+                });
+            }
+            if resolved_pos.is_none() && !matches!(stuff_type, "epinstance" | "ep_instance") {
                 resolved_pos = ctx.db.with_snapshot(|snap| {
                     if snap.active_missions.values().any(|m| {
                         m.character_id == char_id
