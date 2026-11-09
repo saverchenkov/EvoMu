@@ -888,11 +888,26 @@ pub async fn handle(
                     message: "Reprocessing requires being docked at a station or structure".into(),
                 }));
             };
-            let is_batch_call = args.len() >= 2
+            let is_multi_arg = args.len() >= 2;
+            let is_batch_call = is_multi_arg
                 || matches!(
                     args.first(),
                     Some(PyRep::List(_) | PyRep::Dict(_) | PyRep::Tuple(_))
                 );
+            let explicit_out_owner = is_multi_arg
+                .then(|| args.get(2).and_then(PyRep::as_i64).filter(|&id| id > 0))
+                .flatten();
+            let explicit_out_loc = is_multi_arg
+                .then(|| args.get(3).and_then(PyRep::as_i64).filter(|&id| id > 10_000))
+                .flatten();
+            let explicit_out_flag = is_multi_arg
+                .then(|| {
+                    args.get(4)
+                        .and_then(PyRep::as_i64)
+                        .filter(|&f| (1..=u16::MAX as i64).contains(&f))
+                        .map(|f| InventoryFlag::from_u16(f as u16))
+                })
+                .flatten();
             let item_ids: Vec<i64> = match args.first() {
                 Some(PyRep::List(list)) => list.iter().filter_map(|a| a.as_i64()).collect(),
                 Some(PyRep::Tuple(tuple)) => tuple.iter().filter_map(|a| a.as_i64()).collect(),
@@ -1038,6 +1053,40 @@ pub async fn handle(
                     } else {
                         snap.items.remove(&item_id);
                     }
+                    let (out_owner, out_loc, out_flag) = if is_multi_arg {
+                        let requested_loc = explicit_out_loc.unwrap_or(station_id);
+                        let valid_container = requested_loc != station_id
+                            && snap.items.get(&requested_loc).is_some_and(|c| {
+                                c.location_id == station_id
+                                    && (c.owner_id == char_id
+                                        || (caller_corp > 0 && c.owner_id == caller_corp))
+                            });
+                        let target_loc = if requested_loc == station_id || valid_container {
+                            requested_loc
+                        } else {
+                            station_id
+                        };
+                        let requested_flag = explicit_out_flag.unwrap_or(item.flag);
+                        let is_corp_sag = matches!(
+                            requested_flag,
+                            InventoryFlag::CorpSAG1
+                                | InventoryFlag::CorpSAG2
+                                | InventoryFlag::CorpSAG3
+                                | InventoryFlag::CorpSAG4
+                                | InventoryFlag::CorpSAG5
+                                | InventoryFlag::CorpSAG6
+                                | InventoryFlag::CorpSAG7
+                        );
+                        if is_corp_sag && caller_corp > 0 && explicit_out_owner == Some(caller_corp) {
+                            (caller_corp, target_loc, requested_flag)
+                        } else if !is_corp_sag && (explicit_out_owner.is_none() || explicit_out_owner == Some(char_id)) {
+                            (char_id, target_loc, requested_flag)
+                        } else {
+                            (item.owner_id, station_id, item.flag)
+                        }
+                    } else {
+                        (item.owner_id, station_id, item.flag)
+                    };
                     let mut outputs: Vec<(i64, TypeId, i32)> = Vec::with_capacity(materials.len());
                     for mat in &materials {
                         let out_qty = ((mat.quantity as f64) * yield_rate).floor() as i32;
@@ -1049,9 +1098,9 @@ pub async fn handle(
                             InventoryItemRecord {
                                 item_id: mid,
                                 type_id: mat.material_type_id,
-                                owner_id: item.owner_id,
-                                location_id: station_id,
-                                flag: item.flag,
+                                owner_id: out_owner,
+                                location_id: out_loc,
+                                flag: out_flag,
                                 quantity: out_qty,
                                 singleton: false,
                                 version: 1,

@@ -418,3 +418,119 @@ async fn reprocessing_reprocess_and_get_quotes_error_and_success_paths() {
     assert!(kv_field(&rep_res, "tritaniumQuantity").and_then(|v| v.as_i64()).unwrap_or(0) >= 400);
     ctx.db.with_snapshot(|snap| { assert_eq!(snap.items.get(&ore_item_id).map(|i| i.quantity), Some(50)); });
 }
+
+/// #776: V24.01 5-arg `reprocessingSvc.Reprocess(itemIDs, fromLocation, ownerID, outputLocationID, outputFlagID)`
+/// must return `(inputItemIDs, outputByTypeID)` even for a single item stack, so `reprocessing/ui/controller.py`
+/// unpacking `inputItemIDs, outputByTypeID = self.reprocessor.Reprocess(...)` never fails.
+#[tokio::test]
+async fn issue_776_reprocess_five_arg_returns_v24_tuple() {
+    let ctx = test_ctx();
+    let (char_id, corp_id, station_id, ship_id) = (90_000_001_i64, 98_000_001_i64, 60_003_760_i64, 88_776_001_i64);
+    let ore_a = 88_776_002_i64;
+    let ore_b = 88_776_003_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
+            ch.solar_system_id = 30_000_142;
+            ch.station_id = Some(station_id);
+            ch.active_ship_id = ship_id;
+            ch.balance = IskCents(10_000_000);
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        for (iid, qty) in [(ore_a, 200), (ore_b, 100)] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: 1230, // Veldspar
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: qty,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let mut sess = SessionState::new(776);
+    sess.character_id = Some(char_id);
+    sess.user_id = Some(char_id as u64);
+    sess.corporation_id = Some(corp_id);
+    sess.station_id = Some(station_id);
+    sess.ship_id = Some(ship_id);
+
+    // 1) Single-item 5-arg V24 MachoNet call (exact trigger of #776)
+    let kw = std::collections::HashMap::new();
+    let single_v24 = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[
+                PyRep::List(vec![PyRep::Integer(ore_a)]),
+                PyRep::Integer(station_id),
+                PyRep::Integer(char_id),
+                PyRep::Integer(station_id),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .unwrap();
+    let PyRep::Tuple(parts) = single_v24 else {
+        panic!("expected 2-tuple from V24 5-arg Reprocess, got {single_v24:?}");
+    };
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0], PyRep::List(vec![PyRep::Integer(ore_a)]));
+    let PyRep::Dict(ref out_map) = parts[1] else {
+        panic!("expected outputByTypeID Dict, got {:?}", parts[1]);
+    };
+    let trit_out = out_map
+        .iter()
+        .find_map(|(k, v)| (k.as_i64() == Some(34)).then(|| v.as_i64()).flatten())
+        .unwrap_or(0);
+    assert!(trit_out > 0, "expected positive Tritanium yield in outputByTypeID");
+
+    // 2) Second stack via MachoNet wire + check inputItemIDs & Dict shape
+    let second_v24 = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[
+                PyRep::List(vec![PyRep::Integer(ore_b)]),
+                PyRep::Integer(station_id),
+                PyRep::Integer(char_id),
+                PyRep::Integer(station_id),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .unwrap();
+    let PyRep::Tuple(parts2) = second_v24 else {
+        panic!("expected 2-tuple from V24 5-arg Reprocess");
+    };
+    assert_eq!(parts2[0], PyRep::List(vec![PyRep::Integer(ore_b)]));
+}

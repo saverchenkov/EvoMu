@@ -417,3 +417,141 @@ fn issue_765_goal_created_and_get_always_include_contribution_config() {
         );
     }
 }
+
+#[test]
+fn issue_779_non_gm_corp_goal_create_emits_v24_attributes_and_active_list() {
+    use eve_proto::quasar::{
+        encode_bytes_field, encode_string_field, encode_varint_field, EvePublicRequest, GoogleAny,
+        WireValue, TYPE_GOOGLEAPIS_PREFIX,
+    };
+
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let sde = shared_sde();
+    let desc = QuasarDescriptorRegistry::open_default_or_empty();
+    let cid = 90_000_001i64;
+    let corp_id = 98_000_001i64;
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.corporation_id = corp_id;
+        }
+        snap.corporations.entry(corp_id).or_default().ceo_id = cid;
+    });
+
+    let router = PublicGatewayRouter::new(desc.clone(), Arc::clone(&db), Arc::clone(&sde));
+
+    // Non-GM player CEO (ROLE_PLAYER_DEFAULT only, no ROLE_ADMIN)
+    let mut sess = SessionState::new(779);
+    sess.user_id = Some(1);
+    sess.character_id = Some(cid);
+    sess.corporation_id = Some(corp_id);
+    sess.role = service_roles::ROLE_PLAYER_DEFAULT;
+    let _rx = router.subscribe_session(&sess, Vec::new(), 1_760_000_100);
+
+    let manual_pb = encode_goal_contribution_config("Manual", None);
+    let mut create_req = Vec::new();
+    encode_string_field(1, "V24 Corp Project", &mut create_req);
+    encode_string_field(2, "Created by non-GM CEO", &mut create_req);
+    encode_varint_field(3, 250, &mut create_req);
+    encode_bytes_field(4, &manual_pb, &mut create_req);
+
+    let req = EvePublicRequest {
+        issued: None,
+        correlation_uuid: vec![7, 7, 9],
+        payload: Some(GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.api.CreateRequest"),
+            value: create_req,
+        }),
+        external_origin: "test".into(),
+        application_instance_uuid: vec![1, 2, 3],
+        authoritative_context: None,
+        trace_context: None,
+    };
+    let rsp = router.handle_public_request(&sess, &req, None, false, 1_760_000_100);
+    assert_eq!(rsp.status_code, 200);
+    let rsp_wire = WireMessage::decode(&rsp.payload.expect("CreateResponse").value).unwrap();
+    let goal_id_bytes = match &rsp_wire.fields[0].value {
+        WireValue::LengthDelimited(b) => b.clone(),
+        _ => panic!("missing goal id"),
+    };
+
+    let notices = router.poll_notices(sess.session_id);
+    let created_notice = notices
+        .iter()
+        .find(|n| {
+            n.payload
+                .as_ref()
+                .is_some_and(|p| p.type_url.ends_with("eve_public.goal.api.CreatedNotice"))
+        })
+        .and_then(|n| n.payload.as_ref())
+        .expect("CreatedNotice must be emitted for non-GM corp CEO");
+    let notice_msg = desc
+        .decode_dynamic_or_wire(&created_notice.type_url, &created_notice.value)
+        .expect("decode CreatedNotice");
+    let DynamicValue::Message(attrs) = notice_msg.get(2).expect("CreatedNotice.goal") else {
+        panic!("CreatedNotice.goal must be Message");
+    };
+    assert!(attrs.get(7).is_some(), "Attributes must have contribution_config (7)");
+    assert!(attrs.get(14).is_some(), "Attributes must have no_due_timestamp (14)");
+    assert!(attrs.get(19).is_some(), "Attributes must have assigner (19)");
+    assert!(attrs.get(20).is_some(), "Attributes must have assignee (20)");
+    assert!(attrs.get(23).is_some(), "Attributes must have unlimited (23)");
+    assert!(attrs.get(25).is_some(), "Attributes must have contribution_unlimited (25)");
+
+    // Active goal UUID must appear in eve_public.corporationgoal.api.GetActiveResponse
+    let active_rsp = router.handle_public_request(
+        &sess,
+        &EvePublicRequest {
+            payload: Some(GoogleAny {
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.GetActiveRequest"
+                ),
+                value: Vec::new(),
+            }),
+            ..req.clone()
+        },
+        None,
+        false,
+        1_760_000_105,
+    );
+    assert_eq!(active_rsp.status_code, 200);
+    let active_any = active_rsp.payload.expect("GetActiveResponse");
+    let active_wire = WireMessage::decode(&active_any.value).expect("decode GetActiveResponse");
+    assert!(
+        active_wire.fields.iter().any(|f| {
+            f.field_number == 1
+                && matches!(&f.value, WireValue::LengthDelimited(b) if b == &goal_id_bytes)
+        }),
+        "GetActiveResponse must include created goal UUID"
+    );
+
+    // GetRequest must return Attributes with assigner/assignee and manual contribution_config
+    let mut get_bytes = Vec::new();
+    encode_bytes_field(1, &goal_id_bytes, &mut get_bytes);
+    let get_rsp = router.handle_public_request(
+        &sess,
+        &EvePublicRequest {
+            payload: Some(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.api.GetRequest"),
+                value: get_bytes,
+            }),
+            ..req
+        },
+        None,
+        false,
+        1_760_000_110,
+    );
+    assert_eq!(get_rsp.status_code, 200);
+    let get_any = get_rsp.payload.expect("GetResponse");
+    let get_msg = desc
+        .decode_dynamic_or_wire(&get_any.type_url, &get_any.value)
+        .expect("decode GetResponse");
+    let DynamicValue::Message(get_attrs) = get_msg.get(1).expect("GetResponse.goal") else {
+        panic!("GetResponse.goal must be Message");
+    };
+    let DynamicValue::Message(cfg) = get_attrs.get(7).expect("contribution_config") else {
+        panic!("contribution_config must be Message");
+    };
+    assert!(cfg.get(1).is_some(), "expected manual (field 1)");
+    assert!(get_attrs.get(19).is_some(), "GetResponse.goal must include assigner (19)");
+    assert!(get_attrs.get(20).is_some(), "GetResponse.goal must include assignee (20)");
+}

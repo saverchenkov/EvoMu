@@ -36,6 +36,7 @@ pub enum JournalContext {
     Contract,
     Character,
     Corporation,
+    Type,
 }
 
 /// Parties/context metadata for one wallet journal entry (`ownerID1`, `ownerID2`, `referenceID`).

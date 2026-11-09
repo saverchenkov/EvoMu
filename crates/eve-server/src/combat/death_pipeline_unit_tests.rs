@@ -638,7 +638,8 @@ async fn death_pipeline_sets_wreck_and_capsule_names_queues_set_state_and_emits_
         "death pipeline must queue SetState for ejected capsule (#729)"
     );
 
-    // #731: Insurance payout records ref_types::INSURANCE in wallet_journal_meta and emits notifications + EVE mail
+    // #731 / #770: Insurance payout records ref_types::INSURANCE with ship typeID as context_id
+    // (V24 walletEntryFormat passes referenceID for entryTypeID=19 to evetypes.GetName)
     let has_insurance_journal = ctx.db.with_snapshot(|snap| {
         snap.wallet_journal.iter().any(|entry| {
             entry.character_id == victim
@@ -646,13 +647,40 @@ async fn death_pipeline_sets_wreck_and_capsule_names_queues_set_state_and_emits_
                 && snap
                     .wallet_journal_meta
                     .get(&entry.entry_id)
-                    .map(|m| m.ref_type_id == eve_db::ledger::ref_types::INSURANCE)
+                    .map(|m| {
+                        m.ref_type_id == eve_db::ledger::ref_types::INSURANCE
+                            && m.context == eve_db::ledger::JournalContext::Type
+                            && m.context_id == 587
+                    })
                     .unwrap_or(false)
         })
     });
     assert!(
         has_insurance_journal,
-        "insurance payout must persist wallet_journal_meta with ref_types::INSURANCE (#731)"
+        "insurance payout must persist wallet_journal_meta with ref_types::INSURANCE and ship type_id context (#731, #770)"
+    );
+
+    let mut victim_sess = eve_machonet::SessionState::new(9_770);
+    victim_sess.character_id = Some(victim);
+    victim_sess.user_id = Some(victim as u64);
+    let tx_res = crate::services::wallet_ledger::handle(
+        &ctx,
+        &mut victim_sess,
+        "account",
+        "GetTransactions",
+        &[],
+        &std::collections::HashMap::new(),
+    )
+    .expect("account.GetTransactions handled")
+    .expect("account.GetTransactions ok");
+    let tx_rows = tx_res.crowset_rows().expect("expected CRowset from account.GetTransactions");
+    assert!(
+        tx_rows.iter().any(|r| {
+            r.dbrow_get("entryTypeID").and_then(|v| v.as_i64())
+                == Some(i64::from(eve_db::ledger::ref_types::INSURANCE))
+                && r.dbrow_get("referenceID").and_then(|v| v.as_i64()) == Some(587)
+        }),
+        "account.GetTransactions must emit destroyed ship typeID (587) as referenceID for insurance entryTypeID=19 (#770)"
     );
 
     let notifs = ctx.drain_notifications_for_char(victim);

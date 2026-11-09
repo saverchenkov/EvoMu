@@ -232,15 +232,22 @@ pub fn encode_goal_attributes(attrs: &GoalAttributesView<'_>) -> Vec<u8> {
     }
     if let Some(corp) = attrs.corp_id.filter(|c| *c > 0) {
         // Attributes.organization = Organization { corporation = 1 }
+        // V24.01 goal_formatter also reads assigner (19) and assignee (20).
         let mut org = Vec::new();
         put_seq_id(1, corp as u64, &mut org);
         encode_bytes_field(9, &org, &mut a);
+        encode_bytes_field(19, &org, &mut a);
+        encode_bytes_field(20, &org, &mut a);
     }
     if state == GOAL_STATE_ACTIVE {
         encode_varint_field(10, 1, &mut a); // finish_time.not_finished = true
     } else {
         put_timestamp(11, attrs.created_unix.max(1), &mut a); // finish_time.finished
     }
+    encode_varint_field(14, 1, &mut a); // no_due_timestamp = true
+    encode_varint_field(23, 1, &mut a); // unlimited = true (total capacity)
+    encode_varint_field(25, 1, &mut a); // contribution_unlimited = true (per-participant)
+    encode_varint_field(27, 1, &mut a); // default = true (participation limit default)
     a
 }
 

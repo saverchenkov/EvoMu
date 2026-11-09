@@ -64,6 +64,27 @@ fn field(rep: &PyRep, key: &str) -> PyRep {
 fn rowset_data(rep: &PyRep) -> (Vec<String>, Vec<Vec<PyRep>>) {
     match rep {
         PyRep::Rowset { columns, rows } => (columns.clone(), rows.clone()),
+        PyRep::ObjectEx { is_type_2: true, list, .. } => {
+            let cols = list
+                .first()
+                .and_then(|item| match item {
+                    PyRep::DBRow { columns, .. } => {
+                        Some(columns.iter().map(|(k, _)| k.clone()).collect())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let rows = list
+                .iter()
+                .filter_map(|item| match item {
+                    PyRep::DBRow { columns, .. } => {
+                        Some(columns.iter().map(|(_, v)| v.clone()).collect())
+                    }
+                    _ => None,
+                })
+                .collect();
+            (cols, rows)
+        }
         _ => (Vec::new(), Vec::new()),
     }
 }
@@ -400,6 +421,11 @@ async fn test_corp_creation_info_branding_and_members() {
     assert_eq!(a1[1], PyRep::Integer(3));
     assert_eq!(a1[2], PyRep::Integer(0));
     assert_eq!(a1[3], PyRep::Integer(2));
+    assert!(
+        a1[0].is_crowset(),
+        "GetMembersPaged collection must be CRowset so V24 PagedCollection slicing works, got {:?}",
+        a1[0]
+    );
     let (_, p1_rows) = rowset_data(&a1[0]);
     assert_eq!(p1_rows.len(), 2);
 
@@ -424,6 +450,11 @@ async fn test_corp_creation_info_branding_and_members() {
     assert_eq!(a2[1], PyRep::Integer(3));
     assert_eq!(a2[2], PyRep::Integer(1));
     assert_eq!(a2[3], PyRep::Integer(2));
+    assert!(
+        a2[0].is_crowset(),
+        "GetMembersPaged page 2 collection must be CRowset, got {:?}",
+        a2[0]
+    );
     let (_, p2_rows) = rowset_data(&a2[0]);
     assert_eq!(p2_rows.len(), 1);
     assert_eq!(p2_rows[0][0], PyRep::Integer(PILOT_3));

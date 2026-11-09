@@ -777,7 +777,7 @@ pub fn execute_death_pipeline_sync_inner(
                     journal_char_id,
                     now_unix,
                 )
-                .with_context(eve_db::ledger::JournalContext::Character, victim_char_id),
+                .with_context(eve_db::ledger::JournalContext::Type, i64::from(victim_ship_type_id)),
             });
             snap.next_entity_id += 1;
             let mid = snap.next_entity_id;

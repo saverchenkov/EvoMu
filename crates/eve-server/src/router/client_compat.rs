@@ -503,6 +503,68 @@ pub fn normalize_macho_rpc_reply(
             return Ok(PyRep::Dict(out));
         }
     }
+    if matches!(service, "corpRegistry" | "machoNet") && method == "GetMembersPaged" {
+        if let Ok(PyRep::ObjectEx {
+            is_type_2: false,
+            header,
+            list,
+            dict,
+        }) = rpc_res
+        {
+            let header = match *header {
+                PyRep::Tuple(mut h) => {
+                    if h.len() == 2
+                        && h[0]
+                            == PyRep::Token(
+                                "eve.common.script.util.pagedCollection.PagedResultSet".into(),
+                            )
+                    {
+                        if let PyRep::Tuple(mut args) = h[1].clone() {
+                            if !args.is_empty() {
+                                const CORP_MEMBER_COLS: &[(&str, DbColumnType)] = &[
+                                    ("characterID", DbColumnType::I8),
+                                    ("name", DbColumnType::WStr),
+                                    ("role", DbColumnType::I8),
+                                    ("title", DbColumnType::WStr),
+                                    ("corporationID", DbColumnType::I8),
+                                    ("locationID", DbColumnType::I8),
+                                    ("shipTypeID", DbColumnType::I4),
+                                    ("logonDateTime", DbColumnType::FileTime),
+                                    ("roles", DbColumnType::I8),
+                                    ("grantableRoles", DbColumnType::I8),
+                                    ("rolesAtHQ", DbColumnType::I8),
+                                    ("grantableRolesAtHQ", DbColumnType::I8),
+                                    ("rolesAtBase", DbColumnType::I8),
+                                    ("grantableRolesAtBase", DbColumnType::I8),
+                                    ("rolesAtOther", DbColumnType::I8),
+                                    ("grantableRolesAtOther", DbColumnType::I8),
+                                    ("titleMask", DbColumnType::I8),
+                                    ("baseID", DbColumnType::I8),
+                                    ("startDateTime", DbColumnType::FileTime),
+                                    ("accountKey", DbColumnType::I4),
+                                    ("divisionID", DbColumnType::I4),
+                                    ("squadronID", DbColumnType::I4),
+                                    ("blockRoles", DbColumnType::I4),
+                                    ("blocksRoles", DbColumnType::I4),
+                                ];
+                                let coll = std::mem::replace(&mut args[0], PyRep::None);
+                                args[0] = rowset_to_crowset(coll, CORP_MEMBER_COLS);
+                            }
+                            h[1] = PyRep::Tuple(args);
+                        }
+                    }
+                    PyRep::Tuple(h)
+                }
+                other => other,
+            };
+            return Ok(PyRep::ObjectEx {
+                is_type_2: false,
+                header: Box::new(header),
+                list,
+                dict,
+            });
+        }
+    }
     if matches!(service, "corpRegistry" | "machoNet") && method == "GetTitles" {
         if let Ok(PyRep::Rowset { columns, rows }) = rpc_res {
             let key_idx = columns.iter().position(|c| c == "titleID").unwrap_or(0);
@@ -1285,6 +1347,38 @@ pub fn normalize_macho_rpc_reply(
             }
             other => return other,
         }
+    } else if service == "reprocessingSvc" && method == "Reprocess" {
+        let items = match rpc_res {
+            Ok(PyRep::List(items)) => items,
+            Ok(rep @ (PyRep::KeyVal(_) | PyRep::Dict(_))) => vec![rep],
+            other => return other,
+        };
+        let mut input_ids = Vec::with_capacity(items.len());
+        let mut by_type: std::collections::BTreeMap<i64, i64> =
+            std::collections::BTreeMap::new();
+        for item in items {
+            if let Some(id) = item.dict_get("itemID").and_then(PyRep::as_i64) {
+                input_ids.push(PyRep::Integer(id));
+            }
+            if let Some(PyRep::List(outputs)) = item.dict_get("outputs") {
+                for out in outputs {
+                    if let (Some(tid), Some(qty)) = (
+                        out.dict_get("typeID").and_then(PyRep::as_i64),
+                        out.dict_get("quantity").and_then(PyRep::as_i64),
+                    ) {
+                        *by_type.entry(tid).or_insert(0) += qty;
+                    }
+                }
+            }
+        }
+        let dict_entries = by_type
+            .into_iter()
+            .map(|(tid, qty)| (PyRep::Integer(tid), PyRep::Integer(qty)))
+            .collect();
+        return Ok(PyRep::Tuple(vec![
+            PyRep::List(input_ids),
+            PyRep::Dict(dict_entries),
+        ]));
     } else if service == "scanMgr" && method == "RecoverProbes" {
         if let Ok(ref rep) = rpc_res {
             if matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)) {

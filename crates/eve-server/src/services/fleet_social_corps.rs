@@ -4,7 +4,7 @@ use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 pub use eve_db::CorpGovState;
 use eve_db::{corp_roles, CorpApplicationRecord, IskCents, MailRecord};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, DBRowDescriptor, DbColumnType, PyRep};
 use std::collections::{HashMap, HashSet};
 
 pub fn with_corp_gov<R>(
@@ -402,13 +402,39 @@ fn handle_get_members_paged(
     let total_count = members.len();
     let offset = (page.saturating_sub(1)) * page_size;
     let rows: Vec<Vec<PyRep>> = members.iter().skip(offset).take(page_size).map(member_row_rep).collect();
-    let rowset = PyRep::rowset(MEMBER_COLS.to_vec(), rows);
+    let crowset = DBRowDescriptor::new([
+        ("characterID", DbColumnType::I8),
+        ("name", DbColumnType::WStr),
+        ("role", DbColumnType::I8),
+        ("title", DbColumnType::WStr),
+        ("corporationID", DbColumnType::I8),
+        ("locationID", DbColumnType::I8),
+        ("shipTypeID", DbColumnType::I4),
+        ("logonDateTime", DbColumnType::FileTime),
+        ("roles", DbColumnType::I8),
+        ("grantableRoles", DbColumnType::I8),
+        ("rolesAtHQ", DbColumnType::I8),
+        ("grantableRolesAtHQ", DbColumnType::I8),
+        ("rolesAtBase", DbColumnType::I8),
+        ("grantableRolesAtBase", DbColumnType::I8),
+        ("rolesAtOther", DbColumnType::I8),
+        ("grantableRolesAtOther", DbColumnType::I8),
+        ("titleMask", DbColumnType::I8),
+        ("baseID", DbColumnType::I8),
+        ("startDateTime", DbColumnType::FileTime),
+        ("accountKey", DbColumnType::I4),
+        ("divisionID", DbColumnType::I4),
+        ("squadronID", DbColumnType::I4),
+        ("blockRoles", DbColumnType::I4),
+        ("blocksRoles", DbColumnType::I4),
+    ])
+    .build_crowset(rows);
     Some(Ok(PyRep::ObjectEx {
         is_type_2: false,
         header: Box::new(PyRep::Tuple(vec![
             PyRep::Token("eve.common.script.util.pagedCollection.PagedResultSet".into()),
             PyRep::Tuple(vec![
-                rowset,
+                crowset,
                 PyRep::Integer(total_count as i64),
                 PyRep::Integer(page.saturating_sub(1) as i64),
                 PyRep::Integer(page_size as i64),

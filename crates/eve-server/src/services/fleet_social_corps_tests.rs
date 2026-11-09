@@ -253,7 +253,7 @@ fn corp_public_info_update_divisions_members_and_medals() {
     let PyRep::Tuple(hdr_parts) = *paged_hdr else { panic!() };
     assert_eq!(hdr_parts[0], PyRep::Token("eve.common.script.util.pagedCollection.PagedResultSet".into()));
     let PyRep::Tuple(ctor_args) = &hdr_parts[1] else { panic!() };
-    assert!(matches!(&ctor_args[0], PyRep::Rowset { rows, .. } if rows.len() == 1));
+    assert!(matches!(&ctor_args[0], PyRep::ObjectEx { is_type_2: true, list, .. } if list.len() == 1));
     assert_eq!(ctor_args[1].as_i64(), Some(2));
     assert_eq!(ctor_args[2].as_i64(), Some(0));
     assert_eq!(ctor_args[3].as_i64(), Some(1));

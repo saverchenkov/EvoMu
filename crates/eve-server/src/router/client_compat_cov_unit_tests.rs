@@ -695,3 +695,100 @@ fn normalize_contact_station_safety_compression_wars_store_and_err_passthrough()
     let err_pass = normalize_macho_rpc_reply("storeManager", "get_products", Err(BridgeRpcError { code: "store_offline".into(), message: "offline".into() })).expect_err("err");
     assert_eq!(err_pass.code, "store_offline");
 }
+
+#[test]
+fn issue_771_and_776_get_members_paged_crowset_and_reprocess_list_compat() {
+    // #771: PagedResultSet wraps a dbutil.CRowset (not util.Rowset) with 24 member columns.
+    let cols = vec![
+        "characterID", "name", "role", "title", "corporationID", "locationID", "shipTypeID",
+        "logonDateTime", "roles", "grantableRoles", "rolesAtHQ", "grantableRolesAtHQ",
+        "rolesAtBase", "grantableRolesAtBase", "rolesAtOther", "grantableRolesAtOther",
+        "titleMask", "baseID", "startDateTime", "accountKey", "divisionID", "squadronID",
+        "blockRoles", "blocksRoles",
+    ];
+    let row = vec![
+        PyRep::Integer(90_000_001),
+        PyRep::String("Pilot One".into()),
+        PyRep::Integer(1),
+        PyRep::String(String::new()),
+        PyRep::Integer(98_000_001),
+        PyRep::Integer(60_003_760),
+        PyRep::Integer(587),
+        PyRep::Integer(133_000_000_000_000_000),
+        PyRep::Integer(1),
+        PyRep::Integer(1),
+        PyRep::Integer(0),
+        PyRep::Integer(0),
+        PyRep::Integer(0),
+        PyRep::Integer(0),
+        PyRep::Integer(0),
+        PyRep::Integer(0),
+        PyRep::Integer(0),
+        PyRep::None,
+        PyRep::Integer(133_000_000_000_000_000),
+        PyRep::Integer(1000),
+        PyRep::Integer(0),
+        PyRep::Integer(0),
+        PyRep::Integer(0),
+        PyRep::Integer(0),
+    ];
+    let paged = PyRep::ObjectEx {
+        is_type_2: false,
+        header: Box::new(PyRep::Tuple(vec![
+            PyRep::Token("eve.common.script.util.pagedCollection.PagedResultSet".into()),
+            PyRep::Tuple(vec![
+                PyRep::rowset(cols, vec![row]),
+                PyRep::Integer(1),
+                PyRep::Integer(0),
+                PyRep::Integer(50),
+            ]),
+        ])),
+        list: Vec::new(),
+        dict: Vec::new(),
+    };
+    let normalized = normalize_macho_rpc_reply("corpRegistry", "GetMembersPaged", Ok(paged))
+        .expect("normalize GetMembersPaged");
+    let wire = eve_proto::marshal::encode(&normalized);
+    let roundtrip = eve_proto::marshal::decode(&wire).expect("decode GetMembersPaged");
+    let PyRep::ObjectEx { is_type_2: false, header, .. } = roundtrip else {
+        panic!("expected PagedResultSet ObjectEx");
+    };
+    let PyRep::Tuple(h) = header.as_ref() else { panic!("expected Tuple header") };
+    let PyRep::Tuple(args) = &h[1] else { panic!("expected Tuple args") };
+    let PyRep::ObjectEx { is_type_2: true, list, .. } = &args[0] else {
+        panic!("expected dbutil.CRowset inside PagedResultSet, got {:?}", args[0]);
+    };
+    assert_eq!(list.len(), 1);
+    assert!(matches!(&list[0], PyRep::DBRow { columns, .. } if columns.len() == 24));
+
+    // #776: 1-arg batch Reprocess list normalized on wire to (inputItemIDs, outputByTypeID)
+    let batch_reply = PyRep::List(vec![
+        PyRep::keyval([
+            ("itemID", PyRep::Integer(1001)),
+            (
+                "outputs",
+                PyRep::List(vec![PyRep::keyval([
+                    ("typeID", PyRep::Integer(34)),
+                    ("quantity", PyRep::Integer(120)),
+                ])]),
+            ),
+        ]),
+        PyRep::keyval([
+            ("itemID", PyRep::Integer(1002)),
+            (
+                "outputs",
+                PyRep::List(vec![PyRep::keyval([
+                    ("typeID", PyRep::Integer(34)),
+                    ("quantity", PyRep::Integer(80)),
+                ])]),
+            ),
+        ]),
+    ]);
+    let rep_norm = normalize_macho_rpc_reply("reprocessingSvc", "Reprocess", Ok(batch_reply))
+        .expect("normalize Reprocess");
+    let PyRep::Tuple(t) = rep_norm else {
+        panic!("expected 2-tuple from Reprocess compat");
+    };
+    assert_eq!(t[0], PyRep::List(vec![PyRep::Integer(1001), PyRep::Integer(1002)]));
+    assert_eq!(t[1], PyRep::Dict(vec![(PyRep::Integer(34), PyRep::Integer(200))]));
+}
