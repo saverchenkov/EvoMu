@@ -656,3 +656,69 @@ fn issue_550_wallet_rbac_trader_accountant_and_pending_stasis() {
         assert_eq!(snap.characters[&mem_id].balance, IskCents::from_isk(1_500));
     });
 }
+
+#[test]
+fn get_entry_types_covers_all_ref_types_and_matches_accountsvc_schema() {
+    use eve_db::ledger::ref_types;
+
+    let ctx = make_test_context();
+    let mut sess = char_session(90_000_001, 98_000_001);
+    let rep = handle(
+        &ctx,
+        &mut sess,
+        "account",
+        "GetEntryTypes",
+        &[],
+        &HashMap::new(),
+    )
+    .expect("account.GetEntryTypes handled")
+    .expect("account.GetEntryTypes succeeds");
+
+    let wire = eve_proto::marshal::encode(&rep);
+    let decoded = eve_proto::marshal::decode(&wire).expect("GetEntryTypes roundtrip");
+    let PyRep::ObjectEx { header, list, .. } = decoded else {
+        panic!("expected CRowset ObjectEx, got {rep:?}");
+    };
+    assert!(format!("{header:?}").contains("CRowset"));
+
+    let mut seen_ids = std::collections::HashSet::new();
+    for row in &list {
+        let PyRep::DBRow { columns, .. } = row else {
+            panic!("expected DBRow element, got {row:?}");
+        };
+        let get = |name: &str| {
+            columns
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v)
+                .unwrap_or_else(|| panic!("missing column {name}"))
+        };
+        let id = get("entryTypeID").as_i64().expect("entryTypeID integer") as i32;
+        let name = match get("entryTypeName") {
+            PyRep::String(s) => s,
+            other => panic!("expected entryTypeName string, got {other:?}"),
+        };
+        assert!(!name.is_empty(), "entryTypeName empty for {id}");
+        assert_eq!(get("entryTypeNameID"), &PyRep::None);
+        match get("description") {
+            PyRep::String(s) => assert!(!s.is_empty(), "description empty for {id}"),
+            other => panic!("expected description string, got {other:?}"),
+        }
+        seen_ids.insert(id);
+    }
+
+    for required in [
+        ref_types::MARKET_TRANSACTION,
+        ref_types::PLAYER_DONATION,
+        ref_types::CORPORATION_ACCOUNT_WITHDRAWAL,
+        ref_types::MARKET_ESCROW,
+        ref_types::BROKER_FEE,
+        ref_types::TRANSACTION_TAX,
+        ref_types::CONTRACT_COLLATERAL,
+        ref_types::CONTRACT_REWARD,
+        ref_types::CONTRACT_PRICE,
+        ref_types::CONTRACT_BROKERS_FEE,
+    ] {
+        assert!(seen_ids.contains(&required), "missing refType {required}");
+    }
+}

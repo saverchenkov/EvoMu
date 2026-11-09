@@ -65,6 +65,7 @@ const ALL_REMOTE_SLASH_COMMANDS: &[&str] = &[
     "kill",
     "load",
     "location",
+    "moveme",
     "online",
     "operation",
     "pd",
@@ -88,6 +89,7 @@ const ALL_REMOTE_SLASH_COMMANDS: &[&str] = &[
     "tidi",
     "tr",
     "trainskills",
+    "translocate",
     "unban",
     "unspawn",
     "unsuspend",
@@ -1357,75 +1359,18 @@ pub async fn handle(
                     ("typeID", PyRep::Integer(type_id as i64)),
                     ("solarSystemID", PyRep::Integer(sys_id as i64)),
                 ])))
-            } else if let Some(rest) = cmd.strip_prefix("/teleport ").or_else(|| cmd.strip_prefix("/tr ")) {
-                let sys_id_str = rest.trim();
-                let Ok(dest_sys_id) = sys_id_str.parse::<u32>() else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Usage: /teleport <solar_system_id> or /tr <solar_system_id>".into(),
-                    }));
-                };
-                if !ctx.sde.solar_systems.contains_key(&dest_sys_id) {
-                    return Some(Err(BridgeRpcError {
-                        code: "SolarSystemNotFound".into(),
-                        message: format!("Solar system {dest_sys_id} not found in SDE"),
-                    }));
-                }
-                let (old_sys_id, ship_id) = ctx.db.with_snapshot(|snap| {
-                    snap.characters.get(&cid).map(|c| (c.solar_system_id, c.active_ship_id))
-                }).or_else(|| session.solar_system_id.map(|s| (s, 0))).unwrap_or((0, 0));
-
-                let updated_ch = match ctx.db.set_character_solar_system(cid, dest_sys_id, &ctx.sde) {
-                    Ok(c) => c,
-                    Err(e) => return Some(Err(BridgeRpcError {
-                        code: "TeleportFailed".into(),
-                        message: e.to_string(),
-                    })),
-                };
-
-                if ship_id > 0 {
-                    let old_handle = ctx.systems.get_or_spawn(old_sys_id);
-                    let existing_ball = if old_sys_id != dest_sys_id {
-                        old_handle.remove_ball(ship_id).await
+            } else if let Some(rest) = ["/teleport", "/tr", "/translocate", "/moveme"]
+                .iter()
+                .find_map(|prefix| {
+                    if cmd == *prefix {
+                        Some("")
                     } else {
-                        old_handle.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b)
-                    };
-                    let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
-                    if old_sys_id != dest_sys_id || existing_ball.is_none() {
-                        let tr_pos = if !session.address.is_empty() {
-                            ctx.sde.stations.get(&60_003_760).filter(|s| s.solar_system_id == dest_sys_id).or_else(|| ctx.sde.stations.values().find(|s| s.solar_system_id == dest_sys_id)).map_or(DVec3::new(2_500_000_000.0, 0.0, 0.0), |s| s.position + DVec3::new(1_500.0, 0.0, 0.0))
-                        } else { DVec3::new(10_000.0, 0.0, 0.0) };
-                        let ship_tid = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(587);
-                        let mut new_ball = existing_ball.unwrap_or(Ball {
-                            id: ship_id, type_id: ship_tid, position: DVec3::ZERO, velocity: DVec3::ZERO,
-                            max_velocity: 300.0, inertia: 0.5, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop,
-                        });
-                        (new_ball.position, new_ball.velocity, new_ball.mode) = (tr_pos, DVec3::ZERO, MovementMode::Stop);
-                        let combat_state = ctx.build_ship_combat_state(cid, ship_id, new_ball.type_id);
-                        let slim_meta = ctx.build_ship_slim_meta(cid, new_ball.type_id);
-                        let _ = new_handle.spawn_ball_with_meta(new_ball, combat_state, slim_meta).await;
+                        cmd.strip_prefix(prefix)
+                            .filter(|r| r.starts_with(char::is_whitespace))
                     }
-                }
-
-                session.solar_system_id = Some(dest_sys_id);
-                session.constellation_id = Some(updated_ch.constellation_id);
-                session.region_id = Some(updated_ch.region_id);
-                session.station_id = None;
-                session.structure_id = None;
-                ctx.invalidate_bound_objects_for_session_transition(
-                    cid,
-                    dest_sys_id,
-                    None,
-                    "slash_teleport",
-                );
-
-                Some(Ok(PyRep::keyval([
-                    ("command", PyRep::String(cmd.to_string())),
-                    ("characterID", PyRep::Integer(cid)),
-                    ("solarSystemID", PyRep::Integer(dest_sys_id as i64)),
-                    ("constellationID", PyRep::Integer(updated_ch.constellation_id as i64)),
-                    ("regionID", PyRep::Integer(updated_ch.region_id as i64)),
-                ])))
+                })
+            {
+                Some(handle_slash_teleport(ctx, session, cid, cmd, rest).await)
             } else if cmd == "/heal" || cmd.starts_with("/heal ") {
                 let (sys_id, ship_id) = ctx.db.with_snapshot(|snap| {
                     snap.characters.get(&cid).map(|c| (c.solar_system_id, c.active_ship_id))
@@ -1487,6 +1432,306 @@ pub async fn handle(
 
         _ => super::config_service::handle(ctx, session, service, method, args, kwargs),
     }
+}
+
+/// Handles `/teleport`, `/tr`, `/translocate`, and `/moveme` slash commands.
+///
+/// Matches real V24.01 client slash syntax emitted by `menusvc.pyj`, `svc_slash.pyj`, and
+/// `publicQaToolsClient.pyj` (`[me|<char_id>] <location_id> [noblock]`, as well as
+/// `<location_id> me [noblock]`), resolving destinations across solar systems, NPC stations,
+/// Upwell structures, stargates, SDE celestials, and live in-system balls.
+async fn handle_slash_teleport(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    cid: i64,
+    cmd: &str,
+    rest: &str,
+) -> Result<PyRep, BridgeRpcError> {
+    let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
+    let args: Vec<&str> = tokens
+        .iter()
+        .map(String::as_str)
+        .filter(|t| !t.eq_ignore_ascii_case("noblock"))
+        .collect();
+
+    let (target_cid, loc_str) = match args.as_slice() {
+        [loc] => (cid, *loc),
+        [who, loc] if who.eq_ignore_ascii_case("me") || who.eq_ignore_ascii_case("myship") => {
+            (cid, *loc)
+        }
+        [loc, who] if who.eq_ignore_ascii_case("me") || who.eq_ignore_ascii_case("myship") => {
+            (cid, *loc)
+        }
+        [who, loc] => {
+            let Ok(parsed_cid) = who.parse::<i64>() else {
+                return Err(BridgeRpcError {
+                    code: "InvalidSlashArgument".into(),
+                    message: "Usage: /teleport|/tr|/translocate|/moveme [me|<char_id>] <location_id>"
+                        .into(),
+                });
+            };
+            if parsed_cid != cid
+                && !ctx.db.with_snapshot(|s| s.characters.contains_key(&parsed_cid))
+            {
+                return Err(BridgeRpcError {
+                    code: "CharacterNotFound".into(),
+                    message: format!("Character {parsed_cid} not found"),
+                });
+            }
+            (parsed_cid, *loc)
+        }
+        _ => {
+            return Err(BridgeRpcError {
+                code: "InvalidSlashArgument".into(),
+                message: "Usage: /teleport|/tr|/translocate|/moveme [me|<char_id>] <location_id>"
+                    .into(),
+            });
+        }
+    };
+
+    let Ok(target_id) = loc_str.parse::<i64>() else {
+        return Err(BridgeRpcError {
+            code: "InvalidSlashArgument".into(),
+            message: "Usage: /teleport|/tr|/translocate|/moveme [me|<char_id>] <location_id>"
+                .into(),
+        });
+    };
+    if target_id <= 0 {
+        return Err(BridgeRpcError {
+            code: "InvalidSlashArgument".into(),
+            message: "Usage: /teleport|/tr|/translocate|/moveme [me|<char_id>] <location_id>"
+                .into(),
+        });
+    }
+
+    let (old_sys_id, ship_id, was_in_space) = ctx
+        .db
+        .with_snapshot(|snap| {
+            snap.characters.get(&target_cid).map(|c| {
+                (
+                    c.solar_system_id,
+                    c.active_ship_id,
+                    c.station_id.is_none() && c.structure_id.is_none(),
+                )
+            })
+        })
+        .or_else(|| {
+            if target_cid == cid {
+                session.solar_system_id.map(|s| {
+                    (
+                        s,
+                        0,
+                        session.station_id.is_none() && session.structure_id.is_none(),
+                    )
+                })
+            } else {
+                None
+            }
+        })
+        .unwrap_or((0, 0, false));
+
+    let (dest_sys_id, explicit_pos): (u32, Option<DVec3>) = if let Some(sys_id) =
+        u32::try_from(target_id)
+            .ok()
+            .filter(|sid| ctx.sde.solar_systems.contains_key(sid))
+    {
+        (sys_id, None)
+    } else if let Some(st) = ctx.sde.stations.get(&target_id) {
+        (st.solar_system_id, Some(st.position + DVec3::new(5_000.0, 0.0, 0.0)))
+    } else if let Some(structure) =
+        ctx.db.with_snapshot(|snap| snap.structures.get(&target_id).cloned())
+    {
+        if structure.state == "Destroyed" {
+            return Err(BridgeRpcError {
+                code: "StructureDestroyed".into(),
+                message: format!("Structure {target_id} is destroyed"),
+            });
+        }
+        (
+            structure.solar_system_id,
+            Some(DVec3::from_array(structure.position) + DVec3::new(5_000.0, 0.0, 0.0)),
+        )
+    } else if let Some(jump) = ctx.sde.jumps.get(&target_id) {
+        (
+            jump.from_solar_system_id,
+            Some(jump.position + DVec3::new(2_500.0, 0.0, 0.0)),
+        )
+    } else if let Some(cel_sys_id) = ctx.sde.location_solar_system(target_id) {
+        let cel_pos = ctx
+            .sde
+            .celestials_in_system(cel_sys_id)
+            .into_iter()
+            .find(|c| c.celestial_id == target_id)
+            .map(|c| c.position + DVec3::new(c.radius.max(1_000.0) + 1_500.0, 0.0, 0.0));
+        (cel_sys_id, cel_pos)
+    } else if old_sys_id > 0 {
+        let sys_handle = ctx.systems.get_or_spawn(old_sys_id);
+        if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(target_id).await {
+            (
+                old_sys_id,
+                Some(ball.position + DVec3::new(ball.radius.max(500.0) + 1_500.0, 0.0, 0.0)),
+            )
+        } else {
+            return Err(BridgeRpcError {
+                code: "SolarSystemNotFound".into(),
+                message: format!("Solar system or location {target_id} not found"),
+            });
+        }
+    } else {
+        return Err(BridgeRpcError {
+            code: "SolarSystemNotFound".into(),
+            message: format!("Solar system or location {target_id} not found"),
+        });
+    };
+
+    let updated_ch = ctx
+        .db
+        .set_character_solar_system(target_cid, dest_sys_id, &ctx.sde)
+        .map_err(|e| BridgeRpcError {
+            code: "TeleportFailed".into(),
+            message: e.to_string(),
+        })?;
+
+    if ship_id > 0 {
+        let default_spawn_pos = || {
+            if !session.address.is_empty() {
+                ctx.sde
+                    .stations
+                    .get(&60_003_760)
+                    .filter(|s| s.solar_system_id == dest_sys_id)
+                    .or_else(|| {
+                        ctx.sde
+                            .stations
+                            .values()
+                            .find(|s| s.solar_system_id == dest_sys_id)
+                    })
+                    .map_or(DVec3::new(2_500_000_000.0, 0.0, 0.0), |s| {
+                        s.position + DVec3::new(1_500.0, 0.0, 0.0)
+                    })
+            } else {
+                DVec3::new(10_000.0, 0.0, 0.0)
+            }
+        };
+
+        let mut persisted_pos = None;
+        if old_sys_id != dest_sys_id {
+            let existing_ball = if old_sys_id > 0 {
+                let old_handle = ctx.systems.get_or_spawn(old_sys_id);
+                if was_in_space {
+                    crate::services::space_navigation_advanced::deactivate_ship_modules_on_leave_space(
+                        ctx, target_cid, ship_id,
+                    );
+                }
+                old_handle.remove_ball(ship_id).await
+            } else {
+                None
+            };
+            if old_sys_id > 0 {
+                ctx.sync_character_local_chat(target_cid, Some(old_sys_id), dest_sys_id);
+            }
+            let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
+            let tr_pos = explicit_pos.unwrap_or_else(default_spawn_pos);
+            let ship_tid = ctx
+                .db
+                .with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id))
+                .unwrap_or(587);
+            let mut new_ball = existing_ball.unwrap_or(Ball {
+                id: ship_id,
+                type_id: ship_tid,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 0.5,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            });
+            new_ball.position = tr_pos;
+            new_ball.velocity = DVec3::ZERO;
+            new_ball.speed_fraction = 0.0;
+            new_ball.mode = MovementMode::Stop;
+            let combat_state = ctx.build_ship_combat_state(target_cid, ship_id, new_ball.type_id);
+            let slim_meta = ctx.build_ship_slim_meta(target_cid, new_ball.type_id);
+            let _ = new_handle
+                .spawn_ball_with_meta(new_ball, combat_state, slim_meta)
+                .await;
+            let _ = new_handle.push_set_state(ship_id).await;
+            persisted_pos = Some(tr_pos);
+        } else {
+            let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
+            let existing_ball = new_handle
+                .get_ball_snapshot(ship_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|(_, b)| b);
+            if existing_ball.is_none() {
+                let tr_pos = explicit_pos.unwrap_or_else(default_spawn_pos);
+                let ship_tid = ctx
+                    .db
+                    .with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id))
+                    .unwrap_or(587);
+                let new_ball = Ball {
+                    id: ship_id,
+                    type_id: ship_tid,
+                    position: tr_pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 0.5,
+                    mass: 1_000_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                };
+                let combat_state = ctx.build_ship_combat_state(target_cid, ship_id, ship_tid);
+                let slim_meta = ctx.build_ship_slim_meta(target_cid, ship_tid);
+                let _ = new_handle
+                    .spawn_ball_with_meta(new_ball, combat_state, slim_meta)
+                    .await;
+                let _ = new_handle.push_set_state(ship_id).await;
+                persisted_pos = Some(tr_pos);
+            } else if let Some(tr_pos) = explicit_pos {
+                let _ = new_handle.set_ball_position(ship_id, tr_pos).await;
+                let _ = new_handle
+                    .set_movement_mode(ship_id, MovementMode::Stop)
+                    .await;
+                let _ = new_handle.push_set_state(ship_id).await;
+                persisted_pos = Some(tr_pos);
+            }
+        }
+
+        if let Some(pos) = persisted_pos {
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.item_positions.insert(ship_id, [pos.x, pos.y, pos.z]);
+            });
+        }
+    }
+
+    if target_cid == cid {
+        session.solar_system_id = Some(dest_sys_id);
+        session.constellation_id = Some(updated_ch.constellation_id);
+        session.region_id = Some(updated_ch.region_id);
+        session.station_id = None;
+        session.structure_id = None;
+    }
+    ctx.invalidate_bound_objects_for_session_transition(
+        target_cid,
+        dest_sys_id,
+        None,
+        "slash_teleport",
+    );
+
+    Ok(PyRep::keyval([
+        ("command", PyRep::String(cmd.to_string())),
+        ("characterID", PyRep::Integer(target_cid)),
+        ("solarSystemID", PyRep::Integer(dest_sys_id as i64)),
+        (
+            "constellationID",
+            PyRep::Integer(updated_ch.constellation_id as i64),
+        ),
+        ("regionID", PyRep::Integer(updated_ch.region_id as i64)),
+    ]))
 }
 
 /// Handles `machoNet.NoBlock` client keepalive ping semantics.

@@ -479,3 +479,342 @@ async fn createitem_and_giveitem_set_singleton_for_single_modules_and_emit_on_it
         "expected OnItemChange for /giveitem"
     );
 }
+
+fn keyval_i64(rep: &PyRep, key: &str) -> Option<i64> {
+    match rep {
+        PyRep::KeyVal(entries) => entries
+            .iter()
+            .find(|(k, _)| k.as_str() == key)
+            .and_then(|(_, v)| v.as_i64()),
+        PyRep::Object { args, .. } => args.as_dict().and_then(|d| {
+            d.iter()
+                .find(|(k, _)| matches!(k, PyRep::String(s) if s == key))
+                .and_then(|(_, v)| v.as_i64())
+        }),
+        _ => None,
+    }
+}
+
+#[tokio::test]
+async fn slash_tr_moveme_translocate_and_teleport_support_me_and_location_types() {
+    let ctx = test_ctx();
+    let uid = 1_u64;
+    let cid = 90_000_001_i64;
+    let ship_id = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&cid).map(|c| c.active_ship_id))
+        .unwrap_or(0);
+    assert!(ship_id > 0);
+    let kw = HashMap::new();
+
+    // Verify ALL_REMOTE_SLASH_COMMANDS exposes moveme & translocate for QA/GM roles
+    let qa_cmds = remote_slash_commands_for_role(service_roles::ROLE_QA);
+    assert!(qa_cmds.contains(&"moveme") && qa_cmds.contains(&"translocate"));
+    let gm_cmds = remote_slash_commands_for_role(service_roles::ROLE_GM_MASK);
+    for expected in ["teleport", "tr", "moveme", "translocate"] {
+        assert!(gm_cmds.contains(&expected), "missing {expected}");
+    }
+
+    // 1. /tr me <solarSystemID> (Jita -> Perimeter) and /tr <charID> <solarSystemID> back
+    let mut sess = auth_session(uid, cid, 98_000_001, 30_000_142);
+    sess.role = service_roles::ROLE_GMH;
+    let res = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/tr me 30000144".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("/tr me 30000144");
+    assert_eq!(keyval_i64(&res, "solarSystemID"), Some(30_000_144));
+    assert_eq!(sess.solar_system_id, Some(30_000_144));
+    assert_eq!(sess.station_id, None);
+
+    let res_cid = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/tr {cid} 30000142 noblock"))],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("/tr <cid> 30000142 noblock");
+    assert_eq!(keyval_i64(&res_cid, "solarSystemID"), Some(30_000_142));
+
+    // 2. /moveme <stationID> while docked in Jita 4-4 undocks/moves ship in space near station
+    sess.role = service_roles::ROLE_QA;
+    let _ = ctx.db.dock_character(cid, 60_003_760, false);
+    sess.station_id = Some(60_003_760);
+    let target_station = ctx
+        .sde
+        .stations
+        .values()
+        .find(|s| s.solar_system_id == 30_000_144)
+        .or_else(|| ctx.sde.stations.get(&60_003_760))
+        .expect("station in SDE")
+        .clone();
+    let res_st = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/moveme {}", target_station.station_id))],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("/moveme <stationID>");
+    assert_eq!(
+        keyval_i64(&res_st, "solarSystemID"),
+        Some(i64::from(target_station.solar_system_id))
+    );
+    assert_eq!(sess.station_id, None);
+    let st_ball = ctx
+        .systems
+        .get_or_spawn(target_station.solar_system_id)
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .expect("ship spawned near target station")
+        .1;
+    assert!((st_ball.position - target_station.position).length() >= 4_500.0);
+
+    // 3. /tr me <sameSystemStationID> while already in space updates Ballpark position
+    let jita_st = ctx.sde.stations.get(&60_003_760).unwrap().clone();
+    sess.role = service_roles::ROLE_GMH;
+    let _ = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/tr me 30000142".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let _ = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/tr me 60003760".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("/tr me same-system station");
+    let same_sys_ball = ctx
+        .systems
+        .get_or_spawn(30_000_142)
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .expect("ship ball in Jita")
+        .1;
+    assert!((same_sys_ball.position - (jita_st.position + DVec3::new(5_000.0, 0.0, 0.0))).length() < 1.0);
+
+    // 4. /translocate <structureID> (active structure succeeds; destroyed structure fails)
+    let active_struct_id = 1_000_000_990_001_i64;
+    let destroyed_struct_id = 1_000_000_990_002_i64;
+    let struct_pos = [12_000_000.0, -3_000_000.0, 4_000_000.0];
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            active_struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: active_struct_id,
+                type_id: 35832,
+                owner_corp_id: 98_000_001,
+                solar_system_id: 30_000_144,
+                name: "Test Astrahus".into(),
+                position: struct_pos,
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 1.0,
+                armor_hp: 1.0,
+                hull_hp: 1.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        snap.structures.insert(
+            destroyed_struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: destroyed_struct_id,
+                type_id: 35832,
+                owner_corp_id: 98_000_001,
+                solar_system_id: 30_000_144,
+                name: "Dead Astrahus".into(),
+                position: struct_pos,
+                state: "Destroyed".into(),
+                quantum_core_installed: false,
+                fuel_blocks: 0,
+                shield_hp: 0.0,
+                armor_hp: 0.0,
+                hull_hp: 0.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+    });
+    sess.role = service_roles::ROLE_QA;
+    let res_str = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/translocate me {active_struct_id}"))],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("/translocate me <structureID>");
+    assert_eq!(keyval_i64(&res_str, "solarSystemID"), Some(30_000_144));
+    let str_ball = ctx
+        .systems
+        .get_or_spawn(30_000_144)
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .1;
+    assert!((str_ball.position - (DVec3::from_array(struct_pos) + DVec3::new(5_000.0, 0.0, 0.0))).length() < 1.0);
+
+    let err_destroyed = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/translocate {destroyed_struct_id}"))],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_destroyed.code, "StructureDestroyed");
+
+    // 5. Stargate / celestial / live ball in current system
+    if let Some((&gate_id, gate)) = ctx.sde.jumps.iter().next() {
+        sess.role = service_roles::ROLE_GMH;
+        let res_gate = handle(
+            &ctx,
+            &mut sess,
+            "slash",
+            "SlashCmd",
+            &[PyRep::String(format!("/tr me {gate_id}"))],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect("/tr me <stargateID>");
+        assert_eq!(
+            keyval_i64(&res_gate, "solarSystemID"),
+            Some(i64::from(gate.from_solar_system_id))
+        );
+    }
+    let dyn_ball_id = 77_000_888_i64;
+    let dyn_pos = DVec3::new(987_654.0, -123_456.0, 42_000.0);
+    let cur_sys = sess.solar_system_id.unwrap();
+    let _ = ctx
+        .systems
+        .get_or_spawn(cur_sys)
+        .spawn_ball(Ball {
+            id: dyn_ball_id,
+            type_id: 587,
+            position: dyn_pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 0.5,
+            mass: 1_000_000.0,
+            radius: 100.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    sess.role = service_roles::ROLE_GMH;
+    handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/tr me {dyn_ball_id}"))],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("/tr me <live ballID>");
+    let moved_ball = ctx
+        .systems
+        .get_or_spawn(cur_sys)
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .1;
+    assert!((moved_ball.position - (dyn_pos + DVec3::new(2_000.0, 0.0, 0.0))).length() < 1.0);
+
+    // 6. Negative cases: missing args, unknown ID, unknown target char, insufficient role
+    for bad in ["/tr", "/moveme", "/tr me", "/tr me notanumber"] {
+        let err = handle(
+            &ctx,
+            &mut sess,
+            "slash",
+            "SlashCmd",
+            &[PyRep::String(bad.into())],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err.code, "InvalidSlashArgument", "cmd {bad}");
+    }
+    let err_missing = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/tr me 999999999".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_missing.code, "SolarSystemNotFound");
+
+    let err_char = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/tr 999999998 30000142".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_char.code, "CharacterNotFound");
+
+    sess.role = service_roles::ROLE_PLAYER;
+    let err_role = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/moveme 30000142".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_role.code, "InsufficientRole");
+}
