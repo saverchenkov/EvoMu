@@ -653,3 +653,36 @@ fn is_warp_finishing_within_1s_matches_deceleration_dropout_equation() {
     }
     assert!(saw_gt_1s && saw_le_1s);
 }
+
+#[test]
+fn step_scales_gate_cloak_warp_and_undock_tick_timers_with_dt() {
+    let mut park = Ballpark::new(30_000_142);
+    let mut ship = make_ball(20, DVec3::ZERO, DVec3::ZERO, MovementMode::Stop);
+    ship.speed_fraction = 0.0;
+    park.add_ball(ship);
+    park.combat_states.insert(
+        20,
+        crate::CombatState {
+            is_cloaked: true,
+            gate_cloak_remaining_ticks: 60,
+            warp_exit_invulnerable_remaining_ticks: 10,
+            undock_invulnerable_remaining_ticks: 60,
+            sync_invuln_with_undock_timer: true,
+            ..Default::default()
+        },
+    );
+
+    park.step(15.0);
+    let cs = &park.combat_states[&20];
+    assert_eq!(cs.gate_cloak_remaining_ticks, 45);
+    assert_eq!(cs.warp_exit_invulnerable_remaining_ticks, 0);
+    assert_eq!(cs.undock_invulnerable_remaining_ticks, 45);
+    assert!(cs.is_cloaked);
+
+    park.step(45.0);
+    let cs = &park.combat_states[&20];
+    assert_eq!(cs.gate_cloak_remaining_ticks, 0);
+    assert_eq!(cs.undock_invulnerable_remaining_ticks, 0);
+    assert!(!cs.is_cloaked);
+    assert!(!cs.sync_invuln_with_undock_timer);
+}

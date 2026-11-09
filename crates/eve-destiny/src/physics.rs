@@ -243,6 +243,7 @@ impl Ballpark {
         self.step_collision_bumping(&pre_step_balls, &positions, dt);
 
         // Gate cloak, post-warp invulnerability, and undock invulnerability decay and break on active movement (`SP-3`, `SP-4`, `SP-5`)
+        let elapsed_ticks = (dt.floor() as u32).max(1);
         let mut gate_decloaked = Vec::new();
         for (&id, cs) in &mut self.combat_states {
             cs.sync_action_breaks();
@@ -260,7 +261,7 @@ impl Ballpark {
                     gate_decloaked.push(id);
                 } else {
                     cs.gate_cloak_remaining_ticks =
-                        cs.gate_cloak_remaining_ticks.saturating_sub(1);
+                        cs.gate_cloak_remaining_ticks.saturating_sub(elapsed_ticks);
                     if cs.gate_cloak_remaining_ticks == 0 {
                         cs.is_cloaked = false;
                         cs.sync_invuln_with_undock_timer = false;
@@ -280,7 +281,7 @@ impl Ballpark {
                     cs.sync_invuln_with_undock_timer = false;
                 } else {
                     cs.warp_exit_invulnerable_remaining_ticks =
-                        cs.warp_exit_invulnerable_remaining_ticks.saturating_sub(1);
+                        cs.warp_exit_invulnerable_remaining_ticks.saturating_sub(elapsed_ticks);
                     if cs.warp_exit_invulnerable_remaining_ticks == 0 {
                         cs.sync_invuln_with_undock_timer = false;
                     }
@@ -288,7 +289,7 @@ impl Ballpark {
             }
             if cs.undock_invulnerable_remaining_ticks > 0 {
                 cs.undock_invulnerable_remaining_ticks =
-                    cs.undock_invulnerable_remaining_ticks.saturating_sub(1);
+                    cs.undock_invulnerable_remaining_ticks.saturating_sub(elapsed_ticks);
                 if cs.undock_invulnerable_remaining_ticks == 0 {
                     cs.sync_invuln_with_undock_timer = false;
                 }
