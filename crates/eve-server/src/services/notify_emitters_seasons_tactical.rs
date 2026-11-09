@@ -813,7 +813,7 @@ pub(crate) fn handle_load_ammo(
             })
         });
 
-    ctx.db.try_with_mut_snapshot(|snap| {
+    let item_diffs = ctx.db.try_with_mut_snapshot(|snap| {
         if let Some(cargo_cap) = cargo_cap_opt {
             let source_in_cargo = snap
                 .items
@@ -859,13 +859,18 @@ pub(crate) fn handle_load_ammo(
             }
         }
 
-        let charge_owner = snap.items.get(&first_charge_id).map(|it| it.owner_id).unwrap_or(char_id);
+        let mut diffs: Vec<(Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>)> =
+            Vec::new();
+        let pre_source = snap.items.get(&first_charge_id).cloned();
+        let charge_owner = pre_source.as_ref().map(|it| it.owner_id).unwrap_or(char_id);
         snap.consume_exact_item_quantity(
             first_charge_id,
             total_needed,
             eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), charge_owner),
         )
         .map_err(|e| rpc_err("InventoryError", e.to_string()))?;
+        let post_source = snap.items.get(&first_charge_id).cloned();
+        diffs.push((pre_source, post_source));
         for &(mod_id, alloc_qty) in &mod_allocations {
             let Some(mod_item) = snap.items.get(&mod_id).cloned() else {
                 continue;
@@ -885,28 +890,34 @@ pub(crate) fn handle_load_ammo(
                 .collect();
             for pid in prev_charges {
                 if let Some(pi) = snap.items.get_mut(&pid) {
+                    let pre = pi.clone();
                     pi.flag = InventoryFlag::Cargo;
+                    pi.version += 1;
+                    diffs.push((Some(pre), Some(pi.clone())));
                 }
             }
             snap.next_entity_id += 1;
             let new_charge_id = snap.next_entity_id;
-            snap.items.insert(
-                new_charge_id,
-                eve_db::InventoryItemRecord {
-                    item_id: new_charge_id,
-                    type_id: charge_type_id,
-                    owner_id: char_id,
-                    location_id: ship_id,
-                    flag: slot_flag,
-                    quantity: alloc_qty,
-                    singleton: false,
-                    version: 1,
-                    ..Default::default()
-                },
-            );
+            let new_rec = eve_db::InventoryItemRecord {
+                item_id: new_charge_id,
+                type_id: charge_type_id,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: slot_flag,
+                quantity: alloc_qty,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            };
+            snap.items.insert(new_charge_id, new_rec.clone());
+            diffs.push((None, Some(new_rec)));
         }
-        Ok(())
+        Ok(diffs)
     })?;
+
+    for (pre, post) in item_diffs {
+        ctx.notify_item_mutation(char_id, pre.as_ref(), post.as_ref());
+    }
 
     let is_in_space = session.station_id.is_none() && session.structure_id.is_none();
     let is_script = ctx.sde.types.get(&charge_type_id).is_some_and(|t| t.group_id == 908);

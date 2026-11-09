@@ -60,6 +60,7 @@ pub fn notify_special_site_account_changes(
                 args.clone(),
             );
         let notif = crate::router::cache_notifications::PendingMachoNotification {
+            seq_id: crate::router::cache_notifications::next_notification_seq_id(),
             recipient_char_id: char_id,
             event: "OnAccountChange".into(),
             id_type: "charid".into(),

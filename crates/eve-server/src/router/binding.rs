@@ -909,6 +909,7 @@ impl ServerContext {
             let (packet, marshaled_packet) =
                 ServerContext::build_macho_notification_packet(char_id, user_id, "OnGodmaShipEffect", "charid", args.clone());
             let notif = PendingMachoNotification {
+                seq_id: crate::router::cache_notifications::next_notification_seq_id(),
                 recipient_char_id: char_id,
                 event: "OnGodmaShipEffect".to_string(),
                 id_type: "charid".to_string(),
@@ -949,6 +950,7 @@ impl ServerContext {
                 let (sfx_pkt, sfx_bytes) =
                     ServerContext::build_macho_notification_packet(char_id, user_id, "OnSpecialFX", "charid", sfx_args.clone());
                 let sfx_notif = PendingMachoNotification {
+                    seq_id: crate::router::cache_notifications::next_notification_seq_id(),
                     recipient_char_id: char_id,
                     event: "OnSpecialFX".to_string(),
                     id_type: "charid".to_string(),
@@ -987,6 +989,7 @@ impl ServerContext {
                     reload_args.clone(),
                 );
                 let r_notif = PendingMachoNotification {
+                    seq_id: crate::router::cache_notifications::next_notification_seq_id(),
                     recipient_char_id: char_id,
                     event: "OnChargeBeingLoadedToModule".to_string(),
                     id_type: "charid".to_string(),
@@ -1025,6 +1028,7 @@ impl ServerContext {
                 let (packet, marshaled_packet) =
                     ServerContext::build_macho_notification_packet(rcpt_char, rcpt_user, "OnMultiEvent", "charid", args.clone());
                 let notif = PendingMachoNotification {
+                    seq_id: crate::router::cache_notifications::next_notification_seq_id(),
                     recipient_char_id: rcpt_char,
                     event: "OnMultiEvent".to_string(),
                     id_type: "charid".to_string(),

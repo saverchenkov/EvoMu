@@ -541,6 +541,7 @@ pub(crate) fn emit_expedition_destruction_notifications(
             let (packet, marshaled_packet) =
                 ServerContext::build_macho_notification_packet(cid, uid, event, "solarsystemid", args.clone());
             let notif = crate::router::cache_notifications::PendingMachoNotification {
+                seq_id: crate::router::cache_notifications::next_notification_seq_id(),
                 recipient_char_id: cid,
                 event: event.to_string(),
                 id_type: "solarsystemid".to_string(),

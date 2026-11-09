@@ -94,6 +94,7 @@ pub fn emit_structure_cfg_and_jammer_notifications(
             PyRep::List(vec![
                 PyRep::Integer(structure_id),
                 PyRep::String(name.to_string()),
+                PyRep::Integer(i64::from(sys_id)),
                 PyRep::Real(pos[0]),
                 PyRep::Real(pos[1]),
                 PyRep::Real(pos[2]),

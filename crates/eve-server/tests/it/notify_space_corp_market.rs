@@ -1829,7 +1829,7 @@ async fn notify_batch9_jump_queue_flagged_lists_and_cfg_data() {
     .await
     .is_err());
 
-    // Positive: CEO renaming structure emits OnCfgDataChanged(["evelocations", 6-elem list])
+    // Positive: CEO renaming structure emits OnCfgDataChanged(["evelocations", 7-elem list])
     let _ = rpc(
         &ctx,
         &mut sess_a,
@@ -1843,7 +1843,14 @@ async fn notify_batch9_jump_queue_flagged_lists_and_cfg_data() {
     let cfg_args = find_notif(&cfg_notifs, "OnCfgDataChanged");
     assert_eq!(cfg_args.len(), 2);
     assert_eq!(cfg_args[0], PyRep::String("evelocations".into()));
-    assert!(matches!(&cfg_args[1], PyRep::List(elems) if elems.len() == 6));
+    assert!(matches!(
+        &cfg_args[1],
+        PyRep::List(elems)
+            if elems.len() == 7
+                && elems[0] == PyRep::Integer(struct_id)
+                && elems[1] == PyRep::String("New Astrahus".into())
+                && elems[2] == PyRep::Integer(30000142)
+    ));
 }
 
 // parity: notify:OnServerMessage

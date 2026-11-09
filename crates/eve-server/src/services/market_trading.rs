@@ -103,14 +103,6 @@ pub(crate) fn unix_to_filetime(unix_secs: u64) -> i64 {
     (unix_secs as i64 + 11_644_473_600).saturating_mul(10_000_000)
 }
 
-pub(crate) fn acct_change_key(is_corp: bool, div_id: u8) -> String {
-    if !is_corp || div_id <= 1 {
-        "cash".to_string()
-    } else {
-        format!("cash{div_id}")
-    }
-}
-
 pub(crate) fn emit_market_account_change(
     ctx: &ServerContext,
     is_corp: bool,
@@ -118,21 +110,7 @@ pub(crate) fn emit_market_account_change(
     div_id: u8,
     balance: IskCents,
 ) {
-    if is_corp {
-        let key = acct_change_key(true, div_id);
-        let _ = ctx.notify(
-            NotificationTarget::Corporation(owner_id),
-            "OnAccountChange",
-            "corpid",
-            vec![
-                PyRep::String(key.into()),
-                PyRep::Integer(owner_id),
-                PyRep::Real(balance.to_wire_f64()),
-            ],
-        );
-    } else {
-        let _ = ctx.notify_account_change(owner_id, "cash", owner_id, balance.to_wire_f64());
-    }
+    let _ = ctx.notify_wallet_balance(is_corp, owner_id, div_id, balance);
 }
 
 pub(crate) fn emit_market_item_change(
@@ -141,10 +119,55 @@ pub(crate) fn emit_market_item_change(
     item: &InventoryItemRecord,
     changes: Vec<(i32, PyRep)>,
 ) {
-    let row = eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(
-        crate::services::inventory_bound::item_to_packed_cells(ctx, item),
+    let _ = ctx.emit_item_change_routed(recipient_char_id, item, changes);
+}
+
+pub(crate) fn notify_own_order_changed(
+    ctx: &ServerContext,
+    owner_id: i64,
+    fallback_char_id: i64,
+    order_id: i64,
+    reason: &str,
+) {
+    let (is_corp, in_corp) = ctx.db.with_snapshot(|snap| {
+        let is_corp = snap.corporations.contains_key(&owner_id);
+        let in_corp = is_corp
+            && fallback_char_id > 0
+            && snap
+                .corporations
+                .get(&owner_id)
+                .is_some_and(|c| c.members.contains(&fallback_char_id));
+        (is_corp, in_corp)
+    });
+    let payload = crate::services::market_price_history::build_own_order_changed_payload(
+        ctx,
+        order_id,
+        reason,
+        is_corp,
     );
-    let _ = ctx.notify_item_change(recipient_char_id, row, changes);
+    if is_corp {
+        ctx.notify(
+            NotificationTarget::Corporation(owner_id),
+            "OnOwnOrdersChanged",
+            "corpid",
+            payload.clone(),
+        );
+        if !in_corp && fallback_char_id > 0 {
+            ctx.notify(
+                NotificationTarget::Character(fallback_char_id),
+                "OnOwnOrdersChanged",
+                "charid",
+                payload,
+            );
+        }
+    } else {
+        ctx.notify(
+            NotificationTarget::Character(owner_id),
+            "OnOwnOrdersChanged",
+            "charid",
+            payload,
+        );
+    }
 }
 
 pub(crate) fn resolve_corp_recipient_char(
@@ -1279,6 +1302,7 @@ pub fn handle(
                 if remaining_qty == 0 {
                     return Ok((
                         first_matched_oid.unwrap_or(0),
+                        order_owner_id,
                         true,
                         IskCents(0),
                         actual_sales_tax_charged,
@@ -1431,13 +1455,13 @@ pub fn handle(
                         });
                     }
                 }
-                Ok((new_oid, false, broker_fee, actual_sales_tax_charged, escrow, matched_sellers, delivered_items, delivered_item_records, buyer_acct_after, seller_acct_updates))
+                Ok((new_oid, order_owner_id, false, broker_fee, actual_sales_tax_charged, escrow, matched_sellers, delivered_items, delivered_item_records, buyer_acct_after, seller_acct_updates))
             });
 
             match res {
-                Ok((order_id, filled_immediately, broker_fee, actual_sales_tax_charged, escrow_cents, matched_sellers, delivered_items, delivered_item_records, buyer_acct_after, seller_acct_updates)) => {
+                Ok((order_id, order_owner_id, filled_immediately, broker_fee, actual_sales_tax_charged, escrow_cents, matched_sellers, delivered_items, delivered_item_records, buyer_acct_after, seller_acct_updates)) => {
                     for (matched_oid, seller_id) in matched_sellers {
-                        ctx.notify(NotificationTarget::Character(seller_id), "OnOwnOrdersChanged", "charid", crate::services::market_price_history::build_own_order_changed_payload(ctx, matched_oid, "Change", false));
+                        notify_own_order_changed(ctx, seller_id, 0, matched_oid, "Change");
                     }
                     for (s_is_corp, s_owner, s_div, s_bal) in seller_acct_updates {
                         emit_market_account_change(ctx, s_is_corp, s_owner, s_div, s_bal);
@@ -1453,7 +1477,13 @@ pub fn handle(
                         // "OnClientEvent_MarketItemReceived" is scattered internally by MarketQuote.
                         ctx.notify(NotificationTarget::Character(char_id), "OnMarketItemReceived", "charid", vec![PyRep::Integer(iid), PyRep::Integer(tid as i64), PyRep::Integer(flag_id), PyRep::Integer(loc_id)]);
                     }
-                    ctx.notify(NotificationTarget::Character(char_id), "OnOwnOrdersChanged", "charid", crate::services::market_price_history::build_own_order_changed_payload(ctx, order_id, if filled_immediately { "Change" } else { "Add" }, use_corp));
+                    notify_own_order_changed(
+                        ctx,
+                        order_owner_id,
+                        char_id,
+                        order_id,
+                        if filled_immediately { "Change" } else { "Add" },
+                    );
                     Some(Ok(PyRep::keyval([
                         ("orderID", PyRep::Integer(order_id)), ("filledImmediately", PyRep::Bool(filled_immediately)),
                         ("brokerFeeISK", PyRep::Real(broker_fee.to_wire_f64())), ("salesTaxISK", PyRep::Real(actual_sales_tax_charged.to_wire_f64())),

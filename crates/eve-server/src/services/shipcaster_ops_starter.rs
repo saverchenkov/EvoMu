@@ -124,6 +124,7 @@ pub(crate) fn emit_shipcaster_target_state_changed_core(
             args.clone(),
         );
         let note = PendingMachoNotification {
+            seq_id: crate::router::cache_notifications::next_notification_seq_id(),
             recipient_char_id: cid,
             event: "OnShipcasterTargetStateChanged".into(),
             id_type: "solarsystemid".into(),

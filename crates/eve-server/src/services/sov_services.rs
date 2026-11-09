@@ -49,6 +49,7 @@ pub fn scale_entosis_capture_seconds(base_seconds: u64, adm: f64) -> u64 {
 /// Broadcasts `OnSovereigntyChanged(solarSystemID, allianceID)` (exact V24 2-arg signature)
 /// to all sessions and queues destiny event for the solar system.
 pub fn emit_sovereignty_changed(ctx: &ServerContext, sys_id: u32, alliance_id: Option<i64>, _corp_id: Option<i64>) {
+    ctx.invalidate_cached_method("stationSvc", "GetAllianceSystems");
     ctx.notify(
         NotificationTarget::All,
         "OnSovereigntyChanged",

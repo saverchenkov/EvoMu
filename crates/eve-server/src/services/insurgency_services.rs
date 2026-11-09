@@ -843,6 +843,7 @@ pub fn notify_stronghold_destruction(
             update_args.clone(),
         );
         let notif = crate::router::cache_notifications::PendingMachoNotification {
+            seq_id: crate::router::cache_notifications::next_notification_seq_id(),
             recipient_char_id: cid, event: "OnInsurgencyCampaignUpdatedForLocation".into(),
             id_type: "solarsystemid".into(), args: update_args.clone(), packet, marshaled_packet, created_filetime: now_ft,
         };
@@ -856,6 +857,7 @@ pub fn notify_stronghold_destruction(
                 cid, None, "OnSystemFullySuppressedForFaction", "solarsystemid", fs_args.clone(),
             );
             let notif_fs = crate::router::cache_notifications::PendingMachoNotification {
+                seq_id: crate::router::cache_notifications::next_notification_seq_id(),
                 recipient_char_id: cid, event: "OnSystemFullySuppressedForFaction".into(),
                 id_type: "solarsystemid".into(), args: fs_args.clone(), packet: packet_fs, marshaled_packet: marshaled_packet_fs, created_filetime: now_ft,
             };

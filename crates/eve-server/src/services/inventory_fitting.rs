@@ -1740,7 +1740,19 @@ async fn handle_invbroker_add(
                     if updated.owner_id != old_owner_id {
                         item_changes.push((2, PyRep::Integer(old_owner_id)));
                     }
-                    super::inventory_bound::emit_inv_item_change(ctx, char_id, &updated, item_changes);
+                    super::inventory_bound::emit_inv_item_change(ctx, char_id, &updated, item_changes.clone());
+                    let old_flag_enum = InventoryFlag::from_u16(old_flag_id as u16);
+                    if did_split.is_none()
+                        && crate::router::ServerContext::is_corp_hangar_flag(old_flag_enum)
+                        && !crate::router::ServerContext::is_corp_hangar_flag(updated.flag)
+                    {
+                        ctx.notify_item_record_change_with_target(
+                            crate::router::NotificationTarget::Corporation(old_owner_id),
+                            "corpid",
+                            &updated,
+                            item_changes,
+                        );
+                    }
                     ctx.notify(
                         crate::router::NotificationTarget::Character(char_id),
                         "ProcessInventoryChange",

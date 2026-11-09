@@ -228,21 +228,27 @@ fn give_cash_from_corp(
             .debit_division(from_div, amount)
             .ok_or_else(|| rpc_err("NotEnoughMoney", "Insufficient funds in the source wallet division"))?;
         let internal = to_id == corp_id;
-        let mut to_bal = None;
-        if internal {
+        let mut to_bal: Option<(i64, i32, IskCents)> = None;
+        let dest_info = if internal {
             let to_div = to_key
                 .and_then(division_of)
                 .ok_or_else(|| rpc_err("InvalidAccountKey", "toAccountKey required for a division transfer"))?;
             let nb = corp.credit_division(to_div, amount);
             to_bal = Some((corp_id, to_div as i32 + 999, nb));
-        }
+            Some((true, corp_id, to_div, nb))
+        } else {
+            None
+        };
+        let mut ext_dest = dest_info;
         if !internal {
             if let Some(ch) = snap.characters.get_mut(&to_id) {
                 ch.balance = ch.balance.checked_add(amount).unwrap_or(ch.balance);
                 to_bal = Some((to_id, ACCOUNTING_KEY_CASH, ch.balance));
+                ext_dest = Some((false, to_id, 1, ch.balance));
             } else if let Some(other) = snap.corporations.get_mut(&to_id) {
                 let mw = other.credit_division(1, amount);
                 to_bal = Some((to_id, ACCOUNTING_KEY_CASH, mw));
+                ext_dest = Some((true, to_id, 1, mw));
             } else {
                 return Err(rpc_err("InvalidRecipient", format!("Recipient {to_id} not found")));
             }
@@ -267,11 +273,12 @@ fn give_cash_from_corp(
             reason: desc,
             meta: meta.with_account_key(rkey),
         });
-        Ok((corp_id, rid, rbal, internal))
+        Ok((corp_id, from_div, new_from, ext_dest))
     })?;
-    let (_, rid, rbal, internal) = res;
-    if !internal && ctx.db.with_snapshot(|s| s.characters.contains_key(&rid)) {
-        let _ = ctx.notify_account_change(rid, "cash", rid, rbal.to_wire_f64());
+    let (src_corp_id, src_div, src_bal, dest_update) = res;
+    let _ = ctx.notify_wallet_balance(true, src_corp_id, src_div, src_bal);
+    if let Some((d_is_corp, d_owner, d_div, d_bal)) = dest_update {
+        let _ = ctx.notify_wallet_balance(d_is_corp, d_owner, d_div, d_bal);
     }
     Ok(PyRep::None)
 }
@@ -435,7 +442,7 @@ fn deposit_plex_inner(
     session: &SessionState,
     char_id: i64,
     args: &[PyRep],
-) -> Result<(i64, u64, u64, i64, i64), BridgeRpcError> {
+) -> Result<(i64, u64, u64, i64, i64, Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>), BridgeRpcError> {
     let rpc = RpcArgs::positional(args);
     let location_id = rpc.req_positive_i64(0, "locationID")?;
     let item_id = rpc.req_positive_i64(1, "itemID")?;
@@ -521,12 +528,14 @@ fn deposit_plex_inner(
         if item.quantity < qty_i32 {
             return Err(rpc_err("NotEnoughQuantity", "stack has fewer units than requested"));
         }
+        let pre_item = Some(item.clone());
         let mut opts = eve_db::ConsumeExactOptions::for_character_stack(char_id);
         opts.expected_owner_id = item.owner_id;
         opts.required_location_id = Some(location_id);
         opts.required_flag = Some(item.flag);
         snap.consume_exact_item_quantity(item_id, qty_i32, opts)
             .map_err(|e| rpc_err("ItemLocked", e.to_string()))?;
+        let post_item = snap.items.get(&item_id).cloned();
         let rem_plex = snap.adjust_plex_vault(char_id, qty).ok_or_else(|| rpc_err("VaultError", "vault update failed"))?;
         snap.next_entity_id += 1;
         let tx_id = snap.next_entity_id as u64;
@@ -540,7 +549,7 @@ fn deposit_plex_inner(
             "PLEX Vault Deposit from hangar",
             ctx.now_unix(),
         );
-        Ok((snap.next_entity_id, user_id, tx_id, rem_plex, qty))
+        Ok((snap.next_entity_id, user_id, tx_id, rem_plex, qty, pre_item, post_item))
     })
 }
 
@@ -551,15 +560,17 @@ fn deposit_plex(
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let (entity_id, user_id, tx_id, rem_plex, qty) = match deposit_plex_inner(ctx, session, char_id, args) {
-        Ok(v) => v,
-        Err(e) => {
-            if let Some(reference) = kwargs.get("reference").or_else(|| args.get(3)).cloned() {
-                super::notify_emitters_missing::emit_plex_deposit_failed(ctx, char_id, &e.code, reference);
+    let (entity_id, user_id, tx_id, rem_plex, qty, pre_item, post_item) =
+        match deposit_plex_inner(ctx, session, char_id, args) {
+            Ok(v) => v,
+            Err(e) => {
+                if let Some(reference) = kwargs.get("reference").or_else(|| args.get(3)).cloned() {
+                    super::notify_emitters_missing::emit_plex_deposit_failed(ctx, char_id, &e.code, reference);
+                }
+                return Err(e);
             }
-            return Err(e);
-        }
-    };
+        };
+    ctx.notify_item_mutation(char_id, pre_item.as_ref(), post_item.as_ref());
     ctx.notify(
         NotificationTarget::Character(char_id),
         "OnPlexDeposited",
@@ -584,7 +595,7 @@ fn withdraw_plex_inner(
     char_id: i64,
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
-) -> Result<(PyRep, i64, u64, u64, i64, i64), BridgeRpcError> {
+) -> Result<(PyRep, i64, u64, u64, i64, i64, Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>), BridgeRpcError> {
 
     let mut qty = kwargs
         .get("quantity")
@@ -712,29 +723,28 @@ fn withdraw_plex_inner(
             ctx.now_unix(),
         );
 
-        let final_item_id = if let Some((eid, _)) = existing_item {
+        let (pre_item, post_item, final_item_id) = if let Some((eid, _)) = existing_item {
             let it = snap.items.get_mut(&eid).unwrap();
+            let pre = it.clone();
             it.quantity += qty_i32;
             it.version += 1;
-            eid
+            (Some(pre), Some(it.clone()), eid)
         } else {
             snap.next_entity_id += 1;
             let nid = snap.next_entity_id;
-            snap.items.insert(
-                nid,
-                eve_db::InventoryItemRecord {
-                    item_id: nid,
-                    type_id: PLEX_TYPE_ID,
-                    owner_id: char_id,
-                    location_id: target_location,
-                    flag: target_flag,
-                    quantity: qty_i32,
-                    singleton: false,
-                    version: 1,
-                    ..Default::default()
-                },
-            );
-            nid
+            let new_rec = eve_db::InventoryItemRecord {
+                item_id: nid,
+                type_id: PLEX_TYPE_ID,
+                owner_id: char_id,
+                location_id: target_location,
+                flag: target_flag,
+                quantity: qty_i32,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            };
+            snap.items.insert(nid, new_rec.clone());
+            (None, Some(new_rec), nid)
         };
 
         Ok((
@@ -751,6 +761,8 @@ fn withdraw_plex_inner(
             tx_id,
             rem_plex,
             qty,
+            pre_item,
+            post_item,
         ))
     })
 }
@@ -762,7 +774,7 @@ fn withdraw_plex(
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let (rep, final_item_id, user_id, tx_id, rem_plex, qty) =
+    let (rep, final_item_id, user_id, tx_id, rem_plex, qty, pre_item, post_item) =
         match withdraw_plex_inner(ctx, session, char_id, args, kwargs) {
             Ok(v) => v,
             Err(e) => {
@@ -772,6 +784,7 @@ fn withdraw_plex(
                 return Err(e);
             }
         };
+    ctx.notify_item_mutation(char_id, pre_item.as_ref(), post_item.as_ref());
     ctx.notify(
         NotificationTarget::Character(char_id),
         "OnPlexItemAddedToInventory",

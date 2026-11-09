@@ -292,7 +292,9 @@ pub(crate) fn handle_unload_ammo(
         })
         .unwrap_or(1_000_000.0);
 
-    ctx.db.try_with_mut_snapshot(|snap| {
+    let item_diffs = ctx.db.try_with_mut_snapshot(|snap| {
+        let mut diffs: Vec<(Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>)> =
+            Vec::new();
         let mut used_cargo: f64 = snap
             .items
             .values()
@@ -341,14 +343,20 @@ pub(crate) fn handle_unload_ammo(
                     });
                 }
                 if let Some(ci) = snap.items.get_mut(&cid) {
+                    let pre = ci.clone();
                     ci.flag = InventoryFlag::Cargo;
+                    ci.version += 1;
+                    diffs.push((Some(pre), Some(ci.clone())));
                     used_cargo += vol;
                 }
             }
         }
-        Ok(())
+        Ok(diffs)
     })?;
 
+    for (pre, post) in item_diffs {
+        ctx.notify_item_mutation(char_id, pre.as_ref(), post.as_ref());
+    }
     crate::services::notify_emitters_seasons_tactical::emit_bank_ammo_changed_if_grouped(
         ctx,
         char_id,

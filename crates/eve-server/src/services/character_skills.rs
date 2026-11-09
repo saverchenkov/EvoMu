@@ -1263,6 +1263,7 @@ pub fn handle(
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut injected_tids = Vec::with_capacity(raw_ids.len());
+                let mut item_diffs = Vec::with_capacity(raw_ids.len());
                 for raw_id in raw_ids {
                     let skill_type_id = if let Some(item) = snap.items.get(&raw_id) {
                         item.type_id
@@ -1325,6 +1326,7 @@ pub fn handle(
                         });
                     };
 
+                    let pre_book = snap.items.get(&item_id).cloned();
                     snap.consume_exact_item_quantity(
                         item_id,
                         1,
@@ -1337,6 +1339,8 @@ pub fn handle(
                         code: "ItemLocked".into(),
                         message: e.to_string(),
                     })?;
+                    let post_book = snap.items.get(&item_id).cloned();
+                    item_diffs.push((pre_book, post_book));
 
                     snap.skills.entry(char_id).or_default().insert(
                         skill_type_id,
@@ -1359,11 +1363,14 @@ pub fn handle(
                         });
                     injected_tids.push(skill_type_id);
                 }
-                Ok(injected_tids)
+                Ok((injected_tids, item_diffs))
             });
 
             match res {
-                Ok(tids) => {
+                Ok((tids, item_diffs)) => {
+                    for (pre, post) in item_diffs {
+                        ctx.notify_item_mutation(char_id, pre.as_ref(), post.as_ref());
+                    }
                     let first_tid = tids.first().copied().unwrap_or(0);
                     super::jump_clone_names::emit_server_skills_changed(
                         ctx,

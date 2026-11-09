@@ -7,7 +7,7 @@ use super::{
     save_market_order_meta, MarketOrderMeta,
 };
 use crate::formulas::compute_broker_fee_rate;
-use crate::router::{NotificationTarget, RpcArgs, ServerContext};
+use crate::router::{RpcArgs, ServerContext};
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, MarketOrderRecord};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
@@ -795,15 +795,11 @@ pub fn handle_orders_escrow(
                     }
                 }
 
-                Ok((order_ids, total_broker_fee, total_sales_tax, all_filled_immediately, matched_buyers, consumed_items, buyer_acct_updates, delivered_items, seller_acct_final))
+                Ok((order_ids, order_owner_id, total_broker_fee, total_sales_tax, all_filled_immediately, matched_buyers, consumed_items, buyer_acct_updates, delivered_items, seller_acct_final))
             });
 
             match res {
-                Ok((order_ids, total_broker, total_tax, all_filled_immediately, matched_buyers, consumed_items, buyer_acct_updates, delivered_items, seller_acct_final)) => {
-                    let first_oid = order_ids
-                        .first()
-                        .and_then(|o| o.as_i64())
-                        .unwrap_or(0);
+                Ok((order_ids, order_owner_id, total_broker, total_tax, all_filled_immediately, matched_buyers, consumed_items, buyer_acct_updates, delivered_items, seller_acct_final)) => {
                     for (rec, changes) in &consumed_items {
                         super::emit_market_item_change(ctx, char_id, rec, changes.clone());
                     }
@@ -817,24 +813,16 @@ pub fn handle_orders_escrow(
                         super::emit_market_account_change(ctx, s_is_corp, s_owner, s_div, s_bal);
                     }
                     for (matched_oid, buyer_id) in matched_buyers {
-                        ctx.notify(
-                            NotificationTarget::Character(buyer_id),
-                            "OnOwnOrdersChanged",
-                            "charid",
-                            crate::services::market_price_history::build_own_order_changed_payload(ctx, matched_oid, "Change", false),
-                        );
+                        super::notify_own_order_changed(ctx, buyer_id, 0, matched_oid, "Change");
                     }
-                    ctx.notify(
-                        NotificationTarget::Character(char_id),
-                        "OnOwnOrdersChanged",
-                        "charid",
-                        crate::services::market_price_history::build_own_order_changed_payload(
-                            ctx,
-                            first_oid,
-                            if all_filled_immediately { "Change" } else { "Add" },
-                            use_corp,
-                        ),
-                    );
+                    let first_oid = order_ids
+                        .first()
+                        .and_then(|o| o.as_i64())
+                        .unwrap_or(0);
+                    let change_reason = if all_filled_immediately { "Change" } else { "Add" };
+                    for oid in order_ids.iter().filter_map(|o| o.as_i64()) {
+                        super::notify_own_order_changed(ctx, order_owner_id, char_id, oid, change_reason);
+                    }
                     Some(Ok(PyRep::keyval([
                         ("orderID", PyRep::Integer(first_oid)),
                         ("filledImmediately", PyRep::Bool(all_filled_immediately)),
@@ -1025,17 +1013,17 @@ pub fn handle_orders_escrow(
                 meta.final_vol_remaining = Some(remaining_qty);
                 meta.closed_unix = Some(now_unix);
                 save_market_order_meta(snap, order_id, meta);
-                Ok((refund_acct, returned_item, is_corp_order))
+                Ok((refund_acct, returned_item, order.owner_id))
             });
             match res {
-                Ok((refund_acct, returned_item, is_corp_order)) => {
+                Ok((refund_acct, returned_item, order_owner_id)) => {
                     if let Some((r_is_corp, r_owner, r_div, r_bal)) = refund_acct {
                         super::emit_market_account_change(ctx, r_is_corp, r_owner, r_div, r_bal);
                     }
                     if let Some((rec_char, rec, changes)) = returned_item {
                         super::emit_market_item_change(ctx, rec_char, &rec, changes);
                     }
-                    ctx.notify(NotificationTarget::Character(char_id), "OnOwnOrdersChanged", "charid", crate::services::market_price_history::build_own_order_changed_payload(ctx, order_id, "Expiry", is_corp_order));
+                    super::notify_own_order_changed(ctx, order_owner_id, char_id, order_id, "Expiry");
                     Some(Ok(PyRep::Bool(true)))
                 }
                 Err(e) => Some(Err(e)),
@@ -1309,6 +1297,7 @@ pub fn handle_orders_escrow(
                 let mut buyer_bal_final: Option<IskCents> = None;
                 let mut seller_acct_updates: Vec<(bool, i64, u8, IskCents)> = Vec::new();
                 let mut delivered_item_records: Vec<InventoryItemRecord> = Vec::new();
+                let mut matched_sellers: Vec<(i64, i64)> = Vec::new();
 
                 for (oid, fill_tid, fill_qty, fill_gross, seller_id, is_npc, ask_price, ord_st_id, ord_reg_id) in planned_fills {
                     let buyer_bal = snap.characters.get_mut(&char_id).map(|buyer| {
@@ -1346,6 +1335,9 @@ pub fn handle_orders_escrow(
 
                     let mut resting_completed = false;
                     let resting_clone = snap.market_orders.get(&oid).cloned();
+                    if !is_npc {
+                        matched_sellers.push((oid, seller_id));
+                    }
                     let is_npc_skillbook_or_bpo = is_npc
                         && seller_id < 90_000_000
                         && ctx
@@ -1397,11 +1389,14 @@ pub fn handle_orders_escrow(
                     ]));
                 }
 
-                Ok((purchased_lines, total_qty_bought, total_cost, total_sales_tax, orders_created, item_statuses, buyer_bal_final, seller_acct_updates, delivered_item_records))
+                Ok((purchased_lines, total_qty_bought, total_cost, total_sales_tax, orders_created, item_statuses, buyer_bal_final, seller_acct_updates, delivered_item_records, matched_sellers))
             });
 
             match res {
-                Ok((line_count, total_qty, total_cost, total_sales_tax, orders_created, item_statuses, buyer_bal_final, seller_acct_updates, delivered_item_records)) => {
+                Ok((line_count, total_qty, total_cost, total_sales_tax, orders_created, item_statuses, buyer_bal_final, seller_acct_updates, delivered_item_records, matched_sellers)) => {
+                    for (matched_oid, seller_id) in matched_sellers {
+                        super::notify_own_order_changed(ctx, seller_id, 0, matched_oid, "Change");
+                    }
                     for (s_is_corp, s_owner, s_div, s_bal) in seller_acct_updates {
                         super::emit_market_account_change(ctx, s_is_corp, s_owner, s_div, s_bal);
                     }

@@ -359,6 +359,7 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
     // New sessions start strictly unauthenticated (`user_id: None`, `role: 0`)
     let mut session = SessionState::new(session_id);
     session.address = peer_addr;
+    session.live_notify_listener = true;
     let mut sys_rx = ctx.systems.get_or_spawn(30000142).subscribe();
     let mut notify_rx = ctx.notify_tx.subscribe();
 
@@ -414,6 +415,10 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
                         caller_trace,
                     } = envelope
                     {
+                        let mut pre_rpc_notifs = session
+                            .character_id
+                            .map(|cid| ctx.drain_notifications_for_char(cid))
+                            .unwrap_or_default();
                         let prev_session = session.clone();
                         let result = ctx
                             .dispatch_rpc(
@@ -439,7 +444,8 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
 
                         // Emit OnSessionChanged whenever an RPC mutated session state
                         let diff = prev_session.compute_diff(&session);
-                        if !diff.is_empty() {
+                        let sess_diff_sent = !diff.is_empty();
+                        if sess_diff_sent {
                             let changes_dict = PyRep::Dict(
                                 diff.into_iter()
                                     .map(|(k, (old_v, new_v))| {
@@ -470,7 +476,35 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
                             write_bounded_frame(&mut writer, &sess_bytes).await?;
                         }
 
-                        let _ = session.drain_notifications();
+                        if let Some(cid) = session.character_id {
+                            pre_rpc_notifs.extend(ctx.drain_notifications_for_char(cid));
+                        }
+                        for notif in pre_rpc_notifs {
+                            if sess_diff_sent && notif.event == "OnSessionChanged" {
+                                continue;
+                            }
+                            let server_event = BridgeEnvelope::ServerEvent {
+                                tick: 0,
+                                event: notif.event,
+                                args: notif.args,
+                            };
+                            if let Ok(out_bytes) = serde_json::to_vec(&server_event) {
+                                let _ = write_bounded_frame(&mut writer, &out_bytes).await;
+                            }
+                        }
+                        for (event, args) in session.drain_notifications() {
+                            if sess_diff_sent && event == "OnSessionChanged" {
+                                continue;
+                            }
+                            let server_event = BridgeEnvelope::ServerEvent {
+                                tick: 0,
+                                event,
+                                args,
+                            };
+                            if let Ok(out_bytes) = serde_json::to_vec(&server_event) {
+                                let _ = write_bounded_frame(&mut writer, &out_bytes).await;
+                            }
+                        }
 
                         let was_in_space = prev_session.character_id.is_some()
                             && prev_session.station_id.is_none()
@@ -514,16 +548,23 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
                         }
                     }
                 }
-                notify_res = notify_rx.recv() => {
-                    if let Ok((target_cid, notif)) = notify_res {
-                        if session.character_id == Some(target_cid) {
-                            let server_event = BridgeEnvelope::ServerEvent {
-                                tick: 0,
-                                event: notif.event,
-                                args: notif.args,
-                            };
-                            if let Ok(out_bytes) = serde_json::to_vec(&server_event) {
-                                let _ = write_bounded_frame(&mut writer, &out_bytes).await;
+                notify_res = notify_rx.recv(), if session.character_id.is_some() => {
+                    if let Some(cid) = session.character_id {
+                        let should_drain = match notify_res {
+                            Ok((target_cid, _)) => target_cid == cid,
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => false,
+                        };
+                        if should_drain {
+                            for notif in ctx.drain_notifications_for_char(cid) {
+                                let server_event = BridgeEnvelope::ServerEvent {
+                                    tick: 0,
+                                    event: notif.event,
+                                    args: notif.args,
+                                };
+                                if let Ok(out_bytes) = serde_json::to_vec(&server_event) {
+                                    let _ = write_bounded_frame(&mut writer, &out_bytes).await;
+                                }
                             }
                         }
                     }

@@ -20,6 +20,123 @@ pub fn notify_contract(ctx: &ServerContext, char_id: i64, event: &str, cid: i64)
     ctx.notify(NotificationTarget::Character(char_id), event, "charid", vec![PyRep::Integer(cid)]);
 }
 
+struct ContractResolvedNotifications {
+    fallback_char: i64,
+    item_diffs: Vec<(Option<InventoryItemRecord>, Option<InventoryItemRecord>)>,
+    wallet_diffs: Vec<(bool, i64, u8, IskCents)>,
+}
+
+impl ContractResolvedNotifications {
+    fn emit(self, ctx: &ServerContext) {
+        for (pre, post) in self.item_diffs {
+            ctx.notify_item_mutation(self.fallback_char, pre.as_ref(), post.as_ref());
+        }
+        for (is_corp, owner_id, div_id, balance) in self.wallet_diffs {
+            ctx.notify_wallet_balance(is_corp, owner_id, div_id, balance);
+        }
+    }
+}
+
+struct ContractNotifyDelta {
+    fallback_char: i64,
+    pre_next_entity_id: i64,
+    items_before: HashMap<i64, InventoryItemRecord>,
+    wallets_before: Vec<(bool, i64, u8, IskCents)>,
+}
+
+impl ContractNotifyDelta {
+    fn capture(
+        snap: &eve_db::WorldStateSnapshot,
+        fallback_char: i64,
+        contract_id: i64,
+        owner_ids: &[i64],
+        station_ids: &[i64],
+        extra_item_ids: &[i64],
+    ) -> Self {
+        let mut items_before = HashMap::new();
+        for &iid in extra_item_ids {
+            if let Some(it) = snap.items.get(&iid) {
+                items_before.insert(iid, it.clone());
+            }
+        }
+        for (&iid, it) in &snap.items {
+            if (contract_id > 0 && it.location_id == contract_id) || station_ids.contains(&it.location_id) {
+                items_before.insert(iid, it.clone());
+            }
+        }
+        let mut wallets_before = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for &oid in owner_ids {
+            if oid <= 0 {
+                continue;
+            }
+            if let Some(ch) = snap.characters.get(&oid) {
+                if seen.insert((false, oid, 1_u8)) {
+                    wallets_before.push((false, oid, 1_u8, ch.balance));
+                }
+            }
+            if let Some(corp) = snap.corporations.get(&oid) {
+                for div_id in 1..=7_u8 {
+                    if seen.insert((true, oid, div_id)) {
+                        wallets_before.push((true, oid, div_id, corp.division_balance(div_id)));
+                    }
+                }
+            }
+        }
+        Self {
+            fallback_char,
+            pre_next_entity_id: snap.next_entity_id,
+            items_before,
+            wallets_before,
+        }
+    }
+
+    fn item_changed(a: &InventoryItemRecord, b: &InventoryItemRecord) -> bool {
+        a.owner_id != b.owner_id
+            || a.location_id != b.location_id
+            || a.flag != b.flag
+            || a.quantity != b.quantity
+            || a.singleton != b.singleton
+            || a.type_id != b.type_id
+    }
+
+    fn finish(self, snap: &eve_db::WorldStateSnapshot) -> ContractResolvedNotifications {
+        let mut item_diffs = Vec::new();
+        for (iid, pre) in &self.items_before {
+            match snap.items.get(iid) {
+                None => item_diffs.push((Some(pre.clone()), None)),
+                Some(post) if Self::item_changed(pre, post) => {
+                    item_diffs.push((Some(pre.clone()), Some(post.clone())));
+                }
+                _ => {}
+            }
+        }
+        for (&iid, post) in &snap.items {
+            if iid > self.pre_next_entity_id && !self.items_before.contains_key(&iid) {
+                item_diffs.push((None, Some(post.clone())));
+            }
+        }
+        let mut wallet_diffs = Vec::new();
+        for (is_corp, oid, div_id, before_bal) in self.wallets_before {
+            let after_bal = if is_corp {
+                snap.corporations.get(&oid).map(|c| c.division_balance(div_id))
+            } else {
+                snap.characters.get(&oid).map(|ch| ch.balance)
+            };
+            if let Some(after_bal) = after_bal {
+                if after_bal != before_bal {
+                    wallet_diffs.push((is_corp, oid, div_id, after_bal));
+                }
+            }
+        }
+        ContractResolvedNotifications {
+            fallback_char: self.fallback_char,
+            item_diffs,
+            wallet_diffs,
+        }
+    }
+}
+
 fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError { code: code.into(), message: message.into(), }
 }
@@ -547,6 +664,14 @@ pub fn handle(
                         return Err(rpc_err("CrpAccessDenied", "Creating corporation contracts requires ROLE_CONTRACT_MANAGER or ROLE_DIRECTOR"));
                     }
                 }
+                let delta = ContractNotifyDelta::capture(
+                    snap,
+                    char_id,
+                    0,
+                    &[char_id, issuer_corp_id],
+                    &[start_station_id, end_station_id],
+                    &item_ids_req,
+                );
                 let fee_cents = IskCents::from_f64_isk(broker_fee_isk + deposit_isk);
                 let total_upfront = reward
                     .checked_add(fee_cents)
@@ -705,11 +830,13 @@ pub fn handle(
                     item_ids: escrowed_items, requested_items, expiration_unix: exp_unix,
                     date_issued_unix: now_unix, title, for_corp, num_days,
                 });
-                Ok((id, exp_unix, broker_fee_isk, deposit_isk, max_slots))
+                let notify_delta = delta.finish(snap);
+                Ok((id, exp_unix, broker_fee_isk, deposit_isk, max_slots, notify_delta))
             });
 
             match res {
-                Ok((cid, exp_unix, broker_fee_isk, deposit_isk, max_slots)) => {
+                Ok((cid, exp_unix, broker_fee_isk, deposit_isk, max_slots, notify_delta)) => {
+                    notify_delta.emit(ctx);
                     let escrowed_ids = ctx.db.with_snapshot(|s| s.contracts.get(&cid).map(|c| c.item_ids.clone()).unwrap_or_default());
                     for iid in escrowed_ids {
                         let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::void_ship_insurance_contract(ctx, iid);
@@ -859,6 +986,16 @@ pub fn handle(
                     }
                 }
 
+                let acceptor_entity = if is_corp_accept { effective_caller_corp } else { char_id };
+                let issuer_entity = if c.for_corp && c.issuer_corp_id != 0 { c.issuer_corp_id } else { c.issuer_id };
+                let accept_delta = ContractNotifyDelta::capture(
+                    snap,
+                    char_id,
+                    cid,
+                    &[char_id, effective_caller_corp, c.issuer_id, c.issuer_corp_id, issuer_entity, acceptor_entity],
+                    &[c.start_station_id, c.end_station_id],
+                    &c.item_ids,
+                );
                 let required_isk = c.collateral.checked_add(c.price).ok_or_else(|| rpc_err("ContractOverflow", "Collateral + price overflow"))?;
                 if is_corp_accept {
                     if required_isk.0 > 0
@@ -955,7 +1092,8 @@ pub fn handle(
                         c_mut.acceptor_id = Some(acceptor_entity_id);
                         c_mut.status = "Completed".into();
                     }
-                    return Ok(("Completed", c.expiration_unix, None, c.issuer_id, transferred_ids));
+                    let notify_delta = accept_delta.finish(snap);
+                    return Ok(("Completed", c.expiration_unix, None, c.issuer_id, transferred_ids, notify_delta));
                 }
 
                 if let Some(dep_raw) = snap.fleet_and_social_ops.contract_deposits.remove(&cid) {
@@ -983,10 +1121,12 @@ pub fn handle(
                     c_mut.status = "InProgress".into();
                     c_mut.expiration_unix = delivery_deadline;
                 }
-                Ok(("InProgress", delivery_deadline, Some(wrap_id), c.issuer_id, Vec::new()))
+                let notify_delta = accept_delta.finish(snap);
+                Ok(("InProgress", delivery_deadline, Some(wrap_id), c.issuer_id, Vec::new(), notify_delta))
             });
             match res {
-                Ok((new_status, exp_unix, wrap_id_opt, issuer_id, transferred_ids)) => {
+                Ok((new_status, exp_unix, wrap_id_opt, issuer_id, transferred_ids, notify_delta)) => {
+                    notify_delta.emit(ctx);
                     if !transferred_ids.is_empty() {
                         crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &transferred_ids);
                     }
@@ -1138,6 +1278,14 @@ pub fn handle(
                     }
                 }
 
+                let bid_delta = ContractNotifyDelta::capture(
+                    snap,
+                    char_id,
+                    cid,
+                    &[char_id, effective_caller_corp, c.issuer_id, c.issuer_corp_id, c.current_bidder_id.unwrap_or(0)],
+                    &[c.start_station_id],
+                    &c.item_ids,
+                );
                 let prev_bidder_opt = c.current_bidder_id;
                 if let Some(prev_bidder) = prev_bidder_opt {
                     if c.current_bid.0 > 0 {
@@ -1211,7 +1359,8 @@ pub fn handle(
                         c_mut.acceptor_id = Some(bidder_entity_id);
                         c_mut.status = "Completed".into();
                     }
-                    return Ok((new_status, effective_bid, is_buyout, prev_bidder_opt, c.issuer_id, transferred_ids));
+                    let notify_delta = bid_delta.finish(snap);
+                    return Ok((new_status, effective_bid, is_buyout, prev_bidder_opt, c.issuer_id, transferred_ids, notify_delta));
                 }
 
                 if let Some(c_mut) = snap.contracts.get_mut(&cid) {
@@ -1220,11 +1369,13 @@ pub fn handle(
                     c_mut.bid_history.push((bidder_entity_id, effective_bid, now_unix));
                     if is_buyout { c_mut.acceptor_id = Some(bidder_entity_id); c_mut.status = "Completed".into(); }
                 }
-                Ok((new_status, effective_bid, is_buyout, prev_bidder_opt, c.issuer_id, Vec::new()))
+                let notify_delta = bid_delta.finish(snap);
+                Ok((new_status, effective_bid, is_buyout, prev_bidder_opt, c.issuer_id, Vec::new(), notify_delta))
             });
 
             match res {
-                Ok((new_status, effective_bid, is_buyout, prev_bidder_opt, issuer_id, transferred_ids)) => {
+                Ok((new_status, effective_bid, is_buyout, prev_bidder_opt, issuer_id, transferred_ids, notify_delta)) => {
+                    notify_delta.emit(ctx);
                     if !transferred_ids.is_empty() {
                         crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &transferred_ids);
                     }
@@ -1319,6 +1470,16 @@ pub fn handle(
                         return Err(rpc_err("CourierPackageMissing", format!("Courier Plastic Wrap package for item {iid} is not present at destination")));
                     }
                 }
+                let mut complete_extra_ids = c.item_ids.clone();
+                complete_extra_ids.extend_from_slice(&wraps_to_remove);
+                let complete_delta = ContractNotifyDelta::capture(
+                    snap,
+                    char_id,
+                    cid,
+                    &[char_id, effective_corp, c.issuer_id, c.issuer_corp_id, c.acceptor_id.unwrap_or(0)],
+                    &[c.start_station_id, c.end_station_id],
+                    &complete_extra_ids,
+                );
                 let issuer_entity_id = if c.for_corp && c.issuer_corp_id != 0 {
                     c.issuer_corp_id
                 } else {
@@ -1345,10 +1506,12 @@ pub fn handle(
                 } else if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.balance = ch.balance.checked_add(total_return).unwrap_or(ch.balance);
                 }
-                Ok((total_return.to_wire_f64(), c.issuer_id))
+                let notify_delta = complete_delta.finish(snap);
+                Ok((total_return.to_wire_f64(), c.issuer_id, notify_delta))
             });
             match res {
-                Ok((payout, issuer_id)) => {
+                Ok((payout, issuer_id, notify_delta)) => {
+                    notify_delta.emit(ctx);
                     notify_contract(ctx, issuer_id, "OnContractCompleted", cid);
                     Some(Ok(PyRep::keyval([("contractID", PyRep::Integer(cid)), ("status", PyRep::String("Completed".into())), ("totalPayoutISK", PyRep::Real(payout))])))
                 }
@@ -1367,15 +1530,38 @@ pub fn handle(
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let has_gm_role = snap.accounts.values().any(|a| a.user_id == user_id && a.role > 0);
                 if !has_gm_role { return Err(rpc_err("GMRoleRequired", "GM_ExpireContract requires GM role")); }
+                let c_snap = snap
+                    .contracts
+                    .get(&cid)
+                    .cloned()
+                    .ok_or_else(|| rpc_err("ContractNotFound", format!("Contract {cid} does not exist")))?;
+                let mut expire_extra = c_snap.item_ids.clone();
+                let mut wrap_ids: Vec<i64> = snap
+                    .items
+                    .iter()
+                    .filter(|(_, it)| c_snap.item_ids.iter().any(|iid| snap.items.get(iid).is_some_and(|ci| ci.location_id == it.item_id)))
+                    .map(|(id, _)| *id)
+                    .collect();
+                expire_extra.append(&mut wrap_ids);
+                let expire_delta = ContractNotifyDelta::capture(
+                    snap,
+                    c_snap.issuer_id,
+                    cid,
+                    &[c_snap.issuer_id, c_snap.issuer_corp_id, c_snap.acceptor_id.unwrap_or(0), c_snap.current_bidder_id.unwrap_or(0)],
+                    &[c_snap.start_station_id, c_snap.end_station_id],
+                    &expire_extra,
+                );
                 let Some(c_mut) = snap.contracts.get_mut(&cid) else {
                     return Err(rpc_err("ContractNotFound", format!("Contract {cid} does not exist")));
                 };
                 c_mut.expiration_unix = 1;
                 let resolved = snap.resolve_expired_contract(cid, now_unix).unwrap_or("Expired");
-                Ok(resolved)
+                let notify_delta = expire_delta.finish(snap);
+                Ok((resolved, notify_delta))
             });
             match res {
-                Ok(new_status) => {
+                Ok((new_status, notify_delta)) => {
+                    notify_delta.emit(ctx);
                     Some(Ok(PyRep::keyval([
                         ("contractID", PyRep::Integer(cid)),
                         ("status", PyRep::String(new_status.into())),
@@ -1404,6 +1590,14 @@ pub fn handle(
                     .filter(|it| it.location_id == wrap_id)
                     .map(|it| (it.item_id, it.owner_id))
                     .collect();
+                let mut break_extra = vec![wrap_id];
+                break_extra.extend(wrap_item_ids.iter().map(|(iid, _)| *iid));
+                let break_owners: Vec<i64> = snap
+                    .items
+                    .get(&wrap_id)
+                    .map(|w| vec![char_id, w.owner_id])
+                    .unwrap_or_else(|| vec![char_id]);
+                let break_delta = ContractNotifyDelta::capture(snap, char_id, 0, &break_owners, &[], &break_extra);
                 let (cid, issuer_id, extracted) = break_courier_plastic_wrap(snap, char_id, wrap_id, now_unix)?;
                 let transferred_ids: Vec<i64> = wrap_item_ids
                     .into_iter()
@@ -1414,10 +1608,12 @@ pub fn handle(
                             .then_some(iid)
                     })
                     .collect();
-                Ok((cid, issuer_id, extracted, transferred_ids))
+                let notify_delta = break_delta.finish(snap);
+                Ok((cid, issuer_id, extracted, transferred_ids, notify_delta))
             });
             match res {
-                Ok((cid, issuer_id, extracted, transferred_ids)) => {
+                Ok((cid, issuer_id, extracted, transferred_ids, notify_delta)) => {
+                    notify_delta.emit(ctx);
                     if !transferred_ids.is_empty() {
                         crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &transferred_ids);
                     }
@@ -1464,6 +1660,22 @@ pub fn handle(
                     .map(|ch| ch.corporation_id)
                     .filter(|&id| id != 0)
                     .unwrap_or(caller_corp);
+                let mut resolve_extra = c.item_ids.clone();
+                let mut wrap_ids: Vec<i64> = snap
+                    .items
+                    .iter()
+                    .filter(|(_, it)| c.item_ids.iter().any(|iid| snap.items.get(iid).is_some_and(|ci| ci.location_id == it.item_id)))
+                    .map(|(id, _)| *id)
+                    .collect();
+                resolve_extra.append(&mut wrap_ids);
+                let resolve_delta = ContractNotifyDelta::capture(
+                    snap,
+                    char_id,
+                    cid,
+                    &[char_id, effective_corp, c.issuer_id, c.issuer_corp_id, c.acceptor_id.unwrap_or(0), c.current_bidder_id.unwrap_or(0)],
+                    &[c.start_station_id, c.end_station_id],
+                    &resolve_extra,
+                );
                 let has_caller_corp_contract_role =
                     has_corp_contract_role(snap, char_id, effective_corp, now_unix);
                 if method == "RejectContract" {
@@ -1489,7 +1701,7 @@ pub fn handle(
                         }
                     }
                     if let Some(c_mut) = snap.contracts.get_mut(&cid) { c_mut.status = "Rejected".into(); }
-                    return Ok(("Rejected", c.issuer_id));
+                    return Ok(("Rejected", c.issuer_id, resolve_delta.finish(snap)));
                 }
 
                 let can_manage_as_issuer = c.issuer_id == char_id
@@ -1499,7 +1711,7 @@ pub fn handle(
                     return Err(rpc_err("ContractOwnershipViolation", format!("Character {char_id} is neither issuer nor acceptor of contract {cid}")));
                 }
                 if let Some(new_state) = snap.resolve_expired_contract(cid, now_unix) {
-                    return Ok((new_state, c.issuer_id));
+                    return Ok((new_state, c.issuer_id, resolve_delta.finish(snap)));
                 }
                 if method == "DeleteContract" && (c.status == "Outstanding" || c.status == "Expired") && can_manage_as_issuer {
                     if c.status == "Outstanding" && c.contract_type == "Auction" && c.current_bidder_id.is_some() {
@@ -1536,16 +1748,17 @@ pub fn handle(
                         }
                     }
                     if let Some(c_mut) = snap.contracts.get_mut(&cid) { c_mut.status = "Deleted".into(); }
-                    return Ok(("Deleted", c.issuer_id));
+                    return Ok(("Deleted", c.issuer_id, resolve_delta.finish(snap)));
                 }
                 if method == "FailContract" && c.status == "InProgress" && c.contract_type == "Courier" && (c.acceptor_id == Some(char_id) || is_corp_acceptor) {
                     snap.fail_courier_contract(cid, now_unix);
-                    return Ok(("Failed", c.issuer_id));
+                    return Ok(("Failed", c.issuer_id, resolve_delta.finish(snap)));
                 }
                 Err(rpc_err("InvalidContractState", format!("Contract {cid} in state '{}' cannot be resolved via {method}", c.status)))
             });
             match res {
-                Ok((new_status, issuer_id)) => {
+                Ok((new_status, issuer_id, notify_delta)) => {
+                    notify_delta.emit(ctx);
                     match new_status {
                         "Rejected" => notify_contract(ctx, issuer_id, "OnContractRejected", cid),
                         "Deleted" => {}

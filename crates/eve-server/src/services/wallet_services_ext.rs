@@ -507,6 +507,7 @@ pub fn handle(
                 );
 
                 let mut delivered_item_id = 0_i64;
+                let mut delivered_items: Vec<InventoryItemRecord> = Vec::new();
                 for pid in &offer.product_ids {
                     if let Some(prod) = catalog.products.iter().find(|p| p.id == *pid) {
                         if prod.type_id > 0 {
@@ -518,20 +519,19 @@ pub fn handle(
                             .map_err(|_| rpc_err("InvalidQuantity", "Quantity overflow"))?;
                             snap.next_entity_id += 1;
                             delivered_item_id = snap.next_entity_id;
-                            snap.items.insert(
-                                delivered_item_id,
-                                InventoryItemRecord {
-                                    item_id: delivered_item_id,
-                                    type_id: prod.type_id,
-                                    owner_id: char_id,
-                                    location_id: station_id,
-                                    flag: InventoryFlag::Hangar,
-                                    quantity: total_qty,
-                                    singleton: false,
-                                    version: 1,
-                                    ..Default::default()
-                                },
-                            );
+                            let rec = InventoryItemRecord {
+                                item_id: delivered_item_id,
+                                type_id: prod.type_id,
+                                owner_id: char_id,
+                                location_id: station_id,
+                                flag: InventoryFlag::Hangar,
+                                quantity: total_qty,
+                                singleton: false,
+                                version: 1,
+                                ..Default::default()
+                            };
+                            snap.items.insert(delivered_item_id, rec.clone());
+                            delivered_items.push(rec);
                         } else if offer.category_id == 1 {
                             if let Some(ch) = snap.characters.get_mut(&char_id) {
                                 ch.clone_grade = 2;
@@ -539,11 +539,14 @@ pub fn handle(
                         }
                     }
                 }
-                Ok((rem_plex, delivered_item_id, tx_id))
+                Ok((rem_plex, delivered_item_id, delivered_items, tx_id))
             });
             match res {
-                Ok((rem_plex, item_id, tx_id)) => {
+                Ok((rem_plex, item_id, delivered_items, tx_id)) => {
                     let _ = ctx.notify_account_change(char_id, "plex", char_id, rem_plex as f64);
+                    for rec in &delivered_items {
+                        ctx.notify_item_mutation(char_id, None, Some(rec));
+                    }
                     crate::services::quasar_payment_store::emit_balance_changed_notice(
                         &ctx.quasar_gateway.pending_notices,
                         user_id,
@@ -728,6 +731,8 @@ fn handle_trade_action(
     let trade_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
     let now = ctx.now_unix();
     let mut added_item_id: Option<i64> = None;
+    let mut item_diffs: Vec<(i64, Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>)> = Vec::new();
+    let mut bal_updates: Vec<(i64, IskCents)> = Vec::new();
     let res = ctx.db.try_with_mut_snapshot(|snap| {
         let nid = if trade_id > 0 {
             trade_note_id(trade_id)
@@ -934,13 +939,14 @@ fn handle_trade_action(
                     }
                     // Transfer items A -> B and B -> A
                     for &(iid, q) in &tr.items_a {
-                        let new_item = if let Some(it) = snap.items.get_mut(&iid) {
+                        let (pre_item, new_item) = if let Some(it) = snap.items.get_mut(&iid) {
                             if it.owner_id != tr.char_a || it.location_id != tr.station_id {
                                 return Err(rpc_err("InvalidTradeItem", "Offered item no longer available"));
                             }
                             if it.singleton && q != it.quantity {
                                 return Err(rpc_err("CannotSplitSingleton", "Assembled items cannot be split"));
                             }
+                            let pre = it.clone();
                             if q < it.quantity {
                                 it.quantity = it.quantity.checked_sub(q).ok_or_else(|| {
                                     rpc_err("InvalidTradeItem", "Underflow calculating remaining quantity")
@@ -952,12 +958,12 @@ fn handle_trade_action(
                                 new_it.flag = InventoryFlag::Hangar;
                                 new_it.quantity = q;
                                 new_it.version = 1;
-                                Some(new_it)
+                                (pre, Some(new_it))
                             } else if q == it.quantity {
                                 it.owner_id = tr.char_b;
                                 it.flag = InventoryFlag::Hangar;
                                 it.version += 1;
-                                None
+                                (pre, None)
                             } else {
                                 return Err(rpc_err("InvalidTradeItem", "Offered item quantity exceeded"));
                             }
@@ -965,22 +971,26 @@ fn handle_trade_action(
                             return Err(rpc_err("ItemNotFound", "Offered item missing"));
                         };
                         snap.sp6_lifecycle.self_destructs.remove(&iid);
+                        let post_src = snap.items.get(&iid).cloned();
+                        item_diffs.push((tr.char_a, Some(pre_item), post_src));
                         if let Some(mut new_it) = new_item {
                             snap.next_entity_id += 1;
                             let new_iid = snap.next_entity_id.max(snap.items.keys().copied().max().unwrap_or(1_000_000) + 1);
                             snap.next_entity_id = new_iid;
                             new_it.item_id = new_iid;
-                            snap.items.insert(new_iid, new_it);
+                            snap.items.insert(new_iid, new_it.clone());
+                            item_diffs.push((tr.char_b, None, Some(new_it)));
                         }
                     }
                     for &(iid, q) in &tr.items_b {
-                        let new_item = if let Some(it) = snap.items.get_mut(&iid) {
+                        let (pre_item, new_item) = if let Some(it) = snap.items.get_mut(&iid) {
                             if it.owner_id != tr.char_b || it.location_id != tr.station_id {
                                 return Err(rpc_err("InvalidTradeItem", "Offered item no longer available"));
                             }
                             if it.singleton && q != it.quantity {
                                 return Err(rpc_err("CannotSplitSingleton", "Assembled items cannot be split"));
                             }
+                            let pre = it.clone();
                             if q < it.quantity {
                                 it.quantity = it.quantity.checked_sub(q).ok_or_else(|| {
                                     rpc_err("InvalidTradeItem", "Underflow calculating remaining quantity")
@@ -992,12 +1002,12 @@ fn handle_trade_action(
                                 new_it.flag = InventoryFlag::Hangar;
                                 new_it.quantity = q;
                                 new_it.version = 1;
-                                Some(new_it)
+                                (pre, Some(new_it))
                             } else if q == it.quantity {
                                 it.owner_id = tr.char_a;
                                 it.flag = InventoryFlag::Hangar;
                                 it.version += 1;
-                                None
+                                (pre, None)
                             } else {
                                 return Err(rpc_err("InvalidTradeItem", "Offered item quantity exceeded"));
                             }
@@ -1005,12 +1015,15 @@ fn handle_trade_action(
                             return Err(rpc_err("ItemNotFound", "Offered item missing"));
                         };
                         snap.sp6_lifecycle.self_destructs.remove(&iid);
+                        let post_src = snap.items.get(&iid).cloned();
+                        item_diffs.push((tr.char_b, Some(pre_item), post_src));
                         if let Some(mut new_it) = new_item {
                             snap.next_entity_id += 1;
                             let new_iid = snap.next_entity_id.max(snap.items.keys().copied().max().unwrap_or(1_000_000) + 1);
                             snap.next_entity_id = new_iid;
                             new_it.item_id = new_iid;
-                            snap.items.insert(new_iid, new_it);
+                            snap.items.insert(new_iid, new_it.clone());
+                            item_diffs.push((tr.char_a, None, Some(new_it)));
                         }
                     }
                     // Transfer ISK
@@ -1019,6 +1032,7 @@ fn handle_trade_action(
                         if let Some(ca) = snap.characters.get_mut(&tr.char_a) {
                             ca.balance = IskCents(ca.balance.0 - net_to_b);
                             let ba = ca.balance;
+                            bal_updates.push((tr.char_a, ba));
                             snap.append_journal(
                                 tr.char_a,
                                 "PlayerTrading",
@@ -1030,6 +1044,7 @@ fn handle_trade_action(
                         if let Some(cb) = snap.characters.get_mut(&tr.char_b) {
                             cb.balance = IskCents(cb.balance.0 + net_to_b);
                             let bb = cb.balance;
+                            bal_updates.push((tr.char_b, bb));
                             snap.append_journal(
                                 tr.char_b,
                                 "PlayerTrading",
@@ -1050,37 +1065,11 @@ fn handle_trade_action(
     match res {
         Ok(tr) => {
             if tr.completed {
-                let mut item_notifs: Vec<(i64, PyRep)> = Vec::new();
-                ctx.db.with_snapshot(|snap| {
-                    for (old_owner, list) in [(tr.char_a, &tr.items_a), (tr.char_b, &tr.items_b)] {
-                        for &(iid, _) in list {
-                            if let Some(it) = snap.items.get(&iid) {
-                                let (group_id, category_id) = ctx
-                                    .sde
-                                    .types
-                                    .get(&it.type_id)
-                                    .map(|t| (t.group_id, t.category_id))
-                                    .unwrap_or((0, 0));
-                                let row = PyRep::keyval([
-                                    ("itemID", PyRep::Integer(it.item_id)),
-                                    ("typeID", PyRep::Integer(it.type_id as i64)),
-                                    ("ownerID", PyRep::Integer(it.owner_id)),
-                                    ("locationID", PyRep::Integer(it.location_id)),
-                                    ("flagID", PyRep::Integer(it.flag as i64)),
-                                    ("quantity", PyRep::Integer(if it.singleton { -1 } else { it.quantity as i64 })),
-                                    ("groupID", PyRep::Integer(i64::from(group_id))),
-                                    ("categoryID", PyRep::Integer(i64::from(category_id))),
-                                    ("singleton", PyRep::Bool(it.singleton)),
-                                ]);
-                                item_notifs.push((old_owner, row));
-                            }
-                        }
-                    }
-                });
-                for (old_owner, row) in item_notifs {
-                    for party in [tr.char_a, tr.char_b] {
-                        ctx.notify_item_change(party, row.clone(), vec![(2, PyRep::Integer(old_owner))]);
-                    }
+                for (fallback_char, pre, post) in item_diffs {
+                    ctx.notify_item_mutation(fallback_char, pre.as_ref(), post.as_ref());
+                }
+                for (party_id, bal) in bal_updates {
+                    ctx.notify_wallet_balance(false, party_id, 1, bal);
                 }
                 let mut traded_ids = Vec::new();
                 for &(iid, _) in tr.items_a.iter().chain(tr.items_b.iter()) {

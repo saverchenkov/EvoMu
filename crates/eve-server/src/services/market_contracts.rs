@@ -250,7 +250,67 @@ pub(crate) fn sweep_and_notify_expired_for_char(ctx: &ServerContext, char_id: i6
 
 pub(crate) fn emit_expired_order_notifications(ctx: &ServerContext, expired: &[(i64, i64, bool, TypeId, i64)]) {
     for (oid, owner_id, is_bid, type_id, station_id) in expired {
-        notify_char(ctx, *owner_id, "OnOwnOrdersChanged", crate::services::market_price_history::build_own_order_changed_payload(ctx, *oid, "Expiry", false));
+        super::market_trading::notify_own_order_changed(ctx, *owner_id, 0, *oid, "Expiry");
+        let follow_up = ctx.db.with_snapshot(|snap| {
+            let order_opt = snap.market_orders.get(oid);
+            let meta_opt = order_opt.map(|o| load_market_order_meta(snap, o, ctx.now_unix()));
+            let is_corp = snap.corporations.contains_key(owner_id);
+            let acct_update = if *is_bid {
+                let div_id = meta_opt
+                    .as_ref()
+                    .and_then(|m| m.account_key)
+                    .map(|ak| (ak.saturating_sub(999)).clamp(1, 7) as u8)
+                    .unwrap_or(1);
+                let had_escrow = meta_opt.as_ref().and_then(|m| m.final_vol_remaining).unwrap_or(0) > 0
+                    && order_opt.is_some_and(|o| o.price.0 > 0);
+                if had_escrow {
+                    let bal = if is_corp {
+                        snap.corporations.get(owner_id).map(|c| c.division_balance(div_id))
+                    } else {
+                        snap.characters.get(owner_id).map(|ch| ch.balance)
+                    };
+                    bal.map(|b| (is_corp, *owner_id, div_id, b))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let returned_item = if !*is_bid {
+                let target_flag = if is_corp { InventoryFlag::Deliveries } else { InventoryFlag::Hangar };
+                let ret_qty = meta_opt.as_ref().and_then(|m| m.final_vol_remaining).unwrap_or(0);
+                if !( !is_corp && *type_id == PLEX_TYPE_ID ) && ret_qty > 0 {
+                    snap.items
+                        .values()
+                        .find(|i| {
+                            i.owner_id == *owner_id
+                                && i.location_id == *station_id
+                                && i.flag == target_flag
+                                && i.type_id == *type_id
+                                && !i.singleton
+                        })
+                        .map(|rec| {
+                            let changes = if rec.quantity > ret_qty {
+                                vec![(9, PyRep::Integer((rec.quantity - ret_qty) as i64))]
+                            } else {
+                                vec![(3, PyRep::Integer(0))]
+                            };
+                            (rec.clone(), changes)
+                        })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            (acct_update, returned_item)
+        });
+        if let Some((is_c, own, div, bal)) = follow_up.0 {
+            ctx.notify_wallet_balance(is_c, own, div, bal);
+        }
+        if let Some((rec, changes)) = follow_up.1 {
+            ctx.emit_item_change_routed(*owner_id, &rec, changes);
+        }
         if !*is_bid {
             notify_char(ctx, *owner_id, "OnMarketItemReceived", vec![PyRep::Integer(*oid), PyRep::Integer(*type_id as i64), PyRep::Integer(4), PyRep::Integer(*station_id)]);
         }
@@ -775,10 +835,11 @@ pub fn handle(
                     let delivered_to_corp_deliveries = cross_res.delivered_to_corp_deliveries;
                     let final_escrow = cross_res.final_escrow;
 
+                    let order_owner_id = if is_corp_order { caller_corp_id } else { char_id };
                     Ok((
                         old_price, new_price, relist_fee, scc_surcharge, final_escrow, escrow_delta,
                         meta, procurement_lvl, marketing_lvl, daytrading_lvl, visibility_lvl, delivered_to_corp_deliveries,
-                        mod_acct_after, cross_res.acct_updates, cross_res.item_deliveries,
+                        mod_acct_after, cross_res.acct_updates, cross_res.item_deliveries, cross_res.matched_orders, order_owner_id,
                     ))
                 });
 
@@ -786,7 +847,7 @@ pub fn handle(
                     Ok((
                         old_price, new_price, relist_fee, scc_surcharge, final_escrow, escrow_delta,
                         meta, proc_lvl, mkt_lvl, day_lvl, vis_lvl, corp_delivered_qty,
-                        mod_acct_after, cross_acct_updates, cross_item_deliveries,
+                        mod_acct_after, cross_acct_updates, cross_item_deliveries, cross_matched_orders, order_owner_id,
                     )) => {
                         if let Some((is_c, own, div, bal)) = mod_acct_after {
                             super::market_trading::emit_market_account_change(ctx, is_c, own, div, bal);
@@ -797,7 +858,10 @@ pub fn handle(
                         for (rec_char, rec) in &cross_item_deliveries {
                             super::market_trading::emit_market_item_change(ctx, *rec_char, rec, vec![(3, PyRep::Integer(0))]);
                         }
-                        notify_char(ctx, char_id, "OnOwnOrdersChanged", crate::services::market_price_history::build_own_order_changed_payload(ctx, order_id, "Modify", false));
+                        for (matched_oid, matched_owner) in cross_matched_orders {
+                            super::market_trading::notify_own_order_changed(ctx, matched_owner, 0, matched_oid, "Change");
+                        }
+                        super::market_trading::notify_own_order_changed(ctx, order_owner_id, char_id, order_id, "Modify");
                         Some(Ok(PyRep::keyval([
                             ("orderID", PyRep::Integer(order_id)),
                             ("oldPrice", PyRep::Real(old_price.to_wire_f64())),

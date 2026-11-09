@@ -174,14 +174,9 @@ impl ServerContext {
                 );
             }
         }
-        let initial_len = session
+        let pre_seq = session
             .character_id
-            .and_then(|cid| {
-                self.pending_notifications
-                    .read()
-                    .ok()
-                    .and_then(|q| q.get(&cid).map(|v| v.len()))
-            })
+            .map(|cid| self.latest_notification_seq_for_char(cid))
             .unwrap_or(0);
 
         let prev_station_id = session.station_id;
@@ -218,7 +213,7 @@ impl ServerContext {
             if let Some(cid) = session.character_id {
                 if let Ok(mut q) = self.pending_notifications.write() {
                     if let Some(v) = q.get_mut(&cid) {
-                        v.truncate(initial_len);
+                        v.retain(|n| n.seq_id <= pre_seq);
                     }
                 }
             }
@@ -300,14 +295,18 @@ impl ServerContext {
                     );
                 }
             }
-            if let Some(notifs) = self.pending_notifications.read().ok().and_then(|q| {
-                q.get(&cid)
-                    .and_then(|v| v.get(initial_len..))
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_vec())
-            }) {
-                for notif in notifs {
-                    session.push_notification(notif.event, notif.args);
+            if !session.live_notify_listener {
+                if let Some(notifs) = self.pending_notifications.read().ok().and_then(|q| {
+                    q.get(&cid).map(|v| {
+                        v.iter()
+                            .filter(|n| n.seq_id > pre_seq)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    })
+                }) {
+                    for notif in notifs {
+                        session.push_notification(notif.event, notif.args);
+                    }
                 }
             }
         }

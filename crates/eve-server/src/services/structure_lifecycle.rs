@@ -645,6 +645,7 @@ fn emit_structure_left_space_and_spawn_drops(ctx: &ServerContext, snap: &WorldSt
     for (cid, uid) in &sys_recips {
         let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(*cid, *uid, "OnStructureRemoved", "solarsystemid", sys_args.clone());
         let notif = crate::router::PendingMachoNotification {
+            seq_id: crate::router::cache_notifications::next_notification_seq_id(),
             recipient_char_id: *cid,
             event: "OnStructureRemoved".into(),
             id_type: "solarsystemid".into(),
@@ -660,6 +661,7 @@ fn emit_structure_left_space_and_spawn_drops(ctx: &ServerContext, snap: &WorldSt
     for (cid, uid) in corp_recips {
         let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(cid, uid, "OnStructureRemovedFromSpace", "corpid", corp_args.clone());
         let notif = crate::router::PendingMachoNotification {
+            seq_id: crate::router::cache_notifications::next_notification_seq_id(),
             recipient_char_id: cid,
             event: "OnStructureRemovedFromSpace".into(),
             id_type: "corpid".into(),
@@ -686,7 +688,7 @@ fn emit_structure_left_space_and_spawn_drops(ctx: &ServerContext, snap: &WorldSt
         for (cid, uid) in &all_recips {
             for (ev, args) in [("OnSovereigntyChanged", sov_args.clone()), ("OnSolarSystemSovStructuresUpdated", structs_args.clone())] {
                 let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(*cid, *uid, ev, "solarsystemid", args.clone());
-                let notif = crate::router::PendingMachoNotification { recipient_char_id: *cid, event: ev.into(), id_type: "solarsystemid".into(), args, packet, marshaled_packet, created_filetime: now_ft };
+                let notif = crate::router::PendingMachoNotification { seq_id: crate::router::cache_notifications::next_notification_seq_id(), recipient_char_id: *cid, event: ev.into(), id_type: "solarsystemid".into(), args, packet, marshaled_packet, created_filetime: now_ft };
                 queues.entry(*cid).or_default().push(notif.clone());
                 let _ = ctx.notify_tx.send((*cid, notif));
             }
@@ -696,7 +698,7 @@ fn emit_structure_left_space_and_spawn_drops(ctx: &ServerContext, snap: &WorldSt
     out.pending_signal_tracker_notifs.extend(crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_structure_removed_with_snap(ctx, snap, st.solar_system_id, st.structure_id));
 }
 
-fn cleanup_sov_hub_on_leave_space(snap: &mut WorldStateSnapshot, st: &UpwellStructureRecord) {
+fn cleanup_sov_hub_on_leave_space(ctx: &ServerContext, snap: &mut WorldStateSnapshot, st: &UpwellStructureRecord) {
     if st.type_id == crate::services::sov_services::TYPE_SOVEREIGNTY_HUB {
         snap.sov_runtime.sov_claimed_since_unix.remove(&st.solar_system_id);
         if let Some(sys_st) = snap.system_states.get_mut(&st.solar_system_id) {
@@ -704,6 +706,7 @@ fn cleanup_sov_hub_on_leave_space(snap: &mut WorldStateSnapshot, st: &UpwellStru
             sys_st.strategic_index = 0;
         }
         snap.sov_runtime.sov_hubs.remove(&st.structure_id);
+        ctx.invalidate_cached_method("stationSvc", "GetAllianceSystems");
     }
 }
 
@@ -731,6 +734,7 @@ fn push_char_notification(
     let (packet, marshaled_packet) =
         ServerContext::build_macho_notification_packet(char_id, uid, event, id_type, args.clone());
     let notif = crate::router::PendingMachoNotification {
+        seq_id: crate::router::cache_notifications::next_notification_seq_id(),
         recipient_char_id: char_id,
         event: event.into(),
         id_type: id_type.into(),
@@ -1101,7 +1105,7 @@ pub fn destroy_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext
     ext.lifecycle.remove(&structure_id);
     ext.unanchoring_until_unix.remove(&structure_id);
     ext.active_pilot_by_structure.remove(&structure_id); ext.previous_ship_by_structure.remove(&structure_id);
-    cleanup_sov_hub_on_leave_space(snap, &st);
+    cleanup_sov_hub_on_leave_space(ctx, snap, &st);
     // feat:clones.clone-destroyed-structure: clones in destroyed structure are moved home (implants lost) per V24 rules.
     relocate_structure_clones_to_home(ctx, snap, &st);
     emit_structure_left_space_and_spawn_drops(ctx, snap, &st, &mut out);
@@ -1177,7 +1181,7 @@ pub fn package_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext
     ext.active_pilot_by_structure.remove(&structure_id); ext.previous_ship_by_structure.remove(&structure_id);
     ext.descriptions.remove(&structure_id);
     snap.structure_vulnerability_windows.remove(&structure_id);
-    cleanup_sov_hub_on_leave_space(snap, &st);
+    cleanup_sov_hub_on_leave_space(ctx, snap, &st);
     // feat:clones.clone-destroyed-structure: clones in unanchored/packaged structure are moved home (implants lost) per V24 rules.
     relocate_structure_clones_to_home(ctx, snap, &st);
     emit_structure_left_space_and_spawn_drops(ctx, snap, &st, &mut out);

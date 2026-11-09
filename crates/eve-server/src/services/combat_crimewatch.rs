@@ -1468,16 +1468,18 @@ pub async fn dispatch_combat_rpc(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
-    let initial_len = session
+    let pre_seq = session
         .character_id
-        .and_then(|cid| ctx.pending_notifications.read().ok().and_then(|q| q.get(&cid).map(|v| v.len())))
+        .map(|cid| ctx.latest_notification_seq_for_char(cid))
         .unwrap_or(0);
 
     if let Some(res) = handle(ctx, session, service, method, args, kwargs).await {
-        if let Some(cid) = session.character_id {
-            if let Some(notifs) = ctx.pending_notifications.read().ok().and_then(|q| q.get(&cid).cloned()) {
-                for notif in notifs.into_iter().skip(initial_len) {
-                    session.push_notification(notif.event, notif.args);
+        if !session.live_notify_listener {
+            if let Some(cid) = session.character_id {
+                if let Some(notifs) = ctx.pending_notifications.read().ok().and_then(|q| q.get(&cid).cloned()) {
+                    for notif in notifs.into_iter().filter(|n| n.seq_id > pre_seq) {
+                        session.push_notification(notif.event, notif.args);
+                    }
                 }
             }
         }

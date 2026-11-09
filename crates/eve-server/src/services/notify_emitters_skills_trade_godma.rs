@@ -942,7 +942,7 @@ pub fn emit_godma_effect_info_for_module(
     );
 }
 
-/// Emits V24-conformant 6-column `OnCfgDataChanged("evelocations", [locationID, locationName, x, y, z, None])`
+/// Emits V24-conformant 7-column `OnCfgDataChanged("evelocations", [locationID, locationName, solarSystemID, x, y, z, None])`
 /// (`id_type = "solarsystemid"`) matching `config_service.rs` `evelocations` schema.
 // parity: notify:OnCfgDataChanged
 pub fn emit_structure_cfg_data_changed(
@@ -961,6 +961,7 @@ pub fn emit_structure_cfg_data_changed(
             PyRep::List(vec![
                 PyRep::Integer(structure_id),
                 PyRep::String(new_name.to_string()),
+                PyRep::Integer(i64::from(sys_id)),
                 PyRep::Real(pos[0]),
                 PyRep::Real(pos[1]),
                 PyRep::Real(pos[2]),

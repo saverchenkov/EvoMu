@@ -704,23 +704,29 @@ pub(crate) async fn handle_ships_and_services(
 
                 // 3. Mutate normal items
                 let mut last_ver = 1_u64;
+                let mut repackage_diffs = Vec::with_capacity(normal_ids.len());
                 for &item_id in &normal_ids {
                     if let Some(item) = snap.items.get_mut(&item_id) {
+                        let pre = item.clone();
                         item.dynamic_attributes.remove(&1112);
                         item.dynamic_attributes.remove(&1113);
                         item.singleton = false;
                         item.insured_payout_isk = 0.0;
                         item.version += 1;
                         last_ver = item.version;
+                        repackage_diffs.push((pre, item.clone()));
                     }
                 }
 
                 let first_normal_id = normal_ids.first().copied().unwrap_or(0);
-                Ok((first_normal_id, last_ver, normal_ids, broken_wraps))
+                Ok((first_normal_id, last_ver, normal_ids, broken_wraps, repackage_diffs))
             });
 
             match res {
-                Ok((first_normal_id, last_ver, normal_ids, broken_wraps)) => {
+                Ok((first_normal_id, last_ver, normal_ids, broken_wraps, repackage_diffs)) => {
+                    for (pre, post) in &repackage_diffs {
+                        ctx.notify_item_mutation(char_id, Some(pre), Some(post));
+                    }
                     for &(_wrap_id, cid, issuer_id, ref extracted) in &broken_wraps {
                         if !extracted.is_empty() {
                             crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, extracted);
@@ -929,40 +935,49 @@ pub(crate) async fn handle_ships_and_services(
                     });
                 }
                 if !item.singleton && item.quantity > 1 {
-                    if let Some(orig) = snap.items.get_mut(&item_id) {
+                    let pre_orig = snap.items.get(&item_id).cloned();
+                    let post_orig = if let Some(orig) = snap.items.get_mut(&item_id) {
                         orig.quantity -= 1;
                         orig.version += 1;
-                    }
+                        Some(orig.clone())
+                    } else {
+                        None
+                    };
                     snap.next_entity_id += 1;
                     let new_ship_id = snap.next_entity_id;
-                    snap.items.insert(
-                        new_ship_id,
-                        eve_db::InventoryItemRecord {
-                            item_id: new_ship_id,
-                            type_id: item.type_id,
-                            owner_id: item.owner_id,
-                            location_id: station_id,
-                            flag: item.flag,
-                            quantity: 1,
-                            singleton: true,
-                            version: 1,
-                            dynamic_attributes: HashMap::new(),
-                            source_mutaplasmid_id: None,
-                            insured_payout_isk: 0.0,
-                            is_blueprint_copy: false,
-                            blueprint_runs_remaining: None,
-                        },
-                    );
-                    Ok((new_ship_id, 1_u64, item.type_id))
+                    let new_ship = eve_db::InventoryItemRecord {
+                        item_id: new_ship_id,
+                        type_id: item.type_id,
+                        owner_id: item.owner_id,
+                        location_id: station_id,
+                        flag: item.flag,
+                        quantity: 1,
+                        singleton: true,
+                        version: 1,
+                        dynamic_attributes: HashMap::new(),
+                        source_mutaplasmid_id: None,
+                        insured_payout_isk: 0.0,
+                        is_blueprint_copy: false,
+                        blueprint_runs_remaining: None,
+                    };
+                    snap.items.insert(new_ship_id, new_ship.clone());
+                    Ok((new_ship_id, 1_u64, item.type_id, vec![(pre_orig, post_orig), (None, Some(new_ship))]))
                 } else {
                     let item_mut = snap.items.get_mut(&item_id).unwrap();
+                    let pre = item_mut.clone();
                     item_mut.singleton = true;
                     item_mut.version += 1;
-                    Ok((item_id, item_mut.version, item_mut.type_id))
+                    let ver = item_mut.version;
+                    let tid = item_mut.type_id;
+                    let post = item_mut.clone();
+                    Ok((item_id, ver, tid, vec![(Some(pre), Some(post))]))
                 }
             });
             match res {
-                Ok((assembled_id, ver, ship_type_id)) => {
+                Ok((assembled_id, ver, ship_type_id, item_diffs)) => {
+                    for (pre, post) in item_diffs {
+                        ctx.notify_item_mutation(char_id, pre.as_ref(), post.as_ref());
+                    }
                     if ctx
                         .sde
                         .types

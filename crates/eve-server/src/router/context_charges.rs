@@ -67,20 +67,49 @@ impl ServerContext {
         charge_item_id: i64,
         current_dock: Option<i64>,
     ) -> Result<(i64, u32, i32, u64), BridgeRpcError> {
-        let res = self.db.try_with_mut_snapshot(|snap| {
-            self.load_charge_into_weapon_slot_in_snapshot(
+        let out = self.db.try_with_mut_snapshot(|snap| {
+            let pre_items: Vec<eve_db::InventoryItemRecord> = snap
+                .items
+                .values()
+                .filter(|i| {
+                    i.item_id == charge_item_id
+                        || (i.location_id == ship_id && (i.flag == flag || i.flag == eve_db::InventoryFlag::Cargo))
+                })
+                .cloned()
+                .collect();
+            let pre_map: HashMap<i64, eve_db::InventoryItemRecord> =
+                pre_items.into_iter().map(|i| (i.item_id, i)).collect();
+            let loaded = self.load_charge_into_weapon_slot_in_snapshot(
                 snap,
                 char_id,
                 ship_id,
                 flag,
                 charge_item_id,
                 current_dock,
-            )
+            )?;
+            let mut touched_ids: Vec<i64> = pre_map.keys().copied().collect();
+            if !touched_ids.contains(&loaded.0) {
+                touched_ids.push(loaded.0);
+            }
+            let diffs: Vec<(
+                Option<eve_db::InventoryItemRecord>,
+                Option<eve_db::InventoryItemRecord>,
+            )> = touched_ids
+                .into_iter()
+                .map(|iid| (pre_map.get(&iid).cloned(), snap.items.get(&iid).cloned()))
+                .collect();
+            Ok((loaded, diffs))
         });
-        if res.is_ok() {
-            self.invalidate_ship_fitting(ship_id);
+        match out {
+            Ok((loaded, diffs)) => {
+                self.invalidate_ship_fitting(ship_id);
+                for (pre, post) in diffs {
+                    self.notify_item_mutation(char_id, pre.as_ref(), post.as_ref());
+                }
+                Ok(loaded)
+            }
+            Err(e) => Err(e),
         }
-        res
     }
 
     pub fn load_charge_into_weapon_slot_in_snapshot(

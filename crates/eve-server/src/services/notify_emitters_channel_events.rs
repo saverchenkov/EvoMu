@@ -129,6 +129,7 @@ fn push_char_notification_core(
         args.clone(),
     );
     let notif = PendingMachoNotification {
+        seq_id: crate::router::cache_notifications::next_notification_seq_id(),
         recipient_char_id: char_id,
         event: event.to_string(),
         id_type: "charid".to_string(),

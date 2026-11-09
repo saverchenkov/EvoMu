@@ -143,9 +143,18 @@ pub enum NotificationTarget {
     All,
 }
 
+static NEXT_NOTIFICATION_SEQ_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
+/// Returns a monotonically increasing sequence ID for [`PendingMachoNotification`].
+pub fn next_notification_seq_id() -> u64 {
+    NEXT_NOTIFICATION_SEQ_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Queued binary-marshaled `MachoPacket` (`Notification` = `12`) ready for delivery (`P-5`).
 #[derive(Debug, Clone)]
 pub struct PendingMachoNotification {
+    pub seq_id: u64,
     pub recipient_char_id: i64,
     pub event: String,
     pub id_type: String,
@@ -153,6 +162,41 @@ pub struct PendingMachoNotification {
     pub packet: MachoPacket,
     pub marshaled_packet: Vec<u8>,
     pub created_filetime: i64,
+}
+
+impl PendingMachoNotification {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        recipient_char_id: i64,
+        event: impl Into<String>,
+        id_type: impl Into<String>,
+        args: Vec<PyRep>,
+        packet: MachoPacket,
+        marshaled_packet: Vec<u8>,
+        created_filetime: i64,
+    ) -> Self {
+        Self {
+            seq_id: next_notification_seq_id(),
+            recipient_char_id,
+            event: event.into(),
+            id_type: id_type.into(),
+            args,
+            packet,
+            marshaled_packet,
+            created_filetime,
+        }
+    }
+}
+
+/// Pushes `notif` into `queue`, evicting the oldest entry if the per-character cap is reached.
+pub fn push_pending_notification_capped(
+    queue: &mut Vec<PendingMachoNotification>,
+    notif: PendingMachoNotification,
+) {
+    if queue.len() >= MAX_PENDING_NOTIFICATIONS_PER_CHAR {
+        queue.remove(0);
+    }
+    queue.push(notif);
 }
 
 /// Persistent notification inbox record for `notificationMgr` (`NotificationMgrService.cpp:66-90`).
@@ -170,8 +214,19 @@ pub struct NotificationRecord {
     pub interacted: bool,
 }
 
+/// Returns true if `flag` represents a corporation hangar (`CorpSAG1..7` = `116..=122`) or `CorpDeliveries` (`62`).
+pub fn is_corp_hangar_flag(flag: eve_db::InventoryFlag) -> bool {
+    matches!(flag as i64, 62 | 116..=122)
+}
+
 /// Maximum queued real-time notifications per online character (`R51-P1-3`).
 pub const MAX_PENDING_NOTIFICATIONS_PER_CHAR: usize = 128;
+
+impl ServerContext {
+    pub fn is_corp_hangar_flag(flag: eve_db::InventoryFlag) -> bool {
+        is_corp_hangar_flag(flag)
+    }
+}
 
 impl ServerContext {
     /// Builds the `("Method Call", "server", (service, method))` cache `objectID` tuple.
@@ -759,24 +814,31 @@ impl ServerContext {
         for (cid, uid) in recipients {
             let (packet, marshaled_packet) =
                 Self::build_macho_notification_packet(cid, uid, event, id_type, args.clone());
-            let notif = PendingMachoNotification {
-                recipient_char_id: cid,
-                event: event.to_string(),
-                id_type: id_type.to_string(),
-                args: args.clone(),
+            let notif = PendingMachoNotification::new(
+                cid,
+                event,
+                id_type,
+                args.clone(),
                 packet,
                 marshaled_packet,
-                created_filetime: now_ft,
-            };
+                now_ft,
+            );
             let q = queues.entry(cid).or_default();
-            if q.len() >= MAX_PENDING_NOTIFICATIONS_PER_CHAR {
-                q.remove(0);
-            }
-            q.push(notif.clone());
+            push_pending_notification_capped(q, notif.clone());
             let _ = self.notify_tx.send((cid, notif.clone()));
             emitted.push(notif);
         }
         emitted
+    }
+
+    /// Returns the highest queued `seq_id` for `char_id` (or `0` when empty).
+    pub fn latest_notification_seq_for_char(&self, char_id: i64) -> u64 {
+        self.pending_notifications
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&char_id)
+            .and_then(|q| q.last().map(|n| n.seq_id))
+            .unwrap_or(0)
     }
 
     /// Drains all pending notifications queued for `char_id`.
@@ -991,12 +1053,16 @@ impl ServerContext {
                 PyRep::Integer(rec.sender_id), PyRep::Integer(rec.created), PyRep::String(rec.data.clone()),
             ];
             let (packet, marshaled_packet) = Self::build_macho_notification_packet(char_id, user_id, "OnNotificationReceived", "charid", args.clone());
-            let notif = PendingMachoNotification {
-                recipient_char_id: char_id, event: "OnNotificationReceived".into(), id_type: "charid".into(),
-                args, packet, marshaled_packet, created_filetime: now_ft,
-            };
-            if q.len() >= MAX_PENDING_NOTIFICATIONS_PER_CHAR { q.remove(0); }
-            q.push(notif.clone());
+            let notif = PendingMachoNotification::new(
+                char_id,
+                "OnNotificationReceived",
+                "charid",
+                args,
+                packet,
+                marshaled_packet,
+                now_ft,
+            );
+            push_pending_notification_capped(q, notif.clone());
             let _ = self.notify_tx.send((char_id, notif));
         }
     }
@@ -1359,9 +1425,194 @@ impl ServerContext {
         item: &eve_db::InventoryItemRecord,
         changes: Vec<(i32, PyRep)>,
     ) -> Vec<PendingMachoNotification> {
+        self.notify_item_record_change_with_target(
+            NotificationTarget::Character(char_id),
+            "charid",
+            item,
+            changes,
+        )
+    }
+
+    /// Emits a canonical `OnItemChange(row, changes)` notification to a specific [`NotificationTarget`].
+    pub fn notify_item_record_change_with_target(
+        &self,
+        target: NotificationTarget,
+        id_type: &str,
+        item: &eve_db::InventoryItemRecord,
+        changes: Vec<(i32, PyRep)>,
+    ) -> Vec<PendingMachoNotification> {
         let cells = crate::services::inventory_bound::item_to_packed_cells(self, item);
         let row = eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(cells);
-        self.notify_item_change(char_id, row, changes)
+        let change_dict = PyRep::Dict(
+            changes
+                .into_iter()
+                .map(|(col_ix, old_val)| (PyRep::Integer(col_ix as i64), old_val))
+                .collect(),
+        );
+        self.notify(target, "OnItemChange", id_type, vec![row, change_dict])
+    }
+
+    /// Computes canonical V24 `OnItemChange` delta entries (`old_value` keyed by column index).
+    /// Never emits `ixQuantity` (key 5); stack size deltas use `ixStackSize` (key 9).
+    pub fn compute_item_change_dict(
+        old: &eve_db::InventoryItemRecord,
+        new: &eve_db::InventoryItemRecord,
+    ) -> Vec<(i32, PyRep)> {
+        let mut changes = Vec::new();
+        if old.owner_id != new.owner_id {
+            changes.push((2, PyRep::Integer(old.owner_id)));
+        }
+        if old.location_id != new.location_id {
+            changes.push((3, PyRep::Integer(old.location_id)));
+        }
+        if old.flag != new.flag {
+            changes.push((4, PyRep::Integer(old.flag as i64)));
+        }
+        if old.quantity != new.quantity {
+            changes.push((9, PyRep::Integer(old.quantity as i64)));
+        }
+        if old.singleton != new.singleton {
+            changes.push((10, PyRep::Integer(if old.singleton { 1 } else { 0 })));
+        }
+        changes
+    }
+
+    /// Builds a `locJunkyard` (location 6) tombstone record + delta dict for deleted/consumed items.
+    pub fn build_item_tombstone(
+        old: &eve_db::InventoryItemRecord,
+    ) -> (eve_db::InventoryItemRecord, Vec<(i32, PyRep)>) {
+        let mut tomb = old.clone();
+        tomb.location_id = 6; // locJunkyard
+        tomb.flag = eve_db::InventoryFlag::None;
+        tomb.quantity = 0;
+        tomb.singleton = false;
+        let changes = vec![
+            (3, PyRep::Integer(old.location_id)),
+            (4, PyRep::Integer(old.flag as i64)),
+            (9, PyRep::Integer(old.quantity as i64)),
+        ];
+        (tomb, changes)
+    }
+
+    /// Resolves whether an item belongs to a corporation hangar/deliveries scope or personal scope.
+    pub fn resolve_item_notification_target(
+        &self,
+        fallback_char_id: i64,
+        item: &eve_db::InventoryItemRecord,
+    ) -> (NotificationTarget, &'static str) {
+        let is_corp_owned = item.owner_id != fallback_char_id
+            && (is_corp_hangar_flag(item.flag)
+                || self
+                    .db
+                    .with_snapshot(|s| s.corporations.contains_key(&item.owner_id)));
+        if is_corp_owned && is_corp_hangar_flag(item.flag) {
+            (NotificationTarget::Corporation(item.owner_id), "corpid")
+        } else {
+            let is_corp = is_corp_hangar_flag(item.flag)
+                && self
+                    .db
+                    .with_snapshot(|s| s.corporations.contains_key(&item.owner_id));
+            if is_corp {
+                (NotificationTarget::Corporation(item.owner_id), "corpid")
+            } else {
+                (NotificationTarget::Character(fallback_char_id), "charid")
+            }
+        }
+    }
+
+    /// Emits `OnItemChange` routed to `Corporation(owner_id)` for corp hangar items (`116..=122 | 62`)
+    /// or `Character(fallback_char_id)` otherwise.
+    pub fn emit_item_change_routed(
+        &self,
+        fallback_char_id: i64,
+        item: &eve_db::InventoryItemRecord,
+        changes: Vec<(i32, PyRep)>,
+    ) {
+        let (target, id_type) = self.resolve_item_notification_target(fallback_char_id, item);
+        self.notify_item_record_change_with_target(target, id_type, item, changes);
+    }
+
+    /// Emits a routed `locJunkyard` tombstone `OnItemChange` for a deleted or fully consumed item.
+    pub fn emit_item_deleted_routed(
+        &self,
+        fallback_char_id: i64,
+        old_item: &eve_db::InventoryItemRecord,
+    ) {
+        let (tomb, changes) = Self::build_item_tombstone(old_item);
+        let (target, id_type) = self.resolve_item_notification_target(fallback_char_id, old_item);
+        self.notify_item_record_change_with_target(target, id_type, &tomb, changes);
+    }
+
+    /// Emits `OnItemChange` by diffing `pre` and `post` item states, routing to both old and new targets
+    /// if ownership/corp-hangar scope changed.
+    pub fn notify_item_mutation(
+        &self,
+        fallback_char_id: i64,
+        pre: Option<&eve_db::InventoryItemRecord>,
+        post: Option<&eve_db::InventoryItemRecord>,
+    ) {
+        match (pre, post) {
+            (None, Some(new_item)) => {
+                self.emit_item_change_routed(fallback_char_id, new_item, Vec::new());
+            }
+            (Some(old_item), None) => {
+                self.emit_item_deleted_routed(fallback_char_id, old_item);
+            }
+            (Some(old_item), Some(new_item)) => {
+                let changes = Self::compute_item_change_dict(old_item, new_item);
+                if changes.is_empty() {
+                    return;
+                }
+                let (old_target, old_id_type) =
+                    self.resolve_item_notification_target(fallback_char_id, old_item);
+                let (new_target, new_id_type) =
+                    self.resolve_item_notification_target(fallback_char_id, new_item);
+                self.notify_item_record_change_with_target(
+                    new_target.clone(),
+                    new_id_type,
+                    new_item,
+                    changes.clone(),
+                );
+                if old_target != new_target {
+                    self.notify_item_record_change_with_target(
+                        old_target,
+                        old_id_type,
+                        new_item,
+                        changes,
+                    );
+                }
+            }
+            (None, None) => {}
+        }
+    }
+
+    /// Emits `OnAccountChange` for personal (`cash`) or corporate division (`cash` / `cash2..cash7`) wallets.
+    pub fn notify_wallet_balance(
+        &self,
+        is_corp: bool,
+        owner_id: i64,
+        div_id: u8,
+        balance: eve_db::IskCents,
+    ) -> Vec<PendingMachoNotification> {
+        if is_corp {
+            let key = if div_id <= 1 {
+                "cash".to_string()
+            } else {
+                format!("cash{div_id}")
+            };
+            self.notify(
+                NotificationTarget::Corporation(owner_id),
+                "OnAccountChange",
+                "corpid",
+                vec![
+                    PyRep::String(key),
+                    PyRep::Integer(owner_id),
+                    PyRep::Real(balance.to_wire_f64()),
+                ],
+            )
+        } else {
+            self.notify_account_change(owner_id, "cash", owner_id, balance.to_wire_f64())
+        }
     }
 
     pub fn notify_target_events(

@@ -15,6 +15,7 @@ pub(crate) struct ModifyCrossResult {
     pub final_escrow: IskCents,
     pub acct_updates: Vec<(bool, i64, u8, IskCents)>,
     pub item_deliveries: Vec<(i64, InventoryItemRecord)>,
+    pub matched_orders: Vec<(i64, i64)>,
 }
 
 /// Executes crossed order fills when a market order price is modified via `ModifyCharOrder`.
@@ -39,6 +40,7 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
             final_escrow: IskCents(0),
             acct_updates: Vec::new(),
             item_deliveries: Vec::new(),
+            matched_orders: Vec::new(),
         }),
     };
 
@@ -46,6 +48,7 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
     let mut delivered_to_corp_deliveries = 0_i32;
     let mut acct_updates: Vec<(bool, i64, u8, IskCents)> = Vec::new();
     let mut item_deliveries: Vec<(i64, InventoryItemRecord)> = Vec::new();
+    let mut matched_orders: Vec<(i64, i64)> = Vec::new();
 
     if order.is_bid {
         // Buy order modified upward: crosses resting ask orders within buy order range
@@ -177,6 +180,9 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
 
             if let Some(a_mut) = snap.market_orders.get_mut(&ask_id) {
                 a_mut.vol_remaining -= fill_qty;
+                if !a_mut.is_npc {
+                    matched_orders.push((ask_id, ask.owner_id));
+                }
                 if a_mut.vol_remaining == 0 && !a_mut.is_npc {
                     let mut r_meta = load_market_order_meta(snap, &ask, now_unix);
                     r_meta.order_state = Some(2);
@@ -323,6 +329,9 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
             if let Some(b_mut) = snap.market_orders.get_mut(&bid_id) {
                 b_mut.vol_remaining -= fill_qty;
                 b_mut.escrow = b_mut.escrow.checked_sub(from_escrow).unwrap_or(IskCents(0));
+                if !bid.is_npc {
+                    matched_orders.push((bid_id, bid.owner_id));
+                }
                 if b_mut.vol_remaining == 0 && !bid.is_npc {
                     let mut r_meta = load_market_order_meta(snap, &bid, now_unix);
                     r_meta.order_state = Some(2);
@@ -371,6 +380,7 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
         final_escrow,
         acct_updates,
         item_deliveries,
+        matched_orders,
     })
 }
 

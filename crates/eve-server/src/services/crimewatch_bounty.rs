@@ -1038,44 +1038,7 @@ pub fn handle_apply_tags_for_sec_status(
                 ],
             );
             for (old_item, new_item_opt) in changed_items {
-                let (rem_qty, rem_loc) = new_item_opt
-                    .as_ref()
-                    .map(|i| (i.quantity, i.location_id))
-                    .unwrap_or((0, 6));
-                let (group_id, category_id) = ctx
-                    .sde
-                    .types
-                    .get(&old_item.type_id)
-                    .map(|t| (t.group_id as i64, t.category_id as i64))
-                    .unwrap_or((1224, 17));
-                let mut changes = vec![
-                    (PyRep::Integer(5), PyRep::Integer(old_item.quantity as i64)), // ixQuantity
-                    (PyRep::Integer(9), PyRep::Integer(old_item.quantity as i64)), // ixStackSize
-                ];
-                if new_item_opt.is_none() {
-                    changes.push((PyRep::Integer(3), PyRep::Integer(old_item.location_id))); // ixLocationID
-                }
-                ctx.notify(
-                    crate::router::NotificationTarget::Character(char_id),
-                    "OnItemChange",
-                    "charid",
-                    vec![
-                        PyRep::keyval([
-                            ("itemID", PyRep::Integer(old_item.item_id)),
-                            ("typeID", PyRep::Integer(old_item.type_id as i64)),
-                            ("ownerID", PyRep::Integer(old_item.owner_id)),
-                            ("locationID", PyRep::Integer(rem_loc)),
-                            ("flagID", PyRep::Integer(old_item.flag as i64)),
-                            ("quantity", PyRep::Integer(rem_qty as i64)),
-                            ("groupID", PyRep::Integer(group_id)),
-                            ("categoryID", PyRep::Integer(category_id)),
-                            ("singleton", PyRep::Bool(old_item.singleton)),
-                            ("stacksize", PyRep::Integer(rem_qty as i64)),
-                        ]),
-                        PyRep::Dict(changes),
-                        PyRep::Integer(old_item.location_id),
-                    ],
-                );
+                ctx.notify_item_mutation(char_id, Some(&old_item), new_item_opt.as_ref());
             }
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),

@@ -295,6 +295,7 @@ fn enqueue_pvp_char_notification(
         ServerContext::build_macho_notification_packet(cid, Some(uid), event, id_type, args.clone());
     let created_filetime = (db.clock().now_unix_secs() + 11_644_473_600) * 10_000_000;
     let notif = crate::router::PendingMachoNotification {
+        seq_id: crate::router::cache_notifications::next_notification_seq_id(),
         recipient_char_id: cid,
         event: event.to_string(),
         id_type: id_type.to_string(),

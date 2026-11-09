@@ -167,13 +167,13 @@ pub fn booster_penalty_attribute_ids(sde: &SdeRegistry) -> HashSet<u16> {
         .unwrap_or_default()
 }
 
-/// Purges expired `InventoryFlag::Booster` items from `snap.items` and returns `active_ship_id`s to invalidate.
-pub fn purge_expired_boosters_in_snapshot(
+/// Purges expired `InventoryFlag::Booster` items from `snap.items`, returning `(ship_ids, removed_records)`.
+pub fn purge_expired_boosters_in_snapshot_with_items(
     snap: &mut WorldStateSnapshot,
     char_filter: Option<i64>,
     now_unix: u64,
-) -> Vec<i64> {
-    let expired_ids: Vec<(i64, i64)> = snap
+) -> (Vec<i64>, Vec<(i64, InventoryItemRecord)>) {
+    let expired_records: Vec<(i64, i64, InventoryItemRecord)> = snap
         .items
         .values()
         .filter(|item| {
@@ -185,16 +185,27 @@ pub fn purge_expired_boosters_in_snapshot(
                     .get(&DYN_ATTR_BOOSTER_EXPIRY_UNIX)
                     .is_some_and(|&exp| exp > 0.0 && now_unix >= (exp as u64))
         })
-        .map(|item| (item.item_id, item.owner_id))
+        .map(|item| (item.item_id, item.owner_id, item.clone()))
         .collect();
     let mut ships = Vec::new();
-    for (item_id, owner_id) in expired_ids {
+    let mut removed = Vec::with_capacity(expired_records.len());
+    for (item_id, owner_id, rec) in expired_records {
         snap.remove_system_cleanup_item(item_id);
+        removed.push((owner_id, rec));
         if let Some(ch) = snap.characters.get(&owner_id) {
             ships.push(ch.active_ship_id);
         }
     }
-    ships
+    (ships, removed)
+}
+
+/// Purges expired `InventoryFlag::Booster` items from `snap.items` and returns `active_ship_id`s to invalidate.
+pub fn purge_expired_boosters_in_snapshot(
+    snap: &mut WorldStateSnapshot,
+    char_filter: Option<i64>,
+    now_unix: u64,
+) -> Vec<i64> {
+    purge_expired_boosters_in_snapshot_with_items(snap, char_filter, now_unix).0
 }
 
 /// Purges all expired boosters across the snapshot and invalidates affected ship fittings.
@@ -211,11 +222,14 @@ pub fn purge_expired_boosters_all(ctx: &ServerContext, now_unix: u64) {
     if !any_expired {
         return;
     }
-    let ships = ctx
+    let (ships, removed) = ctx
         .db
-        .with_mut_snapshot(|snap| purge_expired_boosters_in_snapshot(snap, None, now_unix));
+        .with_mut_snapshot(|snap| purge_expired_boosters_in_snapshot_with_items(snap, None, now_unix));
     for ship_id in ships {
         ctx.invalidate_ship_fitting(ship_id);
+    }
+    for (owner_id, old_rec) in removed {
+        ctx.notify_item_mutation(owner_id, Some(&old_rec), None);
     }
 }
 
@@ -351,7 +365,7 @@ pub fn inject_implant(
         code: "InvalidArgument".into(),
         message: "InjectImplant requires an itemID".into(),
     })?;
-    let ship_id = ctx.db.try_with_mut_snapshot(|snap| {
+    let (ship_id, item_diffs) = ctx.db.try_with_mut_snapshot(|snap| {
         let Some(item) = snap.items.get(&item_id).cloned() else {
             return Err(BridgeRpcError {
                 code: "ItemNotFound".into(),
@@ -403,31 +417,32 @@ pub fn inject_implant(
             });
         }
 
+        let mut diffs: Vec<(Option<InventoryItemRecord>, Option<InventoryItemRecord>)> = Vec::new();
         if item.quantity > 1 {
             if let Some(src) = snap.items.get_mut(&item_id) {
                 src.quantity -= 1;
                 src.version += 1;
+                diffs.push((Some(item.clone()), Some(src.clone())));
             }
             snap.next_entity_id += 1;
             let plugged_id = snap.next_entity_id;
-            snap.items.insert(
-                plugged_id,
-                InventoryItemRecord {
-                    item_id: plugged_id,
-                    type_id: item.type_id,
-                    owner_id: char_id,
-                    location_id: char_id,
-                    flag: InventoryFlag::Implant,
-                    quantity: 1,
-                    singleton: true,
-                    version: 1,
-                    dynamic_attributes: item.dynamic_attributes.clone(),
-                    source_mutaplasmid_id: None,
-                    insured_payout_isk: 0.0,
-                    is_blueprint_copy: false,
-                    blueprint_runs_remaining: None,
-                },
-            );
+            let plugged_rec = InventoryItemRecord {
+                item_id: plugged_id,
+                type_id: item.type_id,
+                owner_id: char_id,
+                location_id: char_id,
+                flag: InventoryFlag::Implant,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: item.dynamic_attributes.clone(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            };
+            snap.items.insert(plugged_id, plugged_rec.clone());
+            diffs.push((None, Some(plugged_rec)));
         } else {
             snap.transfer_inventory_item(
                 item_id,
@@ -446,14 +461,18 @@ pub fn inject_implant(
             if let Some(src) = snap.items.get_mut(&item_id) {
                 src.singleton = true;
                 src.version += 1;
+                diffs.push((Some(item.clone()), Some(src.clone())));
             }
         }
         let active = snap.active_implants.entry(char_id).or_default();
         if !active.contains(&item.type_id) {
             active.push(item.type_id);
         }
-        Ok(snap.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0))
+        Ok((snap.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0), diffs))
     })?;
+    for (pre, post) in item_diffs {
+        ctx.notify_item_mutation(char_id, pre.as_ref(), post.as_ref());
+    }
     if ship_id > 0 {
         ctx.invalidate_ship_fitting(ship_id);
     }
@@ -477,8 +496,9 @@ pub fn destroy_implant(
         code: "InvalidArgument".into(),
         message: "DestroyImplant requires an itemID".into(),
     })?;
-    let ship_id = ctx.db.try_with_mut_snapshot(|snap| {
+    let (ship_id, removed_item) = ctx.db.try_with_mut_snapshot(|snap| {
         let found_item = snap.items.get(&item_id).cloned();
+        let mut removed_rec = None;
         let removed_type_id = if let Some(item) = found_item {
             if item.owner_id != char_id
                 || item.location_id != char_id
@@ -489,14 +509,16 @@ pub fn destroy_implant(
                     message: format!("Item {item_id} is not a plugged-in implant of character {char_id}"),
                 });
             }
+            let tid = item.type_id;
+            removed_rec = Some(item);
             snap.remove_system_cleanup_item(item_id);
-            item.type_id
+            tid
         } else {
             let tid = u32::try_from(item_id).map_err(|_| BridgeRpcError {
                 code: "ImplantNotFound".into(),
                 message: format!("Plugged-in implant {item_id} not found"),
             })?;
-            let matching_iid = snap
+            let matching_rec = snap
                 .items
                 .values()
                 .find(|it| {
@@ -505,19 +527,20 @@ pub fn destroy_implant(
                         && it.flag == InventoryFlag::Implant
                         && it.type_id == tid
                 })
-                .map(|it| it.item_id);
+                .cloned();
             let has_in_active = snap
                 .active_implants
                 .get(&char_id)
                 .is_some_and(|v| v.contains(&tid));
-            if !has_in_active && matching_iid.is_none() {
+            if !has_in_active && matching_rec.is_none() {
                 return Err(BridgeRpcError {
                     code: "ImplantNotFound".into(),
                     message: format!("Plugged-in implant {item_id} not found"),
                 });
             }
-            if let Some(iid) = matching_iid {
-                snap.remove_system_cleanup_item(iid);
+            if let Some(rec) = matching_rec {
+                snap.remove_system_cleanup_item(rec.item_id);
+                removed_rec = Some(rec);
             }
             tid
         };
@@ -526,8 +549,11 @@ pub fn destroy_implant(
                 active.remove(pos);
             }
         }
-        Ok(snap.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0))
+        Ok((snap.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0), removed_rec))
     })?;
+    if let Some(old_rec) = removed_item {
+        ctx.notify_item_mutation(char_id, Some(&old_rec), None);
+    }
     if ship_id > 0 {
         ctx.invalidate_ship_fitting(ship_id);
     }
@@ -604,9 +630,9 @@ pub fn use_booster(
     let now_unix = ctx.now_unix();
     let penalty_attrs = booster_penalty_attribute_ids(&ctx.sde);
 
-    let (booster_item_id, type_id, slot, duration_secs, expiry_unix, rolled_eids, ship_id) =
+    let (booster_item_id, type_id, slot, duration_secs, expiry_unix, rolled_eids, ship_id, purged_boosters, item_diffs) =
         ctx.db.try_with_mut_snapshot(|snap| {
-            let _ = purge_expired_boosters_in_snapshot(snap, Some(char_id), now_unix);
+            let (_, purged_boosters) = purge_expired_boosters_in_snapshot_with_items(snap, Some(char_id), now_unix);
             let Some(item) = snap.items.get(&item_id).cloned() else {
                 return Err(BridgeRpcError {
                     code: "ItemNotFound".into(),
@@ -741,31 +767,32 @@ pub fn use_booster(
                 dyn_attrs.insert(DYN_ATTR_BOOSTER_SIDE_EFFECT_BASE + (i as u16), eid as f64);
             }
 
+            let mut diffs: Vec<(Option<InventoryItemRecord>, Option<InventoryItemRecord>)> = Vec::new();
             let active_booster_id = if item.quantity > 1 {
                 if let Some(src) = snap.items.get_mut(&item_id) {
                     src.quantity -= 1;
                     src.version += 1;
+                    diffs.push((Some(item.clone()), Some(src.clone())));
                 }
                 snap.next_entity_id += 1;
                 let bid = snap.next_entity_id;
-                snap.items.insert(
-                    bid,
-                    InventoryItemRecord {
-                        item_id: bid,
-                        type_id: item.type_id,
-                        owner_id: char_id,
-                        location_id: char_id,
-                        flag: InventoryFlag::Booster,
-                        quantity: 1,
-                        singleton: true,
-                        version: 1,
-                        dynamic_attributes: dyn_attrs,
-                        source_mutaplasmid_id: None,
-                        insured_payout_isk: 0.0,
-                        is_blueprint_copy: false,
-                        blueprint_runs_remaining: None,
-                    },
-                );
+                let new_b = InventoryItemRecord {
+                    item_id: bid,
+                    type_id: item.type_id,
+                    owner_id: char_id,
+                    location_id: char_id,
+                    flag: InventoryFlag::Booster,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    dynamic_attributes: dyn_attrs,
+                    source_mutaplasmid_id: None,
+                    insured_payout_isk: 0.0,
+                    is_blueprint_copy: false,
+                    blueprint_runs_remaining: None,
+                };
+                snap.items.insert(bid, new_b.clone());
+                diffs.push((None, Some(new_b)));
                 bid
             } else {
                 if let Some(src) = snap.items.get_mut(&item_id) {
@@ -774,6 +801,7 @@ pub fn use_booster(
                     src.singleton = true;
                     src.dynamic_attributes = dyn_attrs;
                     src.version += 1;
+                    diffs.push((Some(item.clone()), Some(src.clone())));
                 }
                 item_id
             };
@@ -786,9 +814,17 @@ pub fn use_booster(
                 expiry_unix,
                 rolled_eids,
                 ship_id,
+                purged_boosters,
+                diffs,
             ))
         })?;
 
+    for (owner_id, old_rec) in purged_boosters {
+        ctx.notify_item_mutation(owner_id, Some(&old_rec), None);
+    }
+    for (pre, post) in item_diffs {
+        ctx.notify_item_mutation(char_id, pre.as_ref(), post.as_ref());
+    }
     if ship_id > 0 {
         ctx.invalidate_ship_fitting(ship_id);
     }
@@ -820,11 +856,14 @@ pub fn get_boosters(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let now_unix = ctx.now_unix();
-    let expired_ships = ctx
+    let (expired_ships, purged) = ctx
         .db
-        .with_mut_snapshot(|snap| purge_expired_boosters_in_snapshot(snap, Some(char_id), now_unix));
+        .with_mut_snapshot(|snap| purge_expired_boosters_in_snapshot_with_items(snap, Some(char_id), now_unix));
     for ship_id in expired_ships {
         ctx.invalidate_ship_fitting(ship_id);
+    }
+    for (owner_id, old_rec) in purged {
+        ctx.notify_item_mutation(owner_id, Some(&old_rec), None);
     }
     let entries = ctx.db.with_snapshot(|snap| {
         let mut items: Vec<&InventoryItemRecord> = snap
@@ -961,7 +1000,7 @@ pub fn inject_skillpoints(
     let current_ship = session.ship_id;
     let now_ft = ctx.now_blueos_filetime_ticks();
 
-    let (yielded, new_free_sp, is_non_dim, rem_non_dim) = ctx.db.try_with_mut_snapshot(|snap| {
+    let (yielded, new_free_sp, is_non_dim, rem_non_dim, pre_inj, post_inj) = ctx.db.try_with_mut_snapshot(|snap| {
         let ch = snap.characters.get(&char_id).cloned().ok_or_else(|| BridgeRpcError {
             code: "CharacterNotFound".into(),
             message: format!("Character {char_id} not found"),
@@ -1026,6 +1065,7 @@ pub fn inject_skillpoints(
             }
         };
 
+        let pre_inj = snap.items.get(&item_id).cloned();
         snap.consume_exact_item_quantity(
             item_id,
             1,
@@ -1038,6 +1078,7 @@ pub fn inject_skillpoints(
             code: "SkillInjectorLocked".into(),
             message: e.to_string(),
         })?;
+        let post_inj = snap.items.get(&item_id).cloned();
 
         let rem_non_dim: i64 = if non_dim_yield.is_some() {
             snap.items
@@ -1058,7 +1099,7 @@ pub fn inject_skillpoints(
         }
         if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
             ch_mut.free_skill_points += y;
-            Ok((y, ch_mut.free_skill_points, non_dim_yield.is_some(), rem_non_dim))
+            Ok((y, ch_mut.free_skill_points, non_dim_yield.is_some(), rem_non_dim, pre_inj, post_inj))
         } else {
             Err(BridgeRpcError {
                 code: "CharacterNotFound".into(),
@@ -1066,6 +1107,7 @@ pub fn inject_skillpoints(
             })
         }
     })?;
+    ctx.notify_item_mutation(char_id, pre_inj.as_ref(), post_inj.as_ref());
 
     if is_non_dim {
         ctx.notify(

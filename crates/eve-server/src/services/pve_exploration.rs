@@ -563,6 +563,7 @@ pub fn notify_pve_destruction_events(
             vec![PyRep::String(site_id.clone())],
         );
         to_send.push(crate::router::cache_notifications::PendingMachoNotification {
+            seq_id: crate::router::cache_notifications::next_notification_seq_id(),
             recipient_char_id: killer_char_id,
             event: "OnCosmicAnomalyRemoved".to_string(),
             id_type: "charid".to_string(),
@@ -581,6 +582,7 @@ pub fn notify_pve_destruction_events(
                 d_args.clone(),
             );
             to_send.push(crate::router::cache_notifications::PendingMachoNotification {
+                seq_id: crate::router::cache_notifications::next_notification_seq_id(),
                 recipient_char_id: killer_char_id,
                 event: "OnDungeonCompleted".to_string(),
                 id_type: "charid".to_string(),
@@ -622,6 +624,7 @@ pub fn notify_pve_destruction_events(
                 fleet_to_send.push((
                     member_id,
                     crate::router::cache_notifications::PendingMachoNotification {
+                        seq_id: crate::router::cache_notifications::next_notification_seq_id(),
                         recipient_char_id: member_id,
                         event: "OnFleetEscalatingPathMessage".to_string(),
                         id_type: "fleetid".to_string(),
@@ -653,6 +656,7 @@ pub fn notify_pve_destruction_events(
             vec![],
         );
         to_send.push(crate::router::cache_notifications::PendingMachoNotification {
+            seq_id: crate::router::cache_notifications::next_notification_seq_id(),
             recipient_char_id: killer_char_id,
             event: "OnEscalatingPathChange".to_string(),
             id_type: "charid".to_string(),
@@ -670,6 +674,7 @@ pub fn notify_pve_destruction_events(
             msg_args.clone(),
         );
         to_send.push(crate::router::cache_notifications::PendingMachoNotification {
+            seq_id: crate::router::cache_notifications::next_notification_seq_id(),
             recipient_char_id: killer_char_id,
             event: "OnEscalatingPathMessage".to_string(),
             id_type: "charid".to_string(),

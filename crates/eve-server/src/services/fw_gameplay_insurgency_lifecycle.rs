@@ -475,6 +475,7 @@ pub fn emit_campaign_resolution_effects_core(
             ],
         );
         let notif = crate::router::cache_notifications::PendingMachoNotification {
+            seq_id: crate::router::cache_notifications::next_notification_seq_id(),
             recipient_char_id: cid,
             event: "OnAccountChange".into(),
             id_type: "cash".into(),
@@ -562,6 +563,7 @@ pub fn emit_campaign_resolution_effects_core(
                 update_args.clone(),
             );
             let notif1 = crate::router::cache_notifications::PendingMachoNotification {
+                seq_id: crate::router::cache_notifications::next_notification_seq_id(),
                 recipient_char_id: cid,
                 event: "OnInsurgencyCampaignUpdatedForLocation".into(),
                 id_type: "solarsystemid".into(),
@@ -578,6 +580,7 @@ pub fn emit_campaign_resolution_effects_core(
                 state_args.clone(),
             );
             let notif2 = crate::router::cache_notifications::PendingMachoNotification {
+                seq_id: crate::router::cache_notifications::next_notification_seq_id(),
                 recipient_char_id: cid,
                 event: "OnInsurgencyStateChangedForFaction".into(),
                 id_type: "solarsystemid".into(),

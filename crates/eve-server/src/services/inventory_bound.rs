@@ -834,8 +834,7 @@ pub(crate) fn emit_inv_item_change(
     item: &eve_db::InventoryItemRecord,
     changes: Vec<(i32, PyRep)>,
 ) {
-    let row = DBRowDescriptor::inv_item_header().build_dbrow(item_to_packed_cells(ctx, item));
-    ctx.notify_item_change(char_id, row, changes);
+    ctx.emit_item_change_routed(char_id, item, changes);
 }
 
 pub(crate) fn emit_inv_item_deleted(
@@ -843,22 +842,7 @@ pub(crate) fn emit_inv_item_deleted(
     char_id: i64,
     old_item: &eve_db::InventoryItemRecord,
 ) {
-    let mut tomb = old_item.clone();
-    tomb.location_id = 6; // locJunkyard
-    tomb.flag = InventoryFlag::None;
-    tomb.quantity = 0;
-    tomb.singleton = false;
-    let row = DBRowDescriptor::inv_item_header().build_dbrow(item_to_packed_cells(ctx, &tomb));
-    ctx.notify_item_change(
-        char_id,
-        row,
-        vec![
-            (3, PyRep::Integer(old_item.location_id)),
-            (4, PyRep::Integer(old_item.flag as i64)),
-            // Omit ixQuantity (5): V24.01 invCache logs tracebacks on key 5; key 9 (ixStackSize) carries quantity deltas.
-            (9, PyRep::Integer(old_item.quantity as i64)),
-        ],
-    );
+    ctx.emit_item_deleted_routed(char_id, old_item);
 }
 
 /// Resolves destination `locationID` for bound/unbound `invbroker.Add` and `invbroker.MultiAdd`.

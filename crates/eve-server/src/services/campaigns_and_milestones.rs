@@ -693,7 +693,9 @@ fn handle_login_campaign_claim_reward(
                 ]),
                 PyRep::Dict(Vec::new()),
             ];
-            session.push_notification("OnItemChange", item_change_args.clone());
+            if !session.live_notify_listener {
+                session.push_notification("OnItemChange", item_change_args.clone());
+            }
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
                 "OnItemChange",

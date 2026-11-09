@@ -387,6 +387,7 @@ pub fn push_dungeon_room_trigger_notify(
     let (pkt, mpkt) =
         ServerContext::build_macho_notification_packet(recipient_char_id, None, event, "charid", args.clone());
     let notif = PendingMachoNotification {
+        seq_id: crate::router::cache_notifications::next_notification_seq_id(),
         recipient_char_id,
         event: event.to_string(),
         id_type: "charid".to_string(),
@@ -645,6 +646,7 @@ pub fn emit_incursion_completion_combat_notifications(
             inf_args.clone(),
         );
         let notif = crate::router::cache_notifications::PendingMachoNotification {
+            seq_id: crate::router::cache_notifications::next_notification_seq_id(),
             recipient_char_id: target_char_id,
             event: "OnInfluenceUpdate".into(),
             id_type: "solarsystemid".into(),
@@ -676,6 +678,7 @@ pub fn emit_incursion_completion_combat_notifications(
                 rem_args.clone(),
             );
             let notif_rem = crate::router::cache_notifications::PendingMachoNotification {
+                seq_id: crate::router::cache_notifications::next_notification_seq_id(),
                 recipient_char_id: target_char_id,
                 event: "OnTaleRemove".into(),
                 id_type: "solarsystemid".into(),

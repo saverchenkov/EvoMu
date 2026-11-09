@@ -482,3 +482,116 @@ fn notification_queue_eviction_login_dedup_local_chat_and_emitters() {
     let dmg_tuple = as_tuple(&dmg[0].args[1]);
     assert_eq!((&as_tuple(&dmg_tuple[0])[0], &dmg_tuple[1], &dmg_tuple[2]), (&PyRep::Real(0.0), &PyRep::Real(1.0), &PyRep::Real(0.5)));
 }
+
+#[test]
+fn seq_id_overflow_preserves_recent_notifications_and_dedup() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001;
+    let _ = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(ctx.latest_notification_seq_for_char(char_id), 0);
+
+    // Fill queue past MAX_PENDING_NOTIFICATIONS_PER_CHAR and record midpoint seq_id.
+    for i in 0..100 {
+        ctx.notify_skill_trained(char_id, 500 + i, 3300, 1);
+    }
+    let pre_seq = ctx.latest_notification_seq_for_char(char_id);
+    assert!(pre_seq > 0);
+
+    for i in 100..160 {
+        ctx.notify_skill_trained(char_id, 500 + i, 3300, 2);
+    }
+    let all = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(all.len(), MAX_PENDING_NOTIFICATIONS_PER_CHAR);
+    let post_seq_notifs: Vec<_> = all.iter().filter(|n| n.seq_id > pre_seq).collect();
+    assert_eq!(post_seq_notifs.len(), 60);
+    assert!(all.windows(2).all(|w| w[0].seq_id < w[1].seq_id));
+}
+
+#[test]
+fn compute_item_change_dict_and_mutation_router_v24_parity() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001;
+    let other_char = 90_000_002;
+    let corp_id = 1_000_299_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "Router Test Corp".into();
+        corp.ceo_id = char_id;
+        corp.members.insert(char_id);
+        corp.members.insert(other_char);
+        snap.corporations.insert(corp_id, corp);
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let _ = ctx.drain_notifications_for_char(other_char);
+
+    let stack_old = InventoryItemRecord {
+        item_id: 880_001,
+        type_id: 34,
+        owner_id: char_id,
+        location_id: 60_003_760,
+        flag: InventoryFlag::Hangar,
+        quantity: 100,
+        singleton: false,
+        ..Default::default()
+    };
+    let stack_new = InventoryItemRecord {
+        owner_id: corp_id,
+        location_id: 60_003_761,
+        flag: InventoryFlag::CorpSAG1,
+        quantity: 60,
+        ..stack_old.clone()
+    };
+    let changes = ServerContext::compute_item_change_dict(&stack_old, &stack_new);
+    assert!(changes.iter().all(|(k, _)| *k != 5), "legacy ixQuantity (5) must never be emitted");
+    assert!(changes.contains(&(2, PyRep::Integer(char_id))));
+    assert!(changes.contains(&(3, PyRep::Integer(60_003_760))));
+    assert!(changes.contains(&(4, PyRep::Integer(InventoryFlag::Hangar as i64))));
+    assert!(changes.contains(&(9, PyRep::Integer(100))));
+
+    // Moving personal -> corp hangar notifies both source character and destination corp members.
+    ctx.notify_item_mutation(char_id, Some(&stack_old), Some(&stack_new));
+    let n_char = ctx.drain_notifications_for_char(char_id);
+    let n_other = ctx.drain_notifications_for_char(other_char);
+    assert!(n_other.iter().any(|n| n.event == "OnItemChange" && n.id_type == "corpid"));
+    assert!(n_char.iter().filter(|n| n.event == "OnItemChange").count() >= 1);
+
+    // Deletion from corp hangar sends tombstone (locationID=6, flag=0, qty=0) to corp scope.
+    ctx.notify_item_mutation(char_id, Some(&stack_new), None);
+    let del_other = ctx.drain_notifications_for_char(other_char);
+    let del_notif = del_other
+        .iter()
+        .find(|n| n.event == "OnItemChange")
+        .expect("corp deletion OnItemChange");
+    assert_eq!(del_notif.id_type, "corpid");
+    assert_eq!(del_notif.args[0].dbrow_get("locationID"), Some(&PyRep::Integer(6)));
+    assert_eq!(del_notif.args[0].dbrow_get("flagID"), Some(&PyRep::Integer(0)));
+    assert_eq!(del_notif.args[0].dbrow_get("quantity"), Some(&PyRep::Integer(0)));
+
+    // Singleton assembly transitions set ixSingleton (10).
+    let single_new = InventoryItemRecord {
+        singleton: true,
+        quantity: 1,
+        ..InventoryItemRecord {
+            quantity: 1,
+            singleton: false,
+            ..stack_old.clone()
+        }
+    };
+    let single_old = InventoryItemRecord { quantity: 1, singleton: false, ..stack_old };
+    let singleton_changes = ServerContext::compute_item_change_dict(&single_old, &single_new);
+    assert!(singleton_changes.contains(&(10, PyRep::Integer(1))));
+    assert!(singleton_changes.iter().all(|(k, _)| *k != 5));
+
+    // Wallet helper covers personal cash and corp divisions cash / cashN.
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let _ = ctx.drain_notifications_for_char(other_char);
+    ctx.notify_wallet_balance(false, char_id, 1, eve_db::IskCents(123_456));
+    ctx.notify_wallet_balance(true, corp_id, 3, eve_db::IskCents(999_000));
+    let wn = ctx.drain_notifications_for_char(other_char);
+    assert!(wn.iter().any(|n| {
+        n.event == "OnAccountChange"
+            && n.id_type == "corpid"
+            && n.args[0] == PyRep::String("cash3".into())
+    }));
+}

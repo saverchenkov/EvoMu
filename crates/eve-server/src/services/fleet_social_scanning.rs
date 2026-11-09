@@ -1361,6 +1361,7 @@ pub(crate) fn emit_signal_tracker_site_removed_with_db(
                 cid, uid, event_name, "charid", args.clone(),
             );
             let notif = crate::router::cache_notifications::PendingMachoNotification {
+                seq_id: crate::router::cache_notifications::next_notification_seq_id(),
                 recipient_char_id: cid, event: event_name.into(), id_type: "charid".into(),
                 args: args.clone(), packet, marshaled_packet, created_filetime: now_ft,
             };

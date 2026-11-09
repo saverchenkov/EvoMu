@@ -290,7 +290,9 @@ pub fn emit_account_change_isk(
         PyRep::Integer(char_id),
         PyRep::Real(bal_f64),
     ];
-    session.push_notification("OnAccountChange", args.clone());
+    if !session.live_notify_listener {
+        session.push_notification("OnAccountChange", args.clone());
+    }
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
         "OnAccountChange",

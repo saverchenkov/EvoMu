@@ -759,6 +759,9 @@ pub struct SessionState {
     pub max_session_time: Option<i64>,
     #[serde(skip)]
     pub notifications: Vec<(String, Vec<PyRep>)>,
+    /// True when a live transport (`macho_listener` / JSON bridge) drains `pending_notifications` directly.
+    #[serde(skip)]
+    pub live_notify_listener: bool,
 }
 
 impl SessionState {
@@ -774,6 +777,7 @@ impl SessionState {
             user_type: 30,
             max_session_time: None,
             notifications: Vec::new(),
+            live_notify_listener: false,
             ..Default::default()
         }
     }

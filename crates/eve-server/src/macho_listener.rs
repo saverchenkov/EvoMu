@@ -117,6 +117,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
 
     let mut session = SessionState::new(session_id);
     session.address = peer_addr.clone();
+    session.live_notify_listener = true;
 
     let mut ver = VersionExchange::default();
     ver.user_count = ctx.db.online_session_count().max(1);

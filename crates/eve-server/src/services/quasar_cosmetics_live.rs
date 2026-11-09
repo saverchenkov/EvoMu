@@ -275,6 +275,7 @@ pub fn install_macho_notify_sink(ctx: &crate::router::ServerContext) {
                 cid, uid, event, id_type, args.clone(),
             );
             let notif = crate::router::cache_notifications::PendingMachoNotification {
+                seq_id: crate::router::cache_notifications::next_notification_seq_id(),
                 recipient_char_id: cid,
                 event: event.to_string(),
                 id_type: id_type.to_string(),
