@@ -686,15 +686,27 @@ pub fn handle(
                     .get(&char_id)
                     .and_then(|ch| {
                         ch.station_id
+                            .filter(|st| {
+                                ctx.sde
+                                    .stations
+                                    .get(st)
+                                    .is_some_and(|s| s.solar_system_id == op_sys)
+                            })
                             .map(|st| crate::router::TransitionLocation::Station {
                                 solar_system_id: Some(op_sys),
                                 station_id: st,
                             })
                             .or_else(|| {
-                                ch.structure_id.map(|st| crate::router::TransitionLocation::Structure {
-                                    solar_system_id: Some(op_sys),
-                                    structure_id: st,
-                                })
+                                ch.structure_id
+                                    .filter(|st| {
+                                        snap.structures
+                                            .get(st)
+                                            .is_some_and(|s| s.solar_system_id == op_sys)
+                                    })
+                                    .map(|st| crate::router::TransitionLocation::Structure {
+                                        solar_system_id: Some(op_sys),
+                                        structure_id: st,
+                                    })
                             })
                     })
                     .unwrap_or(crate::router::TransitionLocation::Space { solar_system_id: op_sys });
@@ -965,15 +977,27 @@ pub fn handle(
                     .get(&char_id)
                     .and_then(|ch| {
                         ch.station_id
+                            .filter(|st| {
+                                ctx.sde
+                                    .stations
+                                    .get(st)
+                                    .is_some_and(|s| s.solar_system_id == sys_id)
+                            })
                             .map(|st| crate::router::TransitionLocation::Station {
                                 solar_system_id: Some(sys_id),
                                 station_id: st,
                             })
                             .or_else(|| {
-                                ch.structure_id.map(|st| crate::router::TransitionLocation::Structure {
-                                    solar_system_id: Some(sys_id),
-                                    structure_id: st,
-                                })
+                                ch.structure_id
+                                    .filter(|st| {
+                                        snap.structures
+                                            .get(st)
+                                            .is_some_and(|s| s.solar_system_id == sys_id)
+                                    })
+                                    .map(|st| crate::router::TransitionLocation::Structure {
+                                        solar_system_id: Some(sys_id),
+                                        structure_id: st,
+                                    })
                             })
                     })
                     .unwrap_or(crate::router::TransitionLocation::Space { solar_system_id: sys_id });

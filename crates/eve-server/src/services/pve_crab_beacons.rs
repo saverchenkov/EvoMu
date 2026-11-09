@@ -289,8 +289,21 @@ fn clear_crab_link_ship_effects(
         }
     }
     ctx.invalidate_ship_fitting(ship_id);
+    let base_cs = ctx
+        .db
+        .with_snapshot(|s| {
+            s.items
+                .get(&ship_id)
+                .map(|item| (char_id_opt.unwrap_or(item.owner_id), item.type_id))
+        })
+        .map(|(cid, tid)| ctx.build_ship_combat_state(cid, ship_id, tid));
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     sys_handle.try_recompute_combat_attributes(ship_id, |cs| {
+        if let Some(ref base) = base_cs {
+            cs.base_shield_resonance = Some(base.shield_resonance);
+            cs.base_armor_resonance = Some(base.armor_resonance);
+            cs.base_structure_resonance = Some(base.structure_resonance);
+        }
         cs.crab_resonance_multiplier = None;
     });
     if let Some(cid) = char_id_opt {

@@ -1019,7 +1019,11 @@ impl WorldStateSnapshot {
         now_unix: u64,
     ) -> (bool, u64) {
         let Some(corp) = self.corporations.get(&corp_id) else {
-            return (false, session_roles);
+            let mut roles = session_roles;
+            if let Some(ra) = self.corp_role_assignments.get(&(corp_id, char_id)) {
+                roles |= ra.roles | ra.roles_at_hq | ra.roles_at_base | ra.roles_at_other;
+            }
+            return (false, roles);
         };
         if corp.ceo_id == char_id {
             return (true, u64::MAX);

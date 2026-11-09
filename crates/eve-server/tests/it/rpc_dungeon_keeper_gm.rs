@@ -562,6 +562,7 @@ async fn test_keeper_and_alpha_injector_services() {
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
             ch.solar_system_id = SYSTEM_JITA;
+            ch.station_id = Some(60_003_760);
         }
     });
     let is_op_after_jump = rpc(&ctx, &mut sess2, "keeper", "IsOperationSite", &[PyRep::Integer(30_002_187)])
