@@ -1,7 +1,25 @@
 //! Unit and mutation-killing tests for `esi::fleet_routes`.
 
 use super::*;
+use crate::domain::fleets::{
+    can_act_on_member, can_invite_member, can_manage_squad, can_manage_wing,
+    fleet_role_to_esi_str as fleet_role_to_str, is_fleet_boss_or_fc, is_fleet_member,
+    parse_esi_fleet_role as parse_fleet_role, squad_parent_wing_id,
+};
 use crate::esi::full_endpoint_catalog_tests::seed_full_esi_context;
+use eve_db::{FleetMemberRecord, FleetRecord, FleetRole, FleetSquadRecord, FleetWingRecord};
+
+fn validate_wing_and_squad(
+    f: &FleetRecord,
+    fleet_id: i64,
+    role: FleetRole,
+    wing_id: Option<i64>,
+    squad_id: Option<i64>,
+    is_move: bool,
+) -> Result<(Option<i64>, Option<i64>), RouteExecutionResult> {
+    fleets::validate_wing_and_squad(f, fleet_id, role, wing_id, squad_id, is_move)
+        .map_err(domain_err_to_esi)
+}
 
 fn params(pairs: &[(&str, &str)]) -> HashMap<String, String> {
     pairs

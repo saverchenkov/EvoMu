@@ -522,14 +522,14 @@ pub(crate) fn new_sqlite_ctx(label: &str) -> (PathBuf, Arc<ServerContext>) {
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let db_path = dir.join(format!("{label}.sqlite"));
     let repo = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open sqlite"));
-    let ctx = Arc::new(ServerContext::with_repository(repo));
+    let ctx = Arc::new(ServerContext::with_repository(repo).with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED));
     (db_path, ctx)
 }
 
 pub(crate) fn reload_ctx_from_sqlite(ctx: &ServerContext, path: &Path) -> Arc<ServerContext> {
     ctx.db.save_to_sqlite(path).expect("flush sqlite world");
     let repo = Arc::new(WorldRepository::open_sqlite(path).expect("reopen sqlite world"));
-    let ctx2 = Arc::new(ServerContext::with_repository(repo));
+    let ctx2 = Arc::new(ServerContext::with_repository(repo).with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED));
     crate::common::pin_clock(&ctx2);
     ctx2
 }

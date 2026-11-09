@@ -52,7 +52,8 @@ pub fn fresh_player_ctx() -> ServerContext {
     let (sde, base_snap) = shared_base_world();
     let db = Arc::new(eve_db::WorldRepository::new_empty());
     db.with_mut_snapshot(|s| *s = base_snap.clone());
-    let mut ctx = ServerContext::with_sde_and_repository(sde.clone(), db);
+    let mut ctx = ServerContext::with_sde_and_repository(sde.clone(), db)
+        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED);
     ctx.feature_flags.free_fast_checkout_plex = true;
     crate::common::pin_clock(&ctx);
     ctx

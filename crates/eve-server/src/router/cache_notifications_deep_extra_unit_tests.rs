@@ -487,6 +487,8 @@ fn notification_queue_eviction_login_dedup_local_chat_and_emitters() {
 fn seq_id_overflow_preserves_recent_notifications_and_dedup() {
     let ctx = test_ctx();
     let char_id = 90_000_001;
+    let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    let _ = ctx.db.acquire_online_lock(uid, 401, Some(char_id), false, ctx.now_unix());
     let _ = ctx.drain_notifications_for_char(char_id);
     assert_eq!(ctx.latest_notification_seq_for_char(char_id), 0);
 
@@ -513,7 +515,7 @@ fn compute_item_change_dict_and_mutation_router_v24_parity() {
     let char_id = 90_000_001;
     let other_char = 90_000_002;
     let corp_id = 1_000_299_i64;
-    ctx.db.with_mut_snapshot(|snap| {
+    let (u1, u2) = ctx.db.with_mut_snapshot(|snap| {
         let mut corp = eve_db::CorporationRecord::default();
         corp.corporation_id = corp_id;
         corp.name = "Router Test Corp".into();
@@ -521,7 +523,16 @@ fn compute_item_change_dict_and_mutation_router_v24_parity() {
         corp.members.insert(char_id);
         corp.members.insert(other_char);
         snap.corporations.insert(corp_id, corp);
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
+        }
+        if let Some(ch) = snap.characters.get_mut(&other_char) {
+            ch.corporation_id = corp_id;
+        }
+        (snap.characters[&char_id].user_id, snap.characters[&other_char].user_id)
     });
+    let _ = ctx.db.acquire_online_lock(u1, 402, Some(char_id), false, ctx.now_unix());
+    let _ = ctx.db.acquire_online_lock(u2, 403, Some(other_char), false, ctx.now_unix());
     let _ = ctx.drain_notifications_for_char(char_id);
     let _ = ctx.drain_notifications_for_char(other_char);
 
@@ -568,7 +579,7 @@ fn compute_item_change_dict_and_mutation_router_v24_parity() {
     assert_eq!(del_notif.args[0].dbrow_get("flagID"), Some(&PyRep::Integer(0)));
     assert_eq!(del_notif.args[0].dbrow_get("quantity"), Some(&PyRep::Integer(0)));
 
-    // Singleton assembly transitions set ixSingleton (10).
+    // Singleton assembly/repackaging transitions record previous ixSingleton (10) state.
     let single_new = InventoryItemRecord {
         singleton: true,
         quantity: 1,
@@ -580,8 +591,10 @@ fn compute_item_change_dict_and_mutation_router_v24_parity() {
     };
     let single_old = InventoryItemRecord { quantity: 1, singleton: false, ..stack_old };
     let singleton_changes = ServerContext::compute_item_change_dict(&single_old, &single_new);
-    assert!(singleton_changes.contains(&(10, PyRep::Integer(1))));
+    assert!(singleton_changes.contains(&(10, PyRep::Integer(0))));
     assert!(singleton_changes.iter().all(|(k, _)| *k != 5));
+    let repackage_changes = ServerContext::compute_item_change_dict(&single_new, &single_old);
+    assert!(repackage_changes.contains(&(10, PyRep::Integer(1))));
 
     // Wallet helper covers personal cash and corp divisions cash / cashN.
     let _ = ctx.drain_notifications_for_char(char_id);

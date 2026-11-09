@@ -16,6 +16,7 @@ fn new_ctx() -> ServerContext {
     );
     let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
     ServerContext::with_sde_and_repository(sde, db)
+        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED)
 }
 
 async fn call_service(

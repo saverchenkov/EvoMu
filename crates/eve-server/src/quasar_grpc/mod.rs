@@ -893,16 +893,6 @@ impl GrpcFrameReader {
         }
     }
 
-    #[cfg(test)]
-    fn buffered_bytes(&self) -> usize {
-        self.buf.len()
-    }
-
-    #[cfg(test)]
-    fn used_flow_control_capacity(&mut self) -> usize {
-        self.body.flow_control().used_capacity()
-    }
-
     async fn next_message(&mut self) -> anyhow::Result<Option<Vec<u8>>> {
         loop {
             if self.buf.len() >= 5 {
@@ -994,6 +984,14 @@ fn decompress_grpc_payload(raw: &[u8], encoding: &str) -> anyhow::Result<Vec<u8>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn grpc_reader_buffered_bytes(reader: &GrpcFrameReader) -> usize {
+        reader.buf.len()
+    }
+
+    fn grpc_reader_used_flow_control_capacity(reader: &mut GrpcFrameReader) -> usize {
+        reader.body.flow_control().used_capacity()
+    }
     use crate::quasar_gateway::{NoticeScope, STATUS_FORBIDDEN, STATUS_OK};
     use crate::router::client_compat::normalize_macho_rpc_reply;
     use eve_proto::quasar::{
@@ -1957,8 +1955,8 @@ mod tests {
             assert_eq!(msg_a, vec![0xAA; 20]);
             // Only the 25 bytes of frame 1 were released; the 35 pipelined bytes of frame 2 remain
             // buffered and accounted against the HTTP/2 RecvStream flow-control window.
-            assert_eq!(reader1.buffered_bytes(), 35);
-            assert_eq!(reader1.used_flow_control_capacity(), 35);
+            assert_eq!(grpc_reader_buffered_bytes(&reader1), 35);
+            assert_eq!(grpc_reader_used_flow_control_capacity(&mut reader1), 35);
 
             let msg_b = reader1
                 .next_message()
@@ -1966,8 +1964,8 @@ mod tests {
                 .expect("frame 2 ok")
                 .expect("frame 2 present");
             assert_eq!(msg_b, vec![0xBB; 30]);
-            assert_eq!(reader1.buffered_bytes(), 0);
-            assert_eq!(reader1.used_flow_control_capacity(), 0);
+            assert_eq!(grpc_reader_buffered_bytes(&reader1), 0);
+            assert_eq!(grpc_reader_used_flow_control_capacity(&mut reader1), 0);
             assert!(reader1.next_message().await.unwrap().is_none());
             send_grpc_trailers(&mut send1, GRPC_STATUS_OK, None).unwrap();
 

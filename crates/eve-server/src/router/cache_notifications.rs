@@ -1500,23 +1500,20 @@ impl ServerContext {
         fallback_char_id: i64,
         item: &eve_db::InventoryItemRecord,
     ) -> (NotificationTarget, &'static str) {
-        let is_corp_owned = item.owner_id != fallback_char_id
-            && (is_corp_hangar_flag(item.flag)
-                || self
-                    .db
-                    .with_snapshot(|s| s.corporations.contains_key(&item.owner_id)));
-        if is_corp_owned && is_corp_hangar_flag(item.flag) {
+        let (is_corp, is_other_char) = self.db.with_snapshot(|s| {
+            let corp =
+                is_corp_hangar_flag(item.flag) && s.corporations.contains_key(&item.owner_id);
+            let other_char = item.owner_id > 0
+                && item.owner_id != fallback_char_id
+                && s.characters.contains_key(&item.owner_id);
+            (corp, other_char)
+        });
+        if is_corp {
             (NotificationTarget::Corporation(item.owner_id), "corpid")
+        } else if is_other_char {
+            (NotificationTarget::Character(item.owner_id), "charid")
         } else {
-            let is_corp = is_corp_hangar_flag(item.flag)
-                && self
-                    .db
-                    .with_snapshot(|s| s.corporations.contains_key(&item.owner_id));
-            if is_corp {
-                (NotificationTarget::Corporation(item.owner_id), "corpid")
-            } else {
-                (NotificationTarget::Character(fallback_char_id), "charid")
-            }
+            (NotificationTarget::Character(fallback_char_id), "charid")
         }
     }
 

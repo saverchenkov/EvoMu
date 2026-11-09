@@ -521,7 +521,16 @@ async fn cmd_stop_omits_duplicate_do_destiny_updates_on_live_tcp_session_only() 
     let char_id = 96_801;
     let ship_id = 78_801;
 
-    ctx.db.with_mut_snapshot(|snap| {
+    let uid = ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        let uid = ch.user_id;
+        ch.character_id = char_id;
+        ch.corporation_id = 98_000_001;
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
         put_item(
             snap,
             ship_id,
@@ -532,7 +541,11 @@ async fn cmd_stop_omits_duplicate_do_destiny_updates_on_live_tcp_session_only() 
             1,
             true,
         );
+        uid
     });
+    ctx.db
+        .acquire_online_lock(uid, 740, Some(char_id), false, ctx.now_unix())
+        .expect("acquire_online_lock");
     let sys_h = ctx.systems.get_or_spawn(sys_id);
     let _ = sys_h
         .spawn_ball(make_ship_ball(ship_id, 587, 98_000_001, DVec3::ZERO))
@@ -545,6 +558,7 @@ async fn cmd_stop_omits_duplicate_do_destiny_updates_on_live_tcp_session_only() 
     // 1. Live TCP session (`!session.address.is_empty()`): zero queued `DoDestinyUpdates` notifications,
     //    leaving the single authoritative `Stop` event in `observer_events` for `macho_listener`.
     let mut tcp_sess = make_session(char_id, 98_000_001, Some(sys_id), Some(ship_id));
+    tcp_sess.user_id = Some(uid);
     tcp_sess.address = "127.0.0.1:54123".to_string();
     let _ = sys_h
         .set_movement_mode(
@@ -570,7 +584,8 @@ async fn cmd_stop_omits_duplicate_do_destiny_updates_on_live_tcp_session_only() 
         .any(|e| matches!(e, eve_destiny::DestinyEvent::Stop { ball_id } if *ball_id == ship_id)));
 
     // 2. Direct in-memory RPC session (`session.address.is_empty()`): keeps `DoDestinyUpdates` for headless tests.
-    let direct_sess = make_session(char_id, 98_000_001, Some(sys_id), Some(ship_id));
+    let mut direct_sess = make_session(char_id, 98_000_001, Some(sys_id), Some(ship_id));
+    direct_sess.user_id = Some(uid);
     handle_cmd_stop(&ctx, &direct_sess, Some(&bound))
         .await
         .expect("CmdStop on direct session");

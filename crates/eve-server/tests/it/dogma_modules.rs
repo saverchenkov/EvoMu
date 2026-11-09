@@ -1110,10 +1110,9 @@ async fn test_phase_4_dg5_targeting_lock_and_break() {
     };
     assert!((lock_ms - expected_sec * 1000.0).abs() < 1.0);
     let notes = sess.drain_notifications();
-    assert!(notes.iter().any(|(n, _)| n == "OnTarget"));
     assert!(
-        !notes.iter().any(|(n, _)| n == "OnMultiEvent"),
-        "OnMultiEvent OnTarget add must not be emitted before lock completes"
+        !notes.iter().any(|(n, _)| n == "OnTarget" || n == "OnMultiEvent"),
+        "OnTarget/OnMultiEvent must not be emitted before lock completes (#777): {notes:?}"
     );
 
     let locks_before = sys.get_target_locks(ship_id).await.expect("get_target_locks");

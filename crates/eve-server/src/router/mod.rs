@@ -16,6 +16,16 @@ pub mod rpc_args;
 pub mod session;
 pub mod session_transition;
 
+pub use binding::SessionCleanupGuard;
+pub use cache_notifications::*;
+pub use context::*;
+pub use dispatch::box_fut;
+pub use rpc_args::RpcArgs;
+pub use session_transition::*;
+
+/// Canonical MachoNet error code returned for unimplemented RPC methods.
+pub const ERR_UNIMPLEMENTED: &str = "UnimplementedRPC";
+
 #[cfg(test)]
 mod binding_deep_extra_unit_tests;
 #[cfg(test)]
@@ -34,13 +44,3 @@ mod runtime_persistence_tests;
 mod session_context_deep_extra_unit_tests;
 #[cfg(test)]
 mod tests;
-
-pub use binding::SessionCleanupGuard;
-pub use cache_notifications::*;
-pub use context::*;
-pub use dispatch::box_fut;
-pub use rpc_args::RpcArgs;
-pub use session_transition::*;
-
-/// Canonical MachoNet error code returned for unimplemented RPC methods.
-pub const ERR_UNIMPLEMENTED: &str = "UnimplementedRPC";
