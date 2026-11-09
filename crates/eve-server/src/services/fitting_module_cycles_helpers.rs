@@ -1594,6 +1594,49 @@ pub(crate) async fn try_handle_mercden_remote_shield_repair(
     ])))
 }
 
+/// Builds the V24 `activeEffects` dict for a fitted module (`const.effectOnline = 16` when online).
+pub(crate) fn online_module_active_effects(
+    mod_id: i64,
+    char_id: i64,
+    ship_id: i64,
+    now_ft: i64,
+    is_online: bool,
+) -> PyRep {
+    if !is_online {
+        return PyRep::Dict(Vec::new());
+    }
+    PyRep::Dict(vec![(
+        PyRep::Integer(16),
+        PyRep::List(vec![
+            PyRep::Integer(mod_id),
+            PyRep::Integer(char_id),
+            PyRep::Integer(ship_id),
+            PyRep::None,
+            PyRep::None,
+            PyRep::List(Vec::new()),
+            PyRep::Integer(16),
+            PyRep::Integer(now_ft),
+            PyRep::Real(-1.0),
+            PyRep::Integer(0),
+        ]),
+    )])
+}
+
+#[allow(dead_code)]
+fn online_module_active_effects_for_attrs(
+    mod_id: i64,
+    char_id: i64,
+    ship_id: i64,
+    now_ft: i64,
+    mod_attrs_rep: &PyRep,
+) -> PyRep {
+    let is_online = matches!(
+        mod_attrs_rep,
+        PyRep::Dict(d) if d.iter().any(|(k, v)| k.as_i64() == Some(2) && v.as_f64().unwrap_or(0.0) > 0.0)
+    );
+    online_module_active_effects(mod_id, char_id, ship_id, now_ft, is_online)
+}
+
 #[cfg(test)]
 #[path = "fitting_module_cycles_helpers_tests.rs"]
 mod fitting_module_cycles_helpers_tests;

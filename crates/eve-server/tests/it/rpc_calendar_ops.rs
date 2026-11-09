@@ -476,14 +476,14 @@ async fn test_calendar_manager_remediation_lifecycle() {
     // Alliance member in non-executor corp sees the alliance event in calendarProxy.GetEventList(month, year) (ownerType=16159)
     let p4_month_evs = ctx.dispatch_rpc(&mut sess4, "calendarProxy", None, "GetEventList", &[PyRep::Integer(1), PyRep::Integer(2027)], &kw, None).await.expect("calendarProxy.GetEventList for alliance member");
     let PyRep::List(p4_list) = p4_month_evs else { panic!("expected outer list from calendarProxy.GetEventList") };
-    let Some(PyRep::Rowset { rows: p4_rows, .. }) = p4_list.first() else { panic!("expected rowset in outer list") };
+    let Some(PyRep::ObjectEx { list: p4_rows, .. }) = p4_list.first() else { panic!("expected CRowset ObjectEx in outer list") };
     assert!(
-        p4_rows.iter().any(|r| r[0] == PyRep::Integer(ally_ev_id) && r[1] == PyRep::Integer(ally_id) && r[6] == PyRep::Integer(16159)),
+        p4_rows.iter().any(|r| matches!(r, PyRep::DBRow { columns, .. } if columns[0].1 == PyRep::Integer(ally_ev_id) && columns[1].1 == PyRep::Integer(ally_id) && columns[6].1 == PyRep::Integer(16159))),
         "Alliance member must see alliance event in calendarProxy.GetEventList(1, 2027)"
     );
     let p4_other_month = ctx.dispatch_rpc(&mut sess4, "calendarProxy", None, "GetEventList", &[PyRep::Integer(2), PyRep::Integer(2027)], &kw, None).await.expect("calendarProxy.GetEventList for empty month");
     let PyRep::List(p4_other_list) = p4_other_month else { panic!("expected outer list") };
-    let Some(PyRep::Rowset { rows: p4_other_rows, .. }) = p4_other_list.first() else { panic!("expected rowset") };
+    let Some(PyRep::ObjectEx { list: p4_other_rows, .. }) = p4_other_list.first() else { panic!("expected CRowset ObjectEx") };
     assert!(p4_other_rows.is_empty(), "calendarProxy.GetEventList must filter by month and year");
 
     let past_ally_edit = ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "EditAllianceEvent", &[PyRep::Integer(ally_ev_id), PyRep::Integer(future_time), PyRep::Integer(100_000_000), PyRep::Integer(180), PyRep::String("Past Ally Edit".into()), PyRep::String("Should fail".into()), PyRep::Integer(3)], &kw, None).await.unwrap_err();

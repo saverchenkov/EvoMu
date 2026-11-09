@@ -168,12 +168,16 @@ pub async fn handle(
                 .map(|st| (st.solar_system_id, st.clone()));
             if let Some((sys_id, st)) = found {
                 let op = ctx.sde.station_operations.get(&st.operation_id);
-                let service_mask = op
-                    .map(|o| o.services.iter().fold(0i64, |acc, &sid| if sid > 0 && sid <= 64 { acc | (1i64 << (sid - 1)) } else { acc }))
-                    .unwrap_or(0);
-                let services = op
-                    .map(|o| o.services.iter().map(|&sid| PyRep::Integer(i64::from(sid))).collect())
+                let mut service_ids: Vec<i64> = op
+                    .map(|o| o.services.iter().map(|&sid| i64::from(sid)).collect())
                     .unwrap_or_default();
+                if !service_ids.contains(&13) && npc_station_offers_service(&ctx.sde, station_id, 13) {
+                    service_ids.push(13);
+                }
+                let service_mask = service_ids.iter().fold(0i64, |acc, &sid| {
+                    if sid > 0 && sid <= 64 { acc | (1i64 << (sid - 1)) } else { acc }
+                });
+                let services: Vec<PyRep> = service_ids.into_iter().map(PyRep::Integer).collect();
                 let hq_services: Vec<PyRep> = crate::services::fw_gameplay::get_war_hq_services(sys_id)
                     .map(|(_, svcs)| svcs.into_iter().map(|s| PyRep::String(s.into())).collect())
                     .unwrap_or_default();
@@ -1389,6 +1393,8 @@ pub async fn handle(
 }
 
 /// Returns whether an NPC station's operation provides the given numeric station service ID (`sde.station_operations`).
+/// Per V24 `structuresCommon.IsStationServiceAvailable`, all NPC stations in high-security systems
+/// (`security >= 0.45`, rounded `>= 0.5`) offer Repair Facilities (`service_id == 13`).
 pub fn npc_station_offers_service(sde: &eve_sde::SdeRegistry, station_id: i64, service_id: i64) -> bool {
     let Some(station) = sde.stations.get(&station_id) else {
         return false;
@@ -1396,6 +1402,15 @@ pub fn npc_station_offers_service(sde: &eve_sde::SdeRegistry, station_id: i64, s
     let Ok(sid) = u32::try_from(service_id) else {
         return false;
     };
+    if sid == 13 {
+        let is_high_sec = sde
+            .solar_systems
+            .get(&station.solar_system_id)
+            .is_some_and(|sys| (sys.security_status * 10.0).round() / 10.0 >= 0.5);
+        if is_high_sec {
+            return true;
+        }
+    }
     sde.station_operations
         .get(&station.operation_id)
         .map(|op| op.services.contains(&sid))

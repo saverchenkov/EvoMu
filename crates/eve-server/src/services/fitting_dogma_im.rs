@@ -54,6 +54,7 @@ fn handle_item_get_info(
     for (&attr_id, &val) in &dyn_attrs {
         merged_attrs.insert(attr_id, val);
     }
+    let mut fitted_online_ship: Option<(i64, i64)> = None;
     let item_cat = ctx.sde.types.get(&type_id).map(|t| t.category_id).unwrap_or(0);
     if item_cat == 18 {
         let parent_opt = space_drone_opt
@@ -148,6 +149,21 @@ fn handle_item_get_info(
                         &mut merged_attrs,
                     );
                 }
+                if item_cat != 8 {
+                    let is_mod_online = fit
+                        .modules
+                        .get(&item.item_id)
+                        .map(|m| m.state != eve_dogma::ModuleState::Offline)
+                        .unwrap_or_else(|| {
+                            ctx.db.with_snapshot(|s| {
+                                s.module_online_states.get(&item.item_id).copied().unwrap_or(true)
+                            })
+                        });
+                    merged_attrs.insert(2, if is_mod_online { 1.0 } else { 0.0 });
+                    if is_mod_online {
+                        fitted_online_ship = Some((item.owner_id, item.location_id));
+                    }
+                }
                 for &aid in &[3u16, 9, 84, 267, 268, 269, 270] {
                     if let Some(&v) = dyn_attrs.get(&aid) {
                         merged_attrs.insert(aid, v);
@@ -175,6 +191,19 @@ fn handle_item_get_info(
     let now_ft = ctx.now_blueos_filetime_ticks();
     let inv_item = ctx.db.get_item(raw_id).map(|it| eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(item_to_packed_cells(ctx, &it))).unwrap_or(PyRep::None);
 
+    let active_effects = match fitted_online_ship {
+        Some((mod_owner_id, mod_ship_id)) => {
+            crate::services::inventory_fitting::fitting_module_cycles::online_module_active_effects(
+                raw_id,
+                mod_owner_id,
+                mod_ship_id,
+                now_ft,
+                true,
+            )
+        }
+        None => PyRep::Dict(Vec::new()),
+    };
+
     Ok(PyRep::keyval([
         ("itemID", PyRep::Integer(raw_id)),
         ("invItem", inv_item),
@@ -198,7 +227,7 @@ fn handle_item_get_info(
         ("variations", PyRep::List(var_reps)),
         ("dynamicAttributes", PyRep::Dict(dyn_entries)),
         ("attributes", PyRep::Dict(attr_entries)),
-        ("activeEffects", PyRep::Dict(Vec::new())),
+        ("activeEffects", active_effects),
         ("time", PyRep::Integer(now_ft)),
         ("wallclockTime", PyRep::Integer(now_ft)),
     ]))

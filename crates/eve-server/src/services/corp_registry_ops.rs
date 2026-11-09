@@ -1281,12 +1281,31 @@ pub(crate) fn handle_get_member_tracking_info(
                 let start_dt = snap.employment_history.get(&mid).and_then(|h| h.iter().rev().find(|e| e.0 == corp_id).map(|e| e.1)).unwrap_or(ch.create_date_unix);
                 let grantable = snap.corp_role_assignments.get(&(corp_id, mid)).map(|r| r.grantable_roles).unwrap_or(0);
                 let base_id = gov.and_then(|g| g.member_bases.get(&mid).copied());
+                let last_online_hours: f64 = if is_currently_online {
+                    0.0
+                } else if let Some(off) = logoff_ts {
+                    ((now_unix.saturating_sub(off)) as f64 / 3600.0).max(0.01)
+                } else if logon_ts > 0 {
+                    ((now_unix.saturating_sub(logon_ts)) as f64 / 3600.0).max(0.01)
+                } else {
+                    -1.0
+                };
+                let logon_rep = if logon_ts > 0 {
+                    PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(logon_ts))
+                } else {
+                    PyRep::None
+                };
+                let logoff_rep = logoff_ts
+                    .map(|t| PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(t)))
+                    .unwrap_or(PyRep::None);
+                let start_rep = PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(start_dt));
                 Some(vec![
                     PyRep::Integer(mid), PyRep::String(ch.name.clone()), PyRep::Integer(roles as i64), PyRep::Integer(roles as i64),
                     PyRep::String(title), PyRep::Integer(tmask as i64), PyRep::Integer(corp_id), loc_rep, ship_rep,
-                    PyRep::Integer(logon_ts as i64), logoff_ts.map(|t| PyRep::Integer(t as i64)).unwrap_or(PyRep::None),
-                    PyRep::Integer(start_dt as i64), base_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                    logon_rep, logoff_rep,
+                    start_rep, base_id.map(PyRep::Integer).unwrap_or(PyRep::None),
                     PyRep::Integer(grantable as i64), PyRep::Bool(is_currently_online),
+                    PyRep::Real(last_online_hours),
                 ])
             })
             .collect()
@@ -1295,7 +1314,7 @@ pub(crate) fn handle_get_member_tracking_info(
         vec![
             "characterID", "name", "role", "roles", "title", "titleMask", "corporationID",
             "locationID", "shipTypeID", "logonDateTime", "logoffDateTime", "startDateTime",
-            "baseID", "grantableRoles", "online",
+            "baseID", "grantableRoles", "online", "lastOnline",
         ],
         rows,
     )))

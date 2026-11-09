@@ -2473,14 +2473,14 @@ async fn test_rpc_utility_services_batch_complete() {
         .await
         .expect("calendarProxy.GetEventList (year, month)");
     let PyRep::List(rowsets_ym) = &ev_list_ym else {
-        panic!("GetEventList must return List of rowsets");
+        panic!("GetEventList must return List of crowsets");
     };
-    assert!(!rowsets_ym.is_empty(), "Must return event rowset");
-    let PyRep::Rowset { rows: ev_rows, .. } = &rowsets_ym[0] else {
-        panic!("Inner item must be Rowset");
+    assert!(!rowsets_ym.is_empty(), "Must return event crowset");
+    let PyRep::ObjectEx { list: ev_rows, .. } = &rowsets_ym[0] else {
+        panic!("Inner item must be CRowset ObjectEx");
     };
     assert!(
-        ev_rows.iter().any(|r| r[0] == PyRep::Integer(ev_id)),
+        ev_rows.iter().any(|r| matches!(r, PyRep::DBRow { columns, .. } if columns[0].1 == PyRep::Integer(ev_id))),
         "Event must be found in calendarProxy.GetEventList(2027, 1)"
     );
 
@@ -2500,11 +2500,11 @@ async fn test_rpc_utility_services_batch_complete() {
     let PyRep::List(rowsets_my) = &ev_list_my else {
         panic!("GetEventList must return List");
     };
-    let PyRep::Rowset { rows: my_rows, .. } = &rowsets_my[0] else {
-        panic!("Inner item must be Rowset");
+    let PyRep::ObjectEx { list: my_rows, .. } = &rowsets_my[0] else {
+        panic!("Inner item must be CRowset ObjectEx");
     };
     assert!(
-        my_rows.iter().any(|r| r[0] == PyRep::Integer(ev_id)),
+        my_rows.iter().any(|r| matches!(r, PyRep::DBRow { columns, .. } if columns[0].1 == PyRep::Integer(ev_id))),
         "Event must be found in calendarProxy.GetEventList(1, 2027)"
     );
 

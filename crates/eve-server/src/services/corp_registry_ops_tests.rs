@@ -263,5 +263,58 @@ fn test_corp_registry_handle_methods_and_helpers() {
         handle_get_member_tracking_info(&ctx, &mut sess, "GetMemberTrackingInfo", &[])
             .unwrap()
             .unwrap();
-    assert!(!matches!(tracking, PyRep::None));
+    let PyRep::Rowset { columns: t_cols, rows: t_rows } = tracking else {
+        panic!("expected Rowset from GetMemberTrackingInfo");
+    };
+    let idx = |name: &str| t_cols.iter().position(|c| c == name).expect(name);
+    assert_eq!(t_rows.len(), 1);
+    assert_eq!(t_rows[0][idx("lastOnline")].as_f64(), Some(0.0));
+    assert_eq!(t_rows[0][idx("online")].as_bool(), Some(true));
+    assert!(t_rows[0][idx("startDateTime")].as_i64().unwrap_or(0) >= 116_444_736_000_000_000);
+    assert!(t_rows[0][idx("logonDateTime")].as_i64().unwrap_or(0) >= 116_444_736_000_000_000);
+
+    // Offline member with prior login/logout and never-logged-in member
+    let off_char_id = 90_000_002_i64;
+    let never_char_id = 90_000_003_i64;
+    let now_u = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.members.insert(off_char_id);
+            corp.members.insert(never_char_id);
+        }
+        if let Some(ch2) = snap.characters.get_mut(&off_char_id) {
+            ch2.corporation_id = corp_id;
+        }
+        if let Some(ch3) = snap.characters.get_mut(&never_char_id) {
+            ch3.corporation_id = corp_id;
+        } else if let Some(mut ch3) = snap.characters.get(&char_id).cloned() {
+            ch3.character_id = never_char_id;
+            ch3.user_id = never_char_id as u64;
+            ch3.name = "Never Logged In".into();
+            ch3.corporation_id = corp_id;
+            snap.characters.insert(never_char_id, ch3);
+        }
+        snap.character_login_stats.remove(&never_char_id);
+        snap.character_login_stats.insert(
+            off_char_id,
+            eve_db::CharacterLoginStats {
+                last_login_unix: now_u.saturating_sub(7200),
+                last_logout_unix: now_u.saturating_sub(3600),
+                ..Default::default()
+            },
+        );
+    });
+    let tracking_all =
+        handle_get_member_tracking_info(&ctx, &mut sess, "GetMemberTrackingInfo", &[])
+            .unwrap()
+            .unwrap();
+    let PyRep::Rowset { rows: all_rows, .. } = tracking_all else {
+        panic!("expected Rowset");
+    };
+    let off_row = all_rows.iter().find(|r| r[0].as_i64() == Some(off_char_id)).unwrap();
+    let off_hours = off_row[idx("lastOnline")].as_f64().unwrap();
+    assert!((off_hours - 1.0).abs() < 0.01, "expected ~1.0 hours offline, got {off_hours}");
+    assert!(off_row[idx("logoffDateTime")].as_i64().unwrap_or(0) >= 116_444_736_000_000_000);
+    let never_row = all_rows.iter().find(|r| r[0].as_i64() == Some(never_char_id)).unwrap();
+    assert_eq!(never_row[idx("lastOnline")].as_f64(), Some(-1.0));
 }

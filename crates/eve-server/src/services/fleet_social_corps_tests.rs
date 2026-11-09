@@ -96,7 +96,11 @@ fn corp_public_info_update_divisions_members_and_medals() {
         panic!()
     };
     assert_eq!(info.get("ticker").unwrap().as_str().unwrap(), "ALPH");
-    assert!(handle_corps(
+    assert_eq!(info.get("creatorID").and_then(|v| v.as_i64()), Some(90_000_001));
+    assert_eq!(info.get("loyaltyPointTaxRate").and_then(|v| v.as_f64()), Some(0.1));
+    assert_eq!(info.get("iskTaxRate").and_then(|v| v.as_f64()), Some(0.1));
+    assert_eq!(info.get("friendlyFire").and_then(|v| v.as_bool()), Some(false));
+    let PyRep::KeyVal(npc_info) = handle_corps(
         &ctx,
         &mut ceo_sess,
         "corpmgr",
@@ -105,7 +109,12 @@ fn corp_public_info_update_divisions_members_and_medals() {
         &kw,
     )
     .unwrap()
-    .is_ok());
+    .unwrap()
+    else {
+        panic!("expected KeyVal for NPC corp")
+    };
+    assert_eq!(npc_info.get("creatorID").and_then(|v| v.as_i64()), Some(1_000_035));
+    assert!(npc_info.get("loyaltyPointTaxRate").and_then(|v| v.as_f64()).is_some());
     assert_eq!(
         handle_corps(&ctx, &mut ceo_sess, "corpmgr", "ceoID", &[], &kw)
             .unwrap()
@@ -219,10 +228,19 @@ fn corp_public_info_update_divisions_members_and_medals() {
     assert_eq!(db_kv.get("name").unwrap().as_str().unwrap(), "Hangar 1");
 
     // GetMembers / GetMembersPaged / GetMembersByIds / GetMemberIDsByQuery / AuditMember
-    assert!(handle_corps(&ctx, &mut ceo_sess, "corpRegistry", "GetMembers", &[], &kw)
+    let PyRep::Rowset { columns: mem_cols, .. } = handle_corps(&ctx, &mut ceo_sess, "corpRegistry", "GetMembers", &[], &kw)
         .unwrap()
-        .is_ok());
-    assert!(handle_corps(
+        .unwrap()
+    else {
+        panic!("expected Rowset from GetMembers")
+    };
+    assert!(mem_cols.contains(&"roles".to_string()));
+    assert!(mem_cols.contains(&"grantableRoles".to_string()));
+    assert!(mem_cols.contains(&"titleMask".to_string()));
+    assert!(mem_cols.contains(&"startDateTime".to_string()));
+    assert!(mem_cols.contains(&"blockRoles".to_string()));
+
+    let paged_res = handle_corps(
         &ctx,
         &mut ceo_sess,
         "corpRegistry",
@@ -231,7 +249,18 @@ fn corp_public_info_update_divisions_members_and_medals() {
         &kw,
     )
     .unwrap()
-    .is_ok());
+    .unwrap();
+    let PyRep::ObjectEx { is_type_2: false, header: paged_hdr, .. } = paged_res else {
+        panic!("expected PagedResultSet ObjectEx from GetMembersPaged");
+    };
+    let PyRep::Tuple(hdr_parts) = *paged_hdr else { panic!() };
+    assert_eq!(hdr_parts[0], PyRep::Token("eve.common.script.util.pagedCollection.PagedResultSet".into()));
+    let PyRep::Tuple(ctor_args) = &hdr_parts[1] else { panic!() };
+    assert!(matches!(&ctor_args[0], PyRep::Rowset { rows, .. } if rows.len() == 1));
+    assert_eq!(ctor_args[1].as_i64(), Some(2));
+    assert_eq!(ctor_args[2].as_i64(), Some(0));
+    assert_eq!(ctor_args[3].as_i64(), Some(1));
+
     assert!(handle_corps(
         &ctx,
         &mut ceo_sess,
@@ -242,7 +271,7 @@ fn corp_public_info_update_divisions_members_and_medals() {
     )
     .unwrap()
     .is_ok());
-    assert!(handle_corps(
+    let str_query = handle_corps(
         &ctx,
         &mut ceo_sess,
         "corpRegistry",
@@ -251,7 +280,8 @@ fn corp_public_info_update_divisions_members_and_medals() {
         &kw,
     )
     .unwrap()
-    .is_ok());
+    .unwrap();
+    assert_eq!(str_query, PyRep::List(vec![PyRep::Integer(90_000_002)]));
 
     // Structured V24 GetMemberIDsByQuery: [property, op, val] with roles & characterID
     let structured = handle_corps(
@@ -268,8 +298,7 @@ fn corp_public_info_update_divisions_members_and_medals() {
     )
     .unwrap()
     .unwrap();
-    let PyRep::Rowset { rows: q_rows, .. } = structured else { panic!() };
-    assert_eq!(q_rows, vec![vec![PyRep::Integer(90_000_001)]]);
+    assert_eq!(structured, PyRep::List(vec![PyRep::Integer(90_000_001)]));
 
     assert!(handle_corps(&ctx, &mut ceo_sess, "corpmgr", "AuditMember", &[], &kw)
         .unwrap()

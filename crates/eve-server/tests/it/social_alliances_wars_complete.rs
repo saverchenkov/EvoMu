@@ -950,9 +950,14 @@ async fn test_corp_registry_members_and_tracking() {
     let cid = sess1.corporation_id.expect("corpID");
 
     assert!(!rows(&call(&ctx, &mut sess1, "corpRegistry", "GetMember", vec![PyRep::Integer(cid)]).await.expect("GetMember")).1.is_empty());
-    assert_eq!(rows(&call(&ctx, &mut sess1, "corpRegistry", "GetMembersPaged", vec![PyRep::Integer(cid)]).await.expect("GetMembersPaged")).1.len(), 1);
+    let paged = call(&ctx, &mut sess1, "corpRegistry", "GetMembersPaged", vec![PyRep::Integer(cid)]).await.expect("GetMembersPaged");
+    let PyRep::ObjectEx { is_type_2: false, header: paged_hdr, .. } = &paged else { panic!("expected PagedResultSet ObjectEx") };
+    let PyRep::Tuple(paged_t) = paged_hdr.as_ref() else { panic!("expected Tuple header") };
+    let PyRep::Tuple(paged_args) = &paged_t[1] else { panic!("expected Tuple args") };
+    assert_eq!(paged_args[1], PyRep::Integer(1));
+    assert_eq!(rows(&paged_args[0]).1.len(), 1);
     assert_eq!(rows(&call(&ctx, &mut sess1, "corpRegistry", "GetMembersByIds", vec![PyRep::Integer(cid), PyRep::List(vec![PyRep::Integer(90_000_001)])]).await.expect("GetMembersByIds")).1.len(), 1);
-    assert_eq!(rows(&call(&ctx, &mut sess1, "corpRegistry", "GetMemberIDsByQuery", vec![PyRep::Integer(cid)]).await.expect("GetMemberIDsByQuery")).1.len(), 1);
+    assert_eq!(call(&ctx, &mut sess1, "corpRegistry", "GetMemberIDsByQuery", vec![PyRep::Integer(cid)]).await.expect("GetMemberIDsByQuery"), PyRep::List(vec![PyRep::Integer(90_000_001)]));
     assert_eq!(rows(&call(&ctx, &mut sess1, "corpRegistry", "GetMemberTrackingInfo", vec![PyRep::Integer(cid)]).await.expect("GetMemberTrackingInfo")).1.len(), 1);
     assert_eq!(rows(&call(&ctx, &mut sess1, "corpRegistry", "GetMemberTrackingInfoSimple", vec![PyRep::Integer(cid)]).await.expect("GetMemberTrackingInfoSimple")).1.len(), 1);
 

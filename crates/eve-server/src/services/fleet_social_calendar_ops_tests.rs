@@ -108,7 +108,41 @@ fn ccp_and_character_calendar_event_lifecycle() {
     let list_all = handle_calendar_get(&ctx, &mut session, svc, "GetEventList", &[])
         .unwrap()
         .unwrap();
-    assert!(!matches!(list_all, PyRep::None));
+    let PyRep::ObjectEx { list: mgr_rows, .. } = list_all else {
+        panic!("expected CRowset from calendarMgr.GetEventList");
+    };
+    assert_eq!(mgr_rows.len(), 2);
+    assert!(mgr_rows.iter().all(|r| matches!(r, PyRep::DBRow { .. })));
+
+    let proxy_nonempty = handle_calendar_get(&ctx, &mut session, "calendarProxy", "GetEventList", &[])
+        .unwrap()
+        .unwrap();
+    let PyRep::List(proxy_tables) = proxy_nonempty else {
+        panic!("expected list from calendarProxy.GetEventList");
+    };
+    assert_eq!(proxy_tables.len(), 1);
+    let PyRep::ObjectEx { list: proxy_rows, .. } = &proxy_tables[0] else {
+        panic!("expected CRowset inside calendarProxy.GetEventList");
+    };
+    assert_eq!(proxy_rows.len(), 2);
+    assert!(proxy_rows.iter().all(|r| matches!(r, PyRep::DBRow { .. })));
+
+    let proxy_empty = handle_calendar_get(
+        &ctx,
+        &mut session,
+        "calendarProxy",
+        "GetEventList",
+        &[PyRep::Integer(2), PyRep::Integer(2099)],
+    )
+    .unwrap()
+    .unwrap();
+    let PyRep::List(empty_tables) = proxy_empty else {
+        panic!("expected list from empty calendarProxy.GetEventList");
+    };
+    let PyRep::ObjectEx { list: empty_rows, .. } = &empty_tables[0] else {
+        panic!("expected CRowset for empty calendarProxy.GetEventList");
+    };
+    assert!(empty_rows.is_empty());
 
     let deleted = handle_calendar_mutate(&ctx, &mut session, "DeleteEvent", &[PyRep::Integer(eid)]).unwrap();
     assert_eq!(deleted.dict_get("deleted").and_then(|v| v.as_bool()), Some(true));

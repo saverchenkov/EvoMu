@@ -391,7 +391,16 @@ async fn test_corp_creation_info_branding_and_members() {
     )
     .await
     .expect("GetMembersPaged page 1");
-    let (_, p1_rows) = rowset_data(&paged1);
+    let PyRep::ObjectEx { is_type_2: false, header: hdr1, .. } = &paged1 else {
+        panic!("expected PagedResultSet ObjectEx, got {paged1:?}");
+    };
+    let PyRep::Tuple(h1) = hdr1.as_ref() else { panic!("expected Tuple header") };
+    assert_eq!(h1[0], PyRep::Token("eve.common.script.util.pagedCollection.PagedResultSet".into()));
+    let PyRep::Tuple(a1) = &h1[1] else { panic!("expected Tuple args") };
+    assert_eq!(a1[1], PyRep::Integer(3));
+    assert_eq!(a1[2], PyRep::Integer(0));
+    assert_eq!(a1[3], PyRep::Integer(2));
+    let (_, p1_rows) = rowset_data(&a1[0]);
     assert_eq!(p1_rows.len(), 2);
 
     let paged2 = rpc(
@@ -407,7 +416,15 @@ async fn test_corp_creation_info_branding_and_members() {
     )
     .await
     .expect("GetMembersPaged page 2");
-    let (_, p2_rows) = rowset_data(&paged2);
+    let PyRep::ObjectEx { is_type_2: false, header: hdr2, .. } = &paged2 else {
+        panic!("expected PagedResultSet ObjectEx, got {paged2:?}");
+    };
+    let PyRep::Tuple(h2) = hdr2.as_ref() else { panic!("expected Tuple header") };
+    let PyRep::Tuple(a2) = &h2[1] else { panic!("expected Tuple args") };
+    assert_eq!(a2[1], PyRep::Integer(3));
+    assert_eq!(a2[2], PyRep::Integer(1));
+    assert_eq!(a2[3], PyRep::Integer(2));
+    let (_, p2_rows) = rowset_data(&a2[0]);
     assert_eq!(p2_rows.len(), 1);
     assert_eq!(p2_rows[0][0], PyRep::Integer(PILOT_3));
 
@@ -468,9 +485,10 @@ async fn test_corp_creation_info_branding_and_members() {
     )
     .await
     .expect("GetMemberIDsByQuery bravo");
-    let (_, q_bravo_rows) = rowset_data(&by_q_bravo);
-    assert_eq!(q_bravo_rows.len(), 1);
-    assert_eq!(q_bravo_rows[0][0], PyRep::Integer(PILOT_2));
+    let PyRep::List(q_bravo_rows) = by_q_bravo else {
+        panic!("expected List from GetMemberIDsByQuery, got {by_q_bravo:?}");
+    };
+    assert_eq!(q_bravo_rows, vec![PyRep::Integer(PILOT_2)]);
 
     let by_q_id = rpc(
         &ctx,
@@ -481,9 +499,10 @@ async fn test_corp_creation_info_branding_and_members() {
     )
     .await
     .expect("GetMemberIDsByQuery id");
-    let (_, q_id_rows) = rowset_data(&by_q_id);
-    assert_eq!(q_id_rows.len(), 1);
-    assert_eq!(q_id_rows[0][0], PyRep::Integer(PILOT_3));
+    let PyRep::List(q_id_rows) = by_q_id else {
+        panic!("expected List from GetMemberIDsByQuery, got {by_q_id:?}");
+    };
+    assert_eq!(q_id_rows, vec![PyRep::Integer(PILOT_3)]);
 
     let by_q_none = rpc(
         &ctx,
@@ -494,7 +513,9 @@ async fn test_corp_creation_info_branding_and_members() {
     )
     .await
     .expect("GetMemberIDsByQuery none");
-    let (_, q_none_rows) = rowset_data(&by_q_none);
+    let PyRep::List(q_none_rows) = by_q_none else {
+        panic!("expected List from GetMemberIDsByQuery, got {by_q_none:?}");
+    };
     assert!(q_none_rows.is_empty());
 
     let by_q_all = rpc(
@@ -506,7 +527,9 @@ async fn test_corp_creation_info_branding_and_members() {
     )
     .await
     .expect("GetMemberIDsByQuery all");
-    let (_, q_all_rows) = rowset_data(&by_q_all);
+    let PyRep::List(q_all_rows) = by_q_all else {
+        panic!("expected List from GetMemberIDsByQuery, got {by_q_all:?}");
+    };
     assert_eq!(q_all_rows.len(), 3);
 
     // 11. Non-CEO Director cannot grant ROLE_DIRECTOR via ExecuteActions, and 24h delayed hangar role promotes into authoritative member_roles

@@ -413,3 +413,94 @@ async fn survey_scanner_ecm_burst_jammer_and_pending_cycle_actions() {
         .await
         .expect("pvp aggression recorded");
 }
+
+#[tokio::test]
+async fn build_all_info_and_item_get_info_populate_effect_online_16_for_online_modules() {
+    let ctx = test_ctx();
+    let char_id = 93_000_050;
+    let sys_id = 30_000_142;
+    let ship_id = 1_000_300_501;
+    let online_mod_id = 1_000_300_502;
+    let offline_mod_id = 1_000_300_503;
+
+    ensure_char(&ctx, char_id, 98_000_001, sys_id, ship_id);
+    insert_item(&ctx, ship_id, 587, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    insert_item(&ctx, online_mod_id, 484, char_id, ship_id, InventoryFlag::HiSlot0, 1, true);
+    insert_item(&ctx, offline_mod_id, 484, char_id, ship_id, InventoryFlag::HiSlot1, 1, true);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(online_mod_id, true);
+        snap.module_online_states.insert(offline_mod_id, false);
+    });
+
+    let mut sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        ship_id: Some(ship_id),
+        solar_system_id: Some(sys_id),
+        ..Default::default()
+    };
+
+    let all_info = build_all_info(
+        &ctx,
+        &sess,
+        char_id,
+        ship_id,
+        587,
+        PyRep::None,
+        vec![],
+        vec![
+            (PyRep::Integer(online_mod_id), PyRep::Dict(vec![(PyRep::Integer(2), PyRep::Real(1.0))])),
+            (PyRep::Integer(offline_mod_id), PyRep::Dict(vec![(PyRep::Integer(2), PyRep::Real(0.0))])),
+        ],
+        &[],
+    );
+    let ship_info = all_info.dict_get("shipInfo").expect("shipInfo");
+    let PyRep::Dict(ship_entries) = ship_info else { panic!("expected Dict shipInfo") };
+    let online_entry = ship_entries.iter().find(|(k, _)| k.as_i64() == Some(online_mod_id)).unwrap().1.clone();
+    let offline_entry = ship_entries.iter().find(|(k, _)| k.as_i64() == Some(offline_mod_id)).unwrap().1.clone();
+    let PyRep::Dict(on_effs) = online_entry.dict_get("activeEffects").unwrap() else { panic!() };
+    assert_eq!(on_effs.len(), 1);
+    assert_eq!(on_effs[0].0, PyRep::Integer(16));
+    let PyRep::List(eff_vals) = &on_effs[0].1 else { panic!() };
+    assert_eq!(eff_vals.len(), 10);
+    assert_eq!(eff_vals[0], PyRep::Integer(online_mod_id));
+    assert_eq!(eff_vals[1], PyRep::Integer(char_id));
+    assert_eq!(eff_vals[2], PyRep::Integer(ship_id));
+    assert_eq!(eff_vals[6], PyRep::Integer(16));
+    let PyRep::Dict(off_effs) = offline_entry.dict_get("activeEffects").unwrap() else { panic!() };
+    assert!(off_effs.is_empty());
+
+    let item_on = crate::services::inventory_fitting::fitting_dogma_im::handle_dogma_im(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "ItemGetInfo",
+        &[PyRep::Integer(online_mod_id)],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let PyRep::Dict(item_on_attrs) = item_on.dict_get("attributes").unwrap() else { panic!() };
+    assert!(item_on_attrs.iter().any(|(k, v)| k.as_i64() == Some(2) && v.as_f64() == Some(1.0)));
+    let PyRep::Dict(item_on_effs) = item_on.dict_get("activeEffects").unwrap() else { panic!() };
+    assert!(item_on_effs.iter().any(|(k, _)| k.as_i64() == Some(16)));
+
+    let item_off = crate::services::inventory_fitting::fitting_dogma_im::handle_dogma_im(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "ItemGetInfo",
+        &[PyRep::Integer(offline_mod_id)],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let PyRep::Dict(item_off_attrs) = item_off.dict_get("attributes").unwrap() else { panic!() };
+    assert!(item_off_attrs.iter().any(|(k, v)| k.as_i64() == Some(2) && v.as_f64() == Some(0.0)));
+    let PyRep::Dict(item_off_effs) = item_off.dict_get("activeEffects").unwrap() else { panic!() };
+    assert!(item_off_effs.is_empty());
+}

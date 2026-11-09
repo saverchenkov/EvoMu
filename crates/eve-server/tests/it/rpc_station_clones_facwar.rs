@@ -556,17 +556,15 @@ async fn test_station_services_and_corp_station_mgr_parity() {
     assert!((mask_jita & (1i64 << (5 - 1))) != 0, "serviceMask must include bitmask 16 for reprocessing (service 5)");
     assert!((mask_jita & (1i64 << (17 - 1))) != 0, "serviceMask must include bit for fitting (service 17)");
 
-    // Move to Station B (60000859: Plantation, does NOT offer repair, insurance, or clone bay):
+    // Move to Station B (60000859: high-sec Plantation, lacks insurance/clone bay, offers high-sec repair #675):
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(c1) = snap.characters.get_mut(&PILOT1) {
             c1.station_id = Some(60000859);
         }
     });
     s1.station_id = Some(60000859);
-    let err_repair_b = rpc(&ctx, &mut s1, "repairSvc", "GetRepairQuotes", &[])
-        .await
-        .expect_err("GetRepairQuotes must fail at station lacking repair service");
-    assert_eq!(err_repair_b.code, "StationServiceUnavailable");
+    let ok_repair_b = rpc(&ctx, &mut s1, "repairSvc", "GetRepairQuotes", &[]).await;
+    assert!(ok_repair_b.is_ok(), "GetRepairQuotes must succeed at high-sec NPC station 60000859 (#675)");
 
     let err_ins_b = rpc(&ctx, &mut s1, "insuranceSvc", "GetInsurancePrices", &[])
         .await
@@ -578,18 +576,25 @@ async fn test_station_services_and_corp_station_mgr_parity() {
         .expect_err("InstallCloneInStation must fail at station lacking clone bay service");
     assert_eq!(err_clone_b.code, "StationHasNoCloneBay");
 
-    let chk_b_repair = rpc(&ctx, &mut s1, "corpStationMgr", "DoStandingCheckForStationService", &[PyRep::Integer(13), PyRep::Integer(60000859)])
-        .await
-        .expect_err("DoStandingCheckForStationService for repair must fail at Plantation");
-    assert_eq!(chk_b_repair.code, "StationServiceUnavailable");
+    let chk_b_repair = rpc(&ctx, &mut s1, "corpStationMgr", "DoStandingCheckForStationService", &[PyRep::Integer(13), PyRep::Integer(60000859)]).await;
+    assert!(chk_b_repair.is_ok(), "DoStandingCheckForStationService for repair must succeed at high-sec NPC station 60000859 (#675)");
 
-    // Move to Station C (60004723: Damaged Bureau, does NOT offer reprocessing, LP store, or fitting):
+    // Move to Station C (60004723: low-sec Damaged Bureau, does NOT offer repair, reprocessing, LP store, or fitting):
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(c1) = snap.characters.get_mut(&PILOT1) {
             c1.station_id = Some(60004723);
         }
     });
     s1.station_id = Some(60004723);
+    let err_repair_c = rpc(&ctx, &mut s1, "repairSvc", "GetRepairQuotes", &[])
+        .await
+        .expect_err("GetRepairQuotes must fail at low-sec station lacking repair service");
+    assert_eq!(err_repair_c.code, "StationServiceUnavailable");
+
+    let chk_c_repair = rpc(&ctx, &mut s1, "corpStationMgr", "DoStandingCheckForStationService", &[PyRep::Integer(13), PyRep::Integer(60004723)])
+        .await
+        .expect_err("DoStandingCheckForStationService for repair must fail at Damaged Bureau");
+    assert_eq!(chk_c_repair.code, "StationServiceUnavailable");
     let err_reproc_c = rpc(&ctx, &mut s1, "reprocessingSvc", "GetQuotes", &[])
         .await
         .expect_err("GetQuotes must fail at station lacking reprocessing service");

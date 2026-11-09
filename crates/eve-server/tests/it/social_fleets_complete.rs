@@ -1297,10 +1297,10 @@ async fn test_so_social_corp_mail_mailing_lists_cspa_calendar_and_chat_features(
     sess1.role = prev_role;
     let ccp_ev_id = ccp_rep.dict_get("eventID").and_then(|v| v.as_i64()).unwrap();
     let ev_list = ctx.dispatch_rpc(&mut sess1, "calendarProxy", None, "GetEventList", &[PyRep::Integer(1), PyRep::Integer(2027)], &kw, None).await.unwrap();
-    let PyRep::List(ev_rowsets) = &ev_list else { panic!("expected List of rowsets from calendarProxy.GetEventList") };
-    let PyRep::Rowset { rows: ev_rows, .. } = &ev_rowsets[0] else { panic!() };
-    assert!(ev_rows.iter().any(|r| r[0] == PyRep::Integer(ccp_ev_id) && r[1] == PyRep::Integer(1) && r[2] == PyRep::Integer(arrival_ft) && r[3] == PyRep::Integer(1440) && r[5] == PyRep::String("CCP Crimson Harvest".into()) && r[6] == PyRep::Integer(0)), "calendarProxy.GetEventList must include GM-created global CCP event");
-    assert!(ev_rows.iter().any(|r| r[0] == PyRep::Integer(auto_ev_id) && r[1] == PyRep::Integer(corp_id) && r[2] == PyRep::Integer(arrival_ft) && r[3] == PyRep::Integer(2880) && r[8] == PyRep::Bool(true) && r[5].as_str().is_some_and(|t| t.contains(&expected_moon_name))), "calendarProxy.GetEventList must include automated moon extraction event with SDE moon name");
+    let PyRep::List(ev_rowsets) = &ev_list else { panic!("expected List of crowsets from calendarProxy.GetEventList") };
+    let PyRep::ObjectEx { list: ev_rows, .. } = &ev_rowsets[0] else { panic!("expected CRowset ObjectEx") };
+    assert!(ev_rows.iter().any(|r| matches!(r, PyRep::DBRow { columns, .. } if columns[0].1 == PyRep::Integer(ccp_ev_id) && columns[1].1 == PyRep::Integer(1) && columns[2].1 == PyRep::Integer(arrival_ft) && columns[3].1 == PyRep::Integer(1440) && columns[5].1 == PyRep::String("CCP Crimson Harvest".into()) && columns[6].1 == PyRep::Integer(0))), "calendarProxy.GetEventList must include GM-created global CCP event");
+    assert!(ev_rows.iter().any(|r| matches!(r, PyRep::DBRow { columns, .. } if columns[0].1 == PyRep::Integer(auto_ev_id) && columns[1].1 == PyRep::Integer(corp_id) && columns[2].1 == PyRep::Integer(arrival_ft) && columns[3].1 == PyRep::Integer(2880) && columns[8].1 == PyRep::Bool(true) && columns[5].1.as_str().is_some_and(|t| t.contains(&expected_moon_name)))), "calendarProxy.GetEventList must include automated moon extraction event with SDE moon name");
     ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "DeleteEvent", &[PyRep::Integer(pers_ev_id)], &kw, None).await.unwrap();
 
     // Chat: Rookie Help, MOTD & GM Mute enforcement (`feat:social.chat-help-rookie`, `feat:social.chat-motd`, `feat:social.chat-gm-mute`)

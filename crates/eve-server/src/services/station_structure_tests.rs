@@ -20,8 +20,16 @@ async fn station_queries_guests_standing_check_and_undock_dock_cycle() {
     let st_id = 1_000_000_960_001_i64;
 
     assert!(npc_station_offers_service(&ctx.sde, jita_station, 5));
+    assert!(npc_station_offers_service(&ctx.sde, 60_003_466, 13));
     assert!(!npc_station_offers_service(&ctx.sde, jita_station, -1));
     assert!(!npc_station_offers_service(&ctx.sde, 999_999_999, 5));
+    assert!(!npc_station_offers_service(&ctx.sde, 999_999_999, 13));
+    if let Some(lowsec_no_repair) = ctx.sde.stations.values().find(|st| {
+        ctx.sde.solar_systems.get(&st.solar_system_id).is_some_and(|sys| (sys.security_status * 10.0).round() / 10.0 < 0.5)
+            && ctx.sde.station_operations.get(&st.operation_id).is_some_and(|op| !op.services.contains(&13))
+    }) {
+        assert!(!npc_station_offers_service(&ctx.sde, lowsec_no_repair.station_id, 13));
+    }
 
     ctx.db.with_mut_snapshot(|snap| {
         let mut ch = clone_char_with(snap, char_id, "Station Pilot", corp_id, jita_sys, ship_id);

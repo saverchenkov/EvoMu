@@ -1061,30 +1061,28 @@ pub fn handle_calendar_get(
             ]);
         }
     });
-    let rowset = PyRep::rowset(
-        vec![
-            "eventID",
-            "ownerID",
-            "eventDateTime",
-            "duration",
-            "importance",
-            "title",
-            "ownerType",
-            "response",
-            "isAutomated",
-            "eventDuration",
-            "eventTitle",
-            "flag",
-            "isDeleted",
-            "dateModified",
-            "autoEventType",
-        ],
-        rows,
-    );
+    let calendar_desc = eve_proto::DBRowDescriptor::new([
+        ("eventID", eve_proto::DbColumnType::I8),
+        ("ownerID", eve_proto::DbColumnType::I8),
+        ("eventDateTime", eve_proto::DbColumnType::FileTime),
+        ("duration", eve_proto::DbColumnType::I4),
+        ("importance", eve_proto::DbColumnType::I4),
+        ("title", eve_proto::DbColumnType::WStr),
+        ("ownerType", eve_proto::DbColumnType::I4),
+        ("response", eve_proto::DbColumnType::I4),
+        ("isAutomated", eve_proto::DbColumnType::Bool),
+        ("eventDuration", eve_proto::DbColumnType::I4),
+        ("eventTitle", eve_proto::DbColumnType::WStr),
+        ("flag", eve_proto::DbColumnType::I4),
+        ("isDeleted", eve_proto::DbColumnType::Bool),
+        ("dateModified", eve_proto::DbColumnType::FileTime),
+        ("autoEventType", eve_proto::DbColumnType::I4),
+    ]);
+    let crowset = calendar_desc.build_crowset(rows);
     if service == "calendarProxy" {
-        Some(Ok(PyRep::List(vec![rowset])))
+        Some(Ok(PyRep::List(vec![crowset])))
     } else {
-        Some(Ok(rowset))
+        Some(Ok(crowset))
     }
 }
 
