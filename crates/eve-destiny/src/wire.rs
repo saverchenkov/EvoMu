@@ -431,13 +431,24 @@ pub fn slim_item_dict(ball: &Ball, meta: &SlimItemMeta) -> PyRep {
         });
     entries.push(("name", PyRep::String(slim_name)));
     if meta.group_id == 10 {
-        // DERIVED: V24.01 `StargateSetup` indexes corruption/suppression 2-tuples directly.
+        // DERIVED: V24.01 `StargateSetup` indexes corruption/suppression 2-tuples directly,
+        // and `SetupStargateBanners` calls `GetFactionIconTexturePath(ownerID)` which crashes
+        // if given `1` (`ownerSystem`). Only emit real faction/sovereignty IDs (> 1); emit `None`
+        // for unclaimed/nullsec/synthetic gates (`#767`).
         let zero_of_five = PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Integer(5)]);
+        let origin_owner = meta
+            .origin_system_owner_id
+            .filter(|&id| id > 1)
+            .or_else(|| (meta.owner_id > 1).then_some(meta.owner_id));
+        let dest_owner = meta.dest_system_owner_id.filter(|&id| id > 1);
         entries.push(("destinationSystemStatusIcons", PyRep::List(vec![])));
-        entries.push(("originSystemOwnerID", PyRep::Integer(meta.owner_id)));
+        entries.push((
+            "originSystemOwnerID",
+            origin_owner.map_or(PyRep::None, PyRep::Integer),
+        ));
         entries.push((
             "destinationSystemOwnerID",
-            PyRep::Integer(meta.dest_system_owner_id.unwrap_or(meta.owner_id)),
+            dest_owner.map_or(PyRep::None, PyRep::Integer),
         ));
         entries.push(("destinationCorruptionStageAndMaximum", zero_of_five.clone()));
         entries.push(("localCorruptionStageAndMaximum", zero_of_five.clone()));

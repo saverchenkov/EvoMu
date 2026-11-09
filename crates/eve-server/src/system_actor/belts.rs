@@ -46,6 +46,16 @@ pub fn populate_system_celestials(
         } else {
             None
         };
+        let (origin_system_owner_id, dest_system_owner_id) = if cel.group_id == 10 {
+            (
+                sde.solar_system_faction_id(solar_system_id).map(i64::from),
+                jump_target
+                    .and_then(|(_, dest_sys_id)| sde.solar_system_faction_id(dest_sys_id))
+                    .map(i64::from),
+            )
+        } else {
+            (None, None)
+        };
         ballpark.add_static_ball_with_meta(
             Ball {
                 id: cel.celestial_id,
@@ -70,6 +80,8 @@ pub fn populate_system_celestials(
                 is_cloaked: false,
                 jump_target,
                 name: (!cel.name.is_empty()).then(|| cel.name.clone()),
+                origin_system_owner_id,
+                dest_system_owner_id,
                 ..Default::default()
             },
         );
@@ -116,6 +128,12 @@ pub fn populate_system_celestials(
                     is_cloaked: false,
                     jump_target: Some((jump.destination_stargate_id, jump.to_solar_system_id)),
                     name: (!gate_name.is_empty()).then(|| gate_name.to_string()),
+                    origin_system_owner_id: sde
+                        .solar_system_faction_id(solar_system_id)
+                        .map(i64::from),
+                    dest_system_owner_id: sde
+                        .solar_system_faction_id(jump.to_solar_system_id)
+                        .map(i64::from),
                     ..Default::default()
                 },
             );

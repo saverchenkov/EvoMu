@@ -363,8 +363,24 @@ fn slim_item_meta_and_dict_covers_stargate_wormhole_npc_and_player_ship() {
     if let PyRep::Dict(entries) = gate_dict {
         assert!(entries.iter().any(|(k, _)| matches!(k, PyRep::String(s) if s == "jumps")));
         assert!(entries.iter().any(|(k, v)| matches!(k, PyRep::String(s) if s == "destinationSystemStatusIcons") && matches!(v, PyRep::List(l) if l.is_empty())));
-        assert!(entries.iter().any(|(k, v)| matches!(k, PyRep::String(s) if s == "originSystemOwnerID") && matches!(v, PyRep::Integer(1))));
-        assert!(entries.iter().any(|(k, v)| matches!(k, PyRep::String(s) if s == "destinationSystemOwnerID") && matches!(v, PyRep::Integer(1))));
+        assert!(entries.iter().any(|(k, v)| matches!(k, PyRep::String(s) if s == "originSystemOwnerID") && matches!(v, PyRep::None)));
+        assert!(entries.iter().any(|(k, v)| matches!(k, PyRep::String(s) if s == "destinationSystemOwnerID") && matches!(v, PyRep::None)));
+    } else {
+        panic!("expected PyRep::Dict");
+    }
+
+    // Stargate with explicit empire faction owner IDs emits Integer(faction_id) (#767)
+    let faction_gate_meta = SlimItemMeta {
+        group_id: 10,
+        category_id: 2,
+        jump_target: Some((50001234, 30000144)),
+        origin_system_owner_id: Some(500_001),
+        dest_system_owner_id: Some(500_002),
+        ..SlimItemMeta::default()
+    };
+    if let PyRep::Dict(entries) = slim_item_dict(&gate_heuristic, &faction_gate_meta) {
+        assert!(entries.iter().any(|(k, v)| matches!(k, PyRep::String(s) if s == "originSystemOwnerID") && matches!(v, PyRep::Integer(500_001))));
+        assert!(entries.iter().any(|(k, v)| matches!(k, PyRep::String(s) if s == "destinationSystemOwnerID") && matches!(v, PyRep::Integer(500_002))));
     } else {
         panic!("expected PyRep::Dict");
     }

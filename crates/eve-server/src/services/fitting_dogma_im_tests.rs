@@ -822,3 +822,224 @@ async fn add_target_wire_flags_reconcile_relocks_prune_stale_slots_and_enforce_c
     );
     assert_eq!(sys.get_target_locks(ship_id).await.unwrap().len(), 2);
 }
+
+#[tokio::test]
+async fn venture_lock_spawned_veldspar_preserves_progress_emits_single_add_and_mines() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 96_311_001i64;
+    let sys_id = 30_000_142u32;
+    let ship_id = 96_311_100i64;
+    let miner_id = 96_311_101i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.accounts.insert(
+            "user_96311".into(),
+            AccountRecord {
+                user_id: 96_311,
+                username: "user_96311".into(),
+                password_token: String::new(),
+                role: eve_machonet::service_roles::ROLE_GMH,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = 96_311;
+        ch.name = "VentureMinerPilot".into();
+        ch.corporation_id = 1_000_009;
+        ch.station_id = None;
+        ch.solar_system_id = sys_id;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        snap.skills.insert(char_id, HashMap::new());
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 32_880, // Venture (scanResolution = 750)
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            miner_id,
+            InventoryItemRecord {
+                item_id: miner_id,
+                type_id: 483, // Miner I
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys
+        .spawn_ball_with_meta(
+            Ball {
+                id: ship_id,
+                type_id: 32_880,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 335.0,
+                inertia: 1.0,
+                mass: 1_200_000.0,
+                radius: 41.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+            SlimItemMeta {
+                owner_id: char_id,
+                char_id: Some(char_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+    let mut session = SessionState::new(96_311);
+    session.user_id = Some(96_311);
+    session.character_id = Some(char_id);
+    session.corporation_id = Some(1_000_009);
+    session.solar_system_id = Some(sys_id);
+    session.ship_id = Some(ship_id);
+    session.role = eve_machonet::service_roles::ROLE_GMH;
+    let kw = HashMap::new();
+
+    // Spawn Veldspar via `/spawn 1230` at ~2km distance
+    let spawn_res = ctx
+        .dispatch_rpc(
+            &mut session,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/spawn 1230".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/spawn 1230");
+    let ast_id = spawn_res
+        .dict_get("itemID")
+        .and_then(|v| v.as_i64())
+        .expect("spawned asteroid itemID");
+    let _ = session.drain_notifications();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // First AddTarget returns `(1, [])` (`flag = 1`), no `OnTarget` `"locking"`, no `OnMultiEvent` `"add"`
+    let r1 = ctx
+        .dispatch_rpc(
+            &mut session,
+            "dogmaIM",
+            None,
+            "AddTarget",
+            &[PyRep::Integer(ast_id)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("AddTarget Veldspar");
+    assert_eq!(r1, PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())]));
+    let pre_notifs: Vec<_> = session
+        .drain_notifications()
+        .into_iter()
+        .chain(
+            ctx.drain_notifications_for_char(char_id)
+                .into_iter()
+                .map(|n| (n.event, n.args)),
+        )
+        .collect();
+    assert!(
+        !pre_notifs
+            .iter()
+            .any(|(ev, args)| (ev == "OnTarget" && format!("{args:?}").contains("locking"))
+                || ev == "OnMultiEvent"),
+        "Must not emit locking or OnMultiEvent OnTarget add before lock completes: {pre_notifs:?}"
+    );
+
+    let initial_locks = sys.get_target_locks(ship_id).await.unwrap();
+    assert_eq!(initial_locks.len(), 1);
+    let initial_ms = initial_locks[0].lock_time_ms;
+    assert!(
+        initial_ms > 500.0 && initial_ms < 3_000.0,
+        "Venture (750mm scan res) on Veldspar (200m+ radius) must lock in ~1.5s, got {initial_ms}ms"
+    );
+
+    // Step 1.0s (< 1.5s): still locking, ~486ms remaining
+    sys.step_manual(1.0).await.expect("tick 1");
+    let mid_locks = sys.get_target_locks(ship_id).await.unwrap();
+    assert!(!mid_locks[0].locked, "lock should still be pending after 1.0s");
+    let mid_remaining = mid_locks[0].remaining_lock_ms;
+    assert!(mid_remaining < initial_ms && mid_remaining > 0.0);
+
+    // Re-issuing AddTarget mid-lock must NOT reset remaining_lock_ms back to lock_time_ms
+    let r2 = ctx
+        .dispatch_rpc(
+            &mut session,
+            "dogmaIM",
+            None,
+            "AddTarget",
+            &[PyRep::Integer(ast_id)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("re-AddTarget mid-lock");
+    assert_eq!(r2, PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())]));
+    let after_readd = sys.get_target_locks(ship_id).await.unwrap();
+    assert!(
+        (after_readd[0].remaining_lock_ms - mid_remaining).abs() < 1e-6,
+        "Duplicate AddTarget while locking must preserve remaining_lock_ms ({mid_remaining}), got {}",
+        after_readd[0].remaining_lock_ms
+    );
+
+    // Step 1.0s more (2.0s total > ~1.5s): lock completes and emits single OnMultiEvent OnTarget add
+    sys.step_manual(1.0).await.expect("tick 2");
+    let done_locks = sys.get_target_locks(ship_id).await.unwrap();
+    assert!(done_locks[0].locked, "Venture must complete Veldspar lock within 2s");
+    let done_notifs: Vec<_> = session
+        .drain_notifications()
+        .into_iter()
+        .chain(
+            ctx.drain_notifications_for_char(char_id)
+                .into_iter()
+                .map(|n| (n.event, n.args)),
+        )
+        .collect();
+    assert!(
+        done_notifs.iter().any(|(ev, args)| ev == "OnMultiEvent"
+            && format!("{args:?}").contains("\"OnTarget\"")
+            && format!("{args:?}").contains("\"add\"")),
+        "Expected OnMultiEvent OnTarget add after lock completion, got {done_notifs:?}"
+    );
+
+    // Miner I (483) Activate against locked asteroid succeeds cleanly
+    let act_res = ctx
+        .dispatch_rpc(
+            &mut session,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(miner_id),
+                PyRep::String("miningLaser".into()),
+                PyRep::Integer(ast_id),
+                PyRep::Integer(0),
+            ],
+            &kw,
+            None,
+        )
+        .await;
+    assert!(act_res.is_ok(), "Miner I activation on locked Veldspar failed: {act_res:?}");
+}

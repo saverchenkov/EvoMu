@@ -329,9 +329,6 @@ pub(super) fn should_invalidate_bound_object(
             | "pvp_arena_exit"
             | "jump_bridge"
             | "shipcaster"
-            | "slash_teleport"
-            | "gm_teleport"
-            | "gm_jump"
             | "tourney_teleport"
     );
 

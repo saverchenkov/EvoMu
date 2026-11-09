@@ -1139,6 +1139,27 @@ impl SdeRegistry {
         self.variations_by_parent.get(&parent_type_id).map(Vec::as_slice).unwrap_or(&[])
     }
 
+    /// Resolves a solar system's faction owner ID (`500001..=500029`), falling back through
+    /// constellation and region `faction_id`. Returns `None` for factionless systems (`#767`).
+    pub fn solar_system_faction_id(&self, solar_system_id: SolarSystemId) -> Option<u32> {
+        if let Some(&fid) = self.solar_system_factions.get(&solar_system_id).filter(|&&f| f > 0) {
+            return Some(fid);
+        }
+        let sys = self.solar_systems.get(&solar_system_id)?;
+        if let Some(fid) = self
+            .constellations
+            .get(&sys.constellation_id)
+            .and_then(|c| c.faction_id)
+            .filter(|&f| f > 0)
+        {
+            return Some(fid);
+        }
+        self.regions
+            .get(&sys.region_id)
+            .and_then(|r| r.faction_id)
+            .filter(|&f| f > 0)
+    }
+
     /// Returns all published type IDs assigned to `market_group_id` (`D-1`, `feat:market.market-groups`).
     pub fn types_in_market_group(&self, market_group_id: u32) -> Vec<TypeId> {
         let mut list: Vec<TypeId> = self.types.values().filter(|t| t.published && t.market_group_id == Some(market_group_id)).map(|t| t.type_id).collect();

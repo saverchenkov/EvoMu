@@ -539,3 +539,70 @@ fn asteroid_depletion_and_downtime_restore_preserve_lod0_hibernation_and_notify_
     };
     assert!(!should_pin_stationary_ball(&ship_ball, None));
 }
+
+#[test]
+fn stargate_slim_items_emit_faction_ids_in_empire_and_none_in_nullsec() {
+    use eve_destiny::wire::slim_item_dict;
+    use eve_proto::PyRep;
+
+    let sde = SdeRegistry::with_canonical_seed();
+
+    let extract_owner = |dict: &PyRep, key: &str| -> PyRep {
+        let PyRep::Dict(entries) = dict else {
+            panic!("expected SlimItem Dict, got {dict:?}");
+        };
+        entries
+            .iter()
+            .find(|(k, _)| matches!(k, PyRep::String(s) if s == key))
+            .map(|(_, v)| v.clone())
+            .expect("missing slim key")
+    };
+
+    // 1. Jita (30000142) stargates carry empire faction IDs (> 1) on originSystemOwnerID & destinationSystemOwnerID
+    let mut jita_bp = Ballpark::new(30_000_142);
+    populate_system_celestials(&mut jita_bp, 30_000_142, &sde);
+    let jita_gates: Vec<_> = jita_bp
+        .balls
+        .values()
+        .filter(|b| jita_bp.ball_group_id(b.id) == Some(10))
+        .collect();
+    assert!(!jita_gates.is_empty(), "Jita must have stargates");
+    for gate in jita_gates {
+        let meta = jita_bp.ball_slim_meta(gate.id).expect("gate meta");
+        let slim = slim_item_dict(gate, meta);
+        let orig = extract_owner(&slim, "originSystemOwnerID");
+        let dest = extract_owner(&slim, "destinationSystemOwnerID");
+        assert!(
+            matches!(orig, PyRep::Integer(id) if id > 500_000),
+            "Jita stargate originSystemOwnerID must be real faction (> 500000), got {orig:?}"
+        );
+        assert!(
+            matches!(dest, PyRep::Integer(id) if id > 500_000),
+            "Jita->empire stargate destinationSystemOwnerID must be real faction (> 500000), got {dest:?}"
+        );
+    }
+
+    // 2. Nullsec OEG-K9 (30000439) has no NPC faction -> both keys must be PyRep::None, never Integer(1)
+    let mut null_bp = Ballpark::new(30_000_439);
+    populate_system_celestials(&mut null_bp, 30_000_439, &sde);
+    let null_gates: Vec<_> = null_bp
+        .balls
+        .values()
+        .filter(|b| null_bp.ball_group_id(b.id) == Some(10))
+        .collect();
+    assert!(!null_gates.is_empty(), "OEG-K9 must have stargates");
+    for gate in null_gates {
+        let meta = null_bp.ball_slim_meta(gate.id).expect("null gate meta");
+        let slim = slim_item_dict(gate, meta);
+        assert_eq!(
+            extract_owner(&slim, "originSystemOwnerID"),
+            PyRep::None,
+            "nullsec stargate originSystemOwnerID must be None, never Integer(1)"
+        );
+        assert_eq!(
+            extract_owner(&slim, "destinationSystemOwnerID"),
+            PyRep::None,
+            "nullsec stargate destinationSystemOwnerID must be None, never Integer(1)"
+        );
+    }
+}

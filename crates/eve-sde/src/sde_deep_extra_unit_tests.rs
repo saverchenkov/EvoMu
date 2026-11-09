@@ -381,3 +381,80 @@ fn test_corrupt_and_missing_sqlite_errors() {
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn solar_system_faction_id_resolves_empire_nullsec_and_constellation_fallback() {
+    let real_sde = shared_sde();
+    let jita_faction = real_sde.solar_system_faction_id(30_000_142);
+    let perim_faction = real_sde.solar_system_faction_id(30_000_144);
+    assert!(jita_faction.is_some_and(|f| f > 500_000));
+    assert!(perim_faction.is_some_and(|f| f > 500_000));
+    assert_eq!(real_sde.solar_system_faction_id(30_000_439), None);
+
+    // Synthetic constellation & region fallback when solar_system_factions lacks explicit entry
+    let mut syn = SdeRegistry::default();
+    syn.regions.insert(
+        10_000_099,
+        RegionInfo {
+            region_id: 10_000_099,
+            name: "SynReg".into(),
+            center: [0.0; 3],
+            faction_id: Some(500_003),
+            wormhole_class_id: None,
+        },
+    );
+    syn.constellations.insert(
+        20_000_099,
+        ConstellationInfo {
+            constellation_id: 20_000_099,
+            region_id: 10_000_099,
+            name: "SynCon".into(),
+            center: [0.0; 3],
+            faction_id: Some(500_004),
+            wormhole_class_id: None,
+        },
+    );
+    syn.constellations.insert(
+        20_000_100,
+        ConstellationInfo {
+            constellation_id: 20_000_100,
+            region_id: 10_000_099,
+            name: "SynConNoFaction".into(),
+            center: [0.0; 3],
+            faction_id: None,
+            wormhole_class_id: None,
+        },
+    );
+    syn.solar_systems.insert(
+        30_099_001,
+        SolarSystem {
+            solar_system_id: 30_099_001,
+            constellation_id: 20_000_099,
+            region_id: 10_000_099,
+            name: "FromCon".into(),
+            security_status: 0.5,
+            radius: 1.0e12,
+            galactic_pos_ly: [0.0; 3],
+            planet_ids: vec![],
+            stations: vec![],
+            wormhole_class_id: None,
+        },
+    );
+    syn.solar_systems.insert(
+        30_099_002,
+        SolarSystem {
+            solar_system_id: 30_099_002,
+            constellation_id: 20_000_100,
+            region_id: 10_000_099,
+            name: "FromReg".into(),
+            security_status: 0.5,
+            radius: 1.0e12,
+            galactic_pos_ly: [0.0; 3],
+            planet_ids: vec![],
+            stations: vec![],
+            wormhole_class_id: None,
+        },
+    );
+    assert_eq!(syn.solar_system_faction_id(30_099_001), Some(500_004));
+    assert_eq!(syn.solar_system_faction_id(30_099_002), Some(500_003));
+}

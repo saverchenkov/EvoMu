@@ -1699,6 +1699,11 @@ async fn handle_slash_teleport(
     } else {
         None
     };
+    let teleport_reason = if was_in_space && old_sys_id == dest_sys_id {
+        "same_system_teleport"
+    } else {
+        "slash_teleport"
+    };
     let _ = ctx.execute_session_transition_sync(
         sess_target,
         crate::router::SessionTransitionSpec::for_kind(
@@ -1708,7 +1713,7 @@ async fn handle_slash_teleport(
                 dock_id: None,
                 ship_id: None,
             },
-            "slash_teleport",
+            teleport_reason,
         )
         .with_apply_db(false)
         .with_sync_local_chat(false)

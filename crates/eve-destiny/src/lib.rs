@@ -1100,6 +1100,7 @@ pub struct SlimItemMeta {
     #[serde(default)] pub jump_target: Option<(i64, u32)>,
     #[serde(default)] pub war_faction_id: Option<i64>,
     #[serde(default)] pub name: Option<String>,
+    #[serde(default)] pub origin_system_owner_id: Option<i64>,
     #[serde(default)] pub dest_system_owner_id: Option<i64>,
 }
 
@@ -1119,6 +1120,7 @@ impl Default for SlimItemMeta {
             jump_target: None,
             war_faction_id: None,
             name: None,
+            origin_system_owner_id: None,
             dest_system_owner_id: None,
         }
     }

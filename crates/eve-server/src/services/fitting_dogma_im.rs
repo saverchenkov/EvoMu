@@ -895,6 +895,12 @@ pub(crate) async fn handle_dogma_im(
                         ("passiveLock", PyRep::Bool(has_active_passive_targeter)),
                     ])));
                 }
+                return Some(Ok(PyRep::keyval([
+                    ("targetID", PyRep::Integer(target_id)),
+                    ("locked", PyRep::Bool(false)),
+                    ("lockTimeMs", PyRep::Real(existing.remaining_lock_ms.max(0.0))),
+                    ("passiveLock", PyRep::Bool(has_active_passive_targeter)),
+                ])));
             } else if current_locks.len() >= max_locked {
                 return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: format!("Max locked targets exceeded ({max_locked})") }));
             }
@@ -925,13 +931,6 @@ pub(crate) async fn handle_dogma_im(
                 return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: e }));
             }
             crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
-
-            ctx.notify(
-                crate::router::NotificationTarget::Character(char_id),
-                "OnTarget",
-                "charid",
-                vec![PyRep::Integer(target_id), PyRep::String("locking".into())],
-            );
 
             if !has_active_passive_targeter {
                 if let Some(target_owner_id) = ctx

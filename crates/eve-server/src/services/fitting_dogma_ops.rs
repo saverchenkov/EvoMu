@@ -203,6 +203,10 @@ pub(crate) async fn handle_dogma_ops(
                         PyRep::List(locked_ids),
                     ])));
                 }
+                return Some(Ok(PyRep::Tuple(vec![
+                    PyRep::Integer(1),
+                    PyRep::List(Vec::new()),
+                ])));
             } else if current_locks.len() >= max_locked {
                 return Some(Err(BridgeRpcError {
                     code: "TargetingFailed".into(),
@@ -245,13 +249,6 @@ pub(crate) async fn handle_dogma_ops(
             if session.ship_id == Some(source_id) {
                 crate::services::space_warp_jump::break_location_change_invulnerability(ctx, char_id);
             }
-
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnTarget",
-                "charid",
-                vec![PyRep::Integer(target_id), PyRep::String("locking".into())],
-            );
 
             if let Some(target_owner_id) = ctx
                 .db

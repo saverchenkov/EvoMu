@@ -297,3 +297,92 @@ async fn test_slash_teleport_evicts_space_and_pi_bindings_and_blocks_cross_syste
         "OnMachoObjectDisconnect must fire for beyonce, planetOrbitalRegistryBroker, and solar-system keeper"
     );
 }
+
+#[tokio::test]
+async fn test_same_system_slash_teleport_preserves_scan_mgr_and_space_bindings() {
+    let ctx = ServerContext::new();
+    let mut sess = select_pilot(&ctx, 80_202, "demo", "demo-secret", P1).await;
+    sess.role |= eve_machonet::service_roles::ROLE_GMH;
+
+    // Enter Jita (30_000_142) space
+    rpc(&ctx, &mut sess, "slash", "SlashCmd", &[PyRep::String("/tr 30000142".into())])
+        .await
+        .expect("/tr Jita");
+    let sys_id = sess.solar_system_id.expect("in Jita") as i64;
+    assert_eq!(sys_id, 30_000_142);
+
+    // Bind scanMgr (simulating directionalScanSvc.OnLoadScene -> GetSystemScanMgr), beyonce, entity, PI
+    let scan_bind = ctx.bind_object(&sess, "scanMgr", sys_id).expect("scanMgr bind");
+    let bey_bind = ctx.bind_object(&sess, "beyonce", sys_id).expect("beyonce bind");
+    let entity_bind = ctx.bind_object(&sess, "entity", sys_id).expect("entity bind");
+    let pi_bind = ctx
+        .bind_object(&sess, "planetOrbitalRegistryBroker", sys_id)
+        .expect("planetOrbitalRegistryBroker bind");
+    let _ = ctx.drain_notifications_for_char(P1);
+
+    // Same-system /tr me to a Jita stargate (50_001_248 Jita -> Perimeter, or any Jita ball)
+    let jita_gate = ctx
+        .sde
+        .jumps
+        .values()
+        .find(|j| j.from_solar_system_id == 30_000_142)
+        .map(|j| j.stargate_id)
+        .expect("Jita stargate");
+    rpc(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/tr me {jita_gate}"))],
+    )
+    .await
+    .expect("/tr me same-system gate");
+    assert_eq!(sess.solar_system_id, Some(30_000_142));
+
+    // Same-system teleport must preserve scanMgr & all system-scoped space bindings (#768)
+    assert!(ctx.verify_bound_object(&sess, scan_bind).is_ok());
+    assert!(ctx.verify_bound_object(&sess, bey_bind).is_ok());
+    assert!(ctx.verify_bound_object(&sess, entity_bind).is_ok());
+    assert!(ctx.verify_bound_object(&sess, pi_bind).is_ok());
+    let disconnects: Vec<_> = ctx
+        .drain_notifications_for_char(P1)
+        .into_iter()
+        .filter(|n| n.event == "OnMachoObjectDisconnect")
+        .collect();
+    assert!(
+        disconnects.is_empty(),
+        "Same-system /tr me must not emit OnMachoObjectDisconnect for scanMgr/space bounds: {disconnects:?}"
+    );
+
+    // Bound RPC on the preserved scanMgr bound ID still succeeds (no InvalidBoundObject / UnMachoDestination)
+    let kw = std::collections::HashMap::new();
+    let scan_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "scanMgr",
+            Some(scan_bind),
+            "ConeScan",
+            &[
+                PyRep::Real(std::f64::consts::TAU),
+                PyRep::Real(2_147_483_647_000.0),
+                PyRep::Real(0.0),
+                PyRep::Real(0.0),
+                PyRep::Real(1.0),
+            ],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("ConeScan using preserved scanMgr bound object after /tr me");
+    assert!(matches!(scan_res, PyRep::List(_)));
+
+    // Cross-system /tr me to another solar system still evicts them cleanly
+    rpc(&ctx, &mut sess, "slash", "SlashCmd", &[PyRep::String("/tr me 30000144".into())])
+        .await
+        .expect("/tr me Perimeter");
+    assert_eq!(sess.solar_system_id, Some(30_000_144));
+    assert!(ctx.verify_bound_object(&sess, scan_bind).is_err());
+    assert!(ctx.verify_bound_object(&sess, bey_bind).is_err());
+    assert!(ctx.verify_bound_object(&sess, entity_bind).is_err());
+    assert!(ctx.verify_bound_object(&sess, pi_bind).is_err());
+}
