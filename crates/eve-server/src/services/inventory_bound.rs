@@ -991,7 +991,7 @@ pub(crate) fn emit_inv_item_deleted(
         vec![
             (3, PyRep::Integer(old_item.location_id)),
             (4, PyRep::Integer(old_item.flag as i64)),
-            (5, PyRep::Integer(old_item.quantity as i64)),
+            // Omit ixQuantity (5): V24.01 invCache logs tracebacks on key 5; key 9 (ixStackSize) carries quantity deltas.
             (9, PyRep::Integer(old_item.quantity as i64)),
         ],
     );

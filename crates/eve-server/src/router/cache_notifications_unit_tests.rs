@@ -240,7 +240,22 @@ fn macho_packets_notification_targets_and_helper_emitters_work_end_to_end() {
             .len(),
         1
     );
-    assert_eq!(ctx.notify_fitted_item_trashed(char_id, 500, 2048, 1, 100_000_001, 11).len(), 1);
+    let trashed_notifs = ctx.notify_fitted_item_trashed(char_id, 500, 2048, 1, 100_000_001, 11);
+    assert_eq!(trashed_notifs.len(), 1);
+    let PyRep::DBRow { columns, .. } = &trashed_notifs[0].args[0] else {
+        panic!("notify_fitted_item_trashed must emit a DBRow, got {:?}", trashed_notifs[0].args[0]);
+    };
+    let col = |name: &str| columns.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+    let expected_type = ctx.sde.types.get(&2048).expect("2048 in SDE");
+    assert_eq!(col("itemID"), Some(PyRep::Integer(500)));
+    assert_eq!(col("typeID"), Some(PyRep::Integer(2048)));
+    assert_eq!(col("ownerID"), Some(PyRep::Integer(char_id)));
+    assert_eq!(col("locationID"), Some(PyRep::Integer(10)));
+    assert_eq!(col("flagID"), Some(PyRep::Integer(147)));
+    assert_eq!(col("quantity"), Some(PyRep::Integer(-1)));
+    assert_eq!(col("groupID"), Some(PyRep::Integer(i64::from(expected_type.group_id))));
+    assert_eq!(col("categoryID"), Some(PyRep::Integer(i64::from(expected_type.category_id))));
+    assert_eq!(col("customInfo"), Some(PyRep::String(String::new())));
 
     let _ = ctx.drain_notifications_for_char(char_id);
     let rec = ctx.create_character_notification(1_000_009, char_id, 5, 1, "text: hello");

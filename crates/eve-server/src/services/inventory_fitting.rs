@@ -1255,7 +1255,7 @@ pub async fn handle(
                                 char_id,
                                 &orig,
                                 vec![
-                                    (5, PyRep::Integer(old_orig_qty)),
+                                    // Omit ixQuantity (5): V24.01 invCache uses ixStackSize (9).
                                     (9, PyRep::Integer(old_orig_qty)),
                                 ],
                             );
@@ -1269,7 +1269,6 @@ pub async fn handle(
                         char_id,
                         &merged_item,
                         vec![
-                            (5, PyRep::Integer(old_target_qty)),
                             (9, PyRep::Integer(old_target_qty)),
                         ],
                     );
@@ -1476,7 +1475,7 @@ pub async fn handle(
                                 char_id,
                                 &orig,
                                 vec![
-                                    (5, PyRep::Integer(old_orig_qty)),
+                                    // Omit ixQuantity (5): V24.01 invCache uses ixStackSize (9).
                                     (9, PyRep::Integer(old_orig_qty)),
                                 ],
                             );

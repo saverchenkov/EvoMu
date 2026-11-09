@@ -323,7 +323,15 @@ async fn gm_slash_ext_heal_spawn_unspawn_setattr_getattr_and_fit_slots() {
     clone_type_with(&mut ctx.sde, 2048, hi_tid, 53, 7, &[12], &[(37, 100.0)]);
     clone_type_with(&mut ctx.sde, 2048, med_tid, 46, 7, &[13], &[]);
     clone_type_with(&mut ctx.sde, 2048, lo_tid, 60, 7, &[11], &[]);
-    clone_type_with(&mut ctx.sde, 2048, rig_tid, 773, 7, &[2663], &[]);
+    clone_type_with(
+        &mut ctx.sde,
+        2048,
+        rig_tid,
+        773,
+        7,
+        &[2663],
+        &[(eve_sde::attr_ids::RIG_SIZE, 1.0)],
+    );
     clone_type_with(&mut ctx.sde, 2048, sub_tid, 954, 32, &[3772], &[]);
     clone_type_with(&mut ctx.sde, 2454, drone_tid, 100, 18, &[], &[]);
     clone_type_with(&mut ctx.sde, 1228, ast_tid, 462, 25, &[], &[]);
@@ -404,16 +412,35 @@ async fn gm_slash_ext_heal_spawn_unspawn_setattr_getattr_and_fit_slots() {
         "ItemNotFound"
     );
 
-    for (tid, expected_flag) in [
-        (hi_tid, InventoryFlag::HiSlot1 as i64),
-        (hi_tid, InventoryFlag::HiSlot2 as i64),
-        (med_tid, InventoryFlag::MedSlot0 as i64),
-        (lo_tid, InventoryFlag::LoSlot0 as i64),
-        (rig_tid, InventoryFlag::RigSlot0 as i64),
-        (sub_tid, InventoryFlag::SubSystemSlot0 as i64),
-        (drone_tid, InventoryFlag::DroneBay as i64),
+    // Subsystem module on non-T3C ship is rejected cleanly without mutating inventory.
+    assert_eq!(
+        handle_gm_slash_ext(&ctx, &mut sess, char_id, &format!("/fit {sub_tid}"))
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "FittingValidationFailed"
+    );
+
+    // Subsystem module fits onto a T3C hull (Tengu = 29984, group_id = 963).
+    let t3c_id = 940_222_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        put_item(snap, t3c_id, 29984, char_id, 60_003_760, InventoryFlag::Hangar);
+    });
+
+    for (target_arg, tid, expected_flag) in [
+        ("me".to_string(), hi_tid, InventoryFlag::HiSlot1 as i64),
+        ("me".to_string(), hi_tid, InventoryFlag::HiSlot2 as i64),
+        ("me".to_string(), med_tid, InventoryFlag::MedSlot0 as i64),
+        ("me".to_string(), lo_tid, InventoryFlag::LoSlot0 as i64),
+        ("me".to_string(), rig_tid, InventoryFlag::RigSlot0 as i64),
+        (t3c_id.to_string(), sub_tid, InventoryFlag::SubSystemSlot0 as i64),
+        ("me".to_string(), drone_tid, InventoryFlag::DroneBay as i64),
     ] {
-        let fit_rep = handle_gm_slash_ext(&ctx, &mut sess, char_id, &format!("/fit {tid}")).await.unwrap().unwrap();
+        let fit_rep = handle_gm_slash_ext(&ctx, &mut sess, char_id, &format!("/fit {target_arg} {tid}"))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(fit_rep.dict_get("flagID"), Some(&PyRep::Integer(expected_flag)));
     }
     let fit_exp = handle_gm_slash_ext(&ctx, &mut sess, char_id, &format!("/fit {ship_id} {hi_tid} 27"))

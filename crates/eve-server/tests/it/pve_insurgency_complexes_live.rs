@@ -67,9 +67,23 @@ async fn spawn_live_pilot(ctx: &ServerContext, sid: u64, cid: i64, sys_id: u32, 
     let mut pilot = LivePilot { sess, char_id: cid, ship_id, beyonce: parts[0].as_i64().unwrap() as u64 };
     let mut guns = Vec::new();
     if gun_tid > 0 {
-        for _ in 0..6 { slash(ctx, &mut pilot.sess, &format!("/fit me {gun_tid}")).await; }
-        for _ in 0..3 { slash(ctx, &mut pilot.sess, &format!("/fit me {gyro_tid}")).await; }
-        slash(ctx, &mut pilot.sess, &format!("/fit me {mwd_tid}")).await;
+        for _ in 0..6 {
+            if let Err(e) = rpc(ctx, &mut pilot.sess, "slash", "SlashCmd", &[PyRep::String(format!("/fit me {gun_tid}"))]).await {
+                if e.code == "FittingValidationFailed" { break; }
+                panic!("SlashCmd /fit gun: {e:?}");
+            }
+        }
+        for _ in 0..3 {
+            if let Err(e) = rpc(ctx, &mut pilot.sess, "slash", "SlashCmd", &[PyRep::String(format!("/fit me {gyro_tid}"))]).await {
+                if e.code == "FittingValidationFailed" { break; }
+                panic!("SlashCmd /fit gyro: {e:?}");
+            }
+        }
+        if let Err(e) = rpc(ctx, &mut pilot.sess, "slash", "SlashCmd", &[PyRep::String(format!("/fit me {mwd_tid}"))]).await {
+            if e.code != "FittingValidationFailed" {
+                panic!("SlashCmd /fit mwd: {e:?}");
+            }
+        }
         let mods: Vec<i64> = ctx.db.with_snapshot(|s| s.items.values().filter(|i| i.location_id == ship_id && (i.type_id == gun_tid || i.type_id == gyro_tid || i.type_id == mwd_tid)).map(|i| i.item_id).collect());
         for mid in mods { let _ = rpc(ctx, &mut pilot.sess, "dogmaIM", "SetModuleOnline", &[PyRep::Integer(mid)]).await; }
         guns = ctx.db.with_snapshot(|s| { let mut g: Vec<i64> = s.items.values().filter(|i| i.location_id == ship_id && i.type_id == gun_tid).map(|i| i.item_id).collect(); g.sort_unstable(); g });

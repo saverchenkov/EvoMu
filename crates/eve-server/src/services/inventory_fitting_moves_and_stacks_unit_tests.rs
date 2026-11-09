@@ -198,13 +198,14 @@ async fn invbroker_add_fitting_prechecks_rig_destruction_charge_load_and_unfit_r
     );
     ctx.crimewatch.write().unwrap().states.clear();
 
-    // 7. Re-dock and unfit gun_mod to Hangar -> clears module_online_states
+    // 7. Re-dock and unfit gun_mod to Hangar -> clears module_online_states, rebuilds fitting & emits load/effect changes
     session.station_id = Some(station_id);
     ctx.db.with_mut_snapshot(|s| {
         if let Some(sh) = s.items.get_mut(&ship_id) {
             sh.location_id = station_id;
         }
     });
+    let _ = ctx.drain_notifications_for_char(char_id);
     call_add(
         &ctx,
         &mut session,
@@ -213,6 +214,16 @@ async fn invbroker_add_fitting_prechecks_rig_destruction_charge_load_and_unfit_r
     .await
     .expect("unfit gun_mod when docked");
     assert!(ctx.db.with_snapshot(|s| !s.module_online_states.contains_key(&gun_mod)));
+    let unfit_fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).expect("rebuild after unfit");
+    assert_eq!(unfit_fit.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde), 0.0);
+    assert_eq!(unfit_fit.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde), 0.0);
+    let unfit_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(unfit_notifs.iter().any(|n| n.event == "OnItemChange"));
+    assert!(unfit_notifs.iter().any(|n| n.event == "OnGodmaShipEffect"));
+    assert!(
+        unfit_notifs.iter().any(|n| n.event == "OnModuleAttributeChanges"),
+        "expected OnModuleAttributeChanges after unfit from ship to hangar"
+    );
 }
 
 #[tokio::test]

@@ -659,3 +659,219 @@ async fn multi_add_auto_fit_splits_stacked_module_and_emits_notifications() {
         assert_eq!(snap.items[&fitted2_id].flag, InventoryFlag::HiSlot1);
     });
 }
+
+fn change_dict_has_key(rep: &PyRep, target_key: i64) -> bool {
+    let PyRep::Dict(entries) = rep else {
+        return false;
+    };
+    entries.iter().any(|(k, _)| k.as_i64() == Some(target_key))
+}
+
+fn change_dict_get_i64(rep: &PyRep, target_key: i64) -> Option<i64> {
+    let PyRep::Dict(entries) = rep else {
+        return None;
+    };
+    entries
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(target_key))
+        .and_then(|(_, v)| v.as_i64())
+}
+
+#[tokio::test]
+async fn item_change_notifications_omit_ix_quantity_and_autofit_syncs_singleton_and_load() {
+    let ctx = test_ctx();
+    let char_id = 90_000_261;
+    let corp_id = 98_000_002;
+    let station_id = 60_003_760;
+    let ship_id = 1_000_261_001;
+    let stack_a = 1_000_261_002;
+    let stack_b = 1_000_261_003;
+    let single_unpackaged_gun = 1_000_261_004;
+
+    ensure_char(&ctx, char_id, corp_id, Some(station_id), 30_000_142, ship_id);
+    insert_item(&ctx, ship_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, stack_a, 484, char_id, station_id, InventoryFlag::Hangar, 5, false);
+    insert_item(&ctx, stack_b, 484, char_id, station_id, InventoryFlag::Hangar, 2, false);
+    insert_item(
+        &ctx,
+        single_unpackaged_gun,
+        484,
+        char_id,
+        station_id,
+        InventoryFlag::Hangar,
+        1,
+        false,
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        for &sk in &[3300u32, 3302, 3318, 3392, 3426] {
+            snap.skills.entry(char_id).or_default().insert(
+                sk,
+                eve_db::TrainedSkillRecord {
+                    type_id: sk,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+    });
+
+    let kw = HashMap::new();
+    let mut sess = make_session(char_id, corp_id, Some(station_id), None, Some(ship_id));
+    let hangar_bound = make_bound(station_id, char_id);
+    let ship_bound = make_bound(ship_id, char_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. MultiAdd flagAutoFit on an unpackaged qty=1 module notifies ixSingleton (10), online effect, & load change
+    handle_multi_add(
+        &ctx,
+        &mut sess,
+        Some(&ship_bound),
+        &[
+            PyRep::List(vec![PyRep::Integer(single_unpackaged_gun)]),
+            PyRep::Integer(station_id),
+            PyRep::Integer(0),
+        ],
+        &kw,
+    )
+    .await
+    .expect("autofit unpackaged singleton gun");
+    let n_auto = ctx.drain_notifications_for_char(char_id);
+    let ic_auto: Vec<_> = n_auto.iter().filter(|n| n.event == "OnItemChange").collect();
+    assert!(ic_auto.iter().all(|n| !change_dict_has_key(&n.args[1], 5)));
+    assert!(
+        ic_auto.iter().any(|n| {
+            dbrow_col_i64(&n.args[0], "itemID") == Some(single_unpackaged_gun)
+                && change_dict_get_i64(&n.args[1], 10) == Some(1)
+        }),
+        "unpackaged autofit must emit ixSingleton=10 change"
+    );
+    assert!(
+        n_auto.iter().any(|n| {
+            n.event == "OnModuleAttributeChanges"
+                && matches!(n.args.first(), Some(PyRep::List(items)) if items.iter().any(|it| {
+                    matches!(
+                        it,
+                        PyRep::Tuple(t)
+                            if t.get(2).and_then(|v| v.as_i64()) == Some(single_unpackaged_gun)
+                            && t.get(3).and_then(|v| v.as_i64()) == Some(2)
+                            && t.get(5).and_then(|v| v.as_f64()) == Some(1.0)
+                    )
+                }))
+        }),
+        "autofit online module must emit OnModuleAttributeChanges (online=1.0)"
+    );
+    assert!(
+        n_auto.iter().any(|n| {
+            n.event == "OnGodmaShipEffect"
+                && n.args.first().and_then(|v| v.as_i64()) == Some(single_unpackaged_gun)
+                && n.args.get(1).and_then(|v| v.as_i64()) == Some(16)
+        }),
+        "autofit online module must emit OnGodmaShipEffect(online=16)"
+    );
+    assert!(
+        n_auto.iter().any(|n| {
+            n.event == "OnModuleAttributeChanges"
+                && matches!(n.args.first(), Some(PyRep::List(items)) if items.iter().any(|it| {
+                    matches!(it, PyRep::Tuple(t) if t.get(2).and_then(|v| v.as_i64()) == Some(ship_id))
+                }))
+        }),
+        "autofit online module must emit ship CPU/PG load change"
+    );
+
+    // 2. Fill remaining turret hardpoints on Rifter, then verify extra turret fails cleanly
+    let max_hi = ctx
+        .sde
+        .types
+        .get(&587)
+        .map(|t| {
+            let hi = t.default_attributes.get(&eve_sde::attr_ids::HI_SLOTS).copied().unwrap_or(0.0) as usize;
+            let tur = t.default_attributes.get(&eve_sde::attr_ids::TURRET_SLOTS_LEFT).copied().unwrap_or(0.0) as usize;
+            hi.min(tur)
+        })
+        .unwrap_or(3);
+    for _ in 1..max_hi {
+        handle_multi_add(
+            &ctx,
+            &mut sess,
+            Some(&ship_bound),
+            &[
+                PyRep::List(vec![PyRep::Integer(stack_a)]),
+                PyRep::Integer(station_id),
+                PyRep::Integer(0),
+            ],
+            &kw,
+        )
+        .await
+        .expect("autofit within hull capacity");
+    }
+    let over_err = handle_multi_add(
+        &ctx,
+        &mut sess,
+        Some(&ship_bound),
+        &[
+            PyRep::List(vec![PyRep::Integer(stack_a)]),
+            PyRep::Integer(station_id),
+            PyRep::Integer(0),
+        ],
+        &kw,
+    )
+    .await
+    .expect_err("over-capacity turret autofit must fail");
+    assert_eq!(over_err.code, "FittingValidationFailed");
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 3. SplitStack, MultiMerge, and StackAll must emit ixStackSize (9) and NEVER ixQuantity (5)
+    super::inventory_stacking_ops::handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&hangar_bound),
+        "invbroker",
+        "SplitStack",
+        &[PyRep::Integer(stack_a), PyRep::Integer(1)],
+        &kw,
+    )
+    .unwrap()
+    .expect("SplitStack ok");
+    super::inventory_stacking_ops::handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&hangar_bound),
+        "invbroker",
+        "MultiMerge",
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(stack_b),
+            PyRep::Integer(stack_a),
+            PyRep::Integer(1),
+        ])])],
+        &kw,
+    )
+    .unwrap()
+    .expect("MultiMerge ok");
+    super::inventory_stacking_ops::handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&hangar_bound),
+        "invbroker",
+        "StackAll",
+        &[PyRep::Integer(InventoryFlag::Hangar as i64)],
+        &kw,
+    )
+    .unwrap()
+    .expect("StackAll ok");
+
+    let n_ops = ctx.drain_notifications_for_char(char_id);
+    let ic_ops: Vec<_> = n_ops.iter().filter(|n| n.event == "OnItemChange").collect();
+    assert!(!ic_ops.is_empty());
+    for notif in &ic_ops {
+        assert!(
+            !change_dict_has_key(&notif.args[1], 5),
+            "OnItemChange must NEVER emit legacy ixQuantity (5): {:?}",
+            notif.args[1]
+        );
+    }
+    assert!(
+        ic_ops.iter().any(|n| change_dict_has_key(&n.args[1], 9)),
+        "quantity mutations must emit ixStackSize (9)"
+    );
+}

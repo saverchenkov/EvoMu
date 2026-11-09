@@ -981,11 +981,18 @@ pub async fn handle_compression(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(observer_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "GetObserverLedger requires observerID".into(),
-                }));
+            let observer_id = match args.first() {
+                // V24.01 client calls GetObserverLedger(None) before selecting an observer structure; return empty ledger.
+                None | Some(PyRep::None) => return Some(Ok(PyRep::List(vec![]))),
+                Some(arg) => match arg.as_i64() {
+                    Some(id) => id,
+                    None => {
+                        return Some(Err(BridgeRpcError {
+                            code: "InvalidArgument".into(),
+                            message: "GetObserverLedger requires observerID".into(),
+                        }));
+                    }
+                },
             };
             let now = ctx.now_unix();
             let cutoff = now.saturating_sub(90 * 86_400);

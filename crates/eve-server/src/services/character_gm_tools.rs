@@ -595,6 +595,9 @@ pub async fn handle_gm_slash_ext(
             } else {
                 inv_type.radius.max(1.0)
             };
+            let is_celestial_or_asteroid = matches!(inv_type.category_id, 2 | 25);
+            // Asteroids/celestials belong to ownerSystem (1) with no player corp/char so bracket/standing UI stays neutral.
+            let spawn_owner_id = if is_celestial_or_asteroid { 1 } else { cid };
             let entity_id = ctx.db.with_mut_snapshot(|snap| {
                 snap.next_entity_id += 1;
                 let id = snap.next_entity_id;
@@ -603,7 +606,7 @@ pub async fn handle_gm_slash_ext(
                     InventoryItemRecord {
                         item_id: id,
                         type_id,
-                        owner_id: cid,
+                        owner_id: spawn_owner_id,
                         location_id: sys_id as i64,
                         flag: InventoryFlag::None,
                         quantity: 1,
@@ -646,7 +649,22 @@ pub async fn handle_gm_slash_ext(
                 mode: MovementMode::Stop,
             };
             let combat = ctx.build_type_combat_state(type_id);
-            let meta = ctx.build_ship_slim_meta(cid, type_id);
+            let meta = if is_celestial_or_asteroid {
+                eve_destiny::SlimItemMeta {
+                    group_id: inv_type.group_id,
+                    category_id: inv_type.category_id,
+                    owner_id: 1,
+                    char_id: None,
+                    corp_id: -1,
+                    alliance_id: -1,
+                    security_status: 0.0,
+                    is_cloaked: false,
+                    name: (!inv_type.name.is_empty()).then(|| inv_type.name.clone()),
+                    ..Default::default()
+                }
+            } else {
+                ctx.build_ship_slim_meta(cid, type_id)
+            };
             let _ = handle.spawn_ball_with_meta(ball, combat, meta).await;
             spawned_ids.push(entity_id);
         }
@@ -671,7 +689,9 @@ pub async fn handle_gm_slash_ext(
         };
         let (sys_id, removed_db) = ctx.db.with_mut_snapshot(|snap| {
             let caller_sys = session.solar_system_id.or_else(|| snap.characters.get(&cid).map(|c| c.solar_system_id)).unwrap_or(0);
-            let removed = snap.items.remove(&target_id).is_some();
+            let removed = snap.items.remove(&target_id).is_some()
+                || snap.asteroids.remove(&target_id).is_some();
+            snap.asteroids.remove(&target_id);
             let children: Vec<i64> = snap.items.values().filter(|i| i.location_id == target_id).map(|i| i.item_id).collect();
             for child_id in children { snap.items.remove(&child_id); }
             (caller_sys, removed)
@@ -900,6 +920,37 @@ pub async fn handle_gm_slash_ext(
         };
         let effects = &mod_type.effect_ids;
 
+        let Some((ship_owner_id, ship_cat_id)) = ctx.db.with_snapshot(|snap| {
+            snap.items.get(&ship_id).map(|ship_item| {
+                let cat = ctx
+                    .sde
+                    .types
+                    .get(&ship_item.type_id)
+                    .map(|t| t.category_id)
+                    .unwrap_or(6);
+                (ship_item.owner_id, cat)
+            })
+        }) else {
+            return Some(Err(BridgeRpcError {
+                code: "ShipNotFound".into(),
+                message: format!("Target ship {ship_id} not found"),
+            }));
+        };
+
+        let pre_fit_opt = if ship_cat_id == 6 {
+            ctx.get_or_rebuild_ship_fitting(ship_owner_id, ship_id).ok()
+        } else {
+            None
+        };
+        let old_cpu = pre_fit_opt
+            .as_ref()
+            .map(|f| f.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde))
+            .unwrap_or(0.0);
+        let old_pg = pre_fit_opt
+            .as_ref()
+            .map(|f| f.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde))
+            .unwrap_or(0.0);
+
         let res = ctx.db.try_with_mut_snapshot(|snap| {
             let Some(ship_item) = snap.items.get(&ship_id).cloned() else {
                 return Err(BridgeRpcError {
@@ -914,8 +965,8 @@ pub async fn handle_gm_slash_ext(
                 .map(|i| i.flag)
                 .collect();
 
-            let candidate_flags: &[InventoryFlag] = if effects.contains(&12) {
-                &[
+            let candidate_flags: Vec<InventoryFlag> = if effects.contains(&12) {
+                vec![
                     InventoryFlag::HiSlot0,
                     InventoryFlag::HiSlot1,
                     InventoryFlag::HiSlot2,
@@ -926,7 +977,7 @@ pub async fn handle_gm_slash_ext(
                     InventoryFlag::HiSlot7,
                 ]
             } else if effects.contains(&13) {
-                &[
+                vec![
                     InventoryFlag::MedSlot0,
                     InventoryFlag::MedSlot1,
                     InventoryFlag::MedSlot2,
@@ -937,7 +988,7 @@ pub async fn handle_gm_slash_ext(
                     InventoryFlag::MedSlot7,
                 ]
             } else if effects.contains(&11) {
-                &[
+                vec![
                     InventoryFlag::LoSlot0,
                     InventoryFlag::LoSlot1,
                     InventoryFlag::LoSlot2,
@@ -948,23 +999,27 @@ pub async fn handle_gm_slash_ext(
                     InventoryFlag::LoSlot7,
                 ]
             } else if effects.contains(&2663) {
-                &[
+                vec![
                     InventoryFlag::RigSlot0,
                     InventoryFlag::RigSlot1,
                     InventoryFlag::RigSlot2,
                 ]
             } else if mod_type.category_id == 32 || effects.contains(&3772) {
-                &[
-                    InventoryFlag::SubSystemSlot0,
-                    InventoryFlag::SubSystemSlot1,
-                    InventoryFlag::SubSystemSlot2,
-                    InventoryFlag::SubSystemSlot3,
-                    InventoryFlag::SubSystemSlot4,
-                ]
+                if let Some(&req_slot_f) = mod_type.default_attributes.get(&1366) {
+                    vec![InventoryFlag::from_u16(req_slot_f as u16)]
+                } else {
+                    vec![
+                        InventoryFlag::SubSystemSlot0,
+                        InventoryFlag::SubSystemSlot1,
+                        InventoryFlag::SubSystemSlot2,
+                        InventoryFlag::SubSystemSlot3,
+                        InventoryFlag::SubSystemSlot4,
+                    ]
+                }
             } else if mod_type.category_id == 18 {
-                &[InventoryFlag::DroneBay]
+                vec![InventoryFlag::DroneBay]
             } else {
-                &[
+                vec![
                     InventoryFlag::HiSlot0,
                     InventoryFlag::HiSlot1,
                     InventoryFlag::MedSlot0,
@@ -973,13 +1028,60 @@ pub async fn handle_gm_slash_ext(
                 ]
             };
 
-            let chosen_flag = explicit_flag.unwrap_or_else(|| {
+            let chosen_flag = if let Some(ef) = explicit_flag {
+                ef
+            } else if mod_type.category_id == 18 {
+                InventoryFlag::DroneBay
+            } else if ship_cat_id == 6 && matches!(mod_type.category_id, 7 | 32) {
+                // Validate hull slot limits, subsystem slots, and turret/launcher hardpoints before creating the item.
+                let mut chosen: Option<InventoryFlag> = None;
+                let mut first_err: Option<String> = None;
+                for &cand in &candidate_flags {
+                    if occupied_flags.contains(&cand) {
+                        continue;
+                    }
+                    if let Some(ref base_fit) = pre_fit_opt {
+                        let mut sim_fit = base_fit.clone();
+                        match sim_fit.fit_module_with_state(
+                            -(snap.next_entity_id + 1),
+                            type_id,
+                            cand as u16,
+                            false,
+                            &ctx.sde,
+                        ) {
+                            Ok(()) => {
+                                chosen = Some(cand);
+                                break;
+                            }
+                            Err(msg) => {
+                                if first_err.is_none() {
+                                    first_err = Some(msg);
+                                }
+                            }
+                        }
+                    } else {
+                        chosen = Some(cand);
+                        break;
+                    }
+                }
+                let Some(valid_flag) = chosen else {
+                    return Err(BridgeRpcError {
+                        code: "FittingValidationFailed".into(),
+                        message: first_err.unwrap_or_else(|| {
+                            format!(
+                                "No free compatible fitting slot for module type {type_id} on ship {ship_id}"
+                            )
+                        }),
+                    });
+                };
+                valid_flag
+            } else {
                 candidate_flags
                     .iter()
                     .copied()
                     .find(|f| !occupied_flags.contains(f))
                     .unwrap_or(candidate_flags[0])
-            });
+            };
 
             snap.next_entity_id += 1;
             let item_id = snap.next_entity_id;
@@ -1009,12 +1111,20 @@ pub async fn handle_gm_slash_ext(
                 let flag_u16 = chosen_flag as u16;
                 let is_fitting_slot = matches!(flag_u16, 11..=34 | 92..=94 | 125..=132);
                 let mut is_online = false;
+                let mut new_loads_opt: Option<(f64, f64)> = None;
                 if is_fitting_slot {
                     if let Ok(mut fit) = ctx.get_or_rebuild_ship_fitting(rec.owner_id, ship_id) {
                         if fit.modules.contains_key(&rec.item_id)
                             && fit.set_module_online(rec.item_id, &ctx.sde).is_ok()
                         {
                             is_online = true;
+                            let new_cpu = fit
+                                .ship
+                                .get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde);
+                            let new_pg = fit
+                                .ship
+                                .get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde);
+                            new_loads_opt = Some((new_cpu, new_pg));
                         }
                     }
                     if is_online {
@@ -1051,6 +1161,13 @@ pub async fn handle_gm_slash_ext(
                             0,
                             0,
                         );
+                        if let Some((new_cpu, new_pg)) = new_loads_opt {
+                            if (new_cpu - old_cpu).abs() > 1e-6 || (new_pg - old_pg).abs() > 1e-6 {
+                                let _ = ctx.notify_ship_fitting_load_changes(
+                                    rec.owner_id, ship_id, old_cpu, new_cpu, old_pg, new_pg,
+                                );
+                            }
+                        }
                     }
                 }
                 Some(Ok(PyRep::keyval([

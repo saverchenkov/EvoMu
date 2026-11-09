@@ -1450,4 +1450,365 @@ async fn playtest_batch_i_autofit_slash_notifications_and_dogma_get_all_info() {
     assert_eq!(cpu_load, 0.0, "GetAllInfo shipInfo.attributes CPU_LOAD must be 0.0");
     assert_eq!(pg_load, 0.0, "GetAllInfo shipInfo.attributes POWER_LOAD must be 0.0");
 }
+
+#[tokio::test]
+async fn inventory_autofit_slash_fit_undock_dock_and_mining_ledger_regressions() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    let uid = ctx.db.provision_player_account("v24audit724", "pass");
+    let char_id = ctx
+        .db
+        .create_character(uid, "Audit Pilot 724", 1, 1, 11, 17, &ctx.sde)
+        .expect("create_character")
+        .character_id;
+    let ship_id = 200_724_001_i64;
+
+    // Seed character with Venture (32880: 3 hiSlots, 2 turret hardpoints) and full mining/gunnery skills.
+    let ship_tid = if ctx.sde.types.contains_key(&32880) && ctx.sde.types.contains_key(&483) {
+        32880_u32
+    } else {
+        587_u32
+    };
+    let turret_tid = if ship_tid == 32880 { 483_u32 } else { 484_u32 };
+    let max_turrets = ctx
+        .sde
+        .types
+        .get(&ship_tid)
+        .map(|t| {
+            let hi = t.default_attributes.get(&eve_sde::attr_ids::HI_SLOTS).copied().unwrap_or(0.0) as usize;
+            let tur = t.default_attributes.get(&eve_sde::attr_ids::TURRET_SLOTS_LEFT).copied().unwrap_or(0.0) as usize;
+            hi.min(tur)
+        })
+        .unwrap_or(2);
+
+    let (station_id, sys_id) = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        let st = ch.station_id.expect("starter station");
+        let sys = ch.solar_system_id;
+        ch.active_ship_id = ship_id;
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: ship_tid,
+                owner_id: char_id,
+                location_id: st,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        for sk in [3300_u32, 3301, 3302, 3386, 3392, 3426] {
+            snap.skills.entry(char_id).or_default().insert(
+                sk,
+                eve_db::TrainedSkillRecord {
+                    type_id: sk,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+        (st, sys)
+    });
+
+    let mut sess = setup_pilot(&ctx, 724_001, "v24audit724", "pass", char_id).await;
+    sess.role |= eve_machonet::service_roles::ROLE_GM_MASK;
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = Some(sys_id);
+    let kw = HashMap::new();
+
+    // 1. /createitem two unpackaged turrets & stack operations never emit ixQuantity (5)
+    let created = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(format!("/createitem {turret_tid} 1"))],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/createitem turret 1");
+    let turret1_id = created.dict_get("itemID").and_then(PyRep::as_i64).unwrap();
+    let created_stack = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(format!("/createitem {turret_tid} 2"))],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/createitem turret stack");
+    let stack_id = created_stack.dict_get("itemID").and_then(PyRep::as_i64).unwrap();
+
+    let bind_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[PyRep::Tuple(vec![PyRep::Integer(station_id), PyRep::Integer(15)]), PyRep::None],
+            &kw,
+            None,
+        )
+        .await
+        .expect("MachoBindObject invbroker");
+    let PyRep::Tuple(bind_parts) = &bind_rep else {
+        panic!("expected MachoBindObject 2-tuple");
+    };
+    let mgr_bid = bind_parts[0].as_i64().expect("invbroker mgr bound id") as u64;
+
+    let ship_inv = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            Some(mgr_bid),
+            "GetInventoryFromId",
+            &[PyRep::Integer(ship_id), PyRep::Integer(0)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("bind ship inv");
+    let ship_bid = ship_inv.as_i64().expect("ship bound id") as u64;
+    let hangar_inv = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            Some(mgr_bid),
+            "GetInventory",
+            &[PyRep::Integer(10_004), PyRep::None],
+            &kw,
+            None,
+        )
+        .await
+        .expect("bind station hangar inv");
+    let hangar_bid = hangar_inv.as_i64().expect("station hangar bound id") as u64;
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    // Fit first unpackaged qty=1 turret via MultiAdd flagAutoFit (0)
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        Some(ship_bid),
+        "MultiAdd",
+        &[
+            PyRep::List(vec![PyRep::Integer(turret1_id)]),
+            PyRep::Integer(station_id),
+            PyRep::Integer(0),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("MultiAdd autofit unpackaged turret");
+
+    let n_multi = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        n_multi
+            .iter()
+            .filter(|n| n.event == "OnItemChange")
+            .all(|n| match &n.args[1] {
+                PyRep::Dict(d) => !d.iter().any(|(k, _)| k.as_i64() == Some(5)),
+                _ => true,
+            }),
+        "MultiAdd OnItemChange must never include key 5 (ixQuantity)"
+    );
+    assert!(
+        n_multi.iter().any(|n| {
+            n.event == "OnModuleAttributeChanges"
+                && matches!(n.args.first(), Some(PyRep::List(items)) if items.iter().any(|it| {
+                    matches!(
+                        it,
+                        PyRep::Tuple(t)
+                            if t.get(2).and_then(PyRep::as_i64) == Some(turret1_id)
+                            && t.get(3).and_then(PyRep::as_i64) == Some(2)
+                            && t.get(5).and_then(PyRep::as_f64) == Some(1.0)
+                    )
+                }))
+        }),
+        "MultiAdd autofit must emit OnModuleAttributeChanges (online=1.0)"
+    );
+    assert!(
+        n_multi.iter().any(|n| n.event == "OnGodmaShipEffect" && n.args.get(1).and_then(PyRep::as_i64) == Some(16)),
+        "MultiAdd autofit must emit OnGodmaShipEffect(16)"
+    );
+
+    // Split + StackAll on station hangar stack must use ixStackSize (9), never ixQuantity (5)
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        Some(hangar_bid),
+        "SplitStack",
+        &[PyRep::Integer(stack_id), PyRep::Integer(1)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SplitStack ok");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        Some(hangar_bid),
+        "StackAll",
+        &[PyRep::Integer(InventoryFlag::Hangar as i64)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("StackAll ok");
+    let n_stack = ctx.drain_notifications_for_char(char_id);
+    for n in n_stack.iter().filter(|n| n.event == "OnItemChange") {
+        if let PyRep::Dict(d) = &n.args[1] {
+            assert!(!d.iter().any(|(k, _)| k.as_i64() == Some(5)));
+        }
+    }
+
+    // 2. Fill remaining turret hardpoints via /fit, verify extra turret fails cleanly without creating item
+    for _ in 1..max_turrets {
+        let fit_res = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "slash",
+                None,
+                "SlashCmd",
+                &[PyRep::String(format!("/fit me {turret_tid}"))],
+                &kw,
+                None,
+            )
+            .await
+            .expect("/fit turret within limit");
+        assert_eq!(fit_res.dict_get("online"), Some(&PyRep::Bool(true)));
+    }
+    let over_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(format!("/fit me {turret_tid}"))],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("3rd turret /fit beyond hull hardpoints must fail");
+    assert_eq!(over_err.code, "FittingValidationFailed");
+
+    // 3. Undock -> GetAllInfo -> Dock keeps ship modules present & synced for both godma & dogmaLocation
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock");
+    let all_info = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "GetAllInfo",
+            &[PyRep::Bool(true), PyRep::Bool(true), PyRep::Bool(false)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetAllInfo in space");
+    let PyRep::Dict(ship_info) = all_info.dict_get("shipInfo").expect("shipInfo") else {
+        panic!("shipInfo dict");
+    };
+    assert!(
+        ship_info.iter().any(|(k, _)| k.as_i64() == Some(turret1_id)),
+        "fitted module must be present in GetAllInfo.shipInfo"
+    );
+
+    // 4. corpMiningLedger.GetObserverLedger(None) returns [], /spawn asteroid sets ownerID=1, /unspawn clears snap.asteroids
+    let obs_ledger = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "corpMiningLedger",
+            None,
+            "GetObserverLedger",
+            &[PyRep::None],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetObserverLedger(None)");
+    assert_eq!(obs_ledger, PyRep::List(vec![]));
+
+    let ast_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.category_id == 25)
+        .map(|t| t.type_id)
+        .unwrap_or(1228);
+    let spawned_ast = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(format!("/spawn {ast_tid}"))],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/spawn asteroid");
+    let ast_id = spawned_ast.dict_get("spawnedID").and_then(PyRep::as_i64).unwrap();
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.items[&ast_id].owner_id, 1);
+        assert!(s.asteroids.contains_key(&ast_id));
+    });
+    ctx.dispatch_rpc(
+        &mut sess,
+        "slash",
+        None,
+        "SlashCmd",
+        &[PyRep::String(format!("/unspawn {ast_id}"))],
+        &kw,
+        None,
+    )
+    .await
+    .expect("/unspawn asteroid");
+    ctx.db.with_snapshot(|s| {
+        assert!(!s.asteroids.contains_key(&ast_id));
+    });
+
+    // Re-dock at starter station and confirm GetAllInfo keeps fitted modules synced (#699).
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, char_id);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "stationSvc",
+        None,
+        "Dock",
+        &[PyRep::Integer(station_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Dock back at station");
+    let post_dock_info = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "GetAllInfo",
+            &[PyRep::Bool(true), PyRep::Bool(true), PyRep::Bool(false)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetAllInfo after dock");
+    let PyRep::Dict(dock_ship_info) = post_dock_info.dict_get("shipInfo").expect("shipInfo") else {
+        panic!("shipInfo dict after dock");
+    };
+    assert!(
+        dock_ship_info.iter().any(|(k, _)| k.as_i64() == Some(turret1_id)),
+        "fitted module must remain synced after Undock -> Dock"
+    );
+}
 }

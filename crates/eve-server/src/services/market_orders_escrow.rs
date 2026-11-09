@@ -376,7 +376,8 @@ pub fn handle_orders_escrow(
                             item_mut.version += 1;
                             consumed_items.push((
                                 item_mut.clone(),
-                                vec![(5, PyRep::Integer(old_qty as i64)), (9, PyRep::Integer(old_qty as i64))],
+                                // V24.01 invCache uses ixStackSize (9), not legacy ixQuantity (5).
+                                vec![(9, PyRep::Integer(old_qty as i64))],
                             ));
                         } else {
                             let mut removed_rec = item_mut.clone();
@@ -386,7 +387,7 @@ pub fn handle_orders_escrow(
                             removed_rec.quantity = 0;
                             consumed_items.push((
                                 removed_rec,
-                                vec![(3, PyRep::Integer(old_loc)), (5, PyRep::Integer(old_qty as i64))],
+                                vec![(3, PyRep::Integer(old_loc)), (9, PyRep::Integer(old_qty as i64))],
                             ));
                         }
                     }
@@ -964,7 +965,8 @@ pub fn handle_orders_escrow(
                                 returned_item = Some((
                                     recipient_char,
                                     item.clone(),
-                                    vec![(5, PyRep::Integer(old_qty as i64)), (9, PyRep::Integer(old_qty as i64))],
+                                    // V24.01 invCache uses ixStackSize (9), not legacy ixQuantity (5).
+                                    vec![(9, PyRep::Integer(old_qty as i64))],
                                 ));
                             }
                         } else {

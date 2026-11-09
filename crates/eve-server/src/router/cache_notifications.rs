@@ -1410,14 +1410,30 @@ impl ServerContext {
     pub fn notify_fitted_item_trashed(
         &self, char_id: i64, item_id: i64, type_id: i64, quantity: i64, old_location_id: i64, old_flag: i64,
     ) -> Vec<PendingMachoNotification> {
-        self.notify(
-            NotificationTarget::Character(char_id), "OnItemChange", "charid",
+        let (group_id, category_id) = u32::try_from(type_id)
+            .ok()
+            .and_then(|tid| self.sde.types.get(&tid))
+            .map(|t| (i64::from(t.group_id), i64::from(t.category_id)))
+            .unwrap_or((0, 0));
+        // Fitted modules/rigs are singleton items, so their packed inv_item quantity is -1 when qty == 1.
+        let packed_qty = if quantity == 1 { -1 } else { quantity };
+        let row = eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(vec![
+            PyRep::Integer(item_id),
+            PyRep::Integer(type_id),
+            PyRep::Integer(char_id),
+            PyRep::Integer(10),
+            PyRep::Integer(147),
+            PyRep::Integer(packed_qty),
+            PyRep::Integer(group_id),
+            PyRep::Integer(category_id),
+            PyRep::String(String::new()),
+        ]);
+        self.notify_item_change(
+            char_id,
+            row,
             vec![
-                PyRep::keyval([
-                    ("itemID", PyRep::Integer(item_id)), ("typeID", PyRep::Integer(type_id)),
-                    ("locationID", PyRep::Integer(10)), ("flagID", PyRep::Integer(147)), ("quantity", PyRep::Integer(quantity)),
-                ]),
-                PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(old_location_id)), (PyRep::Integer(4), PyRep::Integer(old_flag))]),
+                (3, PyRep::Integer(old_location_id)),
+                (4, PyRep::Integer(old_flag)),
             ],
         )
     }

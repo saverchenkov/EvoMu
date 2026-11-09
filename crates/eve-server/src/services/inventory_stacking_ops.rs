@@ -301,7 +301,7 @@ pub(in crate::services) fn handle_stack_ops(
                         char_id,
                         &orig,
                         vec![
-                            (5, PyRep::Integer(old_orig_qty)),
+                            // Omit ixQuantity (5): V24.01 invCache uses ixStackSize (9).
                             (9, PyRep::Integer(old_orig_qty)),
                         ],
                     );
@@ -534,7 +534,7 @@ pub(in crate::services) fn handle_stack_ops(
                                 char_id,
                                 &orig,
                                 vec![
-                                    (5, PyRep::Integer(old_src_qty as i64)),
+                                    // Omit ixQuantity (5): V24.01 invCache uses ixStackSize (9).
                                     (9, PyRep::Integer(old_src_qty as i64)),
                                 ],
                             );
@@ -546,7 +546,6 @@ pub(in crate::services) fn handle_stack_ops(
                             char_id,
                             &upd,
                             vec![
-                                (5, PyRep::Integer(dst_rec.quantity as i64)),
                                 (9, PyRep::Integer(dst_rec.quantity as i64)),
                             ],
                         );
@@ -674,7 +673,7 @@ pub(in crate::services) fn handle_stack_ops(
                         char_id,
                         &upd,
                         vec![
-                            (5, PyRep::Integer(old_dst_qty as i64)),
+                            // Omit ixQuantity (5): V24.01 invCache uses ixStackSize (9).
                             (9, PyRep::Integer(old_dst_qty as i64)),
                         ],
                     );

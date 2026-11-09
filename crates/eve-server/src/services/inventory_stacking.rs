@@ -590,7 +590,7 @@ pub(crate) async fn handle_multi_add(
                     char_id,
                     &fin,
                     vec![
-                        (5, PyRep::Integer(old_target_qty)),
+                        // Omit ixQuantity (5): V24.01 invCache uses ixStackSize (9).
                         (9, PyRep::Integer(old_target_qty)),
                     ],
                 );
@@ -757,6 +757,8 @@ async fn handle_multi_add_auto_fit(
         ctx, session, char_id,
     );
     let mut temp_fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id)?;
+    let mut prev_cpu = temp_fit.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde);
+    let mut prev_pg = temp_fit.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde);
     let (mut used_slots, ch_dock_for_fit, item_meta) = ctx.db.with_snapshot(|snap| -> Result<_, BridgeRpcError> {
         let ch = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
             code: "CharacterNotFound".into(),
@@ -963,7 +965,9 @@ async fn handle_multi_add_auto_fit(
                     break;
                 }
                 Err(msg) => {
-                    last_err = Some(msg);
+                    if last_err.is_none() {
+                        last_err = Some(msg);
+                    }
                 }
             }
         }
@@ -1055,7 +1059,7 @@ async fn handle_multi_add_auto_fit(
             updated.quantity,
         );
         ctx.invalidate_ship_fitting(ship_id);
-        let _ = ctx.get_or_rebuild_ship_fitting(char_id, ship_id);
+        let rebuilt_fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
 
         if let Some((orig_rec, old_orig_qty)) = split_orig_opt {
             super::inventory_bound::emit_inv_item_change(
@@ -1063,12 +1067,12 @@ async fn handle_multi_add_auto_fit(
                 char_id,
                 &orig_rec,
                 vec![
-                    (5, PyRep::Integer(old_orig_qty as i64)),
+                    // Omit ixQuantity (5): V24.01 invCache uses ixStackSize (9).
                     (9, PyRep::Integer(old_orig_qty as i64)),
                 ],
             );
         }
-        let changes = if plan.needs_split {
+        let mut changes = if plan.needs_split {
             vec![(3, PyRep::Integer(0))]
         } else {
             vec![
@@ -1076,6 +1080,10 @@ async fn handle_multi_add_auto_fit(
                 (4, PyRep::Integer(old_flag_u16 as i64)),
             ]
         };
+        if !plan.needs_split && !plan.src_item.singleton && updated.singleton {
+            // ixSingleton (10): notify invCache/godma when an unpackaged qty=1 module turns singleton on fit.
+            changes.push((10, PyRep::Integer(1)));
+        }
         super::inventory_bound::emit_inv_item_change(ctx, char_id, &updated, changes);
         ctx.notify(
             crate::router::NotificationTarget::Character(char_id),
@@ -1096,12 +1104,37 @@ async fn handle_multi_add_auto_fit(
                 PyRep::Integer(updated.flag as i64),
             ],
         );
+        let _ = ctx.notify_module_online_state(char_id, updated.item_id, plan.online);
+        if plan.online {
+            let eff_id = ctx
+                .effect_id_for_module(updated.type_id, Some("online"))
+                .unwrap_or(16) as i32;
+            let _ = ctx.notify_godma_ship_effect(
+                crate::router::NotificationTarget::Character(char_id),
+                updated.item_id,
+                eff_id,
+                true,
+                0,
+                0,
+            );
+        }
         ctx.notify(
             crate::router::NotificationTarget::Character(char_id),
             "OnModuleAttributeChanges",
             "charid",
             vec![PyRep::Integer(updated.item_id)],
         );
+        if let Some(ref new_fit) = rebuilt_fit {
+            let new_cpu = new_fit.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde);
+            let new_pg = new_fit.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde);
+            if (new_cpu - prev_cpu).abs() > 1e-6 || (new_pg - prev_pg).abs() > 1e-6 {
+                let _ = ctx.notify_ship_fitting_load_changes(
+                    char_id, ship_id, prev_cpu, new_cpu, prev_pg, new_pg,
+                );
+                prev_cpu = new_cpu;
+                prev_pg = new_pg;
+            }
+        }
         fitted_ids.push(updated.item_id);
     }
 

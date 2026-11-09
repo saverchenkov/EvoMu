@@ -536,3 +536,65 @@ async fn test_corp_and_character_mining_ledger_rpcs() {
         panic!("expected list of character mining logs");
     }
 }
+
+#[tokio::test]
+async fn corp_mining_ledger_get_observer_ledger_handles_none_and_rejects_bad_types() {
+    let ctx = make_ctx();
+    let mut session = SessionState::default();
+    session.user_id = Some(1);
+    session.character_id = Some(90_000_001);
+    session.corporation_id = Some(1_000_009);
+    let kw = HashMap::new();
+
+    let res_none = handle_compression(
+        &ctx,
+        &mut session,
+        "corpMiningLedger",
+        "GetObserverLedger",
+        &[PyRep::None],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("GetObserverLedger(None) must return empty list");
+    assert_eq!(res_none, PyRep::List(vec![]));
+
+    let res_empty = handle_compression(
+        &ctx,
+        &mut session,
+        "corpMiningLedger",
+        "GetObserverLedger",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("GetObserverLedger() with missing arg must return empty list");
+    assert_eq!(res_empty, PyRep::List(vec![]));
+
+    let bad_err = handle_compression(
+        &ctx,
+        &mut session,
+        "corpMiningLedger",
+        "GetObserverLedger",
+        &[PyRep::String("not-an-id".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("non-integer non-None arg must fail with InvalidArgument");
+    assert_eq!(bad_err.code, "InvalidArgument");
+
+    let denied_err = handle_compression(
+        &ctx,
+        &mut session,
+        "corpMiningLedger",
+        "GetObserverLedger",
+        &[PyRep::Integer(9_999_999)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("unknown observer ID must fail with CrpAccessDenied");
+    assert_eq!(denied_err.code, "CrpAccessDenied");
+}
