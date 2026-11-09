@@ -404,7 +404,7 @@ fn pyrep_node_count_and_wire_boundaries_cover_all_arithmetic_branches() {
     let map: std::collections::HashMap<_, _> = unpacked.into_iter().collect();
     assert_eq!(map["null_i8"], PyRep::None);
     assert_eq!(map["i8_val"], PyRep::Integer(-9_000_000_001));
-    assert_eq!(map["cy_real"], PyRep::Integer(125_000));
+    assert_eq!(map["cy_real"], PyRep::Real(12.5));
     assert_eq!(map["r8_val"], PyRep::Real(3.25));
     assert_eq!(map["null_i4"], PyRep::None);
     assert_eq!(map["i4_val"], PyRep::Integer(-123_456));

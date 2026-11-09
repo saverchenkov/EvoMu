@@ -84,11 +84,22 @@ fn pack_dbrow(col_defs: &[(String, i64)], values: &[(String, PyRep)]) -> PyRep {
     for (orig_idx, (name, dbtype)) in indexed_defs {
         let raw_val = values[orig_idx].1.clone();
         let norm = match *dbtype {
-            20 | 21 | 64 | 6 => {
+            20 | 21 | 64 => {
                 let v = raw_val.as_i64().unwrap_or(0);
                 unpacked[offset..offset + 8].copy_from_slice(&v.to_le_bytes());
                 offset += 8;
                 PyRep::Integer(v)
+            }
+            6 => {
+                let f = raw_val.as_f64().unwrap_or(0.0);
+                let v = if f.is_finite() {
+                    (f * 10_000.0).round() as i64
+                } else {
+                    0
+                };
+                unpacked[offset..offset + 8].copy_from_slice(&v.to_le_bytes());
+                offset += 8;
+                PyRep::Real((v as f64) / 10_000.0)
             }
             5 => {
                 let v = raw_val.as_f64().unwrap_or(0.0);
@@ -342,9 +353,9 @@ enum ArbDbCol {
 fn arb_db_col() -> impl Strategy<Value = ArbDbCol> {
     prop_oneof![
         any::<i64>().prop_map(ArbDbCol::I64),
-        (0u64..(i64::MAX as u64)).prop_map(ArbDbCol::U64),
+        any::<u64>().prop_map(ArbDbCol::U64),
         any::<i64>().prop_map(ArbDbCol::FileTime),
-        any::<i64>().prop_map(ArbDbCol::Currency),
+        (-1_000_000_000_000_000i64..=1_000_000_000_000_000i64).prop_map(ArbDbCol::Currency),
         (-1e9f64..1e9f64).prop_map(ArbDbCol::F64),
         any::<i32>().prop_map(ArbDbCol::I32),
         any::<u32>().prop_map(ArbDbCol::U32),
@@ -523,9 +534,9 @@ proptest! {
                     values.push((name, PyRep::Integer(*v)));
                     fixed_bytes += 8;
                 }
-                ArbDbCol::Currency(v) => {
+                ArbDbCol::Currency(ticks) => {
                     col_defs.push((name.clone(), 6i64));
-                    values.push((name, PyRep::Integer(*v)));
+                    values.push((name, PyRep::Real((*ticks as f64) / 10_000.0)));
                     fixed_bytes += 8;
                 }
                 ArbDbCol::F64(v) => {

@@ -347,7 +347,9 @@ fn decode_error_branches_and_pack_dbrow_helper() {
     ]);
     let enc = encode(&row);
     let dec = decode(&enc).unwrap();
+    assert_eq!(dec, row);
     assert_eq!(dec.dbrow_get("c_i8"), Some(&PyRep::Integer(10)));
+    assert_eq!(dec.dbrow_get("c_cy"), Some(&PyRep::Real(40.0)));
     assert_eq!(dec.dbrow_get("c_str"), Some(&PyRep::String("packed".into())));
 }
 

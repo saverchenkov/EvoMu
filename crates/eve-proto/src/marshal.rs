@@ -1222,7 +1222,11 @@ pub fn pack_dbrow(cols: &[(&str, i64, PyRep)]) -> PyRep {
     };
     let columns: Vec<(String, PyRep)> = cols
         .iter()
-        .map(|(n, _, v)| ((*n).to_string(), v.clone()))
+        .map(|(n, dt, v)| {
+            let norm = crate::dbrow::DbColumnType::from_i64(*dt)
+                .map_or_else(|| v.clone(), |ct| ct.normalize_value(v.clone()));
+            ((*n).to_string(), norm)
+        })
         .collect();
     let raw_rle = crate::dbrow::pack_packed_row_columns_from_defs(&schema, &columns);
 

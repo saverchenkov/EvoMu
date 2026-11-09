@@ -75,19 +75,15 @@ impl DbColumnType {
             Self::I8 | Self::Ui8 | Self::FileTime => {
                 PyRep::Integer(val.as_i64().unwrap_or(0))
             }
-            Self::Cy => match val {
-                PyRep::Integer(v) => PyRep::Integer(v),
-                PyRep::Real(f) => PyRep::Integer((f * 10_000.0).round() as i64),
-                _ => PyRep::Integer(0),
-            },
-            Self::I4 => PyRep::Integer((val.as_i64().unwrap_or(0) as i32) as i64),
-            Self::Ui4 => PyRep::Integer((val.as_i64().unwrap_or(0) as u32) as i64),
-            Self::I2 => PyRep::Integer((val.as_i64().unwrap_or(0) as i16) as i64),
-            Self::Ui2 => PyRep::Integer((val.as_i64().unwrap_or(0) as u16) as i64),
-            Self::I1 => PyRep::Integer((val.as_i64().unwrap_or(0) as i8) as i64),
-            Self::Ui1 => PyRep::Integer((val.as_i64().unwrap_or(0) as u8) as i64),
+            Self::Cy => decode_cy_fixed_point(encode_cy_fixed_point(&val)),
+            Self::I4 => PyRep::Integer(i64::from(val.as_i64().unwrap_or(0) as i32)),
+            Self::Ui4 => PyRep::Integer(i64::from(val.as_i64().unwrap_or(0) as u32)),
+            Self::I2 => PyRep::Integer(i64::from(val.as_i64().unwrap_or(0) as i16)),
+            Self::Ui2 => PyRep::Integer(i64::from(val.as_i64().unwrap_or(0) as u16)),
+            Self::I1 => PyRep::Integer(i64::from(val.as_i64().unwrap_or(0) as i8)),
+            Self::Ui1 => PyRep::Integer(i64::from(val.as_i64().unwrap_or(0) as u8)),
             Self::R8 => PyRep::Real(val.as_f64().unwrap_or(0.0)),
-            Self::R4 => PyRep::Real((val.as_f64().unwrap_or(0.0) as f32) as f64),
+            Self::R4 => PyRep::Real(f64::from(val.as_f64().unwrap_or(0.0) as f32)),
             Self::Bool => PyRep::Bool(val.as_bool().unwrap_or(false)),
             Self::Bytes => match val {
                 PyRep::Bytes(b) | PyRep::Buffer(b) => PyRep::Bytes(b),
@@ -108,6 +104,23 @@ impl DbColumnType {
             Self::Empty => PyRep::None,
         }
     }
+}
+
+/// Fixed-point wire scale for `DBTYPE_CY` (`DbColumnType::Cy` = `6`):
+/// `1.0` ISK is encoded on the `PyPackedRow` wire as `10,000` signed 64-bit units (`0.0001` ISK precision).
+pub const DBTYPE_CY_SCALE_F64: f64 = 10_000.0;
+pub const DBTYPE_CY_SCALE_I64: i64 = 10_000;
+
+fn encode_cy_fixed_point(val: &PyRep) -> i64 {
+    match val {
+        PyRep::Real(f) if f.is_finite() => (*f * DBTYPE_CY_SCALE_F64).round() as i64,
+        PyRep::Integer(i) => i.saturating_mul(DBTYPE_CY_SCALE_I64),
+        _ => 0,
+    }
+}
+
+fn decode_cy_fixed_point(raw_units: i64) -> PyRep {
+    PyRep::Real((raw_units as f64) / DBTYPE_CY_SCALE_F64)
 }
 
 /// Bit width of a raw `DBTYPE` integer code per `DBTYPE_GetSizeBits` (`EVEDB.cpp`).
@@ -652,16 +665,20 @@ pub fn pack_packed_row_columns_from_defs(
     let mut bool_bit_len = 0usize;
     let nulls_bit_len = defs.len();
     let mut bool_ordinals = vec![0usize; defs.len()];
+    let mut indexed_defs: Vec<(usize, &str, Option<DbColumnType>, usize)> =
+        Vec::with_capacity(defs.len());
 
-    for (i, (_, dbtype)) in defs.iter().enumerate() {
-        let size = dbtype_bit_width(*dbtype);
-        if *dbtype == 11 {
+    for (i, (col_name, raw_dbtype)) in defs.iter().enumerate() {
+        let col_type = DbColumnType::from_i64(*raw_dbtype);
+        let size = col_type.map_or(0, DbColumnType::bit_width);
+        if col_type == Some(DbColumnType::Bool) {
             bool_ordinals[i] = bool_bit_len;
             bool_bit_len += 1;
         }
         if size >= 8 {
-            byte_data_bit_len += size;
+            byte_data_bit_len = byte_data_bit_len.saturating_add(size);
         }
+        indexed_defs.push((i, col_name.as_str(), col_type, size));
     }
 
     let bit_data_len = ((bool_bit_len + nulls_bit_len) >> 3) + 1;
@@ -669,11 +686,8 @@ pub fn pack_packed_row_columns_from_defs(
     let mut bit_data = vec![0u8; bit_data_len];
 
     // Sort columns widest-first (64, 32, 16, 8, 1, 0), preserving original index order on ties
-    let mut indexed_defs: Vec<(usize, &(String, i64))> = defs.iter().enumerate().collect();
-    indexed_defs.sort_by(|(idx_a, (_, dt_a)), (idx_b, (_, dt_b))| {
-        dbtype_bit_width(*dt_b)
-            .cmp(&dbtype_bit_width(*dt_a))
-            .then_with(|| idx_a.cmp(idx_b))
+    indexed_defs.sort_by(|(idx_a, _, _, bw_a), (idx_b, _, _, bw_b)| {
+        bw_b.cmp(bw_a).then_with(|| idx_a.cmp(idx_b))
     });
 
     let lookup_val = |orig_idx: usize, col_name: &str| -> &PyRep {
@@ -685,104 +699,73 @@ pub fn pack_packed_row_columns_from_defs(
             .unwrap_or(&PyRep::None)
     };
 
-    for (orig_idx, (col_name, dbtype)) in indexed_defs {
+    for (orig_idx, col_name, col_type, _) in indexed_defs {
         let val = lookup_val(orig_idx, col_name);
-        let is_none = matches!(val, PyRep::None);
-        if is_none {
+        if matches!(val, PyRep::None) {
             let null_bit = bool_bit_len + orig_idx;
             let null_byte = null_bit >> 3;
-            if null_byte < bit_data.len() {
-                bit_data[null_byte] |= 1u8 << (null_bit & 7);
-            }
+            bit_data[null_byte] |= 1u8 << (null_bit & 7);
         }
 
-        match *dbtype {
-            20 | 21 | 64 => {
-                let v = if is_none { 0i64 } else { val.as_i64().unwrap_or(0) };
+        match col_type {
+            Some(DbColumnType::I8 | DbColumnType::FileTime) => {
+                let v = val.as_i64().unwrap_or(0);
                 row_data.extend_from_slice(&v.to_le_bytes());
             }
-            6 => {
-                let v = if is_none {
-                    0i64
-                } else {
-                    match val {
-                        PyRep::Integer(i) => *i,
-                        PyRep::Real(f) => (*f * 10_000.0).round() as i64,
-                        _ => 0,
-                    }
-                };
+            Some(DbColumnType::Ui8) => {
+                let v = val.as_i64().unwrap_or(0) as u64;
                 row_data.extend_from_slice(&v.to_le_bytes());
             }
-            5 => {
-                let v = if is_none { 0.0f64 } else { val.as_f64().unwrap_or(0.0) };
+            Some(DbColumnType::Cy) => {
+                let v = encode_cy_fixed_point(val);
                 row_data.extend_from_slice(&v.to_le_bytes());
             }
-            3 => {
-                let v = if is_none {
-                    0i32
-                } else {
-                    val.as_i64().unwrap_or(0) as i32
-                };
+            Some(DbColumnType::R8) => {
+                let v = val.as_f64().unwrap_or(0.0);
                 row_data.extend_from_slice(&v.to_le_bytes());
             }
-            19 => {
-                let v = if is_none {
-                    0u32
-                } else {
-                    val.as_i64().unwrap_or(0) as u32
-                };
+            Some(DbColumnType::I4) => {
+                let v = val.as_i64().unwrap_or(0) as i32;
                 row_data.extend_from_slice(&v.to_le_bytes());
             }
-            4 => {
-                let v = if is_none {
-                    0.0f32
-                } else {
-                    val.as_f64().unwrap_or(0.0) as f32
-                };
+            Some(DbColumnType::Ui4) => {
+                let v = val.as_i64().unwrap_or(0) as u32;
                 row_data.extend_from_slice(&v.to_le_bytes());
             }
-            2 => {
-                let v = if is_none {
-                    0i16
-                } else {
-                    val.as_i64().unwrap_or(0) as i16
-                };
+            Some(DbColumnType::R4) => {
+                let v = val.as_f64().unwrap_or(0.0) as f32;
                 row_data.extend_from_slice(&v.to_le_bytes());
             }
-            18 => {
-                let v = if is_none {
-                    0u16
-                } else {
-                    val.as_i64().unwrap_or(0) as u16
-                };
+            Some(DbColumnType::I2) => {
+                let v = val.as_i64().unwrap_or(0) as i16;
                 row_data.extend_from_slice(&v.to_le_bytes());
             }
-            16 => {
-                let v = if is_none {
-                    0i8
-                } else {
-                    val.as_i64().unwrap_or(0) as i8
-                };
+            Some(DbColumnType::Ui2) => {
+                let v = val.as_i64().unwrap_or(0) as u16;
+                row_data.extend_from_slice(&v.to_le_bytes());
+            }
+            Some(DbColumnType::I1) => {
+                let v = val.as_i64().unwrap_or(0) as i8;
                 row_data.push(v as u8);
             }
-            17 => {
-                let v = if is_none {
-                    0u8
-                } else {
-                    val.as_i64().unwrap_or(0) as u8
-                };
+            Some(DbColumnType::Ui1) => {
+                let v = val.as_i64().unwrap_or(0) as u8;
                 row_data.push(v);
             }
-            11 => {
-                if !is_none && val.as_bool().unwrap_or(false) {
+            Some(DbColumnType::Bool) => {
+                if val.as_bool().unwrap_or(false) {
                     let bool_bit = bool_ordinals[orig_idx];
                     let bool_byte = bool_bit >> 3;
-                    if bool_byte < bit_data.len() {
-                        bit_data[bool_byte] |= 1u8 << (bool_bit & 7);
-                    }
+                    bit_data[bool_byte] |= 1u8 << (bool_bit & 7);
                 }
             }
-            _ => {
+            Some(
+                DbColumnType::Empty
+                | DbColumnType::Bytes
+                | DbColumnType::Str
+                | DbColumnType::WStr,
+            )
+            | None => {
                 // Zero-bit-width columns (128 BYTES, 129 STR, 130 WSTR) are appended after the RLE stream
             }
         }
@@ -835,16 +818,20 @@ pub fn try_unpack_packed_row_columns(
     let mut bool_bit_len = 0usize;
     let nulls_bit_len = defs.len();
     let mut bool_ordinals = vec![0usize; defs.len()];
+    let mut indexed_defs: Vec<(usize, &str, Option<DbColumnType>, usize)> =
+        Vec::with_capacity(defs.len());
 
-    for (i, (_, dbtype)) in defs.iter().enumerate() {
-        let size = dbtype_bit_width(*dbtype);
-        if *dbtype == 11 {
+    for (i, (name, raw_dbtype)) in defs.iter().enumerate() {
+        let col_type = DbColumnType::from_i64(*raw_dbtype);
+        let size = col_type.map_or(0, DbColumnType::bit_width);
+        if col_type == Some(DbColumnType::Bool) {
             bool_ordinals[i] = bool_bit_len;
             bool_bit_len += 1;
         }
         if size >= 8 {
             byte_data_bit_len = byte_data_bit_len.saturating_add(size);
         }
+        indexed_defs.push((i, name.as_str(), col_type, size));
     }
 
     let expected_bytes = (byte_data_bit_len >> 3) + ((bool_bit_len + nulls_bit_len) >> 3) + 1;
@@ -855,91 +842,105 @@ pub fn try_unpack_packed_row_columns(
         return Err(crate::ProtoError::InvalidPackedRowRle);
     };
 
-    // Per EVEUnmarshal.cpp: columns are iterated in widest-first order (64, 32, 16, 8, 1, 0)
-    let mut indexed_defs: Vec<(usize, &(String, i64))> = defs.iter().enumerate().collect();
-    indexed_defs.sort_by(|(idx_a, (_, dt_a)), (idx_b, (_, dt_b))| {
-        dbtype_bit_width(*dt_b)
-            .cmp(&dbtype_bit_width(*dt_a))
-            .then_with(|| idx_a.cmp(idx_b))
+    // Per EVEUnmarshal.cpp: columns are iterated in widest-first order (64, 32, 16, 8, 1, 0),
+    // retaining `DbColumnType` so unsigned integers (`UI1`/`UI2`/`UI4`) zero-extend into `i64`
+    // and `DbColumnType::Cy` (`6`) divides its 64-bit fixed-point value by `10,000.0`.
+    indexed_defs.sort_by(|(idx_a, _, _, bw_a), (idx_b, _, _, bw_b)| {
+        bw_b.cmp(bw_a).then_with(|| idx_a.cmp(idx_b))
     });
 
     let mut offset = 0usize;
     let mut decoded_by_idx: Vec<(usize, String, PyRep)> = Vec::with_capacity(defs.len());
 
-    for (orig_idx, (name, dbtype)) in indexed_defs {
-        let size_bits = dbtype_bit_width(*dbtype);
+    for (orig_idx, name, col_type, size_bits) in indexed_defs {
         let null_bit = byte_data_bit_len + bool_bit_len + orig_idx;
         let null_byte = null_bit >> 3;
-        let is_null = null_byte < unpacked.len()
-            && (unpacked[null_byte] & (1u8 << (null_bit & 7))) != 0;
+        let is_null = (unpacked[null_byte] & (1u8 << (null_bit & 7))) != 0;
 
         if is_null && size_bits > 0 {
             offset += size_bits >> 3;
-            decoded_by_idx.push((orig_idx, name.clone(), PyRep::None));
+            decoded_by_idx.push((orig_idx, name.to_string(), PyRep::None));
             continue;
         }
 
-        let val = match *dbtype {
-            20 | 21 | 64 | 6 if offset + 8 <= unpacked.len() => {
+        let val = match col_type {
+            Some(DbColumnType::I8 | DbColumnType::FileTime) => {
                 let v = i64::from_le_bytes(unpacked[offset..offset + 8].try_into().unwrap());
                 offset += 8;
                 PyRep::Integer(v)
             }
-            5 if offset + 8 <= unpacked.len() => {
+            Some(DbColumnType::Ui8) => {
+                let v =
+                    u64::from_le_bytes(unpacked[offset..offset + 8].try_into().unwrap()) as i64;
+                offset += 8;
+                PyRep::Integer(v)
+            }
+            Some(DbColumnType::Cy) => {
+                let raw_units =
+                    i64::from_le_bytes(unpacked[offset..offset + 8].try_into().unwrap());
+                offset += 8;
+                decode_cy_fixed_point(raw_units)
+            }
+            Some(DbColumnType::R8) => {
                 let v = f64::from_le_bytes(unpacked[offset..offset + 8].try_into().unwrap());
                 offset += 8;
                 PyRep::Real(v)
             }
-            3 if offset + 4 <= unpacked.len() => {
-                let v =
-                    i32::from_le_bytes(unpacked[offset..offset + 4].try_into().unwrap()) as i64;
+            Some(DbColumnType::I4) => {
+                let v = i64::from(i32::from_le_bytes(
+                    unpacked[offset..offset + 4].try_into().unwrap(),
+                ));
                 offset += 4;
                 PyRep::Integer(v)
             }
-            19 if offset + 4 <= unpacked.len() => {
-                let v =
-                    u32::from_le_bytes(unpacked[offset..offset + 4].try_into().unwrap()) as i64;
+            Some(DbColumnType::Ui4) => {
+                let v = i64::from(u32::from_le_bytes(
+                    unpacked[offset..offset + 4].try_into().unwrap(),
+                ));
                 offset += 4;
                 PyRep::Integer(v)
             }
-            4 if offset + 4 <= unpacked.len() => {
-                let v =
-                    f32::from_le_bytes(unpacked[offset..offset + 4].try_into().unwrap()) as f64;
+            Some(DbColumnType::R4) => {
+                let v = f64::from(f32::from_le_bytes(
+                    unpacked[offset..offset + 4].try_into().unwrap(),
+                ));
                 offset += 4;
                 PyRep::Real(v)
             }
-            2 if offset + 2 <= unpacked.len() => {
-                let v = i16::from_le_bytes([unpacked[offset], unpacked[offset + 1]]) as i64;
+            Some(DbColumnType::I2) => {
+                let v = i64::from(i16::from_le_bytes([unpacked[offset], unpacked[offset + 1]]));
                 offset += 2;
                 PyRep::Integer(v)
             }
-            18 if offset + 2 <= unpacked.len() => {
-                let v = u16::from_le_bytes([unpacked[offset], unpacked[offset + 1]]) as i64;
+            Some(DbColumnType::Ui2) => {
+                let v = i64::from(u16::from_le_bytes([unpacked[offset], unpacked[offset + 1]]));
                 offset += 2;
                 PyRep::Integer(v)
             }
-            16 if offset < unpacked.len() => {
-                let v = (unpacked[offset] as i8) as i64;
+            Some(DbColumnType::I1) => {
+                let v = i64::from(unpacked[offset] as i8);
                 offset += 1;
                 PyRep::Integer(v)
             }
-            17 if offset < unpacked.len() => {
-                let v = unpacked[offset] as i64;
+            Some(DbColumnType::Ui1) => {
+                let v = i64::from(unpacked[offset]);
                 offset += 1;
                 PyRep::Integer(v)
             }
-            11 => {
+            Some(DbColumnType::Bool) => {
                 let bool_bit = byte_data_bit_len + bool_ordinals[orig_idx];
                 let bool_byte = bool_bit >> 3;
-                if bool_byte < unpacked.len() {
-                    PyRep::Bool((unpacked[bool_byte] & (1u8 << (bool_bit & 7))) != 0)
-                } else {
-                    PyRep::Bool(false)
-                }
+                PyRep::Bool((unpacked[bool_byte] & (1u8 << (bool_bit & 7))) != 0)
             }
-            _ => PyRep::None,
+            Some(
+                DbColumnType::Empty
+                | DbColumnType::Bytes
+                | DbColumnType::Str
+                | DbColumnType::WStr,
+            )
+            | None => PyRep::None,
         };
-        decoded_by_idx.push((orig_idx, name.clone(), val));
+        decoded_by_idx.push((orig_idx, name.to_string(), val));
     }
 
     decoded_by_idx.sort_by_key(|(idx, _, _)| *idx);

@@ -341,14 +341,21 @@ fn test_pyrep_accessors_rowsets_null_dbrow_and_objectex() {
     assert!(PyRep::None.cindexed_rowset_entries().is_none());
 
     let crow_roundtrip = marshal::decode(&marshal::encode(&crow)).unwrap();
+    assert_eq!(crow_roundtrip, crow);
     assert!(crow_roundtrip.is_crowset());
     let rows = crow_roundtrip.crowset_rows().unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].dbrow_get("id"), Some(&PyRep::None));
     assert_eq!(rows[0].dbrow_get("flag"), Some(&PyRep::None));
+    assert_eq!(rows[0].dbrow_get("isk"), Some(&PyRep::None));
     assert_eq!(rows[0].dbrow_get("name"), Some(&PyRep::None));
     assert_eq!(rows[0].dbrow_get("raw"), Some(&PyRep::None));
     assert_eq!(rows[1].dbrow_get("id"), Some(&PyRep::Integer(10)));
+    assert_eq!(rows[1].dbrow_get("isk"), Some(&PyRep::Real(50_000.0)));
+    assert_eq!(rows[1].dbrow_get("u1"), Some(&PyRep::Integer(200)));
+    assert_eq!(rows[1].dbrow_get("i1"), Some(&PyRep::Integer(-12)));
+    assert_eq!(rows[1].dbrow_get("u2"), Some(&PyRep::Integer(40_000)));
+    assert_eq!(rows[1].dbrow_get("u4"), Some(&PyRep::Integer(3_000_000_000)));
     assert_eq!(rows[1].dbrow_get("name"), Some(&PyRep::String("Alpha".into())));
 
     let rs = PyRep::rowset(vec!["a", "b"], vec![vec![PyRep::Integer(1), PyRep::Bool(true)]]);

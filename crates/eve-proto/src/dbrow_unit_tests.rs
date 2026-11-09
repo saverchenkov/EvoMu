@@ -42,15 +42,35 @@ fn db_column_type_conversions_bit_widths_and_value_normalization() {
     );
     assert_eq!(
         DbColumnType::Cy.normalize_value(PyRep::Integer(50_000)),
-        PyRep::Integer(50_000)
+        PyRep::Real(50_000.0)
     );
     assert_eq!(
         DbColumnType::Cy.normalize_value(PyRep::Real(12.3456)),
-        PyRep::Integer(123_456)
+        PyRep::Real(12.3456)
+    );
+    assert_eq!(
+        DbColumnType::Cy.normalize_value(PyRep::Real(-98.7654)),
+        PyRep::Real(-98.7654)
+    );
+    assert_eq!(
+        DbColumnType::Cy.normalize_value(PyRep::Real(1.00006)),
+        PyRep::Real(1.0001)
+    );
+    assert_eq!(
+        DbColumnType::Cy.normalize_value(PyRep::Real(f64::NAN)),
+        PyRep::Real(0.0)
+    );
+    assert_eq!(
+        DbColumnType::Cy.normalize_value(PyRep::Real(f64::INFINITY)),
+        PyRep::Real(0.0)
+    );
+    assert_eq!(
+        DbColumnType::Cy.normalize_value(PyRep::Real(f64::NEG_INFINITY)),
+        PyRep::Real(0.0)
     );
     assert_eq!(
         DbColumnType::Cy.normalize_value(PyRep::String("bad".into())),
-        PyRep::Integer(0)
+        PyRep::Real(0.0)
     );
     assert_eq!(
         DbColumnType::I4.normalize_value(PyRep::Integer(-1)),
@@ -305,7 +325,12 @@ fn pack_and_unpack_packed_row_columns_cover_all_scalar_types_booleans_and_nulls(
     let unpacked = try_unpack_packed_row_columns(&hdr_rep, &rle).unwrap();
     let map: std::collections::HashMap<String, PyRep> = unpacked.into_iter().collect();
     assert_eq!(map.get("c_i8"), Some(&PyRep::Integer(-100_000_000_000)));
-    assert_eq!(map.get("c_cy"), Some(&PyRep::Integer(995_000)));
+    assert_eq!(map.get("c_ui8"), Some(&PyRep::Integer(200_000_000_000)));
+    assert_eq!(
+        map.get("c_ft"),
+        Some(&PyRep::Integer(133_000_000_000_000_000))
+    );
+    assert_eq!(map.get("c_cy"), Some(&PyRep::Real(99.5)));
     assert_eq!(map.get("c_r8"), Some(&PyRep::Real(-42.125)));
     assert_eq!(map.get("c_i4"), Some(&PyRep::Integer(-123_456)));
     assert_eq!(map.get("c_ui4"), Some(&PyRep::Integer(3_000_000_000)));
@@ -331,5 +356,267 @@ fn pack_and_unpack_packed_row_columns_cover_all_scalar_types_booleans_and_nulls(
     assert_eq!(
         try_unpack_packed_row_columns(&hdr_rep, &[0x01, 0xFF]),
         Err(ProtoError::InvalidPackedRowRle)
+    );
+}
+
+#[test]
+fn packed_row_unsigned_high_bit_zero_extension_and_signed_negative_roundtrip() {
+    let desc = DBRowDescriptor::new([
+        ("ui1", DbColumnType::Ui1),
+        ("i1", DbColumnType::I1),
+        ("ui2", DbColumnType::Ui2),
+        ("i2", DbColumnType::I2),
+        ("ui4", DbColumnType::Ui4),
+        ("i4", DbColumnType::I4),
+        ("ui8", DbColumnType::Ui8),
+        ("i8", DbColumnType::I8),
+        ("tail", DbColumnType::WStr),
+    ]);
+
+    let ui1_cases: [u8; 6] = [0x00, 0x7F, 0x80, 0xAB, 0xFE, 0xFF];
+    let i1_cases: [i8; 6] = [0, i8::MAX, i8::MIN, -85, -2, -1];
+    let ui2_cases: [u16; 6] = [0x0000, 0x7FFF, 0x8000, 0xCAFE, 0xFFFE, 0xFFFF];
+    let i2_cases: [i16; 6] = [0, i16::MAX, i16::MIN, -13_570, -2, -1];
+    let ui4_cases: [u32; 6] = [
+        0,
+        0x7FFF_FFFF,
+        0x8000_0000,
+        0xDEAD_BEEF,
+        0xFFFF_FFFE,
+        0xFFFF_FFFF,
+    ];
+    let i4_cases: [i32; 6] = [0, i32::MAX, i32::MIN, -559_038_737, -2, -1];
+    let ui8_cases: [u64; 6] = [
+        0,
+        0x7FFF_FFFF_FFFF_FFFF,
+        0x8000_0000_0000_0000,
+        0xFEED_FACE_CAFE_BEEF,
+        u64::MAX - 1,
+        u64::MAX,
+    ];
+    let i8_cases: [i64; 6] = [0, i64::MAX, i64::MIN, -9_000_000_000_001, -2, -1];
+
+    for idx in 0..6 {
+        let row = desc.build_dbrow(vec![
+            PyRep::Integer(i64::from(ui1_cases[idx])),
+            PyRep::Integer(i64::from(i1_cases[idx])),
+            PyRep::Integer(i64::from(ui2_cases[idx])),
+            PyRep::Integer(i64::from(i2_cases[idx])),
+            PyRep::Integer(i64::from(ui4_cases[idx])),
+            PyRep::Integer(i64::from(i4_cases[idx])),
+            PyRep::Integer(ui8_cases[idx] as i64),
+            PyRep::Integer(i8_cases[idx]),
+            PyRep::String(format!("row-{idx}")),
+        ]);
+
+        let wire = crate::marshal::encode(&row);
+        let decoded = crate::marshal::decode(&wire)
+            .expect("PyPackedRow with high-bit unsigned and negative signed columns must decode");
+        assert_eq!(decoded, row, "roundtrip mismatch on boundary case {idx}");
+        assert_eq!(crate::marshal::encode(&decoded), wire);
+
+        assert_eq!(
+            decoded.dbrow_get("ui1"),
+            Some(&PyRep::Integer(i64::from(ui1_cases[idx])))
+        );
+        assert_eq!(
+            decoded.dbrow_get("i1"),
+            Some(&PyRep::Integer(i64::from(i1_cases[idx])))
+        );
+        assert_eq!(
+            decoded.dbrow_get("ui2"),
+            Some(&PyRep::Integer(i64::from(ui2_cases[idx])))
+        );
+        assert_eq!(
+            decoded.dbrow_get("i2"),
+            Some(&PyRep::Integer(i64::from(i2_cases[idx])))
+        );
+        assert_eq!(
+            decoded.dbrow_get("ui4"),
+            Some(&PyRep::Integer(i64::from(ui4_cases[idx])))
+        );
+        assert_eq!(
+            decoded.dbrow_get("i4"),
+            Some(&PyRep::Integer(i64::from(i4_cases[idx])))
+        );
+        assert_eq!(
+            decoded.dbrow_get("ui8"),
+            Some(&PyRep::Integer(ui8_cases[idx] as i64))
+        );
+        assert_eq!(
+            decoded.dbrow_get("i8"),
+            Some(&PyRep::Integer(i8_cases[idx]))
+        );
+        assert_eq!(
+            decoded.dbrow_get("tail"),
+            Some(&PyRep::String(format!("row-{idx}")))
+        );
+
+        // High-bit unsigned values (`idx >= 2`) must strictly zero-extend (`> 0`), never sign-extend (`< 0`).
+        if idx >= 2 {
+            assert!(decoded.dbrow_get("ui1").unwrap().as_i64().unwrap() >= 0x80);
+            assert!(decoded.dbrow_get("ui2").unwrap().as_i64().unwrap() >= 0x8000);
+            assert!(decoded.dbrow_get("ui4").unwrap().as_i64().unwrap() >= 0x8000_0000);
+            assert!(decoded.dbrow_get("i1").unwrap().as_i64().unwrap() < 0);
+            assert!(decoded.dbrow_get("i2").unwrap().as_i64().unwrap() < 0);
+            assert!(decoded.dbrow_get("i4").unwrap().as_i64().unwrap() < 0);
+            assert!(decoded.dbrow_get("i8").unwrap().as_i64().unwrap() < 0);
+        }
+    }
+}
+
+#[test]
+fn packed_row_currency_cy_ten_thousand_scale_symmetry_and_edge_cases() {
+    assert_eq!(DBTYPE_CY_SCALE_F64, 10_000.0);
+    assert_eq!(DBTYPE_CY_SCALE_I64, 10_000);
+
+    let desc = DBRowDescriptor::new([
+        ("pos_cy", DbColumnType::Cy),
+        ("neg_cy", DbColumnType::Cy),
+        ("int_cy", DbColumnType::Cy),
+        ("zero_cy", DbColumnType::Cy),
+        ("null_cy", DbColumnType::Cy),
+        ("round_cy", DbColumnType::Cy),
+        ("marker_ui2", DbColumnType::Ui2),
+    ]);
+    let defs = desc.raw_defs();
+    let expected_len = packed_row_expected_bytes(&defs);
+
+    let row = desc.build_dbrow(vec![
+        PyRep::Real(12.3456),
+        PyRep::Real(-98.7654),
+        PyRep::Integer(250),
+        PyRep::Real(-0.0),
+        PyRep::None,
+        PyRep::Real(1.00006),
+        PyRep::Integer(0xBEEF),
+    ]);
+
+    let PyRep::DBRow { ref raw_rle, .. } = row else {
+        panic!("expected PyRep::DBRow");
+    };
+    let unpacked_bytes = decode_rle(raw_rle, expected_len).expect("valid RLE buffer");
+    // Widest-first layout places the six 64-bit `Cy` columns in bytes `0..48` in descriptor order,
+    // followed by the 16-bit `Ui2` column in bytes `48..50`, then the null-indicator bitmap.
+    assert_eq!(
+        i64::from_le_bytes(unpacked_bytes[0..8].try_into().unwrap()),
+        123_456
+    );
+    assert_eq!(
+        i64::from_le_bytes(unpacked_bytes[8..16].try_into().unwrap()),
+        -987_654
+    );
+    assert_eq!(
+        i64::from_le_bytes(unpacked_bytes[16..24].try_into().unwrap()),
+        2_500_000
+    );
+    assert_eq!(
+        i64::from_le_bytes(unpacked_bytes[24..32].try_into().unwrap()),
+        0
+    );
+    assert_eq!(
+        i64::from_le_bytes(unpacked_bytes[32..40].try_into().unwrap()),
+        0
+    );
+    assert_eq!(
+        i64::from_le_bytes(unpacked_bytes[40..48].try_into().unwrap()),
+        10_001
+    );
+    assert_eq!(
+        u16::from_le_bytes([unpacked_bytes[48], unpacked_bytes[49]]),
+        0xBEEF
+    );
+
+    let wire = crate::marshal::encode(&row);
+    let decoded = crate::marshal::decode(&wire).expect("marshal decode Cy DBRow");
+    assert_eq!(decoded, row);
+    assert_eq!(crate::marshal::encode(&decoded), wire);
+    assert_eq!(decoded.dbrow_get("pos_cy"), Some(&PyRep::Real(12.3456)));
+    assert_eq!(decoded.dbrow_get("neg_cy"), Some(&PyRep::Real(-98.7654)));
+    assert_eq!(decoded.dbrow_get("int_cy"), Some(&PyRep::Real(250.0)));
+    if let Some(PyRep::Real(z)) = decoded.dbrow_get("zero_cy") {
+        assert_eq!(*z, 0.0);
+        assert!(z.is_sign_positive());
+    } else {
+        panic!("expected Real(0.0) for zero_cy");
+    }
+    assert_eq!(decoded.dbrow_get("null_cy"), Some(&PyRep::None));
+    assert_eq!(decoded.dbrow_get("round_cy"), Some(&PyRep::Real(1.0001)));
+    assert_eq!(
+        decoded.dbrow_get("marker_ui2"),
+        Some(&PyRep::Integer(0xBEEF))
+    );
+
+    // Inbound wire-first unpack: raw fixed-point i64 bytes (1_000_005 -> 100.0005 ISK, -42_500 -> -4.25 ISK)
+    let wire_desc = DBRowDescriptor::new([
+        ("wallet", DbColumnType::Cy),
+        ("delta", DbColumnType::Cy),
+    ]);
+    let mut raw_buf = vec![0u8; packed_row_expected_bytes(&wire_desc.raw_defs())];
+    raw_buf[0..8].copy_from_slice(&1_000_005_i64.to_le_bytes());
+    raw_buf[8..16].copy_from_slice(&(-42_500_i64).to_le_bytes());
+    let inbound_row = PyRep::DBRow {
+        header: Box::new(wire_desc.to_pyrep()),
+        columns: Vec::new(),
+        raw_rle: encode_rle(&raw_buf),
+    };
+    let inbound_decoded =
+        crate::marshal::decode(&crate::marshal::encode(&inbound_row)).expect("decode raw Cy RLE");
+    assert_eq!(
+        inbound_decoded.dbrow_get("wallet"),
+        Some(&PyRep::Real(100.0005))
+    );
+    assert_eq!(inbound_decoded.dbrow_get("delta"), Some(&PyRep::Real(-4.25)));
+
+    // Negative / malformed inputs: NaN, +-Infinity, non-numeric strings, saturation at i64::MIN/MAX,
+    // and unknown raw dbtype codes must never panic or produce NaN cells.
+    let edge_hdr = DBRowDescriptor::new([
+        ("nan_cy", DbColumnType::Cy),
+        ("inf_cy", DbColumnType::Cy),
+        ("ninf_cy", DbColumnType::Cy),
+        ("str_cy", DbColumnType::Cy),
+        ("max_int_cy", DbColumnType::Cy),
+        ("min_int_cy", DbColumnType::Cy),
+    ])
+    .to_pyrep();
+    let edge_cols = vec![
+        ("nan_cy".into(), PyRep::Real(f64::NAN)),
+        ("inf_cy".into(), PyRep::Real(f64::INFINITY)),
+        ("ninf_cy".into(), PyRep::Real(f64::NEG_INFINITY)),
+        ("str_cy".into(), PyRep::String("not-a-number".into())),
+        ("max_int_cy".into(), PyRep::Integer(i64::MAX)),
+        ("min_int_cy".into(), PyRep::Integer(i64::MIN)),
+    ];
+    let edge_rle = pack_packed_row_columns(&edge_hdr, &edge_cols);
+    let edge_unpacked: std::collections::HashMap<String, PyRep> =
+        try_unpack_packed_row_columns(&edge_hdr, &edge_rle)
+            .unwrap()
+            .into_iter()
+            .collect();
+    assert_eq!(edge_unpacked.get("nan_cy"), Some(&PyRep::Real(0.0)));
+    assert_eq!(edge_unpacked.get("inf_cy"), Some(&PyRep::Real(0.0)));
+    assert_eq!(edge_unpacked.get("ninf_cy"), Some(&PyRep::Real(0.0)));
+    assert_eq!(edge_unpacked.get("str_cy"), Some(&PyRep::Real(0.0)));
+    assert_eq!(
+        edge_unpacked.get("max_int_cy"),
+        Some(&PyRep::Real((i64::MAX as f64) / 10_000.0))
+    );
+    assert_eq!(
+        edge_unpacked.get("min_int_cy"),
+        Some(&PyRep::Real((i64::MIN as f64) / 10_000.0))
+    );
+
+    // Unknown raw dbtype code in untyped Tuple descriptor gracefully packs/unpacks as 0-bit PyRep::None
+    let unknown_hdr = PyRep::Tuple(vec![
+        PyRep::Token("blue.DBRowDescriptor".into()),
+        PyRep::Tuple(vec![PyRep::Tuple(vec![
+            PyRep::String("mystery".into()),
+            PyRep::Integer(999),
+        ])]),
+    ]);
+    let unk_rle = pack_packed_row_columns(&unknown_hdr, &[("mystery".into(), PyRep::Integer(7))]);
+    assert_eq!(
+        try_unpack_packed_row_columns(&unknown_hdr, &unk_rle).unwrap(),
+        vec![("mystery".into(), PyRep::None)]
     );
 }
