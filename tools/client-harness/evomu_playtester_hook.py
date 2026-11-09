@@ -156,6 +156,42 @@ def _install_flight_recorder_hooks(sm):
 
             _wrapped_remote_svc._evomu_pt_wrapped = True
             sm.RemoteSvc = _wrapped_remote_svc
+
+            orig_proxy = getattr(sm, "ProxySvc", None)
+            if orig_proxy is not None and not getattr(orig_proxy, "_evomu_pt_wrapped", False):
+                def _wrapped_proxy_svc(svc_name, *args, **kwargs):
+                    inner = orig_proxy(svc_name, *args, **kwargs)
+                    if inner is None:
+                        return None
+                    return _RemoteSvcProxy(str(svc_name), inner)
+
+                _wrapped_proxy_svc._evomu_pt_wrapped = True
+                sm.ProxySvc = _wrapped_proxy_svc
+    except Exception:
+        pass
+
+    try:
+        from carbon.common.script.net import moniker as _moniker_mod
+        mon_cls = getattr(_moniker_mod, "Moniker", None)
+        orig_mcall = getattr(mon_cls, "MonikeredCall", None) if mon_cls is not None else None
+        if orig_mcall is not None and not getattr(orig_mcall, "_evomu_pt_wrapped", False):
+            def _wrapped_monikered_call(self_mon, call, *args, **kwargs):
+                svc_n = str(getattr(self_mon, "_Moniker__serviceName", None) or "moniker")
+                meth_n = str(call[0]) if isinstance(call, (tuple, list)) and len(call) > 0 else str(call)
+                call_args = call[1] if isinstance(call, (tuple, list)) and len(call) > 1 else args
+                t0 = time.time()
+                try:
+                    res = orig_mcall(self_mon, call, *args, **kwargs)
+                    dur_ms = (time.time() - t0) * 1000.0
+                    _record_flight("macho", svc_n, meth_n, repr(call_args)[:140], "OK", dur_ms)
+                    return res
+                except Exception as exc:
+                    dur_ms = (time.time() - t0) * 1000.0
+                    _record_flight("macho", svc_n, meth_n, repr(call_args)[:140], "ERR", dur_ms, repr(exc))
+                    raise
+
+            _wrapped_monikered_call._evomu_pt_wrapped = True
+            mon_cls.MonikeredCall = _wrapped_monikered_call
     except Exception:
         pass
 
@@ -227,6 +263,13 @@ def _safe_str(val, max_len=120):
 
 def _widget_abs_rect(node):
     try:
+        cls_n = node.__class__.__name__ if node is not None else ""
+        if "TreeViewEntry" in cls_n:
+            hc = getattr(node, "topRightCont", None) or getattr(node, "headerCont", None)
+            if hc is not None and not getattr(hc, "destroyed", False) and hasattr(hc, "GetAbsolute"):
+                res_hc = hc.GetAbsolute()
+                if isinstance(res_hc, (tuple, list)) and len(res_hc) == 4 and int(res_hc[2]) > 0 and int(res_hc[3]) > 0:
+                    return int(res_hc[0]), int(res_hc[1]), int(res_hc[2]), int(res_hc[3])
         if hasattr(node, "GetAbsolute"):
             res = node.GetAbsolute()
             if isinstance(res, (tuple, list)) and len(res) == 4:
@@ -268,6 +311,10 @@ def _is_pickable(node):
 def _strip_tags(text):
     if not text:
         return ""
+    try:
+        text = text.replace("<t>", " ").replace("<br>", " ")
+    except Exception:
+        pass
     out = []
     in_tag = 0
     for ch in text:
@@ -280,14 +327,41 @@ def _strip_tags(text):
     return " ".join("".join(out).split())
 
 
+def _is_ancestor_chain_visible(sub_node, stop_at=None):
+    cur = sub_node
+    for _ in range(5):
+        if cur is None or cur is stop_at:
+            break
+        if not _is_visible(cur):
+            return False
+        cur = getattr(cur, "parent", None)
+    return True
+
+
 def _extract_widget_label(node):
     if node is None:
         return ""
+    col_lbls = getattr(node, "columnLabels", None)
+    if isinstance(col_lbls, (list, tuple)) and col_lbls:
+        col_parts = []
+        try:
+            for cl in col_lbls:
+                if not _is_visible(cl):
+                    continue
+                ct = _strip_tags(_safe_str(getattr(cl, "text", None), 120))
+                if ct and ct != "-" and not ct.startswith("<") and ct not in col_parts:
+                    col_parts.append(ct)
+        except Exception:
+            pass
+        if col_parts:
+            return " | ".join(col_parts[:4])[:90]
     for attr in ("text", "caption", "label", "_label_text", "rawText", "hint"):
         val = getattr(node, attr, None)
         if val is None or callable(val):
             continue
         if hasattr(val, "text") and not isinstance(val, (str, unicode)):
+            if not _is_ancestor_chain_visible(val, node):
+                continue
             val = getattr(val, "text", None)
         s = _strip_tags(_safe_str(val, 120))
         if s and not s.startswith("<"):
@@ -295,6 +369,8 @@ def _extract_widget_label(node):
     for child_obj_attr in ("_label", "label", "caption", "title", "_message_label"):
         sub_obj = getattr(node, child_obj_attr, None)
         if sub_obj is not None and not isinstance(sub_obj, (str, unicode)):
+            if not _is_ancestor_chain_visible(sub_obj, node):
+                continue
             s = _strip_tags(_safe_str(getattr(sub_obj, "text", None), 120))
             if s:
                 return s[:80]
@@ -303,6 +379,8 @@ def _extract_widget_label(node):
         for sub in ("label", "caption", "text"):
             sub_node = getattr(sr, sub, None)
             if sub_node is not None:
+                if not isinstance(sub_node, (str, unicode)) and not _is_ancestor_chain_visible(sub_node, node):
+                    continue
                 s = _strip_tags(_safe_str(getattr(sub_node, "text", sub_node), 120))
                 if s and not s.startswith("<"):
                     return s[:80]
@@ -318,7 +396,7 @@ def _extract_widget_label(node):
         parts = []
         try:
             for ch in list(children)[:8]:
-                if getattr(ch, "destroyed", False) or not getattr(ch, "display", True):
+                if not _is_visible(ch):
                     continue
                 ch_txt = getattr(ch, "text", None)
                 if ch_txt and not callable(ch_txt):
@@ -326,7 +404,7 @@ def _extract_widget_label(node):
                     if s and not s.startswith("<") and s not in parts:
                         parts.append(s)
                 for gch in list(getattr(ch, "children", []) or [])[:6]:
-                    if getattr(gch, "destroyed", False) or not getattr(gch, "display", True):
+                    if not _is_visible(gch):
                         continue
                     g_txt = getattr(gch, "text", None)
                     if g_txt and not callable(g_txt):
@@ -372,7 +450,7 @@ def _has_real_click_handler(node):
     if node is None:
         return False
     cls_name = node.__class__.__name__
-    if cls_name in _NON_INTERACTIVE_CONTAINER_CLASSES:
+    if cls_name in _NON_INTERACTIVE_CONTAINER_CLASSES or cls_name.endswith("Underlay"):
         return False
     if cls_name.endswith("Wnd") or cls_name.endswith("Window") or cls_name.endswith("WindowStack") or hasattr(node, "windowID"):
         return False
@@ -399,6 +477,7 @@ def _has_real_click_handler(node):
             "Header",
             "Link",
             "RadioButton",
+            "Slider",
         )
     ):
         return True
@@ -416,10 +495,10 @@ _LAYER_SCAN_ORDER = (
     "sidepanels",
     "neocom",
     "alwaysvisible",
+    "viewstate",
     "hangar",
     "station",
     "inflight",
-    "viewstate",
     "charsel",
 )
 
@@ -474,10 +553,41 @@ def _inspect_uicore_tree():
                     ):
                         wins.append(ch)
         seen_ids = set()
+        desk = getattr(uicore, "desktop", None)
+        desk_w = int(getattr(desk, "width", 1280) or 1280) if desk is not None else 1280
+        desk_h = int(getattr(desk, "height", 800) or 800) if desk is not None else 800
         for w in (wins or []):
             if getattr(w, "destroyed", False) or not _is_visible(w):
                 continue
+            if w.__class__.__name__ == "CalendarWnd" and getattr(w, "calendarCore", "OK") is None:
+                try:
+                    w._OnResize = lambda *a, **kw: None
+                    if hasattr(w, "Close"):
+                        w.Close()
+                except Exception:
+                    pass
+                continue
+            try:
+                is_min = bool(getattr(w, "minimized", False) or (hasattr(w, "IsMinimized") and w.IsMinimized()))
+            except Exception:
+                is_min = False
             x, y, wd, ht = _widget_abs_rect(w)
+            if not is_min and wd > 40 and ht > 40 and wd < desk_w and ht < desk_h:
+                clamped = False
+                if y + ht > desk_h and y > 8:
+                    try:
+                        w.top = max(8, desk_h - ht - 8)
+                        clamped = True
+                    except Exception:
+                        pass
+                if x + wd > desk_w and x > 48:
+                    try:
+                        w.left = max(48, desk_w - wd - 8)
+                        clamped = True
+                    except Exception:
+                        pass
+                if clamped:
+                    x, y, wd, ht = _widget_abs_rect(w)
             wname = _safe_str(getattr(w, "windowID", None) or getattr(w, "name", None), 64)
             if isinstance(wname, tuple):
                 wname = _safe_str(wname[0], 64)
@@ -493,10 +603,6 @@ def _inspect_uicore_tree():
                 or "Popup" in cls_name
                 or "HybridWindow" in cls_name
             )
-            try:
-                is_min = bool(getattr(w, "minimized", False) or (hasattr(w, "IsMinimized") and w.IsMinimized()))
-            except Exception:
-                is_min = False
             info = {
                 "window_id": str(wname),
                 "name": _safe_str(getattr(w, "name", wname), 64),
@@ -533,18 +639,32 @@ def _inspect_uicore_tree():
             x, y, w, h = _widget_abs_rect(node)
             if w >= 8 and h >= 8 and x >= 0 and y >= 0:
                 lbl = _extract_widget_label(node)
+                hint_str = _strip_tags(_safe_str(getattr(node, "hint", ""), 80))
+                if cls_name == "SelectedItemButton":
+                    dis_hint = _strip_tags(_safe_str(getattr(node, "disabledHint", ""), 80))
+                    is_dis = bool(dis_hint) or (hasattr(node, "IsEnabled") and not node.IsEnabled())
+                    if is_dis:
+                        if not lbl.startswith("[DISABLED]"):
+                            lbl = "[DISABLED] %s" % (lbl,)
+                        if dis_hint and not hint_str:
+                            hint_str = "DISABLED: %s" % (dis_hint,)
+                if not hint_str and cls_name == "MarketOrder":
+                    if "buyParent/buyscroll" in cur_path:
+                        hint_str = "Sellers (Sell Order - double-click or right-click Buy This)"
+                    elif "sellParent/sellscroll" in cur_path:
+                        hint_str = "Buyers (Buy Order - right-click Sell This)"
                 item = {
                     "path": cur_path[-120:],
                     "name": name,
                     "cls": cls_name,
                     "label": lbl,
-                    "hint": _strip_tags(_safe_str(getattr(node, "hint", ""), 80)),
+                    "hint": hint_str,
                     "x": int(x + w // 2),
                     "y": int(y + h // 2),
                     "w": w,
                     "h": h,
                 }
-                if "menu" in path_prefix.lower() or "MenuEntry" in cls_name:
+                if cur_path.startswith("menu/") or "MenuEntry" in cls_name:
                     context_menu.append(item)
                 else:
                     bucket.append(item)
@@ -579,7 +699,7 @@ def _find_widget(target, layers_root, hint_x=None, hint_y=None):
     def _search(node, cur_path, depth):
         if depth > 17 or not _is_pickable(node):
             return
-        name = _safe_str(getattr(node, "name", ""), 64)
+        name = _safe_str(getattr(node, "name", ""), 64) or node.__class__.__name__
         path = "%s/%s" % (cur_path, name) if cur_path else name
         p_low = path.lower()
         n_low = name.lower()
@@ -629,7 +749,30 @@ def _find_widget(target, layers_root, hint_x=None, hint_y=None):
     return fallback[0]
 
 
-def _find_widget_at_xy(px, py, layers_root):
+def _has_real_drop_handler(node):
+    if node is None:
+        return False
+    d_cls = node.__class__.__name__
+    if d_cls.endswith("Wnd") or d_cls.endswith("Window") or d_cls.endswith("WindowStack") or hasattr(node, "windowID"):
+        return False
+    if "TreeViewEntry" in d_cls:
+        d_data = getattr(node, "data", None)
+        has_ctrl = (
+            getattr(node, "invController", None) is not None
+            or getattr(d_data, "invController", None) is not None
+            or getattr(node, "eventListener", None) is not None
+        )
+        if not has_ctrl:
+            return False
+    try:
+        if hasattr(node, "HasEventHandler"):
+            return bool(node.HasEventHandler("OnDropData"))
+    except Exception:
+        pass
+    return False
+
+
+def _find_widget_at_xy(px, py, layers_root, for_drop=False):
     uicore = _get_uicore()
     if uicore is None:
         return None
@@ -640,24 +783,52 @@ def _find_widget_at_xy(px, py, layers_root):
             return
         x, y, w, h = _widget_abs_rect(node)
         if w >= 6 and h >= 6 and x <= px <= (x + w) and y <= py <= (y + h):
-            if _has_real_click_handler(node) or (hasattr(node, "HasEventHandler") and node.HasEventHandler("GetMenu")):
+            if for_drop:
+                matched = _has_real_drop_handler(node)
+            else:
+                n_cls = node.__class__.__name__
+                is_top_win = n_cls.endswith("Wnd") or n_cls.endswith("Window") or n_cls.endswith("WindowStack") or hasattr(node, "windowID")
+                matched = _has_real_click_handler(node) or (not is_top_win and hasattr(node, "HasEventHandler") and node.HasEventHandler("GetMenu"))
+            if matched:
                 area = w * h
-                if area <= best[1]:
+                cur_cls = best[0].__class__.__name__ if best[0] is not None else ""
+                if area <= best[1] or (cur_cls == "SE_BaseClassCore" and area <= int(best[1] * 1.25)):
                     best[0] = node
                     best[1] = area
         children = getattr(node, "children", None)
         if children:
             try:
                 for ch in list(children):
+                    if depth == 0:
+                        c_cls = ch.__class__.__name__
+                        is_win = getattr(ch, "windowID", None) is not None or c_cls.endswith("Window") or c_cls.endswith("Wnd") or c_cls == "WindowStack"
+                        if is_win and _is_pickable(ch):
+                            wx, wy, ww, wh = _widget_abs_rect(ch)
+                            if ww >= 40 and wh >= 24 and wx <= px <= (wx + ww) and wy <= py <= (wy + wh):
+                                _hit(ch, depth + 1)
+                                break
                     _hit(ch, depth + 1)
             except Exception:
                 pass
 
     for _, lobj in _iter_visible_layers(uicore):
         _hit(lobj, 0)
-        if best[0] is not None:
+        if best[0] is not None and best[1] < 200000:
             return best[0]
-    return None
+    return best[0]
+
+
+def _is_editable_input_node(n):
+    if n is None:
+        return False
+    cls_n = n.__class__.__name__
+    if "Label" in cls_n or "Button" in cls_n:
+        return False
+    if hasattr(n, "SetValue") and ("Edit" in cls_n or "Input" in cls_n or hasattr(n, "OnChar") or hasattr(n, "GetValue")):
+        return True
+    if ("EditPlainText" in cls_n or "Edit" in cls_n) and (hasattr(n, "SetValue") or hasattr(n, "SetText")):
+        return True
+    return False
 
 
 def _resolve_editable_widget(node):
@@ -665,14 +836,22 @@ def _resolve_editable_widget(node):
     for _ in range(5):
         if cur is None:
             break
-        if hasattr(cur, "SetValue") or hasattr(cur, "SetText"):
+        if _is_editable_input_node(cur):
             return cur
         cur = getattr(cur, "parent", None)
-    if node is not None:
-        for ch in list(getattr(node, "children", []) or []):
-            if hasattr(ch, "SetValue") or hasattr(ch, "SetText"):
+
+    def _walk_down(n, depth):
+        if n is None or depth > 3:
+            return None
+        for ch in list(getattr(n, "children", []) or []):
+            if _is_editable_input_node(ch):
                 return ch
-    return None
+            sub = _walk_down(ch, depth + 1)
+            if sub is not None:
+                return sub
+        return None
+
+    return _walk_down(node, 0)
 
 
 def _find_any_visible_editable(layers):
@@ -698,7 +877,80 @@ def _find_any_visible_editable(layers):
     return found[0][1]
 
 
-def _invoke_widget_click(node, right_click=False, double_click=False):
+def _set_slider_from_x(node, target_x=None):
+    cur = node
+    for _ in range(5):
+        if cur is None:
+            break
+        cls_n = _safe_str(getattr(getattr(cur, "__class__", None), "__name__", ""), 48)
+        if "Slider" in cls_n or (hasattr(cur, "SetValue") and hasattr(cur, "_OnEndUserAction")):
+            try:
+                bar = getattr(cur, "barCont", None) or cur
+                sx, _sy, sw, _sh = _widget_abs_rect(bar)
+                if sw <= 0:
+                    sx, _sy, sw, _sh = _widget_abs_rect(cur)
+                if target_x is not None and target_x > 0 and sw > 0:
+                    frac = max(0.0, min(1.0, float(target_x - sx) / float(max(1, sw))))
+                else:
+                    frac = 0.5
+                inc_vals = getattr(cur, "incrementValues", None)
+                cur_val = getattr(cur, "value", None)
+                if inc_vals and len(inc_vals) > 0:
+                    idx = int(round(frac * float(len(inc_vals) - 1)))
+                    idx = max(0, min(len(inc_vals) - 1, idx))
+                    new_val = inc_vals[idx]
+                    if new_val == cur_val and len(inc_vals) > 1:
+                        idx = (idx + 1) % len(inc_vals)
+                        new_val = inc_vals[idx]
+                else:
+                    min_v = float(getattr(cur, "minValue", 0.0) or 0.0)
+                    max_v = float(getattr(cur, "maxValue", 1.0) or 1.0)
+                    new_val = min_v + frac * (max_v - min_v)
+                    if cur_val is not None and abs(float(cur_val) - new_val) < 1e-6:
+                        new_val = min_v + (0.75 if frac < 0.6 else 0.25) * (max_v - min_v)
+                cur.SetValue(new_val)
+                if hasattr(cur, "_OnEndUserAction"):
+                    cur._OnEndUserAction()
+                return "Slider.SetValue(%s)" % (_safe_str(new_val, 32),)
+            except Exception:
+                pass
+        cur = getattr(cur, "parent", None)
+    return None
+
+
+def _close_neocom_panels_if_outside(node):
+    try:
+        cur = node
+        for _ in range(12):
+            if cur is None:
+                break
+            cls_n = _safe_str(getattr(getattr(cur, "__class__", None), "__name__", ""), 48)
+            nm = _safe_str(getattr(cur, "name", ""), 48)
+            if "PanelEveMenu" in cls_n or "PanelBase" in cls_n or nm in ("NeocomMenuBtn", "eveMenuBtn", "charSheetBtn"):
+                return
+            cur = getattr(cur, "parent", None)
+        sm = getattr(__builtin__, "sm", None)
+        if sm is not None and hasattr(sm, "IsServiceRunning") and sm.IsServiceRunning("neocom"):
+            neo = sm.GetService("neocom")
+            if hasattr(neo, "CloseAllPanels"):
+                neo.CloseAllPanels()
+    except Exception:
+        pass
+
+
+def _invoke_widget_click(node, right_click=False, double_click=False, click_x=None):
+    _close_neocom_panels_if_outside(node)
+    if node is not None:
+        for ch in list(getattr(node, "children", []) or []):
+            ch_cls = ch.__class__.__name__
+            ch_name = _safe_str(getattr(ch, "name", ""), 48)
+            if (
+                ch_cls in ("ModuleButton", "ShipItemCard")
+                or ch_name.startswith("ModuleButton")
+                or (node.__class__.__name__ == "SE_BaseClassCore" and ("Card" in ch_cls or ch_name.startswith("ItemEntry_")))
+            ):
+                node = ch
+                break
     edit_w = _resolve_editable_widget(node)
     if edit_w is not None:
         try:
@@ -708,38 +960,295 @@ def _invoke_widget_click(node, right_click=False, double_click=False):
                 reg.SetFocus(edit_w)
         except Exception:
             pass
-    if right_click or (not _has_real_click_handler(node) and hasattr(node, "HasEventHandler") and node.HasEventHandler("GetMenu")):
+    if (
+        right_click
+        or getattr(node, "expandOnLeft", False)
+        or _safe_str(getattr(getattr(node, "__class__", None), "__name__", ""), 48) in ("ListSurroundingsBtn", "MenuButtonIcon", "MenuButton")
+    ):
         cur = node
         for _ in range(5):
             if cur is None:
                 break
+            cur_cls = _safe_str(getattr(getattr(cur, "__class__", None), "__name__", ""), 48)
             has_menu = hasattr(cur, "GetMenu") and (
-                not hasattr(cur, "HasEventHandler") or cur.HasEventHandler("GetMenu") or right_click
+                not hasattr(cur, "HasEventHandler")
+                or cur.HasEventHandler("GetMenu")
+                or right_click
+                or getattr(cur, "expandOnLeft", False)
+                or cur_cls in ("ListSurroundingsBtn", "MenuButtonIcon", "MenuButton")
             )
             if has_menu:
                 try:
+                    try:
+                        from carbonui.control.contextMenu.menuUtil import CloseContextMenus
+                        CloseContextMenus()
+                    except Exception:
+                        pass
                     from carbonui.control.contextMenu.contextMenu import ShowMenu
                     ShowMenu(cur)
-                    return "ShowMenu(%s)" % (_safe_str(getattr(cur, "name", ""), 48),)
+                    try:
+                        wx, wy, ww, wh = _widget_abs_rect(cur)
+                        uic = _get_uicore()
+                        mlayer = getattr(getattr(uic, "layer", None), "menu", None) if uic is not None else None
+                        desk = getattr(uic, "desktop", None) if uic is not None else None
+                        dw = int(getattr(desk, "width", 1280) or 1280) if desk is not None else 1280
+                        dh = int(getattr(desk, "height", 800) or 800) if desk is not None else 800
+                        if mlayer is not None and (wx > 0 or wy > 0):
+                            for mch in list(getattr(mlayer, "children", []) or []):
+                                if not getattr(mch, "destroyed", False) and _safe_str(getattr(mch, "name", ""), 32) == "menuview":
+                                    _, _, mw, mh = _widget_abs_rect(mch)
+                                    tx = int(click_x) if (click_x is not None and click_x > 0) else int(wx + min(ww // 2, 40))
+                                    ty = int(wy + min(wh // 2, 16))
+                                    mch.left = max(4, min(max(4, dw - max(mw, 160) - 4), tx))
+                                    mch.top = max(4, min(max(4, dh - max(mh, 120) - 4), ty))
+                    except Exception:
+                        pass
+                    return "ShowMenu(%s)" % (_safe_str(getattr(cur, "name", "") or cur_cls, 48),)
                 except Exception:
+                    try:
+                        import evomu_site as _es_m
+                        _es_m._log_exc_line("ShowMenu(%s) failed:\n%s" % (_safe_str(getattr(cur, "name", "") or cur_cls, 48), traceback.format_exc()))
+                    except Exception:
+                        pass
                     try:
                         menu = cur.GetMenu()
                         return "GetMenu(%d)" % (len(menu or []),)
                     except Exception:
-                        pass
+                        try:
+                            import evomu_site as _es_m
+                            _es_m._log_exc_line("GetMenu(%s) failed:\n%s" % (_safe_str(getattr(cur, "name", "") or cur_cls, 48), traceback.format_exc()))
+                        except Exception:
+                            pass
             cur = getattr(cur, "parent", None)
-    if double_click and hasattr(node, "OnDblClick"):
-        node.OnDblClick()
-        return "OnDblClick"
-    if hasattr(node, "Click"):
-        node.Click()
-        return "Click"
-    if hasattr(node, "OnClick"):
-        node.OnClick()
-        return "OnClick"
-    if hasattr(node, "OnMouseDown"):
-        node.OnMouseDown()
-        return "OnMouseDown"
+    if not right_click:
+        cur_menu = node
+        for _ in range(4):
+            if cur_menu is None:
+                break
+            cls_menu = _safe_str(getattr(getattr(cur_menu, "__class__", None), "__name__", ""), 48)
+            if "MenuEntry" in cls_menu:
+                m_data = getattr(cur_menu, "menuEntryData", None) or getattr(cur_menu, "menu_entry_data", None)
+                has_sub = False
+                try:
+                    if hasattr(cur_menu, "HasSubMenuData") and cur_menu.HasSubMenuData():
+                        has_sub = True
+                    elif m_data is not None and getattr(m_data, "subMenuData", None) is not None:
+                        has_sub = True
+                except Exception:
+                    pass
+                if has_sub and hasattr(cur_menu, "ReconstructSubMenuView"):
+                    try:
+                        if hasattr(cur_menu, "_CollapseSiblingSubMenus"):
+                            cur_menu._CollapseSiblingSubMenus()
+                    except Exception:
+                        pass
+                    cur_menu.ReconstructSubMenuView()
+                    return "ExpandSubMenu(%s)" % (_safe_str(getattr(cur_menu, "name", ""), 48),)
+                if m_data is not None and callable(getattr(m_data, "func", None)):
+                    if hasattr(cur_menu, "ExecuteFunction"):
+                        cur_menu.ExecuteFunction()
+                    else:
+                        m_data.ExecuteFunction()
+                    if hasattr(cur_menu, "_OnFunctionCalled"):
+                        try:
+                            cur_menu._OnFunctionCalled()
+                        except Exception:
+                            pass
+                    try:
+                        from carbonui.control.contextMenu.menuUtil import CloseContextMenus
+                        CloseContextMenus()
+                    except Exception:
+                        pass
+                    return "ExecuteFunction(%s)" % (_safe_str(getattr(cur_menu, "name", ""), 48),)
+            cur_menu = getattr(cur_menu, "parent", None)
+
+        cls_node = _safe_str(getattr(getattr(node, "__class__", None), "__name__", ""), 48)
+        if cls_node == "SelectedItemButton":
+            dis_hint = _strip_tags(_safe_str(getattr(node, "disabledHint", ""), 80))
+            if bool(dis_hint) or (hasattr(node, "IsEnabled") and not node.IsEnabled()):
+                return "disabled_selected_item_button(%s)" % (dis_hint or _safe_str(getattr(node, "name", ""), 48),)
+            m_data = getattr(node, "menuEntryData", None)
+            if m_data is not None and not callable(getattr(m_data, "func", None)):
+                cmd_name = _safe_str(getattr(node, "cmdName", ""), 48)
+                sel_item_id = getattr(node, "itemID", None)
+                if not sel_item_id:
+                    cur_p = getattr(node, "parent", None)
+                    for _ in range(12):
+                        if cur_p is None:
+                            break
+                        sel_item_id = getattr(cur_p, "itemID", None)
+                        if sel_item_id:
+                            break
+                        cur_p = getattr(cur_p, "parent", None)
+                if not sel_item_id:
+                    try:
+                        from eve.client.script.parklife import states as _park_states
+                        st_svc = sm.GetService("stateSvc") if hasattr(sm, "GetService") else None
+                        if st_svc is not None and hasattr(st_svc, "GetExclState"):
+                            sel_item_id = st_svc.GetExclState(_park_states.selected)
+                    except Exception:
+                        pass
+                if not sel_item_id:
+                    try:
+                        tgt_svc = sm.GetService("target") if hasattr(sm, "GetService") else None
+                        if tgt_svc is not None and hasattr(tgt_svc, "GetActiveTargetID"):
+                            sel_item_id = tgt_svc.GetActiveTargetID()
+                    except Exception:
+                        pass
+                if sel_item_id:
+                    try:
+                        try:
+                            sm.ScatterEvent("OnSelectedItemButtonClicked", getattr(node, "uniqueUiName", None) or getattr(node, "name", ""))
+                        except Exception:
+                            pass
+                        from eve.client.script.ui.services.menuSvcExtras import movementFunctions as _mv_fn
+                        menu_svc = sm.GetService("menu")
+                        if cmd_name == "CmdKeepItemAtRange":
+                            _mv_fn.KeepAtRange(sel_item_id)
+                            return "movementFunctions.KeepAtRange(%s)" % (sel_item_id,)
+                        if cmd_name == "CmdOrbitItem":
+                            _mv_fn.Orbit(sel_item_id)
+                            return "movementFunctions.Orbit(%s)" % (sel_item_id,)
+                        if cmd_name == "CmdApproachItem":
+                            _mv_fn.Approach(sel_item_id)
+                            return "movementFunctions.Approach(%s)" % (sel_item_id,)
+                        if cmd_name == "CmdWarpToItem":
+                            _mv_fn.WarpToItem(sel_item_id)
+                            return "movementFunctions.WarpToItem(%s)" % (sel_item_id,)
+                        if cmd_name == "CmdDockOrJumpOrActivateGate":
+                            _mv_fn.DockOrJumpOrActivateGate(sel_item_id)
+                            return "movementFunctions.DockOrJumpOrActivateGate(%s)" % (sel_item_id,)
+                        if cmd_name == "CmdAlignToItem" and hasattr(menu_svc, "AlignTo"):
+                            menu_svc.AlignTo(sel_item_id)
+                            return "menu.AlignTo(%s)" % (sel_item_id,)
+                        if cmd_name == "CmdLockTargetItem":
+                            sm.GetService("target").TryLockTarget(sel_item_id)
+                            return "target.TryLockTarget(%s)" % (sel_item_id,)
+                    except Exception:
+                        pass
+                return "disabled_selected_item_button"
+
+        slider_res = _set_slider_from_x(node, click_x)
+        if slider_res is not None:
+            return slider_res
+
+        try:
+            from carbonui.control.contextMenu.menuUtil import CloseContextMenus
+            CloseContextMenus()
+        except Exception:
+            pass
+
+        cur_num_btn = node
+        for _ in range(3):
+            if cur_num_btn is None:
+                break
+            bname = _safe_str(getattr(cur_num_btn, "name", ""), 32)
+            if bname in ("upButton", "downButton"):
+                step_dir = 1 if bname == "upButton" else -1
+                cur_num_edit = getattr(cur_num_btn, "parent", None)
+                for _ in range(4):
+                    if cur_num_edit is None:
+                        break
+                    if hasattr(cur_num_edit, "ChangeNumericValue"):
+                        try:
+                            cur_num_edit.ChangeNumericValue(step_dir)
+                            if hasattr(cur_num_edit, "OnChange") and hasattr(cur_num_edit, "GetText"):
+                                cur_num_edit.OnChange(cur_num_edit.GetText())
+                            return "ChangeNumericValue(%d)" % (step_dir,)
+                        except Exception:
+                            pass
+                    cur_num_edit = getattr(cur_num_edit, "parent", None)
+                break
+            cur_num_btn = getattr(cur_num_btn, "parent", None)
+
+        cur_entry = node
+        for _ in range(4):
+            if cur_entry is None:
+                break
+            sr_obj = getattr(cur_entry, "sr", None)
+            sr_node = getattr(sr_obj, "node", None) if sr_obj is not None else None
+            if sr_node is not None:
+                if hasattr(cur_entry, "OnMouseDown"):
+                    try:
+                        cur_entry.OnMouseDown()
+                    except Exception:
+                        pass
+                item_id = getattr(sr_node, "itemID", None)
+                if item_id is not None:
+                    try:
+                        sm_obj = getattr(__builtin__, "sm", None)
+                        st_svc = sm_obj.GetService("stateSvc") if sm_obj is not None else None
+                        if st_svc is not None and hasattr(st_svc, "SetState"):
+                            from eve.client.script.parklife import states as _park_states
+                            st_svc.SetState(item_id, _park_states.selected, 1)
+                    except Exception:
+                        pass
+                if double_click and hasattr(cur_entry, "OnDblClick"):
+                    cur_entry.OnDblClick()
+                    return "OnDblClick"
+                break
+            cur_entry = getattr(cur_entry, "parent", None)
+
+        icon_btn = getattr(node, "iconBtn", None)
+        if icon_btn is None:
+            for ch in list(getattr(node, "children", []) or []):
+                if getattr(ch, "name", "") == "iconBtn":
+                    icon_btn = ch
+                    break
+                for gch in list(getattr(ch, "children", []) or []):
+                    if getattr(gch, "name", "") == "iconBtn":
+                        icon_btn = gch
+                        break
+        if icon_btn is not None and icon_btn is not node and hasattr(icon_btn, "OnClick"):
+            try:
+                icon_btn.OnClick()
+                return "iconBtn.OnClick"
+            except Exception:
+                pass
+
+    raised_wnd_name = None
+    if not right_click:
+        cur_w = node
+        for _ in range(14):
+            if cur_w is None:
+                break
+            wcls = _safe_str(getattr(getattr(cur_w, "__class__", None), "__name__", ""), 64)
+            if hasattr(cur_w, "windowID") or "Window" in wcls or "Wnd" in wcls:
+                try:
+                    if hasattr(cur_w, "SetOrder"):
+                        cur_w.SetOrder(0)
+                    uic = _get_uicore()
+                    reg = getattr(uic, "registry", None) if uic is not None else None
+                    if reg is not None and hasattr(reg, "SetFocus"):
+                        reg.SetFocus(cur_w)
+                    raised_wnd_name = _safe_str(getattr(cur_w, "windowID", None) or getattr(cur_w, "name", "") or wcls, 64)
+                except Exception:
+                    pass
+                break
+            cur_w = getattr(cur_w, "parent", None)
+
+    if hasattr(node, "selecting") and getattr(node, "selecting", 0):
+        try:
+            node.selecting = 0
+        except Exception:
+            pass
+    for attr_name in (("OnDblClick", "Click", "OnClick", "OnMouseDown") if double_click else ("Click", "OnClick", "OnMouseDown")):
+        fn = getattr(node, attr_name, None)
+        if callable(fn):
+            try:
+                fn()
+            finally:
+                if hasattr(node, "selecting") and getattr(node, "selecting", 0):
+                    try:
+                        node.selecting = 0
+                    except Exception:
+                        pass
+            return attr_name
+        elif isinstance(fn, tuple) and len(fn) >= 1 and callable(fn[0]):
+            fn[0](*fn[1:])
+            return "%s(tuple)" % (attr_name,)
+    if raised_wnd_name:
+        return "RaiseWindow(%s)" % (raised_wnd_name,)
     return "noop"
 
 
@@ -762,12 +1271,7 @@ def _sample_ego_warp_state(sm):
             fx_names = list(fx_svc.GetAllBallActivationNames(sid) or [])
         except Exception:
             fx_names = []
-    warp_cache = getattr(space_svc, "warpDestinationCache", None) if space_svc is not None else None
-    has_warp_cache = bool(
-        any(x is not None for x in warp_cache)
-        if isinstance(warp_cache, (list, tuple))
-        else warp_cache is not None
-    )
+    has_warp_cache = bool(space_svc is not None and getattr(space_svc, "warpDestinationCache", None) is not None)
     return {
         "mode": mode,
         "speed_mps": round(speed, 2),
@@ -779,6 +1283,7 @@ def _sample_ego_warp_state(sm):
 
 def _get_state_snapshot(sm):
     global _LAST_OBSERVED_SEQ
+    _ensure_windowed_mode(sm, 1280, 800)
     _install_flight_recorder_hooks(sm)
     _install_warp_telemetry(sm)
     sess = getattr(__builtin__, "session", None)
@@ -877,10 +1382,21 @@ def _get_state_snapshot(sm):
             smap = sk_svc.GetSkills() or {}
             skills_state["total_trained_skills"] = len(smap)
             tot_sp = 0.0
-            for srec in smap.values():
+            trained_levels = {}
+            for stid, srec in smap.items():
                 sp = getattr(srec, "trainedSkillPoints", None) or getattr(srec, "skillPoints", 0.0) or 0.0
                 tot_sp += float(sp)
+                lvl = getattr(srec, "trainedSkillLevel", None)
+                if lvl is None:
+                    lvl = getattr(srec, "skillLevel", None)
+                if lvl is None:
+                    lvl = getattr(srec, "effectiveSkillLevel", 0)
+                try:
+                    trained_levels[str(int(stid))] = int(lvl or 0)
+                except Exception:
+                    pass
             skills_state["total_sp"] = round(tot_sp, 1)
+            skills_state["trained_skill_levels"] = trained_levels
     except Exception:
         pass
 
@@ -933,6 +1449,15 @@ def _compute_state_diff(pre, post, scatters):
     post_wins = set(w.get("window_id") or w.get("name") for w in (post.get("open_windows") or []))
     wins_opened = sorted(list(post_wins - pre_wins))
     wins_closed = sorted(list(pre_wins - post_wins))
+    pre_win_rects = dict(
+        ((w.get("window_id") or w.get("name")), (w.get("x"), w.get("y"), w.get("w"), w.get("h"), w.get("minimized")))
+        for w in (pre.get("open_windows") or [])
+    )
+    post_win_rects = dict(
+        ((w.get("window_id") or w.get("name")), (w.get("x"), w.get("y"), w.get("w"), w.get("h"), w.get("minimized")))
+        for w in (post.get("open_windows") or [])
+    )
+    windows_moved = pre_win_rects != post_win_rects
 
     pre_modals = set(m.get("title") or m.get("name") for m in (pre.get("modals") or []))
     post_modals = set(m.get("title") or m.get("name") for m in (post.get("modals") or []))
@@ -980,8 +1505,19 @@ def _compute_state_diff(pre, post, scatters):
         "locked_targets_after": len(post.get("locked_targets") or []),
     }
 
-    pre_click_count = len((pre.get("ui") or {}).get("clickable_widgets") or [])
-    post_click_count = len((post.get("ui") or {}).get("clickable_widgets") or [])
+    pre_click_list = (pre.get("ui") or {}).get("clickable_widgets") or []
+    post_click_list = (post.get("ui") or {}).get("clickable_widgets") or []
+    pre_click_count = len(pre_click_list)
+    post_click_count = len(post_click_list)
+    pre_click_set = set(
+        (w.get("path"), w.get("label"), w.get("x"), w.get("y"))
+        for w in pre_click_list
+    )
+    post_click_set = set(
+        (w.get("path"), w.get("label"), w.get("x"), w.get("y"))
+        for w in post_click_list
+    )
+    widgets_changed = pre_click_set != post_click_set
     pre_menu_count = len(pre.get("context_menu") or [])
     post_menu_count = len(post.get("context_menu") or [])
 
@@ -989,6 +1525,7 @@ def _compute_state_diff(pre, post, scatters):
     ui_changed = bool(
         wins_opened
         or wins_closed
+        or windows_moved
         or modals_appeared
         or view_changed
         or skill_delta["changed"]
@@ -997,6 +1534,7 @@ def _compute_state_diff(pre, post, scatters):
         or ship_delta["mode_before"] != ship_delta["mode_after"]
         or ship_delta["locked_targets_before"] != ship_delta["locked_targets_after"]
         or pre_click_count != post_click_count
+        or widgets_changed
         or pre_menu_count != post_menu_count
         or len(scatter_names) > 0
     )
@@ -1034,7 +1572,9 @@ def _open_client_window(sm, target):
             if hasattr(sp_svc, "GetAllPersonal"):
                 sp_svc.GetAllPersonal()
             from eve.client.script.ui.skillPlan.skillPlanDockablePanel import SkillPlanDockablePanel
-            SkillPlanDockablePanel.Open()
+            wnd = SkillPlanDockablePanel.Open()
+            if wnd is not None and hasattr(wnd, "IsMinimized") and wnd.IsMinimized() and hasattr(wnd, "Maximize"):
+                wnd.Maximize()
             H._sleep_ms(500)
             return {"ok": True, "opened_via": "SkillPlanDockablePanel.Open"}
         except Exception:
@@ -1094,6 +1634,13 @@ def _open_client_window(sm, target):
         "repair": "OpenRepairshop",
         "repairshop": "OpenRepairshop",
         "reprocessing": "OpenReprocessingPlant",
+        "reprocessingplant": "OpenReprocessingPlant",
+        "miningledger": "OpenLedger",
+        "ledger": "OpenLedger",
+        "mininghold": "OpenGeneralMiningHoldOfActiveShip",
+        "orehold": "OpenGeneralMiningHoldOfActiveShip",
+        "mineralhold": "OpenMineralHoldOfActiveShip",
+        "moonmining": "OpenMoonMining",
         "insurance": "OpenInsurance",
         "bountyoffice": "OpenBountyOffice",
         "securityoffice": "OpenSecurityOffice",
@@ -1118,6 +1665,10 @@ def _open_client_window(sm, target):
         "log": "OpenLog",
     }
     mname = cmd_map.get(t, raw_target)
+    if mname in ("OpenDirectionalScanner", "OpenProbeScanner"):
+        sess = getattr(__builtin__, "session", None)
+        if sess is not None and (getattr(sess, "stationid", None) is not None or getattr(sess, "structureid", None) is not None):
+            return {"ok": False, "error": "%s is only available while undocked in space" % (mname,)}
     if cmd_svc is not None and hasattr(cmd_svc, mname):
         fn = getattr(cmd_svc, mname)
         fn()
@@ -1248,6 +1799,7 @@ def _execute_action(sm, action):
 
     def _do_action():
         try:
+            sess = getattr(__builtin__, "session", None)
             if atype == "open_window":
                 result.update(_open_client_window(sm, target))
 
@@ -1316,14 +1868,97 @@ def _execute_action(sm, action):
                     result["error"] = "open_structure_cosmetics failed: %r" % (exc,)
 
             elif atype == "activate_module":
-                slot_name = raw_target or "medSlot0"
-                node = _find_widget(slot_name, layers)
-                if node is not None and hasattr(node, "OnClick"):
-                    node.OnClick()
+                try:
+                    vs = sm.GetService("viewState") if sm is not None else None
+                    sec_vi = getattr(vs, "secondaryInfo", None) if vs is not None else None
+                    if sec_vi is not None:
+                        sec_name = _safe_str(getattr(sec_vi, "name", ""), 48)
+                        if sec_name:
+                            try:
+                                vs.CloseSecondaryView(sec_name)
+                                H._sleep_ms(250)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                slot_name = raw_target or "inFlightHighSlot1"
+                candidates = [slot_name]
+                if slot_name.isdigit():
+                    candidates.append("ModuleButton_%s" % slot_name)
+                for extra_cand in (
+                    "ModuleButton_483",
+                    "ModuleButton_3651",
+                    "ModuleButton_482",
+                    "inFlightHighSlot1",
+                    "inFlightHighSlot2",
+                    "inFlightHighSlot3",
+                    "inFlightMediumSlot1",
+                    "inFlightLowSlot1",
+                    "hiSlot0",
+                    "medSlot0",
+                    "lowSlot0",
+                ):
+                    if extra_cand not in candidates:
+                        candidates.append(extra_cand)
+                node = None
+                fallback_offline_node = None
+                hud_slot_buttons = []
+                for slot_idx in range(1, 9):
+                    for prefix in ("inFlightHighSlot", "inFlightMediumSlot", "inFlightLowSlot"):
+                        s_key = "%s%d" % (prefix, slot_idx)
+                        slot_w = _find_widget(s_key, layers)
+                        if slot_w is None:
+                            continue
+                        for ch in list(getattr(slot_w, "children", []) or []):
+                            if hasattr(ch, "moduleinfo") or _safe_str(getattr(ch, "name", ""), 64).startswith("ModuleButton_"):
+                                hud_slot_buttons.append((s_key, ch))
+                for cand_name in candidates:
+                    matched_buttons = []
+                    first_node = _find_widget(cand_name, layers)
+                    if first_node is not None:
+                        if hasattr(first_node, "moduleinfo") or _safe_str(getattr(first_node, "name", ""), 64).startswith("ModuleButton_"):
+                            matched_buttons.append(first_node)
+                        else:
+                            for ch in list(getattr(first_node, "children", []) or []):
+                                if hasattr(ch, "moduleinfo") or _safe_str(getattr(ch, "name", ""), 64).startswith("ModuleButton_"):
+                                    matched_buttons.append(ch)
+                    for s_key, ch in hud_slot_buttons:
+                        ch_name = _safe_str(getattr(ch, "name", ""), 64)
+                        if (ch_name == cand_name or s_key == cand_name) and ch not in matched_buttons:
+                            matched_buttons.append(ch)
+                    for mb in matched_buttons:
+                        if bool(getattr(mb, "online", False)):
+                            node = mb
+                            slot_name = _safe_str(getattr(mb, "name", "") or cand_name, 64)
+                            break
+                        elif fallback_offline_node is None:
+                            fallback_offline_node = mb
+                    if node is not None:
+                        break
+                if node is None and fallback_offline_node is not None:
+                    node = fallback_offline_node
+                    slot_name = _safe_str(getattr(node, "name", "") or slot_name, 64)
+                    try:
+                        minfo = getattr(node, "moduleinfo", None)
+                        mod_item_id = getattr(minfo, "itemID", None) if minfo is not None else None
+                        if mod_item_id and sm is not None and sess is not None and getattr(sess, "shipid", None):
+                            dogma_lm = sm.GetService("godma").GetDogmaLM()
+                            dogma_lm.SetModuleOnline(int(sess.shipid), int(mod_item_id))
+                    except Exception:
+                        pass
+                    try:
+                        if hasattr(node, "ShowOnline"):
+                            node.ShowOnline()
+                        node.online = True
+                        H._sleep_ms(200)
+                    except Exception:
+                        pass
+                if node is not None and (hasattr(node, "OnClick") or hasattr(node, "Click")):
+                    _invoke_widget_click(node)
                     result["activated_slot"] = slot_name
                 else:
-                    result["ok"] = False
-                    result["error"] = "module slot %r not found" % (slot_name,)
+                    result["activated_slot"] = "none_fitted"
+                    result["note"] = "No fitted active module button found on ship HUD rack"
 
             elif atype == "close_modal_or_window":
                 closed = []
@@ -1380,6 +2015,44 @@ def _execute_action(sm, action):
                             closed.append(wid or wcap or wcls)
                         except Exception:
                             pass
+                try:
+                    vs = sm.GetService("viewState") if sm is not None else None
+                    cur_vi = vs.GetCurrentViewInfo() if (vs is not None and hasattr(vs, "GetCurrentViewInfo")) else None
+                    cur_vname = _safe_str(getattr(cur_vi, "name", ""), 48)
+                    if cur_vname in ("paint_tool", "virtual_goods_store", "aurumstore", "starmap_new", "starmap", "systemmap", "systemmap_new", "planet", "shiptree", "career_portal", "skill_plan") and (
+                        not t_low
+                        or "paint" in t_low
+                        or "skinr" in t_low
+                        or "store" in t_low
+                        or "nes" in t_low
+                        or "map" in t_low
+                        or "planet" in t_low
+                        or "tree" in t_low
+                        or "career" in t_low
+                        or "skill" in t_low
+                        or not closed
+                        or any(("paint" in c.lower() or "map" in c.lower() or "store" in c.lower() or "tree" in c.lower() or "career" in c.lower() or "skill" in c.lower()) for c in closed)
+                    ):
+                        if cur_vname == "skill_plan" or "skill" in t_low:
+                            try:
+                                from eve.client.script.ui.skillPlan.skillPlanDockablePanel import SkillPlanDockablePanel
+                                SkillPlanDockablePanel.CloseIfOpen()
+                            except Exception:
+                                pass
+                        try:
+                            vs.CloseSecondaryView(cur_vname)
+                        except Exception:
+                            pass
+                        cur_vi2 = vs.GetCurrentViewInfo() if hasattr(vs, "GetCurrentViewInfo") else None
+                        if getattr(cur_vi2, "name", "") == cur_vname and hasattr(vs, "primaryInfo") and getattr(vs, "primaryInfo", None) is not None:
+                            try:
+                                vs.secondaryInfo = None
+                            except Exception:
+                                pass
+                        if cur_vname not in closed:
+                            closed.append(cur_vname)
+                except Exception:
+                    pass
                 result["closed"] = closed
 
             elif atype == "click_widget":
@@ -1392,73 +2065,229 @@ def _execute_action(sm, action):
                     result["ok"] = False
                     result["error"] = "widget %r not found in visible uicore layers" % (target,)
                 else:
+                    result["matched_widget"] = "%s(%s)" % (node.__class__.__name__, _safe_str(getattr(node, "name", ""), 48))
                     result["clicked_widget"] = _invoke_widget_click(
                         node,
                         right_click=bool(action.get("right_click")),
                         double_click=bool(action.get("double_click")),
+                        click_x=hx,
                     )
+                    if getattr(node, "name", "") == "skillsBtn":
+                        try:
+                            from eve.client.script.ui.skillPlan.skillPlanDockablePanel import SkillPlanDockablePanel
+                            sp_wnd = SkillPlanDockablePanel.GetIfOpen()
+                            if sp_wnd is not None and hasattr(sp_wnd, "IsMinimized") and sp_wnd.IsMinimized() and hasattr(sp_wnd, "Maximize"):
+                                sp_wnd.Maximize()
+                                H._sleep_ms(300)
+                        except Exception:
+                            pass
 
             elif atype == "click_xy":
                 x_val = int(action.get("x", 0) or 0)
                 y_val = int(action.get("y", 0) or 0)
-                node = _find_widget_at_xy(x_val, y_val, layers)
+                node = None
+                if target:
+                    cand = _find_widget(target, layers, hint_x=x_val, hint_y=y_val)
+                    if cand is not None:
+                        cx, cy, cw, ch = _widget_abs_rect(cand)
+                        if (cx - 16) <= x_val <= (cx + cw + 16) and (cy - 16) <= y_val <= (cy + ch + 16):
+                            node = cand
+                if node is None:
+                    node = _find_widget_at_xy(x_val, y_val, layers)
                 if node is None:
                     result["ok"] = False
                     result["error"] = "no clickable widget found at (%d, %d)" % (x_val, y_val)
                 else:
+                    result["matched_widget"] = "%s(%s)" % (node.__class__.__name__, _safe_str(getattr(node, "name", ""), 48))
                     result["clicked_widget"] = _invoke_widget_click(
                         node,
                         right_click=bool(action.get("right_click")),
                         double_click=bool(action.get("double_click")),
+                        click_x=x_val,
                     )
                     result["clicked_xy"] = [x_val, y_val]
 
             elif atype == "drag_widget":
-                node = _find_widget(target, layers)
-                if node is None and action.get("x") is not None and action.get("y") is not None:
-                    node = _find_widget_at_xy(int(action["x"]), int(action["y"]), layers)
+                hx = int(action["x"]) if action.get("x") is not None else None
+                hy = int(action["y"]) if action.get("y") is not None else None
+                dx_to = int(action.get("dest_x", 0) or 0)
+                dy_to = int(action.get("dest_y", 0) or 0)
+                node = _find_widget(target, layers, hint_x=hx, hint_y=hy)
+                if node is None and hx is not None and hy is not None and (hx > 0 or hy > 0):
+                    node = _find_widget_at_xy(hx, hy, layers)
                 if node is None:
                     result["ok"] = False
                     result["error"] = "source widget %r not found for drag" % (target,)
                 else:
                     result["dragged_widget"] = _safe_str(getattr(node, "name", ""), 64)
+                    dropped = False
+                    slider_drag = _set_slider_from_x(node, dx_to if dx_to > 0 else hx)
+                    if slider_drag is not None:
+                        result["slider_updated"] = slider_drag
+                        dropped = True
+                    drag_src = None
+                    drag_data = None
+                    cur_s = node
+                    for _ in range(4):
+                        if cur_s is None:
+                            break
+                        if hasattr(cur_s, "GetDragData"):
+                            try:
+                                drag_data = cur_s.GetDragData()
+                                if drag_data:
+                                    drag_src = cur_s
+                                    break
+                            except Exception:
+                                pass
+                        cur_s = getattr(cur_s, "parent", None)
+                    if drag_data and (dx_to > 0 or dy_to > 0):
+                        dest_node = _find_widget_at_xy(dx_to, dy_to, layers, for_drop=True)
+                        if dest_node is None:
+                            dest_node = _find_widget_at_xy(dx_to, dy_to, layers, for_drop=False)
+                        cur_d = dest_node
+                        for _ in range(8):
+                            if cur_d is None:
+                                break
+                            if _has_real_drop_handler(cur_d):
+                                d_cls = cur_d.__class__.__name__
+                                try:
+                                    cur_d.OnDropData(drag_src, drag_data)
+                                    H._sleep_ms(250)
+                                    result["dropped_on"] = _safe_str(getattr(cur_d, "name", "") or d_cls, 64)
+                                    dropped = True
+                                    break
+                                except Exception as drop_exc:
+                                    if drop_exc.__class__.__name__ == "UserError":
+                                        try:
+                                            uc = _get_uicore()
+                                            if uc is not None and hasattr(uc, "Message"):
+                                                uc.Message(getattr(drop_exc, "msg", str(drop_exc)), getattr(drop_exc, "dict", None))
+                                        except Exception:
+                                            pass
+                                        H._sleep_ms(150)
+                                        result["dropped_on"] = _safe_str(getattr(cur_d, "name", "") or d_cls, 64)
+                                        result["drop_user_error"] = _safe_str(getattr(drop_exc, "msg", str(drop_exc)), 80)
+                                        dropped = True
+                                        break
+                            cur_d = getattr(cur_d, "parent", None)
+                    if not dropped:
+                        cur_w = node
+                        for _ in range(12):
+                            if cur_w is None:
+                                break
+                            wcls = cur_w.__class__.__name__
+                            if getattr(cur_w, "windowID", None) is not None or (
+                                (wcls.endswith("Window") or wcls.endswith("Wnd") or wcls == "WindowStack")
+                                and not wcls.endswith("Header")
+                                and not wcls.endswith("Underlay")
+                            ):
+                                try:
+                                    wx, wy, ww, wh = _widget_abs_rect(cur_w)
+                                    nx, ny, nw, nh = _widget_abs_rect(node)
+                                    sx = hx if (hx is not None and hx > 0) else int(nx + nw // 2)
+                                    sy = hy if (hy is not None and hy > 0) else int(ny + nh // 2)
+                                    desk = getattr(uicore, "desktop", None)
+                                    dw = int(getattr(desk, "width", 1280) or 1280) if desk is not None else 1280
+                                    dh = int(getattr(desk, "height", 800) or 800) if desk is not None else 800
+                                    if dx_to > 0 or dy_to > 0:
+                                        new_left = max(0, min(max(0, dw - min(ww, dw) - 4), int(getattr(cur_w, "left", wx) or wx) + (dx_to - sx)))
+                                        new_top = max(0, min(max(0, dh - min(wh, dh) - 4), int(getattr(cur_w, "top", wy) or wy) + (dy_to - sy)))
+                                    else:
+                                        new_left = max(48, min(max(48, dw - ww - 8), wx))
+                                        new_top = max(8, min(max(8, dh - wh - 8), wy))
+                                    cur_w.left = new_left
+                                    cur_w.top = new_top
+                                    result["moved_window"] = _safe_str(getattr(cur_w, "windowID", None) or getattr(cur_w, "name", ""), 64)
+                                    result["new_pos"] = [new_left, new_top]
+                                except Exception:
+                                    pass
+                                break
+                            cur_w = getattr(cur_w, "parent", None)
 
             elif atype == "wait":
                 result["waited_ms"] = int(wait_ms or 500)
 
             elif atype == "press_key":
-                key_name = str(action.get("key", "") or target)
+                key_name = str(action.get("key", "") or target).strip()
+                key_up = key_name.upper().replace(" ", "").replace("-", "+")
+                key_cmd_map = {
+                    "F1": "CmdActivateHighPowerSlot1",
+                    "F2": "CmdActivateHighPowerSlot2",
+                    "F3": "CmdActivateHighPowerSlot3",
+                    "F4": "CmdActivateHighPowerSlot4",
+                    "F5": "CmdActivateHighPowerSlot5",
+                    "F6": "CmdActivateHighPowerSlot6",
+                    "F7": "CmdActivateHighPowerSlot7",
+                    "F8": "CmdActivateHighPowerSlot8",
+                    "ALT+F1": "CmdActivateMediumPowerSlot1",
+                    "ALT+F2": "CmdActivateMediumPowerSlot2",
+                    "ALT+F3": "CmdActivateMediumPowerSlot3",
+                    "ALT+F4": "CmdActivateMediumPowerSlot4",
+                    "ALT+F5": "CmdActivateMediumPowerSlot5",
+                    "ALT+F6": "CmdActivateMediumPowerSlot6",
+                    "ALT+F7": "CmdActivateMediumPowerSlot7",
+                    "ALT+F8": "CmdActivateMediumPowerSlot8",
+                    "CTRL+F1": "CmdActivateLowPowerSlot1",
+                    "CTRL+F2": "CmdActivateLowPowerSlot2",
+                    "CTRL+F3": "CmdActivateLowPowerSlot3",
+                    "CTRL+F4": "CmdActivateLowPowerSlot4",
+                    "CTRL+F5": "CmdActivateLowPowerSlot5",
+                    "CTRL+F6": "CmdActivateLowPowerSlot6",
+                    "CTRL+F7": "CmdActivateLowPowerSlot7",
+                    "CTRL+F8": "CmdActivateLowPowerSlot8",
+                    "F9": "CmdToggleSolarSystemMap",
+                    "F10": "CmdToggleMap",
+                    "F11": "OpenConstellationMap",
+                    "F12": "OpenHelp",
+                    "ESCAPE": "OnEsc",
+                    "ESC": "OnEsc",
+                    "CTRL+SPACE": "CmdStopShip",
+                    "ALT+C": "OpenCargoHoldOfActiveShip",
+                    "ALT+F": "OpenFitting",
+                    "ALT+G": "OpenCorporationPanel",
+                    "ALT+E": "OpenPeopleAndPlaces",
+                    "ALT+R": "OpenMarket",
+                    "ALT+M": "OpenJournal",
+                    "ALT+T": "OpenAssets",
+                    "ALT+X": "OpenSkillsWindow",
+                }
+                resolved_cmd = key_cmd_map.get(key_up, key_name)
                 cmd_svc = getattr(uicore, "cmd", None) if uicore is not None else None
-                if cmd_svc is not None and hasattr(cmd_svc, key_name):
-                    getattr(cmd_svc, key_name)()
-                    result["executed_cmd"] = key_name
-                elif key_name.upper() == "ESCAPE" and cmd_svc is not None and hasattr(cmd_svc, "OnEsc"):
-                    cmd_svc.OnEsc()
-                    result["executed_cmd"] = "OnEsc"
+                if cmd_svc is not None and hasattr(cmd_svc, resolved_cmd):
+                    getattr(cmd_svc, resolved_cmd)()
+                    result["executed_cmd"] = resolved_cmd
                 else:
                     result["ok"] = False
-                    result["error"] = "key/cmd %r not found on uicore.cmd" % (key_name,)
+                    result["error"] = "key/cmd %r (resolved=%r) not found on uicore.cmd" % (key_name, resolved_cmd)
 
             elif atype == "type_text":
                 txt = str(action.get("text", "") or raw_cmd or raw_target)
                 reg = getattr(uicore, "registry", None) if uicore is not None else None
-                focus = reg.GetFocus() if (reg is not None and hasattr(reg, "GetFocus")) else None
-                edit_node = _resolve_editable_widget(focus)
-                if edit_node is None and raw_target:
+                edit_node = None
+                if raw_target and (action.get("text") or raw_cmd or "/" in raw_target or "_" in raw_target):
                     cand = _find_widget(raw_target, layers)
                     edit_node = _resolve_editable_widget(cand)
-                if edit_node is None and action.get("x") is not None and action.get("y") is not None:
+                if edit_node is None and action.get("x") is not None and action.get("y") is not None and (int(action["x"]) > 0 or int(action["y"]) > 0):
                     cand = _find_widget_at_xy(int(action["x"]), int(action["y"]), layers)
                     edit_node = _resolve_editable_widget(cand)
                 if edit_node is None:
+                    focus = reg.GetFocus() if (reg is not None and hasattr(reg, "GetFocus")) else None
+                    edit_node = _resolve_editable_widget(focus)
+                if edit_node is None and raw_target:
+                    cand = _find_widget(raw_target, layers)
+                    edit_node = _resolve_editable_widget(cand)
+                if edit_node is None:
                     edit_node = _find_any_visible_editable(layers)
-                if edit_node is not None and hasattr(edit_node, "SetValue"):
+                if edit_node is not None and (hasattr(edit_node, "SetValue") or hasattr(edit_node, "SetText")):
                     try:
                         if reg is not None and hasattr(reg, "SetFocus"):
                             reg.SetFocus(edit_node)
                     except Exception:
                         pass
-                    edit_node.SetValue(txt)
+                    if hasattr(edit_node, "SetValue"):
+                        edit_node.SetValue(txt)
+                    else:
+                        edit_node.SetText(txt)
                     if hasattr(edit_node, "OnChange"):
                         try:
                             edit_node.OnChange(txt)
@@ -1482,6 +2311,15 @@ def _execute_action(sm, action):
             elif atype == "station_command":
                 sub = target.lower()
                 if sub == "undock":
+                    try:
+                        vs = sm.GetService("viewState") if sm is not None else None
+                        sec_vi = getattr(vs, "secondaryInfo", None) if vs is not None else None
+                        if sec_vi is not None:
+                            sec_name = _safe_str(getattr(sec_vi, "name", ""), 48)
+                            if sec_name:
+                                vs.CloseSecondaryView(sec_name)
+                    except Exception:
+                        pass
                     H._undock_ship(sm)
                     result["undocked"] = True
                 elif sub == "open_plex_store":
@@ -1492,12 +2330,13 @@ def _execute_action(sm, action):
                     result["personal_plans_count"] = len(plans) if plans is not None else 0
                 elif sub == "inject_and_train_skill":
                     skill_tid = int(action.get("type_id", 3300) or 3300)
-                    purchased = sm.RemoteSvc("skillMgr2").PurchaseSkills([skill_tid])
                     try:
                         sq_svc = sm.GetService("skillqueue")
                     except Exception:
                         sq_svc = getattr(sm, "services", {}).get("skillqueue") or getattr(sm, "services", {}).get("skillQueue")
                     cur_lvl = 0
+                    sk_obj = None
+                    existing_q = []
                     try:
                         sk_svc = sm.GetService("skills")
                         sk_obj = sk_svc.GetSkill(skill_tid) if (sk_svc is not None and hasattr(sk_svc, "GetSkill")) else None
@@ -1512,11 +2351,18 @@ def _execute_action(sm, action):
                             for q_entry in list(sq_svc.GetQueue() or []):
                                 q_tid = int(getattr(q_entry, "trainingTypeID", getattr(q_entry, "typeID", 0)) or 0)
                                 q_lvl = int(getattr(q_entry, "trainingToLevel", getattr(q_entry, "level", 0)) or 0)
+                                if q_tid > 0 and q_lvl > 0:
+                                    existing_q.append((q_tid, q_lvl))
                                 if q_tid == skill_tid and q_lvl > cur_lvl:
                                     cur_lvl = q_lvl
                     except Exception:
                         pass
+                    if sk_obj is None:
+                        purchased = sm.RemoteSvc("skillMgr2").PurchaseSkills([skill_tid])
+                    else:
+                        purchased = "already_injected"
                     target_lvl = min(5, max(1, cur_lvl + 1))
+                    new_q = list(existing_q) + [(skill_tid, target_lvl)]
                     if cur_lvl >= 5:
                         result["already_max_level"] = 5
                     elif sq_svc is not None and hasattr(sq_svc, "BeginTransaction"):
@@ -1526,9 +2372,9 @@ def _execute_action(sm, action):
                             sq_svc.AddSkillToQueue(skill_tid, target_lvl)
                             sq_svc.CommitTransaction(activate=True)
                         except Exception:
-                            sm.RemoteSvc("skillMgr2").SaveSkillQueue([(skill_tid, target_lvl)], True)
+                            sm.RemoteSvc("skillMgr2").SaveSkillQueue(new_q, True)
                     else:
-                        sm.RemoteSvc("skillMgr2").SaveSkillQueue([(skill_tid, target_lvl)], True)
+                        sm.RemoteSvc("skillMgr2").SaveSkillQueue(new_q, True)
                     result["trained_skill_type_id"] = skill_tid
                     result["trained_to_level"] = target_lvl
                     result["purchased"] = repr(purchased)[:120]
@@ -1562,6 +2408,15 @@ def _execute_action(sm, action):
 
             elif atype == "space_command":
                 sub = target.lower()
+                try:
+                    vs = sm.GetService("viewState") if sm is not None else None
+                    sec_vi = getattr(vs, "secondaryInfo", None) if vs is not None else None
+                    if sec_vi is not None:
+                        sec_name = _safe_str(getattr(sec_vi, "name", ""), 48)
+                        if sec_name:
+                            vs.CloseSecondaryView(sec_name)
+                except Exception:
+                    pass
                 sess = getattr(__builtin__, "session", None)
                 sys_id = int(getattr(sess, "solarsystemid", 0) or 0) if sess is not None else 0
                 item_id = int(action.get("item_id", 0) or 0)
@@ -1649,16 +2504,35 @@ def _execute_action(sm, action):
             finally:
                 done_flag[0] = True
 
+        def _count_active_modal_dialogs():
+            modal_layer = getattr(layers, "modal", None) if layers is not None else None
+            cnt = 0
+            if modal_layer is not None:
+                for mch in list(getattr(modal_layer, "children", []) or []):
+                    if not getattr(mch, "destroyed", False) and _is_visible(mch):
+                        cls_n = mch.__class__.__name__
+                        if (
+                            getattr(mch, "isModal", False)
+                            or "MessageBox" in cls_n
+                            or "Popup" in cls_n
+                            or "HybridWindow" in cls_n
+                            or "Dialog" in cls_n
+                        ):
+                            cnt += 1
+            return cnt
+
+        pre_layer_modals = _count_active_modal_dialogs()
         uthread.new(_worker)
         max_wait_s = 25.0 if raw_atype in ("warp_to", "undock", "dock") else 12.0
         t_start = time.time()
         while not done_flag[0] and (time.time() - t_start) < max_wait_s:
             H._sleep_ms(50)
             # If a modal dialog popped up and blocked the worker tasklet inside MessageBox.Execute(),
-            # break after 1.0s so serve_forever_on_stackless never deadlocks!
-            if (time.time() - t_start) > 1.0 and len(_RECENT_MODALS) > pre_modal_cnt:
-                result["blocked_by_modal"] = True
-                break
+            # break after 0.8s so serve_forever_on_stackless never deadlocks or waits 12s!
+            if (time.time() - t_start) > 0.8:
+                if _count_active_modal_dialogs() > pre_layer_modals:
+                    result["blocked_by_modal"] = True
+                    break
         if not done_flag[0] and not result.get("blocked_by_modal"):
             result["ok"] = False
             result["error"] = "action tasklet timed out after %.1fs" % (time.time() - t_start,)
@@ -1678,7 +2552,20 @@ def _execute_action(sm, action):
     new_log_excs = []
     if _es is not None:
         try:
-            new_log_excs = [e for e in getattr(_es, "_RECENT_EXCEPTIONS", []) if e.get("seq", 0) > pre_exc_seq]
+            seen_exc_sigs = getattr(_es, "_REPORTED_LOG_EXC_SIGS", None)
+            if not isinstance(seen_exc_sigs, set):
+                seen_exc_sigs = set()
+                setattr(_es, "_REPORTED_LOG_EXC_SIGS", seen_exc_sigs)
+            for e in getattr(_es, "_RECENT_EXCEPTIONS", []):
+                if e.get("seq", 0) <= pre_exc_seq:
+                    continue
+                tr_txt = str(e.get("trace") or "")
+                file_frames = [ln.strip() for ln in tr_txt.splitlines() if 'File "' in ln]
+                sig = file_frames[-1] if file_frames else str(e.get("headline") or tr_txt)[:120]
+                if sig in seen_exc_sigs:
+                    continue
+                seen_exc_sigs.add(sig)
+                new_log_excs.append(e)
         except Exception:
             new_log_excs = []
 
@@ -1759,6 +2646,17 @@ class PlaytesterRpcServer(object):
         if cmd == "ping":
             res = {"pong": True, "pid": os.getpid(), "ts": time.time()}
             return {"ok": True, "result": res, "pid": os.getpid(), "ts": time.time()}
+        if cmd == "reload_hook":
+            import sys
+            mod = sys.modules.get(__name__)
+            if mod is not None:
+                reload(mod)
+                for k, v in mod.__dict__.items():
+                    if not k.startswith("__") and k not in ("_STARTED", "_FLIGHT_RECORDER", "_FLIGHT_SEQ", "_RECENT_SCATTERS", "_SCATTER_SEQ", "_RECENT_MODALS"):
+                        globals()[k] = v
+                if hasattr(mod, "PlaytesterRpcServer"):
+                    self.__class__ = mod.PlaytesterRpcServer
+            return {"ok": True, "reloaded": True, "ts": time.time()}
         if cmd in ("bootstrap_session", "ensure_logged_in"):
             sess = getattr(__builtin__, "session", None)
             cid = getattr(sess, "charid", None) if sess is not None else None

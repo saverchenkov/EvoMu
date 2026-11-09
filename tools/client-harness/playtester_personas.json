@@ -4,37 +4,86 @@
       "id": "regression_and_critical_ui",
       "title": "Critical Live-Client Regressions (Skills, PLEX Store, Warp Animation, Slash, Quasar)",
       "description": "Immediately exercise the highest-risk live V24.01 UI flows that broke during manual playtesting: (1) Open Character Sheet & Skill Plans panel, prime personal plans, buy/inject a skillbook, and start/pause/reorder live skill training queue; (2) Open PLEX Vault & New Eden Store (aurumStoreView), verify Quasar BalanceRequest succeeds without TimeoutException, and test free PLEX pack & NES SKIN purchase; (3) Execute slash commands (/help, /, /giveskill, /heal) verifying FetchRemoteCommandList and SlashError reason dict; (4) Undock into space, initiate a real-time warp (WITHOUT skipping 240s of clock), capture 4 burst frames, and verify both Destiny ball.mode==3 (WARP), fxSequencer 'effects.Warping', warp_signals, and visible warp tunnel animation.",
+      "goals": [
+        "Open Character Sheet & Skill Plans panel, inject/queue a skill, and test complete_skills live SP/level updates.",
+        "Open PLEX Vault & New Eden Store (aurumStoreView), verify Quasar BalanceRequest succeeds without TimeoutException.",
+        "Undock into space, initiate a real-time warp_to (>150 km), and verify ball.mode==3 (WARP) and effects.Warping tunnel FX."
+      ],
+      "rotate_after_steps": 25,
       "priority": 1
     },
     {
       "id": "newbro_career_and_fitting",
       "title": "Newbro Progression, Fitting, Inventory & Station Services",
       "description": "Explore station hangar views, Inventory window (stack splitting, moving items between hangar and cargo), Ship Fitting window (online/offline/fit/unfit modules, verify CPU/PG and Dogma attributes update), Medical clone / home station, Repair shop, Insurance, and AIR Career Program / Daily Goals.",
+      "goals": [
+        "Open Inventory window, list ship cargo and item hangar, split an item stack, and move items between hangar and active ship.",
+        "Open Ship Fitting window, fit/unfit or online/offline modules, and verify Dogma CPU/powergrid and ship stats update live.",
+        "Exercise Station Services (Medical clone, Repair shop, Insurance, LP Store) and AIR Career Program / Opportunities."
+      ],
+      "rotate_after_steps": 25,
       "priority": 2
+    },
+    {
+      "id": "mining_and_resource_harvesting",
+      "title": "Mining, Asteroid Harvesting, Ore Holds, Mining Ledger & Reprocessing",
+      "description": "Full end-to-end EVE Online Mining & Resource Harvesting loop: (1) Train/inject Mining (typeID 3386), Astrogeology (typeID 3410), Mining Frigate (typeID 32918), and Reprocessing (typeID 3385); acquire/fit a mining laser (Miner I typeID 483 or Civilian Miner typeID 3651 via Fitting window, Market, or '/createitem 483 1' / '/fit me 483') and optionally board a Venture mining frigate (typeID 32880); (2) Undock into space, switch Overview to the Mining tab or locate an Asteroid Belt / spawn an asteroid ('/spawn 1230' for Veldspar, '/spawn 1228' for Scordite, '/spawn 1224' for Pyroxeres, '/spawn 18' for Plagioclase), approach within mining laser optimal range (<10 km), lock the asteroid target (lock_target), and activate the mining laser (activate_module / F1 / click ModuleButton_483 or ModuleButton_3651); (3) Observe mining laser beam FX and cycle completion, verifying mined ore units are deposited into the ship's Cargo Hold or Mining Hold ('open_neocom' target 'mininghold' or 'inventory') via OnItemChange; (4) Open the Mining Ledger window ('open_neocom' target 'miningledger' / OpenLedger) and verify personal and corporate mining ledger entries & graphs render without exception; (5) Dock at a station with a Reprocessing Plant, open Reprocessing Plant ('open_neocom' target 'reprocessing' or Station Services 'reprocessing'), load mined ore (Veldspar 1230), inspect reprocessing quotes (reprocessingSvc.GetQuotes), and reprocess ore into minerals (Tritanium 34).",
+      "goals": [
+        "Ensure character has Mining (3386) & Reprocessing (3385) skills and a fitted online Mining Laser (Miner I typeID 483 or Civilian Miner typeID 3651, or Venture typeID 32880).",
+        "Undock into space, warp to an Asteroid Belt or spawn a Veldspar asteroid ('/spawn 1230'), approach within 10 km, lock the asteroid, and activate the mining laser.",
+        "Verify mining laser cycle activation (OnGodmaShipEffect / effects.Laser) and confirm mined Veldspar (typeID 1230) is deposited into the ship Cargo Hold or Mining Hold (open_neocom 'mininghold').",
+        "Open the Mining Ledger window (open_neocom 'miningledger') and verify personal/corporation mining ledger records populate cleanly.",
+        "Dock at a station, open the Reprocessing Plant window (open_neocom 'reprocessing'), quote mined Veldspar (reprocessingSvc.GetQuotes), and reprocess it into Tritanium (typeID 34)."
+      ],
+      "rotate_after_steps": 25,
+      "priority": 3
     },
     {
       "id": "space_navigation_combat_and_ewar",
       "title": "In-Space Navigation, Destiny Physics, Combat, Drones & EWAR",
       "description": "Undock, test sub-warp navigation (Approach, Orbit, Keep at Range, Align, Stop), real-time Warp to celestials/belts/anomalies with burst screenshots, Stargate jump transitions, Target Locking, Weapon & EWAR module activation/cycling, Drone launch/engage/return, overview & D-Scan, probe scanner, and bookmark creation.",
-      "priority": 3
+      "goals": [
+        "Undock and test sub-warp Destiny commands (Approach, Orbit, Keep at Range, Align, Stop) and camera modes (Orbit, Tactical, POV).",
+        "Lock an NPC or spawned target, activate weapon/EWAR modules and drones, and verify combat damage and OnGodmaShipEffect scatters.",
+        "Test Directional Scanner (dscan), Probe Scanner (probe), Solar System Map, and Stargate jump transitions."
+      ],
+      "rotate_after_steps": 25,
+      "priority": 4
     },
     {
       "id": "economy_market_contracts_and_industry",
       "title": "Market, Contracts, Wallet, Industry & Reprocessing",
       "description": "Open Regional Market (browse categories, view price history & orders, place buy/sell orders, modify/cancel orders), Wallet (ISK & PLEX transactions, journal, shares), Contracts (create/search/accept item exchange, auction, courier), Industry window (manufacturing, research, invention), and Reprocessing plant.",
-      "priority": 4
+      "goals": [
+        "Open Regional Market while docked, browse categories, view price history, and buy/sell items verifying OnAccountChange and hangar delivery.",
+        "Open Wallet window, inspect ISK & PLEX balances, transactions, market transactions, shares, and Give ISK tabs.",
+        "Open Contracts, Industry, and Reprocessing windows, testing contract creation/search, blueprint manufacturing jobs, and ore reprocessing."
+      ],
+      "rotate_after_steps": 25,
+      "priority": 5
     },
     {
       "id": "social_corp_fleet_and_sovereignty",
       "title": "Corporation, Fleet, Upwell Structures, SKINR & Agency",
       "description": "Open Corporation window (roles, wallets, bulletins, applications, corporation goals via Quasar), Fleet Finder & Fleet broadcasts/wings, Structure Browser & Upwell docking/tethering/Cosmetics (structureCosmeticStatesController), Paragon Hub / SKINR studio, Agency (encounters, incursions, insurgency, FW, homefront, exploration), and Mail/Calendar/Chat.",
-      "priority": 5
+      "goals": [
+        "Open Corporation window, inspect members/titles/wallets/projects, and verify Quasar corporation goals.",
+        "Open Fleet window (Form Fleet, Fleet Finder, hierarchy, broadcasts) and Structure Browser / Upwell structure timers.",
+        "Open Ship SKINR studio, The Agency (Resource Harvesting, Encounters, Exploration), and Mail/Calendar/Chat."
+      ],
+      "rotate_after_steps": 25,
+      "priority": 6
     },
     {
       "id": "ui_chaos_and_edge_cases",
       "title": "Adversarial UI Chaos & Multi-Window Stress Test",
       "description": "Rapidly open/switch tabs across every Neocom window, right-click context menus on ships/items/celestials/characters, test invalid inputs, edge-case slash commands, rapid dock/undock, and mid-warp sub-warp commands.",
-      "priority": 6
+      "goals": [
+        "Exercise right-click context menus across overview objects, inventory items, fitted modules, and station ship cards.",
+        "Rapidly open, tab-switch, drag, and close multiple windows to uncover unhandled client Python tracebacks or UI state desyncs."
+      ],
+      "rotate_after_steps": 25,
+      "priority": 7
     }
   ],
   "initial_frontier": [
@@ -73,6 +122,24 @@
       "persona": "regression_and_critical_ui",
       "title": "Structure Cosmetics Quasar get_all_in_solar_system_request (#527)",
       "acceptance": "In space, verify structureCosmeticStatesController._get_all_in_solar_system completes via publicGatewaySvc without TimeoutException."
+    },
+    {
+      "feature_id": "space.mining.asteroid_lock_and_laser_cycle",
+      "persona": "mining_and_resource_harvesting",
+      "title": "In-Space Asteroid Spawn/Belt, Target Lock, Mining Laser Cycle & Ore Yield",
+      "acceptance": "Fit an online mining laser (Miner I typeID 483 or Civilian Miner typeID 3651), undock, locate an asteroid belt or spawn Veldspar ('/spawn 1230'), approach <10km, lock the asteroid, activate the mining laser, and verify mining cycle FX and ore yield deposited into Cargo Hold or Mining Hold via OnItemChange."
+    },
+    {
+      "feature_id": "ui.mining.mining_ledger_and_reprocessing",
+      "persona": "mining_and_resource_harvesting",
+      "title": "Mining Ledger Window (OpenLedger) & Station Ore Reprocessing Plant (OpenReprocessingPlant)",
+      "acceptance": "Open Mining Ledger (open_neocom 'miningledger') and verify personal/corporate mining ledger logs render without exception; dock at a station, open Reprocessing Plant (open_neocom 'reprocessing'), load mined ore (Veldspar 1230), verify reprocessingSvc.GetQuotes, and reprocess into Tritanium (34)."
+    },
+    {
+      "feature_id": "space.mining.venture_and_mining_hold",
+      "persona": "mining_and_resource_harvesting",
+      "title": "Mining Frigate (Venture 32880) & Dedicated Mining/Mineral Holds",
+      "acceptance": "Board or inspect a Venture mining frigate (typeID 32880), open the active ship's Mining Hold (open_neocom 'mininghold' / OpenGeneralMiningHoldOfActiveShip), and verify mined ore routes into the Mining Hold."
     },
     {
       "feature_id": "ui.inventory.hangar_and_cargo_ops",

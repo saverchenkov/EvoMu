@@ -119,19 +119,287 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# ---------------------------------------------------------------------------
+# ANSI Color Coding & Structured Trace Logging
+# ---------------------------------------------------------------------------
+
+USE_COLOR = os.environ.get("NO_COLOR", "") == ""
+
+C_RESET = "\033[0m"
+C_BOLD = "\033[1m"
+C_DIM = "\033[2m"
+C_CYAN = "\033[36m"
+C_BCYAN = "\033[1;36m"
+C_BLUE = "\033[34m"
+C_BBLUE = "\033[1;34m"
+C_MAGENTA = "\033[35m"
+C_BMAGENTA = "\033[1;35m"
+C_YELLOW = "\033[33m"
+C_BYELLOW = "\033[1;33m"
+C_GREEN = "\033[32m"
+C_BGREEN = "\033[1;32m"
+C_RED = "\033[31m"
+C_BRED = "\033[1;31m"
+C_WHITE = "\033[37m"
+
+
+def _c(color: str, text: str) -> str:
+    if not USE_COLOR:
+        return text
+    return f"{color}{text}{C_RESET}"
+
+
 def log_info(msg: str) -> None:
-    ts = datetime.now().strftime("%H:%M:%S")
-    print(f"[{ts}] [playtester] {msg}", flush=True)
+    ts = _c(C_DIM, f"[{datetime.now().strftime('%H:%M:%S')}]")
+    tag = _c(C_BCYAN, "[playtester]")
+    print(f"{ts} {tag} {_c(C_CYAN, msg)}", flush=True)
 
 
 def log_warn(msg: str) -> None:
-    ts = datetime.now().strftime("%H:%M:%S")
-    print(f"[{ts}] [playtester] WARN: {msg}", file=sys.stderr, flush=True)
+    ts = _c(C_DIM, f"[{datetime.now().strftime('%H:%M:%S')}]")
+    tag = _c(C_BYELLOW, "[playtester] WARN:")
+    print(f"{ts} {tag} {_c(C_YELLOW, msg)}", file=sys.stderr, flush=True)
 
 
 def log_err(msg: str) -> None:
-    ts = datetime.now().strftime("%H:%M:%S")
-    print(f"[{ts}] [playtester] ERROR: {msg}", file=sys.stderr, flush=True)
+    ts = _c(C_DIM, f"[{datetime.now().strftime('%H:%M:%S')}]")
+    tag = _c(C_BRED, "[playtester] ERROR:")
+    print(f"{ts} {tag} {_c(C_RED, msg)}", file=sys.stderr, flush=True)
+
+
+def _extract_agy_transcript_traces(conversation_id: str) -> Tuple[List[str], List[str]]:
+    """
+    Read internal thinking blocks and intermediate tool calls from agy's
+    `~/.gemini/antigravity-cli/brain/<conversation_id>/.system_generated/logs/transcript_full.jsonl`.
+    """
+    if not conversation_id:
+        return [], []
+    logs_dir = (
+        Path(os.path.expanduser("~/.gemini/antigravity-cli/brain"))
+        / conversation_id
+        / ".system_generated"
+        / "logs"
+    )
+    transcript_path = logs_dir / "transcript_full.jsonl"
+    if not transcript_path.exists():
+        transcript_path = logs_dir / "transcript.jsonl"
+    if not transcript_path.exists():
+        return [], []
+
+    thinking_blocks: List[str] = []
+    tool_summaries: List[str] = []
+    try:
+        for line in transcript_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            th = (obj.get("thinking") or "").strip()
+            if th:
+                # Collapse excessive blank lines while preserving paragraph breaks
+                cleaned = "\n".join(ln.strip() for ln in th.splitlines() if ln.strip())
+                if cleaned:
+                    thinking_blocks.append(cleaned)
+            for tc in obj.get("tool_calls") or []:
+                if not isinstance(tc, dict):
+                    continue
+                tname = str(tc.get("name") or "")
+                if tname and tname != "finish":
+                    targs = tc.get("args") or {}
+                    if isinstance(targs, dict) and "Path" in targs:
+                        tool_summaries.append(f"{tname}({Path(str(targs['Path']).strip('\"')).name})")
+                    else:
+                        tool_summaries.append(tname)
+    except Exception:
+        pass
+    return thinking_blocks, tool_summaries
+
+
+def log_step_header(
+    step_num: int,
+    git_head: str,
+    memory: "PlaytesterMemory",
+    ui_snapshot: Dict[str, Any],
+) -> None:
+    ts = _c(C_DIM, f"[{datetime.now().strftime('%H:%M:%S')}]")
+    mem = memory.data
+    persona = mem.get("active_persona") or {}
+    p_id = persona.get("id", "explorer")
+    p_step = mem.get("active_persona_steps", 0)
+    p_max = persona.get("rotate_after_steps", 25)
+    view = (ui_snapshot or {}).get("active_view") or "unknown"
+    sess = (ui_snapshot or {}).get("session") or {}
+    ui_sub = (ui_snapshot or {}).get("ui") or {}
+    wins = ui_sub.get("open_windows") or (ui_snapshot or {}).get("open_windows") or []
+    widgets = ui_sub.get("clickable_widgets") or []
+    space = (ui_snapshot or {}).get("space") or {}
+    if space.get("in_space"):
+        ego = space.get("ego") or {}
+        loc_str = f"InSpace(sys={sess.get('solarsystemid2')}, mode={ego.get('mode')}, speed={ego.get('speed_mps', 0):.1f}m/s)"
+    else:
+        loc_str = f"Docked(station={sess.get('stationid') or sess.get('structureid')}, sys={sess.get('solarsystemid2')})"
+
+    rule = _c(C_BCYAN, "═" * 92)
+    header = (
+        f"{ts} {_c(C_BCYAN, f'▶ STEP {step_num:04d}')} "
+        f"{_c(C_DIM, f'(HEAD={git_head})')} | "
+        f"{_c(C_BBLUE, f'Persona=[{p_id} {p_step}/{p_max}]')} | "
+        f"{_c(C_CYAN, f'View={view} {loc_str} Wins={len(wins)} Widgets={len(widgets)}')}"
+    )
+    print(f"\n{rule}\n{header}", flush=True)
+
+
+def log_agy_reasoning_trace(
+    step_num: int,
+    model_name: str,
+    elapsed: float,
+    decision: Dict[str, Any],
+) -> None:
+    ts = _c(C_DIM, f"[{datetime.now().strftime('%H:%M:%S')}]")
+    conv_id = str(decision.get("_conversation_id") or "")
+    turns = decision.get("_num_turns") or 1
+    usage = decision.get("_usage") or {}
+    tools_used = decision.get("_tool_calls") or []
+    thinking_blocks = decision.get("_thinking_trace") or []
+
+    usage_parts = []
+    if usage.get("input_tokens") is not None:
+        usage_parts.append(f"in={usage.get('input_tokens')}")
+    if usage.get("output_tokens") is not None:
+        usage_parts.append(f"out={usage.get('output_tokens')}")
+    if usage.get("thinking_tokens") is not None:
+        usage_parts.append(f"think={usage.get('thinking_tokens')}")
+    if usage.get("cache_read_tokens"):
+        usage_parts.append(f"cached={usage.get('cache_read_tokens')}")
+    usage_str = f" tokens({', '.join(usage_parts)})" if usage_parts else ""
+    tools_str = f" tools={tools_used}" if tools_used else ""
+    conv_str = f" conv={conv_id[:8]}" if conv_id else ""
+
+    print(
+        f"{ts} {_c(C_BMAGENTA, '[agy:meta]   ')} "
+        f"{_c(C_MAGENTA, f'model={model_name} latency={elapsed:.1f}s turns={turns}{conv_str}{usage_str}{tools_str}')}",
+        flush=True,
+    )
+
+    for idx, block in enumerate(thinking_blocks, start=1):
+        prefix = f"[agy:think#{idx}]" if len(thinking_blocks) > 1 else "[agy:think]  "
+        for ln_idx, ln in enumerate(block.splitlines()):
+            tag = _c(C_MAGENTA, f"{prefix:<13}") if ln_idx == 0 else " " * 13
+            print(f"{ts} {tag} {_c(C_DIM + C_MAGENTA, ln)}", flush=True)
+
+    obs = str(decision.get("observation") or "").strip()
+    if obs:
+        print(f"{ts} {_c(C_BCYAN, '[agy:observe]')} {_c(C_WHITE, obs)}", flush=True)
+
+    pav = decision.get("previous_action_verification") or {}
+    exp_met = pav.get("expectation_met", True)
+    disc = str(pav.get("discrepancy_summary") or "").strip()
+    if exp_met:
+        print(
+            f"{ts} {_c(C_BGREEN, '[agy:verify] ')} {_c(C_GREEN, '✓ Previous action expectation met')}",
+            flush=True,
+        )
+    else:
+        print(
+            f"{ts} {_c(C_BRED, '[agy:verify] ')} {_c(C_RED, f'✗ Discrepancy: {disc}')}",
+            flush=True,
+        )
+
+    goal = str(decision.get("current_goal") or "").strip()
+    if goal:
+        print(f"{ts} {_c(C_BBLUE, '[agy:goal]   ')} {_c(C_BLUE, goal)}", flush=True)
+
+    reasoning = str(decision.get("reasoning") or "").strip()
+    if reasoning:
+        print(f"{ts} {_c(C_BMAGENTA, '[agy:reason] ')} {_c(C_BMAGENTA, reasoning)}", flush=True)
+
+    act = decision.get("action") or {}
+    act_type = act.get("type") or "wait"
+    act_target = act.get("target") or act.get("command") or ""
+    coords = ""
+    if act.get("x") or act.get("y"):
+        coords = f" @({act.get('x')},{act.get('y')})"
+    flags = []
+    if act.get("right_click"):
+        flags.append("right_click")
+    if act.get("double_click"):
+        flags.append("double_click")
+    flag_str = f" [{' '.join(flags)}]" if flags else ""
+    expected = str(act.get("expected_ui_and_state_change") or "").strip()
+    print(
+        f"{ts} {_c(C_BYELLOW, '[agy:action] ')} "
+        f"{_c(C_BYELLOW, f'{act_type}({act_target!r}){coords}{flag_str}')} "
+        f"{_c(C_YELLOW, f'-> Expect: {expected}')}",
+        flush=True,
+    )
+
+    br = decision.get("bug_report") or {}
+    if isinstance(br, dict) and br.get("should_file") and br.get("title"):
+        sev = str(br.get("severity") or "medium").upper()
+        cat = str(br.get("category") or "bug")
+        title = str(br.get("title") or "")
+        print(
+            f"{ts} {_c(C_BRED, '[agy:bug]    ')} "
+            f"{_c(C_BRED, f'[{sev}/{cat}] {title}')}",
+            flush=True,
+        )
+
+
+def log_step_execution_outcome(step_num: int, exec_res: Dict[str, Any], decision: Dict[str, Any]) -> None:
+    ts = _c(C_DIM, f"[{datetime.now().strftime('%H:%M:%S')}]")
+    ok = bool(exec_res.get("action_ok", exec_res.get("ok", False)))
+    err = exec_res.get("action_error") or exec_res.get("error")
+    matched = exec_res.get("matched_widget") or exec_res.get("clicked_widget") or ""
+    sd = exec_res.get("state_diff") or {}
+    fr = exec_res.get("flight_recorder") or {}
+    calls = [
+        f"{c.get('service')}.{c.get('method')}({c.get('status')},{c.get('duration_ms', 0):.0f}ms)"
+        for c in (fr.get("macho_calls") or [])
+        if isinstance(c, dict)
+    ]
+    scatters = sd.get("scatters_observed") or fr.get("scatters_observed") or []
+    uniq_scatters = list(dict.fromkeys(scatters))[:8]
+    log_excs = fr.get("log_exceptions") or []
+    macho_excs = fr.get("macho_exceptions") or []
+    quasar_errs = fr.get("quasar_errors") or []
+
+    status_badge = _c(C_BGREEN, "✓ OK") if ok else _c(C_BRED, f"✗ FAIL ({err})")
+    diff_summary = (
+        f"ui_changed={sd.get('ui_changed')} "
+        f"opened={sd.get('windows_opened', [])} "
+        f"closed={sd.get('windows_closed', [])} "
+        f"modals={sd.get('modals_appeared', [])} "
+        f"widget_delta={sd.get('clickable_widget_count_delta', 0)}"
+    )
+    if sd.get("view_changed"):
+        diff_summary += f" view_changed={sd.get('view_changed')}"
+    if matched:
+        diff_summary = f"matched={matched} | " + diff_summary
+
+    print(
+        f"{ts} {_c(C_BGREEN if ok else C_BRED, '[client:exec]')} {status_badge} {_c(C_GREEN if ok else C_RED, diff_summary)}",
+        flush=True,
+    )
+    if calls or uniq_scatters:
+        rpc_line = f"RPCs={calls[:6] if calls else '[]'} | Scatters={uniq_scatters}"
+        print(f"{ts} {_c(C_CYAN, '[client:wire]')} {_c(C_DIM + C_CYAN, rpc_line)}", flush=True)
+    if log_excs or macho_excs or quasar_errs:
+        exc_heads = [str(e.get("headline") or e)[:100] for e in (log_excs + macho_excs + quasar_errs)[:3]]
+        print(f"{ts} {_c(C_BRED, '[client:exc] ')} {_c(C_RED, ' | '.join(exc_heads))}", flush=True)
+
+    mem_upd = decision.get("memory_update") or {}
+    tested = mem_upd.get("mark_tested_features") or []
+    buggy = mem_upd.get("mark_buggy_features") or []
+    note = str(mem_upd.get("long_term_note_to_append") or "").strip()
+    if tested or buggy or note:
+        mem_parts = []
+        if tested:
+            mem_parts.append(f"verified+={tested}")
+        if buggy:
+            mem_parts.append(f"buggy+={buggy}")
+        if note:
+            mem_parts.append(f"note={note[:120]!r}")
+        print(f"{ts} {_c(C_BBLUE, '[memory:upd] ')} {_c(C_BLUE, ' | '.join(mem_parts))}", flush=True)
 
 
 def _b64url(data: bytes) -> str:
@@ -608,6 +876,8 @@ def get_git_head(repo_dir: Path) -> str:
 def check_origin_main_update(repo_dir: Path) -> Optional[str]:
     """Fetch origin/main, advance HEAD + crates/ to origin/main (preserving tools/client-harness/*), and return new short SHA."""
     try:
+        if active_cargo_count() >= 2:
+            return None
         subprocess.run(
             ["git", "-C", str(repo_dir), "fetch", "origin", "main"],
             capture_output=True,
@@ -672,6 +942,17 @@ def compile_eve_server(worktree_dir: Path) -> Tuple[bool, Path, str]:
                 return True, binary, ""
         except Exception:
             pass
+
+    if binary.exists() and active_cargo_count() >= 2:
+        waited = 0
+        while active_cargo_count() >= 2 and waited < 20:
+            if waited == 0:
+                log_info("Cargo concurrency guard: >= 2 cargo processes active; waiting up to 20s before reusing existing binary...")
+            time.sleep(10)
+            waited += 10
+        if active_cargo_count() >= 2:
+            log_info(f"Cargo slots still full (>= 2 active); reusing existing {binary} without invoking cargo.")
+            return True, binary, ""
 
     wait_for_cargo_slot(max_concurrent=2)
     log_info(f"Building eve-server in {worktree_dir} (cargo build -j 2 -p eve-server)...")
@@ -885,53 +1166,68 @@ class PlaytesterMemory:
     def _load_personas_cfg(self) -> Dict[str, Any]:
         if PERSONAS_PATH.exists():
             try:
-                cfg = json.loads(PERSONAS_PATH.read_text(encoding="utf-8"))
-                raw_frontier = (
-                    cfg.get("initial_coverage_frontier")
-                    or cfg.get("initial_frontier")
-                    or []
-                )
-                norm_frontier = []
-                for item in raw_frontier:
-                    if isinstance(item, dict):
-                        feat_name = item.get("feature") or item.get("feature_id") or ""
-                        if feat_name:
-                            norm = dict(item)
-                            norm.setdefault("feature", str(feat_name))
-                            norm.setdefault("status", "untested")
-                            norm_frontier.append(norm)
-                    elif isinstance(item, str) and item:
-                        norm_frontier.append({"feature": item, "status": "untested"})
-                cfg["initial_coverage_frontier"] = norm_frontier
-                return cfg
+                return json.loads(PERSONAS_PATH.read_text(encoding="utf-8"))
             except Exception:
                 pass
         return {"personas": [], "initial_coverage_frontier": []}
 
-    def _persona_initial_goal(self, persona: Dict[str, Any]) -> str:
-        goals = persona.get("goals")
-        if isinstance(goals, list) and goals:
-            return str(goals[0])
-        if persona.get("description"):
-            return str(persona["description"])
-        if persona.get("title"):
-            return str(persona["title"])
-        return "Explore the game"
+    def _default_frontier_entries(self) -> List[Dict[str, Any]]:
+        raw = (
+            self.personas_cfg.get("initial_coverage_frontier")
+            or self.personas_cfg.get("initial_frontier")
+            or []
+        )
+        entries: List[Dict[str, Any]] = []
+        for item in raw:
+            if isinstance(item, dict):
+                fid = item.get("feature") or item.get("feature_id")
+                if fid:
+                    entries.append(
+                        {
+                            "feature": str(fid),
+                            "title": item.get("title", ""),
+                            "persona": item.get("persona", ""),
+                            "status": item.get("status", "untested"),
+                        }
+                    )
+        return entries
 
     def _load_or_init(self) -> Dict[str, Any]:
+        personas = self.personas_cfg.get("personas") or []
+        default_frontier = self._default_frontier_entries()
         if self.memory_path.exists():
             try:
-                return json.loads(self.memory_path.read_text(encoding="utf-8"))
+                loaded = json.loads(self.memory_path.read_text(encoding="utf-8"))
+                # Merge any newly added initial_frontier items into existing coverage_frontier
+                frontier = loaded.setdefault("coverage_frontier", [])
+                known = {
+                    item.get("feature")
+                    for item in frontier
+                    if isinstance(item, dict) and item.get("feature")
+                }
+                for entry in default_frontier:
+                    if entry["feature"] not in known:
+                        frontier.append(dict(entry))
+                # Refresh active_persona definition from personas_cfg if matching id exists
+                active_id = (loaded.get("active_persona") or {}).get("id")
+                for idx, p in enumerate(personas):
+                    if p.get("id") == active_id:
+                        loaded["active_persona_index"] = idx
+                        loaded["active_persona"] = p
+                        break
+                return loaded
             except Exception as exc:
                 log_warn(f"Failed to parse {self.memory_path}, re-initializing: {exc}")
 
-        personas = self.personas_cfg.get("personas") or []
         first_persona = personas[0] if personas else {
             "id": "open_explorer",
             "title": "Open-Ended Capsuleer Explorer",
             "rotate_after_steps": 30,
             "goals": ["Explore all station windows, skill plans, PLEX store, undock, and warp."],
         }
+        first_goals = first_persona.get("goals") or (
+            [first_persona["description"]] if first_persona.get("description") else ["Explore the game"]
+        )
         return {
             "created_at": utc_now_iso(),
             "updated_at": utc_now_iso(),
@@ -940,12 +1236,12 @@ class PlaytesterMemory:
             "active_persona_index": 0,
             "active_persona_steps": 0,
             "active_persona": first_persona,
-            "current_goal": self._persona_initial_goal(first_persona),
+            "current_goal": first_goals[0],
             "working_memory": [
                 "Fresh playtester memory initialized. Priority: verify recently reported bugs (#527-#531: skill training, PLEX store, structure cosmetics, warp animation) and explore core gameplay loops."
             ],
             "long_term_notes": [],
-            "coverage_frontier": self.personas_cfg.get("initial_coverage_frontier") or [],
+            "coverage_frontier": default_frontier,
             "recent_actions": [],
             "filed_incident_fingerprints": [],
         }
@@ -967,7 +1263,8 @@ class PlaytesterMemory:
                     self.data["active_persona_index"] = idx
                     self.data["active_persona"] = p
                     self.data["active_persona_steps"] = 0
-                    self.data["current_goal"] = self._persona_initial_goal(p)
+                    goals = p.get("goals") or ["Explore EVE Online systems"]
+                    self.data["current_goal"] = goals[0]
                     self.save()
                     return
 
@@ -979,7 +1276,8 @@ class PlaytesterMemory:
             self.data["active_persona_index"] = idx
             self.data["active_persona"] = next_p
             self.data["active_persona_steps"] = 0
-            self.data["current_goal"] = self._persona_initial_goal(next_p)
+            goals = next_p.get("goals") or ["Explore EVE Online systems"]
+            self.data["current_goal"] = goals[0]
             log_info(f"Rotated persona -> [{next_p.get('id')}] {next_p.get('title')}")
             self.save()
 
@@ -1084,7 +1382,16 @@ def build_reasoning_prompt(
         if x.get("status") == "verified"
     ][-15:]
     recent_actions = (mem.get("recent_actions") or [])[-8:]
-    prev_action_entry = recent_actions[-1] if recent_actions else None
+    if last_flight_recorder:
+        prev_action_entry = recent_actions[-1] if recent_actions else None
+    else:
+        prev_action_entry = {
+            "note": (
+                "Fresh client session just started or hot-reloaded — do NOT verify the "
+                "prior session's last action against this fresh startup window layout. "
+                "Set previous_action_verification.expectation_met = true and bug_report.should_file = false."
+            )
+        }
     compact_recent_lines = ",\n  ".join(
         json.dumps(
             {
@@ -1133,7 +1440,7 @@ Your character has full **GM / QA / Admin role access** (`0x7FFFFFFFFFFFFFFF`) s
 {burst_section}
 ### Active Exploration Persona & Goal
 - **Persona:** `[{persona.get('id', 'explorer')}]` {persona.get('title', 'Explorer')} (step {mem.get('active_persona_steps', 0)}/{persona.get('rotate_after_steps', 25)} before rotation)
-- **Persona Directives:** {json.dumps(persona.get('goals', []))}
+- **Persona Directives:** {json.dumps(persona.get('goals') or ([persona['description']] if persona.get('description') else []))}
 - **Current Goal:** {mem.get('current_goal')}
 
 ### Persistent Working Memory
@@ -1194,22 +1501,27 @@ Use these ground-truth EVE Online V24.01 expectations to judge whether the game 
    - `approach` / `orbit` MUST transition `space.ego.mode` to `1` (`FOLLOW`) or `4` (`ORBIT`) and increase `speed_mps > 0`.
 7. **Quasar Windows (`open_plex_store`, `skill_plans`, `open_structure_cosmetics`, `agency`, `corporation`):**
    - Opening these windows MUST populate their UI content without `TimeoutException`, `SkillPlanConnectionError`, or permanently blank/spinning panels.
+8. **Mining, Asteroid Harvesting, Mining Ledger & Ore Reprocessing (`mining`, `miningledger`, `reprocessing`, `mininghold`):**
+   - Key mining typeIDs: Skills `Mining` (`3386`), `Astrogeology` (`3410`), `Mining Frigate` (`32918`), `Reprocessing` (`3385`); Modules `Miner I` (`483`), `Civilian Miner` (`3651`), `Miner II` (`482`); Ship `Venture` (`32880`); Asteroid ores `Veldspar` (`1230`), `Scordite` (`1228`), `Pyroxeres` (`1224`), `Plagioclase` (`18`); Reprocessed mineral `Tritanium` (`34`).
+   - Running `/spawn 1230` in space MUST spawn a Veldspar asteroid ball (`categoryID 25`) in `space.nearby_balls` (`DoBallsAdded`).
+   - Locking an asteroid within range (`lock_target`) and activating a fitted online mining laser (`activate_module` / `ModuleButton_483` / `ModuleButton_3651`) MUST emit `OnGodmaShipEffect` (`effects.Laser`), deposit mined ore units into the ship's Cargo Hold or Mining Hold (`OnItemChange`), and record a personal/corporate entry in the **Mining Ledger** (`open_neocom` target `"miningledger"`).
+   - While docked at a station, opening the **Reprocessing Plant** (`open_neocom` target `"reprocessing"`), quoting ore (`reprocessingSvc.GetQuotes`), and reprocessing (`reprocessingSvc.Reprocess`) MUST consume the ore stack and deliver minerals (`Tritanium` `34`) via `OnItemChange`.
 
 ### Action Catalog & Instructions
 Choose your next action in the `action` object according to the required JSON schema:
 1. `click_widget`: Click a widget by `target` (matching `name`, `path`, or `label` from `open_windows`, `context_menu`, `modals`, or `clickable_widgets`) or fallback coordinates `x`, `y`.
-2. `open_neocom`: Open a Neocom window by `target` (`character_sheet`, `skills`, `skill_plans`, `inventory`, `fitting`, `market`, `plex_store`, `new_eden_store`, `agency`, `corporation`, `industry`, `contracts`, `mail`, `wallet`, `map`, `assets`, `notepad`).
+2. `open_neocom`: Open a Neocom window by `target` (`character_sheet`, `skills`, `skill_plans`, `inventory`, `cargohold`, `mininghold`, `mineralhold`, `fitting`, `market`, `miningledger`, `reprocessing`, `moonmining`, `plex_store`, `new_eden_store`, `agency`, `corporation`, `fleet`, `industry`, `contracts`, `mail`, `wallet`, `map`, `dscan`, `probe`, `assets`, `notepad`).
 3. `close_window`: Close a window or modal by `target` (`window_id` or `name`, or empty to close modals).
 4. `undock` / `dock`: Undock into space or dock at a station (`target` optional station item_id).
-5. `warp_to` / `approach` / `orbit` / `keep_at_range` / `lock_target` / `activate_module`: In-space navigation and combat commands.
-6. `train_skill`: Inject and queue a skill (`target` = skill typeID, e.g. `"3300"`, `"3301"`, `"3327"`).
+5. `warp_to` / `approach` / `orbit` / `keep_at_range` / `lock_target` / `activate_module`: In-space navigation, combat, and mining laser commands.
+6. `train_skill`: Inject and queue a skill (`target` = skill typeID, e.g. `"3386"`, `"3385"`, `"3300"`, `"3327"`).
 7. **GM Timer-Acceleration Actions (Use these to test multi-hour timers immediately without waiting real-time!):**
    - `complete_skills`: Immediately finishes active skill training (`target` = `"all"` or seconds like `"3600"`).
    - `advance_upwell_timer`: Fast-forwards Upwell structure anchoring/onlining/reinforcement/unanchoring timers in the solar system (`target` = optional `structureID`).
    - `complete_industry_jobs`: Fast-forwards active manufacturing/research industry jobs to completion (`target` = optional `jobID`).
    - `advance_server_time`: Advances virtual server clock by `target` seconds (default `"3600"`), advancing all server lifecycle timers.
    - `clear_timers`: Clears session-change cooldown, jump fatigue/cooldown, clone jump timer, and crimewatch timers.
-   - `slash_command`: Run any GM slash command (`command` = e.g. `"/giveisk 100000000"`, `"/createitem 587 1"`, `"/giveskill 3300 5"`, `"/spawn 1201"`, `"/moveme"`).
+   - `slash_command`: Run any GM slash command (`command` = e.g. `"/giveisk 100000000"`, `"/createitem 483 1"`, `"/giveskill 3386 5"`, `"/fit me 483"`, `"/spawn 1230"`, `"/moveme"`).
 8. `open_plex_store` / `open_structure_cosmetics`: Direct probes for `#529` and `#527`.
 9. `press_key` / `type_text` / `click_xy` / `drag_widget` / `wait`: Direct UI manipulation.
 
@@ -1284,10 +1596,37 @@ def invoke_agy_reasoning(
             if proc.returncode == 0 and raw_out:
                 decision = _extract_json_decision(raw_out)
                 if decision and isinstance(decision.get("action"), dict):
-                    log_info(
-                        f"agy ({model_name}) decided in {elapsed:.1f}s -> "
-                        f"{decision['action'].get('type')} ({decision['action'].get('target') or decision['action'].get('command') or ''})"
-                    )
+                    conv_id = ""
+                    usage: Dict[str, Any] = {}
+                    num_turns = 1
+                    try:
+                        outer = json.loads(raw_out)
+                        if isinstance(outer, dict):
+                            conv_id = str(outer.get("conversation_id") or "")
+                            usage = outer.get("usage") or {}
+                            num_turns = int(outer.get("num_turns") or 1)
+                    except Exception:
+                        pass
+                    thinking_blocks, tool_calls = _extract_agy_transcript_traces(conv_id)
+                    if conv_id:
+                        decision["_conversation_id"] = conv_id
+                    if usage:
+                        decision["_usage"] = usage
+                    decision["_num_turns"] = num_turns
+                    if tool_calls:
+                        decision["_tool_calls"] = tool_calls
+                    if thinking_blocks:
+                        decision["_thinking_trace"] = thinking_blocks
+                        (step_dir / "thinking.md").write_text(
+                            "\n\n---\n\n".join(thinking_blocks) + "\n",
+                            encoding="utf-8",
+                        )
+                    step_num_guess = 0
+                    try:
+                        step_num_guess = int(step_dir.name.replace("step_", ""))
+                    except Exception:
+                        pass
+                    log_agy_reasoning_trace(step_num_guess, model_name, elapsed, decision)
                     return decision, model_name
             last_err = f"model={model_name} rc={proc.returncode} stderr={proc.stderr[-300:] if proc.stderr else ''}"
             log_warn(f"agy model {model_name} failed ({last_err}); trying next fallback...")
@@ -1430,6 +1769,7 @@ class PlaytesterBugOracle:
         traceback_log: Path,
         server_log: Path,
         step_dir: Path,
+        last_flight_recorder: Optional[Dict[str, Any]] = None,
     ) -> List[Path]:
         """
         Check all 5 oracle channels:
@@ -1454,24 +1794,44 @@ class PlaytesterBugOracle:
         fr_macho_excs = fr.get("macho_exceptions") or []
         warp_telemetry = exec_res.get("warp_telemetry") if isinstance(exec_res, dict) else None
 
+        prev_fr = last_flight_recorder if isinstance(last_flight_recorder, dict) else {}
+        prev_log_excs = prev_fr.get("log_exceptions") or []
+        prev_tb_parts: List[str] = []
+        if prev_fr.get("traceback"):
+            prev_tb_parts.append(str(prev_fr.get("traceback")))
+        for ple in prev_log_excs:
+            if isinstance(ple, dict):
+                if ple.get("headline"):
+                    prev_tb_parts.append(str(ple.get("headline")))
+                if ple.get("trace"):
+                    prev_tb_parts.append(str(ple.get("trace")))
+        prev_tb = "\n".join(prev_tb_parts).strip()
+        prev_action_err = str(prev_fr.get("action_error") or "").strip()
+
         incidents: List[Dict[str, Any]] = []
 
-        # 1. Hard client Python traceback
-        if new_tb or fr_log_excs:
-            first_headline = ""
-            if fr_log_excs:
-                first_headline = str(fr_log_excs[0].get("headline") or "")
+        # 1. Hard client Python traceback (only when hook reported a new deduplicated log_exception,
+        # or new_tb has a traceback not already suppressed by hook deduplication)
+        if fr_log_excs:
+            first_headline = str(fr_log_excs[0].get("headline") or "").strip()
             if not first_headline and new_tb:
-                lines = [ln.strip() for ln in new_tb.splitlines() if ln.strip()]
+                lines = [
+                    ln.strip()
+                    for ln in new_tb.splitlines()
+                    if ln.strip()
+                    and "evomu_site.py" not in ln
+                    and "logmodule/__init__.py" not in ln
+                ]
                 first_headline = lines[-1] if lines else "Unhandled client Python exception"
             incidents.append(
                 {
                     "kind": "client_traceback",
-                    "title": f"[Playtester] Client exception during {decision.get('action', {}).get('type')}: {first_headline[:90]}",
+                    "title": f"[Playtester] Client exception: {first_headline[:90]}",
                     "severity": "high",
                     "subsystem": "client-python",
                     "summary": first_headline,
                     "traceback": new_tb or json.dumps(fr_log_excs, indent=2),
+                    "action_error": str(exec_res.get("action_error") or "").strip() if isinstance(exec_res, dict) else "",
                 }
             )
 
@@ -1486,6 +1846,7 @@ class PlaytesterBugOracle:
                     "subsystem": "quasar-macho",
                     "summary": json.dumps(sample),
                     "traceback": new_tb,
+                    "action_error": str(sample.get("error") or "") if isinstance(sample, dict) else str(sample),
                 }
             )
 
@@ -1504,6 +1865,7 @@ class PlaytesterBugOracle:
                         "subsystem": "space-destiny-warp",
                         "summary": f"warp_to completed without ball.mode==3, effects.Warping, or warp FX signals: {json.dumps(warp_telemetry)}",
                         "traceback": "",
+                        "action_error": "",
                     }
                 )
 
@@ -1517,12 +1879,15 @@ class PlaytesterBugOracle:
                     "subsystem": "eve-server",
                     "summary": "\n".join(srv_errors[:15]),
                     "traceback": "",
+                    "action_error": "",
                 }
             )
 
         # 5. Agent-diagnosed bug (`bug_report.should_file`) OR failed previous_action_verification (`expectation_met == False`)
-        br = decision.get("bug_report") or {}
-        pav = decision.get("previous_action_verification") or {}
+        # Skip Channel 5 on the first step of a freshly booted/hot-reloaded client session (`not last_flight_recorder`)
+        # so the agent does not mistake the fresh login window state for a UI-state desync of the old session's last action.
+        br = (decision.get("bug_report") or {}) if last_flight_recorder else {}
+        pav = (decision.get("previous_action_verification") or {}) if last_flight_recorder else {}
         if isinstance(br, dict) and br.get("should_file") and br.get("title"):
             cat = str(br.get("category") or "agent_diagnosed_bug")
             incidents.append(
@@ -1538,7 +1903,8 @@ class PlaytesterBugOracle:
                         f"Discrepancy: {pav.get('discrepancy_summary', '')}\n"
                         f"Steps:\n- " + "\n- ".join(str(s) for s in (br.get("reproduction_steps") or []))
                     ),
-                    "traceback": new_tb,
+                    "traceback": prev_tb or new_tb,
+                    "action_error": prev_action_err,
                 }
             )
         elif isinstance(pav, dict) and pav.get("expectation_met") is False and str(pav.get("discrepancy_summary") or "").strip():
@@ -1550,7 +1916,8 @@ class PlaytesterBugOracle:
                     "severity": "medium",
                     "subsystem": "client-ui-state",
                     "summary": f"Previous action expectation failed without exception:\n{disc}",
-                    "traceback": new_tb,
+                    "traceback": prev_tb or new_tb,
+                    "action_error": prev_action_err,
                 }
             )
 
@@ -1558,11 +1925,32 @@ class PlaytesterBugOracle:
         for inc in incidents:
             fp_src = f"{inc['kind']}:{inc['subsystem']}:{inc['title'][:70]}"
             fingerprint = hashlib.sha256(fp_src.encode("utf-8")).hexdigest()[:16]
+            tb_txt = str(inc.get("traceback") or "")
+            raw_frames = [ln.strip() for ln in tb_txt.splitlines() if 'File "' in ln]
+            game_frames = [
+                ln for ln in raw_frames
+                if "evomu_site.py" not in ln
+                and "logmodule" not in ln
+                and "CallWrapper" not in ln
+                and "MollycoddledUthread" not in ln
+            ]
+            chosen_frames = game_frames or raw_frames
+            tb_fp = ""
+            if chosen_frames:
+                tb_fp = "tb:" + hashlib.sha256(chosen_frames[-1].encode("utf-8")).hexdigest()[:16]
+            act_err_txt = str(inc.get("action_error") or "").strip()
+            err_fp = ""
+            if act_err_txt:
+                err_fp = "err:" + hashlib.sha256(act_err_txt[:140].encode("utf-8")).hexdigest()[:16]
             known = self.memory.data.setdefault("filed_incident_fingerprints", [])
-            if fingerprint in known:
-                log_info(f"Skipping duplicate incident ({fingerprint}): {inc['title']}")
+            if fingerprint in known or (tb_fp and tb_fp in known) or (err_fp and err_fp in known):
+                log_info(f"Skipping duplicate incident ({tb_fp or err_fp or fingerprint}): {inc['title']}")
                 continue
             known.append(fingerprint)
+            if tb_fp and tb_fp not in known:
+                known.append(tb_fp)
+            if err_fp and err_fp not in known:
+                known.append(err_fp)
             self.memory.save()
 
             self.bug_queue_dir.mkdir(parents=True, exist_ok=True)
@@ -2055,8 +2443,11 @@ role_mask = 9223372036854775807
         and `memory.json`.
         """
         log_info("=== HOT-RELOADING SERVER BOUNDARY ===")
-        self.stop_client()
-        self.stop_server()
+        self.reload_requested = False
+        try:
+            DEFAULT_CONTROL_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
 
         if not self.args.no_git_checkout:
             subprocess.run(
@@ -2065,14 +2456,22 @@ role_mask = 9223372036854775807
                 timeout=30,
             )
             subprocess.run(
-                ["git", "-C", str(self.worktree_dir), "checkout", "--detach", "origin/main"],
+                ["git", "-C", str(self.worktree_dir), "reset", "--soft", "origin/main"],
                 capture_output=True,
                 timeout=15,
+            )
+            subprocess.run(
+                ["git", "-C", str(self.worktree_dir), "checkout", "origin/main", "--", "crates", "Cargo.toml", "Cargo.lock"],
+                capture_output=True,
+                timeout=30,
             )
 
         ok, _, err_tail = compile_eve_server(self.worktree_dir)
         if not ok:
             log_err(f"Hot-reload build failed; keeping previous binary if present:\n{err_tail}")
+
+        self.stop_client()
+        self.stop_server()
 
         self.memory.data["server_reloads"] = int(self.memory.data.get("server_reloads", 0)) + 1
         self.memory.data.setdefault("long_term_notes", []).append(
@@ -2106,6 +2505,7 @@ role_mask = 9223372036854775807
         (step_dir / "ui_state.json").write_text(
             json.dumps(ui_snapshot, indent=2), encoding="utf-8"
         )
+        log_step_header(step_num, git_head, self.memory, ui_snapshot)
 
         screenshot_path = step_dir / "screen.png"
         client_pid = self.client_proc.pid if self.client_proc else None
@@ -2184,6 +2584,7 @@ role_mask = 9223372036854775807
         (step_dir / "exec_result.json").write_text(
             json.dumps(exec_res, indent=2), encoding="utf-8"
         )
+        log_step_execution_outcome(step_num, exec_res, decision)
 
         # 4. Update persistent agent memory and evaluate zero-tolerance bug oracle
         self.memory.apply_agent_decision(step_num, decision, exec_res)
@@ -2198,6 +2599,7 @@ role_mask = 9223372036854775807
             traceback_log=self.current_run_dir / "client_tracebacks.log",
             server_log=self.current_run_dir / "server.log",
             step_dir=step_dir,
+            last_flight_recorder=last_flight_recorder,
         )
 
         fr_delta = dict((exec_res.get("flight_recorder") or {}) if isinstance(exec_res, dict) else {})
@@ -2205,6 +2607,10 @@ role_mask = 9223372036854775807
             fr_delta["state_diff"] = exec_res["state_diff"]
         if isinstance(exec_res, dict) and exec_res.get("warp_telemetry"):
             fr_delta["warp_telemetry"] = exec_res["warp_telemetry"]
+        if isinstance(exec_res, dict) and exec_res.get("action_error"):
+            fr_delta["action_error"] = exec_res["action_error"]
+        if isinstance(exec_res, dict) and exec_res.get("traceback"):
+            fr_delta["traceback"] = exec_res["traceback"]
         return fr_delta, burst_paths
 
     def run(self) -> int:
