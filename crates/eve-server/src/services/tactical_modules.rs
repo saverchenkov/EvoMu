@@ -812,12 +812,21 @@ pub async fn activate_command_burst(
     };
     let (charge_tid, charge_item_id_opt) = ctx.db.with_snapshot(|snap| {
         let mod_flag = snap.items.get(&module_id).map(|i| i.flag);
-        let is_burst_charge = |i: &eve_db::InventoryItemRecord| {
-            i.location_id == ship_id && i.item_id != module_id && i.quantity > 0
+        let is_slot_burst_charge = |i: &eve_db::InventoryItemRecord| {
+            i.location_id == ship_id
+                && i.item_id != module_id
+                && Some(i.flag) == mod_flag
+                && i.quantity > 0
                 && is_valid_charge_type(i.type_id)
-                && charge_tid_opt.is_none_or(|req| i.type_id == req)
         };
-        if let Some(found) = snap.items.values().find(|i| Some(i.flag) == mod_flag && is_burst_charge(i)) {
+        // Prefer an exact match with `charge_tid_opt`, falling back to any compatible burst charge
+        // physically loaded in the module's slot if `charge_tid_opt` held a stale cached type ID.
+        if let Some(found) = snap
+            .items
+            .values()
+            .find(|i| is_slot_burst_charge(i) && charge_tid_opt.is_none_or(|req| i.type_id == req))
+            .or_else(|| snap.items.values().find(|i| is_slot_burst_charge(i)))
+        {
             (Some(found.type_id), Some(found.item_id))
         } else {
             (None, None)

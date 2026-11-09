@@ -1028,11 +1028,13 @@ pub async fn handle_gm_slash_ext(
                 ]
             };
 
+            let has_slot_effect = mod_type.category_id == 32
+                || effects.iter().any(|e| matches!(e, 11 | 12 | 13 | 2663 | 3772));
             let chosen_flag = if let Some(ef) = explicit_flag {
                 ef
             } else if mod_type.category_id == 18 {
                 InventoryFlag::DroneBay
-            } else if ship_cat_id == 6 && matches!(mod_type.category_id, 7 | 32) {
+            } else if ship_cat_id == 6 && matches!(mod_type.category_id, 7 | 32) && has_slot_effect {
                 // Validate hull slot limits, subsystem slots, and turret/launcher hardpoints before creating the item.
                 let mut chosen: Option<InventoryFlag> = None;
                 let mut first_err: Option<String> = None;
@@ -1114,9 +1116,14 @@ pub async fn handle_gm_slash_ext(
                 let mut new_loads_opt: Option<(f64, f64)> = None;
                 if is_fitting_slot {
                     if let Ok(mut fit) = ctx.get_or_rebuild_ship_fitting(rec.owner_id, ship_id) {
-                        if fit.modules.contains_key(&rec.item_id)
-                            && fit.set_module_online(rec.item_id, &ctx.sde).is_ok()
-                        {
+                        // Explicit-flag GM `/fit <ship> <type> <flag>` forces the chosen slot online
+                        // when hull CPU/PG permits; auto-slot `/fit <type>` checks pilot skills (#648).
+                        let online_ok = if explicit_flag.is_some() {
+                            fit.set_module_online_skip_skills(rec.item_id, &ctx.sde).is_ok()
+                        } else {
+                            fit.set_module_online(rec.item_id, &ctx.sde).is_ok()
+                        };
+                        if fit.modules.contains_key(&rec.item_id) && online_ok {
                             is_online = true;
                             let new_cpu = fit
                                 .ship

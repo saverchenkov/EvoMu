@@ -2971,11 +2971,11 @@ async fn it_dock_enforces_2500m_perimeter_even_with_nonempty_session_address() {
     let sys_h = ctx.systems.get_or_spawn(sys_id);
     let (_, station_ball) = sys_h.get_ball_snapshot(st_id).await.unwrap().expect("station ball");
 
-    // Place ship 40,000m beyond station radius (> 35,000m live-client perimeter)
+    // Place ship 5,000m beyond station radius (> 2,500m docking perimeter)
     let _ = sys_h
         .set_ball_position(
             ship_id,
-            station_ball.position + DVec3::new(station_ball.radius + 40_000.0, 0.0, 0.0),
+            station_ball.position + DVec3::new(station_ball.radius + 5_000.0, 0.0, 0.0),
         )
         .await;
     assert_eq!(
@@ -2993,7 +2993,7 @@ async fn it_dock_enforces_2500m_perimeter_even_with_nonempty_session_address() {
         "OutsideDockingPerimeter"
     );
 
-    // Spawn structure ball on grid and move ship 40,000m beyond structure radius (> 35,000m)
+    // Spawn structure ball on grid and move ship 10,000m beyond structure radius (> 2,500m)
     let st_rad = 15_000.0;
     let _ = sys_h
         .spawn_ball_with_combat(
@@ -3015,7 +3015,7 @@ async fn it_dock_enforces_2500m_perimeter_even_with_nonempty_session_address() {
     let _ = sys_h
         .set_ball_position(
             ship_id,
-            upwell_pos + DVec3::new(st_rad + 40_000.0, 0.0, 0.0),
+            upwell_pos + DVec3::new(st_rad + 10_000.0, 0.0, 0.0),
         )
         .await;
     assert_eq!(

@@ -45,23 +45,42 @@ pub(crate) async fn handle_module_cycles(
             }
             if method == "Activate" && effect_name == "online" {
                 let module_id = raw_module_id;
-                if let Some(sys_id) = session.solar_system_id {
-                    let sys = ctx.systems.get_or_spawn(sys_id);
-                    if sys.has_active_nanite_repair_sync(ship_id, module_id) {
-                        return Some(Err(BridgeRpcError {
-                            code: "ModuleBeingRepaired".into(),
-                            message: format!("Module {module_id} cannot be onlined while undergoing nanite repair"),
-                        }));
+                let is_docked = session.station_id.is_some() || session.structure_id.is_some();
+                let is_currently_offline = ctx
+                    .db
+                    .with_snapshot(|s| s.module_online_states.get(&module_id).copied())
+                    == Some(false)
+                    || ctx
+                        .get_or_rebuild_ship_fitting(char_id, ship_id)
+                        .ok()
+                        .and_then(|f| {
+                            f.modules
+                                .get(&module_id)
+                                .map(|m| m.state == eve_dogma::ModuleState::Offline)
+                        })
+                        .unwrap_or(false);
+                // When docked or when the module is currently offline in space, `Activate(id, "online")`
+                // brings the fitted module online (`const.effectOnline = 16`). When the module is already
+                // online in space, allow cycle activation to proceed through `handle_module_cycles`.
+                if is_docked || is_currently_offline {
+                    if let Some(sys_id) = session.solar_system_id {
+                        let sys = ctx.systems.get_or_spawn(sys_id);
+                        if sys.has_active_nanite_repair_sync(ship_id, module_id) {
+                            return Some(Err(BridgeRpcError {
+                                code: "ModuleBeingRepaired".into(),
+                                message: format!("Module {module_id} cannot be onlined while undergoing nanite repair"),
+                            }));
+                        }
                     }
+                    return Some(
+                        crate::services::notify_emitters_skills_trade_godma::handle_dogma_set_module_online(
+                            ctx,
+                            session,
+                            &[PyRep::Integer(ship_id), PyRep::Integer(module_id)],
+                        )
+                        .await,
+                    );
                 }
-                return Some(
-                    crate::services::notify_emitters_skills_trade_godma::handle_dogma_set_module_online(
-                        ctx,
-                        session,
-                        &[PyRep::Integer(ship_id), PyRep::Integer(module_id)],
-                    )
-                    .await,
-                );
             }
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Cannot activate modules outside of space".into() }));

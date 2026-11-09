@@ -554,27 +554,17 @@ async fn test_ch2_skill_handling_and_prerequisites() {
     .await
     .expect("SelectCharacterID");
 
-    // 1. GetSkillQueue (feat:skills.queue-get)
+    // 1. GetSkillQueue (feat:skills.queue-get): V24 returns PyRep::List of PyRep::KeyVal entries
     let q_res = ctx
         .dispatch_rpc(&mut sess, "skillMgr2", None, "GetSkillQueue", &[], &kw, None)
         .await
         .expect("GetSkillQueue");
-    let PyRep::Rowset { columns, .. } = q_res else {
-        panic!("Expected Rowset from GetSkillQueue");
+    let PyRep::List(initial_q) = q_res else {
+        panic!("Expected List of KeyVal from GetSkillQueue, got {q_res:?}");
     };
-    assert_eq!(
-        columns,
-        vec![
-            "trainingTypeID",
-            "trainingToLevel",
-            "trainingStartSP",
-            "trainingDestinationSP",
-            "durationSeconds",
-            "queuePosition",
-            "trainingStartTime",
-            "trainingEndTime",
-        ]
-    );
+    for entry in &initial_q {
+        assert!(matches!(entry, PyRep::KeyVal(_)), "GetSkillQueue entries must be KeyVal");
+    }
 
     // 2. SaveSkillQueue: Queue skills with prerequisite checks (feat:skills.queue-save, feat:skills.prereq-check)
     // Small Hybrid Turret (type 3301) requires Gunnery (type 3300) level 1.
@@ -629,6 +619,27 @@ async fn test_ch2_skill_handling_and_prerequisites() {
         assert_eq!(q[0].type_id, 3300);
         assert_eq!(q[1].type_id, 3301);
     });
+
+    let populated_q_res = ctx
+        .dispatch_rpc(&mut sess, "skillMgr2", None, "GetSkillQueue", &[], &kw, None)
+        .await
+        .expect("GetSkillQueue populated");
+    let PyRep::List(populated_q) = populated_q_res else {
+        panic!("Expected List of KeyVal from populated GetSkillQueue");
+    };
+    assert_eq!(populated_q.len(), 2);
+    for (idx, expected_tid) in [(0_i64, 3300_i64), (1_i64, 3301_i64)] {
+        let entry = &populated_q[idx as usize];
+        assert!(matches!(entry, PyRep::KeyVal(_)), "Queue entry {idx} must be KeyVal");
+        assert_eq!(entry.dict_get("trainingTypeID"), Some(&PyRep::Integer(expected_tid)));
+        assert_eq!(entry.dict_get("trainingToLevel"), Some(&PyRep::Integer(1)));
+        assert_eq!(entry.dict_get("queuePosition"), Some(&PyRep::Integer(idx)));
+        assert!(entry.dict_get("trainingStartSP").and_then(PyRep::as_f64).is_some());
+        assert!(entry.dict_get("trainingDestinationSP").and_then(PyRep::as_f64).is_some());
+        assert!(entry.dict_get("durationSeconds").and_then(PyRep::as_f64).is_some_and(|d| d > 0.0));
+        assert!(entry.dict_get("trainingStartTime").and_then(PyRep::as_i64).is_some());
+        assert!(entry.dict_get("trainingEndTime").and_then(PyRep::as_i64).is_some());
+    }
 
     // Save empty queue clears and pauses queue
     let empty_save = ctx

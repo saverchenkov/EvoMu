@@ -63,15 +63,19 @@ fn opt_outs() -> PyRep {
     ])
 }
 
-fn member(char_id: i64, wing: i64, squad: i64, role: i64, job: i64) -> PyRep {
+fn member_opt(char_id: i64, wing: Option<i64>, squad: Option<i64>, role: i64, job: i64) -> PyRep {
     kv(&[
         ("charID", PyRep::Integer(char_id)),
-        ("wingID", PyRep::Integer(wing)),
-        ("squadID", PyRep::Integer(squad)),
+        ("wingID", wing.map(PyRep::Integer).unwrap_or(PyRep::None)),
+        ("squadID", squad.map(PyRep::Integer).unwrap_or(PyRep::None)),
         ("role", PyRep::Integer(role)),
         ("job", PyRep::Integer(job)),
         ("memberOptOuts", opt_outs()),
     ])
+}
+
+fn member(char_id: i64, wing: i64, squad: i64, role: i64, job: i64) -> PyRep {
+    member_opt(char_id, Some(wing), Some(squad), role, job)
 }
 
 fn int(rep: &PyRep, key: &str) -> i64 {
@@ -97,10 +101,11 @@ async fn test_fleet_structure_membership_notifications() {
     let (mut s1, mut s2, _s3, p3) = three_pilots(&ctx).await;
     const FH: &str = "fleetObjectHandler";
 
-    // CreateFleet: the creator's own OnFleetJoin(member) carries the boss job bit (fleetJobCreator = 2).
+    // CreateFleet: the creator sits at fleet root (wingID=None, squadID=None, role=1) and
+    // OnFleetJoin(member) carries the boss job bit (fleetJobCreator = 2).
     call(&ctx, &mut s1, "fleetMgr", "CreateFleet", &[]).await;
     let fid = s1.fleet_id.expect("fleet id");
-    assert_eq!(events(&ctx, P1, "OnFleetJoin"), vec![vec![member(P1, 1, 1, 1, 2)]]);
+    assert_eq!(events(&ctx, P1, "OnFleetJoin"), vec![vec![member_opt(P1, None, None, 1, 2)]]);
     assert!(events(&ctx, P2, "OnFleetJoin").is_empty(), "non-member must not get OnFleetJoin");
 
     // Wing / squad structure: OnFleetWingAdded(wingID), OnFleetWingNameChanged(wingID, name),

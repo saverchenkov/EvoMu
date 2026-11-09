@@ -544,3 +544,151 @@ async fn context_advance_secs_expires_jetcans_extractions_moon_probes_and_skill_
     assert!(prod.db.with_snapshot(|s| !s.characters.is_empty()));
 }
 
+#[test]
+fn rebuild_ship_fitting_prioritizes_skilled_modules_preserves_offline_and_syncs_cached_charges() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001;
+    let ship_id = 900_810_001;
+    let skilled_gun_id = 900_810_002;
+    let unskilled_oversized_id = 900_810_003;
+    let explicit_offline_id = 900_810_004;
+    let charge_item_id = 900_810_005;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let sk = snap.skills.entry(char_id).or_default();
+        sk.clear();
+        for tid in [3300_u32, 3301, 3302] {
+            sk.insert(
+                tid,
+                TrainedSkillRecord {
+                    type_id: tid,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587, // Rifter
+                owner_id: char_id,
+                location_id: 30_000_142,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        // Skilled 125mm Gatling AutoCannon I (484) in HiSlot0
+        snap.items.insert(
+            skilled_gun_id,
+            InventoryItemRecord {
+                item_id: skilled_gun_id,
+                type_id: 484,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        // Unskilled oversized Large Shield Extender II (3841, 175 PG > 41 PG) seeded without skills
+        snap.items.insert(
+            unskilled_oversized_id,
+            InventoryItemRecord {
+                item_id: unskilled_oversized_id,
+                type_id: 3841,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::MedSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        // Explicitly offline Damage Control II (2048, missing skill 3394)
+        snap.items.insert(
+            explicit_offline_id,
+            InventoryItemRecord {
+                item_id: explicit_offline_id,
+                type_id: 2048,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::LoSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            charge_item_id,
+            InventoryItemRecord {
+                item_id: charge_item_id,
+                type_id: 185, // EMP S
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 40,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(unskilled_oversized_id, true);
+        snap.module_online_states.insert(explicit_offline_id, false);
+    });
+
+    let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
+    assert_eq!(
+        fit.modules.get(&skilled_gun_id).map(|m| (m.state, m.charge_type_id, m.charge_quantity)),
+        Some((eve_dogma::ModuleState::Online, Some(185), 40)),
+        "skilled turret must come online with loaded charge"
+    );
+    assert_eq!(
+        fit.modules.get(&explicit_offline_id).map(|m| m.state),
+        Some(eve_dogma::ModuleState::Offline),
+        "explicitly offline missing-skill module must remain in fit.modules as Offline"
+    );
+    assert!(
+        !fit.modules.contains_key(&unskilled_oversized_id),
+        "unskilled oversized seeded module must not stay in fit.modules"
+    );
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.module_online_states.get(&unskilled_oversized_id).copied()),
+        Some(true),
+        "unskilled oversized seeded module must not be auto-offlined in DB snapshot"
+    );
+
+    // Swap charge in DB snapshot without calling invalidate_ship_fitting -> cached fit updates
+    ctx.store_ship_fitting(ship_id, fit);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.items.get_mut(&charge_item_id) {
+            ch.type_id = 182; // Fusion S
+            ch.quantity = 25;
+        }
+    });
+    let cached_fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
+    assert_eq!(
+        cached_fit.modules.get(&skilled_gun_id).map(|m| (m.charge_type_id, m.charge_quantity)),
+        Some((Some(182), 25)),
+        "cached fitting must resync swapped slot charge"
+    );
+
+    // Remove charge item completely -> cached fit clears slot charge cleanly
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&charge_item_id);
+    });
+    let cleared_fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
+    assert_eq!(
+        cleared_fit.modules.get(&skilled_gun_id).map(|m| (m.charge_type_id, m.charge_quantity)),
+        Some((None, 0)),
+        "cached fitting must clear removed slot charge"
+    );
+}
+

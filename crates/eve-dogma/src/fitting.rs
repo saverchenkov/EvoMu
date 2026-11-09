@@ -611,6 +611,15 @@ impl ShipFittingEngine {
         Ok(())
     }
 
+    /// Returns true if the pilot satisfies `requiredSkill1..6` on `module_type_id`.
+    pub fn has_required_skills_for_type(&self, module_type_id: TypeId, sde: &SdeRegistry) -> bool {
+        let Some(mod_type) = sde.types.get(&module_type_id) else {
+            return false;
+        };
+        self.check_required_skills(module_type_id, &mod_type.name, &mod_type.default_attributes)
+            .is_ok()
+    }
+
     pub fn set_module_online(
         &mut self,
         module_item_id: i64,

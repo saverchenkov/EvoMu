@@ -622,18 +622,57 @@ pub fn is_tenebrex_jammer_active_in_snap(
 pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
     tick_skyhooks(ctx, now_unix).await;
 
-    let has_sov_work = ctx.db.with_snapshot(|snap| {
+    // Pre-check read-only snapshot state so steady-state idle 1 Hz ticks with zero pending
+    // sovereignty mutations skip `with_mut_snapshot` (0 SQLite WAL writes), while still
+    // advancing Strategic Index day thresholds, Military/Industrial index daily decay,
+    // Tenebrex spool-up completion, hacked hub expiry, Command Node spawns, unattended
+    // Command Node regeneration, and live Entosis Link captures.
+    let has_sov_snapshot_work = ctx.db.with_snapshot(|snap| {
         !snap.sov_runtime.mercenary_dens.is_empty()
             || !snap.sov_runtime.mto_site_balls.is_empty()
-            || !snap.sov_runtime.hacked_hubs.is_empty()
+            || snap
+                .sov_runtime
+                .hacked_hubs
+                .values()
+                .any(|&until| now_unix >= until)
             || !snap.sov_runtime.sov_hubs.is_empty()
+            || snap
+                .sov_runtime
+                .tenebrex_spool_ready_unix
+                .iter()
+                .any(|(sid, &ready_at)| {
+                    now_unix >= ready_at
+                        && !snap
+                            .sov_runtime
+                            .tenebrex_spool_notified
+                            .get(sid)
+                            .copied()
+                            .unwrap_or(false)
+                })
+            || snap
+                .sov_runtime
+                .sov_claimed_since_unix
+                .iter()
+                .any(|(&sys_id, &since)| {
+                    snap.system_states.get(&sys_id).is_some_and(|st| {
+                        st.sov_alliance_id.is_some()
+                            && st.strategic_index
+                                != strategic_level_for_days(now_unix.saturating_sub(since) / 86_400)
+                    })
+                })
+            || snap.system_states.iter().any(|(&sys_id, st)| {
+                st.sov_alliance_id.is_some()
+                    && match snap.sov_runtime.sov_dev_decay_last_unix.get(&sys_id) {
+                        None => true,
+                        Some(&last) => now_unix.saturating_sub(last) >= 86_400,
+                    }
+            })
     });
-    if !has_sov_work {
-        return;
-    }
 
-    let pending: PendingNotices = Arc::new(RwLock::new(Vec::new()));
-    let (mto_balls, mto_despawns, spool_events, strat_events, upg_spawns, upg_despawns, hubs_ready_for_nodes) = ctx.db.with_mut_snapshot(|snap| {
+    let (mto_balls, mto_despawns, spool_events, strat_events, upg_spawns, upg_despawns) =
+        if has_sov_snapshot_work {
+            let pending: PendingNotices = Arc::new(RwLock::new(Vec::new()));
+            let res = ctx.db.with_mut_snapshot(|snap| {
         let mto_before: std::collections::HashMap<i64, u32> = snap
             .sov_runtime
             .mto_site_balls
@@ -816,24 +855,49 @@ pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
             crate::services::sov_warzone_dynamic::refresh_system_adm_vulnerability_windows_in_snap(snap, usys);
         }
 
-        let sov_types = crate::esi::sov_fw_routes::sov_structure_type_ids(&ctx.sde);
-        let hubs_ready_for_nodes: Vec<(i64, u32)> = snap
+        (mto_to_spawn, mto_despawns, spools, strat_updates, upg_spawns, upg_despawns)
+    });
+            flush_pending_quasar(ctx, &pending, now_unix);
+            res
+        } else {
+            (
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+        };
+
+    // Spawn Constellation Command Nodes for any reinforced Sovereignty Hub or TCU whose
+    // reinforcement timer has elapsed inside its ADM-scaled vulnerability window, even when
+    // no Equinox upgrades (`sov_hubs`) are installed.
+    let hubs_ready_for_nodes: Vec<(i64, u32)> = ctx.db.with_snapshot(|snap| {
+        if !snap
             .structures
+            .values()
+            .any(|st| st.state == "HullReinforced" && now_unix >= st.reinforced_until_unix)
+        {
+            return Vec::new();
+        }
+        let sov_types = crate::esi::sov_fw_routes::sov_structure_type_ids(&ctx.sde);
+        snap.structures
             .values()
             .filter(|st| {
                 (st.type_id == TYPE_SOVEREIGNTY_HUB || sov_types.contains(&st.type_id))
                     && st.state == "HullReinforced"
                     && now_unix >= st.reinforced_until_unix
                     && is_hub_within_vulnerability_window_in_snap(snap, st.structure_id, now_unix)
-                    && !snap.sov_runtime.command_nodes.values().any(|&(hid, _, _)| hid == st.structure_id)
+                    && !snap
+                        .sov_runtime
+                        .command_nodes
+                        .values()
+                        .any(|&(hid, _, _)| hid == st.structure_id)
             })
             .map(|st| (st.structure_id, st.solar_system_id))
-            .collect();
-
-        (mto_to_spawn, mto_despawns, spools, strat_updates, upg_spawns, upg_despawns, hubs_ready_for_nodes)
+            .collect()
     });
-
-    flush_pending_quasar(ctx, &pending, now_unix);
 
     for (hub_id, hsys) in hubs_ready_for_nodes {
         crate::services::sov_warzone_dynamic::spawn_command_nodes_for_hub(ctx, hub_id, hsys).await;

@@ -409,7 +409,7 @@ async fn undock_and_dock_upwell_structure_online_modules_and_guard_branches() {
     sess.address = "tcp:127.0.0.1:44444".to_string();
     let (_, st_ball) = sys_h.get_ball_snapshot(st_id).await.unwrap().unwrap();
     let _ = sys_h
-        .set_ball_position(ship_id, st_ball.position + DVec3::new(st_ball.radius + 40_000.0, 0.0, 0.0))
+        .set_ball_position(ship_id, st_ball.position + DVec3::new(st_ball.radius + 10_000.0, 0.0, 0.0))
         .await;
     assert_eq!(
         handle(&ctx, &mut sess, "structureDocking", "Dock", &[PyRep::Integer(st_id)], &kw)
@@ -476,10 +476,17 @@ async fn station_dock_at_warp_destination_succeeds_while_mid_warp_still_rejects(
     });
 
     let sys_h = ctx.systems.get_or_spawn(jita_sys);
+    let eff_radius = sys_h
+        .get_ball_snapshot(jita_station)
+        .await
+        .unwrap()
+        .map(|(_, b)| b.radius)
+        .filter(|&r| r > 0.0)
+        .unwrap_or(st_radius);
     let origin = st_pos + DVec3::new(1_000_000_000.0, 0.0, 0.0);
-    let landing = st_pos + DVec3::new(st_radius, 0.0, 0.0);
-    // 1. Mid-warp far away from station -> ShipInWarp
-    let mut warp_mode = MovementMode::new_warp(origin, landing, 3.0);
+    let landing = st_pos + DVec3::new(eff_radius, 0.0, 0.0);
+    // 1. Decelerating with > 1.0s remaining (5,000m from landing at 15.0 AU/s) -> ShipInWarp even with non-empty session.address
+    let mut warp_mode = MovementMode::new_warp(origin, landing, 15.0);
     if let MovementMode::Warp { ref mut phase, .. } = warp_mode {
         *phase = eve_destiny::WarpPhase::Decelerating;
     }
@@ -488,14 +495,14 @@ async fn station_dock_at_warp_destination_succeeds_while_mid_warp_still_rejects(
             eve_destiny::Ball {
                 id: ship_id,
                 type_id: 587,
-                position: st_pos + DVec3::new(500_000.0, 0.0, 0.0),
-                velocity: DVec3::new(-50_000.0, 0.0, 0.0),
+                position: landing + DVec3::new(5_000.0, 0.0, 0.0),
+                velocity: DVec3::new(-25_000.0, 0.0, 0.0),
                 max_velocity: 350.0,
                 inertia: 2.0,
                 mass: 1_000_000.0,
                 radius: 40.0,
                 speed_fraction: 0.0,
-                mode: warp_mode.clone(),
+                mode: warp_mode,
             },
             eve_destiny::CombatState::default(),
             eve_destiny::SlimItemMeta::default(),
@@ -505,6 +512,7 @@ async fn station_dock_at_warp_destination_succeeds_while_mid_warp_still_rejects(
     ctx.active_warps.lock().unwrap().insert(ship_id, char_id);
 
     let mut sess = make_sess(char_id, corp_id, Some(jita_sys), None, None, Some(ship_id));
+    sess.address = "tcp:127.0.0.1:44446".to_string();
     assert_eq!(
         handle(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(jita_station)], &kw)
             .await
@@ -514,13 +522,14 @@ async fn station_dock_at_warp_destination_succeeds_while_mid_warp_still_rejects(
         "ShipInWarp"
     );
     assert_eq!(sess.station_id, None);
+    assert!(ctx.active_warps.lock().unwrap().contains_key(&ship_id));
 
-    // 2. Ship has arrived within docking range at warp destination while server mode is still Warp (1 Hz lag)
-    assert!(sys_h.set_ball_position(ship_id, landing).await);
+    // 2. Decelerating with <= 1.0s remaining (2,800m from landing at 15.0 AU/s) -> succeeds and terminates warp
+    assert!(sys_h.set_ball_position(ship_id, landing + DVec3::new(2_800.0, 0.0, 0.0)).await);
     let dock_res = handle(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(jita_station)], &kw)
         .await
         .unwrap()
-        .expect("stationSvc.Dock should succeed once ship has arrived within docking range of destination");
+        .expect("stationSvc.Dock should succeed within <= 1.0s warp deceleration to station");
     assert_eq!(dock_res.dict_get("locationID"), Some(&PyRep::Integer(jita_station)));
     assert_eq!(sess.station_id, Some(jita_station));
     assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));

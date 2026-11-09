@@ -2005,7 +2005,8 @@ async fn test_incursion_spawn_lifecycle_roles_and_map_rpcs() {
         .iter()
         .find(|r| r.dict_get("constellationID").and_then(|v| v.as_i64()) == Some(i64::from(target_cid)))
         .expect("target constellation in report");
-    assert_eq!(rep_row.dict_get("state").and_then(|v| v.as_str()), Some("Establishing"));
+    // V24 `taleCommon.const.incursionStates`: Withdrawing = 0, Mobilizing = 1, Established = 2.
+    assert_eq!(rep_row.dict_get("state").and_then(|v| v.as_i64()), Some(2));
     assert_eq!(rep_row.dict_get("influence").and_then(|v| v.as_f64()), Some(1.0));
     assert_eq!(rep_row.dict_get("hasBoss").and_then(|v| v.as_bool()), Some(false));
 
@@ -2056,6 +2057,19 @@ async fn test_incursion_spawn_lifecycle_roles_and_map_rpcs() {
 
     let state_after_kill = with_pve_special_reg(&ctx, |reg| reg.incursions[&target_cid].state.clone());
     assert_eq!(state_after_kill, "Withdrawing", "Mothership death enters Withdrawing state");
+    let rep_withdrawing = ctx
+        .dispatch_rpc(&mut sess, "map", None, "GetIncursionGlobalReport", &[], &kw, None)
+        .await
+        .expect("GetIncursionGlobalReport while Withdrawing");
+    let PyRep::List(reports_withdrawing) = &rep_withdrawing else {
+        panic!("Expected List");
+    };
+    let withdrawing_row = reports_withdrawing
+        .iter()
+        .find(|r| r.dict_get("constellationID").and_then(|v| v.as_i64()) == Some(i64::from(target_cid)))
+        .expect("target constellation in report while Withdrawing");
+    assert_eq!(withdrawing_row.dict_get("state").and_then(|v| v.as_i64()), Some(0));
+    assert_eq!(withdrawing_row.dict_get("hasBoss").and_then(|v| v.as_bool()), Some(false));
 
     // Advance clock past 24-hour withdrawal duration
     advance_pve_special_clock(&ctx, INCURSION_WITHDRAWAL_DURATION_SEC + 60);

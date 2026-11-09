@@ -540,3 +540,84 @@ async fn cluster_tick_catches_up_multi_second_warp_and_respects_dedicated_physic
         ball.mode
     );
 }
+
+#[tokio::test]
+async fn sov_claimed_without_sov_hubs_entry_stays_idle_clean_and_advances_indices() {
+    let dir = std::env::temp_dir().join(format!(
+        "evomu_sov_tick_wal_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("world.sqlite");
+    let db = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("open_sqlite"));
+    let sde_path = std::env::var("EVOMU_SDE_PATH").unwrap_or_else(|_| "data/evomu_sde.sqlite".into());
+    let sde = Arc::new(eve_sde::SdeRegistry::open(&sde_path).unwrap_or_default());
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    ctx.seed_demo_world_fixtures();
+
+    let claimed_sys = 30_004_759_u32;
+    let unclaimed_stale_sys = 30_004_760_u32;
+    let now0 = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        // Positive setup: claimed sovereignty system without any `sov_hubs` Equinox upgrade map entry.
+        let st = snap.system_states.entry(claimed_sys).or_default();
+        st.sov_alliance_id = Some(99_000_001);
+        st.strategic_index = 0;
+        st.military_index = 2;
+        snap.sov_runtime.sov_npc_kills.insert(claimed_sys, 15);
+        snap.sov_runtime.sov_claimed_since_unix.insert(claimed_sys, now0);
+
+        // Negative setup: stale `sov_claimed_since_unix` on an unclaimed system (`sov_alliance_id == None`)
+        // must neither advance strategic_index nor trigger per-tick SQLite WAL writes.
+        let st_unclaimed = snap.system_states.entry(unclaimed_stale_sys).or_default();
+        st_unclaimed.sov_alliance_id = None;
+        st_unclaimed.strategic_index = 0;
+        snap.sov_runtime
+            .sov_claimed_since_unix
+            .insert(unclaimed_stale_sys, now0.saturating_sub(30 * 86_400));
+    });
+
+    // Warm up initial decay timestamp & daily markers across 2 ticks.
+    for _ in 0..2 {
+        ctx.clock().advance_secs(1);
+        tick_background_cluster(&ctx).await;
+    }
+
+    // Steady-state 1 Hz ticks with claimed sovereignty must still perform 0 SQLite WAL writes.
+    let wal_before = ctx.db.with_snapshot(|s| s.wal_seq);
+    for _ in 0..5 {
+        ctx.clock().advance_secs(1);
+        tick_background_cluster(&ctx).await;
+    }
+    let wal_after = ctx.db.with_snapshot(|s| s.wal_seq);
+    assert_eq!(
+        wal_after.saturating_sub(wal_before),
+        0,
+        "steady-state claimed sov without due thresholds must not perform per-tick SQLite WAL writes"
+    );
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.system_states[&unclaimed_stale_sys].strategic_index),
+        0,
+        "unclaimed system must not gain strategic_index from stale sov_claimed_since_unix"
+    );
+
+    // Advancing past 7 days must advance `strategic_index` (0 -> 1) and decay inactive military kills (2 -> 0).
+    ctx.clock().advance_secs(7 * 86_400 + 10);
+    tick_background_cluster(&ctx).await;
+    let (strat_after, mil_after, unclaimed_strat) = ctx.db.with_snapshot(|s| {
+        (
+            s.system_states[&claimed_sys].strategic_index,
+            s.system_states[&claimed_sys].military_index,
+            s.system_states[&unclaimed_stale_sys].strategic_index,
+        )
+    });
+    assert_eq!(strat_after, 1, "claimed sov must advance strategic_index to 1 after 7 days");
+    assert_eq!(mil_after, 0, "inactive military kills must decay over 7 days");
+    assert_eq!(unclaimed_strat, 0, "unclaimed system must still remain at strategic_index 0");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -2791,9 +2791,10 @@ async fn test_covert_and_standard_cyno_spawning_and_despawning() {
     assert!(cov_beacon_id > 0);
     assert!(is_ship_cyno_active(&ctx, ship2));
 
-    // Covert cyno duration is 60s, isCovert: true, onGridOnly: true (no local notification)
+    // Covert cyno duration on Force Recon Falcon (SDE effect 2008: -50% cynosuralDurationBonus on 60s base = 30s),
+    // isCovert: true, onGridOnly: true (no local notification)
     let dur = cov_act.dict_get("durationSeconds").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    assert_eq!(dur, 60.0);
+    assert_eq!(dur, 30.0);
     assert_eq!(cov_act.dict_get("isCovert"), Some(&PyRep::Bool(true)));
     assert_eq!(cov_act.dict_get("onGridOnly"), Some(&PyRep::Bool(true)));
 

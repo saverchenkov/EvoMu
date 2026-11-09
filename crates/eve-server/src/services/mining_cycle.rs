@@ -255,13 +255,39 @@ async fn check_requirements(ctx: &ServerContext, cycle: &ActiveMiningCycle) -> R
     }
     if let Some(m) = fitted_mod {
         if let Some(mod_type) = ctx.sde.types.get(&m.type_id) {
-            if required_skills(mod_type).contains(&12180)
-                && fit.character_skills.get(&12180).copied().unwrap_or(0) < 1
-            {
-                return Err(err(
-                    MiningStopReason::ModuleOffline,
-                    format!("Module {} requires Deep Core Mining skill", cycle.module_id),
-                ));
+            // Deep Core Mining lasers/strip miners require the Deep Core Mining skill (`11395` in SDE,
+            // or synthetic `Deep Core Mining` skill in unit fixtures) even when DB-seeded online.
+            for (skill_attr, level_attr) in [
+                (182_u16, 277_u16),
+                (183, 278),
+                (184, 279),
+                (1285, 1286),
+                (1289, 1287),
+                (1290, 1288),
+            ] {
+                if let Some(&req_sk_f) = mod_type.default_attributes.get(&skill_attr) {
+                    let req_sk_id = req_sk_f as u32;
+                    let is_deep_core_skill = req_sk_id == 11_395
+                        || ctx
+                            .sde
+                            .types
+                            .get(&req_sk_id)
+                            .is_some_and(|st| st.name == "Deep Core Mining");
+                    if is_deep_core_skill {
+                        let req_lvl = mod_type
+                            .default_attributes
+                            .get(&level_attr)
+                            .copied()
+                            .unwrap_or(1.0)
+                            .max(1.0) as u8;
+                        if fit.character_skills.get(&req_sk_id).copied().unwrap_or(0) < req_lvl {
+                            return Err(err(
+                                MiningStopReason::ModuleOffline,
+                                format!("Module {} requires Deep Core Mining skill", cycle.module_id),
+                            ));
+                        }
+                    }
+                }
             }
         }
     }

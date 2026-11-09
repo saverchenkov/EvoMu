@@ -555,3 +555,100 @@ fn proximity_decloak_emits_cloak_ball_zero_and_special_fx_cloak_stop() {
         "proximity decloak must emit OnSpecialFX(effects.Cloak, is_active=false), got {events:?}"
     );
 }
+
+#[test]
+fn is_warp_finishing_within_1s_matches_deceleration_dropout_equation() {
+    let origin = DVec3::ZERO;
+    let dest = DVec3::new(50_000_000.0, 0.0, 0.0);
+
+    // Non-warp modes always return false
+    let stopped = make_ball(1, dest, DVec3::ZERO, MovementMode::Stop);
+    assert!(!is_warp_finishing_within_1s(&stopped));
+    let goto = make_ball(
+        2,
+        dest,
+        DVec3::new(100.0, 0.0, 0.0),
+        MovementMode::GotoDirection { direction: DVec3::X },
+    );
+    assert!(!is_warp_finishing_within_1s(&goto));
+
+    // Non-Decelerating warp phases always return false even when positioned right at destination
+    for non_decel_phase in [
+        WarpPhase::Aligning,
+        WarpPhase::Accelerating,
+        WarpPhase::Cruising,
+    ] {
+        let b = make_ball(
+            3,
+            dest,
+            DVec3::new(250.0, 0.0, 0.0),
+            MovementMode::Warp {
+                origin,
+                destination: dest,
+                warp_speed_au_s: 15.0,
+                total_distance: dest.length(),
+                phase: non_decel_phase,
+                elapsed_warp_time: 1.0,
+            },
+        );
+        assert!(!is_warp_finishing_within_1s(&b));
+    }
+
+    // Decelerating at 15.0 AU/s (k_d = 5.0), max_velocity = 300.0 (stop_thresh = 100.0):
+    // 1.0s dropout limit is rem_plus_1 < 100.0 / (5.0 * e^{-5.0}) ~= 2,968.26 m.
+    let mut decel_far = make_ball(
+        4,
+        dest - DVec3::new(5_000.0, 0.0, 0.0),
+        DVec3::new(25_000.0, 0.0, 0.0),
+        MovementMode::Warp {
+            origin,
+            destination: dest,
+            warp_speed_au_s: 15.0,
+            total_distance: dest.length(),
+            phase: WarpPhase::Decelerating,
+            elapsed_warp_time: 5.0,
+        },
+    );
+    assert!(!is_warp_finishing_within_1s(&decel_far));
+
+    decel_far.position = dest - DVec3::new(2_800.0, 0.0, 0.0);
+    assert!(is_warp_finishing_within_1s(&decel_far));
+
+    // Real 1 Hz Ballpark trajectory: is_warp_finishing_within_1s turns true strictly on the tick before Stop
+    let mut park = Ballpark::new(30_000_142);
+    let warper = make_ball(
+        10,
+        origin,
+        DVec3::new(250.0, 0.0, 0.0),
+        MovementMode::Warp {
+            origin,
+            destination: dest,
+            warp_speed_au_s: 15.0,
+            total_distance: dest.length(),
+            phase: WarpPhase::Aligning,
+            elapsed_warp_time: 0.0,
+        },
+    );
+    park.add_ball(warper);
+
+    let mut saw_gt_1s = false;
+    let mut saw_le_1s = false;
+    for _ in 0..40 {
+        if matches!(park.balls[&10].mode, MovementMode::Stop) {
+            break;
+        }
+        let finishing = is_warp_finishing_within_1s(&park.balls[&10]);
+        if finishing {
+            saw_le_1s = true;
+        } else {
+            saw_gt_1s = true;
+        }
+        park.step(1.0);
+        assert_eq!(
+            finishing,
+            matches!(park.balls[&10].mode, MovementMode::Stop),
+            "is_warp_finishing_within_1s must match whether the next 1.0s tick exits Warp"
+        );
+    }
+    assert!(saw_gt_1s && saw_le_1s);
+}

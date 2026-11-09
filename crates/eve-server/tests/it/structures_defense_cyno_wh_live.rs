@@ -487,9 +487,11 @@ async fn test_structures_mobile_cyno_inhibitor_lifecycle_live() {
 
     const RANCER: u32 = 30_002_718; // Lowsec (sec < 0.45)
 
-    // Pilot 1 anchors MCI (33476)
-    let mut p_anchor = common::gm_pilot_in_space(&ctx, 7801, 93_800_001, 20_185, RANCER).await;
-    common::slash_cmd(&ctx, &mut p_anchor.sess, "/giveskill 11584 5").await;
+    // Pilot 1 anchors MCI (33476) from a Vexor (626: 4 med slots, 480 m3 cargo)
+    let mut p_anchor = common::gm_pilot_in_space(&ctx, 7801, 93_800_001, 626, RANCER).await;
+    for sk in [11584_u32, 3449, 3450, 3413, 3426] {
+        common::slash_cmd(&ctx, &mut p_anchor.sess, &format!("/giveskill {sk} 5")).await;
+    }
     common::slash_cmd(&ctx, &mut p_anchor.sess, "/fit me 438").await;
     let mci_origin = common::fly_to(&ctx, &mut p_anchor, DVec3::new(80_000.0, 0.0, 0.0)).await;
     let mci_item_id = common::stock_ship_bay(&ctx, &mut p_anchor, 33476, 1, 5).await;

@@ -197,9 +197,8 @@ async fn disconnect_grace_lifecycle_tick_select_sync_and_prune() {
     });
 
     // Re-select 90_000_001 within 120s grace window:
-    // - was_already_online=true preserves fleet_id and restores corp_account_key.
-    // - was_already_online=false (fresh login/SelectCharacterID) clears stale fleet membership
-    //   so the client does not receive session.fleetid without client-side FleetSvc.fleet (#701).
+    // - within_grace=true (even when was_already_online=false on socket relog) restores fleet_id and corp_account_key.
+    // - subsequent re-select with was_already_online=true preserves fleet_id after disconnected_members is consumed.
     ctx.db.with_mut_snapshot(|snap| {
         snap.corp_governance
             .entry(1_000_009)
@@ -208,18 +207,18 @@ async fn disconnect_grace_lifecycle_tick_select_sync_and_prune() {
             .insert(90_000_001, 1003);
     });
     clock.advance_secs(60);
-    let mut online_reselect_sess = SessionState::new(2);
+    let mut grace_reselect_sess = SessionState::new(2);
+    grace_reselect_sess.corporation_id = Some(1_000_009);
+    on_character_select(&ctx, &mut grace_reselect_sess, 90_000_001, false);
+    assert_eq!(grace_reselect_sess.fleet_id, Some(fleet_id));
+    assert_eq!(grace_reselect_sess.corp_account_key, 1003);
+    assert_eq!(character_active_fleet_id(&ctx, 90_000_001), Some(fleet_id));
+
+    let mut online_reselect_sess = SessionState::new(3);
     online_reselect_sess.corporation_id = Some(1_000_009);
     on_character_select(&ctx, &mut online_reselect_sess, 90_000_001, true);
     assert_eq!(online_reselect_sess.fleet_id, Some(fleet_id));
     assert_eq!(online_reselect_sess.corp_account_key, 1003);
-
-    let mut fresh_reselect_sess = SessionState::new(3);
-    fresh_reselect_sess.corporation_id = Some(1_000_009);
-    on_character_select(&ctx, &mut fresh_reselect_sess, 90_000_001, false);
-    assert_eq!(fresh_reselect_sess.fleet_id, None);
-    assert_eq!(fresh_reselect_sess.corp_account_key, 1003);
-    assert_eq!(character_active_fleet_id(&ctx, 90_000_001), None);
 
     // Disconnect 90_000_004 and add pending invite, then advance past 120s expiry
     handle_character_disconnect(&ctx, 90_000_004);

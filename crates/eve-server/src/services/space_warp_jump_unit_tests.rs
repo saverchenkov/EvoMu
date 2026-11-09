@@ -488,7 +488,7 @@ async fn stargate_jump_and_dock_enforce_range_timers_and_complete_transitions() 
 
     sess.address = "tcp:127.0.0.1:44445".to_string();
     let (_, st_ball) = sys_handle.get_ball_snapshot(st_id).await.unwrap().unwrap();
-    sys_handle.try_set_ball_position(ship_id, st_pos + DVec3::new(st_ball.radius + 40_000.0, 0.0, 0.0));
+    sys_handle.try_set_ball_position(ship_id, st_pos + DVec3::new(st_ball.radius + 10_000.0, 0.0, 0.0));
     assert_eq!(
         handle(
             &ctx,
@@ -521,4 +521,147 @@ async fn stargate_jump_and_dock_enforce_range_timers_and_complete_transitions() 
     .unwrap();
     assert_eq!(dock_res.dict_get("locationID"), Some(&PyRep::Integer(st_id)));
     assert_eq!(sess.station_id, Some(st_id));
+}
+
+#[tokio::test]
+async fn cmd_dock_warp_deceleration_1s_tolerance_and_mid_warp_rejection() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let ship_id = 895_099_i64;
+    let sys_id = 30_000_142_u32;
+    let st_id = 60_003_760_i64;
+    let kw = HashMap::new();
+
+    let st_pos = ctx.sde.stations[&st_id].position;
+    spawn_ship_in_space(&ctx, char_id, ship_id, 606, sys_id, st_pos);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let (_, st_ball) = sys_handle.get_ball_snapshot(st_id).await.unwrap().unwrap();
+    let st_radius = st_ball.radius;
+    let origin = st_pos + DVec3::new(100_000_000.0, 0.0, 0.0);
+    let landing = st_pos + DVec3::new(st_radius, 0.0, 0.0);
+
+    // Direct evaluate_dock_perimeter unit coverage across non-warp and warp boundaries
+    let mut probe = Ball {
+        id: ship_id,
+        type_id: 606,
+        position: st_pos + DVec3::new(st_radius + 5_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 350.0,
+        inertia: 2.0,
+        mass: 1_100_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    assert_eq!(
+        evaluate_dock_perimeter(&probe, st_pos, st_radius).unwrap_err().code,
+        "OutsideDockingPerimeter"
+    );
+    probe.position = st_pos + DVec3::new(st_radius + 2_000.0, 0.0, 0.0);
+    assert_eq!(evaluate_dock_perimeter(&probe, st_pos, st_radius).unwrap(), false);
+
+    // Warp to a destination outside docking perimeter must reject with ShipInWarp even if < 1.0s to that destination
+    let far_dest = st_pos + DVec3::new(st_radius + 10_000.0, 0.0, 0.0);
+    probe.position = far_dest + DVec3::new(500.0, 0.0, 0.0);
+    probe.mode = MovementMode::Warp {
+        origin,
+        destination: far_dest,
+        warp_speed_au_s: 15.0,
+        total_distance: origin.distance(far_dest),
+        phase: eve_destiny::WarpPhase::Decelerating,
+        elapsed_warp_time: 5.0,
+    };
+    assert_eq!(
+        evaluate_dock_perimeter(&probe, st_pos, st_radius).unwrap_err().code,
+        "ShipInWarp"
+    );
+
+    // Aligning phase outside 2,500m perimeter rejects with ShipInWarp
+    probe.position = landing + DVec3::new(2_800.0, 0.0, 0.0);
+    probe.mode = MovementMode::Warp {
+        origin,
+        destination: landing,
+        warp_speed_au_s: 15.0,
+        total_distance: origin.distance(landing),
+        phase: eve_destiny::WarpPhase::Aligning,
+        elapsed_warp_time: 0.0,
+    };
+    assert_eq!(
+        evaluate_dock_perimeter(&probe, st_pos, st_radius).unwrap_err().code,
+        "ShipInWarp"
+    );
+
+    // Live CmdDock RPC: Decelerating with > 1.0s remaining (5,000m from landing at 15 AU/s) -> ShipInWarp
+    let decel_mode = MovementMode::Warp {
+        origin,
+        destination: landing,
+        warp_speed_au_s: 15.0,
+        total_distance: origin.distance(landing),
+        phase: eve_destiny::WarpPhase::Decelerating,
+        elapsed_warp_time: 5.0,
+    };
+    sys_handle.try_spawn_ball_with_combat(
+        Ball {
+            id: ship_id,
+            type_id: 606,
+            position: landing + DVec3::new(5_000.0, 0.0, 0.0),
+            velocity: DVec3::new(-25_000.0, 0.0, 0.0),
+            max_velocity: 350.0,
+            inertia: 2.0,
+            mass: 1_100_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: decel_mode,
+        },
+        CombatState::default(),
+    );
+    ctx.active_warps.lock().unwrap().insert(ship_id, char_id);
+
+    let mut sess = SessionState {
+        session_id: 51,
+        user_id: Some(1),
+        character_id: Some(char_id),
+        solar_system_id: Some(sys_id),
+        station_id: None,
+        ship_id: Some(ship_id),
+        address: "tcp:127.0.0.1:44446".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            None,
+            "beyonce",
+            "CmdDock",
+            &[PyRep::Integer(st_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "ShipInWarp"
+    );
+    assert_eq!(sess.station_id, None);
+    assert!(ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+
+    // Decelerating with <= 1.0s remaining (2,800m from landing at 15 AU/s, outside 2,500m static perimeter) -> Ok & warp stopped
+    sys_handle.try_set_ball_position(ship_id, landing + DVec3::new(2_800.0, 0.0, 0.0));
+    let dock_ok = handle(
+        &ctx,
+        &mut sess,
+        None,
+        "beyonce",
+        "CmdDock",
+        &[PyRep::Integer(st_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("CmdDock within <= 1.0s warp deceleration must succeed");
+    assert_eq!(dock_ok.dict_get("locationID"), Some(&PyRep::Integer(st_id)));
+    assert_eq!(sess.station_id, Some(st_id));
+    assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+    assert!(sys_handle.get_ball_snapshot(ship_id).await.unwrap().is_none());
 }

@@ -1238,6 +1238,38 @@ impl ServerContext {
             }
             existing.set_character_skills(skill_levels);
             existing.set_implants(active_implants);
+            // Keep cached slot charge types synchronized with live inventory items in case charges
+            // were swapped or depleted without invalidating `ship_fittings`.
+            let charges_changed = !existing.modules.is_empty()
+                && self.db.with_snapshot(|s| {
+                    let mut slot_charges: HashMap<u16, (u32, u32)> = HashMap::new();
+                    for it in s.items.values() {
+                        if it.location_id == ship_id
+                            && (11..=34).contains(&(it.flag as u16))
+                            && it.quantity > 0
+                            && self.sde.types.get(&it.type_id).is_some_and(|t| t.category_id == 8)
+                        {
+                            slot_charges.insert(it.flag as u16, (it.type_id, it.quantity as u32));
+                        }
+                    }
+                    let mut changed = false;
+                    for m in existing.modules.values_mut() {
+                        let (want_tid, want_qty) =
+                            if let Some(&(ctid, cqty)) = slot_charges.get(&m.flag_id) {
+                                (Some(ctid), cqty)
+                            } else if let Some(&act_tid) = s.module_active_charges.get(&m.item_id) {
+                                (Some(act_tid), m.charge_quantity.max(1))
+                            } else {
+                                (None, 0)
+                            };
+                        if m.charge_type_id != want_tid || m.charge_quantity != want_qty {
+                            m.charge_type_id = want_tid;
+                            m.charge_quantity = want_qty;
+                            changed = true;
+                        }
+                    }
+                    changed
+                });
             crate::services::combat_crimewatch::with_mut_combat_ephemeral(self, |rt| {
                 for d in rt.active_drones_in_space.values() {
                     if d.parent_ship_id == ship_id && !d.is_abandoned {
@@ -1250,7 +1282,7 @@ impl ServerContext {
                     }
                 }
             });
-            if needs_recalc {
+            if needs_recalc || charges_changed {
                 existing.projected_ewar = active_projected;
                 existing.recalculate_stats(&self.sde);
                 self.ship_fittings
@@ -1341,15 +1373,21 @@ impl ServerContext {
                     m.charge_quantity = m.charge_quantity.max(1);
                 }
             }
-            fitted_items.push((item.item_id, want_online));
+            fitted_items.push((item.item_id, item.type_id, want_online));
         }
         fit.recalculate_stats(&self.sde);
-        for (item_id, want_online) in fitted_items {
+        // Pass 1: Online fitted modules whose skill prerequisites are met so skilled modules
+        // receive hull CPU/PG priority, and record genuine post-unfit CPU/PG overloads.
+        let mut unskilled_want_online = Vec::new();
+        for (item_id, type_id, want_online) in fitted_items {
             if !want_online {
                 continue;
             }
-            let online_res = fit.set_module_online_skip_skills(item_id, &self.sde);
-            match online_res {
+            if !fit.has_required_skills_for_type(type_id, &self.sde) {
+                unskilled_want_online.push(item_id);
+                continue;
+            }
+            match fit.set_module_online(item_id, &self.sde) {
                 Ok(()) => {
                     if active_states.contains(&item_id) {
                         let _ = fit.activate_module(item_id, false, &self.sde);
@@ -1360,6 +1398,25 @@ impl ServerContext {
                         || err_msg.contains("Insufficient Powergrid")
                     {
                         auto_offlined.push(item_id);
+                    }
+                }
+            }
+        }
+        if !unskilled_want_online.is_empty() {
+            fit.recalculate_stats(&self.sde);
+            // Pass 2: DB-seeded modules with `want_online == true` but missing pilot skills come
+            // online if remaining CPU/PG permits; otherwise drop them from `fit.modules` without
+            // mutating `snap.module_online_states` (matching pre-fit skill rejection for seeded items
+            // while keeping explicitly offline `want_online == false` modules in `fit.modules` for `GetAllInfo`).
+            for item_id in unskilled_want_online {
+                match fit.set_module_online_skip_skills(item_id, &self.sde) {
+                    Ok(()) => {
+                        if active_states.contains(&item_id) {
+                            let _ = fit.activate_module(item_id, false, &self.sde);
+                        }
+                    }
+                    Err(_) => {
+                        let _ = fit.unfit_module(item_id, &self.sde);
                     }
                 }
             }

@@ -177,6 +177,14 @@ async fn notify_batch2_fighters_ewar_mutual_wars_strip_and_tracker() {
         "OnSignalTrackerSignatureUpdate" | "OnSignalTrackerAnomalyUpdate" | "OnSignalTrackerStructureUpdate"
     )));
 
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(anoms) = s.cosmic_anomalies.get_mut(&sys_lowsec) {
+            anoms.pop();
+        }
+    });
+    eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+        reg.seeded_systems.remove(&sys_lowsec);
+    });
     eve_server::services::pve_exploration_seeding::ensure_system_pve_sites_seeded(&ctx, sys_lowsec).await;
     let seed_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
     let anom_add = find_notif(&seed_notifs, "OnSignalTrackerAnomalyUpdate");

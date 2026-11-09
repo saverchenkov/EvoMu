@@ -493,13 +493,29 @@ async fn weapons_projectile_zero_cap_safety_green_yellow_and_spool_banks() {
         .await
         .unwrap();
 
-    let (proj_mod_tid, ammo_tid) = ctx.sde.types.values()
+    let mut proj_candidates: Vec<_> = ctx
+        .sde
+        .types
+        .values()
         .filter(|mt| {
-            mt.group_id == 55
+            mt.published
+                && mt.group_id == 55
+                && (mt.effect_ids.contains(&42) || mt.default_attributes.contains_key(&604))
                 && mt.default_attributes.get(&30).copied().unwrap_or(0.0) <= 25.0
                 && mt.default_attributes.get(&50).copied().unwrap_or(0.0) <= 50.0
         })
-        .find_map(|mt| ctx.sde.types.values().find(|ct| ServerContext::is_charge_compatible_with_weapon(mt, ct)).map(|ct| (mt.type_id, ct.type_id)))
+        .collect();
+    proj_candidates.sort_by_key(|mt| mt.type_id);
+    let (proj_mod_tid, ammo_tid) = proj_candidates
+        .into_iter()
+        .find_map(|mt| {
+            ctx.sde
+                .types
+                .values()
+                .filter(|ct| ServerContext::is_charge_compatible_with_weapon(mt, ct))
+                .min_by_key(|ct| ct.type_id)
+                .map(|ct| (mt.type_id, ct.type_id))
+        })
         .unwrap();
     let (proj_mod, ammo_item) = (150_100_001_i64, 150_100_002_i64);
     ctx.db.with_mut_snapshot(|snap| {

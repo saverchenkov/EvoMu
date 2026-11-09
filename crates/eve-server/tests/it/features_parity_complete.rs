@@ -787,19 +787,45 @@ async fn test_admin_slash_dispatcher_gm_commands_asset_safety_skins() {
     );
 
     // 8. GM /fit module into ship (feat:admin.gm-fit)
+    // Oversized/untrained Heavy Pulse Laser II (3520, 208 MW PG) fits into a free slot offline on a Rifter:
+    let offline_fit_rep = rpc(
+        &ctx,
+        &mut gm_sess,
+        "slash",
+        "SlashCmd",
+        vec![PyRep::String("/fit me 3520".into())],
+    )
+    .await
+    .expect("/fit me 3520");
+    let PyRep::KeyVal(offline_fit_kv) = offline_fit_rep else {
+        panic!("expected KeyVal from offline /fit");
+    };
+    assert_eq!(offline_fit_kv.get("typeID").and_then(|v| v.as_i64()), Some(3520));
+    assert_eq!(offline_fit_kv.get("online").and_then(|v| v.as_bool()), Some(false));
+
+    // Grant Afterburner I (3450) and fit 1MN Afterburner I (439, 10 MW PG, 15 tf CPU) online:
+    rpc(
+        &ctx,
+        &mut gm_sess,
+        "slash",
+        "SlashCmd",
+        vec![PyRep::String("/giveskill 3450 1".into())],
+    )
+    .await
+    .expect("/giveskill 3450 1");
     let fit_rep = rpc(
         &ctx,
         &mut gm_sess,
         "slash",
         "SlashCmd",
-        vec![PyRep::String("/fit me 3520".into())], // 1MN Afterburner I
+        vec![PyRep::String("/fit me 439".into())], // 1MN Afterburner I
     )
     .await
-    .expect("/fit me 3520");
+    .expect("/fit me 439");
     let PyRep::KeyVal(fit_kv) = fit_rep else {
         panic!("expected KeyVal from /fit");
     };
-    assert_eq!(fit_kv.get("typeID").and_then(|v| v.as_i64()), Some(3520));
+    assert_eq!(fit_kv.get("typeID").and_then(|v| v.as_i64()), Some(439));
     assert_eq!(fit_kv.get("online").and_then(|v| v.as_bool()), Some(true));
     let fitted_item_id = fit_kv.get("itemID").and_then(|v| v.as_i64()).expect("fitted itemID");
     let fitted_item = ctx

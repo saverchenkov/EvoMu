@@ -372,7 +372,40 @@ async fn quasar_career_goals_paths_and_milestones() {
         other => panic!("expected name Identifier, got {other:?}"),
     };
     assert!(name_seq >= 582_516, "Attributes.name.sequential must be a real localization message ID, got {name_seq}");
-    assert!(matches!(first_attrs.get(6), Some(eve_proto::quasar::DynamicValue::Repeated(v)) if v.len() == 4), "Attributes.ui_annotations must carry group, subtype, name, description");
+    let ui_anns: HashMap<String, String> = match first_attrs.get(6) {
+        Some(eve_proto::quasar::DynamicValue::Repeated(items)) => items
+            .iter()
+            .filter_map(|it| match it {
+                eve_proto::quasar::DynamicValue::Message(m) => {
+                    let k = match m.get(1) {
+                        Some(eve_proto::quasar::DynamicValue::String(s)) => s.clone(),
+                        _ => return None,
+                    };
+                    let v = match m.get(2) {
+                        Some(eve_proto::quasar::DynamicValue::String(s)) => s.clone(),
+                        _ => String::new(),
+                    };
+                    Some((k, v))
+                }
+                _ => None,
+            })
+            .collect(),
+        other => panic!("expected Repeated ui_annotations on Attributes, got {other:?}"),
+    };
+    for req_key in ["group", "subtype", "name", "description", "duration", "auraTextID", "order"] {
+        assert!(
+            ui_anns.get(req_key).is_some_and(|v| !v.is_empty()),
+            "Attributes.ui_annotations must carry non-empty '{req_key}', got {ui_anns:?}"
+        );
+    }
+    assert!(
+        ui_anns["duration"].parse::<u32>().is_ok_and(|d| d > 0),
+        "ui_annotations['duration'] must parse as a positive integer for V24 goal_definition.duration_text"
+    );
+    assert!(
+        ui_anns["auraTextID"].parse::<u32>().is_ok_and(|id| id > 0),
+        "ui_annotations['auraTextID'] must parse as a positive localization ID"
+    );
     assert!(matches!(first_attrs.get(12), Some(eve_proto::quasar::DynamicValue::Repeated(v)) if v.len() == 1), "Attributes.rewards must carry ISK reward");
 
     // 3. Progress career goal via real NPC kill + admin.ProgressRequest; verify ProgressedNotice carries cumulative progress (2)

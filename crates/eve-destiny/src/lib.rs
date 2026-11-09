@@ -17,10 +17,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod ballpark;
-mod physics;
+pub mod physics;
 pub mod wire;
 mod wire_batch;
-pub use physics::combat;
+pub use physics::{combat, is_warp_finishing_within_1s};
 
 #[cfg(test)]
 mod tests;

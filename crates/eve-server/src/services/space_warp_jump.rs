@@ -1038,6 +1038,53 @@ async fn handle_cmd_stargate_jump(
     ]))
 }
 
+/// Evaluates the unconditional `target_radius + 2,500 m` EVE docking perimeter (`SP-4`) across
+/// `beyonce.CmdDock`, `stationSvc.Dock`, and `structureDocking.Dock`.
+///
+/// - When `ball.mode` is `MovementMode::Warp`, docking is permitted (`Ok(true)`, signalling that
+///   the active warp must be terminated) only when `destination` lies inside `target_radius + 2,500 m`
+///   of `target_pos` AND the ship is either already inside `max_dock_dist` or within the final
+///   `<= 1.0 s` of `WarpPhase::Decelerating` (`eve_destiny::physics::is_warp_finishing_within_1s`);
+///   all other warp states return `ShipInWarp`.
+/// - For non-warp movement modes, returns `OutsideDockingPerimeter` when `dist > max_dock_dist`
+///   and `Ok(false)` otherwise, regardless of `session.address`.
+pub(crate) fn evaluate_dock_perimeter(
+    ball: &eve_destiny::Ball,
+    target_pos: DVec3,
+    target_radius: f64,
+) -> Result<bool, BridgeRpcError> {
+    let max_dock_dist = target_radius + 2_500.0;
+    let dist = ball.position.distance(target_pos);
+    match ball.mode {
+        MovementMode::Warp { destination, .. } => {
+            if destination.distance(target_pos) <= max_dock_dist
+                && (dist <= max_dock_dist
+                    || eve_destiny::physics::is_warp_finishing_within_1s(ball))
+            {
+                Ok(true)
+            } else {
+                Err(BridgeRpcError {
+                    code: "ShipInWarp".into(),
+                    message: "Cannot dock while ship is still in warp".into(),
+                })
+            }
+        }
+        _ => {
+            if dist > max_dock_dist {
+                Err(BridgeRpcError {
+                    code: "OutsideDockingPerimeter".into(),
+                    message: format!(
+                        "Ship is {:.1} m from docking target (must be <= {:.1} m)",
+                        dist, max_dock_dist
+                    ),
+                })
+            } else {
+                Ok(false)
+            }
+        }
+    }
+}
+
 async fn handle_dock(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -1280,39 +1327,11 @@ async fn handle_dock(
         .map(|(_, b)| b.radius)
         .filter(|&r| r > 0.0)
         .unwrap_or(sde_target_radius);
-    let dist = ball.position.distance(target_pos);
-    let max_dock_dist = if !session.address.is_empty() {
-        target_radius + 35_000.0
-    } else {
-        target_radius + 2_500.0
-    };
-    let arrived_at_warp_dest = match ball.mode {
-        MovementMode::Warp { destination, .. } => {
-            if dist <= max_dock_dist && destination.distance(target_pos) <= max_dock_dist {
-                true
-            } else {
-                return Err(BridgeRpcError {
-                    code: "ShipInWarp".into(),
-                    message: "Cannot dock while ship is still in warp".into(),
-                });
-            }
-        }
-        _ => false,
-    };
+    let arrived_at_warp_dest = evaluate_dock_perimeter(&ball, target_pos, target_radius)?;
     if is_structure && handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
         return Err(BridgeRpcError {
             code: "ShipWarpScrambled".into(),
             message: "Cannot dock at an Upwell structure while ship is warp scrambled".into(),
-        });
-    }
-    if dist > max_dock_dist {
-        return Err(BridgeRpcError {
-            code: "OutsideDockingPerimeter".into(),
-            message: format!(
-                "Ship is {:.1} m from docking target (must be <= {:.1} m)",
-                dist,
-                max_dock_dist
-            ),
         });
     }
     if arrived_at_warp_dest {

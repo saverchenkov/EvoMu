@@ -1348,16 +1348,25 @@ async fn test_phase_4_modifier_engine_stacking_penalty_and_skills() {
 /// with the item now in `locationJunkyard` (10) / `flagJunkyardTrashed` (147); the V24 client's
 /// `InventorySvc.OnItemChange` derives `OnModuleUnfitted` from it.
 fn assert_rig_trashed_item_change(notes: &[(String, Vec<PyRep>)], item_id: i64, ship_id: i64) {
+    let field_val = |rep: &PyRep, col: &str| -> Option<PyRep> {
+        match rep {
+            PyRep::DBRow { columns, .. } => {
+                columns.iter().find(|(k, _)| k == col).map(|(_, v)| v.clone())
+            }
+            PyRep::KeyVal(kv) => kv.get(col).cloned(),
+            _ => None,
+        }
+    };
     let (_, args) = notes
         .iter()
         .find(|(n, a)| {
             n == "OnItemChange"
-                && matches!(a.first(), Some(PyRep::KeyVal(kv)) if kv.get("itemID") == Some(&PyRep::Integer(item_id)))
+                && a.first().and_then(|r| field_val(r, "itemID")) == Some(PyRep::Integer(item_id))
         })
         .unwrap_or_else(|| panic!("OnItemChange for destroyed rig {item_id}: {notes:?}"));
-    let PyRep::KeyVal(row) = &args[0] else { unreachable!() };
-    assert_eq!(row.get("locationID"), Some(&PyRep::Integer(10)));
-    assert_eq!(row.get("flagID"), Some(&PyRep::Integer(147)));
+    let row_rep = &args[0];
+    assert_eq!(field_val(row_rep, "locationID"), Some(PyRep::Integer(10)));
+    assert_eq!(field_val(row_rep, "flagID"), Some(PyRep::Integer(147)));
     let Some(PyRep::Dict(change)) = args.get(1) else { panic!("change dict expected") };
     assert!(change.iter().any(|(k, v)| *k == PyRep::Integer(3) && *v == PyRep::Integer(ship_id)));
     let old_flag = change

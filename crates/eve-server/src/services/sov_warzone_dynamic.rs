@@ -492,6 +492,22 @@ pub(crate) fn decay_sov_dev_indices_in_snap(
 
 /// Regenerates unattended Sovereignty Command Nodes in the defender's favour up to 98 minutes (`5_880s`).
 pub(crate) async fn regenerate_unattended_command_nodes(ctx: &ServerContext, now_unix: u64) {
+    // Guard with a read-only snapshot check so idle 1 Hz cluster ticks without active
+    // Command Node campaigns never acquire a write snapshot or bump SQLite `wal_seq`.
+    let has_regen_candidates = ctx.db.with_snapshot(|snap| {
+        !snap.sov_campaign_scores.is_empty()
+            && !snap.sov_runtime.command_nodes.is_empty()
+            && snap.sov_campaign_scores.keys().any(|&hub_id| {
+                snap.sov_runtime
+                    .command_nodes
+                    .values()
+                    .any(|&(hid, _, _)| hid == hub_id)
+            })
+    });
+    if !has_regen_candidates {
+        return;
+    }
+
     let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
     let active_targets: std::collections::HashSet<i64> = {
         let tst = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());

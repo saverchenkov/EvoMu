@@ -87,8 +87,8 @@ async fn test_combat_pochven_loot_drop_live() {
         "Victim ship cargo must contain seeded items in space"
     );
 
-    // 4. Arm killer with 3x 200mm AutoCannon I and EMP S ammunition
-    for sk in [3300_u32, 3303, 3306, 11083, 3413, 3426] {
+    // 4. Arm killer with 3x 150mm Light AutoCannon II (2881) and EMP S ammunition
+    for sk in [3300_u32, 3301, 3302, 3303, 3306, 11083, 11084, 3413, 3426] {
         common::slash_cmd(&ctx, &mut killer.sess, &format!("/giveskill {sk} 5")).await;
     }
     let mut guns = Vec::new();
