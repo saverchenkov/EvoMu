@@ -7,7 +7,6 @@
 
 use crate::router::ServerContext;
 use eve_db::{InventoryFlag, SsoTokenClaims};
-use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -79,30 +78,6 @@ impl eve_db::FromWalError for RouteExecutionResult {
     fn from_wal_error(err: String) -> Self {
         Self::error(500, format!("Durable persistence failure: {err}"))
     }
-}
-
-/// Opens the on-disk SQLite SDE database (`ctx.sde.db_path`) read-only with `?immutable=1` for celestials/stargates/dogma queries.
-pub(crate) fn open_sde_sqlite(ctx: &ServerContext) -> Option<Connection> {
-    let path = ctx
-        .sde
-        .db_path
-        .clone()
-        .unwrap_or_else(eve_sde::SdeRegistry::default_db_path);
-    let path_str = path.to_string_lossy();
-    // Strip Windows extended path prefix for SQLite URI compatibility
-    let clean_path = if cfg!(windows) && path_str.starts_with(r"\\?\") {
-        &path_str[4..]
-    } else {
-        &*path_str
-    };
-    let uri = format!("file:{}?immutable=1", clean_path);
-    Connection::open_with_flags(
-        &uri,
-        OpenFlags::SQLITE_OPEN_READ_ONLY
-            | OpenFlags::SQLITE_OPEN_URI
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .ok()
 }
 
 /// Paginates a slice of items (`1`-indexed `page`, `page_size` items per page).
@@ -722,17 +697,6 @@ pub fn dispatch_operation(
                     format!("Dogma attribute {aid} not found"),
                 );
             };
-            let published = open_sde_sqlite(ctx)
-                .and_then(|conn| {
-                    conn.query_row(
-                        "SELECT published FROM sde_dogma_attributes WHERE attribute_id = ?1",
-                        [aid],
-                        |r| r.get::<_, i64>(0),
-                    )
-                    .ok()
-                })
-                .map(|v| v != 0)
-                .unwrap_or(true);
             RouteExecutionResult::ok_json(
                 json!({
                     "attribute_id": attr.attribute_id as i64,
@@ -740,7 +704,7 @@ pub fn dispatch_operation(
                     "default_value": attr.default_value,
                     "high_is_good": attr.high_is_good,
                     "stackable": attr.stackable,
-                    "published": published,
+                    "published": attr.published,
                 }),
                 3600,
             )
@@ -774,38 +738,22 @@ pub fn dispatch_operation(
                     })
                 })
                 .collect();
-            let mut obj = json!({
-                "effect_id": eff.effect_id as i64,
-                "name": eff.name,
-                "effect_category": eff.effect_category as i64,
-                "is_offensive": eff.is_offensive,
-                "is_assistance": eff.is_assistance,
-                "modifiers": modifiers,
-            });
-            if let Some(conn) = open_sde_sqlite(ctx) {
-                if let Ok((warp_safe, disallow_repeat, elec_chance, range_chance, published)) = conn
-                    .query_row(
-                        "SELECT is_warp_safe, disallow_auto_repeat, electronic_chance, range_chance, published FROM sde_dogma_effects WHERE effect_id = ?1",
-                        [eid],
-                        |r| {
-                            Ok((
-                                r.get::<_, i64>(0)? != 0,
-                                r.get::<_, i64>(1)? != 0,
-                                r.get::<_, i64>(2)? != 0,
-                                r.get::<_, i64>(3)? != 0,
-                                r.get::<_, i64>(4)? != 0,
-                            ))
-                        },
-                    )
-                {
-                    obj["is_warp_safe"] = json!(warp_safe);
-                    obj["disallow_auto_repeat"] = json!(disallow_repeat);
-                    obj["electronic_chance"] = json!(elec_chance);
-                    obj["range_chance"] = json!(range_chance);
-                    obj["published"] = json!(published);
-                }
-            }
-            RouteExecutionResult::ok_json(obj, 3600)
+            RouteExecutionResult::ok_json(
+                json!({
+                    "effect_id": eff.effect_id as i64,
+                    "name": eff.name,
+                    "effect_category": eff.effect_category as i64,
+                    "is_offensive": eff.is_offensive,
+                    "is_assistance": eff.is_assistance,
+                    "is_warp_safe": eff.is_warp_safe,
+                    "disallow_auto_repeat": eff.disallow_auto_repeat,
+                    "electronic_chance": eff.electronic_chance,
+                    "range_chance": eff.range_chance,
+                    "published": eff.published,
+                    "modifiers": modifiers,
+                }),
+                3600,
+            )
         }
         ("GET", "/dogma/dynamic/items/{type_id}/{item_id}") => {
             let tid = match parse_path_i64(path_params, "type_id") {

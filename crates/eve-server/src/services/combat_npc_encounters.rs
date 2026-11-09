@@ -884,7 +884,7 @@ pub async fn finalize_cycle_destroyed_npcs(ctx: &ServerContext, solar_system_id:
             .await;
             continue;
         }
-        let wreck_tid = ctx.sde.wrecks.get(&npc.type_id).copied().unwrap_or_else(|| {
+        let wreck_tid = ctx.sde.resolve_wreck_type_id(npc.type_id, None).unwrap_or_else(|| {
             match npc.archetype.as_str() {
                 "Drifter" => 37531,
                 "Sleeper" => 30495,

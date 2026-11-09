@@ -105,9 +105,10 @@ pub async fn attempt_salvage_wreck(
     let chance = (0.20 + salvager_access_bonus).clamp(0.05, 0.95);
 
     if roll_u < chance {
-        // Success: select canonical SDE salvage materials
-        // 25588: Alloyed Tritanium Bar, 25595: Armor Plates, 25597: Burned Logic Circuit
-        let salvage_materials = vec![(25588, 4), (25595, 2), (25597, 3)];
+        // Select salvage materials from SDE-derived racial/tier salvage pools (`SalvageMaterialPools`).
+        let salvage_materials = ctx
+            .sde
+            .salvage_materials_for_wreck(wreck_ball.type_id, false);
         let salvage_vol: f64 = salvage_materials
             .iter()
             .map(|&(tid, qty)| {
@@ -559,25 +560,9 @@ pub async fn execute_wreck_salvage_cycle(
         ]));
     }
 
-    // Select T1, T2, or Sleeper salvage loot table based on wreck's SDE accessDifficultyBonus (`attr 901`) and hull size.
-    // DERIVED: SDE group 754 (`Salvage Materials`) and group 966 (`Ancient Salvage`) drop tiers scaled by wreck difficulty/radius.
-    let size_mult = if wreck_difficulty_bonus <= 0.0 {
-        2
-    } else if wreck_difficulty_bonus <= 10.0 {
-        2
-    } else {
-        1
-    };
-    let salvage_table: Vec<(u32, i32)> = if wreck_difficulty_bonus <= -15.0 {
-        // Sleeper / Drifter wreck -> Ancient / Sleeper salvage (`30259` Melted Nanoribbons, `30258` Modified Fluid Router)
-        vec![(30259, 2), (30258, 3)]
-    } else if wreck_difficulty_bonus < 0.0 {
-        // Tech II / Elite wreck -> T2 salvage (`25605` Artificial Neural Network, `25600` Capacitor Console)
-        vec![(25605, 2), (25600, 3)]
-    } else {
-        // Tech I frigate/cruiser/battleship/capital wreck -> T1 salvage (`25588` Alloyed Tritanium Bar, `25595` Armor Plates, `25597` Burned Logic Circuit)
-        vec![(25588, 4 * size_mult), (25595, 2 * size_mult), (25597, 3 * size_mult)]
-    };
+    // Select T1, T2, or Sleeper salvage loot table from SDE-derived `SalvageMaterialPools`
+    // (`sde_types` group 754/966 + `sde_blueprints` + `wrecks.static` + Dogma attribute `901`).
+    let salvage_table = ctx.sde.salvage_materials_for_wreck(wreck_type_id, true);
 
     let yielded_type_ids: Vec<u32> = salvage_table.iter().map(|&(t, _)| t).collect();
     let salvage_vol: f64 = salvage_table

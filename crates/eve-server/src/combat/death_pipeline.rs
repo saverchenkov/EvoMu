@@ -391,9 +391,7 @@ pub fn execute_death_pipeline_sync_inner(
         25
     } else {
         ctx.sde
-            .wrecks
-            .get(&victim_ship_type_id)
-            .copied()
+            .resolve_wreck_type_id(victim_ship_type_id, None)
             .unwrap_or(26557)
     };
 

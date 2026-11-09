@@ -19,8 +19,9 @@ use crate::services::industry_pi::{
     emit_industry_job, handle_industry_job_queries,
     is_fulcrum_pirate_ship_bonus_applicable, is_station_container_type,
     is_structure_industry_service_online_for_bp, is_valid_industry_output_flag,
-    resolve_decryptor_modifiers, resolve_facility_modifiers_and_system,
-    resolve_structure_rig_bonus, save_job_cost_meta,
+    resolve_blueprint_activity_product, resolve_decryptor_modifiers,
+    resolve_facility_modifiers_and_system, resolve_facility_modifiers_and_system_for_job,
+    resolve_structure_rig_bonuses_for_job, save_job_cost_meta,
     solar_system_jump_distance, sync_industry_job_pause_states,
     validate_capital_construction_restrictions,
 };
@@ -311,10 +312,16 @@ pub fn handle_industry_jobs(
                     .get(&char_id)
                     .map(|c| c.solar_system_id)
                     .unwrap_or_else(|| ctx.sde.solar_systems.keys().copied().next().unwrap_or(0));
+                let job_target_prod_tid = resolve_blueprint_activity_product(bp, activity_id);
                 let (fac_type_id, _, fac_sys_id, _, mat_mod, time_mod, _) =
-                    resolve_facility_modifiers_and_system(ctx, snap, station_id).unwrap_or((
-                        1529, 1000035, fallback_sys, 10000002, 1.0, 1.0, 1.0,
-                    ));
+                    resolve_facility_modifiers_and_system_for_job(
+                        ctx,
+                        snap,
+                        station_id,
+                        Some(activity_id),
+                        job_target_prod_tid,
+                    )
+                    .unwrap_or((1529, 1000035, fallback_sys, 10000002, 1.0, 1.0, 1.0));
                 if activity_id == 9 {
                     if !matches!(fac_type_id, 35835 | 35836) {
                         return Err(BridgeRpcError {
@@ -424,8 +431,14 @@ pub fn handle_industry_jobs(
                     (char_id, false, 0u64)
                 };
 
-                let (rig_mat_bonus, _, _) =
-                    resolve_structure_rig_bonus(ctx, snap, station_id, fac_sys_id);
+                let (rig_mat_bonus, _, _, _) = resolve_structure_rig_bonuses_for_job(
+                    ctx,
+                    snap,
+                    station_id,
+                    fac_sys_id,
+                    Some(activity_id),
+                    job_target_prod_tid,
+                );
                 let fulcrum_bonus = is_fulcrum_pirate_ship_bonus_applicable(
                     ctx,
                     snap,

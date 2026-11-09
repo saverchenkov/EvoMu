@@ -776,9 +776,7 @@ pub async fn apply_mercenary_den_weapon_damage(
     }
     let wreck_type = ctx
         .sde
-        .wrecks
-        .get(&TYPE_MERCENARY_DEN)
-        .copied()
+        .resolve_wreck_type_id(TYPE_MERCENARY_DEN, None)
         .unwrap_or(86_175);
     let outcome = ctx.db.try_with_mut_snapshot(|snap| {
         let (mut reinf_until, mut vuln_end, _) = snap

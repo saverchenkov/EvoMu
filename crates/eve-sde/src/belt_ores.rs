@@ -67,11 +67,30 @@ impl crate::SdeRegistry {
         ores
     }
 
-    /// Returns the base asteroid ore types eligible to spawn in belts for `solar_system_id` (`MN-01`, `MN-02`).
+    /// Returns the asteroid ore types eligible to spawn in belts for `solar_system_id` (`MN-01`, `MN-02`).
+    /// Prefers the V24.01 client static table `res:/staticdata/asteroidtypesbysolarsystemid.pickle`
+    /// (`3,974` belt systems) when loaded, falling back to [`Self::belt_ores_for_security_and_region`]
+    /// for beltless special systems (such as Pochven anomalies) or synthetic test registries.
     pub fn belt_ores_for_system(&self, solar_system_id: crate::SolarSystemId) -> Vec<&crate::InvType> {
         let Some(sys) = self.solar_systems.get(&solar_system_id) else {
             return Vec::new();
         };
+        if let Some(tids) = self.asteroid_types_by_system.get(&solar_system_id) {
+            let mut ores: Vec<&crate::InvType> = tids
+                .iter()
+                .filter_map(|tid| self.types.get(tid))
+                .filter(|t| t.category_id == 25 && t.published)
+                .collect();
+            if !ores.is_empty() {
+                ores.sort_by(|a, b| {
+                    a.volume
+                        .partial_cmp(&b.volume)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.type_id.cmp(&b.type_id))
+                });
+                return ores;
+            }
+        }
         self.belt_ores_for_security_and_region(sys.security_status, sys.region_id)
     }
 }

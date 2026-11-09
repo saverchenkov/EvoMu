@@ -11,6 +11,7 @@ fn make_belt_ore_sde() -> SdeRegistry {
     let base_item = sde.types.get(&587).expect("canonical Rifter").clone();
     sde.types.clear();
     sde.groups.clear();
+    sde.asteroid_types_by_system = std::sync::Arc::default();
 
     let mut types = HashMap::new();
     let mut groups = BTreeMap::new();

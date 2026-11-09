@@ -41,6 +41,34 @@ pub struct IndustryTargetFilterInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IndustryAssemblyLineGroupDetail {
+    #[serde(rename = "groupID")]
+    pub group_id: GroupId,
+    #[serde(default = "default_multiplier_one")]
+    pub time_multiplier: f64,
+    #[serde(default = "default_multiplier_one")]
+    pub material_multiplier: f64,
+    #[serde(default = "default_multiplier_one")]
+    pub cost_multiplier: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IndustryAssemblyLineCategoryDetail {
+    #[serde(rename = "categoryID")]
+    pub category_id: CategoryId,
+    #[serde(default = "default_multiplier_one")]
+    pub time_multiplier: f64,
+    #[serde(default = "default_multiplier_one")]
+    pub material_multiplier: f64,
+    #[serde(default = "default_multiplier_one")]
+    pub cost_multiplier: f64,
+}
+
+const fn default_multiplier_one() -> f64 {
+    1.0
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IndustryAssemblyLineInfo {
     pub id: u32,
     pub name: String,
@@ -51,6 +79,27 @@ pub struct IndustryAssemblyLineInfo {
     pub base_material_multiplier: f64,
     #[serde(default)]
     pub base_cost_multiplier: f64,
+    #[serde(default)]
+    pub details_per_group: Vec<IndustryAssemblyLineGroupDetail>,
+    #[serde(default)]
+    pub details_per_category: Vec<IndustryAssemblyLineCategoryDetail>,
+}
+
+impl IndustryAssemblyLineInfo {
+    /// In EVE industry mechanics, assembly lines with non-empty `details_per_group` or
+    /// `details_per_category` restrict eligible outputs to those groups/categories (e.g. Composite
+    /// vs Hybrid vs Biochemical Reactors, Capital vs Supercapital Shipyards, Booster Drug Labs).
+    /// Research/Copying assembly lines have empty detail lists and accept any blueprint.
+    pub fn accepts_product(&self, category_id: CategoryId, group_id: GroupId) -> bool {
+        if self.details_per_group.is_empty() && self.details_per_category.is_empty() {
+            return true;
+        }
+        self.details_per_group.iter().any(|d| d.group_id == group_id)
+            || self
+                .details_per_category
+                .iter()
+                .any(|d| d.category_id == category_id)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

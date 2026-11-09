@@ -32,7 +32,9 @@ pub fn is_structure_industry_service_online(
     })
 }
 
-/// Enforces exact Standup reactor service modules for Composite (`1888`), Hybrid (`1889`), and Biochemical (`1890`) reactions.
+/// Enforces exact Standup reactor service modules for Composite (`1888`), Hybrid (`1889`), and
+/// Biochemical (`1890`) reactions via SDE `industry_installation_types.static` and
+/// `industry_assembly_lines.static` (with formula-group fallback for synthetic unit-test blueprints).
 pub fn is_structure_industry_service_online_for_bp(
     sde: &eve_sde::SdeRegistry,
     snap: &eve_db::WorldStateSnapshot,
@@ -45,6 +47,32 @@ pub fn is_structure_industry_service_online_for_bp(
     }
     if !matches!(activity_id, 9 | 11) || !snap.structures.contains_key(&facility_id) {
         return true;
+    }
+    if !sde.industry_installation_types.is_empty() {
+        if let Some(prod_type) = sde
+            .blueprints
+            .get(&bp_type_id)
+            .and_then(|bp| {
+                bp.activities
+                    .get("reaction")
+                    .or_else(|| bp.activities.get("9"))
+                    .and_then(|a| a.products.first())
+                    .map(|p| p.type_id)
+                    .or_else(|| (bp.product_type_id != 0).then_some(bp.product_type_id))
+            })
+            .and_then(|ptid| sde.types.get(&ptid))
+        {
+            return snap.items.values().any(|it| {
+                it.location_id == facility_id
+                    && (164..=171).contains(&(it.flag as u16))
+                    && snap.module_online_states.get(&it.item_id).copied().unwrap_or(true)
+                    && it.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0
+                    && sde
+                        .installation_assembly_lines_for_activity(it.type_id, 9)
+                        .iter()
+                        .any(|line| line.accepts_product(prod_type.category_id, prod_type.group_id))
+            });
+        }
     }
     let Some(req_tid) = (match sde.types.get(&bp_type_id).map(|t| t.group_id) {
         Some(1888) => Some(45537u32),

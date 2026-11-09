@@ -12,17 +12,10 @@ use eve_db::{
     PlanetaryLinkRecord, PlanetaryPinContentRecord, PlanetaryPinRecord, PlanetaryRouteRecord,
     UpwellStructureRecord,
 };
-use eve_sde::{InvType, StationInfo};
+use eve_sde::{CelestialInfo, InvType, StationInfo};
+use glam::DVec3;
 use serde_json::json;
-use std::path::PathBuf;
 use std::sync::Arc;
-
-struct TempCelestialDb(PathBuf);
-impl Drop for TempCelestialDb {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
 
 fn params(pairs: &[(&str, &str)]) -> HashMap<String, String> {
     pairs.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect()
@@ -47,29 +40,6 @@ fn mk_job(id: i64, installer: i64, fac: i64, act: u8, bp_item: i64, bp_type: u32
         status: status.into(),
         ..Default::default()
     }
-}
-
-fn make_celestial_db(tag: &str, rows: &[(i64, u32, u32, u32, &str, f64)]) -> TempCelestialDb {
-    let path = std::env::temp_dir().join(format!("evomu_cov_econ_ind_{tag}_{}_{}.sqlite", std::process::id(), rows.len()));
-    let _ = std::fs::remove_file(&path);
-    let conn = rusqlite::Connection::open(&path).expect("open temp celestial sqlite");
-    conn.execute_batch(
-        "CREATE TABLE sde_celestials (
-            celestial_id INTEGER PRIMARY KEY, system_id INTEGER NOT NULL, type_id INTEGER NOT NULL,
-            group_id INTEGER NOT NULL, name TEXT NOT NULL, radius REAL NOT NULL,
-            x REAL NOT NULL, y REAL NOT NULL, z REAL NOT NULL,
-            orbit_id INTEGER, orbit_index INTEGER, celestial_index INTEGER
-        );",
-    )
-    .expect("create sde_celestials");
-    for &(cid, sys, tid, gid, name, radius) in rows {
-        conn.execute(
-            "INSERT INTO sde_celestials VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0.0, 0.0, 0.0, NULL, NULL, NULL)",
-            rusqlite::params![cid, i64::from(sys), i64::from(tid), i64::from(gid), name, radius],
-        )
-        .expect("insert sde_celestials row");
-    }
-    TempCelestialDb(path)
 }
 
 #[test]
@@ -157,11 +127,21 @@ fn resolve_planet_types_and_pi_colonies_layouts_and_customs_offices() {
         (40_900_010, 990_001, 8, "Moon Not Planet", "barren"),
         (40_900_011, 990_999, 7, "Missing Type Planet", "barren"),
     ];
-    let db_rows: Vec<_> = planet_specs.iter().map(|&(cid, tid, gid, nm, _)| (cid, 30_000_142_u32, tid, gid, nm, 6_000_000.0)).collect();
-    let tmp_db = make_celestial_db("planets", &db_rows);
-
     let mut sde = (*base_ctx.sde).clone();
-    sde.db_path = Some(tmp_db.0.clone());
+    for &(cid, tid, gid, nm, _) in &planet_specs {
+        sde.insert_celestial(CelestialInfo {
+            celestial_id: cid,
+            solar_system_id: 30_000_142,
+            type_id: tid,
+            group_id: gid,
+            name: nm.to_string(),
+            radius: 6_000_000.0,
+            position: DVec3::ZERO,
+            orbit_id: None,
+            orbit_index: None,
+            celestial_index: None,
+        });
+    }
     let tpl: InvType = sde.types.values().next().cloned().expect("seed type");
     for &(_, tid, _, nm, _) in &planet_specs[..9] {
         let mut t = tpl.clone();

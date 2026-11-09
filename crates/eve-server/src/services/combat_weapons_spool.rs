@@ -256,7 +256,7 @@ pub async fn handle_ship_or_npc_destruction(
         (32_000_000..=32_999_999).contains(&sys_id) && victim_char_opt.is_none();
     let victim_id = victim_char_opt.unwrap_or(target_ball_id);
     let wreck_owner_id = if victim_char_opt.is_some() { victim_id } else { attacker_char_id };
-    let wreck_type_id = ctx.sde.wrecks.get(&target_ball.type_id).copied().unwrap_or_else(|| {
+    let wreck_type_id = ctx.sde.resolve_wreck_type_id(target_ball.type_id, None).unwrap_or_else(|| {
         match crate::services::combat_crimewatch::combat_npc_ai::derive_npc_archetype(ctx, target_ball.type_id) {
             "Drifter" => 37531,
             "Sleeper" => 30495,

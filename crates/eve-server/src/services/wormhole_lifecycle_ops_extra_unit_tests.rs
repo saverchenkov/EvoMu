@@ -24,8 +24,8 @@ async fn pick_system_celestial_position_with_and_without_celestials() {
     assert!((pos_empty[1] - 1.5 * AU_IN_METERS).abs() < 1.0);
     assert!(pos_empty[2].abs() < 1.0);
 
-    // 2. Attach default_db_path so celestials_in_system(sys_id) returns real celestials (+15_000, -10_000, +5_000)
-    Arc::make_mut(&mut ctx.sde).db_path = Some(eve_sde::SdeRegistry::default_db_path());
+    // 2. Load canonical SDE registry so celestials_in_system(sys_id) resolves from memory (+15_000, -10_000, +5_000)
+    ctx.sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
     let celestials = ctx.sde.celestials_in_system(sys_id);
     assert!(!celestials.is_empty());
     let (pos_cel, cel_some) = pick_system_celestial_position(&ctx, sys_id, 0);

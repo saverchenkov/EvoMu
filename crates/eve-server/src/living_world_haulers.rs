@@ -83,9 +83,7 @@ pub fn generate_hauler_sde_cargo_loot(
 
 /// Resolves authentic SDE wreck type for a hauler hull.
 pub fn hauler_wreck_type_id(sde: &eve_sde::SdeRegistry, ship_type_id: TypeId) -> TypeId {
-    sde.wrecks
-        .get(&ship_type_id)
-        .copied()
+    sde.resolve_wreck_type_id(ship_type_id, None)
         .unwrap_or(26557) // Industrial Wreck
 }
 

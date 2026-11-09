@@ -407,6 +407,31 @@ fn item_trader_new_activities_wrappers_and_starter_shipcaster_systems() {
         },
     );
 
+    for (sys_id, reg_id) in [
+        (30_000_101, 10_001_004),
+        (30_000_102, 10_001_004),
+        (30_000_103, 10_001_004),
+        (30_000_104, 10_001_004),
+        (30_000_105, 10_001_004),
+        (30_000_106, 10_000_002),
+    ] {
+        sde.solar_systems.insert(
+            sys_id,
+            SolarSystem {
+                solar_system_id: sys_id,
+                constellation_id: 20_000_001,
+                region_id: reg_id,
+                name: format!("Sys-{sys_id}"),
+                security_status: 0.9,
+                radius: 1.0e12,
+                galactic_pos_ly: [0.0, 0.0, 0.0],
+                planet_ids: Vec::new(),
+                stations: Vec::new(),
+                wormhole_class_id: None,
+            },
+        );
+    }
+
     let db_tmp = std::env::temp_dir().join(format!(
         "evomu_shipcaster_starter_{}.sqlite",
         std::process::id()
@@ -422,11 +447,17 @@ fn item_trader_new_activities_wrappers_and_starter_shipcaster_systems() {
              INSERT INTO sde_solar_systems VALUES (30000102, 10001004, 500002);
              INSERT INTO sde_solar_systems VALUES (30000103, 10001004, 500003);
              INSERT INTO sde_solar_systems VALUES (30000104, 10001004, 500004);
-             INSERT INTO sde_solar_systems VALUES (30000105, 10001004, 500999);",
+             INSERT INTO sde_solar_systems VALUES (30000105, 10001004, 500999);
+             INSERT INTO sde_solar_systems VALUES (30000106, 10000002, 500001);",
         )
         .unwrap();
+        let aux = crate::sqlite_loader_skins::load_universe_aux_and_career_tables(&conn).unwrap();
+        sde.school_starting_stations = Arc::new(aux.school_starting_stations);
+        sde.school_career_agents = Arc::new(aux.school_career_agents);
+        sde.solar_system_factions = Arc::new(aux.solar_system_factions);
     }
-    sde.db_path = Some(db_tmp.clone());
+    let _ = std::fs::remove_file(&db_tmp);
+    sde.db_path = None;
 
     let by_race = sde.starter_shipcaster_systems_by_race();
     assert_eq!(by_race.get(&30_000_001), Some(&(4, Some(60_000_001))));
@@ -439,9 +470,9 @@ fn item_trader_new_activities_wrappers_and_starter_shipcaster_systems() {
     assert_eq!(by_race.get(&30_000_103), Some(&(4, None)));
     assert_eq!(by_race.get(&30_000_104), Some(&(8, None)));
     assert!(!by_race.contains_key(&30_000_105));
+    assert!(!by_race.contains_key(&30_000_106));
     assert!(!by_race.contains_key(&30_000_999));
 
     let _ = std::fs::remove_file(&sc_tmp);
     let _ = std::fs::remove_file(&na_tmp);
-    let _ = std::fs::remove_file(&db_tmp);
 }

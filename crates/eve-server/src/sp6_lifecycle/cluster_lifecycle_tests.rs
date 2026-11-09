@@ -497,7 +497,7 @@ async fn restarted_structures_belt_asteroids_wrecks_drones_and_specialized_npcs_
         &[&hib_bp.balls[&wreck_id], &hib_bp.balls[&jetcan_id], &hib_bp.balls[&drone_id]],
         Some(&hib_bp),
     );
-    let (_, _, dec) = eve_destiny::wire_decode::decode_add_balls(&raw).expect("decode persisted balls");
+    let (_, _, dec) = eve_destiny::wire::decode_add_balls(&raw).expect("decode persisted balls");
     assert_eq!(dec[0].flags & eve_destiny::wire::BALL_FLAG_IS_FREE, 0);
     assert_eq!(dec[1].flags & eve_destiny::wire::BALL_FLAG_IS_FREE, 0);
     assert_ne!(dec[2].flags & eve_destiny::wire::BALL_FLAG_IS_FREE, 0);
@@ -594,7 +594,7 @@ async fn restarted_structures_belt_asteroids_wrecks_drones_and_specialized_npcs_
         .map(|t| t.type_id)
         .unwrap_or(10_029);
     let expected_npc_grp = ctx.sde.types.get(&npc_tid).map(|t| t.group_id).unwrap_or(546);
-    let npc_bid = crate::services::combat_npc_ai::spawn_specialized_npc_entity(
+    let npc_bid = crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity(
         &ctx,
         perim_sys,
         npc_tid,

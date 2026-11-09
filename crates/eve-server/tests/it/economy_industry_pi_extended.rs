@@ -319,7 +319,7 @@ async fn test_industry_capital_components_restrictions_and_core_temp() {
         snap.structures.insert(ls_tatara_id, make_structure(ls_tatara_id, 35836, corp_id, LOWSEC_SOLAR_SYSTEM_ID, "LS Tatara"));
         snap.structures.insert(ls_azbel_id, make_structure(ls_azbel_id, 35826, corp_id, LOWSEC_SOLAR_SYSTEM_ID, "LS Azbel"));
         snap.structures.insert(ns_sotiyo_id, make_structure(ns_sotiyo_id, 35827, corp_id, NULLSEC_SOLAR_SYSTEM_ID, "NS Sotiyo"));
-        for (sid, svc_type) in [(hs_athanor_id, 35894), (ls_tatara_id, 35894), (ls_azbel_id, 35877), (ns_sotiyo_id, 35877)] {
+        for (sid, svc_type) in [(hs_athanor_id, 45539), (ls_tatara_id, 45539), (ls_azbel_id, 35877), (ns_sotiyo_id, 35877)] {
             let svc = seed_item(snap, svc_type, corp_id, sid, InventoryFlag::ServiceSlot0, 1, true, false, None);
             snap.items.get_mut(&svc).unwrap().dynamic_attributes.insert(2, 1.0);
         }

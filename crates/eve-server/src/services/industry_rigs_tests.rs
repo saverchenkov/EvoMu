@@ -104,6 +104,8 @@ fn structure_rig_bonuses_and_security_multipliers_cover_hs_ls_ns_wh_and_reaction
         );
 
         let mut rig_t1 = make_item(5001, 999990, 98000001, 5000, InventoryFlag::RigSlot0);
+        rig_t1.dynamic_attributes.insert(2594, -2.0);
+        rig_t1.dynamic_attributes.insert(2593, -20.0);
         rig_t1.dynamic_attributes.insert(2595, -10.0);
         snap.items.insert(5001, rig_t1);
 
@@ -121,6 +123,8 @@ fn structure_rig_bonuses_and_security_multipliers_cover_hs_ls_ns_wh_and_reaction
 
         let mut rig_t2 = make_item(5002, 999991, 98000001, 5000, InventoryFlag::RigSlot1);
         rig_t2.dynamic_attributes.insert(422, 2.0);
+        rig_t2.dynamic_attributes.insert(2594, -2.4);
+        rig_t2.dynamic_attributes.insert(2593, -24.0);
         snap.items.insert(5002, rig_t2);
         let (mat_ns, time_ns, _, sec_ns) =
             resolve_structure_rig_bonuses_full(&ctx, snap, 5000, 30004759);
@@ -511,4 +515,61 @@ fn ship_insurance_reference_value_with_prices_scales_by_live_material_basket() {
         587,
     );
     assert!((doubled_val - base_val * 2.0).abs() < 1e-3);
+}
+
+#[test]
+fn sde_rig_target_filters_scope_bonuses_by_activity_and_product() {
+    let ctx = make_test_context();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.clear();
+        // Standup M-Set Ammunition Manufacturing Material Efficiency I (37158)
+        snap.items.insert(
+            5101,
+            make_item(5101, 37158, 98000001, 5000, InventoryFlag::RigSlot0),
+        );
+
+        // Matches Ammunition manufacturing (activity 1, Antimatter Charge S = 222)
+        let (ammo_mat, ammo_time, _, _) = resolve_structure_rig_bonuses_for_job(
+            &ctx,
+            snap,
+            5000,
+            30000142,
+            Some(1),
+            Some(222),
+        );
+        assert!(ammo_mat > 0.0, "Ammunition rig must bonus ammo manufacturing");
+        assert_eq!(ammo_time, 0.0);
+
+        // Does NOT bonus Capital Ship manufacturing (19720 Revelation)
+        let (cap_mat, cap_time, _, _) = resolve_structure_rig_bonuses_for_job(
+            &ctx,
+            snap,
+            5000,
+            30000142,
+            Some(1),
+            Some(19720),
+        );
+        assert_eq!((cap_mat, cap_time), (0.0, 0.0));
+
+        // Does NOT bonus Invention (activity 8) or Reactions (activity 9)
+        let (inv_mat, inv_time, _, _) = resolve_structure_rig_bonuses_for_job(
+            &ctx,
+            snap,
+            5000,
+            30004759,
+            Some(8),
+            Some(222),
+        );
+        assert_eq!((inv_mat, inv_time), (0.0, 0.0));
+
+        let (react_mat, react_time, _, _) = resolve_structure_rig_bonuses_for_job(
+            &ctx,
+            snap,
+            5000,
+            30004759,
+            Some(9),
+            Some(222),
+        );
+        assert_eq!((react_mat, react_time), (0.0, 0.0));
+    });
 }

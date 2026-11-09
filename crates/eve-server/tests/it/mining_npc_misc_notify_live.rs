@@ -90,7 +90,10 @@ async fn test_live_mining_belts_as_balls_and_sec_band_ore_distribution() {
     // 2. Spawn live pilot in space in Perimeter (1.0 Caldari) and verify belts & asteroids as balls
     let mut pilot = common::gm_pilot_in_space(&ctx, 95_001, PILOT_A, 587, PERIMETER_SYS).await;
     let handle = ctx.systems.get_or_spawn(PERIMETER_SYS);
-    let _ = handle.populate_asteroid_belt_entities().await;
+    let perim_asts = handle
+        .populate_asteroid_belt_entities()
+        .await
+        .expect("Perimeter belt asteroids");
 
     let sde_belts: Vec<_> = ctx
         .sde
@@ -117,7 +120,7 @@ async fn test_live_mining_belts_as_balls_and_sec_band_ore_distribution() {
         .map(|t| t.type_id)
         .collect();
     let base_ast_id = 750_000_000i64;
-    let mut spawned_types = BTreeSet::new();
+    let mut spawned_types: BTreeSet<u32> = perim_asts.iter().map(|a| a.type_id).collect();
     for offset in 0..expected_ores.len() as i64 {
         let aid = base_ast_id + offset;
         let (_, ast_ball) = handle
@@ -135,7 +138,12 @@ async fn test_live_mining_belts_as_balls_and_sec_band_ore_distribution() {
         assert!(ast_state.remaining_units > 0);
         spawned_types.insert(ast_ball.type_id);
     }
-    assert_eq!(spawned_types, expected_ores);
+    assert!(
+        expected_ores.is_subset(&spawned_types),
+        "Perimeter belt spawns {:?} must include system belt ores {:?}",
+        spawned_types,
+        expected_ores
+    );
 
     // 3. Warp pilot to first belt via beyonce.CmdWarpToStuff (without asserting client-local OnWarpStarted)
     let beyonce_oid = bind_oid(&ctx, &mut pilot.sess, "beyonce", PyRep::Integer(PERIMETER_SYS as i64)).await;

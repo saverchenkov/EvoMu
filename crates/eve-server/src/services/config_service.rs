@@ -47,42 +47,13 @@ fn query_celestials_batch(
     ctx: &ServerContext,
     celestial_ids: &[i64],
 ) -> HashMap<i64, eve_sde::CelestialInfo> {
-    let mut out = HashMap::new();
-    if celestial_ids.is_empty() {
-        return out;
-    }
-    let Some(p) = ctx.sde.db_path.as_ref() else {
-        return out;
-    };
-    let Ok(conn) =
-        rusqlite::Connection::open_with_flags(p, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-    else {
-        return out;
-    };
-    let Ok(mut stmt) = conn.prepare(
-        "SELECT celestial_id, system_id, type_id, group_id, name, radius, x, y, z, orbit_id, orbit_index, celestial_index FROM sde_celestials WHERE celestial_id = ?1",
-    ) else {
-        return out;
-    };
+    let mut out = HashMap::with_capacity(celestial_ids.len());
     for &celestial_id in celestial_ids {
         if out.contains_key(&celestial_id) {
             continue;
         }
-        if let Ok(cel) = stmt.query_row([celestial_id], |r| {
-            Ok(eve_sde::CelestialInfo {
-                celestial_id: r.get(0)?,
-                solar_system_id: r.get::<_, i64>(1)? as eve_sde::SolarSystemId,
-                type_id: r.get::<_, i64>(2)? as eve_sde::TypeId,
-                group_id: r.get::<_, i64>(3)? as eve_sde::GroupId,
-                name: r.get(4)?,
-                radius: r.get(5)?,
-                position: glam::DVec3::new(r.get(6)?, r.get(7)?, r.get(8)?),
-                orbit_id: r.get(9)?,
-                orbit_index: r.get(10)?,
-                celestial_index: r.get(11)?,
-            })
-        }) {
-            out.insert(celestial_id, cel);
+        if let Some(cel) = ctx.sde.celestial(celestial_id) {
+            out.insert(celestial_id, cel.clone());
         }
     }
     out

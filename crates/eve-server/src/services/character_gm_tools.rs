@@ -1444,7 +1444,7 @@ pub async fn handle_gm_slash_ext(
                 }));
             };
             let _ = handle.remove_ball(victim_ship_id).await;
-            let wreck_type_id = ctx.sde.wrecks.get(&ball.type_id).copied().unwrap_or(26557);
+            let wreck_type_id = ctx.sde.resolve_wreck_type_id(ball.type_id, None).unwrap_or(26557);
             let (wreck_id, killmail_id) = ctx.db.with_mut_snapshot(|snap| {
                 snap.next_entity_id += 1;
                 let wid = snap.next_entity_id;

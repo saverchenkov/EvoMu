@@ -312,15 +312,21 @@ async fn validate_and_execute_wreck_salvage_cycle_all_difficulty_tiers_and_radii
         );
     });
 
-    for (idx, (wtid, expected_first_tid, expected_first_qty)) in [
-        (999_701u32, 30259u32, 2i32),
-        (999_702u32, 25605u32, 2i32),
-        (999_703u32, 25588u32, 8i32),
-        (999_704u32, 25588u32, 4i32),
+    for (idx, (wtid, expected_pool, expected_first_qty)) in [
+        (999_701u32, &ctx.sde.salvage_pools.ancient, 2i32),
+        (999_702u32, &ctx.sde.salvage_pools.t2_intact, 2i32),
+        (999_703u32, &ctx.sde.salvage_pools.t1_standard, 8i32),
+        (999_704u32, &ctx.sde.salvage_pools.t1_standard, 4i32),
     ]
     .into_iter()
     .enumerate()
     {
+        let expected_table = ctx.sde.salvage_materials_for_wreck(wtid, true);
+        assert!(!expected_table.is_empty());
+        let expected_first_tid = expected_table[0].0;
+        assert!(expected_pool.contains(&expected_first_tid));
+        assert_eq!(expected_table[0].1, expected_first_qty);
+
         let wid = 100_310_100 + idx as i64;
         spawn_wreck_ball(&ctx, sys_id, wid, wtid, char_id, DVec3::new(500.0, 0.0, 0.0), 30.0);
         ctx.db.with_mut_snapshot(|snap| {

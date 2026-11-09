@@ -222,13 +222,13 @@ async fn test_mn01_mn02_c5_static_data_and_belt_ore_distribution() {
         "Lowsec belt must contain lowsec ores (Kernite/Omber/Jaspet/Hemorphite/Hedbergite)"
     );
 
-    let mut nullsec_bp = eve_destiny::Ballpark::new(30000208); // LZ-6SU (nullsec -0.17)
-    let nullsec_states = eve_server::system_actor::populate_asteroid_belt_entities(&mut nullsec_bp, 30000208, &ctx.sde);
+    let mut nullsec_bp = eve_destiny::Ballpark::new(30000439); // OEG-K9 (deep nullsec)
+    let nullsec_states = eve_server::system_actor::populate_asteroid_belt_entities(&mut nullsec_bp, 30000439, &ctx.sde);
     assert!(!nullsec_states.is_empty(), "Nullsec belts must generate asteroids");
     let nullsec_type_ids: Vec<u32> = nullsec_states.iter().map(|s| s.type_id).collect();
     assert!(
-        nullsec_type_ids.contains(&21) || nullsec_type_ids.contains(&1229) || nullsec_type_ids.contains(&1232),
-        "Nullsec belt must contain high-tier nullsec ores (Hedbergite/Bistot/Dark Ochre)"
+        nullsec_type_ids.contains(&1223) && nullsec_type_ids.contains(&22) && nullsec_type_ids.contains(&11396),
+        "Deep nullsec OEG-K9 belt must contain high-tier nullsec ores (Bistot/Arkonor/Mercoxit)"
     );
 }
 

@@ -10,62 +10,35 @@ use eve_db::{corp_roles, UpwellStructureRecord};
 use eve_proto::quasar::{
     AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, QuasarDescriptorRegistry,
 };
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use eve_sde::CelestialInfo;
+use glam::DVec3;
 
 struct TempCelestialSqlite {
-    path: PathBuf,
+    reg: SdeRegistry,
 }
 
 impl TempCelestialSqlite {
     fn new(rows: &[(i64, u32, u32, u32, f64)]) -> Self {
-        static SEQ: AtomicU64 = AtomicU64::new(1);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "evomu_synth_skyhook_celestials_{}_{}.sqlite",
-            std::process::id(),
-            n
-        ));
-        let _ = std::fs::remove_file(&path);
-        let conn = rusqlite::Connection::open(&path).expect("open temp sqlite");
-        conn.execute_batch(
-            "CREATE TABLE sde_celestials (
-                celestial_id INTEGER PRIMARY KEY,
-                system_id INTEGER NOT NULL,
-                type_id INTEGER NOT NULL,
-                group_id INTEGER NOT NULL,
-                name TEXT NOT NULL,
-                radius REAL NOT NULL,
-                x REAL NOT NULL,
-                y REAL NOT NULL,
-                z REAL NOT NULL,
-                orbit_id INTEGER,
-                orbit_index INTEGER,
-                celestial_index INTEGER
-            );",
-        )
-        .expect("create sde_celestials");
+        let mut reg = SdeRegistry::default();
         for &(cid, sys_id, tid, gid, radius) in rows {
-            conn.execute(
-                "INSERT INTO sde_celestials VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0.0, 0.0, 0.0, NULL, NULL, NULL)",
-                rusqlite::params![cid, i64::from(sys_id), i64::from(tid), i64::from(gid), format!("Planet-{cid}"), radius],
-            )
-            .expect("insert celestial");
+            reg.insert_celestial(CelestialInfo {
+                celestial_id: cid,
+                solar_system_id: sys_id,
+                type_id: tid,
+                group_id: gid,
+                name: format!("Planet-{cid}"),
+                radius,
+                position: DVec3::ZERO,
+                orbit_id: None,
+                orbit_index: None,
+                celestial_index: None,
+            });
         }
-        Self { path }
+        Self { reg }
     }
 
     fn sde(&self) -> SdeRegistry {
-        SdeRegistry {
-            db_path: Some(self.path.clone()),
-            ..Default::default()
-        }
-    }
-}
-
-impl Drop for TempCelestialSqlite {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        self.reg.clone()
     }
 }
 

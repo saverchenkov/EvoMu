@@ -987,7 +987,7 @@ async fn handle_fighters_inner(
                         session.corporation_id.unwrap_or(-1),
                         session.alliance_id.unwrap_or(-1),
                     ));
-                let f_type = ctx.sde.types.get(&item.type_id);
+                let f_type = ctx.sde.types.get(&item_type_id);
                 let fighter_meta = eve_destiny::SlimItemMeta {
                     group_id: f_type.map(|t| t.group_id).unwrap_or(1652),
                     category_id: f_type.map(|t| t.category_id).unwrap_or(87),

@@ -647,7 +647,10 @@ pub fn sample_wormhole_ore_sites_for_system(
     sys_id: u32,
     wh_class: u8,
 ) -> Vec<&'static WormholeOreSiteDef> {
-    let has_shattered_celestial = sde.celestials_in_system(sys_id).iter().any(|c| c.type_id == 30889);
+    let has_shattered_celestial = sde
+        .celestials_in_system_slice(sys_id)
+        .iter()
+        .any(|c| c.type_id == 30889);
     let is_shattered = matches!(wh_class, 12..=18) || has_shattered_celestial;
     let mut candidates: Vec<&'static WormholeOreSiteDef> = if (1..=6).contains(&wh_class) && has_shattered_celestial {
         let lo = wh_class.saturating_sub(1).max(1);

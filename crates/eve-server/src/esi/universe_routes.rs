@@ -1,9 +1,7 @@
 //! `esi::universe_routes` — SDE- and `WorldRepository`-backed ESI route handlers for Routes,
 //! Search, Sovereignty, Universe, and User Interface tags (`ESI-3`, `ESI-7`).
 
-use crate::esi::sample_routes::{
-    open_sde_sqlite, paginate_slice, parse_path_i64, RouteExecutionResult,
-};
+use crate::esi::sample_routes::{paginate_slice, parse_path_i64, RouteExecutionResult};
 use crate::router::cache_notifications::NotificationTarget;
 use crate::router::ServerContext;
 use eve_db::SsoTokenClaims;
@@ -678,15 +676,12 @@ pub fn dispatch_universe_and_nav(
             if let Some(sid) = star_id {
                 obj["star_id"] = json!(sid);
             }
-            if let Some(conn) = open_sde_sqlite(ctx) {
-                if let Ok(Some(sec_class)) = conn.query_row(
-                    "SELECT security_class FROM sde_solar_systems WHERE system_id = ?1",
-                    [sys_id],
-                    |r| r.get::<_, Option<String>>(0),
-                ) {
-                    if !sec_class.is_empty() {
-                        obj["security_class"] = json!(sec_class);
-                    }
+            if let Some(sec_class) = u32::try_from(sys_id)
+                .ok()
+                .and_then(|sid| ctx.sde.solar_system_security_class(sid))
+            {
+                if !sec_class.is_empty() {
+                    obj["security_class"] = json!(sec_class);
                 }
             }
             RouteExecutionResult::ok_json(obj, 3600)
@@ -696,38 +691,18 @@ pub fn dispatch_universe_and_nav(
                 Ok(v) => v,
                 Err(e) => return e,
             };
-            let Some(conn) = open_sde_sqlite(ctx) else {
-                return RouteExecutionResult::error(404, format!("Planet {pid} not found"));
-            };
-            let row = conn.query_row(
-                "SELECT celestial_id, system_id, type_id, name, x, y, z FROM sde_celestials WHERE celestial_id = ?1 AND group_id = 7",
-                [pid],
-                |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, i64>(1)?,
-                        r.get::<_, i64>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, f64>(4)?,
-                        r.get::<_, f64>(5)?,
-                        r.get::<_, f64>(6)?,
-                    ))
-                },
-            );
-            match row {
-                Ok((planet_id, system_id, type_id, name, x, y, z)) => {
-                    RouteExecutionResult::ok_json(
-                        json!({
-                            "planet_id": planet_id,
-                            "system_id": system_id,
-                            "type_id": type_id,
-                            "name": name,
-                            "position": { "x": x, "y": y, "z": z },
-                        }),
-                        3600,
-                    )
-                }
-                Err(_) => RouteExecutionResult::error(404, format!("Planet {pid} not found")),
+            match ctx.sde.celestial(pid).filter(|c| c.group_id == 7) {
+                Some(cel) => RouteExecutionResult::ok_json(
+                    json!({
+                        "planet_id": cel.celestial_id,
+                        "system_id": i64::from(cel.solar_system_id),
+                        "type_id": i64::from(cel.type_id),
+                        "name": cel.name,
+                        "position": { "x": cel.position.x, "y": cel.position.y, "z": cel.position.z },
+                    }),
+                    3600,
+                ),
+                None => RouteExecutionResult::error(404, format!("Planet {pid} not found")),
             }
         }
         ("GET", "/universe/moons/{moon_id}") => {
@@ -735,34 +710,17 @@ pub fn dispatch_universe_and_nav(
                 Ok(v) => v,
                 Err(e) => return e,
             };
-            let Some(conn) = open_sde_sqlite(ctx) else {
-                return RouteExecutionResult::error(404, format!("Moon {mid} not found"));
-            };
-            let row = conn.query_row(
-                "SELECT celestial_id, system_id, name, x, y, z FROM sde_celestials WHERE celestial_id = ?1 AND group_id = 8",
-                [mid],
-                |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, i64>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, f64>(3)?,
-                        r.get::<_, f64>(4)?,
-                        r.get::<_, f64>(5)?,
-                    ))
-                },
-            );
-            match row {
-                Ok((moon_id, system_id, name, x, y, z)) => RouteExecutionResult::ok_json(
+            match ctx.sde.celestial(mid).filter(|c| c.group_id == 8) {
+                Some(cel) => RouteExecutionResult::ok_json(
                     json!({
-                        "moon_id": moon_id,
-                        "system_id": system_id,
-                        "name": name,
-                        "position": { "x": x, "y": y, "z": z },
+                        "moon_id": cel.celestial_id,
+                        "system_id": i64::from(cel.solar_system_id),
+                        "name": cel.name,
+                        "position": { "x": cel.position.x, "y": cel.position.y, "z": cel.position.z },
                     }),
                     3600,
                 ),
-                Err(_) => RouteExecutionResult::error(404, format!("Moon {mid} not found")),
+                None => RouteExecutionResult::error(404, format!("Moon {mid} not found")),
             }
         }
         ("GET", "/universe/asteroid_belts/{asteroid_belt_id}") => {
@@ -770,32 +728,16 @@ pub fn dispatch_universe_and_nav(
                 Ok(v) => v,
                 Err(e) => return e,
             };
-            let Some(conn) = open_sde_sqlite(ctx) else {
-                return RouteExecutionResult::error(404, format!("Asteroid belt {bid} not found"));
-            };
-            let row = conn.query_row(
-                "SELECT system_id, name, x, y, z FROM sde_celestials WHERE celestial_id = ?1 AND group_id = 9",
-                [bid],
-                |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, f64>(2)?,
-                        r.get::<_, f64>(3)?,
-                        r.get::<_, f64>(4)?,
-                    ))
-                },
-            );
-            match row {
-                Ok((system_id, name, x, y, z)) => RouteExecutionResult::ok_json(
+            match ctx.sde.celestial(bid).filter(|c| c.group_id == 9) {
+                Some(cel) => RouteExecutionResult::ok_json(
                     json!({
-                        "system_id": system_id,
-                        "name": name,
-                        "position": { "x": x, "y": y, "z": z },
+                        "system_id": i64::from(cel.solar_system_id),
+                        "name": cel.name,
+                        "position": { "x": cel.position.x, "y": cel.position.y, "z": cel.position.z },
                     }),
                     3600,
                 ),
-                Err(_) => {
+                None => {
                     RouteExecutionResult::error(404, format!("Asteroid belt {bid} not found"))
                 }
             }
@@ -805,67 +747,27 @@ pub fn dispatch_universe_and_nav(
                 Ok(v) => v,
                 Err(e) => return e,
             };
-            if let Some(conn) = open_sde_sqlite(ctx) {
-                let row = conn.query_row(
-                    "SELECT stargate_id, system_id, destination_gate_id, destination_system_id, type_id, name, x, y, z FROM sde_stargates WHERE stargate_id = ?1",
-                    [gid],
-                    |r| {
-                        Ok((
-                            r.get::<_, i64>(0)?,
-                            r.get::<_, i64>(1)?,
-                            r.get::<_, i64>(2)?,
-                            r.get::<_, i64>(3)?,
-                            r.get::<_, i64>(4)?,
-                            r.get::<_, String>(5)?,
-                            r.get::<_, f64>(6)?,
-                            r.get::<_, f64>(7)?,
-                            r.get::<_, f64>(8)?,
-                        ))
-                    },
-                );
-                if let Ok((
-                    stargate_id,
-                    system_id,
-                    dest_gate_id,
-                    dest_sys_id,
-                    type_id,
-                    name,
-                    x,
-                    y,
-                    z,
-                )) = row
-                {
-                    return RouteExecutionResult::ok_json(
-                        json!({
-                            "stargate_id": stargate_id,
-                            "system_id": system_id,
-                            "type_id": type_id,
-                            "name": name,
-                            "position": { "x": x, "y": y, "z": z },
-                            "destination": {
-                                "stargate_id": dest_gate_id,
-                                "system_id": dest_sys_id,
-                            },
-                        }),
-                        3600,
-                    );
-                }
-            }
             let Some(j) = ctx.sde.jumps.get(&gid) else {
                 return RouteExecutionResult::error(404, format!("Stargate {gid} not found"));
             };
-            let dest_name = ctx
-                .sde
-                .solar_systems
-                .get(&j.to_solar_system_id)
-                .map(|s| format!("Stargate ({})", s.name))
-                .unwrap_or_else(|| format!("Stargate ({})", j.to_solar_system_id));
+            let (gate_tid, gate_name) = match ctx.sde.stargate_type_and_name(gid) {
+                Some((tid, nm)) if !nm.is_empty() => (i64::from(tid), nm.to_string()),
+                _ => {
+                    let dest_name = ctx
+                        .sde
+                        .solar_systems
+                        .get(&j.to_solar_system_id)
+                        .map(|s| format!("Stargate ({})", s.name))
+                        .unwrap_or_else(|| format!("Stargate ({})", j.to_solar_system_id));
+                    (16, dest_name)
+                }
+            };
             RouteExecutionResult::ok_json(
                 json!({
                     "stargate_id": j.stargate_id,
                     "system_id": j.from_solar_system_id as i64,
-                    "type_id": 16,
-                    "name": dest_name,
+                    "type_id": gate_tid,
+                    "name": gate_name,
                     "position": {
                         "x": j.position.x,
                         "y": j.position.y,

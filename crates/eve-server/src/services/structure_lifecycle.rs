@@ -1064,7 +1064,7 @@ pub fn destroy_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext
     let Some(st) = snap.structures.get(&structure_id).cloned() else { return out };
     evacuate_structure_on_leave_space(ctx, snap, ext, &st);
     dispose_contents(ctx, snap, ext, &st, true, now, &mut out);
-    let wreck_type_id = ctx.sde.wrecks.get(&st.type_id).copied().unwrap_or(26557);
+    let wreck_type_id = ctx.sde.resolve_wreck_type_id(st.type_id, None).unwrap_or(26557);
     snap.next_entity_id += 1;
     let wreck_id = snap.next_entity_id;
     crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, wreck_id, now, false);

@@ -8,15 +8,6 @@ mod raw_client;
 use eve_sde::SdeRegistry;
 use raw_client::{md5_hex, resfiles_dir, unpickle, PyVal};
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root")
-        .to_path_buf()
-}
 
 fn verify_language_pickle(
     sde: &SdeRegistry,
@@ -109,7 +100,7 @@ fn test_sde_localization_fsd_main_and_en_us_full_verification() {
         "sde:res:/localizationfsd/localization_fsd_en-us.pickle",
     ]);
 
-    let sde = SdeRegistry::open(&repo_root().join("data/evomu_sde.sqlite"))
+    let sde = SdeRegistry::open(&SdeRegistry::default_db_path())
         .expect("SdeRegistry::open must succeed");
 
     // 1. Verify localization_fsd_main.pickle against raw client file (3,344,947 bytes, 31,872 labels)
@@ -195,7 +186,7 @@ fn test_sde_localization_fsd_west_eu_locales_full_verification() {
         "sde:res:/localizationfsd/localization_fsd_fr.pickle",
     ]);
 
-    let sde = SdeRegistry::open(&repo_root().join("data/evomu_sde.sqlite"))
+    let sde = SdeRegistry::open(&SdeRegistry::default_db_path())
         .expect("SdeRegistry::open must succeed");
 
     verify_language_pickle(
@@ -237,7 +228,7 @@ fn test_sde_localization_fsd_cjk_ru_locales_full_verification() {
         "sde:res:/localizationfsd/localization_fsd_zh.pickle",
     ]);
 
-    let sde = SdeRegistry::open(&repo_root().join("data/evomu_sde.sqlite"))
+    let sde = SdeRegistry::open(&SdeRegistry::default_db_path())
         .expect("SdeRegistry::open must succeed");
 
     verify_language_pickle(

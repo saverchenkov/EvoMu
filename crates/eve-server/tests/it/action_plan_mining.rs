@@ -80,10 +80,10 @@ async fn test_action_plan_c5_mn01_to_mn07_mining_data_belts_lasers_holds_crystal
     assert!(!ctx.sde.celestials_in_system(jita_system_id).is_empty(), "Jita system celestials exist in SDE");
     let mut hs_bp = eve_destiny::Ballpark::new(30000144);
     let perim_belt_states = eve_server::system_actor::populate_asteroid_belt_entities(&mut hs_bp, 30000144, &ctx.sde);
-    assert!(!perim_belt_states.is_empty() && perim_belt_states.iter().all(|st| matches!(st.type_id, 1230 | 1228 | 1224 | 18)));
-    let mut nullsec_bp = eve_destiny::Ballpark::new(30000208);
-    let nullsec_states = eve_server::system_actor::populate_asteroid_belt_entities(&mut nullsec_bp, 30000208, &ctx.sde);
-    assert!(nullsec_states.iter().any(|s| s.type_id == 11396) && nullsec_states.iter().any(|s| matches!(s.type_id, 1229 | 1232)));
+    assert!(!perim_belt_states.is_empty() && perim_belt_states.iter().all(|st| matches!(st.type_id, 1230 | 1228 | 1224 | 18 | 17463 | 17464 | 17470 | 17471)));
+    let mut nullsec_bp = eve_destiny::Ballpark::new(30000439);
+    let nullsec_states = eve_server::system_actor::populate_asteroid_belt_entities(&mut nullsec_bp, 30000439, &ctx.sde);
+    assert!(nullsec_states.iter().any(|s| s.type_id == 11396) && nullsec_states.iter().any(|s| matches!(s.type_id, 1223 | 22)));
 
     // 3. plan:MN-04: Venture Miner I cycle, exact SDE m³, notifications & hold-full stop
     let undock = ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None).await.expect("Undock");
@@ -260,6 +260,17 @@ async fn test_action_plan_c5_mn01_to_mn07_mining_data_belts_lasers_holds_crystal
         }
         assert_eq!(ctx.db.get_asteroid(belt_ast_id).unwrap().quantity, 0, "Belt asteroid {belt_ast_id} depleted in ctx.db");
         assert!(perim.get_ball_snapshot(belt_ast_id).await.unwrap().is_none(), "Depleted belt asteroid {belt_ast_id} removed from Ballpark");
+    }
+    let sample_belt_id = ctx.db.get_asteroid(sample_ast_id).unwrap().belt_id;
+    let remaining_belt_rocks: Vec<(i64, u64)> = ctx.db.with_snapshot(|snap| {
+        snap.asteroids
+            .values()
+            .filter(|a| a.belt_id == sample_belt_id && a.quantity > 0)
+            .map(|a| (a.asteroid_id, a.quantity as u64))
+            .collect()
+    });
+    for (aid, qty) in remaining_belt_rocks {
+        perim.mine_asteroid(aid, qty, 0.0).await.expect("Deplete remaining rock in sample belt");
     }
     let _ = perim.step_manual(1.0).await.unwrap();
     assert!(perim.get_ball_snapshot(sample_ast_id).await.unwrap().is_none(), "Stays gone before respawn interval");

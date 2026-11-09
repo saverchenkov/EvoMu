@@ -573,9 +573,8 @@ pub(crate) async fn handle_module_cycles(
                                     Some(tb.position)
                                 } else {
                                     ctx.sde
-                                        .celestials_in_system(sys_id)
-                                        .into_iter()
-                                        .find(|c| c.celestial_id == target_id)
+                                        .celestial(target_id)
+                                        .filter(|c| c.solar_system_id == sys_id)
                                         .map(|c| c.position)
                                 };
                                 tpos.and_then(|tp| ((tp - sb.position).length() > 1e-3).then(|| (tp - sb.position).normalize()))
@@ -589,8 +588,8 @@ pub(crate) async fn handle_module_cycles(
 
                 let moons: Vec<_> = ctx
                     .sde
-                    .celestials_in_system(sys_id)
-                    .into_iter()
+                    .celestials_in_system_slice(sys_id)
+                    .iter()
                     .filter(|c| c.group_id == 8)
                     .collect();
                 let hit_moon_id: Option<i64> = if let Some(target_moon_id) = target_id_opt {

@@ -838,6 +838,128 @@ pub struct SkinInfo {
     pub skin_description: Option<String>,
 }
 
+/// Static definition of a solar system star (`sde_stars`, `8,089` records).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StarInfo {
+    pub star_id: i64,
+    pub solar_system_id: SolarSystemId,
+    pub type_id: TypeId,
+    pub radius: i64,
+    pub age: i64,
+    pub luminosity: f64,
+    pub temperature: i64,
+    pub spectral_class: String,
+}
+
+/// SDE-derived salvage material pools partitioned from `sde_types` (`group_id` `754` & `966`)
+/// and rig/subsystem manufacturing inputs in `sde_blueprints`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SalvageMaterialPools {
+    pub t1_standard: Vec<TypeId>,
+    pub t2_intact: Vec<TypeId>,
+    pub ancient: Vec<TypeId>,
+}
+
+impl SalvageMaterialPools {
+    /// Builds sorted T1 standard (`group 754`), T2 intact (`group 754`), and Sleeper ancient
+    /// (`group 966`) salvage material pools from `sde_types` and `sde_blueprints`.
+    pub fn from_types_and_blueprints(
+        types: &HashMap<TypeId, InvType>,
+        blueprints: &HashMap<TypeId, BlueprintInfo>,
+    ) -> Self {
+        let mut t1_set = std::collections::BTreeSet::new();
+        let mut t2_all_set = std::collections::BTreeSet::new();
+        let mut ancient_set = std::collections::BTreeSet::new();
+
+        for bp in blueprints.values() {
+            let Some(prod) = types.get(&bp.product_type_id) else {
+                continue;
+            };
+            let mats_iter = bp.materials.iter().chain(
+                bp.activities
+                    .get("manufacturing")
+                    .into_iter()
+                    .flat_map(|a| a.materials.iter()),
+            );
+            for mat in mats_iter {
+                let Some(mat_type) = types.get(&mat.type_id) else {
+                    continue;
+                };
+                if !mat_type.published {
+                    continue;
+                }
+                if mat_type.group_id == 754 && prod.category_id == 7 {
+                    if prod.tech_level == Some(2) || prod.meta_group_id == Some(2) {
+                        t2_all_set.insert(mat.type_id);
+                    } else if prod.tech_level == Some(1)
+                        && prod.meta_group_id == Some(1)
+                        && mat_type.race_id.is_none()
+                    {
+                        t1_set.insert(mat.type_id);
+                    }
+                } else if mat_type.group_id == 966 && !mat_type.default_attributes.is_empty() {
+                    ancient_set.insert(mat.type_id);
+                }
+            }
+        }
+
+        let mut t2_intact: Vec<TypeId> = t2_all_set.difference(&t1_set).copied().collect();
+        let mut t1_standard: Vec<TypeId> = t1_set.into_iter().collect();
+        let mut ancient: Vec<TypeId> = ancient_set.into_iter().collect();
+
+        // Fallback when a synthetic test SdeRegistry populates `types` without `blueprints`:
+        // partition published race-neutral group-754 salvage types and group-966 ancient salvage types.
+        if t1_standard.is_empty() || t2_intact.is_empty() {
+            let mut all_g754: Vec<TypeId> = types
+                .values()
+                .filter(|t| t.published && t.group_id == 754 && t.race_id.is_none())
+                .map(|t| t.type_id)
+                .collect();
+            all_g754.sort_unstable();
+            let mid = all_g754.len() / 2;
+            if t1_standard.is_empty() && mid > 0 {
+                t1_standard = all_g754[..mid].to_vec();
+            } else if t1_standard.is_empty() {
+                t1_standard = all_g754.clone();
+            }
+            if t2_intact.is_empty() && mid < all_g754.len() {
+                t2_intact = all_g754[mid..].to_vec();
+            }
+        }
+        if ancient.is_empty() {
+            ancient = types
+                .values()
+                .filter(|t| t.published && t.group_id == 966 && !t.default_attributes.is_empty())
+                .map(|t| t.type_id)
+                .collect();
+            ancient.sort_unstable();
+        }
+
+        Self {
+            t1_standard,
+            t2_intact,
+            ancient,
+        }
+    }
+}
+
+/// Serde adapter for `Arc<T>` fields on `SdeRegistry` so cloning `SdeRegistry` across threads
+/// and test contexts is an $O(1)$ atomic reference count increment without requiring global `serde/rc`.
+pub mod arc_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::sync::Arc;
+
+    pub fn serialize<T: Serialize, S: Serializer>(val: &Arc<T>, s: S) -> Result<S::Ok, S::Error> {
+        val.as_ref().serialize(s)
+    }
+
+    pub fn deserialize<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Arc<T>, D::Error> {
+        T::deserialize(d).map(Arc::new)
+    }
+}
+
 /// Thread-safe, read-only in-memory registry of V24.01 Static Data Export records.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SdeRegistry {
@@ -858,16 +980,32 @@ pub struct SdeRegistry {
     pub bloodlines: HashMap<u32, BloodlineInfo>,
     pub ancestries: HashMap<u32, AncestryInfo>,
     pub schools: HashMap<u32, SchoolInfo>,
+    #[serde(default, with = "arc_serde")]
+    pub school_starting_stations: Arc<HashMap<u32, (u32, Vec<i64>)>>,
+    #[serde(default, with = "arc_serde")]
+    pub school_career_agents: Arc<HashMap<u32, (u32, Vec<i64>)>>,
     #[serde(default)]
     pub regions: HashMap<u32, RegionInfo>,
     #[serde(default)]
     pub constellations: HashMap<u32, ConstellationInfo>,
     pub solar_systems: HashMap<SolarSystemId, SolarSystem>,
+    #[serde(default, with = "arc_serde")]
+    pub solar_system_factions: Arc<HashMap<SolarSystemId, u32>>,
+    #[serde(default, with = "arc_serde")]
+    pub solar_system_security_classes: Arc<HashMap<SolarSystemId, String>>,
     #[serde(default)]
     pub stations: HashMap<i64, StationInfo>,
     pub jumps: HashMap<i64, StargateJump>,
+    #[serde(default, with = "arc_serde")]
+    pub stargate_meta: Arc<HashMap<i64, (TypeId, String)>>,
     #[serde(default)]
     pub celestial_count: usize,
+    #[serde(default, with = "arc_serde")]
+    pub celestials_by_system: Arc<HashMap<SolarSystemId, Vec<CelestialInfo>>>,
+    #[serde(default, with = "arc_serde")]
+    pub celestial_system_by_id: Arc<HashMap<i64, SolarSystemId>>,
+    #[serde(default, with = "arc_serde")]
+    pub stars: Arc<HashMap<i64, StarInfo>>,
     #[serde(default)]
     pub factions: HashMap<u32, FactionInfo>,
     #[serde(default)]
@@ -891,6 +1029,12 @@ pub struct SdeRegistry {
     #[serde(default)]
     pub fighter_abilities_by_type: HashMap<TypeId, Vec<FighterAbilitySlot>>,
     pub wrecks: HashMap<TypeId, TypeId>,
+    #[serde(default, with = "arc_serde")]
+    pub wrecks_by_group_and_race: Arc<HashMap<GroupId, HashMap<u32, TypeId>>>,
+    #[serde(default, with = "arc_serde")]
+    pub wreck_group_race_by_wreck_type: Arc<HashMap<TypeId, (GroupId, u32)>>,
+    #[serde(default, with = "arc_serde")]
+    pub salvage_pools: Arc<SalvageMaterialPools>,
     pub compressible_types: HashMap<TypeId, TypeId>,
     #[serde(default)]
     pub type_lists: HashMap<u32, TypeListInfo>,
@@ -898,6 +1042,20 @@ pub struct SdeRegistry {
     pub dungeon_asteroids: HashMap<u32, Vec<DungeonAsteroidEntry>>,
     #[serde(default)]
     pub dungeon_gas_types: HashMap<u32, Vec<TypeId>>,
+    #[serde(default, with = "arc_serde")]
+    pub asteroid_counts_by_belt: Arc<HashMap<i64, HashMap<TypeId, u32>>>,
+    #[serde(default, with = "arc_serde")]
+    pub asteroid_types_by_system: Arc<HashMap<SolarSystemId, Vec<TypeId>>>,
+    #[serde(default, with = "arc_serde")]
+    pub industry_activities: Arc<HashMap<u32, IndustryActivityInfo>>,
+    #[serde(default, with = "arc_serde")]
+    pub industry_modifier_sources: Arc<HashMap<TypeId, IndustryModifierSources>>,
+    #[serde(default, with = "arc_serde")]
+    pub industry_target_filters: Arc<HashMap<u32, IndustryTargetFilterInfo>>,
+    #[serde(default, with = "arc_serde")]
+    pub industry_assembly_lines: Arc<HashMap<u32, IndustryAssemblyLineInfo>>,
+    #[serde(default, with = "arc_serde")]
+    pub industry_installation_types: Arc<HashMap<TypeId, Vec<u32>>>,
     #[serde(default)]
     pub type_materials: HashMap<TypeId, Vec<TypeMaterialEntry>>,
     #[serde(default)]
@@ -1074,6 +1232,337 @@ impl SdeRegistry {
     pub fn ancestry(&self, ancestry_id: u32) -> Option<&AncestryInfo> { self.ancestries.get(&ancestry_id) }
     pub fn faction(&self, faction_id: u32) -> Option<&FactionInfo> { self.factions.get(&faction_id) }
     pub fn npc_corporation(&self, corporation_id: i64) -> Option<&NpcCorporationInfo> { self.npc_corporations.get(&corporation_id) }
+
+    /// Returns the zero-allocation sorted slice of celestials in `solar_system_id` from memory.
+    pub fn celestials_in_system_slice(&self, solar_system_id: SolarSystemId) -> &[CelestialInfo] {
+        self.celestials_by_system
+            .get(&solar_system_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Looks up a single celestial (`planet`, `moon`, `asteroid belt`, `star`) by ID in $O(\log K)$
+    /// without opening SQLite.
+    pub fn celestial(&self, celestial_id: i64) -> Option<&CelestialInfo> {
+        let &sys_id = self.celestial_system_by_id.get(&celestial_id)?;
+        let list = self.celestials_by_system.get(&sys_id)?;
+        list.binary_search_by_key(&celestial_id, |c| c.celestial_id)
+            .ok()
+            .map(|idx| &list[idx])
+            .or_else(|| list.iter().find(|c| c.celestial_id == celestial_id))
+    }
+
+    /// Inserts or updates a celestial record in the in-memory `SdeRegistry` indices (used by
+    /// unit tests that synthesize custom solar-system celestials).
+    pub fn insert_celestial(&mut self, celestial: CelestialInfo) {
+        let cid = celestial.celestial_id;
+        let sys_id = celestial.solar_system_id;
+        if let Some(prev_sys) = Arc::make_mut(&mut self.celestial_system_by_id).insert(cid, sys_id) {
+            if prev_sys != sys_id {
+                if let Some(prev_list) = Arc::make_mut(&mut self.celestials_by_system).get_mut(&prev_sys) {
+                    prev_list.retain(|c| c.celestial_id != cid);
+                }
+            }
+        } else {
+            self.celestial_count += 1;
+        }
+        let list = Arc::make_mut(&mut self.celestials_by_system)
+            .entry(sys_id)
+            .or_default();
+        match list.binary_search_by_key(&cid, |c| c.celestial_id) {
+            Ok(idx) => list[idx] = celestial,
+            Err(idx) => list.insert(idx, celestial),
+        }
+    }
+
+    /// Looks up a star (`sde_stars`) by `star_id` in $O(1)$.
+    pub fn star(&self, star_id: i64) -> Option<&StarInfo> {
+        self.stars.get(&star_id)
+    }
+
+    /// Inserts or updates a star record in the in-memory `SdeRegistry` star index.
+    pub fn insert_star(&mut self, star: StarInfo) {
+        Arc::make_mut(&mut self.stars).insert(star.star_id, star);
+    }
+
+    /// Returns the sovereign NPC faction ID recorded on `sde_solar_systems` for `solar_system_id`.
+    pub fn solar_system_faction(&self, solar_system_id: SolarSystemId) -> Option<u32> {
+        self.solar_system_factions.get(&solar_system_id).copied()
+    }
+
+    /// Returns the SDE `security_class` string (e.g. `"B"`, `"G1"`) for `solar_system_id`.
+    pub fn solar_system_security_class(&self, solar_system_id: SolarSystemId) -> Option<&str> {
+        self.solar_system_security_classes
+            .get(&solar_system_id)
+            .map(String::as_str)
+    }
+
+    /// Returns `(type_id, name)` from `sde_stargates` for `stargate_id`.
+    pub fn stargate_type_and_name(&self, stargate_id: i64) -> Option<(TypeId, &str)> {
+        self.stargate_meta
+            .get(&stargate_id)
+            .map(|(tid, name)| (*tid, name.as_str()))
+    }
+
+    /// Returns the exact static `type_id -> count` map for an asteroid belt (`40,928` belts).
+    pub fn belt_asteroid_counts(&self, belt_id: i64) -> Option<&HashMap<TypeId, u32>> {
+        self.asteroid_counts_by_belt.get(&belt_id)
+    }
+
+    /// Returns the static sorted list of asteroid ore `type_id`s present in `solar_system_id`.
+    pub fn system_asteroid_types(&self, solar_system_id: SolarSystemId) -> &[TypeId] {
+        self.asteroid_types_by_system
+            .get(&solar_system_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Resolves the canonical wreck `TypeId` for a destroyed ship, NPC, deployable, or structure:
+    /// 1. When `race_override` is provided, checks `wrecks_by_group_and_race[(group_id, race)]` first.
+    /// 2. Checks per-type `sde_types.wreck_type_id` (`self.wrecks`), preserving exact Tech II Elite
+    ///    and Faction hull wrecks.
+    /// 3. Falls back to `wrecks_by_group_and_race` using the hull's `race_id` (or faction race / `0`
+    ///    unaligned group wreck), covering NPCs, POS modules, Sov structures, and deployables whose
+    ///    `sde_types.wreck_type_id` column is `NULL`.
+    pub fn resolve_wreck_type_id(
+        &self,
+        victim_type_id: TypeId,
+        race_override: Option<u32>,
+    ) -> Option<TypeId> {
+        let inv = self.types.get(&victim_type_id);
+        if let (Some(r), Some(t)) = (race_override.filter(|&r| r != 0), inv) {
+            if let Some(&wid) = self
+                .wrecks_by_group_and_race
+                .get(&t.group_id)
+                .and_then(|rm| rm.get(&r))
+            {
+                return Some(wid);
+            }
+        }
+        if let Some(&wid) = self.wrecks.get(&victim_type_id) {
+            return Some(wid);
+        }
+        let t = inv?;
+        let race_map = self.wrecks_by_group_and_race.get(&t.group_id)?;
+        let candidate_race = race_override
+            .filter(|&r| r != 0)
+            .or_else(|| t.race_id.filter(|&r| r != 0))
+            .or_else(|| {
+                match t.faction_id? {
+                    500_001 => Some(1),
+                    500_002 => Some(2),
+                    500_003 | 500_007 | 500_016 => Some(4),
+                    500_004 | 500_009 => Some(8),
+                    500_010..=500_012 | 500_019 | 500_020 => Some(32),
+                    500_014 => Some(128),
+                    500_018 | 500_021 => Some(64),
+                    500_026 => Some(135),
+                    _ => None,
+                }
+            });
+        if let Some(rid) = candidate_race {
+            if let Some(&wid) = race_map.get(&rid) {
+                return Some(wid);
+            }
+        }
+        if let Some(&wid) = race_map.get(&0) {
+            return Some(wid);
+        }
+        (race_map.len() == 1)
+            .then(|| race_map.values().next().copied())
+            .flatten()
+    }
+
+    /// Returns `(group_id, race_id)` from `wrecks.static` for a wreck `type_id`, if mapped.
+    pub fn wreck_group_and_race(&self, wreck_type_id: TypeId) -> Option<(GroupId, u32)> {
+        self.wreck_group_race_by_wreck_type
+            .get(&wreck_type_id)
+            .copied()
+    }
+
+    /// Selects `(salvage_type_id, quantity)` drops for `wreck_type_id` from the SDE-derived
+    /// [`SalvageMaterialPools`] (`sde_types` groups `754` & `966` partitioned via `sde_blueprints`)
+    /// and racial wreck mappings (`wrecks.static` + Dogma attribute `901` `accessDifficultyBonus`).
+    ///
+    /// DERIVED: EVE's server-side salvage loot RNG table is proprietary; we deterministically index
+    /// into the authentic 19-item T1, 19-item T2, and 15-item Sleeper SDE pools by wreck tier and
+    /// racial hull origin so Empire, Pirate, Rogue Drone, Tech II, and Sleeper wrecks yield
+    /// lore-accurate SDE salvage materials without hardcoded item IDs.
+    pub fn salvage_materials_for_wreck(
+        &self,
+        wreck_type_id: TypeId,
+        scale_by_difficulty: bool,
+    ) -> Vec<(TypeId, i32)> {
+        let wreck_diff = self
+            .types
+            .get(&wreck_type_id)
+            .and_then(|t| t.default_attributes.get(&901).copied())
+            .unwrap_or(20.0);
+        let race_id = self
+            .wreck_group_and_race(wreck_type_id)
+            .map(|(_, r)| r)
+            .or_else(|| self.types.get(&wreck_type_id).and_then(|t| t.race_id))
+            .unwrap_or(0);
+
+        if (race_id == 64 || wreck_diff <= -15.0) && !self.salvage_pools.ancient.is_empty() {
+            let pool = &self.salvage_pools.ancient;
+            let n = pool.len();
+            let i0 = (n * 2 / 3) % n;
+            let i1 = (i0 + n - 1) % n;
+            return if i0 == i1 {
+                vec![(pool[i0], 2)]
+            } else {
+                vec![(pool[i0], 2), (pool[i1], 3)]
+            };
+        }
+
+        if wreck_diff < 0.0 && !self.salvage_pools.t2_intact.is_empty() {
+            let pool = &self.salvage_pools.t2_intact;
+            let n = pool.len();
+            let (s0, s1) = match race_id {
+                1 => (0, 1),   // Caldari: Telemetry Processor, Intact Shield Emitter
+                2 => (7, 14),  // Minmatar: Single-crystal Superalloy I-beam, Impetus Console
+                4 => (9, 17),  // Amarr: Artificial Neural Network, Intact Armor Plates
+                8 => (8, 9),   // Gallente: Drone Transceiver, Artificial Neural Network
+                _ => (9, 15),  // Elite / Pirate / Unaligned: Artificial Neural Network, Capacitor Console
+            };
+            let i0 = s0 % n;
+            let i1 = s1 % n;
+            return if i0 == i1 {
+                vec![(pool[i0], 2)]
+            } else {
+                vec![(pool[i0], 2), (pool[i1], 3)]
+            };
+        }
+
+        let pool = &self.salvage_pools.t1_standard;
+        if pool.is_empty() {
+            return Vec::new();
+        }
+        let size_mult = if scale_by_difficulty && wreck_diff <= 10.0 {
+            2
+        } else {
+            1
+        };
+        let n = pool.len();
+        let (s0, s1, s2) = match race_id {
+            1 => (0, 1, 12),  // Caldari: Scorched Telemetry, Shield Emitter, Burned Logic Circuit
+            2 => (7, 5, 14),  // Minmatar: Alloyed Tritanium Bar, Smashed Trigger Unit, Thruster Console
+            4 => (0, 17, 15), // Amarr: Scorched Telemetry, Armor Plates, Melted Capacitor Console
+            8 => (8, 9, 17),  // Gallente: Broken Drone Transceiver, Damaged Neural Net, Armor Plates
+            32 => (1, 7, 12), // Pirate: Shield Emitter, Alloyed Tritanium Bar, Burned Logic Circuit
+            _ => (0, 7, 9),   // Rogue Drone / Unaligned: Scorched Telemetry, Alloyed Tritanium Bar, Damaged Neural Net
+        };
+        let mut out = Vec::with_capacity(3);
+        for (slot, base_qty) in [(s0 % n, 4 * size_mult), (s1 % n, 2 * size_mult), (s2 % n, 3 * size_mult)] {
+            let tid = pool[slot];
+            if out.iter().all(|&(existing, _)| existing != tid) {
+                out.push((tid, base_qty));
+            }
+        }
+        out
+    }
+
+    /// Maps an EVE industry `activity_id` (`1, 3, 4, 5, 8, 9, 11`) to its canonical key in
+    /// `industry_activity_modifier_sources.static`.
+    pub fn industry_activity_key(&self, activity_id: u8) -> Option<&'static str> {
+        let canonical = match activity_id {
+            11 => 9u32,
+            other => u32::from(other),
+        };
+        if !self.industry_activities.is_empty()
+            && !self.industry_activities.contains_key(&canonical)
+        {
+            return None;
+        }
+        match canonical {
+            1 => Some("manufacturing"),
+            3 => Some("research_time"),
+            4 => Some("research_material"),
+            5 => Some("copying"),
+            8 => Some("invention"),
+            9 => Some("reaction"),
+            _ => None,
+        }
+    }
+
+    /// Evaluates whether `product_type_id` satisfies `filter_id` in
+    /// `industry_activity_target_filters.static`.
+    /// - `filter_id == None`: unfiltered activity modifier (e.g. Research/Copy/Invention rigs or
+    ///   Upwell structure hulls) -> `true`.
+    /// - `product_type_id == None`: facility-wide summary query without a target blueprint -> `true`.
+    /// - Otherwise, checks `product_type`'s `category_id` and `group_id` against the SDE filter.
+    pub fn industry_target_filter_matches(
+        &self,
+        filter_id: Option<u32>,
+        product_type_id: Option<TypeId>,
+    ) -> bool {
+        let Some(fid) = filter_id else {
+            return true;
+        };
+        let Some(prod_tid) = product_type_id else {
+            return true;
+        };
+        let Some(filter) = self.industry_target_filters.get(&fid) else {
+            return false;
+        };
+        let Some(prod) = self.types.get(&prod_tid) else {
+            return false;
+        };
+        filter.category_ids.contains(&prod.category_id) || filter.group_ids.contains(&prod.group_id)
+    }
+
+    /// Resolves the source attribute value on `rig_type` (with optional `dynamic_attributes`
+    /// override) that drives `modified_attribute_id` on the host structure via `sde_dogma_effects`.
+    pub fn rig_dogma_source_attribute(
+        &self,
+        rig_type: &InvType,
+        dynamic_attrs: Option<&HashMap<AttributeId, f64>>,
+        modified_attribute_id: AttributeId,
+    ) -> Option<f64> {
+        let read_attr = |aid: AttributeId| -> Option<f64> {
+            dynamic_attrs
+                .and_then(|d| d.get(&aid).copied())
+                .or_else(|| rig_type.default_attributes.get(&aid).copied())
+        };
+        // Direct attribute on the item itself (used by Upwell structure hulls 35825..47514).
+        if let Some(v) = read_attr(modified_attribute_id) {
+            return Some(v);
+        }
+        // Structure rigs map `modified_attribute_id` (e.g. `2546` medium-ship ME) to their own
+        // `modifying_attribute_id` (e.g. `2594` `-2.0` / `-2.4`, or `2714` `-2.0` / `-2.4`) via
+        // `sde_dogma_effects` modifiers on `domain == "structureID"`.
+        for &eid in &rig_type.effect_ids {
+            let Some(eff) = self.effects.get(&eid) else {
+                continue;
+            };
+            for m in &eff.modifiers {
+                if m.modified_attribute_id == modified_attribute_id && m.modifying_attribute_id != 0 {
+                    if let Some(v) = read_attr(m.modifying_attribute_id) {
+                        return Some(v);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Returns all [`IndustryAssemblyLineInfo`] entries supported by `installation_type_id`
+    /// (such as a Standup service module or station type) for `activity_id`.
+    pub fn installation_assembly_lines_for_activity(
+        &self,
+        installation_type_id: TypeId,
+        activity_id: u32,
+    ) -> Vec<&IndustryAssemblyLineInfo> {
+        let Some(line_ids) = self.industry_installation_types.get(&installation_type_id) else {
+            return Vec::new();
+        };
+        line_ids
+            .iter()
+            .filter_map(|id| self.industry_assembly_lines.get(id))
+            .filter(|line| line.activity == activity_id)
+            .collect()
+    }
 }
 
 pub mod cfsd_domain_loaders;
@@ -1234,6 +1723,24 @@ mod tests {
 
         let jita_celestials = sde.celestials_in_system(30000142);
         assert_eq!(jita_celestials.len(), 49);
+        assert_eq!(sde.celestials_in_system_slice(30000142).len(), 49);
+        assert_eq!(sde.celestial_system_by_id.len(), 475_859);
+        assert_eq!(sde.stars.len(), 8_089);
+        let jita_star = sde.star(jita_celestials[0].celestial_id).expect("Jita star in sde.stars");
+        assert_eq!(jita_star.solar_system_id, 30000142);
+        assert_eq!(sde.celestial(jita_star.star_id).unwrap().solar_system_id, 30000142);
+        assert_eq!(sde.career_goals.len(), 188);
+        assert_eq!(sde.industry_activities.len(), 6);
+        assert_eq!(sde.industry_modifier_sources.len(), 220);
+        assert_eq!(sde.industry_target_filters.len(), 18);
+        assert_eq!(sde.industry_assembly_lines.len(), 146);
+        assert_eq!(sde.industry_installation_types.len(), 102);
+        assert_eq!(sde.wrecks_by_group_and_race.len(), 294);
+        assert_eq!(sde.asteroid_counts_by_belt.len(), 40_928);
+        assert_eq!(sde.asteroid_types_by_system.len(), 3_974);
+        assert_eq!(sde.salvage_pools.t1_standard.len(), 19);
+        assert_eq!(sde.salvage_pools.t2_intact.len(), 19);
+        assert_eq!(sde.salvage_pools.ancient.len(), 15);
 
         // 5. Verify school -> race/corp mapping and all 12 starter schools (11..=22) (D-2, S-11)
         assert_eq!(sde.school(11).unwrap().race_id, 4);

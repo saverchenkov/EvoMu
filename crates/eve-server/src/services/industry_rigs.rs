@@ -6,15 +6,48 @@ use crate::router::ServerContext;
 use eve_db::InventoryFlag;
 use eve_proto::BridgeRpcError;
 
-/// Computes Standup Structure Rig bonuses (`feat:industry.structure-rigs`, `feat:industry.structure-standup-rig-security-multipliers`):
+/// Resolves the output product `TypeId` produced by `bp` under `activity_id` (`1..=11`).
+pub fn resolve_blueprint_activity_product(
+    bp: &eve_sde::BlueprintInfo,
+    activity_id: u8,
+) -> Option<eve_sde::TypeId> {
+    let prod_from_act = match activity_id {
+        9 | 11 => bp
+            .activities
+            .get("reaction")
+            .or_else(|| bp.activities.get("9")),
+        8 => bp
+            .activities
+            .get("invention")
+            .or_else(|| bp.activities.get("8")),
+        _ => bp
+            .activities
+            .get("manufacturing")
+            .or_else(|| bp.activities.get("1")),
+    }
+    .and_then(|a| a.products.first())
+    .map(|p| p.type_id)
+    .filter(|&tid| tid != 0);
+    prod_from_act.or_else(|| (bp.product_type_id != 0).then_some(bp.product_type_id))
+}
+
+/// Computes Standup Structure Rig bonuses (`feat:industry.structure-rigs`, `feat:industry.structure-standup-rig-security-multipliers`)
+/// using the SDE industry tables (`industry_activity_modifier_sources.static` + `industry_activity_target_filters.static` +
+/// `sde_dogma_effects`):
+/// - Evaluates `(activity_id, product_type_id)` against each fitted rig's modifier entries and target filters,
+///   so specialized rigs (e.g. Ammunition ME, Basic Small Ship ME, Biochemical Reactor ME) grant bonuses ONLY
+///   to matching activities and product categories/groups, and non-industry rigs grant `0.0`.
 /// - Manufacturing/Research/Invention rigs: High-Sec (`1.0x`), Low-Sec (`1.9x`), Null-Sec/WH (`2.1x`).
 /// - Reaction rigs (`1933..=1939`, `2713`/`2714`, `1970` `disallowInHighSec`): High-Sec (`0.0x`), Low-Sec (`1.0x`), Null-Sec/WH (`1.1x`).
+/// - Outpost Conversion rigs (`group_id == 1984`): flat `1.0x` security multiplier.
 /// Returns `(rig_mat_bonus, rig_time_bonus, rig_cost_bonus, sec_multiplier)`.
-pub fn resolve_structure_rig_bonuses_full(
+pub fn resolve_structure_rig_bonuses_for_job(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
     facility_id: i64,
     solar_system_id: u32,
+    activity_id: Option<u8>,
+    product_type_id: Option<eve_sde::TypeId>,
 ) -> (f64, f64, f64, f64) {
     let sec = ctx
         .sde
@@ -52,6 +85,14 @@ pub fn resolve_structure_rig_bonuses_full(
         if a > 1.0 { a / 100.0 } else { a }
     };
 
+    let req_act_key = match activity_id {
+        Some(aid) => match ctx.sde.industry_activity_key(aid) {
+            Some(k) => Some(k),
+            None => return (0.0, 0.0, 0.0, default_sec_mult),
+        },
+        None => None,
+    };
+
     let mut mat_bonus = 0.0_f64;
     let mut time_bonus = 0.0_f64;
     let mut cost_bonus = 0.0_f64;
@@ -59,11 +100,7 @@ pub fn resolve_structure_rig_bonuses_full(
 
     for rig in fitted_rigs {
         let sde_type = ctx.sde.types.get(&rig.type_id);
-        let is_t2 = sde_type
-            .and_then(|t| t.default_attributes.get(&422).copied())
-            .map(|tl| tl >= 2.0)
-            .unwrap_or(false)
-            || rig.dynamic_attributes.get(&422).copied().unwrap_or(1.0) >= 2.0;
+        let is_outpost_conversion_rig = sde_type.is_some_and(|t| t.group_id == 1984);
         let is_reaction_rig = sde_type
             .map(|t| {
                 (1933..=1939).contains(&t.group_id)
@@ -85,6 +122,8 @@ pub fn resolve_structure_rig_bonuses_full(
                     .filter(|&v| v > 0.0)
                     .unwrap_or(1.0)
             }
+        } else if is_outpost_conversion_rig {
+            1.0
         } else if is_ls {
             sde_type
                 .and_then(|t| t.default_attributes.get(&2356).copied())
@@ -98,64 +137,68 @@ pub fn resolve_structure_rig_bonuses_full(
         };
         active_sec_mult = rig_sec_mult;
 
-        let sde_mat = sde_type
-            .and_then(|t| {
-                t.default_attributes
-                    .get(&2594)
-                    .copied()
-                    .filter(|v| v.abs() > 0.0)
-                    .or_else(|| t.default_attributes.get(&2714).copied().filter(|v| v.abs() > 0.0))
-            })
-            .map(norm_frac);
-        let sde_time = sde_type
-            .and_then(|t| {
-                t.default_attributes
-                    .get(&2593)
-                    .copied()
-                    .filter(|v| v.abs() > 0.0)
-                    .or_else(|| t.default_attributes.get(&2713).copied().filter(|v| v.abs() > 0.0))
-            })
-            .map(norm_frac);
-        let sde_cost = sde_type
-            .and_then(|t| t.default_attributes.get(&2595).copied().filter(|v| v.abs() > 0.0))
-            .map(norm_frac);
-        let has_any_sde_ind_attr = sde_mat.is_some() || sde_time.is_some() || sde_cost.is_some();
+        let mut rig_mat = 0.0_f64;
+        let mut rig_time = 0.0_f64;
+        let mut rig_cost = 0.0_f64;
 
-        let rig_mat = rig
-            .dynamic_attributes
-            .get(&2594)
-            .or_else(|| rig.dynamic_attributes.get(&2714))
-            .copied()
-            .map(norm_frac)
-            .or(sde_mat)
-            .unwrap_or(if has_any_sde_ind_attr {
-                0.0
-            } else if is_t2 {
-                0.024
-            } else {
-                0.02
-            });
-        let rig_time = rig
-            .dynamic_attributes
-            .get(&2593)
-            .or_else(|| rig.dynamic_attributes.get(&2713))
-            .copied()
-            .map(norm_frac)
-            .or(sde_time)
-            .unwrap_or(if has_any_sde_ind_attr {
-                0.0
-            } else if is_t2 {
-                0.24
-            } else {
-                0.20
-            });
-        let rig_cost = rig
-            .dynamic_attributes
-            .get(&2595)
-            .copied()
-            .map(norm_frac)
-            .or(sde_cost)
-            .unwrap_or(0.0);
+        if let (Some(rig_t), Some(mod_sources)) = (
+            sde_type,
+            ctx.sde.industry_modifier_sources.get(&rig.type_id),
+        ) {
+            for (act_key, kind_map) in mod_sources {
+                if let Some(req_k) = req_act_key {
+                    if act_key != req_k {
+                        continue;
+                    }
+                }
+                let eval_kind = |kind: &str| -> f64 {
+                    kind_map
+                        .get(kind)
+                        .into_iter()
+                        .flat_map(|entries| entries.iter())
+                        .filter(|e| {
+                            ctx.sde
+                                .industry_target_filter_matches(e.filter_id, product_type_id)
+                        })
+                        .filter_map(|e| {
+                            ctx.sde.rig_dogma_source_attribute(
+                                rig_t,
+                                Some(&rig.dynamic_attributes),
+                                e.dogma_attribute_id,
+                            )
+                        })
+                        .filter(|v| v.abs() > 0.0)
+                        .map(norm_frac)
+                        .fold(0.0_f64, f64::max)
+                };
+                rig_mat = rig_mat.max(eval_kind("material"));
+                rig_time = rig_time.max(eval_kind("time"));
+                rig_cost = rig_cost.max(eval_kind("cost"));
+            }
+        } else {
+            // Synthetic unit-test rig types not indexed in `industry_modifier_sources`:
+            // honor only explicit industry Dogma attributes (`2593..=2595`, `2713..=2714`) with
+            // zero hardcoded T1/T2 percentage fallbacks.
+            let allow_eng = matches!(req_act_key, None | Some("manufacturing" | "research_time" | "research_material" | "copying" | "invention"));
+            let allow_react = matches!(req_act_key, None | Some("reaction"));
+            let read_explicit = |aid: u16| -> Option<f64> {
+                rig.dynamic_attributes
+                    .get(&aid)
+                    .copied()
+                    .or_else(|| sde_type.and_then(|t| t.default_attributes.get(&aid).copied()))
+                    .filter(|v| v.abs() > 0.0)
+                    .map(norm_frac)
+            };
+            if allow_eng {
+                rig_mat = rig_mat.max(read_explicit(2594).unwrap_or(0.0));
+                rig_time = rig_time.max(read_explicit(2593).unwrap_or(0.0));
+                rig_cost = rig_cost.max(read_explicit(2595).unwrap_or(0.0));
+            }
+            if allow_react {
+                rig_mat = rig_mat.max(read_explicit(2714).unwrap_or(0.0));
+                rig_time = rig_time.max(read_explicit(2713).unwrap_or(0.0));
+            }
+        }
 
         mat_bonus = mat_bonus.max((rig_mat * rig_sec_mult).clamp(0.0, 0.50));
         time_bonus = time_bonus.max((rig_time * rig_sec_mult).clamp(0.0, 0.80));
@@ -163,6 +206,15 @@ pub fn resolve_structure_rig_bonuses_full(
     }
 
     (mat_bonus, time_bonus, cost_bonus, active_sec_mult)
+}
+
+pub fn resolve_structure_rig_bonuses_full(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    facility_id: i64,
+    solar_system_id: u32,
+) -> (f64, f64, f64, f64) {
+    resolve_structure_rig_bonuses_for_job(ctx, snap, facility_id, solar_system_id, None, None)
 }
 
 pub fn resolve_structure_rig_bonus(
@@ -176,25 +228,77 @@ pub fn resolve_structure_rig_bonus(
     (mat, time, sec_mult)
 }
 
-pub fn structure_sde_industry_bonuses(ctx: &ServerContext, type_id: eve_sde::TypeId) -> (f64, f64, f64) {
+/// Resolves Upwell structure hull role bonuses (`2600` ME, `2602`/`2721` TE, `2601` job cost)
+/// scoped to `activity_id` via `industry_activity_modifier_sources.static` (so e.g. Tatara's `-25%`
+/// reaction time modifier `2721` applies to Reactions and not Manufacturing).
+pub fn structure_sde_industry_bonuses_for_activity(
+    ctx: &ServerContext,
+    type_id: eve_sde::TypeId,
+    activity_id: Option<u8>,
+) -> (f64, f64, f64) {
     let Some(t) = ctx.sde.types.get(&type_id) else {
         return (1.0, 1.0, 1.0);
     };
-    let mat_mod = t.default_attributes.get(&2600).copied().unwrap_or(1.0);
-    let time_mod = t
-        .default_attributes
-        .get(&2602)
-        .copied()
-        .or_else(|| t.default_attributes.get(&2721).copied())
-        .unwrap_or(1.0);
-    let cost_mod = t.default_attributes.get(&2601).copied().unwrap_or(1.0);
+    if let Some(mod_sources) = ctx.sde.industry_modifier_sources.get(&type_id) {
+        if let Some(aid) = activity_id {
+            let Some(act_key) = ctx.sde.industry_activity_key(aid) else {
+                return (1.0, 1.0, 1.0);
+            };
+            let Some(kind_map) = mod_sources.get(act_key) else {
+                return (1.0, 1.0, 1.0);
+            };
+            let read_hull_mod = |kind: &str| -> f64 {
+                kind_map
+                    .get(kind)
+                    .and_then(|entries| entries.first())
+                    .and_then(|e| t.default_attributes.get(&e.dogma_attribute_id).copied())
+                    .unwrap_or(1.0)
+            };
+            return (
+                read_hull_mod("material"),
+                read_hull_mod("time"),
+                read_hull_mod("cost"),
+            );
+        }
+    }
+    let allow_react = matches!(activity_id, None | Some(9 | 11));
+    let allow_eng = !matches!(activity_id, Some(9 | 11));
+    let mat_mod = if allow_eng {
+        t.default_attributes.get(&2600).copied().unwrap_or(1.0)
+    } else {
+        1.0
+    };
+    let time_mod = if allow_eng {
+        t.default_attributes
+            .get(&2602)
+            .copied()
+            .or_else(|| {
+                allow_react
+                    .then(|| t.default_attributes.get(&2721).copied())
+                    .flatten()
+            })
+            .unwrap_or(1.0)
+    } else {
+        t.default_attributes.get(&2721).copied().unwrap_or(1.0)
+    };
+    let cost_mod = if allow_eng {
+        t.default_attributes.get(&2601).copied().unwrap_or(1.0)
+    } else {
+        1.0
+    };
     (mat_mod, time_mod, cost_mod)
 }
 
-pub fn resolve_facility_modifiers_and_system(
+pub fn structure_sde_industry_bonuses(ctx: &ServerContext, type_id: eve_sde::TypeId) -> (f64, f64, f64) {
+    structure_sde_industry_bonuses_for_activity(ctx, type_id, None)
+}
+
+pub fn resolve_facility_modifiers_and_system_for_job(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
     facility_id: i64,
+    activity_id: Option<u8>,
+    product_type_id: Option<eve_sde::TypeId>,
 ) -> Option<(eve_sde::TypeId, i64, u32, u32, f64, f64, f64)> {
     if let Some(st) = snap.structures.get(&facility_id) {
         if st.state == "Destroyed" {
@@ -207,9 +311,15 @@ pub fn resolve_facility_modifiers_and_system(
             .map(|sys| sys.region_id)
             .unwrap_or(10000002);
         let (base_mat_mod, base_time_mod, cost_mod) =
-            structure_sde_industry_bonuses(ctx, st.type_id);
-        let (_, rig_time, rig_cost, _) =
-            resolve_structure_rig_bonuses_full(ctx, snap, facility_id, st.solar_system_id);
+            structure_sde_industry_bonuses_for_activity(ctx, st.type_id, activity_id);
+        let (_, rig_time, rig_cost, _) = resolve_structure_rig_bonuses_for_job(
+            ctx,
+            snap,
+            facility_id,
+            st.solar_system_id,
+            activity_id,
+            product_type_id,
+        );
         let eff_time_mod = base_time_mod * (1.0 - rig_time);
         let eff_cost_mod = cost_mod * (1.0 - rig_cost);
         return Some((
@@ -223,7 +333,7 @@ pub fn resolve_facility_modifiers_and_system(
         ));
     }
     if let Some(it) = snap.items.get(&facility_id) {
-        if matches!(it.type_id, 35825 | 35826 | 35827 | 35835 | 35836) {
+        if matches!(it.type_id, 35825 | 35826 | 35827 | 35835 | 35836 | 47512..=47516) {
             let sys_id = if (30_000_000..40_000_000).contains(&it.location_id) {
                 it.location_id as u32
             } else {
@@ -244,9 +354,15 @@ pub fn resolve_facility_modifiers_and_system(
                 .map(|sys| sys.region_id)
                 .unwrap_or(0);
             let (base_mat_mod, base_time_mod, cost_mod) =
-                structure_sde_industry_bonuses(ctx, it.type_id);
-            let (_, rig_time, rig_cost, _) =
-                resolve_structure_rig_bonuses_full(ctx, snap, facility_id, sys_id);
+                structure_sde_industry_bonuses_for_activity(ctx, it.type_id, activity_id);
+            let (_, rig_time, rig_cost, _) = resolve_structure_rig_bonuses_for_job(
+                ctx,
+                snap,
+                facility_id,
+                sys_id,
+                activity_id,
+                product_type_id,
+            );
             let eff_time_mod = base_time_mod * (1.0 - rig_time);
             let eff_cost_mod = cost_mod * (1.0 - rig_cost);
             return Some((
@@ -259,6 +375,17 @@ pub fn resolve_facility_modifiers_and_system(
                 eff_cost_mod,
             ));
         }
+    }
+    if let Some(station) = ctx.sde.stations.get(&facility_id) {
+        return Some((
+            station.station_type_id,
+            station.owner_corporation_id,
+            station.solar_system_id,
+            station.region_id,
+            1.0,
+            1.0,
+            1.0,
+        ));
     }
     for sys in ctx.sde.solar_systems.values() {
         if let Some(station) = sys.stations.iter().find(|s| s.station_id == facility_id) {
@@ -274,6 +401,14 @@ pub fn resolve_facility_modifiers_and_system(
         }
     }
     None
+}
+
+pub fn resolve_facility_modifiers_and_system(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    facility_id: i64,
+) -> Option<(eve_sde::TypeId, i64, u32, u32, f64, f64, f64)> {
+    resolve_facility_modifiers_and_system_for_job(ctx, snap, facility_id, None, None)
 }
 
 static SDE_ADJUSTED_PRICES: std::sync::RwLock<Option<std::collections::HashMap<eve_sde::TypeId, f64>>> =
@@ -686,12 +821,22 @@ pub fn validate_capital_construction_restrictions(
     if activity_id != 1 {
         return Ok(());
     }
-    let prod_grp = ctx
+    let (prod_cat, prod_grp) = ctx
         .sde
         .types
         .get(&bp.product_type_id)
-        .map(|t| t.group_id)
-        .unwrap_or(0);
+        .map(|t| (t.category_id, t.group_id))
+        .unwrap_or((0, 0));
+    let service_accepts_ship = |mod_tid: eve_sde::TypeId, fallback_ok: bool| -> bool {
+        let lines = ctx
+            .sde
+            .installation_assembly_lines_for_activity(mod_tid, 1);
+        if lines.is_empty() {
+            fallback_ok
+        } else {
+            lines.iter().any(|l| l.accepts_product(prod_cat, prod_grp))
+        }
+    };
     let fac_sec = ctx
         .sde
         .solar_systems
@@ -736,7 +881,7 @@ pub fn validate_capital_construction_restrictions(
             && snap.items.values().any(|i| {
                 i.location_id == station_id
                     && (164..=171).contains(&(i.flag as u16))
-                    && i.type_id == 35877
+                    && service_accepts_ship(i.type_id, i.type_id == 35877)
                     && is_mod_online(i)
             });
         if !has_supercap_shipyard {
@@ -765,7 +910,7 @@ pub fn validate_capital_construction_restrictions(
             && snap.items.values().any(|i| {
                 i.location_id == station_id
                     && (164..=171).contains(&(i.flag as u16))
-                    && matches!(i.type_id, 35881 | 35877)
+                    && service_accepts_ship(i.type_id, matches!(i.type_id, 35881 | 35877))
                     && snap.module_online_states.get(&i.item_id).copied().unwrap_or(true)
                     && i.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0
             });

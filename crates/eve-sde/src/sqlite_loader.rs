@@ -610,12 +610,6 @@ impl SdeRegistry {
             }
         }
 
-        let celestial_count: usize = conn
-            .query_row("SELECT count(*) FROM sde_celestials", [], |r| {
-                r.get::<_, i64>(0)
-            })
-            .unwrap_or(0) as usize;
-
         let mut races = HashMap::new();
         {
             let mut stmt = conn.prepare(
@@ -1294,8 +1288,10 @@ impl SdeRegistry {
 
         let (skin_licenses, skin_materials, skins) =
             crate::sqlite_loader_skins::load_skin_tables(&conn)?;
+        let aux = crate::sqlite_loader_skins::load_universe_aux_and_career_tables(&conn)?;
+        let salvage_pools = SalvageMaterialPools::from_types_and_blueprints(&types, &blueprints);
 
-        let registry = Self {
+        let mut registry = Self {
             db_path: Some(canon),
             resources,
             categories,
@@ -1308,12 +1304,20 @@ impl SdeRegistry {
             bloodlines,
             ancestries,
             schools,
+            school_starting_stations: Arc::new(aux.school_starting_stations),
+            school_career_agents: Arc::new(aux.school_career_agents),
             regions,
             constellations,
             solar_systems,
+            solar_system_factions: Arc::new(aux.solar_system_factions),
+            solar_system_security_classes: Arc::new(aux.solar_system_security_classes),
             stations,
             jumps,
-            celestial_count,
+            stargate_meta: Arc::new(aux.stargate_meta),
+            celestial_count: aux.celestial_count,
+            celestials_by_system: Arc::new(aux.celestials_by_system),
+            celestial_system_by_id: Arc::new(aux.celestial_system_by_id),
+            stars: Arc::new(aux.stars),
             npc_factions: factions.clone(),
             factions,
             npc_corporations,
@@ -1328,10 +1332,20 @@ impl SdeRegistry {
             fighter_abilities,
             fighter_abilities_by_type,
             wrecks,
+            wrecks_by_group_and_race: Arc::default(),
+            wreck_group_race_by_wreck_type: Arc::default(),
+            salvage_pools: Arc::new(salvage_pools),
             compressible_types,
             type_lists,
             dungeon_asteroids,
             dungeon_gas_types,
+            asteroid_counts_by_belt: Arc::default(),
+            asteroid_types_by_system: Arc::default(),
+            industry_activities: Arc::default(),
+            industry_modifier_sources: Arc::default(),
+            industry_target_filters: Arc::default(),
+            industry_assembly_lines: Arc::default(),
+            industry_installation_types: Arc::default(),
             type_materials,
             randomized_type_materials,
             dynamic_item_attributes,
@@ -1340,13 +1354,53 @@ impl SdeRegistry {
             dungeons,
             epic_arcs,
             node_graphs,
-            career_goals: HashMap::new(),
+            career_goals: aux.career_goals,
             station_operations,
             station_services,
             skin_licenses,
             skin_materials,
             skins,
         };
+
+        if let Ok(ind_acts) = registry.load_industry_activities() {
+            registry.industry_activities = Arc::new(ind_acts);
+        }
+        if let Ok(ind_mods) = registry.load_industry_activity_modifier_sources() {
+            registry.industry_modifier_sources = Arc::new(ind_mods);
+        }
+        if let Ok(ind_filters) = registry.load_industry_activity_target_filters() {
+            registry.industry_target_filters = Arc::new(ind_filters);
+        }
+        if let Ok(ind_lines) = registry.load_industry_assembly_lines() {
+            registry.industry_assembly_lines = Arc::new(ind_lines);
+        }
+        if let Ok(ind_inst) = registry.load_industry_installation_types() {
+            registry.industry_installation_types = Arc::new(ind_inst);
+        }
+        if let Ok(wrecks_by_grp) = registry.load_wrecks_by_group_and_race() {
+            let mut sorted_groups: Vec<GroupId> = wrecks_by_grp.keys().copied().collect();
+            sorted_groups.sort_unstable();
+            let mut reverse_wrecks: HashMap<TypeId, (GroupId, u32)> = HashMap::new();
+            for gid in sorted_groups {
+                if let Some(rmap) = wrecks_by_grp.get(&gid) {
+                    let mut sorted_races: Vec<u32> = rmap.keys().copied().collect();
+                    sorted_races.sort_unstable();
+                    for rid in sorted_races {
+                        if let Some(&wid) = rmap.get(&rid) {
+                            reverse_wrecks.entry(wid).or_insert((gid, rid));
+                        }
+                    }
+                }
+            }
+            registry.wrecks_by_group_and_race = Arc::new(wrecks_by_grp);
+            registry.wreck_group_race_by_wreck_type = Arc::new(reverse_wrecks);
+        }
+        if let Ok(belt_counts) = registry.load_asteroid_counts_by_belt() {
+            registry.asteroid_counts_by_belt = Arc::new(belt_counts);
+        }
+        if let Ok(sys_ores) = registry.load_asteroid_types_by_solar_system() {
+            registry.asteroid_types_by_system = Arc::new(sys_ores);
+        }
 
         Ok(registry)
     }

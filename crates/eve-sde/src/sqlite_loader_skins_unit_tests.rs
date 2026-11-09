@@ -102,10 +102,19 @@ fn skin_tables_and_on_demand_sqlite_celestial_queries() {
                 );
                 INSERT INTO sde_celestials VALUES (40000001, 30000142, 3802, 6, 'Jita - Star', 1000.0, 0.0, 0.0, 0.0, NULL, NULL, NULL);
                 INSERT INTO sde_celestials VALUES (40000002, 30000142, 11, 7, 'Jita I', 500.0, 10.0, 20.0, 30.0, 40000001, 1, 1);
-                CREATE TABLE sde_solar_systems (solar_system_id INTEGER, faction_id INTEGER);
-                INSERT INTO sde_solar_systems VALUES (30000142, 500001);
-                INSERT INTO sde_solar_systems VALUES (30002187, 500003);
-                INSERT INTO sde_solar_systems VALUES (31000001, NULL);",
+                CREATE TABLE sde_stars (
+                    star_id INTEGER, system_id INTEGER, type_id INTEGER, radius INTEGER,
+                    age INTEGER, luminosity REAL, temperature INTEGER, spectral_class TEXT
+                );
+                INSERT INTO sde_stars VALUES (40000001, 30000142, 3802, 1000, 4500000000, 0.015, 5700, 'G2 V');
+                CREATE TABLE sde_solar_systems (system_id INTEGER, faction_id INTEGER, security_class TEXT);
+                INSERT INTO sde_solar_systems VALUES (30000142, 500001, 'B');
+                INSERT INTO sde_solar_systems VALUES (30002187, 500003, 'A');
+                INSERT INTO sde_solar_systems VALUES (31000001, NULL, NULL);
+                CREATE TABLE sde_career_goals (
+                    goal_id INTEGER, career_path TEXT, name TEXT, target_progress INTEGER, sp_reward INTEGER
+                );
+                INSERT INTO sde_career_goals VALUES (9001, 'Enforcer', 'Destroy 10 Ships', 10, 5000);",
             )
             .unwrap();
     }
@@ -138,11 +147,27 @@ fn skin_tables_and_on_demand_sqlite_celestial_queries() {
     );
     assert_eq!(sde.location_solar_system(60003760), Some(30000142));
 
-    sde.db_path = Some(tmp_path.clone());
+    {
+        let disk_conn = Connection::open(&tmp_path).unwrap();
+        let aux = load_universe_aux_and_career_tables(&disk_conn).unwrap();
+        sde.celestial_count = aux.celestial_count;
+        sde.celestials_by_system = Arc::new(aux.celestials_by_system);
+        sde.celestial_system_by_id = Arc::new(aux.celestial_system_by_id);
+        sde.stars = Arc::new(aux.stars);
+        sde.solar_system_factions = Arc::new(aux.solar_system_factions);
+        sde.solar_system_security_classes = Arc::new(aux.solar_system_security_classes);
+        sde.career_goals = aux.career_goals;
+    }
+    // Explicitly clear db_path so any attempted runtime SQLite connection would fail (`#743`).
+    sde.db_path = None;
     let cels = sde.celestials_in_system(30000142);
     assert_eq!(cels.len(), 2);
     assert_eq!(cels[0].celestial_id, 40000001);
     assert_eq!(cels[1].position, DVec3::new(10.0, 20.0, 30.0));
+    assert_eq!(sde.celestial(40000002).unwrap().name, "Jita I");
+    assert_eq!(sde.star(40000001).unwrap().spectral_class, "G2 V");
+    assert_eq!(sde.solar_system_security_class(30000142), Some("B"));
+    assert_eq!(sde.career_goals[&9001].sp_reward, 5000);
     assert_eq!(sde.all_stars(), vec![(40000001, 3802)]);
     assert_eq!(sde.location_solar_system(40000002), Some(30000142));
     assert_eq!(sde.location_solar_system(99999999), None);

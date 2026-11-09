@@ -12,40 +12,27 @@ use eve_proto::quasar::{
     AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, QuasarDescriptorRegistry,
     WireMessage, WireValue,
 };
-use eve_sde::SdeRegistry;
-use std::path::PathBuf;
+use eve_sde::{CelestialInfo, SdeRegistry};
+use glam::DVec3;
 use std::sync::{Arc, RwLock};
 
-struct TempPlanetDb(PathBuf);
-impl Drop for TempPlanetDb {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-fn sde_with_planets(tag: &str, planets: &[(i64, u32, f64)]) -> (Arc<SdeRegistry>, TempPlanetDb) {
-    let path = std::env::temp_dir().join(format!("evomu_cov_mercden_{tag}_{}_{}.sqlite", std::process::id(), planets.len()));
-    let _ = std::fs::remove_file(&path);
-    let conn = rusqlite::Connection::open(&path).expect("open temp planet db");
-    conn.execute_batch(
-        "CREATE TABLE sde_celestials (
-            celestial_id INTEGER PRIMARY KEY, system_id INTEGER NOT NULL, type_id INTEGER NOT NULL,
-            group_id INTEGER NOT NULL, name TEXT NOT NULL, radius REAL NOT NULL,
-            x REAL NOT NULL, y REAL NOT NULL, z REAL NOT NULL,
-            orbit_id INTEGER, orbit_index INTEGER, celestial_index INTEGER
-        );",
-    )
-    .expect("create sde_celestials");
-    for &(pid, sys_id, radius_m) in planets {
-        conn.execute(
-            "INSERT INTO sde_celestials VALUES (?1, ?2, 11, 7, 'Temperate Planet', ?3, 0.0, 0.0, 0.0, NULL, NULL, NULL)",
-            rusqlite::params![pid, i64::from(sys_id), radius_m],
-        )
-        .expect("insert planet");
-    }
+fn sde_with_planets(_tag: &str, planets: &[(i64, u32, f64)]) -> (Arc<SdeRegistry>, ()) {
     let mut reg = SdeRegistry::with_canonical_seed();
-    reg.db_path = Some(path.clone());
-    (Arc::new(reg), TempPlanetDb(path))
+    for &(pid, sys_id, radius_m) in planets {
+        reg.insert_celestial(CelestialInfo {
+            celestial_id: pid,
+            solar_system_id: sys_id,
+            type_id: 11,
+            group_id: 7,
+            name: "Temperate Planet".into(),
+            radius: radius_m,
+            position: DVec3::ZERO,
+            orbit_id: None,
+            orbit_index: None,
+            celestial_index: None,
+        });
+    }
+    (Arc::new(reg), ())
 }
 
 fn id_req(field: u32, id: i64) -> DynamicQuasarMessage {

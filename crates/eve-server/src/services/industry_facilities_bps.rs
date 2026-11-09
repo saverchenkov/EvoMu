@@ -320,10 +320,16 @@ pub fn compute_industry_job_costs_with_step(
         .and_then(|cid| snap.characters.get(&cid).map(|c| c.solar_system_id))
         .unwrap_or_else(|| ctx.sde.solar_systems.keys().copied().next().unwrap_or(0));
     let fallback_reg = ctx.sde.solar_systems.get(&fallback_sys).map(|s| s.region_id).unwrap_or(0);
+    let target_prod_tid = resolve_blueprint_activity_product(bp, activity_id);
     let (_, _, sys_id, _, _, _, structure_cost_modifier) =
-        resolve_facility_modifiers_and_system(ctx, snap, facility_id).unwrap_or((
-            1529, 0, fallback_sys, fallback_reg, 1.0, 1.0, 1.0,
-        ));
+        resolve_facility_modifiers_and_system_for_job(
+            ctx,
+            snap,
+            facility_id,
+            Some(activity_id),
+            target_prod_tid,
+        )
+        .unwrap_or((1529, 0, fallback_sys, fallback_reg, 1.0, 1.0, 1.0));
     let system_cost_index = compute_canonical_system_cost_index(ctx, snap, sys_id, activity_id);
     let base_job_cost_isk =
         ((total_eiv * system_cost_index * structure_cost_modifier) * 100.0).round() / 100.0;

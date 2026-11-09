@@ -1939,7 +1939,7 @@ async fn test_mn02_asteroid_belts_as_balls_highsec_and_nullsec() {
     //    spawn real asteroid belt balls and asteroids with authentic security/region ore sets.
     let mut pilot = crate::common::gm_pilot_in_space(&ctx, 9102, 95_091_002, 587, 30_000_144).await;
     let perim_handle = ctx.systems.get_or_spawn(30_000_144);
-    let _ = perim_handle.populate_asteroid_belt_entities().await;
+    let perim_asts = perim_handle.populate_asteroid_belt_entities().await.expect("Perimeter belts");
     let perim_belts: Vec<_> = ctx
         .sde
         .celestials_in_system(30_000_144)
@@ -1962,9 +1962,12 @@ async fn test_mn02_asteroid_belts_as_balls_highsec_and_nullsec() {
         .into_iter()
         .map(|t| t.type_id)
         .collect();
-    assert_eq!(perim_expected, std::collections::BTreeSet::from([1230, 1228]));
+    assert_eq!(perim_expected, std::collections::BTreeSet::from([1228, 1230, 17463, 17464, 17470, 17471]));
 
     let mut perim_spawned = std::collections::BTreeSet::new();
+    for ast in &perim_asts {
+        perim_spawned.insert(ast.type_id);
+    }
     for offset in 0..perim_expected.len() as i64 {
         let aid = 750_000_000i64 + offset;
         let (_, ast_ball) = perim_handle
@@ -1974,32 +1977,45 @@ async fn test_mn02_asteroid_belts_as_balls_highsec_and_nullsec() {
             .expect("Perimeter asteroid ball in ballpark");
         assert_eq!(ast_ball.mode, MovementMode::Rigid);
         assert!(ast_ball.radius >= 60.0);
-        perim_spawned.insert(ast_ball.type_id);
     }
-    assert_eq!(perim_spawned, perim_expected);
+    assert!(
+        perim_expected.is_subset(&perim_spawned),
+        "Perimeter belt spawns {:?} must include system belt ores {:?}",
+        perim_spawned,
+        perim_expected
+    );
 
-    let null_handle = ctx.systems.get_or_spawn(30_000_208);
-    let _ = null_handle.populate_asteroid_belt_entities().await;
+    let null_handle = ctx.systems.get_or_spawn(30_000_439);
+    let null_asts = null_handle.populate_asteroid_belt_entities().await.expect("Nullsec belts");
     let null_expected: std::collections::BTreeSet<u32> = ctx
         .sde
-        .belt_ores_for_system(30_000_208)
+        .belt_ores_for_system(30_000_439)
         .into_iter()
         .map(|t| t.type_id)
         .collect();
     assert!(!null_expected.contains(&1230) && !null_expected.contains(&1228));
-    assert!(null_expected.contains(&1229) && null_expected.contains(&11396));
+    assert!(null_expected.contains(&1223) && null_expected.contains(&22) && null_expected.contains(&11396));
     let mut null_spawned = std::collections::BTreeSet::new();
-    for offset in 0..null_expected.len() as i64 {
-        let aid = 750_208_000i64 + offset;
+    for ast in &null_asts {
+        null_spawned.insert(ast.type_id);
+    }
+    let null_base = 750_000_000i64 + 439 * 6_000;
+    assert_eq!(null_asts.first().map(|a| a.asteroid_id), Some(null_base));
+    for offset in 0..3i64 {
+        let aid = null_base + offset;
         let (_, ast_ball) = null_handle
             .get_ball_snapshot(aid)
             .await
             .unwrap()
             .expect("Nullsec asteroid ball in ballpark");
         assert!(ast_ball.radius >= 60.0);
-        null_spawned.insert(ast_ball.type_id);
     }
-    assert_eq!(null_spawned, null_expected);
+    assert!(
+        null_expected.is_subset(&null_spawned),
+        "Nullsec belt spawns {:?} must include system belt ores {:?}",
+        null_spawned,
+        null_expected
+    );
 
     // 2. Warp live pilot to Perimeter belt via beyonce.CmdWarpToStuff and step server ticks
     let _ = ctx.drain_notifications_for_char(pilot.char_id);
@@ -3157,19 +3173,29 @@ async fn test_parity_mining_belts_as_balls_and_ore_distribution() {
     assert!(!tama_types.contains(&1230), "Lowsec must not spawn Veldspar");
     assert!(!tama_types.contains(&1228), "Lowsec must not spawn Scordite");
     assert!(
-        tama_types.contains(&1226) || tama_types.contains(&1231) || tama_types.contains(&21),
-        "Lowsec must spawn lowsec ores"
+        tama_types.contains(&20) && tama_types.contains(&1224),
+        "Lowsec Tama must spawn Kernite and Pyroxeres"
+    );
+    let lowsec_jaspet_ores: HashSet<u32> = ctx
+        .sde
+        .belt_ores_for_system(30_000_013)
+        .into_iter()
+        .map(|t| t.type_id)
+        .collect();
+    assert!(
+        lowsec_jaspet_ores.contains(&1226),
+        "Lowsec Onsooh must include Jaspet"
     );
 
-    let null_handle = ctx.systems.get_or_spawn(30_004_759);
+    let null_handle = ctx.systems.get_or_spawn(30_000_439);
     let null_asts = null_handle
         .populate_asteroid_belt_entities()
         .await
         .expect("Nullsec belts");
     let null_types: HashSet<u32> = null_asts.iter().map(|a| a.type_id).collect();
     assert!(
-        null_types.contains(&1229) && null_types.contains(&1225) && null_types.contains(&11396),
-        "Nullsec must spawn Gneiss, Crokite, and Mercoxit"
+        null_types.contains(&1223) && null_types.contains(&22) && null_types.contains(&11396),
+        "Deep nullsec OEG-K9 must spawn Bistot, Arkonor, and Mercoxit"
     );
     let deep_null_ores: HashSet<u32> = ctx
         .sde

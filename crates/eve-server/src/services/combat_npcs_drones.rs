@@ -595,7 +595,10 @@ pub async fn handle_npcs_drones(
                 let sig_res = attr(97).unwrap_or(0.0);
                 let orbit_dist = attr(238).or_else(|| attr(239)).or_else(|| attr(240)).or_else(|| attr(241)).unwrap_or(0.0);
                 let sig_rad = attr(554).unwrap_or(0.0);
-                prepared_drones.push((rec, sde_t, is_sentry, max_vel, bw_used, opt_range, dmg_vec, d_pos, rof_ms, falloff_m, tracking, orb_vel, sig_res, orbit_dist, sig_rad));
+                let eff_hp = attr(9).filter(|&v| v > 0.0);
+                let eff_sh = attr(263).filter(|&v| v > 0.0);
+                let eff_ar = attr(265).filter(|&v| v > 0.0);
+                prepared_drones.push((rec, sde_t, is_sentry, max_vel, bw_used, opt_range, dmg_vec, d_pos, rof_ms, falloff_m, tracking, orb_vel, sig_res, orbit_dist, sig_rad, (eff_hp, eff_sh, eff_ar)));
             }
 
             let res_ids: Vec<i64> = (0..prepared_drones.len())
@@ -621,7 +624,7 @@ pub async fn handle_npcs_drones(
                 if cur_bw + req_bw > ship_bw + 1e-4 {
                     return Err(BridgeRpcError::user_error("MaxBandwidthExceeded"));
                 }
-                for (i, (rec, sde_t, is_sentry, max_vel, bw_used, opt_range, dmg_vec, _, sh_rep, ar_rep, hu_rep, web_f, neut_a, ecm_s, tp_s)) in prepared_drones.iter().enumerate() {
+                for (i, (rec, sde_t, is_sentry, max_vel, bw_used, opt_range, dmg_vec, _, sh_rep, ar_rep, hu_rep, web_f, neut_a, ecm_s, tp_s, _)) in prepared_drones.iter().enumerate() {
                     let rid = res_ids[i];
                     rt.active_drones_in_space.insert(rid, DroneSpaceState {
                         ball_id: rid,
@@ -667,7 +670,7 @@ pub async fn handle_npcs_drones(
                     }
                 }
                 let mut results = Vec::with_capacity(prepared_drones.len());
-                for (rec, _, _, _, _, _, _, d_pos, _, _, _, _, _, _, _) in &prepared_drones {
+                for (rec, _, _, _, _, _, _, d_pos, _, _, _, _, _, _, _, _) in &prepared_drones {
                     let it = snap.items.get_mut(&rec.item_id).ok_or_else(|| BridgeRpcError {
                         code: "DroneNotFound".into(),
                         message: format!("Drone item {} not found", rec.item_id),
@@ -732,21 +735,21 @@ pub async fn handle_npcs_drones(
             });
 
             let mut launched_ball_ids = Vec::new();
-            for ((rec, sde_t, is_sentry, max_vel, _, _, _, d_pos, _, _, _, _, _, _, _), (ball_id, _launched_drone_item_id)) in prepared_drones.into_iter().zip(committed_launches.into_iter()) {
+            for ((rec, sde_t, is_sentry, max_vel, _, _, _, d_pos, _, _, _, _, _, _, _, (eff_hp, eff_sh, eff_ar)), (ball_id, _launched_drone_item_id)) in prepared_drones.into_iter().zip(committed_launches.into_iter()) {
                 let mut cs = ctx.build_type_combat_state(rec.type_id);
                 if cs.structure_hp <= 0.0 {
                     cs.structure_hp = 200.0;
                     cs.max_structure_hp = 200.0;
                 }
-                if let Some(eff_hp) = attr(9).filter(|&v| v > 0.0) {
+                if let Some(eff_hp) = eff_hp {
                     cs.structure_hp = eff_hp;
                     cs.max_structure_hp = eff_hp;
                 }
-                if let Some(eff_sh) = attr(263).filter(|&v| v > 0.0) {
+                if let Some(eff_sh) = eff_sh {
                     cs.shield_hp = eff_sh;
                     cs.max_shield_hp = eff_sh;
                 }
-                if let Some(eff_ar) = attr(265).filter(|&v| v > 0.0) {
+                if let Some(eff_ar) = eff_ar {
                     cs.armor_hp = eff_ar;
                     cs.max_armor_hp = eff_ar;
                 }

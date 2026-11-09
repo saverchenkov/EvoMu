@@ -95,33 +95,34 @@ pub(crate) fn load_skin_tables(conn: &Connection) -> Result<SkinTables, SdeError
     Ok((skin_licenses, skin_materials, skins))
 }
 
-impl SdeRegistry {
-    /// Queries celestials (stars, planets, moons, asteroid belts, stargates) in `solar_system_id`
-    /// from the on-disk SQLite SDE database (`sde_celestials`, `475,859` records).
-    pub fn celestials_in_system(&self, solar_system_id: SolarSystemId) -> Vec<CelestialInfo> {
-        let Some(ref p) = self.db_path else {
-            return Vec::new();
-        };
-        // Strip Windows extended path prefix `\\?\` for SQLite URI compatibility (SUP-001)
-        let path_str = p.display().to_string();
-        let clean_path = if cfg!(windows) && path_str.starts_with(r"\\?\") {
-            &path_str[4..]
-        } else {
-            &path_str
-        };
-        let uri = format!("file:{}?immutable=1", clean_path);
-        let Ok(conn) = Connection::open_with_flags(
-            &uri,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-        ) else {
-            return Vec::new();
-        };
-        let Ok(mut stmt) = conn.prepare(
-            "SELECT celestial_id, system_id, type_id, group_id, name, radius, x, y, z, orbit_id, orbit_index, celestial_index FROM sde_celestials WHERE system_id = ?1 ORDER BY celestial_id",
-        ) else {
-            return Vec::new();
-        };
-        let Ok(rows) = stmt.query_map([i64::from(solar_system_id)], |r| {
+pub(crate) struct EagerUniverseAuxTables {
+    pub celestial_count: usize,
+    pub celestials_by_system: HashMap<SolarSystemId, Vec<CelestialInfo>>,
+    pub celestial_system_by_id: HashMap<i64, SolarSystemId>,
+    pub stars: HashMap<i64, StarInfo>,
+    pub solar_system_factions: HashMap<SolarSystemId, u32>,
+    pub solar_system_security_classes: HashMap<SolarSystemId, String>,
+    pub stargate_meta: HashMap<i64, (TypeId, String)>,
+    pub school_starting_stations: HashMap<u32, (u32, Vec<i64>)>,
+    pub school_career_agents: HashMap<u32, (u32, Vec<i64>)>,
+    pub career_goals: HashMap<u32, CareerGoalTemplate>,
+}
+
+/// Eagerly loads celestials, stars, solar-system sovereignty/security classes, stargate type/name
+/// metadata, starter school station/agent lists, and AIR career goal templates at startup (`#743`)
+/// so runtime lookups never reopen `evomu_sde.sqlite`.
+pub(crate) fn load_universe_aux_and_career_tables(
+    conn: &Connection,
+) -> Result<EagerUniverseAuxTables, SdeError> {
+    let mut celestials_by_system: HashMap<SolarSystemId, Vec<CelestialInfo>> = HashMap::new();
+    let mut celestial_system_by_id: HashMap<i64, SolarSystemId> = HashMap::new();
+    let celestial_count: usize;
+
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT celestial_id, system_id, type_id, group_id, name, radius, x, y, z, orbit_id, orbit_index, celestial_index FROM sde_celestials ORDER BY celestial_id",
+    ) {
+        let mut loaded = 0usize;
+        if let Ok(rows) = stmt.query_map([], |r| {
             Ok(CelestialInfo {
                 celestial_id: r.get(0)?,
                 solar_system_id: r.get::<_, i64>(1)? as SolarSystemId,
@@ -134,136 +135,259 @@ impl SdeRegistry {
                 orbit_index: r.get(10)?,
                 celestial_index: r.get(11)?,
             })
-        }) else {
-            return Vec::new();
-        };
-        rows.flatten().collect()
+        }) {
+            for cel in rows.flatten() {
+                celestial_system_by_id.insert(cel.celestial_id, cel.solar_system_id);
+                celestials_by_system
+                    .entry(cel.solar_system_id)
+                    .or_default()
+                    .push(cel);
+                loaded += 1;
+            }
+        }
+        celestial_count = loaded;
+    } else {
+        celestial_count = conn
+            .query_row("SELECT count(*) FROM sde_celestials", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap_or(0) as usize;
     }
 
-    /// Queries all star celestials (`group_id == 6`) from `sde_celestials`.
+    let mut stars: HashMap<i64, StarInfo> = HashMap::new();
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT star_id, system_id, type_id, radius, age, luminosity, temperature, spectral_class FROM sde_stars",
+    ) {
+        if let Ok(rows) = stmt.query_map([], |r| {
+            Ok(StarInfo {
+                star_id: r.get(0)?,
+                solar_system_id: r.get::<_, i64>(1)? as SolarSystemId,
+                type_id: r.get::<_, i64>(2)? as TypeId,
+                radius: r.get(3)?,
+                age: r.get(4)?,
+                luminosity: r.get(5)?,
+                temperature: r.get(6)?,
+                spectral_class: r.get(7)?,
+            })
+        }) {
+            for st in rows.flatten() {
+                stars.insert(st.star_id, st);
+            }
+        }
+    }
+
+    let mut solar_system_factions: HashMap<SolarSystemId, u32> = HashMap::new();
+    let mut solar_system_security_classes: HashMap<SolarSystemId, String> = HashMap::new();
+    if let Ok(mut stmt) =
+        conn.prepare("SELECT system_id, faction_id, security_class FROM sde_solar_systems")
+    {
+        if let Ok(rows) = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)? as SolarSystemId,
+                r.get::<_, Option<i64>>(1)?.map(|v| v as u32),
+                r.get::<_, Option<String>>(2)?,
+            ))
+        }) {
+            for (sys_id, fac_opt, sec_cls_opt) in rows.flatten() {
+                if let Some(fac) = fac_opt {
+                    solar_system_factions.insert(sys_id, fac);
+                }
+                if let Some(cls) = sec_cls_opt.filter(|s| !s.is_empty()) {
+                    solar_system_security_classes.insert(sys_id, cls);
+                }
+            }
+        }
+    } else if let Ok(mut stmt) =
+        conn.prepare("SELECT system_id, faction_id FROM sde_solar_systems WHERE faction_id IS NOT NULL")
+    {
+        if let Ok(rows) = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)? as SolarSystemId,
+                r.get::<_, i64>(1)? as u32,
+            ))
+        }) {
+            for (sys_id, fac) in rows.flatten() {
+                solar_system_factions.insert(sys_id, fac);
+            }
+        }
+    }
+
+    let mut stargate_meta: HashMap<i64, (TypeId, String)> = HashMap::new();
+    if let Ok(mut stmt) = conn.prepare("SELECT stargate_id, type_id, name FROM sde_stargates") {
+        if let Ok(rows) = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)? as TypeId,
+                r.get::<_, String>(2)?,
+            ))
+        }) {
+            for (gid, tid, name) in rows.flatten() {
+                stargate_meta.insert(gid, (tid, name));
+            }
+        }
+    }
+
+    let mut school_starting_stations: HashMap<u32, (u32, Vec<i64>)> = HashMap::new();
+    let mut school_career_agents: HashMap<u32, (u32, Vec<i64>)> = HashMap::new();
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT school_id, race_id, starting_stations_json, career_agents_json FROM sde_schools",
+    ) {
+        if let Ok(rows) = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)? as u32,
+                r.get::<_, i64>(1)? as u32,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
+        }) {
+            for (sid, race_id, sts_opt, ags_opt) in rows.flatten() {
+                if let Some(sts) = sts_opt
+                    .and_then(|s| serde_json::from_str::<Vec<i64>>(&s).ok())
+                    .filter(|v| !v.is_empty())
+                {
+                    school_starting_stations.insert(sid, (race_id, sts));
+                }
+                if let Some(ags) = ags_opt
+                    .and_then(|s| serde_json::from_str::<Vec<i64>>(&s).ok())
+                    .filter(|v| !v.is_empty())
+                {
+                    school_career_agents.insert(sid, (race_id, ags));
+                }
+            }
+        }
+    }
+
+    let career_goals = load_career_goals_table(conn)?;
+
+    Ok(EagerUniverseAuxTables {
+        celestial_count,
+        celestials_by_system,
+        celestial_system_by_id,
+        stars,
+        solar_system_factions,
+        solar_system_security_classes,
+        stargate_meta,
+        school_starting_stations,
+        school_career_agents,
+        career_goals,
+    })
+}
+
+fn load_career_goals_table(conn: &Connection) -> Result<HashMap<u32, CareerGoalTemplate>, SdeError> {
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sde_career_goals'",
+            [],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if table_exists {
+        let mut out = HashMap::new();
+        let mut stmt = conn.prepare(
+            "SELECT goal_id, career_path, name, target_progress, sp_reward FROM sde_career_goals",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(CareerGoalTemplate {
+                goal_id: r.get::<_, i64>(0)? as u32,
+                career_path: r.get(1)?,
+                name: r.get(2)?,
+                target_progress: r.get::<_, i64>(3)?.max(0) as u64,
+                sp_reward: r.get::<_, i64>(4)?.max(0) as u64,
+            })
+        })?;
+        for row in rows {
+            let goal = row?;
+            out.insert(goal.goal_id, goal);
+        }
+        return Ok(out);
+    }
+
+    #[derive(Deserialize)]
+    struct RawAirCareerGoal {
+        career_name: String,
+        name: String,
+        target: u64,
+        #[serde(default)]
+        sp_reward: f64,
+        uuid: [u8; 16],
+    }
+
+    let raw_goals: Vec<RawAirCareerGoal> =
+        serde_json::from_str(include_str!("../../../data/air_career_goals.json"))?;
+    let mut out = HashMap::with_capacity(raw_goals.len());
+    for g in raw_goals {
+        let goal_id = u32::from(g.uuid[2]) * 10_000 + u32::from(g.uuid[15]);
+        out.insert(
+            goal_id,
+            CareerGoalTemplate {
+                goal_id,
+                career_path: g.career_name,
+                name: g.name,
+                target_progress: g.target,
+                sp_reward: g.sp_reward.max(0.0).round() as u64,
+            },
+        );
+    }
+    Ok(out)
+}
+
+impl SdeRegistry {
+    /// Returns celestials (stars, planets, moons, asteroid belts) in `solar_system_id` from the
+    /// eagerly-loaded in-memory index (`sde_celestials`, `475,859` records).
+    pub fn celestials_in_system(&self, solar_system_id: SolarSystemId) -> Vec<CelestialInfo> {
+        self.celestials_in_system_slice(solar_system_id).to_vec()
+    }
+
+    /// Returns all star `(star_id, type_id)` pairs sorted by ID from memory (`sde_stars`, `8,089`
+    /// records, falling back to `group_id == 6` celestials when `stars` is empty in synthetic fixtures).
     pub fn all_stars(&self) -> Vec<(i64, TypeId)> {
-        let Some(ref p) = self.db_path else {
-            return Vec::new();
-        };
-        let path_str = p.display().to_string();
-        let clean_path = if cfg!(windows) && path_str.starts_with(r"\\?\") {
-            &path_str[4..]
+        let mut out: Vec<(i64, TypeId)> = if !self.stars.is_empty() {
+            self.stars
+                .values()
+                .map(|s| (s.star_id, s.type_id))
+                .collect()
         } else {
-            &path_str
+            self.celestials_by_system
+                .values()
+                .flat_map(|list| list.iter())
+                .filter(|c| c.group_id == 6)
+                .map(|c| (c.celestial_id, c.type_id))
+                .collect()
         };
-        let uri = format!("file:{}?immutable=1", clean_path);
-        let Ok(conn) = Connection::open_with_flags(
-            &uri,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-        ) else {
-            return Vec::new();
-        };
-        let Ok(mut stmt) = conn.prepare(
-            "SELECT celestial_id, type_id FROM sde_celestials WHERE group_id = 6 ORDER BY celestial_id",
-        ) else {
-            return Vec::new();
-        };
-        let Ok(rows) = stmt.query_map([], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as TypeId))
-        }) else {
-            return Vec::new();
-        };
-        rows.flatten().collect()
+        out.sort_unstable_by_key(|&(id, _)| id);
+        out
     }
 
     /// Resolves any station (`sde_stations`) or celestial (`sde_celestials`) location ID to its
-    /// containing solar system (`res:/staticdata/locationcache.static`).
+    /// containing solar system in $O(1)$ (`res:/staticdata/locationcache.static`).
     pub fn location_solar_system(&self, location_id: i64) -> Option<SolarSystemId> {
         if let Some(sta) = self.stations.get(&location_id) {
             return Some(sta.solar_system_id);
         }
-        let p = self.db_path.as_ref()?;
-        // Strip Windows extended path prefix `\\?\` for SQLite URI compatibility (SUP-001)
-        let path_str = p.display().to_string();
-        let clean_path = if cfg!(windows) && path_str.starts_with(r"\\?\") {
-            &path_str[4..]
-        } else {
-            &path_str
-        };
-        let uri = format!("file:{}?immutable=1", clean_path);
-        let conn = Connection::open_with_flags(
-            &uri,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-        )
-        .ok()?;
-        conn.query_row(
-            "SELECT system_id FROM sde_celestials WHERE celestial_id = ?1",
-            [location_id],
-            |r| Ok(r.get::<_, i64>(0)? as SolarSystemId),
-        )
-        .ok()
+        self.celestial_system_by_id.get(&location_id).copied()
     }
 
-    /// Loads the complete `location_id -> solar_system_id` index across all celestials and NPC
-    /// stations (`res:/staticdata/locationcache.static`, `481,068` entries).
+    /// Builds the `location_id -> solar_system_id` index across all celestials and NPC stations
+    /// from memory (`res:/staticdata/locationcache.static`, `481,069` entries).
     pub fn location_solar_system_map(&self) -> HashMap<i64, SolarSystemId> {
-        let mut out = HashMap::with_capacity(self.celestial_count + self.stations.len());
+        let mut out =
+            HashMap::with_capacity(self.celestial_system_by_id.len() + self.stations.len());
         for (&sta_id, sta) in &self.stations {
             out.insert(sta_id, sta.solar_system_id);
         }
-        if let Some(ref p) = self.db_path {
-            // Strip Windows extended path prefix `\\?\` for SQLite URI compatibility (SUP-001)
-            let path_str = p.display().to_string();
-            let clean_path = if cfg!(windows) && path_str.starts_with(r"\\?\") {
-                &path_str[4..]
-            } else {
-                &path_str
-            };
-            let uri = format!("file:{}?immutable=1", clean_path);
-            if let Ok(conn) = Connection::open_with_flags(
-                &uri,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-            ) {
-                if let Ok(mut stmt) =
-                    conn.prepare("SELECT celestial_id, system_id FROM sde_celestials")
-                {
-                    if let Ok(rows) = stmt.query_map([], |r| {
-                        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as SolarSystemId))
-                    }) {
-                        for (cid, sid) in rows.flatten() {
-                            out.insert(cid, sid);
-                        }
-                    }
-                }
-            }
+        for (&cid, &sid) in self.celestial_system_by_id.iter() {
+            out.insert(cid, sid);
         }
         out
     }
 
-    /// Sorted distinct faction IDs that hold sovereignty over at least one solar system
+    /// Sorted distinct faction IDs that hold sovereignty over at least one solar system from memory
     /// (`res:/staticdata/factionsowningsolarsystems.static`, `22` factions).
     pub fn factions_owning_solar_systems(&self) -> Vec<u32> {
-        let Some(ref p) = self.db_path else {
-            return Vec::new();
-        };
-        // Strip Windows extended path prefix `\\?\` for SQLite URI compatibility (SUP-001)
-        let path_str = p.display().to_string();
-        let clean_path = if cfg!(windows) && path_str.starts_with(r"\\?\") {
-            &path_str[4..]
-        } else {
-            &path_str
-        };
-        let uri = format!("file:{}?immutable=1", clean_path);
-        let Ok(conn) = Connection::open_with_flags(
-            &uri,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-        ) else {
-            return Vec::new();
-        };
-        let Ok(mut stmt) = conn.prepare(
-            "SELECT DISTINCT faction_id FROM sde_solar_systems WHERE faction_id IS NOT NULL ORDER BY faction_id",
-        ) else {
-            return Vec::new();
-        };
-        let Ok(rows) = stmt.query_map([], |r| Ok(r.get::<_, i64>(0)? as u32)) else {
-            return Vec::new();
-        };
-        rows.flatten().collect()
+        let mut out: Vec<u32> = self.solar_system_factions.values().copied().collect();
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 
     /// Sorted distinct non-ice asteroid (`category_id == 25 && group_id != 465`) type IDs present

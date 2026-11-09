@@ -187,69 +187,48 @@ fn candidate_resfiles_dirs() -> Vec<PathBuf> {
 
 fn star_static_records(sde: &SdeRegistry) -> &HashMap<i64, StarStaticRecord> {
     STAR_STATIC_RECORDS.get_or_init(|| {
-        let mut stars = HashMap::new();
-        if let Some(db_path) = &sde.db_path {
-            if let Ok(conn) = rusqlite::Connection::open_with_flags(
-                db_path,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-            ) {
-                if let Ok(mut stmt) = conn.prepare(
-                    "SELECT c.celestial_id, c.system_id, c.type_id, c.radius, COALESCE(s.luminosity, 0.0) FROM sde_celestials c LEFT JOIN sde_systems s ON s.system_id = c.system_id WHERE c.group_id = 6",
-                ) {
-                    if let Ok(rows) = stmt.query_map([], |row| {
-                        Ok((
-                            row.get::<_, i64>(0)?,
-                            row.get::<_, i64>(1)?,
-                            row.get::<_, i64>(2)?,
-                            row.get::<_, f64>(3)?,
-                            row.get::<_, f64>(4)?,
-                        ))
-                    }) {
-                        for (star_id, system_id, type_id, radius, luminosity) in rows.flatten() {
-                            let type_name = sde
-                                .types
-                                .get(&(type_id as u32))
-                                .map(|t| t.name.as_str())
-                                .unwrap_or("");
-                            let (spectral_class, temperature, age) =
-                                derive_star_stats_from_sde(type_name, luminosity, star_id);
-                            stars.insert(
-                                star_id,
-                                StarStaticRecord {
-                                    star_id,
-                                    solar_system_id: system_id,
-                                    type_id,
-                                    radius: radius.round() as i64,
-                                    age,
-                                    luminosity,
-                                    temperature,
-                                    spectral_class,
-                                },
-                            );
-                        }
-                    }
+        let mut stars = HashMap::with_capacity(sde.stars.len().max(16));
+        for cels in sde.celestials_by_system.values() {
+            for cel in cels {
+                if cel.group_id != 6 {
+                    continue;
                 }
-                if let Ok(mut stmt) = conn.prepare(
-                    "SELECT star_id, system_id, type_id, radius, age, luminosity, temperature, spectral_class FROM sde_stars",
-                ) {
-                    if let Ok(rows) = stmt.query_map([], |row| {
-                        Ok(StarStaticRecord {
-                            star_id: row.get(0)?,
-                            solar_system_id: row.get(1)?,
-                            type_id: row.get(2)?,
-                            radius: row.get(3)?,
-                            age: row.get(4)?,
-                            luminosity: row.get(5)?,
-                            temperature: row.get(6)?,
-                            spectral_class: row.get(7)?,
-                        })
-                    }) {
-                        for rec in rows.flatten() {
-                            stars.insert(rec.star_id, rec);
-                        }
-                    }
-                }
+                let type_name = sde
+                    .types
+                    .get(&cel.type_id)
+                    .map(|t| t.name.as_str())
+                    .unwrap_or("");
+                let (spectral_class, temperature, age) =
+                    derive_star_stats_from_sde(type_name, 0.0, cel.celestial_id);
+                stars.insert(
+                    cel.celestial_id,
+                    StarStaticRecord {
+                        star_id: cel.celestial_id,
+                        solar_system_id: i64::from(cel.solar_system_id),
+                        type_id: i64::from(cel.type_id),
+                        radius: cel.radius.round() as i64,
+                        age,
+                        luminosity: 0.0,
+                        temperature,
+                        spectral_class,
+                    },
+                );
             }
+        }
+        for st in sde.stars.values() {
+            stars.insert(
+                st.star_id,
+                StarStaticRecord {
+                    star_id: st.star_id,
+                    solar_system_id: i64::from(st.solar_system_id),
+                    type_id: i64::from(st.type_id),
+                    radius: st.radius,
+                    age: st.age,
+                    luminosity: st.luminosity,
+                    temperature: st.temperature,
+                    spectral_class: st.spectral_class.clone(),
+                },
+            );
         }
         if let Some(res) = sde.resources.get("res:/staticdata/solarsystemcontent.static") {
             for dir in candidate_resfiles_dirs() {

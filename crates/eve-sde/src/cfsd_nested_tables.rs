@@ -515,65 +515,46 @@ impl SdeRegistry {
                 out.entry(sys_id).or_insert((race_id, ag.station_id));
             }
         }
-        if let Some(db_path) = &self.db_path {
-            if let Ok(conn) = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
-                if let Ok(mut stmt) = conn.prepare(
-                    "SELECT race_id, starting_stations_json, career_agents_json \
-                     FROM sde_schools WHERE school_id BETWEEN 11 AND 22",
-                ) {
-                    if let Ok(rows) = stmt.query_map([], |r| {
-                        Ok((
-                            r.get::<_, i64>(0)? as u32,
-                            r.get::<_, String>(1)?,
-                            r.get::<_, String>(2)?,
-                        ))
-                    }) {
-                        for row in rows.flatten() {
-                            let (race_id, sts_json, ags_json) = row;
-                            if let Ok(station_ids) = serde_json::from_str::<Vec<i64>>(&sts_json) {
-                                for st_id in station_ids {
-                                    if let Some(st) = self.stations.get(&st_id) {
-                                        out.entry(st.solar_system_id)
-                                            .or_insert((race_id, Some(st_id)));
-                                    }
-                                }
-                            }
-                            if let Ok(agent_ids) = serde_json::from_str::<Vec<i64>>(&ags_json) {
-                                for ag_id in agent_ids {
-                                    if let Some(ag) = self.agents.get(&ag_id) {
-                                        if let Some(sys_id) = ag.solar_system_id {
-                                            out.entry(sys_id).or_insert((race_id, ag.station_id));
-                                        }
-                                    }
-                                }
-                            }
+        for school_id in 11..=22 {
+            if let Some((race_id, station_ids)) = self.school_starting_stations.get(&school_id) {
+                for &st_id in station_ids {
+                    if let Some(st) = self.stations.get(&st_id) {
+                        out.entry(st.solar_system_id)
+                            .or_insert((*race_id, Some(st_id)));
+                    }
+                }
+            }
+            if let Some((race_id, agent_ids)) = self.school_career_agents.get(&school_id) {
+                for &ag_id in agent_ids {
+                    if let Some(ag) = self.agents.get(&ag_id) {
+                        if let Some(sys_id) = ag.solar_system_id {
+                            out.entry(sys_id).or_insert((*race_id, ag.station_id));
                         }
                     }
                 }
-                if let Ok(mut stmt) = conn.prepare(
-                    "SELECT system_id, faction_id FROM sde_solar_systems WHERE region_id = 10001004 AND faction_id IS NOT NULL",
-                ) {
-                    if let Ok(rows) = stmt.query_map([], |r| {
-                        Ok((r.get::<_, i64>(0)? as SolarSystemId, r.get::<_, i64>(1)? as u32))
-                    }) {
-                        for (sys_id, faction_id) in rows.flatten() {
-                            let race_opt = match faction_id {
-                                500_001 => Some(1),
-                                500_002 => Some(2),
-                                500_003 => Some(4),
-                                500_004 => Some(8),
-                                _ => None,
-                            };
-                            if let Some(race_id) = race_opt {
-                                let st_id = self
-                                    .solar_systems
-                                    .get(&sys_id)
-                                    .and_then(|s| s.stations.first().map(|st| st.station_id));
-                                out.entry(sys_id).or_insert((race_id, st_id));
-                            }
-                        }
-                    }
-                }
+            }
+        }
+        for (&sys_id, &faction_id) in self.solar_system_factions.iter() {
+            if !self
+                .solar_systems
+                .get(&sys_id)
+                .is_some_and(|s| s.region_id == 10_001_004)
+            {
+                continue;
+            }
+            let race_opt = match faction_id {
+                500_001 => Some(1),
+                500_002 => Some(2),
+                500_003 => Some(4),
+                500_004 => Some(8),
+                _ => None,
+            };
+            if let Some(race_id) = race_opt {
+                let st_id = self
+                    .solar_systems
+                    .get(&sys_id)
+                    .and_then(|s| s.stations.first().map(|st| st.station_id));
+                out.entry(sys_id).or_insert((race_id, st_id));
             }
         }
         out

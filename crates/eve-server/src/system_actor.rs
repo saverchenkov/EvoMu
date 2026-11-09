@@ -325,12 +325,8 @@ impl SystemRegistry {
         let mut initial_asteroids = HashMap::new();
         let mut initial_asteroid_templates = HashMap::new();
         let initial_pending_disruptors = if let (Some(sde), Some(db)) = (&sde_opt, &db_opt) {
-            let first_sde_belt_ast_id = 750_000_000i64
-                + if solar_system_id == 30_000_144 {
-                    0
-                } else {
-                    ((solar_system_id as i64 % 10_000_000).max(1)) * 1_000
-                };
+            let first_sde_belt_ast_id =
+                crate::system_actor::belts::belt_asteroid_base_id(solar_system_id);
             let has_persisted_belt_asteroids =
                 db.with_snapshot(|s| s.asteroids.contains_key(&first_sde_belt_ast_id));
             if has_persisted_belt_asteroids {
@@ -621,12 +617,8 @@ impl SystemRegistry {
                                 let _ = reply.send(broken);
                             }
                             SystemCommand::PopulateAsteroids { reply } => {
-                                let first_sde_belt_ast_id = 750_000_000i64
-                                    + if solar_system_id == 30_000_144 {
-                                        0
-                                    } else {
-                                        ((solar_system_id as i64 % 10_000_000).max(1)) * 1_000
-                                    };
+                                let first_sde_belt_ast_id =
+                                    crate::system_actor::belts::belt_asteroid_base_id(solar_system_id);
                                 let mut populated = if !asteroid_templates.contains_key(&first_sde_belt_ast_id) {
                                     if let Some(sde) = &sde_opt {
                                         let spawned = populate_asteroid_belt_entities(&mut ballpark, solar_system_id, sde);

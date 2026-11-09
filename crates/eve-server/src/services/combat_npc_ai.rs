@@ -1098,10 +1098,12 @@ pub async fn destroy_specialized_npc_with_hint(
         37531 // Drifter Response Battleship Wreck (`attr 901 = -20.0`)
     } else if archetype == "Hauler" {
         npc_type_id
-            .and_then(|tid| ctx.sde.wrecks.get(&tid).copied())
+            .and_then(|tid| ctx.sde.resolve_wreck_type_id(tid, None))
             .unwrap_or(26557)
     } else {
-        26473 // Cruiser Wreck
+        npc_type_id
+            .and_then(|tid| ctx.sde.resolve_wreck_type_id(tid, None))
+            .unwrap_or(26473)
     };
 
     let mut dropped_types = Vec::new();

@@ -1252,13 +1252,14 @@ fn handle_get_negotiations(
     let explicit_wid = args.first().and_then(|a| a.as_i64()).or_else(|| {
         bound_obj_id.filter(|bid| ctx.db.with_snapshot(|snap| snap.wars.contains_key(bid)))
     });
+    let now_unix = ctx.now_unix();
     let rows = ctx.db.with_snapshot(|snap| {
         snap.war_state
             .negotiations
             .iter()
             .filter(|n| {
                 let wid_ok = explicit_wid.is_none_or(|wid| n.war_id == wid);
-                let visible = is_war_participant_corp(snap, n.war_id, my_corp)
+                let visible = is_war_participant_corp(snap, n.war_id, my_corp, now_unix)
                     || (n.kind == NegKind::Ally && n.from_corp == my_corp);
                 wid_ok && visible
             })
