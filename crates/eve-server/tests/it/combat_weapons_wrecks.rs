@@ -210,6 +210,15 @@ async fn test_c1_turret_families_hit_formula_wrecking_shots_and_crystal_degradat
     let fac_deg = dict_get(&fac_res, "crystalDamageFraction").and_then(|v| v.as_f64()).unwrap_or(0.0);
     assert!((fac_deg - 0.00025).abs() < 1e-6, "Faction crystal must degrade by 0.00025 per shot (got {fac_deg})");
 
+    ctx.set_mechanic_rng_seed(Some(1));
+    let t2_no_proc = dispatch_combat_rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(pulse_t2_id), PyRep::Integer(target_id)], &kw_crys)
+        .await
+        .expect("T2 Laser Activate non-proc");
+    let t2_no_proc_deg = dict_get(&t2_no_proc, "crystalDamageFraction").and_then(|v| v.as_f64()).unwrap_or(1.0);
+    assert!(t2_no_proc_deg.abs() < 1e-9, "T2 Conflagration S must not degrade when mechanic_rng roll >= 0.10 (got {t2_no_proc_deg})");
+
+    ctx.advance_secs(5);
+    ctx.set_mechanic_rng_seed(Some(10));
     let t2_res = dispatch_combat_rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(pulse_t2_id), PyRep::Integer(target_id)], &kw_crys)
         .await
         .expect("T2 Laser Activate");
@@ -243,6 +252,7 @@ async fn test_c1_turret_families_hit_formula_wrecking_shots_and_crystal_degradat
         }
     });
     ctx.advance_secs(5);
+    ctx.set_mechanic_rng_seed(Some(10));
     let shatter_res = dispatch_combat_rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(pulse_t2_id), PyRep::Integer(target_id)], &kw_crys)
         .await
         .expect("T2 Shatter Activate");

@@ -104,6 +104,31 @@ pub(crate) fn scanners_superweapons_state() -> &'static RwLock<ScannersSuperweap
     STATE.get_or_init(|| RwLock::new(ScannersSuperweaponsState::default()))
 }
 
+/// Collects active `ship_dbuffs` for `ship_id` at `now_unix` (pruning expired entries) as [`eve_dogma::GangBurstEffect`]s.
+pub(crate) fn active_ship_dbuff_gang_bursts(
+    ctx: &ServerContext,
+    ship_id: i64,
+    now_unix: u64,
+) -> Vec<eve_dogma::GangBurstEffect> {
+    let mut st = scanners_superweapons_state()
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    let Some(entries) = st.ship_dbuffs.get_mut(&(ctx.instance_id, ship_id)) else {
+        return Vec::new();
+    };
+    entries.retain(|e| e.expires_at_unix > now_unix);
+    entries
+        .iter()
+        .map(|e| eve_dogma::GangBurstEffect {
+            source_item_id: e.source_module_id,
+            source_type_id: None,
+            dbuff_id: Some(e.dbuff_id),
+            value: e.value,
+            modifiers: Vec::new(),
+        })
+        .collect()
+}
+
 /// Computes aggregated active `dbuff` values for `ship_id` at `now_unix`, pruning expired entries.
 pub(crate) fn get_aggregated_ship_dbuffs(
     ctx: &ServerContext,
@@ -214,9 +239,23 @@ pub fn apply_active_dbuffs_and_system_effects_to_ship_attrs(
     ship_id: i64,
     attrs: &mut HashMap<u16, f64>,
 ) {
+    apply_active_dbuffs_and_system_effects_to_ship_attrs_excluding(ctx, ship_id, &[], attrs);
+}
+
+/// Applies active `dbuff` modifiers (skipping `excluded_dbuff_ids` already evaluated in `ShipFittingEngine::gang_bursts`)
+/// and system-wide wormhole/storm modifiers to a ship's attribute map.
+pub(crate) fn apply_active_dbuffs_and_system_effects_to_ship_attrs_excluding(
+    ctx: &ServerContext,
+    ship_id: i64,
+    excluded_dbuff_ids: &[u32],
+    attrs: &mut HashMap<u16, f64>,
+) {
     let now_unix = ctx.now_unix_secs();
     let agg_dbuffs = get_aggregated_ship_dbuffs(ctx, ship_id, now_unix);
     for (dbuff_id, (val, _)) in agg_dbuffs {
+        if excluded_dbuff_ids.contains(&dbuff_id) {
+            continue;
+        }
         if let Some(coll) = ctx.sde.dbuff_collections.get(&dbuff_id) {
             let mut target_aids = coll.item_modifiers.clone();
             for &aid in &coll.location_modifiers {

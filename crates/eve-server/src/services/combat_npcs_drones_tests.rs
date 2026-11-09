@@ -414,3 +414,295 @@ async fn drone_launch_stack_split_sentry_and_validation_errors() {
     // 6. Non-drone ship RPC method returns None
     assert!(handle_npcs_drones(&ctx, &mut session, "ship", "GetShipConfiguration", &[], &kwargs).await.is_none());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drone_link_augmentor_omnidirectional_tracking_and_bonused_tractor_beam_via_dogma() {
+    let (mut ctx, _session, char_id, ship_id, sys_id) = make_drone_test_ctx();
+    let mut sde = (*ctx.sde).clone();
+
+    if let Some(hull) = sde.types.get_mut(&587) {
+        hull.default_attributes.insert(eve_sde::attr_ids::HI_SLOTS, 8.0);
+        hull.default_attributes.insert(eve_sde::attr_ids::MED_SLOTS, 8.0);
+        hull.default_attributes.insert(eve_sde::attr_ids::LOW_SLOTS, 8.0);
+        hull.default_attributes.insert(eve_sde::attr_ids::RIG_SLOTS, 3.0);
+        hull.default_attributes.insert(eve_sde::attr_ids::CPU_OUTPUT, 500.0);
+        hull.default_attributes.insert(eve_sde::attr_ids::POWER_OUTPUT, 500.0);
+        hull.default_attributes.insert(eve_sde::attr_ids::UPGRADE_CAPACITY, 400.0);
+        hull.default_attributes.insert(eve_sde::attr_ids::RIG_SIZE, 1.0);
+    }
+
+    // Drone Avionics (3437) and Advanced Drone Avionics (23566) skills (+5km/lvl and +3km/lvl to charID attr 458)
+    sde.effects.insert(
+        448,
+        eve_sde::DogmaEffectType {
+            effect_id: 448,
+            name: "scoutDroneOperationSkillBoostDroneRangeBonus".into(),
+            effect_category: 0,
+            modifiers: vec![eve_sde::EffectModifierSpec {
+                domain: "itemID".into(),
+                func: "ItemModifier".into(),
+                modified_attribute_id: 459,
+                modifying_attribute_id: 280,
+                operator: 0,
+                group_id: None,
+                skill_type_id: None,
+                effect_id: None,
+            }],
+            ..Default::default()
+        },
+    );
+    sde.effects.insert(
+        504,
+        eve_sde::DogmaEffectType {
+            effect_id: 504,
+            name: "scoutDroneOperationDroneRangeBonusModAddDroneControlDistanceChar".into(),
+            effect_category: 0,
+            modifiers: vec![eve_sde::EffectModifierSpec {
+                domain: "charID".into(),
+                func: "ItemModifier".into(),
+                modified_attribute_id: 458,
+                modifying_attribute_id: 459,
+                operator: 2,
+                group_id: None,
+                skill_type_id: None,
+                effect_id: None,
+            }],
+            ..Default::default()
+        },
+    );
+    let mut da_skill = make_fighter_type(3_437, 273, 16, 0.01, vec![(459, 5_000.0)]);
+    da_skill.effect_ids = vec![448, 504];
+    sde.types.insert(3_437, da_skill);
+    let mut ada_skill = make_fighter_type(23_566, 273, 16, 0.01, vec![(459, 3_000.0)]);
+    ada_skill.effect_ids = vec![448, 504];
+    sde.types.insert(23_566, ada_skill);
+
+    // Drone Link Augmentor I (type 4405, online effect 9201 adding +20,000 m to charID attr 458)
+    sde.effects.insert(
+        9201,
+        eve_sde::DogmaEffectType {
+            effect_id: 9201,
+            name: "droneLinkAug".into(),
+            effect_category: 4,
+            modifiers: vec![eve_sde::EffectModifierSpec {
+                domain: "charID".into(),
+                func: "ItemModifier".into(),
+                modified_attribute_id: 458,
+                modifying_attribute_id: 459,
+                operator: 2,
+                group_id: None,
+                skill_type_id: None,
+                effect_id: None,
+            }],
+            ..Default::default()
+        },
+    );
+    let mut dla = make_fighter_type(4_405, 646, 7, 5.0, vec![(30, 1.0), (50, 15.0), (459, 20_000.0)]);
+    dla.effect_ids = vec![12, 16, 9201];
+    sde.types.insert(4_405, dla);
+
+    // Omnidirectional Tracking Enhancer (type 23579, passive effect 9202 +25% tracking 160 & falloff 158 on drones requiring 3436)
+    sde.effects.insert(
+        9202,
+        eve_sde::DogmaEffectType {
+            effect_id: 9202,
+            name: "omniTrackingEnh".into(),
+            effect_category: 0,
+            modifiers: vec![
+                eve_sde::EffectModifierSpec {
+                    domain: "charID".into(),
+                    func: "OwnerRequiredSkillModifier".into(),
+                    modified_attribute_id: 160,
+                    modifying_attribute_id: 767,
+                    operator: 6,
+                    group_id: None,
+                    skill_type_id: Some(3436),
+                    effect_id: None,
+                },
+                eve_sde::EffectModifierSpec {
+                    domain: "charID".into(),
+                    func: "OwnerRequiredSkillModifier".into(),
+                    modified_attribute_id: 158,
+                    modifying_attribute_id: 349,
+                    operator: 6,
+                    group_id: None,
+                    skill_type_id: Some(3436),
+                    effect_id: None,
+                },
+            ],
+            ..Default::default()
+        },
+    );
+    let mut omni = make_fighter_type(23_579, 646, 7, 5.0, vec![(30, 1.0), (50, 10.0), (767, 25.0), (349, 25.0)]);
+    omni.effect_ids = vec![11, 16, 9202];
+    sde.types.insert(23_579, omni);
+    if let Some(dt) = sde.types.get_mut(&2_456) {
+        dt.default_attributes.insert(160, 2.0);
+        dt.default_attributes.insert(158, 4_000.0);
+        dt.default_attributes.insert(182, 3436.0);
+    }
+
+    // Noctis-style Tractor Beam bonus rig (type 92_650, group 650 tractor range +100% & 1045 tractor vel +100%)
+    sde.effects.insert(
+        9203,
+        eve_sde::DogmaEffectType {
+            effect_id: 9203,
+            name: "tractorHullBonus".into(),
+            effect_category: 0,
+            modifiers: vec![
+                eve_sde::EffectModifierSpec {
+                    domain: "shipID".into(),
+                    func: "LocationGroupModifier".into(),
+                    modified_attribute_id: 54,
+                    modifying_attribute_id: 1670,
+                    operator: 6,
+                    group_id: Some(650),
+                    skill_type_id: None,
+                    effect_id: None,
+                },
+                eve_sde::EffectModifierSpec {
+                    domain: "shipID".into(),
+                    func: "LocationGroupModifier".into(),
+                    modified_attribute_id: 1045,
+                    modifying_attribute_id: 1670,
+                    operator: 6,
+                    group_id: Some(650),
+                    skill_type_id: None,
+                    effect_id: None,
+                },
+            ],
+            ..Default::default()
+        },
+    );
+    let mut rig = make_fighter_type(92_650, 782, 7, 5.0, vec![(1153, 50.0), (1670, 100.0), (1547, 1.0)]);
+    rig.effect_ids = vec![2663, 9203];
+    sde.types.insert(92_650, rig);
+
+    let mut tractor = make_fighter_type(24_348, 650, 7, 5.0, vec![(30, 5.0), (50, 15.0), (54, 20_000.0), (73, 5_000.0), (1045, 500.0)]);
+    tractor.effect_ids = vec![12, 16];
+    sde.types.insert(24_348, tractor);
+    ctx.sde = Arc::new(sde);
+
+    seed_pilot_skill(&ctx, char_id, 3437, 4); // Drone Avionics IV (+20,000 m)
+    seed_pilot_skill(&ctx, char_id, 23566, 2); // Advanced Drone Avionics II (+6,000 m)
+
+    let dla_id = 710_001i64;
+    let omni_id = 710_002i64;
+    let rig_id = 710_003i64;
+    let tractor_id = 710_004i64;
+    let wreck_in_id = 710_010i64;
+    let wreck_far_id = 710_011i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.dynamic_attributes.insert(eve_sde::attr_ids::UPGRADE_CAPACITY, 400.0);
+        }
+        snap.items.insert(dla_id, make_fighter_item(dla_id, 4_405, char_id, ship_id, InventoryFlag::HiSlot0, 1));
+        snap.items.insert(tractor_id, make_fighter_item(tractor_id, 24_348, char_id, ship_id, InventoryFlag::HiSlot1, 1));
+        snap.items.insert(omni_id, make_fighter_item(omni_id, 23_579, char_id, ship_id, InventoryFlag::LoSlot0, 1));
+        snap.items.insert(rig_id, make_fighter_item(rig_id, 92_650, char_id, ship_id, InventoryFlag::RigSlot0, 1));
+        snap.items.insert(wreck_in_id, make_fighter_item(wreck_in_id, 26_557, char_id, sys_id as i64, InventoryFlag::None, 1));
+        snap.items.insert(wreck_far_id, make_fighter_item(wreck_far_id, 26_557, char_id, sys_id as i64, InventoryFlag::None, 1));
+        for mid in [dla_id, tractor_id, omni_id, rig_id] {
+            snap.module_online_states.insert(mid, true);
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    // 1. Drone control range includes base 20km + DA IV (20km) + ADA II (6km) + online DLA (20km) = 66,000 m!
+    let ctrl_range = compute_drone_control_range(&ctx, char_id, ship_id);
+    assert!((ctrl_range - 66_000.0).abs() < 1e-6, "Expected 66,000 m, got {ctrl_range}");
+
+    // Negative check: offlining DLA drops control range by 20,000 m -> 46,000 m
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(dla_id, false);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    assert!((compute_drone_control_range(&ctx, char_id, ship_id) - 46_000.0).abs() < 1e-6);
+
+    // 2. DroneSpaceState evaluates tracking (2.0 * 1.25 = 2.5) and falloff (4000 * 1.25 = 5000) via ShipFittingEngine
+    let d_state = DroneSpaceState {
+        ball_id: 910_001,
+        drone_item_id: 910_002,
+        type_id: 2_456,
+        group_id: 100,
+        owner_char_id: char_id,
+        original_owner_char_id: char_id,
+        parent_ship_id: ship_id,
+        solar_system_id: sys_id,
+        target_id: None,
+        activity_state: 1,
+        assist_char_id: None,
+        guard_char_id: None,
+        is_abandoned: false,
+        is_sentry: false,
+        bandwidth_used: 5.0,
+        max_velocity: 2_600.0,
+        optimal_range: 2_000.0,
+        damage_vector: DamageVector::new(0.0, 30.0, 0.0, 0.0),
+        shield_repair_amount: 0.0,
+        armor_repair_amount: 0.0,
+        hull_repair_amount: 0.0,
+        web_speed_factor: 0.0,
+        neut_amount: 0.0,
+        ecm_strength: 0.0,
+        tp_sig_bonus_pct: 0.0,
+    };
+    assert!((d_state.effective_tracking_speed(&ctx) - 2.5).abs() < 1e-9);
+    assert!((d_state.effective_falloff_range(&ctx) - 5_000.0).abs() < 1e-9);
+
+    // 3. Bonused Tractor Beam reaches wreck at 35 km (base 20km * 2 = 40km) and pulls at 2,000 m/s * 5s = 10,000 m,
+    //    while rejecting wreck at 45 km (> 40 km) with TargetOutOfRange!
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let attacker_ball = Ball {
+        id: ship_id,
+        type_id: 587,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 1.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    let _ = sys_handle.spawn_ball(attacker_ball.clone()).await;
+    let _ = sys_handle.spawn_ball(Ball { position: DVec3::new(35_000.0, 0.0, 0.0), id: wreck_in_id, ..attacker_ball.clone() }).await;
+    let _ = sys_handle.spawn_ball(Ball { position: DVec3::new(45_000.0, 0.0, 0.0), id: wreck_far_id, ..attacker_ball.clone() }).await;
+
+    let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
+    let fm = fit.modules[&tractor_id].clone();
+    let tractor_type = ctx.sde.types[&24_348].clone();
+    let pull_ok = activate_salvager_or_tractor_module(
+        &ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        tractor_id,
+        &fm,
+        &tractor_type,
+        &attacker_ball,
+        Some(wreck_in_id),
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!((py_dict_get(&pull_ok, "newDistanceMeters").and_then(|v| v.as_f64()).unwrap() - 25_000.0).abs() < 1e-3);
+
+    let pull_err = activate_salvager_or_tractor_module(
+        &ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        tractor_id,
+        &fm,
+        &tractor_type,
+        &attacker_ball,
+        Some(wreck_far_id),
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(pull_err.code, "TargetOutOfRange");
+}

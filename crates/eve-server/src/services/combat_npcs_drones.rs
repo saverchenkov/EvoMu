@@ -6,52 +6,83 @@ use super::*;
 use eve_destiny::{Ball, MovementMode};
 
 impl DroneSpaceState {
-    pub fn effective_tracking_speed(&self, ctx: &ServerContext) -> f64 {
-        ctx.db
+    fn evaluated_drone_attribute(&self, ctx: &ServerContext, attr_id: u16) -> Option<f64> {
+        let dyn_override = ctx
+            .db
             .get_item(self.drone_item_id)
-            .and_then(|r| r.dynamic_attributes.get(&160).copied())
-            .or_else(|| {
-                ctx.sde
-                    .types
-                    .get(&self.type_id)
-                    .and_then(|t| t.default_attributes.get(&160).copied())
-            })
+            .and_then(|r| r.dynamic_attributes.get(&attr_id).copied());
+        if !self.is_abandoned && self.parent_ship_id > 0 && self.owner_char_id > 0 {
+            if let Ok(mut fit) =
+                ctx.get_or_rebuild_ship_fitting(self.owner_char_id, self.parent_ship_id)
+            {
+                let mut d_state_opt = fit
+                    .drone_state(self.drone_item_id, &ctx.sde)
+                    .or_else(|| fit.drone_state(self.ball_id, &ctx.sde));
+                if d_state_opt.is_none() && ctx.sde.types.contains_key(&self.type_id) {
+                    fit.add_drone(self.drone_item_id, self.type_id, &ctx.sde);
+                    d_state_opt = fit.drone_state(self.drone_item_id, &ctx.sde);
+                }
+                if let Some(mut d_state) = d_state_opt {
+                    if let Some(mut_val) = dyn_override {
+                        d_state.base_attributes.insert(attr_id, mut_val);
+                        return Some(d_state.get_attribute(attr_id, &ctx.sde));
+                    }
+                    if d_state.base_attributes.contains_key(&attr_id)
+                        || d_state
+                            .modifiers
+                            .iter()
+                            .any(|m| m.target_attribute_id == attr_id)
+                    {
+                        return Some(d_state.get_attribute(attr_id, &ctx.sde));
+                    }
+                }
+            }
+        }
+        dyn_override.or_else(|| {
+            ctx.sde
+                .types
+                .get(&self.type_id)
+                .and_then(|t| t.default_attributes.get(&attr_id).copied())
+        })
+    }
+
+    pub fn effective_tracking_speed(&self, ctx: &ServerContext) -> f64 {
+        self.evaluated_drone_attribute(ctx, 160)
             .unwrap_or(1.0)
             .max(0.01)
     }
 
     pub fn effective_falloff_range(&self, ctx: &ServerContext) -> f64 {
-        ctx.db
-            .get_item(self.drone_item_id)
-            .and_then(|r| r.dynamic_attributes.get(&158).copied())
-            .or_else(|| {
-                ctx.sde
-                    .types
-                    .get(&self.type_id)
-                    .and_then(|t| t.default_attributes.get(&158).copied())
-            })
+        self.evaluated_drone_attribute(ctx, 158)
             .unwrap_or(5_000.0)
             .max(500.0)
     }
 
+    pub fn effective_optimal_range(&self, ctx: &ServerContext) -> f64 {
+        let sde_base = ctx
+            .sde
+            .types
+            .get(&self.type_id)
+            .and_then(|t| t.default_attributes.get(&54).copied());
+        if let Some(eval_opt) = self.evaluated_drone_attribute(ctx, 54) {
+            if sde_base.is_some_and(|sb| (self.optimal_range - sb).abs() < 1e-6) {
+                return eval_opt.max(500.0);
+            }
+        }
+        self.optimal_range.max(500.0)
+    }
+
     pub fn cycle_duration_secs(&self, ctx: &ServerContext) -> u64 {
-        let ms = ctx
-            .db
-            .get_item(self.drone_item_id)
-            .and_then(|r| r.dynamic_attributes.get(&51).copied())
-            .or_else(|| {
-                ctx.sde
-                    .types
-                    .get(&self.type_id)
-                    .and_then(|t| t.default_attributes.get(&51).copied())
-            })
+        let ms = self
+            .evaluated_drone_attribute(ctx, 51)
+            .or_else(|| self.evaluated_drone_attribute(ctx, 73))
             .unwrap_or(4_000.0)
             .max(1_000.0);
         ((ms / 1_000.0).round() as u64).clamp(1, 60)
     }
 
     /// Computes the turret-style hit multiplier `(0.05..=1.0]` for this drone engaging `target_ball`
-    /// using `effective_tracking_speed` (`attr 160`), `optimal_range` (`attr 54`), `effective_falloff_range` (`attr 158`),
+    /// using `effective_tracking_speed` (`attr 160`), `effective_optimal_range` (`attr 54`), `effective_falloff_range` (`attr 158`),
     /// angular velocity `omega`, and target signature radius (`attr 552`).
     pub fn compute_combat_hit_multiplier(
         &self,
@@ -61,7 +92,7 @@ impl DroneSpaceState {
         target_sig_radius: f64,
     ) -> f64 {
         let raw_dist = drone_ball.position.distance(target_ball.position);
-        let optimal = self.optimal_range.max(500.0);
+        let optimal = self.effective_optimal_range(ctx);
         let falloff = self.effective_falloff_range(ctx).max(1.0);
         if raw_dist > optimal + 3.0 * falloff {
             return 0.0;
@@ -97,15 +128,20 @@ mod cycle_ops;
 pub use cycle_ops::{step_drone_auto_aggression_and_assist, step_engaged_drones};
 
 /// Evaluates effective drone control range in meters for `char_id` flying `ship_id` (`feat:drones.drone-control-range`).
-/// Base control range is 20,000 m + 5,000 m/level of Drone Avionics (`3437`) + 3,000 m/level of Advanced Drone Avionics (`23618`).
+/// Evaluates `charID` attribute `458` (`droneControlDistance`) via `ShipFittingEngine` (Drone Avionics `3437`,
+/// Advanced Drone Avionics `23566`, and Drone Link Augmentors), preserving synthetic/legacy skill `23618` fallbacks.
 pub fn compute_drone_control_range(ctx: &ServerContext, char_id: i64, ship_id: i64) -> f64 {
-    let (da_lv, ada_lv, ship_base) = ctx.db.with_snapshot(|snap| {
+    let (da_lv, ada_real_lv, ada_legacy_lv, ship_base) = ctx.db.with_snapshot(|snap| {
         let skills = snap.skills.get(&char_id);
         let da = skills
             .and_then(|m| m.get(&3437))
             .map(|s| s.level as f64)
             .unwrap_or(0.0);
-        let ada = skills
+        let ada_real = skills
+            .and_then(|m| m.get(&23566))
+            .map(|s| s.level as f64)
+            .unwrap_or(0.0);
+        let ada_legacy = skills
             .and_then(|m| m.get(&23618))
             .map(|s| s.level as f64)
             .unwrap_or(0.0);
@@ -115,9 +151,20 @@ pub fn compute_drone_control_range(ctx: &ServerContext, char_id: i64, ship_id: i
             .and_then(|it| ctx.sde.types.get(&it.type_id))
             .and_then(|t| t.default_attributes.get(&458).copied())
             .unwrap_or(20_000.0);
-        (da, ada, base)
+        (da, ada_real, ada_legacy, base)
     });
-    ship_base + 5_000.0 * da_lv + 3_000.0 * ada_lv
+    let legacy_extra = if ada_real_lv == 0.0 {
+        3_000.0 * ada_legacy_lv
+    } else {
+        0.0
+    };
+    let fallback_range = ship_base + 5_000.0 * da_lv + 3_000.0 * ada_real_lv + legacy_extra;
+    if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
+        let char_range = fit.get_character_effective_attribute(458, &ctx.sde);
+        let ship_delta = ship_base - 20_000.0;
+        return (char_range + ship_delta + legacy_extra).max(fallback_range);
+    }
+    fallback_range
 }
 
 /// Evaluates Salvager (`group_id == 1122`) or Tractor Beam (`group_id == 650`) module activation (`feat:modules.salvager`, `feat:combat.wreck-size-salvage-difficulty`, `feat:modules.tractor-beam`).
@@ -148,13 +195,18 @@ pub async fn activate_salvager_or_tractor_module(
         }));
     };
     let dist = attacker_ball.position.distance(wreck_ball.position);
+    let mod_state_opt = ctx
+        .get_or_rebuild_ship_fitting(char_id, ship_id)
+        .ok()
+        .and_then(|fit| fit.module_state(module_id, &ctx.sde));
 
     // 1. Tractor Beam (`group_id == 650`, `feat:modules.tractor-beam`)
     if mod_type.group_id == 650 {
-        let max_range = mod_type
-            .default_attributes
-            .get(&54)
-            .copied()
+        let max_range = mod_state_opt
+            .as_ref()
+            .map(|ms| ms.get_attribute(54, &ctx.sde))
+            .filter(|&v| v > 0.0)
+            .or_else(|| mod_type.default_attributes.get(&54).copied())
             .unwrap_or(20_000.0)
             .max(20_000.0);
         if dist > max_range {
@@ -197,16 +249,40 @@ pub async fn activate_salvager_or_tractor_module(
                 message: "Cannot tractor a wreck or container owned by another pilot".into(),
             }));
         }
-        let tractor_vel = mod_type
-            .default_attributes
-            .get(&624)
-            .copied()
-            .filter(|&v| v > 0.0)
+        let tractor_vel = mod_state_opt
+            .as_ref()
+            .and_then(|ms| {
+                let v624 = ms.get_attribute(624, &ctx.sde);
+                if v624 > 0.0 {
+                    return Some(v624);
+                }
+                if ms.modifiers.iter().any(|m| m.target_attribute_id == 1045) {
+                    let base_1045 = mod_type
+                        .default_attributes
+                        .get(&1045)
+                        .copied()
+                        .unwrap_or(500.0)
+                        .max(1.0);
+                    let eff_1045 = ms.get_attribute(1045, &ctx.sde);
+                    if eff_1045 > 0.0 {
+                        return Some(eff_1045.max(1_000.0 * (eff_1045 / base_1045)));
+                    }
+                }
+                None
+            })
+            .or_else(|| {
+                mod_type
+                    .default_attributes
+                    .get(&624)
+                    .copied()
+                    .filter(|&v| v > 0.0)
+            })
             .unwrap_or(1_000.0);
-        let pull_seconds = mod_type
-            .default_attributes
-            .get(&73)
-            .copied()
+        let pull_seconds = mod_state_opt
+            .as_ref()
+            .map(|ms| ms.get_attribute(73, &ctx.sde))
+            .filter(|&ms| ms > 0.0)
+            .or_else(|| mod_type.default_attributes.get(&73).copied())
             .map(|ms| (ms / 1_000.0).max(1.0))
             .unwrap_or(5.0);
         let (new_pos, arrived) = crate::combat::drones_salvage_tractor::step_tractor_beam(
@@ -231,10 +307,11 @@ pub async fn activate_salvager_or_tractor_module(
     }
 
     // 2. Salvager (`group_id == 1122`, `feat:modules.salvager`, `feat:combat.wreck-size-salvage-difficulty`)
-    let max_range = mod_type
-        .default_attributes
-        .get(&54)
-        .copied()
+    let max_range = mod_state_opt
+        .as_ref()
+        .map(|ms| ms.get_attribute(54, &ctx.sde))
+        .filter(|&v| v > 0.0)
+        .or_else(|| mod_type.default_attributes.get(&54).copied())
         .unwrap_or(5_000.0)
         .max(5_000.0);
     if dist > max_range {
@@ -473,7 +550,7 @@ pub async fn handle_npcs_drones(
             for (idx, rec) in drone_records.into_iter().enumerate() {
                 if let Some(ref mut f) = ship_fit_opt {
                     if !f.drones.iter().any(|&(id, _)| id == rec.item_id) {
-                        f.drones.push((rec.item_id, rec.type_id));
+                        f.add_drone(rec.item_id, rec.type_id, &ctx.sde);
                     }
                 }
                 let rec_id = rec.item_id;
@@ -482,7 +559,12 @@ pub async fn handle_npcs_drones(
                     let sde_base = sde_t.and_then(|t| t.default_attributes.get(&aid).copied());
                     let fit_eff = ship_fit_opt
                         .as_ref()
-                        .map(|f| f.get_drone_effective_attribute(rec_id, aid, &ctx.sde));
+                        .and_then(|f| f.drone_state(rec_id, &ctx.sde))
+                        .filter(|ds| {
+                            ds.base_attributes.contains_key(&aid)
+                                || ds.modifiers.iter().any(|m| m.target_attribute_id == aid)
+                        })
+                        .map(|ds| ds.get_attribute(aid, &ctx.sde));
                     if let Some(&mut_val) = rec.dynamic_attributes.get(&aid) {
                         if let (Some(fe), Some(sb)) = (fit_eff, sde_base.filter(|b| b.abs() > 1e-9)) {
                             Some(mut_val * (fe / sb))
@@ -656,17 +738,17 @@ pub async fn handle_npcs_drones(
                     cs.structure_hp = 200.0;
                     cs.max_structure_hp = 200.0;
                 }
-                if let Some(&mut_hp) = rec.dynamic_attributes.get(&9) {
-                    cs.structure_hp = mut_hp;
-                    cs.max_structure_hp = mut_hp;
+                if let Some(eff_hp) = attr(9).filter(|&v| v > 0.0) {
+                    cs.structure_hp = eff_hp;
+                    cs.max_structure_hp = eff_hp;
                 }
-                if let Some(&mut_sh) = rec.dynamic_attributes.get(&263) {
-                    cs.shield_hp = mut_sh;
-                    cs.max_shield_hp = mut_sh;
+                if let Some(eff_sh) = attr(263).filter(|&v| v > 0.0) {
+                    cs.shield_hp = eff_sh;
+                    cs.max_shield_hp = eff_sh;
                 }
-                if let Some(&mut_ar) = rec.dynamic_attributes.get(&265) {
-                    cs.armor_hp = mut_ar;
-                    cs.max_armor_hp = mut_ar;
+                if let Some(eff_ar) = attr(265).filter(|&v| v > 0.0) {
+                    cs.armor_hp = eff_ar;
+                    cs.max_armor_hp = eff_ar;
                 }
                 let is_excavator = matches!(rec.type_id, 41030 | 43681 | 41031 | 43682 | 90621 | 90622);
                 let mass = if is_excavator { 10_000_000.0 } else { sde_t.map(|t| t.mass).filter(|&m| m > 0.0).unwrap_or(10_000.0) };

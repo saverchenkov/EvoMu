@@ -429,6 +429,7 @@ pub async fn handle_weapons(
                 if fm.charge_type_id != Some(charge_type_id) {
                     fm.charge_type_id = Some(charge_type_id);
                     fm.charge_quantity = fm.charge_quantity.max(1);
+                    fit.recalculate_stats(&ctx.sde);
                 }
             }
             let mod_state =
@@ -642,6 +643,7 @@ pub async fn handle_weapons(
                     if let Some(fm) = fit.modules.get_mut(&module_id) {
                         fm.state = eve_dogma::ModuleState::Online;
                     }
+                    fit.recalculate_stats(&ctx.sde);
                     ctx.store_ship_fitting(ship_id, fit.clone());
                 }
             }
@@ -702,6 +704,21 @@ pub async fn handle_weapons(
                 cap_after = cs.capacitor;
             }
 
+            let charge_attr = |aid: u16, fallback: f64| -> f64 {
+                if let Some(ch) = fit.charge_state(module_id, &ctx.sde) {
+                    if ch.base_attributes.contains_key(&aid)
+                        || ch.modifiers.iter().any(|cm| cm.target_attribute_id == aid)
+                    {
+                        return ch.get_attribute(aid, &ctx.sde);
+                    }
+                }
+                charge_type
+                    .default_attributes
+                    .get(&aid)
+                    .copied()
+                    .unwrap_or(fallback)
+            };
+
             // Charge consumption / Laser frequency crystal volatility (`feat:modules.turret-laser`)
             let mut crystal_damage_after = 0.0;
             let mut crystal_shattered = false;
@@ -709,31 +726,12 @@ pub async fn handle_weapons(
                 // Energy Laser Turret: uses frequency crystals (`group_id == 86 | 375`).
                 // T1 crystals (`attr 786 == 0.0`) do not degrade.
                 // T2 (`attr 786 == 1.0`, `783 == 0.1`, `784 == 0.01`) and Faction (`786 == 1.0`, `783 == 1.0`, `784 == 0.00025`) take volatility damage!
-                let crystals_get_damaged =
-                    charge_type.default_attributes.get(&786).copied().unwrap_or(0.0) > 0.0;
+                let crystals_get_damaged = charge_attr(786, 0.0) > 0.0;
                 if crystals_get_damaged {
-                    let vol_chance = charge_type
-                        .default_attributes
-                        .get(&783)
-                        .copied()
-                        .unwrap_or(0.10);
-                    let vol_dmg = charge_type
-                        .default_attributes
-                        .get(&784)
-                        .copied()
-                        .unwrap_or(0.01);
-                    let crystal_hp = charge_type
-                        .default_attributes
-                        .get(&9)
-                        .copied()
-                        .unwrap_or(1.0)
-                        .max(0.0001);
-                    let vol_roll = if vol_chance >= 1.0 {
-                        0.0
-                    } else {
-                        0.05 // DERIVED deterministic default < 0.10 so T2 volatility is observable per cycle
-                    };
-                    if vol_roll < vol_chance {
+                    let vol_chance = charge_attr(783, 0.10).clamp(0.0, 1.0);
+                    let vol_dmg = charge_attr(784, 0.01).max(0.0);
+                    let crystal_hp = charge_attr(9, 1.0).max(0.0001);
+                    if ctx.mechanic_rng.roll(vol_chance) {
                         ctx.db.with_mut_snapshot(|snap| {
                             if let Some(ci) = snap.items.get_mut(&charge_item_id) {
                                 let cur = ci.dynamic_attributes.get(&3).copied().unwrap_or(0.0);
@@ -782,9 +780,14 @@ pub async fn handle_weapons(
                 });
             }
 
-            // Weapon damage calculation
-
-            let dmg_mult = {
+            // Weapon damage calculation (evaluated via `ShipFittingEngine` for both charge & launcher/turret)
+            let dmg_mult = if is_missile_launcher {
+                fit.modules
+                    .get(&module_id)
+                    .and_then(|fm| fm.dynamic_attribute_overrides.get(&64).copied())
+                    .filter(|&v| v > 0.0)
+                    .unwrap_or(1.0)
+            } else {
                 let m_mult = mod_state.get_attribute(64, &ctx.sde);
                 if m_mult > 0.0 {
                     m_mult
@@ -792,14 +795,19 @@ pub async fn handle_weapons(
                     mod_type.default_attributes.get(&64).copied().unwrap_or(1.0)
                 }
             };
+            let eval_charge_dmg = |aid: u16| -> f64 {
+                let v = fit.get_charge_effective_attribute(module_id, aid, &ctx.sde);
+                if v > 0.0 {
+                    v
+                } else {
+                    charge_attr(aid, 0.0)
+                }
+            };
             let base_dmg = DamageVector {
-                em: charge_type.default_attributes.get(&114).copied().unwrap_or(0.0) * dmg_mult,
-                explosive: charge_type.default_attributes.get(&116).copied().unwrap_or(0.0)
-                    * dmg_mult,
-                kinetic: charge_type.default_attributes.get(&117).copied().unwrap_or(0.0)
-                    * dmg_mult,
-                thermal: charge_type.default_attributes.get(&118).copied().unwrap_or(0.0)
-                    * dmg_mult,
+                em: eval_charge_dmg(114) * dmg_mult,
+                explosive: eval_charge_dmg(116) * dmg_mult,
+                kinetic: eval_charge_dmg(117) * dmg_mult,
+                thermal: eval_charge_dmg(118) * dmg_mult,
             };
 
             let raw_sig = if let Some((vcid, _)) = player_target_info {
@@ -863,11 +871,15 @@ pub async fn handle_weapons(
             } else {
                 base_tracking * tracking_mult
             }) * attacker_pylon_mult;
-            let turret_sig_res = mod_type
-                .default_attributes
-                .get(&620)
-                .copied()
-                .unwrap_or(40_000.0);
+            let mod_attr_pos = |aid: u16, fallback: f64| -> f64 {
+                let v = mod_state.get_attribute(aid, &ctx.sde);
+                if v > 0.0 {
+                    v
+                } else {
+                    mod_type.default_attributes.get(&aid).copied().unwrap_or(fallback)
+                }
+            };
+            let turret_sig_res = mod_attr_pos(620, 40_000.0);
 
             let angular_vel = eve_destiny::combat::compute_angular_velocity(
                 attacker_ball.position,
@@ -890,7 +902,7 @@ pub async fn handle_weapons(
 
             // Entropic Disintegrator consecutive target-specific spooling (`feat:modules.turret-precursor`)
             let (spool_cycles, spool_multiplier) = if is_entropic {
-                let duration_s = mod_type.default_attributes.get(&51).map(|d| d / 1000.0).unwrap_or(3.5);
+                let duration_s = mod_attr_pos(51, 3_500.0) / 1000.0;
                 match combat_weapons_spool::handle_entropic_activation(ctx, char_id, ship_id, sys_id, module_id, target_ball_id, mod_type, Some(charge_item_id), base_dmg, base_cap_need, duration_s) {
                     Ok(r) => r,
                     Err(e) => return Some(Err(e)),
@@ -899,43 +911,33 @@ pub async fn handle_weapons(
                 (0u32, 1.0)
             };
 
-            let cycle_secs = {
-                let v = mod_state.get_attribute(51, &ctx.sde);
-                if v > 0.0 { v / 1000.0 } else { mod_type.default_attributes.get(&51).copied().unwrap_or(3000.0) / 1000.0 }
-            }
-            .max(0.1);
+            let cycle_secs = (mod_attr_pos(51, 3_000.0) / 1000.0).max(0.1);
 
             // Vorton Projector arc chaining (`feat:modules.vorton-projector`)
             let mut vorton_secondary_targets = Vec::new();
             let final_dmg = if is_vorton {
                 is_wrecking = false;
-                let arc_range = mod_type
-                    .default_attributes
-                    .get(&3036)
-                    .copied()
-                    .unwrap_or(10_000.0);
-                let max_total_targets = mod_type
-                    .default_attributes
-                    .get(&3037)
-                    .or_else(|| mod_type.default_attributes.get(&2104))
-                    .copied()
-                    .unwrap_or(10.0) as usize;
+                let arc_range = mod_attr_pos(3036, 10_000.0);
+                let max_total_targets = {
+                    let v3037 = mod_state.get_attribute(3037, &ctx.sde);
+                    let v2104 = mod_state.get_attribute(2104, &ctx.sde);
+                    if v3037 > 0.0 {
+                        v3037
+                    } else if v2104 > 0.0 {
+                        v2104
+                    } else {
+                        mod_type
+                            .default_attributes
+                            .get(&3037)
+                            .or_else(|| mod_type.default_attributes.get(&2104))
+                            .copied()
+                            .unwrap_or(10.0)
+                    }
+                } as usize;
                 let max_secondary = max_total_targets.saturating_sub(1).max(1);
-                let exp_vel = mod_type
-                    .default_attributes
-                    .get(&653)
-                    .copied()
-                    .unwrap_or(190.0);
-                let exp_rad = mod_type
-                    .default_attributes
-                    .get(&654)
-                    .copied()
-                    .unwrap_or(43.0);
-                let drf = mod_type
-                    .default_attributes
-                    .get(&1353)
-                    .copied()
-                    .unwrap_or(0.40);
+                let exp_vel = mod_attr_pos(653, 190.0);
+                let exp_rad = mod_attr_pos(654, 43.0);
+                let drf = mod_attr_pos(1353, 0.40);
                 let all_balls = sys_handle.list_balls().await.unwrap_or_default();
                 let candidates: Vec<(i64, DVec3)> = all_balls
                     .into_iter()

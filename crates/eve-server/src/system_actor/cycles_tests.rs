@@ -345,3 +345,171 @@ async fn cleanup_and_ship_cycle_removal_restore_ship_attributes_and_handle_warp(
     assert!(!handle.has_active_modules_or_cloak_sync(2001));
     assert!(handle.try_step_full_tick(1.0) >= 1);
 }
+
+#[test]
+fn repeating_weapon_cycles_apply_turret_and_missile_mitigation() {
+    let mut bp = Ballpark::new(30_000_142);
+    let sde_opt = Some(make_sde_for_cycles());
+    let rng = Arc::new(crate::rng::MechanicRng::seeded(42));
+
+    // Attacker at origin
+    bp.add_ball(make_ship(5001, 587, DVec3::ZERO));
+    bp.combat_states.insert(
+        5001,
+        CombatState {
+            shield_hp: 500.0,
+            max_shield_hp: 500.0,
+            capacitor: 500.0,
+            max_capacitor: 500.0,
+            signature_radius: 40.0,
+            ..CombatState::default()
+        },
+    );
+    // Target A: stationary inside turret optimal (2 km) -> 100% hit chance
+    bp.add_ball(make_ship(5002, 587, DVec3::new(2_000.0, 0.0, 0.0)));
+    bp.combat_states.insert(
+        5002,
+        CombatState {
+            shield_hp: 1_000.0,
+            max_shield_hp: 1_000.0,
+            signature_radius: 100.0,
+            ..CombatState::default()
+        },
+    );
+    // Target B: extreme transversal (10,000 m/s at 1 km -> omega = 10 rad/s >> tracking 0.05) -> 0% hit chance
+    let mut fast_orbiter = make_ship(5003, 587, DVec3::new(1_000.0, 0.0, 0.0));
+    fast_orbiter.velocity = DVec3::new(0.0, 10_000.0, 0.0);
+    bp.add_ball(fast_orbiter);
+    bp.combat_states.insert(
+        5003,
+        CombatState {
+            shield_hp: 1_000.0,
+            max_shield_hp: 1_000.0,
+            signature_radius: 25.0,
+            ..CombatState::default()
+        },
+    );
+    // Target C: small fast frigate (sig 25m, speed 2,500 m/s) hit by heavy cruise missile (exp_rad 300m, exp_vel 100 m/s) -> DRF-mitigated
+    let mut fast_frig = make_ship(5004, 587, DVec3::new(10_000.0, 0.0, 0.0));
+    fast_frig.velocity = DVec3::new(0.0, 2_500.0, 0.0);
+    bp.add_ball(fast_frig);
+    bp.combat_states.insert(
+        5004,
+        CombatState {
+            shield_hp: 1_000.0,
+            max_shield_hp: 1_000.0,
+            signature_radius: 25.0,
+            ..CombatState::default()
+        },
+    );
+    // Target D: beyond missile max flight range (50 km > 20 km) -> 0 damage
+    bp.add_ball(make_ship(5005, 587, DVec3::new(50_000.0, 0.0, 0.0)));
+    bp.combat_states.insert(
+        5005,
+        CombatState {
+            shield_hp: 1_000.0,
+            max_shield_hp: 1_000.0,
+            signature_radius: 400.0,
+            ..CombatState::default()
+        },
+    );
+
+    let mut cycles = vec![
+        ActiveModuleCycle {
+            ship_id: 5001,
+            module_id: 8001,
+            target_id: Some(5002),
+            damage_vector: DamageVector::new(200.0, 0.0, 0.0, 0.0),
+            weapon_is_turret: true,
+            weapon_optimal_m: 10_000.0,
+            weapon_falloff_m: 5_000.0,
+            weapon_tracking_speed: 0.5,
+            weapon_sig_resolution_m: 40_000.0,
+            duration_s: 1.0,
+            repeat: 0,
+            ..ActiveModuleCycle::default()
+        },
+        ActiveModuleCycle {
+            ship_id: 5001,
+            module_id: 8002,
+            target_id: Some(5003),
+            damage_vector: DamageVector::new(200.0, 0.0, 0.0, 0.0),
+            weapon_is_turret: true,
+            weapon_optimal_m: 5_000.0,
+            weapon_falloff_m: 2_000.0,
+            weapon_tracking_speed: 0.05,
+            weapon_sig_resolution_m: 40_000.0,
+            duration_s: 1.0,
+            repeat: 0,
+            ..ActiveModuleCycle::default()
+        },
+        ActiveModuleCycle {
+            ship_id: 5001,
+            module_id: 8003,
+            target_id: Some(5004),
+            damage_vector: DamageVector::new(0.0, 0.0, 500.0, 0.0),
+            weapon_is_missile: true,
+            weapon_optimal_m: 30_000.0,
+            missile_explosion_radius_m: 300.0,
+            missile_explosion_velocity_ms: 100.0,
+            missile_drf: 0.88,
+            duration_s: 1.0,
+            repeat: 0,
+            ..ActiveModuleCycle::default()
+        },
+        ActiveModuleCycle {
+            ship_id: 5001,
+            module_id: 8004,
+            target_id: Some(5005),
+            damage_vector: DamageVector::new(0.0, 0.0, 500.0, 0.0),
+            weapon_is_missile: true,
+            weapon_optimal_m: 20_000.0,
+            missile_explosion_radius_m: 40.0,
+            missile_explosion_velocity_ms: 200.0,
+            missile_drf: 0.60,
+            duration_s: 1.0,
+            repeat: 0,
+            ..ActiveModuleCycle::default()
+        },
+    ];
+
+    let _ = step_cycles_and_capacitor(
+        &mut bp,
+        &mut cycles,
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &mut HashMap::new(),
+        &mut HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &sde_opt,
+        &None,
+        &Some(rng),
+        &Arc::new(RwLock::new(Default::default())),
+        &mut Vec::new(),
+        1.0,
+        None,
+    );
+
+    // Target A (stationary inside optimal): took >= 50% of 200 EM damage
+    assert!(
+        bp.combat_states[&5002].shield_hp <= 900.0,
+        "Stationary target inside turret optimal must take mitigated hit damage"
+    );
+    // Target B (extreme angular velocity): missed cleanly (0 damage)
+    assert!(
+        (bp.combat_states[&5003].shield_hp - 1_000.0).abs() < 1e-9,
+        "Extreme-transversal target must evade turret cycle tick"
+    );
+    // Target C (small fast frigate vs cruise missile): took heavily DRF-mitigated (< 10% of 500) > 0 damage
+    let c_dmg_taken = 1_000.0 - bp.combat_states[&5004].shield_hp;
+    assert!(
+        c_dmg_taken > 0.1 && c_dmg_taken < 50.0,
+        "Fast small frigate must receive DRF-mitigated missile damage, got {c_dmg_taken}"
+    );
+    // Target D (beyond missile max flight range): 0 damage
+    assert!(
+        (bp.combat_states[&5005].shield_hp - 1_000.0).abs() < 1e-9,
+        "Target beyond missile flight range must take 0 damage"
+    );
+}

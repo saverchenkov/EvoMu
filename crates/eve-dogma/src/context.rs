@@ -11,7 +11,7 @@ use std::collections::HashMap;
 /// with isolated per-domain location item lists and all 6 modifier functions (`ItemModifier`,
 /// `LocationModifier`, `LocationGroupModifier`, `LocationRequiredSkillModifier`,
 /// `OwnerRequiredSkillModifier`, `EffectStopper`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DogmaEffectContext {
     pub item: DogmaItemState,
     pub ship: DogmaItemState,
@@ -509,7 +509,7 @@ pub enum ModuleState {
 }
 
 /// Fitted module slot entry inside a [`ShipFittingEngine`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FittedModule {
     pub item_id: i64,
     pub type_id: TypeId,

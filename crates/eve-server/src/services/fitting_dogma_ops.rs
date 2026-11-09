@@ -929,6 +929,82 @@ pub(crate) async fn handle_dogma_ops(
     }
 }
 
+fn resolve_parent_ship_for_dogma_item(
+    ctx: &ServerContext,
+    char_id: i64,
+    active_ship_id: i64,
+    item_id: i64,
+) -> (Option<eve_db::InventoryItemRecord>, Option<(i64, i64)>) {
+    let (item_opt, db_parent) = ctx.db.with_snapshot(|snap| {
+        let it = snap.items.get(&item_id).cloned();
+        let parent = if let Some(ref item) = it {
+            let item_cat = ctx.sde.types.get(&item.type_id).map(|t| t.category_id);
+            if matches!(item_cat, Some(6 | 65)) {
+                Some((item.owner_id, item.item_id))
+            } else if active_ship_id > 0 && item.location_id == active_ship_id {
+                Some((char_id, active_ship_id))
+            } else if let Some(loc_item) = snap.items.get(&item.location_id) {
+                let loc_cat = ctx.sde.types.get(&loc_item.type_id).map(|t| t.category_id);
+                matches!(loc_cat, Some(6 | 65)).then_some((loc_item.owner_id, loc_item.item_id))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        (it, parent)
+    });
+    if db_parent.is_some() {
+        return (item_opt, db_parent);
+    }
+    if let Some(sd_parent) = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+        rt.active_drones_in_space
+            .values()
+            .find(|d| d.ball_id == item_id || d.drone_item_id == item_id)
+            .map(|d| (d.owner_char_id, d.parent_ship_id))
+    }) {
+        return (item_opt, Some(sd_parent));
+    }
+    if let Some(probe_parent) = ctx
+        .active_scanner_probes
+        .read()
+        .ok()
+        .and_then(|m| m.get(&item_id).map(|p| (p.owner_char_id, p.ship_id)))
+    {
+        return (item_opt, Some(probe_parent));
+    }
+    let fallback_parent = (active_ship_id > 0).then_some((char_id, active_ship_id));
+    (item_opt, fallback_parent)
+}
+
+fn evaluate_drone_or_probe_state_with_overrides(
+    ctx: &ServerContext,
+    fit: &eve_dogma::ShipFittingEngine,
+    item_id: i64,
+    item_opt: Option<&eve_db::InventoryItemRecord>,
+) -> Option<eve_dogma::DogmaItemState> {
+    let mut st = fit.drone_state(item_id, &ctx.sde)?;
+    if let Some(it) = item_opt {
+        for (&aid, &val) in &it.dynamic_attributes {
+            if !matches!(aid, 3 | 18 | 265 | 266) {
+                st.base_attributes.insert(aid, val);
+            }
+        }
+    }
+    let has_active_triage = fit.modules.values().any(|fm| {
+        matches!(fm.type_id, 27951 | 4294)
+            && matches!(
+                fm.state,
+                eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
+            )
+    });
+    if has_active_triage && st.base_attributes.contains_key(&64) {
+        st.base_attributes.insert(64, 0.0);
+        st.modifiers.retain(|m| m.target_attribute_id != 64);
+    }
+    Some(st)
+}
+
 fn get_item_attribute_value(
     ctx: &ServerContext,
     char_id: i64,
@@ -936,63 +1012,122 @@ fn get_item_attribute_value(
     item_id: i64,
     attr_id: u16,
 ) -> f64 {
-    if item_id == active_ship_id && active_ship_id > 0 {
-        if matches!(attr_id, 1175 | 1176 | 1177) {
-            if let Some(live_heat) = ctx.db.with_snapshot(|snap| {
-                snap.transient_item_attributes
-                    .get(&item_id)
-                    .and_then(|tr| tr.get(&attr_id).copied())
-                    .or_else(|| {
-                        snap.items
-                            .get(&item_id)
-                            .and_then(|it| it.dynamic_attributes.get(&attr_id).copied())
-                    })
-            }) {
-                return live_heat;
-            }
-        }
-        if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(char_id, item_id) {
-            return fit.ship.get_attribute(attr_id, &ctx.sde);
-        }
+    if let Some(transient_val) = ctx.db.with_snapshot(|snap| {
+        snap.transient_item_attributes
+            .get(&item_id)
+            .and_then(|tr| tr.get(&attr_id).copied())
+    }) {
+        return transient_val;
     }
-    if active_ship_id > 0 {
-        if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(char_id, active_ship_id) {
-            if let Some(fm) = fit.modules.get(&item_id) {
-                if attr_id == attr_ids::DAMAGE {
-                    return ctx.db.with_snapshot(|snap| {
-                        snap.items
-                            .get(&item_id)
-                            .map(|it| it.dynamic_attributes.get(&attr_ids::DAMAGE).copied().unwrap_or(0.0))
-                            .unwrap_or(fm.damage_hp)
-                    });
+
+    let (item_opt, parent_ship_opt) =
+        resolve_parent_ship_for_dogma_item(ctx, char_id, active_ship_id, item_id);
+
+    if let Some((owner_id, ship_id)) = parent_ship_opt {
+        if item_id == ship_id && ship_id > 0 {
+            if matches!(attr_id, 1175 | 1176 | 1177 | 3 | 18 | 265 | 266) {
+                if let Some(&live_val) =
+                    item_opt.as_ref().and_then(|it| it.dynamic_attributes.get(&attr_id))
+                {
+                    return live_val;
                 }
-                if attr_id == attr_ids::HP_STRUCT {
-                    return fm.max_hp;
+            }
+            if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(owner_id, ship_id) {
+                let mut ship_attrs = HashMap::from([(attr_id, fit.ship.get_attribute(attr_id, &ctx.sde))]);
+                let already_applied: Vec<u32> =
+                    fit.gang_bursts.iter().filter_map(|b| b.dbuff_id).collect();
+                crate::services::inventory_fitting::fitting_scanners_superweapons::apply_active_dbuffs_and_system_effects_to_ship_attrs_excluding(
+                    ctx,
+                    ship_id,
+                    &already_applied,
+                    &mut ship_attrs,
+                );
+                return ship_attrs.get(&attr_id).copied().unwrap_or(0.0);
+            }
+        } else if ship_id > 0 {
+            if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(owner_id, ship_id) {
+                if let Some(fm) = fit.modules.get(&item_id) {
+                    if attr_id == attr_ids::DAMAGE {
+                        return item_opt
+                            .as_ref()
+                            .and_then(|it| it.dynamic_attributes.get(&attr_ids::DAMAGE).copied())
+                            .unwrap_or(fm.damage_hp);
+                    }
+                    if attr_id == attr_ids::HP_STRUCT {
+                        return fm.max_hp;
+                    }
+                    if attr_id == 2 {
+                        return if fm.state != eve_dogma::ModuleState::Offline {
+                            1.0
+                        } else {
+                            0.0
+                        };
+                    }
+                    let mut m_attrs = HashMap::from([(
+                        attr_id,
+                        fit.get_module_effective_attribute(item_id, attr_id, &ctx.sde),
+                    )]);
+                    if fm.state != eve_dogma::ModuleState::Offline {
+                        crate::services::tactical_modules::apply_projected_rtc_to_module_attrs(
+                            ctx,
+                            ship_id,
+                            &mut m_attrs,
+                        );
+                    }
+                    return m_attrs.get(&attr_id).copied().unwrap_or(0.0);
                 }
-                if let Some(&v) = fm.dynamic_attribute_overrides.get(&attr_id) {
-                    return v;
-                }
-                if let Some(t) = ctx.sde.types.get(&fm.type_id) {
-                    if let Some(&v) = t.default_attributes.get(&attr_id) {
-                        return v;
+
+                if let Some(ref it) = item_opt {
+                    let cat = ctx.sde.types.get(&it.type_id).map(|t| t.category_id);
+                    if cat == Some(8) && it.location_id == ship_id {
+                        if attr_id == attr_ids::DAMAGE {
+                            return it
+                                .dynamic_attributes
+                                .get(&attr_ids::DAMAGE)
+                                .copied()
+                                .unwrap_or(0.0);
+                        }
+                        let slot_flag = it.flag as u16;
+                        if let Some(launcher_id) = fit
+                            .modules
+                            .values()
+                            .find(|m| m.flag_id == slot_flag)
+                            .map(|m| m.item_id)
+                        {
+                            if let Some(c_state) = fit.charge_state(launcher_id, &ctx.sde) {
+                                return c_state.get_attribute(attr_id, &ctx.sde);
+                            }
+                        }
                     }
                 }
-            }
-        }
-    }
-    ctx.db.with_snapshot(|snap| {
-        if let Some(it) = snap.items.get(&item_id) {
-            if let Some(&val) = it.dynamic_attributes.get(&attr_id) {
-                return val;
-            }
-            if let Some(t) = ctx.sde.types.get(&it.type_id) {
-                if let Some(&val) = t.default_attributes.get(&attr_id) {
-                    return val;
+
+                if let Some(d_state) =
+                    evaluate_drone_or_probe_state_with_overrides(ctx, &fit, item_id, item_opt.as_ref())
+                {
+                    if matches!(attr_id, 3 | 18 | 265 | 266) {
+                        if let Some(&live_val) =
+                            item_opt.as_ref().and_then(|it| it.dynamic_attributes.get(&attr_id))
+                        {
+                            return live_val;
+                        }
+                    }
+                    return d_state.get_attribute(attr_id, &ctx.sde);
                 }
             }
         }
-        0.0
-    })
+    }
+
+    if let Some(it) = item_opt {
+        if let Some(&val) = it.dynamic_attributes.get(&attr_id) {
+            return val;
+        }
+        if let Some(t) = ctx.sde.types.get(&it.type_id) {
+            if let Some(&val) = t.default_attributes.get(&attr_id) {
+                return val;
+            }
+        }
+    }
+    0.0
 }
 
 fn get_all_item_attributes(
@@ -1002,34 +1137,148 @@ fn get_all_item_attributes(
     item_id: i64,
 ) -> HashMap<u16, f64> {
     let mut map = HashMap::new();
-    if item_id == active_ship_id && active_ship_id > 0 {
-        if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(char_id, item_id) {
-            let eval_ctx = fit.evaluated_context(&ctx.sde);
-            for (&aid, _) in &eval_ctx.ship.base_attributes {
-                map.insert(aid, eval_ctx.ship.get_attribute(aid, &ctx.sde));
-            }
-            for m in &eval_ctx.ship.modifiers {
-                map.insert(m.target_attribute_id, eval_ctx.ship.get_attribute(m.target_attribute_id, &ctx.sde));
-            }
-        }
-    } else if active_ship_id > 0 {
-        if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(char_id, active_ship_id) {
-            if let Some(fm) = fit.modules.get(&item_id) {
-                if let Some(t) = ctx.sde.types.get(&fm.type_id) {
-                    for (&aid, &v) in &t.default_attributes {
-                        map.insert(aid, v);
+    let (item_opt, parent_ship_opt) =
+        resolve_parent_ship_for_dogma_item(ctx, char_id, active_ship_id, item_id);
+    let mut evaluated_via_dogma = false;
+
+    if let Some((owner_id, ship_id)) = parent_ship_opt {
+        if item_id == ship_id && ship_id > 0 {
+            if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(owner_id, ship_id) {
+                for (&aid, _) in &fit.ship.base_attributes {
+                    map.insert(aid, fit.ship.get_attribute(aid, &ctx.sde));
+                }
+                for m in &fit.ship.modifiers {
+                    map.insert(
+                        m.target_attribute_id,
+                        fit.ship.get_attribute(m.target_attribute_id, &ctx.sde),
+                    );
+                }
+                if let Some(ref it) = item_opt {
+                    for (&aid, &v) in &it.dynamic_attributes {
+                        if matches!(aid, 3 | 18 | 265 | 266 | 1175 | 1176 | 1177)
+                            || !fit.ship.modifiers.iter().any(|m| m.target_attribute_id == aid)
+                        {
+                            map.insert(aid, v);
+                        }
                     }
                 }
-                for (&aid, &v) in &fm.dynamic_attribute_overrides {
-                    map.insert(aid, v);
+                let already_applied: Vec<u32> =
+                    fit.gang_bursts.iter().filter_map(|b| b.dbuff_id).collect();
+                crate::services::inventory_fitting::fitting_scanners_superweapons::apply_active_dbuffs_and_system_effects_to_ship_attrs_excluding(
+                    ctx,
+                    ship_id,
+                    &already_applied,
+                    &mut map,
+                );
+                evaluated_via_dogma = true;
+            }
+        } else if ship_id > 0 {
+            if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(owner_id, ship_id) {
+                if let Some(fm) = fit.modules.get(&item_id) {
+                    if let Some(m_state) = fit.module_state(item_id, &ctx.sde) {
+                        for (&aid, _) in &m_state.base_attributes {
+                            map.insert(aid, m_state.get_attribute(aid, &ctx.sde));
+                        }
+                        for m in &m_state.modifiers {
+                            map.insert(
+                                m.target_attribute_id,
+                                m_state.get_attribute(m.target_attribute_id, &ctx.sde),
+                            );
+                        }
+                        crate::services::tactical_modules::apply_projected_rtc_to_module_attrs(
+                            ctx,
+                            ship_id,
+                            &mut map,
+                        );
+                        map.insert(2, 1.0);
+                    } else {
+                        if let Some(t) = ctx.sde.types.get(&fm.type_id) {
+                            for (&aid, &v) in &t.default_attributes {
+                                map.insert(aid, v);
+                            }
+                        }
+                        for (&aid, &v) in &fm.dynamic_attribute_overrides {
+                            map.insert(aid, v);
+                        }
+                        map.insert(2, 0.0);
+                    }
+                    let live_dmg = item_opt
+                        .as_ref()
+                        .and_then(|it| it.dynamic_attributes.get(&attr_ids::DAMAGE).copied())
+                        .unwrap_or(fm.damage_hp);
+                    map.insert(attr_ids::DAMAGE, live_dmg);
+                    map.insert(attr_ids::HP_STRUCT, fm.max_hp);
+                    evaluated_via_dogma = true;
+                } else if let Some(ref it) = item_opt {
+                    let cat = ctx.sde.types.get(&it.type_id).map(|t| t.category_id);
+                    if cat == Some(8) && it.location_id == ship_id {
+                        let slot_flag = it.flag as u16;
+                        if let Some(launcher_id) = fit
+                            .modules
+                            .values()
+                            .find(|m| m.flag_id == slot_flag)
+                            .map(|m| m.item_id)
+                        {
+                            if let Some(c_state) = fit.charge_state(launcher_id, &ctx.sde) {
+                                for (&aid, _) in &c_state.base_attributes {
+                                    map.insert(aid, c_state.get_attribute(aid, &ctx.sde));
+                                }
+                                for m in &c_state.modifiers {
+                                    map.insert(
+                                        m.target_attribute_id,
+                                        c_state.get_attribute(m.target_attribute_id, &ctx.sde),
+                                    );
+                                }
+                                map.insert(
+                                    attr_ids::DAMAGE,
+                                    it.dynamic_attributes
+                                        .get(&attr_ids::DAMAGE)
+                                        .copied()
+                                        .unwrap_or(0.0),
+                                );
+                                evaluated_via_dogma = true;
+                            }
+                        }
+                    }
                 }
-                map.insert(attr_ids::DAMAGE, fm.damage_hp);
-                map.insert(attr_ids::HP_STRUCT, fm.max_hp);
+
+                if !evaluated_via_dogma {
+                    if let Some(d_state) = evaluate_drone_or_probe_state_with_overrides(
+                        ctx,
+                        &fit,
+                        item_id,
+                        item_opt.as_ref(),
+                    ) {
+                        for (&aid, _) in &d_state.base_attributes {
+                            map.insert(aid, d_state.get_attribute(aid, &ctx.sde));
+                        }
+                        for m in &d_state.modifiers {
+                            map.insert(
+                                m.target_attribute_id,
+                                d_state.get_attribute(m.target_attribute_id, &ctx.sde),
+                            );
+                        }
+                        if let Some(ref it) = item_opt {
+                            for &aid in &[3u16, 18, 265, 266] {
+                                if let Some(&v) = it.dynamic_attributes.get(&aid) {
+                                    map.insert(aid, v);
+                                }
+                            }
+                            if !it.dynamic_attributes.contains_key(&attr_ids::DAMAGE) {
+                                map.entry(attr_ids::DAMAGE).or_insert(0.0);
+                            }
+                        } else {
+                            map.entry(attr_ids::DAMAGE).or_insert(0.0);
+                        }
+                        evaluated_via_dogma = true;
+                    }
+                }
             }
         }
     }
-    ctx.db.with_snapshot(|snap| {
-        if let Some(it) = snap.items.get(&item_id) {
+
+    if !evaluated_via_dogma {
+        if let Some(it) = item_opt {
             if let Some(t) = ctx.sde.types.get(&it.type_id) {
                 for (&aid, &v) in &t.default_attributes {
                     map.entry(aid).or_insert(v);
@@ -1044,7 +1293,9 @@ fn get_all_item_attributes(
                 map.insert(aid, v);
             }
         }
-    });
+    }
+
+    crate::services::tactical_modules::apply_transient_item_attrs(ctx, item_id, &mut map);
     map
 }
 
@@ -1086,7 +1337,11 @@ fn check_dogma_item_access(
         rt.active_drones_in_space.values().any(|d| {
             (d.ball_id == item_id || d.drone_item_id == item_id) && d.owner_char_id == char_id
         })
-    });
+    }) || ctx
+        .active_scanner_probes
+        .read()
+        .ok()
+        .is_some_and(|m| m.get(&item_id).is_some_and(|p| p.owner_char_id == char_id));
 
     if has_access {
         Ok(())

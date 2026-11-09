@@ -3,6 +3,58 @@ use eve_sde::{AttributeId, SdeRegistry, TypeId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
+/// Snapshot of the input fields used during [`ShipFittingEngine::recalculate_stats`] so direct
+/// mutations to public fields on [`ShipFittingEngine`] never serve stale cached states.
+#[derive(Debug, Clone, PartialEq)]
+struct EvalInputsSnapshot {
+    ship_item_id: i64,
+    ship_type_id: TypeId,
+    ship_base_attributes: HashMap<AttributeId, f64>,
+    modules: HashMap<i64, FittedModule>,
+    character_skills: HashMap<TypeId, u8>,
+    implants: Vec<TypeId>,
+    boosters: Vec<TypeId>,
+    booster_side_effects: HashMap<TypeId, Vec<u32>>,
+    projected_ewar: Vec<ProjectedEwarEffect>,
+    gang_bursts: Vec<GangBurstEffect>,
+    active_stance_type_id: Option<TypeId>,
+    drones: Vec<(i64, TypeId)>,
+}
+
+impl EvalInputsSnapshot {
+    fn from_engine(eng: &ShipFittingEngine) -> Self {
+        Self {
+            ship_item_id: eng.ship.item_id,
+            ship_type_id: eng.ship.type_id,
+            ship_base_attributes: eng.ship.base_attributes.clone(),
+            modules: eng.modules.clone(),
+            character_skills: eng.character_skills.clone(),
+            implants: eng.implants.clone(),
+            boosters: eng.boosters.clone(),
+            booster_side_effects: eng.booster_side_effects.clone(),
+            projected_ewar: eng.projected_ewar.clone(),
+            gang_bursts: eng.gang_bursts.clone(),
+            active_stance_type_id: eng.active_stance_type_id,
+            drones: eng.drones.clone(),
+        }
+    }
+
+    fn matches(&self, eng: &ShipFittingEngine) -> bool {
+        self.ship_item_id == eng.ship.item_id
+            && self.ship_type_id == eng.ship.type_id
+            && self.active_stance_type_id == eng.active_stance_type_id
+            && self.modules == eng.modules
+            && self.character_skills == eng.character_skills
+            && self.implants == eng.implants
+            && self.boosters == eng.boosters
+            && self.booster_side_effects == eng.booster_side_effects
+            && self.projected_ewar == eng.projected_ewar
+            && self.gang_bursts == eng.gang_bursts
+            && self.drones == eng.drones
+            && self.ship_base_attributes == eng.ship.base_attributes
+    }
+}
+
 /// Complete Ship Fitting, Thermodynamics, and Module Activation Engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShipFittingEngine {
@@ -39,6 +91,21 @@ pub struct ShipFittingEngine {
     /// Owned drones in space or drone bay (`(drone_item_id, drone_type_id)`) evaluated under `ctx.owned_items`.
     #[serde(default)]
     pub drones: Vec<(i64, TypeId)>,
+    /// Persisted evaluated [`DogmaEffectContext`] from the most recent `recalculate_stats` pass.
+    #[serde(skip)]
+    pub evaluated_context_cache: Option<Box<DogmaEffectContext>>,
+    /// Persisted evaluated fitted module states (`module_item_id -> DogmaItemState`) from `recalculate_stats`.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub evaluated_modules: HashMap<i64, DogmaItemState>,
+    /// Persisted evaluated loaded charge states (`launcher_module_id -> DogmaItemState`) from `recalculate_stats`.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub evaluated_charges: HashMap<i64, DogmaItemState>,
+    /// Persisted evaluated owned drone states (`drone_item_id -> DogmaItemState`) from `recalculate_stats`.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub evaluated_drones: HashMap<i64, DogmaItemState>,
+    /// Internal fingerprint of the inputs evaluated into `evaluated_context_cache`.
+    #[serde(skip)]
+    eval_inputs_snapshot: Option<Box<EvalInputsSnapshot>>,
 }
 
 impl ShipFittingEngine {
@@ -56,7 +123,43 @@ impl ShipFittingEngine {
             active_stance_type_id: None,
             last_stance_switch_ms: None,
             drones: Vec::new(),
+            evaluated_context_cache: None,
+            evaluated_modules: HashMap::new(),
+            evaluated_charges: HashMap::new(),
+            evaluated_drones: HashMap::new(),
+            eval_inputs_snapshot: None,
         }
+    }
+
+    #[inline]
+    fn has_fresh_evaluation(&self) -> bool {
+        self.evaluated_context_cache.is_some()
+            && self
+                .eval_inputs_snapshot
+                .as_ref()
+                .is_some_and(|snap| snap.matches(self))
+    }
+
+    /// Returns a reference to the persisted [`DogmaEffectContext`] when `recalculate_stats` is up-to-date.
+    pub fn persisted_context(&self) -> Option<&DogmaEffectContext> {
+        self.has_fresh_evaluation()
+            .then_some(self.evaluated_context_cache.as_deref())
+            .flatten()
+    }
+
+    /// Evaluates an attribute on the pilot's `charID` domain entity (such as `maxLockedTargets` `192`,
+    /// `missileDamageMultiplier` `212`, or `droneControlDistance` `458`).
+    pub fn get_character_effective_attribute(
+        &self,
+        attr_id: AttributeId,
+        sde: &SdeRegistry,
+    ) -> f64 {
+        if let Some(ctx) = self.persisted_context() {
+            return ctx.character.get_attribute(attr_id, sde);
+        }
+        self.compute_evaluated_context(sde)
+            .character
+            .get_attribute(attr_id, sde)
     }
 
     pub fn set_character_skills(&mut self, skills: HashMap<TypeId, u8>) {
@@ -109,9 +212,14 @@ impl ShipFittingEngine {
 
     /// Returns the evaluated [`DogmaItemState`] of an owned drone (including character skill, ship hull, and DDA modifiers).
     pub fn drone_state(&self, drone_item_id: i64, sde: &SdeRegistry) -> Option<DogmaItemState> {
-        self.evaluated_context(sde)
+        if self.has_fresh_evaluation() {
+            return self.evaluated_drones.get(&drone_item_id).cloned();
+        }
+        let drones_len = self.drones.len();
+        self.compute_evaluated_context(sde)
             .owned_items
             .into_iter()
+            .take(drones_len)
             .find(|d| d.item_id == drone_item_id)
     }
 
@@ -122,6 +230,17 @@ impl ShipFittingEngine {
         attr_id: AttributeId,
         sde: &SdeRegistry,
     ) -> f64 {
+        if self.has_fresh_evaluation() {
+            if let Some(st) = self.evaluated_drones.get(&drone_item_id) {
+                return st.get_attribute(attr_id, sde);
+            }
+            return self
+                .drones
+                .iter()
+                .find(|(id, _)| *id == drone_item_id)
+                .map(|&(id, tid)| DogmaItemState::from_sde(id, tid, sde).get_attribute(attr_id, sde))
+                .unwrap_or(0.0);
+        }
         if let Some(st) = self.drone_state(drone_item_id, sde) {
             return st.get_attribute(attr_id, sde);
         }
@@ -132,9 +251,18 @@ impl ShipFittingEngine {
             .unwrap_or(0.0)
     }
 
+    /// Returns the evaluated [`DogmaEffectContext`] for the current ship hull, character skills,
+    /// and fitted modules, reusing `self.evaluated_context_cache` when `recalculate_stats` is fresh.
+    pub fn evaluated_context(&self, sde: &SdeRegistry) -> DogmaEffectContext {
+        if let Some(ctx) = self.persisted_context() {
+            return ctx.clone();
+        }
+        self.compute_evaluated_context(sde)
+    }
+
     /// Builds and evaluates a [`DogmaEffectContext`] for the current ship hull, character skills,
     /// and fitted modules over real V24.01 SDE `modifierInfo` records (`DG-1`, `OF-31`).
-    pub fn evaluated_context(&self, sde: &SdeRegistry) -> DogmaEffectContext {
+    fn compute_evaluated_context(&self, sde: &SdeRegistry) -> DogmaEffectContext {
         let mut base_ship = self.ship.clone();
         base_ship.modifiers.clear();
 
@@ -196,7 +324,10 @@ impl ShipFittingEngine {
         });
 
         let dummy = DogmaItemState::from_sde(0, 0, sde);
-        let char_state = DogmaItemState::from_sde(-1, 1373, sde);
+        let mut char_state = DogmaItemState::from_sde(-1, 1373, sde);
+        char_state.base_attributes.entry(192).or_insert(2.0);
+        char_state.base_attributes.entry(212).or_insert(1.0);
+        char_state.base_attributes.entry(458).or_insert(20_000.0);
         let mut ctx = DogmaEffectContext::new(
             dummy.clone(),
             base_ship,
@@ -205,6 +336,7 @@ impl ShipFittingEngine {
             dummy.clone(),
             dummy,
         );
+        let drones_len = self.drones.len();
         for &(drone_item_id, drone_type_id) in &self.drones {
             ctx.owned_items
                 .push(DogmaItemState::from_sde(drone_item_id, drone_type_id, sde));
@@ -246,6 +378,20 @@ impl ShipFittingEngine {
                 }
             }
             ctx.ship_located_items.push(mod_state);
+        }
+        let mut offline_charged_modules: Vec<&FittedModule> = self
+            .modules
+            .values()
+            .filter(|m| m.state == ModuleState::Offline && m.charge_type_id.is_some())
+            .collect();
+        offline_charged_modules.sort_by_key(|m| (m.flag_id, m.item_id));
+        for m in offline_charged_modules {
+            if let Some(ctid) = m.charge_type_id {
+                if sde.types.contains_key(&ctid) {
+                    ctx.owned_items
+                        .push(DogmaItemState::from_sde(m.item_id, ctid, sde));
+                }
+            }
         }
 
         // 1. Evaluate trained character skills (`category_id == 16`, passive effects `effect_category == 0`).
@@ -665,6 +811,68 @@ impl ShipFittingEngine {
                         value: agg_value,
                         stacking_penalized,
                     });
+                }
+                for &aid in &dbuff.location_modifiers {
+                    let stacking_penalized = sde.attributes.get(&aid).is_some_and(|a| !a.stackable);
+                    for loc_item in &mut ctx.ship_located_items {
+                        loc_item.modifiers.push(AttributeModifier {
+                            source_item_id,
+                            effect_id: None,
+                            target_attribute_id: aid,
+                            operator: op,
+                            value: agg_value,
+                            stacking_penalized,
+                        });
+                    }
+                }
+                for grp_mod in &dbuff.location_group_modifiers {
+                    let stacking_penalized = sde
+                        .attributes
+                        .get(&grp_mod.attribute_id)
+                        .is_some_and(|a| !a.stackable);
+                    for loc_item in &mut ctx.ship_located_items {
+                        let grp_matches = loc_item.group_id == Some(grp_mod.group_id)
+                            || sde.types.get(&loc_item.type_id).map(|t| t.group_id)
+                                == Some(grp_mod.group_id);
+                        if grp_matches {
+                            loc_item.modifiers.push(AttributeModifier {
+                                source_item_id,
+                                effect_id: None,
+                                target_attribute_id: grp_mod.attribute_id,
+                                operator: op,
+                                value: agg_value,
+                                stacking_penalized,
+                            });
+                        }
+                    }
+                }
+                for srq_mod in &dbuff.location_required_skill_modifiers {
+                    let stacking_penalized = sde
+                        .attributes
+                        .get(&srq_mod.attribute_id)
+                        .is_some_and(|a| !a.stackable);
+                    let m = AttributeModifier {
+                        source_item_id,
+                        effect_id: None,
+                        target_attribute_id: srq_mod.attribute_id,
+                        operator: op,
+                        value: agg_value,
+                        stacking_penalized,
+                    };
+                    for loc_item in &mut ctx.ship_located_items {
+                        if item_requires_skill(loc_item, srq_mod.skill_id, sde)
+                            && !loc_item.modifiers.contains(&m)
+                        {
+                            loc_item.modifiers.push(m);
+                        }
+                    }
+                    for owned_item in &mut ctx.owned_items {
+                        if item_requires_skill(owned_item, srq_mod.skill_id, sde)
+                            && !owned_item.modifiers.contains(&m)
+                        {
+                            owned_item.modifiers.push(m);
+                        }
+                    }
                 }
             }
         }
@@ -1087,67 +1295,91 @@ impl ShipFittingEngine {
             }
         }
 
-        // 6. Evaluate active command burst / gang warfare burst module/group/skill effects (`feat:dogma.gang-bursts`, `T-12`).
-        for (&dbuff_id, &(source_item_id, ref vals)) in &bursts_by_dbuff {
-            if let Some(dbuff) = sde.dbuff_collections.get(&dbuff_id) {
-                let agg_value = aggregate_dbuff_values(&dbuff.aggregate_mode, vals);
-                let op = match dbuff.operation.as_str() {
-                    "PostPercent" => ModifierOperator::PostPercent,
-                    "PostMul" => ModifierOperator::PostMul,
-                    "ModAdd" => ModifierOperator::ModAdd,
-                    "PostAssignment" => ModifierOperator::PostAssign,
-                    _ => ModifierOperator::PostPercent,
-                };
-                for &aid in &dbuff.location_modifiers {
-                    let stacking_penalized = sde.attributes.get(&aid).is_some_and(|a| !a.stackable);
-                    for loc_item in &mut ctx.ship_located_items {
-                        loc_item.modifiers.push(AttributeModifier {
-                            source_item_id,
-                            effect_id: None,
-                            target_attribute_id: aid,
-                            operator: op,
-                            value: agg_value,
-                            stacking_penalized,
-                        });
-                    }
-                }
-                for grp_mod in &dbuff.location_group_modifiers {
-                    let stacking_penalized = sde.attributes.get(&grp_mod.attribute_id).is_some_and(|a| !a.stackable);
-                    for loc_item in &mut ctx.ship_located_items {
-                        let grp_matches = loc_item.group_id == Some(grp_mod.group_id)
-                            || sde.types.get(&loc_item.type_id).map(|t| t.group_id) == Some(grp_mod.group_id);
-                        if grp_matches {
-                            loc_item.modifiers.push(AttributeModifier {
-                                source_item_id,
-                                effect_id: None,
-                                target_attribute_id: grp_mod.attribute_id,
-                                operator: op,
-                                value: agg_value,
-                                stacking_penalized,
-                            });
-                        }
-                    }
-                }
-                for srq_mod in &dbuff.location_required_skill_modifiers {
-                    let stacking_penalized = sde.attributes.get(&srq_mod.attribute_id).is_some_and(|a| !a.stackable);
-                    for loc_item in &mut ctx.ship_located_items {
-                        if item_requires_skill(loc_item, srq_mod.skill_id, sde) {
-                            loc_item.modifiers.push(AttributeModifier {
-                                source_item_id,
-                                effect_id: None,
-                                target_attribute_id: srq_mod.attribute_id,
-                                operator: op,
-                                value: agg_value,
-                                stacking_penalized,
-                            });
-                        }
-                    }
-                }
-            }
-        }
+        // 6. Apply any explicit ship-level gang burst modifiers (`feat:dogma.gang-bursts`, `T-12`).
         for burst in &self.gang_bursts {
             for m in &burst.modifiers {
                 ctx.ship.modifiers.push(*m);
+            }
+        }
+
+        // 7. Finalize loaded charge states in `ctx.owned_items[drones_len..]`:
+        //    - Merge non-structural launcher modifiers (`mod_state.modifiers`) onto the charge so
+        //      launcher/hull/rig `Location*` modifiers (e.g. missile velocity/delay/AoE or crystal volatility)
+        //      are reflected directly on the persisted charge state.
+        //    - Propagate `ctx.character`'s evaluated `missileDamageMultiplier` (`212`, modified by
+        //      Ballistic Control Systems, Warhead Calefaction rigs, and missile implants) onto missile charges.
+        let missile_dmg_mult = ctx.character.get_attribute(212, sde);
+        let apply_missile_mult = (missile_dmg_mult - 1.0).abs() > 1e-12;
+        for ch in ctx.owned_items.iter_mut().skip(drones_len) {
+            let launcher_id = ch.item_id;
+            if let Some(mod_state) = ctx
+                .ship_located_items
+                .iter()
+                .find(|m| m.item_id == launcher_id)
+            {
+                for m in &mod_state.modifiers {
+                    if !matches!(m.target_attribute_id, 9 | 30 | 50 | 1153 | 1211)
+                        && !ch.modifiers.contains(m)
+                    {
+                        ch.modifiers.push(*m);
+                    }
+                }
+            }
+            if apply_missile_mult {
+                let charge_type = sde.types.get(&ch.type_id);
+                let launcher_type = self
+                    .modules
+                    .get(&launcher_id)
+                    .and_then(|lm| sde.types.get(&lm.type_id));
+                let is_missile_charge = charge_type.is_some_and(|ct| {
+                    ct.effect_ids.iter().any(|&eid| matches!(eid, 9 | 104))
+                        || matches!(
+                            ct.group_id,
+                            89 | 384..=387
+                                | 394..=396
+                                | 476
+                                | 648
+                                | 653..=657
+                                | 772
+                                | 1010
+                                | 1019
+                                | 1546
+                                | 1547
+                                | 1677
+                                | 1678
+                        )
+                }) || launcher_type.is_some_and(|lt| {
+                    lt.effect_ids.contains(&101)
+                        || matches!(
+                            lt.group_id,
+                            506..=511 | 524 | 771 | 1245 | 1674 | 4500 | 4805 | 4807
+                        )
+                }) || item_requires_skill(ch, 3319, sde);
+                if is_missile_charge {
+                    for dmg_attr in [
+                        attr_ids::EM_DAMAGE,
+                        attr_ids::EXPLOSIVE_DAMAGE,
+                        attr_ids::KINETIC_DAMAGE,
+                        attr_ids::THERMAL_DAMAGE,
+                    ] {
+                        let has_dmg = ch.base_attributes.get(&dmg_attr).copied().unwrap_or(0.0)
+                            != 0.0
+                            || ch
+                                .modifiers
+                                .iter()
+                                .any(|m| m.target_attribute_id == dmg_attr);
+                        if has_dmg {
+                            ch.modifiers.push(AttributeModifier {
+                                source_item_id: -1,
+                                effect_id: None,
+                                target_attribute_id: dmg_attr,
+                                operator: ModifierOperator::PostMul,
+                                value: missile_dmg_mult,
+                                stacking_penalized: false,
+                            });
+                        }
+                    }
+                }
             }
         }
 
@@ -1182,7 +1414,8 @@ impl ShipFittingEngine {
 
     /// Evaluates the ship's passive hull effects, character skill effects (`category_id == 16`),
     /// and fitted module passive/online/active/overload effects through [`DogmaEffectContext`]
-    /// over real V24.01 SDE `modifierInfo` records (`DG-1`, `OF-31`).
+    /// over real V24.01 SDE `modifierInfo` records (`DG-1`, `OF-31`), persisting the evaluated
+    /// context, module states, charge states, and drone states on `self`.
     pub fn recalculate_stats(&mut self, sde: &SdeRegistry) {
         let mut hi_mod = 0.0;
         let mut med_mod = 0.0;
@@ -1227,14 +1460,37 @@ impl ShipFittingEngine {
                 .insert(attr_ids::LAUNCHER_SLOTS_LEFT, lch_mod);
         }
 
-        let ctx = self.evaluated_context(sde);
-        self.ship = ctx.ship;
+        let ctx = self.compute_evaluated_context(sde);
+        let drones_len = self.drones.len();
+        self.ship = ctx.ship.clone();
+        self.evaluated_modules = ctx
+            .ship_located_items
+            .iter()
+            .map(|m| (m.item_id, m.clone()))
+            .collect();
+        self.evaluated_drones = ctx
+            .owned_items
+            .iter()
+            .take(drones_len)
+            .map(|d| (d.item_id, d.clone()))
+            .collect();
+        self.evaluated_charges = ctx
+            .owned_items
+            .iter()
+            .skip(drones_len)
+            .map(|c| (c.item_id, c.clone()))
+            .collect();
+        self.evaluated_context_cache = Some(Box::new(ctx));
+        self.eval_inputs_snapshot = Some(Box::new(EvalInputsSnapshot::from_engine(self)));
     }
 
     /// Returns the evaluated [`DogmaItemState`] of a fitted module (including character skill,
     /// ship hull bonus, and overload modifiers applied through [`DogmaEffectContext`]).
     pub fn module_state(&self, module_item_id: i64, sde: &SdeRegistry) -> Option<DogmaItemState> {
-        self.evaluated_context(sde)
+        if self.has_fresh_evaluation() {
+            return self.evaluated_modules.get(&module_item_id).cloned();
+        }
+        self.compute_evaluated_context(sde)
             .ship_located_items
             .into_iter()
             .find(|m| m.item_id == module_item_id)
@@ -1242,38 +1498,69 @@ impl ShipFittingEngine {
 
     /// Returns the evaluated dogma attribute for a fitted module after character skills, hull bonuses, and modifiers (`DG-1`, `MN-01`).
     pub fn get_module_effective_attribute(&self, module_item_id: i64, attr_id: AttributeId, sde: &SdeRegistry) -> f64 {
+        if self.has_fresh_evaluation() {
+            if let Some(st) = self.evaluated_modules.get(&module_item_id) {
+                return st.get_attribute(attr_id, sde);
+            }
+            return self
+                .modules
+                .get(&module_item_id)
+                .map(|m| {
+                    let mut st = DogmaItemState::from_sde(module_item_id, m.type_id, sde);
+                    for (&aid, &val) in &m.dynamic_attribute_overrides {
+                        st.base_attributes.insert(aid, val);
+                    }
+                    st.get_attribute(attr_id, sde)
+                })
+                .unwrap_or(0.0);
+        }
         if let Some(st) = self.module_state(module_item_id, sde) {
             return st.get_attribute(attr_id, sde);
         }
         self.modules
             .get(&module_item_id)
-            .map(|m| DogmaItemState::from_sde(module_item_id, m.type_id, sde).get_attribute(attr_id, sde))
+            .map(|m| {
+                let mut st = DogmaItemState::from_sde(module_item_id, m.type_id, sde);
+                for (&aid, &val) in &m.dynamic_attribute_overrides {
+                    st.base_attributes.insert(aid, val);
+                }
+                st.get_attribute(attr_id, sde)
+            })
             .unwrap_or(0.0)
     }
 
-    /// Returns the evaluated dogma attribute for a charge loaded in `launcher_module_id` (such as a missile affected by skills and Guidance Disruptors).
+    /// Returns the evaluated [`DogmaItemState`] of the charge loaded in `launcher_module_id`.
+    pub fn charge_state(&self, launcher_module_id: i64, sde: &SdeRegistry) -> Option<DogmaItemState> {
+        if self.has_fresh_evaluation() {
+            return self.evaluated_charges.get(&launcher_module_id).cloned();
+        }
+        let drones_len = self.drones.len();
+        self.compute_evaluated_context(sde)
+            .owned_items
+            .into_iter()
+            .skip(drones_len)
+            .find(|c| c.item_id == launcher_module_id)
+    }
+
+    /// Returns the evaluated dogma attribute for a charge loaded in `launcher_module_id` (such as a missile affected by skills, BCS, and Guidance Disruptors).
     pub fn get_charge_effective_attribute(
         &self,
         launcher_module_id: i64,
         attr_id: AttributeId,
         sde: &SdeRegistry,
     ) -> f64 {
-        let ctx = self.evaluated_context(sde);
-        if let Some(ch) = ctx.owned_items.iter().find(|c| c.item_id == launcher_module_id) {
-            let mut combined = ch.clone();
-            if let Some(mod_state) = ctx
-                .ship_located_items
-                .iter()
-                .find(|m| m.item_id == launcher_module_id)
-            {
-                for m in &mod_state.modifiers {
-                    if m.target_attribute_id == attr_id && !combined.modifiers.contains(m) {
-                        combined.modifiers.push(*m);
-                    }
+        if self.has_fresh_evaluation() {
+            if let Some(ch) = self.evaluated_charges.get(&launcher_module_id) {
+                let val = ch.get_attribute(attr_id, sde);
+                if val != 0.0 || ch.base_attributes.contains_key(&attr_id) {
+                    return val;
                 }
             }
-            let val = combined.get_attribute(attr_id, sde);
-            if val != 0.0 || combined.base_attributes.contains_key(&attr_id) {
+            return self.get_module_effective_attribute(launcher_module_id, attr_id, sde);
+        }
+        if let Some(ch) = self.charge_state(launcher_module_id, sde) {
+            let val = ch.get_attribute(attr_id, sde);
+            if val != 0.0 || ch.base_attributes.contains_key(&attr_id) {
                 return val;
             }
         }

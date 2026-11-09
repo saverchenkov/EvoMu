@@ -200,10 +200,21 @@ struct CycleEnv {
 /// Values are aggregated per dbuff by the collection's `aggregateMode`. Applied on top of the
 /// fitting engine's result as a separate modifier source (DERIVED ordering).
 pub fn dbuff_multiplier(ctx: &ServerContext, ship_id: i64, module: &InvType, attr_id: u16) -> f64 {
+    dbuff_multiplier_excluding(ctx, ship_id, module, attr_id, &[])
+}
+
+pub(crate) fn dbuff_multiplier_excluding(
+    ctx: &ServerContext,
+    ship_id: i64,
+    module: &InvType,
+    attr_id: u16,
+    excluded_dbuff_ids: &[u32],
+) -> f64 {
     let skills = required_skills(module);
     let now = ctx.now_unix_secs();
     crate::services::inventory_fitting::get_aggregated_ship_dbuffs(ctx, ship_id, now)
         .into_iter()
+        .filter(|(dbuff_id, _)| !excluded_dbuff_ids.contains(dbuff_id))
         .filter_map(|(dbuff_id, (value, _))| {
             let coll = ctx.sde.dbuff_collections.get(&dbuff_id)?;
             let hits = coll
@@ -216,13 +227,15 @@ pub fn dbuff_multiplier(ctx: &ServerContext, ship_id: i64, module: &InvType, att
         .product()
 }
 
-/// Effective module attribute for a mining cycle: fitting-engine value x active burst dbuffs.
+/// Effective module attribute for a mining cycle: fitting-engine value x any system-wide dbuffs
+/// not already evaluated in `fit.gang_bursts`.
 fn module_attr(ctx: &ServerContext, fit: &eve_dogma::ShipFittingEngine, ship_id: i64, module_id: i64, attr_id: u16) -> f64 {
     let base = fit.get_module_effective_attribute(module_id, attr_id, &ctx.sde);
     let Some(module) = fit.modules.get(&module_id).and_then(|m| ctx.sde.types.get(&m.type_id)) else {
         return base;
     };
-    base * dbuff_multiplier(ctx, ship_id, module, attr_id)
+    let already_applied: Vec<u32> = fit.gang_bursts.iter().filter_map(|b| b.dbuff_id).collect();
+    base * dbuff_multiplier_excluding(ctx, ship_id, module, attr_id, &already_applied)
 }
 
 /// Checks every activation/continuation requirement for `cycle` (MN-04 "Requirements" and
@@ -426,14 +439,28 @@ fn cycle_fit(
 fn damage_crystal(ctx: &ServerContext, cycle: &ActiveMiningCycle, crystal: CrystalUse) -> (f64, bool) {
     let Some(ct) = ctx.sde.types.get(&crystal.type_id) else { return (0.0, false) };
     let a = |id: u16| ct.default_attributes.get(&id).copied().unwrap_or(0.0);
-    let vol_chance = (a(attr::CRYSTAL_VOLATILITY_CHANCE)
-        * dbuff_multiplier(ctx, cycle.ship_id, ct, attr::CRYSTAL_VOLATILITY_CHANCE))
-        .clamp(0.0, 1.0);
-    if a(attr::CRYSTALS_GET_DAMAGED) < 0.5 || !ctx.mechanic_rng.roll(vol_chance) {
+    let fit_opt = ctx
+        .get_or_rebuild_ship_fitting(cycle.char_id, cycle.ship_id)
+        .ok()
+        .filter(|f| f.evaluated_charges.get(&cycle.module_id).is_some_and(|c| c.type_id == crystal.type_id));
+    let (vol_chance, get_damaged, dmg, hp) = if let Some(ref fit) = fit_opt {
+        let already_applied: Vec<u32> = fit.gang_bursts.iter().filter_map(|b| b.dbuff_id).collect();
+        let vc = (fit.get_charge_effective_attribute(cycle.module_id, attr::CRYSTAL_VOLATILITY_CHANCE, &ctx.sde)
+            * dbuff_multiplier_excluding(ctx, cycle.ship_id, ct, attr::CRYSTAL_VOLATILITY_CHANCE, &already_applied))
+            .clamp(0.0, 1.0);
+        let gd = fit.get_charge_effective_attribute(cycle.module_id, attr::CRYSTALS_GET_DAMAGED, &ctx.sde);
+        let vd = fit.get_charge_effective_attribute(cycle.module_id, attr::CRYSTAL_VOLATILITY_DAMAGE, &ctx.sde);
+        let chp = fit.get_charge_effective_attribute(cycle.module_id, attr::HP, &ctx.sde);
+        (vc, gd, vd, if chp > 0.0 { chp } else { a(attr::HP) })
+    } else {
+        let vc = (a(attr::CRYSTAL_VOLATILITY_CHANCE)
+            * dbuff_multiplier(ctx, cycle.ship_id, ct, attr::CRYSTAL_VOLATILITY_CHANCE))
+            .clamp(0.0, 1.0);
+        (vc, a(attr::CRYSTALS_GET_DAMAGED), a(attr::CRYSTAL_VOLATILITY_DAMAGE), a(attr::HP))
+    };
+    if get_damaged < 0.5 || !ctx.mechanic_rng.roll(vol_chance) {
         return (0.0, false);
     }
-    let dmg = a(attr::CRYSTAL_VOLATILITY_DAMAGE);
-    let hp = a(attr::HP);
     let slot = ctx.db.with_snapshot(|s| s.items.get(&cycle.module_id).map(|m| m.flag));
     let shattered = ctx.db.with_mut_snapshot(|snap| {
         let Some(item) = snap

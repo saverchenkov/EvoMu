@@ -232,6 +232,7 @@ async fn test_phase_4_dg4_and_exit_gate_full_cycle_journey() {
     assert!(ship_ball_boosted.max_velocity > 600.0);
     assert!((ship_combat_boosted.capacitor - 240.0).abs() < 0.1);
 
+    ctx.set_mechanic_rng_seed(Some(10));
     ctx.dispatch_rpc(
         &mut sess,
         "dogmaIM",

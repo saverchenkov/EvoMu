@@ -565,8 +565,25 @@ async fn test_live_insurgency_mining_ambush_ransom_rescue_destroy_lp_split() {
     assert!(loot_wreck_via_invbroker(&ctx, &mut pirates[0], rorq_wreck).await.contains(&TYPE_UPWELL_CONSORTIUM_DATA_CACHE));
 }
 
-#[tokio::test]
-async fn test_live_insurgency_outpost_raid_sizes_gates_bc_bonus_and_respawn() {
+#[test]
+fn test_live_insurgency_outpost_raid_sizes_gates_bc_bonus_and_respawn() {
+    let handle = std::thread::Builder::new()
+        .name("insurgency_outpost_raid".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime")
+                .block_on(test_live_insurgency_outpost_raid_sizes_gates_bc_bonus_and_respawn_inner());
+        })
+        .expect("spawn test thread");
+    if let Err(e) = handle.join() {
+        std::panic::resume_unwind(e);
+    }
+}
+
+async fn test_live_insurgency_outpost_raid_sizes_gates_bc_bonus_and_respawn_inner() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 

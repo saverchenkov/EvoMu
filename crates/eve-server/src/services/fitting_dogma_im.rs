@@ -63,12 +63,13 @@ fn handle_item_get_info(
             .or_else(|| item_opt.as_ref().map(|it| (it.owner_id, it.location_id)));
         if let Some((p_owner, p_ship)) = parent_opt {
             if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(p_owner, p_ship) {
-                let eval_ctx = fit.evaluated_context(&ctx.sde);
-                if let Some(d_state) = eval_ctx
-                    .owned_items
-                    .iter()
-                    .find(|d| d.item_id == raw_id || d.type_id == type_id)
-                {
+                let drone_state_opt = fit.drone_state(raw_id, &ctx.sde).or_else(|| {
+                    fit.evaluated_drones
+                        .values()
+                        .find(|d| d.type_id == type_id)
+                        .cloned()
+                });
+                if let Some(d_state) = drone_state_opt {
                     let all_aids: std::collections::BTreeSet<u16> = d_state
                         .base_attributes
                         .keys()
@@ -94,31 +95,54 @@ fn handle_item_get_info(
     } else if let Some(ref item) = item_opt {
         if item_cat == 6 {
             if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(item.owner_id, item.item_id) {
-                let eval_ctx = fit.evaluated_context(&ctx.sde);
-                let all_aids: std::collections::BTreeSet<u16> = eval_ctx
+                let all_aids: std::collections::BTreeSet<u16> = fit
                     .ship
                     .base_attributes
                     .keys()
                     .copied()
-                    .chain(eval_ctx.ship.modifiers.iter().map(|m| m.target_attribute_id))
+                    .chain(fit.ship.modifiers.iter().map(|m| m.target_attribute_id))
                     .collect();
                 for aid in all_aids {
-                    merged_attrs.insert(aid, eval_ctx.ship.get_attribute(aid, &ctx.sde));
+                    merged_attrs.insert(aid, fit.ship.get_attribute(aid, &ctx.sde));
                 }
                 for (&attr_id, &val) in &dyn_attrs {
-                    merged_attrs.insert(attr_id, val);
+                    if matches!(attr_id, 3 | 18 | 265 | 266)
+                        || !fit
+                            .ship
+                            .modifiers
+                            .iter()
+                            .any(|m| m.target_attribute_id == attr_id)
+                    {
+                        merged_attrs.insert(attr_id, val);
+                    }
                 }
-                apply_active_dbuffs_and_system_effects_to_ship_attrs(ctx, item.item_id, &mut merged_attrs);
+                let already_applied_dbuffs: Vec<u32> =
+                    fit.gang_bursts.iter().filter_map(|b| b.dbuff_id).collect();
+                crate::services::inventory_fitting::fitting_scanners_superweapons::apply_active_dbuffs_and_system_effects_to_ship_attrs_excluding(
+                    ctx,
+                    item.item_id,
+                    &already_applied_dbuffs,
+                    &mut merged_attrs,
+                );
             }
         } else if matches!(item.flag as u16, 11..=34 | 92..=94 | 125..=132) {
             if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(item.owner_id, item.location_id) {
-                let eval_ctx = fit.evaluated_context(&ctx.sde);
                 if item_cat == 8 {
-                    if let Some(c_state) = eval_ctx
-                        .owned_items
-                        .iter()
-                        .find(|c| c.type_id == item.type_id)
-                    {
+                    let slot_flag = item.flag as u16;
+                    let launcher_id_opt = fit
+                        .modules
+                        .values()
+                        .find(|m| m.flag_id == slot_flag)
+                        .map(|m| m.item_id);
+                    let charge_state_opt = launcher_id_opt
+                        .and_then(|lid| fit.charge_state(lid, &ctx.sde))
+                        .or_else(|| {
+                            fit.evaluated_charges
+                                .values()
+                                .find(|c| c.type_id == item.type_id)
+                                .cloned()
+                        });
+                    if let Some(c_state) = charge_state_opt {
                         let all_aids: std::collections::BTreeSet<u16> = c_state
                             .base_attributes
                             .keys()
@@ -129,11 +153,7 @@ fn handle_item_get_info(
                             merged_attrs.insert(aid, c_state.get_attribute(aid, &ctx.sde));
                         }
                     }
-                } else if let Some(m_state) = eval_ctx
-                    .ship_located_items
-                    .iter()
-                    .find(|m| m.item_id == item.item_id)
-                {
+                } else if let Some(m_state) = fit.module_state(item.item_id, &ctx.sde) {
                     let all_aids: std::collections::BTreeSet<u16> = m_state
                         .base_attributes
                         .keys()
@@ -788,14 +808,17 @@ pub(crate) async fn handle_dogma_im(
                 return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: format!("Target distance ({dist:.1} m) exceeds maxTargetRange ({max_range:.1} m)") }));
             }
 
-            let triage_bonus: usize = fit
+            let unapplied_triage_ship_bonus: usize = fit
                 .modules
                 .values()
                 .filter(|fm| {
                     matches!(
                         fm.state,
                         eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
-                    )
+                    ) && !fit.ship.modifiers.iter().any(|m| {
+                        m.source_item_id == fm.item_id
+                            && m.target_attribute_id == attr_ids::MAX_LOCKED_TARGETS
+                    })
                 })
                 .map(|fm| match fm.type_id {
                     27951 => 4usize,
@@ -803,10 +826,18 @@ pub(crate) async fn handle_dogma_im(
                     _ => 0usize,
                 })
                 .sum();
-            let ship_max = (fit.ship.get_attribute(attr_ids::MAX_LOCKED_TARGETS, &ctx.sde).max(1.0) as usize) + triage_bonus;
+            let ship_max = (fit.ship.get_attribute(attr_ids::MAX_LOCKED_TARGETS, &ctx.sde).max(1.0) as usize)
+                + unapplied_triage_ship_bonus;
             let tm_lvl = ctx.character_skill_levels(char_id).get(&3429).copied().unwrap_or(0);
             let atm_lvl = ctx.character_skill_levels(char_id).get(&3430).copied().unwrap_or(0);
-            let max_locked = eve_dogma::compute_effective_max_locked_targets(ship_max, tm_lvl, atm_lvl) + triage_bonus;
+            let char_eval = fit
+                .get_character_effective_attribute(attr_ids::MAX_LOCKED_TARGETS, &ctx.sde)
+                .round()
+                .max(0.0) as usize;
+            let skill_char_max = 2 + (tm_lvl.min(5) as usize) + (atm_lvl.min(5) as usize);
+            let max_locked = ship_max
+                .min(char_eval.max(skill_char_max))
+                .max(eve_dogma::compute_effective_max_locked_targets(ship_max, tm_lvl, atm_lvl));
             // Prune stale target locks whose target ball left the ballpark, warped, cloaked, or
             // moved outside `max_range_m` before `step()` ran, so despawned/broken targets never
             // permanently occupy server target slots (`#749`).

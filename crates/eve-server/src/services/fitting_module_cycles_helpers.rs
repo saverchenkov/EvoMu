@@ -122,11 +122,17 @@ pub(crate) async fn handle_survey_scanner_activation(
     mod_state: &DogmaItemState,
 ) -> PyRep {
     let mut scan_range = mod_state.get_attribute(197, &ctx.sde);
+    let has_197_mod = mod_state
+        .modifiers
+        .iter()
+        .any(|m| m.target_attribute_id == 197);
     if scan_range <= 0.0 {
         scan_range = mod_type.default_attributes.get(&197).or_else(|| mod_type.default_attributes.get(&54)).copied().unwrap_or(15_000.0);
     }
-    let m197 = crate::services::mining_cycle::dbuff_multiplier(ctx, ship_id, mod_type, 197);
-    scan_range *= if (m197 - 1.0).abs() > 1e-9 { m197 } else { crate::services::mining_cycle::dbuff_multiplier(ctx, ship_id, mod_type, 54) };
+    if !has_197_mod {
+        let m197 = crate::services::mining_cycle::dbuff_multiplier(ctx, ship_id, mod_type, 197);
+        scan_range *= if (m197 - 1.0).abs() > 1e-9 { m197 } else { crate::services::mining_cycle::dbuff_multiplier(ctx, ship_id, mod_type, 54) };
+    }
     let mut ship_pos = DVec3::ZERO;
     if let Ok(Some((_, ship_ball))) = sys.get_ball_snapshot(ship_id).await {
         ship_pos = ship_ball.position;
@@ -373,7 +379,14 @@ pub(crate) fn evaluate_ship_dogma_attributes(
     ship_id: i64,
 ) -> Result<(u32, PyRep, Vec<(PyRep, PyRep)>, Vec<(PyRep, PyRep)>), BridgeRpcError> {
     let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id)?;
-    let eval_ctx = fit.evaluated_context(&ctx.sde);
+    let computed_ctx;
+    let eval_ctx = match fit.persisted_context() {
+        Some(c) => c,
+        None => {
+            computed_ctx = fit.evaluated_context(&ctx.sde);
+            &computed_ctx
+        }
+    };
     let mut ship_attr_ids: std::collections::BTreeSet<u16> = eval_ctx
         .ship
         .base_attributes
@@ -393,11 +406,22 @@ pub(crate) fn evaluate_ship_dogma_attributes(
         .with_snapshot(|s| s.items.get(&ship_id).map(|it| it.dynamic_attributes.clone()))
         .unwrap_or_default();
     for (attr_id, val) in dyn_attrs {
-        ship_attrs_map.insert(attr_id, val);
+        if matches!(attr_id, 3 | 18 | 265 | 266)
+            || !eval_ctx
+                .ship
+                .modifiers
+                .iter()
+                .any(|m| m.target_attribute_id == attr_id)
+        {
+            ship_attrs_map.insert(attr_id, val);
+        }
     }
-    super::super::fitting_scanners_superweapons::apply_active_dbuffs_and_system_effects_to_ship_attrs(
+    let already_applied_dbuffs: Vec<u32> =
+        fit.gang_bursts.iter().filter_map(|b| b.dbuff_id).collect();
+    super::super::fitting_scanners_superweapons::apply_active_dbuffs_and_system_effects_to_ship_attrs_excluding(
         ctx,
         ship_id,
+        &already_applied_dbuffs,
         &mut ship_attrs_map,
     );
     let mut entries: Vec<(PyRep, PyRep)> = ship_attrs_map

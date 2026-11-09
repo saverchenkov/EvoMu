@@ -696,3 +696,217 @@ async fn toctou_concurrent_activate_scan_probe_launcher_caps_at_8_probes() {
     let rem_qty = ctx.db.with_snapshot(|s| s.items.get(&charge_id).map(|i| i.quantity));
     assert_eq!(rem_qty, Some(8), "probes in launcher must only be consumed once");
 }
+
+#[tokio::test]
+async fn request_scans_evaluates_probe_strength_and_deviation_via_dogma_and_expedition_burst() {
+    let (ctx, mut sess) = make_scan_ctx_and_session();
+    let sys_id = 30_000_142;
+    let char_id = 90_000_001;
+    let ship_id = 100_000_001;
+    let launcher_id = 700_950;
+    let rig_id = 700_951;
+    let kw = HashMap::new();
+    let bound = BoundObjectEntry {
+        bound_id: 12,
+        session_id: sess.session_id,
+        user_id: sess.user_id.unwrap_or(1),
+        character_id: char_id,
+        service: "scanMgr".into(),
+        object_id: sys_id as i64,
+        oid_str: "N=1:12".into(),
+        ref_id: 12,
+    };
+
+    let now_unix = ctx.now_unix_secs();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.type_id = 587; // Rifter (small rig size = 1, calibration = 400)
+        }
+        snap.items.insert(
+            launcher_id,
+            InventoryItemRecord {
+                item_id: launcher_id,
+                type_id: 17_938, // Core Probe Launcher I (has 6118/6119 Expedition Burst effects)
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            rig_id,
+            InventoryItemRecord {
+                item_id: rig_id,
+                type_id: 31_213, // Small Gravity Capacitor Upgrade I (+10% probe sensor strength)
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::RigSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(launcher_id, true);
+        snap.module_online_states.insert(rig_id, true);
+        snap.cosmic_signatures.insert(
+            sys_id,
+            vec![CosmicSignatureRecord {
+                signature_id: "DOG-901".into(),
+                solar_system_id: sys_id,
+                sig_group: "Data Site".into(),
+                type_name: "Central Guristas Sparking Transmitter".into(),
+                position: [0.0, 0.0, 0.0],
+                signal_strength: 0.0,
+                wormhole_type_id: None,
+                destination_system_id: None,
+                created_unix: now_unix,
+                lifetime_seconds: 86_400,
+                max_mass_kg: 0.0,
+                remaining_mass_kg: 0.0,
+                max_jump_mass_kg: 0.0,
+                collapsed: false,
+            }],
+        );
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    for k in 0..4 {
+        let pid = 700_960 + k;
+        ctx.active_scanner_probes.write().unwrap().insert(
+            pid,
+            ActiveScannerProbe {
+                probe_id: pid,
+                probe_type_id: 30_013,
+                owner_char_id: char_id,
+                ship_id,
+                launcher_module_id: launcher_id,
+                solar_system_id: sys_id,
+                position: [0.0; 3],
+                destination: [0.0; 3],
+                range_step: 4,
+                scan_range_m: 2.0 * crate::services::space_destiny::AU_IN_METERS,
+                base_sensor_strength: 40.0,
+                max_flight_time_s: 3600.0,
+                launched_at_unix: ctx.now_unix_secs(),
+                state: PROBE_STATE_IDLE,
+                warp_end_ft: None,
+            },
+        );
+    }
+
+    let extract_sig = |rep: &PyRep| -> (f64, f64) {
+        let PyRep::List(rows) = rep else { panic!("expected List") };
+        let row = rows
+            .iter()
+            .find(|r| r.dict_get("id").and_then(|v| v.as_str()) == Some("DOG-901"))
+            .expect("DOG-901 row");
+        (
+            row.dict_get("signalStrength").and_then(|v| v.as_f64()).unwrap(),
+            row.dict_get("maxDeviationAU").and_then(|v| v.as_f64()).unwrap(),
+        )
+    };
+
+    // Baseline scan (rig +10% already active via ShipFittingEngine; Astrometrics/Rangefinding/Pinpointing = 0)
+    let base_rep = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "scanMgr",
+        "RequestScans",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (s_base, dev_base) = extract_sig(&base_rep);
+
+    // Train real SDE Rangefinding (25739) IV (+20% probe strength) & real SDE Pinpointing (25810) IV (-20% max deviation)
+    ctx.db.with_mut_snapshot(|snap| {
+        let sk = snap.skills.entry(char_id).or_default();
+        sk.insert(
+            25_739,
+            eve_db::TrainedSkillRecord {
+                type_id: 25_739,
+                level: 4,
+                skill_points: 362_039.0,
+            },
+        );
+        sk.insert(
+            25_810,
+            eve_db::TrainedSkillRecord {
+                type_id: 25_810,
+                level: 4,
+                skill_points: 226_275.0,
+            },
+        );
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    let skilled_rep = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "scanMgr",
+        "RequestScans",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (s_skilled, dev_skilled) = extract_sig(&skilled_rep);
+    assert!(s_skilled > s_base * 1.15, "Rangefinding 25739 must boost probe strength via eve-dogma ({s_base} -> {s_skilled})");
+    assert!((dev_skilled - dev_base * 0.80).abs() < 1e-6, "Pinpointing 25810 IV must reduce maxDeviationAU by 20% ({dev_base} -> {dev_skilled})");
+
+    // Apply Expedition Command Burst (`dbuff 2464` +25% on Core Probe Launcher I `6118` -> probe `1371`)
+    let now_u = ctx.now_unix_secs();
+    {
+        let mut st = crate::services::inventory_fitting::fitting_scanners_superweapons::scanners_superweapons_state()
+            .write()
+            .unwrap();
+        st.ship_dbuffs
+            .entry((ctx.instance_id, ship_id))
+            .or_default()
+            .push(crate::services::inventory_fitting::fitting_scanners_superweapons::ActiveDbuffEntry {
+                dbuff_id: 2464,
+                value: 25.0,
+                expires_at_unix: now_u + 60,
+                source_module_id: 888_001,
+            });
+    }
+    let burst_rep = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "scanMgr",
+        "RequestScans",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (s_burst, _) = extract_sig(&burst_rep);
+    assert!(s_burst > s_skilled * 1.20, "Expedition Burst dbuff 2464 must boost probe strength ({s_skilled} -> {s_burst})");
+
+    // Negative check: after burst expires, strength returns to s_skilled
+    ctx.advance_secs(65);
+    let after_exp_rep = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "scanMgr",
+        "RequestScans",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (s_after, _) = extract_sig(&after_exp_rep);
+    assert!((s_after - s_skilled).abs() < 1e-6, "Expired Expedition Burst must no longer apply ({s_after} vs {s_skilled})");
+}

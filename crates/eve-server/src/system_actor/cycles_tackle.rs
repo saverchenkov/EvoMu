@@ -1056,6 +1056,9 @@ pub(crate) fn apply_overload_transition_to_cycle(
             // SDE `1222` (`overloadRangeBonus`, e.g. `+300%` Grappler, `+30%` Web, `+20%` Scram)
             if let Some(rng_pct) = mt_opt.and_then(|t| t.default_attributes.get(&1222).copied()) {
                 let rng_mult = (1.0 + rng_pct / 100.0).max(0.1);
+                if c.weapon_optimal_m > 0.0 {
+                    apply_scale(&mut c.weapon_optimal_m, rng_mult);
+                }
                 if c.grappler_optimal_m > 0.0 {
                     apply_scale(&mut c.grappler_optimal_m, rng_mult);
                     c.max_effective_range_m =

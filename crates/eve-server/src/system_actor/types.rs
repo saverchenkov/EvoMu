@@ -123,6 +123,15 @@ pub struct ActiveModuleCycle {
     pub grappler_optimal_m: f64,
     pub grappler_falloff_m: f64,
     pub grappler_speed_factor_pct: f64,
+    pub weapon_is_turret: bool,
+    pub weapon_is_missile: bool,
+    pub weapon_optimal_m: f64,
+    pub weapon_falloff_m: f64,
+    pub weapon_tracking_speed: f64,
+    pub weapon_sig_resolution_m: f64,
+    pub missile_explosion_radius_m: f64,
+    pub missile_explosion_velocity_ms: f64,
+    pub missile_drf: f64,
     /// Unix timestamp (seconds) when this module cycle was added or began its current cycle (`#498`).
     pub started_at_unix: u64,
 }

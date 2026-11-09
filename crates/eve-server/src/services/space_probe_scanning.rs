@@ -91,6 +91,34 @@ pub fn compute_probe_max_deviation_au(
     base_deviation_au * (range_au / base_range_au.max(0.01)) * astro_factor * pinpoint_factor
 }
 
+fn evaluate_probe_dogma_state(
+    fit_opt: Option<&eve_dogma::ShipFittingEngine>,
+    probe_id: i64,
+    probe_type_id: u32,
+    sde: &SdeRegistry,
+) -> Option<eve_dogma::DogmaItemState> {
+    let fit = fit_opt?;
+    if let Some(st) = fit.drone_state(probe_id, sde) {
+        if st.type_id == probe_type_id {
+            return Some(st);
+        }
+    }
+    if let Some(st) = fit
+        .evaluated_drones
+        .values()
+        .chain(fit.evaluated_charges.values())
+        .find(|s| s.type_id == probe_type_id)
+    {
+        return Some(st.clone());
+    }
+    if sde.types.contains_key(&probe_type_id) {
+        let mut tmp = fit.clone();
+        tmp.add_drone(probe_id, probe_type_id, sde);
+        return tmp.drone_state(probe_id, sde);
+    }
+    None
+}
+
 // parity: feat:scanning.signature-strength-levels
 pub fn signature_difficulty_level_and_min_strength(
     sde: &SdeRegistry,
@@ -266,10 +294,31 @@ pub async fn activate_scan_probe_launcher(
     ctx.invalidate_ship_fitting(ship_id);
 
     let probe_sde = ctx.sde.types.get(&probe_type_id);
+    let launch_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
+    let launch_probe_state = evaluate_probe_dogma_state(
+        launch_fit_opt.as_ref(),
+        allocated_probe_ids.first().copied().unwrap_or(0),
+        probe_type_id,
+        &ctx.sde,
+    );
     let base_sensor_strength = probe_base_sensor_strength(&ctx.sde, probe_type_id);
-    let max_flight_time_s = probe_max_flight_time_s(&ctx.sde, probe_type_id);
-    let base_scan_range_au = probe_base_scan_range_au(&ctx.sde, probe_type_id);
+    let max_flight_time_s = launch_probe_state
+        .as_ref()
+        .map(|ps| ps.get_attribute(281, &ctx.sde) / 1000.0)
+        .filter(|&v| v > 0.0)
+        .unwrap_or_else(|| probe_max_flight_time_s(&ctx.sde, probe_type_id));
+    let base_scan_range_au = launch_probe_state
+        .as_ref()
+        .map(|ps| ps.get_attribute(1370, &ctx.sde))
+        .filter(|&v| v > 0.0)
+        .unwrap_or_else(|| probe_base_scan_range_au(&ctx.sde, probe_type_id));
     let base_max_deviation_au = probe_base_max_deviation_au(&ctx.sde, probe_type_id);
+    let probe_max_vel = launch_probe_state
+        .as_ref()
+        .map(|ps| ps.get_attribute(37, &ctx.sde))
+        .filter(|&v| v > 0.0)
+        .or_else(|| probe_sde.and_then(|t| t.default_attributes.get(&37).copied()))
+        .unwrap_or(3_000.0);
     let can_scan_ships = is_combat_scanner_probe(&ctx.sde, probe_type_id);
     let allowed_ranges = probe_allowed_ranges_au(&ctx.sde, probe_type_id);
     let range_step = kwargs.get("rangeStep").and_then(|v| v.as_i64()).unwrap_or(4).clamp(1, 8) as i32;
@@ -326,7 +375,7 @@ pub async fn activate_scan_probe_launcher(
             type_id: probe_type_id,
             position: pos,
             velocity: DVec3::ZERO,
-            max_velocity: 3_000.0,
+            max_velocity: probe_max_vel,
             inertia: 1.0,
             mass: probe_sde.map(|t| t.mass.max(1.0)).unwrap_or(1.0),
             radius: probe_sde.map(|t| t.radius.max(1.0)).unwrap_or(2.0),
@@ -978,6 +1027,17 @@ async fn handle_request_scans(
         return Some(Err(BridgeRpcError::user_error("InvalidProbeCoordinates")));
     }
 
+    let scan_ship_id_for_move = session.ship_id.or_else(|| {
+        ctx.active_scanner_probes.read().ok().and_then(|m| {
+            m.values()
+                .find(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
+                .map(|p| p.ship_id)
+        })
+    });
+    let move_fit_opt = scan_ship_id_for_move
+        .filter(|&sid| sid > 0)
+        .and_then(|sid| ctx.get_or_rebuild_ship_fitting(char_id, sid).ok());
+
     let warp_ft = ctx.now_blueos_filetime_ticks();
     let mut max_warp_end_ft = warp_ft;
     for (pid, new_pos) in moved_balls {
@@ -987,11 +1047,32 @@ async fn handle_request_scans(
             if dist > 1.0 {
                 let p_tid = ctx.active_scanner_probes.read().ok().and_then(|m| m.get(&pid).map(|p| p.probe_type_id)).unwrap_or(30_013);
                 let p_sde = ctx.sde.types.get(&p_tid);
-                let warp_au: f64 = p_sde
-                    .map(|t| t.default_attributes.get(&600).copied().unwrap_or(15.0) * t.default_attributes.get(&1281).copied().unwrap_or(1.0))
+                let p_dogma = evaluate_probe_dogma_state(move_fit_opt.as_ref(), pid, p_tid, &ctx.sde);
+                let warp_au: f64 = p_dogma
+                    .as_ref()
+                    .and_then(|ps| {
+                        let w600 = ps.get_attribute(600, &ctx.sde);
+                        let w1281 = {
+                            let m = ps.get_attribute(1281, &ctx.sde);
+                            if m > 0.0 { m } else { 1.0 }
+                        };
+                        (w600 > 0.0).then_some(w600 * w1281)
+                    })
+                    .or_else(|| {
+                        p_sde.map(|t| {
+                            t.default_attributes.get(&600).copied().unwrap_or(15.0)
+                                * t.default_attributes.get(&1281).copied().unwrap_or(1.0)
+                        })
+                    })
                     .unwrap_or(15.0)
                     .max(1.0);
-                let max_vel = p_sde.and_then(|t| t.default_attributes.get(&37).copied()).unwrap_or(3_000.0).max(500.0);
+                let max_vel = p_dogma
+                    .as_ref()
+                    .map(|ps| ps.get_attribute(37, &ctx.sde))
+                    .filter(|&v| v > 0.0)
+                    .or_else(|| p_sde.and_then(|t| t.default_attributes.get(&37).copied()))
+                    .unwrap_or(3_000.0)
+                    .max(500.0);
                 if dist <= 150_000.0 {
                     let move_ms = ((dist / max_vel) * 1000.0).round().clamp(200.0, 5_000.0) as i64;
                     let p_end_ft = warp_ft + move_ms * 10_000;
@@ -1036,34 +1117,141 @@ async fn handle_request_scans(
         }
     }
 
-    let (astro_lvl, rangefinding_lvl, pinpointing_lvl, fitted_scan_bonus_pct) = ctx.db.with_snapshot(|snap| {
+    let ship_id_for_scan = active_probes.first().map(|pr| pr.ship_id).or(session.ship_id).unwrap_or(0);
+    let scan_fit_opt = (ship_id_for_scan > 0)
+        .then(|| ctx.get_or_rebuild_ship_fitting(char_id, ship_id_for_scan).ok())
+        .flatten();
+    let (
+        astro_lvl,
+        real_rangefinding_lvl,
+        legacy_rangefinding_lvl,
+        real_pinpointing_lvl,
+        legacy_pinpointing_lvl,
+        fitted_scan_mods_1136,
+    ) = ctx.db.with_snapshot(|snap| {
         let sk = snap.skills.get(&char_id);
         let a = sk.and_then(|m| m.get(&3412)).map(|s| s.level).unwrap_or(0);
-        let r = sk.and_then(|m| m.get(&25810)).map(|s| s.level).unwrap_or(0);
-        let p = sk.and_then(|m| m.get(&25811)).map(|s| s.level).unwrap_or(0);
-        let ship_id = active_probes.first().map(|pr| pr.ship_id).or(session.ship_id).unwrap_or(0);
-        let bonus_pct: f64 = snap
+        let rf_real = sk.and_then(|m| m.get(&25739)).map(|s| s.level).unwrap_or(0);
+        let rf_legacy = sk.and_then(|m| m.get(&25810)).map(|s| s.level).unwrap_or(0);
+        let pp_real = sk.and_then(|m| m.get(&25810)).map(|s| s.level).unwrap_or(0);
+        let pp_legacy = sk.and_then(|m| m.get(&25811)).map(|s| s.level).unwrap_or(0);
+        let mod_bonuses: Vec<(i64, f64)> = snap
             .items
             .values()
             .filter(|i| {
-                i.location_id == ship_id
+                i.location_id == ship_id_for_scan
                     && matches!(i.flag as u16, 11..=34 | 92..=94 | 125..=132)
                     && snap.module_online_states.get(&i.item_id).copied().unwrap_or(true)
             })
-            .filter_map(|i| ctx.sde.types.get(&i.type_id))
-            .filter_map(|t| t.default_attributes.get(&1136).copied())
-            .sum();
-        (a, r, p, bonus_pct)
+            .filter_map(|i| {
+                let b = ctx.sde.types.get(&i.type_id)?.default_attributes.get(&1136).copied()?;
+                Some((i.item_id, b))
+            })
+            .collect();
+        (a, rf_real, rf_legacy, pp_real, pp_legacy, mod_bonuses)
     });
+    let eff_rf_lvl = if real_rangefinding_lvl > 0 {
+        real_rangefinding_lvl
+    } else {
+        legacy_rangefinding_lvl
+    };
+    let eff_pp_lvl = if real_pinpointing_lvl > 0 {
+        real_pinpointing_lvl
+    } else {
+        legacy_pinpointing_lvl
+    };
+    let total_1136_pct: f64 = fitted_scan_mods_1136.iter().map(|&(_, b)| b).sum();
     let skill_mult = (1.0 + 0.05 * astro_lvl as f64)
-        * (1.0 + 0.05 * rangefinding_lvl as f64)
-        * (1.0 + fitted_scan_bonus_pct / 100.0);
+        * (1.0 + 0.05 * eff_rf_lvl as f64)
+        * (1.0 + total_1136_pct / 100.0);
+
+    let eval_probe_sensor_and_dev =
+        |probe: &crate::router::ActiveScannerProbe, range_au: f64, base_au: f64| -> (f64, f64) {
+            let sde_base_sensor = probe_base_sensor_strength(&ctx.sde, probe.probe_type_id);
+            let sde_base_dev = probe_base_max_deviation_au(&ctx.sde, probe.probe_type_id);
+            if let Some(p_state) = evaluate_probe_dogma_state(
+                scan_fit_opt.as_ref(),
+                probe.probe_id,
+                probe.probe_type_id,
+                &ctx.sde,
+            ) {
+                let sensor = if p_state.base_attributes.contains_key(&1371)
+                    || p_state.modifiers.iter().any(|m| m.target_attribute_id == 1371)
+                {
+                    let mut s = p_state.get_attribute(1371, &ctx.sde);
+                    let has_3412 = p_state
+                        .modifiers
+                        .iter()
+                        .any(|m| m.source_item_id == 3412 && m.target_attribute_id == 1371);
+                    if !has_3412 && astro_lvl > 0 {
+                        s *= 1.0 + 0.05 * (astro_lvl.min(5) as f64);
+                    }
+                    let has_25739 = p_state
+                        .modifiers
+                        .iter()
+                        .any(|m| m.source_item_id == 25739 && m.target_attribute_id == 1371);
+                    if !has_25739 && real_rangefinding_lvl == 0 && legacy_rangefinding_lvl > 0 {
+                        s *= 1.0 + 0.05 * (legacy_rangefinding_lvl.min(5) as f64);
+                    }
+                    let unapplied_1136: f64 = fitted_scan_mods_1136
+                        .iter()
+                        .filter(|&&(mid, _)| {
+                            !p_state
+                                .modifiers
+                                .iter()
+                                .any(|m| m.source_item_id == mid && m.target_attribute_id == 1371)
+                        })
+                        .map(|&(_, b)| b)
+                        .sum();
+                    if unapplied_1136.abs() > 1e-9 {
+                        s *= 1.0 + unapplied_1136 / 100.0;
+                    }
+                    s
+                } else {
+                    sde_base_sensor * skill_mult
+                };
+
+                let dev_au = if p_state.base_attributes.contains_key(&1372)
+                    || p_state.modifiers.iter().any(|m| m.target_attribute_id == 1372)
+                {
+                    let mut d = p_state.get_attribute(1372, &ctx.sde);
+                    let has_3412_dev = p_state
+                        .modifiers
+                        .iter()
+                        .any(|m| m.source_item_id == 3412 && m.target_attribute_id == 1372);
+                    if !has_3412_dev && astro_lvl > 0 {
+                        d *= 1.0 - 0.05 * (astro_lvl.min(5) as f64);
+                    }
+                    let has_25810_dev = p_state
+                        .modifiers
+                        .iter()
+                        .any(|m| m.source_item_id == 25810 && m.target_attribute_id == 1372);
+                    if !has_25810_dev && real_pinpointing_lvl == 0 && legacy_pinpointing_lvl > 0 {
+                        d *= 1.0 - 0.05 * (legacy_pinpointing_lvl.min(5) as f64);
+                    }
+                    d * (range_au / base_au.max(0.01))
+                } else {
+                    compute_probe_max_deviation_au(
+                        sde_base_dev,
+                        range_au,
+                        base_au,
+                        astro_lvl,
+                        eff_pp_lvl,
+                    )
+                };
+                return (sensor, dev_au);
+            }
+            (
+                sde_base_sensor * skill_mult,
+                compute_probe_max_deviation_au(sde_base_dev, range_au, base_au, astro_lvl, eff_pp_lvl),
+            )
+        };
 
     let first_probe = &active_probes[0];
     let lead_base_range_au = probe_base_scan_range_au(&ctx.sde, first_probe.probe_type_id);
     let lead_base_dev_au = probe_base_max_deviation_au(&ctx.sde, first_probe.probe_type_id);
     let lead_range_au = lead_base_range_au * 2.0_f64.powi(first_probe.range_step - 1);
-    let lead_max_dev_au = compute_probe_max_deviation_au(lead_base_dev_au, lead_range_au, lead_base_range_au, astro_lvl, pinpointing_lvl);
+    let (_, lead_max_dev_au) = eval_probe_sensor_and_dev(first_probe, lead_range_au, lead_base_range_au);
     let lead_max_dev_m = lead_max_dev_au * AU_IN_METERS;
 
     let scan_results = ctx.db.with_snapshot(|snap| {
@@ -1094,12 +1282,12 @@ async fn handle_request_scans(
                         } else {
                             (-((dist - inner_r) / inner_r).powi(2)).exp()
                         };
-                        let sde_base_sensor = probe_base_sensor_strength(&ctx.sde, probe.probe_type_id);
-                        let eff_probe_sensor = sde_base_sensor * skill_mult * step_factor * dist_factor;
-                        sum_probe_strength += eff_probe_sensor;
-                        let p_base_dev = probe_base_max_deviation_au(&ctx.sde, probe.probe_type_id);
                         let p_range_au = base_au * 2.0_f64.powi(probe.range_step - 1);
-                        sum_covering_dev_au += compute_probe_max_deviation_au(p_base_dev, p_range_au, base_au, astro_lvl, pinpointing_lvl);
+                        let (dogma_sensor, dogma_dev_au) =
+                            eval_probe_sensor_and_dev(probe, p_range_au, base_au);
+                        let eff_probe_sensor = dogma_sensor * step_factor * dist_factor;
+                        sum_probe_strength += eff_probe_sensor;
+                        sum_covering_dev_au += dogma_dev_au;
                         sum_covering_range_au += p_range_au;
                     }
                 }
@@ -1279,7 +1467,15 @@ async fn handle_request_scans(
                     covering += 1;
                     let step_factor = 0.5_f64.powi(probe.range_step - 1);
                     let dist_factor = (-(dist / radius).powi(2)).exp();
-                    total_s += probe.base_sensor_strength * skill_mult * step_factor * dist_factor * 2.0;
+                    let p_range_au = base_au * 2.0_f64.powi(probe.range_step - 1);
+                    let (dogma_sensor, _) = eval_probe_sensor_and_dev(probe, p_range_au, base_au);
+                    let sde_sensor = probe_base_sensor_strength(&ctx.sde, probe.probe_type_id).max(1e-6);
+                    let custom_scale = if probe.base_sensor_strength > 0.0 {
+                        probe.base_sensor_strength / sde_sensor
+                    } else {
+                        1.0
+                    };
+                    total_s += dogma_sensor * custom_scale * step_factor * dist_factor * 2.0;
                 }
             }
             if covering == 0 {

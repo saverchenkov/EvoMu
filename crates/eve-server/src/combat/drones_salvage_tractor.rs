@@ -50,8 +50,25 @@ pub async fn attempt_salvage_wreck(
         .map(|(_, b)| b)
         .ok_or_else(|| format!("Wreck {wreck_item_id} not found in space"))?;
 
+    let max_salvage_range = ctx
+        .get_or_rebuild_ship_fitting(char_id, ship_id)
+        .ok()
+        .and_then(|fit| {
+            fit.evaluated_modules
+                .values()
+                .filter(|ms| {
+                    ctx.sde
+                        .types
+                        .get(&ms.type_id)
+                        .is_some_and(|t| t.group_id == 1122)
+                })
+                .map(|ms| ms.get_attribute(54, &ctx.sde))
+                .fold(None, |acc: Option<f64>, r| Some(acc.map_or(r, |a| a.max(r))))
+        })
+        .unwrap_or(5_000.0)
+        .max(5_000.0);
     let dist = ship_ball.position.distance(wreck_ball.position);
-    if dist > 5_000.0 {
+    if dist > max_salvage_range {
         return Err(format!(
             "Wreck is {:.1} m away; salvager maximum range is 5,000 m",
             dist
@@ -342,11 +359,24 @@ pub async fn validate_wreck_salvage_target(
             sys_handle.get_ball_snapshot(ship_id).await.ok().flatten(),
             &wreck_ball_opt,
         ) {
-            let max_mod_range = ctx
-                .sde
-                .types
-                .get(&salvager_tid)
-                .and_then(|t| t.default_attributes.get(&54).copied())
+            let eval_mod_range = ctx
+                .get_or_rebuild_ship_fitting(char_id, ship_id)
+                .ok()
+                .and_then(|fit| {
+                    fit.evaluated_modules
+                        .values()
+                        .filter(|ms| ms.type_id == salvager_tid)
+                        .map(|ms| ms.get_attribute(54, &ctx.sde))
+                        .fold(None, |acc: Option<f64>, r| Some(acc.map_or(r, |a| a.max(r))))
+                })
+                .filter(|&v| v > 0.0);
+            let max_mod_range = eval_mod_range
+                .or_else(|| {
+                    ctx.sde
+                        .types
+                        .get(&salvager_tid)
+                        .and_then(|t| t.default_attributes.get(&54).copied())
+                })
                 .unwrap_or(6_000.0)
                 .max(6_000.0);
             let dist = (sb.position.distance(wb.position) - sb.radius - wb.radius).max(0.0);
@@ -412,20 +442,59 @@ pub async fn execute_wreck_salvage_cycle(
         .and_then(|t| t.default_attributes.get(&901).copied())
         .unwrap_or(20.0);
 
-    let mod_access_bonus = salvager_type_id_opt
-        .and_then(|tid| ctx.sde.types.get(&tid))
-        .and_then(|t| {
-            t.default_attributes
-                .get(&902)
-                .copied()
-                .or_else(|| t.default_attributes.get(&901).copied())
+    let fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
+    let dogma_salvager_state = fit_opt.as_ref().and_then(|fit| {
+        if let Some(tid) = salvager_type_id_opt {
+            fit.evaluated_modules
+                .values()
+                .find(|ms| ms.type_id == tid)
+                .or_else(|| {
+                    fit.evaluated_drones
+                        .values()
+                        .find(|ds| ds.type_id == tid)
+                })
+        } else {
+            fit.evaluated_drones
+                .values()
+                .find(|ds| ds.type_id == 32787 || ds.base_attributes.contains_key(&902))
+        }
+    });
+    let has_dogma_skill_25863 = dogma_salvager_state.is_some_and(|st| {
+        st.modifiers
+            .iter()
+            .any(|m| m.source_item_id == 25863 && m.target_attribute_id == 902)
+    });
+    let has_dogma_rig_902 = dogma_salvager_state.is_some_and(|st| {
+        st.modifiers
+            .iter()
+            .any(|m| m.source_item_id != 25863 && m.target_attribute_id == 902)
+    });
+
+    let mod_access_bonus = dogma_salvager_state
+        .filter(|st| {
+            st.base_attributes.contains_key(&902)
+                || st.modifiers.iter().any(|m| m.target_attribute_id == 902)
+        })
+        .map(|st| st.get_attribute(902, &ctx.sde))
+        .or_else(|| {
+            salvager_type_id_opt
+                .and_then(|tid| ctx.sde.types.get(&tid))
+                .and_then(|t| {
+                    t.default_attributes
+                        .get(&902)
+                        .copied()
+                        .or_else(|| t.default_attributes.get(&901).copied())
+                })
         })
         .unwrap_or(3.0); // Salvage Drone I base access bonus per cycle
 
-    let (salvaging_skill_lv, rig_access_bonus) = ctx.db.with_snapshot(|snap| {
-        let sk_lv = snap
-            .skills
-            .get(&char_id)
+    let (real_salvaging_lv, legacy_salvaging_lv, rig_access_bonus) = ctx.db.with_snapshot(|snap| {
+        let sk_map = snap.skills.get(&char_id);
+        let sk_real = sk_map
+            .and_then(|m| m.get(&25863))
+            .map(|s| s.level as f64)
+            .unwrap_or(0.0);
+        let sk_legacy = sk_map
             .and_then(|m| m.get(&3438))
             .map(|s| s.level as f64)
             .unwrap_or(0.0);
@@ -440,13 +509,26 @@ pub async fn execute_wreck_salvage_cycle(
                     )
             })
             .filter_map(|i| ctx.sde.types.get(&i.type_id))
-            .filter_map(|t| t.default_attributes.get(&901).copied())
+            .filter_map(|t| {
+                t.default_attributes
+                    .get(&901)
+                    .copied()
+                    .or_else(|| (!has_dogma_rig_902).then(|| t.default_attributes.get(&902).copied()).flatten())
+            })
             .sum();
-        (sk_lv, rig_bonus)
+        (sk_real, sk_legacy, rig_bonus)
     });
 
+    let extra_skill_bonus = if has_dogma_skill_25863 {
+        0.0
+    } else if real_salvaging_lv > 0.0 {
+        5.0 * real_salvaging_lv
+    } else {
+        5.0 * legacy_salvaging_lv
+    };
+
     let access_chance_pct =
-        mod_access_bonus + 5.0 * salvaging_skill_lv + rig_access_bonus + wreck_difficulty_bonus;
+        mod_access_bonus + extra_skill_bonus + rig_access_bonus + wreck_difficulty_bonus;
     if access_chance_pct <= 0.0 {
         return Ok(PyRep::keyval([
             ("wreckID", PyRep::Integer(wreck_id)),
@@ -708,16 +790,50 @@ pub async fn execute_wreck_salvage_cycle_scheduled(
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let mod_type_id = salvager_type_id_opt.unwrap_or(32787);
     let mod_sde = ctx.sde.types.get(&mod_type_id);
-    let cap_cost = mod_sde
-        .and_then(|t| {
-            t.default_attributes
-                .get(&eve_sde::attr_ids::CAPACITOR_NEED)
-                .copied()
+    let eval_state_opt = ctx
+        .get_or_rebuild_ship_fitting(char_id, ship_id)
+        .ok()
+        .and_then(|fit| {
+            module_item_id_opt
+                .and_then(|mid| fit.module_state(mid, &ctx.sde))
+                .or_else(|| {
+                    fit.evaluated_modules
+                        .values()
+                        .find(|ms| ms.type_id == mod_type_id)
+                        .cloned()
+                })
+                .or_else(|| {
+                    fit.evaluated_drones
+                        .values()
+                        .find(|ds| ds.type_id == mod_type_id)
+                        .cloned()
+                })
+        });
+    let cap_cost = eval_state_opt
+        .as_ref()
+        .filter(|st| {
+            st.base_attributes
+                .contains_key(&eve_sde::attr_ids::CAPACITOR_NEED)
+                || st
+                    .modifiers
+                    .iter()
+                    .any(|m| m.target_attribute_id == eve_sde::attr_ids::CAPACITOR_NEED)
+        })
+        .map(|st| st.get_attribute(eve_sde::attr_ids::CAPACITOR_NEED, &ctx.sde))
+        .or_else(|| {
+            mod_sde.and_then(|t| {
+                t.default_attributes
+                    .get(&eve_sde::attr_ids::CAPACITOR_NEED)
+                    .copied()
+            })
         })
         .unwrap_or(0.0)
         .max(0.0);
-    let duration_s = (mod_sde
-        .and_then(|t| t.default_attributes.get(&73).copied())
+    let duration_s = (eval_state_opt
+        .as_ref()
+        .map(|st| st.get_attribute(73, &ctx.sde))
+        .filter(|&v| v > 0.0)
+        .or_else(|| mod_sde.and_then(|t| t.default_attributes.get(&73).copied()))
         .unwrap_or(10_000.0)
         / 1_000.0)
         .max(1.0);
@@ -810,25 +926,75 @@ pub fn validate_drone_bandwidth(
         ));
     }
 
-    let ship_type_id = ctx
+    let (ship_type_id, owner_id) = ctx
         .db
-        .with_snapshot(|snap| snap.items.get(&ship_id).map(|s| s.type_id))
+        .with_snapshot(|snap| snap.items.get(&ship_id).map(|s| (s.type_id, s.owner_id)))
         .ok_or_else(|| format!("Ship {ship_id} not found"))?;
 
-    let ship_bandwidth = ctx
+    let sde_default_bw = ctx
         .sde
         .types
         .get(&ship_type_id)
-        .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::DRONE_BANDWIDTH).copied())
-        .unwrap_or(25.0);
+        .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::DRONE_BANDWIDTH).copied());
+    let fit_opt = if owner_id > 0 {
+        let mut fit = ctx.get_or_rebuild_ship_fitting(owner_id, ship_id).ok();
+        if let Some(ref f) = fit {
+            if f.ship
+                .base_attributes
+                .get(&eve_sde::attr_ids::DRONE_BANDWIDTH)
+                .copied()
+                != sde_default_bw
+            {
+                ctx.invalidate_ship_fitting(ship_id);
+                fit = ctx.get_or_rebuild_ship_fitting(owner_id, ship_id).ok();
+            }
+        }
+        fit
+    } else {
+        None
+    };
+
+    let ship_bandwidth = if let Some(ref fit) = fit_opt {
+        let has_bw = fit
+            .ship
+            .base_attributes
+            .contains_key(&eve_sde::attr_ids::DRONE_BANDWIDTH)
+            || fit
+                .ship
+                .modifiers
+                .iter()
+                .any(|m| m.target_attribute_id == eve_sde::attr_ids::DRONE_BANDWIDTH);
+        if has_bw {
+            fit.ship
+                .get_attribute(eve_sde::attr_ids::DRONE_BANDWIDTH, &ctx.sde)
+        } else {
+            sde_default_bw.unwrap_or(25.0)
+        }
+    } else {
+        sde_default_bw.unwrap_or(25.0)
+    };
 
     let mut required_bandwidth = 0.0;
     for &dtid in currently_active_drone_type_ids.iter().chain(requested_drone_type_ids) {
-        let drone_bw = ctx
-            .sde
-            .types
-            .get(&dtid)
-            .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::DRONE_BANDWIDTH_USED).copied())
+        let drone_bw = fit_opt
+            .as_ref()
+            .and_then(|fit| {
+                fit.evaluated_drones
+                    .values()
+                    .find(|d| d.type_id == dtid)
+                    .filter(|d| {
+                        d.base_attributes
+                            .contains_key(&eve_sde::attr_ids::DRONE_BANDWIDTH_USED)
+                    })
+                    .map(|d| d.get_attribute(eve_sde::attr_ids::DRONE_BANDWIDTH_USED, &ctx.sde))
+            })
+            .or_else(|| {
+                ctx.sde.types.get(&dtid).and_then(|t| {
+                    t.default_attributes
+                        .get(&eve_sde::attr_ids::DRONE_BANDWIDTH_USED)
+                        .copied()
+                })
+            })
             .unwrap_or(5.0); // Light combat drones default to 5 Mbit/s
         required_bandwidth += drone_bw;
     }
@@ -903,9 +1069,36 @@ impl DroneController {
         let req_types: Vec<u32> = drone_items.iter().map(|&(_, tid)| tid).collect();
         validate_drone_bandwidth(ctx, ship_id, &req_types, &active_types)?;
 
+        let mut fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
         let mut spawned_ball_ids = Vec::new();
 
         for (idx, (item_id, type_id)) in drone_items.into_iter().enumerate() {
+            if let Some(ref mut f) = fit_opt {
+                if !f.drones.iter().any(|&(id, _)| id == item_id) {
+                    f.add_drone(item_id, type_id, &ctx.sde);
+                }
+            }
+            let d_state_opt = fit_opt
+                .as_ref()
+                .and_then(|f| f.drone_state(item_id, &ctx.sde));
+            let max_vel = d_state_opt
+                .as_ref()
+                .map(|ds| ds.get_attribute(37, &ctx.sde))
+                .filter(|&v| v > 0.0)
+                .unwrap_or(800.0);
+            let eval_dps = d_state_opt
+                .as_ref()
+                .and_then(|ds| {
+                    let raw = ds.get_attribute(114, &ctx.sde)
+                        + ds.get_attribute(116, &ctx.sde)
+                        + ds.get_attribute(117, &ctx.sde)
+                        + ds.get_attribute(118, &ctx.sde);
+                    let mult = ds.get_attribute(64, &ctx.sde).max(1.0);
+                    let rof_s = (ds.get_attribute(51, &ctx.sde) / 1_000.0).max(1.0);
+                    (raw > 0.0).then_some((raw * mult) / rof_s)
+                })
+                .unwrap_or(18.0);
+
             let ball_id = ctx.db.with_mut_snapshot(|snap| {
                 snap.next_entity_id += 1;
                 let bid = snap.next_entity_id;
@@ -930,7 +1123,7 @@ impl DroneController {
                 type_id,
                 position: d_pos,
                 velocity: DVec3::ZERO,
-                max_velocity: 800.0,
+                max_velocity: max_vel,
                 inertia: 0.5,
                 mass: 10_000.0,
                 radius: 10.0,
@@ -967,7 +1160,7 @@ impl DroneController {
                 owner_char_id: char_id,
                 parent_ship_id: ship_id,
                 target_id: None,
-                dps: 18.0,
+                dps: eval_dps,
             };
 
             self.active_drones.insert(ball_id, active);

@@ -954,12 +954,16 @@ pub(crate) async fn handle_module_cycles(
                     return Some(Err(BridgeRpcError { code: "NoChargesLoaded".into(), message: "Capacitor Booster has no Cap Booster charges loaded".into() }));
                 };
                 deferred_post_cycle.cap_booster_charge_id = Some(cid);
-                cap_booster_inject_amount = ctx
-                    .sde
-                    .types
-                    .get(&charge_tid)
-                    .and_then(|t| t.default_attributes.get(&67).copied())
-                    .unwrap_or(100.0);
+                let eval_inject = fit.get_charge_effective_attribute(module_id, 67, &ctx.sde);
+                cap_booster_inject_amount = if eval_inject > 0.0 {
+                    eval_inject
+                } else {
+                    ctx.sde
+                        .types
+                        .get(&charge_tid)
+                        .and_then(|t| t.default_attributes.get(&67).copied())
+                        .unwrap_or(100.0)
+                };
                 cap_need = 0.0;
             }
 
@@ -1062,8 +1066,27 @@ pub(crate) async fn handle_module_cycles(
                                 }) {
                                     active_burst_charge_tid = Some(charge_item.type_id);
                                     let c_sde = ctx.sde.types.get(&charge_item.type_id);
-                                    let vol_dmg = c_sde.and_then(|t| t.default_attributes.get(&784).copied()).unwrap_or(0.0);
-                                    let vol_chance = c_sde.and_then(|t| t.default_attributes.get(&783).copied()).unwrap_or(100.0);
+                                    let ch_state_opt = fit
+                                        .charge_state(tid, &ctx.sde)
+                                        .filter(|cs| cs.type_id == charge_item.type_id);
+                                    let vol_dmg = ch_state_opt
+                                        .as_ref()
+                                        .filter(|cs| {
+                                            cs.base_attributes.contains_key(&784)
+                                                || cs.modifiers.iter().any(|cm| cm.target_attribute_id == 784)
+                                        })
+                                        .map(|cs| cs.get_attribute(784, &ctx.sde))
+                                        .or_else(|| c_sde.and_then(|t| t.default_attributes.get(&784).copied()))
+                                        .unwrap_or(0.0);
+                                    let vol_chance = ch_state_opt
+                                        .as_ref()
+                                        .filter(|cs| {
+                                            cs.base_attributes.contains_key(&783)
+                                                || cs.modifiers.iter().any(|cm| cm.target_attribute_id == 783)
+                                        })
+                                        .map(|cs| cs.get_attribute(783, &ctx.sde))
+                                        .or_else(|| c_sde.and_then(|t| t.default_attributes.get(&783).copied()))
+                                        .unwrap_or(100.0);
                                     if vol_dmg > 0.0 {
                                         crystal_volatility_damage = vol_dmg;
                                         crystal_volatility_chance = if vol_chance > 1.0 { (vol_chance / 100.0).clamp(0.0, 1.0) } else { vol_chance.clamp(0.0, 1.0) };
@@ -1159,6 +1182,192 @@ pub(crate) async fn handle_module_cycles(
                 }
             }
 
+            if let Some(ctid) = active_burst_charge_tid {
+                if let Some(fm) = fit.modules.get_mut(&module_id) {
+                    if fm.charge_type_id != Some(ctid) {
+                        fm.charge_type_id = Some(ctid);
+                        fm.charge_quantity = fm.charge_quantity.max(1);
+                        fit.recalculate_stats(&ctx.sde);
+                    }
+                }
+            }
+            let mod_state = fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde);
+            let is_turret_group = matches!(mod_type.group_id, 53 | 55 | 74 | 1986);
+            let is_missile_group = matches!(
+                mod_type.group_id,
+                506..=512 | 524 | 771 | 862 | 1245
+            );
+            let is_vorton_group = mod_type.group_id == 4060;
+            let weapon_dark_mult = crate::services::pve_abyssal_hazards::dark_weather_midpocket_turret_mult(
+                ctx,
+                char_id,
+                sys_id,
+                is_missile_group,
+                module_id,
+                &mod_type,
+            );
+            let active_charge_sde = active_burst_charge_tid.and_then(|cid| ctx.sde.types.get(&cid));
+            let has_mod_charge_modifier = |attr: u16| {
+                mod_state.modifiers.iter().any(|mm| {
+                    mm.target_attribute_id == attr
+                        && mm.source_item_id == 0
+                        && mm
+                            .effect_id
+                            .is_some_and(|eid| active_charge_sde.is_some_and(|ct| ct.effect_ids.contains(&eid)))
+                })
+            };
+            let weapon_optimal_m = if is_turret_group {
+                let range_mult = active_charge_sde
+                    .and_then(|ct| ct.default_attributes.get(&120).copied())
+                    .unwrap_or(1.0);
+                let base_opt = {
+                    let v = mod_state.get_attribute(54, &ctx.sde);
+                    if v > 0.0 {
+                        v
+                    } else {
+                        mod_type.default_attributes.get(&54).copied().unwrap_or(5_000.0)
+                    }
+                };
+                (if has_mod_charge_modifier(54) {
+                    base_opt
+                } else {
+                    base_opt * range_mult
+                }) * weapon_dark_mult
+            } else if is_missile_group {
+                let vel = {
+                    let v = fit.get_charge_effective_attribute(module_id, 37, &ctx.sde);
+                    if v > 0.0 {
+                        v
+                    } else {
+                        active_charge_sde
+                            .and_then(|ct| ct.default_attributes.get(&37).copied())
+                            .unwrap_or(3_750.0)
+                    }
+                };
+                let delay_ms = {
+                    let v = fit.get_charge_effective_attribute(module_id, 281, &ctx.sde);
+                    if v > 0.0 {
+                        v
+                    } else {
+                        active_charge_sde
+                            .and_then(|ct| ct.default_attributes.get(&281).copied())
+                            .unwrap_or(5_000.0)
+                    }
+                };
+                vel * (delay_ms / 1_000.0)
+            } else if is_vorton_group {
+                let v = mod_state.get_attribute(54, &ctx.sde);
+                if v > 0.0 {
+                    v
+                } else {
+                    mod_type.default_attributes.get(&54).copied().unwrap_or(25_000.0)
+                }
+            } else {
+                0.0
+            };
+            let weapon_falloff_m = if is_turret_group {
+                let fo = eve_dogma::get_module_falloff(&mod_state, &ctx.sde);
+                (if fo > 0.0 {
+                    fo
+                } else {
+                    mod_type.default_attributes.get(&158).copied().unwrap_or(5_000.0)
+                }) * weapon_dark_mult
+            } else {
+                0.0
+            };
+            let weapon_tracking_speed = if is_turret_group {
+                let tracking_mult = active_charge_sde
+                    .and_then(|ct| ct.default_attributes.get(&244).copied())
+                    .unwrap_or(1.0);
+                let base_tr = {
+                    let v = mod_state.get_attribute(160, &ctx.sde);
+                    if v > 0.0 {
+                        v
+                    } else {
+                        mod_type.default_attributes.get(&160).copied().unwrap_or(100.0)
+                    }
+                };
+                if has_mod_charge_modifier(160) {
+                    base_tr
+                } else {
+                    base_tr * tracking_mult
+                }
+            } else {
+                0.0
+            };
+            let weapon_sig_resolution_m = if is_turret_group {
+                let v = mod_state.get_attribute(620, &ctx.sde);
+                if v > 0.0 {
+                    v
+                } else {
+                    mod_type.default_attributes.get(&620).copied().unwrap_or(40_000.0)
+                }
+            } else {
+                0.0
+            };
+            let (missile_explosion_velocity_ms, missile_explosion_radius_m, missile_drf) =
+                if is_missile_group {
+                    let ev = {
+                        let v = fit.get_charge_effective_attribute(module_id, 653, &ctx.sde);
+                        if v > 0.0 {
+                            v
+                        } else {
+                            active_charge_sde
+                                .and_then(|ct| ct.default_attributes.get(&653).copied())
+                                .unwrap_or(170.0)
+                        }
+                    };
+                    let er = {
+                        let v = fit.get_charge_effective_attribute(module_id, 654, &ctx.sde);
+                        if v > 0.0 {
+                            v
+                        } else {
+                            active_charge_sde
+                                .and_then(|ct| ct.default_attributes.get(&654).copied())
+                                .unwrap_or(40.0)
+                        }
+                    };
+                    let drf = {
+                        let v = fit.get_charge_effective_attribute(module_id, 1353, &ctx.sde);
+                        if v > 0.0 {
+                            v
+                        } else {
+                            active_charge_sde
+                                .and_then(|ct| ct.default_attributes.get(&1353).copied())
+                                .unwrap_or(0.604)
+                        }
+                    };
+                    (ev, er, drf)
+                } else if is_vorton_group {
+                    let ev = {
+                        let v = mod_state.get_attribute(653, &ctx.sde);
+                        if v > 0.0 {
+                            v
+                        } else {
+                            mod_type.default_attributes.get(&653).copied().unwrap_or(190.0)
+                        }
+                    };
+                    let er = {
+                        let v = mod_state.get_attribute(654, &ctx.sde);
+                        if v > 0.0 {
+                            v
+                        } else {
+                            mod_type.default_attributes.get(&654).copied().unwrap_or(43.0)
+                        }
+                    };
+                    let drf = {
+                        let v = mod_state.get_attribute(1353, &ctx.sde);
+                        if v > 0.0 {
+                            v
+                        } else {
+                            mod_type.default_attributes.get(&1353).copied().unwrap_or(0.40)
+                        }
+                    };
+                    (ev, er, drf)
+                } else {
+                    (0.0, 0.0, 0.0)
+                };
+
             let cycle = crate::system_actor::ActiveModuleCycle {
                 ship_id,
                 module_id,
@@ -1174,20 +1383,36 @@ pub(crate) async fn handle_module_cycles(
                 pending_overloaded: None,
                 linked_turrets: linked_turrets.clone(),
                 ammo_type_id: active_burst_charge_tid,
-                damage_vector: if matches!(
-                    mod_type.group_id,
-                    53 | 55 | 74 | 506 | 507 | 508 | 509 | 510 | 511 | 512 | 524 | 771 | 862 | 1245 | 1986 | 4060
-                ) {
-                    let dmg_mult = mod_state.get_attribute(64, &ctx.sde).max(1.0)
-                        * (linked_turrets.len().max(1) as f64);
-                    let (em, therm, kin, exp) = if let Some(ct) =
-                        active_burst_charge_tid.and_then(|cid| ctx.sde.types.get(&cid))
-                    {
+                damage_vector: if is_turret_group || is_missile_group || is_vorton_group {
+                    let mod_mult = if is_missile_group {
+                        fit.modules
+                            .get(&module_id)
+                            .and_then(|fm| fm.dynamic_attribute_overrides.get(&64).copied())
+                            .filter(|&v| v > 0.0)
+                            .unwrap_or(1.0)
+                    } else {
+                        let m_mult = mod_state.get_attribute(64, &ctx.sde);
+                        if m_mult > 0.0 {
+                            m_mult
+                        } else {
+                            mod_type.default_attributes.get(&64).copied().unwrap_or(1.0)
+                        }
+                    };
+                    let dmg_mult = mod_mult * (linked_turrets.len().max(1) as f64);
+                    let eval_charge_dmg = |aid: u16, ct: &eve_sde::InvType| -> f64 {
+                        let v = fit.get_charge_effective_attribute(module_id, aid, &ctx.sde);
+                        if v > 0.0 {
+                            v
+                        } else {
+                            ct.default_attributes.get(&aid).copied().unwrap_or(0.0)
+                        }
+                    };
+                    let (em, therm, kin, exp) = if let Some(ct) = active_charge_sde {
                         (
-                            ct.default_attributes.get(&114).copied().unwrap_or(0.0) * dmg_mult,
-                            ct.default_attributes.get(&118).copied().unwrap_or(0.0) * dmg_mult,
-                            ct.default_attributes.get(&117).copied().unwrap_or(0.0) * dmg_mult,
-                            ct.default_attributes.get(&116).copied().unwrap_or(0.0) * dmg_mult,
+                            eval_charge_dmg(114, ct) * dmg_mult,
+                            eval_charge_dmg(118, ct) * dmg_mult,
+                            eval_charge_dmg(117, ct) * dmg_mult,
+                            eval_charge_dmg(116, ct) * dmg_mult,
                         )
                     } else {
                         (
@@ -1250,6 +1475,15 @@ pub(crate) async fn handle_module_cycles(
                 grappler_optimal_m,
                 grappler_falloff_m,
                 grappler_speed_factor_pct,
+                weapon_is_turret: is_turret_group,
+                weapon_is_missile: is_missile_group || is_vorton_group,
+                weapon_optimal_m,
+                weapon_falloff_m,
+                weapon_tracking_speed,
+                weapon_sig_resolution_m,
+                missile_explosion_radius_m,
+                missile_explosion_velocity_ms,
+                missile_drf,
                 target_velocity_multiplier,
                 immobilize_self,
                 self_disallow_assistance,
@@ -1284,6 +1518,8 @@ pub(crate) async fn handle_module_cycles(
                     }
                     let eff = if opt_range > 0.0 {
                         opt_range + 3.0 * falloff.max(0.0)
+                    } else if is_missile_group && weapon_optimal_m > 0.0 {
+                        weapon_optimal_m
                     } else {
                         fit.ship.get_attribute(attr_ids::MAX_TARGET_RANGE, &ctx.sde)
                     };

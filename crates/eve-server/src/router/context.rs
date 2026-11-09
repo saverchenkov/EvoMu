@@ -1326,6 +1326,21 @@ impl ServerContext {
             .get(&ship_id)
             .cloned()
             .unwrap_or_default();
+        let active_ship_dbuffs =
+            crate::services::inventory_fitting::fitting_scanners_superweapons::active_ship_dbuff_gang_bursts(
+                self,
+                ship_id,
+                self.now_unix_secs(),
+            );
+        let mut active_probes: Vec<(i64, u32)> = self
+            .active_scanner_probes
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .filter(|p| p.owner_char_id == char_id && p.state >= 0)
+            .map(|p| (p.probe_id, p.probe_type_id))
+            .collect();
+        active_probes.sort_by_key(|&(id, _)| id);
         let cached = self
             .ship_fittings
             .read()
@@ -1337,25 +1352,22 @@ impl ServerContext {
                     && e.booster_side_effects == active_booster_side_effects
             });
         if let Some(mut existing) = cached {
-            let pocket_dbuffs = crate::services::insurgency_complex_ops::active_insurgency_pocket_dbuffs(
-                self,
-                char_id,
-                ship_id,
-                existing.ship.type_id,
+            let mut desired_gang_bursts: Vec<eve_dogma::GangBurstEffect> = existing
+                .gang_bursts
+                .iter()
+                .filter(|b| b.dbuff_id.is_none())
+                .cloned()
+                .collect();
+            desired_gang_bursts.extend(
+                crate::services::insurgency_complex_ops::active_insurgency_pocket_dbuffs(
+                    self,
+                    char_id,
+                    ship_id,
+                    existing.ship.type_id,
+                ),
             );
-            let dbuff_id = Some(crate::services::insurgency_complex_ops::MODERATE_OUTPOST_BC_SKILL_DBUFF_ID);
-            let had_pocket_dbuff = existing.gang_bursts.iter().any(|b| b.dbuff_id == dbuff_id);
-            let want_pocket_dbuff = !pocket_dbuffs.is_empty();
-            let needs_recalc = existing.character_skills != skill_levels
-                || existing.implants != active_implants
-                || existing.projected_ewar != active_projected
-                || had_pocket_dbuff != want_pocket_dbuff;
-            if had_pocket_dbuff != want_pocket_dbuff {
-                existing.gang_bursts.retain(|b| b.dbuff_id != dbuff_id);
-                existing.gang_bursts.extend(pocket_dbuffs);
-            }
-            existing.set_character_skills(skill_levels);
-            existing.set_implants(active_implants);
+            desired_gang_bursts.extend(active_ship_dbuffs);
+            let mut drones_changed = false;
             // Keep cached slot charge types synchronized with live inventory items in case charges
             // were swapped or depleted without invalidating `ship_fittings`.
             let charges_changed = !existing.modules.is_empty()
@@ -1393,14 +1405,47 @@ impl ServerContext {
                     if d.parent_ship_id == ship_id && !d.is_abandoned {
                         if !existing.drones.iter().any(|&(id, _)| id == d.drone_item_id) {
                             existing.drones.push((d.drone_item_id, d.type_id));
+                            drones_changed = true;
                         }
                         if !existing.drones.iter().any(|&(id, _)| id == d.ball_id) {
                             existing.drones.push((d.ball_id, d.type_id));
+                            drones_changed = true;
                         }
                     }
                 }
             });
-            if needs_recalc || charges_changed {
+            for &(probe_id, probe_type_id) in &active_probes {
+                if !existing.drones.iter().any(|&(id, _)| id == probe_id) {
+                    existing.drones.push((probe_id, probe_type_id));
+                    drones_changed = true;
+                }
+            }
+            let mut ship_dyn_changed = false;
+            if let Some(ship_dyn) = self
+                .db
+                .with_snapshot(|s| s.items.get(&ship_id).map(|it| it.dynamic_attributes.clone()))
+            {
+                for (attr_id, val) in ship_dyn {
+                    if !matches!(attr_id, 3 | 18 | 265 | 266)
+                        && existing.ship.base_attributes.get(&attr_id).copied() != Some(val)
+                    {
+                        existing.ship.base_attributes.insert(attr_id, val);
+                        ship_dyn_changed = true;
+                    }
+                }
+            }
+            let needs_recalc = existing.persisted_context().is_none()
+                || existing.character_skills != skill_levels
+                || existing.implants != active_implants
+                || existing.projected_ewar != active_projected
+                || existing.gang_bursts != desired_gang_bursts
+                || drones_changed
+                || ship_dyn_changed
+                || charges_changed;
+            existing.gang_bursts = desired_gang_bursts;
+            existing.set_character_skills(skill_levels);
+            existing.set_implants(active_implants);
+            if needs_recalc {
                 existing.projected_ewar = active_projected;
                 existing.recalculate_stats(&self.sde);
                 self.ship_fittings
@@ -1425,12 +1470,14 @@ impl ServerContext {
             .with_boosters(active_boosters);
         fit.booster_side_effects = active_booster_side_effects;
         fit.projected_ewar = active_projected;
-        fit.gang_bursts = crate::services::insurgency_complex_ops::active_insurgency_pocket_dbuffs(
+        let mut gang_bursts = crate::services::insurgency_complex_ops::active_insurgency_pocket_dbuffs(
             self,
             char_id,
             ship_id,
             ship_item.type_id,
         );
+        gang_bursts.extend(active_ship_dbuffs);
+        fit.gang_bursts = gang_bursts;
         for (&attr_id, &val) in &ship_item.dynamic_attributes {
             fit.ship.base_attributes.insert(attr_id, val);
         }
@@ -1551,14 +1598,17 @@ impl ServerContext {
             });
         }
 
-        // Attach loaded charges / scripts and owned drones
+        // Attach loaded charges / scripts, scanner probes, and owned drones
         for item in &items {
-            let cat = self.sde.types.get(&item.type_id).map(|t| t.category_id);
+            let t_opt = self.sde.types.get(&item.type_id);
+            let cat = t_opt.map(|t| t.category_id);
             if item.location_id == ship_id && cat == Some(8) {
                 let slot_flag = item.flag as u16;
                 if let Some(m) = fit.modules.values_mut().find(|m| m.flag_id == slot_flag) {
                     m.charge_type_id = Some(item.type_id);
                     m.charge_quantity = item.quantity.max(0) as u32;
+                } else if t_opt.is_some_and(|t| t.group_id == 479) {
+                    fit.drones.push((item.item_id, item.type_id));
                 }
             } else if item.location_id == ship_id && cat == Some(18) {
                 fit.drones.push((item.item_id, item.type_id));
@@ -1576,6 +1626,11 @@ impl ServerContext {
                 }
             }
         });
+        for &(probe_id, probe_type_id) in &active_probes {
+            if !fit.drones.iter().any(|&(id, _)| id == probe_id) {
+                fit.drones.push((probe_id, probe_type_id));
+            }
+        }
         fit.recalculate_stats(&self.sde);
 
         self.store_ship_fitting(ship_id, fit.clone());
