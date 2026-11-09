@@ -118,6 +118,18 @@ pub fn can_caller_view_market_location_at(
     {
         return false;
     }
+    if crate::services::structure_profile_services::require_structure_service_access_in_snap(
+        ctx,
+        snap,
+        location_id,
+        caller_char_id.max(0),
+        crate::services::structure_profile_services::StructureServiceKind::Market,
+        now_unix_opt.unwrap_or(0),
+    )
+    .is_err()
+    {
+        return false;
+    }
     if let (Some(c), Some(now_unix)) = (ctx, now_unix_opt) {
         return crate::services::structure_profile_services::check_upwell_market_access_and_rate(
             c,
