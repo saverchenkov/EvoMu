@@ -261,6 +261,20 @@ pub(super) fn handle_insure_ship(
         fitting_containers_ships::write_container_ship_state_snap(snap, |st| {
             st.insurance_contracts.insert(ship_id, rec.clone());
         });
+        snap.insurance_contracts.insert(
+            ship_id,
+            eve_db::PersistedInsuranceContractRecord {
+                ship_id: rec.ship_id,
+                ship_type_id: rec.ship_type_id,
+                owner_id: rec.owner_id,
+                level_name: rec.level_name.clone(),
+                level_fraction: rec.level_fraction,
+                cost_isk: rec.cost_isk,
+                payout_isk: rec.payout_isk,
+                start_unix: rec.start_unix,
+                end_unix: rec.end_unix,
+            },
+        );
         Ok((cost, payout, rec))
     })?;
 

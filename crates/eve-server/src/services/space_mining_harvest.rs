@@ -454,15 +454,21 @@ pub fn tick_ice_belt_respawn_sync(ctx: &ServerContext, sys_id: u32) {
 
 /// Evaluates 4-hour ice belt respawn timers across all systems with a depleted `"IceBelt"` anomaly.
 pub fn tick_all_ice_belt_respawns_sync(ctx: &ServerContext) {
+    let now = ctx.now_unix();
     let sys_ids: Vec<u32> = ctx.db.with_snapshot(|snap| {
         snap.cosmic_anomalies
             .iter()
             .filter_map(|(&sys_id, anoms)| {
-                if anoms.iter().any(|a| a.anomaly_type == "IceBelt" && a.cleared) {
-                    Some(sys_id)
-                } else {
-                    None
-                }
+                let has_uncleared = anoms.iter().any(|a| a.anomaly_type == "IceBelt" && !a.cleared);
+                let ready = !has_uncleared
+                    && anoms.iter().any(|a| {
+                        a.anomaly_type == "IceBelt"
+                            && a.cleared
+                            && crate::services::mining_sites::is_ice_belt_ready_to_respawn(
+                                now.saturating_sub(a.created_unix),
+                            )
+                    });
+                ready.then_some(sys_id)
             })
             .collect()
     });

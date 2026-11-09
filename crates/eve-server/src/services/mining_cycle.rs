@@ -1058,6 +1058,7 @@ pub async fn process_mining_cycles(ctx: &ServerContext) -> Vec<MiningCycleOutcom
     let mut outcomes = Vec::new();
     for mut cycle in cycles {
         let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, cycle.solar_system_id).clamp(0.1, 1.0);
+        let mut cycle_advanced = false;
         loop {
             if check_requirements(ctx, &cycle).await.is_err() {
                 stop_module(ctx, &cycle);
@@ -1065,8 +1066,10 @@ pub async fn process_mining_cycles(ctx: &ServerContext) -> Vec<MiningCycleOutcom
             }
             let effective_duration_ms = ((cycle.duration_ms as f64) / tidi).round().max(1.0) as u64;
             if now < cycle.cycle_start_ms + effective_duration_ms {
-                ctx.mining_cycles.write().unwrap_or_else(|e| e.into_inner()).insert(cycle.module_id, cycle.clone());
-                ctx.persist_server_runtime_to_db();
+                if cycle_advanced {
+                    ctx.mining_cycles.write().unwrap_or_else(|e| e.into_inner()).insert(cycle.module_id, cycle.clone());
+                    ctx.persist_server_runtime_to_db();
+                }
                 break;
             }
             let outcome = match resolve_cycle(ctx, &cycle, 1.0).await {
@@ -1092,6 +1095,7 @@ pub async fn process_mining_cycles(ctx: &ServerContext) -> Vec<MiningCycleOutcom
                 break;
             }
             cycle.cycle_start_ms += effective_duration_ms;
+            cycle_advanced = true;
             if let Ok((fit, _)) =
                 cycle_fit(ctx, cycle.char_id, cycle.ship_id, cycle.module_id, target_type_of(ctx, cycle.target_id))
             {

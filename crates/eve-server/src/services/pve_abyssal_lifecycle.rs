@@ -199,6 +199,7 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
 
         let (home_sys_id, _home_station_id, _corvette_id, cleared_zarzakh_gate) =
             crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, snap| {
+                snap.insurance_contracts.remove(&pilot_sid);
                 st.abyssal_sessions.remove(&pilot_cid);
                 if idx == 0 {
                     if let Some((_, _, false, _, _, ref caches, _, _, _)) = pocket_cleanup {

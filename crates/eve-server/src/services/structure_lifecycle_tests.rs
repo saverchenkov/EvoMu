@@ -639,3 +639,127 @@ async fn destroy_and_package_structure_evacuate_gunner_docked_pilots_and_reset_h
         assert!(sys_handle.get_ball_snapshot(pod_id).await.unwrap().is_some());
     }
 }
+
+#[test]
+fn sync_all_structures_pauses_industry_jobs_when_fuel_depletes_and_marks_ready() {
+    let ctx = test_ctx();
+    let base_now = 1_750_000_000_u64;
+    let clock = Arc::new(eve_db::VirtualServerClock::with_fixed_base(base_now));
+    ctx.set_clock(clock);
+
+    let sid = 1_000_000_999_001_i64;
+    let corp_id = 98_000_001_i64;
+    let char_id = 90_000_001_i64;
+    let active_jid = 7_700_001_i64;
+    let ready_jid = 7_700_002_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            sid,
+            UpwellStructureRecord {
+                structure_id: sid,
+                type_id: 35_825, // Raitaru
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142,
+                name: "Test Raitaru".into(),
+                position: [10_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 0,
+                shield_hp: 100_000.0,
+                armor_hp: 100_000.0,
+                hull_hp: 100_000.0,
+                ..Default::default()
+            },
+        );
+        let svc_mod_id = 900_999_i64;
+        snap.items.insert(
+            svc_mod_id,
+            InventoryItemRecord {
+                item_id: svc_mod_id,
+                type_id: 35_878, // Standup Manufacturing Plant I
+                owner_id: corp_id,
+                location_id: sid,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(svc_mod_id, true);
+        let mut ext = load_ext_state(snap);
+        ext.lifecycle.insert(
+            sid,
+            crate::services::station_structure::structure_upwell_ops::StructureLifecycleState {
+                last_fuel_tick_unix: Some(base_now - 3_600),
+                online_modules: vec![svc_mod_id],
+                ..Default::default()
+            },
+        );
+        save_ext_state(snap, &ext);
+
+        snap.industry_jobs.insert(
+            active_jid,
+            eve_db::IndustryJobRecord {
+                job_id: active_jid,
+                installer_id: char_id,
+                facility_id: sid,
+                blueprint_item_id: 900_001,
+                blueprint_type_id: 587,
+                activity_id: 1,
+                runs: 1,
+                product_type_id: 587,
+                status: "Active".into(),
+                duration_seconds: 7_200,
+                start_unix: base_now - 600,
+                ..Default::default()
+            },
+        );
+        snap.industry_jobs.insert(
+            ready_jid,
+            eve_db::IndustryJobRecord {
+                job_id: ready_jid,
+                installer_id: char_id,
+                facility_id: sid,
+                blueprint_item_id: 900_002,
+                blueprint_type_id: 587,
+                activity_id: 1,
+                runs: 1,
+                product_type_id: 587,
+                status: "Active".into(),
+                duration_seconds: 300,
+                start_unix: base_now - 600,
+                ..Default::default()
+            },
+        );
+    });
+
+    // Running sync_all_structures burns last fuel block -> low_power_since_unix set & jobs paused!
+    let _ = sync_all_structures(&ctx);
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&sid].fuel_blocks, 0);
+        let ext = load_ext_state(snap);
+        assert!(
+            ext.lifecycle
+                .get(&sid)
+                .and_then(|l| l.low_power_since_unix)
+                .unwrap_or(0)
+                > 0
+        );
+        assert_eq!(snap.industry_jobs[&active_jid].status, "Paused");
+        let active_meta = crate::services::industry_pi::industry_facilities_bps::load_job_cost_meta(
+            snap, active_jid,
+        )
+        .expect("in-progress job gets paused meta immediately on fuel outage");
+        assert!(active_meta.paused_at_unix.is_some());
+        assert!(!active_meta.ready_before_offline);
+
+        let ready_meta = crate::services::industry_pi::industry_facilities_bps::load_job_cost_meta(
+            snap, ready_jid,
+        )
+        .expect("already-completed job gets ready_before_offline meta");
+        assert!(ready_meta.ready_before_offline);
+        assert!(!any_structure_or_industry_needs_sync(&ctx, snap, base_now));
+    });
+}

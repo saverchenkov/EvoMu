@@ -18,7 +18,7 @@ use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::BTreeMap;
 
 #[path = "social_wars_helpers.rs"]
-mod social_wars_helpers;
+pub(crate) mod social_wars_helpers;
 use social_wars_helpers::{
     already_at_war, credit_corp, debit_corp, emit_mutual_wars_updated, emit_war_changed, err,
     is_valid_war_hq, is_war_participant_corp, neg_rows_for_caller, resolve_war_stat_id,
@@ -48,14 +48,19 @@ fn war_kills_in_snap(ctx: &ServerContext, snap: &WorldStateSnapshot, war_id: i64
     let w = snap.wars.get(&war_id)?;
     let (agg, def) = (w.aggressor_corp_id, w.defender_corp_id);
     let meta = snap.war_state.wars.get(&war_id).cloned().unwrap_or_default();
-    let allies: Vec<i64> = snap
+    let allies: Vec<(i64, u64)> = snap
         .war_state
         .negotiations
         .iter()
         .filter(|n| n.war_id == war_id && n.kind == NegKind::Ally && n.status == "Accepted")
-        .map(|n| n.from_corp)
+        .map(|n| (n.from_corp, n.effective_unix.unwrap_or(0)))
         .collect();
-    let is_def_side = |cid: i64| cid == def || allies.contains(&cid);
+    let is_def_side = |cid: i64, ts: u64| {
+        cid == def
+            || allies
+                .iter()
+                .any(|&(ally_cid, eff)| ally_cid == cid && (ts == 0 || ts >= eff))
+    };
     let corp_of = |cid: i64, explicit: i64| {
         if explicit > 0 { explicit } else { snap.characters.get(&cid).map(|c| c.corporation_id).unwrap_or(0) }
     };
@@ -73,7 +78,7 @@ fn war_kills_in_snap(ctx: &ServerContext, snap: &WorldStateSnapshot, war_id: i64
             }
             let a = corp_of(km.attacker_character_id, km.attacker_corp_id);
             let v = corp_of(km.victim_character_id, km.victim_corp_id);
-            ((a == agg && is_def_side(v)) || (is_def_side(a) && v == agg)).then(|| {
+            ((a == agg && is_def_side(v, km.killed_unix)) || (is_def_side(a, km.killed_unix) && v == agg)).then(|| {
                 let att_corp = if a == agg { agg } else { def };
                 let vic_corp = if v == agg { agg } else { def };
                 let att_all = snap.corporations.get(&att_corp).and_then(|c| c.alliance_id);
@@ -96,7 +101,8 @@ fn war_kills_in_snap(ctx: &ServerContext, snap: &WorldStateSnapshot, war_id: i64
         })
         .collect();
     kills.sort_by_key(|k| k.kill_id);
-    Some((agg, def, allies, kills))
+    let ally_ids = allies.into_iter().map(|(cid, _)| cid).collect();
+    Some((agg, def, ally_ids, kills))
 }
 
 fn war_kills(ctx: &ServerContext, war_id: i64) -> Option<(i64, i64, Vec<i64>, Vec<WarKill>)> {
@@ -576,7 +582,7 @@ pub(super) fn handle_wars(
             let res = ctx.db.with_snapshot(|snap| {
                 let neg_opt = snap.war_state.negotiations.iter().find(|n| n.id == neg_id);
                 let wid = neg_opt.map(|n| n.war_id).unwrap_or(wid_hint);
-                let allowed = is_war_participant_corp(snap, wid, my_corp)
+                let allowed = is_war_participant_corp(snap, wid, my_corp, now)
                     || neg_opt.is_some_and(|n| n.from_corp == my_corp);
                 if !allowed {
                     return Err(BridgeRpcError {

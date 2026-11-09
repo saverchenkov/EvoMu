@@ -202,13 +202,20 @@ pub(crate) fn emit_server_skills_changed(
         return;
     }
     let entries: Vec<(PyRep, PyRep)> = ctx.db.with_snapshot(|snap| {
-        let Some(skills) = snap.skills.get(&char_id) else {
-            return Vec::new();
+        let empty_skills = std::collections::HashMap::new();
+        let skills = match snap.skills.get(&char_id) {
+            Some(s) => s,
+            None if event == Some("ExpertSystemExpired") => &empty_skills,
+            None => return Vec::new(),
         };
         skill_type_ids
             .iter()
             .filter_map(|&tid| {
-                let rec = skills.get(&tid)?;
+                let (lvl, sp) = match skills.get(&tid) {
+                    Some(rec) => (rec.level as i64, rec.skill_points),
+                    None if event == Some("ExpertSystemExpired") => (0_i64, 0.0_f64),
+                    None => return None,
+                };
                 let rank = ctx
                     .sde
                     .types
@@ -219,7 +226,6 @@ pub(crate) fn emit_server_skills_changed(
                             .copied()
                     })
                     .unwrap_or(1.0);
-                let lvl = rec.level as i64;
                 Some((
                     PyRep::Integer(tid as i64),
                     PyRep::keyval([
@@ -229,8 +235,8 @@ pub(crate) fn emit_server_skills_changed(
                         ("effectiveSkillLevel", PyRep::Integer(lvl)),
                         ("activeSkillLevel", PyRep::Integer(lvl)),
                         ("virtualSkillLevel", PyRep::None),
-                        ("skillPoints", PyRep::Real(rec.skill_points)),
-                        ("trainedSkillPoints", PyRep::Real(rec.skill_points)),
+                        ("skillPoints", PyRep::Real(sp)),
+                        ("trainedSkillPoints", PyRep::Real(sp)),
                         ("skillRank", PyRep::Real(rank)),
                     ]),
                 ))

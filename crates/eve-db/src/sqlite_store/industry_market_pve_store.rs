@@ -144,6 +144,7 @@ fn compute_blob_hashes(snap: &WorldStateSnapshot) -> HashMap<&'static str, u64> 
     m.insert("system_kill_events", fp_json(&snap.system_kill_events));
     m.insert("quasar_state_blobs", fp_str_map(&snap.quasar_state_blobs));
     m.insert("service_state_blobs", fp_str_map(&snap.service_state_blobs));
+    m.insert("insurance_contracts", fp_map(&snap.insurance_contracts));
     m
 }
 
@@ -195,6 +196,7 @@ fn serialize_blob(snap: &WorldStateSnapshot, key: &str) -> Result<String, String
         }
         "quasar_state_blobs" => map_to_json(&snap.quasar_state_blobs),
         "service_state_blobs" => map_to_json(&snap.service_state_blobs),
+        "insurance_contracts" => map_to_json(&snap.insurance_contracts),
         _ => Ok("[]".into()),
     }
 }
@@ -371,6 +373,11 @@ fn apply_blob_json(snap: &mut WorldStateSnapshot, key: &str, js: &str) {
                 snap.service_state_blobs = m;
             }
         }
+        "insurance_contracts" => {
+            if let Some(m) = map_from_json(js) {
+                snap.insurance_contracts = m;
+            }
+        }
         _ => {}
     }
 }
@@ -497,4 +504,5 @@ pub fn rollback_d6_batch4(conn: &Connection, snap: &mut WorldStateSnapshot, fp: 
     snap.system_kill_events = fresh.system_kill_events;
     snap.quasar_state_blobs = fresh.quasar_state_blobs;
     snap.service_state_blobs = fresh.service_state_blobs;
+    snap.insurance_contracts = fresh.insurance_contracts;
 }

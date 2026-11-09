@@ -629,6 +629,7 @@ pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
     // Command Node regeneration, and live Entosis Link captures.
     let has_sov_snapshot_work = ctx.db.with_snapshot(|snap| {
         !snap.sov_runtime.mercenary_dens.is_empty()
+            || !snap.sov_runtime.mercenary_den_reinforcement.is_empty()
             || !snap.sov_runtime.mto_site_balls.is_empty()
             || snap
                 .sov_runtime
@@ -636,6 +637,11 @@ pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
                 .values()
                 .any(|&until| now_unix >= until)
             || !snap.sov_runtime.sov_hubs.is_empty()
+            || snap.structures.values().any(|s| {
+                s.type_id == super::TYPE_MERCENARY_DEN
+                    && matches!(s.state.as_str(), "HullReinforced" | "HullVulnerable")
+                    && s.reinforced_until_unix > 0
+            })
             || snap
                 .sov_runtime
                 .tenebrex_spool_ready_unix
@@ -673,6 +679,7 @@ pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
         if has_sov_snapshot_work {
             let pending: PendingNotices = Arc::new(RwLock::new(Vec::new()));
             let res = ctx.db.with_mut_snapshot(|snap| {
+                super::tick_mercenary_den_reinforcements_in_snap(snap, &pending, now_unix);
         let mto_before: std::collections::HashMap<i64, u32> = snap
             .sov_runtime
             .mto_site_balls

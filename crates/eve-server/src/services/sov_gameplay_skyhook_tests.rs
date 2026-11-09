@@ -434,3 +434,45 @@ async fn skyhook_weapon_damage_silo_link_theft_and_owner_extraction() {
         Some(0)
     );
 }
+
+#[tokio::test]
+async fn tick_skyhooks_transitions_expired_armor_reinforcement_to_vulnerable() {
+    let ctx = ServerContext::new();
+    let sys_id = 30_004_001_u32;
+    let skyhook_id = 1_090_777_001_i64;
+    let now = 1_750_000_000_u64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            skyhook_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: skyhook_id,
+                type_id: crate::services::sov_gameplay::TYPE_ORBITAL_SKYHOOK,
+                owner_corp_id: 98_000_001,
+                solar_system_id: sys_id,
+                name: "Reinforced Skyhook".into(),
+                position: [0.0, 0.0, 0.0],
+                state: "ArmorReinforced".into(),
+                reinforced_until_unix: now + 60,
+                shield_hp: 0.0,
+                armor_hp: 100.0,
+                hull_hp: 100.0,
+                ..Default::default()
+            },
+        );
+    });
+
+    // Before expiry: remains ArmorReinforced
+    tick_skyhooks(&ctx, now + 59).await;
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&skyhook_id].state, "ArmorReinforced");
+    });
+
+    // At expiry: transitions to ArmorVulnerable and clears reinforced_until_unix
+    tick_skyhooks(&ctx, now + 60).await;
+    ctx.db.with_snapshot(|snap| {
+        let s = &snap.structures[&skyhook_id];
+        assert_eq!(s.state, "ArmorVulnerable");
+        assert_eq!(s.reinforced_until_unix, 0);
+    });
+}

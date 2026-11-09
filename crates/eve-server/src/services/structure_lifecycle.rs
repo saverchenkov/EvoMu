@@ -1431,16 +1431,147 @@ pub(crate) fn sync_structure_with_released(
     None
 }
 
-/// Syncs every structure (called before structure RPCs). Returns structures that left space.
+/// Returns `true` when at least one structure lifecycle timer/fuel-hour/shield-clamp or
+/// active/paused industry job requires a mutable snapshot update at `now`.
+fn any_structure_or_industry_needs_sync(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    now: u64,
+) -> bool {
+    if snap.structures.is_empty() && snap.industry_jobs.is_empty() {
+        return false;
+    }
+    let ext = load_ext_state(snap);
+    if ext.pending_profile_applications.values().any(|&(_, eff)| now >= eff) {
+        return true;
+    }
+    for (&id, st) in &snap.structures {
+        if st.state == STATE_DESTROYED
+            || crate::services::fw_gameplay::is_fw_or_insurgency_structure_in_snap(
+                snap, &ctx.sde, id, st.type_id,
+            )
+            || st.type_id == crate::services::sov_gameplay::TYPE_MERCENARY_DEN
+            || st.type_id == crate::services::sov_services::TYPE_ORBITAL_SKYHOOK
+        {
+            continue;
+        }
+        if st.type_id == crate::services::sov_services::TYPE_SOVEREIGNTY_HUB {
+            if st.state == STATE_ONLINING && now >= st.reinforced_until_unix {
+                return true;
+            }
+            continue;
+        }
+        if st.self_destruct_at_unix.is_some_and(|at| now >= at) {
+            return true;
+        }
+        if !st.state.starts_with("Reinforced")
+            && !matches!(
+                st.state.as_str(),
+                STATE_ARMOR_REINFORCED
+                    | STATE_HULL_REINFORCED
+                    | STATE_ARMOR_VULNERABLE
+                    | STATE_HULL_VULNERABLE
+            )
+            && st.reinforced_until_unix <= now
+            && ext.unanchoring_until_unix.get(&id).is_some_and(|&until| now >= until)
+        {
+            return true;
+        }
+        if ext.pending_reinforce_schedule.get(&id).is_some_and(|&(_, _, eff)| now >= eff) {
+            return true;
+        }
+        if matches!(
+            st.state.as_str(),
+            STATE_ANCHOR_VULNERABLE
+                | STATE_ANCHORING
+                | STATE_ONLINING
+                | STATE_ARMOR_REINFORCED
+                | STATE_HULL_REINFORCED
+        ) && now >= st.reinforced_until_unix
+        {
+            return true;
+        }
+        if st.state == STATE_NO_CORE {
+            if let Some(profile) = structure_profile(ctx, st.type_id) {
+                if installed_core_item(snap, st, profile.core_type_id.unwrap_or(0)).is_some() {
+                    return true;
+                }
+            }
+        }
+        if is_operational(&st.state) {
+            let Some(life) = ext.lifecycle.get(&id) else {
+                return true;
+            };
+            if life.last_fuel_tick_unix.is_none_or(|t| t + SECS_PER_HOUR <= now) {
+                return true;
+            }
+            if life.repair_until_unix.is_some_and(|t| now >= t) {
+                return true;
+            }
+            let online = online_service_modules(ctx, snap, id);
+            if online.iter().any(|m| !life.online_modules.contains(&m.0))
+                || life
+                    .online_modules
+                    .iter()
+                    .any(|iid| !snap.module_online_states.get(iid).copied().unwrap_or(false))
+            {
+                return true;
+            }
+            if (online.is_empty() && life.low_power_since_unix.is_none())
+                || (!online.is_empty() && life.low_power_since_unix.is_some())
+            {
+                return true;
+            }
+            if let Some(profile) = structure_profile(ctx, st.type_id) {
+                let power = power_state(ctx, snap, &ext, st, now);
+                let max_shield = effective_max_shield(ctx, snap, &profile, id, power);
+                if st.shield_hp > max_shield + 1e-6 {
+                    return true;
+                }
+            }
+        } else if ext
+            .lifecycle
+            .get(&id)
+            .and_then(|l| l.repair_until_unix)
+            .is_some_and(|t| now >= t)
+        {
+            return true;
+        }
+    }
+    for (&jid, j) in &snap.industry_jobs {
+        if j.status != "Active" && j.status != "Paused" {
+            continue;
+        }
+        let online =
+            crate::services::industry_pi::industry_facilities_bps::is_structure_industry_service_online(
+                snap,
+                j.facility_id,
+                j.activity_id,
+            );
+        if !online && j.status == "Active" {
+            let meta =
+                crate::services::industry_pi::industry_facilities_bps::load_job_cost_meta(snap, jid)
+                    .unwrap_or_default();
+            if !meta.ready_before_offline {
+                return true;
+            }
+        } else if online && j.status == "Paused" {
+            return true;
+        }
+    }
+    false
+}
+
+/// Syncs every structure (called before structure RPCs and on cluster ticks). Returns structures that left space.
 pub fn sync_all_structures(ctx: &ServerContext) -> Vec<(i64, DisposalOutcome)> {
     super::structure_upwell_ops::sync_auto_delivered_asset_safety_wraps(ctx);
-    if ctx
+    let now = ctx.now_unix();
+    if !ctx
         .db
-        .with_snapshot(|snap| snap.structures.is_empty() && snap.industry_jobs.is_empty())
+        .with_snapshot(|snap| any_structure_or_industry_needs_sync(ctx, snap, now))
     {
         return Vec::new();
     }
-    let now = ctx.now_unix();
     let mut sov_claims: Vec<(u32, i64, i64, i64)> = Vec::new();
     let (gone, released) = ctx.db.with_mut_snapshot(|snap| {
         let mut ids: Vec<i64> = snap.structures.keys().copied().collect();

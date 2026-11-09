@@ -356,3 +356,85 @@ fn test_orbital_access_tax_upgrade_cc_and_expedited_transfer() {
         assert_eq!(snap.items[&555_001].quantity, 20);
     });
 }
+
+#[test]
+fn pi_1hz_processor_ticks_complete_cycle_and_background_tick() {
+    let ctx = make_ctx();
+    let base_now = 1_750_000_000_u64;
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(base_now)));
+    let char_id = 90_000_001_i64;
+    let planet_id = 40_009_091_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.planetary_colonies.insert(
+            (char_id, planet_id),
+            PlanetaryColonyRecord {
+                planet_id,
+                owner_id: char_id,
+                solar_system_id: 30_000_142,
+                command_center_level: 2,
+                pins_count: 2,
+                extracted_commodities: HashMap::new(),
+                last_extracted_unix: 0,
+            },
+        );
+        let net = PiColonyNetworkState {
+            cpu_max: 12_136.0,
+            pg_max: 12_000.0,
+            pins: vec![
+                PiPinState {
+                    pin_id: 201,
+                    type_id: 2469,
+                    schematic_id: Some(65),
+                    contents: HashMap::from([(2268, 3000)]),
+                    last_cycle_unix: Some(base_now),
+                    ..Default::default()
+                },
+                PiPinState {
+                    pin_id: 202,
+                    type_id: 2256,
+                    ..Default::default()
+                },
+            ],
+            links: vec![PiLinkState {
+                source_pin_id: 201,
+                dest_pin_id: 202,
+                level: 1,
+                bandwidth: 2500.0,
+                ..Default::default()
+            }],
+            routes: vec![PiRouteState {
+                route_id: 1,
+                path: vec![201, 202],
+                commodity_type_id: 3645,
+                quantity: 20,
+            }],
+            ..Default::default()
+        };
+        save_pi_network(snap, char_id, planet_id, &net);
+    });
+
+    // Simulate 1,799 1-Hz background ticks: remainder accumulates without completing early.
+    for sec in 1..=1_799 {
+        tick_all_colonies_background(&ctx, base_now + sec);
+    }
+    ctx.db.with_snapshot(|snap| {
+        let net = load_pi_network(snap, char_id, planet_id, 2);
+        let proc_pin = net.pins.iter().find(|p| p.pin_id == 201).unwrap();
+        let launchpad = net.pins.iter().find(|p| p.pin_id == 202).unwrap();
+        assert_eq!(proc_pin.contents.get(&2268).copied(), Some(3000));
+        assert_eq!(launchpad.contents.get(&3645).copied().unwrap_or(0), 0);
+        assert_eq!(proc_pin.last_cycle_unix, Some(base_now));
+    });
+
+    // At 1,800th 1-Hz tick, full P0 -> P1 cycle completes and routes output to launchpad.
+    tick_all_colonies_background(&ctx, base_now + 1_800);
+    ctx.db.with_snapshot(|snap| {
+        let net = load_pi_network(snap, char_id, planet_id, 2);
+        let proc_pin = net.pins.iter().find(|p| p.pin_id == 201).unwrap();
+        let launchpad = net.pins.iter().find(|p| p.pin_id == 202).unwrap();
+        assert_eq!(proc_pin.contents.get(&2268).copied().unwrap_or(0), 0);
+        assert_eq!(launchpad.contents.get(&3645).copied(), Some(20));
+        assert_eq!(proc_pin.last_cycle_unix, Some(base_now + 1_800));
+    });
+}

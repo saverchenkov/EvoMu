@@ -108,6 +108,7 @@ pub(super) fn is_war_participant_corp(
     snap: &WorldStateSnapshot,
     war_id: i64,
     my_corp: i64,
+    now_unix: u64,
 ) -> bool {
     let Some(w) = snap.wars.get(&war_id) else {
         return false;
@@ -124,6 +125,7 @@ pub(super) fn is_war_participant_corp(
         n.war_id == war_id
             && n.kind == NegKind::Ally
             && n.status == "Accepted"
+            && now_unix >= n.effective_unix.unwrap_or(0)
             && n.from_corp == my_corp
     })
 }
@@ -162,7 +164,7 @@ pub(super) fn credit_corp(snap: &mut WorldStateSnapshot, corp_id: i64, amount: I
     }
 }
 
-pub(super) fn sync_wars(ctx: &ServerContext) {
+pub(crate) fn sync_wars(ctx: &ServerContext) {
     let now = ctx.now_unix();
     let needs_end = ctx.db.with_snapshot(|snap| {
         snap.wars.values().filter(|w| w.active).any(|w| {
@@ -327,8 +329,9 @@ pub(super) fn neg_rows_for_caller(
     kind: NegKind,
     my_corp: i64,
 ) -> Result<Vec<Vec<PyRep>>, BridgeRpcError> {
+    let now_unix = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
-        let is_participant = is_war_participant_corp(snap, war_id, my_corp);
+        let is_participant = is_war_participant_corp(snap, war_id, my_corp, now_unix);
         if kind == NegKind::Surrender && !is_participant {
             return Err(BridgeRpcError {
                 code: "NotWarParticipant".into(),

@@ -415,3 +415,64 @@ async fn container_decay_crystal_damage_deactivate_loot_all_and_self_destruct_ki
     .unwrap();
     assert_eq!(granted_with_hash.dict_get("killID"), Some(&PyRep::Integer(km_id)));
 }
+
+#[test]
+fn insurance_contract_persists_end_unix_across_reload_and_expires() {
+    let (ctx, _session, char_id, ship_id, _sys_id) = make_fighter_ctx_and_session();
+    let now = 1_750_000_000_u64;
+    ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(now)));
+
+    let (ref_val, _) = compute_ship_insurance_quote_levels(&ctx, 23_915);
+    let saved_start = now - 30 * 86_400;
+    let saved_end = now + 54 * 86_400;
+
+    // Seed an existing Gold insurance contract in WorldStateSnapshot (as loaded from SQLite on restart).
+    let cloned_snap = ctx.db.with_mut_snapshot(|snap| {
+        let ship = snap.items.get_mut(&ship_id).unwrap();
+        ship.insured_payout_isk = ref_val;
+        snap.insurance_contracts.insert(
+            ship_id,
+            eve_db::PersistedInsuranceContractRecord {
+                ship_id,
+                ship_type_id: ship.type_id,
+                owner_id: char_id,
+                level_name: "Gold".into(),
+                level_fraction: 0.80,
+                cost_isk: 50_000.0,
+                payout_isk: ref_val * 0.80,
+                start_unix: saved_start,
+                end_unix: saved_end,
+            },
+        );
+        snap.clone()
+    });
+
+    // Simulate fresh server restart with empty runtime map.
+    let repo_restarted = std::sync::Arc::new(eve_db::WorldRepository::new_empty());
+    repo_restarted.with_mut_snapshot(|s| *s = cloned_snap);
+    let ctx_restarted = crate::router::ServerContext::with_sde_and_repository(
+        ctx.sde.clone(),
+        repo_restarted,
+    );
+    ctx_restarted.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(now)));
+
+    sync_ship_insurance_contracts(&ctx_restarted, char_id);
+    ctx_restarted.db.with_snapshot(|snap| {
+        let c = snap.insurance_contracts.get(&ship_id).expect("persisted contract kept");
+        assert_eq!(c.start_unix, saved_start);
+        assert_eq!(c.end_unix, saved_end, "restart must NOT reset end_unix to +84 days");
+        assert_eq!(c.level_name, "Gold");
+    });
+    with_combat_runtime(&ctx_restarted, |rt| {
+        let c = rt.insurance_contracts.get(&ship_id).unwrap();
+        assert_eq!(c.end_unix, saved_end);
+        assert_eq!(c.level_name, "Gold");
+    });
+
+    // Once now >= saved_end, sweep expires the persisted contract and clears ship payout.
+    sweep_expired_insurance_contracts(&ctx_restarted, saved_end);
+    ctx_restarted.db.with_snapshot(|snap| {
+        assert!(!snap.insurance_contracts.contains_key(&ship_id));
+        assert_eq!(snap.items[&ship_id].insured_payout_isk, 0.0);
+    });
+}

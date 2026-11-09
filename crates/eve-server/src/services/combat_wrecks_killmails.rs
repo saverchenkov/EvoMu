@@ -22,12 +22,18 @@ pub fn compute_ship_insurance_quote_levels(
     (ref_val, levels)
 }
 
-/// Synchronizes `rt.insurance_contracts` with `snap.items`, creating 12-week contract records for newly insured ships
-/// and voiding contracts whose ship was repackaged (`!singleton`), destroyed, or transferred/sold (`feat:ships.ship-insurance-link`, `feat:combat.insurance-contracts`).
+/// Synchronizes `rt.insurance_contracts` with `snap.items` and persisted `snap.insurance_contracts`,
+/// creating 12-week contract records only when no persisted contract exists and voiding contracts
+/// whose ship expired, was repackaged (`!singleton`), destroyed, or transferred/sold
+/// (`feat:ships.ship-insurance-link`, `feat:combat.insurance-contracts`, `#736`).
 pub fn sync_ship_insurance_contracts(ctx: &ServerContext, owner_id: i64) {
     let now_unix = ctx.now_unix();
-    let ship_items: Vec<(i64, u32, i64, bool, f64)> = ctx.db.with_snapshot(|snap| {
-        snap.items
+    let (ship_items, persisted_contracts): (
+        Vec<(i64, u32, i64, bool, f64)>,
+        HashMap<i64, eve_db::PersistedInsuranceContractRecord>,
+    ) = ctx.db.with_snapshot(|snap| {
+        let items = snap
+            .items
             .values()
             .filter(|i| {
                 ctx.sde
@@ -37,13 +43,40 @@ pub fn sync_ship_insurance_contracts(ctx: &ServerContext, owner_id: i64) {
                     .unwrap_or(false)
             })
             .map(|i| (i.item_id, i.type_id, i.owner_id, i.singleton, i.insured_payout_isk))
-            .collect()
+            .collect();
+        (items, snap.insurance_contracts.clone())
     });
-    let container_st = crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state(ctx);
+    let container_st =
+        crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state(ctx);
+    let mut merged_persisted: HashMap<
+        i64,
+        crate::services::inventory_fitting::fitting_containers_ships::InsuranceContractRecord,
+    > = container_st.insurance_contracts.clone();
+    for (sid, rec) in &persisted_contracts {
+        merged_persisted.insert(
+            *sid,
+            crate::services::inventory_fitting::fitting_containers_ships::InsuranceContractRecord {
+                ship_id: rec.ship_id,
+                ship_type_id: rec.ship_type_id,
+                owner_id: rec.owner_id,
+                level_name: rec.level_name.clone(),
+                level_fraction: rec.level_fraction,
+                cost_isk: rec.cost_isk,
+                payout_isk: rec.payout_isk,
+                start_unix: rec.start_unix,
+                end_unix: rec.end_unix,
+            },
+        );
+    }
     let mut voided_ship_ids = Vec::new();
-    let new_contracts = with_mut_combat_runtime(ctx, |rt| {
-        rt.insurance_contracts.clear();
-        for (sid, c) in &container_st.insurance_contracts {
+    let mut sync_to_container: Vec<(
+        i64,
+        crate::services::inventory_fitting::fitting_containers_ships::InsuranceContractRecord,
+    )> = Vec::new();
+    let mut sync_to_snap: Vec<(i64, eve_db::PersistedInsuranceContractRecord)> = Vec::new();
+    with_mut_combat_runtime(ctx, |rt| {
+        let prev_rt = std::mem::take(&mut rt.insurance_contracts);
+        for (sid, c) in &merged_persisted {
             if c.end_unix <= now_unix {
                 voided_ship_ids.push(*sid);
                 continue;
@@ -69,11 +102,29 @@ pub fn sync_ship_insurance_contracts(ctx: &ServerContext, owner_id: i64) {
                         end_unix: c.end_unix,
                     },
                 );
+                if !persisted_contracts.contains_key(sid) {
+                    sync_to_snap.push((
+                        *sid,
+                        eve_db::PersistedInsuranceContractRecord {
+                            ship_id: c.ship_id,
+                            ship_type_id: c.ship_type_id,
+                            owner_id: c.owner_id,
+                            level_name: c.level_name.clone(),
+                            level_fraction: c.level_fraction,
+                            cost_isk: c.cost_isk,
+                            payout_isk: c.payout_isk,
+                            start_unix: c.start_unix,
+                            end_unix: c.end_unix,
+                        },
+                    ));
+                }
+                if !container_st.insurance_contracts.contains_key(sid) {
+                    sync_to_container.push((*sid, c.clone()));
+                }
             } else {
                 voided_ship_ids.push(*sid);
             }
         }
-        let mut new_contracts: Vec<(i64, crate::services::inventory_fitting::fitting_containers_ships::InsuranceContractRecord)> = Vec::new();
         for &(sid, type_id, item_owner, singleton, payout_isk) in &ship_items {
             if singleton
                 && payout_isk > 0.0
@@ -81,73 +132,170 @@ pub fn sync_ship_insurance_contracts(ctx: &ServerContext, owner_id: i64) {
                 && !rt.insurance_contracts.contains_key(&sid)
                 && !voided_ship_ids.contains(&sid)
             {
-                let ref_val = compute_ship_insurance_reference_value(&ctx.sde, type_id);
-                let frac = (payout_isk / ref_val.max(1.0)).clamp(0.4, 1.0);
-                let (cost_isk, _) = compute_insurance_quote(ref_val, frac);
+                let prev_valid = prev_rt
+                    .get(&sid)
+                    .filter(|p| p.owner_id == item_owner && p.end_unix > now_unix);
+                let (level_name, level_fraction, cost_isk, start_unix, end_unix) =
+                    if let Some(p) = prev_valid {
+                        (
+                            p.level_name.clone(),
+                            p.level_fraction,
+                            p.cost_isk,
+                            p.start_unix,
+                            p.end_unix,
+                        )
+                    } else {
+                        let ref_val = compute_ship_insurance_reference_value(&ctx.sde, type_id);
+                        let frac = (payout_isk / ref_val.max(1.0)).clamp(0.4, 1.0);
+                        let (cost_isk, _) = compute_insurance_quote(ref_val, frac);
+                        (
+                            if frac >= 0.99 { "Platinum".into() } else { "Standard".into() },
+                            frac,
+                            cost_isk,
+                            now_unix,
+                            now_unix.saturating_add(INSURANCE_CONTRACT_DURATION_SECS),
+                        )
+                    };
                 let rec = crate::services::inventory_fitting::fitting_containers_ships::InsuranceContractRecord {
                     ship_id: sid,
                     ship_type_id: type_id,
                     owner_id: item_owner,
-                    level_name: if frac >= 0.99 { "Platinum".into() } else { "Standard".into() },
-                    level_fraction: frac,
+                    level_name: level_name.clone(),
+                    level_fraction,
                     cost_isk,
                     payout_isk,
-                    start_unix: now_unix,
-                    end_unix: now_unix.saturating_add(INSURANCE_CONTRACT_DURATION_SECS),
+                    start_unix,
+                    end_unix,
                 };
-                new_contracts.push((sid, rec));
+                sync_to_container.push((sid, rec));
+                sync_to_snap.push((
+                    sid,
+                    eve_db::PersistedInsuranceContractRecord {
+                        ship_id: sid,
+                        ship_type_id: type_id,
+                        owner_id: item_owner,
+                        level_name: level_name.clone(),
+                        level_fraction,
+                        cost_isk,
+                        payout_isk,
+                        start_unix,
+                        end_unix,
+                    },
+                ));
                 rt.insurance_contracts.insert(
                     sid,
                     InsuranceContractState {
                         ship_id: sid,
                         ship_type_id: type_id,
                         owner_id: item_owner,
-                        level_name: if frac >= 0.99 { "Platinum".into() } else { "Standard".into() },
-                        level_fraction: frac,
+                        level_name,
+                        level_fraction,
                         cost_isk,
                         payout_isk,
-                        start_unix: now_unix,
-                        end_unix: now_unix.saturating_add(INSURANCE_CONTRACT_DURATION_SECS),
+                        start_unix,
+                        end_unix,
                     },
                 );
             }
         }
-        new_contracts
     });
-    if !new_contracts.is_empty() {
-        crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(ctx, |st| {
-            for (ship_id, rec) in new_contracts {
-                st.insurance_contracts.insert(ship_id, rec);
-            }
-        });
+    if !sync_to_container.is_empty() {
+        crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(
+            ctx,
+            |st| {
+                for (ship_id, rec) in sync_to_container {
+                    st.insurance_contracts.insert(ship_id, rec);
+                }
+            },
+        );
     }
-    if !voided_ship_ids.is_empty() {
+    if !sync_to_snap.is_empty() || !voided_ship_ids.is_empty() {
         ctx.db.with_mut_snapshot(|snap| {
-            for sid in voided_ship_ids.clone() {
+            for (sid, rec) in sync_to_snap {
+                snap.insurance_contracts.insert(sid, rec);
+            }
+            for &sid in &voided_ship_ids {
+                snap.insurance_contracts.remove(&sid);
                 if let Some(it) = snap.items.get_mut(&sid) {
                     it.insured_payout_isk = 0.0;
                 }
             }
         });
-        crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(ctx, |st| {
-            for sid in voided_ship_ids {
+    }
+    if !voided_ship_ids.is_empty() {
+        crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(
+            ctx,
+            |st| {
+                for sid in voided_ship_ids {
+                    st.insurance_contracts.remove(&sid);
+                }
+            },
+        );
+    }
+}
+
+/// Sweeps expired ship insurance contracts on periodic background cluster ticks (`#736`).
+pub fn sweep_expired_insurance_contracts(ctx: &ServerContext, now_unix: u64) {
+    let mut expired_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
+        snap.insurance_contracts
+            .iter()
+            .filter(|(_, c)| c.end_unix <= now_unix)
+            .map(|(&sid, _)| sid)
+            .collect()
+    });
+    with_combat_runtime(ctx, |rt| {
+        for (&sid, c) in &rt.insurance_contracts {
+            if c.end_unix <= now_unix && !expired_ids.contains(&sid) {
+                expired_ids.push(sid);
+            }
+        }
+    });
+    let container_st =
+        crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state(ctx);
+    for (&sid, c) in &container_st.insurance_contracts {
+        if c.end_unix <= now_unix && !expired_ids.contains(&sid) {
+            expired_ids.push(sid);
+        }
+    }
+    if expired_ids.is_empty() {
+        return;
+    }
+    with_mut_combat_runtime(ctx, |rt| {
+        for &sid in &expired_ids {
+            rt.insurance_contracts.remove(&sid);
+        }
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        for &sid in &expired_ids {
+            snap.insurance_contracts.remove(&sid);
+            if let Some(it) = snap.items.get_mut(&sid) {
+                it.insured_payout_isk = 0.0;
+            }
+        }
+    });
+    crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(
+        ctx,
+        |st| {
+            for sid in expired_ids {
                 st.insurance_contracts.remove(&sid);
             }
-        });
-    }
+        },
+    );
 }
 
 /// Voids an active ship insurance contract when the ship is repackaged, traded, or un-insured (`feat:ships.ship-insurance-link`, `feat:combat.insurance-contracts`).
 pub fn void_ship_insurance_contract(ctx: &ServerContext, ship_id: i64) -> bool {
     let removed_rt = with_mut_combat_runtime(ctx, |rt| rt.insurance_contracts.remove(&ship_id).is_some());
     let removed_db = ctx.db.with_mut_snapshot(|snap| {
-        if let Some(it) = snap.items.get_mut(&ship_id) {
+        let removed_persisted = snap.insurance_contracts.remove(&ship_id).is_some();
+        let removed_item = if let Some(it) = snap.items.get_mut(&ship_id) {
             let had = it.insured_payout_isk > 0.0;
             it.insured_payout_isk = 0.0;
             had
         } else {
             false
-        }
+        };
+        removed_persisted || removed_item
     });
     let removed_container = crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(ctx, |st| {
         st.insurance_contracts.remove(&ship_id).is_some()
@@ -172,6 +320,7 @@ pub fn process_ship_insurance_payout(
         st.insurance_contracts.remove(&ship_id);
     });
     let db_payout = ctx.db.with_mut_snapshot(|snap| {
+        snap.insurance_contracts.remove(&ship_id);
         if let Some(it) = snap.items.get_mut(&ship_id) {
             let p = it.insured_payout_isk;
             it.insured_payout_isk = 0.0;

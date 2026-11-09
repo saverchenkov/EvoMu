@@ -321,3 +321,101 @@ fn sweep_expired_orders_refunds_buy_escrow_and_returns_sell_items() {
         assert_eq!(meta1.closed_unix, Some(now));
     });
 }
+
+#[test]
+fn get_system_asks_and_plex_best_sweep_expired_orders() {
+    let ctx = test_ctx();
+    let now = 1_750_000_000_u64;
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(now)));
+    let char_id = 90_000_001_i64;
+    let mut sess = jita_session(char_id, 1_000_009);
+    let kw = std::collections::HashMap::new();
+
+    ctx.db.with_mut_snapshot(|s| {
+        s.market_orders.insert(
+            710_001,
+            MarketOrderRecord {
+                order_id: 710_001,
+                owner_id: char_id,
+                station_id: JITA_STATION_ID,
+                region_id: THE_FORGE_REGION_ID,
+                type_id: 34,
+                is_bid: false,
+                price: IskCents::from_isk(10),
+                vol_entered: 50,
+                vol_remaining: 50,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+        save_market_order_meta(
+            s,
+            710_001,
+            MarketOrderMeta {
+                range: -1,
+                duration: 1,
+                issue_unix: now - 2 * 86_400,
+                order_state: None,
+                account_key: None,
+                final_vol_remaining: None,
+                closed_unix: None,
+            },
+        );
+    });
+
+    handle(
+        &ctx,
+        &mut sess,
+        "marketProxy",
+        "GetSystemAsks",
+        &[eve_proto::PyRep::Integer(30_000_142)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.market_orders[&710_001].vol_remaining, 0);
+    });
+
+    // Seed expired PLEX buy order and verify GetPlexBest sweeps it
+    ctx.db.with_mut_snapshot(|s| {
+        s.market_orders.insert(
+            710_002,
+            MarketOrderRecord {
+                order_id: 710_002,
+                owner_id: char_id,
+                station_id: JITA_STATION_ID,
+                region_id: THE_FORGE_REGION_ID,
+                type_id: PLEX_TYPE_ID,
+                is_bid: true,
+                price: IskCents::from_isk(5_000_000),
+                vol_entered: 2,
+                vol_remaining: 2,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents::from_isk(10_000_000),
+            },
+        );
+        save_market_order_meta(
+            s,
+            710_002,
+            MarketOrderMeta {
+                range: -1,
+                duration: 1,
+                issue_unix: now - 2 * 86_400,
+                order_state: None,
+                account_key: None,
+                final_vol_remaining: None,
+                closed_unix: None,
+            },
+        );
+    });
+    handle(&ctx, &mut sess, "marketProxy", "GetPlexBest", &[], &kw)
+        .unwrap()
+        .unwrap();
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.market_orders[&710_002].vol_remaining, 0);
+        assert_eq!(s.market_orders[&710_002].escrow, IskCents(0));
+    });
+}

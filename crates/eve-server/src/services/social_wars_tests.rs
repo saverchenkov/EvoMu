@@ -426,3 +426,46 @@ fn war_statistic_get_killmail_denies_uninvolved_without_hash() {
         .is_ok()
     );
 }
+
+#[test]
+fn war_ally_24h_effective_delay_and_sync_wars_enforced() {
+    let (ctx, mut agg_sess, _agg_char, _def_sess, def_corp, _ally_sess, ally_corp, agg_hq_id) =
+        setup_wars_ctx();
+    let declared = handle_wars(
+        &ctx,
+        &mut agg_sess,
+        "warRegistry",
+        "DeclareWarAgainst",
+        &[PyRep::Integer(def_corp), PyRep::Integer(agg_hq_id)],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let war_id = dict_i64(&declared, "warID").unwrap();
+    let now = 1_750_000_000_u64;
+    let eff = now + 86_400;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.war_state.negotiations.push(eve_db::PersistedWarNegotiation {
+            id: 9_901,
+            war_id,
+            kind: eve_db::PersistedNegKind::Ally,
+            from_corp: ally_corp,
+            isk: IskCents(0),
+            message: "Ally help".into(),
+            status: "Accepted".into(),
+            effective_unix: Some(eff),
+        });
+    });
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            !social_wars_helpers::is_war_participant_corp(snap, war_id, ally_corp, eff - 1),
+            "ally must NOT be a war participant before effective_unix (24h spool-up)"
+        );
+        assert!(
+            social_wars_helpers::is_war_participant_corp(snap, war_id, ally_corp, eff),
+            "ally becomes active war participant once now >= effective_unix"
+        );
+    });
+}

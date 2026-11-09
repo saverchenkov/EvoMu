@@ -543,3 +543,149 @@ fn advance_skill_queues_emits_server_skills_changed_and_queue_saved_and_advance_
         assert_eq!(snap.skills[&char_id][&skill_tid].level, 1);
     });
 }
+
+#[tokio::test]
+async fn unified_clock_tick_pipeline_syncs_ballpark_stats_and_preserves_ice_belts() {
+    let ctx = test_ctx();
+    let base_now = 1_800_000_000_u64;
+    let clock = Arc::new(VirtualServerClock::with_fixed_base(base_now));
+    ctx.set_clock(clock.clone());
+
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = 100_000_777_i64;
+    let corp_id = ctx.db.with_snapshot(|s| s.characters[&char_id].corporation_id);
+
+    ctx.db.acquire_online_lock(1, 501, Some(char_id), true, base_now).unwrap();
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    sys_h
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: 587,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 123.0,
+            inertia: 2.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+    let _ = sys_h
+        .set_combat_state(
+            ship_id,
+            eve_destiny::CombatState {
+                shield_hp: 1.0,
+                max_shield_hp: 1.0,
+                armor_hp: 1.0,
+                max_armor_hp: 1.0,
+                structure_hp: 1.0,
+                max_structure_hp: 1.0,
+                capacitor: 1.0,
+                max_capacitor: 1.0,
+                ..Default::default()
+            },
+        )
+        .await;
+
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            make_item(ship_id, 587, char_id, sys_id as i64, InventoryFlag::None, 1),
+        );
+        // Expired Expert System
+        snap.node_graph_state.expert_systems.entry(char_id).or_default().insert(
+            1001,
+            eve_db::service_domains::ExpertSystemRecord {
+                type_id: 1001,
+                inserted_at_ft: now_ft - 10_000_000,
+                expires_at_ft: now_ft,
+                skills_granted: [(3300, 3)].into_iter().collect(),
+            },
+        );
+        // IceBelt anomaly past generic TTL must survive, while normal Combat anomaly expires.
+        let anoms = snap.cosmic_anomalies.entry(sys_id).or_default();
+        anoms.push(eve_db::CosmicAnomalyRecord {
+            anomaly_id: "ICE-1".into(),
+            solar_system_id: sys_id,
+            name: "Blue Ice Belt".into(),
+            anomaly_type: "IceBelt".into(),
+            position: [10_000.0, 0.0, 0.0],
+            signal_strength: 1.0,
+            ore_types: vec![16_262],
+            remaining_volume: 10_000.0,
+            created_unix: base_now - 90_000,
+            lifetime_seconds: 3_600,
+            cleared: false,
+        });
+        anoms.push(eve_db::CosmicAnomalyRecord {
+            anomaly_id: "COMB-1".into(),
+            solar_system_id: sys_id,
+            name: "Hideaway".into(),
+            anomaly_type: "CombatAnomaly".into(),
+            position: [20_000.0, 0.0, 0.0],
+            signal_strength: 1.0,
+            ore_types: vec![],
+            remaining_volume: 0.0,
+            created_unix: base_now - 90_000,
+            lifetime_seconds: 3_600,
+            cleared: false,
+        });
+        // Matured pending friendly-fire toggle on corp governance.
+        let gov = snap.corp_governance.entry(corp_id).or_default();
+        gov.friendly_fire_legal = false;
+        gov.pending_friendly_fire = Some((true, base_now + 1));
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // Paused virtual clock returns 0 advanced ticks.
+    clock.set_paused(true);
+    assert_eq!(ctx.step_clock_tick(10), 0);
+    assert_eq!(ctx.tick_wall_second(), 0);
+    clock.set_paused(false);
+
+    // Stepping 1s wall tick triggers unified pipeline: sweeps expert systems, syncs ballpark stats,
+    // expires CombatAnomaly while preserving IceBelt, and promotes matured corp grants.
+    let expected = ctx.build_ship_combat_state(char_id, ship_id, 587);
+    assert_eq!(ctx.tick_wall_second(), 1);
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(notifs.iter().any(|n| n.event == "OnExpertSystemsUpdated"));
+    assert!(notifs.iter().any(|n| n.event == "OnServerSkillsChanged"));
+
+    let (_, ball) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let exp_vel = expected.base_max_velocity.expect("build_ship_combat_state sets base_max_velocity");
+    assert!(
+        (ball.max_velocity - exp_vel).abs() < 1e-3,
+        "expected ballpark max_velocity {} vs {}",
+        exp_vel,
+        ball.max_velocity
+    );
+    let cs = sys_h
+        .ballpark
+        .read()
+        .unwrap()
+        .combat_states
+        .get(&ship_id)
+        .cloned()
+        .unwrap();
+    assert!((cs.max_shield_hp - expected.max_shield_hp).abs() < 1e-3);
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.node_graph_state.expert_systems.get(&char_id).map_or(true, |m| m.is_empty()));
+        let anoms = &snap.cosmic_anomalies[&sys_id];
+        assert!(anoms.iter().any(|a| a.anomaly_id == "ICE-1"));
+        assert!(!anoms.iter().any(|a| a.anomaly_id == "COMB-1"));
+        assert!(snap.corp_governance[&corp_id].friendly_fire_legal);
+        assert!(snap.corp_governance[&corp_id].pending_friendly_fire.is_none());
+    });
+}

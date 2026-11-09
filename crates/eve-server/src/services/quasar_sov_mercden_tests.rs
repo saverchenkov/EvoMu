@@ -258,3 +258,51 @@ fn mercenary_den_and_activity_rpc_handlers() {
         STATUS_CONFLICT
     );
 }
+
+#[tokio::test]
+async fn tick_sov_gameplay_transitions_mercenary_den_reinforcement_and_shield_recovery() {
+    let ctx = crate::router::ServerContext::new();
+    let den_id = 1_090_888_001_i64;
+    let now = 1_750_000_000_u64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            den_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: den_id,
+                type_id: crate::services::sov_gameplay::TYPE_MERCENARY_DEN,
+                owner_corp_id: 98_000_001,
+                solar_system_id: 30_000_142,
+                name: "Reinforced Merc Den".into(),
+                position: [0.0, 0.0, 0.0],
+                state: "HullReinforced".into(),
+                reinforced_until_unix: now + 30,
+                shield_hp: 100.0,
+                armor_hp: 100.0,
+                hull_hp: 100.0,
+                ..Default::default()
+            },
+        );
+    });
+
+    crate::services::sov_gameplay::tick_sov_gameplay(&ctx, now + 29).await;
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&den_id].state, "HullReinforced");
+    });
+
+    // At exit of HullReinforced -> HullVulnerable
+    crate::services::sov_gameplay::tick_sov_gameplay(&ctx, now + 30).await;
+    ctx.db.with_snapshot(|snap| {
+        let s = &snap.structures[&den_id];
+        assert_eq!(s.state, "HullVulnerable");
+        assert_eq!(s.reinforced_until_unix, now + 30 + 900);
+    });
+
+    // After 900s uncontested in HullVulnerable -> ShieldVulnerable
+    crate::services::sov_gameplay::tick_sov_gameplay(&ctx, now + 30 + 900).await;
+    ctx.db.with_snapshot(|snap| {
+        let s = &snap.structures[&den_id];
+        assert_eq!(s.state, "ShieldVulnerable");
+        assert_eq!(s.reinforced_until_unix, 0);
+    });
+}

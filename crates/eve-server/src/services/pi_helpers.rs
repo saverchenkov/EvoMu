@@ -39,6 +39,8 @@ pub struct PiPinState {
     pub last_expedited_transfer_unix: u64,
     #[serde(default)]
     pub contents: HashMap<TypeId, u64>,
+    #[serde(default)]
+    pub last_cycle_unix: Option<u64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
@@ -632,13 +634,14 @@ pub fn advance_colony_simulation(
             continue;
         };
         let pin_id = pin.pin_id;
-        let all_inputs_routed = inputs.iter().all(|&(in_tid, _)| {
-            net.routes.iter().any(|r| {
-                r.path.last() == Some(&pin_id)
-                    && r.commodity_type_id == in_tid
-                    && r.path.len() >= 2
-                    && has_pi_link_path(&net.links, &r.path, 0.0).is_ok()
-            })
+        let all_inputs_routed = inputs.iter().all(|&(in_tid, in_qty)| {
+            pin.contents.get(&in_tid).copied().unwrap_or(0) >= in_qty
+                || net.routes.iter().any(|r| {
+                    r.path.last() == Some(&pin_id)
+                        && r.commodity_type_id == in_tid
+                        && r.path.len() >= 2
+                        && has_pi_link_path(&net.links, &r.path, 0.0).is_ok()
+                })
         });
         let output_route = net.routes.iter().find(|r| {
             r.path.first() == Some(&pin_id)
@@ -647,8 +650,14 @@ pub fn advance_colony_simulation(
                 && has_pi_link_path(&net.links, &r.path, 0.0).is_ok()
         });
         if !all_inputs_routed || output_route.is_none() {
+            net.pins[pin_idx].last_cycle_unix = Some(now_unix);
             continue;
         }
+        let pin_baseline = pin
+            .last_cycle_unix
+            .filter(|&t| t > 0 && t <= now_unix)
+            .unwrap_or(sim_start);
+        let pin_elapsed = now_unix.saturating_sub(pin_baseline);
         let out_target_pin_id = output_route.and_then(|r| r.path.last().copied()).unwrap_or(pin_id);
         let input_sources: Vec<(TypeId, u64, Vec<i64>)> = inputs
             .iter()
@@ -672,10 +681,13 @@ pub fn advance_colony_simulation(
             .collect();
 
         let out_unit_vol = ctx.sde.types.get(&out_tid).map(|t| t.volume.max(0.01)).unwrap_or(0.38);
-        let max_cycles = (elapsed_sec / cyc_secs).min(100);
+        let max_cycles = (pin_elapsed / cyc_secs).min(100);
+        let mut cycles_ran = 0_u64;
+        let mut stalled = false;
         for _ in 0..max_cycles {
             // Verify destination pin capacity before processor cycle execution
             let Some(dst_p) = net.pins.iter().find(|p| p.pin_id == out_target_pin_id) else {
+                stalled = true;
                 break;
             };
             let dst_cap_m3 = pin_storage_capacity_m3(&ctx.sde, dst_p.type_id);
@@ -686,6 +698,7 @@ pub fn advance_colony_simulation(
                 if !full_storage_pins.contains(&out_target_pin_id) {
                     full_storage_pins.push(out_target_pin_id);
                 }
+                stalled = true;
                 break;
             }
 
@@ -699,6 +712,7 @@ pub fn advance_colony_simulation(
                 avail >= in_qty
             });
             if !can_fulfill {
+                stalled = true;
                 break;
             }
 
@@ -732,7 +746,13 @@ pub fn advance_colony_simulation(
                 *dst_p.contents.entry(out_tid).or_insert(0) += out_qty;
             }
             processed_total += out_qty;
+            cycles_ran += 1;
         }
+        net.pins[pin_idx].last_cycle_unix = Some(if stalled {
+            now_unix
+        } else {
+            pin_baseline.saturating_add(cycles_ran.saturating_mul(cyc_secs))
+        });
     }
 
     // Check for extractor program completion or expiry
@@ -809,6 +829,56 @@ pub fn sync_character_pi_colonies_on_login(ctx: &ServerContext, char_id: i64) {
             }
         }
         Ok(())
+    });
+}
+
+/// Advances all planetary colonies in the background cluster tick (`#736`).
+/// Per-processor `last_cycle_unix` preserves sub-cycle elapsed time across 1 Hz ticks so
+/// 1,800s / 3,600s schematics complete accurately instead of truncating `1 / 1800 == 0`.
+pub fn tick_all_colonies_background(ctx: &ServerContext, now_unix: u64) {
+    let colony_baseline = |col: &PlanetaryColonyRecord, net: &PiColonyNetworkState| -> u64 {
+        if col.last_extracted_unix > 0 {
+            col.last_extracted_unix
+        } else if net.last_simulated_unix > 0 {
+            net.last_simulated_unix
+        } else {
+            net.pins
+                .iter()
+                .filter_map(|p| p.last_cycle_unix.filter(|&t| t > 0 && t < now_unix))
+                .min()
+                .unwrap_or(0)
+        }
+    };
+    let has_due = ctx.db.with_snapshot(|snap| {
+        snap.planetary_colonies.iter().any(|(&(cid, pid), c)| {
+            if c.last_extracted_unix > 0 && now_unix > c.last_extracted_unix {
+                return true;
+            }
+            let net = load_pi_network(snap, cid, pid, c.command_center_level);
+            let b = colony_baseline(c, &net);
+            b > 0 && now_unix > b
+        })
+    });
+    if !has_due {
+        return;
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        let keys: Vec<(i64, i64)> = snap.planetary_colonies.keys().copied().collect();
+        for (cid, pid) in keys {
+            let Some(mut col) = snap.planetary_colonies.get(&(cid, pid)).cloned() else {
+                continue;
+            };
+            let mut net = load_pi_network(snap, cid, pid, col.command_center_level);
+            let baseline = colony_baseline(&col, &net);
+            if baseline > 0 && now_unix > baseline {
+                let elapsed = now_unix.saturating_sub(baseline);
+                let (ext, proc_qty) = advance_colony_simulation(ctx, &mut col, &mut net, elapsed, now_unix);
+                net.pending_login_extracted = net.pending_login_extracted.saturating_add(ext);
+                net.pending_login_processed = net.pending_login_processed.saturating_add(proc_qty);
+                snap.planetary_colonies.insert((cid, pid), col);
+                save_pi_network(snap, cid, pid, &net);
+            }
+        }
     });
 }
 

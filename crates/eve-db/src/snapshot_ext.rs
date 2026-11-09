@@ -872,6 +872,21 @@ pub struct WorldStateSnapshot {
     pub fleet_and_social_ops: crate::service_domains::FleetAndSocialOpsStore,
     #[serde(default)]
     pub cluster_and_runtime: crate::service_domains::ClusterAndRuntimeStore,
+    #[serde(default)]
+    pub insurance_contracts: HashMap<i64, PersistedInsuranceContractRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct PersistedInsuranceContractRecord {
+    pub ship_id: i64,
+    pub ship_type_id: TypeId,
+    pub owner_id: i64,
+    pub level_name: String,
+    pub level_fraction: f64,
+    pub cost_isk: f64,
+    pub payout_isk: f64,
+    pub start_unix: u64,
+    pub end_unix: u64,
 }
 
 pub use crate::{

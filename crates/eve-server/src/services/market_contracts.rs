@@ -248,6 +248,19 @@ pub(crate) fn sweep_and_notify_expired_for_char(ctx: &ServerContext, char_id: i6
     }
 }
 
+/// Sweeps all expired market orders across the snapshot and notifies owners (`#736`).
+pub fn sweep_expired_orders_and_notify(ctx: &ServerContext, now_unix: u64) -> usize {
+    if !ctx.db.with_snapshot(|snap| has_expired_orders(snap, now_unix)) {
+        return 0;
+    }
+    let swept = ctx.db.with_mut_snapshot(|snap| sweep_expired_orders(snap, now_unix));
+    let count = swept.len();
+    if !swept.is_empty() {
+        emit_expired_order_notifications(ctx, &swept);
+    }
+    count
+}
+
 pub(crate) fn emit_expired_order_notifications(ctx: &ServerContext, expired: &[(i64, i64, bool, TypeId, i64)]) {
     for (oid, owner_id, is_bid, type_id, station_id) in expired {
         super::market_trading::notify_own_order_changed(ctx, *owner_id, 0, *oid, "Expiry");
@@ -393,6 +406,7 @@ pub fn handle(
                     return Some(Err(rpc_err("NoSolarSystem", "GetSystemAsks requires an active solarSystemID")));
                 };
                 let now_unix = ctx.now_unix();
+                let _ = sweep_expired_orders_and_notify(ctx, now_unix);
                 let rows = ctx.db.with_snapshot(|snap| {
                     crate::services::market_trading::best_asks_to_summary_rows(
                         snap.market_orders.values().filter(|o| {
@@ -887,6 +901,8 @@ pub fn handle(
 
             "GetPlexBest" => {
                 if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
+                let now_unix = ctx.now_unix();
+                let _ = sweep_expired_orders_and_notify(ctx, now_unix);
                 let (best_ask, best_bid, ask_vol, bid_vol, summary_rows) =
                     ctx.db.with_snapshot(|snap| {
                         let mut min_ask: Option<&MarketOrderRecord> = None;

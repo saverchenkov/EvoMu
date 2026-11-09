@@ -747,3 +747,54 @@ fn test_contract_item_flags_asset_safety_alsc_and_corp_rbac_security() {
     .unwrap()
     .unwrap();
 }
+
+#[test]
+fn sweep_expired_contracts_and_notify_emits_expiry_and_returns_escrow() {
+    let (ctx, mut issuer_sess, issuer_id, _acc_sess, _acc_id, station_id, _dest_id) =
+        setup_contracts_ctx();
+    let now = 1_750_000_000_u64;
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(now)));
+    ctx.db.acquire_online_lock(1, 501, Some(issuer_id), true, now).unwrap();
+
+    let item_id = 888_111_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            item_id,
+            make_fighter_item(item_id, 34, issuer_id, station_id, InventoryFlag::Hangar, 100),
+        );
+    });
+    let kwargs = HashMap::new();
+    let res = handle(
+        &ctx,
+        &mut issuer_sess,
+        "contractProxy",
+        "CreateContract",
+        &[PyRep::keyval([
+            ("contractType", PyRep::String("ItemExchange".into())),
+            ("forCorp", PyRep::Bool(false)),
+            ("startStationID", PyRep::Integer(station_id)),
+            ("price", PyRep::Real(100_000.0)),
+            ("reward", PyRep::Real(25_000.0)),
+            ("expiretime", PyRep::Integer(1440)),
+            ("itemList", PyRep::List(vec![PyRep::Integer(item_id)])),
+        ])],
+        &kwargs,
+    )
+    .unwrap()
+    .unwrap();
+    let cid = dict_i64(&res, "contractID").unwrap();
+    let exp_unix = ctx.db.with_snapshot(|s| s.contracts[&cid].expiration_unix);
+    let _ = ctx.drain_notifications_for_char(issuer_id);
+
+    let swept = sweep_expired_contracts_and_notify(&ctx, exp_unix);
+    assert_eq!(swept, 1);
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.contracts[&cid].status, "Expired");
+        assert_eq!(snap.items[&item_id].owner_id, issuer_id);
+        assert_eq!(snap.items[&item_id].flag, InventoryFlag::Hangar);
+    });
+    let notifs = ctx.drain_notifications_for_char(issuer_id);
+    assert!(notifs.iter().any(|n| n.event == "OnContractCacheCleared"));
+    assert!(notifs.iter().any(|n| n.event == "OnItemChange"));
+}

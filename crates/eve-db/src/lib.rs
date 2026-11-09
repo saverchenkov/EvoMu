@@ -62,7 +62,7 @@ pub use persistence::{
 pub use snapshot_ext::{
     CalendarEventRecord, ChatChannelAclRecord, CorpVoteBallotRecord, CorpVoteCaseRecord,
     LpRewardLogEntry, MailingListRecord, MarketDailySummary, MarketHistoryDayRecord,
-    SocialContactRecord, StarbaseDetailSettings,
+    PersistedInsuranceContractRecord, SocialContactRecord, StarbaseDetailSettings,
 };
 pub use durable_domain_types::{
     DetailedKillmail, KillmailAttackerEntry, KillmailItemEntry, PersistedFwStatEvent,

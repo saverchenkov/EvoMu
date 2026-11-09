@@ -696,7 +696,7 @@ fn execute_due_abyssal_collapse_sync(
 }
 
 /// Runs all time-driven SP-6 / SP-7 lifecycle progressions when server time advances from `prev_unix`
-/// by `secs` seconds (or when `tick_background_cluster` runs with `secs == 0`).
+/// by `secs` seconds.
 pub fn on_advance_secs(ctx: &ServerContext, prev_unix: u64, secs: u64) {
     on_advance_secs_with_sim_clock_rebase(ctx, prev_unix, secs, true);
 }
@@ -709,6 +709,16 @@ pub fn on_advance_secs_with_sim_clock_rebase(
     prev_unix: u64,
     secs: u64,
     emit_sim_clock_rebase: bool,
+) {
+    on_advance_secs_internal(ctx, prev_unix, secs, emit_sim_clock_rebase, true);
+}
+
+pub fn on_advance_secs_internal(
+    ctx: &ServerContext,
+    prev_unix: u64,
+    secs: u64,
+    emit_sim_clock_rebase: bool,
+    step_active_npc_ai_sync: bool,
 ) {
     if emit_sim_clock_rebase {
         crate::services::notify_emitters_tournaments_anomalies::emit_sim_clock_rebase_if_advanced(ctx, prev_unix, secs);
@@ -732,9 +742,86 @@ pub fn on_advance_secs_with_sim_clock_rebase(
         crate::services::market_contracts::emit_expired_order_notifications(ctx, &swept);
     }
 
-    let cw_pilots: Vec<i64> = with_combat_runtime(ctx, |rt| rt.crimewatch_timer_states.keys().copied().collect());
+    let mut cw_pilots: Vec<i64> = with_combat_runtime(ctx, |rt| {
+        let mut ids: Vec<i64> = rt.crimewatch_timer_states.keys().copied().collect();
+        for &cid in rt.disapproval_flags.keys() {
+            if !ids.contains(&cid) { ids.push(cid); }
+        }
+        for &cid in rt.npc_timers.keys() {
+            if !ids.contains(&cid) { ids.push(cid); }
+        }
+        ids
+    });
+    if let Ok(cw) = ctx.crimewatch.read() {
+        for (&cid, st) in &cw.states {
+            if (st.weapon_timer_until_unix > 0
+                || st.pvp_timer_until_unix > 0
+                || st.suspect_flag_until_unix > 0
+                || st.criminal_flag_until_unix > 0)
+                && !cw_pilots.contains(&cid)
+            {
+                cw_pilots.push(cid);
+            }
+        }
+    }
     for pid in cw_pilots {
         crate::services::combat_crimewatch::crimewatch_timers::emit_crimewatch_timer_notifications(ctx, pid, now_unix);
+    }
+
+    // Sweep expired CrimeWatch timers and runtime maps (`#736`).
+    let has_expired_cw = ctx.crimewatch.read().is_ok_and(|cw| {
+        cw.states.values().any(|st| {
+            (st.weapon_timer_until_unix > 0 && now_unix >= st.weapon_timer_until_unix)
+                || (st.pvp_timer_until_unix > 0 && now_unix >= st.pvp_timer_until_unix)
+                || (st.suspect_flag_until_unix > 0 && now_unix >= st.suspect_flag_until_unix)
+                || (st.criminal_flag_until_unix > 0 && now_unix >= st.criminal_flag_until_unix)
+        }) || cw.aggression_mgr.records.values().any(|r| r.expires_unix <= now_unix)
+    });
+    if has_expired_cw {
+        if let Ok(mut cw) = ctx.crimewatch.write() {
+            cw.states.retain(|_, st| {
+                if st.weapon_timer_until_unix > 0 && now_unix >= st.weapon_timer_until_unix {
+                    st.weapon_timer_until_unix = 0;
+                }
+                if st.pvp_timer_until_unix > 0 && now_unix >= st.pvp_timer_until_unix {
+                    st.pvp_timer_until_unix = 0;
+                }
+                if st.suspect_flag_until_unix > 0 && now_unix >= st.suspect_flag_until_unix {
+                    st.suspect_flag_until_unix = 0;
+                }
+                if st.criminal_flag_until_unix > 0 && now_unix >= st.criminal_flag_until_unix {
+                    st.criminal_flag_until_unix = 0;
+                }
+                st.weapon_timer_until_unix > 0
+                    || st.pvp_timer_until_unix > 0
+                    || st.suspect_flag_until_unix > 0
+                    || st.criminal_flag_until_unix > 0
+                    || st.pending_concord_arrival.is_some()
+            });
+            cw.aggression_mgr.records.retain(|_, r| r.expires_unix > now_unix);
+        }
+    }
+    let has_expired_rt_cw = with_combat_runtime(ctx, |rt| {
+        rt.disapproval_flags.values().any(|&exp| now_unix >= exp)
+            || rt.npc_timers.values().any(|&exp| now_unix >= exp)
+            || rt.duel_challenges.values().any(|&exp| now_unix >= exp)
+            || rt.kill_right_expires_unix.values().any(|&exp| now_unix >= exp)
+            || rt
+                .limited_engagements
+                .values()
+                .any(|m| m.values().any(|&exp| now_unix >= exp))
+    });
+    if has_expired_rt_cw {
+        with_mut_combat_runtime(ctx, |rt| {
+            rt.disapproval_flags.retain(|_, &mut exp| now_unix < exp);
+            rt.npc_timers.retain(|_, &mut exp| now_unix < exp);
+            rt.duel_challenges.retain(|_, &mut exp| now_unix < exp);
+            rt.kill_right_expires_unix.retain(|_, &mut exp| now_unix < exp);
+            for m in rt.limited_engagements.values_mut() {
+                m.retain(|_, &mut exp| now_unix < exp);
+            }
+            rt.limited_engagements.retain(|_, m| !m.is_empty());
+        });
     }
 
     // 1. Sync any in-memory self-destruct countdowns from `CombatRuntimeState` into `Sp6PersistedState`
@@ -928,11 +1015,13 @@ pub fn on_advance_secs_with_sim_clock_rebase(
     };
     let mut finished_warps: std::collections::HashSet<i64> = std::collections::HashSet::new();
     for _ in 0..step_iters {
-        for &sys_id in active_systems.keys() {
-            crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync(ctx, sys_id);
-            if let Some(mgr) = ctx.npc_spawns.write().unwrap_or_else(|e| e.into_inner()).get_mut(&sys_id) {
-                let tick = ctx.systems.get_or_spawn(sys_id).ballpark.read().map(|b| b.current_tick).unwrap_or(0);
-                mgr.step_ai_sync(ctx, sys_id, tick, 1.0);
+        if step_active_npc_ai_sync {
+            for &sys_id in active_systems.keys() {
+                crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync(ctx, sys_id);
+                if let Some(mgr) = ctx.npc_spawns.write().unwrap_or_else(|e| e.into_inner()).get_mut(&sys_id) {
+                    let tick = ctx.systems.get_or_spawn(sys_id).ballpark.read().map(|b| b.current_tick).unwrap_or(0);
+                    mgr.step_ai_sync(ctx, sys_id, tick, 1.0);
+                }
             }
         }
         for (&sys_id, handle) in &disconnected_systems {
@@ -1259,13 +1348,95 @@ pub fn on_advance_secs_with_sim_clock_rebase(
     }
 }
 
-/// Production 1Hz background cluster tick (`plan:SP-7`).
-/// Advances all server-authoritative timers (`on_advance_secs`), checks 11:00 UTC downtime crossing
-/// (`run_daily_downtime_and_jobs`), completes due skill-queue items (`OnSkillTrained`), executes due
-/// CONCORD responses (`step_concord`), despawns expired anomalies/signatures, steps extended NPC AI
-/// across active systems even when unobserved (`feat:lifecycle.world-unobserved-system-sim`), and
-/// processes container decay.
+/// Production 1 Hz background cluster tick (`plan:SP-7`, `#735`).
+/// Honors `ctx.is_clock_paused()` and `ctx.time_acceleration_multiplier()`, running the unified
+/// synchronous subsystem pipeline (`run_clock_advanced_sync_pipeline`) alongside async cluster tasks.
 pub async fn tick_background_cluster(ctx: &ServerContext) {
+    if ctx.is_clock_paused() {
+        return;
+    }
+    tick_background_cluster_with_step(ctx, ctx.time_acceleration_multiplier()).await;
+}
+
+/// Runs one background cluster tick where the server clock advanced by `explicit_step_secs` (`>= 1`).
+/// IceBelt anomalies are permanent system anomalies respawned by `tick_all_ice_belt_respawns_sync`
+/// 4 hours after depletion, so they must not be deleted by generic combat-anomaly lifetime pruning.
+pub(crate) fn sweep_expired_cosmic_anomalies_and_signatures(ctx: &ServerContext, now_unix: u64) {
+    let has_expired_cosmic = ctx.db.with_snapshot(|snap| {
+        snap.cosmic_anomalies.values().any(|anoms| {
+            anoms.iter().any(|a| {
+                a.anomaly_type != "IceBelt"
+                    && a.lifetime_seconds > 0
+                    && now_unix >= a.created_unix.saturating_add(a.lifetime_seconds)
+            })
+        }) || snap.cosmic_signatures.values().any(|sigs| {
+            sigs.iter().any(|s| {
+                !s.sig_group.eq_ignore_ascii_case("wormhole")
+                    && s.sig_group != "IceBelt"
+                    && s.lifetime_seconds > 0
+                    && now_unix >= s.created_unix.saturating_add(s.lifetime_seconds)
+            })
+        })
+    });
+    if has_expired_cosmic {
+        let mut expired_anoms_by_sys: Vec<(u32, Vec<String>)> = Vec::new();
+        let mut expired_sigs_by_sys: Vec<(u32, Vec<String>)> = Vec::new();
+        ctx.db.with_mut_snapshot(|snap| {
+            for (&sys_id, anoms) in snap.cosmic_anomalies.iter_mut() {
+                let mut removed = Vec::new();
+                anoms.retain(|a| {
+                    let keep = a.anomaly_type == "IceBelt"
+                        || a.lifetime_seconds == 0
+                        || now_unix < a.created_unix.saturating_add(a.lifetime_seconds);
+                    if !keep && !a.cleared {
+                        removed.push(a.anomaly_id.clone());
+                    }
+                    keep
+                });
+                if !removed.is_empty() {
+                    expired_anoms_by_sys.push((sys_id, removed));
+                }
+            }
+            for (&sys_id, sigs) in snap.cosmic_signatures.iter_mut() {
+                let mut removed = Vec::new();
+                sigs.retain(|s| {
+                    let keep = s.sig_group.eq_ignore_ascii_case("wormhole")
+                        || s.sig_group == "IceBelt"
+                        || s.lifetime_seconds == 0
+                        || now_unix < s.created_unix.saturating_add(s.lifetime_seconds);
+                    if !keep && !s.collapsed {
+                        removed.push(s.signature_id.clone());
+                    }
+                    keep
+                });
+                if !removed.is_empty() {
+                    expired_sigs_by_sys.push((sys_id, removed));
+                }
+            }
+        });
+        for (sys_id, removed_ids) in expired_anoms_by_sys {
+            crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_anomaly_delta(
+                ctx,
+                sys_id,
+                &[],
+                &removed_ids,
+            );
+        }
+        for (sys_id, removed_ids) in expired_sigs_by_sys {
+            crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_signature_delta(
+                ctx,
+                sys_id,
+                &[],
+                &removed_ids,
+            );
+        }
+    }
+}
+
+pub async fn tick_background_cluster_with_step(ctx: &ServerContext, explicit_step_secs: u64) {
+    if explicit_step_secs == 0 {
+        return;
+    }
     let now_unix = ctx.now_unix();
     let _ = crate::services::serverops_cluster::step_downtime_countdown_warnings(ctx, now_unix);
     if crate::services::serverops_cluster::is_auto_cluster_tidi_enabled(ctx) {
@@ -1296,7 +1467,6 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
         let _ = crate::services::serverops_cluster::maybe_complete_scheduled_downtime_restart(ctx, now_unix);
     }
 
-    on_advance_secs(ctx, now_unix, 0);
     let cached_prev = ctx
         .cluster_tick_last_unix
         .swap(now_unix, std::sync::atomic::Ordering::Relaxed);
@@ -1309,8 +1479,11 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     } else {
         Some(cached_prev)
     };
-    let prev = db_prev.unwrap_or_else(|| now_unix.saturating_sub(1));
-    let elapsed_secs = now_unix.saturating_sub(prev).max(1);
+    let prev = db_prev.unwrap_or_else(|| now_unix.saturating_sub(explicit_step_secs.max(1)));
+    let tick_secs = now_unix
+        .saturating_sub(prev)
+        .max(explicit_step_secs)
+        .max(1);
     let persisted = {
         let cur = ctx
             .cluster_tick_persisted_unix
@@ -1334,19 +1507,29 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
         ctx.db.with_mut_snapshot(|snap| {
             snap.service_state_blobs
                 .insert("cluster_tick_last_unix".into(), now_unix.to_string());
+            snap.service_state_blobs
+                .insert("__server_now_unix".into(), now_unix.to_string());
         });
         ctx.cluster_tick_persisted_unix
             .store(now_unix, std::sync::atomic::Ordering::Relaxed);
     }
-    crate::services::pve_crab_beacons::on_server_clock_advanced(ctx, elapsed_secs);
-    let prev_metenox_tick = ctx.db.with_snapshot(|snap| {
-        if snap.mining_and_ess_state.metenox_last_tick_unix > 0 {
-            snap.mining_and_ess_state.metenox_last_tick_unix
-        } else {
-            now_unix
-        }
-    });
-    crate::services::mining_advanced::tick_all_metenox_moon_drills(ctx, prev_metenox_tick, now_unix);
+
+    // Execute the unified synchronous per-tick pipeline (`#735`):
+    // - `on_advance_secs_internal(ctx, prev, tick_secs, false, false)` (including disconnected warp reconciliation)
+    // - `pve_special_sites::on_server_clock_advanced`
+    // - `tick_all_metenox_moon_drills`
+    // - `purge_expired_boosters_all`
+    // - `advance_skill_queues`
+    // - `tick_fleet_lifecycle`
+    // - `tick_all_ice_belt_respawns_sync`
+    // - `sweep_expired_bookmarks_and_notify`
+    // - jetcan & moon extraction natural decay
+    // - `active_moon_probes` survey arrival notifications
+    // - `sync_all_alliance_timers`
+    // - `sync_all_structures`
+    ctx.run_clock_advanced_sync_pipeline(prev, tick_secs, false, false);
+    crate::services::industry_pi::pi_helpers::tick_all_colonies_background(ctx, now_unix);
+
     crate::services::mining_advanced::tick_all_moon_extractions(ctx).await;
     crate::services::mining_phased_autotarget::tick_phased_asteroid_fields(ctx, now_unix).await;
     crate::services::quasar_payment_store_types::process_due_payment_schedules(&ctx.db, &ctx.quasar_gateway.pending_notices, now_unix);
@@ -1364,42 +1547,10 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     for (scope, payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
         let _ = ctx.quasar_gateway.publish_notice(scope, payload, ts);
     }
-    ctx.advance_skill_queues(1.0);
 
-    let has_expired_cosmic = ctx.db.with_snapshot(|snap| {
-        snap.cosmic_anomalies.values().any(|anoms| {
-            anoms.iter().any(|a| {
-                a.lifetime_seconds > 0
-                    && now_unix >= a.created_unix.saturating_add(a.lifetime_seconds)
-            })
-        }) || snap.cosmic_signatures.values().any(|sigs| {
-            sigs.iter().any(|s| {
-                !s.sig_group.eq_ignore_ascii_case("wormhole")
-                    && s.lifetime_seconds > 0
-                    && now_unix >= s.created_unix.saturating_add(s.lifetime_seconds)
-            })
-        })
-    });
-    if has_expired_cosmic {
-        ctx.db.with_mut_snapshot(|snap| {
-            for anoms in snap.cosmic_anomalies.values_mut() {
-                anoms.retain(|a| {
-                    a.lifetime_seconds == 0
-                        || now_unix < a.created_unix.saturating_add(a.lifetime_seconds)
-                });
-            }
-            for sigs in snap.cosmic_signatures.values_mut() {
-                sigs.retain(|s| {
-                    s.sig_group.eq_ignore_ascii_case("wormhole")
-                        || s.lifetime_seconds == 0
-                        || now_unix < s.created_unix.saturating_add(s.lifetime_seconds)
-                });
-            }
-        });
-    }
+    sweep_expired_cosmic_anomalies_and_signatures(ctx, now_unix);
     crate::services::space_destiny::expire_and_respawn_wormholes_in_cluster(ctx, now_unix).await;
     crate::services::space_destiny::expire_all_overdue_probes(ctx, now_unix).await;
-    let _ = crate::services::station_structure::structure_lifecycle::sync_all_structures(ctx);
     crate::services::sov_gameplay::tick_sov_gameplay(ctx, now_unix).await;
     crate::services::fw_gameplay::tick_fw_gameplay(ctx, now_unix).await;
     crate::services::combat_npc_encounters::tick_overdue_npc_bounty_payouts(ctx, now_unix);
@@ -1516,9 +1667,14 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
         if !ctx
             .dedicated_physics_ticker_active
             .load(std::sync::atomic::Ordering::Acquire)
-            && !handle.take_auto_stepped_at(now_unix)
         {
-            step_single_system_physics_step(ctx, sys_id, &handle).await;
+            let phys_steps = explicit_step_secs.clamp(1, 60);
+            for step_idx in 0..phys_steps {
+                if step_idx == 0 && handle.take_auto_stepped_at(now_unix) {
+                    continue;
+                }
+                step_single_system_physics_step(ctx, sys_id, &handle).await;
+            }
         }
         if (32_000_000..=32_999_999).contains(&sys_id) {
             crate::services::pve_special_sites_abyssal::prune_out_of_bounds_abyssal_probes(ctx, sys_id);
@@ -1559,8 +1715,12 @@ async fn step_single_system_physics_step(
 /// Runs on a dedicated wall-clock ticker in production so slow mining or
 /// SQLite persistence in `tick_background_cluster` cannot delay warp completion.
 pub async fn step_active_systems_physics_tick(ctx: &ServerContext, elapsed_secs: u64) {
+    if ctx.is_clock_paused() {
+        return;
+    }
     let now_unix = ctx.now_unix();
-    let steps = elapsed_secs.clamp(1, 60);
+    let mult = ctx.time_acceleration_multiplier();
+    let steps = elapsed_secs.saturating_mul(mult).clamp(1, 60);
     let active_handles = ctx.systems.active_system_handles();
     for (sys_id, handle) in active_handles {
         for step_idx in 0..steps {

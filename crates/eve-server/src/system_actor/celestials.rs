@@ -707,6 +707,42 @@ impl SystemHandle {
         true
     }
 
+    /// Pushes recomputed ship kinematics & `CombatState` baselines from `ServerContext`
+    /// after skill completions, booster expirations, or expert system expirations (`#736`).
+    pub fn try_sync_ship_ballpark_stats(&self, ball_id: BallId, fresh: &CombatState) -> bool {
+        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        let prev_max_vel = bp.balls.get(&ball_id).map(|b| b.max_velocity);
+        let Some(cs) = bp.combat_states.get_mut(&ball_id) else {
+            return false;
+        };
+        cs.base_max_velocity = fresh.base_max_velocity;
+        cs.base_mass = fresh.base_mass;
+        cs.base_inertia = fresh.base_inertia;
+        cs.base_signature_radius = fresh.base_signature_radius;
+        cs.base_max_shield_hp = fresh.base_max_shield_hp;
+        cs.base_max_armor_hp = fresh.base_max_armor_hp;
+        cs.base_max_structure_hp = fresh.base_max_structure_hp;
+        cs.base_max_capacitor = fresh.base_max_capacitor;
+        cs.shield_recharge_time_ms = fresh.shield_recharge_time_ms;
+        cs.base_capacitor_recharge_time_ms = fresh.base_capacitor_recharge_time_ms;
+        cs.base_shield_resonance = fresh.base_shield_resonance;
+        cs.base_armor_resonance = fresh.base_armor_resonance;
+        cs.base_structure_resonance = fresh.base_structure_resonance;
+        bp.recompute_ball_attributes(ball_id);
+        if let (Some(prev), Some(new_v)) = (prev_max_vel, bp.balls.get(&ball_id).map(|b| b.max_velocity)) {
+            if (prev - new_v).abs() > 1e-6 {
+                bp.emit_event(
+                    Some(ball_id),
+                    eve_destiny::DestinyEvent::SetMaxSpeed {
+                        ball_id,
+                        max_speed: new_v,
+                    },
+                );
+            }
+        }
+        true
+    }
+
     pub fn try_remove_warp_bubble(&self, id: BallId) {
         let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
         let _ = bp.remove_warp_bubble(id);

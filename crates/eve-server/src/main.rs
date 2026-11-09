@@ -84,16 +84,21 @@ async fn main() -> Result<()> {
         });
     }
 
-    // World tick: resolve due mining-module cycles and SP-6/SP-7 background cluster timers once per second (`MN-04`, `plan:SP-7`).
+    // World tick: advance live server clock (`tick_wall_second`, honoring pause/pause_on_tick/acceleration)
+    // and run the unified 1 Hz cluster tick pipeline (`MN-04`, `T-7`, `plan:SP-7`).
     {
         let tick_ctx = Arc::clone(&ctx);
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(1));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            ticker.tick().await;
             loop {
                 ticker.tick().await;
-                let _ = eve_server::services::mining_cycle::process_mining_cycles(&tick_ctx).await;
-                eve_server::sp6_lifecycle::tick_background_cluster(&tick_ctx).await;
+                let advanced = tick_ctx.clock().tick_wall_second();
+                if advanced > 0 {
+                    eve_server::sp6_lifecycle::tick_background_cluster_with_step(&tick_ctx, advanced)
+                        .await;
+                }
             }
         });
     }

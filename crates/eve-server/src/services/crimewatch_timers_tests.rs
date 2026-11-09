@@ -494,3 +494,58 @@ fn test_evaluate_and_record_pvp_aggression_and_remote_assistance() {
         .is_criminal(now));
     let _ = make_fighter_type(600, 25, 6, 10_000.0, vec![]);
 }
+
+#[test]
+fn on_advance_secs_internal_sweeps_expired_crimewatch_and_runtime_maps() {
+    let (ctx, _sess, char_id, _ship_id, _sys_id) = make_fighter_ctx_and_session();
+    let now = 1_750_000_000_u64;
+    ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(now)));
+    let target_id = 90_000_002_i64;
+    let active_char_id = 90_000_003_i64;
+
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        let st_exp = cw.get_or_create(char_id);
+        st_exp.suspect_flag_until_unix = now + 10;
+        st_exp.criminal_flag_until_unix = now + 10;
+        st_exp.weapon_timer_until_unix = now + 10;
+        st_exp.pvp_timer_until_unix = now + 10;
+
+        let st_live = cw.get_or_create(active_char_id);
+        st_live.suspect_flag_until_unix = now + 300;
+    }
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.disapproval_flags.insert(char_id, now + 10);
+        rt.disapproval_flags.insert(active_char_id, now + 300);
+        rt.npc_timers.insert(char_id, now + 10);
+        rt.duel_challenges.insert((char_id, target_id), now + 10);
+        rt.kill_right_expires_unix.insert(5001, now + 10);
+        rt.limited_engagements
+            .entry(char_id)
+            .or_default()
+            .insert(target_id, now + 10);
+    });
+
+    ctx.clock().advance_secs(10);
+    crate::sp6_lifecycle::on_advance_secs_internal(&ctx, now + 10, 10, false, false);
+
+    {
+        let cw = ctx.crimewatch.read().unwrap();
+        assert!(
+            !cw.states.contains_key(&char_id),
+            "fully expired pilot CrimeWatch state must be swept"
+        );
+        assert!(
+            cw.states.contains_key(&active_char_id),
+            "unexpired pilot CrimeWatch state must remain"
+        );
+    }
+    with_combat_runtime(&ctx, |rt| {
+        assert!(!rt.disapproval_flags.contains_key(&char_id));
+        assert!(rt.disapproval_flags.contains_key(&active_char_id));
+        assert!(!rt.npc_timers.contains_key(&char_id));
+        assert!(!rt.duel_challenges.contains_key(&(char_id, target_id)));
+        assert!(!rt.kill_right_expires_unix.contains_key(&5001));
+        assert!(!rt.limited_engagements.contains_key(&char_id));
+    });
+}

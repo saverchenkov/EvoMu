@@ -396,6 +396,20 @@ async fn test_activate_process_and_deactivate_mining_cycle() {
     let sys = ctx.systems.get_or_spawn(sys_id);
     let _ = sys
         .spawn_ball(Ball {
+            id: ast_id,
+            type_id: 1230,
+            position: DVec3::new(1000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e9,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    let _ = sys
+        .spawn_ball(Ball {
             id: ship_id,
             type_id: 32880,
             position: DVec3::ZERO,
@@ -597,4 +611,147 @@ fn test_compute_reprocessing_rates_for_item_npc_and_structure() {
     assert!((s_base - 0.50).abs() < 1e-6);
     assert!(s_yield > 0.50);
     assert_eq!(s_tax, 0.0);
+}
+
+#[tokio::test]
+async fn dedicated_physics_and_cluster_ticks_yield_1x_mining_not_2x() {
+    let ctx = make_ctx();
+    let now = 1_750_000_000_u64;
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(now)));
+    ctx.dedicated_physics_ticker_active
+        .store(true, std::sync::atomic::Ordering::Release);
+
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let mod_id = 200_000_999_i64;
+    let ast_id = 300_000_999_i64;
+    let sys_id = 30_000_142_u32;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 32880,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mod_id,
+            InventoryItemRecord {
+                item_id: mod_id,
+                type_id: 483,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.asteroids.insert(
+            ast_id,
+            AsteroidRecord {
+                asteroid_id: ast_id,
+                solar_system_id: sys_id,
+                belt_id: 0,
+                type_id: 1230,
+                quantity: 10_000,
+                initial_quantity: 10_000,
+                position: (1000.0, 0.0, 0.0),
+                radius: 50.0,
+            },
+        );
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys
+        .spawn_ball(Ball {
+            id: ast_id,
+            type_id: 1230,
+            position: DVec3::new(1000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e9,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    let _ = sys
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 32880,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 200.0,
+            inertia: 1.0,
+            mass: 1e6,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    let _ = sys
+        .set_combat_state(
+            ship_id,
+            CombatState {
+                capacitor: 500.0,
+                max_capacitor: 500.0,
+                ..Default::default()
+            },
+        )
+        .await;
+    let _ = sys
+        .add_target_lock(
+            ship_id,
+            TargetLock {
+                target_id: ast_id,
+                lock_time_ms: 1000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(20_000.0),
+            },
+        )
+        .await;
+
+    let mut fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
+    if let Some(m) = fit.modules.get_mut(&mod_id) {
+        m.state = eve_dogma::ModuleState::Online;
+    }
+    ctx.store_ship_fitting(ship_id, fit);
+    activate(&ctx, char_id, ship_id, sys_id, mod_id, ast_id)
+        .await
+        .expect("activate");
+
+    // Step 1 second x 60 using both dedicated physics tick and background cluster tick:
+    // total yield after 60s must be strictly 1x (600 units), never 2x (1200).
+    for _ in 0..60 {
+        ctx.clock().advance_secs(1);
+        crate::sp6_lifecycle::step_active_systems_physics_tick(&ctx, 1).await;
+        crate::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    }
+
+    ctx.db.with_snapshot(|snap| {
+        let mined: i32 = snap
+            .items
+            .values()
+            .filter(|i| i.owner_id == char_id && i.location_id == ship_id && i.type_id == 1230)
+            .map(|i| i.quantity)
+            .sum();
+        assert_eq!(mined, 600, "60s mining cycle must deliver strictly 1x yield (600), got {mined}");
+        assert_eq!(snap.asteroids[&ast_id].quantity, 9_400);
+    });
 }

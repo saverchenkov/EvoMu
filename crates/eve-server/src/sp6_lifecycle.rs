@@ -23,9 +23,11 @@ mod drone_reconnect_finish;
 pub mod drone_return;
 
 pub use cluster_tick::{
-    on_advance_secs, on_advance_secs_with_sim_clock_rebase, populate_persisted_space_objects,
-    seed_persisted_abandoned_drones, step_active_systems_physics_tick, tick_background_cluster,
+    on_advance_secs, on_advance_secs_internal, on_advance_secs_with_sim_clock_rebase,
+    populate_persisted_space_objects, seed_persisted_abandoned_drones,
+    step_active_systems_physics_tick, tick_background_cluster, tick_background_cluster_with_step,
 };
+pub(crate) use cluster_tick::sweep_expired_cosmic_anomalies_and_signatures;
 pub use cluster_tick_downtime::{
     cleanup_npc_wrecks_and_reset_missions_on_downtime, clear_safe_logoff,
     disconnect_safe_logoff_sessions, recover_scanner_probes_on_downtime,

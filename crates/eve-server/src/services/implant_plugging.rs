@@ -222,11 +222,25 @@ pub fn purge_expired_boosters_all(ctx: &ServerContext, now_unix: u64) {
     if !any_expired {
         return;
     }
-    let (ships, removed) = ctx
-        .db
-        .with_mut_snapshot(|snap| purge_expired_boosters_in_snapshot_with_items(snap, None, now_unix));
-    for ship_id in ships {
-        ctx.invalidate_ship_fitting(ship_id);
+    let (affected, removed): (Vec<(i64, i64)>, Vec<_>) = ctx.db.with_mut_snapshot(|snap| {
+        let (ships, removed) = purge_expired_boosters_in_snapshot_with_items(snap, None, now_unix);
+        let affected = ships
+            .into_iter()
+            .map(|sid| {
+                let cid = snap
+                    .characters
+                    .values()
+                    .find(|c| c.active_ship_id == sid)
+                    .map(|c| c.character_id)
+                    .or_else(|| snap.items.get(&sid).map(|i| i.owner_id))
+                    .unwrap_or(0);
+                (cid, sid)
+            })
+            .collect();
+        (affected, removed)
+    });
+    for (char_id, ship_id) in affected {
+        ctx.sync_ship_ballpark_stats(char_id, ship_id);
     }
     for (owner_id, old_rec) in removed {
         ctx.notify_item_mutation(owner_id, Some(&old_rec), None);

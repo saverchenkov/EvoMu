@@ -457,6 +457,7 @@ pub(crate) fn authorize_killmail_read(
                     n.war_id == *war_id
                         && n.kind == eve_db::PersistedNegKind::Ally
                         && n.status == "Accepted"
+                        && (kill_time_unix == 0 || kill_time_unix >= n.effective_unix.unwrap_or(0))
                 })
                 .map(|n| n.from_corp)
                 .collect();

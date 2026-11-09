@@ -317,6 +317,20 @@ fn populate_all_27_batch4_blobs_and_mining_ledger() -> WorldStateSnapshot {
         date: "2026-01-02".into(),
         timestamp_unix: 1_700_003_000,
     });
+    snap.insurance_contracts.insert(
+        100_000_001,
+        crate::PersistedInsuranceContractRecord {
+            ship_id: 100_000_001,
+            ship_type_id: 587,
+            owner_id: 90_000_001,
+            level_name: "Platinum".into(),
+            level_fraction: 1.0,
+            cost_isk: 150_000.0,
+            payout_isk: 500_000.0,
+            start_unix: 1_700_000_000,
+            end_unix: 1_700_000_000 + 84 * 86_400,
+        },
+    );
     snap
 }
 
@@ -329,11 +343,11 @@ fn all_27_batch4_blobs_and_mining_ledger_roundtrip_and_rollback() {
 
     let empty = WorldStateSnapshot::default();
     let empty_fp = compute_d6_batch4_fingerprints(&empty);
-    assert_eq!(empty_fp.blobs.len(), 34);
+    assert_eq!(empty_fp.blobs.len(), 35);
 
     let full = populate_all_27_batch4_blobs_and_mining_ledger();
     let full_fp = compute_d6_batch4_fingerprints(&full);
-    assert_eq!(full_fp.blobs.len(), 34);
+    assert_eq!(full_fp.blobs.len(), 35);
     assert_ne!(full_fp.mining_ledger, empty_fp.mining_ledger);
     for (key, empty_hash) in &empty_fp.blobs {
         assert_ne!(
@@ -392,8 +406,9 @@ fn all_27_batch4_blobs_and_mining_ledger_roundtrip_and_rollback() {
     assert_eq!(loaded.corp_container_logs, full.corp_container_logs);
     assert_eq!(loaded.quasar_state_blobs, full.quasar_state_blobs);
     assert_eq!(loaded.service_state_blobs, full.service_state_blobs);
+    assert_eq!(loaded.insurance_contracts, full.insurance_contracts);
 
-    // Wipe a dirty snapshot and verify rollback_d6_batch4 restores all 27 blobs + mining_ledger
+    // Wipe a dirty snapshot and verify rollback_d6_batch4 restores all blobs + mining_ledger
     let mut dirty = WorldStateSnapshot::default();
     rollback_d6_batch4(&conn, &mut dirty, &fp);
     assert_eq!(dirty.moon_extractions, full.moon_extractions);
@@ -424,5 +439,6 @@ fn all_27_batch4_blobs_and_mining_ledger_roundtrip_and_rollback() {
     assert_eq!(dirty.corp_container_logs, full.corp_container_logs);
     assert_eq!(dirty.quasar_state_blobs, full.quasar_state_blobs);
     assert_eq!(dirty.service_state_blobs, full.service_state_blobs);
+    assert_eq!(dirty.insurance_contracts, full.insurance_contracts);
     let _ = (HashMap::<i64, i64>::new(), HashSet::<i64>::new());
 }

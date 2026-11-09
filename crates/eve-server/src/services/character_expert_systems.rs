@@ -65,6 +65,72 @@ pub fn get_active_expert_system_skills(
     skills
 }
 
+/// Removes expired Expert Systems across all characters, notifies affected pilots via
+/// `OnExpertSystemsUpdated`, and pushes updated ship kinematics / `CombatState` to active
+/// `SystemActor` `Ballpark`s (`#736`).
+pub fn sweep_expired_expert_systems_all(ctx: &ServerContext, now_ft: i64) {
+    let any_expired = ctx.db.with_snapshot(|snap| {
+        snap.node_graph_state
+            .expert_systems
+            .values()
+            .any(|recs| recs.values().any(|r| r.expires_at_ft <= now_ft))
+    });
+    if !any_expired {
+        return;
+    }
+    let expired_events = ctx.db.with_mut_snapshot(|snap| {
+        let char_ids: Vec<i64> = snap.node_graph_state.expert_systems.keys().copied().collect();
+        let mut events: Vec<(i64, Vec<i64>, Vec<u32>, PyRep, i64)> = Vec::new();
+        for char_id in char_ids {
+            let mut records = load_expert_systems(snap, char_id);
+            let mut removed_tids = Vec::new();
+            let mut removed_skill_ids = Vec::new();
+            records.retain(|&tid, rec| {
+                if rec.expires_at_ft <= now_ft {
+                    removed_tids.push(tid);
+                    for &skill_tid in rec.skills_granted.keys() {
+                        if let Ok(u) = u32::try_from(skill_tid) {
+                            if !removed_skill_ids.contains(&u) {
+                                removed_skill_ids.push(u);
+                            }
+                        }
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
+            if !removed_tids.is_empty() {
+                save_expert_systems(snap, char_id, &records);
+                let ship_id = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.active_ship_id)
+                    .unwrap_or(0);
+                events.push((char_id, removed_tids, removed_skill_ids, expert_systems_to_py_dict(&records), ship_id));
+            }
+        }
+        events
+    });
+    for (char_id, removed_tids, removed_skill_ids, es_dict, ship_id) in expired_events {
+        for tid in removed_tids {
+            ctx.notify(
+                NotificationTarget::Character(char_id),
+                "OnExpertSystemsUpdated",
+                "charid",
+                vec![es_dict.clone(), PyRep::Bool(false), PyRep::Integer(tid)],
+            );
+        }
+        crate::services::jump_clone_names::emit_server_skills_changed(
+            ctx,
+            char_id,
+            &removed_skill_ids,
+            Some("ExpertSystemExpired"),
+        );
+        ctx.sync_ship_ballpark_stats(char_id, ship_id);
+    }
+}
+
 fn expert_systems_to_py_dict(records: &BTreeMap<i64, ExpertSystemRecord>) -> PyRep {
     let mut dict = Vec::with_capacity(records.len());
     for (&tid, rec) in records {

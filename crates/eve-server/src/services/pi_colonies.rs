@@ -973,6 +973,7 @@ pub fn handle_pi_colonies(
                                             });
                                         }
                                         p.schematic_id = Some(schem_info.schematic_id);
+                                        p.last_cycle_unix = Some(ctx.now_unix());
                                     }
                                     save_pi_network(snap, char_id, planet_id, &net);
                                 }

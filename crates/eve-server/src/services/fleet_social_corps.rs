@@ -94,6 +94,29 @@ pub(crate) fn promote_due_pending_corp_grants(ctx: &ServerContext, corp_id: i64)
     }
 }
 
+/// Promotes all matured 24-hour pending corporation role grants and friendly-fire
+/// toggles across every corporation (`#736`).
+pub(crate) fn promote_all_due_corp_grants(ctx: &ServerContext) {
+    let now_unix = ctx.now_unix();
+    let due_corps: Vec<i64> = ctx.db.with_snapshot(|snap| {
+        snap.corp_governance
+            .iter()
+            .filter(|(_, g)| {
+                g.pending_role_grants.values().any(|&(_, eff)| now_unix >= eff)
+                    || g.pending_title_role_grants.values().any(|&(_, eff)| now_unix >= eff)
+                    || g.pending_scoped_role_grants
+                        .values()
+                        .any(|&(_, _, _, eff)| now_unix >= eff)
+                    || g.pending_friendly_fire.is_some_and(|(_, eff)| now_unix >= eff)
+            })
+            .map(|(&cid, _)| cid)
+            .collect()
+    });
+    for corp_id in due_corps {
+        promote_due_pending_corp_grants(ctx, corp_id);
+    }
+}
+
 pub(crate) fn get_character_medals_and_decorations(snap: &eve_db::WorldStateSnapshot, char_id: i64) -> (Vec<PyRep>, Vec<PyRep>) {
     let (mut medals, mut decorations) = (Vec::new(), Vec::new());
     for (&corp_id, state) in &snap.corp_governance {

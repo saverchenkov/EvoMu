@@ -692,6 +692,73 @@ pub async fn handle_mercden_component_call(
     ]))
 }
 
+pub(crate) fn tick_mercenary_den_reinforcements_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    pending: &PendingNotices,
+    now: u64,
+) {
+    let mut entries: Vec<(i64, (u64, u64, u8))> = snap
+        .sov_runtime
+        .mercenary_den_reinforcement
+        .iter()
+        .map(|(&id, &v)| (id, v))
+        .collect();
+    for (&den_id, st) in &snap.structures {
+        if st.type_id == TYPE_MERCENARY_DEN
+            && matches!(st.state.as_str(), "HullReinforced" | "HullVulnerable")
+            && st.reinforced_until_unix > 0
+            && !snap.sov_runtime.mercenary_den_reinforcement.contains_key(&den_id)
+        {
+            if st.state == "HullReinforced" {
+                entries.push((den_id, (st.reinforced_until_unix, 0, 0)));
+            } else {
+                entries.push((den_id, (st.reinforced_until_unix, st.reinforced_until_unix, 0)));
+            }
+        }
+    }
+    for (den_id, (reinf_until, vuln_end, _)) in entries {
+        let Some(st) = snap.structures.get_mut(&den_id) else {
+            continue;
+        };
+        if st.state == "Destroyed" {
+            continue;
+        }
+        let sys_id = st.solar_system_id;
+        if vuln_end > 0 && now >= vuln_end {
+            st.state = "ShieldVulnerable".into();
+            st.shield_hp = MERC_DEN_BASE_HP;
+            st.reinforced_until_unix = 0;
+            snap.sov_runtime
+                .mercenary_den_reinforcement
+                .insert(den_id, (0, 0, 100));
+            if let Some(den_mut) = snap.sov_runtime.mercenary_dens.get_mut(&den_id) {
+                if !den_mut.enabled {
+                    den_mut.enabled = true;
+                    den_mut.simulated_at_unix = now;
+                    let mut n = Vec::new();
+                    id_field(1, den_id as u64, &mut n);
+                    encode_bytes_field(2, &encode_evolution_simulation(den_mut), &mut n);
+                    push_notice(
+                        pending,
+                        sys_id,
+                        "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice",
+                        n,
+                    );
+                }
+            }
+        } else if reinf_until > 0 && now >= reinf_until && st.state == "HullReinforced" {
+            st.state = "HullVulnerable".into();
+            if vuln_end == 0 {
+                let next_vuln = reinf_until + 900;
+                st.reinforced_until_unix = next_vuln;
+                snap.sov_runtime
+                    .mercenary_den_reinforcement
+                    .insert(den_id, (reinf_until, next_vuln, 0));
+            }
+        }
+    }
+}
+
 /// Applies live weapon damage (`dogmaIM.Activate`) to a Mercenary Den:
 /// - Depleting shield puts the den into a 24h reinforcement with a 6h vulnerability window and disables it.
 /// - Attacks during the 24h reinforcement or outside the 6h window are rejected.

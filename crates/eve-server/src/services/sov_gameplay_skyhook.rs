@@ -877,6 +877,14 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
                     ids.push(id);
                 }
             }
+            for (&id, st) in &snap.structures {
+                if st.type_id == crate::services::sov_services::TYPE_ORBITAL_SKYHOOK
+                    && st.state == "ArmorReinforced"
+                    && !ids.contains(&id)
+                {
+                    ids.push(id);
+                }
+            }
             ids.sort_unstable();
             let l: Vec<_> = snap
                 .sov_runtime
@@ -891,9 +899,21 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
         return;
     }
 
-    let newly_hackable: Vec<(u32, i64)> = ctx.db.with_mut_snapshot(|snap| {
+    let (newly_hackable, reinf_expired): (Vec<(u32, i64)>, Vec<(u32, i64)>) = ctx.db.with_mut_snapshot(|snap| {
         let mut opened = Vec::new();
+        let mut expired_reinf = Vec::new();
         for id in skyhook_ids {
+            if let Some(st) = snap.structures.get_mut(&id) {
+                if st.type_id == crate::services::sov_services::TYPE_ORBITAL_SKYHOOK
+                    && st.state == "ArmorReinforced"
+                    && st.reinforced_until_unix > 0
+                    && now_unix >= st.reinforced_until_unix
+                {
+                    st.state = "ArmorVulnerable".into();
+                    st.reinforced_until_unix = 0;
+                    expired_reinf.push((st.solar_system_id, id));
+                }
+            }
             let _ = advance_skyhook_reagents_in_snap(snap, &ctx.sde, id, now_unix);
             let window = snap
                 .sov_runtime
@@ -924,8 +944,11 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
                 }
             }
         }
-        opened
+        (opened, expired_reinf)
     });
+    for (sys_id, sh_id) in reinf_expired {
+        crate::services::sov_services::emit_sov_structures_updated(ctx, sys_id, &[sh_id]);
+    }
     for (sys_id, sh_id) in newly_hackable {
         crate::services::sov_services::emit_skyhook_can_be_hacked(ctx, sys_id, sh_id);
     }

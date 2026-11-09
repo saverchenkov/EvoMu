@@ -111,10 +111,8 @@ pub(crate) fn sync_industry_job_pause_states_at(
                 continue;
             }
             if offline_opt.is_some_and(|m| ready_at <= m) {
-                if offline_is_now {
-                    meta.ready_before_offline = true;
-                    super::save_job_cost_meta(snap, jid, &meta);
-                }
+                meta.ready_before_offline = true;
+                super::save_job_cost_meta(snap, jid, &meta);
                 continue;
             }
             let pause_ts = offline_opt.unwrap_or(now_unix).max(start_unix);

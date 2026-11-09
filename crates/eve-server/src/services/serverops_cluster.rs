@@ -954,24 +954,9 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
                 .insert("industry_system_cost_indices_daily".into(), meta_json);
         }
 
-        // 4. Expired Market Orders & Contracts
+        // 4. Expired Market Orders (Contracts resolved with full client notifications after snapshot unlock)
         let expired_order_list = super::market_contracts::sweep_expired_orders(snap, now);
-        let expired_cids: Vec<i64> = snap
-            .contracts
-            .iter()
-            .filter(|(_, c)| {
-                (c.status == "Outstanding" || c.status == "InProgress")
-                    && c.expiration_unix > 0
-                    && c.expiration_unix <= now
-            })
-            .map(|(&cid, _)| cid)
-            .collect();
-        let mut exp_contracts = 0_i64;
-        for cid in expired_cids {
-            if snap.resolve_expired_contract(cid, now).is_some() {
-                exp_contracts += 1;
-            }
-        }
+        let exp_contracts = 0_i64;
 
         // 5. Sovereignty Index Decay across military & industrial indices + ADM vulnerability rollover + stale ESS link cleanup
         let mut sov_hubs_by_sys: HashMap<u32, Vec<(i64, u32)>> = HashMap::new();
@@ -1091,6 +1076,8 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
 
     let expired_orders = expired_order_list.len() as i64;
     super::market_contracts::emit_expired_order_notifications(ctx, &expired_order_list);
+    let expired_contracts =
+        expired_contracts.max(super::contracts_service::sweep_expired_contracts_and_notify(ctx, now) as i64);
     for (sys_id, _dev_indices) in changed_sov_notifications {
         super::sov_services::emit_dev_index_changed(ctx, sys_id);
     }

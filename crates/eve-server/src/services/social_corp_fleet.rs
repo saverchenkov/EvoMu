@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 #[path = "social_corp_projects.rs"]
 pub mod social_corp_projects;
 #[path = "social_wars.rs"]
-mod social_wars;
+pub mod social_wars;
 
 fn with_alliance_war_state<R>(
     ctx: &ServerContext,
@@ -71,7 +71,20 @@ fn require_executor(ctx: &ServerContext, session: &SessionState) -> Result<i64, 
 }
 
 pub(crate) fn sync_all_alliance_timers(ctx: &ServerContext) {
-    let aids: Vec<i64> = read_alliance_war_state(ctx, |st| st.alliances.keys().copied().collect());
+    let now_unix = ctx.now_unix();
+    let aids: Vec<i64> = read_alliance_war_state(ctx, |st| {
+        st.alliances
+            .iter()
+            .filter_map(|(&aid, meta)| {
+                let has_due_app = meta
+                    .applications
+                    .iter()
+                    .any(|app| app.3 == "Accepted" && app.4.is_some_and(|eff| now_unix >= eff));
+                let has_due_leave = meta.pending_leaves.values().any(|&eff| now_unix >= eff);
+                (has_due_app || has_due_leave).then_some(aid)
+            })
+            .collect()
+    });
     for aid in aids {
         let _ = sync_alliance_timers(ctx, aid);
     }
@@ -79,6 +92,17 @@ pub(crate) fn sync_all_alliance_timers(ctx: &ServerContext) {
 
 fn sync_alliance_timers(ctx: &ServerContext, aid: i64) -> bool {
     let now_unix = ctx.now_unix();
+    let has_due = read_alliance_war_state(ctx, |st| {
+        st.alliances.get(&aid).is_some_and(|meta| {
+            meta.applications
+                .iter()
+                .any(|app| app.3 == "Accepted" && app.4.is_some_and(|eff| now_unix >= eff))
+                || meta.pending_leaves.values().any(|&eff| now_unix >= eff)
+        })
+    });
+    if !has_due {
+        return false;
+    }
     let (mut joined, mut left) = (Vec::new(), Vec::new());
     with_alliance_war_state(ctx, |st| {
         if let Some(meta) = st.alliances.get_mut(&aid) {

@@ -2025,6 +2025,190 @@ pub fn break_courier_plastic_wrap(
     Ok((cid, issuer_id, item_ids))
 }
 
+/// Resolves all due expired contracts (`Outstanding` / `InProgress` with `expiration_unix <= now_unix`)
+/// and emits `OnContractExpired`, `OnContractFailed`, `OnContractCompleted`, `OnAccountChange`, and
+/// `OnItemChange` notifications to all affected parties (`#736`).
+pub fn sweep_expired_contracts_and_notify(ctx: &ServerContext, now_unix: u64) -> usize {
+    let has_due = ctx.db.with_snapshot(|snap| {
+        snap.contracts.values().any(|c| {
+            matches!(c.status.as_str(), "Outstanding" | "InProgress")
+                && c.expiration_unix > 0
+                && c.expiration_unix <= now_unix
+        })
+    });
+    if !has_due {
+        return 0;
+    }
+
+    struct ContractNotifyBatch {
+        contract_events: Vec<(i64, &'static str, i64)>,
+        account_changes: Vec<(i64, i64, f64)>,
+        item_changes: Vec<(i64, InventoryItemRecord, Vec<(i32, PyRep)>)>,
+        resolved_count: usize,
+    }
+
+    let batch = ctx.db.with_mut_snapshot(|snap| {
+        let mut due_ids: Vec<i64> = snap
+            .contracts
+            .values()
+            .filter(|c| {
+                matches!(c.status.as_str(), "Outstanding" | "InProgress")
+                    && c.expiration_unix > 0
+                    && c.expiration_unix <= now_unix
+            })
+            .map(|c| c.contract_id)
+            .collect();
+        due_ids.sort_unstable();
+
+        let mut contract_events = Vec::new();
+        let mut account_changes = Vec::new();
+        let mut item_changes = Vec::new();
+        let mut resolved_count = 0_usize;
+
+        for cid in due_ids {
+            let Some(c_before) = snap.contracts.get(&cid).cloned() else {
+                continue;
+            };
+            let mut tracked_item_ids: Vec<i64> = c_before.item_ids.clone();
+            for item in snap.items.values().filter(|it| it.location_id == cid) {
+                if !tracked_item_ids.contains(&item.item_id) {
+                    tracked_item_ids.push(item.item_id);
+                }
+            }
+            let pre_items: Vec<(i64, i64, i64, i64)> = tracked_item_ids
+                .iter()
+                .filter_map(|iid| {
+                    snap.items.get(iid).map(|it| {
+                        (*iid, it.owner_id, it.location_id, i64::from(it.flag as u16))
+                    })
+                })
+                .collect();
+
+            let pre_issuer_bal = snap.characters.get(&c_before.issuer_id).map(|c| c.balance.0);
+            let pre_corp_bal = (c_before.for_corp && c_before.issuer_corp_id != 0)
+                .then(|| snap.corporations.get(&c_before.issuer_corp_id).map(|c| c.division_balance(1).0))
+                .flatten();
+            let pre_acceptor_bal = c_before
+                .acceptor_id
+                .and_then(|aid| snap.characters.get(&aid).map(|c| (aid, c.balance.0)));
+            let pre_bidder_bal = c_before
+                .current_bidder_id
+                .and_then(|bid| snap.characters.get(&bid).map(|c| (bid, c.balance.0)));
+
+            let Some(new_status) = snap.resolve_expired_contract(cid, now_unix) else {
+                continue;
+            };
+            resolved_count += 1;
+
+            let event_name = match new_status {
+                "Failed" => "OnContractFailed",
+                "Completed" => "OnContractCompleted",
+                _ => "OnContractCacheCleared",
+            };
+            contract_events.push((c_before.issuer_id, event_name, cid));
+            if let Some(aid) = c_before.acceptor_id.filter(|&id| id > 0 && id != c_before.issuer_id) {
+                if snap.characters.contains_key(&aid) {
+                    contract_events.push((aid, event_name, cid));
+                }
+            }
+            if new_status == "Completed" {
+                if let Some(bid) = c_before
+                    .current_bidder_id
+                    .filter(|&id| id > 0 && id != c_before.issuer_id && Some(id) != c_before.acceptor_id)
+                {
+                    if snap.characters.contains_key(&bid) {
+                        contract_events.push((bid, event_name, cid));
+                    }
+                }
+            }
+
+            if let Some(pre) = pre_issuer_bal {
+                if let Some(ch) = snap.characters.get(&c_before.issuer_id) {
+                    if ch.balance.0 != pre {
+                        account_changes.push((c_before.issuer_id, c_before.issuer_id, ch.balance.to_wire_f64()));
+                    }
+                }
+            }
+            if let Some(pre_corp) = pre_corp_bal {
+                if let Some(corp) = snap.corporations.get(&c_before.issuer_corp_id) {
+                    let post = corp.division_balance(1);
+                    if post.0 != pre_corp {
+                        account_changes.push((c_before.issuer_id, c_before.issuer_corp_id, post.to_wire_f64()));
+                    }
+                }
+            }
+            if let Some((aid, pre)) = pre_acceptor_bal {
+                if let Some(ch) = snap.characters.get(&aid) {
+                    if ch.balance.0 != pre {
+                        account_changes.push((aid, aid, ch.balance.to_wire_f64()));
+                    }
+                }
+            }
+            if let Some((bid, pre)) = pre_bidder_bal {
+                if let Some(ch) = snap.characters.get(&bid) {
+                    if ch.balance.0 != pre {
+                        account_changes.push((bid, bid, ch.balance.to_wire_f64()));
+                    }
+                }
+            }
+
+            for (iid, old_owner, old_loc, old_flag) in pre_items {
+                if let Some(item) = snap.items.get(&iid).cloned() {
+                    let mut diffs = Vec::new();
+                    if item.owner_id != old_owner {
+                        diffs.push((2, PyRep::Integer(old_owner)));
+                    }
+                    if item.location_id != old_loc {
+                        diffs.push((3, PyRep::Integer(old_loc)));
+                    }
+                    let new_flag = i64::from(item.flag as u16);
+                    if new_flag != old_flag {
+                        diffs.push((4, PyRep::Integer(old_flag)));
+                    }
+                    if !diffs.is_empty() {
+                        let notify_char = if snap.characters.contains_key(&item.owner_id) {
+                            item.owner_id
+                        } else {
+                            c_before.issuer_id
+                        };
+                        if notify_char > 0 {
+                            item_changes.push((notify_char, item, diffs));
+                        }
+                    }
+                }
+            }
+        }
+
+        ContractNotifyBatch {
+            contract_events,
+            account_changes,
+            item_changes,
+            resolved_count,
+        }
+    });
+
+    for (target_char, event_name, cid) in batch.contract_events {
+        if event_name == "OnContractCacheCleared" {
+            ctx.notify(
+                NotificationTarget::Character(target_char),
+                event_name,
+                "charid",
+                vec![],
+            );
+        } else {
+            notify_contract(ctx, target_char, event_name, cid);
+        }
+    }
+    for (target_char, owner_id, bal_wire) in batch.account_changes {
+        let _ = ctx.notify_account_change(target_char, "cash", owner_id, bal_wire);
+    }
+    for (target_char, item, diffs) in batch.item_changes {
+        let _ = ctx.notify_item_record_change(target_char, &item, diffs);
+    }
+
+    batch.resolved_count
+}
+
 #[cfg(test)]
 #[path = "contracts_service_tests.rs"]
 mod contracts_service_tests;

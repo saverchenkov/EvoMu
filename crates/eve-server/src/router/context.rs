@@ -797,39 +797,99 @@ impl ServerContext {
                 .insert("__server_now_unix".into(), cur_unix.to_string());
         });
         if secs > 0 {
-            crate::sp6_lifecycle::on_advance_secs_with_sim_clock_rebase(
-                self,
-                prev_unix,
-                secs,
-                emit_sim_clock_rebase,
-            );
-            crate::services::pve_special_sites::on_server_clock_advanced(self, secs);
-            crate::services::mining_advanced::tick_all_metenox_moon_drills(
-                self,
-                prev_unix,
-                self.now_unix_secs(),
-            );
+            self.run_clock_advanced_sync_pipeline(prev_unix, secs, emit_sim_clock_rebase, true);
+        }
+    }
+
+    /// Unified synchronous server-clock advancement pipeline shared across live 1 Hz cluster ticks
+    /// (`tick_background_cluster` / `tick_wall_second`), accelerated ticks (`step_clock_tick`),
+    /// and synthetic time jumps (`advance_secs`) (`#735`).
+    pub(crate) fn run_clock_advanced_sync_pipeline(
+        &self,
+        prev_unix: u64,
+        secs: u64,
+        emit_sim_clock_rebase: bool,
+        is_synthetic_jump: bool,
+    ) {
+        if secs == 0 {
+            return;
+        }
+        crate::sp6_lifecycle::on_advance_secs_internal(
+            self,
+            prev_unix,
+            secs,
+            emit_sim_clock_rebase,
+            is_synthetic_jump,
+        );
+        crate::services::pve_special_sites::on_server_clock_advanced(self, secs);
+        let prev_metenox = if is_synthetic_jump {
+            prev_unix
+        } else {
+            let now_u = self.now_unix_secs();
+            self.db.with_snapshot(|snap| {
+                if snap.mining_and_ess_state.metenox_last_tick_unix > 0 {
+                    snap.mining_and_ess_state.metenox_last_tick_unix
+                } else {
+                    now_u
+                }
+            })
+        };
+        crate::services::mining_advanced::tick_all_metenox_moon_drills(
+            self,
+            prev_metenox,
+            self.now_unix_secs(),
+        );
+        if is_synthetic_jump {
             let now_after = self.now_unix_secs();
             let dt_sec = self.systems.downtime_utc_secs_of_day();
-            if secs >= 86_400 || (prev_unix.saturating_sub(dt_sec) / 86_400) < (now_after.saturating_sub(dt_sec) / 86_400) {
+            if secs >= 86_400
+                || (prev_unix.saturating_sub(dt_sec) / 86_400)
+                    < (now_after.saturating_sub(dt_sec) / 86_400)
+            {
                 crate::services::fleet_social::execute_pending_auto_kicks_on_downtime(self);
                 crate::services::fw_services::process_pending_fw_captures_on_downtime(self);
             }
-            crate::services::implant_plugging::purge_expired_boosters_all(
-                self,
-                self.now_unix_secs(),
-            );
-            self.advance_skill_queues(secs as f64);
-            crate::services::fleet_social::fleet_social_notify::tick_fleet_lifecycle(self);
-            crate::services::space_mining_harvest::tick_all_ice_belt_respawns_sync(self);
-            let now = self.now_unix_secs();
-            crate::services::fleet_social::sweep_expired_bookmarks_and_notify(self, now);
-            let mut balls_to_remove: Vec<(u32, i64)> = Vec::new();
-            let has_space_decay = self.db.with_snapshot(|snap| {
-                snap.items.values().any(|it| it.type_id == 23 && it.flag == eve_db::InventoryFlag::None && (30_000_000..=33_000_000).contains(&it.location_id) && snap.sp6_lifecycle.space_object_meta.get(&it.item_id).and_then(|m| m.created_unix).is_some_and(|c| now >= c.saturating_add(3600)))
-                    || snap.moon_extractions.values().any(|e| e.status != "Decayed" && e.status != "Cancelled" && now >= e.natural_decay_unix)
-            });
-            if has_space_decay { self.db.with_mut_snapshot(|snap| {
+        }
+        crate::services::implant_plugging::purge_expired_boosters_all(self, self.now_unix_secs());
+        crate::services::character_expert_systems::sweep_expired_expert_systems_all(
+            self,
+            self.now_blueos_filetime_ticks(),
+        );
+        self.advance_skill_queues(secs as f64);
+        crate::services::fleet_social::fleet_social_notify::tick_fleet_lifecycle(self);
+        crate::services::space_mining_harvest::tick_all_ice_belt_respawns_sync(self);
+        let now = self.now_unix_secs();
+        crate::sp6_lifecycle::sweep_expired_cosmic_anomalies_and_signatures(self, now);
+        crate::services::fleet_social::sweep_expired_bookmarks_and_notify(self, now);
+        self.decay_expired_jetcans_and_moon_extractions(now);
+        self.process_arrived_moon_survey_probes(now);
+        crate::services::social_corp_fleet::sync_all_alliance_timers(self);
+        crate::services::fleet_social::fleet_social_corps::promote_all_due_corp_grants(self);
+        crate::services::social_corp_fleet::social_wars::social_wars_helpers::sync_wars(self);
+        crate::services::contracts_service::sweep_expired_contracts_and_notify(self, now);
+        crate::services::combat_crimewatch::combat_wrecks_killmails::sweep_expired_insurance_contracts(self, now);
+        let _ = crate::services::station_structure::structure_lifecycle::sync_all_structures(self);
+    }
+
+    fn decay_expired_jetcans_and_moon_extractions(&self, now: u64) {
+        let mut balls_to_remove: Vec<(u32, i64)> = Vec::new();
+        let has_space_decay = self.db.with_snapshot(|snap| {
+            snap.items.values().any(|it| {
+                it.type_id == 23
+                    && it.flag == eve_db::InventoryFlag::None
+                    && (30_000_000..=33_000_000).contains(&it.location_id)
+                    && snap
+                        .sp6_lifecycle
+                        .space_object_meta
+                        .get(&it.item_id)
+                        .and_then(|m| m.created_unix)
+                        .is_some_and(|c| now >= c.saturating_add(3600))
+            }) || snap.moon_extractions.values().any(|e| {
+                e.status != "Decayed" && e.status != "Cancelled" && now >= e.natural_decay_unix
+            })
+        });
+        if has_space_decay {
+            self.db.with_mut_snapshot(|snap| {
                 // Despawn Cargo Containers (`type_id = 23`) in space (`InventoryFlag::None`) after 3600s (`feat:mining.jetcan-mining`).
                 let expired_jetcans: Vec<(i64, u32)> = snap
                     .items
@@ -879,79 +939,88 @@ impl ServerContext {
                         ext.status = "Decayed".to_string();
                     }
                 }
-            }); }
+            });
+        }
 
-            for (sys_id, ball_id) in balls_to_remove {
-                let handle = self.systems.get_or_spawn(sys_id);
-                handle.try_remove_ball(ball_id);
-            }
+        for (sys_id, ball_id) in balls_to_remove {
+            let handle = self.systems.get_or_spawn(sys_id);
+            handle.try_remove_ball(ball_id);
+        }
+    }
 
-            let arrived_moon_probes: Vec<ActiveMoonSurveyProbe> =
-                if let Ok(mut probes) = self.active_moon_probes.write() {
-                    let mut arrived = Vec::new();
-                    probes.retain(|p| {
-                        if now >= p.arrival_unix_secs {
-                            arrived.push(p.clone());
-                            false
-                        } else {
-                            true
-                        }
-                    });
-                    arrived
-                } else {
-                    Vec::new()
-                };
-
-            for p in arrived_moon_probes {
-                let stay_in_space = self.db.with_snapshot(|snap| {
-                    snap.characters.get(&p.owner_char_id).is_some_and(|c| {
-                        c.solar_system_id == p.solar_system_id
-                            && c.station_id.is_none()
-                            && c.structure_id.is_none()
-                    })
+    fn process_arrived_moon_survey_probes(&self, now: u64) {
+        let has_arrived = self
+            .active_moon_probes
+            .read()
+            .is_ok_and(|probes| probes.iter().any(|p| now >= p.arrival_unix_secs));
+        if !has_arrived {
+            return;
+        }
+        let arrived_moon_probes: Vec<ActiveMoonSurveyProbe> =
+            if let Ok(mut probes) = self.active_moon_probes.write() {
+                let mut arrived = Vec::new();
+                probes.retain(|p| {
+                    if now >= p.arrival_unix_secs {
+                        arrived.push(p.clone());
+                        false
+                    } else {
+                        true
+                    }
                 });
-                if stay_in_space {
-                    if let Some(moon_id) = p.hit_moon_id {
-                        let composition = crate::services::mining_advanced::derive_moon_ores_from_sde(
-                            &self.sde,
-                            p.solar_system_id,
-                            moon_id,
+                arrived
+            } else {
+                Vec::new()
+            };
+
+        for p in arrived_moon_probes {
+            let stay_in_space = self.db.with_snapshot(|snap| {
+                snap.characters.get(&p.owner_char_id).is_some_and(|c| {
+                    c.solar_system_id == p.solar_system_id
+                        && c.station_id.is_none()
+                        && c.structure_id.is_none()
+                })
+            });
+            if stay_in_space {
+                if let Some(moon_id) = p.hit_moon_id {
+                    let composition = crate::services::mining_advanced::derive_moon_ores_from_sde(
+                        &self.sde,
+                        p.solar_system_id,
+                        moon_id,
+                    );
+                    if composition.is_empty() {
+                        self.notify(
+                            crate::router::NotificationTarget::Character(p.owner_char_id),
+                            "OnScanNoMaterials",
+                            "charid",
+                            vec![eve_proto::PyRep::Integer(moon_id)],
                         );
-                        if composition.is_empty() {
-                            self.notify(
-                                crate::router::NotificationTarget::Character(p.owner_char_id),
-                                "OnScanNoMaterials",
-                                "charid",
-                                vec![eve_proto::PyRep::Integer(moon_id)],
-                            );
-                        } else {
-                            let resources_dict = eve_proto::PyRep::Dict(
-                                composition
-                                    .iter()
-                                    .map(|&(tid, frac)| {
-                                        (
-                                            eve_proto::PyRep::Integer(tid as i64),
-                                            eve_proto::PyRep::Real(frac),
-                                        )
-                                    })
-                                    .collect(),
-                            );
-                            self.notify(
-                                crate::router::NotificationTarget::Character(p.owner_char_id),
-                                "OnMoonScanComplete",
-                                "charid",
-                                vec![eve_proto::PyRep::Integer(moon_id), resources_dict],
-                            );
-                        }
+                    } else {
+                        let resources_dict = eve_proto::PyRep::Dict(
+                            composition
+                                .iter()
+                                .map(|&(tid, frac)| {
+                                    (
+                                        eve_proto::PyRep::Integer(tid as i64),
+                                        eve_proto::PyRep::Real(frac),
+                                    )
+                                })
+                                .collect(),
+                        );
+                        self.notify(
+                            crate::router::NotificationTarget::Character(p.owner_char_id),
+                            "OnMoonScanComplete",
+                            "charid",
+                            vec![eve_proto::PyRep::Integer(moon_id), resources_dict],
+                        );
                     }
                 }
-                self.notify(
-                    crate::router::NotificationTarget::Character(p.owner_char_id),
-                    "OnRemoveMoonProbe", "charid", vec![eve_proto::PyRep::Integer(p.probe_id)],
-                );
             }
-            crate::services::social_corp_fleet::sync_all_alliance_timers(self);
-            let _ = crate::services::station_structure::structure_lifecycle::sync_all_structures(self);
+            self.notify(
+                crate::router::NotificationTarget::Character(p.owner_char_id),
+                "OnRemoveMoonProbe",
+                "charid",
+                vec![eve_proto::PyRep::Integer(p.probe_id)],
+            );
         }
     }
 
@@ -996,20 +1065,22 @@ impl ServerContext {
     }
 
     /// Steps the server clock by `base_secs` real seconds scaled by the time-acceleration multiplier,
-    /// advancing skill queues (`T-7`).
+    /// running the unified synchronous tick pipeline (`T-7`, `#735`).
     pub fn step_clock_tick(&self, base_secs: u64) -> u64 {
+        let prev_unix = self.now_unix_secs();
         let advanced = self.clock().step_tick(base_secs);
         if advanced > 0 {
-            self.advance_skill_queues(advanced as f64);
+            self.run_clock_advanced_sync_pipeline(prev_unix, advanced, false, true);
         }
         advanced
     }
 
-    /// Steps a 1 Hz live server wall-clock tick, advancing skill queues (`T-7`).
+    /// Steps a 1 Hz live server wall-clock tick, running the unified synchronous tick pipeline (`T-7`, `#735`).
     pub fn tick_wall_second(&self) -> u64 {
+        let prev_unix = self.now_unix_secs();
         let advanced = self.clock().tick_wall_second();
         if advanced > 0 {
-            self.advance_skill_queues(advanced as f64);
+            self.run_clock_advanced_sync_pipeline(prev_unix, advanced, false, true);
         }
         advanced
     }
@@ -1158,7 +1229,7 @@ impl ServerContext {
                 if total_sp_gained > 0.0 {
                     if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
                         ch_mut.skill_points += total_sp_gained;
-                        ships_to_invalidate.push(ch_mut.active_ship_id);
+                        ships_to_invalidate.push((char_id, ch_mut.active_ship_id));
                     }
                 }
             }
@@ -1188,8 +1259,34 @@ impl ServerContext {
                 crate::services::jump_clone_names::skill_queue_rowset(self, cid),
             );
         }
-        for ship_id in invalidated_ships {
-            self.invalidate_ship_fitting(ship_id);
+        for (cid, ship_id) in invalidated_ships {
+            self.sync_ship_ballpark_stats(cid, ship_id);
+        }
+    }
+
+    /// Invalidates cached Dogma fitting for `ship_id` and pushes recomputed kinematics and
+    /// `CombatState` baselines to any active `SystemActor` containing the ship (`#736`).
+    pub fn sync_ship_ballpark_stats(&self, char_id: i64, ship_id: i64) {
+        if ship_id <= 0 {
+            return;
+        }
+        self.invalidate_ship_fitting(ship_id);
+        let type_id = self
+            .db
+            .with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id))
+            .unwrap_or(0);
+        if type_id == 0 {
+            return;
+        }
+        let handles = self.systems.active_system_handles();
+        if handles.is_empty() {
+            return;
+        }
+        let fresh = self.build_ship_combat_state(char_id, ship_id, type_id);
+        for (_, h) in handles {
+            if h.try_sync_ship_ballpark_stats(ship_id, &fresh) {
+                break;
+            }
         }
     }
 
