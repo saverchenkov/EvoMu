@@ -3,7 +3,7 @@
 use super::*;
 use crate::router::ServerContext;
 use eve_db::clock::VirtualServerClock;
-use eve_db::{FleetRecord, InventoryFlag, InventoryItemRecord, WorldRepository};
+use eve_db::{FleetRecord, InventoryFlag, InventoryItemRecord, ServerClock, WorldRepository};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_sde::{InvType, SdeRegistry};
@@ -320,4 +320,48 @@ fn tactical_fleet_weapon_bank_and_load_ammo_handlers() {
     assert!(events.contains("OnChargeBeingLoadedToModule"));
     assert!(events.contains("OnChargeLoadedToModule"));
     assert!(events.contains("OnAmmoInBankChanged"));
+}
+
+#[test]
+fn check_and_emit_season_transitions_skips_repeat_writes_when_catalog_empty() {
+    let (ctx, char_id, clock) = make_online_ctx();
+
+    // First call initializes `announced_season_init = true` even when the SDE has no FSD seasons.
+    check_and_emit_season_transitions(&ctx);
+    let seq_after_init = ctx.db.with_snapshot(|s| s.wal_seq);
+    assert!(ctx
+        .db
+        .with_snapshot(|s| s.seasons_and_campaigns.announced_season_init));
+
+    // Subsequent calls with an empty catalog must not repeat mutating snapshot transactions.
+    for _ in 0..5 {
+        clock.advance_secs(1);
+        check_and_emit_season_transitions(&ctx);
+    }
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.wal_seq),
+        seq_after_init,
+        "empty season catalog must not trigger per-tick with_mut_snapshot writes"
+    );
+
+    // Configuring a season later with `seasons_catalog` still empty must still pick up & emit transitions.
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.seasons_and_campaigns.season_configuration = Some(SeasonConfig {
+            season_id: 991,
+            template_id: 991,
+            season_name: "LateConfiguredSeason".into(),
+            start_time_ft: now_ft + 10 * 10_000_000,
+            end_time_ft: now_ft + 100 * 10_000_000,
+            ..SeasonConfig::default()
+        });
+    });
+    check_and_emit_season_transitions(&ctx);
+    assert!(ctx
+        .db
+        .with_snapshot(|s| !s.seasons_and_campaigns.seasons_catalog.is_empty()));
+    clock.advance_secs(15);
+    check_and_emit_season_transitions(&ctx);
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(notifs.iter().any(|n| n.event == "OnSeasonStarted"));
 }

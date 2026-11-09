@@ -441,6 +441,9 @@ impl SystemRegistry {
                             SystemCommand::SetBallMaxVelocity { ball_id, max_velocity, reply } => {
                                 let _ = reply.send(ballpark.set_ball_max_velocity(ball_id, max_velocity));
                             }
+                            SystemCommand::SetBallMaxVelocityCap { ball_id, cap, reply } => {
+                                let _ = reply.send(ballpark.set_ball_max_velocity_cap(ball_id, cap));
+                            }
                             SystemCommand::SpawnBallWithCombat {
                                 ball,
                                 combat_state,

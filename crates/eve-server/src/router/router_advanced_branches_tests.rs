@@ -217,21 +217,34 @@ async fn test_sqlite_context_charges_skill_queue_and_dispatch_edges() {
     let charge_a_id = 910_000_011_i64;
     let charge_b_id = 910_000_012_i64;
     let loaded_prev_id = 910_000_013_i64;
-    if let Some((w_tid, c1_tid, c2_tid)) = ctx.sde.types.values().find_map(|w| {
-        if w.category_id == 7 && w.group_id == 55 && w.capacity >= 5.0 {
-            let charges: Vec<u32> = ctx
+    let mut weapon_candidates: Vec<&_> = ctx
+        .sde
+        .types
+        .values()
+        .filter(|w| w.category_id == 7 && w.group_id == 55 && w.capacity >= 5.0)
+        .collect();
+    weapon_candidates.sort_by_key(|w| w.type_id);
+    let (w_tid, c1_tid, c2_tid) = weapon_candidates
+        .into_iter()
+        .find_map(|w| {
+            let mut charges: Vec<u32> = ctx
                 .sde
                 .types
                 .values()
-                .filter(|c| ServerContext::is_charge_compatible_with_weapon(w, c) && c.volume <= 0.1)
+                .filter(|c| {
+                    ServerContext::is_charge_compatible_with_weapon(w, c)
+                        && c.volume > 0.0
+                        && c.volume <= 0.1
+                        && (w.capacity / c.volume) < 5_000.0
+                })
                 .map(|c| c.type_id)
-                .take(2)
                 .collect();
+            charges.sort_unstable();
+            charges.truncate(2);
             (charges.len() == 2).then(|| (w.type_id, charges[0], charges[1]))
-        } else {
-            None
-        }
-    }) {
+        })
+        .expect("SDE has projectile turret and two compatible charges");
+    {
         ctx.db.with_mut_snapshot(|snap| {
             snap.items.insert(
                 ship_id,
@@ -253,6 +266,18 @@ async fn test_sqlite_context_charges_skill_queue_and_dispatch_edges() {
                 charge_b_id,
                 make_item(charge_b_id, c2_tid, char1, ship_id, InventoryFlag::Cargo, 20),
             );
+            for tid in [w_tid, c1_tid, c2_tid] {
+                for (sk_tid, _) in ctx.sde.required_skills_for_type(tid) {
+                    snap.skills.entry(char1).or_default().insert(
+                        sk_tid,
+                        TrainedSkillRecord {
+                            type_id: sk_tid,
+                            level: 5,
+                            skill_points: 256_000.0,
+                        },
+                    );
+                }
+            }
         });
         let loaded = ctx
             .load_charge_into_weapon_slot(

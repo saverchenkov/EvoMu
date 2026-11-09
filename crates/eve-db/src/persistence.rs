@@ -351,6 +351,7 @@ pub struct WorldRepository {
     pub(crate) pending_wal_records: std::sync::atomic::AtomicUsize,
     pub(crate) state_epoch: std::sync::atomic::AtomicU64,
     pub(crate) rollback_epoch: std::sync::atomic::AtomicU64,
+    pub(crate) combat_state_epoch: std::sync::atomic::AtomicU64,
     #[cfg(test)]
     pub(crate) wal_fault_mode: std::sync::atomic::AtomicU8,
 }
@@ -396,6 +397,12 @@ impl WorldRepository {
         self.rollback_epoch.load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// Returns a monotonic epoch incremented whenever persisted crimewatch/combat runtime state
+    /// changes on commit or when a snapshot load or rollback replaces/reverts state (`#592`).
+    pub fn combat_state_epoch(&self) -> u64 {
+        self.combat_state_epoch.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     #[inline]
     pub(crate) fn bump_state_epoch(&self) {
         self.state_epoch
@@ -403,9 +410,16 @@ impl WorldRepository {
     }
 
     #[inline]
+    pub(crate) fn bump_combat_state_epoch(&self) {
+        self.combat_state_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+
+    #[inline]
     pub(crate) fn bump_rollback_epoch(&self) {
         self.rollback_epoch
             .fetch_add(1, std::sync::atomic::Ordering::Release);
+        self.bump_combat_state_epoch();
         self.bump_state_epoch();
     }
 
@@ -475,6 +489,7 @@ impl WorldRepository {
             pending_wal_records: std::sync::atomic::AtomicUsize::new(0),
             state_epoch: std::sync::atomic::AtomicU64::new(1),
             rollback_epoch: std::sync::atomic::AtomicU64::new(1),
+            combat_state_epoch: std::sync::atomic::AtomicU64::new(1),
             #[cfg(test)]
             wal_fault_mode: std::sync::atomic::AtomicU8::new(0),
         })
@@ -634,6 +649,7 @@ impl WorldRepository {
             pending_wal_records: std::sync::atomic::AtomicUsize::new(0),
             state_epoch: std::sync::atomic::AtomicU64::new(1),
             rollback_epoch: std::sync::atomic::AtomicU64::new(1),
+            combat_state_epoch: std::sync::atomic::AtomicU64::new(1),
             #[cfg(test)]
             wal_fault_mode: std::sync::atomic::AtomicU8::new(0),
         };
@@ -925,10 +941,15 @@ impl WorldRepository {
                 &mut staged_fp,
                 need_wal_delta,
             );
+            let crimewatch_changed =
+                staged_fp.d6_corp_crimewatch.crimewatch_fp != fp.d6_corp_crimewatch.crimewatch_fp;
             match persist_res {
                 Ok(()) => {
                     *fp = *staged_fp;
                     self.bump_state_epoch();
+                    if crimewatch_changed {
+                        self.bump_combat_state_epoch();
+                    }
                     Ok(())
                 }
                 Err(persist_err) => {

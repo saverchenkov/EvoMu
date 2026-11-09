@@ -476,10 +476,13 @@ pub async fn handle(
                         ch.solar_system_id,
                     )
                 });
-                inertia *= mult;
                 if (mult - 1.0).abs() > 1e-6 {
-                    combat_state.base_inertia = Some(inertia);
+                    if combat_state.base_inertia.is_none() {
+                        combat_state.base_inertia = Some(inertia);
+                    }
+                    combat_state.external_inertia_multiplier = Some(mult);
                 }
+                inertia *= mult;
             }
             let mass = combat_state.base_mass.unwrap_or(ship_type.mass);
             let radius = ship_type.radius;

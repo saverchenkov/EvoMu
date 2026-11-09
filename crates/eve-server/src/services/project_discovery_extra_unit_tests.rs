@@ -240,3 +240,40 @@ fn classification_isk_tiers_loot_crates_task_eviction_url_fallbacks_and_slash_er
         "TaskNotFound"
     );
 }
+
+#[test]
+fn project_discovery_ema_accuracy_avoids_binary64_drift() {
+    let ctx = test_ctx();
+    let mut sess = auth_session(1, 90_000_888, 98_000_001, 30_000_142);
+
+    // Task 1: accurate -> 1.0
+    handle_project_discovery_slash(&ctx, "/pd consensus 1 true")
+        .unwrap()
+        .unwrap();
+    call_pd(&ctx, &mut sess, "get_new_task", &[]).unwrap();
+    let sub1 = call_pd(&ctx, &mut sess, "submit", &[PyRep::Integer(1), PyRep::String("ok".into())]).unwrap();
+    assert_eq!(sub1.dict_get("accuracy").and_then(|v| v.as_f64()), Some(1.0));
+
+    // Task 2: inaccurate -> 0.9
+    ctx.advance_secs(MIN_SUBMISSION_INTERVAL_SECS);
+    handle_project_discovery_slash(&ctx, "/pd consensus 2 false")
+        .unwrap()
+        .unwrap();
+    call_pd(&ctx, &mut sess, "get_new_task", &[]).unwrap();
+    let sub2 = call_pd(&ctx, &mut sess, "submit", &[PyRep::Integer(2), PyRep::String("ok".into())]).unwrap();
+    assert_eq!(sub2.dict_get("accuracy").and_then(|v| v.as_f64()), Some(0.9));
+
+    // Task 3: accurate -> exact 0.91 and score 91.0 (not 0.9099999999999999)
+    ctx.advance_secs(MIN_SUBMISSION_INTERVAL_SECS);
+    handle_project_discovery_slash(&ctx, "/pd consensus 3 true")
+        .unwrap()
+        .unwrap();
+    call_pd(&ctx, &mut sess, "get_new_task", &[]).unwrap();
+    let sub3 = call_pd(&ctx, &mut sess, "submit", &[PyRep::Integer(3), PyRep::String("ok".into())]).unwrap();
+    assert_eq!(sub3.dict_get("accuracy").and_then(|v| v.as_f64()), Some(0.91));
+    assert_eq!(sub3.dict_get("score").and_then(|v| v.as_f64()), Some(91.0));
+
+    let stats = call_pd(&ctx, &mut sess, "get_player_statistics", &[]).unwrap();
+    assert_eq!(stats.dict_get("accuracy").and_then(|v| v.as_f64()), Some(0.91));
+    assert_eq!(stats.dict_get("score").and_then(|v| v.as_f64()), Some(91.0));
+}

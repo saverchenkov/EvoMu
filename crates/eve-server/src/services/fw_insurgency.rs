@@ -142,21 +142,11 @@ pub async fn handle_hub_and_scan(
             }
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let (caller_corp_id, caller_alliance_id, caller_roles) = snap
+                let (caller_corp_id, caller_alliance_id) = snap
                     .characters
                     .get(&char_id)
-                    .map(|c| {
-                        (
-                            c.corporation_id,
-                            c.alliance_id.or(session.alliance_id),
-                            session.corp_role,
-                        )
-                    })
-                    .unwrap_or((
-                        session.corporation_id.unwrap_or(0),
-                        session.alliance_id,
-                        session.corp_role,
-                    ));
+                    .map(|c| (c.corporation_id, c.alliance_id))
+                    .unwrap_or((0, None));
                 let held_alliance = snap
                     .system_states
                     .get(&sys_id)
@@ -180,7 +170,7 @@ pub async fn handle_hub_and_scan(
 
                 // Verify an online friendly sovereignty structure exists in sys_id and caller has director/station-manager/CEO role
                 let (is_ceo, member_role) =
-                    snap.effective_corp_roles_at(caller_corp_id, char_id, None, caller_roles, 0);
+                    snap.effective_corp_roles_at(caller_corp_id, char_id, None, 0, ctx.now_unix());
                 if !is_ceo && (member_role & (1 | 128 | 1024 | eve_db::corp_roles::ROLE_STATION_MANAGER)) == 0 {
                     return Err(BridgeRpcError {
                         code: "InsufficientCorporationRole".into(),

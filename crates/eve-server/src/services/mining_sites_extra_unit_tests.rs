@@ -366,6 +366,13 @@ async fn sov_hub_validation_proximity_locks_stack_splitting_and_anomaly_clearing
 
     // Grant Director role (bit 1) -> NoFriendlySovStructureInSystem before hub is spawned
     session.corp_role = 1;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations
+            .get_mut(&corp_id)
+            .unwrap()
+            .member_roles
+            .insert(char_id, 1);
+    });
     assert_eq!(call_sov_hub(&ctx, &mut session, "SaveUpgradeConfiguration", &[]).await.unwrap_err().code, "NoFriendlySovStructureInSystem");
 
     // Spawn online hub at [10_000, 0, 0] -> UpgradeItemNotFound
@@ -494,6 +501,21 @@ async fn sov_hub_validation_proximity_locks_stack_splitting_and_anomaly_clearing
 #[tokio::test]
 async fn demoted_or_expelled_director_cannot_save_sov_hub_upgrade_via_stale_session() {
     let mut sde = SdeRegistry::default();
+    sde.solar_systems.insert(
+        30_004_759,
+        SolarSystem {
+            solar_system_id: 30_004_759,
+            region_id: 10_000_060,
+            constellation_id: 20_000_696,
+            name: "1DQ1-A".into(),
+            security_status: -0.50,
+            radius: 1e12,
+            galactic_pos_ly: [0.0, 0.0, 0.0],
+            planet_ids: vec![],
+            stations: vec![],
+            wormhole_class_id: None,
+        },
+    );
     sde.types.insert(87702, make_type(87702, 4768, 66, "Tritanium Prospecting Array 3", 100.0, 10.0));
     let db = Arc::new(WorldRepository::with_demo_seed());
     let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
@@ -577,5 +599,48 @@ async fn demoted_or_expelled_director_cannot_save_sov_hub_upgrade_via_stale_sess
             .unwrap_err()
             .code,
         "InsufficientCorporationRole"
+    );
+
+    // Even if `corp.members` and `corp.member_roles` become completely empty after expulsion,
+    // stale `session.corp_role` must still be denied rather than falling back to the session.
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.get_mut(&corp_id).unwrap();
+        corp.members.clear();
+        corp.member_roles.clear();
+    });
+    assert_eq!(
+        call_sov_hub(&ctx, &mut stale_session, "SaveUpgradeConfiguration", &[])
+            .await
+            .unwrap_err()
+            .code,
+        "InsufficientCorporationRole"
+    );
+
+    // Even if an expelled director's DB corporation moves to an unseeded NPC corp while retaining
+    // alliance membership, stale `session.corp_role` must still be denied, and clearing DB alliance
+    // must fail closed without falling back to stale `session.alliance_id`.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&ex_dir_id) {
+            ch.corporation_id = 1_000_045;
+        }
+    });
+    assert_eq!(
+        call_sov_hub(&ctx, &mut stale_session, "SaveUpgradeConfiguration", &[])
+            .await
+            .unwrap_err()
+            .code,
+        "InsufficientCorporationRole"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&ex_dir_id) {
+            ch.alliance_id = None;
+        }
+    });
+    assert_eq!(
+        call_sov_hub(&ctx, &mut stale_session, "SaveUpgradeConfiguration", &[])
+            .await
+            .unwrap_err()
+            .code,
+        "SovereigntyNotClaimed"
     );
 }

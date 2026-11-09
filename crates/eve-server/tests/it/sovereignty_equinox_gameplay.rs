@@ -783,6 +783,37 @@ async fn test_skyhook_anchoring_linear_maturity_and_live_silo_ship_link_theft() 
     assert_eq!(hack_notif.args.get(1).and_then(|a| a.as_i64()), Some(lava_skyhook));
 
     let _ = drain_quasar(&mut rx);
+    // Engage an active 50MN Microwarpdrive so the Caracal exceeds the 1,000 m/s Skyhook link cap (`#585`),
+    // then verify `InitiateLink` clamps max velocity to `SKYHOOK_SILO_LINK_MAX_SPEED_MS`.
+    let mwd_id = 991_050i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(thief_cid).or_default().insert(
+            3454,
+            TrainedSkillRecord { type_id: 3454, level: 1, skill_points: 1_250.0 },
+        );
+        snap.items.insert(
+            mwd_id,
+            InventoryItemRecord {
+                item_id: mwd_id,
+                type_id: 12_052, // 50MN Microwarpdrive I (+500% velocity)
+                owner_id: thief_cid,
+                location_id: thief_ship,
+                flag: InventoryFlag::MedSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(mwd_id, true);
+    });
+    ctx.invalidate_ship_fitting(thief_ship);
+    rpc_call(
+        &ctx, &mut s_thief, "dogmaIM", "Activate",
+        &[PyRep::Integer(mwd_id), PyRep::String("moduleBonusMicrowarpdrive".into()), PyRep::None, PyRep::Integer(1)],
+    ).await.expect("Activate 50MN Microwarpdrive");
+    let pre_link_ball = ctx.systems.get_or_spawn(sys_id).get_ball_snapshot(thief_ship).await.unwrap().unwrap().1;
+    assert!(pre_link_ball.max_velocity > SKYHOOK_SILO_LINK_MAX_SPEED_MS);
+
     let link_rep = rpc_call(
         &ctx, &mut s_thief, "beyonce", "CallComponentFromClient",
         &[PyRep::Integer(lava_skyhook), PyRep::String("linkWithShip".into()), PyRep::String("InitiateLink".into())],

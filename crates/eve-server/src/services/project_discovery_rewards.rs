@@ -242,9 +242,10 @@ pub fn execute_post_classification(
     st.accuracy = if prev_tasks <= 0 {
         sample_acc
     } else {
-        (((st.accuracy * 9.0) + sample_acc) / 10.0).clamp(0.0, 1.0)
+        let ema = (((st.accuracy * 9.0) + sample_acc) / 10.0).clamp(0.0, 1.0);
+        ((ema * 1e12).round() / 1e12).clamp(0.0, 1.0)
     };
-    st.score = (st.accuracy * 100.0).clamp(0.0, 1000.0);
+    st.score = ((st.accuracy * 100.0 * 1e10).round() / 1e10).clamp(0.0, 1000.0);
 
     let had_bonus = st.bonus_samples_left > 0;
     st.bonus_samples_left = st.bonus_samples_left.saturating_sub(1);

@@ -384,6 +384,10 @@ pub struct InsuranceContractState {
 pub struct CombatRuntimeState {
     #[doc(hidden)]
     pub synced_db_epoch: u64,
+    #[doc(hidden)]
+    pub synced_rollback_epoch: u64,
+    #[doc(hidden)]
+    pub synced_ext_hash: u64,
     pub entropic_spools: HashMap<(i64, i64), EntropicSpoolState>,
     pub in_flight_missiles: HashMap<i64, InFlightMissileState>,
     pub active_breacher_dots: HashMap<i64, ActiveBreacherDot>,
@@ -485,6 +489,39 @@ struct PersistedCombatExtendedPayload {
 }
 
 impl CombatRuntimeState {
+    pub(crate) fn ext_runtime_hash(p: &eve_db::PersistedCombatCrimewatchState) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for &b in p.extended_runtime_json.as_bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        if h == 0 {
+            1
+        } else {
+            h
+        }
+    }
+
+    pub(crate) fn rehydrate_from_persisted_epochs(
+        &mut self,
+        p: &eve_db::PersistedCombatCrimewatchState,
+        combat_epoch: u64,
+        rb_epoch: u64,
+    ) {
+        let ext_hash = Self::ext_runtime_hash(p);
+        if self.synced_db_epoch == 0
+            || self.synced_rollback_epoch != rb_epoch
+            || self.synced_ext_hash != ext_hash
+        {
+            self.sync_from_persisted(p);
+        } else {
+            self.sync_core_from_persisted(p);
+        }
+        self.synced_db_epoch = combat_epoch;
+        self.synced_rollback_epoch = rb_epoch;
+        self.synced_ext_hash = ext_hash;
+    }
+
     pub fn has_limited_engagement_with(&self, char_id: i64, target_id: i64, now_unix: u64) -> bool {
         self.limited_engagements
             .get(&char_id)
@@ -790,17 +827,18 @@ impl CombatRuntimeState {
 }
 
 /// Rehydrates [`CombatRuntimeState`] from `ctx.db` whenever the repository epoch has changed
-/// (e.g. on startup, database reload, or transaction rollback) (`#592`).
+/// (e.g. on startup, database reload, snapshot replacement, or transaction rollback) (`#592`).
 pub fn sync_combat_runtime_from_db(ctx: &ServerContext) {
-    let db_epoch = ctx.db.rollback_epoch();
-    let cached_epoch = ctx
+    let combat_epoch = ctx.db.combat_state_epoch();
+    let rb_epoch = ctx.db.rollback_epoch();
+    let guard_read = ctx
         .combat_ephemeral
         .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .synced_db_epoch;
-    if cached_epoch == db_epoch {
+        .unwrap_or_else(|e| e.into_inner());
+    if guard_read.synced_db_epoch == combat_epoch && guard_read.synced_rollback_epoch == rb_epoch {
         return;
     }
+    drop(guard_read);
     if ctx.db.is_write_locked_by_current_thread() {
         return;
     }
@@ -809,8 +847,9 @@ pub fn sync_combat_runtime_from_db(ctx: &ServerContext) {
             .combat_ephemeral
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        guard.sync_from_persisted(&s.combat_crimewatch_state);
-        guard.synced_db_epoch = ctx.db.rollback_epoch();
+        let combat_epoch = ctx.db.combat_state_epoch();
+        let rb_epoch = ctx.db.rollback_epoch();
+        guard.rehydrate_from_persisted_epochs(&s.combat_crimewatch_state, combat_epoch, rb_epoch);
     });
 }
 
@@ -820,20 +859,26 @@ pub fn flush_combat_runtime_to_db(ctx: &ServerContext) {
         return;
     }
     let rb_before = ctx.db.rollback_epoch();
+    let mut ext_hash = 0;
     ctx.db.with_mut_snapshot(|s| {
         let mut guard = ctx
             .combat_ephemeral
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        s.combat_crimewatch_state = guard.to_persisted();
+        let persisted = guard.to_persisted();
+        ext_hash = CombatRuntimeState::ext_runtime_hash(&persisted);
+        s.combat_crimewatch_state = persisted;
         guard.synced_db_epoch = 0;
     });
-    if ctx.db.rollback_epoch() == rb_before {
+    let rb_after = ctx.db.rollback_epoch();
+    if rb_after == rb_before {
         let mut guard = ctx
             .combat_ephemeral
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        guard.synced_db_epoch = rb_before;
+        guard.synced_db_epoch = ctx.db.combat_state_epoch();
+        guard.synced_rollback_epoch = rb_after;
+        guard.synced_ext_hash = ext_hash;
     }
 }
 
@@ -863,26 +908,37 @@ pub fn with_mut_combat_runtime<R>(
         return out;
     }
     let rb_before = ctx.db.rollback_epoch();
+    let mut ext_hash = 0;
     let out = ctx.db.with_mut_snapshot(|s| {
         let mut guard = ctx
             .combat_ephemeral
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        let db_epoch = ctx.db.rollback_epoch();
-        if guard.synced_db_epoch != db_epoch {
-            guard.sync_from_persisted(&s.combat_crimewatch_state);
+        let combat_epoch = ctx.db.combat_state_epoch();
+        let rb_epoch = ctx.db.rollback_epoch();
+        if guard.synced_db_epoch != combat_epoch || guard.synced_rollback_epoch != rb_epoch {
+            guard.rehydrate_from_persisted_epochs(
+                &s.combat_crimewatch_state,
+                combat_epoch,
+                rb_epoch,
+            );
         }
         let out = f(&mut guard);
-        s.combat_crimewatch_state = guard.to_persisted();
+        let persisted = guard.to_persisted();
+        ext_hash = CombatRuntimeState::ext_runtime_hash(&persisted);
+        s.combat_crimewatch_state = persisted;
         guard.synced_db_epoch = 0;
         out
     });
-    if ctx.db.rollback_epoch() == rb_before {
+    let rb_after = ctx.db.rollback_epoch();
+    if rb_after == rb_before {
         let mut guard = ctx
             .combat_ephemeral
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        guard.synced_db_epoch = ctx.db.rollback_epoch();
+        guard.synced_db_epoch = ctx.db.combat_state_epoch();
+        guard.synced_rollback_epoch = rb_after;
+        guard.synced_ext_hash = ext_hash;
     }
     out
 }

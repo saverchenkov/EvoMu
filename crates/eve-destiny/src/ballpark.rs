@@ -482,6 +482,27 @@ impl Ballpark {
         true
     }
 
+    /// Sets or clears a declarative hard `max_velocity_cap` (e.g. Orbital Skyhook silo link) on
+    /// `ball_id`'s `CombatState` and recomputes effective `max_velocity`, emitting
+    /// [`DestinyEvent::SetMaxSpeed`] when the effective speed changes (`#584`).
+    pub fn set_ball_max_velocity_cap(&mut self, ball_id: BallId, cap: Option<f64>) -> bool {
+        let Some(prev_vel) = self.balls.get(&ball_id).map(|b| b.max_velocity) else {
+            return false;
+        };
+        let new_vel = {
+            let ball = self.balls.get_mut(&ball_id).unwrap();
+            let cs = self.combat_states.entry(ball_id).or_default();
+            cs.capture_missing_baselines(ball);
+            cs.max_velocity_cap = cap.map(|v| v.max(0.0));
+            cs.recompute_attributes(ball);
+            ball.max_velocity
+        };
+        if (new_vel - prev_vel).abs() > 1e-6 {
+            self.emit_event(Some(ball_id), DestinyEvent::SetMaxSpeed { ball_id, max_speed: new_vel });
+        }
+        true
+    }
+
     /// Emits `OnDamageStateChange` (and `TerminalExplosion` + ball removal when `destroyed`).
     pub fn emit_damage_and_destruction_events(
         &mut self,

@@ -1633,8 +1633,10 @@ async fn test_esi_b6_fw_stats_systems_leaderboards_and_wars_live_rpc_driven() {
         "esi:GET /fw/wars",
     ]);
 
-    let db_path = std::env::temp_dir().join(format!("esi_b6_fw_{}.sqlite", std::process::id()));
-    let _ = std::fs::remove_file(&db_path);
+    let db_path = std::env::temp_dir().join(format!("esi_b6_fw_full_{}.sqlite", std::process::id()));
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", db_path.display()));
+    }
     let ctx = Arc::new(ServerContext::from_sqlite(&db_path).expect("sqlite ctx"));
     common::pin_clock(&ctx);
 
@@ -1890,13 +1892,18 @@ async fn test_esi_b6_fw_stats_systems_leaderboards_and_wars_live_rpc_driven() {
     );
     assert_eq!(char_fw_after["faction_id"], 500_001);
     assert!(char_fw_after["kills"]["total"].as_i64().unwrap_or(0) >= 1);
-    let _ = std::fs::remove_file(&db_path);
+    drop(router_reloaded);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", db_path.display()));
+    }
 }
 
 #[tokio::test]
 async fn test_esi_b6_incursions_and_sovereignty_campaigns_structures_live_state() {
-    let db_path = std::env::temp_dir().join(format!("esi_b6_sov_{}.sqlite", std::process::id()));
-    let _ = std::fs::remove_file(&db_path);
+    let db_path = std::env::temp_dir().join(format!("esi_b6_sov_full_{}.sqlite", std::process::id()));
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", db_path.display()));
+    }
     let ctx = Arc::new(ServerContext::from_sqlite(&db_path).expect("sqlite ctx"));
     common::pin_clock(&ctx);
 
@@ -2036,7 +2043,10 @@ async fn test_esi_b6_incursions_and_sovereignty_campaigns_structures_live_state(
         .unwrap()
         .iter()
         .any(|c| c["structure_id"] == hub_id));
-    let _ = std::fs::remove_file(&db_path);
+    drop(router_reloaded);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", db_path.display()));
+    }
 }
 
 #[tokio::test]

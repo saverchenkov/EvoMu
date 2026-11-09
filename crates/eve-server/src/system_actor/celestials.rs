@@ -95,6 +95,24 @@ impl SystemHandle {
             .map_err(|_| "Solar system reply dropped".to_string())
     }
 
+    pub async fn set_ball_max_velocity_cap(
+        &self,
+        ball_id: BallId,
+        cap: Option<f64>,
+    ) -> Result<bool, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::SetBallMaxVelocityCap {
+                ball_id,
+                cap,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Solar system reply dropped".to_string())
+    }
+
     pub async fn spawn_ball_with_combat(
         &self,
         ball: Ball,

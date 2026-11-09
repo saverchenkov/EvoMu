@@ -59,14 +59,15 @@ fn season_phase_label(cfg: &SeasonConfig, now_ft: i64) -> &'static str {
 pub fn check_and_emit_season_transitions(ctx: &ServerContext) {
     let now_ft = ctx.now_blueos_filetime_ticks();
     let needs_mut = ctx.db.with_snapshot(|snap| {
-        if snap.seasons_and_campaigns.seasons_catalog.is_empty()
-            || !snap.seasons_and_campaigns.announced_season_init
-        {
+        if !snap.seasons_and_campaigns.announced_season_init {
             return true;
         }
         let mut catalog = load_seasons_catalog(snap, &ctx.sde, now_ft);
         if let Some(cfg) = &snap.seasons_and_campaigns.season_configuration {
             catalog.entry(cfg.season_id).or_insert_with(|| cfg.clone());
+        }
+        if snap.seasons_and_campaigns.seasons_catalog.is_empty() && !catalog.is_empty() {
+            return true;
         }
         let announced = &snap.seasons_and_campaigns.announced_season_states;
         catalog

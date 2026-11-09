@@ -755,11 +755,9 @@ pub async fn handle_skyhook_component_call(
                 Ok(())
             })?;
 
-            if ship_ball.max_velocity > SKYHOOK_SILO_LINK_MAX_SPEED_MS {
-                let _ = sys_handle
-                    .set_ball_max_velocity(ship_id, SKYHOOK_SILO_LINK_MAX_SPEED_MS)
-                    .await;
-            }
+            let _ = sys_handle
+                .set_ball_max_velocity_cap(ship_id, Some(SKYHOOK_SILO_LINK_MAX_SPEED_MS))
+                .await;
             crate::services::sov_services::emit_skyhook_can_be_hacked(ctx, sys_id, skyhook_id);
             Ok(PyRep::keyval([
                 ("skyhookID", PyRep::Integer(skyhook_id)),
@@ -974,7 +972,7 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
                 snap.sov_runtime.skyhook_silo_links.remove(&skyhook_id);
             });
             if ship_opt.is_some() && orig_vel > 0.0 {
-                let _ = sys_handle.set_ball_max_velocity(ship_id, orig_vel).await;
+                let _ = sys_handle.set_ball_max_velocity_cap(ship_id, None).await;
             }
             continue;
         }
@@ -983,7 +981,7 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
             if let Some((_, sb)) = ship_opt {
                 if sb.max_velocity > SKYHOOK_SILO_LINK_MAX_SPEED_MS {
                     let _ = sys_handle
-                        .set_ball_max_velocity(ship_id, SKYHOOK_SILO_LINK_MAX_SPEED_MS)
+                        .set_ball_max_velocity_cap(ship_id, Some(SKYHOOK_SILO_LINK_MAX_SPEED_MS))
                         .await;
                 }
             }
@@ -1043,7 +1041,7 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
         });
 
         if ship_opt.is_some() && orig_vel > 0.0 {
-            let _ = sys_handle.set_ball_max_velocity(ship_id, orig_vel).await;
+            let _ = sys_handle.set_ball_max_velocity_cap(ship_id, None).await;
         }
         if let Some((container_id, c_pos, r_type, final_sec)) = drop_res {
             let _ = sys_handle

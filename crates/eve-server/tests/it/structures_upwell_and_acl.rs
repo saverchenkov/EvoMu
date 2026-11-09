@@ -518,10 +518,19 @@ async fn test_fulcrum_docking_allegiance_gating_and_alignment_speed_buff() {
     let neutral_mult = ctx.db.with_snapshot(|s| eve_server::services::station_structure_handlers::fulcrum_alignment_inertia_multiplier(s, 90_000_999, Some(FULCRUM_ID), ZARZAKH_SYS));
     assert!((neutral_mult - 1.0).abs() < 1e-6);
 
-    // Undock from Fulcrum applies buff
+    // Undock from Fulcrum applies buff (on top of pilot Dogma agility)
     assert!(rpc(&ctx, &mut sess, "stationSvc", "Undock", &[]).await.is_ok());
     let ball_snap = z_handle.get_ball_snapshot(ship).await.unwrap().unwrap().1;
-    let base_agility = ctx.sde.types.get(&621).and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::AGILITY).copied()).unwrap_or(1.0);
+    let base_agility = ctx
+        .build_ship_combat_state(cid, ship, 621)
+        .base_inertia
+        .or_else(|| {
+            ctx.sde
+                .types
+                .get(&621)
+                .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::AGILITY).copied())
+        })
+        .unwrap_or(1.0);
     assert!((ball_snap.inertia - base_agility * 0.80).abs() < 1e-4);
 }
 

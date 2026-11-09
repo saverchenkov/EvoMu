@@ -726,3 +726,59 @@ fn many_scanner_probes_persist_without_blowing_service_state_blob_cap() {
         assert_eq!(p.warp_end_ft, None);
     }
 }
+
+#[test]
+fn combat_runtime_rehydrates_on_mut_snapshot_without_clobbering_unflushed_npcs() {
+    let sde = shared_sde();
+    let dir = TempTestDir::new("combat_mut_snap");
+    let db_path = dir.path().join("world.sqlite");
+    let db = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open sqlite"));
+    let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db));
+
+    // Seed clean baseline sync epochs on `ctx.combat_ephemeral`.
+    with_combat_ephemeral(&ctx, |_| {});
+    let sys_id = 30_000_142u32;
+    let hunter_id = 90_000_311i64;
+
+    // Simulate an unflushed RAM-only extended runtime mutation alongside an unrelated
+    // `with_mut_snapshot` update (e.g., `next_entity_id`), then a direct snapshot mutation
+    // updating `bounty_hunter_claimed` (as occurs during whole-snapshot reload / clone).
+    ctx.combat_ephemeral
+        .write()
+        .unwrap()
+        .modified_system_securities
+        .insert(sys_id, 0.25);
+
+    db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+    });
+    with_combat_ephemeral(&ctx, |st| {
+        assert_eq!(st.modified_system_securities.get(&sys_id), Some(&0.25));
+    });
+
+    db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .bounty_hunter_claimed
+            .insert(hunter_id, 1_250_000.0);
+    });
+    with_combat_ephemeral(&ctx, |st| {
+        assert_eq!(
+            st.bounty_hunter_claimed.get(&hunter_id),
+            Some(&1_250_000.0)
+        );
+        // Core snapshot sync must not clobber unflushed RAM extended state when `extended_runtime_json` is unchanged.
+        assert_eq!(st.modified_system_securities.get(&sys_id), Some(&0.25));
+    });
+
+    // When `extended_runtime_json` itself changes in `with_mut_snapshot`, full rehydration runs.
+    let mut replacement = CombatRuntimeState::default();
+    replacement.modified_system_securities.insert(sys_id, 0.75);
+    let replacement_persisted = replacement.to_persisted();
+    db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state.extended_runtime_json =
+            replacement_persisted.extended_runtime_json.clone();
+    });
+    with_combat_ephemeral(&ctx, |st| {
+        assert_eq!(st.modified_system_securities.get(&sys_id), Some(&0.75));
+    });
+}

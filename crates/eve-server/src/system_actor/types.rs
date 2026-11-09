@@ -244,6 +244,11 @@ pub enum SystemCommand {
         max_velocity: f64,
         reply: oneshot::Sender<bool>,
     },
+    SetBallMaxVelocityCap {
+        ball_id: BallId,
+        cap: Option<f64>,
+        reply: oneshot::Sender<bool>,
+    },
     GetBallSlimItem {
         ball_id: BallId,
         reply: oneshot::Sender<Option<eve_proto::PyRep>>,

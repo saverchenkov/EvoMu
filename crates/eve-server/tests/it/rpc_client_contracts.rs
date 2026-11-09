@@ -497,8 +497,24 @@ fn rowset_row_to_keyval(columns: &[String], row: &[PyRep]) -> PyRep {
 }
 
 fn crowset_descriptor_columns(rep: &PyRep) -> Option<Vec<String>> {
-    if let PyRep::ObjectEx { header, .. } = rep {
+    if let PyRep::ObjectEx { header, dict, .. } = rep {
         if let PyRep::Tuple(items) = header.as_ref() {
+            // Canonical Python `__reduce_ex__(2)` layout (`DBRowDescriptor::build_crowset` /
+            // `build_cindexed_rowset` and live V24 wire):
+            // `((Token("...CRowset"),), {"header": DBRowDescriptor, ...})`
+            if let Some(desc_rep) = items.get(1).and_then(|state| match state {
+                PyRep::Dict(entries) => entries
+                    .iter()
+                    .find(|(k, _)| k.as_str() == Some("header"))
+                    .map(|(_, v)| v),
+                PyRep::KeyVal(map) => map.get("header"),
+                _ => None,
+            }) {
+                if let Some(defs) = eve_proto::extract_dbrow_header_col_defs(desc_rep) {
+                    return Some(defs.into_iter().map(|(n, _)| n).collect());
+                }
+            }
+            // Fallback for constructor-arg style `((Token("...CRowset"), DBRowDescriptor), ...)`
             if let Some(PyRep::Tuple(args)) = items.first() {
                 if let Some(desc_rep) = args.get(1).and_then(|t| {
                     if let PyRep::Tuple(inner) = t {
@@ -511,6 +527,11 @@ fn crowset_descriptor_columns(rep: &PyRep) -> Option<Vec<String>> {
                         return Some(defs.into_iter().map(|(n, _)| n).collect());
                     }
                 }
+            }
+        }
+        if let Some((_, desc_rep)) = dict.iter().find(|(k, _)| k.as_str() == Some("header")) {
+            if let Some(defs) = eve_proto::extract_dbrow_header_col_defs(desc_rep) {
+                return Some(defs.into_iter().map(|(n, _)| n).collect());
             }
         }
     }
@@ -3005,4 +3026,43 @@ async fn test_v24_live_client_bug_report_regressions_330_to_352() {
         .await
         .expect("RWManager.get_closest_rw_stations must succeed");
     assert_eq!(rw_stations, PyRep::Dict(Vec::new()));
+}
+
+#[test]
+fn test_crowset_descriptor_columns_reads_canonical_empty_rowsets() {
+    use eve_proto::{DBRowDescriptor, DbColumnType};
+
+    let desc = DBRowDescriptor::new([
+        ("warID", DbColumnType::I8),
+        ("declaredByID", DbColumnType::I8),
+        ("againstID", DbColumnType::I8),
+    ]);
+
+    let empty_crowset = desc.build_crowset(Vec::new());
+    assert!(empty_crowset.is_crowset());
+    assert_eq!(
+        crowset_descriptor_columns(&empty_crowset).as_deref(),
+        Some(&[
+            "warID".to_string(),
+            "declaredByID".to_string(),
+            "againstID".to_string(),
+        ][..])
+    );
+    assert!(has_column_in_collection(&empty_crowset, "warID"));
+    assert!(!has_column_in_collection(&empty_crowset, "missingCol"));
+
+    let empty_cindexed = desc.build_cindexed_rowset("warID", Vec::new());
+    assert!(empty_cindexed.is_cindexed_rowset());
+    assert!(has_column_in_collection(&empty_cindexed, "warID"));
+
+    let legacy_arg_crowset = PyRep::ObjectEx {
+        is_type_2: true,
+        header: Box::new(PyRep::Tuple(vec![PyRep::Tuple(vec![
+            PyRep::Token("carbon.common.script.sys.crowset.CRowset".into()),
+            desc.to_pyrep(),
+        ])])),
+        list: Vec::new(),
+        dict: Vec::new(),
+    };
+    assert!(has_column_in_collection(&legacy_arg_crowset, "warID"));
 }

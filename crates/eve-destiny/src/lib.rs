@@ -343,6 +343,9 @@ pub struct CombatState {
     /// Aggregate self HIC WDFG velocity multiplier, default `1.0`.
     #[serde(default = "default_one_f64")]
     pub hic_velocity_multiplier: f64,
+    /// Optional hard maximum velocity cap in m/s (e.g. Orbital Skyhook silo link `1_000.0` m/s).
+    #[serde(default)]
+    pub max_velocity_cap: Option<f64>,
     /// Aggregate stacking-penalized web / grappler / wubble velocity multiplier, default `1.0`.
     #[serde(default = "default_one_f64")]
     pub web_velocity_multiplier: f64,
@@ -458,6 +461,7 @@ impl Default for CombatState {
             module_immobilized: false,
             prop_velocity_multiplier: 1.0,
             hic_velocity_multiplier: 1.0,
+            max_velocity_cap: None,
             web_velocity_multiplier: 1.0,
             module_mass_multiplier: 1.0,
             module_mass_addition: 0.0,
@@ -539,7 +543,11 @@ impl CombatState {
         } else {
             self.prop_velocity_multiplier * self.hic_velocity_multiplier
         };
-        ball.max_velocity = (base_v * env_v * self_v * self.web_velocity_multiplier).max(0.0);
+        let raw_v = (base_v * env_v * self_v * self.web_velocity_multiplier).max(0.0);
+        ball.max_velocity = match self.max_velocity_cap {
+            Some(cap) => raw_v.min(cap.max(0.0)),
+            None => raw_v,
+        };
 
         let base_m = self.base_mass.unwrap_or(ball.mass);
         ball.mass = (base_m * self.module_mass_multiplier + self.module_mass_addition).max(1.0);
