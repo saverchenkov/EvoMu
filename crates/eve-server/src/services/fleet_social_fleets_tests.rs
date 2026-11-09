@@ -78,6 +78,30 @@ async fn create_fleet_wing_squad_invite_and_move_lifecycle() {
         .unwrap();
     assert_eq!(init, PyRep::None);
 
+    let init_state = handle_fleets(
+        &ctx,
+        &mut boss_session,
+        "fleetObjectHandler",
+        "GetInitState",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let members = init_state.dict_get("members").unwrap();
+    let PyRep::Dict(member_entries) = members else {
+        panic!("expected members dict");
+    };
+    let boss_rec = member_entries
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(boss_id))
+        .map(|(_, v)| v)
+        .expect("boss in GetInitState members");
+    assert_eq!(boss_rec.dict_get("wingID").and_then(|v| v.as_i64()), Some(-1));
+    assert_eq!(boss_rec.dict_get("squadID").and_then(|v| v.as_i64()), Some(-1));
+    assert_eq!(boss_rec.dict_get("role").and_then(|v| v.as_i64()), Some(1));
+
     let wing = handle_fleets(
         &ctx,
         &mut boss_session,

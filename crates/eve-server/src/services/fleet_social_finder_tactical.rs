@@ -516,7 +516,7 @@ fn handle_update_advert_info(
         NotificationTarget::Fleet(fleet_id),
         "OnFleetFinderAdvertChanged",
         "fleetid",
-        vec![PyRep::Integer(fleet_id), PyRep::String(fleet_name.clone())],
+        vec![],
     );
     Ok(PyRep::keyval([
         ("fleetID", PyRep::Integer(fleet_id)),
@@ -869,7 +869,7 @@ pub(super) async fn handle_finder_and_tactical(
                     allowed_entities: HashSet::new(), _created_unix: now_unix,
                 },
             );
-            ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetFinderAdvertChanged", "fleetid", vec![PyRep::Integer(fleet_id), PyRep::String(fleet_name.clone())]);
+            ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetFinderAdvertChanged", "fleetid", vec![]);
             Some(Ok(PyRep::keyval([
                 ("fleetID", PyRep::Integer(fleet_id)),
                 ("leaderID", PyRep::Integer(char_id)),

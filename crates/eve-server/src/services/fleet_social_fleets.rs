@@ -197,9 +197,9 @@ pub(super) async fn handle_fleets(
                         (1_i64, 1_i64)
                     };
                     let wing_details = HashMap::from([(wid, FleetWingRecord { wing_id: wid, name: "Wing 1".into(), commander_id: None, squad_ids: vec![sid] })]);
-                    let squad_details = HashMap::from([(sid, FleetSquadRecord { squad_id: sid, wing_id: wid, name: "Squad 1".into(), commander_id: Some(char_id) })]);
+                    let squad_details = HashMap::from([(sid, FleetSquadRecord { squad_id: sid, wing_id: wid, name: "Squad 1".into(), commander_id: None })]);
                     let member_details = HashMap::from([(char_id, FleetMemberRecord {
-                        character_id: char_id, role: FleetRole::FleetCommander, wing_id: Some(wid), squad_id: Some(sid),
+                        character_id: char_id, role: FleetRole::FleetCommander, wing_id: None, squad_id: None,
                         takes_fleet_warp: true, accepts_regroup: true, accepts_conduit_jumps: true, job: 2,
                         role_name: "Fleet Commander".into(), join_time_unix: ctx.now_unix(),
                     })]);

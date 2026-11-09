@@ -165,6 +165,18 @@ async fn fleet_proxy_update_advert_v2401_and_persistence() {
     .unwrap_err();
     assert_eq!(err.code, "AdvertNotFound");
 
+    let boss_id = session.character_id.unwrap();
+    let boss_uid = ctx.db.with_mut_snapshot(|snap| {
+        let uid = snap.accounts.values().next().unwrap().user_id;
+        snap.characters.get_mut(&boss_id).unwrap().user_id = uid;
+        uid
+    });
+    session.user_id = Some(boss_uid);
+    ctx.db
+        .acquire_online_lock(boss_uid, session.session_id.max(1), Some(boss_id), true, ctx.now_unix())
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(boss_id);
+
     // Seed an advert via AddFleetFinderAdvert
     let _ = handle_finder_and_tactical(
         &ctx,
@@ -181,6 +193,13 @@ async fn fleet_proxy_update_advert_v2401_and_persistence() {
     .await
     .unwrap()
     .unwrap();
+    let add_notifs: Vec<_> = ctx
+        .drain_notifications_for_char(boss_id)
+        .into_iter()
+        .filter(|n| n.event == "OnFleetFinderAdvertChanged")
+        .collect();
+    assert!(!add_notifs.is_empty(), "expected OnFleetFinderAdvertChanged after AddFleetFinderAdvert");
+    assert!(add_notifs.iter().all(|n| n.args.is_empty()), "OnFleetFinderAdvertChanged must take 0 args (#720)");
 
     // V24.01 UpdateAdvertInfo(numMembers, allowedDiffKeyVal)
     let diff = PyRep::keyval([
@@ -201,6 +220,13 @@ async fn fleet_proxy_update_advert_v2401_and_persistence() {
     .await
     .unwrap()
     .unwrap();
+    let upd_notifs: Vec<_> = ctx
+        .drain_notifications_for_char(boss_id)
+        .into_iter()
+        .filter(|n| n.event == "OnFleetFinderAdvertChanged")
+        .collect();
+    assert!(!upd_notifs.is_empty(), "expected OnFleetFinderAdvertChanged after UpdateAdvertInfo");
+    assert!(upd_notifs.iter().all(|n| n.args.is_empty()), "OnFleetFinderAdvertChanged must take 0 args (#720)");
 
     // Remove one entity via V24.01 allowedDiffKeyVal
     let diff_remove = PyRep::keyval([(

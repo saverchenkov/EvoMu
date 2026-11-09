@@ -214,6 +214,7 @@ fn test_session_state_diffs_notifications_and_gm_roles() {
         "userid",
         "charid",
         "corpid",
+        "corpAccountKey",
         "allianceid",
         "locationid",
         "solarsystemid2",

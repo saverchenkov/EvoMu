@@ -16,6 +16,7 @@ fn setup_corp_registry_ctx() -> (ServerContext, SessionState, i64, i64, i64) {
     sess.corporation_id = Some(corp_id);
     sess.station_id = Some(station_id);
     sess.corp_role = u64::MAX;
+    sess.corp_account_key = 1000;
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -268,8 +269,9 @@ fn test_corp_registry_handle_methods_and_helpers() {
     };
     let idx = |name: &str| t_cols.iter().position(|c| c == name).expect(name);
     assert_eq!(t_rows.len(), 1);
-    assert_eq!(t_rows[0][idx("lastOnline")].as_f64(), Some(0.0));
+    assert_eq!(t_rows[0][idx("lastOnline")].as_f64(), Some(-1.0));
     assert_eq!(t_rows[0][idx("online")].as_bool(), Some(true));
+    assert_eq!(t_rows[0][idx("factionID")], PyRep::None);
     assert!(t_rows[0][idx("startDateTime")].as_i64().unwrap_or(0) >= 116_444_736_000_000_000);
     assert!(t_rows[0][idx("logonDateTime")].as_i64().unwrap_or(0) >= 116_444_736_000_000_000);
 
@@ -316,5 +318,37 @@ fn test_corp_registry_handle_methods_and_helpers() {
     assert!((off_hours - 1.0).abs() < 0.01, "expected ~1.0 hours offline, got {off_hours}");
     assert!(off_row[idx("logoffDateTime")].as_i64().unwrap_or(0) >= 116_444_736_000_000_000);
     let never_row = all_rows.iter().find(|r| r[0].as_i64() == Some(never_char_id)).unwrap();
-    assert_eq!(never_row[idx("lastOnline")].as_f64(), Some(-1.0));
+    assert_eq!(never_row[idx("lastOnline")], PyRep::None);
+}
+
+#[test]
+fn set_account_key_noop_skips_session_change_timer() {
+    let (ctx, mut sess, _char_id, _corp_id, _station_id) = setup_corp_registry_ctx();
+    let kwargs = HashMap::new();
+
+    // No-op SetAccountKey(1000) returns None without starting the 10s timer.
+    let res1 = handle(&ctx, &mut sess, "corpRegistry", "SetAccountKey", &[PyRep::Integer(1000)], &kwargs)
+        .unwrap()
+        .unwrap();
+    assert_eq!(res1, PyRep::None);
+    assert_eq!(sess.corp_account_key, 1000);
+
+    // Immediate actual change 1000 -> 1001 succeeds without SessionChangeInProgress.
+    let res2 = handle(&ctx, &mut sess, "corpRegistry", "SetAccountKey", &[PyRep::Integer(1001)], &kwargs)
+        .unwrap()
+        .unwrap();
+    assert_eq!(res2, PyRep::None);
+    assert_eq!(sess.corp_account_key, 1001);
+
+    // No-op repeat of current key (1001) during active timer also succeeds without triggering cooldown.
+    let res3 = handle(&ctx, &mut sess, "corpRegistry", "SetAccountKey", &[PyRep::Integer(1001)], &kwargs)
+        .unwrap()
+        .unwrap();
+    assert_eq!(res3, PyRep::None);
+
+    // Changing to 1002 within 10s fails with SessionChangeInProgress.
+    let err = handle(&ctx, &mut sess, "corpRegistry", "SetAccountKey", &[PyRep::Integer(1002)], &kwargs)
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(err.code, "SessionChangeInProgress");
 }

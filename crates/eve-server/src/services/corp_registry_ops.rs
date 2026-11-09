@@ -406,12 +406,6 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let now_unix = ctx.now_unix();
-            if let Some(active_timer) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
-                return Some(Err(BridgeRpcError {
-                    code: "SessionChangeInProgress".into(),
-                    message: format!("Cannot change account key while 10s session-change timer ({}) is active", active_timer.reason),
-                }));
-            }
             let key = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             if !(1000..=1006).contains(&key) {
                 return Some(Err(BridgeRpcError {
@@ -436,18 +430,25 @@ pub fn handle(
                 return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: format!("Character {char_id} lacks wallet division access for account key {key}") }));
             }
             let old_key = session.corp_account_key as i64;
+            if old_key == key {
+                return Some(Ok(PyRep::None));
+            }
+            if let Some(active_timer) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
+                return Some(Err(BridgeRpcError {
+                    code: "SessionChangeInProgress".into(),
+                    message: format!("Cannot change account key while 10s session-change timer ({}) is active", active_timer.reason),
+                }));
+            }
             session.corp_account_key = key as i32;
             crate::services::fleet_social::fleet_social_corps::with_corp_gov(ctx, |g| {
                 g.entry(corp_id).or_default().member_account_keys.insert(char_id, key);
             });
-            if old_key != key {
-                ctx.notify(
-                    crate::router::NotificationTarget::Character(char_id),
-                    "OnSessionChanged",
-                    "clientID",
-                    vec![PyRep::Bool(false), PyRep::Dict(vec![(PyRep::String("corpAccountKey".into()), PyRep::Tuple(vec![PyRep::Integer(old_key), PyRep::Integer(key)]))])],
-                );
-            }
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnSessionChanged",
+                "clientID",
+                vec![PyRep::Bool(false), PyRep::Dict(vec![(PyRep::String("corpAccountKey".into()), PyRep::Tuple(vec![PyRep::Integer(old_key), PyRep::Integer(key)]))])],
+            );
             let sys_id = session.solar_system_id.unwrap_or(0);
             crate::services::space_destiny::record_session_change_timer(
                 ctx,
@@ -1281,14 +1282,14 @@ pub(crate) fn handle_get_member_tracking_info(
                 let start_dt = snap.employment_history.get(&mid).and_then(|h| h.iter().rev().find(|e| e.0 == corp_id).map(|e| e.1)).unwrap_or(ch.create_date_unix);
                 let grantable = snap.corp_role_assignments.get(&(corp_id, mid)).map(|r| r.grantable_roles).unwrap_or(0);
                 let base_id = gov.and_then(|g| g.member_bases.get(&mid).copied());
-                let last_online_hours: f64 = if is_currently_online {
-                    0.0
+                let last_online_rep = if is_currently_online {
+                    PyRep::Real(-1.0)
                 } else if let Some(off) = logoff_ts {
-                    ((now_unix.saturating_sub(off)) as f64 / 3600.0).max(0.01)
+                    PyRep::Real(((now_unix.saturating_sub(off)) as f64 / 3600.0).max(0.01))
                 } else if logon_ts > 0 {
-                    ((now_unix.saturating_sub(logon_ts)) as f64 / 3600.0).max(0.01)
+                    PyRep::Real(((now_unix.saturating_sub(logon_ts)) as f64 / 3600.0).max(0.01))
                 } else {
-                    -1.0
+                    PyRep::None
                 };
                 let logon_rep = if logon_ts > 0 {
                     PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(logon_ts))
@@ -1299,13 +1300,14 @@ pub(crate) fn handle_get_member_tracking_info(
                     .map(|t| PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(t)))
                     .unwrap_or(PyRep::None);
                 let start_rep = PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(start_dt));
+                let faction_rep = ch.war_faction_id.map(PyRep::Integer).unwrap_or(PyRep::None);
                 Some(vec![
                     PyRep::Integer(mid), PyRep::String(ch.name.clone()), PyRep::Integer(roles as i64), PyRep::Integer(roles as i64),
                     PyRep::String(title), PyRep::Integer(tmask as i64), PyRep::Integer(corp_id), loc_rep, ship_rep,
                     logon_rep, logoff_rep,
                     start_rep, base_id.map(PyRep::Integer).unwrap_or(PyRep::None),
                     PyRep::Integer(grantable as i64), PyRep::Bool(is_currently_online),
-                    PyRep::Real(last_online_hours),
+                    last_online_rep, faction_rep,
                 ])
             })
             .collect()
@@ -1314,7 +1316,7 @@ pub(crate) fn handle_get_member_tracking_info(
         vec![
             "characterID", "name", "role", "roles", "title", "titleMask", "corporationID",
             "locationID", "shipTypeID", "logonDateTime", "logoffDateTime", "startDateTime",
-            "baseID", "grantableRoles", "online", "lastOnline",
+            "baseID", "grantableRoles", "online", "lastOnline", "factionID",
         ],
         rows,
     )))

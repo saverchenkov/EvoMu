@@ -607,13 +607,12 @@ pub fn on_character_select(
         session.corp_account_key = k as i32;
     }
     tick_fleet_lifecycle(ctx);
-    let within_grace = ctx
+    let _ = ctx
         .fleet_extras
         .lock()
         .unwrap()
         .disconnected_members
-        .remove(&char_id)
-        .is_some();
+        .remove(&char_id);
     let existing_fid = ctx.db.with_snapshot(|snap| {
         snap.fleets
             .values()
@@ -621,7 +620,7 @@ pub fn on_character_select(
             .map(|f| f.fleet_id)
     });
     if let Some(fid) = existing_fid {
-        if within_grace || was_already_online {
+        if was_already_online {
             session.fleet_id = Some(fid);
             ctx.db.with_mut_snapshot(|snap| {
                 if let Some(f) = snap.fleets.get(&fid) {

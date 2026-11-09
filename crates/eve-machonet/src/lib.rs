@@ -816,6 +816,25 @@ impl SessionState {
                 "charid".into(),
                 (opt_i64(self.character_id), opt_i64(next.character_id)),
             );
+            if self.character_id.is_none() && next.character_id.is_some() {
+                changes.insert(
+                    "corpAccountKey".into(),
+                    (PyRep::None, PyRep::Integer(next.corp_account_key as i64)),
+                );
+            } else if self.character_id.is_some() && next.character_id.is_none() {
+                changes.insert(
+                    "corpAccountKey".into(),
+                    (PyRep::Integer(self.corp_account_key as i64), PyRep::None),
+                );
+            }
+        } else if self.character_id.is_some() && self.corp_account_key != next.corp_account_key {
+            changes.insert(
+                "corpAccountKey".into(),
+                (
+                    PyRep::Integer(self.corp_account_key as i64),
+                    PyRep::Integer(next.corp_account_key as i64),
+                ),
+            );
         }
         if self.corporation_id != next.corporation_id {
             changes.insert(

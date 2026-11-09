@@ -408,6 +408,7 @@ fn session_state_notifications_locations_and_full_diff_matrix() {
         "userid",
         "charid",
         "corpid",
+        "corpAccountKey",
         "allianceid",
         "structureid",
         "locationid",
