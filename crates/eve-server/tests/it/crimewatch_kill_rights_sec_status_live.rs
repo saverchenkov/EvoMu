@@ -105,7 +105,7 @@ async fn create_fresh_pilot(
     bloodline_ancestry_school: (i64, i64, i64),
     grant_gm_role: bool,
 ) -> (SessionState, i64) {
-    let _ = ctx.db.provision_player_account(username, "pilot-pass");
+    let uid = ctx.db.provision_player_account(username, "pilot-pass");
     if grant_gm_role {
         slash(ctx, gm_sess, &format!("/role {username} GM")).await;
     }
@@ -126,6 +126,8 @@ async fn create_fresh_pilot(
     .as_i64()
     .expect("new char id");
     rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(cid)]).await.expect("SelectCharacterID");
+    let omega_until = ctx.now_unix() + 86_400;
+    slash(ctx, gm_sess, &format!("/setomega {uid} {omega_until}")).await;
     ctx.advance_secs(12);
     (sess, cid)
 }
@@ -141,7 +143,7 @@ async fn equip_abaddon_lasers(ctx: &ServerContext, sess: &mut SessionState) -> V
     let cap_tid = sde_type_id_by_name(ctx, "Cap Recharger II");
     let hs_tid = sde_type_id_by_name(ctx, "Heat Sink II");
     let sig_tid = sde_type_id_by_name(ctx, "Signal Amplifier II");
-    for tid in [hull_tid, gun_tid, crystal_tid, hs_tid, sig_tid] {
+    for tid in [hull_tid, gun_tid, crystal_tid, cap_tid, hs_tid, sig_tid] {
         if let Some(t) = ctx.sde.types.get(&tid) {
             for attr_id in [182_u16, 183, 184, 1285, 1289, 1290] {
                 if let Some(&sk) = t.default_attributes.get(&attr_id) {
@@ -152,7 +154,7 @@ async fn equip_abaddon_lasers(ctx: &ServerContext, sess: &mut SessionState) -> V
             }
         }
     }
-    for sk_id in [3428_u32, 3300, 3312, 3309] {
+    for sk_id in [3428_u32, 3300, 3312, 3309, 3413, 3426, 3318, 11207, 3424, 3316] {
         slash(ctx, sess, &format!("/giveskill {sk_id} 5")).await;
     }
     let ship_id = slash(ctx, sess, &format!("/createitem {hull_tid} 1")).await.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();

@@ -367,7 +367,7 @@ async fn test_paperdoll_server_rpcs() {
         });
     });
 
-    // 1. paperDollServer.GetPaperDollData: returns [gender, details] sequence per V24 AvatarCharacterSceneContext
+    // 1. paperDollServer.GetPaperDollData: returns KeyVal for V24 ApplyDBRowToDoll
     let doll_rep = rpc(
         &ctx,
         &mut sess1,
@@ -377,15 +377,15 @@ async fn test_paperdoll_server_rpcs() {
     )
     .await
     .expect("GetPaperDollData");
-    let PyRep::List(doll_seq) = &doll_rep else {
-        panic!("expected sequence from GetPaperDollData, got {doll_rep:?}");
-    };
-    assert_eq!(doll_seq.first(), Some(&PyRep::String("female".into())));
-    let doll_details = &doll_seq[1];
-    assert_eq!(field(doll_details, "characterID"), &PyRep::Integer(PILOT_1));
-    assert_eq!(field(doll_details, "dollDNA"), &PyRep::String("dna:pilot1_custom".into()));
-    assert_eq!(field(doll_details, "portraitInfo"), &PyRep::String("portrait:pilot1_custom".into()));
-    assert_eq!(field(doll_details, "wornApparel"), &PyRep::List(vec![]));
+    assert!(
+        matches!(doll_rep, PyRep::KeyVal(_)),
+        "expected KeyVal from GetPaperDollData, got {doll_rep:?}"
+    );
+    assert_eq!(field(&doll_rep, "genderLabel"), &PyRep::String("Female".into()));
+    assert_eq!(field(&doll_rep, "characterID"), &PyRep::Integer(PILOT_1));
+    assert_eq!(field(&doll_rep, "dollDNA"), &PyRep::String("dna:pilot1_custom".into()));
+    assert_eq!(field(&doll_rep, "portraitInfo"), &PyRep::String("portrait:pilot1_custom".into()));
+    assert_eq!(field(&doll_rep, "wornApparel"), &PyRep::List(vec![]));
 
     // 2. paperDollServer.GetPaperDollDataBatch: queries multiple characters
     let batch_rep = rpc(
@@ -455,11 +455,12 @@ async fn test_paperdoll_server_rpcs() {
     )
     .await
     .expect("GetPaperDollData after apparel update");
-    let PyRep::List(doll_seq2) = &doll_rep2 else {
-        panic!("expected sequence from GetPaperDollData, got {doll_rep2:?}");
-    };
+    assert!(
+        matches!(doll_rep2, PyRep::KeyVal(_)),
+        "expected KeyVal from GetPaperDollData, got {doll_rep2:?}"
+    );
     assert_eq!(
-        field(&doll_seq2[1], "wornApparel"),
+        field(&doll_rep2, "wornApparel"),
         &PyRep::List(vec![PyRep::Integer(apparel_type_id as i64)])
     );
     ctx.db.with_snapshot(|snap| {

@@ -865,7 +865,7 @@ pub(crate) mod milestone_logon_browser_lockdown_policy {
                 .expect("split singleton wardrobe item")
         });
 
-        // Verify GetMyPaperDollData & GetPaperDollData ([gender, details]) persistence
+        // Verify GetMyPaperDollData & GetPaperDollData (KeyVal for V24 ApplyDBRowToDoll) persistence
         let my_doll = rpc(&ctx, &mut sess, "paperDollServer", "GetMyPaperDollData", &[])
             .await
             .expect("GetMyPaperDollData");
@@ -875,7 +875,7 @@ pub(crate) mod milestone_logon_browser_lockdown_policy {
             Some(&PyRep::List(vec![PyRep::Integer(i64::from(apparel_type_id))]))
         );
 
-        let PyRep::List(public_doll) = rpc(
+        let public_doll = rpc(
             &ctx,
             &mut sess,
             "paperDollServer",
@@ -883,13 +883,11 @@ pub(crate) mod milestone_logon_browser_lockdown_policy {
             &[PyRep::Integer(90_000_001)],
         )
         .await
-        .expect("GetPaperDollData")
-        else {
-            panic!("expected sequence from GetPaperDollData");
-        };
-        assert_eq!(public_doll.first(), Some(&PyRep::String("male".into())));
+        .expect("GetPaperDollData");
+        assert!(matches!(public_doll, PyRep::KeyVal(_)), "expected KeyVal from GetPaperDollData");
+        assert_eq!(dict_get(&public_doll, "genderLabel"), Some(&PyRep::String("Male".into())));
         assert_eq!(
-            dict_get(&public_doll[1], "wornApparel"),
+            dict_get(&public_doll, "wornApparel"),
             Some(&PyRep::List(vec![PyRep::Integer(i64::from(apparel_type_id))]))
         );
 

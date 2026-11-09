@@ -3016,12 +3016,18 @@ async fn test_skills_implants_boosters_respec_clones_and_insurance_notifications
     let n_sq = ctx.drain_notifications_for_char(P1);
     let sq_saved = events_from(&n_sq, "OnNewSkillQueueSaved");
     assert_eq!(sq_saved.len(), 1);
-    let PyRep::Rowset { rows: sq_rows, .. } = &sq_saved[0][0] else {
-        panic!("expected Rowset in OnNewSkillQueueSaved");
+    let PyRep::List(sq_rows) = &sq_saved[0][0] else {
+        panic!("expected List of KeyVal in OnNewSkillQueueSaved, got {:?}", sq_saved[0][0]);
     };
     assert_eq!(sq_rows.len(), 1);
-    assert_eq!(sq_rows[0][0], PyRep::Integer(skill_tid as i64));
-    assert_eq!(sq_rows[0][1], PyRep::Integer(1));
+    assert_eq!(
+        sq_rows[0].dict_get("trainingTypeID"),
+        Some(&PyRep::Integer(skill_tid as i64))
+    );
+    assert_eq!(
+        sq_rows[0].dict_get("trainingToLevel"),
+        Some(&PyRep::Integer(1))
+    );
     assert!(events_from(&n_sq, "OnSkillQueueChanged").is_empty());
 
     // AbortTraining -> OnSkillQueuePausedServer()
