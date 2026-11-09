@@ -70,8 +70,8 @@ Per-change reviews check **precision** (is what you claim true?). Completeness i
 - **Final gate.** `scripts/final_gate.py` is the definition of done. It requires, on the same tree:
   - 100% of the ledger closed, from a fresh full test run;
   - a `PASS` **final** claims review (`run_review.py --final`; reviewer chain `gemini-pro-next` > `gemini-4-carbon-high` > `opus-5.5-high` > `gemini-launch-candidate-high` > `gemini-flash-next`, first with quota wins) and a `CLEAN` gap audit. Routine reviews don't count. Run `--final` once per milestone tree that is otherwise ready;
-  - line coverage ≥ 90% (`cargo llvm-cov`);
-  - every journey in `references/parity/client_journeys.json` passing on the real V24 client via `tools/client-harness/run_journeys`, with zero `UnimplementedRPC`, panics or client tracebacks.
+  - line coverage ≥ 90% (`cargo llvm-cov`).
+  - Real-client journeys (`references/parity/client_journeys.json`) are **not** part of any gate: the supervisor runs them during hourly checks (user decision 2026-11-09). The coding agent must not run `run_journeys --launch-real-client`, add `// parity: journey:*` tags, or wire journeys into any review path. `parity_status.py` reports `journey:*` rows and journey-only plan tasks (`T-6`, `ESI-1`, `Z-6`, `Z-7`) as `SUPERVISOR_OWNED`, excluded from the completeness count.
 
   The Stop hook keeps you working until this gate has passed on the current tree.
 

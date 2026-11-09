@@ -113,7 +113,7 @@ def main():
             "reason": (
                 "EvoMu goal gate: the project is NOT complete. Last measured parity: %s%% of ledger rows "
                 "closed. The user will only review when `final_gate.py` passes (100%% ledger, PASS review and "
-                "CLEAN gap audit on the same tree, line coverage threshold, real-client journeys). "
+                "CLEAN gap audit on the same tree, line coverage threshold). "
                 "Do not stop and do not ask the user for interim review. Pick the next open ledger rows from "
                 "`.evomu-reviews/latest.md` (Parity section) in canonical plan order, implement them fully with "
                 "tagged tests (`// parity: <row id>`), run the review skill (%s), commit, and continue. When you "

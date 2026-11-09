@@ -293,9 +293,21 @@ def main():
         except ValueError:
             sup_triage = {}
 
+    # Supervisor-owned rows (user decision 2026-11-09): real-client journeys are executed ONLY by the supervisor
+    # during hourly checks, never by any gate and never by the coding agent. These rows (and plan tasks whose
+    # pinned "Done when" is purely "every journey passes on the real client") are reported separately and do
+    # not count toward total/closed/complete. Tests cannot close them.
+    SUPERVISOR_OWNED_PLAN = {"plan:T-6", "plan:ESI-1", "plan:Z-6", "plan:Z-7"}
+
+    def supervisor_owned(rid):
+        return rid.startswith("journey:") or rid in SUPERVISOR_OWNED_PLAN
+
     status = {}
     for r in rows:
         rid = r["id"]
+        if supervisor_owned(rid):
+            status[rid] = {"status": "SUPERVISOR_OWNED", "tests": [], "attested_by": []}
+            continue
         t_pass = sorted(t for t in tagged_rows.get(rid, ()) if t in passed)
         a_pass = sorted(att.get(rid, ())) if r.get("attest_ok") else []
         tested = bool(t_pass or a_pass)
@@ -329,14 +341,12 @@ def main():
             by_task.setdefault(r["plan_task"], []).append(r["id"])
     # Plan tasks whose pinned "Done when" is about whole ledger categories or real-client journeys (supervisor-
     # maintained). A single tagged test can't close them; every listed row must be DONE/NA first.
+    # Journey rows are supervisor-owned (see supervisor_owned above), so they are not plan dependencies here.
     plan_deps = {
         "T-2": lambda rid: rid.startswith(("sde:", "effect:")),          # every sde:* and effect:* attested
-        "T-6": lambda rid: rid.startswith("journey:"),                    # harness drives every real-client journey
-        "ESI-1": lambda rid: rid == "journey:launch_login",               # real client logs in via emulated launcher
-        "ESI-7": lambda rid: rid.startswith("esi:") or rid == "journey:esi_external",  # Phase ESI exit gate + esi_external journey
-        "Q-9": lambda rid: rid.startswith(("quasar:", "feat:quasar.")) or rid in ("journey:daily_goals_events", "journey:cosmetics_store"),
-        "Z-7": lambda rid: rid.startswith("journey:"),                    # all 29 journeys pass on real client
-        "Z-8": lambda rid: rid != "plan:Z-8",                             # final gate: every other row DONE or NA
+        "ESI-7": lambda rid: rid.startswith("esi:"),                      # Phase ESI exit gate
+        "Q-9": lambda rid: rid.startswith(("quasar:", "feat:quasar.")),
+        "Z-8": lambda rid: rid != "plan:Z-8" and not supervisor_owned(rid),  # final gate: every other row DONE or NA
     }
     all_ids = [r["id"] for r in rows]
     for r in rows:
@@ -352,7 +362,10 @@ def main():
     unknown_tags = sorted(set(tagged_rows) - {r["id"] for r in rows} -
                           {k for k in tagged_rows if k.startswith("effect:") or k.startswith("sde:")})
     cats = {}
+    supervisor_rows = sorted(rid for rid, s in status.items() if s["status"] == "SUPERVISOR_OWNED")
     for r in rows:
+        if status[r["id"]]["status"] == "SUPERVISOR_OWNED":
+            continue
         c = cats.setdefault(r["category"], {"total": 0, "DONE": 0, "NA": 0, "open": 0})
         c["total"] += 1
         s = status[r["id"]]["status"]
@@ -360,7 +373,7 @@ def main():
             c[s] += 1
         else:
             c["open"] += 1
-    total = len(rows)
+    total = len(rows) - len(supervisor_rows)
     closed = sum(c["DONE"] + c["NA"] for c in cats.values())
 
     tamper = []
@@ -377,6 +390,7 @@ def main():
         "categories": cats, "passed_tests": len(passed), "tagged_tests": len(tags),
         "na_rows": sum(c["NA"] for c in cats.values()),
         "unknown_tags": unknown_tags[:50], "ledger_rows_removed": tamper,
+        "supervisor_owned_rows": len(supervisor_rows),
         "complete": (closed == total and not tamper),
     }
     out = {"summary": summary, "rows": status}
@@ -389,6 +403,9 @@ def main():
     for k in sorted(cats):
         c = cats[k]
         md.append("| %s | %d | %d | %d | %d |" % (k, c["total"], c["DONE"], c["NA"], c["open"]))
+    if supervisor_rows:
+        md += ["", "%d supervisor-owned rows (real-client journeys; run only by the supervisor's hourly check, "
+               "not counted above)." % len(supervisor_rows)]
     if tamper:
         md += ["", "**LEDGER TAMPERING: rows removed since last run:** %s" % tamper[:20]]
     if unknown_tags:

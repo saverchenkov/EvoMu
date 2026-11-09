@@ -12,16 +12,15 @@ on the current working tree. It is deliberately mechanical and slow. Every check
      quota/capacity errors; user decision 2026-10-23). Routine (non --final) PASS reviews don't count.
   3. Gap audit: the latest gap audit on this exact tree is CLEAN.
   4. Line coverage (cargo llvm-cov, whole workspace) >= EVOMU_MIN_LINE_COVERAGE (default 90).
-  5. Real client: tools/client-harness/run_journeys (agent-built) drives the REAL V24.01 client
-     (~/Library/Application Support/EVE Online/SharedCache/tq/EVE.app) against a locally started
-     EvoMu server through every journey in references/parity/client_journeys.json. It must write
-     <out>/result.json = {"journeys": {"<id>": {"passed": true, "evidence": "...", ...}}, "server_log": path,
-     "client_logs": [paths]}. The gate requires every journey passed and zero `UnimplementedRPC`,
-     `panicked at`, or client `Traceback`/`EXCEPTION` lines in the logs.
+
+Real-client journeys (references/parity/client_journeys.json) are NOT part of this gate (user decision
+2026-11-09): they are executed only by the supervisor during hourly checks, never by any gate and never by
+the coding agent. parity_status.py reports `journey:*` rows (and journey-only plan tasks) as SUPERVISOR_OWNED
+and excludes them from the completeness count.
 
 Writes .evomu-reviews/final_gate.json {tree, passed, checks}. Exit 0 only if everything passes.
-Usage: final_gate.py [--skip-coverage] [--skip-client] (skipping required checks makes the gate FAIL;
-flags exist only for diagnosing which checks still fail). --skip-mutants is accepted as a deprecated no-op.
+Usage: final_gate.py [--skip-coverage] (skipping required checks makes the gate FAIL; the flag exists only
+for diagnosing which checks still fail). --skip-mutants and --skip-client are accepted as deprecated no-ops.
 """
 import argparse
 import datetime
@@ -141,35 +140,7 @@ def main():
                                    "min": min_cov, "note": None if pct is not None else
                                    "cargo-llvm-cov missing or failed (cargo install cargo-llvm-cov)"}
 
-    # 5. real client journeys (cargo-mutants removed per user policy)
-    if a.skip_client:
-        checks["real_client_journeys"] = {"passed": False, "note": "skipped"}
-    else:
-        harness = os.path.join(root, "tools", "client-harness", "run_journeys")
-        jdir = os.path.join(out_dir, "client")
-        os.makedirs(jdir, exist_ok=True)
-        want = [j["id"] for j in json.load(open(os.path.join(PARITY, "client_journeys.json")))["journeys"]]
-        res, ok, bad_lines, missing = {}, False, [], want
-        if os.path.exists(harness) and os.access(harness, os.X_OK):
-            hrc, hout = sh([harness, "--out", jdir, "--journeys", os.path.join(PARITY, "client_journeys.json")],
-                           root, timeout=12 * 3600)
-            open(os.path.join(out_dir, "client_harness.txt"), "w", encoding="utf-8").write(hout[-20000:])
-            try:
-                res = json.load(open(os.path.join(jdir, "result.json")))
-            except Exception:  # noqa: BLE001
-                res = {}
-            js = res.get("journeys", {})
-            missing = [j for j in want if not (js.get(j) or {}).get("passed")]
-            for lp in [res.get("server_log")] + list(res.get("client_logs") or []):
-                if lp and os.path.exists(lp):
-                    for ln in open(lp, errors="replace"):
-                        if re.search(r"UnimplementedRPC|panicked at|Traceback \(most recent|\bEXCEPTION\b", ln):
-                            bad_lines.append(ln.strip()[:300])
-            ok = hrc == 0 and not missing and not bad_lines and bool(res.get("server_log"))
-        checks["real_client_journeys"] = {"passed": ok, "missing_or_failed": missing[:50],
-                                          "log_errors": bad_lines[:50],
-                                          "note": None if os.path.exists(harness) else
-                                          "tools/client-harness/run_journeys not found"}
+    # Real-client journeys are supervisor-owned and intentionally not run here (user decision 2026-11-09).
 
     passed = all(c.get("passed") for c in checks.values())
     result = {"tree": tree, "timestamp": ts, "passed": passed, "checks": checks}
