@@ -451,6 +451,7 @@ pub async fn handle(
                 }
             }
             ctx.release_session_bindings(session.session_id);
+            ctx.quasar_gateway.unsubscribe_session(session.session_id);
             ctx.db
                 .clear_revocation_on_fresh_login(acc.user_id, session.session_id);
 

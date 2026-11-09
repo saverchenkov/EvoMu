@@ -10,6 +10,41 @@ use std::sync::Arc;
 const ERR_BIND_AUTH_DENIED: &str = "BindAuthorizationDenied";
 const ERR_BOUND_OWNERSHIP: &str = "BoundObjectOwnershipViolation";
 
+/// RAII guard for TCP client connection tasks (`machoNet` and Python Client Bridge) ensuring
+/// synchronous session state (`session_closers`, `bound_objects`, and `PublicGatewayRouter`
+/// notice subscribers/receivers) and any spawned frame-reader task are always cleaned up,
+/// even if the connection future returns early or is aborted/dropped mid-await.
+pub struct SessionCleanupGuard {
+    ctx: Arc<ServerContext>,
+    session_id: u64,
+    reader_abort: Option<tokio::task::AbortHandle>,
+}
+
+impl SessionCleanupGuard {
+    pub fn new(ctx: Arc<ServerContext>, session_id: u64) -> Self {
+        Self {
+            ctx,
+            session_id,
+            reader_abort: None,
+        }
+    }
+
+    pub fn set_reader_abort(&mut self, abort_handle: tokio::task::AbortHandle) {
+        self.reader_abort = Some(abort_handle);
+    }
+}
+
+impl Drop for SessionCleanupGuard {
+    fn drop(&mut self) {
+        if let Some(ref handle) = self.reader_abort {
+            handle.abort();
+        }
+        self.ctx.unregister_session_closer(self.session_id);
+        self.ctx.release_session_bindings(self.session_id);
+        self.ctx.quasar_gateway.unsubscribe_session(self.session_id);
+    }
+}
+
 impl ServerContext {
     /// Registers a disconnect notification channel for an active TCP client session (`session_id`).
     pub fn register_session_closer(
@@ -31,9 +66,11 @@ impl ServerContext {
             .remove(&session_id);
     }
 
-    /// Actively signals an open TCP session (`session_id`) to send `GPSTransportClosed` and close its socket.
+    /// Actively signals an open TCP session (`session_id`) to send `GPSTransportClosed` and close its socket,
+    /// releasing bound objects and unsubscribing any Quasar gateway notice stream/receiver.
     pub fn disconnect_session(&self, session_id: u64, reason_code: &str, reason: &str) -> bool {
         self.release_session_bindings(session_id);
+        self.quasar_gateway.unsubscribe_session(session_id);
         let tx = self
             .session_closers
             .write()
@@ -56,12 +93,65 @@ impl ServerContext {
             .retain(|_, v| v.session_id != session_id);
     }
 
-    /// Releases all bound objects associated with `user_id` (called on ban, kick, or session displacement).
+    /// Releases all bound objects and Quasar notice subscriptions associated with `user_id`
+    /// (called on ban, suspension, kick, or session displacement).
     pub fn release_user_bindings(&self, user_id: u64) {
         self.bound_objects
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|_, v| v.user_id != user_id);
+        self.quasar_gateway.unsubscribe_user(user_id);
+    }
+
+    /// Unified disconnect cleanup shared by both native `machoNet` TCP (`handle_macho_client`)
+    /// and Python Client Bridge TCP (`handle_bridge_client`) listeners.
+    ///
+    /// Unregisters the session closer, releases all bound objects, unsubscribes any
+    /// `PublicGatewayRouter` notice subscriber and stream receiver for `session.session_id`,
+    /// and—if this session still held the account's active online lock—releases structure
+    /// control, persists in-space ship ball coordinates, runs SP-6 logoff/disconnect
+    /// lifecycle, and notifies watchlist and fleet/social presence listeners.
+    pub async fn cleanup_disconnected_client_session(&self, session: &mut SessionState) {
+        let session_id = session.session_id;
+        self.unregister_session_closer(session_id);
+        self.release_session_bindings(session_id);
+        self.quasar_gateway.unsubscribe_session(session_id);
+        if let Some(uid) = session.user_id {
+            // A dropped connection that still held the character online is a log-off for watchers and triggers SP-6 in-space logoff handling.
+            if self.db.release_online_lock(uid, session_id) {
+                if let Some(cid) = session.character_id {
+                    crate::services::structure_control_ops::release_all_structure_control_for_character(
+                        self,
+                        Some(session),
+                        cid,
+                    );
+                }
+                if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
+                    if session.station_id.is_none() && session.structure_id.is_none() {
+                        let handle = self.systems.get_or_spawn(sys_id);
+                        if let Ok(Some((_, ball))) = handle.get_ball_snapshot(ship_id).await {
+                            self.db.with_mut_snapshot(|snap| {
+                                snap.item_positions.insert(
+                                    ship_id,
+                                    [ball.position.x, ball.position.y, ball.position.z],
+                                );
+                            });
+                        }
+                    }
+                }
+                if let Some(cid) = session.character_id {
+                    let _ = crate::sp6_lifecycle::handle_character_logoff_or_disconnect(self, cid)
+                        .await;
+                    crate::services::character_skills::notify_watchlist_presence(self, cid, false);
+                    crate::services::fleet_social::fleet_social_notify::on_character_logout(
+                        self, cid,
+                    );
+                    crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(
+                        self, cid,
+                    );
+                }
+            }
+        }
     }
 
     /// Binds a stateful remote object scoped to `(session_id, user_id, character_id)`.

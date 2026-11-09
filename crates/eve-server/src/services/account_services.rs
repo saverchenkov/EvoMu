@@ -382,6 +382,7 @@ pub async fn handle(
             ctx.db.release_online_lock(uid, session.session_id);
         }
         ctx.release_session_bindings(session.session_id);
+        ctx.quasar_gateway.unsubscribe_session(session.session_id);
         session.user_id = None;
         session.role = 0;
         session.character_id = None;

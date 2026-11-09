@@ -130,10 +130,10 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
 
     let (close_tx, mut close_rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
     ctx.register_session_closer(session_id, close_tx);
+    let mut session_guard = crate::router::SessionCleanupGuard::new(Arc::clone(&ctx), session_id);
 
     // Step 1: Server immediately sends `LowLevelVersionExchange` upon TCP connection accept.
     if let Err(e) = write_framed_pyrep(&mut stream, &handshake.server_hello()).await {
-        ctx.unregister_session_closer(session_id);
         return Err(e);
     }
 
@@ -217,6 +217,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
             }
         }
     });
+    session_guard.set_reader_abort(reader_task.abort_handle());
 
     loop {
         tokio::select! {
@@ -570,13 +571,13 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                                 crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(
                                                     &ctx, disp_cid,
                                                 );
-                                                ctx.disconnect_session(
-                                                    d.session_id,
-                                                    "ACL_DISPLACED",
-                                                    "Displaced by concurrent login on same account",
-                                                );
-                                                ctx.release_session_bindings(d.session_id);
                                             }
+                                            ctx.disconnect_session(
+                                                d.session_id,
+                                                "ACL_DISPLACED",
+                                                "Displaced by concurrent login on same account",
+                                            );
+                                            ctx.release_session_bindings(d.session_id);
                                         }
                                     }
                                 }
@@ -1200,39 +1201,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
     }
 
     reader_task.abort();
-    ctx.unregister_session_closer(session_id);
-    ctx.release_session_bindings(session_id);
-    if let Some(uid) = session.user_id {
-        // A dropped connection that still held the character online is a log-off for watchers and triggers SP-6 in-space logoff handling.
-        if ctx.db.release_online_lock(uid, session_id) {
-            if let Some(cid) = session.character_id {
-                crate::services::structure_control_ops::release_all_structure_control_for_character(
-                    &ctx,
-                    Some(&mut session),
-                    cid,
-                );
-            }
-            if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
-                if session.station_id.is_none() && session.structure_id.is_none() {
-                    let handle = ctx.systems.get_or_spawn(sys_id);
-                    if let Ok(Some((_, ball))) = handle.get_ball_snapshot(ship_id).await {
-                        ctx.db.with_mut_snapshot(|snap| {
-                            snap.item_positions.insert(
-                                ship_id,
-                                [ball.position.x, ball.position.y, ball.position.z],
-                            );
-                        });
-                    }
-                }
-            }
-            if let Some(cid) = session.character_id {
-                let _ = crate::sp6_lifecycle::handle_character_logoff_or_disconnect(&ctx, cid).await;
-                crate::services::character_skills::notify_watchlist_presence(&ctx, cid, false);
-                crate::services::fleet_social::fleet_social_notify::on_character_logout(&ctx, cid);
-                crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(&ctx, cid);
-            }
-        }
-    }
+    ctx.cleanup_disconnected_client_session(&mut session).await;
 
     Ok(())
 }

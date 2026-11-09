@@ -32,14 +32,38 @@ use tokio::net::TcpStream;
 const GRPC_STATUS_OK: &str = "0";
 const GRPC_STATUS_INVALID_ARGUMENT: &str = "3";
 const GRPC_STATUS_PERMISSION_DENIED: &str = "7";
+const GRPC_STATUS_RESOURCE_EXHAUSTED: &str = "8";
 const GRPC_STATUS_UNIMPLEMENTED: &str = "12";
 const GRPC_STATUS_UNAUTHENTICATED: &str = "16";
 
 /// Pre-encoded 5-byte gRPC frame header for an empty `google.protobuf.Empty` response (`[0, 0, 0, 0, 0]`).
 const EMPTY_GRPC_FRAME: [u8; 5] = [0, 0, 0, 0, 0];
 
-/// Maximum uncompressed gRPC request payload size (16 MiB) matching client and gateway limits.
-const MAX_GRPC_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum concurrent active HTTP/2 gRPC streams per TCP connection.
+pub const H2_MAX_CONCURRENT_STREAMS: u32 = 256;
+/// Per-stream HTTP/2 receive window size (`1 MiB`).
+pub const H2_INITIAL_STREAM_WINDOW_BYTES: u32 = 1_048_576;
+/// Connection-wide HTTP/2 receive window size (`4 MiB`).
+pub const H2_INITIAL_CONNECTION_WINDOW_BYTES: u32 = 4_194_304;
+/// Maximum HTTP/2 frame payload size (`256 KiB`, bounded within RFC 7540 `16 KiB..=16 MiB`).
+pub const H2_MAX_FRAME_SIZE_BYTES: u32 = 262_144;
+/// Maximum decoded HTTP/2 HPACK header list size (`64 KiB`).
+pub const H2_MAX_HEADER_LIST_BYTES: u32 = 65_536;
+/// Maximum `h2` per-stream outbound send buffer size (`1 MiB`).
+pub const H2_MAX_SEND_BUFFER_BYTES: usize = 1_048_576;
+/// Maximum locally-reset stream state entries retained concurrently per HTTP/2 connection.
+pub const H2_MAX_CONCURRENT_RESET_STREAMS: usize = 256;
+/// Maximum pending-accept remotely-reset streams tolerated before `ENHANCE_YOUR_CALM`.
+pub const H2_MAX_PENDING_ACCEPT_RESET_STREAMS: usize = 128;
+/// Maximum wall-clock time allowed for the HTTP/2 connection preface and `SETTINGS` handshake.
+pub const H2_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Maximum time to wait for outbound HTTP/2 flow-control capacity (`WINDOW_UPDATE`) from a stalled peer.
+pub const H2_SEND_CAPACITY_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Maximum wire bytes buffered inside `GrpcFrameReader::buf` (`1 MiB`), matching `H2_INITIAL_STREAM_WINDOW_BYTES`.
+pub const MAX_GRPC_FRAME_BUFFER_BYTES: usize = H2_INITIAL_STREAM_WINDOW_BYTES as usize;
+/// Maximum uncompressed or wire gRPC message payload size (`1 MiB - 5` bytes so a complete frame fits in one stream window).
+pub const MAX_GRPC_MESSAGE_BYTES: usize = MAX_GRPC_FRAME_BUFFER_BYTES - 5;
 
 static NEXT_GRPC_SESSION_ID: AtomicU64 = AtomicU64::new(9_000_000);
 static LAST_REJECTED_BEARER_WARN_UNIX: AtomicU64 = AtomicU64::new(0);
@@ -59,26 +83,64 @@ fn warn_rejected_bearer_token(now_unix: u64, peer_ip: Option<std::net::IpAddr>, 
     }
 }
 
+/// RAII guard ensuring `Notices/Consume` always unsubscribes `session_id` from `PublicGatewayRouter`
+/// on normal stream close, early protocol/send error, auth revocation, or task cancellation/drop.
+struct GrpcSubscriberGuard {
+    gateway: Arc<crate::quasar_gateway::PublicGatewayRouter>,
+    session_id: u64,
+}
+
+impl Drop for GrpcSubscriberGuard {
+    fn drop(&mut self) {
+        self.gateway.unsubscribe_session(self.session_id);
+    }
+}
+
 pub async fn handle_quasar_grpc_connection(
     stream: TcpStream,
     ctx: Arc<ServerContext>,
+) -> anyhow::Result<()> {
+    handle_quasar_grpc_connection_with_limits(
+        stream,
+        ctx,
+        H2_MAX_CONCURRENT_STREAMS,
+        H2_SEND_CAPACITY_TIMEOUT,
+    )
+    .await
+}
+
+pub async fn handle_quasar_grpc_connection_with_limits(
+    stream: TcpStream,
+    ctx: Arc<ServerContext>,
+    max_concurrent_streams: u32,
+    send_capacity_timeout: Duration,
 ) -> anyhow::Result<()> {
     let _ = stream.set_nodelay(true);
     let peer_ip = stream
         .peer_addr()
         .ok()
         .map(|sa| eve_db::gateway_tokens::normalize_peer_ip(sa.ip()));
-    let mut h2_conn = h2::server::Builder::new()
-        .max_concurrent_streams(256)
+    let effective_max_streams = max_concurrent_streams.max(1);
+    let mut builder = h2::server::Builder::new();
+    builder
+        .max_concurrent_streams(effective_max_streams)
         .max_local_error_reset_streams(None)
-        .initial_window_size(1_048_576)
-        .initial_connection_window_size(4_194_304)
-        .max_frame_size(1_048_576)
-        .handshake(stream)
-        .await?;
+        .max_concurrent_reset_streams(H2_MAX_CONCURRENT_RESET_STREAMS)
+        .max_pending_accept_reset_streams(H2_MAX_PENDING_ACCEPT_RESET_STREAMS)
+        .initial_window_size(H2_INITIAL_STREAM_WINDOW_BYTES)
+        .initial_connection_window_size(H2_INITIAL_CONNECTION_WINDOW_BYTES)
+        .max_frame_size(H2_MAX_FRAME_SIZE_BYTES)
+        .max_header_list_size(H2_MAX_HEADER_LIST_BYTES)
+        .max_send_buffer_size(H2_MAX_SEND_BUFFER_BYTES);
+    let mut h2_conn =
+        tokio::time::timeout(H2_HANDSHAKE_TIMEOUT, builder.handshake::<_, Bytes>(stream))
+            .await
+            .map_err(|_| anyhow::anyhow!("Quasar gRPC HTTP/2 handshake timed out"))??;
+
+    let stream_semaphore = Arc::new(tokio::sync::Semaphore::new(effective_max_streams as usize));
 
     while let Some(accept_res) = h2_conn.accept().await {
-        let (request, respond) = match accept_res {
+        let (request, mut respond) = match accept_res {
             Ok(pair) => pair,
             Err(e) => {
                 if !e.is_io() {
@@ -87,9 +149,26 @@ pub async fn handle_quasar_grpc_connection(
                 break;
             }
         };
+        let Ok(stream_permit) = Arc::clone(&stream_semaphore).try_acquire_owned() else {
+            let _ = send_trailers_only(
+                &mut respond,
+                GRPC_STATUS_RESOURCE_EXHAUSTED,
+                "Maximum concurrent Quasar gRPC streams exceeded",
+            );
+            continue;
+        };
         let stream_ctx = Arc::clone(&ctx);
         tokio::spawn(async move {
-            if let Err(e) = handle_grpc_stream(request, respond, stream_ctx, peer_ip).await {
+            let _permit = stream_permit;
+            if let Err(e) = handle_grpc_stream(
+                request,
+                respond,
+                stream_ctx,
+                peer_ip,
+                send_capacity_timeout,
+            )
+            .await
+            {
                 tracing::warn!(error = %e, "Quasar gRPC stream closed with error");
             }
         });
@@ -97,11 +176,14 @@ pub async fn handle_quasar_grpc_connection(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct VerifiedGatewayIdentity {
+    raw_token: String,
+    peer_ip: Option<std::net::IpAddr>,
     user_id: u64,
     token_character_id: Option<i64>,
-    account_role: u64,
+    is_full_sso: bool,
+    bound_online_session_id: Option<u64>,
 }
 
 async fn handle_grpc_stream(
@@ -109,6 +191,7 @@ async fn handle_grpc_stream(
     mut respond: SendResponse<Bytes>,
     ctx: Arc<ServerContext>,
     peer_ip: Option<std::net::IpAddr>,
+    send_capacity_timeout: Duration,
 ) -> anyhow::Result<()> {
     let path = request.uri().path().to_string();
     let headers = request.headers().clone();
@@ -126,12 +209,18 @@ async fn handle_grpc_stream(
             let mut reader = GrpcFrameReader::new(request.into_body(), grpc_encoding);
             let _ = reader.next_message().await?;
             let mut send = send_grpc_headers(&mut respond, false)?;
-            send.send_data(Bytes::from_static(&EMPTY_GRPC_FRAME), false)?;
+            send_grpc_data_bounded(
+                &mut send,
+                Bytes::from_static(&EMPTY_GRPC_FRAME),
+                false,
+                send_capacity_timeout,
+            )
+            .await?;
             send_grpc_trailers(&mut send, GRPC_STATUS_OK, None)?;
             Ok(())
         }
         "/eve_public.gateway.Requests/Send" => {
-            let Some(identity) = authenticate_grpc_headers(&ctx, &headers, peer_ip) else {
+            let Some(mut identity) = authenticate_grpc_headers(&ctx, &headers, peer_ip) else {
                 return send_trailers_only(
                     &mut respond,
                     GRPC_STATUS_UNAUTHENTICATED,
@@ -164,8 +253,22 @@ async fn handle_grpc_stream(
                     .as_ref()
                     .and_then(|ac| ac.effective_character_id())
                     .map(i64::from);
-                let session =
-                    build_session_for_identity(&ctx, grpc_session_id, identity, claimed_cid);
+                let session = match build_session_for_identity(
+                    &ctx,
+                    grpc_session_id,
+                    &mut identity,
+                    claimed_cid,
+                ) {
+                    Ok(s) => s,
+                    Err(reason) => {
+                        send_grpc_trailers(
+                            &mut send,
+                            GRPC_STATUS_UNAUTHENTICATED,
+                            Some(&reason),
+                        )?;
+                        return Ok(());
+                    }
+                };
                 let mut rsp = ctx.quasar_gateway.handle_public_request(
                     &session,
                     &pub_req,
@@ -190,14 +293,14 @@ async fn handle_grpc_stream(
                     );
                 }
                 let encoded = frame_grpc_message(&rsp.encode_proto());
-                send.send_data(encoded, false)?;
+                send_grpc_data_bounded(&mut send, encoded, false, send_capacity_timeout).await?;
             }
 
             send_grpc_trailers(&mut send, GRPC_STATUS_OK, None)?;
             Ok(())
         }
         "/eve_public.gateway.Notices/Consume" => {
-            let Some(identity) = authenticate_grpc_headers(&ctx, &headers, peer_ip) else {
+            let Some(mut identity) = authenticate_grpc_headers(&ctx, &headers, peer_ip) else {
                 return send_trailers_only(
                     &mut respond,
                     GRPC_STATUS_UNAUTHENTICATED,
@@ -205,11 +308,25 @@ async fn handle_grpc_stream(
                 );
             };
             let grpc_session_id = NEXT_GRPC_SESSION_ID.fetch_add(1, Ordering::Relaxed);
-            let mut session = build_session_for_identity(&ctx, grpc_session_id, identity, None);
+            let mut session =
+                match build_session_for_identity(&ctx, grpc_session_id, &mut identity, None) {
+                    Ok(s) => s,
+                    Err(reason) => {
+                        return send_trailers_only(
+                            &mut respond,
+                            GRPC_STATUS_UNAUTHENTICATED,
+                            &reason,
+                        );
+                    }
+                };
             let now_unix = ctx.now_unix();
             let mut rx =
                 ctx.quasar_gateway
                     .subscribe_session(&session, Vec::new(), now_unix);
+            let _subscriber_guard = GrpcSubscriberGuard {
+                gateway: Arc::clone(&ctx.quasar_gateway),
+                session_id: grpc_session_id,
+            };
             if let Some(ref app_uuid) = app_uuid_override {
                 if let Ok(mut subs) = ctx.quasar_gateway.subscribers.write() {
                     if let Some(sub) = subs.get_mut(&grpc_session_id) {
@@ -224,59 +341,84 @@ async fn handle_grpc_stream(
             let mut sync_tick = tokio::time::interval(Duration::from_millis(500));
             sync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-            let res: anyhow::Result<()> = async {
-                loop {
-                    tokio::select! {
-                        maybe_notice = rx.recv() => {
-                            let Some(mut notice) = maybe_notice else {
-                                send_grpc_trailers(&mut send, GRPC_STATUS_OK, None)?;
-                                break;
-                            };
-                            if let Some(ref mut any_payload) = notice.payload {
-                                normalize_quasar_any_payload(&ctx.quasar_gateway.descriptors, any_payload);
+            loop {
+                tokio::select! {
+                    maybe_notice = rx.recv() => {
+                        let Some(mut notice) = maybe_notice else {
+                            match build_session_for_identity(&ctx, grpc_session_id, &mut identity, None) {
+                                Ok(_) => send_grpc_trailers(&mut send, GRPC_STATUS_OK, None)?,
+                                Err(reason) => {
+                                    send_grpc_trailers(&mut send, GRPC_STATUS_UNAUTHENTICATED, Some(&reason))?
+                                }
                             }
-                            let encoded = frame_grpc_message(&notice.encode_proto());
-                            send.send_data(encoded, false)?;
+                            break;
+                        };
+                        match build_session_for_identity(&ctx, grpc_session_id, &mut identity, None) {
+                            Ok(updated) => {
+                                if session_scope_tuple(&updated) != session_scope_tuple(&session) {
+                                    session = updated;
+                                    ctx.quasar_gateway.on_session_changed(&session, ctx.now_unix());
+                                }
+                            }
+                            Err(reason) => {
+                                send_grpc_trailers(&mut send, GRPC_STATUS_UNAUTHENTICATED, Some(&reason))?;
+                                break;
+                            }
                         }
-                        msg_res = reader.next_message() => {
-                            match msg_res {
-                                Ok(Some(_empty_ack_or_sub)) => {
-                                    // Refresh session context when client sends Subscribe/Acknowledge.
-                                    let updated = build_session_for_identity(&ctx, grpc_session_id, identity, None);
-                                    if session_scope_tuple(&updated) != session_scope_tuple(&session) {
-                                        session = updated;
-                                        ctx.quasar_gateway.on_session_changed(&session, ctx.now_unix());
+                        if let Some(ref mut any_payload) = notice.payload {
+                            normalize_quasar_any_payload(&ctx.quasar_gateway.descriptors, any_payload);
+                        }
+                        let encoded = frame_grpc_message(&notice.encode_proto());
+                        send_grpc_data_bounded(&mut send, encoded, false, send_capacity_timeout).await?;
+                    }
+                    msg_res = reader.next_message() => {
+                        match msg_res {
+                            Ok(Some(_empty_ack_or_sub)) => {
+                                // Refresh session context and re-verify auth/session/token revocation when client sends Subscribe/Acknowledge.
+                                match build_session_for_identity(&ctx, grpc_session_id, &mut identity, None) {
+                                    Ok(updated) => {
+                                        if session_scope_tuple(&updated) != session_scope_tuple(&session) {
+                                            session = updated;
+                                            ctx.quasar_gateway.on_session_changed(&session, ctx.now_unix());
+                                        }
+                                    }
+                                    Err(reason) => {
+                                        send_grpc_trailers(&mut send, GRPC_STATUS_UNAUTHENTICATED, Some(&reason))?;
+                                        break;
                                     }
                                 }
-                                Ok(None) => {
-                                    // Client called WritesDone() (`FinishStream`).
-                                    send_grpc_trailers(&mut send, GRPC_STATUS_OK, None)?;
-                                    break;
-                                }
-                                Err(e) => return Err(e),
                             }
-                        }
-                        _ = sync_tick.tick() => {
-                            let updated = build_session_for_identity(&ctx, grpc_session_id, identity, None);
-                            if session_scope_tuple(&updated) != session_scope_tuple(&session) {
-                                session = updated;
-                                ctx.quasar_gateway.on_session_changed(&session, ctx.now_unix());
+                            Ok(None) => {
+                                // Client called WritesDone() (`FinishStream`).
+                                send_grpc_trailers(&mut send, GRPC_STATUS_OK, None)?;
+                                break;
                             }
-                        }
-                        _ = std::future::poll_fn(|cx| send.poll_reset(cx)) => {
-                            break;
+                            Err(e) => return Err(e),
                         }
                     }
+                    _ = sync_tick.tick() => {
+                        match build_session_for_identity(&ctx, grpc_session_id, &mut identity, None) {
+                            Ok(updated) => {
+                                if session_scope_tuple(&updated) != session_scope_tuple(&session) {
+                                    session = updated;
+                                    ctx.quasar_gateway.on_session_changed(&session, ctx.now_unix());
+                                }
+                            }
+                            Err(reason) => {
+                                send_grpc_trailers(&mut send, GRPC_STATUS_UNAUTHENTICATED, Some(&reason))?;
+                                break;
+                            }
+                        }
+                    }
+                    _ = std::future::poll_fn(|cx| send.poll_reset(cx)) => {
+                        break;
+                    }
                 }
-                Ok(())
             }
-            .await;
-
-            ctx.quasar_gateway.unsubscribe_session(grpc_session_id);
-            res
+            Ok(())
         }
         "/eve_public.gateway.Events/Publish" => {
-            let Some(identity) = authenticate_grpc_headers(&ctx, &headers, peer_ip) else {
+            let Some(mut identity) = authenticate_grpc_headers(&ctx, &headers, peer_ip) else {
                 return send_trailers_only(
                     &mut respond,
                     GRPC_STATUS_UNAUTHENTICATED,
@@ -309,8 +451,22 @@ async fn handle_grpc_stream(
                     .as_ref()
                     .and_then(|ac| ac.effective_character_id())
                     .map(i64::from);
-                let session =
-                    build_session_for_identity(&ctx, grpc_session_id, identity, claimed_cid);
+                let session = match build_session_for_identity(
+                    &ctx,
+                    grpc_session_id,
+                    &mut identity,
+                    claimed_cid,
+                ) {
+                    Ok(s) => s,
+                    Err(reason) => {
+                        send_grpc_trailers(
+                            &mut send,
+                            GRPC_STATUS_UNAUTHENTICATED,
+                            Some(&reason),
+                        )?;
+                        return Ok(());
+                    }
+                };
                 if let Some(ref ac) = ev.authoritative_context {
                     if ac
                         .effective_user_id()
@@ -334,7 +490,13 @@ async fn handle_grpc_stream(
                 ctx.quasar_gateway
                     .publish_event(&session, ev, ctx.now_unix());
                 // `EventPublisher::ReadConfirm` / `ReadEmpty` expects one `google.protobuf.Empty` per Event.
-                send.send_data(Bytes::from_static(&EMPTY_GRPC_FRAME), false)?;
+                send_grpc_data_bounded(
+                    &mut send,
+                    Bytes::from_static(&EMPTY_GRPC_FRAME),
+                    false,
+                    send_capacity_timeout,
+                )
+                .await?;
             }
 
             send_grpc_trailers(&mut send, GRPC_STATUS_OK, None)?;
@@ -359,15 +521,93 @@ fn session_scope_tuple(s: &SessionState) -> (Option<u64>, Option<i64>, Option<i6
     )
 }
 
+fn verify_gateway_bearer_token(
+    ctx: &ServerContext,
+    token: &str,
+    peer_ip: Option<std::net::IpAddr>,
+    now_unix: u64,
+) -> Result<eve_db::QuasarVerifiedToken, String> {
+    match ctx.db.verify_quasar_bearer_jwt(token, now_unix) {
+        Ok(v) => Ok(v),
+        Err(bearer_err) if ctx.feature_flags.allow_local_dev_gateway_jwt => {
+            let Some(ip) = peer_ip else {
+                return Err("missing_peer_ip_for_local_dev_jwt".to_string());
+            };
+            ctx.db
+                .verify_local_dev_client_jwt(token, ip, now_unix)
+                .map_err(|local_err| {
+                    format!("bearer_and_local_dev_jwt_rejected ({bearer_err:?} / {local_err:?})")
+                })
+        }
+        Err(bearer_err) => Err(format!("bearer_jwt_rejected ({bearer_err:?})")),
+    }
+}
+
 fn build_session_for_identity(
     ctx: &ServerContext,
     grpc_session_id: u64,
-    identity: VerifiedGatewayIdentity,
+    identity: &mut VerifiedGatewayIdentity,
     claimed_char_id: Option<i64>,
-) -> SessionState {
+) -> Result<SessionState, String> {
+    let now_unix = ctx.now_unix();
+    ctx.db.clear_expired_ban_by_id(identity.user_id, now_unix);
+
+    // 1. Re-verify the bearer JWT against `now_unix`, `revoked_jtis`, `kicked_users`,
+    //    `online_sessions` (for local-dev JWTs), and `acc.check_active_restriction(now_unix)`.
+    let reverified =
+        verify_gateway_bearer_token(ctx, &identity.raw_token, identity.peer_ip, now_unix).map_err(
+            |reason| format!("Quasar authorization token revoked or expired: {reason}"),
+        )?;
+    if reverified.user_id != identity.user_id {
+        return Err("Quasar authorization token subject changed mid-stream".to_string());
+    }
+    identity.token_character_id = reverified.character_id;
+    identity.is_full_sso = reverified.is_full_sso;
+
+    // 2. Enforce session revocation, displacement, and account restrictions via `check_session_revoked`.
+    if let Some(bound_sid) = identity.bound_online_session_id {
+        if let Some((code, msg)) =
+            ctx.db
+                .check_session_revoked(identity.user_id, bound_sid, now_unix)
+        {
+            return Err(format!("Quasar session revoked ({code}): {msg}"));
+        }
+        if bound_sid != grpc_session_id {
+            if let Some((code, msg)) =
+                ctx.db
+                    .check_session_revoked(identity.user_id, grpc_session_id, now_unix)
+            {
+                if code != "MultiLoginBlocked" {
+                    return Err(format!("Quasar stream revoked ({code}): {msg}"));
+                }
+            }
+        }
+    } else {
+        if let Some((code, msg)) =
+            ctx.db
+                .check_session_revoked(identity.user_id, grpc_session_id, now_unix)
+        {
+            if code != "MultiLoginBlocked" {
+                return Err(format!("Quasar session revoked ({code}): {msg}"));
+            }
+        }
+        if let Some(os) = ctx.db.get_online_session(identity.user_id) {
+            identity.bound_online_session_id = Some(os.session_id);
+        }
+    }
+
+    // 3. Re-read live `acc.role` and active account restriction status so mid-stream GM/admin
+    //    role revocations (`set_account_role`) take effect on the very next frame.
+    let Some(mut live_role) = lookup_active_account_role(ctx, identity.user_id, now_unix) else {
+        return Err("Quasar account missing or restricted".to_string());
+    };
+    if !identity.is_full_sso {
+        live_role &= !service_roles::ROLE_GM_MASK;
+    }
+
     let mut session = SessionState::new(grpc_session_id);
     session.user_id = Some(identity.user_id);
-    session.role = identity.account_role;
+    session.role = live_role;
 
     let resolved_char = ctx.db.with_snapshot(|snap| {
         if let Some(cid) = claimed_char_id {
@@ -405,7 +645,7 @@ fn build_session_for_identity(
         session.alliance_id = alliance_id;
         ctx.sync_session(&mut session);
     }
-    session
+    Ok(session)
 }
 
 fn parse_app_instance_uuid(headers: &HeaderMap) -> Option<Vec<u8>> {
@@ -458,55 +698,46 @@ fn authenticate_grpc_headers(
         return None;
     }
 
-    let verified = match ctx.db.verify_quasar_bearer_jwt(token, now_unix) {
+    let verified = match verify_gateway_bearer_token(ctx, token, peer_ip, now_unix) {
         Ok(v) => v,
-        Err(bearer_err) if ctx.feature_flags.allow_local_dev_gateway_jwt => {
-            let Some(ip) = peer_ip else {
-                warn_rejected_bearer_token(
-                    now_unix,
-                    peer_ip,
-                    "missing_peer_ip_for_local_dev_jwt",
-                );
-                return None;
-            };
-            match ctx.db.verify_local_dev_client_jwt(token, ip, now_unix) {
-                Ok(v) => v,
-                Err(local_err) => {
-                    warn_rejected_bearer_token(
-                        now_unix,
-                        peer_ip,
-                        &format!(
-                            "bearer_and_local_dev_jwt_rejected ({bearer_err:?} / {local_err:?})"
-                        ),
-                    );
-                    return None;
-                }
-            }
-        }
-        Err(bearer_err) => {
-            warn_rejected_bearer_token(
-                now_unix,
-                peer_ip,
-                &format!("bearer_jwt_rejected ({bearer_err:?})"),
-            );
+        Err(reason) => {
+            warn_rejected_bearer_token(now_unix, peer_ip, &reason);
             return None;
         }
     };
-    let Some(mut account_role) = lookup_active_account_role(ctx, verified.user_id, now_unix) else {
+    ctx.db.clear_expired_ban_by_id(verified.user_id, now_unix);
+    if lookup_active_account_role(ctx, verified.user_id, now_unix).is_none() {
         warn_rejected_bearer_token(
             now_unix,
             peer_ip,
             "account_missing_or_restricted_for_token",
         );
         return None;
-    };
-    if !verified.is_full_sso {
-        account_role &= !service_roles::ROLE_GM_MASK;
+    }
+    let bound_online_session_id = ctx
+        .db
+        .get_online_session(verified.user_id)
+        .map(|os| os.session_id);
+    if let Some(bound_sid) = bound_online_session_id {
+        if let Some((code, msg)) =
+            ctx.db
+                .check_session_revoked(verified.user_id, bound_sid, now_unix)
+        {
+            warn_rejected_bearer_token(
+                now_unix,
+                peer_ip,
+                &format!("session_revoked ({code}: {msg})"),
+            );
+            return None;
+        }
     }
     Some(VerifiedGatewayIdentity {
+        raw_token: token.to_string(),
+        peer_ip,
         user_id: verified.user_id,
         token_character_id: verified.character_id,
-        account_role,
+        is_full_sso: verified.is_full_sso,
+        bound_online_session_id,
     })
 }
 
@@ -516,6 +747,63 @@ fn lookup_active_account_role(ctx: &ServerContext, user_id: u64, now_unix: u64) 
         acc.check_active_restriction(now_unix).ok()?;
         Some(acc.role)
     })
+}
+
+/// Reserves outbound HTTP/2 flow-control capacity (`SendStream::reserve_capacity`) and sends
+/// `data` in window-bounded slices so slow or zero-window peers cannot trigger unbounded
+/// per-stream memory growth inside `h2`.
+async fn send_grpc_data_bounded(
+    send: &mut h2::SendStream<Bytes>,
+    mut data: Bytes,
+    end_of_stream: bool,
+    capacity_timeout: Duration,
+) -> anyhow::Result<()> {
+    if data.is_empty() {
+        send.send_data(Bytes::new(), end_of_stream)?;
+        return Ok(());
+    }
+    while !data.is_empty() {
+        send.reserve_capacity(data.len());
+        let mut avail = send.capacity();
+        if avail == 0 {
+            let wait_res = tokio::time::timeout(
+                capacity_timeout,
+                std::future::poll_fn(|cx| send.poll_capacity(cx)),
+            )
+            .await;
+            match wait_res {
+                Ok(Some(Ok(granted))) => {
+                    avail = granted;
+                }
+                Ok(Some(Err(e))) => {
+                    send.reserve_capacity(0);
+                    return Err(e.into());
+                }
+                Ok(None) => {
+                    send.reserve_capacity(0);
+                    anyhow::bail!(
+                        "Quasar gRPC stream closed or reset while waiting for HTTP/2 send capacity"
+                    );
+                }
+                Err(_) => {
+                    send.reserve_capacity(0);
+                    send.send_reset(h2::Reason::FLOW_CONTROL_ERROR);
+                    anyhow::bail!(
+                        "Timed out after {:?} waiting for HTTP/2 outbound flow-control capacity",
+                        capacity_timeout
+                    );
+                }
+            }
+        }
+        let chunk_len = data.len().min(avail);
+        let chunk = data.split_to(chunk_len);
+        let is_final = end_of_stream && data.is_empty();
+        if let Err(e) = send.send_data(chunk, is_final) {
+            send.reserve_capacity(0);
+            return Err(e.into());
+        }
+    }
+    Ok(())
 }
 
 fn send_grpc_headers(
@@ -605,21 +893,43 @@ impl GrpcFrameReader {
         }
     }
 
+    #[cfg(test)]
+    fn buffered_bytes(&self) -> usize {
+        self.buf.len()
+    }
+
+    #[cfg(test)]
+    fn used_flow_control_capacity(&mut self) -> usize {
+        self.body.flow_control().used_capacity()
+    }
+
     async fn next_message(&mut self) -> anyhow::Result<Option<Vec<u8>>> {
         loop {
             if self.buf.len() >= 5 {
                 let compressed = self.buf[0];
+                if compressed > 1 {
+                    anyhow::bail!(
+                        "Invalid gRPC frame compression flag {compressed} (expected 0 or 1)"
+                    );
+                }
                 let msg_len =
                     u32::from_be_bytes([self.buf[1], self.buf[2], self.buf[3], self.buf[4]])
                         as usize;
-                if msg_len > MAX_GRPC_MESSAGE_BYTES {
+                if msg_len > MAX_GRPC_MESSAGE_BYTES
+                    || 5usize.saturating_add(msg_len) > MAX_GRPC_FRAME_BUFFER_BYTES
+                {
                     anyhow::bail!(
                         "gRPC frame length {msg_len} exceeds MAX_GRPC_MESSAGE_BYTES ({MAX_GRPC_MESSAGE_BYTES})"
                     );
                 }
-                if self.buf.len() >= 5 + msg_len {
+                let frame_wire_len = 5 + msg_len;
+                if self.buf.len() >= frame_wire_len {
                     self.buf.advance(5);
                     let raw = self.buf.split_to(msg_len);
+                    // Release HTTP/2 RecvStream flow-control capacity ONLY as complete gRPC
+                    // frames are drained from `self.buf`, keeping partial or pipelined frames
+                    // accounted against the stream and connection windows.
+                    self.body.flow_control().release_capacity(frame_wire_len)?;
                     if compressed == 0 {
                         return Ok(Some(raw.to_vec()));
                     }
@@ -631,13 +941,21 @@ impl GrpcFrameReader {
                 if self.buf.is_empty() {
                     return Ok(None);
                 }
-                anyhow::bail!("Truncated gRPC frame at stream EOF ({} trailing bytes)", self.buf.len());
+                anyhow::bail!(
+                    "Truncated gRPC frame at stream EOF ({} trailing bytes)",
+                    self.buf.len()
+                );
             }
             match self.body.data().await {
                 Some(Ok(chunk)) => {
                     let len = chunk.len();
                     if len > 0 {
-                        let _ = self.body.flow_control().release_capacity(len);
+                        if self.buf.len().saturating_add(len) > MAX_GRPC_FRAME_BUFFER_BYTES {
+                            anyhow::bail!(
+                                "gRPC frame buffer ({} + {len} bytes) exceeds MAX_GRPC_FRAME_BUFFER_BYTES ({MAX_GRPC_FRAME_BUFFER_BYTES})",
+                                self.buf.len()
+                            );
+                        }
                         self.buf.extend_from_slice(&chunk);
                     }
                 }
@@ -1610,5 +1928,247 @@ mod tests {
             assert!(joined.is_ok(), "unexpected error: {joined:?}");
             drop(raw);
         }
+    }
+
+    #[tokio::test]
+    async fn grpc_frame_reader_defers_flow_control_release_until_frame_drain_and_rejects_invalid_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let srv_task = tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.expect("accept");
+            let mut h2_srv = h2::server::Builder::new()
+                .initial_window_size(H2_INITIAL_STREAM_WINDOW_BYTES)
+                .handshake::<_, Bytes>(sock)
+                .await
+                .expect("h2 server handshake");
+
+            // Stream 1: two pipelined frames in a single DATA chunk (25 bytes + 35 bytes = 60 bytes).
+            let (req1, mut rsp1) = h2_srv.accept().await.unwrap().unwrap();
+            let mut send1 = send_grpc_headers(&mut rsp1, false).unwrap();
+            let mut reader1 = GrpcFrameReader::new(req1.into_body(), "identity".into());
+
+            let msg_a = reader1
+                .next_message()
+                .await
+                .expect("frame 1 ok")
+                .expect("frame 1 present");
+            assert_eq!(msg_a, vec![0xAA; 20]);
+            // Only the 25 bytes of frame 1 were released; the 35 pipelined bytes of frame 2 remain
+            // buffered and accounted against the HTTP/2 RecvStream flow-control window.
+            assert_eq!(reader1.buffered_bytes(), 35);
+            assert_eq!(reader1.used_flow_control_capacity(), 35);
+
+            let msg_b = reader1
+                .next_message()
+                .await
+                .expect("frame 2 ok")
+                .expect("frame 2 present");
+            assert_eq!(msg_b, vec![0xBB; 30]);
+            assert_eq!(reader1.buffered_bytes(), 0);
+            assert_eq!(reader1.used_flow_control_capacity(), 0);
+            assert!(reader1.next_message().await.unwrap().is_none());
+            send_grpc_trailers(&mut send1, GRPC_STATUS_OK, None).unwrap();
+
+            // Stream 2: oversized frame header (> MAX_GRPC_MESSAGE_BYTES) fails immediately on 5-byte header.
+            let (req2, mut rsp2) = h2_srv.accept().await.unwrap().unwrap();
+            let mut reader2 = GrpcFrameReader::new(req2.into_body(), "identity".into());
+            let err_oversize = reader2
+                .next_message()
+                .await
+                .expect_err("oversized header must fail");
+            assert!(
+                err_oversize
+                    .to_string()
+                    .contains("exceeds MAX_GRPC_MESSAGE_BYTES"),
+                "unexpected error: {err_oversize}"
+            );
+            let _ = send_trailers_only(&mut rsp2, GRPC_STATUS_INVALID_ARGUMENT, "oversized");
+
+            // Stream 3: invalid compression flag (2) fails immediately.
+            let (req3, mut rsp3) = h2_srv.accept().await.unwrap().unwrap();
+            let mut reader3 = GrpcFrameReader::new(req3.into_body(), "identity".into());
+            let err_comp = reader3
+                .next_message()
+                .await
+                .expect_err("invalid compression flag must fail");
+            assert!(
+                err_comp
+                    .to_string()
+                    .contains("Invalid gRPC frame compression flag"),
+                "unexpected error: {err_comp}"
+            );
+            let _ = send_trailers_only(&mut rsp3, GRPC_STATUS_INVALID_ARGUMENT, "bad_comp");
+            let srv_drive = tokio::spawn(async move {
+                while h2_srv.accept().await.is_some() {}
+            });
+            let _ = done_rx.await;
+            srv_drive.abort();
+        });
+
+        let tcp = TcpStream::connect(addr).await.expect("connect");
+        let (mut client, conn) = h2::client::handshake(tcp).await.expect("client h2");
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+
+        // Stream 1: send both frames concatenated in one DATA write.
+        let req1 = Request::builder()
+            .method("POST")
+            .uri("http://127.0.0.1/test/pipelined")
+            .body(())
+            .unwrap();
+        let (rsp1_fut, mut send1) = client.send_request(req1, false).unwrap();
+        let mut combined = BytesMut::new();
+        combined.extend_from_slice(&frame_grpc_message(&vec![0xAA; 20]));
+        combined.extend_from_slice(&frame_grpc_message(&vec![0xBB; 30]));
+        send1.send_data(combined.freeze(), true).unwrap();
+        let rsp1 = rsp1_fut.await.unwrap();
+        assert_eq!(rsp1.status(), StatusCode::OK);
+
+        // Stream 2: 5-byte frame header claiming MAX_GRPC_MESSAGE_BYTES + 1.
+        let req2 = Request::builder()
+            .method("POST")
+            .uri("http://127.0.0.1/test/oversize")
+            .body(())
+            .unwrap();
+        let (rsp2_fut, mut send2) = client.send_request(req2, false).unwrap();
+        let mut bad_len_hdr = BytesMut::with_capacity(5);
+        bad_len_hdr.extend_from_slice(&[0u8]);
+        bad_len_hdr.extend_from_slice(&((MAX_GRPC_MESSAGE_BYTES as u32) + 1).to_be_bytes());
+        send2.send_data(bad_len_hdr.freeze(), true).unwrap();
+        let _ = rsp2_fut.await.unwrap();
+
+        // Stream 3: compression byte = 2.
+        let req3 = Request::builder()
+            .method("POST")
+            .uri("http://127.0.0.1/test/bad-compression")
+            .body(())
+            .unwrap();
+        let (rsp3_fut, mut send3) = client.send_request(req3, false).unwrap();
+        send3
+            .send_data(Bytes::from_static(&[2, 0, 0, 0, 1, 0x00]), true)
+            .unwrap();
+        let _ = rsp3_fut.await.unwrap();
+        let _ = done_tx.send(());
+        drop(rsp1);
+        drop(client);
+
+        srv_task.await.expect("server assertions passed");
+    }
+
+    #[tokio::test]
+    async fn send_grpc_data_bounded_slices_across_small_peer_window_and_times_out_zero_window() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let expected_payload: Vec<u8> = (0u16..300).map(|i| (i % 251) as u8).collect();
+        let srv_payload = Bytes::from(expected_payload.clone());
+
+        let srv_task = tokio::spawn(async move {
+            // Connection 1: client advertises initial_window_size = 64 bytes -> server slices 300 bytes cleanly.
+            let (sock1, _) = listener.accept().await.expect("accept 1");
+            let mut h2_srv1 = h2::server::Builder::new()
+                .handshake::<_, Bytes>(sock1)
+                .await
+                .expect("srv1 handshake");
+            let (_req1, mut rsp1) = h2_srv1.accept().await.unwrap().unwrap();
+            let srv1_drive = tokio::spawn(async move {
+                while h2_srv1.accept().await.is_some() {}
+            });
+            let mut send1 = send_grpc_headers(&mut rsp1, false).unwrap();
+            send_grpc_data_bounded(&mut send1, srv_payload, true, Duration::from_secs(2))
+                .await
+                .expect("window-sliced send must succeed");
+            let _ = srv1_drive.await;
+
+            // Connection 2: client advertises initial_window_size = 0 and never sends WINDOW_UPDATE -> timeout.
+            let (sock2, _) = listener.accept().await.expect("accept 2");
+            let mut h2_srv2 = h2::server::Builder::new()
+                .handshake::<_, Bytes>(sock2)
+                .await
+                .expect("srv2 handshake");
+            let (_req2, mut rsp2) = h2_srv2.accept().await.unwrap().unwrap();
+            let srv2_drive = tokio::spawn(async move {
+                while h2_srv2.accept().await.is_some() {}
+            });
+            let mut send2 = send_grpc_headers(&mut rsp2, false).unwrap();
+            let stall_err = send_grpc_data_bounded(
+                &mut send2,
+                Bytes::from_static(&[0u8; 128]),
+                true,
+                Duration::from_millis(80),
+            )
+            .await
+            .expect_err("stalled zero-window peer must time out cleanly");
+            assert!(
+                stall_err
+                    .to_string()
+                    .contains("outbound flow-control capacity"),
+                "unexpected error: {stall_err}"
+            );
+            srv2_drive.abort();
+        });
+
+        // Client 1: 64-byte initial stream window, releasing capacity incrementally as chunks arrive.
+        {
+            let tcp1 = TcpStream::connect(addr).await.expect("connect 1");
+            let (mut client1, conn1) = h2::client::Builder::new()
+                .initial_window_size(64)
+                .handshake::<_, Bytes>(tcp1)
+                .await
+                .expect("client1 handshake");
+            tokio::spawn(async move {
+                let _ = conn1.await;
+            });
+            let req = Request::builder()
+                .method("POST")
+                .uri("http://127.0.0.1/test/small-window")
+                .body(())
+                .unwrap();
+            let (rsp_fut, _send) = client1.send_request(req, true).unwrap();
+            let rsp = rsp_fut.await.unwrap();
+            let mut body = rsp.into_body();
+            let mut collected = Vec::new();
+            while let Some(chunk_res) = body.data().await {
+                let chunk = chunk_res.expect("chunk");
+                assert!(chunk.len() <= 64, "server must respect 64-byte peer window");
+                collected.extend_from_slice(&chunk);
+                body.flow_control().release_capacity(chunk.len()).unwrap();
+            }
+            assert_eq!(collected, expected_payload);
+        }
+
+        // Client 2: 0-byte initial stream window, never releasing capacity.
+        {
+            let tcp2 = TcpStream::connect(addr).await.expect("connect 2");
+            let (mut client2, conn2) = h2::client::Builder::new()
+                .initial_window_size(0)
+                .handshake::<_, Bytes>(tcp2)
+                .await
+                .expect("client2 handshake");
+            tokio::spawn(async move {
+                let _ = conn2.await;
+            });
+            let req = Request::builder()
+                .method("POST")
+                .uri("http://127.0.0.1/test/zero-window")
+                .body(())
+                .unwrap();
+            let (rsp_fut, _send) = client2.send_request(req, true).unwrap();
+            let rsp = rsp_fut.await.unwrap();
+            let mut body = rsp.into_body();
+            // Server resets stream with FLOW_CONTROL_ERROR after 80ms timeout.
+            let next = tokio::time::timeout(Duration::from_secs(2), body.data())
+                .await
+                .expect("stream reset arrives promptly");
+            assert!(
+                matches!(next, Some(Err(_)) | None),
+                "expected stream reset on zero-window stall, got {next:?}"
+            );
+        }
+
+        srv_task.await.expect("server flow-control test passed");
     }
 }

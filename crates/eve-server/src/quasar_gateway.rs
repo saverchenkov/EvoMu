@@ -745,21 +745,27 @@ impl PublicGatewayRouter {
             }
         }
 
-        let mut subs = self.subscribers.write().unwrap_or_else(|e| e.into_inner());
-        if subs.len() >= MAX_GATEWAY_SUBSCRIBERS && !subs.contains_key(&session.session_id) {
-            if let Some(oldest_sid) = subs
-                .values()
-                .min_by_key(|s| (s.subscribed_at_unix, s.session_id))
-                .map(|s| s.session_id)
-            {
-                subs.remove(&oldest_sid);
-                self.stream_receivers
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&oldest_sid);
+        let mut evicted_sid = None;
+        {
+            let mut subs = self.subscribers.write().unwrap_or_else(|e| e.into_inner());
+            if subs.len() >= MAX_GATEWAY_SUBSCRIBERS && !subs.contains_key(&session.session_id) {
+                if let Some(oldest_sid) = subs
+                    .values()
+                    .min_by_key(|s| (s.subscribed_at_unix, s.session_id))
+                    .map(|s| s.session_id)
+                {
+                    subs.remove(&oldest_sid);
+                    evicted_sid = Some(oldest_sid);
+                }
             }
+            subs.insert(session.session_id, sub);
         }
-        subs.insert(session.session_id, sub);
+        if let Some(oldest_sid) = evicted_sid {
+            self.stream_receivers
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&oldest_sid);
+        }
         rx
     }
 
@@ -774,6 +780,32 @@ impl PublicGatewayRouter {
     pub fn unsubscribe_session(&self, session_id: u64) {
         self.subscribers.write().unwrap_or_else(|e| e.into_inner()).remove(&session_id);
         self.stream_receivers.write().unwrap_or_else(|e| e.into_inner()).remove(&session_id);
+    }
+
+    /// Removes all gateway subscribers and retained notice stream receivers owned by `user_id`
+    /// (invoked on account ban, suspension, or administrative kick).
+    pub fn unsubscribe_user(&self, user_id: u64) {
+        let Ok(target_uid) = i32::try_from(user_id) else {
+            return;
+        };
+        let mut removed_sids = Vec::new();
+        {
+            let mut subs = self.subscribers.write().unwrap_or_else(|e| e.into_inner());
+            subs.retain(|&sid, sub| {
+                if sub.user_id == Some(target_uid) {
+                    removed_sids.push(sid);
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        if !removed_sids.is_empty() {
+            let mut rxs = self.stream_receivers.write().unwrap_or_else(|e| e.into_inner());
+            for sid in removed_sids {
+                rxs.remove(&sid);
+            }
+        }
     }
 
     /// Updates a subscriber's session tenancy attributes (`charid`, `corpid`, `allianceid`, `solarsystemid2`, `fleetid`)

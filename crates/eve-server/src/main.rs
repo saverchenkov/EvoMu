@@ -370,6 +370,7 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
 
     let (close_tx, mut close_rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
     ctx.register_session_closer(session_id, close_tx);
+    let mut session_guard = eve_server::router::SessionCleanupGuard::new(Arc::clone(&ctx), session_id);
 
     let (mut reader, mut writer) = stream.into_split();
     let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>>>(16);
@@ -389,6 +390,7 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
             }
         }
     });
+    session_guard.set_reader_abort(reader_task.abort_handle());
 
     let res: Result<()> = async {
         loop {
@@ -608,17 +610,7 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
     .await;
 
     reader_task.abort();
-    ctx.unregister_session_closer(session_id);
-    if let Some(uid) = session.user_id {
-        // A dropped connection that still held the character online is a log-off for watchers and triggers SP-6 in-space logoff handling.
-        if ctx.db.release_online_lock(uid, session.session_id) {
-            if let Some(cid) = session.character_id {
-                let _ = eve_server::sp6_lifecycle::handle_character_logoff_or_disconnect(&ctx, cid).await;
-                eve_server::services::character_skills::notify_watchlist_presence(&ctx, cid, false);
-            }
-        }
-    }
-    ctx.release_session_bindings(session.session_id);
+    ctx.cleanup_disconnected_client_session(&mut session).await;
     res
 }
 
@@ -788,6 +780,145 @@ mod tests {
 
         let _ = bridge_task.await;
         let _ = macho_task.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bridge_client_disconnect_and_abort_clean_up_quasar_subscribers_and_online_state() -> Result<()> {
+        async fn bridge_call(
+            stream: &mut TcpStream,
+            req_id: u64,
+            service: &str,
+            method: &str,
+            args: Vec<PyRep>,
+        ) -> Result<std::result::Result<PyRep, eve_proto::BridgeRpcError>> {
+            let req = BridgeEnvelope::RpcRequest {
+                req_id,
+                service: service.into(),
+                bound_id: None,
+                method: method.into(),
+                args,
+                kwargs: HashMap::new(),
+                caller_trace: Some("bridge-disconnect-test".into()),
+            };
+            write_bounded_frame(stream, &serde_json::to_vec(&req)?).await?;
+            loop {
+                let raw = read_bounded_frame(stream).await?.expect("bridge frame");
+                if let BridgeEnvelope::RpcResponse {
+                    req_id: got_id,
+                    result,
+                } = serde_json::from_slice(&raw)?
+                {
+                    assert_eq!(got_id, req_id);
+                    return Ok(result);
+                }
+            }
+        }
+
+        let ctx = Arc::new(ServerContext::new());
+        let bridge_listener = Arc::new(TcpListener::bind("127.0.0.1:0").await?);
+        let bridge_addr = bridge_listener.local_addr()?;
+
+        // 1. Normal TCP disconnect evicts Quasar subscriber + stream_receiver and releases online lock.
+        let ctx_c1 = Arc::clone(&ctx);
+        let listener_1 = Arc::clone(&bridge_listener);
+        let bridge_task_1 = tokio::spawn(async move {
+            let (sock, _) = listener_1.accept().await.expect("accept 1");
+            handle_bridge_client(sock, ctx_c1).await
+        });
+
+        let mut b_stream = TcpStream::connect(bridge_addr).await?;
+        assert!(
+            bridge_call(
+                &mut b_stream,
+                1,
+                "authentication",
+                "Login",
+                vec![PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
+            )
+            .await?
+            .is_ok()
+        );
+        assert!(
+            bridge_call(
+                &mut b_stream,
+                2,
+                "charUnboundMgr",
+                "SelectCharacterID",
+                vec![PyRep::Integer(90_000_001)],
+            )
+            .await?
+            .is_ok()
+        );
+        assert!(
+            bridge_call(&mut b_stream, 3, "publicGatewaySvc", "Subscribe", Vec::new())
+                .await?
+                .is_ok()
+        );
+        assert_eq!(
+            ctx.quasar_gateway.subscribers.read().unwrap().len(),
+            1,
+            "active Bridge session must be registered in PublicGatewayRouter::subscribers"
+        );
+        assert_eq!(
+            ctx.quasar_gateway.stream_receivers.read().unwrap().len(),
+            1,
+            "active Bridge session must retain its notice stream_receiver while connected"
+        );
+        assert!(ctx.db.get_online_session(1).is_some());
+
+        drop(b_stream);
+        let _ = bridge_task_1.await?;
+
+        assert!(
+            ctx.quasar_gateway.subscribers.read().unwrap().is_empty(),
+            "Bridge disconnect must remove GatewaySubscriber"
+        );
+        assert!(
+            ctx.quasar_gateway.stream_receivers.read().unwrap().is_empty(),
+            "Bridge disconnect must drop retained mpsc::Receiver"
+        );
+        assert!(ctx.db.get_online_session(1).is_none());
+
+        // 2. Aborting `handle_bridge_client` mid-flight still triggers RAII `SessionCleanupGuard::drop`.
+        let ctx_c2 = Arc::clone(&ctx);
+        let bridge_task_2 = tokio::spawn(async move {
+            let (sock, _) = bridge_listener.accept().await.expect("accept 2");
+            handle_bridge_client(sock, ctx_c2).await
+        });
+
+        let mut b_stream_2 = TcpStream::connect(bridge_addr).await?;
+        assert!(
+            bridge_call(
+                &mut b_stream_2,
+                10,
+                "authentication",
+                "Login",
+                vec![PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
+            )
+            .await?
+            .is_ok()
+        );
+        assert!(
+            bridge_call(&mut b_stream_2, 11, "publicGatewaySvc", "Subscribe", Vec::new())
+                .await?
+                .is_ok()
+        );
+        assert_eq!(ctx.quasar_gateway.subscribers.read().unwrap().len(), 1);
+        assert_eq!(ctx.quasar_gateway.stream_receivers.read().unwrap().len(), 1);
+
+        bridge_task_2.abort();
+        let _ = bridge_task_2.await;
+
+        assert!(
+            ctx.quasar_gateway.subscribers.read().unwrap().is_empty(),
+            "RAII SessionCleanupGuard must evict subscriber on task abort/drop"
+        );
+        assert!(
+            ctx.quasar_gateway.stream_receivers.read().unwrap().is_empty(),
+            "RAII SessionCleanupGuard must drop stream_receiver on task abort/drop"
+        );
+        drop(b_stream_2);
         Ok(())
     }
 }
