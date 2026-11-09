@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 use crate::router::{context::BoundObjectEntry, ServerContext};
+use crate::services::inventory_bound;
 use crate::services::inventory_fitting::{
     fitting_containers_ships, get_effective_corp_roles_at_location,
 };
@@ -294,21 +295,18 @@ pub(in crate::services) fn handle_stack_ops(
             };
             match ctx.db.split_stack(owner_id, item_id, split_quantity) {
                 Ok((orig, new_i)) => {
-                    let _ = ctx.notify_item_record_change(
+                    let old_orig_qty = (orig.quantity + new_i.quantity) as i64;
+                    inventory_bound::emit_inv_item_change(
+                        ctx,
                         char_id,
                         &orig,
                         vec![
-                            (
-                                5,
-                                PyRep::Integer((orig.quantity + new_i.quantity) as i64),
-                            ),
-                            (
-                                9,
-                                PyRep::Integer((orig.quantity + new_i.quantity) as i64),
-                            ),
+                            (5, PyRep::Integer(old_orig_qty)),
+                            (9, PyRep::Integer(old_orig_qty)),
                         ],
                     );
-                    let _ = ctx.notify_item_record_change(
+                    inventory_bound::emit_inv_item_change(
+                        ctx,
                         char_id,
                         &new_i,
                         vec![(3, PyRep::Integer(0))],
@@ -491,10 +489,10 @@ pub(in crate::services) fn handle_stack_ops(
                     {
                         return Err("Cannot merge fighters loaded in a fighter tube".to_string());
                     }
-                    Ok(src.quantity)
+                    Ok((src.clone(), dst.clone()))
                 });
-                let src_qty = match pre_check {
-                    Ok(q) => q,
+                let (src_rec, dst_rec) = match pre_check {
+                    Ok(pair) => pair,
                     Err(msg) => {
                         return Some(Err(BridgeRpcError {
                             code: "StackFailed".into(),
@@ -502,6 +500,8 @@ pub(in crate::services) fn handle_stack_ops(
                         }));
                     }
                 };
+                let src_qty = src_rec.quantity;
+                let mut partial_orig: Option<(eve_db::InventoryItemRecord, i32)> = None;
                 if let Some(req_qty) = qty_opt {
                     if req_qty <= 0 || req_qty > src_qty {
                         return Some(Err(BridgeRpcError {
@@ -513,7 +513,8 @@ pub(in crate::services) fn handle_stack_ops(
                     }
                     if req_qty < src_qty {
                         match ctx.db.split_stack(char_id, src_id, req_qty) {
-                            Ok((_orig, split_segment)) => {
+                            Ok((orig, split_segment)) => {
+                                partial_orig = Some((orig, src_qty));
                                 src_id = split_segment.item_id;
                             }
                             Err(e) => {
@@ -526,7 +527,31 @@ pub(in crate::services) fn handle_stack_ops(
                     }
                 }
                 match ctx.db.stack_items(char_id, dst_id, src_id) {
-                    Ok(upd) => updated_records.push(upd),
+                    Ok(upd) => {
+                        if let Some((orig, old_src_qty)) = partial_orig {
+                            inventory_bound::emit_inv_item_change(
+                                ctx,
+                                char_id,
+                                &orig,
+                                vec![
+                                    (5, PyRep::Integer(old_src_qty as i64)),
+                                    (9, PyRep::Integer(old_src_qty as i64)),
+                                ],
+                            );
+                        } else {
+                            inventory_bound::emit_inv_item_deleted(ctx, char_id, &src_rec);
+                        }
+                        inventory_bound::emit_inv_item_change(
+                            ctx,
+                            char_id,
+                            &upd,
+                            vec![
+                                (5, PyRep::Integer(dst_rec.quantity as i64)),
+                                (9, PyRep::Integer(dst_rec.quantity as i64)),
+                            ],
+                        );
+                        updated_records.push(upd);
+                    }
                     Err(e) => {
                         return Some(Err(BridgeRpcError {
                             code: "StackFailed".into(),
@@ -625,14 +650,34 @@ pub(in crate::services) fn handle_stack_ops(
                     continue;
                 }
                 let dst_id = ids[0];
+                let (old_dst_qty, src_snaps) = ctx.db.with_snapshot(|snap| {
+                    let dst_q = snap.items.get(&dst_id).map(|i| i.quantity).unwrap_or(0);
+                    let srcs: Vec<(i64, Option<eve_db::InventoryItemRecord>)> = ids[1..]
+                        .iter()
+                        .map(|&sid| (sid, snap.items.get(&sid).cloned()))
+                        .collect();
+                    (dst_q, srcs)
+                });
                 let mut latest = None;
-                for &src_id in &ids[1..] {
+                for (src_id, old_src_opt) in src_snaps {
                     if let Ok(upd) = ctx.db.stack_items(char_id, dst_id, src_id) {
                         merged_count += 1;
+                        if let Some(old_src) = old_src_opt {
+                            inventory_bound::emit_inv_item_deleted(ctx, char_id, &old_src);
+                        }
                         latest = Some(upd);
                     }
                 }
                 if let Some(upd) = latest {
+                    inventory_bound::emit_inv_item_change(
+                        ctx,
+                        char_id,
+                        &upd,
+                        vec![
+                            (5, PyRep::Integer(old_dst_qty as i64)),
+                            (9, PyRep::Integer(old_dst_qty as i64)),
+                        ],
+                    );
                     survivors.push(PyRep::keyval([
                         ("itemID", PyRep::Integer(upd.item_id)),
                         ("typeID", PyRep::Integer(upd.type_id as i64)),

@@ -280,6 +280,20 @@ async fn test_account_kiring_disabled_and_accrued_playtime() {
     let PyRep::KeyVal(k_kv) = cfg else { panic!("expected KeyVal") };
     assert_eq!(k_kv.get("enabled").and_then(|v| v.as_bool()), Some(false));
     assert_eq!(k_kv.get("antiAddictionEnabled").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(k_kv.get("mode").and_then(|v| v.as_str()), Some("live"));
+    assert_eq!(k_kv.get("client_id").and_then(|v| v.as_str()), Some("evomu"));
+    let PyRep::KeyVal(endpoints) = k_kv.get("endpoints").expect("endpoints") else {
+        panic!("expected endpoints KeyVal");
+    };
+    for key in ["mpay", "billing", "redirect_uri"] {
+        assert_eq!(endpoints.get(key).and_then(|v| v.as_str()), Some(""), "{key}");
+    }
+    let PyRep::KeyVal(channels) = k_kv.get("channels").expect("channels") else {
+        panic!("expected channels KeyVal");
+    };
+    for key in ["login", "pay", "app"] {
+        assert_eq!(channels.get(key).and_then(|v| v.as_str()), Some(""), "{key}");
+    }
     for m in ["ShouldKickCheater", "IsMonochromeStyleEnabled"] {
         let r = ctx.dispatch_rpc(&mut sess, "kiringMgr", None, m, &[], &kw, None).await.expect(m);
         assert_eq!(r, PyRep::Bool(false), "{m}");

@@ -795,6 +795,7 @@ async fn invbroker_add_bound_ship_ignores_source_arg_and_autofits_slot_0() {
             PyRep::Integer(gun1_id),
             PyRep::Integer(station_id + 999),
             PyRep::Integer(0),
+            PyRep::Integer(1),
         ],
         &kw,
     )
@@ -859,5 +860,185 @@ async fn invbroker_add_bound_ship_ignores_source_arg_and_autofits_slot_0() {
     assert_eq!(
         ctx.db.with_snapshot(|s| (s.items[&cargo_id].location_id, s.items[&cargo_id].flag)),
         (ship_id, InventoryFlag::Cargo)
+    );
+}
+
+#[tokio::test]
+async fn bound_ship_add_with_station_arg_fits_into_ship_and_emits_full_dbrow_item_change() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 96_500_501i64;
+    let station_id = 60_003_760i64;
+    let ship_id = 96_500_600i64;
+    let gun_stack_id = 96_500_601i64;
+    let gun_cargo_id = 96_500_602i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = 1;
+        ch.name = "BoundAddPilot".into();
+        ch.corporation_id = 1_000_009;
+        ch.station_id = Some(station_id);
+        ch.solar_system_id = 30_000_142;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587, // Rifter
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            gun_stack_id,
+            InventoryItemRecord {
+                item_id: gun_stack_id,
+                type_id: 484, // 125mm Gatling AutoCannon I
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 5,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        // Module already inside ship cargo while V24 client still passes sourceLocationID = station_id
+        snap.items.insert(
+            gun_cargo_id,
+            InventoryItemRecord {
+                item_id: gun_cargo_id,
+                type_id: 484,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        for &sk in &[3300u32, 3302, 3318, 3392, 3426] {
+            snap.skills.entry(char_id).or_default().insert(
+                sk,
+                TrainedSkillRecord {
+                    type_id: sk,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+    });
+    let _ = ctx
+        .db
+        .acquire_online_lock(1, 1, Some(char_id), true, ctx.now_unix_secs());
+
+    let mut session = SessionState {
+        user_id: Some(1),
+        character_id: Some(char_id),
+        corporation_id: Some(1_000_009),
+        station_id: Some(station_id),
+        solar_system_id: Some(30_000_142),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let ship_bound = crate::router::BoundObjectEntry {
+        bound_id: 22_001,
+        session_id: 1,
+        user_id: 1,
+        character_id: char_id,
+        service: "invbroker".into(),
+        object_id: ship_id,
+        oid_str: format!("N=22001:{ship_id}"),
+        ref_id: 1,
+    };
+    let kw = HashMap::new();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. V24 drag-to-slot: ship_inv.Add(gun_stack_id, station_id, qty=1, flag=27)
+    let res1 = handle(
+        &ctx,
+        &mut session,
+        Some(&ship_bound),
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(gun_stack_id),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::HiSlot0 as i64),
+            PyRep::Integer(1),
+        ],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("bound ship Add fits split module into HiSlot0");
+    let fitted1_id = res1.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
+    assert_eq!(res1.dict_get("locationID").and_then(|v| v.as_i64()), Some(ship_id));
+    assert_eq!(
+        res1.dict_get("flagID").and_then(|v| v.as_i64()),
+        Some(InventoryFlag::HiSlot0 as i64)
+    );
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&gun_stack_id].quantity, 4);
+        let fitted = &snap.items[&fitted1_id];
+        assert_eq!(fitted.location_id, ship_id);
+        assert_eq!(fitted.flag, InventoryFlag::HiSlot0);
+        assert!(fitted.singleton);
+    });
+
+    let notifs1 = ctx.drain_notifications_for_char(char_id);
+    let ic1: Vec<_> = notifs1.iter().filter(|n| n.event == "OnItemChange").collect();
+    assert!(ic1.iter().any(|n| matches!(
+        &n.args[0],
+        PyRep::DBRow { columns, .. }
+            if columns.iter().any(|(k, v)| k == "itemID" && v.as_i64() == Some(gun_stack_id))
+            && columns.iter().any(|(k, v)| k == "quantity" && v.as_i64() == Some(4))
+            && columns.iter().any(|(k, v)| k == "categoryID" && v.as_i64() == Some(7))
+    )));
+    assert!(ic1.iter().any(|n| matches!(
+        &n.args[0],
+        PyRep::DBRow { columns, .. }
+            if columns.iter().any(|(k, v)| k == "itemID" && v.as_i64() == Some(fitted1_id))
+            && columns.iter().any(|(k, v)| k == "locationID" && v.as_i64() == Some(ship_id))
+            && columns.iter().any(|(k, v)| k == "flagID" && v.as_i64() == Some(InventoryFlag::HiSlot0 as i64))
+            && columns.iter().any(|(k, v)| k == "quantity" && v.as_i64() == Some(-1))
+    )));
+
+    // 2. Even if item already sits in ship cargo while client passes station_id as sourceLocationID,
+    // bound ship inventory still resolves target = ship_id (never station_id).
+    let res2 = handle(
+        &ctx,
+        &mut session,
+        Some(&ship_bound),
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(gun_cargo_id),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::HiSlot1 as i64),
+            PyRep::Integer(1),
+        ],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("bound ship Add fits from cargo even when args[1] = station_id");
+    assert_eq!(res2.dict_get("locationID").and_then(|v| v.as_i64()), Some(ship_id));
+    assert_eq!(
+        res2.dict_get("flagID").and_then(|v| v.as_i64()),
+        Some(InventoryFlag::HiSlot1 as i64)
     );
 }

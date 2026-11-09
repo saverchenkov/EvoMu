@@ -41,27 +41,68 @@ pub(crate) async fn handle_multi_add(
     let first_src_loc = item_ids
         .first()
         .and_then(|&id| ctx.db.with_snapshot(|s| s.items.get(&id).map(|i| i.location_id)));
-    let Some(new_loc) = (match (
-        args.get(1).and_then(|a| a.as_i64()),
-        bound_entry.map(|b| b.object_id),
+    let Some(new_loc) = super::inventory_bound::resolve_inv_target_location(
+        ctx,
+        session,
+        bound_entry,
+        args,
         first_src_loc,
-    ) {
-        (Some(a1), Some(bid), Some(sloc)) if a1 == sloc && bid != sloc => Some(bid),
-        (a1, bid, _) => a1.or(bid),
-    })
-    .or(session.ship_id)
-    .or(session.station_id)
-    .or(session.structure_id) else {
+    ) else {
         return Err(BridgeRpcError {
             code: "InvalidLocation".into(),
             message: "MultiAdd requires target location".into(),
         });
     };
-    let raw_flag_u16 = args
+    let raw_flag_opt = args
         .get(2)
         .and_then(|a| a.as_i64())
         .or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()))
-        .map(|v| v as u16)
+        .map(|v| v as u16);
+    if matches!(raw_flag_opt, Some(11..=34 | 89 | 92..=94 | 125..=132 | 164..=171)) {
+        return Err(BridgeRpcError {
+            code: "InvalidLocation".into(),
+            message: "MultiAdd cannot be used to fit modules or rigs".into(),
+        });
+    }
+    if matches!(raw_flag_opt, Some(36 | 63 | 72)) {
+        let bf = raw_flag_opt.unwrap_or(0);
+        return Err(BridgeRpcError {
+            code: if bf == 72 {
+                "ImpoundedItem"
+            } else if bf == 36 {
+                "AssetSafetyLocked"
+            } else {
+                "ItemLocked"
+            }
+            .into(),
+            message: format!("Cannot MultiAdd items into restricted inventory flag {bf}"),
+        });
+    }
+    let should_auto_fit = (raw_flag_opt == Some(0) || raw_flag_opt.is_none())
+        && ctx.db.with_snapshot(|snap| {
+            let dest_is_owned_ship = snap.items.get(&new_loc).is_some_and(|d| {
+                d.owner_id == char_id
+                    && ctx
+                        .sde
+                        .types
+                        .get(&d.type_id)
+                        .is_some_and(|t| t.category_id == 6)
+            });
+            dest_is_owned_ship
+                && item_ids.iter().all(|&id| {
+                    snap.items.get(&id).is_some_and(|it| {
+                        ctx.sde
+                            .types
+                            .get(&it.type_id)
+                            .is_some_and(|t| t.category_id == 7 || t.category_id == 32)
+                    })
+                })
+        });
+    if should_auto_fit {
+        return handle_multi_add_auto_fit(ctx, session, char_id, new_loc, &item_ids, kwargs).await;
+    }
+    let raw_flag_u16 = raw_flag_opt
+        .filter(|&f| f != 0)
         .unwrap_or(InventoryFlag::Cargo as u16);
     if matches!(raw_flag_u16, 36 | 63 | 72) {
         return Err(BridgeRpcError {
@@ -473,6 +514,14 @@ pub(crate) async fn handle_multi_add(
             .flatten()
             .unwrap_or(0);
         for &item_id in &item_ids {
+            let pre_item = snap
+                .items
+                .get(&item_id)
+                .cloned()
+                .ok_or_else(|| BridgeRpcError {
+                    code: "ItemNotFound".into(),
+                    message: format!("Item {item_id} not found"),
+                })?;
             let it = snap.items.get_mut(&item_id).ok_or_else(|| BridgeRpcError {
                 code: "ItemNotFound".into(),
                 message: format!("Item {item_id} not found"),
@@ -508,8 +557,8 @@ pub(crate) async fn handle_multi_add(
             let (fin_opt, _) = crate::services::structure_acl_defense_rules::finalize_fuel_bay_move_in_snap(
                 ctx, snap, item_id, old_loc, old_flag, new_loc, flag, char_id, caller_corp_id,
             );
-            let final_rec = fin_opt.unwrap_or(moved_rec);
-            moved.push((final_rec, old_loc, old_flag_u16 as i64, old_owner));
+            let post_it = snap.items.get(&item_id).cloned();
+            moved.push((pre_item, post_it, fin_opt, it_tid, it_qty));
         }
         Ok((moved, old_containers))
     })?;
@@ -526,28 +575,73 @@ pub(crate) async fn handle_multi_add(
         .await;
         despawn_set.insert(old_cont);
     }
-    for (rec, old_loc, old_flag_i64, old_owner) in &moved {
-        fitting_containers_ships::record_container_add_log(
-            ctx,
-            char_id,
-            rec.item_id,
-            rec.type_id,
-            rec.quantity,
-            new_loc,
-        );
-        let mut item_changes = vec![
-            (3, PyRep::Integer(*old_loc)),
-            (4, PyRep::Integer(*old_flag_i64)),
-        ];
-        if rec.owner_id != *old_owner {
-            item_changes.push((2, PyRep::Integer(*old_owner)));
+    let mut moved_ids = Vec::with_capacity(moved.len());
+    for (pre_item, post_it, fin_opt, it_tid, it_qty) in moved {
+        let fin_id = fin_opt
+            .as_ref()
+            .map(|r| r.item_id)
+            .or_else(|| post_it.as_ref().map(|r| r.item_id))
+            .unwrap_or(pre_item.item_id);
+        fitting_containers_ships::record_container_add_log(ctx, char_id, fin_id, it_tid, it_qty, new_loc);
+        if let Some(fin) = fin_opt {
+            if fin.item_id != pre_item.item_id {
+                super::inventory_bound::emit_inv_item_deleted(ctx, char_id, &pre_item);
+                let old_target_qty = (fin.quantity - it_qty).max(0) as i64;
+                super::inventory_bound::emit_inv_item_change(
+                    ctx,
+                    char_id,
+                    &fin,
+                    vec![
+                        (5, PyRep::Integer(old_target_qty)),
+                        (9, PyRep::Integer(old_target_qty)),
+                    ],
+                );
+            } else {
+                let mut changes = vec![
+                    (3, PyRep::Integer(pre_item.location_id)),
+                    (4, PyRep::Integer(pre_item.flag as i64)),
+                ];
+                if fin.owner_id != pre_item.owner_id {
+                    changes.push((2, PyRep::Integer(pre_item.owner_id)));
+                }
+                super::inventory_bound::emit_inv_item_change(ctx, char_id, &fin, changes);
+            }
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "ProcessInventoryChange",
+                "charid",
+                vec![
+                    PyRep::Integer(fin.item_id),
+                    PyRep::Integer(fin.location_id),
+                    PyRep::Integer(fin.flag as i64),
+                ],
+            );
+        } else if let Some(updated) = post_it {
+            let mut changes = vec![
+                (3, PyRep::Integer(pre_item.location_id)),
+                (4, PyRep::Integer(pre_item.flag as i64)),
+            ];
+            if updated.owner_id != pre_item.owner_id {
+                changes.push((2, PyRep::Integer(pre_item.owner_id)));
+            }
+            super::inventory_bound::emit_inv_item_change(ctx, char_id, &updated, changes);
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "ProcessInventoryChange",
+                "charid",
+                vec![
+                    PyRep::Integer(updated.item_id),
+                    PyRep::Integer(updated.location_id),
+                    PyRep::Integer(updated.flag as i64),
+                ],
+            );
         }
-        let _ = ctx.notify_item_record_change(char_id, rec, item_changes);
+        moved_ids.push(fin_id);
     }
     for old_cont in despawn_set {
         let _ = despawn_empty_jetcan_if_needed(ctx, session.solar_system_id, old_cont).await;
     }
-    let moved: Vec<i64> = moved.into_iter().map(|(rec, _, _, _)| rec.item_id).collect();
+    let moved = moved_ids;
     let mut source_ships = HashSet::new();
     for &(old_loc, item_id, _) in &fitted_unfit_ids {
         let _ = crate::services::notify_emitters_space_dungeons::flush_module_profile_and_ewar_end(
@@ -600,6 +694,431 @@ pub(crate) async fn handle_multi_add(
     Ok(PyRep::keyval([
         ("movedCount", PyRep::Integer(moved.len() as i64)),
         ("items", PyRep::List(moved.into_iter().map(PyRep::Integer).collect())),
+        ("suspectFlagged", PyRep::Bool(any_foreign_theft)),
+    ]))
+}
+
+async fn handle_multi_add_auto_fit(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    ship_id: i64,
+    item_ids: &[i64],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    if item_ids.contains(&ship_id) {
+        return Err(BridgeRpcError {
+            code: "CannotMoveActiveShip".into(),
+            message: format!("Cannot move ship {ship_id} into itself"),
+        });
+    }
+    if session.station_id.is_none() && session.structure_id.is_none() {
+        let now_unix = ctx.now_unix_secs();
+        let has_weapons_timer = ctx
+            .crimewatch
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .states
+            .get(&char_id)
+            .is_some_and(|cw| cw.is_weapon_timer_active(now_unix));
+        if has_weapons_timer {
+            return Err(BridgeRpcError {
+                code: "CannotRefitWithWeaponsTimer".into(),
+                message: "Cannot fit modules in space while weapons timer is active".into(),
+            });
+        }
+        let near_fitting_service = if let (Some(sys_id), Some(active_id)) = (session.solar_system_id, session.ship_id) {
+            fitting_containers_ships::is_near_in_space_fitting_service(ctx, sys_id, active_id).await
+        } else {
+            false
+        };
+        if !near_fitting_service {
+            return Err(BridgeRpcError {
+                code: "CannotFitInSpace".into(),
+                message: "Fitting modules into ship slots requires being docked at a station or structure or within range of a Mobile Depot or capital SMA".into(),
+            });
+        }
+    }
+
+    let mut looted_from_space_ids: HashSet<i64> = HashSet::new();
+    let mut any_foreign_theft = false;
+    for &item_id in item_ids {
+        if let Some(src_item) = ctx.db.with_snapshot(|snap| snap.items.get(&item_id).cloned()) {
+            let (from_space, foreign_theft) =
+                evaluate_space_wreck_or_jetcan_loot(ctx, char_id, &src_item)?;
+            if from_space {
+                looted_from_space_ids.insert(item_id);
+            }
+            if foreign_theft {
+                any_foreign_theft = true;
+            }
+        }
+    }
+
+    let pre_balls = crate::services::structure_acl_defense_rules::snapshot_system_balls_for_inventory(
+        ctx, session, char_id,
+    );
+    let mut temp_fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id)?;
+    let (mut used_slots, ch_dock_for_fit, item_meta) = ctx.db.with_snapshot(|snap| -> Result<_, BridgeRpcError> {
+        let ch = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
+            code: "CharacterNotFound".into(),
+            message: format!("Character {char_id} not found"),
+        })?;
+        let ship_item = snap.items.get(&ship_id).ok_or_else(|| BridgeRpcError {
+            code: "ShipNotFound".into(),
+            message: format!("Target ship {ship_id} not found"),
+        })?;
+        let ship_t = ctx.sde.types.get(&ship_item.type_id).ok_or_else(|| BridgeRpcError {
+            code: "InvalidFittingTarget".into(),
+            message: format!("Unknown hull type {}", ship_item.type_id),
+        })?;
+        if ship_item.owner_id != char_id || ship_t.category_id != 6 {
+            return Err(BridgeRpcError {
+                code: "InvalidFittingTarget".into(),
+                message: format!("Target {ship_id} is not an owned ship"),
+            });
+        }
+        fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, ship_item)?;
+
+        let ch_dock = if session.station_id.is_none()
+            && session.structure_id.is_none()
+            && session.solar_system_id.is_some()
+        {
+            0
+        } else {
+            ch.station_id.or(ch.structure_id).unwrap_or(0)
+        };
+        if ch_dock > 0 {
+            crate::services::structure_acl_defense_rules::validate_docked_ship_fitting_facility_in_snap(
+                ctx, snap, ch_dock,
+            )?;
+        }
+
+        let used: HashSet<u16> = snap
+            .items
+            .values()
+            .filter(|other| {
+                other.location_id == ship_id
+                    && matches!(other.flag as u16, 11..=34 | 92..=94 | 125..=132)
+                    && ctx
+                        .sde
+                        .types
+                        .get(&other.type_id)
+                        .is_none_or(|t| t.category_id == 7 || t.category_id == 32)
+            })
+            .map(|other| other.flag as u16)
+            .collect();
+
+        let mut meta = Vec::with_capacity(item_ids.len());
+        for &item_id in item_ids {
+            let item = snap.items.get(&item_id).ok_or_else(|| BridgeRpcError {
+                code: "ItemNotFound".into(),
+                message: format!("Item {item_id} not found"),
+            })?;
+            fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, item)?;
+            if snap.is_item_locked_in_contract_or_job(item_id) {
+                return Err(BridgeRpcError {
+                    code: "ItemLocked".into(),
+                    message: format!("Item {item_id} is locked by an active contract or job"),
+                });
+            }
+            if snap
+                .item_custom_names
+                .get(&item_id)
+                .is_some_and(|s| s.starts_with("courier_cargo:"))
+            {
+                return Err(BridgeRpcError {
+                    code: "CannotDeliverCourierCargo".into(),
+                    message: "Courier cargo cannot be fitted".into(),
+                });
+            }
+            let is_corp_item = ch.corporation_id > 0 && item.owner_id == ch.corporation_id;
+            if is_corp_item {
+                crate::services::inventory_bound::validate_corp_source_item_take_access_in_snap(
+                    ctx,
+                    snap,
+                    char_id,
+                    ch.corporation_id,
+                    item,
+                )?;
+            } else if item.owner_id != char_id && !looted_from_space_ids.contains(&item_id) {
+                return Err(BridgeRpcError {
+                    code: "ItemOwnershipViolation".into(),
+                    message: format!("Item {item_id} is not owned by {char_id}"),
+                });
+            }
+            if !crate::services::inventory_bound::is_inventory_location_colocated(
+                snap,
+                session,
+                ch,
+                &pre_balls,
+                item.location_id,
+            ) {
+                return Err(BridgeRpcError {
+                    code: "ItemOwnershipViolation".into(),
+                    message: format!("Item {item_id} location not reachable"),
+                });
+            }
+            if item.location_id == ship_id
+                && matches!(item.flag as u16, 11..=34 | 92..=94 | 125..=132)
+            {
+                return Err(BridgeRpcError {
+                    code: "InvalidLocation".into(),
+                    message: format!("Item {item_id} is already fitted on ship {ship_id}"),
+                });
+            }
+            let mod_t = ctx.sde.types.get(&item.type_id).ok_or_else(|| BridgeRpcError {
+                code: "ItemNotFittableModule".into(),
+                message: format!("Unknown type {}", item.type_id),
+            })?;
+            if mod_t.category_id != 7 && mod_t.category_id != 32 {
+                return Err(BridgeRpcError {
+                    code: "ItemNotFittableModule".into(),
+                    message: format!(
+                        "Item {item_id} (type {}, category {}) cannot be fitted",
+                        item.type_id, mod_t.category_id
+                    ),
+                });
+            }
+            let is_ehe = matches!(item.type_id, 40714 | 40717)
+                || mod_t.effect_ids.contains(&6484);
+            if is_ehe
+                && item
+                    .dynamic_attributes
+                    .get(&eve_sde::attr_ids::DAMAGE)
+                    .copied()
+                    .unwrap_or(0.0)
+                    > 0.0
+            {
+                return Err(BridgeRpcError {
+                    code: "CannotRefitDamagedModule".into(),
+                    message: "UserError: Damaged or burned-out Capital Emergency Hull Energizer cannot be fitted".into(),
+                });
+            }
+            crate::services::tactical_module_mechanics::validate_module_fitting_constraints(
+                ctx, snap, ship_id, item_id, mod_t, ship_t,
+            )?;
+            fitting_containers_ships::validate_container_and_bay_move(
+                ctx,
+                char_id,
+                item_id,
+                ship_id,
+                27,
+                kwargs,
+                (item.quantity > 1 && !item.singleton).then_some(1),
+            )?;
+            let (cand_slots, default_online): (Vec<u16>, bool) = if mod_t.effect_ids.contains(&12) {
+                ((27_u16..=34).collect(), true)
+            } else if mod_t.effect_ids.contains(&13) {
+                ((19_u16..=26).collect(), true)
+            } else if mod_t.effect_ids.contains(&11) {
+                ((11_u16..=18).collect(), true)
+            } else if mod_t.effect_ids.contains(&2663) {
+                ((92_u16..=94).collect(), false)
+            } else if mod_t.effect_ids.contains(&3772) {
+                if let Some(&req_slot_f) = mod_t.default_attributes.get(&1366) {
+                    (vec![req_slot_f as u16], false)
+                } else {
+                    ((125_u16..=132).collect(), false)
+                }
+            } else {
+                return Err(BridgeRpcError {
+                    code: "ItemNotFittableModule".into(),
+                    message: format!("Module {} lacks a fitting slot effect", mod_t.name),
+                });
+            };
+            meta.push((
+                item.clone(),
+                cand_slots,
+                default_online,
+            ));
+        }
+        Ok((used, ch_dock, meta))
+    })?;
+    let _ = ch_dock_for_fit;
+
+    struct PlannedFit {
+        src_item: eve_db::InventoryItemRecord,
+        needs_split: bool,
+        target_flag: u16,
+        online: bool,
+    }
+    let mut planned = Vec::with_capacity(item_meta.len());
+    let mut planned_temp_ids: HashSet<i64> = HashSet::new();
+    for (idx, (src_item, cand_slots, online)) in item_meta.into_iter().enumerate() {
+        let needs_split = !src_item.singleton && !src_item.is_blueprint_copy && src_item.quantity > 1;
+        let sim_id = if !needs_split && planned_temp_ids.insert(src_item.item_id) {
+            src_item.item_id
+        } else {
+            -((idx as i64) + 1)
+        };
+        let mut chosen: Option<u16> = None;
+        let mut last_err: Option<String> = None;
+        for cand_flag in cand_slots {
+            if used_slots.contains(&cand_flag) {
+                continue;
+            }
+            match temp_fit.fit_module_with_state(sim_id, src_item.type_id, cand_flag, online, &ctx.sde) {
+                Ok(()) => {
+                    chosen = Some(cand_flag);
+                    used_slots.insert(cand_flag);
+                    break;
+                }
+                Err(msg) => {
+                    last_err = Some(msg);
+                }
+            }
+        }
+        let Some(target_flag) = chosen else {
+            return Err(BridgeRpcError {
+                code: "FittingValidationFailed".into(),
+                message: last_err.unwrap_or_else(|| {
+                    format!("No free compatible fitting slot for item {}", src_item.item_id)
+                }),
+            });
+        };
+        planned.push(PlannedFit {
+            src_item,
+            needs_split,
+            target_flag,
+            online,
+        });
+    }
+
+    let mut fitted_ids = Vec::with_capacity(planned.len());
+    let mut despawn_set = HashSet::new();
+    for plan in planned {
+        let old_loc = plan.src_item.location_id;
+        let old_flag_u16 = plan.src_item.flag as u16;
+        let (fitted_id, split_orig_opt) = if plan.needs_split {
+            let split_owner = plan.src_item.owner_id;
+            let (orig_rec, split_item) = ctx
+                .db
+                .split_stack(split_owner, plan.src_item.item_id, 1)
+                .map_err(|e| BridgeRpcError {
+                    code: "SplitFailed".into(),
+                    message: e.to_string(),
+                })?;
+            let old_orig_qty = orig_rec.quantity + split_item.quantity;
+            (split_item.item_id, Some((orig_rec, old_orig_qty)))
+        } else {
+            (plan.src_item.item_id, None)
+        };
+
+        let target_flag_enum = InventoryFlag::from_u16(plan.target_flag);
+        let updated = ctx.db.try_with_mut_snapshot(|snap| {
+            let it = snap.items.get_mut(&fitted_id).ok_or_else(|| BridgeRpcError {
+                code: "ItemNotFound".into(),
+                message: format!("Item {fitted_id} not found"),
+            })?;
+            it.owner_id = char_id;
+            it.location_id = ship_id;
+            it.flag = target_flag_enum;
+            it.singleton = true;
+            it.version += 1;
+            snap.module_online_states.insert(fitted_id, plan.online);
+            Ok(it.clone())
+        })?;
+
+        if old_loc != ship_id {
+            fitting_containers_ships::record_container_take_log(
+                ctx,
+                char_id,
+                updated.item_id,
+                updated.type_id,
+                updated.quantity,
+                old_loc,
+            );
+            crate::services::pve_dungeon_runtime::on_dungeon_item_looted(
+                ctx,
+                char_id,
+                session.solar_system_id,
+                old_loc,
+                updated.type_id,
+            )
+            .await;
+            despawn_set.insert(old_loc);
+        }
+        fitting_containers_ships::record_container_add_log(
+            ctx,
+            char_id,
+            updated.item_id,
+            updated.type_id,
+            updated.quantity,
+            ship_id,
+        );
+        crate::services::operations_manager_helpers::record_invbroker_add_operation_event(
+            ctx,
+            char_id,
+            old_loc,
+            ship_id,
+            target_flag_enum,
+            updated.type_id,
+            updated.quantity,
+        );
+        ctx.invalidate_ship_fitting(ship_id);
+        let _ = ctx.get_or_rebuild_ship_fitting(char_id, ship_id);
+
+        if let Some((orig_rec, old_orig_qty)) = split_orig_opt {
+            super::inventory_bound::emit_inv_item_change(
+                ctx,
+                char_id,
+                &orig_rec,
+                vec![
+                    (5, PyRep::Integer(old_orig_qty as i64)),
+                    (9, PyRep::Integer(old_orig_qty as i64)),
+                ],
+            );
+        }
+        let changes = if plan.needs_split {
+            vec![(3, PyRep::Integer(0))]
+        } else {
+            vec![
+                (3, PyRep::Integer(old_loc)),
+                (4, PyRep::Integer(old_flag_u16 as i64)),
+            ]
+        };
+        super::inventory_bound::emit_inv_item_change(ctx, char_id, &updated, changes);
+        ctx.notify(
+            crate::router::NotificationTarget::Character(char_id),
+            "ProcessInventoryChange",
+            "charid",
+            vec![
+                PyRep::Integer(updated.item_id),
+                PyRep::Integer(updated.location_id),
+                PyRep::Integer(updated.flag as i64),
+            ],
+        );
+        ctx.notify(
+            crate::router::NotificationTarget::Character(char_id),
+            "OnModuleFitted",
+            "charid",
+            vec![
+                PyRep::Integer(updated.item_id),
+                PyRep::Integer(updated.flag as i64),
+            ],
+        );
+        ctx.notify(
+            crate::router::NotificationTarget::Character(char_id),
+            "OnModuleAttributeChanges",
+            "charid",
+            vec![PyRep::Integer(updated.item_id)],
+        );
+        fitted_ids.push(updated.item_id);
+    }
+
+    for old_cont in despawn_set {
+        let _ = despawn_empty_jetcan_if_needed(ctx, session.solar_system_id, old_cont).await;
+    }
+    if any_foreign_theft {
+        apply_space_loot_suspect_flag(ctx, session, char_id);
+    }
+    Ok(PyRep::keyval([
+        ("movedCount", PyRep::Integer(fitted_ids.len() as i64)),
+        (
+            "items",
+            PyRep::List(fitted_ids.into_iter().map(PyRep::Integer).collect()),
+        ),
         ("suspectFlagged", PyRep::Bool(any_foreign_theft)),
     ]))
 }

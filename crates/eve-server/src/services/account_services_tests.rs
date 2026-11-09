@@ -116,6 +116,25 @@ fn store_allocators_playtime_underage_and_subscription_sync() {
         Some(&PyRep::Bool(true))
     );
     assert_eq!(
+        kiring_cfg.dict_get("mode"),
+        Some(&PyRep::String("live".into()))
+    );
+    assert_eq!(
+        kiring_cfg.dict_get("client_id"),
+        Some(&PyRep::String("evomu".into()))
+    );
+    let endpoints = kiring_cfg.dict_get("endpoints").expect("endpoints key");
+    assert_eq!(endpoints.dict_get("mpay"), Some(&PyRep::String(String::new())));
+    assert_eq!(endpoints.dict_get("billing"), Some(&PyRep::String(String::new())));
+    assert_eq!(
+        endpoints.dict_get("redirect_uri"),
+        Some(&PyRep::String(String::new()))
+    );
+    let channels = kiring_cfg.dict_get("channels").expect("channels key");
+    assert_eq!(channels.dict_get("login"), Some(&PyRep::String(String::new())));
+    assert_eq!(channels.dict_get("pay"), Some(&PyRep::String(String::new())));
+    assert_eq!(channels.dict_get("app"), Some(&PyRep::String(String::new())));
+    assert_eq!(
         handle_inner(&ctx, &mut sess, "kiringMgr", "GetAntiAddictionCode", &[], &kw)
             .unwrap()
             .unwrap(),

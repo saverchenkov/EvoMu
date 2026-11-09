@@ -1206,6 +1206,24 @@ fn handle_inner(
                 ("enabled", PyRep::Bool(false)),
                 ("antiAddictionEnabled", PyRep::Bool(is_underage)),
                 ("region", PyRep::String("TQ".into())),
+                ("mode", PyRep::String("live".into())),
+                ("client_id", PyRep::String("evomu".into())),
+                (
+                    "endpoints",
+                    PyRep::keyval([
+                        ("mpay", PyRep::String(String::new())),
+                        ("billing", PyRep::String(String::new())),
+                        ("redirect_uri", PyRep::String(String::new())),
+                    ]),
+                ),
+                (
+                    "channels",
+                    PyRep::keyval([
+                        ("login", PyRep::String(String::new())),
+                        ("pay", PyRep::String(String::new())),
+                        ("app", PyRep::String(String::new())),
+                    ]),
+                ),
             ])))
         }
         ("kiringMgr", "GetAntiAddictionCode") | ("kiringMgr", "GetSAuthAid") => {

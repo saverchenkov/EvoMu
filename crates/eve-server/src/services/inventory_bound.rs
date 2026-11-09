@@ -964,6 +964,75 @@ pub(crate) fn validate_multiadd_structure_fuel_transfers(
     Ok(src_is_struct_fuel)
 }
 
+pub(crate) fn emit_inv_item_change(
+    ctx: &ServerContext,
+    char_id: i64,
+    item: &eve_db::InventoryItemRecord,
+    changes: Vec<(i32, PyRep)>,
+) {
+    let row = DBRowDescriptor::inv_item_header().build_dbrow(item_to_packed_cells(ctx, item));
+    ctx.notify_item_change(char_id, row, changes);
+}
+
+pub(crate) fn emit_inv_item_deleted(
+    ctx: &ServerContext,
+    char_id: i64,
+    old_item: &eve_db::InventoryItemRecord,
+) {
+    let mut tomb = old_item.clone();
+    tomb.location_id = 6; // locJunkyard
+    tomb.flag = InventoryFlag::None;
+    tomb.quantity = 0;
+    tomb.singleton = false;
+    let row = DBRowDescriptor::inv_item_header().build_dbrow(item_to_packed_cells(ctx, &tomb));
+    ctx.notify_item_change(
+        char_id,
+        row,
+        vec![
+            (3, PyRep::Integer(old_item.location_id)),
+            (4, PyRep::Integer(old_item.flag as i64)),
+            (5, PyRep::Integer(old_item.quantity as i64)),
+            (9, PyRep::Integer(old_item.quantity as i64)),
+        ],
+    );
+}
+
+/// Resolves destination `locationID` for bound/unbound `invbroker.Add` and `invbroker.MultiAdd`.
+///
+/// Bound container/ship/structure handles (`GetInventoryFromId(dest_id)`) always receive
+/// `args[1] = sourceLocationID` from the V24 client, so a bound ship/item/structure `object_id`
+/// takes precedence unless the bound object is a top-level station/solar-system inventory manager
+/// dispatching into a different container/ship passed in `args[1]`.
+pub(crate) fn resolve_inv_target_location(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    args: &[PyRep],
+    src_loc_opt: Option<i64>,
+) -> Option<i64> {
+    let a1 = args.get(1).and_then(|a| a.as_i64()).filter(|&id| id > 0);
+    let bid = bound_entry.map(|b| b.object_id).filter(|&id| id > 0);
+    let resolved = match (a1, bid) {
+        (a1_opt, Some(bid_val)) => {
+            let bound_is_container_or_struct = ctx.db.with_snapshot(|snap| {
+                snap.items.contains_key(&bid_val) || snap.structures.contains_key(&bid_val)
+            });
+            if bound_is_container_or_struct {
+                Some(bid_val)
+            } else if a1_opt.is_some() && a1_opt == src_loc_opt && a1_opt != Some(bid_val) {
+                Some(bid_val)
+            } else {
+                a1_opt.or(Some(bid_val))
+            }
+        }
+        (a1_opt, None) => a1_opt,
+    };
+    resolved
+        .or(session.ship_id)
+        .or(session.station_id)
+        .or(session.structure_id)
+}
+
 #[cfg(test)]
 #[path = "inventory_bound_tests.rs"]
 mod inventory_bound_tests;

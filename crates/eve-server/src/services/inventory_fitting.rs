@@ -144,20 +144,13 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Add requires itemID".into() }));
             };
             let mut source_item_opt = ctx.db.with_snapshot(|snap| snap.items.get(&item_id).cloned());
-            let bound_is_ship = bound_entry.is_some_and(|b| {
-                ctx.db
-                    .with_snapshot(|snap| snap.items.get(&b.object_id).map(|i| i.type_id))
-                    .and_then(|tid| ctx.sde.types.get(&tid))
-                    .is_some_and(|t| t.category_id == 6)
-            });
-            let Some(new_loc) = (if bound_is_ship {
-                bound_entry.map(|b| b.object_id)
-            } else {
-                match (args.get(1).and_then(|a| a.as_i64()), bound_entry.map(|b| b.object_id), source_item_opt.as_ref().map(|i| i.location_id)) {
-                    (Some(a1), Some(bid), Some(sloc)) if a1 == sloc && bid != sloc => Some(bid),
-                    (a1, bid, _) => a1.or(bid),
-                }
-            }).or(session.ship_id).or(session.station_id).or(session.structure_id) else {
+            let Some(new_loc) = super::inventory_bound::resolve_inv_target_location(
+                ctx,
+                session,
+                bound_entry,
+                args,
+                source_item_opt.as_ref().map(|i| i.location_id),
+            ) else {
                 return Some(Err(BridgeRpcError { code: "InvalidLocation".into(), message: "Add requires a target locationID, bound inventory, or active ship/station".into() }));
             };
             let raw_flag_opt = args.get(2).and_then(|a| a.as_i64()).or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()));
@@ -1255,24 +1248,29 @@ pub async fn handle(
                     crate::services::operations_manager_helpers::record_invbroker_add_operation_event(ctx, char_id, orig_source_loc_id, new_loc, flag, moved_tid, moved_qty);
                     ctx.invalidate_ship_fitting(new_loc);
                     if let Some((orig_id, sq)) = did_split {
-                        if let Some(orig_item) = ctx.db.with_snapshot(|s| s.items.get(&orig_id).cloned()) {
-                            let orig_prev = (orig_item.quantity + sq) as i64;
-                            let _ = ctx.notify_item_record_change(
+                        if let Some(orig) = ctx.db.get_item(orig_id) {
+                            let old_orig_qty = (orig.quantity + sq) as i64;
+                            super::inventory_bound::emit_inv_item_change(
+                                ctx,
                                 char_id,
-                                &orig_item,
+                                &orig,
                                 vec![
-                                    (5, PyRep::Integer(orig_prev)),
-                                    (9, PyRep::Integer(orig_prev)),
+                                    (5, PyRep::Integer(old_orig_qty)),
+                                    (9, PyRep::Integer(old_orig_qty)),
                                 ],
                             );
                         }
+                    } else if let Some(consumed) = &source_item_opt {
+                        super::inventory_bound::emit_inv_item_deleted(ctx, char_id, consumed);
                     }
-                    let _ = ctx.notify_item_record_change(
+                    let old_target_qty = prev_qty as i64;
+                    super::inventory_bound::emit_inv_item_change(
+                        ctx,
                         char_id,
                         &merged_item,
                         vec![
-                            (5, PyRep::Integer(prev_qty as i64)),
-                            (9, PyRep::Integer(prev_qty as i64)),
+                            (5, PyRep::Integer(old_target_qty)),
+                            (9, PyRep::Integer(old_target_qty)),
                         ],
                     );
                     ctx.notify(crate::router::NotificationTarget::Character(char_id), "ProcessInventoryChange", "charid", vec![
@@ -1320,11 +1318,25 @@ pub async fn handle(
                 .move_item_transactional(char_id, item_id, new_loc, flag, expected_version, idem_key)
                 .map_err(|e| e.to_string())
                 .and_then(|mut rec| {
-                    if dst_corp_owner > 0 && rec.owner_id != dst_corp_owner {
+                    if (dst_corp_owner > 0 && rec.owner_id != dst_corp_owner)
+                        || (is_fitting_slot && !rec.singleton)
+                    {
                         ctx.db.with_mut_snapshot(|snap| {
-                            if let Some(it) = snap.items.get_mut(&item_id) { it.owner_id = dst_corp_owner; }
+                            if let Some(it) = snap.items.get_mut(&item_id) {
+                                if dst_corp_owner > 0 {
+                                    it.owner_id = dst_corp_owner;
+                                }
+                                if is_fitting_slot {
+                                    it.singleton = true;
+                                }
+                            }
                         });
-                        rec.owner_id = dst_corp_owner;
+                        if dst_corp_owner > 0 {
+                            rec.owner_id = dst_corp_owner;
+                        }
+                        if is_fitting_slot {
+                            rec.singleton = true;
+                        }
                     }
                     Ok(rec)
                 })
@@ -1346,6 +1358,9 @@ pub async fn handle(
                             let it = snap.items.get_mut(&item_id).ok_or_else(|| format!("Item {item_id} not found"))?;
                             it.location_id = new_loc;
                             it.flag = flag;
+                            if is_fitting_slot {
+                                it.singleton = true;
+                            }
                             if dst_corp_owner > 0 {
                                 it.owner_id = dst_corp_owner;
                             } else if matches!(flag, InventoryFlag::Hangar | InventoryFlag::Cargo)
@@ -1454,22 +1469,27 @@ pub async fn handle(
                     crate::services::operations_manager_helpers::record_invbroker_add_operation_event(ctx, char_id, orig_source_loc_id, new_loc, flag, updated.type_id, updated.quantity);
                     ctx.invalidate_ship_fitting(new_loc);
                     if let Some((orig_id, sq)) = did_split {
-                        if let Some(orig_item) = ctx.db.with_snapshot(|s| s.items.get(&orig_id).cloned()) {
-                            let orig_prev = (orig_item.quantity + sq) as i64;
-                            let _ = ctx.notify_item_record_change(
+                        if let Some(orig) = ctx.db.get_item(orig_id) {
+                            let old_orig_qty = (orig.quantity + sq) as i64;
+                            super::inventory_bound::emit_inv_item_change(
+                                ctx,
                                 char_id,
-                                &orig_item,
+                                &orig,
                                 vec![
-                                    (5, PyRep::Integer(orig_prev)),
-                                    (9, PyRep::Integer(orig_prev)),
+                                    (5, PyRep::Integer(old_orig_qty)),
+                                    (9, PyRep::Integer(old_orig_qty)),
                                 ],
                             );
                         }
                     }
-                    let mut item_changes = vec![
-                        (3, PyRep::Integer(old_loc_id)),
-                        (4, PyRep::Integer(old_flag_id)),
-                    ];
+                    let mut item_changes = if did_split.is_some() {
+                        vec![(3, PyRep::Integer(0))]
+                    } else {
+                        vec![
+                            (3, PyRep::Integer(old_loc_id)),
+                            (4, PyRep::Integer(old_flag_id)),
+                        ]
+                    };
                     if !was_singleton_before_move && updated.singleton {
                         // ixSingleton (10): prior unpackaged item had quantity=1, singleton=False.
                         item_changes.push((10, PyRep::Integer(1)));
@@ -1477,7 +1497,7 @@ pub async fn handle(
                     if updated.owner_id != old_owner_id {
                         item_changes.push((2, PyRep::Integer(old_owner_id)));
                     }
-                    let _ = ctx.notify_item_record_change(char_id, &updated, item_changes);
+                    super::inventory_bound::emit_inv_item_change(ctx, char_id, &updated, item_changes);
                     ctx.notify(
                         crate::router::NotificationTarget::Character(char_id),
                         "ProcessInventoryChange",

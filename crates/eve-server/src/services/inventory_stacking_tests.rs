@@ -413,3 +413,249 @@ async fn get_container_contents_alsc_password_list_and_empty_jetcan_despawn() {
         assert!(!snap.items.contains_key(&empty_jetcan_id));
     });
 }
+
+fn dbrow_col_i64(row: &PyRep, col: &str) -> Option<i64> {
+    let PyRep::DBRow { columns, .. } = row else {
+        return None;
+    };
+    columns
+        .iter()
+        .find(|(name, _)| name == col)
+        .and_then(|(_, val)| val.as_i64())
+}
+
+#[tokio::test]
+async fn multi_merge_and_stack_all_emit_full_dbrow_item_change_notifications() {
+    let ctx = test_ctx();
+    let char_id = 92_000_050;
+    let corp_id = 98_000_002;
+    let station_id = 60_003_760;
+    let ship_id = 1_000_250_001;
+    let stack_a = 1_000_250_002;
+    let stack_b = 1_000_250_003;
+    let stack_c = 1_000_250_004;
+
+    ensure_char(&ctx, char_id, corp_id, Some(station_id), 30_000_142, ship_id);
+    insert_item(&ctx, ship_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, stack_a, 34, char_id, station_id, InventoryFlag::Hangar, 100, false);
+    insert_item(&ctx, stack_b, 34, char_id, station_id, InventoryFlag::Hangar, 50, false);
+    insert_item(&ctx, stack_c, 34, char_id, station_id, InventoryFlag::Hangar, 40, false);
+
+    let kw = HashMap::new();
+    let mut sess = make_session(char_id, corp_id, Some(station_id), None, Some(ship_id));
+    let station_bound = make_bound(station_id, char_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. Full MultiMerge: stack_b (50) -> stack_a (100) => stack_a = 150, stack_b removed
+    handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&station_bound),
+        "invbroker",
+        "MultiMerge",
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(stack_b),
+            PyRep::Integer(stack_a),
+        ])])],
+        &kw,
+    )
+    .expect("matched")
+    .expect("full MultiMerge ok");
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    let item_changes: Vec<_> = notifs.iter().filter(|n| n.event == "OnItemChange").collect();
+    assert_eq!(item_changes.len(), 2, "expected 2 OnItemChange for full merge");
+    let del = item_changes
+        .iter()
+        .find(|n| dbrow_col_i64(&n.args[0], "itemID") == Some(stack_b))
+        .expect("deleted source notification");
+    assert_eq!(dbrow_col_i64(&del.args[0], "locationID"), Some(6));
+    assert_eq!(dbrow_col_i64(&del.args[0], "quantity"), Some(0));
+    assert_ne!(dbrow_col_i64(&del.args[0], "groupID").unwrap_or(0), 0);
+    assert_ne!(dbrow_col_i64(&del.args[0], "categoryID").unwrap_or(0), 0);
+    assert_eq!(dbrow_col_i64(&del.args[0], "ownerID"), Some(char_id));
+    let surv = item_changes
+        .iter()
+        .find(|n| dbrow_col_i64(&n.args[0], "itemID") == Some(stack_a))
+        .expect("survivor notification");
+    assert_eq!(dbrow_col_i64(&surv.args[0], "quantity"), Some(150));
+
+    // 2. Partial MultiMerge: 15 from stack_c (40) -> stack_a (150) => stack_c=25, stack_a=165
+    handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&station_bound),
+        "invbroker",
+        "MultiMerge",
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(stack_c),
+            PyRep::Integer(stack_a),
+            PyRep::Integer(15),
+        ])])],
+        &kw,
+    )
+    .expect("matched")
+    .expect("partial MultiMerge ok");
+    let p_notifs = ctx.drain_notifications_for_char(char_id);
+    let p_changes: Vec<_> = p_notifs.iter().filter(|n| n.event == "OnItemChange").collect();
+    assert_eq!(p_changes.len(), 2, "expected 2 OnItemChange for partial merge");
+    let rem = p_changes
+        .iter()
+        .find(|n| dbrow_col_i64(&n.args[0], "itemID") == Some(stack_c))
+        .expect("remainder notification");
+    assert_eq!(dbrow_col_i64(&rem.args[0], "quantity"), Some(25));
+    let p_surv = p_changes
+        .iter()
+        .find(|n| dbrow_col_i64(&n.args[0], "itemID") == Some(stack_a))
+        .expect("survivor notification");
+    assert_eq!(dbrow_col_i64(&p_surv.args[0], "quantity"), Some(165));
+
+    // 3. StackAll merges stack_c (25) into stack_a (165 -> 190) and emits full DBRows
+    handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&station_bound),
+        "invbroker",
+        "StackAll",
+        &[PyRep::Integer(InventoryFlag::Hangar as i64)],
+        &kw,
+    )
+    .expect("matched")
+    .expect("StackAll ok");
+    let sa_notifs = ctx.drain_notifications_for_char(char_id);
+    let sa_changes: Vec<_> = sa_notifs.iter().filter(|n| n.event == "OnItemChange").collect();
+    assert_eq!(sa_changes.len(), 2, "expected 2 OnItemChange for StackAll");
+    assert!(sa_changes.iter().any(|n| {
+        dbrow_col_i64(&n.args[0], "itemID") == Some(stack_c)
+            && dbrow_col_i64(&n.args[0], "locationID") == Some(6)
+    }));
+    assert!(sa_changes.iter().any(|n| {
+        dbrow_col_i64(&n.args[0], "itemID") == Some(stack_a)
+            && dbrow_col_i64(&n.args[0], "quantity") == Some(190)
+    }));
+
+    // 4. Subsequent MultiAdd of surviving stack_a to ship cargo succeeds and emits OnItemChange
+    let ship_bound = make_bound(ship_id, char_id);
+    handle_multi_add(
+        &ctx,
+        &mut sess,
+        Some(&ship_bound),
+        &[
+            PyRep::List(vec![PyRep::Integer(stack_a)]),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("subsequent move of merged survivor succeeds");
+    let m_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(m_notifs.iter().any(|n| {
+        n.event == "OnItemChange"
+            && dbrow_col_i64(&n.args[0], "itemID") == Some(stack_a)
+            && dbrow_col_i64(&n.args[0], "locationID") == Some(ship_id)
+            && dbrow_col_i64(&n.args[0], "flagID") == Some(InventoryFlag::Cargo as i64)
+    }));
+}
+
+#[tokio::test]
+async fn multi_add_auto_fit_splits_stacked_module_and_emits_notifications() {
+    let ctx = test_ctx();
+    let char_id = 92_000_060;
+    let corp_id = 98_000_002;
+    let station_id = 60_003_760;
+    let ship_id = 1_000_260_001;
+    let gun_stack_id = 1_000_260_002;
+
+    ensure_char(&ctx, char_id, corp_id, Some(station_id), 30_000_142, ship_id);
+    insert_item(&ctx, ship_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, gun_stack_id, 484, char_id, station_id, InventoryFlag::Hangar, 5, false);
+    ctx.db.with_mut_snapshot(|snap| {
+        for &sk in &[3300u32, 3302, 3318, 3392, 3426] {
+            snap.skills.entry(char_id).or_default().insert(
+                sk,
+                eve_db::TrainedSkillRecord {
+                    type_id: sk,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+    });
+
+    let kw = HashMap::new();
+    let mut sess = make_session(char_id, corp_id, Some(station_id), None, Some(ship_id));
+    let ship_bound = make_bound(ship_id, char_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. Fit first unit from 5x stack with flag = 0 (flagAutoFit)
+    let fit1 = handle_multi_add(
+        &ctx,
+        &mut sess,
+        Some(&ship_bound),
+        &[
+            PyRep::List(vec![PyRep::Integer(gun_stack_id)]),
+            PyRep::Integer(station_id),
+            PyRep::Integer(0),
+        ],
+        &kw,
+    )
+    .await
+    .expect("auto-fit 1st module from stack");
+    let PyRep::List(items1) = fit1.dict_get("items").unwrap() else {
+        panic!("expected items list");
+    };
+    let fitted1_id = items1[0].as_i64().unwrap();
+    assert_ne!(fitted1_id, gun_stack_id);
+
+    ctx.db.with_snapshot(|snap| {
+        let orig = &snap.items[&gun_stack_id];
+        assert_eq!(orig.location_id, station_id);
+        assert_eq!(orig.flag, InventoryFlag::Hangar);
+        assert_eq!(orig.quantity, 4);
+        let fitted = &snap.items[&fitted1_id];
+        assert_eq!(fitted.location_id, ship_id);
+        assert_eq!(fitted.flag, InventoryFlag::HiSlot0);
+        assert_eq!(fitted.quantity, 1);
+        assert!(fitted.singleton);
+        assert_eq!(snap.module_online_states.get(&fitted1_id).copied(), Some(true));
+    });
+
+    let n1 = ctx.drain_notifications_for_char(char_id);
+    let ic1: Vec<_> = n1.iter().filter(|n| n.event == "OnItemChange").collect();
+    assert!(ic1.iter().any(|n| {
+        dbrow_col_i64(&n.args[0], "itemID") == Some(gun_stack_id)
+            && dbrow_col_i64(&n.args[0], "quantity") == Some(4)
+    }));
+    assert!(ic1.iter().any(|n| {
+        dbrow_col_i64(&n.args[0], "itemID") == Some(fitted1_id)
+            && dbrow_col_i64(&n.args[0], "locationID") == Some(ship_id)
+            && dbrow_col_i64(&n.args[0], "flagID") == Some(InventoryFlag::HiSlot0 as i64)
+            && dbrow_col_i64(&n.args[0], "quantity") == Some(-1)
+    }));
+    assert!(n1.iter().any(|n| n.event == "OnModuleFitted"));
+
+    // 2. Fit second unit from remaining 4x stack (with flag kwarg = 0) -> lands in HiSlot1 (28)
+    let mut kw2 = HashMap::new();
+    kw2.insert("flag".into(), PyRep::Integer(0));
+    let fit2 = handle_multi_add(
+        &ctx,
+        &mut sess,
+        Some(&ship_bound),
+        &[
+            PyRep::List(vec![PyRep::Integer(gun_stack_id)]),
+            PyRep::Integer(station_id),
+        ],
+        &kw2,
+    )
+    .await
+    .expect("auto-fit 2nd module into HiSlot1");
+    let PyRep::List(items2) = fit2.dict_get("items").unwrap() else {
+        panic!("expected items list");
+    };
+    let fitted2_id = items2[0].as_i64().unwrap();
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&gun_stack_id].quantity, 3);
+        assert_eq!(snap.items[&fitted2_id].flag, InventoryFlag::HiSlot1);
+    });
+}

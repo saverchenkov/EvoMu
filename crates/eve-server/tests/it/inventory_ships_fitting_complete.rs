@@ -3152,3 +3152,226 @@ async fn test_issue_630_docked_fit_miner_sets_singleton_dbrow_and_survives_undoc
 }
 
 }
+
+#[tokio::test]
+async fn test_batch_o_multi_merge_stack_all_auto_fit_and_bound_ship_add() {
+    let ctx = new_sqlite_ctx();
+    let mut sess = SessionState::new(30_950);
+    let kw = HashMap::new();
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+    let char_id = sess.character_id.expect("character_id");
+    let station_id = sess.station_id.unwrap_or(60_003_760);
+
+    // Board a freshly seeded Venture (32880) at station
+    let venture_id = 9_500_100i64;
+    let miner_stack_id = 9_500_200i64;
+    let trit_a = 9_500_301i64;
+    let trit_b = 9_500_302i64;
+    let trit_c = 9_500_303i64;
+    seed_item(&ctx, venture_id, 32880, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    seed_item(&ctx, miner_stack_id, 482, char_id, station_id, InventoryFlag::Hangar, 5, false);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items
+            .retain(|_, it| !(it.owner_id == char_id && it.location_id == station_id && it.type_id == 35));
+    });
+    seed_item(&ctx, trit_a, 35, char_id, station_id, InventoryFlag::Hangar, 100, false);
+    seed_item(&ctx, trit_b, 35, char_id, station_id, InventoryFlag::Hangar, 50, false);
+    seed_item(&ctx, trit_c, 35, char_id, station_id, InventoryFlag::Hangar, 25, false);
+    ctx.db.with_mut_snapshot(|snap| {
+        for tid in [32880u32, 482u32] {
+            for (skill_tid, req_lvl) in ctx.sde.required_skills_for_type(tid) {
+                snap.skills.entry(char_id).or_default().insert(
+                    skill_tid,
+                    eve_db::TrainedSkillRecord {
+                        type_id: skill_tid,
+                        level: req_lvl.max(5),
+                        skill_points: 256_000.0,
+                    },
+                );
+            }
+        }
+    });
+
+    ctx.dispatch_rpc(&mut sess, "ship", None, "AssembleShip", &[PyRep::List(vec![PyRep::Integer(venture_id)])], &kw, None)
+        .await
+        .ok();
+    ctx.advance_secs(20);
+    ctx.dispatch_rpc(&mut sess, "ship", None, "Board", &[PyRep::Integer(venture_id)], &kw, None)
+        .await
+        .expect("board Venture");
+
+    let station_bound = ctx.bind_object(&sess, "invbroker", station_id).unwrap();
+    let ship_bound = ctx.bind_object(&sess, "invbroker", venture_id).unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // #684: MultiMerge + StackAll emit full 9-col DBRow OnItemChange & leave survivor movable
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        Some(station_bound),
+        "MultiMerge",
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(trit_b),
+            PyRep::Integer(trit_a),
+        ])])],
+        &kw,
+        None,
+    )
+    .await
+    .expect("MultiMerge full");
+    let mm_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(mm_notifs.iter().filter(|n| n.event == "OnItemChange").count(), 2);
+
+    let sa_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            Some(station_bound),
+            "StackAll",
+            &[PyRep::Integer(InventoryFlag::Hangar as i64)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("StackAll");
+    let PyRep::List(sa_stacks) = sa_res.dict_get("stacks").expect("stacks") else {
+        panic!("expected stacks list");
+    };
+    let pyerite_surv = sa_stacks
+        .iter()
+        .find(|s| s.dict_get("typeID").and_then(|v| v.as_i64()) == Some(35))
+        .expect("surviving Pyerite stack in StackAll response");
+    let survivor_id = pyerite_surv.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
+    let survivor_qty = pyerite_surv.dict_get("quantity").and_then(|v| v.as_i64()).unwrap();
+    assert!(survivor_qty >= 175, "merged Pyerite stack qty {survivor_qty} < 175");
+
+    let sa_notifs = ctx.drain_notifications_for_char(char_id);
+    let sa_changes: Vec<_> = sa_notifs.iter().filter(|n| n.event == "OnItemChange").collect();
+    assert!(sa_changes.len() >= 2, "expected StackAll OnItemChange notifications, got {}", sa_changes.len());
+    assert!(sa_changes.iter().any(|n| matches!(
+        &n.args[0],
+        PyRep::DBRow { columns, .. }
+            if columns.iter().any(|(k, v)| k == "itemID" && v.as_i64() == Some(trit_c))
+            && columns.iter().any(|(k, v)| k == "locationID" && v.as_i64() == Some(6))
+    )));
+    assert!(sa_changes.iter().any(|n| matches!(
+        &n.args[0],
+        PyRep::DBRow { columns, .. }
+            if columns.iter().any(|(k, v)| k == "itemID" && v.as_i64() == Some(survivor_id))
+            && columns.iter().any(|(k, v)| k == "quantity" && v.as_i64() == Some(survivor_qty))
+    )));
+
+    // Drag merged survivor to ship cargo using bound ship inventory
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        Some(ship_bound),
+        "Add",
+        &[
+            PyRep::Integer(survivor_id),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("drag merged survivor into ship cargo");
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.items[&survivor_id].location_id, venture_id);
+        assert_eq!(s.items[&survivor_id].quantity as i64, survivor_qty);
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // #690: Fit to Active Ship on 5x Miner I stack via MultiAdd(flag=0) splits 1 into HiSlot0
+    let auto_fit_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            Some(ship_bound),
+            "MultiAdd",
+            &[
+                PyRep::List(vec![PyRep::Integer(miner_stack_id)]),
+                PyRep::Integer(station_id),
+                PyRep::Integer(0),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("MultiAdd Fit to Active Ship on Venture with Miner I stack");
+    let PyRep::List(fit_items) = auto_fit_res.dict_get("items").expect("items") else {
+        panic!("expected items list");
+    };
+    let fitted_miner1 = fit_items[0].as_i64().unwrap();
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.items[&miner_stack_id].quantity, 4);
+        assert_eq!(s.items[&fitted_miner1].location_id, venture_id);
+        assert_eq!(s.items[&fitted_miner1].flag, InventoryFlag::HiSlot0);
+        assert!(s.items[&fitted_miner1].singleton);
+    });
+    let af_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(af_notifs.iter().filter(|n| n.event == "OnItemChange").count(), 2);
+    assert!(af_notifs.iter().any(|n| n.event == "OnModuleFitted"));
+
+    // #691: Drag 2nd Miner I from remaining 4x stack via ship_inv.Add(miner_stack_id, station_id, qty=1, flag=28)
+    let drag_fit = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            Some(ship_bound),
+            "Add",
+            &[
+                PyRep::Integer(miner_stack_id),
+                PyRep::Integer(station_id),
+                PyRep::Integer(InventoryFlag::HiSlot1 as i64),
+                PyRep::Integer(1),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("bound ship Add fits 2nd Miner I into HiSlot1 despite args[1]=station_id");
+    let fitted_miner2 = drag_fit.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.items[&miner_stack_id].quantity, 3);
+        assert_eq!(s.items[&fitted_miner2].location_id, venture_id);
+        assert_eq!(s.items[&fitted_miner2].flag, InventoryFlag::HiSlot1);
+        assert!(s.items[&fitted_miner2].singleton);
+    });
+    let df_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(df_notifs.iter().filter(|n| n.event == "OnItemChange").count(), 2);
+
+    // Trying to fit a 3rd Miner I onto Venture (only 2 hiSlots) fails cleanly without mutating stack
+    let err3 = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            Some(ship_bound),
+            "MultiAdd",
+            &[
+                PyRep::List(vec![PyRep::Integer(miner_stack_id)]),
+                PyRep::Integer(station_id),
+                PyRep::Integer(0),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("3rd Miner I must fail on 2-high-slot Venture");
+    assert_eq!(err3.code, "FittingValidationFailed");
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.items[&miner_stack_id].quantity, 3);
+    });
+}
