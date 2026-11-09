@@ -231,11 +231,11 @@ pub fn populate_asteroid_belt_entities(
                     mass: (total_m3 * 5.0e7).max(ore_type.mass),
                     radius: scaled_radius,
                     speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
+                    mode: MovementMode::Rigid,
                 };
 
-                ballpark.set_ball_slim_meta(
-                    id,
+                ballpark.add_static_ball_with_meta(
+                    ball,
                     SlimItemMeta {
                         group_id: ore_type.group_id,
                         category_id: ore_type.category_id,
@@ -244,15 +244,35 @@ pub fn populate_asteroid_belt_entities(
                         corp_id: -1,
                         alliance_id: -1,
                         security_status: 0.0,
-                        is_cloaked: false, ..Default::default()
+                        is_cloaked: false,
+                        name: (!ore_type.name.is_empty()).then(|| ore_type.name.clone()),
+                        ..Default::default()
                     },
                 );
-                ballpark.add_ball(ball);
                 states.push(ast_state);
             }
         }
     }
     states
+}
+
+/// Returns `true` if `ball` is a stationary space object (wreck, jetcan, loot/secure container,
+/// corpse, or anchored deployable/structure) that must omit `BALL_FLAG_IS_FREE` in `AddBalls2` /
+/// `SetState` (`DestinyManager.cpp:1780`).
+pub fn should_pin_stationary_ball(ball: &Ball, meta: Option<&SlimItemMeta>) -> bool {
+    if !matches!(ball.mode, MovementMode::Stop)
+        || ball.max_velocity > 0.0
+        || ball.velocity.length_squared() > 0.0
+    {
+        return false;
+    }
+    if matches!(
+        ball.type_id,
+        23 | 25 | 3293 | 26_468..=27_030 | 33_474..=33_500
+    ) {
+        return true;
+    }
+    meta.is_some_and(|m| matches!(m.category_id, 2 | 3 | 22 | 23 | 40 | 46 | 65))
 }
 
 pub(super) fn ensure_default_slim_meta(
@@ -263,13 +283,19 @@ pub(super) fn ensure_default_slim_meta(
     if ballpark.ball_slim_meta.contains_key(&ball.id) {
         return;
     }
-    let (group_id, category_id) = sde_opt
+    let (group_id, category_id, name) = sde_opt
         .as_ref()
         .and_then(|sde| sde.types.get(&ball.type_id))
-        .map(|t| (t.group_id, t.category_id))
+        .map(|t| {
+            (
+                t.group_id,
+                t.category_id,
+                (!t.name.is_empty()).then(|| t.name.clone()),
+            )
+        })
         .unwrap_or_else(|| {
             let fallback = eve_destiny::wire::resolve_slim_item_meta(None, ball);
-            (fallback.group_id, fallback.category_id)
+            (fallback.group_id, fallback.category_id, None)
         });
     ballpark.set_ball_slim_meta(
         ball.id,
@@ -282,6 +308,7 @@ pub(super) fn ensure_default_slim_meta(
             alliance_id: -1,
             security_status: 0.0,
             is_cloaked: false,
+            name,
             ..Default::default()
         },
     );
@@ -325,13 +352,21 @@ pub(super) fn restore_asteroid_from_template(
     reset_ast.respawn_at_tick = None;
     asteroids.insert(id, reset_ast);
     if !ballpark.balls.contains_key(&id) {
-        let (group_id, category_id) = sde_opt
+        let (group_id, category_id, name) = sde_opt
             .as_ref()
             .and_then(|s| s.types.get(&orig_ball.type_id))
-            .map(|t| (t.group_id, t.category_id))
-            .unwrap_or((25, 25));
-        ballpark.set_ball_slim_meta(
-            id,
+            .map(|t| {
+                (
+                    t.group_id,
+                    t.category_id,
+                    (!t.name.is_empty()).then(|| t.name.clone()),
+                )
+            })
+            .unwrap_or((25, 25, None));
+        let mut restored_ball = orig_ball.clone();
+        restored_ball.mode = MovementMode::Rigid;
+        ballpark.add_static_ball_with_meta(
+            restored_ball.clone(),
             SlimItemMeta {
                 group_id,
                 category_id,
@@ -340,10 +375,17 @@ pub(super) fn restore_asteroid_from_template(
                 corp_id: -1,
                 alliance_id: -1,
                 security_status: 0.0,
-                is_cloaked: false, ..Default::default()
+                is_cloaked: false,
+                name,
+                ..Default::default()
             },
         );
-        ballpark.add_ball(orig_ball.clone());
+        ballpark.queue_event_for_all_grid_observers(
+            Some(id),
+            &DestinyEvent::AddBalls2 {
+                balls: vec![restored_ball],
+            },
+        );
     }
 }
 

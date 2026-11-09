@@ -125,7 +125,7 @@ async fn test_live_mining_belts_as_balls_and_sec_band_ore_distribution() {
             .await
             .expect("ast ball query")
             .expect("asteroid ball must exist in ballpark");
-        assert_eq!(ast_ball.mode, MovementMode::Stop);
+        assert_eq!(ast_ball.mode, MovementMode::Rigid);
         assert!(ast_ball.radius >= 60.0);
         let ast_state = handle
             .get_asteroid_state(aid)

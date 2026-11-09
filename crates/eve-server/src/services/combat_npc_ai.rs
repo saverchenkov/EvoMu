@@ -203,7 +203,25 @@ pub async fn spawn_specialized_npc_entity(
         spawn_group_id,
         pos,
     );
-    let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
+    let sde_t = ctx.sde.types.get(&npc_type_id);
+    let fac_owner = if entity.faction_id > 0 {
+        entity.faction_id as i64
+    } else {
+        500_001
+    };
+    let npc_meta = eve_destiny::SlimItemMeta {
+        group_id: sde_t.map(|t| t.group_id).unwrap_or(546),
+        category_id: sde_t.map(|t| t.category_id).unwrap_or(11),
+        owner_id: fac_owner,
+        char_id: None,
+        corp_id: fac_owner,
+        alliance_id: -1,
+        security_status: -1.0,
+        is_cloaked: false,
+        name: sde_t.map(|t| t.name.clone()).filter(|n| !n.is_empty()),
+        ..Default::default()
+    };
+    let _ = sys_handle.spawn_ball_with_meta(ball, cs, npc_meta).await;
     with_mut_combat_ephemeral(ctx, |rt| {
         rt.npc_entities.insert(ball_id, entity);
     });
@@ -1344,8 +1362,9 @@ pub async fn destroy_specialized_npc_with_hint(
         wid
     });
 
+    let wreck_sde = ctx.sde.types.get(&wreck_type_id);
     let _ = sys_handle
-        .spawn_ball_with_combat(
+        .spawn_ball_with_meta(
             Ball {
                 id: wreck_id,
                 type_id: wreck_type_id,
@@ -1359,6 +1378,18 @@ pub async fn destroy_specialized_npc_with_hint(
                 mode: MovementMode::Stop,
             },
             ctx.build_type_combat_state(wreck_type_id),
+            eve_destiny::SlimItemMeta {
+                group_id: wreck_sde.map(|t| t.group_id).unwrap_or(186),
+                category_id: wreck_sde.map(|t| t.category_id).unwrap_or(2),
+                owner_id: killer_char_id,
+                char_id: None,
+                corp_id: -1,
+                alliance_id: -1,
+                security_status: 0.0,
+                is_cloaked: false,
+                name: wreck_sde.map(|t| t.name.clone()).filter(|n| !n.is_empty()),
+                ..Default::default()
+            },
         )
         .await;
     crate::services::combat_crimewatch::combat_wrecks_killmails::register_container_lifetime(

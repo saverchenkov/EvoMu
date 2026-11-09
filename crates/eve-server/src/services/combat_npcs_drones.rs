@@ -675,8 +675,28 @@ pub async fn handle_npcs_drones(
                 cs.base_max_velocity = Some(max_vel);
                 cs.base_mass = Some(mass);
                 cs.base_inertia = Some(inertia);
+                let (pilot_corp_id, pilot_alliance_id) = ctx
+                    .db
+                    .get_character(char_id)
+                    .map(|ch| (ch.corporation_id, ch.alliance_id.unwrap_or(-1)))
+                    .unwrap_or((
+                        session.corporation_id.unwrap_or(-1),
+                        session.alliance_id.unwrap_or(-1),
+                    ));
+                let drone_meta = eve_destiny::SlimItemMeta {
+                    group_id: sde_t.map(|t| t.group_id).unwrap_or(100),
+                    category_id: sde_t.map(|t| t.category_id).unwrap_or(18),
+                    owner_id: char_id,
+                    char_id: None,
+                    corp_id: pilot_corp_id,
+                    alliance_id: pilot_alliance_id,
+                    security_status: 0.0,
+                    is_cloaked: false,
+                    name: sde_t.map(|t| t.name.clone()).filter(|n| !n.is_empty()),
+                    ..Default::default()
+                };
                 let _ = sys_handle
-                    .spawn_ball_with_combat(
+                    .spawn_ball_with_meta(
                         Ball {
                             id: ball_id,
                             type_id: rec.type_id,
@@ -690,6 +710,7 @@ pub async fn handle_npcs_drones(
                             mode: MovementMode::Stop,
                         },
                         cs,
+                        drone_meta,
                     )
                     .await;
                 let _ = sys_handle

@@ -148,8 +148,26 @@ pub async fn spawn_sleeper_sentry_tower_for_class(
     let pos = center + DVec3::new(3_000.0, 0.0, 2_500.0);
     let (ball, cs, entity) =
         build_sleeper_sentry_entity(sde, solar_system_id, bid, tid, pos, wh_class);
+    let sde_t = sde.types.get(&tid);
+    let fac_owner = if entity.faction_id > 0 {
+        entity.faction_id as i64
+    } else {
+        500_005
+    };
+    let sentry_meta = eve_destiny::SlimItemMeta {
+        group_id: sde_t.map(|t| t.group_id).unwrap_or(959),
+        category_id: sde_t.map(|t| t.category_id).unwrap_or(11),
+        owner_id: fac_owner,
+        char_id: None,
+        corp_id: fac_owner,
+        alliance_id: -1,
+        security_status: -1.0,
+        is_cloaked: false,
+        name: sde_t.map(|t| t.name.clone()).filter(|n| !n.is_empty()),
+        ..Default::default()
+    };
     let sys_handle = systems.get_or_spawn(solar_system_id);
-    let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
+    let _ = sys_handle.spawn_ball_with_meta(ball, cs, sentry_meta).await;
     let mut rt = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
     rt.npc_entities.insert(bid, entity);
     bid
@@ -243,18 +261,32 @@ pub async fn drop_site_loot_into_space_core(
     });
     let sys_handle = systems.get_or_spawn(solar_system_id);
     let _ = sys_handle
-        .spawn_ball(Ball {
-            id: container_id,
-            type_id: container_type_id,
-            position: DVec3::from_array(pos),
-            velocity: DVec3::ZERO,
-            max_velocity: 0.0,
-            inertia: 1.0,
-            mass: 50_000.0,
-            radius: 30.0,
-            speed_fraction: 0.0,
-            mode: MovementMode::Stop,
-        })
+        .spawn_ball_with_meta(
+            Ball {
+                id: container_id,
+                type_id: container_type_id,
+                position: DVec3::from_array(pos),
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 50_000.0,
+                radius: 30.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            eve_destiny::CombatState::default(),
+            eve_destiny::SlimItemMeta {
+                group_id: 340,
+                category_id: 2,
+                owner_id: char_id,
+                char_id: None,
+                corp_id: -1,
+                alliance_id: -1,
+                security_status: 0.0,
+                is_cloaked: false,
+                ..Default::default()
+            },
+        )
         .await;
     item_id
 }

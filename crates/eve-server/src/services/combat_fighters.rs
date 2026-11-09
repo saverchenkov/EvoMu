@@ -979,7 +979,28 @@ async fn handle_fighters_inner(
                 cs.max_armor_hp *= squad_size;
                 cs.structure_hp *= squad_size;
                 cs.max_structure_hp *= squad_size;
-                let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
+                let (pilot_corp_id, pilot_alliance_id) = ctx
+                    .db
+                    .get_character(char_id)
+                    .map(|ch| (ch.corporation_id, ch.alliance_id.unwrap_or(-1)))
+                    .unwrap_or((
+                        session.corporation_id.unwrap_or(-1),
+                        session.alliance_id.unwrap_or(-1),
+                    ));
+                let f_type = ctx.sde.types.get(&item.type_id);
+                let fighter_meta = eve_destiny::SlimItemMeta {
+                    group_id: f_type.map(|t| t.group_id).unwrap_or(1652),
+                    category_id: f_type.map(|t| t.category_id).unwrap_or(87),
+                    owner_id: char_id,
+                    char_id: None,
+                    corp_id: pilot_corp_id,
+                    alliance_id: pilot_alliance_id,
+                    security_status: 0.0,
+                    is_cloaked: false,
+                    name: f_type.map(|t| t.name.clone()).filter(|n| !n.is_empty()),
+                    ..Default::default()
+                };
+                let _ = sys_handle.spawn_ball_with_meta(ball, cs, fighter_meta).await;
 
                 let tube_flag = (159 + tube_idx) as i64;
                 let now_ft = ctx.now_blueos_filetime_ticks();

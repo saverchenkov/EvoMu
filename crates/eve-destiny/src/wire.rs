@@ -119,10 +119,15 @@ pub fn encode_single_ball_with_park(
             DST_BALL_FOLLOW,
             BALL_FLAG_IS_FREE | BALL_FLAG_IS_MASSIVE | BALL_FLAG_IS_INTERACTIVE,
         ),
-        MovementMode::Stop => (
-            DST_BALL_STOP,
-            BALL_FLAG_IS_FREE | BALL_FLAG_IS_MASSIVE | BALL_FLAG_IS_INTERACTIVE,
-        ),
+        MovementMode::Stop => {
+            let is_non_free = park.is_some_and(|p| p.non_free_ball_ids.contains(&ball.id));
+            let stop_flags = if is_non_free {
+                BALL_FLAG_IS_MASSIVE | BALL_FLAG_IS_INTERACTIVE
+            } else {
+                BALL_FLAG_IS_FREE | BALL_FLAG_IS_MASSIVE | BALL_FLAG_IS_INTERACTIVE
+            };
+            (DST_BALL_STOP, stop_flags)
+        }
         MovementMode::Warp { .. } => (
             DST_BALL_WARP,
             BALL_FLAG_IS_FREE | BALL_FLAG_IS_MASSIVE | BALL_FLAG_IS_INTERACTIVE,
@@ -537,7 +542,7 @@ pub fn encode_set_state_payload(park: &Ballpark, observer_ball_id: BallId) -> Py
     for ball in &visible {
         let meta = resolve_slim_item_meta(Some(park), ball);
         slims.push(encode_slim_item_with_park(Some(park), ball, &meta));
-        if !park.is_static_ball(ball.id) {
+        if !park.is_static_ball(ball.id) || park.combat_states.contains_key(&ball.id) {
             let dmg = encode_damage_state_tuple(park.combat_states.get(&ball.id), stamp);
             damage_dict.push((PyRep::Integer(ball.id), dmg));
         }

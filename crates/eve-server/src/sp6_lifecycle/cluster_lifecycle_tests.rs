@@ -404,3 +404,220 @@ async fn on_advance_secs_safe_logoff_disconnect_warp_self_destruct_and_abyssal_c
 
     tick_background_cluster(&ctx).await;
 }
+
+#[tokio::test]
+async fn restarted_structures_belt_asteroids_wrecks_drones_and_specialized_npcs_encode_canonical_flags_and_slim_meta() {
+    let ctx = test_ctx();
+    let perim_sys = 30_000_144;
+
+    // 1. Populated SDE asteroid belts + persisted Upwell structure are `MovementMode::Rigid` static balls,
+    //    keeping `has_dynamic_balls() == false` so empty systems hibernate at LOD 0.
+    let structure_id = 1_070_000_001;
+    with_mut_sp6_state(&ctx.db, |_, snap| {
+        snap.structures.insert(
+            structure_id,
+            UpwellStructureRecord {
+                structure_id,
+                type_id: 35_832,
+                owner_corp_id: 98_000_001,
+                solar_system_id: perim_sys,
+                name: "Perimeter Keep-Hibernating Astrahus".into(),
+                position: [120_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                shield_hp: 500_000.0,
+                armor_hp: 500_000.0,
+                hull_hp: 500_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+    });
+
+    let mut hib_bp = eve_destiny::Ballpark::new(perim_sys);
+    crate::system_actor::populate_system_celestials(&mut hib_bp, perim_sys, &ctx.sde);
+    let belt_asts =
+        crate::system_actor::populate_asteroid_belt_entities(&mut hib_bp, perim_sys, &ctx.sde);
+    assert!(!belt_asts.is_empty(), "Perimeter has SDE belt asteroids");
+    let _ = populate_persisted_space_objects(&mut hib_bp, perim_sys, &ctx.sde, &ctx.db);
+
+    assert_eq!(hib_bp.balls[&structure_id].mode, MovementMode::Rigid);
+    assert!(hib_bp.is_static_ball(structure_id));
+    assert!(hib_bp.combat_states.contains_key(&structure_id));
+    for ast in &belt_asts {
+        assert_eq!(hib_bp.balls[&ast.asteroid_id].mode, MovementMode::Rigid);
+        assert!(hib_bp.is_static_ball(ast.asteroid_id));
+    }
+    assert!(
+        !hib_bp.has_dynamic_balls(),
+        "empty system with celestials, belt asteroids, and restarted Upwell structures must stay at LOD 0"
+    );
+
+    // 2. Persisted wrecks and jetcans are pinned non-free (`!BALL_FLAG_IS_FREE`), whereas abandoned drones stay free.
+    let now = ctx.now_unix();
+    let wreck_id = 1_070_000_010;
+    let jetcan_id = 1_070_000_011;
+    let drone_id = 1_070_000_012;
+    with_mut_sp6_state(&ctx.db, |st, snap| {
+        for (iid, tid) in [(wreck_id, 26_557), (jetcan_id, 23), (drone_id, 2_454)] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: 90_000_001,
+                    location_id: perim_sys as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    dynamic_attributes: HashMap::new(),
+                    source_mutaplasmid_id: None,
+                    insured_payout_isk: 0.0,
+                    is_blueprint_copy: false,
+                    blueprint_runs_remaining: None,
+                },
+            );
+            snap.item_positions.insert(iid, [2_000.0, 0.0, 0.0]);
+        }
+        st.space_object_meta.entry(wreck_id).or_default().created_unix = Some(now);
+        st.space_object_meta.entry(jetcan_id).or_default().created_unix = Some(now);
+    });
+    let _ = populate_persisted_space_objects(&mut hib_bp, perim_sys, &ctx.sde, &ctx.db);
+    assert!(!hib_bp.is_ball_free(wreck_id));
+    assert!(!hib_bp.is_ball_free(jetcan_id));
+    assert!(hib_bp.is_ball_free(drone_id));
+
+    let raw = eve_destiny::wire::encode_add_balls_with_park(
+        1,
+        1,
+        &[&hib_bp.balls[&wreck_id], &hib_bp.balls[&jetcan_id], &hib_bp.balls[&drone_id]],
+        Some(&hib_bp),
+    );
+    let (_, _, dec) = eve_destiny::wire_decode::decode_add_balls(&raw).expect("decode persisted balls");
+    assert_eq!(dec[0].flags & eve_destiny::wire::BALL_FLAG_IS_FREE, 0);
+    assert_eq!(dec[1].flags & eve_destiny::wire::BALL_FLAG_IS_FREE, 0);
+    assert_ne!(dec[2].flags & eve_destiny::wire::BALL_FLAG_IS_FREE, 0);
+
+    // 3. Player launched drone (`DroneController::launch_drones`) encodes `categoryID == 18`, SDE `groupID`,
+    //    `ownerID == char_id`, and `corpID == pilot_corp_id`.
+    let char_id = 90_000_001;
+    let pilot_corp = ctx.db.get_character(char_id).unwrap().corporation_id;
+    let ship_id = 1_070_000_050;
+    let bay_drone_id = 1_070_000_051;
+    let hobgoblin_tid = 2_454u32;
+    let expected_drone_grp = ctx.sde.types.get(&hobgoblin_tid).map(|t| t.group_id).unwrap_or(100);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 645, // Dominix (ample drone bandwidth)
+                owner_id: char_id,
+                location_id: perim_sys as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        snap.items.insert(
+            bay_drone_id,
+            InventoryItemRecord {
+                item_id: bay_drone_id,
+                type_id: hobgoblin_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::DroneBay,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+    let sys_h = ctx.systems.get_or_spawn(perim_sys);
+    sys_h
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 645,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 140.0,
+            inertia: 5.0,
+            mass: 97_000_000.0,
+            radius: 300.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+
+    let mut dc = crate::combat::drones_salvage_tractor::DroneController::new();
+    let launched = dc
+        .launch_drones(&ctx, perim_sys, char_id, ship_id, &[bay_drone_id])
+        .await
+        .expect("launch drone");
+    let launched_bid = launched[0];
+    let drone_slim = sys_h
+        .get_ball_slim_item(launched_bid)
+        .await
+        .unwrap()
+        .expect("drone slim item");
+    assert_eq!(drone_slim.dict_get("categoryID"), Some(&eve_proto::PyRep::Integer(18)));
+    assert_eq!(
+        drone_slim.dict_get("groupID"),
+        Some(&eve_proto::PyRep::Integer(expected_drone_grp as i64))
+    );
+    assert_eq!(drone_slim.dict_get("ownerID"), Some(&eve_proto::PyRep::Integer(char_id)));
+    assert_eq!(drone_slim.dict_get("corpID"), Some(&eve_proto::PyRep::Integer(pilot_corp)));
+
+    // 4. Specialized NPC (`spawn_specialized_npc_entity`) encodes `categoryID == 11`, SDE `groupID`,
+    //    faction `ownerID`, and V24 `hostile_response_threshold` / `friendly_response_threshold`.
+    let npc_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.category_id == 11)
+        .map(|t| t.type_id)
+        .unwrap_or(10_029);
+    let expected_npc_grp = ctx.sde.types.get(&npc_tid).map(|t| t.group_id).unwrap_or(546);
+    let npc_bid = crate::services::combat_npc_ai::spawn_specialized_npc_entity(
+        &ctx,
+        perim_sys,
+        npc_tid,
+        "",
+        1,
+        DVec3::new(15_000.0, 0.0, 0.0),
+    )
+    .await;
+    let npc_slim = sys_h
+        .get_ball_slim_item(npc_bid)
+        .await
+        .unwrap()
+        .expect("npc slim item");
+    assert_eq!(npc_slim.dict_get("categoryID"), Some(&eve_proto::PyRep::Integer(11)));
+    assert_eq!(
+        npc_slim.dict_get("groupID"),
+        Some(&eve_proto::PyRep::Integer(expected_npc_grp as i64))
+    );
+    let npc_owner = npc_slim
+        .dict_get("ownerID")
+        .and_then(|r| r.as_i64())
+        .unwrap_or(0);
+    assert!(npc_owner >= 500_000, "NPC ownerID should be a valid NPC faction, got {npc_owner}");
+    assert!(npc_slim.dict_get("hostile_response_threshold").is_some());
+    assert!(npc_slim.dict_get("friendly_response_threshold").is_some());
+}

@@ -662,3 +662,135 @@ fn slim_item_dict_always_emits_non_empty_name_for_capsules_and_objects() {
         "non-zero player owner_id must be preserved verbatim"
     );
 }
+
+#[test]
+fn non_free_stop_and_rigid_static_balls_encode_flags_omit_data_sector_and_resist_bumping() {
+    let mut park = Ballpark::new(30_000_142);
+
+    // 1. Static Rigid asteroid: system-wide global flag, no MassSector or DataSector (39 bytes),
+    //    and keeps `has_dynamic_balls() == false` for LOD 0 hibernation.
+    let ast_id = 750_000_001;
+    let ast_pos = DVec3::new(300.0, 0.0, 0.0);
+    park.add_static_ball_with_meta(
+        Ball {
+            id: ast_id,
+            type_id: 1230,
+            position: ast_pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 0.0,
+            mass: 5.0e9,
+            radius: 250.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Rigid,
+        },
+        SlimItemMeta {
+            group_id: 462,
+            category_id: 25,
+            owner_id: 1,
+            name: Some("Veldspar".into()),
+            ..Default::default()
+        },
+    );
+    assert!(!park.has_dynamic_balls());
+    assert!(!park.is_ball_free(ast_id));
+
+    // 2. Stationary pinned wreck (`mark_ball_non_free` before `add_ball`): `DST_BALL_STOP` with
+    //    `BALL_FLAG_IS_MASSIVE | BALL_FLAG_IS_INTERACTIVE` (no `BALL_FLAG_IS_FREE`), 64 bytes (no 36-byte DataSector).
+    let wreck_id = 880_001;
+    let wreck_pos = DVec3::new(0.0, 300.0, 0.0);
+    park.mark_ball_non_free(wreck_id, false);
+    park.add_ball(Ball {
+        id: wreck_id,
+        type_id: 26_557,
+        position: wreck_pos,
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 10_000.0,
+        radius: 50.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    });
+    assert!(park.has_dynamic_balls());
+    assert!(!park.is_ball_free(wreck_id));
+
+    let ast_bytes = encode_add_balls_with_park(1, 7, &[&park.balls[&ast_id]], Some(&park));
+    assert_eq!(ast_bytes.len(), 5 + 39);
+    let (_, _, dec_ast) = decode_add_balls(&ast_bytes).expect("decode rigid asteroid");
+    assert_eq!(dec_ast[0].mode, DST_BALL_RIGID);
+    assert_eq!(dec_ast[0].flags, BALL_FLAG_IS_GLOBAL);
+    assert_eq!(dec_ast[0].mass, None);
+    assert_eq!(dec_ast[0].max_velocity, None);
+
+    let wreck_bytes = encode_add_balls_with_park(1, 7, &[&park.balls[&wreck_id]], Some(&park));
+    assert_eq!(wreck_bytes.len(), 5 + 64);
+    let (_, _, dec_wreck) = decode_add_balls(&wreck_bytes).expect("decode non-free wreck");
+    assert_eq!(dec_wreck[0].mode, DST_BALL_STOP);
+    assert_eq!(
+        dec_wreck[0].flags,
+        BALL_FLAG_IS_MASSIVE | BALL_FLAG_IS_INTERACTIVE
+    );
+    assert_eq!(dec_wreck[0].flags & BALL_FLAG_IS_FREE, 0);
+    assert_eq!(dec_wreck[0].max_velocity, None);
+    assert_eq!(dec_wreck[0].velocity, None);
+
+    // 3. Re-enabling `set_ball_free(wreck_id, true)` restores `BALL_FLAG_IS_FREE` and the 36-byte DataSector,
+    //    and `set_ball_free(wreck_id, false)` pins it again.
+    assert!(park.set_ball_free(wreck_id, true));
+    assert!(park.is_ball_free(wreck_id));
+    let free_bytes = encode_add_balls_with_park(1, 7, &[&park.balls[&wreck_id]], Some(&park));
+    assert_eq!(free_bytes.len(), 5 + 100);
+    assert!(park.set_ball_free(wreck_id, false));
+    assert!(!park.is_ball_free(wreck_id));
+
+    // 4. Ship ramming the asteroid or the pinned wreck bounces off without displacing either object.
+    let rammer_ast = 880_010;
+    park.add_ball(Ball {
+        id: rammer_ast,
+        type_id: 587,
+        position: DVec3::new(10.0, 0.0, 0.0),
+        velocity: DVec3::new(400.0, 0.0, 0.0),
+        max_velocity: 400.0,
+        inertia: 2.0,
+        mass: 50_000_000.0,
+        radius: 60.0,
+        speed_fraction: 1.0,
+        mode: MovementMode::GotoDirection {
+            direction: DVec3::X,
+        },
+    });
+    let rammer_wreck = 880_011;
+    park.add_ball(Ball {
+        id: rammer_wreck,
+        type_id: 587,
+        position: DVec3::new(0.0, 210.0, 0.0),
+        velocity: DVec3::new(0.0, 400.0, 0.0),
+        max_velocity: 400.0,
+        inertia: 2.0,
+        mass: 50_000_000.0,
+        radius: 60.0,
+        speed_fraction: 1.0,
+        mode: MovementMode::GotoDirection {
+            direction: DVec3::Y,
+        },
+    });
+    park.step(1.0);
+    assert_eq!(park.balls[&ast_id].position, ast_pos);
+    assert_eq!(park.balls[&ast_id].velocity, DVec3::ZERO);
+    assert_eq!(park.balls[&wreck_id].position, wreck_pos);
+    assert_eq!(park.balls[&wreck_id].velocity, DVec3::ZERO);
+
+    // 5. Tractor beam (`set_ball_position`) still repositions a pinned non-free wreck cleanly,
+    //    and removing the static asteroid notifies grid observers via `RemoveBall`.
+    let tractored_pos = DVec3::new(0.0, 150.0, 0.0);
+    assert!(park.set_ball_position(wreck_id, tractored_pos));
+    assert_eq!(park.balls[&wreck_id].position, tractored_pos);
+
+    park.drain_all_observer_events();
+    assert!(park.remove_ball(ast_id).is_some());
+    let obs_evs = park.drain_observer_events(rammer_ast);
+    assert!(obs_evs
+        .iter()
+        .any(|e| matches!(e, DestinyEvent::RemoveBall { ball_id } if *ball_id == ast_id)));
+}

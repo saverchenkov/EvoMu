@@ -1972,7 +1972,7 @@ async fn test_mn02_asteroid_belts_as_balls_highsec_and_nullsec() {
             .await
             .unwrap()
             .expect("Perimeter asteroid ball in ballpark");
-        assert_eq!(ast_ball.mode, MovementMode::Stop);
+        assert_eq!(ast_ball.mode, MovementMode::Rigid);
         assert!(ast_ball.radius >= 60.0);
         perim_spawned.insert(ast_ball.type_id);
     }

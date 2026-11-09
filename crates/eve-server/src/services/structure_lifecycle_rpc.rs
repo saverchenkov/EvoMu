@@ -839,11 +839,11 @@ pub async fn ensure_structure_ball_in_space(ctx: &ServerContext, sys_id: u32, st
         position: DVec3::from_array(st.position),
         velocity: DVec3::ZERO,
         max_velocity: 0.0,
-        inertia: 1.0,
+        inertia: 0.0,
         mass,
         radius,
         speed_fraction: 0.0,
-        mode: eve_destiny::MovementMode::Stop,
+        mode: eve_destiny::MovementMode::Rigid,
     };
     let mut cs = eve_destiny::CombatState::new();
     cs.shield_hp = st.shield_hp.max(1.0);

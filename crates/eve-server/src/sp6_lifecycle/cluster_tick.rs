@@ -76,8 +76,19 @@ pub fn populate_persisted_space_objects(
                     })
                     .unwrap_or((1657, 65, 10_000.0, 100_000_000_000.0));
                 let pos = DVec3::from_array(st.position);
-                ballpark.set_ball_slim_meta(
-                    st.structure_id,
+                ballpark.add_static_ball_with_meta(
+                    Ball {
+                        id: st.structure_id,
+                        type_id: st.type_id,
+                        position: pos,
+                        velocity: DVec3::ZERO,
+                        max_velocity: 0.0,
+                        inertia: 0.0,
+                        mass,
+                        radius,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Rigid,
+                    },
                     SlimItemMeta {
                         group_id,
                         category_id,
@@ -86,21 +97,11 @@ pub fn populate_persisted_space_objects(
                         corp_id: st.owner_corp_id,
                         alliance_id: -1,
                         security_status: 0.0,
-                        is_cloaked: false, ..Default::default()
+                        is_cloaked: false,
+                        name: (!st.name.is_empty()).then(|| st.name.clone()),
+                        ..Default::default()
                     },
                 );
-                ballpark.add_ball(Ball {
-                    id: st.structure_id,
-                    type_id: st.type_id,
-                    position: pos,
-                    velocity: DVec3::ZERO,
-                    max_velocity: 0.0,
-                    inertia: 1.0,
-                    mass,
-                    radius,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                });
                 let sde_cs = default_combat_state_for_type(sde, st.type_id);
                 let max_sh = sde_cs.max_shield_hp.max(st.shield_hp).max(1.0);
                 let max_ar = sde_cs.max_armor_hp.max(st.armor_hp).max(1.0);
@@ -269,6 +270,9 @@ pub fn populate_persisted_space_objects(
                     is_cloaked: false, ..Default::default()
                 },
             );
+            if !is_drone {
+                ballpark.mark_ball_non_free(ball_id, false);
+            }
             ballpark.add_ball(Ball {
                 id: ball_id,
                 type_id: item.type_id,

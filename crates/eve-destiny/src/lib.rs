@@ -1316,6 +1316,8 @@ pub struct Ballpark {
     #[serde(default)]
     pub static_ball_ids: BTreeSet<BallId>,
     #[serde(default)]
+    pub non_free_ball_ids: BTreeSet<BallId>,
+    #[serde(default)]
     pub ball_group_ids: BTreeMap<BallId, u32>,
     #[serde(default)]
     pub ball_slim_meta: BTreeMap<BallId, SlimItemMeta>,
@@ -1556,6 +1558,32 @@ impl Ballpark {
         true
     }
 
+    /// Returns `true` if `ball_id` has `BALL_FLAG_IS_FREE` (mobile sub-warp/warp ball) rather than
+    /// being a `Rigid` / `Field` static ball or a stationary pinned ball (`non_free_ball_ids`).
+    pub fn is_ball_free(&self, ball_id: BallId) -> bool {
+        if self.non_free_ball_ids.contains(&ball_id) || self.is_static_ball(ball_id) {
+            return false;
+        }
+        !self
+            .balls
+            .get(&ball_id)
+            .is_some_and(|b| matches!(b.mode, MovementMode::Rigid | MovementMode::Field))
+    }
+
+    /// Sets or clears `ball_id`'s pinned (`!BALL_FLAG_IS_FREE`) flag without emitting `SetBallFree`
+    /// (for pre-spawn pinning so initial `AddBalls2` / `SetState` omits `BALL_FLAG_IS_FREE` directly).
+    pub fn mark_ball_non_free(&mut self, ball_id: BallId, is_free: bool) {
+        if is_free {
+            self.non_free_ball_ids.remove(&ball_id);
+        } else {
+            self.non_free_ball_ids.insert(ball_id);
+            if let Some(ball) = self.balls.get_mut(&ball_id) {
+                ball.velocity = DVec3::ZERO;
+                ball.speed_fraction = 0.0;
+            }
+        }
+    }
+
     /// Updates `ball_id`'s free-movement flag and emits [`DestinyEvent::SetBallFree`] (`destiny:SetBallFree`).
     pub fn set_ball_free(&mut self, ball_id: BallId, is_free: bool) -> bool {
         let Some(ball) = self.balls.get_mut(&ball_id) else {
@@ -1565,6 +1593,9 @@ impl Ballpark {
             ball.velocity = DVec3::ZERO;
             ball.speed_fraction = 0.0;
             ball.mode = MovementMode::Stop;
+            self.non_free_ball_ids.insert(ball_id);
+        } else {
+            self.non_free_ball_ids.remove(&ball_id);
         }
         self.emit_event(
             Some(ball_id),

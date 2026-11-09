@@ -434,6 +434,9 @@ impl SystemRegistry {
                                 } else {
                                     ensure_default_slim_meta(&mut ballpark, &ball, sde_opt);
                                 }
+                                if should_pin_stationary_ball(&ball, ballpark.ball_slim_meta.get(&ball_id)) {
+                                    ballpark.mark_ball_non_free(ball_id, false);
+                                }
                                 ballpark.add_ball(ball);
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 let _ = reply.send(Ok(ballpark.current_tick));
@@ -530,13 +533,21 @@ impl SystemRegistry {
                                     let _ = reply.send(Ok(ball_id));
                                     continue;
                                 }
-                                let (group_id, category_id) = sde_opt
+                                let mut ast_ball = ball;
+                                ast_ball.mode = eve_destiny::MovementMode::Rigid;
+                                let (group_id, category_id, name) = sde_opt
                                     .as_ref()
-                                    .and_then(|s| s.types.get(&ball.type_id))
-                                    .map(|t| (t.group_id, t.category_id))
-                                    .unwrap_or((25, 25));
-                                ballpark.set_ball_slim_meta(
-                                    ball_id,
+                                    .and_then(|s| s.types.get(&ast_ball.type_id))
+                                    .map(|t| {
+                                        (
+                                            t.group_id,
+                                            t.category_id,
+                                            (!t.name.is_empty()).then(|| t.name.clone()),
+                                        )
+                                    })
+                                    .unwrap_or((25, 25, None));
+                                ballpark.add_static_ball_with_meta(
+                                    ast_ball.clone(),
                                     SlimItemMeta {
                                         group_id,
                                         category_id,
@@ -545,25 +556,32 @@ impl SystemRegistry {
                                         corp_id: -1,
                                         alliance_id: -1,
                                         security_status: 0.0,
-                                        is_cloaked: false, ..Default::default()
+                                        is_cloaked: false,
+                                        name,
+                                        ..Default::default()
                                     },
                                 );
-                                ballpark.add_ball(ball.clone());
+                                ballpark.queue_event_for_all_grid_observers(
+                                    Some(ball_id),
+                                    &DestinyEvent::AddBalls2 {
+                                        balls: vec![ast_ball.clone()],
+                                    },
+                                );
                                 if let Some(db) = &db_opt {
                                     if db.get_asteroid(ball_id).is_none() {
                                         let _ = db.spawn_asteroid(eve_db::AsteroidRecord {
                                             asteroid_id: ball_id,
                                             belt_id: asteroid.belt_id,
-                                            type_id: ball.type_id,
+                                            type_id: ast_ball.type_id,
                                             solar_system_id,
-                                            position: (ball.position.x, ball.position.y, ball.position.z),
+                                            position: (ast_ball.position.x, ast_ball.position.y, ast_ball.position.z),
                                             quantity: i64::try_from(asteroid.remaining_units).unwrap_or(i64::MAX),
                                             initial_quantity: i64::try_from(asteroid.initial_units).unwrap_or(i64::MAX),
-                                            radius: ball.radius,
+                                            radius: ast_ball.radius,
                                         });
                                     }
                                 }
-                                asteroid_templates.insert(ball_id, (asteroid.clone(), ball));
+                                asteroid_templates.insert(ball_id, (asteroid.clone(), ast_ball));
                                 asteroids.insert(ball_id, asteroid);
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 let _ = reply.send(Ok(ball_id));
@@ -612,7 +630,7 @@ impl SystemRegistry {
                                 let mut populated = if !asteroid_templates.contains_key(&first_sde_belt_ast_id) {
                                     if let Some(sde) = &sde_opt {
                                         let spawned = populate_asteroid_belt_entities(&mut ballpark, solar_system_id, sde);
-                                        reconcile_spawned_belt_asteroids(
+                                        let reconciled = reconcile_spawned_belt_asteroids(
                                             &mut ballpark,
                                             solar_system_id,
                                             spawned,
@@ -621,7 +639,21 @@ impl SystemRegistry {
                                             &db_opt,
                                             belt_interval_atomic.load(std::sync::atomic::Ordering::Relaxed),
                                             downtime_utc_atomic.load(std::sync::atomic::Ordering::Relaxed),
-                                        )
+                                        );
+                                        let newly_added_balls: Vec<Ball> = reconciled
+                                            .iter()
+                                            .filter(|a| !a.depleted)
+                                            .filter_map(|a| ballpark.balls.get(&a.asteroid_id).cloned())
+                                            .collect();
+                                        if !newly_added_balls.is_empty() {
+                                            ballpark.queue_event_for_all_grid_observers(
+                                                None,
+                                                &DestinyEvent::AddBalls2 {
+                                                    balls: newly_added_balls,
+                                                },
+                                            );
+                                        }
+                                        reconciled
                                     } else {
                                         Vec::new()
                                     }

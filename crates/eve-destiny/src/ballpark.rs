@@ -64,6 +64,7 @@ impl Ballpark {
             combat_states: BTreeMap::new(),
             pending_events: Vec::new(),
             static_ball_ids: BTreeSet::new(),
+            non_free_ball_ids: BTreeSet::new(),
             ball_group_ids: BTreeMap::new(),
             ball_slim_meta: BTreeMap::new(),
             grids: BTreeMap::new(),
@@ -371,6 +372,20 @@ impl Ballpark {
         }
     }
 
+    /// Queues `event` for every active observer across all currently populated [`GridBubble`]s
+    /// (used when system-wide `Rigid` static balls such as belt asteroids or structures are
+    /// dynamically spawned, respawned, or removed while pilots are in space).
+    pub fn queue_event_for_all_grid_observers(
+        &mut self,
+        exclude_ball_id: Option<BallId>,
+        event: &DestinyEvent,
+    ) {
+        let grid_ids: Vec<u64> = self.grids.keys().copied().collect();
+        for gid in grid_ids {
+            self.queue_event_for_grid_observers(gid, exclude_ball_id, event);
+        }
+    }
+
     /// Inserts a new dynamic `Ball` into the solar system, assigning it to a shared [`GridBubble`]
     /// and notifying observers in that grid via `AddBalls2`.
     pub fn add_ball(&mut self, ball: Ball) -> bool {
@@ -434,7 +449,9 @@ impl Ballpark {
         let removed = self.balls.remove(&ball_id)?;
         self.warp_bubble_mgr.remove_bubble(ball_id);
         let old_grid_id = self.ball_grid_ids.remove(&ball_id);
-        self.static_ball_ids.remove(&ball_id);
+        let was_static = self.static_ball_ids.remove(&ball_id)
+            || matches!(removed.mode, MovementMode::Rigid);
+        self.non_free_ball_ids.remove(&ball_id);
         self.ball_group_ids.remove(&ball_id);
         self.ball_slim_meta.remove(&ball_id);
         self.combat_states.remove(&ball_id);
@@ -461,6 +478,11 @@ impl Ballpark {
                 &DestinyEvent::RemoveBall { ball_id },
             );
             self.contract_or_delete_grid(gid);
+        } else if was_static {
+            self.queue_event_for_all_grid_observers(
+                Some(ball_id),
+                &DestinyEvent::RemoveBall { ball_id },
+            );
         }
         Some(removed)
     }

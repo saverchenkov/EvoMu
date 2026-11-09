@@ -398,3 +398,144 @@ fn sync_player_slim_items_updates_corp_alliance_and_security_status() {
     assert_eq!(updated.corp_id, corp_id);
     assert!((updated.security_status - sec).abs() < 1e-6);
 }
+
+#[test]
+fn asteroid_depletion_and_downtime_restore_preserve_lod0_hibernation_and_notify_observers() {
+    let sde = make_test_belt_sde();
+    let sde_opt = Some(sde.clone());
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    let db_opt = Some(db);
+    let rng = crate::rng::MechanicRng::seeded(11);
+    let interval_atomic = AtomicU64::new(86_400);
+    let downtime_atomic = AtomicU64::new(DEFAULT_DOWNTIME_UTC_SECS_OF_DAY);
+
+    let mut bp = Ballpark::new(30_009_999);
+    populate_system_celestials(&mut bp, 30_009_999, &sde);
+    assert!(!bp.has_dynamic_balls());
+
+    let mut asteroids = HashMap::new();
+    let mut templates = HashMap::new();
+    let ast_id = 750_999_001i64;
+    let belt_id = 40_999_050i64;
+    let ast = AsteroidState {
+        asteroid_id: ast_id,
+        belt_id,
+        type_id: 1230,
+        initial_units: 50,
+        remaining_units: 50,
+        unit_volume: 0.1,
+        depleted: false,
+        respawn_at_tick: None,
+    };
+    let ast_ball = Ball {
+        id: ast_id,
+        type_id: 1230,
+        position: DVec3::new(5_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 0.0,
+        mass: 1.0e8,
+        radius: 200.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Rigid,
+    };
+    bp.add_static_ball_with_meta(
+        ast_ball.clone(),
+        SlimItemMeta {
+            group_id: 462,
+            category_id: 25,
+            owner_id: 1,
+            name: Some("Veldspar".into()),
+            ..Default::default()
+        },
+    );
+    asteroids.insert(ast_id, ast.clone());
+    templates.insert(ast_id, (ast, ast_ball));
+
+    // Populated static asteroid keeps `has_dynamic_balls() == false` so empty systems hibernate at LOD 0.
+    assert!(!bp.has_dynamic_balls());
+    assert!(bp.is_static_ball(ast_id));
+
+    // Spawn a live miner ship on grid; depleting the static asteroid must emit `RemoveBall` to the miner,
+    // and downtime belt restoration must emit `AddBalls2` with `MovementMode::Rigid`.
+    let miner_id = 91_001i64;
+    bp.add_ball(Ball {
+        id: miner_id,
+        type_id: 32_880,
+        position: DVec3::new(4_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 180.0,
+        inertia: 3.0,
+        mass: 4_000_000.0,
+        radius: 80.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    });
+    assert!(bp.has_dynamic_balls());
+    bp.drain_all_observer_events();
+
+    let res = handle_mine_asteroid(
+        30_009_999,
+        ast_id,
+        50,
+        0.0,
+        true,
+        &mut bp,
+        &mut asteroids,
+        &rng,
+        &db_opt,
+        &interval_atomic,
+        &downtime_atomic,
+    )
+    .expect("deplete asteroid");
+    assert!(res.depleted);
+    assert!(!bp.balls.contains_key(&ast_id));
+    let deplete_evs = bp.drain_observer_events(miner_id);
+    assert!(deplete_evs
+        .iter()
+        .any(|e| matches!(e, DestinyEvent::RemoveBall { ball_id } if *ball_id == ast_id)));
+
+    let restored = respawn_depleted_belts_on_downtime_inner(
+        &mut bp,
+        &mut asteroids,
+        &templates,
+        &sde_opt,
+        &db_opt,
+    );
+    assert_eq!(restored, 1);
+    assert_eq!(bp.balls[&ast_id].mode, MovementMode::Rigid);
+    assert!(bp.is_static_ball(ast_id));
+    let respawn_evs = bp.drain_observer_events(miner_id);
+    assert!(respawn_evs.iter().any(|e| {
+        matches!(
+            e,
+            DestinyEvent::AddBalls2 { balls }
+                if balls.iter().any(|b| b.id == ast_id && b.mode == MovementMode::Rigid)
+        )
+    }));
+
+    // Removing the miner returns the system to `has_dynamic_balls() == false` (LOD 0 hibernation).
+    bp.remove_ball(miner_id);
+    assert!(!bp.has_dynamic_balls());
+
+    // Stationary helper pins wrecks/jetcans/deployables while leaving mobile ships/drones free.
+    let wreck_ball = Ball {
+        id: 92_001,
+        type_id: 26_557,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 10_000.0,
+        radius: 50.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    assert!(should_pin_stationary_ball(&wreck_ball, None));
+    let ship_ball = Ball {
+        max_velocity: 300.0,
+        type_id: 587,
+        ..wreck_ball.clone()
+    };
+    assert!(!should_pin_stationary_ball(&ship_ball, None));
+}

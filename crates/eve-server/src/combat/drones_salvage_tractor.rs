@@ -212,18 +212,33 @@ pub async fn attempt_salvage_wreck(
                 false,
             );
             let _ = sys_handle
-                .spawn_ball(Ball {
-                    id: can_id,
-                    type_id: 23,
-                    position: wreck_ball.position,
-                    velocity: DVec3::ZERO,
-                    max_velocity: 0.0,
-                    inertia: 1.0,
-                    mass: 1_000.0,
-                    radius: 20.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                })
+                .spawn_ball_with_meta(
+                    Ball {
+                        id: can_id,
+                        type_id: 23,
+                        position: wreck_ball.position,
+                        velocity: DVec3::ZERO,
+                        max_velocity: 0.0,
+                        inertia: 1.0,
+                        mass: 1_000.0,
+                        radius: 20.0,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Stop,
+                    },
+                    eve_destiny::CombatState::default(),
+                    eve_destiny::SlimItemMeta {
+                        group_id: 12,
+                        category_id: 2,
+                        owner_id: wreck_owner,
+                        char_id: None,
+                        corp_id: -1,
+                        alliance_id: -1,
+                        security_status: 0.0,
+                        is_cloaked: false,
+                        name: ctx.sde.types.get(&23).map(|t| t.name.clone()),
+                        ..Default::default()
+                    },
+                )
                 .await;
         }
 
@@ -600,18 +615,33 @@ pub async fn execute_wreck_salvage_cycle(
             false,
         );
         let _ = sys_handle
-            .spawn_ball(Ball {
-                id: can_id,
-                type_id: 23,
-                position: DVec3::from_array(wreck_pos),
-                velocity: DVec3::ZERO,
-                max_velocity: 0.0,
-                inertia: 1.0,
-                mass: 1_000.0,
-                radius: 20.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            })
+            .spawn_ball_with_meta(
+                Ball {
+                    id: can_id,
+                    type_id: 23,
+                    position: DVec3::from_array(wreck_pos),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 1.0,
+                    mass: 1_000.0,
+                    radius: 20.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                eve_destiny::CombatState::default(),
+                eve_destiny::SlimItemMeta {
+                    group_id: 12,
+                    category_id: 2,
+                    owner_id: wreck_owner,
+                    char_id: None,
+                    corp_id: -1,
+                    alliance_id: -1,
+                    security_status: 0.0,
+                    is_cloaked: false,
+                    name: ctx.sde.types.get(&23).map(|t| t.name.clone()),
+                    ..Default::default()
+                },
+            )
             .await;
     }
     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
@@ -908,8 +938,26 @@ impl DroneController {
                 mode: MovementMode::Stop,
             };
 
+            let (pilot_corp_id, pilot_alliance_id) = ctx
+                .db
+                .get_character(char_id)
+                .map(|ch| (ch.corporation_id, ch.alliance_id.unwrap_or(-1)))
+                .unwrap_or((-1, -1));
+            let sde_t = ctx.sde.types.get(&type_id);
+            let drone_meta = eve_destiny::SlimItemMeta {
+                group_id: sde_t.map(|t| t.group_id).unwrap_or(100),
+                category_id: sde_t.map(|t| t.category_id).unwrap_or(18),
+                owner_id: char_id,
+                char_id: None,
+                corp_id: pilot_corp_id,
+                alliance_id: pilot_alliance_id,
+                security_status: 0.0,
+                is_cloaked: false,
+                name: sde_t.map(|t| t.name.clone()).filter(|n| !n.is_empty()),
+                ..Default::default()
+            };
             let _ = sys_handle
-                .spawn_ball_with_combat(ball, ctx.build_type_combat_state(type_id))
+                .spawn_ball_with_meta(ball, ctx.build_type_combat_state(type_id), drone_meta)
                 .await;
 
             let active = ActiveDrone {

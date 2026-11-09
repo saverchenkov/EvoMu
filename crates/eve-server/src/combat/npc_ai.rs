@@ -289,9 +289,29 @@ impl NpcSpawnManager {
             };
 
             let combat_state = ctx.build_type_combat_state(npc_type_id);
-            let _ = sys_handle.spawn_ball_with_combat(ball, combat_state).await;
-
             let faction_id = spawn_group.faction_id;
+            let fac_owner = if faction_id > 0 {
+                faction_id as i64
+            } else {
+                500_001
+            };
+            let sde_t = ctx.sde.types.get(&npc_type_id);
+            let npc_meta = eve_destiny::SlimItemMeta {
+                group_id: sde_t.map(|t| t.group_id).unwrap_or(546),
+                category_id: sde_t.map(|t| t.category_id).unwrap_or(11),
+                owner_id: fac_owner,
+                char_id: None,
+                corp_id: fac_owner,
+                alliance_id: -1,
+                security_status: -1.0,
+                is_cloaked: false,
+                name: sde_t.map(|t| t.name.clone()).filter(|n| !n.is_empty()),
+                ..Default::default()
+            };
+            let _ = sys_handle
+                .spawn_ball_with_meta(ball, combat_state, npc_meta)
+                .await;
+
             let damage_vector = faction_damage_vector(faction_id, base_dps);
 
             let entity = NpcCombatEntity {

@@ -324,6 +324,7 @@ impl Ballpark {
                 matches!(group_id, 6 | 7 | 8 | 15 | 1404..=1410 | 1657 | 2016 | 2017)
                     || slim_cat == 65;
             let is_static = self.is_static_ball(id)
+                || self.non_free_ball_ids.contains(&id)
                 || matches!(ball.mode, MovementMode::Miniball)
                 || is_station_or_struct
                 || matches!(slim_cat, 2 | 3 | 22 | 23 | 40 | 46 | 65);

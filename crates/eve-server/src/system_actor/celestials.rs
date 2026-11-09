@@ -535,9 +535,43 @@ impl SystemHandle {
         let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
         let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
         let ball_id = ball.id;
-        super::ensure_default_slim_meta(&mut bp, &ball, &st.sde_opt);
-        let _ = bp.add_ball(ball.clone());
-        st.asteroid_templates.insert(ball_id, (asteroid.clone(), ball));
+        let mut ast_ball = ball;
+        ast_ball.mode = eve_destiny::MovementMode::Rigid;
+        let (group_id, category_id, name) = st
+            .sde_opt
+            .as_ref()
+            .and_then(|s| s.types.get(&ast_ball.type_id))
+            .map(|t| {
+                (
+                    t.group_id,
+                    t.category_id,
+                    (!t.name.is_empty()).then(|| t.name.clone()),
+                )
+            })
+            .unwrap_or((25, 25, None));
+        let _ = bp.add_static_ball_with_meta(
+            ast_ball.clone(),
+            SlimItemMeta {
+                group_id,
+                category_id,
+                owner_id: 1,
+                char_id: None,
+                corp_id: -1,
+                alliance_id: -1,
+                security_status: 0.0,
+                is_cloaked: false,
+                name,
+                ..Default::default()
+            },
+        );
+        bp.queue_event_for_all_grid_observers(
+            Some(ball_id),
+            &eve_destiny::DestinyEvent::AddBalls2 {
+                balls: vec![ast_ball.clone()],
+            },
+        );
+        st.asteroid_templates
+            .insert(ball_id, (asteroid.clone(), ast_ball));
         st.asteroids.insert(ball_id, asteroid);
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
     }
@@ -577,9 +611,23 @@ impl SystemHandle {
         if bp.balls.contains_key(&ball_id) {
             let _ = bp.remove_ball(ball_id);
         }
-        bp.set_ball_slim_meta(ball_id, slim_meta);
-        bp.add_ball(ball);
-        bp.combat_states.insert(ball_id, combat_state);
+        if matches!(ball.mode, eve_destiny::MovementMode::Rigid) {
+            bp.add_static_ball_with_meta(ball.clone(), slim_meta);
+            bp.combat_states.insert(ball_id, combat_state);
+            bp.pending_events
+                .push(eve_destiny::DestinyEvent::AddBall { ball: ball.clone() });
+            bp.queue_event_for_all_grid_observers(
+                Some(ball_id),
+                &eve_destiny::DestinyEvent::AddBalls2 { balls: vec![ball] },
+            );
+        } else {
+            if super::should_pin_stationary_ball(&ball, Some(&slim_meta)) {
+                bp.mark_ball_non_free(ball_id, false);
+            }
+            bp.set_ball_slim_meta(ball_id, slim_meta);
+            bp.add_ball(ball);
+            bp.combat_states.insert(ball_id, combat_state);
+        }
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
     }
 
@@ -589,10 +637,25 @@ impl SystemHandle {
     }
 
     pub fn try_spawn_ball_with_combat(&self, ball: Ball, combat_state: CombatState) {
+        let sde_opt = self
+            .actor_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .sde_opt
+            .clone();
         let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
         let ball_id = ball.id;
+        let existing_meta = bp.ball_slim_meta.get(&ball_id).cloned();
         if bp.balls.contains_key(&ball_id) {
             let _ = bp.remove_ball(ball_id);
+        }
+        if let Some(meta) = existing_meta {
+            bp.set_ball_slim_meta(ball_id, meta);
+        } else {
+            super::ensure_default_slim_meta(&mut bp, &ball, &sde_opt);
+        }
+        if super::should_pin_stationary_ball(&ball, bp.ball_slim_meta.get(&ball_id)) {
+            bp.mark_ball_non_free(ball_id, false);
         }
         bp.add_ball(ball);
         bp.combat_states.insert(ball_id, combat_state);

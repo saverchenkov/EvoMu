@@ -1323,7 +1323,7 @@ pub async fn handle(
                     combat_state.structure_hp = dmg.structure_hp;
                 }
                 if let Err(e) = sys_handle
-                    .spawn_ball_with_combat(
+                    .spawn_ball_with_meta(
                         eve_destiny::Ball {
                             id: item_id,
                             type_id: item.type_id,
@@ -1337,6 +1337,18 @@ pub async fn handle(
                             mode: eve_destiny::MovementMode::Stop,
                         },
                         combat_state,
+                        eve_destiny::SlimItemMeta {
+                            group_id: item_type.group_id,
+                            category_id: item_type.category_id,
+                            owner_id: item.owner_id,
+                            char_id: None,
+                            corp_id: session.corporation_id.unwrap_or(-1),
+                            alliance_id: session.alliance_id.unwrap_or(-1),
+                            security_status: 0.0,
+                            is_cloaked: false,
+                            name: (!item_type.name.is_empty()).then(|| item_type.name.clone()),
+                            ..Default::default()
+                        },
                     )
                     .await
                 {

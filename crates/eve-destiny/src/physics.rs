@@ -57,12 +57,17 @@ impl Ballpark {
         let mut warp_exit_stops = Vec::new();
         let mut expired_mushrooms = Vec::new();
         let mut frozen_trolls = Vec::new();
+        let non_free_ball_ids = self.non_free_ball_ids.clone();
 
         for ball in self.balls.values_mut() {
             if matches!(
                 ball.mode,
                 MovementMode::Rigid | MovementMode::Field | MovementMode::Miniball
-            ) {
+            ) || non_free_ball_ids.contains(&ball.id)
+            {
+                if non_free_ball_ids.contains(&ball.id) {
+                    ball.velocity = DVec3::ZERO;
+                }
                 continue;
             }
 

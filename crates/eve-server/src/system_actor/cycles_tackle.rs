@@ -182,8 +182,28 @@ pub(crate) fn spawn_ball_with_combat_in_actor(
             ball.max_velocity = base_v;
         }
     }
-    ballpark.add_ball(ball);
-    ballpark.combat_states.insert(ball_id, cs);
+    if matches!(ball.mode, MovementMode::Rigid) {
+        let meta = ballpark
+            .ball_slim_meta
+            .get(&ball_id)
+            .cloned()
+            .unwrap_or_default();
+        ballpark.add_static_ball_with_meta(ball.clone(), meta);
+        ballpark.combat_states.insert(ball_id, cs);
+        ballpark
+            .pending_events
+            .push(eve_destiny::DestinyEvent::AddBall { ball: ball.clone() });
+        ballpark.queue_event_for_all_grid_observers(
+            Some(ball_id),
+            &eve_destiny::DestinyEvent::AddBalls2 { balls: vec![ball] },
+        );
+    } else {
+        if super::should_pin_stationary_ball(&ball, ballpark.ball_slim_meta.get(&ball_id)) {
+            ballpark.mark_ball_non_free(ball_id, false);
+        }
+        ballpark.add_ball(ball);
+        ballpark.combat_states.insert(ball_id, cs);
+    }
     if !active_module_cycles.is_empty() {
         reconcile_tackle_and_bubbles(
             ballpark,
