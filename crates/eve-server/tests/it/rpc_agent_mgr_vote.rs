@@ -400,7 +400,32 @@ async fn test_vote_manager_cases_and_actions() {
     .expect_err("CEO election for non-member must fail");
     assert_eq!(invalid_cand_err.code, "CandidateNotMember");
 
-    // 3. voteManager.GetVoteCasesByCorporation (all, open status=2, closed status=1, maxLen)
+    // 3. voteManager.GetVoteCasesByCorporation (default grouped {2: CRowset, 1: CRowset}, open status=2, closed status=1)
+    let cases_grouped = rpc(
+        &ctx,
+        &mut sess,
+        "voteManager",
+        "GetVoteCasesByCorporation",
+        &[PyRep::Integer(corp_id)],
+    )
+    .await
+    .expect("voteManager.GetVoteCasesByCorporation default");
+    let PyRep::Dict(grouped_entries) = &cases_grouped else {
+        panic!("expected Dict {{2: CRowset, 1: CRowset}}, got {cases_grouped:?}");
+    };
+    let open_crowset = grouped_entries
+        .iter()
+        .find(|(k, _)| k == &PyRep::Integer(2))
+        .map(|(_, v)| v)
+        .expect("key 2 open CRowset");
+    assert_eq!(open_crowset.crowset_rows().expect("open CRowset").len(), 1);
+    let closed_crowset = grouped_entries
+        .iter()
+        .find(|(k, _)| k == &PyRep::Integer(1))
+        .map(|(_, v)| v)
+        .expect("key 1 closed CRowset");
+    assert_eq!(closed_crowset.crowset_rows().expect("closed CRowset").len(), 0);
+
     let cases_open = rpc(
         &ctx,
         &mut sess,
@@ -410,11 +435,7 @@ async fn test_vote_manager_cases_and_actions() {
     )
     .await
     .expect("voteManager.GetVoteCasesByCorporation open");
-    if let PyRep::Rowset { rows, .. } = &cases_open {
-        assert_eq!(rows.len(), 1);
-    } else {
-        panic!("expected Rowset");
-    }
+    assert_eq!(cases_open.crowset_rows().expect("expected CRowset").len(), 1);
     let cases_closed = rpc(
         &ctx,
         &mut sess,
@@ -424,9 +445,11 @@ async fn test_vote_manager_cases_and_actions() {
     )
     .await
     .expect("voteManager.GetVoteCasesByCorporation closed");
-    if let PyRep::Rowset { rows, .. } = &cases_closed {
-        assert_eq!(rows.len(), 0, "open vote case must not appear in closed filter");
-    }
+    assert_eq!(
+        cases_closed.crowset_rows().expect("expected CRowset").len(),
+        0,
+        "open vote case must not appear in closed filter"
+    );
 
     // 4. voteManager.GetVoteCase (2-arg (corpID, voteCaseID) + VoteCaseNotFound on unknown/wrong corp)
     assert!(
@@ -462,7 +485,14 @@ async fn test_vote_manager_cases_and_actions() {
     )
     .await
     .expect("voteManager.GetVoteCase");
-    assert!(matches!(single_case_res, PyRep::Rowset { .. }));
+    assert!(matches!(single_case_res, PyRep::DBRow { .. }));
+    assert!(
+        single_case_res
+            .dbrow_get("startDateTime")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            >= 116_444_736_000_000_000
+    );
 
     // 5. voteManager.GetVoteCaseOptions (persisted custom options + VoteCaseNotFound on wrong corp)
     assert!(

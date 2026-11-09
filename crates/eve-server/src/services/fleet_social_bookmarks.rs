@@ -307,16 +307,42 @@ pub(super) async fn handle_bookmarks(
                     if service == "beyonce" {
                         Some(Ok(PyRep::Tuple(vec![PyRep::Integer(bm_id), explicit_entity_id.map(PyRep::Integer).unwrap_or(PyRep::Integer(sys_id as i64)), PyRep::Integer(derived_type_id), PyRep::Real(x), PyRep::Real(y), PyRep::Real(z), PyRep::Integer(derived_loc_id), folder_id.map(PyRep::Integer).unwrap_or(PyRep::None)])))
                     } else {
-                        Some(Ok(PyRep::keyval([("bookmarkID", PyRep::Integer(bm_id)), ("label", PyRep::String(label.to_string())), ("x", PyRep::Real(x)), ("y", PyRep::Real(y)), ("z", PyRep::Real(z))])))
+                        let expiry_rep = if expiry_hours > 0 {
+                            PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(now_unix + (expiry_hours as u64 * 3600)))
+                        } else {
+                            PyRep::None
+                        };
+                        let note_str = ctx.db.with_snapshot(|s| s.bookmarks.get(&bm_id).map(|b| b.memo.clone()).unwrap_or_default());
+                        Some(Ok(PyRep::keyval([
+                            ("bookmarkID", PyRep::Integer(bm_id)),
+                            ("ownerID", PyRep::Integer(char_id)),
+                            ("creatorID", PyRep::Integer(char_id)),
+                            ("itemID", explicit_entity_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                            ("locationID", PyRep::Integer(sys_id as i64)),
+                            ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                            ("typeID", PyRep::Integer(derived_type_id)),
+                            ("created", PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(now_unix))),
+                            ("expiry", expiry_rep),
+                            ("folderID", folder_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                            ("isShared", PyRep::Bool(is_shared_folder)),
+                            ("label", PyRep::String(label.to_string())),
+                            ("memo", PyRep::String(note_str.clone())),
+                            ("note", PyRep::String(note_str)),
+                            ("flag", PyRep::Integer(0)),
+                            ("x", PyRep::Real(x)),
+                            ("y", PyRep::Real(y)),
+                            ("z", PyRep::Real(z)),
+                        ])))
                     }
                 }
                 Err(e) => Some(Err(e)),
             }
         }
 
-        ("bookmark", "GetBookmarks") => {
+        ("bookmark", "GetBookmarks") | ("bookmark", "GetMyActiveBookmarks") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let now_unix = ctx.now_unix();
+            let now_ft = crate::sp6_lifecycle::unix_to_filetime(now_unix);
             sweep_expired_bookmarks_and_notify(ctx, now_unix);
             let rows = ctx.db.try_with_mut_snapshot(|snap| {
                 let (corp_id_opt, _) = effective_char_corp_and_alliance(snap, session, char_id);
@@ -344,6 +370,19 @@ pub(super) async fn handle_bookmarks(
                             .bookmark_subfolders
                             .get(&b.bookmark_id)
                             .copied();
+                        let type_id = super::fleet_social_access_group_bookmarks_ops::bookmark_type_id_in_snap(
+                            ctx,
+                            snap,
+                            b.solar_system_id,
+                            b.item_id,
+                        );
+                        let expiry_rep = snap
+                            .bookmark_expiries
+                            .get(&b.bookmark_id)
+                            .copied()
+                            .filter(|&exp| exp > 0)
+                            .map(|exp| PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(exp)))
+                            .unwrap_or(PyRep::None);
                         vec![
                             PyRep::Integer(b.bookmark_id),
                             PyRep::String(b.label.clone()),
@@ -356,14 +395,39 @@ pub(super) async fn handle_bookmarks(
                             b.folder_id.map(PyRep::Integer).unwrap_or(PyRep::None),
                             PyRep::Bool(b.is_shared),
                             sf_opt.map(PyRep::Integer).unwrap_or(PyRep::None),
+                            PyRep::Integer(b.owner_id),
+                            PyRep::Integer(b.owner_id),
+                            PyRep::Integer(now_ft),
+                            expiry_rep,
+                            PyRep::Integer(type_id),
+                            PyRep::String(b.memo.clone()),
+                            PyRep::Integer(0),
+                            PyRep::Integer(b.solar_system_id as i64),
                         ]
                     })
                     .collect();
                 Ok::<_, BridgeRpcError>(list)
             }).unwrap_or_default();
-            const BM_COLUMNS: [&str; 11] = [
-                "bookmarkID", "label", "solarSystemID", "x", "y", "z", "itemID", "memo", "folderID", "isShared",
+            const BM_COLUMNS: [&str; 19] = [
+                "bookmarkID",
+                "label",
+                "solarSystemID",
+                "x",
+                "y",
+                "z",
+                "itemID",
+                "memo",
+                "folderID",
+                "isShared",
                 "subfolderID",
+                "ownerID",
+                "creatorID",
+                "created",
+                "expiry",
+                "typeID",
+                "note",
+                "flag",
+                "locationID",
             ];
             if method == "GetMyActiveBookmarks" {
                 return Some(Ok(acl_active_bookmarks(ctx, session, char_id, &BM_COLUMNS, rows)));
@@ -1242,7 +1306,27 @@ pub(super) async fn handle_bookmarks(
             if service == "beyonce" {
                 Some(Ok(PyRep::Tuple(vec![PyRep::Integer(bm_id), PyRep::Integer(sys_id as i64), PyRep::Integer(sig_type_id), PyRep::Real(pos[0]), PyRep::Real(pos[1]), PyRep::Real(pos[2]), PyRep::Integer(sys_id as i64), folder_id.map(PyRep::Integer).unwrap_or(PyRep::None)])))
             } else {
-                Some(Ok(PyRep::keyval([("bookmarkID", PyRep::Integer(bm_id)), ("signatureID", PyRep::String(sig_id.to_string())), ("label", PyRep::String(label.to_string())), ("x", PyRep::Real(pos[0])), ("y", PyRep::Real(pos[1])), ("z", PyRep::Real(pos[2]))])))
+                let note = format!("Scanned {sig_id}");
+                Some(Ok(PyRep::keyval([
+                    ("bookmarkID", PyRep::Integer(bm_id)),
+                    ("ownerID", PyRep::Integer(char_id)),
+                    ("creatorID", PyRep::Integer(char_id)),
+                    ("itemID", PyRep::None),
+                    ("locationID", PyRep::Integer(sys_id as i64)),
+                    ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                    ("typeID", PyRep::Integer(sig_type_id)),
+                    ("created", PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(now_unix))),
+                    ("expiry", PyRep::None),
+                    ("folderID", folder_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                    ("signatureID", PyRep::String(sig_id.to_string())),
+                    ("label", PyRep::String(label.to_string())),
+                    ("memo", PyRep::String(note.clone())),
+                    ("note", PyRep::String(note)),
+                    ("flag", PyRep::Integer(0)),
+                    ("x", PyRep::Real(pos[0])),
+                    ("y", PyRep::Real(pos[1])),
+                    ("z", PyRep::Real(pos[2])),
+                ])))
             }
         }
 

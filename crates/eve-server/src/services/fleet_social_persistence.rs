@@ -826,6 +826,19 @@ pub(super) fn handle_vote_queries(
         "votesFor",
         "inEffect",
     ];
+    let vote_desc = eve_proto::DBRowDescriptor::new([
+        ("voteCaseID", eve_proto::DbColumnType::I8),
+        ("corporationID", eve_proto::DbColumnType::I8),
+        ("voteCaseText", eve_proto::DbColumnType::WStr),
+        ("description", eve_proto::DbColumnType::WStr),
+        ("voteType", eve_proto::DbColumnType::I4),
+        ("parameter", eve_proto::DbColumnType::I8),
+        ("startDateTime", eve_proto::DbColumnType::FileTime),
+        ("endDateTime", eve_proto::DbColumnType::FileTime),
+        ("status", eve_proto::DbColumnType::I4),
+        ("votesFor", eve_proto::DbColumnType::I8),
+        ("inEffect", eve_proto::DbColumnType::Bool),
+    ]);
     let format_case = |c: &eve_db::CorpVoteCaseRecord,
                        ballots: &HashMap<(i64, i64), eve_db::CorpVoteBallotRecord>|
      -> Vec<PyRep> {
@@ -839,8 +852,8 @@ pub(super) fn handle_vote_queries(
             PyRep::String(c.description.clone()),
             PyRep::Integer(c.vote_type),
             PyRep::Integer(param),
-            PyRep::Integer(c.start_ts as i64),
-            PyRep::Integer(c.end_ts as i64),
+            PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(c.start_ts)),
+            PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(c.end_ts)),
             PyRep::Integer(status),
             PyRep::Integer(win_votes),
             PyRep::Bool(c.executed),
@@ -865,10 +878,7 @@ pub(super) fn handle_vote_queries(
                     code: "VoteCaseNotFound".into(),
                     message: format!("Vote case {case_id} not found for corporation {target_corp}"),
                 })?;
-            Ok(PyRep::rowset(
-                columns,
-                vec![format_case(vc, &snap.corp_vote_ballots)],
-            ))
+            Ok(vote_desc.build_dbrow(format_case(vc, &snap.corp_vote_ballots)))
         });
         return Some(res);
     }
@@ -881,6 +891,61 @@ pub(super) fn handle_vote_queries(
         .filter(|&m| m > 0)
         .map(|m| m as usize);
 
+    if method == "GetVoteCasesByCorporation" {
+        let filter_open_only = matches!(status_arg, Some(PyRep::Integer(2)))
+            || matches!(status_arg, Some(PyRep::String(s)) if s.eq_ignore_ascii_case("open"));
+        let filter_closed_only = matches!(status_arg, Some(PyRep::Integer(1)))
+            || matches!(status_arg, Some(PyRep::String(s)) if s.eq_ignore_ascii_case("closed"));
+
+        let rep = ctx.db.with_snapshot(|snap| {
+            let mut open_cases: Vec<&eve_db::CorpVoteCaseRecord> = Vec::new();
+            let mut closed_cases: Vec<&eve_db::CorpVoteCaseRecord> = Vec::new();
+            for c in snap.corp_vote_cases.values() {
+                if c.corporation_id != target_corp {
+                    continue;
+                }
+                if now_unix < c.end_ts {
+                    open_cases.push(c);
+                } else {
+                    closed_cases.push(c);
+                }
+            }
+            let sort_newest_first = |v: &mut Vec<&eve_db::CorpVoteCaseRecord>| {
+                v.sort_by(|a, b| {
+                    b.start_ts
+                        .cmp(&a.start_ts)
+                        .then_with(|| b.case_id.cmp(&a.case_id))
+                });
+                if let Some(m) = max_len {
+                    v.truncate(m);
+                }
+            };
+            sort_newest_first(&mut open_cases);
+            sort_newest_first(&mut closed_cases);
+
+            let to_crowset = |list: Vec<&eve_db::CorpVoteCaseRecord>| {
+                let rows = list
+                    .into_iter()
+                    .map(|c| format_case(c, &snap.corp_vote_ballots))
+                    .collect();
+                vote_desc.build_crowset(rows)
+            };
+
+            if filter_open_only {
+                to_crowset(open_cases)
+            } else if filter_closed_only {
+                to_crowset(closed_cases)
+            } else {
+                // V24 corp_ui_votes / voting expects `{2: CRowset(open), 1: CRowset(closed)}`.
+                PyRep::Dict(vec![
+                    (PyRep::Integer(2), to_crowset(open_cases)),
+                    (PyRep::Integer(1), to_crowset(closed_cases)),
+                ])
+            }
+        });
+        return Some(Ok(rep));
+    }
+
     let rows = ctx.db.with_snapshot(|snap| {
         let mut cases: Vec<&eve_db::CorpVoteCaseRecord> = snap
             .corp_vote_cases
@@ -889,34 +954,21 @@ pub(super) fn handle_vote_queries(
                 if c.corporation_id != target_corp {
                     return false;
                 }
-                if method == "GetCorpSanctionedActions" {
-                    let (passed, _, _) = eval_vote_case_winner(c, &snap.corp_vote_ballots);
-                    return match status_arg {
-                        Some(PyRep::Integer(2)) | Some(PyRep::Bool(true)) => c.executed,
-                        Some(PyRep::String(s))
-                            if s.eq_ignore_ascii_case("in effect")
-                                || s.eq_ignore_ascii_case("active")
-                                || s.eq_ignore_ascii_case("executed") =>
-                        {
-                            c.executed
-                        }
-                        Some(PyRep::Integer(0)) => c.executed || (now_unix >= c.end_ts && passed),
-                        Some(PyRep::String(s)) if s.eq_ignore_ascii_case("all") => {
-                            c.executed || (now_unix >= c.end_ts && passed)
-                        }
-                        _ => !c.executed && now_unix >= c.end_ts && passed,
-                    };
-                }
+                let (passed, _, _) = eval_vote_case_winner(c, &snap.corp_vote_ballots);
                 match status_arg {
-                    Some(PyRep::Integer(2)) => now_unix < c.end_ts,
-                    Some(PyRep::String(s)) if s.eq_ignore_ascii_case("open") => {
-                        now_unix < c.end_ts
+                    Some(PyRep::Integer(2)) | Some(PyRep::Bool(true)) => c.executed,
+                    Some(PyRep::String(s))
+                        if s.eq_ignore_ascii_case("in effect")
+                            || s.eq_ignore_ascii_case("active")
+                            || s.eq_ignore_ascii_case("executed") =>
+                    {
+                        c.executed
                     }
-                    Some(PyRep::Integer(1)) => now_unix >= c.end_ts,
-                    Some(PyRep::String(s)) if s.eq_ignore_ascii_case("closed") => {
-                        now_unix >= c.end_ts
+                    Some(PyRep::Integer(0)) => c.executed || (now_unix >= c.end_ts && passed),
+                    Some(PyRep::String(s)) if s.eq_ignore_ascii_case("all") => {
+                        c.executed || (now_unix >= c.end_ts && passed)
                     }
-                    _ => true,
+                    _ => !c.executed && now_unix >= c.end_ts && passed,
                 }
             })
             .collect();

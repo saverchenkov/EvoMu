@@ -18,6 +18,35 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
 
+/// Resolves the canonical EVE `typeID` for a bookmark's referenced entity (`5` = Solar System fallback).
+pub(crate) fn bookmark_type_id_in_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    sys_id: u32,
+    item_id: Option<i64>,
+) -> i64 {
+    let Some(ent_id) = item_id else {
+        return 5;
+    };
+    if ent_id == sys_id as i64 {
+        return 5;
+    }
+    snap.items
+        .get(&ent_id)
+        .map(|it| it.type_id as i64)
+        .or_else(|| snap.structures.get(&ent_id).map(|st| st.type_id as i64))
+        .or_else(|| ctx.sde.stations.get(&ent_id).map(|st| st.station_type_id as i64))
+        .or_else(|| ctx.sde.jumps.contains_key(&ent_id).then_some(29_624))
+        .or_else(|| {
+            ctx.sde
+                .celestials_in_system(sys_id)
+                .into_iter()
+                .find(|c| c.celestial_id == ent_id)
+                .map(|c| c.type_id as i64)
+        })
+        .unwrap_or(5)
+}
+
 /// Formats active bookmarks as `(folders, bookmarks, subfolders)` 3-tuple consumed by
 /// `BookmarkSvc.ACLPrimeBookmarks` (`eve/client/script/ui/shared/bookmarks/bookmarkSvc.pyj:164-169`).
 pub(crate) fn acl_active_bookmarks(
@@ -27,9 +56,14 @@ pub(crate) fn acl_active_bookmarks(
     columns: &[&str],
     rows: Vec<Vec<PyRep>>,
 ) -> PyRep {
-    let folder_ids: Vec<i64> = rows.iter().filter_map(|r| r[8].as_i64()).collect();
-    let row_subfolder_ids: Vec<i64> = rows.iter().filter_map(|r| r[10].as_i64()).collect();
-    let (folders, subfolders): (Vec<PyRep>, Vec<PyRep>) = ctx.db.with_snapshot(|snap| {
+    let folder_ids: Vec<i64> = rows.iter().filter_map(|r| r.get(8).and_then(|v| v.as_i64())).collect();
+    let row_subfolder_ids: Vec<i64> = rows.iter().filter_map(|r| r.get(10).and_then(|v| v.as_i64())).collect();
+    let now_ft = crate::sp6_lifecycle::unix_to_filetime(ctx.now_unix());
+    let (folders, subfolders, bm_meta): (
+        Vec<PyRep>,
+        Vec<PyRep>,
+        HashMap<i64, (i64, PyRep, i64, String)>,
+    ) = ctx.db.with_snapshot(|snap| {
         let mut list: Vec<_> = snap
             .bookmark_folders
             .values()
@@ -123,14 +157,65 @@ pub(crate) fn acl_active_bookmarks(
                 ])
             })
             .collect();
-        (folders, subfolders)
+        let mut meta = HashMap::new();
+        for r in &rows {
+            if let Some(bm_id) = r.first().and_then(|v| v.as_i64()) {
+                let sys_id = r.get(2).and_then(|v| v.as_i64()).unwrap_or(0).max(0) as u32;
+                let item_id = r.get(6).and_then(|v| v.as_i64());
+                let b_rec = snap.bookmarks.get(&bm_id);
+                let owner_id = b_rec.map(|b| b.owner_id).unwrap_or(char_id);
+                let expiry = snap
+                    .bookmark_expiries
+                    .get(&bm_id)
+                    .copied()
+                    .filter(|&exp| exp > 0)
+                    .map(|exp| PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(exp)))
+                    .unwrap_or(PyRep::None);
+                let type_id = bookmark_type_id_in_snap(
+                    ctx,
+                    snap,
+                    b_rec.map(|b| b.solar_system_id).unwrap_or(sys_id),
+                    b_rec.and_then(|b| b.item_id).or(item_id),
+                );
+                let note = b_rec
+                    .map(|b| b.memo.clone())
+                    .or_else(|| r.get(7).and_then(|v| v.as_str()).map(str::to_string))
+                    .unwrap_or_default();
+                meta.insert(bm_id, (owner_id, expiry, type_id, note));
+            }
+        }
+        (folders, subfolders, meta)
     });
     let bookmarks: Vec<PyRep> = rows
         .into_iter()
         .map(|row| {
-            let location = row[2].clone();
+            let bm_id = row.first().and_then(|v| v.as_i64()).unwrap_or(0);
+            let location = row.get(2).cloned().unwrap_or(PyRep::None);
+            let memo_fallback = row
+                .get(7)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let (owner_id, expiry_rep, type_id, note) = bm_meta.get(&bm_id).cloned().unwrap_or((
+                char_id,
+                PyRep::None,
+                5,
+                memo_fallback,
+            ));
             let mut fields: Vec<(&str, PyRep)> = columns.iter().copied().zip(row).collect();
-            fields.push(("locationID", location));
+            let mut push_missing = |key: &'static str, val: PyRep| {
+                if !fields.iter().any(|(k, _)| *k == key) {
+                    fields.push((key, val));
+                }
+            };
+            push_missing("locationID", location);
+            push_missing("ownerID", PyRep::Integer(owner_id));
+            push_missing("creatorID", PyRep::Integer(owner_id));
+            push_missing("created", PyRep::Integer(now_ft));
+            push_missing("expiry", expiry_rep);
+            push_missing("typeID", PyRep::Integer(type_id));
+            push_missing("note", PyRep::String(note));
+            push_missing("flag", PyRep::Integer(0));
             PyRep::keyval(fields)
         })
         .collect();
@@ -948,26 +1033,52 @@ pub(crate) async fn handle_copy_move_bookmarks(
             .collect();
         Ok(PyRep::Tuple(vec![PyRep::List(moved_list), PyRep::None]))
     } else {
-        let copied_dict = out_records
-            .into_iter()
-            .map(|rec| {
-                let kv = PyRep::keyval([
-                    ("bookmarkID", PyRep::Integer(rec.bookmark_id)),
-                    ("locationID", PyRep::Integer(rec.solar_system_id as i64)),
-                    ("folderID", folder_val.clone()),
-                    (
-                        "subfolderID",
-                        target_subfolder_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                    ),
-                    ("label", PyRep::String(rec.label)),
-                    ("memo", PyRep::String(rec.memo)),
-                    ("x", PyRep::Real(rec.x)),
-                    ("y", PyRep::Real(rec.y)),
-                    ("z", PyRep::Real(rec.z)),
-                ]);
-                (PyRep::Integer(rec.bookmark_id), kv)
-            })
-            .collect();
+        let now_ft = crate::sp6_lifecycle::unix_to_filetime(ctx.now_unix());
+        let copied_dict = ctx.db.with_snapshot(|snap| {
+            out_records
+                .into_iter()
+                .map(|rec| {
+                    let type_id = bookmark_type_id_in_snap(
+                        ctx,
+                        snap,
+                        rec.solar_system_id,
+                        rec.item_id,
+                    );
+                    let expiry = snap
+                        .bookmark_expiries
+                        .get(&rec.bookmark_id)
+                        .copied()
+                        .filter(|&exp| exp > 0)
+                        .map(|exp| PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(exp)))
+                        .unwrap_or(PyRep::None);
+                    let kv = PyRep::keyval([
+                        ("bookmarkID", PyRep::Integer(rec.bookmark_id)),
+                        ("ownerID", PyRep::Integer(rec.owner_id)),
+                        ("creatorID", PyRep::Integer(rec.owner_id)),
+                        ("itemID", rec.item_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                        ("locationID", PyRep::Integer(rec.solar_system_id as i64)),
+                        ("solarSystemID", PyRep::Integer(rec.solar_system_id as i64)),
+                        ("typeID", PyRep::Integer(type_id)),
+                        ("created", PyRep::Integer(now_ft)),
+                        ("expiry", expiry),
+                        ("folderID", folder_val.clone()),
+                        (
+                            "subfolderID",
+                            target_subfolder_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                        ),
+                        ("label", PyRep::String(rec.label)),
+                        ("memo", PyRep::String(rec.memo.clone())),
+                        ("note", PyRep::String(rec.memo)),
+                        ("flag", PyRep::Integer(0)),
+                        ("isShared", PyRep::Bool(rec.is_shared)),
+                        ("x", PyRep::Real(rec.x)),
+                        ("y", PyRep::Real(rec.y)),
+                        ("z", PyRep::Real(rec.z)),
+                    ]);
+                    (PyRep::Integer(rec.bookmark_id), kv)
+                })
+                .collect()
+        });
         Ok(PyRep::Tuple(vec![PyRep::Dict(copied_dict), PyRep::None]))
     }
 }

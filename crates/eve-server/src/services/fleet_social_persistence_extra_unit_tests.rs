@@ -430,7 +430,7 @@ async fn multi_option_vote_winner_and_sanctioned_action_filters_kill_mutations()
         panic!("expected rowset");
     }
 
-    // GetVoteCase: 2-arg form on 3-option case 601 verifies winning parameter == 90_000_002 and votesFor == 300
+    // GetVoteCase: 2-arg form on 3-option case 601 verifies DBRow shape, FileTime timestamps, winning parameter == 90_000_002, and votesFor == 300
     let vc_601 = call_vote_mgr(
         &ctx,
         &mut sess,
@@ -440,15 +440,46 @@ async fn multi_option_vote_winner_and_sanctioned_action_filters_kill_mutations()
     .await
     .unwrap()
     .unwrap();
-    if let PyRep::Rowset { rows, .. } = vc_601 {
-        assert_eq!(rows[0][5], PyRep::Integer(90_000_002)); // winning parameter
-        assert_eq!(rows[0][8], PyRep::Integer(1)); // status 1 (closed)
-        assert_eq!(rows[0][9], PyRep::Integer(300)); // votesFor
-    } else {
-        panic!("expected rowset");
+    assert!(matches!(vc_601, PyRep::DBRow { .. }), "expected DBRow, got {vc_601:?}");
+    assert_eq!(vc_601.dbrow_get("parameter"), Some(&PyRep::Integer(90_000_002)));
+    assert_eq!(vc_601.dbrow_get("status"), Some(&PyRep::Integer(1)));
+    assert_eq!(vc_601.dbrow_get("votesFor"), Some(&PyRep::Integer(300)));
+    assert!(
+        vc_601
+            .dbrow_get("startDateTime")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            >= 116_444_736_000_000_000
+    );
+
+    // GetVoteCasesByCorporation 1-arg and status=0/"all" return {2: CRowset(open), 1: CRowset(closed)}
+    for status_args in [
+        vec![PyRep::Integer(corp_id)],
+        vec![PyRep::Integer(corp_id), PyRep::Integer(0)],
+        vec![PyRep::Integer(corp_id), PyRep::String("all".into())],
+    ] {
+        let grouped = call_vote_mgr(&ctx, &mut sess, "GetVoteCasesByCorporation", &status_args)
+            .await
+            .unwrap()
+            .unwrap();
+        let PyRep::Dict(entries) = grouped else {
+            panic!("expected Dict {{2: CRowset, 1: CRowset}}, got {grouped:?}");
+        };
+        let open_set = entries
+            .iter()
+            .find(|(k, _)| k == &PyRep::Integer(2))
+            .map(|(_, v)| v)
+            .expect("open key 2 present");
+        let closed_set = entries
+            .iter()
+            .find(|(k, _)| k == &PyRep::Integer(1))
+            .map(|(_, v)| v)
+            .expect("closed key 1 present");
+        assert!(open_set.is_crowset(), "key 2 must be CRowset");
+        assert!(closed_set.is_crowset(), "key 1 must be CRowset");
     }
 
-    // GetVoteCasesByCorporation with "open", "closed", Integer(1), and max_len = 1
+    // GetVoteCasesByCorporation with "open", "closed", Integer(1), and max_len = 1 returns CRowset
     for filter in [
         PyRep::String("open".into()),
         PyRep::String("closed".into()),
@@ -463,11 +494,8 @@ async fn multi_option_vote_winner_and_sanctioned_action_filters_kill_mutations()
         .await
         .unwrap()
         .unwrap();
-        if let PyRep::Rowset { rows, .. } = res {
-            assert_eq!(rows.len(), 1);
-        } else {
-            panic!("expected rowset");
-        }
+        let rows = res.crowset_rows().expect("expected CRowset");
+        assert_eq!(rows.len(), 1);
     }
 
     // GetCorpSanctionedActions with Integer(2), String("in effect"), Integer(0), String("all"), and default

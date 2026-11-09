@@ -525,3 +525,125 @@ async fn station_dock_at_warp_destination_succeeds_while_mid_warp_still_rejects(
     assert_eq!(sess.station_id, Some(jita_station));
     assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
 }
+
+#[tokio::test]
+async fn station_dock_invalidates_space_bound_objects_and_emits_ship_item_change() {
+    let ctx = test_ctx_with_clock(1_800_000_000);
+    let char_id = 90_000_703_i64;
+    let corp_id = 98_000_001_i64;
+    let ship_id = 100_000_703_i64;
+    let jita_sys = 30_000_142_u32;
+    let jita_station = 60_003_760_i64;
+    let kw = HashMap::new();
+
+    let (st_pos, st_radius) = ctx
+        .sde
+        .stations
+        .get(&jita_station)
+        .map(|s| (DVec3::new(s.position.x, s.position.y, s.position.z), 5_000.0))
+        .unwrap_or((DVec3::ZERO, 5_000.0));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = clone_char_with(snap, char_id, "DockInvalidator", corp_id, jita_sys, ship_id);
+        ch.user_id = 1;
+        ch.station_id = None;
+        ch.structure_id = None;
+        snap.characters.insert(char_id, ch);
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: jita_sys as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let sys_h = ctx.systems.get_or_spawn(jita_sys);
+    sys_h
+        .spawn_ball_with_meta(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: st_pos + DVec3::new(st_radius, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 2.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            eve_destiny::CombatState::default(),
+            eve_destiny::SlimItemMeta::default(),
+        )
+        .await
+        .unwrap();
+
+    ctx.db
+        .acquire_online_lock(1, 9_703, Some(char_id), true, ctx.now_unix())
+        .unwrap();
+    let mut sess = make_sess(char_id, corp_id, Some(jita_sys), None, None, Some(ship_id));
+    sess.user_id = Some(1);
+    let beyonce_oid = 70_300_001_u64;
+    ctx.bound_objects.write().unwrap().insert(
+        beyonce_oid,
+        crate::router::context::BoundObjectEntry {
+            bound_id: beyonce_oid,
+            session_id: sess.session_id,
+            user_id: char_id as u64,
+            character_id: char_id,
+            service: "beyonce".into(),
+            object_id: jita_sys as i64,
+            oid_str: format!("N=1:{jita_sys}"),
+            ref_id: 1,
+        },
+    );
+    let inv_space_oid = 70_300_002_u64;
+    ctx.bound_objects.write().unwrap().insert(
+        inv_space_oid,
+        crate::router::context::BoundObjectEntry {
+            bound_id: inv_space_oid,
+            session_id: sess.session_id,
+            user_id: char_id as u64,
+            character_id: char_id,
+            service: "invbroker".into(),
+            object_id: jita_sys as i64,
+            oid_str: format!("N=1:{jita_sys}"),
+            ref_id: 2,
+        },
+    );
+    assert!(ctx.bound_objects.read().unwrap().contains_key(&beyonce_oid));
+    assert!(ctx.bound_objects.read().unwrap().contains_key(&inv_space_oid));
+
+    let _ = handle(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(jita_station)], &kw)
+        .await
+        .unwrap()
+        .expect("Dock must succeed");
+
+    assert!(
+        !ctx.bound_objects.read().unwrap().contains_key(&beyonce_oid),
+        "stationSvc.Dock must invalidate space-bound beyonce monikers"
+    );
+    assert!(
+        !ctx.bound_objects.read().unwrap().contains_key(&inv_space_oid),
+        "stationSvc.Dock must invalidate space-bound invbroker monikers"
+    );
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args.len() == 2
+                && n.args[0].dbrow_get("itemID") == Some(&PyRep::Integer(ship_id))
+                && n.args[0].dbrow_get("locationID") == Some(&PyRep::Integer(jita_station))
+                && n.args[0].dbrow_get("flagID") == Some(&PyRep::Integer(InventoryFlag::Hangar as i64))
+        }),
+        "Dock must emit OnItemChange moving the active ship into station hangar: {notifs:?}"
+    );
+}

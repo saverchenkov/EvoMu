@@ -63,11 +63,33 @@ async fn main() -> Result<()> {
     // Pre-spawn Jita (30000142) solar system actor inside the ServerContext registry
     let _jita = ctx.systems.get_or_spawn(30000142);
 
+    // Dedicated 1 Hz Destiny physics & NPC AI loop, isolated from mining and SQLite timers
+    // so warp decelerations complete strictly in real time.
+    ctx.dedicated_physics_ticker_active
+        .store(true, std::sync::atomic::Ordering::Release);
+    {
+        let physics_ctx = Arc::clone(&ctx);
+        tokio::spawn(async move {
+            let mut last_step = std::time::Instant::now();
+            let mut physics_ticker = tokio::time::interval(Duration::from_secs(1));
+            physics_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            physics_ticker.tick().await;
+            loop {
+                physics_ticker.tick().await;
+                let elapsed = last_step.elapsed().as_secs().clamp(1, 10);
+                last_step += Duration::from_secs(elapsed);
+                eve_server::sp6_lifecycle::step_active_systems_physics_tick(&physics_ctx, elapsed)
+                    .await;
+            }
+        });
+    }
+
     // World tick: resolve due mining-module cycles and SP-6/SP-7 background cluster timers once per second (`MN-04`, `plan:SP-7`).
     {
         let tick_ctx = Arc::clone(&ctx);
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(1));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 ticker.tick().await;
                 let _ = eve_server::services::mining_cycle::process_mining_cycles(&tick_ctx).await;

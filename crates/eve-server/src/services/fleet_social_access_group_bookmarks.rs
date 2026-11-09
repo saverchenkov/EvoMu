@@ -1048,6 +1048,7 @@ async fn handle_known_folders_state(
         );
     }
 
+    let now_ft = crate::sp6_lifecycle::unix_to_filetime(now_unix);
     let (bms, subfolders) = ctx.db.with_snapshot(|snap| {
         let bms: Vec<PyRep> = if !active {
             Vec::new()
@@ -1060,15 +1061,36 @@ async fn handle_known_folders_state(
                 })
                 .map(|b| {
                     let sfid = snap.bookmark_subfolders.get(&b.bookmark_id).copied();
+                    let type_id = super::fleet_social_access_group_bookmarks_ops::bookmark_type_id_in_snap(
+                        ctx,
+                        snap,
+                        b.solar_system_id,
+                        b.item_id,
+                    );
+                    let expiry = snap
+                        .bookmark_expiries
+                        .get(&b.bookmark_id)
+                        .copied()
+                        .filter(|&exp| exp > 0)
+                        .map(|exp| PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(exp)))
+                        .unwrap_or(PyRep::None);
                     PyRep::keyval([
                         ("bookmarkID", PyRep::Integer(b.bookmark_id)),
                         ("ownerID", PyRep::Integer(b.owner_id)),
-                        ("itemID", PyRep::Integer(b.item_id.unwrap_or(b.solar_system_id as i64))),
+                        ("creatorID", PyRep::Integer(b.owner_id)),
+                        ("itemID", b.item_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
                         ("locationID", PyRep::Integer(b.solar_system_id as i64)),
+                        ("solarSystemID", PyRep::Integer(b.solar_system_id as i64)),
+                        ("typeID", PyRep::Integer(type_id)),
+                        ("created", PyRep::Integer(now_ft)),
+                        ("expiry", expiry),
                         ("folderID", PyRep::Integer(folder_id)),
                         ("subfolderID", sfid.map(PyRep::Integer).unwrap_or(PyRep::None)),
                         ("label", PyRep::String(b.label.clone())),
                         ("memo", PyRep::String(b.memo.clone())),
+                        ("note", PyRep::String(b.memo.clone())),
+                        ("flag", PyRep::Integer(0)),
+                        ("isShared", PyRep::Bool(b.is_shared)),
                         ("x", PyRep::Real(b.x)),
                         ("y", PyRep::Real(b.y)),
                         ("z", PyRep::Real(b.z)),

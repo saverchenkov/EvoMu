@@ -270,3 +270,127 @@ async fn bookmark_location_get_update_delete_and_expiry_sweep() {
     assert_eq!(del_kv.get("deleted").unwrap(), &PyRep::Bool(true));
     assert!(ctx.db.with_snapshot(|s| !s.bookmarks.contains_key(&bm2_id)));
 }
+
+#[tokio::test]
+async fn active_bookmarks_and_get_bookmarks_populate_v24_creator_owner_dates_and_type_fields() {
+    let ctx = test_ctx_with_clock(1_800_000_000);
+    let char_id = 90_000_717_i64;
+    let corp_id = 98_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = 100_000_717_i64;
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = clone_char_with(snap, char_id, "BookmarkV24Pilot", corp_id, sys_id, ship_id);
+        ch.station_id = None;
+        ch.structure_id = None;
+        snap.characters.insert(char_id, ch);
+        snap.items.insert(
+            ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    sys_h
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: 587,
+            position: glam::DVec3::new(1000.0, 2000.0, 3000.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+
+    let mut session = SessionState::new(1);
+    session.user_id = Some(char_id as u64);
+    session.character_id = Some(char_id);
+    session.corporation_id = Some(corp_id);
+    session.solar_system_id = Some(sys_id);
+    session.ship_id = Some(ship_id);
+
+    // Create one timed bookmark (3 hours) and one permanent bookmark
+    handle_bookmarks(
+        &ctx,
+        &mut session,
+        "bookmark",
+        "BookmarkLocation",
+        &[
+            PyRep::Integer(sys_id as i64),
+            PyRep::None,
+            PyRep::String("Timed Spot".into()),
+            PyRep::String("check creatorID".into()),
+            PyRep::None,
+            PyRep::Integer(3),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    for (svc, method) in [
+        ("bookmark", "GetMyActiveBookmarks"),
+        ("accessGroupBookmarkMgr", "GetMyActiveBookmarks"),
+    ] {
+        let rep = if svc == "bookmark" {
+            handle_bookmarks(&ctx, &mut session, svc, method, &[], &kw)
+                .await
+                .unwrap()
+                .unwrap()
+        } else {
+            crate::services::fleet_social::fleet_social_access_group_bookmarks::handle(
+                &ctx, &mut session, svc, method, &[], &kw,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+        };
+        let PyRep::Tuple(parts) = rep else {
+            panic!("{svc}.{method}: expected 3-tuple, got {rep:?}");
+        };
+        let PyRep::List(bms) = &parts[1] else {
+            panic!("{svc}.{method}: expected bookmarks list");
+        };
+        assert_eq!(bms.len(), 1);
+        let bm = &bms[0];
+        assert_eq!(bm.dict_get("creatorID"), Some(&PyRep::Integer(char_id)));
+        assert_eq!(bm.dict_get("ownerID"), Some(&PyRep::Integer(char_id)));
+        assert_eq!(bm.dict_get("locationID"), Some(&PyRep::Integer(sys_id as i64)));
+        assert_eq!(bm.dict_get("typeID"), Some(&PyRep::Integer(5)));
+        assert_eq!(bm.dict_get("note"), Some(&PyRep::String("check creatorID".into())));
+        assert_eq!(bm.dict_get("flag"), Some(&PyRep::Integer(0)));
+        assert!(bm.dict_get("created").and_then(|v| v.as_i64()).unwrap_or(0) >= 116_444_736_000_000_000);
+        assert!(bm.dict_get("expiry").and_then(|v| v.as_i64()).unwrap_or(0) > 116_444_736_000_000_000);
+    }
+
+    let PyRep::Rowset { columns, rows } =
+        handle_bookmarks(&ctx, &mut session, "bookmark", "GetBookmarks", &[], &kw)
+            .await
+            .unwrap()
+            .unwrap()
+    else {
+        panic!("expected Rowset from bookmark.GetBookmarks");
+    };
+    assert_eq!(rows.len(), 1);
+    for req_col in ["creatorID", "ownerID", "created", "expiry", "typeID", "note", "flag", "locationID"] {
+        assert!(
+            columns.iter().any(|c| c == req_col),
+            "GetBookmarks rowset missing column {req_col}: {columns:?}"
+        );
+    }
+}

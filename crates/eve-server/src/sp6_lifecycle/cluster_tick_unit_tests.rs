@@ -474,3 +474,69 @@ async fn idle_cluster_tick_avoids_per_tick_sqlite_wal_writes() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn cluster_tick_catches_up_multi_second_warp_and_respects_dedicated_physics_ticker() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let sys_id = 30_000_142_u32;
+    let ship_id = 100_000_001_i64;
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+
+    // 1. When dedicated_physics_ticker_active is true, tick_background_cluster skips physics
+    // and step_active_systems_physics_tick owns simulation advancement.
+    let tick_initial = sys_h.ballpark.read().unwrap().current_tick;
+    ctx.dedicated_physics_ticker_active
+        .store(true, std::sync::atomic::Ordering::Release);
+    ctx.clock().advance_secs(5);
+    tick_background_cluster(&ctx).await;
+    let tick_after_bg = sys_h.ballpark.read().unwrap().current_tick;
+    assert_eq!(
+        tick_after_bg, tick_initial,
+        "tick_background_cluster must not step physics when dedicated physics ticker is active"
+    );
+    crate::sp6_lifecycle::step_active_systems_physics_tick(&ctx, 1).await;
+    assert_eq!(sys_h.ballpark.read().unwrap().current_tick, tick_initial + 1);
+
+    // 2. step_active_systems_physics_tick catches up multi-second wall-clock deltas so an
+    // in-flight warp finishes strictly on schedule independent of background cluster ticks.
+    let warp_dest = glam::DVec3::new(150_000_000.0, 0.0, 0.0);
+    let warp_mode = eve_destiny::MovementMode::new_warp(glam::DVec3::ZERO, warp_dest, 3.0);
+    sys_h
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: 587,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: warp_mode,
+        })
+        .await
+        .unwrap();
+
+    ctx.clock().advance_secs(35);
+    crate::sp6_lifecycle::step_active_systems_physics_tick(&ctx, 35).await;
+
+    let tick_after_catchup = sys_h.ballpark.read().unwrap().current_tick;
+    assert!(
+        tick_after_catchup >= tick_initial + 36,
+        "expected multi-second warp catchup ticks >= {}, got {tick_after_catchup}",
+        tick_initial + 36
+    );
+    let ball = sys_h
+        .ballpark
+        .read()
+        .unwrap()
+        .balls
+        .get(&ship_id)
+        .cloned()
+        .expect("ship ball exists");
+    assert!(
+        matches!(ball.mode, eve_destiny::MovementMode::Stop),
+        "ship should have completed warp after 35s catchup, mode={:?}",
+        ball.mode
+    );
+}

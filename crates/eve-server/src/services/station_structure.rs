@@ -526,6 +526,16 @@ pub async fn handle(
             session.station_id = None;
             session.structure_id = None;
             ctx.invalidate_bound_objects_for_session_transition(char_id, ch.solar_system_id, None, "undock");
+            if let Some(ship_rec) = ctx.db.with_snapshot(|snap| snap.items.get(&ship.item_id).cloned()) {
+                ctx.notify_item_record_change(
+                    char_id,
+                    &ship_rec,
+                    vec![
+                        (3, PyRep::Integer(station_id)),
+                        (4, PyRep::Integer(eve_db::InventoryFlag::Hangar as i64)),
+                    ],
+                );
+            }
             let sess_rep = PyRep::keyval([
                 ("userid", session.user_id.map(|u| PyRep::Integer(u as i64)).unwrap_or(PyRep::None)),
                 ("charid", PyRep::Integer(char_id)),
@@ -861,6 +871,22 @@ pub async fn handle(
                     } else {
                         session.station_id = Some(dock_id);
                         session.structure_id = None;
+                    }
+                    ctx.invalidate_bound_objects_for_session_transition(
+                        char_id,
+                        sys_id,
+                        Some(dock_id),
+                        "dock",
+                    );
+                    if let Some(ship_rec) = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).cloned()) {
+                        ctx.notify_item_record_change(
+                            char_id,
+                            &ship_rec,
+                            vec![
+                                (3, PyRep::Integer(sys_id as i64)),
+                                (4, PyRep::Integer(eve_db::InventoryFlag::None as i64)),
+                            ],
+                        );
                     }
                     crate::services::space_destiny::record_session_change_timer(
                         ctx, char_id, now_unix, sys_id, 0, "dock",

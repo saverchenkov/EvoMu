@@ -1492,18 +1492,12 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(sys_id, mgr);
         }
-        if !handle.take_auto_stepped_at(now_unix) {
-            let _tick = handle
-                .step_manual(1.0)
-                .await
-                .map(|b| b.tick)
-                .unwrap_or(0);
-            crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai(ctx, sys_id).await;
-            if let Some(mgr) = ctx.npc_spawns.write().unwrap_or_else(|e| e.into_inner()).get_mut(&sys_id) {
-                let tick = handle.ballpark.read().map(|b| b.current_tick).unwrap_or(0);
-                let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, sys_id);
-                mgr.step_ai_sync(ctx, sys_id, tick, 1.0 * tidi);
-            }
+        if !ctx
+            .dedicated_physics_ticker_active
+            .load(std::sync::atomic::Ordering::Acquire)
+            && !handle.take_auto_stepped_at(now_unix)
+        {
+            step_single_system_physics_step(ctx, sys_id, &handle).await;
         }
         if (32_000_000..=32_999_999).contains(&sys_id) {
             crate::services::pve_special_sites_abyssal::prune_out_of_bounds_abyssal_probes(ctx, sys_id);
@@ -1514,6 +1508,46 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
             ctx, sys_id, now_unix,
         )
         .await;
+    }
+}
+
+async fn step_single_system_physics_step(
+    ctx: &ServerContext,
+    sys_id: u32,
+    handle: &crate::system_actor::SystemHandle,
+) {
+    let _tick = handle
+        .step_manual(1.0)
+        .await
+        .map(|b| b.tick)
+        .unwrap_or(0);
+    crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai(ctx, sys_id).await;
+    if let Some(mgr) = ctx
+        .npc_spawns
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_mut(&sys_id)
+    {
+        let tick = handle.ballpark.read().map(|b| b.current_tick).unwrap_or(0);
+        let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, sys_id);
+        mgr.step_ai_sync(ctx, sys_id, tick, 1.0 * tidi);
+    }
+}
+
+/// Steps 1 Hz Destiny physics and NPC AI across all active solar systems.
+/// Runs on a dedicated wall-clock ticker in production so slow mining or
+/// SQLite persistence in `tick_background_cluster` cannot delay warp completion.
+pub async fn step_active_systems_physics_tick(ctx: &ServerContext, elapsed_secs: u64) {
+    let now_unix = ctx.now_unix();
+    let steps = elapsed_secs.clamp(1, 60);
+    let active_handles = ctx.systems.active_system_handles();
+    for (sys_id, handle) in active_handles {
+        for step_idx in 0..steps {
+            if step_idx == 0 && handle.take_auto_stepped_at(now_unix) {
+                continue;
+            }
+            step_single_system_physics_step(ctx, sys_id, &handle).await;
+        }
     }
 }
 

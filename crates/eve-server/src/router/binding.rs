@@ -1109,6 +1109,7 @@ impl ServerContext {
             combat_rng_seq: std::sync::atomic::AtomicU64::new(0),
             cluster_tick_last_unix: std::sync::atomic::AtomicU64::new(0),
             cluster_tick_persisted_unix: std::sync::atomic::AtomicU64::new(0),
+            dedicated_physics_ticker_active: std::sync::atomic::AtomicBool::new(false),
             fw_idle_last_step_unix: std::sync::RwLock::new(std::collections::HashMap::new()),
         }
     }

@@ -383,3 +383,43 @@ fn facility_manager_limits_locations_and_set_facility_taxes_dict_keyval_and_role
     assert_eq!(set_dict.dict_get("1"), Some(&PyRep::Real(0.02)));
     assert_eq!(set_dict.dict_get("8"), Some(&PyRep::Real(0.08)));
 }
+
+#[test]
+fn facility_manager_get_facilities_populates_service_access_docked_and_undocked() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let st_id = 60_003_760_i64;
+    let kw = HashMap::new();
+
+    for (label, station_id) in [("docked", Some(st_id)), ("undocked", None)] {
+        let mut sess = char_session(char_id, station_id);
+        let raw = call_ind_bps(&ctx, &mut sess, "facilityManager", "GetFacilities", &[], &kw)
+            .expect("GetFacilities raw succeeds");
+        let normalized = crate::router::client_compat::normalize_macho_rpc_reply(
+            "facilityManager",
+            "GetFacilities",
+            Ok(raw),
+        )
+        .expect("GetFacilities normalized succeeds");
+        let PyRep::List(facilities) = normalized else {
+            panic!("{label}: expected facility list");
+        };
+        assert!(!facilities.is_empty(), "{label}: expected at least one facility");
+        for fac in &facilities {
+            let service_access = fac
+                .dict_get("serviceAccess")
+                .unwrap_or_else(|| panic!("{label}: facility missing serviceAccess"));
+            assert!(
+                matches!(service_access, PyRep::Dict(_)),
+                "{label}: expected serviceAccess Dict, got {service_access:?}"
+            );
+            assert!(
+                matches!(fac.dict_get("activities"), Some(PyRep::Dict(_))),
+                "{label}: facility missing activities Dict"
+            );
+            assert!(fac.dict_get("sccTaxModifier").is_some());
+            assert!(fac.dict_get("rigModifiers").is_some());
+            assert!(fac.dict_get("globalModifiers").is_some());
+        }
+    }
+}

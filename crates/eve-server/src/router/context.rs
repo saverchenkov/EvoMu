@@ -8,7 +8,7 @@ use eve_dogma::ShipFittingEngine;
 use eve_proto::BridgeRpcError;
 use eve_sde::SdeRegistry;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, RwLock};
 
 pub static NEXT_BOUND_ID: AtomicU64 = AtomicU64::new(10_000);
@@ -94,6 +94,7 @@ pub struct ServerContext {
     pub combat_rng_seq: AtomicU64,
     pub cluster_tick_last_unix: AtomicU64,
     pub cluster_tick_persisted_unix: AtomicU64,
+    pub dedicated_physics_ticker_active: AtomicBool,
     pub fw_idle_last_step_unix: RwLock<HashMap<i64, u64>>,
 }
 
@@ -380,6 +381,7 @@ impl ServerContext {
             combat_rng_seq: AtomicU64::new(1),
             cluster_tick_last_unix: AtomicU64::new(0),
             cluster_tick_persisted_unix: AtomicU64::new(0),
+            dedicated_physics_ticker_active: AtomicBool::new(false),
             fw_idle_last_step_unix: RwLock::new(HashMap::new()),
         };
         ctx.db.with_mut_snapshot(|snap| {
