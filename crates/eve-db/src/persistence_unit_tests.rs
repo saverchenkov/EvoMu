@@ -344,3 +344,96 @@ fn snapshot_wal_fault_injection_torn_tail_and_checkpoint_compaction() {
     let _ = std::fs::remove_file(&wal_path);
     let _ = std::fs::remove_file(&sqlite_out);
 }
+
+#[test]
+fn noop_mut_snapshot_skips_wal_and_skill_tick_emits_incremental_delta() {
+    let dir = std::env::temp_dir();
+    let snap_path = dir.join(format!("evomu_idle_wal_{}.json", std::process::id()));
+    let wal_path = WorldRepository::wal_path_for(&snap_path);
+    let _ = std::fs::remove_file(&snap_path);
+    let _ = std::fs::remove_file(&wal_path);
+
+    let repo =
+        WorldRepository::new_empty_with_snapshot_path(Some(snap_path.clone())).expect("init json");
+    repo.with_mut_snapshot(|snap| {
+        snap.characters.insert(90_000_001, sample_character(90_000_001, 50_000));
+        snap.skills.entry(90_000_001).or_default().insert(
+            3300,
+            TrainedSkillRecord {
+                type_id: 3300,
+                level: 3,
+                skill_points: 8_000.0,
+            },
+        );
+        snap.skill_queues.insert(
+            90_000_001,
+            vec![SkillQueueEntry {
+                type_id: 3300,
+                target_level: 4,
+                start_sp: 8_000.0,
+                end_sp: 45_255.0,
+                duration_seconds: 1200.0,
+                started_at_unix: Some(1_700_000_000),
+            }],
+        );
+    });
+    repo.save_snapshot_to_file(&snap_path).expect("checkpoint");
+    assert!(!wal_path.exists());
+
+    let seq_before = repo.with_snapshot(|s| s.wal_seq);
+    let epoch_before = repo.state_epoch();
+
+    // 1. No-op `with_mut_snapshot` and `try_with_mut_snapshot` must write 0 bytes to `.json.wal`
+    // and keep `wal_seq`, `pending_wal_records`, and `state_epoch` completely unchanged.
+    for _ in 0..10 {
+        repo.with_mut_snapshot(|_snap| {});
+        let ok_res: Result<(), String> = repo.try_with_mut_snapshot(|_snap| Ok(()));
+        assert!(ok_res.is_ok());
+    }
+    assert!(
+        !wal_path.exists(),
+        "no-op mut snapshot calls must not create or append to .json.wal"
+    );
+    assert_eq!(repo.pending_wal_records.load(Ordering::SeqCst), 0);
+    assert_eq!(repo.with_snapshot(|s| s.wal_seq), seq_before);
+    assert_eq!(repo.state_epoch(), epoch_before);
+
+    // 2. 1 Hz skill progression (`skills` + `skill_queues` + `characters` SP update) must emit a
+    // compact incremental `.json.wal` delta without cloning or serializing `full_snapshot`.
+    repo.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.skill_points += 0.5;
+        }
+        if let Some(sk) = snap.skills.get_mut(&90_000_001).and_then(|m| m.get_mut(&3300)) {
+            sk.skill_points += 0.5;
+        }
+        if let Some(q) = snap.skill_queues.get_mut(&90_000_001).and_then(|v| v.first_mut()) {
+            q.start_sp += 0.5;
+            q.duration_seconds -= 1.0;
+        }
+    });
+    assert!(wal_path.exists());
+    let wal_text = std::fs::read_to_string(&wal_path).expect("read wal");
+    assert!(
+        !wal_text.contains("\"full_snapshot\""),
+        "1 Hz skill tick WAL delta must be incremental without full_snapshot: {wal_text}"
+    );
+    let parsed_delta: WorldStateWalDelta =
+        serde_json::from_str(wal_text.lines().next().unwrap()).expect("parse wal line");
+    assert!(parsed_delta.full_snapshot.is_none());
+    assert_eq!(parsed_delta.upserted_skills.len(), 1);
+    assert_eq!(parsed_delta.upserted_skill_queues.len(), 1);
+
+    // Simulate ungraceful crash and verify incremental skill WAL delta replays losslessly.
+    std::mem::forget(repo);
+    let reopened =
+        WorldRepository::new_empty_with_snapshot_path(Some(snap_path.clone())).expect("reopen");
+    reopened.with_snapshot(|snap| {
+        assert!((snap.skills[&90_000_001][&3300].skill_points - 8_000.5).abs() < 1e-6);
+        assert!((snap.skill_queues[&90_000_001][0].start_sp - 8_000.5).abs() < 1e-6);
+    });
+
+    drop(reopened);
+    let _ = std::fs::remove_file(&snap_path);
+    let _ = std::fs::remove_file(&wal_path);
+}

@@ -42,43 +42,32 @@ pub fn apply_d6_batch4_migration(conn: &Connection) -> Result<(), String> {
 }
 
 fn fp_str_map(map: &HashMap<String, String>) -> u64 {
-    let mut xor = (map.len() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    for (k, v) in map {
-        let mut h = FnvHasher::new();
-        h.write_str(k);
-        h.write_str(v);
-        xor ^= h.finish();
-    }
-    xor
+    super::fingerprints::canonical_fp(map)
 }
 
 fn fp_map<K: Serialize, V: Serialize>(map: &HashMap<K, V>) -> u64 {
-    let mut xor = (map.len() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    for (k, v) in map {
-        xor ^= fp_json(&(k, v));
-    }
-    xor
+    super::fingerprints::canonical_fp(map)
 }
 
 fn fp_set<T: Serialize>(set: &HashSet<T>) -> u64 {
-    let mut xor = (set.len() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    let mut xor = 0u64;
+    let mut sum = 0u64;
     for v in set {
-        xor ^= fp_json(v);
+        let eh = fp_json(v);
+        xor ^= eh;
+        sum = sum.wrapping_add(eh.rotate_left(13));
     }
-    xor
+    let mut out = FnvHasher::new();
+    out.write_u64(set.len() as u64);
+    out.write_u64(xor);
+    out.write_u64(sum);
+    out.finish()
 }
 
 fn fp_nested_map<K1: Serialize, K2: Serialize, V: Serialize>(
     map: &HashMap<K1, HashMap<K2, V>>,
 ) -> u64 {
-    let mut xor = (map.len() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    for (k1, inner) in map {
-        let mut h = FnvHasher::new();
-        h.write_u64(fp_json(k1));
-        h.write_u64(fp_map(inner));
-        xor ^= h.finish();
-    }
-    xor
+    super::fingerprints::canonical_fp(map)
 }
 
 fn map_to_json<K: Serialize, V: Serialize>(map: &HashMap<K, V>) -> Result<String, String> {
@@ -180,12 +169,16 @@ fn serialize_blob(snap: &WorldStateSnapshot, key: &str) -> Result<String, String
         "wh_polarizations" => map_to_json(&snap.wh_polarizations),
         "module_online_states" => map_to_json(&snap.module_online_states),
         "module_active_states" => {
-            serde_json::to_string(&snap.module_active_states).map_err(|e| e.to_string())
+            let mut sorted: Vec<i64> = snap.module_active_states.iter().copied().collect();
+            sorted.sort_unstable();
+            serde_json::to_string(&sorted).map_err(|e| e.to_string())
         }
         "module_active_charges" => map_to_json(&snap.module_active_charges),
         "weapon_banks" => nested_map_to_json(&snap.weapon_banks),
         "paused_skill_queues" => {
-            serde_json::to_string(&snap.paused_skill_queues).map_err(|e| e.to_string())
+            let mut sorted: Vec<i64> = snap.paused_skill_queues.iter().copied().collect();
+            sorted.sort_unstable();
+            serde_json::to_string(&sorted).map_err(|e| e.to_string())
         }
         "starbase_settings" => map_to_json(&snap.starbase_settings),
         "corp_container_logs" => map_to_json(&snap.corp_container_logs),

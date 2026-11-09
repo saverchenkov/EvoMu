@@ -180,7 +180,7 @@ pub struct CharacterSeasonState {
     pub challenges: HashMap<i64, CharacterChallenge>,
     #[serde(default)]
     pub claimed_challenges: HashMap<i64, CharacterChallenge>,
-    #[serde(default)]
+    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
     pub completed_once_per_season_ids: HashSet<i64>,
 }
 

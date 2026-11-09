@@ -276,7 +276,21 @@ pub async fn tick_all_moon_extractions(ctx: &ServerContext) {
             .moon_fractured_fields
             .iter()
             .any(|(_, _, decay_unix, _)| now >= *decay_unix)
-            || !snap.moon_extractions.is_empty()
+            || snap.moon_extractions.iter().any(|(&structure_id, ext)| {
+                if !snap.structures.contains_key(&structure_id) {
+                    return false;
+                }
+                if ext.status != "Cancelled" && ext.status != "Decayed" && now >= ext.natural_decay_unix {
+                    return true;
+                }
+                if ext.status == "Started" || ext.status == "Ready" {
+                    let delay_secs = compute_auto_fracture_delay_secs(&ctx.sde, snap, structure_id);
+                    now >= ext.chunk_arrival_unix.saturating_add(delay_secs)
+                        && now < ext.natural_decay_unix
+                } else {
+                    false
+                }
+            })
     });
     if !has_work {
         return;
@@ -1235,7 +1249,36 @@ fn metenox_output_bay_remaining_capacity(sde: &SdeRegistry, snap: &eve_db::World
 
 /// Server-driven hourly Metenox Moon Drill production tick (`plan:MN-14`, `R-MN14-FALSE`, `R-MN14-PROD-TICK`).
 pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_unix: u64) {
-    if !ctx.db.with_snapshot(|s| s.structures.values().any(|st| st.quantum_core_installed && ctx.sde.types.get(&st.type_id).is_some_and(|t| t.group_id == 4744))) {
+    let has_due_metenox = ctx.db.with_snapshot(|s| {
+        s.structures.values().any(|st| {
+            if !st.quantum_core_installed
+                || !matches!(
+                    st.state.as_str(),
+                    "ShieldVulnerable" | "ArmorVulnerable" | "HullVulnerable" | "Online" | "Operating"
+                )
+                || !ctx.sde.types.get(&st.type_id).is_some_and(|t| t.group_id == 4744)
+            {
+                return false;
+            }
+            let sec = ctx
+                .sde
+                .solar_systems
+                .get(&st.solar_system_id)
+                .map(|sys| sys.security_status)
+                .unwrap_or(0.0);
+            if sec >= 0.45 && st.solar_system_id < 31_000_000 {
+                return false;
+            }
+            if resolve_structure_moon_id(&ctx.sde, st.solar_system_id, st.position).is_none() {
+                return false;
+            }
+            match s.auto_moon_miners.get(&st.structure_id) {
+                None => true,
+                Some(rec) => now_unix.saturating_sub(rec.last_cycle_unix) >= rec.cycle_duration_seconds.max(1),
+            }
+        })
+    });
+    if !has_due_metenox {
         return;
     }
     let fuel_per_cycle = metenox_fuel_per_cycle(&ctx.sde);

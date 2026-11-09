@@ -13,11 +13,17 @@ pub(crate) const WAL_CHECKPOINT_INTERVAL: usize = 64;
 /// Incremental Write-Ahead Log (WAL) delta record for hot-path mutations (`OF-06` / `OF-23` / `R21-P1-5`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorldStateWalDelta {
+    #[serde(skip)]
+    pub(crate) dirty: bool,
     #[serde(default)]
     pub(crate) seq: u64,
     pub(crate) next_entity_id: i64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) upserted_characters: Vec<CharacterRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) upserted_skills: Vec<(i64, TrainedSkillRecord)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) upserted_skill_queues: Vec<(i64, Vec<SkillQueueEntry>)>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) upserted_items: Vec<InventoryItemRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -41,10 +47,17 @@ pub struct WorldStateWalDelta {
 impl WorldStateWalDelta {
     #[cfg(test)]
     pub(crate) fn from_diff(old: &WorldStateSnapshot, new: &WorldStateSnapshot) -> Self {
+        let skills_only_upserted = old.skills.iter().all(|(cid, old_m)| {
+            new.skills
+                .get(cid)
+                .is_some_and(|new_m| old_m.keys().all(|tid| new_m.contains_key(tid)))
+        }) && old
+            .skill_queues
+            .keys()
+            .all(|cid| new.skill_queues.contains_key(cid));
         let cold_equal = old.markets_seeded == new.markets_seeded
             && old.accounts == new.accounts
-            && old.skills == new.skills
-            && old.skill_queues == new.skill_queues
+            && skills_only_upserted
             && old.jump_clones == new.jump_clones
             && old.active_implants == new.active_implants
             && old.saved_fittings == new.saved_fittings
@@ -215,6 +228,7 @@ impl WorldStateWalDelta {
 
         if !cold_equal {
             return Self {
+                dirty: true,
                 seq: new.wal_seq,
                 next_entity_id: new.next_entity_id,
                 full_snapshot: Some(Box::new(new.clone())),
@@ -223,6 +237,7 @@ impl WorldStateWalDelta {
         }
 
         let mut delta = Self {
+            dirty: old != new,
             seq: new.wal_seq,
             next_entity_id: new.next_entity_id,
             ..Default::default()
@@ -230,6 +245,19 @@ impl WorldStateWalDelta {
         for (id, ch) in &new.characters {
             if old.characters.get(id) != Some(ch) {
                 delta.upserted_characters.push(ch.clone());
+            }
+        }
+        for (&cid, new_m) in &new.skills {
+            let old_m = old.skills.get(&cid);
+            for (tid, sk) in new_m {
+                if old_m.and_then(|m| m.get(tid)) != Some(sk) {
+                    delta.upserted_skills.push((cid, sk.clone()));
+                }
+            }
+        }
+        for (&cid, new_q) in &new.skill_queues {
+            if old.skill_queues.get(&cid) != Some(new_q) {
+                delta.upserted_skill_queues.push((cid, new_q.clone()));
             }
         }
         for (id, item) in &new.items {
@@ -287,6 +315,12 @@ impl WorldStateWalDelta {
         snap.next_entity_id = self.next_entity_id;
         for ch in self.upserted_characters {
             snap.characters.insert(ch.character_id, ch);
+        }
+        for (cid, sk) in self.upserted_skills {
+            snap.skills.entry(cid).or_default().insert(sk.type_id, sk);
+        }
+        for (cid, q) in self.upserted_skill_queues {
+            snap.skill_queues.insert(cid, q);
         }
         for id in self.removed_items {
             snap.items.remove(&id);
@@ -466,11 +500,9 @@ impl WorldRepository {
                 std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
         }
-        let mut conn = rusqlite::Connection::open(target).map_err(|e| e.to_string())?;
+        let conn = rusqlite::Connection::open(target).map_err(|e| e.to_string())?;
         sqlite_store::apply_migrations(&conn)?;
-        let (mut snap, _) = sqlite_store::load_snapshot_from_sqlite(&conn)?;
-        snap.backfill_fw_system_occupations();
-        let fp = sqlite_store::replace_sqlite_from_snapshot(&mut conn, &snap)?;
+        let (snap, fp) = sqlite_store::load_snapshot_from_sqlite(&conn)?;
         let jwt_secret =
             sqlite_store::load_or_init_jwt_secret(&conn, Self::generate_random_secret_32)?;
         let auth_runtime = sqlite_store::load_auth_runtime_from_sqlite(&conn, jwt_secret)?;
@@ -891,25 +923,48 @@ impl WorldRepository {
     fn persist_dirty_sqlite_and_wal(
         &self,
         conn: &mut rusqlite::Connection,
-        guard: &WorldStateSnapshot,
+        guard: &mut WorldStateSnapshot,
         staged_fp: &mut sqlite_store::TableFingerprints,
+        prev_wal_seq: u64,
         need_wal_delta: bool,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| e.to_string())?;
-        let delta = Box::new(sqlite_store::sync_dirty_to_sqlite(
+        let mut delta = Box::new(sqlite_store::sync_dirty_to_sqlite(
             &tx,
             guard,
             staged_fp,
             need_wal_delta,
         )?);
-        if let Some(ref p) = self.snapshot_path {
-            let _wal_guard = self.wal_lock.lock().unwrap_or_else(|e| e.into_inner());
-            self.append_wal_delta_locked(p, guard, &delta)?;
+        if !delta.dirty {
+            return Ok(false);
+        }
+        if guard.wal_seq <= prev_wal_seq {
+            guard.wal_seq = prev_wal_seq.saturating_add(1);
+            delta.seq = guard.wal_seq;
+            if let Some(ref mut full) = delta.full_snapshot {
+                full.wal_seq = guard.wal_seq;
+            }
+            tx.execute(
+                "INSERT OR REPLACE INTO world_meta (meta_key, meta_value) VALUES ('next_entity_id', ?1), ('wal_seq', ?2), ('markets_seeded', ?3)",
+                rusqlite::params![
+                    guard.next_entity_id,
+                    guard.wal_seq as i64,
+                    i64::from(guard.markets_seeded)
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+            staged_fp.wal_seq = guard.wal_seq;
+        }
+        if need_wal_delta {
+            if let Some(ref p) = self.snapshot_path {
+                let _wal_guard = self.wal_lock.lock().unwrap_or_else(|e| e.into_inner());
+                self.append_wal_delta_locked(p, guard, &delta)?;
+            }
         }
         tx.commit().map_err(|e| e.to_string())?;
-        Ok(())
+        Ok(true)
     }
 
     fn run_mut_snapshot_tx(
@@ -932,23 +987,26 @@ impl WorldRepository {
             for (&sid, st) in &mut guard.system_states {
                 st.solar_system_id = sid;
             }
-            guard.wal_seq = guard.wal_seq.saturating_add(1);
-            let need_wal_delta = self.snapshot_path.is_some();
+            let prev_wal_seq = fp.wal_seq;
+            let need_wal_delta = self.snapshot_path.is_some() && self.sqlite_path.is_none();
             let mut staged_fp = Box::new(fp.clone());
             let persist_res = self.persist_dirty_sqlite_and_wal(
                 &mut conn,
                 guard,
                 &mut staged_fp,
+                prev_wal_seq,
                 need_wal_delta,
             );
             let crimewatch_changed =
                 staged_fp.d6_corp_crimewatch.crimewatch_fp != fp.d6_corp_crimewatch.crimewatch_fp;
             match persist_res {
-                Ok(()) => {
-                    *fp = *staged_fp;
-                    self.bump_state_epoch();
-                    if crimewatch_changed {
-                        self.bump_combat_state_epoch();
+                Ok(did_mutate) => {
+                    if did_mutate {
+                        *fp = *staged_fp;
+                        self.bump_state_epoch();
+                        if crimewatch_changed {
+                            self.bump_combat_state_epoch();
+                        }
                     }
                     Ok(())
                 }

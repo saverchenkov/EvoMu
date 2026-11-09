@@ -300,11 +300,24 @@ fn legacy_service_blobs_and_sentinel_owner_notes_migrate_cleanly() {
     assert!(!snap.owner_notes.contains_key(&-10_000_055));
     assert!(!snap.owner_notes.contains_key(&-8_650_000_000_000));
 
-    // Subsequent sync persists migrated typed tables and deletes legacy rows.
+    // `load_snapshot_from_sqlite` already flushed migrated typed tables and stripped legacy rows
+    // before computing baseline `fp`, so an immediate unchanged sync is a clean 0-write no-op.
     let tx = conn.transaction().expect("tx");
     let delta = sync_dirty_to_sqlite(&tx, &snap, &mut fp, true).expect("sync migrated");
-    assert!(delta.full_snapshot.is_some());
+    assert!(!delta.dirty);
+    assert!(delta.full_snapshot.is_none());
     tx.commit().expect("commit");
+
+    // Aborting a subsequent mutation and rolling back against `fp` must preserve migrated domains.
+    let mut aborted = snap.clone();
+    aborted.crab_beacons.beacons.clear();
+    aborted.tourney_state.matches.clear();
+    aborted.deployable_state.deployables.clear();
+    super::rollback::rollback_dirty_from_sqlite(&conn, &mut aborted, &fp)
+        .expect("rollback after startup migration");
+    assert!(aborted.crab_beacons.beacons.contains_key(&555));
+    assert!(aborted.tourney_state.matches.contains_key(&1));
+    assert!(aborted.deployable_state.deployables.contains_key(&5001));
 
     let (reloaded, _) = load_snapshot_from_sqlite(&conn).expect("reload");
     assert!(reloaded.crab_beacons.beacons.contains_key(&555));

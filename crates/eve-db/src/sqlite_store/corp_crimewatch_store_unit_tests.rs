@@ -282,3 +282,74 @@ fn d6_corp_crimewatch_payload_roundtrip_sync_load_and_rollback() {
         populated_fps
     );
 }
+
+#[test]
+fn corp_crimewatch_rollback_preserves_state_on_missing_or_corrupt_kv_row() {
+    let conn = Connection::open_in_memory().unwrap();
+    apply_migrations(&conn).unwrap();
+
+    // 1. Non-default baseline in memory when `d6_corp_crimewatch_kv` has NO row (or corrupt JSON):
+    // rollback must NOT apply `Payload::default()` and wipe in-memory corp/crimewatch/warfare state.
+    let mut snap = WorldStateSnapshot::default();
+    snap.corp_member_limits.insert(98_000_001, 75);
+    snap.wh_polarizations.insert((90_000_001, 31_000_001), 4242);
+    snap.fw_wars.push((500_001, 500_004));
+    snap.insurgency_runtime
+        .active_state_notified
+        .extend([90_000_001, 90_000_002, 90_000_003]);
+
+    let mut fp = TableFingerprints::default();
+    fp.d6_corp_crimewatch = compute_d6_corp_crimewatch_fingerprints(&snap);
+
+    // Dirty all three domains in memory while `d6_corp_crimewatch_kv` is empty.
+    snap.corp_member_limits.insert(98_000_002, 999);
+    snap.zarzakh_gate_locks.insert(90_000_001, (30_100_000, 777));
+    snap.sov_prospecting_levels.insert(30_000_142, 5);
+    rollback_d6_corp_crimewatch(&conn, &mut snap, &fp);
+    assert_eq!(
+        snap.corp_member_limits.get(&98_000_001),
+        Some(&75),
+        "missing KV row must not wipe non-default corp_governance state"
+    );
+    assert_eq!(
+        snap.wh_polarizations.get(&(90_000_001, 31_000_001)),
+        Some(&4242),
+        "missing KV row must not wipe non-default crimewatch state"
+    );
+    assert_eq!(
+        snap.fw_wars,
+        vec![(500_001, 500_004)],
+        "missing KV row must not wipe non-default warfare state"
+    );
+
+    // Corrupt JSON in KV table must likewise refuse to wipe non-default in-memory state.
+    for key in [KEY_CORP_GOV, KEY_CRIMEWATCH, KEY_WARFARE] {
+        conn.execute(
+            "INSERT OR REPLACE INTO d6_corp_crimewatch_kv (store_key, payload_json) VALUES (?1, '{corrupt')",
+            params![key],
+        )
+        .unwrap();
+    }
+    rollback_d6_corp_crimewatch(&conn, &mut snap, &fp);
+    assert_eq!(snap.corp_member_limits.get(&98_000_001), Some(&75));
+    assert_eq!(snap.wh_polarizations.get(&(90_000_001, 31_000_001)), Some(&4242));
+    assert_eq!(snap.fw_wars, vec![(500_001, 500_004)]);
+
+    // 2. Converse: when committed baseline genuinely WAS empty (`default`) and no KV row exists,
+    // rolling back an aborted first-transaction insertion cleanly reverts back to empty.
+    conn.execute("DELETE FROM d6_corp_crimewatch_kv", []).unwrap();
+    let empty_base = WorldStateSnapshot::default();
+    let mut empty_fp = TableFingerprints::default();
+    empty_fp.d6_corp_crimewatch = compute_d6_corp_crimewatch_fingerprints(&empty_base);
+
+    let mut dirty_from_empty = empty_base;
+    dirty_from_empty.corp_member_limits.insert(98_000_099, 10);
+    dirty_from_empty
+        .wh_polarizations
+        .insert((90_000_099, 31_000_001), 1);
+    dirty_from_empty.fw_wars.push((500_002, 500_003));
+    rollback_d6_corp_crimewatch(&conn, &mut dirty_from_empty, &empty_fp);
+    assert!(dirty_from_empty.corp_member_limits.is_empty());
+    assert!(dirty_from_empty.wh_polarizations.is_empty());
+    assert!(dirty_from_empty.fw_wars.is_empty());
+}

@@ -80,6 +80,7 @@ impl std::hash::Hasher for FnvHasher {
     }
 }
 
+#[cfg(test)]
 #[inline]
 pub(crate) fn fnv1a_hasher() -> FnvHasher {
     FnvHasher::new()
@@ -872,5 +873,344 @@ mod tests {
 
         check(&|s| s.missions_awaiting_downtime_respawn.reverse(), "missions_awaiting_downtime_respawn.order");
         check(&|s| s.missions_awaiting_downtime_respawn[0].1 += 1, "missions_awaiting_downtime_respawn.val");
+    }
+
+    fn build_unordered_collections_snapshot(order: &[i64], cap: usize, scramble: bool) -> crate::WorldStateSnapshot {
+        use crate::service_domains::{CharacterSeasonState, PvpArenaMatchInstance};
+        use crate::snapshot_ext::{CalendarEventRecord, ChatChannelAclRecord, MailingListRecord};
+        use crate::types::{
+            AllianceRecord, ChatChannelRecord, CorporationRecord, FleetMemberRecord, FleetRecord,
+            FleetRole, FleetSquadRecord, FleetWingRecord, NpeProgressRecord, PlanetaryColonyRecord,
+        };
+        use std::collections::HashSet;
+
+        let mut snap = crate::WorldStateSnapshot::default();
+        if let Some(ch) = crate::persistence::WorldRepository::create_demo_snapshot()
+            .characters
+            .get(&90_000_001)
+            .cloned()
+        {
+            snap.characters.insert(90_000_001, ch);
+        }
+        let make_i64_set = |vals: &[i64]| -> HashSet<i64> {
+            let mut set = HashSet::with_capacity(cap);
+            if scramble {
+                for d in 70_000..70_040 {
+                    set.insert(d);
+                }
+                for d in 70_000..70_040 {
+                    set.remove(&d);
+                }
+            }
+            for &idx in order {
+                set.insert(vals[idx as usize % vals.len()]);
+            }
+            for &v in vals {
+                set.insert(v);
+            }
+            set
+        };
+        let make_i64_map = |pairs: &[(i64, u64)]| -> HashMap<i64, u64> {
+            let mut m = HashMap::with_capacity(cap);
+            if scramble {
+                for d in 80_000..80_040 {
+                    m.insert(d, d as u64);
+                }
+                for d in 80_000..80_040 {
+                    m.remove(&d);
+                }
+            }
+            for &idx in order {
+                let (k, v) = pairs[idx as usize % pairs.len()];
+                m.insert(k, v);
+            }
+            for &(k, v) in pairs {
+                m.insert(k, v);
+            }
+            m
+        };
+
+        let mut corp = CorporationRecord::new(98_000_001, "OrderIndep Corp", "ORD", 90_000_001);
+        corp.members = make_i64_set(&[90_000_001, 90_000_002, 90_000_003, 90_000_004]);
+        corp.member_roles = make_i64_map(&[(90_000_001, 1), (90_000_002, 128), (90_000_003, 512), (90_000_004, 1024)]);
+        snap.corporations.insert(98_000_001, corp);
+
+        snap.alliances.insert(
+            99_000_001,
+            AllianceRecord {
+                alliance_id: 99_000_001,
+                name: "OrderIndep Alliance".into(),
+                short_name: "ORDA".into(),
+                executor_corp_id: 98_000_001,
+                member_corp_ids: make_i64_set(&[98_000_001, 98_000_002, 98_000_003, 98_000_004]),
+            },
+        );
+
+        let mut fleet = FleetRecord {
+            fleet_id: 640_001,
+            boss_id: 90_000_001,
+            members: vec![90_000_001, 90_000_002],
+            wings: vec![1, 2],
+            squads: vec![11, 22],
+            free_move: true,
+            is_registered: true,
+            wing_details: HashMap::with_capacity(cap),
+            squad_details: HashMap::with_capacity(cap),
+            member_details: HashMap::with_capacity(cap),
+            invites: make_i64_set(&[90_000_005, 90_000_006, 90_000_007]),
+            motd: "Deterministic".into(),
+        };
+        for &idx in order {
+            let wid = (idx % 2) + 1;
+            fleet.wing_details.insert(
+                wid,
+                FleetWingRecord {
+                    wing_id: wid,
+                    name: format!("W{wid}"),
+                    commander_id: None,
+                    squad_ids: vec![wid * 11],
+                },
+            );
+            fleet.squad_details.insert(
+                wid * 11,
+                FleetSquadRecord {
+                    squad_id: wid * 11,
+                    wing_id: wid,
+                    name: format!("S{wid}"),
+                    commander_id: None,
+                },
+            );
+            let cid = 90_000_000 + wid;
+            fleet.member_details.insert(
+                cid,
+                FleetMemberRecord {
+                    character_id: cid,
+                    role: FleetRole::SquadMember,
+                    wing_id: Some(wid),
+                    squad_id: Some(wid * 11),
+                    takes_fleet_warp: true,
+                    accepts_regroup: true,
+                    accepts_conduit_jumps: true,
+                    job: 0,
+                    role_name: String::new(),
+                    join_time_unix: 1_700_000_000,
+                },
+            );
+        }
+        snap.fleets.insert(640_001, fleet);
+
+        let mut extracted = HashMap::with_capacity(cap);
+        for &idx in order {
+            let tid = 2393 + (idx as u32 % 4);
+            extracted.insert(tid, 100 * u64::from(tid));
+        }
+        snap.planetary_colonies.insert(
+            (90_000_001, 40_009_082),
+            PlanetaryColonyRecord {
+                planet_id: 40_009_082,
+                owner_id: 90_000_001,
+                solar_system_id: 30_000_142,
+                command_center_level: 4,
+                pins_count: 5,
+                extracted_commodities: extracted,
+                last_extracted_unix: 1_700_000_000,
+            },
+        );
+
+        let mut claimed_goals = HashSet::with_capacity(cap);
+        let mut goal_prog = HashMap::with_capacity(cap);
+        for &idx in order {
+            let gid = (idx as u32 % 4) + 1;
+            claimed_goals.insert(gid);
+            goal_prog.insert(gid, u64::from(gid) * 10);
+        }
+        snap.npe_progress.insert(
+            90_000_001,
+            NpeProgressRecord {
+                character_id: 90_000_001,
+                node_graph_id: 1,
+                current_node_id: 2,
+                completed: false,
+                career_goal_progress: goal_prog,
+                claimed_goals,
+            },
+        );
+
+        let mut ml_members = HashMap::with_capacity(cap);
+        let mut ml_access = HashMap::with_capacity(cap);
+        for &idx in order {
+            let id = 90_000_010 + (idx % 4);
+            ml_members.insert(id, idx % 3);
+            ml_access.insert(98_000_010 + (idx % 4), 1);
+        }
+        snap.mailing_lists.insert(
+            501,
+            MailingListRecord {
+                list_id: 501,
+                name: "FleetList".into(),
+                owner_id: 90_000_001,
+                default_access: 1,
+                default_role: 0,
+                cost: 0,
+                members: ml_members,
+                entity_access: ml_access,
+                welcome_mail: None,
+                mail_ids: make_i64_set(&[1001, 1002, 1003, 1004]),
+            },
+        );
+
+        let mut cal_resp = HashMap::with_capacity(cap);
+        for &idx in order {
+            cal_resp.insert(90_000_010 + (idx % 4), (idx % 3) + 1);
+        }
+        snap.calendar_events.insert(
+            601,
+            CalendarEventRecord {
+                event_id: 601,
+                owner_id: 90_000_001,
+                creator_id: 90_000_001,
+                event_date_time: 1_700_050_000,
+                duration: 60,
+                importance: 1,
+                title: "Op".into(),
+                description: "Move".into(),
+                scope: "Personal".into(),
+                responses: cal_resp,
+                is_deleted: false,
+            },
+        );
+
+        snap.chat_channels.insert(
+            "chan_det".into(),
+            ChatChannelRecord {
+                channel_id: "chan_det".into(),
+                name: "Det".into(),
+                motd: String::new(),
+                owner_id: Some(90_000_001),
+                members: make_i64_set(&[90_000_001, 90_000_002, 90_000_003]),
+                is_system_local: false,
+                solar_system_id: None,
+                is_private: true,
+                operators: make_i64_set(&[90_000_001, 90_000_003, 90_000_004]),
+                password: None,
+                is_delayed_local: false,
+            },
+        );
+        let mut muted = HashMap::with_capacity(cap);
+        for &idx in order {
+            muted.insert(90_000_020 + (idx % 3), (1_800_000_000, "spam".into()));
+        }
+        snap.chat_channel_acl.insert(
+            "chan_det".into(),
+            ChatChannelAclRecord {
+                allow_list: make_i64_set(&[90_000_001, 90_000_002, 90_000_005]),
+                deny_list: make_i64_set(&[90_000_091, 90_000_092, 90_000_093]),
+                muted_until: muted,
+            },
+        );
+
+        snap.insurgency_runtime.active_state_notified = make_i64_set(&[90_000_001, 90_000_002, 90_000_003, 90_000_004]);
+        snap.structure_docking_acl_denied
+            .insert(1_000_000_000_001, make_i64_set(&[90_000_011, 90_000_012, 90_000_013]));
+
+        snap.pvp_filament_state.active_matches.insert(
+            1,
+            PvpArenaMatchInstance {
+                match_id: 1,
+                event_id: 1,
+                arena_solar_system_id: 32_000_001,
+                team_a: vec![90_000_001],
+                team_b: vec![90_000_002],
+                origin_systems: HashMap::from([(90_000_001, 30_000_142), (90_000_002, 30_002_187)]),
+                started_unix: 1_700_000_000,
+                active: true,
+                winner_char_id: None,
+                exited_pilots: make_i64_set(&[90_000_002, 90_000_003, 90_000_004]),
+                end_gate_id: 0,
+            },
+        );
+        snap.pvp_filament_state
+            .match_eliminated
+            .insert(1, make_i64_set(&[90_000_002, 90_000_005, 90_000_006]));
+        for &idx in order {
+            snap.quasar_commerce
+                .lp_asset_ops_completed
+                .insert(format!("op_{}", idx % 4));
+            snap.fleet_and_social_ops
+                .agent_global_disabled_missions
+                .insert(100 + (idx as u32 % 4));
+        }
+        snap.fleet_and_social_ops
+            .fleet_join_requests
+            .insert(640_001, make_i64_set(&[90_000_021, 90_000_022, 90_000_023]));
+        snap.fleet_and_social_ops
+            .fleet_watchlist
+            .insert(640_001, make_i64_set(&[90_000_031, 90_000_032, 90_000_033]));
+        snap.fleet_and_social_ops.mission_taxed_journal = make_i64_set(&[5001, 5002, 5003]);
+        snap.fleet_and_social_ops
+            .wh_local_witnesses
+            .insert("J100001".into(), make_i64_set(&[90_000_041, 90_000_042, 90_000_043]));
+        snap.cluster_and_runtime.resculpt_pending = make_i64_set(&[90_000_001, 90_000_002, 90_000_003]);
+        for &idx in order {
+            snap.cluster_and_runtime
+                .omega_downgraded
+                .insert(1_000 + (idx as u64 % 4));
+        }
+        snap.seasons_and_campaigns.season_states.insert(
+            90_000_001,
+            CharacterSeasonState {
+                selected_season_id: 1,
+                season_points: 100,
+                challenges: HashMap::new(),
+                claimed_challenges: HashMap::new(),
+                completed_once_per_season_ids: make_i64_set(&[10, 20, 30, 40]),
+            },
+        );
+        snap
+    }
+
+    #[test]
+    fn multi_seed_unordered_collections_produce_identical_fingerprints_and_zero_write_sync() {
+        use super::compute_fingerprints;
+        use crate::sqlite_store::schema::apply_migrations;
+        use crate::sqlite_store::sync::{replace_sqlite_from_snapshot, sync_dirty_to_sqlite};
+        use rusqlite::Connection;
+
+        let baseline = build_unordered_collections_snapshot(&[0, 1, 2, 3], 0, false);
+        let base_fp = compute_fingerprints(&baseline);
+
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply_migrations(&conn).unwrap();
+        let mut sql_fp = replace_sqlite_from_snapshot(&mut conn, &baseline).unwrap();
+
+        let permutations: &[(&[i64], usize, bool)] = &[
+            (&[3, 2, 1, 0], 128, true),
+            (&[2, 0, 3, 1], 16, false),
+            (&[1, 3, 0, 2], 64, true),
+            (&[0, 2, 1, 3], 4, true),
+        ];
+        for (round, &(perm, cap, scramble)) in permutations.iter().enumerate() {
+            let candidate = build_unordered_collections_snapshot(perm, cap, scramble);
+            let cand_fp = compute_fingerprints(&candidate);
+            assert_eq!(cand_fp.corporations, base_fp.corporations, "round {round} corporations");
+            assert_eq!(cand_fp.alliances, base_fp.alliances, "round {round} alliances");
+            assert_eq!(cand_fp.fleets, base_fp.fleets, "round {round} fleets");
+            assert_eq!(cand_fp.planetary_colonies, base_fp.planetary_colonies, "round {round} colonies");
+            assert_eq!(cand_fp.npe_progress, base_fp.npe_progress, "round {round} npe_progress");
+            assert_eq!(cand_fp.d6_social, base_fp.d6_social, "round {round} social");
+            assert_eq!(cand_fp.d6_corp_crimewatch, base_fp.d6_corp_crimewatch, "round {round} corp_crimewatch");
+            assert_eq!(cand_fp.service_domains, base_fp.service_domains, "round {round} service_domains");
+
+            // Also roundtrip through JSON to allocate brand-new RandomState SipHash seeds on every HashMap/HashSet.
+            let roundtripped: crate::WorldStateSnapshot =
+                serde_json::from_str(&serde_json::to_string(&candidate).unwrap()).unwrap();
+            let before = conn.total_changes();
+            let tx = conn.transaction().unwrap();
+            let delta = sync_dirty_to_sqlite(&tx, &roundtripped, &mut sql_fp, true).unwrap();
+            tx.commit().unwrap();
+            assert!(!delta.dirty, "round {round} resync must not mark delta dirty");
+            assert!(delta.full_snapshot.is_none(), "round {round} resync must not emit full_snapshot");
+            assert_eq!(conn.total_changes(), before, "round {round} resync must execute 0 SQL writes");
+        }
     }
 }

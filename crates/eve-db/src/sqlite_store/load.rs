@@ -761,13 +761,27 @@ pub fn load_snapshot_from_sqlite(
     super::corp_crimewatch_store::load_d6_corp_crimewatch(conn, &mut snap);
     super::industry_market_pve_store::load_d6_batch4(conn, &mut snap);
     super::service_domains_store::load_service_domains(conn, &mut snap);
-    let fp = compute_fingerprints(&snap);
-    // Migration after fingerprinting so the folded vault/characters and migrated service domains
-    // are persisted on next sync.
+    let mut pre_migration_fp = compute_fingerprints(&snap);
+    // Run startup snapshot migrations BEFORE computing baseline fingerprints and flush any
+    // migrated rows immediately into SQLite so neither clean reads nor first-transaction rollbacks
+    // revert `next_entity_id`, `account_plex_vault`, `service_domains`, or `fw_system_occupations`.
     snap.fold_legacy_plex_balances();
     snap.migrate_legacy_service_state();
     snap.reconcile_id_counters();
     snap.backfill_fw_system_occupations();
+    for (&sid, st) in &mut snap.system_states {
+        st.solar_system_id = sid;
+    }
+    if conn.is_autocommit() {
+        if let Ok(tx) = conn.unchecked_transaction() {
+            if super::sync::sync_dirty_to_sqlite(&tx, &snap, &mut pre_migration_fp, false)
+                .is_ok_and(|d| d.dirty)
+            {
+                let _ = tx.commit();
+            }
+        }
+    }
+    let fp = compute_fingerprints(&snap);
     Ok((snap, fp))
 }
 #[cfg(test)] #[path = "load_unit_tests.rs"] mod load_unit_tests;

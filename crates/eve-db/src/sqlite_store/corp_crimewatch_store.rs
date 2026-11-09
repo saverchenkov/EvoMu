@@ -289,14 +289,18 @@ impl Serialize for UnorderedIntSetRef<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeSeq;
         let mut xor = 0u64;
+        let mut sum = 0u64;
         for &v in self.0 {
             let mut eh = FnvHasher::new();
             eh.write_i64(v);
-            xor ^= eh.finish();
+            let fp = eh.finish();
+            xor ^= fp;
+            sum = sum.wrapping_add(fp.rotate_left(13));
         }
-        let mut seq = serializer.serialize_seq(Some(2))?;
+        let mut seq = serializer.serialize_seq(Some(3))?;
         seq.serialize_element(&(self.0.len() as u64))?;
         seq.serialize_element(&xor)?;
+        seq.serialize_element(&sum)?;
         seq.end()
     }
 }
@@ -489,45 +493,68 @@ pub fn rollback_d6_corp_crimewatch(
     let dfp = &fp.d6_corp_crimewatch;
 
     if canonical_fp(&CorpGovernanceDomainRef::from_snapshot(snap)) != dfp.corp_governance_fp {
-        let js: Option<String> = conn
-            .query_row(
-                "SELECT payload_json FROM d6_corp_crimewatch_kv WHERE store_key = ?1",
-                params![KEY_CORP_GOV],
-                |r| r.get(0),
-            )
-            .ok();
-        let payload = js
-            .and_then(|s| serde_json::from_str::<CorpGovernanceDomainPayload>(&s).ok())
-            .unwrap_or_default();
-        payload.apply_to_snapshot(snap);
+        match conn.query_row(
+            "SELECT payload_json FROM d6_corp_crimewatch_kv WHERE store_key = ?1",
+            params![KEY_CORP_GOV],
+            |r| r.get::<_, String>(0),
+        ) {
+            Ok(js) => {
+                if let Ok(payload) = serde_json::from_str::<CorpGovernanceDomainPayload>(&js) {
+                    payload.apply_to_snapshot(snap);
+                }
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                let empty = WorldStateSnapshot::default();
+                if dfp.corp_governance_fp
+                    == canonical_fp(&CorpGovernanceDomainRef::from_snapshot(&empty))
+                {
+                    CorpGovernanceDomainPayload::default().apply_to_snapshot(snap);
+                }
+            }
+            Err(_) => {}
+        }
     }
 
     if canonical_fp(&CrimewatchDomainRef::from_snapshot(snap)) != dfp.crimewatch_fp {
-        let js: Option<String> = conn
-            .query_row(
-                "SELECT payload_json FROM d6_corp_crimewatch_kv WHERE store_key = ?1",
-                params![KEY_CRIMEWATCH],
-                |r| r.get(0),
-            )
-            .ok();
-        let payload = js
-            .and_then(|s| serde_json::from_str::<CrimewatchDomainPayload>(&s).ok())
-            .unwrap_or_default();
-        payload.apply_to_snapshot(snap);
+        match conn.query_row(
+            "SELECT payload_json FROM d6_corp_crimewatch_kv WHERE store_key = ?1",
+            params![KEY_CRIMEWATCH],
+            |r| r.get::<_, String>(0),
+        ) {
+            Ok(js) => {
+                if let Ok(payload) = serde_json::from_str::<CrimewatchDomainPayload>(&js) {
+                    payload.apply_to_snapshot(snap);
+                }
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                let empty = WorldStateSnapshot::default();
+                if dfp.crimewatch_fp == canonical_fp(&CrimewatchDomainRef::from_snapshot(&empty)) {
+                    CrimewatchDomainPayload::default().apply_to_snapshot(snap);
+                }
+            }
+            Err(_) => {}
+        }
     }
 
     if canonical_fp(&WarfareDomainRef::from_snapshot(snap)) != dfp.warfare_fp {
-        let js: Option<String> = conn
-            .query_row(
-                "SELECT payload_json FROM d6_corp_crimewatch_kv WHERE store_key = ?1",
-                params![KEY_WARFARE],
-                |r| r.get(0),
-            )
-            .ok();
-        let payload = js
-            .and_then(|s| serde_json::from_str::<WarfareDomainPayload>(&s).ok())
-            .unwrap_or_default();
-        payload.apply_to_snapshot(snap);
+        match conn.query_row(
+            "SELECT payload_json FROM d6_corp_crimewatch_kv WHERE store_key = ?1",
+            params![KEY_WARFARE],
+            |r| r.get::<_, String>(0),
+        ) {
+            Ok(js) => {
+                if let Ok(payload) = serde_json::from_str::<WarfareDomainPayload>(&js) {
+                    payload.apply_to_snapshot(snap);
+                }
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                let empty = WorldStateSnapshot::default();
+                if dfp.warfare_fp == canonical_fp(&WarfareDomainRef::from_snapshot(&empty)) {
+                    WarfareDomainPayload::default().apply_to_snapshot(snap);
+                }
+            }
+            Err(_) => {}
+        }
     }
 }
 #[cfg(test)] #[path = "corp_crimewatch_store_unit_tests.rs"] mod corp_crimewatch_store_unit_tests;

@@ -25,7 +25,7 @@ pub fn reinforce_change_delay_secs(ctx: &ServerContext, sys_id: u32) -> u64 {
     if super::structure_lifecycle::space_class(ctx, sys_id) == super::structure_lifecycle::SpaceClass::HighSec { 30 * 86_400 } else { 7 * 86_400 }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AssetSafetyWrapRecord {
     pub wrap_id: i64,
     pub owner_id: i64,
@@ -48,7 +48,7 @@ pub struct AssetSafetyWrapRecord {
 }
 
 /// Per-structure lifecycle bookkeeping used by `structure_lifecycle`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StructureLifecycleState {
     pub repair_until_unix: Option<u64>, pub fight_started_unix: Option<u64>, pub reinforce_jitter_secs: i64,
@@ -59,7 +59,7 @@ pub struct StructureLifecycleState {
     #[serde(default)] pub anchoring_duration_secs: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AccessGroupRecord {
     pub group_id: i64, pub creator_id: i64, pub owner_corp_id: i64, pub name: String, pub description: String, pub members: HashMap<i64, i64>,
@@ -67,7 +67,7 @@ pub struct AccessGroupRecord {
 
 fn default_true() -> bool { true }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StructureAccessProfile {
     pub profile_id: i64, pub owner_corp_id: i64, pub name: String, pub description: String, pub access_group_ids: HashSet<i64>,
@@ -89,10 +89,10 @@ pub struct StructureAccessProfile {
     #[serde(default = "default_true")] pub target_blocked_acl: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)] #[serde(default)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)] #[serde(default)]
 pub struct InFlightGuidedBombRecord { pub bomb_id: i64, pub structure_id: i64, pub structure_corp_id: i64, pub gunner_char_id: i64, pub solar_system_id: u32, pub target_id: i64, pub bomb_type_id: u32, pub remaining_flight_s: f64 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)] #[serde(default)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)] #[serde(default)]
 pub struct StructureExtendedState {
     pub unanchoring_until_unix: HashMap<i64, u64>, pub descriptions: HashMap<i64, String>, pub active_pilot_by_structure: HashMap<i64, i64>,
     pub pending_reinforce_schedule: HashMap<i64, (u8, u8, u64)>, pub asset_safety_wraps: HashMap<i64, AssetSafetyWrapRecord>,
@@ -119,7 +119,16 @@ pub fn load_ext_state(snap: &WorldStateSnapshot) -> StructureExtendedState {
 }
 
 pub fn save_ext_state(snap: &mut WorldStateSnapshot, state: &StructureExtendedState) {
-    if let Ok(json) = serde_json::to_string(state) { snap.item_custom_names.insert(STRUCT_EXT_STATE_KEY, json); }
+    if snap.item_custom_names.contains_key(&STRUCT_EXT_STATE_KEY) {
+        if load_ext_state(snap) == *state {
+            return;
+        }
+    } else if *state == StructureExtendedState::default() {
+        return;
+    }
+    if let Ok(json) = serde_json::to_string(state) {
+        snap.item_custom_names.insert(STRUCT_EXT_STATE_KEY, json);
+    }
 }
 
 pub(crate) fn err(code: &str, message: impl Into<String>) -> BridgeRpcError { BridgeRpcError { code: code.into(), message: message.into() } }

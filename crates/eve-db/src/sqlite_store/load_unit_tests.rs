@@ -457,3 +457,97 @@ fn load_snapshot_from_sqlite_restores_all_37_tables_and_post_processes_state() {
     assert_eq!(loaded.character_doll_info[&cid].0, "dna_blob");
     assert!(!loaded.fw_system_occupations.is_empty());
 }
+
+#[test]
+fn startup_migrations_persist_before_baseline_fingerprints_and_survive_first_tx_rollback() {
+    let tmp_path = std::env::temp_dir().join(format!(
+        "evomu_startup_mig_rollback_{}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&tmp_path);
+
+    let cid = 90_000_001i64;
+    let uid: u64;
+    {
+        let mut conn = Connection::open(&tmp_path).unwrap();
+        apply_migrations(&conn).unwrap();
+
+        let mut pre_mig = build_populated_snapshot();
+        uid = pre_mig.characters[&cid].user_id;
+        // 1. Legacy per-character PLEX balance with empty account_plex_vault
+        pre_mig.account_plex_vault.clear();
+        pre_mig.characters.get_mut(&cid).unwrap().plex_balance = 450;
+        // 2. Stale next_entity_id smaller than an existing item_id (760_000_099)
+        pre_mig.next_entity_id = 100;
+        pre_mig.items.insert(
+            760_000_099,
+            InventoryItemRecord {
+                item_id: 760_000_099,
+                type_id: 34,
+                owner_id: cid,
+                location_id: 60_003_760,
+                flag: InventoryFlag::Hangar,
+                quantity: 10,
+                ..Default::default()
+            },
+        );
+        // 3. Empty FW system occupations requiring startup backfill
+        pre_mig.fw_system_occupations.clear();
+        // 4. Legacy service_state_blobs entry requiring typed service domain migration
+        pre_mig
+            .service_state_blobs
+            .insert("contract_deposit:777".into(), "125000".into());
+
+        replace_sqlite_from_snapshot(&mut conn, &pre_mig).unwrap();
+    }
+
+    let repo = WorldRepository::open_sqlite(&tmp_path).expect("open_sqlite with pending migrations");
+    repo.with_snapshot(|snap| {
+        assert_eq!(snap.account_plex_vault.get(&uid), Some(&450));
+        assert_eq!(snap.characters[&cid].plex_balance, 0);
+        assert_eq!(snap.next_entity_id, 760_000_099);
+        assert!(snap.fw_system_occupations.len() >= 175);
+        assert_eq!(
+            snap.fleet_and_social_ops.contract_deposits.get(&777),
+            Some(&125_000)
+        );
+        assert!(!snap.service_state_blobs.contains_key("contract_deposit:777"));
+    });
+
+    // Execute a failing first transaction that mutates all 4 migrated domains and returns Err.
+    // Rollback must restore the POST-migration baseline rather than reverting to pre-migration rows.
+    let abort_res: Result<(), String> = repo.try_with_mut_snapshot(|snap| {
+        snap.account_plex_vault.insert(uid, 999_999);
+        snap.characters.get_mut(&cid).unwrap().plex_balance = 888;
+        snap.next_entity_id = 899_999_999;
+        snap.fw_system_occupations.clear();
+        snap.fleet_and_social_ops.contract_deposits.clear();
+        Err("simulated first-tx failure".into())
+    });
+    assert!(abort_res.is_err());
+
+    repo.with_snapshot(|snap| {
+        assert_eq!(
+            snap.account_plex_vault.get(&uid),
+            Some(&450),
+            "rollback must preserve folded account_plex_vault"
+        );
+        assert_eq!(snap.characters[&cid].plex_balance, 0);
+        assert_eq!(
+            snap.next_entity_id, 760_000_099,
+            "rollback must preserve reconciled next_entity_id"
+        );
+        assert!(
+            snap.fw_system_occupations.len() >= 175,
+            "rollback must preserve backfilled fw_system_occupations"
+        );
+        assert_eq!(
+            snap.fleet_and_social_ops.contract_deposits.get(&777),
+            Some(&125_000),
+            "rollback must preserve migrated service domain state"
+        );
+    });
+
+    drop(repo);
+    let _ = std::fs::remove_file(&tmp_path);
+}

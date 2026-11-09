@@ -19,12 +19,14 @@ pub fn sync_dirty_to_sqlite(
         next_entity_id: snap.next_entity_id,
         ..Default::default()
     });
+    let mut meta_changed = false;
     let mut cold_changed = false;
 
     if fp.next_entity_id != snap.next_entity_id
         || fp.wal_seq != snap.wal_seq
         || fp.markets_seeded != snap.markets_seeded
     {
+        meta_changed = true;
         if fp.markets_seeded != snap.markets_seeded {
             cold_changed = true;
         }
@@ -54,6 +56,19 @@ pub fn sync_dirty_to_sqlite(
     cold_changed |= super::corp_crimewatch_store::sync_d6_corp_crimewatch(tx, snap, fp)?;
     cold_changed |= super::industry_market_pve_store::sync_d6_batch4(tx, snap, fp)?;
     cold_changed |= super::service_domains_store::sync_service_domains(tx, snap, fp)?;
+
+    let hot_changed = !delta.upserted_characters.is_empty()
+        || !delta.upserted_skills.is_empty()
+        || !delta.upserted_skill_queues.is_empty()
+        || !delta.upserted_items.is_empty()
+        || !delta.removed_items.is_empty()
+        || !delta.upserted_market_orders.is_empty()
+        || !delta.removed_market_orders.is_empty()
+        || !delta.appended_wallet_journal.is_empty()
+        || !delta.upserted_contracts.is_empty()
+        || !delta.upserted_system_states.is_empty()
+        || !delta.added_idempotency_keys.is_empty();
+    delta.dirty = meta_changed || hot_changed || cold_changed;
 
     if need_wal_delta && cold_changed {
         delta.full_snapshot = Some(Box::new(snap.clone()));
@@ -190,13 +205,13 @@ fn sync_part1_hot_tables(
         for (&tid, sk) in sk_map {
             let digest = canonical_fp(sk);
             if fp_map.get(&tid) != Some(&digest) {
-                cold_changed = true;
                 tx.execute(
                     "INSERT OR REPLACE INTO skills (character_id, type_id, level, skill_points) VALUES (?1, ?2, ?3, ?4)",
                     params![cid, tid as i64, sk.level as i64, sk.skill_points],
                 )
                 .map_err(|e| e.to_string())?;
                 fp_map.insert(tid, digest);
+                delta.upserted_skills.push((cid, sk.clone()));
             }
         }
     }
@@ -220,7 +235,6 @@ fn sync_part1_hot_tables(
     for (&cid, q) in &snap.skill_queues {
         let h = fp_skill_queue(q);
         if fp.skill_queues.get(&cid) != Some(&h) {
-            cold_changed = true;
             tx.execute(
                 "DELETE FROM skill_queues WHERE character_id = ?1",
                 params![cid],
@@ -244,6 +258,7 @@ fn sync_part1_hot_tables(
                 .map_err(|e| e.to_string())?;
             }
             fp.skill_queues.insert(cid, h);
+            delta.upserted_skill_queues.push((cid, q.clone()));
         }
     }
 

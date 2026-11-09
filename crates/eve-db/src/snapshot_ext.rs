@@ -528,7 +528,7 @@ pub struct MailingListRecord {
     pub entity_access: HashMap<i64, i64>,
     #[serde(default)]
     pub welcome_mail: Option<(String, String)>,
-    #[serde(default)]
+    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
     pub mail_ids: HashSet<i64>,
 }
 
@@ -550,9 +550,9 @@ pub struct CalendarEventRecord {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatChannelAclRecord {
-    #[serde(default)]
+    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
     pub allow_list: HashSet<i64>,
-    #[serde(default)]
+    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
     pub deny_list: HashSet<i64>,
     #[serde(default)]
     pub muted_until: HashMap<i64, (u64, String)>,
@@ -604,6 +604,7 @@ pub struct WorldStateSnapshot {
     pub kill_rights: HashMap<i64, KillRightRecord>,
     pub structures: HashMap<i64, UpwellStructureRecord>,
     pub system_states: HashMap<SolarSystemId, SystemDynamicState>,
+    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
     pub committed_idempotency_keys: HashSet<(i64, String)>,
     #[serde(default)]
     pub licensed_skins: HashMap<i64, Vec<u32>>,
@@ -613,9 +614,9 @@ pub struct WorldStateSnapshot {
     pub chat_channels: HashMap<String, ChatChannelRecord>,
     #[serde(default)]
     pub cosmic_signatures: HashMap<SolarSystemId, Vec<CosmicSignatureRecord>>,
-    #[serde(default)]
+    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
     pub read_mails: HashSet<(i64, i64)>,
-    #[serde(default)]
+    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
     pub deleted_mails: HashSet<(i64, i64)>,
     #[serde(default)]
     pub mail_labels: HashMap<i64, Vec<MailLabelRecord>>,
@@ -629,7 +630,7 @@ pub struct WorldStateSnapshot {
     pub mining_ledger: Vec<MiningLedgerRecord>,
     pub module_online_states: HashMap<i64, bool>,
     /// Fitted modules currently cycling, set by `dogmaIM.Activate` and cleared by `dogmaIM.Deactivate`.
-    #[serde(default)]
+    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
     pub module_active_states: HashSet<i64>,
     /// Charge type loaded into an active burst module when it was activated (`dogmaIM.Activate`).
     #[serde(default)]
@@ -646,7 +647,7 @@ pub struct WorldStateSnapshot {
     pub observer_mining_ledger: HashMap<i64, Vec<ObserverMiningRecord>>,
     #[serde(default)]
     pub owner_notes: HashMap<i64, OwnerNoteRecord>,
-    #[serde(default)]
+    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
     pub paused_skill_queues: HashSet<i64>,
     #[serde(default)]
     pub cosmic_anomalies: HashMap<SolarSystemId, Vec<CosmicAnomalyRecord>>,
@@ -775,7 +776,7 @@ pub struct WorldStateSnapshot {
     pub next_notification_id: i64,
     #[serde(default)]
     pub next_report_id: i64,
-    #[serde(default)]
+    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
     pub trashed_mails: HashSet<(i64, i64)>,
     #[serde(default)]
     pub mailing_lists: HashMap<i64, MailingListRecord>,
@@ -833,7 +834,7 @@ pub struct WorldStateSnapshot {
     pub combat_crimewatch_state: PersistedCombatCrimewatchState,
     #[serde(default)]
     pub zarzakh_gate_locks: HashMap<i64, (i64, u64)>,
-    #[serde(default)]
+    #[serde(default, with = "crate::durable_domain_types::sorted_map_of_sets_serde")]
     pub structure_docking_acl_denied: HashMap<i64, HashSet<i64>>,
     #[serde(default)]
     pub sp6_lifecycle: Sp6PersistedState,

@@ -299,6 +299,7 @@ pub struct QuasarCommerceStore {
     pub failed_fulfillments: Vec<FailedFulfillmentRecord>,
     pub targeted_offers: BTreeMap<String, TargetedOfferAdminRecord>,
     pub acl_registry: Option<Vec<QuasarAclRecord>>,
+    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
     pub lp_asset_ops_completed: HashSet<String>,
 }
 
@@ -377,7 +378,9 @@ pub struct FleetAndSocialOpsStore {
     pub fleet_saved_setups: HashMap<i64, HashMap<String, FleetSetupRecord>>,
     pub fleet_stored_formations: HashMap<i64, (i64, f64, f64)>,
     pub fleet_adverts: HashMap<i64, FleetAdvertRecord>,
+    #[serde(default, with = "crate::durable_domain_types::sorted_map_of_sets_serde")]
     pub fleet_join_requests: HashMap<i64, HashSet<i64>>,
+    #[serde(default, with = "crate::durable_domain_types::sorted_map_of_sets_serde")]
     pub fleet_watchlist: HashMap<i64, HashSet<i64>>,
     pub fleet_voice_enabled: HashMap<i64, bool>,
     pub fleet_loot_logging: HashMap<i64, bool>,
@@ -388,13 +391,17 @@ pub struct FleetAndSocialOpsStore {
     pub contract_deposits: HashMap<i64, i64>,
     pub lp_store_offers: Option<Vec<LPOffer>>,
     pub delayed_rewards: HashMap<i64, HashMap<String, Vec<serde_json::Value>>>,
+    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
     pub mission_taxed_journal: HashSet<i64>,
+    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
     pub agent_global_disabled_missions: HashSet<u32>,
+    #[serde(default, with = "crate::durable_domain_types::sorted_map_of_sets_serde")]
     pub agent_char_disabled_missions: HashMap<i64, HashSet<u32>>,
     #[serde(with = "tuple_map_serde")]
     pub agent_replay_ts: HashMap<(i64, i64), u64>,
     pub signal_tracker_subs: HashMap<u32, Vec<i64>>,
     pub pending_probe_scans: Vec<(i64, Vec<i64>, Vec<PyRep>, Vec<PyRep>, Vec<PyRep>, i64)>,
+    #[serde(default, with = "crate::durable_domain_types::sorted_map_of_sets_serde")]
     pub wh_local_witnesses: HashMap<String, HashSet<i64>>,
 }
 
@@ -728,10 +735,12 @@ pub struct ClusterAndRuntimeStore {
     pub ship_clone_offers: HashMap<i64, (i64, i64)>,
     pub mct_slots: HashMap<u64, Vec<u64>>,
     pub account_resculpt_tokens: HashMap<String, u32>,
+    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
     pub resculpt_pending: HashSet<i64>,
     pub char_cohorts: HashMap<i64, Vec<String>>,
     pub user_cohorts: HashMap<u64, Vec<String>>,
     pub character_locks: HashMap<i64, String>,
+    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
     pub omega_downgraded: HashSet<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_runtime_json: Option<String>,

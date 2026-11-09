@@ -1,10 +1,9 @@
 //! SQLite persistence for first-class typed service domain registries (`#588`).
 
-use crate::sqlite_store::fingerprints::{FnvHasher, TableFingerprints};
+use crate::sqlite_store::fingerprints::{canonical_fp, TableFingerprints};
 use crate::types::WorldStateSnapshot;
 use rusqlite::{params, Connection, Transaction};
 use serde::{de::DeserializeOwned, Serialize};
-use serde_json::Value;
 
 pub const SERVICE_DOMAINS_SCHEMA_VERSION: i64 = 6;
 
@@ -52,53 +51,11 @@ pub fn apply_service_domains_migration(conn: &Connection) -> Result<(), String> 
     Ok(())
 }
 
-fn hash_json_value(h: &mut FnvHasher, value: &Value) {
-    match value {
-        Value::Null => h.write_u8(0),
-        Value::Bool(b) => {
-            h.write_u8(1);
-            h.write_bool(*b);
-        }
-        Value::Number(n) => {
-            h.write_u8(2);
-            h.write_str(&n.to_string());
-        }
-        Value::String(s) => {
-            h.write_u8(3);
-            h.write_str(s);
-        }
-        Value::Array(arr) => {
-            h.write_u8(4);
-            h.write_u64(arr.len() as u64);
-            for item in arr {
-                hash_json_value(h, item);
-            }
-        }
-        Value::Object(map) => {
-            h.write_u8(5);
-            h.write_u64(map.len() as u64);
-            for (k, v) in map {
-                h.write_str(k);
-                hash_json_value(h, v);
-            }
-        }
-    }
-}
-
 fn fp_domain<T: Default + PartialEq + Serialize>(val: &T) -> u64 {
     if *val == T::default() {
         return 0;
     }
-    let mut h = FnvHasher::new();
-    match serde_json::to_value(val) {
-        Ok(value) => hash_json_value(&mut h, &value),
-        Err(_) => {
-            if let Ok(s) = serde_json::to_string(val) {
-                h.write_str(&s);
-            }
-        }
-    }
-    let out = h.finish();
+    let out = canonical_fp(val);
     if out == 0 {
         1
     } else {
@@ -107,19 +64,44 @@ fn fp_domain<T: Default + PartialEq + Serialize>(val: &T) -> u64 {
 }
 
 fn load_domain_row<T: Default + DeserializeOwned>(conn: &Connection, key: &str, dst: &mut T) {
-    let raw: Option<String> = conn
-        .query_row(
-            "SELECT payload_json FROM service_domain_state WHERE domain_key = ?1",
-            params![key],
-            |r| r.get(0),
-        )
-        .ok();
-    if let Some(json) = raw {
-        if let Ok(parsed) = serde_json::from_str::<T>(&json) {
-            *dst = parsed;
+    match conn.query_row(
+        "SELECT payload_json FROM service_domain_state WHERE domain_key = ?1",
+        params![key],
+        |r| r.get::<_, String>(0),
+    ) {
+        Ok(json) => {
+            if let Ok(parsed) = serde_json::from_str::<T>(&json) {
+                *dst = parsed;
+            }
         }
-    } else {
-        *dst = T::default();
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            *dst = T::default();
+        }
+        Err(_) => {}
+    }
+}
+
+fn rollback_domain_row<T: Default + DeserializeOwned>(
+    conn: &Connection,
+    key: &str,
+    expected_fp: u64,
+    dst: &mut T,
+) {
+    match conn.query_row(
+        "SELECT payload_json FROM service_domain_state WHERE domain_key = ?1",
+        params![key],
+        |r| r.get::<_, String>(0),
+    ) {
+        Ok(json) => {
+            if let Ok(parsed) = serde_json::from_str::<T>(&json) {
+                *dst = parsed;
+            }
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) if expected_fp == 0 => {
+            // Committed baseline was `T::default()` (stored as an omitted row); revert dirty mutations.
+            *dst = T::default();
+        }
+        Err(_) => {}
     }
 }
 
@@ -224,7 +206,7 @@ pub fn rollback_service_domains(
     macro_rules! rollback_one {
         ($field:ident, $key:expr) => {
             if fp_domain(&snap.$field) != fp.service_domains.$field {
-                load_domain_row(conn, $key, &mut snap.$field);
+                rollback_domain_row(conn, $key, fp.service_domains.$field, &mut snap.$field);
             }
         };
     }

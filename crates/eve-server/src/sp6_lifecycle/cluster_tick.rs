@@ -1311,10 +1311,26 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     };
     let prev = db_prev.unwrap_or_else(|| now_unix.saturating_sub(1));
     let elapsed_secs = now_unix.saturating_sub(prev).max(1);
-    let persisted = ctx
-        .cluster_tick_persisted_unix
-        .load(std::sync::atomic::Ordering::Relaxed);
-    if db_prev.is_none() || now_unix >= persisted.saturating_add(60) {
+    let persisted = {
+        let cur = ctx
+            .cluster_tick_persisted_unix
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if cur == 0 {
+            if let Some(ts) = db_prev {
+                ctx.cluster_tick_persisted_unix
+                    .store(ts, std::sync::atomic::Ordering::Relaxed);
+                ts
+            } else {
+                0
+            }
+        } else {
+            cur
+        }
+    };
+    let should_persist_tick = db_prev.is_none()
+        || (now_unix >= persisted.saturating_add(60)
+            && ctx.db.with_snapshot(|s| s.pve_special_sites.initialized));
+    if should_persist_tick {
         ctx.db.with_mut_snapshot(|snap| {
             snap.service_state_blobs
                 .insert("cluster_tick_last_unix".into(), now_unix.to_string());

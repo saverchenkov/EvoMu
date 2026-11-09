@@ -88,27 +88,32 @@ fn compute_d6_social_fp_detects_every_single_social_collection_mutation() {
         },
         "calendar_events",
     );
-    assert_changes(
-        &|s| {
-            s.bookmarks.insert(
-                1,
-                BookmarkRecord {
-                    bookmark_id: 1,
-                    owner_id: 1,
-                    label: "BM".into(),
-                    solar_system_id: 30_000_142,
-                    x: 0.0,
-                    y: 0.0,
-                    z: 0.0,
-                    item_id: None,
-                    memo: String::new(),
-                    folder_id: None,
-                    is_shared: false,
-                },
-            );
-        },
-        "bookmarks",
-    );
+    // `snap.bookmarks` is persisted via `bookmarks` in `sync.rs`, so mutating `bookmarks` alone
+    // must NOT dirty `social_store` fingerprints.
+    {
+        let mut s = base.clone();
+        s.bookmarks.insert(
+            1,
+            BookmarkRecord {
+                bookmark_id: 1,
+                owner_id: 1,
+                label: "BM".into(),
+                solar_system_id: 30_000_142,
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                item_id: None,
+                memo: String::new(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        assert_eq!(
+            compute_d6_social_fp(&s),
+            base_fp,
+            "mutating bookmarks table must not dirty social_store fingerprints"
+        );
+    }
     assert_changes(&|s| { s.bookmark_subfolders.insert(1, 2); }, "bookmark_subfolders");
     assert_changes(&|s| { s.bookmark_expiries.insert(1, 500); }, "bookmark_expiries");
     assert_changes(
@@ -126,10 +131,31 @@ fn compute_d6_social_fp_detects_every_single_social_collection_mutation() {
         "bookmark_folders",
     );
     assert_changes(&|s| { s.access_groups.insert(5, vec![1, 2]); }, "access_groups");
-    assert_changes(
-        &|s| { s.bookmark_folder_known_by.insert((10, 1), true); },
-        "bookmark_folder_known_by",
-    );
+    {
+        let mut folder_base = base.clone();
+        folder_base.bookmark_folders.insert(
+            10,
+            BookmarkFolderRecord {
+                folder_id: 10,
+                owner_id: 1,
+                folder_name: "F".into(),
+                ..Default::default()
+            },
+        );
+        let folder_fp = compute_d6_social_fp(&folder_base);
+
+        let mut with_known = folder_base.clone();
+        with_known.bookmark_folder_known_by.insert((10, 1), true);
+        assert_ne!(compute_d6_social_fp(&with_known), folder_fp);
+
+        let mut with_acl = folder_base.clone();
+        with_acl.bookmark_folder_acls.insert(10, vec![5]);
+        assert_ne!(compute_d6_social_fp(&with_acl), folder_fp);
+
+        let mut with_parent = folder_base;
+        with_parent.bookmark_subfolder_parents.insert(10, 1);
+        assert_ne!(compute_d6_social_fp(&with_parent), folder_fp);
+    }
     assert_changes(
         &|s| {
             s.chat_channels.insert(
@@ -328,4 +354,173 @@ fn social_store_load_edge_cases_for_bookmark_meta_folders_and_chat_acls() {
     loaded.bookmark_folders.clear();
     rollback_d6_social(&conn, &mut loaded, &fp);
     assert_eq!(loaded.bookmark_folders.len(), 2);
+}
+
+#[test]
+fn social_store_single_domain_mutation_never_wipes_untouched_tables() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    apply_migrations(&conn).unwrap();
+    apply_d6_social_migration(&conn).unwrap();
+
+    let mut snap = WorldStateSnapshot::default();
+    snap.read_mails.insert((1, 100));
+    snap.deleted_mails.insert((1, 101));
+    snap.trashed_mails.insert((1, 102));
+    snap.mail_labels.insert(
+        1,
+        vec![MailLabelRecord {
+            label_id: 1,
+            name: "Ops".into(),
+            color: "#ffffff".into(),
+        }],
+    );
+    snap.mail_assigned_labels.insert((1, 100), vec![1]);
+    snap.mailing_lists.insert(
+        50,
+        MailingListRecord {
+            list_id: 50,
+            name: "Ping".into(),
+            owner_id: 1,
+            default_access: 1,
+            default_role: 0,
+            cost: 0,
+            members: HashMap::from([(1, 3), (2, 0)]),
+            entity_access: HashMap::from([(98_000_001, 1)]),
+            welcome_mail: None,
+            mail_ids: HashSet::from([100, 200]),
+        },
+    );
+    snap.calendar_events.insert(
+        60,
+        CalendarEventRecord {
+            event_id: 60,
+            owner_id: 1,
+            creator_id: 1,
+            event_date_time: 1_700_000_000,
+            duration: 60,
+            importance: 1,
+            title: "CTA".into(),
+            description: "Formup".into(),
+            scope: "Corporation".into(),
+            responses: HashMap::from([(1, 1), (2, 2)]),
+            is_deleted: false,
+        },
+    );
+    snap.bookmark_subfolders.insert(100, 10);
+    snap.bookmark_expiries.insert(100, 1_900_000_000);
+    snap.bookmark_folders.insert(
+        10,
+        BookmarkFolderRecord {
+            folder_id: 10,
+            owner_id: 1,
+            folder_name: "Tac".into(),
+            ..Default::default()
+        },
+    );
+    snap.access_groups.insert(7, vec![1, 2]);
+    snap.chat_channels.insert(
+        "player_77".into(),
+        ChatChannelRecord {
+            channel_id: "player_77".into(),
+            name: "Intel".into(),
+            motd: String::new(),
+            owner_id: Some(1),
+            members: HashSet::from([1, 2]),
+            is_system_local: false,
+            solar_system_id: None,
+            is_private: true,
+            operators: HashSet::from([1]),
+            password: None,
+            is_delayed_local: false,
+        },
+    );
+    let contact = SocialContactRecord {
+        contact_id: 2,
+        contact_type: "character".into(),
+        standing: 5.0,
+        is_watched: true,
+        is_blocked: false,
+        label_ids: vec![1],
+    };
+    snap.char_contacts.insert(1, vec![contact.clone()]);
+    snap.char_contact_notifications.insert(
+        1,
+        vec![SocialContactNotificationRecord {
+            notification_id: 9,
+            sender_character_id: 2,
+            send_date_unix: 1_700_000_000,
+            standing_level: 5.0,
+            message: "o7".into(),
+        }],
+    );
+    snap.char_contact_labels.insert(1, vec![(1, "Blue".into())]);
+    snap.corp_contacts.insert(98_000_001, vec![contact.clone()]);
+    snap.corp_contact_labels
+        .insert(98_000_001, vec![(1, "CorpBlue".into(), 0)]);
+    snap.alliance_contacts.insert(99_000_001, vec![contact]);
+    snap.alliance_contact_labels
+        .insert(99_000_001, vec![(1, "AllyBlue".into())]);
+    snap.char_notes.insert((1, 2), "Trusted FC".into());
+
+    let mut fp = TableFingerprints::default();
+    {
+        let tx = conn.transaction().unwrap();
+        assert!(sync_d6_social(&tx, &snap, &mut fp).unwrap());
+        tx.commit().unwrap();
+    }
+
+    // Install BEFORE DELETE AND BEFORE INSERT triggers on all 18 untouched tables so any
+    // monolithic full-table wipe (`DELETE FROM ...` + re-insert) aborts immediately.
+    let untouched_tables = [
+        "deleted_mails",
+        "trashed_mails",
+        "mail_labels",
+        "mail_assigned_labels",
+        "mailing_lists",
+        "calendar_events",
+        "bookmark_meta",
+        "bookmark_folders",
+        "access_groups",
+        "chat_channels",
+        "char_contacts",
+        "char_contact_notifications",
+        "char_contact_labels",
+        "corp_contacts",
+        "corp_contact_labels",
+        "alliance_contacts",
+        "alliance_contact_labels",
+        "char_notes",
+    ];
+    for tbl in untouched_tables {
+        conn.execute_batch(&format!(
+            "CREATE TEMP TRIGGER no_del_{tbl} BEFORE DELETE ON {tbl} BEGIN SELECT RAISE(ABORT, 'unexpected delete on {tbl}'); END;
+             CREATE TEMP TRIGGER no_ins_{tbl} BEFORE INSERT ON {tbl} BEGIN SELECT RAISE(ABORT, 'unexpected insert on {tbl}'); END;"
+        ))
+        .unwrap();
+    }
+
+    // Mark a single new mail read: only `read_mails` may receive 1 row insert.
+    snap.read_mails.insert((1, 105));
+    let before_changes = conn.total_changes();
+    {
+        let tx = conn.transaction().unwrap();
+        assert!(sync_d6_social(&tx, &snap, &mut fp).unwrap());
+        tx.commit().unwrap();
+    }
+    assert_eq!(
+        conn.total_changes() - before_changes,
+        1,
+        "marking 1 mail read must execute exactly 1 SQLite row write"
+    );
+
+    // JSON roundtrip scrambles HashMap/HashSet capacities and SipHash seeds; resync must be a 0-write no-op.
+    let roundtripped: WorldStateSnapshot =
+        serde_json::from_str(&serde_json::to_string(&snap).unwrap()).unwrap();
+    let before_resync = conn.total_changes();
+    {
+        let tx = conn.transaction().unwrap();
+        assert!(!sync_d6_social(&tx, &roundtripped, &mut fp).unwrap());
+        tx.commit().unwrap();
+    }
+    assert_eq!(conn.total_changes(), before_resync);
 }

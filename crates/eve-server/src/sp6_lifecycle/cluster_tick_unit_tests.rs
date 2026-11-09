@@ -427,11 +427,8 @@ async fn idle_cluster_tick_avoids_per_tick_sqlite_wal_writes() {
     let sde_path = std::env::var("EVOMU_SDE_PATH").unwrap_or_else(|_| "data/evomu_sde.sqlite".into());
     let sde = Arc::new(eve_sde::SdeRegistry::open(&sde_path).unwrap_or_default());
     let ctx = ServerContext::with_sde_and_repository(sde, db);
-    // Freeze wall-clock drift and keep the 2 warmup + 5 measured 1 Hz ticks clear of a `% 60 == 0` periodic NPC-mining DB sync.
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_770_000_010)));
     ctx.clock().set_paused(true);
-    if ctx.now_unix() % 60 >= 50 || ctx.now_unix() % 60 == 0 {
-        ctx.clock().advance_secs(61 - (ctx.now_unix() % 60));
-    }
     ctx.seed_demo_world_fixtures();
     // Place demo char in space in Maurasi (30000140) with active Venture (32880) like Batch P
     let char_id = 90_000_001_i64;
@@ -630,4 +627,166 @@ async fn sov_claimed_without_sov_hubs_entry_stays_idle_clean_and_advances_indice
     assert_eq!(unclaimed_strat, 0, "unclaimed system must still remain at strategic_index 0");
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn idle_1hz_cluster_ticks_do_not_append_wal_snapshots() {
+    let dir = std::env::temp_dir();
+    let snap_path = dir.join(format!("evomu_idle_cluster_tick_{}.json", std::process::id()));
+    let wal_path = snap_path.with_extension("json.wal");
+    let _ = std::fs::remove_file(&snap_path);
+    let _ = std::fs::remove_file(&wal_path);
+
+    let repo = Arc::new(
+        eve_db::WorldRepository::new_empty_with_snapshot_path(Some(snap_path.clone()))
+            .expect("init json repo"),
+    );
+    let ctx = ServerContext::with_repository(repo);
+    let base_unix = 1_770_000_000_u64;
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(base_unix)));
+
+    // Seed structures (including ACL profile state, online Metenox Moon Drill, active Moon Extraction,
+    // Sovereignty Hub), an active industry job, and an active non-expired safe-logoff timer.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            1_000_000_000_101,
+            eve_db::UpwellStructureRecord {
+                structure_id: 1_000_000_000_101,
+                type_id: 35832,
+                owner_corp_id: 98_000_001,
+                solar_system_id: 30_000_142,
+                name: "Idle Astrahus".into(),
+                position: [1_000_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 1_000,
+                shield_hp: 1_000_000.0,
+                armor_hp: 1_000_000.0,
+                hull_hp: 1_000_000.0,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            1_000_000_000_102,
+            eve_db::UpwellStructureRecord {
+                structure_id: 1_000_000_000_102,
+                type_id: 81826,
+                owner_corp_id: 98_000_001,
+                solar_system_id: 30_002_537,
+                name: "Idle Metenox".into(),
+                position: [2_000_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 1_000,
+                shield_hp: 500_000.0,
+                armor_hp: 500_000.0,
+                hull_hp: 500_000.0,
+                ..Default::default()
+            },
+        );
+        snap.auto_moon_miners.insert(
+            1_000_000_000_102,
+            eve_db::AutoMoonMinerRecord {
+                structure_id: 1_000_000_000_102,
+                fuel_units_remaining: 500,
+                magmatic_gas_remaining: 5_000,
+                efficiency: 0.4,
+                cycle_duration_seconds: 3_600,
+                last_cycle_unix: base_unix,
+                ore_type_id: 45490,
+                hourly_yield: 1_000,
+                status: "Active".into(),
+            },
+        );
+        snap.moon_extractions.insert(
+            1_000_000_000_101,
+            eve_db::MoonExtractionRecord {
+                structure_id: 1_000_000_000_101,
+                moon_id: 40_009_083,
+                extraction_start_unix: base_unix,
+                chunk_arrival_unix: base_unix + 86_400,
+                natural_decay_unix: base_unix + 172_800,
+                status: "Started".into(),
+                auto_fracture: true,
+                event_id: 1,
+                moon_ores: Vec::new(),
+                spawned_asteroid_ids: Vec::new(),
+            },
+        );
+        let mut ext = crate::services::station_structure::structure_upwell_ops::StructureExtendedState::default();
+        let mut prof = crate::services::station_structure::structure_upwell_ops::StructureAccessProfile::default();
+        prof.profile_id = 1;
+        prof.allowed_characters.extend([90_000_001, 90_000_002, 90_000_003]);
+        prof.blocked_characters.extend([90_000_010, 90_000_011]);
+        ext.access_profiles.insert(1_000_000_000_101, prof);
+        ext.lifecycle.insert(
+            1_000_000_000_101,
+            crate::services::station_structure::structure_upwell_ops::StructureLifecycleState {
+                last_fuel_tick_unix: Some(base_unix),
+                ..Default::default()
+            },
+        );
+        ext.lifecycle.insert(
+            1_000_000_000_102,
+            crate::services::station_structure::structure_upwell_ops::StructureLifecycleState {
+                last_fuel_tick_unix: Some(base_unix),
+                ..Default::default()
+            },
+        );
+        crate::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
+
+        snap.industry_jobs.insert(
+            610_500,
+            eve_db::IndustryJobRecord {
+                job_id: 610_500,
+                installer_id: 90_000_001,
+                facility_id: 60_003_760,
+                blueprint_item_id: 100_000_500,
+                blueprint_type_id: 683,
+                activity_id: 1,
+                runs: 1,
+                product_type_id: 587,
+                status: "Active".into(),
+                duration_seconds: 3_600,
+                start_unix: base_unix,
+                ..Default::default()
+            },
+        );
+        snap.sp6_lifecycle.abyssal_sessions.insert(
+            90_000_001,
+            AbyssalPersistedSession {
+                char_id: 90_000_001,
+                ship_id: 100_000_001,
+                pocket_system_id: 32_000_001,
+                origin_system_id: 30_000_142,
+                entered_unix: base_unix,
+                collapse_at_unix: base_unix + 1_200,
+            },
+        );
+    });
+
+    // Run 1 initial cold-boot tick to initialize once-per-boot / once-per-day fields, then checkpoint.
+    tick_background_cluster(&ctx).await;
+    ctx.db.save_snapshot_to_file(&snap_path).expect("checkpoint after cold-boot tick");
+    assert!(!wal_path.exists());
+
+    let seq_after_warmup = ctx.db.with_snapshot(|s| s.wal_seq);
+    let epoch_after_warmup = ctx.db.state_epoch();
+
+    // Advance 10 consecutive 1 Hz ticks: zero `.json.wal` writes, zero `wal_seq` bumps, zero `state_epoch` bumps.
+    for _ in 0..10 {
+        ctx.clock().advance_secs(1);
+        tick_background_cluster(&ctx).await;
+    }
+
+    assert!(
+        !wal_path.exists(),
+        "idle 1 Hz cluster ticks must not append full-snapshot or no-op records to .json.wal"
+    );
+    assert_eq!(ctx.db.with_snapshot(|s| s.wal_seq), seq_after_warmup);
+    assert_eq!(ctx.db.state_epoch(), epoch_after_warmup);
+
+    drop(ctx);
+    let _ = std::fs::remove_file(&snap_path);
+    let _ = std::fs::remove_file(&wal_path);
 }

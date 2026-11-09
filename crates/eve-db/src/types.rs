@@ -1303,7 +1303,7 @@ pub struct ChatChannelRecord {
     pub is_system_local: bool,
     pub solar_system_id: Option<SolarSystemId>,
     pub is_private: bool,
-    #[serde(default)]
+    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
     pub operators: HashSet<i64>,
     #[serde(default)]
     pub password: Option<String>,

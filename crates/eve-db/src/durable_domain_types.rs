@@ -45,10 +45,10 @@ pub mod sorted_set_serde {
     pub fn serialize<S, T>(set: &HashSet<T>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
-        T: Serialize + Copy + Ord,
+        T: Serialize + Ord,
     {
-        let mut items: Vec<T> = set.iter().copied().collect();
-        items.sort();
+        let mut items: Vec<&T> = set.iter().collect();
+        items.sort_unstable();
         items.serialize(serializer)
     }
 
@@ -59,6 +59,50 @@ pub mod sorted_set_serde {
     {
         let items: Vec<T> = Vec::deserialize(deserializer)?;
         Ok(items.into_iter().collect())
+    }
+}
+
+pub mod sorted_map_of_sets_serde {
+    use serde::ser::SerializeMap;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::{HashMap, HashSet};
+    use std::hash::Hash;
+
+    struct SortedSetRef<'a, V>(&'a HashSet<V>);
+
+    impl<V: Serialize + Ord> Serialize for SortedSetRef<'_, V> {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            super::sorted_set_serde::serialize(self.0, serializer)
+        }
+    }
+
+    pub fn serialize<S, K, V>(
+        map: &HashMap<K, HashSet<V>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        K: Serialize + Ord,
+        V: Serialize + Ord,
+    {
+        let mut entries: Vec<(&K, &HashSet<V>)> = map.iter().collect();
+        entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+        let mut ser_map = serializer.serialize_map(Some(entries.len()))?;
+        for (k, set) in entries {
+            ser_map.serialize_entry(k, &SortedSetRef(set))?;
+        }
+        ser_map.end()
+    }
+
+    pub fn deserialize<'de, D, K, V>(
+        deserializer: D,
+    ) -> Result<HashMap<K, HashSet<V>>, D::Error>
+    where
+        D: Deserializer<'de>,
+        K: Deserialize<'de> + Eq + Hash,
+        V: Deserialize<'de> + Eq + Hash,
+    {
+        HashMap::<K, HashSet<V>>::deserialize(deserializer)
     }
 }
 
@@ -587,7 +631,7 @@ pub struct PersistedInsurgencyState {
     pub campaign_outcomes: HashMap<i64, String>,
     #[serde(default)]
     pub surrender_ihub_vulnerable_unix: HashMap<u32, u64>,
-    #[serde(default)]
+    #[serde(default, with = "sorted_set_serde")]
     pub active_state_notified: HashSet<i64>,
 }
 

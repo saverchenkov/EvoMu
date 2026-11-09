@@ -40,7 +40,7 @@ pub struct PvpArenaMatchInstance {
     pub started_unix: u64,
     pub active: bool,
     pub winner_char_id: Option<i64>,
-    #[serde(default)]
+    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
     pub exited_pilots: HashSet<i64>,
     #[serde(default)]
     pub end_gate_id: i64,
@@ -56,6 +56,7 @@ pub struct PvpFilamentStore {
     pub seeded_default_events: bool,
     pub active_matches: HashMap<i64, PvpArenaMatchInstance>,
     pub match_teams: HashMap<i64, Vec<Vec<i64>>>,
+    #[serde(default, with = "crate::durable_domain_types::sorted_map_of_sets_serde")]
     pub match_eliminated: HashMap<i64, HashSet<i64>>,
     pub match_arena_offsets: HashMap<i64, [f64; 3]>,
     pub match_filament_types: HashMap<i64, u32>,
