@@ -529,7 +529,6 @@ pub(crate) async fn handle_multi_add(
             let old_flag = it.flag;
             let old_flag_u16 = old_flag as u16;
             let old_loc = it.location_id;
-            let old_owner = it.owner_id;
             let it_tid = it.type_id;
             let it_qty = it.quantity;
             if old_loc != new_loc {
@@ -550,7 +549,6 @@ pub(crate) async fn handle_multi_add(
                 it.owner_id = char_id;
             }
             it.version += 1;
-            let moved_rec = it.clone();
             snap.module_online_states.remove(&item_id);
             snap.module_active_states.remove(&item_id);
             snap.module_active_charges.remove(&item_id);

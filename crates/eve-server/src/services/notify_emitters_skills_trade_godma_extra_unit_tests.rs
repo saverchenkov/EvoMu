@@ -402,7 +402,18 @@ async fn dogma_set_module_online_and_offline_burnout_capacitor_and_reactivation_
     // 4. Raise capacitor to 75% (750.0 / 1000.0) -> succeeds in space, then offline succeeds
     cs.capacitor = 750.0;
     sys.set_combat_state(ship_id, cs).await.unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            3454,
+            eve_db::TrainedSkillRecord {
+                type_id: 3454,
+                level: 3,
+                skill_points: 24_000.0,
+            },
+        );
+    });
     let mut fit = eve_dogma::ShipFittingEngine::from_sde(ship_id, 587, &ctx.sde);
+    fit.set_character_skills(std::collections::HashMap::from([(3454, 3)]));
     fit.modules.insert(
         mod_id,
         eve_dogma::FittedModule {

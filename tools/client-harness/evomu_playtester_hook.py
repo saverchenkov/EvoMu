@@ -2505,21 +2505,41 @@ def _execute_action(sm, action):
                 done_flag[0] = True
 
         def _count_active_modal_dialogs():
+            seen_modals = set()
+            reg = getattr(uicore, "registry", None) if uicore is not None else None
+            if reg is not None and hasattr(reg, "GetWindows"):
+                try:
+                    for w in list(reg.GetWindows() or []):
+                        if not getattr(w, "destroyed", False) and _is_visible(w):
+                            cls_n = w.__class__.__name__
+                            if (
+                                getattr(w, "isModal", False)
+                                or "MessageBox" in cls_n
+                                or "Popup" in cls_n
+                                or "HybridWindow" in cls_n
+                                or "Dialog" in cls_n
+                            ):
+                                seen_modals.add(id(w))
+                except Exception:
+                    pass
             modal_layer = getattr(layers, "modal", None) if layers is not None else None
-            cnt = 0
             if modal_layer is not None:
-                for mch in list(getattr(modal_layer, "children", []) or []):
-                    if not getattr(mch, "destroyed", False) and _is_visible(mch):
-                        cls_n = mch.__class__.__name__
-                        if (
-                            getattr(mch, "isModal", False)
-                            or "MessageBox" in cls_n
-                            or "Popup" in cls_n
-                            or "HybridWindow" in cls_n
-                            or "Dialog" in cls_n
-                        ):
-                            cnt += 1
-            return cnt
+                def _scan_modal_node(node, depth):
+                    if node is None or depth > 3 or getattr(node, "destroyed", False) or not _is_visible(node):
+                        return
+                    cls_n = node.__class__.__name__
+                    if (
+                        getattr(node, "isModal", False)
+                        or "MessageBox" in cls_n
+                        or "Popup" in cls_n
+                        or "HybridWindow" in cls_n
+                        or "Dialog" in cls_n
+                    ):
+                        seen_modals.add(id(node))
+                    for sub in list(getattr(node, "children", []) or []):
+                        _scan_modal_node(sub, depth + 1)
+                _scan_modal_node(modal_layer, 0)
+            return len(seen_modals)
 
         pre_layer_modals = _count_active_modal_dialogs()
         uthread.new(_worker)

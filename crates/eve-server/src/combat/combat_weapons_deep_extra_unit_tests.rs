@@ -494,13 +494,18 @@ async fn weapons_projectile_zero_cap_safety_green_yellow_and_spool_banks() {
         .unwrap();
 
     let (proj_mod_tid, ammo_tid) = ctx.sde.types.values()
-        .filter(|mt| mt.group_id == 55)
+        .filter(|mt| {
+            mt.group_id == 55
+                && mt.default_attributes.get(&30).copied().unwrap_or(0.0) <= 25.0
+                && mt.default_attributes.get(&50).copied().unwrap_or(0.0) <= 50.0
+        })
         .find_map(|mt| ctx.sde.types.values().find(|ct| ServerContext::is_charge_compatible_with_weapon(mt, ct)).map(|ct| (mt.type_id, ct.type_id)))
         .unwrap();
     let (proj_mod, ammo_item) = (150_100_001_i64, 150_100_002_i64);
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(proj_mod, make_item(proj_mod, proj_mod_tid, shooter_char, shooter_ship, InventoryFlag::HiSlot0, 1));
         snap.items.insert(ammo_item, make_item(ammo_item, ammo_tid, shooter_char, shooter_ship, InventoryFlag::HiSlot0, 10));
+        snap.module_online_states.insert(proj_mod, true);
     });
     let mut session = eve_machonet::SessionState::new(1);
     session.user_id = Some(1);

@@ -330,7 +330,17 @@ async fn fitting_module_cycles_error_guards_and_activation_paths() {
     let cap_booster_id = 960_002_i64;
     let cloak_id = 960_003_i64;
     let bubble_id = 960_004_i64;
-    let cap_booster_tid = ctx.sde.types.values().find(|t| t.group_id == 76).map(|t| t.type_id).unwrap_or(3568);
+    let cap_booster_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| {
+            t.group_id == 76
+                && t.default_attributes.get(&30).copied().unwrap_or(0.0) <= 25.0
+                && t.default_attributes.get(&50).copied().unwrap_or(0.0) <= 50.0
+        })
+        .map(|t| t.type_id)
+        .unwrap_or(3568);
     let cloak_tid = 11370_u32;
 
     ctx.db.with_mut_snapshot(|snap| {

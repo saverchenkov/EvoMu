@@ -1327,7 +1327,6 @@ pub fn handle(
                     if let Some(corp) = snap.corporations.get_mut(&caller_corp_id) {
                         let bal_after = corp.division_balance(div_id).checked_sub(broker_fee).unwrap_or(IskCents(0));
                         corp.set_division_balance(div_id, bal_after);
-                        buyer_acct_after = Some((buyer_acct_key_str.clone(), caller_corp_id, bal_after.to_wire_f64()));
                         snap.append_journal(caller_corp_id, "MarketBrokerFee", broker_fee, bal_after, format!("Broker fee for corporate order on type {type_id}"));
                         Some(bal_after)
                     } else {
@@ -1336,7 +1335,6 @@ pub fn handle(
                 } else if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.balance = ch.balance.checked_sub(broker_fee).unwrap_or(IskCents(0));
                     let bal_after = ch.balance;
-                    buyer_acct_after = Some(("cash".to_string(), char_id, bal_after.to_wire_f64()));
                     snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
                         owner_id: char_id,
                         entry_type: "MarketBrokerFee",
@@ -1374,7 +1372,7 @@ pub fn handle(
                     })
                 };
                 if let Some(bal) = escrow_bal {
-                    buyer_acct_after = Some((buyer_acct_key_str.clone(), order_owner_id, bal.to_wire_f64()));
+                    buyer_acct_after = Some((use_corp, order_owner_id, div_id, bal));
                 }
 
                 snap.next_entity_id += 1;

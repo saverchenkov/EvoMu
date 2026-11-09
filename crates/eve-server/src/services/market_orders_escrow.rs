@@ -1271,9 +1271,6 @@ pub fn handle_orders_escrow(
 
                 let mut total_sales_tax = IskCents(0);
                 let mut orders_created = Vec::with_capacity(planned_fills.len());
-                let mut buyer_bal_after: Option<f64> = None;
-                let mut seller_acct_updates: Vec<(bool, i64, String, f64)> = Vec::new();
-                let mut delivered_item_records: Vec<InventoryItemRecord> = Vec::new();
                 let tax_collector = crate::services::wallet_serverops::tax_collector_id(ctx);
                 let mut buyer_bal_final: Option<IskCents> = None;
                 let mut seller_acct_updates: Vec<(bool, i64, u8, IskCents)> = Vec::new();

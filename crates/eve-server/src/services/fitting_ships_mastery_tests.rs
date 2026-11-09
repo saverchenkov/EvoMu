@@ -274,6 +274,7 @@ async fn ships_mastery_leave_ship_corvette_mastery_killmarks_repair_simulation_t
     // issues a Corvette, and emits OnItemChange + OnSessionChanged; calling again inside Corvette fails.
     let rifter2_id = 96_400_300i64;
     ctx.db.with_mut_snapshot(|s| {
+        s.items.retain(|_, i| !(i.owner_id == char_id && i.location_id == station_id && i.type_id != 587));
         s.items.insert(
             rifter2_id,
             InventoryItemRecord {

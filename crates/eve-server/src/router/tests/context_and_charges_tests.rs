@@ -281,15 +281,31 @@ fn charge_compatibility_capacity_and_loading_into_weapon_slot() {
         .sde
         .types
         .values()
-        .find(|c| {
+        .filter(|c| {
             c.category_id == 8
                 && c.group_id == ctype.group_id
                 && c.default_attributes.get(&128).copied()
                     == ctype.default_attributes.get(&128).copied()
+                && (c.volume - ctype.volume).abs() < 1e-6
                 && c.type_id != charge_type_id
+        })
+        .min_by_key(|c| c.type_id)
+        .or_else(|| {
+            ctx.sde
+                .types
+                .values()
+                .filter(|c| {
+                    c.category_id == 8
+                        && c.group_id == ctype.group_id
+                        && c.default_attributes.get(&128).copied()
+                            == ctype.default_attributes.get(&128).copied()
+                        && c.type_id != charge_type_id
+                })
+                .min_by_key(|c| c.type_id)
         })
         .map(|c| c.type_id)
         .unwrap_or(if charge_type_id == 192 { 193 } else { 192 });
+    let alt_cap = ServerContext::weapon_slot_max_charge_capacity(wtype, &ctx.sde.types[&alt_type_id]);
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             alt_ammo_id,
@@ -321,7 +337,7 @@ fn charge_compatibility_capacity_and_loading_into_weapon_slot() {
         .unwrap();
     assert!(id_swapped > 0);
     assert_eq!(tid_swapped, alt_type_id);
-    assert_eq!(qty_swapped, 10.min(cap));
+    assert_eq!(qty_swapped, 10.min(alt_cap));
     // Previous charge merged back into `ammo_stack_id` in Cargo!
     let merged_back = ctx
         .db

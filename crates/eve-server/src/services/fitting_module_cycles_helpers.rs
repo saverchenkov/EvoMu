@@ -524,26 +524,18 @@ fn emit_godma_prime_location_and_ship_state(
     let build_active_effect_line = |mod_id: i64, effect_id: i64, dur_ms: f64| -> PyRep {
         PyRep::List(vec![
             PyRep::Integer(mod_id),
+            PyRep::Integer(char_id),
+            PyRep::Integer(ship_id),
+            PyRep::None,
+            PyRep::None,
+            PyRep::List(Vec::new()),
             PyRep::Integer(effect_id),
             PyRep::Integer(now_ft),
             PyRep::Real(dur_ms),
             PyRep::Integer(0),
-            PyRep::Tuple(vec![
-                PyRep::Integer(mod_id),
-                PyRep::Integer(char_id),
-                PyRep::Integer(ship_id),
-                PyRep::None,
-                PyRep::None,
-                PyRep::List(vec![PyRep::Integer(mod_id)]),
-                PyRep::Integer(effect_id),
-            ]),
-            PyRep::Integer(now_ft),
-            PyRep::Real(dur_ms),
-            PyRep::Integer(0),
-            PyRep::None,
         ])
     };
-    for (mod_id_rep, mod_attrs_rep) in &module_entries {
+    for (mod_id_rep, mod_attrs_rep) in module_entries {
         if let Some(mod_id) = mod_id_rep.as_i64() {
             if let Some(mut mod_item) = ctx.db.get_item(mod_id) {
                 mod_item.singleton = true;
@@ -554,7 +546,7 @@ fn emit_godma_prime_location_and_ship_state(
                     if is_online && type_rec.effect_ids.contains(&16) {
                         active_effects.push((
                             PyRep::Integer(16),
-                            build_active_effect_line(mod_id, 16, 1_000.0),
+                            build_active_effect_line(mod_id, 16, -1.0),
                         ));
                     }
                     if active_states.contains(&mod_id) {

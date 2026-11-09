@@ -488,7 +488,7 @@ async fn stargate_jump_and_dock_enforce_range_timers_and_complete_transitions() 
 
     sess.address = "tcp:127.0.0.1:44445".to_string();
     let (_, st_ball) = sys_handle.get_ball_snapshot(st_id).await.unwrap().unwrap();
-    sys_handle.try_set_ball_position(ship_id, st_pos + DVec3::new(st_ball.radius + 10_000.0, 0.0, 0.0));
+    sys_handle.try_set_ball_position(ship_id, st_pos + DVec3::new(st_ball.radius + 40_000.0, 0.0, 0.0));
     assert_eq!(
         handle(
             &ctx,

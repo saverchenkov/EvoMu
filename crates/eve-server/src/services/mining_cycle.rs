@@ -248,9 +248,22 @@ async fn check_requirements(ctx: &ServerContext, cycle: &ActiveMiningCycle) -> R
         return Err(err(MiningStopReason::Cloaked, "Cannot mine while cloaked".into()));
     }
     let fit = ctx.get_or_rebuild_ship_fitting(cycle.char_id, cycle.ship_id)?;
-    let online = fit.modules.get(&cycle.module_id).is_some_and(|m| m.state != eve_dogma::ModuleState::Offline);
+    let fitted_mod = fit.modules.get(&cycle.module_id);
+    let online = fitted_mod.is_some_and(|m| m.state != eve_dogma::ModuleState::Offline);
     if !online {
         return Err(err(MiningStopReason::ModuleOffline, format!("Module {} is not online", cycle.module_id)));
+    }
+    if let Some(m) = fitted_mod {
+        if let Some(mod_type) = ctx.sde.types.get(&m.type_id) {
+            if required_skills(mod_type).contains(&12180)
+                && fit.character_skills.get(&12180).copied().unwrap_or(0) < 1
+            {
+                return Err(err(
+                    MiningStopReason::ModuleOffline,
+                    format!("Module {} requires Deep Core Mining skill", cycle.module_id),
+                ));
+            }
+        }
     }
     let Some(asteroid) = ctx.db.get_asteroid(cycle.target_id) else {
         return Err(err(MiningStopReason::TargetLost, format!("Target {} is not an asteroid", cycle.target_id)));
