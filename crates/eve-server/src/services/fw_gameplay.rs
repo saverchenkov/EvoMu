@@ -158,7 +158,76 @@ pub async fn ensure_warzone_sites_spawned(ctx: &ServerContext, sys_id: u32) {
     let occ_corp = militia_lp_corp_id(&ctx.sde, occ_fac);
 
     let mut balls_to_spawn: Vec<(i64, u32, [f64; 3], f64)> = Vec::new();
-    let spawn_bf = ctx.db.with_mut_snapshot(|snap| {
+    let needs_mut = ctx.db.with_snapshot(|snap| {
+        let has_stale = snap.fw_runtime.fw_complexes.iter().any(|(_, (csys, tier, _, _, completed))| {
+            *completed || (*csys == sys_id && !allowed_tiers.contains(&tier.as_str()))
+        });
+        if has_stale {
+            return true;
+        }
+        let mut has_any_complex_pos = false;
+        for &tier in allowed_tiers.iter().filter(|&&t| t != "Battlefield") {
+            let cd_key = format!("{sys_id}:{tier}");
+            let tier_cd = snap.fw_runtime.complex_tier_cooldowns.get(&cd_key).copied().unwrap_or(0);
+            let existing = snap
+                .fw_runtime
+                .fw_complexes
+                .iter()
+                .find(|(_, (csys, t, _, _, completed))| *csys == sys_id && t == tier && !*completed)
+                .map(|(&gid, _)| gid);
+            match existing {
+                None if now >= tier_cd => return true,
+                Some(gid) => {
+                    if !snap.item_positions.contains_key(&gid) {
+                        return true;
+                    }
+                    has_any_complex_pos = true;
+                }
+                None => {}
+            }
+        }
+        if has_any_complex_pos
+            && snap
+                .system_states
+                .get(&sys_id)
+                .is_none_or(|st| st.fw_complex_position.is_none())
+        {
+            return true;
+        }
+        for kind in ["SupplyCache", "SupplyDepot", "ListeningPost", "Propaganda"] {
+            let exists = snap.fw_runtime.supply_sites.iter().any(|(&sid, (ssys, skind, _))| {
+                *ssys == sys_id
+                    && skind == kind
+                    && snap.structures.get(&sid).is_some_and(|st| st.state != "Destroyed")
+            });
+            if !exists {
+                return true;
+            }
+        }
+        let ihub_ok = snap.structures.values().any(|st| {
+            st.solar_system_id == sys_id
+                && st.type_id == TYPE_FW_IHUB
+                && st.state != "Destroyed"
+                && st.owner_corp_id == occ_corp
+        });
+        if !ihub_ok {
+            return true;
+        }
+        let bf_active = snap
+            .fw_runtime
+            .battlefield_instances
+            .iter()
+            .any(|b| b.solar_system_id == sys_id && !b.completed);
+        let bf_cd = snap
+            .fw_runtime
+            .battlefield_respawn_unix
+            .get(&sys_id)
+            .copied()
+            .unwrap_or(0);
+        status == STATUS_FRONTLINE && !bf_active && now >= bf_cd
+    });
+    let spawn_bf = if needs_mut {
+        ctx.db.with_mut_snapshot(|snap| {
         // 1. Remove disallowed complex tiers if system downgraded (e.g., Frontline -> Rearguard).
         let stale_gates: Vec<i64> = snap
             .fw_runtime
@@ -291,7 +360,10 @@ pub async fn ensure_warzone_sites_spawned(ctx: &ServerContext, sys_id: u32) {
             .copied()
             .unwrap_or(0);
         status == STATUS_FRONTLINE && !bf_active && now >= bf_cd
-    });
+    })
+    } else {
+        false
+    };
 
     if spawn_bf {
         let enemy_fac = fw_opposing_faction(occ_fac).unwrap_or(occ_fac);
@@ -816,9 +888,10 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
             }
         }
         let hold_timer = |ctx: &ServerContext| {
-            ctx.db.with_mut_snapshot(|s| {
-                s.fw_runtime.complex_last_step_unix.insert(gid, now_unix);
-            });
+            ctx.fw_idle_last_step_unix
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(gid, now_unix);
         };
         if present.is_empty() {
             hold_timer(ctx);
@@ -853,9 +926,16 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
             (attacker_adv, occ_adv)
         };
         let speed_mult = calculate_capture_speed_multiplier(my_adv, their_adv);
-        let last_step = ctx.db.with_snapshot(|s| {
-            s.fw_runtime.complex_last_step_unix.get(&gid).copied().unwrap_or(now_unix)
+        let mem_last = ctx
+            .fw_idle_last_step_unix
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&gid)
+            .copied();
+        let db_last = ctx.db.with_snapshot(|s| {
+            s.fw_runtime.complex_last_step_unix.get(&gid).copied()
         });
+        let last_step = db_last.into_iter().chain(mem_last).max().unwrap_or(now_unix);
         let dt = now_unix.saturating_sub(last_step).max(1);
         let base_dur = complex_base_capture_duration_seconds(&tier);
         let delta_pct = ((dt as f64 * speed_mult) / (base_dur as f64) * 100.0).clamp(0.01, 100.0);
@@ -1123,14 +1203,22 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
             .map(|&(cid, f, _)| (cid, f))
             .collect();
         if all_on_grid.is_empty() {
-            ctx.db.with_mut_snapshot(|s| {
-                s.fw_runtime.complex_last_step_unix.insert(bf_id, now_unix);
-            });
+            ctx.fw_idle_last_step_unix
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(bf_id, now_unix);
             continue;
         }
-        let last_step = ctx.db.with_snapshot(|s| {
-            s.fw_runtime.complex_last_step_unix.get(&bf_id).copied().unwrap_or(now_unix)
+        let mem_last = ctx
+            .fw_idle_last_step_unix
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&bf_id)
+            .copied();
+        let db_last = ctx.db.with_snapshot(|s| {
+            s.fw_runtime.complex_last_step_unix.get(&bf_id).copied()
         });
+        let last_step = db_last.into_iter().chain(mem_last).max().unwrap_or(now_unix);
         let dt = now_unix.saturating_sub(last_step).max(1);
         let mut zones = [0i64; 3];
         for zi in 0..3 {

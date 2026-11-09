@@ -538,6 +538,16 @@ pub fn step_downtime_countdown_warnings(ctx: &ServerContext, now_unix: u64) -> V
         return Vec::new();
     }
     let dt_day_key = upcoming_dt_unix / 86_400;
+    let has_new_warning = ctx.db.with_snapshot(|snap| {
+        let st = load_downtime_state(snap);
+        let emitted = st.emitted_warnings_by_day.get(&dt_day_key);
+        DOWNTIME_WARNING_THRESHOLDS_SECS.iter().any(|&threshold| {
+            secs_until_dt <= threshold && !emitted.is_some_and(|e| e.contains(&threshold))
+        })
+    });
+    if !has_new_warning {
+        return Vec::new();
+    }
     let newly_crossed: Vec<u64> = ctx.db.with_mut_snapshot(|snap| {
         let mut st = load_downtime_state(snap);
         let emitted = st.emitted_warnings_by_day.entry(dt_day_key).or_default();

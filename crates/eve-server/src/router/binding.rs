@@ -1107,6 +1107,9 @@ impl ServerContext {
             bug_reporting: std::sync::Arc::new(crate::bug_reporting::BugReportingRuntime::new()),
             npc_spawns: std::sync::RwLock::new(std::collections::HashMap::new()),
             combat_rng_seq: std::sync::atomic::AtomicU64::new(0),
+            cluster_tick_last_unix: std::sync::atomic::AtomicU64::new(0),
+            cluster_tick_persisted_unix: std::sync::atomic::AtomicU64::new(0),
+            fw_idle_last_step_unix: std::sync::RwLock::new(std::collections::HashMap::new()),
         }
     }
 

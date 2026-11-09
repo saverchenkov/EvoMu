@@ -1433,6 +1433,12 @@ pub(crate) fn sync_structure_with_released(
 /// Syncs every structure (called before structure RPCs). Returns structures that left space.
 pub fn sync_all_structures(ctx: &ServerContext) -> Vec<(i64, DisposalOutcome)> {
     super::structure_upwell_ops::sync_auto_delivered_asset_safety_wraps(ctx);
+    if ctx
+        .db
+        .with_snapshot(|snap| snap.structures.is_empty() && snap.industry_jobs.is_empty())
+    {
+        return Vec::new();
+    }
     let now = ctx.now_unix();
     let mut sov_claims: Vec<(u32, i64, i64, i64)> = Vec::new();
     let (gone, released) = ctx.db.with_mut_snapshot(|snap| {

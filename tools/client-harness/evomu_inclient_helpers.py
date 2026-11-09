@@ -548,9 +548,15 @@ def _wait_warp_fx_settled(sm, timeout_sec=4.0, min_finished=0):
             bp = michelle.GetBallpark() if (sid and michelle is not None) else None
             ball = bp.GetBall(sid) if (bp is not None and sid) else None
             warping_ball = ball is not None and int(getattr(ball, "mode", 0) or 0) == 3
+            warp_cache = (
+                getattr(space_svc, "warpDestinationCache", None)
+                if space_svc is not None
+                else None
+            )
             warping_fx = (
-                space_svc is not None
-                and getattr(space_svc, "warpDestinationCache", None) is not None
+                any(x is not None for x in warp_cache)
+                if isinstance(warp_cache, (list, tuple))
+                else warp_cache is not None
             )
             if not warping_fx and fx_svc is not None and sid:
                 try:

@@ -714,7 +714,16 @@ pub fn on_advance_secs_with_sim_clock_rebase(
 
     // 0. Sweep expired market orders and check season transitions across cluster ticks.
     crate::services::notify_emitters_seasons_tactical::check_and_emit_season_transitions(ctx);
-    let swept = ctx.db.with_mut_snapshot(|s| crate::services::market_contracts::sweep_expired_orders(s, now_unix));
+    let swept = if ctx
+        .db
+        .with_snapshot(|s| crate::services::market_contracts::has_expired_orders(s, now_unix))
+    {
+        ctx.db.with_mut_snapshot(|s| {
+            crate::services::market_contracts::sweep_expired_orders(s, now_unix)
+        })
+    } else {
+        Vec::new()
+    };
     if !swept.is_empty() {
         crate::services::market_contracts::emit_expired_order_notifications(ctx, &swept);
     }
@@ -774,80 +783,90 @@ pub fn on_advance_secs_with_sim_clock_rebase(
         .map(|entry| entry.char_id)
         .collect();
 
-    with_mut_sp6_state(&ctx.db, |st, snap| {
-        for cd in rt_self_destructs {
-            st.self_destructs.entry(cd.ship_id).or_insert(cd);
-        }
-
-        // Prune disconnected_ships entries whose ship was destroyed or pilot docked/changed ship
-        st.disconnected_ships.retain(|&cid, disc| {
-            snap.items.contains_key(&disc.ship_id)
-                && snap.characters.get(&cid).is_some_and(|c| {
-                    c.active_ship_id == disc.ship_id
-                        && c.station_id.is_none()
-                        && c.structure_id.is_none()
-                })
+    let needs_sp6_lifecycle_sync = !rt_self_destructs.is_empty()
+        || super::with_sp6_state(&ctx.db, |st| {
+            !st.disconnected_ships.is_empty()
+                || !st.safe_logoffs.is_empty()
+                || !st.self_destructs.is_empty()
+                || !st.abyssal_sessions.is_empty()
         });
 
-        let safe_keys: Vec<i64> = st.safe_logoffs.keys().copied().collect();
-        for cid in safe_keys {
-            let Some(entry) = st.safe_logoffs.get(&cid).cloned() else {
-                continue;
-            };
-            if entry.completed {
-                continue;
+    if needs_sp6_lifecycle_sync {
+        with_mut_sp6_state(&ctx.db, |st, snap| {
+            for cd in rt_self_destructs {
+                st.self_destructs.entry(cd.ship_id).or_insert(cd);
             }
-            if blocked_safe_char_ids.contains(&cid) {
-                st.safe_logoffs.remove(&cid);
-                aborted_safe_logoffs.push((cid, "SAFE_LOGOFF_ABORT_MODULE"));
-                continue;
-            }
-            if now_unix >= entry.complete_at_unix {
-                if let Some(e) = st.safe_logoffs.get_mut(&cid) {
-                    e.completed = true;
+
+            // Prune disconnected_ships entries whose ship was destroyed or pilot docked/changed ship
+            st.disconnected_ships.retain(|&cid, disc| {
+                snap.items.contains_key(&disc.ship_id)
+                    && snap.characters.get(&cid).is_some_and(|c| {
+                        c.active_ship_id == disc.ship_id
+                            && c.station_id.is_none()
+                            && c.structure_id.is_none()
+                    })
+            });
+
+            let safe_keys: Vec<i64> = st.safe_logoffs.keys().copied().collect();
+            for cid in safe_keys {
+                let Some(entry) = st.safe_logoffs.get(&cid).cloned() else {
+                    continue;
+                };
+                if entry.completed {
+                    continue;
                 }
-                completed_safe_logoffs.push(entry);
-            }
-        }
-
-        for disc in st.disconnected_ships.values_mut() {
-            if !disc.removed_from_space {
-                if ctx.systems.is_ball_scrambled_sync(disc.solar_system_id, disc.ship_id)
-                    && !ctx
-                        .systems
-                        .is_ball_in_committed_warp_sync(disc.solar_system_id, disc.ship_id)
-                {
-                    disc.emergency_warp_dest = None;
-                } else if disc.emergency_warp_dest.is_some() {
-                    active_warping_disconnected.push(disc.clone());
+                if blocked_safe_char_ids.contains(&cid) {
+                    st.safe_logoffs.remove(&cid);
+                    aborted_safe_logoffs.push((cid, "SAFE_LOGOFF_ABORT_MODULE"));
+                    continue;
+                }
+                if now_unix >= entry.complete_at_unix {
+                    if let Some(e) = st.safe_logoffs.get_mut(&cid) {
+                        e.completed = true;
+                    }
+                    completed_safe_logoffs.push(entry);
                 }
             }
-        }
 
-        let sd_keys: Vec<i64> = st
-            .self_destructs
-            .iter()
-            .filter(|(_, cd)| now_unix >= cd.detonate_at_unix)
-            .map(|(&sid, _)| sid)
-            .collect();
-        for sid in sd_keys {
-            if let Some(cd) = st.self_destructs.remove(&sid) {
-                due_self_destructs.push(cd);
+            for disc in st.disconnected_ships.values_mut() {
+                if !disc.removed_from_space {
+                    if ctx.systems.is_ball_scrambled_sync(disc.solar_system_id, disc.ship_id)
+                        && !ctx
+                            .systems
+                            .is_ball_in_committed_warp_sync(disc.solar_system_id, disc.ship_id)
+                    {
+                        disc.emergency_warp_dest = None;
+                    } else if disc.emergency_warp_dest.is_some() {
+                        active_warping_disconnected.push(disc.clone());
+                    }
+                }
             }
-        }
 
-        let ab_keys: Vec<i64> = st
-            .abyssal_sessions
-            .iter()
-            .filter(|(_, ab)| now_unix >= ab.collapse_at_unix)
-            .map(|(&cid, _)| cid)
-            .collect();
-        for cid in ab_keys {
-            if let Some(ab) = st.abyssal_sessions.remove(&cid) {
-                due_abyssal.push(ab);
+            let sd_keys: Vec<i64> = st
+                .self_destructs
+                .iter()
+                .filter(|(_, cd)| now_unix >= cd.detonate_at_unix)
+                .map(|(&sid, _)| sid)
+                .collect();
+            for sid in sd_keys {
+                if let Some(cd) = st.self_destructs.remove(&sid) {
+                    due_self_destructs.push(cd);
+                }
             }
-        }
-    });
+
+            let ab_keys: Vec<i64> = st
+                .abyssal_sessions
+                .iter()
+                .filter(|(_, ab)| now_unix >= ab.collapse_at_unix)
+                .map(|(&cid, _)| cid)
+                .collect();
+            for cid in ab_keys {
+                if let Some(ab) = st.abyssal_sessions.remove(&cid) {
+                    due_abyssal.push(ab);
+                }
+            }
+        });
+    }
 
     for (cid, reason) in aborted_safe_logoffs {
         ctx.notify(
@@ -1029,7 +1048,10 @@ pub fn on_advance_secs_with_sim_clock_rebase(
 
     // 6b. Sweep expired Void Space sessions, despawn expired un-entered Abyssal trace balls, and clear expired Zarzakh gate locks.
     crate::services::pve_abyssal_lifecycle::sweep_expired_void_space_sessions_sync(ctx, now_unix);
-    let expired_traces: Vec<(u32, i64)> =
+    let expired_traces: Vec<(u32, i64)> = if crate::services::pve_special_sites::read_pve_special_reg(
+        ctx,
+        |reg| reg.abyssal_traces.values().any(|t| t.expires_at_sec > 0 && now_unix >= t.expires_at_sec),
+    ) {
         crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
             let mut out = Vec::new();
             reg.abyssal_traces.retain(|&tid, t| {
@@ -1041,22 +1063,32 @@ pub fn on_advance_secs_with_sim_clock_rebase(
                 }
             });
             out
-        });
+        })
+    } else {
+        Vec::new()
+    };
     for (origin_sys, tid) in expired_traces {
         ctx.systems.get_or_spawn(origin_sys).try_remove_ball(tid);
     }
-    let expired_zarzakh_locks: Vec<(i64, i64)> = ctx.db.with_mut_snapshot(|snap| {
-        let mut out = Vec::new();
-        snap.zarzakh_gate_locks.retain(|&cid, &mut (gate_id, exp)| {
-            if now_unix >= exp {
-                out.push((cid, gate_id));
-                false
-            } else {
-                true
-            }
-        });
-        out
-    });
+    let expired_zarzakh_locks: Vec<(i64, i64)> = if ctx
+        .db
+        .with_snapshot(|snap| snap.zarzakh_gate_locks.values().any(|&(_, exp)| now_unix >= exp))
+    {
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut out = Vec::new();
+            snap.zarzakh_gate_locks.retain(|&cid, &mut (gate_id, exp)| {
+                if now_unix >= exp {
+                    out.push((cid, gate_id));
+                    false
+                } else {
+                    true
+                }
+            });
+            out
+        })
+    } else {
+        Vec::new()
+    };
     for (cid, gate_id) in expired_zarzakh_locks {
         crate::services::quasar_sov_services::publish_stargate_lock_deactivated_notice(
             &ctx.quasar_gateway,
@@ -1076,11 +1108,15 @@ pub fn on_advance_secs_with_sim_clock_rebase(
     //    and Mobile Warp Disruptors (SDE decay = 48h), and complete anchoring Mobile Warp Disruptors
     //    (`feat:lifecycle.wreck-restart`, `feat:lifecycle.mobile_warp_disruptor-lifecycle`)
     let mut balls_to_remove: Vec<(u32, i64, bool)> = Vec::new();
-    let mut bubbles_to_activate: Vec<(u32, i64, DVec3, f64)> = Vec::new();
-
-    with_mut_sp6_state(&ctx.db, |st, snap| {
+    let (expired_ids, newly_anchored_ids, bubbles_to_activate): (
+        Vec<(i64, u32, bool)>,
+        Vec<i64>,
+        Vec<(u32, i64, DVec3, f64)>,
+    ) = ctx.db.with_snapshot(|snap| {
+        let st = &snap.sp6_lifecycle;
         let mut expired_ids: Vec<(i64, u32, bool)> = Vec::new();
         let mut newly_anchored_ids: Vec<i64> = Vec::new();
+        let mut bubbles_to_activate: Vec<(u32, i64, DVec3, f64)> = Vec::new();
         let deployable_state = crate::services::mobile_deployables::read_deployable_state_snap(snap);
 
         for item in snap.items.values() {
@@ -1169,28 +1205,35 @@ pub fn on_advance_secs_with_sim_clock_rebase(
                 }
             }
         }
+        (expired_ids, newly_anchored_ids, bubbles_to_activate)
+    });
 
-        for iid in newly_anchored_ids {
-            st.space_object_meta
-                .entry(iid)
-                .or_default()
-                .anchor_completed = true;
-        }
+    if !expired_ids.is_empty() || !newly_anchored_ids.is_empty() {
+        with_mut_sp6_state(&ctx.db, |st, snap| {
+            for iid in newly_anchored_ids {
+                st.space_object_meta
+                    .entry(iid)
+                    .or_default()
+                    .anchor_completed = true;
+            }
 
-        for (iid, sys_id, is_bubble) in &expired_ids {
-            snap.items.remove(iid);
-            snap.item_positions.remove(iid);
-            st.space_object_meta.remove(iid);
-            st.ship_combat_hp.remove(iid);
-            snap.items.retain(|_, child| child.location_id != *iid);
-            balls_to_remove.push((*sys_id, *iid, *is_bubble));
-        }
-        crate::services::mobile_deployables::write_deployable_state_snap(snap, |dst| {
-            for (iid, _, _) in &expired_ids {
-                dst.deployables.remove(iid);
+            if !expired_ids.is_empty() {
+                for (iid, sys_id, is_bubble) in &expired_ids {
+                    snap.items.remove(iid);
+                    snap.item_positions.remove(iid);
+                    st.space_object_meta.remove(iid);
+                    st.ship_combat_hp.remove(iid);
+                    snap.items.retain(|_, child| child.location_id != *iid);
+                    balls_to_remove.push((*sys_id, *iid, *is_bubble));
+                }
+                crate::services::mobile_deployables::write_deployable_state_snap(snap, |dst| {
+                    for (iid, _, _) in &expired_ids {
+                        dst.deployables.remove(iid);
+                    }
+                });
             }
         });
-    });
+    }
 
     if !balls_to_remove.is_empty() {
         with_mut_combat_runtime(ctx, |rt| {
@@ -1229,17 +1272,18 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     let sec_of_day = now_unix % 86_400;
     let in_downtime_window = sec_of_day >= dt_sec && sec_of_day < dt_sec.saturating_add(900);
     let now_day_idx = now_unix.saturating_sub(dt_sec) / 86_400;
-    let action = with_mut_sp6_state(&ctx.db, |st, _snap| match st.last_downtime_day_idx {
-        Some(last_idx) if now_day_idx > last_idx => {
+    let last_dt_day_idx = super::with_sp6_state(&ctx.db, |st| st.last_downtime_day_idx);
+    let action = match last_dt_day_idx {
+        Some(last_idx) if now_day_idx > last_idx => with_mut_sp6_state(&ctx.db, |st, _snap| {
             st.last_downtime_day_idx = Some(now_day_idx);
             if in_downtime_window { 2 } else { 1 }
-        }
-        None => {
+        }),
+        None => with_mut_sp6_state(&ctx.db, |st, _snap| {
             st.last_downtime_day_idx = Some(now_day_idx);
             0
-        }
+        }),
         _ => 0,
-    });
+    };
     if action == 2 && crate::services::serverops_cluster::is_scheduled_downtime_enabled(ctx) {
         let _ = crate::services::serverops_cluster::start_daily_downtime_window(ctx);
     } else if action > 0 {
@@ -1249,26 +1293,37 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     }
 
     on_advance_secs(ctx, now_unix, 0);
-    let elapsed_secs = ctx.db.with_mut_snapshot(|snap| {
-        let prev = snap
-            .service_state_blobs
-            .get("cluster_tick_last_unix")
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or_else(|| now_unix.saturating_sub(1));
-        snap.service_state_blobs
-            .insert("cluster_tick_last_unix".into(), now_unix.to_string());
-        now_unix.saturating_sub(prev).max(1)
-    });
+    let cached_prev = ctx
+        .cluster_tick_last_unix
+        .swap(now_unix, std::sync::atomic::Ordering::Relaxed);
+    let db_prev = if cached_prev == 0 {
+        ctx.db.with_snapshot(|snap| {
+            snap.service_state_blobs
+                .get("cluster_tick_last_unix")
+                .and_then(|s| s.parse::<u64>().ok())
+        })
+    } else {
+        Some(cached_prev)
+    };
+    let prev = db_prev.unwrap_or_else(|| now_unix.saturating_sub(1));
+    let elapsed_secs = now_unix.saturating_sub(prev).max(1);
+    let persisted = ctx
+        .cluster_tick_persisted_unix
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if db_prev.is_none() || now_unix >= persisted.saturating_add(60) {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.service_state_blobs
+                .insert("cluster_tick_last_unix".into(), now_unix.to_string());
+        });
+        ctx.cluster_tick_persisted_unix
+            .store(now_unix, std::sync::atomic::Ordering::Relaxed);
+    }
     crate::services::pve_crab_beacons::on_server_clock_advanced(ctx, elapsed_secs);
-    let prev_metenox_tick = ctx.db.with_mut_snapshot(|snap| {
-        let prev = snap
-            .service_state_blobs
+    let prev_metenox_tick = ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs
             .get("metenox_last_tick_unix")
             .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(now_unix);
-        snap.service_state_blobs
-            .insert("metenox_last_tick_unix".into(), now_unix.to_string());
-        prev
+            .unwrap_or(now_unix)
     });
     crate::services::mining_advanced::tick_all_metenox_moon_drills(ctx, prev_metenox_tick, now_unix);
     crate::services::mining_advanced::tick_all_moon_extractions(ctx).await;
@@ -1290,21 +1345,37 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     }
     ctx.advance_skill_queues(1.0);
 
-    ctx.db.with_mut_snapshot(|snap| {
-        for anoms in snap.cosmic_anomalies.values_mut() {
-            anoms.retain(|a| {
-                a.lifetime_seconds == 0
-                    || now_unix < a.created_unix.saturating_add(a.lifetime_seconds)
-            });
-        }
-        for sigs in snap.cosmic_signatures.values_mut() {
-            sigs.retain(|s| {
-                s.sig_group.eq_ignore_ascii_case("wormhole")
-                    || s.lifetime_seconds == 0
-                    || now_unix < s.created_unix.saturating_add(s.lifetime_seconds)
-            });
-        }
+    let has_expired_cosmic = ctx.db.with_snapshot(|snap| {
+        snap.cosmic_anomalies.values().any(|anoms| {
+            anoms.iter().any(|a| {
+                a.lifetime_seconds > 0
+                    && now_unix >= a.created_unix.saturating_add(a.lifetime_seconds)
+            })
+        }) || snap.cosmic_signatures.values().any(|sigs| {
+            sigs.iter().any(|s| {
+                !s.sig_group.eq_ignore_ascii_case("wormhole")
+                    && s.lifetime_seconds > 0
+                    && now_unix >= s.created_unix.saturating_add(s.lifetime_seconds)
+            })
+        })
     });
+    if has_expired_cosmic {
+        ctx.db.with_mut_snapshot(|snap| {
+            for anoms in snap.cosmic_anomalies.values_mut() {
+                anoms.retain(|a| {
+                    a.lifetime_seconds == 0
+                        || now_unix < a.created_unix.saturating_add(a.lifetime_seconds)
+                });
+            }
+            for sigs in snap.cosmic_signatures.values_mut() {
+                sigs.retain(|s| {
+                    s.sig_group.eq_ignore_ascii_case("wormhole")
+                        || s.lifetime_seconds == 0
+                        || now_unix < s.created_unix.saturating_add(s.lifetime_seconds)
+                });
+            }
+        });
+    }
     crate::services::space_destiny::expire_and_respawn_wormholes_in_cluster(ctx, now_unix).await;
     crate::services::space_destiny::expire_all_overdue_probes(ctx, now_unix).await;
     let _ = crate::services::station_structure::structure_lifecycle::sync_all_structures(ctx);
@@ -1314,25 +1385,32 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     let _ = crate::services::pve_ess_reserve_banks::tick_ess_main_bank_autopayout(ctx, now_unix);
     let _ = crate::services::pve_ess_reserve_banks::tick_ess_reserve_bank_links(ctx, now_unix).await;
 
-    let due_bounty_ticks: Vec<(u32, i64)> = with_mut_combat_runtime(ctx, |rt| {
-        let mut due = Vec::new();
-        for (&(sys_id, char_id), &pending) in &rt.pending_bounty_ticks {
-            if pending <= 0.0 {
-                continue;
-            }
-            let next_flush = *rt
-                .bounty_tick_next_flush_unix
-                .entry((sys_id, char_id))
-                .or_insert_with(|| now_unix.saturating_add(1_200));
-            if now_unix >= next_flush {
-                due.push((sys_id, char_id));
-            }
-        }
-        for key in &due {
-            rt.bounty_tick_next_flush_unix.remove(key);
-        }
-        due
+    let has_pending_bounty_ticks = with_combat_runtime(ctx, |rt| {
+        rt.pending_bounty_ticks.values().any(|&pending| pending > 0.0)
     });
+    let due_bounty_ticks: Vec<(u32, i64)> = if has_pending_bounty_ticks {
+        with_mut_combat_runtime(ctx, |rt| {
+            let mut due = Vec::new();
+            for (&(sys_id, char_id), &pending) in &rt.pending_bounty_ticks {
+                if pending <= 0.0 {
+                    continue;
+                }
+                let next_flush = *rt
+                    .bounty_tick_next_flush_unix
+                    .entry((sys_id, char_id))
+                    .or_insert_with(|| now_unix.saturating_add(1_200));
+                if now_unix >= next_flush {
+                    due.push((sys_id, char_id));
+                }
+            }
+            for key in &due {
+                rt.bounty_tick_next_flush_unix.remove(key);
+            }
+            due
+        })
+    } else {
+        Vec::new()
+    };
     for (sys_id, char_id) in due_bounty_ticks {
         let _ = crate::services::combat_npc_encounters::flush_npc_bounty_tick(
             ctx,

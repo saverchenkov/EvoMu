@@ -123,6 +123,24 @@ pub fn compute_relist_fee_cents(
 
 /// Sweeps expired non-NPC orders (`issue_unix + duration * 86_400 <= now_unix`), refunding buy
 /// order escrow or returning sell order items to hangar/deliveries (`feat:market.order-expiry-history`).
+pub(crate) fn has_expired_orders(snap: &eve_db::WorldStateSnapshot, now_unix: u64) -> bool {
+    snap.market_orders.values().any(|o| {
+        if o.is_npc || o.vol_remaining <= 0 {
+            return false;
+        }
+        let has_meta = snap.market_order_meta.contains_key(&o.order_id)
+            || snap
+                .owner_notes
+                .contains_key(&-(4_000_000_000_000_i64.saturating_add(o.order_id.abs())));
+        if !has_meta {
+            return false;
+        }
+        let meta = load_market_order_meta(snap, o, now_unix);
+        let dur_secs = (meta.duration.max(1) as u64).saturating_mul(86_400);
+        meta.issue_unix.saturating_add(dur_secs) <= now_unix
+    })
+}
+
 pub(crate) fn sweep_expired_orders(
     snap: &mut eve_db::WorldStateSnapshot,
     now_unix: u64,

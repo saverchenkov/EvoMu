@@ -885,6 +885,10 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
             (ids, l)
         });
 
+    if skyhook_ids.is_empty() && links.is_empty() {
+        return;
+    }
+
     let newly_hackable: Vec<(u32, i64)> = ctx.db.with_mut_snapshot(|snap| {
         let mut opened = Vec::new();
         for id in skyhook_ids {

@@ -569,6 +569,7 @@ impl SystemRegistry {
                                 asteroid_id,
                                 requested_units,
                                 waste_probability,
+                                persist_db,
                                 reply,
                             } => {
                                 let res = handle_mine_asteroid(
@@ -576,6 +577,7 @@ impl SystemRegistry {
                                     asteroid_id,
                                     requested_units,
                                     waste_probability,
+                                    persist_db,
                                     &mut ballpark,
                                     asteroids,
                                     &mechanic_rng,
@@ -1066,7 +1068,7 @@ impl SystemRegistry {
                                     }
                                 }
                                 if let Some(db) = &db_opt {
-                                    crate::sp6_lifecycle::persist_ship_combat_hp_batch_in_db(
+                                    crate::sp6_lifecycle::persist_existing_ship_combat_hp_batch_in_db(
                                         db,
                                         ballpark.combat_states.iter().filter_map(|(&bid, cs)| {
                                             if !ballpark.is_static_ball(bid)

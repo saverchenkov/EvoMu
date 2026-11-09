@@ -647,7 +647,50 @@ fn normalize_destiny_payload_arg(rep: PyRep) -> PyRep {
                     .collect(),
             )
         }
-        PyRep::Tuple(items) => {
+        PyRep::Tuple(mut items) => {
+            if items.len() == 2 {
+                if let (Some(name), Some(PyRep::Tuple(ev_args))) =
+                    (items[0].as_str(), items.get(1))
+                {
+                    if name == "CloakBall" && ev_args.len() >= 2 {
+                        let is_uncloak = match &ev_args[1] {
+                            PyRep::Bool(b) => !*b,
+                            PyRep::Integer(v) => *v == 0,
+                            _ => false,
+                        };
+                        if is_uncloak {
+                            return PyRep::Tuple(vec![
+                                PyRep::String("UncloakBall".into()),
+                                PyRep::Tuple(vec![ev_args[0].clone()]),
+                            ]);
+                        }
+                    } else if name == "OnSpecialFX" && ev_args.len() >= 11 {
+                        let guid = ev_args[5].as_str();
+                        let is_stop = matches!(ev_args[7], PyRep::Bool(false) | PyRep::Integer(0));
+                        if guid == Some("effects.Cloak") && is_stop {
+                            let mut fx = ev_args.clone();
+                            fx[5] = PyRep::String("effects.Uncloak".into());
+                            fx[7] = PyRep::Integer(1);
+                            fx[8] = PyRep::Integer(0);
+                            fx[9] = PyRep::Integer(6000);
+                            fx[10] = PyRep::Integer(1);
+                            items[1] = PyRep::Tuple(fx);
+                            return PyRep::Tuple(items);
+                        } else if guid == Some("effects.Uncloak") {
+                            let mut fx = ev_args.clone();
+                            fx[8] = PyRep::Integer(0);
+                            if fx[9].as_i64().is_none_or(|d| d <= 0) {
+                                fx[9] = PyRep::Integer(6000);
+                            }
+                            if fx[10].as_i64().is_none_or(|r| r <= 0) {
+                                fx[10] = PyRep::Integer(1);
+                            }
+                            items[1] = PyRep::Tuple(fx);
+                            return PyRep::Tuple(items);
+                        }
+                    }
+                }
+            }
             PyRep::Tuple(items.into_iter().map(normalize_destiny_payload_arg).collect())
         }
         other => other,
@@ -1429,5 +1472,69 @@ mod client_compat_tests {
         let kv_list = PyRep::List(entries.clone());
         let notif = normalize_macho_notification("OnNewSkillQueueSaved", vec![kv_list.clone()]);
         assert_eq!(notif, vec![kv_list]);
+    }
+
+    #[test]
+    fn cloak_ball_and_special_fx_uncloak_normalize_to_v24_client_format() {
+        let ship_id = 100_000_042_i64;
+
+        let uncloak_bool = normalize_destiny_payload_arg(PyRep::Tuple(vec![
+            PyRep::String("CloakBall".into()),
+            PyRep::Tuple(vec![PyRep::Integer(ship_id), PyRep::Bool(false)]),
+        ]));
+        assert_eq!(
+            uncloak_bool,
+            PyRep::Tuple(vec![
+                PyRep::String("UncloakBall".into()),
+                PyRep::Tuple(vec![PyRep::Integer(ship_id)]),
+            ])
+        );
+
+        let uncloak_int = normalize_destiny_payload_arg(PyRep::Tuple(vec![
+            PyRep::String("CloakBall".into()),
+            PyRep::Tuple(vec![PyRep::Integer(ship_id), PyRep::Integer(0)]),
+        ]));
+        assert_eq!(
+            uncloak_int,
+            PyRep::Tuple(vec![
+                PyRep::String("UncloakBall".into()),
+                PyRep::Tuple(vec![PyRep::Integer(ship_id)]),
+            ])
+        );
+
+        let cloak_on = PyRep::Tuple(vec![
+            PyRep::String("CloakBall".into()),
+            PyRep::Tuple(vec![PyRep::Integer(ship_id), PyRep::Bool(true)]),
+        ]);
+        assert_eq!(normalize_destiny_payload_arg(cloak_on.clone()), cloak_on);
+
+        let fx_uncloak = normalize_destiny_payload_arg(PyRep::Tuple(vec![
+            PyRep::String("OnSpecialFX".into()),
+            PyRep::Tuple(vec![
+                PyRep::Integer(ship_id),
+                PyRep::None,
+                PyRep::None,
+                PyRep::None,
+                PyRep::None,
+                PyRep::String("effects.Cloak".into()),
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Integer(1),
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+            ]),
+        ]));
+        let PyRep::Tuple(outer) = fx_uncloak else {
+            panic!("expected OnSpecialFX tuple");
+        };
+        assert_eq!(outer[0], PyRep::String("OnSpecialFX".into()));
+        let PyRep::Tuple(args) = &outer[1] else {
+            panic!("expected FX args tuple");
+        };
+        assert_eq!(args[5], PyRep::String("effects.Uncloak".into()));
+        assert_eq!(args[7], PyRep::Integer(1));
+        assert_eq!(args[8], PyRep::Integer(0));
+        assert_eq!(args[9], PyRep::Integer(6000));
+        assert_eq!(args[10], PyRep::Integer(1));
     }
 }

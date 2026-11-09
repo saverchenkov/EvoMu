@@ -92,6 +92,9 @@ pub struct ServerContext {
     pub bug_reporting: Arc<crate::bug_reporting::BugReportingRuntime>,
     pub npc_spawns: RwLock<HashMap<u32, crate::combat::npc_ai::NpcSpawnManager>>,
     pub combat_rng_seq: AtomicU64,
+    pub cluster_tick_last_unix: AtomicU64,
+    pub cluster_tick_persisted_unix: AtomicU64,
+    pub fw_idle_last_step_unix: RwLock<HashMap<i64, u64>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -375,6 +378,9 @@ impl ServerContext {
             bug_reporting: Arc::new(crate::bug_reporting::BugReportingRuntime::new()),
             npc_spawns: RwLock::new(HashMap::new()),
             combat_rng_seq: AtomicU64::new(1),
+            cluster_tick_last_unix: AtomicU64::new(0),
+            cluster_tick_persisted_unix: AtomicU64::new(0),
+            fw_idle_last_step_unix: RwLock::new(HashMap::new()),
         };
         ctx.db.with_mut_snapshot(|snap| {
             snap.module_active_states.clear();

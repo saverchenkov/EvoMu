@@ -410,3 +410,67 @@ async fn cold_boot_inside_downtime_window_does_not_shutdown_but_day_crossing_doe
         "day crossing into 11:00..11:15 UTC must emit OnClusterShutdownInitiated"
     );
 }
+
+#[tokio::test]
+async fn idle_cluster_tick_avoids_per_tick_sqlite_wal_writes() {
+    let dir = std::env::temp_dir().join(format!(
+        "evomu_idle_tick_wal_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("world.sqlite");
+    let db = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("open_sqlite"));
+    let sde_path = std::env::var("EVOMU_SDE_PATH").unwrap_or_else(|_| "data/evomu_sde.sqlite".into());
+    let sde = Arc::new(eve_sde::SdeRegistry::open(&sde_path).unwrap_or_default());
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    ctx.seed_demo_world_fixtures();
+    // Place demo char in space in Maurasi (30000140) with active Venture (32880) like Batch P
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = 30_000_140;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+    });
+    let _jita = ctx.systems.get_or_spawn(30_000_142);
+    let maurasi = ctx.systems.get_or_spawn(30_000_140);
+    let _ = maurasi
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: 32880,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 335.0,
+            inertia: 3.6,
+            mass: 1_200_000.0,
+            radius: 35.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+    // Warm up initial ambient spawns / daily timers across two ticks
+    for _ in 0..2 {
+        ctx.clock().advance_secs(1);
+        tick_background_cluster(&ctx).await;
+    }
+
+    let wal_before = ctx.db.with_snapshot(|s| s.wal_seq);
+    for _ in 0..5 {
+        ctx.clock().advance_secs(1);
+        tick_background_cluster(&ctx).await;
+    }
+    let wal_after = ctx.db.with_snapshot(|s| s.wal_seq);
+    assert_eq!(
+        wal_after.saturating_sub(wal_before),
+        0,
+        "steady-state idle cluster ticks must not perform SQLite WAL writes every second"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -164,14 +164,14 @@ fn destiny_event_routing_rah_resonance_clamping_and_belt_downtime_respawn() {
     let interval_a = std::sync::atomic::AtomicU64::new(3600);
     let dt_a = std::sync::atomic::AtomicU64::new(39600);
     let mine_res = belts::handle_mine_asteroid(
-        30_000_142, ast_ice_partial, 20, 0.0, &mut bp, &mut asteroids, &rng, &Some(Arc::clone(&db)), &interval_a, &dt_a,
+        30_000_142, ast_ice_partial, 20, 0.0, true, &mut bp, &mut asteroids, &rng, &Some(Arc::clone(&db)), &interval_a, &dt_a,
     ).unwrap();
     assert_eq!(mine_res.mined_units, 20);
     assert_eq!(mine_res.remaining_units, 80);
 
     // Deplete sole rock in belt_ore with waste_probability = 1.0
     let mine_full = belts::handle_mine_asteroid(
-        30_000_142, ast_ore, 300, 1.0, &mut bp, &mut asteroids, &rng, &Some(Arc::clone(&db)), &interval_a, &dt_a,
+        30_000_142, ast_ore, 300, 1.0, true, &mut bp, &mut asteroids, &rng, &Some(Arc::clone(&db)), &interval_a, &dt_a,
     ).unwrap();
     assert_eq!(mine_full.mined_units, 300);
     assert_eq!(mine_full.wasted_units, 200);

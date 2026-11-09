@@ -639,33 +639,43 @@ pub fn evaluate_and_resolve_insurgency_campaign(
 /// Live 1 Hz Pirate Insurgency campaign scheduler (`Forecasting` -> `Active` -> Ambition / Tie -> `WindDown` -> End).
 pub async fn tick_insurgency_campaigns(ctx: &ServerContext, now_unix: u64) {
     let _ = crate::services::cluster_macho_misc_services::tick_zarzakh_horizon_siege(ctx, now_unix);
-    let unlocked_surrender_sys: Vec<(u32, i64)> = ctx.db.with_mut_snapshot(|snap| {
-        let due: Vec<u32> = snap
-            .insurgency_runtime
+    let has_due_surrender = ctx.db.with_snapshot(|snap| {
+        snap.insurgency_runtime
             .surrender_ihub_vulnerable_unix
             .iter()
-            .filter(|(&sys, &ts)| now_unix >= ts && !snap.fw_runtime.ihub_vulnerable.get(&sys).copied().unwrap_or(false))
-            .map(|(&sys, _)| sys)
-            .collect();
-        let mut out = Vec::new();
-        for sys in due {
-            if let Some(occ) = snap.fw_system_occupations.get_mut(&sys) {
-                if !(500_001..=500_004).contains(&occ.occupier_faction_id) {
-                    occ.occupier_faction_id = occ.owner_faction_id;
-                }
-                occ.victory_points = occ.victory_points_threshold;
-                let occ_fac = occ.occupier_faction_id;
-                snap.fw_runtime
-                    .system_victory_points
-                    .insert(sys, occ.victory_points_threshold);
-                if let Some(st) = snap.system_states.get_mut(&sys) {
-                    st.fw_contested_pct = 100.0;
-                }
-                out.push((sys, occ_fac));
-            }
-        }
-        out
+            .any(|(&sys, &ts)| now_unix >= ts && !snap.fw_runtime.ihub_vulnerable.get(&sys).copied().unwrap_or(false))
     });
+    let unlocked_surrender_sys: Vec<(u32, i64)> = if has_due_surrender {
+        ctx.db.with_mut_snapshot(|snap| {
+            let due: Vec<u32> = snap
+                .insurgency_runtime
+                .surrender_ihub_vulnerable_unix
+                .iter()
+                .filter(|(&sys, &ts)| now_unix >= ts && !snap.fw_runtime.ihub_vulnerable.get(&sys).copied().unwrap_or(false))
+                .map(|(&sys, _)| sys)
+                .collect();
+            let mut out = Vec::new();
+            for sys in due {
+                if let Some(occ) = snap.fw_system_occupations.get_mut(&sys) {
+                    if !(500_001..=500_004).contains(&occ.occupier_faction_id) {
+                        occ.occupier_faction_id = occ.owner_faction_id;
+                    }
+                    occ.victory_points = occ.victory_points_threshold;
+                    let occ_fac = occ.occupier_faction_id;
+                    snap.fw_runtime
+                        .system_victory_points
+                        .insert(sys, occ.victory_points_threshold);
+                    if let Some(st) = snap.system_states.get_mut(&sys) {
+                        st.fw_contested_pct = 100.0;
+                    }
+                    out.push((sys, occ_fac));
+                }
+            }
+            out
+        })
+    } else {
+        Vec::new()
+    };
     for (sys, occ_fac) in unlocked_surrender_sys {
         set_facwar_bunker_vulnerable(ctx, sys, occ_fac, true);
     }

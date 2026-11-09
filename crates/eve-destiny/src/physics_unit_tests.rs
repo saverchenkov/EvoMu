@@ -528,3 +528,30 @@ fn coverage_and_mutants_proximity_decloak_restores_velocity_and_mjfg_lifecycle()
     assert_ne!(sp.ball_grid_ids[&1], old_gid);
     assert!(sp.observer_events[&2].iter().any(|e| matches!(e, DestinyEvent::RemoveBalls { .. })));
 }
+
+#[test]
+fn proximity_decloak_emits_cloak_ball_zero_and_special_fx_cloak_stop() {
+    let mut sp = Ballpark::new(30_000_140);
+    sp.add_ball(make_ball(1, DVec3::ZERO, DVec3::ZERO, MovementMode::Stop));
+    sp.add_ball(make_ball(2, DVec3::new(1_000.0, 0.0, 0.0), DVec3::ZERO, MovementMode::Stop));
+
+    {
+        let cs = sp.combat_states.entry(1).or_default();
+        cs.is_cloaked = true;
+        cs.gate_cloak_remaining_ticks = 0;
+    }
+
+    let events = sp.step(1.0);
+    assert!(!sp.combat_states[&1].is_cloaked);
+    assert!(
+        events.iter().any(|e| matches!(e, DestinyEvent::CloakBall { ball_id: 1, cloaked: 0 })),
+        "proximity decloak must emit CloakBall(0), got {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            DestinyEvent::OnSpecialFX { ball_id: 1, guid, is_active: false, .. } if guid == "effects.Cloak"
+        )),
+        "proximity decloak must emit OnSpecialFX(effects.Cloak, is_active=false), got {events:?}"
+    );
+}

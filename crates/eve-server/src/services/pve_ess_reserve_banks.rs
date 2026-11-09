@@ -905,6 +905,17 @@ pub fn record_ess_main_bank_contribution(
 /// Distributes accumulated ESS Main Bank ISK every 2h45m (`9_900` s) when not currently being hacked
 /// (`feat:pve.ess-main-bank-autopayout`), conserving 100% of ISK cents across valid contributors.
 pub fn tick_ess_main_bank_autopayout(ctx: &ServerContext, now_unix: u64) -> usize {
+    let has_due = ctx.db.with_snapshot(|snap| {
+        snap.system_states.values().any(|st| {
+            !st.ess_main_bank_contributors.is_empty()
+                && st.ess_cycle_started_unix > 0
+                && now_unix.saturating_sub(st.ess_cycle_started_unix)
+                    >= ESS_MAIN_BANK_AUTOPAYOUT_SECS
+        })
+    });
+    if !has_due {
+        return 0;
+    }
     let (paid_events, acct_changes): (Vec<(SolarSystemId, f64, f64)>, Vec<(CharacterId, f64)>) =
         ctx.db.with_mut_snapshot(|snap| {
             let sys_ids: Vec<SolarSystemId> = snap

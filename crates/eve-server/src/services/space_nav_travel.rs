@@ -286,6 +286,17 @@ pub(crate) async fn emit_cloak_transition(ctx: &ServerContext, sys_id: u32, ship
             },
         )
         .await;
+    let _ = handle
+        .emit_destiny_event(
+            ship_id,
+            DestinyEvent::OnSpecialFX {
+                ball_id: ship_id,
+                module_id: None,
+                guid: "effects.Cloak".to_string(),
+                is_active: cloaked,
+            },
+        )
+        .await;
     let time_ft = unix_to_filetime(ctx.now_unix());
     let (new_v, old_v) = if cloaked { (1.0, 0.0) } else { (0.0, 1.0) };
     let module_states: Vec<(i64, i64, u32, i64, f64, f64)> = ctx.db.with_snapshot(|snap| {

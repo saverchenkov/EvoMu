@@ -622,6 +622,16 @@ pub fn is_tenebrex_jammer_active_in_snap(
 pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
     tick_skyhooks(ctx, now_unix).await;
 
+    let has_sov_work = ctx.db.with_snapshot(|snap| {
+        !snap.sov_runtime.mercenary_dens.is_empty()
+            || !snap.sov_runtime.mto_site_balls.is_empty()
+            || !snap.sov_runtime.hacked_hubs.is_empty()
+            || !snap.sov_runtime.sov_hubs.is_empty()
+    });
+    if !has_sov_work {
+        return;
+    }
+
     let pending: PendingNotices = Arc::new(RwLock::new(Vec::new()));
     let (mto_balls, mto_despawns, spool_events, strat_events, upg_spawns, upg_despawns, hubs_ready_for_nodes) = ctx.db.with_mut_snapshot(|snap| {
         let mto_before: std::collections::HashMap<i64, u32> = snap

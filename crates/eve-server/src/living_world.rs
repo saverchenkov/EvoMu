@@ -720,7 +720,14 @@ impl LivingWorldDirector {
             .unwrap_or(5_000.0)
             .clamp(500.0, 5_000.0);
 
-        let extraction = handle.mine_asteroid(target_id, units_per_tick, 0.0).await?;
+        let extraction = handle
+            .mine_asteroid_with_db_sync(
+                target_id,
+                units_per_tick,
+                0.0,
+                elapsed_tick_secs == 0.0 || now_unix % 60 == 0,
+            )
+            .await?;
 
         let mut hauled = false;
         let mut final_cargo = current_cargo + extraction.mined_units as i32;

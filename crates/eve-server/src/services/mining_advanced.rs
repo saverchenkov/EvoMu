@@ -283,6 +283,15 @@ fn resolve_moon_structure_id(
 /// asteroid field decay tick (`plan:MN-13`, `R-MN13-LAZY-LEAK`).
 pub async fn tick_all_moon_extractions(ctx: &ServerContext) {
     let now = ctx.now_unix();
+    let has_work = ctx.db.with_snapshot(|snap| {
+        load_fractured_moon_fields(snap)
+            .into_iter()
+            .any(|(_, _, decay_unix, _)| now >= decay_unix)
+            || !snap.moon_extractions.is_empty()
+    });
+    if !has_work {
+        return;
+    }
     let (decayed_balls, auto_fractures) = ctx.db.with_mut_snapshot(|snap| {
         let mut decayed: Vec<(u32, Vec<i64>)> = Vec::new();
         let mut active_fields = Vec::new();

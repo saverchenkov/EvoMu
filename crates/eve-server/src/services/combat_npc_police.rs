@@ -414,12 +414,19 @@ pub fn scan_and_enforce_highsec_contraband(
     let Some(char_id) = char_id else {
         return Vec::new();
     };
+    let has_cargo_items = ctx.db.with_snapshot(|snap| {
+        snap.items.values().any(|i| {
+            i.location_id == ship_id
+                && i.quantity > 0
+                && i.flag == eve_db::InventoryFlag::Cargo
+        })
+    });
+    if !has_cargo_items {
+        return Vec::new();
+    }
     let contraband_map = ctx.sde.load_contraband_types().unwrap_or_default();
-    let now_unix = ctx.now_unix();
-
-    let (confiscated, found) = ctx.db.with_mut_snapshot(|snap| {
-        let contraband_items: Vec<(i64, u32, i32, f64, f64)> = snap
-            .items
+    let contraband_items: Vec<(i64, u32, i32, f64, f64)> = ctx.db.with_snapshot(|snap| {
+        snap.items
             .values()
             .filter_map(|it| {
                 if it.location_id != ship_id || it.flag != eve_db::InventoryFlag::Cargo || it.quantity <= 0 {
@@ -446,11 +453,14 @@ pub fn scan_and_enforce_highsec_contraband(
                 }
                 None
             })
-            .collect();
+            .collect()
+    });
+    if contraband_items.is_empty() {
+        return Vec::new();
+    }
+    let now_unix = ctx.now_unix();
 
-        if contraband_items.is_empty() {
-            return (Vec::new(), Vec::new());
-        }
+    let (confiscated, found) = ctx.db.with_mut_snapshot(|snap| {
 
         let mut removed = Vec::new();
         let mut found_list = Vec::new();

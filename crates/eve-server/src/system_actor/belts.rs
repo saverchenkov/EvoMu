@@ -571,6 +571,7 @@ pub(super) fn handle_mine_asteroid(
     asteroid_id: BallId,
     requested_units: u64,
     waste_probability: f64,
+    persist_db: bool,
     ballpark: &mut Ballpark,
     asteroids: &mut HashMap<BallId, AsteroidState>,
     mechanic_rng: &crate::rng::MechanicRng,
@@ -602,12 +603,14 @@ pub(super) fn handle_mine_asteroid(
             let remaining_units = ast.remaining_units;
             let ore_type_id = ast.type_id;
             let belt_id = ast.belt_id;
-            if let Some(db) = db_opt {
-                db.with_mut_snapshot(|snap| {
-                    if let Some(a) = snap.asteroids.get_mut(&asteroid_id) {
-                        a.quantity = i64::try_from(remaining_units).unwrap_or(0);
-                    }
-                });
+            if persist_db || depleted {
+                if let Some(db) = db_opt {
+                    db.with_mut_snapshot(|snap| {
+                        if let Some(a) = snap.asteroids.get_mut(&asteroid_id) {
+                            a.quantity = i64::try_from(remaining_units).unwrap_or(0);
+                        }
+                    });
+                }
             }
             if depleted {
                 let _ = ballpark.remove_ball(asteroid_id);

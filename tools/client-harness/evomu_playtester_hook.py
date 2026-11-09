@@ -762,7 +762,12 @@ def _sample_ego_warp_state(sm):
             fx_names = list(fx_svc.GetAllBallActivationNames(sid) or [])
         except Exception:
             fx_names = []
-    has_warp_cache = bool(space_svc is not None and getattr(space_svc, "warpDestinationCache", None) is not None)
+    warp_cache = getattr(space_svc, "warpDestinationCache", None) if space_svc is not None else None
+    has_warp_cache = bool(
+        any(x is not None for x in warp_cache)
+        if isinstance(warp_cache, (list, tuple))
+        else warp_cache is not None
+    )
     return {
         "mode": mode,
         "speed_mps": round(speed, 2),

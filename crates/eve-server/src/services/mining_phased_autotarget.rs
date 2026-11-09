@@ -524,6 +524,9 @@ async fn reconcile_phased_field_connections(ctx: &ServerContext, solar_system_id
 
 /// Periodic cluster tick for active Phased Asteroid Fields (`MN-08`).
 pub async fn tick_phased_asteroid_fields(ctx: &ServerContext, now_unix: u64) {
+    if ctx.db.with_snapshot(|snap| load_phased_fields(snap).is_empty()) {
+        return;
+    }
     let (elapsed_secs, sys_ids) = ctx.db.with_mut_snapshot(|snap| {
         let fields = load_phased_fields(snap);
         let prev = snap

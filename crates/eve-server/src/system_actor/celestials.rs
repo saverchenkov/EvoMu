@@ -210,12 +210,24 @@ impl SystemHandle {
         requested_units: u64,
         waste_probability: f64,
     ) -> Result<MiningExtractionResult, String> {
+        self.mine_asteroid_with_db_sync(asteroid_id, requested_units, waste_probability, true)
+            .await
+    }
+
+    pub async fn mine_asteroid_with_db_sync(
+        &self,
+        asteroid_id: BallId,
+        requested_units: u64,
+        waste_probability: f64,
+        persist_db: bool,
+    ) -> Result<MiningExtractionResult, String> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(SystemCommand::MineAsteroid {
                 asteroid_id,
                 requested_units,
                 waste_probability,
+                persist_db,
                 reply: tx,
             })
             .await

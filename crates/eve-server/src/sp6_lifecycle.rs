@@ -229,10 +229,37 @@ pub fn persist_ship_combat_hp_batch_in_db<'a, I>(
 ) where
     I: IntoIterator<Item = (i64, &'a CombatState)>,
 {
+    persist_ship_combat_hp_batch_inner(db, updates, false);
+}
+
+/// Persists combat HPs only for balls backed by persisted `snap.items` or `snap.structures`,
+/// preventing ephemeral NPC combat HP updates from triggering per-tick SQLite WAL writes.
+pub fn persist_existing_ship_combat_hp_batch_in_db<'a, I>(
+    db: &Arc<WorldRepository>,
+    updates: I,
+) where
+    I: IntoIterator<Item = (i64, &'a CombatState)>,
+{
+    persist_ship_combat_hp_batch_inner(db, updates, true);
+}
+
+fn persist_ship_combat_hp_batch_inner<'a, I>(
+    db: &Arc<WorldRepository>,
+    updates: I,
+    require_persisted_entity: bool,
+) where
+    I: IntoIterator<Item = (i64, &'a CombatState)>,
+{
     let to_update: Vec<(i64, PersistedCombatHp)> = db.with_snapshot(|snap| {
         updates
             .into_iter()
             .filter_map(|(bid, cs)| {
+                if require_persisted_entity
+                    && !snap.items.contains_key(&bid)
+                    && !snap.structures.contains_key(&bid)
+                {
+                    return None;
+                }
                 let new_hp = PersistedCombatHp {
                     shield_hp: cs.shield_hp.max(0.0),
                     armor_hp: cs.armor_hp.max(0.0),

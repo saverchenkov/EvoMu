@@ -495,3 +495,175 @@ async fn active_warp_tunnel_rejects_all_subwarp_rpcs_and_prevents_slingshot_past
         landed.position
     );
 }
+
+#[tokio::test]
+async fn venture_jita_to_maurasi_gate_cloak_break_52au_warp_and_next_jump() {
+    eve_testkit::attest(&[
+        "feat:navigation.jump-cloak-immunities",
+        "feat:navigation.warp-drive",
+        "rpc:beyonce.CmdStargateJump",
+        "rpc:beyonce.CmdWarpToStuff",
+    ]);
+
+    let ctx = Arc::new(ServerContext::new());
+    common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let jita_sys = 30_000_142_u32;
+    let maurasi_sys = 30_000_140_u32;
+    // Venture (32880) pilot starting in Jita
+    let pilot = common::gm_pilot_in_space(&ctx, 7301, 91_820_001, 32880, jita_sys).await;
+    let char_id = pilot.char_id;
+    let mut sess = pilot.sess.clone();
+    let ship_id = pilot.ship_id;
+    let jita_beyonce = pilot.beyonce;
+    let jita_handle = ctx.systems.get_or_spawn(jita_sys);
+
+    let jita_gate = ctx
+        .sde
+        .jumps
+        .values()
+        .find(|j| j.from_solar_system_id == jita_sys && j.to_solar_system_id == maurasi_sys)
+        .or_else(|| ctx.sde.jumps.values().find(|j| j.from_solar_system_id == jita_sys))
+        .cloned()
+        .expect("Jita stargate in SDE");
+    let dest_sys = jita_gate.to_solar_system_id;
+    let return_gate = ctx
+        .sde
+        .jumps
+        .values()
+        .find(|j| j.from_solar_system_id == dest_sys && j.to_solar_system_id == jita_sys)
+        .or_else(|| ctx.sde.jumps.values().find(|j| j.from_solar_system_id == dest_sys))
+        .cloned()
+        .expect("Return stargate in SDE");
+
+    jita_handle
+        .set_ball_position(ship_id, jita_gate.position + DVec3::new(1_000.0, 0.0, 0.0))
+        .await;
+
+    let jump_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(jita_beyonce),
+            "CmdStargateJump",
+            &[PyRep::Integer(jita_gate.stargate_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Jita -> Maurasi CmdStargateJump must succeed");
+    let PyRep::KeyVal(jkv) = jump_res else {
+        panic!("expected KeyVal from CmdStargateJump");
+    };
+    assert_eq!(jkv.get("solarSystemID").and_then(|v| v.as_i64()), Some(i64::from(dest_sys)));
+    let maurasi_beyonce = jkv.get("beyonceBoundID").and_then(|v| v.as_i64()).unwrap() as u64;
+
+    let dest_handle = ctx.systems.get_or_spawn(dest_sys);
+    let jumped_cs = dest_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(jumped_cs.is_cloaked, "ship must start gate-cloaked after jump");
+    assert_eq!(jumped_cs.gate_cloak_remaining_ticks, 60);
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let _ = dest_handle.drain_observer_updates(ship_id).await;
+
+    let (_, arrival_ball) = dest_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let far_beacon_id = 88_930_001_i64;
+    spawn_beacon(&dest_handle, far_beacon_id, arrival_ball.position + DVec3::new(52.0 * AU_METERS, 0.0, 0.0)).await;
+
+    // Initiating a 52 AU warp breaks gate cloak and sends UncloakBall + effects.Uncloak
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(maurasi_beyonce),
+        "CmdWarpToStuff",
+        &[PyRep::String("item".into()), PyRep::Integer(far_beacon_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("52 AU CmdWarpToStuff must succeed while gate-cloaked");
+
+    let decloaked_cs = dest_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(!decloaked_cs.is_cloaked, "CmdWarpToStuff must break gate cloak");
+
+    // Drain the Destiny stream queued on the system actor before stepping (normalizing like macho_listener does)
+    let (_tick, _evs, raw_updates) = dest_handle
+        .drain_observer_updates(ship_id)
+        .await
+        .expect("drain observer updates");
+    let norm_args = eve_server::router::client_compat::normalize_macho_notification(
+        "DoDestinyUpdate",
+        vec![raw_updates, PyRep::Bool(false)],
+    );
+    let mut saw_uncloak_ball = false;
+    let mut saw_fx_uncloak = false;
+    if let Some(PyRep::List(updates)) = norm_args.first() {
+        for entry in updates {
+            let PyRep::Tuple(outer) = entry else { continue };
+            let Some(PyRep::Tuple(inner)) = outer.get(1) else { continue };
+            let Some(fname) = inner[0].as_str() else { continue };
+            let Some(PyRep::Tuple(fargs)) = inner.get(1) else { continue };
+            if fname == "UncloakBall" && fargs.first().and_then(|v| v.as_i64()) == Some(ship_id) {
+                saw_uncloak_ball = true;
+            } else if fname == "OnSpecialFX"
+                && fargs.first().and_then(|v| v.as_i64()) == Some(ship_id)
+                && fargs.get(5).and_then(|v| v.as_str()) == Some("effects.Uncloak")
+                && fargs.get(7).and_then(|v| v.as_i64()) == Some(1)
+                && fargs.get(8).and_then(|v| v.as_i64()) == Some(0)
+                && fargs.get(9).and_then(|v| v.as_i64()) == Some(6000)
+                && fargs.get(10).and_then(|v| v.as_i64()) == Some(1)
+            {
+                saw_fx_uncloak = true;
+            }
+        }
+    }
+    assert!(saw_uncloak_ball, "V24 client must receive UncloakBall({ship_id}) when gate cloak breaks");
+    assert!(saw_fx_uncloak, "V24 client must receive OnSpecialFX(effects.Uncloak, start=1, active=0, duration=6000, repeat=1)");
+
+    let mut entered_warp = false;
+    let mut landed = false;
+    for _ in 0..55 {
+        dest_handle.step_manual(1.0).await.unwrap();
+        let (_, b) = dest_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+        if matches!(b.mode, MovementMode::Warp { .. }) {
+            entered_warp = true;
+        } else if entered_warp && b.mode == MovementMode::Stop {
+            landed = true;
+            break;
+        }
+    }
+    assert!(entered_warp, "Venture must enter MovementMode::Warp");
+    assert!(landed, "Venture must complete 52 AU warp cleanly within 55 ticks");
+
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(maurasi_beyonce), "UpdateStateRequest", &[], &kw, None)
+        .await
+        .expect("UpdateStateRequest after warp completion");
+    assert!(
+        !ctx.active_warps.lock().unwrap().contains_key(&ship_id),
+        "ctx.active_warps must be cleared once warp has landed"
+    );
+
+    // Move within jump range of return stargate and verify subsequent gate jump succeeds
+    dest_handle
+        .set_ball_position(ship_id, return_gate.position + DVec3::new(1_000.0, 0.0, 0.0))
+        .await;
+    let jump_back = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(maurasi_beyonce),
+            "CmdStargateJump",
+            &[PyRep::Integer(return_gate.stargate_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Subsequent CmdStargateJump after warp must succeed");
+    let PyRep::KeyVal(ret_kv) = jump_back else {
+        panic!("expected KeyVal from return CmdStargateJump");
+    };
+    assert_eq!(
+        ret_kv.get("solarSystemID").and_then(|v| v.as_i64()),
+        Some(i64::from(return_gate.to_solar_system_id))
+    );
+}

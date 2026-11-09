@@ -1226,22 +1226,30 @@ pub async fn step_structure_auto_defense(ctx: &ServerContext, sys_id: u32, dt: f
         }
 
         let Some(primary_target) = hostile_targets.first() else {
-            ctx.db.with_mut_snapshot(|snap| {
-                let mut ext = load_ext_state(snap);
-                let mut changed = false;
-                for w in &weapons {
-                    if let Some(rem) = ext.weapon_cooldowns.get_mut(&w.item_id) {
-                        *rem = (*rem - dt).max(0.0);
-                        if *rem <= 0.0 {
-                            ext.weapon_cooldowns.remove(&w.item_id);
-                        }
-                        changed = true;
-                    }
-                }
-                if changed {
-                    save_ext_state(snap, &ext);
-                }
+            let has_cooldowns = ctx.db.with_snapshot(|snap| {
+                let ext = load_ext_state(snap);
+                weapons
+                    .iter()
+                    .any(|w| ext.weapon_cooldowns.contains_key(&w.item_id))
             });
+            if has_cooldowns {
+                ctx.db.with_mut_snapshot(|snap| {
+                    let mut ext = load_ext_state(snap);
+                    let mut changed = false;
+                    for w in &weapons {
+                        if let Some(rem) = ext.weapon_cooldowns.get_mut(&w.item_id) {
+                            *rem = (*rem - dt).max(0.0);
+                            if *rem <= 0.0 {
+                                ext.weapon_cooldowns.remove(&w.item_id);
+                            }
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        save_ext_state(snap, &ext);
+                    }
+                });
+            }
             continue;
         };
 

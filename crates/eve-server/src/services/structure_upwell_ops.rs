@@ -499,6 +499,16 @@ fn handle_move_assets_to_safety(ctx: &ServerContext, session: &mut SessionState,
 /// Lazily auto-delivers wraps older than 20 days to the nearest NPC station in the allowed security band (`feat:lifecycle.asset_safety-auto_delivery`).
 pub fn sync_auto_delivered_asset_safety_wraps(ctx: &ServerContext) {
     let now_unix = ctx.now_unix();
+    let has_due = ctx.db.with_snapshot(|snap| {
+        let ext = load_ext_state(snap);
+        ext.asset_safety_wraps.values().any(|w| {
+            w.delivered_to_id.is_none()
+                && now_unix >= w.created_unix.saturating_add(ASSET_SAFETY_AUTO_DELIVERY_SECS)
+        })
+    });
+    if !has_due {
+        return;
+    }
     ctx.db.with_mut_snapshot(|snap| {
         let mut ext = load_ext_state(snap);
         let mut changed = false;

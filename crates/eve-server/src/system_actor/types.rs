@@ -262,6 +262,7 @@ pub enum SystemCommand {
         asteroid_id: BallId,
         requested_units: u64,
         waste_probability: f64,
+        persist_db: bool,
         reply: oneshot::Sender<Result<MiningExtractionResult, String>>,
     },
     GetAsteroidState {

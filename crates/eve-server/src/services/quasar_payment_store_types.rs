@@ -131,6 +131,19 @@ pub fn process_due_payment_schedules(
     router_notices: &RwLock<Vec<(NoticeScope, GoogleAny)>>,
     now_unix: u64,
 ) {
+    let has_due = db.with_snapshot(|snap| {
+        let scheds: Vec<PaymentScheduleRecord> = snap
+            .service_state_blobs
+            .get("payment_schedules")
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or_default();
+        scheds
+            .iter()
+            .any(|s| s.next_payment_unix > 0 && s.next_payment_unix <= now_unix)
+    });
+    if !has_due {
+        return;
+    }
     let failed_scheds: Vec<(u64, u64, u32)> = db.with_mut_snapshot(|snap| {
         let mut scheds: Vec<PaymentScheduleRecord> = snap
             .service_state_blobs

@@ -541,6 +541,15 @@ impl Ballpark {
                     cloaked: 0,
                 },
             );
+            self.emit_event(
+                Some(decloaked_id),
+                DestinyEvent::OnSpecialFX {
+                    ball_id: decloaked_id,
+                    module_id: None,
+                    guid: "effects.Cloak".to_string(),
+                    is_active: false,
+                },
+            );
             if let Some(orig_v) = self
                 .combat_states
                 .get_mut(&decloaked_id)

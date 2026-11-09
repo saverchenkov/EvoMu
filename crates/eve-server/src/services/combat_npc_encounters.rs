@@ -431,7 +431,7 @@ pub async fn handle_npc_destroyed_in_space(
 
 /// Flushes all pending 20-minute (`1,200 s`) NPC bounty ticks that have matured by `now_unix`.
 pub fn tick_overdue_npc_bounty_payouts(ctx: &ServerContext, now_unix: u64) {
-    let due_keys: Vec<(u32, i64)> = with_mut_combat_runtime(ctx, |rt| {
+    let due_keys: Vec<(u32, i64)> = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
         rt.pending_bounty_ticks
             .keys()
             .copied()
