@@ -220,6 +220,61 @@ async fn reprocessing_quotes_and_reprocess_npc_structure_and_error_paths() {
     assert_eq!(dq_list[0].dict_get("typeID").and_then(|v| v.as_i64()), Some(1230));
     assert!(!matches!(dq_list[0].dict_get("outputs"), Some(PyRep::List(o)) if o.is_empty()));
 
+    // 1-arg Dict (`activeShipID` omitted, `< 2` args) returns V24.01 3-tuple `(tax, eff_dict, {itemID: KeyVal})`
+    let single_arg_dict_quote = handle(
+        &ctx,
+        &mut sess,
+        "reprocessingSvc",
+        "GetQuotes",
+        &[PyRep::Dict(vec![(
+            PyRep::Integer(ore_stack_id),
+            PyRep::keyval([("itemID", PyRep::Integer(ore_stack_id))]),
+        )])],
+        None,
+    )
+    .await
+    .expect("handled")
+    .expect("1-arg dict quote");
+    let PyRep::Tuple(ref sdq_parts) = single_arg_dict_quote else {
+        panic!("expected 3-tuple from 1-arg Dict GetQuotes, got {single_arg_dict_quote:?}");
+    };
+    let PyRep::Dict(ref sdq_entries) = sdq_parts[2] else {
+        panic!("expected {{itemID: KeyVal}} Dict in 1-arg Dict GetQuotes, got {sdq_parts:?}");
+    };
+    assert_eq!(sdq_entries.len(), 1);
+    assert_eq!(sdq_entries[0].0, PyRep::Integer(ore_stack_id));
+    assert_eq!(sdq_entries[0].1.dict_get("typeID").and_then(PyRep::as_i64), Some(1230));
+    assert!(sdq_entries[0].1.dict_get("recoverables").is_some_and(PyRep::is_crowset));
+
+    // 1-arg List and 1-arg Integer (`< 2` args) also return V24.01 3-tuple preserving `typeID` (`#723`)
+    for single_arg in [
+        PyRep::List(vec![PyRep::Integer(ore_stack_id)]),
+        PyRep::Integer(ore_stack_id),
+    ] {
+        let single_res = handle(
+            &ctx,
+            &mut sess,
+            "reprocessingSvc",
+            "GetQuotes",
+            &[single_arg],
+            None,
+        )
+        .await
+        .expect("handled")
+        .expect("1-arg quote");
+        let PyRep::Tuple(ref parts) = single_res else {
+            panic!("expected 3-tuple from 1-arg GetQuotes, got {single_res:?}");
+        };
+        assert_eq!(parts.len(), 3);
+        let PyRep::Dict(ref entries) = parts[2] else {
+            panic!("expected rawQuotes Dict in 1-arg GetQuotes, got {parts:?}");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, PyRep::Integer(ore_stack_id));
+        assert_eq!(entries[0].1.dict_get("typeID").and_then(PyRep::as_i64), Some(1230));
+        assert!(entries[0].1.dict_get("recoverables").is_some_and(PyRep::is_crowset));
+    }
+
     // 2. Reprocess active ship rejected
     let err = handle(&ctx, &mut sess, "reprocessingSvc", "Reprocess", &[PyRep::Integer(ship_id)], None)
         .await

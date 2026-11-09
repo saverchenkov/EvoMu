@@ -807,8 +807,64 @@ pub(crate) async fn handle_dogma_im(
             let tm_lvl = ctx.character_skill_levels(char_id).get(&3429).copied().unwrap_or(0);
             let atm_lvl = ctx.character_skill_levels(char_id).get(&3430).copied().unwrap_or(0);
             let max_locked = eve_dogma::compute_effective_max_locked_targets(ship_max, tm_lvl, atm_lvl) + triage_bonus;
-            let current_locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
-            if current_locks.len() >= max_locked {
+            // Prune stale target locks whose target ball left the ballpark, warped, cloaked, or
+            // moved outside `max_range_m` before `step()` ran, so despawned/broken targets never
+            // permanently occupy server target slots (`#749`).
+            let raw_locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
+            let mut current_locks = Vec::with_capacity(raw_locks.len());
+            for existing_lock in raw_locks {
+                let Some((_, tb)) = sys
+                    .get_ball_snapshot(existing_lock.target_id)
+                    .await
+                    .unwrap_or(None)
+                else {
+                    let _ = sys.remove_target_lock(ship_id, existing_lock.target_id).await;
+                    continue;
+                };
+                let tb_untarg = sys
+                    .get_combat_state(existing_lock.target_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|c| c.is_cloaked || c.is_warp_exit_invulnerable());
+                let tb_warping = matches!(tb.mode, eve_destiny::MovementMode::Warp { .. });
+                let tb_out_of_range = existing_lock
+                    .max_range_m
+                    .is_some_and(|max_r| (ship_ball.position - tb.position).length() > max_r);
+                if tb_untarg || tb_warping || tb_out_of_range {
+                    let _ = sys.remove_target_lock(ship_id, existing_lock.target_id).await;
+                    continue;
+                }
+                current_locks.push(existing_lock);
+            }
+
+            // Passive Targeter (`group_id == 82`, `feat:modules.passive-targeter`) suppresses `"targetedBy"` yellow-box notification!
+            let has_active_passive_targeter = fit.modules.values().any(|fm| {
+                matches!(
+                    fm.state,
+                    eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
+                ) && ctx.sde.types.get(&fm.type_id).is_some_and(|t| t.group_id == 82)
+            });
+
+            // If `target_id` is already locked on the server (e.g. client UI dropped it via local
+            // `FailLockTarget` and re-issued `AddTarget`), return `locked = true` (`flag = 0`) with
+            // the active target list instead of consuming an extra slot or failing `max_locked` (`#749`).
+            if let Some(existing) = current_locks.iter().find(|l| l.target_id == target_id) {
+                if existing.locked {
+                    let locked_ids: Vec<PyRep> = current_locks
+                        .iter()
+                        .filter(|l| l.locked)
+                        .map(|l| PyRep::Integer(l.target_id))
+                        .collect();
+                    return Some(Ok(PyRep::keyval([
+                        ("targetID", PyRep::Integer(target_id)),
+                        ("targetIDs", PyRep::List(locked_ids)),
+                        ("locked", PyRep::Bool(true)),
+                        ("lockTimeMs", PyRep::Real(0.0)),
+                        ("passiveLock", PyRep::Bool(has_active_passive_targeter)),
+                    ])));
+                }
+            } else if current_locks.len() >= max_locked {
                 return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: format!("Max locked targets exceeded ({max_locked})") }));
             }
 
@@ -846,13 +902,6 @@ pub(crate) async fn handle_dogma_im(
                 vec![PyRep::Integer(target_id), PyRep::String("locking".into())],
             );
 
-            // Passive Targeter (`group_id == 82`, `feat:modules.passive-targeter`) suppresses `"targetedBy"` yellow-box notification!
-            let has_active_passive_targeter = fit.modules.values().any(|fm| {
-                matches!(
-                    fm.state,
-                    eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
-                ) && ctx.sde.types.get(&fm.type_id).is_some_and(|t| t.group_id == 82)
-            });
             if !has_active_passive_targeter {
                 if let Some(target_owner_id) = ctx
                     .db

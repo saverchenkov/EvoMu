@@ -208,6 +208,16 @@ fn rows(rep: &PyRep) -> (Vec<String>, Vec<Vec<PyRep>>) {
     match rep {
         PyRep::Rowset { columns, rows } => (columns.clone(), rows.clone()),
         PyRep::ObjectEx { list, .. } => {
+            let cols = list
+                .first()
+                .and_then(|item| {
+                    if let PyRep::DBRow { columns, .. } = item {
+                        Some(columns.iter().map(|(k, _)| k.clone()).collect())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
             let r: Vec<Vec<PyRep>> = list
                 .iter()
                 .map(|item| {
@@ -220,7 +230,7 @@ fn rows(rep: &PyRep) -> (Vec<String>, Vec<Vec<PyRep>>) {
                     }
                 })
                 .collect();
-            (Vec::new(), r)
+            (cols, r)
         }
         other => panic!("expected Rowset, got {other:?}"),
     }
@@ -488,6 +498,16 @@ fn rows(rep: &PyRep) -> (Vec<String>, Vec<Vec<PyRep>>) {
     match rep {
         PyRep::Rowset { columns, rows } => (columns.clone(), rows.clone()),
         PyRep::ObjectEx { list, .. } => {
+            let cols = list
+                .first()
+                .and_then(|item| {
+                    if let PyRep::DBRow { columns, .. } = item {
+                        Some(columns.iter().map(|(k, _)| k.clone()).collect())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
             let r: Vec<Vec<PyRep>> = list
                 .iter()
                 .map(|item| {
@@ -500,7 +520,7 @@ fn rows(rep: &PyRep) -> (Vec<String>, Vec<Vec<PyRep>>) {
                     }
                 })
                 .collect();
-            (Vec::new(), r)
+            (cols, r)
         }
         other => panic!("expected Rowset, got {other:?}"),
     }

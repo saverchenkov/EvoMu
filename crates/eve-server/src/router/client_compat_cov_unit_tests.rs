@@ -389,8 +389,33 @@ fn normalize_map_paperdoll_peacetreaty_petitioner_planet_pos_raffle_reprocess_sc
             "AddTarget",
             Ok(PyRep::keyval([("locked", PyRep::Bool(true)), ("targetID", PyRep::Integer(77))])),
         )
-        .expect("add target"),
-        PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(vec![PyRep::Integer(77)])])
+        .expect("add target already locked"),
+        PyRep::Tuple(vec![PyRep::Integer(0), PyRep::List(vec![PyRep::Integer(77)])])
+    );
+    assert_eq!(
+        normalize_macho_rpc_reply(
+            "dogmaIM",
+            "AddTarget",
+            Ok(PyRep::keyval([("locked", PyRep::Bool(false)), ("targetID", PyRep::Integer(77))])),
+        )
+        .expect("add target async lock in progress"),
+        PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())])
+    );
+    assert_eq!(
+        normalize_macho_rpc_reply(
+            "dogmaIM",
+            "AddTarget",
+            Ok(PyRep::keyval([
+                ("locked", PyRep::Bool(true)),
+                ("targetID", PyRep::Integer(77)),
+                ("targetIDs", PyRep::List(vec![PyRep::Integer(76), PyRep::Integer(77)])),
+            ])),
+        )
+        .expect("add target reconciled list"),
+        PyRep::Tuple(vec![
+            PyRep::Integer(0),
+            PyRep::List(vec![PyRep::Integer(76), PyRep::Integer(77)]),
+        ])
     );
     assert_eq!(
         normalize_macho_rpc_reply("peaceTreatyMgr", "GetPeaceTreatiesForSession", Ok(PyRep::List(Vec::new())))
@@ -557,6 +582,51 @@ fn normalize_map_paperdoll_peacetreaty_petitioner_planet_pos_raffle_reprocess_sc
     let d_recov = d_entries[0].1.dict_get("recoverables").expect("decoded recoverables");
     assert!(d_recov.is_crowset());
     assert_eq!(d_recov.crowset_rows().unwrap()[0].dbrow_get("client").and_then(|v| v.as_i64()), Some(2288));
+
+    // `< 2` args GetQuotes replies (`PyRep::List` and summary `PyRep::KeyVal`) also normalize to `(tax, eff_dict, {itemID: KeyVal})`
+    let single_arg_list_quotes = normalize_macho_rpc_reply(
+        "reprocessingSvc",
+        "GetQuotes",
+        Ok(PyRep::List(vec![PyRep::keyval([
+            ("itemID", PyRep::Integer(701)),
+            ("typeID", PyRep::Integer(1230)),
+            ("stationBaseYield", PyRep::Real(0.50)),
+            ("stationTaxRate", PyRep::Real(0.05)),
+            ("quantityToProcess", PyRep::Integer(1000)),
+            ("leftOvers", PyRep::Integer(0)),
+            (
+                "outputs",
+                PyRep::List(vec![PyRep::keyval([
+                    ("typeID", PyRep::Integer(34)),
+                    ("quantity", PyRep::Integer(2000)),
+                ])]),
+            ),
+        ])])),
+    )
+    .expect("1-arg list quotes normalized");
+    let PyRep::Tuple(ref sq_tup) = single_arg_list_quotes else {
+        panic!("expected 3-tuple from 1-arg list GetQuotes");
+    };
+    let PyRep::Dict(ref sq_dict) = sq_tup[2] else {
+        panic!("expected quotes Dict from 1-arg list GetQuotes");
+    };
+    assert_eq!(sq_dict.len(), 1);
+    assert_eq!(sq_dict[0].0, PyRep::Integer(701));
+    assert_eq!(sq_dict[0].1.dict_get("typeID").and_then(PyRep::as_i64), Some(1230));
+
+    let zero_arg_summary_quotes = normalize_macho_rpc_reply(
+        "reprocessingSvc",
+        "GetQuotes",
+        Ok(PyRep::keyval([
+            ("stationBaseYield", PyRep::Real(0.50)),
+            ("stationTaxRate", PyRep::Real(0.05)),
+        ])),
+    )
+    .expect("0-arg summary quotes normalized");
+    assert!(matches!(
+        zero_arg_summary_quotes,
+        PyRep::Tuple(ref t) if t.len() == 3 && matches!(t[2], PyRep::Dict(ref d) if d.is_empty())
+    ));
 
     let rec = normalize_macho_rpc_reply(
         "scanMgr",

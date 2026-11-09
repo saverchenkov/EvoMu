@@ -209,9 +209,13 @@ async fn test_fleet_proxy_and_fleet_mgr_rpcs() {
         PyRep::Real(-10.0),
         PyRep::Real(-10.0),
     ];
-    rpc(&ctx, &mut sess1, "fleetProxy", "AddFleetFinderAdvert", &ad_args)
+    let add_rep = rpc(&ctx, &mut sess1, "fleetProxy", "AddFleetFinderAdvert", &ad_args)
         .await
         .expect("AddFleetFinderAdvert");
+    assert!(matches!(add_rep, PyRep::Dict(_)), "AddFleetFinderAdvert must return Dict (#732)");
+    assert_eq!(field(&add_rep, "fleetID").as_i64(), Some(fleet_id));
+    assert_eq!(field(&add_rep, "fleetName").as_str(), Some("Jita Standing Defense"));
+    assert_eq!(field(&add_rep, "leaderID").as_i64(), Some(PILOT_1));
 
     // 4. fleetProxy.GetMyFleetFinderAdvert: queries advert for caller's fleet
     let my_ad = rpc(&ctx, &mut sess1, "fleetProxy", "GetMyFleetFinderAdvert", &[])
@@ -235,6 +239,7 @@ async fn test_fleet_proxy_and_fleet_mgr_rpcs() {
     let updated_info = rpc(&ctx, &mut sess1, "fleetProxy", "UpdateAdvertInfo", &update_info_args)
         .await
         .expect("UpdateAdvertInfo");
+    assert!(matches!(updated_info, PyRep::Dict(_)), "UpdateAdvertInfo must return Dict (#732)");
     assert_eq!(field(&updated_info, "fleetName").as_str(), Some("Jita Incursion Wing"));
 
     // Verify change is persisted in advert query

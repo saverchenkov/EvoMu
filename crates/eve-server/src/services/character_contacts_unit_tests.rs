@@ -121,6 +121,14 @@ fn public_private_info_description_notes_and_respec_cover_branches() {
         .unwrap()
         .unwrap();
     assert!(rowset_len(&emp) > 0);
+    if let PyRep::Rowset { columns, rows } = &emp {
+        assert_eq!(columns, &vec!["recordID", "corporationID", "startDate", "deleted"]);
+        let start_ft = rows[0][2].as_i64().expect("startDate filetime");
+        assert!(start_ft >= 116_444_736_000_000_000, "startDate must be 64-bit Win32 FILETIME ticks, got {start_ft}");
+        assert_eq!(rows[0][3], PyRep::Integer(0));
+    } else {
+        panic!("expected Rowset from GetEmployementRecordAndCharacterTransfers");
+    }
 
     // Owner notes CRUD & labels
     let nid = handle_contacts(

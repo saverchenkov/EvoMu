@@ -144,16 +144,23 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Add requires itemID".into() }));
             };
             let source_item_opt = ctx.db.with_snapshot(|snap| snap.items.get(&item_id).cloned());
+            let raw_flag_opt = args.get(2).and_then(|a| a.as_i64()).or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()));
+            let src_is_fittable_module = raw_flag_opt.is_some()
+                && source_item_opt
+                    .as_ref()
+                    .and_then(|src| ctx.sde.types.get(&src.type_id))
+                    .is_some_and(|t| matches!(t.category_id, 7 | 32));
             let Some(new_loc) = super::inventory_bound::resolve_inv_target_location(
                 ctx,
                 session,
                 bound_entry,
                 args,
                 source_item_opt.as_ref().map(|i| i.location_id),
+                raw_flag_opt.and_then(|v| u16::try_from(v).ok()),
+                src_is_fittable_module,
             ) else {
                 return Some(Err(BridgeRpcError { code: "InvalidLocation".into(), message: "Add requires a target locationID, bound inventory, or active ship/station".into() }));
             };
-            let raw_flag_opt = args.get(2).and_then(|a| a.as_i64()).or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()));
             if let Some(rf) = raw_flag_opt {
                 if !matches!(rf, 0 | 4 | 5 | 11..=34 | 87 | 90 | 92..=94 | 116..=122 | 125..=151 | 155 | 158 | 164..=172 | 177 | 179..=182 | 185) {
                     return Some(Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: format!("Invalid or restricted inventory flag {rf}") }));

@@ -334,8 +334,46 @@ async fn extended_rpcs_plausible_missions_career_standings_mission_tracker_and_n
     });
 
     assert_eq!(
-        handle_extended(&ctx, &mut sess, "agentMgr", "GetCompletedCareerAgentIDs", &[], &kw).await.unwrap().unwrap(),
-        PyRep::List(vec![PyRep::Integer(career_aid)])
+        handle_extended(&ctx, &mut sess, "agentMgr", "GetCompletedCareerAgentIDs", &[], &kw)
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::Dict(vec![(PyRep::Integer(career_aid), PyRep::Bool(true))])
+    );
+    assert_eq!(
+        handle_extended(
+            &ctx,
+            &mut sess,
+            "agentMgr",
+            "GetCompletedCareerAgentIDs",
+            &[PyRep::List(vec![
+                PyRep::Integer(career_aid),
+                PyRep::Integer(3_018_935),
+            ])],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap(),
+        PyRep::Dict(vec![
+            (PyRep::Integer(career_aid), PyRep::Bool(true)),
+            (PyRep::Integer(3_018_935), PyRep::Bool(false)),
+        ])
+    );
+    assert_eq!(
+        handle_extended(
+            &ctx,
+            &mut sess,
+            "agentMgr",
+            "GetCompletedCareerAgentIDs",
+            &[PyRep::List(vec![PyRep::Integer(-1)])],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidParameter"
     );
     assert_eq!(
         handle_extended(&ctx, &mut sess, "agentMgr", "GetPlausibleMissionIDs", &[PyRep::Integer(999_999_999)], &kw)

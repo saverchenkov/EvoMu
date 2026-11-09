@@ -105,7 +105,35 @@ async fn corp_gov_shares_dividends_titles_and_ceo_resign() {
     let holders = call_gov(&ctx, &mut ceo, "corpRegistry", "GetShareholders", vec![])
         .await
         .unwrap();
-    assert_eq!(rs_rows(&holders).len(), 3);
+    let PyRep::IndexRowset {
+        key_column,
+        columns,
+        items,
+    } = holders
+    else {
+        panic!("expected IndexRowset for GetShareholders");
+    };
+    assert_eq!(key_column, "shareholderID");
+    assert_eq!(
+        columns,
+        vec![
+            "shareholderID",
+            "corporationID",
+            "shareholderCorporationID",
+            "shares"
+        ]
+    );
+    assert_eq!(items.len(), 3);
+    let ceo_entry = items
+        .iter()
+        .find(|(k, _)| *k == PyRep::Integer(90_000_001))
+        .expect("CEO shareholder entry");
+    assert_eq!(ceo_entry.1[2], PyRep::Integer(98_000_001));
+    let corp_entry = items
+        .iter()
+        .find(|(k, _)| *k == PyRep::Integer(98_000_001))
+        .expect("Corp shareholder entry");
+    assert_eq!(corp_entry.1[2], PyRep::None);
 
     let above_avg = call_gov(
         &ctx,
@@ -413,5 +441,12 @@ async fn corp_gov_recruitment_contacts_labels_and_add_corp() {
     )
     .await
     .unwrap();
-    assert_eq!(rs_rows(&divs).len(), 7);
+    let PyRep::Rowset { columns, rows } = &divs else {
+        panic!("expected Rowset from GetWalletDivisionsInfo");
+    };
+    assert!(columns.contains(&"key".to_string()));
+    assert_eq!(rows.len(), 7);
+    let key_idx = columns.iter().position(|c| c == "key").unwrap();
+    let keys: Vec<i64> = rows.iter().filter_map(|r| r[key_idx].as_i64()).collect();
+    assert_eq!(keys, vec![1000, 1001, 1002, 1003, 1004, 1005, 1006]);
 }

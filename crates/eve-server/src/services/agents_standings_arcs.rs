@@ -875,7 +875,7 @@ pub(super) async fn handle_extended_with_bound(
     service: &str,
     method: &str,
     args: &[PyRep],
-    _kwargs: &HashMap<String, PyRep>,
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         ("agentMgr", "agentID") => handle_agent_mgr_attr(ctx, session, bound_entry, service, "agentID", args),
@@ -885,17 +885,70 @@ pub(super) async fn handle_extended_with_bound(
         ("agentMgr", "stationID") => handle_agent_mgr_attr(ctx, session, bound_entry, service, "stationID", args),
 
         ("agentMgr", "GetCompletedCareerAgentIDs") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let ids = ctx.db.with_snapshot(|snap| {
-                let mut completed_agents: Vec<i64> = snap.active_missions.values()
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let mut requested_ids = Vec::new();
+            let mut seen_ids = std::collections::HashSet::new();
+            if let Some(arg0) = args.first().or_else(|| kwargs.get("agentIDs")) {
+                match arg0 {
+                    PyRep::None => {}
+                    PyRep::List(items)
+                    | PyRep::Tuple(items)
+                    | PyRep::Set(items)
+                    | PyRep::PySet(items) => {
+                        for item in items {
+                            let Some(aid) = item.as_i64().filter(|&id| id > 0) else {
+                                return Some(Err(BridgeRpcError {
+                                    code: "InvalidParameter".into(),
+                                    message: "agentIDs must contain positive integer agent IDs".into(),
+                                }));
+                            };
+                            if seen_ids.insert(aid) {
+                                requested_ids.push(aid);
+                            }
+                        }
+                    }
+                    PyRep::Integer(aid) if *aid > 0 => {
+                        requested_ids.push(*aid);
+                    }
+                    _ => {
+                        return Some(Err(BridgeRpcError {
+                            code: "InvalidParameter".into(),
+                            message: "agentIDs must be a list, tuple, set, or positive integer".into(),
+                        }));
+                    }
+                }
+            }
+            // V24.01 `agents.pyj:217-223` calls `self._careerAgentsCompletedByID.update(...)`
+            // and indexes `self._careerAgentsCompletedByID[agentID]` directly, so every queried
+            // `agentID` must be mapped to `PyRep::Bool(completed)` in the returned `PyRep::Dict`.
+            let completed_set: std::collections::BTreeSet<i64> = ctx.db.with_snapshot(|snap| {
+                snap.active_missions
+                    .values()
                     .filter(|m| m.character_id == char_id && m.state == "Completed")
-                    .filter_map(|m| ctx.sde.agents.get(&m.agent_id).filter(|a| a.agent_type_id == 12).map(|a| a.agent_id))
-                    .collect();
-                completed_agents.sort_unstable();
-                completed_agents.dedup();
-                completed_agents.into_iter().map(PyRep::Integer).collect::<Vec<_>>()
+                    .filter_map(|m| {
+                        ctx.sde
+                            .agents
+                            .get(&m.agent_id)
+                            .filter(|a| a.agent_type_id == 12)
+                            .map(|a| a.agent_id)
+                    })
+                    .collect()
             });
-            Some(Ok(PyRep::List(ids)))
+            let entries: Vec<(PyRep, PyRep)> = if requested_ids.is_empty() {
+                completed_set
+                    .into_iter()
+                    .map(|aid| (PyRep::Integer(aid), PyRep::Bool(true)))
+                    .collect()
+            } else {
+                requested_ids
+                    .into_iter()
+                    .map(|aid| (PyRep::Integer(aid), PyRep::Bool(completed_set.contains(&aid))))
+                    .collect()
+            };
+            Some(Ok(PyRep::Dict(entries)))
         }
 
         // parity: rpc:agentMgr.GetDisabledMissions

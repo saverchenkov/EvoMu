@@ -1127,16 +1127,19 @@ async fn test_asset_safety_fulcrum_and_reprocessing_rigs() {
     sess.solar_system_id = Some(null_sys);
     sess.station_id = None;
     sess.structure_id = Some(refinery_id);
-    let PyRep::List(quotes) = rpc(&ctx, &mut sess, "reprocessingSvc", "GetQuotes", &[PyRep::List(vec![PyRep::Integer(ore_id)])]).await.expect("rigged GetQuotes") else {
-        panic!("expected List of quotes from reprocessingSvc.GetQuotes");
+    let PyRep::Tuple(q_parts) = rpc(&ctx, &mut sess, "reprocessingSvc", "GetQuotes", &[PyRep::List(vec![PyRep::Integer(ore_id)])]).await.expect("rigged GetQuotes") else {
+        panic!("expected 3-tuple of quotes from reprocessingSvc.GetQuotes");
     };
-    assert_eq!(quotes.len(), 1);
-    let rigged_base = quotes[0].dict_get("stationBaseYield").and_then(|v| v.as_f64()).expect("stationBaseYield");
+    assert_eq!(q_parts.len(), 3);
+    let PyRep::Dict(ref eff_entries) = q_parts[1] else { panic!("efficiency dict"); };
+    let rigged_base = eff_entries.iter().find(|(k, _)| k.as_i64() == Some(1230)).and_then(|(_, v)| v.as_f64()).expect("stationBaseYield for 1230");
     let expected_rigged = 0.53 * 1.12 * 1.02;
     assert!((rigged_base - expected_rigged).abs() < 1e-6 && rigged_base > 0.51, "rigged base yield {rigged_base} must match {expected_rigged}");
-    let PyRep::List(ref outputs) = quotes[0].dict_get("outputs").expect("outputs") else { panic!("outputs list"); };
-    let trit_out = outputs.iter().find(|o| o.dict_get("typeID").and_then(|v| v.as_i64()) == Some(34)).expect("Tritanium output");
-    assert_eq!(trit_out.dict_get("quantity").and_then(|v| v.as_i64()), Some(24_218));
+    let PyRep::Dict(ref quote_entries) = q_parts[2] else { panic!("rawQuotes dict"); };
+    assert_eq!(quote_entries.len(), 1);
+    let recs = quote_entries[0].1.dict_get("recoverables").and_then(|v| v.crowset_rows()).expect("recoverables crowset");
+    let trit_out = recs.iter().find(|r| r.dict_get("typeID").and_then(|v| v.as_i64()) == Some(34)).expect("Tritanium output");
+    assert_eq!(trit_out.dict_get("client").and_then(|v| v.as_i64()), Some(24_218));
 }
 
 }

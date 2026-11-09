@@ -303,6 +303,24 @@ pub(super) fn war_row(w: &WarRecord, meta: &WarMeta, now: u64) -> Vec<PyRep> {
     ]
 }
 
+pub(super) fn war_crowset(rows: Vec<Vec<PyRep>>) -> PyRep {
+    use eve_proto::{DBRowDescriptor, DbColumnType};
+    DBRowDescriptor::new([
+        ("warID", DbColumnType::I8),
+        ("declaredByID", DbColumnType::I8),
+        ("againstID", DbColumnType::I8),
+        ("timeDeclared", DbColumnType::I8),
+        ("timeStarted", DbColumnType::I8),
+        ("timeFinished", DbColumnType::I8),
+        ("mutual", DbColumnType::Bool),
+        ("openForAllies", DbColumnType::Bool),
+        ("warHQ", DbColumnType::I8),
+        ("active", DbColumnType::Bool),
+        ("combatActive", DbColumnType::Bool),
+    ])
+    .build_crowset(rows)
+}
+
 pub(super) fn neg_rows_for_caller(
     ctx: &ServerContext,
     war_id: i64,

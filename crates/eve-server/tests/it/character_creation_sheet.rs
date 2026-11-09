@@ -606,13 +606,24 @@ async fn test_ch4_character_sheet_biography_and_notes() {
     else {
         panic!("Expected Rowset from GetEmployementRecordAndCharacterTransfers");
     };
-    assert_eq!(emp_cols, vec!["recordID", "corporationID", "startDate"]);
+    assert_eq!(
+        emp_cols,
+        vec!["recordID", "corporationID", "startDate", "deleted"]
+    );
     assert!(!emp_rows.is_empty());
     assert_eq!(
         emp_rows[0].get(1).and_then(|v| v.as_i64()),
         Some(1_000_170),
         "Employment history row must match pilot corporation"
     );
+    assert!(
+        emp_rows[0]
+            .get(2)
+            .and_then(|v| v.as_i64())
+            .is_some_and(|ft| ft >= 116_444_736_000_000_000),
+        "Employment history startDate must be 64-bit Win32 FILETIME ticks"
+    );
+    assert_eq!(emp_rows[0].get(3), Some(&PyRep::Integer(0)));
 
     // 4. Owner notes (feat:character.owner-notes)
     let add_note_rep = ctx

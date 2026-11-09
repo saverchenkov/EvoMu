@@ -440,17 +440,31 @@ async fn test_mining_prismaticite_reprocessing_and_unrefined_mineral_reactions()
         )
         .await
         .expect("GetQuotes on rigged Tatara");
-    let PyRep::List(quote_list) = quotes else { panic!("Expected quote list") };
-    let unref_quote = quote_list
+    let PyRep::Tuple(q_parts) = quotes else { panic!("Expected 3-tuple from GetQuotes") };
+    let PyRep::Dict(eff_entries) = &q_parts[1] else { panic!("Expected efficiencyDict") };
+    let PyRep::Dict(quote_dict) = &q_parts[2] else { panic!("Expected rawQuotesDict") };
+    let unref_tid = quote_dict
         .iter()
-        .find(|q| dict_get(q, "itemID").and_then(|v| v.as_i64()) == Some(unref_item_id))
-        .expect("Unrefined Tritanium quote");
-    let prism_quote = quote_list
+        .find(|(k, _)| k.as_i64() == Some(unref_item_id))
+        .and_then(|(_, v)| dict_get(v, "typeID"))
+        .and_then(|v| v.as_i64())
+        .expect("Unrefined Tritanium typeID");
+    let prism_tid = quote_dict
         .iter()
-        .find(|q| dict_get(q, "itemID").and_then(|v| v.as_i64()) == Some(102_000_822))
-        .expect("Prismaticite quote");
-    let unref_base = dict_get(unref_quote, "stationBaseYield").and_then(|v| v.as_f64()).unwrap();
-    let prism_base = dict_get(prism_quote, "stationBaseYield").and_then(|v| v.as_f64()).unwrap();
+        .find(|(k, _)| k.as_i64() == Some(102_000_822))
+        .and_then(|(_, v)| dict_get(v, "typeID"))
+        .and_then(|v| v.as_i64())
+        .expect("Prismaticite typeID");
+    let unref_base = eff_entries
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(unref_tid))
+        .and_then(|(_, v)| v.as_f64())
+        .unwrap();
+    let prism_base = eff_entries
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(prism_tid))
+        .and_then(|(_, v)| v.as_f64())
+        .unwrap();
     assert!(
         (unref_base - 0.51).abs() < 1e-6,
         "Unrefined Mineral (group 4932) must NOT receive M-Set Asteroid Ore Grading Processor rig bonus on Athanor (got {unref_base})"

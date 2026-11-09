@@ -480,7 +480,11 @@ fn signal_tracker_subscriber_and_site_removed_helpers() {
     let st_kv = build_signal_tracker_structure_kv(&ctx, &st);
     assert_eq!(st_kv.dict_get("groupID").and_then(|v| v.as_i64()), Some(1657));
     assert_eq!(st_kv.dict_get("categoryID").and_then(|v| v.as_i64()), Some(65));
-    let _ = build_signal_tracker_anomaly_kv(&anom);
+    let anom_kv = build_signal_tracker_anomaly_kv(&ctx.sde, &anom);
+    assert!(anom_kv.dict_get("dungeonID").and_then(|v| v.as_i64()).is_some_and(|id| id > 0));
+    assert!(anom_kv.dict_get("archetypeID").and_then(|v| v.as_i64()).is_some_and(|id| id > 0));
+    assert!(anom_kv.dict_get("factionID").and_then(|v| v.as_i64()).is_some_and(|id| id > 0));
+    assert!(anom_kv.dict_get("scanStrengthAttribute").and_then(|v| v.as_i64()).is_some_and(|id| id > 0));
 
     emit_signal_tracker_signature_delta(&ctx, sys2, &[sig], &[]);
     emit_signal_tracker_anomaly_delta(&ctx, sys2, &[anom], &[]);

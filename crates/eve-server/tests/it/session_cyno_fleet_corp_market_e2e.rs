@@ -447,6 +447,7 @@ async fn test_fleet_finder_advert_keyval() {
         &kw,
         None,
     ).await.expect("AddFleetFinderAdvert with KeyVal");
+    assert!(matches!(rep, PyRep::Dict(_)), "AddFleetFinderAdvert must return Dict (#732)");
     assert_eq!(rep.dict_get("fleetName").and_then(|v| v.as_str()), Some("Corp Mining Op"));
     assert_eq!(rep.dict_get("inviteScope").and_then(|v| v.as_i64()), Some(1));
     assert_eq!(rep.dict_get("autoJoin").and_then(|v| v.as_bool()), Some(false));

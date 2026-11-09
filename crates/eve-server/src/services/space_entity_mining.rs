@@ -1188,7 +1188,14 @@ pub async fn handle(
             let item_ids: Vec<i64> = match args.first() {
                 Some(PyRep::List(list)) => list.iter().filter_map(|a| a.as_i64()).collect(),
                 Some(PyRep::Tuple(tuple)) => tuple.iter().filter_map(|a| a.as_i64()).collect(),
-                Some(PyRep::Dict(entries)) => entries.iter().filter_map(|(k, _)| k.as_i64()).collect(),
+                Some(PyRep::Dict(entries)) => entries
+                    .iter()
+                    .filter_map(|(k, v)| {
+                        k.as_i64()
+                            .or_else(|| v.dict_get("itemID").and_then(PyRep::as_i64))
+                            .or_else(|| v.as_i64())
+                    })
+                    .collect(),
                 Some(first) => first.as_i64().into_iter().collect(),
                 None => Vec::new(),
             };
@@ -1206,7 +1213,7 @@ pub async fn handle(
                     let re = char_skills.and_then(|m| m.get(&3389)).map(|s| s.level).unwrap_or(0);
                     (base, tax, r, re)
                 });
-            if item_ids.is_empty() && args.len() < 2 {
+            if item_ids.is_empty() && args.is_empty() {
                 return Some(Ok(PyRep::keyval([
                     ("stationBaseYield", PyRep::Real(station_base_yield)),
                     ("stationTaxRate", PyRep::Real(station_tax_rate)),
@@ -1276,14 +1283,23 @@ pub async fn handle(
                 }
                 quotes
             });
-            if args.len() >= 2 {
+            if args.len() < 2 {
+                // V24.01 `Quotes._GetQuotes` (`reprocessing/ui/quotes.pyj:14-19`) passes `{itemID: DBRow}`
+                // or a list/tuple/itemID; whenever `activeShipID` is omitted (`args.len() < 2`), always
+                // return the V24.01 3-tuple `(stationTax, stationEfficiencyDict, {itemID: KeyVal(...)})` (`#723`).
+                Some(Ok(
+                    crate::router::client_compat::build_v24_reprocessing_quotes_tuple(
+                        PyRep::Real(station_tax_rate),
+                        PyRep::Real(station_base_yield),
+                        quotes,
+                    ),
+                ))
+            } else {
                 Some(Ok(PyRep::Tuple(vec![
                     PyRep::Real(station_tax_rate),
                     PyRep::Real(station_base_yield),
                     PyRep::List(quotes),
                 ])))
-            } else {
-                Some(Ok(PyRep::List(quotes)))
             }
         }
 

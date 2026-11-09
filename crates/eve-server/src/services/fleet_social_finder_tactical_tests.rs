@@ -178,7 +178,7 @@ async fn fleet_proxy_update_advert_v2401_and_persistence() {
     let _ = ctx.drain_notifications_for_char(boss_id);
 
     // Seed an advert via AddFleetFinderAdvert
-    let _ = handle_finder_and_tactical(
+    let add_rep = handle_finder_and_tactical(
         &ctx,
         &mut session,
         "fleetProxy",
@@ -193,6 +193,8 @@ async fn fleet_proxy_update_advert_v2401_and_persistence() {
     .await
     .unwrap()
     .unwrap();
+    assert!(matches!(add_rep, PyRep::Dict(_)), "AddFleetFinderAdvert must return PyRep::Dict (#732)");
+    assert_eq!(add_rep.dict_get("fleetName").and_then(PyRep::as_str), Some("Test Fleet"));
     let add_notifs: Vec<_> = ctx
         .drain_notifications_for_char(boss_id)
         .into_iter()

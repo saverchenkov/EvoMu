@@ -357,9 +357,30 @@ async fn test_pve_mining_missions_career_and_data_centers() {
         }
     });
 
-    let car_completed_list = ctx.dispatch_rpc(&mut sess, "agentMgr", None, "GetCompletedCareerAgentIDs", &[], &kw, None).await.expect("GetCompletedCareerAgentIDs");
-    let PyRep::List(c_ids) = car_completed_list else { panic!() };
-    assert!(c_ids.contains(&PyRep::Integer(car_aid)), "Completed career agent must appear in GetCompletedCareerAgentIDs");
+    let car_completed_dict = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "agentMgr",
+            None,
+            "GetCompletedCareerAgentIDs",
+            &[PyRep::List(vec![
+                PyRep::Integer(car_aid),
+                PyRep::Integer(3_018_935),
+            ])],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetCompletedCareerAgentIDs");
+    let PyRep::Dict(c_entries) = car_completed_dict else { panic!() };
+    assert!(
+        c_entries.contains(&(PyRep::Integer(car_aid), PyRep::Bool(true))),
+        "Completed career agent must map to true in GetCompletedCareerAgentIDs"
+    );
+    assert!(
+        c_entries.contains(&(PyRep::Integer(3_018_935), PyRep::Bool(false))),
+        "Uncompleted queried career agent must map to false in GetCompletedCareerAgentIDs"
+    );
 
     let car_repeat_err = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(car_oid), "DoAction", &[PyRep::Integer(2)], &kw, None).await.expect_err("Repeat career must fail");
     assert_eq!(car_repeat_err.code, "OneTimeAgentMissionCompleted");

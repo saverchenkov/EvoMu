@@ -78,7 +78,7 @@ pub struct ProgressionExtraManager {
 
 pub use super::quasar_campaign_state::{CampaignObjectiveRecord, CampaignRecord, CampaignTrackRecord};
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct GenericGoalRecord {
     pub uuid: [u8; 16],
     pub creator_id: u32,
@@ -87,6 +87,14 @@ pub struct GenericGoalRecord {
     pub desired_progress: u64,
     pub current_progress: u64,
     pub closed: bool,
+    #[serde(default)]
+    pub matcher_type: String,
+    #[serde(default)]
+    pub filter_id: Option<i64>,
+    #[serde(default)]
+    pub created_unix: u64,
+    #[serde(default)]
+    pub contribution_config_pb: Vec<u8>,
 }
 
 impl ProgressionExtraManager {
@@ -702,6 +710,18 @@ pub fn register_progression_extra_handlers(
     // ------------------------------------------------------------------------
     use crate::services::social_corp_fleet::social_corp_projects as corp_projects;
 
+    fn resolved_contrib_pb(
+        contribution_config_pb: &[u8],
+        matcher_type: &str,
+        filter_id: Option<i64>,
+    ) -> Vec<u8> {
+        if !contribution_config_pb.is_empty() {
+            contribution_config_pb.to_vec()
+        } else {
+            notices::encode_goal_contribution_config(matcher_type, filter_id)
+        }
+    }
+
     fn load_live_goal(
         mgr: &ProgressionExtraManager,
         target_uuid: &[u8; 16],
@@ -724,18 +744,65 @@ pub fn register_progression_extra_handlers(
                 } else {
                     1
                 };
-                Some((p.name.clone(), det.description, p.target_quantity, p.current_quantity, det.creator_id, det.closed || det.status == "Closed", st))
+                let matcher_type = s
+                    .alliance_war_state
+                    .project_meta
+                    .get(&pid)
+                    .map(|m| m.0.clone())
+                    .unwrap_or_default();
+                Some((
+                    p.name.clone(),
+                    det.description,
+                    p.target_quantity,
+                    p.current_quantity,
+                    det.creator_id,
+                    det.closed || det.status == "Closed",
+                    st,
+                    matcher_type,
+                    det.filter_id,
+                    det.created_unix,
+                ))
             });
-            if let Some((name, desc, desired, current, det_creator, closed, state)) = from_db {
+            if let Some((name, desc, desired, current, det_creator, closed, state, matcher_type, filter_id, created_unix)) = from_db {
+                let cached = mgr
+                    .generic_goals
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&uuid_to_hex(target_uuid))
+                    .cloned();
                 let creator_id = if det_creator > 0 {
                     det_creator as u32
                 } else {
-                    mgr.generic_goals.read().unwrap_or_else(|e| e.into_inner()).get(&uuid_to_hex(target_uuid)).map_or(0, |g| g.creator_id)
+                    cached.as_ref().map_or(0, |g| g.creator_id)
                 };
-                return Some((GenericGoalRecord { uuid: *target_uuid, creator_id, name, description: desc, desired_progress: desired, current_progress: current, closed }, state));
+                let contribution_config_pb = cached
+                    .as_ref()
+                    .map(|g| g.contribution_config_pb.as_slice())
+                    .unwrap_or(&[]);
+                let contribution_config_pb =
+                    resolved_contrib_pb(contribution_config_pb, &matcher_type, filter_id);
+                return Some((
+                    GenericGoalRecord {
+                        uuid: *target_uuid,
+                        creator_id,
+                        name,
+                        description: desc,
+                        desired_progress: desired,
+                        current_progress: current,
+                        closed,
+                        matcher_type,
+                        filter_id,
+                        created_unix,
+                        contribution_config_pb,
+                    },
+                    state,
+                ));
             }
         }
-        mgr.generic_goals.read().unwrap_or_else(|e| e.into_inner()).get(&uuid_to_hex(target_uuid)).cloned().map(|g| {
+        mgr.generic_goals.read().unwrap_or_else(|e| e.into_inner()).get(&uuid_to_hex(target_uuid)).cloned().map(|mut g| {
+            if g.contribution_config_pb.is_empty() {
+                g.contribution_config_pb = notices::encode_goal_contribution_config(&g.matcher_type, g.filter_id);
+            }
             let st = if g.closed { 2 } else if g.current_progress >= g.desired_progress { 3 } else { 1 };
             (g, st)
         })
@@ -743,6 +810,11 @@ pub fn register_progression_extra_handlers(
 
     fn collect_all_live_goals(mgr: &ProgressionExtraManager, now_unix: u64) -> Vec<GenericGoalRecord> {
         let mut by_hex: HashMap<String, GenericGoalRecord> = mgr.generic_goals.read().unwrap_or_else(|e| e.into_inner()).clone();
+        for g in by_hex.values_mut() {
+            if g.contribution_config_pb.is_empty() {
+                g.contribution_config_pb = notices::encode_goal_contribution_config(&g.matcher_type, g.filter_id);
+            }
+        }
         if let Some(ref db) = mgr.db {
             let _ = db.with_mut_snapshot(|s| corp_projects::sweep_expired_corp_projects_in_snap(s, now_unix));
             db.with_snapshot(|s| {
@@ -753,7 +825,19 @@ pub fn register_progression_extra_handlers(
                     let det = s.alliance_war_state.project_details.get(&pid).cloned().unwrap_or_default();
                     let uuid = corp_projects::corp_goal_uuid(pid);
                     let hex = uuid_to_hex(&uuid);
-                    let creator_id = if det.creator_id > 0 { det.creator_id as u32 } else { by_hex.get(&hex).map_or(0, |g| g.creator_id) };
+                    let prev = by_hex.get(&hex);
+                    let matcher_type = s
+                        .alliance_war_state
+                        .project_meta
+                        .get(&pid)
+                        .map(|m| m.0.clone())
+                        .unwrap_or_default();
+                    let creator_id = if det.creator_id > 0 { det.creator_id as u32 } else { prev.map_or(0, |g| g.creator_id) };
+                    let contribution_config_pb = resolved_contrib_pb(
+                        prev.map(|g| g.contribution_config_pb.as_slice()).unwrap_or(&[]),
+                        &matcher_type,
+                        det.filter_id,
+                    );
                     by_hex.insert(hex, GenericGoalRecord {
                         uuid,
                         creator_id,
@@ -762,6 +846,10 @@ pub fn register_progression_extra_handlers(
                         desired_progress: p.target_quantity,
                         current_progress: p.current_quantity,
                         closed: det.closed || det.status == "Closed",
+                        matcher_type,
+                        filter_id: det.filter_id,
+                        created_unix: det.created_unix,
+                        contribution_config_pb,
                     });
                 }
             });
@@ -774,7 +862,7 @@ pub fn register_progression_extra_handlers(
     let mgr = Arc::clone(&manager);
     router.register_handler(
         "eve_public.goal.api.CreateRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, any, dyn_msg| {
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
@@ -839,7 +927,7 @@ pub fn register_progression_extra_handlers(
                         escrow: opts.escrow,
                         isk_per_unit: opts.isk_per_unit,
                         wallet_division: wallet_div,
-                        matcher_type: opts.matcher_type,
+                        matcher_type: opts.matcher_type.clone(),
                         is_freelance: false,
                         auto_payout_on_contribution: opts.auto_payout,
                         max_per_character: opts.max_per_character,
@@ -860,6 +948,8 @@ pub fn register_progression_extra_handlers(
                 corp_projects::corp_goal_uuid(gid as i64)
             };
 
+            let contrib_pb = notices::extract_raw_length_delimited_field(&any.value, 4)
+                .unwrap_or_else(|| notices::encode_goal_contribution_config(&opts.matcher_type, opts.filter_id));
             let rec = GenericGoalRecord {
                 uuid,
                 creator_id: cid,
@@ -868,6 +958,10 @@ pub fn register_progression_extra_handlers(
                 desired_progress: target,
                 current_progress: initial_prog,
                 closed: false,
+                matcher_type: opts.matcher_type.clone(),
+                filter_id: opts.filter_id,
+                created_unix: now_u,
+                contribution_config_pb: contrib_pb,
             };
             let goal_corp = mgr.goal_corp_id(&uuid);
             let created = notices::goal_created(
@@ -880,6 +974,8 @@ pub fn register_progression_extra_handlers(
                     description: &rec.description,
                     desired: target,
                     current: initial_prog,
+                    state: None,
+                    contribution_config_pb: &rec.contribution_config_pb,
                 },
             );
             mgr.generic_goals.write().unwrap_or_else(|e| e.into_inner()).insert(uuid_to_hex(&uuid), rec);
@@ -920,16 +1016,18 @@ pub fn register_progression_extra_handlers(
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Goal not found".into()))?;
 
             let mut out = Vec::new();
-            let mut attr_bytes = Vec::new();
-            encode_string_field(2, &g.name, &mut attr_bytes);
-            encode_string_field(3, &g.description, &mut attr_bytes);
-
-            let mut prog_bytes = Vec::new();
-            encode_varint_field(1, g.desired_progress, &mut prog_bytes);
-            encode_varint_field(2, g.current_progress, &mut prog_bytes);
-            encode_bytes_field(5, &prog_bytes, &mut attr_bytes);
-
-            encode_varint_field(6, state, &mut attr_bytes);
+            let contrib_pb = resolved_contrib_pb(&g.contribution_config_pb, &g.matcher_type, g.filter_id);
+            let attr_bytes = notices::encode_goal_attributes(&notices::GoalAttributesView {
+                created_unix: if g.created_unix > 0 { g.created_unix } else { ctx.now_unix() },
+                creator_id: g.creator_id,
+                corp_id: goal_corp,
+                name: &g.name,
+                description: &g.description,
+                desired: g.desired_progress,
+                current: g.current_progress,
+                state: Some(state),
+                contribution_config_pb: &contrib_pb,
+            });
             encode_bytes_field(1, &attr_bytes, &mut out);
 
             Ok(GoogleAny {
@@ -964,9 +1062,26 @@ pub fn register_progression_extra_handlers(
                 encode_bytes_field(1, &g.uuid, &mut id_bytes);
                 encode_bytes_field(1, &id_bytes, &mut goal_bytes);
 
-                let mut attr_bytes = Vec::new();
-                encode_string_field(2, &g.name, &mut attr_bytes);
-                encode_string_field(3, &g.description, &mut attr_bytes);
+                let g_corp = mgr.goal_corp_id(&g.uuid);
+                let g_state = if g.closed {
+                    notices::GOAL_STATE_CLOSED
+                } else if g.current_progress >= g.desired_progress {
+                    notices::GOAL_STATE_COMPLETED
+                } else {
+                    notices::GOAL_STATE_ACTIVE
+                };
+                let contrib_pb = resolved_contrib_pb(&g.contribution_config_pb, &g.matcher_type, g.filter_id);
+                let attr_bytes = notices::encode_goal_attributes(&notices::GoalAttributesView {
+                    created_unix: if g.created_unix > 0 { g.created_unix } else { ctx.now_unix() },
+                    creator_id: g.creator_id,
+                    corp_id: g_corp,
+                    name: &g.name,
+                    description: &g.description,
+                    desired: g.desired_progress,
+                    current: g.current_progress,
+                    state: Some(g_state),
+                    contribution_config_pb: &contrib_pb,
+                });
                 encode_bytes_field(2, &attr_bytes, &mut goal_bytes);
 
                 encode_bytes_field(3, &goal_bytes, &mut out);

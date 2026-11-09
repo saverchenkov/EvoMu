@@ -308,7 +308,15 @@ async fn reprocessing_npc_station_corp_hangar_locks_singleton_and_insufficient_f
     .await
     .unwrap()
     .unwrap();
-    assert!(matches!(quotes, PyRep::List(ref l) if l.len() == 1));
+    let PyRep::Tuple(ref q_parts) = quotes else {
+        panic!("expected 3-tuple from 1-arg GetQuotes, got {quotes:?}");
+    };
+    assert_eq!(q_parts.len(), 3);
+    let PyRep::Dict(ref q_entries) = q_parts[2] else {
+        panic!("expected rawQuotes Dict, got {:?}", q_parts[2]);
+    };
+    assert_eq!(q_entries.len(), 1);
+    assert_eq!(q_entries[0].0, PyRep::Integer(corp_ore_id));
 
     let batch_rep = handle(
         &ctx,

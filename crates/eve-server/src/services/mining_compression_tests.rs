@@ -524,6 +524,18 @@ async fn test_corp_and_character_mining_ledger_rpcs() {
     if let PyRep::List(items) = char_logs {
         assert_eq!(items.len(), 1);
         assert_eq!(
+            items[0].dict_get("eventDate").and_then(|v| v.as_i64()),
+            Some(crate::sp6_lifecycle::unix_to_filetime(now))
+        );
+        assert_eq!(
+            items[0].dict_get("solarsystemID").and_then(|v| v.as_i64()),
+            Some(30_000_142)
+        );
+        assert_eq!(
+            items[0].dict_get("solarSystemID").and_then(|v| v.as_i64()),
+            Some(30_000_142)
+        );
+        assert_eq!(
             items[0].dict_get("quantity").and_then(|v| v.as_i64()),
             Some(1200)
         );
@@ -534,6 +546,25 @@ async fn test_corp_and_character_mining_ledger_rpcs() {
     } else {
         panic!("expected list of character mining logs");
     }
+
+    assert_eq!(parse_date_string_to_unix_secs("1970-01-01"), Some(0));
+    assert_eq!(parse_date_string_to_unix_secs("invalid-date"), None);
+
+    let mut unauth_sess = SessionState::default();
+    assert!(
+        handle_compression(
+            &ctx,
+            &mut unauth_sess,
+            "characterMiningLedger",
+            "GetCharacterLogs",
+            &[],
+            &HashMap::new(),
+        )
+        .await
+        .unwrap()
+        .is_err(),
+        "unauthenticated session must be rejected by characterMiningLedger.GetCharacterLogs"
+    );
 }
 
 #[tokio::test]
@@ -545,6 +576,15 @@ async fn corp_mining_ledger_get_observer_ledger_handles_none_and_rejects_bad_typ
     session.corporation_id = Some(1_000_009);
     let kw = HashMap::new();
 
+    let expected_empty = eve_proto::DBRowDescriptor::new([
+        ("characterID", eve_proto::DbColumnType::I8),
+        ("recordedCorporationID", eve_proto::DbColumnType::I8),
+        ("typeID", eve_proto::DbColumnType::I4),
+        ("quantity", eve_proto::DbColumnType::I8),
+        ("lastUpdated", eve_proto::DbColumnType::Str),
+    ])
+    .build_crowset(Vec::new());
+
     let res_none = handle_compression(
         &ctx,
         &mut session,
@@ -555,8 +595,10 @@ async fn corp_mining_ledger_get_observer_ledger_handles_none_and_rejects_bad_typ
     )
     .await
     .unwrap()
-    .expect("GetObserverLedger(None) must return empty list");
-    assert_eq!(res_none, PyRep::List(vec![]));
+    .expect("GetObserverLedger(None) must return empty CRowset");
+    assert!(res_none.is_crowset(), "GetObserverLedger(None) must return CRowset");
+    assert_eq!(res_none.crowset_rows().map(<[PyRep]>::len), Some(0));
+    assert_eq!(res_none, expected_empty);
 
     let res_empty = handle_compression(
         &ctx,
@@ -568,8 +610,9 @@ async fn corp_mining_ledger_get_observer_ledger_handles_none_and_rejects_bad_typ
     )
     .await
     .unwrap()
-    .expect("GetObserverLedger() with missing arg must return empty list");
-    assert_eq!(res_empty, PyRep::List(vec![]));
+    .expect("GetObserverLedger() with missing arg must return empty CRowset");
+    assert!(res_empty.is_crowset(), "GetObserverLedger() must return CRowset");
+    assert_eq!(res_empty, expected_empty);
 
     let bad_err = handle_compression(
         &ctx,

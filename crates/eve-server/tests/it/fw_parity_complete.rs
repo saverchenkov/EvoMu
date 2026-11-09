@@ -45,18 +45,18 @@ async fn test_fw_warzones_victory_points_and_system_capture() {
         .await
         .expect("GetAllWarzones");
     match wz_rep {
-        PyRep::List(wzs) => {
+        PyRep::Dict(wzs) => {
             assert_eq!(wzs.len(), 2, "Must return 2 warzones");
-            let wz1 = &wzs[0];
-            assert_eq!(wz1.dict_get("warzoneID"), Some(&PyRep::Integer(1)));
-            assert_eq!(wz1.dict_get("factionOneID"), Some(&PyRep::Integer(FACTION_CALDARI)));
-            assert_eq!(wz1.dict_get("factionTwoID"), Some(&PyRep::Integer(FACTION_GALLENTE)));
-            let wz2 = &wzs[1];
-            assert_eq!(wz2.dict_get("warzoneID"), Some(&PyRep::Integer(2)));
-            assert_eq!(wz2.dict_get("factionOneID"), Some(&PyRep::Integer(FACTION_AMARR)));
-            assert_eq!(wz2.dict_get("factionTwoID"), Some(&PyRep::Integer(FACTION_MINMATAR)));
+            assert_eq!(
+                wzs.iter().find(|(k, _)| *k == PyRep::Integer(1)).map(|(_, v)| v),
+                Some(&PyRep::List(vec![PyRep::Integer(FACTION_CALDARI), PyRep::Integer(FACTION_GALLENTE)]))
+            );
+            assert_eq!(
+                wzs.iter().find(|(k, _)| *k == PyRep::Integer(2)).map(|(_, v)| v),
+                Some(&PyRep::List(vec![PyRep::Integer(FACTION_AMARR), PyRep::Integer(FACTION_MINMATAR)]))
+            );
         }
-        other => panic!("Expected List for GetAllWarzones, got {other:?}"),
+        other => panic!("Expected Dict for GetAllWarzones, got {other:?}"),
     }
 
     // GetAllWarzonesOccupationStates returns owner, occupier, frontline status, and contested %

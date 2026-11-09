@@ -1004,18 +1004,122 @@ pub fn build_signal_tracker_signature_kv(
     ])
 }
 
-pub(crate) fn build_signal_tracker_anomaly_kv(anom: &eve_db::CosmicAnomalyRecord) -> PyRep {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AnomalyDungeonMetadata {
+    pub dungeon_id: u32,
+    pub archetype_id: u32,
+    pub faction_id: u32,
+    pub difficulty: u32,
+    pub scan_strength_attribute: i64,
+}
+
+fn scan_strength_attribute_for_anomaly(anom_type: &str, archetype_id: u32) -> i64 {
+    match archetype_id {
+        45 => 208, // scanRadarStrength (Data)
+        30 => 209, // scanLadarStrength (Gas)
+        44 => 210, // scanMagnetometricStrength (Relic)
+        27 | 28 => 211, // scanGravimetricStrength (Ore / Ice)
+        _ => match anom_type.trim().to_ascii_lowercase().as_str() {
+            "data" | "data site" => 208,
+            "gas" | "gas site" => 209,
+            "relic" | "relic site" => 210,
+            _ => 211,
+        },
+    }
+}
+
+pub(crate) fn resolve_anomaly_dungeon_metadata(
+    sde: &eve_sde::SdeRegistry,
+    anom: &eve_db::CosmicAnomalyRecord,
+) -> AnomalyDungeonMetadata {
+    let parsed_dungeon_id = anom
+        .anomaly_id
+        .strip_prefix("DNG-")
+        .and_then(|rest| rest.split('-').next())
+        .and_then(|num| num.parse::<u32>().ok())
+        .filter(|&id| id > 0);
+
+    let anom_name = anom.name.trim();
+    let by_id = parsed_dungeon_id.and_then(|id| sde.dungeons.get(&id));
+    let by_name = if by_id.is_none() && !anom_name.is_empty() {
+        sde.dungeons
+            .values()
+            .filter(|d| d.name.trim().eq_ignore_ascii_case(anom_name))
+            .min_by_key(|d| (u8::from(d.archetype_id.is_none()), d.dungeon_id))
+    } else {
+        None
+    };
+
+    let lower_type = anom.anomaly_type.trim().to_ascii_lowercase();
+    let (default_dungeon_id, default_archetype_id, default_faction_id, default_difficulty) =
+        if matches!(lower_type.as_str(), "ore" | "oreanomaly" | "sovore") {
+            (10_778_u32, 27_u32, 500_021_u32, 1_u32)
+        } else if matches!(lower_type.as_str(), "icebelt" | "ice") {
+            (5_496_u32, 28_u32, 500_021_u32, 2_u32)
+        } else if matches!(lower_type.as_str(), "gas" | "gas site") {
+            (3_807_u32, 30_u32, 500_021_u32, 2_u32)
+        } else if matches!(lower_type.as_str(), "relic" | "relic site") {
+            (1_612_u32, 44_u32, 500_011_u32, 2_u32)
+        } else if matches!(lower_type.as_str(), "data" | "data site") {
+            (1_617_u32, 45_u32, 500_010_u32, 2_u32)
+        } else {
+            (2_134_u32, 24_u32, 500_010_u32, 1_u32)
+        };
+
+    let matched = by_id.or(by_name).or_else(|| {
+        sde.dungeons.get(&default_dungeon_id).or_else(|| {
+            sde.dungeons
+                .values()
+                .filter(|d| d.archetype_id == Some(default_archetype_id))
+                .min_by_key(|d| d.dungeon_id)
+        })
+    });
+
+    if let Some(d) = matched {
+        let archetype_id = d.archetype_id.unwrap_or(default_archetype_id);
+        let faction_id = d.faction_id.unwrap_or(default_faction_id);
+        let difficulty = d.difficulty.unwrap_or(default_difficulty).clamp(1, 5);
+        AnomalyDungeonMetadata {
+            dungeon_id: d.dungeon_id,
+            archetype_id,
+            faction_id,
+            difficulty,
+            scan_strength_attribute: scan_strength_attribute_for_anomaly(
+                &anom.anomaly_type,
+                archetype_id,
+            ),
+        }
+    } else {
+        AnomalyDungeonMetadata {
+            dungeon_id: parsed_dungeon_id.unwrap_or(default_dungeon_id),
+            archetype_id: default_archetype_id,
+            faction_id: default_faction_id,
+            difficulty: default_difficulty,
+            scan_strength_attribute: scan_strength_attribute_for_anomaly(
+                &anom.anomaly_type,
+                default_archetype_id,
+            ),
+        }
+    }
+}
+
+pub(crate) fn build_signal_tracker_anomaly_kv(
+    sde: &eve_sde::SdeRegistry,
+    anom: &eve_db::CosmicAnomalyRecord,
+) -> PyRep {
     let pos_rep = PyRep::Tuple(vec![PyRep::Real(anom.position[0]), PyRep::Real(anom.position[1]), PyRep::Real(anom.position[2])]);
+    let meta = resolve_anomaly_dungeon_metadata(sde, anom);
     PyRep::keyval([
         ("instanceID", PyRep::String(anom.anomaly_id.clone())),
         ("position", pos_rep),
         ("targetID", PyRep::String(anom.anomaly_id.clone())),
-        ("difficulty", PyRep::Integer(1)),
-        ("dungeonID", PyRep::None),
-        ("archetypeID", PyRep::None),
+        ("difficulty", PyRep::Integer(i64::from(meta.difficulty))),
+        ("dungeonID", PyRep::Integer(i64::from(meta.dungeon_id))),
+        ("archetypeID", PyRep::Integer(i64::from(meta.archetype_id))),
+        ("dungeonName", PyRep::String(anom.name.clone())),
         ("dungeonNameID", PyRep::None),
-        ("factionID", PyRep::None),
-        ("scanStrengthAttribute", PyRep::None),
+        ("factionID", PyRep::Integer(i64::from(meta.faction_id))),
+        ("scanStrengthAttribute", PyRep::Integer(meta.scan_strength_attribute)),
         ("allowedTypes", PyRep::None),
     ])
 }
@@ -1095,7 +1199,7 @@ pub(crate) fn emit_signal_tracker_anomaly_delta(
             .map(|anom| {
                 (
                     PyRep::String(anom.anomaly_id.clone()),
-                    build_signal_tracker_anomaly_kv(anom),
+                    build_signal_tracker_anomaly_kv(&ctx.sde, anom),
                 )
             })
             .collect(),

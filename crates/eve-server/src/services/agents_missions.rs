@@ -134,7 +134,7 @@ pub async fn handle_with_bound(
             Some(agents_finder_query::handle_get_agents(ctx, session, args, _kwargs))
         }
 
-        ("agentMgr", "GetInfoServiceDetails") | ("agentMgr", "GetAgentLocationWrap") => {
+        ("agentMgr", "GetInfoServiceDetails") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
@@ -163,6 +163,40 @@ pub async fn handle_with_bound(
                 ("isLocator", PyRep::Bool(a.is_locator)),
                 ("incompatible", PyRep::None),
                 ("services", PyRep::List(services)),
+            ])))
+        }
+
+        ("agentMgr", "GetAgentLocationWrap") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
+            };
+            let (agent_id, _) =
+                resolve_target_agent_id_with_bound(ctx, session, bound_entry, char_id, sys_id, args, _kwargs);
+            let Some(a) = ctx.sde.agents.get(&agent_id) else {
+                return Some(Err(BridgeRpcError { code: "UnknownAgent".into(), message: format!("Agent {agent_id} does not exist in SDE") }));
+            };
+            let loc_id = a
+                .station_id
+                .or_else(|| a.solar_system_id.map(|s| s as i64))
+                .unwrap_or(0);
+            let type_id = a
+                .station_id
+                .and_then(|sid| ctx.sde.stations.get(&sid))
+                .map(|st| st.station_type_id as i64)
+                .unwrap_or(5);
+            Some(Ok(PyRep::Dict(vec![
+                (PyRep::String("agentID".into()), PyRep::Integer(a.agent_id)),
+                (
+                    PyRep::String("solarsystemID".into()),
+                    a.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None),
+                ),
+                (PyRep::String("locationID".into()), PyRep::Integer(loc_id)),
+                (PyRep::String("typeID".into()), PyRep::Integer(type_id)),
+                (
+                    PyRep::String("stationID".into()),
+                    a.station_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                ),
             ])))
         }
 

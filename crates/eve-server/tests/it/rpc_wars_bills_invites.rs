@@ -70,6 +70,18 @@ fn field(rep: &PyRep, key: &str) -> PyRep {
 fn rowset_data(rep: &PyRep) -> (Vec<String>, Vec<Vec<PyRep>>) {
     match rep {
         PyRep::Rowset { columns, rows } => (columns.clone(), rows.clone()),
+        PyRep::ObjectEx { list, .. } if rep.is_crowset() => {
+            let cols = list
+                .first()
+                .and_then(|r| r.dbrow_columns())
+                .map(|c| c.iter().map(|(k, _)| k.clone()).collect())
+                .unwrap_or_default();
+            let rows = list
+                .iter()
+                .filter_map(|r| r.dbrow_columns().map(|c| c.iter().map(|(_, v)| v.clone()).collect()))
+                .collect();
+            (cols, rows)
+        }
         _ => (Vec::new(), Vec::new()),
     }
 }

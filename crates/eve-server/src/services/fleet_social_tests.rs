@@ -218,6 +218,34 @@ async fn office_manager_lifecycle_and_fleet_rpc_handlers() {
         .unwrap();
     assert_eq!(empty_before.as_i64(), Some(16));
 
+    let impounded_before = handle(&ctx, &mut session, "officeManager", "HasCorpImpoundedItems", &[PyRep::Integer(station_id)], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(impounded_before, PyRep::Bool(false));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            777_002,
+            InventoryItemRecord {
+                item_id: 777_002,
+                type_id: 34,
+                owner_id: corp_id,
+                location_id: station_id,
+                flag: InventoryFlag::Impounded,
+                quantity: 5,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let impounded_after = handle(&ctx, &mut session, "officeManager", "HasCorpImpoundedItems", &[PyRep::Integer(station_id)], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(impounded_after, PyRep::Bool(true));
+
     let rent = handle(&ctx, &mut session, "officeManager", "RentOffice", &[PyRep::Integer(station_id)], &kw)
         .await
         .unwrap()

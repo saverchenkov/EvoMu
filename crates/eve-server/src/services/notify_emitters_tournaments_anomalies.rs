@@ -207,22 +207,23 @@ pub fn emit_signal_tracker_full_state_for_system(
                     })
                     .enumerate()
                     .map(|(idx, a)| {
+                        let meta = crate::services::fleet_social::fleet_social_scanning::resolve_anomaly_dungeon_metadata(&ctx.sde, a);
                         (
                             PyRep::String(a.anomaly_id.clone()),
                             PyRep::keyval([
                                 ("instanceID", PyRep::Integer((idx + 1) as i64)),
                                 ("siteID", PyRep::String(a.anomaly_id.clone())),
                                 ("targetID", PyRep::String(a.anomaly_id.clone())),
-                                ("dungeonID", PyRep::Integer(0)),
+                                ("dungeonID", PyRep::Integer(i64::from(meta.dungeon_id))),
                                 ("dungeonName", PyRep::String(a.name.clone())),
                                 ("dungeonNameID", PyRep::None),
                                 ("anomalyType", PyRep::String(a.anomaly_type.clone())),
-                                ("archetypeID", PyRep::None),
-                                ("difficulty", PyRep::None),
-                                ("factionID", PyRep::None),
+                                ("archetypeID", PyRep::Integer(i64::from(meta.archetype_id))),
+                                ("difficulty", PyRep::Integer(i64::from(meta.difficulty))),
+                                ("factionID", PyRep::Integer(i64::from(meta.faction_id))),
                                 ("scanStrength", PyRep::Real(a.signal_strength)),
                                 ("signalStrength", PyRep::Real(a.signal_strength)),
-                                ("scanStrengthAttribute", PyRep::None),
+                                ("scanStrengthAttribute", PyRep::Integer(meta.scan_strength_attribute)),
                                 ("deviation", PyRep::Real(0.0)),
                                 ("groupID", PyRep::None),
                                 ("typeID", PyRep::None),

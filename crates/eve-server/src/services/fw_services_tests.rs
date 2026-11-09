@@ -67,9 +67,14 @@ async fn fw_services_helpers_and_rpc_mutations() {
         .await
         .unwrap()
         .unwrap();
-    let wz_list = wzs.as_list().unwrap();
-    assert_eq!(wz_list.len(), 2);
-    assert!(wz_list[0].dict_get("systemCount").and_then(|v| v.as_i64()).is_some());
+    let PyRep::Dict(wz_entries) = wzs else {
+        panic!("Expected Dict from GetAllWarzones, got {wzs:?}");
+    };
+    assert_eq!(wz_entries.len(), 2);
+    assert_eq!(
+        wz_entries.iter().find(|(k, _)| *k == PyRep::Integer(1)).map(|(_, v)| v),
+        Some(&PyRep::List(vec![PyRep::Integer(FACTION_CALDARI), PyRep::Integer(FACTION_GALLENTE)]))
+    );
 
     let occ_all = handle(
         &ctx,

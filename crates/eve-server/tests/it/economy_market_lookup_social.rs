@@ -882,11 +882,10 @@ pub(crate) mod milestone_logon_browser_lockdown_policy {
         )
         .await
         .expect("GetPaperDollData");
-        assert!(matches!(public_doll, PyRep::KeyVal(_)), "expected KeyVal from GetPaperDollData");
-        assert_eq!(dict_get(&public_doll, "genderLabel"), Some(&PyRep::String("Male".into())));
         assert_eq!(
-            dict_get(&public_doll, "wornApparel"),
-            Some(&PyRep::List(vec![PyRep::Integer(i64::from(apparel_type_id))]))
+            public_doll,
+            PyRep::List(vec![PyRep::String("male".into())]),
+            "GetPaperDollData must return [gender_label] for Doll.MatchDNA without summary KeyVal"
         );
 
         // Unequip moves singleton back to docked station hangar (60_003_760, Hangar)

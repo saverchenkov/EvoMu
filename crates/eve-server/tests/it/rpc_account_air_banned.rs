@@ -367,7 +367,7 @@ async fn test_paperdoll_server_rpcs() {
         });
     });
 
-    // 1. paperDollServer.GetPaperDollData: returns KeyVal for V24 ApplyDBRowToDoll
+    // 1. paperDollServer.GetPaperDollData: returns [gender] sequence per V24 Doll.MatchDNA / AvatarCharacterSceneContext
     let doll_rep = rpc(
         &ctx,
         &mut sess1,
@@ -377,15 +377,11 @@ async fn test_paperdoll_server_rpcs() {
     )
     .await
     .expect("GetPaperDollData");
-    assert!(
-        matches!(doll_rep, PyRep::KeyVal(_)),
-        "expected KeyVal from GetPaperDollData, got {doll_rep:?}"
+    assert_eq!(
+        doll_rep,
+        PyRep::List(vec![PyRep::String("female".into())]),
+        "GetPaperDollData must return [gender] without non-footprint summary KeyVal"
     );
-    assert_eq!(field(&doll_rep, "genderLabel"), &PyRep::String("Female".into()));
-    assert_eq!(field(&doll_rep, "characterID"), &PyRep::Integer(PILOT_1));
-    assert_eq!(field(&doll_rep, "dollDNA"), &PyRep::String("dna:pilot1_custom".into()));
-    assert_eq!(field(&doll_rep, "portraitInfo"), &PyRep::String("portrait:pilot1_custom".into()));
-    assert_eq!(field(&doll_rep, "wornApparel"), &PyRep::List(vec![]));
 
     // 2. paperDollServer.GetPaperDollDataBatch: queries multiple characters
     let batch_rep = rpc(
@@ -405,7 +401,7 @@ async fn test_paperdoll_server_rpcs() {
                 .find(|(k, _)| k.as_i64() == Some(PILOT_1))
                 .map(|(_, v)| v)
                 .expect("pilot 1 entry in batch");
-            assert_eq!(field(p1_entry, "characterID"), &PyRep::Integer(PILOT_1));
+            assert_eq!(p1_entry, &PyRep::List(vec![PyRep::String("female".into())]));
         }
         other => panic!("expected Dict from GetPaperDollDataBatch, got {other:?}"),
     }
@@ -445,7 +441,20 @@ async fn test_paperdoll_server_rpcs() {
         &PyRep::List(vec![PyRep::Integer(apparel_type_id as i64)])
     );
 
-    // Verify GetPaperDollData reflects worn apparel and item moves to Wardrobe on character
+    // Verify GetMyPaperDollData reflects worn apparel and GetPaperDollData stays valid Doll.MatchDNA list
+    let my_doll2 = rpc(
+        &ctx,
+        &mut sess1,
+        "paperDollServer",
+        "GetMyPaperDollData",
+        &[],
+    )
+    .await
+    .expect("GetMyPaperDollData after apparel update");
+    assert_eq!(
+        field(&my_doll2, "wornApparel"),
+        &PyRep::List(vec![PyRep::Integer(apparel_type_id as i64)])
+    );
     let doll_rep2 = rpc(
         &ctx,
         &mut sess1,
@@ -455,14 +464,7 @@ async fn test_paperdoll_server_rpcs() {
     )
     .await
     .expect("GetPaperDollData after apparel update");
-    assert!(
-        matches!(doll_rep2, PyRep::KeyVal(_)),
-        "expected KeyVal from GetPaperDollData, got {doll_rep2:?}"
-    );
-    assert_eq!(
-        field(&doll_rep2, "wornApparel"),
-        &PyRep::List(vec![PyRep::Integer(apparel_type_id as i64)])
-    );
+    assert_eq!(doll_rep2, PyRep::List(vec![PyRep::String("female".into())]));
     ctx.db.with_snapshot(|snap| {
         let it = snap.items.get(&apparel_item_id).expect("apparel item in snapshot");
         assert_eq!(it.location_id, PILOT_1);

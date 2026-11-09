@@ -185,7 +185,15 @@ fn test_corp_registry_handle_methods_and_helpers() {
     )
     .unwrap()
     .unwrap();
-    assert!(matches!(short_names, PyRep::List(ref l) if !l.is_empty()));
+    let PyRep::List(short_items) = short_names else {
+        panic!("expected List from GetSuggestedAllianceShortNames");
+    };
+    assert!(!short_items.is_empty());
+    assert!(short_items.iter().all(|item| {
+        item.dict_get("shortName")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty())
+    }));
 
     let tickers = handle(
         &ctx,

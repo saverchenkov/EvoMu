@@ -1734,7 +1734,7 @@ async fn inventory_autofit_slash_fit_undock_dock_and_mining_ledger_regressions()
         "fitted module must be present in GetAllInfo.shipInfo"
     );
 
-    // 4. corpMiningLedger.GetObserverLedger(None) returns [], /spawn asteroid sets ownerID=1, /unspawn clears snap.asteroids
+    // 4. corpMiningLedger.GetObserverLedger(None) returns empty CRowset, /spawn asteroid sets ownerID=1, /unspawn clears snap.asteroids
     let obs_ledger = ctx
         .dispatch_rpc(
             &mut sess,
@@ -1747,7 +1747,8 @@ async fn inventory_autofit_slash_fit_undock_dock_and_mining_ledger_regressions()
         )
         .await
         .expect("GetObserverLedger(None)");
-    assert_eq!(obs_ledger, PyRep::List(vec![]));
+    assert!(obs_ledger.is_crowset(), "GetObserverLedger(None) must return CRowset");
+    assert_eq!(obs_ledger.crowset_rows().map(<[PyRep]>::len), Some(0));
 
     let ast_tid = ctx
         .sde

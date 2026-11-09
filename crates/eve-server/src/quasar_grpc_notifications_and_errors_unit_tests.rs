@@ -82,7 +82,23 @@ fn normalize_macho_notification_covers_all_event_shapes() {
     assert_eq!(normalize_macho_notification("OnNotificationReceived", Vec::new()).len(), 5);
     assert_eq!(
         normalize_macho_notification("OnTarget", vec![PyRep::Integer(99), PyRep::String("locking".into())]),
+        vec![PyRep::String("locking".into()), PyRep::Integer(99), PyRep::None]
+    );
+    assert!(crate::router::client_compat::should_suppress_macho_notification(
+        "OnTarget",
+        &[PyRep::Integer(99), PyRep::String("locking".into())]
+    ));
+    assert!(!crate::router::client_compat::should_suppress_macho_notification(
+        "OnTarget",
+        &[PyRep::Integer(99), PyRep::String("locked".into())]
+    ));
+    assert_eq!(
+        normalize_macho_notification("OnTarget", vec![PyRep::Integer(99), PyRep::String("locked".into())]),
         vec![PyRep::String("add".into()), PyRep::Integer(99), PyRep::None]
+    );
+    assert_eq!(
+        normalize_macho_notification("OnTarget", vec![PyRep::Integer(99), PyRep::String("targetedBy".into())]),
+        vec![PyRep::String("otheradd".into()), PyRep::Integer(99), PyRep::None]
     );
     assert_eq!(
         normalize_macho_notification("OnTarget", vec![PyRep::Integer(99), PyRep::String("unlock".into())]),

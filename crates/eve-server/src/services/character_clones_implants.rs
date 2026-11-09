@@ -865,61 +865,21 @@ pub fn handle_clones_and_sheet(
                     message: "GetPaperDollData requires characterID".into(),
                 }));
             };
-            let res = ctx.db.with_snapshot(|snap| {
-                snap.characters.get(&target_cid).map(|c| {
-                    let (doll, portrait) = snap
-                        .character_doll_info
-                        .get(&target_cid)
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            (
-                                format!("bloodline:{}", c.bloodline_id),
-                                format!("portrait:bloodline:{}", c.bloodline_id),
-                            )
-                        });
-                    let mut worn: Vec<u32> = snap
-                        .items
-                        .values()
-                        .filter(|i| {
-                            i.owner_id == target_cid
-                                && matches!(i.flag, InventoryFlag::Wardrobe | InventoryFlag::Pilot)
-                                && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 30)
-                        })
-                        .map(|i| i.type_id)
-                        .collect();
-                    worn.sort_unstable();
-                    (c.gender, c.bloodline_id, doll, portrait, worn)
-                })
-            });
-            let Some((gender, bloodline_id, doll_dna, portrait_info, worn_apparel)) = res else {
+            let Some(gender) = ctx
+                .db
+                .with_snapshot(|snap| snap.characters.get(&target_cid).map(|c| c.gender))
+            else {
                 return Some(Err(BridgeRpcError {
                     code: "CharacterNotFound".into(),
                     message: format!("Character {target_cid} not found"),
                 }));
             };
-            let gender_label = if gender == 0 { "Female" } else { "Male" };
-            let details = PyRep::keyval([
-                ("characterID", PyRep::Integer(target_cid)),
-                ("dollDNA", PyRep::String(doll_dna.clone())),
-                ("dollInfo", PyRep::String(doll_dna.clone())),
-                ("paperdollState", PyRep::String(doll_dna)),
-                ("portraitInfo", PyRep::String(portrait_info)),
-                ("gender", PyRep::Integer(gender as i64)),
-                ("genderLabel", PyRep::String(gender_label.into())),
-                ("bloodlineID", PyRep::Integer(bloodline_id as i64)),
-                ("wornApparel", PyRep::List(worn_apparel.into_iter().map(|t| PyRep::Integer(i64::from(t))).collect())),
-                (
-                    "appearance",
-                    PyRep::keyval([
-                        ("hairDarkness", PyRep::Real(0.0)),
-                        ("lastUpdate", PyRep::Integer(0)),
-                    ]),
-                ),
-                ("sculpts", PyRep::List(Vec::new())),
-                ("colors", PyRep::List(Vec::new())),
-                ("modifiers", PyRep::List(Vec::new())),
-            ]);
-            Some(Ok(details))
+            // V24.01 `AvatarCharacterSceneContext` (`avatardisplay.pyj:1390`, `dna[0] == "male"`) and
+            // `Doll.MatchDNA` (`paperDollImpl.pyj:2308-2323`, `dna[0] in pdDef.GENDER` followed by
+            // `CreateModifierFromFootPrint` indexing `footPrint['path']` on `dna[1:]`) require
+            // `[gender_label]` when no modifier footprints exist (`#650`).
+            let gender_label = if gender == 0 { "female" } else { "male" };
+            Some(Ok(PyRep::List(vec![PyRep::String(gender_label.into())])))
         }
 
         ("paperDollServer", "GetPaperDollDataBatch") => {
@@ -937,38 +897,10 @@ pub fn handle_clones_and_sheet(
                 let mut out = Vec::new();
                 for cid in char_ids {
                     if let Some(c) = snap.characters.get(&cid) {
-                        let (doll, portrait) = snap
-                            .character_doll_info
-                            .get(&cid)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                (
-                                    format!("bloodline:{}", c.bloodline_id),
-                                    format!("portrait:bloodline:{}", c.bloodline_id),
-                                )
-                            });
-                        let mut worn: Vec<u32> = snap
-                            .items
-                            .values()
-                            .filter(|i| {
-                                i.owner_id == cid
-                                    && matches!(i.flag, InventoryFlag::Wardrobe | InventoryFlag::Pilot)
-                                    && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 30)
-                            })
-                            .map(|i| i.type_id)
-                            .collect();
-                        worn.sort_unstable();
+                        let gender_label = if c.gender == 0 { "female" } else { "male" };
                         out.push((
                             PyRep::Integer(cid),
-                            PyRep::keyval([
-                                ("characterID", PyRep::Integer(cid)),
-                                ("dollDNA", PyRep::String(doll.clone())),
-                                ("dollInfo", PyRep::String(doll)),
-                                ("portraitInfo", PyRep::String(portrait)),
-                                ("gender", PyRep::Integer(c.gender as i64)),
-                                ("bloodlineID", PyRep::Integer(c.bloodline_id as i64)),
-                                ("wornApparel", PyRep::List(worn.into_iter().map(|t| PyRep::Integer(i64::from(t))).collect())),
-                            ]),
+                            PyRep::List(vec![PyRep::String(gender_label.into())]),
                         ));
                     }
                 }

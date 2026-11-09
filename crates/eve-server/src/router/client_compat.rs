@@ -754,7 +754,7 @@ pub fn normalize_macho_rpc_reply(
         if let Ok(rep) = rpc_res {
             return Ok(PyRep::Tuple(vec![rep.clone(), rep]));
         }
-    } else if service == "corporationSvc"
+    } else if matches!(service, "corporationSvc" | "charMgr")
         && method == "GetEmployementRecordAndCharacterTransfers"
     {
         if let Ok(rep) = rpc_res {
@@ -978,6 +978,15 @@ pub fn normalize_macho_rpc_reply(
                 rows,
             ));
         }
+    } else if service == "paperDollServer" && method == "GetPaperDollData" {
+        if let Ok(PyRep::KeyVal(map)) = rpc_res {
+            let gender = map
+                .get("gender")
+                .and_then(PyRep::as_i64)
+                .map(|g| if g == 0 { "female" } else { "male" })
+                .unwrap_or("male");
+            return Ok(PyRep::List(vec![PyRep::String(gender.into())]));
+        }
     } else if service == "paperDollServer" && method == "GetPaperDollPortraitDataFor" {
         if let Ok(rep) = rpc_res {
             if matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)) {
@@ -991,13 +1000,26 @@ pub fn normalize_macho_rpc_reply(
                 .get("locked")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
-            let target_id = map
-                .get("targetID")
-                .cloned()
-                .unwrap_or(PyRep::Integer(0));
+            let target_ids = if locked {
+                match map.get("targetIDs") {
+                    Some(PyRep::List(ids)) => ids.clone(),
+                    _ => vec![map
+                        .get("targetID")
+                        .cloned()
+                        .unwrap_or(PyRep::Integer(0))],
+                }
+            } else {
+                Vec::new()
+            };
+            // V24.01 `TargetMgr._LockTarget` (`targetMgr.pyj:1589-1592`):
+            //   flag, targetList = self.GetDogmaLM().AddTarget(tid)
+            //   if not flag:
+            //       self.OnTargetAdded(tid)
+            // `flag = 1` (`!locked`) means asynchronous target lock in progress (`targetList = []`),
+            // whereas `flag = 0` (`locked`) means already/instantly locked (`targetList = [tid, ...]`).
             return Ok(PyRep::Tuple(vec![
-                PyRep::Integer(i64::from(locked)),
-                PyRep::List(vec![target_id]),
+                PyRep::Integer(i64::from(!locked)),
+                PyRep::List(target_ids),
             ]));
         }
     } else if service == "peaceTreatyMgr" && method == "GetPeaceTreatiesForSession" {
@@ -1202,82 +1224,66 @@ pub fn normalize_macho_rpc_reply(
             return Ok(PyRep::Tuple(vec![PyRep::List(out), PyRep::Integer(total)]));
         }
     } else if service == "reprocessingSvc" && method == "GetQuotes" {
-        if let Ok(PyRep::Tuple(parts)) = rpc_res {
-            if parts.len() >= 3 && matches!(parts[1], PyRep::Real(_)) && matches!(parts[2], PyRep::List(_)) {
-                let tax = parts[0].clone();
-                let base_yield = parts[1].clone();
-                let PyRep::List(quotes) = parts[2].clone() else {
-                    unreachable!()
-                };
-                let mut eff_entries = vec![
-                    (PyRep::None, base_yield.clone()),
-                    (PyRep::Integer(25), base_yield.clone()),
-                ];
-                let mut seen_eff_types = std::collections::HashSet::new();
-                let recoverable_desc = DBRowDescriptor::new([
-                    ("typeID", DbColumnType::I4),
-                    ("client", DbColumnType::I8),
-                    ("unrecoverable", DbColumnType::I8),
-                    ("station", DbColumnType::I8),
-                    ("iskCost", DbColumnType::R8),
-                ]);
-                let mut quote_entries = Vec::with_capacity(quotes.len());
-                for q in quotes {
-                    let item_id = q.dict_get("itemID").cloned().unwrap_or(PyRep::Integer(0));
-                    let quote_type_id = q.dict_get("typeID").cloned().unwrap_or(PyRep::Integer(0));
-                    if let Some(tid) = quote_type_id.as_i64() {
-                        if seen_eff_types.insert(tid) {
-                            let eff_val = q
-                                .dict_get("stationBaseYield")
-                                .cloned()
-                                .unwrap_or_else(|| base_yield.clone());
-                            eff_entries.push((PyRep::Integer(tid), eff_val));
-                        }
-                    }
-                    let recoverable_rows = match q.dict_get("outputs") {
-                        Some(PyRep::List(outs)) => outs
-                            .iter()
-                            .map(|o| {
-                                let tid = o.dict_get("typeID").cloned().unwrap_or(PyRep::Integer(0));
-                                let qty = o.dict_get("quantity").cloned().unwrap_or(PyRep::Integer(0));
-                                let unrec = o
-                                    .dict_get("unrecoverable")
-                                    .cloned()
-                                    .unwrap_or(PyRep::Integer(0));
-                                let station =
-                                    o.dict_get("station").cloned().unwrap_or(PyRep::Integer(0));
-                                let isk_cost =
-                                    o.dict_get("iskCost").cloned().unwrap_or(PyRep::Real(0.0));
-                                vec![tid, qty, unrec, station, isk_cost]
-                            })
-                            .collect(),
-                        _ => Vec::new(),
-                    };
-                    let recoverables = recoverable_desc.build_crowset(recoverable_rows);
-                    let qty_to_process = q
-                        .dict_get("quantityToProcess")
-                        .cloned()
-                        .unwrap_or(PyRep::Integer(0));
-                    let left_overs = q.dict_get("leftOvers").cloned().unwrap_or(PyRep::Integer(0));
-                    let isk_cost = q.dict_get("iskCost").cloned().unwrap_or(PyRep::Real(0.0));
-                    let total_isk_cost = q
-                        .dict_get("totalISKCost")
-                        .cloned()
-                        .unwrap_or(PyRep::Real(0.0));
-                    let entry = PyRep::keyval([
-                        ("typeID", quote_type_id),
-                        ("quantityToProcess", qty_to_process),
-                        ("leftOvers", left_overs),
-                        ("iskCost", isk_cost),
-                        ("totalISKCost", total_isk_cost),
-                        ("recoverables", recoverables),
-                    ]);
-                    quote_entries.push((item_id, entry));
+        match rpc_res {
+            Ok(PyRep::Tuple(parts)) => {
+                if parts.len() >= 3
+                    && matches!(parts[1], PyRep::Dict(_))
+                    && matches!(parts[2], PyRep::Dict(_))
+                {
+                    return Ok(PyRep::Tuple(parts));
                 }
-                let eff_dict = PyRep::Dict(eff_entries);
-                return Ok(PyRep::Tuple(vec![tax, eff_dict, PyRep::Dict(quote_entries)]));
+                if parts.len() >= 3 && matches!(parts[2], PyRep::List(_)) {
+                    let tax = parts[0].clone();
+                    let base_yield = match &parts[1] {
+                        PyRep::Real(_) => parts[1].clone(),
+                        other => other.as_f64().map(PyRep::Real).unwrap_or(PyRep::Real(0.50)),
+                    };
+                    let PyRep::List(quotes) = parts[2].clone() else {
+                        unreachable!()
+                    };
+                    return Ok(build_v24_reprocessing_quotes_tuple(tax, base_yield, quotes));
+                }
+                let tax = parts.first().cloned().unwrap_or(PyRep::Real(0.0));
+                let base_yield = parts
+                    .get(1)
+                    .and_then(PyRep::as_f64)
+                    .map(PyRep::Real)
+                    .unwrap_or(PyRep::Real(0.50));
+                return Ok(build_v24_reprocessing_quotes_tuple(
+                    tax,
+                    base_yield,
+                    Vec::new(),
+                ));
             }
-            return Ok(PyRep::Tuple(parts));
+            Ok(PyRep::List(quotes)) => {
+                let tax = quotes
+                    .first()
+                    .and_then(|q| q.dict_get("stationTaxRate"))
+                    .cloned()
+                    .unwrap_or(PyRep::Real(0.0));
+                let base_yield = quotes
+                    .first()
+                    .and_then(|q| q.dict_get("stationBaseYield"))
+                    .cloned()
+                    .unwrap_or(PyRep::Real(0.50));
+                return Ok(build_v24_reprocessing_quotes_tuple(tax, base_yield, quotes));
+            }
+            Ok(rep @ (PyRep::KeyVal(_) | PyRep::Dict(_))) => {
+                let tax = rep
+                    .dict_get("stationTaxRate")
+                    .cloned()
+                    .unwrap_or(PyRep::Real(0.0));
+                let base_yield = rep
+                    .dict_get("stationBaseYield")
+                    .cloned()
+                    .unwrap_or(PyRep::Real(0.50));
+                return Ok(build_v24_reprocessing_quotes_tuple(
+                    tax,
+                    base_yield,
+                    Vec::new(),
+                ));
+            }
+            other => return other,
         }
     } else if service == "scanMgr" && method == "RecoverProbes" {
         if let Ok(ref rep) = rpc_res {
@@ -1379,6 +1385,26 @@ pub fn normalize_macho_rpc_reply(
             }
             return Ok(rep);
         }
+    } else if service == "agentMgr" && matches!(method, "DoAction" | "GetOffer") {
+        if let Ok(rep) = rpc_res {
+            return Ok(normalize_agent_do_action_rep(rep));
+        }
+    } else if service == "agentMgr" && method == "GetAgentLocationWrap" {
+        if let Ok(rep) = rpc_res {
+            return Ok(normalize_agent_location_wrap_rep(rep));
+        }
+    } else if service == "agentMgr" && method == "GetMissionBriefingInfo" {
+        match rpc_res {
+            Err(ref e) if e.code == "MissionNotActive" => return Ok(PyRep::None),
+            Ok(rep) => return Ok(normalize_agent_mission_briefing_rep(rep)),
+            Err(e) => return Err(e),
+        }
+    } else if service == "agentMgr" && method == "GetMissionObjectiveInfo" {
+        match rpc_res {
+            Err(ref e) if e.code == "MissionNotActive" => return Ok(PyRep::None),
+            Ok(rep) => return Ok(normalize_agent_mission_objective_rep(rep)),
+            Err(e) => return Err(e),
+        }
     } else if service == "storeManager"
         && matches!(method, "get_categories" | "get_products" | "get_offers")
     {
@@ -1387,6 +1413,264 @@ pub fn normalize_macho_rpc_reply(
         }
     }
     rpc_res
+}
+
+fn extract_string_field(rep: &PyRep, key: &str) -> Option<String> {
+    match rep.dict_get(key) {
+        Some(PyRep::String(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn normalize_agent_do_action_rep(rep: PyRep) -> PyRep {
+    // V24.01 `AgentDialogueWindow._GetConversation` unpacks:
+    // `((agentSaysMsg, availableActions), lastActionInfo) = agent.DoAction(actionID)`
+    // where `agentSaysMsg` is `(text, contentID)`, `availableActions` is `[(actionID, buttonType), ...]`,
+    // and `lastActionInfo` is a `dict` (supporting `.get(...)` and subscripting).
+    if matches!(rep, PyRep::Tuple(ref items) if items.len() == 2) {
+        return rep;
+    }
+    if !matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)) {
+        return rep;
+    }
+    let content_id = rep
+        .dict_get("contentID")
+        .or_else(|| rep.dict_get("missionID"))
+        .cloned()
+        .unwrap_or(PyRep::None);
+    let state_str = extract_string_field(&rep, "state").unwrap_or_default();
+    let mission_state = rep
+        .dict_get("missionState")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let is_completed = state_str == "Completed" || mission_state == 4;
+    let is_declined = state_str == "Declined" || mission_state == 5;
+    let is_quit = state_str == "Quit" || mission_state == 6;
+
+    let msg_text = extract_string_field(&rep, "agentSays")
+        .or_else(|| extract_string_field(&rep, "briefing"))
+        .or_else(|| extract_string_field(&rep, "text"))
+        .unwrap_or_else(|| {
+            if is_completed {
+                "Well done! Your mission is complete and your rewards have been credited.".into()
+            } else if state_str == "Accepted" || mission_state == 2 {
+                "Excellent. Your mission is now active in your journal. Return here once your objectives are complete.".into()
+            } else if is_declined || is_quit {
+                "Very well. Let me know when you are ready for another assignment.".into()
+            } else {
+                "Very well, let us proceed.".into()
+            }
+        });
+    let agent_says_msg = PyRep::Tuple(vec![PyRep::String(msg_text), content_id]);
+
+    let available_actions = match rep.dict_get("dialogue") {
+        Some(PyRep::List(items)) => items
+            .iter()
+            .filter_map(|item| match item {
+                PyRep::Tuple(pair) if pair.len() >= 2 => {
+                    let act_id = pair[0].as_i64()?;
+                    let btn_type = pair[1].as_i64().unwrap_or(act_id);
+                    Some(PyRep::Tuple(vec![
+                        PyRep::Integer(act_id),
+                        PyRep::Integer(btn_type),
+                    ]))
+                }
+                PyRep::Integer(act_id) => Some(PyRep::Tuple(vec![
+                    PyRep::Integer(*act_id),
+                    PyRep::Integer(*act_id),
+                ])),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    let lp_val = rep
+        .dict_get("loyaltyPoints")
+        .or_else(|| rep.dict_get("lpReward"))
+        .cloned()
+        .unwrap_or(PyRep::Integer(0));
+    let mut info_entries = vec![
+        (PyRep::String("missionCompleted".into()), PyRep::Bool(is_completed)),
+        (PyRep::String("missionDeclined".into()), PyRep::Bool(is_declined)),
+        (PyRep::String("missionQuit".into()), PyRep::Bool(is_quit)),
+        (PyRep::String("missionCantReplay".into()), PyRep::None),
+        (PyRep::String("loyaltyPoints".into()), lp_val),
+    ];
+    let existing_dict = keyval_to_dict_recursive(rep);
+    if let PyRep::Dict(kvs) = existing_dict {
+        for (k, v) in kvs {
+            let dup = matches!(&k, PyRep::String(s) if matches!(
+                s.as_str(),
+                "missionCompleted" | "missionDeclined" | "missionQuit" | "missionCantReplay" | "loyaltyPoints"
+            ));
+            if !dup {
+                info_entries.push((k, v));
+            }
+        }
+    }
+
+    PyRep::Tuple(vec![
+        PyRep::Tuple(vec![agent_says_msg, PyRep::List(available_actions)]),
+        PyRep::Dict(info_entries),
+    ])
+}
+
+fn normalize_agent_location_wrap_rep(rep: PyRep) -> PyRep {
+    if !matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)) {
+        return rep;
+    }
+    let sys_id = rep
+        .dict_get("solarsystemID")
+        .or_else(|| rep.dict_get("solarSystemID"))
+        .cloned()
+        .unwrap_or(PyRep::None);
+    let station_id = rep.dict_get("stationID").cloned().unwrap_or(PyRep::None);
+    let loc_id = rep
+        .dict_get("locationID")
+        .cloned()
+        .unwrap_or_else(|| match &station_id {
+            PyRep::None => sys_id.clone(),
+            other => other.clone(),
+        });
+    let type_id = rep
+        .dict_get("typeID")
+        .cloned()
+        .unwrap_or(PyRep::Integer(5));
+    let agent_id = rep.dict_get("agentID").cloned().unwrap_or(PyRep::None);
+    PyRep::Dict(vec![
+        (PyRep::String("agentID".into()), agent_id),
+        (PyRep::String("solarsystemID".into()), sys_id),
+        (PyRep::String("locationID".into()), loc_id),
+        (PyRep::String("typeID".into()), type_id),
+        (PyRep::String("stationID".into()), station_id),
+    ])
+}
+
+fn normalize_agent_mission_briefing_rep(rep: PyRep) -> PyRep {
+    if !matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)) {
+        return rep;
+    }
+    let title = rep
+        .dict_get("Mission Title ID")
+        .or_else(|| rep.dict_get("title"))
+        .cloned()
+        .unwrap_or_else(|| PyRep::String("Agent Mission".into()));
+    let content_id = rep
+        .dict_get("ContentID")
+        .or_else(|| rep.dict_get("contentID"))
+        .or_else(|| rep.dict_get("missionID"))
+        .cloned()
+        .unwrap_or(PyRep::Integer(0));
+    let briefing = rep
+        .dict_get("Mission Briefing ID")
+        .or_else(|| rep.dict_get("briefing"))
+        .cloned()
+        .unwrap_or_else(|| PyRep::String(String::new()));
+    let decline_time = rep
+        .dict_get("Decline Time")
+        .cloned()
+        .unwrap_or(PyRep::Integer(-1));
+    let expiration_time = rep
+        .dict_get("Expiration Time")
+        .cloned()
+        .unwrap_or(PyRep::None);
+    let image = rep
+        .dict_get("Mission Image")
+        .cloned()
+        .unwrap_or_else(|| PyRep::String(String::new()));
+    let keywords = rep
+        .dict_get("Mission Keywords")
+        .cloned()
+        .unwrap_or_else(|| PyRep::Dict(Vec::new()));
+    PyRep::Dict(vec![
+        (PyRep::String("Mission Title ID".into()), title),
+        (PyRep::String("ContentID".into()), content_id),
+        (PyRep::String("Mission Briefing ID".into()), briefing),
+        (PyRep::String("Decline Time".into()), decline_time),
+        (PyRep::String("Expiration Time".into()), expiration_time),
+        (PyRep::String("Mission Image".into()), image),
+        (PyRep::String("Mission Keywords".into()), keywords),
+    ])
+}
+
+fn normalize_agent_mission_objective_rep(rep: PyRep) -> PyRep {
+    if !matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)) {
+        return rep;
+    }
+    let title = rep
+        .dict_get("missionTitleID")
+        .or_else(|| rep.dict_get("title"))
+        .cloned()
+        .unwrap_or_else(|| PyRep::String("Agent Mission".into()));
+    let mission_name = rep
+        .dict_get("missionName")
+        .cloned()
+        .unwrap_or_else(|| title.clone());
+    let mission_state = rep
+        .dict_get("missionState")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let completion_status = rep
+        .dict_get("completionStatus")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(if mission_state == 4 { 1 } else { 0 });
+    let content_id = rep
+        .dict_get("contentID")
+        .or_else(|| rep.dict_get("missionID"))
+        .cloned()
+        .unwrap_or(PyRep::Integer(0));
+    let isk_reward = rep
+        .dict_get("iskReward")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let bonus_reward = rep
+        .dict_get("bonusReward")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let lp_reward = rep
+        .dict_get("loyaltyPoints")
+        .or_else(|| rep.dict_get("lpReward"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let normal_rewards = match rep.dict_get("normalRewards") {
+        Some(PyRep::List(items)) => PyRep::List(items.clone()),
+        _ if isk_reward > 0 => PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(29), // const.typeCredits
+            PyRep::Integer(isk_reward),
+            PyRep::None,
+        ])]),
+        _ => PyRep::List(Vec::new()),
+    };
+    let bonus_rewards = match rep.dict_get("bonusRewards") {
+        Some(PyRep::List(items)) => PyRep::List(items.clone()),
+        _ if bonus_reward > 0 => PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(29), // const.typeCredits
+            PyRep::Integer(bonus_reward),
+            PyRep::None,
+        ])]),
+        _ => PyRep::List(Vec::new()),
+    };
+    let objectives = match rep.dict_get("objectives") {
+        Some(PyRep::List(items)) => PyRep::List(items.clone()),
+        _ => PyRep::List(Vec::new()),
+    };
+    PyRep::Dict(vec![
+        (PyRep::String("completionStatus".into()), PyRep::Integer(completion_status)),
+        (PyRep::String("missionTitleID".into()), title),
+        (PyRep::String("missionState".into()), PyRep::Integer(mission_state)),
+        (PyRep::String("missionName".into()), mission_name),
+        (PyRep::String("objectives".into()), objectives),
+        (PyRep::String("dungeons".into()), PyRep::List(Vec::new())),
+        (PyRep::String("locations".into()), PyRep::List(Vec::new())),
+        (PyRep::String("agentGift".into()), PyRep::List(Vec::new())),
+        (PyRep::String("normalRewards".into()), normal_rewards),
+        (PyRep::String("loyaltyPoints".into()), PyRep::Integer(lp_reward)),
+        (PyRep::String("researchPoints".into()), PyRep::Integer(0)),
+        (PyRep::String("bonusRewards".into()), bonus_rewards),
+        (PyRep::String("collateral".into()), PyRep::List(Vec::new())),
+        (PyRep::String("contentID".into()), content_id),
+    ])
 }
 
 fn market_tx_column_type(col: &str) -> DbColumnType {
@@ -1598,10 +1882,96 @@ fn normalize_destiny_payload_arg(rep: PyRep) -> PyRep {
     }
 }
 
+/// Builds the canonical V24.01 `reprocessingSvc.GetQuotes` 3-tuple
+/// `(stationTax, stationEfficiencyDict, {itemID: utillib.KeyVal(...)})` (`reprocessing/ui/quotes.pyj:14-19`).
+pub(crate) fn build_v24_reprocessing_quotes_tuple(
+    tax: PyRep,
+    base_yield: PyRep,
+    quotes: Vec<PyRep>,
+) -> PyRep {
+    let mut eff_entries = vec![
+        (PyRep::None, base_yield.clone()),
+        (PyRep::Integer(25), base_yield.clone()),
+    ];
+    let mut seen_eff_types = std::collections::HashSet::new();
+    let recoverable_desc = DBRowDescriptor::new([
+        ("typeID", DbColumnType::I4),
+        ("client", DbColumnType::I8),
+        ("unrecoverable", DbColumnType::I8),
+        ("station", DbColumnType::I8),
+        ("iskCost", DbColumnType::R8),
+    ]);
+    let mut quote_entries = Vec::with_capacity(quotes.len());
+    for q in quotes {
+        let item_id = q.dict_get("itemID").cloned().unwrap_or(PyRep::Integer(0));
+        let quote_type_id = q.dict_get("typeID").cloned().unwrap_or(PyRep::Integer(0));
+        if let Some(tid) = quote_type_id.as_i64() {
+            if seen_eff_types.insert(tid) {
+                let eff_val = q
+                    .dict_get("stationBaseYield")
+                    .cloned()
+                    .unwrap_or_else(|| base_yield.clone());
+                eff_entries.push((PyRep::Integer(tid), eff_val));
+            }
+        }
+        let recoverable_rows = match q.dict_get("outputs") {
+            Some(PyRep::List(outs)) => outs
+                .iter()
+                .map(|o| {
+                    let tid = o.dict_get("typeID").cloned().unwrap_or(PyRep::Integer(0));
+                    let qty = o.dict_get("quantity").cloned().unwrap_or(PyRep::Integer(0));
+                    let unrec = o
+                        .dict_get("unrecoverable")
+                        .cloned()
+                        .unwrap_or(PyRep::Integer(0));
+                    let station = o.dict_get("station").cloned().unwrap_or(PyRep::Integer(0));
+                    let isk_cost = o.dict_get("iskCost").cloned().unwrap_or(PyRep::Real(0.0));
+                    vec![tid, qty, unrec, station, isk_cost]
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let recoverables = recoverable_desc.build_crowset(recoverable_rows);
+        let qty_to_process = q
+            .dict_get("quantityToProcess")
+            .cloned()
+            .unwrap_or(PyRep::Integer(0));
+        let left_overs = q.dict_get("leftOvers").cloned().unwrap_or(PyRep::Integer(0));
+        let isk_cost = q.dict_get("iskCost").cloned().unwrap_or(PyRep::Real(0.0));
+        let total_isk_cost = q
+            .dict_get("totalISKCost")
+            .cloned()
+            .unwrap_or(PyRep::Real(0.0));
+        let entry = PyRep::keyval([
+            ("typeID", quote_type_id),
+            ("quantityToProcess", qty_to_process),
+            ("leftOvers", left_overs),
+            ("iskCost", isk_cost),
+            ("totalISKCost", total_isk_cost),
+            ("recoverables", recoverables),
+        ]);
+        quote_entries.push((item_id, entry));
+    }
+    let eff_dict = PyRep::Dict(eff_entries);
+    PyRep::Tuple(vec![tax, eff_dict, PyRep::Dict(quote_entries)])
+}
+
 /// Returns `true` when a server notification uses an internal test-only tuple shape that
 /// has no bound MachoNet moniker on the live TCP client wire.
 pub fn should_suppress_macho_notification(event: &str, args: &[PyRep]) -> bool {
     if matches!(event, "OnDamageStateChange" | "OnSessionChanged") {
+        return true;
+    }
+    // `TargetMgr._LockTarget` starts the client lock timer from `AddTarget` returning `(1, [])`;
+    // suppress internal `"locking"` notices on `:26000` so only lock completion (`OnMultiEvent` `"add"`) fires (`#749`).
+    if event == "OnTarget"
+        && matches!(
+            args,
+            [PyRep::Integer(_), PyRep::String(w)]
+                | [PyRep::String(w), PyRep::Integer(_), ..]
+                if w == "locking"
+        )
+    {
         return true;
     }
     if event == "OnTradeInitiate" && matches!(args.get(1), Some(PyRep::Integer(_))) {
@@ -1842,8 +2212,11 @@ pub fn normalize_macho_notification_with_sde(
             if args.len() == 2 {
                 let (what, tid) = match (&args[0], &args[1]) {
                     (PyRep::Integer(id), PyRep::String(w)) => {
+                        // Never rewrite `"locking"` to `"add"`: doing so triggers `TargetMgr.OnTargetAdded(tid)`
+                        // immediately before `remaining_lock_ms` elapses (`#749`).
                         let mapped = match w.as_str() {
-                            "locking" | "locked" | "add" => "add",
+                            "locked" | "add" | "added" => "add",
+                            "targetedBy" | "otheradd" => "otheradd",
                             "unlock" | "unlocked" | "lost" => "lost",
                             "clear" => "clear",
                             other => other,
@@ -1925,14 +2298,8 @@ pub fn normalize_macho_notification_with_sde(
                 other => normalize_destiny_payload_arg(other),
             })
             .collect(),
-        "OnSpecialFX" => {
-            if args.first().is_some_and(|a| matches!(a, PyRep::List(_))) {
-                args
-            } else {
-                vec![PyRep::List(vec![PyRep::Tuple(args)])]
-            }
-        }
-        "OnGodmaShipEffect" => normalize_on_godma_ship_effect(args),
+        "OnSpecialFX" => normalize_on_special_fx(args),
+        "OnGodmaShipEffect" => normalize_on_godma_ship_effect(args, sde),
         "OnGodmaPrimeItem" => {
             if let Some(PyRep::KeyVal(entries)) = args.get_mut(1) {
                 if !entries.contains_key("wallclockTime") {
@@ -2084,10 +2451,47 @@ fn ensure_filetime_pyrep(rep: &mut PyRep, fallback_ft: i64) {
     }
 }
 
-fn normalize_godma_environment(env: PyRep, item_id: &PyRep, effect_id: &PyRep) -> PyRep {
+fn resolve_effect_id_pyrep(rep: PyRep, sde: Option<&eve_sde::SdeRegistry>) -> PyRep {
+    match rep {
+        PyRep::Integer(v) => PyRep::Integer(v),
+        PyRep::String(name) | PyRep::Token(name) => {
+            if let Ok(parsed) = name.parse::<i64>() {
+                return PyRep::Integer(parsed);
+            }
+            if let Some(sde) = sde {
+                if let Some(eff) = sde.effects.values().find(|e| e.name == name) {
+                    return PyRep::Integer(eff.effect_id as i64);
+                }
+            }
+            let fallback = match name.as_str() {
+                "online" => 16,
+                "miningLaser" => 67,
+                "miningClouds" => 2726,
+                "mining" => 17,
+                "targetAttack" => 10,
+                "projectileFired" => 34,
+                "useMissiles" => 101,
+                "loPower" => 11,
+                "hiPower" => 12,
+                "medPower" => 13,
+                _ => 0,
+            };
+            PyRep::Integer(fallback)
+        }
+        other => other,
+    }
+}
+
+fn normalize_godma_environment(
+    env: PyRep,
+    item_id: &PyRep,
+    effect_id: &PyRep,
+    sde: Option<&eve_sde::SdeRegistry>,
+) -> PyRep {
     match env {
         PyRep::Tuple(mut elems) => {
             if elems.len() == 3 {
+                let eff = resolve_effect_id_pyrep(elems[2].clone(), sde);
                 return PyRep::Tuple(vec![
                     elems[0].clone(),
                     PyRep::None,
@@ -2095,7 +2499,7 @@ fn normalize_godma_environment(env: PyRep, item_id: &PyRep, effect_id: &PyRep) -
                     PyRep::None,
                     PyRep::None,
                     PyRep::List(Vec::new()),
-                    elems[2].clone(),
+                    eff,
                 ]);
             }
             while elems.len() < 7 {
@@ -2103,6 +2507,11 @@ fn normalize_godma_environment(env: PyRep, item_id: &PyRep, effect_id: &PyRep) -
                     5 => elems.push(PyRep::List(Vec::new())),
                     6 => elems.push(effect_id.clone()),
                     _ => elems.push(PyRep::None),
+                }
+            }
+            if let Some(last) = elems.get_mut(6) {
+                if matches!(last, PyRep::String(_) | PyRep::Token(_)) {
+                    *last = effect_id.clone();
                 }
             }
             PyRep::Tuple(elems)
@@ -2132,7 +2541,46 @@ fn ensure_i4_pyrep(rep: &mut PyRep) {
     }
 }
 
-fn normalize_on_godma_ship_effect(mut args: Vec<PyRep>) -> Vec<PyRep> {
+/// Normalizes `OnSpecialFX` MachoNet broadcast notifications to the V24.01 14-positional-arg
+/// signature (`shipID, moduleID, moduleTypeID, targetID, otherTypeID, guid, isOffensive,
+/// start, active, duration, repeat, startTime, timeFromStart, graphicInfo`).
+fn normalize_on_special_fx(mut args: Vec<PyRep>) -> Vec<PyRep> {
+    if args.len() == 1 {
+        match args.into_iter().next().unwrap() {
+            PyRep::List(mut items) if items.len() == 1 => match items.remove(0) {
+                PyRep::Tuple(inner) | PyRep::List(inner) => args = inner,
+                other => args = vec![other],
+            },
+            PyRep::Tuple(inner) => args = inner,
+            other => args = vec![other],
+        }
+    }
+    if args.is_empty() {
+        return Vec::new();
+    }
+    let (secs, nanos) = eve_db::clock::host_wall_unix_secs_and_nanos();
+    let fallback_ft = (secs as i64 + 11_644_473_600) * 10_000_000 + (nanos as i64 / 100);
+    while args.len() < 14 {
+        match args.len() {
+            5 => args.push(PyRep::String("effects.Laser".into())),
+            6 => args.push(PyRep::Bool(false)),
+            7 | 8 => args.push(PyRep::Integer(1)),
+            9 => args.push(PyRep::Real(-1.0)),
+            10 => args.push(PyRep::Integer(0)),
+            11 => args.push(PyRep::Integer(fallback_ft)),
+            12 => args.push(PyRep::Real(0.0)),
+            _ => args.push(PyRep::None),
+        }
+    }
+    args.truncate(14);
+    ensure_filetime_pyrep(&mut args[11], fallback_ft);
+    args
+}
+
+fn normalize_on_godma_ship_effect(
+    mut args: Vec<PyRep>,
+    sde: Option<&eve_sde::SdeRegistry>,
+) -> Vec<PyRep> {
     if args.is_empty() {
         return Vec::new();
     }
@@ -2140,10 +2588,11 @@ fn normalize_on_godma_ship_effect(mut args: Vec<PyRep>) -> Vec<PyRep> {
     let fallback_ft = (secs as i64 + 11_644_473_600) * 10_000_000 + (nanos as i64 / 100);
     if args.len() >= 10 {
         let item_id = args[0].clone();
-        let effect_id = args[1].clone();
+        let effect_id = resolve_effect_id_pyrep(args[1].clone(), sde);
+        args[1] = effect_id.clone();
         ensure_filetime_pyrep(&mut args[2], fallback_ft);
         let env = std::mem::replace(&mut args[5], PyRep::None);
-        args[5] = normalize_godma_environment(env, &item_id, &effect_id);
+        args[5] = normalize_godma_environment(env, &item_id, &effect_id, sde);
         ensure_filetime_pyrep(&mut args[6], fallback_ft);
         ensure_i4_pyrep(&mut args[7]);
         ensure_i4_pyrep(&mut args[8]);
@@ -2153,13 +2602,16 @@ fn normalize_on_godma_ship_effect(mut args: Vec<PyRep>) -> Vec<PyRep> {
         return args;
     }
     let item_id = args[0].clone();
-    let effect_id = args.get(1).cloned().unwrap_or(PyRep::Integer(0));
+    let effect_id = resolve_effect_id_pyrep(
+        args.get(1).cloned().unwrap_or(PyRep::Integer(0)),
+        sde,
+    );
     let active_flag = PyRep::Integer(if args.get(2).and_then(PyRep::as_bool).unwrap_or(false) {
         1
     } else {
         0
     });
-    let env = normalize_godma_environment(PyRep::None, &item_id, &effect_id);
+    let env = normalize_godma_environment(PyRep::None, &item_id, &effect_id, sde);
     vec![
         item_id,
         effect_id,
@@ -2247,6 +2699,40 @@ mod client_compat_tests {
         );
         assert_eq!(preserved[2].as_i64(), Some(valid_ft));
         assert_eq!(preserved[6].as_i64(), Some(valid_ft));
+
+        let str_eff = normalize_macho_notification(
+            "OnGodmaShipEffect",
+            vec![
+                PyRep::Integer(200_165_898),
+                PyRep::String("miningLaser".into()),
+                PyRep::Bool(true),
+            ],
+        );
+        assert_eq!(str_eff[1], PyRep::Integer(67));
+        assert!(matches!(&str_eff[5], PyRep::Tuple(t) if t.get(6) == Some(&PyRep::Integer(67))));
+
+        let sfx = normalize_macho_notification(
+            "OnSpecialFX",
+            vec![
+                PyRep::Integer(200_164_799),
+                PyRep::Integer(200_165_898),
+                PyRep::Integer(483),
+                PyRep::Integer(200_185_369),
+                PyRep::None,
+                PyRep::String("effects.Laser".into()),
+                PyRep::Bool(false),
+                PyRep::Integer(1),
+                PyRep::Integer(1),
+                PyRep::Real(60_000.0),
+                PyRep::Integer(1000),
+                PyRep::Integer(valid_ft),
+                PyRep::Real(0.0),
+                PyRep::None,
+            ],
+        );
+        assert_eq!(sfx.len(), 14);
+        assert_eq!(sfx[5], PyRep::String("effects.Laser".into()));
+        assert_eq!(sfx[11], PyRep::Integer(valid_ft));
     }
 
     #[test]
@@ -2705,6 +3191,163 @@ mod client_compat_tests {
             panic!("expected items list");
         };
         assert_eq!(items[0].dict_get("itemTypeID"), Some(&PyRep::Integer(0)));
+    }
+
+    #[test]
+    fn issue_766_agent_mgr_v24_dialogue_briefing_objective_and_location_normalization() {
+        // 1. DoAction offered mission -> ((agentSaysMsg, availableActions), lastActionInfo)
+        let do_action = normalize_macho_rpc_reply(
+            "agentMgr",
+            "DoAction",
+            Ok(PyRep::keyval([
+                ("missionID", PyRep::Integer(501)),
+                ("contentID", PyRep::Integer(501)),
+                ("agentID", PyRep::Integer(3_018_910)),
+                ("state", PyRep::String("Offered".into())),
+                ("missionState", PyRep::Integer(1)),
+                ("briefing", PyRep::String("Clear pirates".into())),
+                (
+                    "dialogue",
+                    PyRep::List(vec![
+                        PyRep::Tuple(vec![PyRep::Integer(3), PyRep::String("Accept".into())]),
+                        PyRep::Tuple(vec![PyRep::Integer(9), PyRep::String("Decline".into())]),
+                    ]),
+                ),
+                ("lpReward", PyRep::Integer(450)),
+            ])),
+        )
+        .expect("DoAction ok");
+
+        let PyRep::Tuple(outer) = do_action else {
+            panic!("DoAction must return 2-tuple");
+        };
+        assert_eq!(outer.len(), 2);
+        let PyRep::Tuple(inner) = &outer[0] else {
+            panic!("first element must be (agentSaysMsg, availableActions)");
+        };
+        assert_eq!(
+            inner[0],
+            PyRep::Tuple(vec![
+                PyRep::String("Clear pirates".into()),
+                PyRep::Integer(501),
+            ])
+        );
+        assert_eq!(
+            inner[1],
+            PyRep::List(vec![
+                PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(3)]),
+                PyRep::Tuple(vec![PyRep::Integer(9), PyRep::Integer(9)]),
+            ])
+        );
+        assert!(matches!(outer[1], PyRep::Dict(_)), "lastActionInfo must be Dict");
+        assert_eq!(outer[1].dict_get("missionCompleted"), Some(&PyRep::Bool(false)));
+        assert_eq!(outer[1].dict_get("missionDeclined"), Some(&PyRep::Bool(false)));
+        assert_eq!(outer[1].dict_get("missionQuit"), Some(&PyRep::Bool(false)));
+        assert_eq!(outer[1].dict_get("missionCantReplay"), Some(&PyRep::None));
+        assert_eq!(outer[1].dict_get("loyaltyPoints"), Some(&PyRep::Integer(450)));
+
+        // Idempotent if already a 2-tuple
+        assert!(matches!(
+            normalize_macho_rpc_reply("agentMgr", "DoAction", Ok(PyRep::Tuple(outer.clone()))),
+            Ok(PyRep::Tuple(_))
+        ));
+
+        // Completed mission sets missionCompleted=true and fallback message
+        let completed = normalize_macho_rpc_reply(
+            "agentMgr",
+            "DoAction",
+            Ok(PyRep::keyval([
+                ("missionID", PyRep::Integer(501)),
+                ("state", PyRep::String("Completed".into())),
+                ("missionState", PyRep::Integer(4)),
+            ])),
+        )
+        .unwrap();
+        let PyRep::Tuple(c_outer) = completed else { panic!("tuple") };
+        assert_eq!(c_outer[1].dict_get("missionCompleted"), Some(&PyRep::Bool(true)));
+
+        // 2. GetAgentLocationWrap -> Dict with solarsystemID, locationID, typeID
+        let loc = normalize_macho_rpc_reply(
+            "agentMgr",
+            "GetAgentLocationWrap",
+            Ok(PyRep::keyval([
+                ("agentID", PyRep::Integer(3_018_910)),
+                ("solarSystemID", PyRep::Integer(30_000_142)),
+                ("stationID", PyRep::Integer(60_003_760)),
+            ])),
+        )
+        .unwrap();
+        assert!(matches!(loc, PyRep::Dict(_)));
+        assert_eq!(loc.dict_get("solarsystemID"), Some(&PyRep::Integer(30_000_142)));
+        assert_eq!(loc.dict_get("locationID"), Some(&PyRep::Integer(60_003_760)));
+        assert_eq!(loc.dict_get("typeID"), Some(&PyRep::Integer(5)));
+
+        // 3. GetMissionBriefingInfo / GetMissionObjectiveInfo -> Dict keys + MissionNotActive -> None
+        let no_briefing = normalize_macho_rpc_reply(
+            "agentMgr",
+            "GetMissionBriefingInfo",
+            Err(eve_proto::BridgeRpcError {
+                code: "MissionNotActive".into(),
+                message: "none".into(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(no_briefing, PyRep::None);
+
+        let no_obj = normalize_macho_rpc_reply(
+            "agentMgr",
+            "GetMissionObjectiveInfo",
+            Err(eve_proto::BridgeRpcError {
+                code: "MissionNotActive".into(),
+                message: "none".into(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(no_obj, PyRep::None);
+
+        let briefing = normalize_macho_rpc_reply(
+            "agentMgr",
+            "GetMissionBriefingInfo",
+            Ok(PyRep::keyval([
+                ("missionID", PyRep::Integer(501)),
+                ("title", PyRep::String("Eliminate Pirates".into())),
+                ("briefing", PyRep::String("Go there.".into())),
+            ])),
+        )
+        .unwrap();
+        assert!(matches!(briefing, PyRep::Dict(_)));
+        assert_eq!(
+            briefing.dict_get("Mission Title ID"),
+            Some(&PyRep::String("Eliminate Pirates".into()))
+        );
+        assert_eq!(briefing.dict_get("ContentID"), Some(&PyRep::Integer(501)));
+        assert_eq!(briefing.dict_get("Decline Time"), Some(&PyRep::Integer(-1)));
+        assert!(matches!(briefing.dict_get("Mission Keywords"), Some(PyRep::Dict(_))));
+
+        let objective = normalize_macho_rpc_reply(
+            "agentMgr",
+            "GetMissionObjectiveInfo",
+            Ok(PyRep::keyval([
+                ("missionID", PyRep::Integer(501)),
+                ("title", PyRep::String("Eliminate Pirates".into())),
+                ("missionState", PyRep::Integer(2)),
+                ("iskReward", PyRep::Integer(100_000)),
+                ("lpReward", PyRep::Integer(250)),
+                ("bonusReward", PyRep::Integer(50_000)),
+            ])),
+        )
+        .unwrap();
+        assert!(matches!(objective, PyRep::Dict(_)));
+        assert_eq!(objective.dict_get("completionStatus"), Some(&PyRep::Integer(0)));
+        assert_eq!(objective.dict_get("loyaltyPoints"), Some(&PyRep::Integer(250)));
+        assert_eq!(
+            objective.dict_get("normalRewards"),
+            Some(&PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(29),
+                PyRep::Integer(100_000),
+                PyRep::None,
+            ])]))
+        );
     }
 }
 

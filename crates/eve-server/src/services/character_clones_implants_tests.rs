@@ -545,12 +545,15 @@ fn standing_mgr_and_paper_doll_server_handle_queries_and_apparel() {
     )
     .expect("handled")
     .expect("GetPaperDollData ok");
-    assert!(matches!(doll_data, PyRep::KeyVal(_)), "GetPaperDollData must return KeyVal for ApplyDBRowToDoll");
-    assert_eq!(kv_get(&doll_data, "characterID").and_then(PyRep::as_i64), Some(char_id));
-    assert!(kv_get(&doll_data, "sculpts").is_some_and(|v| matches!(v, PyRep::List(_))));
-    assert!(kv_get(&doll_data, "colors").is_some_and(|v| matches!(v, PyRep::List(_))));
-    assert!(kv_get(&doll_data, "modifiers").is_some_and(|v| matches!(v, PyRep::List(_))));
-    assert!(kv_get(&doll_data, "appearance").is_some_and(|a| kv_get(a, "hairDarkness").is_some()));
+    assert!(
+        matches!(
+            &doll_data,
+            PyRep::List(seq)
+                if seq.len() == 1
+                    && matches!(seq.first(), Some(PyRep::String(g)) if g == "female" || g == "male")
+        ),
+        "GetPaperDollData must return [gender_label] for Doll.MatchDNA, got {doll_data:?}"
+    );
 
     let missing_doll = handle_clones_and_sheet(
         &ctx,

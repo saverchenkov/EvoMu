@@ -873,9 +873,30 @@ pub(crate) fn resolve_inv_target_location(
     bound_entry: Option<&BoundObjectEntry>,
     args: &[PyRep],
     src_loc_opt: Option<i64>,
+    raw_flag_opt: Option<u16>,
+    items_are_fittable_modules: bool,
 ) -> Option<i64> {
     let a1 = args.get(1).and_then(|a| a.as_i64()).filter(|&id| id > 0);
     let bid = bound_entry.map(|b| b.object_id).filter(|&id| id > 0);
+    // When the caller passes `args[1] == sourceLocationID` on an unbound or station-bound
+    // `invbroker` handle together with a ship-only flag (fitting slot, ship bay/cargo, or
+    // `flagAutoFit` on fittable modules/rigs), `args[1]` is `sourceLocationID` from the
+    // V24 client rather than a station destination, so redirect to `session.ship_id`.
+    let target_is_ship_only_flag = matches!(
+        raw_flag_opt,
+        Some(5 | 11..=34 | 87 | 90 | 92..=94 | 125..=132 | 134..=151 | 158)
+    ) || (items_are_fittable_modules && matches!(raw_flag_opt, Some(0) | None));
+    let redirect_source_station_to_ship = |a1_opt: Option<i64>| -> Option<i64> {
+        if target_is_ship_only_flag
+            && a1_opt.is_some()
+            && a1_opt == src_loc_opt
+            && session.ship_id.is_some_and(|sid| Some(sid) != a1_opt)
+        {
+            session.ship_id
+        } else {
+            None
+        }
+    };
     let resolved = match (a1, bid) {
         (a1_opt, Some(bid_val)) => {
             let bound_is_container_or_struct = ctx.db.with_snapshot(|snap| {
@@ -885,11 +906,13 @@ pub(crate) fn resolve_inv_target_location(
                 Some(bid_val)
             } else if a1_opt.is_some() && a1_opt == src_loc_opt && a1_opt != Some(bid_val) {
                 Some(bid_val)
+            } else if let Some(ship_id) = redirect_source_station_to_ship(a1_opt) {
+                Some(ship_id)
             } else {
                 a1_opt.or(Some(bid_val))
             }
         }
-        (a1_opt, None) => a1_opt,
+        (a1_opt, None) => redirect_source_station_to_ship(a1_opt).or(a1_opt),
     };
     resolved
         .or(session.ship_id)

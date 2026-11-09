@@ -58,7 +58,7 @@ fn fw_enlistment_direct_join_leave_cooldown_and_corp_allowed_factions() {
             )
             .unwrap()
             .unwrap(),
-        PyRep::None
+        PyRep::List(Vec::new())
     );
 
     let set_allowed = handle(

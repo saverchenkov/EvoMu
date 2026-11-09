@@ -444,11 +444,56 @@ async fn test_activate_process_and_deactivate_mining_cycle() {
     }
     ctx.store_ship_fitting(ship_id, fit);
 
+    // Negative check: activating on an unlocked / nonexistent target must reject cleanly
+    // without leaking OnGodmaShipEffect or OnSpecialFX notifications.
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let bad_err = activate(&ctx, char_id, ship_id, sys_id, mod_id, 999_999_999)
+        .await
+        .expect_err("unlocked/missing target must fail");
+    assert_eq!(bad_err.code, "TargetNotLocked");
+    let leaked = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        leaked
+            .iter()
+            .all(|n| n.event != "OnGodmaShipEffect" && n.event != "OnSpecialFX"),
+        "Rejected mining activation must not leak OnGodmaShipEffect or OnSpecialFX: {leaked:?}"
+    );
+
     let res = activate(&ctx, char_id, ship_id, sys_id, mod_id, ast_id)
         .await
         .expect("activate should succeed");
     assert_eq!(res.dict_get("moduleID").and_then(|v| v.as_i64()), Some(mod_id));
     assert_eq!(active_cycles_for_ship(&ctx, ship_id).len(), 1);
+
+    let start_notifs = ctx.drain_notifications_for_char(char_id);
+    let gse_start = start_notifs
+        .iter()
+        .find(|n| n.event == "OnGodmaShipEffect")
+        .expect("activate must emit OnGodmaShipEffect");
+    assert_eq!(gse_start.args.len(), 11);
+    assert_eq!(gse_start.args[0], PyRep::Integer(mod_id));
+    assert_eq!(gse_start.args[1], PyRep::Integer(101));
+    assert!(gse_start.args[2].as_i64().unwrap() > 116_444_736_000_000_000);
+    assert_eq!(&gse_start.args[3..5], &[PyRep::Integer(1), PyRep::Integer(1)]);
+    assert!(matches!(&gse_start.args[5], PyRep::Tuple(env) if env.get(6) == Some(&PyRep::Integer(101))));
+    assert!(gse_start.args[6].as_i64().unwrap() > 116_444_736_000_000_000);
+    assert_eq!(gse_start.args[7], PyRep::Integer(60_000));
+    assert_eq!(gse_start.args[8], PyRep::Integer(1000));
+
+    let sfx_start = start_notifs
+        .iter()
+        .find(|n| n.event == "OnSpecialFX")
+        .expect("activate must emit OnSpecialFX");
+    assert_eq!(sfx_start.args.len(), 14);
+    assert_eq!(sfx_start.args[0], PyRep::Integer(ship_id));
+    assert_eq!(sfx_start.args[1], PyRep::Integer(mod_id));
+    assert_eq!(sfx_start.args[2], PyRep::Integer(483));
+    assert_eq!(sfx_start.args[3], PyRep::Integer(ast_id));
+    assert_eq!(sfx_start.args[5], PyRep::String("effects.Laser".into()));
+    assert_eq!(&sfx_start.args[7..9], &[PyRep::Integer(1), PyRep::Integer(1)]);
+    assert_eq!(sfx_start.args[9], PyRep::Real(60_000.0));
+    assert_eq!(sfx_start.args[10], PyRep::Integer(1000));
+    assert!(sfx_start.args[11].as_i64().unwrap() > 116_444_736_000_000_000);
 
     // Backdate cycle_start_ms by 60_000 ms so process_mining_cycles resolves one full cycle
     ctx.mining_cycles
@@ -464,6 +509,7 @@ async fn test_activate_process_and_deactivate_mining_cycle() {
     assert_eq!(outcomes[0].units_delivered, 600);
     assert_eq!(outcomes[0].asteroid_remaining, 400);
 
+    let _ = ctx.drain_notifications_for_char(char_id);
     // Deactivate remaining running cycle
     let deact = deactivate(&ctx, char_id, Some(ship_id), mod_id)
         .await
@@ -471,6 +517,24 @@ async fn test_activate_process_and_deactivate_mining_cycle() {
         .expect("caller owns cycle");
     let _ = deact;
     assert!(active_cycles_for_ship(&ctx, ship_id).is_empty());
+
+    let stop_notifs = ctx.drain_notifications_for_char(char_id);
+    let gse_stop = stop_notifs
+        .iter()
+        .find(|n| n.event == "OnGodmaShipEffect")
+        .expect("deactivate must emit OnGodmaShipEffect");
+    assert_eq!(gse_stop.args[1], PyRep::Integer(101));
+    assert_eq!(&gse_stop.args[3..5], &[PyRep::Integer(0), PyRep::Integer(0)]);
+    assert!(gse_stop.args[10].as_i64().unwrap() > 116_444_736_000_000_000);
+
+    let sfx_stop = stop_notifs
+        .iter()
+        .find(|n| n.event == "OnSpecialFX")
+        .expect("deactivate must emit OnSpecialFX");
+    assert_eq!(sfx_stop.args[5], PyRep::String("effects.Laser".into()));
+    assert_eq!(&sfx_stop.args[7..9], &[PyRep::Integer(0), PyRep::Integer(0)]);
+    assert_eq!(sfx_stop.args[10], PyRep::Integer(0));
+    assert!(sfx_stop.args[11].as_i64().unwrap() > 116_444_736_000_000_000);
 }
 
 #[test]

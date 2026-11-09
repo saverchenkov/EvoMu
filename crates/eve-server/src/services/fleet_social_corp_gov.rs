@@ -371,13 +371,21 @@ pub(super) fn handle_get_wallet_divisions_info(
                     .find(|w| w.division_id == d)
                     .map(|w| w.name.clone())
                     .unwrap_or_else(|| if d == 1 { "Master Wallet".into() } else { format!("Division {d}") });
-                vec![PyRep::Integer(d as i64), PyRep::String(name), PyRep::Real(corp.division_balance(d).to_wire_f64())]
+                vec![
+                    PyRep::Integer(d as i64),
+                    PyRep::String(name),
+                    PyRep::Real(corp.division_balance(d).to_wire_f64()),
+                    PyRep::Integer(999 + i64::from(d)),
+                ]
             })
             .collect();
         Ok(rows)
     });
     match res {
-        Ok(rows) => Some(Ok(PyRep::rowset(vec!["divisionID", "name", "balance"], rows))),
+        Ok(rows) => Some(Ok(PyRep::rowset(
+            vec!["divisionID", "name", "balance", "key"],
+            rows,
+        ))),
         Err(e) => Some(Err(e)),
     }
 }
@@ -593,9 +601,38 @@ pub(super) fn handle_corp_gov(
                 let ids: Vec<PyRep> = member_shares.into_iter().filter(|&(_, cnt)| cnt >= avg).map(|(oid, _)| PyRep::Integer(oid)).collect();
                 return Some(Ok(PyRep::List(ids)));
             }
-            let rows: Vec<Vec<PyRep>> = shares.iter().filter(|(_, &cnt)| cnt > 0)
-                .map(|(&oid, &cnt)| vec![PyRep::Integer(oid), PyRep::Integer(corp_id), PyRep::Integer(cnt)]).collect();
-            Some(Ok(PyRep::rowset(vec!["shareholderID", "corporationID", "shares"], rows)))
+            let items: Vec<(PyRep, Vec<PyRep>)> = ctx.db.with_snapshot(|snap| {
+                shares
+                    .iter()
+                    .filter(|(_, &cnt)| cnt > 0)
+                    .map(|(&oid, &cnt)| {
+                        let shareholder_corp_id = snap
+                            .characters
+                            .get(&oid)
+                            .map(|c| PyRep::Integer(c.corporation_id))
+                            .unwrap_or(PyRep::None);
+                        (
+                            PyRep::Integer(oid),
+                            vec![
+                                PyRep::Integer(oid),
+                                PyRep::Integer(corp_id),
+                                shareholder_corp_id,
+                                PyRep::Integer(cnt),
+                            ],
+                        )
+                    })
+                    .collect()
+            });
+            Some(Ok(PyRep::index_rowset(
+                "shareholderID",
+                vec![
+                    "shareholderID",
+                    "corporationID",
+                    "shareholderCorporationID",
+                    "shares",
+                ],
+                items,
+            )))
         }
 
         ("corpRegistry", "PayoutDividend") => {

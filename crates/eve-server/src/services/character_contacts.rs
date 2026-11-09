@@ -186,15 +186,29 @@ pub fn handle_contacts(
                     message: "GetEmployementRecordAndCharacterTransfers requires charID or selected character".into(),
                 }));
             };
+            // V24.01 `Info.GetEmploymentHistorySubContent` (`infosvc.pyj:3565-3605`) reads
+            // `job.corporationID`, `job.deleted`, and `FmtDate(job.startDate, 'ls')` /
+            // `(nextDateRaw - job.startDate) / const.DAY` (64-bit Win32 FILETIME ticks, `#750`).
+            let unix_to_filetime = |ts: u64| -> i64 {
+                if ts > 100_000_000_000 {
+                    ts as i64
+                } else {
+                    ((ts as i64) + 11_644_473_600) * 10_000_000
+                }
+            };
             let mut rows = Vec::new();
             ctx.db.with_snapshot(|snap| {
+                let is_corp_deleted = |corp_id: i64| -> i64 {
+                    i64::from(corp_id >= 98_000_000 && !snap.corporations.contains_key(&corp_id))
+                };
                 if let Some(hist) = snap.employment_history.get(&cid) {
                     if !hist.is_empty() {
                         for (idx, entry) in hist.iter().enumerate() {
                             rows.push(vec![
                                 PyRep::Integer((idx + 1) as i64),
                                 PyRep::Integer(entry.0),
-                                PyRep::Integer(entry.1 as i64),
+                                PyRep::Integer(unix_to_filetime(entry.1)),
+                                PyRep::Integer(is_corp_deleted(entry.0)),
                             ]);
                         }
                     }
@@ -204,12 +218,16 @@ pub fn handle_contacts(
                         rows.push(vec![
                             PyRep::Integer(1),
                             PyRep::Integer(c.corporation_id),
-                            PyRep::Integer(c.create_date_unix as i64),
+                            PyRep::Integer(unix_to_filetime(c.create_date_unix)),
+                            PyRep::Integer(is_corp_deleted(c.corporation_id)),
                         ]);
                     }
                 }
             });
-            Some(Ok(PyRep::rowset(vec!["recordID", "corporationID", "startDate"], rows)))
+            Some(Ok(PyRep::rowset(
+                vec!["recordID", "corporationID", "startDate", "deleted"],
+                rows,
+            )))
         }
 
         ("charMgr", "AddOwnerNote") => {

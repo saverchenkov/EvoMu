@@ -450,7 +450,7 @@ async fn test_corp_registry_kills_naming_and_owners() {
     .await
     .expect("GetSuggestedAllianceShortNames");
     let PyRep::List(s_list) = shorts else { panic!("expected list") };
-    assert!(s_list.contains(&PyRep::String("UFC".into())));
+    assert!(s_list.iter().any(|r| field(r, "shortName").as_str() == Some("UFC")));
 
     // Seed killmails for recent kills and recent losses
     ctx.db.with_mut_snapshot(|snap| {

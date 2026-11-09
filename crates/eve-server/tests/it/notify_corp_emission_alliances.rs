@@ -326,8 +326,8 @@ async fn test_corp_registry_governance_structures_contacts_and_reinforce() {
     assert_eq!(sh_kv.get("sharesTransferred"), Some(&PyRep::Integer(100)));
 
     let shs = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "GetShareholders", &[], &kw, None).await.expect("GetShareholders");
-    let PyRep::Rowset { rows: sh_rows, .. } = shs else { panic!("expected Rowset") };
-    assert!(!sh_rows.is_empty());
+    let PyRep::IndexRowset { items: sh_items, .. } = shs else { panic!("expected IndexRowset") };
+    assert!(!sh_items.is_empty());
 
     let sh_by = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "GetSharesByShareholder", &[PyRep::Integer(P1)], &kw, None).await.expect("GetSharesByShareholder");
     assert!(matches!(sh_by, PyRep::Rowset { .. }));

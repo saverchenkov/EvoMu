@@ -386,12 +386,16 @@ pub fn slim_item_dict(ball: &Ball, meta: &SlimItemMeta) -> PyRep {
         32882 | 56002 => 55914,
         other => other,
     };
+    // V24.01 `StateSvc.CheckStates` (`state.pyj:874`) and `IsStandingRelevant` (`state.pyj:927`)
+    // treat `invConst.ownerSystem == 1` (and `None` / NPC IDs) as non-player owners, whereas `0`
+    // falls into `_GetRelationship` as a player character ID (`#722`).
+    let wire_owner_id = if meta.owner_id == 0 { 1 } else { meta.owner_id };
     let mut entries = vec![
         ("itemID", PyRep::Integer(ball.id)),
         ("typeID", PyRep::Integer(wire_type_id as i64)),
         ("groupID", PyRep::Integer(meta.group_id as i64)),
         ("categoryID", PyRep::Integer(meta.category_id as i64)),
-        ("ownerID", PyRep::Integer(meta.owner_id)),
+        ("ownerID", PyRep::Integer(wire_owner_id)),
         ("charID", char_rep),
         ("corpID", corp_rep),
         ("allianceID", alliance_rep),

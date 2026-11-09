@@ -709,22 +709,197 @@ pub(crate) fn clear_emptied_sites(ctx: &ServerContext, sys_id: u32, ast_pos: DVe
     });
 }
 
+/// Resolves the numeric SDE `effectID`, 3D FX `guid`, and `isOffensive` flag for a mining module
+/// so `OnGodmaShipEffect` (`godma.py:1729` -> `dogma.data.get_effect`) receives an integer `effectID`
+/// (e.g. `67` for `miningLaser`, `2726` for `miningClouds`) and `FxSequencer.OnSpecialFX` receives
+/// the corresponding SDE `guid` (`effects.Laser` / `effects.CloudMining` / `effects.Mining`).
+pub(crate) fn resolve_mining_effect_id_and_fx(
+    ctx: &ServerContext,
+    module_type_id: Option<u32>,
+    effect_name: &str,
+    kind: Option<MiningKind>,
+) -> (i64, String, bool) {
+    let name_opt = (!effect_name.is_empty() && effect_name != "defaultEffect").then_some(effect_name);
+    let effect_id = module_type_id
+        .and_then(|tid| ctx.effect_id_for_module(tid, name_opt))
+        .or_else(|| {
+            name_opt.and_then(|name| {
+                ctx.sde
+                    .effects
+                    .values()
+                    .find(|e| e.name == name)
+                    .map(|e| i64::from(e.effect_id))
+            })
+        })
+        .unwrap_or(match (kind, effect_name) {
+            (Some(MiningKind::Gas), _) | (_, "miningClouds") => 2726,
+            (_, "mining") => 17,
+            _ => 67,
+        });
+
+    let eff_def = u16::try_from(effect_id)
+        .ok()
+        .and_then(|eid| ctx.sde.effects.get(&eid));
+    let guid = eff_def
+        .and_then(|e| e.guid.as_deref())
+        .filter(|g| !g.is_empty() && *g != "None")
+        .map(str::to_string)
+        .unwrap_or_else(|| match (kind, effect_name) {
+            (Some(MiningKind::Gas), _) | (_, "miningClouds") => "effects.CloudMining".to_string(),
+            (_, "mining") => "effects.Mining".to_string(),
+            _ => "effects.Laser".to_string(),
+        });
+    let is_offensive = eff_def.is_some_and(|e| e.is_offensive);
+    (effect_id, guid, is_offensive)
+}
+
+/// Emits the V24.01 11-argument `OnGodmaShipEffect` tuple (with numeric `effectID` and Win32
+/// FILETIME `startTime`) to the pilot and the 14-argument `OnSpecialFX` notification (`effects.Laser`
+/// / `effects.CloudMining`) to the pilot and online observers in space in `solar_system_id`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_mining_godma_and_special_fx(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    solar_system_id: u32,
+    module_id: i64,
+    module_type_id: Option<u32>,
+    target_id: Option<i64>,
+    charge_type_id: Option<u32>,
+    effect_id: i64,
+    guid: &str,
+    is_offensive: bool,
+    active: bool,
+    duration_ms: u64,
+) {
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let flag = i64::from(active);
+    let repeat = if active { 1000_i64 } else { 0_i64 };
+    let actual_stop_time = if active {
+        PyRep::None
+    } else {
+        PyRep::Integer(now_ft)
+    };
+    let environment = PyRep::Tuple(vec![
+        PyRep::Integer(module_id),
+        PyRep::Integer(char_id),
+        PyRep::Integer(ship_id),
+        target_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+        charge_type_id
+            .map(|cid| PyRep::Integer(i64::from(cid)))
+            .unwrap_or(PyRep::None),
+        PyRep::List(Vec::new()),
+        PyRep::Integer(effect_id),
+    ]);
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnGodmaShipEffect",
+        "charid",
+        vec![
+            PyRep::Integer(module_id),
+            PyRep::Integer(effect_id),
+            PyRep::Integer(now_ft),
+            PyRep::Integer(flag),
+            PyRep::Integer(flag),
+            environment,
+            PyRep::Integer(now_ft),
+            PyRep::Integer(duration_ms as i64),
+            PyRep::Integer(repeat),
+            PyRep::None,
+            actual_stop_time,
+        ],
+    );
+
+    let sfx_args = vec![
+        PyRep::Integer(ship_id),
+        PyRep::Integer(module_id),
+        module_type_id
+            .map(|tid| PyRep::Integer(i64::from(tid)))
+            .unwrap_or(PyRep::None),
+        target_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+        charge_type_id
+            .map(|cid| PyRep::Integer(i64::from(cid)))
+            .unwrap_or(PyRep::None),
+        PyRep::String(guid.to_string()),
+        PyRep::Bool(is_offensive),
+        PyRep::Integer(flag),
+        PyRep::Integer(flag),
+        PyRep::Real(duration_ms as f64),
+        PyRep::Integer(repeat),
+        PyRep::Integer(now_ft),
+        PyRep::Real(0.0),
+        PyRep::None,
+    ];
+    let space_candidates: Vec<(i64, u64)> = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .values()
+            .filter(|c| {
+                c.solar_system_id == solar_system_id
+                    && c.station_id.is_none()
+                    && c.structure_id.is_none()
+            })
+            .map(|c| (c.character_id, c.user_id))
+            .collect()
+    });
+    let mut sfx_recipients: Vec<i64> = space_candidates
+        .into_iter()
+        .filter(|&(cid, uid)| cid == char_id || ctx.is_character_online(cid, uid))
+        .map(|(cid, _)| cid)
+        .collect();
+    if !sfx_recipients.contains(&char_id) {
+        sfx_recipients.push(char_id);
+    }
+    sfx_recipients.sort_unstable();
+    sfx_recipients.dedup();
+    for cid in sfx_recipients {
+        ctx.notify(
+            NotificationTarget::Character(cid),
+            "OnSpecialFX",
+            "charid",
+            sfx_args.clone(),
+        );
+    }
+}
+
 /// Marks the module inactive in the fitting engine and persisted state, and tells the client.
 fn stop_module(ctx: &ServerContext, cycle: &ActiveMiningCycle) {
     ctx.mining_cycles.write().unwrap_or_else(|e| e.into_inner()).remove(&cycle.module_id);
     ctx.persist_server_runtime_to_db();
+    let mut module_type_id = ctx
+        .db
+        .with_snapshot(|s| s.items.get(&cycle.module_id).map(|i| i.type_id));
+    let mut charge_type_id = None;
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.remove(&cycle.module_id);
     });
     if let Ok(mut fit) = ctx.get_or_rebuild_ship_fitting(cycle.char_id, cycle.ship_id) {
+        if let Some(m) = fit.modules.get(&cycle.module_id) {
+            module_type_id = module_type_id.or(Some(m.type_id));
+            charge_type_id = m.charge_type_id;
+        }
         let _ = fit.deactivate_module(cycle.module_id, &ctx.sde);
         ctx.store_ship_fitting(cycle.ship_id, fit);
     }
-    ctx.notify(
-        NotificationTarget::Character(cycle.char_id),
-        "OnGodmaShipEffect",
-        "charid",
-        vec![PyRep::Integer(cycle.module_id), PyRep::String(cycle.effect_name.clone()), PyRep::Bool(false)],
+    let (effect_id, guid, is_offensive) = resolve_mining_effect_id_and_fx(
+        ctx,
+        module_type_id,
+        &cycle.effect_name,
+        Some(cycle.kind),
+    );
+    emit_mining_godma_and_special_fx(
+        ctx,
+        cycle.char_id,
+        cycle.ship_id,
+        cycle.solar_system_id,
+        cycle.module_id,
+        module_type_id,
+        Some(cycle.target_id),
+        charge_type_id,
+        effect_id,
+        &guid,
+        is_offensive,
+        false,
+        cycle.duration_ms,
     );
 }
 
@@ -801,17 +976,33 @@ pub async fn activate(
             return Err(e);
         }
     };
+    let charge_type_id = fit.modules.get(&module_id).and_then(|m| m.charge_type_id);
     let _ = fit.activate_module(module_id, false, &ctx.sde);
     ctx.store_ship_fitting(ship_id, fit);
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.insert(module_id);
     });
     ctx.persist_server_runtime_to_db();
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnGodmaShipEffect",
-        "charid",
-        vec![PyRep::Integer(module_id), PyRep::String(cycle.effect_name.clone()), PyRep::Bool(true)],
+    let (effect_id, guid, is_offensive) = resolve_mining_effect_id_and_fx(
+        ctx,
+        Some(module_type_id),
+        &cycle.effect_name,
+        Some(cycle.kind),
+    );
+    emit_mining_godma_and_special_fx(
+        ctx,
+        char_id,
+        ship_id,
+        solar_system_id,
+        module_id,
+        Some(module_type_id),
+        Some(target_id),
+        charge_type_id,
+        effect_id,
+        &guid,
+        is_offensive,
+        true,
+        duration_ms,
     );
     Ok(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)),

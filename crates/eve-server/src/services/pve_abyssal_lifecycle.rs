@@ -581,7 +581,7 @@ pub fn evacuate_void_space_session_sync(
             let _ = crate::router::apply_character_transition_in_snap(
                 snap,
                 &ctx.sde,
-                cid,
+                char_id,
                 crate::router::TransitionLocation::Space { solar_system_id: origin_sys },
                 Some(sid),
                 true,

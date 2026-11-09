@@ -1008,9 +1008,22 @@ pub async fn handle_compression(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let observer_ledger_descriptor = || {
+                DBRowDescriptor::new([
+                    ("characterID", DbColumnType::I8),
+                    ("recordedCorporationID", DbColumnType::I8),
+                    ("typeID", DbColumnType::I4),
+                    ("quantity", DbColumnType::I8),
+                    ("lastUpdated", DbColumnType::Str),
+                ])
+            };
             let observer_id = match args.first() {
-                // V24.01 client calls GetObserverLedger(None) before selecting an observer structure; return empty ledger.
-                None | Some(PyRep::None) => return Some(Ok(PyRep::List(vec![]))),
+                // V24.01 `LedgerSvc.GetCorpData(observerItemID=None)` (`ledgerSvc.pyj:42-43`) calls
+                // `corpMiningLedger.GetObserverLedger(None)` when the corp has 0 moon-mining observers;
+                // return an empty `dbutil.CRowset` with the exact observer ledger descriptor (`#748`).
+                None | Some(PyRep::None) => {
+                    return Some(Ok(observer_ledger_descriptor().build_crowset(Vec::new())));
+                }
                 Some(arg) => match arg.as_i64() {
                     Some(id) => id,
                     None => {
@@ -1083,13 +1096,7 @@ pub async fn handle_compression(
             });
             match res {
                 Ok(entries) => {
-                    let descriptor = DBRowDescriptor::new([
-                        ("characterID", DbColumnType::I8),
-                        ("recordedCorporationID", DbColumnType::I8),
-                        ("typeID", DbColumnType::I4),
-                        ("quantity", DbColumnType::I8),
-                        ("lastUpdated", DbColumnType::Str),
-                    ]);
+                    let descriptor = observer_ledger_descriptor();
                     let rows: Vec<Vec<PyRep>> = entries
                         .into_iter()
                         .map(|(cid, rcorp, tid, qty, dt)| {
@@ -1118,6 +1125,7 @@ pub async fn handle_compression(
             let mut agg_order: Vec<(String, u32, TypeId)> = Vec::new();
             let mut agg_qty: HashMap<(String, u32, TypeId), i64> = HashMap::new();
             let mut agg_waste: HashMap<(String, u32, TypeId), i64> = HashMap::new();
+            let mut agg_ts: HashMap<(String, u32, TypeId), u64> = HashMap::new();
             for (r, waste) in records {
                 if r.timestamp_unix > 0 && r.timestamp_unix < cutoff {
                     continue;
@@ -1127,7 +1135,11 @@ pub async fn handle_compression(
                     agg_order.push(key.clone());
                 }
                 *agg_qty.entry(key.clone()).or_insert(0) += r.quantity;
-                *agg_waste.entry(key).or_insert(0) += waste;
+                *agg_waste.entry(key.clone()).or_insert(0) += waste;
+                agg_ts
+                    .entry(key)
+                    .and_modify(|ts| *ts = (*ts).max(r.timestamp_unix))
+                    .or_insert(r.timestamp_unix);
             }
             let items: Vec<PyRep> = agg_order
                 .into_iter()
@@ -1135,14 +1147,26 @@ pub async fn handle_compression(
                     let key = (date.clone(), sys_id, type_id);
                     let qty = agg_qty.get(&key).copied().unwrap_or(0);
                     let waste = agg_waste.get(&key).copied().unwrap_or(0);
+                    let raw_ts = agg_ts.get(&key).copied().unwrap_or(0);
+                    let event_unix = if raw_ts > 0 {
+                        raw_ts
+                    } else {
+                        parse_date_string_to_unix_secs(&date).unwrap_or(now)
+                    };
+                    let event_date_ft = crate::sp6_lifecycle::unix_to_filetime(event_unix);
                     let (group_id, category_id) = ctx
                         .sde
                         .types
                         .get(&type_id)
                         .map(|t| (t.group_id as i64, t.category_id as i64))
                         .unwrap_or((0, 0));
+                    // V24.01 `ledgerUtil.GetDataForMinimap` reads `each.eventDate` as a 64-bit Win32
+                    // FILETIME (`blue.os.GetTimeParts`), and `ledgerEntry.pyj:31` reads lowercase
+                    // `eachData.solarsystemID` (`cfg.evelocations.Get(eachData.solarsystemID).name`).
                     PyRep::keyval([
+                        ("eventDate", PyRep::Integer(event_date_ft)),
                         ("date", PyRep::String(date)),
+                        ("solarsystemID", PyRep::Integer(sys_id as i64)),
                         ("solarSystemID", PyRep::Integer(sys_id as i64)),
                         ("typeID", PyRep::Integer(type_id as i64)),
                         ("groupID", PyRep::Integer(group_id)),
@@ -1157,6 +1181,26 @@ pub async fn handle_compression(
         }
         _ => None,
     }
+}
+
+/// Converts a `"YYYY-MM-DD"` UTC date string into midnight Unix seconds (inverse of
+/// `eve_db::unix_secs_to_date_string`) for records whose `timestamp_unix` was left at `0`.
+fn parse_date_string_to_unix_secs(date: &str) -> Option<u64> {
+    let mut parts = date.split('-');
+    let y: i64 = parts.next()?.parse().ok()?;
+    let m: u32 = parts.next()?.parse().ok()?;
+    let d: u32 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let y_adj = if m <= 2 { y - 1 } else { y };
+    let era = if y_adj >= 0 { y_adj } else { y_adj - 399 } / 400;
+    let yoe = (y_adj - era * 400) as u32;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + i64::from(doe) - 719_468;
+    u64::try_from(days).ok().map(|v| v.saturating_mul(86_400))
 }
 
 /// DERIVED: Metenox Moon Drill hourly Magmatic Gas (`type_id == 81143`) reagent consumption

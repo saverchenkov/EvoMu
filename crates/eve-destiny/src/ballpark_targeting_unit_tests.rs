@@ -100,13 +100,15 @@ fn target_lock_lifecycle_and_cloak_invulnerability_guards() {
     let obs2_events = park.drain_observer_events(2);
     assert!(obs2_events.iter().any(|e| matches!(e, DestinyEvent::AddBalls2 { .. })));
 
-    // 5. Add second lock on target 3
+    // 5. Add second lock on target 3 and verify duplicate `add_target_lock` never leaks extra slots
     assert!(park.add_target_lock(1, make_lock(3, 2500.0, false)));
+    assert!(park.add_target_lock(1, make_lock(3, 2000.0, false)));
+    assert!(park.add_target_lock(1, make_lock(2, 3000.0, false)));
     let locks = park.get_target_locks(1);
     assert_eq!(locks.len(), 2);
-    assert!(locks[0].locked);
+    assert!(locks[0].locked, "already-completed lock on target 2 must stay locked on duplicate add_target_lock");
     assert!(!locks[1].locked);
-    assert_eq!(locks[1].remaining_lock_ms, 2500.0);
+    assert_eq!(locks[1].remaining_lock_ms, 2000.0);
 
     // 6. remove_target_lock & clear_target_locks
     assert!(!park.remove_target_lock(999, 2));

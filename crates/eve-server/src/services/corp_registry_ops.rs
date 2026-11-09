@@ -321,15 +321,15 @@ pub fn handle(
             let mut suggestions = Vec::new();
             if words.len() >= 3 {
                 let acronym: String = words.iter().filter_map(|w| w.chars().next()).take(5).collect();
-                suggestions.push(PyRep::String(acronym.to_uppercase()));
+                suggestions.push(PyRep::keyval([("shortName", PyRep::String(acronym.to_uppercase()))]));
             }
             let clean: String = name.chars().filter(|c| c.is_alphanumeric()).collect();
             if clean.len() >= 3 {
                 let prefix: String = clean.chars().take(4).collect();
-                suggestions.push(PyRep::String(prefix.to_uppercase()));
+                suggestions.push(PyRep::keyval([("shortName", PyRep::String(prefix.to_uppercase()))]));
             }
             if suggestions.is_empty() {
-                suggestions.push(PyRep::String("ALLI".into()));
+                suggestions.push(PyRep::keyval([("shortName", PyRep::String("ALLI".into()))]));
             }
             Some(Ok(PyRep::List(suggestions)))
         }

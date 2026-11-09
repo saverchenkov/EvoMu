@@ -147,7 +147,8 @@ async fn test_so3_corporation_roles_public_info_governance_shares_votes_and_alli
         vec![
             PyRep::Integer(1),
             PyRep::String("Master Wallet".into()),
-            PyRep::Real(0.0)
+            PyRep::Real(0.0),
+            PyRep::Integer(1000),
         ]
     );
     assert_eq!(
@@ -155,7 +156,8 @@ async fn test_so3_corporation_roles_public_info_governance_shares_votes_and_alli
         vec![
             PyRep::Integer(2),
             PyRep::String("Division 2".into()),
-            PyRep::Real(0.0)
+            PyRep::Real(0.0),
+            PyRep::Integer(1001),
         ]
     );
 
@@ -218,7 +220,8 @@ async fn test_so3_corporation_roles_public_info_governance_shares_votes_and_alli
         vec![
             PyRep::Integer(1),
             PyRep::String("Master Wallet".into()),
-            PyRep::Real(300_000.0)
+            PyRep::Real(300_000.0),
+            PyRep::Integer(1000),
         ]
     );
     assert_eq!(
@@ -226,7 +229,8 @@ async fn test_so3_corporation_roles_public_info_governance_shares_votes_and_alli
         vec![
             PyRep::Integer(2),
             PyRep::String("Freight Escrow".into()),
-            PyRep::Real(200_000.0)
+            PyRep::Real(200_000.0),
+            PyRep::Integer(1001),
         ]
     );
 

@@ -893,7 +893,11 @@ pub fn handle(
                 let ap = snap.owner_notes.get(&autopay_note_id(corp_id))
                     .and_then(|n| serde_json::from_str::<CorpAutoPaySettings>(&n.note).ok())
                     .unwrap_or(CorpAutoPaySettings { division_id: 1000, enabled_bill_types: BTreeMap::new() });
-                let mut inner: Vec<(PyRep, PyRep)> = ap.enabled_bill_types
+                let mut bill_types = ap.enabled_bill_types;
+                for bt in 1..=7 {
+                    bill_types.entry(bt).or_insert(false);
+                }
+                let mut inner: Vec<(PyRep, PyRep)> = bill_types
                     .into_iter()
                     .map(|(bt, enabled)| (PyRep::Integer(bt), PyRep::Bool(enabled)))
                     .collect();

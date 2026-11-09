@@ -641,4 +641,24 @@ fn slim_item_dict_always_emits_non_empty_name_for_capsules_and_objects() {
         empty_name_obj.dict_get("name"),
         Some(&PyRep::String("Item 777002".into()))
     );
+
+    let zero_owner_asteroid = slim_item_dict(
+        &sample_ball(777_003, MovementMode::Rigid),
+        &SlimItemMeta {
+            group_id: 462,
+            category_id: 25,
+            owner_id: 0,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        zero_owner_asteroid.dict_get("ownerID"),
+        Some(&PyRep::Integer(1)),
+        "zero owner_id on natural celestials/asteroids must serialize as invConst.ownerSystem (1)"
+    );
+    assert_eq!(
+        cap_dict.dict_get("ownerID"),
+        Some(&PyRep::Integer(90_000_001)),
+        "non-zero player owner_id must be preserved verbatim"
+    );
 }

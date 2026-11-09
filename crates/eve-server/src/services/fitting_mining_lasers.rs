@@ -176,12 +176,71 @@ pub(crate) async fn handle_mining_and_deactivate(
                 "charid",
                 vec![PyRep::List(vec![PyRep::Integer(module_id)])],
             );
-            ctx.notify(
-                crate::router::NotificationTarget::Character(char_id),
-                "OnGodmaShipEffect",
-                "charid",
-                vec![PyRep::Integer(module_id), PyRep::String(effect_name), PyRep::Bool(false)],
-            );
+            if is_mining {
+                let (effect_id, guid, is_offensive) =
+                    crate::services::mining_cycle::resolve_mining_effect_id_and_fx(
+                        ctx,
+                        mod_type_opt,
+                        &effect_name,
+                        None,
+                    );
+                if let Some(sys_id) = session.solar_system_id {
+                    let charge_type_id = fit.modules.get(&module_id).and_then(|m| m.charge_type_id);
+                    crate::services::mining_cycle::emit_mining_godma_and_special_fx(
+                        ctx,
+                        char_id,
+                        ship_id,
+                        sys_id,
+                        module_id,
+                        mod_type_opt,
+                        None,
+                        charge_type_id,
+                        effect_id,
+                        &guid,
+                        is_offensive,
+                        false,
+                        0,
+                    );
+                } else {
+                    ctx.notify_godma_ship_effect(
+                        crate::router::NotificationTarget::Character(char_id),
+                        module_id,
+                        effect_id as i32,
+                        false,
+                        0,
+                        0,
+                    );
+                }
+            } else {
+                let name_opt = (!effect_name.is_empty() && effect_name != "defaultEffect")
+                    .then_some(effect_name.as_str());
+                let effect_id = mod_type_opt
+                    .and_then(|tid| ctx.effect_id_for_module(tid, name_opt))
+                    .or_else(|| {
+                        name_opt.and_then(|name| {
+                            ctx.sde
+                                .effects
+                                .values()
+                                .find(|e| e.name == name)
+                                .map(|e| i64::from(e.effect_id))
+                        })
+                    })
+                    .unwrap_or(match effect_name.as_str() {
+                        "online" => 16,
+                        "miningLaser" => 67,
+                        "miningClouds" => 2726,
+                        "mining" => 17,
+                        _ => 0,
+                    });
+                ctx.notify_godma_ship_effect(
+                    crate::router::NotificationTarget::Character(char_id),
+                    module_id,
+                    effect_id as i32,
+                    false,
+                    0,
+                    0,
+                );
+            }
 
             ctx.db.with_mut_snapshot(|snap| {
                 snap.module_active_states.remove(&module_id);

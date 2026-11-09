@@ -471,8 +471,8 @@ async fn test_fw_warzone_solarsystem_states_and_queries() {
         .await
         .expect("GetAllWarzones");
     match warzones {
-        PyRep::List(list) => assert_eq!(list.len(), 2, "Must contain 2 warzones"),
-        other => panic!("Expected List for GetAllWarzones, got {other:?}"),
+        PyRep::Dict(entries) => assert_eq!(entries.len(), 2, "Must contain 2 warzones"),
+        other => panic!("Expected Dict for GetAllWarzones, got {other:?}"),
     }
 
     // 3. GetAllWarzonesOccupationStates & GetAllWarzonesOccupationStatesUncached

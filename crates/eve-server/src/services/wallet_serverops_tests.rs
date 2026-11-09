@@ -303,6 +303,31 @@ fn bill_mgr_personal_corporate_and_autopay_lifecycle() {
     .unwrap()
     .unwrap();
 
+    let ap_default = handle(
+        &ctx,
+        &mut sess,
+        "billMgr",
+        "GetAutomaticPaySettings",
+        &[],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap();
+    let PyRep::Dict(default_outer) = &ap_default else {
+        panic!("expected Dict from GetAutomaticPaySettings");
+    };
+    let (_, default_inner) = default_outer.first().expect("corp entry");
+    let PyRep::Dict(default_pairs) = default_inner else {
+        panic!("expected inner Dict");
+    };
+    for bt in 1..=7 {
+        assert!(
+            default_pairs.iter().any(|(k, v)| *k == PyRep::Integer(bt) && *v == PyRep::Bool(false)),
+            "missing default billTypeID {bt}"
+        );
+    }
+    assert!(default_pairs.iter().any(|(k, v)| k.as_str() == Some("divisionID") && *v == PyRep::Integer(1000)));
+
     handle(
         &ctx,
         &mut sess,

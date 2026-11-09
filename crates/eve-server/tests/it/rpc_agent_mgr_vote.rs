@@ -200,18 +200,25 @@ async fn test_agent_mgr_career_and_epic_arcs() {
         &mut sess,
         "agentMgr",
         "GetCompletedCareerAgentIDs",
-        &[],
+        &[PyRep::List(vec![
+            PyRep::Integer(CAREER_AGENT_ID),
+            PyRep::Integer(3_018_935),
+        ])],
     )
     .await
     .expect("agentMgr.GetCompletedCareerAgentIDs");
     match completed_res {
-        PyRep::List(ids) => {
+        PyRep::Dict(entries) => {
             assert!(
-                ids.contains(&PyRep::Integer(CAREER_AGENT_ID)),
-                "Completed career agents must include CAREER_AGENT_ID"
+                entries.contains(&(PyRep::Integer(CAREER_AGENT_ID), PyRep::Bool(true))),
+                "Completed career agents dict must map CAREER_AGENT_ID -> true: {entries:?}"
+            );
+            assert!(
+                entries.contains(&(PyRep::Integer(3_018_935), PyRep::Bool(false))),
+                "Uncompleted queried career agent must map to false so agents.pyj never hits KeyError: {entries:?}"
             );
         }
-        other => panic!("Expected PyRep::List from GetCompletedCareerAgentIDs, got: {other:?}"),
+        other => panic!("Expected PyRep::Dict from GetCompletedCareerAgentIDs, got: {other:?}"),
     }
 
     // 2. agentMgr.GetDisabledMissions

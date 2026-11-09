@@ -190,6 +190,26 @@ async fn notify_batch2_fighters_ewar_mutual_wars_strip_and_tracker() {
     let anom_add = find_notif(&seed_notifs, "OnSignalTrackerAnomalyUpdate");
     assert_eq!(anom_add[0], PyRep::Integer(sys_lowsec as i64));
     assert!(matches!(&anom_add[1], PyRep::Dict(d) if !d.is_empty() && d[0].1.dict_get("instanceID").is_some()));
+    if let PyRep::Dict(entries) = &anom_add[1] {
+        for (_, akv) in entries {
+            assert!(
+                akv.dict_get("dungeonID").and_then(|v| v.as_i64()).is_some_and(|id| id > 0),
+                "OnSignalTrackerAnomalyUpdate must carry positive integer dungeonID (#747)"
+            );
+            assert!(
+                akv.dict_get("archetypeID").and_then(|v| v.as_i64()).is_some_and(|id| id > 0),
+                "OnSignalTrackerAnomalyUpdate must carry positive integer archetypeID (#747)"
+            );
+            assert!(
+                akv.dict_get("factionID").and_then(|v| v.as_i64()).is_some_and(|id| id > 0),
+                "OnSignalTrackerAnomalyUpdate must carry positive integer factionID (#747)"
+            );
+            assert!(
+                akv.dict_get("scanStrengthAttribute").and_then(|v| v.as_i64()).is_some_and(|id| id > 0),
+                "OnSignalTrackerAnomalyUpdate must carry positive integer scanStrengthAttribute (#747)"
+            );
+        }
+    }
 
     ctx.db.with_mut_snapshot(|s| { let mut d = s.cosmic_signatures[&sys_lowsec][0].clone(); d.signature_id = "STA-100".into(); if let Some(wh) = eve_server::services::space_destiny::build_static_replacement_wormhole(&ctx, sys_lowsec, &d, ctx.now_unix(), 1) { s.cosmic_signatures.get_mut(&sys_lowsec).unwrap().push(wh); } });
     ctx.advance_secs(90_000);

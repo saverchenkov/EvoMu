@@ -427,6 +427,7 @@ fn freelance_cap_100_dust_sweep_pool_rates_and_redeem_error_paths() {
                 desired_progress: 4,
                 current_progress: 0,
                 closed: false,
+                ..Default::default()
             },
         );
 

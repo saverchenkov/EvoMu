@@ -231,6 +231,18 @@ fn handle_office_manager(
     match method {
         "Bind" | "SetSessionCheck" | "PrimeOfficeItem" => Some(Ok(PyRep::None)),
 
+        "HasCorpImpoundedItems" => {
+            let station_id = resolve_office_station_id(ctx, args, bound_entry, default_station_id);
+            let has_impounded = ctx.db.with_snapshot(|snap| {
+                snap.items.values().any(|it| {
+                    it.owner_id == corp_id
+                        && it.flag == eve_db::InventoryFlag::Impounded
+                        && (station_id <= 0 || it.location_id == station_id)
+                })
+            });
+            Some(Ok(PyRep::Bool(has_impounded)))
+        }
+
         "GetPriceQuote" => {
             let station_id = resolve_office_station_id(ctx, args, bound_entry, default_station_id);
             let occupied = ctx.db.with_snapshot(|snap| {

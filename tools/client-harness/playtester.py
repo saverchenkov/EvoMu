@@ -1492,7 +1492,7 @@ Use these ground-truth EVE Online V24.01 expectations to judge whether the game 
 3. **Industry Jobs (`complete_industry_jobs` / `/completeindustry`):**
    - After starting an industry job, running `complete_industry_jobs` (`/completeindustry`) fast-forwards `start_unix` so the job is immediately ready for delivery in the Industry window.
 4. **Ship Fitting & Inventory (`fitting`, `inventory`, `/fit`, `/createitem`):**
-   - Fitting a module or creating an item MUST emit `OnItemChange` and update the Fitting window slots / Ship HUD module rack / Hangar inventory list live.
+   - Fitting a module or creating an item MUST emit `OnItemChange` and update the Fitting window slots / Ship HUD module rack / Hangar inventory list live. (Note: in EVE V24.01, double-clicking a module/charge in an inventory list opens Show Info (`infowindow`) — fit modules via drag-and-drop to a slot, right-click -> `Fit to Active Ship`, or `/fit me <typeID>`.)
 5. **Market & Wallet (`market`, `wallet`, `/giveisk`):**
    - Buying an item or running `/giveisk` MUST emit `OnAccountChange`, update `wallet_state.isk_balance` in `state_diff`, and deliver purchased items to the hangar.
 6. **Navigation & Real-Time Warp Animation (`undock`, `dock`, `warp_to`, `approach`, `orbit`):**
@@ -1528,7 +1528,8 @@ Choose your next action in the `action` object according to the required JSON sc
 ### Bug Detection Rule (Exceptions AND Silent UI-State Desyncs!)
 1. First fill out `previous_action_verification`:
    - Compare the previous action's `expected_ui_and_state_change` against `state_diff`, `scatters_observed`, `ui_snapshot`, and `screen.png`.
-   - If the previous action should have changed the UI or game state (e.g., opened a window, switched a tab, queued/completed a skill, updated wallet/inventory, changed ship movement mode, or closed a modal) and the UI state **did not update properly**, set `previous_action_verification.expectation_met = false` and describe the exact discrepancy in `discrepancy_summary`.
+   - **Important:** If the previous action returned `ok: false` / non-empty `action_error` (e.g. unsupported `press_key` combo, widget not found, or missing locked target precondition), that is a harness/input rejection rather than a game bug — set `previous_action_verification.expectation_met = true` and `bug_report.should_file = false` unless there was a `log_exceptions`, `macho_exceptions`, `quasar_errors`, or server error.
+   - Otherwise, if the previous action succeeded (`ok: true`) and should have changed the UI or game state (e.g., opened a window, switched a tab, queued/completed a skill, updated wallet/inventory, changed ship movement mode, or closed a modal) and the UI state **did not update properly**, set `previous_action_verification.expectation_met = false` and describe the exact discrepancy in `discrepancy_summary`.
 2. Set `bug_report.should_file = true` whenever ANY of the following holds:
    - `previous_action_verification.expectation_met == false` (use `category: "ui_state_desync"` or `"broken_game_mechanic"` or `"blank_or_stuck_window"`).
    - `modals` contains an error/timeout dialog (`SkillPlanConnectionError`, `TimeoutException`, `CustomError`, etc.).
@@ -1563,7 +1564,11 @@ def invoke_agy_reasoning(
     prompt_file.write_text(prompt_text, encoding="utf-8")
 
     last_err = ""
-    for model_name in model_chain:
+    for idx, model_name in enumerate(model_chain):
+        cooldown_until = _AGY_MODEL_COOLDOWN_UNTIL.get(model_name, 0.0)
+        now_ts = time.time()
+        if now_ts < cooldown_until and idx < len(model_chain) - 1:
+            continue
         model_flags = _resolve_agy_model_args(model_name)
         cmd = [
             "agy",
@@ -1628,7 +1633,14 @@ def invoke_agy_reasoning(
                         pass
                     log_agy_reasoning_trace(step_num_guess, model_name, elapsed, decision)
                     return decision, model_name
-            last_err = f"model={model_name} rc={proc.returncode} stderr={proc.stderr[-300:] if proc.stderr else ''}"
+            stderr_str = proc.stderr or ""
+            if "RESOURCE_EXHAUSTED" in stderr_str or '"error_code":429' in stderr_str or "exhausted your capacity" in stderr_str:
+                cd_secs = _parse_quota_cooldown_secs(stderr_str)
+                _AGY_MODEL_COOLDOWN_UNTIL[model_name] = time.time() + cd_secs
+                log_warn(f"agy model {model_name} hit 429 RESOURCE_EXHAUSTED; cooling down for {int(cd_secs)}s and trying next fallback...")
+                last_err = f"model={model_name} rc={proc.returncode} quota_429_cooldown={int(cd_secs)}s"
+                continue
+            last_err = f"model={model_name} rc={proc.returncode} stderr={stderr_str[-300:] if stderr_str else ''}"
             log_warn(f"agy model {model_name} failed ({last_err}); trying next fallback...")
         except subprocess.TimeoutExpired:
             last_err = f"model={model_name} timed out after {timeout_secs}s"
@@ -1640,6 +1652,22 @@ def invoke_agy_reasoning(
     # Deterministic heuristic fallback if all agy models time out or fail
     log_warn(f"All agy models in chain {model_chain} failed ({last_err}); using heuristic fallback step.")
     return _heuristic_fallback_decision(), "heuristic-fallback"
+
+
+_AGY_MODEL_COOLDOWN_UNTIL: Dict[str, float] = {}
+
+
+def _parse_quota_cooldown_secs(stderr_text: str) -> float:
+    import re as _re
+    m = _re.search(r"reset after (?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?", stderr_text or "")
+    if m and any(m.groups()):
+        h = int(m.group(1) or 0)
+        mins = int(m.group(2) or 0)
+        secs = int(m.group(3) or 0)
+        total = float(h * 3600 + mins * 60 + secs)
+        if total > 0:
+            return min(total, 1800.0)
+    return 600.0
 
 
 def _extract_json_decision(raw_out: str) -> Optional[Dict[str, Any]]:
@@ -1890,24 +1918,34 @@ class PlaytesterBugOracle:
         pav = (decision.get("previous_action_verification") or {}) if last_flight_recorder else {}
         if isinstance(br, dict) and br.get("should_file") and br.get("title"):
             cat = str(br.get("category") or "agent_diagnosed_bug")
-            incidents.append(
-                {
-                    "kind": cat if cat != "none" else "agent_diagnosed_bug",
-                    "title": f"[Playtester] {str(br.get('title')).strip()}",
-                    "severity": str(br.get("severity") or "medium"),
-                    "subsystem": str(br.get("subsystem") or "client-ui"),
-                    "summary": (
-                        f"Category: {cat}\n"
-                        f"Expected: {br.get('expected_behavior')}\n"
-                        f"Actual: {br.get('actual_behavior')}\n"
-                        f"Discrepancy: {pav.get('discrepancy_summary', '')}\n"
-                        f"Steps:\n- " + "\n- ".join(str(s) for s in (br.get("reproduction_steps") or []))
-                    ),
-                    "traceback": prev_tb or new_tb,
-                    "action_error": prev_action_err,
-                }
-            )
-        elif isinstance(pav, dict) and pav.get("expectation_met") is False and str(pav.get("discrepancy_summary") or "").strip():
+            if prev_action_err and cat in ("ui_state_desync", "none", "agent_diagnosed_bug", "broken_game_mechanic") and not prev_tb:
+                log_warn(
+                    f"Step {step_num}: Suppressing agent bug_report ({cat}) because previous action returned client action_error={prev_action_err[:90]}"
+                )
+            else:
+                incidents.append(
+                    {
+                        "kind": cat if cat != "none" else "agent_diagnosed_bug",
+                        "title": f"[Playtester] {str(br.get('title')).strip()}",
+                        "severity": str(br.get("severity") or "medium"),
+                        "subsystem": str(br.get("subsystem") or "client-ui"),
+                        "summary": (
+                            f"Category: {cat}\n"
+                            f"Expected: {br.get('expected_behavior')}\n"
+                            f"Actual: {br.get('actual_behavior')}\n"
+                            f"Discrepancy: {pav.get('discrepancy_summary', '')}\n"
+                            f"Steps:\n- " + "\n- ".join(str(s) for s in (br.get("reproduction_steps") or []))
+                        ),
+                        "traceback": prev_tb or new_tb,
+                        "action_error": prev_action_err,
+                    }
+                )
+        elif (
+            isinstance(pav, dict)
+            and pav.get("expectation_met") is False
+            and str(pav.get("discrepancy_summary") or "").strip()
+            and not prev_action_err
+        ):
             disc = str(pav.get("discrepancy_summary")).strip()
             incidents.append(
                 {
@@ -2014,7 +2052,7 @@ class PlaytesterBugOracle:
                     "solar_system_id": sess_raw.get("solarsystemid2") or sess_raw.get("solarsystemid"),
                     "station_id": sess_raw.get("stationid"),
                     "structure_id": sess_raw.get("structureid"),
-                    "ship_type_id": sess_raw.get("shipid"),
+                    "ship_id": sess_raw.get("shipid"),
                     **sess_raw,
                 },
                 "active_view": ui_snapshot.get("active_view"),

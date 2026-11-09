@@ -178,13 +178,13 @@ async fn structure_defense_volley_target_locking_weapon_activation_and_auto_defe
         save_ext_state(snap, &ext);
     });
 
-    // Lock hostile_ship on structure -> starts locking with realistic lock_time_ms > 0 (not instant)
+    // Lock hostile_ship on structure -> starts locking with realistic lock_time_ms > 0 (`flag = 1, targetList = []`)
     let lock_rep = handle_structure_add_target(&ctx, &session, gunner_id, st_id, hostile_ship)
         .await
         .expect("lock target on structure");
     assert_eq!(
         lock_rep,
-        PyRep::Tuple(vec![PyRep::Integer(0), PyRep::List(vec![PyRep::Integer(hostile_ship)])])
+        PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())])
     );
     let locks_pending = sys_handle.get_target_locks(st_id).await.unwrap();
     assert_eq!(locks_pending.len(), 1);

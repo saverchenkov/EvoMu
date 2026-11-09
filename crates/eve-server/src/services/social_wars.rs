@@ -22,8 +22,8 @@ mod social_wars_helpers;
 use social_wars_helpers::{
     already_at_war, credit_corp, debit_corp, emit_mutual_wars_updated, emit_war_changed, err,
     is_valid_war_hq, is_war_participant_corp, neg_rows_for_caller, resolve_war_stat_id,
-    same_alliance, sync_wars, war_eligible, war_row, NEG_COLUMNS, PEACE_TREATY_SECS, WAR_COLUMNS,
-    WAR_DECLARATION_FEE_ISK, WAR_TIMER_SECS,
+    same_alliance, sync_wars, war_crowset, war_eligible, war_row, NEG_COLUMNS, PEACE_TREATY_SECS,
+    WAR_COLUMNS, WAR_DECLARATION_FEE_ISK, WAR_TIMER_SECS,
 };
 
 struct WarKill {
@@ -327,7 +327,12 @@ pub(super) fn handle_wars(
                     .collect()
             });
             rows.sort_by_key(|r| r.0);
-            Some(Ok(PyRep::rowset(WAR_COLUMNS.to_vec(), rows.into_iter().map(|r| r.1).collect())))
+            let raw_rows: Vec<Vec<PyRep>> = rows.into_iter().map(|r| r.1).collect();
+            if method == "GetWarsByOwnerID" {
+                Some(Ok(war_crowset(raw_rows)))
+            } else {
+                Some(Ok(PyRep::rowset(WAR_COLUMNS.to_vec(), raw_rows)))
+            }
         }
 
         // parity: rpc:warsInfoMgr.GetTop50
@@ -1238,14 +1243,34 @@ fn handle_get_negotiations(
     my_corp: i64,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let wid = args.first().and_then(|a| a.as_i64()).or(bound_obj_id).unwrap_or(1);
-    let mut rows = match neg_rows_for_caller(ctx, wid, NegKind::Surrender, my_corp) {
-        Ok(r) => r,
-        Err(e) => return Some(Err(e)),
-    };
-    if let Ok(ally_rows) = neg_rows_for_caller(ctx, wid, NegKind::Ally, my_corp) {
-        rows.extend(ally_rows);
-    }
+    let explicit_wid = args.first().and_then(|a| a.as_i64()).or_else(|| {
+        bound_obj_id.filter(|bid| ctx.db.with_snapshot(|snap| snap.wars.contains_key(bid)))
+    });
+    let rows = ctx.db.with_snapshot(|snap| {
+        snap.war_state
+            .negotiations
+            .iter()
+            .filter(|n| {
+                let wid_ok = explicit_wid.is_none_or(|wid| n.war_id == wid);
+                let visible = is_war_participant_corp(snap, n.war_id, my_corp)
+                    || (n.kind == NegKind::Ally && n.from_corp == my_corp);
+                wid_ok && visible
+            })
+            .map(|n| {
+                vec![
+                    PyRep::Integer(n.id),
+                    PyRep::Integer(n.war_id),
+                    PyRep::Integer(n.from_corp),
+                    PyRep::Real(n.isk.to_wire_f64()),
+                    PyRep::String(n.message.clone()),
+                    PyRep::String(n.status.clone()),
+                    n.effective_unix
+                        .map(|e| PyRep::Integer(e as i64))
+                        .unwrap_or(PyRep::None),
+                ]
+            })
+            .collect()
+    });
     Some(Ok(PyRep::rowset(NEG_COLUMNS.to_vec(), rows)))
 }
 

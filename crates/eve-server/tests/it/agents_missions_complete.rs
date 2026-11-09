@@ -1688,13 +1688,23 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
     .expect_err("Career agent must reject repeat completion");
     assert_eq!(career_repeat_err.code, "OneTimeAgentMissionCompleted");
 
-    let career_ids = rpc_call(&ctx, &mut sess, "agentMgr", "GetCompletedCareerAgentIDs", &[])
-        .await
-        .expect("GetCompletedCareerAgentIDs");
-    let PyRep::List(completed_careers) = career_ids else {
-        panic!("Expected list from GetCompletedCareerAgentIDs");
+    let career_ids = rpc_call(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "GetCompletedCareerAgentIDs",
+        &[PyRep::List(vec![
+            PyRep::Integer(career_agent_id),
+            PyRep::Integer(3_018_935),
+        ])],
+    )
+    .await
+    .expect("GetCompletedCareerAgentIDs");
+    let PyRep::Dict(completed_careers) = career_ids else {
+        panic!("Expected dict from GetCompletedCareerAgentIDs");
     };
-    assert!(completed_careers.contains(&PyRep::Integer(career_agent_id)));
+    assert!(completed_careers.contains(&(PyRep::Integer(career_agent_id), PyRep::Bool(true))));
+    assert!(completed_careers.contains(&(PyRep::Integer(3_018_935), PyRep::Bool(false))));
 
     // 4. Data Center (`agent_type_id == 5`): Tag Turn-In (requires 1x tag 17202, one-time lockout)
     let (dc_agent_id, dc_corp_id, _) = find_agent_by_level_and_type(&ctx, 1, 5);

@@ -66,6 +66,10 @@ fn field(rep: &PyRep, key: &str) -> PyRep {
 fn rowset_data(rep: &PyRep) -> (Vec<String>, Vec<Vec<PyRep>>) {
     match rep {
         PyRep::Rowset { columns, rows } => (columns.clone(), rows.clone()),
+        PyRep::IndexRowset { columns, items, .. } => (
+            columns.clone(),
+            items.iter().map(|(_, row)| row.clone()).collect(),
+        ),
         _ => (Vec::new(), Vec::new()),
     }
 }

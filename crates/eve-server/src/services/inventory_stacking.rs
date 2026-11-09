@@ -38,26 +38,40 @@ pub(crate) async fn handle_multi_add(
             ("items", PyRep::List(Vec::new())),
         ]));
     }
-    let first_src_loc = item_ids
-        .first()
-        .and_then(|&id| ctx.db.with_snapshot(|s| s.items.get(&id).map(|i| i.location_id)));
+    let raw_flag_opt = args
+        .get(2)
+        .and_then(|a| a.as_i64())
+        .or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()))
+        .map(|v| v as u16);
+    let (first_src_loc, items_are_fittable_modules) = ctx.db.with_snapshot(|s| {
+        let first_loc = item_ids
+            .first()
+            .and_then(|&id| s.items.get(&id).map(|i| i.location_id));
+        let all_fittable = !item_ids.is_empty()
+            && item_ids.iter().all(|&id| {
+                s.items.get(&id).is_some_and(|it| {
+                    ctx.sde
+                        .types
+                        .get(&it.type_id)
+                        .is_some_and(|t| t.category_id == 7 || t.category_id == 32)
+                })
+            });
+        (first_loc, all_fittable)
+    });
     let Some(new_loc) = super::inventory_bound::resolve_inv_target_location(
         ctx,
         session,
         bound_entry,
         args,
         first_src_loc,
+        raw_flag_opt,
+        items_are_fittable_modules,
     ) else {
         return Err(BridgeRpcError {
             code: "InvalidLocation".into(),
             message: "MultiAdd requires target location".into(),
         });
     };
-    let raw_flag_opt = args
-        .get(2)
-        .and_then(|a| a.as_i64())
-        .or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()))
-        .map(|v| v as u16);
     if matches!(raw_flag_opt, Some(11..=34 | 89 | 92..=94 | 125..=132 | 164..=171)) {
         return Err(BridgeRpcError {
             code: "InvalidLocation".into(),

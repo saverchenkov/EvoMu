@@ -15,7 +15,7 @@
 use crate::quasar_gateway::NoticeScope;
 use eve_proto::quasar::{
     encode_bytes_field, encode_string_field, encode_varint_field, DynamicValue, GoogleAny,
-    TYPE_GOOGLEAPIS_PREFIX,
+    WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 
 /// Prefix of the 16-byte goal UUID used for goals backed by the corporation project ledger.
@@ -61,7 +61,133 @@ pub fn goal_scope(corp_id: Option<u32>, creator_id: u32) -> NoticeScope {
     }
 }
 
-/// Snapshot of the goal attributes carried by `CreatedNotice.goal` (`eve_public.goal.Attributes`).
+/// Extracts the raw serialized bytes of the first length-delimited field `field_number` from a
+/// protobuf wire payload (used to forward `CreateRequest.contribution_configuration` verbatim).
+pub fn extract_raw_length_delimited_field(wire_bytes: &[u8], field_number: u32) -> Option<Vec<u8>> {
+    let msg = WireMessage::decode(wire_bytes).ok()?;
+    msg.fields.into_iter().find_map(|f| {
+        if f.field_number == field_number {
+            if let WireValue::LengthDelimited(bytes) = f.value {
+                if !bytes.is_empty() {
+                    return Some(bytes);
+                }
+            }
+        }
+        None
+    })
+}
+
+/// Encodes `.eve_public.goal.ContributionConfiguration` from a canonical `(matcher_type, filter_id)`
+/// pair so `Attributes.contribution_config` (field 7) is always populated and never causes V24.01
+/// `goalMessengerUtil._find_contribution_method_id` to return `None` (`#765`).
+pub fn encode_goal_contribution_config(matcher_type: &str, filter_id: Option<i64>) -> Vec<u8> {
+    let mut cfg = Vec::new();
+    match matcher_type {
+        "DeliverItem" => {
+            let mut method = Vec::new();
+            if let Some(tid) = filter_id.filter(|&v| v > 0) {
+                put_seq_id(1, tid as u64, &mut method); // delivered_item_type
+            }
+            encode_varint_field(2, 1, &mut method); // free_office = true
+            let mut inner = Vec::new();
+            encode_bytes_field(1, &method, &mut inner);
+            encode_bytes_field(2, &inner, &mut cfg);
+        }
+        "DestroyNPCShips" => {
+            let mut method = Vec::new();
+            if let Some(sid) = filter_id.filter(|&v| v > 0) {
+                put_seq_id(4, sid as u64, &mut method); // solar_system
+            } else {
+                encode_varint_field(3, 1, &mut method); // free_solar_system = true
+            }
+            let mut inner = Vec::new();
+            encode_bytes_field(1, &method, &mut inner);
+            encode_bytes_field(3, &inner, &mut cfg);
+        }
+        "DamageShips" => {
+            let mut method = Vec::new();
+            if let Some(sid) = filter_id.filter(|&v| v > 0) {
+                put_seq_id(2, sid as u64, &mut method); // solar_system
+            } else {
+                encode_varint_field(1, 1, &mut method); // free_solar_system = true
+            }
+            encode_varint_field(3, 1, &mut method); // free_ship_type = true
+            encode_varint_field(5, 1, &mut method); // free_organization_type = true
+            let mut inner = Vec::new();
+            encode_bytes_field(1, &method, &mut inner);
+            encode_bytes_field(4, &inner, &mut cfg);
+        }
+        "MineMaterials" | "MineOre" => {
+            let mut method = Vec::new();
+            encode_varint_field(1, 1, &mut method); // free_solar_system = true
+            if let Some(ore_tid) = filter_id.filter(|&v| v > 0) {
+                put_seq_id(4, ore_tid as u64, &mut method); // ore
+            } else {
+                encode_varint_field(3, 1, &mut method); // free_ore_type = true
+            }
+            let mut inner = Vec::new();
+            encode_bytes_field(1, &method, &mut inner);
+            encode_bytes_field(5, &inner, &mut cfg);
+        }
+        "DestroyCapsuleerShips" => {
+            let mut inner = Vec::new();
+            encode_bytes_field(4, &[], &mut inner);
+            encode_bytes_field(6, &inner, &mut cfg);
+        }
+        "CaptureFWComplexes" => {
+            let mut inner = Vec::new();
+            encode_bytes_field(4, &[], &mut inner);
+            encode_bytes_field(7, &inner, &mut cfg);
+        }
+        "DefendFWComplexes" => {
+            let mut inner = Vec::new();
+            encode_bytes_field(4, &[], &mut inner);
+            encode_bytes_field(8, &inner, &mut cfg);
+        }
+        "RemoteRepairArmor" => {
+            let mut inner = Vec::new();
+            encode_bytes_field(4, &[], &mut inner);
+            encode_bytes_field(9, &inner, &mut cfg);
+        }
+        "RemoteRepairShield" => {
+            let mut inner = Vec::new();
+            encode_bytes_field(4, &[], &mut inner);
+            encode_bytes_field(10, &inner, &mut cfg);
+        }
+        "ScanSignatures" => {
+            let mut inner = Vec::new();
+            encode_bytes_field(3, &[], &mut inner);
+            encode_bytes_field(12, &inner, &mut cfg);
+        }
+        "ManufactureItems" => {
+            let mut method = Vec::new();
+            if let Some(tid) = filter_id.filter(|&v| v > 0) {
+                put_seq_id(1, tid as u64, &mut method); // manufactured_type
+            }
+            let mut inner = Vec::new();
+            encode_bytes_field(3, &method, &mut inner);
+            encode_bytes_field(14, &inner, &mut cfg);
+        }
+        "SalvageWrecks" => {
+            let mut inner = Vec::new();
+            encode_bytes_field(1, &[], &mut inner);
+            encode_bytes_field(16, &inner, &mut cfg);
+        }
+        "EarnLoyaltyPoints" => {
+            let mut inner = Vec::new();
+            encode_bytes_field(1, &[], &mut inner);
+            encode_bytes_field(17, &inner, &mut cfg);
+        }
+        _ => {
+            // `manual` (`ManualContributionConfiguration {}`, field 1)
+            encode_bytes_field(1, &[], &mut cfg);
+        }
+    }
+    cfg
+}
+
+/// Snapshot of the goal attributes carried by `eve_public.goal.Attributes`.
+#[derive(Default)]
 pub struct GoalAttributesView<'a> {
     pub created_unix: u64,
     pub creator_id: u32,
@@ -70,29 +196,57 @@ pub struct GoalAttributesView<'a> {
     pub description: &'a str,
     pub desired: u64,
     pub current: u64,
+    /// Optional explicit `eve_public.goal.State`; `None` derives `ACTIVE` vs `COMPLETED`.
+    pub state: Option<u64>,
+    /// Pre-encoded `.eve_public.goal.ContributionConfiguration` wire bytes (defaults to `manual`).
+    pub contribution_config_pb: &'a [u8],
 }
 
-/// `eve_public.goal.api.CreatedNotice { id = 1, goal = 2 }`.
-pub fn goal_created(uuid: &[u8; 16], attrs: &GoalAttributesView<'_>) -> GoogleAny {
+/// Encodes `eve_public.goal.Attributes` wire bytes (shared by `CreatedNotice`, `GetResponse`,
+/// and `GetAllResponse`).
+pub fn encode_goal_attributes(attrs: &GoalAttributesView<'_>) -> Vec<u8> {
     let mut a = Vec::new();
-    put_timestamp(1, attrs.created_unix, &mut a);
+    put_timestamp(1, attrs.created_unix.max(1), &mut a);
     encode_string_field(2, attrs.name, &mut a); // user_input_name
     encode_string_field(3, attrs.description, &mut a); // user_input_description
-    put_seq_id(4, attrs.creator_id as u64, &mut a); // creator
+    if attrs.creator_id > 0 {
+        put_seq_id(4, attrs.creator_id as u64, &mut a); // creator
+    }
     let mut progress = Vec::new();
     encode_varint_field(1, attrs.desired, &mut progress);
     encode_varint_field(2, attrs.current, &mut progress);
     encode_bytes_field(5, &progress, &mut a);
-    let state = if attrs.current >= attrs.desired { GOAL_STATE_COMPLETED } else { GOAL_STATE_ACTIVE };
+    let state = attrs.state.unwrap_or_else(|| {
+        if attrs.current >= attrs.desired {
+            GOAL_STATE_COMPLETED
+        } else {
+            GOAL_STATE_ACTIVE
+        }
+    });
     encode_varint_field(6, state, &mut a);
+    if !attrs.contribution_config_pb.is_empty() {
+        encode_bytes_field(7, attrs.contribution_config_pb, &mut a);
+    } else {
+        let fallback = encode_goal_contribution_config("Manual", None);
+        encode_bytes_field(7, &fallback, &mut a);
+    }
     if let Some(corp) = attrs.corp_id.filter(|c| *c > 0) {
         // Attributes.organization = Organization { corporation = 1 }
         let mut org = Vec::new();
         put_seq_id(1, corp as u64, &mut org);
         encode_bytes_field(9, &org, &mut a);
     }
-    encode_varint_field(10, 1, &mut a); // finish_time.not_finished = true
+    if state == GOAL_STATE_ACTIVE {
+        encode_varint_field(10, 1, &mut a); // finish_time.not_finished = true
+    } else {
+        put_timestamp(11, attrs.created_unix.max(1), &mut a); // finish_time.finished
+    }
+    a
+}
 
+/// `eve_public.goal.api.CreatedNotice { id = 1, goal = 2 }`.
+pub fn goal_created(uuid: &[u8; 16], attrs: &GoalAttributesView<'_>) -> GoogleAny {
+    let a = encode_goal_attributes(attrs);
     let mut out = Vec::new();
     put_goal_id(1, uuid, &mut out);
     encode_bytes_field(2, &a, &mut out);

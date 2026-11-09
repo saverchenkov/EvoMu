@@ -37,7 +37,16 @@ impl Ballpark {
         if uncloaked {
             self.finish_gate_decloak(source_id);
         }
-        self.target_locks.entry(source_id).or_default().push(lock);
+        // Deduplicate by `target_id` so re-locking an in-progress or already-locked target never
+        // allocates duplicate target slots on the server (`#749`).
+        let locks = self.target_locks.entry(source_id).or_default();
+        if let Some(existing) = locks.iter_mut().find(|l| l.target_id == lock.target_id) {
+            if lock.locked || !existing.locked {
+                *existing = lock;
+            }
+        } else {
+            locks.push(lock);
+        }
         true
     }
 

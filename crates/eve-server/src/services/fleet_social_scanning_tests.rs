@@ -80,8 +80,42 @@ async fn signal_tracker_signatures_and_request_scans() {
         lifetime_seconds: 3600,
         cleared: false,
     };
-    let akv = build_signal_tracker_anomaly_kv(&anom_rec);
+    let akv = build_signal_tracker_anomaly_kv(&ctx.sde, &anom_rec);
     assert_eq!(akv.dict_get("instanceID").and_then(|v| v.as_str()), Some("ANOM-1"));
+    assert!(
+        akv.dict_get("dungeonID").and_then(|v| v.as_i64()).is_some_and(|id| id > 0),
+        "anomaly KeyVal must carry positive integer dungeonID (#747)"
+    );
+    assert!(
+        akv.dict_get("archetypeID").and_then(|v| v.as_i64()).is_some_and(|id| id > 0),
+        "anomaly KeyVal must carry positive integer archetypeID (#747)"
+    );
+    assert!(
+        akv.dict_get("factionID").and_then(|v| v.as_i64()).is_some_and(|id| id > 0),
+        "anomaly KeyVal must carry positive integer factionID (#747)"
+    );
+    assert!(
+        akv.dict_get("scanStrengthAttribute").and_then(|v| v.as_i64()).is_some_and(|id| id > 0),
+        "anomaly KeyVal must carry positive integer scanStrengthAttribute (#747)"
+    );
+
+    let ore_anom = CosmicAnomalyRecord {
+        anomaly_id: "DNG-10778-42".into(),
+        solar_system_id: sys_id,
+        anomaly_type: "OreAnomaly".into(),
+        name: "Veldspar Deposit".into(),
+        signal_strength: 1.0,
+        position: [10.0, 20.0, 30.0],
+        ore_types: vec![1230],
+        remaining_volume: 1000.0,
+        created_unix: 1000,
+        lifetime_seconds: 3600,
+        cleared: false,
+    };
+    let ore_kv = build_signal_tracker_anomaly_kv(&ctx.sde, &ore_anom);
+    assert_eq!(ore_kv.dict_get("dungeonID").and_then(|v| v.as_i64()), Some(10_778));
+    assert_eq!(ore_kv.dict_get("archetypeID").and_then(|v| v.as_i64()), Some(27));
+    assert_eq!(ore_kv.dict_get("scanStrengthAttribute").and_then(|v| v.as_i64()), Some(211));
 
     let st_rec = UpwellStructureRecord {
         structure_id: 1_000_000_000_555,

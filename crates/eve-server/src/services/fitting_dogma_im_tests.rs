@@ -621,3 +621,204 @@ async fn get_all_info_includes_offline_missing_skill_modules_and_zeros_base_load
     assert!(eval_cpu_load > 0.0, "Evaluated ship CPU_LOAD should be > 0");
     assert!(eval_pg_load > 0.0, "Evaluated ship POWER_LOAD should be > 0");
 }
+
+#[tokio::test]
+async fn add_target_wire_flags_reconcile_relocks_prune_stale_slots_and_enforce_cap() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 96_310_001i64;
+    let sys_id = 30_000_142u32;
+    let ship_id = 96_310_100i64;
+    let ast1_id = 96_310_201i64;
+    let ast2_id = 96_310_202i64;
+    let rifter_id = 96_310_203i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.accounts.insert(
+            "user_96310".into(),
+            AccountRecord {
+                user_id: 96_310,
+                username: "user_96310".into(),
+                password_token: String::new(),
+                role: 0,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = 96_310;
+        ch.name = "VentureLockPilot".into();
+        ch.corporation_id = 1_000_009;
+        ch.station_id = None;
+        ch.solar_system_id = sys_id;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        // Clear Target Management skills so pilot cap is `2 + 0 = 2` (`min(hull_max=5, char_max=2) == 2`)
+        snap.skills.insert(char_id, HashMap::new());
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 32_880, // Venture (hull maxLockedTargets = 5, skill-capped to 2)
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    for (bid, tid, pos, owner) in [
+        (ship_id, 32_880u32, DVec3::ZERO, char_id),
+        (ast1_id, 1230u32, DVec3::new(2_000.0, 0.0, 0.0), 1),
+        (ast2_id, 1230u32, DVec3::new(2_500.0, 0.0, 0.0), 1),
+        (rifter_id, 587u32, DVec3::new(3_000.0, 0.0, 0.0), 1),
+    ] {
+        let _ = sys
+            .spawn_ball_with_meta(
+                Ball {
+                    id: bid,
+                    type_id: tid,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState::default(),
+                SlimItemMeta {
+                    owner_id: owner,
+                    char_id: (owner == char_id).then_some(char_id),
+                    ..Default::default()
+                },
+            )
+            .await;
+    }
+
+    let mut session = SessionState::new(96_310);
+    session.user_id = Some(96_310);
+    session.character_id = Some(char_id);
+    session.corporation_id = Some(1_000_009);
+    session.solar_system_id = Some(sys_id);
+    session.ship_id = Some(ship_id);
+    let kw = HashMap::new();
+
+    // 1. Live wire AddTarget starts async lock -> returns `(1, [])` (`flag = 1`), NOT `(0, [id])`
+    let wire_lock1 = ctx
+        .dispatch_rpc(
+            &mut session,
+            "dogmaIM",
+            None,
+            "AddTarget",
+            &[PyRep::Integer(ast1_id)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("AddTarget ast1");
+    assert_eq!(
+        wire_lock1,
+        PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())]),
+        "Async target lock start must return flag=1 and empty targetList"
+    );
+
+    // 2. CancelAddTarget releases the pending slot cleanly
+    ctx.dispatch_rpc(
+        &mut session,
+        "dogmaIM",
+        None,
+        "CancelAddTarget",
+        &[PyRep::Integer(ast1_id)],
+        &kw,
+        Some("machoNet:26000"),
+    )
+    .await
+    .expect("CancelAddTarget ast1");
+    assert!(sys.get_target_locks(ship_id).await.unwrap().is_empty());
+
+    // 3. Lock ast1 and ast2 to fill Venture's 2 target slots, step until locked
+    for tid in [ast1_id, ast2_id] {
+        ctx.dispatch_rpc(
+            &mut session,
+            "dogmaIM",
+            None,
+            "AddTarget",
+            &[PyRep::Integer(tid)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("AddTarget slot");
+    }
+    sys.step_manual(15.0).await.expect("step_manual locks");
+    assert_eq!(sys.get_target_locks(ship_id).await.unwrap().len(), 2);
+
+    // 4. Re-locking already-locked ast1 at full capacity returns `(0, [ast1, ast2])` without failing or leaking slots
+    let relock_ast1 = ctx
+        .dispatch_rpc(
+            &mut session,
+            "dogmaIM",
+            None,
+            "AddTarget",
+            &[PyRep::Integer(ast1_id)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("Re-locking already-locked target must succeed instead of Max locked targets exceeded");
+    assert_eq!(
+        relock_ast1,
+        PyRep::Tuple(vec![
+            PyRep::Integer(0),
+            PyRep::List(vec![PyRep::Integer(ast1_id), PyRep::Integer(ast2_id)]),
+        ])
+    );
+    assert_eq!(sys.get_target_locks(ship_id).await.unwrap().len(), 2);
+
+    // 5. Negative check: locking a 3rd distinct valid target while 2 valid targets are locked fails cleanly
+    let cap_err = ctx
+        .dispatch_rpc(
+            &mut session,
+            "dogmaIM",
+            None,
+            "AddTarget",
+            &[PyRep::Integer(rifter_id)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect_err("3rd distinct target on 2-slot Venture must fail");
+    assert_eq!(cap_err.code, "TargetingFailed");
+    assert!(cap_err.message.contains("Max locked targets exceeded"));
+
+    // 6. When ast2 moves beyond maxTargetRange before `step()` runs, stale slot is pruned so rifter_id locks cleanly
+    let _ = sys
+        .set_ball_position(ast2_id, DVec3::new(500_000.0, 0.0, 0.0))
+        .await;
+    let lock_rifter = ctx
+        .dispatch_rpc(
+            &mut session,
+            "dogmaIM",
+            None,
+            "AddTarget",
+            &[PyRep::Integer(rifter_id)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("Stale out-of-range ast2 slot must be pruned so rifter_id locks");
+    assert_eq!(
+        lock_rifter,
+        PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())])
+    );
+    assert_eq!(sys.get_target_locks(ship_id).await.unwrap().len(), 2);
+}

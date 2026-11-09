@@ -729,3 +729,109 @@ async fn test_live_plan_e5_agent_missions_end_to_end() {
     let courier_comp = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(dist_oid), "DoAction", &[PyRep::Integer(6)], &kw, None).await.expect("Complete courier mission at destination");
     assert_eq!(courier_comp.dict_get("state").and_then(|v| v.as_str()), Some("Completed"));
 }
+
+#[tokio::test]
+async fn test_issue_766_agent_dialogue_v24_machonet_wire_contract() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let char_id = 90_000_001_i64;
+    let mut sess = create_auth_session(&ctx, 2766, char_id).await;
+    let kw = HashMap::new();
+
+    let agents_rep = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", None, "GetAgents", &[PyRep::Integer(1), PyRep::Integer(24)], &kw, None)
+        .await
+        .expect("GetAgents");
+    let PyRep::Rowset { rows, .. } = agents_rep else {
+        panic!("Expected Rowset");
+    };
+    let row = rows
+        .iter()
+        .find(|r| r[5].as_i64() == Some(30_000_142) && r[6].as_i64().is_some())
+        .unwrap_or(&rows[0]);
+    let agent_id = row[0].as_i64().unwrap();
+    let corp_id = row[3].as_i64().unwrap();
+    let sys_id = row[5].as_i64().unwrap() as u32;
+    let station_id = row[6].as_i64();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = station_id;
+            ch.standings.insert(corp_id, 0.0);
+        }
+    });
+    sess.solar_system_id = Some(sys_id);
+    sess.station_id = station_id;
+
+    let agent_oid = bind_service_oid(&ctx, &mut sess, "agentMgr", PyRep::Integer(agent_id)).await;
+
+    // Before any mission exists, V24 machoNet calls to briefing/objective return None so
+    // InteractWithAgent still reaches ConstructBrowsers() and creates self.briefingBrowser.
+    let no_brief = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "GetMissionBriefingInfo", &[], &kw, Some("machoNet:26000"))
+        .await
+        .expect("GetMissionBriefingInfo when no mission active");
+    assert_eq!(no_brief, PyRep::None);
+
+    let no_obj = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "GetMissionObjectiveInfo", &[], &kw, Some("machoNet:26000"))
+        .await
+        .expect("GetMissionObjectiveInfo when no mission active");
+    assert_eq!(no_obj, PyRep::None);
+
+    // GetAgentLocationWrap returns a Dict with solarsystemID, locationID, and station typeID.
+    let loc_wrap = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "GetAgentLocationWrap", &[], &kw, Some("machoNet:26000"))
+        .await
+        .expect("GetAgentLocationWrap");
+    assert!(matches!(loc_wrap, PyRep::Dict(_)));
+    assert_eq!(loc_wrap.dict_get("solarsystemID"), Some(&PyRep::Integer(sys_id as i64)));
+    assert!(loc_wrap.dict_get("locationID").and_then(|v| v.as_i64()).is_some());
+    assert!(loc_wrap.dict_get("typeID").and_then(|v| v.as_i64()).is_some_and(|t| t > 0));
+
+    // DoAction over machoNet:26000 returns ((agentSaysMsg, availableActions), lastActionInfo).
+    let do_action = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "DoAction", &[PyRep::None], &kw, Some("machoNet:26000"))
+        .await
+        .expect("DoAction(None)");
+    let PyRep::Tuple(outer) = do_action else {
+        panic!("DoAction on machoNet:26000 must return 2-tuple");
+    };
+    let PyRep::Tuple(inner) = &outer[0] else {
+        panic!("first item must be (agentSaysMsg, availableActions)");
+    };
+    assert!(matches!(inner[0], PyRep::Tuple(ref m) if m.len() == 2));
+    assert!(matches!(inner[1], PyRep::List(ref actions) if !actions.is_empty()));
+    assert!(matches!(outer[1], PyRep::Dict(_)));
+    assert_eq!(outer[1].dict_get("missionCompleted"), Some(&PyRep::Bool(false)));
+    assert_eq!(outer[1].dict_get("missionDeclined"), Some(&PyRep::Bool(false)));
+    assert_eq!(outer[1].dict_get("missionQuit"), Some(&PyRep::Bool(false)));
+    assert_eq!(outer[1].dict_get("missionCantReplay"), Some(&PyRep::None));
+
+    // Briefing & Objective info after offer return V24 Dict contracts.
+    let brief = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "GetMissionBriefingInfo", &[], &kw, Some("machoNet:26000"))
+        .await
+        .expect("GetMissionBriefingInfo");
+    assert!(matches!(brief, PyRep::Dict(_)));
+    assert!(brief.dict_get("Mission Title ID").is_some());
+    assert!(brief.dict_get("ContentID").is_some());
+
+    let obj = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "GetMissionObjectiveInfo", &[], &kw, Some("machoNet:26000"))
+        .await
+        .expect("GetMissionObjectiveInfo");
+    assert!(matches!(obj, PyRep::Dict(_)));
+    assert_eq!(obj.dict_get("completionStatus"), Some(&PyRep::Integer(0)));
+    assert!(obj.dict_get("normalRewards").is_some());
+
+    // Accept returns ((agentSaysMsg, [(6, 6), (11, 11)]), lastActionInfo).
+    let accepted = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "DoAction", &[PyRep::Integer(3)], &kw, Some("machoNet:26000"))
+        .await
+        .expect("DoAction(Accept)");
+    let PyRep::Tuple(acc_outer) = accepted else { panic!("tuple") };
+    let PyRep::Tuple(acc_inner) = &acc_outer[0] else { panic!("tuple") };
+    assert!(matches!(acc_inner[1], PyRep::List(ref a) if a.len() == 2));
+}

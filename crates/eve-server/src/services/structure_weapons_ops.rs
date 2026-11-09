@@ -487,9 +487,14 @@ pub async fn handle_structure_add_target(
     }
     let existing_locks = sys_handle.get_target_locks(structure_id).await.unwrap_or_default();
     if let Some(existing) = existing_locks.iter().find(|l| l.target_id == target_id) {
+        let target_ids = if existing.locked {
+            vec![PyRep::Integer(target_id)]
+        } else {
+            Vec::new()
+        };
         return Ok(PyRep::Tuple(vec![
-            PyRep::Integer(i64::from(existing.locked)),
-            PyRep::List(vec![PyRep::Integer(target_id)]),
+            PyRep::Integer(i64::from(!existing.locked)),
+            PyRep::List(target_ids),
         ]));
     }
     if existing_locks.len() >= max_locks {
@@ -550,7 +555,7 @@ pub async fn handle_structure_add_target(
             vec![PyRep::Integer(structure_id), PyRep::String("targetedBy".into())],
         );
     }
-    Ok(PyRep::Tuple(vec![PyRep::Integer(0), PyRep::List(vec![PyRep::Integer(target_id)])]))
+    Ok(PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())]))
 }
 
 fn consume_structure_charge_in_snap(

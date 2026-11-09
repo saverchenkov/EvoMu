@@ -810,7 +810,31 @@ async fn batch10_expedition_signatures_signal_tracker_and_probes() {
     assert_eq!(st_args.len(), 3);
     assert_eq!(st_args[0], PyRep::Integer(i64::from(SYS_JITA)));
     match &st_args[1] {
-        PyRep::Tuple(parts) => assert_eq!(parts.len(), 4),
+        PyRep::Tuple(parts) => {
+            assert_eq!(parts.len(), 4);
+            let PyRep::Dict(anoms) = &parts[0] else {
+                panic!("expected anomaly Dict in OnSignalTrackerFullState, got {:?}", parts[0]);
+            };
+            assert!(!anoms.is_empty(), "Jita signal tracker fullState must include anomalies");
+            for (_, anom_kv) in anoms {
+                assert!(
+                    anom_kv.dict_get("dungeonID").and_then(|v| v.as_i64()).is_some_and(|id| id > 0),
+                    "OnSignalTrackerFullState anomaly must have positive integer dungeonID (#747)"
+                );
+                assert!(
+                    anom_kv.dict_get("archetypeID").and_then(|v| v.as_i64()).is_some_and(|id| id > 0),
+                    "OnSignalTrackerFullState anomaly must have positive integer archetypeID (#747)"
+                );
+                assert!(
+                    anom_kv.dict_get("factionID").and_then(|v| v.as_i64()).is_some_and(|id| id > 0),
+                    "OnSignalTrackerFullState anomaly must have positive integer factionID (#747)"
+                );
+                assert!(
+                    anom_kv.dict_get("scanStrengthAttribute").and_then(|v| v.as_i64()).is_some_and(|id| id > 0),
+                    "OnSignalTrackerFullState anomaly must have positive integer scanStrengthAttribute (#747)"
+                );
+            }
+        }
         other => panic!("expected 4-tuple fullState, got {other:?}"),
     }
     assert_eq!(st_args[2], PyRep::Bool(true));

@@ -593,7 +593,7 @@ fn get_corp_allowed(ctx: &ServerContext, session: &SessionState, args: &[PyRep])
     let allowed = ctx.db.with_snapshot(|s| load_store(s).corp_allowed.get(&corp_id).cloned());
     Ok(match allowed {
         Some(list) => PyRep::List(list.into_iter().map(PyRep::Integer).collect()),
-        None => PyRep::None,
+        None => PyRep::List(Vec::new()),
     })
 }
 

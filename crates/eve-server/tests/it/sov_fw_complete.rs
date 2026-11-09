@@ -192,7 +192,7 @@ async fn fw_corp_allowed_enlistment_factions_gate_member_enlistment() {
 
     // Nothing configured yet.
     let none = call(&ctx, &mut member, "GetCorpAllowedEnlistmentFactions", &[PyRep::Integer(corp_id)]).await.unwrap();
-    assert_eq!(none, PyRep::None);
+    assert_eq!(none, PyRep::List(Vec::new()));
 
     // A plain member (no director role, not CEO) may not change the setting.
     let denied = call(&ctx, &mut member, "SetMyCorpAllowedEnlistmentFactions", &[PyRep::List(vec![PyRep::Integer(CALDARI)])])
@@ -1010,11 +1010,11 @@ async fn fw_warzones_victory_points_and_advantage_scaling() {
         .await
         .expect("GetAllWarzones");
     match warzones {
-        PyRep::List(list) => {
-            assert!(list.len() >= 2);
-            assert_eq!(list[0].dict_get("warzoneID").and_then(|v| v.as_i64()), Some(1));
+        PyRep::Dict(entries) => {
+            assert!(entries.len() >= 2);
+            assert!(entries.iter().any(|(k, _)| *k == PyRep::Integer(1)));
         }
-        _other => panic!("expected warzone list"),
+        _other => panic!("expected warzone dict"),
     }
 
     let (vp, contested) = fw_services::add_victory_points(&ctx, sys_id, 1500);

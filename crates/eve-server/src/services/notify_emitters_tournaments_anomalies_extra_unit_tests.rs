@@ -185,6 +185,22 @@ fn tournament_dedup_signal_tracker_filtering_and_dungeon_trigger_queue_cap_kill_
         if let PyRep::Dict(anoms) = &parts[0] {
             assert_eq!(anoms.len(), 1);
             assert_eq!(anoms[0].0, PyRep::String("ETERNAL-1".into()));
+            assert!(
+                anoms[0].1.dict_get("dungeonID").and_then(|v| v.as_i64()).is_some_and(|id| id > 0),
+                "OnSignalTrackerFullState anomaly must include positive integer dungeonID (#747)"
+            );
+            assert!(
+                anoms[0].1.dict_get("archetypeID").and_then(|v| v.as_i64()).is_some_and(|id| id > 0),
+                "OnSignalTrackerFullState anomaly must include positive integer archetypeID (#747)"
+            );
+            assert!(
+                anoms[0].1.dict_get("factionID").and_then(|v| v.as_i64()).is_some_and(|id| id > 0),
+                "OnSignalTrackerFullState anomaly must include positive integer factionID (#747)"
+            );
+            assert!(
+                anoms[0].1.dict_get("scanStrengthAttribute").and_then(|v| v.as_i64()).is_some_and(|id| id > 0),
+                "OnSignalTrackerFullState anomaly must include positive integer scanStrengthAttribute (#747)"
+            );
         } else {
             panic!("expected Dict for anoms");
         }

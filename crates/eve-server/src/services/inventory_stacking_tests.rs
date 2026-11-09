@@ -875,3 +875,141 @@ async fn item_change_notifications_omit_ix_quantity_and_autofit_syncs_singleton_
         "quantity mutations must emit ixStackSize (9)"
     );
 }
+
+#[tokio::test]
+async fn multi_add_and_add_redirect_station_source_arg_to_active_ship_for_ship_flags() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001;
+    let corp_id = 1_000_009;
+    let station_id = 60_003_760;
+    let ship_id = 1_000_691_001;
+    let mod_stack_id = 1_000_691_002;
+    let cargo_ore_id = 1_000_691_003;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(station_id);
+            ch.active_ship_id = ship_id;
+        }
+        snap.skills.entry(char_id).or_default().insert(
+            3386,
+            eve_db::TrainedSkillRecord {
+                type_id: 3386, // Mining
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 32880, // Venture (2 hiSlots)
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mod_stack_id,
+            InventoryItemRecord {
+                item_id: mod_stack_id,
+                type_id: 482, // Miner I
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 3,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            cargo_ore_id,
+            InventoryItemRecord {
+                item_id: cargo_ore_id,
+                type_id: 1230, // Veldspar
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 10,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+
+    let kw = HashMap::new();
+    let mut sess = make_session(char_id, corp_id, Some(station_id), None, Some(ship_id));
+    let hangar_bound = make_bound(station_id, char_id);
+
+    // 1. Station-bound MultiAdd with flagAutoFit (0) & args[1]=station_id redirects to active ship
+    let fit_res = handle_multi_add(
+        &ctx,
+        &mut sess,
+        Some(&hangar_bound),
+        &[
+            PyRep::List(vec![PyRep::Integer(mod_stack_id)]),
+            PyRep::Integer(station_id),
+            PyRep::Integer(0),
+        ],
+        &kw,
+    )
+    .await
+    .expect("station-bound MultiAdd flagAutoFit must auto-fit onto active ship");
+    let PyRep::List(fitted_items) = fit_res.dict_get("items").unwrap() else {
+        panic!("expected items list");
+    };
+    let fitted1_id = fitted_items[0].as_i64().unwrap();
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&mod_stack_id].quantity, 2);
+        assert_eq!(snap.items[&fitted1_id].location_id, ship_id);
+        assert_eq!(snap.items[&fitted1_id].flag, InventoryFlag::HiSlot0);
+        assert!(snap.items[&fitted1_id].singleton);
+    });
+
+    // 2. Unbound Add with HiSlot1 (28) & args[1]=station_id redirects to active ship
+    let add_fit = crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut sess,
+        None,
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(mod_stack_id),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::HiSlot1 as i64),
+            PyRep::Integer(1),
+        ],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("unbound Add HiSlot1 with args[1]=station_id fits onto active ship");
+    let fitted2_id = add_fit.dict_get("itemID").and_then(PyRep::as_i64).unwrap();
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&mod_stack_id].quantity, 1);
+        assert_eq!(snap.items[&fitted2_id].location_id, ship_id);
+        assert_eq!(snap.items[&fitted2_id].flag, InventoryFlag::HiSlot1);
+    });
+
+    // 3. Station-bound MultiAdd with Cargo flag (5) & args[1]=station_id moves into active ship cargo
+    handle_multi_add(
+        &ctx,
+        &mut sess,
+        Some(&hangar_bound),
+        &[
+            PyRep::List(vec![PyRep::Integer(cargo_ore_id)]),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("station-bound MultiAdd Cargo moves item to active ship");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&cargo_ore_id].location_id, ship_id);
+        assert_eq!(snap.items[&cargo_ore_id].flag, InventoryFlag::Cargo);
+    });
+}

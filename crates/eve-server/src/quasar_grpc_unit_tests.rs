@@ -277,7 +277,7 @@ fn normalize_macho_rpc_reply_covers_dogma_map_planet_raffle_skill_war_and_store(
     .unwrap();
     assert_eq!(
         add_tgt,
-        PyRep::Tuple(vec![PyRep::Integer(0), PyRep::List(vec![PyRep::Integer(555)])])
+        PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())])
     );
 
     assert!(normalize_macho_rpc_reply("jumpCloneSvc", "GetCloneState", Ok(PyRep::None)).is_ok());

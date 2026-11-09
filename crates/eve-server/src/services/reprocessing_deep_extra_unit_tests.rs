@@ -441,7 +441,7 @@ async fn reprocessing_svc_reprocess_and_get_quotes_error_and_success_paths() {
         );
     }
 
-    // 4. GetQuotes: 0 args (KeyVal), 1 list arg (List), and 2 args (Tuple)
+    // 4. GetQuotes: 0 args (KeyVal), 1 list arg (V24 3-tuple), and 2 args (Tuple)
     let q_empty = handle(&ctx, &mut sess, "reprocessingSvc", "GetQuotes", &[], None)
         .await
         .unwrap()
@@ -459,7 +459,11 @@ async fn reprocessing_svc_reprocess_and_get_quotes_error_and_success_paths() {
     .await
     .unwrap()
     .unwrap();
-    assert!(matches!(q_list, PyRep::List(ref l) if l.len() == 1));
+    let PyRep::Tuple(ref ql_parts) = q_list else {
+        panic!("expected 3-tuple from 1-arg GetQuotes, got {q_list:?}");
+    };
+    assert_eq!(ql_parts.len(), 3);
+    assert!(matches!(ql_parts[2], PyRep::Dict(ref d) if d.len() == 1));
 
     let q_tuple = handle(
         &ctx,

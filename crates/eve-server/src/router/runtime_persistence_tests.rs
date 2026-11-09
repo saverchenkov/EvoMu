@@ -337,10 +337,9 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
         // 1) ServerContext persisted state restored
         let probes = ctx2.active_scanner_probes.read().unwrap();
         assert_eq!(probes.get(&probe_id).map(|p| p.range_step), Some(4));
-        assert_eq!(
-            probes.get(&probe_id).and_then(|p| p.warp_end_ft),
-            Some(133_500_000_000_000_000)
-        );
+        assert_eq!(probes.get(&probe_id).map(|p| p.probe_type_id), Some(30_013));
+        assert_eq!(probes.get(&probe_id).map(|p| p.state), Some(0));
+        assert_eq!(probes.get(&probe_id).and_then(|p| p.warp_end_ft), None);
         assert!(ctx2
             .scanned_signatures
             .read()
@@ -668,4 +667,61 @@ fn rollback_reverts_dirty_runtime_state_across_all_caches_and_rehydrates_from_sq
         "dirty unpersisted probe must be wiped on rollback rehydration"
     );
     assert_eq!(probes.get(&700_001).map(|p| p.range_step), Some(2));
+}
+
+#[test]
+fn many_scanner_probes_persist_without_blowing_service_state_blob_cap() {
+    let dir = TempTestDir::new("probes_blob_cap");
+    let db_path = dir.path().join("probes_cap.sqlite");
+    let sde = shared_sde();
+
+    {
+        let db = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open sqlite"));
+        let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db));
+        for i in 0..12i64 {
+            let pid = 750_000_000 + i;
+            ctx.active_scanner_probes.write().unwrap().insert(
+                pid,
+                ActiveScannerProbe {
+                    probe_id: pid,
+                    probe_type_id: 30_013,
+                    owner_char_id: 90_000_777,
+                    ship_id: 100_000_777,
+                    launcher_module_id: 100_000_888,
+                    solar_system_id: 30_000_142,
+                    position: [1_000.0 * i as f64, 2_000.0, 3_000.0],
+                    destination: [1_500.0 * i as f64, 2_000.0, 3_000.0],
+                    range_step: 4,
+                    scan_range_m: 16.0 * 149_597_870_700.0,
+                    base_sensor_strength: 40.0,
+                    max_flight_time_s: 3_600.0,
+                    launched_at_unix: 1_700_000_000,
+                    state: 1,
+                    warp_end_ft: Some(133_500_000_000_000_000),
+                },
+            );
+        }
+        crate::services::space_probe_scanning::sync_scanner_probes_to_db(&ctx);
+        // Must not leave an oversized `server_runtime_state` blob in SQLite.
+        let blob_len = db.with_snapshot(|s| {
+            s.service_state_blobs
+                .get("server_runtime_state")
+                .map(|v| v.len())
+                .unwrap_or(0)
+        });
+        assert!(
+            blob_len <= eve_db::service_domains::MAX_SERVICE_STATE_BLOB_VALUE_BYTES,
+            "server_runtime_state blob must stay within MAX_SERVICE_STATE_BLOB_VALUE_BYTES, got {blob_len}"
+        );
+    }
+
+    let db2 = Arc::new(WorldRepository::open_sqlite(&db_path).expect("reopen sqlite"));
+    let ctx2 = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db2));
+    let probes = ctx2.active_scanner_probes.read().unwrap();
+    assert_eq!(probes.len(), 12);
+    for i in 0..12i64 {
+        let p = &probes[&(750_000_000 + i)];
+        assert_eq!(p.state, 0);
+        assert_eq!(p.warp_end_ft, None);
+    }
 }

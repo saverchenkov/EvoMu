@@ -358,6 +358,26 @@ async fn activate_scan_probe_launcher_and_scan_mgr_rpcs_end_to_end() {
                 "anomaly KeyVal missing required V24 field `{req_key}`"
             );
         }
+        assert!(
+            val.dict_get("dungeonID").and_then(|v| v.as_i64()).is_some_and(|id| id > 0),
+            "anomaly KeyVal dungeonID must be a positive integer for V24 GetDungeon (#747)"
+        );
+        assert!(
+            val.dict_get("archetypeID").and_then(|v| v.as_i64()).is_some_and(|id| id > 0),
+            "anomaly KeyVal archetypeID must be a positive integer (#747)"
+        );
+        assert!(
+            val.dict_get("factionID").and_then(|v| v.as_i64()).is_some_and(|id| id > 0),
+            "anomaly KeyVal factionID must be a positive integer (#747)"
+        );
+        assert!(
+            val.dict_get("difficulty").and_then(|v| v.as_i64()).is_some_and(|d| d >= 1),
+            "anomaly KeyVal difficulty must be >= 1 (#747)"
+        );
+        assert!(
+            val.dict_get("scanStrengthAttribute").and_then(|v| v.as_i64()).is_some_and(|id| id > 0),
+            "anomaly KeyVal scanStrengthAttribute must be a positive integer (#747)"
+        );
     }
     let PyRep::Dict(sig_dict) = &state_parts[1] else {
         panic!("expected signature dict");

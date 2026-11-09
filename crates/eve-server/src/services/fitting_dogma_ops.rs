@@ -164,8 +164,46 @@ pub(crate) async fn handle_dogma_ops(
                 })
                 .unwrap_or(7);
 
-            let current_locks = sys.get_target_locks(source_id).await.unwrap_or_default();
-            if current_locks.len() >= max_locked {
+            let raw_locks = sys.get_target_locks(source_id).await.unwrap_or_default();
+            let mut current_locks = Vec::with_capacity(raw_locks.len());
+            for existing_lock in raw_locks {
+                let Some((_, tb)) = sys
+                    .get_ball_snapshot(existing_lock.target_id)
+                    .await
+                    .unwrap_or(None)
+                else {
+                    let _ = sys.remove_target_lock(source_id, existing_lock.target_id).await;
+                    continue;
+                };
+                let tb_untarg = sys
+                    .get_combat_state(existing_lock.target_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|c| c.is_cloaked || c.is_warp_exit_invulnerable());
+                let tb_warping = matches!(tb.mode, eve_destiny::MovementMode::Warp { .. });
+                let tb_out_of_range = existing_lock
+                    .max_range_m
+                    .is_some_and(|max_r| (ship_ball.position - tb.position).length() > max_r);
+                if tb_untarg || tb_warping || tb_out_of_range {
+                    let _ = sys.remove_target_lock(source_id, existing_lock.target_id).await;
+                    continue;
+                }
+                current_locks.push(existing_lock);
+            }
+            if let Some(existing) = current_locks.iter().find(|l| l.target_id == target_id) {
+                if existing.locked {
+                    let locked_ids: Vec<PyRep> = current_locks
+                        .iter()
+                        .filter(|l| l.locked)
+                        .map(|l| PyRep::Integer(l.target_id))
+                        .collect();
+                    return Some(Ok(PyRep::Tuple(vec![
+                        PyRep::Integer(0),
+                        PyRep::List(locked_ids),
+                    ])));
+                }
+            } else if current_locks.len() >= max_locked {
                 return Some(Err(BridgeRpcError {
                     code: "TargetingFailed".into(),
                     message: format!("Max locked targets exceeded ({max_locked})"),
@@ -229,8 +267,8 @@ pub(crate) async fn handle_dogma_ops(
             }
 
             Some(Ok(PyRep::Tuple(vec![
-                PyRep::Bool(true),
-                PyRep::Real(lock_time_ms),
+                PyRep::Integer(1),
+                PyRep::List(Vec::new()),
             ])))
         }
 
@@ -252,16 +290,22 @@ pub(crate) async fn handle_dogma_ops(
                     message: "CancelAddTarget requires targetID".into(),
                 }));
             };
+            let mut removed = false;
             if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
-                let _ = sys.remove_target_lock(ship_id, target_id).await;
+                removed = sys.remove_target_lock(ship_id, target_id).await.unwrap_or(false);
             }
+            crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, Some(target_id));
+            crate::services::combat_weapons_spool::clear_entropic_spools_on_target_unlock(ctx, ship_id, char_id, Some(target_id));
             ctx.notify(
                 NotificationTarget::Character(char_id),
                 "OnTarget",
                 "charid",
                 vec![PyRep::Integer(target_id), PyRep::String("lost".into())],
             );
+            if removed {
+                let _ = ctx.notify_target_events(char_id, &[("lost", target_id, "")]);
+            }
             Some(Ok(PyRep::None))
         }
 

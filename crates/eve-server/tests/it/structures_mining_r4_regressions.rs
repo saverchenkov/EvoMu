@@ -426,7 +426,7 @@ async fn test_r4_167_reprocess_and_compress_flag_ownership_and_acl() {
         .unwrap_err();
     assert_eq!(rep_err.code, "OwnershipOrLocationViolation");
 
-    // GetQuotes filters out unowned items (returns empty list instead of leaking quote)
+    // GetQuotes filters out unowned items (returns empty rawQuotesDict instead of leaking quote)
     let quote_res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -439,7 +439,10 @@ async fn test_r4_167_reprocess_and_compress_flag_ownership_and_acl() {
         )
         .await
         .expect("GetQuotes");
-    assert_eq!(quote_res, PyRep::List(vec![]));
+    let PyRep::Tuple(q_parts) = quote_res else {
+        panic!("expected 3-tuple from 1-arg GetQuotes");
+    };
+    assert_eq!(q_parts[2], PyRep::Dict(vec![]));
 }
 
 #[tokio::test]

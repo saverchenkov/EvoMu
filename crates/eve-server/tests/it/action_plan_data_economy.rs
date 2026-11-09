@@ -1004,16 +1004,27 @@ async fn test_plan_c6_reprocessing_yield_tax_and_materials() {
         .await
         .expect("reprocessingSvc.GetQuotes");
 
-    let quote_entry = match &quote_res {
-        PyRep::List(l) => l.first().expect("quote entry"),
-        _ => &quote_res,
+    let PyRep::Tuple(quote_parts) = &quote_res else {
+        panic!("expected 3-tuple from GetQuotes, got {quote_res:?}");
     };
-    let quote_yield = get_dict_val(quote_entry, "yieldRate")
-        .and_then(|v| match v { PyRep::Real(r) => Some(*r), _ => None })
-        .expect("yieldRate");
-    let quote_tax = get_dict_val(quote_entry, "stationTaxRate")
-        .and_then(|v| match v { PyRep::Real(r) => Some(*r), _ => None })
-        .expect("stationTaxRate");
+    let quote_tax = quote_parts[0].as_f64().expect("stationTaxRate");
+    let PyRep::Dict(ref raw_quotes) = quote_parts[2] else {
+        panic!("expected rawQuotes dict");
+    };
+    let quote_entry = raw_quotes
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(veldspar_item_id))
+        .map(|(_, v)| v)
+        .expect("quote entry");
+    let qty_to_proc = get_dict_val(quote_entry, "quantityToProcess").and_then(|v| v.as_i64()).expect("quantityToProcess");
+    let recs = get_dict_val(quote_entry, "recoverables").and_then(|v| v.crowset_rows()).expect("recoverables");
+    let trit_qty = recs
+        .iter()
+        .find(|r| r.dict_get("typeID").and_then(|v| v.as_i64()) == Some(34))
+        .and_then(|r| r.dict_get("client"))
+        .and_then(|v| v.as_i64())
+        .expect("Tritanium output");
+    let quote_yield = trit_qty as f64 / ((qty_to_proc as f64 / 100.0) * 400.0);
 
     assert!(quote_yield > 0.50, "Yield rate must exceed base 50% facility yield with skills");
     assert!((quote_tax - 0.035).abs() < 1e-4, "Station tax rate must reflect standings: got {quote_tax}");
@@ -1093,8 +1104,8 @@ async fn test_plan_c6_reprocessing_yield_tax_and_materials() {
         )
         .await;
 
-    if let Ok(PyRep::List(quotes)) = non_reproc_quote {
-        assert!(quotes.is_empty(), "Non-reprocessable items must produce empty quotes");
+    if let Ok(PyRep::Tuple(parts)) = non_reproc_quote {
+        assert_eq!(parts[2], PyRep::Dict(vec![]), "Non-reprocessable items must produce empty quotes");
     }
 
     let non_reproc_exec = ctx

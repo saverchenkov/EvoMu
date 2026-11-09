@@ -167,7 +167,7 @@ fn normalize_macho_rpc_reply_covers_dev_index_raffle_skill_station_and_store_var
     .unwrap();
     assert_eq!(hs_other, PyRep::List(vec![PyRep::String("custom".into())]));
 
-    // dogmaIM.AddTarget default locked=true and default targetID=0
+    // dogmaIM.AddTarget default locked=true (`flag = 0`) and default targetID=0
     let tgt_def = normalize_macho_rpc_reply(
         "dogmaIM",
         "AddTarget",
@@ -177,7 +177,7 @@ fn normalize_macho_rpc_reply_covers_dev_index_raffle_skill_station_and_store_var
     assert_eq!(
         tgt_def,
         PyRep::Tuple(vec![
-            PyRep::Integer(1),
+            PyRep::Integer(0),
             PyRep::List(vec![PyRep::Integer(0)])
         ])
     );

@@ -137,7 +137,26 @@ fn test_declare_war_allies_surrender_peace_treaty_and_statistics() {
     )
     .unwrap()
     .unwrap();
-    assert!(!matches!(by_owner, PyRep::None));
+    assert!(by_owner.is_crowset(), "GetWarsByOwnerID must return dbutil.CRowset");
+    assert_eq!(by_owner.row_count(), Some(1));
+
+    // A non-participant corporation calling warRegistry.GetNegotiations() must get an empty result,
+    // not NotWarParticipant (#760).
+    let mut non_party_sess = SessionState::new(719);
+    non_party_sess.user_id = Some(999);
+    non_party_sess.character_id = Some(90_000_003);
+    non_party_sess.corporation_id = Some(98_099_999);
+    let empty_negs = handle_wars(
+        &ctx,
+        &mut non_party_sess,
+        "warRegistry",
+        "GetNegotiations",
+        &[],
+        Some(98_099_999),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(empty_negs.row_count(), Some(0));
 
     let top50 = handle_wars(&ctx, &mut agg_sess, "warsInfoMgr", "GetTop50", &[], None)
         .unwrap()

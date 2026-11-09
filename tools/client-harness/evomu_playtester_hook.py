@@ -174,11 +174,19 @@ def _install_flight_recorder_hooks(sm):
         from carbon.common.script.net import moniker as _moniker_mod
         mon_cls = getattr(_moniker_mod, "Moniker", None)
         orig_mcall = getattr(mon_cls, "MonikeredCall", None) if mon_cls is not None else None
+        try:
+            import stackless as _sl
+        except Exception:
+            _sl = None
+        _MONIKER_TASKLET_DEPTH = {}
+
         if orig_mcall is not None and not getattr(orig_mcall, "_evomu_pt_wrapped", False):
             def _wrapped_monikered_call(self_mon, call, *args, **kwargs):
                 svc_n = str(getattr(self_mon, "_Moniker__serviceName", None) or "moniker")
                 meth_n = str(call[0]) if isinstance(call, (tuple, list)) and len(call) > 0 else str(call)
                 call_args = call[1] if isinstance(call, (tuple, list)) and len(call) > 1 else args
+                tid = id(_sl.getcurrent()) if _sl is not None else 0
+                _MONIKER_TASKLET_DEPTH[tid] = _MONIKER_TASKLET_DEPTH.get(tid, 0) + 1
                 t0 = time.time()
                 try:
                     res = orig_mcall(self_mon, call, *args, **kwargs)
@@ -189,9 +197,41 @@ def _install_flight_recorder_hooks(sm):
                     dur_ms = (time.time() - t0) * 1000.0
                     _record_flight("macho", svc_n, meth_n, repr(call_args)[:140], "ERR", dur_ms, repr(exc))
                     raise
+                finally:
+                    rem = _MONIKER_TASKLET_DEPTH.get(tid, 1) - 1
+                    if rem <= 0:
+                        _MONIKER_TASKLET_DEPTH.pop(tid, None)
+                    else:
+                        _MONIKER_TASKLET_DEPTH[tid] = rem
 
             _wrapped_monikered_call._evomu_pt_wrapped = True
             mon_cls.MonikeredCall = _wrapped_monikered_call
+
+        from carbon.common.script.net import ObjectCallGPCS as _oc_mod
+        oc_wrap_cls = getattr(_oc_mod, "MachoObjectCallWrapper", None)
+        orig_oc_call = getattr(oc_wrap_cls, "__call__", None) if oc_wrap_cls is not None else None
+        if orig_oc_call is not None and not getattr(orig_oc_call, "_evomu_pt_wrapped", False):
+            def _wrapped_bound_object_call(self_wrap, *args, **kwargs):
+                tid = id(_sl.getcurrent()) if _sl is not None else 0
+                if _MONIKER_TASKLET_DEPTH.get(tid, 0) > 0:
+                    return orig_oc_call(self_wrap, *args, **kwargs)
+                pid = getattr(self_wrap, "persistantObjectID", None)
+                oid = getattr(self_wrap, "objectID", None)
+                svc_n = _safe_str(pid if pid is not None else (oid if oid is not None else "bound_object"), 48)
+                meth_n = _safe_str(getattr(self_wrap, "method", "") or "", 48)
+                t0 = time.time()
+                try:
+                    res = orig_oc_call(self_wrap, *args, **kwargs)
+                    dur_ms = (time.time() - t0) * 1000.0
+                    _record_flight("macho", svc_n, meth_n, repr(args)[:140], "OK", dur_ms)
+                    return res
+                except Exception as exc:
+                    dur_ms = (time.time() - t0) * 1000.0
+                    _record_flight("macho", svc_n, meth_n, repr(args)[:140], "ERR", dur_ms, repr(exc))
+                    raise
+
+            _wrapped_bound_object_call._evomu_pt_wrapped = True
+            oc_wrap_cls.__call__ = _wrapped_bound_object_call
     except Exception:
         pass
 
@@ -938,7 +978,7 @@ def _close_neocom_panels_if_outside(node):
         pass
 
 
-def _invoke_widget_click(node, right_click=False, double_click=False, click_x=None):
+def _invoke_widget_click(node, right_click=False, double_click=False, click_x=None, click_y=None):
     _close_neocom_panels_if_outside(node)
     if node is not None:
         for ch in list(getattr(node, "children", []) or []):
@@ -951,6 +991,20 @@ def _invoke_widget_click(node, right_click=False, double_click=False, click_x=No
             ):
                 node = ch
                 break
+    try:
+        uic_xy = _get_uicore()
+        uilib = getattr(uic_xy, "uilib", None) if uic_xy is not None else None
+        if uilib is not None:
+            if click_x is not None and click_y is not None:
+                uilib.x = int(click_x)
+                uilib.y = int(click_y)
+            elif node is not None:
+                rx, ry, rw, rh = _widget_abs_rect(node)
+                if rw > 0 and rh > 0:
+                    uilib.x = int(rx + (rw // 2))
+                    uilib.y = int(ry + (rh // 2))
+    except Exception:
+        pass
     edit_w = _resolve_editable_widget(node)
     if edit_w is not None:
         try:
@@ -1227,6 +1281,13 @@ def _invoke_widget_click(node, right_click=False, double_click=False, click_x=No
                 break
             cur_w = getattr(cur_w, "parent", None)
 
+    uic_pre = _get_uicore()
+    cmd_pre = getattr(uic_pre, "cmd", None) if uic_pre is not None else None
+    if cmd_pre is not None and getattr(cmd_pre, "combatFunctionLoaded", None) is not None and hasattr(cmd_pre, "UnloadCombatCommand"):
+        try:
+            cmd_pre.UnloadCombatCommand()
+        except Exception:
+            pass
     if hasattr(node, "selecting") and getattr(node, "selecting", 0):
         try:
             node.selecting = 0
@@ -1237,12 +1298,28 @@ def _invoke_widget_click(node, right_click=False, double_click=False, click_x=No
         if callable(fn):
             try:
                 fn()
+            except Exception as exc:
+                if exc.__class__.__name__ == "UserError":
+                    try:
+                        uc = _get_uicore()
+                        if uc is not None and hasattr(uc, "Message"):
+                            uc.Message(getattr(exc, "msg", ""), getattr(exc, "dict", None))
+                    except Exception:
+                        pass
+                    return "UserError(%s)" % (_safe_str(getattr(exc, "msg", ""), 48),)
+                raise
             finally:
                 if hasattr(node, "selecting") and getattr(node, "selecting", 0):
                     try:
                         node.selecting = 0
                     except Exception:
                         pass
+            if cmd_pre is not None and getattr(cmd_pre, "combatFunctionLoaded", None) is not None and hasattr(cmd_pre, "UnloadCombatCommand"):
+                try:
+                    cmd_pre.UnloadCombatCommand()
+                except Exception:
+                    pass
+                return "NeedsLockedTarget(%s)" % (attr_name,)
             return attr_name
         elif isinstance(fn, tuple) and len(fn) >= 1 and callable(fn[0]):
             fn[0](*fn[1:])
@@ -1329,12 +1406,48 @@ def _get_state_snapshot(sm):
             bp = michelle.GetBallpark() if michelle is not None else None
             sid = sess_dict.get("shipid", 0)
             if bp is not None:
+                now_sim = None
+                try:
+                    now_sim = blue.os.GetSimTime()
+                except Exception:
+                    now_sim = None
+                ego_ball = bp.GetBall(sid) if sid else None
+                if ego_ball is not None and now_sim is not None and hasattr(ego_ball, "GetVectorAt"):
+                    try:
+                        ego_ball.GetVectorAt(now_sim)
+                    except Exception:
+                        pass
                 slims = getattr(bp, "slimItems", {}) or {}
                 for bid, slim in list(slims.items()):
                     if int(bid) == int(sid):
                         continue
                     b = bp.GetBall(bid)
-                    dist = float(getattr(b, "surfaceDist", getattr(b, "maxVelocity", 0.0)) or 0.0) if b is not None else 0.0
+                    dist = 0.0
+                    if b is not None:
+                        got_dist = False
+                        if hasattr(bp, "GetSurfaceDist") and sid:
+                            try:
+                                sd = bp.GetSurfaceDist(int(sid), int(bid))
+                                if sd is not None:
+                                    dist = max(0.0, float(sd))
+                                    got_dist = True
+                            except Exception:
+                                got_dist = False
+                        if not got_dist:
+                            try:
+                                if now_sim is not None and hasattr(b, "GetVectorAt"):
+                                    b.GetVectorAt(now_sim)
+                            except Exception:
+                                pass
+                            sd2 = getattr(b, "surfaceDist", None)
+                            if sd2 is not None and float(sd2) >= 0.0:
+                                dist = float(sd2)
+                            elif ego_ball is not None:
+                                dx = float(getattr(b, "x", 0.0) or 0.0) - float(getattr(ego_ball, "x", 0.0) or 0.0)
+                                dy = float(getattr(b, "y", 0.0) or 0.0) - float(getattr(ego_ball, "y", 0.0) or 0.0)
+                                dz = float(getattr(b, "z", 0.0) or 0.0) - float(getattr(ego_ball, "z", 0.0) or 0.0)
+                                r_sum = float(getattr(b, "radius", 0.0) or 0.0) + float(getattr(ego_ball, "radius", 0.0) or 0.0)
+                                dist = max(0.0, ((dx * dx + dy * dy + dz * dz) ** 0.5) - r_sum)
                     nearby.append({
                         "item_id": int(bid),
                         "type_id": int(getattr(slim, "typeID", 0) or 0),
@@ -1556,6 +1669,19 @@ def _compute_state_diff(pre, post, scatters):
 
 def _open_client_window(sm, target):
     uicore = _get_uicore()
+    layers = getattr(uicore, "layer", None) if uicore is not None else None
+    menu_layer = getattr(layers, "menu", None) if layers is not None else None
+    if menu_layer is not None:
+        try:
+            for mv in list(getattr(menu_layer, "children", []) or []):
+                if hasattr(mv, "CloseMenu"):
+                    mv.CloseMenu()
+                elif hasattr(mv, "Close"):
+                    mv.Close()
+            if hasattr(menu_layer, "Flush"):
+                menu_layer.Flush()
+        except Exception:
+            pass
     cmd_svc = getattr(uicore, "cmd", None) if uicore is not None else None
     if cmd_svc is None:
         try:
@@ -1665,6 +1791,15 @@ def _open_client_window(sm, target):
         "log": "OpenLog",
     }
     mname = cmd_map.get(t, raw_target)
+    if mname == "OpenMoonMining":
+        sess = getattr(__builtin__, "session", None)
+        struct_id = getattr(sess, "structureid", None) if sess is not None else None
+        ship_id = getattr(sess, "shipid", None) if sess is not None else None
+        if not struct_id or struct_id != ship_id:
+            return {
+                "ok": False,
+                "error": "Moon Mining Scheduling requires controlling an Upwell Refinery with an active Standup Moon Drill; use 'miningledger' or 'structurebrowser' instead",
+            }
     if mname in ("OpenDirectionalScanner", "OpenProbeScanner"):
         sess = getattr(__builtin__, "session", None)
         if sess is not None and (getattr(sess, "stationid", None) is not None or getattr(sess, "structureid", None) is not None):
@@ -1954,8 +2089,13 @@ def _execute_action(sm, action):
                     except Exception:
                         pass
                 if node is not None and (hasattr(node, "OnClick") or hasattr(node, "Click")):
-                    _invoke_widget_click(node)
-                    result["activated_slot"] = slot_name
+                    click_res = _invoke_widget_click(node)
+                    result["clicked_widget"] = click_res
+                    if str(click_res).startswith("NeedsLockedTarget"):
+                        result["ok"] = False
+                        result["error"] = "Module %s requires a locked target (loaded targeting cursor); call lock_target first" % (slot_name,)
+                    else:
+                        result["activated_slot"] = slot_name
                 else:
                     result["activated_slot"] = "none_fitted"
                     result["note"] = "No fitted active module button found on ship HUD rack"
@@ -2066,12 +2206,20 @@ def _execute_action(sm, action):
                     result["error"] = "widget %r not found in visible uicore layers" % (target,)
                 else:
                     result["matched_widget"] = "%s(%s)" % (node.__class__.__name__, _safe_str(getattr(node, "name", ""), 48))
-                    result["clicked_widget"] = _invoke_widget_click(
+                    click_res = _invoke_widget_click(
                         node,
                         right_click=bool(action.get("right_click")),
                         double_click=bool(action.get("double_click")),
                         click_x=hx,
+                        click_y=hy,
                     )
+                    result["clicked_widget"] = click_res
+                    if str(click_res).startswith("NeedsLockedTarget"):
+                        result["ok"] = False
+                        result["error"] = "Module requires a locked target (loaded targeting cursor); call lock_target first"
+                    elif str(click_res).startswith("UserError("):
+                        result["ok"] = False
+                        result["error"] = "Client action rejected with %s" % (click_res,)
                     if getattr(node, "name", "") == "skillsBtn":
                         try:
                             from eve.client.script.ui.skillPlan.skillPlanDockablePanel import SkillPlanDockablePanel
@@ -2099,12 +2247,20 @@ def _execute_action(sm, action):
                     result["error"] = "no clickable widget found at (%d, %d)" % (x_val, y_val)
                 else:
                     result["matched_widget"] = "%s(%s)" % (node.__class__.__name__, _safe_str(getattr(node, "name", ""), 48))
-                    result["clicked_widget"] = _invoke_widget_click(
+                    click_res = _invoke_widget_click(
                         node,
                         right_click=bool(action.get("right_click")),
                         double_click=bool(action.get("double_click")),
                         click_x=x_val,
+                        click_y=y_val,
                     )
+                    result["clicked_widget"] = click_res
+                    if str(click_res).startswith("NeedsLockedTarget"):
+                        result["ok"] = False
+                        result["error"] = "Module requires a locked target (loaded targeting cursor); call lock_target first"
+                    elif str(click_res).startswith("UserError("):
+                        result["ok"] = False
+                        result["error"] = "Client action rejected with %s" % (click_res,)
                     result["clicked_xy"] = [x_val, y_val]
 
             elif atype == "drag_widget":
@@ -2255,6 +2411,15 @@ def _execute_action(sm, action):
                 cmd_svc = getattr(uicore, "cmd", None) if uicore is not None else None
                 if cmd_svc is not None and hasattr(cmd_svc, resolved_cmd):
                     getattr(cmd_svc, resolved_cmd)()
+                    if getattr(cmd_svc, "combatFunctionLoaded", None) is not None and hasattr(cmd_svc, "UnloadCombatCommand"):
+                        H._sleep_ms(50)
+                        try:
+                            cmd_svc.UnloadCombatCommand()
+                        except Exception:
+                            pass
+                        if resolved_cmd.startswith("CmdActivate"):
+                            result["ok"] = False
+                            result["error"] = "Command %s requires a locked target (loaded targeting cursor); call lock_target first" % (resolved_cmd,)
                     result["executed_cmd"] = resolved_cmd
                 else:
                     result["ok"] = False
@@ -2482,7 +2647,98 @@ def _execute_action(sm, action):
                     elif sub == "stop":
                         beyonce.CmdStop()
                     elif sub == "dock":
-                        H._dock_station(sm, int(item_id or 60003760))
+                        dock_id = int(item_id or 60003760)
+                        sess_d = getattr(__builtin__, "session", None)
+                        sid_d = int(getattr(sess_d, "shipid", 0) or 0) if sess_d is not None else 0
+                        mich_d = sm.services.get("michelle") if hasattr(sm, "services") else None
+                        bp_d = mich_d.GetBallpark() if (sid_d and mich_d is not None) else None
+                        ball_d = bp_d.GetBall(sid_d) if (bp_d is not None and sid_d) else None
+                        if ball_d is not None and int(getattr(ball_d, "mode", 0) or 0) == 3:
+                            H._wait_warp_fx_settled(sm, timeout_sec=6.0)
+                        H._wait_view_settled(sm)
+                        try:
+                            sm.RemoteSvc("timeControl").ClearSessionTimer()
+                        except Exception:
+                            pass
+                        target_ball_d = bp_d.GetBall(dock_id) if (bp_d is not None and hasattr(bp_d, "GetBall")) else None
+                        surf_d = None
+                        if target_ball_d is not None and bp_d is not None and hasattr(bp_d, "GetSurfaceDist") and sid_d:
+                            try:
+                                surf_d = float(bp_d.GetSurfaceDist(int(sid_d), dock_id))
+                            except Exception:
+                                surf_d = None
+                        if (bp_d is not None and target_ball_d is None) or (surf_d is not None and surf_d >= 150000.0):
+                            beyonce.CmdWarpToStuff("item", dock_id, 0.0)
+                            try:
+                                sm.RemoteSvc("timeControl").AdvanceClock(180)
+                            except Exception:
+                                pass
+                            H._sleep_sim_ms(400)
+                            H._wait_warp_fx_settled(sm, timeout_sec=8.0)
+                            bp_d = mich_d.GetBallpark() if (sid_d and mich_d is not None) else None
+                            target_ball_d = bp_d.GetBall(dock_id) if (bp_d is not None and hasattr(bp_d, "GetBall")) else None
+                            surf_d = None
+                            if target_ball_d is not None and bp_d is not None and hasattr(bp_d, "GetSurfaceDist") and sid_d:
+                                try:
+                                    surf_d = float(bp_d.GetSurfaceDist(int(sid_d), dock_id))
+                                except Exception:
+                                    surf_d = None
+                        if surf_d is not None and surf_d > 2400.0:
+                            beyonce.CmdFollowBall(dock_id, 0.0)
+                            for _ in range(12):
+                                try:
+                                    sm.RemoteSvc("timeControl").AdvanceClock(8)
+                                except Exception:
+                                    pass
+                                H._sleep_sim_ms(200)
+                                if bp_d is not None and hasattr(bp_d, "GetSurfaceDist") and sid_d:
+                                    try:
+                                        if float(bp_d.GetSurfaceDist(int(sid_d), dock_id) or 0.0) <= 2200.0:
+                                            break
+                                    except Exception:
+                                        pass
+                            try:
+                                sm.RemoteSvc("timeControl").ClearSessionTimer()
+                            except Exception:
+                                pass
+                        try:
+                            sm.RemoteSvc("stationSvc").Dock(dock_id)
+                        except Exception as dock_exc:
+                            if "OutsideDockingPerimeter" not in str(dock_exc):
+                                raise
+                            beyonce.CmdFollowBall(dock_id, 0.0)
+                            for _ in range(12):
+                                try:
+                                    sm.RemoteSvc("timeControl").AdvanceClock(8)
+                                except Exception:
+                                    pass
+                                H._sleep_sim_ms(200)
+                                if bp_d is not None and hasattr(bp_d, "GetSurfaceDist") and sid_d:
+                                    try:
+                                        if float(bp_d.GetSurfaceDist(int(sid_d), dock_id) or 0.0) <= 2000.0:
+                                            break
+                                    except Exception:
+                                        pass
+                            try:
+                                sm.RemoteSvc("timeControl").ClearSessionTimer()
+                            except Exception:
+                                pass
+                            sm.RemoteSvc("stationSvc").Dock(dock_id)
+                        dl_d = time.time() + 10.0
+                        while time.time() < dl_d:
+                            sess_d = getattr(__builtin__, "session", None)
+                            if (
+                                (getattr(sess_d, "stationid", None) == dock_id or getattr(sess_d, "structureid", None) == dock_id)
+                                and not getattr(sess_d, "mutating", 0)
+                                and getattr(sess_d, "changing", None) is None
+                            ):
+                                break
+                            H._sleep_ms(100)
+                        try:
+                            sm.RemoteSvc("timeControl").ClearSessionTimer()
+                        except Exception:
+                            pass
+                        H._ensure_view(sm, "hangar")
                     elif sub == "lock_target":
                         tgt_svc = sm.GetService("target")
                         tgt_svc.TryLockTarget(int(item_id))
@@ -2490,9 +2746,26 @@ def _execute_action(sm, action):
                         tgt_svc = sm.GetService("target")
                         tgt_svc.UnlockTarget(int(item_id))
         except Exception as exc:
+            tb_full = traceback.format_exc()
             result["ok"] = False
             result["error"] = "%s: %s" % (exc.__class__.__name__, exc)
-            result["traceback"] = traceback.format_exc()[-1200:]
+            result["traceback"] = tb_full[-1200:]
+            if (
+                exc.__class__.__name__ == "UserError"
+                and raw_atype in ("click_widget", "click_xy", "drag_widget", "press_key")
+                and uicore is not None
+                and hasattr(uicore, "Message")
+            ):
+                try:
+                    import uthread as _ut_msg
+                    _ut_msg.new(uicore.Message, getattr(exc, "msg", "CustomInfo"), getattr(exc, "dict", None))
+                except Exception:
+                    pass
+            elif _es is not None and ("eve/client/script/" in tb_full or "packages/" in tb_full):
+                try:
+                    _es._log_exc_line("Action tasklet exception (%s):\n%s" % (raw_atype, tb_full))
+                except Exception:
+                    pass
 
     done_flag = [False]
     try:
@@ -2529,11 +2802,15 @@ def _execute_action(sm, action):
                         return
                     cls_n = node.__class__.__name__
                     if (
-                        getattr(node, "isModal", False)
+                        depth == 1
+                        or getattr(node, "isModal", False)
+                        or getattr(node, "windowID", None) is not None
                         or "MessageBox" in cls_n
                         or "Popup" in cls_n
                         or "HybridWindow" in cls_n
                         or "Dialog" in cls_n
+                        or "Window" in cls_n
+                        or "Wnd" in cls_n
                     ):
                         seen_modals.add(id(node))
                     for sub in list(getattr(node, "children", []) or []):

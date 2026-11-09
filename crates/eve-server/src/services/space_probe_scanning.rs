@@ -465,7 +465,7 @@ async fn handle_get_full_state(
     let anom_entries: Vec<(PyRep, PyRep)> = anomalies
         .into_iter()
         .map(|a| {
-            let kv = crate::services::fleet_social::fleet_social_scanning::build_signal_tracker_anomaly_kv(&a);
+            let kv = crate::services::fleet_social::fleet_social_scanning::build_signal_tracker_anomaly_kv(&ctx.sde, &a);
             (PyRep::String(a.anomaly_id), kv)
         })
         .collect();

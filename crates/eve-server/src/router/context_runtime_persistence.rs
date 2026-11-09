@@ -253,7 +253,9 @@ struct PersistedSocialExtrasRuntimePayload {
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct PersistedServerRuntimeState {
-    active_scanner_probes: HashMap<i64, ActiveScannerProbe>,
+    // Active scanner probes are stored in `sp6_lifecycle.active_scanner_probes` (typed SQLite
+    // table) rather than the 4096-byte `service_state_blobs` row so 8-probe launches never blow
+    // the blob cap and cluster-restart downtime recovery (`state = 0`) is never clobbered.
     active_moon_probes: Vec<ActiveMoonSurveyProbe>,
     scanned_signatures: Vec<(i64, u32, i64)>,
     character_scan_progress: Vec<((i64, u32, String), f64)>,
@@ -377,11 +379,6 @@ impl PersistedServerRuntimeState {
         active_ewar_starts.sort_by_key(|(k, _)| *k);
 
         Self {
-            active_scanner_probes: ctx
-                .active_scanner_probes
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
             active_moon_probes: ctx
                 .active_moon_probes
                 .read()
@@ -451,8 +448,7 @@ impl PersistedServerRuntimeState {
     }
 
     fn is_empty(&self) -> bool {
-        self.active_scanner_probes.is_empty()
-            && self.active_moon_probes.is_empty()
+        self.active_moon_probes.is_empty()
             && self.scanned_signatures.is_empty()
             && self.character_scan_progress.is_empty()
             && self.active_fighters.is_empty()
@@ -492,9 +488,6 @@ impl PersistedServerRuntimeState {
     }
 
     fn apply_to_ctx(self, ctx: &ServerContext) {
-        *ctx.active_scanner_probes
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = self.active_scanner_probes;
         *ctx.active_moon_probes
             .write()
             .unwrap_or_else(|e| e.into_inner()) = self.active_moon_probes;
@@ -604,7 +597,7 @@ impl PersistedServerRuntimeState {
 impl ServerContext {
     /// Hydrates all gameplay-affecting `ServerContext` runtime maps from `WorldRepository` (`#592`).
     pub fn hydrate_server_runtime_from_db(&self) {
-        let (blob_opt, global_cfg, notifications) = self.db.with_snapshot(|snap| {
+        let (blob_opt, global_cfg, notifications, persisted_probes) = self.db.with_snapshot(|snap| {
             let blob = snap
                 .service_state_blobs
                 .get(SERVER_RUNTIME_STATE_BLOB_KEY)
@@ -621,7 +614,22 @@ impl ServerContext {
                 .filter_map(|n| serde_json::from_str(&n.note).ok())
                 .collect();
             notifs.sort_by_key(|r| r.notification_id);
-            (blob, gcfg, notifs)
+            let probes: HashMap<i64, ActiveScannerProbe> =
+                crate::sp6_lifecycle::load_sp6_state_from_snap(snap)
+                    .active_scanner_probes
+                    .into_iter()
+                    .filter(|(_, p)| p.state >= 0)
+                    .map(|(id, mut p)| {
+                        // Cluster restarts disconnect launched probes (`INACTIVE = 0`) and cancel
+                        // in-flight warp timers so ReconnectToLostProbes can reclaim them.
+                        if p.state > 0 {
+                            p.state = 0;
+                        }
+                        p.warp_end_ft = None;
+                        (id, p)
+                    })
+                    .collect();
+            (blob, gcfg, notifs, probes)
         });
         *self
             .global_config_values
@@ -631,6 +639,10 @@ impl ServerContext {
             .notification_records
             .write()
             .unwrap_or_else(|e| e.into_inner()) = notifications;
+        *self
+            .active_scanner_probes
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = persisted_probes;
 
         let state = blob_opt
             .and_then(|s| serde_json::from_str::<PersistedServerRuntimeState>(&s).ok())
@@ -639,10 +651,40 @@ impl ServerContext {
     }
 
     /// Persists all gameplay-affecting `ServerContext` runtime maps into
-    /// `WorldStateSnapshot::service_state_blobs` (`#592`).
+    /// `WorldStateSnapshot::service_state_blobs` and `sp6_lifecycle.active_scanner_probes` (`#592`).
     pub fn persist_server_runtime_to_db(&self) {
         if self.db.is_write_locked_by_current_thread() {
             return;
+        }
+        // Keep `sp6_lifecycle.active_scanner_probes` synchronized even when callers invoke
+        // `persist_server_runtime_to_db`/`sync_runtime_to_db` directly without `sync_scanner_probes_to_db`,
+        // preserving the `db` -> `active_scanner_probes` lock order.
+        let probes_differ = self.db.with_snapshot(|snap| {
+            let map = self
+                .active_scanner_probes
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            let persisted = &snap.sp6_lifecycle.active_scanner_probes;
+            let live_count = map.values().filter(|p| p.state >= 0).count();
+            if persisted.len() != live_count {
+                return true;
+            }
+            map.iter()
+                .filter(|(_, p)| p.state >= 0)
+                .any(|(id, p)| persisted.get(id) != Some(p))
+        });
+        if probes_differ {
+            crate::sp6_lifecycle::with_mut_sp6_state(&self.db, |st, _snap| {
+                let map = self
+                    .active_scanner_probes
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
+                st.active_scanner_probes = map
+                    .iter()
+                    .filter(|(_, p)| p.state >= 0)
+                    .map(|(&id, p)| (id, p.clone()))
+                    .collect();
+            });
         }
         let payload = PersistedServerRuntimeState::from_ctx(self);
         if payload.is_empty() {
