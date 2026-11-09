@@ -488,3 +488,53 @@ fn test_step_collision_bumping_dynamics_and_statics() {
         "High-velocity static swept collision must clamp ship outside gate hull"
     );
 }
+
+#[test]
+fn test_aligning_warp_clears_static_station_without_bounce_trap() {
+    let mut park = Ballpark::with_bubble_radius(30_000_142, 250_000.0);
+    let mut station = make_test_ball(60_003_760, DVec3::ZERO, DVec3::ZERO, 100_000.0, 1e12);
+    station.mode = MovementMode::Rigid;
+    assert!(park.add_static_ball(station, 15));
+
+    // Undock-like frigate 500m outside a 100 km station sphere warping directly behind the station.
+    let ship = Ball {
+        id: 100_000_001,
+        type_id: 587,
+        position: DVec3::new(100_548.0, 0.0, 0.0),
+        velocity: DVec3::new(180.0, 0.0, 0.0),
+        max_velocity: 365.0,
+        inertia: 3.0,
+        mass: 1_067_000.0,
+        radius: 48.0,
+        speed_fraction: 1.0,
+        mode: MovementMode::new_warp(
+            DVec3::new(100_548.0, 0.0, 0.0),
+            DVec3::new(-3.0e11, 0.0, 0.0),
+            5.0,
+        ),
+    };
+    assert!(park.add_ball(ship));
+
+    for _ in 0..20 {
+        park.step(1.0);
+    }
+
+    let b = &park.balls[&100_000_001];
+    assert!(
+        !matches!(
+            b.mode,
+            MovementMode::Warp {
+                phase: WarpPhase::Aligning,
+                ..
+            }
+        ),
+        "Ship aligning toward celestial behind station must enter warp without trapping on station hull, got mode={:?} pos={:?}",
+        b.mode,
+        b.position
+    );
+    assert!(
+        b.position.x < -1_000_000.0,
+        "Ship must warp past station toward destination, pos={:?}",
+        b.position
+    );
+}

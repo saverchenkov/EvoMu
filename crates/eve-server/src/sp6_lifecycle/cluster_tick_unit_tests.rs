@@ -427,6 +427,11 @@ async fn idle_cluster_tick_avoids_per_tick_sqlite_wal_writes() {
     let sde_path = std::env::var("EVOMU_SDE_PATH").unwrap_or_else(|_| "data/evomu_sde.sqlite".into());
     let sde = Arc::new(eve_sde::SdeRegistry::open(&sde_path).unwrap_or_default());
     let ctx = ServerContext::with_sde_and_repository(sde, db);
+    // Freeze wall-clock drift and keep the 2 warmup + 5 measured 1 Hz ticks clear of a `% 60 == 0` periodic NPC-mining DB sync.
+    ctx.clock().set_paused(true);
+    if ctx.now_unix() % 60 >= 50 || ctx.now_unix() % 60 == 0 {
+        ctx.clock().advance_secs(61 - (ctx.now_unix() % 60));
+    }
     ctx.seed_demo_world_fixtures();
     // Place demo char in space in Maurasi (30000140) with active Venture (32880) like Batch P
     let char_id = 90_000_001_i64;
@@ -557,6 +562,11 @@ async fn sov_claimed_without_sov_hubs_entry_stays_idle_clean_and_advances_indice
     let sde_path = std::env::var("EVOMU_SDE_PATH").unwrap_or_else(|_| "data/evomu_sde.sqlite".into());
     let sde = Arc::new(eve_sde::SdeRegistry::open(&sde_path).unwrap_or_default());
     let ctx = ServerContext::with_sde_and_repository(sde, db);
+    // Freeze wall-clock drift and keep the 2 warmup + 5 measured 1 Hz ticks clear of a `% 60 == 0` periodic NPC-mining DB sync.
+    ctx.clock().set_paused(true);
+    if ctx.now_unix() % 60 >= 50 || ctx.now_unix() % 60 == 0 {
+        ctx.clock().advance_secs(61 - (ctx.now_unix() % 60));
+    }
     ctx.seed_demo_world_fixtures();
 
     let claimed_sys = 30_004_759_u32;

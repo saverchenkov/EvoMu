@@ -701,6 +701,7 @@ mod tests {
             mission_initial_npc_counts: HashMap::with_capacity(cap),
             mission_initial_npc_types: HashMap::with_capacity(cap),
             active_scanner_probes: HashMap::with_capacity(cap),
+            server_runtime_json: Some("{}".into()),
         };
         if scramble {
             for dummy in 9_000..9_032 {

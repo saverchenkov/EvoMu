@@ -983,7 +983,8 @@ async fn handle_cmd_stargate_jump(
     .with_apply_db(false)
     .with_cleanup_departing_space(false)
     .with_sync_local_chat(false)
-    .with_emit_on_session_changed(false);
+    .with_emit_on_session_changed(false)
+    .with_preserve_session_ship(true);
     let _ = ctx.execute_session_transition_sync(Some(session), jump_spec);
     crate::services::map_service::record_solar_system_jump(ctx, char_id, dest_sys_id);
     crate::services::nav_warp_interdiction::advance_waypoints_on_arrival(
@@ -1346,7 +1347,8 @@ async fn handle_dock(
                 "dock",
             )
             .with_apply_db(false)
-            .with_cleanup_departing_space(false);
+            .with_cleanup_departing_space(false)
+            .with_preserve_session_ship(true);
             let _ = ctx.execute_session_transition_sync(Some(session), dock_spec);
             deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
             crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);

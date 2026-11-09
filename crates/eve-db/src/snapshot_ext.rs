@@ -1244,13 +1244,36 @@ impl WorldStateSnapshot {
         station_or_struct_id: Option<i64>,
         active_ship_id: Option<i64>,
     ) -> bool {
+        self.is_item_consumable_by_inner(item, char_id, station_or_struct_id, active_ship_id, true)
+    }
+
+    pub fn is_item_consumable_by_ignoring_contents(
+        &self,
+        item: &InventoryItemRecord,
+        char_id: i64,
+        station_or_struct_id: Option<i64>,
+        active_ship_id: Option<i64>,
+    ) -> bool {
+        self.is_item_consumable_by_inner(item, char_id, station_or_struct_id, active_ship_id, false)
+    }
+
+    fn is_item_consumable_by_inner(
+        &self,
+        item: &InventoryItemRecord,
+        char_id: i64,
+        station_or_struct_id: Option<i64>,
+        active_ship_id: Option<i64>,
+        require_empty: bool,
+    ) -> bool {
         if item.owner_id != char_id || item.quantity <= 0 {
             return false;
         }
         if self.is_item_or_ancestor_locked_or_impounded(item.item_id) {
             return false;
         }
-        if Self::is_fitted_slot_flag(item.flag) || self.is_container_non_empty(item.item_id) {
+        if Self::is_fitted_slot_flag(item.flag)
+            || (require_empty && self.is_container_non_empty(item.item_id))
+        {
             return false;
         }
         if self.is_character_boarded_or_saved_ship(char_id, active_ship_id, item.item_id)

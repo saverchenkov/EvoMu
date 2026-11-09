@@ -989,6 +989,12 @@ pub fn maybe_abort_safe_logoff_on_action(
     char_id: i64,
     reason_code: &str,
 ) -> bool {
+    if !ctx
+        .db
+        .with_snapshot(|snap| snap.sp6_lifecycle.safe_logoffs.contains_key(&char_id))
+    {
+        return false;
+    }
     let aborted = with_mut_sp6_state(&ctx.db, |st, _snap| {
         st.safe_logoffs
             .remove(&char_id)

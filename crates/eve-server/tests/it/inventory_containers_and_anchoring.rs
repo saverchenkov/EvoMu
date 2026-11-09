@@ -154,10 +154,11 @@ async fn test_container_contents_restrictions_and_manual_reload() {
 
     // 3. Contract creation with item inside container fails with ItemInsideContainer
     let err_contract = rpc(&ctx, &mut sess, "contractProxy", "CreateContract", &[
-        PyRep::String("ItemExchange".into()), PyRep::Integer(1), PyRep::Integer(86400),
-        PyRep::Real(100_000.0), PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0),
-        PyRep::None, PyRep::None, PyRep::Integer(JITA_STATION_ID), PyRep::Integer(JITA_STATION_ID),
-        PyRep::List(vec![PyRep::Integer(inside_item_id)]), PyRep::List(vec![]),
+        PyRep::Integer(1), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(1440), PyRep::Integer(1),
+        PyRep::Integer(JITA_STATION_ID), PyRep::Integer(JITA_STATION_ID),
+        PyRep::Real(100_000.0), PyRep::Real(0.0), PyRep::Real(0.0),
+        PyRep::String("".into()), PyRep::String("".into()),
+        PyRep::List(vec![PyRep::Integer(inside_item_id)]), PyRep::Integer(0), PyRep::List(vec![]),
     ]).await.expect_err("Contract item inside container");
     assert_eq!(err_contract.code, "ItemInsideContainer");
 

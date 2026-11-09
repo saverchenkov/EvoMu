@@ -770,6 +770,11 @@ pub fn migrate_legacy_service_state(snap: &mut WorldStateSnapshot) {
             }
         }
     }
+    if let Some(raw) = snap.service_state_blobs.remove("server_runtime_state") {
+        if snap.cluster_and_runtime.server_runtime_json.is_none() {
+            snap.cluster_and_runtime.server_runtime_json = Some(raw);
+        }
+    }
 
     // 3. Prefixed keys -> typed maps
     let prefixed_keys: Vec<String> = snap

@@ -733,4 +733,6 @@ pub struct ClusterAndRuntimeStore {
     pub user_cohorts: HashMap<u64, Vec<String>>,
     pub character_locks: HashMap<i64, String>,
     pub omega_downgraded: HashSet<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_runtime_json: Option<String>,
 }

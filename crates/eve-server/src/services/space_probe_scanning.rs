@@ -1619,14 +1619,29 @@ pub fn tick_probe_warp_end(ctx: &ServerContext) {
 /// Persists non-expired tracked scanner probes (`state >= 0`) to `Sp6PersistedState`.
 /// Locks `db` before `active_scanner_probes.read()` to prevent stale out-of-order overwrites.
 pub(crate) fn sync_scanner_probes_to_db(ctx: &ServerContext) {
-    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _snap| {
+    let probes_differ = ctx.db.with_snapshot(|snap| {
         if let Ok(map) = ctx.active_scanner_probes.read() {
-            st.active_scanner_probes = map
-                .iter()
-                .filter(|(_, p)| p.state >= 0)
-                .map(|(&id, p)| (id, p.clone()))
-                .collect();
+            let persisted = &snap.sp6_lifecycle.active_scanner_probes;
+            let live_count = map.values().filter(|p| p.state >= 0).count();
+            persisted.len() != live_count
+                || map
+                    .iter()
+                    .filter(|(_, p)| p.state >= 0)
+                    .any(|(id, p)| persisted.get(id) != Some(p))
+        } else {
+            false
         }
     });
+    if probes_differ {
+        crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _snap| {
+            if let Ok(map) = ctx.active_scanner_probes.read() {
+                st.active_scanner_probes = map
+                    .iter()
+                    .filter(|(_, p)| p.state >= 0)
+                    .map(|(&id, p)| (id, p.clone()))
+                    .collect();
+            }
+        });
+    }
     ctx.persist_server_runtime_to_db();
 }

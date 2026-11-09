@@ -391,6 +391,38 @@ impl Ballpark {
                 let uncol_b = b.uncol;
                 let pre_a = pre_step_balls.get(&id_a).unwrap_or(uncol_a);
                 let pre_b = pre_step_balls.get(&id_b).unwrap_or(uncol_b);
+                let is_aligning_a = matches!(
+                    uncol_a.mode,
+                    MovementMode::Warp {
+                        phase: WarpPhase::Aligning,
+                        ..
+                    }
+                ) || matches!(
+                    pre_a.mode,
+                    MovementMode::Warp {
+                        phase: WarpPhase::Aligning,
+                        ..
+                    }
+                );
+                let is_aligning_b = matches!(
+                    uncol_b.mode,
+                    MovementMode::Warp {
+                        phase: WarpPhase::Aligning,
+                        ..
+                    }
+                ) || matches!(
+                    pre_b.mode,
+                    MovementMode::Warp {
+                        phase: WarpPhase::Aligning,
+                        ..
+                    }
+                );
+                // Ships aligning for warp must clear static station/gate/celestial bounding spheres
+                // (e.g. undocking 500m off a 100 km station sphere and warping to a celestial behind
+                // it) without bouncing indefinitely, while remaining bumpable by other dynamic ships.
+                if (is_aligning_a && is_static_b) || (is_aligning_b && is_static_a) {
+                    continue;
+                }
                 let rad_a = a.radius;
                 let rad_b = b.radius;
                 let mass_a = a.mass;

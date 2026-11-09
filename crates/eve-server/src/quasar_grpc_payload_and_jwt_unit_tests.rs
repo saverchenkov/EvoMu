@@ -89,7 +89,7 @@ fn normalize_macho_notification_exhaustive_edge_cases() {
         PyRep::Integer(1),
         valid_env,
         valid_ft,
-        PyRep::Real(0.0),
+        PyRep::Integer(0),
         PyRep::Integer(0),
         PyRep::None,
         PyRep::None,

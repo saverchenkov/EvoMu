@@ -339,13 +339,9 @@ async fn bounty_proxy_returns_zero_entries_for_requested_unlisted_targets() {
     let nonzero_id = 90_000_077_i64;
     let unlisted_id = 90_000_001_i64;
     let explicit_zero_id = 90_000_078_i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.combat_crimewatch_state
-            .player_bounty_pool
-            .insert(nonzero_id, 500_000.0);
-        snap.combat_crimewatch_state
-            .player_bounty_pool
-            .insert(explicit_zero_id, 0.0);
+    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.player_bounty_pool.insert(nonzero_id, 500_000.0);
+        rt.player_bounty_pool.insert(explicit_zero_id, 0.0);
     });
 
     for req_arg in [

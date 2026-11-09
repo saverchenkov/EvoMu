@@ -279,6 +279,12 @@ async fn test_lp_store_offers_and_purchases() {
 
     // Restore Director role for successful purchase
     sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&player_corp_id) {
+            corp.member_roles
+                .insert(CHAR_ID, eve_db::corp_roles::ROLE_DIRECTOR);
+        }
+    });
     let take_corp_rep = rpc(
         &ctx,
         &mut sess,
@@ -833,6 +839,9 @@ async fn test_lp_store_mgr_gameplay() {
             __corp.ticker = "LPTC".into();
             __corp.ceo_id = char_id + 999;
             __corp.members = [char_id].into_iter().collect();
+            __corp.member_roles = [(char_id, eve_db::corp_roles::ROLE_DIRECTOR)]
+                .into_iter()
+                .collect();
             __corp.hq_station_id = Some(station_id);
             __corp.set_division_balance(1, IskCents::from_isk(100_000_000));
             __corp };
@@ -1952,6 +1961,12 @@ async fn test_lp_store_corporation_purchase_and_delivery() {
 
     // 2. Negative path 2: OfferNotFound on non-existent offer ID
     sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&CORP_ID) {
+            corp.member_roles
+                .insert(CHAR_ID, eve_db::corp_roles::ROLE_DIRECTOR);
+        }
+    });
     let err_not_found = rpc(
         &ctx,
         &mut sess,

@@ -197,24 +197,42 @@ pub fn step_bosonic_doomsday_in_ballpark(
                 continue;
             }
             if now_unix >= cycle.immobilize_until_unix && !cycle.mobility_restored {
-                if let Some(titan_ball) = ballpark.balls.get_mut(&cycle.ship_id) {
-                    titan_ball.max_velocity = cycle.orig_max_velocity;
-                }
                 base_scramble_strengths.insert(cycle.ship_id, cycle.orig_warp_scramble_strength);
                 if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
                     cs.warp_scramble_strength = cycle.orig_warp_scramble_strength;
                     cs.disallow_assistance = cycle.orig_disallow_assistance;
+                    if cs.external_velocity_multiplier == Some(0.0) {
+                        cs.external_velocity_multiplier = None;
+                    }
+                    if cs.base_max_velocity.is_none() && cycle.orig_max_velocity > 0.0 {
+                        cs.base_max_velocity = Some(cycle.orig_max_velocity);
+                    }
+                }
+                ballpark.recompute_ball_attributes(cycle.ship_id);
+                if ballpark
+                    .combat_states
+                    .get(&cycle.ship_id)
+                    .is_none_or(|cs| cs.base_max_velocity.is_none())
+                {
+                    if let Some(titan_ball) = ballpark.balls.get_mut(&cycle.ship_id) {
+                        titan_ball.max_velocity = cycle.orig_max_velocity;
+                    }
                 }
                 cycle.mobility_restored = true;
             } else if !cycle.mobility_restored {
-                if let Some(titan_ball) = ballpark.balls.get_mut(&cycle.ship_id) {
-                    titan_ball.max_velocity = 0.0;
-                }
                 base_scramble_strengths.insert(cycle.ship_id, 100);
                 if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
                     cs.warp_scramble_strength = cs.warp_scramble_strength.max(100);
                     cs.disallow_assistance = true;
                     cs.is_tethered = false;
+                    if cs.base_max_velocity.is_none() && cycle.orig_max_velocity > 0.0 {
+                        cs.base_max_velocity = Some(cycle.orig_max_velocity);
+                    }
+                    cs.external_velocity_multiplier = Some(0.0);
+                }
+                ballpark.recompute_ball_attributes(cycle.ship_id);
+                if let Some(titan_ball) = ballpark.balls.get_mut(&cycle.ship_id) {
+                    titan_ball.max_velocity = 0.0;
                 }
             }
         }

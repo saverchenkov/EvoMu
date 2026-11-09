@@ -284,7 +284,7 @@ async fn test_quasar_auth_and_bubble() {
     assert_eq!(in_bubble_payload.normalized_type_name(), "eve.bubble.presence.api.GetInBubbleResponse");
 
     // Call eve.bubble.presence.api.GetInBubbleByCharacterRequest
-    let by_char_req = encode_id_msg(1, 90_000_002);
+    let by_char_req = encode_id_msg(2, 90_000_002);
     let by_char_rsp = quasar_call(&ctx, &authed_sess, "eve.bubble.presence.api.GetInBubbleByCharacterRequest", by_char_req);
     assert_eq!(by_char_rsp.status_code, STATUS_OK);
     let by_char_payload = by_char_rsp.payload.expect("by char payload");

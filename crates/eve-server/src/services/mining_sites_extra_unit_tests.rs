@@ -490,3 +490,92 @@ async fn sov_hub_validation_proximity_locks_stack_splitting_and_anomaly_clearing
     let saved_again = call_sov_hub(&ctx, &mut session, "SaveUpgradeConfiguration", &[]).await.unwrap();
     assert_eq!(saved_again.dict_get("hubID").and_then(|v| v.as_i64()), Some(hub_id));
 }
+
+#[tokio::test]
+async fn demoted_or_expelled_director_cannot_save_sov_hub_upgrade_via_stale_session() {
+    let mut sde = SdeRegistry::default();
+    sde.types.insert(87702, make_type(87702, 4768, 66, "Tritanium Prospecting Array 3", 100.0, 10.0));
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
+
+    let ceo_id = 90_000_001_i64;
+    let ex_dir_id = 90_000_002_i64;
+    let corp_id = 98_000_778_i64;
+    let alliance_id = 99_000_778_i64;
+    let hub_id = 1_000_000_000_888_i64;
+    let null_sys = 30_004_759_u32;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&ex_dir_id) {
+            ch.corporation_id = corp_id;
+            ch.alliance_id = Some(alliance_id);
+        }
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "Real Sov Corp".into();
+        corp.ticker = "RSOV".into();
+        corp.ceo_id = ceo_id;
+        corp.alliance_id = Some(alliance_id);
+        corp.members = [ceo_id, ex_dir_id].into_iter().collect();
+        corp.member_roles = [
+            (ceo_id, u64::MAX),
+            (ex_dir_id, 0),
+        ]
+        .into_iter()
+        .collect();
+        snap.corporations.insert(corp_id, corp);
+        snap.system_states.insert(
+            null_sys,
+            SystemDynamicState {
+                solar_system_id: null_sys,
+                sov_alliance_id: Some(alliance_id),
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            hub_id,
+            UpwellStructureRecord {
+                structure_id: hub_id,
+                type_id: 35832,
+                owner_corp_id: corp_id,
+                solar_system_id: null_sys,
+                name: "Sov Hub".into(),
+                state: "ShieldVulnerable".into(),
+                position: [10_000.0, 0.0, 0.0],
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut stale_session = SessionState::default();
+    stale_session.user_id = Some(2);
+    stale_session.character_id = Some(ex_dir_id);
+    stale_session.corporation_id = Some(corp_id);
+    stale_session.alliance_id = Some(alliance_id);
+    stale_session.solar_system_id = Some(null_sys);
+    stale_session.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+
+    assert_eq!(
+        call_sov_hub(&ctx, &mut stale_session, "SaveUpgradeConfiguration", &[])
+            .await
+            .unwrap_err()
+            .code,
+        "InsufficientCorporationRole"
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.get_mut(&corp_id).unwrap();
+        corp.members.remove(&ex_dir_id);
+        corp.member_roles.remove(&ex_dir_id);
+    });
+
+    assert_eq!(
+        call_sov_hub(&ctx, &mut stale_session, "SaveUpgradeConfiguration", &[])
+            .await
+            .unwrap_err()
+            .code,
+        "InsufficientCorporationRole"
+    );
+}

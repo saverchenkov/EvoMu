@@ -81,6 +81,7 @@ fn setup_corp_env() -> (ServerContext, SessionState, i64, i64, i64, i64) {
         for div in &mut corp.wallet_divisions {
             div.balance = IskCents::from_isk(10_000_000);
         }
+        corp.set_division_balance(1, IskCents::from_isk(10_000_000));
         snap.corporations.insert(corp_id, corp);
         let gov = snap.corp_governance.entry(corp_id).or_default();
         gov.shares.insert(corp_id, 1_000);

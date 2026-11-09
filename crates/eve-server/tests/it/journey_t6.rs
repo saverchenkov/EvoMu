@@ -519,7 +519,7 @@ async fn test_journey_09_market_trade() {
         .expect("CancelCharOrder");
     let bal_after_cancel = ctx.db.get_character(90_000_001).unwrap().balance.0;
     assert!(bal_after_cancel > bal_after_mod, "escrow refunded on cancel");
-    let hist = rpc(&ctx, &mut sess, "marketProxy", "GetMarketOrderHistory", &[PyRep::Integer(10_000_002), PyRep::Integer(34)]).await.unwrap();
+    let hist = rpc(&ctx, &mut sess, "marketProxy", "GetMarketOrderHistory", &[PyRep::Bool(false)]).await.unwrap();
     assert!(!matches!(hist, PyRep::None));
 }
 

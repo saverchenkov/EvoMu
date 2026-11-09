@@ -334,8 +334,17 @@ pub(crate) fn set_combat_state_in_actor(
     if let Some(ball) = ballpark.balls.get(&ball_id) {
         cs.capture_missing_baselines(ball);
     }
-    if let Some(db) = db_opt {
-        crate::sp6_lifecycle::persist_ship_combat_hp_in_db(db, ball_id, &cs);
+    let hp_changed_or_damaged = prev_opt.is_some_and(|p| {
+        (p.shield_hp - cs.shield_hp).abs() > 1e-6
+            || (p.armor_hp - cs.armor_hp).abs() > 1e-6
+            || (p.structure_hp - cs.structure_hp).abs() > 1e-6
+    }) || (cs.max_shield_hp > 0.0 && cs.shield_hp < cs.max_shield_hp - 1e-6)
+        || (cs.max_armor_hp > 0.0 && cs.armor_hp < cs.max_armor_hp - 1e-6)
+        || (cs.max_structure_hp > 0.0 && cs.structure_hp < cs.max_structure_hp - 1e-6);
+    if hp_changed_or_damaged {
+        if let Some(db) = db_opt {
+            crate::sp6_lifecycle::persist_ship_combat_hp_in_db(db, ball_id, &cs);
+        }
     }
     ballpark.combat_states.insert(ball_id, cs);
     ballpark.recompute_ball_attributes(ball_id);
@@ -649,7 +658,6 @@ pub(crate) fn reconcile_velocity_for_ship(
         cs.hic_velocity_multiplier = hic_mult;
         cs.web_velocity_multiplier = web_mult;
         if let Some(cm) = cloak_mult {
-            cs.is_cloaked = true;
             cs.cloak_velocity_multiplier = Some(cm);
         }
         cs.module_mass_multiplier = mass_mult;
@@ -811,7 +819,6 @@ pub(crate) fn handle_add_module_cycle(
     }
     if cycle.effect_name.starts_with("cloaking") {
         let cs = ballpark.combat_states.entry(cycle.ship_id).or_default();
-        cs.is_cloaked = true;
         cs.cloak_velocity_multiplier = Some((1.0 + cycle.speed_boost_factor).max(0.0));
     }
     if cycle.immobilize_self {

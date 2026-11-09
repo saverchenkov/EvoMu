@@ -533,6 +533,7 @@ async fn test_quasar_corporation_governance_complete() {
             ch.corporation_id = 98_000_001;
         }
         if let Some(corp) = snap.corporations.get_mut(&98_000_001) {
+            corp.ceo_id = 90_000_002;
             corp.members.insert(90_000_001);
             corp.alliance_id = Some(99_000_001);
             corp.hq_station_id = Some(60_003_760);

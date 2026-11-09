@@ -68,6 +68,12 @@ async fn setup_docked_session(ctx: &ServerContext) -> SessionState {
     .expect("SelectCharacterID");
     sess.station_id = Some(STATION_ID);
     sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.corporations.get_mut(&CORP_ID) {
+            c.member_roles
+                .insert(CHAR_ID, eve_db::corp_roles::ROLE_DIRECTOR);
+        }
+    });
     sess
 }
 
@@ -496,6 +502,12 @@ async fn test_lp_store_mgr_take_offer_for_corporation() {
     .unwrap_err();
     assert_eq!(err_role.code, "InsufficientCorporationRole");
     sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.corporations.get_mut(&CORP_ID) {
+            c.member_roles
+                .insert(CHAR_ID, eve_db::corp_roles::ROLE_DIRECTOR);
+        }
+    });
 
     // 2. Validation: InsufficientLoyaltyPoints for corp (Offer 3415 costs 65,000 LP, corp has 60,000)
     let err_clp = rpc(

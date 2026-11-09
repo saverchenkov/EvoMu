@@ -305,7 +305,14 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     let w = if c.wallet_divisions.is_empty() {
                         CorporationRecord::default_wallet_divisions(c.master_wallet_balance())
                     } else {
-                        c.wallet_divisions.clone()
+                        c.wallet_divisions
+                            .iter()
+                            .map(|div| eve_db::types::CorpWalletDivisionRecord {
+                                division_id: div.division_id,
+                                name: div.name.clone(),
+                                balance: c.division_balance(div.division_id),
+                            })
+                            .collect()
                     };
                     Ok::<_, (u32, String)>(w)
                 })?;
@@ -343,7 +350,14 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     let w = if c.wallet_divisions.is_empty() {
                         CorporationRecord::default_wallet_divisions(c.master_wallet_balance())
                     } else {
-                        c.wallet_divisions.clone()
+                        c.wallet_divisions
+                            .iter()
+                            .map(|div| eve_db::types::CorpWalletDivisionRecord {
+                                division_id: div.division_id,
+                                name: div.name.clone(),
+                                balance: c.division_balance(div.division_id),
+                            })
+                            .collect()
                     };
                     Ok::<_, (u32, String)>((h, w))
                 })?;

@@ -672,6 +672,9 @@ pub async fn handle_npcs_drones(
                 let mass = if is_excavator { 10_000_000.0 } else { sde_t.map(|t| t.mass).filter(|&m| m > 0.0).unwrap_or(10_000.0) };
                 let inertia = if is_excavator { 2.8 } else { sde_t.and_then(|t| t.default_attributes.get(&70).copied()).unwrap_or(0.5).clamp(0.1, 5.0) };
                 let radius = if is_excavator { 50.0 } else { sde_t.map(|t| t.radius).filter(|&r| r > 0.0).unwrap_or(10.0) };
+                cs.base_max_velocity = Some(max_vel);
+                cs.base_mass = Some(mass);
+                cs.base_inertia = Some(inertia);
                 let _ = sys_handle
                     .spawn_ball_with_combat(
                         Ball {

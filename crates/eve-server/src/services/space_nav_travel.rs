@@ -1284,6 +1284,11 @@ pub(crate) async fn sync_ship_cloak_and_mjfg_from_fitting(
                 cloak_type_id,
                 cloaking_skill as u8,
             );
+        let cloak_recorded = ctx.db.with_snapshot(|snap| {
+            crate::services::mobile_deployables::read_deployable_state_snap(snap)
+                .cloak_activated_unix
+                .contains_key(&ship_id)
+        });
         if !cs.is_cloaked {
             cs.capture_missing_baselines(&ball);
             cs.cloak_velocity_multiplier = Some(vel_mult);
@@ -1292,12 +1297,27 @@ pub(crate) async fn sync_ship_cloak_and_mjfg_from_fitting(
             cs.is_covert_cloak = is_covert;
             cs.cloak_stabilization_remaining_s = 900.0;
             cs.cloak_configured_targeting_delay_s = targeting_delay_s;
-            crate::services::mobile_deployables_ext::record_ship_cloak_activated(ctx, ship_id);
+            if !cloak_recorded {
+                crate::services::mobile_deployables_ext::record_ship_cloak_activated(ctx, ship_id);
+            }
             cs_changed = true;
             ball_changed = true;
-        } else if (cs.cloak_configured_targeting_delay_s - targeting_delay_s).abs() > 1e-6 {
-            cs.cloak_configured_targeting_delay_s = targeting_delay_s;
-            cs_changed = true;
+        } else {
+            if cs.is_covert_cloak != is_covert {
+                cs.is_covert_cloak = is_covert;
+                cs_changed = true;
+            }
+            if cs.cloak_stabilization_remaining_s <= 0.0 && !cloak_recorded {
+                cs.cloak_stabilization_remaining_s = 900.0;
+                cs_changed = true;
+            }
+            if !cloak_recorded {
+                crate::services::mobile_deployables_ext::record_ship_cloak_activated(ctx, ship_id);
+            }
+            if (cs.cloak_configured_targeting_delay_s - targeting_delay_s).abs() > 1e-6 {
+                cs.cloak_configured_targeting_delay_s = targeting_delay_s;
+                cs_changed = true;
+            }
         }
     } else if cs.is_cloaked && (cs.gate_cloak_remaining_ticks == 0 || in_abyssal) {
         cs.is_cloaked = false;
@@ -1312,6 +1332,20 @@ pub(crate) async fn sync_ship_cloak_and_mjfg_from_fitting(
             ball_changed = true;
         }
         cs_changed = true;
+    } else if !cs.is_cloaked {
+        if in_abyssal && cs.cloak_velocity_multiplier.take().is_some() {
+            cs.recompute_attributes(&mut ball);
+            ball_changed = true;
+            cs_changed = true;
+        }
+        let cloak_recorded = ctx.db.with_snapshot(|snap| {
+            crate::services::mobile_deployables::read_deployable_state_snap(snap)
+                .cloak_activated_unix
+                .contains_key(&ship_id)
+        });
+        if cloak_recorded {
+            crate::services::mobile_deployables_ext::clear_ship_cloak_activated(ctx, ship_id);
+        }
     }
 
     if active_cap_mjfg && cs.mjfg_spool_remaining_s <= 0.0 && cs.mjfg_sig_multiplier.is_none() {

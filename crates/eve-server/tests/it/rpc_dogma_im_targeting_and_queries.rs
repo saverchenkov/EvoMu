@@ -173,8 +173,8 @@ async fn test_dogma_im_targeting_and_queries_complete() {
         panic!("AddTargetOBO must return 2-tuple, got {add_obo_res:?}");
     };
     assert_eq!(lock_tuple.len(), 2);
-    assert_eq!(lock_tuple[0], PyRep::Bool(true));
-    assert!(matches!(lock_tuple[1], PyRep::Real(_)));
+    assert_eq!(lock_tuple[0], PyRep::Integer(1));
+    assert_eq!(lock_tuple[1], PyRep::List(Vec::new()));
 
     // F-02: Target with location-change invulnerability rejects with TargetInvulnerable
     eve_server::services::space_warp_jump::grant_location_change_invulnerability(&ctx, C2, ctx.now_unix_secs() + 60);

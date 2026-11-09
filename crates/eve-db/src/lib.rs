@@ -196,6 +196,8 @@ pub struct Sp6PersistedState {
     pub mission_initial_npc_types: HashMap<String, Vec<u32>>,
     #[serde(default)]
     pub active_scanner_probes: HashMap<i64, PersistedScannerProbe>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_runtime_json: Option<String>,
 }
 
 #[cfg(test)] mod db_lib_extra_tests;

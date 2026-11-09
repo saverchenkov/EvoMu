@@ -353,7 +353,21 @@ async fn test_crab_beacon_lifecycle_ceq_interference_and_cyno_jammer_live() {
     assert_eq!(link_state.dict_get("phase").and_then(|v| v.as_str()), Some("scanning"));
 
     for wave in 0..3_usize {
-        let wave_drones: Vec<i64> = null_h.list_balls().await.unwrap().into_iter().filter(|b| b.id >= 1_897_000_000 && b.id < 1_897_700_000).map(|b| b.id).collect();
+        let recorded_wave_ids: std::collections::HashSet<i64> = ctx.db.with_snapshot(|s| {
+            s.crab_beacons
+                .beacons
+                .get(&beacon_id)
+                .map(|r| r.wave_npc_ball_ids.iter().copied().collect())
+                .unwrap_or_default()
+        });
+        let wave_drones: Vec<i64> = null_h
+            .list_balls()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|b| recorded_wave_ids.contains(&b.id))
+            .map(|b| b.id)
+            .collect();
         for did in wave_drones {
             let is_capital_target = null_h.get_ball_snapshot(did).await.unwrap().is_some_and(|(_, b)| b.type_id == 60_333);
             if is_capital_target {
@@ -442,14 +456,14 @@ async fn test_metaliminal_storm_footprint_dogma_overlap_and_movement_live() {
     let PyRep::List(weather_rows) = ok(&ctx, &mut pilot.sess, "map", "GetAllRoamingWeatherSystems", &[]).await else { panic!("weather rows") };
     assert!(!weather_rows.is_empty());
 
-    // Group rows by stormID -> 4 roaming storms in null-sec (only isCore == true gives each storm's center)
+    // Group rows by stormID -> 8 roaming storms in null-sec (first isCore == true row per storm is its center)
     let mut centers_by_storm: HashMap<i64, u32> = HashMap::new();
     let mut storm_count_per_sys: HashMap<u32, usize> = HashMap::new();
     for r in &weather_rows {
         let storm_id = r.dict_get("stormID").and_then(|v| v.as_i64()).unwrap();
         let sid = r.dict_get("solarSystemID").and_then(|v| v.as_i64()).unwrap() as u32;
         if r.dict_get("isCore") == Some(&PyRep::Bool(true)) {
-            centers_by_storm.insert(storm_id, sid);
+            centers_by_storm.entry(storm_id).or_insert(sid);
         }
         *storm_count_per_sys.entry(sid).or_default() += 1;
         assert!(ctx.sde.solar_systems[&sid].security_status < 0.0, "Storm system {sid} must be in null-sec");
@@ -487,15 +501,24 @@ async fn test_metaliminal_storm_footprint_dogma_overlap_and_movement_live() {
     let PyRep::Dict(core_anoms) = ok(&ctx, &mut core_pilot.sess, "dungeonInstanceCacheMgr", "GetCombatAnomalyInstances", &[]).await else { panic!("core anoms") };
     assert!(core_anoms.iter().any(|(k, _)| k.as_i64() == Some(i64::from(core_sys))));
 
-    // Step in 12h increments (< 25h min interval) across two 24-48h windows -> each storm takes two exact 1-jump steps
+    // Step in 12h increments across 48h window (max initial interval 46h) -> each storm takes first 1-jump step
+    let extract_snapshot_centers = |rows: &[PyRep]| -> HashMap<i64, u32> {
+        let mut out = HashMap::new();
+        for r in rows {
+            if r.dict_get("isCore") == Some(&PyRep::Bool(true)) {
+                let sid_storm = r.dict_get("stormID").and_then(|v| v.as_i64()).unwrap();
+                let sid = r.dict_get("solarSystemID").and_then(|v| v.as_i64()).unwrap() as u32;
+                out.entry(sid_storm).or_insert(sid);
+            }
+        }
+        out
+    };
     let mut mid_centers: HashMap<i64, u32> = HashMap::new();
     for _ in 0..4 {
         ctx.advance_secs(12 * 3_600);
         tick_background_cluster(&ctx).await;
         let PyRep::List(rows) = ok(&ctx, &mut pilot.sess, "map", "GetAllRoamingWeatherSystems", &[]).await else { panic!("mid rows") };
-        for r in rows.iter().filter(|r| r.dict_get("isCore") == Some(&PyRep::Bool(true))) {
-            let sid_storm = r.dict_get("stormID").and_then(|v| v.as_i64()).unwrap();
-            let sid = r.dict_get("solarSystemID").and_then(|v| v.as_i64()).unwrap() as u32;
+        for (sid_storm, sid) in extract_snapshot_centers(&rows) {
             if sid != centers_by_storm[&sid_storm] {
                 mid_centers.entry(sid_storm).or_insert(sid);
             }
@@ -509,9 +532,7 @@ async fn test_metaliminal_storm_footprint_dogma_overlap_and_movement_live() {
         ctx.advance_secs(12 * 3_600);
         tick_background_cluster(&ctx).await;
         let PyRep::List(rows) = ok(&ctx, &mut pilot.sess, "map", "GetAllRoamingWeatherSystems", &[]).await else { panic!("moved rows") };
-        for r in rows.iter().filter(|r| r.dict_get("isCore") == Some(&PyRep::Bool(true))) {
-            let sid_storm = r.dict_get("stormID").and_then(|v| v.as_i64()).unwrap();
-            let sid = r.dict_get("solarSystemID").and_then(|v| v.as_i64()).unwrap() as u32;
+        for (sid_storm, sid) in extract_snapshot_centers(&rows) {
             if sid != mid_centers[&sid_storm] {
                 final_centers.entry(sid_storm).or_insert(sid);
             }

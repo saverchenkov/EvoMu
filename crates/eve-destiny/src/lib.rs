@@ -534,12 +534,8 @@ impl CombatState {
             * self.cloud_velocity_multiplier.unwrap_or(1.0);
         let self_v = if self.module_immobilized {
             0.0
-        } else if self.is_cloaked {
-            if let Some(cm) = self.cloak_velocity_multiplier {
-                cm.max(0.0) * self.hic_velocity_multiplier
-            } else {
-                self.prop_velocity_multiplier * self.hic_velocity_multiplier
-            }
+        } else if let Some(cm) = self.cloak_velocity_multiplier {
+            cm.max(0.0) * self.hic_velocity_multiplier
         } else {
             self.prop_velocity_multiplier * self.hic_velocity_multiplier
         };
@@ -553,6 +549,40 @@ impl CombatState {
             * self.external_inertia_multiplier.unwrap_or(1.0)
             * self.cloud_inertia_multiplier.unwrap_or(1.0))
         .max(0.001);
+
+        self.recompute_combat_attributes();
+    }
+
+    /// Declaratively recomputes `CombatState`-local attributes (signature radius, capacitor
+    /// recharge, max HP/cap, and resistances) without requiring a `Ball` entry (`#584`).
+    pub fn recompute_combat_attributes(&mut self) {
+        if self.base_signature_radius.is_none() && self.signature_radius > 0.0 {
+            self.base_signature_radius = Some(self.signature_radius);
+        }
+        if self.base_shield_resonance.is_none() {
+            self.base_shield_resonance = Some(self.shield_resonance);
+        }
+        if self.base_armor_resonance.is_none() {
+            self.base_armor_resonance = Some(self.armor_resonance);
+        }
+        if self.base_structure_resonance.is_none() {
+            self.base_structure_resonance = Some(self.structure_resonance);
+        }
+        if self.base_max_shield_hp.is_none() {
+            self.base_max_shield_hp = Some(self.max_shield_hp);
+        }
+        if self.base_max_armor_hp.is_none() {
+            self.base_max_armor_hp = Some(self.max_armor_hp);
+        }
+        if self.base_max_structure_hp.is_none() {
+            self.base_max_structure_hp = Some(self.max_structure_hp);
+        }
+        if self.base_max_capacitor.is_none() {
+            self.base_max_capacitor = Some(self.max_capacitor);
+        }
+        if self.base_capacitor_recharge_time_ms.is_none() {
+            self.base_capacitor_recharge_time_ms = Some(self.capacitor_recharge_time_ms);
+        }
 
         let base_sig = self.base_signature_radius.unwrap_or(self.signature_radius);
         self.signature_radius = (base_sig
@@ -633,7 +663,9 @@ impl CombatState {
     }
 
     pub(crate) fn is_warp_scrambled(&self) -> bool {
-        self.warp_scramble_strength > 0 && self.warp_scramble_strength >= self.warp_core_strength
+        self.warp_core_strength < 0
+            || (self.warp_scramble_strength > 0
+                && self.warp_scramble_strength >= self.warp_core_strength)
     }
 
     /// Reconciles external module activation or target lock initiation that cleared `undock_invulnerable_remaining_ticks`.

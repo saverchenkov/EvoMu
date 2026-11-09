@@ -429,7 +429,8 @@ async fn test_shard5_lance_doomsday_nosferatu_nanite_and_mobile_depot() {
         for _ in 0..16 {
             let _ = ctx.systems.get_or_spawn(CYNO_MID_SYS).step_manual(60.0).await;
         }
-        ctx.advance_secs(960);
+        // Clear max jump reactivation cooldown cap (30 min = 1800s) before Avatar's 2nd jump.
+        ctx.advance_secs(1800);
 
         fly_stargates_to(&ctx, &mut cyno_sess, null_sys_id).await;
         crate::industry_live_support::warp_to(&ctx, &mut cyno_sess, null_sun, 100_000.0).await;
@@ -450,8 +451,10 @@ async fn test_shard5_lance_doomsday_nosferatu_nanite_and_mobile_depot() {
         undock_from_station(&ctx, &mut p2, null_sys_id).await;
         crate::industry_live_support::warp_to(&ctx, &mut p2, null_sun, 100_000.0).await;
         warp_and_approach_fleet_ship(&ctx, &mut p1, null_sys_id, megathron_ship_id, PILOT_2, p2_stab).await;
-        ctx.advance_secs(12);
-        let _ = null_sys.step_manual(12.0).await;
+        ctx.advance_secs(15);
+        for _ in 0..15 {
+            let _ = null_sys.step_manual(1.0).await;
+        }
         lock(&ctx, null_sys_id, &mut p1, p2_stab).await;
 
         // Overheat lasers legitimately via dogmaIM.Overload until heat damage accumulates
@@ -543,7 +546,8 @@ async fn test_shard5_lance_doomsday_nosferatu_nanite_and_mobile_depot() {
         for _ in 0..16 {
             let _ = ctx.systems.get_or_spawn(CYNO_MID_SYS).step_manual(60.0).await;
         }
-        ctx.advance_secs(960);
+        // Clear max jump reactivation cooldown cap (30 min = 1800s) before Avatar's 2nd jump.
+        ctx.advance_secs(1800);
 
         crate::industry_live_support::travel(&ctx, &mut cyno_sess, null_sys_id).await;
         warp_and_approach_fleet_ship(&ctx, &mut cyno_sess, null_sys_id, falcon_id, PILOT_2, p2_stab).await;
@@ -558,6 +562,8 @@ async fn test_shard5_lance_doomsday_nosferatu_nanite_and_mobile_depot() {
             let _ = null_sys.step_manual(60.0).await;
         }
         ctx.advance_secs(1200);
+        // Move Falcon out of Disruptive Lance collateral beam corridor (`2,500 m` / `10,000 m`) before firing (#697/#583).
+        crate::industry_live_support::warp_to(&ctx, &mut cyno_sess, null_sun, 100_000.0).await;
 
         let p2_beyonce = match rpc(&ctx, &mut p2, "beyonce", "MachoBindObject", &[PyRep::Integer(i64::from(null_sys_id)), PyRep::None]).await.unwrap() {
             PyRep::Tuple(parts) => parts[0].as_i64().unwrap() as u64,
@@ -598,7 +604,8 @@ async fn test_shard5_lance_doomsday_nosferatu_nanite_and_mobile_depot() {
         for _ in 0..16 {
             let _ = ctx.systems.get_or_spawn(CYNO_MID_SYS).step_manual(60.0).await;
         }
-        ctx.advance_secs(960);
+        // Clear max jump reactivation cooldown cap (30 min = 1800s) before Avatar's 2nd jump.
+        ctx.advance_secs(1800);
 
         crate::industry_live_support::travel(&ctx, &mut cyno_sess, null_sys_id).await;
         warp_and_approach_fleet_ship(&ctx, &mut cyno_sess, null_sys_id, falcon_id, PILOT_2, p2_stab).await;

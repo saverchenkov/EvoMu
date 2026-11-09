@@ -1041,8 +1041,10 @@ pub(crate) fn cleanup_removed_module_cycle(ballpark: &mut Ballpark, removed: &Ac
     let mut needs_recompute = false;
     if removed.effect_name.starts_with("cloaking") {
         if let Some(cs) = ballpark.combat_states.get_mut(&removed.ship_id) {
-            cs.is_cloaked = false;
             cs.cloak_velocity_multiplier = None;
+            cs.decloak_targeting_delay_remaining_s = cs
+                .decloak_targeting_delay_remaining_s
+                .max(cs.cloak_configured_targeting_delay_s);
         }
         needs_recompute = true;
     }

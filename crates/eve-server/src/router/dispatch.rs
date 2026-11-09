@@ -14,6 +14,45 @@ tokio::task_local! {
 
 static WAL_HOOK_ONCE: Once = Once::new();
 
+#[inline(never)]
+pub fn box_fut<'a, F, Fut, T>(
+    f: F,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = T> + Send + 'a,
+{
+    Box::pin(f())
+}
+
+#[inline(never)]
+fn dispatch_rpc_boxed<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    bound_id: Option<u64>,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+    caller_trace: Option<&'a str>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<PyRep, BridgeRpcError>> + Send + 'a>> {
+    Box::pin(ctx.dispatch_rpc(session, service, bound_id, method, args, kwargs, caller_trace))
+}
+
+#[inline(never)]
+fn dispatch_rpc_inner_boxed<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    bound_id: Option<u64>,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+    caller_trace: Option<&'a str>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<PyRep, BridgeRpcError>> + Send + 'a>> {
+    Box::pin(ctx.dispatch_rpc_inner(session, service, bound_id, method, args, kwargs, caller_trace))
+}
+
 pub fn ensure_wal_error_hook_installed() {
     WAL_HOOK_ONCE.call_once(|| {
         eve_db::set_wal_error_hook(Arc::new(record_dispatch_wal_error));
@@ -150,7 +189,8 @@ impl ServerContext {
         let start_time = std::time::Instant::now();
         let (mut res, wal_err) = DISPATCH_WAL_ERROR
             .scope(std::cell::RefCell::new(None), async {
-                let r = Box::pin(self.dispatch_rpc_inner(
+                let r = dispatch_rpc_inner_boxed(
+                    self,
                     session,
                     service,
                     bound_id,
@@ -158,7 +198,7 @@ impl ServerContext {
                     args,
                     kwargs,
                     caller_trace,
-                ))
+                )
                 .await;
                 let err = DISPATCH_WAL_ERROR.with(|slot| slot.borrow_mut().take());
                 (r, err)
@@ -260,13 +300,13 @@ impl ServerContext {
                     );
                 }
             }
-            if let Some(notifs) = self
-                .pending_notifications
-                .read()
-                .ok()
-                .and_then(|q| q.get(&cid).cloned())
-            {
-                for notif in notifs.into_iter().skip(initial_len) {
+            if let Some(notifs) = self.pending_notifications.read().ok().and_then(|q| {
+                q.get(&cid)
+                    .and_then(|v| v.get(initial_len..))
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_vec())
+            }) {
+                for notif in notifs {
                     session.push_notification(notif.event, notif.args);
                 }
             }
@@ -722,7 +762,8 @@ impl ServerContext {
                             }
                         }
                     }
-                    Box::pin(self.dispatch_rpc(
+                    dispatch_rpc_boxed(
+                        self,
                         session,
                         effective_service,
                         Some(bid),
@@ -730,7 +771,7 @@ impl ServerContext {
                         &sub_args,
                         &sub_kwargs,
                         caller_trace,
-                    ))
+                    )
                     .await?
                 }
                 _ => PyRep::None,
@@ -743,10 +784,10 @@ impl ServerContext {
         }
 
         // Dispatch across the 12 domain modules in order
-        if let Some(res) = Box::pin(services::account_services::handle(self, session, effective_service, method, args, kwargs)).await {
+        if let Some(res) = box_fut(|| services::account_services::handle(self, session, effective_service, method, args, kwargs)).await {
             return res;
         }
-        if let Some(res) = Box::pin(services::character_skills::character_contacts_gm::handle_gm_qa_rpcs(self, session, effective_service, method, args)).await {
+        if let Some(res) = box_fut(|| services::character_skills::character_contacts_gm::handle_gm_qa_rpcs(self, session, effective_service, method, args)).await {
             return res;
         }
         if let Some(res) = services::character_energy::handle(self, session, effective_service, method, args) {
@@ -775,7 +816,7 @@ impl ServerContext {
         if let Some(res) = services::macho_cluster_mgmt::handle(self, session, effective_service, method, args, kwargs) {
             return res;
         }
-        if let Some(res) = Box::pin(services::auth_cache::handle(self, session, effective_service, method, args, kwargs)).await {
+        if let Some(res) = box_fut(|| services::auth_cache::handle(self, session, effective_service, method, args, kwargs)).await {
             if (effective_service, method) == ("authentication", "Login") && res.is_ok() {
                 if let Some(uid) = session.user_id {
                     services::account_services::on_login(self, uid);
@@ -783,13 +824,13 @@ impl ServerContext {
             }
             return res;
         }
-        if let Some(res) = Box::pin(services::client_login::handle(self, session, effective_service, method, args, kwargs, caller_trace)).await {
+        if let Some(res) = box_fut(|| services::client_login::handle(self, session, effective_service, method, args, kwargs, caller_trace)).await {
             return res;
         }
         if let Some(res) = services::inventory_bound::handle(self, session, bound_entry.as_ref(), effective_service, method, args, caller_trace) {
             return res;
         }
-        if let Some(res) = Box::pin(services::corp_registry_ops::handle_corp_hangar_invbroker(self, session, bound_entry.as_ref(), effective_service, method, args, kwargs)).await {
+        if let Some(res) = box_fut(|| services::corp_registry_ops::handle_corp_hangar_invbroker(self, session, bound_entry.as_ref(), effective_service, method, args, kwargs)).await {
             return res;
         }
         if let Some(res) = services::character_expert_systems::handle(self, session, effective_service, method, args, kwargs) {
@@ -881,67 +922,67 @@ impl ServerContext {
         ) {
             services::station_structure::structure_lifecycle::sync_asset_safety_wraps(self);
         }
-        if let Some(res) = Box::pin(services::inventory_fitting::handle(
+        if let Some(res) = box_fut(|| services::inventory_fitting::handle(
             self, session, bound_entry.as_ref(), effective_service, method, args, kwargs,
         )).await {
             if res.is_ok() {
-                services::character_skill_ops::post_inventory_fitting_hook(
+                box_fut(|| services::character_skill_ops::post_inventory_fitting_hook(
                     self,
                     session,
                     bound_entry.as_ref(),
                     method,
                     args,
-                )
+                ))
                 .await;
             }
             return res;
         }
-        if let Some(res) = Box::pin(services::station_structure::handle(
+        if let Some(res) = box_fut(|| services::station_structure::handle(
             self, session, effective_service, method, args, kwargs,
         )).await {
             return res;
         }
-        if let Some(res) = Box::pin(services::space_entity_mining::handle(
+        if let Some(res) = box_fut(|| services::space_entity_mining::handle(
             self, session, effective_service, method, args, bound_entry.as_ref(),
         )).await {
             return res;
         }
-        if let Some(res) = Box::pin(services::space_entity_ops::handle(
+        if let Some(res) = box_fut(|| services::space_entity_ops::handle(
             self, session, bound_entry.as_ref(), effective_service, method, args, kwargs,
         )).await {
             return res;
         }
-        if let Some(res) = Box::pin(services::mining_sites::handle(
+        if let Some(res) = box_fut(|| services::mining_sites::handle(
             self, session, effective_service, method, args, kwargs,
         )).await {
             return res;
         }
-        if let Some(res) = Box::pin(services::space_destiny::handle(
+        if let Some(res) = box_fut(|| services::space_destiny::handle(
             self, session, bound_entry.as_ref(), effective_service, method, args, kwargs,
         )).await {
             return res;
         }
-        if let Some(res) = Box::pin(services::pve_exploration::handle_pve_exploration(
+        if let Some(res) = box_fut(|| services::pve_exploration::handle_pve_exploration(
             self, session, effective_service, method, args, kwargs,
         )).await {
             return res;
         }
-        if let Some(res) = Box::pin(services::pve_special_sites::handle_pve_special_sites(
+        if let Some(res) = box_fut(|| services::pve_special_sites::handle_pve_special_sites(
             self, session, effective_service, method, args, kwargs,
         )).await {
             return res;
         }
-        if let Some(res) = Box::pin(services::pve_dungeon_cache::handle(
+        if let Some(res) = box_fut(|| services::pve_dungeon_cache::handle(
             self, session, effective_service, method, args, kwargs,
         )).await {
             return res;
         }
-        if let Some(res) = Box::pin(services::abyssal_void_mgr::handle(
+        if let Some(res) = box_fut(|| services::abyssal_void_mgr::handle(
             self, session, effective_service, method, args, kwargs,
         )).await {
             return res;
         }
-        if let Some(res) = Box::pin(services::combat_crimewatch::handle(
+        if let Some(res) = box_fut(|| services::combat_crimewatch::handle(
             self, session, effective_service, method, args, kwargs,
         )).await {
             return res;
@@ -966,33 +1007,33 @@ impl ServerContext {
         if let Some(res) = services::wallet_serverops::handle(self, session, effective_service, method, args, kwargs) {
             return res;
         }
-        if let Some(res) = Box::pin(services::mining_advanced::handle(self, session, effective_service, method, args, kwargs)).await {
+        if let Some(res) = box_fut(|| services::mining_advanced::handle(self, session, effective_service, method, args, kwargs)).await {
             return res;
         }
         if let Some(res) = services::industry_pi::handle(self, session, effective_service, method, args, kwargs, bound_entry.as_ref()) {
             return res;
         }
-        if let Some(res) = Box::pin(services::agents_missions::handle_with_bound(self, session, bound_entry.as_ref(), effective_service, method, args, kwargs)).await {
+        if let Some(res) = box_fut(|| services::agents_missions::handle_with_bound(self, session, bound_entry.as_ref(), effective_service, method, args, kwargs)).await {
             return res;
         }
-        if let Some(res) = Box::pin(services::fleet_social::handle_with_bound(self, session, bound_entry.as_ref(), effective_service, method, args, kwargs)).await {
+        if let Some(res) = box_fut(|| services::fleet_social::handle_with_bound(self, session, bound_entry.as_ref(), effective_service, method, args, kwargs)).await {
             return res;
         }
-        if let Some(res) = Box::pin(services::social_corp_fleet::handle(
+        if let Some(res) = box_fut(|| services::social_corp_fleet::handle(
             self, session, effective_service, method, args, kwargs, bound_entry.as_ref().map(|b| b.object_id),
         )).await {
             return res;
         }
-        if let Some(res) = Box::pin(services::sov_fw_insurgency::handle(self, session, effective_service, method, args, kwargs)).await {
+        if let Some(res) = box_fut(|| services::sov_fw_insurgency::handle(self, session, effective_service, method, args, kwargs)).await {
             return res;
         }
-        if let Some(res) = Box::pin(services::cosmetics_ui_ops::handle(self, session, effective_service, method, args, kwargs)).await {
+        if let Some(res) = box_fut(|| services::cosmetics_ui_ops::handle(self, session, effective_service, method, args, kwargs)).await {
             return res;
         }
-        if let Some(res) = Box::pin(services::campaigns_and_milestones::handle(self, session, effective_service, method, args, kwargs)).await {
+        if let Some(res) = box_fut(|| services::campaigns_and_milestones::handle(self, session, effective_service, method, args, kwargs)).await {
             return res;
         }
-        if let Some(res) = Box::pin(services::cosmetics_events::handle(self, session, effective_service, method, args, kwargs)).await {
+        if let Some(res) = box_fut(|| services::cosmetics_events::handle(self, session, effective_service, method, args, kwargs)).await {
             return res;
         }
         if let Some(res) = services::operations_manager::handle(self, session, effective_service, method, args, kwargs) {
@@ -1004,13 +1045,13 @@ impl ServerContext {
         if let Some(res) = services::lookup_svc::handle(self, session, effective_service, method, args, kwargs) {
             return res;
         }
-        if let Some(res) = services::pvp_filament_mgr::handle(self, session, effective_service, method, args, kwargs).await {
+        if let Some(res) = box_fut(|| services::pvp_filament_mgr::handle(self, session, effective_service, method, args, kwargs)).await {
             return res;
         }
         if let Some(res) = services::map_service::handle(self, session, effective_service, method, args, kwargs) {
             return res;
         }
-        if let Some(res) = services::tourney_service::handle(self, session, effective_service, method, args, kwargs).await {
+        if let Some(res) = box_fut(|| services::tourney_service::handle(self, session, effective_service, method, args, kwargs)).await {
             return res;
         }
         if effective_service == "ingamereport" {
@@ -1018,7 +1059,7 @@ impl ServerContext {
                 return res;
             }
         }
-        if let Some(res) = Box::pin(services::cluster_macho_misc_services::handle(self, session, effective_service, method, args, kwargs)).await {
+        if let Some(res) = box_fut(|| services::cluster_macho_misc_services::handle(self, session, effective_service, method, args, kwargs)).await {
             return res;
         }
 

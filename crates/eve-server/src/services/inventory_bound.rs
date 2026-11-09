@@ -887,12 +887,24 @@ pub(crate) fn resolve_inv_target_location(
         Some(5 | 11..=34 | 87 | 90 | 92..=94 | 125..=132 | 134..=151 | 158)
     ) || (items_are_fittable_modules && matches!(raw_flag_opt, Some(0) | None));
     let redirect_source_station_to_ship = |a1_opt: Option<i64>| -> Option<i64> {
+        let a1_id = a1_opt?;
         if target_is_ship_only_flag
-            && a1_opt.is_some()
             && a1_opt == src_loc_opt
-            && session.ship_id.is_some_and(|sid| Some(sid) != a1_opt)
+            && session.ship_id.is_some_and(|sid| sid != a1_id)
         {
-            session.ship_id
+            // Upwell structures own fitting/rig/fighter slots (`11..=34 | 92..=94 | 158`);
+            // do not redirect Standup modules or structure weapon charges targeting `a1_id`
+            // onto `session.ship_id`.
+            let blocked_by_structure_slots = !items_are_fittable_modules
+                && matches!(raw_flag_opt, Some(11..=34 | 92..=94 | 158))
+                && ctx
+                    .db
+                    .with_snapshot(|snap| snap.structures.contains_key(&a1_id));
+            if blocked_by_structure_slots {
+                None
+            } else {
+                session.ship_id
+            }
         } else {
             None
         }

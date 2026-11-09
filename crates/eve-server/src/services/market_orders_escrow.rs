@@ -262,6 +262,19 @@ pub fn handle_orders_escrow(
                             now_unix,
                         )
                     };
+                    let is_sellable_ignoring_contents = |snap_ref: &eve_db::WorldStateSnapshot, i: &InventoryItemRecord| {
+                        market_orders_corp_auth::is_item_sellable_on_market_ignoring_contents(
+                            snap_ref,
+                            &ext,
+                            i,
+                            char_id,
+                            caller_corp_id,
+                            use_corp,
+                            station_id,
+                            session.ship_id,
+                            now_unix,
+                        )
+                    };
                     let is_courier_item = |iid: i64| snap.item_custom_names.get(&iid).map_or(false, |s| s.starts_with("courier_cargo:"));
 
                     // Resolve itemID (explicit or auto-discovered from hangar stack)
@@ -285,7 +298,7 @@ pub fn handle_orders_escrow(
                             }
                             let has_non_empty_candidate = snap.items.values().any(|i| {
                                 i.type_id == type_id
-                                    && is_sellable_item(snap, i)
+                                    && is_sellable_ignoring_contents(snap, i)
                                     && snap.items.values().any(|other| other.item_id != i.item_id && other.location_id == i.item_id && other.quantity > 0)
                             });
                             if has_non_empty_candidate {
@@ -334,19 +347,11 @@ pub fn handle_orders_escrow(
                             message: "Courier mission items cannot be sold on the market".into(),
                         });
                     }
-                    if item.type_id != type_id || !is_sellable_item(snap, &item) {
+                    if item.type_id != type_id || !is_sellable_ignoring_contents(snap, &item) {
                         return Err(BridgeRpcError {
                             code: "InsufficientInventoryForSellOrder".into(),
                             message: format!(
                                 "Item {item_id} (type {type_id}) is not reachable in station {station_id} hangar"
-                            ),
-                        });
-                    }
-                    if item.singleton {
-                        return Err(BridgeRpcError {
-                            code: "CannotSellAssembledItem".into(),
-                            message: format!(
-                                "Item {item_id} of type {type_id} must be repackaged before selling"
                             ),
                         });
                     }
@@ -359,6 +364,14 @@ pub fn handle_orders_escrow(
                             code: "CannotSellItemWithContents".into(),
                             message: format!(
                                 "Cannot sell container/ship {item_id} while it contains items"
+                            ),
+                        });
+                    }
+                    if item.singleton {
+                        return Err(BridgeRpcError {
+                            code: "CannotSellAssembledItem".into(),
+                            message: format!(
+                                "Item {item_id} of type {type_id} must be repackaged before selling"
                             ),
                         });
                     }

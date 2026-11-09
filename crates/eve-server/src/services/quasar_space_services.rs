@@ -550,7 +550,8 @@ pub fn register_handlers(
         router.register_handler(
             "eve.bubble.presence.api.GetInBubbleByCharacterRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let Some(char_id) = get_int_field(dyn_msg, 1)
+                let Some(char_id) = get_identifier_or_int(dyn_msg, 2)
+                    .or_else(|| get_identifier_or_int(dyn_msg, 1))
                     .filter(|&v| v > 0)
                     .map(|v| v as u32)
                 else {

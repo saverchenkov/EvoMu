@@ -35,7 +35,7 @@ pub struct WorldStateWalDelta {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) added_idempotency_keys: Vec<(i64, String)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) full_snapshot: Option<WorldStateSnapshot>,
+    pub(crate) full_snapshot: Option<Box<WorldStateSnapshot>>,
 }
 
 impl WorldStateWalDelta {
@@ -217,7 +217,7 @@ impl WorldStateWalDelta {
             return Self {
                 seq: new.wal_seq,
                 next_entity_id: new.next_entity_id,
-                full_snapshot: Some(new.clone()),
+                full_snapshot: Some(Box::new(new.clone())),
                 ..Default::default()
             };
         }
@@ -280,7 +280,7 @@ impl WorldStateWalDelta {
     fn apply_to(self, snap: &mut WorldStateSnapshot) {
         if let Some(mut full) = self.full_snapshot {
             full.wal_seq = full.wal_seq.max(self.seq);
-            *snap = full;
+            *snap = *full;
             return;
         }
         snap.wal_seq = snap.wal_seq.max(self.seq);
@@ -871,6 +871,31 @@ impl WorldRepository {
         }
     }
 
+    #[inline(never)]
+    fn persist_dirty_sqlite_and_wal(
+        &self,
+        conn: &mut rusqlite::Connection,
+        guard: &WorldStateSnapshot,
+        staged_fp: &mut sqlite_store::TableFingerprints,
+        need_wal_delta: bool,
+    ) -> Result<(), String> {
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let delta = Box::new(sqlite_store::sync_dirty_to_sqlite(
+            &tx,
+            guard,
+            staged_fp,
+            need_wal_delta,
+        )?);
+        if let Some(ref p) = self.snapshot_path {
+            let _wal_guard = self.wal_lock.lock().unwrap_or_else(|e| e.into_inner());
+            self.append_wal_delta_locked(p, guard, &delta)?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     fn run_mut_snapshot_tx(
         &self,
         f: &mut dyn FnMut(&mut WorldStateSnapshot) -> bool,
@@ -893,27 +918,16 @@ impl WorldRepository {
             }
             guard.wal_seq = guard.wal_seq.saturating_add(1);
             let need_wal_delta = self.snapshot_path.is_some();
-            let mut staged_fp = fp.clone();
-            let persist_res = (|| -> Result<(), String> {
-                let tx = conn
-                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                    .map_err(|e| e.to_string())?;
-                let delta = sqlite_store::sync_dirty_to_sqlite(
-                    &tx,
-                    guard,
-                    &mut staged_fp,
-                    need_wal_delta,
-                )?;
-                if let Some(ref p) = self.snapshot_path {
-                    let _wal_guard = self.wal_lock.lock().unwrap_or_else(|e| e.into_inner());
-                    self.append_wal_delta_locked(p, guard, &delta)?;
-                }
-                tx.commit().map_err(|e| e.to_string())?;
-                Ok(())
-            })();
+            let mut staged_fp = Box::new(fp.clone());
+            let persist_res = self.persist_dirty_sqlite_and_wal(
+                &mut conn,
+                guard,
+                &mut staged_fp,
+                need_wal_delta,
+            );
             match persist_res {
                 Ok(()) => {
-                    *fp = staged_fp;
+                    *fp = *staged_fp;
                     self.bump_state_epoch();
                     Ok(())
                 }

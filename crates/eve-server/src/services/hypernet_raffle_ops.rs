@@ -1373,7 +1373,10 @@ pub fn handle_character_seeding(
         return Err(BridgeRpcError::user_error("InvalidTicketCount"));
     }
     let ticket_count = ticket_count_i64 as u32;
-    let ticket_price_isk = rpc.opt_positive_f64(4, "ticketPrice")?.unwrap_or(1000.0);
+    let ticket_price_isk = rpc
+        .opt_positive_f64(4, "ticketPrice")
+        .map_err(|_| BridgeRpcError::user_error("InvalidTicketPrice"))?
+        .unwrap_or(1000.0);
     let hypercores_used = compute_required_hypercores(
         ticket_price_isk * (ticket_count as f64),
         ticket_count,

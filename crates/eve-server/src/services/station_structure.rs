@@ -452,10 +452,10 @@ pub async fn handle(
                     .unwrap_or_else(|| (DVec3::new(100_000.0, 0.0, 0.0), DVec3::X))
             };
 
-            let max_vel = ctx
-                .get_or_rebuild_ship_fitting(char_id, ship.item_id)
-                .ok()
-                .map(|f| f.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde))
+            let mut combat_state = ctx.build_ship_combat_state(char_id, ship.item_id, ship.type_id);
+            combat_state.undock_invulnerable_remaining_ticks = 30;
+            let max_vel = combat_state
+                .base_max_velocity
                 .or_else(|| {
                     ship_type
                         .default_attributes
@@ -463,10 +463,9 @@ pub async fn handle(
                         .copied()
                 })
                 .unwrap_or(0.0);
-            let mut inertia = ship_type
-                .default_attributes
-                .get(&attr_ids::AGILITY)
-                .copied()
+            let mut inertia = combat_state
+                .base_inertia
+                .or_else(|| ship_type.default_attributes.get(&attr_ids::AGILITY).copied())
                 .unwrap_or(1.0);
             if station_id == 60_015_187 || ch.solar_system_id == 30_100_000 {
                 let mult = ctx.db.with_snapshot(|s| {
@@ -478,8 +477,11 @@ pub async fn handle(
                     )
                 });
                 inertia *= mult;
+                if (mult - 1.0).abs() > 1e-6 {
+                    combat_state.base_inertia = Some(inertia);
+                }
             }
-            let mass = ship_type.mass;
+            let mass = combat_state.base_mass.unwrap_or(ship_type.mass);
             let radius = ship_type.radius;
 
             let ball = Ball {
@@ -497,8 +499,6 @@ pub async fn handle(
                 },
             };
 
-            let mut combat_state = ctx.build_ship_combat_state(char_id, ship.item_id, ship.type_id);
-            combat_state.undock_invulnerable_remaining_ticks = 30;
             let slim_meta = ctx.build_ship_slim_meta(char_id, ship.type_id);
             let sys_handle = ctx.systems.get_or_spawn(ch.solar_system_id);
             let tick = match sys_handle

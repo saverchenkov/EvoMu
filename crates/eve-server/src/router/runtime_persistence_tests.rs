@@ -627,6 +627,7 @@ fn rollback_reverts_dirty_runtime_state_across_all_caches_and_rehydrates_from_sq
     let res: Result<(), String> = db.try_with_mut_snapshot(|snap| {
         snap.service_state_blobs
             .insert("server_runtime_state".into(), "{}".into());
+        snap.cluster_and_runtime.server_runtime_json = None;
         snap.quasar_state_blobs
             .insert("quasar_community_state".into(), "{}".into());
         snap.combat_crimewatch_state.extended_runtime_json.clear();

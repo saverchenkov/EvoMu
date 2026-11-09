@@ -124,12 +124,8 @@ pub fn process_due_payment_schedules(
     now_unix: u64,
 ) {
     let has_due = db.with_snapshot(|snap| {
-        let scheds: Vec<PaymentScheduleRecord> = snap
-            .service_state_blobs
-            .get("payment_schedules")
-            .and_then(|json| serde_json::from_str(json).ok())
-            .unwrap_or_default();
-        scheds
+        snap.quasar_commerce
+            .payment_schedules
             .iter()
             .any(|s| s.next_payment_unix > 0 && s.next_payment_unix <= now_unix)
     });

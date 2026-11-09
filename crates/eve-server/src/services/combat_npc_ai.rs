@@ -317,32 +317,35 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         .map(|(&id, b)| (id, b.clone()))
         .collect();
 
-    let has_system_npcs = with_combat_ephemeral(ctx, |rt| {
-        rt.npc_entities.values().any(|n| n.solar_system_id == solar_system_id)
-            || rt.npc_scrambled_ships.contains_key(&solar_system_id)
-    });
-    if !has_system_npcs {
-        return;
-    }
-    let (npc_ids, prev_npc_scram_targets): (Vec<i64>, HashSet<i64>) = with_mut_combat_ephemeral(ctx, |rt| {
-        let ids = rt
+    let (npc_ids, has_scrammed) = with_combat_ephemeral(ctx, |rt| {
+        let ids: Vec<i64> = rt
             .npc_entities
             .values()
             .filter(|n| n.solar_system_id == solar_system_id)
             .map(|n| n.ball_id)
             .collect();
-        let prev = rt
-            .npc_scrambled_ships
-            .remove(&solar_system_id)
-            .unwrap_or_default();
-        (ids, prev)
+        let scrammed = rt.npc_scrambled_ships.contains_key(&solar_system_id);
+        (ids, scrammed)
     });
+    if npc_ids.is_empty() && !has_scrammed {
+        return;
+    }
+    let prev_npc_scram_targets: HashSet<i64> = if has_scrammed {
+        with_mut_combat_ephemeral(ctx, |rt| {
+            rt.npc_scrambled_ships
+                .remove(&solar_system_id)
+                .unwrap_or_default()
+        })
+    } else {
+        HashSet::new()
+    };
     let mut active_npc_scram_targets: HashSet<i64> = HashSet::new();
 
     for nid in npc_ids {
         let Some(mut npc) = with_combat_ephemeral(ctx, |rt| rt.npc_entities.get(&nid).cloned()) else {
             continue;
         };
+        let orig_npc = npc.clone();
         let npc_dead = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner()).combat_states.get(&nid).is_some_and(|cs| cs.structure_hp <= 0.0);
         let Some(npc_ball) = ball_map.get(&nid).filter(|_| !npc_dead) else {
             with_mut_combat_ephemeral(ctx, |rt| { rt.npc_entities.remove(&nid); });
@@ -692,16 +695,20 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         npc.target_id = next_target;
 
         let Some(target_id) = npc.target_id else {
-            with_mut_combat_ephemeral(ctx, |rt| {
-                rt.npc_entities.insert(nid, npc);
-            });
+            if npc != orig_npc {
+                with_mut_combat_ephemeral(ctx, |rt| {
+                    rt.npc_entities.insert(nid, npc);
+                });
+            }
             continue;
         };
         let Some(target_ball) = ball_map.get(&target_id) else {
             npc.target_id = None;
-            with_mut_combat_ephemeral(ctx, |rt| {
-                rt.npc_entities.insert(nid, npc);
-            });
+            if npc != orig_npc {
+                with_mut_combat_ephemeral(ctx, |rt| {
+                    rt.npc_entities.insert(nid, npc);
+                });
+            }
             continue;
         };
         let dist = npc_ball.position.distance(target_ball.position);
@@ -848,9 +855,11 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             }
         }
 
-        with_mut_combat_ephemeral(ctx, |rt| {
-            rt.npc_entities.insert(nid, npc);
-        });
+        if npc != orig_npc {
+            with_mut_combat_ephemeral(ctx, |rt| {
+                rt.npc_entities.insert(nid, npc);
+            });
+        }
     }
 
     if prev_npc_scram_targets

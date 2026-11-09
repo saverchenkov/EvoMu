@@ -693,8 +693,8 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
     // Find a warzone system occupied by Caldari (or seed one) that has an NPC station so we can compare real broker fees!
     let (mkt_sys, mkt_sta, mkt_reg) = ctx.sde.solar_systems.values()
         .filter(|s| s.security_status > 0.0 && s.security_status < 0.45 && !s.stations.is_empty())
+        .min_by_key(|s| s.solar_system_id)
         .map(|s| (s.solar_system_id, s.stations[0].station_id, s.region_id))
-        .next()
         .expect("low-sec system with NPC station");
     ctx.db.with_mut_snapshot(|s| {
         s.fw_system_occupations.entry(mkt_sys).or_insert(eve_db::snapshot_ext::FwSystemOccupationRecord {
@@ -716,7 +716,11 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
     s_cal.station_id = Some(mkt_sta);
     s_cal.region_id = Some(mkt_reg);
 
-    let bp_id = *ctx.sde.blueprints.keys().next().unwrap() as i64;
+    let bp_id = *ctx.sde.blueprints.iter()
+        .filter(|(_, bp)| bp.product_type_id > 0 && !bp.materials.is_empty())
+        .min_by_key(|(&id, _)| id)
+        .map(|(id, _)| id)
+        .expect("manufacturable blueprint with materials in SDE") as i64;
     let bal0 = ctx.db.with_snapshot(|s| s.characters[&cal_cid].balance.0);
     rpc_call(
         &ctx, &mut s_cal, "marketProxy", "PlaceBuyOrder",
@@ -914,10 +918,11 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
     // 6. SDE FW Agent (`agent_type_id == 9`) mission gating (`NotEnlistedInMilitia`) & repeatable acceptance!
     let (fw_agent_id, fw_sys, fw_sta, fw_fac) = ctx.sde.agents.values()
         .filter(|a| a.agent_type_id == 9 && a.solar_system_id.is_some() && a.station_id.is_some())
-        .find_map(|a| {
+        .filter_map(|a| {
             let fac = ctx.sde.factions.values().find(|f| f.militia_corporation_id == Some(a.corporation_id))?.faction_id as i64;
             Some((a.agent_id, a.solar_system_id.unwrap(), a.station_id.unwrap(), fac))
         })
+        .min_by_key(|&(aid, _, _, _)| aid)
         .expect("SDE FW agent");
     s_norole.solar_system_id = Some(fw_sys);
     s_norole.station_id = Some(fw_sta);

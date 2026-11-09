@@ -454,16 +454,23 @@ where
     cs.warp_scramble_strength = cs.warp_scramble_strength.max(100);
     cs.disallow_assistance = true;
     cs.is_tethered = false;
+    cs.external_velocity_multiplier = Some(0.0);
     if cap_need > 0.0 {
         cs.capacitor = (cs.capacitor - cap_need).max(0.0);
     }
     let orig_max_velocity =
         if let Ok(Some((_, mut titan_ball))) = sys.get_ball_snapshot(ship_id).await {
             let orig_v = existing_orig.map(|o| o.0).unwrap_or(titan_ball.max_velocity);
+            if cs.base_max_velocity.is_none() && orig_v > 0.0 {
+                cs.base_max_velocity = Some(orig_v);
+            }
             titan_ball.max_velocity = 0.0;
             let _ = sys.spawn_ball_with_combat(titan_ball, cs).await;
             orig_v
         } else {
+            if cs.base_max_velocity.is_none() && titan_ball_initial.max_velocity > 0.0 {
+                cs.base_max_velocity = Some(titan_ball_initial.max_velocity);
+            }
             let _ = sys.set_combat_state(ship_id, cs).await;
             titan_ball_initial.max_velocity
         };

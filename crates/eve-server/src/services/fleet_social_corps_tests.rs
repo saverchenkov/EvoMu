@@ -8,7 +8,7 @@ use super::*;
 use crate::services::fleet_social::fleet_social_fleet_ops::fleet_social_fleet_ops_tests::{
     clone_char_with, test_ctx_with_clock,
 };
-use eve_db::{corp_roles, CorpWalletDivisionRecord, CorporationRecord, IskCents};
+use eve_db::{corp_roles, CorporationRecord, IskCents};
 use eve_machonet::SessionState;
 use std::collections::{HashMap, HashSet};
 
@@ -43,11 +43,10 @@ pub(crate) fn seed_player_corps(ctx: &ServerContext) -> (SessionState, SessionSt
             __corp.set_division_balance(1, IskCents::from_isk(50_000_000));
             __corp };
         corp1.wallet_divisions = CorporationRecord::default_wallet_divisions(corp1.master_wallet_balance());
-        corp1.wallet_divisions.push(CorpWalletDivisionRecord {
-            division_id: 7,
-            name: "Reserve".into(),
-            balance: IskCents::from_isk(1_000_000),
-        });
+        if let Some(div7) = corp1.wallet_divisions.iter_mut().find(|d| d.division_id == 7) {
+            div7.name = "Reserve".into();
+            div7.balance = IskCents::from_isk(1_000_000);
+        }
         snap.corporations.insert(98_000_001, corp1);
 
         let mut corp2 = { let mut __corp = CorporationRecord::default();

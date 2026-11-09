@@ -37,6 +37,7 @@ mod tests;
 
 pub use cache_notifications::*;
 pub use context::*;
+pub use dispatch::box_fut;
 pub use rpc_args::RpcArgs;
 pub use session_transition::*;
 

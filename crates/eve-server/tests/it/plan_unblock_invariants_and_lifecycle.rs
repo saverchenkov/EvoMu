@@ -361,9 +361,7 @@ async fn test_e3_corp_contract_wallet_roles_and_issuer_departure() {
                     | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]
                     | corp_roles::ROLE_HANGAR_CAN_TAKE[0],
             );
-            if let Some(div) = corp.wallet_divisions.first_mut() {
-                div.balance = IskCents(0); // empty division 1 to test short funds
-            }
+            corp.set_division_balance(1, IskCents(0)); // empty division 1 to test short funds
         }
     });
     // Fixes R1-P1-2: Assert division 1 shortage fails with InsufficientFunds
@@ -375,9 +373,7 @@ async fn test_e3_corp_contract_wallet_roles_and_issuer_departure() {
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-            if let Some(div) = corp.wallet_divisions.first_mut() {
-                div.balance = IskCents::from_f64_isk(10_000_000.0);
-            }
+            corp.set_division_balance(1, IskCents::from_f64_isk(10_000_000.0));
         }
     });
     let char_bal_before = ctx.db.get_character(90_000_001).unwrap().balance;

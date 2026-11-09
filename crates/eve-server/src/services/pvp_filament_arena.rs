@@ -876,8 +876,14 @@ pub async fn spawn_matched_arena_instance(
         )
         .with_apply_db(false)
         .with_sync_local_chat(false)
-        .with_emit_on_session_changed(false),
+        .with_emit_on_session_changed(false)
+        .with_preserve_session_ship(true),
     );
+    if session.solar_system_id != Some(32_000_001) {
+        session.solar_system_id = Some(32_000_001);
+        session.station_id = None;
+        session.structure_id = None;
+    }
     let arena = ctx.systems.get_or_spawn(32_000_001);
     let center = DVec3::from_array(arena_offset);
     if arena.get_ball_snapshot(end_gate_id).await.ok().flatten().is_none() {

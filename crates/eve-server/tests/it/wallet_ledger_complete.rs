@@ -616,6 +616,7 @@ async fn test_corporation_and_personal_bills_and_autopay() {
         for d in &mut corp.wallet_divisions {
             d.balance = IskCents::from_isk(1_000_000);
         }
+        corp.set_division_balance(1, IskCents::from_isk(1_000_000));
     });
 
     let p_bill = create_bill(&ctx, 1, P1, landlord_corp, 2_500.0, now + 3600, 0.0, 0, 0);

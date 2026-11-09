@@ -100,9 +100,11 @@ pub async fn handle(
                 || ctx.db.with_snapshot(|s| s.structures.contains_key(&sid))
         })
     {
-        if let Some(res) = crate::services::combat_crimewatch::combat_weapons::handle_weapons(
-            ctx, session, service, method, args, kwargs,
-        )
+        if let Some(res) = crate::router::box_fut(|| {
+            crate::services::combat_crimewatch::combat_weapons::handle_weapons(
+                ctx, session, service, method, args, kwargs,
+            )
+        })
         .await
         {
             return Some(res);
@@ -132,10 +134,68 @@ pub async fn handle(
         }
 
         ("invbroker", "GetContainerContents") => {
-            Some(super::inventory_stacking::handle_get_container_contents(ctx, session, bound_entry, args, kwargs).await)
+            Some(
+                crate::router::box_fut(|| {
+                    super::inventory_stacking::handle_get_container_contents(
+                        ctx, session, bound_entry, args, kwargs,
+                    )
+                })
+                .await,
+            )
         }
 
         ("invbroker", "Add") => {
+            crate::router::box_fut(|| {
+                handle_invbroker_add(ctx, session, bound_entry, args, kwargs)
+            })
+            .await
+        }
+
+        ("ship", "Jettison") | ("invbroker", "Jettison") => {
+            Some(crate::router::box_fut(|| handle_ship_jettison(ctx, session, args, kwargs)).await)
+        }
+
+        ("ship", "Drop") => {
+            Some(crate::router::box_fut(|| handle_ship_drop(ctx, session, args, kwargs)).await)
+        }
+        ("invbroker", "MultiAdd") => {
+            Some(
+                crate::router::box_fut(|| {
+                    super::inventory_stacking::handle_multi_add(
+                        ctx, session, bound_entry, args, kwargs,
+                    )
+                })
+                .await,
+            )
+        }
+
+        _ => {
+            if let Some(res) = super::inventory_stacking::handle_stack_ops(ctx, session, bound_entry, service, method, args, kwargs) { return Some(res); }
+            if session.structure_id.is_some() && session.structure_id == session.ship_id {
+                if let Some(res) = crate::router::box_fut(|| crate::services::combat_crimewatch::combat_weapons::handle_weapons(ctx, session, service, method, args, kwargs)).await { return Some(res); }
+            }
+            if let Some(res) = crate::router::box_fut(|| handle_dogma_im(ctx, session, bound_entry, service, method, args, kwargs)).await { return Some(res); }
+            if let Some(res) = crate::router::box_fut(|| handle_dogma_ops(ctx, session, bound_entry, service, method, args, kwargs)).await { return Some(res); }
+            if let Some(res) = crate::router::box_fut(|| handle_module_cycles(ctx, session, bound_entry, service, method, args, kwargs)).await { return Some(res); }
+            if let Some(res) = crate::router::box_fut(|| handle_mining_and_deactivate(ctx, session, bound_entry, service, method, args, kwargs)).await { return Some(res); }
+            if let Some(res) = crate::router::box_fut(|| handle_fitting_mgr(ctx, session, bound_entry, service, method, args, kwargs)).await { return Some(res); }
+            if let Some(res) = crate::router::box_fut(|| handle_ships_and_services(ctx, session, bound_entry, service, method, args, kwargs)).await { return Some(res); }
+            if let Some(res) = crate::router::box_fut(|| handle_containers_ships_and_fitting(ctx, session, bound_entry, service, method, args, kwargs)).await { return Some(res); }
+            if let Some(res) = crate::router::box_fut(|| handle_ships_mastery_and_fitting_ext(ctx, session, bound_entry, service, method, args, kwargs)).await { return Some(res); }
+            if let Some(res) = crate::router::box_fut(|| handle_superweapons_dbuffs_and_clones(ctx, session, bound_entry, service, method, args, kwargs)).await { return Some(res); }
+            if let Some(res) = crate::router::box_fut(|| handle_cyno_portal(ctx, session, service, method, args)).await { return Some(res); }
+            None
+        }
+    }
+}
+
+async fn handle_invbroker_add(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1736,37 +1796,6 @@ pub async fn handle(
                 }
                 Err(e) => Some(Err(e)),
             }
-        }
-
-        ("ship", "Jettison") | ("invbroker", "Jettison") => {
-            Some(handle_ship_jettison(ctx, session, args, kwargs).await)
-        }
-
-        ("ship", "Drop") => {
-            Some(handle_ship_drop(ctx, session, args, kwargs).await)
-        }
-        ("invbroker", "MultiAdd") => {
-            Some(super::inventory_stacking::handle_multi_add(ctx, session, bound_entry, args, kwargs).await)
-        }
-
-        _ => {
-            if let Some(res) = super::inventory_stacking::handle_stack_ops(ctx, session, bound_entry, service, method, args, kwargs) { return Some(res); }
-            if session.structure_id.is_some() && session.structure_id == session.ship_id {
-                if let Some(res) = crate::services::combat_crimewatch::combat_weapons::handle_weapons(ctx, session, service, method, args, kwargs).await { return Some(res); }
-            }
-            if let Some(res) = handle_dogma_im(ctx, session, bound_entry, service, method, args, kwargs).await { return Some(res); }
-            if let Some(res) = handle_dogma_ops(ctx, session, bound_entry, service, method, args, kwargs).await { return Some(res); }
-            if let Some(res) = handle_module_cycles(ctx, session, bound_entry, service, method, args, kwargs).await { return Some(res); }
-            if let Some(res) = handle_mining_and_deactivate(ctx, session, bound_entry, service, method, args, kwargs).await { return Some(res); }
-            if let Some(res) = handle_fitting_mgr(ctx, session, bound_entry, service, method, args, kwargs).await { return Some(res); }
-            if let Some(res) = handle_ships_and_services(ctx, session, bound_entry, service, method, args, kwargs).await { return Some(res); }
-            if let Some(res) = handle_containers_ships_and_fitting(ctx, session, bound_entry, service, method, args, kwargs).await { return Some(res); }
-            if let Some(res) = handle_ships_mastery_and_fitting_ext(ctx, session, bound_entry, service, method, args, kwargs).await { return Some(res); }
-            if let Some(res) = handle_superweapons_dbuffs_and_clones(ctx, session, bound_entry, service, method, args, kwargs).await { return Some(res); }
-            if let Some(res) = handle_cyno_portal(ctx, session, service, method, args).await { return Some(res); }
-            None
-        }
-    }
 }
 
 async fn handle_ship_jettison(

@@ -200,3 +200,120 @@ fn clone_jump_reset_and_contract_helpers_kill_mutations() {
         panic!("expected List");
     }
 }
+
+#[test]
+fn demoted_or_expelled_director_cannot_use_stale_session_corp_role_on_contract_helpers() {
+    let ctx = make_ctx();
+    let ceo_id = 90_000_001_i64;
+    let ex_dir_id = 90_000_002_i64;
+    let real_corp = 98_000_777_i64;
+    let station_id = 60_003_760_i64;
+    let cid = 770_901_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&ex_dir_id) {
+            ch.corporation_id = real_corp;
+        }
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = real_corp;
+        corp.ceo_id = ceo_id;
+        corp.name = "RealCorp".into();
+        corp.ticker = "RCRP".into();
+        corp.members = [ceo_id, ex_dir_id].into_iter().collect();
+        corp.member_roles = [
+            (ceo_id, u64::MAX),
+            (
+                ex_dir_id,
+                eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_CONTRACT_MANAGER,
+            ),
+        ]
+        .into_iter()
+        .collect();
+        snap.corporations.insert(real_corp, corp);
+        snap.contracts.insert(
+            cid,
+            ContractRecord {
+                contract_id: cid,
+                issuer_id: ceo_id,
+                issuer_corp_id: real_corp,
+                for_corp: true,
+                status: "Outstanding".into(),
+                start_station_id: station_id,
+                reward: IskCents(0),
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut stale_sess = make_session(ex_dir_id, real_corp, Some(30_000_142));
+    stale_sess.corp_role =
+        eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_CONTRACT_MANAGER;
+
+    // 1) Demote ex_dir_id in DB (`member_roles` set to 0) -> stale session must be denied.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations
+            .get_mut(&real_corp)
+            .unwrap()
+            .member_roles
+            .insert(ex_dir_id, 0);
+        snap.corp_governance
+            .entry(real_corp)
+            .or_default()
+            .role_drop_timestamps
+            .insert(ex_dir_id, ctx.now_unix());
+    });
+    assert_eq!(
+        handle_contract_delete_notif(
+            &ctx,
+            &stale_sess,
+            "DeleteContractNotification",
+            &[PyRep::Integer(cid), PyRep::Bool(true)],
+        )
+        .unwrap_err()
+        .code,
+        "CrpAccessDenied"
+    );
+    let bulk_demoted =
+        handle_contract_delete_multiple(&ctx, &stale_sess, &[PyRep::Integer(cid)]).unwrap();
+    if let PyRep::Tuple(parts) = bulk_demoted {
+        assert_eq!(parts[0], PyRep::List(vec![]));
+        assert_eq!(parts[1], PyRep::List(vec![PyRep::Integer(cid)]));
+    } else {
+        panic!("expected Tuple from DeleteMultipleContracts");
+    }
+
+    // 2) Expel ex_dir_id (`members` / `member_roles` / `role_drop_timestamps` removed and >24h elapsed)
+    // -> stale session must STILL be denied.
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.get_mut(&real_corp).unwrap();
+        corp.members.remove(&ex_dir_id);
+        corp.member_roles.remove(&ex_dir_id);
+        if let Some(gov) = snap.corp_governance.get_mut(&real_corp) {
+            gov.role_drop_timestamps.remove(&ex_dir_id);
+        }
+    });
+    ctx.advance_secs(90_000);
+
+    assert_eq!(
+        handle_contract_delete_notif(
+            &ctx,
+            &stale_sess,
+            "DeleteContractNotification",
+            &[PyRep::Integer(cid), PyRep::Bool(true)],
+        )
+        .unwrap_err()
+        .code,
+        "CrpAccessDenied"
+    );
+    let bulk_expelled =
+        handle_contract_delete_multiple(&ctx, &stale_sess, &[PyRep::Integer(cid)]).unwrap();
+    if let PyRep::Tuple(parts) = bulk_expelled {
+        assert_eq!(parts[0], PyRep::List(vec![]));
+        assert_eq!(parts[1], PyRep::List(vec![PyRep::Integer(cid)]));
+    } else {
+        panic!("expected Tuple from DeleteMultipleContracts");
+    }
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.contracts.contains_key(&cid), "demoted/expelled director must not delete corp contract");
+    });
+}

@@ -319,7 +319,7 @@ pub struct DroneSpaceState {
     pub tp_sig_bonus_pct: f64,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExtendedNpcEntity {
     pub ball_id: i64,
     pub type_id: u32,
@@ -819,6 +819,7 @@ pub fn flush_combat_runtime_to_db(ctx: &ServerContext) {
     if ctx.db.is_write_locked_by_current_thread() {
         return;
     }
+    let rb_before = ctx.db.rollback_epoch();
     ctx.db.with_mut_snapshot(|s| {
         let mut guard = ctx
             .combat_ephemeral
@@ -827,6 +828,13 @@ pub fn flush_combat_runtime_to_db(ctx: &ServerContext) {
         s.combat_crimewatch_state = guard.to_persisted();
         guard.synced_db_epoch = 0;
     });
+    if ctx.db.rollback_epoch() == rb_before {
+        let mut guard = ctx
+            .combat_ephemeral
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.synced_db_epoch = rb_before;
+    }
 }
 
 pub fn with_combat_runtime<R>(
@@ -902,15 +910,21 @@ pub async fn evaluate_effective_signature_radius(
     ship_id: i64,
     solar_system_id: u32,
 ) -> f64 {
+    let tp_mult = ctx.effective_target_painter_multiplier(ship_id);
     let base_sig = if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
         let eval_ctx = fit.evaluated_context(&ctx.sde);
         let sig = eval_ctx.ship.get_attribute(eve_sde::attr_ids::SIGNATURE_RADIUS, &ctx.sde);
-        if sig > 0.0 {
+        let fitted_sig = if sig > 0.0 {
             sig
         } else {
             fit.ship
                 .get_attribute(eve_sde::attr_ids::SIGNATURE_RADIUS, &ctx.sde)
                 .max(35.0)
+        };
+        if tp_mult > 1.0 + 1e-6 {
+            fitted_sig / tp_mult
+        } else {
+            fitted_sig
         }
     } else {
         ctx.db
@@ -944,19 +958,27 @@ pub async fn evaluate_effective_signature_radius(
         mult
     });
     let unbloomed_sig = base_sig;
-    let bloom_mult = if mwd_bloom_mult > 1.0 && base_sig < 150.0 {
+    let bloom_mult = if mwd_bloom_mult > 1.0 && unbloomed_sig < 150.0 {
         mwd_bloom_mult
     } else {
         1.0
     };
-    let effective_sig = unbloomed_sig * bloom_mult;
+    let effective_sig = unbloomed_sig * bloom_mult * tp_mult;
+    let tp_sig_mult = (tp_mult > 1.0 + 1e-6).then_some(tp_mult);
+    let ext_sig_mult = (bloom_mult > 1.0).then_some(bloom_mult);
 
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
     if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ship_id).await {
-        if (ball.radius - effective_sig).abs() > 1e-3 {
-            if let Ok(Some(mut cs)) = sys_handle.get_combat_state(ship_id).await {
+        if let Ok(Some(mut cs)) = sys_handle.get_combat_state(ship_id).await {
+            let cs_mismatch = (cs.tp_sig_multiplier.unwrap_or(1.0) - tp_mult).abs() > 1e-6
+                || (cs.external_sig_multiplier.unwrap_or(1.0) - bloom_mult).abs() > 1e-6
+                || cs
+                    .base_signature_radius
+                    .is_some_and(|b| (b - unbloomed_sig).abs() > 1e-3);
+            if (ball.radius - effective_sig).abs() > 1e-3 || cs_mismatch {
                 cs.base_signature_radius = Some(unbloomed_sig);
-                cs.external_sig_multiplier = (bloom_mult > 1.0).then_some(bloom_mult);
+                cs.tp_sig_multiplier = tp_sig_mult;
+                cs.external_sig_multiplier = ext_sig_mult;
                 cs.signature_radius = effective_sig;
                 let _ = sys_handle.set_combat_state(ship_id, cs).await;
             }

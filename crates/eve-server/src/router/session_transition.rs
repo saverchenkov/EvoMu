@@ -173,6 +173,7 @@ pub struct SessionTransitionSpec {
     pub arrive_ball_pos: Option<DVec3>,
     pub spawn_destination_ball: bool,
     pub accept_ballpark_dock: Option<(i64, DVec3)>,
+    pub preserve_session_ship: bool,
 }
 
 impl SessionTransitionSpec {
@@ -196,6 +197,7 @@ impl SessionTransitionSpec {
                 arrive_ball_pos: None,
                 spawn_destination_ball: false,
                 accept_ballpark_dock: None,
+                preserve_session_ship: false,
             },
             TransitionKind::Undock { .. } => Self {
                 char_id,
@@ -215,6 +217,7 @@ impl SessionTransitionSpec {
                 arrive_ball_pos: None,
                 spawn_destination_ball: false,
                 accept_ballpark_dock: None,
+                preserve_session_ship: false,
             },
             TransitionKind::JumpSystem { .. } => Self {
                 char_id,
@@ -234,6 +237,7 @@ impl SessionTransitionSpec {
                 arrive_ball_pos: None,
                 spawn_destination_ball: false,
                 accept_ballpark_dock: None,
+                preserve_session_ship: false,
             },
             TransitionKind::BoardShip { .. } | TransitionKind::EjectToPod { .. } => Self {
                 char_id,
@@ -253,6 +257,7 @@ impl SessionTransitionSpec {
                 arrive_ball_pos: None,
                 spawn_destination_ball: false,
                 accept_ballpark_dock: None,
+                preserve_session_ship: false,
             },
             TransitionKind::CloneJump { .. } => Self {
                 char_id,
@@ -272,6 +277,7 @@ impl SessionTransitionSpec {
                 arrive_ball_pos: None,
                 spawn_destination_ball: false,
                 accept_ballpark_dock: None,
+                preserve_session_ship: false,
             },
             TransitionKind::DeathRespawn { .. } => Self {
                 char_id,
@@ -291,6 +297,7 @@ impl SessionTransitionSpec {
                 arrive_ball_pos: None,
                 spawn_destination_ball: false,
                 accept_ballpark_dock: None,
+                preserve_session_ship: false,
             },
             TransitionKind::Teleport { .. } => Self {
                 char_id,
@@ -310,6 +317,7 @@ impl SessionTransitionSpec {
                 arrive_ball_pos: None,
                 spawn_destination_ball: false,
                 accept_ballpark_dock: None,
+                preserve_session_ship: false,
             },
             TransitionKind::CharacterLogin { .. } => Self {
                 char_id,
@@ -329,6 +337,7 @@ impl SessionTransitionSpec {
                 arrive_ball_pos: None,
                 spawn_destination_ball: false,
                 accept_ballpark_dock: None,
+                preserve_session_ship: false,
             },
             TransitionKind::Logout => Self {
                 char_id,
@@ -348,6 +357,7 @@ impl SessionTransitionSpec {
                 arrive_ball_pos: None,
                 spawn_destination_ball: false,
                 accept_ballpark_dock: None,
+                preserve_session_ship: false,
             },
         }
     }
@@ -395,6 +405,11 @@ impl SessionTransitionSpec {
 
     pub fn with_accept_ballpark_dock(mut self, dock_id: i64, dock_pos: DVec3) -> Self {
         self.accept_ballpark_dock = Some((dock_id, dock_pos));
+        self
+    }
+
+    pub fn with_preserve_session_ship(mut self, preserve: bool) -> Self {
+        self.preserve_session_ship = preserve;
         self
     }
 }
@@ -836,10 +851,35 @@ pub fn sync_session_from_character(
     sync_quasar: bool,
     emit_changed: bool,
 ) -> HashMap<String, (PyRep, PyRep)> {
+    sync_session_from_character_with_override(
+        ctx,
+        session,
+        prev_snapshot,
+        ch_opt,
+        None,
+        reason,
+        invalidate_bounds,
+        sync_quasar,
+        emit_changed,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sync_session_from_character_with_override(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    prev_snapshot: Option<&SessionState>,
+    ch_opt: Option<&CharacterRecord>,
+    override_ship: Option<Option<i64>>,
+    reason: &str,
+    invalidate_bounds: bool,
+    sync_quasar: bool,
+    emit_changed: bool,
+) -> HashMap<String, (PyRep, PyRep)> {
     let prev = prev_snapshot.cloned().unwrap_or_else(|| session.clone());
     match ch_opt {
         Some(ch) => {
-            apply_session_from_character(session, ch, None, Some(&ctx.sde));
+            apply_session_from_character(session, ch, override_ship, Some(&ctx.sde));
         }
         None => {
             clear_session_character_state(session);
@@ -890,6 +930,57 @@ fn run_departing_space_cleanup_sync(
         crate::services::space_navigation_advanced::deactivate_ship_modules_on_leave_space(
             ctx, char_id, ship_id,
         );
+    }
+}
+
+fn apply_spec_destination_to_character_copy(
+    sde: &SdeRegistry,
+    ch: &mut CharacterRecord,
+    dest_loc: TransitionLocation,
+    target_ship: Option<i64>,
+) {
+    match dest_loc {
+        TransitionLocation::Space { solar_system_id } => {
+            ch.solar_system_id = solar_system_id;
+            let (cid, rid) =
+                resolve_system_hierarchy(sde, solar_system_id, ch.constellation_id, ch.region_id);
+            ch.constellation_id = cid;
+            ch.region_id = rid;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        TransitionLocation::Station {
+            solar_system_id,
+            station_id,
+        } => {
+            if let Some(sys_id) = solar_system_id {
+                ch.solar_system_id = sys_id;
+                let (cid, rid) =
+                    resolve_system_hierarchy(sde, sys_id, ch.constellation_id, ch.region_id);
+                ch.constellation_id = cid;
+                ch.region_id = rid;
+            }
+            ch.station_id = Some(station_id);
+            ch.structure_id = None;
+        }
+        TransitionLocation::Structure {
+            solar_system_id,
+            structure_id,
+        } => {
+            if let Some(sys_id) = solar_system_id {
+                ch.solar_system_id = sys_id;
+                let (cid, rid) =
+                    resolve_system_hierarchy(sde, sys_id, ch.constellation_id, ch.region_id);
+                ch.constellation_id = cid;
+                ch.region_id = rid;
+            }
+            ch.structure_id = Some(structure_id);
+            ch.station_id = None;
+        }
+        TransitionLocation::KeepCurrent | TransitionLocation::ClearAll => {}
+    }
+    if let Some(sid) = target_ship {
+        ch.active_ship_id = sid;
     }
 }
 
@@ -953,7 +1044,18 @@ impl ServerContext {
                 .map_err(db_err_to_rpc)?;
             Some(ch)
         } else {
-            self.db.get_character(spec.char_id).ok()
+            let mut ch_opt = self.db.get_character(spec.char_id).ok();
+            if !matches!(spec.kind, TransitionKind::CharacterLogin { .. }) {
+                if let Some(ref mut ch) = ch_opt {
+                    apply_spec_destination_to_character_copy(
+                        &self.sde,
+                        ch,
+                        dest_loc,
+                        target_ship,
+                    );
+                }
+            }
+            ch_opt
         };
 
         if spec.sync_local_chat {
@@ -969,12 +1071,18 @@ impl ServerContext {
             }
         }
 
+        let override_ship = if spec.preserve_session_ship && prev_session.ship_id.is_some() {
+            Some(prev_session.ship_id)
+        } else {
+            None
+        };
         let diff = if let Some(sess) = session.as_deref_mut() {
-            sync_session_from_character(
+            sync_session_from_character_with_override(
                 self,
                 sess,
                 Some(&prev_session),
                 updated_ch.as_ref(),
+                override_ship,
                 spec.reason,
                 spec.invalidate_bounds,
                 spec.sync_quasar_gateway,
@@ -983,7 +1091,7 @@ impl ServerContext {
         } else {
             let mut next_synth = prev_session.clone();
             if let Some(ref ch) = updated_ch {
-                apply_session_from_character(&mut next_synth, ch, None, Some(&self.sde));
+                apply_session_from_character(&mut next_synth, ch, override_ship, Some(&self.sde));
             } else {
                 clear_session_character_state(&mut next_synth);
             }
@@ -1103,7 +1211,18 @@ impl ServerContext {
                 .map_err(db_err_to_rpc)?;
             Some(ch)
         } else {
-            self.db.get_character(spec.char_id).ok()
+            let mut ch_opt = self.db.get_character(spec.char_id).ok();
+            if !matches!(spec.kind, TransitionKind::CharacterLogin { .. }) {
+                if let Some(ref mut ch) = ch_opt {
+                    apply_spec_destination_to_character_copy(
+                        &self.sde,
+                        ch,
+                        dest_loc,
+                        target_ship,
+                    );
+                }
+            }
+            ch_opt
         };
 
         let mut arrival_tick = None;
@@ -1164,12 +1283,18 @@ impl ServerContext {
             }
         }
 
+        let override_ship = if spec.preserve_session_ship && prev_session.ship_id.is_some() {
+            Some(prev_session.ship_id)
+        } else {
+            None
+        };
         let diff = if let Some(sess) = session.as_deref_mut() {
-            sync_session_from_character(
+            sync_session_from_character_with_override(
                 self,
                 sess,
                 Some(&prev_session),
                 updated_ch.as_ref(),
+                override_ship,
                 spec.reason,
                 spec.invalidate_bounds,
                 spec.sync_quasar_gateway,
@@ -1178,7 +1303,7 @@ impl ServerContext {
         } else {
             let mut next_synth = prev_session.clone();
             if let Some(ref ch) = updated_ch {
-                apply_session_from_character(&mut next_synth, ch, None, Some(&self.sde));
+                apply_session_from_character(&mut next_synth, ch, override_ship, Some(&self.sde));
             } else {
                 clear_session_character_state(&mut next_synth);
             }

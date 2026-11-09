@@ -242,6 +242,12 @@ async fn test_insurance_contracts_get_for_ship_and_corp_roles() {
     let corp_denied = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "GetContracts", &[PyRep::Bool(true)], &kw, None).await.unwrap_err();
     assert_eq!(corp_denied.code, "CorpRoleDenied");
 
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(corp) = s.corporations.get_mut(&test_corp_id) {
+            corp.member_roles
+                .insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR);
+        }
+    });
     sess.corp_role |= eve_db::corp_roles::ROLE_DIRECTOR;
     let corp_contracts = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "GetContracts", &[PyRep::Bool(true)], &kw, None).await.unwrap();
     let PyRep::List(_) = corp_contracts else { panic!("expected List") };

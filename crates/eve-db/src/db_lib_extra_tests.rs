@@ -122,6 +122,7 @@ fn test_sp6_persisted_state_and_entries_serde_defaults_and_roundtrip() {
             warp_end_ft: None,
         },
     );
+    full.server_runtime_json = Some("{\"active_warps\":{}}".into());
 
     let json = serde_json::to_string(&full).expect("serialize full Sp6PersistedState");
     let decoded: Sp6PersistedState =

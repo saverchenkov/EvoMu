@@ -345,7 +345,7 @@ async fn test_so2_corporation_roles_applications_and_wallet_divisions() {
         .expect("GetWalletDivisionsInfo");
     let PyRep::Rowset { rows: init_divs, .. } = &divs_rep else { panic!() };
     assert_eq!(init_divs.len(), 7, "Corporation must have 7 wallet divisions (1000..1006 / 1..7)");
-    assert_eq!(init_divs[0], vec![PyRep::Integer(1), PyRep::String("Master Wallet".into()), PyRep::Real(0.0)]);
+    assert_eq!(init_divs[0], vec![PyRep::Integer(1), PyRep::String("Master Wallet".into()), PyRep::Real(0.0), PyRep::Integer(1000)]);
 
     ctx.dispatch_rpc(
         &mut sess1,
@@ -519,8 +519,8 @@ async fn test_so2_corporation_roles_applications_and_wallet_divisions() {
         .await
         .expect("GetWalletDivisionsInfo after transfer");
     let PyRep::Rowset { rows: divs_after_rows, .. } = &divs_after else { panic!() };
-    assert_eq!(divs_after_rows[0], vec![PyRep::Integer(1), PyRep::String("Master Wallet".into()), PyRep::Real(40_000_000.0)]);
-    assert_eq!(divs_after_rows[1], vec![PyRep::Integer(2), PyRep::String("Combat SRP".into()), PyRep::Real(10_000_000.0)]);
+    assert_eq!(divs_after_rows[0], vec![PyRep::Integer(1), PyRep::String("Master Wallet".into()), PyRep::Real(40_000_000.0), PyRep::Integer(1000)]);
+    assert_eq!(divs_after_rows[1], vec![PyRep::Integer(2), PyRep::String("Combat SRP".into()), PyRep::Real(10_000_000.0), PyRep::Integer(1001)]);
 
     // 8. Verify role bitmask enforcement: Pilot 2 (not director/CEO) cannot UpdateMember
     let denied = ctx

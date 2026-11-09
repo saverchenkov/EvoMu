@@ -425,7 +425,10 @@ async fn test_b29_crimewatch_persist_restart_and_movement_restrictions() {
         let PyRep::Tuple(top) = &st1 else { panic!("expected Tuple from GetClientStates, got {st1:?}"); };
         assert_eq!(top[3], PyRep::Integer(0));
         let PyRep::Tuple(timers) = &top[0] else { panic!("expected timers Tuple, got {:?}", top[0]); };
-        assert_eq!(timers.get(3), Some(&PyRep::Tuple(vec![PyRep::Integer(301), PyRep::Integer(unix_to_ft(crim_exp))])));
+        // Weapons, PvP, and criminal timers were emitted before restart, so with persisted
+        // `crimewatch_timer_states`/`crimewatch_timer_triggered_at` (#592) at `t0 + 30` they
+        // remain in their counting-down state (`303`) identically to an uninterrupted server.
+        assert_eq!(timers.get(3), Some(&PyRep::Tuple(vec![PyRep::Integer(303), PyRep::Integer(unix_to_ft(crim_exp))])));
 
         let mut s3 = SessionState::new(9306);
         s3.user_id = Some(30);
@@ -433,7 +436,7 @@ async fn test_b29_crimewatch_persist_restart_and_movement_restrictions() {
         let st3 = rpc(&ctx2, &mut s3, "crimewatch", "GetClientStates", &[]).await;
         let PyRep::Tuple(top3) = &st3 else { panic!("expected Tuple from GetClientStates, got {st3:?}"); };
         let PyRep::Tuple(timers3) = &top3[0] else { panic!("expected timers Tuple, got {:?}", top3[0]); };
-        assert!(timers3.contains(&PyRep::Tuple(vec![PyRep::Integer(301), PyRep::Integer(unix_to_ft(susp_exp))])));
+        assert!(timers3.contains(&PyRep::Tuple(vec![PyRep::Integer(303), PyRep::Integer(unix_to_ft(susp_exp))])));
         ctx2.db.with_snapshot(|snap| {
             assert!(!snap.kill_rights.is_empty());
             assert_eq!(snap.zarzakh_gate_locks.get(&PILOT_4).map(|(g, _)| *g), Some(zz_allowed_gate));

@@ -719,8 +719,7 @@ async fn test_esi5_corporation_divisions_blueprints_and_standings() {
                         balance: IskCents::from_isk(80_000_000),
                     },
                 ];
-                let __mw = IskCents::from_isk(100_000_000);
-                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp.ensure_wallet_divisions();
                 __corp },
         );
 

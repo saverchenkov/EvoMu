@@ -54,7 +54,9 @@ pub(crate) async fn handle_abyssal_gate_activation(
     args: &[PyRep],
     _kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
-    let gate_id = crate::router::RpcArgs::positional(args).req_positive_i64(0, "gateID")?;
+    let gate_id = crate::router::RpcArgs::positional(args)
+        .opt_i64(0, "gateID")?
+        .unwrap_or(0);
     let _cur_sys = session.solar_system_id.ok_or_else(err_no_solar_system)?;
     let ship_id = session.ship_id.ok_or_else(err_no_active_ship)?;
 
@@ -330,7 +332,9 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
     char_id: i64,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let gate_id = crate::router::RpcArgs::positional(args).req_positive_i64(0, "gateID")?;
+    let gate_id = crate::router::RpcArgs::positional(args)
+        .opt_i64(0, "gateID")?
+        .unwrap_or(0);
     let pocket_sys = session.solar_system_id.ok_or_else(err_no_solar_system)?;
     let ship_id = session.ship_id.ok_or_else(err_no_active_ship)?;
 
@@ -918,7 +922,9 @@ pub(crate) async fn handle_void_space_end_gate_activation(
     char_id: i64,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let gate_id = crate::router::RpcArgs::positional(args).req_positive_i64(0, "gateID")?;
+    let gate_id = crate::router::RpcArgs::positional(args)
+        .opt_i64(0, "gateID")?
+        .unwrap_or(0);
     let cur_sys = session.solar_system_id.ok_or_else(err_no_solar_system)?;
     if cur_sys != VOID_SPACE_SYSTEM_ID {
         return Err(BridgeRpcError::user_error("NotInVoidSpace"));

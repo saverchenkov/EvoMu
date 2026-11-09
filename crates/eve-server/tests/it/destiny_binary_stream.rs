@@ -1114,6 +1114,8 @@ async fn test_hic_warp_disruption_field_generator_bubble_and_focused_script() {
     jita_handle.spawn_ball(hic_ball).await.unwrap();
     let base_cs = ctx.build_ship_combat_state(hic_char_id, hic_ship_id, 11995);
     let base_sig = base_cs.signature_radius;
+    let base_vel = base_cs.base_max_velocity.unwrap_or(185.0);
+    let base_mass = base_cs.base_mass.unwrap_or(12_600_000.0);
     jita_handle.set_combat_state(hic_ship_id, base_cs).await.unwrap();
 
     // Place victim at (10,000m, 0, 0) -> inside the 16,000m unscripted WDFG bubble
@@ -1146,11 +1148,11 @@ async fn test_hic_warp_disruption_field_generator_bubble_and_focused_script() {
     // Verify HIC self-penalties (velocity -60%, mass +80M kg, sig radius +50%, disallow_assistance = true)
     let (_, hic_ball_active) = jita_handle.get_ball_snapshot(hic_ship_id).await.unwrap().unwrap();
     assert!(
-        (hic_ball_active.max_velocity - 185.0 * 0.40).abs() < 1.0,
+        (hic_ball_active.max_velocity - base_vel * 0.40).abs() < 1.0,
         "Unscripted WDFG must reduce HIC max velocity by 60%"
     );
     assert!(
-        (hic_ball_active.mass - (12_600_000.0 + 80_000_000.0)).abs() < 100.0,
+        (hic_ball_active.mass - (base_mass + 80_000_000.0)).abs() < 100.0,
         "Unscripted WDFG must add 80,000,000 kg mass penalty"
     );
     let hic_cs_active = jita_handle.get_combat_state(hic_ship_id).await.unwrap().unwrap();
@@ -1211,8 +1213,8 @@ async fn test_hic_warp_disruption_field_generator_bubble_and_focused_script() {
     .expect("Deactivate unscripted WDFG");
 
     let (_, hic_ball_restored) = jita_handle.get_ball_snapshot(hic_ship_id).await.unwrap().unwrap();
-    assert!((hic_ball_restored.max_velocity - 185.0).abs() < 1.0);
-    assert!((hic_ball_restored.mass - 12_600_000.0).abs() < 100.0);
+    assert!((hic_ball_restored.max_velocity - base_vel).abs() < 1.0);
+    assert!((hic_ball_restored.mass - base_mass).abs() < 100.0);
     let hic_cs_restored = jita_handle.get_combat_state(hic_ship_id).await.unwrap().unwrap();
     assert!(!hic_cs_restored.disallow_assistance);
 

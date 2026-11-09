@@ -76,9 +76,12 @@ pub async fn handle_weapons(
             };
 
             if controlling_structure {
-                if let Some(res) = crate::services::structure_standup_weapons::try_activate_standup_weapon(
-                    ctx, &sys_handle, char_id, ship_id, sys_id, module_id, target_id_opt, &attacker_ball,
-                ).await {
+                if let Some(res) = crate::router::box_fut(|| {
+                    crate::services::structure_standup_weapons::try_activate_standup_weapon(
+                        ctx, &sys_handle, char_id, ship_id, sys_id, module_id, target_id_opt, &attacker_ball,
+                    )
+                })
+                .await {
                     return Some(res);
                 }
             }
@@ -121,9 +124,12 @@ pub async fn handle_weapons(
                     message: format!("Module type {} not found in SDE", m.type_id),
                 }));
             };
-            if let Some(res) = crate::services::structure_standup_weapons::try_activate_standup_weapon(
-                ctx, &sys_handle, char_id, ship_id, sys_id, module_id, target_id_opt, &attacker_ball,
-            ).await {
+            if let Some(res) = crate::router::box_fut(|| {
+                crate::services::structure_standup_weapons::try_activate_standup_weapon(
+                    ctx, &sys_handle, char_id, ship_id, sys_id, module_id, target_id_opt, &attacker_ball,
+                )
+            })
+            .await {
                 return Some(res);
             }
             if !controlling_structure {
@@ -351,11 +357,32 @@ pub async fn handle_weapons(
 
             // 1b. Salvager (`group_id == 1122`) and Tractor Beam (`group_id == 650`) (`C-7`)
             if matches!(mod_type.group_id, 1122 | 650) {
-                return activate_salvager_or_tractor_module(
+                return crate::router::box_fut(|| {
+                    activate_salvager_or_tractor_module(
+                        ctx,
+                        char_id,
+                        ship_id,
+                        sys_id,
+                        module_id,
+                        &m,
+                        mod_type,
+                        &attacker_ball,
+                        target_id_opt,
+                        kwargs,
+                    )
+                })
+                .await;
+            }
+
+            // 2-4. Smartbomb (`72`), Bomb Launcher (`862`), and Defender Launcher (`512`) (`C-2`)
+            if let Some(aoe_res) = crate::router::box_fut(|| {
+                activate_aoe_or_defender_module(
                     ctx,
                     char_id,
                     ship_id,
                     sys_id,
+                    sys_sec,
+                    now_unix,
                     module_id,
                     &m,
                     mod_type,
@@ -363,24 +390,7 @@ pub async fn handle_weapons(
                     target_id_opt,
                     kwargs,
                 )
-                .await;
-            }
-
-            // 2-4. Smartbomb (`72`), Bomb Launcher (`862`), and Defender Launcher (`512`) (`C-2`)
-            if let Some(aoe_res) = activate_aoe_or_defender_module(
-                ctx,
-                char_id,
-                ship_id,
-                sys_id,
-                sys_sec,
-                now_unix,
-                module_id,
-                &m,
-                mod_type,
-                &attacker_ball,
-                target_id_opt,
-                kwargs,
-            )
+            })
             .await
             {
                 return Some(aoe_res);
@@ -1005,9 +1015,9 @@ pub async fn handle_weapons(
                             drf,
                         );
                         if let Some((arc_app, arc_destroyed, _)) =
-                            crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(
+                            crate::router::box_fut(|| crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(
                                 ctx, &sys_handle, sys_id, char_id, arc_id, base_dmg.scaled(arc_factor), cycle_secs, now_unix,
-                            )
+                            ))
                             .await
                             .ok()
                             .flatten()

@@ -752,6 +752,7 @@ async fn test_ranged_buy_orders_corp_divisions_multisell_multibuy_expiry_and_his
         for d in &mut corp.wallet_divisions {
             d.balance = IskCents::from_isk(1_000_000);
         }
+        corp.set_division_balance(1, IskCents::from_isk(1_000_000));
         snap.corporations.insert(cid, corp);
 
         // Put 200 Pyerite in CorpSAG3 at Jita for corporate sell order

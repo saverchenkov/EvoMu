@@ -57,7 +57,7 @@ pub(crate) async fn handle_module_cycles(
                     s.items.get(&raw_module_id).and_then(|it| s.structures.contains_key(&it.location_id).then_some(it.location_id))
                 })
             }) {
-                return Some(crate::services::structure_weapons_ops::handle_structure_module_activate(ctx, session, char_id, st_id, raw_module_id, &effect_name, target_id_opt, method == "Overload").await);
+                return Some(crate::router::box_fut(|| crate::services::structure_weapons_ops::handle_structure_module_activate(ctx, session, char_id, st_id, raw_module_id, &effect_name, target_id_opt, method == "Overload")).await);
             }
             if method == "Activate" && effect_name == "online" {
                 let module_id = raw_module_id;
@@ -244,7 +244,7 @@ pub(crate) async fn handle_module_cycles(
             let is_arena_pvp = is_weapon && (32_000_000..33_000_000).contains(&sys_id)
                 && ctx.db.with_snapshot(|s| crate::services::pvp_filament_mgr::load_pvp_store(s).active_matches.values().any(|m| m.active && m.arena_solar_system_id == sys_id));
             if is_fw_pvp || is_arena_pvp || is_upwell_weapon_or_aoe || is_special_target || matches!(mod_type.group_id, 1328 | 1330 | 1333) {
-                return crate::services::combat_crimewatch::combat_weapons::handle_weapons(ctx, session, service, method, args, kwargs).await;
+                return crate::router::box_fut(|| crate::services::combat_crimewatch::combat_weapons::handle_weapons(ctx, session, service, method, args, kwargs)).await;
             }
 
             if (matches!(
@@ -272,7 +272,7 @@ pub(crate) async fn handle_module_cycles(
                     return Some(Err(BridgeRpcError { code: "TargetNotLocked".into(), message: "Mining modules require a locked target asteroid".into() }));
                 };
                 return Some(
-                    crate::services::mining_cycle::activate(ctx, char_id, ship_id, sys_id, module_id, target_id).await,
+                    crate::router::box_fut(|| crate::services::mining_cycle::activate(ctx, char_id, ship_id, sys_id, module_id, target_id)).await,
                 );
             }
 
@@ -302,11 +302,11 @@ pub(crate) async fn handle_module_cycles(
                 } else {
                     "ActivateSinglePointTargetedModule"
                 };
-                return Some(crate::services::tactical_modules::activate_superweapon_or_lance(ctx, char_id, ship_id, sys_id, module_id, sw_method, target_id_opt).await);
+                return Some(crate::router::box_fut(|| crate::services::tactical_modules::activate_superweapon_or_lance(ctx, char_id, ship_id, sys_id, module_id, sw_method, target_id_opt)).await);
             }
             if mod_type.group_id == 1154 {
                 let mod_state = fit.build_effective_module_state(module_id, m.type_id, false, &ctx.sde);
-                return Some(crate::services::tactical_modules::activate_target_spectrum_breaker(ctx, &sys, char_id, ship_id, module_id, mod_type, &mod_state).await);
+                return Some(crate::router::box_fut(|| crate::services::tactical_modules::activate_target_spectrum_breaker(ctx, &sys, char_id, ship_id, module_id, mod_type, &mod_state)).await);
             }
 
             if let Some(res) =
@@ -343,7 +343,7 @@ pub(crate) async fn handle_module_cycles(
                         .max(mod_type.default_attributes.get(&73).copied().unwrap_or(60_000.0))
                         / 1000.0;
                     return Some(
-                        activate_command_burst_module(
+                        crate::router::box_fut(|| activate_command_burst_module(
                             ctx,
                             &sys,
                             char_id,
@@ -355,11 +355,11 @@ pub(crate) async fn handle_module_cycles(
                             m.charge_type_id,
                             duration_s,
                             kwargs,
-                        )
+                        ))
                         .await,
                     );
                 }
-                if let Some(res) = handle_scanner_analyzer_entosis_activation(
+                if let Some(res) = crate::router::box_fut(|| handle_scanner_analyzer_entosis_activation(
                     ctx,
                     &sys,
                     char_id,
@@ -368,7 +368,7 @@ pub(crate) async fn handle_module_cycles(
                     mod_type,
                     &mod_state,
                     target_id_opt,
-                )
+                ))
                 .await
                 {
                     return Some(res);
@@ -379,9 +379,9 @@ pub(crate) async fn handle_module_cycles(
                 if let Some(tid) = target_id_opt.filter(|&t| t > 0) {
                     if ctx.db.with_snapshot(|s| s.sov_runtime.mercenary_dens.contains_key(&tid)) {
                         return Some(
-                            helpers::try_handle_mercden_remote_shield_repair(
+                            crate::router::box_fut(|| helpers::try_handle_mercden_remote_shield_repair(
                                 ctx, &sys, sys_id, char_id, ship_id, module_id, &m, mod_type, &fit, method, tid,
-                            ).await.and_then(|opt| opt.ok_or_else(|| BridgeRpcError::user_error("MercDenRepairFailed")))
+                            )).await.and_then(|opt| opt.ok_or_else(|| BridgeRpcError::user_error("MercDenRepairFailed")))
                         );
                     }
                 }
@@ -390,7 +390,7 @@ pub(crate) async fn handle_module_cycles(
             // Scan Probe Launcher (`group_id == 481`, e.g., `Core Probe Launcher I` `17938`)
             if mod_type.group_id == 481 {
                 return Some(
-                    crate::services::space_destiny::activate_scan_probe_launcher(
+                    crate::router::box_fut(|| crate::services::space_destiny::activate_scan_probe_launcher(
                         ctx,
                         session,
                         &sys,
@@ -403,7 +403,7 @@ pub(crate) async fn handle_module_cycles(
                         effect_name.as_str(),
                         target_id_opt,
                         kwargs,
-                    )
+                    ))
                     .await,
                 );
             }
@@ -429,7 +429,7 @@ pub(crate) async fn handle_module_cycles(
                     }));
                 }
                 return Some(
-                    crate::services::tactical_module_mechanics::activate_interdiction_sphere_launcher(
+                    crate::router::box_fut(|| crate::services::tactical_module_mechanics::activate_interdiction_sphere_launcher(
                         ctx,
                         &sys,
                         sys_id,
@@ -441,7 +441,7 @@ pub(crate) async fn handle_module_cycles(
                         mod_type,
                         effect_name.as_str(),
                         target_id_opt,
-                    )
+                    ))
                     .await,
                 );
             }
@@ -823,10 +823,10 @@ pub(crate) async fn handle_module_cycles(
                     mutadaptive_spool_step, mutadaptive_spool_max,
                     grappler_optimal_m, grappler_falloff_m, grappler_speed_factor_pct,
                     mut deferred_post_cycle,
-                } = match prepare_ewar_and_capital_module(
+                } = match crate::router::box_fut(|| prepare_ewar_and_capital_module(
                     ctx, &sys, sys_id, char_id, ship_id, ship_group_id, module_id, &m, mod_type,
                     &mod_state, &fit, target_id_opt, is_overloaded, is_mwd, is_mjd, kwargs,
-                ).await {
+                )).await {
                     Some(Ok(v)) => v,
                     Some(Err(e)) => return Some(Err(e)),
                     None => unreachable!(),
@@ -1300,9 +1300,9 @@ pub(crate) async fn handle_module_cycles(
                 return Some(Err(BridgeRpcError { code: code.into(), message: e }));
             }
 
-            if let Err(e) = evaluate_module_cycle_aggression_or_assistance(
+            if let Err(e) = crate::router::box_fut(|| evaluate_module_cycle_aggression_or_assistance(
                 ctx, &sys, sys_id, char_id, ship_id, mod_type.group_id, target_id_opt,
-            ).await {
+            )).await {
                 ctx.remove_projected_ewar_by_module(ship_id, module_id);
                 let _ = sys.remove_module_cycle(ship_id, module_id).await;
                 if cap_need > 0.0 {
@@ -1313,10 +1313,10 @@ pub(crate) async fn handle_module_cycles(
                 return Some(Err(e));
             }
 
-            if let Err(e) = commit_post_cycle_activation_effects(
+            if let Err(e) = crate::router::box_fut(|| commit_post_cycle_activation_effects(
                 ctx, &sys, char_id, ship_id, module_id, &m, mod_type, &mod_state,
                 target_id_opt, deferred_post_cycle,
-            ).await {
+            )).await {
                 ctx.remove_projected_ewar_by_module(ship_id, module_id);
                 let _ = sys.remove_module_cycle(ship_id, module_id).await;
                 if cap_need > 0.0 {
@@ -1327,10 +1327,10 @@ pub(crate) async fn handle_module_cycles(
                 return Some(Err(e));
             }
 
-            let instant_rep_opt = match run_pre_notify_instant_module_effects(
+            let instant_rep_opt = match crate::router::box_fut(|| run_pre_notify_instant_module_effects(
                 ctx, &sys, sys_id, char_id, ship_id, module_id, &m, mod_type, &mod_state,
                 is_overloaded, target_id_opt, duration_s, kwargs,
-            ).await {
+            )).await {
                 Ok(rep_opt) => rep_opt,
                 Err(e) => {
                     ctx.remove_projected_ewar_by_module(ship_id, module_id);
@@ -1415,9 +1415,9 @@ pub(crate) async fn handle_module_cycles(
             if let Some(res) = build_specialized_module_result(method, &fit, ctx, module_id, mod_type, hic_bubble_radius_m, warp_scramble_points, active_burst_charge_tid) {
                 Some(Ok(res))
             } else if is_auto_targeter {
-                Some(crate::services::tactical_modules::activate_auto_targeting_system(ctx, &sys, char_id, ship_id, module_id, mod_type, &mod_state, &fit).await)
+                Some(crate::router::box_fut(|| crate::services::tactical_modules::activate_auto_targeting_system(ctx, &sys, char_id, ship_id, module_id, mod_type, &mod_state, &fit)).await)
             } else if mod_type.group_id == 49 || mod_type.default_attributes.contains_key(&197) {
-                Some(Ok(handle_survey_scanner_activation(ctx, &sys, sys_id, char_id, ship_id, module_id, mod_type, &mod_state).await))
+                Some(Ok(crate::router::box_fut(|| handle_survey_scanner_activation(ctx, &sys, sys_id, char_id, ship_id, module_id, mod_type, &mod_state)).await))
             } else {
                 let max_vel = if mod_type.group_id == 330 {
                     sys.get_ball_snapshot(ship_id)

@@ -319,7 +319,7 @@ async fn test_homefront_drifter_triglavian_and_metaliminal_storms_e2e() {
         8,
         "8 Metaliminal storms (2 per weather type) must seed across null-sec"
     );
-    advance_pve_special_clock(&ctx, 25 * 3600);
+    advance_pve_special_clock(&ctx, 48 * 3600);
 
     let after_centers: Vec<SolarSystemId> = read_pve_special_reg(&ctx, |reg| {
         reg.roaming_storms

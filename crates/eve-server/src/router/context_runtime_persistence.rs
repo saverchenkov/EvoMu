@@ -598,10 +598,17 @@ impl ServerContext {
     /// Hydrates all gameplay-affecting `ServerContext` runtime maps from `WorldRepository` (`#592`).
     pub fn hydrate_server_runtime_from_db(&self) {
         let (blob_opt, global_cfg, notifications, persisted_probes) = self.db.with_snapshot(|snap| {
+            let sp6_state = crate::sp6_lifecycle::load_sp6_state_from_snap(snap);
             let blob = snap
-                .service_state_blobs
-                .get(SERVER_RUNTIME_STATE_BLOB_KEY)
-                .cloned();
+                .cluster_and_runtime
+                .server_runtime_json
+                .clone()
+                .or_else(|| sp6_state.server_runtime_json.clone())
+                .or_else(|| {
+                    snap.service_state_blobs
+                        .get(SERVER_RUNTIME_STATE_BLOB_KEY)
+                        .cloned()
+                });
             let gcfg: HashMap<String, eve_proto::PyRep> = snap
                 .service_state_blobs
                 .get("macho_global_config")
@@ -614,21 +621,20 @@ impl ServerContext {
                 .filter_map(|n| serde_json::from_str(&n.note).ok())
                 .collect();
             notifs.sort_by_key(|r| r.notification_id);
-            let probes: HashMap<i64, ActiveScannerProbe> =
-                crate::sp6_lifecycle::load_sp6_state_from_snap(snap)
-                    .active_scanner_probes
-                    .into_iter()
-                    .filter(|(_, p)| p.state >= 0)
-                    .map(|(id, mut p)| {
-                        // Cluster restarts disconnect launched probes (`INACTIVE = 0`) and cancel
-                        // in-flight warp timers so ReconnectToLostProbes can reclaim them.
-                        if p.state > 0 {
-                            p.state = 0;
-                        }
-                        p.warp_end_ft = None;
-                        (id, p)
-                    })
-                    .collect();
+            let probes: HashMap<i64, ActiveScannerProbe> = sp6_state
+                .active_scanner_probes
+                .into_iter()
+                .filter(|(_, p)| p.state >= 0)
+                .map(|(id, mut p)| {
+                    // Cluster restarts disconnect launched probes (`INACTIVE = 0`) and cancel
+                    // in-flight warp timers so ReconnectToLostProbes can reclaim them.
+                    if p.state > 0 {
+                        p.state = 0;
+                    }
+                    p.warp_end_ft = None;
+                    (id, p)
+                })
+                .collect();
             (blob, gcfg, notifs, probes)
         });
         *self
@@ -688,22 +694,38 @@ impl ServerContext {
         }
         let payload = PersistedServerRuntimeState::from_ctx(self);
         if payload.is_empty() {
-            let has_blob = self
-                .db
-                .with_snapshot(|s| s.service_state_blobs.contains_key(SERVER_RUNTIME_STATE_BLOB_KEY));
-            if !has_blob {
+            let has_state = self.db.with_snapshot(|s| {
+                s.cluster_and_runtime.server_runtime_json.is_some()
+                    || s.sp6_lifecycle.server_runtime_json.is_some()
+                    || s.service_state_blobs
+                        .contains_key(SERVER_RUNTIME_STATE_BLOB_KEY)
+            });
+            if !has_state {
                 return;
             }
             let _ = self.db.with_mut_snapshot(|snap| {
-                snap.service_state_blobs.remove(SERVER_RUNTIME_STATE_BLOB_KEY);
+                snap.cluster_and_runtime.server_runtime_json = None;
+                snap.sp6_lifecycle.server_runtime_json = None;
+                snap.service_state_blobs
+                    .remove(SERVER_RUNTIME_STATE_BLOB_KEY);
             });
             return;
         }
         if let Ok(json) = serde_json::to_string(&payload) {
-            let _ = self.db.with_mut_snapshot(|snap| {
-                snap.service_state_blobs
-                    .insert(SERVER_RUNTIME_STATE_BLOB_KEY.to_string(), json);
+            let already_matches = self.db.with_snapshot(|s| {
+                s.cluster_and_runtime.server_runtime_json.as_deref() == Some(json.as_str())
+                    && s.sp6_lifecycle.server_runtime_json.is_none()
+                    && !s.service_state_blobs
+                        .contains_key(SERVER_RUNTIME_STATE_BLOB_KEY)
             });
+            if !already_matches {
+                let _ = self.db.with_mut_snapshot(|snap| {
+                    snap.cluster_and_runtime.server_runtime_json = Some(json);
+                    snap.sp6_lifecycle.server_runtime_json = None;
+                    snap.service_state_blobs
+                        .remove(SERVER_RUNTIME_STATE_BLOB_KEY);
+                });
+            }
         }
     }
 

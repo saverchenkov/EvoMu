@@ -633,13 +633,12 @@ pub fn handle(
                         || already_locked
                         || snap.is_item_or_ancestor_locked_or_impounded(iid)
                         || snap.is_war_hq_structure(iid)
-                        || eve_db::WorldStateSnapshot::is_fitted_slot_flag(item_flag)
                         || snap.is_container_non_empty(iid)
                         || !snap.has_structure_acl_access(start_station_id, char_id)
                     {
                         return Err(rpc_err(
                             "ContractItemLocked",
-                            format!("Item {iid} is locked, fitted, non-empty, or ineligible for contracting"),
+                            format!("Item {iid} is locked, non-empty, or ineligible for contracting"),
                         ));
                     }
                     if for_corp {

@@ -136,6 +136,61 @@ pub(crate) fn is_item_sellable_on_market(
     active_ship_id: Option<i64>,
     now_unix: u64,
 ) -> bool {
+    is_item_sellable_on_market_inner(
+        snap,
+        ext,
+        item,
+        char_id,
+        caller_corp_id,
+        use_corp,
+        station_id,
+        active_ship_id,
+        now_unix,
+        true,
+    )
+}
+
+/// Validates whether `item` is otherwise sellable in the caller's hangar before checking contents
+/// so non-empty containers/ships yield `CannotSellItemWithContents` instead of missing-inventory (`#583`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn is_item_sellable_on_market_ignoring_contents(
+    snap: &WorldStateSnapshot,
+    ext: &StructureExtendedState,
+    item: &InventoryItemRecord,
+    char_id: i64,
+    caller_corp_id: i64,
+    use_corp: bool,
+    station_id: i64,
+    active_ship_id: Option<i64>,
+    now_unix: u64,
+) -> bool {
+    is_item_sellable_on_market_inner(
+        snap,
+        ext,
+        item,
+        char_id,
+        caller_corp_id,
+        use_corp,
+        station_id,
+        active_ship_id,
+        now_unix,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn is_item_sellable_on_market_inner(
+    snap: &WorldStateSnapshot,
+    ext: &StructureExtendedState,
+    item: &InventoryItemRecord,
+    char_id: i64,
+    caller_corp_id: i64,
+    use_corp: bool,
+    station_id: i64,
+    active_ship_id: Option<i64>,
+    now_unix: u64,
+    require_empty: bool,
+) -> bool {
     if snap.is_structure_controller_saved_ship(item.item_id) {
         return false;
     }
@@ -156,7 +211,12 @@ pub(crate) fn is_item_sellable_on_market(
     if in_asset_safety {
         return false;
     }
-    if snap.is_item_consumable_by(item, char_id, Some(station_id), active_ship_id) {
+    let consumable = if require_empty {
+        snap.is_item_consumable_by(item, char_id, Some(station_id), active_ship_id)
+    } else {
+        snap.is_item_consumable_by_ignoring_contents(item, char_id, Some(station_id), active_ship_id)
+    };
+    if consumable {
         return true;
     }
     if !use_corp || caller_corp_id == 0 || item.owner_id != caller_corp_id || item.location_id != station_id {

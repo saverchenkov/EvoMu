@@ -649,7 +649,7 @@ fn step_mmju_spools_in_actor(
     now_unix: u64,
 ) {
     let has_due = db.with_snapshot(|snap| {
-        snap.owner_notes.values().any(|n| n.note.contains("\"mmju_spools\""))
+        !snap.deployable_state.mmju_spools.is_empty()
             && read_deployable_state_snap(snap)
                 .mmju_spools
                 .values()
@@ -980,7 +980,9 @@ fn step_siphons_in_db(
     now_unix: u64,
 ) {
     let has_due_siphon = db.with_snapshot(|snap| {
-        if !snap.owner_notes.values().any(|n| n.note.contains("1247")) {
+        if !snap.deployable_state.deployables.values().any(|v| v.group_id == GROUP_MOBILE_SIPHON)
+            && !snap.owner_notes.values().any(|n| n.note.contains("1247"))
+        {
             return false;
         }
         let st = read_deployable_state_snap(snap);
@@ -1191,9 +1193,10 @@ fn step_siphons_in_db(
 /// Flushes pending decloak notifications (`OnCloakModuleForceDeactivated`) and invalidates ship fittings.
 pub fn flush_deployable_side_effects(ctx: &ServerContext) {
     let has_pending = ctx.db.with_snapshot(|snap| {
-        snap.owner_notes
-            .values()
-            .any(|n| n.note.contains("\"pending_decloak_notifications\":[{"))
+        !snap.deployable_state.pending_decloak_notifications.is_empty()
+            || snap.owner_notes
+                .values()
+                .any(|n| n.note.contains("\"pending_decloak_notifications\":[{"))
     });
     if !has_pending {
         return;
@@ -1222,7 +1225,9 @@ pub fn flush_deployable_side_effects(ctx: &ServerContext) {
 pub fn step_system_deployables_sync(ctx: &ServerContext, solar_system_id: u32) {
     let now_unix = ctx.now_unix();
     let needs_work = ctx.db.with_snapshot(|snap| {
-        if !snap.owner_notes.values().any(|n| n.note.contains("\"deployables\"")) {
+        if snap.deployable_state.deployables.is_empty()
+            && !snap.owner_notes.values().any(|n| n.note.contains("\"deployables\""))
+        {
             return false;
         }
         let st = read_deployable_state_snap(snap);

@@ -460,11 +460,13 @@ impl Ballpark {
     /// Declaratively recomputes a ball's effective kinematics and combat attributes
     /// from its immutable baselines and currently active modifiers (`#584`).
     pub fn recompute_ball_attributes(&mut self, ball_id: BallId) {
-        if let (Some(ball), Some(cs)) = (
+        match (
             self.balls.get_mut(&ball_id),
             self.combat_states.get_mut(&ball_id),
         ) {
-            cs.recompute_attributes(ball);
+            (Some(ball), Some(cs)) => cs.recompute_attributes(ball),
+            (None, Some(cs)) => cs.recompute_combat_attributes(),
+            _ => {}
         }
     }
 

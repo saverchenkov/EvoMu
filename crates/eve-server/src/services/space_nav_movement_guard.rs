@@ -199,9 +199,9 @@ fn is_piloted_upwell_structure(ctx: &ServerContext, ship_id: i64) -> bool {
     })
 }
 
-/// Validates system-level locks, navigation-lock modules, immobilizing modules,
-/// and piloted Upwell structure control before resolving a warp target.
-pub(crate) fn validate_pre_movement_locks(
+/// Validates piloted Upwell structure control and Category 5 system-level locks
+/// before touching Ballpark state.
+fn validate_system_movement_locks(
     ctx: &ServerContext,
     ship_id: i64,
     intent: &MovementIntent,
@@ -269,8 +269,17 @@ pub(crate) fn validate_pre_movement_locks(
         _ => {}
     }
 
-    // Category 2: Navigation locks (Cyno, Doomsday/Lance, Entosis, Skyhook, CRAB)
-    // and immobilizing modules (Siege, Bastion, Triage, Industrial Core).
+    Ok(())
+}
+
+/// Category 2: Navigation locks (Cyno, Doomsday/Lance, Entosis, Skyhook, CRAB)
+/// and immobilizing modules (Siege, Bastion, Triage, Industrial Core).
+fn validate_navigation_and_immobilizing_locks(
+    ctx: &ServerContext,
+    ship_id: i64,
+    intent: &MovementIntent,
+) -> Result<(), BridgeRpcError> {
+    let action = intent.action_label();
     let nav_action = match intent {
         MovementIntent::AccelerationGate {
             kind: AccelerationGateKind::FwComplex | AccelerationGateKind::EssBank,
@@ -316,6 +325,17 @@ pub(crate) fn validate_pre_movement_locks(
     Ok(())
 }
 
+/// Validates system-level locks, navigation-lock modules, immobilizing modules,
+/// and piloted Upwell structure control before resolving a warp target.
+pub(crate) fn validate_pre_movement_locks(
+    ctx: &ServerContext,
+    ship_id: i64,
+    intent: &MovementIntent,
+) -> Result<(), BridgeRpcError> {
+    validate_system_movement_locks(ctx, ship_id, intent)?;
+    validate_navigation_and_immobilizing_locks(ctx, ship_id, intent)
+}
+
 /// Sync helper for reconnect return-warp eligibility while avoiding `CombatState::is_warp_scrambled`.
 pub(crate) fn check_sync_pre_warp_eligibility(ctx: &ServerContext, ship_id: i64) -> bool {
     validate_pre_movement_locks(
@@ -351,7 +371,7 @@ impl ServerContext {
         ship_id: i64,
         intent: MovementIntent,
     ) -> Result<ValidatedShipMovement, BridgeRpcError> {
-        validate_pre_movement_locks(self, ship_id, &intent)?;
+        validate_system_movement_locks(self, ship_id, &intent)?;
 
         let sys_id = intent.sys_id();
         let sys_handle = self.systems.get_or_spawn(sys_id);
@@ -401,7 +421,8 @@ impl ServerContext {
             }
         }
 
-        // Category 2 (Ballpark half): explicit `lance_disrupted_remaining_s > 0.0` check.
+        // Explicit Disruptive Lance debuff sets `warp_scramble_strength = max(100)` internally,
+        // so check it before generic `is_ball_scrambled` so `DisruptiveLanceDebuffActive` is not shadowed by `WarpScrambled`.
         if let Some(ref cs) = cs_opt {
             if cs.lance_disrupted_remaining_s > 0.0 {
                 let code = match intent {
@@ -423,14 +444,17 @@ impl ServerContext {
         }
 
         // Category 1: Tackle and warp-disruption bubble interdiction via `Ballpark::is_ball_scrambled`.
+        // Checked before Category 2 navigation locks so active scram/WCS < 0 surfaces `WarpScrambled` first.
         if intent.checks_bubble_and_scram() && ball_opt.is_some() {
             let allow_bubbled = intent.allow_bubbled();
             let scrambled = if allow_bubbled {
                 // Bubbles allowed (e.g. covert portal bridging target), but targeted warp
-                // scrambling (`warp_scramble_strength > 0 && >= warp_core_strength`) still blocks!
+                // scrambling (`warp_scramble_strength > 0 && >= warp_core_strength`) or
+                // negative warp core strength (`warp_core_strength < 0`) still blocks!
                 cs_opt.as_ref().is_some_and(|cs| {
-                    cs.warp_scramble_strength > 0
-                        && cs.warp_scramble_strength >= cs.warp_core_strength
+                    cs.warp_core_strength < 0
+                        || (cs.warp_scramble_strength > 0
+                            && cs.warp_scramble_strength >= cs.warp_core_strength)
                 })
             } else {
                 sys_handle
@@ -449,6 +473,9 @@ impl ServerContext {
                 });
             }
         }
+
+        // Category 2: Navigation locks (Cyno, Doomsday/Lance, Entosis, Skyhook, CRAB) and immobilizing modules.
+        validate_navigation_and_immobilizing_locks(self, ship_id, &intent)?;
 
         // Category 3: Cloak & tether rules.
         let mut is_covert_cloaked = false;

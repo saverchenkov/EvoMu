@@ -14,11 +14,11 @@ pub fn sync_dirty_to_sqlite(
     fp: &mut TableFingerprints,
     need_wal_delta: bool,
 ) -> Result<WorldStateWalDelta, String> {
-    let mut delta = WorldStateWalDelta {
+    let mut delta = Box::new(WorldStateWalDelta {
         seq: snap.wal_seq,
         next_entity_id: snap.next_entity_id,
         ..Default::default()
-    };
+    });
     let mut cold_changed = false;
 
     if fp.next_entity_id != snap.next_entity_id
@@ -41,6 +41,34 @@ pub fn sync_dirty_to_sqlite(
         fp.wal_seq = snap.wal_seq;
         fp.markets_seeded = snap.markets_seeded;
     }
+
+    cold_changed |= sync_part1_hot_tables(tx, snap, fp, &mut delta)?;
+    cold_changed |= sync_part2_activity_tables(tx, snap, fp, &mut delta)?;
+    cold_changed |= sync_part3_social_corp_tables(tx, snap, fp)?;
+    cold_changed |= sync_part4_world_tail_tables(tx, snap, fp, &mut delta)?;
+
+    cold_changed |= super::sync_ext::sync_extension_tables(tx, snap, fp)?;
+    cold_changed |= super::ledger_store::sync_ledger(tx, snap, fp)?;
+    cold_changed |= super::notes_lp_sequence_store::sync_d6(tx, snap, fp)?;
+    cold_changed |= super::social_store::sync_d6_social(tx, snap, fp)?;
+    cold_changed |= super::corp_crimewatch_store::sync_d6_corp_crimewatch(tx, snap, fp)?;
+    cold_changed |= super::industry_market_pve_store::sync_d6_batch4(tx, snap, fp)?;
+    cold_changed |= super::service_domains_store::sync_service_domains(tx, snap, fp)?;
+
+    if need_wal_delta && cold_changed {
+        delta.full_snapshot = Some(Box::new(snap.clone()));
+    }
+    Ok(*delta)
+}
+
+#[inline(never)]
+fn sync_part1_hot_tables(
+    tx: &Transaction<'_>,
+    snap: &WorldStateSnapshot,
+    fp: &mut TableFingerprints,
+    delta: &mut WorldStateWalDelta,
+) -> Result<bool, String> {
+    let mut cold_changed = false;
 
     // 1. accounts
     let removed_accounts: Vec<String> = fp
@@ -434,6 +462,17 @@ pub fn sync_dirty_to_sqlite(
         fp.wallet_journal_len = snap.wallet_journal.len();
         fp.wallet_journal_hash = fp_wallet_journal_slice(&snap.wallet_journal);
     }
+    Ok(cold_changed)
+}
+
+#[inline(never)]
+fn sync_part2_activity_tables(
+    tx: &Transaction<'_>,
+    snap: &WorldStateSnapshot,
+    fp: &mut TableFingerprints,
+    delta: &mut WorldStateWalDelta,
+) -> Result<bool, String> {
+    let mut cold_changed = false;
 
     // 11. contracts
     let rem_contracts: Vec<i64> = fp
@@ -759,6 +798,16 @@ pub fn sync_dirty_to_sqlite(
         fp.mails_len = snap.mails.len();
         fp.mails_hash = fp_mails_slice(&snap.mails);
     }
+    Ok(cold_changed)
+}
+
+#[inline(never)]
+fn sync_part3_social_corp_tables(
+    tx: &Transaction<'_>,
+    snap: &WorldStateSnapshot,
+    fp: &mut TableFingerprints,
+) -> Result<bool, String> {
+    let mut cold_changed = false;
 
     // 20. fleets
     let rem_fl: Vec<i64> = fp
@@ -999,6 +1048,17 @@ pub fn sync_dirty_to_sqlite(
             fp.kill_rights.insert(krid, h);
         }
     }
+    Ok(cold_changed)
+}
+
+#[inline(never)]
+fn sync_part4_world_tail_tables(
+    tx: &Transaction<'_>,
+    snap: &WorldStateSnapshot,
+    fp: &mut TableFingerprints,
+    delta: &mut WorldStateWalDelta,
+) -> Result<bool, String> {
+    let mut cold_changed = false;
 
     // 27. structures
     let rem_st: Vec<i64> = fp
@@ -1207,18 +1267,7 @@ pub fn sync_dirty_to_sqlite(
         }
     }
 
-    cold_changed |= super::sync_ext::sync_extension_tables(tx, snap, fp)?;
-    cold_changed |= super::ledger_store::sync_ledger(tx, snap, fp)?;
-    cold_changed |= super::notes_lp_sequence_store::sync_d6(tx, snap, fp)?;
-    cold_changed |= super::social_store::sync_d6_social(tx, snap, fp)?;
-    cold_changed |= super::corp_crimewatch_store::sync_d6_corp_crimewatch(tx, snap, fp)?;
-    cold_changed |= super::industry_market_pve_store::sync_d6_batch4(tx, snap, fp)?;
-    cold_changed |= super::service_domains_store::sync_service_domains(tx, snap, fp)?;
-
-    if need_wal_delta && cold_changed {
-        delta.full_snapshot = Some(snap.clone());
-    }
-    Ok(delta)
+    Ok(cold_changed)
 }
 
 pub fn replace_sqlite_from_snapshot(
