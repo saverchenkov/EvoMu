@@ -273,21 +273,33 @@ impl ServerContext {
         }
 
         if caller_trace == Some("machoNet:26000") {
-            if service == "scanMgr" && method == "GetSystemScanMgr" {
+            let effective_service = bound_id
+                .and_then(|bid| {
+                    self.bound_objects
+                        .read()
+                        .ok()
+                        .and_then(|m| m.get(&bid).map(|e| e.service.clone()))
+                })
+                .unwrap_or_else(|| service.to_string());
+            if effective_service == "scanMgr" && method == "GetSystemScanMgr" {
                 if let Ok(ref rep) = res {
                     if let Some(bid) = rep.dict_get("boundID").and_then(|v| v.as_i64()) {
                         res = Ok(self.bound_object_rep(bid as u64, caller_trace));
                     }
                 }
             }
-            if service == "fleetObjectHandler" && method == "CreateFleet" {
+            if effective_service == "fleetObjectHandler" && method == "CreateFleet" {
                 if let Ok(PyRep::Integer(fleet_id)) = res {
                     res = self
                         .bind_verified_sub_object(session, "fleetObjectHandler", fleet_id)
                         .map(|bid| self.bound_object_rep(bid, caller_trace));
                 }
             }
-            res = crate::router::client_compat::normalize_macho_rpc_reply(service, method, res);
+            res = crate::router::client_compat::normalize_macho_rpc_reply(
+                &effective_service,
+                method,
+                res,
+            );
         }
 
         res

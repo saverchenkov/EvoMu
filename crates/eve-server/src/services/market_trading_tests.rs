@@ -1030,3 +1030,161 @@ fn market_v24_resting_buy_order_visibility_and_account_item_notifications() {
         .iter()
         .any(|n| n.event == "OnItemChange"));
 }
+
+#[test]
+fn v24_immediate_place_buy_order_and_cancel_buy_order_emit_wallet_and_item_notifications_700_714() {
+    let ctx = test_ctx();
+    let buyer_id = 90_991_001_i64;
+    let seller_id = 90_991_002_i64;
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.market_orders.retain(|_, o| o.type_id != 1230);
+        let base = snap.characters.values().next().unwrap().clone();
+        let mut buyer = base.clone();
+        buyer.character_id = buyer_id;
+        buyer.user_id = 1;
+        buyer.name = "V24Buyer700".into();
+        buyer.corporation_id = 1_000_009;
+        buyer.balance = IskCents::from_isk(100_000);
+        buyer.station_id = Some(JITA_STATION_ID);
+        buyer.solar_system_id = 30_000_142;
+        snap.characters.insert(buyer_id, buyer);
+
+        let mut seller = base;
+        seller.character_id = seller_id;
+        seller.user_id = 2;
+        seller.name = "V24Seller700".into();
+        seller.corporation_id = 1_000_009;
+        seller.balance = IskCents::from_isk(10_000);
+        seller.station_id = Some(JITA_STATION_ID);
+        seller.solar_system_id = 30_000_142;
+        snap.characters.insert(seller_id, seller);
+
+        snap.next_entity_id += 1;
+        let sell_oid = snap.next_entity_id;
+        snap.market_orders.insert(
+            sell_oid,
+            eve_db::MarketOrderRecord {
+                order_id: sell_oid,
+                type_id: 1230, // Veldspar
+                owner_id: seller_id,
+                station_id: JITA_STATION_ID,
+                region_id: 10_000_002,
+                price: IskCents::from_isk(2000),
+                vol_entered: 10,
+                vol_remaining: 10,
+                is_bid: false,
+                is_npc: false,
+                min_volume: 1,
+                escrow: IskCents(0),
+            },
+        );
+    });
+
+    let mut buyer_sess = jita_session(buyer_id, 1_000_009);
+    ctx.db.acquire_online_lock(1, 9701, Some(buyer_id), true, ctx.now_unix()).unwrap();
+    let _ = ctx.drain_notifications_for_char(buyer_id);
+
+    // #700: Immediate PlaceBuyOrder(60003760, 1230, 2120.0, 1, -1, 1, 0, False, None)
+    let buy_res = handle(
+        &ctx,
+        &mut buyer_sess,
+        "marketProxy",
+        "PlaceBuyOrder",
+        &[
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::Integer(1230),
+            PyRep::Real(2120.0),
+            PyRep::Integer(1),
+            PyRep::Integer(-1),
+            PyRep::Integer(1),
+            PyRep::Integer(0),
+            PyRep::Bool(false),
+            PyRep::None,
+        ],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        buy_res.dict_get("filledImmediately").and_then(PyRep::as_bool),
+        Some(true)
+    );
+    let bal_after_buy = ctx.db.get_character(buyer_id).unwrap().balance;
+    assert!(
+        bal_after_buy < IskCents::from_isk(100_000),
+        "immediate fill must deduct ISK: {bal_after_buy:?}"
+    );
+    let has_veldspar = ctx.db.with_snapshot(|snap| {
+        snap.items.values().any(|it| {
+            it.owner_id == buyer_id
+                && it.type_id == 1230
+                && it.location_id == JITA_STATION_ID
+                && it.quantity >= 1
+        })
+    });
+    assert!(has_veldspar, "immediate buy must deliver Veldspar to buyer hangar");
+    let buy_notifs = ctx.drain_notifications_for_char(buyer_id);
+    assert!(
+        buy_notifs.iter().any(|n| n.event == "OnAccountChange"),
+        "immediate PlaceBuyOrder must emit OnAccountChange (#700)"
+    );
+    assert!(
+        buy_notifs.iter().any(|n| n.event == "OnItemChange"),
+        "immediate PlaceBuyOrder must emit OnItemChange (#700)"
+    );
+
+    // #714: Resting 1.00 ISK buy order -> CancelCharOrder refunds 1.00 ISK & emits OnAccountChange
+    let bal_before_escrow = ctx.db.get_character(buyer_id).unwrap().balance;
+    let resting_buy = handle(
+        &ctx,
+        &mut buyer_sess,
+        "marketProxy",
+        "PlaceBuyOrder",
+        &[
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::Integer(1230),
+            PyRep::Real(1.0),
+            PyRep::Integer(1),
+            PyRep::Integer(-1),
+            PyRep::Integer(1),
+            PyRep::Integer(1),
+            PyRep::Bool(false),
+            PyRep::None,
+        ],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let order_id = resting_buy.dict_get("orderID").and_then(PyRep::as_i64).unwrap();
+    let bal_with_escrow = ctx.db.get_character(buyer_id).unwrap().balance;
+    assert!(bal_with_escrow <= IskCents(bal_before_escrow.0 - 100));
+    let _ = ctx.drain_notifications_for_char(buyer_id);
+
+    handle(
+        &ctx,
+        &mut buyer_sess,
+        "marketProxy",
+        "CancelCharOrder",
+        &[PyRep::Integer(order_id), PyRep::Integer(JITA_STATION_ID)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let bal_after_cancel = ctx.db.get_character(buyer_id).unwrap().balance;
+    assert_eq!(
+        bal_after_cancel,
+        IskCents(bal_with_escrow.0 + 100),
+        "CancelCharOrder must refund 1.00 ISK escrow (#714)"
+    );
+    let cancel_notifs = ctx.drain_notifications_for_char(buyer_id);
+    assert!(
+        cancel_notifs.iter().any(|n| n.event == "OnAccountChange"),
+        "CancelCharOrder must emit OnAccountChange (#714)"
+    );
+    assert!(
+        cancel_notifs.iter().any(|n| n.event == "OnOwnOrdersChanged"),
+        "CancelCharOrder must emit OnOwnOrdersChanged (#714)"
+    );
+}

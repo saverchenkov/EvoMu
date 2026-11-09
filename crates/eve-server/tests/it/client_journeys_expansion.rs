@@ -982,21 +982,21 @@ async fn test_v24_client_market_ui_every_tab_and_click_flow() {
     let char_tx = call_rpc(&ctx, &mut sess, "marketProxy", "CharGetTransactions", &[PyRep::Integer(0)])
         .await
         .expect("CharGetTransactions");
-    let PyRep::Rowset { columns: tx_cols, rows: tx_rows } = char_tx else {
-        panic!("CharGetTransactions must return Rowset");
-    };
+    assert!(char_tx.is_crowset(), "CharGetTransactions must return CRowset");
+    let tx_rows = char_tx.crowset_rows().expect("CharGetTransactions CRowset rows");
+    assert!(!tx_rows.is_empty(), "CharGetTransactions must contain executed BuyMulti trade");
+    let tx_cols = tx_rows[0].dbrow_columns().expect("DBRow columns");
     for req_col in [
         "transactionID", "transactionDate", "typeID", "quantity", "price",
         "stationID", "buyerID", "sellerID", "accountID", "buyerAccountID", "sellerAccountID",
     ] {
-        assert!(tx_cols.iter().any(|c| c == req_col), "CharGetTransactions missing column {req_col}");
+        assert!(tx_cols.iter().any(|(c, _)| c == req_col), "CharGetTransactions missing column {req_col}");
     }
-    assert!(!tx_rows.is_empty(), "CharGetTransactions must contain executed BuyMulti trade");
 
     let corp_tx = call_rpc(&ctx, &mut sess, "marketProxy", "CorpGetTransactions", &[PyRep::Integer(0), PyRep::Integer(1000)])
         .await
         .expect("CorpGetTransactions");
-    assert!(matches!(corp_tx, PyRep::Rowset { .. }));
+    assert!(corp_tx.is_crowset(), "CorpGetTransactions must return CRowset");
 
     let full_types = eve_server::world_seeder::select_full_market_types(&ctx.sde);
     assert!(

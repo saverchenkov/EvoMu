@@ -794,10 +794,10 @@ pub fn evaluate_station_service_standing_gate(
         raw_service_id
     };
     let (owner_corp, owner_fac) = if let Some(st) = ctx.sde.stations.get(&station_id) {
-        if !crate::services::station_structure::npc_station_offers_service(&ctx.sde, station_id, raw_service_id as i64) {
+        if !crate::services::station_structure::npc_station_offers_service(&ctx.sde, station_id, service_id as i64) {
             return Err(err(
                 "StationServiceUnavailable",
-                format!("Station {station_id} does not offer service {raw_service_id}"),
+                format!("Station {station_id} does not offer service {service_id}"),
             ));
         }
         (st.owner_corporation_id, st.owner_faction_id)

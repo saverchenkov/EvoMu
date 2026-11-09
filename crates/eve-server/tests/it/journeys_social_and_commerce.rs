@@ -420,7 +420,11 @@ async fn test_journey_market_trade() {
     let txs = call_rpc(&ctx, &mut sess1, "marketProxy", "CharGetTransactions", &[])
         .await
         .expect("CharGetTransactions");
-    assert!(format!("{txs:?}").contains("34") || format!("{txs:?}").contains("36"));
+    assert!(txs.is_crowset(), "CharGetTransactions must return CRowset");
+    let tx_rows = txs.crowset_rows().expect("CharGetTransactions rows");
+    assert!(tx_rows.iter().any(|r| {
+        matches!(r.dbrow_get("typeID").and_then(|v| v.as_i64()), Some(34 | 36))
+    }));
     let hist = call_rpc(&ctx, &mut sess1, "marketProxy", "GetOldPriceHistory", &[PyRep::Integer(34)])
         .await
         .expect("GetOldPriceHistory");

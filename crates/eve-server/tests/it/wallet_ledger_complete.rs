@@ -41,9 +41,15 @@ async fn call_kw(
     ctx.dispatch_rpc(s, svc, None, m, a, &kw, None).await
 }
 
-/// Rowset -> Vec of column-name maps.
+/// Rowset / CRowset -> Vec of column-name maps.
 fn rows(rep: &PyRep) -> Vec<HashMap<String, PyRep>> {
-    let PyRep::Rowset { columns, rows } = rep else { panic!("expected Rowset, got {rep:?}") };
+    if let Some(crowset_rows) = rep.crowset_rows() {
+        return crowset_rows
+            .iter()
+            .filter_map(|r| r.dbrow_columns().map(|cols| cols.iter().cloned().collect()))
+            .collect();
+    }
+    let PyRep::Rowset { columns, rows } = rep else { panic!("expected Rowset or CRowset, got {rep:?}") };
     rows.iter().map(|r| columns.iter().cloned().zip(r.iter().cloned()).collect()).collect()
 }
 

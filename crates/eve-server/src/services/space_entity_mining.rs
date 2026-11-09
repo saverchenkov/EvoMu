@@ -1276,19 +1276,29 @@ pub async fn handle(
                     let (item_base_yield, yield_rate, item_tax_rate) =
                         compute_reprocessing_rates_for_item_at(&ctx.sde, snap, char_id, station_id, inv_type, Some(now_unix));
                     let net_yield_rate = yield_rate;
+                    let quantity_to_process = portions * portion_size;
+                    let left_overs = (item.quantity - quantity_to_process).max(0);
                     let mut est_outputs = Vec::new();
                     for mat in &materials {
                         let out_qty = ((mat.quantity as f64) * yield_rate).floor() as i32;
+                        let unrecoverable = (mat.quantity as i64 - out_qty as i64).max(0);
                         if out_qty > 0 {
                             est_outputs.push(PyRep::keyval([
                                 ("typeID", PyRep::Integer(mat.material_type_id as i64)),
                                 ("quantity", PyRep::Integer(out_qty as i64)),
+                                ("unrecoverable", PyRep::Integer(unrecoverable)),
+                                ("station", PyRep::Integer(0)),
+                                ("iskCost", PyRep::Real(0.0)),
                             ]));
                         }
                     }
                     quotes.push(PyRep::keyval([
                         ("itemID", PyRep::Integer(item_id)),
                         ("typeID", PyRep::Integer(item.type_id as i64)),
+                        ("quantityToProcess", PyRep::Integer(quantity_to_process as i64)),
+                        ("leftOvers", PyRep::Integer(left_overs as i64)),
+                        ("iskCost", PyRep::Real(0.0)),
+                        ("totalISKCost", PyRep::Real(0.0)),
                         ("stationBaseYield", PyRep::Real(item_base_yield)),
                         ("yieldRate", PyRep::Real(yield_rate)),
                         ("stationTaxRate", PyRep::Real(item_tax_rate)),

@@ -64,6 +64,9 @@ fn ext(
 }
 
 fn rowset_len(rep: &PyRep) -> usize {
+    if let Some(rows) = rep.crowset_rows() {
+        return rows.len();
+    }
     match rep {
         PyRep::Rowset { rows, .. } => rows.len(),
         PyRep::Object { args, .. } => args

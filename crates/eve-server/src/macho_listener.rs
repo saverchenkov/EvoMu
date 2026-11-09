@@ -871,6 +871,27 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                             (PyRep::ascii_bytes("required"), PyRep::Real(required)),
                                         ],
                                     )
+                                } else if err.code == "MaxOpenOrdersReached" {
+                                    let (cur_cnt, max_cnt) = err
+                                        .message
+                                        .rsplit_once('(')
+                                        .and_then(|(_, rest)| rest.strip_suffix(')'))
+                                        .and_then(|pair| pair.split_once('/'))
+                                        .and_then(|(c, m)| {
+                                            Some((
+                                                c.trim().parse::<i64>().ok()?,
+                                                m.trim().parse::<i64>().ok()?,
+                                            ))
+                                        })
+                                        .unwrap_or((0, 0));
+                                    eve_machonet::wrapped_user_error_with_dict_body(
+                                        MachoPacketType::CallReq as i64,
+                                        "MarketExceededOrderCount",
+                                        vec![
+                                            (PyRep::ascii_bytes("curCnt"), PyRep::Integer(cur_cnt)),
+                                            (PyRep::ascii_bytes("maxCnt"), PyRep::Integer(max_cnt)),
+                                        ],
+                                    )
                                 } else {
                                     eve_machonet::wrapped_user_error_body(
                                         MachoPacketType::CallReq as i64,

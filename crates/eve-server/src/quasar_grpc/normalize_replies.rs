@@ -18,7 +18,7 @@
 
 #![forbid(unsafe_code)]
 
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, DBRowDescriptor, DbColumnType, PyRep};
 
 fn row_field(item: &PyRep, key: &str) -> Option<PyRep> {
     match item {
@@ -727,37 +727,72 @@ pub fn normalize_macho_rpc_reply(
                 let PyRep::List(quotes) = parts[2].clone() else {
                     unreachable!()
                 };
-                let eff_dict = PyRep::Dict(vec![
+                let mut eff_entries = vec![
                     (PyRep::None, base_yield.clone()),
-                    (PyRep::Integer(25), base_yield),
+                    (PyRep::Integer(25), base_yield.clone()),
+                ];
+                let mut seen_eff_types = std::collections::HashSet::new();
+                let recoverable_desc = DBRowDescriptor::new([
+                    ("typeID", DbColumnType::I4),
+                    ("client", DbColumnType::I8),
+                    ("unrecoverable", DbColumnType::I8),
+                    ("station", DbColumnType::I8),
+                    ("iskCost", DbColumnType::R8),
                 ]);
                 let mut quote_entries = Vec::with_capacity(quotes.len());
                 for q in quotes {
                     let item_id = q.dict_get("itemID").cloned().unwrap_or(PyRep::Integer(0));
-                    let recoverables = match q.dict_get("outputs") {
+                    let quote_type_id = q.dict_get("typeID").cloned().unwrap_or(PyRep::Integer(0));
+                    if let Some(tid) = quote_type_id.as_i64() {
+                        if seen_eff_types.insert(tid) {
+                            let eff_val = q
+                                .dict_get("stationBaseYield")
+                                .cloned()
+                                .unwrap_or_else(|| base_yield.clone());
+                            eff_entries.push((PyRep::Integer(tid), eff_val));
+                        }
+                    }
+                    let recoverable_rows = match q.dict_get("outputs") {
                         Some(PyRep::List(outs)) => outs
                             .iter()
                             .map(|o| {
                                 let tid = o.dict_get("typeID").cloned().unwrap_or(PyRep::Integer(0));
                                 let qty = o.dict_get("quantity").cloned().unwrap_or(PyRep::Integer(0));
-                                PyRep::keyval([
-                                    ("typeID", tid),
-                                    ("client", qty),
-                                    ("station", PyRep::Integer(0)),
-                                    ("unrecoverable", PyRep::Integer(0)),
-                                ])
+                                let unrec = o
+                                    .dict_get("unrecoverable")
+                                    .cloned()
+                                    .unwrap_or(PyRep::Integer(0));
+                                let station =
+                                    o.dict_get("station").cloned().unwrap_or(PyRep::Integer(0));
+                                let isk_cost =
+                                    o.dict_get("iskCost").cloned().unwrap_or(PyRep::Real(0.0));
+                                vec![tid, qty, unrec, station, isk_cost]
                             })
                             .collect(),
                         _ => Vec::new(),
                     };
-                    let quote_type_id = q.dict_get("typeID").cloned().unwrap_or(PyRep::Integer(0));
+                    let recoverables = recoverable_desc.build_crowset(recoverable_rows);
+                    let qty_to_process = q
+                        .dict_get("quantityToProcess")
+                        .cloned()
+                        .unwrap_or(PyRep::Integer(0));
+                    let left_overs = q.dict_get("leftOvers").cloned().unwrap_or(PyRep::Integer(0));
+                    let isk_cost = q.dict_get("iskCost").cloned().unwrap_or(PyRep::Real(0.0));
+                    let total_isk_cost = q
+                        .dict_get("totalISKCost")
+                        .cloned()
+                        .unwrap_or(PyRep::Real(0.0));
                     let entry = PyRep::keyval([
                         ("typeID", quote_type_id),
-                        ("totalISKCost", PyRep::Real(0.0)),
-                        ("recoverables", PyRep::List(recoverables)),
+                        ("quantityToProcess", qty_to_process),
+                        ("leftOvers", left_overs),
+                        ("iskCost", isk_cost),
+                        ("totalISKCost", total_isk_cost),
+                        ("recoverables", recoverables),
                     ]);
                     quote_entries.push((item_id, entry));
                 }
+                let eff_dict = PyRep::Dict(eff_entries);
                 return Ok(PyRep::Tuple(vec![tax, eff_dict, PyRep::Dict(quote_entries)]));
             }
             return Ok(PyRep::Tuple(parts));

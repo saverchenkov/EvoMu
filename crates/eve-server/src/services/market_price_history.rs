@@ -6,7 +6,7 @@
 
 use crate::router::ServerContext;
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, TypeId, WorldStateSnapshot};
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, DBRowDescriptor, DbColumnType, PyRep};
 use super::market_contracts::{compute_sales_tax_cents, PLEX_TYPE_ID};
 use super::market_trading::{load_market_order_meta, save_market_order_meta, MarketOrderMeta};
 
@@ -776,26 +776,24 @@ pub(crate) fn handle_market_transactions_rpc(
                 Ok(r) => r,
                 Err(e) => return Some(Err(e)),
             };
-            Some(Ok(PyRep::rowset(
-                vec![
-                    "transactionID",
-                    "transactionDate",
-                    "typeID",
-                    "quantity",
-                    "price",
-                    "stationID",
-                    "buyerID",
-                    "sellerID",
-                    "accountID",
-                    "buyerAccountID",
-                    "sellerAccountID",
-                    "clientID",
-                    "credit",
-                    "journalRefID",
-                    "journalTransactionID",
-                ],
-                rows,
-            )))
+            let descriptor = DBRowDescriptor::new([
+                ("transactionID", DbColumnType::I8),
+                ("transactionDate", DbColumnType::FileTime),
+                ("typeID", DbColumnType::I4),
+                ("quantity", DbColumnType::I4),
+                ("price", DbColumnType::R8),
+                ("stationID", DbColumnType::I8),
+                ("buyerID", DbColumnType::I8),
+                ("sellerID", DbColumnType::I8),
+                ("accountID", DbColumnType::I8),
+                ("buyerAccountID", DbColumnType::I4),
+                ("sellerAccountID", DbColumnType::I4),
+                ("clientID", DbColumnType::I8),
+                ("credit", DbColumnType::R8),
+                ("journalRefID", DbColumnType::I8),
+                ("journalTransactionID", DbColumnType::I8),
+            ]);
+            Some(Ok(descriptor.build_crowset(rows)))
         }
         _ => None,
     }

@@ -308,7 +308,9 @@ fn journal_and_market_transactions_filter_and_enforce_corp_roles() {
     )
     .unwrap()
     .unwrap();
-    assert!(format!("{char_j:?}").contains("test journal"));
+    assert!(char_j.is_crowset(), "account.GetTransactions must return CRowset");
+    let char_j_rows = char_j.crowset_rows().unwrap();
+    assert!(char_j_rows.iter().any(|r| r.dbrow_get("description").and_then(|v| v.as_str()) == Some("test journal")));
 
     assert_eq!(
         handle(
@@ -345,7 +347,8 @@ fn journal_and_market_transactions_filter_and_enforce_corp_roles() {
     )
     .unwrap()
     .unwrap();
-    assert!(format!("{corp_j:?}").contains("corp journal"));
+    assert!(corp_j.is_crowset());
+    assert!(corp_j.crowset_rows().unwrap().iter().any(|r| r.dbrow_get("description").and_then(|v| v.as_str()) == Some("corp journal")));
 
     let char_tx = handle(
         &ctx,
@@ -357,7 +360,8 @@ fn journal_and_market_transactions_filter_and_enforce_corp_roles() {
     )
     .unwrap()
     .unwrap();
-    assert!(format!("{char_tx:?}").contains("60003760"));
+    assert!(char_tx.is_crowset());
+    assert!(char_tx.crowset_rows().unwrap().iter().any(|r| r.dbrow_get("stationID") == Some(&PyRep::Integer(60003760))));
 
     assert_eq!(
         handle(
@@ -384,7 +388,8 @@ fn journal_and_market_transactions_filter_and_enforce_corp_roles() {
     )
     .unwrap()
     .unwrap();
-    assert!(format!("{corp_tx:?}").contains("60003760"));
+    assert!(corp_tx.is_crowset());
+    assert!(corp_tx.crowset_rows().unwrap().iter().any(|r| r.dbrow_get("stationID") == Some(&PyRep::Integer(60003760))));
 }
 
 #[test]

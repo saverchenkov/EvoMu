@@ -490,11 +490,19 @@ fn normalize_map_paperdoll_peacetreaty_petitioner_planet_pos_raffle_reprocess_sc
             PyRep::List(vec![PyRep::keyval([
                 ("itemID", PyRep::Integer(700)),
                 ("typeID", PyRep::Integer(1230)),
+                ("stationBaseYield", PyRep::Real(0.55)),
+                ("quantityToProcess", PyRep::Integer(1000)),
+                ("leftOvers", PyRep::Integer(0)),
+                ("iskCost", PyRep::Real(0.0)),
+                ("totalISKCost", PyRep::Real(0.0)),
                 (
                     "outputs",
                     PyRep::List(vec![PyRep::keyval([
                         ("typeID", PyRep::Integer(34)),
-                        ("quantity", PyRep::Integer(100)),
+                        ("quantity", PyRep::Integer(2288)),
+                        ("unrecoverable", PyRep::Integer(1872)),
+                        ("station", PyRep::Integer(0)),
+                        ("iskCost", PyRep::Real(0.0)),
                     ])]),
                 ),
             ])]),
@@ -505,6 +513,11 @@ fn normalize_map_paperdoll_peacetreaty_petitioner_planet_pos_raffle_reprocess_sc
         panic!("expected tuple");
     };
     assert_eq!(qt.len(), 3);
+    let PyRep::Dict(ref eff_entries) = qt[1] else {
+        panic!("expected stationEfficiency Dict");
+    };
+    assert!(eff_entries.iter().any(|(k, v)| *k == PyRep::None && *v == PyRep::Real(0.55)));
+    assert!(eff_entries.iter().any(|(k, v)| *k == PyRep::Integer(1230) && *v == PyRep::Real(0.55)));
     let PyRep::Dict(ref qentries) = qt[2] else {
         panic!("expected normalized quotes Dict");
     };
@@ -513,6 +526,37 @@ fn normalize_map_paperdoll_peacetreaty_petitioner_planet_pos_raffle_reprocess_sc
         qentries[0].1.dict_get("typeID").and_then(|v| v.as_i64()),
         Some(1230)
     );
+    assert_eq!(
+        qentries[0].1.dict_get("quantityToProcess").and_then(|v| v.as_i64()),
+        Some(1000)
+    );
+    assert_eq!(
+        qentries[0].1.dict_get("leftOvers").and_then(|v| v.as_i64()),
+        Some(0)
+    );
+    let recov = qentries[0]
+        .1
+        .dict_get("recoverables")
+        .expect("recoverables CRowset");
+    assert!(recov.is_crowset(), "recoverables must be dbutil.CRowset, got {recov:?}");
+    let recov_rows = recov.crowset_rows().expect("crowset rows");
+    assert_eq!(recov_rows.len(), 1);
+    assert_eq!(recov_rows[0].dbrow_get("typeID").and_then(|v| v.as_i64()), Some(34));
+    assert_eq!(recov_rows[0].dbrow_get("client").and_then(|v| v.as_i64()), Some(2288));
+    assert_eq!(recov_rows[0].dbrow_get("unrecoverable").and_then(|v| v.as_i64()), Some(1872));
+    assert_eq!(recov_rows[0].dbrow_get("station").and_then(|v| v.as_i64()), Some(0));
+    assert_eq!(recov_rows[0].dbrow_get("iskCost").and_then(|v| v.as_f64()), Some(0.0));
+    let wire = eve_proto::marshal::encode(&quotes);
+    let decoded = eve_proto::marshal::decode(&wire).expect("decode GetQuotes");
+    let PyRep::Tuple(dt) = decoded else {
+        panic!("decoded GetQuotes tuple");
+    };
+    let PyRep::Dict(d_entries) = &dt[2] else {
+        panic!("decoded GetQuotes quotes dict");
+    };
+    let d_recov = d_entries[0].1.dict_get("recoverables").expect("decoded recoverables");
+    assert!(d_recov.is_crowset());
+    assert_eq!(d_recov.crowset_rows().unwrap()[0].dbrow_get("client").and_then(|v| v.as_i64()), Some(2288));
 
     let rec = normalize_macho_rpc_reply(
         "scanMgr",

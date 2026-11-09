@@ -438,3 +438,42 @@ async fn docking_aborts_active_self_destruct_countdown() {
         assert!(!rt.self_destruct_countdowns.contains_key(&ship_id));
     });
 }
+
+#[tokio::test]
+async fn corp_station_mgr_standing_check_accepts_service_id_and_bitmask_695() {
+    let ctx = ServerContext::new();
+    let station_id = 60_003_466_i64;
+    let station = ctx
+        .sde
+        .stations
+        .get(&station_id)
+        .expect("NPC station 60003466 in SDE");
+    assert!(
+        crate::services::station_structure::npc_station_offers_service(&ctx.sde, station_id, 13),
+        "Station 60003466 must offer service 13 (bit 4096)"
+    );
+
+    let char_id = 90_000_001_i64;
+    let mut session = SessionState::new(1);
+    session.user_id = Some(char_id as u64);
+    session.character_id = Some(char_id);
+    session.corporation_id = Some(1_000_009);
+    session.solar_system_id = Some(station.solar_system_id);
+    session.station_id = Some(station_id);
+
+    let kw = HashMap::new();
+    for arg in [13_i64, 4096_i64] {
+        let res = handle(
+            &ctx,
+            &mut session,
+            "corpStationMgr",
+            "DoStandingCheckForStationService",
+            &[PyRep::Integer(arg)],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .unwrap_or_else(|e| panic!("service arg {arg} at {station_id} should succeed, got {e:?}"));
+        assert_eq!(res, PyRep::Bool(true));
+    }
+}

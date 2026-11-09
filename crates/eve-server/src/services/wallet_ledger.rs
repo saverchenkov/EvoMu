@@ -19,7 +19,7 @@ use eve_db::corp_roles;
 use eve_db::ledger::{ref_types, JournalContext, JournalEntryInput, JournalMeta, ACCOUNTING_KEY_CASH};
 use eve_db::{InventoryFlag, IskCents};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, DBRowDescriptor, DbColumnType, PyRep};
 use std::collections::HashMap;
 
 fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
@@ -362,13 +362,19 @@ fn get_journal(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> R
             })
             .collect())
     })?;
-    Ok(PyRep::rowset(
-        vec![
-            "transactionID", "transactionDate", "referenceID", "entryTypeID", "ownerID1", "ownerID2",
-            "accountKey", "amount", "balance", "description",
-        ],
-        rows,
-    ))
+    let descriptor = DBRowDescriptor::new([
+        ("transactionID", DbColumnType::I8),
+        ("transactionDate", DbColumnType::FileTime),
+        ("referenceID", DbColumnType::I8),
+        ("entryTypeID", DbColumnType::I4),
+        ("ownerID1", DbColumnType::I8),
+        ("ownerID2", DbColumnType::I8),
+        ("accountKey", DbColumnType::I4),
+        ("amount", DbColumnType::R8),
+        ("balance", DbColumnType::R8),
+        ("description", DbColumnType::WStr),
+    ]);
+    Ok(descriptor.build_crowset(rows))
 }
 
 fn market_transactions(
@@ -436,13 +442,21 @@ fn market_transactions(
             })
             .collect())
     })?;
-    Ok(PyRep::rowset(
-        vec![
-            "transactionID", "transactionDate", "typeID", "quantity", "price", "stationID", "buyerID",
-            "sellerID", "accountID", "buyerAccountID", "sellerAccountID", "journalRefID",
-        ],
-        rows,
-    ))
+    let descriptor = DBRowDescriptor::new([
+        ("transactionID", DbColumnType::I8),
+        ("transactionDate", DbColumnType::FileTime),
+        ("typeID", DbColumnType::I4),
+        ("quantity", DbColumnType::I4),
+        ("price", DbColumnType::R8),
+        ("stationID", DbColumnType::I8),
+        ("buyerID", DbColumnType::I8),
+        ("sellerID", DbColumnType::I8),
+        ("accountID", DbColumnType::I8),
+        ("buyerAccountID", DbColumnType::I4),
+        ("sellerAccountID", DbColumnType::I4),
+        ("journalRefID", DbColumnType::I8),
+    ]);
+    Ok(descriptor.build_crowset(rows))
 }
 
 fn deposit_plex_inner(

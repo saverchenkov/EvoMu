@@ -870,3 +870,118 @@ fn on_item_change_and_multiple_item_change_resolve_sde_and_singleton_qty() {
     assert_eq!(col(m_cols, "groupID"), Some(i64::from(ship_type.group_id)));
     assert_eq!(col(m_cols, "categoryID"), Some(i64::from(ship_type.category_id)));
 }
+
+#[tokio::test]
+async fn market_max_open_orders_maps_to_v24_market_exceeded_order_count_user_error_713() {
+    let ctx = Arc::new(ServerContext::new());
+    let addr = spawn_listener(Arc::clone(&ctx)).await;
+    let char_id = 90_000_001_i64;
+    let station_id = 60_003_760_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = eve_db::IskCents::from_isk(1_000_000);
+        }
+        snap.skills.remove(&char_id);
+    });
+
+    let (mut s, client_id, user_id) = connect_login(addr, "demo", "demo-secret").await;
+    let sel_pkt = build_call_pkt(
+        client_id,
+        user_id,
+        1,
+        MachoAddress::Node {
+            node_id: MACHO_PROXY_NODE_ID,
+            service: Some("charUnboundMgr".into()),
+            call_id: 0,
+        },
+        None,
+        "SelectCharacterID",
+        vec![PyRep::Integer(char_id)],
+    );
+    write_framed_pyrep(&mut s, &sel_pkt.to_pyrep()).await.unwrap();
+    assert_eq!(read_until_call_reply(&mut s).await.packet_type, MachoPacketType::CallRsp);
+
+    let mut call_id = 10_u64;
+    for i in 0..5 {
+        call_id += 1;
+        let pkt = build_call_pkt(
+            client_id,
+            user_id,
+            call_id,
+            MachoAddress::Node {
+                node_id: MACHO_PROXY_NODE_ID,
+                service: Some("marketProxy".into()),
+                call_id: 0,
+            },
+            None,
+            "PlaceBuyOrder",
+            vec![
+                PyRep::Integer(station_id),
+                PyRep::Integer(1230),
+                PyRep::Real(1.0 + (i as f64)),
+                PyRep::Integer(1),
+                PyRep::Integer(-1),
+                PyRep::Integer(1),
+                PyRep::Integer(1),
+                PyRep::Bool(false),
+                PyRep::None,
+            ],
+        );
+        write_framed_pyrep(&mut s, &pkt.to_pyrep()).await.unwrap();
+        let reply = read_until_call_reply(&mut s).await;
+        assert_ne!(
+            reply.packet_type,
+            MachoPacketType::ErrorResponse,
+            "order #{i} should succeed, got {reply:?}"
+        );
+    }
+
+    call_id += 1;
+    let over_pkt = build_call_pkt(
+        client_id,
+        user_id,
+        call_id,
+        MachoAddress::Node {
+            node_id: MACHO_PROXY_NODE_ID,
+            service: Some("marketProxy".into()),
+            call_id: 0,
+        },
+        None,
+        "PlaceBuyOrder",
+        vec![
+            PyRep::Integer(station_id),
+            PyRep::Integer(1230),
+            PyRep::Real(10.0),
+            PyRep::Integer(1),
+            PyRep::Integer(-1),
+            PyRep::Integer(1),
+            PyRep::Integer(1),
+            PyRep::Bool(false),
+            PyRep::None,
+        ],
+    );
+    write_framed_pyrep(&mut s, &over_pkt.to_pyrep()).await.unwrap();
+    let err_pkt = read_until_call_reply(&mut s).await;
+    assert_eq!(err_pkt.packet_type, MachoPacketType::ErrorResponse);
+    let PyRep::Bytes(bytes) = &as_tuple(&as_tuple(&err_pkt.payload)[2])[0] else {
+        panic!("expected wrapped exception bytes in ErrorResponse");
+    };
+    let PyRep::ObjectEx { header, .. } = marshal::decode(bytes).unwrap() else {
+        panic!("expected ObjectEx UserError");
+    };
+    let hdr = as_tuple(&header);
+    assert_eq!(hdr[0], PyRep::Token("eveexceptions.UserError".into()));
+    let args = as_tuple(&hdr[1]);
+    assert_eq!(args[0].as_str(), Some("MarketExceededOrderCount"));
+    let PyRep::Dict(entries) = &args[1] else {
+        panic!("expected UserError dict args");
+    };
+    let get_int = |key: &str| -> Option<i64> {
+        entries
+            .iter()
+            .find(|(k, _)| k.as_str() == Some(key))
+            .and_then(|(_, v)| v.as_i64())
+    };
+    assert_eq!(get_int("curCnt"), Some(5));
+    assert_eq!(get_int("maxCnt"), Some(5));
+}

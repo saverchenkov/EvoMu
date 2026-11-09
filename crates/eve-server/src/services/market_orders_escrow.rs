@@ -999,17 +999,17 @@ pub fn handle_orders_escrow(
                 meta.final_vol_remaining = Some(remaining_qty);
                 meta.closed_unix = Some(now_unix);
                 save_market_order_meta(snap, order_id, meta);
-                Ok((refund_acct, returned_item))
+                Ok((refund_acct, returned_item, is_corp_order))
             });
             match res {
-                Ok((refund_acct, returned_item)) => {
+                Ok((refund_acct, returned_item, is_corp_order)) => {
                     if let Some((r_is_corp, r_owner, r_div, r_bal)) = refund_acct {
                         super::emit_market_account_change(ctx, r_is_corp, r_owner, r_div, r_bal);
                     }
                     if let Some((rec_char, rec, changes)) = returned_item {
                         super::emit_market_item_change(ctx, rec_char, &rec, changes);
                     }
-                    ctx.notify(NotificationTarget::Character(char_id), "OnOwnOrdersChanged", "charid", crate::services::market_price_history::build_own_order_changed_payload(ctx, order_id, "Expiry", false));
+                    ctx.notify(NotificationTarget::Character(char_id), "OnOwnOrdersChanged", "charid", crate::services::market_price_history::build_own_order_changed_payload(ctx, order_id, "Expiry", is_corp_order));
                     Some(Ok(PyRep::Bool(true)))
                 }
                 Err(e) => Some(Err(e)),
