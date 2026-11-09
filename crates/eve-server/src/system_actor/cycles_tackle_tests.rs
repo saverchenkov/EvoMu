@@ -604,3 +604,84 @@ fn arch_584_overlapping_and_out_of_order_modifier_expiration_preserves_baselines
     assert_eq!(bp.combat_states[&ship_id].armor_resonance, base_ar);
     assert_eq!(bp.combat_states[&ship_id].structure_resonance, base_hr);
 }
+
+#[test]
+fn reconcile_velocity_and_immobilize_emit_set_max_speed_and_cross_ball_interactive() {
+    let sde = make_tackle_sde();
+    let sde_opt = Some(sde);
+    let mut bp = Ballpark::new(30_000_142);
+    let ship_id = 5001_i64;
+    let observer_id = 5002_i64;
+    let mut ship_b = make_tackle_ball(ship_id, 587, DVec3::ZERO);
+    ship_b.max_velocity = 400.0;
+    bp.add_ball(ship_b);
+    bp.combat_states.insert(
+        ship_id,
+        CombatState {
+            base_max_velocity: Some(400.0),
+            ..CombatState::default()
+        },
+    );
+    bp.add_ball(make_tackle_ball(observer_id, 587, DVec3::new(1_000.0, 0.0, 0.0)));
+    bp.combat_states.insert(observer_id, CombatState::default());
+    let _ = bp.drain_all_observer_events();
+
+    let mut cycles = Vec::new();
+    let mut scram_map = HashMap::new();
+    let mut core_map = HashMap::new();
+
+    // 1. Immobilizing cycle (e.g. Bastion/Siege/Cyno) must emit SetMaxSpeed(..., 0.0).
+    let siege_cycle = ActiveModuleCycle {
+        ship_id,
+        module_id: 95_001,
+        effect_name: "siege".into(),
+        duration_s: 300.0,
+        immobilize_self: true,
+        ..Default::default()
+    };
+    handle_add_module_cycle(
+        &mut bp,
+        &mut cycles,
+        &mut scram_map,
+        &mut core_map,
+        &sde_opt,
+        &None,
+        None,
+        siege_cycle,
+    )
+    .expect("add immobilize cycle");
+    assert_eq!(bp.balls[&ship_id].max_velocity, 0.0);
+    let evs1 = bp.drain_observer_events(observer_id);
+    assert!(evs1.iter().any(|e| matches!(
+        e,
+        DestinyEvent::SetMaxSpeed { ball_id, max_speed } if *ball_id == ship_id && *max_speed == 0.0
+    )));
+
+    // 2. Removing immobilizing cycle restores velocity and emits SetMaxSpeed(..., 400.0).
+    let rem = cycles.pop().unwrap();
+    crate::system_actor::cycles::cleanup_removed_module_cycle(&mut bp, &rem, &None);
+    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &scram_map, &core_map, &None, None);
+    assert!((bp.balls[&ship_id].max_velocity - 400.0).abs() < 1e-6);
+    let evs2 = bp.drain_observer_events(observer_id);
+    assert!(evs2.iter().any(|e| matches!(
+        e,
+        DestinyEvent::SetMaxSpeed { ball_id, max_speed } if *ball_id == ship_id && (*max_speed - 400.0).abs() < 1e-6
+    )));
+
+    // 3. Cross-ball SetBallInteractive (observer scope != target ball_id) must update
+    //    ball_interactive_overrides and emit SetBallInteractive for target ball_id.
+    assert!(apply_destiny_event_in_actor(
+        &mut bp,
+        observer_id,
+        DestinyEvent::SetBallInteractive {
+            ball_id: ship_id,
+            is_interactive: false,
+        }
+    ));
+    assert_eq!(bp.ball_interactive_overrides.get(&ship_id), Some(&false));
+    let evs3 = bp.drain_observer_events(observer_id);
+    assert!(evs3.iter().any(|e| matches!(
+        e,
+        DestinyEvent::SetBallInteractive { ball_id, is_interactive: false } if *ball_id == ship_id
+    )));
+}

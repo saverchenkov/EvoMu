@@ -565,11 +565,14 @@ impl Ballpark {
             if let Some(c) = self.combat_states.get_mut(&decloaked_id) {
                 c.cloak_velocity_multiplier = None;
             }
-            self.recompute_ball_attributes(decloaked_id);
+            let speed_change = self.recompute_ball_attributes_quiet(decloaked_id);
             if let Some(meta) = self.ball_slim_meta.get_mut(&decloaked_id) {
                 meta.is_cloaked = false;
             }
             self.reveal_ball_to_grid_observers(decloaked_id);
+            if let Some(next_max_v) = speed_change {
+                self.set_ball_max_velocity(decloaked_id, next_max_v);
+            }
         }
 
         // Reconcile shared dynamic GridBubble membership after movement (`SP-2`, `SP-3`, `Grid.md:13-15`).
@@ -1429,11 +1432,14 @@ impl Ballpark {
         if let Some(c) = self.combat_states.get_mut(&ball_id) {
             c.cloak_velocity_multiplier = None;
         }
-        self.recompute_ball_attributes(ball_id);
+        let speed_change = self.recompute_ball_attributes_quiet(ball_id);
         if let Some(meta) = self.ball_slim_meta.get_mut(&ball_id) {
             meta.is_cloaked = false;
         }
         self.reveal_ball_to_grid_observers(ball_id);
+        if let Some(next_max_v) = speed_change {
+            self.set_ball_max_velocity(ball_id, next_max_v);
+        }
     }
 
     pub(crate) fn remove_ball_preserving_observer_events(

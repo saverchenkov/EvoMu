@@ -93,31 +93,154 @@ pub fn try_remove_ball_for_db(
     }
 }
 
-/// Persists dynamic ship/item landing coordinates into `snap.item_positions` when a warp slide exits warp.
+/// Minimum sub-warp displacement squared (`100 m`) triggering an immediate `snap.item_positions` flush
+/// between periodic 5-tick flushes.
+const SUBWARP_FLUSH_DISPLACEMENT_SQ_M2: f64 = 100.0 * 100.0;
+/// Periodic sub-warp position flush cadence in 1 Hz ticks when moving slowly (`< 100 m/s`).
+const SUBWARP_FLUSH_INTERVAL_TICKS: u64 = 5;
+
+/// Persists explicit `ball_ids` coordinates from `ballpark` into `snap.item_positions`
+/// when backed by `snap.items` and changed (`#741`).
+pub(crate) fn persist_ball_positions_in_db(
+    ballpark: &Ballpark,
+    ball_ids: &[BallId],
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+) {
+    let Some(db) = db_opt
+        .as_ref()
+        .filter(|db| !db.is_write_locked_by_current_thread())
+    else {
+        return;
+    };
+    if ball_ids.is_empty() {
+        return;
+    }
+    let updates: Vec<(BallId, [f64; 3])> = db.with_snapshot(|snap| {
+        let mut out = Vec::new();
+        for &bid in ball_ids {
+            if ballpark.is_static_ball(bid)
+                || ballpark
+                    .ball_slim_meta
+                    .get(&bid)
+                    .is_some_and(|m| m.category_id == 11)
+                || !snap.items.contains_key(&bid)
+            {
+                continue;
+            }
+            let Some(b) = ballpark.balls.get(&bid) else {
+                continue;
+            };
+            if !b.position.is_finite() {
+                continue;
+            }
+            let changed = match snap.item_positions.get(&bid) {
+                None => true,
+                Some(&prev) => (DVec3::from_array(prev) - b.position).length_squared() > 1e-6,
+            };
+            if changed {
+                out.push((bid, b.position.to_array()));
+            }
+        }
+        out
+    });
+    if updates.is_empty() {
+        return;
+    }
+    let _ = db.try_with_mut_snapshot(|snap| -> Result<(), String> {
+        for (bid, pos_arr) in updates {
+            if snap.items.contains_key(&bid) {
+                snap.item_positions.insert(bid, pos_arr);
+            }
+        }
+        Ok(())
+    });
+}
+
+/// Persists dynamic ship/item coordinates into `snap.item_positions` on warp exit (`OnDeactivatingWarp`),
+/// explicit `SetBallPosition` / `Stop` events, and periodic / resting sub-warp movement flushes,
+/// while performing zero snapshot writes when persisted items are stationary (`#741`).
 pub(crate) fn persist_landed_warps_in_db(
     ballpark: &Ballpark,
     events: &[eve_destiny::DestinyEvent],
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
 ) {
-    let Some(db) = db_opt.as_ref() else {
+    let Some(db) = db_opt
+        .as_ref()
+        .filter(|db| !db.is_write_locked_by_current_thread())
+    else {
         return;
     };
-    if !events
-        .iter()
-        .any(|e| matches!(e, eve_destiny::DestinyEvent::OnDeactivatingWarp { .. }))
-    {
-        return;
-    }
-    db.with_mut_snapshot(|snap| {
-        for ev in events {
-            if let eve_destiny::DestinyEvent::OnDeactivatingWarp { ball_id } = ev {
-                if !ballpark.is_static_ball(*ball_id) && snap.items.contains_key(ball_id) {
-                    if let Some(b) = ballpark.balls.get(ball_id) {
-                        snap.item_positions.insert(*ball_id, b.position.to_array());
-                    }
+    let mut immediate_ids = std::collections::BTreeSet::new();
+    for ev in events {
+        match ev {
+            eve_destiny::DestinyEvent::OnDeactivatingWarp { ball_id }
+            | eve_destiny::DestinyEvent::SetBallPosition { ball_id, .. }
+            | eve_destiny::DestinyEvent::Stop { ball_id } => {
+                if !ballpark.is_static_ball(*ball_id) {
+                    immediate_ids.insert(*ball_id);
                 }
             }
+            _ => {}
         }
+    }
+    let updates: Vec<(BallId, [f64; 3])> = db.with_snapshot(|snap| {
+        let mut out = Vec::new();
+        for (&bid, b) in &ballpark.balls {
+            if ballpark.is_static_ball(bid)
+                || ballpark
+                    .ball_slim_meta
+                    .get(&bid)
+                    .is_some_and(|m| m.category_id == 11)
+                || !snap.items.contains_key(&bid)
+                || !b.position.is_finite()
+            {
+                continue;
+            }
+            let is_immediate = immediate_ids.contains(&bid);
+            if !is_immediate
+                && matches!(
+                    b.mode,
+                    eve_destiny::MovementMode::Warp { phase, .. }
+                        if phase != eve_destiny::WarpPhase::Aligning
+                )
+            {
+                continue;
+            }
+            let should_write = match snap.item_positions.get(&bid) {
+                None => {
+                    is_immediate
+                        || !matches!(b.mode, eve_destiny::MovementMode::Stop)
+                        || b.velocity.length_squared() > 1e-6
+                }
+                Some(&prev) => {
+                    let delta_sq = (DVec3::from_array(prev) - b.position).length_squared();
+                    if is_immediate {
+                        delta_sq > 1e-6
+                    } else {
+                        delta_sq > 1e-4
+                            && (delta_sq >= SUBWARP_FLUSH_DISPLACEMENT_SQ_M2
+                                || ballpark.current_tick % SUBWARP_FLUSH_INTERVAL_TICKS == 0
+                                || (matches!(b.mode, eve_destiny::MovementMode::Stop)
+                                    && b.velocity.length_squared() <= 1.0))
+                    }
+                }
+            };
+            if should_write {
+                out.push((bid, b.position.to_array()));
+            }
+        }
+        out
+    });
+    if updates.is_empty() {
+        return;
+    }
+    let _ = db.try_with_mut_snapshot(|snap| -> Result<(), String> {
+        for (bid, pos_arr) in updates {
+            if snap.items.contains_key(&bid) {
+                snap.item_positions.insert(bid, pos_arr);
+            }
+        }
+        Ok(())
     });
 }
 
@@ -205,6 +328,7 @@ pub(crate) fn fast_forward_clock_in_actor(
             all_events.insert(0, pos_ev);
             all_events.insert(1, vel_ev);
         }
+        persist_ball_positions_in_db(ballpark, &[ship_id], db_opt);
     }
     crate::system_actor::sync_ball_positions(ballpark, ball_positions_actor, scrambled_balls_actor);
     let broadcast = crate::system_actor::build_tick_broadcast(solar_system_id, ballpark, all_events);

@@ -10,7 +10,40 @@ use std::sync::{Arc, OnceLock};
 
 fn shared_sde() -> Arc<SdeRegistry> {
     static SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
-    Arc::clone(SDE.get_or_init(|| Arc::new(SdeRegistry::with_canonical_seed())))
+    Arc::clone(SDE.get_or_init(|| {
+        let mut sde = SdeRegistry::with_canonical_seed();
+        for (aid, name) in [
+            (306u16, "maxVelocityModifier"),
+            (560, "cloakingTargetingDelay"),
+            (852, "siegeModeWarpStatus"),
+            (1035, "covertOpsStealthBomberTargettingDelay"),
+            (2343, "disallowTethering"),
+            (2354, "disallowDocking"),
+            (2453, "disallowDriveJumping"),
+        ] {
+            sde.attributes.entry(aid).or_insert_with(|| eve_sde::DogmaAttributeType {
+                attribute_id: aid,
+                name: name.into(),
+                default_value: 0.0,
+                high_is_good: true,
+                stackable: false,
+                published: true,
+            });
+        }
+        let mut bastion = sde
+            .types
+            .values()
+            .next()
+            .expect("canonical seed has types")
+            .clone();
+        bastion.type_id = 33_400;
+        bastion.group_id = 515;
+        bastion.category_id = 7;
+        bastion.name = "Bastion Module I".into();
+        bastion.default_attributes = HashMap::from([(852, 1.0)]);
+        sde.types.entry(33_400).or_insert(bastion);
+        Arc::new(sde)
+    }))
 }
 
 #[tokio::test]
@@ -430,4 +463,324 @@ async fn eject_in_space_sets_capsule_name_and_queues_set_state() {
         )),
         "ship.Eject must queue SetState for new capsule (#729)"
     );
+}
+
+#[tokio::test]
+async fn in_space_eject_and_ship_to_ship_board_lifecycle_and_guards() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 96_500_301_i64;
+    let other_char_id = 96_500_302_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_a = 96_500_310_i64;
+    let ship_b = 96_500_311_i64;
+    let ship_manned = 96_500_312_i64;
+    let mod_a = 96_500_320_i64;
+    let bastion_mod_id = 96_500_321_i64;
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|s| {
+        let seed_ch = s.characters.values().next().cloned().expect("seed char");
+        let mut ch = seed_ch.clone();
+        ch.character_id = char_id;
+        ch.user_id = 1;
+        ch.name = "BoardPilot".into();
+        ch.corporation_id = 98_000_001;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.solar_system_id = sys_id;
+        ch.active_ship_id = ship_a;
+        ch.clone_grade = 2; // Omega
+        s.characters.insert(char_id, ch);
+        let mut pilot_skills = s.skills.values().next().cloned().unwrap_or_default();
+        if let Some(t) = ctx.sde.types.get(&587) {
+            for &aid in &[182_u16, 183, 184] {
+                if let Some(&req_sid) = t.default_attributes.get(&aid) {
+                    pilot_skills.insert(
+                        req_sid as u32,
+                        eve_db::TrainedSkillRecord {
+                            type_id: req_sid as u32,
+                            level: 5,
+                            skill_points: 256_000.0,
+                        },
+                    );
+                }
+            }
+        }
+        s.skills.insert(char_id, pilot_skills);
+
+        let mut ch2 = seed_ch;
+        ch2.character_id = other_char_id;
+        ch2.user_id = 2;
+        ch2.name = "OtherPilot".into();
+        ch2.corporation_id = 98_000_001;
+        ch2.station_id = None;
+        ch2.structure_id = None;
+        ch2.solar_system_id = sys_id;
+        ch2.active_ship_id = ship_manned;
+        s.characters.insert(other_char_id, ch2);
+
+        for sid in [ship_a, ship_b, ship_manned] {
+            s.items.insert(
+                sid,
+                InventoryItemRecord {
+                    item_id: sid,
+                    type_id: 587,
+                    owner_id: char_id,
+                    location_id: sys_id as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    for (sid, pos, vel, mode, pilot_opt) in [
+        (
+            ship_a,
+            glam::DVec3::new(10_000.0, 0.0, 0.0),
+            glam::DVec3::new(300.0, 0.0, 0.0),
+            eve_destiny::MovementMode::GotoDirection {
+                direction: glam::DVec3::X,
+            },
+            Some(char_id),
+        ),
+        (
+            ship_b,
+            glam::DVec3::new(10_600.0, 0.0, 0.0),
+            glam::DVec3::ZERO,
+            eve_destiny::MovementMode::Stop,
+            None,
+        ),
+        (
+            ship_manned,
+            glam::DVec3::new(10_800.0, 0.0, 0.0),
+            glam::DVec3::ZERO,
+            eve_destiny::MovementMode::Stop,
+            Some(other_char_id),
+        ),
+    ] {
+        let mut meta = ctx.build_ship_slim_meta(pilot_opt.unwrap_or(char_id), 587);
+        meta.char_id = pilot_opt;
+        sys.try_spawn_ball_with_meta(
+            eve_destiny::Ball {
+                id: sid,
+                type_id: 587,
+                position: pos,
+                velocity: vel,
+                max_velocity: 350.0,
+                inertia: 2.0,
+                mass: 1_100_000.0,
+                radius: 40.0,
+                speed_fraction: if vel.length_squared() > 0.0 { 1.0 } else { 0.0 },
+                mode,
+            },
+            eve_destiny::CombatState::default(),
+            meta,
+        );
+    }
+
+    // Seed active module cycle and target lock on ship_a before Eject.
+    let _ = sys
+        .add_module_cycle(crate::system_actor::ActiveModuleCycle {
+            ship_id: ship_a,
+            module_id: mod_a,
+            target_id: Some(ship_b),
+            effect_name: "afterburner".into(),
+            duration_s: 10.0,
+            elapsed_s: 0.0,
+            cap_need_per_cycle: 0.0,
+            ..Default::default()
+        })
+        .await;
+    {
+        let mut bp = sys.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        bp.target_locks.entry(ship_a).or_default().push(eve_destiny::TargetLock {
+            target_id: ship_b,
+            lock_time_ms: 2_000.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: None,
+        });
+    }
+
+    let mut sess = SessionState::new(9_730);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(98_000_001);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_a);
+
+    // 1. Negative guard: cannot Eject while immobilized (e.g. Siege / Bastion).
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(
+            bastion_mod_id,
+            InventoryItemRecord {
+                item_id: bastion_mod_id,
+                type_id: 33_400,
+                owner_id: char_id,
+                location_id: ship_a,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        s.module_active_states.insert(bastion_mod_id);
+    });
+    let immob_err = handle_ships_mastery_and_fitting_ext(&ctx, &mut sess, None, "ship", "Eject", &[], &kw)
+        .await
+        .unwrap()
+        .expect_err("Eject must reject immobilized ship");
+    assert_eq!(immob_err.code, "CantJumpWhileModuleActive");
+    ctx.db.with_mut_snapshot(|s| {
+        s.module_active_states.remove(&bastion_mod_id);
+        s.items.remove(&bastion_mod_id);
+    });
+
+    // 2. Negative guard: cannot Eject while in active warp.
+    let _ = sys
+        .set_movement_mode(
+            ship_a,
+            eve_destiny::MovementMode::Warp {
+                origin: glam::DVec3::new(10_000.0, 0.0, 0.0),
+                destination: glam::DVec3::new(2_000_000.0, 0.0, 0.0),
+                warp_speed_au_s: 3.0,
+                total_distance: 1_990_000.0,
+                phase: eve_destiny::WarpPhase::Cruising,
+                elapsed_warp_time: 5.0,
+            },
+        )
+        .await;
+    let warp_eject_err = handle_ships_mastery_and_fitting_ext(&ctx, &mut sess, None, "ship", "Eject", &[], &kw)
+        .await
+        .unwrap()
+        .expect_err("Eject must reject active warp");
+    assert_eq!(warp_eject_err.code, "ShipInWarp");
+    let _ = sys.force_stop_warp(ship_a);
+    let _ = sys
+        .set_movement_mode(
+            ship_a,
+            eve_destiny::MovementMode::GotoDirection {
+                direction: glam::DVec3::X,
+            },
+        )
+        .await
+        .expect("restore GotoDirection after force_stop_warp");
+
+    // 3. Successful in-space Eject: stops ship_a, initializes capsule HP, updates ball_interactive_overrides,
+    //    clears cycles/locks, and persists both positions to snap.item_positions.
+    let _ = handle_ships_mastery_and_fitting_ext(&ctx, &mut sess, None, "ship", "Eject", &[], &kw)
+        .await
+        .unwrap()
+        .expect("Eject in space");
+    let cap_id = sess.ship_id.expect("capsule id");
+    let (_, old_ball_after_eject) = sys.get_ball_snapshot(ship_a).await.unwrap().unwrap();
+    assert!(
+        matches!(old_ball_after_eject.mode, eve_destiny::MovementMode::Stop),
+        "ejected ship must be stopped, got {:?}",
+        old_ball_after_eject.mode
+    );
+    let cap_cs = sys.get_combat_state(cap_id).await.unwrap().unwrap();
+    assert!(cap_cs.max_shield_hp > 0.0 && cap_cs.max_armor_hp > 0.0 && cap_cs.max_structure_hp > 0.0);
+    {
+        let bp = sys.ballpark.read().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(bp.ball_interactive_overrides.get(&ship_a), Some(&false));
+        assert_eq!(bp.ball_slim_meta.get(&ship_a).and_then(|m| m.char_id), None);
+        assert!(bp.target_locks.get(&ship_a).is_none_or(|v| v.is_empty()));
+    }
+    assert!(sys.actor_state.read().unwrap().active_module_cycles.iter().all(|c| c.ship_id != ship_a));
+    ctx.db.with_snapshot(|s| {
+        assert!(s.item_positions.contains_key(&ship_a));
+        assert!(s.item_positions.contains_key(&cap_id));
+    });
+
+    // 4. Board ship_a from capsule (removes capsule item & ball, restores interactive=true).
+    ctx.advance_secs(12);
+    let _ = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "ship",
+        "Board",
+        &[PyRep::Integer(ship_a)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("Board ship_a from capsule");
+    assert_eq!(sess.ship_id, Some(ship_a));
+    assert!(sys.get_ball_snapshot(cap_id).await.unwrap().is_none());
+    {
+        let bp = sys.ballpark.read().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(bp.ball_interactive_overrides.get(&ship_a), Some(&true));
+        assert_eq!(bp.ball_slim_meta.get(&ship_a).and_then(|m| m.char_id), Some(char_id));
+    }
+
+    // 5. Negative guard: cannot Board another pilot's manned ship.
+    ctx.advance_secs(12);
+    let manned_err = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "ship",
+        "Board",
+        &[PyRep::Integer(ship_manned)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("Cannot board manned ship");
+    assert_eq!(manned_err.code, "ShipNotBoardable");
+
+    // 6. Ship-to-ship Board: moving ship_a -> unmanned ship_b stops ship_a, sets interactive(ship_a, false),
+    //    sets ship_a slim char_id=None, sets interactive(ship_b, true), sets ship_b slim char_id=Some(char_id).
+    let _ = sys
+        .set_movement_mode(
+            ship_a,
+            eve_destiny::MovementMode::GotoDirection {
+                direction: glam::DVec3::Y,
+            },
+        )
+        .await;
+    let _ = sys.drain_observer_updates(ship_manned).await;
+    ctx.advance_secs(12);
+    let _ = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "ship",
+        "Board",
+        &[PyRep::Integer(ship_b)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("Ship-to-ship Board");
+    assert_eq!(sess.ship_id, Some(ship_b));
+    let (_, ship_a_after_board) = sys.get_ball_snapshot(ship_a).await.unwrap().unwrap();
+    assert!(matches!(ship_a_after_board.mode, eve_destiny::MovementMode::Stop));
+    {
+        let bp = sys.ballpark.read().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(bp.ball_interactive_overrides.get(&ship_a), Some(&false));
+        assert_eq!(bp.ball_slim_meta.get(&ship_a).and_then(|m| m.char_id), None);
+        assert_eq!(bp.ball_interactive_overrides.get(&ship_b), Some(&true));
+        assert_eq!(bp.ball_slim_meta.get(&ship_b).and_then(|m| m.char_id), Some(char_id));
+    }
+    let (_t, obs_events, _) = sys.drain_observer_updates(ship_manned).await.unwrap();
+    assert!(obs_events.iter().any(|e| matches!(
+        e,
+        eve_destiny::DestinyEvent::SetBallInteractive { ball_id, is_interactive: false } if *ball_id == ship_a
+    )));
+    assert!(obs_events.iter().any(|e| matches!(
+        e,
+        eve_destiny::DestinyEvent::SetBallInteractive { ball_id, is_interactive: true } if *ball_id == ship_b
+    )));
 }

@@ -577,3 +577,146 @@ async fn cmd_stop_omits_duplicate_do_destiny_updates_on_live_tcp_session_only() 
     let direct_notifs = ctx.drain_notifications_for_char(char_id);
     assert!(direct_notifs.iter().any(|n| n.event == "DoDestinyUpdates"));
 }
+
+#[tokio::test]
+async fn sync_ship_cloak_from_fitting_preserves_combat_state_and_locks_without_spawn_ball() {
+    let mut ctx = test_ctx();
+    let sys_id = 30_000_142u32;
+    let char_id = 96_601i64;
+    let ship_id = 78_601i64;
+    let enemy_id = 78_602i64;
+    let observer_id = 78_603i64;
+    let cloak_tid = 99_871u32;
+
+    let vel_attr = crate::services::space_navigation_advanced::max_velocity_cloak_attr_id(&ctx.sde)
+        .unwrap_or(306);
+    clone_type_with(
+        &mut ctx.sde,
+        11_370,
+        cloak_tid,
+        330,
+        7,
+        5.0,
+        0.0,
+        &[(vel_attr, 0.25), (560, 5.0)], // non-covert cloak: 0.25x speed, 5s recalibration
+    );
+
+    let cloak_item_id = ctx.db.with_mut_snapshot(|snap| {
+        put_item(snap, ship_id, 588, char_id, i64::from(sys_id), InventoryFlag::Hangar, 1, true);
+        let c_id = put_item(
+            snap,
+            78_610,
+            cloak_tid,
+            char_id,
+            ship_id,
+            InventoryFlag::HiSlot0,
+            1,
+            true,
+        );
+        snap.module_active_states.insert(c_id);
+        c_id
+    });
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let mut ship_b = make_ship_ball(ship_id, 588, 98_000_001, DVec3::ZERO);
+    ship_b.max_velocity = 400.0;
+    let _ = sys_h
+        .spawn_ball_with_combat(
+            ship_b,
+            eve_destiny::CombatState {
+                shield_hp: 123.0,
+                max_shield_hp: 500.0,
+                armor_hp: 210.0,
+                max_armor_hp: 400.0,
+                structure_hp: 290.0,
+                max_structure_hp: 350.0,
+                capacitor: 85.0,
+                max_capacitor: 250.0,
+                base_max_velocity: Some(400.0),
+                ..eve_destiny::CombatState::default()
+            },
+        )
+        .await;
+    let _ = sys_h
+        .spawn_ball(make_ship_ball(enemy_id, 588, 98_000_002, DVec3::new(3_000.0, 0.0, 0.0)))
+        .await;
+    let _ = sys_h
+        .spawn_ball(make_ship_ball(observer_id, 588, 98_000_003, DVec3::new(1_000.0, 0.0, 0.0)))
+        .await;
+
+    // Seed active incoming/outgoing target locks before sync_ship_cloak_and_mjfg_from_fitting runs.
+    {
+        let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        bp.target_locks.entry(ship_id).or_default().push(eve_destiny::TargetLock {
+            target_id: enemy_id,
+            lock_time_ms: 2_000.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: None,
+        });
+        bp.target_locks.entry(observer_id).or_default().push(eve_destiny::TargetLock {
+            target_id: ship_id,
+            lock_time_ms: 2_000.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: None,
+        });
+    }
+    let _ = sys_h.drain_observer_updates(observer_id).await;
+
+    sync_ship_cloak_and_mjfg_from_fitting(&ctx, char_id, sys_id, ship_id).await;
+
+    let (_, b_after) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let cs_after = sys_h.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!((b_after.max_velocity - 100.0).abs() < 1e-6);
+    assert!((cs_after.shield_hp - 123.0).abs() < 1e-6);
+    assert!((cs_after.armor_hp - 210.0).abs() < 1e-6);
+    assert!((cs_after.structure_hp - 290.0).abs() < 1e-6);
+    assert!((cs_after.capacitor - 85.0).abs() < 1e-6);
+    assert!(cs_after.is_cloaked);
+
+    {
+        let bp = sys_h.ballpark.read().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            bp.target_locks.get(&ship_id).is_some_and(|l| l.iter().any(|t| t.target_id == enemy_id && t.locked)),
+            "outgoing target lock must survive cloak speed sync"
+        );
+        assert!(
+            bp.target_locks.get(&observer_id).is_some_and(|l| l.iter().any(|t| t.target_id == ship_id && t.locked)),
+            "incoming target lock must survive cloak speed sync"
+        );
+    }
+
+    let (_tick, obs_events, _) = sys_h.drain_observer_updates(observer_id).await.unwrap();
+    assert!(
+        obs_events.iter().any(|e| matches!(
+            e,
+            eve_destiny::DestinyEvent::SetMaxSpeed { ball_id, max_speed }
+            if *ball_id == ship_id && (*max_speed - 100.0).abs() < 1e-6
+        )),
+        "cloak speed sync must emit SetMaxSpeed rather than RemoveBall+AddBalls2"
+    );
+    assert!(
+        !obs_events.iter().any(|e| matches!(
+            e,
+            eve_destiny::DestinyEvent::RemoveBalls { ball_ids } if ball_ids.contains(&ship_id)
+        )),
+        "cloak speed sync must NOT emit RemoveBalls via spawn_ball"
+    );
+
+    // Deactivate cloak and verify baseline speed restored with SetMaxSpeed and damage still intact.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.remove(&cloak_item_id);
+    });
+    sync_ship_cloak_and_mjfg_from_fitting(&ctx, char_id, sys_id, ship_id).await;
+    let (_, b_decloaked) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let cs_decloaked = sys_h.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!((b_decloaked.max_velocity - 400.0).abs() < 1e-6);
+    assert!((cs_decloaked.shield_hp - 123.0).abs() < 1e-6);
+    let (_tick, obs_events2, _) = sys_h.drain_observer_updates(observer_id).await.unwrap();
+    assert!(obs_events2.iter().any(|e| matches!(
+        e,
+        eve_destiny::DestinyEvent::SetMaxSpeed { ball_id, max_speed }
+        if *ball_id == ship_id && (*max_speed - 400.0).abs() < 1e-6
+    )));
+}

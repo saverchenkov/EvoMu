@@ -738,10 +738,9 @@ pub async fn handle_entosis_link_activation(
     let base_cycle_s = mod_type.default_attributes.get(&73).copied().unwrap_or(300_000.0) / 1000.0;
     let cycle_duration_s = if is_capital { base_cycle_s * 5.0 } else { base_cycle_s };
 
-    if let Ok(Some((_, mut ball))) = sys.get_ball_snapshot(ship_id).await {
+    if let Ok(Some((_, ball))) = sys.get_ball_snapshot(ship_id).await {
         if ball.max_velocity > 4_000.0 {
-            ball.max_velocity = 4_000.0;
-            let _ = sys.spawn_ball(ball).await;
+            let _ = sys.set_ball_max_velocity(ship_id, 4_000.0).await;
         }
     }
     if let Ok(Some(mut cs)) = sys.get_combat_state(ship_id).await {

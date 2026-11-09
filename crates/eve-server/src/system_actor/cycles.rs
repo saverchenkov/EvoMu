@@ -383,15 +383,17 @@ pub(crate) fn step_cycles_and_capacitor(
                 let mjd_disabled = ballpark.combat_states.get(&cycle.ship_id).is_some_and(|cs| cs.is_mwd_mjd_disabled);
                 if !mjd_disabled {
                     if let Some((radius_m, max_ships, max_caps)) = cycle.mjfg_field_params {
-                        let _ = ballpark.micro_jump_field_with_capitals(
+                        if let Ok(jumped_ids) = ballpark.micro_jump_field_with_capitals(
                             cycle.ship_id,
                             jump_dist,
                             radius_m,
                             max_ships,
                             max_caps,
-                        );
-                    } else {
-                        let _ = ballpark.micro_jump(cycle.ship_id, jump_dist);
+                        ) {
+                            super::persist_ball_positions_in_db(ballpark, &jumped_ids, db_opt);
+                        }
+                    } else if ballpark.micro_jump(cycle.ship_id, jump_dist).is_ok() {
+                        super::persist_ball_positions_in_db(ballpark, &[cycle.ship_id], db_opt);
                     }
                 }
             }
@@ -1041,10 +1043,14 @@ pub(crate) fn cleanup_removed_module_cycle(ballpark: &mut Ballpark, removed: &Ac
     let mut needs_recompute = false;
     if removed.effect_name.starts_with("cloaking") {
         if let Some(cs) = ballpark.combat_states.get_mut(&removed.ship_id) {
+            cs.is_covert_cloak = false;
+            cs.cloak_stabilization_remaining_s = 0.0;
             cs.cloak_velocity_multiplier = None;
-            cs.decloak_targeting_delay_remaining_s = cs
-                .decloak_targeting_delay_remaining_s
-                .max(cs.cloak_configured_targeting_delay_s);
+            if cs.gate_cloak_remaining_ticks == 0 {
+                cs.decloak_targeting_delay_remaining_s = cs
+                    .decloak_targeting_delay_remaining_s
+                    .max(cs.cloak_configured_targeting_delay_s);
+            }
         }
         needs_recompute = true;
     }

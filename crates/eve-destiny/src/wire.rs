@@ -110,7 +110,7 @@ pub fn encode_single_ball_with_park(
     park: Option<&Ballpark>,
 ) {
     let is_rigid = matches!(ball.mode, MovementMode::Rigid);
-    let (mode_byte, flags) = match ball.mode {
+    let (mode_byte, mut flags) = match ball.mode {
         MovementMode::GotoDirection { .. } => (
             DST_BALL_GOTO,
             BALL_FLAG_IS_FREE | BALL_FLAG_IS_MASSIVE | BALL_FLAG_IS_INTERACTIVE,
@@ -145,6 +145,13 @@ pub fn encode_single_ball_with_park(
         MovementMode::Rigid => (DST_BALL_RIGID, BALL_FLAG_IS_GLOBAL),
         MovementMode::Formation => (DST_BALL_FORMATION, BALL_FLAG_IS_FREE),
     };
+    if let Some(is_inter) = park.and_then(|p| p.ball_interactive_overrides.get(&ball.id).copied()) {
+        if is_inter {
+            flags |= BALL_FLAG_IS_INTERACTIVE;
+        } else {
+            flags &= !BALL_FLAG_IS_INTERACTIVE;
+        }
+    }
 
     // BallHeader (38 bytes): entityID(i64), mode(u8), radius(f32), posX(f64), posY(f64), posZ(f64), flags(u8)
     buf.extend_from_slice(&ball.id.to_le_bytes());

@@ -754,6 +754,7 @@ impl SystemRegistry {
                                                 reconcile_tackle_and_bubbles(&mut ballpark, active_module_cycles, &base_scramble_strengths, &base_core_strengths, &db_opt, deact_guard.as_ref());
                                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                             }
+                                            persist_ball_positions_in_db(&ballpark, &[ball_id], &db_opt);
                                             let _ = reply.send(Ok(ballpark.current_tick));
                                         }
                                         Err(e) => {
@@ -825,6 +826,9 @@ impl SystemRegistry {
                                 reply,
                             } => {
                                 let updated = ballpark.set_ball_position(ball_id, position);
+                                if updated {
+                                    persist_ball_positions_in_db(&ballpark, &[ball_id], &db_opt);
+                                }
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 let _ = reply.send(updated);
                             }
@@ -840,6 +844,9 @@ impl SystemRegistry {
                                 let res = ballpark
                                     .goto_point(ball_id, point)
                                     .map(|()| ballpark.current_tick);
+                                if res.is_ok() {
+                                    persist_ball_positions_in_db(&ballpark, &[ball_id], &db_opt);
+                                }
                                 let _ = reply.send(res);
                             }
                             SystemCommand::PushSetState {
@@ -1364,11 +1371,17 @@ impl SystemRegistry {
                             }
                             SystemCommand::MicroJump { ball_id, distance_meters, reply } => {
                                 let res = ballpark.micro_jump(ball_id, distance_meters);
+                                if res.is_ok() {
+                                    persist_ball_positions_in_db(&ballpark, &[ball_id], &db_opt);
+                                }
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 let _ = reply.send(res);
                             }
                             SystemCommand::MicroJumpField { ball_id, distance_meters, field_radius_meters, max_jumped_ships, reply } => {
                                 let res = ballpark.micro_jump_field(ball_id, distance_meters, field_radius_meters, max_jumped_ships);
+                                if let Ok(ref jumped_ids) = res {
+                                    persist_ball_positions_in_db(&ballpark, jumped_ids, &db_opt);
+                                }
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 let _ = reply.send(res);
                             }

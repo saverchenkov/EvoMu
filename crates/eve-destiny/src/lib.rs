@@ -1344,6 +1344,8 @@ pub struct Ballpark {
     #[serde(default)]
     pub ball_harmonics: BTreeMap<BallId, i32>,
     #[serde(default)]
+    pub ball_interactive_overrides: BTreeMap<BallId, bool>,
+    #[serde(default)]
     pub ball_wormhole_stages: BTreeMap<BallId, (i64, f64)>,
     #[serde(skip, default)]
     pub active_wubble_multipliers: BTreeMap<BallId, f64>,
@@ -1604,11 +1606,13 @@ impl Ballpark {
         true
     }
 
-    /// Updates `ball_id`'s interactive flag and emits [`DestinyEvent::SetBallInteractive`] (`destiny:SetBallInteractive`).
+    /// Updates `ball_id`'s interactive flag, records the override for future `AddBalls2`/`SetState`
+    /// binary frames, and emits [`DestinyEvent::SetBallInteractive`] (`destiny:SetBallInteractive`).
     pub fn set_ball_interactive(&mut self, ball_id: BallId, is_interactive: bool) -> bool {
         if !self.balls.contains_key(&ball_id) {
             return false;
         }
+        self.ball_interactive_overrides.insert(ball_id, is_interactive);
         self.emit_event(
             Some(ball_id),
             DestinyEvent::SetBallInteractive {

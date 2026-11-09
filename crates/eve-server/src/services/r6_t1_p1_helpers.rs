@@ -110,10 +110,9 @@ pub(crate) async fn validate_and_activate_fighter_mwd(
                         .copied()
                 })
                 .unwrap_or(400.0);
-            if let Ok(Some((_, mut b))) = sys_handle.get_ball_snapshot(fid).await {
-                b.max_velocity *= 1.0 + speed_bonus_pct / 100.0;
-                b.speed_fraction = 1.0;
-                let _ = sys_handle.spawn_ball(b).await;
+            if let Ok(Some((_, b))) = sys_handle.get_ball_snapshot(fid).await {
+                let boosted = b.max_velocity * (1.0 + speed_bonus_pct / 100.0);
+                let _ = sys_handle.set_ball_max_velocity(fid, boosted).await;
             }
         }
         let _ = sys_handle.set_speed_fraction(fid, 1.0).await;

@@ -78,6 +78,7 @@ impl Ballpark {
             miniball_states: BTreeMap::new(),
             formation_states: BTreeMap::new(),
             ball_harmonics: BTreeMap::new(),
+            ball_interactive_overrides: BTreeMap::new(),
             ball_wormhole_stages: BTreeMap::new(),
             active_wubble_multipliers: BTreeMap::new(),
             sim_unix_secs: 0,
@@ -460,6 +461,7 @@ impl Ballpark {
         self.miniball_states.remove(&ball_id);
         self.formation_states.remove(&ball_id);
         self.ball_harmonics.remove(&ball_id);
+        self.ball_interactive_overrides.remove(&ball_id);
         self.active_wubble_multipliers.remove(&ball_id);
         self.target_locks.remove(&ball_id);
         for locks in self.target_locks.values_mut() {
@@ -487,16 +489,34 @@ impl Ballpark {
         Some(removed)
     }
 
-    /// Declaratively recomputes a ball's effective kinematics and combat attributes
-    /// from its immutable baselines and currently active modifiers (`#584`).
-    pub fn recompute_ball_attributes(&mut self, ball_id: BallId) {
+    /// Recomputes `ball_id`'s effective attributes in-place, returning `Some(new_max_velocity)`
+    /// when a non-static ball's `max_velocity` changed so callers can emit `SetMaxSpeed`.
+    pub(crate) fn recompute_ball_attributes_quiet(&mut self, ball_id: BallId) -> Option<f64> {
+        let is_static = self.is_static_ball(ball_id);
         match (
             self.balls.get_mut(&ball_id),
             self.combat_states.get_mut(&ball_id),
         ) {
-            (Some(ball), Some(cs)) => cs.recompute_attributes(ball),
-            (None, Some(cs)) => cs.recompute_combat_attributes(),
-            _ => {}
+            (Some(ball), Some(cs)) => {
+                let prev_max_v = ball.max_velocity;
+                cs.recompute_attributes(ball);
+                let next_max_v = ball.max_velocity;
+                (!is_static && (next_max_v - prev_max_v).abs() > 1e-6).then_some(next_max_v)
+            }
+            (None, Some(cs)) => {
+                cs.recompute_combat_attributes();
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Declaratively recomputes a ball's effective kinematics and combat attributes
+    /// from its immutable baselines and currently active modifiers (`#584`), emitting
+    /// [`DestinyEvent::SetMaxSpeed`] whenever a non-static ball's `max_velocity` changes (`#741`).
+    pub fn recompute_ball_attributes(&mut self, ball_id: BallId) {
+        if let Some(next_max_v) = self.recompute_ball_attributes_quiet(ball_id) {
+            self.set_ball_max_velocity(ball_id, next_max_v);
         }
     }
 
@@ -1009,7 +1029,7 @@ impl Ballpark {
             }
         }
         if was_cloaked {
-            self.recompute_ball_attributes(ball_id);
+            let speed_change = self.recompute_ball_attributes_quiet(ball_id);
             self.emit_event(Some(ball_id), DestinyEvent::CloakBall { ball_id, cloaked: 0 });
             if was_gate_cloak {
                 self.emit_event(
@@ -1034,6 +1054,9 @@ impl Ballpark {
                     Some(ball_id),
                     &DestinyEvent::AddBalls2 { balls: vec![b] },
                 );
+            }
+            if let Some(next_max_v) = speed_change {
+                self.set_ball_max_velocity(ball_id, next_max_v);
             }
         }
         was_cloaked

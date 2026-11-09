@@ -570,3 +570,78 @@ fn coverage_and_mutants_ballpark_grids_damage_cloak_and_navigation() {
     assert!(nav.deactivate_cloak(203));
     assert_eq!(nav.combat_states[&203].decloak_targeting_delay_remaining_s, 0.0);
 }
+
+#[test]
+fn ball_interactive_overrides_wire_and_recompute_emits_set_max_speed() {
+    let mut park = Ballpark::new(30_000_142);
+    let mut ship = make_ship(501, DVec3::ZERO);
+    ship.max_velocity = 400.0;
+    park.add_ball(ship.clone());
+    park.add_ball(make_ship(502, DVec3::new(1_000.0, 0.0, 0.0)));
+    let mut station = make_ship(60_003_760, DVec3::new(2_000.0, 0.0, 0.0));
+    station.mode = MovementMode::Rigid;
+    station.max_velocity = 10.0;
+    assert!(park.add_static_ball(station, 15));
+
+    // 1. SetBallInteractive records override, updates AddBalls2/SetState BallHeader flags (offset 37),
+    //    and remove_ball cleans up the override entry.
+    let mut buf_default = Vec::new();
+    crate::wire::encode_single_ball_with_park(&mut buf_default, &park.balls[&501], 1, None, Some(&park));
+    assert_ne!(buf_default[37] & crate::wire::BALL_FLAG_IS_INTERACTIVE, 0);
+
+    assert!(park.set_ball_interactive(501, false));
+    assert_eq!(park.ball_interactive_overrides.get(&501), Some(&false));
+    let mut buf_non_inter = Vec::new();
+    crate::wire::encode_single_ball_with_park(&mut buf_non_inter, &park.balls[&501], 1, None, Some(&park));
+    assert_eq!(buf_non_inter[37] & crate::wire::BALL_FLAG_IS_INTERACTIVE, 0);
+
+    assert!(park.set_ball_interactive(501, true));
+    assert_eq!(park.ball_interactive_overrides.get(&501), Some(&true));
+    let mut buf_re_inter = Vec::new();
+    crate::wire::encode_single_ball_with_park(&mut buf_re_inter, &park.balls[&501], 1, None, Some(&park));
+    assert_ne!(buf_re_inter[37] & crate::wire::BALL_FLAG_IS_INTERACTIVE, 0);
+
+    // 2. recompute_ball_attributes emits SetMaxSpeed when dynamic max_velocity changes, not on static balls.
+    let _ = park.drain_all_observer_events();
+    if let Some(cs) = park.combat_states.get_mut(&501) {
+        cs.base_max_velocity = Some(400.0);
+        cs.prop_velocity_multiplier = 2.5;
+    }
+    park.recompute_ball_attributes(501);
+    assert!((park.balls[&501].max_velocity - 1_000.0).abs() < 1e-6);
+    assert!(park.drain_observer_events(502).iter().any(|e| matches!(
+        e,
+        DestinyEvent::SetMaxSpeed { ball_id: 501, max_speed } if (*max_speed - 1_000.0).abs() < 1e-6
+    )));
+
+    // Static ball attribute recompute never emits SetMaxSpeed.
+    if let Some(cs) = park.combat_states.get_mut(&60_003_760) {
+        cs.base_max_velocity = Some(10.0);
+        cs.prop_velocity_multiplier = 2.0;
+    }
+    park.recompute_ball_attributes(60_003_760);
+    assert!(!park.drain_observer_events(502).iter().any(|e| matches!(
+        e,
+        DestinyEvent::SetMaxSpeed { ball_id: 60_003_760, .. }
+    )));
+
+    // 3. deactivate_cloak emits SetMaxSpeed after AddBalls2 when cloak velocity penalty clears.
+    if let Some(cs) = park.combat_states.get_mut(&501) {
+        cs.is_cloaked = true;
+        cs.cloak_velocity_multiplier = Some(0.25);
+    }
+    park.recompute_ball_attributes(501);
+    assert!((park.balls[&501].max_velocity - 100.0).abs() < 1e-6);
+    let _ = park.drain_all_observer_events();
+    assert!(park.deactivate_cloak(501));
+    assert!((park.balls[&501].max_velocity - 1_000.0).abs() < 1e-6);
+    let obs_502 = park.drain_observer_events(502);
+    assert!(obs_502.iter().any(|e| matches!(
+        e,
+        DestinyEvent::SetMaxSpeed { ball_id: 501, max_speed } if (*max_speed - 1_000.0).abs() < 1e-6
+    )));
+
+    // 4. remove_ball cleans up ball_interactive_overrides.
+    assert!(park.remove_ball(501).is_some());
+    assert!(!park.ball_interactive_overrides.contains_key(&501));
+}

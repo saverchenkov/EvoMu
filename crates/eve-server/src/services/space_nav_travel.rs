@@ -1362,7 +1362,9 @@ pub(crate) async fn sync_ship_cloak_and_mjfg_from_fitting(
 
     let cloak_now = cs.is_cloaked;
     if ball_changed {
-        let _ = handle.spawn_ball(ball).await;
+        // Update `max_velocity` in-place via `SetMaxSpeed` rather than calling `spawn_ball`,
+        // which would remove and re-add the ball, wiping `CombatState` and breaking target locks.
+        let _ = handle.set_ball_max_velocity(ship_id, ball.max_velocity).await;
     }
     if cs_changed {
         let _ = handle.set_combat_state(ship_id, cs).await;

@@ -842,11 +842,14 @@ pub(crate) fn handle_add_module_cycle(
         cs.cloak_velocity_multiplier = Some((1.0 + cycle.speed_boost_factor).max(0.0));
     }
     if cycle.immobilize_self {
+        let prev_max_v = ballpark.balls.get(&cycle.ship_id).map(|b| b.max_velocity);
         if let Some(ball) = ballpark.balls.get_mut(&cycle.ship_id) {
-            ball.max_velocity = 0.0;
             ball.velocity = DVec3::ZERO;
             ball.speed_fraction = 0.0;
             ball.mode = MovementMode::Stop;
+        }
+        if prev_max_v.is_some_and(|v| v > 1e-6) {
+            ballpark.set_ball_max_velocity(cycle.ship_id, 0.0);
         }
     }
     if cycle.is_adc {
@@ -1112,8 +1115,16 @@ pub(super) fn apply_destiny_event_in_actor(
             DestinyEvent::SetBallInteractive {
                 ball_id: id,
                 is_interactive,
-            } if id == ball_id => {
-                ballpark.set_ball_interactive(id, is_interactive);
+            } => {
+                if !ballpark.set_ball_interactive(id, is_interactive) {
+                    ballpark.emit_event(
+                        scope,
+                        DestinyEvent::SetBallInteractive {
+                            ball_id: id,
+                            is_interactive,
+                        },
+                    );
+                }
             }
             DestinyEvent::SetBallRadius {
                 ball_id: id,

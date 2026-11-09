@@ -517,6 +517,10 @@ pub async fn handle(
                     }));
                 }
             };
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.item_positions
+                    .insert(ship.item_id, spawn_pos.to_array());
+            });
             if ctx.feature_flags.enable_living_world {
                 let _ = ctx
                     .living_world
@@ -793,6 +797,7 @@ pub async fn handle(
                             .remove(&ship_id);
                     }
                     let active_mods: Vec<i64> = ctx.db.with_mut_snapshot(|snap| {
+                        snap.item_positions.remove(&ship_id);
                         let mods: Vec<i64> = snap
                             .items
                             .values()

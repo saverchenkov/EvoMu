@@ -56,9 +56,22 @@ impl SystemHandle {
     }
 
     pub fn try_set_ball_position(&self, ball_id: BallId, position: DVec3) {
-        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        bp.set_ball_position(ball_id, position);
-        super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+        let updated = {
+            let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+            let ok = bp.set_ball_position(ball_id, position);
+            super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+            ok
+        };
+        if updated {
+            let db_opt = self
+                .actor_state
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .db_opt
+                .clone();
+            let bp = self.ballpark.read().unwrap_or_else(|e| e.into_inner());
+            persist_ball_positions_in_db(&bp, &[ball_id], &db_opt);
+        }
     }
 
     pub fn try_stop_ball(&self, ball_id: BallId) {
@@ -1513,8 +1526,8 @@ impl SystemHandle {
 mod celestials_helpers;
 pub use celestials_helpers::try_remove_ball_for_db;
 pub(crate) use celestials_helpers::{
-    fast_forward_clock_in_actor, persist_landed_warps_in_db, register_db_system_ballpark,
-    sync_ball_positions,
+    fast_forward_clock_in_actor, persist_ball_positions_in_db, persist_landed_warps_in_db,
+    register_db_system_ballpark, sync_ball_positions,
 };
 
 #[cfg(test)] #[path = "celestials_unit_tests.rs"] mod celestials_unit_tests;
