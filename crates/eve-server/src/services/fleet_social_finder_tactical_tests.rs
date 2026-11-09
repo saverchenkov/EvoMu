@@ -195,13 +195,25 @@ async fn fleet_proxy_update_advert_v2401_and_persistence() {
     .unwrap();
     assert!(matches!(add_rep, PyRep::Dict(_)), "AddFleetFinderAdvert must return PyRep::Dict (#732)");
     assert_eq!(add_rep.dict_get("fleetName").and_then(PyRep::as_str), Some("Test Fleet"));
-    let add_notifs: Vec<_> = ctx
-        .drain_notifications_for_char(boss_id)
-        .into_iter()
+    assert_eq!(add_rep.dict_get("leaderID").and_then(PyRep::as_i64), Some(boss_id));
+    let leader_kv = add_rep
+        .dict_get("leader")
+        .expect("AddFleetFinderAdvert must include leader KeyVal (#775)");
+    assert_eq!(leader_kv.dict_get("charID").and_then(PyRep::as_i64), Some(boss_id));
+    let raw_add_notifs = ctx.drain_notifications_for_char(boss_id);
+    let add_notifs: Vec<_> = raw_add_notifs
+        .iter()
         .filter(|n| n.event == "OnFleetFinderAdvertChanged")
         .collect();
     assert!(!add_notifs.is_empty(), "expected OnFleetFinderAdvertChanged after AddFleetFinderAdvert");
     assert!(add_notifs.iter().all(|n| n.args.is_empty()), "OnFleetFinderAdvertChanged must take 0 args (#720)");
+    let opt_add_notif = raw_add_notifs
+        .iter()
+        .find(|n| n.event == "OnFleetOptionsChanged")
+        .expect("expected OnFleetOptionsChanged after AddFleetFinderAdvert (#774)");
+    assert_eq!(opt_add_notif.args.len(), 2);
+    assert_eq!(opt_add_notif.args[0].dict_get("isRegistered"), Some(&PyRep::Bool(false)));
+    assert_eq!(opt_add_notif.args[1].dict_get("isRegistered"), Some(&PyRep::Bool(true)));
 
     // V24.01 UpdateAdvertInfo(numMembers, allowedDiffKeyVal)
     let diff = PyRep::keyval([
@@ -289,4 +301,25 @@ async fn fleet_proxy_update_advert_v2401_and_persistence() {
         .allowed_entities
         .clone();
     assert_eq!(adv_entities, HashSet::from([98_000_333]));
+
+    let _ = ctx.drain_notifications_for_char(boss_id);
+    handle_finder_and_tactical(
+        &ctx,
+        &mut session,
+        "fleetProxy",
+        "RemoveFleetFinderAdvert",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let raw_rem_notifs = ctx.drain_notifications_for_char(boss_id);
+    let opt_rem_notif = raw_rem_notifs
+        .iter()
+        .find(|n| n.event == "OnFleetOptionsChanged")
+        .expect("expected OnFleetOptionsChanged after RemoveFleetFinderAdvert (#774)");
+    assert_eq!(opt_rem_notif.args.len(), 2);
+    assert_eq!(opt_rem_notif.args[0].dict_get("isRegistered"), Some(&PyRep::Bool(true)));
+    assert_eq!(opt_rem_notif.args[1].dict_get("isRegistered"), Some(&PyRep::Bool(false)));
 }

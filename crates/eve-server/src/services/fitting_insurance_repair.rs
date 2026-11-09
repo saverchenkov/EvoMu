@@ -211,6 +211,7 @@ pub(super) fn handle_insure_ship(
 
         let cost_cents = IskCents::from_f64_isk(cost);
         let ship_type_id = ship.type_id;
+        let div_id = (corp_acct_key.saturating_sub(999)).clamp(1, 7) as u8;
         let new_bal = if is_corp {
             let corp = snap.corporations.get_mut(&caller_corp_id).ok_or_else(|| {
                 rpc_err(
@@ -218,7 +219,6 @@ pub(super) fn handle_insure_ship(
                     format!("Corporation {caller_corp_id} not found"),
                 )
             })?;
-            let div_id = (corp_acct_key.saturating_sub(999)).clamp(1, 7) as u8;
             corp.debit_division(div_id, cost_cents)
                 .ok_or_else(|| rpc_err("InsufficientFunds", "Not enough corporation ISK to insure ship"))?
         } else {
@@ -275,10 +275,10 @@ pub(super) fn handle_insure_ship(
                 end_unix: rec.end_unix,
             },
         );
-        Ok((cost, payout, rec))
+        Ok((cost, payout, rec, new_bal, is_corp, div_id))
     })?;
 
-    let (cost, payout, rec) = res;
+    let (cost, payout, rec, new_bal, is_corp, div_id) = res;
     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
         rt.insurance_contracts.insert(
             ship_id,
@@ -305,6 +305,25 @@ pub(super) fn handle_insure_ship(
         "charid",
         vec![],
     );
+    if is_corp {
+        let acct_key = if div_id == 1 {
+            "cash".to_string()
+        } else {
+            format!("cash{div_id}")
+        };
+        ctx.notify(
+            crate::router::NotificationTarget::Corporation(rec.owner_id),
+            "OnAccountChange",
+            "corpid",
+            vec![
+                PyRep::String(acct_key),
+                PyRep::Integer(rec.owner_id),
+                PyRep::Real(new_bal.to_wire_f64()),
+            ],
+        );
+    } else {
+        let _ = ctx.notify_account_change(char_id, "cash", char_id, new_bal.to_wire_f64());
+    }
     Ok(PyRep::keyval([
         ("shipID", PyRep::Integer(ship_id)),
         ("typeID", PyRep::Integer(rec.ship_type_id as i64)),

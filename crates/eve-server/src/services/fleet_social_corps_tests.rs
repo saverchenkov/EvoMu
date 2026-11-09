@@ -343,3 +343,61 @@ fn corp_public_info_update_divisions_members_and_medals() {
         assert_eq!(decors.len(), 1);
     });
 }
+
+#[test]
+fn get_corporation_omits_zero_station_and_ceo_ids() {
+    let ctx = test_ctx_with_clock(1_800_010_000);
+    let (mut ceo_sess, _) = seed_player_corps(&ctx);
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.get_mut(&98_000_001).unwrap();
+        corp.hq_station_id = None;
+        corp.alliance_id = Some(0);
+    });
+
+    let PyRep::KeyVal(info) = handle_corps(
+        &ctx,
+        &mut ceo_sess,
+        "corpRegistry",
+        "GetCorporation",
+        &[PyRep::Integer(98_000_001)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap()
+    else {
+        panic!("expected KeyVal for player corp");
+    };
+    assert_eq!(info.get("stationID"), Some(&PyRep::None), "missing HQ station must be None (#773)");
+    assert_eq!(info.get("allianceID"), Some(&PyRep::None), "zero allianceID must be None (#773)");
+    assert_eq!(info.get("ceoID"), Some(&PyRep::Integer(90_000_001)));
+
+    let PyRep::KeyVal(npc_info) = handle_corps(
+        &ctx,
+        &mut ceo_sess,
+        "corpmgr",
+        "GetPublicInfo",
+        &[PyRep::Integer(1_000_035)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap()
+    else {
+        panic!("expected KeyVal for NPC corp");
+    };
+    assert_eq!(npc_info.get("ceoID"), Some(&PyRep::None), "NPC corp ceoID must be None, not 0 (#773)");
+    assert_eq!(
+        handle_corps(
+            &ctx,
+            &mut ceo_sess,
+            "corpmgr",
+            "ceoID",
+            &[PyRep::Integer(1_000_035)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::None
+    );
+}

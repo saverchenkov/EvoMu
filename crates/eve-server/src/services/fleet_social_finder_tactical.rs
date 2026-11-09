@@ -60,13 +60,37 @@ pub(crate) fn ensure_fleet_formations_loaded(ctx: &ServerContext) {
     }
 }
 
-fn advert_to_dict(ad: &FleetAdvertState, num_members: i64) -> PyRep {
+fn leader_keyval(leader_id: i64, leader_meta: Option<(i64, Option<i64>, f64)>) -> PyRep {
+    let (corp_id, alliance_id, sec) = leader_meta.unwrap_or((0, None, 0.0));
+    PyRep::keyval([
+        ("charID", PyRep::Integer(leader_id)),
+        ("corpID", PyRep::Integer(corp_id)),
+        (
+            "allianceID",
+            alliance_id
+                .filter(|&id| id > 0)
+                .map(PyRep::Integer)
+                .unwrap_or(PyRep::None),
+        ),
+        ("securityStatus", PyRep::Real(sec)),
+    ])
+}
+
+fn advert_to_dict(
+    ad: &FleetAdvertState,
+    num_members: i64,
+    leader_meta: Option<(i64, Option<i64>, f64)>,
+) -> PyRep {
     let mut allowed: Vec<i64> = ad.allowed_entities.iter().copied().collect();
     allowed.sort_unstable();
     let date_created = ((ad._created_unix as i64) + 11_644_473_600).saturating_mul(10_000_000);
     PyRep::Dict(vec![
         (PyRep::String("fleetID".into()), PyRep::Integer(ad.fleet_id)),
         (PyRep::String("leaderID".into()), PyRep::Integer(ad.leader_id)),
+        (
+            PyRep::String("leader".into()),
+            leader_keyval(ad.leader_id, leader_meta),
+        ),
         (PyRep::String("fleetName".into()), PyRep::String(ad.fleet_name.clone())),
         (PyRep::String("description".into()), PyRep::String(ad.description.clone())),
         (PyRep::String("solarSystemID".into()), PyRep::Integer(ad.solar_system_id as i64)),
@@ -521,11 +545,17 @@ fn handle_update_advert_info(
         }
         ad.clone()
     };
-    let num_members = ctx.db.with_snapshot(|snap| {
-        snap.fleets
+    let (num_members, leader_meta) = ctx.db.with_snapshot(|snap| {
+        let nm = snap
+            .fleets
             .get(&fleet_id)
             .map(|f| f.members.len() as i64)
-            .unwrap_or(1)
+            .unwrap_or(1);
+        let lm = snap
+            .characters
+            .get(&ad_snapshot.leader_id)
+            .map(|c| (c.corporation_id, c.alliance_id, c.security_status));
+        (nm, lm)
     });
     sync_fleet_advert_snapshot_to_db(ctx, fleet_id);
     ctx.notify(
@@ -534,7 +564,7 @@ fn handle_update_advert_info(
         "fleetid",
         vec![],
     );
-    Ok(advert_to_dict(&ad_snapshot, num_members))
+    Ok(advert_to_dict(&ad_snapshot, num_members, leader_meta))
 }
 
 fn handle_update_advert_allowed_entities(
@@ -866,25 +896,49 @@ pub(super) async fn handle_finder_and_tactical(
                     (fn_name, desc, scope, aj, min_st, min_sec)
                 };
             let now_unix = ctx.now_unix();
-            let mut sys_id = session.solar_system_id.unwrap_or(0);
-            ctx.db.with_mut_snapshot(|snap| {
-                if sys_id == 0 {
-                    sys_id = snap.characters.get(&char_id).map(|c| c.solar_system_id).unwrap_or(0);
+            let initial_sys_id = session.solar_system_id.unwrap_or(0);
+            let (sys_id, reg_change, num_members, leader_meta) = ctx.db.with_mut_snapshot(|snap| {
+                let sid = if initial_sys_id == 0 {
+                    snap.characters.get(&char_id).map(|c| c.solar_system_id).unwrap_or(0)
+                } else {
+                    initial_sys_id
+                };
+                let mut reg_change = None;
+                let mut nm = 1i64;
+                if let Some(f) = snap.fleets.get_mut(&fleet_id) {
+                    let old_reg = f.is_registered;
+                    f.is_registered = true;
+                    reg_change = Some((f.free_move, old_reg));
+                    nm = f.members.len() as i64;
                 }
-                if let Some(f) = snap.fleets.get_mut(&fleet_id) { f.is_registered = true; }
+                let lm = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| (c.corporation_id, c.alliance_id, c.security_status));
+                (sid, reg_change, nm, lm)
             });
             let ad_state = FleetAdvertState {
                 fleet_id, leader_id: char_id, fleet_name: fleet_name.clone(), description: description.clone(),
                 solar_system_id: sys_id, invite_scope, auto_join, min_standing, min_security,
                 allowed_entities: HashSet::new(), _created_unix: now_unix,
             };
-            ctx.fleet_extras.lock().unwrap().adverts.insert(fleet_id, ad_state.clone());
-            let num_members = ctx.db.with_snapshot(|snap| {
-                snap.fleets.get(&fleet_id).map(|f| f.members.len() as i64).unwrap_or(1)
-            });
+            let auto_join_squad = {
+                let mut ex = ctx.fleet_extras.lock().unwrap();
+                ex.adverts.insert(fleet_id, ad_state.clone());
+                ex.auto_join_squads.get(&fleet_id).copied().flatten()
+            };
             sync_fleet_advert_snapshot_to_db(ctx, fleet_id);
+            notify::sync_fleet_options_to_db(ctx);
+            if let Some((free_move, false)) = reg_change {
+                notify::emit_options_changed(
+                    ctx,
+                    fleet_id,
+                    notify::options_keyval(free_move, false, auto_join_squad),
+                    notify::options_keyval(free_move, true, auto_join_squad),
+                );
+            }
             ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetFinderAdvertChanged", "fleetid", vec![]);
-            Some(Ok(advert_to_dict(&ad_state, num_members)))
+            Some(Ok(advert_to_dict(&ad_state, num_members, leader_meta)))
         }
 
         // parity: rpc:fleetProxy.UpdateAdvertInfo
@@ -913,6 +967,7 @@ pub(super) async fn handle_finder_and_tactical(
                 ad.leader_id = new_leader;
             }
             sync_fleet_advert_snapshot_to_db(ctx, fleet_id);
+            ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetFinderAdvertChanged", "fleetid", vec![]);
             Some(Ok(PyRep::Dict(vec![
                 (PyRep::String("fleetID".into()), PyRep::Integer(fleet_id)),
                 (PyRep::String("leaderID".into()), PyRep::Integer(new_leader)),
@@ -931,7 +986,8 @@ pub(super) async fn handle_finder_and_tactical(
                         .find(|ad| caller_fleet == Some(ad.fleet_id) || ad.leader_id == char_id)
                         .map(|ad| {
                             let num_members = snap.fleets.get(&ad.fleet_id).map(|f| f.members.len() as i64).unwrap_or(1);
-                            advert_to_dict(&ad, num_members)
+                            let leader_meta = snap.characters.get(&ad.leader_id).map(|c| (c.corporation_id, c.alliance_id, c.security_status));
+                            advert_to_dict(&ad, num_members, leader_meta)
                         })
                 });
                 return Some(Ok(my_ad.unwrap_or(PyRep::None)));
@@ -970,7 +1026,8 @@ pub(super) async fn handle_finder_and_tactical(
                     .map(|ad| {
                         let fid = ad.fleet_id;
                         let num_members = snap.fleets.get(&fid).map(|f| f.members.len() as i64).unwrap_or(1);
-                        (PyRep::Integer(fid), advert_to_dict(&ad, num_members))
+                        let leader_meta = snap.characters.get(&ad.leader_id).map(|c| (c.corporation_id, c.alliance_id, c.security_status));
+                        (PyRep::Integer(fid), advert_to_dict(&ad, num_members, leader_meta))
                     })
                     .collect();
                 out.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
@@ -984,7 +1041,7 @@ pub(super) async fn handle_finder_and_tactical(
             let Some(fleet_id) = session.fleet_id else {
                 return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
             };
-            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(bool, bool), BridgeRpcError> {
                 let Some(f) = snap.fleets.get_mut(&fleet_id) else {
                     return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
                 };
@@ -994,13 +1051,27 @@ pub(super) async fn handle_finder_and_tactical(
                 if f.boss_id != char_id {
                     return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Boss can remove fleet finder advert".into() });
                 }
+                let old_registered = f.is_registered;
                 f.is_registered = false;
-                Ok(())
+                Ok((f.free_move, old_registered))
             });
             match res {
-                Ok(()) => {
-                    ctx.fleet_extras.lock().unwrap().adverts.remove(&fleet_id);
+                Ok((free_move, old_registered)) => {
+                    let auto_join_squad = {
+                        let mut ex = ctx.fleet_extras.lock().unwrap();
+                        ex.adverts.remove(&fleet_id);
+                        ex.auto_join_squads.get(&fleet_id).copied().flatten()
+                    };
                     sync_fleet_advert_snapshot_to_db(ctx, fleet_id);
+                    notify::sync_fleet_options_to_db(ctx);
+                    if old_registered {
+                        notify::emit_options_changed(
+                            ctx,
+                            fleet_id,
+                            notify::options_keyval(free_move, true, auto_join_squad),
+                            notify::options_keyval(free_move, false, auto_join_squad),
+                        );
+                    }
                     ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetFinderAdvertChanged", "fleetid", vec![]);
                     Some(Ok(PyRep::Dict(vec![
                         (PyRep::String("fleetID".into()), PyRep::Integer(fleet_id)),

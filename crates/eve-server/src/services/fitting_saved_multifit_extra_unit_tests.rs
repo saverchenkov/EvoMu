@@ -101,7 +101,7 @@ fn make_ctx_and_session() -> (ServerContext, SessionState, i64, i64, i64) {
 
 #[tokio::test]
 async fn insurance_corp_roles_exact_isk_cost_uninsure_get_contracts_and_prices() {
-    let (ctx, mut sess, _char_id, corp_id, station_id) = make_ctx_and_session();
+    let (ctx, mut sess, char_id, corp_id, station_id) = make_ctx_and_session();
     let ship_id = sess.ship_id.unwrap();
     let corp_ship_id = 96_700_101i64;
     let kw = HashMap::new();
@@ -165,6 +165,23 @@ async fn insurance_corp_roles_exact_isk_cost_uninsure_get_contracts_and_prices()
     .unwrap()
     .unwrap();
     assert_eq!(ins_ok.dict_get("level").and_then(|v| v.as_str()), Some("Platinum"));
+    let expected_bal = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&char_id).unwrap().balance.to_wire_f64());
+    let ins_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(ins_notifs.iter().any(|n| n.event == "OnShipInsured"));
+    assert!(
+        ins_notifs.iter().any(|n| {
+            n.event == "OnAccountChange"
+                && n.args
+                    == vec![
+                        PyRep::String("cash".into()),
+                        PyRep::Integer(char_id),
+                        PyRep::Real(expected_bal),
+                    ]
+        }),
+        "InsureShip must emit OnAccountChange (#772), got {ins_notifs:?}"
+    );
 
     // Re-insuring without voidOld fails; with voidOld = true succeeds
     assert!(handle_ships_and_services(

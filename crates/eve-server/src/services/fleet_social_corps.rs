@@ -672,12 +672,12 @@ pub(super) fn handle_corps(
                 snap.corporations.get(&corp_id).map(|c| {
                     let h_divs = snap.corp_hangar_divisions.get(&corp_id).cloned().unwrap_or_default();
                     let w_divs: Vec<(u8, String)> = c.wallet_divisions.iter().map(|d| (d.division_id, d.name.clone())).collect();
-                    (c.corporation_id, c.name.clone(), c.ticker.clone(), c.ceo_id, c.members.len() as i64, c.tax_rate, c.alliance_id, c.hq_station_id.unwrap_or(0), c.description.clone(), c.url.clone(), h_divs, w_divs, allow_war)
+                    (c.corporation_id, c.name.clone(), c.ticker.clone(), (c.ceo_id > 0).then_some(c.ceo_id), c.members.len() as i64, c.tax_rate, c.alliance_id.filter(|&id| id > 0), c.hq_station_id.filter(|&id| id > 0), c.description.clone(), c.url.clone(), h_divs, w_divs, allow_war)
                 })
             }).or_else(|| {
                 // DERIVED: SDE NPC corporations fallback for starter/NPC corps
                 ctx.sde.npc_corporations.get(&corp_id).map(|c| {
-                    (c.corporation_id, c.name.clone(), c.ticker_name.clone(), 0i64, 10_000i64, c.tax_rate, None, c.station_id.unwrap_or(0), format!("NPC Corporation {}", c.name), String::new(), HashMap::new(), Vec::new(), false)
+                    (c.corporation_id, c.name.clone(), c.ticker_name.clone(), None, 10_000i64, c.tax_rate, None, c.station_id.filter(|&id| id > 0), format!("NPC Corporation {}", c.name), String::new(), HashMap::new(), Vec::new(), false)
                 })
             });
 
@@ -689,7 +689,7 @@ pub(super) fn handle_corps(
                     .map(|s| (s.logo, s.logo_extra_colors, s.applications_enabled.unwrap_or(true), s.friendly_fire_legal))
                     .unwrap_or(((1, 2, 3, 10), (0, 0), true, false))
             });
-            let creator_id = if ceo_id > 0 { ceo_id } else { cid };
+            let creator_id = ceo_id.unwrap_or(cid);
             let default_h = ["1st Division", "2nd Division", "3rd Division", "4th Division", "5th Division", "6th Division", "7th Division"];
             let default_w = ["Master Wallet", "2nd Wallet", "3rd Wallet", "4th Wallet", "5th Wallet", "6th Wallet", "7th Wallet"];
             let mut entries = vec![
@@ -697,14 +697,14 @@ pub(super) fn handle_corps(
                 ("corporationName".into(), PyRep::String(name)),
                 ("ticker".into(), PyRep::String(ticker.clone())),
                 ("tickerName".into(), PyRep::String(ticker)),
-                ("ceoID".into(), PyRep::Integer(ceo_id)),
+                ("ceoID".into(), ceo_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
                 ("creatorID".into(), PyRep::Integer(creator_id)),
                 ("memberCount".into(), PyRep::Integer(m_count)),
                 ("taxRate".into(), PyRep::Real(tax)),
                 ("iskTaxRate".into(), PyRep::Real(tax)),
                 ("loyaltyPointTaxRate".into(), PyRep::Real(tax)),
                 ("allianceID".into(), alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                ("stationID".into(), PyRep::Integer(hq_station)),
+                ("stationID".into(), hq_station.map(PyRep::Integer).unwrap_or(PyRep::None)),
                 ("description".into(), PyRep::String(desc)),
                 ("url".into(), PyRep::String(url)),
                 ("shares".into(), PyRep::Integer(1000)),
@@ -743,8 +743,8 @@ pub(super) fn handle_corps(
             });
             let (cid, ceo, aid) = info.unwrap_or((corp_id, 0, None));
             let rep = match method {
-                "allianceID" => aid.map(PyRep::Integer).unwrap_or(PyRep::None),
-                "ceoID" => PyRep::Integer(ceo),
+                "allianceID" => aid.filter(|&id| id > 0).map(PyRep::Integer).unwrap_or(PyRep::None),
+                "ceoID" => (ceo > 0).then_some(PyRep::Integer(ceo)).unwrap_or(PyRep::None),
                 "corporationID" => PyRep::Integer(cid),
                 _ => PyRep::None,
             };
