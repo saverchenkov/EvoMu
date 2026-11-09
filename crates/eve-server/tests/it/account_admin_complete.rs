@@ -195,21 +195,18 @@ async fn test_account_alpha_omega_switch_and_subscription_time() {
         .await
         .expect("/setomega");
 
+    let expected_omega_ft = (omega_until as i64 + 11_644_473_600) * 10_000_000;
     let sub_rep = ctx
         .dispatch_rpc(&mut sess, "subscriptionMgr", None, "GetSubscriptionTime", &[], &kw, None)
         .await
         .expect("GetSubscriptionTime");
-    let PyRep::KeyVal(sub_kv) = sub_rep else { panic!("expected KeyVal") };
-    assert_eq!(sub_kv.get("subscriptionEndTime").and_then(|v| v.as_i64()), Some(omega_until as i64));
-    assert_eq!(sub_kv.get("cloneGrade").and_then(|v| v.as_i64()), Some(2));
-    assert_eq!(sub_kv.get("isOmega").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(sub_rep, PyRep::Integer(expected_omega_ft));
     // The client cannot extend its own subscription by passing an argument.
     let spoof = ctx
         .dispatch_rpc(&mut sess, "subscriptionMgr", None, "GetSubscriptionTime", &[PyRep::Integer((now + 999_999) as i64)], &kw, None)
         .await
         .expect("GetSubscriptionTime with spoofed arg");
-    let PyRep::KeyVal(spoof_kv) = spoof else { panic!("expected KeyVal") };
-    assert_eq!(spoof_kv.get("subscriptionEndTime").and_then(|v| v.as_i64()), Some(omega_until as i64));
+    assert_eq!(spoof, PyRep::Integer(expected_omega_ft));
     let omega_rows = skills_rows(&ctx, &mut sess).await;
     assert_eq!(skill_levels(&omega_rows, skill_id), (5, 5), "Omega: trained and active level V");
 
@@ -224,9 +221,7 @@ async fn test_account_alpha_omega_switch_and_subscription_time() {
         .dispatch_rpc(&mut sess, "subscriptionMgr", None, "GetSubscriptionTime", &[], &kw, None)
         .await
         .expect("GetSubscriptionTime after lapse");
-    let PyRep::KeyVal(sub_after_kv) = sub_after else { panic!("expected KeyVal") };
-    assert_eq!(sub_after_kv.get("isOmega").and_then(|v| v.as_bool()), Some(false));
-    assert_eq!(sub_after_kv.get("subscriptionEndTime").and_then(|v| v.as_i64()), Some(omega_until as i64));
+    assert_eq!(sub_after, PyRep::None, "Alpha account returns None for GetSubscriptionTime");
     assert_eq!(ctx.db.get_character(char_id).unwrap().clone_grade, 1);
     assert_eq!(ctx.db.get_character(alt_id).unwrap().clone_grade, 1, "all account characters downgrade");
 

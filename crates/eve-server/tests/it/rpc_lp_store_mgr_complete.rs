@@ -158,8 +158,10 @@ async fn test_lp_store_mgr_get_available_offers() {
         panic!("reqItems list");
     };
     assert_eq!(req_3565.len(), 1);
-    assert_eq!(k_i64(&req_3565[0], "typeID"), Some(IRON_CHARGE_S_TYPE_ID as i64));
-    assert_eq!(k_i64(&req_3565[0], "quantity"), Some(5_000));
+    assert_eq!(
+        req_3565[0],
+        PyRep::Tuple(vec![PyRep::Integer(IRON_CHARGE_S_TYPE_ID as i64), PyRep::Integer(5_000)])
+    );
 
     // 2. Query major Empire navies, CONCORD, Paragon (V24 SDE EverMarks), and FW militia corps unseeded
     for &corp in &[

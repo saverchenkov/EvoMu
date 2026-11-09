@@ -327,8 +327,7 @@ fn esi_sde_filtering_paragon_catalog_legacy_fallback_and_pyrep_serialization() {
     assert!(rep.dict_get("minStanding").is_none());
     let req_list = rep.dict_get("reqItems").and_then(|v| v.as_list()).unwrap();
     assert_eq!(req_list.len(), 1);
-    assert_eq!(req_list[0].dict_get("typeID").and_then(|v| v.as_i64()), Some(35));
-    assert_eq!(req_list[0].dict_get("quantity").and_then(|v| v.as_i64()), Some(4));
+    assert_eq!(req_list[0], PyRep::Tuple(vec![PyRep::Integer(35), PyRep::Integer(4)]));
 }
 
 #[test]

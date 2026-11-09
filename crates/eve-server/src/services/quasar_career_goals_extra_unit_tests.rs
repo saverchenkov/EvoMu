@@ -160,15 +160,40 @@ fn effective_group_exhaustive_matrix_and_message_id_threat_boundaries() {
     // 5. Message IDs for all 4 career paths + unknown career_id fallback (582_520 / 582_521)
     for &(cid, base_n, base_d) in &CAREER_PATH_MESSAGE_IDS {
         let d = make_def(cid, "Combat", "combat");
-        assert_eq!(d.effective_name_message_id(), base_n + 5);
-        assert_eq!(d.effective_description_message_id(), base_d + 1_000 + 5);
+        assert_eq!(d.effective_name_message_id(), base_n);
+        assert_eq!(d.effective_description_message_id(), base_d);
     }
     let unknown_career = make_def(99, "Combat", "combat");
-    assert_eq!(unknown_career.effective_name_message_id(), 582_520 + 5);
+    assert_eq!(unknown_career.effective_name_message_id(), 582_520);
     assert_eq!(
         unknown_career.effective_description_message_id(),
-        582_521 + 1_000 + 5
+        582_521
     );
+
+    // 5b. Stale persisted synthesized IDs (e.g. 665529..665537 / 696260..696439) heal from default_career_goal_definitions
+    let stale_db = Arc::new(WorldRepository::with_demo_seed());
+    let mut stale_defs = default_career_goal_definitions();
+    let sample_uuid = stale_defs[0].uuid;
+    let expected_name_id = stale_defs[0].name_message_id;
+    let expected_desc_id = stale_defs[0].description_message_id;
+    stale_defs[0].name_message_id = 665_529;
+    stale_defs[0].description_message_id = 696_260;
+    stale_defs[0].aura_text_id = None;
+    stale_db.with_mut_snapshot(|snap| {
+        snap.quasar_state_blobs.insert(
+            "quasar_career_goal_defs".into(),
+            serde_json::to_string(&stale_defs).unwrap(),
+        );
+    });
+    let healed_mgr = CareerGoalManager::new(Some(Arc::clone(&stale_db)));
+    let healed_def = healed_mgr
+        .load_definitions()
+        .into_iter()
+        .find(|d| d.uuid == sample_uuid)
+        .unwrap();
+    assert_eq!(healed_def.effective_name_message_id(), expected_name_id);
+    assert_eq!(healed_def.effective_description_message_id(), expected_desc_id);
+    assert!(healed_def.aura_text_id.is_some());
 
     // 6. Threat boundary values (<= 15 -> 1, 16..=25 -> 2, > 25 -> 3, explicit clamp(1, 3))
     let mut d = make_def(1, "Scanning", "exploration");

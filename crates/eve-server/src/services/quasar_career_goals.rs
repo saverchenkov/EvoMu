@@ -32,12 +32,11 @@ pub const CAREER_PATH_MESSAGE_IDS: [(u32, u32, u32); 4] = [
     (4, 582_522, 582_523),
 ];
 
-/// DERIVED: AIR Career Program goal definition. Career path IDs (`1..=4`), activity groups, targets,
-/// career points, and ISK/SP rewards are synthesized from SDE (`careerpaths.fsdbinary`,
-/// `contributionmethods.fsdbinary`) and EVE University Wiki AIR Career Program tables; per-goal
-/// `name_message_id` (`582531..582689`, `665435..665481`), `description_message_id` (`696260..696439`),
-/// and `threat` are DERIVED offsets from client UI base localization IDs because individual goal
-/// definitions are served dynamically by live Quasar.
+/// Authentic V24 AIR Career Program goal definitions. Career path IDs (`1..=4`), activity groups,
+/// targets, career points, ISK/SP rewards, and authentic V24.01 localization message IDs
+/// (`name_message_id` `601356..601543`, `description_message_id` `601544..601731`,
+/// `aura_text_id` `601732..601919`, `agency_link_text_id` `601920..602107`) come from
+/// `data/air_career_goals.json`, verified against `localization_fsd_en-us.pickle` and `careerpaths.fsdbinary`.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CareerGoalDef {
     pub uuid: [u8; 16],
@@ -73,32 +72,30 @@ pub struct CareerGoalDef {
 }
 
 impl CareerGoalDef {
-    /// DERIVED: Returns the localization message ID for `Attributes.name.sequential`, falling back
-    /// to a derived offset (`base + uuid[15]`) from the `careerpaths.fsdbinary` career path base ID.
+    /// Returns the authentic V24.01 localization message ID for `Attributes.name.sequential`,
+    /// falling back to the career path's authentic `careerpaths.fsdbinary` `nameID` when unset.
     pub fn effective_name_message_id(&self) -> u32 {
         if self.name_message_id > 0 {
             return self.name_message_id;
         }
-        let base = CAREER_PATH_MESSAGE_IDS
+        CAREER_PATH_MESSAGE_IDS
             .iter()
             .find(|(cid, _, _)| *cid == self.career_id)
             .map(|(_, n, _)| *n)
-            .unwrap_or(582_520);
-        base + (self.uuid[15] as u32)
+            .unwrap_or(582_520)
     }
 
-    /// DERIVED: Returns the localization message ID for `Attributes.description.sequential`, falling
-    /// back to a derived offset (`base + 1_000 + uuid[15]`) from the `careerpaths.fsdbinary` base ID.
+    /// Returns the authentic V24.01 localization message ID for `Attributes.description.sequential`,
+    /// falling back to the career path's authentic `careerpaths.fsdbinary` `descriptionID` when unset.
     pub fn effective_description_message_id(&self) -> u32 {
         if self.description_message_id > 0 {
             return self.description_message_id;
         }
-        let base = CAREER_PATH_MESSAGE_IDS
+        CAREER_PATH_MESSAGE_IDS
             .iter()
             .find(|(cid, _, _)| *cid == self.career_id)
             .map(|(_, _, d)| *d)
-            .unwrap_or(582_521);
-        base + 1_000 + (self.uuid[15] as u32)
+            .unwrap_or(582_521)
     }
 
     /// Returns the canonical V24 `CAREER_PATH_GROUPS` activity group annotation key (`ui_annotations["group"]`).
@@ -321,15 +318,38 @@ pub struct CareerGoalManager {
     db: Option<Arc<WorldRepository>>,
 }
 
+fn is_stale_synthesized_loc_id(def: &CareerGoalDef) -> bool {
+    def.name_message_id == 0
+        || (582_531..=582_689).contains(&def.name_message_id)
+        || (665_435..=665_600).contains(&def.name_message_id)
+        || def.description_message_id == 0
+        || (696_260..=696_450).contains(&def.description_message_id)
+        || def.aura_text_id.is_none()
+}
+
+fn sync_def_localization_from(dst: &mut CareerGoalDef, src: &CareerGoalDef) {
+    dst.name_message_id = src.name_message_id;
+    dst.description_message_id = src.description_message_id;
+    dst.aura_text_id = src.aura_text_id;
+    dst.agency_link_text_id = src.agency_link_text_id;
+    dst.agency_screen = src.agency_screen.clone();
+    dst.duration = src.duration;
+    dst.order = src.order;
+    dst._provenance = src._provenance.clone();
+}
+
 fn ensure_character_career_goals_with_defs(
     goals: &mut Vec<CharacterCareerGoal>,
     defs: &[CareerGoalDef],
 ) {
     goals.retain(|g| defs.iter().any(|d| d.uuid == g.uuid));
     for g in goals.iter_mut() {
-        if g.def.activity_kind.is_empty() {
-            if let Some(def) = defs.iter().find(|d| d.uuid == g.uuid) {
+        if let Some(def) = defs.iter().find(|d| d.uuid == g.uuid) {
+            if g.def.activity_kind.is_empty() {
                 g.def.activity_kind = def.activity_kind.clone();
+            }
+            if is_stale_synthesized_loc_id(&g.def) && !is_stale_synthesized_loc_id(def) {
+                sync_def_localization_from(&mut g.def, def);
             }
         }
     }
@@ -349,6 +369,7 @@ fn ensure_character_career_goals_with_defs(
 
 impl CareerGoalManager {
     pub fn new(db: Option<Arc<WorldRepository>>) -> Self {
+        let default_defs = default_career_goal_definitions();
         let defs = db
             .as_ref()
             .and_then(|d| {
@@ -358,7 +379,17 @@ impl CareerGoalManager {
                         .and_then(|json| serde_json::from_str::<Vec<CareerGoalDef>>(json).ok())
                 })
             })
-            .unwrap_or_else(default_career_goal_definitions);
+            .map(|mut loaded_defs| {
+                for def in &mut loaded_defs {
+                    if is_stale_synthesized_loc_id(def) {
+                        if let Some(auth) = default_defs.iter().find(|d| d.uuid == def.uuid) {
+                            sync_def_localization_from(def, auth);
+                        }
+                    }
+                }
+                loaded_defs
+            })
+            .unwrap_or(default_defs);
         let mut loaded = db
             .as_ref()
             .map(|d| {

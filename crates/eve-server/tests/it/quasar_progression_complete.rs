@@ -371,7 +371,15 @@ async fn quasar_career_goals_paths_and_milestones() {
         },
         other => panic!("expected name Identifier, got {other:?}"),
     };
-    assert!(name_seq >= 582_516, "Attributes.name.sequential must be a real localization message ID, got {name_seq}");
+    assert!((601_356..=601_543).contains(&name_seq), "Attributes.name.sequential must be an authentic V24.01 localization message ID, got {name_seq}");
+    let desc_seq = match first_attrs.get(2) {
+        Some(eve_proto::quasar::DynamicValue::Message(m)) => match m.get(1) {
+            Some(eve_proto::quasar::DynamicValue::Uint32(v)) => *v,
+            other => panic!("expected uint32 description.sequential, got {other:?}"),
+        },
+        other => panic!("expected description Identifier, got {other:?}"),
+    };
+    assert!((601_544..=601_731).contains(&desc_seq), "Attributes.description.sequential must be an authentic V24.01 localization message ID, got {desc_seq}");
     let ui_anns: HashMap<String, String> = match first_attrs.get(6) {
         Some(eve_proto::quasar::DynamicValue::Repeated(items)) => items
             .iter()

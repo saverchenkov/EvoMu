@@ -538,12 +538,19 @@ fn handle_inner(
             // Read-only: arguments are ignored; the client cannot change its own subscription.
             let uid = ServerContext::require_auth(session)?;
             let (grade, exp) = sync_subscription(ctx, uid);
-            Ok(Some(PyRep::keyval([
-                ("userID", PyRep::Integer(uid as i64)),
-                ("subscriptionEndTime", PyRep::Integer(exp as i64)),
-                ("cloneGrade", PyRep::Integer(grade as i64)),
-                ("isOmega", PyRep::Bool(grade == 2)),
-            ])))
+            if grade < 2 {
+                Ok(Some(PyRep::None))
+            } else {
+                let effective_exp = if exp > 0 {
+                    exp
+                } else {
+                    ctx.now_unix().saturating_add(30 * 86_400)
+                };
+                let omega_ft = (effective_exp as i64)
+                    .saturating_add(11_644_473_600)
+                    .saturating_mul(10_000_000);
+                Ok(Some(PyRep::Integer(omega_ft)))
+            }
         }
         ("subscriptionMgr", "GetCloneGrade") => {
             // Apply any lapsed/renewed expiry first, then let `auth_cache` build the reply.

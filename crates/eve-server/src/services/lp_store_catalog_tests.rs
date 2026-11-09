@@ -59,6 +59,10 @@ fn test_lp_store_catalog_helpers_and_persistence() {
     assert_eq!(rep.dict_get("offerID").and_then(|v| v.as_i64()), Some(888_111));
     assert_eq!(rep.dict_get("akCost").and_then(|v| v.as_i64()), Some(5));
     assert_eq!(rep.dict_get("minStanding").and_then(|v| v.as_f64()), Some(2.5));
+    let Some(PyRep::List(req_items)) = rep.dict_get("reqItems") else {
+        panic!("expected reqItems list");
+    };
+    assert_eq!(req_items.as_slice(), &[PyRep::Tuple(vec![PyRep::Integer(35), PyRep::Integer(2)])]);
 
     // esi_sde_lp_offers & esi_all_lp_offers with empty SDE types fallback
     let empty_sde = eve_sde::SdeRegistry::default();

@@ -342,12 +342,7 @@ pub(crate) fn offer_to_pyrep(o: &LPOffer) -> PyRep {
     let req_items_rep: Vec<PyRep> = o
         .req_items
         .iter()
-        .map(|&(tid, qty)| {
-            PyRep::keyval([
-                ("typeID", PyRep::Integer(tid as i64)),
-                ("quantity", PyRep::Integer(qty as i64)),
-            ])
-        })
+        .map(|&(tid, qty)| PyRep::Tuple(vec![PyRep::Integer(tid as i64), PyRep::Integer(qty as i64)]))
         .collect();
     let mut fields = vec![
         ("offerID", PyRep::Integer(o.offer_id)),

@@ -20,10 +20,43 @@ fn career_goal_def_effective_attributes_and_milestones() {
         threat: 0,
         ..Default::default()
     };
-    assert_eq!(def.effective_name_message_id(), 582_516 + 7);
-    assert_eq!(def.effective_description_message_id(), 582_517 + 1_000 + 7);
+    assert_eq!(def.effective_name_message_id(), 582_516);
+    assert_eq!(def.effective_description_message_id(), 582_517);
     assert_eq!(def.effective_group(), "Scanning");
     assert_eq!(def.effective_threat(), 1);
+
+    let defs = default_career_goal_definitions();
+    assert_eq!(defs.len(), 188);
+    for g in &defs {
+        assert!((601_356..=601_543).contains(&g.effective_name_message_id()));
+        assert!((601_544..=601_731).contains(&g.effective_description_message_id()));
+        assert!((601_732..=601_919).contains(&g.effective_aura_text_id()));
+    }
+
+    // Stale persisted synthesized IDs (e.g. 665529..665537 / 696260..696439) heal from defaults.
+    let (stale_ctx, _) = test_ctx_and_clock(1_700_000_000);
+    let mut stale_defs = defs.clone();
+    let sample_uuid = stale_defs[0].uuid;
+    let expected_name_id = stale_defs[0].name_message_id;
+    let expected_desc_id = stale_defs[0].description_message_id;
+    stale_defs[0].name_message_id = 665_529;
+    stale_defs[0].description_message_id = 696_260;
+    stale_defs[0].aura_text_id = None;
+    stale_ctx.db.with_mut_snapshot(|snap| {
+        snap.quasar_state_blobs.insert(
+            "quasar_career_goal_defs".into(),
+            serde_json::to_string(&stale_defs).unwrap(),
+        );
+    });
+    let healed_mgr = CareerGoalManager::new(Some(Arc::clone(&stale_ctx.db)));
+    let healed = healed_mgr
+        .load_definitions()
+        .into_iter()
+        .find(|d| d.uuid == sample_uuid)
+        .unwrap();
+    assert_eq!(healed.effective_name_message_id(), expected_name_id);
+    assert_eq!(healed.effective_description_message_id(), expected_desc_id);
+    assert!(healed.aura_text_id.is_some());
 
     def.name_message_id = 600_001;
     def.description_message_id = 700_002;

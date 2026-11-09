@@ -213,19 +213,36 @@ fn store_allocators_playtime_underage_and_subscription_sync() {
     let sub_rep = handle_inner(&ctx, &mut sess, "subscriptionMgr", "GetSubscriptionTime", &[], &kw)
         .unwrap()
         .unwrap();
-    assert_eq!(sub_rep.dict_get("cloneGrade"), Some(&PyRep::Integer(2)));
-    assert_eq!(sub_rep.dict_get("isOmega"), Some(&PyRep::Bool(true)));
+    let expected_omega_ft = ((now + 7200) as i64 + 11_644_473_600) * 10_000_000;
+    assert_eq!(sub_rep, PyRep::Integer(expected_omega_ft));
     assert_eq!(
         handle_inner(&ctx, &mut sess, "subscriptionMgr", "GetCloneGrade", &[], &kw).unwrap(),
         None
     );
 
-    // Lapsed subscription downgrades to Alpha (1)
+    // Lapsed subscription downgrades to Alpha (1) and GetSubscriptionTime returns None
     ctx.db.with_mut_snapshot(|snap| {
         snap.owner_notes.remove(&-8_500_000_000_000_i64);
     });
     let (grade_past, _) = set_subscription_expiry(&ctx, uid, now.saturating_sub(10));
     assert_eq!(grade_past, 1);
+    let sub_alpha = handle_inner(&ctx, &mut sess, "subscriptionMgr", "GetSubscriptionTime", &[], &kw)
+        .unwrap()
+        .unwrap();
+    assert_eq!(sub_alpha, PyRep::None);
+
+    // Default-Omega account with no explicit expiry (exp == 0) gets a future Win32 FILETIME integer
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_custom_names.remove(&ACCOUNT_SERVICES_STORE_KEY);
+        for ch in snap.characters.values_mut().filter(|c| c.user_id == uid) {
+            ch.clone_grade = 2;
+        }
+    });
+    let sub_default_omega = handle_inner(&ctx, &mut sess, "subscriptionMgr", "GetSubscriptionTime", &[], &kw)
+        .unwrap()
+        .unwrap();
+    let expected_fallback_ft = ((now + 30 * 86_400) as i64 + 11_644_473_600) * 10_000_000;
+    assert_eq!(sub_default_omega, PyRep::Integer(expected_fallback_ft));
 }
 
 #[test]

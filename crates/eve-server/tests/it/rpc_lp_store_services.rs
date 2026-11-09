@@ -1545,8 +1545,10 @@ async fn test_lp_store_offers_browsing_and_station_corp_resolution() {
         panic!("reqItems must be a list");
     };
     assert_eq!(req_items.len(), 1);
-    assert_eq!(req_items[0].dict_get("typeID").and_then(|v| v.as_i64()), Some(IRON_CHARGE_S_TYPE_ID as i64));
-    assert_eq!(req_items[0].dict_get("quantity").and_then(|v| v.as_i64()), Some(5_000));
+    assert_eq!(
+        req_items[0],
+        PyRep::Tuple(vec![PyRep::Integer(IRON_CHARGE_S_TYPE_ID as i64), PyRep::Integer(5_000)])
+    );
 
     // 2. Querying explicit corp ID 1000120 (Federation Navy) returns Federation Navy offers (including 3616)
     let fed_rep = rpc(
