@@ -478,6 +478,17 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
                         let is_in_space = session.character_id.is_some()
                             && session.station_id.is_none()
                             && session.structure_id.is_none();
+                        if was_in_space
+                            && prev_session.solar_system_id != session.solar_system_id
+                        {
+                            if let Some(old_sys_id) = prev_session.solar_system_id {
+                                let _ = ctx
+                                    .systems
+                                    .get_or_spawn(old_sys_id)
+                                    .flush_peer_observer_updates(prev_session.ship_id)
+                                    .await;
+                            }
+                        }
                         if was_in_space || is_in_space {
                             if let (Some(sys_id), Some(ship_id)) = (
                                 session.solar_system_id.or(prev_session.solar_system_id),
@@ -496,6 +507,9 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
                                         }
                                     }
                                 }
+                                let _ = handle
+                                    .flush_peer_observer_updates(Some(ship_id))
+                                    .await;
                             }
                         }
                     }

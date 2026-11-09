@@ -888,17 +888,21 @@ pub(crate) async fn handle_cmd_stop(
         .await
         .map_err(map_destiny_nav_err)?;
     cancel_pending_warp_align_if_needed(ctx, ship_id, &current_ball.mode);
-    crate::services::notify_emitters_space_dungeons::emit_destiny_updates(
-        ctx,
-        char_id,
-        vec![PyRep::Tuple(vec![
-            PyRep::Integer(tick as i64),
-            PyRep::Tuple(vec![
-                PyRep::String("Stop".into()),
-                PyRep::Tuple(vec![PyRep::Integer(ship_id)]),
-            ]),
-        ])],
-    );
+    // Live TCP sessions (`!session.address.is_empty()`) receive the authoritative `Stop` action
+    // via `macho_listener` / `main` draining `observer_events` into a single `DoDestinyUpdate`.
+    if session.address.is_empty() {
+        crate::services::notify_emitters_space_dungeons::emit_destiny_updates(
+            ctx,
+            char_id,
+            vec![PyRep::Tuple(vec![
+                PyRep::Integer(tick as i64),
+                PyRep::Tuple(vec![
+                    PyRep::String("Stop".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(ship_id)]),
+                ]),
+            ])],
+        );
+    }
     let res = PyRep::Integer(tick as i64);
     let _ = crate::services::pve_dungeon_runtime::on_dungeon_approach(
         ctx, char_id, sys_id, ship_id, None,

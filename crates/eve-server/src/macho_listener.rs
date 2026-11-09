@@ -954,6 +954,30 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             }
                         }
 
+                        if docking_transition {
+                            if let Some(sys_id) =
+                                session.solar_system_id.or(prev_session.solar_system_id)
+                            {
+                                let _ = ctx
+                                    .systems
+                                    .get_or_spawn(sys_id)
+                                    .flush_peer_observer_updates(
+                                        session.ship_id.or(prev_session.ship_id),
+                                    )
+                                    .await;
+                            }
+                        } else if was_in_space
+                            && prev_session.solar_system_id != session.solar_system_id
+                        {
+                            if let Some(old_sys_id) = prev_session.solar_system_id {
+                                let _ = ctx
+                                    .systems
+                                    .get_or_spawn(old_sys_id)
+                                    .flush_peer_observer_updates(prev_session.ship_id)
+                                    .await;
+                            }
+                        }
+
                         let mut sess_change_sent = false;
                         if let Some(mut sess_change_payload) = prev_session
                             .to_session_change_pyrep(&session, vec![MACHO_PROXY_NODE_ID as i64])
@@ -1029,6 +1053,19 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 } else if !was_ballpark_ready {
                                     ballpark_ready = false;
                                 }
+                            }
+                        }
+                        if !docking_transition && (was_in_space || is_in_space) {
+                            if let Some(sys_id) =
+                                session.solar_system_id.or(prev_session.solar_system_id)
+                            {
+                                let _ = ctx
+                                    .systems
+                                    .get_or_spawn(sys_id)
+                                    .flush_peer_observer_updates(
+                                        session.ship_id.or(prev_session.ship_id),
+                                    )
+                                    .await;
                             }
                         }
                         if !is_in_space {

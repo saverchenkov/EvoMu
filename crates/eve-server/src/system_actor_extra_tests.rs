@@ -361,3 +361,97 @@ async fn test_actor_commands_docking_cloak_tether_ewar_immune_nanite_and_errors(
         .await;
     assert!(docked.is_some());
 }
+
+#[tokio::test]
+async fn flush_peer_observer_updates_broadcasts_immediately_and_preserves_pending_set_state() {
+    let reg = SystemRegistry::new();
+    let h = reg.get_or_spawn(30_000_142);
+
+    let acting_ship = 9_101;
+    let ready_peer = 9_102;
+    let joining_peer = 9_103;
+
+    h.spawn_ball(make_ball(acting_ship, 587, DVec3::ZERO))
+        .await
+        .unwrap();
+    h.spawn_ball(make_ball(ready_peer, 587, DVec3::new(1_000.0, 0.0, 0.0)))
+        .await
+        .unwrap();
+    h.spawn_ball(make_ball(joining_peer, 587, DVec3::new(2_000.0, 0.0, 0.0)))
+        .await
+        .unwrap();
+
+    let _ = h.drain_observer_updates(acting_ship).await.unwrap();
+    let _ = h.drain_observer_updates(ready_peer).await.unwrap();
+    let _ = h.drain_observer_updates(joining_peer).await.unwrap();
+    h.push_set_state(joining_peer).await.unwrap();
+
+    // Negative case: with 0 live broadcast subscribers, flush_peer_observer_updates is a no-op
+    // so direct drain_observer_updates callers keep their events.
+    h.set_movement_mode(
+        acting_ship,
+        MovementMode::GotoDirection {
+            direction: DVec3::X,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        h.flush_peer_observer_updates(Some(acting_ship))
+            .await
+            .unwrap(),
+        0
+    );
+    let (_, direct_evs, _) = h.drain_observer_updates(ready_peer).await.unwrap();
+    assert!(direct_evs
+        .iter()
+        .any(|e| matches!(e, DestinyEvent::GotoDirection { ball_id: 9_101, .. })));
+    let _ = h.drain_observer_updates(acting_ship).await.unwrap();
+
+    // Positive case: with an active subscriber (`macho_listener`), peer updates broadcast immediately
+    // without advancing the 1 Hz tick, excluding `acting_ship` and preserving `joining_peer`'s SetState queue.
+    let mut rx = h.subscribe();
+    h.set_movement_mode(
+        acting_ship,
+        MovementMode::new_warp(DVec3::ZERO, DVec3::new(1.5e11, 0.0, 0.0), 3.0),
+    )
+    .await
+    .unwrap();
+
+    let flushed = h
+        .flush_peer_observer_updates(Some(acting_ship))
+        .await
+        .unwrap();
+    assert_eq!(flushed, 1);
+
+    let msg = rx.try_recv().expect("immediate sub-tick TickBroadcast");
+    assert_eq!(msg.solar_system_id, 30_000_142);
+    assert!(!msg.observer_events.contains_key(&acting_ship));
+    assert!(!msg.observer_events.contains_key(&joining_peer));
+    let peer_evs = msg
+        .observer_events
+        .get(&ready_peer)
+        .expect("ready_peer updates included");
+    assert!(peer_evs
+        .iter()
+        .any(|e| matches!(e, DestinyEvent::WarpTo { ball_id: 9_101, .. })));
+    assert!(msg.observer_updates_pyrep.contains_key(&ready_peer));
+
+    // Acting pilot still drains its own authoritative WarpTo on its RPC reply path
+    let (_, caller_evs, _) = h.drain_observer_updates(acting_ship).await.unwrap();
+    assert!(caller_evs
+        .iter()
+        .any(|e| matches!(e, DestinyEvent::WarpTo { ball_id: 9_101, .. })));
+
+    // Joining peer's SetState at index 0 is intact along with the subsequent WarpTo
+    let (_, join_evs, _) = h.drain_observer_updates(joining_peer).await.unwrap();
+    assert!(matches!(
+        join_evs.first(),
+        Some(DestinyEvent::SetState {
+            observer_ball_id: 9_103
+        })
+    ));
+    assert!(join_evs
+        .iter()
+        .any(|e| matches!(e, DestinyEvent::WarpTo { ball_id: 9_101, .. })));
+}

@@ -513,3 +513,67 @@ async fn sync_ship_cloak_and_mjfg_from_fitting_updates_stealth_and_spool() {
     assert!(!still_active);
     let _ = mjfg_item_id;
 }
+
+#[tokio::test]
+async fn cmd_stop_omits_duplicate_do_destiny_updates_on_live_tcp_session_only() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142;
+    let char_id = 96_801;
+    let ship_id = 78_801;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        put_item(
+            snap,
+            ship_id,
+            587,
+            char_id,
+            i64::from(sys_id),
+            InventoryFlag::None,
+            1,
+            true,
+        );
+    });
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_h
+        .spawn_ball(make_ship_ball(ship_id, 587, 98_000_001, DVec3::ZERO))
+        .await;
+    let _ = sys_h.drain_observer_updates(ship_id).await;
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let bound = bound_sys(sys_id);
+
+    // 1. Live TCP session (`!session.address.is_empty()`): zero queued `DoDestinyUpdates` notifications,
+    //    leaving the single authoritative `Stop` event in `observer_events` for `macho_listener`.
+    let mut tcp_sess = make_session(char_id, 98_000_001, Some(sys_id), Some(ship_id));
+    tcp_sess.address = "127.0.0.1:54123".to_string();
+    let _ = sys_h
+        .set_movement_mode(
+            ship_id,
+            MovementMode::GotoDirection {
+                direction: DVec3::X,
+            },
+        )
+        .await;
+    let _ = sys_h.drain_observer_updates(ship_id).await;
+
+    handle_cmd_stop(&ctx, &tcp_sess, Some(&bound))
+        .await
+        .expect("CmdStop on TCP session");
+    let tcp_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        !tcp_notifs.iter().any(|n| n.event == "DoDestinyUpdates"),
+        "live TCP session must not emit duplicate DoDestinyUpdates alongside DoDestinyUpdate: {tcp_notifs:?}"
+    );
+    let (_, obs_evs, _) = sys_h.drain_observer_updates(ship_id).await.unwrap();
+    assert!(obs_evs
+        .iter()
+        .any(|e| matches!(e, eve_destiny::DestinyEvent::Stop { ball_id } if *ball_id == ship_id)));
+
+    // 2. Direct in-memory RPC session (`session.address.is_empty()`): keeps `DoDestinyUpdates` for headless tests.
+    let direct_sess = make_session(char_id, 98_000_001, Some(sys_id), Some(ship_id));
+    handle_cmd_stop(&ctx, &direct_sess, Some(&bound))
+        .await
+        .expect("CmdStop on direct session");
+    let direct_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(direct_notifs.iter().any(|n| n.event == "DoDestinyUpdates"));
+}

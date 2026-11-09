@@ -353,6 +353,17 @@ pub(super) async fn handle_fleet_ops(
             }
             let dir = (target_ball.position - caller_ball.position).normalize_or_zero();
             let dest = target_ball.position - dir * min_range;
+            if let Ok(Some(cs)) = sys.get_combat_state(caller_ship_id).await {
+                if cs.gate_cloak_remaining_ticks > 0 || cs.undock_invulnerable_remaining_ticks > 0 {
+                    let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(
+                        ctx,
+                        &sys,
+                        char_id,
+                        caller_ship_id,
+                    )
+                    .await;
+                }
+            }
             let warp_mode = MovementMode::new_warp(caller_ball.position, dest, 3.0);
             let _ = sys.set_movement_mode(caller_ship_id, warp_mode).await;
 
@@ -1245,6 +1256,17 @@ pub(crate) async fn handle_fleet_warp(
                 {
                     ess_bubble_blocked = true;
                     continue;
+                }
+                if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
+                    if cs.gate_cloak_remaining_ticks > 0 || cs.undock_invulnerable_remaining_ticks > 0 {
+                        let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(
+                            ctx,
+                            &sys,
+                            member_char_id,
+                            ship_id,
+                        )
+                        .await;
+                    }
                 }
                 let warp_mode = MovementMode::new_warp(ball.position, landing, 3.0);
                 if sys.set_movement_mode(ship_id, warp_mode).await.is_ok() {

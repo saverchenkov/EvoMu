@@ -230,3 +230,257 @@ fn force_stop_warp_and_ultra_slow_landing_clamp_velocity_to_subwarp_bounds() {
         bs.max_velocity
     );
 }
+
+#[test]
+fn multi_au_warp_across_populated_intermediate_bubble_avoids_mid_warp_grid_thrashing() {
+    let mut park = Ballpark::new(30_000_142);
+    let warper = 1_100;
+    let dep_obs = 1_101;
+    let mid_bystander = 1_102;
+    let dest_obs = 1_103;
+
+    let origin = DVec3::ZERO;
+    let mid_pos = DVec3::new(5.0 * AU_METERS, 0.0, 0.0);
+    let dest_pos = DVec3::new(10.0 * AU_METERS, 0.0, 0.0);
+
+    park.add_ball(make_ship_ball(warper, origin, 350.0));
+    park.add_ball(make_ship_ball(dep_obs, DVec3::new(0.0, 2_000.0, 0.0), 350.0));
+    park.add_ball(make_ship_ball(mid_bystander, mid_pos, 350.0));
+    park.add_ball(make_ship_ball(
+        dest_obs,
+        dest_pos + DVec3::new(0.0, 2_500.0, 0.0),
+        350.0,
+    ));
+
+    let dep_gid = park.bubble_id_for_ball(dep_obs).expect("dep grid");
+    let mid_gid = park.bubble_id_for_ball(mid_bystander).expect("mid grid");
+    let dest_gid = park.bubble_id_for_ball(dest_obs).expect("dest grid");
+    assert_eq!(park.bubble_id_for_ball(warper), Some(dep_gid));
+    assert_ne!(dep_gid, mid_gid);
+    assert_ne!(mid_gid, dest_gid);
+    assert_eq!(park.grids.len(), 3);
+
+    park.set_mode(warper, MovementMode::new_warp(origin, dest_pos, 3.0))
+        .expect("start 10 AU warp");
+    park.drain_all_observer_events();
+
+    let mut dep_saw_remove = false;
+    let mut dest_saw_add2 = false;
+    let mut warper_saw_add = false;
+
+    for _ in 0..120 {
+        park.step(1.0);
+        // Zero orphan intermediate GridBubbles may ever be created along the 10 AU tunnel.
+        assert_eq!(
+            park.grids.len(),
+            3,
+            "mid-warp step must never allocate intermediate GridBubbles"
+        );
+
+        let mode_now = park.balls[&warper].mode.clone();
+        if let MovementMode::Warp { phase, .. } = mode_now {
+            if matches!(
+                phase,
+                WarpPhase::Aligning | WarpPhase::Accelerating | WarpPhase::Cruising
+            ) {
+                assert_eq!(
+                    park.bubble_id_for_ball(warper),
+                    Some(dep_gid),
+                    "warper must stay in departure bubble during {phase:?}"
+                );
+            }
+        }
+
+        let mid_evs = park.drain_observer_events(mid_bystander);
+        assert!(
+            !mid_evs.iter().any(|e| matches!(
+                e,
+                DestinyEvent::AddBalls { .. }
+                    | DestinyEvent::AddBalls2 { .. }
+                    | DestinyEvent::RemoveBalls { .. }
+                    | DestinyEvent::RemoveBall { .. }
+            )),
+            "intermediate bubble bystander must receive zero spurious AddBalls/RemoveBalls: {mid_evs:?}"
+        );
+
+        for ev in park.drain_observer_events(warper) {
+            if let DestinyEvent::AddBalls { balls } = &ev {
+                assert!(
+                    !balls.iter().any(|b| b.id == mid_bystander),
+                    "warper must never load intermediate bubble bystander"
+                );
+                if balls.iter().any(|b| b.id == dest_obs) {
+                    warper_saw_add = true;
+                }
+            }
+        }
+        for ev in park.drain_observer_events(dep_obs) {
+            if matches!(&ev, DestinyEvent::RemoveBalls { ball_ids } if ball_ids.contains(&warper)) {
+                assert!(
+                    !matches!(
+                        park.balls[&warper].mode,
+                        MovementMode::Warp {
+                            phase: WarpPhase::Aligning
+                                | WarpPhase::Accelerating
+                                | WarpPhase::Cruising,
+                            ..
+                        }
+                    ),
+                    "departure RemoveBalls must not fire before destination deceleration"
+                );
+                dep_saw_remove = true;
+            }
+        }
+        for ev in park.drain_observer_events(dest_obs) {
+            if matches!(&ev, DestinyEvent::AddBalls2 { balls } if balls.iter().any(|b| b.id == warper))
+            {
+                dest_saw_add2 = true;
+            }
+        }
+
+        if park.balls[&warper].mode == MovementMode::Stop {
+            break;
+        }
+    }
+
+    assert_eq!(park.balls[&warper].mode, MovementMode::Stop);
+    assert_eq!(park.bubble_id_for_ball(warper), Some(dest_gid));
+    assert!(dep_saw_remove, "departure observer must receive RemoveBalls");
+    assert!(dest_saw_add2, "destination observer must receive AddBalls2");
+    assert!(warper_saw_add, "warper must receive AddBalls for destination resident");
+
+    // Also warp into completely unpopulated deep space (2 AU further) and verify exactly 1 new grid is created at destination.
+    let deep_dest = DVec3::new(12.0 * AU_METERS, 0.0, 0.0);
+    park.set_mode(
+        warper,
+        MovementMode::new_warp(park.balls[&warper].position, deep_dest, 3.0),
+    )
+    .expect("warp to unpopulated deep space");
+    park.drain_all_observer_events();
+    for _ in 0..90 {
+        park.step(1.0);
+        assert!(
+            park.grids.len() <= 4,
+            "unpopulated warp must create at most 1 destination grid (got {})",
+            park.grids.len()
+        );
+        if park.balls[&warper].mode == MovementMode::Stop {
+            break;
+        }
+    }
+    assert_eq!(park.balls[&warper].mode, MovementMode::Stop);
+    assert_eq!(park.grids.len(), 4);
+    let final_gid = park.bubble_id_for_ball(warper).expect("deep grid");
+    assert!(park.grids[&final_gid].contains(deep_dest));
+}
+
+#[test]
+fn gate_cloak_decloak_events_precede_warp_to_and_goto_point_while_covert_cloak_persists() {
+    let mut park = Ballpark::new(30_000_142);
+    let ship = 1_201;
+    let peer = 1_202;
+    park.add_ball(make_ship_ball(ship, DVec3::ZERO, 300.0));
+    park.add_ball(make_ship_ball(peer, DVec3::new(1_500.0, 0.0, 0.0), 300.0));
+    {
+        let cs = park.combat_states.get_mut(&ship).unwrap();
+        cs.is_cloaked = true;
+        cs.gate_cloak_remaining_ticks = 60;
+        cs.cloak_velocity_multiplier = Some(0.25);
+    }
+    park.drain_all_observer_events();
+
+    let dest = DVec3::new(1.0 * AU_METERS, 0.0, 0.0);
+    park.set_mode(ship, MovementMode::new_warp(DVec3::ZERO, dest, 3.0))
+        .expect("warp from gate cloak");
+    assert_eq!(park.combat_states[&ship].cloak_velocity_multiplier, None);
+
+    let ship_evs = park.drain_observer_events(ship);
+    let cloak_idx = ship_evs
+        .iter()
+        .position(|e| matches!(e, DestinyEvent::CloakBall { ball_id: 1_201, cloaked: 0 }))
+        .expect("CloakBall(0) emitted");
+    let fx_idx = ship_evs
+        .iter()
+        .position(|e| {
+            matches!(
+                e,
+                DestinyEvent::OnSpecialFX {
+                    ball_id: 1_201,
+                    guid,
+                    is_active: false,
+                    ..
+                } if guid == "effects.Cloak"
+            )
+        })
+        .expect("OnSpecialFX(effects.Cloak, false) emitted");
+    let warp_idx = ship_evs
+        .iter()
+        .position(|e| matches!(e, DestinyEvent::WarpTo { ball_id: 1_201, .. }))
+        .expect("WarpTo emitted");
+    assert!(cloak_idx < warp_idx && fx_idx < warp_idx);
+
+    let peer_evs = park.drain_observer_events(peer);
+    let add_idx = peer_evs
+        .iter()
+        .position(|e| matches!(e, DestinyEvent::AddBalls2 { balls } if balls.iter().any(|b| b.id == ship)))
+        .expect("peer receives AddBalls2 on gate-cloak break");
+    let peer_warp_idx = peer_evs
+        .iter()
+        .position(|e| matches!(e, DestinyEvent::WarpTo { ball_id: 1_201, .. }))
+        .expect("peer receives WarpTo");
+    assert!(add_idx < peer_warp_idx);
+
+    // GotoPoint also breaks gate cloak and emits CloakBall(0) strictly before GotoPoint
+    let ship2 = 1_203;
+    park.add_ball(make_ship_ball(ship2, DVec3::new(0.0, 500.0, 0.0), 300.0));
+    {
+        let cs2 = park.combat_states.get_mut(&ship2).unwrap();
+        cs2.is_cloaked = true;
+        cs2.gate_cloak_remaining_ticks = 60;
+        cs2.undock_invulnerable_remaining_ticks = 30;
+    }
+    park.drain_all_observer_events();
+    park.goto_point(ship2, DVec3::new(10_000.0, 0.0, 0.0))
+        .expect("goto_point breaks gate cloak");
+    let s2_evs = park.drain_observer_events(ship2);
+    let s2_cloak = s2_evs
+        .iter()
+        .position(|e| matches!(e, DestinyEvent::CloakBall { ball_id: 1_203, cloaked: 0 }))
+        .expect("CloakBall(0) before GotoPoint");
+    let s2_goto = s2_evs
+        .iter()
+        .position(|e| matches!(e, DestinyEvent::GotoPoint { ball_id: 1_203, .. }))
+        .expect("GotoPoint emitted");
+    assert!(s2_cloak < s2_goto);
+    assert_eq!(park.combat_states[&ship2].undock_invulnerable_remaining_ticks, 0);
+
+    // Covert-ops cloak stays cloaked across WarpTo; non-covert module cloak rejects WarpTo
+    let cov_ship = 1_204;
+    park.add_ball(make_ship_ball(cov_ship, DVec3::new(0.0, -500.0, 0.0), 300.0));
+    {
+        let csc = park.combat_states.get_mut(&cov_ship).unwrap();
+        csc.is_cloaked = true;
+        csc.is_covert_cloak = true;
+        csc.gate_cloak_remaining_ticks = 0;
+    }
+    park.drain_all_observer_events();
+    park.set_mode(cov_ship, MovementMode::new_warp(DVec3::ZERO, dest, 3.0))
+        .expect("covert cloak warps cleanly");
+    assert!(park.combat_states[&cov_ship].is_cloaked);
+    let cov_evs = park.drain_observer_events(cov_ship);
+    assert!(!cov_evs
+        .iter()
+        .any(|e| matches!(e, DestinyEvent::CloakBall { cloaked: 0, .. })));
+
+    let proto_ship = 1_205;
+    park.add_ball(make_ship_ball(proto_ship, DVec3::new(0.0, -900.0, 0.0), 300.0));
+    {
+        let csp = park.combat_states.get_mut(&proto_ship).unwrap();
+        csp.is_cloaked = true;
+        csp.is_covert_cloak = false;
+        csp.gate_cloak_remaining_ticks = 0;
+    }
+    assert!(park
+        .set_mode(proto_ship, MovementMode::new_warp(DVec3::ZERO, dest, 3.0))
+        .is_err());
+}

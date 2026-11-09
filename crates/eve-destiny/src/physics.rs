@@ -568,14 +568,19 @@ impl Ballpark {
         }
 
         // Reconcile shared dynamic GridBubble membership after movement (`SP-2`, `SP-3`, `Grid.md:13-15`).
+        // Warping balls stay in their departure bubble throughout Aligning, Accelerating, and Cruising
+        // and only transition once Decelerating (or landing) inside their destination grid, avoiding
+        // orphan intermediate GridBubbles and spurious mid-warp AddBalls/RemoveBalls (`DestinyManager.cpp:365-380`).
         for &ball_id in &dynamic_ids {
-            let Some((new_pos, is_warping)) = self
+            let Some((new_pos, mode)) = self
                 .balls
                 .get(&ball_id)
-                .map(|b| (b.position, matches!(b.mode, MovementMode::Warp { .. })))
+                .map(|b| (b.position, b.mode.clone()))
             else {
                 continue;
             };
+            let is_warping = matches!(mode, MovementMode::Warp { .. });
+            let exited_warp = warp_exit_stops.contains(&ball_id);
             let old_gid = self.ball_grid_ids.get(&ball_id).copied();
             let still_in_old = old_gid
                 .and_then(|gid| self.grids.get(&gid))
@@ -587,7 +592,7 @@ impl Ballpark {
                         && g.contains(new_pos)
                 });
             if still_in_old {
-                if !is_warping {
+                if !is_warping && !exited_warp {
                     if let Some(gid) = old_gid {
                         let _ = self.try_expand_grid(gid, new_pos);
                         self.contract_or_delete_grid(gid);
@@ -595,8 +600,72 @@ impl Ballpark {
                 }
                 continue;
             }
+            if let MovementMode::Warp {
+                destination,
+                phase,
+                ..
+            } = mode
+            {
+                match phase {
+                    WarpPhase::Aligning | WarpPhase::Accelerating | WarpPhase::Cruising => {
+                        if old_gid.is_some() {
+                            continue;
+                        }
+                        let new_gid = self.find_or_create_grid_for_position(new_pos);
+                        if let Some(g) = self.grids.get_mut(&new_gid) {
+                            g.members.insert(ball_id);
+                        }
+                        self.ball_grid_ids.insert(ball_id, new_gid);
+                        continue;
+                    }
+                    WarpPhase::Decelerating => {
+                        let existing_dest_gid = self
+                            .grids
+                            .iter()
+                            .find_map(|(&gid, g)| g.contains(destination).then_some(gid));
+                        let target_gid = if let Some(dgid) = existing_dest_gid {
+                            if !self.grids[&dgid].contains(new_pos) {
+                                continue;
+                            }
+                            if let Some(gid) = old_gid {
+                                if gid != dgid {
+                                    if let Some(g) = self.grids.get_mut(&gid) {
+                                        g.members.remove(&ball_id);
+                                    }
+                                    self.contract_or_delete_grid(gid);
+                                }
+                            }
+                            dgid
+                        } else {
+                            let (min_b, max_b) = self.prospective_grid_bounds(destination);
+                            let in_dest_bounds = new_pos.x >= min_b.x
+                                && new_pos.x <= max_b.x
+                                && new_pos.y >= min_b.y
+                                && new_pos.y <= max_b.y
+                                && new_pos.z >= min_b.z
+                                && new_pos.z <= max_b.z;
+                            if !in_dest_bounds {
+                                continue;
+                            }
+                            if let Some(gid) = old_gid {
+                                if let Some(g) = self.grids.get_mut(&gid) {
+                                    g.members.remove(&ball_id);
+                                }
+                                self.contract_or_delete_grid(gid);
+                            }
+                            self.find_or_create_grid_for_position(destination)
+                        };
+                        if let Some(g) = self.grids.get_mut(&target_gid) {
+                            g.members.insert(ball_id);
+                        }
+                        self.ball_grid_ids.insert(ball_id, target_gid);
+                        continue;
+                    }
+                }
+            }
             // Sub-warp ships pushing a grid boundary expand the grid (up to 10,000 km) if no adjacent grid wall blocks it.
-            if !is_warping {
+            // Warping ships that dropped out of warp on this tick (`exited_warp`) never stretch grid boundaries (`Grid.md:13`).
+            if !exited_warp {
                 if let Some(gid) = old_gid {
                     if self.try_expand_grid(gid, new_pos) {
                         continue;

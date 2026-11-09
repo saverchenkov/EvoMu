@@ -885,6 +885,25 @@ impl SystemHandle {
             .map_err(|_| "Solar system reply dropped".to_string())?
     }
 
+    /// Immediately flushes queued `DoDestinyUpdate` payloads over `event_tx` for all active
+    /// peer observers (excluding `exclude_ball_id` and any observer whose queue still awaits
+    /// initial `SetState` consumption), avoiding up to `1.0s` of next-tick latency.
+    pub async fn flush_peer_observer_updates(
+        &self,
+        exclude_ball_id: Option<BallId>,
+    ) -> Result<usize, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::FlushPeerObserverUpdates {
+                exclude_ball_id,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Solar system reply dropped".to_string())
+    }
+
     pub async fn get_ball_snapshot(&self, ball_id: BallId) -> Result<Option<(u64, Ball)>, String> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx

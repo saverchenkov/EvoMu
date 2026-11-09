@@ -874,6 +874,15 @@ pub(super) async fn handle_scanning_and_wormholes(
                 Err(e) => return Some(Err(e)),
             };
 
+            if !validated_gate.is_covert_cloaked {
+                let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(
+                    ctx,
+                    &sys_handle,
+                    char_id,
+                    ship_id,
+                )
+                .await;
+            }
             let pocket_pos = ship_ball.position + DVec3::new(500_000.0, 0.0, 0.0);
             let warp_mode = MovementMode::new_warp(ship_ball.position, pocket_pos, 3.0);
             let _ = sys_handle.set_movement_mode(ship_id, warp_mode).await;

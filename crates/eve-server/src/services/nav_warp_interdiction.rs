@@ -902,6 +902,15 @@ pub async fn handle_use_warp_vector(
         sys_id,
         ship_ball.type_id,
     );
+    if !validated.is_covert_cloaked {
+        let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(
+            ctx,
+            &sys_handle,
+            char_id,
+            ship_id,
+        )
+        .await;
+    }
     let warp_mode = MovementMode::new_warp(ship_ball.position, dest_pos, warp_speed);
     if let Err(e) = sys_handle.set_movement_mode(ship_id, warp_mode).await {
         rollback_warp_vector_reservation(ctx, char_id, target_id, prev_item, prev_cd_until);

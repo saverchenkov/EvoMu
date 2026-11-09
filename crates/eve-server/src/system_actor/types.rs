@@ -516,6 +516,10 @@ pub enum SystemCommand {
         ship_id: BallId,
         reply: oneshot::Sender<()>,
     },
+    FlushPeerObserverUpdates {
+        exclude_ball_id: Option<BallId>,
+        reply: oneshot::Sender<usize>,
+    },
 }
 
 pub type CharacterId = i64;

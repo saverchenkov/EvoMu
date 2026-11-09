@@ -199,15 +199,9 @@ impl Ballpark {
         self.balls.keys().any(|&id| !self.is_static_ball(id))
     }
 
-    /// Finds an existing [`GridBubble`] containing `pos`, or creates a new non-overlapping
-    /// [`GridBubble`] whose boundaries are clamped against any adjacent pre-existing grid walls (`Grid.md:13-15`).
-    pub fn find_or_create_grid_for_position(&mut self, pos: DVec3) -> u64 {
-        for (&gid, grid) in &self.grids {
-            if grid.contains(pos) {
-                return gid;
-            }
-        }
-
+    /// Computes the clamped `(min_bounds, max_bounds)` that a newly created [`GridBubble`]
+    /// centered at `pos` would occupy without mutating `self.grids` (`Grid.md:13-15`).
+    pub fn prospective_grid_bounds(&self, pos: DVec3) -> (DVec3, DVec3) {
         let r = self.bubble_radius_meters;
         let mut min_b = pos - DVec3::splat(r);
         let mut max_b = pos + DVec3::splat(r);
@@ -232,6 +226,20 @@ impl Ballpark {
         }
         min_b = min_b.min(pos);
         max_b = max_b.max(pos);
+        (min_b, max_b)
+    }
+
+    /// Finds an existing [`GridBubble`] containing `pos`, or creates a new non-overlapping
+    /// [`GridBubble`] whose boundaries are clamped against any adjacent pre-existing grid walls (`Grid.md:13-15`).
+    pub fn find_or_create_grid_for_position(&mut self, pos: DVec3) -> u64 {
+        for (&gid, grid) in &self.grids {
+            if grid.contains(pos) {
+                return gid;
+            }
+        }
+
+        let r = self.bubble_radius_meters;
+        let (min_b, max_b) = self.prospective_grid_bounds(pos);
 
         let id = self.next_grid_id.max(1);
         self.next_grid_id = id + 1;

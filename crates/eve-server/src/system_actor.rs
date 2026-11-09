@@ -1374,6 +1374,62 @@ impl SystemRegistry {
                                 let jammed = handle_apply_ecm_burst(&mut ballpark, &active_module_cycles, &sde_opt, &mechanic_rng_opt, source_id, burst_radius_m, jam_strengths, duration_s, roll, ship_eval_overrides);
                                 let _ = reply.send(jammed);
                             }
+                            SystemCommand::FlushPeerObserverUpdates {
+                                exclude_ball_id,
+                                reply,
+                            } => {
+                                let mut flushed = 0usize;
+                                if event_tx_actor.receiver_count() > 0 {
+                                    sync_player_slim_items(&mut ballpark, &db_opt);
+                                    let stamp = ballpark.current_tick as u32;
+                                    let ready_obs_ids: Vec<BallId> = ballpark
+                                        .observer_events
+                                        .iter()
+                                        .filter_map(|(&obs_id, evs)| {
+                                            if Some(obs_id) == exclude_ball_id || evs.is_empty() {
+                                                return None;
+                                            }
+                                            if evs
+                                                .iter()
+                                                .any(|ev| matches!(ev, DestinyEvent::SetState { .. }))
+                                            {
+                                                return None;
+                                            }
+                                            Some(obs_id)
+                                        })
+                                        .collect();
+                                    if !ready_obs_ids.is_empty() {
+                                        let mut observer_events = std::collections::BTreeMap::new();
+                                        let mut observer_updates_pyrep =
+                                            std::collections::BTreeMap::new();
+                                        for obs_id in ready_obs_ids {
+                                            let obs_evs = ballpark.drain_observer_events(obs_id);
+                                            if !obs_evs.is_empty() {
+                                                observer_updates_pyrep.insert(
+                                                    obs_id,
+                                                    encode_destiny_updates(
+                                                        stamp,
+                                                        &obs_evs,
+                                                        Some(&ballpark),
+                                                    ),
+                                                );
+                                                observer_events.insert(obs_id, obs_evs);
+                                            }
+                                        }
+                                        flushed = observer_events.len();
+                                        if flushed > 0 {
+                                            let _ = event_tx_actor.send(TickBroadcast {
+                                                solar_system_id,
+                                                tick: ballpark.current_tick,
+                                                events: Vec::new(),
+                                                observer_events,
+                                                observer_updates_pyrep,
+                                            });
+                                        }
+                                    }
+                                }
+                                let _ = reply.send(flushed);
+                            }
                         }
                         {
                             let mut mod_guard = active_module_ships_actor.write().unwrap_or_else(|e| e.into_inner());

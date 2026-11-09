@@ -71,10 +71,22 @@ impl Ballpark {
                 ..
             }
         );
-        if was_aligning_warp {
-            if let Some(cs) = self.combat_states.get_mut(&ball_id) {
+        let mut uncloaked = false;
+        if let Some(cs) = self.combat_states.get_mut(&ball_id) {
+            if was_aligning_warp {
                 cs.is_emergency_warping = false;
             }
+            cs.undock_invulnerable_remaining_ticks = 0;
+            cs.warp_exit_invulnerable_remaining_ticks = 0;
+            cs.sync_invuln_with_undock_timer = false;
+            if cs.gate_cloak_remaining_ticks > 0 {
+                cs.gate_cloak_remaining_ticks = 0;
+                cs.is_cloaked = false;
+                uncloaked = true;
+            }
+        }
+        if uncloaked {
+            self.finish_gate_decloak(ball_id);
         }
         let ball = self.balls.get_mut(&ball_id).unwrap();
         if was_aligning_warp {
@@ -209,29 +221,7 @@ impl Ballpark {
             }
         }
         if uncloaked {
-            self.emit_event(Some(ball_id), DestinyEvent::CloakBall { ball_id, cloaked: 0 });
-            self.emit_event(
-                Some(ball_id),
-                DestinyEvent::OnSpecialFX {
-                    ball_id,
-                    module_id: None,
-                    guid: "effects.Cloak".to_string(),
-                    is_active: false,
-                },
-            );
-            if let Some(meta) = self.ball_slim_meta.get_mut(&ball_id) {
-                meta.is_cloaked = false;
-            }
-            if let (Some(&gid), Some(b)) = (
-                self.ball_grid_ids.get(&ball_id),
-                self.balls.get(&ball_id).cloned(),
-            ) {
-                self.queue_event_for_grid_observers(
-                    gid,
-                    Some(ball_id),
-                    &DestinyEvent::AddBalls2 { balls: vec![b] },
-                );
-            }
+            self.finish_gate_decloak(ball_id);
         }
 
         let mut emitted_event: Option<DestinyEvent> = None;
