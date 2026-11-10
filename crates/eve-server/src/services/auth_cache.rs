@@ -1599,7 +1599,7 @@ async fn handle_slash_teleport(
             }
         };
 
-        let mut persisted_pos = None;
+        let persisted_pos;
         if old_sys_id != dest_sys_id {
             let existing_ball = if old_sys_id > 0 {
                 let old_handle = ctx.systems.get_or_spawn(old_sys_id);
@@ -1677,13 +1677,15 @@ async fn handle_slash_teleport(
                     .await;
                 let _ = new_handle.push_set_state(ship_id).await;
                 persisted_pos = Some(tr_pos);
-            } else if let Some(tr_pos) = explicit_pos {
-                let _ = new_handle.set_ball_position(ship_id, tr_pos).await;
+            } else {
+                if let Some(tr_pos) = explicit_pos {
+                    let _ = new_handle.set_ball_position(ship_id, tr_pos).await;
+                }
                 let _ = new_handle
                     .set_movement_mode(ship_id, MovementMode::Stop)
                     .await;
                 let _ = new_handle.push_set_state(ship_id).await;
-                persisted_pos = Some(tr_pos);
+                persisted_pos = explicit_pos;
             }
         }
 

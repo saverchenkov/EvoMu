@@ -812,16 +812,34 @@ pub fn on_advance_secs_internal(
                 .any(|m| m.values().any(|&exp| now_unix >= exp))
     });
     if has_expired_rt_cw {
+        let mut expired_kr_ids: Vec<i64> = Vec::new();
         with_mut_combat_runtime(ctx, |rt| {
             rt.disapproval_flags.retain(|_, &mut exp| now_unix < exp);
             rt.npc_timers.retain(|_, &mut exp| now_unix < exp);
             rt.duel_challenges.retain(|_, &mut exp| now_unix < exp);
-            rt.kill_right_expires_unix.retain(|_, &mut exp| now_unix < exp);
+            rt.kill_right_expires_unix.retain(|&kr_id, &mut exp| {
+                if now_unix >= exp {
+                    expired_kr_ids.push(kr_id);
+                    false
+                } else {
+                    true
+                }
+            });
+            for &kr_id in &expired_kr_ids {
+                rt.kill_right_restricted_to.remove(&kr_id);
+            }
             for m in rt.limited_engagements.values_mut() {
                 m.retain(|_, &mut exp| now_unix < exp);
             }
             rt.limited_engagements.retain(|_, m| !m.is_empty());
         });
+        if !expired_kr_ids.is_empty() {
+            ctx.db.with_mut_snapshot(|snap| {
+                for &kr_id in &expired_kr_ids {
+                    snap.kill_rights.remove(&kr_id);
+                }
+            });
+        }
     }
 
     // 1. Sync any in-memory self-destruct countdowns from `CombatRuntimeState` into `Sp6PersistedState`
@@ -1352,9 +1370,6 @@ pub fn on_advance_secs_internal(
 /// Honors `ctx.is_clock_paused()` and `ctx.time_acceleration_multiplier()`, running the unified
 /// synchronous subsystem pipeline (`run_clock_advanced_sync_pipeline`) alongside async cluster tasks.
 pub async fn tick_background_cluster(ctx: &ServerContext) {
-    if ctx.is_clock_paused() {
-        return;
-    }
     tick_background_cluster_with_step(ctx, ctx.time_acceleration_multiplier()).await;
 }
 
@@ -1365,14 +1380,14 @@ pub(crate) fn sweep_expired_cosmic_anomalies_and_signatures(ctx: &ServerContext,
     let has_expired_cosmic = ctx.db.with_snapshot(|snap| {
         snap.cosmic_anomalies.values().any(|anoms| {
             anoms.iter().any(|a| {
-                a.anomaly_type != "IceBelt"
+                !matches!(a.anomaly_type.as_str(), "IceBelt" | "OreAnomaly")
                     && a.lifetime_seconds > 0
                     && now_unix >= a.created_unix.saturating_add(a.lifetime_seconds)
             })
         }) || snap.cosmic_signatures.values().any(|sigs| {
             sigs.iter().any(|s| {
                 !s.sig_group.eq_ignore_ascii_case("wormhole")
-                    && s.sig_group != "IceBelt"
+                    && !matches!(s.sig_group.as_str(), "IceBelt" | "OreAnomaly" | "Ore" | "Gas")
                     && s.lifetime_seconds > 0
                     && now_unix >= s.created_unix.saturating_add(s.lifetime_seconds)
             })
@@ -1385,7 +1400,7 @@ pub(crate) fn sweep_expired_cosmic_anomalies_and_signatures(ctx: &ServerContext,
             for (&sys_id, anoms) in snap.cosmic_anomalies.iter_mut() {
                 let mut removed = Vec::new();
                 anoms.retain(|a| {
-                    let keep = a.anomaly_type == "IceBelt"
+                    let keep = matches!(a.anomaly_type.as_str(), "IceBelt" | "OreAnomaly")
                         || a.lifetime_seconds == 0
                         || now_unix < a.created_unix.saturating_add(a.lifetime_seconds);
                     if !keep && !a.cleared {
@@ -1401,7 +1416,7 @@ pub(crate) fn sweep_expired_cosmic_anomalies_and_signatures(ctx: &ServerContext,
                 let mut removed = Vec::new();
                 sigs.retain(|s| {
                     let keep = s.sig_group.eq_ignore_ascii_case("wormhole")
-                        || s.sig_group == "IceBelt"
+                        || matches!(s.sig_group.as_str(), "IceBelt" | "OreAnomaly" | "Ore" | "Gas")
                         || s.lifetime_seconds == 0
                         || now_unix < s.created_unix.saturating_add(s.lifetime_seconds);
                     if !keep && !s.collapsed {
@@ -1715,9 +1730,6 @@ async fn step_single_system_physics_step(
 /// Runs on a dedicated wall-clock ticker in production so slow mining or
 /// SQLite persistence in `tick_background_cluster` cannot delay warp completion.
 pub async fn step_active_systems_physics_tick(ctx: &ServerContext, elapsed_secs: u64) {
-    if ctx.is_clock_paused() {
-        return;
-    }
     let now_unix = ctx.now_unix();
     let mult = ctx.time_acceleration_multiplier();
     let steps = elapsed_secs.saturating_mul(mult).clamp(1, 60);

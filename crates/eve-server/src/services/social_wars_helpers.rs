@@ -49,10 +49,16 @@ pub(super) fn err(code: &str, message: impl Into<String>) -> Option<Result<PyRep
 /// combat-operational Upwell War HQ owned by `owner_corp_id` (`#506`).
 pub(super) fn is_valid_war_hq(
     ctx: &ServerContext,
+    corporations: &std::collections::HashMap<i64, eve_db::CorporationRecord>,
     owner_corp_id: i64,
     s: &UpwellStructureRecord,
 ) -> bool {
-    if s.owner_corp_id != owner_corp_id || !s.quantum_core_installed {
+    let owns_or_allied = s.owner_corp_id == owner_corp_id
+        || corporations
+            .get(&s.owner_corp_id)
+            .and_then(|c| c.alliance_id)
+            == Some(owner_corp_id);
+    if !owns_or_allied || !s.quantum_core_installed {
         return false;
     }
     if !matches!(
@@ -131,9 +137,15 @@ pub(super) fn is_war_participant_corp(
 }
 
 pub(super) fn war_eligible(snap: &WorldStateSnapshot, corp_id: i64) -> bool {
-    snap.structures
-        .values()
-        .any(|s| s.owner_corp_id == corp_id && s.state != "Destroyed")
+    snap.structures.values().any(|s| {
+        s.state != "Destroyed"
+            && (s.owner_corp_id == corp_id
+                || snap
+                    .corporations
+                    .get(&s.owner_corp_id)
+                    .and_then(|c| c.alliance_id)
+                    == Some(corp_id))
+    })
 }
 
 pub(super) fn debit_corp(
@@ -173,7 +185,7 @@ pub(crate) fn sync_wars(ctx: &ServerContext) {
             let hq_lost = meta.war_hq_id.is_some_and(|hq| {
                 snap.structures
                     .get(&hq)
-                    .is_none_or(|s| !is_valid_war_hq(ctx, w.aggressor_corp_id, s))
+                    .is_none_or(|s| !is_valid_war_hq(ctx, &snap.corporations, w.aggressor_corp_id, s))
             });
             let defender_ineligible = !w.mutual && !war_eligible(snap, w.defender_corp_id);
             finished || hq_lost || defender_ineligible
@@ -192,7 +204,7 @@ pub(crate) fn sync_wars(ctx: &ServerContext) {
             let hq_lost = meta.war_hq_id.is_some_and(|hq| {
                 snap.structures
                     .get(&hq)
-                    .is_none_or(|s| !is_valid_war_hq(ctx, w.aggressor_corp_id, s))
+                    .is_none_or(|s| !is_valid_war_hq(ctx, &snap.corporations, w.aggressor_corp_id, s))
             });
             let defender_ineligible = !w.mutual && !war_eligible(snap, w.defender_corp_id);
             if finished || hq_lost || defender_ineligible {

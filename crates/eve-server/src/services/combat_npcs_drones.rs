@@ -595,9 +595,9 @@ pub async fn handle_npcs_drones(
                 let sig_res = attr(97).unwrap_or(0.0);
                 let orbit_dist = attr(238).or_else(|| attr(239)).or_else(|| attr(240)).or_else(|| attr(241)).unwrap_or(0.0);
                 let sig_rad = attr(554).unwrap_or(0.0);
-                let eff_hp = attr(9).filter(|&v| v > 0.0);
-                let eff_sh = attr(263).filter(|&v| v > 0.0);
-                let eff_ar = attr(265).filter(|&v| v > 0.0);
+                let eff_hp = rec.dynamic_attributes.get(&9).copied().or_else(|| attr(9)).filter(|&v| v > 0.0);
+                let eff_sh = rec.dynamic_attributes.get(&263).copied().or_else(|| attr(263)).filter(|&v| v > 0.0);
+                let eff_ar = rec.dynamic_attributes.get(&265).copied().or_else(|| attr(265)).filter(|&v| v > 0.0);
                 prepared_drones.push((rec, sde_t, is_sentry, max_vel, bw_used, opt_range, dmg_vec, d_pos, rof_ms, falloff_m, tracking, orb_vel, sig_res, orbit_dist, sig_rad, (eff_hp, eff_sh, eff_ar)));
             }
 

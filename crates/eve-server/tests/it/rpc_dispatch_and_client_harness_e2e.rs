@@ -183,7 +183,7 @@ async fn test_parity_plan_z6_z7_z8_journeys_coverage_and_acceptance_gate() {
     assert!(gate_text.contains("EVOMU_MIN_LINE_COVERAGE"));
     assert!(gate_text.contains("90"));
     assert!(gate_text.contains("llvm-cov"));
-    assert!(gate_text.contains("run_journeys"));
+    assert!(gate_text.contains("client_journeys.json") && gate_text.contains("SUPERVISOR_OWNED"));
     assert!(scripts_dir.join("preflight.py").exists());
 
     // Z-8: Full canonical ledger categories & plan closure rows present

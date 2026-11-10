@@ -462,10 +462,12 @@ pub(crate) fn step_cycles_and_capacitor(
                                 cycle.weapon_optimal_m.max(1.0),
                                 cycle.weapon_falloff_m.max(1.0),
                             );
-                            let hit_roll = mechanic_rng_opt
-                                .as_ref()
-                                .and_then(|rng| rng.try_unit_f64())
-                                .unwrap_or(0.5);
+                            let mut roll_seed = ((cycle.ship_id ^ cycle.module_id) as u64)
+                                .wrapping_add((target_id as u64).wrapping_mul(0x517c_c1b7_2722_0a95))
+                                .wrapping_add(ballpark.current_tick);
+                            let hit_roll = crate::rng::u64_to_unit_f64(
+                                crate::rng::splitmix64_next(&mut roll_seed),
+                            );
                             crate::formulas::turret_shot_damage(
                                 cycle.damage_vector,
                                 p_hit,

@@ -1456,7 +1456,13 @@ fn any_structure_or_industry_needs_sync(
             continue;
         }
         if st.type_id == crate::services::sov_services::TYPE_SOVEREIGNTY_HUB {
-            if st.state == STATE_ONLINING && now >= st.reinforced_until_unix {
+            if (st.state == STATE_ONLINING && now >= st.reinforced_until_unix)
+                || st.self_destruct_at_unix.is_some_and(|at| now >= at)
+                || ext
+                    .unanchoring_until_unix
+                    .get(&id)
+                    .is_some_and(|&until| now >= until)
+            {
                 return true;
             }
             continue;

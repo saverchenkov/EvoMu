@@ -78,8 +78,10 @@ async fn main() -> Result<()> {
                 physics_ticker.tick().await;
                 let elapsed = last_step.elapsed().as_secs().clamp(1, 10);
                 last_step += Duration::from_secs(elapsed);
-                eve_server::sp6_lifecycle::step_active_systems_physics_tick(&physics_ctx, elapsed)
-                    .await;
+                if !physics_ctx.is_clock_paused() {
+                    eve_server::sp6_lifecycle::step_active_systems_physics_tick(&physics_ctx, elapsed)
+                        .await;
+                }
             }
         });
     }

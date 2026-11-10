@@ -1143,9 +1143,17 @@ async fn test_b23_skinr_plex_pricing_and_sec_office_tag_remediation() {
         .expect("ApplyTagsForSecStatus with SDE Clone Soldier Negotiator Tag (33141)");
 
     let notifs = ctx.drain_notifications_for_char(cid as i64);
-    let item_change = notifs.iter().find(|n| n.event == "OnItemChange").expect("3-arg OnItemChange");
-    assert_eq!(item_change.args.len(), 3, "OnItemChange must have 3 positional args");
-    assert_eq!(item_change.args[2].as_i64(), Some(sec_office_station));
+    let item_change = notifs.iter().find(|n| n.event == "OnItemChange").expect("2-arg V24 OnItemChange");
+    assert_eq!(item_change.args.len(), 2, "OnItemChange must have 2 positional args (row, change_dict)");
+    assert_eq!(item_change.args[0].dict_get("itemID").and_then(PyRep::as_i64), Some(700_998));
+    assert_eq!(item_change.args[0].dict_get("locationID").and_then(PyRep::as_i64), Some(6));
+    let PyRep::Dict(ref change_entries) = item_change.args[1] else {
+        panic!("OnItemChange second arg must be change_dict");
+    };
+    assert!(
+        change_entries.iter().any(|(k, v)| k.as_i64() == Some(3) && v.as_i64() == Some(sec_office_station)),
+        "change_dict must record old ixLocationID (3) == sec_office_station"
+    );
 
     ctx.db.with_snapshot(|s| {
         let ch = &s.characters[&(cid as i64)];

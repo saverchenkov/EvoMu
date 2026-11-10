@@ -233,7 +233,9 @@ pub(super) fn handle_wars(
                 if already_at_war(snap, my_corp, defender) {
                     return Err(BridgeRpcError { code: "AlreadyAtWar".into(), message: "These corporations are already at war".into() });
                 }
-                let owned_ok = |s: &&eve_db::UpwellStructureRecord| is_valid_war_hq(ctx, my_corp, s);
+                let owned_ok = |s: &&eve_db::UpwellStructureRecord| {
+                    is_valid_war_hq(ctx, &snap.corporations, my_corp, s)
+                };
                 let hq = match hq_arg {
                     Some(id) => snap.structures.get(&id).filter(owned_ok).map(|s| s.structure_id),
                     // No explicit War HQ: use the attacker's lowest-ID eligible structure.

@@ -1128,7 +1128,7 @@ impl WorldRepository {
 
     pub fn spawn_asteroid(&self, record: AsteroidRecord) {
         self.with_mut_snapshot(|snap| {
-            snap.asteroids.entry(record.asteroid_id).or_insert(record);
+            snap.asteroids.insert(record.asteroid_id, record);
         });
     }
 }

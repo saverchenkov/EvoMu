@@ -929,7 +929,7 @@ async fn test_crimewatch_criminal_wreck_and_jetcan_auto_abandon_all_sec_bands() 
 
     // Advance 901s so `hs_crim`'s Criminal Timer expires: wreck & jetcan created while criminal remain permanently abandoned!
     ctx.advance_virtual_clock(901);
-    assert!(!ctx.crimewatch.read().unwrap().states[&hs_crim].is_criminal(ctx.now_unix()));
+    assert!(!ctx.crimewatch.read().unwrap().states.get(&hs_crim).is_some_and(|st| st.is_criminal(ctx.now_unix())));
     rpc(&ctx, &mut hs_loot_sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(2)]).await.unwrap();
     let hs_inv = ctx.bind_object(&hs_loot_sess, "invbroker", hs_loot_s).unwrap();
     let hs_wrep = rpc(&ctx, &mut hs_loot_sess, "invbroker", Some(hs_inv), "LootAll", &[PyRep::Integer(hs_wreck)]).await.expect("High-sec criminal wreck auto-abandoned");

@@ -237,13 +237,13 @@ fn repository_metadata_clocks_write_depth_and_asteroids() {
         radius: 150.0,
     };
     r1.spawn_asteroid(ast.clone());
-    // Spawning duplicate asteroid_id must not overwrite existing
+    // Spawning duplicate asteroid_id replaces the existing record
     let mut ast_dup = ast.clone();
     ast_dup.quantity = 1;
-    r1.spawn_asteroid(ast_dup);
-    assert_eq!(r1.get_asteroid(777), Some(ast.clone()));
+    r1.spawn_asteroid(ast_dup.clone());
+    assert_eq!(r1.get_asteroid(777), Some(ast_dup.clone()));
     assert_eq!(r1.get_asteroid(888), None);
-    assert_eq!(r1.get_asteroids_in_system(30_000_142), vec![ast]);
+    assert_eq!(r1.get_asteroids_in_system(30_000_142), vec![ast_dup]);
     assert!(r1.get_asteroids_in_system(30_000_144).is_empty());
 }
 

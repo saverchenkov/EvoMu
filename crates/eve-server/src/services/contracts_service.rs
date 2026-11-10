@@ -886,6 +886,9 @@ pub fn handle(
                 let Some(c) = snap.contracts.get(&cid).cloned() else {
                     return Err(rpc_err("ContractNotFound", format!("Contract {cid} does not exist")));
                 };
+                if c.status == "Expired" {
+                    return Err(rpc_err("ContractExpired", format!("Contract {cid} has expired; escrowed items and reward returned to issuer")));
+                }
                 if c.status != "Outstanding" {
                     return Err(rpc_err("InvalidContractState", format!("Contract {cid} is in state '{}', not Outstanding", c.status)));
                 }
@@ -1187,6 +1190,9 @@ pub fn handle(
                 if c.contract_type != "Auction" {
                     return Err(rpc_err("InvalidContractType", format!("Contract {cid} is not an Auction")));
                 }
+                if c.status == "Expired" {
+                    return Err(rpc_err("ContractExpired", format!("Auction contract {cid} has expired")));
+                }
                 if c.status != "Outstanding" {
                     return Err(rpc_err("InvalidContractState", format!("Auction {cid} is no longer Outstanding")));
                 }
@@ -1435,6 +1441,18 @@ pub fn handle(
                     .filter(|&id| id != 0)
                     .unwrap_or(caller_corp);
                 let is_corp_acceptor = effective_corp != 0 && c.acceptor_id == Some(effective_corp) && has_corp_contract_role(snap, char_id, effective_corp, now_unix);
+                if (c.acceptor_id == Some(char_id) || is_corp_acceptor)
+                    && (c.status == "Expired"
+                        || (c.status == "Failed"
+                            && c.contract_type == "Courier"
+                            && c.expiration_unix > 0
+                            && c.expiration_unix <= now_unix))
+                {
+                    return Err(rpc_err(
+                        "ContractExpired",
+                        format!("Courier contract {cid} exceeded its delivery deadline; collateral and reward forfeited"),
+                    ));
+                }
                 if c.status != "InProgress" || (c.acceptor_id != Some(char_id) && !is_corp_acceptor) {
                     return Err(rpc_err("InvalidContractState", format!("Contract {cid} is not InProgress for character {char_id}")));
                 }
@@ -1752,6 +1770,14 @@ pub fn handle(
                 }
                 if method == "FailContract" && c.status == "InProgress" && c.contract_type == "Courier" && (c.acceptor_id == Some(char_id) || is_corp_acceptor) {
                     snap.fail_courier_contract(cid, now_unix);
+                    return Ok(("Failed", c.issuer_id, resolve_delta.finish(snap)));
+                }
+                if method == "FailContract"
+                    && c.status == "Failed"
+                    && c.contract_type == "Courier"
+                    && c.expiration_unix > 0
+                    && c.expiration_unix <= now_unix
+                {
                     return Ok(("Failed", c.issuer_id, resolve_delta.finish(snap)));
                 }
                 Err(rpc_err("InvalidContractState", format!("Contract {cid} in state '{}' cannot be resolved via {method}", c.status)))

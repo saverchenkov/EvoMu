@@ -5483,8 +5483,14 @@ async fn test_plan_z7_z8_test_thresholds_and_final_acceptance_gate() {
         "Gate must run cargo llvm-cov coverage verification"
     );
     assert!(
-        gate_content.contains("tools/client-harness/run_journeys"),
-        "Gate must reference client journey harness"
+        gate_content.contains("client_journeys.json") && gate_content.contains("SUPERVISOR_OWNED"),
+        "Gate must enforce supervisor-owned client_journeys.json policy"
+    );
+    let run_journeys_path = root.join("tools/client-harness/run_journeys");
+    let run_journeys_content = std::fs::read_to_string(&run_journeys_path).expect("read tools/client-harness/run_journeys");
+    assert!(
+        run_journeys_content.contains("client_journeys.json") && run_journeys_content.contains("bridge_verified"),
+        "tools/client-harness/run_journeys must validate client_journeys.json and bridge_verified"
     );
 
     // 2. Verify ledger structure and row categorization completeness
