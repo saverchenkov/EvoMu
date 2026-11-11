@@ -1143,26 +1143,30 @@ pub(crate) fn handle_get_corp_market_info(
     let corp_id = args.first().and_then(|a| a.as_i64()).or(session.corporation_id).unwrap_or(0);
     crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
     let now_unix = ctx.now_unix();
+    let is_npc_corp =
+        (1_000_000..2_000_000).contains(&corp_id) || ctx.sde.npc_corporations.contains_key(&corp_id);
     let rows_res: Result<Vec<Vec<PyRep>>, BridgeRpcError> = ctx.db.with_snapshot(|snap| {
-        let allowed = eve_db::corp_roles::ROLE_DIRECTOR
-            | eve_db::corp_roles::ROLE_ACCOUNTANT
-            | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT
-            | eve_db::corp_roles::ROLE_TRADER;
-        if let Some(corp) = snap.corporations.get(&corp_id) {
-            let (is_ceo, caller_role) =
-                snap.effective_corp_roles_at(corp_id, caller_id, None, session.corp_role, now_unix);
-            if !corp.members.contains(&caller_id)
-                || (!is_ceo && caller_role != u64::MAX && (caller_role & allowed) == 0)
-            {
-                return Err(BridgeRpcError::user_error("CrpAccessDenied"));
-            }
-        } else {
-            let caller_corp = session
-                .corporation_id
-                .or_else(|| snap.characters.get(&caller_id).map(|c| c.corporation_id))
-                .unwrap_or(0);
-            if corp_id <= 0 || corp_id != caller_corp || (session.corp_role & allowed) == 0 {
-                return Err(BridgeRpcError::user_error("CrpAccessDenied"));
+        if !is_npc_corp {
+            let allowed = eve_db::corp_roles::ROLE_DIRECTOR
+                | eve_db::corp_roles::ROLE_ACCOUNTANT
+                | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT
+                | eve_db::corp_roles::ROLE_TRADER;
+            if let Some(corp) = snap.corporations.get(&corp_id) {
+                let (is_ceo, caller_role) =
+                    snap.effective_corp_roles_at(corp_id, caller_id, None, session.corp_role, now_unix);
+                if !corp.members.contains(&caller_id)
+                    || (!is_ceo && caller_role != u64::MAX && (caller_role & allowed) == 0)
+                {
+                    return Err(BridgeRpcError::user_error("CrpAccessDenied"));
+                }
+            } else {
+                let caller_corp = session
+                    .corporation_id
+                    .or_else(|| snap.characters.get(&caller_id).map(|c| c.corporation_id))
+                    .unwrap_or(0);
+                if corp_id <= 0 || corp_id != caller_corp || (session.corp_role & allowed) == 0 {
+                    return Err(BridgeRpcError::user_error("CrpAccessDenied"));
+                }
             }
         }
         #[derive(Default)]
@@ -1178,7 +1182,14 @@ pub(crate) fn handle_get_corp_market_info(
             if !is_corp { continue; }
             let entry = by_type.entry(o.type_id).or_default();
             let price_isk = o.price.to_f64_isk();
-            let issued_ts = meta.map(|m| m.issued_unix as i64).unwrap_or(0);
+            let raw_ts = meta.map(|m| m.issued_unix as i64).unwrap_or(0);
+            let issued_ts = if raw_ts > 0 && raw_ts < 10_000_000_000 {
+                crate::sp6_lifecycle::unix_to_filetime(raw_ts as u64)
+            } else if raw_ts <= 0 {
+                crate::sp6_lifecycle::unix_to_filetime(now_unix)
+            } else {
+                raw_ts
+            };
             if o.is_bid {
                 entry.buy_vol += o.vol_remaining as i64;
                 if entry.buy_price.is_none_or(|bp| price_isk > bp) {

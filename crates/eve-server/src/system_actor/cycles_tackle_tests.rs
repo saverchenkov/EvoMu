@@ -2342,4 +2342,26 @@ fn w4_mutant_killers_baselines_scaled_recompute_dirty_filters_immobilize_and_ove
     assert!(!evs2
         .iter()
         .any(|e| matches!(e, DestinyEvent::SetBallInteractive { .. })));
+
+    // 7. #871: spawn_ball_with_combat_in_actor with is_cloaked=true inserts CombatState before add_ball
+    let _ = bp.drain_all_observer_events();
+    let mut cloaked_cs = CombatState::default();
+    cloaked_cs.is_cloaked = true;
+    spawn_ball_with_combat_in_actor(
+        &mut bp,
+        &mut cycles,
+        &mut base_scram,
+        &mut base_core,
+        &None,
+        &db_opt,
+        None,
+        make_tackle_ball(9104, 587, DVec3::new(150.0, 0.0, 0.0)),
+        cloaked_cs,
+        None,
+    );
+    let obs_evs = bp.drain_observer_events(9103);
+    assert!(
+        !obs_evs.iter().any(|e| matches!(e, DestinyEvent::AddBalls2 { .. })),
+        "cloaked ball spawn via spawn_ball_with_combat_in_actor must not emit AddBalls2 (#871)"
+    );
 }

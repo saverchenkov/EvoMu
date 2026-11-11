@@ -784,12 +784,12 @@ async fn test_home_station_and_jump_clones_parity() {
     let PyRep::List(cands) = cands_rep else {
         panic!("get_home_station_candidates must return List");
     };
-    assert!(cands.contains(&PyRep::Integer(STATION_JITA)));
+    assert!(cands.iter().any(|c| c.dict_get("id") == Some(&PyRep::Integer(STATION_JITA))));
 
     let next_time_initial = rpc(&ctx, &mut s1, "home_station", "get_next_remote_change_time", &[])
         .await
         .expect("home_station.get_next_remote_change_time");
-    assert_eq!(next_time_initial, PyRep::Integer(0));
+    assert_eq!(next_time_initial, PyRep::None);
 
     let future_cooldown = 1_800_000_000i64;
     ctx.db.with_mut_snapshot(|snap| {
@@ -809,7 +809,7 @@ async fn test_home_station_and_jump_clones_parity() {
     let next_time_active = rpc(&ctx, &mut s1, "home_station", "get_next_remote_change_time", &[])
         .await
         .expect("get_next_remote_change_time active");
-    assert_eq!(next_time_active, PyRep::Integer(future_cooldown));
+    assert_eq!(next_time_active, PyRep::Integer(eve_server::sp6_lifecycle::unix_to_filetime(future_cooldown as u64)));
 
     let reset_unauth_err = rpc(&ctx, &mut s1, "home_station", "reset_remote_change_time", &[])
         .await
@@ -827,7 +827,7 @@ async fn test_home_station_and_jump_clones_parity() {
     let next_time_cleared = rpc(&ctx, &mut s1, "home_station", "get_next_remote_change_time", &[])
         .await
         .expect("get_next_remote_change_time cleared");
-    assert_eq!(next_time_cleared, PyRep::Integer(0));
+    assert_eq!(next_time_cleared, PyRep::None);
 
     ctx.drain_notifications_for_char(PILOT1);
     let in_ship_err = rpc(&ctx, &mut s1, "home_station", "self_destruct_clone", &[])
@@ -1079,7 +1079,23 @@ async fn test_home_station_and_jump_clones_parity() {
     let cvb_mod_id = 930_002i64;
     seed_test_item(&ctx, host_ship_id, 28352, PILOT1, SYS_JITA as i64, InventoryFlag::None, 1);
     seed_test_item(&ctx, cvb_mod_id, 23735, PILOT1, host_ship_id, InventoryFlag::HiSlot0, 1);
-    seed_test_item(&ctx, 930_003, 16273, PILOT1, host_ship_id, InventoryFlag::Cargo, 10);
+    seed_test_item(&ctx, 930_003, 16273, PILOT1, host_ship_id, InventoryFlag::Cargo, 500);
+    let _ = ctx
+        .systems
+        .get_or_spawn(SYS_JITA)
+        .spawn_ball(eve_destiny::Ball {
+            id: host_ship_id,
+            type_id: 28352,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 100.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 1_000.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_online_states.insert(cvb_mod_id, true);
         if let Some(c1) = snap.characters.get_mut(&PILOT1) {

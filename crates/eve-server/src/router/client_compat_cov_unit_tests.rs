@@ -103,6 +103,18 @@ fn normalize_structure_jump_xmpp_beyonce_blueprint_and_char_branches() {
     .expect("xmpp");
     assert_eq!(xmpp, PyRep::List(vec![PyRep::String("local_30000142".into())]));
 
+    let xmpp_create = normalize_macho_rpc_reply(
+        "XmppChatMgr",
+        "CreatePlayerOwnedChannel",
+        Ok(PyRep::keyval([
+            ("channelID", PyRep::String("channel:playtest".into())),
+            ("name", PyRep::String("playtest".into())),
+            ("ownerID", PyRep::Integer(90_000_001)),
+        ])),
+    )
+    .expect("xmpp create player channel");
+    assert_eq!(xmpp_create, PyRep::String("channel_playtest".into()));
+
     let siphon =
         normalize_macho_rpc_reply("beyonce", "GetCapacityOfSiphon", Ok(PyRep::Real(0.25)))
             .expect("siphon");
@@ -791,4 +803,29 @@ fn issue_771_and_776_get_members_paged_crowset_and_reprocess_list_compat() {
     };
     assert_eq!(t[0], PyRep::List(vec![PyRep::Integer(1001), PyRep::Integer(1002)]));
     assert_eq!(t[1], PyRep::Dict(vec![(PyRep::Integer(34), PyRep::Integer(200))]));
+
+    // #934: facilityManager.GetFacilityLocations wraps KeyVal locations into industry.job.Location ObjectEx
+    let fac_locs = normalize_macho_rpc_reply(
+        "facilityManager",
+        "GetFacilityLocations",
+        Ok(PyRep::List(vec![PyRep::keyval([
+            ("itemID", PyRep::Integer(60_003_760)),
+            ("ownerID", PyRep::Integer(90_000_001)),
+            ("flagID", PyRep::Integer(4)),
+            ("typeID", PyRep::Integer(1529)),
+        ])])),
+    )
+    .expect("normalize GetFacilityLocations");
+    let PyRep::List(fac_items) = fac_locs else {
+        panic!("expected List from GetFacilityLocations");
+    };
+    assert_eq!(fac_items.len(), 1);
+    let PyRep::ObjectEx { is_type_2: true, header, .. } = &fac_items[0] else {
+        panic!("expected ObjectEx type 2 industry.job.Location");
+    };
+    let PyRep::Tuple(hdr) = header.as_ref() else { panic!("expected Tuple header") };
+    assert_eq!(hdr[0], PyRep::Tuple(vec![PyRep::Token("industry.job.Location".into())]));
+    assert_eq!(hdr[1].dict_get("itemID"), Some(&PyRep::Integer(60_003_760)));
+    assert_eq!(hdr[1].dict_get("canView"), Some(&PyRep::Bool(true)));
+    assert_eq!(hdr[1].dict_get("canTake"), Some(&PyRep::Bool(true)));
 }

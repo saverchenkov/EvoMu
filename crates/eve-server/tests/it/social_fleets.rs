@@ -379,7 +379,7 @@ async fn test_so2_corporation_roles_applications_and_wallet_divisions() {
         .dispatch_rpc(&mut sess1, "corpRegistry", None, "GetApplications", &[PyRep::Integer(corp_id)], &kw, None)
         .await
         .expect("GetApplications");
-    let PyRep::Rowset { rows: app_rows, .. } = &apps_rep else { panic!() };
+    let PyRep::Dict(app_rows) = &apps_rep else { panic!() };
     assert_eq!(app_rows.len(), 1);
 
     let app_id = ctx.db.with_snapshot(|snap| {

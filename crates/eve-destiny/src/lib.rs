@@ -388,6 +388,9 @@ pub struct CombatState {
     /// Remaining seconds of Disruptive Lance warp/jump/dock/tether suppression (`feat:modules.lance-doomsday-directional-geometry`).
     #[serde(default)]
     pub lance_disrupted_remaining_s: f64,
+    /// Previous tick's `is_cloaked` state for grid observer transition diffing (`#871`).
+    #[serde(default)]
+    pub was_cloaked_last_tick: bool,
 }
 
 fn default_recharge_time_ms() -> f64 { 120_000.0 }
@@ -476,6 +479,7 @@ impl Default for CombatState {
             shield_boost_multiplier: 1.0,
             rng_state: default_combat_rng_state(),
             lance_disrupted_remaining_s: 0.0,
+            was_cloaked_last_tick: false,
         }
     }
 }

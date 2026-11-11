@@ -253,10 +253,23 @@ fn daily_maintenance_jobs_asteroids_market_ohlcv_contracts_sov_ess_and_declines(
                 timestamp_unix: dt_base,
             });
         }
+        // #865: Queue a pending FW system capture for daily downtime
+        snap.fw_system_occupations.insert(
+            30_045_307,
+            eve_db::FwSystemOccupationRecord {
+                solar_system_id: 30_045_307,
+                owner_faction_id: 500_001,
+                occupier_faction_id: 500_001,
+                victory_points: 100,
+                victory_points_threshold: 100,
+            },
+        );
+        snap.fw_runtime.pending_downtime_captures.insert(30_045_307, 500_004);
     });
 
     let report = execute_daily_maintenance_jobs(&ctx);
     assert_eq!(report["is1100UtcWindow"], 1);
+    assert_eq!(report["fwSystemsCaptured"], 1);
     assert!(report["replenishedAsteroids"] >= 3);
     assert!(report["rolledUpMarketHistoryPairs"] >= 1);
     assert!(report["expiredContracts"] >= 1);

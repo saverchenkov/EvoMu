@@ -284,12 +284,12 @@ async fn test_character_creation_lifecycle_selection_home_station() {
     let PyRep::List(cand_list) = candidates_rep else {
         panic!("Expected list from get_home_station_candidates");
     };
-    assert!(cand_list.contains(&PyRep::Integer(orig_home_id)));
+    assert!(cand_list.iter().any(|c| c.dict_get("id") == Some(&PyRep::Integer(orig_home_id))));
 
     let next_time_rep = rpc(&ctx, &mut sess, "home_station", "get_next_remote_change_time", vec![])
         .await
         .expect("get_next_remote_change_time");
-    assert_eq!(next_time_rep, PyRep::Integer(0));
+    assert_eq!(next_time_rep, PyRep::None);
 
     // Non-candidate remote station where pilot is not docked must be rejected
     let alt_station_id = if orig_home_id == 60_003_760 {
@@ -324,8 +324,8 @@ async fn test_character_creation_lifecycle_selection_home_station() {
     else {
         panic!("Expected list from get_home_station_candidates");
     };
-    assert!(cand_list_docked.contains(&PyRep::Integer(orig_home_id)));
-    assert!(cand_list_docked.contains(&PyRep::Integer(alt_station_id)));
+    assert!(cand_list_docked.iter().any(|c| c.dict_get("id") == Some(&PyRep::Integer(orig_home_id))));
+    assert!(cand_list_docked.iter().any(|c| c.dict_get("id") == Some(&PyRep::Integer(alt_station_id))));
 
     // Local set_home_station while docked at alt_station_id succeeds without incurring remote cooldown
     let set_local_rep = rpc(
@@ -349,7 +349,7 @@ async fn test_character_creation_lifecycle_selection_home_station() {
         rpc(&ctx, &mut sess, "home_station", "get_next_remote_change_time", vec![])
             .await
             .expect("get_next_remote_change_time after local change"),
-        PyRep::Integer(0)
+        PyRep::None
     );
 
     // Remote set_home_station back to school station (orig_home_id) while docked at alt_station_id
@@ -376,7 +376,7 @@ async fn test_character_creation_lifecycle_selection_home_station() {
         rpc(&ctx, &mut sess, "home_station", "get_next_remote_change_time", vec![])
             .await
             .expect("get_next_remote_change_time after remote change"),
-        PyRep::Integer(expected_cooldown_until)
+        PyRep::Integer(eve_server::sp6_lifecycle::unix_to_filetime(expected_cooldown_until as u64))
     );
 
     // Switch back locally to alt_station_id, then verify a second remote change during the 365d cooldown is rejected

@@ -1081,6 +1081,7 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
     for (sys_id, _dev_indices) in changed_sov_notifications {
         super::sov_services::emit_dev_index_changed(ctx, sys_id);
     }
+    let fw_captured = crate::services::fw_services::process_pending_fw_captures_on_downtime(ctx) as i64;
 
     HashMap::from([
         ("is1100UtcWindow".into(), i64::from(is_1100_utc_window)),
@@ -1100,6 +1101,7 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
         ("npcWrecksCleaned".into(), npc_wrecks_cleaned as i64),
         ("missionNpcsRespawned".into(), mission_npcs_respawned as i64),
         ("wormholeSitesDespawned".into(), wormhole_sites_despawned as i64),
+        ("fwSystemsCaptured".into(), fw_captured),
     ])
 }
 
@@ -1153,10 +1155,8 @@ pub fn maybe_complete_scheduled_downtime_restart(ctx: &ServerContext, now_unix: 
 pub fn run_daily_downtime_and_jobs(ctx: &ServerContext) -> HashMap<String, i64> {
     let disconnected = initiate_cluster_downtime_shutdown(ctx) as i64;
     let mut report = execute_daily_maintenance_jobs(ctx);
-    let fw_captured = crate::services::fw_services::process_pending_fw_captures_on_downtime(ctx) as i64;
     let restart_epoch = complete_cluster_downtime_restart(ctx) as i64;
     report.insert("disconnectedSessions".into(), disconnected);
-    report.insert("fwSystemsCaptured".into(), fw_captured);
     report.insert("clusterRestartEpoch".into(), restart_epoch);
     report
 }

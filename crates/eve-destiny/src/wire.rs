@@ -531,7 +531,7 @@ pub fn encode_damage_state_tuple(cs: Option<&CombatState>, stamp: u32) -> PyRep 
     } else {
         (1.0, 1.0, 1.0)
     };
-    let tau_ms = cs.map(|c| c.shield_recharge_time_ms).unwrap_or(120_000.0);
+    let tau_ms = cs.map(|c| c.shield_recharge_time_ms).unwrap_or(120_000.0) / 5.0;
     damage_state_wire(s, tau_ms, a, st, stamp)
 }
 
@@ -851,7 +851,8 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
                     *shield_ratio,
                     park.and_then(|p| p.combat_states.get(ball_id))
                         .map(|c| c.shield_recharge_time_ms)
-                        .unwrap_or(120_000.0),
+                        .unwrap_or(120_000.0)
+                        / 5.0,
                     *armor_ratio,
                     *structure_ratio,
                     stamp,
@@ -1033,7 +1034,8 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
                     *shield_ratio,
                     park.and_then(|p| p.combat_states.get(ball_id))
                         .map(|c| c.shield_recharge_time_ms)
-                        .unwrap_or(120_000.0),
+                        .unwrap_or(120_000.0)
+                        / 5.0,
                     *armor_ratio,
                     *structure_ratio,
                     stamp,

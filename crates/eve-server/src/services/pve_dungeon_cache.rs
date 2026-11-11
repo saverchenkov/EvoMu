@@ -1054,7 +1054,10 @@ pub async fn handle(
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
             let instances = registry_instances(ctx, sys_id, false);
             let count: usize = instances.values().map(|v| v.len()).sum();
-            Some(Ok(PyRep::Integer(count as i64)))
+            Some(Ok(PyRep::Dict(vec![(
+                PyRep::Integer(sys_id as i64),
+                PyRep::Integer(count as i64),
+            )])))
         }
         "GetOreAnomalyInstances" => {
             seed_system_mining_sites_from_sde(ctx, sys_id).await;
@@ -1065,7 +1068,10 @@ pub async fn handle(
             seed_system_mining_sites_from_sde(ctx, sys_id).await;
             let instances = anomaly_instances(ctx, sys_id, "OreAnomaly");
             let count: usize = instances.values().map(|v| v.len()).sum();
-            Some(Ok(PyRep::Integer(count as i64)))
+            Some(Ok(PyRep::Dict(vec![(
+                PyRep::Integer(sys_id as i64),
+                PyRep::Integer(count as i64),
+            )])))
         }
         "GetOreAnomaliesCountInRange" => {
             let max_jumps = args
@@ -1098,7 +1104,10 @@ pub async fn handle(
             seed_system_ice_belt_from_sde(ctx, sys_id);
             let instances = anomaly_instances(ctx, sys_id, ICE_BELT_ANOMALY_TYPE);
             let count: usize = instances.values().map(|v| v.len()).sum();
-            Some(Ok(PyRep::Integer(count as i64)))
+            Some(Ok(PyRep::Dict(vec![(
+                PyRep::Integer(sys_id as i64),
+                PyRep::Integer(count as i64),
+            )])))
         }
         "GetBulwarkMiningSiteCounts" => {
             let now = ctx.now_unix();

@@ -1323,7 +1323,14 @@ pub fn handle_contacts(
             let next_time = ctx.db.with_snapshot(|snap| {
                 snap.owner_notes.get(&(-10_000_099 - char_id)).and_then(|n| n.note.parse::<i64>().ok()).unwrap_or(0)
             });
-            Some(Ok(PyRep::Integer(next_time)))
+            let rep = if next_time <= 0 {
+                PyRep::None
+            } else if next_time < 10_000_000_000 {
+                PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(next_time as u64))
+            } else {
+                PyRep::Integer(next_time)
+            };
+            Some(Ok(rep))
         }
 
         ("home_station", "reset_remote_change_time") => {

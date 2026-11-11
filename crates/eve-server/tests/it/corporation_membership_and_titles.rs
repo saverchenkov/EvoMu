@@ -278,8 +278,11 @@ async fn test_corp_member_limit_and_applications() {
     let apps_rep = rpc(&ctx, &mut sess_ceo, "corpRegistry", "GetApplications", &[])
         .await
         .expect("GetApplications");
-    let PyRep::Rowset { rows, .. } = apps_rep else { panic!("expected Rowset") };
-    assert!(rows.iter().any(|r| r[0] == PyRep::Integer(app1_id)));
+    let PyRep::Dict(apps_by_char) = apps_rep else { panic!("expected Dict") };
+    assert!(apps_by_char.iter().any(|(k, v)| {
+        k == &PyRep::Integer(applicant_id)
+            && matches!(v, PyRep::List(list) if list.iter().any(|a| a.dict_get("applicationID") == Some(&PyRep::Integer(app1_id))))
+    }));
 
     // 2. Applicant withdraws application
     rpc(

@@ -633,4 +633,36 @@ fn pos_mgr_and_cluster_telemetry_handlers_work() {
     .unwrap()
     .unwrap_err();
     assert_eq!(anchor_non_gantry.code, "StarbaseRemoved");
+
+    // #862: GiveCash to a corporation emits OnAccountChange for both sender and recipient corp wallet
+    let uid = ctx.db.with_mut_snapshot(|snap| {
+        let mut uid = 1;
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = IskCents::from_f64_isk(50_000.0);
+            uid = ch.user_id;
+        }
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.members.insert(char_id);
+        }
+        uid
+    });
+    ctx.db.acquire_online_lock(uid, 1, Some(char_id), true, 1_700_000_000).unwrap();
+    ctx.drain_notifications_for_char(char_id);
+    handle(
+        &ctx,
+        &mut sess,
+        "account",
+        "GiveCash",
+        &[PyRep::Integer(corp_id), PyRep::Real(1_250.0), PyRep::String("Donation".into())],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap();
+    let notes = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notes.iter().any(|n| n.event == "OnAccountChange"
+            && n.args.get(1) == Some(&PyRep::Integer(corp_id))
+            && n.args.get(2).and_then(|v| v.as_f64()).is_some_and(|b| b > 0.0)),
+        "expected OnAccountChange notification for recipient corporation wallet (#862)"
+    );
 }
