@@ -454,4 +454,182 @@ async fn flush_peer_observer_updates_broadcasts_immediately_and_preserves_pendin
     assert!(join_evs
         .iter()
         .any(|e| matches!(e, DestinyEvent::WarpTo { ball_id: 9_101, .. })));
+
+    // flush_peer_observer_updates(None) flushes all ready observers without exclusions
+    h.set_movement_mode(acting_ship, MovementMode::Stop)
+        .await
+        .unwrap();
+    let flushed_all = h.flush_peer_observer_updates(None).await.unwrap();
+    assert!(flushed_all >= 2);
+}
+
+#[tokio::test]
+async fn test_system_actor_persisted_asteroids_damage_nanite_partial_ecm_and_commands() {
+    let sde = Arc::new(SdeRegistry::with_canonical_seed());
+    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    // Seed first SDE belt asteroid ID for Perimeter (30_000_144 -> 750_000_000) so get_or_spawn hydrates belts
+    db.with_mut_snapshot(|snap| {
+        snap.asteroids.insert(
+            750_000_000,
+            eve_db::AsteroidRecord {
+                asteroid_id: 750_000_000,
+                solar_system_id: 30_000_144,
+                belt_id: 40_009_077,
+                type_id: 1230,
+                quantity: 500,
+                initial_quantity: 1_000,
+                position: (0.0, 0.0, 0.0),
+                radius: 100.0,
+            },
+        );
+    });
+    let reg = SystemRegistry::with_sde_and_db(sde, Arc::clone(&db));
+    let h = reg.get_or_spawn(30_000_144);
+    // Second get_or_spawn hits cached handle
+    let h2 = reg.get_or_spawn(30_000_144);
+    assert_eq!(h2.solar_system_id, 30_000_144);
+
+    // Spawn & re-spawn ball via SpawnBall preserving existing slim_meta
+    h.spawn_ball(make_ball(750_001, 587, DVec3::new(100.0, 0.0, 0.0)))
+        .await
+        .unwrap();
+    h.spawn_ball(make_ball(750_001, 587, DVec3::new(200.0, 0.0, 0.0)))
+        .await
+        .unwrap();
+    assert!(h.set_ball_max_velocity(750_001, 420.0).await.unwrap());
+    assert_eq!(reg.find_ball_position_sync(999_888_777), None);
+
+    // Spawn combat ship 750_002 with active module cycle, apply non-lethal then lethal damage
+    h.spawn_ball_with_combat(
+        make_ball(750_002, 587, DVec3::new(1_000.0, 0.0, 0.0)),
+        CombatState {
+            shield_hp: 10.0,
+            max_shield_hp: 10.0,
+            armor_hp: 10.0,
+            max_armor_hp: 10.0,
+            structure_hp: 10.0,
+            max_structure_hp: 10.0,
+            ..CombatState::default()
+        },
+    )
+    .await
+    .unwrap();
+    h.add_module_cycle(ActiveModuleCycle {
+        ship_id: 750_002,
+        module_id: 8801,
+        duration_s: 10.0,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    // StopNonWarpModuleCycles keeps active_module_ships accurate
+    h.add_module_cycle(ActiveModuleCycle {
+        ship_id: 750_002,
+        module_id: 8802,
+        grants_interdiction_nullification: true,
+        duration_s: 10.0,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    h.stop_non_warp_module_cycles(750_002).await.unwrap();
+    assert!(!h.has_module_cycle(750_002, 8801).await);
+    assert!(h.has_module_cycle(750_002, 8802).await);
+
+    // Partial nanite repair stop (elapsed_s > 0 -> partial paste refund branch)
+    h.start_nanite_repair(ActiveNaniteRepair {
+        char_id: 90_000_001,
+        ship_id: 750_002,
+        module_id: 8803,
+        initial_damage_hp: 20.0,
+        paste_total_needed: 4,
+        paste_consumed_so_far: 4,
+        duration_s: 10.0,
+        elapsed_s: 5.0,
+    })
+    .await
+    .unwrap();
+    let (rem_dmg, refund) = h.stop_nanite_repair(750_002, 8803).await.unwrap().unwrap();
+    assert!((rem_dmg - 10.0).abs() < 1e-6);
+    assert_eq!(refund, 2);
+
+    // ApplyEcmJam on non-immune ball + ApplyEcmBurst + FastForwardClock
+    assert!(h.apply_ecm_jam(750_002, 5.0).await.unwrap());
+    let _ = h.apply_ecm_burst(750_002, 20_000.0, [20.0; 4], 5.0, 0.1).await.unwrap();
+    h.fast_forward_clock(750_002, 2).await.unwrap();
+
+    // ApplyDamage: missing ball returns None; lethal damage destroys 750_002 and persists HP
+    assert!(h.apply_damage(999_888_777, eve_destiny::DamageVector { em: 10.0, ..Default::default() }).await.unwrap().is_none());
+    let dmg_res = h
+        .apply_damage(
+            750_002,
+            eve_destiny::DamageVector {
+                em: 100.0,
+                thermal: 100.0,
+                kinetic: 100.0,
+                explosive: 100.0,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(dmg_res.1, "lethal damage should destroy 750_002");
+
+    // Duplicate spawn_asteroid early-return path
+    let ast_id = 750_777_i64;
+    let ast_state = crate::system_actor::AsteroidState {
+        asteroid_id: ast_id,
+        belt_id: 1,
+        type_id: 1230,
+        initial_units: 100,
+        remaining_units: 100,
+        unit_volume: 0.1,
+        depleted: false,
+        respawn_at_tick: None,
+    };
+    assert_eq!(h.spawn_asteroid(ast_state.clone(), make_ball(ast_id, 1230, DVec3::new(100.0, 0.0, 0.0))).await.unwrap(), ast_id);
+    assert_eq!(h.spawn_asteroid(ast_state, make_ball(ast_id, 1230, DVec3::new(100.0, 0.0, 0.0))).await.unwrap(), ast_id);
+
+    // Stop while ship has active module cycle
+    h.add_module_cycle(ActiveModuleCycle {
+        ship_id: 750_001,
+        module_id: 8890,
+        duration_s: 10.0,
+        ..Default::default()
+    }).await.unwrap();
+    assert!(h.set_movement_mode(750_001, MovementMode::Stop).await.is_ok());
+
+    // StepManual with target_lock_completed_hook resolving character via db + lethal module cycle
+    let actor_lock_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let actor_lock_hits_c = Arc::clone(&actor_lock_hits);
+    reg.set_target_lock_completed_hook(Arc::new(move |_cid, _tid| {
+        actor_lock_hits_c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }));
+    db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&90_000_001) {
+            c.active_ship_id = 750_001;
+        }
+    });
+    h.spawn_ball_with_combat(make_ball(750_003, 587, DVec3::new(150.0, 0.0, 0.0)), eve_destiny::CombatState {
+        shield_hp: 0.0, max_shield_hp: 10.0, armor_hp: 0.0, max_armor_hp: 10.0, structure_hp: 1.0, max_structure_hp: 10.0, ..Default::default()
+    }).await.unwrap();
+    h.add_target_lock(750_001, eve_destiny::TargetLock {
+        target_id: 750_003,
+        lock_time_ms: 500.0,
+        remaining_lock_ms: 500.0,
+        locked: false,
+        max_range_m: None,
+    }).await.unwrap();
+    h.add_module_cycle(ActiveModuleCycle {
+        ship_id: 750_001,
+        owner_char_id: Some(90_000_001),
+        module_id: 8891,
+        target_id: Some(750_003),
+        damage_vector: eve_destiny::DamageVector { em: 50.0, ..Default::default() },
+        duration_s: 0.5,
+        ..Default::default()
+    }).await.unwrap();
+    let _ = h.step_manual(1.0).await.unwrap();
+    assert!(actor_lock_hits.load(std::sync::atomic::Ordering::SeqCst) >= 1);
 }

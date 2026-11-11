@@ -297,9 +297,9 @@ pub async fn step_missiles_and_breachers(
                         10_000.0
                     };
                     let tick_dps = breacher_pod_tick_damage(
-                        total_target_hp,
-                        mstate.breacher_pct_cap,
                         mstate.breacher_flat_cap,
+                        mstate.breacher_pct_cap,
+                        total_target_hp,
                     );
                     with_mut_combat_runtime(ctx, |rt| {
                         rt.active_breacher_dots.insert(

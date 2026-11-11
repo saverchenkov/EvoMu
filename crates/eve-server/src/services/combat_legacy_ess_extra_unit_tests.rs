@@ -673,3 +673,348 @@ async fn issue_542_dogma_activate_safety_tether_and_entropic_target_switch_spool
     assert_eq!(ctx.weapon_cycle_state.read().unwrap()[&ship_id].1, 1);
     assert_eq!(ctx.weapon_cycle_state.read().unwrap()[&ship_id].2, Some(vic_ship_b));
 }
+
+#[tokio::test]
+async fn mutant_killers_wspace_bounty_nonempty_wreck_mission_vorton_arc_convoy_and_invuln() {
+    let (mut ctx, mut session, char_id, ship_id, high_sys) = make_fighter_ctx_and_session();
+    let wh_sys = 31_000_005_u32; // Wormhole space: sys_sec <= 0.0, sys_id >= 31_000_000 (NOT K-space nullsec!)
+    let mut kw = HashMap::new();
+
+    // Register Vorton Projector (4060), compatible Vorton ammo (54_701, group 4061), and NPC target (10_001, bounty = 100_000 ISK)
+    {
+        let sde_mut = Arc::make_mut(&mut ctx.sde);
+        if let Some(ship_t) = sde_mut.types.get_mut(&23_915) {
+            ship_t.default_attributes.insert(14, 8.0);
+            ship_t.default_attributes.insert(101, 8.0);
+            ship_t.default_attributes.insert(102, 8.0);
+            ship_t.default_attributes.insert(11, 50_000.0);
+            ship_t.default_attributes.insert(48, 50_000.0);
+        } else {
+            sde_mut.types.insert(
+                23_915,
+                make_fighter_type(
+                    23_915,
+                    27,
+                    6,
+                    100_000.0,
+                    vec![(14, 8.0), (101, 8.0), (102, 8.0), (11, 50_000.0), (48, 50_000.0)],
+                ),
+            );
+        }
+        let mut gun = make_fighter_type(
+            54_700,
+            4060,
+            7,
+            10.0,
+            vec![(64, 5.0), (54, 25_000.0), (51, 2_000.0), (128, 1.0), (604, 4061.0), (2104, 3.0)],
+        );
+        gun.effect_ids = vec![12];
+        gun.default_attributes.insert(1353, 0.40);
+        sde_mut.types.insert(54_700, gun);
+        sde_mut.types.insert(
+            54_701,
+            make_fighter_type(
+                54_701,
+                4061,
+                8,
+                0.1,
+                vec![(128, 1.0), (114, 100.0), (653, 200.0), (654, 40.0)],
+            ),
+        );
+        sde_mut
+            .types
+            .insert(10_001, make_fighter_type(10_001, 550, 11, 5_000.0, vec![(481, 100_000.0)]));
+        sde_mut
+            .types
+            .insert(670, make_fighter_type(670, 29, 6, 100.0, vec![]));
+    }
+
+    // 1. step_dynamic_bounty_multiplier exact math: ratting decay (floor 0.50), pvp boost (ceil 2.00), equilibrium drift toward 1.35
+    let m_rat = step_dynamic_bounty_multiplier(&ctx, wh_sys, 50_000_000.0, 0.0);
+    assert!((m_rat - 1.25).abs() < 1e-6); // 1.35 - 0.10, no eq_drift because ratting != 0
+    let m_pvp = step_dynamic_bounty_multiplier(&ctx, wh_sys, 0.0, 25_000_000.0);
+    assert!((m_pvp - 1.40).abs() < 1e-6); // 1.25 + 0.15, no eq_drift because pvp != 0
+    let m_eq = step_dynamic_bounty_multiplier(&ctx, wh_sys, 0.0, 0.0);
+    assert!((m_eq - (1.40 + (1.35 - 1.40) * 0.05)).abs() < 1e-6);
+    assert!((step_dynamic_bounty_multiplier(&ctx, wh_sys, 10_000_000_000.0, 0.0) - 0.50).abs() < 1e-6);
+    assert!((step_dynamic_bounty_multiplier(&ctx, wh_sys, 0.0, 10_000_000_000.0) - 2.00).abs() < 1e-6);
+
+    // Fit two Vorton guns: slot 27 (unloaded!) + slot 28 (loaded with ammo) so kwargs flagID / moduleID matters
+    let mod2_id = 820_002_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            make_fighter_item(ship_id, 23_915, char_id, wh_sys as i64, InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            820_001,
+            make_fighter_item(820_001, 54_700, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        snap.items.insert(
+            mod2_id,
+            make_fighter_item(mod2_id, 54_700, char_id, ship_id, InventoryFlag::HiSlot1, 1),
+        );
+        snap.items.insert(
+            820_003,
+            make_fighter_item(820_003, 54_701, char_id, ship_id, InventoryFlag::HiSlot1, 50),
+        );
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.solar_system_id = wh_sys;
+        ch.station_id = None;
+        ch.balance = IskCents(0);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    session.solar_system_id = Some(wh_sys);
+
+    // 2. W-space NPC kill with primary mission NPC + Vorton arc mission NPC + non-empty wreck preservation
+    ctx.db.with_mut_snapshot(|snap| {
+        // Seed 1 non-empty wreck with smallest item_id (should NEVER be evicted!) + 64 empty wrecks
+        snap.items.insert(
+            859_999,
+            make_fighter_item(859_999, 26_557, char_id, wh_sys as i64, InventoryFlag::Cargo, 1),
+        );
+        snap.items.insert(
+            859_998,
+            make_fighter_item(859_998, 54_701, char_id, 859_999, InventoryFlag::Cargo, 5),
+        );
+        for i in 0..64 {
+            snap.items.insert(
+                860_000 + i,
+                make_fighter_item(860_000 + i, 26_557, char_id, wh_sys as i64, InventoryFlag::Cargo, 1),
+            );
+        }
+        snap.active_missions.insert(
+            (char_id, 3_018_418),
+            ActiveMissionRecord {
+                character_id: char_id,
+                agent_id: 3_018_418,
+                mission_id: 10,
+                state: "Accepted".into(),
+                solar_system_id: wh_sys,
+                current_room_id: 0,
+                npcs_remaining: 3,
+                spawned_npc_ball_ids: vec![925_001, 925_002, 925_003],
+                bookmark_id: None,
+            },
+        );
+        // Other-system mission with matching ball ID must NOT decrement
+        snap.active_missions.insert(
+            (char_id, 3_018_419),
+            ActiveMissionRecord {
+                character_id: char_id,
+                agent_id: 3_018_419,
+                mission_id: 11,
+                state: "Accepted".into(),
+                solar_system_id: high_sys,
+                current_room_id: 0,
+                npcs_remaining: 1,
+                spawned_npc_ball_ids: vec![925_001],
+                bookmark_id: None,
+            },
+        );
+    });
+    spawn_combat_ball(&ctx, wh_sys, ship_id, 23_915, DVec3::ZERO, 2_000.0).await;
+    spawn_combat_ball(&ctx, wh_sys, 925_001, 10_001, DVec3::new(1_000.0, 0.0, 0.0), 10.0).await;
+    spawn_combat_ball(&ctx, wh_sys, 925_002, 10_001, DVec3::new(2_000.0, 0.0, 0.0), 10.0).await;
+
+    // Request non-existent flagID (29) -> NoWeaponFitted; request empty slot 27 (no ammo in HiSlot0) -> NoAmmoLoaded; then slot 28 via kwargs -> hits & destroys BOTH primary & arc NPC
+    kw.insert("flagID".into(), PyRep::Integer(29));
+    assert_eq!(
+        handle_legacy_and_ess(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(925_001)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "NoWeaponFitted"
+    );
+    kw.insert("flagID".into(), PyRep::Integer(27));
+    assert_eq!(
+        handle_legacy_and_ess(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(925_001)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "NoAmmoLoaded"
+    );
+    kw.insert("flagID".into(), PyRep::Integer(28));
+    let wh_kill = handle_legacy_and_ess(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(925_001)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(wh_kill.dict_get("destroyed"), Some(&PyRep::Bool(true)));
+    // W-space pays 100% of post-tax 90_000 ISK directly to pilot & ZERO to ESS banks!
+    let payout = wh_kill.dict_get("bountyPayoutISK").unwrap().as_f64().unwrap();
+    assert!((payout - 90_000.0).abs() < 1e-6);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&char_id].balance, IskCents::from_f64_isk(90_000.0));
+        let st = snap.system_states.get(&wh_sys).unwrap();
+        assert_eq!(st.ess_main_bank, IskCents(0));
+        assert_eq!(st.ess_reserve_bank, IskCents(0));
+        // Non-empty wreck 859_999 preserved while oldest empty wreck 860_000 evicted!
+        assert!(snap.items.contains_key(&859_999));
+        assert!(!snap.items.contains_key(&860_000));
+        // Primary AND arc NPCs decremented npcs_remaining 3 -> 1 in wh_sys; high_sys mission untouched
+        assert_eq!(snap.active_missions[&(char_id, 3_018_418)].npcs_remaining, 1);
+        assert_eq!(snap.active_missions[&(char_id, 3_018_419)].npcs_remaining, 1);
+    });
+
+    // 3. Target with radius == 0.0 fallback target_sig = 35.0 (non-fatal hit)
+    ctx.weapon_cycle_state.write().unwrap().clear();
+    let zero_rad_npc = 925_004_i64;
+    let wh_h = ctx.systems.get_or_spawn(wh_sys);
+    let _ = wh_h
+        .spawn_ball_with_combat(
+            Ball {
+                id: zero_rad_npc,
+                type_id: 10_001,
+                position: DVec3::new(3_000.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 100.0,
+                inertia: 1.0,
+                mass: 500_000.0,
+                radius: 0.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                structure_hp: 50_000.0,
+                max_structure_hp: 50_000.0,
+                ..CombatState::default()
+            },
+        )
+        .await;
+    let non_fatal = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(zero_rad_npc)])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(non_fatal.dict_get("destroyed"), Some(&PyRep::Bool(false)));
+
+    // 4. PvP location-change invulnerability & existing_in_space_cap reuse on PvP kill
+    ctx.weapon_cycle_state.write().unwrap().clear();
+    let vic_char = 90_000_009_i64;
+    let vic_ship = 200_000_099_i64;
+    let vic_existing_pod = 200_000_199_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut vc = snap.characters[&char_id].clone();
+        vc.character_id = vic_char;
+        vc.corporation_id = 2_000_009;
+        vc.active_ship_id = vic_ship;
+        vc.solar_system_id = wh_sys;
+        snap.characters.insert(vic_char, vc);
+        snap.items.insert(
+            vic_ship,
+            make_fighter_item(vic_ship, 23_915, vic_char, wh_sys as i64, InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            vic_existing_pod,
+            make_fighter_item(vic_existing_pod, 670, vic_char, wh_sys as i64, InventoryFlag::None, 1),
+        );
+    });
+    spawn_combat_ball(&ctx, wh_sys, vic_ship, 23_915, DVec3::new(1_500.0, 0.0, 0.0), 10.0).await;
+
+    ctx.location_change_invuln
+        .lock()
+        .unwrap()
+        .insert(vic_char, ctx.now_unix() + 60);
+    assert_eq!(
+        call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(vic_ship)])
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "TargetInvulnerable"
+    );
+    ctx.location_change_invuln.lock().unwrap().remove(&vic_char);
+
+    let pvp_ok = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(vic_ship)])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pvp_ok.dict_get("destroyed"), Some(&PyRep::Bool(true)));
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.characters[&vic_char].active_ship_id),
+        vic_existing_pod
+    );
+
+    // 5. Living-world Convoy interdiction kill in high_sys via dogmaIM.Activate
+    ctx.weapon_cycle_state.write().unwrap().clear();
+    let convoy_id = ctx.living_world.ensure_system_hauler_convoy(high_sys, &ctx.sde);
+    assert_eq!(
+        ctx.living_world
+            .materialize_system_lod2(high_sys, &ctx.systems, &ctx.sde)
+            .await,
+        1
+    );
+    let high_h = ctx.systems.get_or_spawn(high_sys);
+    let (_, convoy_ball) = high_h.get_ball_snapshot(convoy_id).await.unwrap().unwrap();
+    let _ = high_h.try_update_combat_state(convoy_id, |cs| {
+        cs.shield_hp = 0.0;
+        cs.armor_hp = 0.0;
+        cs.structure_hp = 5.0;
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&ship_id).unwrap().location_id = high_sys as i64;
+        snap.characters.get_mut(&char_id).unwrap().solar_system_id = high_sys;
+    });
+    session.solar_system_id = Some(high_sys);
+    spawn_combat_ball(
+        &ctx,
+        high_sys,
+        ship_id,
+        23_915,
+        convoy_ball.position + DVec3::new(1_000.0, 0.0, 0.0),
+        2_000.0,
+    )
+    .await;
+    let convoy_kill = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(convoy_id)])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(convoy_kill.dict_get("convoyID"), Some(&PyRep::Integer(convoy_id)));
+    assert_eq!(convoy_kill.dict_get("destroyed"), Some(&PyRep::Bool(true)));
+    let wreck_item_id = convoy_kill.dict_get("wreckItemID").unwrap().as_i64().unwrap();
+    assert!(high_h.get_ball_snapshot(wreck_item_id).await.unwrap().is_some());
+    assert!(convoy_kill.dict_get("newDestinationAskISK").unwrap().as_f64().unwrap() > 0.0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handle_legacy_and_ess_dispatch_returns_non_default_and_none_for_unknown() {
+    let (ctx, mut session, _char_id, _ship_id, _sys_id) = make_fighter_ctx_and_session();
+
+    // rpc-lint: allow testing Phase 4 deleted dogmaIM.FireWeapon rejection
+    let fw_err = handle_legacy_and_ess(&ctx, &mut session, "dogmaIM", "FireWeapon", &[], &HashMap::new())
+        .await
+        .expect("FireWeapon handled")
+        .expect_err("FireWeapon deleted error");
+    assert_eq!(fw_err.code, "UnimplementedRPC");
+
+    // rpc-lint: allow testing Phase 4 deleted CmdAttackTarget rejection
+    let atk_err = handle_legacy_and_ess(&ctx, &mut session, "beyonce", "CmdAttackTarget", &[], &HashMap::new())
+        .await
+        .expect("CmdAttackTarget handled")
+        .expect_err("CmdAttackTarget deleted error");
+    assert_eq!(atk_err.code, "UnimplementedRPC");
+
+    let ess_res = handle_legacy_and_ess(
+        &ctx,
+        &mut session,
+        "essMgr",
+        "AttemptLinkToMainBank",
+        &[PyRep::Integer(999_001)],
+        &HashMap::new(),
+    )
+    .await
+    .expect("essMgr handled");
+    assert!(ess_res.is_err());
+
+    assert!(handle_legacy_and_ess(&ctx, &mut session, "account", "GetCashBalance", &[], &HashMap::new())
+        .await
+        .is_none());
+}

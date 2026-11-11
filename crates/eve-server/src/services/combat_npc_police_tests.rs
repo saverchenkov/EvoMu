@@ -162,3 +162,7 @@ async fn outlaw_docking_contraband_confiscation_police_spawns_and_corruption_sup
     assert!(!is_outlaw_ship_docking_refused(&ctx, sys_id, char_id, ship_id));
     assert!(step_empire_navy_patrols(&ctx, sys_id).await.is_empty());
 }
+
+#[cfg(test)]
+#[path = "combat_npc_police_extra_unit_tests.rs"]
+mod combat_npc_police_extra_unit_tests;

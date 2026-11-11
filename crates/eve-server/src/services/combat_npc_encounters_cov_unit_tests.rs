@@ -236,8 +236,9 @@ fn bounty_tick_thresholds_npc_vs_player_corp_wspace_and_nullsec_dbs_ess_splits()
     }
     ctx.sde = Arc::new(sde);
 
-    // 1. Empty / non-positive pending tick returns (0, 0, 0)
-    assert_eq!(flush_npc_bounty_tick(&ctx, hs_sys, char_id, 0.0), (0.0, 0.0, 0.0));
+    // 1. Empty / non-positive pending tick returns zeroed payout
+    let empty_tick = flush_npc_bounty_tick(&ctx, hs_sys, char_id, 0.0);
+    assert_eq!((empty_tick.pilot_isk, empty_tick.main_ess_isk, empty_tick.reserve_ess_isk), (0.0, 0.0, 0.0));
 
     // 2. Overdue boundary: 1,199s not flushed; 1,200s flushed at 0% tax (< 100k with default threshold)
     with_mut_combat_runtime(&ctx, |rt| {
@@ -254,21 +255,21 @@ fn bounty_tick_thresholds_npc_vs_player_corp_wspace_and_nullsec_dbs_ess_splits()
     with_mut_combat_runtime(&ctx, |rt| {
         rt.pending_bounty_ticks.insert((hs_sys, char_id), 50_000.0);
     });
-    let (p_small_taxed, m0, r0) = flush_npc_bounty_tick(&ctx, hs_sys, char_id, 0.20);
-    assert!((p_small_taxed - 40_000.0).abs() < 1e-2 && m0 == 0.0 && r0 == 0.0);
+    let small_taxed = flush_npc_bounty_tick(&ctx, hs_sys, char_id, 0.20);
+    assert!((small_taxed.pilot_isk - 40_000.0).abs() < 1e-2 && small_taxed.main_ess_isk == 0.0 && small_taxed.reserve_ess_isk == 0.0);
 
     with_mut_combat_runtime(&ctx, |rt| {
         rt.pending_bounty_ticks.insert((hs_sys, char_id), 200_000.0);
     });
-    let (p_npc_tax, _, _) = flush_npc_bounty_tick(&ctx, hs_sys, char_id, 0.0);
+    let p_npc_tax = flush_npc_bounty_tick(&ctx, hs_sys, char_id, 0.0).pilot_isk;
     assert!((p_npc_tax - 178_000.0).abs() < 1e-2);
 
     // 4. Wormhole system (>= 31_000_000, sec -1.0) is NOT K-space nullsec -> dbs_mult = 1.0, main_ess = 0.0!
     with_mut_combat_runtime(&ctx, |rt| {
         rt.pending_bounty_ticks.insert((wh_sys, char_id), 200_000.0);
     });
-    let (_, wh_ess, wh_res) = flush_npc_bounty_tick(&ctx, wh_sys, char_id, 0.0);
-    assert_eq!((wh_ess, wh_res), (0.0, 0.0));
+    let wh_payout = flush_npc_bounty_tick(&ctx, wh_sys, char_id, 0.0);
+    assert_eq!((wh_payout.main_ess_isk, wh_payout.reserve_ess_isk), (0.0, 0.0));
 
     // 5. K-space nullsec with player corp: first with dbs_multiplier = 0.0 (falls back to 1.35x),
     //    then with custom dbs_multiplier = 1.25x, crediting master_wallet, division 1, and ESS main/reserve banks!
@@ -298,8 +299,8 @@ fn bounty_tick_thresholds_npc_vs_player_corp_wspace_and_nullsec_dbs_ess_splits()
     with_mut_combat_runtime(&ctx, |rt| {
         rt.pending_bounty_ticks.insert((null_sys, char_id), 1_000_000.0);
     });
-    let (null_pilot, null_main, null_res) = flush_npc_bounty_tick(&ctx, null_sys, char_id, 0.0);
-    assert!(null_pilot > 0.0 && null_main > 0.0 && null_res >= 0.0);
+    let null_payout = flush_npc_bounty_tick(&ctx, null_sys, char_id, 0.0);
+    assert!(null_payout.pilot_isk > 0.0 && null_payout.main_ess_isk > 0.0 && null_payout.reserve_ess_isk >= 0.0);
 
     ctx.db.with_mut_snapshot(|snap| {
         let c = &snap.corporations[&pcorp];
@@ -311,7 +312,7 @@ fn bounty_tick_thresholds_npc_vs_player_corp_wspace_and_nullsec_dbs_ess_splits()
     with_mut_combat_runtime(&ctx, |rt| {
         rt.pending_bounty_ticks.insert((null_sys, char_id), 500_000.0);
     });
-    let (null_pilot2, _, _) = flush_npc_bounty_tick(&ctx, null_sys, char_id, 0.11);
+    let null_pilot2 = flush_npc_bounty_tick(&ctx, null_sys, char_id, 0.11).pilot_isk;
     assert!(null_pilot2 > 0.0);
 }
 

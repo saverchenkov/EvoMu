@@ -370,9 +370,13 @@ async fn missile_launch_breacher_dot_expiration_and_self_destruct_step() {
     assert_eq!(py_val(&res_br, "isBreacherPod").and_then(|v| v.as_bool()), Some(true));
     assert!(py_val(&res_br, "breacherTickDPS").and_then(|v| v.as_f64()).unwrap() > 0.0);
 
-    let sh_before_dot = sys_handle.get_combat_state(target_id).await.unwrap().unwrap().shield_hp;
+    let cs_before_dot = sys_handle.get_combat_state(target_id).await.unwrap().unwrap();
+    let hp_before_dot = cs_before_dot.shield_hp + cs_before_dot.armor_hp + cs_before_dot.structure_hp;
     let _ = step_combat_system(&ctx, sys_id, 2.0).await;
-    assert!(sys_handle.get_combat_state(target_id).await.unwrap().unwrap().shield_hp < sh_before_dot);
+    let cs_after_dot = sys_handle.get_combat_state(target_id).await.unwrap().unwrap();
+    assert!(
+        cs_after_dot.shield_hp + cs_after_dot.armor_hp + cs_after_dot.structure_hp < hp_before_dot
+    );
 
     // Exhaust target HP via multi-second DoT ticks when target is on low structure HP
     if let Ok(Some(mut cs)) = sys_handle.get_combat_state(target_id).await {
@@ -427,4 +431,86 @@ async fn missile_launch_breacher_dot_expiration_and_self_destruct_step() {
     });
     let _ = step_missiles_and_breachers(&ctx, sys_id, 1.0).await;
     assert!(with_combat_runtime(&ctx, |rt| !rt.self_destruct_countdowns.contains_key(&sd_ship)));
+}
+
+#[tokio::test]
+async fn cleanup_destroyed_non_ship_ball_fails_courier_contracts_and_removes_nested_items() {
+    let (ctx, _session, char_id, _ship_id, sys_id) = make_missile_and_aoe_ctx();
+    let jetcan_id = 300_000_701i64;
+    let wrap_id = 300_000_702i64;
+    let cargo_id = 300_000_703i64;
+    let sibling_id = 300_000_704i64;
+    let active_cid = 880_001i64;
+    let outstanding_cid = 880_002i64;
+    let can_pos = DVec3::new(1_500.0, 250.0, -100.0);
+
+    spawn_missile_target_ball(&ctx, sys_id, jetcan_id, 26_470, can_pos, 0.0, 0.0, 50.0, 0.0).await;
+
+    let balance_before = ctx.db.with_mut_snapshot(|snap| {
+        let bal_before = snap.characters.get(&char_id).expect("issuer char").balance;
+        snap.items.insert(
+            jetcan_id,
+            make_fighter_item(jetcan_id, 26_470, char_id, sys_id as i64, InventoryFlag::None, 1),
+        );
+        snap.item_positions.insert(jetcan_id, can_pos.to_array());
+        snap.items.insert(
+            wrap_id,
+            make_fighter_item(wrap_id, 3468, char_id, jetcan_id, InventoryFlag::Cargo, 1),
+        );
+        snap.items.insert(
+            cargo_id,
+            make_fighter_item(cargo_id, 587, char_id, wrap_id, InventoryFlag::Cargo, 1),
+        );
+        snap.item_positions.insert(cargo_id, can_pos.to_array());
+        snap.items.insert(
+            sibling_id,
+            make_fighter_item(sibling_id, 209, char_id, jetcan_id, InventoryFlag::Cargo, 50),
+        );
+        snap.contracts.insert(
+            active_cid,
+            eve_db::types::ContractRecord {
+                contract_id: active_cid,
+                issuer_id: char_id,
+                acceptor_id: Some(char_id + 1),
+                contract_type: "Courier".into(),
+                status: "InProgress".into(),
+                start_station_id: 60_003_760,
+                end_station_id: 60_003_761,
+                reward: eve_db::types::IskCents(5_000),
+                collateral: eve_db::types::IskCents(25_000),
+                item_ids: vec![cargo_id],
+                ..Default::default()
+            },
+        );
+        snap.contracts.insert(
+            outstanding_cid,
+            eve_db::types::ContractRecord {
+                contract_id: outstanding_cid,
+                issuer_id: char_id,
+                contract_type: "Courier".into(),
+                status: "Outstanding".into(),
+                start_station_id: 60_003_760,
+                end_station_id: 60_003_761,
+                item_ids: vec![sibling_id],
+                ..Default::default()
+            },
+        );
+        bal_before
+    });
+
+    cleanup_destroyed_non_ship_ball(&ctx, sys_id, jetcan_id).await;
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    assert!(sys_handle.get_ball_snapshot(jetcan_id).await.unwrap().is_none());
+
+    ctx.db.with_snapshot(|snap| {
+        for removed_id in [jetcan_id, wrap_id, cargo_id, sibling_id] {
+            assert!(!snap.items.contains_key(&removed_id), "item {removed_id} must be deleted");
+            assert!(!snap.item_positions.contains_key(&removed_id), "pos {removed_id} must be deleted");
+        }
+        assert_eq!(snap.contracts.get(&active_cid).unwrap().status, "Failed");
+        assert_eq!(snap.contracts.get(&outstanding_cid).unwrap().status, "Outstanding");
+        let bal_after = snap.characters.get(&char_id).unwrap().balance;
+        assert_eq!(bal_after.0, balance_before.0 + 30_000);
+    });
 }

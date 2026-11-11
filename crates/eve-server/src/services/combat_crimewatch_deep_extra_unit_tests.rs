@@ -485,3 +485,416 @@ async fn kill_right_sell_cancel_buy_activate_duel_and_security_tags_turn_in() {
     assert!((bal_post - (bal_pre - 20_000_000.0)).abs() < 1e-6);
     let _ = ship_id;
 }
+
+#[tokio::test]
+async fn safety_level_sec_status_transactions_get_client_states_and_nested_runtime() {
+    let (ctx, mut session, char_id, _ship_id, sys_id) = make_fighter_ctx_and_session();
+    let kw = HashMap::new();
+    let peer_id = char_id + 50;
+    let crim_id = char_id + 51;
+    let susp_id = char_id + 52;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.security_status = 2.75;
+        }
+        let mut peer = snap.characters[&char_id].clone();
+        peer.character_id = peer_id;
+        peer.user_id = peer_id as u64;
+        peer.security_status = -3.25;
+        snap.characters.insert(peer_id, peer);
+    });
+
+    ctx.db
+        .acquire_online_lock(1, session.session_id, Some(char_id), true, ctx.now_unix())
+        .unwrap();
+
+    // SetSafetyLevel invalid input rejected, valid 0/1/2 update runtime + notify.
+    assert_eq!(
+        dispatch_combat_rpc(&ctx, &mut session, "crimewatch", "SetSafetyLevel", &[PyRep::String("bad".into())], &kw)
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidArgument"
+    );
+    for (raw, expected) in [(0i64, SafetyLevel::Red), (1, SafetyLevel::Yellow), (2, SafetyLevel::Green)] {
+        ctx.drain_notifications_for_char(char_id);
+        let rep = dispatch_combat_rpc(&ctx, &mut session, "crimewatch", "SetSafetyLevel", &[PyRep::Integer(raw)], &kw)
+            .await
+            .unwrap();
+        assert_eq!(rep.dict_get("safetyLevel"), Some(&PyRep::Integer(raw)));
+        assert_eq!(with_combat_runtime(&ctx, |rt| rt.safety_levels.get(&char_id).copied()), Some(expected));
+        assert!(ctx.drain_notifications_for_char(char_id).iter().any(|n| {
+            n.event == "OnSafetyLevelChanged" && n.args == vec![PyRep::Integer(raw)]
+        }));
+    }
+    dispatch_combat_rpc(&ctx, &mut session, "crimewatch", "SetSafetyLevel", &[PyRep::Integer(1)], &kw)
+        .await
+        .unwrap();
+
+    // GetMySecurityStatus (both service names) + GetCharacterSecurityStatus.
+    let my1 = dispatch_combat_rpc(&ctx, &mut session, "crimewatch", "GetMySecurityStatus", &[], &kw).await.unwrap();
+    let my2 = dispatch_combat_rpc(&ctx, &mut session, "crimewatchSvc", "GetMySecurityStatus", &[], &kw).await.unwrap();
+    assert_eq!(my1, PyRep::Real(2.75));
+    assert_eq!(my2, PyRep::Real(2.75));
+
+    assert_eq!(
+        dispatch_combat_rpc(&ctx, &mut session, "crimewatch", "GetCharacterSecurityStatus", &[PyRep::Integer(0)], &kw)
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidArgument"
+    );
+    assert_eq!(
+        dispatch_combat_rpc(&ctx, &mut session, "crimewatch", "GetCharacterSecurityStatus", &[], &kw).await.unwrap(),
+        PyRep::Real(2.75)
+    );
+    assert_eq!(
+        dispatch_combat_rpc(&ctx, &mut session, "crimewatch", "GetCharacterSecurityStatus", &[PyRep::Integer(peer_id)], &kw)
+            .await
+            .unwrap(),
+        PyRep::Real(-3.25)
+    );
+    assert_eq!(
+        dispatch_combat_rpc(&ctx, &mut session, "crimewatch", "GetCharacterSecurityStatus", &[PyRep::Integer(9_999_777)], &kw)
+            .await
+            .unwrap(),
+        PyRep::Real(0.0)
+    );
+
+    // GetSecurityStatusTransactions: all 5 reason->eventTypeID mappings + explicit event_type_id.
+    let now = ctx.now_unix();
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.sec_status_transactions.insert(
+            char_id,
+            vec![
+                SecStatusTransaction { timestamp_unix: now, old_sec: 2.0, new_sec: 2.1, delta: 0.1, reason: "NPC Pirate Bounty".into(), solar_system_id: sys_id, event_type_id: 0, other_owner_id: Some(peer_id), other_type_id: Some(587) },
+                SecStatusTransaction { timestamp_unix: now, old_sec: 2.1, new_sec: 1.5, delta: -0.6, reason: "Illegal Ship Aggression".into(), solar_system_id: sys_id, event_type_id: 0, other_owner_id: None, other_type_id: None },
+                SecStatusTransaction { timestamp_unix: now, old_sec: 1.5, new_sec: 2.0, delta: 0.5, reason: "Clone Soldier Security Tag".into(), solar_system_id: sys_id, event_type_id: 0, other_owner_id: None, other_type_id: None },
+                SecStatusTransaction { timestamp_unix: now, old_sec: 2.0, new_sec: 2.5, delta: 0.5, reason: "eventSecStatusGmRollback".into(), solar_system_id: sys_id, event_type_id: 0, other_owner_id: None, other_type_id: None },
+                SecStatusTransaction { timestamp_unix: now, old_sec: 2.5, new_sec: 2.6, delta: 0.1, reason: "Miscellaneous".into(), solar_system_id: sys_id, event_type_id: 0, other_owner_id: None, other_type_id: None },
+                SecStatusTransaction { timestamp_unix: now, old_sec: 2.6, new_sec: 2.75, delta: 0.15, reason: "Ignored".into(), solar_system_id: sys_id, event_type_id: 399, other_owner_id: None, other_type_id: None },
+            ],
+        );
+    });
+    let tx_rep = dispatch_combat_rpc(&ctx, &mut session, "crimewatch", "GetSecurityStatusTransactions", &[], &kw)
+        .await
+        .unwrap();
+    let PyRep::Rowset { columns, rows } = tx_rep else {
+        panic!("expected Rowset from GetSecurityStatusTransactions");
+    };
+    assert_eq!(columns[1], "eventTypeID");
+    let got_codes: Vec<i64> = rows.iter().map(|r| r[1].as_i64().unwrap()).collect();
+    assert_eq!(got_codes, vec![378, 379, 385, 386, 380, 399]);
+
+    // GetClientStates reflects criminal, suspect, non-expired LEs, and safety level.
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.get_or_create(crim_id).criminal_flag_until_unix = now + 900;
+        cw.get_or_create(susp_id).suspect_flag_until_unix = now + 900;
+    }
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.add_limited_engagement(char_id, peer_id, now);
+        rt.limited_engagements.entry(char_id).or_default().insert(peer_id + 1, now.saturating_sub(10));
+    });
+    let client_states = dispatch_combat_rpc(&ctx, &mut session, "crimewatch", "GetClientStates", &[], &kw)
+        .await
+        .unwrap();
+    let PyRep::Tuple(cs_parts) = client_states else {
+        panic!("expected 4-tuple from GetClientStates");
+    };
+    assert_eq!(cs_parts.len(), 4);
+    let PyRep::Dict(ref le_dict) = cs_parts[1] else {
+        panic!("expected LE dict");
+    };
+    assert_eq!(le_dict.len(), 1);
+    assert_eq!(le_dict[0].0, PyRep::Integer(peer_id));
+    let PyRep::Tuple(ref flags_tuple) = cs_parts[2] else {
+        panic!("expected (criminals, suspects)");
+    };
+    assert!(matches!(&flags_tuple[0], PyRep::List(v) if v.contains(&PyRep::Integer(crim_id))));
+    assert!(matches!(&flags_tuple[1], PyRep::List(v) if v.contains(&PyRep::Integer(susp_id))));
+    assert_eq!(cs_parts[3], PyRep::Integer(1));
+
+    // Nested with_mut_combat_runtime inside ctx.db.with_mut_snapshot does not deadlock and updates cleanly.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().security_status = 3.5;
+        snap.combat_crimewatch_state.safety_levels.insert(char_id, 0);
+        with_mut_combat_runtime(&ctx, |rt| {
+            rt.safety_levels.insert(char_id, SafetyLevel::Red);
+        });
+    });
+    assert_eq!(with_combat_runtime(&ctx, |rt| rt.safety_levels[&char_id]), SafetyLevel::Red);
+}
+
+#[tokio::test]
+async fn duel_lifecycle_kill_right_activate_buy_edges_and_action_restriction_capsule() {
+    let (ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let kw = HashMap::new();
+    let peer_id = char_id + 60;
+    let bystander_id = char_id + 61;
+    let peer_ship_id = 9_860_001i64;
+    let pod_ship_id = 9_860_002i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = IskCents(50_000_00);
+            ch.station_id = None;
+        }
+        let mut p = snap.characters[&char_id].clone();
+        p.character_id = peer_id;
+        p.user_id = peer_id as u64;
+        p.corporation_id += 10;
+        p.solar_system_id = sys_id;
+        p.active_ship_id = peer_ship_id;
+        p.balance = IskCents(100_000_00);
+        p.station_id = None;
+        snap.characters.insert(peer_id, p);
+
+        let mut b = snap.characters[&char_id].clone();
+        b.character_id = bystander_id;
+        b.user_id = bystander_id as u64;
+        b.corporation_id += 20;
+        b.solar_system_id = sys_id;
+        b.station_id = None;
+        b.balance.0 = 1_000_000_00;
+        snap.characters.insert(bystander_id, b);
+
+        snap.items.insert(pod_ship_id, make_fighter_item(pod_ship_id, 670, char_id, sys_id as i64, InventoryFlag::None, 1));
+    });
+
+    // Duel Start & Respond error branches.
+    assert_eq!(
+        dispatch_combat_rpc(&ctx, &mut session, "crimewatch", "StartDuelChallenge", &[PyRep::String("bad".into())], &kw)
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidArgument"
+    );
+    assert_eq!(
+        dispatch_combat_rpc(&ctx, &mut session, "crimewatch", "StartDuelChallenge", &[PyRep::Integer(char_id)], &kw)
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidDuelTarget"
+    );
+    assert_eq!(
+        dispatch_combat_rpc(&ctx, &mut session, "crimewatch", "StartDuelChallenge", &[PyRep::Integer(peer_id)], &kw)
+            .await
+            .unwrap_err()
+            .code,
+        "DuelChallengeFailNoSesssionForTarget"
+    );
+    assert_eq!(
+        dispatch_combat_rpc(&ctx, &mut session, "crimewatch", "RespondToDuelChallenge", &[PyRep::String("bad".into())], &kw)
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidArgument"
+    );
+    assert_eq!(
+        dispatch_combat_rpc(&ctx, &mut session, "crimewatch", "RespondToDuelChallenge", &[PyRep::Integer(peer_id), PyRep::Bool(true)], &kw)
+            .await
+            .unwrap_err()
+            .code,
+        "NoPendingDuelChallenge"
+    );
+
+    // Register peer online -> StartDuelChallenge -> 3-arg decline then 3-arg accept grants mutual LE.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.accounts.insert(
+            format!("peer_{peer_id}"),
+            eve_db::AccountRecord {
+                user_id: peer_id as u64,
+                username: format!("peer_{peer_id}"),
+                password_token: "pw".into(),
+                role: 0,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+    });
+    ctx.db
+        .acquire_online_lock(peer_id as u64, 99_801, Some(peer_id), true, ctx.now_unix())
+        .unwrap();
+    dispatch_combat_rpc(&ctx, &mut session, "crimewatch", "StartDuelChallenge", &[PyRep::Integer(peer_id)], &kw)
+        .await
+        .unwrap();
+    let mut peer_sess = eve_machonet::SessionState {
+        user_id: Some(peer_id as u64),
+        character_id: Some(peer_id),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(peer_ship_id),
+        ..Default::default()
+    };
+    dispatch_combat_rpc(
+        &ctx,
+        &mut peer_sess,
+        "crimewatch",
+        "RespondToDuelChallenge",
+        &[PyRep::Integer(char_id), PyRep::Integer(1_340_000_000_000_000), PyRep::Integer(0)],
+        &kw,
+    )
+    .await
+    .unwrap();
+    assert!(!with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(char_id, peer_id, ctx.now_unix())));
+
+    dispatch_combat_rpc(&ctx, &mut session, "crimewatch", "StartDuelChallenge", &[PyRep::Integer(peer_id)], &kw)
+        .await
+        .unwrap();
+    dispatch_combat_rpc(
+        &ctx,
+        &mut peer_sess,
+        "crimewatch",
+        "RespondToDuelChallenge",
+        &[PyRep::Integer(char_id), PyRep::Integer(1_340_000_000_000_000), PyRep::Integer(1)],
+        &kw,
+    )
+    .await
+    .unwrap();
+    assert!(with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(char_id, peer_id, ctx.now_unix())));
+    assert!(with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(peer_id, char_id, ctx.now_unix())));
+
+    // KillRight Activate & Buy error paths.
+    let kr_id = 920_901i64;
+    create_kill_right(&ctx, kr_id, char_id, peer_id, 0.0);
+    assert_eq!(
+        dispatch_combat_rpc(&ctx, &mut session, "killRightMgr", "ActivateKillRight", &[PyRep::Integer(9_888_777), PyRep::Integer(peer_id), PyRep::Integer(ship_id), PyRep::Integer(peer_ship_id)], &kw)
+            .await
+            .unwrap_err()
+            .code,
+        "KillRightNotFound"
+    );
+    assert_eq!(
+        dispatch_combat_rpc(&ctx, &mut peer_sess, "killRightMgr", "ActivateKillRight", &[PyRep::Integer(kr_id), PyRep::Integer(peer_id), PyRep::Integer(peer_ship_id), PyRep::Integer(peer_ship_id)], &kw)
+            .await
+            .unwrap_err()
+            .code,
+        "NotKillRightOwner"
+    );
+    let mut bystander_sess = eve_machonet::SessionState {
+        user_id: Some(bystander_id as u64),
+        character_id: Some(bystander_id),
+        solar_system_id: Some(sys_id),
+        ..Default::default()
+    };
+    assert_eq!(
+        dispatch_combat_rpc(&ctx, &mut bystander_sess, "killRightMgr", "BuyKillRight", &[PyRep::Integer(kr_id), PyRep::Real(0.0)], &kw)
+            .await
+            .unwrap_err()
+            .code,
+        "KillRightNotForSale"
+    );
+    assert_eq!(
+        dispatch_combat_rpc(&ctx, &mut peer_sess, "killRightMgr", "BuyKillRight", &[PyRep::Integer(kr_id), PyRep::Real(0.0)], &kw)
+            .await
+            .unwrap_err()
+            .code,
+        "CannotBuyKillRightAgainstSelf"
+    );
+    assert_eq!(
+        dispatch_combat_rpc(&ctx, &mut session, "killRightMgr", "BuyKillRight", &[PyRep::Integer(kr_id), PyRep::Real(0.0)], &kw)
+            .await
+            .unwrap_err()
+            .code,
+        "AlreadyKillRightOwner"
+    );
+
+    // Public sale price-changed, insufficient funds, and valid free sale.
+    dispatch_combat_rpc(&ctx, &mut session, "killRightMgr", "SellKillRight", &[PyRep::Integer(kr_id), PyRep::Real(5_000_000.0)], &kw)
+        .await
+        .unwrap();
+    assert_eq!(
+        dispatch_combat_rpc(&ctx, &mut bystander_sess, "killRightMgr", "BuyKillRight", &[PyRep::Integer(kr_id), PyRep::Real(1_000_000.0)], &kw)
+            .await
+            .unwrap_err()
+            .code,
+        "KillRightPriceChanged"
+    );
+    assert_eq!(
+        dispatch_combat_rpc(&ctx, &mut bystander_sess, "killRightMgr", "BuyKillRight", &[PyRep::Integer(kr_id), PyRep::Real(5_000_000.0)], &kw)
+            .await
+            .unwrap_err()
+            .code,
+        "InsufficientFunds"
+    );
+    let kr_free = 920_902i64;
+    create_kill_right(&ctx, kr_free, char_id, peer_id, 0.0);
+    dispatch_combat_rpc(
+        &ctx,
+        &mut session,
+        "killRightMgr",
+        "SellKillRight",
+        &[PyRep::Integer(kr_free), PyRep::Real(1.0), PyRep::Integer(bystander_id)],
+        &kw,
+    )
+    .await
+    .unwrap();
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for (bid, pos) in [(ship_id, DVec3::ZERO), (peer_ship_id, DVec3::new(10_000.0, 0.0, 0.0))] {
+        sys_handle
+            .spawn_ball(Ball {
+                id: bid,
+                type_id: 587,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 1.0,
+                mode: MovementMode::Stop,
+            })
+            .await
+            .unwrap();
+    }
+    dispatch_combat_rpc(&ctx, &mut bystander_sess, "killRightMgr", "BuyKillRight", &[PyRep::Integer(kr_free), PyRep::Real(1.0)], &kw)
+        .await
+        .unwrap();
+    assert!(ctx.crimewatch.read().unwrap().states.get(&peer_id).is_some_and(|st| st.is_suspect(ctx.now_unix())));
+    assert_eq!(
+        dispatch_combat_rpc(&ctx, &mut session, "killRightMgr", "ActivateKillRight", &[PyRep::Integer(kr_free), PyRep::Integer(peer_id), PyRep::Integer(ship_id), PyRep::Integer(peer_ship_id)], &kw)
+            .await
+            .unwrap_err()
+            .code,
+        "KillRightAlreadyActivated"
+    );
+
+    // check_crimewatch_action_restriction: weapons, pvp, highsec criminal, and capsule exemption.
+    let now = ctx.now_unix();
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        let st = cw.get_or_create(char_id);
+        st.criminal_flag_until_unix = now + 900;
+        st.weapon_timer_until_unix = now + 60;
+        st.pvp_timer_until_unix = now + 900;
+    }
+    assert_eq!(
+        check_crimewatch_action_restriction(&ctx, char_id, ship_id, 30_000_142, "dock", now).unwrap_err().code,
+        "CantDockGlobalCriminalFlag"
+    );
+    assert_eq!(
+        check_crimewatch_action_restriction(&ctx, char_id, ship_id, 30_000_142, "wormhole_jump", now).unwrap_err().code,
+        "CantEnterWormholeGlobalCriminalFlag"
+    );
+    // Capsule (type 670) bypasses criminal ship/warp/dock/wh restrictions, then weapons timer hits!
+    assert!(check_crimewatch_action_restriction(&ctx, char_id, pod_ship_id, 30_000_142, "wormhole_jump", now).is_ok());
+    assert_eq!(
+        check_crimewatch_action_restriction(&ctx, char_id, pod_ship_id, 30_000_142, "stargate_jump", now).unwrap_err().code,
+        "CannotJumpWithWeaponsTimer"
+    );
+    assert_eq!(
+        check_crimewatch_action_restriction(&ctx, char_id, pod_ship_id, 30_000_142, "safe_logoff", now).unwrap_err().code,
+        "PvpLogoffRestricted"
+    );
+    assert_eq!(
+        check_crimewatch_action_restriction(&ctx, char_id, pod_ship_id, 30_000_142, "activate_filament", now).unwrap_err().code,
+        "CannotJumpWithWeaponsTimer"
+    );
+    ctx.crimewatch.write().unwrap().get_or_create(char_id).weapon_timer_until_unix = 0;
+    assert_eq!(
+        check_crimewatch_action_restriction(&ctx, char_id, pod_ship_id, 30_000_142, "activate_filament", now).unwrap_err().code,
+        "PvpTimerBlocksFilament"
+    );
+}
+

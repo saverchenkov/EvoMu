@@ -859,17 +859,28 @@ pub fn flush_combat_runtime_to_db(ctx: &ServerContext) {
         return;
     }
     let rb_before = ctx.db.rollback_epoch();
-    let mut ext_hash = 0;
-    ctx.db.with_mut_snapshot(|s| {
-        let mut guard = ctx
+    let (persisted, ext_hash) = {
+        let guard = ctx
             .combat_ephemeral
-            .write()
+            .read()
             .unwrap_or_else(|e| e.into_inner());
-        let persisted = guard.to_persisted();
-        ext_hash = CombatRuntimeState::ext_runtime_hash(&persisted);
-        s.combat_crimewatch_state = persisted;
-        guard.synced_db_epoch = 0;
-    });
+        let p = guard.to_persisted();
+        let h = CombatRuntimeState::ext_runtime_hash(&p);
+        (p, h)
+    };
+    let already_matches = ctx
+        .db
+        .with_snapshot(|s| s.combat_crimewatch_state == persisted);
+    if !already_matches {
+        ctx.db.with_mut_snapshot(|s| {
+            let mut guard = ctx
+                .combat_ephemeral
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            s.combat_crimewatch_state = persisted;
+            guard.synced_db_epoch = 0;
+        });
+    }
     let rb_after = ctx.db.rollback_epoch();
     if rb_after == rb_before {
         let mut guard = ctx
@@ -1685,6 +1696,9 @@ pub fn create_kill_right(ctx: &ServerContext, kr_id: i64, owner_id: i64, target_
         rt.kill_right_expires_unix.insert(kr_id, expires_unix);
     });
     ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .kill_right_expires_unix
+            .insert(kr_id, expires_unix);
         snap.kill_rights.insert(
             kr_id,
             KillRightRecord {
@@ -1723,14 +1737,20 @@ pub(crate) fn validate_kill_right_live_preconditions(
     caller_id: i64,
     target_id: i64,
 ) -> Result<(), BridgeRpcError> {
-    let exp_opt = snap.combat_crimewatch_state.kill_right_expires_unix.get(&kr_id).copied();
-    if let Some(exp) = exp_opt {
-        if ctx.now_unix() >= exp {
-            return Err(BridgeRpcError {
-                code: "KillRightExpired".into(),
-                message: format!("Kill right {kr_id} has expired (30-day lifetime)"),
-            });
-        }
+    let expired = match snap
+        .combat_crimewatch_state
+        .kill_right_expires_unix
+        .get(&kr_id)
+        .copied()
+    {
+        Some(exp) => ctx.now_unix() >= exp,
+        None => !snap.kill_rights.contains_key(&kr_id),
+    };
+    if expired {
+        return Err(BridgeRpcError {
+            code: "KillRightExpired".into(),
+            message: format!("Kill right {kr_id} has expired (30-day lifetime)"),
+        });
     }
     let Some(caller) = snap.characters.get(&caller_id) else {
         return Err(BridgeRpcError {
@@ -1803,4 +1823,6 @@ pub fn update_crimewatch_engagement_timers(ctx: &ServerContext, char_id: i64, ot
 
 #[cfg(test)]
 #[path = "combat_crimewatch_tests.rs"] mod combat_crimewatch_tests;
+#[cfg(test)]
+#[path = "combat_crimewatch_edges_tests.rs"] mod combat_crimewatch_edges_tests;
 

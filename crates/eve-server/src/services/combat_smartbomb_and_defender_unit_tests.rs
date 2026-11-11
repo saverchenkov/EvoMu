@@ -2,14 +2,10 @@
 
 #![forbid(unsafe_code)]
 
-use super::super::*;
 use super::*;
-use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
-    make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
-};
-use crate::services::combat_crimewatch::*;
+use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_item;
 use eve_db::InventoryFlag;
-use eve_destiny::{Ball, CombatState, DamageVector, MovementMode};
+use eve_destiny::DamageVector;
 use eve_proto::PyRep;
 use glam::DVec3;
 use std::collections::HashMap;
@@ -97,6 +93,12 @@ async fn missile_multi_step_flight_destroyed_ball_missing_target_and_assisted_se
             777_001,
             make_fighter_item(777_001, 2_410, sd_char, sd_ship, InventoryFlag::HiSlot0, 1),
         );
+        if let Some(ch) = snap.characters.get_mut(&sd_char) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = sd_ship;
+        }
     });
     with_mut_combat_runtime(&ctx, |rt| {
         rt.aggression_assist_log.insert(

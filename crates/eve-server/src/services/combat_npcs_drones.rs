@@ -1288,11 +1288,24 @@ pub async fn handle_npcs_drones(
                 .db
                 .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.character_id));
             let rpc = RpcArgs::new(args, kwargs);
-            let aggressive = match rpc.opt_bool(0, "aggressive") {
+            let parse_drone_flag = |idx: usize, kw_name: &str| -> Result<Option<bool>, BridgeRpcError> {
+                match rpc.get_raw(idx, kw_name) {
+                    Some(PyRep::Real(v)) if (*v - 0.0).abs() < 1e-9 => Ok(Some(false)),
+                    Some(PyRep::Real(v)) if (*v - 1.0).abs() < 1e-9 => Ok(Some(true)),
+                    Some(PyRep::Real(v)) => Err(BridgeRpcError {
+                        code: "InvalidArgument".into(),
+                        message: format!(
+                            "{kw_name} must be boolean or 0..=1 (got float {v})"
+                        ),
+                    }),
+                    _ => rpc.opt_bool(idx, kw_name),
+                }
+            };
+            let aggressive = match parse_drone_flag(0, "aggressive") {
                 Ok(v) => v.unwrap_or(true),
                 Err(e) => return Some(Err(e)),
             };
-            let focus_fire = match rpc.opt_bool(1, "focusFire") {
+            let focus_fire = match parse_drone_flag(1, "focusFire") {
                 Ok(v) => v.unwrap_or(true),
                 Err(e) => return Some(Err(e)),
             };
@@ -1453,8 +1466,14 @@ pub async fn handle_npcs_drones(
                 let ship_drone_cap = snap
                     .items
                     .get(&ship_id)
-                    .and_then(|sh| ctx.sde.types.get(&sh.type_id))
-                    .and_then(|st| st.default_attributes.get(&283).copied())
+                    .and_then(|sh| {
+                        sh.dynamic_attributes.get(&283).copied().or_else(|| {
+                            ctx.sde
+                                .types
+                                .get(&sh.type_id)
+                                .and_then(|st| st.default_attributes.get(&283).copied())
+                        })
+                    })
                     .unwrap_or(0.0)
                     .max(0.0);
                 let used_vol: f64 = snap

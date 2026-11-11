@@ -85,6 +85,7 @@ async fn fighter_point_bomb_validations_and_security_rules() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fighter_point_bomb_detonation_aoe_pod_safety_charges_and_kill() {
     let (ctx, mut session, char_id, ship_id, _) = make_ability_test_ctx();
+    ctx.set_clock(Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(1_800_000_000)));
     let low_sys = 30_000_200u32;
     session.solar_system_id = Some(low_sys);
     let bomber_id = 800_000_040i64;

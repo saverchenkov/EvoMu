@@ -574,3 +574,446 @@ async fn bubble_decay_precursor_deactivate_loot_all_split_and_killmail_variants(
     .unwrap();
     assert_eq!(det_rep.dict_get("victimAllianceID"), Some(&PyRep::Integer(99_000_001)));
 }
+
+#[tokio::test]
+async fn mutants_cov_insurance_sync_sweep_void_deactivate_and_full_self_destruct() {
+    use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime, InsuranceContractState};
+    use crate::services::inventory_fitting::fitting_containers_ships::{
+        read_container_ship_state_snap, write_container_ship_state_snap, InsuranceContractRecord,
+    };
+    use eve_db::{InventoryFlag, PersistedInsuranceContractRecord, ServerClock, VirtualServerClock};
+    use eve_destiny::{Ball, CombatState, MovementMode};
+    use glam::DVec3;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let (ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let now = 1_800_050_000u64;
+    let clock = Arc::new(VirtualServerClock::with_fixed_base(now));
+    ctx.set_clock(clock.clone());
+    let ship_tid = 23_915u32;
+    let (ref_val, _) = compute_ship_insurance_quote_levels(&ctx, ship_tid);
+    let other_char_id = char_id + 99;
+
+    let s_snap_only = 97_800_001i64;
+    let s_cont_only = 97_800_002i64;
+    let s_rt_prev = 97_800_003i64;
+    let s_rt_wrong_owner = 97_800_004i64;
+    let s_rt_exp_end = 97_800_005i64;
+    let s_fresh_std = 97_800_006i64;
+    let s_fresh_plat = 97_800_007i64;
+    let s_other_owner = 97_800_008i64;
+    let s_cont_exp_void = 97_800_009i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for &(sid, owner, payout) in &[
+            (s_snap_only, char_id, ref_val),
+            (s_cont_only, char_id, ref_val),
+            (s_rt_prev, char_id, ref_val),
+            (s_rt_wrong_owner, char_id, ref_val),
+            (s_rt_exp_end, char_id, ref_val),
+            (s_fresh_std, char_id, 0.98 * ref_val),
+            (s_fresh_plat, char_id, ref_val),
+            (s_other_owner, other_char_id, ref_val),
+            (s_cont_exp_void, char_id, ref_val),
+        ] {
+            let mut rec = make_fighter_item(sid, ship_tid, owner, 60_003_760, InventoryFlag::Hangar, 1);
+            rec.singleton = true;
+            rec.insured_payout_isk = payout;
+            snap.items.insert(sid, rec);
+        }
+        snap.insurance_contracts.insert(
+            s_snap_only,
+            PersistedInsuranceContractRecord {
+                ship_id: s_snap_only,
+                ship_type_id: ship_tid,
+                owner_id: char_id,
+                level_name: "Gold".into(),
+                level_fraction: 0.80,
+                cost_isk: 50_000.0,
+                payout_isk: ref_val * 0.80,
+                start_unix: now - 1_000,
+                end_unix: now + 5_000,
+            },
+        );
+        write_container_ship_state_snap(snap, |st| {
+            st.insurance_contracts.insert(
+                s_cont_only,
+                InsuranceContractRecord {
+                    ship_id: s_cont_only,
+                    ship_type_id: ship_tid,
+                    owner_id: char_id,
+                    level_name: "Silver".into(),
+                    level_fraction: 0.70,
+                    cost_isk: 30_000.0,
+                    payout_isk: ref_val * 0.70,
+                    start_unix: now - 1_000,
+                    end_unix: now + 4_000,
+                },
+            );
+            st.insurance_contracts.insert(
+                s_cont_exp_void,
+                InsuranceContractRecord {
+                    ship_id: s_cont_exp_void,
+                    ship_type_id: ship_tid,
+                    owner_id: char_id,
+                    level_name: "Gold".into(),
+                    level_fraction: 0.80,
+                    cost_isk: 50_000.0,
+                    payout_isk: ref_val * 0.80,
+                    start_unix: now - 10_000,
+                    end_unix: now,
+                },
+            );
+        });
+    });
+
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.insurance_contracts.insert(
+            s_rt_prev,
+            InsuranceContractState {
+                ship_id: s_rt_prev,
+                ship_type_id: ship_tid,
+                owner_id: char_id,
+                level_name: "Silver".into(),
+                level_fraction: 0.70,
+                cost_isk: 20_000.0,
+                payout_isk: ref_val * 0.70,
+                start_unix: now - 500,
+                end_unix: now + 500,
+            },
+        );
+        rt.insurance_contracts.insert(
+            s_rt_wrong_owner,
+            InsuranceContractState {
+                ship_id: s_rt_wrong_owner,
+                ship_type_id: ship_tid,
+                owner_id: other_char_id,
+                level_name: "Silver".into(),
+                level_fraction: 0.70,
+                cost_isk: 20_000.0,
+                payout_isk: ref_val * 0.70,
+                start_unix: now - 500,
+                end_unix: now + 500,
+            },
+        );
+        rt.insurance_contracts.insert(
+            s_rt_exp_end,
+            InsuranceContractState {
+                ship_id: s_rt_exp_end,
+                ship_type_id: ship_tid,
+                owner_id: char_id,
+                level_name: "Silver".into(),
+                level_fraction: 0.70,
+                cost_isk: 20_000.0,
+                payout_isk: ref_val * 0.70,
+                start_unix: now - 500,
+                end_unix: now,
+            },
+        );
+    });
+
+    // 1. sync_ship_insurance_contracts scoped to char_id
+    sync_ship_insurance_contracts(&ctx, char_id);
+    ctx.db.with_snapshot(|snap| {
+        let cst = read_container_ship_state_snap(snap);
+        assert_eq!(cst.insurance_contracts.get(&s_snap_only).map(|c| c.level_name.as_str()), Some("Gold"));
+        assert_eq!(snap.insurance_contracts.get(&s_cont_only).map(|c| c.level_name.as_str()), Some("Silver"));
+        assert_eq!(snap.insurance_contracts.get(&s_rt_prev).map(|c| (c.level_name.as_str(), c.end_unix)), Some(("Silver", now + 500)));
+        assert_eq!(snap.insurance_contracts.get(&s_rt_wrong_owner).map(|c| c.level_name.as_str()), Some("Platinum"));
+        assert_eq!(snap.insurance_contracts.get(&s_rt_exp_end).map(|c| c.level_name.as_str()), Some("Platinum"));
+        assert_eq!(snap.insurance_contracts.get(&s_fresh_std).map(|c| c.level_name.as_str()), Some("Standard"));
+        assert_eq!(snap.insurance_contracts.get(&s_fresh_plat).map(|c| c.level_name.as_str()), Some("Platinum"));
+        // Unscoped owner left untouched
+        assert!(!snap.insurance_contracts.contains_key(&s_other_owner));
+        // Expired container contract was voided cleanly
+        assert!(!cst.insurance_contracts.contains_key(&s_cont_exp_void));
+        assert_eq!(snap.items[&s_cont_exp_void].insured_payout_isk, 0.0);
+    });
+    with_combat_runtime(&ctx, |rt| {
+        assert_eq!(rt.insurance_contracts.get(&s_snap_only).map(|c| c.level_name.as_str()), Some("Gold"));
+        assert_eq!(rt.insurance_contracts.get(&s_cont_only).map(|c| c.level_name.as_str()), Some("Silver"));
+        assert!(!rt.insurance_contracts.contains_key(&s_cont_exp_void));
+    });
+
+    // Void-only container contract when sync_to_snap would otherwise be empty (tests || -> && in L212)
+    let s_only_void_cont = 97_800_010i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut rec = make_fighter_item(s_only_void_cont, ship_tid, other_char_id, 60_003_760, InventoryFlag::Hangar, 1);
+        rec.singleton = true;
+        rec.insured_payout_isk = ref_val;
+        snap.items.insert(s_only_void_cont, rec);
+        snap.items.get_mut(&s_other_owner).unwrap().insured_payout_isk = 0.0;
+        write_container_ship_state_snap(snap, |st| {
+            st.insurance_contracts.insert(
+                s_only_void_cont,
+                InsuranceContractRecord {
+                    ship_id: s_only_void_cont,
+                    ship_type_id: ship_tid,
+                    owner_id: other_char_id,
+                    level_name: "Gold".into(),
+                    level_fraction: 0.80,
+                    cost_isk: 50_000.0,
+                    payout_isk: ref_val * 0.80,
+                    start_unix: now - 1_000,
+                    end_unix: now,
+                },
+            );
+        });
+    });
+    sync_ship_insurance_contracts(&ctx, other_char_id);
+    ctx.db.with_snapshot(|snap| {
+        let cst = read_container_ship_state_snap(snap);
+        assert!(!cst.insurance_contracts.contains_key(&s_only_void_cont));
+        assert_eq!(snap.items[&s_only_void_cont].insured_payout_isk, 0.0);
+    });
+
+    // 2. sweep_expired_insurance_contracts across disjoint expired stores + active boundary
+    let s_sw_snap = 97_800_011i64;
+    let s_sw_rt = 97_800_012i64;
+    let s_sw_cont = 97_800_013i64;
+    let s_sw_keep = 97_800_014i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        for &sid in &[s_sw_snap, s_sw_rt, s_sw_cont, s_sw_keep] {
+            let mut rec = make_fighter_item(sid, ship_tid, char_id, 60_003_760, InventoryFlag::Hangar, 1);
+            rec.singleton = true;
+            rec.insured_payout_isk = ref_val;
+            snap.items.insert(sid, rec);
+        }
+        snap.insurance_contracts.insert(
+            s_sw_snap,
+            PersistedInsuranceContractRecord {
+                ship_id: s_sw_snap,
+                ship_type_id: ship_tid,
+                owner_id: char_id,
+                level_name: "Basic".into(),
+                level_fraction: 0.50,
+                cost_isk: 10_000.0,
+                payout_isk: ref_val * 0.50,
+                start_unix: now - 100,
+                end_unix: now,
+            },
+        );
+        snap.insurance_contracts.insert(
+            s_sw_keep,
+            PersistedInsuranceContractRecord {
+                ship_id: s_sw_keep,
+                ship_type_id: ship_tid,
+                owner_id: char_id,
+                level_name: "Platinum".into(),
+                level_fraction: 1.0,
+                cost_isk: 90_000.0,
+                payout_isk: ref_val,
+                start_unix: now - 100,
+                end_unix: now + 100,
+            },
+        );
+        write_container_ship_state_snap(snap, |st| {
+            st.insurance_contracts.insert(
+                s_sw_cont,
+                InsuranceContractRecord {
+                    ship_id: s_sw_cont,
+                    ship_type_id: ship_tid,
+                    owner_id: char_id,
+                    level_name: "Basic".into(),
+                    level_fraction: 0.50,
+                    cost_isk: 10_000.0,
+                    payout_isk: ref_val * 0.50,
+                    start_unix: now - 100,
+                    end_unix: now,
+                },
+            );
+            st.insurance_contracts.insert(
+                s_sw_keep,
+                InsuranceContractRecord {
+                    ship_id: s_sw_keep,
+                    ship_type_id: ship_tid,
+                    owner_id: char_id,
+                    level_name: "Platinum".into(),
+                    level_fraction: 1.0,
+                    cost_isk: 90_000.0,
+                    payout_isk: ref_val,
+                    start_unix: now - 100,
+                    end_unix: now + 100,
+                },
+            );
+        });
+    });
+    with_mut_combat_runtime(&ctx, |rt| {
+        for &(sid, exp) in &[(s_sw_rt, now), (s_sw_keep, now + 100)] {
+            rt.insurance_contracts.insert(
+                sid,
+                InsuranceContractState {
+                    ship_id: sid,
+                    ship_type_id: ship_tid,
+                    owner_id: char_id,
+                    level_name: "Gold".into(),
+                    level_fraction: 0.80,
+                    cost_isk: 40_000.0,
+                    payout_isk: ref_val * 0.80,
+                    start_unix: now - 100,
+                    end_unix: exp,
+                },
+            );
+        }
+    });
+    sweep_expired_insurance_contracts(&ctx, now);
+    ctx.db.with_snapshot(|snap| {
+        let cst = read_container_ship_state_snap(snap);
+        for &expired_sid in &[s_sw_snap, s_sw_rt, s_sw_cont] {
+            assert!(!snap.insurance_contracts.contains_key(&expired_sid));
+            assert!(!cst.insurance_contracts.contains_key(&expired_sid));
+            assert_eq!(snap.items[&expired_sid].insured_payout_isk, 0.0);
+        }
+        assert!(snap.insurance_contracts.contains_key(&s_sw_keep));
+        assert!(cst.insurance_contracts.contains_key(&s_sw_keep));
+    });
+    with_combat_runtime(&ctx, |rt| {
+        assert!(!rt.insurance_contracts.contains_key(&s_sw_rt));
+        assert!(rt.insurance_contracts.contains_key(&s_sw_keep));
+    });
+
+    // 3. void_ship_insurance_contract single-store variants (false when clean, true for rt-only, snap-only, payout-only, cont-only)
+    assert!(!void_ship_insurance_contract(&ctx, 97_899_999));
+    let s_v_rt = 97_800_021i64;
+    let s_v_snap = 97_800_022i64;
+    let s_v_payout = 97_800_023i64;
+    let s_v_cont = 97_800_024i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        for &sid in &[s_v_rt, s_v_snap, s_v_payout, s_v_cont] {
+            let mut rec = make_fighter_item(sid, ship_tid, char_id, 60_003_760, InventoryFlag::Hangar, 1);
+            if sid == s_v_payout {
+                rec.insured_payout_isk = 50_000.0;
+            }
+            snap.items.insert(sid, rec);
+        }
+        snap.insurance_contracts.insert(
+            s_v_snap,
+            PersistedInsuranceContractRecord {
+                ship_id: s_v_snap,
+                ship_type_id: ship_tid,
+                owner_id: char_id,
+                level_name: "Gold".into(),
+                level_fraction: 0.80,
+                cost_isk: 40_000.0,
+                payout_isk: 80_000.0,
+                start_unix: now,
+                end_unix: now + 500,
+            },
+        );
+        write_container_ship_state_snap(snap, |st| {
+            st.insurance_contracts.insert(
+                s_v_cont,
+                InsuranceContractRecord {
+                    ship_id: s_v_cont,
+                    ship_type_id: ship_tid,
+                    owner_id: char_id,
+                    level_name: "Gold".into(),
+                    level_fraction: 0.80,
+                    cost_isk: 40_000.0,
+                    payout_isk: 80_000.0,
+                    start_unix: now,
+                    end_unix: now + 500,
+                },
+            );
+        });
+    });
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.insurance_contracts.insert(
+            s_v_rt,
+            InsuranceContractState {
+                ship_id: s_v_rt,
+                ship_type_id: ship_tid,
+                owner_id: char_id,
+                level_name: "Gold".into(),
+                level_fraction: 0.80,
+                cost_isk: 40_000.0,
+                payout_isk: 80_000.0,
+                start_unix: now,
+                end_unix: now + 500,
+            },
+        );
+    });
+    assert!(void_ship_insurance_contract(&ctx, s_v_rt));
+    assert!(!void_ship_insurance_contract(&ctx, s_v_rt));
+    assert!(void_ship_insurance_contract(&ctx, s_v_snap));
+    assert!(void_ship_insurance_contract(&ctx, s_v_payout));
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&s_v_payout].insured_payout_isk), 0.0);
+    assert!(void_ship_insurance_contract(&ctx, s_v_cont));
+
+    // 4. process_ship_insurance_payout + handle_wrecks_killmails Deactivate, non-matching service None, and clock-advanced SelfDestruct
+    let kwargs = HashMap::new();
+    let other_svc = ["other", "Service"].concat();
+    assert!(handle_wrecks_killmails(&ctx, &mut session, &other_svc, "Deactivate", &[], &kwargs).await.is_none());
+
+    let mod_id = 97_800_030i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut sh = make_fighter_item(ship_id, ship_tid, char_id, sys_id as i64, InventoryFlag::None, 1);
+        sh.singleton = true;
+        sh.insured_payout_isk = ref_val;
+        snap.items.insert(ship_id, sh);
+        snap.items.insert(
+            mod_id,
+            make_fighter_item(mod_id, 53_001, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+    });
+    session.station_id = None;
+    session.structure_id = None;
+    session.solar_system_id = Some(sys_id);
+    session.ship_id = Some(ship_id);
+
+    let deact = handle_wrecks_killmails(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Deactivate",
+        &[PyRep::Integer(mod_id)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(deact.dict_get("active"), Some(&PyRep::Bool(false)));
+    assert_eq!(deact.dict_get("moduleID"), Some(&PyRep::Integer(mod_id)));
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    sys_h
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: ship_tid,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+        )
+        .await
+        .unwrap();
+
+    let sd_init = handle_wrecks_killmails(&ctx, &mut session, "ship", "SelfDestruct", &[], &kwargs)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(sd_init.dict_get("countdownStarted"), Some(&PyRep::Bool(true)));
+    assert_eq!(sd_init.dict_get("detonated"), Some(&PyRep::Bool(false)));
+
+    clock.advance_secs(125);
+    let sd_boom = handle_wrecks_killmails(&ctx, &mut session, "ship", "SelfDestruct", &[], &kwargs)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(sd_boom.dict_get("detonated"), Some(&PyRep::Bool(true)));
+    assert!(sd_boom.dict_get("killmailID").and_then(PyRep::as_i64).is_some_and(|id| id > 0));
+}

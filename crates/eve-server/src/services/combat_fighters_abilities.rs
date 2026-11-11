@@ -1574,3 +1574,7 @@ pub(crate) async fn handle_deactivate_fighter_ability_slots(
 #[cfg(test)]
 #[path = "combat_fighters_abilities_tests.rs"]
 mod combat_fighters_abilities_tests;
+
+#[cfg(test)]
+#[path = "combat_fighters_abilities_edges_b4_tests.rs"]
+mod combat_fighters_abilities_edges_b4_tests;

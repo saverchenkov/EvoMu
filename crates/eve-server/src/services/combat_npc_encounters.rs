@@ -430,7 +430,8 @@ pub async fn handle_npc_destroyed_in_space(
 
     if !db.is_write_locked_by_current_thread() {
         db.with_mut_snapshot(|s| {
-            let guard = combat_ephemeral.read().unwrap_or_else(|e| e.into_inner());
+            let mut guard = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
+            guard.sync_core_from_persisted(&s.combat_crimewatch_state);
             s.combat_crimewatch_state = guard.to_persisted();
         });
     }
@@ -457,6 +458,13 @@ pub fn tick_overdue_npc_bounty_payouts(ctx: &ServerContext, now_unix: u64) {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct NpcBountyTickPayout {
+    pub pilot_isk: f64,
+    pub main_ess_isk: f64,
+    pub reserve_ess_isk: f64,
+}
+
 /// Flushes the 20-minute (`1,200s`) batched NPC bounty tick for `(solar_system_id, char_id)`
 /// applying the system's Dynamic Bounty System (`dbs_multiplier`), corporation tax, and K-space null-sec ESS split (`feat:combat.bounty-payout-npc`).
 pub fn flush_npc_bounty_tick(
@@ -464,7 +472,7 @@ pub fn flush_npc_bounty_tick(
     solar_system_id: u32,
     char_id: i64,
     corp_tax_rate: f64,
-) -> (f64, f64, f64) {
+) -> NpcBountyTickPayout {
     use eve_db::{IskCents, WalletJournalEntry};
     use crate::formulas::compute_dbs_and_ess_bounty_split;
 
@@ -478,7 +486,7 @@ pub fn flush_npc_bounty_tick(
             .unwrap_or(0.0)
     });
     if raw_bounty <= 0.0 {
-        return (0.0, 0.0, 0.0);
+        return NpcBountyTickPayout::default();
     }
     let sys_sec = ctx
         .sde
@@ -592,7 +600,11 @@ pub fn flush_npc_bounty_tick(
         );
     }
 
-    (pilot_isk, main_ess, reserve_ess)
+    NpcBountyTickPayout {
+        pilot_isk,
+        main_ess_isk: main_ess,
+        reserve_ess_isk: reserve_ess,
+    }
 }
 
 /// Resolves SDE special module or BPC drop for Officer, Faction Commander, and Mordu's Legion NPCs (`feat:npc.officer-npc`, `feat:npc.belt-rats`).
@@ -997,3 +1009,7 @@ pub fn record_npc_kill_progression(
 #[path = "combat_npc_encounters_cov_unit_tests.rs"]
 #[cfg(test)]
 mod combat_npc_encounters_cov_unit_tests;
+
+#[path = "combat_npc_encounters_edges2_tests.rs"]
+#[cfg(test)]
+mod combat_npc_encounters_edges2_tests;

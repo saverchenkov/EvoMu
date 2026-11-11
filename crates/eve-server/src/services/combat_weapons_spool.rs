@@ -195,6 +195,14 @@ pub fn handle_entropic_activation(
     })
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShipOrNpcDestructionResult {
+    pub kill_id: i64,
+    pub wreck_id: i64,
+    pub corpse_id: i64,
+    pub killmail_hash: String,
+}
+
 /// Handles ship or NPC destruction: wreck creation, Loot Fairy, pod/capsule ejection,
 /// assist log pruning, killmail generation, and bounties/insurance.
 pub async fn handle_ship_or_npc_destruction(
@@ -210,7 +218,7 @@ pub async fn handle_ship_or_npc_destruction(
     sys_id: u32,
     applied_dmg: f64,
     now_unix: u64,
-) -> (i64, i64, i64, String) {
+) -> ShipOrNpcDestructionResult {
     let mut generated_kill_id: i64 = 0;
     let mut generated_wreck_id: i64 = 0;
     let mut generated_corpse_id: i64 = 0;
@@ -234,7 +242,7 @@ pub async fn handle_ship_or_npc_destruction(
             target_ball_id,
         )
         .await;
-        return (0, 0, 0, String::new());
+        return ShipOrNpcDestructionResult::default();
     }
 
     crate::services::doomsday_aoe_ops::cancel_aoe_superweapon_cycles_for_ship(ctx, target_ball_id);
@@ -912,7 +920,12 @@ pub async fn handle_ship_or_npc_destruction(
         );
     }
 
-    (generated_kill_id, generated_wreck_id, generated_corpse_id, generated_km_hash)
+    ShipOrNpcDestructionResult {
+        kill_id: generated_kill_id,
+        wreck_id: generated_wreck_id,
+        corpse_id: generated_corpse_id,
+        killmail_hash: generated_km_hash,
+    }
 }
 
 /// Steps all active entropic disintegrator spools in a solar system by `dt` seconds.

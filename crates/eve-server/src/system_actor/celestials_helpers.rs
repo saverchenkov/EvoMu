@@ -323,8 +323,14 @@ pub(crate) fn fast_forward_clock_in_actor(
                 velocity: vel,
             };
             let obs = ballpark.observer_events.entry(ship_id).or_default();
+            let had_set_state = obs
+                .iter()
+                .any(|ev| matches!(ev, eve_destiny::DestinyEvent::SetState { .. }));
             obs.insert(0, pos_ev.clone());
             obs.insert(1, vel_ev.clone());
+            if had_set_state {
+                ballpark.queue_set_state(ship_id);
+            }
             all_events.insert(0, pos_ev);
             all_events.insert(1, vel_ev);
         }
@@ -349,3 +355,6 @@ impl SystemHandle {
 #[cfg(test)]
 #[path = "celestials_helpers_cov_unit_tests.rs"]
 mod celestials_helpers_cov_unit_tests;
+#[cfg(test)]
+#[path = "celestials_helpers_edges_tests.rs"]
+mod celestials_helpers_edges_tests;

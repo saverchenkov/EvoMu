@@ -54,6 +54,20 @@ pub fn derive_npc_archetype(ctx: &ServerContext, npc_type_id: u32) -> &'static s
         return "RogueDrone";
     }
 
+    // 3b. Empire Navy / Republic Fleet / Faction Police (must precede group_id == 4034 EDENCOM check,
+    // because Empire Navy & Republic Fleet hulls 52923..=52967 / 54000..=54107 share SDE group 4034 and faction_id 500027)
+    if group_name.contains("Faction Drone")
+        || group_name.contains("Navy")
+        || type_name.contains("Navy")
+        || type_name.contains("Republic Fleet")
+        || group_name.contains("Police")
+        || type_name.contains("Police")
+        || (52923..=52967).contains(&npc_type_id)
+        || (54000..=54107).contains(&npc_type_id)
+    {
+        return "Navy";
+    }
+
     // 4. EDENCOM: EDENCOM faction (500027), group (4034), or group/type name
     if group_name.contains("EDENCOM")
         || type_name.contains("EDENCOM")
@@ -154,6 +168,29 @@ pub fn derive_npc_archetype(ctx: &ServerContext, npc_type_id: u32) -> &'static s
     "Pirate"
 }
 
+/// Deterministically resolves the lowest-ID SDE NPC corporation belonging to `faction_id`,
+/// returning `-1` when no matching corporation exists so Destiny wire encoding emits `None`
+/// for `corpID` rather than leaking a `500_xxx` faction ID into `cfg.crptickernames.Get`.
+pub(crate) fn resolve_npc_corp_id_for_sde_faction(
+    sde: &eve_sde::SdeRegistry,
+    faction_id: i64,
+) -> i64 {
+    let Ok(fid) = u32::try_from(faction_id) else {
+        return -1;
+    };
+    sde.npc_corporations
+        .values()
+        .filter(|c| c.faction_id == Some(fid))
+        .map(|c| c.corporation_id)
+        .min()
+        .unwrap_or(-1)
+}
+
+/// ServerContext convenience wrapper for [`resolve_npc_corp_id_for_sde_faction`].
+pub(crate) fn resolve_npc_corp_id_for_faction(ctx: &ServerContext, faction_id: i64) -> i64 {
+    resolve_npc_corp_id_for_sde_faction(&ctx.sde, faction_id)
+}
+
 /// Spawns an NPC combat entity from SDE, dynamically determining its archetype from SDE metadata.
 pub async fn spawn_npc_entity_from_sde(
     ctx: &ServerContext,
@@ -163,6 +200,114 @@ pub async fn spawn_npc_entity_from_sde(
     pos: DVec3,
 ) -> i64 {
     spawn_specialized_npc_entity(ctx, solar_system_id, npc_type_id, "", spawn_group_id, pos).await
+}
+
+/// Spawns multiple specialized NPC combat entities using a caller-supplied starting ball ID,
+/// appending `(ball_id, entity)` to `out_entities` without committing to `db` or `combat_ephemeral`.
+pub(crate) async fn spawn_specialized_npc_batch_with_start_id<F>(
+    ctx: &ServerContext,
+    solar_system_id: u32,
+    specs: &[(u32, &str, u32, DVec3)],
+    start_ball_id: i64,
+    mut post_build: F,
+    out_entities: &mut Vec<(i64, ExtendedNpcEntity)>,
+) -> Vec<i64>
+where
+    F: FnMut(&mut ExtendedNpcEntity),
+{
+    if specs.is_empty() {
+        return Vec::new();
+    }
+    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    let mut spawned_ids = Vec::with_capacity(specs.len());
+    out_entities.reserve(specs.len());
+    for (idx, &(npc_type_id, archetype_hint, spawn_group_id, pos)) in specs.iter().enumerate() {
+        let ball_id = start_ball_id + idx as i64;
+        let sde_derived = derive_npc_archetype(ctx, npc_type_id);
+        let archetype = if !archetype_hint.is_empty()
+            && (sde_derived == "Pirate"
+                || matches!(
+                    archetype_hint,
+                    "FactionPolice" | "Police" | "Sleeper" | "CounterInsurgencySentry" | "Navy"
+                    | "CaldariNavy" | "MinmatarNavy" | "AmarrNavy" | "GallenteNavy"
+                ))
+        {
+            archetype_hint
+        } else {
+            sde_derived
+        };
+        let (ball, cs, mut entity) =
+            crate::services::wormhole_pve_seeding::build_specialized_npc_components(
+                ctx,
+                solar_system_id,
+                ball_id,
+                npc_type_id,
+                archetype,
+                spawn_group_id,
+                pos,
+            );
+        let sde_t = ctx.sde.types.get(&npc_type_id);
+        let fac_owner = if entity.faction_id > 0 {
+            entity.faction_id as i64
+        } else {
+            500_001
+        };
+        let npc_meta = eve_destiny::SlimItemMeta {
+            group_id: sde_t.map(|t| t.group_id).unwrap_or(546),
+            category_id: sde_t.map(|t| t.category_id).unwrap_or(11),
+            owner_id: fac_owner,
+            char_id: None,
+            corp_id: resolve_npc_corp_id_for_faction(ctx, fac_owner),
+            alliance_id: -1,
+            security_status: -1.0,
+            is_cloaked: false,
+            name: sde_t.map(|t| t.name.clone()).filter(|n| !n.is_empty()),
+            ..Default::default()
+        };
+        let _ = sys_handle.spawn_ball_with_meta(ball, cs, npc_meta).await;
+        post_build(&mut entity);
+        out_entities.push((ball_id, entity));
+        spawned_ids.push(ball_id);
+    }
+    spawned_ids
+}
+
+/// Spawns multiple specialized NPC combat entities in one `next_entity_id` allocation and one
+/// batched `with_mut_combat_ephemeral` persistence commit.
+pub async fn spawn_specialized_npc_batch<F>(
+    ctx: &ServerContext,
+    solar_system_id: u32,
+    specs: &[(u32, &str, u32, DVec3)],
+    post_build: F,
+) -> Vec<i64>
+where
+    F: FnMut(&mut ExtendedNpcEntity),
+{
+    if specs.is_empty() {
+        return Vec::new();
+    }
+    let count = specs.len() as i64;
+    let start_ball_id = ctx.db.with_mut_snapshot(|snap| {
+        let start = snap.next_entity_id + 1;
+        snap.next_entity_id += count;
+        start
+    });
+    let mut built = Vec::with_capacity(specs.len());
+    let spawned_ids = spawn_specialized_npc_batch_with_start_id(
+        ctx,
+        solar_system_id,
+        specs,
+        start_ball_id,
+        post_build,
+        &mut built,
+    )
+    .await;
+    with_mut_combat_ephemeral(ctx, |rt| {
+        for (ball_id, entity) in built {
+            rt.npc_entities.insert(ball_id, entity);
+        }
+    });
+    spawned_ids
 }
 
 /// Spawns a specialized NPC combat entity from SDE (`feat:npc.drifters`, `feat:npc.triglavians`, `feat:npc.sleepers`,
@@ -176,59 +321,19 @@ pub async fn spawn_specialized_npc_entity(
     spawn_group_id: u32,
     pos: DVec3,
 ) -> i64 {
-    let sde_derived = derive_npc_archetype(ctx, npc_type_id);
-    let archetype = if !archetype_hint.is_empty()
-        && (sde_derived == "Pirate"
-            || matches!(
-                archetype_hint,
-                "FactionPolice" | "Police" | "Sleeper" | "CounterInsurgencySentry" | "Navy"
-                | "CaldariNavy" | "MinmatarNavy" | "AmarrNavy" | "GallenteNavy"
-            ))
-    {
-        archetype_hint
-    } else {
-        sde_derived
-    };
-    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
-    let ball_id = ctx.db.with_mut_snapshot(|snap| {
-        snap.next_entity_id += 1;
-        snap.next_entity_id
-    });
-    let (ball, cs, entity) = crate::services::wormhole_pve_seeding::build_specialized_npc_components(
+    spawn_specialized_npc_batch(
         ctx,
         solar_system_id,
-        ball_id,
-        npc_type_id,
-        archetype,
-        spawn_group_id,
-        pos,
-    );
-    let sde_t = ctx.sde.types.get(&npc_type_id);
-    let fac_owner = if entity.faction_id > 0 {
-        entity.faction_id as i64
-    } else {
-        500_001
-    };
-    let npc_meta = eve_destiny::SlimItemMeta {
-        group_id: sde_t.map(|t| t.group_id).unwrap_or(546),
-        category_id: sde_t.map(|t| t.category_id).unwrap_or(11),
-        owner_id: fac_owner,
-        char_id: None,
-        corp_id: fac_owner,
-        alliance_id: -1,
-        security_status: -1.0,
-        is_cloaked: false,
-        name: sde_t.map(|t| t.name.clone()).filter(|n| !n.is_empty()),
-        ..Default::default()
-    };
-    let _ = sys_handle.spawn_ball_with_meta(ball, cs, npc_meta).await;
-    with_mut_combat_ephemeral(ctx, |rt| {
-        rt.npc_entities.insert(ball_id, entity);
-    });
-    ball_id
+        &[(npc_type_id, archetype_hint, spawn_group_id, pos)],
+        |_| {},
+    )
+    .await
+    .into_iter()
+    .next()
+    .unwrap_or(0)
 }
 
-/// Determines if a candidate ball is hostile to EDENCOM or matches primary target hostility/fleet (`NPC-AI-2`).
+/// Determines if a candidate ball is hostile to EDENCOM or matches primary target hostility/fleet.
 pub fn is_candidate_hostile_to_edencom(
     ctx: &ServerContext,
     npc: &ExtendedNpcEntity,
@@ -315,66 +420,465 @@ pub fn is_candidate_hostile_to_edencom(
 /// Steps extended NPC AI (`feat:npc.npc-ai-targeting`, `feat:npc.npc-ewar-application`, `feat:npc.npc-remote-repair`,
 /// `feat:npc.npc-target-switching`, `feat:npc.npc-standings-aggression`, `feat:npc.drifters`, `feat:npc.triglavians`,
 /// `feat:npc.sleepers`, `feat:npc.edencom-npc`).
+#[derive(Clone, Copy)]
+struct BallSnapshotLite {
+    position: DVec3,
+    type_id: u32,
+    speed_fraction: f64,
+    radius: f64,
+    max_velocity: f64,
+    mode_is_warp: bool,
+    is_cloaked_or_dead: bool,
+}
+
+struct CandidateOwnerMeta {
+    standings: HashMap<i64, f64>,
+    is_low_sec_criminal: bool,
+    war_faction_id: Option<i64>,
+    is_capsule: bool,
+    owner_active_ship_id: Option<i64>,
+    has_criminal_flag: bool,
+    has_suspect_flag: bool,
+    has_disapproval_flag: bool,
+    pilot_is_pirate: bool,
+    pilot_is_campaign_pirate: bool,
+    is_active_player_ship: bool,
+}
+
+struct PrecomputedCandidate {
+    cand_id: i64,
+    position: DVec3,
+    is_player_drone: bool,
+    is_capital: bool,
+    sig_radius: f64,
+    has_ewar: bool,
+    has_logi: bool,
+    drone_sig: f64,
+    drone_state: Option<(i64, Option<i64>, f64)>,
+    owner: Option<CandidateOwnerMeta>,
+}
+
 pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
     crate::services::mobile_deployables_ext::step_system_deployables_sync(ctx, solar_system_id);
-    {
+    let (mut npcs_in_sys, has_scram, prev_npc_scram_targets, is_debugged) = {
         let guard = ctx.combat_ephemeral.read().unwrap_or_else(|e| e.into_inner());
-        let has_npcs = guard.npc_entities.values().any(|n| n.solar_system_id == solar_system_id);
-        let has_scram = guard.npc_scrambled_ships.get(&solar_system_id).is_some_and(|s| !s.is_empty());
-        if !has_npcs && !has_scram {
-            return;
-        }
-    }
-    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
-    let ball_map: HashMap<i64, Ball> = sys_handle
-        .ballpark
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .balls
-        .iter()
-        .map(|(&id, b)| (id, b.clone()))
-        .collect();
-
-    let (npc_ids, has_scrammed) = with_combat_ephemeral(ctx, |rt| {
-        let ids: Vec<i64> = rt
+        let npcs: Vec<_> = guard
             .npc_entities
             .values()
             .filter(|n| n.solar_system_id == solar_system_id)
-            .map(|n| n.ball_id)
+            .cloned()
             .collect();
-        let scrammed = rt.npc_scrambled_ships.contains_key(&solar_system_id);
-        (ids, scrammed)
-    });
-    if npc_ids.is_empty() && !has_scrammed {
-        return;
-    }
-    let prev_npc_scram_targets: HashSet<i64> = if has_scrammed {
-        with_mut_combat_ephemeral(ctx, |rt| {
-            rt.npc_scrambled_ships
-                .remove(&solar_system_id)
-                .unwrap_or_default()
-        })
-    } else {
-        HashSet::new()
+        let scram_opt = guard.npc_scrambled_ships.get(&solar_system_id);
+        let has_scram = scram_opt.is_some_and(|s| !s.is_empty());
+        if npcs.is_empty() && !has_scram {
+            return;
+        }
+        let prev_scram = scram_opt.cloned().unwrap_or_default();
+        let debugged = !guard.behavior_debugging_active.is_empty();
+        (npcs, has_scram, prev_scram, debugged)
     };
-    let mut active_npc_scram_targets: HashSet<i64> = HashSet::new();
+    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
 
-    for nid in npc_ids {
-        let Some(mut npc) = with_combat_ephemeral(ctx, |rt| rt.npc_entities.get(&nid).cloned()) else {
-            continue;
-        };
-        let orig_npc = npc.clone();
-        let npc_dead = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner()).combat_states.get(&nid).is_some_and(|cs| cs.structure_hp <= 0.0);
-        let Some(npc_ball) = ball_map.get(&nid).filter(|_| !npc_dead) else {
-            with_mut_combat_ephemeral(ctx, |rt| { rt.npc_entities.remove(&nid); });
-            continue;
+    let (lite_balls, cand_ball_ids, mut dead_npc_set): (
+        HashMap<i64, BallSnapshotLite>,
+        Vec<i64>,
+        HashSet<i64>,
+    ) = {
+        let bp = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
+        let mut lites = HashMap::new();
+        let mut cand_ids = Vec::new();
+        let mut dead_npcs = HashSet::new();
+
+        let to_lite = |id: i64, b: &Ball| -> BallSnapshotLite {
+            let is_cloaked_or_dead = bp
+                .combat_states
+                .get(&id)
+                .is_some_and(|cs| cs.is_cloaked || cs.structure_hp <= 0.0);
+            BallSnapshotLite {
+                position: b.position,
+                type_id: b.type_id,
+                speed_fraction: b.speed_fraction,
+                radius: b.radius,
+                max_velocity: b.max_velocity,
+                mode_is_warp: matches!(b.mode, MovementMode::Warp { .. }),
+                is_cloaked_or_dead,
+            }
         };
 
-        let is_debugged = with_combat_ephemeral(ctx, |rt| {
-            rt.behavior_debugging_active.contains(&nid)
-                || rt.behavior_debugging_active.contains(&(solar_system_id as i64))
-                || !rt.behavior_debugging_active.is_empty()
+        for npc in &npcs_in_sys {
+            let npc_dead = bp
+                .combat_states
+                .get(&npc.ball_id)
+                .is_some_and(|cs| cs.structure_hp <= 0.0);
+            if npc_dead {
+                dead_npcs.insert(npc.ball_id);
+            } else if let Some(b) = bp.balls.get(&npc.ball_id) {
+                lites.entry(npc.ball_id).or_insert_with(|| to_lite(npc.ball_id, b));
+            } else {
+                dead_npcs.insert(npc.ball_id);
+            }
+            for &tid in npc
+                .aggression_threat
+                .keys()
+                .chain(npc.threat_table.keys())
+                .chain(npc.target_id.iter())
+            {
+                if !lites.contains_key(&tid) {
+                    if let Some(tb) = bp.balls.get(&tid) {
+                        lites.insert(tid, to_lite(tid, tb));
+                    }
+                }
+            }
+        }
+
+        if dead_npcs.len() < npcs_in_sys.len() {
+            for (&id, b) in &bp.balls {
+                let is_targetable_cat = ctx
+                    .sde
+                    .types
+                    .get(&b.type_id)
+                    .is_none_or(|t| matches!(t.category_id, 6 | 11 | 18 | 65));
+                if !is_targetable_cat {
+                    continue;
+                }
+                let lite = *lites.entry(id).or_insert_with(|| to_lite(id, b));
+                if b.type_id != 26468 && !lite.mode_is_warp && !lite.is_cloaked_or_dead {
+                    cand_ids.push(id);
+                }
+            }
+        }
+
+        (lites, cand_ids, dead_npcs)
+    };
+
+    let mut non_npc_drones: Vec<(i64, Option<(u32, i64, Option<i64>, f64)>)> = Vec::new();
+    if !cand_ball_ids.is_empty() {
+        with_combat_ephemeral(ctx, |rt| {
+            for cid in cand_ball_ids {
+                if !rt.npc_entities.contains_key(&cid) {
+                    let drone_info = rt
+                        .active_drones_in_space
+                        .get(&cid)
+                        .map(|d| (d.type_id, d.activity_state, d.target_id, d.damage_vector.total()));
+                    non_npc_drones.push((cid, drone_info));
+                }
+            }
         });
+    }
+
+    let now_unix = ctx.now_unix();
+    let sys_sec = ctx
+        .sde
+        .solar_systems
+        .get(&solar_system_id)
+        .map(|sys| sys.security_status)
+        .unwrap_or(0.0);
+    let sec_threshold = faction_police_sec_threshold(sys_sec).unwrap_or(-5.0);
+
+    let precomputed_cands: Vec<PrecomputedCandidate> = if non_npc_drones.is_empty() {
+        Vec::new()
+    } else {
+        struct RawCand {
+            cand_id: i64,
+            position: DVec3,
+            is_player_drone: bool,
+            is_capital: bool,
+            sig_radius: f64,
+            has_ewar: bool,
+            has_logi: bool,
+            drone_sig: f64,
+            drone_state: Option<(i64, Option<i64>, f64)>,
+            owner_cid: Option<i64>,
+            standings: HashMap<i64, f64>,
+            is_low_sec_criminal: bool,
+            war_faction_id: Option<i64>,
+            is_capsule: bool,
+            owner_active_ship_id: Option<i64>,
+            is_active_player_ship: bool,
+        }
+
+        let mut raws: Vec<RawCand> = ctx.db.with_snapshot(|snap| {
+            let mut ewar_locs: HashSet<i64> = HashSet::new();
+            let mut logi_locs: HashSet<i64> = HashSet::new();
+            let cand_id_set: HashSet<i64> = non_npc_drones.iter().map(|&(id, _)| id).collect();
+            if !snap.module_active_states.is_empty() {
+                for &aid in &snap.module_active_states {
+                    if let Some(it) = snap.items.get(&aid) {
+                        if cand_id_set.contains(&it.location_id) {
+                            if let Some(mt) = ctx.sde.types.get(&it.type_id) {
+                                if matches!(mt.group_id, 52 | 65 | 201 | 208 | 291 | 357) {
+                                    ewar_locs.insert(it.location_id);
+                                }
+                                if matches!(mt.group_id, 41 | 325 | 585) {
+                                    logi_locs.insert(it.location_id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut active_ship_to_char: HashMap<i64, i64> = HashMap::new();
+            for ch in snap.characters.values() {
+                if cand_id_set.contains(&ch.active_ship_id) {
+                    active_ship_to_char
+                        .entry(ch.active_ship_id)
+                        .or_insert(ch.character_id);
+                }
+            }
+
+            let mut out = Vec::new();
+            for (cand_id, drone_info) in non_npc_drones {
+                let Some(lite) = lite_balls.get(&cand_id) else {
+                    continue;
+                };
+                let is_player_drone = drone_info.is_some()
+                    || snap.items.get(&cand_id).is_some_and(|item| {
+                        ctx.sde
+                            .types
+                            .get(&item.type_id)
+                            .is_some_and(|t| t.category_id == 18 || matches!(t.group_id, 100 | 549 | 1023))
+                    });
+                if lite.max_velocity <= 0.0 && !is_player_drone {
+                    continue;
+                }
+                let (owner_cid, is_active_player_ship) = if is_player_drone {
+                    let ocid = snap
+                        .items
+                        .get(&cand_id)
+                        .and_then(|item| snap.characters.get(&item.owner_id))
+                        .map(|c| c.character_id);
+                    (ocid, false)
+                } else {
+                    let ocid = active_ship_to_char.get(&cand_id).copied();
+                    (ocid, ocid.is_some())
+                };
+
+                let item_opt = snap.items.get(&cand_id);
+                let st = item_opt.and_then(|i| ctx.sde.types.get(&i.type_id));
+                let is_capital = st.is_some_and(|t| matches!(t.group_id, 485 | 547 | 1538 | 30 | 659));
+                let sig_radius = st
+                    .and_then(|t| t.default_attributes.get(&552).copied())
+                    .unwrap_or(40.0);
+                let has_ewar = ewar_locs.contains(&cand_id);
+                let has_logi = logi_locs.contains(&cand_id);
+                let is_capsule = item_opt
+                    .map(|i| {
+                        i.type_id == 670
+                            || ctx.sde.types.get(&i.type_id).map(|t| t.group_id == 29).unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+
+                let (drone_sig, drone_state) = if is_player_drone {
+                    let d_tid = drone_info.map(|d| d.0).unwrap_or(lite.type_id);
+                    let d_sig = ctx
+                        .sde
+                        .types
+                        .get(&d_tid)
+                        .and_then(|t| t.default_attributes.get(&552).copied())
+                        .unwrap_or(25.0);
+                    let d_state = drone_info.map(|(_, act, tid, dps)| (act, tid, dps));
+                    (d_sig, d_state)
+                } else {
+                    (0.0, None)
+                };
+
+                let (standings, is_low_sec_criminal, war_faction_id, owner_active_ship_id) =
+                    if let Some(cid) = owner_cid {
+                        let char_rec = snap.characters.get(&cid);
+                        let s = char_rec.map(|c| c.standings.clone()).unwrap_or_default();
+                        let sec = char_rec.map(|c| c.security_status).unwrap_or(0.0);
+                        let wf = char_rec.and_then(|c| c.war_faction_id);
+                        let osid = char_rec.map(|c| c.active_ship_id);
+                        (s, sec <= sec_threshold || sec <= -5.0, wf, osid)
+                    } else {
+                        (HashMap::new(), false, None, None)
+                    };
+
+                out.push(RawCand {
+                    cand_id,
+                    position: lite.position,
+                    is_player_drone,
+                    is_capital,
+                    sig_radius,
+                    has_ewar,
+                    has_logi,
+                    drone_sig,
+                    drone_state,
+                    owner_cid,
+                    standings,
+                    is_low_sec_criminal,
+                    war_faction_id,
+                    is_capsule,
+                    owner_active_ship_id,
+                    is_active_player_ship,
+                });
+            }
+            out
+        });
+
+        if raws.iter().any(|r| r.is_player_drone && r.owner_cid.is_none()) {
+            let fallback_owners: HashMap<i64, i64> = with_combat_ephemeral(ctx, |rt| {
+                raws.iter()
+                    .filter(|r| r.is_player_drone && r.owner_cid.is_none())
+                    .filter_map(|r| {
+                        rt.active_drones_in_space
+                            .get(&r.cand_id)
+                            .map(|d| (r.cand_id, d.owner_char_id))
+                    })
+                    .collect()
+            });
+            if !fallback_owners.is_empty() {
+                ctx.db.with_snapshot(|snap| {
+                    for r in &mut raws {
+                        if r.owner_cid.is_none() {
+                            if let Some(&cid) = fallback_owners.get(&r.cand_id) {
+                                r.owner_cid = Some(cid);
+                                let char_rec = snap.characters.get(&cid);
+                                r.standings = char_rec.map(|c| c.standings.clone()).unwrap_or_default();
+                                let sec = char_rec.map(|c| c.security_status).unwrap_or(0.0);
+                                r.is_low_sec_criminal = sec <= sec_threshold || sec <= -5.0;
+                                r.war_faction_id = char_rec.and_then(|c| c.war_faction_id);
+                                r.owner_active_ship_id = char_rec.map(|c| c.active_ship_id);
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        let owner_cids: Vec<i64> = {
+            let mut s: HashSet<i64> = HashSet::new();
+            for r in &raws {
+                if let Some(cid) = r.owner_cid {
+                    s.insert(cid);
+                }
+            }
+            s.into_iter().collect()
+        };
+
+        let cw_flags: HashMap<i64, (bool, bool)> = if owner_cids.is_empty() {
+            HashMap::new()
+        } else if let Ok(cw) = ctx.crimewatch.read() {
+            owner_cids
+                .iter()
+                .map(|&cid| {
+                    let st = cw.states.get(&cid);
+                    (
+                        cid,
+                        (
+                            st.is_some_and(|s| s.is_criminal(now_unix)),
+                            st.is_some_and(|s| s.is_suspect(now_unix)),
+                        ),
+                    )
+                })
+                .collect()
+        } else {
+            HashMap::new()
+        };
+
+        let disapproval_cids: HashSet<i64> = if owner_cids.is_empty() {
+            HashSet::new()
+        } else {
+            crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                owner_cids
+                    .iter()
+                    .copied()
+                    .filter(|cid| rt.disapproval_flags.get(cid).copied().is_some_and(|exp| now_unix < exp))
+                    .collect()
+            })
+        };
+
+        let campaign_pirate_cids: HashMap<i64, bool> = owner_cids
+            .iter()
+            .map(|&cid| {
+                (
+                    cid,
+                    crate::services::security_mgr::is_pilot_aligned_with_insurgency_pirate(
+                        ctx,
+                        solar_system_id,
+                        cid,
+                    ),
+                )
+            })
+            .collect();
+
+        raws.into_iter()
+            .map(|r| {
+                let owner = r.owner_cid.map(|cid| {
+                    let (has_criminal_flag, has_suspect_flag) =
+                        cw_flags.get(&cid).copied().unwrap_or((false, false));
+                    CandidateOwnerMeta {
+                        standings: r.standings,
+                        is_low_sec_criminal: r.is_low_sec_criminal,
+                        war_faction_id: r.war_faction_id,
+                        is_capsule: r.is_capsule,
+                        owner_active_ship_id: r.owner_active_ship_id,
+                        has_criminal_flag,
+                        has_suspect_flag,
+                        has_disapproval_flag: disapproval_cids.contains(&cid),
+                        pilot_is_pirate: r
+                            .war_faction_id
+                            .is_some_and(crate::services::security_mgr::is_pirate_militia_faction),
+                        pilot_is_campaign_pirate: campaign_pirate_cids
+                            .get(&cid)
+                            .copied()
+                            .unwrap_or(false),
+                        is_active_player_ship: r.is_active_player_ship,
+                    }
+                });
+                PrecomputedCandidate {
+                    cand_id: r.cand_id,
+                    position: r.position,
+                    is_player_drone: r.is_player_drone,
+                    is_capital: r.is_capital,
+                    sig_radius: r.sig_radius,
+                    has_ewar: r.has_ewar,
+                    has_logi: r.has_logi,
+                    drone_sig: r.drone_sig,
+                    drone_state: r.drone_state,
+                    owner,
+                }
+            })
+            .collect()
+    };
+
+    let cand_by_id: HashMap<i64, &PrecomputedCandidate> = precomputed_cands
+        .iter()
+        .map(|c| (c.cand_id, c))
+        .collect();
+
+    let mut active_npc_scram_targets: HashSet<i64> = HashSet::new();
+    let mut dead_npcs_to_remove: Vec<i64> = Vec::new();
+    let mut updated_npcs = Vec::new();
+    let mut destroyed_in_call: HashSet<i64> = HashSet::new();
+    let mut cached_c_stage = None;
+    let mut cached_s_stage = None;
+
+    let mut group_peer_ids_by_group: HashMap<u32, Vec<i64>> = HashMap::new();
+    for n in &npcs_in_sys {
+        if !dead_npc_set.contains(&n.ball_id) {
+            group_peer_ids_by_group
+                .entry(n.spawn_group_id)
+                .or_default()
+                .push(n.ball_id);
+        }
+    }
+
+    for npc_val in npcs_in_sys.drain(..) {
+        let nid = npc_val.ball_id;
+        if dead_npc_set.contains(&nid) || destroyed_in_call.contains(&nid) {
+            dead_npcs_to_remove.push(nid);
+            continue;
+        }
+        let Some(&npc_ball) = lite_balls.get(&nid) else {
+            dead_npc_set.insert(nid);
+            dead_npcs_to_remove.push(nid);
+            continue;
+        };
+        let orig_npc = npc_val.clone();
+        let mut npc = npc_val;
+
         if is_debugged {
             info!(
                 target: "ai::behavior",
@@ -388,13 +892,11 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
 
         if npc.archetype == "TransmissionRelay"
             || npc.type_id == 41_589
-            || matches!(npc_ball.mode, MovementMode::Warp { .. })
+            || npc_ball.mode_is_warp
         {
-            if matches!(npc_ball.mode, MovementMode::Warp { .. }) && npc.target_id.is_some() {
+            if npc_ball.mode_is_warp && npc.target_id.is_some() {
                 npc.target_id = None;
-                with_mut_combat_ephemeral(ctx, |rt| {
-                    rt.npc_entities.insert(nid, npc);
-                });
+                updated_npcs.push((nid, npc));
             }
             continue;
         }
@@ -411,21 +913,21 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         // 1. Remote Repair (`feat:npc.npc-remote-repair`, `feat:npc.sleepers`):
         // If not ECM-jammed, repair damaged fellow NPCs in the same `spawn_group_id` within `remote_rep_range`.
         if !npc.ecm_jammed && (npc.remote_shield_rep > 0.0 || npc.remote_armor_rep > 0.0) {
-            let group_peers: Vec<i64> = with_combat_ephemeral(ctx, |rt| {
-                rt.npc_entities
-                    .values()
-                    .filter(|p| {
-                        p.solar_system_id == solar_system_id
-                            && p.spawn_group_id == npc.spawn_group_id
-                            && p.ball_id != nid
+            if let Some(peers) = group_peer_ids_by_group.get(&npc.spawn_group_id) {
+                let peers_in_range: Vec<i64> = peers
+                    .iter()
+                    .copied()
+                    .filter(|&pid| {
+                        pid != nid
+                            && !destroyed_in_call.contains(&pid)
+                            && lite_balls
+                                .get(&pid)
+                                .is_some_and(|pb| npc_ball.position.distance(pb.position) <= npc.remote_rep_range)
                     })
-                    .map(|p| p.ball_id)
-                    .collect()
-            });
-            let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
-            for pid in group_peers {
-                if let Some(peer_ball) = ball_map.get(&pid) {
-                    if npc_ball.position.distance(peer_ball.position) <= npc.remote_rep_range {
+                    .collect();
+                if !peers_in_range.is_empty() {
+                    let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
+                    for pid in peers_in_range {
                         if let Some(pcs) = bp.combat_states.get_mut(&pid) {
                             if npc.remote_shield_rep > 0.0 && pcs.shield_hp < pcs.max_shield_hp {
                                 pcs.shield_hp =
@@ -455,45 +957,50 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             150_000.0
         };
         let valid_target = |tid: i64| -> bool {
-            let Some(tb) = ball_map.get(&tid) else {
-                return false;
-            };
-            if tb.position.distance(npc_ball.position) > max_engage_range
-                || matches!(tb.mode, MovementMode::Warp { .. })
-            {
+            if destroyed_in_call.contains(&tid) {
                 return false;
             }
-            let bp = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
-            !bp.combat_states.get(&tid).is_some_and(|cs| cs.is_cloaked || cs.structure_hp <= 0.0)
+            let Some(tb) = lite_balls.get(&tid) else {
+                return false;
+            };
+            tb.position.distance(npc_ball.position) <= max_engage_range
+                && !tb.mode_is_warp
+                && !tb.is_cloaked_or_dead
         };
-        npc.aggression_threat.retain(|&tid, _| valid_target(tid));
-        npc.threat_table.retain(|&tid, _| valid_target(tid));
+        if !npc.aggression_threat.is_empty() {
+            npc.aggression_threat.retain(|&tid, _| valid_target(tid));
+        }
+        if !npc.threat_table.is_empty() {
+            npc.threat_table.retain(|&tid, _| valid_target(tid));
+        }
         if npc.target_id.is_some_and(|tid| !valid_target(tid)) {
             npc.target_id = None;
         }
 
         // Add any hostile ships or active player drones within grid aggro range that pass standings aggression check
-        for (&cand_id, cand_ball) in &ball_map {
-            let is_player_drone = with_combat_ephemeral(ctx, |rt| rt.active_drones_in_space.contains_key(&cand_id))
-                || ctx.db.with_snapshot(|snap| {
-                    snap.items.get(&cand_id).is_some_and(|item| {
-                        ctx.sde.types.get(&item.type_id).is_some_and(|t| t.category_id == 18 || matches!(t.group_id, 100 | 549 | 1023))
-                    })
-                });
-            let is_targetable_category = ctx
-                .sde
-                .types
-                .get(&cand_ball.type_id)
-                .is_none_or(|t| matches!(t.category_id, 6 | 11 | 18 | 65));
-            if cand_id == nid || !is_targetable_category || cand_ball.type_id == 26468
-                || (cand_ball.max_velocity <= 0.0 && !is_player_drone) || !valid_target(cand_id)
-            {
-                continue;
-            }
-            if with_combat_ephemeral(ctx, |rt| rt.npc_entities.contains_key(&cand_id)) {
-                continue;
-            }
-            let dist = npc_ball.position.distance(cand_ball.position);
+        if !precomputed_cands.is_empty() {
+            let is_police = matches!(npc.archetype.as_str(), "FactionPolice" | "Police");
+            let is_insurgency_pirate = npc.archetype == "InsurgencyPirateRoamer";
+            let is_insurgency_enforcer = npc.archetype == "InsurgencyEnforcer";
+            let is_ci_sentry = npc.archetype == "CounterInsurgencySentry" || npc.type_id == 79_507;
+            let is_ambush_tackler = npc.archetype == "InsurgencyAmbushTackler";
+            let is_ore_defender = npc.archetype == "InsurgencyAmbushOreDefender";
+            let is_ore_rorqual = npc.type_id == 79_589 || npc.archetype == "InsurgencyOreRorqual";
+            let is_outpost_defender = npc.archetype == "InsurgencyOutpostDefender";
+            let is_navy = matches!(
+                npc.archetype.as_str(),
+                "Navy" | "CaldariNavy" | "MinmatarNavy" | "AmarrNavy" | "GallenteNavy"
+            ) || (matches!(npc.faction_id, 500001..=500004)
+                && !is_ci_sentry
+                && !is_insurgency_enforcer
+                && !matches!(npc.archetype.as_str(), "BeltRat" | "Pirate" | "FactionPolice" | "Police"));
+            let is_pirate = matches!(
+                npc.archetype.as_str(),
+                "BeltRat" | "Pirate" | "Officer" | "CloneSoldier" | "MorduCommander"
+            );
+            let is_edencom = matches!(npc.archetype.as_str(), "EDENCOM" | "Edencom");
+            let is_zarzakh_gun = npc.archetype == "ZarzakhGateGun";
+
             let max_acquire_range = if npc.type_id == 79_507 {
                 npc.optimal_range.max(500_000.0)
             } else if npc.archetype == "SleeperSentry" {
@@ -503,195 +1010,124 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             } else {
                 75_000.0
             };
-            if dist > max_acquire_range {
-                continue;
-            }
-            // Standings and security status check (`feat:npc.npc-standings-aggression`, `feat:npc.navy-npc`, `F-01`):
-            // Resolve owner character for ships and player drones
-            let owner_char_opt = if is_player_drone {
-                ctx.db.with_snapshot(|snap| {
-                    snap.items
-                        .get(&cand_id)
-                        .and_then(|item| snap.characters.get(&item.owner_id))
-                        .map(|c| c.character_id)
-                }).or_else(|| {
-                    with_combat_ephemeral(ctx, |rt| {
-                        rt.active_drones_in_space.get(&cand_id).map(|d| d.owner_char_id)
-                    })
-                })
-            } else {
-                ctx.db.with_snapshot(|snap| {
-                    snap.characters
-                        .values()
-                        .find(|c| c.active_ship_id == cand_id)
-                        .map(|c| c.character_id)
-                })
-            };
+            let max_range = max_acquire_range.min(max_engage_range);
 
-            if let Some(cid) = owner_char_opt {
-                let is_capsule = ctx.db.with_snapshot(|snap| {
-                    snap.items.get(&cand_id).map(|i| {
-                        i.type_id == 670 || ctx.sde.types.get(&i.type_id).map(|t| t.group_id == 29).unwrap_or(false)
-                    }).unwrap_or(false)
-                });
-                let is_police = matches!(npc.archetype.as_str(), "FactionPolice" | "Police");
-                let is_insurgency_pirate = npc.archetype == "InsurgencyPirateRoamer";
-                let is_insurgency_enforcer = npc.archetype == "InsurgencyEnforcer";
-                let is_ci_sentry = npc.archetype == "CounterInsurgencySentry" || npc.type_id == 79_507;
-                let is_ambush_tackler = npc.archetype == "InsurgencyAmbushTackler";
-                let is_ore_defender = npc.archetype == "InsurgencyAmbushOreDefender";
-                let is_ore_rorqual = npc.type_id == 79_589 || npc.archetype == "InsurgencyOreRorqual";
-                let is_outpost_defender = npc.archetype == "InsurgencyOutpostDefender";
-                let is_navy = matches!(
-                    npc.archetype.as_str(),
-                    "Navy" | "CaldariNavy" | "MinmatarNavy" | "AmarrNavy" | "GallenteNavy"
-                ) || (matches!(npc.faction_id, 500001..=500004)
-                    && !is_ci_sentry
-                    && !is_insurgency_enforcer
-                    && !matches!(npc.archetype.as_str(), "BeltRat" | "Pirate" | "FactionPolice" | "Police"));
-                let is_pirate = matches!(
-                    npc.archetype.as_str(),
-                    "BeltRat" | "Pirate" | "Officer" | "CloneSoldier" | "MorduCommander"
-                );
-                let is_edencom = matches!(npc.archetype.as_str(), "EDENCOM" | "Edencom");
-                let is_zarzakh_gun = npc.archetype == "ZarzakhGateGun";
-
-                // Capsules (pods) are never engaged by Faction Police, Empire Navy, Insurgency Enforcers, or Counter-Insurgency Sentries
-                if (is_police || is_navy || is_insurgency_enforcer || is_ci_sentry) && is_capsule {
+            for cand in &precomputed_cands {
+                let cand_id = cand.cand_id;
+                if cand_id == nid || destroyed_in_call.contains(&cand_id) {
+                    continue;
+                }
+                let dist = npc_ball.position.distance(cand.position);
+                if dist > max_range {
                     continue;
                 }
 
-                let (standing, is_low_sec_criminal, war_faction_id) = ctx.db.with_snapshot(|snap| {
-                    let char_rec = snap.characters.get(&cid);
-                    let s = char_rec
-                        .and_then(|c| c.standings.get(&(npc.faction_id as i64)).copied())
-                        .unwrap_or(0.0);
-                    let sec = char_rec.map(|c| c.security_status).unwrap_or(0.0);
-                    let wf = char_rec.and_then(|c| c.war_faction_id);
-                    let sys_sec = ctx
-                        .sde
-                        .solar_systems
-                        .get(&solar_system_id)
-                        .map(|sys| sys.security_status)
-                        .unwrap_or(0.0);
-                    let sec_threshold = faction_police_sec_threshold(sys_sec).unwrap_or(-5.0);
-                    let is_crim = sec <= sec_threshold || sec <= -5.0;
-                    (s, is_crim, wf)
-                });
-                let now_unix = ctx.now_unix();
-                let has_criminal_flag = ctx.crimewatch.read().ok().and_then(|cw| {
-                    cw.states.get(&cid).map(|st| st.is_criminal(now_unix))
-                }).unwrap_or(false);
-                let has_suspect_flag = ctx.crimewatch.read().ok().and_then(|cw| {
-                    cw.states.get(&cid).map(|st| st.is_suspect(now_unix))
-                }).unwrap_or(false);
-                let has_disapproval_flag = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                    rt.disapproval_flags.get(&cid).copied().is_some_and(|exp| now_unix < exp)
-                });
-                let is_criminal = is_low_sec_criminal || has_criminal_flag;
-                let pilot_is_pirate = war_faction_id.is_some_and(crate::services::security_mgr::is_pirate_militia_faction);
-                let pilot_is_campaign_pirate = crate::services::security_mgr::is_pilot_aligned_with_insurgency_pirate(
-                    ctx, solar_system_id, cid,
-                );
-                let pilot_is_same_pirate = if npc.faction_id != 0 {
-                    war_faction_id == Some(i64::from(npc.faction_id))
-                } else {
-                    pilot_is_campaign_pirate
-                };
-
-                let owner_active_ship_id = ctx.db.with_snapshot(|snap| {
-                    snap.characters.get(&cid).map(|c| c.active_ship_id)
-                });
-                let owner_already_threat = owner_active_ship_id.is_some_and(|osid| {
-                    npc.aggression_threat.contains_key(&osid) || npc.threat_table.contains_key(&osid)
-                });
-
-                let should_skip = if is_pirate {
-                    false
-                } else if is_insurgency_pirate {
-                    let c_stage = crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, solar_system_id);
-                    c_stage < 2 || pilot_is_same_pirate
-                } else if is_insurgency_enforcer {
-                    let s_stage = crate::services::security_mgr::insurgency_system_suppression_stage(ctx, solar_system_id);
-                    s_stage < 3 || !pilot_is_pirate
-                } else if is_ci_sentry {
-                    !pilot_is_pirate && !has_criminal_flag
-                } else if is_ambush_tackler {
-                    pilot_is_same_pirate
-                } else if is_ore_defender {
-                    !pilot_is_pirate
-                } else if is_ore_rorqual {
-                    true
-                } else if is_outpost_defender {
-                    if npc.faction_id == 500_018 { !pilot_is_pirate } else { pilot_is_same_pirate }
-                } else if is_zarzakh_gun {
-                    !has_criminal_flag && !has_suspect_flag && !has_disapproval_flag
-                } else if is_navy {
-                    standing > -5.0 && !is_criminal
-                } else if is_police {
-                    !is_criminal && standing > -5.0
-                } else if is_edencom {
-                    standing >= 0.0 && !is_criminal
-                } else {
-                    standing >= 5.0 && !is_criminal
-                };
-                if should_skip && !owner_already_threat && !npc.aggression_threat.contains_key(&cand_id) && !npc.threat_table.contains_key(&cand_id) {
-                    continue;
-                }
-            } else if !npc.aggression_threat.contains_key(&cand_id) && !npc.threat_table.contains_key(&cand_id) {
-                continue;
-            }
-            let (is_capital, sig_radius, has_ewar, has_logi) = ctx.db.with_snapshot(|snap| {
-                let st = snap.items.get(&cand_id).and_then(|i| ctx.sde.types.get(&i.type_id));
-                let cap = st.is_some_and(|t| matches!(t.group_id, 485 | 547 | 1538 | 30 | 659));
-                let sig = st.and_then(|t| t.default_attributes.get(&552).copied()).unwrap_or(40.0);
-                let (mut ewar, mut logi) = (false, false);
-                for &aid in &snap.module_active_states {
-                    if let Some(mt) = snap.items.get(&aid).filter(|i| i.location_id == cand_id).and_then(|it| ctx.sde.types.get(&it.type_id)) {
-                        if matches!(mt.group_id, 52 | 65 | 201 | 208 | 291 | 357) { ewar = true; }
-                        if matches!(mt.group_id, 41 | 325 | 585) { logi = true; }
+                if let Some(owner) = cand.owner.as_ref() {
+                    // Capsules (pods) are never engaged by Faction Police, Empire Navy, Insurgency Enforcers, or Counter-Insurgency Sentries
+                    if (is_police || is_navy || is_insurgency_enforcer || is_ci_sentry) && owner.is_capsule {
+                        continue;
                     }
+                    let standing = owner
+                        .standings
+                        .get(&(npc.faction_id as i64))
+                        .copied()
+                        .unwrap_or(0.0);
+                    let is_criminal = owner.is_low_sec_criminal || owner.has_criminal_flag;
+                    let pilot_is_same_pirate = if npc.faction_id != 0 {
+                        owner.war_faction_id == Some(i64::from(npc.faction_id))
+                    } else {
+                        owner.pilot_is_campaign_pirate
+                    };
+                    let owner_already_threat = owner.owner_active_ship_id.is_some_and(|osid| {
+                        npc.aggression_threat.contains_key(&osid) || npc.threat_table.contains_key(&osid)
+                    });
+
+                    let should_skip = if is_pirate {
+                        false
+                    } else if is_insurgency_pirate {
+                        let c_stage = *cached_c_stage.get_or_insert_with(|| {
+                            crate::services::insurgency_services::insurgency_system_corruption_stage(
+                                ctx,
+                                solar_system_id,
+                            )
+                        });
+                        c_stage < 2 || pilot_is_same_pirate
+                    } else if is_insurgency_enforcer {
+                        let s_stage = *cached_s_stage.get_or_insert_with(|| {
+                            crate::services::security_mgr::insurgency_system_suppression_stage(
+                                ctx,
+                                solar_system_id,
+                            )
+                        });
+                        s_stage < 3 || !owner.pilot_is_pirate
+                    } else if is_ci_sentry {
+                        !owner.pilot_is_pirate && !owner.has_criminal_flag
+                    } else if is_ambush_tackler {
+                        pilot_is_same_pirate
+                    } else if is_ore_defender {
+                        !owner.pilot_is_pirate
+                    } else if is_ore_rorqual {
+                        true
+                    } else if is_outpost_defender {
+                        if npc.faction_id == 500_018 { !owner.pilot_is_pirate } else { pilot_is_same_pirate }
+                    } else if is_zarzakh_gun {
+                        !owner.has_criminal_flag && !owner.has_suspect_flag && !owner.has_disapproval_flag
+                    } else if is_navy {
+                        standing > -5.0 && !is_criminal
+                    } else if is_police {
+                        !is_criminal && standing > -5.0
+                    } else if is_edencom {
+                        standing >= 0.0 && !is_criminal
+                    } else {
+                        standing >= 5.0 && !is_criminal
+                    };
+                    if should_skip
+                        && !owner_already_threat
+                        && !npc.aggression_threat.contains_key(&cand_id)
+                        && !npc.threat_table.contains_key(&cand_id)
+                    {
+                        continue;
+                    }
+                } else if !npc.aggression_threat.contains_key(&cand_id) && !npc.threat_table.contains_key(&cand_id) {
+                    continue;
                 }
-                (cap, sig, ewar, logi)
-            });
-            // DERIVED: threat weighting combines hull class/drone base, signature radius (attr 552), proximity, DPS, EWAR (1.5x), and logistics (1.3x).
-            let sig_weight = (sig_radius / 40.0).clamp(0.5, 5.0) * 10.0;
-            let role_mult = if has_ewar { 1.5 } else if has_logi { 1.3 } else { 1.0 };
-            let (drone_sig, drone_dps, drone_attacking) = if is_player_drone {
-                let d_state = with_combat_ephemeral(ctx, |rt| rt.active_drones_in_space.get(&cand_id).cloned());
-                let d_tid = d_state.as_ref().map(|d| d.type_id).unwrap_or(cand_ball.type_id);
-                let d_sig = ctx.sde.types.get(&d_tid).and_then(|t| t.default_attributes.get(&552).copied()).unwrap_or(25.0);
-                let attacking = d_state
-                    .as_ref()
-                    .is_some_and(|d| d.activity_state == 1 && (d.target_id.is_none() || d.target_id == Some(npc.ball_id)));
-                let d_dps = if attacking {
-                    d_state.as_ref().map(|d| d.damage_vector.total()).unwrap_or(15.0)
+
+                // DERIVED: threat weighting combines hull class/drone base, signature radius (attr 552), proximity, DPS, EWAR (1.5x), and logistics (1.3x).
+                let sig_weight = (cand.sig_radius / 40.0).clamp(0.5, 5.0) * 10.0;
+                let role_mult = if cand.has_ewar { 1.5 } else if cand.has_logi { 1.3 } else { 1.0 };
+                let (drone_sig, drone_dps, drone_attacking) = if cand.is_player_drone {
+                    let attacking = cand.drone_state.is_some_and(|(act, tid, _)| {
+                        act == 1 && (tid.is_none() || tid == Some(npc.ball_id))
+                    });
+                    let d_dps = if attacking {
+                        cand.drone_state.map(|(_, _, dps)| dps).unwrap_or(15.0)
+                    } else {
+                        0.0
+                    };
+                    (cand.drone_sig, d_dps, attacking)
                 } else {
-                    0.0
+                    (0.0, 0.0, false)
                 };
-                (d_sig, d_dps, attacking)
-            } else {
-                (0.0, 0.0, false)
-            };
-            let base_threat = if is_capital {
-                if npc.archetype == "Sleeper" { 1_000.0 } else { (200.0 + sig_weight) * role_mult }
-            } else if is_player_drone {
-                let sig_bonus = (drone_sig / 25.0).clamp(0.5, 4.0) * 5.0;
-                if drone_attacking {
-                    let prox_bonus = (10_000.0 / dist.max(500.0)).clamp(0.0, 20.0);
-                    let dps_bonus = (drone_dps / 10.0).clamp(0.0, 25.0);
-                    (140.0 + prox_bonus + sig_bonus + dps_bonus) * role_mult
+                let base_threat = if cand.is_capital {
+                    if npc.archetype == "Sleeper" { 1_000.0 } else { (200.0 + sig_weight) * role_mult }
+                } else if cand.is_player_drone {
+                    let sig_bonus = (drone_sig / 25.0).clamp(0.5, 4.0) * 5.0;
+                    if drone_attacking {
+                        let prox_bonus = (10_000.0 / dist.max(500.0)).clamp(0.0, 20.0);
+                        let dps_bonus = (drone_dps / 10.0).clamp(0.0, 25.0);
+                        (140.0 + prox_bonus + sig_bonus + dps_bonus) * role_mult
+                    } else {
+                        (55.0 + sig_bonus * 0.5) * role_mult
+                    }
                 } else {
-                    (55.0 + sig_bonus * 0.5) * role_mult
+                    (100.0 + sig_weight) * role_mult
+                };
+                let entry = npc.aggression_threat.entry(cand_id).or_insert(base_threat);
+                if cand.is_player_drone && !drone_attacking {
+                    *entry = base_threat;
+                } else if *entry < base_threat {
+                    *entry = base_threat;
                 }
-            } else {
-                (100.0 + sig_weight) * role_mult
-            };
-            let entry = npc.aggression_threat.entry(cand_id).or_insert(base_threat);
-            if is_player_drone && !drone_attacking {
-                *entry = base_threat;
-            } else if *entry < base_threat {
-                *entry = base_threat;
             }
         }
 
@@ -714,24 +1150,21 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
 
         let Some(target_id) = npc.target_id else {
             if npc != orig_npc {
-                with_mut_combat_ephemeral(ctx, |rt| {
-                    rt.npc_entities.insert(nid, npc);
-                });
+                updated_npcs.push((nid, npc));
             }
             continue;
         };
-        let Some(target_ball) = ball_map.get(&target_id) else {
+        let Some(&target_ball) = lite_balls.get(&target_id) else {
             npc.target_id = None;
             if npc != orig_npc {
-                with_mut_combat_ephemeral(ctx, |rt| {
-                    rt.npc_entities.insert(nid, npc);
-                });
+                updated_npcs.push((nid, npc));
             }
             continue;
         };
         let dist = npc_ball.position.distance(target_ball.position);
 
         // 3. Apply NPC EWAR & 4. Archetype Weapon Application synchronously on Ballpark
+        let mut destroyed_in_tick: Vec<(i64, i64, eve_destiny::Ball)> = Vec::new();
         let did_aggress = {
             let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
             let mut st_guard = sys_handle.actor_state.write().unwrap_or_else(|e| e.into_inner());
@@ -787,7 +1220,6 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                     }
                 }
             }
-            let mut destroyed_in_tick: Vec<(i64, i64, eve_destiny::Ball)> = Vec::new();
             if npc.archetype == "Triglavian" {
                 let mult = 1.0 + (npc.entropic_cycles as f64 * 0.10).min(1.50);
                 cycle_dmg = cycle_dmg.scaled(mult);
@@ -800,12 +1232,12 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 npc.drifter_doomsday_fired = true;
                 cycle_dmg = DamageVector::new(2_500.0, 2_500.0, 2_500.0, 2_500.0);
             } else if npc.archetype.eq_ignore_ascii_case("Edencom") {
-                let candidates: Vec<(i64, DVec3)> = ball_map
+                let candidates: Vec<(i64, DVec3)> = lite_balls
                     .iter()
-                    .filter(|(&other_id, other_ball)| {
+                    .filter(|(&other_id, _)| {
                         other_id != nid
                             && other_id != target_id
-                            && ctx.sde.types.get(&other_ball.type_id).is_none_or(|t| matches!(t.category_id, 6 | 11 | 18 | 65))
+                            && !destroyed_in_call.contains(&other_id)
                             && (npc.threat_table.contains_key(&other_id)
                                 || is_candidate_hostile_to_edencom(ctx, &npc, other_id, target_id))
                     })
@@ -824,11 +1256,16 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                     }
                 }
             } else if npc.archetype == "Sleeper" {
-                let is_cap = ctx.db.with_snapshot(|snap| {
-                    snap.items.get(&target_id).and_then(|i| {
-                        ctx.sde.types.get(&i.type_id).map(|t| matches!(t.group_id, 485 | 547 | 1538 | 30 | 659))
-                    }).unwrap_or(false)
-                });
+                let is_cap = cand_by_id
+                    .get(&target_id)
+                    .map(|c| c.is_capital)
+                    .unwrap_or_else(|| {
+                        ctx.db.with_snapshot(|snap| {
+                            snap.items.get(&target_id).and_then(|i| {
+                                ctx.sde.types.get(&i.type_id).map(|t| matches!(t.group_id, 485 | 547 | 1538 | 30 | 659))
+                            }).unwrap_or(false)
+                        })
+                    });
                 if is_cap {
                     cycle_dmg = cycle_dmg.scaled(2.5);
                 }
@@ -853,30 +1290,37 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 }
             }
             crate::system_actor::sync_ball_positions(&bp, &sys_handle.ball_positions, &sys_handle.scrambled_balls);
-            drop(st_guard);
-            drop(bp);
-            crate::combat::npc_ai::handle_npc_ai_ball_destructions(ctx, solar_system_id, destroyed_in_tick);
             can_fire || active_npc_scram_targets.contains(&target_id)
         };
+        if !destroyed_in_tick.is_empty() {
+            for &(_, did, _) in &destroyed_in_tick {
+                destroyed_in_call.insert(did);
+            }
+            crate::combat::npc_ai::handle_npc_ai_ball_destructions(ctx, solar_system_id, destroyed_in_tick);
+        }
         if did_aggress {
-            let now_u = ctx.now_unix();
-            let min_fresh = now_u.saturating_add(crate::sp6_lifecycle::NPC_TIMER_SECS.saturating_sub(5));
-            if let Some(target_char_id) = ctx.db.with_snapshot(|snap| {
-                let cid = snap.characters.values().find(|c| c.active_ship_id == target_id).map(|c| c.character_id)?;
-                if snap.sp6_lifecycle.disconnected_ships.get(&cid).is_some_and(|d| !d.removed_from_space) {
-                    return None;
+            let may_be_player_ship = cand_by_id
+                .get(&target_id)
+                .and_then(|c| c.owner.as_ref())
+                .is_none_or(|o| o.is_active_player_ship);
+            if may_be_player_ship {
+                let now_u = ctx.now_unix();
+                let min_fresh = now_u.saturating_add(crate::sp6_lifecycle::NPC_TIMER_SECS.saturating_sub(5));
+                if let Some(target_char_id) = ctx.db.with_snapshot(|snap| {
+                    let cid = snap.characters.values().find(|c| c.active_ship_id == target_id).map(|c| c.character_id)?;
+                    if snap.sp6_lifecycle.disconnected_ships.get(&cid).is_some_and(|d| !d.removed_from_space) {
+                        return None;
+                    }
+                    let sp_u = snap.sp6_lifecycle.npc_timers_until.get(&cid).copied().unwrap_or(0);
+                    (snap.sp6_lifecycle.safe_logoffs.contains_key(&cid) || sp_u < min_fresh).then_some(cid)
+                }) {
+                    crate::sp6_lifecycle::record_npc_aggression_timer(ctx, target_char_id, now_u);
                 }
-                let sp_u = snap.sp6_lifecycle.npc_timers_until.get(&cid).copied().unwrap_or(0);
-                (snap.sp6_lifecycle.safe_logoffs.contains_key(&cid) || sp_u < min_fresh).then_some(cid)
-            }) {
-                crate::sp6_lifecycle::record_npc_aggression_timer(ctx, target_char_id, now_u);
             }
         }
 
         if npc != orig_npc {
-            with_mut_combat_ephemeral(ctx, |rt| {
-                rt.npc_entities.insert(nid, npc);
-            });
+            updated_npcs.push((nid, npc));
         }
     }
 
@@ -911,10 +1355,24 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             &sys_handle.scrambled_balls,
         );
     }
-    if !active_npc_scram_targets.is_empty() {
+
+    let need_scram_write = !active_npc_scram_targets.is_empty() || has_scram;
+    if !dead_npcs_to_remove.is_empty() || !updated_npcs.is_empty() || need_scram_write {
         with_mut_combat_ephemeral(ctx, |rt| {
-            rt.npc_scrambled_ships
-                .insert(solar_system_id, active_npc_scram_targets);
+            for dead_id in dead_npcs_to_remove {
+                rt.npc_entities.remove(&dead_id);
+            }
+            for (nid, npc) in updated_npcs {
+                if !destroyed_in_call.contains(&nid) && rt.npc_entities.contains_key(&nid) {
+                    rt.npc_entities.insert(nid, npc);
+                }
+            }
+            if !active_npc_scram_targets.is_empty() {
+                rt.npc_scrambled_ships
+                    .insert(solar_system_id, active_npc_scram_targets);
+            } else if has_scram {
+                rt.npc_scrambled_ships.remove(&solar_system_id);
+            }
         });
     }
 }
@@ -1425,3 +1883,10 @@ pub use crate::services::combat_crimewatch::combat_npc_encounters::{
 };
 #[cfg(test)]
 #[path = "combat_npc_ai_tests.rs"] pub(crate) mod combat_npc_ai_tests;
+#[cfg(test)]
+#[path = "combat_npc_ai_edges_b4_tests.rs"]
+mod combat_npc_ai_edges_b4_tests;
+
+#[cfg(test)]
+#[path = "combat_npc_ai_edges2_tests.rs"]
+pub(crate) mod combat_npc_ai_edges2_tests;

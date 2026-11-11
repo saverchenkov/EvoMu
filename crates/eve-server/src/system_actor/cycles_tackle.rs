@@ -159,6 +159,18 @@ pub(crate) fn spawn_ball_with_combat_in_actor(
                 .unwrap_or(ball.radius.max(35.0))
         };
         cs.base_signature_radius = Some(base);
+    } else if cs.signature_radius > 0.0
+        && (cs.module_sig_multiplier - 1.0).abs() <= 1e-6
+        && cs.mjfg_sig_multiplier.is_none()
+        && cs.tp_sig_multiplier.is_none()
+        && cs.external_sig_multiplier.is_none()
+        && cs.cloud_sig_multiplier.is_none()
+        && cs.env_sig_multiplier.is_none()
+        && cs
+            .base_signature_radius
+            .is_some_and(|b| (cs.signature_radius - b).abs() > 1e-6)
+    {
+        cs.base_signature_radius = Some(cs.signature_radius);
     }
     cs.capture_missing_baselines(&ball);
     if sde_opt
@@ -183,6 +195,9 @@ pub(crate) fn spawn_ball_with_combat_in_actor(
         }
     }
     if matches!(ball.mode, MovementMode::Rigid) {
+        ball.velocity = DVec3::ZERO;
+        ball.max_velocity = 0.0;
+        ball.speed_fraction = 0.0;
         let meta = ballpark
             .ball_slim_meta
             .get(&ball_id)
@@ -387,16 +402,46 @@ pub(crate) fn reconcile_tackle_and_bubbles(
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     deactivation_hook: Option<&ModuleDeactivationHook>,
 ) {
+    let reentrant_db = db_opt
+        .as_ref()
+        .is_some_and(|db| db.is_write_locked_by_current_thread());
+    let effective_db = if reentrant_db { &None } else { db_opt };
+    let mut aborted_cycles = Vec::new();
+
     // 0. Prune synthetic Support Fighter Siren tackle cycles when the fighter ball, parent carrier,
-    //    or target ball leaves space (`CmdAbandonFighter` explicitly strips cycles on abandonment).
-    active_module_cycles.retain(|c| {
-        let Some((parent_ship_id, _fighter_item_id)) = parse_siren_tackle_ids(&c.effect_name) else {
-            return true;
-        };
-        ballpark.balls.contains_key(&c.ship_id)
-            && ballpark.balls.contains_key(&parent_ship_id)
-            && c.target_id.is_some_and(|tid| ballpark.balls.contains_key(&tid))
-    });
+    //    or target ball leaves space (`CmdAbandonFighter` explicitly strips cycles on abandonment),
+    //    and deactivate targeted cycles whose balls have drifted beyond `max_effective_range_m`.
+    for idx in (0..active_module_cycles.len()).rev() {
+        let is_siren = parse_siren_tackle_ids(&active_module_cycles[idx].effect_name);
+        let siren_missing = is_siren.is_some_and(|(parent_ship_id, _fighter_item_id)| {
+            !ballpark.balls.contains_key(&active_module_cycles[idx].ship_id)
+                || !ballpark.balls.contains_key(&parent_ship_id)
+                || !active_module_cycles[idx]
+                    .target_id
+                    .is_some_and(|tid| ballpark.balls.contains_key(&tid))
+        });
+        if siren_missing {
+            active_module_cycles.remove(idx);
+            continue;
+        }
+        let out_of_range = matches!(
+            (
+                active_module_cycles[idx]
+                    .target_id
+                    .and_then(|tid| ballpark.balls.get(&tid)),
+                ballpark.balls.get(&active_module_cycles[idx].ship_id),
+                active_module_cycles[idx].max_effective_range_m,
+            ),
+            (Some(tb), Some(sb), Some(max_r)) if (sb.position - tb.position).length() > max_r
+        );
+        if out_of_range {
+            let shut_down = active_module_cycles.remove(idx);
+            cleanup_removed_module_cycle(ballpark, &shut_down, effective_db);
+            if is_siren.is_none() {
+                aborted_cycles.push(shut_down);
+            }
+        }
+    }
 
     // 1. Collect all target balls currently subjected to MWD/MJD suppression (Warp Scrambler / Scripted HIC WDFG / Zero-Point Mass Entangler)
     let mut mwd_disabled_targets: Vec<BallId> = Vec::new();
@@ -484,11 +529,6 @@ pub(crate) fn reconcile_tackle_and_bubbles(
     }
 
     // 4. Immediately shut down any active MWD or MJD cycle on MWD/MJD-disabled targets (Warp Scrambler / Scripted HIC WDFG / ESS field)
-    let reentrant_db = db_opt
-        .as_ref()
-        .is_some_and(|db| db.is_write_locked_by_current_thread());
-    let effective_db = if reentrant_db { &None } else { db_opt };
-    let mut aborted_cycles = Vec::new();
     for idx in (0..active_module_cycles.len()).rev() {
         let ship_id = active_module_cycles[idx].ship_id;
         let mjd_or_mwd_disabled = mwd_disabled_targets.contains(&ship_id)
@@ -1119,7 +1159,10 @@ pub(super) fn apply_destiny_event_in_actor(
                 ball_id: id,
                 is_interactive,
             } => {
-                if !ballpark.set_ball_interactive(id, is_interactive) {
+                if ballpark.ball_interactive_overrides.get(&id).copied() != Some(is_interactive)
+                    && !ballpark.set_ball_interactive(id, is_interactive)
+                {
+                    ballpark.ball_interactive_overrides.insert(id, is_interactive);
                     ballpark.emit_event(
                         scope,
                         DestinyEvent::SetBallInteractive {
@@ -1189,6 +1232,26 @@ pub(super) fn apply_destiny_event_in_actor(
                     controller_owner_id,
                     target_id,
                 );
+            }
+            DestinyEvent::GotoDirection {
+                ball_id: id,
+                direction,
+            } if id == ball_id => {
+                let _ = ballpark.set_mode(
+                    id,
+                    MovementMode::GotoDirection {
+                        direction: DVec3::from_array(direction),
+                    },
+                );
+            }
+            DestinyEvent::SetSpeedFraction {
+                ball_id: id,
+                fraction,
+            } if id == ball_id => {
+                ballpark.set_speed_fraction(id, fraction);
+            }
+            DestinyEvent::Stop { ball_id: id } if id == ball_id => {
+                let _ = ballpark.set_mode(id, MovementMode::Stop);
             }
             other => {
                 if let DestinyEvent::OnSlimItemChange { ball_id: slim_id } = &other {

@@ -374,7 +374,7 @@ pub async fn handle_weapons(
                 .await;
             }
 
-            // 2-4. Smartbomb (`72`), Bomb Launcher (`862`), and Defender Launcher (`512`) (`C-2`)
+            // 2-4. Smartbomb (`72`), Bomb Launcher (`862`), and Defender Launcher (`512`)
             if let Some(aoe_res) = crate::router::box_fut(|| {
                 activate_aoe_or_defender_module(
                     ctx,
@@ -732,7 +732,7 @@ pub async fn handle_weapons(
                     let vol_dmg = charge_attr(784, 0.01).max(0.0);
                     let crystal_hp = charge_attr(9, 1.0).max(0.0001);
                     if ctx.mechanic_rng.roll(vol_chance) {
-                        ctx.db.with_mut_snapshot(|snap| {
+                        let (prev_dmg, next_dmg) = ctx.db.with_mut_snapshot(|snap| {
                             if let Some(ci) = snap.items.get_mut(&charge_item_id) {
                                 let cur = ci.dynamic_attributes.get(&3).copied().unwrap_or(0.0);
                                 let next_dmg = cur + vol_dmg;
@@ -745,16 +745,29 @@ pub async fn handle_weapons(
                                     } else {
                                         snap.items.remove(&charge_item_id);
                                     }
+                                    (cur, 0.0)
                                 } else {
                                     ci.dynamic_attributes.insert(3, next_dmg);
+                                    (cur, next_dmg)
                                 }
+                            } else {
+                                (0.0, 0.0)
                             }
                         });
                         ctx.notify(
                             NotificationTarget::Character(char_id),
                             "OnModuleAttributeChanges",
                             "charid",
-                            vec![PyRep::Integer(charge_item_id)],
+                            vec![PyRep::List(vec![PyRep::Tuple(vec![
+                                PyRep::String("OnModuleAttributeChange".into()),
+                                PyRep::Integer(char_id),
+                                PyRep::Integer(charge_item_id),
+                                PyRep::Integer(eve_sde::attr_ids::DAMAGE as i64),
+                                PyRep::Integer(ctx.now_blueos_filetime_ticks()),
+                                PyRep::Real(next_dmg),
+                                PyRep::Real(prev_dmg),
+                                PyRep::None,
+                            ])])],
                         );
                     } else {
                         crystal_damage_after = ctx.db.with_snapshot(|snap| {
@@ -1096,7 +1109,14 @@ pub async fn handle_weapons(
                 )
                 .await
                 {
-                    Ok(Some(res)) => res,
+                    Ok(Some(res)) => (
+                        res.applied_damage,
+                        res.destroyed,
+                        res.shield_ratio,
+                        res.armor_ratio,
+                        res.hull_ratio,
+                        res.became_invulnerable,
+                    ),
                     Ok(None) => (0.0, false, 0.0, 0.0, 0.0, false),
                     Err(e) => return Some(Err(e)),
                 }
@@ -1306,9 +1326,17 @@ pub async fn handle_weapons(
             }
 
             // Handle target destruction: 50% Loot Fairy wreck drop, DetailedKillmail with 15-min assist window & SHA-1 hash, and Pod Corpse / Implant destruction
-            let (generated_kill_id, generated_wreck_id, generated_corpse_id, generated_km_hash) = if destroyed && is_upwell_target {
+            let combat_weapons_spool::ShipOrNpcDestructionResult {
+                kill_id: generated_kill_id,
+                wreck_id: generated_wreck_id,
+                corpse_id: generated_corpse_id,
+                killmail_hash: generated_km_hash,
+            } = if destroyed && is_upwell_target {
                 let kid = ctx.db.with_snapshot(|snap| snap.killmails.keys().max().copied().unwrap_or(0));
-                (kid, 0, 0, String::new())
+                combat_weapons_spool::ShipOrNpcDestructionResult {
+                    kill_id: kid,
+                    ..Default::default()
+                }
             } else if destroyed {
                 combat_weapons_spool::handle_ship_or_npc_destruction(
                     ctx,
@@ -1325,7 +1353,7 @@ pub async fn handle_weapons(
                     now_unix,
                 ).await
             } else {
-                (0, 0, 0, String::new())
+                combat_weapons_spool::ShipOrNpcDestructionResult::default()
             };
 
             if became_invuln {
@@ -1376,4 +1404,8 @@ pub use super::combat_weapons_spool::{clear_entropic_spool, get_entropic_spool_m
 
 #[cfg(test)]
 #[path = "combat_weapons_tests.rs"] mod combat_weapons_tests;
+
+#[cfg(test)]
+#[path = "combat_weapons_edges2_tests.rs"]
+mod combat_weapons_edges2_tests;
 

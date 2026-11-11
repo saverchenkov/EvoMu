@@ -207,9 +207,8 @@ pub(super) async fn handle_loot_all(
             .values()
             .any(|f| f.members.contains(&char_id) && f.members.contains(&live_wreck.owner_id));
         let same_corp_or_fleet = same_corp || same_fleet;
-        let needs_suspect = (live_wreck.owner_id != char_id || active_ball_id != ship_id)
-            && !is_abandoned
-            && !same_corp_or_fleet;
+        let foreign_loot = live_wreck.owner_id != char_id && !same_corp_or_fleet;
+        let needs_suspect = (foreign_loot || active_ball_id != ship_id) && !is_abandoned;
         if needs_suspect && safety == SafetyLevel::Green {
             return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
         }

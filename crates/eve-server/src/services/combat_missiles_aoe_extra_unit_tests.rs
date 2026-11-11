@@ -8,7 +8,7 @@ use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::
 };
 use crate::services::combat_crimewatch::*;
 use eve_db::InventoryFlag;
-use eve_destiny::{Ball, CombatState, DamageVector, MovementMode};
+use eve_destiny::{Ball, CombatState, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use glam::DVec3;
@@ -250,4 +250,114 @@ async fn combatant_predicates_structure_noop_capsuleer_and_cat11_npc_destruction
         assert_ne!(snap.characters[&victim_char].active_ship_id, victim_ship);
         assert!(snap.killmails.values().any(|km| km.victim_character_id == victim_char));
     });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn activate_missile_and_breacher_launcher_fof_defer_and_dot_application() {
+    let (mut ctx, _, char_id, ship_id, sys_id) = setup_aoe_extra_ctx();
+    let target_char = 90_000_002_i64;
+    let target_ship = 220_000_333_i64;
+    let launcher_id = 720_001_i64;
+    let now_unix = ctx.now_unix();
+
+    let mut sde = (*ctx.sde).clone();
+    sde.types.insert(
+        950_209,
+        make_fighter_type(
+            950_209,
+            384,
+            8,
+            0.015,
+            vec![
+                (37, 2_000.0),
+                (281, 6_000.0),
+                (9, 75.0),
+                (653, 170.0),
+                (654, 40.0),
+                (1353, 0.604),
+                (5735, 30_000.0),
+                (5736, 150.0),
+                (5737, 1.0),
+            ],
+        ),
+    );
+    ctx.sde = Arc::new(sde);
+
+    spawn_ball_with_hp(&ctx, sys_id, ship_id, 587, DVec3::ZERO, 500.0, 500.0, 500.0, 500.0).await;
+    spawn_ball_with_hp(&ctx, sys_id, target_ship, 587, DVec3::new(500.0, 0.0, 0.0), 5_000.0, 5_000.0, 5_000.0, 500.0).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(tc) = snap.characters.get_mut(&target_char) {
+            tc.solar_system_id = sys_id;
+            tc.station_id = None;
+            tc.active_ship_id = target_ship;
+        }
+    });
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let (_, attacker_ball) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
+    let fitted_mod = eve_dogma::FittedModule {
+        item_id: launcher_id,
+        type_id: 2_410,
+        flag_id: 27,
+        state: eve_dogma::ModuleState::Active,
+        damage_hp: 0.0,
+        max_hp: 40.0,
+        charge_type_id: Some(209),
+        charge_quantity: 10,
+        dynamic_attribute_overrides: std::collections::HashMap::new(),
+    };
+    let charge_std = ctx.sde.types[&209].clone();
+    let charge_breacher = ctx.sde.types[&950_209].clone();
+
+    // 1. FoF missile with explicit target defers impact (`inFlight = true`)
+    let fof_rep = activate_missile_or_breacher_launcher(
+        &ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        now_unix,
+        launcher_id,
+        &fitted_mod,
+        &fit,
+        209,
+        &charge_std,
+        &attacker_ball,
+        target_ship,
+        eve_destiny::DamageVector::new(0.0, 0.0, 100.0, 0.0),
+        true,
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(py_val(&fof_rep, "inFlight"), Some(&PyRep::Bool(true)));
+    let fof_ball = py_val(&fof_rep, "missileBallID").and_then(PyRep::as_i64).unwrap();
+    assert!(with_combat_runtime(&ctx, |rt| rt.in_flight_missiles.contains_key(&fof_ball)));
+
+    // 2. Non-deferred Breacher Pod impacts immediately and activates DoT
+    let br_rep = activate_missile_or_breacher_launcher(
+        &ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        now_unix,
+        launcher_id,
+        &fitted_mod,
+        &fit,
+        950_209,
+        &charge_breacher,
+        &attacker_ball,
+        target_ship,
+        eve_destiny::DamageVector::new(0.0, 0.0, 50.0, 0.0),
+        false,
+        true,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(py_val(&br_rep, "impacted"), Some(&PyRep::Bool(true)));
+    assert_eq!(py_val(&br_rep, "isBreacherPod"), Some(&PyRep::Bool(true)));
+    assert!(py_val(&br_rep, "breacherTickDPS").and_then(PyRep::as_f64).unwrap_or(0.0) > 0.0);
+    assert!(with_combat_runtime(&ctx, |rt| rt.active_breacher_dots.contains_key(&target_ship)));
 }

@@ -17,6 +17,10 @@ use std::sync::{Arc, OnceLock};
 #[path = "tactical_superweapons_and_entosis_tests.rs"]
 mod tactical_superweapons_and_entosis_tests;
 
+#[cfg(test)]
+#[path = "tactical_superweapons_edge_tests.rs"]
+mod tactical_superweapons_edge_tests;
+
 pub(super) fn shared_sde() -> Arc<SdeRegistry> {
     static SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
     Arc::clone(SDE.get_or_init(|| Arc::new(SdeRegistry::with_canonical_seed())))
@@ -164,7 +168,7 @@ pub(super) async fn spawn_ship_ball_with_cs(
         .expect("spawn ball");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn navigation_locks_wormhole_prep_and_projected_remote_assistance() {
     let ctx = test_ctx_with_custom_types(|sde| {
         sde.types.insert(
@@ -271,7 +275,7 @@ async fn navigation_locks_wormhole_prep_and_projected_remote_assistance() {
     remove_projected_remote_assistance(&ctx, logi_ship_id, rsb_mod_id);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn target_spectrum_breaker_and_auto_targeting_system() {
     let ctx = test_ctx_with_custom_types(|sde| {
         sde.types.insert(

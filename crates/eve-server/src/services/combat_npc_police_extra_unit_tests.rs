@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use super::combat_npc_police::{
+use super::super::{
     check_and_spawn_faction_police, configure_navy_combat_properties,
     is_concord_suppressed_in_system, is_faction_police_suppressed, is_outlaw_ship_docking_refused,
     is_sentry_disabled_by_corruption, scan_and_enforce_highsec_contraband,
@@ -12,6 +12,7 @@ use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
 use crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity;
+use crate::services::combat_crimewatch::with_combat_runtime;
 use eve_db::{InventoryFlag, IskCents, PersistedInsurgencyCampaign, SystemDynamicState};
 use eve_destiny::{Ball, CombatState, MovementMode};
 use glam::DVec3;
@@ -233,4 +234,227 @@ async fn contraband_edge_cases_and_idempotent_police_and_navy_patrol_spawning() 
     assert_eq!(police_first.len(), 2);
     let police_second = check_and_spawn_faction_police(&ctx, sys_id).await;
     assert!(police_second.is_empty());
+}
+
+#[tokio::test]
+async fn mutant_killers_sec_threshold_contraband_table_blockade_runner_navy_only_and_patrol_fallbacks() {
+    let (mut ctx, _session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let sde_mut = Arc::make_mut(&mut ctx.sde);
+    // Blockade Runner hull (group 1202) and Capsule (type 670, group 29)
+    sde_mut
+        .types
+        .insert(12_731, make_fighter_type(12_731, 1202, 6, 15_000.0, vec![]));
+    sde_mut
+        .types
+        .insert(670, make_fighter_type(670, 29, 6, 100.0, vec![]));
+    // Contraband booster & SDE contraband fallback/rule check (ensure 3721 exists with base_price 200.0 if loaded from SDE)
+    let mut illegal_booster = make_fighter_type(946_003, 303, 20, 1.0, vec![(1089, 5.0)]);
+    illegal_booster.base_price = 1_000.0;
+    sde_mut.types.insert(946_003, illegal_booster);
+
+    // 1. Register char online so OnItemChange & OnRemoteMessage customs notifications are delivered
+    let user_id = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    ctx.db
+        .acquire_online_lock_with_computer_hash(
+            user_id,
+            user_id * 100 + 1,
+            Some(char_id),
+            None,
+            true,
+            ctx.now_unix(),
+        )
+        .unwrap();
+
+    // 2. Faction police sec-status threshold boundary (e.g. sys_sec = 0.9 -> threshold = -2.5; 1.0 -> -2.0)
+    let sys_sec = ctx.sde.solar_systems[&sys_id].security_status;
+    let expected_thresh =
+        crate::services::combat_crimewatch::crimewatch_timers::faction_police_sec_threshold(sys_sec)
+            .unwrap_or(-5.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.security_status = expected_thresh;
+        ch.standings.insert(500_001, 0.0);
+    });
+    assert!(is_outlaw_ship_docking_refused(&ctx, sys_id, char_id, ship_id));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().security_status = expected_thresh + 0.05;
+    });
+    assert!(!is_outlaw_ship_docking_refused(&ctx, sys_id, char_id, ship_id));
+
+    // Type 670 capsule is always allowed to dock even at -10.0 sec / -10.0 standing
+    let pod_id = 300_111_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.security_status = -10.0;
+        ch.standings.insert(500_001, -10.0);
+        snap.items.insert(
+            pod_id,
+            make_fighter_item(pod_id, 670, char_id, sys_id as i64, InventoryFlag::None, 1),
+        );
+    });
+    assert!(!is_outlaw_ship_docking_refused(&ctx, sys_id, char_id, pod_id));
+
+    // Reset sec & standing to clean neutral
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.security_status = 0.0;
+        ch.standings.insert(500_001, 0.0);
+        ch.station_id = None;
+        ch.balance = IskCents(100_000_000);
+    });
+
+    // 3. SDE contraband item (if present in contrabandtypes.fsdbinary) + Blockade Runner + qty==0 ignore + notifications
+    let contraband_map = ctx.sde.load_contraband_types().unwrap_or_default();
+    let sde_rule_pair = contraband_map.iter().find_map(|(&tid, rules)| {
+        let r = rules.get(&500_001)?;
+        (sys_sec >= r.confiscate_min_sec as f64 && ctx.sde.types.contains_key(&tid))
+            .then_some((tid, r.clone()))
+    });
+
+    // Switch active ship to Blockade Runner (12_731), ensure clean cargo (qty == 0) produces no enforcement
+    let br_ship_id = 300_222_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().active_ship_id = br_ship_id;
+        snap.items.insert(
+            br_ship_id,
+            make_fighter_item(br_ship_id, 12_731, char_id, sys_id as i64, InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            8101,
+            make_fighter_item(8101, 946_003, char_id, br_ship_id, InventoryFlag::Cargo, 0),
+        );
+    });
+    assert!(scan_and_enforce_highsec_contraband(&ctx, sys_id, br_ship_id).is_empty());
+
+    // Now place active contraband in Blockade Runner cargo -> high-sec customs still confiscates!
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&8101);
+        snap.items.insert(
+            8102,
+            make_fighter_item(8102, 946_003, char_id, br_ship_id, InventoryFlag::Cargo, 2),
+        );
+        if let Some((tid, _)) = &sde_rule_pair {
+            snap.items.insert(
+                8103,
+                make_fighter_item(8103, *tid, char_id, br_ship_id, InventoryFlag::Cargo, 2),
+            );
+        }
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    sys_h
+        .spawn_ball_with_combat(
+            Ball {
+                id: br_ship_id,
+                type_id: 12_731,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                gate_cloak_remaining_ticks: 15,
+                ..CombatState::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // check_and_spawn_faction_police: contraband-only spawns ONLY FactionPolice (1 ship, NOT Navy), breaks gate cloak, emits customs notifications
+    let police_only = check_and_spawn_faction_police(&ctx, sys_id).await;
+    assert_eq!(police_only.len(), 1);
+    let fp_id = police_only[0];
+    assert_eq!(
+        sys_h.get_combat_state(br_ship_id).await.unwrap().unwrap().gate_cloak_remaining_ticks,
+        0
+    );
+    with_combat_runtime(&ctx, |rt| {
+        let fp = &rt.npc_entities[&fp_id];
+        assert_eq!(fp.archetype, "FactionPolice");
+        assert_eq!(fp.faction_id, 500_001);
+        assert_eq!(fp.target_id, Some(br_ship_id));
+        assert_eq!(fp.aggression_threat.get(&br_ship_id), Some(&500.0));
+        assert_eq!(fp.threat_table.get(&br_ship_id), Some(&500.0));
+        assert!((fp.orbit_range - 5_000.0).abs() < 1e-6);
+        assert!((fp.web_speed_factor - (-50.0)).abs() < 1e-6);
+        assert!((fp.scram_strength - 2.0).abs() < 1e-6);
+    });
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(notifs.iter().any(|n| n.event == "OnItemChange"));
+    assert!(notifs.iter().any(|n| n.event == "OnRemoteMessage"));
+
+    if let Some((tid, rule)) = sde_rule_pair {
+        let expected_sde_fine = ctx.sde.types[&tid].base_price.max(100.0)
+            * 2.0
+            * (rule.fine_by_value as f64).max(1.0);
+        assert!(expected_sde_fine >= 200.0);
+        assert!(!ctx.db.with_snapshot(|s| s.items.contains_key(&8103)));
+    }
+
+    // Contraband in low-sec is NOT confiscated
+    let lowsec_id = 30_002_537_u32;
+    assert!(scan_and_enforce_highsec_contraband(&ctx, lowsec_id, br_ship_id).is_empty());
+
+    // 4. Clean cargo & capsule outlaw: capsule with -10.0 sec / -10.0 standing spawns ZERO police/navy
+    let cap_ball_id = 300_333_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.security_status = -10.0;
+        ch.standings.insert(500_001, -10.0);
+        ch.active_ship_id = cap_ball_id;
+        snap.items.insert(
+            cap_ball_id,
+            make_fighter_item(cap_ball_id, 670, char_id, sys_id as i64, InventoryFlag::None, 1),
+        );
+    });
+    sys_h
+        .spawn_ball_with_combat(
+            Ball {
+                id: cap_ball_id,
+                type_id: 670,
+                position: DVec3::new(1000.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 100_000.0,
+                radius: 20.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+        )
+        .await
+        .unwrap();
+    assert!(check_and_spawn_faction_police(&ctx, sys_id).await.is_empty());
+
+    // 5. Navy-only response: lawful sec (0.0) + hostile standing (-5.0) spawns ONLY CaldariNavy (not FactionPolice)
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.security_status = 0.0;
+        ch.standings.insert(500_001, -5.0);
+        ch.active_ship_id = br_ship_id;
+    });
+    let navy_only = check_and_spawn_faction_police(&ctx, sys_id).await;
+    assert_eq!(navy_only.len(), 1);
+    let navy_id = navy_only[0];
+    with_combat_runtime(&ctx, |rt| {
+        let navy = &rt.npc_entities[&navy_id];
+        assert_eq!(navy.archetype, "CaldariNavy");
+        assert_eq!(navy.aggression_threat.get(&br_ship_id), Some(&800.0));
+        assert_eq!(navy.threat_table.get(&br_ship_id), Some(&800.0));
+    });
+    assert!(check_and_spawn_faction_police(&ctx, sys_id).await.is_empty());
+
+    // 6. step_empire_navy_patrols: non-empire nullsec returns empty; unpiloted highsec system anchors on gate/station and spawns 2 ships idempotently
+    let nullsec_id = 30_004_759_u32;
+    assert!(step_empire_navy_patrols(&ctx, nullsec_id).await.is_empty());
+
+    let empty_highsec = 30_000_144_u32; // Perimeter (Caldari highsec, no piloted ship spawned)
+    let patrol = step_empire_navy_patrols(&ctx, empty_highsec).await;
+    assert_eq!(patrol.len(), 2);
+    assert!(step_empire_navy_patrols(&ctx, empty_highsec).await.is_empty());
 }

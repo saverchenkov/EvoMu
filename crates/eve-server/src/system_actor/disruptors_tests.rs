@@ -310,3 +310,111 @@ async fn try_remove_module_cycle_removes_matching_cycle_and_keeps_others() {
     assert_eq!(st.active_module_cycles.len(), 1);
     assert_eq!(st.active_module_cycles[0].module_id, 702);
 }
+
+#[test]
+fn apply_ecm_burst_covers_ladar_magnetometric_radar_and_zero_sensor_defaults() {
+    let mut sde = (*make_sde_with_sensors_and_wreck()).clone();
+    let mut make_ship_type = |tid: u32, attr_opt: Option<(u16, f64)>| {
+        let mut attrs = HashMap::new();
+        if let Some((k, v)) = attr_opt {
+            attrs.insert(k, v);
+        }
+        sde.types.insert(
+            tid,
+            InvType {
+                type_id: tid,
+                group_id: 25,
+                category_id: 6,
+                name: format!("TestShip-{tid}"),
+                mass: 1_000_000.0,
+                volume: 25_000.0,
+                capacity: 100.0,
+                portion_size: 1,
+                radius: 40.0,
+                base_price: 100_000.0,
+                published: true,
+                market_group_id: None,
+                race_id: Some(1),
+                faction_id: None,
+                variation_parent_type_id: None,
+                description_id: None,
+                icon_id: None,
+                graphic_id: None,
+                sound_id: None,
+                meta_group_id: None,
+                meta_level: None,
+                tech_level: Some(1),
+                default_effect_id: None,
+                description: String::new(),
+                effect_ids: Vec::new(),
+                default_attributes: attrs,
+            },
+        );
+    };
+    make_ship_type(9001, Some((209, 15.0))); // Ladar (idx 1)
+    make_ship_type(9002, Some((210, 14.0))); // Magnetometric (idx 2)
+    make_ship_type(9003, Some((208, 16.0))); // Radar (idx 3)
+    make_ship_type(9004, None); // Default fallback (idx 0, str 10.0)
+    let sde = Some(Arc::new(sde));
+
+    let mut bp = Ballpark::new(30_000_142);
+    bp.add_ball(make_ship_ball(400, 587, DVec3::ZERO));
+    bp.combat_states.insert(400, CombatState::default());
+
+    for (ball_id, tid, x) in [
+        (401, 9001, 2_000.0),
+        (402, 9002, 3_000.0),
+        (403, 9003, 4_000.0),
+        (404, 9004, 5_000.0),
+    ] {
+        bp.add_ball(make_ship_ball(ball_id, tid, DVec3::new(x, 0.0, 0.0)));
+        bp.combat_states.insert(ball_id, CombatState::default());
+    }
+
+    // Only Ladar (idx 1) and Magnetometric (idx 2) have strong jam; Radar (idx 3) = 0 -> cannot jam 403
+    let jammed = handle_apply_ecm_burst(
+        &mut bp,
+        &[],
+        &sde,
+        &None,
+        400,
+        25_000.0,
+        [40.0, 40.0, 40.0, 0.0],
+        10.0,
+        0.05,
+        None,
+    );
+    assert!(jammed.contains(&401), "ladar ship should jam");
+    assert!(jammed.contains(&402), "magnetometric ship should jam");
+    assert!(!jammed.contains(&403), "radar ship with 0 radar jam should resist");
+    assert!(jammed.contains(&404), "zero-sensor fallback ship should jam via gravimetric idx 0");
+}
+
+#[tokio::test]
+async fn try_remove_module_cycle_clears_db_active_state_and_charges() {
+    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let reg = crate::system_actor::SystemRegistry::new();
+    let handle = reg.get_or_spawn(30_000_142);
+
+    db.with_mut_snapshot(|snap| {
+        snap.module_active_states.insert(801);
+        snap.module_active_charges.insert(801, 12);
+    });
+    {
+        let mut st = handle.actor_state.write().unwrap();
+        st.db_opt = Some(Arc::clone(&db));
+        st.active_module_cycles.push(ActiveModuleCycle {
+            ship_id: 410,
+            module_id: 801,
+            elapsed_s: 2.0,
+            duration_s: 10.0,
+            ..ActiveModuleCycle::default()
+        });
+    }
+
+    handle.try_remove_module_cycle(410, 801);
+    db.with_snapshot(|snap| {
+        assert!(!snap.module_active_states.contains(&801));
+        assert!(!snap.module_active_charges.contains_key(&801));
+    });
+}

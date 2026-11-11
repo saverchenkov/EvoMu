@@ -548,4 +548,17 @@ fn on_advance_secs_internal_sweeps_expired_crimewatch_and_runtime_maps() {
         assert!(!rt.kill_right_expires_unix.contains_key(&5001));
         assert!(!rt.limited_engagements.contains_key(&char_id));
     });
+
+    // Boundary check: timer expiring at now + 11 (> now + 10) is NOT swept at now + 10
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.npc_timers.insert(active_char_id, now + 11);
+    });
+    crate::sp6_lifecycle::on_advance_secs_internal(&ctx, now + 10, 0, false, false);
+    with_combat_runtime(&ctx, |rt| {
+        assert_eq!(rt.npc_timers.get(&active_char_id).copied(), Some(now + 11));
+    });
 }
+
+#[cfg(test)]
+#[path = "crimewatch_timers_extra_unit_tests.rs"]
+mod crimewatch_timers_extra_unit_tests;

@@ -1637,3 +1637,6 @@ async fn handle_scoop_abandoned_fighter(
 #[cfg(test)]
 #[path = "combat_fighters_tests.rs"]
 pub(in crate::services) mod combat_fighters_tests;
+#[cfg(test)]
+#[path = "combat_fighters_edges2_tests.rs"]
+mod combat_fighters_edges2_tests;

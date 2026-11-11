@@ -11,6 +11,10 @@ use std::sync::Arc;
 #[path = "combat_npcs_drones_control_tests.rs"]
 mod combat_npcs_drones_control_tests;
 
+#[cfg(test)]
+#[path = "combat_npcs_drones_cycle_ops_cov_tests.rs"]
+mod combat_npcs_drones_cycle_ops_cov_tests;
+
 pub(super) fn py_dict_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
     match rep {
         PyRep::Dict(entries) => entries
@@ -649,6 +653,64 @@ async fn drone_link_augmentor_omnidirectional_tracking_and_bonused_tractor_beam_
     };
     assert!((d_state.effective_tracking_speed(&ctx) - 2.5).abs() < 1e-9);
     assert!((d_state.effective_falloff_range(&ctx) - 5_000.0).abs() < 1e-9);
+    assert!((d_state.effective_optimal_range(&ctx) - 2_000.0).abs() < 1e-9);
+    assert_eq!(d_state.cycle_duration_secs(&ctx), 4);
+
+    let mut custom_opt_drone = d_state.clone();
+    custom_opt_drone.optimal_range = 12_345.0;
+    assert!((custom_opt_drone.effective_optimal_range(&ctx) - 12_345.0).abs() < 1e-9);
+    custom_opt_drone.optimal_range = 100.0;
+    assert!((custom_opt_drone.effective_optimal_range(&ctx) - 500.0).abs() < 1e-9);
+
+    let mut abandoned_drone = d_state.clone();
+    abandoned_drone.is_abandoned = true;
+    assert!((abandoned_drone.effective_tracking_speed(&ctx) - 2.0).abs() < 1e-9);
+    assert!((abandoned_drone.effective_falloff_range(&ctx) - 4_000.0).abs() < 1e-9);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut rec = make_fighter_item(d_state.drone_item_id, 2_456, char_id, ship_id, InventoryFlag::DroneBay, 1);
+        rec.dynamic_attributes.insert(51, 6_000.0);
+        snap.items.insert(d_state.drone_item_id, rec);
+    });
+    assert_eq!(d_state.cycle_duration_secs(&ctx), 6);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&d_state.drone_item_id).unwrap().dynamic_attributes.insert(51, 90_000.0);
+    });
+    assert_eq!(d_state.cycle_duration_secs(&ctx), 60);
+
+    let d_ball = Ball {
+        id: d_state.ball_id,
+        type_id: 2_456,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 2_600.0,
+        inertia: 1.0,
+        mass: 5_000.0,
+        radius: 5.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    let stationary_in_opt = Ball {
+        id: 910_099,
+        position: DVec3::new(1_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        radius: 40.0,
+        ..d_ball.clone()
+    };
+    assert!((d_state.compute_combat_hit_multiplier(&ctx, &d_ball, &stationary_in_opt, 40.0) - 1.0).abs() < 1e-9);
+    let out_of_range_ball = Ball {
+        position: DVec3::new(17_001.0, 0.0, 0.0),
+        ..stationary_in_opt.clone()
+    };
+    assert_eq!(d_state.compute_combat_hit_multiplier(&ctx, &d_ball, &out_of_range_ball, 40.0), 0.0);
+    let fast_transversal_ball = Ball {
+        position: DVec3::new(2_000.0, 0.0, 0.0),
+        velocity: DVec3::new(0.0, 50_000.0, 0.0),
+        radius: 25.0,
+        ..stationary_in_opt
+    };
+    let glancing_mult = d_state.compute_combat_hit_multiplier(&ctx, &d_ball, &fast_transversal_ball, 25.0);
+    assert!((0.05..1.0).contains(&glancing_mult), "expected clamped glancing hit mult, got {glancing_mult}");
 
     // 3. Bonused Tractor Beam reaches wreck at 35 km (base 20km * 2 = 40km) and pulls at 2,000 m/s * 5s = 10,000 m,
     //    while rejecting wreck at 45 km (> 40 km) with TargetOutOfRange!
@@ -705,4 +767,24 @@ async fn drone_link_augmentor_omnidirectional_tracking_and_bonused_tractor_beam_
     .unwrap()
     .unwrap_err();
     assert_eq!(pull_err.code, "TargetOutOfRange");
+
+    // Exact range boundary: wreck at 40,000.0 m (== optimal 40km) succeeds, 40,000.1 m fails
+    let _ = sys_handle
+        .set_ball_position(wreck_far_id, DVec3::new(40_000.0, 0.0, 0.0))
+        .await;
+    assert!(activate_salvager_or_tractor_module(
+        &ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        tractor_id,
+        &fm,
+        &tractor_type,
+        &attacker_ball,
+        Some(wreck_far_id),
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .is_ok());
 }

@@ -66,8 +66,9 @@ fn bounty_tick_threshold_tax_and_overdue_flush_mechanics() {
     let (ctx, _session, char_id, _ship_id, sys_id) = make_fighter_ctx_and_session();
     let now = 1_750_000_000_u64;
 
-    // 1. Empty tick returns (0, 0, 0)
-    assert_eq!(flush_npc_bounty_tick(&ctx, sys_id, char_id, 0.0), (0.0, 0.0, 0.0));
+    // 1. Empty tick returns zeroed payout
+    let empty = flush_npc_bounty_tick(&ctx, sys_id, char_id, 0.0);
+    assert_eq!((empty.pilot_isk, empty.main_ess_isk, empty.reserve_ess_isk), (0.0, 0.0, 0.0));
 
     // 2. Below 100k gross with default tax threshold -> 0% tax applied
     with_mut_combat_runtime(&ctx, |rt| {
@@ -95,10 +96,10 @@ fn bounty_tick_threshold_tax_and_overdue_flush_mechanics() {
     with_mut_combat_runtime(&ctx, |rt| {
         rt.pending_bounty_ticks.insert((sys_id, char_id), 200_000.0);
     });
-    let (pilot_isk, main_ess, reserve_ess) = flush_npc_bounty_tick(&ctx, sys_id, char_id, 0.10);
-    assert!((pilot_isk - 180_000.0).abs() < 1e-2);
-    assert_eq!(main_ess, 0.0);
-    assert_eq!(reserve_ess, 0.0);
+    let payout = flush_npc_bounty_tick(&ctx, sys_id, char_id, 0.10);
+    assert!((payout.pilot_isk - 180_000.0).abs() < 1e-2);
+    assert_eq!(payout.main_ess_isk, 0.0);
+    assert_eq!(payout.reserve_ess_isk, 0.0);
 }
 
 #[tokio::test]

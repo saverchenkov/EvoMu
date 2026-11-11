@@ -551,3 +551,411 @@ async fn t1_and_stacked_crystal_volatility_vorton_arc_and_already_active_checks(
         Some(4)
     );
 }
+
+#[tokio::test]
+async fn rpc_args_tethered_invulnerable_range_capacitor_and_projectile_zero_cap() {
+    let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let kw = HashMap::new();
+    let hybrid_tid = 74_501u32;
+    let hybrid_charge_tid = 85_501u32;
+    let proj_tid = 55_501u32;
+    let proj_charge_tid = 83_501u32;
+    {
+        let sde = Arc::make_mut(&mut ctx.sde);
+        sde.types.insert(
+            hybrid_tid,
+            make_fighter_type(
+                hybrid_tid,
+                74,
+                7,
+                50.0,
+                vec![(6, 50.0), (51, 3_000.0), (54, 5_000.0), (158, 2_000.0), (160, 1.0), (604, 85.0)],
+            ),
+        );
+        sde.types.insert(
+            hybrid_charge_tid,
+            make_fighter_type(hybrid_charge_tid, 85, 8, 0.01, vec![(117, 100.0), (9, 1.0)]),
+        );
+        sde.types.insert(
+            proj_tid,
+            make_fighter_type(
+                proj_tid,
+                55,
+                7,
+                50.0,
+                vec![(6, 999.0), (51, 3_000.0), (54, 10_000.0), (158, 2_000.0), (160, 1.0), (604, 83.0)],
+            ),
+        );
+        sde.types.insert(
+            proj_charge_tid,
+            make_fighter_type(proj_charge_tid, 83, 8, 0.01, vec![(117, 80.0), (9, 1.0)]),
+        );
+    }
+
+    let hybrid_id = 860_001i64;
+    let hybrid_ammo_id = 860_002i64;
+    let proj_id = 860_003i64;
+    let proj_ammo_id = 860_004i64;
+    let target_char_id = char_id + 100;
+    let target_ship_id = 860_100i64;
+    let corp_id = ctx.db.with_snapshot(|s| s.characters[&char_id].corporation_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut target_ch = snap.characters[&char_id].clone();
+        target_ch.character_id = target_char_id;
+        target_ch.user_id = target_char_id as u64;
+        target_ch.corporation_id = corp_id + 1;
+        target_ch.solar_system_id = sys_id;
+        target_ch.active_ship_id = target_ship_id;
+        target_ch.station_id = None;
+        snap.characters.insert(target_char_id, target_ch);
+
+        snap.items.insert(
+            target_ship_id,
+            make_fighter_item(target_ship_id, 587, target_char_id, sys_id as i64, InventoryFlag::None, 1),
+        );
+        snap.items.insert(hybrid_id, make_fighter_item(hybrid_id, hybrid_tid, char_id, ship_id, InventoryFlag::HiSlot0, 1));
+        snap.items.insert(hybrid_ammo_id, make_fighter_item(hybrid_ammo_id, hybrid_charge_tid, char_id, ship_id, InventoryFlag::HiSlot0, 5));
+        snap.items.insert(proj_id, make_fighter_item(proj_id, proj_tid, char_id, ship_id, InventoryFlag::HiSlot1, 1));
+        snap.items.insert(proj_ammo_id, make_fighter_item(proj_ammo_id, proj_charge_tid, char_id, ship_id, InventoryFlag::HiSlot1, 5));
+        snap.module_online_states.insert(hybrid_id, true);
+        snap.module_online_states.insert(proj_id, true);
+    });
+
+    spawn_weapon_ball(&ctx, sys_id, ship_id, 23_915, DVec3::ZERO, 2000.0, 200.0).await;
+    spawn_weapon_ball(&ctx, sys_id, target_ship_id, 587, DVec3::new(2_000.0, 0.0, 0.0), 2000.0, 200.0).await;
+    lock_target(&ctx, sys_id, ship_id, target_ship_id).await;
+
+    // W2 RpcArgs invalid moduleID / bad target type.
+    for bad_args in [
+        vec![PyRep::Integer(0)],
+        vec![PyRep::Integer(-5), PyRep::String("targetAttack".into()), PyRep::Integer(target_ship_id)],
+        vec![PyRep::Integer(hybrid_id), PyRep::String("targetAttack".into()), PyRep::String("bad_target".into())],
+    ] {
+        let err = handle_weapons(&ctx, &mut session, "dogmaIM", "Activate", &bad_args, &kw)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.code, "InvalidArgument");
+    }
+
+    // Tethered blocks offensive activation with no cap/ammo consumption.
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    {
+        let mut cs = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+        cs.is_tethered = true;
+        sys_handle.set_combat_state(ship_id, cs).await.unwrap();
+    }
+    let tether_err = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(hybrid_id), PyRep::String("targetAttack".into()), PyRep::Integer(target_ship_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(tether_err.code, "CantActivateWhileTethered");
+    assert!((sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().capacitor - 200.0).abs() < 1e-6);
+    assert_eq!(ctx.db.get_item(hybrid_ammo_id).unwrap().quantity, 5);
+
+    {
+        let mut cs = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+        cs.is_tethered = false;
+        sys_handle.set_combat_state(ship_id, cs).await.unwrap();
+    }
+
+    // Location-change invulnerability rejects with TargetInvulnerable.
+    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, target_char_id, ctx.now_unix() + 60);
+    let invuln_err = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(hybrid_id), PyRep::String("targetAttack".into()), PyRep::Integer(target_ship_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(invuln_err.code, "TargetInvulnerable");
+    assert_eq!(ctx.db.get_item(hybrid_ammo_id).unwrap().quantity, 5);
+
+    // Clear invulnerability, move target outside optimal+falloff range -> TargetOutOfRange.
+    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, target_char_id, 0);
+    spawn_weapon_ball(&ctx, sys_id, target_ship_id, 587, DVec3::new(250_000.0, 0.0, 0.0), 2000.0, 200.0).await;
+    lock_target(&ctx, sys_id, ship_id, target_ship_id).await;
+    let range_err = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(hybrid_id), PyRep::String("targetAttack".into()), PyRep::Integer(target_ship_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(range_err.code, "TargetOutOfRange");
+    assert!((sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().capacitor - 200.0).abs() < 1e-6);
+    assert_eq!(ctx.db.get_item(hybrid_ammo_id).unwrap().quantity, 5);
+
+    // Move target back into range; insufficient cap rejects Hybrid (preserves ammo), whereas 0 cap allows Projectile.
+    spawn_weapon_ball(&ctx, sys_id, target_ship_id, 587, DVec3::new(2_000.0, 0.0, 0.0), 2000.0, 200.0).await;
+    lock_target(&ctx, sys_id, ship_id, target_ship_id).await;
+    {
+        let mut cs = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+        cs.capacitor = 10.0;
+        sys_handle.set_combat_state(ship_id, cs).await.unwrap();
+    }
+    let cap_err = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(hybrid_id), PyRep::String("targetAttack".into()), PyRep::Integer(target_ship_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(cap_err.code, "NotEnoughCapacitor");
+    assert_eq!(ctx.db.get_item(hybrid_ammo_id).unwrap().quantity, 5);
+
+    {
+        let mut cs = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+        cs.capacitor = 0.0;
+        sys_handle.set_combat_state(ship_id, cs).await.unwrap();
+    }
+    let proj_ok = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(proj_id), PyRep::String("targetAttack".into()), PyRep::Integer(target_ship_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("projectile fires at 0 cap");
+    assert!((proj_ok.dict_get("capacitorAfter").and_then(|v| v.as_f64()).unwrap() - 0.0).abs() < 1e-6);
+    assert_eq!(ctx.db.get_item(proj_ammo_id).unwrap().quantity, 4);
+}
+
+#[tokio::test]
+async fn entropic_disintegrator_spool_already_active_and_target_switch_reset() {
+    let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    ctx.set_clock(Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let kw = HashMap::new();
+    let ent_tid = 19_860u32;
+    let ent_charge_tid = 19_870u32;
+    {
+        let sde = Arc::make_mut(&mut ctx.sde);
+        sde.types.insert(
+            ent_tid,
+            make_fighter_type(
+                ent_tid,
+                1986,
+                7,
+                50.0,
+                vec![(6, 20.0), (51, 3_000.0), (54, 10_000.0), (158, 1_000.0), (604, 1987.0), (2733, 0.25), (2734, 1.5)],
+            ),
+        );
+        sde.types.insert(
+            ent_charge_tid,
+            make_fighter_type(ent_charge_tid, 1987, 8, 0.01, vec![(114, 100.0), (118, 100.0), (9, 1.0)]),
+        );
+    }
+
+    let ent_id = 861_001i64;
+    let ent_ammo_id = 861_002i64;
+    let t1_id = 861_101i64;
+    let t2_id = 861_102i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(ent_id, make_fighter_item(ent_id, ent_tid, char_id, ship_id, InventoryFlag::HiSlot0, 1));
+        snap.items.insert(ent_ammo_id, make_fighter_item(ent_ammo_id, ent_charge_tid, char_id, ship_id, InventoryFlag::HiSlot0, 10));
+        snap.module_online_states.insert(ent_id, true);
+    });
+    spawn_weapon_ball(&ctx, sys_id, ship_id, 23_915, DVec3::ZERO, 2000.0, 500.0).await;
+    spawn_weapon_ball(&ctx, sys_id, t1_id, 587, DVec3::new(2_000.0, 0.0, 0.0), 5000.0, 500.0).await;
+    spawn_weapon_ball(&ctx, sys_id, t2_id, 587, DVec3::new(2_500.0, 0.0, 0.0), 5000.0, 500.0).await;
+    lock_target(&ctx, sys_id, ship_id, t1_id).await;
+    lock_target(&ctx, sys_id, ship_id, t2_id).await;
+
+    let shot1 = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(ent_id), PyRep::String("targetAttack".into()), PyRep::Integer(t1_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(shot1.dict_get("spoolCycles"), Some(&PyRep::Integer(0)));
+    assert!((shot1.dict_get("spoolMultiplier").and_then(|v| v.as_f64()).unwrap() - 1.0).abs() < 1e-6);
+
+    // Calling Activate while already active on same target returns AlreadyActive.
+    let dup_err = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(ent_id), PyRep::String("targetAttack".into()), PyRep::Integer(t1_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(dup_err.code, "AlreadyActive");
+
+    // Advancing spool cycles increments multiplier along per_cycle_bonus (0.25) and clamps to 1.0 + max_bonus.
+    let (c1, m1) = crate::services::combat_weapons_spool::advance_entropic_spool_cycle(&ctx, ship_id, ent_id);
+    assert_eq!(c1, 1);
+    assert!((m1 - 1.25).abs() < 1e-6);
+    let (c2, m2) = crate::services::combat_weapons_spool::advance_entropic_spool_cycle(&ctx, ship_id, ent_id);
+    assert_eq!(c2, 2);
+    assert!((m2 - 1.5).abs() < 1e-6);
+    assert!((crate::services::combat_weapons_spool::get_entropic_spool_multiplier(&ctx, ship_id, ent_id) - 1.5).abs() < 1e-6);
+
+    // Switching target to t2 resets spool back to cycle 0 and 1.0x.
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle.remove_module_cycle(ship_id, ent_id).await;
+    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.db.with_mut_snapshot(|s| {
+        s.module_active_states.remove(&ent_id);
+        if let Some(m) = s.items.get_mut(&ent_id) {
+            m.flag = InventoryFlag::HiSlot0;
+        }
+    });
+    if let Ok(mut fit) = ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
+        if let Some(fm) = fit.modules.get_mut(&ent_id) {
+            fm.state = eve_dogma::ModuleState::Online;
+        }
+        ctx.store_ship_fitting(ship_id, fit);
+    }
+    let shot_switch = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(ent_id), PyRep::String("targetAttack".into()), PyRep::Integer(t2_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(shot_switch.dict_get("spoolCycles"), Some(&PyRep::Integer(0)));
+    assert!((shot_switch.dict_get("spoolMultiplier").and_then(|v| v.as_f64()).unwrap() - 1.0).abs() < 1e-6);
+    assert!((crate::services::combat_weapons_spool::get_entropic_spool_multiplier(&ctx, ship_id, ent_id) - 1.0).abs() < 1e-6);
+}
+
+#[tokio::test]
+async fn salvager_tractor_smartbomb_safety_aoe_and_bomb_highsec() {
+    let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let kw = HashMap::new();
+    let salv_tid = 11_220u32;
+    let trac_tid = 6_500u32;
+    let sb_tid = 7_200u32;
+    let bomb_tid = 8_620u32;
+    let bomb_charge_tid = 8_621u32;
+    {
+        let sde = Arc::make_mut(&mut ctx.sde);
+        sde.types.insert(salv_tid, make_fighter_type(salv_tid, 1122, 7, 5.0, vec![(54, 6_000.0), (51, 5_000.0)]));
+        sde.types.insert(trac_tid, make_fighter_type(trac_tid, 650, 7, 5.0, vec![(54, 20_000.0), (51, 5_000.0)]));
+        sde.types.insert(sb_tid, make_fighter_type(sb_tid, 72, 7, 50.0, vec![(6, 25.0), (99, 5_000.0), (114, 500.0), (51, 5_000.0)]));
+        sde.types.insert(bomb_tid, make_fighter_type(bomb_tid, 862, 7, 50.0, vec![(51, 5_000.0)]));
+        sde.types.insert(bomb_charge_tid, make_fighter_type(bomb_charge_tid, 863, 8, 75.0, vec![(114, 1_000.0)]));
+    }
+
+    let salv_id = 862_001i64;
+    let trac_id = 862_002i64;
+    let sb_id = 862_003i64;
+    let bomb_id = 862_004i64;
+    let bomb_charge_id = 862_005i64;
+    let near_npc = 862_101i64;
+    let far_npc = 862_102i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(salv_id, make_fighter_item(salv_id, salv_tid, char_id, ship_id, InventoryFlag::HiSlot0, 1));
+        snap.items.insert(trac_id, make_fighter_item(trac_id, trac_tid, char_id, ship_id, InventoryFlag::HiSlot1, 1));
+        snap.items.insert(sb_id, make_fighter_item(sb_id, sb_tid, char_id, ship_id, InventoryFlag::HiSlot2, 1));
+        snap.items.insert(bomb_id, make_fighter_item(bomb_id, bomb_tid, char_id, ship_id, InventoryFlag::HiSlot3, 1));
+        snap.items.insert(bomb_charge_id, make_fighter_item(bomb_charge_id, bomb_charge_tid, char_id, ship_id, InventoryFlag::HiSlot3, 2));
+        for id in [salv_id, trac_id, sb_id, bomb_id] {
+            snap.module_online_states.insert(id, true);
+        }
+    });
+
+    spawn_weapon_ball(&ctx, sys_id, ship_id, 23_915, DVec3::ZERO, 2000.0, 500.0).await;
+    spawn_weapon_ball(&ctx, sys_id, near_npc, 587, DVec3::new(2_000.0, 0.0, 0.0), 2000.0, 200.0).await;
+    spawn_weapon_ball(&ctx, sys_id, far_npc, 587, DVec3::new(15_000.0, 0.0, 0.0), 2000.0, 200.0).await;
+
+    // Salvager & Tractor target guards.
+    for mid in [salv_id, trac_id] {
+        assert_eq!(
+            handle_weapons(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(mid)], &kw)
+                .await
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "TargetRequired"
+        );
+        assert_eq!(
+            handle_weapons(
+                &ctx,
+                &mut session,
+                "dogmaIM",
+                "Activate",
+                &[PyRep::Integer(mid), PyRep::String("Salvage".into()), PyRep::Integer(999_888)],
+                &kw,
+            )
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "TargetNotInSpace"
+        );
+    }
+
+    // Smartbomb Green safety blocked in highsec, Red safety damages near ball and spares far ball.
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, SafetyLevel::Green);
+    });
+    assert_eq!(
+        handle_weapons(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(sb_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CantDoInCurrentSafetyLevel"
+    );
+
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, SafetyLevel::Red);
+    });
+    handle_weapons(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(sb_id)], &kw)
+        .await
+        .unwrap()
+        .expect("smartbomb Red safety");
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let near_sh = sys_handle.get_combat_state(near_npc).await.unwrap().unwrap().shield_hp;
+    let far_sh = sys_handle.get_combat_state(far_npc).await.unwrap().unwrap().shield_hp;
+    assert!(near_sh < 2000.0, "near target should take smartbomb AoE damage");
+    assert!((far_sh - 2000.0).abs() < 1e-6, "far target should remain untouched");
+
+    // BombLauncher forbidden in highsec (30_000_142).
+    assert_eq!(
+        handle_weapons(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(bomb_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "BombDisallowedInHighSec"
+    );
+}
+

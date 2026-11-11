@@ -162,10 +162,10 @@ fn test_flush_npc_bounty_tick_nullsec_ess_dbs_and_player_corp_tax() {
     });
 
     // Pass corp_tax_rate = 0.0 with gross >= 100k -> uses player corp's resolved_tax_rate (0.15)
-    let (pilot_isk, main_ess, reserve_ess) = flush_npc_bounty_tick(&ctx, null_sys_id, char_id, 0.0);
-    assert!(pilot_isk > 0.0);
-    assert!(main_ess > 0.0);
-    assert!(reserve_ess >= 0.0);
+    let payout = flush_npc_bounty_tick(&ctx, null_sys_id, char_id, 0.0);
+    assert!(payout.pilot_isk > 0.0);
+    assert!(payout.main_ess_isk > 0.0);
+    assert!(payout.reserve_ess_isk >= 0.0);
 
     ctx.db.with_snapshot(|snap| {
         let corp = snap.corporations.get(&player_corp_id).unwrap();

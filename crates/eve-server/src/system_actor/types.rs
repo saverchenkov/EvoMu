@@ -198,6 +198,16 @@ pub enum PendingCycleAction {
         char_id: Option<CharacterId>,
         ship_id: BallId,
     },
+    CycleWeaponDamage {
+        attacker_char_id: Option<CharacterId>,
+        attacker_ship_id: BallId,
+        attacker_ship_type_id: u32,
+        target_id: BallId,
+        target_char_id: Option<CharacterId>,
+        module_type_id: u32,
+        applied_dmg: f64,
+        notified: bool,
+    },
 }
 
 #[derive(Default)]
@@ -340,6 +350,11 @@ pub enum SystemCommand {
         event: DestinyEvent,
         reply: oneshot::Sender<bool>,
     },
+    EmitObserverDestinyEvent {
+        observer_ball_id: BallId,
+        event: DestinyEvent,
+        reply: oneshot::Sender<bool>,
+    },
     GotoPoint {
         ball_id: BallId,
         point: glam::DVec3,
@@ -390,6 +405,10 @@ pub enum SystemCommand {
     StepManual {
         dt: f64,
         reply: oneshot::Sender<(TickBroadcast, Vec<(BallId, Option<CharacterId>)>)>,
+    },
+    StepManualTickOnly {
+        dt: f64,
+        reply: oneshot::Sender<(u64, Vec<(BallId, Option<CharacterId>)>)>,
     },
     FastForwardClock {
         ship_id: BallId,

@@ -527,3 +527,182 @@ fn multi_stack_paste_deduction_legacy_rack_heat_migration_and_mid_low_rack_propa
             .contains_key(&attr_ids::DAMAGE));
     });
 }
+
+#[tokio::test]
+async fn activate_interdiction_sphere_launcher_reload_division_and_quantity_cap_mutants() {
+    let dictor_ship_tid = 999_930_u32;
+    let launcher_tid = 999_931_u32;
+    let disrupt_probe_tid = 22_778_u32;
+    let wubble_probe_tid = 999_932_u32;
+    let null_sys = 30_004_759_u32;
+
+    let (ctx, _) = make_ctx(1_775_000_100, |sde| {
+        sde.types.insert(
+            dictor_ship_tid,
+            custom_type(sde, dictor_ship_tid, 541, 6, 100.0, 10_000.0, &[(38, 100.0)]),
+        );
+        sde.types.insert(
+            launcher_tid,
+            custom_type(
+                sde,
+                launcher_tid,
+                589,
+                7,
+                15.0,
+                5.0,
+                &[(51, 5_000.0), (1795, 60_000.0), (5561, 1.0)],
+            ),
+        );
+        sde.types.insert(
+            disrupt_probe_tid,
+            custom_type(
+                sde,
+                disrupt_probe_tid,
+                548,
+                8,
+                0.0,
+                5.0,
+                &[(103, 20_000.0), (281, 120_000.0), (9, 1_000.0)],
+            ),
+        );
+        // 5.0 m3 probes with 15.0 m3 launcher capacity => r_cap = floor(15.0 / 5.0) = 3;
+        // whereas 15.0 % 5.0 = 0 -> max(1.0) = 1, and 15.0 * 5.0 = 75 (clamped by cargo qty 7 -> 7).
+        sde.types.insert(
+            wubble_probe_tid,
+            custom_type(
+                sde,
+                wubble_probe_tid,
+                4088,
+                8,
+                0.0,
+                5.0,
+                &[(2279, 15_000.0), (2280, 30_000.0), (9, 800.0)],
+            ),
+        );
+        sde.solar_systems.insert(
+            null_sys,
+            SolarSystem {
+                solar_system_id: null_sys,
+                region_id: 10_000_060,
+                constellation_id: 20_000_700,
+                name: "Delve Reload Test".into(),
+                security_status: -0.5,
+                radius: 1e12,
+                galactic_pos_ly: [0.0; 3],
+                planet_ids: vec![],
+                stations: vec![],
+                wormhole_class_id: None,
+            },
+        );
+    });
+
+    let char_id = 90_000_001_i64;
+    let ship_id = 1_210_001_i64;
+    let mod_id = 1_210_002_i64;
+    let charge_id = 1_210_003_i64;
+    let cargo_id = 1_210_004_i64;
+    let mod_type = ctx.sde.types.get(&launcher_tid).unwrap().clone();
+    let fitted_mod = FittedModule {
+        item_id: mod_id,
+        type_id: launcher_tid,
+        flag_id: InventoryFlag::HiSlot0 as u16,
+        state: ModuleState::Online,
+        charge_type_id: Some(disrupt_probe_tid),
+        charge_quantity: 1,
+        damage_hp: 0.0,
+        max_hp: 40.0,
+        dynamic_attribute_overrides: HashMap::new(),
+    };
+
+    let sys_null = ctx.systems.get_or_spawn(null_sys);
+    sys_null
+        .spawn_ball_with_meta(
+            Ball {
+                id: ship_id,
+                type_id: dictor_ship_tid,
+                position: DVec3::new(1_000.0, 2_000.0, 3_000.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_500_000.0,
+                radius: 60.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+            SlimItemMeta::default(),
+        )
+        .await
+        .unwrap();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: dictor_ship_tid,
+                owner_id: char_id,
+                location_id: null_sys as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            charge_id,
+            InventoryItemRecord {
+                item_id: charge_id,
+                type_id: disrupt_probe_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            cargo_id,
+            InventoryItemRecord {
+                item_id: cargo_id,
+                type_id: wubble_probe_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 7,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+
+    let res = activate_interdiction_sphere_launcher(
+        &ctx,
+        &sys_null,
+        null_sys,
+        char_id,
+        ship_id,
+        dictor_ship_tid,
+        mod_id,
+        &fitted_mod,
+        &mod_type,
+        "useMissiles",
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(res.dict_get("reloading"), Some(&PyRep::Bool(true)));
+    assert_eq!(res.dict_get("remainingInLauncher"), Some(&PyRep::Integer(3)));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&cargo_id].quantity, 4);
+        let reloaded_slot = snap
+            .items
+            .values()
+            .find(|i| i.location_id == ship_id && i.flag == InventoryFlag::HiSlot0)
+            .expect("reloaded wubble probe stack in HiSlot0");
+        assert_eq!(reloaded_slot.type_id, wubble_probe_tid);
+        assert_eq!(reloaded_slot.quantity, 3);
+    });
+}

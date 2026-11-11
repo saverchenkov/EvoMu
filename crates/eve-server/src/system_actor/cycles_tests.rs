@@ -513,3 +513,289 @@ fn repeating_weapon_cycles_apply_turret_and_missile_mitigation() {
         "Target beyond missile flight range must take 0 damage"
     );
 }
+
+#[test]
+fn w3_mutant_killers_crystal_volatility_infinite_crystal_and_cargo_autoreload() {
+    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let mut sde = (*make_sde_for_cycles()).clone();
+    let mut launcher = sde.types[&587].clone();
+    launcher.type_id = 995_001;
+    launcher.capacity = 0.05; // 20 rounds of 0.0025 m3 ammo
+    launcher.default_attributes.insert(1795, 5_000.0); // 5s reload
+    sde.types.insert(995_001, launcher);
+
+    let mut ammo = sde.types[&587].clone();
+    ammo.type_id = 995_002;
+    ammo.volume = 0.0025;
+    sde.types.insert(995_002, ammo);
+    let sde_opt = Some(Arc::new(sde));
+    let db_opt = Some(Arc::clone(&db));
+
+    let mut bp = Ballpark::new(30_000_142);
+    let ship_id = 5101_i64;
+    let tgt_id = 5102_i64;
+    bp.add_ball(make_ship(ship_id, 587, DVec3::ZERO));
+    bp.combat_states.insert(
+        ship_id,
+        CombatState {
+            capacitor: 1_000.0,
+            max_capacitor: 1_000.0,
+            ..CombatState::default()
+        },
+    );
+    bp.add_ball(make_ship(tgt_id, 587, DVec3::new(1_000.0, 0.0, 0.0)));
+    bp.combat_states.insert(
+        tgt_id,
+        CombatState {
+            shield_hp: 10_000.0,
+            max_shield_hp: 10_000.0,
+            ..CombatState::default()
+        },
+    );
+
+    let mod_inf_crystal = 6101_i64;
+    let chg_inf_crystal = 6102_i64;
+    let mod_vol_crystal = 6103_i64;
+    let chg_vol_crystal = 6104_i64;
+    let mod_proj = 6105_i64;
+    let chg_proj = 6106_i64;
+    let cargo_ammo = 6107_i64;
+
+    db.with_mut_snapshot(|snap| {
+        for (mid, flag) in [
+            (mod_inf_crystal, eve_db::InventoryFlag::HiSlot0),
+            (mod_vol_crystal, eve_db::InventoryFlag::HiSlot1),
+            (mod_proj, eve_db::InventoryFlag::HiSlot2),
+        ] {
+            snap.items.insert(
+                mid,
+                eve_db::InventoryItemRecord {
+                    item_id: mid,
+                    type_id: 995_001,
+                    owner_id: 90_000_001,
+                    location_id: ship_id,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        // 1. T1 frequency crystal (crystal_volatility_damage < 0.0): never consumes quantity
+        snap.items.insert(
+            chg_inf_crystal,
+            eve_db::InventoryItemRecord {
+                item_id: chg_inf_crystal,
+                type_id: 995_002,
+                owner_id: 90_000_001,
+                location_id: ship_id,
+                flag: eve_db::InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        // 2. Volatile crystal stack of 2 with 0.60 damage already + 0.50 volatility damage -> shatters 1 unit, resets DAMAGE to 0.0, keeps qty 1
+        snap.items.insert(
+            chg_vol_crystal,
+            eve_db::InventoryItemRecord {
+                item_id: chg_vol_crystal,
+                type_id: 995_002,
+                owner_id: 90_000_001,
+                location_id: ship_id,
+                flag: eve_db::InventoryFlag::HiSlot1,
+                quantity: 2,
+                singleton: false,
+                dynamic_attributes: HashMap::from([(eve_sde::attr_ids::DAMAGE, 0.60)]),
+                version: 1,
+                ..Default::default()
+            },
+        );
+        // 3. Projectile ammo with 1 round left + 50 rounds in Cargo -> consumes last round and auto-reloads 20 rounds from Cargo
+        snap.items.insert(
+            chg_proj,
+            eve_db::InventoryItemRecord {
+                item_id: chg_proj,
+                type_id: 995_002,
+                owner_id: 90_000_001,
+                location_id: ship_id,
+                flag: eve_db::InventoryFlag::HiSlot2,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            cargo_ammo,
+            eve_db::InventoryItemRecord {
+                item_id: cargo_ammo,
+                type_id: 995_002,
+                owner_id: 90_000_001,
+                location_id: ship_id,
+                flag: eve_db::InventoryFlag::Cargo,
+                quantity: 50,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut cycles = vec![
+        ActiveModuleCycle {
+            ship_id,
+            module_id: mod_inf_crystal,
+            module_type_id: 995_001,
+            linked_turrets: vec![mod_inf_crystal],
+            target_id: Some(tgt_id),
+            ammo_type_id: Some(995_002),
+            crystal_volatility_damage: -1.0,
+            damage_vector: DamageVector::new(10.0, 0.0, 0.0, 0.0),
+            duration_s: 1.0,
+            repeat: 10,
+            ..ActiveModuleCycle::default()
+        },
+        ActiveModuleCycle {
+            ship_id,
+            module_id: mod_vol_crystal,
+            module_type_id: 995_001,
+            linked_turrets: vec![mod_vol_crystal],
+            target_id: Some(tgt_id),
+            ammo_type_id: Some(995_002),
+            crystal_volatility_chance: 1.0,
+            crystal_volatility_damage: 0.50,
+            damage_vector: DamageVector::new(10.0, 0.0, 0.0, 0.0),
+            duration_s: 1.0,
+            repeat: 10,
+            ..ActiveModuleCycle::default()
+        },
+        ActiveModuleCycle {
+            ship_id,
+            module_id: mod_proj,
+            module_type_id: 995_001,
+            linked_turrets: vec![mod_proj],
+            target_id: Some(tgt_id),
+            ammo_type_id: Some(995_002),
+            crystal_volatility_damage: 0.0,
+            damage_vector: DamageVector::new(10.0, 0.0, 0.0, 0.0),
+            duration_s: 1.0,
+            repeat: 10,
+            ..ActiveModuleCycle::default()
+        },
+    ];
+
+    step_cycles_and_capacitor(
+        &mut bp,
+        &mut cycles,
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &mut HashMap::new(),
+        &mut HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &sde_opt,
+        &db_opt,
+        &None,
+        &Arc::new(RwLock::new(Default::default())),
+        &mut Vec::new(),
+        1.0,
+        None,
+    );
+
+    db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&chg_inf_crystal].quantity, 1);
+        assert_eq!(snap.items[&chg_vol_crystal].quantity, 1);
+        assert_eq!(
+            snap.items[&chg_vol_crystal]
+                .dynamic_attributes
+                .get(&eve_sde::attr_ids::DAMAGE)
+                .copied(),
+            Some(0.0)
+        );
+        // Cargo stack had 20 rounds moved into HiSlot2 (50 -> 30)
+        assert_eq!(snap.items[&cargo_ammo].quantity, 30);
+    });
+}
+
+#[test]
+fn resolve_ball_pilot_char_id_covers_slim_meta_active_ship_item_owner_and_non_positive_filter() {
+    let mut bp = Ballpark::new(30_000_142);
+    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let char_id = 90_000_001_i64;
+    let active_ship = db.with_snapshot(|s| s.characters[&char_id].active_ship_id);
+
+    // 1. Direct ball_slim_meta char_id > 0
+    bp.ball_slim_meta.insert(
+        500_001,
+        eve_destiny::SlimItemMeta {
+            char_id: Some(char_id),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        super::resolve_ball_pilot_char_id(&bp, Some(&db), 500_001),
+        Some(char_id)
+    );
+
+    // 2. Non-positive char_id (0 or -1) is rejected by filter(|&c| c > 0)
+    bp.ball_slim_meta.insert(
+        500_002,
+        eve_destiny::SlimItemMeta {
+            char_id: Some(0),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        super::resolve_ball_pilot_char_id(&bp, Some(&db), 500_002),
+        None
+    );
+
+    // 3. Fallback to character with active_ship_id == ball_id
+    assert_eq!(
+        super::resolve_ball_pilot_char_id(&bp, Some(&db), active_ship),
+        Some(char_id)
+    );
+
+    // 4. Fallback to item.owner_id when owner_id is in snap.characters vs non-character owner
+    let char_owned_ball = 500_003_i64;
+    let corp_owned_ball = 500_004_i64;
+    db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            char_owned_ball,
+            eve_db::InventoryItemRecord {
+                item_id: char_owned_ball,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: 30_000_142,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            corp_owned_ball,
+            eve_db::InventoryItemRecord {
+                item_id: corp_owned_ball,
+                type_id: 587,
+                owner_id: 98_000_001,
+                location_id: 30_000_142,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+    assert_eq!(
+        super::resolve_ball_pilot_char_id(&bp, Some(&db), char_owned_ball),
+        Some(char_id)
+    );
+    assert_eq!(
+        super::resolve_ball_pilot_char_id(&bp, Some(&db), corp_owned_ball),
+        None
+    );
+}

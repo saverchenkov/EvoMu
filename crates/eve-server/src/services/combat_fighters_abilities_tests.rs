@@ -17,6 +17,9 @@ mod combat_fighters_bomb_tests;
 #[cfg(test)]
 #[path = "combat_fighters_ewar_tests.rs"]
 mod combat_fighters_ewar_tests;
+#[cfg(test)]
+#[path = "combat_fighters_abilities_edges_tests.rs"]
+mod combat_fighters_abilities_edges_tests;
 
 pub(super) fn py_key<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
     match rep {

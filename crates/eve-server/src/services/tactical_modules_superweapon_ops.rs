@@ -80,9 +80,6 @@ pub async fn activate_superweapon_or_lance(
 }
 
 fn parse_vec3_arg(args: &[PyRep], idx: usize) -> Result<Option<DVec3>, BridgeRpcError> {
-    if !matches!(args.get(idx), Some(PyRep::Tuple(_) | PyRep::List(_))) {
-        return Ok(None);
-    }
     RpcArgs::positional(args)
         .opt_finite_vec3(idx)
         .map_err(|e| BridgeRpcError {
@@ -977,3 +974,7 @@ pub(crate) fn fire_lance_warmup_in_ballpark(
         });
     }
 }
+
+#[cfg(test)]
+#[path = "tactical_modules_superweapon_ops_edges_tests.rs"]
+mod tactical_modules_superweapon_ops_edges_tests;

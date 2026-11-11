@@ -33,6 +33,7 @@ pub(crate) fn handle_schedule_mobile_warp_disruptor(
     }
     let ok = ballpark.add_ball(ball);
     if ok {
+        ballpark.ball_group_ids.insert(id, 361);
         ballpark.set_ball_free(id, false);
         ballpark.set_ball_radius(id, radius);
         ballpark.set_ball_harmonic(id, 1);

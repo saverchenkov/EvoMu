@@ -143,13 +143,46 @@ pub fn evaluate_remote_assistance_legality(
     res
 }
 
+struct ComputedCrimewatchTimerStates {
+    timers: [(i64, PyRep); 5],
+    sigs: (i64, i64, i64, i64, i64),
+    next_trig: [u64; 5],
+    prev_opt: Option<(i64, i64, i64, i64, i64)>,
+}
+
+impl Default for ComputedCrimewatchTimerStates {
+    fn default() -> Self {
+        Self {
+            timers: [
+                (0, PyRep::None),
+                (0, PyRep::None),
+                (0, PyRep::None),
+                (0, PyRep::None),
+                (0, PyRep::None),
+            ],
+            sigs: (0, 0, 0, 0, 0),
+            next_trig: [0; 5],
+            prev_opt: None,
+        }
+    }
+}
+
 fn compute_crimewatch_timer_states(
     ctx: &ServerContext,
     char_id: i64,
     now_unix: u64,
-) -> ([(i64, PyRep); 5], (i64, i64, i64, i64, i64), [u64; 5], Option<(i64, i64, i64, i64, i64)>) {
+) -> ComputedCrimewatchTimerStates {
+    let st = ctx.crimewatch.state_of(char_id).unwrap_or_default();
+    compute_crimewatch_timer_states_with_state(ctx, char_id, &st, now_unix)
+}
+
+fn compute_crimewatch_timer_states_with_state(
+    ctx: &ServerContext,
+    char_id: i64,
+    st: &crate::combat::CharacterCrimeWatchState,
+    now_unix: u64,
+) -> ComputedCrimewatchTimerStates {
     let unix_to_ft = |u: u64| -> i64 { (u as i64 + 11_644_473_600) * 10_000_000 };
-    let st = ctx.crimewatch.read().ok().and_then(|cw| cw.states.get(&char_id).cloned()).unwrap_or_default();
     let (npc_exp, dis_exp, prev_opt, trig_at) = with_combat_runtime(ctx, |rt| (
         rt.npc_timers.get(&char_id).copied().filter(|&exp| now_unix < exp),
         rt.disapproval_flags.get(&char_id).copied().filter(|&exp| now_unix < exp),
@@ -185,17 +218,48 @@ fn compute_crimewatch_timer_states(
     let (dc, dv, ds) = if let Some(exp) = dis_exp {
         eval(4, prev.4, exp, 501, 502, &mut next_trig)
     } else { next_trig[4] = 0; (500, PyRep::None, 500) };
-    ([(wc, wv), (pc, pv), (nc, nv), (cc, cv), (dc, dv)], (ws, ps, ns, cs, ds), next_trig, prev_opt)
+    ComputedCrimewatchTimerStates {
+        timers: [(wc, wv), (pc, pv), (nc, nv), (cc, cv), (dc, dv)],
+        sigs: (ws, ps, ns, cs, ds),
+        next_trig,
+        prev_opt,
+    }
 }
 
 /// Pushes `OnWeaponsTimerUpdate`, `OnPvpTimerUpdate`, `OnNpcTimerUpdate`, and `OnCriminalTimerUpdate`
 /// (`(state, expiryTime)` with Windows FILETIME expiry) to `char_id` on timer state changes (`feat:crimewatch.crimewatch-states`).
 pub fn emit_crimewatch_timer_notifications(ctx: &ServerContext, char_id: i64, now_unix: u64) {
-    let ([(weap_code, weap_val), (pvp_code, pvp_val), (npc_code, npc_val), (crim_code, crim_val), (dis_code, dis_val)], (weap_sig, pvp_sig, npc_sig, crim_sig, dis_sig), next_trig, prev_opt) =
-        compute_crimewatch_timer_states(ctx, char_id, now_unix);
+    let st = ctx.crimewatch.state_of(char_id).unwrap_or_default();
+    emit_crimewatch_timer_notifications_with_state(ctx, char_id, &st, now_unix);
+}
+
+pub fn emit_crimewatch_timer_notifications_with_state(
+    ctx: &ServerContext,
+    char_id: i64,
+    st: &crate::combat::CharacterCrimeWatchState,
+    now_unix: u64,
+) {
+    let ComputedCrimewatchTimerStates {
+        timers: [(weap_code, weap_val), (pvp_code, pvp_val), (npc_code, npc_val), (crim_code, crim_val), (dis_code, dis_val)],
+        sigs: (weap_sig, pvp_sig, npc_sig, crim_sig, dis_sig),
+        next_trig,
+        prev_opt,
+    } = compute_crimewatch_timer_states_with_state(ctx, char_id, st, now_unix);
     let prev = prev_opt.unwrap_or((0, 0, 0, 0, 0));
 
     let is_all_idle = weap_code == 100 && pvp_code == 200 && npc_code == 400 && crim_code == 300 && dis_code == 500;
+    if prev_opt.is_none() && is_all_idle {
+        return;
+    }
+    let new_sigs = (weap_sig, pvp_sig, npc_sig, crim_sig, dis_sig);
+    if !is_all_idle && prev_opt == Some(new_sigs) {
+        let same_trig = with_combat_runtime(ctx, |rt| {
+            rt.crimewatch_timer_triggered_at.get(&char_id).copied().unwrap_or([0; 5]) == next_trig
+        });
+        if same_trig {
+            return;
+        }
+    }
     let mut updates: Vec<(&str, Vec<PyRep>)> = Vec::new();
     let mut crim_transition: Option<(Vec<i64>, Vec<i64>, Vec<i64>)> = None;
     let mut dis_transition: Option<(Vec<i64>, Vec<i64>)> = None;
@@ -820,7 +884,7 @@ pub async fn handle_crimewatch(
                     .unwrap_or(SafetyLevel::Green);
                 (le, saf)
             });
-            let (timers, _, _, _) = compute_crimewatch_timer_states(ctx, char_id, now_unix);
+            let timers = compute_crimewatch_timer_states(ctx, char_id, now_unix).timers;
             Some(Ok(PyRep::Tuple(vec![
                 PyRep::Tuple(
                     timers
@@ -1372,4 +1436,8 @@ pub fn evaluate_and_record_remote_assistance(
 #[cfg(test)]
 #[path = "crimewatch_timers_tests.rs"]
 mod crimewatch_timers_tests;
+
+#[cfg(test)]
+#[path = "crimewatch_timers_edges2_tests.rs"]
+mod crimewatch_timers_edges2_tests;
 

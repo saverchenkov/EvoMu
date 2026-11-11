@@ -530,3 +530,7 @@ pub async fn step_drone_auto_aggression_and_assist(
     }
     engaged_drone_balls
 }
+
+#[cfg(test)]
+#[path = "combat_npcs_drones_cycle_ops_edges_tests.rs"]
+mod combat_npcs_drones_cycle_ops_edges_tests;

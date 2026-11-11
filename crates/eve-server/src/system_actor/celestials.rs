@@ -370,7 +370,7 @@ impl SystemHandle {
 
     pub fn try_remove_ball(&self, ball_id: BallId) {
         self.cancel_ship_nanite_repairs_sync(ball_id, true);
-        let (removed_cycles, db_opt, deact_guard) = {
+        let (removed_cycles, fallback_slim_owner, db_opt, deact_guard) = {
             let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
             let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
             let deact_guard = self.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
@@ -390,11 +390,15 @@ impl SystemHandle {
                 ball_id,
                 None,
             );
+            let fallback_slim_owner = bp
+                .ball_slim_meta
+                .get(&ball_id)
+                .and_then(|m| (m.owner_id > 0).then_some(m.owner_id));
             base_scramble_strengths.remove(&ball_id);
             base_core_strengths.remove(&ball_id);
             let _ = bp.remove_ball(ball_id);
             super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-            (removed_cycles, db_opt.clone(), deact_guard)
+            (removed_cycles, fallback_slim_owner, db_opt.clone(), deact_guard)
         };
         if let Some(db_ref) = db_opt {
             if !db_ref.is_write_locked_by_current_thread() {
@@ -440,15 +444,17 @@ impl SystemHandle {
                 });
                 if let Some(hook) = deact_guard.as_ref() {
                     for (removed, char_id_opt) in &removed_cycles {
-                        let cid = (*char_id_opt).or_else(|| {
-                            db_ref.with_snapshot(|s| {
-                                s.characters
-                                    .values()
-                                    .find(|c| c.active_ship_id == removed.ship_id)
-                                    .map(|c| c.character_id)
-                                    .or_else(|| s.items.get(&removed.ship_id).map(|it| it.owner_id))
+                        let cid = (*char_id_opt)
+                            .or_else(|| {
+                                db_ref.with_snapshot(|s| {
+                                    s.characters
+                                        .values()
+                                        .find(|c| c.active_ship_id == removed.ship_id)
+                                        .map(|c| c.character_id)
+                                        .or_else(|| s.items.get(&removed.ship_id).map(|it| it.owner_id))
+                                })
                             })
-                        });
+                            .or(fallback_slim_owner);
                         if let Some(cid) = cid {
                             hook(cid, removed);
                         }
@@ -972,6 +978,28 @@ impl SystemHandle {
         rx.await.unwrap_or(false)
     }
 
+    /// Queues `event` directly into `observer_ball_id`'s observer queue (returns `false` if absent).
+    pub async fn emit_observer_destiny_event(
+        &self,
+        observer_ball_id: BallId,
+        event: DestinyEvent,
+    ) -> bool {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(SystemCommand::EmitObserverDestinyEvent {
+                observer_ball_id,
+                event,
+                reply: tx,
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
     /// Steers `ball_id` toward `point` (`beyonce.CmdGotoPoint`) and returns the current tick.
     pub async fn goto_point(&self, ball_id: BallId, point: glam::DVec3) -> Result<u64, String> {
         let (tx, rx) = oneshot::channel();
@@ -1178,6 +1206,23 @@ impl SystemHandle {
             hook(self.solar_system_id, dt * self.tidi_factor(), destroyed_balls).await;
         }
         Ok(broadcast)
+    }
+
+    pub(crate) async fn step_manual_tick_only(&self, dt: f64) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx.send(SystemCommand::StepManualTickOnly { dt, reply: tx }).await.map_err(|_| "Solar system actor stopped".to_string())?;
+        let (tick, destroyed_balls) = rx.await.map_err(|_| "Solar system reply dropped".to_string())?;
+        let hook = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
+        for &(target_ball_id, owner_char_id) in &destroyed_balls {
+            if let Some(fut) = super::on_ball_destroyed_by_damage(self.solar_system_id, target_ball_id, owner_char_id, hook.as_ref()) {
+                fut.await;
+            }
+        }
+        let step_hook = self.system_step_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(hook) = step_hook {
+            hook(self.solar_system_id, dt * self.tidi_factor(), destroyed_balls).await;
+        }
+        Ok(tick)
     }
 
     pub async fn fast_forward_clock(&self, ship_id: BallId, secs: u64) -> Result<(), String> {

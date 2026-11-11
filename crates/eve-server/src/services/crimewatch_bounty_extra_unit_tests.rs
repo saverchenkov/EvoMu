@@ -248,3 +248,137 @@ fn kill_right_sale_restrictions_expiry_and_queries_kill_mutations() {
         panic!("expected List");
     }
 }
+
+#[test]
+fn mutant_kill_bounty_proxy_cancel_floor_restriction_gm_and_sec_tags() {
+    let (ctx, mut session, char_id, _ship_id, _sys_id) = make_fighter_ctx_and_session();
+    let target_char_id = 90_000_079_i64;
+    let ally_id = 3_000_079_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut tc = snap.characters[&char_id].clone();
+        tc.character_id = target_char_id;
+        tc.name = "BountyTarget".into();
+        snap.characters.insert(target_char_id, tc);
+        snap.characters.get_mut(&char_id).unwrap().balance = eve_db::IskCents::from_f64_isk(500_000.0);
+        snap.alliances.insert(
+            ally_id,
+            AllianceRecord {
+                alliance_id: ally_id,
+                name: "TestRestrAlly".into(),
+                short_name: "TRA".into(),
+                executor_corp_id: 2_000_079,
+                member_corp_ids: std::collections::HashSet::from([2_000_079]),
+            },
+        );
+    });
+
+    // Unknown method must return None (kills Some(Ok(Default::default())))
+    assert!(call_bounty_rpc(&ctx, &mut session, "bountyProxy", "unmatched_method", &[]).is_none());
+
+    // SellKillRight negative restrictedTo (< 0 filtered out) vs positive restrictedTo, then CancelSellKillRight happy path
+    create_kill_right(&ctx, 1901, char_id, target_char_id, 0.0);
+    let neg_restr = call_bounty_rpc(
+        &ctx,
+        &mut session,
+        "bountyProxy",
+        "SellKillRight",
+        &[PyRep::Integer(1901), PyRep::Real(0.0), PyRep::Integer(-5)],
+    )
+    .unwrap()
+    .unwrap();
+    let PyRep::List(neg_rows) = neg_restr else {
+        panic!("expected List");
+    };
+    assert_eq!(neg_rows[0].dict_get("forSale"), Some(&PyRep::Bool(false)));
+    assert_eq!(neg_rows[0].dict_get("restrictedTo"), Some(&PyRep::None));
+
+    let sold = call_bounty_rpc(
+        &ctx,
+        &mut session,
+        "bountyProxy",
+        "SellKillRight",
+        &[PyRep::Integer(1901), PyRep::Real(50_000.0), PyRep::Integer(ally_id)],
+    )
+    .unwrap()
+    .unwrap();
+    let PyRep::List(sold_rows) = sold else {
+        panic!("expected List");
+    };
+    assert_eq!(sold_rows[0].dict_get("forSale"), Some(&PyRep::Bool(true)));
+    assert_eq!(sold_rows[0].dict_get("restrictedTo"), Some(&PyRep::Integer(ally_id)));
+
+    let cancelled = call_bounty_rpc(
+        &ctx,
+        &mut session,
+        "killRightMgr",
+        "CancelSellKillRight",
+        &[PyRep::Integer(1901)],
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(cancelled.dict_get("killRightID"), Some(&PyRep::Integer(1901)));
+    assert_eq!(cancelled.dict_get("forSale"), Some(&PyRep::Bool(false)));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.kill_rights[&1901].activation_fee, eve_db::IskCents(0));
+        assert!(!snap.combat_crimewatch_state.kill_right_restricted_to.contains_key(&1901));
+    });
+
+    // AddToBounty boundary checks: 99_999.99 < 100k rejected, 100_000.0 accepted, 150_000.0 accepted
+    assert_eq!(
+        call_bounty_rpc(
+            &ctx,
+            &mut session,
+            "bountyProxy",
+            "AddToBounty",
+            &[PyRep::Integer(target_char_id), PyRep::Real(99_999.99)],
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "BountyAmountTooLow"
+    );
+    let exact = call_bounty_rpc(
+        &ctx,
+        &mut session,
+        "bountyProxy",
+        "AddToBounty",
+        &[PyRep::Integer(target_char_id), PyRep::Real(100_000.0)],
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(exact.dict_get("totalBountyISK"), Some(&PyRep::Real(100_000.0)));
+    let above = call_bounty_rpc(
+        &ctx,
+        &mut session,
+        "bountyProxy",
+        "AddToBounty",
+        &[PyRep::Integer(target_char_id), PyRep::Real(150_000.0)],
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(above.dict_get("totalBountyISK"), Some(&PyRep::Real(250_000.0)));
+
+    // GM bounty admin returns exact keyval with action & amountISK
+    session.role = eve_machonet::service_roles::ROLE_GMH;
+    let gm_reimb = call_bounty_rpc(
+        &ctx,
+        &mut session,
+        "bountyProxy",
+        "GMReimburseBounties",
+        &[PyRep::Integer(target_char_id)],
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(gm_reimb.dict_get("action"), Some(&PyRep::String("reimburse".into())));
+    assert_eq!(gm_reimb.dict_get("targetID"), Some(&PyRep::Integer(target_char_id)));
+    assert_eq!(gm_reimb.dict_get("amountISK"), Some(&PyRep::Real(250_000.0)));
+
+    // handle_apply_tags_for_sec_status returns real error (kills None & Some(Ok(Default::default())))
+    let unauth = SessionState::default();
+    let tag_err = call_sec_tags_rpc(&ctx, &unauth, &[]).unwrap().unwrap_err();
+    assert!(!tag_err.code.is_empty());
+    session.station_id = None;
+    let undocked_err = call_sec_tags_rpc(&ctx, &session, &[]).unwrap().unwrap_err();
+    assert_eq!(undocked_err.code, "NotDockedInStation");
+}

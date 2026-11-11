@@ -32,13 +32,21 @@ async fn handle_destruction_non_ship_npc_bounty_and_battleship_with_escape_bay()
         now_unix,
     )
     .await;
-    assert_eq!(res_ns.0, 0);
+    assert_eq!(res_ns.kill_id, 0);
+    assert_eq!(res_ns.wreck_id, 0);
+    assert_eq!(res_ns.corpse_id, 0);
+    assert!(res_ns.killmail_hash.is_empty());
 
     // 2. NPC pirate destruction credits pending bounty, updates sec status, and records killmail
     let npc_id = 1_895_000_123i64;
     let npc_ball = spawn_spool_ball(&ctx, sys_id, npc_id, 500_001, DVec3::new(1_000.0, 0.0, 0.0), 0.0, 0.0, 10.0, 0.0).await;
     let before_sec = ctx.db.with_snapshot(|s| s.characters.get(&attacker_id).map(|c| c.security_status).unwrap());
-    let (npc_km, npc_wreck, _, npc_hash) = handle_ship_or_npc_destruction(
+    let ShipOrNpcDestructionResult {
+        kill_id: npc_km,
+        wreck_id: npc_wreck,
+        corpse_id: npc_corpse,
+        killmail_hash: npc_hash,
+    } = handle_ship_or_npc_destruction(
         &ctx,
         &sys_handle,
         attacker_id,
@@ -53,7 +61,7 @@ async fn handle_destruction_non_ship_npc_bounty_and_battleship_with_escape_bay()
         now_unix,
     )
     .await;
-    assert!(npc_km > 0 && npc_wreck > 0 && !npc_hash.is_empty());
+    assert!(npc_km > 0 && npc_wreck > 0 && npc_corpse == 0 && !npc_hash.is_empty());
     let after_sec = ctx.db.with_snapshot(|s| s.characters.get(&attacker_id).map(|c| c.security_status).unwrap());
     assert!(after_sec >= before_sec);
 
@@ -99,7 +107,12 @@ async fn handle_destruction_non_ship_npc_bounty_and_battleship_with_escape_bay()
         }
     });
     let bs_ball = spawn_spool_ball(&ctx, sys_id, victim_bs, 24_690, DVec3::new(3_000.0, 0.0, 0.0), 10.0, 10.0, 10.0, 100.0).await;
-    let (bs_km, bs_wreck, bs_corpse, _) = handle_ship_or_npc_destruction(
+    let ShipOrNpcDestructionResult {
+        kill_id: bs_km,
+        wreck_id: bs_wreck,
+        corpse_id: bs_corpse,
+        ..
+    } = handle_ship_or_npc_destruction(
         &ctx,
         &sys_handle,
         attacker_id,
@@ -138,7 +151,12 @@ async fn handle_destruction_non_ship_npc_bounty_and_battleship_with_escape_bay()
         }
     });
     let pod_ball = spawn_spool_ball(&ctx, sys_id, pod_id, 670, DVec3::new(4_000.0, 0.0, 0.0), 0.0, 0.0, 5.0, 0.0).await;
-    let (pod_km, pod_wreck, pod_corpse, _) = handle_ship_or_npc_destruction(
+    let ShipOrNpcDestructionResult {
+        kill_id: pod_km,
+        wreck_id: pod_wreck,
+        corpse_id: pod_corpse,
+        ..
+    } = handle_ship_or_npc_destruction(
         &ctx,
         &sys_handle,
         attacker_id,

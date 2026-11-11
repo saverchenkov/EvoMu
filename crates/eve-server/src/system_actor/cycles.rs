@@ -556,7 +556,7 @@ pub(crate) fn step_cycles_and_capacitor(
                         entry[1] += effective_damage.thermal;
                         entry[2] += effective_damage.kinetic;
                         entry[3] += effective_damage.explosive;
-                        if let Some((_, true, _)) = dmg_res {
+                        if let Some((applied_dmg, is_destroyed, _)) = dmg_res {
                             let attacker_char_id = cycle.owner_char_id.or_else(|| {
                                 ballpark.ball_slim_meta.get(&cycle.ship_id).and_then(|m| m.char_id.or(Some(m.owner_id)))
                             }).or_else(|| {
@@ -565,7 +565,50 @@ pub(crate) fn step_cycles_and_capacitor(
                                         .or_else(|| s.items.get(&cycle.ship_id).map(|it| it.owner_id))
                                 }))
                             });
-                            destroyed_balls.push((target_id, attacker_char_id));
+                            let target_char_id = ballpark
+                                .ball_slim_meta
+                                .get(&target_id)
+                                .and_then(|m| m.char_id)
+                                .or_else(|| {
+                                    db_opt.as_ref().and_then(|db| {
+                                        db.with_snapshot(|s| {
+                                            s.characters
+                                                .values()
+                                                .find(|c| c.active_ship_id == target_id)
+                                                .map(|c| c.character_id)
+                                                .or_else(|| {
+                                                    s.items
+                                                        .get(&target_id)
+                                                        .map(|it| it.owner_id)
+                                                        .filter(|oid| s.characters.contains_key(oid))
+                                                })
+                                        })
+                                    })
+                                })
+                                .filter(|&cid| cid > 0 && Some(cid) != attacker_char_id);
+                            let attacker_ship_type_id = ballpark
+                                .balls
+                                .get(&cycle.ship_id)
+                                .map(|b| b.type_id)
+                                .unwrap_or(0);
+                            if applied_dmg > 0.0
+                                && (attacker_char_id.is_some_and(|c| c > 0)
+                                    || target_char_id.is_some_and(|c| c > 0))
+                            {
+                                pending_cycle_actions.push(super::PendingCycleAction::CycleWeaponDamage {
+                                    attacker_char_id,
+                                    attacker_ship_id: cycle.ship_id,
+                                    attacker_ship_type_id,
+                                    target_id,
+                                    target_char_id,
+                                    module_type_id: cycle.module_type_id,
+                                    applied_dmg,
+                                    notified: false,
+                                });
+                            }
+                            if is_destroyed {
+                                destroyed_balls.push((target_id, attacker_char_id));
+                            }
                         }
                     }
                 }
@@ -1258,14 +1301,31 @@ pub(crate) fn emit_cycle_deactivation(
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     hook: Option<&ModuleDeactivationHook>,
 ) {
-    let char_id = cycle.owner_char_id.or_else(|| {
-        ballpark.ball_slim_meta.get(&cycle.ship_id).and_then(|m| m.char_id.or(if m.owner_id > 0 { Some(m.owner_id) } else { None }))
-    }).or_else(|| {
-        db_opt.as_ref().and_then(|db| db.with_snapshot(|s| {
-            s.characters.values().find(|c| c.active_ship_id == cycle.ship_id).map(|c| c.character_id)
-                .or_else(|| s.items.get(&cycle.ship_id).map(|it| it.owner_id))
-        }))
-    });
+    let char_id = cycle
+        .owner_char_id
+        .or_else(|| {
+            ballpark
+                .ball_slim_meta
+                .get(&cycle.ship_id)
+                .and_then(|m| m.char_id)
+        })
+        .or_else(|| {
+            db_opt.as_ref().and_then(|db| {
+                db.with_snapshot(|s| {
+                    s.characters
+                        .values()
+                        .find(|c| c.active_ship_id == cycle.ship_id)
+                        .map(|c| c.character_id)
+                        .or_else(|| s.items.get(&cycle.ship_id).map(|it| it.owner_id))
+                })
+            })
+        })
+        .or_else(|| {
+            ballpark
+                .ball_slim_meta
+                .get(&cycle.ship_id)
+                .and_then(|m| (m.owner_id > 0).then_some(m.owner_id))
+        });
     if let (Some(cid), Some(h)) = (char_id, hook) {
         h(cid, cycle);
     }
@@ -1328,9 +1388,10 @@ pub(crate) fn remove_all_ship_module_cycles(
             let removed = active_module_cycles.swap_remove(i);
             cleanup_removed_module_cycle(ballpark, &removed, effective_db);
             let char_id = removed.owner_char_id.or_else(|| {
-                ballpark.ball_slim_meta.get(&removed.ship_id).and_then(|m| {
-                    m.char_id.or(if m.owner_id > 0 { Some(m.owner_id) } else { None })
-                })
+                ballpark
+                    .ball_slim_meta
+                    .get(&removed.ship_id)
+                    .and_then(|m| m.char_id)
             });
             removed_cycles.push((removed, char_id));
         }
@@ -1402,6 +1463,13 @@ impl SystemHandle {
         }
         let events = bp.step(dt);
         super::persist_landed_warps_in_db(&bp, &events, db_opt);
+        flush_target_lost_notifications(
+            &bp,
+            &events,
+            db_opt.as_ref(),
+            pending_notifications_opt.as_deref(),
+            notify_tx_opt.as_ref(),
+        );
         if let Some(lock_hook) = self.target_lock_completed_hook.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
             for ev in &events {
                 if let eve_destiny::DestinyEvent::OnTarget { mode, source_id, target_id } = ev {
@@ -1445,6 +1513,12 @@ impl SystemHandle {
             &mut bp, active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
             sde_opt, db_opt, mechanic_rng_opt, tactical_state, pending_cycle_actions, dt, deact_hook_guard.as_ref(),
+        );
+        flush_pending_cycle_damage_notifications(
+            db_opt.as_ref(),
+            pending_notifications_opt.as_deref(),
+            notify_tx_opt.as_ref(),
+            pending_cycle_actions,
         );
         destroyed.extend(sup_dead.into_iter().chain(pg_dead).map(|bid| (bid, None)));
         let zk_dead = crate::services::space_navigation_advanced::step_zarzakh_gravity_hazard_in_ballpark(
@@ -1543,6 +1617,328 @@ impl SystemHandle {
         sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
         let final_pos = bp.balls.get(&ship_id).map(|b| b.position).unwrap_or(dest);
         (final_pos, arrived)
+    }
+}
+
+fn resolve_ball_pilot_char_id(
+    ballpark: &eve_destiny::Ballpark,
+    db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
+    ball_id: i64,
+) -> Option<i64> {
+    ballpark
+        .ball_slim_meta
+        .get(&ball_id)
+        .and_then(|m| m.char_id)
+        .or_else(|| {
+            db_opt.and_then(|db| {
+                db.with_snapshot(|s| {
+                    s.characters
+                        .values()
+                        .find(|c| c.active_ship_id == ball_id)
+                        .map(|c| c.character_id)
+                        .or_else(|| {
+                            s.items
+                                .get(&ball_id)
+                                .map(|i| i.owner_id)
+                                .filter(|oid| s.characters.contains_key(oid))
+                        })
+                })
+            })
+        })
+        .filter(|&c| c > 0)
+}
+
+pub(crate) fn flush_target_lost_notifications(
+    ballpark: &eve_destiny::Ballpark,
+    events: &[eve_destiny::DestinyEvent],
+    db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
+    pending_opt: Option<
+        &std::sync::RwLock<
+            std::collections::HashMap<i64, Vec<crate::router::PendingMachoNotification>>,
+        >,
+    >,
+    notify_tx_opt: Option<
+        &tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>,
+    >,
+) {
+    let Some(pending) = pending_opt else {
+        return;
+    };
+    let now = db_opt
+        .map(|db| db.clock().now_blueos_filetime_ticks())
+        .unwrap_or(133_500_000_000_000_000);
+    let enqueue_notif = |cid: i64, event: &str, args: Vec<eve_proto::PyRep>| {
+        let uid =
+            db_opt.and_then(|db| db.with_snapshot(|s| s.characters.get(&cid).map(|c| c.user_id)));
+        let (packet, marshaled_packet) =
+            crate::router::ServerContext::build_macho_notification_packet(
+                cid,
+                uid,
+                event,
+                "charid",
+                args.clone(),
+            );
+        let notif = crate::router::PendingMachoNotification {
+            seq_id: crate::router::cache_notifications::next_notification_seq_id(),
+            recipient_char_id: cid,
+            event: event.to_string(),
+            id_type: "charid".to_string(),
+            args,
+            packet,
+            marshaled_packet,
+            created_filetime: now,
+        };
+        pending
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(cid)
+            .or_default()
+            .push(notif.clone());
+        if let Some(tx) = notify_tx_opt {
+            let _ = tx.send((cid, notif));
+        }
+    };
+    for ev in events {
+        if let eve_destiny::DestinyEvent::OnTarget {
+            mode,
+            source_id,
+            target_id,
+        } = ev
+        {
+            if mode != "lost" {
+                continue;
+            }
+            let source_char_id = resolve_ball_pilot_char_id(ballpark, db_opt, *source_id);
+            let target_char_id = resolve_ball_pilot_char_id(ballpark, db_opt, *target_id)
+                .filter(|&c| Some(c) != source_char_id);
+            if let Some(cid) = source_char_id {
+                enqueue_notif(
+                    cid,
+                    "OnTarget",
+                    vec![
+                        eve_proto::PyRep::Integer(*target_id),
+                        eve_proto::PyRep::String("lost".into()),
+                    ],
+                );
+                enqueue_notif(
+                    cid,
+                    "OnMultiEvent",
+                    vec![eve_proto::PyRep::List(vec![eve_proto::PyRep::Tuple(vec![
+                        eve_proto::PyRep::Tuple(vec![
+                            eve_proto::PyRep::String("OnTarget".into()),
+                            eve_proto::PyRep::String("lost".into()),
+                            eve_proto::PyRep::Integer(*target_id),
+                            eve_proto::PyRep::String(String::new()),
+                        ]),
+                        eve_proto::PyRep::Integer(0),
+                    ])])],
+                );
+            }
+            if let Some(t_char) = target_char_id {
+                enqueue_notif(
+                    t_char,
+                    "OnMultiEvent",
+                    vec![eve_proto::PyRep::List(vec![eve_proto::PyRep::Tuple(vec![
+                        eve_proto::PyRep::Tuple(vec![
+                            eve_proto::PyRep::String("OnTarget".into()),
+                            eve_proto::PyRep::String("otherlost".into()),
+                            eve_proto::PyRep::Integer(*source_id),
+                            eve_proto::PyRep::String(String::new()),
+                        ]),
+                        eve_proto::PyRep::Integer(0),
+                    ])])],
+                );
+            }
+        }
+    }
+}
+
+pub(crate) fn flush_pending_cycle_damage_notifications(
+    db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
+    pending_opt: Option<
+        &std::sync::RwLock<
+            std::collections::HashMap<i64, Vec<crate::router::PendingMachoNotification>>,
+        >,
+    >,
+    notify_tx_opt: Option<
+        &tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>,
+    >,
+    pending_cycle_actions: &mut [super::PendingCycleAction],
+) {
+    let Some(pending) = pending_opt else {
+        return;
+    };
+    let now = db_opt
+        .map(|db| db.clock().now_blueos_filetime_ticks())
+        .unwrap_or(133_500_000_000_000_000);
+    let enqueue_notif = |cid: i64, event: &str, args: Vec<eve_proto::PyRep>| {
+        let uid = db_opt.and_then(|db| db.with_snapshot(|s| s.characters.get(&cid).map(|c| c.user_id)));
+        let (packet, marshaled_packet) =
+            crate::router::ServerContext::build_macho_notification_packet(
+                cid,
+                uid,
+                event,
+                "charid",
+                args.clone(),
+            );
+        let notif = crate::router::PendingMachoNotification {
+            seq_id: crate::router::cache_notifications::next_notification_seq_id(),
+            recipient_char_id: cid,
+            event: event.to_string(),
+            id_type: "charid".to_string(),
+            args,
+            packet,
+            marshaled_packet,
+            created_filetime: now,
+        };
+        {
+            let mut q_guard = pending.write().unwrap_or_else(|e| e.into_inner());
+            let q = q_guard.entry(cid).or_default();
+            if q.len() >= crate::router::MAX_PENDING_NOTIFICATIONS_PER_CHAR {
+                q.remove(0);
+            }
+            q.push(notif.clone());
+        }
+        if let Some(tx) = notify_tx_opt {
+            let _ = tx.send((cid, notif));
+        }
+    };
+    for action in pending_cycle_actions.iter_mut() {
+        if let super::PendingCycleAction::CycleWeaponDamage {
+            attacker_char_id,
+            attacker_ship_id,
+            target_id,
+            target_char_id,
+            module_type_id,
+            applied_dmg,
+            notified,
+            ..
+        } = action
+        {
+            if *notified || *applied_dmg <= 0.0 {
+                continue;
+            }
+            *notified = true;
+            let owner_cid = attacker_char_id.unwrap_or(0);
+            if let Some(acid) = attacker_char_id.filter(|&c| c > 0) {
+                let dmg_dict = eve_proto::PyRep::Dict(vec![
+                    (
+                        eve_proto::PyRep::String("damage".into()),
+                        eve_proto::PyRep::Real(*applied_dmg),
+                    ),
+                    (
+                        eve_proto::PyRep::String("source".into()),
+                        eve_proto::PyRep::Integer(*attacker_ship_id),
+                    ),
+                    (
+                        eve_proto::PyRep::String("attackerID".into()),
+                        eve_proto::PyRep::Integer(*attacker_ship_id),
+                    ),
+                    (
+                        eve_proto::PyRep::String("target".into()),
+                        eve_proto::PyRep::Integer(*target_id),
+                    ),
+                    (
+                        eve_proto::PyRep::String("target_ID".into()),
+                        eve_proto::PyRep::Integer(*target_id),
+                    ),
+                    (
+                        eve_proto::PyRep::String("owner".into()),
+                        eve_proto::PyRep::Tuple(vec![
+                            eve_proto::PyRep::Integer(2),
+                            eve_proto::PyRep::Integer(acid),
+                        ]),
+                    ),
+                    (
+                        eve_proto::PyRep::String("weapon".into()),
+                        eve_proto::PyRep::Integer(*module_type_id as i64),
+                    ),
+                    (
+                        eve_proto::PyRep::String("hitQuality".into()),
+                        eve_proto::PyRep::Integer(3),
+                    ),
+                    (
+                        eve_proto::PyRep::String("attackType".into()),
+                        eve_proto::PyRep::String("me".into()),
+                    ),
+                    (
+                        eve_proto::PyRep::String("isWrecking".into()),
+                        eve_proto::PyRep::Bool(false),
+                    ),
+                ]);
+                let msg_args = vec![
+                    eve_proto::PyRep::String("AttackHit".into()),
+                    dmg_dict,
+                ];
+                enqueue_notif(acid, "OnDamageMessage", msg_args.clone());
+                enqueue_notif(
+                    acid,
+                    "OnDamageMessages",
+                    vec![eve_proto::PyRep::List(vec![eve_proto::PyRep::Tuple(
+                        msg_args,
+                    )])],
+                );
+            }
+            if let Some(vcid) = target_char_id.filter(|&c| c > 0 && c != owner_cid) {
+                let vic_dict = eve_proto::PyRep::Dict(vec![
+                    (
+                        eve_proto::PyRep::String("damage".into()),
+                        eve_proto::PyRep::Real(*applied_dmg),
+                    ),
+                    (
+                        eve_proto::PyRep::String("source".into()),
+                        eve_proto::PyRep::Integer(*attacker_ship_id),
+                    ),
+                    (
+                        eve_proto::PyRep::String("attackerID".into()),
+                        eve_proto::PyRep::Integer(*attacker_ship_id),
+                    ),
+                    (
+                        eve_proto::PyRep::String("target".into()),
+                        eve_proto::PyRep::Integer(*target_id),
+                    ),
+                    (
+                        eve_proto::PyRep::String("target_ID".into()),
+                        eve_proto::PyRep::Integer(*target_id),
+                    ),
+                    (
+                        eve_proto::PyRep::String("owner".into()),
+                        eve_proto::PyRep::Tuple(vec![
+                            eve_proto::PyRep::Integer(2),
+                            eve_proto::PyRep::Integer(owner_cid),
+                        ]),
+                    ),
+                    (
+                        eve_proto::PyRep::String("weapon".into()),
+                        eve_proto::PyRep::Integer(*module_type_id as i64),
+                    ),
+                    (
+                        eve_proto::PyRep::String("hitQuality".into()),
+                        eve_proto::PyRep::Integer(3),
+                    ),
+                    (
+                        eve_proto::PyRep::String("attackType".into()),
+                        eve_proto::PyRep::String("other".into()),
+                    ),
+                    (
+                        eve_proto::PyRep::String("isWrecking".into()),
+                        eve_proto::PyRep::Bool(false),
+                    ),
+                ]);
+                let vic_args = vec![
+                    eve_proto::PyRep::String("AttackedBy".into()),
+                    vic_dict,
+                ];
+                enqueue_notif(vcid, "OnDamageMessage", vic_args.clone());
+                enqueue_notif(
+                    vcid,
+                    "OnDamageMessages",
+                    vec![eve_proto::PyRep::List(vec![eve_proto::PyRep::Tuple(
+                        vic_args,
+                    )])],
+                );
+            }
+        }
     }
 }
 

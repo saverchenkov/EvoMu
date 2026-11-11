@@ -532,12 +532,26 @@ fn asteroid_depletion_and_downtime_restore_preserve_lod0_hibernation_and_notify_
         mode: MovementMode::Stop,
     };
     assert!(should_pin_stationary_ball(&wreck_ball, None));
+    assert!(should_pin_stationary_ball(
+        &wreck_ball,
+        Some(&SlimItemMeta {
+            category_id: 22,
+            ..Default::default()
+        })
+    ));
     let ship_ball = Ball {
         max_velocity: 300.0,
         type_id: 587,
         ..wreck_ball.clone()
     };
     assert!(!should_pin_stationary_ball(&ship_ball, None));
+    assert!(!should_pin_stationary_ball(
+        &ship_ball,
+        Some(&SlimItemMeta {
+            category_id: 6,
+            ..Default::default()
+        })
+    ));
 }
 
 #[test]
@@ -605,4 +619,240 @@ fn stargate_slim_items_emit_faction_ids_in_empire_and_none_in_nullsec() {
             "nullsec stargate destinationSystemOwnerID must be None, never Integer(1)"
         );
     }
+}
+
+#[tokio::test]
+async fn step_manual_and_fast_forward_preserve_pending_set_state_observer_queue() {
+    let reg = crate::system_actor::SystemRegistry::new();
+    let sys = reg.get_or_spawn(30_000_142);
+
+    let ship_init = 200_092_496i64;
+    let ship_ready = 200_092_497i64;
+    for (id, x) in [(ship_init, 0.0), (ship_ready, 1_500.0)] {
+        sys.spawn_ball(Ball {
+            id,
+            type_id: 587,
+            position: DVec3::new(x, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 2.0,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+    }
+
+    // Drain initial spawn events on both ships, then queue SetState on `ship_init`
+    // while queuing a normal movement event on `ship_ready`.
+    let _ = sys.drain_observer_updates(ship_init).await.unwrap();
+    let _ = sys.drain_observer_updates(ship_ready).await.unwrap();
+    sys.push_set_state(ship_init).await.unwrap();
+    sys.set_movement_mode(
+        ship_init,
+        MovementMode::GotoDirection {
+            direction: DVec3::X,
+        },
+    )
+    .await
+    .unwrap();
+    sys.set_speed_fraction(ship_init, 1.0).await.unwrap();
+
+    // 1. 1 Hz StepManual must drain `ship_ready`'s peer events into TickBroadcast
+    //    WITHOUT stealing `ship_init`'s pending SetState queue (#802).
+    let bcast = sys.step_manual(1.0).await.unwrap();
+    assert!(
+        !bcast.observer_events.contains_key(&ship_init),
+        "build_tick_broadcast must not steal observer queue containing pending SetState"
+    );
+    assert!(
+        bcast.observer_events.contains_key(&ship_ready),
+        "ready peer without SetState must still be drained on 1 Hz tick"
+    );
+
+    // 2. fast_forward_clock must also preserve `ship_init`'s SetState at index 0.
+    sys.fast_forward_clock(ship_init, 8).await.unwrap();
+
+    let (_tick, init_evs, _pyrep) = sys.drain_observer_updates(ship_init).await.unwrap();
+    assert!(
+        matches!(
+            init_evs.first(),
+            Some(DestinyEvent::SetState {
+                observer_ball_id
+            }) if *observer_ball_id == ship_init
+        ),
+        "SetState must remain at index 0 after StepManual + fast_forward_clock, got {init_evs:?}"
+    );
+}
+
+#[test]
+fn build_tick_broadcast_skips_empty_and_set_state_observers_and_drains_ready() {
+    let mut bp = Ballpark::new(30_000_142);
+    bp.current_tick = 42;
+    bp.observer_events.insert(101, Vec::new());
+    bp.observer_events.insert(
+        102,
+        vec![
+            DestinyEvent::SetState {
+                observer_ball_id: 102,
+            },
+            DestinyEvent::Stop { ball_id: 102 },
+        ],
+    );
+    bp.observer_events
+        .insert(103, vec![DestinyEvent::Stop { ball_id: 103 }]);
+
+    let bcast = build_tick_broadcast(30_000_142, &mut bp, Vec::new());
+    assert_eq!(bcast.tick, 42);
+    assert!(!bcast.observer_events.contains_key(&101));
+    assert!(!bcast.observer_events.contains_key(&102));
+    assert_eq!(bp.observer_events.get(&102).map(Vec::len), Some(2));
+    assert_eq!(bcast.observer_events.get(&103).map(Vec::len), Some(1));
+    assert!(bcast.observer_updates_pyrep.contains_key(&103));
+}
+
+#[test]
+fn belt_asteroid_base_id_restore_and_reconcile_spawned_belt_asteroids() {
+    // 1. `belt_asteroid_base_id` three-branch solar_system_id mapping
+    assert_eq!(belt_asteroid_base_id(30_000_144), 750_000_000);
+    assert_eq!(belt_asteroid_base_id(30_000_142), 750_000_000 + 142 * 6_000);
+    assert_eq!(belt_asteroid_base_id(31_000_005), 750_000_000 + 5_605 * 6_000);
+
+    // 2. `restore_asteroid_from_template` resets remaining_units/depleted/respawn_at_tick and respawns ball
+    let mut bp = Ballpark::new(30_000_142);
+    let mut asteroids = HashMap::new();
+    let orig_ast = AsteroidState {
+        asteroid_id: 750_852_001,
+        belt_id: 40_009_087,
+        type_id: 1230,
+        initial_units: 20_000,
+        remaining_units: 0,
+        unit_volume: 0.1,
+        depleted: true,
+        respawn_at_tick: Some(500),
+    };
+    let orig_ball = Ball {
+        id: 750_852_001,
+        type_id: 1230,
+        position: DVec3::new(1_000.0, 2_000.0, 3_000.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 1.0e9,
+        radius: 120.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    restore_asteroid_from_template(
+        750_852_001,
+        &orig_ast,
+        &orig_ball,
+        &mut bp,
+        &mut asteroids,
+        &None,
+    );
+    let restored = &asteroids[&750_852_001];
+    assert_eq!(restored.remaining_units, 20_000);
+    assert!(!restored.depleted);
+    assert_eq!(restored.respawn_at_tick, None);
+    assert!(bp.balls.contains_key(&750_852_001));
+
+    // 3. `reconcile_spawned_belt_asteroids` reconciles DB quantities (depleted <= 0 vs partial > 0 vs newly seeded)
+    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let ast1 = AsteroidState {
+        asteroid_id: 750_852_010,
+        belt_id: 40_009_087,
+        type_id: 1230,
+        initial_units: 10_000,
+        remaining_units: 10_000,
+        unit_volume: 0.1,
+        depleted: false,
+        respawn_at_tick: None,
+    };
+    let ast2 = AsteroidState {
+        asteroid_id: 750_852_011,
+        belt_id: 40_009_087,
+        type_id: 1230,
+        initial_units: 10_000,
+        remaining_units: 10_000,
+        unit_volume: 0.1,
+        depleted: false,
+        respawn_at_tick: None,
+    };
+    bp.add_static_ball_with_meta(
+        Ball {
+            id: 750_852_010,
+            type_id: 1230,
+            position: DVec3::new(100.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1.0e8,
+            radius: 80.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        SlimItemMeta::default(),
+    );
+    bp.add_static_ball_with_meta(
+        Ball {
+            id: 750_852_011,
+            type_id: 1230,
+            position: DVec3::new(200.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1.0e8,
+            radius: 80.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        SlimItemMeta::default(),
+    );
+    db.with_mut_snapshot(|snap| {
+        snap.asteroids.insert(
+            750_852_010,
+            eve_db::AsteroidRecord {
+                asteroid_id: 750_852_010,
+                solar_system_id: 30_000_142,
+                belt_id: 40_009_087,
+                type_id: 1230,
+                position: (100.0, 0.0, 0.0),
+                quantity: 0,
+                initial_quantity: 10_000,
+                radius: 80.0,
+            },
+        );
+        snap.asteroids.insert(
+            750_852_011,
+            eve_db::AsteroidRecord {
+                asteroid_id: 750_852_011,
+                solar_system_id: 30_000_142,
+                belt_id: 40_009_087,
+                type_id: 1230,
+                position: (200.0, 0.0, 0.0),
+                quantity: 4_321,
+                initial_quantity: 10_000,
+                radius: 80.0,
+            },
+        );
+    });
+    let mut templates = HashMap::new();
+    let out = reconcile_spawned_belt_asteroids(
+        &mut bp,
+        30_000_142,
+        vec![ast1, ast2],
+        &mut asteroids,
+        &mut templates,
+        &Some(db),
+        14_400,
+        39_600,
+    );
+    assert_eq!(out.len(), 2);
+    assert!(asteroids[&750_852_010].depleted);
+    assert!(!bp.balls.contains_key(&750_852_010));
+    assert_eq!(asteroids[&750_852_011].remaining_units, 4_321);
+    assert!(bp.balls.contains_key(&750_852_011));
 }

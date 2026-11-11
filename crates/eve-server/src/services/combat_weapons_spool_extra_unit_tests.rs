@@ -426,7 +426,12 @@ async fn handle_destruction_player_capsule_ejection_zarzakh_podding_and_abyssal_
     });
 
     let v_ball = spawn_spool_ball(&ctx, sys_id, victim_ship, 47_271, DVec3::new(1_000.0, 0.0, 0.0), 0.0, 0.0, 5.0, 0.0).await;
-    let (km_id, wreck_id, corpse_id, _) = handle_ship_or_npc_destruction(
+    let ShipOrNpcDestructionResult {
+        kill_id: km_id,
+        wreck_id,
+        corpse_id,
+        ..
+    } = handle_ship_or_npc_destruction(
         &ctx,
         &sys_handle,
         attacker_id,
@@ -463,7 +468,12 @@ async fn handle_destruction_player_capsule_ejection_zarzakh_podding_and_abyssal_
         snap.zarzakh_gate_locks.insert(victim_id, (50_000_001, now_unix + 3_600));
     });
     let pod_ball = sys_handle.get_ball_snapshot(new_pod_id).await.unwrap().unwrap().1;
-    let (pod_km, pod_wreck, pod_corpse, _) = handle_ship_or_npc_destruction(
+    let ShipOrNpcDestructionResult {
+        kill_id: pod_km,
+        wreck_id: pod_wreck,
+        corpse_id: pod_corpse,
+        ..
+    } = handle_ship_or_npc_destruction(
         &ctx,
         &sys_handle,
         attacker_id,
@@ -485,7 +495,11 @@ async fn handle_destruction_player_capsule_ejection_zarzakh_podding_and_abyssal_
     let abyss_sys = 32_000_001u32;
     let abyss_handle = ctx.systems.get_or_spawn(abyss_sys);
     let abyss_npc_ball = spawn_spool_ball(&ctx, abyss_sys, 1_896_001, 500_001, DVec3::ZERO, 0.0, 0.0, 5.0, 0.0).await;
-    let (ab_km, ab_wreck, _, _) = handle_ship_or_npc_destruction(
+    let ShipOrNpcDestructionResult {
+        kill_id: ab_km,
+        wreck_id: ab_wreck,
+        ..
+    } = handle_ship_or_npc_destruction(
         &ctx,
         &abyss_handle,
         attacker_id,

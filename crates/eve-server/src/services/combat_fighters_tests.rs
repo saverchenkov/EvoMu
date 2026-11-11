@@ -596,4 +596,33 @@ async fn toctou_concurrent_scoop_abandoned_fighter_only_one_wins() {
     let final_loc = ctx.db.with_snapshot(|s| s.items[&fighter_item_id].location_id);
     let expected_winner_ship = if ok1 { ship1 } else { ship2 };
     assert_eq!(final_loc, expected_winner_ship);
+
+    // Non-abandoned fighter cannot be scooped via CmdScoopAbandonedFighterFromSpace
+    let non_aband_ball = 91_000_299i64;
+    ctx.active_fighters.write().unwrap().insert(
+        non_aband_ball,
+        crate::router::context::ActiveFighterSquadron {
+            ball_id: non_aband_ball,
+            item_id: fighter_item_id,
+            type_id: 23_057,
+            owner_char_id: char1,
+            parent_ship_id: ship1,
+            tube_index: 0,
+            squadron_size: 5,
+            target_id: None,
+            is_abandoned: false,
+            mwd_active: false,
+        },
+    );
+    assert!(handle_fighters(
+        &ctx,
+        &mut s1,
+        "fighterMgr",
+        "CmdScoopAbandonedFighterFromSpace",
+        &[PyRep::Integer(non_aband_ball)],
+        &kw
+    )
+    .await
+    .unwrap()
+    .is_err());
 }

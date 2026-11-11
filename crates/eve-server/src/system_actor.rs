@@ -418,6 +418,11 @@ impl SystemRegistry {
                 } = &mut *actor_st;
                 {
                     {
+                        enum StepReply {
+                            Full(tokio::sync::oneshot::Sender<(TickBroadcast, Vec<(BallId, Option<CharacterId>)>)>),
+                            TickOnly(tokio::sync::oneshot::Sender<(u64, Vec<(BallId, Option<CharacterId>)>)>),
+                        }
+                        let mut pending_step: Option<(f64, StepReply)> = None;
                         match cmd {
                             SystemCommand::SpawnBall { ball, reply } => {
                                 let ball_id = ball.id;
@@ -832,6 +837,21 @@ impl SystemRegistry {
                                 );
                                 let _ = reply.send(known);
                             }
+                            SystemCommand::EmitObserverDestinyEvent {
+                                observer_ball_id,
+                                event,
+                                reply,
+                            } => {
+                                let ok = ballpark.balls.contains_key(&observer_ball_id);
+                                if ok {
+                                    ballpark
+                                        .observer_events
+                                        .entry(observer_ball_id)
+                                        .or_default()
+                                        .push(event);
+                                }
+                                let _ = reply.send(ok);
+                            }
                             SystemCommand::GotoPoint { ball_id, point, reply } => {
                                 let res = ballpark
                                     .goto_point(ball_id, point)
@@ -911,6 +931,12 @@ impl SystemRegistry {
                             } => {
                                 sync_player_slim_items(&mut ballpark, &db_opt);
                                 let events = ballpark.drain_observer_events(observer_ball_id);
+                                if events
+                                    .iter()
+                                    .any(|ev| matches!(ev, DestinyEvent::SetState { .. }))
+                                {
+                                    ballpark.current_tick = ballpark.current_tick.saturating_add(1);
+                                }
                                 let stamp = ballpark.current_tick as u32;
                                 let pyrep = encode_destiny_updates(stamp, &events, Some(&ballpark));
                                 let _ = reply.send((ballpark.current_tick, events, pyrep));
@@ -988,162 +1014,10 @@ impl SystemRegistry {
                                 }
                             }
                             SystemCommand::StepManual { dt, reply } => {
-                                let raw_tidi = f64::from_bits(tidi_factor_bits_actor.load(std::sync::atomic::Ordering::Relaxed));
-                                let tidi = if raw_tidi.is_finite() { raw_tidi.clamp(0.10, 1.0) } else { 1.0 };
-                                let dt_sim = if dt > 0.0 && dt.is_finite() { dt * tidi } else { dt };
-                                if dt_sim > 0.0 && dt_sim.is_finite() {
-                                    *sim_elapsed_secs += dt_sim;
-                                }
-                                respawn_due_asteroids(
-                                    &mut ballpark,
-                                    asteroids,
-                                    &asteroid_templates,
-                                    &sde_opt,
-                                    &db_opt,
-                                );
-                                sync_player_slim_items(&mut ballpark, &db_opt);
-                                if let Some(db) = db_opt.as_ref() {
-                                    let now_unix = db.clock().now_unix_secs();
-                                    if now_unix > ballpark.sim_unix_secs {
-                                        ballpark.sim_unix_secs = now_unix;
-                                    }
-                                }
-                                let events = ballpark.step(dt_sim);
-                                persist_landed_warps_in_db(&ballpark, &events, &db_opt);
-                                if let Some(lock_hook) = target_lock_completed_hook_actor.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
-                                    for ev in &events {
-                                        if let DestinyEvent::OnTarget { mode, source_id, target_id } = ev {
-                                            if mode == "locked" {
-                                                let char_id_opt = ballpark
-                                                    .ball_slim_meta
-                                                    .get(source_id)
-                                                    .and_then(|m| m.char_id)
-                                                    .or_else(|| {
-                                                        db_opt.as_ref().and_then(|db| {
-                                                            db.with_snapshot(|s| {
-                                                                s.characters
-                                                                    .values()
-                                                                    .find(|c| c.active_ship_id == *source_id)
-                                                                    .map(|c| c.character_id)
-                                                                    .or_else(|| {
-                                                                        crate::services::station_structure::structure_upwell_ops::load_ext_state(s)
-                                                                            .active_pilot_by_structure
-                                                                            .get(source_id)
-                                                                            .copied()
-                                                                    })
-                                                            })
-                                                        })
-                                                    });
-                                                if let Some(cid) = char_id_opt.filter(|&c| c > 0) {
-                                                    lock_hook(cid, *target_id);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
-                                let mut destroyed_balls = step_cycles_and_capacitor(
-                                    &mut ballpark, active_module_cycles, pending_anchoring_disruptors,
-                                    active_nanite_repairs, ship_rack_heat, rah_incoming_damage,
-                                    &base_scramble_strengths, &base_core_strengths, &sde_opt, &db_opt,
-                                    mechanic_rng_opt, tactical_state, pending_cycle_actions, dt_sim, deact_guard.as_ref(),
-                                );
-                                if let Some(db) = db_opt.as_ref() {
-                                    for &(target_ball_id, _) in &destroyed_balls {
-                                        crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
-                                            &mut ballpark,
-                                            &db_opt,
-                                            tactical_state,
-                                            target_ball_id,
-                                        );
-                                        crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark(
-                                            &mut ballpark, db, solar_system_id, target_ball_id,
-                                        );
-                                    }
-                                }
-                                for bid in crate::services::pve_abyssal_pylons::step_abyssal_hazards_and_pylons_in_ballpark_for_tick(
-                                    &mut ballpark,
-                                    sde_opt.as_deref(),
-                                    db_opt.as_ref(),
-                                    solar_system_id,
-                                ) {
-                                    destroyed_balls.push((bid, None));
-                                }
-                                for bid in crate::services::pvp_filament_arena::step_proving_grounds_arena_hazards_in_ballpark_for_tick(
-                                    &mut ballpark,
-                                    sde_opt.as_deref(),
-                                    db_opt.as_ref(),
-                                    solar_system_id,
-                                    pending_notifications_opt.as_deref(),
-                                    notify_tx_opt.as_ref(),
-                                ) {
-                                    destroyed_balls.push((bid, None));
-                                }
-                                for bid in crate::services::space_navigation_advanced::step_zarzakh_gravity_hazard_in_ballpark(
-                                    &mut ballpark,
-                                    sde_opt.as_deref(),
-                                    solar_system_id,
-                                ) {
-                                    destroyed_balls.push((bid, None));
-                                }
-                                {
-                                    let step_now_unix = db_opt.as_ref().map(|db| db.clock().now_unix_secs()).unwrap_or_else(|| {
-                                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
-                                    });
-                                    crate::services::mobile_deployables::step_mobile_deployables_in_actor(
-                                        &mut ballpark,
-                                        active_module_cycles,
-                                        &mechanic_rng,
-                                        deact_guard.as_ref(),
-                                        sde_opt.as_deref(),
-                                        db_opt.as_ref(),
-                                        mechanic_rng_opt.as_deref(),
-                                        solar_system_id,
-                                        dt_sim,
-                                        step_now_unix,
-                                    );
-                                    crate::services::doomsday_aoe_ops::step_bosonic_doomsday_in_ballpark(
-                                        &mut ballpark,
-                                        base_scramble_strengths,
-                                        sde_opt.as_ref(),
-                                        db_opt.as_ref(),
-                                        solar_system_id,
-                                        step_now_unix,
-                                        &mut destroyed_balls,
-                                    );
-                                    cycles_tackle::snapshot_active_tackle_totals(&ballpark, active_module_cycles, &mut last_active_totals);
-                                    reconcile_tackle_and_bubbles(
-                                        &mut ballpark,
-                                        active_module_cycles,
-                                        &base_scramble_strengths,
-                                        &base_core_strengths,
-                                        &db_opt,
-                                        deact_guard.as_ref(),
-                                    );
-                                    let mut mod_guard = active_module_ships_actor.write().unwrap_or_else(|e| e.into_inner());
-                                    mod_guard.clear();
-                                    for c in active_module_cycles.iter() {
-                                        mod_guard.insert(c.ship_id);
-                                    }
-                                }
-                                if let Some(db) = &db_opt {
-                                    crate::sp6_lifecycle::persist_existing_ship_combat_hp_batch_in_db(
-                                        db,
-                                        ballpark.combat_states.iter().filter_map(|(&bid, cs)| {
-                                            if !ballpark.is_static_ball(bid)
-                                                && ballpark.ball_slim_meta.get(&bid).is_none_or(|m| m.category_id != 11)
-                                            {
-                                                Some((bid, cs))
-                                            } else {
-                                                None
-                                            }
-                                        }),
-                                    );
-                                }
-                                sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
-                                let broadcast = build_tick_broadcast(solar_system_id, &mut ballpark, events);
-                                let _ = event_tx_actor.send(broadcast.clone());
-                                let _ = reply.send((broadcast, destroyed_balls));
+                                pending_step = Some((dt, StepReply::Full(reply)));
+                            }
+                            SystemCommand::StepManualTickOnly { dt, reply } => {
+                                pending_step = Some((dt, StepReply::TickOnly(reply)));
                             }
                             SystemCommand::GetTargetLocks { ball_id, reply } => {
                                 let locks = ballpark.get_target_locks(ball_id);
@@ -1466,6 +1340,189 @@ impl SystemRegistry {
                                     }
                                 }
                                 let _ = reply.send(flushed);
+                            }
+                        }
+                        if let Some((dt, step_reply)) = pending_step {
+                            let raw_tidi = f64::from_bits(tidi_factor_bits_actor.load(std::sync::atomic::Ordering::Relaxed));
+                            let tidi = if raw_tidi.is_finite() { raw_tidi.clamp(0.10, 1.0) } else { 1.0 };
+                            let dt_sim = if dt > 0.0 && dt.is_finite() { dt * tidi } else { dt };
+                            if dt_sim > 0.0 && dt_sim.is_finite() {
+                                *sim_elapsed_secs += dt_sim;
+                            }
+                            respawn_due_asteroids(
+                                &mut ballpark,
+                                asteroids,
+                                &asteroid_templates,
+                                &sde_opt,
+                                &db_opt,
+                            );
+                            sync_player_slim_items(&mut ballpark, &db_opt);
+                            if let Some(db) = db_opt.as_ref() {
+                                let now_unix = db.clock().now_unix_secs();
+                                if now_unix > ballpark.sim_unix_secs {
+                                    ballpark.sim_unix_secs = now_unix;
+                                }
+                            }
+                            let events = ballpark.step(dt_sim);
+                            persist_landed_warps_in_db(&ballpark, &events, &db_opt);
+                            cycles::flush_target_lost_notifications(
+                                &ballpark,
+                                &events,
+                                db_opt.as_ref(),
+                                pending_notifications_opt.as_deref(),
+                                notify_tx_opt.as_ref(),
+                            );
+                            if let Some(lock_hook) = target_lock_completed_hook_actor.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                                for ev in &events {
+                                    if let DestinyEvent::OnTarget { mode, source_id, target_id } = ev {
+                                        if mode == "locked" {
+                                            let char_id_opt = ballpark
+                                                .ball_slim_meta
+                                                .get(source_id)
+                                                .and_then(|m| m.char_id)
+                                                .or_else(|| {
+                                                    db_opt.as_ref().and_then(|db| {
+                                                        db.with_snapshot(|s| {
+                                                            s.characters
+                                                                .values()
+                                                                .find(|c| c.active_ship_id == *source_id)
+                                                                .map(|c| c.character_id)
+                                                                .or_else(|| {
+                                                                    crate::services::station_structure::structure_upwell_ops::load_ext_state(s)
+                                                                        .active_pilot_by_structure
+                                                                        .get(source_id)
+                                                                        .copied()
+                                                                })
+                                                        })
+                                                    })
+                                                });
+                                            if let Some(cid) = char_id_opt.filter(|&c| c > 0) {
+                                                lock_hook(cid, *target_id);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
+                            let mut destroyed_balls = step_cycles_and_capacitor(
+                                &mut ballpark, active_module_cycles, pending_anchoring_disruptors,
+                                active_nanite_repairs, ship_rack_heat, rah_incoming_damage,
+                                &base_scramble_strengths, &base_core_strengths, &sde_opt, &db_opt,
+                                mechanic_rng_opt, tactical_state, pending_cycle_actions, dt_sim, deact_guard.as_ref(),
+                            );
+                            cycles::flush_pending_cycle_damage_notifications(
+                                db_opt.as_ref(),
+                                pending_notifications_opt.as_deref(),
+                                notify_tx_opt.as_ref(),
+                                pending_cycle_actions,
+                            );
+                            if let Some(db) = db_opt.as_ref() {
+                                for &(target_ball_id, _) in &destroyed_balls {
+                                    crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
+                                        &mut ballpark,
+                                        &db_opt,
+                                        tactical_state,
+                                        target_ball_id,
+                                    );
+                                    crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark(
+                                        &mut ballpark, db, solar_system_id, target_ball_id,
+                                    );
+                                }
+                            }
+                            for bid in crate::services::pve_abyssal_pylons::step_abyssal_hazards_and_pylons_in_ballpark_for_tick(
+                                &mut ballpark,
+                                sde_opt.as_deref(),
+                                db_opt.as_ref(),
+                                solar_system_id,
+                            ) {
+                                destroyed_balls.push((bid, None));
+                            }
+                            for bid in crate::services::pvp_filament_arena::step_proving_grounds_arena_hazards_in_ballpark_for_tick(
+                                &mut ballpark,
+                                sde_opt.as_deref(),
+                                db_opt.as_ref(),
+                                solar_system_id,
+                                pending_notifications_opt.as_deref(),
+                                notify_tx_opt.as_ref(),
+                            ) {
+                                destroyed_balls.push((bid, None));
+                            }
+                            for bid in crate::services::space_navigation_advanced::step_zarzakh_gravity_hazard_in_ballpark(
+                                &mut ballpark,
+                                sde_opt.as_deref(),
+                                solar_system_id,
+                            ) {
+                                destroyed_balls.push((bid, None));
+                            }
+                            {
+                                let step_now_unix = db_opt.as_ref().map(|db| db.clock().now_unix_secs()).unwrap_or_else(|| {
+                                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+                                });
+                                crate::services::mobile_deployables::step_mobile_deployables_in_actor(
+                                    &mut ballpark,
+                                    active_module_cycles,
+                                    &mechanic_rng,
+                                    deact_guard.as_ref(),
+                                    sde_opt.as_deref(),
+                                    db_opt.as_ref(),
+                                    mechanic_rng_opt.as_deref(),
+                                    solar_system_id,
+                                    dt_sim,
+                                    step_now_unix,
+                                );
+                                crate::services::doomsday_aoe_ops::step_bosonic_doomsday_in_ballpark(
+                                    &mut ballpark,
+                                    base_scramble_strengths,
+                                    sde_opt.as_ref(),
+                                    db_opt.as_ref(),
+                                    solar_system_id,
+                                    step_now_unix,
+                                    &mut destroyed_balls,
+                                );
+                                cycles_tackle::snapshot_active_tackle_totals(&ballpark, active_module_cycles, &mut last_active_totals);
+                                reconcile_tackle_and_bubbles(
+                                    &mut ballpark,
+                                    active_module_cycles,
+                                    &base_scramble_strengths,
+                                    &base_core_strengths,
+                                    &db_opt,
+                                    deact_guard.as_ref(),
+                                );
+                            }
+                            if let Some(db) = &db_opt {
+                                crate::sp6_lifecycle::persist_existing_ship_combat_hp_batch_in_db(
+                                    db,
+                                    ballpark.combat_states.iter().filter_map(|(&bid, cs)| {
+                                        if !ballpark.is_static_ball(bid)
+                                            && ballpark.ball_slim_meta.get(&bid).is_none_or(|m| m.category_id != 11)
+                                        {
+                                            Some((bid, cs))
+                                        } else {
+                                            None
+                                        }
+                                    }),
+                                );
+                            }
+                            sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
+                            let has_subscribers = event_tx_actor.receiver_count() > 0;
+                            if has_subscribers || matches!(step_reply, StepReply::Full(_)) {
+                                let broadcast = build_tick_broadcast(solar_system_id, &mut ballpark, events);
+                                if has_subscribers {
+                                    let _ = event_tx_actor.send(broadcast.clone());
+                                }
+                                match step_reply {
+                                    StepReply::Full(reply) => {
+                                        let _ = reply.send((broadcast, destroyed_balls));
+                                    }
+                                    StepReply::TickOnly(reply) => {
+                                        let _ = reply.send((broadcast.tick, destroyed_balls));
+                                    }
+                                }
+                            } else {
+                                belts::drain_tick_events_without_encode(&mut ballpark);
+                                if let StepReply::TickOnly(reply) = step_reply {
+                                    let _ = reply.send((ballpark.current_tick, destroyed_balls));
+                                }
                             }
                         }
                         {

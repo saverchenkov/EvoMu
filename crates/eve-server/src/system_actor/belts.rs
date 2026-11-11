@@ -202,7 +202,7 @@ pub fn belt_asteroid_base_id(solar_system_id: SolarSystemId) -> i64 {
     750_000_000 + sys_offset
 }
 
-/// Populates asteroid belt entities around asteroid belt celestials (`SP-4`, `MN-01`).
+/// Populates asteroid belt entities around asteroid belt celestials.
 /// Uses exact per-belt asteroid counts from `res:/staticdata/asteroidcountbytypeidbeltid.static`
 /// (`40,928` belts) when present in `SdeRegistry`, falling back to `SdeRegistry::belt_ores_for_system`
 /// for synthetic belt celestials in unit tests.
@@ -386,13 +386,56 @@ pub(super) fn ensure_default_slim_meta(
     );
 }
 
+pub(super) fn drain_tick_events_without_encode(ballpark: &mut Ballpark) {
+    ballpark.pending_events.clear();
+    let ready_obs_ids: Vec<BallId> = ballpark
+        .observer_events
+        .iter()
+        .filter_map(|(&obs_id, evs)| {
+            if evs.is_empty()
+                || evs
+                    .iter()
+                    .any(|ev| matches!(ev, DestinyEvent::SetState { .. }))
+            {
+                None
+            } else {
+                Some(obs_id)
+            }
+        })
+        .collect();
+    for obs_id in ready_obs_ids {
+        let _ = ballpark.drain_observer_events(obs_id);
+    }
+}
+
 pub(super) fn build_tick_broadcast(
     solar_system_id: SolarSystemId,
     ballpark: &mut Ballpark,
     mut events: Vec<DestinyEvent>,
 ) -> TickBroadcast {
     events.append(&mut ballpark.pending_events);
-    let observer_events = ballpark.drain_all_observer_events();
+    let ready_obs_ids: Vec<BallId> = ballpark
+        .observer_events
+        .iter()
+        .filter_map(|(&obs_id, evs)| {
+            if evs.is_empty()
+                || evs
+                    .iter()
+                    .any(|ev| matches!(ev, DestinyEvent::SetState { .. }))
+            {
+                None
+            } else {
+                Some(obs_id)
+            }
+        })
+        .collect();
+    let mut observer_events = BTreeMap::new();
+    for obs_id in ready_obs_ids {
+        let obs_evs = ballpark.drain_observer_events(obs_id);
+        if !obs_evs.is_empty() {
+            observer_events.insert(obs_id, obs_evs);
+        }
+    }
     let stamp = ballpark.current_tick as u32;
     let mut observer_updates_pyrep = BTreeMap::new();
     for (&obs_id, obs_evs) in &observer_events {

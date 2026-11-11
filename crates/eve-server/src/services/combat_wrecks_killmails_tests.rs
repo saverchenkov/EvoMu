@@ -1,5 +1,9 @@
 //! Unit and mutation-killing tests for `combat_wrecks_killmails`.
 
+#[cfg(test)]
+#[path = "combat_wrecks_loot_ops_cov_tests.rs"]
+mod combat_wrecks_loot_ops_cov_tests;
+
 use super::*;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
@@ -68,7 +72,7 @@ fn insurance_quotes_contracts_voiding_payouts_and_killmail_sha1_hash() {
     assert_ne!(h1, h2);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn container_decay_crystal_damage_deactivate_loot_all_and_self_destruct_killmail() {
     let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
     let kwargs = HashMap::new();
@@ -475,4 +479,33 @@ fn insurance_contract_persists_end_unix_across_reload_and_expires() {
         assert!(!snap.insurance_contracts.contains_key(&ship_id));
         assert_eq!(snap.items[&ship_id].insured_payout_isk, 0.0);
     });
+
+    // Repackaged (!singleton) ship voids persisted insurance contract on sync_ship_insurance_contracts
+    ctx.db.with_mut_snapshot(|snap| {
+        let ship = snap.items.get_mut(&ship_id).unwrap();
+        ship.singleton = false;
+        ship.insured_payout_isk = ref_val;
+        snap.insurance_contracts.insert(
+            ship_id,
+            eve_db::PersistedInsuranceContractRecord {
+                ship_id,
+                ship_type_id: ship.type_id,
+                owner_id: char_id,
+                level_name: "Gold".into(),
+                level_fraction: 0.80,
+                cost_isk: 50_000.0,
+                payout_isk: ref_val * 0.80,
+                start_unix: saved_start,
+                end_unix: saved_end,
+            },
+        );
+    });
+    sync_ship_insurance_contracts(&ctx, char_id);
+    with_combat_runtime(&ctx, |rt| {
+        assert!(!rt.insurance_contracts.contains_key(&ship_id));
+    });
 }
+
+#[cfg(test)]
+#[path = "combat_wrecks_killmails_extra_unit_tests.rs"]
+mod combat_wrecks_killmails_extra_unit_tests;

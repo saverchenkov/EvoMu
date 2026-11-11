@@ -214,18 +214,25 @@ pub async fn check_and_spawn_faction_police(
         .unwrap_or(500_001);
     let police_type = police_ship_type_for_faction(sys_faction);
 
-    let handle = ctx.systems.get_or_spawn(solar_system_id);
-    let ball_ids = handle
-        .list_balls()
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|b| b.id)
-        .collect::<Vec<_>>();
+    // Only undocked piloted player ships can trigger faction police or contraband scans.
+    let player_ships: Vec<(i64, i64, f64, f64)> = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .values()
+            .filter(|c| c.solar_system_id == solar_system_id && c.station_id.is_none() && c.active_ship_id > 0)
+            .map(|c| {
+                let st = c.standings.get(&(sys_faction as i64)).copied().unwrap_or(0.0);
+                (c.active_ship_id, c.character_id, c.security_status, st)
+            })
+            .collect()
+    });
+    if player_ships.is_empty() {
+        return Vec::new();
+    }
 
+    let handle = ctx.systems.get_or_spawn(solar_system_id);
     let mut spawned_police = Vec::new();
 
-    for bid in ball_ids {
+    for (bid, _char_id, sec_status, standing_to_faction) in player_ships {
         let snap_opt = handle.get_ball_snapshot(bid).await.ok().flatten();
         let Some((_, ball)) = snap_opt else { continue; };
 
@@ -233,18 +240,6 @@ pub async fn check_and_spawn_faction_police(
         if ball.type_id == 670 || ctx.sde.types.get(&ball.type_id).map(|t| t.group_id == 29).unwrap_or(false) {
             continue;
         }
-
-        // Find active piloted character owner in this solar system (R-CUSTOMS-SCOPE)
-        let owner_char_opt = ctx.db.with_snapshot(|snap| {
-            snap.characters
-                .values()
-                .find(|c| c.active_ship_id == bid && c.solar_system_id == solar_system_id && c.station_id.is_none())
-                .map(|c| {
-                    let st = c.standings.get(&(sys_faction as i64)).copied().unwrap_or(0.0);
-                    (c.character_id, c.security_status, st)
-                })
-        });
-        let Some((_char_id, sec_status, standing_to_faction)) = owner_char_opt else { continue; };
 
         // High-sec customs contraband scan & enforcement (`feat:ships.blockade-runner-cargo-scan-immunity`, `feat:attributes.booster-highsec-contraband`):
         // Blockade Runners (group 1202, cargoScanResistance == 100%) are immune to player cargo scanners,
@@ -262,7 +257,7 @@ pub async fn check_and_spawn_faction_police(
         // 1. Navy response to negative faction standing (<= -5.0) in high-sec empire systems:
         if is_hostile_navy {
             let navy_arch = navy_archetype_for_faction(sys_faction);
-            let navy_already_targeted = with_mut_combat_runtime(ctx, |rt| {
+            let navy_already_targeted = with_combat_runtime(ctx, |rt| {
                 rt.npc_entities.values().any(|n| {
                     (n.archetype == navy_arch || n.archetype == "Navy")
                         && n.solar_system_id == solar_system_id
@@ -311,7 +306,7 @@ pub async fn check_and_spawn_faction_police(
 
         // 2. Faction Police response to outlaw security status or contraband:
         if is_outlaw || has_contraband {
-            let already_targeted = with_mut_combat_runtime(ctx, |rt| {
+            let already_targeted = with_combat_runtime(ctx, |rt| {
                 rt.npc_entities.values().any(|n| {
                     n.archetype == "FactionPolice"
                         && n.solar_system_id == solar_system_id
@@ -604,18 +599,26 @@ pub fn navy_patrol_ship_types_for_faction(faction_id: u32) -> (u32, u32) {
     }
 }
 
-/// Ensures an Empire Navy patrol fleet is spawned in empire-owned solar systems (`feat:npc.navy-npc`).
-pub async fn step_empire_navy_patrols(
+pub(crate) struct NavyPatrolSpawnPlan {
+    pub solar_system_id: SolarSystemId,
+    pub sys_faction: u32,
+    pub specs: [(u32, &'static str, u32, DVec3); 2],
+}
+
+pub(crate) async fn plan_empire_navy_patrol_with_preloaded(
     ctx: &ServerContext,
     solar_system_id: SolarSystemId,
-) -> Vec<i64> {
-    if is_concord_suppressed_in_system(ctx, solar_system_id)
+    already_present: bool,
+    piloted_ship_id: Option<i64>,
+) -> Option<NavyPatrolSpawnPlan> {
+    if already_present
+        || is_concord_suppressed_in_system(ctx, solar_system_id)
         || is_faction_police_suppressed(ctx, solar_system_id)
     {
-        return Vec::new();
+        return None;
     }
     let Some(_convoy_id) = ctx.living_world.ensure_system_navy_patrol(solar_system_id, &ctx.sde) else {
-        return Vec::new();
+        return None;
     };
     let sys_faction = ctx
         .sde
@@ -630,31 +633,14 @@ pub async fn step_empire_navy_patrols(
         })
         .unwrap_or(500_001);
     if !matches!(sys_faction, 500_001..=500_004) {
-        return Vec::new();
+        return None;
     }
 
-    let already_present = with_combat_runtime(ctx, |rt| {
-        rt.npc_entities
-            .values()
-            .any(|n| (n.archetype == "Navy" || n.archetype.ends_with("Navy")) && n.solar_system_id == solar_system_id)
-    });
-    if already_present {
-        return Vec::new();
-    }
-
-    let handle = ctx.systems.get_or_spawn(solar_system_id);
-    let piloted_ship_pos = {
-        let ship_id_opt = ctx.db.with_snapshot(|snap| {
-            snap.characters
-                .values()
-                .find(|c| c.solar_system_id == solar_system_id && c.station_id.is_none() && c.active_ship_id > 0)
-                .map(|c| c.active_ship_id)
-        });
-        if let Some(sid) = ship_id_opt {
-            handle.get_ball_snapshot(sid).await.ok().flatten().map(|(_, b)| b.position)
-        } else {
-            None
-        }
+    let piloted_ship_pos = if let Some(sid) = piloted_ship_id {
+        let handle = ctx.systems.get_or_spawn(solar_system_id);
+        handle.get_ball_snapshot(sid).await.ok().flatten().map(|(_, b)| b.position)
+    } else {
+        None
     };
     let anchor_pos = piloted_ship_pos
         .or_else(|| {
@@ -674,30 +660,102 @@ pub async fn step_empire_navy_patrols(
         .unwrap_or(DVec3::new(15_000.0, 0.0, 0.0));
 
     let (cruiser_tid, frigate_tid) = navy_patrol_ship_types_for_faction(sys_faction);
-    let mut spawned = Vec::new();
-    let sys_sec = ctx.sde.solar_systems.get(&solar_system_id).map(|s| s.security_status).unwrap_or(0.0);
-    for (idx, tid) in [cruiser_tid, frigate_tid].into_iter().enumerate() {
-        let pos = anchor_pos + DVec3::new(2_500.0 + (idx as f64) * 800.0, 0.0, 500.0);
-        let bid = spawn_specialized_npc_entity(
-            ctx,
-            solar_system_id,
-            tid,
+    let specs = [
+        (
+            cruiser_tid,
             "Navy",
             sys_faction,
-            pos,
-        )
-        .await;
-        if bid > 0 {
-            with_mut_combat_runtime(ctx, |rt| {
-                if let Some(npc) = rt.npc_entities.get_mut(&bid) {
-                    configure_navy_combat_properties(npc, sys_faction, 0, sys_sec, 0.0);
-                    npc.archetype = "Navy".to_string();
-                }
-            });
-            spawned.push(bid);
-        }
+            anchor_pos + DVec3::new(2_500.0, 0.0, 500.0),
+        ),
+        (
+            frigate_tid,
+            "Navy",
+            sys_faction,
+            anchor_pos + DVec3::new(3_300.0, 0.0, 500.0),
+        ),
+    ];
+    Some(NavyPatrolSpawnPlan {
+        solar_system_id,
+        sys_faction,
+        specs,
+    })
+}
+
+pub(crate) async fn execute_navy_patrol_plan_with_start_id(
+    ctx: &ServerContext,
+    plan: NavyPatrolSpawnPlan,
+    start_ball_id: i64,
+    out_entities: &mut Vec<(i64, crate::services::combat_crimewatch::ExtendedNpcEntity)>,
+) -> Vec<i64> {
+    let sys_sec = ctx
+        .sde
+        .solar_systems
+        .get(&plan.solar_system_id)
+        .map(|s| s.security_status)
+        .unwrap_or(0.0);
+    let sys_faction = plan.sys_faction;
+    crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_batch_with_start_id(
+        ctx,
+        plan.solar_system_id,
+        &plan.specs,
+        start_ball_id,
+        move |npc| {
+            configure_navy_combat_properties(npc, sys_faction, 0, sys_sec, 0.0);
+            npc.archetype = "Navy".to_string();
+        },
+        out_entities,
+    )
+    .await
+}
+
+/// Ensures an Empire Navy patrol fleet is spawned in empire-owned solar systems (`feat:npc.navy-npc`).
+pub async fn step_empire_navy_patrols(
+    ctx: &ServerContext,
+    solar_system_id: SolarSystemId,
+) -> Vec<i64> {
+    if is_concord_suppressed_in_system(ctx, solar_system_id)
+        || is_faction_police_suppressed(ctx, solar_system_id)
+    {
+        return Vec::new();
     }
-    spawned
+    let already_present = with_combat_runtime(ctx, |rt| {
+        rt.npc_entities
+            .values()
+            .any(|n| (n.archetype == "Navy" || n.archetype.ends_with("Navy")) && n.solar_system_id == solar_system_id)
+    });
+    if already_present {
+        return Vec::new();
+    }
+    let piloted_ship_id = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .values()
+            .find(|c| c.solar_system_id == solar_system_id && c.station_id.is_none() && c.active_ship_id > 0)
+            .map(|c| c.active_ship_id)
+    });
+    let Some(plan) = plan_empire_navy_patrol_with_preloaded(
+        ctx,
+        solar_system_id,
+        false,
+        piloted_ship_id,
+    )
+    .await
+    else {
+        return Vec::new();
+    };
+    let count = plan.specs.len() as i64;
+    let start_ball_id = ctx.db.with_mut_snapshot(|snap| {
+        let start = snap.next_entity_id + 1;
+        snap.next_entity_id += count;
+        start
+    });
+    let mut built = Vec::with_capacity(plan.specs.len());
+    let ids = execute_navy_patrol_plan_with_start_id(ctx, plan, start_ball_id, &mut built).await;
+    with_mut_combat_runtime(ctx, |rt| {
+        for (ball_id, entity) in built {
+            rt.npc_entities.insert(ball_id, entity);
+        }
+    });
+    ids
 }
 
 #[cfg(test)]
