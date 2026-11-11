@@ -1190,6 +1190,7 @@ async fn handle_invbroker_add(
                     old_was_fitted: bool,
                     st_fuel: Option<u32>,
                     dst_corp_owner: i64,
+                    unfitted_charges: Vec<(eve_db::InventoryItemRecord, eve_db::InventoryItemRecord)>,
                 },
             }
 
@@ -1358,6 +1359,7 @@ async fn handle_invbroker_add(
                                 old_was_fitted: false,
                                 st_fuel: None,
                                 dst_corp_owner: 0,
+                                unfitted_charges: Vec::new(),
                             });
                         }
                     }
@@ -1562,12 +1564,38 @@ async fn handle_invbroker_add(
                     updated = fin;
                 }
 
+                let mut unfitted_charges = Vec::new();
                 if is_fitting_slot {
                     snap.module_online_states.insert(effective_item_id, online);
                 } else if old_was_fitted {
                     snap.module_online_states.remove(&effective_item_id);
                     snap.module_active_states.remove(&effective_item_id);
                     snap.module_active_charges.remove(&effective_item_id);
+                    if active_cat != 8 && (11..=34).contains(&(old_flag_id as u16)) {
+                        let old_slot_flag = orig_item.flag;
+                        let charge_ids: Vec<i64> = snap
+                            .items
+                            .values()
+                            .filter(|i| {
+                                i.location_id == old_loc_id
+                                    && i.flag == old_slot_flag
+                                    && i.item_id != effective_item_id
+                                    && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 8)
+                            })
+                            .map(|i| i.item_id)
+                            .collect();
+                        for cid in charge_ids {
+                            if let Some(ci) = snap.items.get_mut(&cid) {
+                                let pre = ci.clone();
+                                ci.location_id = new_loc;
+                                ci.flag = flag;
+                                ci.singleton = false;
+                                ci.owner_id = updated.owner_id;
+                                ci.version += 1;
+                                unfitted_charges.push((pre, ci.clone()));
+                            }
+                        }
+                    }
                 }
 
                 Ok(AddTxOutcome::Moved {
@@ -1579,6 +1607,7 @@ async fn handle_invbroker_add(
                     old_was_fitted,
                     st_fuel,
                     dst_corp_owner,
+                    unfitted_charges,
                 })
             });
 
@@ -1642,7 +1671,7 @@ async fn handle_invbroker_add(
                         ("version", PyRep::Integer(merged_item.version as i64)), ("suspectFlagged", PyRep::Bool(looted_foreign_jetcan)),
                     ])))
                 }
-                Ok(AddTxOutcome::Moved { updated, effective_item_id, old_loc_id, old_flag_id, old_owner_id, old_was_fitted, st_fuel, dst_corp_owner }) => {
+                Ok(AddTxOutcome::Moved { updated, effective_item_id, old_loc_id, old_flag_id, old_owner_id, old_was_fitted, st_fuel, dst_corp_owner, unfitted_charges }) => {
                     item_id = effective_item_id;
                     if updated.owner_id != old_owner_id {
                         crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &[updated.item_id]);
@@ -1789,6 +1818,9 @@ async fn handle_invbroker_add(
                             );
                         }
                     } else if old_was_fitted {
+                        for (pre_c, post_c) in &unfitted_charges {
+                            ctx.notify_item_mutation(char_id, Some(pre_c), Some(post_c));
+                        }
                         ctx.invalidate_ship_fitting(old_loc_id);
                         let new_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, old_loc_id).ok();
                         let _ = ctx.notify_module_online_state(char_id, item_id, false);

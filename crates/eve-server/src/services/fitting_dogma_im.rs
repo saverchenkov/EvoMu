@@ -649,15 +649,38 @@ pub(crate) async fn handle_dogma_im(
                             return Err(BridgeRpcError { code: "SubsystemHasFittedModules".into(), message: "Cannot destroy a T3 Strategic Cruiser subsystem while modules are fitted".into() });
                         }
                     }
-                    let found = (loc, item.flag as i64, item.type_id as i64, item.quantity as i64);
+                    let old_flag = item.flag;
+                    let found = (loc, old_flag as i64, item.type_id as i64, item.quantity as i64);
+                    let mut removed_charges = Vec::new();
+                    if (11..=34).contains(&flag_u16)
+                        && ctx.sde.types.get(&item.type_id).is_none_or(|t| t.category_id != 8)
+                    {
+                        let charge_ids: Vec<i64> = snap
+                            .items
+                            .values()
+                            .filter(|other| {
+                                other.location_id == loc
+                                    && other.flag == old_flag
+                                    && other.item_id != item_id
+                                    && ctx.sde.types.get(&other.type_id).is_some_and(|t| t.category_id == 8)
+                            })
+                            .map(|other| other.item_id)
+                            .collect();
+                        for cid in charge_ids {
+                            if let Some(c_rec) = snap.items.get(&cid).cloned() {
+                                removed_charges.push(c_rec);
+                            }
+                            snap.remove_system_cleanup_item(cid);
+                        }
+                    }
                     snap.remove_system_cleanup_item(item_id);
-                    Ok(Some(found))
+                    Ok(Some((found, removed_charges)))
                 } else {
                     Ok(None)
                 }
             });
             let loc_opt = match destroy_res { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            if let Some((loc, flag, type_id, qty)) = loc_opt {
+            if let Some(((loc, flag, type_id, qty), removed_charges)) = loc_opt {
                 if let Some(sys_id) = session.solar_system_id {
                     let sys = ctx.systems.get_or_spawn(sys_id);
                     let _ = sys.remove_module_cycle(loc, item_id).await;
@@ -679,6 +702,9 @@ pub(crate) async fn handle_dogma_im(
                     }
                 }
                 crate::services::tactical_modules::remove_projected_remote_assistance(ctx, loc, item_id);
+                for c_rec in &removed_charges {
+                    ctx.notify_item_mutation(char_id, Some(c_rec), None);
+                }
                 ctx.invalidate_ship_fitting(loc);
                 if let Ok(new_fit) = ctx.get_or_rebuild_ship_fitting(char_id, loc) {
                     if let Some((old_cpu, old_pg)) = old_fit_loads {

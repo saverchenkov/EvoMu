@@ -286,35 +286,109 @@ pub(crate) fn handle_unload_ammo(
         out
     });
 
-    let ship_cargo_cap = ctx
-        .get_or_rebuild_ship_fitting(char_id, ship_id)
-        .ok()
-        .map(|f| f.ship.get_attribute(attr_ids::CAPACITY, &ctx.sde))
-        .or_else(|| {
-            ctx.db.with_snapshot(|s| {
-                s.items
-                    .get(&ship_id)
-                    .and_then(|sh| ctx.sde.types.get(&sh.type_id))
-                    .map(|t| t.capacity)
-            })
-        })
-        .unwrap_or(1_000_000.0);
+    let (dest_loc_id, dest_owner_opt, dest_flag_raw_opt) = match args.get(2) {
+        None | Some(PyRep::None) => (ship_id, None, None),
+        Some(PyRep::Integer(loc_id)) if *loc_id > 0 => (*loc_id, None, None),
+        Some(PyRep::Tuple(elems) | PyRep::List(elems)) => {
+            let loc_id = elems
+                .first()
+                .and_then(|e| e.as_i64())
+                .filter(|&id| id > 0)
+                .unwrap_or(ship_id);
+            let owner_opt = elems.get(1).and_then(|e| e.as_i64()).filter(|&id| id > 0);
+            let flag_opt = elems.get(2).and_then(|e| e.as_i64());
+            (loc_id, owner_opt, flag_opt)
+        }
+        Some(_) => (ship_id, None, None),
+    };
+    if let Some(dest_owner) = dest_owner_opt {
+        let char_corp = session.corporation_id.or_else(|| {
+            ctx.db
+                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
+        });
+        if dest_owner != char_id && Some(dest_owner) != char_corp {
+            return Err(BridgeRpcError {
+                code: "ItemOwnershipViolation".into(),
+                message: format!("Destination owner {dest_owner} does not match character {char_id}"),
+            });
+        }
+    }
+    let dest_flag = match dest_flag_raw_opt {
+        Some(rf) => {
+            if !matches!(
+                rf,
+                4 | 5 | 116..=122 | 133..=151 | 155 | 177 | 179 | 181 | 182 | 185
+            ) {
+                return Err(BridgeRpcError {
+                    code: "InvalidInventoryFlag".into(),
+                    message: format!("Invalid unload destination flag {rf}"),
+                });
+            }
+            InventoryFlag::from_u16(rf as u16)
+        }
+        None => {
+            if dest_loc_id == ship_id {
+                InventoryFlag::Cargo
+            } else {
+                InventoryFlag::Hangar
+            }
+        }
+    };
+
+    let ship_cargo_cap = if dest_loc_id == ship_id && dest_flag == InventoryFlag::Cargo {
+        Some(
+            ctx.get_or_rebuild_ship_fitting(char_id, ship_id)
+                .ok()
+                .map(|f| f.ship.get_attribute(attr_ids::CAPACITY, &ctx.sde))
+                .or_else(|| {
+                    ctx.db.with_snapshot(|s| {
+                        s.items
+                            .get(&ship_id)
+                            .and_then(|sh| ctx.sde.types.get(&sh.type_id))
+                            .map(|t| t.capacity)
+                    })
+                })
+                .unwrap_or(1_000_000.0),
+        )
+    } else {
+        None
+    };
 
     let item_diffs = ctx.db.try_with_mut_snapshot(|snap| {
+        if dest_loc_id != ship_id {
+            let ch_dock = session
+                .station_id
+                .or(session.structure_id)
+                .or_else(|| snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id)));
+            let is_docked_target = ch_dock == Some(dest_loc_id);
+            let is_owned_container_target = snap.items.get(&dest_loc_id).is_some_and(|d| {
+                d.owner_id == char_id
+                    && (d.location_id == ship_id || (ch_dock.is_some() && Some(d.location_id) == ch_dock))
+            });
+            if !is_docked_target && !is_owned_container_target {
+                return Err(BridgeRpcError {
+                    code: "InvalidDestination".into(),
+                    message: format!("Unload destination {dest_loc_id} is not accessible to character {char_id}"),
+                });
+            }
+        }
         let mut diffs: Vec<(Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>)> =
             Vec::new();
-        let mut used_cargo: f64 = snap
-            .items
-            .values()
-            .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::Cargo)
-            .map(|i| {
-                ctx.sde
-                    .types
-                    .get(&i.type_id)
-                    .map(|t| t.volume * (i.quantity.max(1) as f64))
-                    .unwrap_or(0.0)
-            })
-            .sum();
+        let mut used_cargo: f64 = if ship_cargo_cap.is_some() {
+            snap.items
+                .values()
+                .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::Cargo)
+                .map(|i| {
+                    ctx.sde
+                        .types
+                        .get(&i.type_id)
+                        .map(|t| t.volume * (i.quantity.max(1) as f64))
+                        .unwrap_or(0.0)
+                })
+                .sum()
+        } else {
+            0.0
+        };
 
         for &mod_id in &all_target_modules {
             let Some(mod_item) = snap.items.get(&mod_id).cloned() else {
@@ -322,7 +396,7 @@ pub(crate) fn handle_unload_ammo(
             };
             if mod_item.location_id != ship_id || !matches!(mod_item.flag as u16, 11..=34 | 125..=132) {
                 continue;
-            }
+            };
             let slot_flag = mod_item.flag;
             let charges: Vec<(i64, f64)> = snap
                 .items
@@ -344,15 +418,19 @@ pub(crate) fn handle_unload_ammo(
                 })
                 .collect();
             for (cid, vol) in charges {
-                if ship_cargo_cap > 0.0 && used_cargo + vol > ship_cargo_cap + 1e-4 {
-                    return Err(BridgeRpcError {
-                        code: "NotEnoughCargoSpace".into(),
-                        message: "Not enough cargo space to unload ammo".into(),
-                    });
+                if let Some(cap) = ship_cargo_cap {
+                    if cap > 0.0 && used_cargo + vol > cap + 1e-4 {
+                        return Err(BridgeRpcError {
+                            code: "NotEnoughCargoSpace".into(),
+                            message: "Not enough cargo space to unload ammo".into(),
+                        });
+                    }
                 }
                 if let Some(ci) = snap.items.get_mut(&cid) {
                     let pre = ci.clone();
-                    ci.flag = InventoryFlag::Cargo;
+                    ci.location_id = dest_loc_id;
+                    ci.flag = dest_flag;
+                    ci.singleton = false;
                     ci.version += 1;
                     diffs.push((Some(pre), Some(ci.clone())));
                     used_cargo += vol;
@@ -481,6 +559,64 @@ pub(crate) fn evaluate_ship_dogma_attributes(
         m_attrs.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
         module_entries.push((PyRep::Integer(m.item_id), PyRep::Dict(m_attrs)));
     }
+    let loaded_charges: Vec<eve_db::InventoryItemRecord> = ctx.db.with_snapshot(|snap| {
+        let mut list: Vec<eve_db::InventoryItemRecord> = snap
+            .items
+            .values()
+            .filter(|i| {
+                i.location_id == ship_id
+                    && matches!(i.flag as u16, 11..=34 | 125..=132)
+                    && i.quantity > 0
+                    && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 8)
+            })
+            .cloned()
+            .collect();
+        list.sort_by_key(|i| i.item_id);
+        list
+    });
+    for c_item in loaded_charges {
+        let mut c_map: HashMap<u16, f64> = ctx
+            .sde
+            .types
+            .get(&c_item.type_id)
+            .map(|t| t.default_attributes.clone())
+            .unwrap_or_default();
+        let slot_flag = c_item.flag as u16;
+        let launcher_id_opt = fit
+            .modules
+            .values()
+            .find(|m| m.flag_id == slot_flag)
+            .map(|m| m.item_id);
+        let charge_state_opt = launcher_id_opt
+            .and_then(|lid| fit.charge_state(lid, &ctx.sde))
+            .or_else(|| {
+                fit.evaluated_charges
+                    .values()
+                    .find(|c| c.type_id == c_item.type_id)
+                    .cloned()
+            });
+        if let Some(c_state) = charge_state_opt {
+            let all_aids: std::collections::BTreeSet<u16> = c_state
+                .base_attributes
+                .keys()
+                .copied()
+                .chain(c_state.modifiers.iter().map(|m| m.target_attribute_id))
+                .collect();
+            for aid in all_aids {
+                c_map.insert(aid, c_state.get_attribute(aid, &ctx.sde));
+            }
+        }
+        for (&aid, &val) in &c_item.dynamic_attributes {
+            c_map.insert(aid, val);
+        }
+        c_map.insert(80, c_item.quantity as f64);
+        let mut c_attrs: Vec<(PyRep, PyRep)> = c_map
+            .into_iter()
+            .map(|(aid, v)| (PyRep::Integer(aid as i64), PyRep::Real(v)))
+            .collect();
+        c_attrs.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
+        module_entries.push((PyRep::Integer(c_item.item_id), PyRep::Dict(c_attrs)));
+    }
 
     let ship_type_id = fit.ship.type_id;
     let active_stance = fit
@@ -561,32 +697,40 @@ fn emit_godma_prime_location_and_ship_state(
     for (mod_id_rep, mod_attrs_rep) in module_entries {
         if let Some(mod_id) = mod_id_rep.as_i64() {
             if let Some(mut mod_item) = ctx.db.get_item(mod_id) {
-                mod_item.singleton = true;
+                let is_charge = ctx
+                    .sde
+                    .types
+                    .get(&mod_item.type_id)
+                    .is_some_and(|t| t.category_id == 8);
+                mod_item.singleton = !is_charge;
                 let inv_row = header.build_dbrow(super::super::item_to_packed_cells(ctx, &mod_item));
-                let is_online = matches!(mod_attrs_rep, PyRep::Dict(pairs) if pairs.iter().any(|(k, v)| k.as_i64() == Some(2) && v.as_f64().is_some_and(|val| val > 0.5)));
+                let is_online = !is_charge
+                    && matches!(mod_attrs_rep, PyRep::Dict(pairs) if pairs.iter().any(|(k, v)| k.as_i64() == Some(2) && v.as_f64().is_some_and(|val| val > 0.5)));
                 let mut active_effects = Vec::new();
-                if let Some(type_rec) = ctx.sde.types.get(&mod_item.type_id) {
-                    if is_online && type_rec.effect_ids.contains(&16) {
-                        active_effects.push((
-                            PyRep::Integer(16),
-                            build_active_effect_line(mod_id, 16, -1.0),
-                        ));
-                    }
-                    if active_states.contains(&mod_id) {
-                        if let Some(def_eff) = type_rec.default_effect_id.filter(|&eid| eid != 16) {
-                            let dur_ms = match mod_attrs_rep {
-                                PyRep::Dict(pairs) => pairs
-                                    .iter()
-                                    .find(|(k, _)| k.as_i64() == Some(73))
-                                    .and_then(|(_, v)| v.as_f64())
-                                    .filter(|&d| d > 0.0)
-                                    .unwrap_or(1_000.0),
-                                _ => 1_000.0,
-                            };
+                if !is_charge {
+                    if let Some(type_rec) = ctx.sde.types.get(&mod_item.type_id) {
+                        if is_online && type_rec.effect_ids.contains(&16) {
                             active_effects.push((
-                                PyRep::Integer(i64::from(def_eff)),
-                                build_active_effect_line(mod_id, i64::from(def_eff), dur_ms),
+                                PyRep::Integer(16),
+                                build_active_effect_line(mod_id, 16, -1.0),
                             ));
+                        }
+                        if active_states.contains(&mod_id) {
+                            if let Some(def_eff) = type_rec.default_effect_id.filter(|&eid| eid != 16) {
+                                let dur_ms = match mod_attrs_rep {
+                                    PyRep::Dict(pairs) => pairs
+                                        .iter()
+                                        .find(|(k, _)| k.as_i64() == Some(73))
+                                        .and_then(|(_, v)| v.as_f64())
+                                        .filter(|&d| d > 0.0)
+                                        .unwrap_or(1_000.0),
+                                    _ => 1_000.0,
+                                };
+                                active_effects.push((
+                                    PyRep::Integer(i64::from(def_eff)),
+                                    build_active_effect_line(mod_id, i64::from(def_eff), dur_ms),
+                                ));
+                            }
                         }
                     }
                 }
@@ -604,6 +748,55 @@ fn emit_godma_prime_location_and_ship_state(
                 ));
             }
         }
+    }
+    let extra_charges: Vec<eve_db::InventoryItemRecord> = ctx.db.with_snapshot(|snap| {
+        let mut list: Vec<eve_db::InventoryItemRecord> = snap
+            .items
+            .values()
+            .filter(|i| {
+                i.location_id == ship_id
+                    && matches!(i.flag as u16, 11..=34 | 125..=132)
+                    && i.quantity > 0
+                    && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 8)
+            })
+            .cloned()
+            .collect();
+        list.sort_by_key(|i| i.item_id);
+        list
+    });
+    for mut c_item in extra_charges {
+        if ship_info_entries.iter().any(|(k, _)| k.as_i64() == Some(c_item.item_id)) {
+            continue;
+        }
+        c_item.singleton = false;
+        let inv_row = header.build_dbrow(super::super::item_to_packed_cells(ctx, &c_item));
+        let mut c_map: HashMap<u16, f64> = ctx
+            .sde
+            .types
+            .get(&c_item.type_id)
+            .map(|t| t.default_attributes.clone())
+            .unwrap_or_default();
+        for (&aid, &val) in &c_item.dynamic_attributes {
+            c_map.insert(aid, val);
+        }
+        c_map.insert(80, c_item.quantity as f64);
+        let mut c_attrs: Vec<(PyRep, PyRep)> = c_map
+            .into_iter()
+            .map(|(aid, v)| (PyRep::Integer(aid as i64), PyRep::Real(v)))
+            .collect();
+        c_attrs.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
+        ship_info_entries.push((
+            PyRep::Integer(c_item.item_id),
+            PyRep::keyval([
+                ("itemID", PyRep::Integer(c_item.item_id)),
+                ("invItem", inv_row),
+                ("attributes", PyRep::Dict(c_attrs)),
+                ("activeEffects", PyRep::Dict(Vec::new())),
+                ("time", PyRep::Integer(now_ft)),
+                ("wallclockTime", PyRep::Integer(now_ft)),
+                ("description", PyRep::String(String::new())),
+            ]),
+        ));
     }
 
     ctx.notify(

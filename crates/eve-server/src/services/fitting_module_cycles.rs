@@ -428,22 +428,37 @@ pub(crate) async fn handle_module_cycles(
                         message: "Cannot activate Interdiction Sphere Launcher while tethered".into(),
                     }));
                 }
-                return Some(
-                    crate::router::box_fut(|| crate::services::tactical_module_mechanics::activate_interdiction_sphere_launcher(
-                        ctx,
-                        &sys,
-                        sys_id,
-                        char_id,
-                        ship_id,
-                        fit.ship.type_id,
+                let res = crate::router::box_fut(|| crate::services::tactical_module_mechanics::activate_interdiction_sphere_launcher(
+                    ctx,
+                    &sys,
+                    sys_id,
+                    char_id,
+                    ship_id,
+                    fit.ship.type_id,
+                    module_id,
+                    &m,
+                    mod_type,
+                    effect_name.as_str(),
+                    target_id_opt,
+                ))
+                .await;
+                if res.is_ok() {
+                    ctx.db.with_mut_snapshot(|s| {
+                        s.module_active_states.remove(&module_id);
+                    });
+                    let stop_eff_id = ctx
+                        .effect_id_for_module(m.type_id, Some(effect_name.as_str()))
+                        .unwrap_or(101) as i32;
+                    let _ = ctx.notify_godma_ship_effect(
+                        crate::router::NotificationTarget::Character(char_id),
                         module_id,
-                        &m,
-                        mod_type,
-                        effect_name.as_str(),
-                        target_id_opt,
-                    ))
-                    .await,
-                );
+                        stop_eff_id,
+                        false,
+                        0,
+                        0,
+                    );
+                }
+                return Some(res);
             }
 
             // Survey Probe Launcher (`group_id == 1226`, `33270` Survey Probe Launcher I, `33272` Survey Probe Launcher II)

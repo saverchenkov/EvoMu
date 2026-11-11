@@ -1660,3 +1660,120 @@ async fn toctou_concurrent_dock_stargate_anchor_filament_loot_hacking() {
         "only one concurrent StartNewGameInstance may claim an in-progress structure hack: hr1={hr1:?} hr2={hr2:?}"
     );
 }
+
+#[tokio::test]
+async fn unfitting_loaded_module_relocates_charge_and_emits_on_item_change_947() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 91_609_470_i64;
+    let station_id = 60_003_760_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = 91_609_471_i64;
+    let gun_id = 91_609_472_i64;
+    let charge_id = 91_609_473_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = 1;
+        ch.station_id = Some(station_id);
+        ch.solar_system_id = sys_id;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            gun_id,
+            InventoryItemRecord {
+                item_id: gun_id,
+                type_id: 484, // 125mm Gatling AutoCannon I
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            charge_id,
+            InventoryItemRecord {
+                item_id: charge_id,
+                type_id: 179, // Depleted Uranium S
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 40,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(gun_id, true);
+    });
+
+    let mut session = SessionState {
+        user_id: Some(1),
+        character_id: Some(char_id),
+        station_id: Some(station_id),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    ctx.db
+        .acquire_online_lock(1, 1, Some(char_id), true, ctx.now_unix_secs())
+        .expect("online lock");
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let unfit_res = handle(
+        &ctx,
+        &mut session,
+        None,
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(gun_id),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::Hangar as i64),
+        ],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("unfit module to station hangar");
+    assert_eq!(unfit_res.dict_get("locationID").and_then(|v| v.as_i64()), Some(station_id));
+
+    let gun_after = ctx.db.get_item(gun_id).expect("gun exists");
+    assert_eq!(gun_after.location_id, station_id);
+    assert_eq!(gun_after.flag, InventoryFlag::Hangar);
+
+    let charge_after = ctx.db.get_item(charge_id).expect("charge exists");
+    assert_eq!(
+        charge_after.location_id, station_id,
+        "loaded charge must move with unfitted module instead of staying stranded on ship (#947)"
+    );
+    assert_eq!(charge_after.flag, InventoryFlag::Hangar);
+    assert_eq!(charge_after.quantity, 40);
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs.iter().any(|n| n.event == "OnItemChange" && format!("{:?}", n.args).contains(&charge_id.to_string())),
+        "unfitting loaded module must emit OnItemChange for the relocated charge (#947), got {notifs:?}"
+    );
+}
