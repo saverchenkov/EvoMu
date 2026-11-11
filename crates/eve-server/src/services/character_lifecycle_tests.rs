@@ -70,8 +70,7 @@ fn char_unbound_mgr_prepare_cancel_delete_bloodline_and_gender() {
         "InvalidBloodline"
     );
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs
-            .insert(format!("resculpt_pending:{cid}"), "true".into());
+        snap.cluster_and_runtime.resculpt_pending.insert(cid);
     });
     let ch_race = ctx.db.with_snapshot(|s| s.characters[&cid].race_id);
     let valid_bl = *ctx.sde.bloodlines.iter().find(|(_, b)| b.race_id == ch_race).unwrap().0;
@@ -506,4 +505,43 @@ fn biomass_prepare_blocked_when_ship_keyed_self_destruct_active() {
     .unwrap()
     .unwrap_err();
     assert_eq!(err.code, "CharacterInSpace");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let test_corp_id = 98_777_123_i64;
+        let ceo_id = 90_777_001_i64;
+        let dir_id = 90_777_002_i64;
+        let pm_id = 90_777_003_i64;
+        let member_id = 90_777_004_i64;
+        assert!(!super::has_corp_director_or_personnel_manager_role(
+            snap, ceo_id, test_corp_id
+        ));
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = test_corp_id;
+        corp.name = "RoleCheckCorp".into();
+        corp.ticker = "RLCK".into();
+        corp.ceo_id = ceo_id;
+        corp.member_roles
+            .insert(dir_id, eve_db::corp_roles::ROLE_DIRECTOR);
+        snap.corporations.insert(test_corp_id, corp);
+        snap.corp_role_assignments.insert(
+            (test_corp_id, pm_id),
+            eve_db::CorpMemberRoleAssignment {
+                character_id: pm_id,
+                roles: eve_db::corp_roles::ROLE_PERSONNEL_MANAGER,
+                ..Default::default()
+            },
+        );
+        assert!(super::has_corp_director_or_personnel_manager_role(
+            snap, ceo_id, test_corp_id
+        ));
+        assert!(super::has_corp_director_or_personnel_manager_role(
+            snap, dir_id, test_corp_id
+        ));
+        assert!(super::has_corp_director_or_personnel_manager_role(
+            snap, pm_id, test_corp_id
+        ));
+        assert!(!super::has_corp_director_or_personnel_manager_role(
+            snap, member_id, test_corp_id
+        ));
+    });
 }

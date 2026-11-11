@@ -216,3 +216,7 @@ pub fn handle(
 
 #[cfg(test)] #[path = "character_energy_tests.rs"] mod character_energy_tests;
 
+#[cfg(test)]
+#[path = "character_energy_edges_tests.rs"]
+mod character_energy_edges_tests;
+

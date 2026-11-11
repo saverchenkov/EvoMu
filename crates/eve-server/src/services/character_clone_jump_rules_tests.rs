@@ -409,7 +409,7 @@ fn clone_jump_rejects_wormhole_pochven_and_non_capsule() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn clone_vat_bay_activation_and_in_space_ship_clone_jump() {
     let mut ctx = test_ctx();
     let titan_tid = 99_910;
@@ -750,3 +750,7 @@ fn clone_bay_rejects_empty_slots_offline_and_non_operational_structures() {
         .expect("clone jump with operational structures and online 35894 modules must succeed");
     assert_eq!(ok.dict_get("locationID"), Some(&PyRep::Integer(struct_dest)));
 }
+
+#[cfg(test)]
+#[path = "character_clone_jump_rules_extra_unit_tests.rs"]
+mod character_clone_jump_rules_extra_unit_tests;

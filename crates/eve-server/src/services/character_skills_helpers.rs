@@ -1233,3 +1233,7 @@ fn handle_get_skill_bundle_info(
     // `SkillBundleLootItem.__init__` unpacks `(name, icon)` where `icon = None` falls back to `ICON_PATH`.
     Ok(PyRep::Tuple(vec![PyRep::String(name), PyRep::None]))
 }
+
+#[cfg(test)]
+#[path = "character_skills_helpers_edges_tests.rs"]
+mod character_skills_helpers_edges_tests;

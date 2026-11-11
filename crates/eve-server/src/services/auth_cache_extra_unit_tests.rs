@@ -474,3 +474,252 @@ async fn slash_commands_error_branches_and_role_aliases() {
         assert_eq!(err.code, expected_code, "for command '{bad_cmd}'");
     }
 }
+
+#[tokio::test]
+async fn rowset_login_global_config_and_teleport_kill_all_mutants() {
+    let ctx = test_ctx();
+    let kw = HashMap::new();
+
+    // 1. record_gm_audit exact payload & ok=false
+    record_gm_audit(&ctx, 90_123_001, "/auditcheck", false);
+    ctx.db.with_snapshot(|snap| {
+        let last = snap.cluster_and_runtime.gm_audit_log.last().expect("audit entry");
+        assert_eq!(last["char_id"].as_i64(), Some(90_123_001));
+        assert_eq!(last["cmd"].as_str(), Some("/auditcheck"));
+        assert_eq!(last["ok"].as_bool(), Some(false));
+    });
+
+    // 2. SetGlobalConfigValue non-GM rejection + positional write persisted to ctx & DB
+    let mut player_sess = auth_session(77, 90_123_001, 98_000_001, 30_000_142);
+    player_sess.role = service_roles::ROLE_PLAYER_DEFAULT;
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut player_sess,
+            "machoNet",
+            "SetGlobalConfigValue",
+            &[PyRep::String("k".into()), PyRep::Integer(1)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InsufficientRole"
+    );
+
+    let mut gm_sess = auth_session(1, 90_000_001, 98_000_001, 30_000_142);
+    gm_sess.role = service_roles::ROLE_GMH | service_roles::ROLE_QA;
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut gm_sess,
+            "machoNet",
+            "SetGlobalConfigValue",
+            &[PyRep::String("pos_cfg".into()), PyRep::String("v1".into())],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(
+        ctx.global_config_values.read().unwrap().get("pos_cfg"),
+        Some(&PyRep::String("v1".into()))
+    );
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.cluster_and_runtime.macho_global_config.get("pos_cfg").cloned()),
+        Some(PyRep::String("v1".into()))
+    );
+
+    // 3. cache.Rowset: corpmgt__roles, roles, default, races/factions/bloodlines/ancestries, unknown
+    for tbl in ["corpmgt__roles", "roles"] {
+        let rep = handle(&ctx, &mut gm_sess, "cache", "Rowset", &[PyRep::String(tbl.into())], &kw)
+            .await
+            .unwrap()
+            .unwrap();
+        match rep {
+            PyRep::Rowset { columns, rows } => {
+                assert_eq!(columns, vec!["roleID".to_string(), "roleName".to_string()]);
+                assert!(!rows.is_empty(), "{tbl} must contain role rows");
+                assert_eq!(
+                    rows.len(),
+                    crate::domain::corp_governance::CORP_ROLE_DEFINITIONS.len()
+                );
+            }
+            other => panic!("expected Rowset for {tbl}, got {other:?}"),
+        }
+    }
+    let default_rep = handle(&ctx, &mut gm_sess, "cache", "Rowset", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(default_rep, PyRep::Rowset { rows, .. } if !rows.is_empty()));
+    for tbl in ["races", "factions", "bloodlines", "ancestries"] {
+        let rep = handle(&ctx, &mut gm_sess, "cache", "Rowset", &[PyRep::String(tbl.into())], &kw)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(rep, PyRep::Rowset { rows, .. } if !rows.is_empty()), "{tbl} empty");
+    }
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut gm_sess,
+            "cache",
+            "Rowset",
+            &[PyRep::String("no_such_table".into())],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "UnknownCacheRowset"
+    );
+
+    // 4. authentication.Login success, session mutation, wrong password, banned account
+    ctx.db.provision_gm_account("auth_login_user", "secret_pw", 90_123_100, "AuthLoginChar");
+    let login_acc = ctx.db.with_snapshot(|s| s.accounts["auth_login_user"].clone());
+    let mut login_sess = SessionState::new(501);
+    login_sess.character_id = Some(90_123_100);
+    login_sess.address = "127.0.0.1:5000".into();
+    let login_rep = handle(
+        &ctx,
+        &mut login_sess,
+        "authentication",
+        "Login",
+        &[PyRep::String("auth_login_user".into()), PyRep::String("secret_pw".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(login_rep.dict_get("userID"), Some(&PyRep::Integer(login_acc.user_id as i64)));
+    assert_eq!(login_rep.dict_get("role"), Some(&PyRep::Integer(login_acc.role as i64)));
+    assert!(login_rep.dict_get("sessionChange").is_some());
+    assert_eq!(login_sess.user_id, Some(login_acc.user_id));
+    assert_eq!(login_sess.role, login_acc.role);
+    assert_eq!(login_sess.character_id, None);
+
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut login_sess,
+            "authentication",
+            "Login",
+            &[PyRep::String("auth_login_user".into()), PyRep::String("wrong_pw".into())],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "AuthenticationFailed"
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(a) = snap.accounts.get_mut("auth_login_user") {
+            a.banned_until_unix = Some(u64::MAX);
+        }
+    });
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut login_sess,
+            "authentication",
+            "Login",
+            &[PyRep::String("auth_login_user".into()), PyRep::String("secret_pw".into())],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "UserBanned"
+    );
+
+    // 5. handle_slash_teleport: self cross-system, self same-system in-space, and remote target_cid != cid
+    let mut sys_ids: Vec<u32> = ctx.sde.solar_systems.keys().copied().collect();
+    sys_ids.sort_unstable();
+    assert!(sys_ids.len() >= 2, "seed must have >= 2 solar systems");
+    let sys_a = 30_000_142_u32;
+    let sys_b = sys_ids.into_iter().find(|&s| s != sys_a).unwrap();
+
+    let gm_cid = 90_123_201_i64;
+    let other_cid = 90_123_202_i64;
+    ctx.db.provision_gm_account("tp_gm", "pw", gm_cid, "TpGm");
+    ctx.db.provision_gm_account("tp_other", "pw", other_cid, "TpOther");
+    let gm_acct = ctx.db.with_snapshot(|s| s.accounts["tp_gm"].clone());
+    let gm_ship = ctx.db.get_character(gm_cid).unwrap().active_ship_id;
+
+    let mut tp_sess = auth_session(gm_acct.user_id, gm_cid, 98_000_001, sys_a);
+    tp_sess.role = service_roles::ROLE_GMH | service_roles::ROLE_QA;
+    tp_sess.station_id = Some(60_003_760);
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&gm_cid).unwrap();
+        ch.solar_system_id = sys_a;
+        ch.station_id = Some(60_003_760);
+    });
+
+    // Self cross-system teleport updates session solar_system_id & clears station_id & returns valid keyval
+    let tp_res = handle(
+        &ctx,
+        &mut tp_sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/teleport {sys_b}"))],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(tp_res.dict_get("command"), Some(&PyRep::String(format!("/teleport {sys_b}"))));
+    assert_eq!(tp_res.dict_get("characterID"), Some(&PyRep::Integer(gm_cid)));
+    assert_eq!(tp_res.dict_get("solarSystemID"), Some(&PyRep::Integer(sys_b as i64)));
+    assert_eq!(tp_sess.solar_system_id, Some(sys_b));
+    assert_eq!(tp_sess.station_id, None);
+    assert_eq!(ctx.db.get_character(gm_cid).unwrap().solar_system_id, sys_b);
+    if gm_ship > 0 {
+        assert!(ctx.db.with_snapshot(|s| s.item_positions.contains_key(&gm_ship)));
+    }
+
+    // Remote target_cid != cid: GM session MUST remain on gm_cid / sys_b while target_cid moves to sys_b
+    ctx.db.with_mut_snapshot(|snap| {
+        let other = snap.characters.get_mut(&other_cid).unwrap();
+        other.solar_system_id = sys_a;
+        other.station_id = None;
+    });
+    let remote_tp = handle(
+        &ctx,
+        &mut tp_sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/tr {other_cid} {sys_b}"))],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(remote_tp.dict_get("characterID"), Some(&PyRep::Integer(other_cid)));
+    assert_eq!(remote_tp.dict_get("solarSystemID"), Some(&PyRep::Integer(sys_b as i64)));
+    assert_eq!(tp_sess.character_id, Some(gm_cid));
+    assert_eq!(tp_sess.solar_system_id, Some(sys_b));
+    assert_eq!(ctx.db.get_character(other_cid).unwrap().solar_system_id, sys_b);
+
+    // Same-system in-space teleport by GM succeeds and updates position
+    let same_tp = handle(
+        &ctx,
+        &mut tp_sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/moveme {sys_b}"))],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(same_tp.dict_get("solarSystemID"), Some(&PyRep::Integer(sys_b as i64)));
+    assert_eq!(tp_sess.solar_system_id, Some(sys_b));
+}

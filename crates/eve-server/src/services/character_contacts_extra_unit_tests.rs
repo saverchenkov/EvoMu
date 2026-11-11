@@ -566,3 +566,175 @@ fn home_station_remote_cooldown_pochven_rejection_and_self_destruct_non_capsule(
             || err_sd.code.contains("SelfDestructOnlyInCapsule")
     );
 }
+
+#[test]
+fn contact_labels_edit_agent_max_contacts_and_home_station_structure_branches() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let st_id = 60_003_760_i64;
+    let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    let _ = ctx
+        .db
+        .acquire_online_lock(uid, 101, Some(char_id), false, ctx.now_unix());
+    let mut sess = char_session(Some(char_id), Some(st_id));
+    let kw = HashMap::new();
+
+    // 1. AddContact for an SDE agent -> triggers OnAgentAdded notification
+    if let Some(&agent_id) = ctx.sde.agents.keys().next() {
+        let mut add_kw = HashMap::new();
+        add_kw.insert("labelMask".into(), PyRep::Integer(2));
+        let added = call_contacts(
+            &ctx,
+            &mut sess,
+            "charMgr",
+            "AddContact",
+            &[PyRep::Integer(agent_id), PyRep::Real(5.0), PyRep::Bool(true)],
+            &add_kw,
+        )
+        .unwrap();
+        assert_eq!(added.dict_get("labelMask"), Some(&PyRep::Integer(2)));
+        // Update same contact -> hits existing_pos = Some(idx) branch with labelMask
+        let updated = call_contacts(
+            &ctx,
+            &mut sess,
+            "charMgr",
+            "AddContact",
+            &[PyRep::Integer(agent_id), PyRep::Real(7.5), PyRep::Bool(false)],
+            &add_kw,
+        )
+        .unwrap();
+        assert_eq!(updated.dict_get("standing"), Some(&PyRep::Real(7.5)));
+        let notes = ctx.drain_notifications_for_char(char_id);
+        assert!(notes.iter().any(|n| n.event == "OnAgentAdded"));
+    }
+
+    // 2. EditContact on a new contact not yet in list + integer watchlist + labelMask kwarg
+    let new_cid = 90_123_456_i64;
+    let mut edit_kw = HashMap::new();
+    edit_kw.insert("labelMask".into(), PyRep::Integer(4));
+    let edited = call_contacts(
+        &ctx,
+        &mut sess,
+        "charMgr",
+        "EditContact",
+        &[PyRep::Integer(new_cid), PyRep::Real(-2.5), PyRep::Integer(1)],
+        &edit_kw,
+    )
+    .unwrap();
+    assert_eq!(edited.dict_get("updatedCount"), Some(&PyRep::Integer(1)));
+
+    // EditContact empty list -> InvalidArgument
+    assert_eq!(
+        call_contacts(&ctx, &mut sess, "charMgr", "EditContact", &[PyRep::List(vec![])], &kw)
+            .unwrap_err()
+            .code,
+        "InvalidArgument"
+    );
+
+    // 3. AssignLabels / RemoveLabels validation and happy paths
+    assert_eq!(
+        call_contacts(&ctx, &mut sess, "charMgr", "AssignLabels", &[PyRep::List(vec![]), PyRep::Integer(1)], &kw)
+            .unwrap_err()
+            .code,
+        "InvalidArgument"
+    );
+    assert_eq!(
+        call_contacts(&ctx, &mut sess, "charMgr", "RemoveLabels", &[PyRep::Integer(new_cid), PyRep::Integer(0)], &kw)
+            .unwrap_err()
+            .code,
+        "InvalidArgument"
+    );
+    let lbl_id = call_contacts(&ctx, &mut sess, "charMgr", "CreateLabel", &[PyRep::String("VIP".into())], &kw)
+        .unwrap()
+        .as_i64()
+        .unwrap();
+    let assigned = call_contacts(
+        &ctx,
+        &mut sess,
+        "charMgr",
+        "AssignLabels",
+        &[PyRep::Integer(new_cid), PyRep::Integer(lbl_id)],
+        &kw,
+    )
+    .unwrap();
+    assert_eq!(assigned.dict_get("updatedCount"), Some(&PyRep::Integer(1)));
+    let removed_lbl = call_contacts(
+        &ctx,
+        &mut sess,
+        "charMgr",
+        "RemoveLabels",
+        &[PyRep::Integer(new_cid), PyRep::Integer(lbl_id)],
+        &kw,
+    )
+    .unwrap();
+    assert_eq!(removed_lbl.dict_get("updatedCount"), Some(&PyRep::Integer(1)));
+
+    // Re-assign and delete label -> strips label from contacts in ESI, DB, and social_extras
+    let _ = call_contacts(
+        &ctx,
+        &mut sess,
+        "charMgr",
+        "AssignLabels",
+        &[PyRep::Integer(new_cid), PyRep::Integer(lbl_id)],
+        &kw,
+    )
+    .unwrap();
+    ctx.social_extras.lock().unwrap().contacts.entry(char_id).or_default().insert(new_cid, (-2.5, true, lbl_id as u64));
+    let del = call_contacts(&ctx, &mut sess, "charMgr", "DeleteLabel", &[PyRep::Integer(lbl_id)], &kw).unwrap();
+    assert_eq!(del.dict_get("deleted"), Some(&PyRep::Bool(true)));
+
+    // 4. MaxContactsExceeded when 1024 contacts already exist
+    {
+        let mut guard = ctx.esi_state.char_contacts.write().unwrap();
+        let list = guard.entry(char_id).or_default();
+        let start = 91_000_000_i64;
+        let mut k = 0i64;
+        while list.len() < 1_024 {
+            list.push(crate::esi::runtime_state::EsiContactEntry {
+                contact_id: start + k,
+                contact_type: "character".into(),
+                standing: 0.0,
+                is_watched: false,
+                is_blocked: false,
+                label_ids: Vec::new(),
+            });
+            k += 1;
+        }
+    }
+    assert_eq!(
+        call_contacts(
+            &ctx,
+            &mut sess,
+            "charMgr",
+            "AddContact",
+            &[PyRep::Integer(99_999_888), PyRep::Real(1.0)],
+            &kw,
+        )
+        .unwrap_err()
+        .code,
+        "MaxContactsExceeded"
+    );
+
+    // 5. charMgr.GetHomeStation + home_station.get_home_station with Upwell structure home
+    let get_hs = call_contacts(&ctx, &mut sess, "charMgr", "GetHomeStation", &[], &kw).unwrap();
+    assert!(get_hs.as_i64().is_some());
+    let upwell_id = 1_000_000_888_777_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            upwell_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: upwell_id,
+                solar_system_id: 30_000_142,
+                owner_corp_id: 1_000_009,
+                type_id: 35_832,
+                name: "Home Astrahus".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        snap.characters.get_mut(&char_id).unwrap().home_station_id = upwell_id;
+    });
+    let hs_info = call_home_station(&ctx, &mut sess, "get_home_station", &[]).unwrap();
+    assert_eq!(hs_info.dict_get("station_id"), Some(&PyRep::Integer(upwell_id)));
+    assert_eq!(hs_info.dict_get("type_id"), Some(&PyRep::Integer(35_832)));
+}

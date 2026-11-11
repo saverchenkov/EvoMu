@@ -1401,4 +1401,5 @@ pub fn handle(
     }
 }
 #[cfg(test)] #[path = "character_skills_unit_tests.rs"] mod character_skills_unit_tests;
+#[cfg(test)] #[path = "character_skills_edges2_tests.rs"] mod character_skills_edges2_tests;
 

@@ -461,7 +461,7 @@ fn standing_mgr_and_paper_doll_server_handle_queries_and_apparel() {
             2,
             false,
         );
-        snap.service_state_blobs.insert(format!("resculpt_pending:{cid}"), "true".into());
+        snap.cluster_and_runtime.resculpt_pending.insert(cid);
         (uid, cid, iid)
     });
 
@@ -591,3 +591,7 @@ fn standing_mgr_and_paper_doll_server_handle_queries_and_apparel() {
     .expect("GetPaperDollPortraitDataFor ok");
     assert_eq!(kv_get(&portrait, "characterID").and_then(PyRep::as_i64), Some(char_id));
 }
+
+#[cfg(test)]
+#[path = "character_clones_implants_extra_unit_tests.rs"]
+mod character_clones_implants_extra_unit_tests;

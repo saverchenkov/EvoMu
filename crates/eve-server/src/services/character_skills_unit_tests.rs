@@ -1,6 +1,9 @@
 //! Unit and mutation-killing tests for `services::character_skills`.
 
 use super::*;
+#[cfg(test)]
+#[path = "character_skills_helpers_cov_tests.rs"]
+mod character_skills_helpers_cov_tests;
 use crate::router::ServerContext;
 use eve_db::{InventoryFlag, InventoryItemRecord, SkillQueueEntry, TrainedSkillRecord, WorldRepository};
 use eve_machonet::SessionState;
@@ -20,7 +23,7 @@ fn rowset_len(rep: &PyRep) -> usize {
     }
 }
 
-fn test_ctx() -> ServerContext {
+pub(super) fn test_ctx() -> ServerContext {
     if let Some(sde) = SHARED_SDE.get() {
         ServerContext::with_sde_and_repository(
             Arc::clone(sde),
@@ -34,7 +37,7 @@ fn test_ctx() -> ServerContext {
     }
 }
 
-fn char_session(char_id: i64, st_id: i64) -> SessionState {
+pub(super) fn char_session(char_id: i64, st_id: i64) -> SessionState {
     SessionState {
         user_id: Some(1),
         character_id: Some(char_id),

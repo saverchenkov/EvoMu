@@ -126,14 +126,28 @@ pub fn handle(
                 .and_then(|a| a.as_i64())
                 .or_else(|| kwargs.get("offer_id").or_else(|| kwargs.get("offerID")).and_then(|v| v.as_i64()))
                 .unwrap_or(0);
-            let in_catalog = offer_id > 0
+            let handle_weekly_free_sp = offer_id == 1005
                 && ctx.db.with_snapshot(|snap| {
-                    crate::services::quasar_payment_store_types::read_store_catalog(snap)
-                        .offers
-                        .iter()
-                        .any(|o| (o.id as i64) == offer_id)
+                    let cat =
+                        crate::services::quasar_payment_store_types::read_store_catalog(snap);
+                    match cat.offers.iter().find(|o| (o.id as i64) == offer_id) {
+                        None => true,
+                        Some(o) => {
+                            o.price_plex == 0
+                                && crate::services::quasar_payment_store_types::read_store_offer_tags(
+                                    snap,
+                                )
+                                .get(&o.id)
+                                .is_some_and(|tags| {
+                                    tags.iter().any(|t| {
+                                        let lc = t.to_ascii_lowercase();
+                                        lc == "omega-weekly-free-sp" || lc == "omega-weekly"
+                                    })
+                                })
+                        }
+                    }
                 });
-            if !in_catalog && offer_id == 1005 {
+            if handle_weekly_free_sp {
                 Some(handle_omega_weekly_free_sp_offer(ctx, session, 1005, 15_000, method == "buy_offer"))
             } else {
                 None
@@ -499,6 +513,13 @@ pub fn get_respec_info(
 }
 
 pub fn handle_get_skill_changes_for_isis(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    get_skill_changes_for_isis(ctx, session)
+}
+
+pub fn get_skill_changes_for_isis(
     ctx: &ServerContext,
     session: &SessionState,
 ) -> Result<PyRep, BridgeRpcError> {

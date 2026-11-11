@@ -572,4 +572,5 @@ pub fn handle(
 }
 
 #[cfg(test)] #[path = "character_certificates_tests.rs"] mod character_certificates_tests;
+#[cfg(test)] #[path = "character_certificates_edges_tests.rs"] mod character_certificates_edges_tests;
 

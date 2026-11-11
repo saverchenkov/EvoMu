@@ -636,21 +636,48 @@ pub async fn handle_gm_slash_ext(
                 }
                 id
             });
-            let ball = Ball {
-                id: entity_id,
-                type_id,
-                position: pos,
-                velocity: DVec3::ZERO,
-                max_velocity: 300.0,
-                inertia: 1.0,
-                mass: inv_type.mass.max(1.0),
-                radius: ball_radius,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            };
-            let combat = ctx.build_type_combat_state(type_id);
-            let meta = if is_celestial_or_asteroid {
-                eve_destiny::SlimItemMeta {
+            if inv_type.category_id == 25 {
+                let _ = handle
+                    .spawn_asteroid(
+                        crate::system_actor::AsteroidState {
+                            asteroid_id: entity_id,
+                            belt_id: 0,
+                            type_id,
+                            initial_units: 200_000,
+                            remaining_units: 200_000,
+                            unit_volume: inv_type.volume.max(0.01),
+                            depleted: false,
+                            respawn_at_tick: None,
+                        },
+                        Ball {
+                            id: entity_id,
+                            type_id,
+                            position: pos,
+                            velocity: DVec3::ZERO,
+                            max_velocity: 0.0,
+                            inertia: 0.0,
+                            mass: inv_type.mass.max(1.0),
+                            radius: ball_radius,
+                            speed_fraction: 0.0,
+                            mode: MovementMode::Rigid,
+                        },
+                    )
+                    .await;
+            } else if inv_type.category_id == 2 {
+                let ball = Ball {
+                    id: entity_id,
+                    type_id,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 0.0,
+                    mass: inv_type.mass.max(1.0),
+                    radius: ball_radius,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Rigid,
+                };
+                let combat = ctx.build_type_combat_state(type_id);
+                let meta = eve_destiny::SlimItemMeta {
                     group_id: inv_type.group_id,
                     category_id: inv_type.category_id,
                     owner_id: 1,
@@ -661,11 +688,90 @@ pub async fn handle_gm_slash_ext(
                     is_cloaked: false,
                     name: (!inv_type.name.is_empty()).then(|| inv_type.name.clone()),
                     ..Default::default()
+                };
+                let _ = handle.spawn_ball_with_meta(ball, combat, meta).await;
+                if let Ok(mut bp) = handle.ballpark.write() {
+                    bp.static_ball_ids.insert(entity_id);
                 }
+            } else if inv_type.category_id == 11 {
+                let archetype =
+                    crate::services::combat_crimewatch::combat_npc_ai::derive_npc_archetype(
+                        ctx, type_id,
+                    );
+                let (ball, combat, entity) =
+                    crate::services::wormhole_pve_seeding::build_specialized_npc_components(
+                        ctx,
+                        sys_id,
+                        entity_id,
+                        type_id,
+                        archetype,
+                        0,
+                        pos,
+                    );
+                let fac_owner = if entity.faction_id > 0 {
+                    i64::from(entity.faction_id)
+                } else {
+                    500_010
+                };
+                let meta = eve_destiny::SlimItemMeta {
+                    group_id: inv_type.group_id,
+                    category_id: 11,
+                    owner_id: fac_owner,
+                    char_id: None,
+                    corp_id: crate::services::combat_crimewatch::combat_npc_ai::resolve_npc_corp_id_for_faction(
+                        ctx,
+                        fac_owner,
+                    ),
+                    alliance_id: -1,
+                    security_status: -1.0,
+                    is_cloaked: false,
+                    name: (!inv_type.name.is_empty()).then(|| inv_type.name.clone()),
+                    ..Default::default()
+                };
+                let _ = handle.spawn_ball_with_meta(ball, combat, meta).await;
+                let legacy_ent = crate::combat::npc_ai::NpcCombatEntity {
+                    ball_id: entity_id,
+                    type_id,
+                    faction_id: entity.faction_id,
+                    state: crate::combat::npc_ai::NpcAiState::Idle,
+                    spawn_group_id: 0,
+                    spawn_pos: pos,
+                    target_id: None,
+                    bounty_isk: entity.bounty_isk,
+                    optimal_range: entity.optimal_range,
+                    orbit_range: entity.orbit_range,
+                    base_dps: entity.damage_vector.total(),
+                    damage_vector: entity.damage_vector,
+                    last_attack_tick: 0,
+                    has_shield_rep: entity.remote_shield_rep > 0.0,
+                    has_armor_rep: entity.remote_armor_rep > 0.0,
+                };
+                if let Ok(mut map) = ctx.npc_spawns.write() {
+                    map.entry(sys_id)
+                        .or_insert_with(crate::combat::npc_ai::NpcSpawnManager::new)
+                        .entities
+                        .insert(entity_id, legacy_ent);
+                }
+                crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+                    rt.npc_entities.insert(entity_id, entity);
+                });
             } else {
-                ctx.build_ship_slim_meta(cid, type_id)
-            };
-            let _ = handle.spawn_ball_with_meta(ball, combat, meta).await;
+                let ball = Ball {
+                    id: entity_id,
+                    type_id,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 1.0,
+                    mass: inv_type.mass.max(1.0),
+                    radius: ball_radius,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                };
+                let combat = ctx.build_type_combat_state(type_id);
+                let meta = ctx.build_ship_slim_meta(cid, type_id);
+                let _ = handle.spawn_ball_with_meta(ball, combat, meta).await;
+            }
             spawned_ids.push(entity_id);
         }
 
@@ -698,6 +804,14 @@ pub async fn handle_gm_slash_ext(
         });
         let handle = ctx.systems.get_or_spawn(sys_id);
         let removed_ball = handle.remove_ball(target_id).await.is_some();
+        if let Ok(mut map) = ctx.npc_spawns.write() {
+            if let Some(mgr) = map.get_mut(&sys_id) {
+                mgr.entities.remove(&target_id);
+            }
+        }
+        crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+            rt.npc_entities.remove(&target_id);
+        });
         if removed_ball {
             crate::services::pve_incursion_sites::mark_incursion_boss_destroyed(ctx, sys_id, target_id);
             crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_core(&ctx.systems, &ctx.db, sys_id, target_id).await;
@@ -1151,11 +1265,22 @@ pub async fn handle_gm_slash_ext(
                     vec![(3, PyRep::Integer(0)), (4, PyRep::Integer(0))],
                 );
                 if is_fitting_slot {
+                    let group_id = ctx
+                        .sde
+                        .types
+                        .get(&type_id)
+                        .map(|t| i64::from(t.group_id))
+                        .unwrap_or(0);
                     ctx.notify(
                         crate::router::NotificationTarget::Character(rec.owner_id),
                         "OnModuleFitted",
                         "charid",
-                        vec![PyRep::Integer(rec.item_id), PyRep::Integer(chosen_flag as i64)],
+                        vec![
+                            PyRep::Integer(rec.owner_id),
+                            PyRep::Integer(chosen_flag as i64),
+                            PyRep::Integer(type_id as i64),
+                            PyRep::Integer(group_id),
+                        ],
                     );
                     let _ = ctx.notify_module_online_state(rec.owner_id, rec.item_id, is_online);
                     if is_online {
@@ -1692,7 +1817,7 @@ pub async fn handle_gm_slash_ext(
         if !ctx.db.with_snapshot(|snap| snap.characters.contains_key(&target_cid)) {
             return Some(Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {target_cid} not found") }));
         }
-        // DATA GAP: notify:OnCharacterEnergyChanged remains open until a V24 gameplay CEQ consumer (CRAB beacons / Mobile Phase Anchors) exists.
+        // Update character CONCORD Encounter Surveillance System / CEQ energy state and emit OnCharacterEnergyChanged.
         let st = crate::services::character_energy::set_character_energy(ctx, target_cid, energy_val);
         return Some(Ok(crate::services::character_energy::energy_to_keyval(&st)));
     }

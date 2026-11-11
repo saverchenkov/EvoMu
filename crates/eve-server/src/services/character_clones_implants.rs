@@ -1344,3 +1344,7 @@ fn handle_get_ship_clone_state(
 #[path = "character_clones_implants_tests.rs"]
 mod character_clones_implants_tests;
 
+#[cfg(test)]
+#[path = "character_clones_implants_edges2_tests.rs"]
+mod character_clones_implants_edges2_tests;
+

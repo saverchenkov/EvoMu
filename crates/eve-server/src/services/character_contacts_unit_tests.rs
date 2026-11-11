@@ -9,6 +9,10 @@ use eve_sde::SdeRegistry;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
+#[cfg(test)]
+#[path = "character_contacts_extra_unit_tests.rs"]
+mod extra_unit_tests;
+
 static SHARED_SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
 
 fn rowset_len(rep: &PyRep) -> usize {

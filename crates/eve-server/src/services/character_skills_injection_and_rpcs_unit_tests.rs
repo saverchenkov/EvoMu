@@ -12,6 +12,7 @@ use eve_proto::PyRep;
 #[test]
 fn apply_free_sp_inject_stack_and_auxiliary_skill_rpcs_cover_all_branches() {
     let mut ctx = test_ctx();
+    ctx.set_clock(std::sync::Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(1_800_000_000)));
     let char_id = 90_000_001_i64;
     let st_id = 60_003_760_i64;
     let sk_base = 941_020_u32;

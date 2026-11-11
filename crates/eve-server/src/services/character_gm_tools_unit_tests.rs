@@ -785,6 +785,11 @@ async fn gm_fit_enforces_hull_slots_and_hardpoints_and_spawn_asteroid_uses_syste
     assert_eq!(slim_meta.char_id, None);
     assert_eq!(slim_meta.corp_id, -1);
     assert_eq!(slim_meta.alliance_id, -1);
+    {
+        let bp = handle.ballpark.read().unwrap();
+        assert_eq!(bp.balls[&ast_id].mode, eve_destiny::MovementMode::Rigid);
+        assert!(bp.is_static_ball(ast_id));
+    }
 
     let unspawned = handle_gm_slash_ext(&ctx, &mut sess, char_id, &format!("/unspawn {ast_id}"))
         .await
@@ -795,4 +800,53 @@ async fn gm_fit_enforces_hull_slots_and_hardpoints_and_spawn_asteroid_uses_syste
         assert!(!s.items.contains_key(&ast_id));
         assert!(!s.asteroids.contains_key(&ast_id), "/unspawn must remove snap.asteroids entry");
     });
+
+    // 3. /spawn <npc_type> registers live NPC AI in both npc_spawns and combat_ephemeral.npc_entities (#792).
+    let npc_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.category_id == 11 && t.published)
+        .or_else(|| ctx.sde.types.values().find(|t| t.category_id == 11))
+        .map(|t| t.type_id);
+    if let Some(ntid) = npc_tid {
+        let sp_npc = handle_gm_slash_ext(&ctx, &mut sess, char_id, &format!("/spawn {ntid}"))
+            .await
+            .expect("handled")
+            .expect("/spawn NPC ok");
+        let npc_id = sp_npc.dict_get("spawnedID").and_then(|v| v.as_i64()).unwrap();
+        let npc_meta = handle
+            .ballpark
+            .read()
+            .unwrap()
+            .ball_slim_meta
+            .get(&npc_id)
+            .cloned()
+            .expect("NPC SlimItemMeta in ballpark");
+        assert_eq!(npc_meta.category_id, 11);
+        assert!(
+            ctx.npc_spawns
+                .read()
+                .unwrap()
+                .get(&sys_id)
+                .is_some_and(|m| m.entities.contains_key(&npc_id)),
+            "/spawn NPC must register in NpcSpawnManager"
+        );
+        assert!(
+            crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+                rt.npc_entities.contains_key(&npc_id)
+            }),
+            "/spawn NPC must register in combat_ephemeral.npc_entities"
+        );
+        let _ = handle_gm_slash_ext(&ctx, &mut sess, char_id, &format!("/unspawn {npc_id}"))
+            .await
+            .expect("handled")
+            .expect("/unspawn NPC ok");
+        assert!(
+            !crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+                rt.npc_entities.contains_key(&npc_id)
+            }),
+            "/unspawn NPC must remove from combat_ephemeral.npc_entities"
+        );
+    }
 }

@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 //! Semantic unit tests split from `character_skill_ops_extra_unit_tests`.
 
 #![forbid(unsafe_code)]
@@ -32,7 +33,7 @@ fn abort_training_and_respec_info_branches() {
 
     assert!(abort_training(&ctx, &unauth).is_err());
     assert!(get_respec_info(&ctx, &unauth).is_err());
-    assert!(get_skill_changes_for_isis(&unauth).is_err());
+    assert!(get_skill_changes_for_isis(&ctx, &unauth).is_err());
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(cid).or_default().remove(&99999);

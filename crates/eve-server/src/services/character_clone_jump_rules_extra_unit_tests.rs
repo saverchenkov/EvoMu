@@ -144,6 +144,23 @@ fn structure_fees_preconditions_fulcrum_thera_and_structure_to_structure_jump() 
                     ..Default::default()
                 },
             );
+            snap.next_entity_id += 1;
+            let svc_mod_id = snap.next_entity_id;
+            snap.items.insert(
+                svc_mod_id,
+                InventoryItemRecord {
+                    item_id: svc_mod_id,
+                    type_id: 35894,
+                    owner_id: owner_corp,
+                    location_id: sid,
+                    flag: InventoryFlag::ServiceSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.module_online_states.insert(svc_mod_id, true);
         }
         let mut ext = load_ext_state(snap);
         let mut prof = StructureAccessProfile {
@@ -516,4 +533,392 @@ async fn clone_vat_bay_activation_and_jump_to_ship_clone_vat_bay_branches() {
         let loaded = load_clone_vat_bay_state(snap);
         assert_eq!(loaded.active_by_ship.get(&titan_id), Some(&(cvb_mod, 100)));
     });
+}
+
+#[tokio::test]
+async fn mutant_kill_clone_bay_acl_fee_structure_jump_swap_cooldown_and_vat_bay() {
+    use crate::services::station_structure::structure_upwell_ops::AccessGroupRecord;
+    use crate::services::structure_profile_services::SETTING_CLONINGBAY_TAX;
+
+    let ctx = new_ctx();
+    let now = 1_800_000_000_u64;
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(now)));
+
+    let mut stations_with_bay: Vec<(u32, i64)> = Vec::new();
+    for sys in ctx.sde.solar_systems.values() {
+        if sys.solar_system_id < 31_000_000 && sys.region_id != POCHVEN_REGION_ID {
+            for st in &sys.stations {
+                if st.has_clone_bay && st.station_id != 60_015_187 {
+                    stations_with_bay.push((sys.solar_system_id, st.station_id));
+                    break;
+                }
+            }
+        }
+        if stations_with_bay.len() >= 2 {
+            break;
+        }
+    }
+    let (sys1, st1) = stations_with_bay[0];
+    let (_sys2, st2) = stations_with_bay[1];
+
+    let struct_id = 1_040_500_099_000_i64;
+    let owner_corp = 98_500_099_i64;
+    let acl_grp = 77_001_i64;
+    let host_pilot = 90_099_001_i64;
+    let other_pilot = 90_099_002_i64;
+    let titan_id = 97_600_100_i64;
+    let titan_2 = 97_600_200_i64;
+    let cvb_mod = 97_600_101_i64;
+    let cvb_bad_loc = 97_600_102_i64;
+    let cvb_bad_owner = 97_600_103_i64;
+    let cvb_mod_2 = 97_600_201_i64;
+
+    let (uid, cid, corp_id) = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.values_mut().next().expect("demo char");
+        let cid = ch.character_id;
+        let uid = ch.user_id;
+        let corp = ch.corporation_id;
+        ch.solar_system_id = sys1;
+        ch.station_id = Some(st1);
+        ch.structure_id = None;
+        ch.balance = IskCents::from_isk(50_000_000);
+        ch.last_clone_jump_unix = 0;
+
+        snap.skills.entry(cid).or_default().insert(
+            24242,
+            TrainedSkillRecord {
+                type_id: 24242,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+        snap.skills.entry(cid).or_default().insert(
+            33399,
+            TrainedSkillRecord {
+                type_id: 33399,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+
+        let cap_id = snap.next_entity_id + 100;
+        snap.next_entity_id = cap_id + 10;
+        snap.items.insert(
+            cap_id,
+            InventoryItemRecord {
+                item_id: cap_id,
+                type_id: 670,
+                owner_id: cid,
+                location_id: st1,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.characters.get_mut(&cid).unwrap().active_ship_id = cap_id;
+
+        snap.corporations.insert(owner_corp, {
+            let mut c = CorporationRecord::default();
+            c.corporation_id = owner_corp;
+            c.name = "AclOwner".into();
+            c
+        });
+        snap.structures.insert(
+            struct_id,
+            UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35832,
+                owner_corp_id: owner_corp,
+                solar_system_id: sys1,
+                name: "AclCloneCitadel".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                ..Default::default()
+            },
+        );
+        let svc_id = snap.next_entity_id + 1;
+        snap.next_entity_id = svc_id + 1;
+        snap.items.insert(
+            svc_id,
+            InventoryItemRecord {
+                item_id: svc_id,
+                type_id: 35894,
+                owner_id: owner_corp,
+                location_id: struct_id,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(svc_id, true);
+
+        let mut ext = load_ext_state(snap);
+        let mut grp = AccessGroupRecord::default();
+        grp.group_id = acl_grp;
+        grp.owner_corp_id = owner_corp;
+        grp.members.insert(cid, 0);
+        ext.owner_groups.insert(acl_grp, grp);
+
+        let mut prof = StructureAccessProfile {
+            profile_id: 8801,
+            owner_corp_id: owner_corp,
+            name: "AclProfile".into(),
+            ..Default::default()
+        };
+        prof.access_group_ids.insert(acl_grp);
+        ext.access_profiles.insert(struct_id, prof.clone());
+        save_ext_state(snap, &ext);
+        assert_eq!(
+            check_structure_clone_bay_access_at(snap, struct_id, cid, Some(now)),
+            Ok(None)
+        );
+
+        prof.service_acl_rules
+            .insert(SETTING_CLONINGBAY_TAX, vec![(acl_grp, 1_500)]);
+        ext.access_profiles.insert(struct_id, prof);
+        save_ext_state(snap, &ext);
+        assert_eq!(
+            check_structure_clone_bay_access_at(snap, struct_id, cid, Some(now)),
+            Ok(Some(IskCents(15)))
+        );
+
+        snap.jump_clones.insert(
+            cid,
+            vec![
+                JumpCloneRecord {
+                    jump_clone_id: 901,
+                    character_id: cid,
+                    location_id: st1,
+                    implants: vec![],
+                },
+                JumpCloneRecord {
+                    jump_clone_id: 902,
+                    character_id: cid,
+                    location_id: struct_id,
+                    implants: vec![],
+                },
+                JumpCloneRecord {
+                    jump_clone_id: 903,
+                    character_id: cid,
+                    location_id: st2,
+                    implants: vec![],
+                },
+            ],
+        );
+
+        for (tid, own) in [(titan_id, host_pilot), (titan_2, host_pilot)] {
+            snap.items.insert(
+                tid,
+                InventoryItemRecord {
+                    item_id: tid,
+                    type_id: 995_001,
+                    owner_id: own,
+                    location_id: sys1 as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.items.insert(
+            cvb_mod,
+            InventoryItemRecord {
+                item_id: cvb_mod,
+                type_id: 995_002,
+                owner_id: host_pilot,
+                location_id: titan_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            cvb_bad_loc,
+            InventoryItemRecord {
+                item_id: cvb_bad_loc,
+                type_id: 995_002,
+                owner_id: host_pilot,
+                location_id: st1,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            cvb_bad_owner,
+            InventoryItemRecord {
+                item_id: cvb_bad_owner,
+                type_id: 995_002,
+                owner_id: other_pilot,
+                location_id: titan_id,
+                flag: InventoryFlag::HiSlot1,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            cvb_mod_2,
+            InventoryItemRecord {
+                item_id: cvb_mod_2,
+                type_id: 995_002,
+                owner_id: host_pilot,
+                location_id: titan_2,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        for (fid, loc, qty) in [
+            (97_600_301_i64, titan_id, 600),
+            (97_600_302_i64, titan_2, 600),
+        ] {
+            snap.items.insert(
+                fid,
+                InventoryItemRecord {
+                    item_id: fid,
+                    type_id: 16273,
+                    owner_id: host_pilot,
+                    location_id: loc,
+                    flag: InventoryFlag::SpecializedFuelBay,
+                    quantity: qty,
+                    singleton: false,
+                    ..Default::default()
+                },
+            );
+        }
+
+        (uid, cid, corp)
+    });
+
+    let cap_id = ctx.db.with_snapshot(|s| s.characters[&cid].active_ship_id);
+    let mut sess = make_sess(uid, cid, corp_id, sys1, Some(st1), None, Some(cap_id));
+
+    // Same-station swap does NOT update last_clone_jump_unix
+    let swap_ok = handle_clone_jump(&ctx, &mut sess, &[PyRep::Integer(901)])
+        .unwrap()
+        .unwrap();
+    assert_eq!(swap_ok.dict_get("cooldownSeconds"), Some(&PyRep::Integer(0)));
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.characters[&cid].last_clone_jump_unix, 0);
+    });
+
+    crate::services::space_destiny::clear_session_change_timer(&ctx, cid);
+
+    // Jump to Upwell structure (>= 1e12): sets structure_id on both char & session and updates cooldown timestamp
+    let to_struct = handle_clone_jump(&ctx, &mut sess, &[PyRep::Integer(902)])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        to_struct.dict_get("locationID"),
+        Some(&PyRep::Integer(struct_id))
+    );
+    assert_eq!(sess.structure_id, Some(struct_id));
+    assert_eq!(sess.station_id, None);
+    ctx.db.with_snapshot(|s| {
+        let ch = &s.characters[&cid];
+        assert_eq!(ch.structure_id, Some(struct_id));
+        assert_eq!(ch.station_id, None);
+        assert_eq!(ch.last_clone_jump_unix, now);
+        ch.active_ship_id
+    });
+
+    crate::services::space_destiny::clear_session_change_timer(&ctx, cid);
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&cid).unwrap().last_clone_jump_unix = 0;
+    });
+
+    // Jump from structure to NPC station (< 1e12): sets station_id on both char & session
+    let to_npc = handle_clone_jump(&ctx, &mut sess, &[PyRep::Integer(903)])
+        .unwrap()
+        .unwrap();
+    assert_eq!(to_npc.dict_get("locationID"), Some(&PyRep::Integer(st2)));
+    assert_eq!(sess.station_id, Some(st2));
+    assert_eq!(sess.structure_id, None);
+    ctx.db.with_snapshot(|s| {
+        let ch = &s.characters[&cid];
+        assert_eq!(ch.station_id, Some(st2));
+        assert_eq!(ch.structure_id, None);
+    });
+
+    // Spawn both titans in space
+    let sys = ctx.systems.get_or_spawn(sys1);
+    for tid in [titan_id, titan_2] {
+        let b = Ball {
+            id: tid,
+            type_id: 995_001,
+            position: DVec3::new(10_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 100.0,
+            inertia: 1.0,
+            mass: 2_000_000_000.0,
+            radius: 1_000.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        };
+        let _ = sys.try_spawn_ball_with_meta(b, CombatState::default(), SlimItemMeta::default());
+    }
+
+    // Wrong location or wrong owner -> ModuleNotFitted
+    assert_eq!(
+        activate_clone_vat_bay(&ctx, &sys, host_pilot, titan_id, cvb_bad_loc)
+            .await
+            .unwrap_err()
+            .code,
+        "ModuleNotFitted"
+    );
+    assert_eq!(
+        activate_clone_vat_bay(&ctx, &sys, host_pilot, titan_id, cvb_bad_owner)
+            .await
+            .unwrap_err()
+            .code,
+        "ModuleNotFitted"
+    );
+
+    // Already active when now < until_unix -> ModuleAlreadyActive
+    ctx.db.with_mut_snapshot(|s| {
+        let mut st = load_clone_vat_bay_state(s);
+        st.active_by_ship.insert(titan_id, (cvb_mod, now + 60));
+        save_clone_vat_bay_state(s, &st);
+    });
+    assert_eq!(
+        activate_clone_vat_bay(&ctx, &sys, host_pilot, titan_id, cvb_mod)
+            .await
+            .unwrap_err()
+            .code,
+        "ModuleAlreadyActive"
+    );
+
+    // Exactly at boundary now == until_unix -> allowed, durationSeconds == 120.0
+    ctx.db.with_mut_snapshot(|s| {
+        let mut st = load_clone_vat_bay_state(s);
+        st.active_by_ship.insert(titan_id, (cvb_mod, now));
+        save_clone_vat_bay_state(s, &st);
+    });
+    let act1 = activate_clone_vat_bay(&ctx, &sys, host_pilot, titan_id, cvb_mod)
+        .await
+        .expect("equal expiry boundary activates");
+    assert_eq!(act1.dict_get("durationSeconds"), Some(&PyRep::Real(120.0)));
+    assert_eq!(
+        act1.dict_get("activeUntilUnix"),
+        Some(&PyRep::Integer((now + 120) as i64))
+    );
+
+    // Past expiry now > until_unix -> allowed
+    ctx.db.with_mut_snapshot(|s| {
+        let mut st = load_clone_vat_bay_state(s);
+        st.active_by_ship.insert(titan_2, (cvb_mod_2, now - 10));
+        save_clone_vat_bay_state(s, &st);
+    });
+    let act2 = activate_clone_vat_bay(&ctx, &sys, host_pilot, titan_2, cvb_mod_2)
+        .await
+        .expect("expired boundary activates");
+    assert_eq!(act2.dict_get("durationSeconds"), Some(&PyRep::Real(120.0)));
 }

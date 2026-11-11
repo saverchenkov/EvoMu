@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 //! Extra branch-coverage and mutation-killing unit tests for `character_skill_ops`.
 
 #![forbid(unsafe_code)]
@@ -285,12 +286,7 @@ fn omega_weekly_free_sp_kwargs_subscription_expiry_and_min_grant() {
 
     // Expired subscription blocks Omega weekly claim even if clone_grade == 2
     let now = ctx.now_unix();
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(
-            format!("subscription_expiry:{uid}"),
-            now.saturating_sub(10).to_string(),
-        );
-    });
+    crate::services::account_services::set_subscription_expiry(&ctx, uid, now.saturating_sub(10));
     crate::services::quasar_auth_user::with_identity_store(&ctx.db, |st| {
         st.omega_subscriptions.insert(uid, now.saturating_sub(10));
     });
@@ -308,6 +304,7 @@ fn omega_weekly_free_sp_kwargs_subscription_expiry_and_min_grant() {
     );
 
     // Active future subscription and sp_grant <= 0 clamped to 1
+    crate::services::account_services::set_subscription_expiry(&ctx, uid, now + 86_400);
     crate::services::quasar_auth_user::with_identity_store(&ctx.db, |st| {
         st.omega_subscriptions.insert(uid, now + 86_400);
     });

@@ -559,3 +559,191 @@ async fn extract_skills_guards_prerequisites_queue_reconciliation_and_qa_move() 
     assert_eq!(moved.dict_get("moved"), Some(&PyRep::Bool(true)));
     assert_eq!(moved.dict_get("solarSystemID"), Some(&PyRep::Integer(30_002_187)));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn emit_server_skills_changed_expert_system_guards_extract_fields_and_qa_move() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let station_id = 60_003_760_i64;
+    let mut sess = auth_session(1, char_id, 98_000_001, 30_000_142);
+    sess.station_id = Some(station_id);
+    sess.structure_id = None;
+    let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    ctx.db
+        .acquire_online_lock(uid, 401, Some(char_id), true, ctx.now_unix())
+        .expect("online lock");
+
+    // 1. emit_server_skills_changed: empty slice is no-op; missing char skills only emit on ExpertSystemExpired
+    emit_server_skills_changed(&ctx, char_id, &[], Some("ExpertSystemExpired"));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.remove(&char_id);
+        snap.skill_queues.remove(&char_id);
+    });
+    ctx.pending_notifications.write().unwrap().clear();
+
+    emit_server_skills_changed(&ctx, char_id, &[3300], Some("OtherEvent"));
+    assert!(
+        ctx.pending_notifications
+            .read()
+            .unwrap()
+            .get(&char_id)
+            .is_none_or(|v| v.is_empty()),
+        "missing skills map with non-ExpertSystemExpired event must emit nothing"
+    );
+
+    emit_server_skills_changed(&ctx, char_id, &[3300], None);
+    assert!(
+        ctx.pending_notifications
+            .read()
+            .unwrap()
+            .get(&char_id)
+            .is_none_or(|v| v.is_empty()),
+        "missing skills map with None event must emit nothing"
+    );
+
+    emit_server_skills_changed(&ctx, char_id, &[3300], Some("ExpertSystemExpired"));
+    {
+        let pending = ctx.pending_notifications.read().unwrap();
+        let evs = pending.get(&char_id).expect("must notify on ExpertSystemExpired");
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].event, "OnServerSkillsChanged");
+        assert_eq!(evs[0].args[1], PyRep::String("ExpertSystemExpired".into()));
+        let dict = match &evs[0].args[0] {
+            PyRep::Dict(d) => d,
+            other => panic!("expected Dict, got {other:?}"),
+        };
+        assert_eq!(dict.len(), 1);
+        assert_eq!(dict[0].0, PyRep::Integer(3300));
+        assert_eq!(dict[0].1.dict_get("skillLevel"), Some(&PyRep::Integer(0)));
+        assert_eq!(dict[0].1.dict_get("skillPoints"), Some(&PyRep::Real(0.0)));
+    }
+
+    // 2. emit_server_skills_changed: existing skills map with 3300 trained and 3301 missing
+    ctx.db.with_mut_snapshot(|snap| {
+        let sk = snap.skills.entry(char_id).or_default();
+        sk.insert(
+            3300,
+            TrainedSkillRecord {
+                type_id: 3300,
+                level: 5,
+                skill_points: 500_000.0,
+            },
+        );
+        snap.characters.get_mut(&char_id).unwrap().clone_grade = 2;
+        snap.characters.get_mut(&char_id).unwrap().skill_points = 6_000_000.0;
+        snap.characters.get_mut(&char_id).unwrap().station_id = Some(station_id);
+        snap.items.insert(
+            777_405_190,
+            InventoryItemRecord {
+                item_id: 777_405_190,
+                type_id: 40519,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    ctx.pending_notifications.write().unwrap().clear();
+
+    emit_server_skills_changed(&ctx, char_id, &[3300, 3301], Some("SkillTrained"));
+    {
+        let pending = ctx.pending_notifications.read().unwrap();
+        let evs = pending.get(&char_id).expect("SkillTrained emit");
+        assert_eq!(evs.len(), 1);
+        let dict = match &evs[0].args[0] {
+            PyRep::Dict(d) => d,
+            other => panic!("expected Dict, got {other:?}"),
+        };
+        assert_eq!(dict.len(), 1, "missing skill 3301 must be omitted when event != ExpertSystemExpired");
+        assert_eq!(dict[0].0, PyRep::Integer(3300));
+        assert_eq!(dict[0].1.dict_get("skillLevel"), Some(&PyRep::Integer(5)));
+    }
+    ctx.pending_notifications.write().unwrap().clear();
+
+    emit_server_skills_changed(&ctx, char_id, &[3300, 3301], Some("ExpertSystemExpired"));
+    {
+        let pending = ctx.pending_notifications.read().unwrap();
+        let evs = pending.get(&char_id).expect("ExpertSystemExpired inner emit");
+        assert_eq!(evs.len(), 1);
+        let dict = match &evs[0].args[0] {
+            PyRep::Dict(d) => d,
+            other => panic!("expected Dict, got {other:?}"),
+        };
+        assert_eq!(dict.len(), 2, "missing skill 3301 must be emitted with level 0 on ExpertSystemExpired");
+        assert_eq!(dict[1].0, PyRep::Integer(3301));
+        assert_eq!(dict[1].1.dict_get("skillLevel"), Some(&PyRep::Integer(0)));
+        assert_eq!(dict[1].1.dict_get("skillPoints"), Some(&PyRep::Real(0.0)));
+    }
+
+    // 3. extract_skills: verify EVERY InventoryItemRecord field on the minted injector (40520)
+    ctx.pending_notifications.write().unwrap().clear();
+    let res = extract_skills(
+        &ctx,
+        &sess,
+        &[PyRep::Integer(3300), PyRep::Integer(777_405_190)],
+    )
+    .expect("extract_skills succeeds");
+    let inj_id = res
+        .dict_get("injectorItemID")
+        .and_then(|v| v.as_i64())
+        .expect("injectorItemID");
+    assert!(inj_id > 0);
+    assert_eq!(res.dict_get("extractedSkills"), Some(&PyRep::Integer(1)));
+    ctx.db.with_snapshot(|snap| {
+        let inj = snap.items.get(&inj_id).expect("minted injector record");
+        assert_eq!(inj.item_id, inj_id);
+        assert_eq!(inj.type_id, 40520);
+        assert_eq!(inj.owner_id, char_id);
+        assert_eq!(inj.location_id, station_id);
+        assert_eq!(inj.flag, InventoryFlag::Hangar);
+        assert_eq!(inj.quantity, 1);
+        assert_eq!(inj.version, 1);
+        assert_eq!(snap.characters[&char_id].skill_points, 5_500_000.0);
+        assert!(snap
+            .skill_history
+            .get(&char_id)
+            .is_some_and(|h| h.iter().any(|e| e.event_type_id == 39 && e.skill_type_id == 3300)));
+    });
+    assert!(ctx
+        .pending_notifications
+        .read()
+        .unwrap()
+        .get(&char_id)
+        .is_some_and(|v| v.iter().any(|n| n.event == "OnServerSkillsRemoved")));
+
+    // 4. handle_qa_move_me_to invalid dest and numeric solar system move
+    assert_eq!(
+        handle_qa_move_me_to(&ctx, &mut sess, char_id, &[PyRep::Integer(99_999_999)])
+            .await
+            .unwrap_err()
+            .code,
+        "DestinationNotFound"
+    );
+    let ship_id = ctx.db.with_snapshot(|s| s.characters[&char_id].active_ship_id);
+    let old_sys = ctx.systems.get_or_spawn(30_000_142);
+    let _ = old_sys
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    let qa_res = handle_qa_move_me_to(&ctx, &mut sess, char_id, &[PyRep::Integer(30_002_187)])
+        .await
+        .expect("qa move");
+    assert_eq!(qa_res.dict_get("characterID"), Some(&PyRep::Integer(char_id)));
+    assert_eq!(qa_res.dict_get("solarSystemID"), Some(&PyRep::Integer(30_002_187)));
+    assert_eq!(qa_res.dict_get("moved"), Some(&PyRep::Bool(true)));
+    assert_eq!(sess.solar_system_id, Some(30_002_187));
+}
