@@ -136,6 +136,9 @@ impl ServerContext {
             // A dropped connection that still held the character online is a log-off for watchers and triggers in-space logoff handling.
             if self.db.release_online_lock(uid, session_id) {
                 if let Some(cid) = session.character_id {
+                    crate::services::wallet_services_ext::cancel_open_trades_for_character(
+                        self, cid,
+                    );
                     crate::services::structure_control_ops::release_all_structure_control_for_character(
                         self,
                         Some(session),

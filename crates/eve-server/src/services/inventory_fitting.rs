@@ -350,11 +350,9 @@ async fn handle_invbroker_add(
                 return Some(Err(e));
             }
             if let Some(src_item) = &source_item_opt {
-                let corp_id = session.corporation_id.or_else(|| {
-                    ctx.db.with_snapshot(|snap| {
-                        snap.characters.get(&char_id).map(|c| c.corporation_id)
-                    })
-                }).unwrap_or(0);
+                let corp_id = ctx.db.with_snapshot(|snap| {
+                    snap.characters.get(&char_id).map(|c| c.corporation_id)
+                }).or(session.corporation_id).unwrap_or(0);
                 if src_item.owner_id == corp_id && corp_id > 0 {
                     if let Err(err) = ctx.db.with_snapshot(|snap| {
                         super::inventory_bound::validate_corp_source_item_take_access_in_snap(
@@ -1145,7 +1143,6 @@ async fn handle_invbroker_add(
             } else {
                 None
             };
-            let corp_id_for_owner = session.corporation_id.unwrap_or(0);
             let orig_item_id = item_id;
             let active_ship_opt = session.ship_id;
             let orig_source_snapshot = source_item_opt.clone();
@@ -1265,6 +1262,24 @@ async fn handle_invbroker_add(
                 if let Some(dest_item) = snap.items.get(&new_loc) {
                     fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, dest_item)?;
                 }
+                super::inventory_bound::recheck_invbroker_add_auth_in_snap(
+                    ctx,
+                    snap,
+                    session,
+                    char_id,
+                    &orig_item,
+                    orig_source_snapshot.as_ref(),
+                    new_loc,
+                    flag,
+                    args,
+                    kwargs,
+                )?;
+                let corp_id_for_owner = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .or(session.corporation_id)
+                    .unwrap_or(0);
 
                 if is_fitting_slot {
                     if orig_item.owner_id != char_id {

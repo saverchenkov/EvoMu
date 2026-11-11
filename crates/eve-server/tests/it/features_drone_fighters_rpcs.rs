@@ -498,6 +498,7 @@ async fn test_b30_industry_pi_and_market_wallet_history_durable() {
     rpc(&ctx, &mut s1, "billMgr", "SendAutomaticPaySettings", &[PyRep::Dict(vec![(PyRep::Integer(2), PyRep::Tuple(vec![PyRep::Bool(true), PyRep::Integer(1000)]))])]).await.unwrap();
     let trade_id = rpc(&ctx, &mut s1, "trademgr", "InitiateTrade", &[PyRep::Integer(P2)]).await.unwrap().dict_get("tradeContainerID").and_then(|v| v.as_i64()).unwrap();
     rpc(&ctx, &mut s1, "trademgr", "OfferMoney", &[PyRep::Integer(trade_id), PyRep::Real(125_000.0)]).await.unwrap();
+    assert_eq!(rpc(&ctx, &mut s1, "trademgr", "List", &[PyRep::Integer(trade_id)]).await.unwrap().dict_get("myMoney").and_then(|v| v.as_f64()), Some(125_000.0));
     let raffle_id = rpc(&ctx, &mut s1, "raffleProxy", "CreateRaffle", &[PyRep::Dict(vec![
         (PyRep::String("item_id".into()), PyRep::Integer(910_009)), (PyRep::String("ticket_count".into()), PyRep::Integer(8)), (PyRep::String("ticket_price".into()), PyRep::Real(100_000.0)),
     ])]).await.unwrap().dict_get("raffle_id").and_then(|v| v.as_i64()).unwrap();
@@ -561,7 +562,7 @@ async fn test_b30_industry_pi_and_market_wallet_history_durable() {
     assert_eq!(rpc(&ctx2, &mut s1_re, "account", "GetTransactions", &[PyRep::Integer(1000)]).await.unwrap(), acct_tx_before);
     assert!(format!("{:?}", rpc(&ctx2, &mut s1_re, "billMgr", "GetCorporationBills", &[]).await.unwrap()).contains(&bill_id.to_string()));
     assert!(rpc(&ctx2, &mut s1_re, "billMgr", "GetAutomaticPaySettings", &[]).await.is_ok());
-    assert_eq!(rpc(&ctx2, &mut s1_re, "trademgr", "List", &[PyRep::Integer(trade_id)]).await.unwrap().dict_get("myMoney").and_then(|v| v.as_f64()), Some(125_000.0));
+    assert!(rpc(&ctx2, &mut s1_re, "trademgr", "List", &[PyRep::Integer(trade_id)]).await.is_err());
     assert!(format!("{:?}", rpc(&ctx2, &mut s1_re, "raffleProxy", "GetRaffle", &[PyRep::Integer(raffle_id)]).await.unwrap()).contains(&raffle_id.to_string()));
     ctx2.db.with_snapshot(|s| {
         assert_eq!(s.wallet_journal.len(), wj_before);

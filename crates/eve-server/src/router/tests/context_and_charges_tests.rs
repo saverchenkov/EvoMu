@@ -167,22 +167,37 @@ fn charge_compatibility_capacity_and_loading_into_weapon_slot() {
     let turret_id = 100_095_002;
     let ammo_stack_id = 100_095_003;
 
-    let (wtype, ctype) = ctx
+    let mut weapons: Vec<_> = ctx
         .sde
         .types
         .values()
         .filter(|w| w.published && w.category_id == 7)
+        .collect();
+    weapons.sort_by_key(|w| w.type_id);
+    let (wtype, ctype) = weapons
+        .into_iter()
         .find_map(|w| {
             let cg = *w.default_attributes.get(&604)? as u32;
             let csize = w.default_attributes.get(&128).copied();
-            let ch = ctx.sde.types.values().find(|c| {
-                c.category_id == 8
-                    && c.group_id == cg
-                    && c.default_attributes.get(&128).copied() == csize
-            })?;
-            Some((w, ch))
+            let mut compat: Vec<_> = ctx
+                .sde
+                .types
+                .values()
+                .filter(|c| {
+                    c.category_id == 8
+                        && c.group_id == cg
+                        && c.default_attributes.get(&128).copied() == csize
+                        && ServerContext::is_charge_compatible_with_weapon(w, c)
+                })
+                .collect();
+            compat.sort_by_key(|c| c.type_id);
+            let ch = compat.first().copied()?;
+            compat
+                .iter()
+                .any(|c| c.type_id != ch.type_id)
+                .then_some((w, ch))
         })
-        .expect("SDE has compatible weapon + charge pair");
+        .expect("SDE has compatible weapon + charge pair with alternative charge");
     let tritype = &ctx.sde.types[&34];
     assert!(ServerContext::is_charge_compatible_with_weapon(wtype, ctype));
     assert!(!ServerContext::is_charge_compatible_with_weapon(
@@ -193,7 +208,7 @@ fn charge_compatibility_capacity_and_loading_into_weapon_slot() {
 
     ctx.db.with_mut_snapshot(|snap| {
         let skills = snap.skills.entry(char_id).or_default();
-        for attr_id in [182_u16, 183, 184, 277, 278, 279] {
+        for attr_id in [182_u16, 183, 184, 277, 278, 279, 1285, 1289, 1290] {
             if let Some(&req_sk) = ctype.default_attributes.get(&attr_id) {
                 skills.insert(
                     req_sk as u32,
@@ -304,9 +319,20 @@ fn charge_compatibility_capacity_and_loading_into_weapon_slot() {
                 .min_by_key(|c| c.type_id)
         })
         .map(|c| c.type_id)
-        .unwrap_or(if charge_type_id == 192 { 193 } else { 192 });
-    let alt_cap = ServerContext::weapon_slot_max_charge_capacity(wtype, &ctx.sde.types[&alt_type_id]);
+        .expect("compatible alternative charge in SDE");
+    let alt_type = &ctx.sde.types[&alt_type_id];
+    let alt_cap = ServerContext::weapon_slot_max_charge_capacity(wtype, alt_type);
     ctx.db.with_mut_snapshot(|snap| {
+        let skills = snap.skills.entry(char_id).or_default();
+        for attr_id in [182_u16, 183, 184, 277, 278, 279, 1285, 1289, 1290] {
+            if let Some(&req_sk) = alt_type.default_attributes.get(&attr_id) {
+                skills.entry(req_sk as u32).or_insert(TrainedSkillRecord {
+                    type_id: req_sk as u32,
+                    level: 5,
+                    skill_points: 256_000.0,
+                });
+            }
+        }
         snap.items.insert(
             alt_ammo_id,
             InventoryItemRecord {

@@ -1507,10 +1507,10 @@ impl WorldStateSnapshot {
             && item.source_mutaplasmid_id.is_none()
             && !is_courier_cargo
         {
-            let merge_target_id = self
+            let mut candidates: Vec<&InventoryItemRecord> = self
                 .items
                 .values()
-                .find(|cand| {
+                .filter(|cand| {
                     cand.item_id != item_id
                         && cand.owner_id == dest_owner
                         && cand.location_id == spec.new_location_id
@@ -1525,9 +1525,22 @@ impl WorldStateSnapshot {
                             .get(&cand.item_id)
                             .is_some_and(|tag| tag.starts_with("courier_cargo:"))
                 })
+                .collect();
+            candidates.sort_by_key(|c| c.item_id);
+            let merge_target_id = candidates
+                .iter()
+                .find(|cand| cand.quantity.checked_add(target_qty).is_some())
+                .or_else(|| candidates.first())
                 .map(|c| c.item_id);
 
             if let Some(target_id) = merge_target_id {
+                let new_tgt_qty = self
+                    .items
+                    .get(&target_id)
+                    .ok_or(DbError::ItemNotFound(target_id))?
+                    .quantity
+                    .checked_add(target_qty)
+                    .ok_or_else(|| DbError::ValidationError("Destination stack quantity overflow".into()))?;
                 if is_partial {
                     if let Some(src_mut) = self.items.get_mut(&item_id) {
                         src_mut.quantity -= target_qty;
@@ -1540,10 +1553,7 @@ impl WorldStateSnapshot {
                     .items
                     .get_mut(&target_id)
                     .ok_or(DbError::ItemNotFound(target_id))?;
-                tgt.quantity = tgt
-                    .quantity
-                    .checked_add(target_qty)
-                    .ok_or_else(|| DbError::ValidationError("Destination stack quantity overflow".into()))?;
+                tgt.quantity = new_tgt_qty;
                 tgt.version += 1;
                 return Ok(tgt.clone());
             }
@@ -1583,8 +1593,57 @@ impl WorldStateSnapshot {
             entry.location_id = spec.new_location_id;
             entry.flag = spec.new_flag;
             entry.version += 1;
-            Ok(entry.clone())
+            let out = entry.clone();
+            self.set_owner_recursive(item_id, dest_owner);
+            Ok(out)
         }
+    }
+
+    /// Recursively updates `owner_id = new_owner` on `item_id` and all nested items located inside it
+    /// (up to depth 8, cycle-guarded). Returns `(pre, post)` pairs for all updated items.
+    pub fn set_owner_recursive(
+        &mut self,
+        item_id: i64,
+        new_owner: i64,
+    ) -> Vec<(InventoryItemRecord, InventoryItemRecord)> {
+        let mut changed = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(item_id);
+        if let Some(root) = self.items.get_mut(&item_id) {
+            if root.owner_id != new_owner {
+                let pre = root.clone();
+                root.owner_id = new_owner;
+                root.version += 1;
+                changed.push((pre, root.clone()));
+            }
+        }
+        let mut frontier = vec![item_id];
+        for _ in 0..8 {
+            if frontier.is_empty() {
+                break;
+            }
+            let children: Vec<i64> = self
+                .items
+                .values()
+                .filter(|it| frontier.contains(&it.location_id) && !visited.contains(&it.item_id))
+                .map(|it| it.item_id)
+                .collect();
+            frontier.clear();
+            for cid in children {
+                if visited.insert(cid) {
+                    frontier.push(cid);
+                    if let Some(child) = self.items.get_mut(&cid) {
+                        if child.owner_id != new_owner {
+                            let pre = child.clone();
+                            child.owner_id = new_owner;
+                            child.version += 1;
+                            changed.push((pre, child.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        changed
     }
 }
 #[cfg(test)] #[path = "inventory_unit_tests.rs"] mod inventory_unit_tests;

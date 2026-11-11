@@ -689,7 +689,14 @@ pub(crate) fn handle_load_ammo(
         .sde
         .types
         .get(&charge_type_id)
-        .map(|t| t.volume.max(0.0001))
+        .map(|t| {
+            let v = if t.volume > 0.0 {
+                t.volume
+            } else {
+                t.default_attributes.get(&161).copied().unwrap_or(0.0)
+            };
+            v.max(0.0001)
+        })
         .unwrap_or(0.0025);
 
     let all_target_modules: Vec<i64> = ctx.db.with_snapshot(|snap| {
@@ -738,13 +745,23 @@ pub(crate) fn handle_load_ammo(
             ctx.sde.types.get(&mod_item.type_id),
             ctx.sde.types.get(&charge_type_id),
         ) {
+            let wt_cap = if wt.capacity > 0.0 {
+                wt.capacity
+            } else {
+                wt.default_attributes.get(&38).copied().unwrap_or(0.0)
+            };
+            let ct_vol = if ct.volume > 0.0 {
+                ct.volume
+            } else {
+                ct.default_attributes.get(&161).copied().unwrap_or(0.0)
+            };
             let aar_paste_ok = matches!(wt.group_id, 1199 | 1698) && ct.type_id == 28668;
             let cap_booster_ok = matches!(wt.group_id, 76 | 1156 | 1697)
                 && ct.group_id == 87
-                && ct.volume <= wt.capacity.max(1.0) + 1e-6;
+                && ct_vol <= wt_cap.max(1.0) + 1e-6;
             let wubble_probe_ok = wt.group_id == 589
                 && matches!(ct.group_id, 548 | 4088)
-                && ct.volume <= wt.capacity.max(1.0) + 1e-6;
+                && ct_vol <= wt_cap.max(1.0) + 1e-6;
             if !ServerContext::is_charge_compatible_with_weapon(wt, ct)
                 && !aar_paste_ok
                 && !cap_booster_ok
@@ -785,7 +802,12 @@ pub(crate) fn handle_load_ammo(
                         reload_time_ms = 60_000.0 * (1.0 - 0.10 * (cbs_lvl as f64));
                     }
                 }
-                let cap = mod_t.capacity.max(0.0);
+                let cap = if mod_t.capacity > 0.0 {
+                    mod_t.capacity
+                } else {
+                    mod_t.default_attributes.get(&38).copied().unwrap_or(0.0)
+                }
+                .max(0.0);
                 if cap > 0.0 {
                     cap_rounds = (cap / charge_vol).floor() as i32;
                 }
@@ -810,6 +832,16 @@ pub(crate) fn handle_load_ammo(
         total_needed += alloc;
     }
 
+    let old_fit_loads = ctx
+        .get_or_rebuild_ship_fitting(char_id, ship_id)
+        .ok()
+        .map(|f| {
+            let eval_ctx = f.evaluated_context(&ctx.sde);
+            (
+                eval_ctx.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde),
+                eval_ctx.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde),
+            )
+        });
     let cargo_cap_opt = ctx
         .get_or_rebuild_ship_fitting(char_id, ship_id)
         .ok()
@@ -834,14 +866,24 @@ pub(crate) fn handle_load_ammo(
                     (s.location_id == ship_id && s.flag == InventoryFlag::Cargo)
                         || snap.items.get(&s.location_id).is_some_and(|p| p.location_id == ship_id && p.flag == InventoryFlag::Cargo)
                 });
+            let type_vol = |type_id: u32| -> f64 {
+                ctx.sde
+                    .types
+                    .get(&type_id)
+                    .map(|t| {
+                        if t.volume > 0.0 {
+                            t.volume
+                        } else {
+                            t.default_attributes.get(&161).copied().unwrap_or(0.0)
+                        }
+                    })
+                    .unwrap_or(0.0)
+            };
             let current_cargo_used: f64 = snap
                 .items
                 .values()
                 .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::Cargo)
-                .map(|i| {
-                    let v = ctx.sde.types.get(&i.type_id).map(|t| t.volume).unwrap_or(0.0);
-                    v * (i.quantity as f64)
-                })
+                .map(|i| type_vol(i.type_id) * (i.quantity as f64))
                 .sum();
             let removed_from_cargo_vol = if source_in_cargo {
                 charge_vol * (total_needed as f64)
@@ -855,7 +897,7 @@ pub(crate) fn handle_load_ammo(
                     for prev in snap.items.values().filter(|i| {
                         i.location_id == ship_id && i.flag == slot_flag && i.item_id != mod_id
                     }) {
-                        let pv = ctx.sde.types.get(&prev.type_id).map(|t| t.volume).unwrap_or(0.0);
+                        let pv = type_vol(prev.type_id);
                         unloaded_to_cargo_vol += pv * (prev.quantity as f64);
                     }
                 }
@@ -871,9 +913,24 @@ pub(crate) fn handle_load_ammo(
             }
         }
 
+        for &(mod_id, _) in &mod_allocations {
+            let Some(mod_item) = snap.items.get(&mod_id) else {
+                return Err(rpc_err("ModuleNotFound", format!("Target module {mod_id} not found")));
+            };
+            if mod_item.owner_id != char_id
+                || mod_item.location_id != ship_id
+                || !matches!(mod_item.flag as u16, 11..=34 | 125..=132)
+            {
+                return Err(rpc_err(
+                    "ModuleOwnershipViolation",
+                    format!("Target module {mod_id} is not fitted on ship {ship_id} owned by character {char_id}"),
+                ));
+            }
+        }
         let mut diffs: Vec<(Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>)> =
             Vec::new();
         let pre_source = snap.items.get(&first_charge_id).cloned();
+        let src_flag = pre_source.as_ref().map(|it| it.flag).unwrap_or(InventoryFlag::Cargo);
         let charge_owner = pre_source.as_ref().map(|it| it.owner_id).unwrap_or(char_id);
         snap.consume_exact_item_quantity(
             first_charge_id,
@@ -882,7 +939,10 @@ pub(crate) fn handle_load_ammo(
         )
         .map_err(|e| rpc_err("InventoryError", e.to_string()))?;
         let post_source = snap.items.get(&first_charge_id).cloned();
-        diffs.push((pre_source, post_source));
+        let move_source_in_place = mod_allocations.len() == 1 && post_source.is_none();
+        if !move_source_in_place {
+            diffs.push((pre_source.clone(), post_source));
+        }
         for &(mod_id, alloc_qty) in &mod_allocations {
             let Some(mod_item) = snap.items.get(&mod_id).cloned() else {
                 continue;
@@ -908,21 +968,52 @@ pub(crate) fn handle_load_ammo(
                     diffs.push((Some(pre), Some(pi.clone())));
                 }
             }
-            snap.next_entity_id += 1;
-            let new_charge_id = snap.next_entity_id;
-            let new_rec = eve_db::InventoryItemRecord {
-                item_id: new_charge_id,
-                type_id: charge_type_id,
-                owner_id: char_id,
-                location_id: ship_id,
-                flag: slot_flag,
-                quantity: alloc_qty,
-                singleton: false,
-                version: 1,
-                ..Default::default()
-            };
-            snap.items.insert(new_charge_id, new_rec.clone());
-            diffs.push((None, Some(new_rec)));
+            if move_source_in_place {
+                let pre_ver = pre_source.as_ref().map(|p| p.version).unwrap_or(1);
+                let moved_rec = eve_db::InventoryItemRecord {
+                    item_id: first_charge_id,
+                    type_id: charge_type_id,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: slot_flag,
+                    quantity: alloc_qty,
+                    singleton: false,
+                    version: pre_ver + 1,
+                    ..Default::default()
+                };
+                snap.items.insert(first_charge_id, moved_rec.clone());
+                diffs.push((pre_source.clone(), Some(moved_rec)));
+            } else {
+                let next_max = snap
+                    .next_entity_id
+                    .max(snap.items.keys().copied().max().unwrap_or(1_000_000));
+                snap.next_entity_id = next_max + 1;
+                let new_charge_id = snap.next_entity_id;
+                let new_rec = eve_db::InventoryItemRecord {
+                    item_id: new_charge_id,
+                    type_id: charge_type_id,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: slot_flag,
+                    quantity: alloc_qty,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                };
+                let pre_split = eve_db::InventoryItemRecord {
+                    item_id: new_charge_id,
+                    type_id: charge_type_id,
+                    owner_id: char_id,
+                    location_id: 0,
+                    flag: src_flag,
+                    quantity: alloc_qty,
+                    singleton: false,
+                    version: 0,
+                    ..Default::default()
+                };
+                snap.items.insert(new_charge_id, new_rec.clone());
+                diffs.push((Some(pre_split), Some(new_rec)));
+            }
         }
         Ok(diffs)
     })?;
@@ -1010,6 +1101,16 @@ pub(crate) fn handle_load_ammo(
         ],
     );
     emit_charge_and_bank_ammo_loaded(ctx, char_id, ship_id, &all_target_modules);
+    if let (Some((old_cpu, old_pg)), Ok(new_fit)) =
+        (old_fit_loads, ctx.get_or_rebuild_ship_fitting(char_id, ship_id))
+    {
+        let eval_ctx = new_fit.evaluated_context(&ctx.sde);
+        let new_cpu = eval_ctx.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde);
+        let new_pg = eval_ctx.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde);
+        let _ = ctx.notify_ship_fitting_load_changes(
+            char_id, ship_id, old_cpu, new_cpu, old_pg, new_pg,
+        );
+    }
     let (charge_gid, charge_cid) = ctx
         .sde
         .types

@@ -329,11 +329,14 @@ impl PyRep {
                 }
                 args.dict_get(key)
             }
-            Self::ObjectEx { dict, list, .. } => dict
+            Self::ObjectEx {
+                header, dict, list, ..
+            } => dict
                 .iter()
                 .find(|(k, _)| k.as_str() == Some(key))
                 .map(|(_, v)| v)
-                .or_else(|| list.first().and_then(|r| r.dict_get(key))),
+                .or_else(|| list.first().and_then(|r| r.dict_get(key)))
+                .or_else(|| header.dict_get(key)),
             Self::Tuple(items) | Self::List(items) => {
                 items.iter().find_map(|it| it.dict_get(key))
             }

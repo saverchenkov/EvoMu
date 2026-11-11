@@ -173,7 +173,7 @@ fn parse_item_ids(raw: Option<&PyRep>) -> Vec<i64> {
         Some(PyRep::List(items) | PyRep::Tuple(items)) => items.iter().filter_map(|v| match v {
             PyRep::Integer(id) if *id > 0 => Some(*id),
             PyRep::Tuple(pair) | PyRep::List(pair) => pair.first().and_then(|x| x.as_i64()).filter(|id| *id > 0),
-            _ => None,
+            other => other.dict_get("itemID").and_then(|x| x.as_i64()).filter(|id| *id > 0),
         }).collect(),
         _ => Vec::new(),
     }
@@ -421,11 +421,17 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let payload_opt = match args.first() {
-                Some(p @ (PyRep::KeyVal(_) | PyRep::Dict(_))) => Some(p),
+                Some(
+                    p @ (PyRep::KeyVal(_)
+                    | PyRep::Dict(_)
+                    | PyRep::ObjectEx { .. }
+                    | PyRep::Object { .. }),
+                ) => Some(p),
                 _ => None,
             };
             let p_field = |key: &str| payload_opt.and_then(|p| p.dict_get(key));
-            let contract_type = match p_field("contractType").or_else(|| p_field("type")).or_else(|| args.first()) {
+            let p_field_some = |key: &str| p_field(key).filter(|v| !matches!(v, PyRep::None));
+            let contract_type = match p_field_some("contractType").or_else(|| p_field_some("type")).or_else(|| args.first()) {
                 Some(PyRep::Integer(1)) => "ItemExchange",
                 Some(PyRep::Integer(2)) => "Auction",
                 Some(PyRep::Integer(3)) => "Courier",
@@ -441,10 +447,14 @@ pub fn handle(
                     return Some(Err(rpc_err("InvalidContractType", format!("Unsupported contract type {other:?}"),)));
                 }
             };
-            let availability = if let Some(av_kw) = kwargs.get("availability").or_else(|| p_field("availability")).and_then(|v| v.as_str()) {
+            let availability = if let Some(av_kw) = kwargs.get("availability").or_else(|| p_field_some("availability")).and_then(|v| v.as_str()) {
                 av_kw.to_string()
             } else {
-                match p_field("availability").or_else(|| args.get(1)) {
+                match p_field_some("availability")
+                    .or_else(|| p_field_some("isPrivate"))
+                    .or_else(|| kwargs.get("isPrivate"))
+                    .or_else(|| args.get(1))
+                {
                     Some(PyRep::Bool(false)) | Some(PyRep::Integer(0)) | None | Some(PyRep::None) => {
                         "Public".to_string()
                     }
@@ -456,12 +466,13 @@ pub fn handle(
                 }
             };
             let rpc = RpcArgs::new(args, kwargs);
-            let assignee_id = match p_field("assigneeID") {
+            let assignee_id = match p_field_some("assigneeID").or_else(|| p_field_some("assignedToID")) {
                 Some(PyRep::Integer(v)) => *v,
                 Some(PyRep::None) => 0,
                 Some(_) => return Some(Err(rpc_err("InvalidContractParameters", "assigneeID must be an integer"))),
                 None => match rpc.opt_i64(2, "assigneeID") {
-                    Ok(v) => v.unwrap_or(0),
+                    Ok(Some(v)) => v,
+                    Ok(None) => kwargs.get("assignedToID").and_then(|v| v.as_i64()).unwrap_or(0),
                     Err(e) => return Some(Err(e)),
                 },
             };
@@ -470,11 +481,16 @@ pub fn handle(
             } else {
                 availability
             };
-            let num_days = p_field("numDays").or_else(|| args.get(4)).and_then(|a| a.as_i64()).filter(|&d| d > 0).map(|d| d.clamp(1, 28) as u32)
+            let num_days = p_field_some("numDays").or_else(|| args.get(4)).and_then(|a| a.as_i64()).filter(|&d| d > 0).map(|d| d.clamp(1, 28) as u32)
                 .unwrap_or(1);
-            let duration_secs = if let Some(exp_min) = p_field("expireTime").or_else(|| args.get(3)).and_then(|a| a.as_i64()).filter(|&m| m > 0)
+            let duration_secs = if let Some(exp_min) = p_field_some("expireTime")
+                .or_else(|| p_field_some("minutesExpire"))
+                .or_else(|| kwargs.get("minutesExpire"))
+                .or_else(|| args.get(3))
+                .and_then(|a| a.as_i64())
+                .filter(|&m| m > 0)
             { ((exp_min as u64).saturating_mul(60)).clamp(60, 2_419_200) } else { 86_400 };
-            let Some(start_station_id) = p_field("startStationID").or_else(|| args.get(5)).and_then(|a| a.as_i64()).filter(|&id| id > 0)
+            let Some(start_station_id) = p_field_some("startStationID").or_else(|| args.get(5)).and_then(|a| a.as_i64()).filter(|&id| id > 0)
                 .or(session.station_id).or(session.structure_id)
             else {
                 return Some(Err(rpc_err(
@@ -482,7 +498,13 @@ pub fn handle(
                     "Caller must be docked at start_station_id to create a contract",
                 )));
             };
-            let end_station_id = match p_field("endStationID").or_else(|| args.get(6)).and_then(|a| a.as_i64()).filter(|&id| id > 0) {
+            let end_station_id = match p_field_some("endStationID")
+                .or_else(|| p_field_some("destinationID"))
+                .or_else(|| kwargs.get("destinationID"))
+                .or_else(|| args.get(6))
+                .and_then(|a| a.as_i64())
+                .filter(|&id| id > 0)
+            {
                 Some(eid) => eid,
                 None if matches!(contract_type, "ItemExchange" | "Auction") => start_station_id,
                 None => {
@@ -511,7 +533,10 @@ pub fn handle(
                 "Auction" => (price_arg, collateral_arg),
                 _ => (price_arg, reward_arg),
             };
-            let raw_title = if let Some(t) = p_field("title") {
+            let raw_title = if let Some(t) = p_field_some("title")
+                .filter(|v| v.as_str() != Some(""))
+                .or_else(|| p_field_some("description"))
+            {
                 match t {
                     PyRep::None => "",
                     other => match other.as_str() {
@@ -520,12 +545,21 @@ pub fn handle(
                     },
                 }
             } else {
-                match rpc.opt_str(10, "title") { Ok(v) => v.unwrap_or(""), Err(e) => return Some(Err(e)) }
+                match rpc.opt_str(10, "title") {
+                    Ok(Some(s)) if !s.is_empty() => s,
+                    Ok(_) => kwargs.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+                    Err(e) => return Some(Err(e)),
+                }
             };
             let title = raw_title.chars().take(128).collect::<String>();
-            let items_source = p_field("itemList").or_else(|| p_field("items")).or_else(|| args.get(12)).or_else(|| kwargs.get("itemList")).or_else(|| kwargs.get("items"));
+            let items_source = p_field_some("itemList").or_else(|| p_field_some("items")).or_else(|| args.get(12)).or_else(|| kwargs.get("itemList")).or_else(|| kwargs.get("items"));
             let item_ids_req = parse_item_ids(items_source);
-            let requested_items = match parse_requested_items(p_field("requestedItems").or_else(|| args.get(14)), kwargs) {
+            let requested_items = match parse_requested_items(
+                p_field_some("requestedItems")
+                    .or_else(|| p_field_some("requestItemTypeList"))
+                    .or_else(|| args.get(14)),
+                kwargs,
+            ) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -533,6 +567,7 @@ pub fn handle(
                 match fc {
                     PyRep::None => false,
                     PyRep::Bool(b) => *b,
+                    PyRep::Integer(i) => *i != 0,
                     _ => return Some(Err(rpc_err("InvalidContractParameters", "forCorp must be a boolean"))),
                 }
             } else {

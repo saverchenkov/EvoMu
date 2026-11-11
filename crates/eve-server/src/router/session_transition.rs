@@ -626,6 +626,27 @@ pub fn apply_character_transition_in_snap(
     move_ship_item: bool,
     validate_destination: bool,
 ) -> Result<CharacterRecord, DbError> {
+    apply_character_transition_in_snap_with_trades(
+        snap,
+        sde,
+        char_id,
+        location,
+        new_ship_id,
+        move_ship_item,
+        validate_destination,
+    )
+    .map(|(ch, _)| ch)
+}
+
+fn apply_character_transition_in_snap_with_trades(
+    snap: &mut WorldStateSnapshot,
+    sde: &SdeRegistry,
+    char_id: i64,
+    location: TransitionLocation,
+    new_ship_id: Option<i64>,
+    move_ship_item: bool,
+    validate_destination: bool,
+) -> Result<(CharacterRecord, Vec<(i64, i64, i64)>), DbError> {
     let ch_pre = snap
         .characters
         .get(&char_id)
@@ -646,6 +667,22 @@ pub fn apply_character_transition_in_snap(
         location,
         validate_destination,
     )?;
+
+    let old_dock = ch_pre.station_id.or(ch_pre.structure_id);
+    let new_dock = if matches!(location, TransitionLocation::ClearAll) {
+        None
+    } else if matches!(location, TransitionLocation::KeepCurrent) {
+        old_dock
+    } else {
+        station_id.or(structure_id)
+    };
+    let cancelled_trades = if old_dock != new_dock {
+        crate::services::wallet_services_ext::cancel_open_trades_for_character_in_snap(
+            snap, char_id,
+        )
+    } else {
+        Vec::new()
+    };
 
     let eff_ship_id = {
         let ch = snap.characters.get_mut(&char_id).unwrap();
@@ -698,7 +735,7 @@ pub fn apply_character_transition_in_snap(
         }
     }
 
-    Ok(snap.characters[&char_id].clone())
+    Ok((snap.characters[&char_id].clone(), cancelled_trades))
 }
 
 /// Clears all character/spatial attributes on a `SessionState` (used on logoff / character clear).
@@ -1060,12 +1097,16 @@ impl ServerContext {
         let dest_loc = spec.kind.destination_location();
         let target_ship = spec.kind.target_ship_id();
         let updated_ch = if matches!(spec.kind, TransitionKind::Logout) {
+            crate::services::wallet_services_ext::cancel_open_trades_for_character(
+                self,
+                spec.char_id,
+            );
             None
         } else if spec.apply_db {
-            let ch = self
+            let (ch, cancelled_trades) = self
                 .db
                 .try_with_mut_snapshot(|snap| {
-                    apply_character_transition_in_snap(
+                    apply_character_transition_in_snap_with_trades(
                         snap,
                         &self.sde,
                         spec.char_id,
@@ -1076,6 +1117,16 @@ impl ServerContext {
                     )
                 })
                 .map_err(db_err_to_rpc)?;
+            for (trade_id, char_a, char_b) in cancelled_trades {
+                for party in [char_a, char_b] {
+                    self.notify(
+                        NotificationTarget::Character(party),
+                        "OnTradeCancel",
+                        "charid",
+                        vec![PyRep::Integer(trade_id)],
+                    );
+                }
+            }
             Some(ch)
         } else {
             let mut ch_opt = self.db.get_character(spec.char_id).ok();
@@ -1227,12 +1278,16 @@ impl ServerContext {
         let dest_loc = spec.kind.destination_location();
         let target_ship = spec.kind.target_ship_id();
         let updated_ch = if matches!(spec.kind, TransitionKind::Logout) {
+            crate::services::wallet_services_ext::cancel_open_trades_for_character(
+                self,
+                spec.char_id,
+            );
             None
         } else if spec.apply_db {
-            let ch = self
+            let (ch, cancelled_trades) = self
                 .db
                 .try_with_mut_snapshot(|snap| {
-                    apply_character_transition_in_snap(
+                    apply_character_transition_in_snap_with_trades(
                         snap,
                         &self.sde,
                         spec.char_id,
@@ -1243,6 +1298,16 @@ impl ServerContext {
                     )
                 })
                 .map_err(db_err_to_rpc)?;
+            for (trade_id, char_a, char_b) in cancelled_trades {
+                for party in [char_a, char_b] {
+                    self.notify(
+                        NotificationTarget::Character(party),
+                        "OnTradeCancel",
+                        "charid",
+                        vec![PyRep::Integer(trade_id)],
+                    );
+                }
+            }
             Some(ch)
         } else {
             let mut ch_opt = self.db.get_character(spec.char_id).ok();

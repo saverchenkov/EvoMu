@@ -622,6 +622,33 @@ impl PersistedServerRuntimeState {
 impl ServerContext {
     /// Hydrates all gameplay-affecting `ServerContext` runtime maps from `WorldRepository` (`#592`).
     pub fn hydrate_server_runtime_from_db(&self) {
+        if !self.db.is_write_locked_by_current_thread()
+            && self
+                .db
+                .with_snapshot(|snap| snap.owner_notes.values().any(|n| n.character_id == -73))
+        {
+            self.db.with_mut_snapshot(|snap| {
+                let online: std::collections::HashSet<i64> = snap
+                    .sessions
+                    .values()
+                    .filter_map(|s| s.character_id)
+                    .collect();
+                snap.owner_notes.retain(|_, n| {
+                    if n.character_id != -73 {
+                        return true;
+                    }
+                    serde_json::from_str::<crate::services::wallet_services_ext::TradeSessionState>(
+                        &n.note,
+                    )
+                    .is_ok_and(|t| {
+                        !t.completed
+                            && !t.cancelled
+                            && online.contains(&t.char_a)
+                            && online.contains(&t.char_b)
+                    })
+                });
+            });
+        }
         let (blob_opt, global_cfg, notifications, persisted_probes) = self.db.with_snapshot(|snap| {
             let sp6_state = crate::sp6_lifecycle::load_sp6_state_from_snap(snap);
             let blob = snap

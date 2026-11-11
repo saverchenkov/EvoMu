@@ -875,7 +875,7 @@ fn test_contracts_error_guards_lists_corp_divisions_and_courier_wrap_break() {
         snap.items.insert(item_sag3, make_fighter_item(item_sag3, 34, corp_id, station_id, InventoryFlag::CorpSAG3, 10));
         snap.items.insert(item_sag5, make_fighter_item(item_sag5, 34, corp_id, station_id, InventoryFlag::CorpSAG5, 10));
         snap.items.insert(item_courier, make_fighter_item(item_courier, 34, corp_id, station_id, InventoryFlag::CorpDeliveries, 20));
-        snap.items.insert(item_req_split, make_fighter_item(item_req_split, 35, acceptor_id, station_id, InventoryFlag::Hangar, 100));
+        snap.items.insert(item_req_split, make_fighter_item(item_req_split, 35, buyer_corp_id, station_id, InventoryFlag::CorpSAG1, 100));
         snap.items.insert(item_auc, make_fighter_item(item_auc, 34, corp_id, station_id, InventoryFlag::CorpSAG2, 15));
         snap.items.insert(item_exp, make_fighter_item(item_exp, 34, issuer_id, station_id, InventoryFlag::Hangar, 5));
     });
@@ -1354,3 +1354,123 @@ fn test_contracts_error_guards_lists_corp_divisions_and_courier_wrap_break() {
     assert!(matches!(handle(&ctx, &mut ceo_sess, "contractProxy", "GetMyBids", &[PyRep::Bool(false), PyRep::Integer(corp_id)], &kwargs).unwrap().unwrap(), PyRep::List(_)));
     assert!(matches!(handle(&ctx, &mut ceo_sess, "contractProxy", "GetMyBids", &[PyRep::Bool(true), PyRep::Integer(corp_id)], &kwargs).unwrap().unwrap(), PyRep::List(_)));
 }
+
+#[test]
+fn issue_935_create_contract_accepts_object_ex_contract_struct_from_wizard() {
+    let (ctx, mut sess, issuer_id, _acc_sess, assignee_id, station_id, dest_station_id) =
+        setup_contracts_ctx();
+    let courier_item_id = 935_001_i64;
+    let exchange_item_id = 935_002_i64;
+    let kwargs = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for iid in [courier_item_id, exchange_item_id] {
+            snap.items.insert(
+                iid,
+                make_fighter_item(iid, 34, issuer_id, station_id, InventoryFlag::Hangar, 50),
+            );
+        }
+    });
+
+    // Build V24 new-style `ContractStruct(object)` serialized as Op_PyObjectEx1 (`header = (cls, (), state_dict)`)
+    let courier_struct = PyRep::ObjectEx {
+        header: Box::new(PyRep::Tuple(vec![
+            PyRep::String("eve.client.script.ui.shared.neocom.contracts.createContractWnd.ContractStruct".into()),
+            PyRep::Tuple(vec![]),
+            PyRep::Dict(vec![
+                (PyRep::String("type".into()), PyRep::Integer(3)), // Courier
+                (PyRep::String("availability".into()), PyRep::None),
+                (PyRep::String("isPrivate".into()), PyRep::Bool(true)),
+                (PyRep::String("assigneeID".into()), PyRep::None),
+                (PyRep::String("assignedToID".into()), PyRep::Integer(assignee_id)),
+                (PyRep::String("expireTime".into()), PyRep::None),
+                (PyRep::String("minutesExpire".into()), PyRep::Integer(2880)), // 2 days
+                (PyRep::String("numDays".into()), PyRep::Integer(3)),
+                (PyRep::String("startStationID".into()), PyRep::Integer(station_id)),
+                (PyRep::String("endStationID".into()), PyRep::None),
+                (PyRep::String("destinationID".into()), PyRep::Integer(dest_station_id)),
+                (PyRep::String("reward".into()), PyRep::Real(250_000.0)),
+                (PyRep::String("collateral".into()), PyRep::Real(500_000.0)),
+                (PyRep::String("title".into()), PyRep::None),
+                (PyRep::String("description".into()), PyRep::String("Wizard Courier".into())),
+                (PyRep::String("forCorp".into()), PyRep::Integer(0)),
+                (
+                    PyRep::String("itemList".into()),
+                    PyRep::List(vec![PyRep::Tuple(vec![
+                        PyRep::Integer(courier_item_id),
+                        PyRep::Integer(50),
+                    ])]),
+                ),
+            ]),
+        ])),
+        list: vec![],
+        dict: vec![],
+        is_type_2: false,
+    };
+
+    let created = handle(
+        &ctx,
+        &mut sess,
+        "contractProxy",
+        "CreateContract",
+        &[courier_struct],
+        &kwargs,
+    )
+    .expect("dispatch CreateContract")
+    .expect("CreateContract with ObjectEx ContractStruct succeeds");
+
+    let contract_id = dict_i64(&created, "contractID").expect("contractID returned");
+    let rec = ctx.db.with_snapshot(|s| s.contracts.get(&contract_id).cloned()).expect("contract persisted");
+    assert_eq!(rec.contract_type, "Courier");
+    assert_eq!(rec.availability, "Personal");
+    assert_eq!(rec.assignee_id, assignee_id);
+    assert_eq!(rec.start_station_id, station_id);
+    assert_eq!(rec.end_station_id, dest_station_id);
+    assert_eq!(rec.title, "Wizard Courier");
+    assert_eq!(rec.num_days, 3);
+    assert!(!rec.for_corp);
+
+    // Also test ItemExchange with `requestItemTypeList` inside `ObjectEx`
+    let exchange_struct = PyRep::ObjectEx {
+        header: Box::new(PyRep::Tuple(vec![
+            PyRep::String("ContractStruct".into()),
+            PyRep::Tuple(vec![]),
+            PyRep::Dict(vec![
+                (PyRep::String("type".into()), PyRep::Integer(1)), // ItemExchange
+                (PyRep::String("isPrivate".into()), PyRep::Integer(0)),
+                (PyRep::String("minutesExpire".into()), PyRep::Integer(1440)),
+                (PyRep::String("startStationID".into()), PyRep::Integer(station_id)),
+                (PyRep::String("price".into()), PyRep::Real(10_000.0)),
+                (
+                    PyRep::String("itemList".into()),
+                    PyRep::List(vec![PyRep::keyval([("itemID", PyRep::Integer(exchange_item_id))])]),
+                ),
+                (
+                    PyRep::String("requestItemTypeList".into()),
+                    PyRep::List(vec![PyRep::Tuple(vec![
+                        PyRep::Integer(35),
+                        PyRep::Integer(100),
+                    ])]),
+                ),
+            ]),
+        ])),
+        list: vec![],
+        dict: vec![],
+        is_type_2: false,
+    };
+    let ex_created = handle(
+        &ctx,
+        &mut sess,
+        "contractProxy",
+        "CreateContract",
+        &[exchange_struct],
+        &kwargs,
+    )
+    .unwrap()
+    .expect("ItemExchange ObjectEx succeeds");
+    let ex_cid = dict_i64(&ex_created, "contractID").unwrap();
+    let ex_rec = ctx.db.with_snapshot(|s| s.contracts[&ex_cid].clone());
+    assert_eq!(ex_rec.contract_type, "ItemExchange");
+    assert_eq!(ex_rec.requested_items, vec![(35, 100)]);
+}
+

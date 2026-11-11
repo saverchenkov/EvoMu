@@ -36,13 +36,19 @@ pub(crate) async fn handle_ships_and_services(
             let Some(arg_id) = args.first().and_then(|a| a.as_i64()).or(session.ship_id) else {
                 return Some(Err(rpc_err("NoActiveShip", "GetInsurancePrice requires shipID/typeID argument or active ship in session")));
             };
-            let corp_id = session.corporation_id;
-            let item_check = ctx.db.with_snapshot(|snap| {
-                snap.items.get(&arg_id).map(|i| (i.owner_id, i.type_id))
+            let (corp_id, item_check) = ctx.db.with_snapshot(|snap| {
+                let corp_id = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .filter(|&cid| cid > 0)
+                    .or(session.corporation_id)
+                    .unwrap_or(0);
+                (corp_id, snap.items.get(&arg_id).map(|i| (i.owner_id, i.type_id)))
             });
             let type_id = match item_check {
                 Some((owner, tid)) => {
-                    if owner != char_id && Some(owner) != corp_id {
+                    if owner != char_id && !(corp_id > 0 && owner == corp_id) {
                         return Some(Err(rpc_err("OwnershipViolation", format!("Ship {arg_id} is not owned by caller"))));
                     }
                     tid
@@ -69,13 +75,24 @@ pub(crate) async fn handle_ships_and_services(
             let Some(ship_id) = args.first().and_then(|a| a.as_i64()).or(session.ship_id) else {
                 return Some(Err(rpc_err("NoActiveShip", "GetContractForShip requires shipID argument or active ship in session")));
             };
-            let item_info = ctx.db.with_snapshot(|snap| {
-                snap.items.get(&ship_id).map(|i| (i.owner_id, i.type_id, i.insured_payout_isk))
+            let (corp_id, item_info) = ctx.db.with_snapshot(|snap| {
+                let corp_id = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .filter(|&cid| cid > 0)
+                    .or(session.corporation_id)
+                    .unwrap_or(0);
+                let item = snap
+                    .items
+                    .get(&ship_id)
+                    .map(|i| (i.owner_id, i.type_id, i.insured_payout_isk));
+                (corp_id, item)
             });
             let Some((owner_id, _type_id, current_payout)) = item_info else {
                 return Some(Err(rpc_err("ShipNotFound", format!("Ship {ship_id} not found"))));
             };
-            let is_corp_owner = session.corporation_id == Some(owner_id);
+            let is_corp_owner = corp_id > 0 && owner_id == corp_id;
             if owner_id != char_id && !is_corp_owner {
                 return Some(Err(rpc_err("OwnershipViolation", format!("Ship {ship_id} is not owned by character {char_id}"))));
             }
@@ -143,14 +160,17 @@ pub(crate) async fn handle_ships_and_services(
                 _ => return Some(Err(rpc_err("InvalidArgument", "Expected boolean or 0/1 for 'isCorp' (arg[0])"))),
             };
             let owner = if is_corp {
-                let corp_id = session.corporation_id.unwrap_or(0);
-                if corp_id == 0 {
-                    return Some(Err(BridgeRpcError {
-                        code: "CorpRoleDenied".into(),
-                        message: "Character does not belong to a corporation".into(),
-                    }));
-                }
-                let has_privs = ctx.db.with_snapshot(|snap| {
+                let (corp_id, has_privs) = ctx.db.with_snapshot(|snap| {
+                    let corp_id = snap
+                        .characters
+                        .get(&char_id)
+                        .map(|c| c.corporation_id)
+                        .filter(|&cid| cid > 0)
+                        .or(session.corporation_id)
+                        .unwrap_or(0);
+                    if corp_id <= 0 {
+                        return (0, false);
+                    }
                     let (is_ceo, roles) = snap.effective_corp_roles_at(
                         corp_id,
                         char_id,
@@ -158,11 +178,18 @@ pub(crate) async fn handle_ships_and_services(
                         session.corp_role,
                         ctx.now_unix(),
                     );
-                    is_ceo
+                    let ok = is_ceo
                         || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR)
                         || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_ACCOUNTANT)
-                        || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT)
+                        || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT);
+                    (corp_id, ok)
                 });
+                if corp_id <= 0 {
+                    return Some(Err(BridgeRpcError {
+                        code: "CorpRoleDenied".into(),
+                        message: "Character does not belong to a corporation".into(),
+                    }));
+                }
                 if !has_privs {
                     return Some(Err(BridgeRpcError {
                         code: "CorpRoleDenied".into(),

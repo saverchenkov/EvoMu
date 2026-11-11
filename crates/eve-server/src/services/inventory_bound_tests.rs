@@ -873,3 +873,476 @@ async fn issue_803_macho_dispatch_verify_bound_object_for_destroyed_ship_stub() 
         "InventoryNotAccessible"
     );
 }
+
+#[test]
+fn issue_885_recheck_invbroker_add_auth_in_snap_rejects_mid_flight_revocations() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let other_id = 90_000_002_i64;
+    let corp_id = 98_885_001_i64;
+    let station_id = 60_003_760_i64;
+    let ship_id = 1_000_885_001_i64;
+    let cont_id = 1_000_885_002_i64;
+    let item_id = 1_000_885_003_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
+            ch.station_id = Some(station_id);
+            ch.active_ship_id = ship_id;
+        }
+        let mut corp = snap.corporations.values().next().cloned().unwrap();
+        corp.corporation_id = corp_id;
+        corp.ceo_id = other_id;
+        corp.members.insert(other_id);
+        corp.members.insert(char_id);
+        corp.member_roles.insert(char_id, u64::MAX);
+        snap.corporations.insert(corp_id, corp);
+
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            cont_id,
+            InventoryItemRecord {
+                item_id: cont_id,
+                type_id: 17366, // Station container
+                owner_id: corp_id,
+                location_id: station_id,
+                flag: InventoryFlag::CorpSAG1,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            item_id,
+            InventoryItemRecord {
+                item_id,
+                type_id: 34,
+                owner_id: corp_id,
+                location_id: cont_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 100,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut sess = SessionState::new(1);
+    sess.user_id = Some(char_id as u64);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(corp_id);
+    sess.station_id = Some(station_id);
+    sess.ship_id = Some(ship_id);
+    let orig_src = ctx.db.with_snapshot(|snap| snap.items[&item_id].clone());
+    let kw = HashMap::new();
+
+    // 1. Baseline passes when roles and container state match
+    ctx.db.with_snapshot(|snap| {
+        super::recheck_invbroker_add_auth_in_snap(
+            &ctx,
+            snap,
+            &sess,
+            char_id,
+            &orig_src,
+            Some(&orig_src),
+            ship_id,
+            InventoryFlag::Cargo,
+            &[],
+            &kw,
+        )
+        .expect("baseline recheck ok");
+    });
+
+    // 2. Mid-flight ALSC lock on source item -> ALSCItemLocked
+    {
+        let mut st = crate::services::fitting_containers_ships::read_container_ship_state(&ctx);
+        st.alsc_locked_items.insert(item_id);
+        crate::services::fitting_containers_ships::save_container_ship_state(&ctx, &st);
+    }
+    ctx.db.with_snapshot(|snap| {
+        let err = super::recheck_invbroker_add_auth_in_snap(
+            &ctx,
+            snap,
+            &sess,
+            char_id,
+            &orig_src,
+            Some(&orig_src),
+            ship_id,
+            InventoryFlag::Cargo,
+            &[],
+            &kw,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "ALSCItemLocked");
+    });
+    {
+        let mut st = crate::services::fitting_containers_ships::read_container_ship_state(&ctx);
+        st.alsc_locked_items.clear();
+        st.container_passwords.insert(cont_id, "secret".into());
+        crate::services::fitting_containers_ships::save_container_ship_state(&ctx, &st);
+    }
+
+    // 3. Mid-flight container password set without unlock -> ALSCPasswordNeededToOpen
+    ctx.db.with_snapshot(|snap| {
+        let err = super::recheck_invbroker_add_auth_in_snap(
+            &ctx,
+            snap,
+            &sess,
+            char_id,
+            &orig_src,
+            Some(&orig_src),
+            ship_id,
+            InventoryFlag::Cargo,
+            &[],
+            &kw,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "ALSCPasswordNeededToOpen");
+    });
+    {
+        let mut st = crate::services::fitting_containers_ships::read_container_ship_state(&ctx);
+        st.container_passwords.clear();
+        crate::services::fitting_containers_ships::save_container_ship_state(&ctx, &st);
+    }
+
+    // 4. Mid-flight revocation of corporation take roles -> CorpRoleDenied
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations
+            .get_mut(&corp_id)
+            .unwrap()
+            .member_roles
+            .insert(char_id, 0);
+    });
+    ctx.db.with_snapshot(|snap| {
+        let err = super::recheck_invbroker_add_auth_in_snap(
+            &ctx,
+            snap,
+            &sess,
+            char_id,
+            &orig_src,
+            Some(&orig_src),
+            ship_id,
+            InventoryFlag::Cargo,
+            &[],
+            &kw,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "CorpRoleDenied");
+    });
+
+    // 5. Fuel Technician (StarbaseOperator) withdrawing from structure SpecializedFuelBay succeeds
+    let struct_id = 1_000_885_010_i64;
+    let other_struct_id = 1_000_885_011_i64;
+    let fuel_item_id = 1_000_885_012_i64;
+    let fuel_item = InventoryItemRecord {
+        item_id: fuel_item_id,
+        type_id: 4051,
+        owner_id: corp_id,
+        location_id: struct_id,
+        flag: InventoryFlag::SpecializedFuelBay,
+        quantity: 50,
+        singleton: false,
+        ..Default::default()
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations
+            .get_mut(&corp_id)
+            .unwrap()
+            .member_roles
+            .insert(char_id, eve_db::corp_roles::ROLE_STARBASE_OPERATOR);
+        snap.structures.insert(
+            struct_id,
+            UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35832,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142,
+                name: "Fuel Astrahus".into(),
+                state: "ShieldVulnerable".into(),
+                position: [10_000.0, 0.0, 0.0],
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 1.0,
+                armor_hp: 1.0,
+                hull_hp: 1.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        snap.structures.insert(
+            other_struct_id,
+            UpwellStructureRecord {
+                structure_id: other_struct_id,
+                type_id: 35832,
+                owner_corp_id: 1_000_125,
+                solar_system_id: 30_000_142,
+                name: "Public Freeport".into(),
+                state: "ShieldVulnerable".into(),
+                position: [20_000.0, 0.0, 0.0],
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 1.0,
+                armor_hp: 1.0,
+                hull_hp: 1.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        snap.items.insert(fuel_item_id, fuel_item.clone());
+    });
+    ctx.db.with_snapshot(|snap| {
+        super::recheck_invbroker_add_auth_in_snap(
+            &ctx,
+            snap,
+            &sess,
+            char_id,
+            &fuel_item,
+            Some(&fuel_item),
+            ship_id,
+            InventoryFlag::Cargo,
+            &[],
+            &kw,
+        )
+        .expect("fuel technician should retain structure fuel bay withdrawal access");
+    });
+
+    // 6. Mid-flight structure docking ACL revocation -> DestinationAccessDenied
+    let personal_item = InventoryItemRecord {
+        item_id: 1_000_885_013_i64,
+        type_id: 34,
+        owner_id: char_id,
+        location_id: ship_id,
+        flag: InventoryFlag::Cargo,
+        quantity: 10,
+        singleton: false,
+        ..Default::default()
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(personal_item.item_id, personal_item.clone());
+        snap.structure_docking_acl_denied
+            .entry(other_struct_id)
+            .or_default()
+            .insert(char_id);
+    });
+    ctx.db.with_snapshot(|snap| {
+        let err = super::recheck_invbroker_add_auth_in_snap(
+            &ctx,
+            snap,
+            &sess,
+            char_id,
+            &personal_item,
+            Some(&personal_item),
+            other_struct_id,
+            InventoryFlag::Hangar,
+            &[],
+            &kw,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "DestinationAccessDenied");
+    });
+}
+
+#[tokio::test]
+async fn issue_885_rejects_ex_corp_container_personal_withdrawal_other_corp_deposit_and_uses_live_corp() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let other_id = 90_000_002_i64;
+    let old_corp = 98_885_101_i64;
+    let new_corp = 98_885_102_i64;
+    let station_id = 60_003_760_i64;
+    let ship_id = 1_000_885_101_i64;
+    let ex_corp_cont_id = 1_000_885_102_i64;
+    let personal_in_ex_cont_id = 1_000_885_103_i64;
+    let ship_cargo_stack_id = 1_000_885_104_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = new_corp;
+            ch.station_id = Some(station_id);
+            ch.active_ship_id = ship_id;
+        }
+        let template = snap.corporations.values().next().cloned().unwrap();
+        let mut corp_old = template.clone();
+        corp_old.corporation_id = old_corp;
+        corp_old.ceo_id = other_id;
+        corp_old.members.insert(other_id);
+        corp_old.members.remove(&char_id);
+        corp_old.member_roles.remove(&char_id);
+        snap.corporations.insert(old_corp, corp_old);
+
+        let mut corp_new = template;
+        corp_new.corporation_id = new_corp;
+        corp_new.ceo_id = char_id;
+        corp_new.members.insert(char_id);
+        corp_new.member_roles.insert(char_id, u64::MAX);
+        snap.corporations.insert(new_corp, corp_new);
+
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            ex_corp_cont_id,
+            InventoryItemRecord {
+                item_id: ex_corp_cont_id,
+                type_id: 17366, // Station container (non-space)
+                owner_id: old_corp,
+                location_id: station_id,
+                flag: InventoryFlag::CorpSAG1,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            personal_in_ex_cont_id,
+            InventoryItemRecord {
+                item_id: personal_in_ex_cont_id,
+                type_id: 34,
+                owner_id: char_id, // personal item inside ex-corp container
+                location_id: ex_corp_cont_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 10,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            ship_cargo_stack_id,
+            InventoryItemRecord {
+                item_id: ship_cargo_stack_id,
+                type_id: 34,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 100,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+
+    // Session holds stale corporation_id (old_corp), while character is live in new_corp.
+    let mut sess = SessionState::new(1);
+    sess.user_id = Some(char_id as u64);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(old_corp);
+    sess.station_id = Some(station_id);
+    sess.ship_id = Some(ship_id);
+    let kw = HashMap::new();
+
+    // 1. Non-GM withdrawing personal item from ex-corp container must be rejected (CorpRoleDenied)
+    let personal_item = ctx.db.get_item(personal_in_ex_cont_id).unwrap();
+    ctx.db.with_snapshot(|snap| {
+        let err = super::recheck_invbroker_add_auth_in_snap(
+            &ctx,
+            snap,
+            &sess,
+            char_id,
+            &personal_item,
+            Some(&personal_item),
+            ship_id,
+            InventoryFlag::Cargo,
+            &[],
+            &kw,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "CorpRoleDenied");
+    });
+
+    // 2. Non-GM depositing into non-space container owned by another corp must be rejected
+    let ship_stack = ctx.db.get_item(ship_cargo_stack_id).unwrap();
+    ctx.db.with_snapshot(|snap| {
+        let err = super::recheck_invbroker_add_auth_in_snap(
+            &ctx,
+            snap,
+            &sess,
+            char_id,
+            &ship_stack,
+            Some(&ship_stack),
+            ex_corp_cont_id,
+            InventoryFlag::Cargo,
+            &[],
+            &kw,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "DestinationAccessDenied");
+    });
+
+    // 3. End-to-end invbroker.Add split and full move into CorpSAG1 (116) must stamp live new_corp,
+    // not stale session.corporation_id (old_corp).
+    let bound = bound_invbroker(char_id, station_id);
+    let mut split_kw = HashMap::new();
+    split_kw.insert("qty".to_string(), PyRep::Integer(25));
+    let split_res = crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(ship_cargo_stack_id),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(InventoryFlag::CorpSAG1 as i64),
+        ],
+        &split_kw,
+    )
+    .await
+    .expect("invbroker.Add handled")
+    .expect("split into CorpSAG1 succeeds");
+    let split_id = split_res
+        .dict_get("itemID")
+        .and_then(|v| v.as_i64())
+        .expect("split itemID returned");
+    let split_rec = ctx.db.get_item(split_id).expect("split item exists");
+    assert_eq!(split_rec.location_id, station_id);
+    assert_eq!(split_rec.flag, InventoryFlag::CorpSAG1);
+    assert_eq!(split_rec.owner_id, new_corp);
+
+    crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(ship_cargo_stack_id),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(InventoryFlag::CorpSAG1 as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("invbroker.Add handled")
+    .expect("full move into CorpSAG1 succeeds");
+    let moved_rec = ctx.db.get_item(ship_cargo_stack_id).expect("moved item exists");
+    assert_eq!(moved_rec.location_id, station_id);
+    assert_eq!(moved_rec.flag, InventoryFlag::CorpSAG1);
+    assert_eq!(moved_rec.owner_id, new_corp);
+}

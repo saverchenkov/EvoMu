@@ -1096,6 +1096,9 @@ pub fn finalize_fuel_bay_move_in_snap(
     let to_fuel = is_structure_fuel_flag(new_flag)
         && snap.structures.contains_key(&new_loc);
     if !from_fuel && !to_fuel {
+        if let Some(owner_id) = snap.items.get(&moved_item_id).map(|i| i.owner_id) {
+            snap.set_owner_recursive(moved_item_id, owner_id);
+        }
         return (snap.items.get(&moved_item_id).cloned(), None);
     }
     let Some(moving) = snap.items.get(&moved_item_id).cloned() else {
@@ -1116,16 +1119,12 @@ pub fn finalize_fuel_bay_move_in_snap(
             } else {
                 char_id
             };
-            if let Some(it) = snap.items.get_mut(&moved_item_id) {
-                it.owner_id = new_owner;
-            }
+            snap.set_owner_recursive(moved_item_id, new_owner);
         }
     }
     if to_fuel {
         let owner_corp = snap.structures.get(&new_loc).map(|s| s.owner_corp_id).unwrap_or(caller_corp);
-        if let Some(it) = snap.items.get_mut(&moved_item_id) {
-            it.owner_id = owner_corp;
-        }
+        snap.set_owner_recursive(moved_item_id, owner_corp);
         if !same_bay && is_block {
             if let Some(st) = snap.structures.get_mut(&new_loc) {
                 st.fuel_blocks = st.fuel_blocks.saturating_add(qty_u32);
