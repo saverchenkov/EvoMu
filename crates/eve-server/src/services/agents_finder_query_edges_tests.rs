@@ -72,7 +72,8 @@ fn get_agents_unfiltered_and_has_access_with_and_without_character() {
         .sde
         .agents
         .values()
-        .find(|a| a.level >= 2)
+        .filter(|a| a.level >= 2)
+        .min_by_key(|a| a.agent_id)
         .expect("level >= 2 agent in SDE");
     let char_id = 90_000_001i64;
     ctx.db.with_mut_snapshot(|snap| {
@@ -105,13 +106,14 @@ fn get_agents_positional_and_kwarg_filters() {
         .sde
         .agents
         .values()
-        .find(|a| {
+        .filter(|a| {
             ctx.sde
                 .npc_corporations
                 .get(&a.corporation_id)
                 .and_then(|c| c.faction_id)
                 .is_some()
         })
+        .min_by_key(|a| a.agent_id)
         .expect("agent with faction in SDE");
     let fac_id = ctx.sde.npc_corporations[&sample.corporation_id]
         .faction_id

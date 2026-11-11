@@ -696,6 +696,7 @@ pub(crate) fn fast_raw_ctx() -> ServerContext {
     let db = std::sync::Arc::new(eve_db::WorldRepository::new_empty());
     db.with_mut_snapshot(|s| *s = snap.clone());
     ServerContext::with_sde_and_repository(sde.clone(), db)
+        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED)
 }
 
 pub(crate) fn new_ctx() -> ServerContext {

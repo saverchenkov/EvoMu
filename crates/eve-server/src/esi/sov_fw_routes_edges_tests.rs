@@ -264,19 +264,25 @@ fn sov_structures_covers_adm_windows_command_nodes_onlining_and_fallbacks() {
 fn sov_campaigns_incursions_and_fw_wars_cover_all_filters_and_fallbacks() {
     let (ctx, _token, _char_id, corp_id, _planet_id) = seed_full_esi_context();
     let sov_types = sov_structure_type_ids(&ctx.sde);
-    let sov_tid = *sov_types.iter().next().expect("sov type");
+    let sov_tid = *sov_types.iter().min().expect("sov type");
     let no_alliance_corp = 98_888_777_i64;
     let npc_corp_id = ctx
         .sde
         .factions
         .values()
-        .find_map(|f| f.militia_corporation_id.map(|cid| (cid, f.faction_id as i64)));
+        .filter(|f| f.faction_id != 500_001 && f.faction_id != 500_010)
+        .filter_map(|f| f.militia_corporation_id.map(|cid| (cid, f.faction_id as i64)))
+        .min_by_key(|&(cid, fid)| (fid, cid));
+    let militia_faction_id = npc_corp_id.map(|(_, fid)| fid);
     let npc_only_corp = ctx
         .sde
         .npc_corporations
         .values()
-        .find(|nc| nc.faction_id.is_some())
-        .map(|nc| (nc.corporation_id, nc.faction_id.unwrap() as i64));
+        .filter_map(|nc| nc.faction_id.map(|fid| (nc.corporation_id, fid as i64)))
+        .filter(|&(_, fid)| {
+            fid != 500_001 && fid != 500_010 && Some(fid) != militia_faction_id
+        })
+        .min_by_key(|&(cid, fid)| (fid, cid));
 
     ctx.db.with_mut_snapshot(|snap| {
         let mut c2 = snap.corporations.get(&corp_id).unwrap().clone();

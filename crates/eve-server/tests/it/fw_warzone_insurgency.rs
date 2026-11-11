@@ -30,10 +30,12 @@ pub(crate) fn fw_cached_sde() -> std::sync::Arc<eve_sde::SdeRegistry> {
 pub(crate) fn fw_fast_mem_ctx() -> ServerContext {
     let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
     ServerContext::with_sde_and_repository(fw_cached_sde(), db)
+        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED)
 }
 
 pub(crate) fn fw_fast_ctx_from_repo(repo: std::sync::Arc<eve_db::WorldRepository>) -> ServerContext {
     ServerContext::with_sde_and_repository(fw_cached_sde(), repo)
+        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED)
 }
 
 pub(crate) fn fw_fast_sqlite_ctx(path: &std::path::Path, seed_demo: bool) -> ServerContext {
@@ -54,6 +56,7 @@ pub(crate) fn fw_fast_sqlite_ctx(path: &std::path::Path, seed_demo: bool) -> Ser
         eve_db::WorldRepository::open_sqlite(path).expect("open sqlite repo"),
     );
     ServerContext::with_sde_and_repository(fw_cached_sde(), repo)
+        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED)
 }
 
 pub(crate) fn fw_fast_forward_secs(ctx: &ServerContext, secs: u64) {
@@ -432,7 +435,7 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
             snap.module_active_charges.insert(997_010, 185);
         });
         ctx.invalidate_ship_fitting(gal_ship);
-        set_hull(&ctx, gal_ship, 19_722, def_pos + DVec3::new(2_000.0, 0.0, 0.0)).await;
+        set_hull(&ctx, gal_ship, 19_722, def_pos + DVec3::new(500.0, 0.0, 0.0)).await;
         crate::fw_warzone_insurgency::fw_fast_lock_target(&ctx, &mut s_gal, front_sys, gal_ship, def_sid).await;
         let _ = rpc_call(&ctx, &mut s_gal, "dogmaIM", "Activate", &[
             PyRep::Integer(997_010),
@@ -3906,6 +3909,7 @@ async fn anchor_and_online_hub(
 async fn test_e2e_sov_entosis_counter_regen_and_command_nodes() {
     let db_path = temp_sqlite_path("e2e_sov_entosis_nodes");
     let ctx = crate::fw_warzone_insurgency::fw_fast_sqlite_ctx(&db_path, true);
+    crate::common::pin_clock(&ctx);
     let (null_sys, _) = find_claimable_nullsec_and_lava(&ctx);
     let hub_pos = DVec3::new(150_000.0, 0.0, 0.0);
 
@@ -3973,7 +3977,7 @@ async fn test_e2e_sov_entosis_counter_regen_and_command_nodes() {
 
     // 6. Capture 1 node (defender_score 0.60 -> 0.50), leave unattended -> regenerates in defender's favour!
     let (nid0, nsys0, npos0) = ctx.db.with_snapshot(|s| {
-        let (&nid, &(_, nsys, _)) = s.sov_runtime.command_nodes.iter().next().unwrap();
+        let (&nid, &(_, nsys, _)) = s.sov_runtime.command_nodes.iter().min_by_key(|(&nid, _)| nid).unwrap();
         (nid, nsys, s.item_positions[&nid])
     });
     let _ = ctx.systems.get_or_spawn(null_sys).remove_ball(att_ship).await;
@@ -4006,7 +4010,7 @@ async fn test_e2e_sov_entosis_counter_regen_and_command_nodes() {
             let _ = rpc_call(&ctx, &mut s_def, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT)]).await;
         }
         let (nid, nsys, npos) = ctx.db.with_snapshot(|s| {
-            let (&nid, &(_, nsys, _)) = s.sov_runtime.command_nodes.iter().next().unwrap();
+            let (&nid, &(_, nsys, _)) = s.sov_runtime.command_nodes.iter().min_by_key(|(&nid, _)| nid).unwrap();
             (nid, nsys, s.item_positions[&nid])
         });
         let prev = s_att.solar_system_id.unwrap();
@@ -4033,6 +4037,7 @@ async fn test_e2e_sov_entosis_counter_regen_and_command_nodes() {
 async fn test_e2e_sov_dev_indices_decay_adm_and_upgrade_sites() {
     let db_path = temp_sqlite_path("e2e_sov_indices_sites");
     let ctx = crate::fw_warzone_insurgency::fw_fast_sqlite_ctx(&db_path, true);
+    crate::common::pin_clock(&ctx);
     let (null_sys, _) = find_claimable_nullsec_and_lava(&ctx);
     let hub_pos = DVec3::new(150_000.0, 0.0, 0.0);
 
@@ -4096,13 +4101,13 @@ async fn test_e2e_sov_dev_indices_decay_adm_and_upgrade_sites() {
     assert!(anoms.iter().filter(|a| a.anomaly_type == "Combat").count() >= 3, "Major Threat Detection Array spawns >= 3 combat sites");
 
     // Kill 5+ NPCs in Threat Detection site via real weapon fire to raise Military Index -> 1!
-    let npc_id = ctx.db.with_snapshot(|s| *s.sov_runtime.sov_upgrade_combat_npcs.iter().next().unwrap());
+    let npc_id = ctx.db.with_snapshot(|s| *s.sov_runtime.sov_upgrade_combat_npcs.iter().min().unwrap());
     let npc_pos = ctx.systems.get_or_spawn(null_sys).get_ball_snapshot(npc_id).await.unwrap().unwrap().1.position;
     let _ = ctx.systems.get_or_spawn(null_sys).remove_ball(PILOT_SHIP).await;
     fit_subcap_blasters(&ctx, PILOT, PILOT_SHIP, 987_000);
     place_ship_ball(&ctx, null_sys, PILOT, PILOT_SHIP, 16_229, npc_pos + DVec3::new(2_500.0, 0.0, 0.0)).await;
     for _ in 0..5 {
-        let nid = ctx.db.with_snapshot(|s| *s.sov_runtime.sov_upgrade_combat_npcs.iter().next().unwrap());
+        let nid = ctx.db.with_snapshot(|s| *s.sov_runtime.sov_upgrade_combat_npcs.iter().min().unwrap());
         crate::fw_warzone_insurgency::fw_fast_lock_target(&ctx, &mut s_dir, null_sys, PILOT_SHIP, nid).await;
         for _ in 0..6 {
             let _ = rpc_call(&ctx, &mut s_dir, "dogmaIM", "Activate", &[PyRep::Integer(987_000), PyRep::String("targetAttack".into()), PyRep::Integer(nid)]).await;
@@ -4172,6 +4177,7 @@ async fn test_e2e_sov_dev_indices_decay_adm_and_upgrade_sites() {
 async fn test_e2e_skyhook_reagent_maturity_and_theft() {
     let db_path = temp_sqlite_path("e2e_skyhook_maturity");
     let ctx = crate::fw_warzone_insurgency::fw_fast_sqlite_ctx(&db_path, true);
+    crate::common::pin_clock(&ctx);
     let (null_sys, lava_planet) = find_claimable_nullsec_and_lava(&ctx);
     let lava_pos = ctx.sde.celestials_in_system(null_sys).into_iter().find(|c| c.celestial_id == lava_planet).unwrap().position;
 
@@ -4261,6 +4267,7 @@ async fn test_e2e_skyhook_reagent_maturity_and_theft() {
 async fn test_e2e_fw_system_capture_downtime_and_insurgency_fob_lifecycle() {
     let db_path = temp_sqlite_path("e2e_fw_insurgency");
     let ctx = crate::fw_warzone_insurgency::fw_fast_sqlite_ctx(&db_path, true);
+    crate::common::pin_clock(&ctx);
     let fw_sys = 30_002_537u32; // Huola (Amarr/Minmatar warzone)
 
     let mut s_min = register_online_pilot(

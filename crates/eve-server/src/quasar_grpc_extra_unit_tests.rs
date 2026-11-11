@@ -434,13 +434,23 @@ async fn grpc_auth_expired_ban_revocation_gm_demotion_and_subscriber_guard_drop_
         .unwrap();
     let cons_rsp = cons_fut.await.unwrap();
     assert_eq!(cons_rsp.status(), StatusCode::OK);
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    for _ in 0..100 {
+        if ctx.quasar_gateway.subscribers.read().unwrap().len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert_eq!(ctx.quasar_gateway.subscribers.read().unwrap().len(), 1);
 
     // Resetting the consumer stream triggers `GrpcSubscriberGuard::drop` -> 0 subscribers.
     cons_send.send_reset(h2::Reason::CANCEL);
     drop(cons_rsp);
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    for _ in 0..100 {
+        if ctx.quasar_gateway.subscribers.read().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert_eq!(ctx.quasar_gateway.subscribers.read().unwrap().len(), 0);
 
     // Apply an active ban: both new `authenticate_grpc_headers` and open stream next frame return gRPC 16.

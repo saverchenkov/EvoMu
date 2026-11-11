@@ -25,7 +25,7 @@ fn test_ctx() -> ServerContext {
         )
         .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED)
     } else {
-        let ctx = ServerContext::new();
+        let ctx = ServerContext::new().with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
         let _ = SHARED_SDE.set(Arc::clone(&ctx.sde));
         ctx
     }
@@ -46,7 +46,12 @@ fn char_session(char_id: i64, sys_id: u32, station_id: Option<i64>) -> SessionSt
 fn ensure_char(ctx: &ServerContext, char_id: i64, station_id: Option<i64>, sys_id: u32) {
     ctx.db.with_mut_snapshot(|snap| {
         if !snap.characters.contains_key(&char_id) {
-            let mut ch = snap.characters.values().next().cloned().expect("seed char");
+            let mut ch = snap
+                .characters
+                .values()
+                .min_by_key(|c| c.character_id)
+                .cloned()
+                .expect("seed char");
             ch.character_id = char_id;
             ch.name = format!("Edge Pilot {char_id}");
             ch.corporation_id = 1_000_009;
@@ -63,13 +68,14 @@ fn find_lvl1_agent(ctx: &ServerContext) -> AgentInfo {
     ctx.sde
         .agents
         .values()
-        .find(|a| {
+        .filter(|a| {
             a.level == 1
                 && a.agent_type_id == 2
                 && a.division_id == 24
                 && a.solar_system_id.is_some()
                 && a.station_id.is_some()
         })
+        .min_by_key(|a| a.agent_id)
         .cloned()
         .expect("level 1 standard agent")
 }
@@ -82,7 +88,8 @@ async fn in_space_agent_colocation_and_deterministic_origin_edges() {
         .sde
         .agents
         .values()
-        .find(|a| a.station_id.is_none() && a.solar_system_id.is_some())
+        .filter(|a| a.station_id.is_none() && a.solar_system_id.is_some())
+        .min_by_key(|a| a.agent_id)
         .cloned()
         .unwrap_or_else(|| {
             let mut ag = find_lvl1_agent(&ctx);
@@ -238,7 +245,8 @@ async fn agent_info_location_and_mission_metadata_rpcs() {
         .sde
         .agents
         .values()
-        .find(|a| a.agent_type_id == 4 && a.solar_system_id.is_some())
+        .filter(|a| a.agent_type_id == 4 && a.solar_system_id.is_some())
+        .min_by_key(|a| a.agent_id)
         .cloned()
     {
         let rnd_info = handle(
@@ -260,7 +268,8 @@ async fn agent_info_location_and_mission_metadata_rpcs() {
         .sde
         .agents
         .values()
-        .find(|a| a.is_locator && a.solar_system_id.is_some())
+        .filter(|a| a.is_locator && a.solar_system_id.is_some())
+        .min_by_key(|a| a.agent_id)
         .cloned()
     {
         let loc_info = handle(
@@ -677,13 +686,14 @@ async fn do_action_accept_guards_lp_tax_and_remote_complete_rejection() {
         .sde
         .agents
         .values()
-        .find(|a| {
+        .filter(|a| {
             a.level == 5
                 && a.agent_type_id == 2
                 && a.solar_system_id.is_some_and(|s| {
                     ctx.sde.solar_systems.get(&s).is_some_and(|sys| sys.security_status >= 0.45)
                 })
         })
+        .min_by_key(|a| a.agent_id)
         .cloned()
     {
         let mut s = char_session(char_id, l5_hs.solar_system_id.unwrap(), l5_hs.station_id);
@@ -748,7 +758,13 @@ async fn do_action_accept_guards_lp_tax_and_remote_complete_rejection() {
         .sde
         .agents
         .values()
-        .find(|a| a.level == 4 && a.agent_type_id == 2 && a.solar_system_id.is_some())
+        .filter(|a| {
+            a.level == 4
+                && a.agent_type_id == 2
+                && a.solar_system_id.is_some()
+                && a.station_id.is_some()
+        })
+        .min_by_key(|a| a.agent_id)
         .cloned()
     {
         ctx.db.with_mut_snapshot(|snap| {
@@ -787,7 +803,14 @@ async fn do_action_accept_guards_lp_tax_and_remote_complete_rejection() {
     }
 
     // 3. Action 7 (CompleteRemotely) fails with CannotCompleteRemotely when delivery required
-    let mid_deliv = *ctx.sde.missions.keys().find(|&&id| id != 72_001 && id != 72_003 && id != 72_101).unwrap();
+    let mid_deliv = ctx
+        .sde
+        .missions
+        .keys()
+        .copied()
+        .filter(|&id| id != mid && id != 72_001 && id != 72_003 && id != 72_101)
+        .min()
+        .unwrap();
     ctx.db.with_mut_snapshot(|snap| {
         snap.active_missions.insert(
             (char_id, mid_deliv),
@@ -942,7 +965,8 @@ async fn do_action_accept_guards_lp_tax_and_remote_complete_rejection() {
         .sde
         .agents
         .values()
-        .find(|a| a.agent_type_id == 10 && a.solar_system_id.is_some())
+        .filter(|a| a.agent_type_id == 10 && a.solar_system_id.is_some() && a.station_id.is_some())
+        .min_by_key(|a| a.agent_id)
         .cloned()
     {
         let (arc_id, _fac_id) = resolve_epic_arc_id_for_agent(&ctx, epic_ag.agent_id);

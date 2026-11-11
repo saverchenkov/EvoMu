@@ -18,7 +18,7 @@ pub(super) fn shared_sde() -> Arc<SdeRegistry> {
     static SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
     Arc::clone(SDE.get_or_init(|| {
         let mut sde = SdeRegistry::with_canonical_seed();
-        let mut pt = sde.types.values().next().cloned().unwrap();
+        let mut pt = sde.types.values().min_by_key(|t| t.type_id).cloned().unwrap();
         pt.type_id = 581;
         pt.group_id = 82;
         pt.category_id = 7;
@@ -890,13 +890,15 @@ async fn destroy_fitting_t3_struct_roles_and_target_lock_guards() {
     let ship_type = sde
         .types
         .values()
-        .find(|t| t.category_id == 6 && t.capacity > 0.0)
+        .filter(|t| t.category_id == 6 && t.group_id == 25 && t.capacity > 0.0)
+        .min_by_key(|t| t.type_id)
         .map(|t| t.type_id)
         .unwrap_or(593);
     let turret_type = sde
         .types
         .values()
-        .find(|t| t.category_id == 7 && t.group_id == 55)
+        .filter(|t| t.category_id == 7 && t.group_id == 55)
+        .min_by_key(|t| t.type_id)
         .map(|t| t.type_id)
         .unwrap_or(581);
 
@@ -907,7 +909,7 @@ async fn destroy_fitting_t3_struct_roles_and_target_lock_guards() {
     .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
 
     let (base_char, sys_id) = ctx.db.with_snapshot(|snap| {
-        let ch = snap.characters.values().next().cloned().expect("demo char");
+        let ch = snap.characters.values().min_by_key(|c| c.character_id).cloned().expect("demo char");
         (ch, 30_000_142u32)
     });
     let char_id = 91_800_001i64;
@@ -1091,7 +1093,8 @@ async fn destroy_fitting_t3_struct_roles_and_target_lock_guards() {
         .sde
         .types
         .values()
-        .find(|t| t.group_id == 1246)
+        .filter(|t| t.group_id == 1246)
+        .min_by_key(|t| t.type_id)
         .map(|t| t.type_id)
         .unwrap_or(33_474);
     let depot_id = 1_918_000_600i64;
@@ -1379,7 +1382,7 @@ async fn mutants_cov_item_get_info_triage_targeting_passive_and_weapon_banks() {
             (tp1_id, 999_603, char_id, ship_id, InventoryFlag::MedSlot1),
             (tp2_id, 999_603, char_id, ship_id, InventoryFlag::MedSlot2),
             (tp_target_id, 999_601, target_char_id, i64::from(sys_id), InventoryFlag::None),
-            (depot_id, ctx.sde.types.values().find(|t| t.group_id == 1246).map(|t| t.type_id).unwrap_or(33_474), char_id, i64::from(sys_id), InventoryFlag::None),
+            (depot_id, ctx.sde.types.values().filter(|t| t.group_id == 1246).min_by_key(|t| t.type_id).map(|t| t.type_id).unwrap_or(33_474), char_id, i64::from(sys_id), InventoryFlag::None),
         ] {
             snap.items.insert(
                 iid,
@@ -1432,7 +1435,7 @@ async fn mutants_cov_item_get_info_triage_targeting_passive_and_weapon_banks() {
         max_capacitor: 500.0,
         ..Default::default()
     };
-    let depot_type = ctx.sde.types.values().find(|t| t.group_id == 1246).map(|t| t.type_id).unwrap_or(33_474);
+    let depot_type = ctx.sde.types.values().filter(|t| t.group_id == 1246).min_by_key(|t| t.type_id).map(|t| t.type_id).unwrap_or(33_474);
     spawn(ship_id, 999_601, DVec3::ZERO, MovementMode::Stop, base_cs.clone());
     spawn(skill_ship_id, 999_602, DVec3::new(100.0, 0.0, 0.0), MovementMode::Stop, base_cs.clone());
     spawn(depot_id, depot_type, DVec3::new(500.0, 0.0, 0.0), MovementMode::Stop, base_cs.clone());

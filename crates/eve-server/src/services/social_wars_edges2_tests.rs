@@ -37,6 +37,9 @@ fn setup_wars_edge_ctx() -> (
     i64,
 ) {
     let (ctx, mut agg_sess, agg_char, _ship_id, sys_id) = make_fighter_ctx_and_session();
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::VirtualServerClock::with_fixed_base(1_800_000_000),
+    ));
     let agg_corp = 98_600_101_i64;
     let def_corp = 98_600_102_i64;
     let ally_corp = 98_600_103_i64;

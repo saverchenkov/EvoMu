@@ -41,7 +41,7 @@ async fn asset_safety_wrap_auto_delivery_and_05_pct_vs_15_pct_fee_math() {
     let (sid_src, sid_dst, npc_station) = (88_201i64, 88_202i64, 60_003_760i64);
 
     ctx.db.with_mut_snapshot(|snap| {
-        let mut ch = snap.characters.values().next().cloned().expect("demo char");
+        let mut ch = snap.characters.values().min_by_key(|c| c.character_id).cloned().expect("demo char");
         ch.character_id = char_id;
         ch.corporation_id = corp_id;
         ch.solar_system_id = sys_id;
@@ -182,7 +182,13 @@ async fn pos_mgr_orbital_anchoring_gantry_upgrade_and_skyhook_reagent_siphon_mat
         .sde
         .solar_systems
         .values()
-        .find(|s| s.security_status <= 0.0 && !s.planet_ids.is_empty())
+        .filter(|s| {
+            (30_000_000..31_000_000).contains(&s.solar_system_id)
+                && s.region_id != 10_000_070
+                && s.security_status <= 0.0
+                && !s.planet_ids.is_empty()
+        })
+        .min_by_key(|s| s.solar_system_id)
         .and_then(|s| {
             let pid = s.planet_ids[0];
             let ppos = ctx.sde.celestials_in_system(s.solar_system_id).into_iter().find(|c| c.celestial_id == pid).map(|c| c.position).unwrap_or(DVec3::ZERO);
@@ -206,7 +212,7 @@ async fn pos_mgr_orbital_anchoring_gantry_upgrade_and_skyhook_reagent_siphon_mat
             __corp.alliance_id = Some(ally_id);
             __corp.members = HashSet::from([char_id]);
             __corp });
-        let base_ch = snap.characters.values().next().cloned().expect("demo char");
+        let base_ch = snap.characters.values().min_by_key(|c| c.character_id).cloned().expect("demo char");
         for (cid, c_corp, s_id) in [(char_id, corp_id, ship_id), (thief_id, 98_999, cruiser_id)] {
             let mut ch = base_ch.clone();
             ch.character_id = cid; ch.corporation_id = c_corp; ch.solar_system_id = null_sys; ch.active_ship_id = s_id;

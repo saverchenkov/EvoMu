@@ -37,12 +37,14 @@ fn find_highsec_system(sde: &SdeRegistry) -> SolarSystemId {
 fn find_pochven_or_lowsec_system(sde: &SdeRegistry) -> SolarSystemId {
     sde.solar_systems
         .values()
-        .find(|s| s.region_id == 10_000_070)
+        .filter(|s| s.region_id == 10_000_070)
+        .min_by_key(|s| s.solar_system_id)
         .map(|s| s.solar_system_id)
         .unwrap_or_else(|| {
             sde.solar_systems
                 .values()
-                .find(|s| s.security_status < 0.45 && s.solar_system_id < 31_000_000)
+                .filter(|s| s.security_status < 0.45 && s.solar_system_id < 31_000_000)
+                .min_by_key(|s| s.solar_system_id)
                 .map(|s| s.solar_system_id)
                 .unwrap_or(30_000_119)
         })
@@ -51,7 +53,8 @@ fn find_pochven_or_lowsec_system(sde: &SdeRegistry) -> SolarSystemId {
 fn find_ship_type_id(sde: &SdeRegistry) -> u32 {
     sde.types
         .values()
-        .find(|t| t.category_id == 6 && t.capacity > 50.0)
+        .filter(|t| t.category_id == 6 && t.group_id == 25 && t.capacity > 50.0)
+        .min_by_key(|t| t.type_id)
         .map(|t| t.type_id)
         .unwrap_or(587)
 }

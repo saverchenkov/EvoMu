@@ -167,11 +167,12 @@ async fn do_action_colocation_fw_cosmos_and_standing_error_branches() {
         .sde
         .agents
         .values()
-        .find(|a| {
+        .filter(|a| {
             a.agent_type_id == 9
                 && a.solar_system_id.is_some()
                 && ctx.sde.factions.values().any(|f| f.militia_corporation_id == Some(a.corporation_id))
         })
+        .min_by_key(|a| a.agent_id)
         .cloned()
     {
         let mut fw_sess = char_session(char_id, fw_ag.solar_system_id, fw_ag.station_id);
@@ -192,7 +193,8 @@ async fn do_action_colocation_fw_cosmos_and_standing_error_branches() {
         .sde
         .agents
         .values()
-        .find(|a| matches!(a.agent_type_id, 5 | 8 | 12) && a.solar_system_id.is_some())
+        .filter(|a| matches!(a.agent_type_id, 5 | 8 | 12) && a.solar_system_id.is_some())
+        .min_by_key(|a| a.agent_id)
         .cloned()
     {
         let mut c_sess = char_session(char_id, cosmos_ag.solar_system_id, cosmos_ag.station_id);
@@ -237,18 +239,20 @@ async fn mission_completion_expiry_penalty_and_courier_delivery_branches() {
         .sde
         .missions
         .iter()
-        .find(|(_, t)| {
+        .filter(|(_, t)| {
             t.is_courier
                 && !t.content_template.as_deref().unwrap_or_default().contains("Trade")
         })
+        .min_by_key(|&(&id, _)| id)
         .or_else(|| {
             ctx.sde
                 .missions
                 .iter()
-                .find(|(_, t)| !t.content_template.as_deref().unwrap_or_default().contains("Trade"))
+                .filter(|(_, t)| !t.content_template.as_deref().unwrap_or_default().contains("Trade"))
+                .min_by_key(|&(&id, _)| id)
         })
         .map(|(&id, _)| id)
-        .unwrap_or_else(|| *ctx.sde.missions.keys().next().expect("SDE mission"));
+        .unwrap_or_else(|| ctx.sde.missions.keys().copied().min().expect("SDE mission"));
 
     // 1. Accepting an expired offer returns MissionOfferExpired
     ctx.db.with_mut_snapshot(|snap| {
@@ -308,7 +312,14 @@ async fn mission_completion_expiry_penalty_and_courier_delivery_branches() {
     });
 
     // 3. Courier mission completion: wrong station -> CourierNotAtDestinationStation, missing cargo -> MissionIncomplete, valid cargo -> Completed
-    let dest_st = *ctx.sde.stations.keys().find(|&&k| k != st_id).unwrap_or(&(st_id + 1));
+    let dest_st = ctx
+        .sde
+        .stations
+        .keys()
+        .copied()
+        .filter(|&k| k != st_id)
+        .min()
+        .unwrap_or(st_id + 1);
     ctx.db.with_mut_snapshot(|snap| {
         let m_mut = snap.active_missions.get_mut(&(char_id, mid)).unwrap();
         m_mut.state = "Accepted".into();

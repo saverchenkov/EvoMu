@@ -27,7 +27,8 @@ fn find_highsec_system(sde: &SdeRegistry) -> SolarSystemId {
 fn find_ship_type_id(sde: &SdeRegistry) -> u32 {
     sde.types
         .values()
-        .find(|t| t.category_id == 6 && t.capacity > 50.0)
+        .filter(|t| t.category_id == 6 && t.group_id == 25 && t.capacity > 50.0)
+        .min_by_key(|t| t.type_id)
         .map(|t| t.type_id)
         .unwrap_or(587)
 }

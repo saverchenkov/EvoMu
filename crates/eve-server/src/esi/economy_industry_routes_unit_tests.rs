@@ -907,7 +907,9 @@ fn economy_industry_routes_errors_corp_filtering_job_meta_fallbacks_and_edge_bra
 
     // Exercise resolve_planet_type_name across real SDE systems to hit planet-type keywords
     let mut seen_types = std::collections::HashSet::new();
-    for &sid in ctx.sde.solar_systems.keys().take(40) {
+    let mut sids: Vec<u32> = ctx.sde.solar_systems.keys().copied().collect();
+    sids.sort_unstable();
+    for sid in sids.into_iter().take(40) {
         for c in ctx.sde.celestials_in_system(sid) {
             if c.group_id == 7 {
                 seen_types.insert(resolve_planet_type_name(&ctx, sid, c.celestial_id));

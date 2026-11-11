@@ -171,19 +171,26 @@ async fn try_send_h2_grpc_call(
     }
     let request = builder.body(()).expect("build h2 req");
     let (response_fut, mut send_stream) = client.send_request(request, false)?;
-    if !frame.is_empty() {
-        send_stream.send_data(frame, true)?;
+    let send_res = if !frame.is_empty() {
+        send_stream.send_data(frame, true)
     } else {
-        send_stream.send_data(Bytes::new(), true)?;
-    }
+        send_stream.send_data(Bytes::new(), true)
+    };
 
-    let response = response_fut.await?;
+    let response = match response_fut.await {
+        Ok(resp) => resp,
+        Err(resp_err) => {
+            send_res?;
+            return Err(resp_err);
+        }
+    };
     let status = response.status();
     let resp_headers = response.headers().clone();
     // gRPC Trailers-Only response (server closes before reading request body; no data frames follow).
     if resp_headers.contains_key("grpc-status") {
         return Ok((status, resp_headers, Bytes::new(), http::HeaderMap::new()));
     }
+    send_res?;
     let mut body = response.into_body();
     let mut data = BytesMut::new();
     while let Some(chunk) = body.data().await {

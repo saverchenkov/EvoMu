@@ -10,11 +10,16 @@ use std::collections::HashMap;
 
 fn build_synthetic_sde() -> SdeRegistry {
     let mut sde = SdeRegistry::with_canonical_seed();
-    let base_type = sde.types.values().next().expect("seed has types").clone();
+    let base_type = sde
+        .types
+        .values()
+        .min_by_key(|t| t.type_id)
+        .expect("seed has types")
+        .clone();
     let base_bp = sde
         .blueprints
         .values()
-        .next()
+        .min_by_key(|b| b.blueprint_type_id)
         .expect("seed has blueprints")
         .clone();
 
@@ -25,7 +30,12 @@ fn build_synthetic_sde() -> SdeRegistry {
         (60_011_866i64, 10_000_032u32, 1_000_114i64, 500_004i64),
         (60_004_588i64, 10_000_030u32, 1_000_054i64, 500_002i64),
     ];
-    let template_station = sde.stations.values().next().expect("seed has stations").clone();
+    let template_station = sde
+        .stations
+        .values()
+        .min_by_key(|s| s.station_id)
+        .expect("seed has stations")
+        .clone();
     for (sid, rid, owner_corp, faction_id) in hub_factions {
         let st = sde.stations.entry(sid).or_insert_with(|| {
             let mut s = template_station.clone();

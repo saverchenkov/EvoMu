@@ -1012,7 +1012,13 @@ async fn fw_hq_system_ids_and_fleet_member_opt_outs_boundaries() {
 
     // When solar_systems is non-empty and only contains Onnamon (30_045_324), only Caldari (500_001) is retained
     let mut sde_one = SdeRegistry::default();
-    let sample_sys = ServerContext::new().sde.solar_systems.values().next().cloned().unwrap();
+    let sample_sys = ServerContext::new()
+        .sde
+        .solar_systems
+        .values()
+        .min_by_key(|s| s.solar_system_id)
+        .cloned()
+        .unwrap();
     sde_one.solar_systems.clear();
     sde_one.solar_systems.insert(30_045_324, sample_sys);
     let ctx_one = ServerContext::with_sde_and_repository(
@@ -1518,7 +1524,13 @@ fn compute_required_hypercores_and_title_bitmask_role_member_boundaries() {
     assert_eq!(member_rep.dict_get("blockRoles"), Some(&PyRep::Integer(0)));
     assert_eq!(member_rep.dict_get("blocksRoles"), Some(&PyRep::Integer(0)));
 
-    let npc_corp_id = *ctx.sde.npc_corporations.keys().next().expect("SDE NPC corp");
+    let npc_corp_id = ctx
+        .sde
+        .npc_corporations
+        .keys()
+        .copied()
+        .min()
+        .expect("SDE NPC corp");
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&ceo_id) { ch.corporation_id = npc_corp_id; }
     });
@@ -1714,11 +1726,18 @@ async fn agent_mgr_implicit_greeting_vs_explicit_offer_and_client_compat_states(
     assert_eq!(loc_space.dict_get("locationID"), Some(&PyRep::Integer(30_000_142)));
 
     // 2. `handle_with_bound("agentMgr", "DoAction", &[])` (`is_implicit_greeting == true`) vs explicit `DoAction([2])` (`#796`, `#797`):
-    let ctx = ServerContext::new();
+    let ctx = ServerContext::new().with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
     let char_id = 90_000_001_i64;
     let kw = HashMap::new();
 
-    let l2_ag = ctx.sde.agents.values().find(|a| a.level == 2 && a.agent_type_id == 2 && a.station_id.is_some() && a.solar_system_id.is_some()).cloned().unwrap();
+    let l2_ag = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| a.level == 2 && a.agent_type_id == 2 && a.station_id.is_some() && a.solar_system_id.is_some())
+        .min_by_key(|a| a.agent_id)
+        .cloned()
+        .unwrap();
     let (l2_sys, l2_st) = (l2_ag.solar_system_id.unwrap(), l2_ag.station_id.unwrap());
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -1748,7 +1767,14 @@ async fn agent_mgr_implicit_greeting_vs_explicit_offer_and_client_compat_states(
     let explicit_l2_err = handle_with_bound(&ctx, &mut sess, Some(&bound_l2), "agentMgr", "DoAction", &[PyRep::Integer(2)], &kw).await.unwrap().unwrap_err();
     assert_eq!(explicit_l2_err.code, "InsufficientAgentStanding");
 
-    let l1_ag = ctx.sde.agents.values().find(|a| a.level == 1 && a.agent_type_id == 2 && a.station_id.is_some() && a.solar_system_id.is_some()).cloned().unwrap();
+    let l1_ag = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| a.level == 1 && a.agent_type_id == 2 && a.station_id.is_some() && a.solar_system_id.is_some())
+        .min_by_key(|a| a.agent_id)
+        .cloned()
+        .unwrap();
     let (l1_sys, l1_st) = (l1_ag.solar_system_id.unwrap(), l1_ag.station_id.unwrap());
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -1764,7 +1790,7 @@ async fn agent_mgr_implicit_greeting_vs_explicit_offer_and_client_compat_states(
     let greet_l1 = handle_with_bound(&ctx, &mut sess, Some(&bound_l1), "agentMgr", "DoAction", &[], &kw).await.unwrap().unwrap();
     assert_eq!(greet_l1.dict_get("state"), Some(&PyRep::String("Refused".into())));
 
-    let mid = *ctx.sde.missions.keys().next().unwrap();
+    let mid = ctx.sde.missions.keys().copied().min().unwrap();
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) { ch.standings.clear(); }
         snap.active_missions.insert(
@@ -1780,7 +1806,14 @@ async fn agent_mgr_implicit_greeting_vs_explicit_offer_and_client_compat_states(
     assert_eq!(greet_acc.dict_get("missionState"), Some(&PyRep::Integer(2)));
     assert_eq!(greet_acc.dict_get("missionID"), Some(&PyRep::Integer(mid as i64)));
 
-    if let Some(rnd_ag) = ctx.sde.agents.values().find(|a| a.agent_type_id == 4 && a.station_id.is_some() && a.solar_system_id.is_some()).cloned() {
+    if let Some(rnd_ag) = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| a.agent_type_id == 4 && a.station_id.is_some() && a.solar_system_id.is_some())
+        .min_by_key(|a| a.agent_id)
+        .cloned()
+    {
         let (r_sys, r_st) = (rnd_ag.solar_system_id.unwrap(), rnd_ag.station_id.unwrap());
         ctx.db.with_mut_snapshot(|snap| {
             snap.active_missions.clear();

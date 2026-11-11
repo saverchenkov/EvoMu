@@ -22,18 +22,20 @@ use std::sync::{Arc, Mutex};
 #[test]
 fn operation_definitions_dungeon_resolution_and_prerequisite_trees() {
     let (ctx, _sess, _cid, _sid, _sys) = make_fighter_ctx_and_session();
-    let (&any_dungeon_id, _) = ctx
+    let any_dungeon_id = *ctx
         .sde
         .dungeons
-        .iter()
-        .next()
+        .keys()
+        .min()
         .expect("SDE has at least one dungeon");
-    let (&second_dungeon_id, _) = ctx
+    let second_dungeon_id = ctx
         .sde
         .dungeons
-        .iter()
-        .nth(1)
-        .unwrap_or((&any_dungeon_id, &ctx.sde.dungeons[&any_dungeon_id]));
+        .keys()
+        .copied()
+        .filter(|&id| id != any_dungeon_id)
+        .min()
+        .unwrap_or(any_dungeon_id);
 
     let mut defs = OperationDefinitions::default();
     // [amarr, caldari, gallente, minmatar]
