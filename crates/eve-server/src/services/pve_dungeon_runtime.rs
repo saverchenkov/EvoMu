@@ -501,13 +501,20 @@ pub async fn on_warp_landed_at_dungeon_pocket_if_present(
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct MaterializedDungeonRoomEntities {
+    pub object_ids: Vec<i64>,
+    pub npc_ids: Vec<i64>,
+    pub next_gate_id: Option<i64>,
+}
+
 /// Materializes a room's objects, acceleration gate, and immediate NPC groups into the system ballpark.
 pub(crate) async fn materialize_dungeon_room_entities(
     ctx: &ServerContext,
     sys_id: SolarSystemId,
     instance_id: i64,
     room_vec_idx: usize,
-) -> Result<(Vec<i64>, Vec<i64>, Option<i64>), BridgeRpcError> {
+) -> Result<MaterializedDungeonRoomEntities, BridgeRpcError> {
     enum SpawnPlan {
         Object {
             ball_id: i64,
@@ -708,7 +715,11 @@ pub(crate) async fn materialize_dungeon_room_entities(
         }
     }
 
-    Ok((obj_ids, npc_ids, gate_id_opt))
+    Ok(MaterializedDungeonRoomEntities {
+        object_ids: obj_ids,
+        npc_ids,
+        next_gate_id: gate_id_opt,
+    })
 }
 
 /// Despawns all remaining dungeon objects, gates, and NPCs when a dungeon completes and emits `OnDungeonCompleted`.

@@ -313,3 +313,7 @@ pub fn dispatch_dungeon_trigger_notify_actions(
 #[path = "notify_emitters_channel_events_tests.rs"]
 mod notify_emitters_channel_events_tests;
 
+#[cfg(test)]
+#[path = "notify_emitters_channel_events_edges_tests.rs"]
+mod notify_emitters_channel_events_edges_tests;
+

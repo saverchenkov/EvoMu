@@ -36,6 +36,17 @@ fn open_window(snap: &WorldStateSnapshot, id: i64, now: u64) -> Option<(u64, u64
         .filter(|(start, end)| *start <= now && now < *end)
 }
 
+/// Base V24 hourly reagent harvest yield by planet `type_id` prior to radius scaling.
+pub fn planet_type_base_hourly_reagent_yield(type_id: u32) -> u64 {
+    match type_id {
+        12 => 1_200,
+        2015 => 1_000,
+        2014 | 2063 => 600,
+        2017 | 13 => 400,
+        _ => super::sov_gameplay::SKYHOOK_HOURLY_REAGENT_YIELD,
+    }
+}
+
 /// Computes V24 per-planet-type hourly reagent harvest yield from SDE celestial type and radius.
 pub fn planet_hourly_reagent_yield(
     sde: &SdeRegistry,
@@ -55,13 +66,13 @@ pub fn planet_hourly_reagent_yield(
         2015 => (1_000.0, 750, 1_500),   // Lava -> Magmatic Gas
         2014 | 2063 => (600.0, 450, 900),
         2017 | 13 => (400.0, 300, 600),
-        _ => return fallback,
+        _ => return planet_type_base_hourly_reagent_yield(planet.type_id),
     };
     if planet.radius > 0.0 {
         let factor = (planet.radius / 5_000_000.0).clamp(0.75, 1.5);
         ((base * factor).round() as u64).clamp(min_y, max_y)
     } else {
-        base as u64
+        planet_type_base_hourly_reagent_yield(planet.type_id)
     }
 }
 

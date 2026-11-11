@@ -701,4 +701,5 @@ fn set_corp_allowed(ctx: &ServerContext, session: &mut SessionState, args: &[PyR
 }
 
 #[cfg(test)] #[path = "fw_enlistment_tests.rs"] mod fw_enlistment_tests;
+#[cfg(test)] #[path = "fw_enlistment_edges_tests.rs"] mod fw_enlistment_edges_tests;
 

@@ -484,6 +484,53 @@ pub fn record_server_opportunity_event(
     if matching_defs.is_empty() {
         return;
     }
+    let needs_write = db.with_snapshot(|snap| {
+        let Some(raw) = snap.quasar_state_blobs.get("quasar_opportunities") else {
+            return true;
+        };
+        let Ok(state) = serde_json::from_str::<serde_json::Value>(raw) else {
+            return true;
+        };
+        let ch_key = character_id.to_string();
+        let Some(eobj) = state.get(&ch_key).and_then(|v| v.as_object()) else {
+            return true;
+        };
+        if !eobj.contains_key("completed")
+            || !eobj.contains_key("progress")
+            || !eobj.contains_key("completed_at")
+        {
+            return true;
+        }
+        let Some(prog_obj) = eobj.get("progress").and_then(|v| v.as_object()) else {
+            return true;
+        };
+        let Some(comp_arr) = eobj.get("completed").and_then(|v| v.as_array()) else {
+            return true;
+        };
+        for def in &matching_defs {
+            for cond in &def.conditions {
+                if event_names.contains(&cond.event_name.as_str()) {
+                    let k = format!("{}:{}", def.id, cond.condition_id);
+                    let prev = prog_obj.get(&k).and_then(|v| v.as_u64()).unwrap_or(0);
+                    let next = prev.saturating_add(delta).min(cond.target_value);
+                    if next != prev || !prog_obj.contains_key(&k) {
+                        return true;
+                    }
+                }
+            }
+            let all_done = def.conditions.iter().all(|c| {
+                let k = format!("{}:{}", def.id, c.condition_id);
+                prog_obj.get(&k).and_then(|v| v.as_u64()).unwrap_or(0) >= c.target_value
+            });
+            if all_done && !comp_arr.iter().any(|x| x.as_u64() == Some(u64::from(def.id))) {
+                return true;
+            }
+        }
+        false
+    });
+    if !needs_write {
+        return;
+    }
     db.with_mut_snapshot(|snap| {
         let mut state: serde_json::Value = snap
             .quasar_state_blobs
@@ -636,4 +683,7 @@ pub fn complete_system_tale_encounter(
 #[cfg(test)]
 #[path = "quasar_goal_tale_notices_tests.rs"]
 mod quasar_goal_tale_notices_tests;
+#[cfg(test)]
+#[path = "quasar_goal_tale_notices_edges_tests.rs"]
+mod quasar_goal_tale_notices_edges_tests;
 

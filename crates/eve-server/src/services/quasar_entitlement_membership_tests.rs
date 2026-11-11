@@ -173,3 +173,7 @@ fn user_entitlements_logo_grants_membership_and_direct_skill_purchases() {
     assert_eq!(call(&router, &player, "eve.character.skill.PurchaseSkillsRequest", ok_sk.clone(), now).status_code, STATUS_OK);
     assert_eq!(call(&router, &player, "eve.character.skill.PurchaseSkillsRequest", ok_sk, now).status_code, STATUS_CONFLICT);
 }
+
+#[cfg(test)]
+#[path = "quasar_entitlement_membership_extra_unit_tests.rs"]
+mod quasar_entitlement_membership_extra_unit_tests;

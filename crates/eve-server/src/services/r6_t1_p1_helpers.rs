@@ -173,7 +173,11 @@ pub(crate) async fn step_active_breacher_dots(
         }
 
         let total_max_hp = (cs.max_shield_hp + cs.max_armor_hp + cs.max_structure_hp).max(1.0);
-        let dps = crate::formulas::breacher_pod_tick_damage(total_max_hp, dot.pct_cap_fraction, dot.flat_cap_dps);
+        let dps = crate::formulas::breacher_pod_tick_damage(
+            dot.flat_cap_dps,
+            dot.pct_cap_fraction,
+            total_max_hp,
+        );
         let step_s = dt.min(dot.remaining_s).max(0.0);
         let raw_dmg = dps * step_s;
         dot.tick_damage = dps;

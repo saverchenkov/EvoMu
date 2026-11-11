@@ -65,3 +65,7 @@ fn default_and_sde_progression_managers_register_all_tracks() {
         assert_eq!(rsp.status_code, STATUS_OK, "{ty}");
     }
 }
+
+#[cfg(test)]
+#[path = "quasar_progression_extra_unit_tests.rs"]
+mod quasar_progression_extra_unit_tests;

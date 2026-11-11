@@ -386,4 +386,122 @@ fn due_payment_schedules_renew_with_quick_pay_or_cancel_without_token() {
     let mut req_msg = DynamicQuasarMessage::new("ListRequest");
     req_msg.set(1, DynamicValue::Message(Box::new(page)));
     assert!(encode_targeted_offer_list_response(&offers, 1, &req_msg).is_empty());
+
+    // Default seeded catalog includes Omega Weekly 15,000 Free SP offer (1005) and tag.
+    let db_seed = Arc::new(WorldRepository::with_demo_seed());
+    let sde_seed = SdeRegistry::default();
+    db_seed.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.nes_store_catalog = None;
+        ensure_store_catalog_seeded(snap, &sde_seed);
+    });
+    db_seed.with_snapshot(|snap| {
+        let cat = read_store_catalog(snap);
+        assert!(
+            cat.offers.iter().any(|o| o.id == 1005 && o.price_plex == 0),
+            "default catalog must include 0-PLEX Omega Weekly offer 1005"
+        );
+        assert!(
+            cat.products
+                .iter()
+                .any(|p| p.id == 105 && p.type_id == 0 && p.quantity == 15_000),
+            "default catalog must include 15,000 SP product 105"
+        );
+        let tags = read_store_offer_tags(snap);
+        assert!(
+            tags.get(&1005)
+                .is_some_and(|t| t.iter().any(|s| s == "omega-weekly-free-sp")),
+            "offer 1005 must carry omega-weekly-free-sp tag"
+        );
+    });
+
+    // Verify `ensure_store_catalog_seeded` backfills offer 1005 & product 105 into an existing custom catalog idempotently
+    db_seed.with_mut_snapshot(|snap| {
+        let mut cat = read_store_catalog(snap);
+        cat.offers.retain(|o| o.id != 1005);
+        cat.products.retain(|p| p.id != 105);
+        cat.offers.push(StoreOffer {
+            id: 9999,
+            name: "Custom Offer".into(),
+            description: "".into(),
+            category_id: 1,
+            price_plex: 42,
+            product_ids: vec![101],
+            targeted: false,
+            price_cents: None,
+            currency: None,
+        });
+        snap.quasar_commerce.nes_store_catalog = Some(cat);
+        ensure_store_catalog_seeded(snap, &sde_seed);
+        ensure_store_catalog_seeded(snap, &sde_seed);
+    });
+    db_seed.with_snapshot(|snap| {
+        let cat = read_store_catalog(snap);
+        assert!(cat.offers.iter().any(|o| o.id == 9999));
+        assert_eq!(cat.offers.iter().filter(|o| o.id == 1005).count(), 1);
+        assert_eq!(cat.products.iter().filter(|p| p.id == 105).count(), 1);
+    });
+
+    // Verify `PurchaseRequest` on offer 1005 (0 PLEX, product 105 has type_id == 0):
+    // Rejected when `free_fast_checkout_plex == false`, succeeds when `true`, and never creates a `type_id == 0` inventory item.
+    let uid_sp = 41u64;
+    let cid_sp = 90_000_041i64;
+    router.db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.nes_store_catalog = None;
+        ensure_store_catalog_seeded(snap, &sde_seed);
+        let mut ch = snap.characters.values().next().unwrap().clone();
+        ch.character_id = cid_sp;
+        ch.user_id = uid_sp;
+        ch.clone_grade = 2;
+        ch.station_id = Some(60_003_760);
+        snap.characters.insert(cid_sp, ch);
+        snap.account_plex_vault.insert(uid_sp, 100);
+    });
+    let sess_sp = make_sess(Some(uid_sp), Some(cid_sp), service_roles::ROLE_PLAYER_DEFAULT);
+    let mut buy_1005 = Vec::new();
+    let mut off_inner = Vec::new();
+    encode_string_field(1, "1005", &mut off_inner);
+    encode_bytes_field(1, &off_inner, &mut buy_1005);
+    encode_varint_field(2, 1, &mut buy_1005);
+
+    let t_claim = 1_750_000_000u64;
+    router
+        .free_fast_checkout_plex
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        call(
+            &router,
+            &sess_sp,
+            "eve_public.plex.vault.api.PurchaseRequest",
+            buy_1005.clone(),
+            t_claim,
+        )
+        .status_code,
+        STATUS_BAD_REQUEST
+    );
+
+    router
+        .free_fast_checkout_plex
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        call(
+            &router,
+            &sess_sp,
+            "eve_public.plex.vault.api.PurchaseRequest",
+            buy_1005,
+            t_claim,
+        )
+        .status_code,
+        STATUS_OK
+    );
+    router.db.with_snapshot(|snap| {
+        assert_eq!(snap.account_plex_vault[&uid_sp], 100);
+        assert!(
+            !snap.items.values().any(|i| i.owner_id == cid_sp && i.type_id == 0),
+            "Free SP product (type_id == 0) must not create an inventory item"
+        );
+    });
 }
+
+#[cfg(test)]
+#[path = "quasar_payment_store_types_extra_unit_tests.rs"]
+mod quasar_payment_store_types_extra_unit_tests;

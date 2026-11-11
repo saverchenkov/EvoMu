@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use super::quasar_payment_store::*;
+use super::super::*;
 use crate::quasar_gateway::{
     PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_OK,
     STATUS_UNAUTHORIZED,
@@ -150,10 +150,7 @@ fn seed_store_catalog(db: &WorldRepository) {
                 consumed: false,
             },
         ];
-        snap.service_state_blobs.insert(
-            "payment_tokens".to_string(),
-            serde_json::to_string(&tokens).unwrap(),
-        );
+        snap.quasar_commerce.payment_tokens = tokens;
     });
 }
 
@@ -442,4 +439,256 @@ fn cost_and_token_purchase_prefix_stripping_negative_price_and_recipient_validat
         1_700_000_206,
     );
     assert_eq!(r.status_code, STATUS_BAD_REQUEST);
+}
+
+#[test]
+fn schedule_token_quickpay_and_purchase_idor_and_predicate_isolation() {
+    let (router, db) = new_router();
+    seed_store_catalog(&db);
+    let u1_sess = make_sess(Some(1), Some(90_000_001), service_roles::ROLE_PLAYER_DEFAULT);
+    let u2_sess = make_sess(Some(2), None, service_roles::ROLE_PLAYER_DEFAULT);
+
+    // Seed schedules in order: other-user same-type FIRST, same-user other-type SECOND, target THIRD
+    // so flipping any predicate clause (`&& -> ||`, `id != sched_id`, `user_id != uid`, `schedule_type != stype`) picks a wrong record.
+    db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.payment_schedules = vec![
+            eve_db::PaymentScheduleRecord {
+                id: 102,
+                user_id: 2,
+                schedule_type: 1,
+                next_payment_unix: 1_700_086_400,
+                offer_id: "offer-u2-s1".into(),
+                interval_days: 30,
+                created_unix: 1_700_000_000,
+            },
+            eve_db::PaymentScheduleRecord {
+                id: 103,
+                user_id: 1,
+                schedule_type: 2,
+                next_payment_unix: 1_700_086_400,
+                offer_id: "offer-u1-s2".into(),
+                interval_days: 60,
+                created_unix: 1_700_000_000,
+            },
+            eve_db::PaymentScheduleRecord {
+                id: 101,
+                user_id: 1,
+                schedule_type: 1,
+                next_payment_unix: 1_700_086_400,
+                offer_id: "offer-u1-s1".into(),
+                interval_days: 90,
+                created_unix: 1_700_000_000,
+            },
+        ];
+
+        // Tokens in order: u2 quick-pay FIRST, u1 non-quick-pay SECOND, u1 quick-pay THIRD
+        snap.quasar_commerce.payment_tokens = vec![
+            PaymentTokenRecord {
+                id: 702,
+                user_id: 2,
+                token_str: "u2-card-702".into(),
+                is_quick_pay: true,
+                consumed: false,
+            },
+            PaymentTokenRecord {
+                id: 703,
+                user_id: 1,
+                token_str: "u1-disabled-703".into(),
+                is_quick_pay: false,
+                consumed: false,
+            },
+            PaymentTokenRecord {
+                id: 701,
+                user_id: 1,
+                token_str: "u1-valid-701".into(),
+                is_quick_pay: true,
+                consumed: false,
+            },
+        ];
+    });
+
+    // 1. schedule.api.GetRequest: u1 gets 101 ("offer-u1-s1"), NOT 103; cross-user 102 is NOT_FOUND
+    let mk_nested_id = |id: u64| -> Vec<u8> {
+        let mut inner = Vec::new();
+        encode_varint_field(1, id, &mut inner);
+        let mut outer = Vec::new();
+        encode_bytes_field(1, &inner, &mut outer);
+        outer
+    };
+    let r101 = call(
+        &router,
+        &u1_sess,
+        "eve_public.payment.schedule.api.GetRequest",
+        mk_nested_id(101),
+        1_700_000_300,
+    );
+    assert_eq!(r101.status_code, STATUS_OK);
+    let bytes_101 = r101.payload.expect("101 payload").value;
+    assert!(bytes_101.windows(b"offer-u1-s1".len()).any(|w| w == b"offer-u1-s1"));
+    assert!(!bytes_101.windows(b"offer-u1-s2".len()).any(|w| w == b"offer-u1-s2"));
+
+    assert_eq!(
+        call(
+            &router,
+            &u1_sess,
+            "eve_public.payment.schedule.api.GetRequest",
+            mk_nested_id(102),
+            1_700_000_301,
+        )
+        .status_code,
+        STATUS_NOT_FOUND
+    );
+    assert_eq!(
+        call(
+            &router,
+            &u2_sess,
+            "eve_public.payment.schedule.api.GetRequest",
+            mk_nested_id(102),
+            1_700_000_302,
+        )
+        .status_code,
+        STATUS_OK
+    );
+
+    // 2. schedule.api.GetActiveByTypeRequest: u1 type 1 returns id 101 (NOT 102 or 103); type 9 is NOT_FOUND
+    let mut stype_1 = Vec::new();
+    encode_varint_field(1, 1, &mut stype_1);
+    let r_act = call(
+        &router,
+        &u1_sess,
+        "eve_public.payment.schedule.api.GetActiveByTypeRequest",
+        stype_1,
+        1_700_000_303,
+    );
+    assert_eq!(r_act.status_code, STATUS_OK);
+    assert_eq!(r_act.payload.expect("active sched").value, mk_nested_id(101));
+
+    let mut stype_9 = Vec::new();
+    encode_varint_field(1, 9, &mut stype_9);
+    assert_eq!(
+        call(
+            &router,
+            &u1_sess,
+            "eve_public.payment.schedule.api.GetActiveByTypeRequest",
+            stype_9,
+            1_700_000_304,
+        )
+        .status_code,
+        STATUS_NOT_FOUND
+    );
+
+    // 3. payment.token.api.GetQuickPayRequest: u1 receives ONLY token 701 (excludes u2's 702 and non-QP 703)
+    let r_qp = call(
+        &router,
+        &u1_sess,
+        "eve_public.payment.token.api.GetQuickPayRequest",
+        Vec::new(),
+        1_700_000_305,
+    );
+    assert_eq!(r_qp.status_code, STATUS_OK);
+    assert_eq!(r_qp.payload.expect("quick pay").value, mk_nested_id(701));
+
+    // 4. payment.token.api.GetRequest: u1 gets 701 ("u1-valid-701"), NOT 703; u1 requesting u2's 702 -> NOT_FOUND
+    let r_tok = call(
+        &router,
+        &u1_sess,
+        "eve_public.payment.token.api.GetRequest",
+        mk_nested_id(701),
+        1_700_000_306,
+    );
+    assert_eq!(r_tok.status_code, STATUS_OK);
+    let tok_bytes = r_tok.payload.expect("tok payload").value;
+    assert!(tok_bytes.windows(b"u1-valid-701".len()).any(|w| w == b"u1-valid-701"));
+    assert!(!tok_bytes.windows(b"u1-disabled-703".len()).any(|w| w == b"u1-disabled-703"));
+    assert_eq!(
+        call(
+            &router,
+            &u1_sess,
+            "eve_public.payment.token.api.GetRequest",
+            mk_nested_id(702),
+            1_700_000_307,
+        )
+        .status_code,
+        STATUS_NOT_FOUND
+    );
+
+    // 5. TokenRequest: cross-user token 702 -> FORBIDDEN; non-quick-pay 703 -> BAD_REQUEST; valid 701 -> OK
+    let mk_tok_purchase = |tok_id: u64| -> Vec<u8> {
+        let mut req = Vec::new();
+        encode_varint_field(1, 1002, &mut req);
+        encode_varint_field(2, tok_id, &mut req);
+        req
+    };
+    assert_eq!(
+        call(
+            &router,
+            &u1_sess,
+            "eve_public.payment.purchase.api.TokenRequest",
+            mk_tok_purchase(702),
+            1_700_000_308,
+        )
+        .status_code,
+        STATUS_FORBIDDEN
+    );
+    assert_eq!(
+        call(
+            &router,
+            &u1_sess,
+            "eve_public.payment.purchase.api.TokenRequest",
+            mk_tok_purchase(703),
+            1_700_000_309,
+        )
+        .status_code,
+        STATUS_BAD_REQUEST
+    );
+    assert_eq!(
+        call(
+            &router,
+            &u1_sess,
+            "eve_public.payment.purchase.api.TokenRequest",
+            mk_tok_purchase(701),
+            1_700_000_310,
+        )
+        .status_code,
+        STATUS_OK
+    );
+
+    // 6. DisableAllRequest as u1 disables ONLY u1's active quick-pay token and leaves u2's 702 quick-pay intact
+    db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.payment_tokens.push(PaymentTokenRecord {
+            id: 705,
+            user_id: 1,
+            token_str: "u1-fresh-705".into(),
+            is_quick_pay: true,
+            consumed: false,
+        });
+    });
+    router.pending_notices.write().unwrap().clear();
+    router.routing_cache.write().unwrap().entries.clear();
+    assert_eq!(
+        call(
+            &router,
+            &u1_sess,
+            "eve_public.payment.token.api.DisableAllRequest",
+            Vec::new(),
+            1_700_000_311,
+        )
+        .status_code,
+        STATUS_OK
+    );
+    let notice_payloads: Vec<Vec<u8>> = router
+        .routing_cache
+        .read()
+        .unwrap()
+        .entries
+        .iter()
+        .filter_map(|e| e.notice.payload.as_ref().map(|p| p.value.clone()))
+        .collect();
+    assert_eq!(notice_payloads.len(), 2);
+    assert_eq!(notice_payloads, vec![mk_nested_id(701), mk_nested_id(705)]);
+    db.with_snapshot(|snap| {
+        assert!(!snap.quasar_commerce.payment_tokens.iter().find(|t| t.id == 701).unwrap().is_quick_pay);
+        assert!(!snap.quasar_commerce.payment_tokens.iter().find(|t| t.id == 705).unwrap().is_quick_pay);
+        assert!(snap.quasar_commerce.payment_tokens.iter().find(|t| t.id == 702).unwrap().is_quick_pay);
+    });
 }

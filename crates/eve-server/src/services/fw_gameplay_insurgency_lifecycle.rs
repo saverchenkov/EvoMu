@@ -758,83 +758,141 @@ pub async fn tick_insurgency_campaigns(ctx: &ServerContext, now_unix: u64) {
     for cid in camp_ids {
         let _ = ensure_campaign_pirate_fob(ctx, cid).await;
 
-        let (action, notify_active) = ctx.db.with_mut_snapshot(|snap| {
-            let Some(camp) = snap.insurgency_runtime.campaigns.get(&cid).cloned() else {
-                return (None, None);
-            };
-            let (phase, _) = get_campaign_phase_and_timer(&camp, now_unix);
-            if now_unix >= camp.winddown_end_unix {
-                return (Some("End"), None);
-            }
-            if phase == PHASE_FORECASTING {
-                return (None, None);
-            }
-            let notify_active = if phase == PHASE_ACTIVE && snap.insurgency_runtime.active_state_notified.insert(cid) {
-                Some((camp.systems.clone(), camp.pirate_faction_id, camp.fob_solar_system_id))
-            } else {
-                None
-            };
-            if phase == PHASE_ACTIVE {
-                if notify_active.is_some() {
-                    for &sys in &camp.systems {
-                        crate::services::security_mgr::sync_stage_gated_insurgency_sites_in_snap(
-                            &ctx.sde,
-                            snap,
-                            sys,
-                            now_unix,
-                        );
+        let (action, notify_active) = {
+            let (needs_active_notify, action_ro) = ctx.db.with_snapshot(|snap| {
+                let Some(camp) = snap.insurgency_runtime.campaigns.get(&cid) else {
+                    return (false, None);
+                };
+                let (phase, _) = get_campaign_phase_and_timer(camp, now_unix);
+                if now_unix >= camp.winddown_end_unix {
+                    return (false, Some("End"));
+                }
+                if phase == PHASE_FORECASTING {
+                    return (false, None);
+                }
+                let needs_notify =
+                    phase == PHASE_ACTIVE && !snap.insurgency_runtime.active_state_notified.contains(&cid);
+                if phase == PHASE_ACTIVE {
+                    if !snap.insurgency_runtime.campaign_outcomes.contains_key(&cid) {
+                        let p_mod = snap
+                            .insurgency_runtime
+                            .pirate_ambition_modifier
+                            .get(&camp.pirate_faction_id)
+                            .copied()
+                            .unwrap_or(0)
+                            .min(5);
+                        let c5 = camp
+                            .corruption_points
+                            .values()
+                            .filter(|&&pts| insurgency_stage(pts) >= 5)
+                            .count();
+                        let fob_destroyed = snap
+                            .structures
+                            .get(&(PIRATE_FOB_STRUCTURE_BASE_ID + cid))
+                            .is_some_and(|st| st.state == "Destroyed");
+                        if fob_destroyed {
+                            return (needs_notify, Some("ResolveEmpireWin"));
+                        }
+                        if c5 >= usize::from(5 + p_mod) {
+                            return (needs_notify, Some("Resolve"));
+                        }
                     }
+                    return (needs_notify, None);
                 }
                 if !snap.insurgency_runtime.campaign_outcomes.contains_key(&cid) {
-                    let p_mod = snap
-                        .insurgency_runtime
-                        .pirate_ambition_modifier
-                        .get(&camp.pirate_faction_id)
-                        .copied()
-                        .unwrap_or(0)
-                        .min(5);
-                    let _e_mod = snap
-                        .insurgency_runtime
-                        .empire_ambition_modifier
-                        .get(&camp.pirate_faction_id)
-                        .copied()
-                        .unwrap_or(0)
-                        .min(5);
-                    let c5 = camp
-                        .corruption_points
-                        .values()
-                        .filter(|&&pts| insurgency_stage(pts) >= 5)
-                        .count();
-                    let _s5 = camp
-                        .suppression_points
-                        .values()
-                        .filter(|&&pts| insurgency_stage(pts) >= 5)
-                        .count();
                     let fob_destroyed = snap
                         .structures
                         .get(&(PIRATE_FOB_STRUCTURE_BASE_ID + cid))
                         .is_some_and(|st| st.state == "Destroyed");
                     if fob_destroyed {
-                        return (Some("ResolveEmpireWin"), notify_active);
+                        return (needs_notify, Some("ResolveEmpireWin"));
                     }
-                    if c5 >= usize::from(5 + p_mod) {
+                    return (needs_notify, Some("Resolve"));
+                }
+                (needs_notify, None)
+            });
+            if !needs_active_notify {
+                (action_ro, None)
+            } else {
+                ctx.db.with_mut_snapshot(|snap| {
+                    let Some(camp) = snap.insurgency_runtime.campaigns.get(&cid).cloned() else {
+                        return (None, None);
+                    };
+                    let (phase, _) = get_campaign_phase_and_timer(&camp, now_unix);
+                    if now_unix >= camp.winddown_end_unix {
+                        return (Some("End"), None);
+                    }
+                    if phase == PHASE_FORECASTING {
+                        return (None, None);
+                    }
+                    let notify_active = if phase == PHASE_ACTIVE && snap.insurgency_runtime.active_state_notified.insert(cid) {
+                        Some((camp.systems.clone(), camp.pirate_faction_id, camp.fob_solar_system_id))
+                    } else {
+                        None
+                    };
+                    if phase == PHASE_ACTIVE {
+                        if notify_active.is_some() {
+                            for &sys in &camp.systems {
+                                crate::services::security_mgr::sync_stage_gated_insurgency_sites_in_snap(
+                                    &ctx.sde,
+                                    snap,
+                                    sys,
+                                    now_unix,
+                                );
+                            }
+                        }
+                        if !snap.insurgency_runtime.campaign_outcomes.contains_key(&cid) {
+                            let p_mod = snap
+                                .insurgency_runtime
+                                .pirate_ambition_modifier
+                                .get(&camp.pirate_faction_id)
+                                .copied()
+                                .unwrap_or(0)
+                                .min(5);
+                            let _e_mod = snap
+                                .insurgency_runtime
+                                .empire_ambition_modifier
+                                .get(&camp.pirate_faction_id)
+                                .copied()
+                                .unwrap_or(0)
+                                .min(5);
+                            let c5 = camp
+                                .corruption_points
+                                .values()
+                                .filter(|&&pts| insurgency_stage(pts) >= 5)
+                                .count();
+                            let _s5 = camp
+                                .suppression_points
+                                .values()
+                                .filter(|&&pts| insurgency_stage(pts) >= 5)
+                                .count();
+                            let fob_destroyed = snap
+                                .structures
+                                .get(&(PIRATE_FOB_STRUCTURE_BASE_ID + cid))
+                                .is_some_and(|st| st.state == "Destroyed");
+                            if fob_destroyed {
+                                return (Some("ResolveEmpireWin"), notify_active);
+                            }
+                            if c5 >= usize::from(5 + p_mod) {
+                                return (Some("Resolve"), notify_active);
+                            }
+                        }
+                        return (None, notify_active);
+                    }
+                    if !snap.insurgency_runtime.campaign_outcomes.contains_key(&cid) {
+                        let fob_destroyed = snap
+                            .structures
+                            .get(&(PIRATE_FOB_STRUCTURE_BASE_ID + cid))
+                            .is_some_and(|st| st.state == "Destroyed");
+                        if fob_destroyed {
+                            return (Some("ResolveEmpireWin"), notify_active);
+                        }
                         return (Some("Resolve"), notify_active);
                     }
-                }
-                return (None, notify_active);
+                    (None, notify_active)
+                })
             }
-            if !snap.insurgency_runtime.campaign_outcomes.contains_key(&cid) {
-                let fob_destroyed = snap
-                    .structures
-                    .get(&(PIRATE_FOB_STRUCTURE_BASE_ID + cid))
-                    .is_some_and(|st| st.state == "Destroyed");
-                if fob_destroyed {
-                    return (Some("ResolveEmpireWin"), notify_active);
-                }
-                return (Some("Resolve"), notify_active);
-            }
-            (None, notify_active)
-        });
+        };
 
         let active_sys_info: Option<(i64, i64, Vec<(u32, u8, u8)>)> = ctx.db.with_snapshot(|snap| {
             let camp = snap.insurgency_runtime.campaigns.get(&cid)?;

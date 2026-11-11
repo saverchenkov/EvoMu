@@ -189,11 +189,21 @@ impl QuasarCorpState {
         }
         let plans = self.skill_plans.read().unwrap_or_else(|e| e.into_inner()).clone();
         let counters = *self.id_counters.read().unwrap_or_else(|e| e.into_inner());
+        let c_json_opt = serde_json::to_string(&counters).ok();
+        let p_json_opt = serde_json::to_string(&plans).ok();
+        let already = db.with_snapshot(|snap| {
+            c_json_opt.as_ref().is_none_or(|j| snap.quasar_state_blobs.get("quasar_corp_counters") == Some(j))
+                && p_json_opt.as_ref().is_none_or(|j| snap.quasar_state_blobs.get("quasar_corp_plans") == Some(j))
+                && !snap.quasar_state_blobs.contains_key("quasar_corp_goals")
+        });
+        if already {
+            return;
+        }
         db.with_mut_snapshot(|snap| {
-            if let Ok(c_json) = serde_json::to_string(&counters) {
+            if let Some(c_json) = c_json_opt {
                 snap.quasar_state_blobs.insert("quasar_corp_counters".into(), c_json);
             }
-            if let Ok(p_json) = serde_json::to_string(&plans) {
+            if let Some(p_json) = p_json_opt {
                 snap.quasar_state_blobs.insert("quasar_corp_plans".into(), p_json);
             }
             snap.quasar_state_blobs.remove("quasar_corp_goals");

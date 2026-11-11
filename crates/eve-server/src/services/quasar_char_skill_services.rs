@@ -1118,6 +1118,10 @@ pub fn encode_epicarc_progress(arc_id: u32, branch_stage: u32, completed: bool) 
 
 /// Fallback wire decoder for registered request handlers whose proto schemas are not in the SQLite catalog.
 pub fn decode_wire_dynamic(full_name: &str, buf: &[u8]) -> DynamicQuasarMessage {
+    decode_wire_dynamic_depth(full_name, buf, 0)
+}
+
+fn decode_wire_dynamic_depth(full_name: &str, buf: &[u8], depth: usize) -> DynamicQuasarMessage {
     let mut msg = DynamicQuasarMessage::new(full_name);
     if let Ok(wm) = WireMessage::decode(buf) {
         for f in wm.fields {
@@ -1125,22 +1129,19 @@ pub fn decode_wire_dynamic(full_name: &str, buf: &[u8]) -> DynamicQuasarMessage 
                 WireValue::Varint(v) => DynamicValue::Uint64(v),
                 WireValue::Fixed64(v) => DynamicValue::Fixed64(v),
                 WireValue::Fixed32(v) => DynamicValue::Fixed32(v),
-                WireValue::LengthDelimited(b) => match WireMessage::decode(&b) {
-                    Ok(sub) if !sub.fields.is_empty() => {
-                        let mut smsg = DynamicQuasarMessage::new(String::new());
-                        for sf in sub.fields {
-                            let sv = match sf.value {
-                                WireValue::Varint(v) => DynamicValue::Uint64(v),
-                                WireValue::Fixed64(v) => DynamicValue::Fixed64(v),
-                                WireValue::Fixed32(v) => DynamicValue::Fixed32(v),
-                                WireValue::LengthDelimited(sb) => DynamicValue::Bytes(sb),
-                            };
-                            smsg.set(sf.field_number, sv);
+                WireValue::LengthDelimited(b) => {
+                    let is_printable_ascii = !b.is_empty() && b.iter().all(|&c| (0x20..=0x7E).contains(&c));
+                    if depth < 4 && !is_printable_ascii {
+                        match WireMessage::decode(&b) {
+                            Ok(sub) if !sub.fields.is_empty() => {
+                                DynamicValue::Message(Box::new(decode_wire_dynamic_depth("", &b, depth + 1)))
+                            }
+                            _ => DynamicValue::Bytes(b),
                         }
-                        DynamicValue::Message(Box::new(smsg))
+                    } else {
+                        DynamicValue::Bytes(b)
                     }
-                    _ => DynamicValue::Bytes(b),
-                },
+                }
             };
             msg.set(f.field_number, val);
         }

@@ -84,6 +84,25 @@ fn planet_star_resources_and_skyhook_admin_handlers() {
         .type_url
         .ends_with("eve_public.sovereignty.resource.planet.api.GetAllDefinitionsResponse"));
     assert!(all_defs.value.len() > 20);
+    // Planet definitions encode per-type base reagent yields (`12` -> `1200`, `2015` -> `1000`), not the fallback `50`.
+    let mut expected_ice_amount = Vec::new();
+    eve_proto::quasar::encode_varint_field(1, 1_200, &mut expected_ice_amount);
+    let mut expected_lava_amount = Vec::new();
+    eve_proto::quasar::encode_varint_field(1, 1_000, &mut expected_lava_amount);
+    assert!(
+        all_defs
+            .value
+            .windows(expected_ice_amount.len())
+            .any(|w| w == expected_ice_amount.as_slice()),
+        "Ice planet definition must encode 1,200/hr base yield"
+    );
+    assert!(
+        all_defs
+            .value
+            .windows(expected_lava_amount.len())
+            .any(|w| w == expected_lava_amount.as_slice()),
+        "Lava planet definition must encode 1,000/hr base yield"
+    );
 
     let mut ver_100 = DynamicQuasarMessage::new("Spec");
     ver_100.fields.insert(1, DynamicValue::Uint32(1));
@@ -203,4 +222,74 @@ fn planet_star_resources_and_skyhook_admin_handlers() {
         .0,
         STATUS_BAD_REQUEST
     );
+}
+
+#[test]
+fn encode_planet_definitions_and_register_handlers_contract() {
+    let mut encoded = Vec::new();
+    encode_planet_definitions(&mut encoded);
+    assert!(!encoded.is_empty());
+    for &(type_id, _name, power, workforce) in PLANET_RESOURCE_TABLE.iter() {
+        let mut expected_def = Vec::new();
+        encode_id_field(1, u64::from(type_id), &mut expected_def);
+        encode_varint_field(2, power, &mut expected_def);
+        encode_varint_field(3, workforce, &mut expected_def);
+        assert!(
+            encoded
+                .windows(expected_def.len())
+                .any(|w| w == expected_def.as_slice()),
+            "encoded planet definitions missing header fields for type_id={type_id}"
+        );
+    }
+
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let descriptors = Arc::new(QuasarDescriptorRegistry::empty_with_builtins());
+    let router = PublicGatewayRouter::new(descriptors, Arc::clone(&db), Arc::clone(&sde));
+    register_handlers(&router, Arc::clone(&db), Arc::clone(&sde));
+
+    let handlers = router.handlers.read().unwrap();
+    for expected in [
+        "eve_public.sovereignty.resource.planet.api.GetAllDefinitionsRequest",
+        "eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionRequest",
+        "eve_public.sovereignty.resource.planet.api.GetAllConfigurationsRequest",
+        "eve_public.sovereignty.resource.star.api.GetAllConfigurationsRequest",
+        "eve_public.sovereignty.skyhook.api.admin.ModifyReagentsRequest",
+        "eve_public.sovereignty.skyhook.api.admin.ScheduleTheftVulnerabilityWindowRequest",
+    ] {
+        assert!(handlers.contains_key(expected), "missing handler {expected}");
+    }
+
+    // Even when client provides version 1.0.0, no_known = true forces definitions to be encoded.
+    let ctx = AuthoritativeContext::for_session(
+        Some(1),
+        Some(90_000_001),
+        Some(1_000_009),
+        0,
+        "tranquility",
+        vec![1],
+    );
+    let mut ver_100 = DynamicQuasarMessage::new("Spec");
+    ver_100.fields.insert(1, DynamicValue::Uint32(1));
+    ver_100.fields.insert(2, DynamicValue::Uint32(0));
+    ver_100.fields.insert(3, DynamicValue::Uint32(0));
+    let mut force_req = DynamicQuasarMessage::new("Req");
+    force_req.fields.insert(1, DynamicValue::Message(Box::new(ver_100)));
+    force_req.fields.insert(2, DynamicValue::Bool(true));
+
+    let resp = handlers["eve_public.sovereignty.resource.planet.api.GetAllDefinitionsRequest"](
+        &ctx,
+        &GoogleAny::default(),
+        &force_req,
+    )
+    .expect("GetAllDefinitionsRequest with no_known=true");
+    assert!(resp.value.len() >= encoded.len());
+
+    let ver_resp = handlers["eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionRequest"](
+        &ctx,
+        &GoogleAny::default(),
+        &DynamicQuasarMessage::new("VerReq"),
+    )
+    .expect("GetDefinitionsVersionRequest");
+    assert_eq!(ver_resp.value, encoded);
 }

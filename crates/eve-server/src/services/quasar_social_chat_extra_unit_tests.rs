@@ -9,8 +9,9 @@ use crate::quasar_gateway::{
 use crate::services::quasar_social_chat::{
     check_active_chat_mute, ctx_now_unix, ctx_queue_notice, drain_local_notices,
     encode_chat_member, get_solar_system_members, is_delayed_local_system, is_wormhole_system,
-    load_mutes_from_db, on_character_enter_local_chat, on_character_leave_local_chat,
-    on_character_local_chat_membership_refreshed, register, save_mutes_to_db, ChatModerationState,
+    load_mutes_from_db, load_wormhole_speakers_from_db, on_character_enter_local_chat,
+    on_character_leave_local_chat, on_character_local_chat_membership_refreshed, register,
+    save_mutes_to_db, save_wormhole_speakers_to_db, ChatModerationState,
 };
 use eve_db::clock::VirtualServerClock;
 use eve_db::{corp_roles, OnlineSessionRecord, WorldRepository};
@@ -454,4 +455,12 @@ fn presence_handlers_and_local_chat_lifecycle_edge_cases() {
         );
     }
     let _ = (NoticeScope::Broadcast, ctx_queue_notice, corp_roles::ROLE_DIRECTOR);
+
+    // Direct check for `save_wormhole_speakers_to_db` and `load_wormhole_speakers_from_db`
+    let mut speakers = std::collections::HashSet::from([(wh_sys, cid)]);
+    save_wormhole_speakers_to_db(&db, &speakers);
+    assert!(load_wormhole_speakers_from_db(&db).contains(&(wh_sys, cid)));
+    speakers.clear();
+    save_wormhole_speakers_to_db(&db, &speakers);
+    assert!(load_wormhole_speakers_from_db(&db).is_empty());
 }

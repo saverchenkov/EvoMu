@@ -70,7 +70,7 @@ fn find_level1_standard_agent(ctx: &ServerContext) -> AgentInfo {
         .expect("SDE must contain a level 1 standard agent")
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn get_agents_and_metadata_queries_cover_filters_and_branches() {
     let ctx = test_ctx();
     let ag = find_level1_standard_agent(&ctx);
@@ -242,7 +242,7 @@ async fn get_agents_and_metadata_queries_cover_filters_and_branches() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mission_offer_restrictions_enforce_storyline_alpha_rnd_cosmos_and_standing_gates() {
     let ctx = test_ctx();
     let char_id = 90_000_001_i64;
@@ -313,9 +313,34 @@ async fn mission_offer_restrictions_enforce_storyline_alpha_rnd_cosmos_and_stand
         .unwrap()
         .unwrap_err();
         assert_eq!(err_st.code, "InsufficientAgentStanding");
+
+        // DoAction(None) returns Refused dialogue instead of raising InsufficientAgentStanding (#791)
+        let refused_rep = handle(
+            &ctx,
+            &mut sess,
+            "agentMgr",
+            "DoAction",
+            &[PyRep::Integer(l4_ag.agent_id)],
+            &HashMap::new(),
+        )
+        .await
+        .unwrap()
+        .expect("DoAction(None) on L4 agent with insufficient standing returns Refused greeting");
+        assert_eq!(
+            refused_rep.dict_get("state"),
+            Some(&PyRep::String("Refused".into()))
+        );
+        assert!(refused_rep
+            .dict_get("agentSays")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty()));
+        assert_eq!(
+            refused_rep.dict_get("dialogue"),
+            Some(&PyRep::List(Vec::new()))
+        );
     }
 
-    // 3. R&D agent (type 4) requires active research
+    // 3. R&D agent (type 4) requires active research for GetOffer, returns Greeting for DoAction(None) (#791)
     if let Some(rnd_ag) = ctx
         .sde
         .agents
@@ -336,6 +361,26 @@ async fn mission_offer_restrictions_enforce_storyline_alpha_rnd_cosmos_and_stand
         .unwrap()
         .unwrap_err();
         assert_eq!(err_rnd.code, "ResearchNotActive");
+
+        let rnd_greet = handle(
+            &ctx,
+            &mut sess,
+            "agentMgr",
+            "DoAction",
+            &[PyRep::Integer(rnd_ag.agent_id)],
+            &HashMap::new(),
+        )
+        .await
+        .unwrap()
+        .expect("DoAction(None) on R&D agent without active research returns Greeting");
+        assert_eq!(
+            rnd_greet.dict_get("state"),
+            Some(&PyRep::String("Greeting".into()))
+        );
+        assert!(matches!(
+            rnd_greet.dict_get("dialogue"),
+            Some(PyRep::List(items)) if !items.is_empty()
+        ));
     }
 
     // 4. Epic Arc agent (type 10) on cooldown returns EpicArcOnCooldown
@@ -380,7 +425,7 @@ async fn mission_offer_restrictions_enforce_storyline_alpha_rnd_cosmos_and_stand
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_mission_lifecycle_offer_accept_journal_briefing_complete_and_quit_works() {
     let ctx = test_ctx();
     let char_id = 90_000_001_i64;
@@ -547,3 +592,7 @@ async fn full_mission_lifecycle_offer_accept_journal_briefing_complete_and_quit_
         Some(&PyRep::Integer(mid2))
     );
 }
+
+#[cfg(test)]
+#[path = "agents_missions_extra_unit_tests.rs"]
+mod extra_unit_tests;

@@ -210,23 +210,40 @@ impl ProgressionExtraManager {
             let camps = self.campaigns.read().unwrap_or_else(|e| e.into_inner());
             let objs = self.campaign_objectives.read().unwrap_or_else(|e| e.into_inner());
             let trks = self.campaign_tracks.read().unwrap_or_else(|e| e.into_inner());
+            let trks_j = serde_json::to_string(&*trks).ok();
+            let tracks_j = serde_json::to_string(&*tracks).ok();
+            let goals_j = serde_json::to_string(&*goals).ok();
+            let tales_j = serde_json::to_string(&*tales).ok();
+            let camps_j = serde_json::to_string(&*camps).ok();
+            let objs_j = serde_json::to_string(&*objs).ok();
+            let already = db.with_snapshot(|snap| {
+                trks_j.as_ref().is_none_or(|j| snap.quasar_state_blobs.get("quasar_campaign_tracks") == Some(j))
+                    && tracks_j.as_ref().is_none_or(|j| snap.quasar_state_blobs.get("quasar_community_tracks") == Some(j))
+                    && goals_j.as_ref().is_none_or(|j| snap.quasar_state_blobs.get("quasar_generic_goals") == Some(j))
+                    && tales_j.as_ref().is_none_or(|j| snap.quasar_state_blobs.get("quasar_active_tales") == Some(j))
+                    && camps_j.as_ref().is_none_or(|j| snap.quasar_state_blobs.get("quasar_campaigns") == Some(j))
+                    && objs_j.as_ref().is_none_or(|j| snap.quasar_state_blobs.get("quasar_campaign_objectives") == Some(j))
+            });
+            if already {
+                return;
+            }
             let _ = db.try_with_mut_snapshot(|snap| {
-                if let Ok(json) = serde_json::to_string(&*trks) {
+                if let Some(json) = trks_j {
                     snap.quasar_state_blobs.insert("quasar_campaign_tracks".into(), json);
                 }
-                if let Ok(json) = serde_json::to_string(&*tracks) {
+                if let Some(json) = tracks_j {
                     snap.quasar_state_blobs.insert("quasar_community_tracks".into(), json);
                 }
-                if let Ok(json) = serde_json::to_string(&*goals) {
+                if let Some(json) = goals_j {
                     snap.quasar_state_blobs.insert("quasar_generic_goals".into(), json);
                 }
-                if let Ok(json) = serde_json::to_string(&*tales) {
+                if let Some(json) = tales_j {
                     snap.quasar_state_blobs.insert("quasar_active_tales".into(), json);
                 }
-                if let Ok(json) = serde_json::to_string(&*camps) {
+                if let Some(json) = camps_j {
                     snap.quasar_state_blobs.insert("quasar_campaigns".into(), json);
                 }
-                if let Ok(json) = serde_json::to_string(&*objs) {
+                if let Some(json) = objs_j {
                     snap.quasar_state_blobs.insert("quasar_campaign_objectives".into(), json);
                 }
                 Ok::<(), String>(())

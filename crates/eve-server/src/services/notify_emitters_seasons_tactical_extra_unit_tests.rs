@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 //! Deep branch-coverage and mutation-killing unit tests for `notify_emitters_seasons_tactical`.
 
 #![forbid(unsafe_code)]
@@ -12,7 +13,7 @@ use crate::services::notify_emitters_seasons_tactical::{
     handle_season_slash, handle_select_season_clear_if_none_or_zero, on_deployable_deactivated,
 };
 use crate::services::season_manager::{
-    load_season_state_from_blobs, save_season_state_to_blobs, CharacterChallenge, SeasonConfig,
+    load_season_state, save_season_state_to_blobs, CharacterChallenge, SeasonConfig,
     SEASONS_CATALOG_KEY, SEASON_CONFIG_KEY,
 };
 use eve_db::clock::VirtualServerClock;
@@ -124,7 +125,7 @@ fn season_transition_state_machine_and_slash_command_edge_cases() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.seasons_and_campaigns.seasons_catalog.clear();
         snap.seasons_and_campaigns.season_configuration = Some(cfg);
-        let mut st = load_season_state_from_blobs(snap, char_id);
+        let mut st = load_season_state(snap, char_id);
         st.selected_season_id = 777;
         save_season_state_to_blobs(snap, char_id, &st);
     });
@@ -148,7 +149,7 @@ fn season_transition_state_machine_and_slash_command_edge_cases() {
         .iter()
         .any(|n| n.event == "OnSeasonSelectionCleared"));
     assert_eq!(
-        ctx.db.with_snapshot(|s| load_season_state_from_blobs(s, char_id).selected_season_id),
+        ctx.db.with_snapshot(|s| load_season_state(s, char_id).selected_season_id),
         0
     );
 
@@ -202,7 +203,7 @@ fn season_transition_state_machine_and_slash_command_edge_cases() {
 
     // Seed claimed & unclaimed challenge on char_id and run `/season reset`
     ctx.db.with_mut_snapshot(|snap| {
-        let mut st = load_season_state_from_blobs(snap, char_id);
+        let mut st = load_season_state(snap, char_id);
         st.season_points = 500;
         let c_claimed = CharacterChallenge {
             challenge_id: 1,
@@ -234,7 +235,7 @@ fn season_transition_state_machine_and_slash_command_edge_cases() {
         .unwrap()
         .unwrap();
     ctx.db.with_snapshot(|snap| {
-        let st = load_season_state_from_blobs(snap, char_id);
+        let st = load_season_state(snap, char_id);
         assert_eq!(st.season_points, 0);
         assert_eq!(st.claimed_challenges[&1].progress, 10);
         assert!(st.claimed_challenges[&1].completed);
@@ -243,7 +244,7 @@ fn season_transition_state_machine_and_slash_command_edge_cases() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn break_gate_cloak_deployables_and_load_ammo_all_branches() {
     let (ctx, char_id, _) = setup_ctx();
     let sys_id = 30_000_142u32;

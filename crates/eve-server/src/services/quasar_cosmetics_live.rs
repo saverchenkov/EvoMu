@@ -68,6 +68,7 @@ pub struct PaintworkLicense {
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct CosmeticsLiveData {
     /// ship item id -> logo slot index -> kind (1 = alliance, 2 = corporation).
     pub ship_logos: HashMap<u64, BTreeMap<i32, u8>>,
@@ -1429,4 +1430,8 @@ fn license_admin_revoke(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg
 #[cfg(test)]
 #[path = "quasar_cosmetics_live_tests.rs"]
 mod quasar_cosmetics_live_tests;
+
+#[cfg(test)]
+#[path = "quasar_cosmetics_live_edges_tests.rs"]
+mod quasar_cosmetics_live_edges_tests;
 

@@ -202,7 +202,7 @@ fn docking_fulcrum_timers_custom_fob_group_and_contribution_guards() {
     assert!(check_docking_allowed(&ctx, 103, sys_id, 702, true).is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pirate_fob_siege_non_base_id_ambition_scaling_and_reinforcement_boundaries() {
     let (ctx, clock) = test_ctx_with_clock(10_000);
     let sys_id = 30002505_u32;
@@ -304,7 +304,7 @@ async fn pirate_fob_siege_non_base_id_ambition_scaling_and_reinforcement_boundar
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn roamer_selection_waypoints_npc_sync_patrol_and_ended_campaign_cleanup() {
     let (ctx, clock) = test_ctx_with_clock(30_000);
     let sys_id = 30002505_u32;
@@ -455,4 +455,174 @@ async fn roamer_selection_waypoints_npc_sync_patrol_and_ended_campaign_cleanup()
         assert!(rt.npc_entities.contains_key(&ci_bid));
         assert!(!rt.npc_entities.values().any(|n| n.solar_system_id == sys_id && n.type_id != 79_507));
     });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actor_fob_damage_phases_and_idle_roamer_patrol_branches() {
+    let (ctx, clock) = test_ctx_with_clock(20_000);
+    let sys_id = 30002510_u32;
+    let camp_id = 77_i64;
+    let fob_id = PIRATE_FOB_STRUCTURE_BASE_ID + camp_id;
+    let all_systems: Vec<u32> = (0..6).map(|i| sys_id + i).collect();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            fob_id,
+            UpwellStructureRecord {
+                structure_id: fob_id,
+                solar_system_id: sys_id,
+                type_id: PIRATE_STRONGHOLD_GURISTAS_TYPE,
+                state: "ShieldVulnerable".into(),
+                shield_hp: 2_500.0,
+                armor_hp: 2_500.0,
+                hull_hp: 3_500.0,
+                ..Default::default()
+            },
+        );
+        snap.insurgency_runtime.campaigns.insert(
+            camp_id,
+            PersistedInsurgencyCampaign {
+                campaign_id: camp_id,
+                pirate_faction_id: FACTION_GURISTAS,
+                target_faction_id: 500_001,
+                fob_solar_system_id: sys_id,
+                systems: all_systems.clone(),
+                created_at_unix: 10_000,
+                forecasting_end_unix: 11_000,
+                active_end_unix: 90_000,
+                winddown_end_unix: 99_000,
+                corruption_points: HashMap::new(),
+                suppression_points: HashMap::new(),
+            },
+        );
+    });
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    {
+        let mut bp = sys_h.ballpark.write().unwrap();
+        let fob_ball = eve_destiny::Ball {
+            id: fob_id,
+            type_id: PIRATE_STRONGHOLD_GURISTAS_TYPE,
+            position: glam::DVec3::new(10_000.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e9,
+            radius: 500.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        };
+        bp.add_ball(fob_ball);
+
+        // 1. Invulnerable (suppression < stage 5) -> deals 0.0
+        let invuln = handle_fob_ball_damage_in_actor(
+            Some(&ctx.db),
+            sys_id,
+            fob_id,
+            eve_destiny::DamageVector { em: 100.0, thermal: 0.0, kinetic: 0.0, explosive: 0.0 },
+            &mut bp,
+            20_000,
+        )
+        .unwrap();
+        assert_eq!(invuln.0, 0.0);
+        assert!(!invuln.1);
+    }
+
+    // Push all systems to suppression stage 5 (supp >= 500 in >= 5 systems)
+    for &s in &all_systems[..5] {
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(c) = snap.insurgency_runtime.campaigns.get_mut(&camp_id) {
+                c.suppression_points.insert(s, 1_000);
+            }
+        });
+    }
+
+    {
+        let mut bp = sys_h.ballpark.write().unwrap();
+        // 2. Partial ShieldPhase damage stripping shield -> ArmorVulnerable
+        let p_arm = handle_fob_ball_damage_in_actor(
+            Some(&ctx.db),
+            sys_id,
+            fob_id,
+            eve_destiny::DamageVector { em: 1_500.0, thermal: 1_500.0, kinetic: 0.0, explosive: 0.0 },
+            &mut bp,
+            20_100,
+        )
+        .unwrap();
+        assert!(p_arm.0 > 0.0);
+        assert!(!p_arm.1);
+    }
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures.get(&fob_id).unwrap().state, "ArmorVulnerable");
+    });
+
+    {
+        let mut bp = sys_h.ballpark.write().unwrap();
+        // 3. Wipe remaining armor -> enters ArmorReinforced with timer
+        let reinf = handle_fob_ball_damage_in_actor(
+            Some(&ctx.db),
+            sys_id,
+            fob_id,
+            eve_destiny::DamageVector { em: 0.0, thermal: 0.0, kinetic: 5_000.0, explosive: 0.0 },
+            &mut bp,
+            20_200,
+        )
+        .unwrap();
+        assert!(!reinf.1);
+    }
+    let until = ctx.db.with_snapshot(|snap| snap.insurgency_runtime.fob_armor_reinforced_until[&camp_id]);
+    assert!(until > 20_200);
+
+    // Advance past reinforcement -> ArmorPhase partial -> HullVulnerable, then fatal -> Destroyed
+    set_clock_to(&clock, until + 10);
+    {
+        let mut bp = sys_h.ballpark.write().unwrap();
+        let p_hull = handle_fob_ball_damage_in_actor(
+            Some(&ctx.db),
+            sys_id,
+            fob_id,
+            eve_destiny::DamageVector { em: 0.0, thermal: 0.0, kinetic: 0.0, explosive: 1_000.0 },
+            &mut bp,
+            until + 10,
+        )
+        .unwrap();
+        assert!(!p_hull.1);
+    }
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures.get(&fob_id).unwrap().state, "HullVulnerable");
+    });
+    {
+        let mut bp = sys_h.ballpark.write().unwrap();
+        let killed = handle_fob_ball_damage_in_actor(
+            Some(&ctx.db),
+            sys_id,
+            fob_id,
+            eve_destiny::DamageVector { em: 5_000.0, thermal: 5_000.0, kinetic: 5_000.0, explosive: 5_000.0 },
+            &mut bp,
+            until + 20,
+        )
+        .unwrap();
+        assert!(killed.1);
+    }
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures.get(&fob_id).unwrap().state, "Destroyed");
+    });
+
+    // Tick roamers at corruption stage 2 + suppression stage 2, then a second tick so existing idle roamers navigate waypoints (warp & goto)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.insurgency_runtime.campaigns.get_mut(&camp_id) {
+            c.corruption_points.insert(sys_id, 200);
+            c.suppression_points.insert(sys_id, 200);
+        }
+    });
+    sync_insurgency_system_npcs(&ctx, FACTION_GURISTAS, 500_001, sys_id, 2, 3).await;
+    // Move an idle roamer far from its spawn_position so second tick updates spawn_position and warps/goes to next waypoint
+    let moved_bid = with_combat_runtime(&ctx, |rt| rt.npc_entities.keys().next().copied());
+    if let Some(bid) = moved_bid {
+        let mut bp = sys_h.ballpark.write().unwrap();
+        if let Some(b) = bp.balls.get_mut(&bid) {
+            b.position = glam::DVec3::new(1.0e12, 0.0, 0.0);
+        }
+    }
+    sync_insurgency_system_npcs(&ctx, FACTION_GURISTAS, 500_001, sys_id, 2, 3).await;
 }

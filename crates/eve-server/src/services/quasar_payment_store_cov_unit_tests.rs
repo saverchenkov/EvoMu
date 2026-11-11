@@ -92,7 +92,7 @@ fn raw_varint_parser_id_extractor_and_sde_catalog_hydration_boundaries() {
     assert_eq!(extract_u64_id(&fallback_raw, &msg_with(1, DynamicValue::Uint64(0))), Some(999));
     assert_eq!(extract_u64_id(&empty_raw, &msg_with(1, DynamicValue::Bool(true))), None);
 
-    // hydrate_store_catalog_from_sde boundary: `skin_licenses.len() == 20` is a no-op; `25` hydrates 28 offers!
+    // ensure_store_catalog_seeded boundary: `skin_licenses.len() == 20` seeds 5 base offers; `25` hydrates 5 + 24 = 29 offers!
     let mut sde_20 = (*shared_sde()).clone();
     sde_20.skin_licenses.clear();
     let valid_tids: Vec<u32> = sde_20.types.keys().copied().take(25).collect();
@@ -107,8 +107,13 @@ fn raw_varint_parser_id_extractor_and_sde_catalog_hydration_boundaries() {
         );
     }
     let db_20 = WorldRepository::new_empty();
-    hydrate_store_catalog_from_sde(&db_20, &sde_20);
-    assert!(db_20.with_snapshot(|s| s.quasar_commerce.nes_store_catalog.is_none()));
+    db_20.with_mut_snapshot(|s| ensure_store_catalog_seeded(s, &sde_20));
+    db_20.with_snapshot(|s| {
+        let cat = read_store_catalog(s);
+        assert_eq!(cat.categories.len(), 4);
+        assert_eq!(cat.products.len(), 5);
+        assert_eq!(cat.offers.len(), 5);
+    });
 
     let mut sde_25 = sde_20;
     for &tid in &valid_tids[20..25] {
@@ -121,12 +126,15 @@ fn raw_varint_parser_id_extractor_and_sde_catalog_hydration_boundaries() {
             },
         );
     }
-    hydrate_store_catalog_from_sde(&db_20, &sde_25);
+    db_20.with_mut_snapshot(|s| {
+        s.quasar_commerce.nes_store_catalog = None;
+        ensure_store_catalog_seeded(s, &sde_25);
+    });
     db_20.with_snapshot(|s| {
         let cat = read_store_catalog(s);
-        assert_eq!(cat.categories.len(), 3);
-        assert_eq!(cat.products.len(), 28);
-        assert_eq!(cat.offers.len(), 28);
+        assert_eq!(cat.categories.len(), 4);
+        assert_eq!(cat.products.len(), 29);
+        assert_eq!(cat.offers.len(), 29);
     });
     // Idempotency: second call does not overwrite custom catalog
     db_20.with_mut_snapshot(|s| {
@@ -142,8 +150,8 @@ fn raw_varint_parser_id_extractor_and_sde_catalog_hydration_boundaries() {
                 offers: Vec::new(),
             },
         );
+        ensure_store_catalog_seeded(s, &sde_25);
     });
-    hydrate_store_catalog_from_sde(&db_20, &sde_25);
     assert_eq!(db_20.with_snapshot(|s| read_store_catalog(s).categories.len()), 1);
 }
 

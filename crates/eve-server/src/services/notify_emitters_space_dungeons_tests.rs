@@ -273,3 +273,124 @@ fn godma_ewar_drones_cloak_pvp_deathzone_and_dungeon_trigger_emitters() {
     };
     assert_eq!(kv.get("activeEffects"), Some(&effect_info.args[2]));
 }
+
+#[test]
+fn on_godma_prime_item_preserves_skill_and_ship_dogma_bonuses() {
+    let (ctx, char_id) = make_online_ctx();
+    let ship_id = 920_100_i64;
+    let mod_id = 920_101_i64;
+    let mod_type_id = 484_u32; // 125mm Gatling AutoCannon I
+
+    let base_type = ctx.sde.types.get(&mod_type_id).expect("484 in seed SDE");
+    let raw_speed = base_type.default_attributes[&51];
+    let raw_dmg_mult = base_type.default_attributes[&64];
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+        }
+        let mut sk = snap.skills.entry(char_id).or_default().clone();
+        sk.insert(
+            3300, // Gunnery V (+10% ROF -> lower speed attr 51)
+            eve_db::TrainedSkillRecord {
+                type_id: 3300,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+        sk.insert(
+            3301, // Small Projectile Turret V (+25% damageMultiplier attr 64)
+            eve_db::TrainedSkillRecord {
+                type_id: 3301,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+        snap.skills.insert(char_id, sk);
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587, // Rifter
+                owner_id: char_id,
+                location_id: 30_000_142,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mod_id,
+            InventoryItemRecord {
+                item_id: mod_id,
+                type_id: mod_type_id,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: std::collections::HashMap::from([(3, 12.5)]),
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(mod_id, true);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let fit = ctx
+        .get_or_rebuild_ship_fitting(char_id, ship_id)
+        .expect("ship fit built");
+    let m_state = fit.module_state(mod_id, &ctx.sde).expect("module state");
+    let expected_speed = m_state.get_attribute(51, &ctx.sde);
+    let expected_dmg_mult = m_state.get_attribute(64, &ctx.sde);
+    assert!(
+        expected_speed < raw_speed,
+        "Gunnery V should reduce attr 51 speed ({expected_speed} < {raw_speed})"
+    );
+    assert!(
+        expected_dmg_mult > raw_dmg_mult,
+        "Small Projectile Turret V should boost attr 64 damageMultiplier ({expected_dmg_mult} > {raw_dmg_mult})"
+    );
+
+    emit_module_activation_godma_notifications(
+        &ctx,
+        char_id,
+        ship_id,
+        mod_id,
+        mod_type_id,
+        "online",
+        expected_speed / 1_000.0,
+        None,
+    );
+
+    let drained = ctx.drain_notifications_for_char(char_id);
+    let prime_item = drained
+        .iter()
+        .find(|n| n.event == "OnGodmaPrimeItem")
+        .expect("OnGodmaPrimeItem emitted");
+    let PyRep::KeyVal(kv) = &prime_item.args[1] else {
+        panic!("expected KeyVal in OnGodmaPrimeItem");
+    };
+    let Some(PyRep::Dict(entries)) = kv.get("attributes") else {
+        panic!("expected attributes Dict");
+    };
+    let attrs: std::collections::HashMap<i64, f64> = entries
+        .iter()
+        .filter_map(|(k, v)| match (k.as_i64(), v) {
+            (Some(aid), PyRep::Real(val)) => Some((aid, *val)),
+            _ => None,
+        })
+        .collect();
+    assert!((attrs[&51] - expected_speed).abs() < 1e-6);
+    assert!((attrs[&64] - expected_dmg_mult).abs() < 1e-6);
+    assert_eq!(attrs.get(&3), Some(&12.5), "dynamic runtime damage attr preserved");
+    assert_eq!(attrs.get(&2), Some(&1.0), "online attr preserved");
+}
+
+#[cfg(test)]
+#[path = "notify_emitters_space_dungeons_extra_unit_tests.rs"]
+mod notify_emitters_space_dungeons_extra_unit_tests;

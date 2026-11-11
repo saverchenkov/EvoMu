@@ -108,3 +108,7 @@ pub(super) fn find_active_dungeon_id_at_position(
         })
     })
 }
+
+#[cfg(test)]
+#[path = "pve_dungeon_runtime_ops_edges_tests.rs"]
+mod pve_dungeon_runtime_ops_edges_tests;

@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use super::quasar_cosmetics_skinr::{
+use crate::services::quasar_cosmetics_skinr::{
     encode_component_id, encode_layout_slot, encode_skin_id, encode_skin_license_id,
     FiniteComponentLicense, SequencingJobRecord, SkinDesignRecord, SkinLayoutSlot,
     SkinrCosmeticsState,
@@ -102,7 +102,7 @@ fn skin_get_and_license_endpoints_error_and_edge_branches() {
         Arc::clone(&sde),
     );
     let skinr = SkinrCosmeticsState::load(Arc::clone(&db), Arc::clone(&sde));
-    super::quasar_cosmetics_skinr_seq::register(&router, Arc::clone(&skinr));
+    crate::services::quasar_cosmetics_skinr_seq::register(&router, Arc::clone(&skinr));
     let now = 1_760_000_000u64;
     let cid = 90_000_001i64;
     let other_cid = 90_000_002i64;
@@ -316,7 +316,7 @@ fn sequencing_job_initiate_validation_finite_licenses_plex_rollback_and_settle()
         Arc::clone(&sde),
     );
     let skinr = SkinrCosmeticsState::load(Arc::clone(&db), Arc::clone(&sde));
-    super::quasar_cosmetics_skinr_seq::register(&router, Arc::clone(&skinr));
+    crate::services::quasar_cosmetics_skinr_seq::register(&router, Arc::clone(&skinr));
     let now = 1_760_000_000u64;
     let cid = 90_000_001i64;
     let other_cid = 90_000_002i64;
@@ -427,6 +427,16 @@ fn sequencing_job_initiate_validation_finite_licenses_plex_rollback_and_settle()
     let mut valid_init_req = Vec::new();
     encode_bytes_field(3, &valid_lay, &mut valid_init_req);
     encode_varint_field(5, 2, &mut valid_init_req);
+    db.with_mut_snapshot(|s| {
+        s.skills.entry(cid).or_default().insert(
+            81375,
+            eve_db::TrainedSkillRecord {
+                type_id: 81375,
+                level: 1,
+                skill_points: 1_000.0,
+            },
+        );
+    });
 
     // Insufficient component license capacity -> 400
     assert_code(&router, &player, init_ep, valid_init_req.clone(), now, STATUS_BAD_REQUEST);
@@ -478,7 +488,13 @@ fn sequencing_job_initiate_validation_finite_licenses_plex_rollback_and_settle()
     assert_code(&router, &gm, job_get_ep, job_get_req.clone(), now, STATUS_OK);
 
     // CompleteEarly with insufficient PLEX rolls back completed_unix
-    db.with_mut_snapshot(|s| s.characters.get_mut(&cid).unwrap().plex_balance = 0);
+    db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&cid) {
+            let uid = ch.user_id;
+            ch.plex_balance = 0;
+            s.account_plex_vault.insert(uid, 0);
+        }
+    });
     assert_code(&router, &player, early_ep, job_get_req.clone(), now + 10, STATUS_BAD_REQUEST);
 
     // Advance clock past planned_duration_secs -> settle_completed_jobs completes job and grants 2 licenses
@@ -511,4 +527,142 @@ fn sequencing_job_initiate_validation_finite_licenses_plex_rollback_and_settle()
         },
         encode_component_id(coat_id, false),
     );
+}
+
+#[test]
+fn mutant_kill_skinr_skill_discounts_cap_runs_and_tier_endpoints() {
+    use crate::services::quasar_cosmetics_skinr_seq::{max_runs_per_job, skill_discounts_and_cap};
+
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let router = PublicGatewayRouter::new(
+        shared_descriptors(),
+        Arc::clone(&db),
+        Arc::clone(&sde),
+    );
+    let skinr = SkinrCosmeticsState::load(Arc::clone(&db), Arc::clone(&sde));
+    crate::services::quasar_cosmetics_skinr_seq::register(&router, Arc::clone(&skinr));
+
+    let cid_no_skills = 90_000_099_i64;
+    let cid_mid_a = 90_000_098_i64;
+    let cid_mid_b = 90_000_097_i64;
+    let cid_max = 90_000_096_i64;
+    let add_sk = |map: &mut std::collections::HashMap<u32, TrainedSkillRecord>, tid: u32, lvl: u8| {
+        map.insert(
+            tid,
+            TrainedSkillRecord {
+                type_id: tid,
+                level: lvl,
+                skill_points: 256_000.0,
+            },
+        );
+    };
+
+    db.with_mut_snapshot(|s| {
+        let base_char = s.characters[&90_000_001].clone();
+        for (i, &c) in [cid_mid_a, cid_mid_b, cid_max].iter().enumerate() {
+            s.characters.entry(c).or_insert_with(|| {
+                let mut ch = base_char.clone();
+                ch.character_id = c;
+                ch.user_id = (90_000 + i) as u64;
+                ch.name = format!("SkinrSkillTester{i}");
+                ch.corporation_id = 1_000_009;
+                ch.solar_system_id = 3000_0142;
+                ch
+            });
+        }
+        // cid_mid_a: par_bonus=3 (lvl 2 -> 81366), mt_bonus=2 (lvl 1 -> 81367), dur_disc=1+3+6+10=20
+        // max_jobs = 1 + 3 + 2 = 6 (whereas 1*3+2=5, 1+3-2=2, 1+3*2=7)
+        let ma = s.skills.entry(cid_mid_a).or_default();
+        add_sk(ma, 81377, 1);
+        add_sk(ma, 81372, 2);
+        add_sk(ma, 81373, 3);
+        add_sk(ma, 81374, 4);
+        add_sk(ma, 81366, 2);
+        add_sk(ma, 81367, 1);
+        // Batch lvl 5 (49), Mass lvl 5 (250), Industrial lvl 1 (200) -> 1 + 49 + 250 + 200 = 500
+        add_sk(ma, 81375, 5);
+        add_sk(ma, 81364, 5);
+        add_sk(ma, 81365, 1);
+
+        // cid_mid_b: par_bonus=5 (lvl 3), mt_bonus=8 (lvl 4) -> 1 + 5 + 8 = 14
+        let mb = s.skills.entry(cid_mid_b).or_default();
+        add_sk(mb, 81366, 3);
+        add_sk(mb, 81367, 4);
+        add_sk(mb, 81377, 5); // dur_disc=15
+
+        // cid_max: all level 5 -> capped at (0, 60, 20) and 5_000 runs
+        let mm = s.skills.entry(cid_max).or_default();
+        for sid in [81377, 81372, 81373, 81374, 81366, 81367, 81375, 81364, 81365] {
+            add_sk(mm, sid, 5);
+        }
+    });
+
+    assert_eq!(skill_discounts_and_cap(&skinr, None), (0, 0, 1));
+    assert_eq!(
+        skill_discounts_and_cap(&skinr, Some(cid_no_skills as u32)),
+        (0, 0, 1)
+    );
+    assert_eq!(
+        skill_discounts_and_cap(&skinr, Some(cid_mid_a as u32)),
+        (0, 20, 6)
+    );
+    assert_eq!(
+        skill_discounts_and_cap(&skinr, Some(cid_mid_b as u32)),
+        (0, 15, 14)
+    );
+    assert_eq!(
+        skill_discounts_and_cap(&skinr, Some(cid_max as u32)),
+        (0, 60, 20)
+    );
+
+    assert_eq!(max_runs_per_job(&skinr, cid_no_skills as u32), 1);
+    assert_eq!(max_runs_per_job(&skinr, cid_mid_a as u32), 500);
+    assert_eq!(max_runs_per_job(&skinr, cid_max as u32), 5_000);
+
+    // Tier pricing, tier durations, and GetSkillBasedJobsCapacityRequest responses
+    let now = 1_760_000_000u64;
+    let s_none = sess(Some(1), Some(cid_no_skills), service_roles::ROLE_PLAYER_DEFAULT);
+    let s_mid = sess(Some(2), Some(cid_mid_a), service_roles::ROLE_PLAYER_DEFAULT);
+
+    let tp = call(
+        &router,
+        &s_mid,
+        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierPricingRequest",
+        Vec::new(),
+        now,
+    );
+    assert_eq!(tp.status_code, STATUS_OK);
+    assert!(!tp.payload.as_ref().unwrap().value.is_empty());
+
+    let td_base = call(
+        &router,
+        &s_none,
+        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierDurationsRequest",
+        Vec::new(),
+        now,
+    );
+    let td_disc = call(
+        &router,
+        &s_mid,
+        "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierDurationsForCharacterRequest",
+        Vec::new(),
+        now,
+    );
+    assert_eq!(td_base.status_code, STATUS_OK);
+    assert_eq!(td_disc.status_code, STATUS_OK);
+    assert_ne!(
+        td_base.payload.as_ref().unwrap().value,
+        td_disc.payload.as_ref().unwrap().value
+    );
+
+    let cap_rsp = call(
+        &router,
+        &s_mid,
+        "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetSkillBasedJobsCapacityRequest",
+        Vec::new(),
+        now,
+    );
+    assert_eq!(cap_rsp.status_code, STATUS_OK);
+    assert!(!cap_rsp.payload.unwrap().value.is_empty());
 }

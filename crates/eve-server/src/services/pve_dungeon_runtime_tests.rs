@@ -383,7 +383,9 @@ async fn room_materialization_wave_triggers_gate_unlock_and_completion_despawn()
     let notes = ctx.drain_notifications_for_char(char_id);
     assert!(notes.iter().any(|n| n.event == "OnExitingDungeon"));
 
-    let (_, r2_npcs, _) = materialize_dungeon_room_entities(&ctx, sys_id, 950_010, 1)
+    let MaterializedDungeonRoomEntities {
+        npc_ids: r2_npcs, ..
+    } = materialize_dungeon_room_entities(&ctx, sys_id, 950_010, 1)
         .await
         .expect("materialize room 2");
     assert_eq!(r2_npcs.len(), 1);
@@ -399,4 +401,238 @@ async fn room_materialization_wave_triggers_gate_unlock_and_completion_despawn()
     });
     let done_notes = ctx.drain_notifications_for_char(char_id);
     assert!(done_notes.iter().any(|n| n.event == "OnDungeonCompleted"));
+}
+
+#[test]
+fn private_mwd_precedence_boundaries_and_gate_ship_restriction_matrix() {
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_020_101;
+    let mut custom_sde = (*shared_sde()).clone();
+
+    // Inject synthetic DungeonTemplates covering all archetypes & difficulties 1..=5 + None
+    for (did, arch, diff) in [
+        (880_001u32, Some(3u32), Some(1u32)),  // restricted arch 3, diff 1
+        (880_002, Some(4), Some(2)),           // restricted arch 4, diff 2
+        (880_003, Some(6), Some(3)),           // restricted arch 6, diff 3
+        (880_004, Some(8), Some(4)),           // restricted arch 8, diff 4
+        (880_005, Some(24), Some(5)),          // restricted arch 24, diff 5
+        (880_006, Some(51), None),             // restricted arch 51, no difficulty
+        (880_007, Some(99), Some(1)),          // unrestricted arch 99, diff 1
+    ] {
+        custom_sde.dungeons.insert(
+            did,
+            eve_sde::DungeonTemplate {
+                dungeon_id: did,
+                name: format!("Synth_{did}"),
+                archetype_id: arch,
+                faction_id: Some(500_010),
+                difficulty: diff,
+            },
+        );
+    }
+
+    // Inject synthetic ItemTypes covering always-blocked groups, valid/invalid diff groups, rigs, mass
+    let base_item = custom_sde.types.values().next().unwrap().clone();
+    let mut add_ship = |tid: u32, grp: u32, mass: f64, rig_sz: f64| {
+        let mut t = base_item.clone();
+        t.type_id = tid;
+        t.category_id = 6;
+        t.group_id = grp;
+        t.mass = mass;
+        t.default_attributes.insert(1547, rig_sz);
+        custom_sde.types.insert(tid, t);
+    };
+    add_ship(910_001, 25, 1_000_000.0, 1.0);   // Frigate ok for diff 1,2,3,4,5
+    add_ship(910_002, 420, 15_000_000.0, 1.0); // Exact 15M mass destroyer -> diff 1 ok
+    add_ship(910_003, 25, 15_000_001.0, 1.0);  // Frigate > 15M -> diff 1 blocked, diff 2 ok
+    add_ship(910_004, 25, 1_000_000.0, 1.5);   // Rig > 1.0 -> diff 1 blocked, diff 2 ok
+    add_ship(910_005, 26, 10_000_000.0, 2.0);  // Cruiser rig 2.0 -> diff 1 blocked, diff 2..=3 ok
+    add_ship(910_006, 963, 50_000_000.0, 2.0); // Strategic Cruiser exact 50M -> diff 2..=3 ok
+    add_ship(910_007, 26, 50_000_001.0, 2.0);  // Cruiser > 50M -> diff 2..=3 blocked, diff 4 ok
+    add_ship(910_008, 419, 40_000_000.0, 2.0); // Battlecruiser (grp 419 NOT in diff 2..=3) -> diff 2..=3 blocked, diff 4 ok
+    add_ship(910_009, 27, 300_000_000.0, 3.0); // Battleship exact 300M rig 3.0 -> diff 4..=5 ok
+    add_ship(910_010, 27, 300_000_001.0, 3.0); // > 300M -> diff 4..=5 blocked, None ok (<= 500M)
+    add_ship(910_011, 27, 100_000_000.0, 3.1); // Rig > 3.0 -> diff 4..=5 AND None blocked
+    add_ship(910_012, 27, 500_000_001.0, 3.0); // > 500M -> None diff blocked
+
+    for (idx, &blk_grp) in [29u32, 30, 485, 513, 547, 659, 883, 902, 941, 1538].iter().enumerate() {
+        add_ship(920_000 + idx as u32, blk_grp, 100.0, 1.0);
+    }
+
+    let db = Arc::new(WorldRepository::new_empty());
+    db.provision_gm_account("dng_priv", "pw", char_id, "DngPriv");
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(custom_sde), db);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_200_000)));
+
+    // 1. Store presence checks, dist3, and unix_to_filetime_ticks
+    assert!(!has_dungeon_runtime_store_db(&ctx.db));
+    assert!(!has_dungeon_runtime_store(&ctx));
+    assert!((dist3([-3.0, -4.0, 0.0], [0.0, 0.0, 12.0]) - 13.0).abs() < 1e-9);
+    assert_eq!(unix_to_filetime_ticks(1_000), (1_000 + 11_644_473_600) * 10_000_000);
+
+    // 2. is_pocket_mwd_disallowed precedence + pocket radius exact boundary (200_000.0 vs 200_000.1)
+    let mut base_inst = sample_instance(955_001, 880_007, sys_id, char_id, false);
+    let mut room = base_inst.rooms[0].clone();
+    room.room_id = 88_001;
+    room.position = [10_000_000.0, 0.0, 0.0];
+
+    // All false/unrestricted -> MWD allowed
+    room.disallow_mwd = None;
+    base_inst.disallow_mwd = false;
+    base_inst.dungeon_id = 880_007; // arch 99 (unrestricted)
+    assert!(!is_pocket_mwd_disallowed(&ctx, &base_inst, &room));
+
+    // SDE archetype 3, 4, 6, 8, 24, 51 -> all disallow MWD when flags are None/false
+    for restricted_did in [880_001u32, 880_002, 880_003, 880_004, 880_005, 880_006] {
+        base_inst.dungeon_id = restricted_did;
+        assert!(is_pocket_mwd_disallowed(&ctx, &base_inst, &room), "arch for {restricted_did}");
+    }
+
+    // inst.disallow_mwd = true beats unrestricted arch 99
+    base_inst.dungeon_id = 880_007;
+    base_inst.disallow_mwd = true;
+    assert!(is_pocket_mwd_disallowed(&ctx, &base_inst, &room));
+
+    // Editor dungeon override beats inst.disallow_mwd = true and restricted arch 51
+    base_inst.dungeon_id = 880_006;
+    with_dungeon_editor_store(&ctx, |ed| {
+        ed.dungeon_disallow_mwd.insert(880_006, false);
+    });
+    assert!(!is_pocket_mwd_disallowed(&ctx, &base_inst, &room));
+
+    // Editor room override beats editor dungeon override
+    with_dungeon_editor_store(&ctx, |ed| {
+        ed.rooms_by_dungeon.insert(
+            880_006,
+            vec![crate::services::pve_dungeon_editor::DungeonEditorRoom {
+                room_id: 88_001,
+                room_name: "EdOverride".into(),
+                dungeon_id: 880_006,
+                disallow_mwd: true,
+                objects: Vec::new(),
+            }],
+        );
+    });
+    assert!(is_pocket_mwd_disallowed(&ctx, &base_inst, &room));
+
+    // Room.disallow_mwd = Some(false) beats editor room override (`true`), inst flag (`true`), & SDE arch 51!
+    room.disallow_mwd = Some(false);
+    assert!(!is_pocket_mwd_disallowed(&ctx, &base_inst, &room));
+
+    // Pocket radius boundary & completed/despawned/other-system filtering in is_ship_in_deadspace_pocket
+    base_inst.rooms = vec![room];
+    with_dungeon_runtime_store(&ctx, |store| {
+        store.instances.insert(955_001, base_inst);
+    });
+    assert!(has_dungeon_runtime_store_db(&ctx.db));
+    assert!(is_ship_in_deadspace_pocket(&ctx, sys_id, [10_200_000.0, 0.0, 0.0]));
+    assert!(!is_ship_in_deadspace_pocket(&ctx, sys_id, [10_200_000.1, 0.0, 0.0]));
+    assert!(!is_ship_in_deadspace_pocket(&ctx, 30_000_144, [10_000_000.0, 0.0, 0.0]));
+    with_dungeon_runtime_store(&ctx, |store| {
+        store.instances.get_mut(&955_001).unwrap().completed = true;
+    });
+    assert!(!is_ship_in_deadspace_pocket(&ctx, sys_id, [10_000_000.0, 0.0, 0.0]));
+
+    // 3. check_dungeon_runtime_gate_ship_allowed across all difficulty buckets & blocked groups
+    for idx in 0..10 {
+        assert_eq!(
+            check_dungeon_runtime_gate_ship_allowed(&ctx.sde, 880_006, 920_000 + idx, 100.0)
+                .unwrap_err()
+                .code,
+            "ShipRestrictedByDungeonGate"
+        );
+    }
+    // Diff 1 (`880_001`)
+    assert!(check_dungeon_runtime_gate_ship_allowed(&ctx.sde, 880_001, 910_001, 1.0).is_ok());
+    assert!(check_dungeon_runtime_gate_ship_allowed(&ctx.sde, 880_001, 910_002, 1.0).is_ok());
+    assert!(check_dungeon_runtime_gate_ship_allowed(&ctx.sde, 880_001, 910_003, 1.0).is_err());
+    assert!(check_dungeon_runtime_gate_ship_allowed(&ctx.sde, 880_001, 910_004, 1.0).is_err());
+    assert!(check_dungeon_runtime_gate_ship_allowed(&ctx.sde, 880_001, 910_005, 1.0).is_err());
+    assert!(check_dungeon_runtime_gate_ship_allowed(&ctx.sde, 880_001, 999_999, 15_000_000.0).is_ok());
+    assert!(check_dungeon_runtime_gate_ship_allowed(&ctx.sde, 880_001, 999_999, 15_000_001.0).is_err());
+
+    // Diff 2 (`880_002`) & Diff 3 (`880_003`)
+    for d in [880_002u32, 880_003] {
+        assert!(check_dungeon_runtime_gate_ship_allowed(&ctx.sde, d, 910_005, 1.0).is_ok());
+        assert!(check_dungeon_runtime_gate_ship_allowed(&ctx.sde, d, 910_006, 1.0).is_ok());
+        assert!(check_dungeon_runtime_gate_ship_allowed(&ctx.sde, d, 910_007, 1.0).is_err());
+        assert!(check_dungeon_runtime_gate_ship_allowed(&ctx.sde, d, 910_008, 1.0).is_err());
+        assert!(check_dungeon_runtime_gate_ship_allowed(&ctx.sde, d, 910_009, 1.0).is_err());
+    }
+    // Diff 4 (`880_004`) & Diff 5 (`880_005`)
+    for d in [880_004u32, 880_005] {
+        assert!(check_dungeon_runtime_gate_ship_allowed(&ctx.sde, d, 910_008, 1.0).is_ok());
+        assert!(check_dungeon_runtime_gate_ship_allowed(&ctx.sde, d, 910_009, 1.0).is_ok());
+        assert!(check_dungeon_runtime_gate_ship_allowed(&ctx.sde, d, 910_010, 1.0).is_err());
+        assert!(check_dungeon_runtime_gate_ship_allowed(&ctx.sde, d, 910_011, 1.0).is_err());
+    }
+    // None / unknown difficulty (`880_006` and `999_999`)
+    for d in [880_006u32, 999_999] {
+        assert!(check_dungeon_runtime_gate_ship_allowed(&ctx.sde, d, 910_010, 1.0).is_ok());
+        assert!(check_dungeon_runtime_gate_ship_allowed(&ctx.sde, d, 910_011, 1.0).is_err());
+        assert!(check_dungeon_runtime_gate_ship_allowed(&ctx.sde, d, 910_012, 1.0).is_err());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn on_dungeon_npc_killed_guards_unfired_triggers_and_owner_fallback_recipient() {
+    let sys_id: SolarSystemId = 30_000_142;
+    let owner_cid: i64 = 90_020_201;
+    let ctx = make_ctx(sys_id, owner_cid);
+
+    // 1. Empty store returns cleanly
+    on_dungeon_npc_killed(&ctx, sys_id, 123_456, owner_cid).await;
+
+    // 2. Single-room instance where an unfired OnApproach trigger remains prevents room clear & completion!
+    let mut inst = sample_instance(956_001, 1, sys_id, owner_cid, false);
+    inst.rooms.truncate(1);
+    inst.rooms[0].npc_groups.truncate(1);
+    inst.rooms[0].triggers = vec![DungeonTrigger {
+        trigger_id: 91,
+        kind: DungeonTriggerKind::OnApproach {
+            target_ball_id: None,
+            target_object_index: None,
+            anchor_pos: inst.rooms[0].position,
+            radius_m: 1_000.0,
+        },
+        action: DungeonTriggerAction::UnlockGate,
+        fired: false,
+    }];
+    with_dungeon_runtime_store(&ctx, |store| {
+        store.instances.insert(956_001, inst);
+    });
+    let MaterializedDungeonRoomEntities { npc_ids: npcs, .. } =
+        materialize_dungeon_room_entities(&ctx, sys_id, 956_001, 0)
+            .await
+            .unwrap();
+    on_dungeon_npc_killed(&ctx, sys_id, npcs[0], owner_cid).await;
+    with_dungeon_runtime_store(&ctx, |store| {
+        let s = &store.instances[&956_001];
+        assert!(!s.rooms[0].cleared, "unfired OnApproach must block room clear");
+        assert!(!s.completed);
+    });
+
+    // 3. Remove the blocking trigger, materialize a fresh room with no triggers & kill with killer_char_id = 0 -> owner_cid gets notifications!
+    let mut inst2 = sample_instance(956_002, 1, sys_id, owner_cid, false);
+    inst2.rooms.truncate(1);
+    inst2.rooms[0].npc_groups.truncate(1);
+    inst2.rooms[0].triggers.clear();
+    with_dungeon_runtime_store(&ctx, |store| {
+        store.instances.insert(956_002, inst2);
+    });
+    let MaterializedDungeonRoomEntities { npc_ids: npcs2, .. } =
+        materialize_dungeon_room_entities(&ctx, sys_id, 956_002, 0)
+            .await
+            .unwrap();
+    let _ = ctx.drain_notifications_for_char(owner_cid);
+    on_dungeon_npc_killed(&ctx, sys_id, npcs2[0], 0).await;
+    with_dungeon_runtime_store(&ctx, |store| {
+        let s = &store.instances[&956_002];
+        assert!(s.completed);
+        assert!(s.despawned);
+        assert_eq!(s.completed_task_ids.len(), 1);
+    });
+    let owner_notes = ctx.drain_notifications_for_char(owner_cid);
+    assert!(owner_notes.iter().any(|n| n.event == "OnDungeonCompleted"));
+    assert!(owner_notes.iter().any(|n| n.event == "OnProgressionTaskCompleted"));
 }

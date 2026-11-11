@@ -672,3 +672,370 @@ async fn test_doomsday_r9_capacitor_pos_forcefield_and_cloak_protections() {
     assert_eq!(sys.get_combat_state(pos_victim_id).await.unwrap().unwrap().shield_hp, 50_000.0);
     assert!(sys.get_combat_state(open_victim_id).await.unwrap().unwrap().shield_hp < 50_000.0);
 }
+
+#[tokio::test]
+async fn test_doomsday_cancel_locked_fuel_multi_stack_zero_vel_and_arg_forms() {
+    use crate::services::doomsday_aoe_ops::cancel_aoe_superweapon_cycles_for_ship;
+    use crate::services::doomsday_aoe_tick::mutate_superweapon_runtime;
+    use eve_db::{OwnerNoteRecord, PersistedSuperweaponCycle, SuperweaponCycleKind};
+
+    // 1. cancel_aoe_superweapon_cycles_for_ship: empty no-op and ship-scoped filter
+    let (ctx, _sess, char_id, ship_id, sys_id, _mod_id, _fuel_id) = build_titan_test_env();
+    cancel_aoe_superweapon_cycles_for_ship(&ctx, ship_id);
+    assert!(read_superweapon_runtime(&ctx.db).is_none());
+
+    mutate_superweapon_runtime(&ctx.db, |rt| {
+        for sid in [ship_id, ship_id + 1] {
+            rt.active_cycles.push(PersistedSuperweaponCycle {
+                sys_id,
+                char_id,
+                ship_id: sid,
+                ship_type_id: 11_567,
+                mod_type_id: 24_550,
+                kind: SuperweaponCycleKind::Cone {
+                    origin_pos: [0.0; 3],
+                    dir_vec: [1.0, 0.0, 0.0],
+                    cone_len_m: 100_000.0,
+                    tick_dmg: [1_000.0; 4],
+                    sig_radius_m: 1_000.0,
+                },
+                started_at_unix: 1,
+                warmup_secs: 5,
+                total_ticks: 10,
+                ticks_applied: 0,
+                immobilize_until_unix: 30,
+                orig_max_velocity: 75.0,
+                orig_warp_scramble_strength: 0,
+                orig_disallow_assistance: false,
+                mobility_restored: false,
+            });
+        }
+    });
+    cancel_aoe_superweapon_cycles_for_ship(&ctx, ship_id);
+    let rt_after_cancel = read_superweapon_runtime(&ctx.db).expect("other ship cycle remains");
+    assert_eq!(rt_after_cancel.active_cycles.len(), 1);
+    assert_eq!(rt_after_cancel.active_cycles[0].ship_id, ship_id + 1);
+
+    // 2. Non-fuel & ALSC-locked fuel exclusion + 3-stack remaining -= take + zero-vel preservation + Tuple cone (len==2)
+    let (ctx2, _s2, c2, ship2, sys2, mod2, fuel2) = build_titan_test_env();
+    let sys_h2 = ctx2.systems.get_or_spawn(sys2);
+    sys_h2
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship2,
+                type_id: 11_567,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 1_000_000_000.0,
+                radius: 5_000.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                capacitor: 100_000.0,
+                max_capacitor: 100_000.0,
+                base_max_velocity: None,
+                ..CombatState::new()
+            },
+        )
+        .await
+        .unwrap();
+    let non_fuel_id = 551_900_001_i64;
+    let partial_bay_id = 551_900_002_i64;
+    let stack_a_id = 551_900_003_i64;
+    let stack_b_id = 551_900_004_i64;
+    ctx2.db.with_mut_snapshot(|snap| {
+        // Lock original 500-isotope stack via ALSC owner note and reduce available unlocked fuel to 200
+        snap.owner_notes.insert(
+            -8_400_000_000_000,
+            OwnerNoteRecord {
+                note_id: -8_400_000_000_000,
+                character_id: 0,
+                item_id: 0,
+                label: "container".into(),
+                note: format!("{{\"alsc_locked_items\":[{fuel2}]}}"),
+                timestamp_unix: 0,
+            },
+        );
+        snap.items.insert(
+            non_fuel_id,
+            make_fighter_item(non_fuel_id, 34, c2, ship2, InventoryFlag::Cargo, 10_000),
+        );
+        snap.items.insert(
+            partial_bay_id,
+            make_fighter_item(
+                partial_bay_id,
+                17_888,
+                c2,
+                ship2,
+                InventoryFlag::SpecializedFuelBay,
+                100,
+            ),
+        );
+        snap.items.insert(
+            stack_a_id,
+            make_fighter_item(stack_a_id, 17_888, c2, ship2, InventoryFlag::Cargo, 100),
+        );
+    });
+    let locked_err = activate_cone_doomsday(&ctx2, c2, ship2, sys2, mod2, &[PyRep::Integer(mod2)])
+        .await
+        .unwrap_err();
+    assert_eq!(locked_err.code, "InsufficientFuel");
+    ctx2.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&fuel2].quantity, 500);
+        assert_eq!(snap.items[&non_fuel_id].quantity, 10_000);
+    });
+
+    // Add 100 more in stack_a (200 total) + 300 in stack_b -> 600 unlocked across 3 stacks, consume exact 500 leaving 100 in stack_b
+    ctx2.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&stack_a_id).unwrap().quantity = 200;
+        snap.items.insert(
+            stack_b_id,
+            make_fighter_item(stack_b_id, 17_888, c2, ship2, InventoryFlag::Cargo, 300),
+        );
+    });
+    activate_cone_doomsday(
+        &ctx2,
+        c2,
+        ship2,
+        sys2,
+        mod2,
+        &[
+            PyRep::Integer(mod2),
+            PyRep::Tuple(vec![PyRep::Real(0.0), PyRep::Real(1.0), PyRep::Real(0.0)]),
+        ],
+    )
+    .await
+    .unwrap();
+    ctx2.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&partial_bay_id));
+        assert!(!snap.items.contains_key(&stack_a_id));
+        assert_eq!(snap.items.get(&stack_b_id).map(|i| i.quantity), Some(100));
+        assert_eq!(snap.items.get(&fuel2).map(|i| i.quantity), Some(500));
+    });
+    assert_eq!(
+        sys_h2.get_combat_state(ship2).await.unwrap().unwrap().base_max_velocity,
+        None,
+        "max_velocity == 0.0 must not populate base_max_velocity = Some(0.0)"
+    );
+    let rt2 = read_superweapon_runtime(&ctx2.db).unwrap();
+    match &rt2.active_cycles.last().unwrap().kind {
+        SuperweaponCycleKind::Cone { dir_vec, .. } => assert!(dir_vec[1] > 0.9),
+        other => panic!("expected Cone cycle, got {other:?}"),
+    }
+
+    // 3. Preserves pre-existing base_max_velocity = Some(99.0) when orig_v > 0 AND 4-flat-arg Cone form
+    let (ctx3, _s3, c3, ship3, sys3, mod3, _f3) = build_titan_test_env();
+    let sys_h3 = ctx3.systems.get_or_spawn(sys3);
+    let mut cs3 = CombatState::new();
+    cs3.capacitor = 100_000.0;
+    cs3.base_max_velocity = Some(99.0);
+    sys_h3
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship3,
+                type_id: 11_567,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 75.0,
+                inertia: 1.0,
+                mass: 1_000_000_000.0,
+                radius: 5_000.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            cs3,
+        )
+        .await
+        .unwrap();
+    activate_cone_doomsday(
+        &ctx3,
+        c3,
+        ship3,
+        sys3,
+        mod3,
+        &[
+            PyRep::Integer(mod3),
+            PyRep::Real(0.0),
+            PyRep::Real(0.0),
+            PyRep::Real(1.0),
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        sys_h3.get_combat_state(ship3).await.unwrap().unwrap().base_max_velocity,
+        Some(99.0)
+    );
+    match &read_superweapon_runtime(&ctx3.db).unwrap().active_cycles.last().unwrap().kind {
+        SuperweaponCycleKind::Cone { dir_vec, .. } => assert!(dir_vec[2] > 0.9),
+        other => panic!("expected Cone cycle, got {other:?}"),
+    }
+
+    // 4. GTFO Tuple (len == 2) & 4-flat-arg forms
+    let (ctx4, _s4, c4, ship4, sys4, mod4, _) = build_titan_test_env();
+    let sys_h4 = ctx4.systems.get_or_spawn(sys4);
+    sys_h4
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship4,
+                type_id: 11_567,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 75.0,
+                inertia: 1.0,
+                mass: 1_000_000_000.0,
+                radius: 5_000.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::new(),
+        )
+        .await
+        .unwrap();
+    activate_spatial_gtfo_doomsday(
+        &ctx4,
+        c4,
+        ship4,
+        sys4,
+        mod4,
+        &[
+            PyRep::Integer(mod4),
+            PyRep::Tuple(vec![PyRep::Real(12_000.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+        ],
+    )
+    .await
+    .unwrap();
+    match &read_superweapon_runtime(&ctx4.db).unwrap().active_cycles.last().unwrap().kind {
+        SuperweaponCycleKind::SpatialGtfo { center, .. } => assert_eq!(center[0], 12_000.0),
+        other => panic!("expected SpatialGtfo, got {other:?}"),
+    }
+
+    let (ctx5, _s5, c5, ship5, sys5, mod5, _) = build_titan_test_env();
+    let sys_h5 = ctx5.systems.get_or_spawn(sys5);
+    sys_h5
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship5,
+                type_id: 11_567,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 75.0,
+                inertia: 1.0,
+                mass: 1_000_000_000.0,
+                radius: 5_000.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::new(),
+        )
+        .await
+        .unwrap();
+    activate_spatial_gtfo_doomsday(
+        &ctx5,
+        c5,
+        ship5,
+        sys5,
+        mod5,
+        &[
+            PyRep::Integer(mod5),
+            PyRep::Real(0.0),
+            PyRep::Real(12_000.0),
+            PyRep::Real(0.0),
+        ],
+    )
+    .await
+    .unwrap();
+    match &read_superweapon_runtime(&ctx5.db).unwrap().active_cycles.last().unwrap().kind {
+        SuperweaponCycleKind::SpatialGtfo { center, .. } => assert_eq!(center[1], 12_000.0),
+        other => panic!("expected SpatialGtfo, got {other:?}"),
+    }
+
+    // 5. Reaper: mixed [mod, Tuple, Integer(5)] falls back cleanly (L794 &&->||) & 7-flat-arg form (L805, L809)
+    let (ctx6, _s6, c6, ship6, sys6, mod6, _) = build_titan_test_env();
+    let sys_h6 = ctx6.systems.get_or_spawn(sys6);
+    sys_h6
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship6,
+                type_id: 11_567,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 75.0,
+                inertia: 1.0,
+                mass: 1_000_000_000.0,
+                radius: 5_000.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::new(),
+        )
+        .await
+        .unwrap();
+    activate_multipoint_reaper_doomsday(
+        &ctx6,
+        c6,
+        ship6,
+        sys6,
+        mod6,
+        &[
+            PyRep::Integer(mod6),
+            PyRep::Tuple(vec![PyRep::Real(1_000.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+            PyRep::Integer(5),
+        ],
+    )
+    .await
+    .unwrap();
+    match &read_superweapon_runtime(&ctx6.db).unwrap().active_cycles.last().unwrap().kind {
+        SuperweaponCycleKind::ReaperSweep { start_pt, .. } => assert_eq!(*start_pt, [20_000.0, 0.0, 0.0]),
+        other => panic!("expected ReaperSweep, got {other:?}"),
+    }
+
+    let (ctx7, _s7, c7, ship7, sys7, mod7, _) = build_titan_test_env();
+    let sys_h7 = ctx7.systems.get_or_spawn(sys7);
+    sys_h7
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship7,
+                type_id: 11_567,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 75.0,
+                inertia: 1.0,
+                mass: 1_000_000_000.0,
+                radius: 5_000.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::new(),
+        )
+        .await
+        .unwrap();
+    activate_multipoint_reaper_doomsday(
+        &ctx7,
+        c7,
+        ship7,
+        sys7,
+        mod7,
+        &[
+            PyRep::Integer(mod7),
+            PyRep::Real(100.0),
+            PyRep::Real(200.0),
+            PyRep::Real(300.0),
+            PyRep::Real(400.0),
+            PyRep::Real(500.0),
+            PyRep::Real(600.0),
+        ],
+    )
+    .await
+    .unwrap();
+    match &read_superweapon_runtime(&ctx7.db).unwrap().active_cycles.last().unwrap().kind {
+        SuperweaponCycleKind::ReaperSweep { start_pt, end_pt, .. } => {
+            assert_eq!(*start_pt, [100.0, 200.0, 300.0]);
+            assert_eq!(*end_pt, [400.0, 500.0, 600.0]);
+        }
+        other => panic!("expected ReaperSweep, got {other:?}"),
+    }
+}

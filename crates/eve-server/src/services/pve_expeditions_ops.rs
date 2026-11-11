@@ -284,3 +284,7 @@ pub fn format_escalation_journal_text(
         )
     }
 }
+
+#[cfg(test)]
+#[path = "pve_expeditions_ops_edges_tests.rs"]
+mod pve_expeditions_ops_edges_tests;

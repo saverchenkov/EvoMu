@@ -33,6 +33,15 @@ fn make_runtime_ctx(sys_id: SolarSystemId, char_id: i64) -> ServerContext {
             ch.active_ship_id = 1_030_000_001;
         }
     });
+    let uid = db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.user_id).unwrap_or(1));
+    let _ = db.acquire_online_lock_with_computer_hash(
+        uid,
+        char_id as u64,
+        Some(char_id),
+        None,
+        true,
+        1_780_000_000,
+    );
     let ctx = ServerContext::with_sde_and_repository(sde, db);
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_780_000_000)));
     ctx
@@ -311,8 +320,13 @@ async fn materialize_errors_entry_gate_all_trigger_actions_and_boss_kill_auto_cl
     assert!(materialize_dungeon_room_entities(&ctx, sys_id, 960_010, 5).await.is_err());
 
     // Materialize room 0 -> spawns entry gate, container (owner 500_010, type 23), and 2 NPCs
-    let (obj_ids, npc_ids, gate_opt) =
-        materialize_dungeon_room_entities(&ctx, sys_id, 960_010, 0).await.unwrap();
+    let MaterializedDungeonRoomEntities {
+        object_ids: obj_ids,
+        npc_ids,
+        next_gate_id: gate_opt,
+    } = materialize_dungeon_room_entities(&ctx, sys_id, 960_010, 0)
+        .await
+        .unwrap();
     assert_eq!(obj_ids.len(), 1);
     assert_eq!(npc_ids.len(), 2);
     assert!(gate_opt.is_none(), "single-room dungeon has no internal next-room gate");
@@ -443,5 +457,527 @@ async fn materialize_errors_entry_gate_all_trigger_actions_and_boss_kill_auto_cl
     on_warp_landed_at_dungeon_pocket_if_present(&ctx, char_id, sys_id, [15_000_000.0, 0.0, 0.0]).await;
     with_pve_exploration_reg(&ctx, |reg| {
         assert!(reg.escalations_by_char[&char_id][0].dungeons_entered.contains(&20));
+    });
+}
+
+#[test]
+fn warp_guards_leave_suppression_bookmarks_and_exploration_site_targets() {
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id = 90_030_101i64;
+    let other_char = 90_030_102i64;
+    let ctx = make_runtime_ctx(sys_id, char_id);
+
+    let r1_pos = [10_000_000.0, 0.0, 0.0];
+    let r2_pos = [20_000_000.0, 0.0, 0.0];
+    let inst = DungeonRuntimeInstance {
+        instance_id: 970_001,
+        dungeon_id: 42,
+        dungeon_name: "Gated Start".into(),
+        category: "Combat".into(),
+        archetype: "Deadspace".into(),
+        solar_system_id: sys_id,
+        owner_char_id: char_id,
+        base_position: r1_pos,
+        disallow_mwd: false,
+        entry_gate_ball_id: None,
+        entry_gate_pos: None,
+        entry_gate_locked: false,
+        current_room_index: 1,
+        rooms: vec![
+            DungeonRuntimeRoom {
+                room_index: 1,
+                room_id: 8001,
+                room_name: "Gated Entry".into(),
+                position: r1_pos,
+                gate_destination_pos: r2_pos,
+                gated: true,
+                disallow_mwd: None,
+                gate_ball_id: None,
+                gate_locked: false,
+                objects: Vec::new(),
+                npc_groups: Vec::new(),
+                triggers: Vec::new(),
+                spawned: false,
+                cleared: false,
+            },
+            DungeonRuntimeRoom {
+                room_index: 2,
+                room_id: 8002,
+                room_name: "Open Exit".into(),
+                position: r2_pos,
+                gate_destination_pos: r2_pos,
+                gated: false,
+                disallow_mwd: None,
+                gate_ball_id: None,
+                gate_locked: false,
+                objects: Vec::new(),
+                npc_groups: Vec::new(),
+                triggers: Vec::new(),
+                spawned: false,
+                cleared: false,
+            },
+        ],
+        completed: false,
+        despawned: false,
+        active_objective_id: 0,
+        last_completed_task_id: None,
+        completed_task_ids: Vec::new(),
+        created_unix: 1_780_100_000,
+    };
+    with_dungeon_runtime_store(&ctx, |store| {
+        store.instances.insert(970_001, inst);
+    });
+
+    // 1. Exact radius boundary (200_000.0 blocked vs 200_000.1 allowed) + anchor_pos check
+    assert_eq!(
+        check_deadspace_warp_allowed(
+            &ctx,
+            sys_id,
+            [0.0; 3],
+            [0.0; 3],
+            [10_200_000.0, 0.0, 0.0],
+        )
+        .unwrap_err()
+        .code,
+        "NaturalPhenomenaDisruptingWarp"
+    );
+    assert_eq!(
+        check_deadspace_warp_allowed(
+            &ctx,
+            sys_id,
+            [0.0; 3],
+            [10_200_000.0, 0.0, 0.0], // anchor in gated room even if dest outside
+            [50_000_000.0, 0.0, 0.0],
+        )
+        .unwrap_err()
+        .code,
+        "NaturalPhenomenaDisruptingWarp"
+    );
+    assert!(check_deadspace_warp_allowed(
+        &ctx,
+        sys_id,
+        [0.0; 3],
+        [10_200_000.1, 0.0, 0.0],
+        [10_200_000.1, 0.0, 0.0],
+    )
+    .is_ok());
+
+    // 2. Resolving instance/dungeon whose first_room.gated == true & entry_gate_pos == None fails!
+    assert_eq!(
+        resolve_deadspace_or_escalation_warp_target(&ctx, char_id, sys_id, "dungeon", 42, None)
+            .unwrap_err()
+            .code,
+        "NaturalPhenomenaDisruptingWarp" // rpc-lint: allow test fixture
+    );
+
+    // 3. on_warp_start_leave_dungeon_if_needed: intra-dungeon warp & open-space-to-dungeon suppress notice; leaving emits once
+    let _ = ctx.drain_notifications_for_char(char_id);
+    on_warp_start_leave_dungeon_if_needed(&ctx, char_id, sys_id, r1_pos, [10_010_000.0, 0.0, 0.0]);
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty(), "same pocket/dungeon warp must not emit OnExitingDungeon");
+
+    on_warp_start_leave_dungeon_if_needed(&ctx, char_id, sys_id, [50_000_000.0, 0.0, 0.0], r2_pos);
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty(), "entering from open space must not emit OnExitingDungeon");
+
+    on_warp_start_leave_dungeon_if_needed(&ctx, char_id, sys_id, r2_pos, [50_000_000.0, 0.0, 0.0]);
+    let exit_notes = ctx.drain_notifications_for_char(char_id);
+    assert!(exit_notes.iter().any(|n| n.event == "OnExitingDungeon"));
+
+    // Completing/despawning instance stops blocking warps into that coordinate
+    with_dungeon_runtime_store(&ctx, |store| {
+        store.instances.get_mut(&970_001).unwrap().despawned = true;
+    });
+    assert!(check_deadspace_warp_allowed(&ctx, sys_id, [0.0; 3], r1_pos, r1_pos).is_ok());
+
+    // 4. Bookmark system/owner filtering and PveExplorationRegistry string site lookup (ignoring cleared)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.bookmarks.insert(
+            77_101,
+            eve_db::BookmarkRecord {
+                bookmark_id: 77_101,
+                owner_id: other_char,
+                label: "WrongOwner".into(),
+                solar_system_id: sys_id,
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+                item_id: Some(99_901),
+                memo: String::new(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        snap.bookmarks.insert(
+            77_102,
+            eve_db::BookmarkRecord {
+                bookmark_id: 77_102,
+                owner_id: char_id,
+                label: "WrongSys".into(),
+                solar_system_id: 30_000_144,
+                x: 4.0,
+                y: 5.0,
+                z: 6.0,
+                item_id: Some(99_901),
+                memo: String::new(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+    });
+    assert!(resolve_deadspace_or_escalation_warp_target(&ctx, char_id, sys_id, "epinstance", 99_901, None)
+        .unwrap()
+        .is_none());
+
+    with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system.entry(sys_id).or_default().extend([
+            PveSiteInstance {
+                site_id: "EXP-CLEARED".into(),
+                solar_system_id: sys_id,
+                site_category: "Deadspace".into(),
+                dungeon_id: 777,
+                position: [1.0, 2.0, 3.0],
+                cleared: true,
+                ..Default::default()
+            },
+            PveSiteInstance {
+                site_id: "EXP-LIVE".into(),
+                solar_system_id: sys_id,
+                site_category: "Deadspace".into(),
+                dungeon_id: 778,
+                position: [8_000_000.0, -100.0, 250.0],
+                cleared: false,
+                ..Default::default()
+            },
+        ]);
+    });
+    assert!(resolve_deadspace_or_escalation_warp_target(&ctx, char_id, sys_id, "dungeon", 0, Some("EXP-CLEARED"))
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        resolve_deadspace_or_escalation_warp_target(&ctx, char_id, sys_id, "dungeon", 0, Some("EXP-LIVE"))
+            .unwrap(),
+        Some(DVec3::new(8_000_000.0, -100.0, 250.0))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn materialize_idempotency_static_objects_and_despawn_cleanup_guards() {
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id = 90_030_201i64;
+    let ctx = make_runtime_ctx(sys_id, char_id);
+
+    // Nonexistent despawn is clean no-op
+    despawn_completed_dungeon(&ctx, sys_id, 999_111_222, char_id).await;
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+
+    let r1_pos = [30_000_000.0, 0.0, 0.0];
+    let r2_pos = [31_000_000.0, 0.0, 0.0];
+    let inst = DungeonRuntimeInstance {
+        instance_id: 970_010,
+        dungeon_id: 313,
+        dungeon_name: "Static Monument Complex".into(),
+        category: "Combat".into(),
+        archetype: "Deadspace".into(),
+        solar_system_id: sys_id,
+        owner_char_id: char_id,
+        base_position: r1_pos,
+        disallow_mwd: false,
+        entry_gate_ball_id: None,
+        entry_gate_pos: Some([29_500_000.0, 0.0, 0.0]),
+        entry_gate_locked: false,
+        current_room_index: 1,
+        rooms: vec![
+            DungeonRuntimeRoom {
+                room_index: 1,
+                room_id: 8101,
+                room_name: "Atrium".into(),
+                position: r1_pos,
+                gate_destination_pos: r2_pos,
+                gated: false,
+                disallow_mwd: None,
+                gate_ball_id: None,
+                gate_locked: false,
+                objects: vec![
+                    DungeonRuntimeObject {
+                        ball_id: 0,
+                        type_id: 17_831,
+                        name: "NonContainerMonument".into(),
+                        position: [r1_pos[0] + 500.0, 0.0, 0.0],
+                        radius: 150.0,
+                        is_container: false, // NOT a container -> ball only, no snap.items!
+                        loot_items: Vec::new(),
+                        spawned: false,
+                    },
+                    DungeonRuntimeObject {
+                        ball_id: 0,
+                        type_id: DEFAULT_CONTAINER_TYPE_ID,
+                        name: "LootCan".into(),
+                        position: [r1_pos[0] + 900.0, 0.0, 0.0],
+                        radius: 100.0,
+                        is_container: true,
+                        loot_items: vec![(34, 250)],
+                        spawned: false,
+                    },
+                ],
+                npc_groups: vec![DungeonNpcGroup {
+                    group_id: 1,
+                    wave: 1,
+                    npc_specs: vec![(48_090, 2)],
+                    npc_ball_ids: Vec::new(),
+                    spawn_immediately: true,
+                    spawned: false,
+                    cleared: false,
+                }],
+                triggers: Vec::new(),
+                spawned: false,
+                cleared: false,
+            },
+            DungeonRuntimeRoom {
+                room_index: 2,
+                room_id: 8102,
+                room_name: "Sanctum".into(),
+                position: r2_pos,
+                gate_destination_pos: r2_pos,
+                gated: true,
+                disallow_mwd: None,
+                gate_ball_id: None,
+                gate_locked: false,
+                objects: Vec::new(),
+                npc_groups: Vec::new(),
+                triggers: Vec::new(),
+                spawned: false,
+                cleared: false,
+            },
+        ],
+        completed: false,
+        despawned: false,
+        active_objective_id: 0,
+        last_completed_task_id: None,
+        completed_task_ids: Vec::new(),
+        created_unix: 1_780_100_000,
+    };
+    with_dungeon_runtime_store(&ctx, |store| {
+        store.instances.insert(970_010, inst);
+    });
+    with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system.entry(sys_id).or_default().push(PveSiteInstance {
+            site_id: "DNG-STATIC-313".into(),
+            solar_system_id: sys_id,
+            site_category: "Deadspace".into(),
+            dungeon_id: 313,
+            position: r1_pos,
+            ..Default::default()
+        });
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cosmic_signatures
+            .entry(sys_id)
+            .or_default()
+            .push(eve_db::CosmicSignatureRecord {
+                signature_id: "DNG-STATIC-313".into(),
+                solar_system_id: sys_id,
+                sig_group: "Combat Site".into(),
+                type_name: "Static Monument Complex".into(),
+                position: r1_pos,
+                signal_strength: 100.0,
+                wormhole_type_id: None,
+                destination_system_id: None,
+                created_unix: 1_780_100_000,
+                lifetime_seconds: 86_400,
+                max_mass_kg: 0.0,
+                remaining_mass_kg: 0.0,
+                max_jump_mass_kg: 0.0,
+                collapsed: false,
+            });
+    });
+
+    // First materialization
+    let MaterializedDungeonRoomEntities {
+        object_ids: objs1,
+        npc_ids: npcs1,
+        next_gate_id: gate1,
+    } = materialize_dungeon_room_entities(&ctx, sys_id, 970_010, 0)
+        .await
+        .unwrap();
+    assert_eq!(objs1.len(), 2);
+    assert_eq!(npcs1.len(), 2);
+    assert!(gate1.is_some());
+
+    // Non-container object must NOT be in snap.items, while container + loot MUST be in snap.items
+    let items_after_first = ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&objs1[0]));
+        assert!(snap.items.contains_key(&objs1[1]));
+        snap.items.len()
+    });
+
+    // Second materialization of same room -> idempotent! No new items/NPCs/balls
+    let MaterializedDungeonRoomEntities {
+        object_ids: objs2,
+        npc_ids: npcs2,
+        next_gate_id: gate2,
+    } = materialize_dungeon_room_entities(&ctx, sys_id, 970_010, 0)
+        .await
+        .unwrap();
+    assert_eq!(objs2, objs1);
+    assert_eq!(npcs2, npcs1);
+    assert_eq!(gate2, gate1);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items.len(), items_after_first, "rematerialize must not duplicate loot");
+    });
+
+    let entry_gate_id = with_dungeon_runtime_store(&ctx, |store| store.instances[&970_010].entry_gate_ball_id.unwrap());
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    assert!(sys_handle.get_ball_snapshot(entry_gate_id).await.unwrap().is_some());
+    assert!(sys_handle.get_ball_snapshot(gate1.unwrap()).await.unwrap().is_some());
+    assert!(sys_handle.get_ball_snapshot(objs1[0]).await.unwrap().is_some());
+    assert!(sys_handle.get_ball_snapshot(npcs1[0]).await.unwrap().is_some());
+
+    // Explicit despawn cleans all balls, marks exploration site cleared, collapses cosmic signature, emits OnDungeonCompleted ONCE
+    let _ = ctx.drain_notifications_for_char(char_id);
+    despawn_completed_dungeon(&ctx, sys_id, 970_010, char_id).await;
+    assert!(sys_handle.get_ball_snapshot(entry_gate_id).await.unwrap().is_none());
+    assert!(sys_handle.get_ball_snapshot(gate1.unwrap()).await.unwrap().is_none());
+    assert!(sys_handle.get_ball_snapshot(objs1[0]).await.unwrap().is_none());
+    assert!(sys_handle.get_ball_snapshot(npcs1[0]).await.unwrap().is_none());
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.cosmic_signatures[&sys_id][0].collapsed);
+    });
+    with_pve_exploration_reg(&ctx, |reg| {
+        assert!(reg.sites_by_system[&sys_id][0].cleared);
+    });
+    assert_eq!(
+        ctx.drain_notifications_for_char(char_id)
+            .iter()
+            .filter(|n| n.event == "OnDungeonCompleted")
+            .count(),
+        1
+    );
+
+    // Calling despawn again on already despawned instance must NOT emit duplicate OnDungeonCompleted
+    despawn_completed_dungeon(&ctx, sys_id, 970_010, char_id).await;
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn materialize_room_preserves_positive_ball_id_and_increments_next_entity_id_monotonically() {
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id = 90_030_301i64;
+    let ctx = make_runtime_ctx(sys_id, char_id);
+    let base_id = 10_000_000i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id = base_id;
+    });
+
+    let r1_pos = [40_000_000.0, 0.0, 0.0];
+    let r2_pos = [41_000_000.0, 0.0, 0.0];
+    let inst = DungeonRuntimeInstance {
+        instance_id: 970_020,
+        dungeon_id: 314,
+        dungeon_name: "Sequential ID Test Complex".into(),
+        category: "Combat".into(),
+        archetype: "Deadspace".into(),
+        solar_system_id: sys_id,
+        owner_char_id: char_id,
+        base_position: r1_pos,
+        disallow_mwd: false,
+        entry_gate_ball_id: None,
+        entry_gate_pos: Some([39_500_000.0, 0.0, 0.0]),
+        entry_gate_locked: false,
+        current_room_index: 1,
+        rooms: vec![
+            DungeonRuntimeRoom {
+                room_index: 1,
+                room_id: 8201,
+                room_name: "Room One".into(),
+                position: r1_pos,
+                gate_destination_pos: r2_pos,
+                gated: false,
+                disallow_mwd: None,
+                gate_ball_id: None,
+                gate_locked: false,
+                objects: vec![
+                    DungeonRuntimeObject {
+                        ball_id: 555_001,
+                        type_id: 17_831,
+                        name: "PresetMonument".into(),
+                        position: [r1_pos[0] + 400.0, 0.0, 0.0],
+                        radius: 150.0,
+                        is_container: false,
+                        loot_items: Vec::new(),
+                        spawned: false,
+                    },
+                    DungeonRuntimeObject {
+                        ball_id: 0,
+                        type_id: DEFAULT_CONTAINER_TYPE_ID,
+                        name: "AutoIdCan".into(),
+                        position: [r1_pos[0] + 800.0, 0.0, 0.0],
+                        radius: 100.0,
+                        is_container: true,
+                        loot_items: vec![(34, 100), (35, 50)],
+                        spawned: false,
+                    },
+                ],
+                npc_groups: vec![DungeonNpcGroup {
+                    group_id: 1,
+                    wave: 1,
+                    npc_specs: vec![(48_090, 2)],
+                    npc_ball_ids: Vec::new(),
+                    spawn_immediately: true,
+                    spawned: false,
+                    cleared: false,
+                }],
+                triggers: Vec::new(),
+                spawned: false,
+                cleared: false,
+            },
+            DungeonRuntimeRoom {
+                room_index: 2,
+                room_id: 8202,
+                room_name: "Room Two".into(),
+                position: r2_pos,
+                gate_destination_pos: r2_pos,
+                gated: true,
+                disallow_mwd: None,
+                gate_ball_id: None,
+                gate_locked: false,
+                objects: Vec::new(),
+                npc_groups: Vec::new(),
+                triggers: Vec::new(),
+                spawned: false,
+                cleared: false,
+            },
+        ],
+        completed: false,
+        despawned: false,
+        active_objective_id: 0,
+        last_completed_task_id: None,
+        completed_task_ids: Vec::new(),
+        created_unix: 1_780_100_000,
+    };
+    with_dungeon_runtime_store(&ctx, |store| {
+        store.instances.insert(970_020, inst);
+    });
+
+    let res = materialize_dungeon_room_entities(&ctx, sys_id, 970_020, 0)
+        .await
+        .unwrap();
+
+    // Exact strictly increasing allocation order:
+    // +1 entry gate, preset object keeps 555_001, +2 container, +3..+4 loot items, +5 internal gate, +6..+7 NPCs
+    let entry_gate_id = with_dungeon_runtime_store(&ctx, |store| store.instances[&970_020].entry_gate_ball_id);
+    assert_eq!(entry_gate_id, Some(base_id + 1));
+    assert_eq!(res.object_ids, vec![555_001, base_id + 2]);
+    assert_eq!(res.next_gate_id, Some(base_id + 5));
+    assert_eq!(res.npc_ids, vec![base_id + 6, base_id + 7]);
+
+    ctx.db.with_snapshot(|snap| {
+        let mut loot_ids: Vec<i64> = snap
+            .items
+            .values()
+            .filter(|it| it.location_id == base_id + 2)
+            .map(|it| it.item_id)
+            .collect();
+        loot_ids.sort_unstable();
+        assert_eq!(loot_ids, vec![base_id + 3, base_id + 4]);
+        assert_eq!(snap.next_entity_id, base_id + 7);
     });
 }

@@ -11,6 +11,10 @@ use eve_sde::SdeRegistry;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
+#[cfg(test)]
+#[path = "pvp_filament_mgr_extra_unit_tests.rs"]
+mod extra_unit_tests;
+
 static SHARED_SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
 
 fn test_ctx() -> ServerContext {

@@ -343,6 +343,18 @@ pub async fn check_filament_1000km_proximity(
     Ok(())
 }
 
+/// Validated and consumed Abyssal Deadspace filament metadata returned by [`validate_and_consume_abyssal_filaments`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConsumedAbyssalFilament {
+    pub filament_item_id: ItemId,
+    pub filament_type_id: TypeId,
+    pub tier: u8,
+    pub max_ships: u8,
+    pub origin_security_status: f64,
+    pub ship_position: DVec3,
+    pub opener_fleet_id: Option<i64>,
+}
+
 /// Validates hull, fleet membership for Frigate/Destroyer (`max_ships > 1`), readiness (no PvP/weapon/logoff timer,
 /// no warp/cloak/tether/scramble/invuln), deadspace/1,000 km proximity, `InventoryFlag::Cargo`, high-sec tier/suspect rules,
 /// and hull-class filament count (1 Cruiser, 2 Destroyer, 3 Frigate), then consumes the filaments and returns the opener's `fleet_id`.
@@ -352,7 +364,7 @@ pub async fn validate_and_consume_abyssal_filaments(
     ship_id: ItemId,
     cur_sys: SolarSystemId,
     filament_arg: i64,
-) -> Result<(ItemId, TypeId, u8, u8, f64, DVec3, Option<i64>), BridgeRpcError> {
+) -> Result<ConsumedAbyssalFilament, BridgeRpcError> {
     if filament_arg <= 0 {
         return Err(rpc_err(
             "MissingRequiredArgument",
@@ -457,7 +469,15 @@ pub async fn validate_and_consume_abyssal_filaments(
             Ok((iid, tid, tier, origin_sec, active_fleet_id))
         })?;
 
-    Ok((iid, filament_type_id, tier, max_ships, origin_sec, ship_pos, opener_fleet_id))
+    Ok(ConsumedAbyssalFilament {
+        filament_item_id: iid,
+        filament_type_id,
+        tier,
+        max_ships,
+        origin_security_status: origin_sec,
+        ship_position: ship_pos,
+        opener_fleet_id,
+    })
 }
 
 /// Rolls the Abyssal weather penalty percentage (`30%` or `50%` for `T0..=T3`, `50%` or `70%` for `T4..=T6`).

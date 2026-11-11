@@ -517,3 +517,224 @@ fn process_configuration_reordering_fuel_restore_hacked_hub_and_uninstall_recove
     )
     .expect("owning corp station manager uninstalls upgrade");
 }
+
+#[test]
+fn mutant_kill_upgrade_definition_item_at_hub_boundaries_and_consume_items() {
+    let sde = shared_sde();
+    let db = WorldRepository::with_demo_seed();
+
+    // 1. upgrade_definition full field verification & published / group checks
+    let svc_def = upgrade_definition(&sde, 81_623).expect("81_623 definition");
+    assert_eq!(svc_def.type_id, 81_623);
+    assert_eq!(svc_def.fuel_startup, 180);
+    assert!(!svc_def.exclusive_group.is_empty());
+
+    let seg_def = upgrade_definition(&sde, 87_815).expect("87_815 definition");
+    assert_eq!(seg_def.exclusive_group, "SystemEffectGenerator");
+    assert_eq!(seg_def.fuel_startup, 14);
+
+    let res_def = upgrade_definition(&sde, 87_710).expect("87_710 definition");
+    assert_eq!(res_def.exclusive_group, "ResourceManagement");
+    assert_eq!(res_def.fuel_startup, 16);
+
+    assert!(!all_upgrade_definitions(&sde).is_empty());
+
+    let mut unpub_sde = (*sde).clone();
+    unpub_sde.types.get_mut(&81_623).unwrap().published = false;
+    assert!(upgrade_definition(&unpub_sde, 81_623).is_none());
+
+    // 2. item_at_hub: owner, qty >= 1, unlocked, non-fitted, hub/active-ship-system boundaries
+    let cid = 90_000_001_i64;
+    let other_cid = 90_000_099_i64;
+    let corp_id = 98_000_401_i64;
+    let hub_id = 79_500_001_i64;
+    let ship_id = 79_500_010_i64;
+    let other_ship_id = 79_500_011_i64;
+    let hub_sys = 30_000_142_u32;
+    let other_sys = 30_000_144_u32;
+
+    let dir_cid = cid + 1;
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.corporation_id = corp_id;
+            ch.solar_system_id = hub_sys;
+            ch.active_ship_id = ship_id;
+        }
+        let mut dir_ch = snap.characters[&cid].clone();
+        dir_ch.character_id = dir_cid;
+        dir_ch.user_id += 1;
+        dir_ch.name = "ItemAtHubDir".into();
+        snap.characters.insert(dir_cid, dir_ch);
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "ItemAtHubCorp".into();
+        corp.ticker = "IAH".into();
+        corp.ceo_id = 99_999_401;
+        corp.members.insert(cid);
+        corp.members.insert(dir_cid);
+        corp.member_roles.insert(dir_cid, corp_roles::ROLE_DIRECTOR);
+        corp.ensure_wallet_divisions();
+        snap.corporations.insert(corp_id, corp);
+
+        // Insert active ship item so ancestor lock can be toggled on it cleanly
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: cid,
+                location_id: hub_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            91_001,
+            InventoryItemRecord {
+                item_id: 91_001,
+                type_id: TYPE_SUPERIONIC_ICE,
+                owner_id: cid,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 10,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            91_002,
+            InventoryItemRecord {
+                item_id: 91_002,
+                type_id: 82_499,
+                owner_id: cid,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            91_003,
+            InventoryItemRecord {
+                item_id: 91_003,
+                type_id: TYPE_SUPERIONIC_ICE,
+                owner_id: cid,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 0,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            91_004,
+            InventoryItemRecord {
+                item_id: 91_004,
+                type_id: TYPE_SUPERIONIC_ICE,
+                owner_id: other_cid,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 5,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            91_005,
+            InventoryItemRecord {
+                item_id: 91_005,
+                type_id: TYPE_SUPERIONIC_ICE,
+                owner_id: cid,
+                location_id: hub_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            91_006,
+            InventoryItemRecord {
+                item_id: 91_006,
+                type_id: TYPE_SUPERIONIC_ICE,
+                owner_id: corp_id,
+                location_id: hub_id,
+                flag: InventoryFlag::CorpSAG1,
+                quantity: 5,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+
+        let caller_plain = Caller {
+            cid,
+            corp: corp_id,
+            alliance: None,
+            roles: 0,
+        };
+        let caller_dir = Caller {
+            cid: dir_cid,
+            corp: corp_id,
+            alliance: None,
+            roles: corp_roles::ROLE_DIRECTOR,
+        };
+
+        // Valid cargo item in active ship in hub_sys -> true
+        assert!(item_at_hub(snap, &caller_plain, &snap.items[&91_001], hub_id, hub_sys));
+        // Exact min quantity == 1 in hub Hangar -> true
+        assert!(item_at_hub(snap, &caller_plain, &snap.items[&91_005], hub_id, hub_sys));
+        // Fitted module (HiSlot0) -> false (kills delete !is_fitted_slot_flag & ||)
+        assert!(!item_at_hub(snap, &caller_plain, &snap.items[&91_002], hub_id, hub_sys));
+        // Quantity == 0 -> false (kills quantity < 1 & ||)
+        assert!(!item_at_hub(snap, &caller_plain, &snap.items[&91_003], hub_id, hub_sys));
+        // Wrong owner (valid_owner == false while qty > 0, unlocked, Cargo, right ship) -> false
+        assert!(!item_at_hub(snap, &caller_plain, &snap.items[&91_004], hub_id, hub_sys));
+
+        // CorpSAG1 requires corp hangar take role
+        assert!(!item_at_hub(snap, &caller_plain, &snap.items[&91_006], hub_id, hub_sys));
+        assert!(item_at_hub(snap, &caller_dir, &snap.items[&91_006], hub_id, hub_sys));
+
+        // Locked ancestor ship blocks cargo item -> false (kills delete !is_item_or_ancestor_locked & ||)
+        snap.items.get_mut(&ship_id).unwrap().flag = InventoryFlag::Locked;
+        assert!(!item_at_hub(snap, &caller_plain, &snap.items[&91_001], hub_id, hub_sys));
+        snap.items.get_mut(&ship_id).unwrap().flag = InventoryFlag::Hangar;
+
+        // Caller outside hub_sys still accesses hub Hangar, but NOT active ship cargo
+        snap.characters.get_mut(&cid).unwrap().solar_system_id = other_sys;
+        assert!(!item_at_hub(snap, &caller_plain, &snap.items[&91_001], hub_id, hub_sys));
+        assert!(item_at_hub(snap, &caller_plain, &snap.items[&91_005], hub_id, hub_sys));
+        snap.characters.get_mut(&cid).unwrap().solar_system_id = hub_sys;
+        snap.characters.get_mut(&cid).unwrap().active_ship_id = other_ship_id;
+        assert!(!item_at_hub(snap, &caller_plain, &snap.items[&91_001], hub_id, hub_sys));
+
+        // 3. consume_items decrements partial stacks and removes exhausted items (even when singleton == true)
+        snap.items.insert(
+            91_007,
+            InventoryItemRecord {
+                item_id: 91_007,
+                type_id: TYPE_SUPERIONIC_ICE,
+                owner_id: cid,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        consume_items(snap, 91_001, 4);
+        assert_eq!(snap.items[&91_001].quantity, 6);
+        consume_items(snap, 91_007, 1);
+        assert!(!snap.items.contains_key(&91_007));
+    });
+}

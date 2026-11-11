@@ -528,9 +528,47 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
     }
 
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    let default_fac = crate::combat::npc_ai::regional_pirate_faction_id(ctx, solar_system_id);
     for ball in balls_to_spawn {
         let cs = ctx.build_type_combat_state(ball.type_id);
-        let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
+        let ty = ctx.sde.types.get(&ball.type_id);
+        let cat_id = ty.map(|t| t.category_id).unwrap_or(11);
+        let grp_id = ty.map(|t| t.group_id).unwrap_or(301);
+        let meta = if cat_id == 11 {
+            let fac_owner = ty
+                .and_then(|t| t.faction_id)
+                .filter(|&f| f > 0)
+                .unwrap_or(default_fac) as i64;
+            eve_destiny::SlimItemMeta {
+                group_id: grp_id,
+                category_id: 11,
+                owner_id: fac_owner,
+                char_id: None,
+                corp_id: crate::services::combat_crimewatch::combat_npc_ai::resolve_npc_corp_id_for_faction(
+                    ctx,
+                    fac_owner,
+                ),
+                alliance_id: -1,
+                security_status: -1.0,
+                is_cloaked: false,
+                name: ty.and_then(|t| (!t.name.is_empty()).then(|| t.name.clone())),
+                ..Default::default()
+            }
+        } else {
+            eve_destiny::SlimItemMeta {
+                group_id: grp_id,
+                category_id: cat_id,
+                owner_id: 1,
+                char_id: None,
+                corp_id: -1,
+                alliance_id: -1,
+                security_status: 0.0,
+                is_cloaked: false,
+                name: ty.and_then(|t| (!t.name.is_empty()).then(|| t.name.clone())),
+                ..Default::default()
+            }
+        };
+        let _ = sys_handle.spawn_ball_with_meta(ball, cs, meta).await;
     }
 
     let (added_anoms, added_sigs) = ctx.db.with_mut_snapshot(|snap| {
@@ -676,4 +714,8 @@ pub fn build_type_combat_state_from_sde(sde: &eve_sde::SdeRegistry, type_id: u32
 #[cfg(test)]
 #[path = "pve_exploration_seeding_tests.rs"]
 mod pve_exploration_seeding_tests;
+
+#[cfg(test)]
+#[path = "pve_exploration_seeding_edges_tests.rs"]
+mod pve_exploration_seeding_edges_tests;
 

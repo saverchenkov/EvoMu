@@ -667,7 +667,12 @@ pub async fn handle_dogma_set_module_online(
     let mut fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id)?;
     let before_ship_attrs = snapshot_ship_fitting_attrs(ctx, &fit);
     if let Err(e) = fit.set_module_online(module_id, &ctx.sde) {
-        return Err(err("FittingValidationFailed", e));
+        let code = if e.starts_with("ModuleBurnedOut") {
+            "ModuleBurnedOut"
+        } else {
+            "FittingValidationFailed"
+        };
+        return Err(err(code, e));
     }
     let after_ship_attrs = snapshot_ship_fitting_attrs(ctx, &fit);
     let committed_mod_type_id = ctx.db.try_with_mut_snapshot(|snap| {

@@ -466,8 +466,65 @@ pub async fn handle_with_bound(
                 .and_then(|mt| mt.offered_level)
                 .or_else(|| ctx.sde.agents.get(&m.agent_id).map(|a| a.level))
                 .unwrap_or(1);
-            let (isk_reward, lp_reward, bonus_reward) =
-                compute_character_mission_rewards(ctx, char_id, m.agent_id, mission_id, sys_id);
+            let CharacterMissionRewards {
+                isk_reward,
+                lp_reward,
+                bonus_reward,
+            } = compute_character_mission_rewards(ctx, char_id, m.agent_id, mission_id, sys_id);
+            let origin_sid = meta
+                .as_ref()
+                .and_then(|mt| mt.origin_station_id)
+                .or_else(|| ctx.sde.agents.get(&m.agent_id).and_then(|a| a.station_id))
+                .unwrap_or(60_003_760);
+            let dest_sid_opt = meta.as_ref().and_then(|mt| mt.destination_station_id);
+            let make_loc = |sid: i64, ltype: &str| {
+                let lsys = ctx
+                    .sde
+                    .stations
+                    .get(&sid)
+                    .map(|st| st.solar_system_id as i64)
+                    .unwrap_or(m.solar_system_id as i64);
+                let ltid = ctx
+                    .sde
+                    .stations
+                    .get(&sid)
+                    .map(|st| st.station_type_id as i64)
+                    .unwrap_or(1529);
+                PyRep::Dict(vec![
+                    (PyRep::String("locationID".into()), PyRep::Integer(sid)),
+                    (PyRep::String("solarsystemID".into()), PyRep::Integer(lsys)),
+                    (PyRep::String("stationID".into()), PyRep::Integer(sid)),
+                    (PyRep::String("typeID".into()), PyRep::Integer(ltid)),
+                    (PyRep::String("agentID".into()), PyRep::Integer(m.agent_id)),
+                    (PyRep::String("referringAgentID".into()), PyRep::None),
+                    (PyRep::String("shipTypeID".into()), PyRep::None),
+                    (PyRep::String("locationType".into()), PyRep::String(ltype.into())),
+                    (PyRep::String("coords".into()), PyRep::None),
+                    (PyRep::String("BookmarkID".into()), m.bookmark_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ])
+            };
+            let mut locations = vec![make_loc(origin_sid, "agenthomebase")];
+            if let Some(dsid) = dest_sid_opt {
+                locations.push(make_loc(dsid, "objective.destination"));
+            }
+            let completion_status = if mission_state == 4 || (!is_courier && !is_trade && !is_mining && m.npcs_remaining == 0) {
+                1_i64
+            } else {
+                0_i64
+            };
+            let dungeons = if !is_courier && !is_trade {
+                vec![PyRep::Dict(vec![
+                    (PyRep::String("dungeonID".into()), PyRep::Integer(mission_id as i64)),
+                    (PyRep::String("solarsystemID".into()), PyRep::Integer(m.solar_system_id as i64)),
+                    (PyRep::String("locationID".into()), PyRep::Integer(origin_sid)),
+                    (PyRep::String("ownerID".into()), PyRep::Integer(m.agent_id)),
+                    (PyRep::String("shipRestrictions".into()), PyRep::Integer(0)),
+                    (PyRep::String("completed".into()), PyRep::Bool(completion_status > 0)),
+                    (PyRep::String("completionStatus".into()), PyRep::Integer(completion_status)),
+                ])]
+            } else {
+                Vec::new()
+            };
             Some(Ok(PyRep::keyval([
                 ("missionID", PyRep::Integer(mission_id as i64)),
                 ("contentID", PyRep::Integer(mission_id as i64)),
@@ -476,8 +533,14 @@ pub async fn handle_with_bound(
                 ("title", PyRep::String(title)),
                 ("state", PyRep::String(m.state)),
                 ("missionState", PyRep::Integer(mission_state)),
+                ("completionStatus", PyRep::Integer(completion_status)),
                 ("briefing", PyRep::String(briefing)),
                 ("objectives", PyRep::String(objectives.into())),
+                ("locations", PyRep::List(locations)),
+                ("dungeons", PyRep::List(dungeons)),
+                ("originStationID", PyRep::Integer(origin_sid)),
+                ("destinationStationID", dest_sid_opt.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("solarsystemID", PyRep::Integer(m.solar_system_id as i64)),
                 ("currentRoomID", PyRep::Integer(m.current_room_id as i64)),
                 ("npcsRemaining", PyRep::Integer(m.npcs_remaining as i64)),
                 ("requiredTypeID", req_type),
@@ -493,13 +556,15 @@ pub async fn handle_with_bound(
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
             };
-            let action_id = if method == "GetOffer" {
-                2_i64
-            } else if let Some(raw_action) = args.first().and_then(|a| a.as_i64()) {
-                if (1..=19).contains(&raw_action) { raw_action } else { 2_i64 }
+            let explicit_action_opt = if method == "GetOffer" {
+                Some(2_i64)
             } else {
-                2_i64
+                args.first()
+                    .and_then(|a| a.as_i64())
+                    .filter(|v| (1..=19).contains(v))
             };
+            let is_implicit_greeting = explicit_action_opt.is_none();
+            let action_id = explicit_action_opt.unwrap_or(2_i64);
 
             let bound_agent_id = bound_entry
                 .filter(|b| b.service == "agentMgr" && b.object_id > 0)
@@ -628,16 +693,55 @@ pub async fn handle_with_bound(
                         }
                     }
 
-                    let is_rnd = is_rnd_agent(agent_info);
-                    if is_rnd {
-                        let has_research = ctx.db.with_snapshot(|snap| {
-                            load_rnd_research_entries(snap, char_id).iter().any(|r| r.agent_id == agent_id)
+                    if is_implicit_greeting {
+                        let existing_accepted = ctx.db.with_snapshot(|snap| {
+                            snap.active_missions
+                                .values()
+                                .find(|m| {
+                                    m.character_id == char_id
+                                        && m.agent_id == agent_id
+                                        && m.state == "Accepted"
+                                })
+                                .cloned()
                         });
-                        if !has_research {
-                            return Some(Err(BridgeRpcError {
-                                code: "ResearchNotActive".into(),
-                                message: format!("Agent {agent_id} requires active research to offer daily missions"),
-                            }));
+                        if let Some(acc) = existing_accepted {
+                            let mid = acc.mission_id;
+                            let title = ctx
+                                .sde
+                                .missions
+                                .get(&mid)
+                                .map(|t| t.title.clone())
+                                .unwrap_or_else(|| format!("Mission {mid}"));
+                            let msg = format!(
+                                "Your assignment '{title}' is currently in progress. Return here once your objectives are complete."
+                            );
+                            let mut dlg = vec![
+                                PyRep::Tuple(vec![
+                                    PyRep::Integer(6),
+                                    PyRep::String("Complete Mission".into()),
+                                ]),
+                                PyRep::Tuple(vec![
+                                    PyRep::Integer(11),
+                                    PyRep::String("Quit Mission".into()),
+                                ]),
+                            ];
+                            if agent_info.is_locator {
+                                dlg.push(PyRep::Tuple(vec![
+                                    PyRep::Integer(15),
+                                    PyRep::String("Locate Character".into()),
+                                ]));
+                            }
+                            return Some(Ok(PyRep::keyval([
+                                ("missionID", PyRep::Integer(mid as i64)),
+                                ("contentID", PyRep::Integer(mid as i64)),
+                                ("agentID", PyRep::Integer(agent_id)),
+                                ("title", PyRep::String(title)),
+                                ("state", PyRep::String("Accepted".into())),
+                                ("missionState", PyRep::Integer(2)),
+                                ("briefing", PyRep::String(msg.clone())),
+                                ("agentSays", PyRep::String(msg)),
+                                ("dialogue", PyRep::List(dlg)),
+                            ])));
                         }
                     }
 
@@ -648,10 +752,66 @@ pub async fn handle_with_bound(
                     if agent_info.level > 1 {
                         let required_standing = ((agent_info.level as f64) - 1.0) * 2.0 - 1.0;
                         if effective_standing < required_standing {
+                            if is_implicit_greeting {
+                                let refusal = format!(
+                                    "I am sorry, capsuleer, but I only offer assignments to pilots with an effective standing of at least {required_standing:.1} (yours is {effective_standing:.2})."
+                                );
+                                return Some(Ok(PyRep::keyval([
+                                    ("agentID", PyRep::Integer(agent_id)),
+                                    ("state", PyRep::String("Refused".into())),
+                                    ("missionState", PyRep::Integer(0)),
+                                    ("briefing", PyRep::String(refusal.clone())),
+                                    ("agentSays", PyRep::String(refusal)),
+                                    ("dialogue", PyRep::List(Vec::new())),
+                                ])));
+                            }
                             return Some(Err(BridgeRpcError { code: "InsufficientAgentStanding".into(), message: format!("Agent {agent_id} (level {}) requires agent/corporation/faction standing >= {required_standing:.1}, character has {effective_standing:.2}", agent_info.level) }));
                         }
                     } else if !matches!(agent_info.agent_type_id, 7 | 12) && effective_standing <= -2.0 {
+                        if is_implicit_greeting {
+                            let refusal = format!(
+                                "I do not work with pilots whose standing has fallen so low ({effective_standing:.2}). Improve your standing above -2.0 first."
+                            );
+                            return Some(Ok(PyRep::keyval([
+                                ("agentID", PyRep::Integer(agent_id)),
+                                ("state", PyRep::String("Refused".into())),
+                                ("missionState", PyRep::Integer(0)),
+                                ("briefing", PyRep::String(refusal.clone())),
+                                ("agentSays", PyRep::String(refusal)),
+                                ("dialogue", PyRep::List(Vec::new())),
+                            ])));
+                        }
                         return Some(Err(BridgeRpcError { code: "InsufficientAgentStanding".into(), message: format!("Agent {agent_id} (level 1) requires standing > -2.0, character has {effective_standing:.2}") }));
+                    }
+
+                    let is_rnd = is_rnd_agent(agent_info);
+                    if is_rnd {
+                        let has_research = ctx.db.with_snapshot(|snap| {
+                            load_rnd_research_entries(snap, char_id).iter().any(|r| r.agent_id == agent_id)
+                        });
+                        if !has_research {
+                            if is_implicit_greeting {
+                                let greeting = "Greetings, capsuleer. We do not have an active research project yet, but we can begin one whenever you are ready.".to_string();
+                                return Some(Ok(PyRep::keyval([
+                                    ("agentID", PyRep::Integer(agent_id)),
+                                    ("state", PyRep::String("Greeting".into())),
+                                    ("missionState", PyRep::Integer(0)),
+                                    ("briefing", PyRep::String(greeting.clone())),
+                                    ("agentSays", PyRep::String(greeting)),
+                                    (
+                                        "dialogue",
+                                        PyRep::List(vec![PyRep::Tuple(vec![
+                                            PyRep::Integer(12),
+                                            PyRep::String("Start Research".into()),
+                                        ])]),
+                                    ),
+                                ])));
+                            }
+                            return Some(Err(BridgeRpcError {
+                                code: "ResearchNotActive".into(),
+                                message: format!("Agent {agent_id} requires active research to offer daily missions"),
+                            }));
+                        }
                     }
 
                     let offer_dur = 604_800_u64;
@@ -746,7 +906,11 @@ pub async fn handle_with_bound(
                         Ok((mission_id, title, briefing, objectives, dest_sid)) => {
                             let expiry_unix = now + offer_dur;
                             let dialogue = PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(3), PyRep::String("Accept".into())]), PyRep::Tuple(vec![PyRep::Integer(9), PyRep::String("Decline".into())])]);
-                            let (isk_reward, lp_reward, bonus_reward) = compute_character_mission_rewards(ctx, char_id, agent_id, mission_id, sys_id);
+                            let CharacterMissionRewards {
+                                isk_reward,
+                                lp_reward,
+                                bonus_reward,
+                            } = compute_character_mission_rewards(ctx, char_id, agent_id, mission_id, sys_id);
                             ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionChange", "charid", vec![PyRep::String("offered".into()), PyRep::Integer(agent_id)]);
                             let clean_header = title.trim_start_matches("[d]").trim();
                             let header_str = if clean_header.is_empty() { "Agent Transmission" } else { clean_header };
@@ -1021,12 +1185,18 @@ pub async fn handle_with_bound(
                     let mission_body = ctx.sde.missions.get(&mission_id).and_then(|m| m.content_template.as_deref()).unwrap_or("");
                     ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionChange", "charid", vec![PyRep::String("offer_accepted".into()), PyRep::Integer(active_agent_id)]);
                     emit_agent_mission_dialogue(ctx, char_id, active_agent_id, agent_type_id, &mission_title, mission_body, false);
+                    let accept_msg = format!(
+                        "Excellent. Your mission '{mission_title}' is now active in your journal. Return here once your objectives are complete."
+                    );
                     Some(Ok(PyRep::keyval([
                         ("missionID", PyRep::Integer(mission_id as i64)),
                         ("contentID", PyRep::Integer(mission_id as i64)),
                         ("agentID", PyRep::Integer(active_agent_id)),
+                        ("title", PyRep::String(mission_title)),
                         ("state", PyRep::String("Accepted".into())),
                         ("missionState", PyRep::Integer(2)),
+                        ("agentSays", PyRep::String(accept_msg.clone())),
+                        ("briefing", PyRep::String(accept_msg)),
                         ("dialogue", dialogue),
                         ("dungeonID", PyRep::None),
                         ("currentRoomID", PyRep::Integer(1)),
@@ -1078,8 +1248,11 @@ pub async fn handle_with_bound(
                     let storyline_mult = if is_storyline { 3.0 } else { 1.0 };
                     let standing_pct = if tmpl.has_standing_rewards { 1.5 * agent_level * storyline_mult } else { 0.0 };
                     let (storyline_agent_id, _) = resolve_agent_and_corp_for_system(ctx, char_id, sys_id, session.station_id, true);
-                    let (isk_reward, lp_reward, bonus_reward) =
-                        compute_character_mission_rewards(ctx, char_id, active_agent_id, mission_id, sys_id);
+                    let CharacterMissionRewards {
+                        isk_reward,
+                        lp_reward,
+                        bonus_reward,
+                    } = compute_character_mission_rewards(ctx, char_id, active_agent_id, mission_id, sys_id);
                     let corp_id = ctx.sde.agents.get(&active_agent_id).map(|a| a.corporation_id)
                         .unwrap_or_else(|| {
                             resolve_agent_and_corp_for_system(ctx, char_id, sys_id, session.station_id, is_storyline).1
@@ -1450,11 +1623,25 @@ pub async fn handle_with_bound(
                             let mission_title = ctx.sde.missions.get(&mission_id).map(|m| m.title.clone()).unwrap_or_else(|| format!("Mission {mission_id}"));
                             let mission_body = ctx.sde.missions.get(&mission_id).and_then(|m| m.content_template.as_deref()).unwrap_or("");
                             emit_agent_mission_dialogue(ctx, char_id, active_agent_id, agent_type_id, &mission_title, mission_body, true);
+                            let complete_msg = format!(
+                                "Well done! Your mission '{mission_title}' is complete and your rewards have been credited."
+                            );
                             Some(Ok(PyRep::keyval([
                                 ("missionID", PyRep::Integer(mission_id as i64)),
                                 ("contentID", PyRep::Integer(mission_id as i64)),
+                                ("agentID", PyRep::Integer(active_agent_id)),
+                                ("title", PyRep::String(mission_title)),
                                 ("state", PyRep::String("Completed".into())),
                                 ("missionState", PyRep::Integer(4)),
+                                ("agentSays", PyRep::String(complete_msg.clone())),
+                                ("briefing", PyRep::String(complete_msg)),
+                                (
+                                    "dialogue",
+                                    PyRep::List(vec![PyRep::Tuple(vec![
+                                        PyRep::Integer(2),
+                                        PyRep::String("Request Mission".into()),
+                                    ])]),
+                                ),
                                 ("iskReward", PyRep::Integer(isk_reward)),
                                 ("bonusReward", PyRep::Integer(bonus_paid)),
                                 ("lpReward", PyRep::Integer(lp_reward)),
@@ -1485,11 +1672,26 @@ pub async fn handle_with_bound(
                             }
                             let action_str = if was_accepted { "quit" } else { "offer_declined" };
                             ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionChange", "charid", vec![PyRep::String(action_str.into()), PyRep::Integer(active_agent_id)]);
+                            let quit_msg = if was_accepted {
+                                "Very well. I have cancelled your active assignment.".to_string()
+                            } else {
+                                "Very well. Let me know when you are ready for another assignment.".to_string()
+                            };
                             Some(Ok(PyRep::keyval([
                                 ("missionID", PyRep::Integer(mission_id as i64)),
                                 ("contentID", PyRep::Integer(mission_id as i64)),
+                                ("agentID", PyRep::Integer(active_agent_id)),
                                 ("state", PyRep::String(new_state)),
                                 ("missionState", PyRep::Integer(mission_state)),
+                                ("agentSays", PyRep::String(quit_msg.clone())),
+                                ("briefing", PyRep::String(quit_msg)),
+                                (
+                                    "dialogue",
+                                    PyRep::List(vec![PyRep::Tuple(vec![
+                                        PyRep::Integer(2),
+                                        PyRep::String("Request Mission".into()),
+                                    ])]),
+                                ),
                                 ("standingPenaltyApplied", PyRep::Bool(penalty_applied)),
                                 ("dungeonCleaned", PyRep::Bool(was_accepted)),
                             ])))
@@ -1531,4 +1733,5 @@ pub async fn handle_with_bound(
 }
 
 #[cfg(test)] #[path = "agents_missions_unit_tests.rs"] mod agents_missions_unit_tests;
+#[cfg(test)] #[path = "agents_missions_edges2_tests.rs"] mod agents_missions_edges2_tests;
 

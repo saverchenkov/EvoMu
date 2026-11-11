@@ -132,7 +132,7 @@ async fn test_ensure_system_pve_sites_seeded_highsec_lowsec_nullsec_and_wh() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn signal_tracker_register_seeds_offgrid_anoms_warp_works_and_cleared_sites_stay_cleared() {
     let ctx = ServerContext::with_sde_and_repository(
         shared_sde(),
@@ -282,5 +282,213 @@ async fn signal_tracker_register_seeds_offgrid_anoms_warp_works_and_cleared_site
             upgraded_pos >= 10_000_000_000.0,
             "legacy near-Sun anomaly must be upgraded off-grid, got {upgraded_pos}"
         );
+    }
+}
+
+#[test]
+fn synthetic_sde_covers_all_faction_fallbacks_ded_ratings_and_dungeon_name_lookup() {
+    use eve_sde::{ConstellationInfo, DungeonTemplate, InvType, RegionInfo, SolarSystem};
+
+    let mut sde = SdeRegistry::default();
+    let cases = [
+        (1u32, 101u32, "The Forge", Some(500_001u32), PirateFaction::Guristas),
+        (2, 102, "Derelik", Some(500_003), PirateFaction::Sansha),
+        (3, 103, "Kor-Azor", Some(500_003), PirateFaction::BloodRaiders),
+        (4, 104, "Sinq Laison", Some(500_004), PirateFaction::Serpentis),
+        (5, 105, "Heimatar", Some(500_002), PirateFaction::AngelCartel),
+        (6, 106, "Lonetrek", None, PirateFaction::Guristas),
+        (7, 107, "Everyshore", None, PirateFaction::Serpentis),
+        (8, 108, "Bleak Lands", None, PirateFaction::BloodRaiders),
+        (9, 109, "Scalding Pass", None, PirateFaction::AngelCartel),
+    ];
+    for (idx, (sys_id, reg_id, reg_name, fac, expected)) in cases.into_iter().enumerate() {
+        let con_id = 200 + idx as u32;
+        sde.regions.insert(
+            reg_id,
+            RegionInfo {
+                region_id: reg_id,
+                name: reg_name.into(),
+                center: [0.0; 3],
+                faction_id: fac,
+                wormhole_class_id: None,
+            },
+        );
+        sde.constellations.insert(
+            con_id,
+            ConstellationInfo {
+                constellation_id: con_id,
+                region_id: reg_id,
+                name: format!("Con-{idx}"),
+                center: [0.0; 3],
+                faction_id: None,
+                wormhole_class_id: None,
+            },
+        );
+        sde.solar_systems.insert(
+            sys_id,
+            SolarSystem {
+                solar_system_id: sys_id,
+                region_id: reg_id,
+                constellation_id: con_id,
+                name: format!("Sys-{idx}"),
+                security_status: 0.5,
+                radius: 1.0e12,
+                galactic_pos_ly: [0.0; 3],
+                planet_ids: Vec::new(),
+                stations: Vec::new(),
+                wormhole_class_id: None,
+            },
+        );
+        assert_eq!(pirate_faction_for_system(&sde, sys_id), expected);
+    }
+    // Unknown system falls back to Guristas
+    assert_eq!(pirate_faction_for_system(&sde, 999_999_999), PirateFaction::Guristas);
+
+    // Every DED rating arm across all 5 factions (sys 1..=5)
+    for sys_id in 1..=5_u32 {
+        for r in 1..=10_u8 {
+            let (did, name) = ded_complex_for_rating(&sde, sys_id, r);
+            assert!(did > 0 && !name.is_empty());
+        }
+        for sec in [0.8, 0.2, -0.4] {
+            let anoms = anomaly_dungeons_for_system(&sde, sys_id, sec);
+            assert_eq!(anoms.len(), 2);
+        }
+    }
+    // Serpentis 2 vs 3 distinct, Angel 6..=10 distinct
+    assert_ne!(ded_complex_for_rating(&sde, 4, 2).0, ded_complex_for_rating(&sde, 4, 3).0);
+    assert_ne!(ded_complex_for_rating(&sde, 5, 6).0, ded_complex_for_rating(&sde, 5, 7).0);
+    assert_ne!(ded_complex_for_rating(&sde, 5, 8).0, ded_complex_for_rating(&sde, 5, 9).0);
+    assert_ne!(ded_complex_for_rating(&sde, 5, 9).0, ded_complex_for_rating(&sde, 5, 10).0);
+
+    // Ghost site & Sleeper cache fallback when SDE lacks target ID (first no match, then name match)
+    assert_eq!(
+        ghost_site_dungeon_for_system(&sde, 1, 0.8, None),
+        (5541, "Lesser Guristas Covert Research Facility".into())
+    );
+    assert_eq!(
+        sleeper_cache_dungeon_for_system(&sde, 0.8, None),
+        (5604, "Limited Sleeper Cache".into())
+    );
+    sde.dungeons.insert(
+        99_001,
+        DungeonTemplate {
+            dungeon_id: 99_001,
+            name: "  Lesser Guristas Covert Research Facility  ".into(),
+            archetype_id: None,
+            faction_id: None,
+            difficulty: None,
+        },
+    );
+    sde.dungeons.insert(
+        99_002,
+        DungeonTemplate {
+            dungeon_id: 99_002,
+            name: "Standard Sleeper Cache".into(),
+            archetype_id: None,
+            faction_id: None,
+            difficulty: None,
+        },
+    );
+    assert_eq!(ghost_site_dungeon_for_system(&sde, 1, 0.8, None).0, 99_001);
+    assert_eq!(sleeper_cache_dungeon_for_system(&sde, 0.2, None).0, 99_002);
+
+    // build_wave_npc_balls clamping and WH class 2/4/6
+    assert_eq!(build_wave_npc_balls(&sde, 1, 100, 0, [0.0; 3], Some(2)).len(), 2);
+    assert_eq!(build_wave_npc_balls(&sde, 1, 100, 9, [0.0; 3], Some(4)).len(), 4);
+    assert_eq!(build_wave_npc_balls(&sde, 1, 100, 3, [0.0; 3], Some(6))[0].type_id, 30_198);
+
+    // Type in SDE without combat attributes uses radius.max(25.0) & defaults
+    sde.types.insert(
+        77_001,
+        InvType {
+            type_id: 77_001,
+            group_id: 25,
+            category_id: 6,
+            name: "TestType".into(),
+            mass: 1_000.0,
+            volume: 100.0,
+            capacity: 10.0,
+            radius: 10.0,
+            base_price: 0.0,
+            published: true,
+            portion_size: 1,
+            market_group_id: None,
+            race_id: None,
+            faction_id: None,
+            variation_parent_type_id: None,
+            description_id: None,
+            icon_id: None,
+            graphic_id: None,
+            sound_id: None,
+            meta_group_id: None,
+            meta_level: None,
+            tech_level: None,
+            default_effect_id: None,
+            description: String::new(),
+            effect_ids: Vec::new(),
+            default_attributes: std::collections::HashMap::new(),
+        },
+    );
+    let cs = build_type_combat_state_from_sde(&sde, 77_001);
+    assert_eq!(cs.max_shield_hp, 50.0);
+    assert_eq!(cs.signature_radius, 25.0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn seeding_preserves_expeditions_emits_tracker_deltas_and_handles_special_wh() {
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    db.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_776_200_000)));
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    db.acquire_online_lock(1, 701, Some(char_id), true, 1_776_200_000)
+        .expect("online lock");
+    let ctx = ServerContext::with_sde_and_repository(sde.clone(), db);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&char_id) {
+            c.solar_system_id = sys_id;
+        }
+        snap.fleet_and_social_ops.signal_tracker_subs.insert(sys_id, vec![char_id]);
+    });
+
+    // Pre-insert an Expedition site; ensure_system_pve_sites_seeded must preserve it
+    with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system.entry(sys_id).or_default().push(PveSiteInstance {
+            site_id: "EXP-KEEP-1".into(),
+            solar_system_id: sys_id,
+            site_category: "Expedition".into(),
+            ..Default::default()
+        });
+    });
+
+    ensure_system_pve_sites_seeded(&ctx, sys_id).await;
+
+    with_pve_exploration_reg(&ctx, |reg| {
+        let sites = &reg.sites_by_system[&sys_id];
+        assert!(sites.iter().any(|s| s.site_id == "EXP-KEEP-1"));
+        assert!(sites.iter().any(|s| s.site_category == "DED"));
+        assert!(sites.iter().any(|s| s.site_category == "Deadspace"));
+        assert!(sites.iter().any(|s| s.site_category == "Ghost"));
+        assert!(sites.iter().any(|s| s.site_category == "SleeperCache"));
+    });
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.cosmic_anomalies[&sys_id].is_empty());
+        assert!(snap.cosmic_signatures[&sys_id].len() >= 5);
+    });
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(notifs.iter().any(|n| n.event == "OnSignalTrackerAnomalyUpdate" || n.event.contains("SignalTracker")));
+
+    // Special C14..C18 wormhole system hits early-return branch in seed_special_wormhole_pve_sites
+    if let Some(c14_sys) = sde
+        .solar_systems
+        .keys()
+        .copied()
+        .find(|&sid| (31_000_000..32_000_000).contains(&sid) && sid >= 31_002_600)
+    {
+        ensure_system_pve_sites_seeded(&ctx, c14_sys).await;
+        with_pve_exploration_reg(&ctx, |reg| {
+            assert!(reg.seeded_systems.get(&c14_sys).copied().unwrap_or(false));
+        });
     }
 }

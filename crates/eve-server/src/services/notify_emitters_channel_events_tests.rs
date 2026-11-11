@@ -168,4 +168,88 @@ fn dungeon_trigger_core_and_dispatcher_handle_queue_cap_and_fallback_targets() {
     assert_eq!(q[4].args, vec![PyRep::Integer(2), PyRep::Integer(4444)]);
     assert_eq!(q[5].event, "OnDungeonTriggerMusic");
     assert_eq!(q[5].args, vec![PyRep::Integer(650), PyRep::Integer(888)]);
+
+    // Broadcast receiver also received all 6 dispatched notifications
+    let mut rx_events = Vec::new();
+    while let Ok((rcid, notif)) = rx.try_recv() {
+        assert_eq!(rcid, char_id);
+        assert_eq!(notif.recipient_char_id, char_id);
+        assert_eq!(notif.id_type, "charid");
+        assert_eq!(notif.created_filetime, ctx.now_blueos_filetime_ticks());
+        assert!(!notif.marshaled_packet.is_empty());
+        rx_events.push(notif.event);
+    }
+    assert_eq!(
+        rx_events,
+        vec![
+            "OnDungeonCameraInterest",
+            "OnDungeonCameraInterest",
+            "OnDungeonTriggerAmbientSound",
+            "OnDungeonTriggerAudio",
+            "OnDungeonTriggerMessage",
+            "OnDungeonTriggerMusic",
+        ]
+    );
+}
+
+#[test]
+fn dungeon_trigger_fallback_empty_objs_none_sinks_and_ignored_actions() {
+    let (ctx, char_id) = make_online_ctx();
+    let pend: RwLock<HashMap<i64, Vec<PendingMachoNotification>>> = RwLock::new(HashMap::new());
+    let (tx, mut rx) = broadcast::channel(16);
+
+    // Empty slices on emit_operations_progress_reset
+    emit_operations_progress_reset(&ctx, char_id, &[], &[], 0, 0, 0);
+    let drained = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(drained.len(), 1);
+    assert_eq!(
+        drained[0].args,
+        vec![
+            PyRep::List(vec![]),
+            PyRep::List(vec![]),
+            PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0)]),
+        ]
+    );
+
+    // None pending_notifications & None notify_tx must be safe no-ops
+    emit_dungeon_camera_interest_core(&ctx.db, None, None, char_id, 1, 1.0, 2.0);
+    emit_dungeon_trigger_ambient_sound_core(&ctx.db, None, Some(&tx), char_id, 10, 20, 30, 40);
+    let (rcid, n) = rx.try_recv().expect("broadcast only");
+    assert_eq!(rcid, char_id);
+    assert_eq!(n.event, "OnDungeonTriggerAmbientSound");
+
+    // CameraInterest with item_id == 0 and empty obj_ball_ids falls back to 0;
+    // non-notify DungeonTriggerAction variants (UnlockGate, SpawnNpcGroup, CompleteDungeon) are ignored.
+    dispatch_dungeon_trigger_notify_actions(
+        &ctx.db,
+        Some(&pend),
+        Some(&tx),
+        char_id,
+        700,
+        &[],
+        vec![
+            DungeonTriggerAction::UnlockGate,
+            DungeonTriggerAction::SpawnNpcGroup(1),
+            DungeonTriggerAction::CompleteDungeon,
+            DungeonTriggerAction::CameraInterest {
+                item_id: 0,
+                speed_bits: 0.5_f64.to_bits(),
+                duration_bits: 3.0_f64.to_bits(),
+            },
+        ],
+    );
+
+    let g = pend.read().unwrap();
+    let q = g.get(&char_id).expect("queue");
+    assert_eq!(q.len(), 1);
+    assert_eq!(q[0].event, "OnDungeonCameraInterest");
+    assert_eq!(
+        q[0].args,
+        vec![PyRep::Integer(0), PyRep::Real(0.5), PyRep::Real(3.0)]
+    );
+
+    // Empty actions list leaves queue untouched
+    drop(g);
+    dispatch_dungeon_trigger_notify_actions(&ctx.db, Some(&pend), Some(&tx), char_id, 700, &[], vec![]);
+    assert_eq!(pend.read().unwrap().get(&char_id).unwrap().len(), 1);
 }

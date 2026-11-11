@@ -192,3 +192,104 @@ fn death_pod_and_system_flag_security_emitters_respect_guards() {
         ]
     );
 }
+
+#[test]
+fn broadcast_delivery_station_alliance_faction_fields_negative_guards_and_empty_payloads() {
+    let (ctx, char_id) = make_online_ctx();
+    let other_char = 90_000_002_i64;
+    let station_id = 60_003_760_i64;
+    let other_station = 60_008_494_i64;
+    let sys_id = 30_000_142_u32;
+
+    // Seed character with alliance_id & war_faction_id and bring other_char online in the same station/system
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.alliance_id = Some(99_000_010);
+            ch.war_faction_id = Some(500_001);
+            ch.station_id = Some(station_id);
+            ch.solar_system_id = sys_id;
+        }
+        if let Some(ch2) = snap.characters.get_mut(&other_char) {
+            ch2.station_id = Some(station_id);
+            ch2.solar_system_id = sys_id;
+        }
+    });
+    ctx.db
+        .acquire_online_lock(2, 502, Some(other_char), true, 1_775_400_000)
+        .expect("online lock 2");
+
+    // 1. push_char_notification_with_db broadcast delivery & unknown char_id (uid_opt = None)
+    let pend: RwLock<HashMap<i64, Vec<PendingMachoNotification>>> = RwLock::new(HashMap::new());
+    let (tx, mut rx) = broadcast::channel(16);
+    push_char_notification_with_db(
+        &ctx.db,
+        Some(&pend),
+        Some(&tx),
+        999_888_777,
+        "BroadcastTest",
+        vec![PyRep::Integer(7)],
+    );
+    let (bc_cid, bc_notif) = rx.try_recv().expect("broadcast received");
+    assert_eq!(bc_cid, 999_888_777);
+    assert_eq!(bc_notif.event, "BroadcastTest");
+    assert_eq!(pend.read().unwrap()[&999_888_777].len(), 1);
+
+    // 2. Station notification includes alliance_id & war_faction_id and delivers to both pilots in station
+    emit_char_station_notification(&ctx, char_id, station_id, true);
+    let d1 = ctx.drain_notifications_for_char(char_id);
+    let d2 = ctx.drain_notifications_for_char(other_char);
+    assert_eq!(d1.len(), 1);
+    assert_eq!(d2.len(), 1);
+    assert_eq!(
+        d1[0].args,
+        vec![PyRep::List(vec![
+            PyRep::Integer(char_id),
+            PyRep::Integer(1_000_170),
+            PyRep::Integer(99_000_010),
+            PyRep::Integer(500_001),
+        ])]
+    );
+
+    // Unknown char_id -> corp=0, alliance=None, war_faction=None; wrong station delivers to neither
+    emit_char_station_notification(&ctx, 999_888_777, other_station, false);
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+
+    // 3. Negative damage with is_wrecking=true still reports "misses"; empty scan payloads & empty flag slices
+    emit_combat_message(&ctx, char_id, "MsgNeg", 9004, -5.0, 2456, true);
+    emit_cargo_scan_complete(&ctx, char_id, 800_002, vec![]);
+    emit_ship_scan_completed(&ctx, char_id, 800_002, 0.0, 0.0, vec![]);
+    emit_system_criminal_flag_updates(&ctx, sys_id, &[], &[], &[]);
+    emit_system_disapproval_flag_updates(&ctx, sys_id, &[], &[]);
+
+    let d_neg = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(d_neg.len(), 5);
+    assert_eq!(
+        d_neg[0].args[1].dict_get("hitQualityText"),
+        Some(&PyRep::String("misses".into()))
+    );
+    assert_eq!(
+        d_neg[1].args,
+        vec![PyRep::Integer(800_002), PyRep::List(vec![])]
+    );
+    assert_eq!(
+        d_neg[2].args,
+        vec![
+            PyRep::Integer(800_002),
+            PyRep::Real(0.0),
+            PyRep::Real(0.0),
+            PyRep::List(vec![]),
+        ]
+    );
+    assert_eq!(d_neg[3].event, "OnSystemCriminalFlagUpdates");
+    assert_eq!(d_neg[4].event, "OnSystemDisapprovalFlagUpdates");
+
+    // 4. Negative char_id guards on all death/pod emitters
+    let _ = ctx.drain_notifications_for_char(other_char);
+    emit_kill_notification(&ctx, -1);
+    emit_ship_death(&ctx, -1);
+    emit_pod_death(&ctx, -1);
+    emit_pod_killed(&ctx, -1, 123);
+    emit_player_pod_death(&ctx, -1);
+    emit_player_pod_respawn(&ctx, -1);
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+}

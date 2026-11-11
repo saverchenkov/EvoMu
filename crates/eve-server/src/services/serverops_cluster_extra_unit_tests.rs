@@ -341,3 +341,216 @@ fn countdown_warnings_history_bound_and_gm_preserving_downtime_shutdown() {
     assert!(epoch >= 1);
     assert!(!ctx.is_shutting_down());
 }
+
+#[test]
+fn mutant_kill_downtime_persistence_maintenance_map_and_admin_cluster_rpcs() {
+    use eve_machonet::{service_roles, SessionState};
+    use std::collections::HashMap;
+
+    let (ctx, clock) = make_ctx(1_767_225_600);
+    let dt_sec = ctx.systems.downtime_utc_secs_of_day();
+    let test_dt = 25 * 86_400 + dt_sec;
+
+    // 1. load_downtime_state / save_downtime_state deduplication and active downtime rollover
+    let w1 = step_downtime_countdown_warnings(&ctx, test_dt - 3_600);
+    assert_eq!(w1, vec![3_600]);
+    assert!(has_downtime_countdown_armed_for_day(&ctx, test_dt - 3_600));
+    let w2 = step_downtime_countdown_warnings(&ctx, test_dt - 3_600);
+    assert!(w2.is_empty(), "Persisted warning state must suppress duplicate countdown broadcast");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cluster_and_runtime.cluster_downtime_state.cluster_restart_epoch = 41;
+    });
+    assert!(!is_downtime_active_in_db(&ctx));
+    let dt_report = start_daily_downtime_window(&ctx);
+    assert!(is_downtime_active_in_db(&ctx));
+    assert_eq!(dt_report["is1100UtcWindow"], 0);
+    let expected_keys = [
+        "is1100UtcWindow",
+        "replenishedAsteroids",
+        "respawnedBeltAsteroids",
+        "rolledUpMarketHistoryPairs",
+        "recomputedIndustrySystems",
+        "expiredMarketOrders",
+        "expiredContracts",
+        "sovSystemsDecayed",
+        "missionDeclinesReset",
+        "essBanksRolledOver",
+        "autoPaidBills",
+        "expiredRaffles",
+        "dailyGoalsReset",
+        "evacuatedAbyssalPilots",
+        "npcWrecksCleaned",
+        "missionNpcsRespawned",
+        "wormholeSitesDespawned",
+    ];
+    for key in expected_keys {
+        assert!(dt_report.contains_key(key), "missing maintenance key {key}");
+    }
+    assert_eq!(dt_report.len(), expected_keys.len() + 1); // + disconnectedSessions
+    assert!(dt_report["recomputedIndustrySystems"] > 0);
+
+    // Advance past 15-minute window and verify epoch persists from 41 -> 42 and downtime_until_unix clears
+    let now_u = ctx.now_unix();
+    assert_eq!(maybe_complete_scheduled_downtime_restart(&ctx, now_u + 899), None);
+    assert_eq!(maybe_complete_scheduled_downtime_restart(&ctx, now_u + 900), Some(42));
+    assert!(!is_downtime_active_in_db(&ctx));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.cluster_and_runtime.cluster_downtime_state.cluster_restart_epoch, 42);
+        assert_eq!(snap.cluster_and_runtime.cluster_downtime_state.downtime_until_unix, None);
+    });
+
+    // Execute daily maintenance jobs directly outside & inside the 11:00 UTC window
+    let outside = execute_daily_maintenance_jobs(&ctx);
+    assert_eq!(outside.len(), expected_keys.len());
+    assert_eq!(outside["is1100UtcWindow"], 0);
+    assert!(outside["recomputedIndustrySystems"] > 0);
+    clock.advance_secs(dt_sec + 120);
+    assert_eq!(clock.now_unix_secs(), 1_767_225_600 + dt_sec + 120);
+    let inside = execute_daily_maintenance_jobs(&ctx);
+    assert_eq!(inside["is1100UtcWindow"], 1);
+
+    // 2. handle_admin_cluster_rpc: unknown -> None, auth gate, AddClusterNode, RemoveClusterNode, AdminBroadcast, SetServiceState
+    let kw = HashMap::new();
+    let mut player_sess = SessionState::new(10);
+    player_sess.role = 0;
+    let mut gm_sess = SessionState::new(11);
+    gm_sess.user_id = Some(1);
+    gm_sess.role = service_roles::ROLE_GMH;
+    gm_sess.character_id = Some(90_000_001);
+
+    assert!(handle_admin_cluster_rpc(&ctx, &gm_sess, "DoesNotExist", &[], &kw).is_none());
+    assert!(handle_admin_cluster_rpc(&ctx, &player_sess, "AddClusterNode", &[], &kw)
+        .unwrap()
+        .is_err());
+
+    // Invalid explicit ID <= 0 fails
+    assert_eq!(
+        handle_admin_cluster_rpc(&ctx, &gm_sess, "AddClusterNode", &[PyRep::Integer(0)], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "InvalidArgument"
+    );
+    let auto_nid = handle_admin_cluster_rpc(&ctx, &gm_sess, "AddClusterNode", &[], &kw)
+        .unwrap()
+        .unwrap()
+        .as_i64()
+        .unwrap();
+    assert_eq!(auto_nid, 3);
+    assert_eq!(
+        handle_admin_cluster_rpc(
+            &ctx,
+            &gm_sess,
+            "AddClusterNode",
+            &[PyRep::Integer(5), PyRep::String("10.0.0.5:26005".into())],
+            &kw
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Integer(5)
+    );
+    ctx.db.with_snapshot(|snap| {
+        let tbl = snap.cluster_and_runtime.cluster_node_table.as_ref().unwrap();
+        assert_eq!(tbl.get("5").map(String::as_str), Some("10.0.0.5:26005"));
+    });
+    assert!(ctx
+        .cluster_state
+        .read()
+        .unwrap()
+        .node_addresses
+        .contains_key("10.0.0.5:26005"));
+
+    // RemoveClusterNode: primary node <= 1 rejected; node 5 removed cleanly
+    assert_eq!(
+        handle_admin_cluster_rpc(&ctx, &gm_sess, "RemoveClusterNode", &[PyRep::Integer(1)], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "InvalidArgument"
+    );
+    assert_eq!(
+        handle_admin_cluster_rpc(&ctx, &gm_sess, "RemoveClusterNode", &[PyRep::Integer(5)], &kw)
+            .unwrap()
+            .unwrap(),
+        PyRep::Bool(true)
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap
+            .cluster_and_runtime
+            .cluster_node_table
+            .as_ref()
+            .unwrap()
+            .contains_key("5"));
+    });
+    assert!(!ctx
+        .cluster_state
+        .read()
+        .unwrap()
+        .node_addresses
+        .contains_key("10.0.0.5:26005"));
+
+    // AdminBroadcast: empty rejected; valid logs and emits broadcast
+    assert_eq!(
+        handle_admin_cluster_rpc(&ctx, &gm_sess, "AdminBroadcast", &[PyRep::String("   ".into())], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "InvalidArgument"
+    );
+    assert_eq!(
+        handle_admin_cluster_rpc(
+            &ctx,
+            &gm_sess,
+            "AdminBroadcast",
+            &[PyRep::String("Maintenance in 5m".into())],
+            &kw
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    ctx.db.with_snapshot(|snap| {
+        let last = snap.cluster_and_runtime.cluster_admin_broadcasts.last().unwrap();
+        assert_eq!(last["message"], "Maintenance in 5m");
+    });
+
+    // SetServiceState: empty rejected; offline/Bool(true) persisted
+    assert_eq!(
+        handle_admin_cluster_rpc(&ctx, &gm_sess, "SetServiceState", &[PyRep::String("".into())], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "InvalidArgument"
+    );
+    assert_eq!(
+        handle_admin_cluster_rpc(
+            &ctx,
+            &gm_sess,
+            "SetServiceState",
+            &[PyRep::String("market_node".into()), PyRep::String("offline".into())],
+            &kw
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.cluster_and_runtime.cluster_service_states.get("market_node"), Some(&false));
+    });
+    assert_eq!(
+        handle_admin_cluster_rpc(
+            &ctx,
+            &gm_sess,
+            "SetServiceState",
+            &[PyRep::String("market_node".into()), PyRep::Bool(true)],
+            &kw
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.cluster_and_runtime.cluster_service_states.get("market_node"), Some(&true));
+    });
+}

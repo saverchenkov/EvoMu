@@ -9,6 +9,10 @@ use eve_sde::{SdeRegistry, SolarSystemId};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
+#[cfg(test)]
+#[path = "pve_special_sites_ops_edge_tests.rs"]
+mod pve_special_sites_ops_edge_tests;
+
 fn shared_sde() -> Arc<SdeRegistry> {
     static SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
     Arc::clone(SDE.get_or_init(|| Arc::new(SdeRegistry::with_canonical_seed())))
@@ -458,3 +462,7 @@ async fn rpc_dispatch_interference_storms_and_errors() {
 
     advance_pve_special_clock(&ctx, 3_600);
 }
+
+#[cfg(test)]
+#[path = "pve_special_sites_extra_unit_tests.rs"]
+mod pve_special_sites_extra_unit_tests;

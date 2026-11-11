@@ -262,3 +262,7 @@ fn freelance_project_lifecycle_and_rpc_handlers() {
     .expect("commit on closed project returns invalid_project_state");
     assert!(!closed_commit.value.is_empty());
 }
+
+#[cfg(test)]
+#[path = "quasar_social_freelance_extra_unit_tests.rs"]
+mod quasar_social_freelance_extra_unit_tests;

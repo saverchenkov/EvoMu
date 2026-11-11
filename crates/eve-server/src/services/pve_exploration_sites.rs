@@ -521,3 +521,7 @@ pub async fn drop_sleeper_wreck_core(
 #[path = "pve_exploration_sites_tests.rs"]
 mod pve_exploration_sites_tests;
 
+#[cfg(test)]
+#[path = "pve_exploration_sites_edges_tests.rs"]
+mod pve_exploration_sites_edges_tests;
+

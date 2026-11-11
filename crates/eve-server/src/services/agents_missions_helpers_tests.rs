@@ -205,8 +205,11 @@ fn mission_rewards_and_courier_trade_mining_encounter_details_resolve() {
         );
     });
 
-    let (isk, lp, bonus) =
-        compute_character_mission_rewards(&ctx, char_id, 3_018_921, 100, 30_000_142);
+    let CharacterMissionRewards {
+        isk_reward: isk,
+        lp_reward: lp,
+        bonus_reward: bonus,
+    } = compute_character_mission_rewards(&ctx, char_id, 3_018_921, 100, 30_000_142);
     assert_eq!(lp, 1_500);
     assert_eq!(isk, 1_200_000);
     assert_eq!(bonus, 600_000);
@@ -305,5 +308,84 @@ async fn abandon_or_decline_reclaims_courier_cargo_and_tracks_npc_destruction() 
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&55_001));
         assert!((snap.characters[&char_id].standings[&1_000_009] - (-0.1)).abs() < 1e-9);
+    });
+}
+
+#[tokio::test]
+async fn wave4_courier_min_qty_clamp_missing_sde_mission_quit_and_bookmark_fallback_cleanup() {
+    let mut ctx = make_test_context();
+    let mut sde = (*ctx.sde).clone();
+    sde.agents.insert(3_018_921, make_agent(3_018_921, 2, 24, 1));
+    sde.missions.remove(&999);
+    ctx.sde = Arc::new(sde);
+
+    let char_id = 90_000_001;
+    let session = char_session(char_id, 98_000_001);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.insert(
+            (char_id, 999),
+            ActiveMissionRecord {
+                character_id: char_id,
+                mission_id: 999, // Not in sde.missions -> quit skips standing penalty
+                agent_id: 3_018_921,
+                state: "Accepted".into(),
+                solar_system_id: 30_000_142,
+                current_room_id: 0,
+                npcs_remaining: 0,
+                spawned_npc_ball_ids: vec![],
+                bookmark_id: None, // Triggers memo == "Mission Pocket Destination" fallback cleanup
+            },
+        );
+        snap.items.insert(
+            55_999,
+            InventoryItemRecord {
+                item_id: 55_999,
+                type_id: 3810,
+                owner_id: char_id,
+                location_id: 60_003_760,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        save_mission_meta(
+            snap,
+            char_id,
+            &MissionTimingAndCargoMeta {
+                mission_id: 999,
+                agent_id: 3_018_921,
+                granted_courier_item_id: Some(55_999),
+                granted_courier_qty: 0, // .max(1) still reclaims single-unit courier item
+                ..Default::default()
+            },
+        );
+        if let Some((_, bm)) = snap.bookmarks.iter().next().map(|(id, b)| (*id, b.clone())) {
+            let mut m_bm = bm.clone();
+            m_bm.bookmark_id = 77_001;
+            m_bm.owner_id = char_id;
+            m_bm.solar_system_id = 30_000_142;
+            m_bm.memo = "Mission Pocket Destination".into();
+            snap.bookmarks.insert(77_001, m_bm);
+
+            let mut keep_bm = bm;
+            keep_bm.bookmark_id = 77_002;
+            keep_bm.owner_id = char_id;
+            keep_bm.solar_system_id = 30_000_142;
+            keep_bm.memo = "Keep Safe Bookmark".into();
+            snap.bookmarks.insert(77_002, keep_bm);
+        }
+    });
+
+    let (st, penalty, was_acc) = abandon_or_decline_mission(&ctx, &session, char_id, 999)
+        .await
+        .unwrap();
+    assert_eq!(st, "Quit");
+    assert!(!penalty && was_acc);
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&55_999));
+        assert!(!snap.bookmarks.contains_key(&77_001));
+        assert!(snap.bookmarks.contains_key(&77_002) || snap.bookmarks.is_empty());
     });
 }

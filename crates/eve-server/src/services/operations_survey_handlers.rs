@@ -558,3 +558,7 @@ pub fn handle_survey_claim_rewards(
 #[path = "operations_survey_handlers_tests.rs"]
 mod operations_survey_handlers_tests;
 
+#[cfg(test)]
+#[path = "operations_survey_handlers_edges_tests.rs"]
+mod operations_survey_handlers_edges_tests;
+

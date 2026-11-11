@@ -644,12 +644,15 @@ pub fn evacuate_void_space_session_sync(
         char_id,
         VOID_SPACE_SYSTEM_ID,
     );
-    // DATA GAP: V24 content-finished timer_type enum mappings are Tranquility server-only
+    // V24 `crimewatchTimers.pyj::TimerType::VoidSpaceContentExpiration = 16` (`voidSpaceContentService.pyj:109`).
     ctx.notify(
         NotificationTarget::Character(char_id),
         "OnVoidSpaceContentFinished",
         "charid",
-        vec![PyRep::Integer(finished_content_id), PyRep::Integer(1)],
+        vec![
+            PyRep::Integer(finished_content_id),
+            PyRep::Integer(crate::services::abyssal_void_mgr::TIMER_TYPE_VOID_SPACE_CONTENT_EXPIRATION),
+        ],
     );
     origin_sys
 }

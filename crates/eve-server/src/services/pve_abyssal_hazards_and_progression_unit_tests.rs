@@ -5,8 +5,8 @@ use crate::services::abyssal_void_gates::{
     handle_abyssal_end_gate_activation, handle_abyssal_gate_activation,
 };
 use crate::services::pve_abyssal_hazards::{
-    check_abyssal_in_pocket_rpc_restrictions, check_filament_1000km_proximity,
-    check_not_in_deadspace_pocket,
+    ConsumedAbyssalFilament, check_abyssal_in_pocket_rpc_restrictions,
+    check_filament_1000km_proximity, check_not_in_deadspace_pocket,
     is_abyssal_local_channel_disabled, is_abyssal_system, validate_abyssal_hull_and_capacity,
     validate_and_consume_abyssal_filaments,
 };
@@ -100,10 +100,15 @@ async fn deep_hull_capacity_filament_validation_and_in_pocket_rpc_restrictions()
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.get_mut(&fil_item_id).unwrap().quantity = 4;
     });
-    let (_, consumed_tid, tier, max_ships, _, _, fleet_opt) =
-        validate_and_consume_abyssal_filaments(&ctx, char_id, frig_ship_id, origin_sys, fil_item_id)
-            .await
-            .expect("frigate filament activation succeeds");
+    let ConsumedAbyssalFilament {
+        filament_type_id: consumed_tid,
+        tier,
+        max_ships,
+        opener_fleet_id: fleet_opt,
+        ..
+    } = validate_and_consume_abyssal_filaments(&ctx, char_id, frig_ship_id, origin_sys, fil_item_id)
+        .await
+        .expect("frigate filament activation succeeds");
     assert_eq!((consumed_tid, tier, max_ships, fleet_opt), (56131, 0, 3, Some(8801)));
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&fil_item_id].quantity), 1);
 
@@ -263,6 +268,7 @@ async fn deep_room_1_2_3_conduit_progression_pocket_collapse_and_downtime_evacua
                 entered_unix: 100,
                 expires_at_sec: 200,
                 target_id: 77,
+                nebula_graphic_id: None,
             },
         );
     });

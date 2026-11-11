@@ -9,6 +9,10 @@ use eve_proto::quasar::{AuthoritativeContext, DynamicQuasarMessage, DynamicValue
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
 
+#[cfg(test)]
+#[path = "quasar_social_community_extra_unit_tests.rs"]
+mod extra_unit_tests;
+
 static SHARED_SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
 
 fn shared_sde() -> Arc<SdeRegistry> {

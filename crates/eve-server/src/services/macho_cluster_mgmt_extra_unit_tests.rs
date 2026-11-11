@@ -631,3 +631,243 @@ fn macho_net_node_lookup_acl_connection_properties_and_shutdown_cancel() {
     handle(&ctx, &mut gm, "machoNet", "GracefulShutdown", &[PyRep::Integer(1), PyRep::String("Aborted".into()), PyRep::Integer(0), PyRep::Bool(true)], &kw).unwrap().expect("cancel shutdown");
     assert!(!get_cluster_state(&ctx).shutdown_in_progress);
 }
+
+#[test]
+fn cluster_set_config_total_requests_session_prune_reload_hash_and_attr_update_exists_flags() {
+    let ctx = test_ctx();
+    let kw = HashMap::new();
+    let mut gm = gm_sess(90_000_001, Some(60_003_760), Some(30_000_142));
+    let mut player = player_sess(2, 90_000_002);
+
+    // 1. SetConfig twice increments total_requests via `+= 1` to 2 (kills `-=` -> 0 and `*=` -> 0/1)
+    handle(
+        &ctx,
+        &mut gm,
+        "loadService",
+        "SetConfig",
+        &[PyRep::String("rate".into()), PyRep::Integer(10)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    handle(
+        &ctx,
+        &mut gm,
+        "loadService",
+        "SetConfig",
+        &[PyRep::String("rate".into()), PyRep::Integer(20)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let stats = handle(&ctx, &mut gm, "loadService", "GetTotalStats", &[], &kw)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stats.dict_get("total_requests"), Some(&PyRep::Integer(2)));
+
+    // 2. EndAllGameSessions retains ONLY caller session in active_sessions & session_registry (L478, L482 `==` -> `!=`)
+    let caller_sid = gm.session_id as i64;
+    let other_sid = 88_002_i64;
+    let third_sid = 88_003_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cluster_and_runtime.active_sessions = vec![caller_sid, other_sid];
+        snap.cluster_and_runtime
+            .session_registry
+            .insert(caller_sid.to_string(), serde_json::json!({"character_id": 90_000_001}));
+        snap.cluster_and_runtime
+            .session_registry
+            .insert(other_sid.to_string(), serde_json::json!({"character_id": 90_000_002}));
+    });
+    handle(&ctx, &mut gm, "sessionMgr", "EndAllGameSessions", &[], &kw)
+        .unwrap()
+        .unwrap();
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.cluster_and_runtime.active_sessions, vec![caller_sid]);
+        assert!(snap
+            .cluster_and_runtime
+            .session_registry
+            .contains_key(&caller_sid.to_string()));
+        assert!(!snap
+            .cluster_and_runtime
+            .session_registry
+            .contains_key(&other_sid.to_string()));
+    });
+
+    // 3. RemoveSessionsFromServer removes targeted session_ids and retains untargeted ones (L520 `!` deletion)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cluster_and_runtime.active_sessions = vec![caller_sid, other_sid, third_sid];
+        snap.cluster_and_runtime
+            .session_registry
+            .insert(other_sid.to_string(), serde_json::json!({}));
+        snap.cluster_and_runtime
+            .session_registry
+            .insert(third_sid.to_string(), serde_json::json!({}));
+    });
+    handle(
+        &ctx,
+        &mut gm,
+        "sessionMgr",
+        "RemoveSessionsFromServer",
+        &[PyRep::Integer(1), PyRep::List(vec![PyRep::Integer(other_sid)])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.cluster_and_runtime.active_sessions,
+            vec![caller_sid, third_sid]
+        );
+        assert!(!snap
+            .cluster_and_runtime
+            .session_registry
+            .contains_key(&other_sid.to_string()));
+        assert!(snap
+            .cluster_and_runtime
+            .session_registry
+            .contains_key(&third_sid.to_string()));
+    });
+
+    // 4. machoNet.ReloadClientCodeHash: non-GM denied, GM increments reload_count & persists hash (L1045)
+    assert_eq!(
+        handle(&ctx, &mut player, "machoNet", "ReloadClientCodeHash", &[], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "UserError"
+    );
+    let h1 = handle(
+        &ctx,
+        &mut gm,
+        "machoNet",
+        "ReloadClientCodeHash",
+        &[PyRep::String("hash_alpha".into())],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(h1, PyRep::String("hash_alpha".into()));
+    let h2 = handle(
+        &ctx,
+        &mut gm,
+        "machoNet",
+        "ReloadClientCodeHash",
+        &[PyRep::String("hash_beta".into())],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(h2, PyRep::String("hash_beta".into()));
+    ctx.db.with_snapshot(|snap| {
+        let obj = snap
+            .cluster_and_runtime
+            .macho_client_code_hash
+            .as_ref()
+            .unwrap()
+            .as_object()
+            .unwrap();
+        assert_eq!(obj.get("hash").and_then(|v| v.as_str()), Some("hash_beta"));
+        assert_eq!(obj.get("reload_count").and_then(|v| v.as_u64()), Some(2));
+    });
+
+    // 5. handle_session_attribute_update `exists` disjunction across all 4 sources (L1402, L1495-1497):
+    //    (a) is_caller when all remote tables are empty
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cluster_and_runtime.active_sessions.clear();
+        snap.cluster_and_runtime.session_registry.clear();
+    });
+    assert!(handle(
+        &ctx,
+        &mut gm,
+        "sessionMgr",
+        "UpdateSessionAttributes",
+        &[PyRep::String("corprole".into()), PyRep::Integer(4)],
+        &kw,
+    )
+    .unwrap()
+    .is_ok());
+
+    //    (b) ONLY in online_sessions
+    ctx.db
+        .acquire_online_lock(2, 88_101, Some(90_000_002), true, ctx.now_unix())
+        .expect("online session 88101");
+    assert!(handle(
+        &ctx,
+        &mut gm,
+        "sessionMgr",
+        "UpdateSessionAttributes",
+        &[PyRep::Integer(88_101), PyRep::String("corprole".into()), PyRep::Integer(8)],
+        &kw,
+    )
+    .unwrap()
+    .is_ok());
+
+    //    (c) ONLY in session_registry
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cluster_and_runtime
+            .session_registry
+            .insert("88102".into(), serde_json::json!({"character_id": 90_000_002}));
+    });
+    assert!(handle(
+        &ctx,
+        &mut gm,
+        "sessionMgr",
+        "UpdateSessionAttributes",
+        &[PyRep::Integer(88_102), PyRep::String("corprole".into()), PyRep::Integer(16)],
+        &kw,
+    )
+    .unwrap()
+    .is_ok());
+
+    //    (d) ONLY in active_sessions
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cluster_and_runtime.active_sessions.push(88_103);
+    });
+    assert!(handle(
+        &ctx,
+        &mut gm,
+        "sessionMgr",
+        "UpdateSessionAttributes",
+        &[PyRep::Integer(88_103), PyRep::String("languageID".into()), PyRep::String("EN".into())],
+        &kw,
+    )
+    .unwrap()
+    .is_ok());
+
+    //    (e) absent from all 4 -> SessionNotFound
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut gm,
+            "sessionMgr",
+            "UpdateSessionAttributes",
+            &[PyRep::Integer(99_999), PyRep::String("corprole".into()), PyRep::Integer(1)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "SessionNotFound"
+    );
+
+    // 6. externalQueueMgr & tcpRawProxyService & DB2 baseline roundtrips
+    handle(
+        &ctx,
+        &mut gm,
+        "externalQueueMgr",
+        "PublishProxyEvent",
+        &[PyRep::String("ev_test".into())],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(!ctx.db.with_snapshot(|s| s.cluster_and_runtime.external_queue_events.is_empty()));
+    assert!(matches!(
+        handle(&ctx, &mut player, "tcpRawProxyService", "GetESPTunnelingAddressByNodeID", &[], &kw).unwrap().unwrap(),
+        PyRep::Tuple(_)
+    ));
+    assert_eq!(
+        handle(&ctx, &mut gm, "DB2", "CallProc", &[PyRep::String("zcluster.Nodes_PolarisID".into())], &kw).unwrap().unwrap(),
+        PyRep::Integer(1)
+    );
+}

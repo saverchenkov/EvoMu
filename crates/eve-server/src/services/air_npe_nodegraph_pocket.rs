@@ -684,3 +684,7 @@ pub(crate) fn cleanup_npe_pocket_and_restore_ui(
 #[path = "air_npe_nodegraph_pocket_tests.rs"]
 mod air_npe_nodegraph_pocket_tests;
 
+#[cfg(test)]
+#[path = "air_npe_nodegraph_pocket_edges_tests.rs"]
+mod air_npe_nodegraph_pocket_edges_tests;
+

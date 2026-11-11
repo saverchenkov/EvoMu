@@ -1441,3 +1441,10 @@ fn handle_get_escalating_path_dungeons_entered(
 #[cfg(test)]
 #[path = "pve_exploration_tests.rs"]
 mod pve_exploration_tests;
+
+#[cfg(test)]
+#[path = "pve_exploration_edges_tests.rs"]
+mod pve_exploration_edges_tests;
+#[cfg(test)]
+#[path = "pve_exploration_edges_b4_tests.rs"]
+mod pve_exploration_edges_b4_tests;

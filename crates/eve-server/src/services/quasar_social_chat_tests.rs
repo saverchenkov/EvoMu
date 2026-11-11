@@ -223,3 +223,7 @@ fn chat_rpc_handlers_and_lifecycle_notices() {
         assert!(r2.type_url.ends_with(suffix));
     }
 }
+
+#[cfg(test)]
+#[path = "quasar_social_chat_extra_unit_tests.rs"]
+mod quasar_social_chat_extra_unit_tests;

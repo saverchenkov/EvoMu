@@ -600,7 +600,13 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 if let Some(ch) = snap.characters.get(&cid) {
                     let corp_title = if snap.corporations.get(&ch.corporation_id).map(|c| c.ceo_id) == Some(cid) {
                         "Chief Executive Officer".to_string()
-                    } else if (ctx.corp_role_mask & eve_db::corp_roles::ROLE_DIRECTOR) != 0 {
+                    } else if (ctx.corp_role_mask & eve_db::corp_roles::ROLE_DIRECTOR) != 0
+                        || snap
+                            .corporations
+                            .get(&ch.corporation_id)
+                            .and_then(|c| c.member_roles.get(&cid))
+                            .is_some_and(|&r| (r & eve_db::corp_roles::ROLE_DIRECTOR) != 0)
+                    {
                         "Director".to_string()
                     } else {
                         "Member".to_string()
@@ -786,3 +792,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
 #[cfg(test)]
 #[path = "quasar_entitlement_membership_tests.rs"]
 mod quasar_entitlement_membership_tests;
+
+#[cfg(test)]
+#[path = "quasar_entitlement_membership_edges_tests.rs"]
+mod quasar_entitlement_membership_edges_tests;

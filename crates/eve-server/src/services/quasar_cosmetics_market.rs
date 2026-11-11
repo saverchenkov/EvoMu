@@ -28,7 +28,7 @@ use super::quasar_cosmetics_skinr::{SkinrCosmeticsState, ThirdPartySkinLicense};
 use super::quasar_social_chat::ctx_queue_notice;
 use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
-    STATUS_NOT_FOUND, STATUS_PRECONDITION_FAILED,
+    STATUS_NOT_FOUND, STATUS_PRECONDITION_FAILED, STATUS_UNAUTHORIZED,
 };
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldRepository};
 use eve_proto::quasar::{
@@ -379,8 +379,11 @@ fn uuid_of(msg: &DynamicQuasarMessage, field: u32) -> Option<[u8; 16]> {
 }
 
 fn require_char(ctx: &AuthoritativeContext) -> Result<u32, (u32, String)> {
-    ctx.effective_character_id()
-        .ok_or_else(|| (STATUS_FORBIDDEN, "Active character required".to_string()))
+    match ctx.effective_character_id() {
+        None => Err((STATUS_FORBIDDEN, "Active character required".to_string())),
+        Some(0) => Err((STATUS_UNAUTHORIZED, "Authenticated character required".to_string())),
+        Some(cid) => Ok(cid),
+    }
 }
 
 fn parse_listing_target(msg: Option<&DynamicQuasarMessage>) -> ListingTargetRecord {
@@ -1490,3 +1493,7 @@ pub fn register_with_state(router: &PublicGatewayRouter, state: Arc<CosmeticsMar
 #[cfg(test)]
 #[path = "quasar_cosmetics_market_tests.rs"]
 mod quasar_cosmetics_market_tests;
+
+#[cfg(test)]
+#[path = "quasar_cosmetics_market_edges_tests.rs"]
+mod quasar_cosmetics_market_edges_tests;

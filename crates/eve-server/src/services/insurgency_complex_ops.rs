@@ -792,35 +792,35 @@ async fn ensure_mining_ambush_in_system(
     let beacon_id = 1_892_100_000 + i64::from(sys_id);
     spawn_static_space_object(ctx, sys_id, beacon_id, TYPE_MINING_AMBUSH_BEACON, 1_000_129, grid).await;
 
-    let rorq_id = spawn_specialized_npc_entity(
-        ctx, sys_id, TYPE_ORE_RORQUAL, "InsurgencyOreRorqual", 500_014, grid + DVec3::new(500.0, 0.0, 0.0),
+    let pirate_types: [u32; 3] = if p_fac == FACTION_ANGEL_CARTEL { [79_596, 79_598, 79_599] } else { [79_597, 79_600, 79_601] };
+    let specs: [(u32, &str, u32, DVec3); 6] = [
+        (TYPE_ORE_RORQUAL, "InsurgencyOreRorqual", 500_014, grid + DVec3::new(500.0, 0.0, 0.0)),
+        (pirate_types[0], "InsurgencyAmbushTackler", p_fac as u32, grid + DVec3::new(1_800.0, 0.0, 0.0)),
+        (pirate_types[1], "InsurgencyAmbushTackler", p_fac as u32, grid + DVec3::new(2_600.0, 0.0, 0.0)),
+        (pirate_types[2], "InsurgencyAmbushTackler", p_fac as u32, grid + DVec3::new(3_400.0, 0.0, 0.0)),
+        (79_592_u32, "InsurgencyAmbushOreDefender", 500_014_u32, grid + DVec3::new(-1_800.0, 0.0, 0.0)),
+        (79_594_u32, "InsurgencyAmbushOreDefender", 500_018_u32, grid + DVec3::new(-1_800.0, 0.0, 1_200.0)),
+    ];
+    let batch_ids = crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_batch(
+        ctx,
+        sys_id,
+        &specs,
+        |npc| {
+            if npc.type_id == TYPE_ORE_RORQUAL {
+                npc.custom_cargo_loot = named_insurgency_roamer_loot_drop(TYPE_ORE_RORQUAL);
+            }
+        },
     )
     .await;
-    with_mut_combat_ephemeral(ctx, |rt| {
-        if let Some(npc) = rt.npc_entities.get_mut(&rorq_id) {
-            npc.custom_cargo_loot = named_insurgency_roamer_loot_drop(TYPE_ORE_RORQUAL);
-        }
-    });
+    let rorq_id = batch_ids[0];
     if let Ok(Some(mut rcs)) = sys_handle.get_combat_state(rorq_id).await {
         rcs.warp_scramble_strength = 3;
         let _ = sys_handle.set_combat_state(rorq_id, rcs).await;
     }
     sys_handle.scrambled_balls.write().unwrap_or_else(|e| e.into_inner()).insert(rorq_id);
 
-    let pirate_types: [u32; 3] = if p_fac == FACTION_ANGEL_CARTEL { [79_596, 79_598, 79_599] } else { [79_597, 79_600, 79_601] };
-    let mut pirate_ids = Vec::with_capacity(3);
-    for (idx, &ptid) in pirate_types.iter().enumerate() {
-        pirate_ids.push(
-            spawn_specialized_npc_entity(ctx, sys_id, ptid, "InsurgencyAmbushTackler", p_fac as u32, grid + DVec3::new(1_800.0 + (idx as f64) * 800.0, 0.0, 0.0)).await,
-        );
-    }
-
-    let mut ore_def_ids = Vec::with_capacity(2);
-    for (idx, &(dtid, dfac)) in [(79_592_u32, 500_014_u32), (79_594_u32, 500_018_u32)].iter().enumerate() {
-        ore_def_ids.push(
-            spawn_specialized_npc_entity(ctx, sys_id, dtid, "InsurgencyAmbushOreDefender", dfac, grid + DVec3::new(-1_800.0, 0.0, (idx as f64) * 1_200.0)).await,
-        );
-    }
+    let pirate_ids = batch_ids[1..4].to_vec();
+    let ore_def_ids = batch_ids[4..6].to_vec();
 
     save_single_ambush(
         ctx,
@@ -1185,3 +1185,10 @@ pub async fn tick_insurgency_complex_ops(ctx: &ServerContext, now_unix: u64) {
 #[cfg(test)]
 #[path = "insurgency_complex_ops_tests.rs"]
 mod insurgency_complex_ops_tests;
+#[cfg(test)]
+#[path = "insurgency_complex_ops_edges_tests.rs"]
+mod insurgency_complex_ops_edges_tests;
+
+#[cfg(test)]
+#[path = "insurgency_complex_ops_edges2_tests.rs"]
+mod insurgency_complex_ops_edges2_tests;

@@ -288,10 +288,14 @@ async fn test_abyssal_proximity_filament_consumption_and_spatial_clouds() {
             },
         );
     });
-    let (_, consumed_tid, tier, _, _, _, fid_out) =
-        validate_and_consume_abyssal_filaments(&ctx, char_id, ship_id, sys_id, fil_id)
-            .await
-            .expect("cruiser T0 filament succeeds");
+    let ConsumedAbyssalFilament {
+        filament_type_id: consumed_tid,
+        tier,
+        opener_fleet_id: fid_out,
+        ..
+    } = validate_and_consume_abyssal_filaments(&ctx, char_id, ship_id, sys_id, fil_id)
+        .await
+        .expect("cruiser T0 filament succeeds");
     assert_eq!(consumed_tid, 56131);
     assert_eq!(tier, 0);
     assert_eq!(fid_out, Some(1));
@@ -348,3 +352,292 @@ async fn test_abyssal_proximity_filament_consumption_and_spatial_clouds() {
         .await
         .is_none());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abyssal_hazards_home_fallback_deadspace_prox_dark_turret_and_pvp_cloud_exclusions() {
+    let (ctx, _, char_id, ship_id, sys_id) = crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_ctx_and_session();
+    let corp_id = 98_000_077_i64;
+    let ab_sys = 32_000_004_u32;
+    let now = ctx.now_unix();
+    let ship_tid = find_ship_of_group(&ctx.sde, 26, 621);
+
+    // resolve_character_home_station_and_system fallback via corp HQ station & missing station solar_system_id fallback
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
+            ch.home_station_id = 0;
+            ch.solar_system_id = sys_id;
+        }
+        let mut corp = snap.corporations.entry(corp_id).or_default().clone();
+        corp.corporation_id = corp_id;
+        corp.hq_station_id = ctx.sde.stations.keys().next().copied();
+        snap.corporations.insert(corp_id, corp);
+    });
+    let resolved = ctx.db.with_snapshot(|snap| resolve_character_home_station_and_system(snap, &ctx.sde, char_id));
+    assert!(resolved.0 > 0 && resolved.1 > 0);
+
+    // RPC restriction channel forms solarsystemid2_ / solarsystemid_ and List args
+    let mut sess = SessionState::default();
+    sess.solar_system_id = Some(ab_sys);
+    assert!(check_abyssal_in_pocket_rpc_restrictions(&sess, "LSC", "JoinChannel", &[PyRep::List(vec![PyRep::String("solarsystemid2_32000004".into())])]).is_some());
+    assert!(is_abyssal_local_channel_disabled("solarsystemid_1", Some(ab_sys)));
+
+    // Deadspace proximity check via exploration registry + acceleration gate (group_id == 366)
+    crate::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system.entry(sys_id).or_default().push(crate::services::pve_exploration::PveSiteInstance {
+            site_id: "TEST-DED".into(),
+            solar_system_id: sys_id,
+            dungeon_name: "Test DED".into(),
+            site_category: "Combat".into(),
+            ded_rating: Some(4),
+            position: [10_000.0, 0.0, 0.0],
+            gate_ball_id: Some(7_000_001),
+            total_waves: 1,
+            created_unix: now,
+            ..Default::default()
+        });
+    });
+    assert_eq!(check_not_in_deadspace_pocket(&ctx, sys_id, DVec3::new(10_500.0, 0.0, 0.0)).await.unwrap_err().code, "ShipInDungeon");
+    crate::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system.remove(&sys_id);
+    });
+    if let Some(&gate_tid) = ctx.sde.types.values().find(|t| t.group_id == 366).map(|t| &t.type_id) {
+        let sys_h = ctx.systems.get_or_spawn(sys_id);
+        let _ = sys_h.spawn_ball(Ball {
+            id: 7_000_002, type_id: gate_tid, position: DVec3::new(20_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 1.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+        }).await;
+        assert_eq!(check_not_in_deadspace_pocket(&ctx, sys_id, DVec3::new(20_500.0, 0.0, 0.0)).await.unwrap_err().code, "ShipInDungeon");
+    }
+
+    // 1000km proximity against UpwellStructure + AbyssalTrace
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(7_000_010, eve_db::UpwellStructureRecord {
+            structure_id: 7_000_010,
+            type_id: 35_832,
+            owner_corp_id: corp_id,
+            solar_system_id: sys_id,
+            name: "NearFort".into(),
+            position: [50_000_000.0, 0.0, 0.0],
+            state: "ShieldVulnerable".into(),
+            ..Default::default()
+        });
+    });
+    assert_eq!(check_filament_1000km_proximity(&ctx, sys_id, DVec3::new(50_000_500.0, 0.0, 0.0)).await.unwrap_err().code, "ProximityRestriction");
+
+    // dark_weather_midpocket_turret_mult active Dark pocket + already_applied branch
+    let turret_type = ctx.sde.types.values().find(|t| t.group_id == 53).unwrap();
+    let mod_id = 96_000_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(mod_id, InventoryItemRecord {
+            item_id: mod_id, type_id: turret_type.type_id, owner_id: char_id, location_id: ship_id,
+            flag: InventoryFlag::HiSlot0, quantity: 1, ..Default::default()
+        });
+    });
+    let mk_room = |idx| crate::services::pve_special_sites::AbyssalRoomRecord {
+        room_index: idx, dungeon_id: 0, dungeon_name: format!("R{idx}"), npc_ball_ids: vec![], cache_item_id: 0, cleared: false, gate_unlocked_at_sec: None,
+    };
+    crate::services::pve_special_sites::with_abyssal_state(&ctx, |reg| {
+        let mut p = crate::services::pve_special_sites::AbyssalPocketSession {
+            pocket_id: 88,
+            trace_ball_id: 0,
+            character_id: char_id,
+            ship_id,
+            fleet_ship_ids: vec![ship_id],
+            origin_solar_system_id: sys_id,
+            origin_position: [0.0; 3],
+            grid_offset: [0.0; 3],
+            abyssal_solar_system_id: ab_sys,
+            filament_type_id: 47_762,
+            tier: 1,
+            weather: AbyssalWeatherKind::Dark,
+            weather_penalty_pct: 50.0,
+            weather_bonus_pct: 25.0,
+            npc_difficulty_mult: 1.0,
+            started_at_sec: now,
+            collapse_at_sec: now + 1_200,
+            current_room: 1,
+            completed: false,
+            collapsed_destroyed: false,
+            ship_room: Default::default(),
+            max_ships: 1,
+            rooms: [mk_room(1), mk_room(2), mk_room(3)],
+        };
+        p.completed = false;
+        reg.pockets.insert(char_id, p);
+    });
+    let mult = dark_weather_midpocket_turret_mult(&ctx, char_id, ab_sys, false, mod_id, turret_type);
+    assert!((mult - 0.5).abs() < 1e-6);
+    assert_eq!(dark_weather_midpocket_turret_mult(&ctx, char_id, ab_sys, true, mod_id, turret_type), 1.0);
+    assert_eq!(dark_weather_midpocket_turret_mult(&ctx, char_id, sys_id, false, mod_id, turret_type), 1.0);
+
+    // Void Space exclusion + missing snap.items fallback in evaluate_abyssal_spatial_clouds_for_ship
+    let ab_h = ctx.systems.get_or_spawn(ab_sys);
+    let _ = ab_h.spawn_ball(Ball {
+        id: ship_id, type_id: ship_tid, position: DVec3::ZERO, velocity: DVec3::ZERO,
+        max_velocity: 300.0, inertia: 1.0, mass: 1e6, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    }).await;
+    // active_ship_id fallback when ship_id missing from snap.items
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().active_ship_id = ship_id;
+    });
+    assert!(evaluate_abyssal_spatial_clouds_for_ship(&ctx, ab_sys, ship_id).await.is_none());
+
+    crate::services::pve_special_sites::with_abyssal_state(&ctx, |reg| {
+        reg.void_space_sessions.insert(char_id, crate::services::pve_special_sites::VoidSpaceSessionRecord {
+            char_id, ship_id, origin_solar_system_id: sys_id, origin_position: [0.0; 3], target_id: 1, entered_unix: now, expires_at_sec: now + 600, ..Default::default()
+        });
+    });
+    assert!(evaluate_abyssal_spatial_clouds_for_ship(&ctx, ab_sys, ship_id).await.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abyssal_hazards_weather_backup_sentinel_and_cloud_char_fallback_cov() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(eve_db::WorldRepository::with_demo_seed()),
+    );
+    let char_id = 90_000_781;
+    let ship_id = 1_000_781;
+    let turret_a = 1_000_782;
+    let turret_b = 1_000_783;
+    let ab_sys = 32_000_005;
+    let now = ctx.now_unix();
+    let turret_tid = ctx.sde.types.values().find(|t| t.group_id == 53).unwrap().type_id;
+
+    let sys_handle = ctx.systems.get_or_spawn(ab_sys);
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 588,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1.0e6,
+            radius: 30.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: 1_000_784,
+            type_id: TACHYON_CLOUD_TYPE_ID,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1.0,
+            radius: 15_000.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Rigid,
+        })
+        .await;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().unwrap().clone();
+        ch.character_id = char_id;
+        ch.active_ship_id = ship_id;
+        ch.solar_system_id = ab_sys;
+        snap.characters.insert(char_id, ch);
+
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 588,
+                owner_id: char_id,
+                location_id: ab_sys as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+
+        let mut mod_a = InventoryItemRecord {
+            item_id: turret_a,
+            type_id: turret_tid,
+            owner_id: char_id,
+            location_id: ship_id,
+            flag: InventoryFlag::HiSlot0,
+            quantity: 1,
+            ..Default::default()
+        };
+        mod_a.dynamic_attributes.insert(9954, -1.0e300);
+        mod_a.dynamic_attributes.insert(9958, -1.0e300);
+        snap.items.insert(turret_a, mod_a);
+
+        let mut mod_b = InventoryItemRecord {
+            item_id: turret_b,
+            type_id: turret_tid,
+            owner_id: char_id,
+            location_id: ship_id,
+            flag: InventoryFlag::HiSlot1,
+            quantity: 1,
+            ..Default::default()
+        };
+        mod_b.dynamic_attributes.insert(9954, 15_000.0);
+        mod_b.dynamic_attributes.insert(9958, 12_000.0);
+        snap.items.insert(turret_b, mod_b);
+    });
+
+    let mut test_attrs = HashMap::from([(37, 300.0), (54, 15_000.0), (158, 12_000.0)]);
+    apply_abyssal_weather_to_ship_attrs(
+        AbyssalWeatherKind::Dark,
+        30.0,
+        20.0,
+        &mut test_attrs,
+    );
+    assert!((test_attrs[&37] - 360.0).abs() < 1e-6);
+
+    // Remove ship_id from snap.items -> hits snap.characters active_ship_id fallback (859-864)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&ship_id);
+    });
+    let mk_room = |idx| crate::services::pve_special_sites::AbyssalRoomRecord {
+        room_index: idx,
+        dungeon_id: 0,
+        dungeon_name: format!("R{idx}"),
+        npc_ball_ids: vec![],
+        cache_item_id: 0,
+        cleared: false,
+        gate_unlocked_at_sec: None,
+    };
+    crate::services::pve_special_sites::with_abyssal_state(&ctx, |reg| {
+        reg.pockets.insert(
+            char_id,
+            crate::services::pve_special_sites::AbyssalPocketSession {
+                pocket_id: 999_781,
+                trace_ball_id: 0,
+                character_id: char_id,
+                ship_id,
+                fleet_ship_ids: vec![ship_id],
+                origin_solar_system_id: 30_000_142,
+                origin_position: [0.0; 3],
+                grid_offset: [0.0; 3],
+                abyssal_solar_system_id: ab_sys,
+                filament_type_id: 47_762,
+                tier: 1,
+                weather: AbyssalWeatherKind::Dark,
+                weather_penalty_pct: 50.0,
+                weather_bonus_pct: 25.0,
+                npc_difficulty_mult: 1.0,
+                started_at_sec: now,
+                collapse_at_sec: now + 1_200,
+                current_room: 1,
+                completed: false,
+                collapsed_destroyed: false,
+                ship_room: Default::default(),
+                max_ships: 1,
+                rooms: [mk_room(1), mk_room(2), mk_room(3)],
+            },
+        );
+    });
+    let cloud = evaluate_abyssal_spatial_clouds_for_ship(&ctx, ab_sys, ship_id).await;
+    assert_eq!(cloud, Some("TachyonCloud"));
+}
+
+#[cfg(test)]
+#[path = "pve_abyssal_hazards_extra_unit_tests.rs"]
+mod pve_abyssal_hazards_extra_unit_tests;

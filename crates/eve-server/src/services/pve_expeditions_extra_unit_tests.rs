@@ -353,3 +353,597 @@ async fn test_expiry_pruning_destruction_notifications_and_ded_sleeper_gate_chec
     assert!(validate_and_advance_pve_site_room(&ctx, &mut session, sys_id, "7701").await.is_ok());
     assert!(validate_and_advance_pve_site_room(&ctx, &mut session, sys_id, "8801").await.is_ok());
 }
+
+mod w4_ops_pve_mut_extra_tests {
+    use crate::router::ServerContext;
+    use crate::services::pve_expeditions::*;
+    use crate::services::pve_exploration::{with_pve_exploration_reg, PveSiteInstance};
+    use eve_db::clock::VirtualServerClock;
+    use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
+    use eve_destiny::{Ball, MovementMode};
+    use eve_machonet::SessionState;
+    use eve_proto::PyRep;
+    use eve_sde::{DungeonTemplate, SdeRegistry, SolarSystemId};
+    use glam::DVec3;
+    use std::sync::{Arc, OnceLock};
+
+    fn shared_sde() -> Arc<SdeRegistry> {
+        static SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
+        Arc::clone(SDE.get_or_init(|| Arc::new(SdeRegistry::with_canonical_seed())))
+    }
+
+    fn make_ctx(sys_id: SolarSystemId, char_id: i64, ship_id: i64) -> (ServerContext, SessionState) {
+        make_ctx_with_sde(shared_sde(), sys_id, char_id, ship_id)
+    }
+
+    fn make_ctx_with_sde(
+        sde: Arc<SdeRegistry>,
+        sys_id: SolarSystemId,
+        char_id: i64,
+        ship_id: i64,
+    ) -> (ServerContext, SessionState) {
+        let db = Arc::new(WorldRepository::new_empty());
+        db.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+        db.provision_gm_account(&format!("exp_w4_{char_id}"), "pw", char_id, "ExpW4Pilot");
+        let uid = db
+            .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.user_id).unwrap_or(1));
+        let _ = db.acquire_online_lock_with_computer_hash(
+            uid,
+            char_id as u64,
+            Some(char_id),
+            None,
+            true,
+            1_800_000_000,
+        );
+        db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.solar_system_id = sys_id;
+                ch.active_ship_id = ship_id;
+                ch.station_id = None;
+                ch.structure_id = None;
+            }
+            snap.items.insert(
+                ship_id,
+                InventoryItemRecord {
+                    item_id: ship_id,
+                    type_id: 587, // Rifter (Frigate)
+                    owner_id: char_id,
+                    location_id: i64::from(sys_id),
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        });
+        let ctx = ServerContext::with_sde_and_repository(sde, db)
+            .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+        let mut sess = SessionState::new(720);
+        sess.user_id = Some(uid);
+        sess.character_id = Some(char_id);
+        sess.solar_system_id = Some(sys_id);
+        sess.ship_id = Some(ship_id);
+        (ctx, sess)
+    }
+
+    #[tokio::test]
+    async fn pve_expeditions_ops_faction_inference_chains_and_empty_sde_fallback() {
+        let mut sde = (*shared_sde()).clone();
+        let sys_id: SolarSystemId = 30_000_142;
+
+        // Add synthetic source dungeons with each faction keyword & difficulty tier to exercise infer_faction_id,
+        // resolve_escalation_journal_template_and_hint, resolve_sde_escalation_chain, and format_escalation_journal_text
+        let custom_cases = [
+            (9_999_201, "Angel Cartel Yard", None, Some(20), Some(1)),
+            (9_999_202, "Blood Raider Altar", None, Some(20), Some(4)),
+            (9_999_203, "Sansha Nation Vigil", None, Some(20), Some(2)),
+            (9_999_204, "Serpentis Refuge", None, Some(20), Some(3)),
+            (9_999_205, "Guristas Hideaway", None, Some(20), Some(1)),
+            (9_999_206, "Rogue Drone Alvu Hive", None, Some(20), Some(4)),
+            (9_999_207, "Unrecognized Site", Some(500_021), Some(20), Some(2)),
+        ];
+        for (did, nm, fid, arch, diff) in custom_cases {
+            sde.dungeons.insert(
+                did,
+                DungeonTemplate {
+                    dungeon_id: did,
+                    name: nm.to_string(),
+                    archetype_id: arch,
+                    faction_id: fid,
+                    difficulty: diff,
+                },
+            );
+        }
+        let sde_arc = Arc::new(sde);
+
+        for (idx, (did, nm, _, _, _)) in custom_cases.iter().enumerate() {
+            let cid = 94_201_000 + idx as i64;
+            let sid = 1_042_010_000 + idx as i64;
+            let (ctx, _) = make_ctx_with_sde(Arc::clone(&sde_arc), sys_id, cid, sid);
+            let e = create_escalation_expedition(&ctx, cid, sys_id, *did, nm, [1_000.0, 0.0, 0.0])
+                .await
+                .expect("create custom faction escalation");
+            assert!(e.total_steps >= 1);
+            assert!(!e.journal_text.is_empty());
+            assert!(e.effective_journal_entry_template_id() > 0);
+        }
+
+        // Direct archetype 31 escalation template in SDE
+        if let Some((&esc_id, esc_def)) = sde_arc.dungeons.iter().find(|(_, d)| d.archetype_id == Some(31)) {
+            let (ctx, _) = make_ctx_with_sde(Arc::clone(&sde_arc), sys_id, 94_201_100, 1_042_010_100);
+            let e = create_escalation_expedition(
+                &ctx,
+                94_201_100,
+                sys_id,
+                esc_id,
+                &esc_def.name,
+                [0.0, 0.0, 0.0],
+            )
+            .await
+            .expect("arch 31 direct template");
+            assert!(e.total_steps >= 1);
+        }
+
+        // Empty SDE dungeons falls back cleanly to expedition_dungeon_chain
+        let mut empty_sde = (*sde_arc).clone();
+        empty_sde.dungeons.clear();
+        let (empty_ctx, _) = make_ctx_with_sde(Arc::new(empty_sde), sys_id, 94_201_200, 1_042_010_200);
+        let fb = create_escalation_expedition(
+            &empty_ctx,
+            94_201_200,
+            sys_id,
+            1420,
+            "Guristas Scout Outpost",
+            [0.0, 0.0, 0.0],
+        )
+        .await
+        .expect("empty sde fallback");
+        assert_eq!(fb.expedition_dungeon_id, 1420);
+        assert_eq!(fb.total_steps, 3);
+    }
+
+    #[tokio::test]
+    async fn escalation_roll_kv_rowset_signatures_and_step_completion_effects() {
+        let sys_id: SolarSystemId = 30_000_142;
+        let char_id = 94_200_001;
+        let ship_id = 1_042_000_001;
+        let (ctx, mut session) = make_ctx(sys_id, char_id, ship_id);
+
+        // 1. Seeded RNG roll determinism yields booleans cleanly
+        let mut saw_true = false;
+        let mut saw_false = false;
+        for _ in 0..200 {
+            if roll_escalation_chance(&ctx) {
+                saw_true = true;
+            } else {
+                saw_false = true;
+            }
+            if saw_true && saw_false {
+                break;
+            }
+        }
+        assert!(saw_true && saw_false);
+
+        // 2. Capture char notifications on create -> advance -> final step
+        let _ = ctx.drain_notifications_for_char(char_id);
+        let entry = create_escalation_expedition(
+            &ctx,
+            char_id,
+            sys_id,
+            1420,
+            "Guristas Scout Outpost",
+            [1_000_000.0, 0.0, 0.0],
+        )
+        .await
+        .expect("create escalation");
+
+        // Bookmark + cosmic signature created
+        let (bm_count_1, has_sig_1) = ctx.db.with_snapshot(|snap| {
+            let bms = snap
+                .bookmarks
+                .values()
+                .filter(|b| b.owner_id == char_id)
+                .count();
+            (bms, !snap.cosmic_signatures.is_empty())
+        });
+        assert!(bm_count_1 >= 1);
+        assert!(has_sig_1 || !matches!(get_my_escalating_path_details_rowset(&ctx, char_id), PyRep::None));
+
+        // Add synthetic entry with template_id == 0 and unknown dungeon/system to cover fallbacks in rowset & KV
+        with_pve_exploration_reg(&ctx, |reg| {
+            reg.escalations_by_char
+                .entry(char_id)
+                .or_default()
+                .push(EscalatingPathEntry {
+                    instance_id: 99_887_766,
+                    character_id: char_id,
+                    source_dungeon_id: 9_998_881,
+                    expedition_dungeon_id: 9_998_882,
+                    expedition_name: "Unknown Esc".into(),
+                    destination_solar_system_id: 99_999_991,
+                    step_index: 1,
+                    total_steps: 2,
+                    journal_text: "Unknown dest".into(),
+                    created_at_sec: 1_800_000_000,
+                    expires_at_sec: 1_800_086_400,
+                    dungeons_entered: vec![9_998_882],
+                    journal_entry_template_id: 0,
+                });
+        });
+        let eff_tpl = with_pve_exploration_reg(&ctx, |reg| {
+            reg.escalations_by_char
+                .get(&char_id)
+                .and_then(|list| list.iter().find(|e| e.instance_id == 99_887_766))
+                .map(|e| e.effective_journal_entry_template_id())
+                .unwrap()
+        });
+        assert!(eff_tpl > 0);
+        let rowset = get_my_escalating_path_details_rowset(&ctx, char_id);
+        assert!(!matches!(rowset, PyRep::None));
+        with_pve_exploration_reg(&ctx, |reg| {
+            if let Some(list) = reg.escalations_by_char.get_mut(&char_id) {
+                list.retain(|e| e.instance_id != 99_887_766);
+            }
+        });
+
+        // Advance step 1 -> 2 -> 3 -> completed
+        let mut cur = entry.clone();
+        while cur.step_index < cur.total_steps {
+            cur = advance_expedition_step(&ctx, char_id, cur.instance_id)
+                .await
+                .expect("advance")
+                .expect("step entry");
+        }
+        let final_done = advance_expedition_step(&ctx, char_id, cur.instance_id)
+            .await
+            .expect("final advance")
+            .expect("completed summary");
+        assert!(final_done.journal_text.contains("fully completed"));
+
+        let missing = advance_expedition_step(&ctx, char_id, 999_111_222)
+            .await
+            .expect("missing ok");
+        assert!(missing.is_none());
+
+        // Verify notifications emitted across create/advance
+        let drained = ctx.drain_notifications_for_char(char_id);
+        assert!(
+            drained.iter().any(|n| n.event == "OnDungeonInstanceAdded" || n.event == "OnEscalatingPathMessage" || n.event == "OnBookmarkAdd"), // rpc-lint: allow test fixture
+            "expected expedition notifications, got: {:?}",
+            drained.iter().map(|n| n.event.as_str()).collect::<Vec<_>>()
+        );
+
+        // 3. enter_combat_anomaly_site matching by destination_solar_system_id + expedition_dungeon_id
+        let entry2 = create_escalation_expedition(
+            &ctx,
+            char_id,
+            sys_id,
+            1420,
+            "Guristas Scout Outpost",
+            [5_000_000.0, 0.0, 0.0],
+        )
+        .await
+        .expect("create entry2");
+        let dest_sys = entry2.destination_solar_system_id;
+        let _ = ctx.systems.get_or_spawn(dest_sys);
+        session.solar_system_id = Some(dest_sys);
+        let anom_key = format!("SITE_LIFETIME0_{dest_sys}");
+        with_pve_exploration_reg(&ctx, |reg| {
+            reg.sites_by_system.entry(dest_sys).or_default().push(PveSiteInstance {
+                site_id: anom_key.clone(),
+                dungeon_id: entry2.expedition_dungeon_id,
+                dungeon_name: "Lifetime0 Site".into(),
+                solar_system_id: dest_sys,
+                site_category: "CombatAnomaly".into(),
+                position: [5_000_000.0, 0.0, 0.0],
+                signal_strength: 1.0,
+                current_room: 1,
+                total_rooms: 2,
+                current_wave: 1,
+                total_waves: 1,
+                created_unix: 1_800_000_000,
+                lifetime_seconds: 0, // hits 86_400 default fallback!
+                expedition_instance_id: None,
+                ..Default::default()
+            });
+        });
+        let enter = enter_combat_anomaly_site(
+            &ctx,
+            char_id,
+            entry2.destination_solar_system_id,
+            &anom_key,
+        )
+        .expect("enter combat anomaly");
+        assert!(!matches!(enter, PyRep::None));
+
+        // validate_and_advance_pve_site_room using numeric dungeon_id string instead of site_id
+        let dest_sys_h = ctx.systems.get_or_spawn(dest_sys);
+        let _ = dest_sys_h
+            .spawn_ball(Ball {
+                id: ship_id,
+                type_id: 587,
+                position: DVec3::new(5_000_000.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 400.0,
+                inertia: 2.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            })
+            .await;
+        // Too far from gate -> GateOutOfRange, then move ship within 2,500m and advance via numeric dungeon_id
+        let err_far = validate_and_advance_pve_site_room(
+            &ctx,
+            &mut session,
+            dest_sys,
+            &entry2.expedition_dungeon_id.to_string(),
+        )
+        .await
+        .expect_err("far from gate must fail GateOutOfRange");
+        assert_eq!(err_far.code, "GateOutOfRange");
+
+        let (gate_pos, wave_npcs) = with_pve_exploration_reg(&ctx, |reg| {
+            reg.sites_by_system
+                .get(&dest_sys)
+                .and_then(|v| v.iter().find(|s| s.dungeon_id == entry2.expedition_dungeon_id))
+                .map(|s| (DVec3::from(s.position), s.active_npc_ball_ids.clone()))
+                .unwrap()
+        });
+        let _ = dest_sys_h.remove_ball(ship_id).await;
+        let _ = dest_sys_h
+            .spawn_ball(Ball {
+                id: ship_id,
+                type_id: 587,
+                position: gate_pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 400.0,
+                inertia: 2.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            })
+            .await;
+        // While wave NPCs remain alive -> WaveNpcsRemaining
+        if !wave_npcs.is_empty() {
+            let err_wave = validate_and_advance_pve_site_room(
+                &ctx,
+                &mut session,
+                dest_sys,
+                &entry2.expedition_dungeon_id.to_string(),
+            )
+            .await
+            .expect_err("wave NPCs alive must block advance with WaveNpcsRemaining");
+            assert_eq!(err_wave.code, "WaveNpcsRemaining");
+            for npc_id in wave_npcs {
+                let _ = dest_sys_h.remove_ball(npc_id).await;
+            }
+        }
+        let ok_num = validate_and_advance_pve_site_room(
+            &ctx,
+            &mut session,
+            dest_sys,
+            &entry2.expedition_dungeon_id.to_string(),
+        )
+        .await;
+        assert!(ok_num.is_ok(), "validate_and_advance_pve_site_room failed: {ok_num:?}");
+    }
+
+    #[tokio::test]
+    async fn batch3_pve_expeditions_ops_destinations_null_wh_difficulties_and_chain_edge_cases() {
+        let mut sde = (*shared_sde()).clone();
+        // Ensure diverse synthetic dungeons covering remaining keywords, unknown faction, and difficulty variants
+        let extra_dungeons = [
+            (9_999_301, "Mordu's Legion Stronghold", None, Some(20), Some(5)),
+            (9_999_302, "Triglavian Pochven Vault", None, Some(20), Some(3)),
+            (9_999_303, "Sleeper Forgotten Cache", None, Some(20), None),
+            (9_999_304, "Mercenary Syndicate Outpost", None, Some(20), Some(1)),
+            (9_999_305, "Generic Mystery Anomaly", None, Some(20), None),
+            (9_999_306, "Guristas Deep Complex", None, Some(31), None),
+            (9_999_307, "Guristas High Complex", None, Some(31), Some(6)),
+        ];
+        for (did, nm, fid, arch, diff) in extra_dungeons {
+            sde.dungeons.insert(
+                did,
+                DungeonTemplate {
+                    dungeon_id: did,
+                    name: nm.to_string(),
+                    archetype_id: arch,
+                    faction_id: fid,
+                    difficulty: diff,
+                },
+            );
+        }
+        let sde_arc = Arc::new(sde);
+
+        let low_sys = sde_arc
+            .solar_systems
+            .values()
+            .find(|s| s.security_status > 0.0 && s.security_status < 0.45 && s.solar_system_id < 31_000_000)
+            .map(|s| s.solar_system_id)
+            .unwrap();
+        let null_sys = sde_arc
+            .solar_systems
+            .values()
+            .find(|s| s.security_status <= 0.0 && s.solar_system_id < 31_000_000)
+            .map(|s| s.solar_system_id)
+            .unwrap();
+        let wh_sys = sde_arc
+            .solar_systems
+            .values()
+            .find(|s| s.solar_system_id >= 31_000_000)
+            .map(|s| s.solar_system_id);
+
+        // Lowsec and nullsec origins across all difficulty/faction combos
+        for (idx, (did, nm, _, _, _)) in extra_dungeons.iter().enumerate() {
+            let origin = if idx % 2 == 0 { low_sys } else { null_sys };
+            let cid = 94_205_000 + idx as i64;
+            let sid = 1_042_050_000 + idx as i64;
+            let (ctx, _) = make_ctx_with_sde(Arc::clone(&sde_arc), origin, cid, sid);
+            let mut cur = create_escalation_expedition(&ctx, cid, origin, *did, nm, [0.0, 0.0, 0.0])
+                .await
+                .expect("create low/null escalation");
+            assert!(cur.total_steps >= 1);
+            assert!(!cur.journal_text.is_empty());
+            for _ in 0..=cur.total_steps {
+                let Some(next) = advance_expedition_step(&ctx, cid, cur.instance_id).await.expect("step") else {
+                    break;
+                };
+                if next.journal_text.contains("fully completed") {
+                    break;
+                }
+                cur = next;
+            }
+        }
+
+        // Wormhole origin if present
+        if let Some(wh) = wh_sys {
+            let (ctx, _) = make_ctx_with_sde(Arc::clone(&sde_arc), wh, 94_205_100, 1_042_050_100);
+            let e = create_escalation_expedition(&ctx, 94_205_100, wh, 9_999_303, "Sleeper Forgotten Cache", [0.0, 0.0, 0.0])
+                .await
+                .expect("wh escalation");
+            assert!(e.destination_solar_system_id > 0);
+        }
+
+        // Single-system SDE with empty jumps hits fallback destination selection!
+        let mut iso_sde = (*sde_arc).clone();
+        iso_sde.solar_systems.retain(|&id, _| id == low_sys);
+        iso_sde.jumps.clear();
+        iso_sde.dungeons.retain(|&id, _| id == 9_999_306);
+        assert_eq!(find_escalation_destination_system_sde(&iso_sde, 30_000_144), 30_000_145);
+        assert_eq!(find_escalation_destination_system_sde(&iso_sde, 30_002_187), 30_002_188);
+        assert_eq!(find_escalation_destination_system_sde(&iso_sde, 30_002_659), 30_002_660);
+        assert_eq!(find_escalation_destination_system_sde(&iso_sde, 30_002_510), 30_002_511);
+        let (iso_ctx, _) = make_ctx_with_sde(Arc::new(iso_sde), low_sys, 94_205_200, 1_042_050_200);
+        let iso_e = create_escalation_expedition(&iso_ctx, 94_205_200, low_sys, 9_999_306, "Guristas Deep Complex", [0.0, 0.0, 0.0])
+            .await
+            .expect("isolated sys escalation");
+        assert_eq!(iso_e.destination_solar_system_id, (low_sys + 1).max(30_000_001));
+    }
+
+    #[tokio::test]
+    async fn batch4_pve_expeditions_ops_faction_hint_objectives_and_rooms() {
+        let mut sde = (*shared_sde()).clone();
+        sde.dungeons.insert(
+            9_999_401,
+            DungeonTemplate {
+                dungeon_id: 9_999_401,
+                name: "Unknown Complex".into(),
+                archetype_id: Some(20),
+                faction_id: Some(500_010),
+                difficulty: Some(3),
+            },
+        );
+        sde.dungeons.insert(
+            9_999_402,
+            DungeonTemplate {
+                dungeon_id: 9_999_402,
+                name: "Rogue Drone Hive Anomaly".into(),
+                archetype_id: Some(20),
+                faction_id: None,
+                difficulty: Some(3),
+            },
+        );
+        sde.dungeons.insert(
+            9_999_403,
+            DungeonTemplate {
+                dungeon_id: 9_999_403,
+                name: "Rogue Drone Escalation Hub".into(),
+                archetype_id: Some(31),
+                faction_id: Some(500_021),
+                difficulty: Some(3),
+            },
+        );
+        let sde_arc = Arc::new(sde.clone());
+        let (ctx1, _) = make_ctx_with_sde(Arc::clone(&sde_arc), 30_000_142, 94_206_001, 1_042_060_001);
+        let e1 = create_escalation_expedition(&ctx1, 94_206_001, 30_000_142, 9_999_401, "Unknown Complex", [0.0, 0.0, 0.0])
+            .await
+            .expect("explicit faction escalation");
+        assert!(e1.total_steps >= 1);
+
+        let e2 = create_escalation_expedition(&ctx1, 94_206_001, 30_000_142, 9_999_402, "Rogue Drone Hive Anomaly", [0.0, 0.0, 0.0])
+            .await
+            .expect("drone hive faction escalation");
+        assert!(e2.total_steps >= 1);
+
+        // Drone archetype_id == 31 explicit faction retention (line 45)
+        let e_drone = create_escalation_expedition(
+            &ctx1,
+            94_206_001,
+            30_000_142,
+            9_999_403,
+            "Rogue Drone Escalation Hub",
+            [0.0, 0.0, 0.0],
+        )
+        .await
+        .expect("drone 31 escalation");
+        assert!(e_drone.total_steps >= 1);
+        assert_eq!(
+            sde_arc
+                .dungeons
+                .get(&e_drone.expedition_dungeon_id)
+                .and_then(|d| d.faction_id),
+            Some(500_021)
+        );
+
+        // Pirate faction system fallbacks (BloodRaiders / Sansha / Serpentis -> lines 70-72)
+        use crate::services::pve_exploration_seeding::{pirate_faction_for_system, PirateFaction};
+        for (idx, (target_pf, expected_fid)) in [
+            (PirateFaction::BloodRaiders, 500_012_u32),
+            (PirateFaction::Sansha, 500_019_u32),
+            (PirateFaction::Serpentis, 500_020_u32),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let sys_id = sde_arc
+                .solar_systems
+                .keys()
+                .copied()
+                .find(|&sid| pirate_faction_for_system(&sde_arc, sid) == target_pf)
+                .expect("system for pirate faction");
+            let cid = 94_206_100 + idx as i64;
+            let (sys_ctx, _) = make_ctx_with_sde(
+                Arc::clone(&sde_arc),
+                sys_id,
+                cid,
+                1_042_060_100 + idx as i64,
+            );
+            let e_pf = create_escalation_expedition(
+                &sys_ctx,
+                cid,
+                sys_id,
+                9_999_998,
+                "Mystery Uncharted Anomaly",
+                [0.0, 0.0, 0.0],
+            )
+            .await
+            .expect("pirate faction escalation");
+            assert!(e_pf.total_steps >= 1);
+            assert!(!e_pf.expedition_name.is_empty());
+            if sde_arc
+                .dungeons
+                .values()
+                .any(|d| d.archetype_id == Some(31) && d.faction_id == Some(expected_fid))
+            {
+                assert_eq!(
+                    sde_arc
+                        .dungeons
+                        .get(&e_pf.expedition_dungeon_id)
+                        .and_then(|d| d.faction_id),
+                    Some(expected_fid)
+                );
+            }
+        }
+
+        // Empty SDE hits sde.dungeon_objectives() Err fallback cleanly (line 87)
+        let (empty_ctx, _) = make_ctx_with_sde(Arc::new(SdeRegistry::default()), 30_000_142, 94_206_002, 1_042_060_002);
+        let e_empty = create_escalation_expedition(&empty_ctx, 94_206_002, 30_000_142, 1420, "Guristas Scout Outpost", [0.0, 0.0, 0.0])
+            .await
+            .expect("empty sde escalation");
+        assert!(e_empty.total_steps >= 1);
+        assert!(e_empty.journal_text.contains("Guristas Scout Outpost"));
+    }
+}

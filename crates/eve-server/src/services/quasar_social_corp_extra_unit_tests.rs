@@ -480,3 +480,70 @@ fn corporation_goal_active_inactive_contributions_and_reward_redemption() {
         .type_url
         .ends_with("eve_public.corporationgoal.api.RedeemMyRewardsResponse"));
 }
+
+#[test]
+fn quasar_corp_state_sync_to_db_and_rehydrate_max_plus_one_counters() {
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let state = QuasarCorpState::from_db(Arc::clone(&db));
+
+    // Seed a real corp_project then copy it at key 150 (`max_goal == 150 >= 101`, so `max * 1 != max + 1`)
+    let tmp_gid = state
+        .create_goal_from_division(1_000_009, "Seed150".into(), "Desc".into(), 10, 0, 1)
+        .expect("seed goal");
+
+    let plan5 = CorpSkillPlanRecord {
+        id: 5,
+        corp_id: 1_000_009,
+        name: "Plan Five".into(),
+        description: "Desc".into(),
+        category_id: 1,
+        requirements: vec![(3300, 3)],
+        milestones: vec![(12, "Milestone 12".into())],
+    };
+
+    db.with_mut_snapshot(|snap| {
+        if let Some(proj) = snap.corp_projects.get(&(tmp_gid as i64)).cloned() {
+            snap.corp_projects.insert(150, proj);
+        }
+        snap.corp_projects.retain(|&id, _| id == 150);
+        let mut plans = std::collections::HashMap::new();
+        plans.insert(5_u64, plan5.clone());
+        snap.quasar_state_blobs.insert(
+            "quasar_corp_plans".into(),
+            serde_json::to_string(&plans).unwrap(),
+        );
+        snap.quasar_state_blobs
+            .insert("quasar_corp_counters".into(), "[0,0,0]".into());
+    });
+
+    // Rehydrate into a fresh zero-initialized `QuasarCorpState`:
+    // max_plan=5 -> 6, max_ms=12 -> 13, max_goal=150 -> 151 (kills `-> ()`, `+ -> -`, `+ -> *` for all 3!)
+    let fresh = QuasarCorpState {
+        db: Some(Arc::clone(&db)),
+        ..Default::default()
+    };
+    fresh.rehydrate_from_db();
+    assert!(fresh.skill_plans.read().unwrap().contains_key(&5));
+    assert_eq!(*fresh.id_counters.read().unwrap(), (6, 13, 151));
+    assert_eq!(fresh.alloc_plan_id(), 6);
+    assert_eq!(fresh.alloc_milestone_id(), 13);
+
+    // Mutate plans & counters in `fresh`, call `sync_to_db`, and verify persisted blobs in DB
+    {
+        let mut sp = fresh.skill_plans.write().unwrap();
+        let mut plan77 = plan5;
+        plan77.id = 77;
+        sp.insert(77, plan77);
+    }
+    *fresh.id_counters.write().unwrap() = (78, 89, 999);
+    fresh.sync_to_db();
+
+    db.with_snapshot(|snap| {
+        let saved_counters: (u64, u64, u64) =
+            serde_json::from_str(&snap.quasar_state_blobs["quasar_corp_counters"]).unwrap();
+        assert_eq!(saved_counters, (78, 89, 999));
+        let saved_plans: std::collections::HashMap<u64, CorpSkillPlanRecord> =
+            serde_json::from_str(&snap.quasar_state_blobs["quasar_corp_plans"]).unwrap();
+        assert!(saved_plans.contains_key(&77));
+    });
+}

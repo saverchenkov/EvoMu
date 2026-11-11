@@ -528,3 +528,191 @@ async fn deathzone_room_offset_and_system_bounds_kill_mutations() {
     sync_deathzone_state_notifications(&ctx, abyss_sys);
     assert!(ctx.drain_notifications_for_char(char_id).is_empty());
 }
+
+#[tokio::test]
+async fn mutant_kill_deathzone_transitions_boundary_and_incursion_tale_remove() {
+    let (ctx, char_id) = make_ctx();
+    let ship_id = 100_000_002_i64;
+    let abyss_sys = 32_000_002_u32;
+    let const_id = ctx.sde.solar_systems[&30_000_142].constellation_id;
+    let r = crate::services::pve_abyssal_hazards::ABYSSAL_ROOM_BOUNDARY_RADIUS_M;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&char_id) {
+            c.solar_system_id = abyss_sys;
+            c.station_id = None;
+            c.structure_id = None;
+            c.active_ship_id = ship_id;
+        }
+    });
+    let dummy_room = AbyssalRoomRecord {
+        room_index: 1,
+        dungeon_id: 1,
+        dungeon_name: "R".into(),
+        npc_ball_ids: vec![],
+        cache_item_id: 0,
+        cleared: false,
+        gate_unlocked_at_sec: None,
+    };
+    crate::services::pve_special_sites::with_abyssal_state(&ctx, |st| {
+        st.pockets.insert(
+            2,
+            AbyssalPocketSession {
+                pocket_id: 2,
+                character_id: char_id,
+                ship_id,
+                origin_solar_system_id: 30_000_142,
+                abyssal_solar_system_id: abyss_sys,
+                origin_position: [0.0; 3],
+                grid_offset: [10_000.0, 0.0, 0.0],
+                filament_type_id: 47_762,
+                tier: 1,
+                weather: AbyssalWeatherKind::Electrical,
+                weather_penalty_pct: 30.0,
+                weather_bonus_pct: 50.0,
+                npc_difficulty_mult: 1.0,
+                current_room: 2,
+                rooms: [dummy_room.clone(), dummy_room.clone(), dummy_room],
+                started_at_sec: 1_775_400_000,
+                collapse_at_sec: 1_775_401_200,
+                completed: false,
+                collapsed_destroyed: false,
+                trace_ball_id: 0,
+                fleet_ship_ids: vec![ship_id],
+                ship_room: HashMap::new(),
+                max_ships: 1,
+            },
+        );
+    });
+
+    let handle = ctx.systems.get_or_spawn(abyss_sys);
+    let center = DVec3::new(10_000.0, 0.0, 50_000.0);
+    let set_pos = |pos: DVec3| {
+        handle.ballpark.write().unwrap().balls.insert(
+            ship_id,
+            Ball {
+                id: ship_id,
+                type_id: 587,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+        );
+    };
+
+    // 1. Exact boundary radius (distance == r): not outside (> r is false)
+    set_pos(center + DVec3::new(r, 0.0, 0.0));
+    sync_deathzone_state_notifications(&ctx, abyss_sys);
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.abyssal_state.deathzone_active_ships.contains(&ship_id));
+    });
+
+    // 2. Step outside boundary (distance == r + 1.0): enters danger, emits keyval, inserts active ship
+    set_pos(center + DVec3::new(r + 1.0, 0.0, 0.0));
+    sync_deathzone_state_notifications(&ctx, abyss_sys);
+    let enter_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(enter_notifs.len(), 1);
+    assert_eq!(enter_notifs[0].event, "OnDeathzoneStateUpdate");
+    assert_eq!(enter_notifs[0].args[1], PyRep::Integer(ship_id));
+    assert_eq!(enter_notifs[0].args[2].dict_get("dangerLevel"), Some(&PyRep::Real(1.0)));
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.abyssal_state.deathzone_active_ships.contains(&ship_id));
+    });
+
+    // 3. Re-sync while still outside: no duplicate notification and ship remains tracked
+    sync_deathzone_state_notifications(&ctx, abyss_sys);
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.abyssal_state.deathzone_active_ships.contains(&ship_id));
+    });
+
+    // 4. Return inside boundary: emits None payload and removes ship from active deathzone set
+    set_pos(center);
+    sync_deathzone_state_notifications(&ctx, abyss_sys);
+    let exit_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(exit_notifs.len(), 1);
+    assert_eq!(exit_notifs[0].event, "OnDeathzoneStateUpdate");
+    assert_eq!(exit_notifs[0].args[2], PyRep::None);
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.abyssal_state.deathzone_active_ships.contains(&ship_id));
+    });
+
+    // 5. Re-sync while still inside: no spurious exit/entry notification
+    sync_deathzone_state_notifications(&ctx, abyss_sys);
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+
+    // 6. Verify emit_incursion_completion_combat_notifications emits OnTaleRemove when incursion_ended == true
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().solar_system_id = 30_000_142;
+    });
+    crate::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
+        reg.incursions.insert(
+            const_id,
+            IncursionTaleRecord {
+                tale_id: 911,
+                constellation_id: const_id,
+                constellation_name: "Kimotoro".into(),
+                staging_solar_system_id: 30_000_142,
+                vanguard_solar_system_ids: vec![30_000_142],
+                assault_solar_system_ids: vec![],
+                hq_solar_system_id: 30_000_142,
+                influence: 0.0,
+                state: "Withdrawn".into(),
+                mothership_spawned: true,
+                mothership_defeated: true,
+                sites: vec![IncursionSiteEntry {
+                    site_id: "INC-911".into(),
+                    dungeon_id: 2,
+                    dungeon_name: "HQ".into(),
+                    solar_system_id: 30_000_142,
+                    tier: "Headquarters".into(),
+                    min_pilots: 10,
+                    max_optimal_pilots: 20,
+                    base_isk: 30_000_000,
+                    base_concord_lp: 3_000,
+                    influence_delta: 0.1,
+                    locked_until_low_influence: false,
+                    completed_count: 1,
+                    boss_npc_ball_id: 999_002,
+                    boss_type_id: 2933,
+                    position: [0.0, 0.0, 0.0],
+                    escort_spawns: vec![],
+                    boss_destroyed: true,
+                    killer_char_id: Some(char_id),
+                    killer_fleet_id: None,
+                }],
+                lockout_until_filetime: None,
+                tale_stop_published: true,
+            },
+        );
+    });
+    let pend: RwLock<HashMap<i64, Vec<PendingMachoNotification>>> = RwLock::new(HashMap::new());
+    let (tx, _rx) = broadcast::channel(64);
+    emit_incursion_completion_combat_notifications(
+        &ctx.db,
+        &ctx.sde,
+        Some(&pend),
+        Some(&tx),
+        &IncursionCompletionResult {
+            site_id: "INC-911".into(),
+            tier: "Headquarters".into(),
+            fleet_size: 1,
+            fleet_scale_factor: 1.0,
+            isk_per_pilot: 1,
+            concord_lp_per_pilot: 1,
+            influence: 0.0,
+            state: "Withdrawn".into(),
+            mothership_spawned: true,
+            incursion_ended: true,
+        },
+    );
+    let inc_notifs = &pend.read().unwrap()[&char_id];
+    assert!(inc_notifs.iter().any(|n| n.event == "OnInfluenceUpdate"));
+    assert!(inc_notifs.iter().any(|n| n.event == "OnTaleRemove"));
+}

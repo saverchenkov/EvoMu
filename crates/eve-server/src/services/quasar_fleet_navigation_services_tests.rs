@@ -554,3 +554,7 @@ fn apply_bounty_multiplier_factor_handler() {
     let _ = DynamicQuasarMessage::new("test.Msg");
     let _ = DynamicValue::Bool(true);
 }
+
+#[cfg(test)]
+#[path = "quasar_fleet_navigation_services_extra_unit_tests.rs"]
+mod quasar_fleet_navigation_services_extra_unit_tests;

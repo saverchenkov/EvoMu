@@ -136,3 +136,7 @@ fn achievement_notices_and_gateway_handlers() {
     )
     .unwrap();
 }
+
+#[cfg(test)]
+#[path = "quasar_achievements_ops_extra_unit_tests.rs"]
+mod quasar_achievements_ops_extra_unit_tests;

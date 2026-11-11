@@ -483,3 +483,30 @@ async fn scan_results_wormhole_gas_sleeper_spawn_signal_tiers_and_cone_scan_filt
     assert!(hit_ids.contains(&941_601));
     assert!(!hit_ids.contains(&941_602));
 }
+
+#[tokio::test]
+async fn hub_and_scan_unknown_none_and_save_upgrade_configuration_kill_mutants() {
+    let ctx = test_ctx();
+    let kw = HashMap::new();
+    let mut sess = auth_session(1, 90_000_001, 98_000_001, 30_000_142);
+
+    // 1. Unrelated service returns None (kills `handle_hub_and_scan -> Some(Ok(Default::default()))`)
+    assert!(
+        handle_hub_and_scan(&ctx, &mut sess, "marketProxy", "GetMarketGroups", &[], &kw)
+            .await
+            .is_none()
+    );
+
+    // 2. High-sec SaveUpgradeConfiguration -> Err("NotNullSecSystem")
+    let hi_err = call_hub_scan(&ctx, &mut sess, "sovHubSvc", "SaveUpgradeConfiguration", &[], &kw)
+        .await
+        .unwrap_err();
+    assert_eq!(hi_err.code, "NotNullSecSystem");
+
+    // 3. No solar system -> Err("NoSolarSystem")
+    sess.solar_system_id = None;
+    let no_sys_err = call_hub_scan(&ctx, &mut sess, "sovHubSvc", "SaveUpgradeConfiguration", &[], &kw)
+        .await
+        .unwrap_err();
+    assert_eq!(no_sys_err.code, "NoSolarSystem");
+}

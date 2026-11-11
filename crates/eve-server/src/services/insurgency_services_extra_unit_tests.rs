@@ -173,10 +173,9 @@ fn corruption_and_suppression_modifiers_caps_and_ice_heist_spawning() {
 
     // In other_sys, put ice_heist_respawn_until on cooldown -> stage 3 corruption does NOT spawn direct 800_001+ Ice Heist
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(
-            format!("ice_heist_respawn_until:{other_sys}"),
-            (ctx.now_unix_secs() + 3600).to_string(),
-        );
+        snap.insurgency_complex_ops
+            .ice_heist_respawn_until
+            .insert(other_sys, ctx.now_unix_secs() + 3600);
     });
     let (_, other_stg) = add_system_corruption(&ctx, camp_id, other_sys, 450);
     assert_eq!(other_stg, 3);
@@ -200,7 +199,7 @@ fn corruption_and_suppression_modifiers_caps_and_ice_heist_spawning() {
     assert_eq!(stage5_ih, 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stronghold_destruction_outcomes_and_notifications() {
     let ctx = test_ctx();
     let camp_id = 77_200_i64;
@@ -292,7 +291,7 @@ async fn stronghold_destruction_outcomes_and_notifications() {
     end_insurgency_campaign(&ctx, camp_emp);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn complex_capture_tick_pirate_vs_antipirate_and_contested_grid() {
     let ctx = test_ctx();
     let camp_id = 77_300_i64;
@@ -408,7 +407,7 @@ async fn complex_capture_tick_pirate_vs_antipirate_and_contested_grid() {
     step_system_insurgency_tick_delta(&ctx, sys_id, Some(10)).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rpc_error_branches_and_instance_filters() {
     let ctx = test_ctx();
     let mut sess = auth_session(1, 90_000_001, 98_000_001, 30_000_142);

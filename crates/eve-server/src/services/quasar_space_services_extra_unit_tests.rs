@@ -185,8 +185,15 @@ fn schema_field_builder_all_field_types_oneof_depth_and_extractors() {
         ]),
     );
     root.set(4, DynamicValue::Repeated(vec![DynamicValue::Uint32(1)]));
+    root.set(5, DynamicValue::Bytes(b"Jita".to_vec()));
+    root.set(
+        6,
+        DynamicValue::Repeated(vec![DynamicValue::Bytes(b"Perimeter".to_vec())]),
+    );
     assert_eq!(get_string_field(&root, 3).as_deref(), Some("found"));
     assert_eq!(get_string_field(&root, 4), None);
+    assert_eq!(get_string_field(&root, 5).as_deref(), Some("Jita"));
+    assert_eq!(get_string_field(&root, 6).as_deref(), Some("Perimeter"));
 }
 
 #[test]

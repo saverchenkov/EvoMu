@@ -855,6 +855,57 @@ pub fn record_server_operation_event_in_db(
         return (None, OperationRewardOutcome::default());
     }
     let op_defs = get_operation_defs(sde);
+    if !op_defs
+        .task_event_names
+        .values()
+        .any(|ev| ev.eq_ignore_ascii_case(event_name))
+    {
+        return (None, OperationRewardOutcome::default());
+    }
+    let should_advance = db.with_snapshot(|snap| {
+        let Some(ch) = snap.characters.get(&char_id) else {
+            return false;
+        };
+        let curr_sys = ch.solar_system_id;
+        let store = load_store_pub(snap);
+        let Some(rec) = store.by_character.get(&char_id) else {
+            return false;
+        };
+        let active_op = rec
+            .active_operation_id
+            .filter(|oid| op_defs.sde_operations.contains(oid))
+            .filter(|_| rec.active_operation_system_id.is_none_or(|s| s == curr_sys));
+        let current_tid = active_op
+            .and_then(|oid| op_defs.op_tasks.get(&oid))
+            .and_then(|ts| {
+                ts.iter()
+                    .copied()
+                    .find(|t| !rec.completed_tasks.contains(t) && !rec.skipped_tasks.contains(t))
+            });
+        let Some(tid) = current_tid else {
+            return false;
+        };
+        if rec.blocked_tasks.contains(&tid)
+            || !op_defs
+                .task_event_names
+                .get(&tid)
+                .is_some_and(|ev| ev.eq_ignore_ascii_case(event_name))
+        {
+            return false;
+        }
+        op_defs.task_event_conditions.get(&tid).is_none_or(|conds| {
+            conds.iter().all(|(ck, allowed)| {
+                allowed.is_empty()
+                    || params
+                        .iter()
+                        .find(|(pk, _)| pk.eq_ignore_ascii_case(ck))
+                        .is_some_and(|(_, pv)| allowed.iter().any(|a| a.eq_ignore_ascii_case(pv)))
+            })
+        })
+    });
+    if !should_advance {
+        return (None, OperationRewardOutcome::default());
+    }
     db.with_mut_snapshot(|snap| {
         let Some(ch) = snap.characters.get(&char_id) else {
             return (None, OperationRewardOutcome::default());
@@ -863,6 +914,7 @@ pub fn record_server_operation_event_in_db(
         let curr_sys = ch.solar_system_id;
         let docked_loc = ch.station_id.or(ch.structure_id);
         let mut store = load_store_pub(snap);
+        let mut did_advance = false;
         let res = {
             let rec = store.by_character.entry(char_id).or_default();
             let active_op = rec
@@ -901,12 +953,15 @@ pub fn record_server_operation_event_in_db(
                         );
                         transitioned = tr;
                         out = rw;
+                        did_advance = true;
                     }
                 }
             }
             (transitioned, out)
         };
-        save_store_pub(snap, &store, now);
+        if did_advance {
+            save_store_pub(snap, &store, now);
+        }
         res
     })
 }

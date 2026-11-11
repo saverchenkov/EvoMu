@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use super::quasar_cosmetics_live::*;
+use super::super::*;
 use crate::quasar_gateway::{
     PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_OK,
 };
@@ -160,7 +160,7 @@ fn macho_notify_sink_alliance_logos_and_ship_skin_state_branches() {
     db.with_mut_snapshot(|s| s.characters.get_mut(&cid).unwrap().alliance_id = Some(99_000_001));
     assert_code(router, &player, disp_ep, alliance_disp.clone(), now, STATUS_FORBIDDEN);
 
-    super::quasar_auth_user::with_identity_store(&db, |id| {
+    crate::services::quasar_auth_user::with_identity_store(&db, |id| {
         id.char_alliance_logo_ships.entry(cid as u64).or_default().push(ship_tid as u64);
     });
     assert_code(router, &player, disp_ep, alliance_disp.clone(), now, STATUS_OK);
@@ -191,10 +191,10 @@ fn macho_notify_sink_alliance_logos_and_ship_skin_state_branches() {
 
     db.with_mut_snapshot(|s| {
         s.applied_ship_skins.remove(&(ship_id as i64));
-        let mut skinr_data = super::quasar_cosmetics_skinr::SkinrCosmeticsData::default();
+        let mut skinr_data = crate::services::quasar_cosmetics_skinr::SkinrCosmeticsData::default();
         skinr_data.skin_licenses.insert(
-            super::quasar_cosmetics_skinr::SkinrCosmeticsState::skin_lic_key(cid as u32, "custom_hex_123"),
-            super::quasar_cosmetics_skinr::ThirdPartySkinLicense {
+            crate::services::quasar_cosmetics_skinr::SkinrCosmeticsState::skin_lic_key(cid as u32, "custom_hex_123"),
+            crate::services::quasar_cosmetics_skinr::ThirdPartySkinLicense {
                 character_id: cid as u32,
                 skin_hex: "custom_hex_123".into(),
                 activated: true,
@@ -205,7 +205,7 @@ fn macho_notify_sink_alliance_logos_and_ship_skin_state_branches() {
         );
         skinr_data.applied_thirdparty_skins.insert(ship_id, "custom_hex_123".into());
         s.quasar_state_blobs.insert(
-            super::quasar_cosmetics_skinr::SKINR_BLOB_KEY.into(),
+            crate::services::quasar_cosmetics_skinr::SKINR_BLOB_KEY.into(),
             serde_json::to_string(&skinr_data).unwrap(),
         );
     });
@@ -240,6 +240,7 @@ fn palette_roles_and_structure_paintwork_error_and_admin_paths() {
         s.characters.get_mut(&cid).unwrap().corporation_id = corp_id;
         if let Some(c) = s.corporations.get_mut(&corp_id) {
             c.ceo_id = 90_000_099;
+            c.member_roles.insert(cid, 0);
         }
         for (sid, tid, owner) in [
             (struct_id, 35832, corp_id),
@@ -318,6 +319,9 @@ fn palette_roles_and_structure_paintwork_error_and_admin_paths() {
     encode_bytes_field(4, &encode_rgb(7, 8, 9), &mut full_pal_attrs);
     let mut full_pal_req = Vec::new();
     encode_bytes_field(1, &full_pal_attrs, &mut full_pal_req);
+    db.with_mut_snapshot(|s| {
+        s.corporations.get_mut(&corp_id).unwrap().member_roles.insert(cid, CORP_ROLE_BRAND_MANAGER);
+    });
     assert_code(&router, &brand_mgr, pal_set_ep, full_pal_req, now, STATUS_OK);
 
     // Paintwork IssueRequest validation & character LP fallback:
@@ -336,9 +340,13 @@ fn palette_roles_and_structure_paintwork_error_and_admin_paths() {
     encode_bytes_field(3, &st_seq, &mut issue_req);
 
     let issue_ep = "eve_public.cosmetic.structure.paintwork.license.api.IssueRequest";
+    db.with_mut_snapshot(|s| {
+        s.corporations.get_mut(&corp_id).unwrap().member_roles.insert(cid, 0);
+    });
     assert_code(&router, &member, issue_ep, issue_req.clone(), now, STATUS_FORBIDDEN);
 
     db.with_mut_snapshot(|s| {
+        s.corporations.get_mut(&corp_id).unwrap().member_roles.insert(cid, corp_roles::ROLE_STATION_MANAGER);
         s.corp_lp_balances.clear();
         s.characters.get_mut(&cid).unwrap().loyalty_points.clear();
     });

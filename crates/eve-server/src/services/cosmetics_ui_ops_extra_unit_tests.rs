@@ -459,7 +459,15 @@ async fn links_guests_achievements_offer_ring_buffer_and_crate_delegation() {
     let mut sess = auth_session(1, cid, 98_000_001, 30_000_142);
 
     sess.station_id = None;
-    assert_eq!(call_err(&ctx, &mut sess, "station", "GetGuests", &[]).await, "NotDockedInStation");
+    assert!(handle(&ctx, &mut sess, "station", "GetGuests", &[], &HashMap::new()).await.is_none());
+    assert_eq!(
+        crate::services::station_structure::handle(&ctx, &mut sess, "station", "GetGuests", &[], &HashMap::new())
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "NotDockedInStation"
+    );
     assert_eq!(
         call_err(&ctx, &mut sess, "overviewPresetMgr", "StoreLinkAndGetID", &[]).await,
         "EmptyLinkPayload"
@@ -578,4 +586,127 @@ async fn links_guests_achievements_offer_ring_buffer_and_crate_delegation() {
         assert_eq!(log.len(), 256);
         assert_eq!((log.first().unwrap().1, log.last().unwrap().1), (7, 505));
     });
+}
+
+#[tokio::test]
+async fn cosmetics_ui_active_ship_cargo_activation_and_admin_dispatch_mutants() {
+    let ctx = test_ctx();
+    let cid = 90_000_001_i64;
+    let mut sess = auth_session(1, cid, 98_000_001, 30_000_142);
+
+    // Unknown service returns None (kills `handle -> Some(Ok(Default::default()))`)
+    assert!(dispatch_ui(&ctx, &mut sess, "nonexistent_svc", "Ping", &[])
+        .await
+        .is_none());
+
+    let (lic_tid, skin_id, ship_tid) = ctx
+        .sde
+        .skin_licenses
+        .iter()
+        .find_map(|(&ltid, lic)| {
+            let st = ctx.sde.types.get(&ltid).filter(|t| t.category_id == 91)?;
+            let sk = ctx.sde.skins.get(&lic.skin_id).filter(|s| !s.types.is_empty())?;
+            Some((st.type_id, sk.skin_id, sk.types[0]))
+        })
+        .expect("SDE should have a valid skin license");
+
+    let ship_id = ctx.db.with_snapshot(|snap| snap.characters[&cid].active_ship_id);
+    let cargo_lic_id = 945_099_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&cid).unwrap();
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.owner_id = cid;
+            sh.type_id = ship_tid;
+            sh.location_id = 30_000_142;
+            sh.flag = InventoryFlag::None;
+        }
+        snap.items.insert(
+            cargo_lic_id,
+            InventoryItemRecord {
+                item_id: cargo_lic_id,
+                type_id: lic_tid,
+                owner_id: cid,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.ship_id = Some(ship_id);
+
+    // Activating license from active ship Cargo when undocked requires `active_ship_id` in ConsumeExactOptions
+    let act_res = call_ok(
+        &ctx,
+        &mut sess,
+        "shipCosmeticsMgr",
+        "ActivateSkinLicense",
+        &[PyRep::Integer(lic_tid as i64), PyRep::Integer(ship_tid as i64)],
+    )
+    .await;
+    assert_eq!(act_res.dict_get("skinID"), Some(&PyRep::Integer(skin_id as i64)));
+    assert!(ctx.db.with_snapshot(|snap| !snap.items.contains_key(&cargo_lic_id)));
+
+    // Verify RemoveSkin, GMExpireSkinLicense, and GetStoredSharedSetting arms explicitly
+    sess.role = service_roles::ROLE_GML;
+    assert_eq!(
+        call_ok(
+            &ctx,
+            &mut sess,
+            "shipCosmeticsMgr",
+            "RemoveSkin",
+            &[PyRep::Integer(skin_id as i64), PyRep::Integer(cid)],
+        )
+        .await,
+        PyRep::Bool(true)
+    );
+    assert!(ctx.db.with_snapshot(|snap| !snap
+        .licensed_skins
+        .get(&cid)
+        .is_some_and(|v| v.contains(&skin_id))));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.licensed_skins.entry(cid).or_default().push(skin_id);
+    });
+    assert_eq!(
+        call_ok(
+            &ctx,
+            &mut sess,
+            "shipCosmeticsMgr",
+            "GMExpireSkinLicense",
+            &[PyRep::Integer(skin_id as i64), PyRep::Integer(cid)],
+        )
+        .await,
+        PyRep::Bool(true)
+    );
+    assert!(ctx.db.with_snapshot(|snap| !snap
+        .licensed_skins
+        .get(&cid)
+        .is_some_and(|v| v.contains(&skin_id))));
+
+    call_ok(
+        &ctx,
+        &mut sess,
+        "sharedSettingsMgr",
+        "StoreSettingLinkAndGetID",
+        &[PyRep::String("ui.key".into()), PyRep::String("ui.val".into())],
+    )
+    .await;
+    assert_eq!(
+        call_ok(
+            &ctx,
+            &mut sess,
+            "sharedSettingsMgr",
+            "GetStoredSharedSetting",
+            &[PyRep::String("ui.key".into())],
+        )
+        .await,
+        PyRep::String("ui.val".into())
+    );
 }

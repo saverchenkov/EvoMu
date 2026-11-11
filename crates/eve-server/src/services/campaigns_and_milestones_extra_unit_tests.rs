@@ -133,7 +133,7 @@ fn pure_date_turnover_and_track_length_helpers_kill_boundary_mutants() {
     assert_eq!(camp.track_length(), 5);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn login_and_seasonal_campaign_omega_retro_claim_undocked_redeem_and_error_branches() {
     let ctx = test_ctx();
     let uid = 1_u64;
@@ -142,12 +142,9 @@ async fn login_and_seasonal_campaign_omega_retro_claim_undocked_redeem_and_error
 
     // 1. Custom per-character enrollment to unknown campaign -> CampaignNotFound
     ctx.db.with_mut_snapshot(|snap| {
-        let mut map = HashMap::new();
-        map.insert(cid, 999_999_999_i64);
-        snap.service_state_blobs.insert(
-            "login_campaign_enrollments".into(),
-            serde_json::to_string(&map).unwrap(),
-        );
+        snap.seasons_and_campaigns
+            .login_campaign_enrollments
+            .insert(cid, 999_999_999_i64);
     });
     assert_eq!(
         call_login_campaign(&ctx, &mut sess, "get_client_campaign_state", &[])
@@ -166,7 +163,7 @@ async fn login_and_seasonal_campaign_omega_retro_claim_undocked_redeem_and_error
 
     // 2. Undocked Omega login campaign claim -> delivers both Alpha + Omega rewards into redeem queue
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.remove("login_campaign_enrollments");
+        snap.seasons_and_campaigns.login_campaign_enrollments.clear();
         let ch = snap.characters.get_mut(&cid).unwrap();
         ch.station_id = None;
         ch.structure_id = None;
@@ -256,7 +253,7 @@ async fn login_and_seasonal_campaign_omega_retro_claim_undocked_redeem_and_error
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn info_gathering_fifo_cap_milestones_and_community_tracks_edge_branches() {
     let ctx = test_ctx();
     let uid = 1_u64;
@@ -492,4 +489,131 @@ async fn info_gathering_fifo_cap_milestones_and_community_tracks_edge_branches()
             .unwrap(),
         PyRep::Bool(true)
     );
+}
+
+#[tokio::test]
+async fn deliver_login_reward_docked_claim_notification_toggle_and_milestone_side_effects_kill_mutants() {
+    let ctx = test_ctx();
+    let cid1 = 90_000_001_i64;
+    let uid1 = ctx.db.with_snapshot(|s| s.characters[&cid1].user_id);
+    let station_id = 60_003_760_i64;
+    let now = ctx.now_unix();
+
+    // 1. Direct deliver_login_reward (docked + expiry + auto_injected + BPC, and undocked redeem token):
+    //    kills `deliver_login_reward -> Default::default()`.
+    let bpc_rw = SdeLoginRewardEntry {
+        type_id: 587,
+        quantity: 2,
+        tier: 1,
+        blueprint_runs: Some(5),
+        blueprint_material_level: Some(10),
+        blueprint_productivity_level: Some(20),
+        redeemed_expiry_days: Some(7),
+        is_auto_injected_booster_or_skin: true,
+        overlay_texture_path: None,
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        let docked = deliver_login_reward(snap, uid1, cid1, Some(station_id), 42, now, &bpc_rw);
+        assert!(docked.primary_id > 0);
+        let spawned = docked.spawned_item.expect("docked delivery must spawn item");
+        assert_eq!(spawned.item_id, docked.primary_id);
+        assert_eq!(spawned.type_id, 587);
+        assert_eq!(spawned.location_id, station_id);
+        assert_eq!(spawned.blueprint_runs_remaining, Some(5));
+        assert!(docked.expire_date_time.is_some());
+        assert!(snap.items.contains_key(&docked.primary_id));
+        assert_eq!(
+            snap.seasons_and_campaigns.login_reward_expiry.get(&docked.primary_id).copied(),
+            docked.expire_date_time
+        );
+        assert!(snap.seasons_and_campaigns.auto_injected_rewards[&cid1].contains(&587));
+
+        let undocked = deliver_login_reward(snap, uid1, cid1, None, 42, now, &bpc_rw);
+        assert!(undocked.primary_id > 0);
+        assert!(undocked.spawned_item.is_none());
+        assert!(undocked.expire_date_time.is_some());
+    });
+
+    // 2. Docked loginCampaignManager.claim_reward with live_notify_listener = false vs true:
+    //    kills `handle_login_campaign_claim_reward -> Ok(Default::default())` AND `delete !` on `!session.live_notify_listener`.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.seasons_and_campaigns = Default::default();
+        if let Some(ch) = snap.characters.get_mut(&cid1) {
+            ch.station_id = Some(station_id);
+            ch.structure_id = None;
+            ch.clone_grade = 2;
+        }
+    });
+    let mut sess_false = auth_session(uid1, cid1, 98_000_001, 30_000_142);
+    sess_false.station_id = Some(station_id);
+    sess_false.live_notify_listener = false;
+    let _ = sess_false.drain_notifications();
+    let _ = ctx.drain_notifications_for_char(cid1);
+
+    let claim1 = call_login_campaign(&ctx, &mut sess_false, "claim_reward", &[])
+        .await
+        .expect("docked claim_reward false listener");
+    assert!(matches!(claim1, PyRep::Tuple(ref parts) if parts.len() == 4));
+    let sess_false_notifs = sess_false.drain_notifications();
+    assert!(
+        sess_false_notifs.iter().any(|(ev, _)| ev == "OnItemChange"),
+        "when !session.live_notify_listener, session must push OnItemChange"
+    );
+
+    let cid2 = 90_990_002_i64;
+    ctx.db.provision_gm_account("login_rw_p2", "pw", cid2, "LoginRwP2");
+    let uid2 = ctx.db.with_snapshot(|s| s.accounts["login_rw_p2"].user_id);
+    ctx.db.acquire_online_lock(uid2, 2, Some(cid2), true, now).unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid2) {
+            ch.station_id = Some(station_id);
+            ch.structure_id = None;
+            ch.clone_grade = 1;
+        }
+    });
+    let mut sess_true = auth_session(uid2, cid2, 98_000_001, 30_000_142);
+    sess_true.station_id = Some(station_id);
+    sess_true.live_notify_listener = true;
+    let _ = sess_true.drain_notifications();
+    let _ = ctx.drain_notifications_for_char(cid2);
+
+    let claim2 = call_login_campaign(&ctx, &mut sess_true, "claim_reward", &[])
+        .await
+        .expect("docked claim_reward true listener");
+    assert!(matches!(claim2, PyRep::Tuple(ref parts) if parts.len() == 4));
+    let sess_true_notifs = sess_true.drain_notifications();
+    assert!(
+        sess_true_notifs.iter().all(|(ev, _)| ev != "OnItemChange"),
+        "when session.live_notify_listener == true, session must not duplicate OnItemChange"
+    );
+    assert!(ctx
+        .drain_notifications_for_char(cid2)
+        .iter()
+        .any(|n| n.event == "OnItemChange"));
+
+    // 3. milestoneMgr.ClaimRewards persistence & replay error (kills `handle_milestone_claim_rewards -> Ok(Default::default())`).
+    let _ = call_milestone_mgr(&ctx, &mut sess_false, "ProcessCharacterLogon", &[])
+        .await
+        .unwrap();
+    ctx.advance_virtual_clock(7_200);
+    let bal_before = ctx.db.with_snapshot(|s| s.characters[&cid1].balance.raw_cents());
+    assert_eq!(
+        call_milestone_mgr(&ctx, &mut sess_false, "ClaimRewards", &[PyRep::Integer(1)])
+            .await
+            .unwrap(),
+        PyRep::None
+    );
+    let bal_after = ctx.db.with_snapshot(|s| s.characters[&cid1].balance.raw_cents());
+    assert_eq!(bal_after - bal_before, 50_000_000);
+    assert_eq!(
+        call_milestone_mgr(&ctx, &mut sess_false, "ClaimRewards", &[PyRep::Integer(1)])
+            .await
+            .unwrap_err()
+            .code,
+        "MilestoneAlreadyClaimed"
+    );
+    ctx.db.with_snapshot(|snap| {
+        let ext = load_cosmetics_ui_state(snap);
+        assert!(ext.claimed_milestones.get(&cid1).is_some_and(|v| v.contains(&1)));
+    });
 }

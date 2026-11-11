@@ -1344,4 +1344,7 @@ pub async fn sync_system_deployables(ctx: &ServerContext, solar_system_id: u32) 
 }
 
 #[cfg(test)] #[path = "mobile_deployables_ext_tests.rs"] mod mobile_deployables_ext_tests;
+#[cfg(test)]
+#[path = "mobile_deployables_ext_edges_tests.rs"]
+mod mobile_deployables_ext_edges_tests;
 

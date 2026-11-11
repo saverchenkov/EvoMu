@@ -555,3 +555,389 @@ fn issue_779_non_gm_corp_goal_create_emits_v24_attributes_and_active_list() {
     assert!(get_attrs.get(19).is_some(), "GetResponse.goal must include assigner (19)");
     assert!(get_attrs.get(20).is_some(), "GetResponse.goal must include assignee (20)");
 }
+
+#[test]
+fn goal_tale_wire_contents_and_opportunity_security_edges() {
+    // 1. Decode goal_created / goal_closed / goal_progressed / goal_contributed / tale_lifecycle wire fields
+    let uuid = [0x55u8; 16];
+    let created_active = goal_created(
+        &uuid,
+        &GoalAttributesView {
+            created_unix: 1_760_000_100,
+            creator_id: 90_000_001,
+            corp_id: Some(98_000_001),
+            name: "G1",
+            description: "D1",
+            desired: 10,
+            current: 3,
+            ..Default::default()
+        },
+    );
+    let wm_act = WireMessage::decode(&created_active.value).unwrap();
+    let attr_act = WireMessage::decode(wm_act.fields[1].value.as_bytes().unwrap()).unwrap();
+    assert_eq!(
+        attr_act.fields.iter().find(|f| f.field_number == 6).and_then(|f| f.value.as_varint()),
+        Some(GOAL_STATE_ACTIVE)
+    );
+    assert!(attr_act.fields.iter().any(|f| f.field_number == 9)); // organization present
+
+    let created_done = goal_created(
+        &uuid,
+        &GoalAttributesView {
+            created_unix: 1_760_000_100,
+            creator_id: 90_000_001,
+            corp_id: None,
+            name: "G2",
+            description: "D2",
+            desired: 10,
+            current: 10,
+            ..Default::default()
+        },
+    );
+    let attr_done = WireMessage::decode(
+        WireMessage::decode(&created_done.value).unwrap().fields[1]
+            .value
+            .as_bytes()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        attr_done.fields.iter().find(|f| f.field_number == 6).and_then(|f| f.value.as_varint()),
+        Some(GOAL_STATE_COMPLETED)
+    );
+    assert!(attr_done.fields.iter().all(|f| f.field_number != 9));
+
+    let contrib_wm = WireMessage::decode(&goal_contributed(&uuid, 90_000_002, 10, 25, 1_760_000_200).value).unwrap();
+    assert_eq!(
+        contrib_wm.fields.iter().find(|f| f.field_number == 4).and_then(|f| f.value.as_varint()),
+        Some(10)
+    );
+    assert_eq!(
+        contrib_wm.fields.iter().find(|f| f.field_number == 5).and_then(|f| f.value.as_varint()),
+        Some(25)
+    );
+
+    // 2. handle_opportunity_event negative/spoofing/dedup/cap/completed-client-event checks
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let sde = shared_sde();
+    let mgrs = new_progression_managers(Arc::clone(&db), Arc::clone(&sde));
+    let desc = QuasarDescriptorRegistry::open_default_or_empty();
+    let now = 1_760_000_000u64;
+    let cid = 90_000_001u32;
+
+    let mut sess = SessionState::new(1);
+    sess.user_id = Some(1);
+    sess.character_id = Some(cid as i64);
+    sess.role = service_roles::ROLE_PLAYER_DEFAULT;
+
+    // Seed non-object blob to verify recovery
+    db.with_mut_snapshot(|s| {
+        s.quasar_state_blobs.insert("quasar_opportunities".into(), "[]".into());
+    });
+
+    // Unrelated event ignored
+    handle_opportunity_event(
+        &mgrs,
+        &desc,
+        &sess,
+        &GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.opportunity.api.UnknownEvent"),
+            value: Vec::new(),
+        },
+        now,
+    );
+    // Unauthenticated session ignored
+    let unauth_sess = SessionState::new(2);
+    handle_opportunity_event(
+        &mgrs,
+        &desc,
+        &unauth_sess,
+        &GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.opportunity.api.Tracked"),
+            value: Vec::new(),
+        },
+        now,
+    );
+
+    // Spoofed character ID inside Tracked payload is ignored
+    let mut spoof_ch = Vec::new();
+    encode_varint_field(1, 90_999_999, &mut spoof_ch);
+    let mut opp_story = Vec::new();
+    encode_string_field(1, "air_npe_storyline", &mut opp_story);
+    let mut opp_msg = Vec::new();
+    encode_bytes_field(5, &opp_story, &mut opp_msg);
+    let mut spoof_req = Vec::new();
+    encode_bytes_field(1, &spoof_ch, &mut spoof_req);
+    encode_bytes_field(2, &opp_msg, &mut spoof_req);
+    handle_opportunity_event(
+        &mgrs,
+        &desc,
+        &sess,
+        &GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.opportunity.api.Tracked"),
+            value: spoof_req,
+        },
+        now,
+    );
+    assert_eq!(
+        db.with_snapshot(|s| s.quasar_state_blobs.get("quasar_opportunities").cloned()),
+        Some("[]".into())
+    );
+
+    // Client-sent Completed event only records history and NEVER marks server completion
+    let mut own_ch = Vec::new();
+    encode_varint_field(1, cid as u64, &mut own_ch);
+    let mut own_req = Vec::new();
+    encode_bytes_field(1, &own_ch, &mut own_req);
+    encode_bytes_field(2, &opp_msg, &mut own_req);
+    handle_opportunity_event(
+        &mgrs,
+        &desc,
+        &sess,
+        &GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.opportunity.api.Completed"),
+            value: own_req.clone(),
+        },
+        now,
+    );
+    let blob_after_client_comp: serde_json::Value = db.with_snapshot(|s| {
+        serde_json::from_str(&s.quasar_state_blobs["quasar_opportunities"]).unwrap()
+    });
+    assert!(blob_after_client_comp[cid.to_string()]["completed"].as_array().unwrap().is_empty());
+    assert_eq!(blob_after_client_comp[cid.to_string()]["history"].as_array().unwrap().len(), 1);
+
+    // Tracked deduplication + Untracked removal
+    for ev in [
+        "eve_public.opportunity.api.Tracked",
+        "eve_public.opportunity.api.Tracked",
+        "eve_public.opportunity.api.Viewed",
+        "eve_public.opportunity.api.Viewed",
+    ] {
+        handle_opportunity_event(
+            &mgrs,
+            &desc,
+            &sess,
+            &GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{ev}"),
+                value: own_req.clone(),
+            },
+            now,
+        );
+    }
+    let blob_dedup: serde_json::Value = db.with_snapshot(|s| {
+        serde_json::from_str(&s.quasar_state_blobs["quasar_opportunities"]).unwrap()
+    });
+    assert_eq!(blob_dedup[cid.to_string()]["tracked"].as_array().unwrap().len(), 1);
+    assert_eq!(blob_dedup[cid.to_string()]["viewed"].as_array().unwrap().len(), 1);
+
+    handle_opportunity_event(
+        &mgrs,
+        &desc,
+        &sess,
+        &GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.opportunity.api.Untracked"),
+            value: own_req,
+        },
+        now,
+    );
+    let blob_untrack: serde_json::Value = db.with_snapshot(|s| {
+        serde_json::from_str(&s.quasar_state_blobs["quasar_opportunities"]).unwrap()
+    });
+    assert!(blob_untrack[cid.to_string()]["tracked"].as_array().unwrap().is_empty());
+
+    // 3. format_opportunity_id_value variants
+    let mut nested = eve_proto::quasar::DynamicQuasarMessage::new("Sub");
+    nested.fields.insert(1, DynamicValue::Uint32(9));
+    assert_eq!(format_opportunity_id_value(&DynamicValue::Bytes(vec![0xab, 0x0f])), "ab0f");
+    assert_eq!(format_opportunity_id_value(&DynamicValue::Bool(true)), "true");
+    assert_eq!(format_opportunity_id_value(&DynamicValue::Enum(4)), "4");
+    assert_eq!(format_opportunity_id_value(&DynamicValue::Int32(-3)), "-3");
+    assert_eq!(
+        format_opportunity_id_value(&DynamicValue::Repeated(vec![
+            DynamicValue::String("a".into()),
+            DynamicValue::Message(Box::new(nested)),
+        ])),
+        "a,1=9"
+    );
+
+    // 4. record_server_opportunity_event multi-condition, client achievement skip, and zero guards
+    let multi_defs = vec![
+        AchievementDef {
+            id: 6001,
+            name: "Client Only".into(),
+            description: String::new(),
+            notification_text: String::new(),
+            category_id: 1,
+            target: 1,
+            score: 5,
+            milestone_targets: vec![],
+            reward_isk: 0,
+            reward_sp: 0,
+            is_client_achievement: true,
+            conditions: vec![AchievementConditionDef {
+                condition_id: 1,
+                statistic_event_id: 1,
+                event_name: "ev_a".into(),
+                target_value: 1,
+            }],
+        },
+        AchievementDef {
+            id: 6002,
+            name: "Multi Cond".into(),
+            description: String::new(),
+            notification_text: String::new(),
+            category_id: 1,
+            target: 2,
+            score: 10,
+            milestone_targets: vec![],
+            reward_isk: 0,
+            reward_sp: 0,
+            is_client_achievement: false,
+            conditions: vec![
+                AchievementConditionDef {
+                    condition_id: 1,
+                    statistic_event_id: 1,
+                    event_name: "ev_a".into(),
+                    target_value: 2,
+                },
+                AchievementConditionDef {
+                    condition_id: 2,
+                    statistic_event_id: 2,
+                    event_name: "ev_b".into(),
+                    target_value: 1,
+                },
+            ],
+        },
+    ];
+    // delta == 0 and empty event_names are no-ops
+    record_server_opportunity_event(&db, &multi_defs, cid, &["ev_a"], 0, now);
+    record_server_opportunity_event(&db, &multi_defs, cid, &[], 5, now);
+    // Advance only ev_a to completion -> 6002 NOT completed yet
+    record_server_opportunity_event(&db, &multi_defs, cid, &["ev_a"], 10, now);
+    let mid_blob: serde_json::Value = db.with_snapshot(|s| {
+        serde_json::from_str(&s.quasar_state_blobs["quasar_opportunities"]).unwrap()
+    });
+    assert!(!mid_blob[cid.to_string()]["completed"].as_array().unwrap().contains(&serde_json::json!(6001)));
+    assert!(!mid_blob[cid.to_string()]["completed"].as_array().unwrap().contains(&serde_json::json!(6002)));
+    assert_eq!(mid_blob[cid.to_string()]["progress"]["6002:1"].as_u64(), Some(2));
+    // Advance ev_b -> 6002 completed at now+50
+    record_server_opportunity_event(&db, &multi_defs, cid, &["ev_b"], 1, now + 50);
+    // Subsequent call does not overwrite completed_at
+    record_server_opportunity_event(&db, &multi_defs, cid, &["ev_b"], 1, now + 999);
+    let done_blob: serde_json::Value = db.with_snapshot(|s| {
+        serde_json::from_str(&s.quasar_state_blobs["quasar_opportunities"]).unwrap()
+    });
+    assert!(done_blob[cid.to_string()]["completed"].as_array().unwrap().contains(&serde_json::json!(6002)));
+    assert_eq!(done_blob[cid.to_string()]["completed_at"]["6002"].as_u64(), Some(now + 50));
+}
+
+#[test]
+fn tale_matching_archetypes_and_inactive_tracks() {
+    let mut sde = eve_sde::SdeRegistry::with_canonical_seed();
+    sde.dungeons.insert(
+        9101,
+        eve_sde::DungeonTemplate {
+            dungeon_id: 9101,
+            name: "Incursion".into(),
+            archetype_id: Some(62),
+            faction_id: None,
+            difficulty: None,
+        },
+    );
+    sde.dungeons.insert(
+        9102,
+        eve_sde::DungeonTemplate {
+            dungeon_id: 9102,
+            name: "Triglavian".into(),
+            archetype_id: Some(65),
+            faction_id: None,
+            difficulty: None,
+        },
+    );
+    sde.dungeons.insert(
+        9103,
+        eve_sde::DungeonTemplate {
+            dungeon_id: 9103,
+            name: "CombatAnomaly".into(),
+            archetype_id: Some(28),
+            faction_id: None,
+            difficulty: None,
+        },
+    );
+    let event_tpls = HashSet::from([9103u32, 9104u32]);
+
+    assert!(tale_matches_completed_encounter(Some(&sde), &event_tpls, 9101, "Incursion", 0));
+    assert!(tale_matches_completed_encounter(Some(&sde), &event_tpls, 9102, "Triglavian", 0));
+    assert!(!tale_matches_completed_encounter(Some(&sde), &event_tpls, 9103, "CombatAnomaly", 0));
+    assert!(tale_matches_completed_encounter(Some(&sde), &event_tpls, 9103, "CombatAnomaly", 9103));
+    assert!(tale_matches_completed_encounter(Some(&sde), &event_tpls, 9104, "EventSite", 0));
+    assert!(!tale_matches_completed_encounter(Some(&sde), &event_tpls, 9104, "Relic", 0));
+    assert!(tale_matches_completed_encounter(Some(&sde), &event_tpls, 9104, "Relic", 9104));
+    assert!(!tale_matches_completed_encounter(Some(&sde), &event_tpls, 9104, "Mining", 9104));
+
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let sde_arc = Arc::new(sde);
+    let router = PublicGatewayRouter::new(
+        QuasarDescriptorRegistry::open_default_or_empty(),
+        Arc::clone(&db),
+        Arc::clone(&sde_arc),
+    );
+    let mut sess = SessionState::new(10);
+    sess.user_id = Some(1);
+    sess.character_id = Some(90_000_001);
+    let mut rx = router.subscribe_session(&sess, Vec::new(), 1_760_000_000);
+
+    let mgr = &router.progression.extra;
+    mgr.active_tales.write().unwrap().insert(1, (9104, 30_000_142, 0));
+    mgr.community_tracks.write().unwrap().insert(
+        81,
+        CommunityTrackState {
+            track_id: 81,
+            template_id: 81,
+            name: "Inactive".into(),
+            current_progress: 0,
+            target_progress: 50,
+            active: false,
+            tale_templates: vec![9104],
+        },
+    );
+    mgr.community_tracks.write().unwrap().insert(
+        82,
+        CommunityTrackState {
+            track_id: 82,
+            template_id: 82,
+            name: "Active".into(),
+            current_progress: 40,
+            target_progress: 50,
+            active: true,
+            tale_templates: vec![9104],
+        },
+    );
+
+    // Wrong system yields empty
+    assert!(complete_system_tale_encounter(mgr, 30_000_144, "Event", 9104, 25, 1_760_000_010, &router).is_empty());
+
+    // Queue a TLS notice so publish_community_track_progressed_notices flushes it too
+    crate::services::quasar_social_chat::ctx_queue_notice(
+        crate::quasar_gateway::NoticeScope::Broadcast,
+        GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.test.FlushedNotice"),
+            value: vec![1, 2, 3],
+        },
+        1_760_000_010,
+    );
+
+    let res = complete_system_tale_encounter(mgr, 30_000_142, "Event", 9104, 25, 1_760_000_010, &router);
+    assert_eq!(res.len(), 1);
+    assert_eq!(res[0].track_id, 82);
+    assert_eq!(res[0].current_progress, 50); // clamped to target_progress
+
+    let mut noticed_urls = Vec::new();
+    while let Ok(env) = rx.try_recv() {
+        if let Some(p) = env.payload {
+            noticed_urls.push(p.type_url);
+        }
+    }
+    assert!(noticed_urls.iter().any(|u| u.ends_with("eve_public.communitytrack.api.ProgressedNotice")));
+    assert!(noticed_urls.iter().any(|u| u.ends_with("eve_public.test.FlushedNotice")));
+}

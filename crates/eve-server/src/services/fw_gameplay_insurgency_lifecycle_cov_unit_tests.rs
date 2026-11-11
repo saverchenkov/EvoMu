@@ -560,3 +560,383 @@ async fn tick_insurgency_surrender_unlock_auto_frontline_phases_and_ambition_tri
         assert!(!snap.insurgency_runtime.campaigns.contains_key(&wd_cid));
     });
 }
+
+#[tokio::test]
+async fn ensure_fob_damaged_hp_sync_spread_khanid_wh_and_fallback_corps_coverage() {
+    let now = 3_000_000u64;
+    let ctx = build_insurgency_ctx(now);
+
+    // 1. Pre-existing damaged FOB structure syncs its HP into the spawned ballpark CombatState
+    let fob_cid = 301i64;
+    let fob_sys = 30_004_001u32;
+    let fob_id = 1_897_000_000i64 + fob_cid;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            fob_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: fob_id,
+                type_id: PIRATE_STRONGHOLD_GURISTAS_TYPE,
+                owner_corp_id: FACTION_GURISTAS,
+                solar_system_id: fob_sys,
+                name: "Damaged Guristas FOB".into(),
+                position: [0.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: false,
+                fuel_blocks: 0,
+                shield_hp: 12_345.0,
+                armor_hp: 6_789.0,
+                hull_hp: 2_345.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        snap.insurgency_runtime.campaigns.insert(
+            fob_cid,
+            PersistedInsurgencyCampaign {
+                campaign_id: fob_cid,
+                pirate_faction_id: FACTION_GURISTAS,
+                target_faction_id: 500_001,
+                fob_solar_system_id: fob_sys,
+                systems: vec![fob_sys],
+                created_at_unix: now,
+                forecasting_end_unix: now + 3_600,
+                active_end_unix: now + 7_200,
+                winddown_end_unix: now + 10_800,
+                corruption_points: HashMap::new(),
+                suppression_points: HashMap::new(),
+            },
+        );
+    });
+    let spawned_id = ensure_campaign_pirate_fob(&ctx, fob_cid).await;
+    assert_eq!(spawned_id, Some(fob_id));
+    let fob_cs = ctx
+        .systems
+        .get_or_spawn(fob_sys)
+        .ballpark
+        .read()
+        .unwrap()
+        .combat_states
+        .get(&fob_id)
+        .cloned()
+        .expect("fob ball combat state");
+    assert!((fob_cs.shield_hp - 12_345.0).abs() < 1e-6);
+    assert!((fob_cs.armor_hp - 6_789.0).abs() < 1e-6);
+    assert!((fob_cs.structure_hp - 2_345.0).abs() < 1e-6);
+
+    // 2. try_spread_insurgency_from_system: missing campaign, Khanid (500_008) region, WH 7..=9 vs 10, and has_hs_covered priority
+    assert_eq!(try_spread_insurgency_from_system(&ctx, 999_999, fob_sys), None);
+    let mut sde_mut = (*ctx.sde).clone();
+    let khanid_reg = 10_000_049u32;
+    sde_mut.regions.insert(
+        khanid_reg,
+        RegionInfo {
+            region_id: khanid_reg,
+            name: "KhanidTest".into(),
+            center: [0.0; 3],
+            faction_id: Some(500_008),
+            wormhole_class_id: None,
+        },
+    );
+    let sys_hs_cur = 30_004_100u32;
+    let sys_hs_cand = 30_004_101u32;
+    let sys_wh10 = 30_004_102u32;
+    let sys_khanid_wh8 = 30_004_103u32;
+    add_sys(&mut sde_mut, sys_hs_cur, khanid_reg, 0.6, None);
+    add_sys(&mut sde_mut, sys_hs_cand, khanid_reg, 0.7, None);
+    add_sys(&mut sde_mut, sys_wh10, khanid_reg, 0.4, Some(10));
+    add_sys(&mut sde_mut, sys_khanid_wh8, khanid_reg, 0.4, Some(8));
+    add_jump(&mut sde_mut, 900_101, sys_hs_cur, sys_wh10);
+    add_jump(&mut sde_mut, 900_102, sys_hs_cur, sys_hs_cand);
+    add_jump(&mut sde_mut, 900_103, sys_hs_cur, sys_khanid_wh8);
+    let spread_ctx = ServerContext::with_sde_and_repository(Arc::new(sde_mut), Arc::clone(&ctx.db));
+    let spread_cid = 302i64;
+    spread_ctx.db.with_mut_snapshot(|snap| {
+        snap.insurgency_runtime.campaigns.insert(
+            spread_cid,
+            PersistedInsurgencyCampaign {
+                campaign_id: spread_cid,
+                pirate_faction_id: FACTION_ANGEL_CARTEL,
+                target_faction_id: 500_002,
+                fob_solar_system_id: sys_hs_cur,
+                systems: vec![sys_hs_cur],
+                created_at_unix: now,
+                forecasting_end_unix: now + 3_600,
+                active_end_unix: now + 7_200,
+                winddown_end_unix: now + 10_800,
+                corruption_points: HashMap::new(),
+                suppression_points: HashMap::new(),
+            },
+        );
+    });
+    // Because sys_hs_cur is already >= 0.5, hs_prio is disabled (1), sys_wh10 is rejected (wh_class 10),
+    // and among valid candidates sys_hs_cand (30_004_101) vs sys_khanid_wh8 (30_004_103), neither gets hs_prio=0!
+    let picked = try_spread_insurgency_from_system(&spread_ctx, spread_cid, sys_hs_cur);
+    assert_eq!(picked, Some(sys_hs_cand));
+    // Now sys_hs_cand is already covered, so next spread MUST skip sys_wh10 and pick sys_khanid_wh8 (wh=Some(8) in Khanid 500_008)!
+    let picked2 = try_spread_insurgency_from_system(&spread_ctx, spread_cid, sys_hs_cur);
+    assert_eq!(picked2, Some(sys_khanid_wh8));
+    // No more valid neighbors
+    assert_eq!(try_spread_insurgency_from_system(&spread_ctx, spread_cid, sys_hs_cur), None);
+
+    // 3. Direct coverage of all fallback_militia_lp_corp arms
+    assert_eq!(fallback_militia_lp_corp(500_001), 1_000_180);
+    assert_eq!(fallback_militia_lp_corp(500_002), 1_000_179);
+    assert_eq!(fallback_militia_lp_corp(500_003), 1_000_182);
+    assert_eq!(fallback_militia_lp_corp(500_004), 1_000_181);
+    assert_eq!(fallback_militia_lp_corp(500_010), 1_000_436);
+    assert_eq!(fallback_militia_lp_corp(500_011), 1_000_437);
+    assert_eq!(fallback_militia_lp_corp(999_999), 1_000_127);
+}
+
+#[test]
+fn resolve_campaign_error_cached_mods_sde_none_notifications_and_removed_fallback() {
+    let now = 4_000_000u64;
+    let ctx = build_insurgency_ctx(now);
+
+    // 1. Unknown campaign -> CampaignNotFound
+    ctx.db.with_mut_snapshot(|snap| {
+        let err = resolve_insurgency_campaign_in_snap(snap, Some(&ctx.sde), 999_888, None, now)
+            .expect_err("missing campaign");
+        assert_eq!(err.code, "CampaignNotFound");
+    });
+
+    // 2. PirateWin with empire_ambition_modifier > 0, active_end_unix <= now (preserves timers), zero-pt contrib, & sde_opt = None
+    let cid = 401i64;
+    let p_zero = 40_101i64;
+    let p_win = 40_102i64;
+    let sys_a = 30_004_201u32;
+    let res = ctx.db.with_mut_snapshot(|snap| {
+        seed_pilot(snap, p_zero, Some(FACTION_ANGEL_CARTEL), sys_a);
+        seed_pilot(snap, p_win, Some(FACTION_ANGEL_CARTEL), sys_a);
+        snap.insurgency_runtime.campaigns.insert(
+            cid,
+            PersistedInsurgencyCampaign {
+                campaign_id: cid,
+                pirate_faction_id: FACTION_ANGEL_CARTEL,
+                target_faction_id: 500_002,
+                fob_solar_system_id: sys_a,
+                systems: vec![sys_a],
+                created_at_unix: now - 10_000,
+                forecasting_end_unix: now - 5_000,
+                active_end_unix: now - 100,
+                winddown_end_unix: now + 999,
+                corruption_points: HashMap::new(),
+                suppression_points: HashMap::new(),
+            },
+        );
+        snap.insurgency_runtime.empire_ambition_modifier.insert(FACTION_ANGEL_CARTEL, 2);
+        snap.insurgency_runtime.pirate_ambition_modifier.insert(FACTION_ANGEL_CARTEL, 1);
+        snap.insurgency_runtime.campaign_contributions.insert(
+            cid,
+            vec![(p_zero, FACTION_ANGEL_CARTEL, 0), (p_win, FACTION_ANGEL_CARTEL, 100)],
+        );
+        let eff = resolve_insurgency_campaign_in_snap(snap, None, cid, Some("PirateWin"), now).unwrap();
+        let camp = &snap.insurgency_runtime.campaigns[&cid];
+        assert_eq!(camp.active_end_unix, now - 100);
+        assert_eq!(camp.winddown_end_unix, now + 999);
+        assert_eq!(snap.insurgency_runtime.empire_ambition_modifier[&FACTION_ANGEL_CARTEL], 1);
+        assert_eq!(snap.insurgency_runtime.pirate_ambition_modifier[&FACTION_ANGEL_CARTEL], 1);
+        assert!(snap.characters[&p_zero].loyalty_points.is_empty());
+        assert_eq!(
+            snap.characters[&p_win].loyalty_points.get(&fallback_militia_lp_corp(FACTION_ANGEL_CARTEL)).copied(),
+            Some(1_500_000)
+        );
+        // Re-resolving returns empty cached payouts immediately
+        let cached = resolve_insurgency_campaign_in_snap(snap, None, cid, Some("PirateWin"), now).unwrap();
+        assert!(cached.payouts.is_empty());
+        eff
+    });
+
+    // 3. Emit effects emits account/location/state notifications and falls back to [cid, 5] if campaign was deleted
+    emit_campaign_resolution_effects_core(
+        &ctx.db,
+        Some(&ctx.quasar_gateway),
+        Some(&ctx.pending_notifications),
+        Some(&ctx.notify_tx),
+        &res,
+    );
+    {
+        let notifs = ctx.pending_notifications.read().unwrap();
+        let events: Vec<&str> = notifs[&p_win].iter().map(|n| n.event.as_str()).collect();
+        assert!(events.contains(&"OnAccountChange"));
+        assert!(events.contains(&"OnInsurgencyCampaignUpdatedForLocation"));
+        assert!(events.contains(&"OnInsurgencyStateChangedForFaction"));
+    }
+
+    // Delete campaign & emit EmpireWin effects with leftover p_mod decremented
+    let res_emp = ctx.db.with_mut_snapshot(|snap| {
+        let cid2 = 402i64;
+        snap.insurgency_runtime.campaigns.insert(
+            cid2,
+            PersistedInsurgencyCampaign {
+                campaign_id: cid2,
+                pirate_faction_id: FACTION_GURISTAS,
+                target_faction_id: 500_004,
+                fob_solar_system_id: sys_a,
+                systems: vec![sys_a],
+                created_at_unix: now,
+                forecasting_end_unix: now + 100,
+                active_end_unix: now + 200,
+                winddown_end_unix: now + 300,
+                corruption_points: HashMap::new(),
+                suppression_points: HashMap::new(),
+            },
+        );
+        snap.insurgency_runtime.campaign_contributions.insert(cid2, vec![(p_win, 500_004, 100)]);
+        let eff = resolve_insurgency_campaign_in_snap(snap, None, cid2, Some("EmpireWin"), now).unwrap();
+        snap.insurgency_runtime.campaigns.remove(&cid2);
+        eff
+    });
+    ctx.pending_notifications.write().unwrap().clear();
+    emit_campaign_resolution_effects_core(
+        &ctx.db,
+        None,
+        Some(&ctx.pending_notifications),
+        Some(&ctx.notify_tx),
+        &res_emp,
+    );
+    let p_notifs = &ctx.pending_notifications.read().unwrap()[&p_win];
+    assert!(p_notifs.iter().any(|n| {
+        n.event == "OnInsurgencyCampaignUpdatedForLocation"
+            && n.args == vec![eve_proto::PyRep::Integer(402), eve_proto::PyRep::Integer(5)]
+    }));
+    assert!(p_notifs.iter().any(|n| {
+        n.event == "OnInsurgencyStateChangedForFaction"
+            && n.args
+                == vec![
+                    eve_proto::PyRep::Integer(5),
+                    eve_proto::PyRep::Integer(FACTION_GURISTAS),
+                    eve_proto::PyRep::Integer(i64::from(sys_a)),
+                ]
+    }));
+}
+
+#[tokio::test]
+async fn tick_insurgency_surrender_empire_occ_auto_frontline_and_end_resolution() {
+    let now = 5_000_000u64;
+    let ctx = build_insurgency_ctx(now);
+    let mut sde_mut = (*ctx.sde).clone();
+    let region_id = 10_000_042u32;
+    sde_mut.regions.insert(
+        region_id,
+        RegionInfo {
+            region_id,
+            name: "WarzoneRegion".into(),
+            center: [0.0; 3],
+            faction_id: Some(500_001),
+            wormhole_class_id: None,
+        },
+    );
+    let s_emp = 30_005_001u32;
+    let s_already_vuln = 30_005_002u32;
+    let s_end = 30_005_003u32;
+    let s_win_fob = 30_005_010u32;
+    add_sys(&mut sde_mut, s_emp, region_id, 0.2, None);
+    add_sys(&mut sde_mut, s_already_vuln, region_id, 0.2, None);
+    add_sys(&mut sde_mut, s_end, region_id, 0.2, None);
+    add_sys(&mut sde_mut, s_win_fob, region_id, 0.2, None);
+    add_jump(&mut sde_mut, 905_001, s_emp, s_already_vuln);
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde_mut), Arc::clone(&ctx.db));
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now)));
+
+    let p_front = 50_001i64;
+    let end_cid = 501i64;
+    let win_cid = 502i64;
+    let end_fob_id = 1_897_000_000 + end_cid;
+    ctx.db.with_mut_snapshot(|snap| {
+        // Pilot already in frontline with Guristas; surrender expires for empire-occupied system (stays 500_001) and already-vulnerable system
+        seed_pilot(snap, p_front, Some(FACTION_GURISTAS), s_emp);
+        snap.fw_system_occupations.insert(
+            s_emp,
+            FwSystemOccupationRecord {
+                solar_system_id: s_emp,
+                owner_faction_id: 500_001,
+                occupier_faction_id: 500_001,
+                victory_points: 100,
+                victory_points_threshold: 3_000,
+            },
+        );
+        snap.fw_runtime.ihub_vulnerable.insert(s_already_vuln, true);
+        snap.insurgency_runtime.surrender_ihub_vulnerable_unix.insert(s_emp, now - 1);
+        snap.insurgency_runtime.surrender_ihub_vulnerable_unix.insert(s_already_vuln, now - 1);
+
+        // End-phase campaign still unresolved with destroyed FOB -> resolves to EmpireWin before removal
+        snap.structures.insert(
+            end_fob_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: end_fob_id,
+                type_id: PIRATE_STRONGHOLD_GURISTAS_TYPE,
+                owner_corp_id: FACTION_GURISTAS,
+                solar_system_id: s_end,
+                name: "Destroyed End FOB".into(),
+                position: [0.0, 0.0, 0.0],
+                state: "Destroyed".into(),
+                quantum_core_installed: false,
+                fuel_blocks: 0,
+                shield_hp: 0.0,
+                armor_hp: 0.0,
+                hull_hp: 0.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        snap.insurgency_runtime.campaigns.insert(
+            end_cid,
+            PersistedInsurgencyCampaign {
+                campaign_id: end_cid,
+                pirate_faction_id: FACTION_GURISTAS,
+                target_faction_id: 500_001,
+                fob_solar_system_id: s_end,
+                systems: vec![s_end],
+                created_at_unix: now - 10_000,
+                forecasting_end_unix: now - 5_000,
+                active_end_unix: now - 1_000,
+                winddown_end_unix: now - 10,
+                corruption_points: HashMap::new(),
+                suppression_points: HashMap::new(),
+            },
+        );
+        snap.insurgency_runtime.campaign_contributions.insert(end_cid, vec![(p_front, 500_001, 100)]);
+
+        // Active campaign reaching c5 >= 5 triggers natural PirateWin in tick_insurgency_campaigns
+        let mut cpts = HashMap::new();
+        cpts.insert(s_win_fob, 50_000);
+        cpts.insert(30_005_011, 50_000);
+        cpts.insert(30_005_004, 50_000);
+        cpts.insert(30_005_005, 50_000);
+        cpts.insert(30_005_006, 50_000);
+        snap.insurgency_runtime.campaigns.insert(
+            win_cid,
+            PersistedInsurgencyCampaign {
+                campaign_id: win_cid,
+                pirate_faction_id: FACTION_ANGEL_CARTEL,
+                target_faction_id: 500_002,
+                fob_solar_system_id: s_win_fob,
+                systems: vec![s_win_fob, 30_005_011, 30_005_004, 30_005_005, 30_005_006],
+                created_at_unix: now - 5_000,
+                forecasting_end_unix: now - 1_000,
+                active_end_unix: now + 5_000,
+                winddown_end_unix: now + 10_000,
+                corruption_points: cpts,
+                suppression_points: HashMap::new(),
+            },
+        );
+    });
+
+    tick_insurgency_campaigns(&ctx, now).await;
+
+    ctx.db.with_snapshot(|snap| {
+        // Surrender unlock kept empire occupier 500_001 and marked s_emp ihub vulnerable
+        assert_eq!(snap.fw_system_occupations[&s_emp].occupier_faction_id, 500_001);
+        assert!(snap.fw_runtime.ihub_vulnerable.get(&s_emp).copied().unwrap_or(false));
+        assert!(!snap.insurgency_runtime.campaigns.contains_key(&end_cid));
+        // End-phase unresolved campaign resolved before removal and credited empire LP
+        assert!(snap.characters[&p_front].loyalty_points.values().sum::<i64>() > 0);
+        // Natural c5 >= 5 resolved win_cid to PirateWin and moved it into WindDown
+        assert_eq!(snap.insurgency_runtime.campaign_outcomes.get(&win_cid).map(|s| s.as_str()), Some("PirateWin"));
+    });
+}

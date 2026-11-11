@@ -1387,4 +1387,11 @@ pub fn handle(
 #[cfg(test)]
 #[path = "operations_manager_tests.rs"]
 mod operations_manager_tests;
+#[cfg(test)]
+#[path = "operations_manager_edges_tests.rs"]
+mod operations_manager_edges_tests;
+
+#[cfg(test)]
+#[path = "operations_manager_edges2_tests.rs"]
+mod operations_manager_edges2_tests;
 

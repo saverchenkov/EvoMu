@@ -430,3 +430,7 @@ pub async fn step_ice_heist_system(ctx: &ServerContext, sys_id: u32) {
 
 #[cfg(test)] #[path = "ice_heist_ops_tests.rs"] mod ice_heist_ops_tests;
 
+#[cfg(test)]
+#[path = "ice_heist_ops_edges_tests.rs"]
+mod ice_heist_ops_edges_tests;
+

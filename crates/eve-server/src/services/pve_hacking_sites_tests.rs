@@ -274,3 +274,128 @@ async fn hacking_minigame_start_click_utility_progress_and_quit_rpc() {
     .expect("QuitHackingAttempt succeeds");
     assert!(!matches!(quit_res, PyRep::None));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wave4_hacking_wins_not_double_counted_when_already_hacked() {
+    let sys_id: SolarSystemId = 30_000_142;
+    let (char_id, ship_id, can_id) = (90_040_999, 1_040_000_999, 1_040_900_999);
+    let mut sde = (*shared_sde()).clone();
+    if !sde.types.contains_key(&22_586) {
+        if let Some(mut t) = sde.types.values().next().cloned() {
+            t.type_id = 22_586;
+            t.group_id = 538;
+            t.name = "Data Analyzer I".into();
+            t.published = true;
+            t.default_attributes.insert(1909, 60.0);
+            t.default_attributes.insert(1910, 30.0);
+            t.default_attributes.insert(1911, 2.0);
+            t.default_attributes.insert(54, 5_000.0);
+            sde.types.insert(22_586, t);
+        }
+    }
+    let db = Arc::new(WorldRepository::new_empty());
+    db.provision_gm_account("hk_w4", "pw", char_id, "HackerW4");
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        snap.item_positions.insert(can_id, [10_200.0, 0.0, 0.0]);
+        for (id, tid, loc, flag) in [
+            (ship_id, 587_u32, sys_id as i64, eve_db::InventoryFlag::None),
+            (ship_id + 1, 22_586, ship_id, eve_db::InventoryFlag::MedSlot0),
+        ] {
+            snap.items.insert(
+                id,
+                eve_db::InventoryItemRecord {
+                    item_id: id,
+                    type_id: tid,
+                    owner_id: char_id,
+                    location_id: loc,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_776_600_000)));
+    let _ = ctx
+        .systems
+        .get_or_spawn(sys_id)
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::new(10_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 200.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 30.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+
+    with_pve_exploration_reg(&ctx, |reg| {
+        reg.seeded_systems.insert(sys_id, true);
+        reg.hacked_containers.insert((sys_id, can_id));
+        reg.hacking_games.insert(
+            (char_id, can_id),
+            HackingGameSession {
+                game_id: 99_901,
+                character_id: char_id,
+                solar_system_id: sys_id,
+                container_id: can_id,
+                site_id: format!("DATA_{sys_id}_W4"),
+                is_relic: false,
+                is_ghost_site: false,
+                is_sleeper_cache_puzzle: false,
+                virus_coherence: 60,
+                max_virus_coherence: 60,
+                base_virus_strength: 30,
+                polymorphic_shield_charges: 0,
+                secondary_vector_target: None,
+                utilities: vec![None; 2],
+                tiles: {
+                    let mut grid = build_hacking_grid(can_id, false);
+                    grid[1].revealed = true;
+                    grid[1].kind = HackingNodeKind::SystemCore;
+                    grid[1].coherence = 1;
+                    grid[1].strength = 1;
+                    grid
+                },
+                status: "InProgress".into(),
+            },
+        );
+    });
+
+    let mut session = SessionState {
+        user_id: Some(1),
+        character_id: Some(char_id),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let kw = HashMap::new();
+    let res = handle_pve_hacking(
+        &ctx,
+        &mut session,
+        "hackingMgr",
+        "ClickedOnTile",
+        &[PyRep::Integer(can_id), PyRep::Integer(1)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(res.dict_get("status"), Some(&PyRep::String("Won".into())));
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.seasons_and_campaigns.hacking_wins.get(&char_id).copied()),
+        None,
+        "re-winning an already_hacked container must not increment hacking_wins or spawn duplicate spew"
+    );
+}

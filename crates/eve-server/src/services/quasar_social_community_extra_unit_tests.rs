@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use super::quasar_social_community::{
+use crate::services::quasar_social_community::{
     publish_medal_awarded_notice, publish_narrative_warp_vector_notice,
     publish_notification_notice, register,
 };
@@ -595,4 +595,154 @@ fn tags_default_fallback_and_notice_publishers_encode_unread_and_read_states() {
     let drained = router.poll_notices(777);
     assert_eq!(drained.len(), 3);
     let _ = HashMap::<u32, u32>::new();
+}
+
+#[test]
+fn community_state_persistence_bounds_and_standing_command_arithmetic_mutants() {
+    use crate::services::quasar_social_community::QuasarCommunityState;
+
+    // 1. Direct QuasarCommunityState sync_to_db (L77, L99 `&&` -> `||` and `==` -> `!=`) & rehydrate_from_db (L52)
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let st = QuasarCommunityState::default();
+    st.next_mail_id.store(50_001, std::sync::atomic::Ordering::SeqCst);
+
+    // Pre-seed blob, then sync completely default/empty state -> must REMOVE blob
+    db.with_mut_snapshot(|snap| {
+        snap.quasar_state_blobs
+            .insert("quasar_community_state".into(), "{}".into());
+    });
+    st.sync_to_db(&db);
+    assert!(db.with_snapshot(|snap| !snap.quasar_state_blobs.contains_key("quasar_community_state")));
+
+    // Each non-empty/non-50001 field ALONE must persist (NOT delete) the blob (kills each `&&` -> `||` and `==` -> `!=`)
+    st.next_mail_id.store(50_002, std::sync::atomic::Ordering::SeqCst);
+    st.sync_to_db(&db);
+    assert!(db.with_snapshot(|snap| snap.quasar_state_blobs.contains_key("quasar_community_state")));
+    st.next_mail_id.store(50_001, std::sync::atomic::Ordering::SeqCst);
+
+    st.tags.write().unwrap().insert("doctr".into(), "T1".into());
+    st.sync_to_db(&db);
+    assert!(db.with_snapshot(|snap| snap.quasar_state_blobs.contains_key("quasar_community_state")));
+    st.tags.write().unwrap().clear();
+
+    st.standings.write().unwrap().insert((10, 20), 3.0);
+    st.sync_to_db(&db);
+    assert!(db.with_snapshot(|snap| snap.quasar_state_blobs.contains_key("quasar_community_state")));
+    st.standings.write().unwrap().clear();
+
+    st.mails
+        .write()
+        .unwrap()
+        .insert(50_001, (10, vec![20], "Sub".into(), "Body".into(), 100));
+    st.sync_to_db(&db);
+    assert!(db.with_snapshot(|snap| snap.quasar_state_blobs.contains_key("quasar_community_state")));
+
+    // Rehydrate into a fresh QuasarCommunityState
+    let st2 = QuasarCommunityState::default();
+    st2.rehydrate_from_db(&db);
+    assert!(st2.mails.read().unwrap().contains_key(&50_001));
+
+    // 2. IncreaseCommanded & DecreaseCommanded: char_id == 0 unauthorized (L402, L431),
+    //    Uint64/Int64/Uint32 field shapes (L408-410, L437-439), double step +1+1=2.0 / -1-1=-2.0 (L417, L446)
+    let (router, db2) = make_router();
+    let zero_char_ctx = make_ctx(Some(10), Some(0), Some(1_000_009), false);
+    assert_eq!(
+        invoke_quasar(
+            &router,
+            "eve.standing.api.IncreaseCommanded",
+            &zero_char_ctx,
+            &DynamicQuasarMessage::new("Inc"),
+        )
+        .unwrap_err()
+        .0,
+        STATUS_UNAUTHORIZED
+    );
+    assert_eq!(
+        invoke_quasar(
+            &router,
+            "eve.standing.api.DecreaseCommanded",
+            &zero_char_ctx,
+            &DynamicQuasarMessage::new("Dec"),
+        )
+        .unwrap_err()
+        .0,
+        STATUS_UNAUTHORIZED
+    );
+
+    let player_ctx = make_ctx(Some(10), Some(90_000_001), Some(1_000_009), false);
+    for (val, expected_id) in [
+        (DynamicValue::Uint64(5_001), 5_001_u32),
+        (DynamicValue::Int64(5_002), 5_002_u32),
+        (DynamicValue::Uint32(5_003), 5_003_u32),
+    ] {
+        let mut msg = DynamicQuasarMessage::new("Inc");
+        msg.set(1, val);
+        invoke_quasar(&router, "eve.standing.api.IncreaseCommanded", &player_ctx, &msg).unwrap();
+        invoke_quasar(&router, "eve.standing.api.IncreaseCommanded", &player_ctx, &msg).unwrap();
+
+        let blob = db2.with_snapshot(|s| s.quasar_state_blobs.get("quasar_community_state").cloned()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&blob).unwrap();
+        let standings = parsed["standings"].as_array().unwrap();
+        let found = standings
+            .iter()
+            .find(|e| e[0][0] == 90_000_001 && e[0][1] == expected_id)
+            .and_then(|e| e[1].as_f64());
+        assert_eq!(
+            found,
+            Some(2.0),
+            "IncreaseCommanded twice on {expected_id} must yield +2.0"
+        );
+    }
+
+    for (val, expected_id) in [
+        (DynamicValue::Uint64(6_001), 6_001_u32),
+        (DynamicValue::Int64(6_002), 6_002_u32),
+        (DynamicValue::Uint32(6_003), 6_003_u32),
+    ] {
+        let mut msg = DynamicQuasarMessage::new("Dec");
+        msg.set(1, val);
+        invoke_quasar(&router, "eve.standing.api.DecreaseCommanded", &player_ctx, &msg).unwrap();
+        invoke_quasar(&router, "eve.standing.api.DecreaseCommanded", &player_ctx, &msg).unwrap();
+
+        let blob = db2.with_snapshot(|s| s.quasar_state_blobs.get("quasar_community_state").cloned()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&blob).unwrap();
+        let standings = parsed["standings"].as_array().unwrap();
+        let found = standings
+            .iter()
+            .find(|e| e[0][0] == 90_000_001 && e[0][1] == expected_id)
+            .and_then(|e| e[1].as_f64());
+        assert_eq!(
+            found,
+            Some(-2.0),
+            "DecreaseCommanded twice on {expected_id} must yield -2.0"
+        );
+    }
+
+    // Rehydrate via router hook after wiping DB state blob clears standings on fresh reload
+    db2.with_mut_snapshot(|snap| {
+        snap.quasar_state_blobs.remove("quasar_community_state");
+    });
+    router.rehydrate_all_from_db();
+    invoke_quasar(
+        &router,
+        "eve.standing.api.IncreaseCommanded",
+        &player_ctx,
+        &{
+            let mut m = DynamicQuasarMessage::new("Inc");
+            m.set(1, DynamicValue::Uint32(5_001));
+            m
+        },
+    )
+    .unwrap();
+    let blob_after = db2
+        .with_snapshot(|s| s.quasar_state_blobs.get("quasar_community_state").cloned())
+        .unwrap();
+    let parsed_after: serde_json::Value = serde_json::from_str(&blob_after).unwrap();
+    let val_after = parsed_after["standings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e[0][0] == 90_000_001 && e[0][1] == 5_001)
+        .and_then(|e| e[1].as_f64());
+    assert_eq!(val_after, Some(1.0), "rehydrate reset standing to 0 before +1");
 }

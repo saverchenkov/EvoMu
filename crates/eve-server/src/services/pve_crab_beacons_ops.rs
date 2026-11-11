@@ -206,3 +206,7 @@ pub(super) fn apply_interference_activity(
         None
     }
 }
+
+#[cfg(test)]
+#[path = "pve_crab_beacons_ops_edges_tests.rs"]
+mod pve_crab_beacons_ops_edges_tests;

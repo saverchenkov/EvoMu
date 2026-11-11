@@ -180,3 +180,7 @@ pub(super) fn handle_get_agents(
         rows,
     ))
 }
+
+#[cfg(test)]
+#[path = "agents_finder_query_edges_tests.rs"]
+mod agents_finder_query_edges_tests;

@@ -10,7 +10,7 @@ use eve_db::{IskCents, MarketOrderRecord};
 use eve_proto::PyRep;
 use std::collections::HashMap;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn alert_telemetry_bean_delivery_and_log_modes() {
     let ctx = test_ctx();
     let mut sess = auth_session(1, 90_000_001, 98_000_001, 30_000_142);
@@ -174,7 +174,7 @@ async fn alert_telemetry_bean_delivery_and_log_modes() {
     assert!(traces_len >= 2 && beans_len >= 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn login_config_cohorts_population_cap_portrait_and_skills() {
     let ctx = test_ctx();
     let uid = 1_u64;
@@ -421,7 +421,7 @@ async fn login_config_cohorts_population_cap_portrait_and_skills() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_login_state_backed_hollow_arm_remediations() {
     use crate::services::account_services;
 
@@ -588,3 +588,7 @@ async fn client_login_state_backed_hollow_arm_remediations() {
         PyRep::Integer(4)
     );
 }
+
+#[cfg(test)]
+#[path = "client_login_extra_unit_tests.rs"]
+mod client_login_extra_unit_tests;

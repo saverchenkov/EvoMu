@@ -1079,6 +1079,17 @@ pub async fn step_living_world_fob_and_observatory_spawns(ctx: &ServerContext) {
     }
 }
 
+/// Live combat damage and remaining HP-ratio summary for a Pirate FOB engagement.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PirateFobDamageOutcome {
+    pub applied_damage: f64,
+    pub destroyed: bool,
+    pub shield_ratio: f64,
+    pub armor_ratio: f64,
+    pub hull_ratio: f64,
+    pub invulnerable: bool,
+}
+
 pub async fn apply_live_combat_damage_to_pirate_fob(
     ctx: &ServerContext,
     sys_id: u32,
@@ -1086,7 +1097,7 @@ pub async fn apply_live_combat_damage_to_pirate_fob(
     attacker_char_id: i64,
     target_ball_id: i64,
     total_dmg: f64,
-) -> (f64, bool, f64, f64, f64, bool) {
+) -> PirateFobDamageOutcome {
     if total_dmg > 0.0 && attacker_char_id > 0 {
         record_fob_combat_participant(ctx, target_ball_id, attacker_char_id);
     }
@@ -1180,7 +1191,14 @@ pub async fn apply_live_combat_damage_to_pirate_fob(
     if dest {
         let _ = destroy_pirate_fob_and_payout(ctx, target_ball_id, &attacker_chars).await;
     }
-    (total_dmg, dest, s_r, a_r, h_r, dest)
+    PirateFobDamageOutcome {
+        applied_damage: total_dmg,
+        destroyed: dest,
+        shield_ratio: s_r,
+        armor_ratio: a_r,
+        hull_ratio: h_r,
+        invulnerable: dest,
+    }
 }
 
 #[cfg(test)]

@@ -370,3 +370,7 @@ fn registered_quasar_alliance_and_corporation_handlers() {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "quasar_corp_domain_extra_unit_tests.rs"]
+mod quasar_corp_domain_extra_unit_tests;

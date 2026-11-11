@@ -11,6 +11,10 @@ use eve_proto::quasar::{
 };
 use std::sync::{Arc, OnceLock};
 
+#[cfg(test)]
+#[path = "quasar_cosmetics_skinr_wire_edge_tests.rs"]
+mod quasar_cosmetics_skinr_wire_edge_tests;
+
 fn shared_sde() -> Arc<SdeRegistry> {
     static SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
     Arc::clone(SDE.get_or_init(|| Arc::new(SdeRegistry::with_canonical_seed())))
@@ -75,8 +79,12 @@ fn static_catalog_tier_math_and_wire_encoders() {
     assert!(!cat.allowed_slots_for_ship(587).is_empty());
 
     let (pts, tier) = cat.compute_points_and_tier(&[9001, 9002]);
-    assert!(pts >= 750);
-    assert!(tier >= 3);
+    assert_eq!(pts, 1_150);
+    assert_eq!(tier, 7);
+    assert_eq!(cat.tier_thresholds_by_isis_group.len(), 49);
+    // Rifter (587, isisGroupID=8, tier 5) vs Avatar (11567, isisGroupID=34, tier 11)
+    assert_eq!(cat.compute_points_and_tier_for_ship(587, &[9001]).1, 5);
+    assert_eq!(cat.compute_points_and_tier_for_ship(11567, &[9001]).1, 11);
 
     assert_eq!(tier_base_plex_cents(1), 2_500);
     assert_eq!(tier_base_plex_cents(2), 3_000);
@@ -343,4 +351,49 @@ fn component_licenses_grant_get_revoke_consume_and_title_definitions() {
         .status_code,
         STATUS_OK
     );
+
+    // 5. SKINR 1c catalog boundary tests: compute_points_and_tier_for_ship exact <= boundary, tier 20, and non-frigate isis_group_id
+    use crate::services::quasar_cosmetics_skinr::SdeSkinComponent;
+    let mut custom_cat = SkinrStaticCatalog::load(&SdeRegistry::default());
+    custom_cat.components.insert(
+        990_001,
+        SdeSkinComponent {
+            component_id: 990_001,
+            category: 3,
+            rarity: 1,
+            disallowed_slots: vec![],
+            associated_types: vec![],
+            binder_type_id: 79992,
+            binder_count: 1,
+        },
+    );
+    custom_cat.point_values.insert((1, 99), 125);
+    custom_cat.point_values.insert((1, 98), 126);
+    custom_cat.point_values.insert((1, 97), 5300);
+    custom_cat.point_values.insert((1, 96), 5301);
+    for (cid, rarity) in [(990_002, 99), (990_003, 98), (990_004, 97), (990_005, 96)] {
+        custom_cat.components.insert(
+            cid,
+            SdeSkinComponent {
+                component_id: cid,
+                category: 1,
+                rarity,
+                disallowed_slots: vec![],
+                associated_types: vec![],
+                binder_type_id: 79992,
+                binder_count: 1,
+            },
+        );
+    }
+    assert_eq!(custom_cat.compute_points_and_tier_for_ship(587, &[990_001]), (100, 1));
+    assert_eq!(custom_cat.compute_points_and_tier_for_ship(587, &[990_002]), (125, 1));
+    assert_eq!(custom_cat.compute_points_and_tier_for_ship(587, &[990_003]), (126, 2));
+    assert_eq!(custom_cat.compute_points_and_tier_for_ship(587, &[990_004]), (5300, 19));
+    assert_eq!(custom_cat.compute_points_and_tier_for_ship(587, &[990_005]), (5301, 20));
+    custom_cat.ship_isis_groups.insert(11_567, 45);
+    custom_cat
+        .tier_thresholds_by_isis_group
+        .insert(45, [(1, 50), (19, 500)].into_iter().collect());
+    assert_eq!(custom_cat.compute_points_and_tier_for_ship(11_567, &[990_001]), (100, 19));
+    assert_eq!(custom_cat.compute_points_and_tier_for_ship(11_567, &[990_004]), (5300, 20));
 }

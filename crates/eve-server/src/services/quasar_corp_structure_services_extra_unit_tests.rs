@@ -384,3 +384,238 @@ fn orchestrator_deployments_instances_and_commerce_admin_error_and_retry_paths_k
         STATUS_BAD_REQUEST
     );
 }
+
+#[test]
+fn mutant_kill_orch_state_and_failed_fulfillment_admin_mutations() {
+    use crate::services::quasar_payment_store_types::get_plex_transactions;
+    use eve_db::FailedFulfillmentRecord;
+
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let handlers = ctx.quasar_gateway.handlers.read().unwrap();
+    let db = &ctx.db;
+    let admin_ctx = AuthoritativeContext::for_session(
+        Some(1),
+        Some(100_000_001),
+        Some(1_000_009),
+        u64::MAX,
+        "tranquility",
+        vec![1, 2],
+    );
+    let dummy_any = GoogleAny::default();
+    let empty_msg = DynamicQuasarMessage::new("Empty");
+
+    // 1. SetDefaultTenantVersionRequest & GetDefaultTenantVersionRequest roundtrip through orch state
+    let mut ver_msg = DynamicQuasarMessage::new("SemVer");
+    ver_msg.fields.insert(1, DynamicValue::Uint64(3));
+    ver_msg.fields.insert(2, DynamicValue::Uint64(4));
+    ver_msg.fields.insert(3, DynamicValue::Uint64(5));
+    let mut set_def_req = DynamicQuasarMessage::new("SetDef");
+    set_def_req
+        .fields
+        .insert(1, DynamicValue::Message(Box::new(ver_msg)));
+
+    let get_def_fn = &handlers["eve.content.orchestrator.api.GetDefaultTenantVersionRequest"];
+    let before_def = get_def_fn(&admin_ctx, &dummy_any, &empty_msg).unwrap();
+    handlers["eve.content.orchestrator.admin.api.SetDefaultTenantVersionRequest"](
+        &admin_ctx,
+        &dummy_any,
+        &set_def_req,
+    )
+    .unwrap();
+    let after_def = get_def_fn(&admin_ctx, &dummy_any, &empty_msg).unwrap();
+    assert_ne!(before_def.value, after_def.value);
+    assert_eq!(
+        db.with_snapshot(|s| s.quasar_commerce.orchestrator.default_tenant_version.clone()),
+        SemVerSpec {
+            major: 3,
+            minor: 4,
+            patch: 5
+        }
+    );
+
+    // 2. Component listing GetAllRequest is registered by register_commerce_admin_handlers
+    let comp_all = handlers["eve.cosmetic.market.component.listing.api.GetAllRequest"](
+        &admin_ctx, &dummy_any, &empty_msg,
+    )
+    .unwrap();
+    assert!(!comp_all.value.is_empty());
+
+    // 3. RetryFailedFulfillmentRequest boundary cases (fulfilled, plex=0, plex<0, eligible non-first, retries++, next_entity_id++)
+    let uid = 888_001_u64;
+    db.with_mut_snapshot(|snap| {
+        snap.account_plex_vault.insert(uid, 100);
+        snap.quasar_commerce.failed_fulfillments = vec![
+            FailedFulfillmentRecord {
+                id: 4,
+                user_id: uid,
+                plex_units: 200,
+                retries: 0,
+                fulfilled: true,
+            },
+            FailedFulfillmentRecord {
+                id: 6,
+                user_id: uid,
+                plex_units: 0,
+                retries: 0,
+                fulfilled: false,
+            },
+            FailedFulfillmentRecord {
+                id: 7,
+                user_id: uid,
+                plex_units: -25,
+                retries: 0,
+                fulfilled: false,
+            },
+            FailedFulfillmentRecord {
+                id: 5,
+                user_id: uid,
+                plex_units: 300,
+                retries: 0,
+                fulfilled: false,
+            },
+        ];
+    });
+    let retry_fn = &handlers["eve.store.sale.admin.RetryFailedFulfillmentRequest"];
+    let mk_fid = |id: u64| {
+        let mut m = DynamicQuasarMessage::new("Fid");
+        m.fields.insert(1, DynamicValue::Uint64(id));
+        m
+    };
+
+    let (eid_0, tx_0) = db.with_snapshot(|s| (s.next_entity_id, get_plex_transactions(s).len()));
+
+    // Already fulfilled, 0 units, and negative units must NOT credit PLEX or touch next_entity_id
+    for id in [4_u64, 6, 7] {
+        assert!(retry_fn(&admin_ctx, &dummy_any, &mk_fid(id)).is_ok());
+    }
+    db.with_snapshot(|s| {
+        assert_eq!(s.account_plex_vault[&uid], 100);
+        assert_eq!(s.next_entity_id, eid_0);
+        for id in [4_u32, 6, 7] {
+            let r = s
+                .quasar_commerce
+                .failed_fulfillments
+                .iter()
+                .find(|r| r.id == id)
+                .unwrap();
+            assert_eq!(r.retries, 1);
+            if id != 4 {
+                assert!(!r.fulfilled);
+            }
+        }
+    });
+
+    // Eligible record fid=5 (non-first): credits 300 once, retries goes 0 -> 1 -> 2, next_entity_id increments by 1
+    assert!(retry_fn(&admin_ctx, &dummy_any, &mk_fid(5)).is_ok());
+    db.with_snapshot(|s| {
+        assert_eq!(s.account_plex_vault[&uid], 400);
+        assert_eq!(s.next_entity_id, eid_0 + 1);
+        let txs = get_plex_transactions(s);
+        assert_eq!(txs.len(), tx_0 + 1);
+        let r5 = s
+            .quasar_commerce
+            .failed_fulfillments
+            .iter()
+            .find(|r| r.id == 5)
+            .unwrap();
+        assert_eq!(r5.retries, 1);
+        assert!(r5.fulfilled);
+    });
+    assert!(retry_fn(&admin_ctx, &dummy_any, &mk_fid(5)).is_ok());
+    db.with_snapshot(|s| {
+        assert_eq!(s.account_plex_vault[&uid], 400);
+        assert_eq!(s.next_entity_id, eid_0 + 1);
+        let r5 = s
+            .quasar_commerce
+            .failed_fulfillments
+            .iter()
+            .find(|r| r.id == 5)
+            .unwrap();
+        assert_eq!(r5.retries, 2);
+    });
+
+    // 4. RetryAllFailedFulfillmentsRequest: only eligible (!fulfilled && plex_units > 0) credited; DropFailedFulfillmentRequest retains non-matching IDs
+    db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.failed_fulfillments = vec![
+            FailedFulfillmentRecord {
+                id: 11,
+                user_id: uid,
+                plex_units: 120,
+                retries: 0,
+                fulfilled: true,
+            },
+            FailedFulfillmentRecord {
+                id: 12,
+                user_id: uid,
+                plex_units: 0,
+                retries: 0,
+                fulfilled: false,
+            },
+            FailedFulfillmentRecord {
+                id: 13,
+                user_id: uid,
+                plex_units: -10,
+                retries: 0,
+                fulfilled: false,
+            },
+            FailedFulfillmentRecord {
+                id: 14,
+                user_id: uid,
+                plex_units: 150,
+                retries: 0,
+                fulfilled: false,
+            },
+        ];
+    });
+    let eid_1 = db.with_snapshot(|s| s.next_entity_id);
+    handlers["eve.store.sale.admin.RetryAllFailedFulfillmentsRequest"](
+        &admin_ctx, &dummy_any, &empty_msg,
+    )
+    .unwrap();
+    db.with_snapshot(|s| {
+        assert_eq!(s.account_plex_vault[&uid], 550);
+        assert_eq!(s.next_entity_id, eid_1 + 1);
+        assert!(
+            s.quasar_commerce
+                .failed_fulfillments
+                .iter()
+                .find(|r| r.id == 14)
+                .unwrap()
+                .fulfilled
+        );
+        assert!(
+            !s.quasar_commerce
+                .failed_fulfillments
+                .iter()
+                .find(|r| r.id == 12)
+                .unwrap()
+                .fulfilled
+        );
+        assert!(
+            !s.quasar_commerce
+                .failed_fulfillments
+                .iter()
+                .find(|r| r.id == 13)
+                .unwrap()
+                .fulfilled
+        );
+    });
+
+    let drop_fn = &handlers["eve.store.sale.admin.DropFailedFulfillmentRequest"];
+    assert!(drop_fn(&admin_ctx, &dummy_any, &mk_fid(12)).is_ok());
+    db.with_snapshot(|s| {
+        let remaining_ids: Vec<u32> = s
+            .quasar_commerce
+            .failed_fulfillments
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(remaining_ids, vec![11, 13, 14]);
+    });
+    assert_eq!(
+        drop_fn(&admin_ctx, &dummy_any, &mk_fid(99_999))
+            .unwrap_err()
+            .0,
+        STATUS_NOT_FOUND
+    );
+}

@@ -508,3 +508,103 @@ fn bounty_multiplier_zero_sys_id_default_pct_and_exact_boundaries() {
     )
     .is_ok());
 }
+
+#[test]
+fn register_handlers_and_lp_deposit_withdraw_idempotent_notices_kill_mutants() {
+    use crate::services::quasar_fleet_navigation_services::register_handlers;
+    use crate::services::quasar_social_chat::drain_local_notices;
+
+    let (router, db) = make_router_and_db();
+    register_handlers(
+        &router,
+        Arc::clone(&db),
+        shared_sde(),
+        Arc::clone(&router.progression.daily_goals),
+    );
+    let cid = 211_200_499_u32;
+    let paragon = crate::services::lp_store::PARAGON_CORP_ID as u32;
+    seed_char(&db, cid as i64, 98_000_499, 1_000_000, 1_000);
+    let admin = make_ctx(Some(cid), ROLE_PROGRAMMER, 500_000);
+
+    let make_lp_op = |uuid: &[u8; 16], amount: u64| {
+        let mut id_m = DynamicQuasarMessage::new("id");
+        id_m.set(1, DynamicValue::Bytes(uuid.to_vec()));
+        let mut cm = DynamicQuasarMessage::new("c");
+        cm.set(1, DynamicValue::Uint32(cid));
+        let mut im = DynamicQuasarMessage::new("iss");
+        im.set(1, DynamicValue::Uint32(paragon));
+        let mut wm = DynamicQuasarMessage::new("wallet");
+        wm.set(1, DynamicValue::Message(Box::new(cm)));
+        wm.set(3, DynamicValue::Message(Box::new(im)));
+        let mut cur_m = DynamicQuasarMessage::new("cur");
+        cur_m.set(1, DynamicValue::Uint64(amount));
+        let mut attr_m = DynamicQuasarMessage::new("attr");
+        attr_m.set(1, DynamicValue::Message(Box::new(wm)));
+        attr_m.set(2, DynamicValue::Message(Box::new(cur_m)));
+        let mut req = DynamicQuasarMessage::new("op");
+        req.set(1, DynamicValue::Message(Box::new(id_m)));
+        req.set(2, DynamicValue::Message(Box::new(attr_m)));
+        req
+    };
+
+    let _ = drain_local_notices();
+    let dep_uuid = [0x41; 16];
+    let dep_req = make_lp_op(&dep_uuid, 250);
+    dispatch_dyn(
+        &router,
+        &admin,
+        "eve.loyaltypoints.assetholding.operation.api.DepositRequest",
+        &dep_req,
+    )
+    .expect("first DepositRequest succeeds");
+    let dep_notices = drain_local_notices();
+    assert!(
+        dep_notices.iter().any(|(_, any, _)| any.type_url.ends_with("BalanceAdded")),
+        "first deposit (!already_done) must queue BalanceAdded notice"
+    );
+    assert_eq!(db.with_snapshot(|s| s.characters[&(cid as i64)].loyalty_points[&(paragon as i64)]), 1_250);
+
+    // Replay with same op_uuid: already_done == true -> must NOT emit duplicate BalanceAdded notice
+    dispatch_dyn(
+        &router,
+        &admin,
+        "eve.loyaltypoints.assetholding.operation.api.DepositRequest",
+        &dep_req,
+    )
+    .expect("idempotent DepositRequest succeeds");
+    let dep_replay_notices = drain_local_notices();
+    assert!(
+        dep_replay_notices.is_empty(),
+        "replayed deposit (already_done) must not emit BalanceAdded notice"
+    );
+
+    let wd_uuid = [0x42; 16];
+    let wd_req = make_lp_op(&wd_uuid, 100);
+    dispatch_dyn(
+        &router,
+        &admin,
+        "eve.loyaltypoints.assetholding.operation.api.WithdrawRequest",
+        &wd_req,
+    )
+    .expect("first WithdrawRequest succeeds");
+    let wd_notices = drain_local_notices();
+    assert!(
+        wd_notices.iter().any(|(_, any, _)| any.type_url.ends_with("BalanceRemoved")),
+        "first withdraw (!already_done) must queue BalanceRemoved notice"
+    );
+    assert_eq!(db.with_snapshot(|s| s.characters[&(cid as i64)].loyalty_points[&(paragon as i64)]), 1_150);
+
+    // Replay withdraw with same op_uuid: already_done == true -> must NOT emit duplicate BalanceRemoved notice
+    dispatch_dyn(
+        &router,
+        &admin,
+        "eve.loyaltypoints.assetholding.operation.api.WithdrawRequest",
+        &wd_req,
+    )
+    .expect("idempotent WithdrawRequest succeeds");
+    let wd_replay_notices = drain_local_notices();
+    assert!(
+        wd_replay_notices.is_empty(),
+        "replayed withdraw (already_done) must not emit BalanceRemoved notice"
+    );
+}

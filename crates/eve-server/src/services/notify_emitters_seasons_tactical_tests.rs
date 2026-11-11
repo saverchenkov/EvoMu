@@ -107,7 +107,7 @@ fn season_slash_commands_transitions_and_challenge_expiry() {
 
     // Select season 10 for char_id in blobs so ending season 10 clears it
     ctx.db.with_mut_snapshot(|snap| {
-        let mut st = load_season_state_from_blobs(snap, char_id);
+        let mut st = crate::services::season_manager::load_season_state_from_blobs(snap, char_id);
         st.selected_season_id = 10;
         save_season_state_to_blobs(snap, char_id, &st);
     });
@@ -365,3 +365,7 @@ fn check_and_emit_season_transitions_skips_repeat_writes_when_catalog_empty() {
     let notifs = ctx.drain_notifications_for_char(char_id);
     assert!(notifs.iter().any(|n| n.event == "OnSeasonStarted"));
 }
+
+#[cfg(test)]
+#[path = "notify_emitters_seasons_tactical_extra_unit_tests.rs"]
+mod notify_emitters_seasons_tactical_extra_unit_tests;

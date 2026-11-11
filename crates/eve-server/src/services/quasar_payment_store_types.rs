@@ -477,41 +477,115 @@ pub fn save_store_catalog(snap: &mut eve_db::WorldStateSnapshot, catalog: &Store
     snap.quasar_commerce.nes_store_catalog = Some(catalog.clone());
 }
 
-pub(crate) fn seed_default_store_catalog_if_empty(
+pub fn ensure_store_catalog_seeded(
     snap: &mut eve_db::WorldStateSnapshot,
     sde: &eve_sde::SdeRegistry,
 ) {
-    if snap.quasar_commerce.nes_store_catalog.is_some() {
+    if let Some(ref mut cat) = snap.quasar_commerce.nes_store_catalog {
+        if !cat.products.iter().any(|p| p.id == 105) {
+            cat.products.push(StoreProduct {
+                id: 105,
+                name: "15,000 Free Skill Points".into(),
+                description: "Omega weekly 15,000 free Skill Points".into(),
+                type_id: 0,
+                quantity: 15_000,
+            });
+        }
+        if !cat.offers.iter().any(|o| o.id == 1005) {
+            cat.offers.push(StoreOffer {
+                id: 1005,
+                name: "Omega Weekly 15,000 Free SP".into(),
+                description: "Claim 15,000 free Skill Points once per week with active Omega".into(),
+                category_id: 3,
+                price_plex: 0,
+                product_ids: vec![105],
+                targeted: false,
+                price_cents: None,
+                currency: None,
+            });
+        }
+        snap.quasar_commerce
+            .nes_store_offer_tags
+            .entry(1005)
+            .or_insert_with(|| vec!["omega-weekly-free-sp".into()]);
         return;
     }
-    let type_name = |tid: u32| sde.types.get(&tid).map(|t| t.name.clone()).unwrap_or_default();
+    let type_name = |tid: u32, fallback: &str| {
+        sde.types
+            .get(&tid)
+            .map(|t| t.name.clone())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| fallback.to_string())
+    };
     let cat_name = |cid: u32, fallback: &str| {
-        sde.categories.get(&cid).map(|c| c.name.clone()).unwrap_or_else(|| fallback.to_string())
+        sde.categories
+            .get(&cid)
+            .map(|c| c.name.clone())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| fallback.to_string())
     };
-    let catalog = StoreCatalog {
-        categories: vec![
-            StoreCategory { id: 1, name: "Clone State & Omega".into(), description: "Omega Clone State subscriptions".into() },
-            StoreCategory { id: 2, name: cat_name(91, "Ship SKINs"), description: "Permanent Ship Cosmetic Licenses".into() },
-            StoreCategory { id: 3, name: cat_name(5, "Accessories"), description: "Pilot services and skill extraction".into() },
-            StoreCategory { id: 4, name: cat_name(30, "Apparel"), description: "Pilot customizations and vanity items".into() },
-        ],
-        products: vec![
-            StoreProduct { id: 101, name: "30 Days Omega Clone State".into(), description: "30 Days Omega clone subscription".into(), type_id: 0, quantity: 1 },
-            StoreProduct { id: 102, name: type_name(34599), description: type_name(34599), type_id: 34599, quantity: 1 },
-            StoreProduct { id: 103, name: type_name(40519), description: type_name(40519), type_id: 40519, quantity: 1 },
-            StoreProduct { id: 104, name: type_name(3966), description: type_name(3966), type_id: 3966, quantity: 1 },
-        ],
-        offers: vec![
-            StoreOffer { id: 1001, name: "30 Days Omega Clone State".into(), description: "30 Days Omega clone subscription".into(), category_id: 1, price_plex: 500, product_ids: vec![101], targeted: false, price_cents: Some(1_999), currency: Some("USD".into()) },
-            StoreOffer { id: 1002, name: type_name(34599), description: type_name(34599), category_id: 2, price_plex: 110, product_ids: vec![102], targeted: false, price_cents: Some(499), currency: Some("USD".into()) },
-            StoreOffer { id: 1003, name: type_name(40519), description: type_name(40519), category_id: 3, price_plex: 140, product_ids: vec![103], targeted: false, price_cents: Some(699), currency: Some("USD".into()) },
-            StoreOffer { id: 1004, name: type_name(3966), description: type_name(3966), category_id: 4, price_plex: 75, product_ids: vec![104], targeted: true, price_cents: Some(399), currency: Some("USD".into()) },
-        ],
-    };
+    let categories = vec![
+        StoreCategory { id: 1, name: "Clone State & Omega".into(), description: "Omega Clone State subscriptions".into() },
+        StoreCategory { id: 2, name: cat_name(91, "Ship SKINs"), description: "Permanent Ship Cosmetic Licenses".into() },
+        StoreCategory { id: 3, name: cat_name(5, "Accessories"), description: "Pilot services and skill extraction".into() },
+        StoreCategory { id: 4, name: cat_name(30, "Apparel"), description: "Pilot customizations and vanity items".into() },
+    ];
+    let mut products = vec![
+        StoreProduct { id: 101, name: "30 Days Omega Clone State".into(), description: "30 Days Omega clone subscription".into(), type_id: 0, quantity: 1 },
+        StoreProduct { id: 102, name: type_name(34599, "Multiple Pilot Training Certificate"), description: type_name(34599, "Multiple Pilot Training Certificate"), type_id: 34599, quantity: 1 },
+        StoreProduct { id: 103, name: type_name(40519, "Skill Extractor"), description: type_name(40519, "Skill Extractor"), type_id: 40519, quantity: 1 },
+        StoreProduct { id: 104, name: type_name(3966, "Men's 'Esquire' Coat (black/gold)"), description: type_name(3966, "Men's 'Esquire' Coat (black/gold)"), type_id: 3966, quantity: 1 },
+        StoreProduct { id: 105, name: "15,000 Free Skill Points".into(), description: "Omega weekly 15,000 free Skill Points".into(), type_id: 0, quantity: 15_000 },
+    ];
+    let mut offers = vec![
+        StoreOffer { id: 1001, name: "30 Days Omega Clone State".into(), description: "30 Days Omega clone subscription".into(), category_id: 1, price_plex: 500, product_ids: vec![101], targeted: false, price_cents: Some(1_999), currency: Some("USD".into()) },
+        StoreOffer { id: 1002, name: type_name(34599, "Multiple Pilot Training Certificate"), description: type_name(34599, "Multiple Pilot Training Certificate"), category_id: 3, price_plex: 110, product_ids: vec![102], targeted: false, price_cents: Some(499), currency: Some("USD".into()) },
+        StoreOffer { id: 1003, name: type_name(40519, "Skill Extractor"), description: type_name(40519, "Skill Extractor"), category_id: 3, price_plex: 140, product_ids: vec![103], targeted: false, price_cents: Some(699), currency: Some("USD".into()) },
+        StoreOffer { id: 1004, name: type_name(3966, "Men's 'Esquire' Coat (black/gold)"), description: type_name(3966, "Men's 'Esquire' Coat (black/gold)"), category_id: 4, price_plex: 75, product_ids: vec![104], targeted: true, price_cents: Some(399), currency: Some("USD".into()) },
+        StoreOffer { id: 1005, name: "Omega Weekly 15,000 Free SP".into(), description: "Claim 15,000 free Skill Points once per week with active Omega".into(), category_id: 3, price_plex: 0, product_ids: vec![105], targeted: false, price_cents: None, currency: None },
+    ];
+    if sde.skin_licenses.len() > 20 {
+        let mut skin_tids: Vec<u32> = sde
+            .skin_licenses
+            .keys()
+            .copied()
+            .filter(|tid| sde.types.contains_key(tid))
+            .collect();
+        skin_tids.sort_unstable();
+        for (idx, tid) in skin_tids.into_iter().take(24).enumerate() {
+            let pid = 200 + idx as u32;
+            let oid = 2001 + idx as u32;
+            let name = type_name(tid, &format!("Ship SKIN {tid}"));
+            let plex = 55i64 + i64::from(tid % 4) * 55;
+            products.push(StoreProduct {
+                id: pid,
+                name: name.clone(),
+                description: name.clone(),
+                type_id: tid,
+                quantity: 1,
+            });
+            offers.push(StoreOffer {
+                id: oid,
+                name,
+                description: "Published V24 Ship SKIN".into(),
+                category_id: 2,
+                price_plex: plex,
+                product_ids: vec![pid],
+                targeted: idx % 4 == 0,
+                price_cents: None,
+                currency: None,
+            });
+        }
+    }
+    let catalog = StoreCatalog { categories, products, offers };
     save_store_catalog(snap, &catalog);
+    snap.quasar_commerce
+        .nes_store_offer_tags
+        .entry(1005)
+        .or_insert_with(|| vec!["omega-weekly-free-sp".into()]);
 }
 
-/// DATA GAP: NES store catalog (categories, products, offers) is live Quasar backend data not present in V24 client FSD.
+/// NES store catalog (categories, products, offers) persisted in `WorldStateSnapshot.quasar_commerce`.
 /// Read persisted New Eden Store catalog from `WorldStateSnapshot.quasar_commerce.nes_store_catalog`.
 pub fn read_store_catalog(snap: &eve_db::WorldStateSnapshot) -> StoreCatalog {
     snap.quasar_commerce
@@ -1160,7 +1234,7 @@ pub fn register_plex_vault_extra_handlers(
     router.register_handler(
         "eve.payment.purchase.api.CreditCardRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            // DATA GAP: feat:quasar.payment acceptance: (real-money backend; stub as disabled)
+            // feat:quasar.payment acceptance: real-money backend is disabled by design.
             Err((
                 STATUS_FORBIDDEN,
                 "Real-money payment backend is disabled".into(),

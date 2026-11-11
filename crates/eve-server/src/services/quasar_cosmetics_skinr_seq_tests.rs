@@ -58,7 +58,8 @@ fn induction_discounts_skill_caps_and_wire_parsers() {
     let db = Arc::new(WorldRepository::with_demo_seed());
     let sde = shared_sde();
     let state = SkinrCosmeticsState::load(Arc::clone(&db), Arc::clone(&sde));
-    assert_eq!(skill_discounts_and_cap(&state, None), (0, 0, 5));
+    assert_eq!(skill_discounts_and_cap(&state, None), (0, 0, 1));
+    assert_eq!(max_runs_per_job(&state, 90_000_001), 1);
 
     let cid = 90_000_001i64;
     db.with_mut_snapshot(|s| {
@@ -79,11 +80,20 @@ fn induction_discounts_skill_caps_and_wire_parsers() {
                 skill_points: 50_000.0,
             },
         );
+        sk.insert(
+            81375,
+            TrainedSkillRecord {
+                type_id: 81375,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
     });
     let (price_disc, dur_disc, max_jobs) = skill_discounts_and_cap(&state, Some(cid as u32));
     assert_eq!(price_disc, 0);
     assert!(dur_disc >= 10);
-    assert!(max_jobs >= 11);
+    assert_eq!(max_jobs, 6);
+    assert_eq!(max_runs_per_job(&state, cid as u32), 50);
 
     let u = job_seq_to_uuid(9);
     assert_eq!(&u[0..8], &0x534B_494E_524A_4F42u64.to_be_bytes());
@@ -301,7 +311,7 @@ fn sequencing_pricing_durations_and_job_lifecycle() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_545_cluster_tick_settles_matured_skinr_job_and_publishes_notices() {
     let ctx = crate::router::ServerContext::with_sde_and_repository(
         shared_sde(),
@@ -419,4 +429,52 @@ async fn issue_545_cluster_tick_settles_matured_skinr_job_and_publishes_notices(
     );
     assert_eq!(act_rsp.status_code, STATUS_OK);
     assert!(act_rsp.payload.unwrap().value.is_empty());
+
+    // Direct skill_discounts_and_cap & max_runs_per_job level progression tests
+    let skinr_state = SkinrCosmeticsState::load_unregistered(ctx.db.clone(), ctx.sde.clone());
+    let unseeded_cid = 99_999_888_u32;
+    assert_eq!(skill_discounts_and_cap(&skinr_state, None), (0, 0, 1));
+    assert_eq!(skill_discounts_and_cap(&skinr_state, Some(unseeded_cid)), (0, 0, 1));
+    assert_eq!(max_runs_per_job(&skinr_state, unseeded_cid), 1);
+
+    for (lvl, exp_par, exp_mt, exp_batch, exp_mass, exp_ind) in [
+        (1u8, 1usize, 2usize, 4u32, 25u32, 200u32),
+        (2, 3, 4, 9, 50, 450),
+        (3, 5, 6, 19, 100, 700),
+        (4, 7, 8, 29, 150, 1_700),
+        (5, 9, 10, 49, 250, 4_700),
+    ] {
+        ctx.db.with_mut_snapshot(|s| {
+            let base = s.characters.values().next().unwrap().clone();
+            s.characters.entry(unseeded_cid as i64).or_insert(eve_db::CharacterRecord {
+                character_id: unseeded_cid as i64,
+                name: "Unseeded Skinr Seq".to_string(),
+                ..base
+            });
+            let mut sm = std::collections::HashMap::new();
+            for sid in [81366u32, 81367, 81375, 81364, 81365] {
+                sm.insert(
+                    sid,
+                    eve_db::TrainedSkillRecord {
+                        type_id: sid,
+                        level: lvl,
+                        skill_points: 1_000.0,
+                    },
+                );
+            }
+            s.skills.insert(unseeded_cid as i64, sm);
+        });
+        assert_eq!(
+            skill_discounts_and_cap(&skinr_state, Some(unseeded_cid)).2,
+            1 + exp_par + exp_mt
+        );
+        assert_eq!(
+            max_runs_per_job(&skinr_state, unseeded_cid),
+            1 + exp_batch + exp_mass + exp_ind
+        );
+    }
 }
+
+#[cfg(test)]
+#[path = "quasar_cosmetics_skinr_seq_extra_unit_tests.rs"]
+mod quasar_cosmetics_skinr_seq_extra_unit_tests;

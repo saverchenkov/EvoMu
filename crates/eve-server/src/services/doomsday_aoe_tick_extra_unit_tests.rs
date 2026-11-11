@@ -345,6 +345,7 @@ fn step_bosonic_doomsday_in_ballpark_none_db_cross_system_and_retention() {
 #[tokio::test]
 async fn step_bosonic_doomsday_system_warmup_cone_filters_reaper_dedup_and_gtfo_guards() {
     let (ctx, _sess, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    ctx.set_clock(Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(1_800_000_000)));
     let struct_id = 1_000_000_000_999_i64;
     let out_of_cone_ball = 790_001_i64;
     let reaper_target_ball = 790_002_i64;
@@ -594,4 +595,291 @@ async fn step_bosonic_doomsday_system_warmup_cone_filters_reaper_dedup_and_gtfo_
     let rt = read_superweapon_runtime(&ctx.db).unwrap();
     assert_eq!(rt.warp_suppressions.len(), 1);
     assert_eq!(rt.warp_suppressions[0].suppressed_until_unix, now + 60);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn superweapon_runtime_read_mutate_ballpark_immobilize_restore_and_system_guards() {
+    let (ctx, _sess, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+
+    // 1. read_superweapon_runtime & mutate_superweapon_runtime
+    assert!(read_superweapon_runtime(&ctx.db).is_none());
+    assert_eq!(mutate_superweapon_runtime(&ctx.db, |_| 77_i32), 77);
+
+    // Only active_cycles non-empty (warp_suppressions empty) -> Some(...)
+    mutate_superweapon_runtime(&ctx.db, |rt| {
+        rt.active_cycles.push(PersistedSuperweaponCycle {
+            sys_id,
+            char_id,
+            ship_id,
+            ship_type_id: 11_567,
+            mod_type_id: 24_550,
+            kind: SuperweaponCycleKind::SpatialGtfo {
+                center: [0.0; 3],
+                sphere_radius_m: 1_000.0,
+            },
+            started_at_unix: 100,
+            warmup_secs: 5,
+            total_ticks: 2,
+            ticks_applied: 0,
+            immobilize_until_unix: 110,
+            orig_max_velocity: 75.0,
+            orig_warp_scramble_strength: 1,
+            orig_disallow_assistance: false,
+            mobility_restored: false,
+        });
+    });
+    assert_eq!(read_superweapon_runtime(&ctx.db).unwrap().active_cycles.len(), 1);
+
+    // Only warp_suppressions non-empty (active_cycles empty) -> Some(...)
+    mutate_superweapon_runtime(&ctx.db, |rt| {
+        rt.active_cycles.clear();
+        rt.warp_suppressions.push(PersistedWarpSuppression {
+            sys_id,
+            ship_id: ship_id + 1,
+            suppressed_until_unix: 200,
+            orig_warp_scramble_strength: 2,
+        });
+    });
+    assert_eq!(
+        read_superweapon_runtime(&ctx.db).unwrap().warp_suppressions.len(),
+        1
+    );
+
+    // 2. step_bosonic_doomsday_in_ballpark with ONLY warp_suppressions active_cycles empty
+    let mut bp = Ballpark::new(sys_id);
+    let mut scrams = HashMap::new();
+    let mut destroyed = Vec::new();
+    let supp_ball = ship_id + 1;
+    bp.balls.insert(
+        supp_ball,
+        Ball {
+            id: supp_ball,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1.0e6,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+    );
+    let mut supp_cs = CombatState::new();
+    supp_cs.warp_scramble_strength = 2;
+    bp.combat_states.insert(supp_ball, supp_cs);
+
+    step_bosonic_doomsday_in_ballpark(
+        &mut bp,
+        &mut scrams,
+        Some(&ctx.sde),
+        Some(&ctx.db),
+        sys_id,
+        150,
+        &mut destroyed,
+    );
+    assert_eq!(
+        bp.combat_states[&supp_ball].warp_scramble_strength,
+        GTFO_WARP_SUPPRESSION_STRENGTH
+    );
+    assert_eq!(scrams.get(&supp_ball), Some(&GTFO_WARP_SUPPRESSION_STRENGTH));
+
+    // Expire warp suppression -> restores original scramble strength 2
+    step_bosonic_doomsday_in_ballpark(
+        &mut bp,
+        &mut scrams,
+        Some(&ctx.sde),
+        Some(&ctx.db),
+        sys_id,
+        200,
+        &mut destroyed,
+    );
+    assert_eq!(bp.combat_states[&supp_ball].warp_scramble_strength, 2);
+    assert!(read_superweapon_runtime(&ctx.db).is_none());
+
+    // 3. step_bosonic_doomsday_in_ballpark with ONLY active_cycles (warp_suppressions empty):
+    //    - t_immob: orig_max_velocity = 80.0 -> immobilizes & sets base_max_velocity = Some(80.0), then restores at boundary
+    //    - t_zero:  orig_max_velocity = 0.0  -> keeps base_max_velocity = None in both immobilize and restore branches
+    //    - t_ext_keep: external_velocity_multiplier = Some(0.5) != Some(0.0) -> restore keeps Some(0.5)
+    let t_immob = ship_id + 10;
+    let t_zero = ship_id + 11;
+    let t_ext_keep = ship_id + 12;
+    for (bid, max_v, ext_mult) in [
+        (t_immob, 80.0, None),
+        (t_zero, 0.0, None),
+        (t_ext_keep, 0.0, Some(0.5)),
+    ] {
+        bp.balls.insert(
+            bid,
+            Ball {
+                id: bid,
+                type_id: 11_567,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: max_v,
+                inertia: 1.0,
+                mass: 1.0e9,
+                radius: 5_000.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+        );
+        let mut cs = CombatState::new();
+        cs.base_max_velocity = None;
+        cs.external_velocity_multiplier = ext_mult;
+        bp.combat_states.insert(bid, cs);
+    }
+
+    mutate_superweapon_runtime(&ctx.db, |rt| {
+        for (bid, orig_v) in [(t_immob, 80.0), (t_zero, 0.0)] {
+            rt.active_cycles.push(PersistedSuperweaponCycle {
+                sys_id,
+                char_id,
+                ship_id: bid,
+                ship_type_id: 11_567,
+                mod_type_id: 24_550,
+                kind: SuperweaponCycleKind::Cone {
+                    origin_pos: [0.0; 3],
+                    dir_vec: [1.0, 0.0, 0.0],
+                    cone_len_m: 10_000.0,
+                    tick_dmg: [0.0; 4],
+                    sig_radius_m: 100.0,
+                },
+                started_at_unix: 1_000,
+                warmup_secs: 5,
+                total_ticks: 3,
+                ticks_applied: 0,
+                immobilize_until_unix: 1_010,
+                orig_max_velocity: orig_v,
+                orig_warp_scramble_strength: 1,
+                orig_disallow_assistance: false,
+                mobility_restored: false,
+            });
+        }
+        rt.active_cycles.push(PersistedSuperweaponCycle {
+            sys_id,
+            char_id,
+            ship_id: t_ext_keep,
+            ship_type_id: 11_567,
+            mod_type_id: 24_550,
+            kind: SuperweaponCycleKind::Cone {
+                origin_pos: [0.0; 3],
+                dir_vec: [1.0, 0.0, 0.0],
+                cone_len_m: 10_000.0,
+                tick_dmg: [0.0; 4],
+                sig_radius_m: 100.0,
+            },
+            started_at_unix: 1_000,
+            warmup_secs: 5,
+            total_ticks: 3,
+            ticks_applied: 0,
+            immobilize_until_unix: 1_009,
+            orig_max_velocity: 0.0,
+            orig_warp_scramble_strength: 1,
+            orig_disallow_assistance: false,
+            mobility_restored: false,
+        });
+    });
+
+    // At 1_008 (< 1_009/1_010): immobilizes
+    step_bosonic_doomsday_in_ballpark(
+        &mut bp,
+        &mut scrams,
+        Some(&ctx.sde),
+        Some(&ctx.db),
+        sys_id,
+        1_008,
+        &mut destroyed,
+    );
+    assert_eq!(bp.combat_states[&t_immob].base_max_velocity, Some(80.0));
+    assert_eq!(bp.combat_states[&t_immob].external_velocity_multiplier, Some(0.0));
+    assert_eq!(bp.balls[&t_immob].max_velocity, 0.0);
+    assert!(bp.combat_states[&t_immob].disallow_assistance);
+    assert_eq!(bp.combat_states[&t_zero].base_max_velocity, None);
+
+    // Clear base_max_velocity on t_immob to also cover L207 restore branch (`cs.base_max_velocity.is_none() && orig_max_velocity > 0.0`)
+    bp.combat_states.get_mut(&t_immob).unwrap().base_max_velocity = None;
+    bp.combat_states.get_mut(&t_ext_keep).unwrap().base_max_velocity = None;
+    bp.combat_states.get_mut(&t_ext_keep).unwrap().external_velocity_multiplier = Some(0.5);
+
+    step_bosonic_doomsday_in_ballpark(
+        &mut bp,
+        &mut scrams,
+        Some(&ctx.sde),
+        Some(&ctx.db),
+        sys_id,
+        1_010,
+        &mut destroyed,
+    );
+    assert_eq!(bp.combat_states[&t_immob].external_velocity_multiplier, None);
+    assert_eq!(bp.combat_states[&t_immob].base_max_velocity, Some(80.0));
+    assert_eq!(bp.balls[&t_immob].max_velocity, 80.0);
+    assert!(!bp.combat_states[&t_immob].disallow_assistance);
+    assert_eq!(bp.combat_states[&t_zero].base_max_velocity, None);
+    assert_eq!(bp.combat_states[&t_ext_keep].external_velocity_multiplier, Some(0.5));
+    assert_eq!(bp.combat_states[&t_ext_keep].base_max_velocity, None);
+
+    // Subsequent step after mobility_restored == true must NOT overwrite state in either branch (kills L199/L222 mutants)
+    bp.combat_states.get_mut(&t_immob).unwrap().disallow_assistance = true;
+    step_bosonic_doomsday_in_ballpark(
+        &mut bp,
+        &mut scrams,
+        Some(&ctx.sde),
+        Some(&ctx.db),
+        sys_id,
+        1_011,
+        &mut destroyed,
+    );
+    assert!(bp.combat_states[&t_immob].disallow_assistance);
+
+    // 4. step_bosonic_doomsday_system with ONLY active_cycles (warp_suppressions empty) advances ticks_applied
+    let live_sys = ctx.systems.get_or_spawn(sys_id);
+    let _ = live_sys
+        .spawn_ball_with_combat(
+            Ball {
+                id: t_immob,
+                type_id: 11_567,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 80.0,
+                inertia: 1.0,
+                mass: 1.0e9,
+                radius: 5_000.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::new(),
+        )
+        .await;
+    let now_sys = ctx.now_unix_secs();
+    mutate_superweapon_runtime(&ctx.db, |rt| {
+        rt.active_cycles.clear();
+        rt.warp_suppressions.clear();
+        rt.active_cycles.push(PersistedSuperweaponCycle {
+            sys_id,
+            char_id,
+            ship_id: t_immob,
+            ship_type_id: 11_567,
+            mod_type_id: 24_550,
+            kind: SuperweaponCycleKind::Cone {
+                origin_pos: [0.0; 3],
+                dir_vec: [1.0, 0.0, 0.0],
+                cone_len_m: 10_000.0,
+                tick_dmg: [0.0; 4],
+                sig_radius_m: 100.0,
+            },
+            started_at_unix: now_sys.saturating_sub(10),
+            warmup_secs: 2,
+            total_ticks: 3,
+            ticks_applied: 0,
+            immobilize_until_unix: now_sys + 60,
+            orig_max_velocity: 80.0,
+            orig_warp_scramble_strength: 0,
+            orig_disallow_assistance: false,
+            mobility_restored: false,
+        });
+    });
+    step_bosonic_doomsday_system(&ctx, sys_id).await;
+    let rt_after = read_superweapon_runtime(&ctx.db).unwrap();
+    assert!(rt_after.active_cycles[0].ticks_applied > 0);
 }

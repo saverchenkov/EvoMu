@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 //! Deep branch-coverage and mutation-killing unit tests for `abyssal_void_gates`.
 
 #![forbid(unsafe_code)]

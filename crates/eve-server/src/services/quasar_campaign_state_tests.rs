@@ -128,3 +128,7 @@ fn campaign_state_lifecycle_contributions_commit_resign_and_redemption() {
     assert!(!exp_notices.is_empty());
     assert_eq!(mgr.campaigns.read().unwrap()[&cid].state, CAMPAIGN_STATE_EXPIRED);
 }
+
+#[cfg(test)]
+#[path = "quasar_campaign_state_extra_unit_tests.rs"]
+mod quasar_campaign_state_extra_unit_tests;

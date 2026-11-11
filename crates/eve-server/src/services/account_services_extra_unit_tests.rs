@@ -24,7 +24,7 @@ async fn call_acct(
         .expect("account_services method should be handled")
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn save_location_logout_in_space_and_multilogin_blocker_branches() {
     let ctx = test_ctx();
     let uid = 1_u64;
@@ -184,7 +184,7 @@ async fn save_location_logout_in_space_and_multilogin_blocker_branches() {
     assert!(!err.code.is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn claim_redeem_tokens_input_variants_ownership_ship_singleton_and_injectors() {
     let ctx = test_ctx();
     let uid = 1_u64;
@@ -373,7 +373,7 @@ async fn claim_redeem_tokens_input_variants_ownership_ship_singleton_and_injecto
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mct_resculpt_stack_decrement_and_session_history_trim_branches() {
     let ctx = test_ctx();
     let uid = 42_u64;
@@ -449,10 +449,11 @@ async fn mct_resculpt_stack_decrement_and_session_history_trim_branches() {
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&880_002));
         assert_eq!(
-            snap.service_state_blobs
-                .get(&format!("account_resculpt_tokens:{uid}"))
-                .map(String::as_str),
-            Some("2")
+            snap.cluster_and_runtime
+                .account_resculpt_tokens
+                .get(&uid.to_string())
+                .copied(),
+            Some(2)
         );
     });
 
@@ -496,8 +497,7 @@ async fn mct_resculpt_stack_decrement_and_session_history_trim_branches() {
         let big: Vec<serde_json::Value> = (0..260)
             .map(|i| serde_json::json!({"user_id": uid, "session_id": i}))
             .collect();
-        snap.service_state_blobs
-            .insert("user_sessions".into(), serde_json::to_string(&big).unwrap());
+        snap.cluster_and_runtime.user_sessions = big;
     });
     assert!(call_acct(
         &ctx,
@@ -510,8 +510,212 @@ async fn mct_resculpt_stack_decrement_and_session_history_trim_branches() {
     .await
     .is_ok());
     ctx.db.with_snapshot(|snap| {
-        let list: Vec<serde_json::Value> =
-            serde_json::from_str(&snap.service_state_blobs["user_sessions"]).unwrap();
+        let list = &snap.cluster_and_runtime.user_sessions;
         assert_eq!(list.len(), 256);
     });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn account_services_subscription_time_ship_cargo_certs_resculpt_and_space_leave() {
+    let ctx = test_ctx();
+    let uid = 7_101_u64;
+    let cid = 90_710_001_i64;
+    let ship_id = 710_001_001_i64;
+    let sys_id = 30_000_142_u32;
+    let station_id = 60_003_760_i64;
+    let kw = HashMap::new();
+
+    // Seed account + character in space + active ship + ship cargo certs + prior resculpt token count 2
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut acc = snap.accounts.values().next().cloned().expect("seed account");
+        acc.user_id = uid;
+        acc.username = "acct_7101".into();
+        snap.accounts.insert("acct_7101".into(), acc);
+        let mut ch = snap.characters[&90_000_001].clone();
+        ch.character_id = cid;
+        ch.user_id = uid;
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+        ch.clone_grade = 1;
+        snap.characters.insert(cid, ch);
+
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: cid,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        // Place MCT (48582) and ReSculpt (33502) in ACTIVE SHIP Cargo (kills active_ship_id StructField mutants)
+        snap.items.insert(
+            988_001,
+            InventoryItemRecord {
+                item_id: 988_001,
+                type_id: 48582,
+                owner_id: cid,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            988_002,
+            InventoryItemRecord {
+                item_id: 988_002,
+                type_id: 33502,
+                owner_id: cid,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+        snap.cluster_and_runtime
+            .account_resculpt_tokens
+            .insert(uid.to_string(), 2);
+        snap.cluster_and_runtime
+            .account_resculpt_tokens
+            .insert(cid.to_string(), 2);
+    });
+
+    // 1. save_location_and_leave_space: undocked -> (true, sys_id); station docked -> (false, sys_id); structure docked -> (false, sys_id)
+    let mut sess = auth_session(uid, cid, 98_000_001, sys_id);
+    sess.ship_id = Some(ship_id);
+    sess.station_id = None;
+    sess.structure_id = None;
+    assert_eq!(save_location_and_leave_space(&ctx, &sess).await, (true, sys_id));
+
+    let mut station_sess = sess.clone();
+    station_sess.station_id = Some(station_id);
+    station_sess.structure_id = None;
+    assert_eq!(save_location_and_leave_space(&ctx, &station_sess).await, (false, sys_id));
+
+    let mut struct_sess = sess.clone();
+    struct_sess.station_id = None;
+    struct_sess.structure_id = Some(1_999_000_001);
+    assert_eq!(save_location_and_leave_space(&ctx, &struct_sess).await, (false, sys_id));
+
+    // Re-enter space in DB for active-ship cargo tests + Logout test
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+    });
+
+    // 2. GetSubscriptionTime: Alpha (grade 1) -> None; Omega with expiry -> filetime(exp); Omega without expiry (exp==0) -> now + 30d
+    assert_eq!(
+        call_acct(&ctx, &mut sess, "subscriptionMgr", "GetSubscriptionTime", &[], &kw)
+            .await
+            .unwrap(),
+        PyRep::None
+    );
+    let exp_target = ctx.now_unix() + 5_000;
+    set_subscription_expiry(&ctx, uid, exp_target);
+    let expected_omega_ft = (exp_target as i64)
+        .saturating_add(11_644_473_600)
+        .saturating_mul(10_000_000);
+    assert_eq!(
+        call_acct(&ctx, &mut sess, "subscriptionMgr", "GetSubscriptionTime", &[], &kw)
+            .await
+            .unwrap(),
+        PyRep::Integer(expected_omega_ft)
+    );
+
+    // Grade == 2 with no stored expiry -> uses now + 30 * 86_400
+    let uid_omega0 = 7_102_u64;
+    let cid_omega0 = 90_710_002_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut acc: AccountRecord = snap.accounts.values().next().cloned().expect("seed account");
+        acc.user_id = uid_omega0;
+        acc.username = "acct_7102".into();
+        snap.accounts.insert("acct_7102".into(), acc);
+        let mut ch = snap.characters[&90_000_001].clone();
+        ch.character_id = cid_omega0;
+        ch.user_id = uid_omega0;
+        ch.clone_grade = 2;
+        snap.characters.insert(cid_omega0, ch);
+    });
+    let mut omega0_sess = auth_session(uid_omega0, cid_omega0, 98_000_001, sys_id);
+    let before_unix = ctx.now_unix();
+    let omega0_ft = call_acct(&ctx, &mut omega0_sess, "subscriptionMgr", "GetSubscriptionTime", &[], &kw)
+        .await
+        .unwrap()
+        .as_i64()
+        .expect("Omega with exp==0 should return integer FileTime");
+    let after_unix = ctx.now_unix();
+    let min_ft = (before_unix.saturating_add(30 * 86_400) as i64)
+        .saturating_add(11_644_473_600)
+        .saturating_mul(10_000_000);
+    let max_ft = (after_unix.saturating_add(30 * 86_400) as i64)
+        .saturating_add(11_644_473_600)
+        .saturating_mul(10_000_000);
+    assert!(omega0_ft >= min_ft && omega0_ft <= max_ft);
+
+    // 3. MCT activation from ship cargo + slots + GetUpdated/Invalidate + ReSculpt from ship cargo (2 -> 3 on both keys)
+    let mct_res = call_acct(&ctx, &mut sess, "userSvc", "ActivateMultiTraining", &[], &kw)
+        .await
+        .unwrap();
+    assert_eq!(mct_res.dict_get("slotActivated"), Some(&PyRep::Bool(true)));
+    assert!(ctx.db.with_snapshot(|snap| !snap.items.contains_key(&988_001)));
+
+    let slots = call_acct(&ctx, &mut sess, "userSvc", "GetMultiCharactersTrainingSlots", &[], &kw)
+        .await
+        .unwrap();
+    assert_eq!(slots.as_dict().map(|d| d.len()), Some(1));
+
+    let upd = call_acct(&ctx, &mut sess, "userSvc", "GetUpdatedMultiCharacterTraining", &[], &kw)
+        .await
+        .unwrap();
+    assert_eq!(upd.as_list().map(|l| l.len()), Some(1));
+
+    let inv = call_acct(&ctx, &mut sess, "userSvc", "InvalidateMultiCharacterTrainingCache", &[], &kw)
+        .await
+        .unwrap();
+    assert_eq!(inv.as_list().map(|l| l.len()), Some(1));
+
+    assert_eq!(
+        call_acct(&ctx, &mut sess, "userSvc", "ActivateCharacterReSculpt", &[], &kw)
+            .await
+            .unwrap(),
+        PyRep::Bool(true)
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&988_002));
+        assert_eq!(snap.cluster_and_runtime.account_resculpt_tokens.get(&uid.to_string()).copied(), Some(3));
+        assert_eq!(snap.cluster_and_runtime.account_resculpt_tokens.get(&cid.to_string()).copied(), Some(3));
+    });
+
+    // 4. ProcessEVESessionCreated records session + authentication.Logout returns full KeyVal
+    assert_eq!(
+        call_acct(&ctx, &mut sess, "userSvc", "ProcessEVESessionCreated", &[], &kw)
+            .await
+            .unwrap(),
+        PyRep::None
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap
+            .cluster_and_runtime
+            .user_sessions
+            .iter()
+            .any(|v| v["user_id"] == uid && v["character_id"] == cid));
+    });
+
+    let logout_res = call_acct(&ctx, &mut sess, "authentication", "Logout", &[], &kw)
+        .await
+        .unwrap();
+    assert_eq!(logout_res.dict_get("loggedOut"), Some(&PyRep::Bool(true)));
+    assert_eq!(logout_res.dict_get("removedFromSpace"), Some(&PyRep::Bool(true)));
+    assert_eq!(logout_res.dict_get("savedSolarSystemID"), Some(&PyRep::Integer(sys_id as i64)));
 }

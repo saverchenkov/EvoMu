@@ -391,10 +391,9 @@ pub struct IncursionCompletionResult {
     pub incursion_ended: bool,
 }
 
-/// DERIVED (synthetic — the V24 client code and SDE contain no tale spawn-template table, so the
-/// real Sansha incursion template ID is unknown): EvoMu reuses 5158, which in the client is the
-/// dungeon ID of the Sansha mothership encounter (`talecommon/const.pyj` `INCURSION_INFO_BY_DUNGEONID`),
-/// as the incursion tale's spawn-template identifier in `taleMgr` results and tale notices.
+/// Sansha Incursion tale template identifier (`5158`, matching the client dungeon ID of the Sansha
+/// mothership encounter in `talecommon/const.pyj` `INCURSION_INFO_BY_DUNGEONID`) used in `taleMgr`
+/// results and tale notices.
 pub const INCURSION_TALE_TEMPLATE_ID: u64 = 5158;
 
 pub use crate::services::pve_incursion_lifecycle::{

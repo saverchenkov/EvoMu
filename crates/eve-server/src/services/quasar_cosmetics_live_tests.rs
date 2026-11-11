@@ -422,3 +422,7 @@ fn ship_cosmetics_stripping_clears_first_third_party_skins_and_logos_across_cach
     assert!(!live_state.data.read().unwrap().ship_logos.contains_key(&ship_id));
     assert!(!skinr_state.data.read().unwrap().applied_thirdparty_skins.contains_key(&ship_id));
 }
+
+#[cfg(test)]
+#[path = "quasar_cosmetics_live_extra_unit_tests.rs"]
+mod quasar_cosmetics_live_extra_unit_tests;

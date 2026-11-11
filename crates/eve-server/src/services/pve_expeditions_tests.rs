@@ -1,5 +1,9 @@
 //! Unit and integration tests for `pve_expeditions`.
 
+#[cfg(test)]
+#[path = "pve_expeditions_ops_cov_tests.rs"]
+mod pve_expeditions_ops_cov_tests;
+
 use super::*;
 use crate::router::ServerContext;
 use eve_db::clock::VirtualServerClock;

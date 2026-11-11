@@ -1036,3 +1036,7 @@ pub fn enter_combat_anomaly_site(
 #[cfg(test)]
 #[path = "pve_expeditions_tests.rs"]
 mod pve_expeditions_tests;
+
+#[cfg(test)]
+#[path = "pve_expeditions_edges_tests.rs"]
+mod pve_expeditions_edges_tests;

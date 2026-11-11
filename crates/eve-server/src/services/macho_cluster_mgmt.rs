@@ -1703,3 +1703,7 @@ fn handle_session_attribute_update(
 #[cfg(test)] #[path = "macho_cluster_mgmt_tests.rs"]
 mod macho_cluster_mgmt_tests;
 
+#[cfg(test)]
+#[path = "macho_cluster_mgmt_edges_tests.rs"]
+mod macho_cluster_mgmt_edges_tests;
+

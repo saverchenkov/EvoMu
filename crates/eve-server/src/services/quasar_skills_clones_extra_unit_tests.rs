@@ -422,3 +422,296 @@ fn test_skilltype_skill_level_and_active_implants_encodings_and_permissions() {
     .expect("admin query implants via wire");
     assert_eq!(imp_wire_resp.value, imp_resp.value);
 }
+
+#[test]
+fn test_quasar_skills_clones_additional_branches_and_validation() {
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let descriptors = Arc::new(QuasarDescriptorRegistry::empty_with_builtins());
+    let router = PublicGatewayRouter::new(descriptors, Arc::clone(&db), Arc::clone(&sde));
+    let mgr = Arc::new(SkillPlanManager::new_with_db(Some(Arc::clone(&db))));
+    register_skill_handlers(&router, Arc::clone(&db), Arc::clone(&mgr));
+
+    let handlers = router.handlers.read().unwrap();
+    let dummy_any = GoogleAny::default();
+    let cid = 90_000_001_u32;
+    let other_cid = 90_000_002_u32;
+    let ctx = AuthoritativeContext::for_session(
+        Some(1),
+        Some(cid),
+        Some(1_000_009),
+        corp_roles::ROLE_DIRECTOR,
+        "tranquility",
+        vec![1],
+    );
+    let other_ctx = AuthoritativeContext::for_session(
+        Some(2),
+        Some(other_cid),
+        Some(1_000_009),
+        0,
+        "tranquility",
+        vec![1],
+    );
+
+    // 1. Malformed blob in SkillPlanManager::new_with_db falls back safely
+    db.with_mut_snapshot(|s| {
+        s.quasar_state_blobs.insert("quasar_skill_plans".into(), "{bad json".into());
+    });
+    let bad_mgr = SkillPlanManager::new_with_db(Some(Arc::clone(&db)));
+    assert!(bad_mgr.get_personal_plans(cid).is_empty());
+
+    // 2. Active plan pointing to non-existent UUID returns None; extract_uuid rejects wrong length
+    let bogus_uuid = [0x55_u8; 16];
+    mgr.set_active_plan(cid, bogus_uuid);
+    assert!(mgr.get_active_plan(cid).is_none());
+    mgr.clear_active_plan(cid);
+
+    let mut short_id = DynamicQuasarMessage::new("Identifier");
+    short_id.fields.insert(1, DynamicValue::Bytes(vec![1, 2, 3]));
+    let mut short_req = DynamicQuasarMessage::new("Req");
+    short_req.fields.insert(1, DynamicValue::Message(Box::new(short_id)));
+    assert_eq!(extract_uuid(&short_req, 1), None);
+
+    // 3. GetActiveRequest when NO active plan is set returns 16 zero bytes
+    let no_act_1 = handlers["eve_public.skill.plan.GetActiveRequest"](
+        &ctx,
+        &dummy_any,
+        &DynamicQuasarMessage::new("Active"),
+    )
+    .expect("skill.plan.GetActiveRequest empty");
+    assert!(!no_act_1.value.is_empty());
+    let no_act_2 = handlers["eve_public.character.skill.plan.GetActiveRequest"](
+        &ctx,
+        &dummy_any,
+        &DynamicQuasarMessage::new("Active"),
+    )
+    .expect("character.skill.plan.GetActiveRequest empty");
+    assert!(!no_act_2.value.is_empty());
+
+    // 4. CreateRequest with whitespace-only name -> STATUS_BAD_REQUEST
+    let mut ws_create = DynamicQuasarMessage::new("Create");
+    ws_create.fields.insert(1, DynamicValue::String("   ".into()));
+    assert_eq!(
+        handlers["eve_public.skill.plan.CreateRequest"](&ctx, &dummy_any, &ws_create)
+            .unwrap_err()
+            .0,
+        STATUS_BAD_REQUEST
+    );
+    assert_eq!(
+        handlers["eve_public.character.skill.plan.CreateRequest"](&ctx, &dummy_any, &ws_create)
+            .unwrap_err()
+            .0,
+        STATUS_BAD_REQUEST
+    );
+
+    // 5. character.skill.plan.CreateRequest with DynamicValue::String and SetActiveRequest clear
+    let mut str_create = DynamicQuasarMessage::new("Create");
+    str_create.fields.insert(1, DynamicValue::String("Quick String Plan".into()));
+    handlers["eve_public.character.skill.plan.CreateRequest"](&ctx, &dummy_any, &str_create)
+        .expect("create string plan");
+    let plan_uuid = mgr.get_personal_plans(cid)[0].uuid;
+
+    // Another character can fetch this plan via GetSharedRequest!
+    let shared_resp = handlers["eve_public.character.skill.plan.GetSharedRequest"](
+        &other_ctx,
+        &dummy_any,
+        &uuid_msg(1, plan_uuid),
+    )
+    .expect("shared plan readable by other character");
+    assert!(shared_resp
+        .type_url
+        .ends_with("eve_public.character.skill.plan.GetSharedResponse"));
+
+    // Clear active plan via character.skill.plan.SetActiveRequest with empty message
+    handlers["eve_public.character.skill.plan.SetActiveRequest"](
+        &ctx,
+        &dummy_any,
+        &DynamicQuasarMessage::new("Clear"),
+    )
+    .expect("clear char active plan");
+
+    // 6. Error branches for character.skill.plan.{Get,GetShared,SetName,SetDescription,SetSkillRequirements,Delete}
+    let unknown_uuid = [0x99_u8; 16];
+    let empty_msg = DynamicQuasarMessage::new("Empty");
+    for ep in [
+        "eve_public.character.skill.plan.GetRequest",
+        "eve_public.character.skill.plan.GetSharedRequest",
+        "eve_public.character.skill.plan.SetNameRequest",
+        "eve_public.character.skill.plan.SetDescriptionRequest",
+        "eve_public.character.skill.plan.SetSkillRequirementsRequest",
+        "eve_public.character.skill.plan.DeleteRequest",
+        "eve_public.character.skill.plan.milestone.GetAllRequest",
+        "eve_public.character.skill.plan.milestone.CreateRequest",
+        "eve_public.character.skill.plan.milestone.DeleteRequest",
+        "eve_public.character.skill.plan.milestone.SetDescriptionRequest",
+    ] {
+        assert_eq!(
+            handlers[ep](&ctx, &dummy_any, &empty_msg).unwrap_err().0,
+            STATUS_BAD_REQUEST,
+            "expected STATUS_BAD_REQUEST on {ep}"
+        );
+    }
+
+    let mut unknown_name = uuid_msg(1, unknown_uuid);
+    unknown_name.fields.insert(2, DynamicValue::String("Valid".into()));
+    assert_eq!(
+        handlers["eve_public.character.skill.plan.SetNameRequest"](&ctx, &dummy_any, &unknown_name)
+            .unwrap_err()
+            .0,
+        STATUS_NOT_FOUND
+    );
+    assert_eq!(
+        handlers["eve_public.character.skill.plan.SetDescriptionRequest"](
+            &ctx,
+            &dummy_any,
+            &uuid_msg(1, unknown_uuid),
+        )
+        .unwrap_err()
+        .0,
+        STATUS_NOT_FOUND
+    );
+    assert_eq!(
+        handlers["eve_public.character.skill.plan.SetSkillRequirementsRequest"](
+            &ctx,
+            &dummy_any,
+            &uuid_msg(1, unknown_uuid),
+        )
+        .unwrap_err()
+        .0,
+        STATUS_NOT_FOUND
+    );
+
+    // Invalid skill requirement (non-skill type 587) on SetSkillRequirementsRequest -> STATUS_BAD_REQUEST
+    let mut bad_req_item = DynamicQuasarMessage::new("ReqItem");
+    bad_req_item.fields.insert(1, DynamicValue::Uint32(587));
+    bad_req_item.fields.insert(2, DynamicValue::Uint32(2));
+    let mut bad_set_reqs = uuid_msg(1, plan_uuid);
+    bad_set_reqs.fields.insert(
+        2,
+        DynamicValue::Repeated(vec![DynamicValue::Message(Box::new(bad_req_item))]),
+    );
+    assert_eq!(
+        handlers["eve_public.character.skill.plan.SetSkillRequirementsRequest"](
+            &ctx,
+            &dummy_any,
+            &bad_set_reqs,
+        )
+        .unwrap_err()
+        .0,
+        STATUS_BAD_REQUEST
+    );
+
+    // 7. Milestone error branches: invalid skill_requirement, unknown plan, and other_ctx (no plans)
+    let mut bad_ms_attr = uuid_msg(1, plan_uuid);
+    let mut bad_sr = DynamicQuasarMessage::new("SR");
+    bad_sr.fields.insert(1, DynamicValue::Uint32(587)); // Rifter, not a skill
+    bad_sr.fields.insert(2, DynamicValue::Uint32(3));
+    bad_ms_attr.fields.insert(3, DynamicValue::Message(Box::new(bad_sr)));
+    let mut bad_ms_req = DynamicQuasarMessage::new("MsCreate");
+    bad_ms_req.fields.insert(1, DynamicValue::Message(Box::new(bad_ms_attr)));
+    assert_eq!(
+        handlers["eve_public.character.skill.plan.milestone.CreateRequest"](
+            &ctx,
+            &dummy_any,
+            &bad_ms_req,
+        )
+        .unwrap_err()
+        .0,
+        STATUS_BAD_REQUEST
+    );
+
+    let mut unk_ms_attr = uuid_msg(1, unknown_uuid);
+    unk_ms_attr.fields.insert(4, DynamicValue::String("Missing plan".into()));
+    let mut unk_ms_req = DynamicQuasarMessage::new("MsCreate");
+    unk_ms_req.fields.insert(1, DynamicValue::Message(Box::new(unk_ms_attr)));
+    assert_eq!(
+        handlers["eve_public.character.skill.plan.milestone.CreateRequest"](
+            &ctx,
+            &dummy_any,
+            &unk_ms_req,
+        )
+        .unwrap_err()
+        .0,
+        STATUS_NOT_FOUND
+    );
+    assert_eq!(
+        handlers["eve_public.character.skill.plan.milestone.GetAllRequest"](
+            &ctx,
+            &dummy_any,
+            &uuid_msg(1, unknown_uuid),
+        )
+        .unwrap_err()
+        .0,
+        STATUS_NOT_FOUND
+    );
+    assert_eq!(
+        handlers["eve_public.character.skill.plan.milestone.DeleteRequest"](
+            &other_ctx,
+            &dummy_any,
+            &uuid_msg(1, unknown_uuid),
+        )
+        .unwrap_err()
+        .0,
+        STATUS_NOT_FOUND
+    );
+    assert_eq!(
+        handlers["eve_public.character.skill.plan.milestone.SetDescriptionRequest"](
+            &other_ctx,
+            &dummy_any,
+            &uuid_msg(1, unknown_uuid),
+        )
+        .unwrap_err()
+        .0,
+        STATUS_NOT_FOUND
+    );
+    assert_eq!(
+        handlers["eve_public.character.skill.plan.DeleteRequest"](
+            &other_ctx,
+            &dummy_any,
+            &uuid_msg(1, unknown_uuid),
+        )
+        .unwrap_err()
+        .0,
+        STATUS_NOT_FOUND
+    );
+
+    // 8. eve.skilltype.GetRequest via raw WireMessage in GoogleAny (both direct varint and nested message)
+    let mut wire_direct = Vec::new();
+    encode_varint_field(1, 3300, &mut wire_direct);
+    let st_wire1 = handlers["eve.skilltype.GetRequest"](
+        &ctx,
+        &GoogleAny {
+            type_url: String::new(),
+            value: wire_direct,
+        },
+        &empty_msg,
+    )
+    .expect("skilltype direct wire");
+    assert!(!st_wire1.value.is_empty());
+
+    let mut sub_st = Vec::new();
+    encode_varint_field(1, 3300, &mut sub_st);
+    let mut wire_nested = Vec::new();
+    encode_bytes_field(1, &sub_st, &mut wire_nested);
+    let st_wire2 = handlers["eve.skilltype.GetRequest"](
+        &ctx,
+        &GoogleAny {
+            type_url: String::new(),
+            value: wire_nested,
+        },
+        &empty_msg,
+    )
+    .expect("skilltype nested wire");
+    assert_eq!(st_wire1.value, st_wire2.value);
+
+    // 9. eve.skill.character.api.GetLevelRequest untrained skill -> 0
+    let mut untrained_req = DynamicQuasarMessage::new("Lvl");
+    untrained_req.fields.insert(2, DynamicValue::Int32(3301));
+    let untrained_resp = handlers["eve.skill.character.api.GetLevelRequest"](
+        &ctx,
+        &dummy_any,
+        &untrained_req,
+    )
+    .expect("untrained skill level");
+    assert_eq!(untrained_resp.value, vec![0x08, 0x00]);
+}

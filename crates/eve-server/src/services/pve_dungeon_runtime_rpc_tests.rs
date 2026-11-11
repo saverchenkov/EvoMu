@@ -321,3 +321,7 @@ async fn sde_dungeon_and_operation_registration_and_hull_restriction() {
         .expect_err("oversized hull rejected");
     assert_eq!(hull_err.code, "ShipRestrictedByDungeonGate");
 }
+
+#[cfg(test)]
+#[path = "pve_dungeon_runtime_rpc_extra_unit_tests.rs"]
+mod pve_dungeon_runtime_rpc_extra_unit_tests;

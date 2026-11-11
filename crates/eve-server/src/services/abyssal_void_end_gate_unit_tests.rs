@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 //! Semantic unit tests split from `abyssal_void_gates_extra_unit_tests`.
 
 #![forbid(unsafe_code)]

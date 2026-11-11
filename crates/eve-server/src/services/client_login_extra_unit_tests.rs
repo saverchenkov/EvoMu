@@ -51,7 +51,7 @@ async fn login_err(
         .code
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn alert_telemetry_caps_proxy_traces_and_log_mode_variants() {
     let ctx = test_ctx();
     let mut sess = auth_session(1, 90_000_001, 98_000_001, 30_000_142);
@@ -218,10 +218,7 @@ async fn alert_telemetry_caps_proxy_traces_and_log_mode_variants() {
         let dummy: Vec<serde_json::Value> = (0..256)
             .map(|i| serde_json::json!({ "stack_id": i }))
             .collect();
-        snap.service_state_blobs.insert(
-            "alert_proxy_traces".into(),
-            serde_json::to_string(&dummy).unwrap(),
-        );
+        snap.cluster_and_runtime.alert_proxy_traces = Some(serde_json::Value::Array(dummy));
     });
     login_ok(
         &ctx,
@@ -236,9 +233,12 @@ async fn alert_telemetry_caps_proxy_traces_and_log_mode_variants() {
     )
     .await;
     let proxy_len = ctx.db.with_snapshot(|snap| {
-        let v: Vec<serde_json::Value> =
-            serde_json::from_str(&snap.service_state_blobs["alert_proxy_traces"]).unwrap();
-        v.len()
+        snap.cluster_and_runtime
+            .alert_proxy_traces
+            .as_ref()
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .len()
     });
     assert_eq!(proxy_len, 256);
 
@@ -273,7 +273,7 @@ async fn alert_telemetry_caps_proxy_traces_and_log_mode_variants() {
     assert!(bc_sz <= ALERT_REGISTRY_CAP);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cohorts_lock_types_population_cap_portrait_station_and_skill_handlers() {
     let ctx = test_ctx();
     let uid = 1_u64;
@@ -315,9 +315,9 @@ async fn cohorts_lock_types_population_cap_portrait_station_and_skill_handlers()
         .contains(&PyRep::String("cohort_new_player".into())));
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(
-            format!("user_cohorts:{uid}"),
-            serde_json::to_string(&vec!["custom_cohort_a", "custom_cohort_b"]).unwrap(),
+        snap.cluster_and_runtime.user_cohorts.insert(
+            uid,
+            vec!["custom_cohort_a".into(), "custom_cohort_b".into()],
         );
     });
     let custom_cohorts =
@@ -353,8 +353,9 @@ async fn cohorts_lock_types_population_cap_portrait_station_and_skill_handlers()
         ("other_lock", 1),
     ] {
         ctx.db.with_mut_snapshot(|snap| {
-            snap.service_state_blobs
-                .insert(format!("character_lock:{cid}"), raw.into());
+            snap.cluster_and_runtime
+                .character_locks
+                .insert(cid, raw.into());
         });
         assert_eq!(
             login_ok(
@@ -572,5 +573,237 @@ async fn cohorts_lock_types_population_cap_portrait_station_and_skill_handlers()
     assert_eq!(
         login_err(&ctx, &mut ghost_sess, "skillMgr2", "GetFreeSkillPoints", &[]).await,
         "CharacterNotFound"
+    );
+}
+
+#[tokio::test]
+async fn login_alert_counts_modes_cohorts_downgrade_blacklist_locks_and_paperdoll_resculpt() {
+    let ctx = test_ctx();
+    let mut gm = auth_session(1, 90_000_001, 98_000_001, 30_000_142);
+    gm.role = service_roles::ROLE_GMH | service_roles::ROLE_PLAYER;
+    let mut player = auth_session(2, 90_000_002, 98_000_002, 30_000_142);
+    player.role = service_roles::ROLE_PLAYER;
+
+    // 1. delivered_bean_count (L45 -> 0, 1, -1): absent=0, in-memory=5, DB-only after mem clear=12
+    assert_eq!(delivered_bean_count(&ctx, 9_999), 0);
+    login_ok(
+        &ctx,
+        &mut player,
+        "alert",
+        "GroupBeanDelivery",
+        &[PyRep::Dict(vec![(PyRep::Integer(444), PyRep::Integer(5))])],
+    )
+    .await;
+    assert_eq!(delivered_bean_count(&ctx, 444), 5);
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.cluster_and_runtime.alert_bean_counts.get("444").copied()),
+        Some(5)
+    );
+    // DB fallback path when memory is cleared
+    {
+        let mut st = ctx.alert_telemetry.lock().unwrap();
+        st.bean_counts.clear();
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cluster_and_runtime.alert_bean_counts.insert("445".into(), 12);
+    });
+    assert_eq!(delivered_bean_count(&ctx, 445), 12);
+
+    // 2. GroupBeanDelivery Bytes arm (L399)
+    login_ok(
+        &ctx,
+        &mut player,
+        "alert",
+        "GroupBeanDelivery",
+        &[PyRep::Bytes(vec![1, 2, 3, 4, 5, 6])],
+    )
+    .await;
+    assert_eq!(
+        ctx.db
+            .with_snapshot(|s| s.cluster_and_runtime.alert_group_bean_bytes.as_ref().and_then(|v| v.as_i64())),
+        Some(6)
+    );
+
+    // 3. log_mode_override (L72), SendClientStackTraceAlert (L141), GetLogModeForError (L242),
+    //    LogModeChanged (L272), SendProxyStackTraceAlert (L314)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cluster_and_runtime
+            .alert_log_modes
+            .insert("1".into(), "L".into());
+    });
+    let client_alert = login_ok(
+        &ctx,
+        &mut player,
+        "alert",
+        "SendClientStackTraceAlert",
+        &[
+            PyRep::Tuple(vec![PyRep::Integer(111_222), PyRep::String("key1".into())]),
+            PyRep::String("line1\nRuntimeError: boom".into()),
+        ],
+    )
+    .await;
+    let PyRep::Tuple(client_pair) = client_alert else {
+        panic!("expected tuple from SendClientStackTraceAlert");
+    };
+    assert_eq!(client_pair[0], PyRep::Integer(1));
+    assert_eq!(client_pair[1], PyRep::ascii_bytes("L"));
+
+    // LogModeChanged denies player, allows GM, updates GetLogModeForError
+    assert_eq!(
+        login_err(
+            &ctx,
+            &mut player,
+            "alert",
+            "LogModeChanged",
+            &[PyRep::Integer(2), PyRep::String("I".into())],
+        )
+        .await,
+        "UserError"
+    );
+    login_ok(
+        &ctx,
+        &mut gm,
+        "alert",
+        "LogModeChanged",
+        &[PyRep::Integer(2), PyRep::String("I".into())],
+    )
+    .await;
+    let mode_2 = login_ok(
+        &ctx,
+        &mut player,
+        "alert",
+        "GetLogModeForError",
+        &[PyRep::Integer(2)],
+    )
+    .await;
+    assert_eq!(mode_2, PyRep::Tuple(vec![PyRep::Integer(2), PyRep::ascii_bytes("I")]));
+
+    // Dict form of GetLogModeForError + SendProxyStackTraceAlert
+    let bulk_modes = login_ok(
+        &ctx,
+        &mut player,
+        "alert",
+        "GetLogModeForError",
+        &[PyRep::Dict(vec![(PyRep::Integer(77), PyRep::Integer(1))])],
+    )
+    .await;
+    assert!(matches!(bulk_modes, PyRep::Tuple(ref p) if p.len() == 2));
+    let proxy_rep = login_ok(
+        &ctx,
+        &mut player,
+        "alert",
+        "SendProxyStackTraceAlert",
+        &[PyRep::Integer(333_444), PyRep::String("proxy trace".into())],
+    )
+    .await;
+    assert!(matches!(proxy_rep, PyRep::Tuple(ref t) if t[0] == PyRep::Integer(2)));
+    assert!(ctx
+        .db
+        .with_snapshot(|s| s.cluster_and_runtime.alert_proxy_traces.is_some()));
+
+    // 4. config.GetBlackListedPlanets (L429) sorts and deduplicates
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cluster_and_runtime.blacklisted_planets = Some(vec![40_009_002, 40_009_001, 40_009_002]);
+    });
+    let bl = login_ok(&ctx, &mut player, "config", "GetBlackListedPlanets", &[]).await;
+    assert_eq!(
+        bl,
+        PyRep::List(vec![PyRep::Integer(40_009_001), PyRep::Integer(40_009_002)])
+    );
+
+    // 5. charUnboundMgr.GetCohortsForUser (L491), userSvc.GetRedeemTokens (L521), GetCharOmegaDowngradeStatus (L524)
+    let default_cohorts = login_ok(&ctx, &mut gm, "charUnboundMgr", "GetCohortsForUser", &[]).await;
+    assert!(matches!(default_cohorts, PyRep::List(ref l) if !l.is_empty()));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cluster_and_runtime
+            .user_cohorts
+            .insert(1, vec!["alpha_cohort".into()]);
+    });
+    assert_eq!(
+        login_ok(&ctx, &mut gm, "charUnboundMgr", "GetCohortsForUser", &[]).await,
+        PyRep::List(vec![PyRep::String("alpha_cohort".into())])
+    );
+    assert!(matches!(
+        login_ok(&ctx, &mut gm, "userSvc", "GetRedeemTokens", &[]).await,
+        PyRep::List(_)
+    ));
+    assert_eq!(
+        login_ok(&ctx, &mut gm, "charUnboundMgr", "GetCharOmegaDowngradeStatus", &[]).await,
+        PyRep::Bool(false)
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cluster_and_runtime.omega_downgraded.insert(1);
+    });
+    assert_eq!(
+        login_ok(&ctx, &mut gm, "charUnboundMgr", "GetCharOmegaDowngradeStatus", &[]).await,
+        PyRep::Bool(true)
+    );
+
+    // 6. charUnboundMgr.GetCharacterLockType (L686) & charMgr.GetPaperdollState (L810, L826 `||` -> `&&`)
+    assert_eq!(
+        login_ok(
+            &ctx,
+            &mut gm,
+            "charUnboundMgr",
+            "GetCharacterLockType",
+            &[PyRep::Integer(90_000_001)],
+        )
+        .await,
+        PyRep::None
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cluster_and_runtime
+            .character_locks
+            .insert(90_000_001, "transfer".into());
+    });
+    assert_eq!(
+        login_ok(
+            &ctx,
+            &mut gm,
+            "charUnboundMgr",
+            "GetCharacterLockType",
+            &[PyRep::Integer(90_000_001)],
+        )
+        .await,
+        PyRep::Integer(1)
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cluster_and_runtime
+            .character_locks
+            .insert(90_000_001, "delete_pending".into());
+    });
+    assert_eq!(
+        login_ok(
+            &ctx,
+            &mut gm,
+            "charUnboundMgr",
+            "GetCharacterLockType",
+            &[PyRep::Integer(90_000_001)],
+        )
+        .await,
+        PyRep::Integer(2)
+    );
+
+    // GetPaperdollState: ONLY cluster_and_runtime.resculpt_pending (kills L826 `||` -> `&&`), plus clamp [0,4]
+    assert_eq!(
+        login_ok(&ctx, &mut gm, "charMgr", "GetPaperdollState", &[]).await,
+        PyRep::Integer(0)
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cluster_and_runtime.resculpt_pending.insert(90_000_001);
+    });
+    assert_eq!(
+        login_ok(&ctx, &mut gm, "charMgr", "GetPaperdollState", &[]).await,
+        PyRep::Integer(1),
+        "cluster_and_runtime.resculpt_pending alone must return state 1"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cluster_and_runtime
+            .paperdoll_states
+            .insert(90_000_001, "99".into());
+    });
+    assert_eq!(
+        login_ok(&ctx, &mut gm, "charMgr", "GetPaperdollState", &[]).await,
+        PyRep::Integer(4)
     );
 }

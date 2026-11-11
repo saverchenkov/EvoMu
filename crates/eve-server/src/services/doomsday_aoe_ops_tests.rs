@@ -210,4 +210,13 @@ async fn test_dispatch_superweapon_aoe_rpc_cone_spatial_and_multipoint() {
         reaper_res.dict_get("mode").and_then(|v| v.as_str()),
         Some("MultiPointReaper")
     );
+
+    // Direct check for `cancel_aoe_superweapon_cycles_for_ship`
+    assert!(!ctx
+        .db
+        .with_snapshot(|s| s.superweapon_runtime.active_cycles.is_empty()));
+    cancel_aoe_superweapon_cycles_for_ship(&ctx, ship_id);
+    assert!(ctx
+        .db
+        .with_snapshot(|s| s.superweapon_runtime.active_cycles.is_empty()));
 }

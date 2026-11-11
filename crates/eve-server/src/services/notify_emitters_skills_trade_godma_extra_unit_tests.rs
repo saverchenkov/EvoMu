@@ -530,3 +530,392 @@ fn browser_lockdown_legacy_entries_hash_and_localization_qa_wrap_eviction() {
         PyRep::None
     );
 }
+
+#[tokio::test]
+async fn dogma_online_cargo_docked_burnout_zero_type_tp_ewar_and_lockdown_text_mutants() {
+    let mut sde = (*shared_sde()).clone();
+    let tp_tid = 95_379_u32;
+    let mut tp_type = sde.types.get(&440).cloned().expect("seed module 440");
+    tp_type.type_id = tp_tid;
+    tp_type.group_id = 379; // Target Painter
+    tp_type.category_id = 7;
+    tp_type.default_attributes.insert(attr_ids::CPU, 10.0);
+    tp_type.default_attributes.insert(attr_ids::POWER, 1.0);
+    tp_type.default_attributes.insert(554, 30.0); // signatureRadiusBonus
+    tp_type.default_attributes.insert(attr_ids::MAX_RANGE, 50_000.0);
+    tp_type.default_attributes.insert(158, 20_000.0); // falloff
+    sde.types.insert(tp_tid, tp_type);
+
+    let base_unix = 1_775_500_000_u64;
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let char_id = 90_000_001_i64;
+    db.acquire_online_lock(1, 601, Some(char_id), true, base_unix)
+        .expect("online lock");
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(base_unix)));
+
+    let sys_id = 30_000_142_u32;
+    let station_id = 60_003_760_i64;
+    let st_id = 1_000_000_955_001_i64;
+    let ship_id = 100_000_001_i64;
+    let other_ship_id = 100_000_991_i64;
+    let mod_other_loc = 955_101_i64;
+    let mod_cargo = 955_102_i64;
+    let mod_ghost = 955_103_i64;
+    let mod_burned = 955_104_i64;
+    let mod_just_under_burn = 955_105_i64;
+    let tp_mod_1 = 955_201_i64;
+    let tp_mod_2 = 955_202_i64;
+    let target_ship_id = 955_301_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = Some(st_id);
+        }
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.location_id = sys_id as i64;
+            sh.flag = InventoryFlag::None;
+        }
+        snap.skills.entry(char_id).or_default().insert(
+            3454,
+            eve_db::TrainedSkillRecord {
+                type_id: 3454,
+                level: 3,
+                skill_points: 24_000.0,
+            },
+        );
+        for (item_id, type_id, loc, flag, dyn_attrs) in [
+            (other_ship_id, 587_u32, sys_id as i64, InventoryFlag::None, vec![]),
+            (mod_other_loc, 440, other_ship_id, InventoryFlag::HiSlot0, vec![]),
+            (mod_cargo, 440, ship_id, InventoryFlag::Cargo, vec![]),
+            (
+                mod_burned,
+                440,
+                ship_id,
+                InventoryFlag::MedSlot0,
+                vec![(attr_ids::HP_STRUCT, 40.0), (attr_ids::DAMAGE, 40.0)],
+            ),
+            (
+                mod_just_under_burn,
+                440,
+                ship_id,
+                InventoryFlag::MedSlot3,
+                vec![(attr_ids::HP_STRUCT, 40.0), (attr_ids::DAMAGE, 39.0)],
+            ),
+            (tp_mod_1, tp_tid, ship_id, InventoryFlag::MedSlot1, vec![]),
+            (tp_mod_2, tp_tid, ship_id, InventoryFlag::MedSlot2, vec![]),
+            (target_ship_id, 587, sys_id as i64, InventoryFlag::None, vec![]),
+        ] {
+            let mut rec = InventoryItemRecord {
+                item_id,
+                type_id,
+                owner_id: char_id,
+                location_id: loc,
+                flag,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            };
+            for (k, v) in dyn_attrs {
+                rec.dynamic_attributes.insert(k, v);
+            }
+            snap.items.insert(item_id, rec);
+        }
+        snap.module_online_states.insert(mod_burned, false);
+        snap.module_online_states.insert(mod_just_under_burn, false);
+        snap.module_online_states.insert(tp_mod_1, true);
+        snap.module_online_states.insert(tp_mod_2, true);
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    for (id, tid) in [(ship_id, 587_u32), (target_ship_id, 587_u32)] {
+        let mut cs = CombatState::default();
+        cs.max_capacitor = 1_000.0;
+        cs.capacitor = 1_000.0;
+        if id == target_ship_id {
+            cs.tp_sig_multiplier = Some(1.3);
+        }
+        sys.spawn_ball_with_meta(
+            Ball {
+                id,
+                type_id: tid,
+                position: DVec3::new(if id == target_ship_id { 1_000.0 } else { 0.0 }, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            cs,
+            SlimItemMeta::default(),
+        )
+        .await
+        .unwrap();
+    }
+
+    let make_mod = |item_id: i64, type_id: u32, flag_id: u16, state: eve_dogma::ModuleState| {
+        eve_dogma::FittedModule {
+            item_id,
+            type_id,
+            flag_id,
+            state,
+            charge_type_id: None,
+            charge_quantity: 0,
+            damage_hp: 0.0,
+            max_hp: 40.0,
+            dynamic_attribute_overrides: std::collections::HashMap::new(),
+        }
+    };
+
+    let mut fit = eve_dogma::ShipFittingEngine::from_sde(ship_id, 587, &ctx.sde);
+    fit.set_character_skills(std::collections::HashMap::from([(3454, 3)]));
+    fit.modules.insert(mod_other_loc, make_mod(mod_other_loc, 440, InventoryFlag::MedSlot0 as u16, eve_dogma::ModuleState::Offline));
+    fit.modules.insert(mod_cargo, make_mod(mod_cargo, 440, InventoryFlag::MedSlot1 as u16, eve_dogma::ModuleState::Offline));
+    fit.modules.insert(mod_ghost, make_mod(mod_ghost, 440, InventoryFlag::MedSlot2 as u16, eve_dogma::ModuleState::Offline));
+
+    let mut sess = SessionState::new(601);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.station_id = Some(station_id);
+
+    // 1. Module on other ship OR in Cargo (`was_fitted_in_db` must be false) -> succeeds when present in fit
+    ctx.store_ship_fitting(ship_id, fit.clone());
+    assert_eq!(
+        handle_dogma_set_module_online(&ctx, &mut sess, &[PyRep::Integer(ship_id), PyRep::Integer(mod_other_loc)])
+            .await
+            .unwrap()
+            .dict_get("online"),
+        Some(&PyRep::Bool(true))
+    );
+    ctx.store_ship_fitting(ship_id, fit.clone());
+    assert_eq!(
+        handle_dogma_set_module_online(&ctx, &mut sess, &[PyRep::Integer(ship_id), PyRep::Integer(mod_cargo)])
+            .await
+            .unwrap()
+            .dict_get("online"),
+        Some(&PyRep::Bool(true))
+    );
+
+    // 2. Ghost module absent from snap.items (`eff_tid == 0`) emits NO OnGodmaShipEffect;
+    //    real module (`eff_tid > 0`) DOES emit OnGodmaShipEffect
+    let _ = ctx.drain_notifications_for_char(char_id);
+    ctx.store_ship_fitting(ship_id, fit.clone());
+    assert!(
+        handle_dogma_set_module_online(&ctx, &mut sess, &[PyRep::Integer(ship_id), PyRep::Integer(mod_ghost)])
+            .await
+            .is_ok()
+    );
+    let ghost_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        !ghost_notifs.iter().any(|n| n.event == "OnGodmaShipEffect"),
+        "eff_tid == 0 must not emit OnGodmaShipEffect: {ghost_notifs:?}"
+    );
+
+    // 3. Stale docked session (`session.station_id = Some(station_id)` passes early guard) + stale cached fit
+    //    vs DB character state:
+    //    (a) ch.station_id = None, ch.structure_id = Some(st_id) -> ch_docked = true -> burned module succeeds
+    //    (b) ch.station_id = None, ch.structure_id = None -> ch_docked = false -> burned (`40 == 40`) fails ModuleBurnedOut,
+    //        while damage `39.0 < 40.0 - 1e-6` succeeds AND emits OnGodmaShipEffect
+    let mut burned_stale_fit = eve_dogma::ShipFittingEngine::from_sde(ship_id, 587, &ctx.sde);
+    burned_stale_fit.set_character_skills(std::collections::HashMap::from([(3454, 3)]));
+    burned_stale_fit.modules.insert(
+        mod_burned,
+        make_mod(mod_burned, 440, InventoryFlag::MedSlot0 as u16, eve_dogma::ModuleState::Offline),
+    );
+    ctx.store_ship_fitting(ship_id, burned_stale_fit.clone());
+    assert!(
+        handle_dogma_set_module_online(&ctx, &mut sess, &[PyRep::Integer(ship_id), PyRep::Integer(mod_burned)])
+            .await
+            .is_ok()
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.station_id = None;
+        ch.structure_id = None;
+        snap.module_online_states.insert(mod_burned, false);
+    });
+    ctx.store_ship_fitting(ship_id, burned_stale_fit);
+    assert_eq!(
+        handle_dogma_set_module_online(&ctx, &mut sess, &[PyRep::Integer(ship_id), PyRep::Integer(mod_burned)])
+            .await
+            .unwrap_err()
+            .code,
+        "ModuleBurnedOut"
+    );
+    let _ = ctx.drain_notifications_for_char(char_id);
+    // Rifter 587 has 3 med slots (MedSlot0..=MedSlot2); move mod_burned out so mod_just_under_burn fits MedSlot0 on rebuild.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(m) = snap.items.get_mut(&mod_burned) {
+            m.flag = InventoryFlag::Cargo;
+        }
+        if let Some(m) = snap.items.get_mut(&mod_just_under_burn) {
+            m.flag = InventoryFlag::MedSlot0;
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    assert!(
+        handle_dogma_set_module_online(&ctx, &mut sess, &[PyRep::Integer(ship_id), PyRep::Integer(mod_just_under_burn)])
+            .await
+            .is_ok()
+    );
+    let real_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        real_notifs.iter().any(|n| n.event == "OnGodmaShipEffect"),
+        "eff_tid > 0 must emit OnGodmaShipEffect: {real_notifs:?}"
+    );
+
+    // 4. Target Painter offline recomputes target `tp_sig_multiplier`:
+    //    2 active TPs -> taking 1 offline keeps Some(> 1.0); taking 2nd offline clears to None
+    sess.station_id = None;
+    let mut eff1 = eve_dogma::DogmaItemState::from_sde(tp_mod_1, tp_tid, &ctx.sde);
+    eff1.base_attributes.insert(554, 30.0);
+    eff1.base_attributes.insert(attr_ids::MAX_RANGE, 50_000.0);
+    eff1.base_attributes.insert(158, 20_000.0);
+    let mut eff2 = eff1.clone();
+    eff2.item_id = tp_mod_2;
+    {
+        let mut src = ctx.projected_ewar_sources.write().unwrap();
+        src.insert(tp_mod_1, ship_id);
+        src.insert(tp_mod_2, ship_id);
+    }
+    ctx.projected_ewar.write().unwrap().insert(
+        target_ship_id,
+        vec![
+            eve_dogma::ProjectedEwarEffect {
+                source_module_id: tp_mod_1,
+                source_module_type_id: tp_tid,
+                charge_type_id: None,
+                distance: 1_000.0,
+                overloaded: false,
+                effective_module: eff1,
+            },
+            eve_dogma::ProjectedEwarEffect {
+                source_module_id: tp_mod_2,
+                source_module_type_id: tp_tid,
+                charge_type_id: None,
+                distance: 1_000.0,
+                overloaded: false,
+                effective_module: eff2,
+            },
+        ],
+    );
+    let mut tp_fit = eve_dogma::ShipFittingEngine::from_sde(ship_id, 587, &ctx.sde);
+    tp_fit.set_character_skills(std::collections::HashMap::from([(3454, 3)]));
+    tp_fit.modules.insert(tp_mod_1, make_mod(tp_mod_1, tp_tid, InventoryFlag::MedSlot1 as u16, eve_dogma::ModuleState::Online));
+    tp_fit.modules.insert(tp_mod_2, make_mod(tp_mod_2, tp_tid, InventoryFlag::MedSlot2 as u16, eve_dogma::ModuleState::Online));
+    ctx.store_ship_fitting(ship_id, tp_fit);
+
+    handle_dogma_take_module_offline(&ctx, &mut sess, &[PyRep::Integer(ship_id), PyRep::Integer(tp_mod_1)])
+        .await
+        .expect("take first TP offline");
+    let cs_one_left = sys.get_combat_state(target_ship_id).await.unwrap().unwrap();
+    assert!(
+        cs_one_left.tp_sig_multiplier.is_some_and(|m| m > 1.0 + 1e-6),
+        "expected remaining TP sig multiplier > 1.0, got {:?}",
+        cs_one_left.tp_sig_multiplier
+    );
+
+    handle_dogma_take_module_offline(&ctx, &mut sess, &[PyRep::Integer(ship_id), PyRep::Integer(tp_mod_2)])
+        .await
+        .expect("take second TP offline");
+    let cs_none_left = sys.get_combat_state(target_ship_id).await.unwrap().unwrap();
+    assert_eq!(cs_none_left.tp_sig_multiplier, None);
+
+    // 5. emit_structure_cfg_data_changed emits OnCfgDataChanged("evelocations", [id, name, sys, x, y, z, None])
+    let _ = ctx.drain_notifications_for_char(char_id);
+    emit_structure_cfg_data_changed(&ctx, sys_id, st_id, "Alpha Keepstar", [10.0, 20.0, 30.0]);
+    let cfg_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        cfg_notifs.iter().any(|n| {
+            n.event == "OnCfgDataChanged"
+                && n.args
+                    == vec![
+                        PyRep::String("evelocations".into()),
+                        PyRep::List(vec![
+                            PyRep::Integer(st_id),
+                            PyRep::String("Alpha Keepstar".into()),
+                            PyRep::Integer(i64::from(sys_id)),
+                            PyRep::Real(10.0),
+                            PyRep::Real(20.0),
+                            PyRep::Real(30.0),
+                            PyRep::None,
+                        ]),
+                    ]
+        }),
+        "expected OnCfgDataChanged payload, got {cfg_notifs:?}"
+    );
+
+    // 6. browserLockdownSvc & Localization QA wrap non-empty / role checks
+    ctx.db.with_mut_snapshot(|snap| {
+        set_browser_lockdown_policy(
+            snap,
+            false,
+            "https://custom.home/",
+            vec![("https://a.example".into(), 1), ("https://b.example".into(), 2)],
+        );
+        snap.owner_notes.insert(
+            -8_960_000_000_000,
+            eve_db::OwnerNoteRecord {
+                note_id: -8_960_000_000_000,
+                character_id: 0,
+                item_id: 0,
+                label: "loc".into(),
+                note: r#"{"101":"Hello"}"#.into(),
+                timestamp_unix: 0,
+            },
+        );
+    });
+    assert_eq!(
+        call_browser_lockdown(&ctx, &sess, "IsBrowserInLockdown").unwrap().unwrap(),
+        PyRep::Bool(false)
+    );
+    assert_eq!(
+        call_browser_lockdown(&ctx, &sess, "GetDefaultHomePage").unwrap().unwrap(),
+        PyRep::String("https://custom.home/".into())
+    );
+    let PyRep::List(flagged) = call_browser_lockdown(&ctx, &sess, "GetFlaggedSitesList").unwrap().unwrap() else {
+        panic!("expected flagged sites list");
+    };
+    assert_eq!(flagged.len(), 2);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        set_browser_lockdown_policy(snap, true, "https://locked.home/", vec![]);
+    });
+    assert_eq!(
+        call_browser_lockdown(&ctx, &sess, "IsBrowserInLockdown").unwrap().unwrap(),
+        PyRep::Bool(true)
+    );
+
+    let mut unpriv = sess.clone();
+    unpriv.role = 0;
+    assert_eq!(
+        handle_update_localization_qa_wrap(&ctx, &unpriv, &[PyRep::Integer(1)])
+            .unwrap_err()
+            .code,
+        "RoleRequired"
+    );
+
+    sess.role = service_roles::ROLE_QA;
+    assert_eq!(
+        handle_update_localization_qa_wrap(&ctx, &sess, &[PyRep::Integer(1)]).unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(
+        handle_get_all_text_changes(&ctx, &sess, &[]).unwrap(),
+        PyRep::Dict(vec![(PyRep::Integer(101), PyRep::String("[QA:101] Hello".into()))])
+    );
+    assert_eq!(
+        handle_update_localization_qa_wrap(&ctx, &sess, &[PyRep::Integer(0)]).unwrap(),
+        PyRep::Bool(false)
+    );
+    assert_eq!(
+        handle_get_all_text_changes(&ctx, &sess, &[]).unwrap(),
+        PyRep::Dict(vec![(PyRep::Integer(101), PyRep::String("Hello".into()))])
+    );
+}

@@ -192,6 +192,16 @@ pub fn handle(
                             PyRep::None,
                             PyRep::None,
                         ]);
+                    } else if let Some(sys) =
+                        u32::try_from(id).ok().and_then(|sid| ctx.sde.solar_systems.get(&sid))
+                    {
+                        rows.push(vec![
+                            PyRep::Integer(id),
+                            PyRep::String(sys.name.clone()),
+                            PyRep::Integer(5),
+                            PyRep::Bool(false),
+                            PyRep::None,
+                        ]);
                     } else if id == 1 {
                         rows.push(vec![
                             PyRep::Integer(1),

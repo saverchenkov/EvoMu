@@ -480,3 +480,57 @@ fn query_handlers_sorting_filtering_and_error_paths() {
     assert_eq!(decode_ts_submsg(&extract_bytes_all(&e0, 3)[0]), 5_000);
     assert_eq!(decode_ts_submsg(&extract_bytes_all(&e0, 4)[0]), 200);
 }
+
+#[test]
+fn planet_hourly_reagent_yield_planet_types_and_radius_scaling() {
+    let mut sde = SdeRegistry::default();
+    // Fallback without planet/system returns SKYHOOK_HOURLY_REAGENT_YIELD (50)
+    assert_eq!(planet_hourly_reagent_yield(&sde, None, None, 81_143), 50);
+    assert_eq!(planet_hourly_reagent_yield(&sde, None, None, 81_144), 50);
+
+    // Base yield by planet type_id
+    assert_eq!(planet_type_base_hourly_reagent_yield(12), 1_200);
+    assert_eq!(planet_type_base_hourly_reagent_yield(2015), 1_000);
+    assert_eq!(planet_type_base_hourly_reagent_yield(2014), 600);
+    assert_eq!(planet_type_base_hourly_reagent_yield(2017), 400);
+    assert_eq!(planet_type_base_hourly_reagent_yield(11), 50);
+
+    // Radius scaling for Lava (2015) and Ice (12) planets
+    Arc::make_mut(&mut sde.celestials_by_system).insert(
+        30_000_142,
+        vec![
+            eve_sde::CelestialInfo {
+                celestial_id: 40_009_080,
+                solar_system_id: 30_000_142,
+                type_id: 2015,
+                group_id: 7,
+                name: "Lava I".into(),
+                radius: 5_000_000.0,
+                position: glam::DVec3::ZERO,
+                orbit_id: None,
+                orbit_index: None,
+                celestial_index: None,
+            },
+            eve_sde::CelestialInfo {
+                celestial_id: 40_009_081,
+                solar_system_id: 30_000_142,
+                type_id: 12,
+                group_id: 7,
+                name: "Ice II".into(),
+                radius: 7_500_000.0,
+                position: glam::DVec3::ZERO,
+                orbit_id: None,
+                orbit_index: None,
+                celestial_index: None,
+            },
+        ],
+    );
+    assert_eq!(
+        planet_hourly_reagent_yield(&sde, Some(40_009_080), Some(30_000_142), 81_143),
+        1_000
+    );
+    assert_eq!(
+        planet_hourly_reagent_yield(&sde, Some(40_009_081), Some(30_000_142), 81_144),
+        1_800
+    );
+}

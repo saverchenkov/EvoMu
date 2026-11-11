@@ -145,17 +145,89 @@ pub struct CharacterDailyGoal {
     pub expired: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MonthlyGoalProgress {
+    /// `(year, month)` in UTC downtime calendar for the current 12-step Monthly Progress Track.
+    pub year_month: (i32, u8),
+    /// Completed bonus days in this UTC month (`0..=12`, max 1 step per downtime `day_bucket`).
+    pub steps_completed: u32,
+    /// Last `day_bucket` that incremented `steps_completed` (prevents duplicate increments same day).
+    pub last_bonus_day_bucket: Option<u64>,
+    /// Milestone thresholds (`3`, `6`, `9`, `12`) already claimed for `year_month`.
+    #[serde(default)]
+    pub claimed_milestones: Vec<u32>,
+}
+
+/// Canonical AIR Daily Goals Monthly Progress Track milestone steps (`AIR_Daily_Goals.md`).
+pub const MONTHLY_TRACK_MAX_STEPS: u32 = 12;
+pub const MONTHLY_TRACK_MILESTONES: [u32; 4] = [3, 6, 9, 12];
+
+/// Fixed currency/SP reward grant for an AIR Daily Goals Monthly Progress Track milestone.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MonthlyMilestoneReward {
+    pub alpha_isk: i64,
+    pub alpha_em: i64,
+    pub alpha_sp: f64,
+    pub omega_isk: i64,
+    pub omega_em: i64,
+    pub omega_sp: f64,
+}
+
+/// Returns `(alpha_isk, alpha_em, alpha_sp, omega_isk, omega_em, omega_sp)` rewards for monthly milestones `3, 6, 9, 12`.
+/// Total Alpha track: 200,000 ISK + 2,250 EverMarks + 25,000 SP; Omega adds 1,000,000 ISK + 9,000 EM + 125,000 SP.
+pub fn monthly_milestone_rewards(milestone: u32) -> Option<MonthlyMilestoneReward> {
+    match milestone {
+        3 => Some(MonthlyMilestoneReward {
+            alpha_isk: 200_000,
+            omega_isk: 1_000_000,
+            ..Default::default()
+        }),
+        6 => Some(MonthlyMilestoneReward {
+            alpha_em: 2_250,
+            omega_em: 9_000,
+            ..Default::default()
+        }),
+        9 => Some(MonthlyMilestoneReward {
+            alpha_sp: 25_000.0,
+            omega_sp: 50_000.0,
+            ..Default::default()
+        }),
+        12 => Some(MonthlyMilestoneReward {
+            omega_sp: 75_000.0,
+            ..Default::default()
+        }),
+        _ => None,
+    }
+}
+
+/// Converts a UNIX timestamp to UTC calendar `(year, month)` (`1..=12`).
+pub fn utc_year_month(unix_secs: u64) -> (i32, u8) {
+    let z = (unix_secs / 86_400) as i64 + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let m = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + if m <= 2 { 1 } else { 0 };
+    (year as i32, m as u8)
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct DailyGoalStore {
     #[serde(default)]
     pub templates: Vec<DailyGoalTemplate>,
     #[serde(default)]
     pub character_goals: HashMap<u32, Vec<CharacterDailyGoal>>,
+    #[serde(default)]
+    pub monthly_progress: HashMap<u32, MonthlyGoalProgress>,
 }
 
 pub struct DailyGoalManager {
     pub templates: RwLock<Vec<DailyGoalTemplate>>,
     pub character_goals: RwLock<HashMap<u32, Vec<CharacterDailyGoal>>>,
+    pub monthly_progress: RwLock<HashMap<u32, MonthlyGoalProgress>>,
     db: Option<Arc<WorldRepository>>,
 }
 
@@ -164,6 +236,7 @@ impl Default for DailyGoalManager {
         Self {
             templates: RwLock::new(Vec::new()),
             character_goals: RwLock::new(HashMap::new()),
+            monthly_progress: RwLock::new(HashMap::new()),
             db: None,
         }
     }
@@ -181,14 +254,35 @@ pub fn daily_goal_window_unix(day_bucket: u64) -> (u64, u64) {
     (active_after, active_until)
 }
 
+fn is_sde_rotating_regular_template(tpl: &DailyGoalTemplate) -> bool {
+    tpl.uuid.starts_with(b"SDEDG") && tpl.category != 6
+}
+
 fn ensure_character_daily_goals_with_templates(
     goals: &mut Vec<CharacterDailyGoal>,
     templates: &[DailyGoalTemplate],
     now_unix: u64,
 ) -> bool {
     let mut changed = false;
-    let day_bucket = daily_goal_day_bucket(now_unix);
+    let day_bucket = if now_unix > 0 {
+        daily_goal_day_bucket(now_unix)
+    } else {
+        goals.iter().map(|g| g.day_bucket).max().unwrap_or(0)
+    };
+    let sde_regular_uuids: Vec<[u8; 16]> = templates
+        .iter()
+        .filter(|t| is_sde_rotating_regular_template(t))
+        .map(|t| t.uuid)
+        .collect();
+    // AIR Daily Goals selects 4 rotating regular goals per downtime day + DailyBonus (= 5 active).
+    let omitted_sde_uuid = if sde_regular_uuids.len() > 4 {
+        let idx = (day_bucket as usize) % sde_regular_uuids.len();
+        Some(sde_regular_uuids[idx])
+    } else {
+        None
+    };
     for tpl in templates {
+        let is_active_today = omitted_sde_uuid != Some(tpl.uuid);
         if let Some(existing) = goals.iter_mut().find(|g| g.uuid == tpl.uuid) {
             existing.template = tpl.clone();
             if existing.day_bucket > 0 && day_bucket > existing.day_bucket {
@@ -198,11 +292,22 @@ fn ensure_character_daily_goals_with_templates(
                 existing.paid_completion = false;
                 existing.completed_at_unix = None;
                 existing.claimed_at_unix = None;
-                existing.expired = false;
+                existing.expired = !is_active_today;
                 existing.day_bucket = day_bucket;
                 changed = true;
             } else if existing.day_bucket == 0 && day_bucket > 0 {
                 existing.day_bucket = day_bucket;
+                if !is_active_today
+                    || (existing.current_progress == 0
+                        && !existing.completed
+                        && !existing.claimed
+                        && !existing.paid_completion)
+                {
+                    existing.expired = !is_active_today;
+                }
+                changed = true;
+            } else if !is_active_today && !existing.expired {
+                existing.expired = true;
                 changed = true;
             }
         } else {
@@ -216,7 +321,7 @@ fn ensure_character_daily_goals_with_templates(
                 completed_at_unix: None,
                 claimed_at_unix: None,
                 day_bucket,
-                expired: false,
+                expired: !is_active_today,
             });
             changed = true;
         }
@@ -235,7 +340,7 @@ pub fn default_daily_bonus_template() -> DailyGoalTemplate {
         category: 6,
         career: 1,
         target: 2,
-        isk_reward: 500_000,
+        isk_reward: 0,
         sp_reward: 10_000.0,
         completion_cost_isk: None,
         completion_cost_evermarks: None,
@@ -249,19 +354,15 @@ pub fn default_daily_bonus_template() -> DailyGoalTemplate {
 pub fn build_sde_daily_goal_templates(sde: &eve_sde::SdeRegistry) -> Vec<DailyGoalTemplate> {
     let methods = sde.contribution_methods().unwrap_or_default();
     // DERIVED: Only localization message IDs come from `res:/staticdata/contributionmethods.fsdbinary`.
-    // Targets (25, 2_000, 5, 10, 1), ISK rewards (500_000), SP rewards (5_000.0), and EverMark/ISK
-    // completion costs (Some(2_500) EM, Some(100_000) ISK) are server-authored (DERIVED).
+    // Canonical targets (25, 2_000, 5, 3, 1), individual ISK rewards (500_000, 0.0 individual SP, +500 EverMarks char & corp),
+    // and progressive EverMark completion costs (2_500 -> 4_500 EM) align with `AIR_Daily_Goals.md` & `dailygoals/client/job.pyj`;
+    // 10_000 SP + monthly progress step come from completing 2+ goals (`DailyBonus`).
     let specs: [(&str, u32, u32, u64, i64, f64, Option<i64>, Option<i64>, u32, u32, u32); 5] = [
-        // DERIVED: target=25, isk_reward=500_000, sp_reward=5_000.0, completion_cost_evermarks=Some(2_500)
-        ("KillNPC", 1, 3, 25, 500_000, 5_000.0, None, Some(2_500), 659_195, 696_251, 659_196),
-        // DERIVED: target=2_000, isk_reward=500_000, sp_reward=5_000.0, completion_cost_isk=Some(100_000), completion_cost_evermarks=Some(2_500)
-        ("MineOre", 2, 2, 2_000, 500_000, 5_000.0, Some(100_000), Some(2_500), 659_218, 696_247, 659_219),
-        // DERIVED: target=5, isk_reward=500_000, sp_reward=5_000.0, completion_cost_evermarks=Some(2_500)
-        ("ScanSignature", 3, 1, 5, 500_000, 5_000.0, None, Some(2_500), 665_435, 696_245, 665_436),
-        // DERIVED: target=10, isk_reward=500_000, sp_reward=5_000.0, completion_cost_evermarks=Some(2_500)
-        ("SpaceJump", 4, 4, 10, 500_000, 5_000.0, None, Some(2_500), 541_824, 1_041_584, 1_004_955),
-        // DERIVED: target=1, isk_reward=500_000, sp_reward=5_000.0, completion_cost_evermarks=Some(2_500)
-        ("ManufactureItem", 5, 2, 1, 500_000, 5_000.0, None, Some(2_500), 665_394, 696_246, 665_412),
+        ("KillNPC", 1, 3, 25, 500_000, 0.0, None, Some(2_500), 659_195, 696_251, 659_196),
+        ("MineOre", 2, 2, 2_000, 500_000, 0.0, None, Some(2_500), 659_218, 696_247, 659_219),
+        ("ScanSignature", 3, 1, 5, 500_000, 0.0, None, Some(2_500), 665_435, 696_245, 665_436),
+        ("SpaceJump", 4, 4, 3, 500_000, 0.0, None, Some(2_500), 541_824, 1_041_584, 1_004_955),
+        ("ManufactureItem", 5, 2, 1, 500_000, 0.0, None, Some(2_500), 665_394, 696_246, 665_412),
     ];
     specs
         .into_iter()
@@ -358,6 +459,7 @@ impl DailyGoalManager {
                                 Some(DailyGoalStore {
                                     templates,
                                     character_goals: cg,
+                                    monthly_progress: HashMap::new(),
                                 })
                             } else {
                                 None
@@ -387,11 +489,129 @@ impl DailyGoalManager {
         Self {
             templates: RwLock::new(store.templates),
             character_goals: RwLock::new(character_goals),
+            monthly_progress: RwLock::new(store.monthly_progress),
             db,
         }
     }
 
-    
+    pub fn get_monthly_progress(&self, character_id: u32, now_unix: u64) -> MonthlyGoalProgress {
+        let ym = utc_year_month(if now_unix > 0 { now_unix } else { self.now_unix() });
+        let map = self.monthly_progress.read().unwrap_or_else(|e| e.into_inner());
+        match map.get(&character_id) {
+            Some(p) if p.year_month == ym => p.clone(),
+            _ => MonthlyGoalProgress {
+                year_month: ym,
+                steps_completed: 0,
+                last_bonus_day_bucket: None,
+                claimed_milestones: Vec::new(),
+            },
+        }
+    }
+
+    pub fn record_daily_bonus_completion(&self, character_id: u32, now_unix: u64) -> MonthlyGoalProgress {
+        let effective_now = if now_unix > 0 { now_unix } else { self.now_unix() };
+        let ym = utc_year_month(effective_now);
+        let day_bucket = daily_goal_day_bucket(effective_now);
+        let mut map = self.monthly_progress.write().unwrap_or_else(|e| e.into_inner());
+        let entry = map.entry(character_id).or_insert_with(|| MonthlyGoalProgress {
+            year_month: ym,
+            steps_completed: 0,
+            last_bonus_day_bucket: None,
+            claimed_milestones: Vec::new(),
+        });
+        if entry.year_month != ym {
+            *entry = MonthlyGoalProgress {
+                year_month: ym,
+                steps_completed: 0,
+                last_bonus_day_bucket: None,
+                claimed_milestones: Vec::new(),
+            };
+        }
+        if entry.last_bonus_day_bucket != Some(day_bucket)
+            && entry.steps_completed < MONTHLY_TRACK_MAX_STEPS
+        {
+            entry.last_bonus_day_bucket = Some(day_bucket);
+            entry.steps_completed += 1;
+        }
+        entry.clone()
+    }
+
+    pub fn claim_monthly_milestone(
+        &self,
+        character_id: u32,
+        milestone: u32,
+        is_omega: bool,
+        now_unix: u64,
+        db: &WorldRepository,
+    ) -> Result<MonthlyGoalProgress, (u32, String)> {
+        let Some(MonthlyMilestoneReward {
+            alpha_isk: a_isk,
+            alpha_em: a_em,
+            alpha_sp: a_sp,
+            omega_isk: o_isk,
+            omega_em: o_em,
+            omega_sp: o_sp,
+        }) = monthly_milestone_rewards(milestone) else {
+            return Err((STATUS_BAD_REQUEST, format!("Invalid monthly milestone step: {milestone}")));
+        };
+        let effective_now = if now_unix > 0 { now_unix } else { self.now_unix() };
+        let ym = utc_year_month(effective_now);
+        {
+            let mut map = self.monthly_progress.write().unwrap_or_else(|e| e.into_inner());
+            let entry = map.entry(character_id).or_insert_with(|| MonthlyGoalProgress {
+                year_month: ym,
+                steps_completed: 0,
+                last_bonus_day_bucket: None,
+                claimed_milestones: Vec::new(),
+            });
+            if entry.year_month != ym {
+                *entry = MonthlyGoalProgress {
+                    year_month: ym,
+                    steps_completed: 0,
+                    last_bonus_day_bucket: None,
+                    claimed_milestones: Vec::new(),
+                };
+            }
+            if entry.steps_completed < milestone {
+                return Err((STATUS_PRECONDITION_FAILED, "Monthly milestone not yet reached".into()));
+            }
+            if entry.claimed_milestones.contains(&milestone) {
+                return Err((STATUS_FORBIDDEN, "Monthly milestone already claimed".into()));
+            }
+            entry.claimed_milestones.push(milestone);
+        }
+
+        let isk_total = a_isk + if is_omega { o_isk } else { 0 };
+        let em_total = a_em + if is_omega { o_em } else { 0 };
+        let sp_total = a_sp + if is_omega { o_sp } else { 0.0 };
+        let credit_res = db.try_with_mut_snapshot(|snap| {
+            crate::domain::career_goals::credit_character_reward_in_snap(
+                snap,
+                character_id as i64,
+                IskCents::from_isk(isk_total),
+                sp_total,
+                em_total,
+                Some((
+                    "DailyGoalReward",
+                    format!("AIR Monthly Progress Track milestone {milestone}"),
+                    None,
+                )),
+            )
+            .map(|_| ())
+            .map_err(|e| e.message)
+        });
+        if credit_res.is_err() {
+            let mut map = self.monthly_progress.write().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = map.get_mut(&character_id) {
+                entry.claimed_milestones.retain(|&m| m != milestone);
+            }
+            return Err((STATUS_BAD_REQUEST, "Unable to credit monthly milestone reward".into()));
+        }
+        let updated = self.get_monthly_progress(character_id, effective_now);
+        self.save_to_db();
+        Ok(updated)
+    }
+
     pub fn reset_daily_goals_on_downtime(&self, now_unix: u64) -> usize {
         let mut count = 0;
         let tpls = self.templates.read().unwrap().clone();
@@ -415,12 +635,20 @@ impl DailyGoalManager {
             }
             let templates = self.templates.read().unwrap_or_else(|e| e.into_inner()).clone();
             let character_goals = self.character_goals.read().unwrap_or_else(|e| e.into_inner()).clone();
-            let store = DailyGoalStore { templates, character_goals };
+            let monthly_progress = self.monthly_progress.read().unwrap_or_else(|e| e.into_inner()).clone();
+            let store = DailyGoalStore { templates, character_goals, monthly_progress };
             if let Ok(json) = serde_json::to_string(&store) {
-                let _ = db.try_with_mut_snapshot(|snap| {
-                    snap.quasar_state_blobs.insert("quasar_daily_goals".into(), json);
-                    Ok::<(), String>(())
+                let already = db.with_snapshot(|snap| {
+                    snap.quasar_state_blobs
+                        .get("quasar_daily_goals")
+                        .is_some_and(|cur| cur == &json)
                 });
+                if !already {
+                    let _ = db.try_with_mut_snapshot(|snap| {
+                        snap.quasar_state_blobs.insert("quasar_daily_goals".into(), json);
+                        Ok::<(), String>(())
+                    });
+                }
             }
         }
     }
@@ -448,6 +676,7 @@ impl DailyGoalManager {
                     Some(DailyGoalStore {
                         templates,
                         character_goals: cg,
+                        monthly_progress: HashMap::new(),
                     })
                 } else {
                     None
@@ -471,8 +700,16 @@ impl DailyGoalManager {
                 .character_goals
                 .write()
                 .unwrap_or_else(|e| e.into_inner()) = store.character_goals;
+            *self
+                .monthly_progress
+                .write()
+                .unwrap_or_else(|e| e.into_inner()) = store.monthly_progress;
         } else {
             self.character_goals
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+            self.monthly_progress
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
                 .clear();
@@ -565,6 +802,7 @@ impl DailyGoalManager {
         let goals = map.entry(character_id).or_default();
         self.ensure_character_goals(goals, now_unix);
 
+        let mut res = None;
         for g in goals.iter_mut() {
             if &g.uuid == goal_uuid && !g.expired {
                 let prev_completed = g.completed;
@@ -574,10 +812,35 @@ impl DailyGoalManager {
                     g.completed_at_unix = Some(now_unix);
                 }
                 let just_completed = !prev_completed && g.completed;
-                return Some((g.clone(), just_completed));
+                res = Some((g.clone(), just_completed));
+                break;
             }
         }
-        None
+        let mut bonus_just_completed = false;
+        if res.is_some() {
+            let num_completed_regular = goals
+                .iter()
+                .filter(|goal| goal.template.category != 6 && goal.completed && !goal.expired)
+                .count() as u64;
+            for bonus in goals.iter_mut() {
+                if bonus.template.category == 6 && !bonus.completed && !bonus.expired {
+                    let prev_b = bonus.completed;
+                    bonus.current_progress = num_completed_regular;
+                    if bonus.current_progress >= bonus.template.target {
+                        bonus.completed = true;
+                        bonus.completed_at_unix = Some(now_unix);
+                    }
+                    if !prev_b && bonus.completed {
+                        bonus_just_completed = true;
+                    }
+                }
+            }
+        }
+        drop(map);
+        if bonus_just_completed {
+            self.record_daily_bonus_completion(character_id, now_unix);
+        }
+        res
     }
 
     pub fn redeem_goal(
@@ -619,13 +882,14 @@ impl DailyGoalManager {
         };
 
         let reward_cents = IskCents::from_isk(isk);
+        let evermarks_reward = if res_goal.template.category == 6 { 0 } else { 500 };
         let credit_res = db.try_with_mut_snapshot(|snap| {
             crate::domain::career_goals::credit_character_reward_in_snap(
                 snap,
                 character_id as i64,
                 reward_cents,
                 sp,
-                500,
+                evermarks_reward,
                 Some((
                     "DailyGoalReward",
                     format!("Daily goal reward ({})", res_goal.template.name_message),
@@ -662,8 +926,8 @@ impl DailyGoalManager {
         now_unix: u64,
         db: &Arc<WorldRepository>,
     ) -> Result<CharacterDailyGoal, (u32, String)> {
-        // 1. Validate goal existence and require configured EverMarks/ISK completion cost under short-lived lock
-        let (em_cost, cost_isk, assigner_corp) = {
+        // 1. Validate goal existence and progressive EverMarks completion cost (2,500 -> 4,500 EM) under short-lived lock
+        let (em_cost, assigner_corp) = {
             let mut map = self
                 .character_goals
                 .write()
@@ -673,61 +937,72 @@ impl DailyGoalManager {
             let Some(g) = goals.iter().find(|g| &g.uuid == goal_uuid && !g.expired) else {
                 return Err((STATUS_NOT_FOUND, "Daily goal not found".into()));
             };
+            if g.template.category == 6 {
+                return Err((
+                    STATUS_PRECONDITION_FAILED,
+                    "Daily bonus goal cannot be completed with paid completion".into(),
+                ));
+            }
             if g.completed {
                 return Err((STATUS_BAD_REQUEST, "Daily goal already completed".into()));
             }
-            let em = g.template.completion_cost_evermarks.filter(|&c| c > 0);
-            let isk = g
-                .template
-                .completion_cost_isk
-                .filter(|&c| c > 0)
-                .map(IskCents::from_isk);
-            if em.is_none() && isk.is_none() {
+            let paid_count = goals
+                .iter()
+                .filter(|goal| goal.template.category != 6 && goal.paid_completion && !goal.expired)
+                .count();
+            let bonus_prog = goals
+                .iter()
+                .find(|goal| goal.template.category == 6 && !goal.expired)
+                .map(|b| if b.completed { 2 } else { b.current_progress as usize })
+                .unwrap_or(0);
+            if 2usize.saturating_sub(bonus_prog.max(paid_count)) == 0 {
+                return Err((
+                    STATUS_PRECONDITION_FAILED,
+                    "Daily Skill Point bonus already reached; paid completion unavailable".into(),
+                ));
+            }
+            if !g.template.completion_cost_evermarks.is_some_and(|c| c > 0) {
                 return Err((
                     STATUS_PRECONDITION_FAILED,
                     "Paid completion cost is not configured for this daily goal".into(),
                 ));
             }
-            (em, isk, g.template.effective_assigner_corporation_id() as i64)
+            let cost_em: i64 = if paid_count == 0 { 2_500 } else { 4_500 };
+            (cost_em, g.template.effective_assigner_corporation_id() as i64)
         };
 
-        // 2. Debit EverMarks or balance via try_with_mut_snapshot without holding character_goals lock
-        #[derive(Copy, Clone, PartialEq, Eq)]
-        enum PaymentMethod {
-            EverMarks(i64),
-            Isk(IskCents),
-        }
+        // 2. Debit EverMarks via try_with_mut_snapshot without holding character_goals lock
         let debit_res = db.try_with_mut_snapshot(|snap| {
             let Some(ch) = snap.characters.get_mut(&(character_id as i64)) else {
                 return Err("Character not found".to_string());
             };
             let em_bal = ch.loyalty_points.get(&assigner_corp).copied().unwrap_or(0);
-            if let Some(em_req) = em_cost {
-                if em_bal >= em_req {
-                    *ch.loyalty_points.entry(assigner_corp).or_insert(0) -= em_req;
-                    return Ok(PaymentMethod::EverMarks(em_req));
+            if em_bal >= em_cost {
+                *ch.loyalty_points.entry(assigner_corp).or_insert(0) -= em_cost;
+                return Ok(assigner_corp);
+            }
+            if assigner_corp != 1_000_419 {
+                let paragon_bal = ch.loyalty_points.get(&1_000_419).copied().unwrap_or(0);
+                if paragon_bal >= em_cost {
+                    *ch.loyalty_points.entry(1_000_419).or_insert(0) -= em_cost;
+                    return Ok(1_000_419);
                 }
             }
-            if let Some(isk_req) = cost_isk {
-                if ch.balance >= isk_req {
-                    ch.balance = ch.balance.checked_sub(isk_req).unwrap_or(ch.balance);
-                    return Ok(PaymentMethod::Isk(isk_req));
-                }
-            }
-            Err("Insufficient funds or EverMarks to pay for daily goal completion".to_string())
+            Err("Insufficient EverMarks to pay for daily goal completion".to_string())
         });
-        let payment_method = match debit_res {
-            Ok(m) => m,
+        let debited_corp = match debit_res {
+            Ok(corp) => corp,
             Err(msg) => return Err((STATUS_BAD_REQUEST, msg)),
         };
 
         // 3. Mark goal complete under write lock without holding across db.try_with_mut_snapshot
-        let outcome = {
+        let (outcome, bonus_just_completed) = {
             let mut map = self
                 .character_goals
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
             let mut found = None;
+            let mut bonus_completed_now = false;
             if let Some(goals) = map.get_mut(&character_id) {
                 for g in goals.iter_mut() {
                     if &g.uuid == goal_uuid {
@@ -746,10 +1021,14 @@ impl DailyGoalManager {
                             .count() as u64;
                         for bonus in goals.iter_mut() {
                             if bonus.template.category == 6 && !bonus.completed && !bonus.expired {
+                                let prev_b = bonus.completed;
                                 bonus.current_progress = num_completed_regular;
                                 if bonus.current_progress >= bonus.template.target {
                                     bonus.completed = true;
                                     bonus.completed_at_unix = Some(now_unix);
+                                }
+                                if !prev_b && bonus.completed {
+                                    bonus_completed_now = true;
                                 }
                             }
                         }
@@ -757,21 +1036,14 @@ impl DailyGoalManager {
                     }
                 }
             }
-            found
+            (found, bonus_completed_now)
         };
 
         let rollback_payment = |db: &Arc<WorldRepository>| {
             let _ = db.try_with_mut_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get_mut(&(character_id as i64)) {
-                    match payment_method {
-                        PaymentMethod::EverMarks(em) => {
-                            let cur = ch.loyalty_points.entry(assigner_corp).or_insert(0);
-                            *cur = cur.saturating_add(em);
-                        }
-                        PaymentMethod::Isk(cost) => {
-                            ch.balance = ch.balance.checked_add(cost).unwrap_or(ch.balance);
-                        }
-                    }
+                    let cur = ch.loyalty_points.entry(debited_corp).or_insert(0);
+                    *cur = cur.saturating_add(em_cost);
                 }
                 Ok::<(), String>(())
             });
@@ -779,6 +1051,9 @@ impl DailyGoalManager {
 
         match outcome {
             Some(Ok(g)) => {
+                if bonus_just_completed {
+                    self.record_daily_bonus_completion(character_id, now_unix);
+                }
                 self.save_to_db();
                 Ok(g)
             }
@@ -802,6 +1077,7 @@ impl DailyGoalManager {
     ) {
         let now_unix = self.now_unix();
         let mut progressed = Vec::new();
+        let mut bonus_just_completed = false;
         {
             let mut map = self
                 .character_goals
@@ -836,11 +1112,17 @@ impl DailyGoalManager {
                         g.completed_at_unix = Some(now_unix);
                     }
                     let just_completed = !prev && g.completed;
+                    if just_completed {
+                        bonus_just_completed = true;
+                    }
                     if g.current_progress > 0 {
                         progressed.push((g.uuid, g.current_progress, just_completed));
                     }
                 }
             }
+        }
+        if bonus_just_completed {
+            self.record_daily_bonus_completion(char_id, now_unix);
         }
         self.save_to_db();
 
@@ -1475,4 +1757,5 @@ pub fn register_daily_goal_handlers(
 }
 
 #[cfg(test)] #[path = "quasar_daily_goals_tests.rs"] mod quasar_daily_goals_tests;
+#[cfg(test)] #[path = "quasar_daily_goals_edges_tests.rs"] mod quasar_daily_goals_edges_tests;
 

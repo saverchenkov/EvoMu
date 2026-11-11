@@ -83,7 +83,7 @@ fn seed_pilot(
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn random_offset_and_coop_vs_solo_pocket_collapse_branches() {
     let ctx = build_ctx();
     for _ in 0..8 {
@@ -191,29 +191,21 @@ async fn random_offset_and_coop_vs_solo_pocket_collapse_branches() {
         }
     });
 
-    // 1. Collapse char1 while char2 is still alive in the same pocket_id (any_other_alive == true):
-    // trace and cache items are preserved for char2, zarzakh gate lock is cleared for char1
+    // 1. Collapse char1 in shared pocket_id: collapses co-op pilots together, clears trace/caches and zarzakh gate lock
     let home1 = collapse_abyssal_pocket_and_pod_pilot_at(&ctx, char1, ship1, abyss_sys, 1_779_000_000);
     assert!(home1 > 0);
-    with_abyssal_state(&ctx, |st| {
-        assert!(st.traces.contains_key(&trace_id));
-    });
-    ctx.db.with_snapshot(|snap| {
-        assert!(!snap.zarzakh_gate_locks.contains_key(&char1));
-        assert!(snap.items.contains_key(&cache1_id));
-        assert!(snap.items.contains_key(&cache_loot_id));
-    });
-
-    // 2. Collapse char2 (last pilot in pocket -> any_other_alive == false):
-    // trace and cache + cache loot are now purged!
-    let _ = collapse_abyssal_pocket_and_pod_pilot_at(&ctx, char2, ship2, abyss_sys, 1_779_000_000);
     with_abyssal_state(&ctx, |st| {
         assert!(!st.traces.contains_key(&trace_id));
     });
     ctx.db.with_snapshot(|snap| {
+        assert!(!snap.zarzakh_gate_locks.contains_key(&char1));
         assert!(!snap.items.contains_key(&cache1_id));
         assert!(!snap.items.contains_key(&cache_loot_id));
     });
+
+    // 2. Collapse char2 (already collapsed by co-op pocket collapse -> idempotent early return)
+    let home2 = collapse_abyssal_pocket_and_pod_pilot_at(&ctx, char2, ship2, abyss_sys, 1_779_000_000);
+    assert_eq!(home2, origin_sys);
 
     // 3. Collapse char_pod (no entry in reg.abyssal_pockets, ship_type_id == 670):
     // records only 1 pod killmail (no separate ship killmail for type 670)
@@ -229,7 +221,7 @@ async fn random_offset_and_coop_vs_solo_pocket_collapse_branches() {
     assert_eq!(kms_after - kms_before, 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn downtime_evacuation_drones_cleanup_and_highsec_tier_suspect_flag() {
     let ctx = build_ctx();
     let highsec_origin: SolarSystemId = 30_999_080; // 0.80 security -> T5 triggers suspect flag
@@ -365,7 +357,7 @@ async fn downtime_evacuation_drones_cleanup_and_highsec_tier_suspect_flag() {
     assert!(is_suspect);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn void_space_and_reconcile_abyssal_login_sp6_and_completed_branches() {
     let ctx = build_ctx();
     let origin_sys: SolarSystemId = 30_000_142;
@@ -460,6 +452,7 @@ async fn void_space_and_reconcile_abyssal_login_sp6_and_completed_branches() {
         target_id: 777,
         entered_unix: 100,
         expires_at_sec: 200,
+        nebula_graphic_id: None,
     };
     assert_eq!(
         evacuate_void_space_session_sync(&ctx, char_id, &vs, 300),

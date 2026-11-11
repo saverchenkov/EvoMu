@@ -4,6 +4,10 @@
 
 const ALREADY_CLAIMED_ERR: &str = "DailyRewardAlreadyClaimedToday";
 
+#[cfg(test)]
+#[path = "campaigns_milestones_playtime_cov_tests.rs"]
+mod campaigns_milestones_playtime_cov_tests;
+
 use super::*;
 use crate::services::account_services::account_services_tests::{
     auth_session, test_ctx, PyRepTestExt,
@@ -12,7 +16,7 @@ use crate::services::cosmetics_ui_ops::SeasonalCampaignSchedule;
 use eve_proto::PyRep;
 use std::collections::HashMap;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn date_helpers_login_campaigns_and_seasonal_campaigns() {
     assert_eq!(format_turnover_hms(11 * 3_600 + 65), "11:01:05");
     assert_eq!(parse_turnover_hms("11:01:05"), Some(11 * 3_600 + 65));
@@ -171,7 +175,7 @@ async fn date_helpers_login_campaigns_and_seasonal_campaigns() {
     assert_eq!(hist.as_dict().map(|d| d.len()), Some(1));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn info_gathering_milestones_and_community_tracks() {
     let ctx = test_ctx();
     let uid = 1_u64;
@@ -408,7 +412,7 @@ async fn info_gathering_milestones_and_community_tracks() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn login_campaign_rejects_non_catalog_rpcs_and_prevents_campaign_switch_cooldown_reset() {
     let ctx = test_ctx();
     let uid = 1_u64;
@@ -490,3 +494,7 @@ async fn login_campaign_rejects_non_catalog_rpcs_and_prevents_campaign_switch_co
         .unwrap();
     assert!(matches!(claim_next_day, PyRep::Tuple(ref v) if v.len() == 4));
 }
+
+#[cfg(test)]
+#[path = "campaigns_and_milestones_extra_unit_tests.rs"]
+mod campaigns_and_milestones_extra_unit_tests;

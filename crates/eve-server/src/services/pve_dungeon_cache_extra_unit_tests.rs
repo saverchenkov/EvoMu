@@ -1,6 +1,6 @@
 //! Extra branch-coverage and mutation-killing unit tests for `pve_dungeon_cache`.
 
-use super::pve_dungeon_cache::*;
+use crate::services::pve_dungeon_cache::*;
 use crate::router::ServerContext;
 use crate::services::pve_exploration::{PveSiteInstance, with_pve_exploration_reg};
 use crate::services::pve_special_sites_abyssal::{
@@ -483,4 +483,97 @@ async fn bulwark_fw_instances_range_bfs_and_signature_filtering() {
     });
     let combat_rep = handle(&ctx, &mut sess, "dungeonInstanceCacheMgr", "GetCombatAnomalyInstances", &[], &kw).await.unwrap().unwrap();
     assert!(!format!("{combat_rep:?}").contains("999111"));
+}
+
+#[tokio::test]
+async fn handle_unknown_returns_none_and_keeper_current_dungeon_for_character_kill_mutants() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 90_000_001_i64;
+    let mut sess = SessionState::new(33);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.solar_system_id = Some(30_000_142);
+    let kw = HashMap::new();
+
+    // 1. Unrelated service returns None (kills `handle -> Some(Ok(Default::default()))`)
+    assert!(
+        handle(&ctx, &mut sess, "marketProxy", "GetMarketGroups", &[], &kw)
+            .await
+            .is_none()
+    );
+
+    // 2. keeper.GetCurrentDungeonForCharacter with no active dungeon returns PyRep::None
+    let empty_rep = handle(&ctx, &mut sess, "keeper", "GetCurrentDungeonForCharacter", &[], &kw)
+        .await
+        .expect("keeper.GetCurrentDungeonForCharacter must return Some")
+        .expect("succeeds with no active dungeon");
+    assert_eq!(empty_rep, PyRep::None);
+
+    // 3. Seed an active abyssal pocket for char_id and assert full 4-tuple return
+    //    (kills `handle -> None`, `handle -> Some(Ok(Default::default()))`, and deleted match arm).
+    let room = |idx: u8, did: u32, name: &str| AbyssalRoomRecord {
+        room_index: idx,
+        dungeon_id: did,
+        dungeon_name: name.into(),
+        npc_ball_ids: Vec::new(),
+        cache_item_id: 0,
+        cleared: false,
+        gate_unlocked_at_sec: None,
+    };
+    with_abyssal_state(&ctx, |st| {
+        st.pockets.insert(
+            char_id,
+            AbyssalPocketSession {
+                pocket_id: 777_001,
+                character_id: char_id,
+                ship_id: 1_000_001,
+                origin_solar_system_id: 30_000_142,
+                abyssal_solar_system_id: 32_000_001,
+                origin_position: [0.0; 3],
+                grid_offset: [0.0; 3],
+                filament_type_id: 47762,
+                tier: 1,
+                weather: AbyssalWeatherKind::Electrical,
+                weather_penalty_pct: 0.0,
+                weather_bonus_pct: 0.0,
+                npc_difficulty_mult: 1.0,
+                current_room: 1,
+                rooms: [
+                    room(1, 515_101, "Deadspace Pocket Alpha"),
+                    room(2, 515_102, "Deadspace Pocket Beta"),
+                    room(3, 515_103, "Deadspace Pocket Gamma"),
+                ],
+                started_at_sec: 1_775_900_000,
+                collapse_at_sec: 1_775_901_200,
+                completed: false,
+                collapsed_destroyed: false,
+                trace_ball_id: 0,
+                fleet_ship_ids: vec![1_000_001],
+                ship_room: HashMap::new(),
+                max_ships: 1,
+            },
+        );
+    });
+
+    let active_rep = handle(&ctx, &mut sess, "keeper", "GetCurrentDungeonForCharacter", &[], &kw)
+        .await
+        .expect("keeper.GetCurrentDungeonForCharacter handled")
+        .expect("active dungeon returns populated tuple");
+    let PyRep::Tuple(parts) = active_rep else {
+        panic!("expected 4-tuple, got {active_rep:?}");
+    };
+    assert_eq!(parts.len(), 4);
+    assert_eq!(parts[0], PyRep::Integer(515_101));
+    assert_eq!(parts[2], PyRep::Integer(777_001));
+    assert_eq!(
+        parts[3].dict_get("dungeonID"),
+        Some(&PyRep::Integer(515_101))
+    );
+    assert_eq!(
+        parts[3].dict_get("dungeonName"),
+        Some(&PyRep::String("Deadspace Pocket Alpha".into()))
+    );
 }

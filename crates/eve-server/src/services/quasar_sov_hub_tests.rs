@@ -8,6 +8,10 @@ use eve_db::{InventoryFlag, InventoryItemRecord, UpwellStructureRecord};
 use eve_proto::quasar::{AuthoritativeContext, DynamicQuasarMessage, DynamicValue, QuasarDescriptorRegistry};
 use std::sync::{Arc, OnceLock};
 
+#[cfg(test)]
+#[path = "quasar_sov_hub_extra_unit_tests.rs"]
+mod quasar_sov_hub_extra_unit_tests;
+
 static SHARED_SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
 
 fn shared_sde() -> Arc<SdeRegistry> {

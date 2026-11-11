@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 //! Additional branch-coverage and mutation-killing unit tests for `quasar_career_goals`.
 
 #![forbid(unsafe_code)]
@@ -386,7 +387,6 @@ fn manager_persistence_claim_rollbacks_and_edge_cases() {
             .read()
             .unwrap()
             .get(&ghost_cid)
-            .unwrap()
-            .contains(&1)
+            .is_some_and(|s| s.contains(&1))
     );
 }

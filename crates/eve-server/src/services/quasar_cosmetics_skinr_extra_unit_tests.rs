@@ -58,8 +58,9 @@ fn test_empty_sde_catalog_fallbacks_tier_boundaries_and_wire_helpers() {
     let mut cat = SkinrStaticCatalog::load(&empty_sde);
     assert_eq!(cat.point_values.get(&(1, 1)), Some(&25));
     assert_eq!(cat.point_values.get(&(2, 6)), Some(&750));
-    assert_eq!(cat.tier_thresholds.get(&2), Some(&350));
-    assert_eq!(cat.tier_thresholds.get(&5), Some(&1400));
+    assert_eq!(cat.point_values.get(&(3, 6)), Some(&900));
+    assert_eq!(cat.tier_thresholds.get(&1), Some(&125));
+    assert_eq!(cat.tier_thresholds.get(&5), Some(&850));
     assert_eq!(cat.default_ship_slots, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     assert_eq!(cat.slot_allowed_categories.get(&5), Some(&vec![COMP_CAT_PATTERN]));
 
@@ -67,16 +68,16 @@ fn test_empty_sde_catalog_fallbacks_tier_boundaries_and_wire_helpers() {
     assert_eq!(cat.allowed_slots_for_ship(587), &[1, 2, 5]);
     assert_eq!(cat.allowed_slots_for_ship(999), &[1, 2, 3, 4, 5, 6, 7, 8]);
 
-    // Test exact tier boundaries: 0->1, 349->1, 350->2, 699->2, 700->3, 1049->3, 1050->4, 1399->4, 1400->5
+    // Test exact upper-bound tier boundaries on frigate table (isisGroupID=8: [125, 250, 400, 625, 850, ..., 5300])
     for (cid, pts) in [
-        (101u32, 349u32),
-        (102, 350),
-        (103, 699),
-        (104, 700),
-        (105, 1049),
-        (106, 1050),
-        (107, 1399),
-        (108, 1400),
+        (101u32, 125u32),
+        (102, 126),
+        (103, 250),
+        (104, 251),
+        (105, 400),
+        (106, 401),
+        (107, 5300),
+        (108, 5301),
     ] {
         cat.components.insert(
             cid,
@@ -93,14 +94,14 @@ fn test_empty_sde_catalog_fallbacks_tier_boundaries_and_wire_helpers() {
         cat.point_values.insert((99, cid), pts);
     }
     assert_eq!(cat.compute_points_and_tier(&[]), (0, 1));
-    assert_eq!(cat.compute_points_and_tier(&[101]), (349, 1));
-    assert_eq!(cat.compute_points_and_tier(&[102]), (350, 2));
-    assert_eq!(cat.compute_points_and_tier(&[103]), (699, 2));
-    assert_eq!(cat.compute_points_and_tier(&[104]), (700, 3));
-    assert_eq!(cat.compute_points_and_tier(&[105]), (1049, 3));
-    assert_eq!(cat.compute_points_and_tier(&[106]), (1050, 4));
-    assert_eq!(cat.compute_points_and_tier(&[107]), (1399, 4));
-    assert_eq!(cat.compute_points_and_tier(&[108]), (1400, 5));
+    assert_eq!(cat.compute_points_and_tier(&[101]), (125, 1));
+    assert_eq!(cat.compute_points_and_tier(&[102]), (126, 2));
+    assert_eq!(cat.compute_points_and_tier(&[103]), (250, 2));
+    assert_eq!(cat.compute_points_and_tier(&[104]), (251, 3));
+    assert_eq!(cat.compute_points_and_tier(&[105]), (400, 3));
+    assert_eq!(cat.compute_points_and_tier(&[106]), (401, 4));
+    assert_eq!(cat.compute_points_and_tier(&[107]), (5300, 19));
+    assert_eq!(cat.compute_points_and_tier(&[108]), (5301, 20));
 
     // SequencingJobRecord::is_active
     let mut job = SequencingJobRecord {
@@ -569,4 +570,157 @@ fn test_consume_item_branches_and_title_definition_versions() {
         .status_code,
         STATUS_BAD_REQUEST
     );
+}
+
+#[test]
+fn catalog_load_isis_groups_custom_tiers_persistence_and_active_ship_consume_mutants() {
+    // 1. SkinrStaticCatalog::load populates ship_isis_groups & custom hull thresholds (kills L88, L89, L247, L261, L274, L279, L284)
+    let mut sde = (*shared_sde()).clone();
+    sde.type_isis_groups.insert(648, 28);
+    let mut cat = SkinrStaticCatalog::load(&sde);
+    assert_eq!(cat.ship_isis_groups.get(&648), Some(&28));
+    assert_eq!(cat.thresholds_for_ship(587).get(&1), Some(&125));
+    cat.tier_thresholds_by_isis_group.insert(
+        28,
+        std::collections::BTreeMap::from([(1_u32, 100_u32), (5_u32, 500_u32)]),
+    );
+    assert_eq!(cat.thresholds_for_ship(648).get(&5), Some(&500));
+
+    cat.components.insert(
+        701,
+        SdeSkinComponent {
+            component_id: 701,
+            category: 99,
+            rarity: 1,
+            disallowed_slots: Vec::new(),
+            associated_types: Vec::new(),
+            binder_type_id: 0,
+            binder_count: 0,
+        },
+    );
+    cat.components.insert(
+        702,
+        SdeSkinComponent {
+            component_id: 702,
+            category: 99,
+            rarity: 2,
+            disallowed_slots: Vec::new(),
+            associated_types: Vec::new(),
+            binder_type_id: 0,
+            binder_count: 0,
+        },
+    );
+    cat.point_values.insert((99, 1), 100);
+    cat.point_values.insert((99, 2), 401);
+    assert_eq!(cat.compute_points_and_tier_for_ship(648, &[701]), (100, 1));
+    assert_eq!(cat.compute_points_and_tier_for_ship(648, &[702]), (401, 5));
+    // Exceeding max_tier = 5 yields (5 + 1).min(20) = 6 (kills `+ -> - / *` on L279)
+    assert_eq!(cat.compute_points_and_tier_for_ship(648, &[701, 702]), (501, 6));
+
+    // 2. SkinrCosmeticsState::save & rehydrate_from_db round-trip + DB skin merge (kills L534, L567)
+    let sde = Arc::new(sde);
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let state1 = SkinrCosmeticsState::load_unregistered(Arc::clone(&db), Arc::clone(&sde));
+    let preserved_skin = SkinDesignRecord {
+        skin_hex: "deadbeef01".into(),
+        name: "Persisted Crimson".into(),
+        line_name: "LineX".into(),
+        creator_id: 90_000_001,
+        ship_type_id: 587,
+        pattern_blend_mode: 2,
+        slots: vec![SkinLayoutSlot {
+            slot_id: 1,
+            component_id: 701,
+            is_pattern: false,
+            primary_coating_id: None,
+            secondary_coating_id: None,
+        }],
+        tier_level: 3,
+        first_sequenced_unix: Some(1_710_000_050),
+    };
+    state1
+        .data
+        .write()
+        .unwrap()
+        .skins
+        .insert("deadbeef01".into(), preserved_skin.clone());
+    state1.save();
+
+    let state2 = SkinrCosmeticsState::load_unregistered(Arc::clone(&db), Arc::clone(&sde));
+    assert_eq!(state2.data.read().unwrap().skins.get("deadbeef01"), Some(&preserved_skin));
+    // Clear in-memory skins, seed a second design in state2, save() merges existing DB skin back
+    let second_skin = SkinDesignRecord {
+        skin_hex: "cafe02".into(),
+        name: "Second Coat".into(),
+        ..preserved_skin.clone()
+    };
+    state2.data.write().unwrap().skins.clear();
+    state2
+        .data
+        .write()
+        .unwrap()
+        .skins
+        .insert("cafe02".into(), second_skin.clone());
+    state2.save();
+    let state3 = SkinrCosmeticsState::load_unregistered(Arc::clone(&db), Arc::clone(&sde));
+    {
+        let mut g = state3.data.write().unwrap();
+        g.skins.clear();
+    }
+    state3.rehydrate_from_db();
+    assert_eq!(state3.data.read().unwrap().skins.get("deadbeef01"), Some(&preserved_skin));
+    assert_eq!(state3.data.read().unwrap().skins.get("cafe02"), Some(&second_skin));
+
+    // 3. handle_item_consume forwards active_ship_id so boarded active ship hull cannot be consumed (kills L854, L938, L1201)
+    let router = PublicGatewayRouter::new(
+        QuasarDescriptorRegistry::open_default_or_empty(),
+        Arc::clone(&db),
+        Arc::clone(&sde),
+    );
+    let mut state_arc = SkinrCosmeticsState::load_unregistered(Arc::clone(&db), Arc::clone(&sde));
+    Arc::get_mut(&mut state_arc)
+        .unwrap()
+        .catalog
+        .item_type_to_component
+        .insert(587, (701, 5));
+    register(&router, state_arc);
+
+    let cid = 2_112_930_001_i64;
+    let station_id = 60_003_760_i64;
+    let active_ship_item = 888_930_001_i64;
+    db.with_mut_snapshot(|s| {
+        let mut ch = s.characters.values().next().unwrap().clone();
+        ch.character_id = cid;
+        ch.station_id = Some(station_id);
+        ch.active_ship_id = active_ship_item;
+        s.characters.insert(cid, ch);
+        s.items.insert(
+            active_ship_item,
+            InventoryItemRecord {
+                item_id: active_ship_item,
+                type_id: 587,
+                owner_id: cid,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    let player_sess = sess(Some(77), Some(cid), 0);
+    let mut id_msg = Vec::new();
+    encode_varint_field(1, active_ship_item as u64, &mut id_msg);
+    let mut req = Vec::new();
+    encode_bytes_field(1, &id_msg, &mut req);
+    encode_varint_field(2, 1, &mut req);
+    let rsp = call(
+        &router,
+        &player_sess,
+        "eve_public.cosmetic.ship.skin.thirdparty.component.license.item.api.ConsumeRequest",
+        req,
+        1_710_000_100,
+    );
+    assert_eq!(rsp.status_code, STATUS_PRECONDITION_FAILED);
+    assert!(db.with_snapshot(|s| s.items.contains_key(&active_ship_item)));
 }

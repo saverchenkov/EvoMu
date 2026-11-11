@@ -48,11 +48,21 @@ pub(super) fn seed_pilot_and_ship(
     ctx.db.with_mut_snapshot(|snap| {
         let mut ch = snap.characters.values().next().cloned().expect("demo char");
         ch.character_id = char_id;
+        ch.user_id = char_id as u64;
         ch.solar_system_id = sys_id;
         ch.station_id = None;
         ch.structure_id = None;
         ch.active_ship_id = ship_id;
         snap.characters.insert(char_id, ch);
+        let acct_name = format!("void_{char_id}");
+        snap.accounts.entry(acct_name.clone()).or_insert_with(|| eve_db::AccountRecord {
+            user_id: char_id as u64,
+            username: acct_name,
+            password_token: "pw".into(),
+            role: 0,
+            banned_until_unix: None,
+            ban_reason: None,
+        });
         snap.item_positions.insert(ship_id, pos.to_array());
         snap.items.insert(
             ship_id,
@@ -69,6 +79,9 @@ pub(super) fn seed_pilot_and_ship(
             },
         );
     });
+    let _ = ctx
+        .db
+        .acquire_online_lock(char_id as u64, char_id as u64, Some(char_id), false, ctx.now_unix());
     let sys_h = ctx.systems.get_or_spawn(sys_id);
     sys_h.try_spawn_ball_with_meta(
         Ball {
@@ -261,4 +274,193 @@ async fn trace_lifetime_expiration_explicit_and_unentered_1800s_vs_entered_1200s
         .code,
         "TraceExpired"
     );
+}
+
+#[tokio::test]
+async fn mutants_cov_nebula_relog_trace_rollback_and_filament_spawn() {
+    let base_now = 1_800_000_000u64;
+    let ctx = make_ctx_at(base_now);
+
+    // 1. resolve_void_space_nebula_graphic_id returns actual graphic IDs (> 1, never -1/0/1)
+    let g_62448 = crate::services::abyssal_void_mgr::resolve_void_space_nebula_graphic_id(&ctx.sde, 62_448);
+    let g_79997 = crate::services::abyssal_void_mgr::resolve_void_space_nebula_graphic_id(&ctx.sde, 79_997);
+    let g_79998 = crate::services::abyssal_void_mgr::resolve_void_space_nebula_graphic_id(&ctx.sde, 79_998);
+    let g_unk = crate::services::abyssal_void_mgr::resolve_void_space_nebula_graphic_id(&ctx.sde, 999_999);
+    assert!(g_62448 > 1 && g_79997 > 1 && g_79998 > 1 && g_unk > 1);
+
+    let sys_id = 30_004_759u32;
+    let char_id = 92_101i64;
+    let ship_id = 892_101i64;
+    let far_pos = DVec3::new(500_000_000.0, 500_000_000.0, 500_000_000.0);
+    let mut sess = seed_pilot_and_ship(&ctx, char_id, ship_id, 621, sys_id, far_pos);
+    let kw = HashMap::new();
+
+    // 2. Non-matching service returns None; invalid filament arg returns MissingRequiredArgument
+    let other_svc = ["other", "Svc"].concat();
+    assert!(handle(&ctx, &mut sess, &other_svc, "ClientIsReady", &[], &kw).await.is_none());
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "abyssalMgr",
+            "AbyssalEntranceGateActivation",
+            &[PyRep::Integer(0)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "MissingRequiredArgument"
+    );
+
+    // 3. voidSpaceMgr.ClientIsReady only emits OnVoidSpaceRelog when in VOID_SPACE_SYSTEM_ID
+    with_abyssal_state(&ctx, |st| {
+        st.void_space_sessions.insert(
+            char_id,
+            crate::services::pve_special_sites::VoidSpaceSessionRecord {
+                char_id,
+                ship_id,
+                origin_solar_system_id: sys_id,
+                origin_position: far_pos.to_array(),
+                target_id: 79_997,
+                entered_unix: base_now,
+                expires_at_sec: base_now + 100,
+                nebula_graphic_id: None,
+            },
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let out_of_void_rep = handle(&ctx, &mut sess, "voidSpaceMgr", "ClientIsReady", &[], &kw)
+        .await
+        .unwrap()
+        .expect("ClientIsReady outside void");
+    assert_eq!(out_of_void_rep.dict_get("ready"), Some(&PyRep::Bool(true)));
+    let out_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(!out_notifs.iter().any(|n| n.event == "OnVoidSpaceRelog"));
+
+    // Inside VOID_SPACE_SYSTEM_ID: emits OnVoidSpaceRelog with exact end_time & nebula_graphic_id
+    sess.solar_system_id = Some(VOID_SPACE_SYSTEM_ID);
+    let in_void_rep = handle(&ctx, &mut sess, "voidSpaceMgr", "ClientIsReady", &[], &kw)
+        .await
+        .unwrap()
+        .expect("ClientIsReady in void");
+    assert_eq!(in_void_rep.dict_get("ready"), Some(&PyRep::Bool(true)));
+    let relog_notif = ctx
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .find(|n| n.event == "OnVoidSpaceRelog")
+        .expect("expected OnVoidSpaceRelog");
+    let client_data = relog_notif.args.first().expect("OnVoidSpaceRelog payload");
+    let end_time = client_data.dict_get("end_time").and_then(|v| v.as_i64()).expect("end_time");
+    let neb_id = client_data
+        .dict_get("nebula_graphic_id")
+        .and_then(|v| v.as_i64())
+        .expect("nebula_graphic_id");
+    let expected_end_ft = ctx.now_blueos_filetime_ticks() + 100 * 10_000_000;
+    assert_eq!(end_time, expected_end_ft);
+    assert!(neb_id > 1);
+
+    // 4. activate_trace rollback retains != char_id on SystemTransitionFailed, then succeeds when aligned
+    sess.solar_system_id = Some(sys_id);
+    with_abyssal_state(&ctx, |st| {
+        st.traces.insert(
+            760,
+            crate::services::pve_special_sites::AbyssalTraceRecord {
+                trace_ball_id: 760,
+                char_id,
+                filament_type_id: 56_131,
+                origin_solar_system_id: sys_id,
+                position: far_pos.to_array(),
+                created_unix: base_now,
+                expires_at_sec: base_now + 1_200,
+                max_ships: 1,
+                entered_char_ids: Vec::new(),
+                pocket_id: None,
+                fleet_id: None,
+            },
+        );
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().solar_system_id = sys_id + 1;
+    });
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "abyssalMgr",
+            "AbyssalEntranceGateActivation",
+            &[PyRep::Integer(760)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "SystemTransitionFailed"
+    );
+    let entered_after_fail =
+        crate::services::pve_special_sites::read_abyssal_state(&ctx, |st| {
+            st.traces[&760].entered_char_ids.clone()
+        });
+    assert!(entered_after_fail.is_empty());
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().solar_system_id = sys_id;
+    });
+    let trace_ok = handle(
+        &ctx,
+        &mut sess,
+        "abyssalMgr",
+        "AbyssalEntranceGateActivation",
+        &[PyRep::Integer(760)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("activate_trace success");
+    assert!(trace_ok.dict_get("pocketID").and_then(|v| v.as_i64()).is_some());
+
+    // 5. activate_inventory_filament places trace at ship_pos + (500, 0, 0) with 1_897_000_000 + seq
+    let char_fil = 92_102i64;
+    let ship_fil = 892_102i64;
+    let fil_item = 892_901i64;
+    let fil_pos = DVec3::new(500_001_000.0, 2_000.0, 3_000.0);
+    let mut sess_fil = seed_pilot_and_ship(&ctx, char_fil, ship_fil, 621, sys_id, fil_pos);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            fil_item,
+            eve_db::InventoryItemRecord {
+                item_id: fil_item,
+                type_id: 56_131,
+                owner_id: char_fil,
+                location_id: ship_fil,
+                flag: eve_db::InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let fil_rep = handle(
+        &ctx,
+        &mut sess_fil,
+        "abyssalMgr",
+        "AbyssalEntranceGateActivation",
+        &[PyRep::Integer(fil_item)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("activate_inventory_filament success");
+    let tbid = fil_rep
+        .dict_get("traceBallID")
+        .and_then(|v| v.as_i64())
+        .expect("traceBallID");
+    assert!(tbid > 1_897_000_000 && tbid < 1_897_100_000);
+    let spawned_pos =
+        crate::services::pve_special_sites::read_abyssal_state(&ctx, |st| st.traces[&tbid].position);
+    assert_eq!(spawned_pos, [fil_pos.x + 500.0, fil_pos.y, fil_pos.z]);
+    assert!(ctx.db.with_snapshot(|snap| !snap.items.contains_key(&fil_item)));
 }

@@ -944,3 +944,7 @@ pub fn register_handlers(
 #[path = "quasar_vendors_and_war_services_tests.rs"]
 mod quasar_vendors_and_war_services_tests;
 
+#[cfg(test)]
+#[path = "quasar_vendors_and_war_services_edges_tests.rs"]
+mod quasar_vendors_and_war_services_edges_tests;
+

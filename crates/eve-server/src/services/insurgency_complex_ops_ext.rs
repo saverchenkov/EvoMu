@@ -247,3 +247,7 @@ pub async fn collect_aligned_pilots_on_grid(
     out.sort_by_key(|&(cid, _, _, _, _)| cid);
     out
 }
+
+#[cfg(test)]
+#[path = "insurgency_complex_ops_ext_edges_tests.rs"]
+mod insurgency_complex_ops_ext_edges_tests;

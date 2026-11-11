@@ -445,3 +445,84 @@ fn fee_tax_and_buyer_fee_rpcs_cover_skills_targets_and_db_skin_fallback() {
     );
     assert_eq!(r_defs.status_code, STATUS_OK);
 }
+
+#[test]
+fn seed_component_listings_if_empty_canonical_sde_and_paragon_tax_parity() {
+    let sde = shared_sde();
+    let mut design_types: Vec<u32> = sde
+        .types
+        .values()
+        .filter(|t| t.group_id == GROUP_SHIP_SKIN_DESIGN_ELEMENT && t.published)
+        .map(|t| t.type_id)
+        .collect();
+    design_types.sort_unstable();
+    assert!(
+        design_types.len() > 4,
+        "canonical seed must expose >4 published design elements, got {}",
+        design_types.len()
+    );
+
+    let mut data = CosmeticsMarketData::default();
+    assert!(seed_component_listings_if_empty(&mut data, &sde));
+    assert!(!seed_component_listings_if_empty(&mut data, &sde));
+    assert_eq!(data.component_listings.len(), design_types.len() * 3);
+    assert!(data.next_seq >= (design_types.len() as u64) * 3 + 10);
+
+    for tid in &design_types {
+        let listings: Vec<&ComponentListingRecord> = data
+            .component_listings
+            .values()
+            .filter(|l| l.component_item_type_id == *tid)
+            .collect();
+        assert_eq!(listings.len(), 3, "type {tid} must seed 3 variants");
+        assert!(
+            listings
+                .iter()
+                .any(|l| l.bundle_size == 1 && l.discount_percent == 0 && l.price_isk.is_some())
+        );
+        assert!(
+            listings
+                .iter()
+                .any(|l| l.bundle_size == 5 && l.discount_percent == 20 && l.price_isk.is_some())
+        );
+        assert!(listings.iter().any(|l| {
+            l.bundle_size == 1 && l.discount_percent == 0 && l.price_plex_cents.is_some()
+        }));
+    }
+
+    // Verify incremental Paragon Relations (84217: 20% -> 15%) and Partnership skills (84218/84220 -> 5%)
+    let (_router, db, _skinr, state) = new_market_harness();
+    let cid = 2_112_000_202i64;
+    make_char(&db, cid, 98_000_201, None, 1_000_000_00, 0, 0);
+    assert_eq!(
+        paragon_hub_tax_pct(&state, cid as u32, &ListingTargetRecord::Public),
+        20
+    );
+    assert_eq!(
+        paragon_hub_tax_pct(&state, cid as u32, &ListingTargetRecord::Corporation(98_000_201)),
+        10
+    );
+    assert_eq!(
+        paragon_hub_tax_pct(&state, cid as u32, &ListingTargetRecord::Character(cid as u64)),
+        30
+    );
+
+    db.with_mut_snapshot(|s| {
+        let tmpl_sk = s
+            .skills
+            .values()
+            .next()
+            .and_then(|m| m.values().next())
+            .expect("demo skill")
+            .clone();
+        let sks = s.skills.entry(cid).or_default();
+        let mut sk = tmpl_sk;
+        sk.type_id = 84217; // Paragon Relations
+        sk.level = 5;
+        sks.insert(84217, sk);
+    });
+    assert_eq!(
+        paragon_hub_tax_pct(&state, cid as u32, &ListingTargetRecord::Public),
+        15
+    );
+}

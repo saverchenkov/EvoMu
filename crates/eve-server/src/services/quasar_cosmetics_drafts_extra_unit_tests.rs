@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use super::quasar_cosmetics_drafts::*;
+use super::super::*;
 use crate::quasar_gateway::{
     PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_OK,
 };
@@ -264,7 +264,7 @@ fn draft_legacy_migration_capacity_enforcement_and_unauthenticated_guards() {
         Arc::clone(&db),
         shared_sde(),
     );
-    let cosmetics = super::quasar_cosmetics_services::QuasarCosmeticsState::from_db(Arc::clone(&db));
+    let cosmetics = crate::services::quasar_cosmetics_services::QuasarCosmeticsState::from_db(Arc::clone(&db));
     register_draft_and_title_handlers(
         &router,
         Arc::clone(&cosmetics),
@@ -421,7 +421,7 @@ fn cosmetic_title_explicit_zero_uuid_clear_and_unequipped_revoke() {
         Arc::clone(&db),
         shared_sde(),
     );
-    let cosmetics = super::quasar_cosmetics_services::QuasarCosmeticsState::from_db(Arc::clone(&db));
+    let cosmetics = crate::services::quasar_cosmetics_services::QuasarCosmeticsState::from_db(Arc::clone(&db));
     register_draft_and_title_handlers(
         &router,
         Arc::clone(&cosmetics),

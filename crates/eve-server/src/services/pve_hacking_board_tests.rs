@@ -393,7 +393,7 @@ fn test_hacking_turn_combat_utilities_suppressor_restorer_and_core_win() {
     assert!(won);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_hack_failure_explosion_and_ghost_site_detonation() {
     let ctx = build_ctx();
     let sys_id: SolarSystemId = 30_000_142; // Jita (highsec)
@@ -512,3 +512,7 @@ async fn test_hack_failure_explosion_and_ghost_site_detonation() {
         detonate_ghost_site_with_can(&ctx, &mut session, wh_sys, "MISSING_WH_GHOST", Some(777)).await;
     assert_eq!(wh_dmg, 12_000.0);
 }
+
+#[cfg(test)]
+#[path = "pve_hacking_board_extra_unit_tests.rs"]
+mod pve_hacking_board_extra_unit_tests;

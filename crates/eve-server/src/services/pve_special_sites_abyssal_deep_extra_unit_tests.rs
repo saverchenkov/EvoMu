@@ -340,3 +340,392 @@ async fn deep_spatial_hazard_clouds_radius_and_ballpark_modifiers() {
     let cs_clear = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!((cs_clear.shield_boost_multiplier - 1.0).abs() < 1e-6);
 }
+
+#[tokio::test]
+async fn mutants_cov_abyssal_state_room_unlock_pocket_entry_and_deployment() {
+    use crate::services::pve_special_sites_abyssal::*;
+    use eve_db::{AbyssalPocketSession, AbyssalRoomRecord, AbyssalTraceRecord, InventoryFlag};
+    use eve_destiny::{Ball, Ballpark, CombatState, DestinyEvent, MovementMode};
+    use eve_machonet::SessionState;
+    use eve_proto::PyRep;
+
+    let ctx = new_ctx();
+    let char_a = 90_309_001i64;
+    let char_b = 90_309_002i64;
+    let char_c = 90_309_003i64;
+    let ship_a = 1_309_000_001i64;
+    let ship_b = 1_309_000_002i64;
+    let ship_c = 1_309_000_003i64;
+    let filament_a = 1_309_000_010i64;
+    let cruiser_tid = ctx.sde.types.values().find(|t| t.group_id == 26).unwrap().type_id;
+    let origin_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| s.solar_system_id >= 30_000_000 && s.solar_system_id < 31_000_000 && s.security_status < 0.5)
+        .map(|s| s.solar_system_id)
+        .unwrap_or(30_002_505);
+    let far_pos = DVec3::new(9_000_000_000.0, 9_000_000_000.0, 9_000_000_000.0);
+
+    // 1. next_abyssal_seq, read_abyssal_state, with_abyssal_state, with_abyssal_state_db
+    let s1 = with_abyssal_state_db(&ctx.db, |st| next_abyssal_seq(st));
+    let s2 = with_abyssal_state(&ctx, |st| next_abyssal_seq(st));
+    assert!(s1 >= 1);
+    assert_eq!(s2, s1 + 1);
+    assert_eq!(read_abyssal_state(&ctx, |st| st.next_seq), s2);
+
+    // 2. rpc_err via handle_abyssal_entrance_deployment guards (docked + missing arg)
+    let mut docked_sess = SessionState {
+        user_id: Some(char_a as u64),
+        character_id: Some(char_a),
+        solar_system_id: Some(origin_sys),
+        station_id: Some(60_003_760),
+        ship_id: Some(ship_a),
+        ..Default::default()
+    };
+    let docked_err = handle_abyssal_entrance_deployment(&ctx, &mut docked_sess, &[PyRep::Integer(filament_a)])
+        .await
+        .unwrap_err();
+    assert_eq!(docked_err.code, "ShipDocked");
+    assert!(!docked_err.message.is_empty());
+
+    // 3. Seed ships + filament -> handle_abyssal_entrance_deployment happy path
+    for cid in [char_a, char_b, char_c] {
+        ctx.db.provision_gm_account(
+            &format!("ab_dep_{cid}"),
+            "pw",
+            cid,
+            &format!("AbyssPilot_{cid}"),
+        );
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, sid) in [(char_a, ship_a), (char_b, ship_b), (char_c, ship_c)] {
+            let ch = snap.characters.get_mut(&cid).expect("provisioned char");
+            ch.solar_system_id = origin_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = sid;
+            snap.items.insert(sid, make_item(sid, cruiser_tid, cid, i64::from(origin_sys), InventoryFlag::None, 1));
+            snap.item_positions.insert(sid, [far_pos.x, far_pos.y, far_pos.z]);
+        }
+        snap.items.insert(filament_a, make_item(filament_a, 56131, char_a, ship_a, InventoryFlag::Cargo, 1));
+    });
+
+    let origin_handle = ctx.systems.get_or_spawn(origin_sys);
+    let _ = origin_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_a,
+                type_id: cruiser_tid,
+                position: far_pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 2.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                shield_hp: 1000.0,
+                max_shield_hp: 1000.0,
+                armor_hp: 1000.0,
+                max_armor_hp: 1000.0,
+                structure_hp: 1000.0,
+                max_structure_hp: 1000.0,
+                capacitor: 1000.0,
+                max_capacitor: 1000.0,
+                ..Default::default()
+            },
+        )
+        .await;
+
+    let mut space_sess_a = SessionState {
+        user_id: Some(char_a as u64),
+        character_id: Some(char_a),
+        solar_system_id: Some(origin_sys),
+        ship_id: Some(ship_a),
+        ..Default::default()
+    };
+    let arg_err = handle_abyssal_entrance_deployment(&ctx, &mut space_sess_a, &[PyRep::Integer(0)])
+        .await
+        .unwrap_err();
+    assert_eq!(arg_err.code, "MissingRequiredArgument");
+
+    let deploy_ok = handle_abyssal_entrance_deployment(&ctx, &mut space_sess_a, &[PyRep::Integer(filament_a)])
+        .await
+        .expect("deployment ok");
+    let trace_id = deploy_ok.dict_get("traceBallID").and_then(PyRep::as_i64).unwrap();
+    assert!(trace_id > 1_897_000_000);
+    assert_eq!(deploy_ok.dict_get("solarSystemID").and_then(PyRep::as_i64), Some(i64::from(origin_sys)));
+    assert_eq!(deploy_ok.dict_get("filamentTypeID").and_then(PyRep::as_i64), Some(56131));
+    assert_eq!(deploy_ok.dict_get("tier").and_then(PyRep::as_i64), Some(0));
+    assert_eq!(deploy_ok.dict_get("maxShips").and_then(PyRep::as_i64), Some(1));
+    let trace_ball = origin_handle.get_ball_snapshot(trace_id).await.unwrap().expect("trace ball spawned").1;
+    assert!((trace_ball.position - (far_pos + DVec3::new(500.0, 0.0, 0.0))).length() < 1e-6);
+    assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&filament_a)));
+
+    // 4. enter_abyssal_pocket_with_trace: trace_ball_id == Some(0) ignored, tier diff_mult, pocket_grid_offset, and fleet trace reuse
+    let (pid_a, npcs_a) = enter_abyssal_pocket_with_trace(&ctx, &mut space_sess_a, char_a, 56131, 0, origin_sys, Some(0)).await;
+    assert!(pid_a > 1);
+    assert!(!npcs_a.is_empty());
+    let ab_sys_a = read_abyssal_state(&ctx, |st| st.pockets[&char_a].abyssal_solar_system_id);
+    assert_eq!(space_sess_a.solar_system_id, Some(ab_sys_a));
+    let npc_hp_t0 = ctx
+        .systems
+        .get_or_spawn(ab_sys_a)
+        .get_combat_state(npcs_a[0])
+        .await
+        .unwrap()
+        .unwrap()
+        .max_shield_hp;
+
+    // Higher tier (tier 3) increases npc_difficulty_mult = 1.0 + 3 * 1.25 = 4.75 vs 1.0
+    let mut space_sess_c = SessionState {
+        user_id: Some(char_c as u64),
+        character_id: Some(char_c),
+        solar_system_id: Some(origin_sys),
+        ship_id: Some(ship_c),
+        ..Default::default()
+    };
+    let (pid_c, npcs_c) = enter_abyssal_pocket_with_trace(&ctx, &mut space_sess_c, char_c, 47905, 3, origin_sys, None).await;
+    assert_ne!(pid_c, pid_a);
+    let ab_sys_c = read_abyssal_state(&ctx, |st| st.pockets[&char_c].abyssal_solar_system_id);
+    let npc_hp_t3 = ctx
+        .systems
+        .get_or_spawn(ab_sys_c)
+        .get_combat_state(npcs_c[0])
+        .await
+        .unwrap()
+        .unwrap()
+        .max_shield_hp;
+    assert!(npc_hp_t3 > npc_hp_t0 * 2.0, "tier 3 NPC HP {npc_hp_t3} must reflect difficulty mult over tier 0 {npc_hp_t0}");
+
+    // pocket_grid_offset returns exact pocket offset or [0;3] for unknown
+    assert_eq!(pocket_grid_offset(&ctx, 9_999_999), [0.0, 0.0, 0.0]);
+    let expected_off_c = read_abyssal_state(&ctx, |st| st.pockets[&char_c].grid_offset);
+    assert_eq!(pocket_grid_offset(&ctx, pid_c), expected_off_c);
+
+    // Join second char via valid trace_id -> leader enters with trace_id, then char_b joins SAME pocket via trace_id
+    let trace_fleet = trace_id + 50;
+    with_abyssal_state(&ctx, |st| {
+        st.traces.insert(
+            trace_fleet,
+            AbyssalTraceRecord {
+                trace_ball_id: trace_fleet,
+                char_id: char_b,
+                filament_type_id: 56131,
+                origin_solar_system_id: origin_sys,
+                position: [0.0; 3],
+                created_unix: ctx.now_unix(),
+                expires_at_sec: ctx.now_unix() + 1800,
+                max_ships: 3,
+                entered_char_ids: Vec::new(),
+                pocket_id: None,
+                fleet_id: None,
+            },
+        );
+    });
+    let char_b2 = 90_309_004i64;
+    let ship_b2 = 1_309_000_004i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters[&char_b].clone();
+        ch.character_id = char_b2;
+        ch.user_id = char_b2 as u64;
+        ch.active_ship_id = ship_b2;
+        snap.characters.insert(char_b2, ch);
+        snap.items.insert(ship_b2, make_item(ship_b2, cruiser_tid, char_b2, i64::from(origin_sys), InventoryFlag::None, 1));
+    });
+    let mut space_sess_b = SessionState {
+        user_id: Some(char_b as u64),
+        character_id: Some(char_b),
+        solar_system_id: Some(origin_sys),
+        ship_id: Some(ship_b),
+        ..Default::default()
+    };
+    let mut space_sess_b2 = SessionState {
+        user_id: Some(char_b2 as u64),
+        character_id: Some(char_b2),
+        solar_system_id: Some(origin_sys),
+        ship_id: Some(ship_b2),
+        ..Default::default()
+    };
+    let (pid_b1, _) = enter_abyssal_pocket_with_trace(&ctx, &mut space_sess_b, char_b, 56131, 0, origin_sys, Some(trace_fleet)).await;
+    let (pid_b2, _) = enter_abyssal_pocket_with_trace(&ctx, &mut space_sess_b2, char_b2, 56131, 0, origin_sys, Some(trace_fleet)).await;
+    assert_eq!(pid_b1, pid_b2);
+    assert!(read_abyssal_state(&ctx, |st| st.pockets[&char_b2].fleet_ship_ids.contains(&ship_b)));
+    assert!(read_abyssal_state(&ctx, |st| st.pockets[&char_b2].fleet_ship_ids.contains(&ship_b2)));
+
+    // 5. ensure_abyssal_room_balls_for_ctx: missing gate respawned for active pocket, ignored when completed/collapsed
+    let gate_c = 1_895_000_000 + pid_c * 10 + 1;
+    let ab_handle_c = ctx.systems.get_or_spawn(ab_sys_c);
+    let _ = ab_handle_c.remove_ball(gate_c).await;
+    assert!(ab_handle_c.get_ball_snapshot(gate_c).await.unwrap().is_none());
+    ensure_abyssal_room_balls_for_ctx(&ctx, char_c).await;
+    assert!(ab_handle_c.get_ball_snapshot(gate_c).await.unwrap().is_some());
+
+    // Mark completed -> delete gate again -> ensure_abyssal_room_balls_for_ctx does NOT respawn
+    with_abyssal_state(&ctx, |st| st.pockets.get_mut(&char_c).unwrap().completed = true);
+    let _ = ab_handle_c.remove_ball(gate_c).await;
+    ensure_abyssal_room_balls_for_ctx(&ctx, char_c).await;
+    assert!(ab_handle_c.get_ball_snapshot(gate_c).await.unwrap().is_none());
+
+    // 6. on_abyssal_room_npc_destroyed_in_ballpark & on_abyssal_room_npc_destroyed_core
+    let ab_sys_bp = 32_991_001u32;
+    let ab_sys_core = 32_991_002u32;
+    let pid_bp = 699_001i64;
+    let pid_core = 699_002i64;
+    let pid_completed = 699_003i64;
+    let mk_rooms = |pid: i64, n1: i64, n2: i64| -> [AbyssalRoomRecord; 3] {
+        [
+            AbyssalRoomRecord {
+                room_index: 1,
+                dungeon_id: 6046,
+                dungeon_name: "R1".into(),
+                npc_ball_ids: vec![n1, n2],
+                cache_item_id: 1_896_000_000 + pid * 10 + 1,
+                cleared: false,
+                gate_unlocked_at_sec: None,
+            },
+            AbyssalRoomRecord {
+                room_index: 2,
+                dungeon_id: 6047,
+                dungeon_name: "R2".into(),
+                npc_ball_ids: vec![n1 + 10],
+                cache_item_id: 1_896_000_000 + pid * 10 + 2,
+                cleared: false,
+                gate_unlocked_at_sec: None,
+            },
+            AbyssalRoomRecord {
+                room_index: 3,
+                dungeon_id: 6048,
+                dungeon_name: "R3".into(),
+                npc_ball_ids: Vec::new(),
+                cache_item_id: 1_896_000_000 + pid * 10 + 3,
+                cleared: false,
+                gate_unlocked_at_sec: None,
+            },
+        ]
+    };
+    with_abyssal_state(&ctx, |st| {
+        st.pockets.insert(
+            90_309_101,
+            AbyssalPocketSession {
+                pocket_id: pid_bp,
+                character_id: 90_309_101,
+                ship_id: 1_309_100_001,
+                origin_solar_system_id: origin_sys,
+                abyssal_solar_system_id: ab_sys_bp,
+                origin_position: [0.0; 3],
+                grid_offset: [0.0; 3],
+                filament_type_id: 56131,
+                tier: 0,
+                weather: AbyssalWeatherKind::Electrical,
+                weather_penalty_pct: 30.0,
+                weather_bonus_pct: 50.0,
+                npc_difficulty_mult: 1.0,
+                current_room: 1,
+                rooms: mk_rooms(pid_bp, 71_001, 71_002),
+                started_at_sec: 1_800_000_000,
+                collapse_at_sec: 1_800_001_200,
+                completed: false,
+                collapsed_destroyed: false,
+                trace_ball_id: 0,
+                fleet_ship_ids: vec![1_309_100_001],
+                ship_room: HashMap::new(),
+                max_ships: 1,
+            },
+        );
+        st.pockets.insert(
+            90_309_102,
+            AbyssalPocketSession {
+                pocket_id: pid_core,
+                character_id: 90_309_102,
+                ship_id: 1_309_100_002,
+                origin_solar_system_id: origin_sys,
+                abyssal_solar_system_id: ab_sys_core,
+                origin_position: [0.0; 3],
+                grid_offset: [0.0; 3],
+                filament_type_id: 56131,
+                tier: 0,
+                weather: AbyssalWeatherKind::Electrical,
+                weather_penalty_pct: 30.0,
+                weather_bonus_pct: 50.0,
+                npc_difficulty_mult: 1.0,
+                current_room: 1,
+                rooms: mk_rooms(pid_core, 72_001, 72_002),
+                started_at_sec: 1_800_000_000,
+                collapse_at_sec: 1_800_001_200,
+                completed: false,
+                collapsed_destroyed: false,
+                trace_ball_id: 0,
+                fleet_ship_ids: vec![1_309_100_002],
+                ship_room: HashMap::new(),
+                max_ships: 1,
+            },
+        );
+        st.pockets.insert(
+            90_309_103,
+            AbyssalPocketSession {
+                pocket_id: pid_completed,
+                character_id: 90_309_103,
+                ship_id: 1_309_100_003,
+                origin_solar_system_id: origin_sys,
+                abyssal_solar_system_id: ab_sys_bp,
+                origin_position: [0.0; 3],
+                grid_offset: [0.0; 3],
+                filament_type_id: 56131,
+                tier: 0,
+                weather: AbyssalWeatherKind::Electrical,
+                weather_penalty_pct: 30.0,
+                weather_bonus_pct: 50.0,
+                npc_difficulty_mult: 1.0,
+                current_room: 1,
+                rooms: mk_rooms(pid_completed, 73_001, 73_002),
+                started_at_sec: 1_800_000_000,
+                collapse_at_sec: 1_800_001_200,
+                completed: true,
+                collapsed_destroyed: false,
+                trace_ball_id: 0,
+                fleet_ship_ids: vec![1_309_100_003],
+                ship_room: HashMap::new(),
+                max_ships: 1,
+            },
+        );
+    });
+
+    // Ballpark variant: non-abyssal system false, completed pocket NPC false, partial NPC false, final NPC true + gate event
+    let mut bp = Ballpark::new(ab_sys_bp);
+    let gate_bp = 1_895_000_000 + pid_bp * 10 + 1;
+    let _ = bp.add_ball(make_ball(gate_bp, 47685, DVec3::ZERO, 500.0));
+    let _ = bp.add_ball(make_ball(71_001, 48090, DVec3::new(1000.0, 0.0, 0.0), 40.0));
+    let _ = bp.add_ball(make_ball(71_002, 48090, DVec3::new(2000.0, 0.0, 0.0), 40.0));
+    assert!(!on_abyssal_room_npc_destroyed_in_ballpark(&mut bp, &ctx.db, 31_999_999, 71_001));
+    assert!(!on_abyssal_room_npc_destroyed_in_ballpark(&mut bp, &ctx.db, ab_sys_bp, 73_001));
+    assert!(!on_abyssal_room_npc_destroyed_in_ballpark(&mut bp, &ctx.db, ab_sys_bp, 71_001));
+    let _ = bp.remove_ball(71_001);
+    assert!(on_abyssal_room_npc_destroyed_in_ballpark(&mut bp, &ctx.db, ab_sys_bp, 71_002));
+    assert!(read_abyssal_state(&ctx, |st| st.pockets[&90_309_101].rooms[0].cleared));
+    assert!(read_abyssal_state(&ctx, |st| st.pockets[&90_309_101].rooms[0].gate_unlocked_at_sec.is_some()));
+    assert!(!read_abyssal_state(&ctx, |st| st.pockets[&90_309_102].rooms[0].cleared));
+    let events_bp = std::mem::take(&mut bp.pending_events);
+    assert!(events_bp.iter().any(|ev| matches!(ev, DestinyEvent::SetBallInteractive { ball_id, is_interactive: true } if *ball_id == gate_bp)));
+    assert!(events_bp.iter().any(|ev| matches!(ev, DestinyEvent::OnClientControllerEvent { ball_id, event_name, value: 1, .. } if *ball_id == gate_bp && event_name == "GateActivate")));
+
+    // Core async variant: non-abyssal false, partial NPC false, final NPC true + gate unlock
+    let core_handle = ctx.systems.get_or_spawn(ab_sys_core);
+    let obs_core = 72_099i64;
+    let gate_core = 1_895_000_000 + pid_core * 10 + 1;
+    let _ = core_handle.spawn_ball(make_ball(obs_core, 587, DVec3::ZERO, 40.0)).await;
+    let _ = core_handle.spawn_ball(make_ball(gate_core, 47685, DVec3::ZERO, 500.0)).await;
+    let _ = core_handle.spawn_ball(make_ball(72_001, 48090, DVec3::new(1000.0, 0.0, 0.0), 40.0)).await;
+    let _ = core_handle.spawn_ball(make_ball(72_002, 48090, DVec3::new(2000.0, 0.0, 0.0), 40.0)).await;
+    assert!(!on_abyssal_room_npc_destroyed_core(&ctx.systems, &ctx.db, 33_000_000, 72_001).await);
+    assert!(!on_abyssal_room_npc_destroyed_core(&ctx.systems, &ctx.db, ab_sys_core, 72_001).await);
+    let _ = core_handle.remove_ball(72_001).await;
+    assert!(on_abyssal_room_npc_destroyed_core(&ctx.systems, &ctx.db, ab_sys_core, 72_002).await);
+    assert!(read_abyssal_state(&ctx, |st| st.pockets[&90_309_102].rooms[0].cleared));
+    let (_, core_events, _) = core_handle.drain_observer_updates(obs_core).await.unwrap();
+    assert!(core_events.iter().any(|ev| matches!(ev, DestinyEvent::OnClientControllerEvent { ball_id, event_name, value: 1, .. } if *ball_id == gate_core && event_name == "GateActivate")));
+}
+

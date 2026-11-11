@@ -494,6 +494,14 @@ impl CareerGoalManager {
             };
             let goals_json = serde_json::to_string(&*map).ok();
             let milestones_json = serde_json::to_string(&*cm).ok();
+            let already = db.with_snapshot(|snap| {
+                defs_json.as_ref().is_none_or(|j| snap.quasar_state_blobs.get("quasar_career_goal_defs") == Some(j))
+                    && goals_json.as_ref().is_none_or(|j| snap.quasar_state_blobs.get("quasar_career_goals") == Some(j))
+                    && milestones_json.as_ref().is_none_or(|j| snap.quasar_state_blobs.get("quasar_career_milestones") == Some(j))
+            });
+            if already {
+                return;
+            }
             let _ = db.try_with_mut_snapshot(|snap| {
                 if let Some(d_json) = defs_json {
                     snap.quasar_state_blobs

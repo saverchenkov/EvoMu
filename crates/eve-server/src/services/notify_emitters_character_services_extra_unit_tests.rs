@@ -889,3 +889,53 @@ fn gm_timer_acceleration_slash_commands_cover_all_aliases_branches_and_notificat
         assert!(!rt.limited_engagements.contains_key(&char_id));
     });
 }
+
+#[test]
+fn emit_allow_war_updated_for_alliance_and_slash_unknown_none_kill_mutants() {
+    let (ctx, char_id) = make_ctx();
+    let alliance_id = 99_777_001_i64;
+    let member_a = 98_777_001_i64;
+    let member_b = 98_777_002_i64;
+    let non_member = 98_777_003_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, aid) in [
+            (member_a, Some(alliance_id)),
+            (member_b, Some(alliance_id)),
+            (non_member, None),
+        ] {
+            let mut corp = CorporationRecord::default();
+            corp.corporation_id = cid;
+            corp.ceo_id = char_id;
+            corp.alliance_id = aid;
+            corp.name = format!("Corp-{cid}");
+            corp.ticker = format!("C{}", cid % 1000);
+            snap.corporations.insert(cid, corp);
+        }
+    });
+
+    // 1. emit_allow_war_updated_for_alliance persists `corp_allow_war` for member corps only
+    //    (kills `emit_allow_war_updated_for_alliance -> ()`).
+    emit_allow_war_updated_for_alliance(&ctx, alliance_id, true);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.fleet_and_social_ops.corp_allow_war.get(&member_a), Some(&true));
+        assert_eq!(snap.fleet_and_social_ops.corp_allow_war.get(&member_b), Some(&true));
+        assert_eq!(snap.fleet_and_social_ops.corp_allow_war.get(&non_member), None);
+    });
+    emit_allow_war_updated_for_alliance(&ctx, alliance_id, false);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.fleet_and_social_ops.corp_allow_war.get(&member_a), Some(&false));
+        assert_eq!(snap.fleet_and_social_ops.corp_allow_war.get(&member_b), Some(&false));
+    });
+
+    // 2. handle_batch3_gm_slash_cmd returns `None` on non-batch3 command & non-empty keyval on valid command
+    //    (kills `-> Some(Ok(Default::default()))` and `-> None`).
+    assert!(handle_batch3_gm_slash_cmd(&ctx, char_id, Some(30_000_142), "").is_none());
+    assert!(handle_batch3_gm_slash_cmd(&ctx, char_id, Some(30_000_142), "/unknownslashcmd").is_none());
+
+    let res = handle_batch3_gm_slash_cmd(&ctx, char_id, Some(30_000_142), "/achievements reset")
+        .expect("recognized command must return Some")
+        .expect("command succeeds");
+    assert_eq!(res.dict_get("reset"), Some(&PyRep::Bool(true)));
+    assert_eq!(res.dict_get("characterID"), Some(&PyRep::Integer(char_id)));
+}

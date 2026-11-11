@@ -508,3 +508,138 @@ async fn tick_insurgency_campaigns_auto_seeding_roamers_and_cleanup() {
     tick_insurgency_campaigns(&ctx, now).await;
     assert!(ctx.db.with_snapshot(|snap| !snap.insurgency_runtime.campaigns.contains_key(&seeded_id)));
 }
+
+#[tokio::test]
+async fn sync_campaign_system_npcs_roamer_waypoint_fallback_boundaries_0_1_2_3_celestials() {
+    use glam::DVec3;
+
+    let mut custom_sde = (*test_ctx().sde).clone();
+    let mk_planet = |cid: i64, sys_id: u32, x: f64| eve_sde::CelestialInfo {
+        celestial_id: cid,
+        solar_system_id: sys_id,
+        type_id: 11,
+        group_id: 7,
+        name: format!("Planet {cid}"),
+        radius: 10_000.0,
+        position: DVec3::new(x, 0.0, 0.0),
+        orbit_id: None,
+        orbit_index: None,
+        celestial_index: None,
+    };
+    let sys_0 = 99_100_000_u32;
+    let sys_1 = 99_100_001_u32;
+    let sys_2 = 99_100_002_u32;
+    let sys_3 = 99_100_003_u32;
+
+    custom_sde.insert_celestial(mk_planet(40_900_101, sys_1, 200_000.0));
+
+    custom_sde.insert_celestial(mk_planet(40_900_201, sys_2, 100_000.0));
+    custom_sde.insert_celestial(mk_planet(40_900_202, sys_2, 400_000.0));
+
+    custom_sde.insert_celestial(mk_planet(40_900_301, sys_3, 100_000.0));
+    custom_sde.insert_celestial(mk_planet(40_900_302, sys_3, 400_000.0));
+    custom_sde.insert_celestial(mk_planet(40_900_303, sys_3, 700_000.0));
+
+    let ctx = ServerContext::with_sde_and_repository(
+        Arc::new(custom_sde),
+        Arc::new(eve_db::WorldRepository::with_demo_seed()),
+    )
+    .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+
+    let now = ctx.now_unix();
+    let camp_id = 77_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.insurgency_runtime.campaigns.insert(
+            camp_id,
+            PersistedInsurgencyCampaign {
+                campaign_id: camp_id,
+                pirate_faction_id: FACTION_GURISTAS,
+                target_faction_id: 500_001,
+                fob_solar_system_id: sys_0,
+                systems: vec![sys_0, sys_1, sys_2, sys_3],
+                created_at_unix: now - 1_000,
+                forecasting_end_unix: now - 10,
+                active_end_unix: now + 3_600,
+                winddown_end_unix: now + 7_200,
+                corruption_points: HashMap::new(),
+                suppression_points: HashMap::new(),
+            },
+        );
+        for &s in &[sys_0, sys_1, sys_2, sys_3] {
+            let st = snap.system_states.entry(s).or_default();
+            st.insurgency_corruption_stage = 2;
+            st.insurgency_suppression_stage = 0;
+        }
+    });
+
+    let pirate_offset = DVec3::new(12_000.0, 0.0, 4_000.0);
+    let fallback0 = DVec3::new(12_000.0, 0.0, 4_000.0) + pirate_offset;
+
+    let find_pirate_bid = |sys: u32| -> i64 {
+        crate::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
+            rt.npc_entities
+                .iter()
+                .find(|(_, npc)| {
+                    npc.solar_system_id == sys
+                        && ctx.sde.types.get(&npc.type_id).map(|t| t.group_id) == Some(4637)
+                })
+                .map(|(&bid, _)| bid)
+                .expect("pirate roamer present")
+        })
+    };
+
+    let next_idle_dest = |sys: u32, bid: i64, stop_at: DVec3| -> DVec3 {
+        let sys_h = ctx.systems.get_or_spawn(sys);
+        {
+            let mut bp = sys_h.ballpark.write().unwrap();
+            let b = bp.balls.get_mut(&bid).unwrap();
+            b.position = stop_at;
+            b.mode = eve_destiny::MovementMode::Stop;
+        }
+        crate::services::combat_crimewatch::with_mut_combat_ephemeral(&ctx, |rt| {
+            rt.npc_entities.get_mut(&bid).unwrap().spawn_position = stop_at;
+        });
+        stop_at
+    };
+
+    // 0 celestials: spawns at fallback0 = (24_000, 0, 8_000) (kills `vec![]`, `vec![Default::default()]`, `< 2 -> == 2 / > 2`)
+    sync_campaign_system_npcs(&ctx, camp_id, sys_0).await;
+    let bid0 = find_pirate_bid(sys_0);
+    let pos0 = ctx.systems.get_or_spawn(sys_0).ballpark.read().unwrap().balls[&bid0].position;
+    assert_eq!(pos0, fallback0);
+
+    // 1 celestial: spawns at wp0 (200_000 + 60_000 + 12_000 = 272_000); next idle patrol MUST go to fallback0 (len == 4, not len == 1!)
+    let c_wp = |x: f64| DVec3::new(x + 10_000.0 + 50_000.0, 0.0, 0.0) + pirate_offset;
+    sync_campaign_system_npcs(&ctx, camp_id, sys_1).await;
+    let bid1 = find_pirate_bid(sys_1);
+    let pos1 = ctx.systems.get_or_spawn(sys_1).ballpark.read().unwrap().balls[&bid1].position;
+    assert_eq!(pos1, c_wp(200_000.0));
+    sync_campaign_system_npcs(&ctx, camp_id, sys_1).await;
+    let dest1 = match &ctx.systems.get_or_spawn(sys_1).ballpark.read().unwrap().balls[&bid1].mode {
+        eve_destiny::MovementMode::Warp { destination, .. } => *destination,
+        other => panic!("expected Warp toward fallback0 from wp0, got {other:?}"),
+    };
+    assert_eq!(dest1, fallback0, "1 celestial must append fallback waypoints (`wps.len() < 2`)");
+
+    // 2 celestials: from wp1 (400k), next idle patrol MUST wrap back to wp0 (len == 2), NOT fallback0 (`< 2 -> <= 2 / == 2`)
+    sync_campaign_system_npcs(&ctx, camp_id, sys_2).await;
+    let bid2 = find_pirate_bid(sys_2);
+    let _ = next_idle_dest(sys_2, bid2, c_wp(400_000.0));
+    sync_campaign_system_npcs(&ctx, camp_id, sys_2).await;
+    let dest2 = match &ctx.systems.get_or_spawn(sys_2).ballpark.read().unwrap().balls[&bid2].mode {
+        eve_destiny::MovementMode::Warp { destination, .. } => *destination,
+        other => panic!("expected Warp back to wp0, got {other:?}"),
+    };
+    assert_eq!(dest2, c_wp(100_000.0), "2 celestials must wrap 1 -> 0 without fallback waypoints");
+
+    // 3 celestials: from wp2 (700k), next idle patrol MUST wrap back to wp0 (len == 3), NOT fallback0 (`< 2 -> > 2`)
+    sync_campaign_system_npcs(&ctx, camp_id, sys_3).await;
+    let bid3 = find_pirate_bid(sys_3);
+    let _ = next_idle_dest(sys_3, bid3, c_wp(700_000.0));
+    sync_campaign_system_npcs(&ctx, camp_id, sys_3).await;
+    let dest3 = match &ctx.systems.get_or_spawn(sys_3).ballpark.read().unwrap().balls[&bid3].mode {
+        eve_destiny::MovementMode::Warp { destination, .. } => *destination,
+        other => panic!("expected Warp back to wp0, got {other:?}"),
+    };
+    assert_eq!(dest3, c_wp(100_000.0), "3 celestials must wrap 2 -> 0 without fallback waypoints");
+}

@@ -65,7 +65,7 @@ fn make_char(
     c
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn supply_sites_ihub_regen_battlefield_wave_and_space_entity_destroyed() {
     let ctx = test_ctx();
     let sys_id = 30002505_u32;
@@ -243,8 +243,8 @@ fn donate_lp_all_tiers_and_neighbor_jump_check() {
             },
         );
         let mut ch = make_char(snap, cid, 98_000_001, None, Some(500_001), far_sys);
-        // Seed LP under faction_id fallback key (500_001)
-        ch.loyalty_points.insert(500_001, 250_000);
+        // Seed LP under faction_id fallback key (500_001) below effective_lp (200_000 cap) first
+        ch.loyalty_points.insert(500_001, 150_000);
         snap.characters.insert(cid, ch);
     });
 
@@ -263,6 +263,15 @@ fn donate_lp_all_tiers_and_neighbor_jump_check() {
         "InsufficientLoyaltyPoints"
     );
 
+    // Top up LP so the tier walk has enough for all 200_000 LP
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters
+            .get_mut(&cid)
+            .unwrap()
+            .loyalty_points
+            .insert(500_001, 250_000);
+    });
+
     // Walk through all tier thresholds: 0 -> 1 -> 2 -> 3 -> 4 -> 5
     let (tot0, t0, r0, _) = donate_lp_to_fw_ihub(&ctx, cid, sys_id, 39_999).unwrap();
     assert_eq!((tot0, t0, r0), (39_999, 0, 0.0));
@@ -278,7 +287,7 @@ fn donate_lp_all_tiers_and_neighbor_jump_check() {
     assert_eq!((tot5, t5, r5), (200_000, 5, 50.0));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn corp_and_alliance_standing_sources_and_error_guards() {
     let ctx = test_ctx();
     let ceo_id = 930_020_i64;
@@ -469,7 +478,7 @@ async fn corp_and_alliance_standing_sources_and_error_guards() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stat_events_leaderboards_and_remaining_rpc_methods() {
     let ctx = test_ctx();
     let now = ctx.now_unix();

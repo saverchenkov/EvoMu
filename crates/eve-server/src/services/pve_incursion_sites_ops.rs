@@ -234,3 +234,7 @@ pub fn sync_incursion_lp_log_rows(
     }
     matched
 }
+
+#[cfg(test)]
+#[path = "pve_incursion_sites_ops_edges_tests.rs"]
+mod pve_incursion_sites_ops_edges_tests;

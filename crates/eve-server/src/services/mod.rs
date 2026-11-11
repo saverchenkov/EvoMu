@@ -517,6 +517,8 @@ mod corp_registry_roles_deep_extra_unit_tests;
 
 #[cfg(test)]
 mod sov_fw_deep_extra_unit_tests;
+#[cfg(test)]
+mod w4_gh758_804_mutant_killers_unit_tests;
 
 #[cfg(test)]
 mod fleet_social_deep_extra_unit_tests;
@@ -597,6 +599,14 @@ mod tactical_scanners_bays_deep_extra_unit_tests;
 #[cfg(test)]
 mod warp_jump_gm_tools_deep_extra_unit_tests;
 #[cfg(test)]
+mod abyssal_void_gates_extra_unit_tests;
+#[cfg(test)]
+mod fleet_social_chat_extra_unit_tests;
+#[cfg(test)]
+mod market_orders_escrow_extra_unit_tests;
+#[cfg(test)]
+mod space_entity_mining_extra_unit_tests;
+#[cfg(test)]
 mod r6_t3_p0_security_tests;
 #[cfg(test)]
 mod r6_t2_p0_security_tests;
@@ -629,6 +639,10 @@ mod insurgency_outpost_ess_security_tests;
 #[cfg(test)]
 mod npe_career_docking_security_tests;
 #[cfg(test)]
+mod quasar_career_goals_extra_unit_tests;
+#[cfg(test)]
+mod space_entity_ops_extra_unit_tests;
+#[cfg(test)]
 mod r6_t4_econ_security_tests;
 #[cfg(test)]
 mod combat_reconnect_npc_concord_security_tests;
@@ -654,6 +668,22 @@ mod corp_registry_actions_and_tracking_unit_tests;
 mod r8_shard_h_security_tests;
 #[cfg(test)]
 mod rpc_args_migration_tests;
+#[cfg(test)]
+mod structure_profile_services_extra_unit_tests;
+#[cfg(test)]
+mod combat_missiles_aoe_extra_unit_tests;
+#[cfg(test)]
+mod inventory_fitting_extra_unit_tests;
+#[cfg(test)]
+mod sov_gameplay_skyhook_extra_unit_tests;
+#[cfg(test)]
+mod fast_checkout_and_activity_extra_unit_tests;
+#[cfg(test)]
+mod combat_npcs_drones_extra_unit_tests;
+#[cfg(test)]
+mod character_skill_ops_extra_unit_tests;
+#[cfg(test)]
+mod fitting_ships_mastery_extra_unit_tests;
 
 pub(crate) fn domain_err_to_rpc(err: crate::domain::DomainError) -> eve_proto::BridgeRpcError {
     eve_proto::BridgeRpcError {

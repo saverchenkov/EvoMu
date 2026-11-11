@@ -214,7 +214,7 @@ async fn staging_payout_solo_ball_offgrid_zero_payout_lockout_expiry_and_beacon_
     // Spawn boss ball in space -> completion blocked because ball is still alive in system!
     let vg_handle = ctx.systems.get_or_spawn(vg_site.solar_system_id);
     vg_handle
-        .spawn_ball(make_site_npc_ball(vg_site.boss_npc_ball_id, vg_site.boss_type_id, vg_site.position))
+        .spawn_ball(make_site_npc_ball(vg_site.boss_npc_ball_id, vg_site.boss_type_id, DVec3::from_array(vg_site.position)))
         .await
         .unwrap();
     assert_eq!(
@@ -254,13 +254,14 @@ async fn staging_payout_solo_ball_offgrid_zero_payout_lockout_expiry_and_beacon_
 
     // 4. Staging site completion by solo pilot (not in fleet) with ship ball in sys_handle and candidate_pilots = Some(&[])
     let solo_pid = 92_100_010i64;
-    let solo_ship = insert_pilot(&ctx, solo_pid, stg_site.solar_system_id, None, stg_site.position);
+    let stg_pos = DVec3::from_array(stg_site.position);
+    let solo_ship = insert_pilot(&ctx, solo_pid, stg_site.solar_system_id, None, stg_pos);
     let stg_handle = ctx.systems.get_or_spawn(stg_site.solar_system_id);
     stg_handle
         .spawn_ball(Ball {
             id: solo_ship,
             type_id: 587,
-            position: stg_site.position + DVec3::new(5_000.0, 0.0, 0.0),
+            position: stg_pos + DVec3::new(5_000.0, 0.0, 0.0),
             velocity: DVec3::ZERO,
             max_velocity: 200.0,
             inertia: 1.0,

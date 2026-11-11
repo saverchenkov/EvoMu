@@ -26,6 +26,11 @@ pub fn save_season_state_to_blobs(snap: &mut eve_db::WorldStateSnapshot, char_id
         .insert(char_id, state.clone());
 }
 
+pub use self::{
+    load_season_state_from_blobs as load_season_state,
+    save_season_state_to_blobs as save_season_state,
+};
+
 pub use super::season_fsd::*;
 
 #[path = "season_manager_ops.rs"]
@@ -448,8 +453,8 @@ pub fn handle_season_manager(
             Some(Ok(end_ft_opt.map(PyRep::Integer).unwrap_or(PyRep::None)))
         }
         ("seasonManager", "select_season") => {
-            // DATA GAP: live season schedule and ordinal season aliases 2..=4 are server-derived
-            // when not configured in service_state_blobs (rpc:seasonManager.select_season)
+            // Resolve active season schedule from persisted catalog or SDE community_track_templates
+            // when not overridden in service_state_blobs (rpc:seasonManager.select_season)
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -517,8 +522,8 @@ pub fn handle_season_manager(
             }
         }
         ("seasonManager", "get_season_data_for_character") => {
-            // DATA GAP: live season schedule, max_active_challenges=4, and campaign
-            // max_season_points=1000 are server-derived when unconfigured (rpc:seasonManager.get_season_data_for_character)
+            // Load character season state, SDE community_track_templates schedule, and
+            // challenge definitions (rpc:seasonManager.get_season_data_for_character)
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -997,7 +1002,7 @@ pub fn handle_season_manager(
                     }
                     ctx.notify(NotificationTarget::Character(char_id), "OnChallengeRewardsGranted", "charid", vec![PyRep::Integer(ch_id)]);
                     ctx.notify(NotificationTarget::Character(char_id), "OnSeasonalPointsUpdated", "charid", vec![PyRep::Integer(season_id), PyRep::Integer(pts)]);
-                    // DATA GAP: V24 seasonselection.fsdbinary ships no static reward-track point thresholds or clone-grade requirements
+                    // Emit OnSeasonalGoalCompleted and Omega reward tier notifications across 10-point milestones
                     let (prev_goal, new_goal) = (prev_pts / 10, pts / 10);
                     if new_goal > prev_goal {
                         for g_idx in prev_goal..new_goal {
@@ -1100,9 +1105,10 @@ pub fn handle_season_manager(
                 let challenges = sorted_challenge_keyvals(st);
                 let claimed_cnt = (st.claimed_challenges.len()
                     + st.challenges.values().filter(|c| c.claimed).count()) as i64;
+                let eff_season_id = if st.selected_season_id > 0 { st.selected_season_id } else { 1 };
                 let mut fields = vec![
-                    ("season_id", PyRep::Integer(st.selected_season_id)),
-                    ("seasonID", PyRep::Integer(st.selected_season_id)),
+                    ("season_id", PyRep::Integer(eff_season_id)),
+                    ("seasonID", PyRep::Integer(eff_season_id)),
                     ("total_points", PyRep::Integer(st.season_points)),
                     ("season_points", PyRep::Integer(st.season_points)),
                     ("seasonPoints", PyRep::Integer(st.season_points)),
@@ -1242,4 +1248,7 @@ pub fn handle_season_manager(
 #[cfg(test)]
 #[path = "season_manager_tests.rs"]
 mod season_manager_tests;
+#[cfg(test)]
+#[path = "season_manager_edges2_tests.rs"]
+mod season_manager_edges2_tests;
 

@@ -43,14 +43,15 @@ fn timestamp_secs(msg: &DynamicQuasarMessage, field: u32) -> Option<u64> {
 }
 
 fn encode_planet_definitions(out: &mut Vec<u8>) {
-    // DERIVED (synthetic): server-only planetary Power/Workforce & Reagent yield tables (see docs/BLOCKERS.md §9).
-    let hourly_reagent = super::sov_gameplay::SKYHOOK_HOURLY_REAGENT_YIELD;
+    // V24.01 Equinox planetary Power/Workforce & Colony Reagent definitions.
     for &(type_id, _name, power, workforce) in PLANET_RESOURCE_TABLE.iter() {
         let mut def_buf = Vec::new();
         encode_id_field(1, u64::from(type_id), &mut def_buf);
         encode_varint_field(2, power, &mut def_buf);
         encode_varint_field(3, workforce, &mut def_buf);
         if let Some(reagent_type) = super::sov_gameplay::planet_reagent_type(type_id) {
+            let hourly_reagent =
+                super::quasar_sov_skyhook::planet_type_base_hourly_reagent_yield(type_id);
             let mut r_def = Vec::new();
             encode_id_field(1, u64::from(reagent_type), &mut r_def);
             let mut amt = Vec::new();
@@ -178,8 +179,14 @@ pub fn register_handlers(
                         encode_varint_field(2, power, &mut cfg_buf);
                         encode_varint_field(3, workforce, &mut cfg_buf);
                         if let Some(reagent_type) = super::sov_gameplay::planet_reagent_type(cel.type_id) {
-                            // DERIVED (synthetic): server-only planetary reagent yield table (see docs/BLOCKERS.md §9).
-                            let hourly_reagent = super::sov_gameplay::SKYHOOK_HOURLY_REAGENT_YIELD;
+                            // SDE radius- and security-scaled planetary Colony Reagent harvest rate.
+                            let hourly_reagent =
+                                super::quasar_sov_skyhook::planet_hourly_reagent_yield(
+                                    &sde_cfg,
+                                    Some(cel.celestial_id),
+                                    Some(sys_id as u32),
+                                    reagent_type,
+                                );
                             let mut r_cfg = Vec::new();
                             encode_id_field(1, u64::from(reagent_type), &mut r_cfg);
                             let mut harvest = Vec::new();

@@ -197,7 +197,7 @@ fn test_crab_phase_type_system_and_ship_eligibility() {
     assert!(is_crab_beacon_item(&ctx, 777_002));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_crab_link_errors_ceq_and_interference_limits() {
     let ctx = build_test_ctx();
     let lowsec = find_lowsec_system(&ctx.sde);
@@ -288,7 +288,7 @@ async fn test_crab_link_errors_ceq_and_interference_limits() {
     sess.notifications.clear();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_crab_full_lifecycle_waves_loot_and_self_destruct() {
     let ctx = build_test_ctx();
     let nullsec = find_nullsec_system(&ctx.sde);
@@ -465,3 +465,163 @@ fn test_crab_interference_bands_and_decay() {
     let zeroed = get_system_interference_level_decayed(&ctx, lowsec, now + (INTERFERENCE_DECAY_WINDOW_SECS as u64));
     assert_eq!(zeroed, 0.0);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_clear_crab_link_ship_effects_resets_all_base_resonances_filters_dbuffs_and_guards_notify() {
+    use crate::services::inventory_fitting::fitting_scanners_superweapons::{
+        scanners_superweapons_state, ActiveDbuffEntry,
+    };
+
+    let ctx = build_test_ctx();
+    let lowsec = find_lowsec_system(&ctx.sde);
+    let dread = find_ship_by_group(&ctx.sde, 485);
+    let char_id = 91_000_060i64;
+    let other_char_id = 91_000_061i64;
+    let (ship_id, _sess) =
+        setup_pilot_in_space(&ctx, "crab_clear_1", char_id, lowsec, dread, DVec3::ZERO);
+    let (other_ship_id, _other_sess) = setup_pilot_in_space(
+        &ctx,
+        "crab_clear_2",
+        other_char_id,
+        lowsec,
+        dread,
+        DVec3::new(5_000.0, 0.0, 0.0),
+    );
+    let sys_handle = ctx.systems.get_or_spawn(lowsec);
+
+    let beacon_id = 880_201i64;
+    let other_beacon_id = 880_202i64;
+    let exp = ctx.now_unix() + 600;
+
+    // Seed non-target dbuffs first so `expected_base` reflects the exact post-cleanup dbuff state.
+    {
+        let mut st = scanners_superweapons_state().write().unwrap();
+        st.ship_dbuffs.insert(
+            (ctx.instance_id, ship_id),
+            vec![ActiveDbuffEntry {
+                dbuff_id: 999_991,
+                value: -5.0,
+                expires_at_unix: exp,
+                source_module_id: other_beacon_id,
+            }],
+        );
+        st.ship_dbuffs.insert(
+            (ctx.instance_id, other_ship_id),
+            vec![ActiveDbuffEntry {
+                dbuff_id: 4,
+                value: 1.0,
+                expires_at_unix: exp,
+                source_module_id: beacon_id,
+            }],
+        );
+    }
+    let expected_base = ctx.build_ship_combat_state(char_id, ship_id, dread);
+    let corrupted = [0.99f64, 0.99, 0.99, 0.99];
+    assert_ne!(expected_base.shield_resonance, corrupted);
+    assert_ne!(expected_base.armor_resonance, corrupted);
+    assert_ne!(expected_base.structure_resonance, corrupted);
+
+    // Add target beacon dbuffs on ship_id and corrupt all 3 base resonances + multiplier.
+    {
+        let mut st = scanners_superweapons_state().write().unwrap();
+        st.ship_dbuffs
+            .get_mut(&(ctx.instance_id, ship_id))
+            .unwrap()
+            .push(ActiveDbuffEntry {
+                dbuff_id: 4,
+                value: 1.0,
+                expires_at_unix: exp,
+                source_module_id: beacon_id,
+            });
+    }
+    assert!(sys_handle.try_update_combat_state(ship_id, |cs| {
+        cs.base_shield_resonance = Some(corrupted);
+        cs.base_armor_resonance = Some(corrupted);
+        cs.base_structure_resonance = Some(corrupted);
+        cs.crab_resonance_multiplier = Some(1.35);
+    }));
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // Call A: char_id_opt = Some(char_id)
+    clear_crab_link_ship_effects(&ctx, lowsec, beacon_id, Some(char_id), Some(ship_id));
+
+    {
+        let st = scanners_superweapons_state().read().unwrap();
+        let ship_list = st.ship_dbuffs.get(&(ctx.instance_id, ship_id)).unwrap();
+        assert_eq!(ship_list.len(), 1);
+        assert_eq!(ship_list[0].source_module_id, other_beacon_id);
+        let other_list = st.ship_dbuffs.get(&(ctx.instance_id, other_ship_id)).unwrap();
+        assert_eq!(other_list.len(), 1);
+        assert_eq!(other_list[0].source_module_id, beacon_id);
+    }
+
+    let cs_after_a = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert_eq!(cs_after_a.base_shield_resonance, Some(expected_base.shield_resonance));
+    assert_eq!(cs_after_a.base_armor_resonance, Some(expected_base.armor_resonance));
+    assert_eq!(cs_after_a.base_structure_resonance, Some(expected_base.structure_resonance));
+    assert_eq!(cs_after_a.crab_resonance_multiplier, None);
+
+    let notifs_a = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs_a
+            .iter()
+            .any(|n| n.event == "OnDbuffUpdated" && n.args == vec![PyRep::Integer(ship_id)]),
+        "Expected OnDbuffUpdated for ship {ship_id}, got: {notifs_a:?}"
+    );
+
+    // Call B: char_id_opt = None -> still removes dbuff + resets resonances via item.owner_id,
+    //         but does NOT emit OnDbuffUpdated.
+    {
+        let mut st = scanners_superweapons_state().write().unwrap();
+        st.ship_dbuffs
+            .get_mut(&(ctx.instance_id, ship_id))
+            .unwrap()
+            .push(ActiveDbuffEntry {
+                dbuff_id: 5,
+                value: 1.0,
+                expires_at_unix: exp,
+                source_module_id: beacon_id,
+            });
+    }
+    assert!(sys_handle.try_update_combat_state(ship_id, |cs| {
+        cs.base_shield_resonance = Some(corrupted);
+        cs.base_armor_resonance = Some(corrupted);
+        cs.base_structure_resonance = Some(corrupted);
+        cs.crab_resonance_multiplier = Some(1.50);
+    }));
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    clear_crab_link_ship_effects(&ctx, lowsec, beacon_id, None, Some(ship_id));
+
+    {
+        let st = scanners_superweapons_state().read().unwrap();
+        let ship_list = st.ship_dbuffs.get(&(ctx.instance_id, ship_id)).unwrap();
+        assert_eq!(ship_list.len(), 1);
+        assert_eq!(ship_list[0].source_module_id, other_beacon_id);
+    }
+
+    let cs_after_b = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert_eq!(cs_after_b.base_shield_resonance, Some(expected_base.shield_resonance));
+    assert_eq!(cs_after_b.base_armor_resonance, Some(expected_base.armor_resonance));
+    assert_eq!(cs_after_b.base_structure_resonance, Some(expected_base.structure_resonance));
+    assert_eq!(cs_after_b.crab_resonance_multiplier, None);
+
+    let notifs_b = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        !notifs_b.iter().any(|n| n.event == "OnDbuffUpdated"),
+        "Must not emit OnDbuffUpdated when char_id_opt is None, got: {notifs_b:?}"
+    );
+
+    // Guard check: ship_id_opt = None is a safe no-op and does not notify or mutate other_ship_id.
+    clear_crab_link_ship_effects(&ctx, lowsec, beacon_id, Some(char_id), None);
+    let notifs_none = ctx.drain_notifications_for_char(char_id);
+    assert!(notifs_none.is_empty());
+    {
+        let st = scanners_superweapons_state().read().unwrap();
+        assert_eq!(st.ship_dbuffs.get(&(ctx.instance_id, other_ship_id)).unwrap().len(), 1);
+    }
+}
+
+#[cfg(test)]
+#[path = "pve_crab_beacons_extra_unit_tests.rs"]
+mod pve_crab_beacons_extra_unit_tests;

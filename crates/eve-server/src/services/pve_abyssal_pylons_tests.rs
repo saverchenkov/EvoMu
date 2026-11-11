@@ -409,7 +409,7 @@ async fn abyssal_automated_pylons_pulse_probe_prune_and_ballpark_step() {
     assert!(bp.balls.values().any(|b| b.type_id == 25));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn arch_585_abyssal_boundary_enforces_invuln_preserves_events_and_step_hook_death_pipeline() {
     let sde = shared_sde();
     let db = Arc::new(WorldRepository::new_empty());
@@ -595,4 +595,274 @@ async fn arch_585_abyssal_boundary_enforces_invuln_preserves_events_and_step_hoo
             "escalated tick must carry over to ejected capsule"
         );
     });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abyssal_pylons_npc_kill_probe_prune_and_cloud_transitions() {
+    use crate::services::pve_abyssal_hazards::TACHYON_CLOUD_TYPE_ID;
+    let mut sde = (*shared_sde()).clone();
+    // Ensure a drone type (cat 18) and probe type (group 479) exist in SDE
+    let drone_tid = 2488_u32;
+    let template_type = sde.types.values().next().cloned().expect("sde has types");
+    sde.types.entry(drone_tid).or_insert_with(|| {
+        let mut t = template_type.clone();
+        t.type_id = drone_tid;
+        t.group_id = 100;
+        t.category_id = 18;
+        t.name = "Hornet II".into();
+        t
+    });
+    let probe_tid = 30013_u32;
+    sde.types.insert(probe_tid, {
+        let mut t = template_type.clone();
+        t.type_id = probe_tid;
+        t.group_id = 479;
+        t.category_id = 8;
+        t.name = "Core Scanner Probe I".into();
+        t
+    });
+    let sde = Arc::new(sde);
+    let db = Arc::new(WorldRepository::new_empty());
+    let char_id: i64 = 90_050_201;
+    let fleet_char: i64 = 90_050_202;
+    let ship_id: i64 = 1_050_200_001;
+    let fleet_ship: i64 = 1_050_200_002;
+    let drone_id: i64 = 1_050_200_050;
+    let ab_sys: SolarSystemId = 32_000_003;
+
+    db.provision_gm_account("pylon_p2", "pw", char_id, "PylonP2");
+    let ctx = ServerContext::with_sde_and_repository(sde.clone(), db.clone());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_670_000)));
+
+    let make_room = |idx: u8| AbyssalRoomRecord {
+        room_index: idx,
+        dungeon_id: 2200 + idx as u32,
+        dungeon_name: "Abyss".into(),
+        npc_ball_ids: vec![],
+        cache_item_id: 0,
+        cleared: false,
+        gate_unlocked_at_sec: None,
+    };
+    with_abyssal_state(&ctx, |reg| {
+        reg.pockets.insert(
+            char_id,
+            AbyssalPocketSession {
+                pocket_id: 2,
+                character_id: char_id,
+                ship_id,
+                origin_solar_system_id: 30_000_142,
+                abyssal_solar_system_id: ab_sys,
+                origin_position: [0.0; 3],
+                grid_offset: [0.0; 3],
+                filament_type_id: 56131,
+                tier: 1,
+                weather: AbyssalWeatherKind::Electrical,
+                weather_penalty_pct: 30.0,
+                weather_bonus_pct: 50.0,
+                npc_difficulty_mult: 1.0,
+                current_room: 0,
+                rooms: [make_room(0), make_room(1), make_room(2)],
+                started_at_sec: 1_775_670_000,
+                collapse_at_sec: 1_775_671_200,
+                completed: false,
+                collapsed_destroyed: false,
+                trace_ball_id: 1_890_000_002,
+                fleet_ship_ids: vec![ship_id, fleet_ship],
+                ship_room: HashMap::from([(ship_id, 0), (fleet_ship, 1)]),
+                max_ships: 2,
+            },
+        );
+        let _ = fleet_char;
+    });
+
+    // Spawn out-of-bounds scanner probe + in-bounds probe + probe in another system
+    let ab_h = ctx.systems.get_or_spawn(ab_sys);
+    let oob_probe_id = 1_050_200_101_i64;
+    let in_probe_id = 1_050_200_102_i64;
+    let other_probe_id = 1_050_200_103_i64;
+    {
+        let mut probes = ctx.active_scanner_probes.write().unwrap();
+        let make_probe = |pid: i64, sid: u32, pos: [f64; 3]| crate::router::ActiveScannerProbe {
+            probe_id: pid,
+            probe_type_id: probe_tid,
+            owner_char_id: char_id,
+            ship_id,
+            launcher_module_id: 99_001,
+            solar_system_id: sid,
+            position: pos,
+            destination: pos,
+            range_step: 1,
+            scan_range_m: 1_000_000.0,
+            base_sensor_strength: 20.0,
+            max_flight_time_s: 3600.0,
+            launched_at_unix: 1_775_670_000,
+            state: 0,
+            warp_end_ft: None,
+        };
+        probes.insert(oob_probe_id, make_probe(oob_probe_id, ab_sys, [120_000.0, 0.0, 0.0]));
+        probes.insert(in_probe_id, make_probe(in_probe_id, ab_sys, [1_000.0, 0.0, 0.0]));
+        probes.insert(other_probe_id, make_probe(other_probe_id, 30_000_142, [500_000.0, 0.0, 0.0]));
+    }
+    prune_out_of_bounds_abyssal_probes(&ctx, ab_sys);
+    {
+        let probes = ctx.active_scanner_probes.read().unwrap();
+        assert!(!probes.contains_key(&oob_probe_id));
+        assert!(probes.contains_key(&in_probe_id));
+        assert!(probes.contains_key(&other_probe_id));
+    }
+
+    // Spawn ship, drone (1 HP), suppressor, and tracking pylon in ab_sys for pulse_abyssal_automated_pylons
+    for (bid, tid, pos, hp) in [
+        (ship_id, 587_u32, DVec3::new(1_000.0, 0.0, 0.0), 1_000.0),
+        (drone_id, drone_tid, DVec3::new(1_500.0, 0.0, 0.0), 1.0),
+        (1_899_000_211_i64, AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID, DVec3::new(1_600.0, 0.0, 0.0), 10_000.0),
+        (1_899_000_212_i64, MULTIBODY_TRACKING_PYLON_TYPE_ID, DVec3::new(1_200.0, 0.0, 0.0), 10_000.0),
+    ] {
+        let _ = ab_h
+            .spawn_ball_with_combat(
+                Ball {
+                    id: bid,
+                    type_id: tid,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 100.0,
+                    inertia: 1.0,
+                    mass: 10_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                eve_destiny::CombatState {
+                    shield_hp: 0.0,
+                    armor_hp: 0.0,
+                    structure_hp: hp,
+                    max_structure_hp: hp,
+                    ..Default::default()
+                },
+            )
+            .await;
+    }
+    let (sup, trk) = pulse_abyssal_automated_pylons(&ctx, ab_sys).await;
+    assert!(sup >= 1 && trk >= 1);
+
+    // Ballpark void-space skip + cloud enter -> stay -> exit + out-of-bounds probe removal
+    let mut bp_void = Ballpark::new(crate::services::abyssal_void_mgr::VOID_SPACE_SYSTEM_ID);
+    assert!(step_abyssal_hazards_and_pylons_in_ballpark(
+        &mut bp_void,
+        Some(&sde),
+        Some(&db),
+        crate::services::abyssal_void_mgr::VOID_SPACE_SYSTEM_ID,
+    )
+    .is_empty());
+
+    let mut bp = Ballpark::new(ab_sys);
+    bp.add_ball(Ball {
+        id: ship_id,
+        type_id: 587,
+        position: DVec3::new(100.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 200.0,
+        inertia: 1.0,
+        mass: 100_000.0,
+        radius: 35.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    });
+    bp.combat_states.insert(ship_id, eve_destiny::CombatState::new());
+    bp.add_ball(Ball {
+        id: 1_898_000_211,
+        type_id: TACHYON_CLOUD_TYPE_ID,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 1e6,
+        radius: 10_000.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    });
+    bp.add_ball(Ball {
+        id: oob_probe_id,
+        type_id: probe_tid,
+        position: DVec3::new(100_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 100.0,
+        radius: 5.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    });
+    bp.ball_slim_meta.insert(
+        oob_probe_id,
+        eve_destiny::SlimItemMeta {
+            owner_id: char_id,
+            char_id: Some(char_id),
+            ..Default::default()
+        },
+    );
+    bp.combat_states.remove(&oob_probe_id);
+
+    // Tick 1: enter cloud + prune OOB probe
+    step_abyssal_hazards_and_pylons_in_ballpark(&mut bp, Some(&sde), Some(&db), ab_sys);
+    assert!(!bp.balls.contains_key(&oob_probe_id));
+    // Tick 2: stay in cloud
+    step_abyssal_hazards_and_pylons_in_ballpark(&mut bp, Some(&sde), Some(&db), ab_sys);
+    // Tick 3: exit cloud
+    bp.balls.get_mut(&ship_id).unwrap().position = DVec3::new(50_000.0, 0.0, 0.0);
+    step_abyssal_hazards_and_pylons_in_ballpark(&mut bp, Some(&sde), Some(&db), ab_sys);
+}
+
+#[test]
+fn suppressor_and_tracking_pylon_pure_helpers_cover_fallbacks_and_type_filters() {
+    let sde = shared_sde();
+    assert_eq!(suppressor_radius_m(None, AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID, 18_500.0), 18_500.0);
+    assert_eq!(suppressor_radius_m(None, AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID, 0.0), 15_000.0);
+    assert_eq!(suppressor_radius_m(None, AUTOMATA_SUPPRESSOR_MEDIUM_TYPE_ID, 0.0), 25_000.0);
+    assert_eq!(suppressor_radius_m(None, AUTOMATA_SUPPRESSOR_LARGE_TYPE_ID, 0.0), 40_000.0);
+    assert_eq!(suppressor_radius_m(None, 999_999, 0.0), 15_000.0);
+    assert!(suppressor_radius_m(Some(&sde), AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID, 0.0) > 0.0);
+
+    let fallback_dmg = suppressor_pulse_damage(None, AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID);
+    assert_eq!((fallback_dmg.em, fallback_dmg.thermal, fallback_dmg.kinetic, fallback_dmg.explosive), (0.0, 0.0, 0.0, 90.0));
+    let mut custom_sde = (*sde).clone();
+    let mut dmg_t = custom_sde.types.values().next().cloned().expect("sde type");
+    dmg_t.type_id = 999_991;
+    dmg_t.default_attributes = HashMap::from([(114, 10.0), (116, 20.0), (117, 30.0), (118, 40.0)]);
+    custom_sde.types.insert(999_991, dmg_t.clone());
+    let sde_dmg = suppressor_pulse_damage(Some(&custom_sde), 999_991);
+    assert_eq!((sde_dmg.em, sde_dmg.explosive, sde_dmg.kinetic, sde_dmg.thermal), (10.0, 20.0, 30.0, 40.0));
+
+    assert_eq!(tracking_pylon_radius_and_mult(None, MULTIBODY_TRACKING_PYLON_TYPE_ID, 0.0), (15_000.0, 1.8));
+    assert_eq!(tracking_pylon_radius_and_mult(None, MULTIBODY_TRACKING_PYLON_MEDIUM_TYPE_ID, 0.0), (40_000.0, 1.6));
+    assert_eq!(tracking_pylon_radius_and_mult(None, 999_999, 22_000.0), (22_000.0, 1.8));
+
+    let make_inv_type = |tid: u32, gid: u32, cid: u32, max_vel: Option<f64>| {
+        let mut t = dmg_t.clone();
+        t.type_id = tid;
+        t.group_id = gid;
+        t.category_id = cid;
+        t.default_attributes.clear();
+        if let Some(v) = max_vel {
+            t.default_attributes.insert(37, v);
+        }
+        t
+    };
+    // Stationary sentry drone (category 18, attr 37 < 1.0 or type 60_481) & Tessera (48_262..=48_265) excluded
+    assert!(!is_suppressor_target_type(&make_inv_type(28_280, 100, 18, Some(0.0))));
+    assert!(!is_suppressor_target_type(&make_inv_type(60_481, 100, 18, Some(500.0))));
+    assert!(!is_suppressor_target_type(&make_inv_type(48_263, 1997, 11, Some(500.0))));
+    // Mobile drone (category 18, attr 37 >= 1.0), charge/missile (cat 8), fighter (cat 87), & rogue drone swarm (group 1997) included
+    assert!(is_suppressor_target_type(&make_inv_type(2_456, 100, 18, Some(2_600.0))));
+    assert!(is_suppressor_target_type(&make_inv_type(200, 89, 8, None)));
+    assert!(is_suppressor_target_type(&make_inv_type(40_555, 1652, 87, None)));
+    assert!(is_suppressor_target_type(&make_inv_type(47_500, 1997, 11, None)));
+    assert!(!is_suppressor_target_type(&make_inv_type(587, 25, 6, None)));
+
+    // Tracking pylon beneficiary: player ship (cat 6), sentry drone (group 100), combat NPC (cat 11), excluding clouds/pylons/gates/caches
+    assert!(is_tracking_pylon_beneficiary(&make_inv_type(587, 25, 6, None)));
+    assert!(is_tracking_pylon_beneficiary(&make_inv_type(28_280, 100, 18, Some(0.0))));
+    assert!(is_tracking_pylon_beneficiary(&make_inv_type(47_500, 1982, 11, None)));
+    assert!(!is_tracking_pylon_beneficiary(&make_inv_type(47_501, 1971, 11, None)));
+    assert!(!is_tracking_pylon_beneficiary(&make_inv_type(47_685, 1982, 11, None)));
 }

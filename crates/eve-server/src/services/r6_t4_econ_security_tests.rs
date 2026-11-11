@@ -400,10 +400,10 @@ fn test_408_market_buy_order_skill_range_and_immediate_fill_broker_fee() {
     let mut buyer_sess = make_session(301, buyer_id, 1_000_035, JITA_STATION, 0);
     let kw = HashMap::new();
 
-    // Immediate buy order (duration=0) cannot bypass Visibility skill range check with range=32767
+    // Buy order (duration=1) cannot bypass Visibility skill range check with range=32767
     let vis_err = crate::services::market_trading::handle(
         &ctx, &mut buyer_sess, "marketProxy", "PlaceBuyOrder",
-        &[PyRep::Integer(JITA_STATION), PyRep::Integer(34), PyRep::Real(1_000.0), PyRep::Integer(10), PyRep::Integer(32_767), PyRep::Integer(1), PyRep::Integer(0)],
+        &[PyRep::Integer(JITA_STATION), PyRep::Integer(34), PyRep::Real(1_000.0), PyRep::Integer(10), PyRep::Integer(32_767), PyRep::Integer(1), PyRep::Integer(1)],
         &kw,
     ).unwrap().unwrap_err();
     assert_eq!(vis_err.code, "VisibilitySkillRequired");

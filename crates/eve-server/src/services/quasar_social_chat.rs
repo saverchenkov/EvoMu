@@ -87,19 +87,32 @@ pub fn save_wormhole_speakers_to_db(
     let mut entries: Vec<(u32, u32)> = speakers.iter().copied().collect();
     entries.sort_unstable();
     if entries.is_empty() {
-        let _ = db.try_with_mut_snapshot(|snap| {
+        let has_key = db.with_snapshot(|snap| {
             snap.quasar_state_blobs
-                .remove("quasar_chat_wormhole_speakers");
-            Ok::<(), String>(())
+                .contains_key("quasar_chat_wormhole_speakers")
         });
+        if has_key {
+            let _ = db.try_with_mut_snapshot(|snap| {
+                snap.quasar_state_blobs
+                    .remove("quasar_chat_wormhole_speakers");
+                Ok::<(), String>(())
+            });
+        }
         return;
     }
     if let Ok(json) = serde_json::to_string(&entries) {
-        let _ = db.try_with_mut_snapshot(|snap| {
+        let already = db.with_snapshot(|snap| {
             snap.quasar_state_blobs
-                .insert("quasar_chat_wormhole_speakers".into(), json);
-            Ok::<(), String>(())
+                .get("quasar_chat_wormhole_speakers")
+                .is_some_and(|s| s == &json)
         });
+        if !already {
+            let _ = db.try_with_mut_snapshot(|snap| {
+                snap.quasar_state_blobs
+                    .insert("quasar_chat_wormhole_speakers".into(), json);
+                Ok::<(), String>(())
+            });
+        }
     }
 }
 
@@ -117,18 +130,28 @@ pub fn save_mutes_to_db(db: &WorldRepository, mutes: &HashMap<u32, (u64, String)
         return;
     }
     if mutes.is_empty() {
-        let _ = db.try_with_mut_snapshot(|snap| {
-            snap.quasar_state_blobs.remove("quasar_chat_mutes");
-            Ok::<(), String>(())
-        });
+        let has_key = db.with_snapshot(|snap| snap.quasar_state_blobs.contains_key("quasar_chat_mutes"));
+        if has_key {
+            let _ = db.try_with_mut_snapshot(|snap| {
+                snap.quasar_state_blobs.remove("quasar_chat_mutes");
+                Ok::<(), String>(())
+            });
+        }
         return;
     }
     if let Ok(json) = serde_json::to_string(mutes) {
-        let _ = db.try_with_mut_snapshot(|snap| {
+        let already = db.with_snapshot(|snap| {
             snap.quasar_state_blobs
-                .insert("quasar_chat_mutes".into(), json);
-            Ok::<(), String>(())
+                .get("quasar_chat_mutes")
+                .is_some_and(|s| s == &json)
         });
+        if !already {
+            let _ = db.try_with_mut_snapshot(|snap| {
+                snap.quasar_state_blobs
+                    .insert("quasar_chat_mutes".into(), json);
+                Ok::<(), String>(())
+            });
+        }
     }
 }
 

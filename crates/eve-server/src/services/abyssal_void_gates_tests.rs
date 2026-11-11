@@ -8,7 +8,7 @@ use eve_destiny::{Ball, MovementMode};
 #[tokio::test]
 async fn test_abyssal_gate_and_end_gate_activation_and_void_space() {
     let (mut ctx, mut session, char_id, ship_id, origin_sys) = make_fighter_ctx_and_session();
-    let kw = HashMap::new();
+    let kw: HashMap<String, PyRep> = HashMap::new();
     let void_fil_type = 950_001_u32;
     let void_gate_id = 777_001_i64;
     std::sync::Arc::make_mut(&mut ctx.sde).types.insert(
@@ -204,4 +204,632 @@ async fn test_abyssal_gate_and_end_gate_activation_and_void_space() {
             .and_then(|v| v.as_bool()),
         Some(true)
     );
+}
+
+#[tokio::test]
+async fn test_abyssal_gates_and_void_space_all_error_and_fleet_cleanup_branches() {
+    use crate::services::pve_special_sites::{
+        with_abyssal_state, AbyssalPocketSession, AbyssalRoomRecord, AbyssalTraceRecord,
+        AbyssalWeatherKind, VoidSpaceSessionRecord,
+    };
+    use eve_db::InventoryFlag;
+
+    let (mut ctx, mut session, char_id, ship_id, origin_sys) = make_fighter_ctx_and_session();
+    ctx.set_clock(std::sync::Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let kw: HashMap<String, PyRep> = HashMap::new();
+    let abyss_sys = crate::services::abyssal_void_mgr::ABYSSAL_SPACE_SYSTEM_ID;
+    let void_fil_type = 950_002_u32;
+    std::sync::Arc::make_mut(&mut ctx.sde).types.insert(
+        void_fil_type,
+        crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_type(
+            void_fil_type,
+            4145,
+            66,
+            0.1,
+            vec![],
+        ),
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.type_id = 621;
+        }
+    });
+
+    // 1. handle_void_space_player_jump error paths: docked, no_sys, no_ship, target_id <= 0, cloaked, target_id == ship_id, missing target, invalid target type, out of range
+    let mut s_docked = session.clone();
+    s_docked.station_id = Some(60_003_760);
+    assert_eq!(
+        handle_void_space_player_jump(&ctx, &mut s_docked, char_id, &[PyRep::Integer(1)])
+            .await
+            .unwrap_err()
+            .code,
+        "ShipDocked"
+    );
+    let mut s_nosys = session.clone();
+    s_nosys.solar_system_id = None;
+    assert_eq!(
+        handle_void_space_player_jump(&ctx, &mut s_nosys, char_id, &[PyRep::Integer(1)])
+            .await
+            .unwrap_err()
+            .code,
+        "NoSolarSystem"
+    );
+    let mut s_noship = session.clone();
+    s_noship.ship_id = None;
+    assert_eq!(
+        handle_void_space_player_jump(&ctx, &mut s_noship, char_id, &[PyRep::Integer(1)])
+            .await
+            .unwrap_err()
+            .code,
+        "NoActiveShip"
+    );
+    assert_eq!(
+        handle_void_space_player_jump(&ctx, &mut session, char_id, &[PyRep::Integer(0)])
+            .await
+            .unwrap_err()
+            .code,
+        "MissingRequiredArgument"
+    );
+
+    let origin_h = ctx.systems.get_or_spawn(origin_sys);
+    let far_pos = DVec3::splat(500_000_000.0);
+    let _ = origin_h
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 621,
+                position: far_pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 1e7,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            eve_destiny::CombatState {
+                is_cloaked: true,
+                ..Default::default()
+            },
+        )
+        .await;
+    assert_eq!(
+        handle_void_space_player_jump(&ctx, &mut session, char_id, &[PyRep::Integer(99_999)])
+            .await
+            .unwrap_err()
+            .code,
+        "ShipIsCloaked"
+    );
+    let _ = origin_h
+        .set_combat_state(
+            ship_id,
+            eve_destiny::CombatState {
+                is_cloaked: false,
+                ..Default::default()
+            },
+        )
+        .await;
+
+    assert_eq!(
+        handle_void_space_player_jump(&ctx, &mut session, char_id, &[PyRep::Integer(ship_id)])
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidTarget"
+    );
+    assert_eq!(
+        handle_void_space_player_jump(&ctx, &mut session, char_id, &[PyRep::Integer(888_999_001)])
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidTarget"
+    );
+
+    // Non-gate ball in space -> InvalidTarget; valid gate ball >5000m -> OutOfRange
+    let bad_gate = 888_999_002_i64;
+    let good_gate = 888_999_003_i64;
+    let _ = origin_h
+        .spawn_ball(Ball {
+            id: bad_gate,
+            type_id: 587,
+            position: far_pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e6,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    let _ = origin_h
+        .spawn_ball(Ball {
+            id: good_gate,
+            type_id: 60_770,
+            position: far_pos + DVec3::new(10_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e6,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    assert_eq!(
+        handle_void_space_player_jump(&ctx, &mut session, char_id, &[PyRep::Integer(bad_gate)])
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidTarget"
+    );
+    assert_eq!(
+        handle_void_space_player_jump(&ctx, &mut session, char_id, &[PyRep::Integer(good_gate)])
+            .await
+            .unwrap_err()
+            .code,
+        "OutOfRange"
+    );
+
+    // 2. handle_void_space_end_gate_activation error branches
+    assert_eq!(
+        handle_void_space_end_gate_activation(&ctx, &mut session, char_id, &[PyRep::Integer(888_001)])
+            .await
+            .unwrap_err()
+            .code,
+        "NotInVoidSpace"
+    );
+    session.solar_system_id = Some(VOID_SPACE_SYSTEM_ID);
+    assert_eq!(
+        handle_void_space_end_gate_activation(&ctx, &mut s_docked, char_id, &[PyRep::Integer(888_001)])
+            .await
+            .unwrap_err()
+            .code,
+        "NotInVoidSpace"
+    );
+    s_docked.solar_system_id = Some(VOID_SPACE_SYSTEM_ID);
+    assert_eq!(
+        handle_void_space_end_gate_activation(&ctx, &mut s_docked, char_id, &[PyRep::Integer(888_001)])
+            .await
+            .unwrap_err()
+            .code,
+        "ShipDocked"
+    );
+    s_noship.solar_system_id = Some(VOID_SPACE_SYSTEM_ID);
+    assert_eq!(
+        handle_void_space_end_gate_activation(&ctx, &mut s_noship, char_id, &[PyRep::Integer(888_001)])
+            .await
+            .unwrap_err()
+            .code,
+        "NoActiveShip"
+    );
+    assert_eq!(
+        handle_void_space_end_gate_activation(&ctx, &mut session, char_id, &[PyRep::Integer(0)])
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidGate"
+    );
+    // No VoidSpaceSessionRecord -> NotInVoidSpace
+    assert_eq!(
+        handle_void_space_end_gate_activation(&ctx, &mut session, char_id, &[PyRep::Integer(888_001)])
+            .await
+            .unwrap_err()
+            .code,
+        "NotInVoidSpace"
+    );
+
+    let now = ctx.now_unix();
+    // NotInVoidSpace before entering void system, then expired VoidSpaceSessionRecord -> PocketCollapsed
+    session.station_id = None;
+    session.structure_id = None;
+    assert_eq!(
+        handle_void_space_end_gate_activation(&ctx, &mut session, char_id, &[PyRep::Integer(888_001)])
+            .await
+            .unwrap_err()
+            .code,
+        "NotInVoidSpace"
+    );
+    session.solar_system_id = Some(VOID_SPACE_SYSTEM_ID);
+    with_abyssal_state(&ctx, |reg| {
+        reg.void_space_sessions.insert(
+            char_id,
+            VoidSpaceSessionRecord {
+                char_id,
+                ship_id,
+                origin_solar_system_id: origin_sys,
+                origin_position: [0.0; 3],
+                target_id: 1,
+                entered_unix: now.saturating_sub(2000),
+                expires_at_sec: now.saturating_sub(10),
+                ..Default::default()
+            },
+        );
+    });
+    assert_eq!(
+        handle_void_space_end_gate_activation(&ctx, &mut session, char_id, &[PyRep::Integer(888_001)])
+            .await
+            .unwrap_err()
+            .code,
+        "PocketCollapsed"
+    );
+
+    // Valid void session -> test missing gate, wrong gate type, out-of-range gate, warp scrambled
+    session.solar_system_id = Some(VOID_SPACE_SYSTEM_ID);
+    session.station_id = None;
+    session.structure_id = None;
+    with_abyssal_state(&ctx, |reg| {
+        reg.void_space_sessions.insert(
+            char_id,
+            VoidSpaceSessionRecord {
+                char_id,
+                ship_id,
+                origin_solar_system_id: origin_sys,
+                origin_position: [0.0; 3],
+                target_id: 1,
+                entered_unix: now,
+                expires_at_sec: now + 600,
+                ..Default::default()
+            },
+        );
+    });
+    let void_h = ctx.systems.get_or_spawn(VOID_SPACE_SYSTEM_ID);
+    let _ = void_h
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 621,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 1e7,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            eve_destiny::CombatState::new(),
+        )
+        .await;
+    assert_eq!(
+        handle_void_space_end_gate_activation(&ctx, &mut session, char_id, &[PyRep::Integer(888_777)])
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidGate"
+    );
+    let _ = void_h
+        .spawn_ball(Ball {
+            id: 888_778,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e6,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    assert_eq!(
+        handle_void_space_end_gate_activation(&ctx, &mut session, char_id, &[PyRep::Integer(888_778)])
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidGate"
+    );
+    let _ = void_h
+        .spawn_ball(Ball {
+            id: 888_779,
+            type_id: 47_686,
+            position: DVec3::new(10_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e6,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    assert_eq!(
+        handle_void_space_end_gate_activation(&ctx, &mut session, char_id, &[PyRep::Integer(888_779)])
+            .await
+            .unwrap_err()
+            .code,
+        "GateOutOfRange"
+    );
+
+    // 3. handle_abyssal_end_gate_activation & handle_abyssal_gate_activation error & fleet cleanup
+    session.solar_system_id = Some(abyss_sys);
+    assert_eq!(
+        handle_abyssal_end_gate_activation(&ctx, &mut session, char_id, &[PyRep::Integer(1)])
+            .await
+            .unwrap_err()
+            .code,
+        "NotInAbyssalSpace"
+    );
+
+    let pid = 2_i64;
+    let r3_gate = 1_895_000_000 + pid * 10 + 3;
+    let r3_npc = 60_000_201_i64;
+    let trace_id = 1_897_000_222_i64;
+    let mate_id = 90_000_888_i64;
+    let mate_ship = 100_000_888_i64;
+    let make_r = |idx: u8, npcs: Vec<i64>| AbyssalRoomRecord {
+        room_index: idx,
+        dungeon_id: idx as u32,
+        dungeon_name: "R".into(),
+        npc_ball_ids: npcs,
+        cache_item_id: 0,
+        cleared: false,
+        gate_unlocked_at_sec: None,
+    };
+    with_abyssal_state(&ctx, |reg| {
+        reg.traces.insert(
+            trace_id,
+            AbyssalTraceRecord {
+                trace_ball_id: trace_id,
+                char_id,
+                filament_type_id: 47_762,
+                origin_solar_system_id: origin_sys,
+                position: [0.0; 3],
+                created_unix: now,
+                expires_at_sec: now + 1200,
+                max_ships: 2,
+                entered_char_ids: vec![char_id, mate_id],
+                pocket_id: Some(pid),
+                fleet_id: None,
+            },
+        );
+        reg.pockets.insert(
+            char_id,
+            AbyssalPocketSession {
+                pocket_id: pid,
+                character_id: char_id,
+                ship_id,
+                origin_solar_system_id: origin_sys,
+                abyssal_solar_system_id: abyss_sys,
+                origin_position: [0.0; 3],
+                grid_offset: [0.0; 3],
+                filament_type_id: 47_762,
+                tier: 1,
+                weather: AbyssalWeatherKind::Electrical,
+                weather_penalty_pct: -30.0,
+                weather_bonus_pct: 50.0,
+                npc_difficulty_mult: 1.0,
+                current_room: 3,
+                rooms: [make_r(1, vec![]), make_r(2, vec![]), make_r(3, vec![r3_npc])],
+                started_at_sec: now,
+                collapse_at_sec: now + 1200,
+                completed: false,
+                collapsed_destroyed: false,
+                trace_ball_id: trace_id,
+                fleet_ship_ids: vec![ship_id, mate_ship],
+                ship_room: HashMap::from([(ship_id, 3), (mate_ship, 3)]),
+                max_ships: 2,
+            },
+        );
+        reg.pockets.insert(
+            mate_id,
+            AbyssalPocketSession {
+                pocket_id: pid,
+                character_id: mate_id,
+                ship_id: mate_ship,
+                origin_solar_system_id: origin_sys,
+                abyssal_solar_system_id: abyss_sys,
+                origin_position: [0.0; 3],
+                grid_offset: [0.0; 3],
+                filament_type_id: 47_762,
+                tier: 1,
+                weather: AbyssalWeatherKind::Electrical,
+                weather_penalty_pct: -30.0,
+                weather_bonus_pct: 50.0,
+                npc_difficulty_mult: 1.0,
+                current_room: 3,
+                rooms: [make_r(1, vec![]), make_r(2, vec![]), make_r(3, vec![r3_npc])],
+                started_at_sec: now,
+                collapse_at_sec: now + 1200,
+                completed: false,
+                collapsed_destroyed: false,
+                trace_ball_id: trace_id,
+                fleet_ship_ids: vec![ship_id, mate_ship],
+                ship_room: HashMap::from([(ship_id, 3), (mate_ship, 3)]),
+                max_ships: 2,
+            },
+        );
+    });
+
+    let abyss_h = ctx.systems.get_or_spawn(abyss_sys);
+    for (bid, pos) in [
+        (ship_id, DVec3::ZERO),
+        (mate_ship, DVec3::ZERO),
+        (r3_npc, DVec3::new(1000.0, 0.0, 0.0)),
+    ] {
+        let _ = abyss_h
+            .spawn_ball(Ball {
+                id: bid,
+                type_id: 621,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 100.0,
+                inertia: 1.0,
+                mass: 1e6,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            })
+            .await;
+    }
+
+    // InvalidGate ID
+    assert_eq!(
+        handle_abyssal_end_gate_activation(&ctx, &mut session, char_id, &[PyRep::Integer(999_111)])
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidGate"
+    );
+    // GateLocked due to alive r3_npc
+    assert_eq!(
+        handle_abyssal_end_gate_activation(&ctx, &mut session, char_id, &[PyRep::Integer(r3_gate)])
+            .await
+            .unwrap_err()
+            .code,
+        "GateLocked"
+    );
+    let _ = abyss_h.remove_ball(r3_npc).await;
+    // GateNotFound (r3_gate not spawned yet)
+    assert_eq!(
+        handle_abyssal_end_gate_activation(&ctx, &mut session, char_id, &[PyRep::Integer(r3_gate)])
+            .await
+            .unwrap_err()
+            .code,
+        "GateNotFound"
+    );
+    // Spawn r3_gate far away -> GateOutOfRange
+    let _ = abyss_h
+        .spawn_ball(Ball {
+            id: r3_gate,
+            type_id: 47_686,
+            position: DVec3::new(10_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e6,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    assert_eq!(
+        handle_abyssal_end_gate_activation(&ctx, &mut session, char_id, &[PyRep::Integer(r3_gate)])
+            .await
+            .unwrap_err()
+            .code,
+        "GateOutOfRange"
+    );
+
+    // Move r3_gate within range: first pilot exits (mate remains), then mate exits (trace cleaned up!)
+    let _ = abyss_h.set_ball_position(r3_gate, DVec3::ZERO).await;
+    assert!(
+        handle_abyssal_end_gate_activation(&ctx, &mut session, char_id, &[PyRep::Integer(r3_gate)])
+            .await
+            .is_ok()
+    );
+    assert!(with_abyssal_state(&ctx, |reg| reg.traces.contains_key(&trace_id)));
+
+    let mut mate_sess = session.clone();
+    mate_sess.character_id = Some(mate_id);
+    mate_sess.ship_id = Some(mate_ship);
+    mate_sess.solar_system_id = Some(abyss_sys);
+    assert!(
+        handle_abyssal_end_gate_activation(&ctx, &mut mate_sess, mate_id, &[PyRep::Integer(r3_gate)])
+            .await
+            .is_ok()
+    );
+    assert!(!with_abyssal_state(&ctx, |reg| reg.traces.contains_key(&trace_id)));
+
+    // SessionChangeInProgress on VoidSpaceExitGate + Expired PocketCollapsed on transfer gate & end gate
+    let mut sess2 = mate_sess.clone();
+    sess2.character_id = Some(char_id);
+    sess2.solar_system_id = Some(VOID_SPACE_SYSTEM_ID);
+    sess2.station_id = None;
+    sess2.structure_id = None;
+    sess2.ship_id = Some(ship_id);
+    with_abyssal_state(&ctx, |reg| {
+        reg.void_space_sessions.insert(char_id, crate::services::pve_special_sites::VoidSpaceSessionRecord {
+            char_id, ship_id, origin_solar_system_id: 30_000_142, origin_position: [0.0, 0.0, 0.0],
+            target_id: 777, entered_unix: now, expires_at_sec: now + 600, ..Default::default()
+        });
+    });
+    crate::services::space_destiny::record_session_change_timer(&ctx, char_id, now, VOID_SPACE_SYSTEM_ID, 0, "jump");
+    assert_eq!(handle_void_space_end_gate_activation(&ctx, &mut sess2, char_id, &[PyRep::Integer(999)]).await.unwrap_err().code, "SessionChangeInProgress");
+
+    let mk_room = |idx: u8| crate::services::pve_special_sites::AbyssalRoomRecord {
+        room_index: idx, dungeon_id: 0, dungeon_name: format!("R{idx}"), npc_ball_ids: vec![], cache_item_id: 0, cleared: false, gate_unlocked_at_sec: None,
+    };
+    with_abyssal_state(&ctx, |reg| {
+        reg.pockets.insert(char_id, crate::services::pve_special_sites::AbyssalPocketSession {
+            pocket_id: 55,
+            trace_ball_id: 0,
+            character_id: char_id,
+            ship_id,
+            fleet_ship_ids: vec![ship_id],
+            filament_type_id: 47_762,
+            tier: 1,
+            origin_solar_system_id: 30_000_142,
+            origin_position: [0.0; 3],
+            grid_offset: [0.0; 3],
+            abyssal_solar_system_id: abyss_sys,
+            weather: crate::services::pve_special_sites::AbyssalWeatherKind::Electrical,
+            weather_penalty_pct: 30.0,
+            weather_bonus_pct: 50.0,
+            npc_difficulty_mult: 1.0,
+            started_at_sec: now.saturating_sub(2_000),
+            collapse_at_sec: now.saturating_sub(10),
+            current_room: 1,
+            completed: false,
+            collapsed_destroyed: false,
+            ship_room: Default::default(),
+            max_ships: 1,
+            rooms: [mk_room(1), mk_room(2), mk_room(3)],
+        });
+    });
+    sess2.solar_system_id = Some(abyss_sys);
+    assert_eq!(handle_abyssal_gate_activation(&ctx, &mut sess2, char_id, &[PyRep::Integer(1)], &kw).await.unwrap_err().code, "PocketCollapsed");
+
+    with_abyssal_state(&ctx, |reg| {
+        reg.pockets.insert(char_id, crate::services::pve_special_sites::AbyssalPocketSession {
+            pocket_id: 56,
+            trace_ball_id: 0,
+            character_id: char_id,
+            ship_id,
+            fleet_ship_ids: vec![ship_id],
+            filament_type_id: 47_762,
+            tier: 1,
+            origin_solar_system_id: 30_000_142,
+            origin_position: [0.0; 3],
+            grid_offset: [0.0; 3],
+            abyssal_solar_system_id: abyss_sys,
+            weather: crate::services::pve_special_sites::AbyssalWeatherKind::Electrical,
+            weather_penalty_pct: 30.0,
+            weather_bonus_pct: 50.0,
+            npc_difficulty_mult: 1.0,
+            started_at_sec: now.saturating_sub(2_000),
+            collapse_at_sec: now.saturating_sub(10),
+            current_room: 3,
+            completed: false,
+            collapsed_destroyed: false,
+            ship_room: Default::default(),
+            max_ships: 1,
+            rooms: [mk_room(1), mk_room(2), mk_room(3)],
+        });
+    });
+    sess2.station_id = None;
+    sess2.structure_id = None;
+    sess2.solar_system_id = Some(abyss_sys);
+    assert_eq!(handle_abyssal_end_gate_activation(&ctx, &mut sess2, char_id, &[PyRep::Integer(1)]).await.unwrap_err().code, "PocketCollapsed");
+    let _ = InventoryFlag::Cargo;
+
+    // Direct unit checks for `is_void_space_filament_type`, `is_valid_void_entrance_gate`, and `is_valid_void_exit_gate`
+    assert!(super::is_void_space_filament_type(&ctx, void_fil_type));
+    assert!(!super::is_void_space_filament_type(&ctx, 587));
+    assert!(!super::is_void_space_filament_type(&ctx, 999_999_999));
+
+    assert!(super::is_valid_void_entrance_gate(&ctx, 500_001, 60_770));
+    assert!(super::is_valid_void_entrance_gate(&ctx, 500_001, 82_139));
+    assert!(!super::is_valid_void_entrance_gate(
+        &ctx,
+        500_001,
+        crate::services::pve_special_sites::ABYSSAL_TRACE_TYPE_ID
+    ));
+    assert!(!super::is_valid_void_entrance_gate(&ctx, 500_001, 587));
+
+    assert!(super::is_valid_void_exit_gate(47_686));
+    assert!(super::is_valid_void_exit_gate(60_608));
+    assert!(super::is_valid_void_exit_gate(80_944));
+    assert!(super::is_valid_void_exit_gate(82_139));
+    assert!(!super::is_valid_void_exit_gate(587));
 }

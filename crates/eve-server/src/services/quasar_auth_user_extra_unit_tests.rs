@@ -552,3 +552,99 @@ fn character_transfer_validation_guards_and_execution_branches() {
         assert_eq!(snap.unified_plex_balance_for_user(src_uid), 200);
     });
 }
+
+#[test]
+fn federated_and_transfer_handlers_registration_and_exact_1000_plex_fee() {
+    let (ctx, _clock) = test_ctx_and_clock(1_775_000_000);
+    let db = &ctx.db;
+    let router = &ctx.quasar_gateway;
+    register_handlers(router, Arc::clone(db));
+
+    let handlers = router.handlers.read().unwrap();
+    for expected in [
+        "eve.vendors.steam.user.api.admin.LinkRequest",
+        "eve_public.auth.steam.AuthenticateSteamRequest",
+        "eve.vendors.epic.api.GetUserByEpicUserIDRequest",
+        "eve.id.federate.twitch.api.CompleteLinkingRequest",
+        "eve.user.character.transfer.ValidateRequest",
+        "eve.user.character.transfer.QueueRequest",
+    ] {
+        assert!(handlers.contains_key(expected), "missing registered handler {expected}");
+    }
+
+    let src_uid = 610_u64;
+    let dst_uid = 611_u64;
+    let char_id = 95_000_111_i64;
+    db.with_mut_snapshot(|snap| {
+        for (uname, uid) in [("src_610", src_uid), ("dst_611", dst_uid)] {
+            snap.accounts.insert(
+                uname.into(),
+                AccountRecord {
+                    user_id: uid,
+                    username: uname.into(),
+                    password_token: String::new(),
+                    role: 0,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
+        }
+        let mut ch = snap.characters.values().next().unwrap().clone();
+        ch.character_id = char_id;
+        ch.user_id = src_uid;
+        ch.corporation_id = 1_000_009;
+        ch.balance = IskCents(500_000);
+        ch.plex_balance = 0;
+        snap.characters.insert(char_id, ch);
+        assert_eq!(snap.adjust_unified_plex(char_id, 999), Some(999));
+        snap.service_state_blobs
+            .insert(format!("char_transfer_consent_token:{dst_uid}"), "tok_ok".into());
+    });
+
+    let src_ctx = user_ctx(Some(src_uid as i32), Some(char_id), false);
+    let dummy_any = GoogleAny::default();
+    let mut xfer_msg = DynamicQuasarMessage::new("QueueXfer");
+    xfer_msg.fields.insert(1, DynamicValue::Uint64(char_id as u64));
+    xfer_msg.fields.insert(2, DynamicValue::Uint64(dst_uid));
+    xfer_msg.fields.insert(3, DynamicValue::String("tok_ok".into()));
+
+    let queue_fn = &handlers["eve.user.character.transfer.QueueRequest"];
+    // 999 PLEX is 1 short of 1,000 PLEX fee -> must reject and leave account PLEX untouched.
+    assert_eq!(
+        queue_fn(&src_ctx, &dummy_any, &xfer_msg).unwrap_err().0,
+        STATUS_PRECONDITION_FAILED
+    );
+    db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&char_id].user_id, src_uid);
+        assert_eq!(snap.unified_plex_balance_for_user(src_uid), 999);
+    });
+
+    // Top up +501 PLEX -> 1,500 PLEX vault -> queue deducts exact -1,000 PLEX leaving 500 PLEX.
+    db.with_mut_snapshot(|snap| {
+        assert_eq!(snap.adjust_unified_plex(char_id, 501), Some(1_500));
+    });
+    router.pending_notices.write().unwrap().clear();
+
+    let queued = queue_fn(&src_ctx, &dummy_any, &xfer_msg).expect("1500 PLEX transfer succeeds");
+    assert!(queued.type_url.ends_with("QueueResponse"));
+
+    db.with_snapshot(|snap| {
+        let ch = &snap.characters[&char_id];
+        assert_eq!(ch.user_id, dst_uid);
+        assert_eq!(snap.unified_plex_balance_for_user(src_uid), 500);
+        assert!(snap
+            .service_state_blobs
+            .contains_key(&format!("char_transfer_last_unix:{char_id}")));
+        assert!(snap
+            .wallet_journal
+            .iter()
+            .any(|j| j.character_id == char_id && j.entry_type == "character_transfer"));
+    });
+    let notices = router.pending_notices.read().unwrap();
+    assert!(notices.iter().any(|(scope, any)| {
+        *scope == crate::quasar_gateway::NoticeScope::User(dst_uid as i32)
+            && any
+                .type_url
+                .ends_with("eve.user.character.transfer.api.Completed")
+    }));
+}

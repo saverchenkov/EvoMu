@@ -161,7 +161,9 @@ pub fn load_fsd_seasons_catalog_clean(
     let mut out = BTreeMap::new();
 
     if let Ok(tracks) = sde.load_cfsd_nested("res:/staticdata/community_track_templates.fsdbinary") {
-        let msg_table = sde.load_all_localized_messages_en_us().unwrap_or_default();
+        let localized_title = u32::try_from(title_id)
+            .ok()
+            .and_then(|id| sde.localized_message_en_us(id));
         for (id_str, val) in tracks {
             let Ok(sid) = id_str.parse::<i64>() else {
                 continue;
@@ -170,11 +172,7 @@ pub fn load_fsd_seasons_catalog_clean(
                 .get("name")
                 .and_then(|v| v.as_str())
                 .map(str::to_string)
-                .or_else(|| {
-                    u32::try_from(title_id)
-                        .ok()
-                        .and_then(|id| msg_table.get(&id).cloned())
-                })
+                .or_else(|| localized_title.clone())
                 .unwrap_or_else(|| format!("Season {sid}"));
             let goal_pts = val.get("goal").and_then(|v| v.as_i64()).unwrap_or(100);
             out.insert(
@@ -202,7 +200,6 @@ pub fn load_fsd_seasons_catalog_clean(
     if let Ok(campaigns) =
         sde.load_cfsd_nested("res:/staticdata/seasonalcampaignsloginrewards.fsdbinary")
     {
-        let msg_table = sde.load_all_localized_messages_en_us().unwrap_or_default();
         for (k, val) in campaigns {
             let Ok(cid) = k.parse::<i64>() else {
                 continue;
@@ -213,7 +210,7 @@ pub fn load_fsd_seasons_catalog_clean(
                 .unwrap_or(title_id);
             let loc_name = u32::try_from(cname_id)
                 .ok()
-                .and_then(|id| msg_table.get(&id).cloned())
+                .and_then(|id| sde.localized_message_en_us(id))
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| format!("Seasonal Campaign {cid}"));
             let bg = val
@@ -413,3 +410,7 @@ pub fn fill_and_normalize_character_challenges(
     }
     expired
 }
+
+#[cfg(test)]
+#[path = "season_manager_ops_edges_tests.rs"]
+mod season_manager_ops_edges_tests;

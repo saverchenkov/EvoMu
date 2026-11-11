@@ -935,18 +935,18 @@ pub async fn handle(
 
 fn handle_get_hq_system_ids(ctx: &ServerContext) -> Option<Result<PyRep, BridgeRpcError>> {
     let hqs = [
-        HQ_SYSTEM_MEHATOOR,
-        HQ_SYSTEM_ONNAMON,
-        HQ_SYSTEM_INTAKI,
-        HQ_SYSTEM_AMO,
+        (FACTION_CALDARI, HQ_SYSTEM_ONNAMON),
+        (FACTION_MINMATAR, HQ_SYSTEM_AMO),
+        (FACTION_AMARR, HQ_SYSTEM_MEHATOOR),
+        (FACTION_GALLENTE, HQ_SYSTEM_INTAKI),
     ]
     .into_iter()
-    .filter(|sys_id| {
+    .filter(|(_, sys_id)| {
         ctx.sde.solar_systems.is_empty() || ctx.sde.solar_systems.contains_key(sys_id)
     })
-    .map(|sys_id| PyRep::Integer(i64::from(sys_id)))
+    .map(|(faction_id, sys_id)| (PyRep::Integer(faction_id), PyRep::Integer(i64::from(sys_id))))
     .collect();
-    Some(Ok(PyRep::List(hqs)))
+    Some(Ok(PyRep::Dict(hqs)))
 }
 
 fn handle_get_all_warzones(_ctx: &ServerContext) -> Option<Result<PyRep, BridgeRpcError>> {

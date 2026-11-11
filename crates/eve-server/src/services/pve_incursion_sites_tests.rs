@@ -162,7 +162,7 @@ fn test_encounter_composition_payout_bands_and_overstack() {
     assert_eq!(fallback, DVec3::new(100_000_000.0, 50_000_000.0, -80_000_000.0));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_incursion_site_completion_scaling_and_mothership_finale() {
     let ctx = build_test_ctx();
     let cid = eligible_incursion_constellations(&ctx)[0].0;
@@ -468,3 +468,7 @@ async fn test_incursion_site_completion_scaling_and_mothership_finale() {
         assert!(!snap.combat_crimewatch_state.sec_status_transactions[&92_000_001].is_empty());
     });
 }
+
+#[cfg(test)]
+#[path = "pve_incursion_sites_extra_unit_tests.rs"]
+mod pve_incursion_sites_extra_unit_tests;

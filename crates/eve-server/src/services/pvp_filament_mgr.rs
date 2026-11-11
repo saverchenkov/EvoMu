@@ -15,7 +15,7 @@ use crate::services::pve_abyssal_hazards::{
 use crate::services::pvp_filament_arena::{
     are_opposing_in_match, handle_pvp_end_gate_activation, match_contains_char,
     notify_pvp_stats_for_pilots, record_proving_grounds_combat_result_in_snap,
-    spawn_matched_arena_instance,
+    spawn_matched_arena_instance, PROVING_ARENA_DURATION_SECS,
 };
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -1179,7 +1179,11 @@ pub async fn handle(
                 Ok(Some((mid, end_gate_id, arena_offset, teams, participants))) => {
                     let char_ids: Vec<i64> = participants.iter().map(|(c, _, _)| *c).collect();
                     for &cid in &char_ids {
-                        crate::services::notify_emitters_space_dungeons::emit_pvp_match_found_and_expiry(ctx, cid, ctx.now_unix().saturating_add(900));
+                        crate::services::notify_emitters_space_dungeons::emit_pvp_match_found_and_expiry(
+                            ctx,
+                            cid,
+                            ctx.now_unix().saturating_add(PROVING_ARENA_DURATION_SECS),
+                        );
                     }
                     spawn_matched_arena_instance(ctx, session, mid, end_gate_id, arena_offset, teams, participants).await;
                     Some(Ok(PyRep::Integer(5)))

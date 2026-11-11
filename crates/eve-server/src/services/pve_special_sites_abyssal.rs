@@ -881,8 +881,14 @@ pub async fn handle_abyssal_entrance_deployment(
         ));
     };
 
-    let (_iid, filament_type_id, tier, max_ships, _origin_sec, ship_pos, opener_fleet_id) =
-        validate_and_consume_abyssal_filaments(ctx, char_id, ship_id, cur_sys, filament_arg).await?;
+    let ConsumedAbyssalFilament {
+        filament_type_id,
+        tier,
+        max_ships,
+        ship_position: ship_pos,
+        opener_fleet_id,
+        ..
+    } = validate_and_consume_abyssal_filaments(ctx, char_id, ship_id, cur_sys, filament_arg).await?;
 
     let now_unix = ctx.now_unix();
     let trace_pos = ship_pos + DVec3::new(500.0, 0.0, 0.0);
@@ -928,3 +934,7 @@ pub async fn handle_abyssal_entrance_deployment(
 #[cfg(test)]
 #[path = "pve_special_sites_abyssal_tests.rs"]
 mod pve_special_sites_abyssal_tests;
+
+#[cfg(test)]
+#[path = "pve_special_sites_abyssal_edges_tests.rs"]
+mod pve_special_sites_abyssal_edges_tests;

@@ -418,7 +418,7 @@ pub fn sync_stage_gated_insurgency_sites_in_snap(
                         solar_system_id: target_sys,
                         site_type: stype.into(),
                         name: sname(),
-                        // DERIVED (synthetic): baseline corruption/suppression point reward for site completion.
+                        // Baseline corruption/suppression point reward for site completion.
                         corruption_reward: rew,
                         completed: false,
                     });
@@ -552,4 +552,8 @@ pub fn nearest_sentry_gun_origin(ctx: &ServerContext, sys_id: u32, pos: DVec3) -
 #[cfg(test)]
 #[path = "security_mgr_tests.rs"]
 mod security_mgr_tests;
+
+#[cfg(test)]
+#[path = "security_mgr_edges_tests.rs"]
+mod security_mgr_edges_tests;
 

@@ -103,7 +103,7 @@ fn asset_spawn_hold_create_lookup_and_entitlement_redemption_lifecycle() {
     let (mut t_sub, mut st_sub, mut stacks_sub) = (Vec::new(), Vec::new(), Vec::new());
     encode_varint_field(1, 34, &mut t_sub);
     encode_bytes_field(1, &t_sub, &mut st_sub);
-    encode_varint_field(2, 5, &mut st_sub);
+    encode_varint_field(2, 20, &mut st_sub);
     encode_bytes_field(1, &st_sub, &mut stacks_sub);
     encode_bytes_field(6, &stacks_sub, &mut spawn_req);
     let spawn_rsp = call_rsp(&router, &gm, "eve.assetholding.asset.api.SpawnRequest", spawn_req, now);
@@ -196,4 +196,182 @@ fn asset_spawn_hold_create_lookup_and_entitlement_redemption_lifecycle() {
         delivered += 1;
     }
     assert_eq!(delivered, 5);
+}
+
+#[test]
+fn extract_u64_matrix_empty_asset_uuids_and_unredeemed_holder_filters() {
+    use eve_proto::quasar::AuthoritativeContext;
+
+    // 1. Direct extract_u64_from_field variant matrix (top-level & nested Message)
+    let mut deeply_nested = DynamicQuasarMessage::new("Deep");
+    deeply_nested.set(1, DynamicValue::Uint32(42));
+
+    let mut sub_msg_u64 = DynamicQuasarMessage::new("SubU64");
+    sub_msg_u64.set(1, DynamicValue::Uint64(99));
+    let mut sub_msg_u32 = DynamicQuasarMessage::new("SubU32");
+    sub_msg_u32.set(1, DynamicValue::Uint32(77));
+    let mut sub_msg_i64 = DynamicQuasarMessage::new("SubI64");
+    sub_msg_i64.set(1, DynamicValue::Int64(88));
+    let mut sub_msg_i32 = DynamicQuasarMessage::new("SubI32");
+    sub_msg_i32.set(1, DynamicValue::Int32(66));
+    let mut sub_msg_nested = DynamicQuasarMessage::new("SubNested");
+    sub_msg_nested.set(1, DynamicValue::Message(Box::new(deeply_nested)));
+    let mut sub_msg_bool = DynamicQuasarMessage::new("SubBool");
+    sub_msg_bool.set(1, DynamicValue::Bool(true));
+
+    let mut msg = DynamicQuasarMessage::new("TestHolderMsg");
+    msg.set(1, DynamicValue::Message(Box::new(sub_msg_u64)));
+    msg.set(2, DynamicValue::Message(Box::new(sub_msg_u32)));
+    msg.set(3, DynamicValue::Message(Box::new(sub_msg_i64)));
+    msg.set(4, DynamicValue::Message(Box::new(sub_msg_i32)));
+    msg.set(5, DynamicValue::Message(Box::new(sub_msg_nested)));
+    msg.set(6, DynamicValue::Message(Box::new(sub_msg_bool)));
+    msg.set(7, DynamicValue::Uint64(1234));
+    msg.set(8, DynamicValue::Uint32(567));
+    msg.set(9, DynamicValue::Int64(890));
+    msg.set(10, DynamicValue::Int32(321));
+    msg.set(11, DynamicValue::String("ignored".into()));
+
+    assert_eq!(extract_u64_from_field(&msg, 1), 99);
+    assert_eq!(extract_u64_from_field(&msg, 2), 77);
+    assert_eq!(extract_u64_from_field(&msg, 3), 88);
+    assert_eq!(extract_u64_from_field(&msg, 4), 66);
+    assert_eq!(extract_u64_from_field(&msg, 5), 42);
+    assert_eq!(extract_u64_from_field(&msg, 6), 0);
+    assert_eq!(extract_u64_from_field(&msg, 7), 1234);
+    assert_eq!(extract_u64_from_field(&msg, 8), 567);
+    assert_eq!(extract_u64_from_field(&msg, 9), 890);
+    assert_eq!(extract_u64_from_field(&msg, 10), 321);
+    assert_eq!(extract_u64_from_field(&msg, 11), 0);
+    assert_eq!(extract_u64_from_field(&msg, 99), 0);
+
+    // 2. Invoke handlers directly & via gateway for empty UUIDs and unredeemed edge cases
+    let router = new_router();
+    let holder_cid = 90_000_001u64;
+    let other_cid = 90_000_055u64;
+    let uid_only = 4242u64;
+    let now = 1_750_000_500u64;
+    router.db.with_mut_snapshot(|s| {
+        let mut ch_uid = s.characters[&(holder_cid as i64)].clone();
+        ch_uid.character_id = uid_only as i64;
+        ch_uid.user_id = uid_only;
+        s.characters.insert(uid_only as i64, ch_uid);
+    });
+
+    let gm = make_sess(Some(1), Some(holder_cid as i64), service_roles::ROLE_GM_DEFAULT);
+
+    // Spawn two assets & grant two entitlements: one in "promo" (partially redeemed),
+    // one in "full" (fully redeemed -> total == redeemed, must be excluded from GetUnredeemed),
+    // plus one belonging to uid_only so user-fallback path returns real results.
+    let mut spawn_req = Vec::new();
+    encode_string_field(2, "tritanium-edge", &mut spawn_req);
+    let (mut t_sub, mut st_sub, mut stacks_sub) = (Vec::new(), Vec::new(), Vec::new());
+    encode_varint_field(1, 34, &mut t_sub);
+    encode_bytes_field(1, &t_sub, &mut st_sub);
+    encode_varint_field(2, 20, &mut st_sub);
+    encode_bytes_field(1, &st_sub, &mut stacks_sub);
+    encode_bytes_field(6, &stacks_sub, &mut spawn_req);
+    assert_eq!(call(&router, &gm, "eve.assetholding.asset.api.SpawnRequest", spawn_req, now), STATUS_OK);
+
+    let asset_uuid = super::super::quasar_entitlement_ledger::load(&router.db)
+        .assets
+        .values()
+        .next()
+        .expect("asset")
+        .uuid;
+
+    // Fully redeem a 2-count entitlement for group "done" and grant active 3-count for group "promo"
+    let eid_done = build_ent_id(holder_cid, &asset_uuid, "done");
+    let mut deliv_done = Vec::new();
+    let mut ent_done = Vec::new();
+    encode_bytes_field(2, &eid_done, &mut ent_done);
+    encode_varint_field(10, 2, &mut ent_done);
+    encode_bytes_field(2, &ent_done, &mut deliv_done);
+    assert_eq!(call(&router, &gm, "eve.assetholding.entitlement.api.DirectDeliveryRequest", deliv_done, now), STATUS_OK);
+    let mut red_done = Vec::new();
+    encode_bytes_field(1, &eid_done, &mut red_done);
+    let player = make_sess(Some(1), Some(holder_cid as i64), service_roles::ROLE_PLAYER_DEFAULT);
+    assert_eq!(call(&router, &player, "eve_public.assetholding.entitlement.api.RedeemRequest", red_done, now), STATUS_OK);
+    assert!(super::super::quasar_entitlement_ledger::load(&router.db)
+        .entitlements
+        .values()
+        .any(|e| e.group_name == "done" && e.redeemed == e.total));
+
+    let eid_promo = build_ent_id(holder_cid, &asset_uuid, "promo");
+    let mut deliv_promo = Vec::new();
+    let mut ent_promo = Vec::new();
+    encode_bytes_field(2, &eid_promo, &mut ent_promo);
+    encode_varint_field(10, 3, &mut ent_promo);
+    encode_bytes_field(2, &ent_promo, &mut deliv_promo);
+    assert_eq!(call(&router, &gm, "eve.assetholding.entitlement.api.DirectDeliveryRequest", deliv_promo, now), STATUS_OK);
+
+    // Grant entitlement held directly by uid_only (caller_cid == None && caller_uid == Some(4242))
+    let eid_uid = build_ent_id(uid_only, &asset_uuid, "uidgrp");
+    let mut deliv_uid = Vec::new();
+    let mut ent_uid = Vec::new();
+    encode_bytes_field(2, &eid_uid, &mut ent_uid);
+    encode_varint_field(10, 1, &mut ent_uid);
+    encode_bytes_field(2, &ent_uid, &mut deliv_uid);
+    assert_eq!(call(&router, &gm, "eve.assetholding.entitlement.api.DirectDeliveryRequest", deliv_uid, now), STATUS_OK);
+
+    let dummy_any = GoogleAny::default();
+    let handlers = router.handlers.read().unwrap();
+
+    // Asset GetRequest (internal & public) with empty Bytes(vec![]) inside Identifier
+    let mut inner_empty = DynamicQuasarMessage::new("Identifier");
+    inner_empty.set(1, DynamicValue::Bytes(Vec::new()));
+    let mut get_empty = DynamicQuasarMessage::new("GetRequest");
+    get_empty.set(1, DynamicValue::Message(Box::new(inner_empty)));
+    let p_ctx = AuthoritativeContext::for_session(Some(1), Some(holder_cid as u32), None, 0, "evomu", vec![]);
+    assert_eq!(
+        handlers["eve.assetholding.asset.api.GetRequest"](&p_ctx, &dummy_any, &get_empty)
+            .expect_err("empty uuid -> 400")
+            .0,
+        STATUS_BAD_REQUEST
+    );
+    assert_eq!(
+        handlers["eve_public.assetholding.asset.api.GetRequest"](&p_ctx, &dummy_any, &get_empty)
+            .expect_err("public empty uuid -> 400")
+            .0,
+        STATUS_BAD_REQUEST
+    );
+
+    let unred_h = &handlers["eve.assetholding.entitlement.api.GetUnredeemedByHolderAndGroupNameRequest"];
+
+    // holder_raw > u32::MAX -> Invalid holder ID
+    let mut overflow_msg = DynamicQuasarMessage::new("GetUnredeemedByHolderAndGroupNameRequest");
+    overflow_msg.set(1, DynamicValue::Uint64(1u64 << 40));
+    assert_eq!(unred_h(&p_ctx, &dummy_any, &overflow_msg).expect_err("overflow holder").0, STATUS_BAD_REQUEST);
+
+    // Direct handler with no caller_cid, no caller_uid, non-admin -> 403 Authentication required
+    let empty_ctx = AuthoritativeContext::for_session(None, None, None, 0, "evomu", vec![]);
+    let empty_msg = DynamicQuasarMessage::new("GetUnredeemedByHolderAndGroupNameRequest");
+    assert_eq!(unred_h(&empty_ctx, &dummy_any, &empty_msg).expect_err("unauth").0, STATUS_FORBIDDEN);
+
+    // Admin with no caller_cid/uid and req_holder == 0 -> 400 Holder ID required
+    let mut admin_no_id_ctx = AuthoritativeContext::for_session(None, None, None, 0, "evomu", vec![]);
+    admin_no_id_ctx.service_role_mask = service_roles::ROLE_ADMIN;
+    assert_eq!(unred_h(&admin_no_id_ctx, &dummy_any, &empty_msg).expect_err("holder required").0, STATUS_BAD_REQUEST);
+
+    // Admin querying another holder's entitlements -> 200 OK
+    let mut admin_full_ctx = AuthoritativeContext::for_session(Some(1), Some(other_cid as u32), None, 0, "evomu", vec![]);
+    admin_full_ctx.service_role_mask = service_roles::ROLE_ADMIN;
+    let mut req_holder_msg = DynamicQuasarMessage::new("GetUnredeemedByHolderAndGroupNameRequest");
+    req_holder_msg.set(1, DynamicValue::Uint64(holder_cid));
+    let rsp_admin = unred_h(&admin_full_ctx, &dummy_any, &req_holder_msg).expect("admin queries holder");
+    assert!(!rsp_admin.value.is_empty());
+
+    // group_filter == Some("") matches unredeemed "promo" and excludes fully redeemed "done"
+    req_holder_msg.set(2, DynamicValue::String(String::new()));
+    let rsp_empty_grp = unred_h(&p_ctx, &dummy_any, &req_holder_msg).expect("empty group filter");
+    // Compare against filtering exclusively for "done" (fully redeemed -> empty payload)
+    req_holder_msg.set(2, DynamicValue::String("done".into()));
+    let rsp_done_only = unred_h(&p_ctx, &dummy_any, &req_holder_msg).expect("done excluded");
+    assert!(!rsp_empty_grp.value.is_empty());
+    assert!(rsp_done_only.value.is_empty());
+
+    // caller_cid == None && caller_uid == Some(uid_only) fallback returns uid_only's entitlement
+    let uid_ctx = AuthoritativeContext::for_session(Some(uid_only as i32), None, None, 0, "evomu", vec![]);
+    let rsp_uid = unred_h(&uid_ctx, &dummy_any, &empty_msg).expect("uid fallback");
+    assert!(!rsp_uid.value.is_empty());
 }

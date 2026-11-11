@@ -488,3 +488,7 @@ fn direct_delivery_get_redeem_delete_expire_autoredeem_and_redeliver() {
         vec![("skin_abc".to_string(), 3)]
     );
 }
+
+#[cfg(test)]
+#[path = "quasar_entitlement_ledger_extra_unit_tests.rs"]
+mod quasar_entitlement_ledger_extra_unit_tests;

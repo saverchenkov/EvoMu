@@ -2,6 +2,10 @@ use super::*;
 use crate::quasar_gateway::NoticeScope;
 use crate::services::fleet_social::fleet_social_fleet_ops::fleet_social_fleet_ops_tests::test_ctx_and_clock;
 
+#[cfg(test)]
+#[path = "quasar_char_skill_services_cov_edges_tests.rs"]
+mod quasar_char_skill_services_cov_edges_tests;
+
 #[test]
 fn char_skill_service_encoders_notices_and_gateway_handlers() {
     let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
@@ -33,6 +37,24 @@ fn char_skill_service_encoders_notices_and_gateway_handlers() {
     let decoded = decode_wire_dynamic("test.Msg", &raw_wire);
     assert_eq!(extract_u64_checked(&decoded, 1).unwrap(), Some(30_000_142));
     assert_eq!(extract_u64_checked(&decoded, 2).unwrap(), Some(99));
+
+    // Nested depth >= 2 submessage and printable ASCII preservation
+    let mut inner = Vec::new();
+    encode_varint_field(3, 777, &mut inner);
+    let mut mid = Vec::new();
+    eve_proto::quasar::encode_bytes_field(2, &inner, &mut mid);
+    let mut outer = Vec::new();
+    eve_proto::quasar::encode_bytes_field(1, &mid, &mut outer);
+    eve_proto::quasar::encode_bytes_field(4, b"8@", &mut outer);
+    let deep = decode_wire_dynamic("test.DeepMsg", &outer);
+    let Some(DynamicValue::Message(mid_msg)) = deep.get(1) else {
+        panic!("expected mid message");
+    };
+    let Some(DynamicValue::Message(inner_msg)) = mid_msg.get(2) else {
+        panic!("expected depth-2 inner message");
+    };
+    assert_eq!(inner_msg.get(3), Some(&DynamicValue::Uint64(777)));
+    assert_eq!(deep.get(4), Some(&DynamicValue::Bytes(b"8@".to_vec())));
 
     let admin_ctx = AuthoritativeContext::for_session(
         Some(1),
@@ -83,3 +105,7 @@ fn char_skill_service_encoders_notices_and_gateway_handlers() {
     vj_msg.fields.insert(3, DynamicValue::Uint64(50_000_001));
     assert!(handlers["eve.stargate.lock.api.ValidateJumpRequest"](&admin_ctx, &dummy_any, &vj_msg).is_ok());
 }
+
+#[cfg(test)]
+#[path = "quasar_char_skill_services_extra_unit_tests.rs"]
+mod quasar_char_skill_services_extra_unit_tests;

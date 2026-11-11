@@ -3,7 +3,7 @@
 use super::*;
 use crate::services::account_services::account_services_tests::{auth_session, test_ctx};
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mobile_deployables_ext_restrictions_and_helpers_mutations() {
     assert!(is_single_use_deployable(GROUP_MOBILE_MICRO_JUMP_UNIT));
     assert!(is_single_use_deployable(GROUP_MOBILE_CYNO_BEACON));
@@ -163,3 +163,8 @@ async fn mobile_deployables_ext_restrictions_and_helpers_mutations() {
     step_system_deployables_sync(&ctx, 30000142);
     sync_system_deployables(&ctx, 30000142).await;
 }
+
+#[cfg(test)]
+#[path = "mobile_deployables_ext_extra_unit_tests.rs"]
+mod extra_unit_tests;
+

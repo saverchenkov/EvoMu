@@ -3,6 +3,10 @@ use crate::quasar_gateway::{STATUS_BAD_REQUEST, STATUS_NOT_FOUND};
 use eve_proto::quasar::{QuasarDescriptorRegistry, WireMessage};
 use std::sync::OnceLock;
 
+#[cfg(test)]
+#[path = "quasar_space_domain_extra_unit_tests.rs"]
+mod quasar_space_domain_extra_unit_tests;
+
 fn shared_sde() -> Arc<SdeRegistry> {
     static SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
     Arc::clone(SDE.get_or_init(|| Arc::new(SdeRegistry::with_canonical_seed())))

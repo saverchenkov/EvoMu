@@ -2,14 +2,14 @@
 
 #![forbid(unsafe_code)]
 
-use super::encounter_surveillance_system::{
+use super::super::{
     handle_ess_link, prime_cache_result, select_ess_reserve_key_in_cargo,
 };
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
 use crate::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
-use crate::services::space_destiny::{set_ess_reserve_pulses_in_blobs, EssReservePulseState};
+use crate::services::space_destiny::{set_ess_reserve_pulses, EssReservePulseState};
 use eve_db::{InventoryFlag, IskCents, SystemDynamicState};
 use eve_destiny::{Ball, CombatState, DVec3, MovementMode};
 use eve_proto::PyRep;
@@ -185,8 +185,7 @@ fn prime_cache_result_covers_wormhole_missing_system_active_link_and_expired_pul
                 ..Default::default()
             },
         );
-        set_ess_reserve_pulses_in_blobs(
-            &mut snap.service_state_blobs,
+        set_ess_reserve_pulses(snap,
             null_sys,
             &EssReservePulseState {
                 unlocked_until_unix: now.saturating_sub(10),
@@ -399,8 +398,7 @@ async fn handle_ess_link_covers_preconditions_range_boundary_conflicts_cooldown_
     .unwrap();
     ctx.db.with_mut_snapshot(|snap| {
         assert_eq!(snap.items[&991_001].quantity, 1);
-        set_ess_reserve_pulses_in_blobs(
-            &mut snap.service_state_blobs,
+        set_ess_reserve_pulses(snap,
             null_sys,
             &EssReservePulseState {
                 unlocked_until_unix: ctx.now_unix() + 60,

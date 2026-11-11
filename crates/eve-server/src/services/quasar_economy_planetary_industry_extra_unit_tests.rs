@@ -1,6 +1,6 @@
 //! Extra unit and mutation-killing tests for `services::quasar_economy_planetary_industry` (`Q-6`).
 
-use super::quasar_economy_planetary_industry::*;
+use super::super::*;
 use crate::quasar_gateway::{
     PublicGatewayRouter, STATUS_FORBIDDEN,
 };
@@ -415,4 +415,182 @@ fn admin_lp_ops_structure_facility_isk_transfer_variants_and_id_handlers() {
         assert!(dispatch_dyn(&router, &user, rpc, &d_u32).is_ok());
         assert!(dispatch_dyn(&router, &user, rpc, &empty_d).is_ok());
     }
+}
+
+#[test]
+fn authorize_corp_financial_access_roles_and_transfer_by_owner_positive_id_kill_mutants() {
+    use crate::quasar_gateway::STATUS_UNAUTHORIZED;
+    use eve_db::corp_roles::ROLE_ACCOUNTANT;
+
+    let (router, db) = make_router_and_db();
+    let corp_a = 98_000_591_i64;
+    let corp_b = 98_000_592_i64;
+    let ceo_id = 211_200_590_i64;
+    let sess_role_only = 211_200_591_i64;
+    let db_role_only = 211_200_592_i64;
+    let both_roles = 211_200_593_i64;
+    let other_corp_member = 211_200_594_i64;
+    let outsider = 211_200_595_i64;
+
+    seed_char(&db, ceo_id, corp_a, 100_000);
+    seed_char(&db, sess_role_only, corp_a, 100_000);
+    seed_char(&db, db_role_only, corp_a, 100_000);
+    seed_char(&db, both_roles, corp_a, 100_000);
+    seed_char(&db, other_corp_member, corp_b, 100_000);
+    seed_char(&db, outsider, corp_b, 100_000);
+
+    db.with_mut_snapshot(|snap| {
+        let mut rec_a = CorporationRecord::default();
+        rec_a.corporation_id = corp_a;
+        rec_a.name = "AlphaFin".into();
+        rec_a.ticker = "AFIN".into();
+        rec_a.ceo_id = ceo_id;
+        rec_a.members = HashSet::from([
+            ceo_id,
+            sess_role_only,
+            db_role_only,
+            both_roles,
+            other_corp_member,
+        ]);
+        rec_a.ensure_wallet_divisions();
+        snap.corporations.insert(corp_a, rec_a);
+
+        let mut rec_b = CorporationRecord::default();
+        rec_b.corporation_id = corp_b;
+        rec_b.name = "BetaFin".into();
+        rec_b.ticker = "BFIN".into();
+        rec_b.ceo_id = outsider;
+        rec_b.members = HashSet::from([other_corp_member, outsider]);
+        rec_b.ensure_wallet_divisions();
+        snap.corporations.insert(corp_b, rec_b);
+
+        for cid in [db_role_only, both_roles] {
+            snap.corp_role_assignments.insert(
+                (corp_a, cid),
+                CorpMemberRoleAssignment {
+                    character_id: cid,
+                    roles: ROLE_ACCOUNTANT,
+                    grantable_roles: 0,
+                    roles_at_hq: 0,
+                    grantable_roles_at_hq: 0,
+                    roles_at_base: 0,
+                    grantable_roles_at_base: 0,
+                    roles_at_other: 0,
+                    grantable_roles_at_other: 0,
+                },
+            );
+        }
+    });
+
+    db.with_snapshot(|snap| {
+        // 1. Unauthenticated / invalid character -> Err(STATUS_UNAUTHORIZED) (kills Ok(0)/Ok(1)/Ok(-1))
+        let unauth_ctx = make_ctx(Some(1), None, None, ROLE_ACCOUNTANT);
+        assert_eq!(
+            authorize_corp_financial_access(&unauth_ctx, snap, corp_a)
+                .unwrap_err()
+                .0,
+            STATUS_UNAUTHORIZED
+        );
+
+        // 2. Non-member -> Err(STATUS_FORBIDDEN)
+        let outsider_ctx = make_ctx(Some(1), Some(outsider as u32), None, ROLE_ACCOUNTANT);
+        assert_eq!(
+            authorize_corp_financial_access(&outsider_ctx, snap, corp_a)
+                .unwrap_err()
+                .0,
+            STATUS_FORBIDDEN
+        );
+
+        // 3. Session-only role in same corp (`caller_corp == target_corp`, `eff_roles = 0`, `ctx_roles = ROLE_ACCOUNTANT`):
+        //    kills `== -> !=` (positive branch) and `| -> &` (session-only branch) and `Ok(0/1/-1)`.
+        let sess_ctx = make_ctx(Some(1), Some(sess_role_only as u32), None, ROLE_ACCOUNTANT);
+        assert_eq!(
+            authorize_corp_financial_access(&sess_ctx, snap, corp_a),
+            Ok(corp_a)
+        );
+        // Zero requested_corp_id falls back to caller_corp == corp_a
+        assert_eq!(
+            authorize_corp_financial_access(&sess_ctx, snap, 0),
+            Ok(corp_a)
+        );
+
+        // 4. DB-only role (`eff_roles = ROLE_ACCOUNTANT`, `ctx_roles = 0`): kills `| -> &` (db-only branch).
+        let db_ctx = make_ctx(Some(1), Some(db_role_only as u32), None, 0);
+        assert_eq!(
+            authorize_corp_financial_access(&db_ctx, snap, corp_a),
+            Ok(corp_a)
+        );
+
+        // 5. Same role present in BOTH `eff_roles` AND `session_roles`:
+        //    `eff_roles | session_roles == ROLE_ACCOUNTANT` succeeds; XOR mutant gives 0 -> FORBIDDEN!
+        let both_ctx = make_ctx(Some(1), Some(both_roles as u32), None, ROLE_ACCOUNTANT);
+        assert_eq!(
+            authorize_corp_financial_access(&both_ctx, snap, corp_a),
+            Ok(corp_a)
+        );
+
+        // 6. Cross-corp member (`caller_corp = corp_b != corp_a`, member of `corp_a` with 0 DB roles in `corp_a`,
+        //    carrying session `ROLE_ACCOUNTANT`): MUST be denied because session roles apply only to `caller_corp == target_corp`!
+        //    Kills `== -> !=` (negative branch).
+        let cross_ctx = make_ctx(Some(1), Some(other_corp_member as u32), None, ROLE_ACCOUNTANT);
+        assert_eq!(
+            authorize_corp_financial_access(&cross_ctx, snap, corp_a)
+                .unwrap_err()
+                .0,
+            STATUS_FORBIDDEN
+        );
+    });
+
+    // 7. TransferByOwnerRequest (`effective_character_id().filter(|&v| v > 0)`):
+    //    - `Some(0)` and `None` MUST return `STATUS_UNAUTHORIZED` (kills `> -> ==` and `> -> >=`)
+    //    - `Some(positive_cid)` MUST succeed, debit balance, and emit notice (kills `> -> <` and `register -> ()`)
+    let mut amt_m = DynamicQuasarMessage::new("amt");
+    amt_m.set(1, DynamicValue::Int64(1_250));
+    let mut xfer_d = DynamicQuasarMessage::new("req");
+    xfer_d.set(5, DynamicValue::Message(Box::new(amt_m)));
+
+    let zero_char_ctx = make_ctx(Some(99), Some(0), None, 0);
+    assert_eq!(
+        dispatch_dyn(
+            &router,
+            &zero_char_ctx,
+            "eve.isk.wallet.api.TransferByOwnerRequest",
+            &xfer_d
+        )
+        .unwrap_err()
+        .0,
+        STATUS_UNAUTHORIZED
+    );
+
+    let none_char_ctx = make_ctx(Some(99), None, None, 0);
+    assert_eq!(
+        dispatch_dyn(
+            &router,
+            &none_char_ctx,
+            "eve.isk.wallet.api.TransferByOwnerRequest",
+            &xfer_d
+        )
+        .unwrap_err()
+        .0,
+        STATUS_UNAUTHORIZED
+    );
+
+    let notices_before = router.pending_notices.read().unwrap().len();
+    let valid_ctx = make_ctx(Some(99), Some(sess_role_only as u32), None, 0);
+    let rsp = dispatch_dyn(
+        &router,
+        &valid_ctx,
+        "eve.isk.wallet.api.TransferByOwnerRequest",
+        &xfer_d,
+    )
+    .expect("positive character id must pass TransferByOwnerRequest");
+    assert!(rsp.type_url.ends_with("eve.isk.wallet.api.TransferByOwnerResponse"));
+    assert_eq!(
+        db.with_snapshot(|s| s.characters[&sess_role_only].balance),
+        IskCents::from_isk(98_750)
+    );
+    assert_eq!(
+        router.pending_notices.read().unwrap().len(),
+        notices_before + 1
+    );
 }

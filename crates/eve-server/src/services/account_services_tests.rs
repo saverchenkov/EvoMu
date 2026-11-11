@@ -61,6 +61,7 @@ impl PyRepTestExt for PyRep {
 #[test]
 fn store_allocators_playtime_underage_and_subscription_sync() {
     let ctx = test_ctx();
+    ctx.set_clock(Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(1_800_000_000)));
     let mut store = AccountServicesStore::default();
     assert_eq!(store.alloc_id(), 600_001);
     assert_eq!(store.alloc_id(), 600_002);
@@ -572,7 +573,7 @@ fn slash_commands_redeem_tokens_mct_resculpt_and_user_svc_misc() {
     .is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn async_logout_logoff_and_multilogin_blocker_paths() {
     let ctx = test_ctx();
     let uid = 1_u64;
@@ -645,3 +646,7 @@ async fn async_logout_logoff_and_multilogin_blocker_paths() {
     .unwrap_err();
     assert_eq!(err.code, "UserBanned");
 }
+
+#[cfg(test)]
+#[path = "account_services_extra_unit_tests.rs"]
+mod account_services_extra_unit_tests;

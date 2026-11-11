@@ -1377,3 +1377,7 @@ pub fn complete_air_npe(
 #[path = "air_npe_nodegraph_runner_tests.rs"]
 mod air_npe_nodegraph_runner_tests;
 
+#[cfg(test)]
+#[path = "air_npe_nodegraph_runner_edges_tests.rs"]
+mod air_npe_nodegraph_runner_edges_tests;
+

@@ -303,3 +303,7 @@ fn character_cosmetic_titles_grant_equip_unequip_and_revoke() {
     );
     assert_eq!(db.with_snapshot(|s| s.characters[&cid].title.clone()), "");
 }
+
+#[cfg(test)]
+#[path = "quasar_cosmetics_drafts_extra_unit_tests.rs"]
+mod quasar_cosmetics_drafts_extra_unit_tests;

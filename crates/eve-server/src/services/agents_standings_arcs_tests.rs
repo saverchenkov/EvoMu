@@ -288,7 +288,7 @@ fn special_dialogue_actions_cover_locator_agent_and_epic_arc_branching() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn handle_extended_rpcs_cover_agent_mgr_epic_arc_tracker_standings_keeper_and_npe() {
     let mut ctx = make_test_context();
     let mut sde = (*ctx.sde).clone();
@@ -537,9 +537,10 @@ async fn handle_extended_rpcs_cover_agent_mgr_epic_arc_tracker_standings_keeper_
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn get_disabled_missions_and_replay_timestamp_read_persisted_state() {
     let ctx = make_test_context();
+    ctx.set_clock(Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(1_800_000_000)));
     let mut session = char_session(90_000_001, 98_000_001);
     let kw = HashMap::new();
     let sample_mission_id = *ctx.sde.missions.keys().next().expect("SDE mission");
@@ -584,3 +585,31 @@ async fn get_disabled_missions_and_replay_timestamp_read_persisted_state() {
     .unwrap();
     assert_eq!(replay, PyRep::Integer(expected_ft));
 }
+
+#[test]
+fn synthesized_npc_faction_standings_sign_count_and_bounds_kill_unary_mutants() {
+    assert_eq!(SYNTHESIZED_NPC_FACTION_STANDINGS.len(), 294);
+    let mut neg_count = 0usize;
+    let mut pos_count = 0usize;
+    let mut sum_tenths = 0i64;
+    for &(from_faction, to_faction, standing) in SYNTHESIZED_NPC_FACTION_STANDINGS {
+        assert_ne!(from_faction, to_faction);
+        assert!(standing.is_finite() && (-10.0..=10.0).contains(&standing));
+        assert_ne!(standing, 0.0);
+        if standing < 0.0 {
+            neg_count += 1;
+        } else {
+            pos_count += 1;
+        }
+        sum_tenths += (standing * 10.0).round() as i64;
+    }
+    assert_eq!(neg_count, 189);
+    assert_eq!(pos_count, 105);
+    assert_eq!(sum_tenths, -2334);
+    assert!(SYNTHESIZED_NPC_FACTION_STANDINGS.contains(&(500_026, 500_027, -10.0)));
+    assert!(SYNTHESIZED_NPC_FACTION_STANDINGS.contains(&(500_027, 500_026, -10.0)));
+}
+
+#[cfg(test)]
+#[path = "agents_standings_arcs_extra_unit_tests.rs"]
+mod agents_standings_arcs_extra_unit_tests;

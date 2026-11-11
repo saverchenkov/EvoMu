@@ -770,3 +770,7 @@ pub(crate) fn publish_stargate_lock_deactivated_notice(
 #[path = "quasar_sov_services_tests.rs"]
 mod quasar_sov_services_tests;
 
+#[cfg(test)]
+#[path = "quasar_sov_services_edges_tests.rs"]
+mod quasar_sov_services_edges_tests;
+

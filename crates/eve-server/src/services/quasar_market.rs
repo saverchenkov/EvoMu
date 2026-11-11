@@ -886,3 +886,7 @@ pub fn publish_market_new_entry_notice(
 #[path = "quasar_market_tests.rs"]
 mod quasar_market_tests;
 
+#[cfg(test)]
+#[path = "quasar_market_edges_tests.rs"]
+mod quasar_market_edges_tests;
+

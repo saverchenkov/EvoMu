@@ -209,6 +209,7 @@ fn test_void_space_evacuation_and_reconcile_abyssal_login_paths() {
                 target_id: 99_001,
                 entered_unix: 1_776_299_500,
                 expires_at_sec: 1_776_300_500,
+                nebula_graphic_id: None,
             },
         );
     });
@@ -240,6 +241,7 @@ fn test_void_space_evacuation_and_reconcile_abyssal_login_paths() {
                 target_id: 99_002,
                 entered_unix: 1_776_299_000,
                 expires_at_sec: 1_776_299_500,
+                nebula_graphic_id: None,
             },
         );
     });
@@ -252,3 +254,121 @@ fn test_void_space_evacuation_and_reconcile_abyssal_login_paths() {
     let fallback_sys = reconcile_abyssal_login(&ctx, char_id, 32_000_055, ship_id);
     assert!(fallback_sys > 0);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evacuate_downtime_with_traces_drones_highsec_suspect_and_void_space_in_void_char() {
+    let ctx = build_ctx();
+    let char_id = 90_000_088_i64;
+    let ship_id = 95_000_088_i64;
+    let origin_sys = 30_000_142_u32;
+    let ab_sys = 32_000_011_u32;
+    let trace_id = 1_897_555_001_i64;
+    let now = ctx.now_unix();
+    let drone_tid = ctx.sde.types.values().find(|t| t.category_id == 18).map(|t| t.type_id).unwrap_or(2454);
+
+    seed_pilot_and_ship(&ctx, char_id, ship_id, VOID_SPACE_SYSTEM_ID);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(96_555_001, InventoryItemRecord {
+            item_id: 96_555_001, type_id: drone_tid, owner_id: char_id, location_id: ab_sys as i64, quantity: 1, ..Default::default()
+        });
+        snap.items.insert(96_555_002, InventoryItemRecord {
+            item_id: 96_555_002, type_id: drone_tid, owner_id: char_id + 1, location_id: ab_sys as i64, quantity: 1, ..Default::default()
+        });
+    });
+
+    // 1) evacuate_void_space_session_sync when ch.solar_system_id == VOID_SPACE_SYSTEM_ID
+    let vs = VoidSpaceSessionRecord {
+        char_id,
+        ship_id,
+        origin_solar_system_id: origin_sys,
+        origin_position: [5_000.0, 0.0, 0.0],
+        target_id: 77_001,
+        entered_unix: now.saturating_sub(1_000),
+        expires_at_sec: now.saturating_sub(1),
+        ..Default::default()
+    };
+    assert_eq!(evacuate_void_space_session_sync(&ctx, char_id, &vs, now), origin_sys);
+
+    // 2) evacuate_abyssal_pockets_for_downtime with trace, active drones, orphaned drones, and T4 highsec suspect
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        for (bid, did, oid, sid) in [
+            (96_555_101, 96_555_102, char_id, ship_id),
+            (96_555_103, 96_555_104, char_id + 1, ship_id + 1),
+        ] {
+            rt.active_drones_in_space.insert(bid, crate::services::combat_crimewatch::DroneSpaceState {
+                ball_id: bid,
+                drone_item_id: did,
+                type_id: drone_tid,
+                group_id: 100,
+                owner_char_id: oid,
+                original_owner_char_id: oid,
+                parent_ship_id: sid,
+                solar_system_id: ab_sys,
+                target_id: None,
+                activity_state: 0,
+                assist_char_id: None,
+                guard_char_id: None,
+                is_abandoned: false,
+                is_sentry: false,
+                bandwidth_used: 5.0,
+                max_velocity: 400.0,
+                optimal_range: 5_000.0,
+                damage_vector: Default::default(),
+                shield_repair_amount: 0.0,
+                armor_repair_amount: 0.0,
+                hull_repair_amount: 0.0,
+                web_speed_factor: 1.0,
+                neut_amount: 0.0,
+                ecm_strength: 0.0,
+                tp_sig_bonus_pct: 0.0,
+            });
+        }
+    });
+
+    crate::services::pve_special_sites::with_abyssal_state(&ctx, |reg| {
+        reg.traces.insert(trace_id, AbyssalTraceRecord {
+            trace_ball_id: trace_id,
+            char_id,
+            filament_type_id: 47_762,
+            origin_solar_system_id: origin_sys,
+            position: [1_000.0, 0.0, 0.0],
+            created_unix: now,
+            expires_at_sec: now + 600,
+            max_ships: 1,
+            entered_char_ids: vec![char_id],
+            pocket_id: Some(77),
+            fleet_id: None,
+        });
+        reg.pockets.insert(char_id, AbyssalPocketSession {
+            pocket_id: 77,
+            trace_ball_id: trace_id,
+            character_id: char_id,
+            ship_id,
+            fleet_ship_ids: vec![ship_id],
+            origin_solar_system_id: origin_sys,
+            origin_position: [1_000.0, 0.0, 0.0],
+            grid_offset: [0.0; 3],
+            abyssal_solar_system_id: ab_sys,
+            filament_type_id: 47_762,
+            tier: 4,
+            weather: AbyssalWeatherKind::Electrical,
+            weather_penalty_pct: 30.0,
+            weather_bonus_pct: 50.0,
+            npc_difficulty_mult: 1.0,
+            started_at_sec: now,
+            collapse_at_sec: now + 1_200,
+            current_room: 1,
+            completed: false,
+            collapsed_destroyed: false,
+            ship_room: Default::default(),
+            max_ships: 1,
+            rooms: [sample_room(1, vec![1_900_000_001]), sample_room(2, vec![]), sample_room(3, vec![])],
+        });
+    });
+    assert_eq!(evacuate_abyssal_pockets_for_downtime(&ctx), 1);
+    assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&96_555_001) && !s.items.contains_key(&96_555_002)));
+}
+
+#[cfg(test)]
+#[path = "pve_abyssal_lifecycle_extra_unit_tests.rs"]
+mod pve_abyssal_lifecycle_extra_unit_tests;

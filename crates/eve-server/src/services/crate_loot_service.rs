@@ -435,3 +435,7 @@ fn handle_crate_claim_skill_bundle(ctx: &ServerContext, session: &SessionState, 
 
 #[cfg(test)] #[path = "crate_loot_service_tests.rs"] mod crate_loot_service_tests;
 
+#[cfg(test)]
+#[path = "crate_loot_service_edges_tests.rs"]
+mod crate_loot_service_edges_tests;
+

@@ -1,6 +1,6 @@
 //! Extra unit and mutation-killing tests for `services::quasar_daily_goals` (`feat:pve.daily-goals`).
 
-use super::quasar_daily_goals::*;
+use super::super::*;
 use crate::quasar_gateway::{
     PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_PRECONDITION_FAILED,
 };
@@ -186,6 +186,7 @@ fn store_loading_corrupt_json_empty_store_and_day_bucket_zero_upgrade() {
     let mut store = DailyGoalStore {
         templates: vec![tpls[0].clone()],
         character_goals: Default::default(),
+        ..Default::default()
     };
     store.character_goals.insert(
         4001,
@@ -274,7 +275,7 @@ fn add_progress_boundaries_expired_filtering_and_already_completed() {
         list.iter_mut().find(|g| g.uuid == g1_uuid).unwrap().expired = true;
     }
     let active = mgr.get_or_init_goals_at(cid, 200_010);
-    assert_eq!(active.len(), 5);
+    assert_eq!(active.len(), 4);
     assert!(mgr.add_progress(cid, &g1_uuid, 1, 200_010).is_none());
 }
 
@@ -340,18 +341,18 @@ fn pay_for_completion_exact_cost_boundaries_and_zero_cost_precondition() {
     mgr.configure_template(zero_cost_tpl.clone());
 
     let cid = 211200303u32;
-    // Exact 2500 EverMarks (cost of g1) and exact 100,000 ISK (cost of g2)
+    // Exact 2500 EverMarks (cost of 1st paid goal g1)
     seed_char(&db, cid as i64, 98000303, 10_000_000, 2_500);
     let goals = mgr.get_or_init_goals_at(cid, 400_000);
     let g1_uuid = goals[0].uuid; // EM=2500, ISK=None
-    let g2_uuid = goals[1].uuid; // EM=2500, ISK=100_000
+    let g2_uuid = goals[1].uuid; // EM=2500 (progressive 4500 on 2nd paid), ISK=None
 
     let err_zero = mgr
         .pay_for_completion(cid, &zero_cost_tpl.uuid, 400_000, &db)
         .unwrap_err();
     assert_eq!(err_zero.0, STATUS_PRECONDITION_FAILED);
 
-    // Paying for g1 with exact 2500 EM -> succeeds, EM becomes 0
+    // Paying for g1 with exact 2500 EM -> succeeds, EM becomes 0, ISK untouched
     mgr.pay_for_completion(cid, &g1_uuid, 400_001, &db)
         .expect("exact 2500 EM");
     assert_eq!(
@@ -359,12 +360,23 @@ fn pay_for_completion_exact_cost_boundaries_and_zero_cost_precondition() {
         0
     );
 
-    // Paying for g2 with 0 EM and exact 100,000 ISK (10,000,000 cents) -> succeeds, balance becomes 0
+    // Paying for g2 with 0 EM (even with 100,000 ISK) -> fails STATUS_BAD_REQUEST (no ISK fallback), then succeeds with exact 4,500 EM
+    assert_eq!(
+        mgr.pay_for_completion(cid, &g2_uuid, 400_002, &db).unwrap_err().0,
+        STATUS_BAD_REQUEST
+    );
+    db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&(cid as i64)).unwrap().loyalty_points.insert(1_000_419, 4_500);
+    });
     mgr.pay_for_completion(cid, &g2_uuid, 400_002, &db)
-        .expect("exact 100,000 ISK");
+        .expect("exact 4,500 EM progressive 2nd paid completion");
+    assert_eq!(
+        db.with_snapshot(|s| s.characters[&(cid as i64)].loyalty_points[&1_000_419]),
+        0
+    );
     assert_eq!(
         db.with_snapshot(|s| s.characters[&(cid as i64)].balance),
-        IskCents(0)
+        IskCents(10_000_000)
     );
 
     // Ghost character not in DB -> pay_for_completion fails with STATUS_BAD_REQUEST
@@ -379,13 +391,16 @@ fn pay_for_completion_exact_cost_boundaries_and_zero_cost_precondition() {
 #[test]
 fn on_gameplay_event_bonus_progression_and_admin_progress_variants() {
     let (router, db) = make_router_and_db();
+    db.set_clock(Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(
+        300_000,
+    )));
     let cid = 211200304u32;
     let other_cid = 211200305u32;
     seed_char(&db, cid as i64, 98000304, 1_000_000, 0);
     seed_char(&db, other_cid as i64, 98000304, 1_000_000, 0);
 
     let mgr = &router.progression.daily_goals;
-    let goals = mgr.get_or_init_goals_at(cid, 500_000);
+    let goals = mgr.get_or_init_goals_at(cid, 300_000);
     let bonus_uuid = goals.iter().find(|g| g.template.category == 6).unwrap().uuid;
 
     // 1. Partial progress on category 1 (5 / 25) -> bonus goal stays at 0 (no bonus ProgressedNotice)
@@ -398,7 +413,7 @@ fn on_gameplay_event_bonus_progression_and_admin_progress_variants() {
     mgr.on_gameplay_event(cid, 1, 20, &router);
     // Notices: cat1 Progressed, cat1 Completed, bonus Progressed (3 notices total)
     assert_eq!(router.routing_cache.read().unwrap().entries.len(), 3);
-    let g_after_1 = mgr.get_or_init_goals_at(cid, 500_000);
+    let g_after_1 = mgr.get_or_init_goals_at(cid, 300_000);
     let bonus_1 = g_after_1.iter().find(|g| g.uuid == bonus_uuid).unwrap();
     assert_eq!(bonus_1.current_progress, 1);
     assert!(!bonus_1.completed);
@@ -408,15 +423,15 @@ fn on_gameplay_event_bonus_progression_and_admin_progress_variants() {
     mgr.on_gameplay_event(cid, 5, 1, &router);
     // Notices: cat5 Progressed, cat5 Completed, bonus Progressed, bonus Completed (4 notices total)
     assert_eq!(router.routing_cache.read().unwrap().entries.len(), 4);
-    let g_after_2 = mgr.get_or_init_goals_at(cid, 500_000);
+    let g_after_2 = mgr.get_or_init_goals_at(cid, 300_000);
     let bonus_2 = g_after_2.iter().find(|g| g.uuid == bonus_uuid).unwrap();
     assert_eq!(bonus_2.current_progress, 2);
     assert!(bonus_2.completed);
 
     // 4. Test eve_public.dailygoal.api.admin.ProgressRequest dynamic value variants
-    let admin = make_ctx(Some(cid), ROLE_PROGRAMMER, 500_100);
-    let admin_no_char = make_ctx(None, ROLE_PROGRAMMER, 500_100);
-    let g3_uuid = goals[2].uuid; // ScanSignature, target 5
+    let admin = make_ctx(Some(cid), ROLE_PROGRAMMER, 300_100);
+    let admin_no_char = make_ctx(None, ROLE_PROGRAMMER, 300_100);
+    let g3_uuid = goals.iter().find(|g| g.template.category == 3).unwrap().uuid; // ScanSignature, target 5
 
     // Admin without active character -> FORBIDDEN
     let mut id_sub = DynamicQuasarMessage::new("id");
@@ -458,7 +473,7 @@ fn on_gameplay_event_bonus_progression_and_admin_progress_variants() {
     )
     .expect("default target_char and delta=1");
     let g3_prog = mgr
-        .get_or_init_goals_at(cid, 500_100)
+        .get_or_init_goals_at(cid, 300_100)
         .into_iter()
         .find(|g| g.uuid == g3_uuid)
         .unwrap()
@@ -466,7 +481,7 @@ fn on_gameplay_event_bonus_progression_and_admin_progress_variants() {
     assert_eq!(g3_prog, 1);
 
     // Explicit target_char variants (Direct Int32, Int64, Uint32, Message(Int64)) and Int64 delta
-    let _ = mgr.get_or_init_goals_at(other_cid, 500_100);
+    let _ = mgr.get_or_init_goals_at(other_cid, 300_100);
     for (char_val, delta_val) in [
         (DynamicValue::Int32(other_cid as i32), DynamicValue::Int64(1)),
         (DynamicValue::Int64(other_cid as i64), DynamicValue::Uint64(1)),
@@ -486,7 +501,7 @@ fn on_gameplay_event_bonus_progression_and_admin_progress_variants() {
         .expect("variant progress");
     }
     let other_g3 = mgr
-        .get_or_init_goals_at(other_cid, 500_100)
+        .get_or_init_goals_at(other_cid, 300_100)
         .into_iter()
         .find(|g| g.uuid == g3_uuid)
         .unwrap();
@@ -494,7 +509,7 @@ fn on_gameplay_event_bonus_progression_and_admin_progress_variants() {
     assert!(other_g3.completed);
 
     // Also test GetProgressRequest when not completed (field 3 = 1)
-    let user = make_ctx(Some(cid), 0, 500_100);
+    let user = make_ctx(Some(cid), 0, 300_100);
     let mut id_bytes = Vec::new();
     encode_bytes_field(1, &g3_uuid, &mut id_bytes);
     let mut req_bytes = Vec::new();

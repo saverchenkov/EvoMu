@@ -100,7 +100,7 @@ fn config_owners_locations_shortnames_and_map_queries() {
 
     let mut sess = auth_session(cid, corp_id, sys_id);
 
-    // GetMultiOwnersEx: resolves char, corp, alliance, EVE system (1), plus duplicate deduplication
+    // GetMultiOwnersEx: resolves char, corp, alliance, EVE system (1), solar systems (typeID=5), plus duplicate deduplication
     let owners = handle(
         &ctx,
         &mut sess,
@@ -118,6 +118,32 @@ fn config_owners_locations_shortnames_and_map_queries() {
     .unwrap()
     .expect("owners lookup");
     assert_eq!(owners.row_count(), Some(4));
+
+    let sys_owners = handle(
+        &ctx,
+        &mut sess,
+        "config",
+        "GetMultiOwnersEx",
+        &[PyRep::List(vec![
+            PyRep::Integer(30_045_324),
+            PyRep::Integer(30_002_055),
+            PyRep::Integer(30_002_974),
+            PyRep::Integer(30_003_788),
+            PyRep::Integer(30_000_142),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .expect("solar system owners lookup");
+    let PyRep::TupleSet { rows: sys_rows, .. } = sys_owners else {
+        panic!("expected TupleSet for GetMultiOwnersEx, got {sys_owners:?}");
+    };
+    assert_eq!(sys_rows.len(), 5);
+    for row in &sys_rows {
+        assert_eq!(row.get(2), Some(&PyRep::Integer(5)));
+        assert_eq!(row.get(3), Some(&PyRep::Bool(false)));
+        assert_eq!(row.get(4), Some(&PyRep::None));
+    }
 
     // Invalid element in list raises InvalidArgument
     let bad_list = handle(
@@ -447,3 +473,7 @@ fn config_corp_ticker_names_includes_governance_logo_fields() {
     assert_eq!(rows[0].dbrow_get("color2"), Some(&PyRep::Real(672.0)));
     assert_eq!(rows[0].dbrow_get("color3"), Some(&PyRep::Real(673.0)));
 }
+
+#[cfg(test)]
+#[path = "config_service_extra_unit_tests.rs"]
+mod config_service_extra_unit_tests;

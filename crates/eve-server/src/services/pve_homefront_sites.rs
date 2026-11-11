@@ -171,4 +171,7 @@ pub fn handle_get_homefront_site_instances(
 #[cfg(test)]
 #[path = "pve_homefront_sites_tests.rs"]
 mod pve_homefront_sites_tests;
+#[cfg(test)]
+#[path = "pve_homefront_sites_edges_tests.rs"]
+mod pve_homefront_sites_edges_tests;
 

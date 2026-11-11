@@ -6,7 +6,7 @@ use crate::services::account_services::account_services_tests::{
 };
 use std::collections::HashMap;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fw_services_helpers_and_rpc_mutations() {
     assert_eq!(fw_opposing_faction(FACTION_CALDARI), Some(FACTION_GALLENTE));
     assert_eq!(fw_opposing_faction(FACTION_GALLENTE), Some(FACTION_CALDARI));
@@ -59,9 +59,26 @@ async fn fw_services_helpers_and_rpc_mutations() {
         .await
         .unwrap()
         .unwrap();
-    let hq_list = hqs.as_list().unwrap();
-    assert_eq!(hq_list.len(), 4);
-    assert!(hq_list.contains(&PyRep::Integer(i64::from(HQ_SYSTEM_MEHATOOR))));
+    let PyRep::Dict(hq_entries) = hqs else {
+        panic!("Expected Dict from GetHQSystemIDs, got {hqs:?}");
+    };
+    assert_eq!(hq_entries.len(), 4);
+    assert_eq!(
+        hq_entries.iter().find(|(k, _)| *k == PyRep::Integer(FACTION_CALDARI)).map(|(_, v)| v),
+        Some(&PyRep::Integer(i64::from(HQ_SYSTEM_ONNAMON)))
+    );
+    assert_eq!(
+        hq_entries.iter().find(|(k, _)| *k == PyRep::Integer(FACTION_MINMATAR)).map(|(_, v)| v),
+        Some(&PyRep::Integer(i64::from(HQ_SYSTEM_AMO)))
+    );
+    assert_eq!(
+        hq_entries.iter().find(|(k, _)| *k == PyRep::Integer(FACTION_AMARR)).map(|(_, v)| v),
+        Some(&PyRep::Integer(i64::from(HQ_SYSTEM_MEHATOOR)))
+    );
+    assert_eq!(
+        hq_entries.iter().find(|(k, _)| *k == PyRep::Integer(FACTION_GALLENTE)).map(|(_, v)| v),
+        Some(&PyRep::Integer(i64::from(HQ_SYSTEM_INTAKI)))
+    );
 
     let wzs = handle(&ctx, &mut sess, "fwWarzoneSolarsystem", "GetAllWarzones", &[], &kw)
         .await
@@ -169,3 +186,7 @@ async fn fw_services_helpers_and_rpc_mutations() {
         assert_eq!(snap.fw_runtime.historical_char_totals.get(&90_000_001), Some(&(2, 50)));
     });
 }
+
+#[cfg(test)]
+#[path = "fw_services_cov_edges_tests.rs"]
+mod fw_services_cov_edges_tests;

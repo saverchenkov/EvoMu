@@ -1578,3 +1578,7 @@ fn handle_fw_withdraw_faction(
 #[cfg(test)] #[path = "fw_gameplay_rpc_tests.rs"]
 mod fw_gameplay_rpc_tests;
 
+#[cfg(test)]
+#[path = "fw_gameplay_rpc_edges_tests.rs"]
+mod fw_gameplay_rpc_edges_tests;
+

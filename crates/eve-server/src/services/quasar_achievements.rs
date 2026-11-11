@@ -245,9 +245,38 @@ impl AchievementManager {
         db: Option<Arc<WorldRepository>>,
         sde: Option<Arc<eve_sde::SdeRegistry>>,
     ) -> Self {
+        type CachedDefs = (Vec<AchievementDef>, HashSet<String>, usize, String, Vec<u8>);
+        type DefsCacheKey = (std::path::PathBuf, u64, usize);
+        static DEFS_CACHE: std::sync::OnceLock<
+            std::sync::Mutex<HashMap<DefsCacheKey, CachedDefs>>,
+        > = std::sync::OnceLock::new();
+
         let (defs, allowed_client_counter_keys, sde_achievement_count, sde_achievement_hash, sde_definitions_json) = sde
             .as_deref()
-            .map(build_definitions_from_sde)
+            .map(|s| {
+                if let Some(ref p) = s.db_path {
+                    if let Ok(meta) = std::fs::metadata(p) {
+                        let key = (p.clone(), meta.len(), s.resources.len());
+                        let cache =
+                            DEFS_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+                        if let Some(cached) = cache
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .get(&key)
+                            .cloned()
+                        {
+                            return cached;
+                        }
+                        let built = build_definitions_from_sde(s);
+                        cache
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(key, built.clone());
+                        return built;
+                    }
+                }
+                build_definitions_from_sde(s)
+            })
             .unwrap_or_else(|| {
                 let empty = b"[]".to_vec();
                 (Vec::new(), HashSet::new(), 0, sha256_hex(&empty)[..16].to_string(), empty)
@@ -320,11 +349,20 @@ impl AchievementManager {
             let map = self.character_achievements.read().unwrap_or_else(|e| e.into_inner());
             let cat_scores = self.category_scores.read().unwrap_or_else(|e| e.into_inner());
             let cat_map: HashMap<String, u32> = cat_scores.iter().map(|((c, cat), v)| (format!("{c}:{cat}"), *v)).collect();
+            let a_json = serde_json::to_string(&*map).ok();
+            let c_json = serde_json::to_string(&cat_map).ok();
+            let already = db.with_snapshot(|snap| {
+                a_json.as_ref().is_none_or(|j| snap.quasar_state_blobs.get("quasar_achievements") == Some(j))
+                    && c_json.as_ref().is_none_or(|j| snap.quasar_state_blobs.get("quasar_achievement_cat_scores") == Some(j))
+            });
+            if already {
+                return;
+            }
             let _ = db.try_with_mut_snapshot(|snap| {
-                if let Ok(json) = serde_json::to_string(&*map) {
+                if let Some(json) = a_json {
                     snap.quasar_state_blobs.insert("quasar_achievements".into(), json);
                 }
-                if let Ok(cat_json) = serde_json::to_string(&cat_map) {
+                if let Some(cat_json) = c_json {
                     snap.quasar_state_blobs.insert("quasar_achievement_cat_scores".into(), cat_json);
                 }
                 Ok::<(), String>(())

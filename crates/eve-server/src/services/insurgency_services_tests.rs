@@ -6,7 +6,7 @@ use crate::services::account_services::account_services_tests::{
 };
 use std::collections::HashMap;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn insurgency_services_stages_campaigns_and_rpc_mutations() {
     assert_eq!(insurgency_stage(-10), 0);
     assert_eq!(insurgency_stage(0), 0);
@@ -135,6 +135,14 @@ async fn insurgency_services_stages_campaigns_and_rpc_mutations() {
     .unwrap()
     .unwrap();
     assert!(!insts.as_list().unwrap().is_empty());
+    assert_eq!(
+        insts.as_list().unwrap()[0].dict_get("dungeonID"),
+        Some(&PyRep::Integer(10_477))
+    );
+    assert_eq!(
+        insts.as_list().unwrap()[0].dict_get("factionID"),
+        Some(&PyRep::Integer(500_010))
+    );
 
     let ih_id = spawn_ice_heist(&ctx, fob_sys);
     assert!(ih_id >= 800_001);
@@ -150,6 +158,14 @@ async fn insurgency_services_stages_campaigns_and_rpc_mutations() {
     .unwrap()
     .unwrap();
     assert!(!ih_insts.as_list().unwrap().is_empty());
+    assert_eq!(
+        ih_insts.as_list().unwrap()[0].dict_get("dungeonID"),
+        Some(&PyRep::Integer(10_497))
+    );
+    assert_eq!(
+        ih_insts.as_list().unwrap()[0].dict_get("factionID"),
+        Some(&PyRep::Integer(500_010))
+    );
 
     // Destroy stronghold in Active phase
     let d_info = on_insurgency_stronghold_destroyed_core(&ctx.systems, &ctx.db, fob_sys, sh_id, Some(90_000_001))
@@ -162,3 +178,7 @@ async fn insurgency_services_stages_campaigns_and_rpc_mutations() {
     end_insurgency_campaign(&ctx, camp_id);
     assert_eq!(insurgency_system_corruption_stage(&ctx, fob_sys), 0);
 }
+
+#[cfg(test)]
+#[path = "insurgency_services_extra_unit_tests.rs"]
+mod insurgency_services_extra_unit_tests;

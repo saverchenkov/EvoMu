@@ -147,10 +147,17 @@ impl SkillPlanManager {
                 next_seq: self.next_seq.load(Ordering::Relaxed),
             };
             if let Ok(json) = serde_json::to_string(&state) {
-                let _ = db.try_with_mut_snapshot(|snap| {
-                    snap.quasar_state_blobs.insert("quasar_skill_plans".into(), json);
-                    Ok::<(), String>(())
+                let already = db.with_snapshot(|snap| {
+                    snap.quasar_state_blobs
+                        .get("quasar_skill_plans")
+                        .is_some_and(|cur| cur == &json)
                 });
+                if !already {
+                    let _ = db.try_with_mut_snapshot(|snap| {
+                        snap.quasar_state_blobs.insert("quasar_skill_plans".into(), json);
+                        Ok::<(), String>(())
+                    });
+                }
             }
         }
     }
@@ -1426,4 +1433,8 @@ fn parse_skill_requirements(val: Option<&DynamicValue>, sde: &eve_sde::SdeRegist
 #[cfg(test)]
 #[path = "quasar_skills_clones_tests.rs"]
 mod quasar_skills_clones_tests;
+
+#[cfg(test)]
+#[path = "quasar_skills_clones_edges_tests.rs"]
+mod quasar_skills_clones_edges_tests;
 

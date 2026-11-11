@@ -95,10 +95,10 @@ async fn pirate_fob_validation_fleet_weights_and_payout_dilution() {
         "FobNotFound"
     );
     let sys_handle = ctx.systems.get_or_spawn(hisec_sys);
-    let (_, missing_dest, _, _, _, _) =
+    let missing =
         apply_live_combat_damage_to_pirate_fob(&ctx, hisec_sys, &sys_handle, 1, 999_999, 50.0)
             .await;
-    assert!(missing_dest);
+    assert!(missing.destroyed);
 
     // Spawn Guristas FOB
     let gur_res = spawn_pirate_fob(&ctx, hisec_sys, FACTION_GURISTAS)

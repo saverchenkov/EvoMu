@@ -551,3 +551,64 @@ fn map_queries_and_notification_mgr_error_and_bulk_paths() {
         PyRep::Integer(0)
     );
 }
+
+#[test]
+fn query_celestials_batch_get_locations_ex_and_unknown_service_mutants() {
+    let ctx = test_ctx();
+    let mut sess = auth_session(940_001, 98_400_001, Some(30_000_142));
+    let kw = HashMap::new();
+
+    // Kills `handle -> Some(Ok(Default::default()))`
+    assert!(handle(&ctx, &mut sess, "nonexistent_svc", "AnyMethod", &[], &kw).is_none());
+
+    // Pick a real SDE celestial (e.g. star or planet in Jita 30_000_142) not shadowed by system/station/gate IDs
+    let cel = ctx
+        .sde
+        .celestials_in_system(30_000_142)
+        .into_iter()
+        .find(|c| matches!(c.group_id, 6 | 7 | 8))
+        .expect("canonical seed Jita should contain star/planet celestials");
+
+    // Genuine celestial ID resolves 1 row with its exact SDE name
+    let cel_res = handle(
+        &ctx,
+        &mut sess,
+        "config",
+        "GetLocationsEx",
+        &[PyRep::Integer(cel.celestial_id)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(cel_res.row_count(), Some(1));
+    assert!(format!("{cel_res:?}").contains(&cel.name));
+
+    // Sentinel IDs (0, 1, -1) must NOT resolve as phantom Default celestials; kills `[(0/1/-1, Default::default())]`
+    for phantom_id in [0_i64, 1, -1] {
+        let res = handle(
+            &ctx,
+            &mut sess,
+            "config",
+            "GetLocationsEx",
+            &[PyRep::Integer(phantom_id)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(res.row_count(), Some(0), "id {phantom_id} should not resolve");
+    }
+
+    // Direct GetMultiOwnersEx assertion (kills delete match arm + handle -> None)
+    let owners = handle(
+        &ctx,
+        &mut sess,
+        "config",
+        "GetMultiOwnersEx",
+        &[PyRep::Integer(1)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(owners.row_count(), Some(1));
+    assert!(format!("{owners:?}").contains("EVE System"));
+}

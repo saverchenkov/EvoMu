@@ -157,3 +157,43 @@ fn unix_to_filetime_and_character_selection_branches() {
     assert_eq!(ch_row_paused.dict_get("skillTypeID"), Some(&PyRep::None));
     assert_eq!(ch_row_paused.dict_get("queueEndTime"), Some(&PyRep::None));
 }
+
+#[test]
+fn get_character_selection_data_resculpt_or_branches_and_non_default() {
+    let ctx = test_ctx();
+    let uid = 1_u64;
+    let cid = 90_000_001_i64;
+    let sess = auth_session(uid, cid, 98_000_001, 30_000_142);
+
+    let paperdoll_for = |sess: &SessionState| {
+        let rep = get_character_selection_data(&ctx, sess).expect("char selection data");
+        let PyRep::Tuple(parts) = rep else {
+            panic!("expected tuple");
+        };
+        parts[2]
+            .as_list()
+            .unwrap()
+            .iter()
+            .find(|r| r.dict_get("characterID") == Some(&PyRep::Integer(cid)))
+            .and_then(|r| r.dict_get("paperdollState"))
+            .cloned()
+    };
+
+    // Baseline: both flags clear -> paperdollState == 0
+    assert_eq!(paperdoll_for(&sess), Some(PyRep::Integer(0)));
+
+    // Only account store resculpt_pending set -> 1 (kills ||->&&)
+    crate::services::account_services::with_store(&ctx, |_, store| {
+        store.resculpt_pending.insert(cid);
+    });
+    assert_eq!(paperdoll_for(&sess), Some(PyRep::Integer(1)));
+
+    // Only cluster_and_runtime resculpt_pending set -> 1 (kills ||->&& from other side)
+    crate::services::account_services::with_store(&ctx, |_, store| {
+        store.resculpt_pending.remove(&cid);
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cluster_and_runtime.resculpt_pending.insert(cid);
+    });
+    assert_eq!(paperdoll_for(&sess), Some(PyRep::Integer(1)));
+}

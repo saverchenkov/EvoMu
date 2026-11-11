@@ -7,7 +7,11 @@ use eve_destiny::{Ball, Ballpark, CombatState, MovementMode};
 use glam::DVec3;
 use std::collections::{HashMap, HashSet};
 
-#[tokio::test]
+#[cfg(test)]
+#[path = "pvp_filament_arena_cov_edges_tests.rs"]
+mod pvp_filament_arena_cov_edges_tests;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pvp_filament_arena_rewards_combat_hazards_and_end_gate() {
     let ctx = test_ctx();
     let mut sess_a = auth_session(1, 90_000_001, 98_000_001, 30_000_142);
@@ -187,7 +191,7 @@ async fn test_pvp_filament_arena_rewards_combat_hazards_and_end_gate() {
     assert_eq!(destroyed, vec![ship_b]);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn arch_585_arena_hazard_enforces_invuln_preserves_events_and_step_hook_pays_insurance() {
     let ctx = test_ctx();
     let cid_a = 90_000_001_i64;

@@ -373,3 +373,6 @@ pub fn encode_ship_attributes(type_id: u64, owner_id: u64) -> Vec<u8> {
 #[cfg(test)]
 #[path = "quasar_debug_race_ship_services_tests.rs"]
 mod quasar_debug_race_ship_services_tests;
+#[cfg(test)]
+#[path = "quasar_debug_race_ship_services_edges_tests.rs"]
+mod quasar_debug_race_ship_services_edges_tests;

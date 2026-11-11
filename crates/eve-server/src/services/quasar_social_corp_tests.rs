@@ -349,3 +349,7 @@ fn corporation_goal_and_reward_rpc_handlers() {
         .expect("internal corp goal GetAll");
     assert!(int_all.type_url.ends_with("eve.corporationgoal.api.GetAllResponse"));
 }
+
+#[cfg(test)]
+#[path = "quasar_social_corp_extra_unit_tests.rs"]
+mod quasar_social_corp_extra_unit_tests;

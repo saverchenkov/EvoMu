@@ -113,3 +113,7 @@ pub(crate) fn require_corp_roles(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "quasar_corp_domain_auth_edges_tests.rs"]
+mod quasar_corp_domain_auth_edges_tests;

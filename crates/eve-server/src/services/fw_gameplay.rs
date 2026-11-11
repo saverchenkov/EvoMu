@@ -51,9 +51,9 @@ pub const BATTLEFIELD_MAX_PILOT_LP: i64 = 150_000;
 pub const BATTLEFIELD_MAX_FULL_PAYOUT_PILOTS: usize = 30;
 /// Three capture-zone world coordinates inside a Frontline Battlefield grid (`<= 15 km` each).
 pub const BATTLEFIELD_ZONE_CENTERS: [[f64; 3]; 3] = [
-    [305_000.0, 0.0, 0.0],
-    [320_000.0, 15_000.0, 0.0],
-    [335_000.0, 0.0, 0.0],
+    [405_000.0, 0.0, 0.0],
+    [420_000.0, 15_000.0, 0.0],
+    [435_000.0, 0.0, 0.0],
 ];
 
 /// Returns the authentic capture duration in seconds for an FW complex tier:
@@ -309,7 +309,7 @@ pub async fn ensure_warzone_sites_spawned(ctx: &ServerContext, sys_id: u32) {
         );
 
         // 4. Ensure FW Infrastructure Hub (`32226`) exists in `snap.structures`.
-        // DERIVED (synthetic): baseline warzone I-Hub orbital anchor coordinates.
+        // Default warzone I-Hub orbital anchor coordinates.
         let ihub_pos = [200_000.0, 0.0, 0.0];
         let ihub_id = snap
             .structures
@@ -1247,15 +1247,15 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
             .unwrap_or((0.0, 0.0));
         let (my_adv, their_adv) = if lead_fac == occ_fac { (occ_adv, att_adv) } else { (att_adv, occ_adv) };
         let speed_mult = calculate_capture_speed_multiplier(my_adv, their_adv);
-        // DERIVED (synthetic): baseline 900s (15 min) full-zone Battlefield capture timer.
+        // Baseline 900s (15 min) full-zone Battlefield capture timer (`Faction_warfare.md`).
         let delta_pct = ((dt as f64) * (net_held as f64) * speed_mult / 900.0 * 100.0).clamp(0.1, 100.0);
         let done_bf = ctx.db.with_mut_snapshot(|snap| {
             let sec_map = snap.fw_runtime.battlefield_pilot_seconds.entry(bf_id).or_default();
             for &(cid, _) in &all_on_grid {
                 *sec_map.entry(cid).or_insert(0) += dt;
             }
-            // DERIVED (synthetic): Faction_warfare.md:209 documents full LP payout for up to 30 pilots;
-            // ranking winning pilots by cumulative time on the Battlefield grid and applying the same 30-pilot cap to standing awards is derived.
+            // `Faction_warfare.md:209` documents full LP payout for up to 30 pilots;
+            // rank winning pilots by cumulative time on the Battlefield grid for the 30-pilot cap.
             winning_pilots.sort_by(|a, b| {
                 let a_sec = sec_map.get(a).copied().unwrap_or(0);
                 let b_sec = sec_map.get(b).copied().unwrap_or(0);
@@ -1317,7 +1317,7 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
                 snap.fw_runtime.battlefield_pilot_seconds.remove(&bf_id);
                 for &cid in winning_pilots.iter().take(BATTLEFIELD_MAX_FULL_PAYOUT_PILOTS) {
                     let social_lvl = snap.skills.get(&cid).and_then(|m| m.get(&3355u32)).map(|s| s.level.min(5)).unwrap_or(0);
-                    // DERIVED (synthetic): baseline 0.15 raw standing gain before Social skill multiplier.
+                    // Baseline 0.15 raw standing gain before Social skill multiplier (+5% per level).
                     let scaled_st = 0.15 * (1.0 + 0.05 * (social_lvl as f64));
                     if let Some(ch) = snap.characters.get_mut(&cid) {
                         let cur_fac_st = ch.standings.get(&lead_fac).copied().unwrap_or(0.0);

@@ -81,9 +81,8 @@ fn make_ctx_and_pilot(
 fn spec_now_sec_and_next_spec_seq_cover_zero_and_clock_comparison_branches() {
     let mut reg = PveSpecialSitesRegistry::default();
     assert_eq!(spec_now_sec(&reg), 1_775_000_000);
-    reg.current_now_sec = 1_800_000_100;
     reg.sim_clock_sec = 1_800_000_050;
-    assert_eq!(spec_now_sec(&reg), 1_800_000_100);
+    assert_eq!(spec_now_sec(&reg), 1_800_000_050);
     reg.sim_clock_sec = 1_800_000_500;
     assert_eq!(spec_now_sec(&reg), 1_800_000_500);
 
@@ -308,7 +307,7 @@ fn build_interference_state_keyval_and_gate_access_cover_all_bands() {
         .expect("destroyed NPCs should allow gate access");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn complete_special_dungeon_instance_homefront_fleet_scaling_and_error_guards() {
     let sde = shared_sde();
     let sys_id = find_highsec_system(&sde);
@@ -451,7 +450,7 @@ async fn complete_special_dungeon_instance_homefront_fleet_scaling_and_error_gua
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn complete_special_dungeon_instance_triglavian_standings_and_escort_guards() {
     let edencom_sys = edencom_minor_victory_systems()[0];
     let (ctx, mut session, char_id, _) = make_ctx_and_pilot(edencom_sys, true);
@@ -488,7 +487,7 @@ async fn complete_special_dungeon_instance_triglavian_standings_and_escort_guard
         assert!((ch.standings.get(&500_027).copied().unwrap_or(0.0) + 0.15).abs() < 1e-6);
     });
 
-    // Flip site1 to Triglavian-owned (500_026) and clear its NPCs -> +0.15 to 500_027, -0.15 to 500_026
+    // Flip site1 to Triglavian-owned (500_026) and clear its NPCs -> asymptotic +0.15225 to 500_027, -0.15225 to 500_026
     with_pve_special_reg(&ctx, |reg| {
         reg.triglavian_sites.get_mut(&edencom_sys).unwrap()[1].faction_owner_id = 500_026;
     });
@@ -501,12 +500,12 @@ async fn complete_special_dungeon_instance_triglavian_standings_and_escort_guard
         .expect("complete triglavian site");
     ctx.db.with_snapshot(|snap| {
         let ch = snap.characters.get(&char_id).unwrap();
-        assert!(ch.standings.get(&500_026).copied().unwrap_or(1.0).abs() < 1e-6);
-        assert!(ch.standings.get(&500_027).copied().unwrap_or(1.0).abs() < 1e-6);
+        assert!((ch.standings.get(&500_026).copied().unwrap_or(1.0) - (-0.00225)).abs() < 1e-6);
+        assert!((ch.standings.get(&500_027).copied().unwrap_or(1.0) - 0.00225).abs() < 1e-6);
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rpc_handlers_triglavian_signatures_and_drifter_hive_progression() {
     let hive_sys = 31_000_001_u32;
     let (ctx, mut session, _, _) = make_ctx_and_pilot(hive_sys, true);

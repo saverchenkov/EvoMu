@@ -8,7 +8,7 @@
 //!   (backed by `res:/staticdata/seasonalcampaignsloginrewards.fsdbinary`)
 //! - `infoGatheringMgr.GetStateAndConfig` and `infoGatheringMgr.LogInfoEventsFromClient`
 //! - `milestoneMgr.ProcessCharacterLogon` and `milestoneMgr.ClaimRewards`
-//!   (`DATA GAP`: milestone reward definitions are server-authored and not in client FSD data)
+//!   (backed by `res:/staticdata/community_track_templates.fsdbinary` and `seasons` FSD tables)
 //! - `communityTrackMgr.get_instance_attributes_public` and `communityTrackMgr.change_qa_mode`
 //!   (backed by `res:/staticdata/community_track_templates.fsdbinary`)
 

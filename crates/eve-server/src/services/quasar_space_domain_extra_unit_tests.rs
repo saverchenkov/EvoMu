@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use super::quasar_space_domain::{encode_space_location, register_handlers, SpaceDomainState};
+use crate::services::quasar_space_domain::{encode_space_location, register_handlers, SpaceDomainState};
 use crate::quasar_gateway::{
     PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
 };

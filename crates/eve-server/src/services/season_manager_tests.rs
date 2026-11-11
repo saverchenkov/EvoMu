@@ -13,7 +13,11 @@ use std::sync::{Arc, OnceLock};
 
 static SHARED_SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
 
-fn test_ctx() -> ServerContext {
+#[cfg(test)]
+#[path = "season_manager_ops_edge_tests.rs"]
+mod season_manager_ops_edge_tests;
+
+pub(super) fn test_ctx() -> ServerContext {
     if let Some(sde) = SHARED_SDE.get() {
         ServerContext::with_sde_and_repository(
             Arc::clone(sde),
@@ -59,7 +63,7 @@ fn season_state_activity_counters_and_challenge_helpers() {
 
     ctx.db.with_mut_snapshot(|snap| {
         save_season_state_to_blobs(snap, cid, &st);
-        let loaded = load_season_state_from_blobs(snap, cid);
+        let loaded = load_season_state(snap, cid);
         assert_eq!(loaded.season_points, 100);
         assert!(loaded.challenges.contains_key(&9_000_001));
 
@@ -409,6 +413,6 @@ fn season_manager_catalog_queries_dormancy_expiration_and_claim_ops() {
     .expect("claim challenge 102");
     assert!(claim_rep != PyRep::None);
 
-    let updated = ctx.db.with_snapshot(|s| load_season_state_from_blobs(s, cid));
+    let updated = ctx.db.with_snapshot(|s| load_season_state(s, cid));
     assert_eq!(updated.season_points, 575);
 }

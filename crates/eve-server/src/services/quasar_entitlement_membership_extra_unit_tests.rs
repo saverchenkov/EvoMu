@@ -408,6 +408,11 @@ fn membership_titles_alliances_and_quasar_skill_purchase_branches() {
     .unwrap();
     assert!(String::from_utf8_lossy(&dir_resp.value).contains("Director"));
 
+    db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles.insert(cid, 0);
+        }
+    });
     let mem_resp = invoke(
         &router,
         "eve.membership.corporation.GetCharacterRequest",
@@ -568,4 +573,189 @@ fn membership_titles_alliances_and_quasar_skill_purchase_branches() {
         .0,
         STATUS_CONFLICT
     );
+}
+
+#[test]
+fn mutant_kill_positive_id_filters_and_corp_director_role_bitmasks() {
+    let sde = test_sde();
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let router = PublicGatewayRouter::new(
+        QuasarDescriptorRegistry::open_default_or_empty(),
+        Arc::clone(&db),
+        Arc::clone(&sde),
+    );
+    register_handlers(&router, Arc::clone(&db));
+
+    let cid = 90_000_001_i64;
+    let corp_id = 98_000_001_i64;
+
+    // 1. Logo entitlement admin endpoint with char_id == 0 -> STATUS_UNAUTHORIZED
+    let zero_admin_ctx = AuthoritativeContext::for_session(
+        Some(1),
+        Some(0),
+        Some(corp_id as u32),
+        0,
+        "tranquility",
+        vec![1],
+    )
+    .with_service_roles(u64::MAX);
+    let mut logo_msg = DynamicQuasarMessage::new("Logo");
+    logo_msg.fields.insert(2, DynamicValue::Uint64(587));
+    assert_eq!(
+        invoke(
+            &router,
+            "eve_public.entitlement.character.ship.admin.corplogo.GrantRequest",
+            &zero_admin_ctx,
+            &logo_msg,
+        )
+        .unwrap_err()
+        .0,
+        STATUS_UNAUTHORIZED
+    );
+
+    // 2. GetCharacterAllRequest with char_id == 0 -> STATUS_UNAUTHORIZED
+    let zero_char_ctx = AuthoritativeContext::for_session(
+        Some(1),
+        Some(0),
+        Some(corp_id as u32),
+        0,
+        "tranquility",
+        vec![1],
+    );
+    assert_eq!(
+        invoke(
+            &router,
+            "eve.membership.GetCharacterAllRequest",
+            &zero_char_ctx,
+            &DynamicQuasarMessage::new("All"),
+        )
+        .unwrap_err()
+        .0,
+        STATUS_UNAUTHORIZED
+    );
+
+    // 3. corporation.GetCharacterRequest: msg char_id <= 0 without active char AND active char == 0 -> STATUS_UNAUTHORIZED
+    let no_char_ctx = AuthoritativeContext::for_session(
+        Some(1),
+        None,
+        Some(corp_id as u32),
+        0,
+        "tranquility",
+        vec![1],
+    );
+    for bad in [0_i64, -5] {
+        let mut id_sub = DynamicQuasarMessage::new("CharId");
+        id_sub.fields.insert(1, DynamicValue::Int64(bad));
+        let mut req = DynamicQuasarMessage::new("CorpGet");
+        req.fields.insert(1, DynamicValue::Message(Box::new(id_sub)));
+        assert_eq!(
+            invoke(
+                &router,
+                "eve.membership.corporation.GetCharacterRequest",
+                &no_char_ctx,
+                &req,
+            )
+            .unwrap_err()
+            .0,
+            STATUS_UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        invoke(
+            &router,
+            "eve.membership.corporation.GetCharacterRequest",
+            &zero_char_ctx,
+            &DynamicQuasarMessage::new("CorpGet"),
+        )
+        .unwrap_err()
+        .0,
+        STATUS_UNAUTHORIZED
+    );
+
+    // Positive msg char_id succeeds even with no_char_ctx
+    let mut pos_sub = DynamicQuasarMessage::new("CharId");
+    pos_sub.fields.insert(1, DynamicValue::Uint32(cid as u32));
+    let mut pos_req = DynamicQuasarMessage::new("CorpGet");
+    pos_req
+        .fields
+        .insert(1, DynamicValue::Message(Box::new(pos_sub)));
+    assert!(invoke(
+        &router,
+        "eve.membership.corporation.GetCharacterRequest",
+        &no_char_ctx,
+        &pos_req,
+    )
+    .is_ok());
+
+    // 4. corporation.GetCharacterRequest Director bitmask matrix (Auditor vs Session Director vs DB Director)
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.corporation_id = corp_id;
+        }
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.ceo_id = 90_000_999;
+            corp.member_roles.insert(cid, corp_roles::ROLE_AUDITOR);
+        }
+    });
+    let aud_ctx = AuthoritativeContext::for_session(
+        Some(1),
+        Some(cid as u32),
+        Some(corp_id as u32),
+        corp_roles::ROLE_AUDITOR,
+        "tranquility",
+        vec![1],
+    );
+    let aud_rsp = invoke(
+        &router,
+        "eve.membership.corporation.GetCharacterRequest",
+        &aud_ctx,
+        &pos_req,
+    )
+    .unwrap();
+    let aud_txt = String::from_utf8_lossy(&aud_rsp.value);
+    assert!(aud_txt.contains("Member"));
+    assert!(!aud_txt.contains("Director"));
+
+    // Session-only Director (DB still Auditor) -> Director
+    let sess_dir_ctx = AuthoritativeContext::for_session(
+        Some(1),
+        Some(cid as u32),
+        Some(corp_id as u32),
+        corp_roles::ROLE_DIRECTOR,
+        "tranquility",
+        vec![1],
+    );
+    let sess_dir_rsp = invoke(
+        &router,
+        "eve.membership.corporation.GetCharacterRequest",
+        &sess_dir_ctx,
+        &pos_req,
+    )
+    .unwrap();
+    assert!(String::from_utf8_lossy(&sess_dir_rsp.value).contains("Director"));
+
+    // DB-only Director (session role == 0) -> Director
+    db.with_mut_snapshot(|snap| {
+        snap.corporations
+            .get_mut(&corp_id)
+            .unwrap()
+            .member_roles
+            .insert(cid, corp_roles::ROLE_DIRECTOR);
+    });
+    let db_dir_ctx = AuthoritativeContext::for_session(
+        Some(1),
+        Some(cid as u32),
+        Some(corp_id as u32),
+        0,
+        "tranquility",
+        vec![1],
+    );
+    let db_dir_rsp = invoke(
+        &router,
+        "eve.membership.corporation.GetCharacterRequest",
+        &db_dir_ctx,
+        &pos_req,
+    )
+    .unwrap();
+    assert!(String::from_utf8_lossy(&db_dir_rsp.value).contains("Director"));
 }

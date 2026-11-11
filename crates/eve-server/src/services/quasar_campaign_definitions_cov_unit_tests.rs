@@ -345,3 +345,51 @@ fn gateway_handlers_missing_sde_error_paths_and_blank_trigger_name_fallback() {
         assert_eq!(field_bytes_all(&decode_wire(&em_real.value), 1).len(), expected_em_len);
     }
 }
+
+#[test]
+fn authentic_methods_uniqueness_and_trigger_encoder_param_ordering() {
+    use super::{
+        encode_contribution_method_definition, encode_trigger_eventmatch_definition,
+        AUTHENTIC_CONTRIBUTION_METHODS,
+    };
+
+    // 1. All 22 canonical contribution methods have unique string keys, positive localization IDs, and non-empty icons
+    assert_eq!(AUTHENTIC_CONTRIBUTION_METHODS.len(), 22);
+    let mut keys = std::collections::HashSet::new();
+    for (method_key, title_id, progress_desc_id, icon, params) in AUTHENTIC_CONTRIBUTION_METHODS {
+        assert!(!method_key.trim().is_empty());
+        assert!(*title_id > 0);
+        assert!(*progress_desc_id > 0);
+        assert!(!icon.trim().is_empty());
+        assert!(keys.insert(*method_key), "duplicate method key {method_key}");
+        for (p_key, _p_type, _p_opt) in *params {
+            assert!(!p_key.trim().is_empty());
+        }
+    }
+
+    // 2. Contribution method encoder emits ordered field tags for empty vs multi-param entries
+    let mut cm_empty = Vec::new();
+    encode_contribution_method_definition("CustomEmpty", 101, 102, "res:/icon.png", &[], &mut cm_empty);
+    let cm_decoded = decode_wire(&cm_empty);
+    assert_eq!(
+        field_bytes_all(&decode_wire(&field_bytes_all(&cm_decoded, 1)[0]), 1)[0],
+        b"CustomEmpty"
+    );
+
+    // 3. Trigger eventmatch encoder emits id (tag 1) and attrs with every param key in order (tag 2 -> tag 1)
+    let mut trig_out = Vec::new();
+    encode_trigger_eventmatch_definition(
+        "OnSyntheticTrigger", // rpc-lint: allow test fixture
+        &[("target_ship", "ui_ship"), ("solar_system", "ui_sys")],
+        &mut trig_out,
+    );
+    let trig_wire = decode_wire(&trig_out);
+    let id_msg = decode_wire(&field_bytes_all(&trig_wire, 1)[0]);
+    assert_eq!(field_bytes_all(&id_msg, 1)[0], b"OnSyntheticTrigger"); // rpc-lint: allow test fixture
+    let attr_msg = decode_wire(&field_bytes_all(&trig_wire, 2)[0]);
+    let encoded_keys: Vec<Vec<u8>> = field_bytes_all(&attr_msg, 1)
+        .into_iter()
+        .map(|blob| field_bytes_all(&decode_wire(&blob), 1).remove(0))
+        .collect();
+    assert_eq!(encoded_keys, vec![b"target_ship".to_vec(), b"solar_system".to_vec()]);
+}

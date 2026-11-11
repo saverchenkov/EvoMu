@@ -84,3 +84,111 @@ fn test_season_fsd_downtime_challenges_conditions_and_catalog() {
     });
     assert!(!catalog.is_empty());
 }
+
+#[test]
+fn test_season_fsd_catalog_overrides_conditions_and_def_fallbacks() {
+    let ctx = test_ctx();
+    let base_ft = 133_700_000_000_000_000_i64;
+
+    // 1. default_fsd_seasons includes ordinal aliases 2..=4 when campaigns exist
+    let default_cat = default_fsd_seasons(&ctx.sde, base_ft);
+    assert!(!default_cat.is_empty());
+    assert!(default_cat.contains_key(&2) || default_cat.len() >= 1);
+
+    // 2. load_season_config & load_seasons_catalog with malformed & valid overrides
+    let mut snap = ctx.db.with_snapshot(|s| s.clone());
+    assert_eq!(load_season_config(&snap).season_id, 1);
+
+    // Malformed JSON falls back safely to defaults
+    snap.seasons_and_campaigns.season_configuration = serde_json::from_str("{not-json").ok();
+    snap.seasons_and_campaigns.seasons_catalog = serde_json::from_str("{not-json").unwrap_or_default();
+    snap.seasons_and_campaigns.challenge_definitions = serde_json::from_str("[]").unwrap_or_default();
+    assert_eq!(load_season_config(&snap).season_id, 1);
+    let cat_fallback = load_seasons_catalog(&snap, &ctx.sde, base_ft);
+    assert!(!cat_fallback.is_empty());
+    let defs_fallback = load_challenge_definitions_with_sde(&snap, &ctx.sde);
+    assert!(!defs_fallback.is_empty());
+    let defs_no_sde_fallback = load_challenge_definitions(&snap);
+    assert!(!defs_no_sde_fallback.is_empty());
+
+    // Valid SEASON_CONFIG_KEY override merges into both cfg.season_id and key 1
+    let custom_cfg = SeasonConfig {
+        season_id: 99,
+        max_active_challenges: 7,
+        max_season_points: 750,
+        season_name: "Winter Nexus".into(),
+        start_time_ft: base_ft,
+        end_time_ft: base_ft + 60 * 86_400 * 10_000_000,
+        ..Default::default()
+    };
+    snap.seasons_and_campaigns.season_configuration = serde_json::from_str(&String::from(serde_json::to_string(&custom_cfg).unwrap())).ok();
+    assert_eq!(load_season_config(&snap).season_name, "Winter Nexus");
+    let cat_merged = load_seasons_catalog(&snap, &ctx.sde, base_ft);
+    assert_eq!(cat_merged[&99].season_name, "Winter Nexus");
+    assert_eq!(cat_merged[&99].max_season_points, 750);
+    assert_eq!(cat_merged[&1].season_name, "Winter Nexus");
+    assert_eq!(cat_merged[&1].max_active_challenges, 7);
+
+    // Custom non-empty challenge definitions blob overrides FSD
+    let custom_def = SeasonalChallengeDef {
+        challenge_id: 555_001,
+        season_id: 99,
+        event_type: "client_scan".into(),
+        title: "Scan".into(),
+        description: "Scan sites".into(),
+        points: 20,
+        max_progress: 3,
+        client_event_driven: true,
+        ..Default::default()
+    };
+    snap.seasons_and_campaigns.challenge_definitions = serde_json::from_str(&String::from(serde_json::to_string(&vec![custom_def.clone()]).unwrap())).unwrap_or_default();
+    assert_eq!(load_challenge_definitions(&snap), vec![custom_def.clone()]);
+    assert_eq!(load_challenge_definitions_with_sde(&snap, &ctx.sde), vec![custom_def]);
+
+    // 3. matches_challenge_conditions edge cases: empty vec, unknown key, KeyVal, Tuple, non-dict, string value
+    let mut cond_catalog = BTreeMap::new();
+    cond_catalog.insert("ship_group".to_string(), 7);
+    cond_catalog.insert("region_id".to_string(), 8);
+
+    let mut cond_def = SeasonalChallengeDef::default();
+    cond_def.event_conditions.insert("ship_group".into(), Vec::new());
+    assert!(matches_challenge_conditions(&cond_def, None, &cond_catalog));
+
+    cond_def.event_conditions.insert("unknown_cond".into(), vec![1]);
+    let kv_ed = PyRep::keyval([("ship_group", PyRep::Integer(25))]);
+    assert!(!matches_challenge_conditions(&cond_def, Some(&kv_ed), &cond_catalog));
+
+    cond_def.event_conditions.remove("unknown_cond");
+    cond_def.event_conditions.insert("ship_group".into(), vec![25, 26]);
+    assert!(matches_challenge_conditions(&cond_def, Some(&kv_ed), &cond_catalog));
+
+    // Tuple inside KeyVal matches
+    let kv_tuple = PyRep::keyval([(
+        "ship_group",
+        PyRep::Tuple(vec![PyRep::Integer(99), PyRep::Integer(26)]),
+    )]);
+    assert!(matches_challenge_conditions(&cond_def, Some(&kv_tuple), &cond_catalog));
+
+    // String value fails
+    let kv_str = PyRep::keyval([("ship_group", PyRep::String("25".into()))]);
+    assert!(!matches_challenge_conditions(&cond_def, Some(&kv_str), &cond_catalog));
+
+    // Non-dict/non-keyval extra_data fails
+    assert!(!matches_challenge_conditions(
+        &cond_def,
+        Some(&PyRep::Integer(25)),
+        &cond_catalog
+    ));
+
+    // Missing required key in KeyVal fails
+    let kv_other = PyRep::keyval([("region_id", PyRep::Integer(10_000_002))]);
+    assert!(!matches_challenge_conditions(&cond_def, Some(&kv_other), &cond_catalog));
+
+    // 4. Verify fsd_challenge_definitions & fsd_crate_loot_tables invariants
+    let fsd_defs = fsd_challenge_definitions(&ctx.sde);
+    assert!(fsd_defs.iter().all(|d| d.max_progress >= 1));
+    assert!(fsd_defs.iter().any(|d| d.is_dormant));
+    assert!(fsd_defs.iter().any(|d| !d.is_dormant));
+    let crates = fsd_crate_loot_tables(&ctx.sde);
+    assert!(crates.values().all(|v| !v.is_empty()));
+}

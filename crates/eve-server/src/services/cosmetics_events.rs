@@ -398,3 +398,7 @@ pub async fn handle(
 
 #[cfg(test)] #[path = "cosmetics_events_tests.rs"] mod cosmetics_events_tests;
 
+#[cfg(test)]
+#[path = "cosmetics_events_edges_tests.rs"]
+mod cosmetics_events_edges_tests;
+

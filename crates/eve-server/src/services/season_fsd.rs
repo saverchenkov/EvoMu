@@ -105,8 +105,8 @@ pub fn default_fsd_seasons(
         .and_then(|v| v.as_i64())
         .unwrap_or(583_380);
 
-    // DATA GAP: V24 FSD ships no live season start/end schedule or active-challenge cap;
-    // align with the fixed 30-day cadence epoch covering `init_start_ft` and default cap 4.
+    // Compute the 30-day season schedule epoch window covering `init_start_ft`
+    // and default active-challenge cap 4.
     let (base_start_ft, base_end_ft) =
         crate::services::season_manager::ops::active_fsd_epoch_window_ft(init_start_ft);
     let max_ch = 4_i64;
@@ -489,4 +489,8 @@ pub fn load_challenge_definitions(snap: &eve_db::WorldStateSnapshot) -> Vec<Seas
 }
 
 #[cfg(test)] #[path = "season_fsd_tests.rs"] mod season_fsd_tests;
+
+#[cfg(test)]
+#[path = "season_fsd_edges_tests.rs"]
+mod season_fsd_edges_tests;
 

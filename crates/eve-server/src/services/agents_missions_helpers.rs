@@ -276,6 +276,13 @@ pub fn resolve_division_connections_skill(
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CharacterMissionRewards {
+    pub isk_reward: i64,
+    pub lp_reward: i64,
+    pub bonus_reward: i64,
+}
+
 /// Computes mission rewards `(isk_reward, lp_reward, bonus_reward)` from V24 SDE templates,
 /// dungeon difficulty, agent solar-system true security, and character Connections/Negotiation skills
 /// (`feat:pve.mission-lp-isk-reward-formula`, `feat:pve.mission-complete`, `plan:E-5`).
@@ -285,7 +292,7 @@ pub fn compute_character_mission_rewards(
     agent_id: i64,
     mission_id: u32,
     sys_id: u32,
-) -> (i64, i64, i64) {
+) -> CharacterMissionRewards {
     let tmpl = ctx.sde.missions.get(&mission_id);
     let agent_info = ctx.sde.agents.get(&agent_id);
     let agent_sys_id = agent_info.and_then(|a| a.solar_system_id).unwrap_or(sys_id);
@@ -346,16 +353,35 @@ pub fn compute_character_mission_rewards(
         }
     });
 
+    let no_lp_mission = agent_info.is_some_and(|a| {
+        is_rnd_agent(a)
+            || is_storyline_agent_type(a.agent_type_id)
+            || matches!(a.agent_type_id, 10..=12)
+    }) || tmpl.is_some_and(|t| {
+        is_storyline_template(t)
+            || t.content_template
+                .as_deref()
+                .is_some_and(|ct| ct.contains("EpicArc"))
+    });
+
     let sec_factor = (1.6288 - true_sec).max(0.01);
     let conn_factor = 1.0 + 0.10 * (conn_lvl.min(5) as f64);
-    let lp_reward = ((base_lp as f64) * sec_factor * conn_factor).round() as i64;
+    let lp_reward = if no_lp_mission {
+        0
+    } else {
+        ((base_lp as f64) * sec_factor * conn_factor).round() as i64
+    };
 
     let base_isk = base_lp.saturating_mul(1_000);
     let neg_factor = 1.0 + 0.05 * (neg_lvl.min(5) as f64);
     let isk_reward = ((base_isk as f64) * neg_factor).round() as i64;
     let bonus_reward = isk_reward / 2;
 
-    (isk_reward, lp_reward, bonus_reward)
+    CharacterMissionRewards {
+        isk_reward,
+        lp_reward,
+        bonus_reward,
+    }
 }
 
 pub fn resolve_target_agent_id(

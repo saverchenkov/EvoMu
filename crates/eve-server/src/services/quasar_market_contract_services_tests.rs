@@ -371,3 +371,398 @@ fn cdn_client_host_contacts_and_content_handlers() {
         assert!(!resp.value.is_empty(), "{rpc} should return non-empty payload");
     }
 }
+
+#[test]
+fn market_contract_services_edge_branches_decoding_and_mutants() {
+    let (router, db) = make_router_and_db();
+    register_handlers(&router, Arc::clone(&db), shared_sde());
+    let anon = make_ctx(None, 0);
+    let zero_char = make_ctx(Some(0), 0);
+    let buyer_ctx = make_ctx(Some(900101), 0);
+    let seller_ctx = make_ctx(Some(900102), 0);
+    let outsider_ctx = make_ctx(Some(900103), 0);
+    let admin_ctx = make_ctx(Some(900199), ROLE_PROGRAMMER);
+
+    let dispatch_raw = |ctx: &AuthoritativeContext, rpc: &str, value: Vec<u8>, dyn_msg: DynamicQuasarMessage| {
+        let handler = router.handlers.read().unwrap().get(rpc).cloned().expect(rpc);
+        let req = GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{rpc}"),
+            value,
+        };
+        handler(ctx, &req, &dyn_msg)
+    };
+
+    // --- Helper decoders & hex_uuid ---
+    assert_eq!(hex_uuid(&[0x00, 0xab, 0xff]), "00abff");
+    assert_eq!(
+        require_character(&anon).unwrap_err(),
+        (STATUS_UNAUTHORIZED, "Authenticated character required".to_string())
+    );
+    assert_eq!(require_character(&buyer_ctx).unwrap(), 900101);
+
+    let mut u64_wrap = Vec::new();
+    let mut inner_u64 = Vec::new();
+    encode_varint_field(1, 777, &mut inner_u64);
+    encode_bytes_field(1, &inner_u64, &mut u64_wrap);
+    assert_eq!(extract_uint64_field(&u64_wrap, 1), Some(777));
+    assert_eq!(extract_uint64_field(&[0xff, 0xff], 1), None);
+
+    let mut u32_overflow = Vec::new();
+    encode_varint_field(1, u64::from(u32::MAX) + 1, &mut u32_overflow);
+    assert_eq!(extract_uint32_field(&DynamicQuasarMessage::new("test"), &u32_overflow, 1), None);
+
+    // extract_uuid_field across Message, 16B Bytes, wrapped Bytes, and WireMessage fallbacks
+    let raw_uuid = vec![0x11; 16];
+    let mut sub_dyn = DynamicQuasarMessage::new("test");
+    sub_dyn.fields.insert(1, DynamicValue::Bytes(raw_uuid.clone()));
+    let mut dyn_msg_obj = DynamicQuasarMessage::new("test");
+    dyn_msg_obj.fields.insert(2, DynamicValue::Message(Box::new(sub_dyn)));
+    assert_eq!(extract_uuid_field(&dyn_msg_obj, &[], 2), Some(raw_uuid.clone()));
+
+    let mut dyn_bytes_direct = DynamicQuasarMessage::new("test");
+    dyn_bytes_direct.fields.insert(2, DynamicValue::Bytes(raw_uuid.clone()));
+    assert_eq!(extract_uuid_field(&dyn_bytes_direct, &[], 2), Some(raw_uuid.clone()));
+
+    let mut wrapped_short = Vec::new();
+    encode_bytes_field(1, b"short", &mut wrapped_short);
+    let mut dyn_bytes_wrapped = DynamicQuasarMessage::new("test");
+    dyn_bytes_wrapped.fields.insert(2, DynamicValue::Bytes(wrapped_short.clone()));
+    assert_eq!(extract_uuid_field(&dyn_bytes_wrapped, &[], 2), Some(b"short".to_vec()));
+
+    let mut wire_direct_16 = Vec::new();
+    encode_bytes_field(2, &raw_uuid, &mut wire_direct_16);
+    assert_eq!(extract_uuid_field(&DynamicQuasarMessage::new("test"), &wire_direct_16, 2), Some(raw_uuid.clone()));
+
+    let mut wire_wrapped_16 = Vec::new();
+    let mut inner_uuid_wire = Vec::new();
+    encode_bytes_field(1, &raw_uuid, &mut inner_uuid_wire);
+    encode_bytes_field(2, &inner_uuid_wire, &mut wire_wrapped_16);
+    assert_eq!(extract_uuid_field(&DynamicQuasarMessage::new("test"), &wire_wrapped_16, 2), Some(raw_uuid.clone()));
+    assert_eq!(extract_uuid_field(&DynamicQuasarMessage::new("test"), &[0xff, 0xff], 2), None);
+
+    // --- 1. GetSharedRequest: auth, char_id == 0, uuid len != 16, UUID linear scan fallback, missing ---
+    let rpc_draft = "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSharedRequest";
+    assert_eq!(
+        dispatch_raw(&anon, rpc_draft, vec![], DynamicQuasarMessage::new("test")).unwrap_err().0,
+        STATUS_UNAUTHORIZED
+    );
+    let mut bad_zero_char = Vec::new();
+    encode_varint_field(1, 0, &mut bad_zero_char);
+    encode_bytes_field(2, &raw_uuid, &mut bad_zero_char);
+    assert_eq!(
+        dispatch_raw(&buyer_ctx, rpc_draft, bad_zero_char, DynamicQuasarMessage::new("test")).unwrap_err().0,
+        STATUS_BAD_REQUEST
+    );
+    let mut valid_char_only = Vec::new();
+    encode_varint_field(1, 900101, &mut valid_char_only);
+    assert_eq!(
+        dispatch_raw(&buyer_ctx, rpc_draft, valid_char_only.clone(), DynamicQuasarMessage::new("test")).unwrap_err().0,
+        STATUS_BAD_REQUEST
+    );
+    let mut bad_uuid_len = valid_char_only.clone();
+    encode_bytes_field(2, &wrapped_short, &mut bad_uuid_len);
+    let err_len = dispatch_raw(&buyer_ctx, rpc_draft, bad_uuid_len, DynamicQuasarMessage::new("test")).unwrap_err();
+    assert_eq!(err_len.0, STATUS_BAD_REQUEST);
+    assert!(err_len.1.contains("16 bytes"));
+
+    // Seed a saved draft keyed under draft_id=999 with custom UUID whose extract_id != 999 to force scan fallback
+    let custom_draft_uuid: [u8; 16] = [0xAA; 16];
+    {
+        let st = QuasarCosmeticsState::from_db(Arc::clone(&db));
+        {
+            let mut data = st.data.write().unwrap();
+            let draft = SkinrDraftRecord {
+                draft_id: 999,
+                uuid: custom_draft_uuid.to_vec(),
+                name: "SharedFallback".to_string(),
+                line_name: "LineA".to_string(),
+                design_slot_id: 1,
+                pattern_id: 2,
+                material_ids: vec![3],
+                updated_at_unix: 1_760_000_100,
+                editor_cfg: Vec::new(),
+                ship_type_id: 587,
+            };
+            data.saved_drafts.entry(900101).or_default().insert(999, draft);
+        }
+        st.sync_to_db();
+    }
+    let mut scan_req = valid_char_only.clone();
+    encode_bytes_field(2, &custom_draft_uuid, &mut scan_req);
+    let scan_resp = dispatch_raw(&outsider_ctx, rpc_draft, scan_req, DynamicQuasarMessage::new("test"))
+        .expect("custom uuid scan fallback");
+    assert_eq!(
+        scan_resp.type_url,
+        format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSharedResponse")
+    );
+    let wm_draft = WireMessage::decode(&scan_resp.value).unwrap();
+    assert!(!wm_draft.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap().is_empty());
+
+    let mut missing_draft_req = valid_char_only;
+    encode_bytes_field(2, &vec![0xBB; 16], &mut missing_draft_req);
+    assert_eq!(
+        dispatch_raw(&outsider_ctx, rpc_draft, missing_draft_req, DynamicQuasarMessage::new("test")).unwrap_err().0,
+        STATUS_NOT_FOUND
+    );
+
+    // --- 2 & 3. Cosmetic Market Transactions: corrupt JSON resilience, buyer/seller/neither ACL, all 3 detail variants ---
+    let rpc_tx_get = "eve_public.cosmetic.market.transaction.api.GetRequest";
+    let rpc_tx_all = "eve_public.cosmetic.market.transaction.api.GetAllRequest";
+
+    // Unauthenticated & malformed UUID checks
+    assert_eq!(
+        dispatch_raw(&anon, rpc_tx_get, vec![], DynamicQuasarMessage::new("test")).unwrap_err().0,
+        STATUS_UNAUTHORIZED
+    );
+    assert_eq!(
+        dispatch_raw(&anon, rpc_tx_all, vec![], DynamicQuasarMessage::new("test")).unwrap_err().0,
+        STATUS_UNAUTHORIZED
+    );
+    assert_eq!(
+        dispatch_raw(&buyer_ctx, rpc_tx_get, vec![], DynamicQuasarMessage::new("test")).unwrap_err().0,
+        STATUS_BAD_REQUEST
+    );
+    let mut tx_bad_len = Vec::new();
+    encode_bytes_field(1, &wrapped_short, &mut tx_bad_len);
+    assert_eq!(
+        dispatch_raw(&buyer_ctx, rpc_tx_get, tx_bad_len, DynamicQuasarMessage::new("test")).unwrap_err().0,
+        STATUS_BAD_REQUEST
+    );
+
+    // Corrupt market JSON blob -> graceful empty fallback (NOT_FOUND / empty list)
+    db.with_mut_snapshot(|snap| {
+        snap.quasar_state_blobs.insert("quasar_cosmetics_market".to_string(), "{not-valid-json".to_string());
+    });
+    let mut tx_req_missing = Vec::new();
+    encode_bytes_field(1, &vec![0x55; 16], &mut tx_req_missing);
+    assert_eq!(
+        dispatch_raw(&buyer_ctx, rpc_tx_get, tx_req_missing, DynamicQuasarMessage::new("test")).unwrap_err().0,
+        STATUS_NOT_FOUND
+    );
+    let empty_all = dispatch_raw(&buyer_ctx, rpc_tx_all, vec![], DynamicQuasarMessage::new("test")).unwrap();
+    assert!(empty_all.value.is_empty());
+
+    // Populate transactions covering all 3 CosmeticTransactionDetails variants & buyer/seller/none ACL
+    let uuid_comp = id_to_uuid_bytes(701);
+    let uuid_skin = id_to_uuid_bytes(702);
+    let uuid_list = id_to_uuid_bytes(703);
+    db.with_mut_snapshot(|snap| {
+        let mut market = super::super::quasar_cosmetics_market_types::CosmeticsMarketData::default();
+        market.transactions.insert(
+            hex_uuid(&uuid_comp),
+            super::super::quasar_cosmetics_market_types::CosmeticTransactionRecord {
+                uuid: uuid_comp,
+                buyer_id: Some(900101),
+                seller_id: None,
+                status: 2,
+                last_updated_unix: 1_760_000_011,
+                details: super::super::quasar_cosmetics_market_types::CosmeticTransactionDetails::PurchasingComponent,
+            },
+        );
+        market.transactions.insert(
+            hex_uuid(&uuid_skin),
+            super::super::quasar_cosmetics_market_types::CosmeticTransactionRecord {
+                uuid: uuid_skin,
+                buyer_id: None,
+                seller_id: Some(900102),
+                status: 3,
+                last_updated_unix: 1_760_000_022,
+                details: super::super::quasar_cosmetics_market_types::CosmeticTransactionDetails::PurchasingSkin,
+            },
+        );
+        market.transactions.insert(
+            hex_uuid(&uuid_list),
+            super::super::quasar_cosmetics_market_types::CosmeticTransactionRecord {
+                uuid: uuid_list,
+                buyer_id: None,
+                seller_id: None,
+                status: 4,
+                last_updated_unix: 1_760_000_033,
+                details: super::super::quasar_cosmetics_market_types::CosmeticTransactionDetails::CreatingSkinListing,
+            },
+        );
+        snap.quasar_state_blobs.insert(
+            "quasar_cosmetics_market".to_string(),
+            serde_json::to_string(&market).unwrap(),
+        );
+    });
+
+    for (ctx_ok, ctx_deny, uuid, expected_status, expected_ts, expected_detail_field) in [
+        (&buyer_ctx, &outsider_ctx, uuid_comp, 2u64, 1_760_000_011u64, 1u32),
+        (&seller_ctx, &outsider_ctx, uuid_skin, 3u64, 1_760_000_022u64, 2u32),
+        (&admin_ctx, &buyer_ctx, uuid_list, 4u64, 1_760_000_033u64, 3u32),
+    ] {
+        let mut req_bytes = Vec::new();
+        encode_bytes_field(1, &uuid, &mut req_bytes);
+        assert_eq!(
+            dispatch_raw(ctx_deny, rpc_tx_get, req_bytes.clone(), DynamicQuasarMessage::new("test")).unwrap_err().0,
+            STATUS_FORBIDDEN
+        );
+        let ok_resp = dispatch_raw(ctx_ok, rpc_tx_get, req_bytes, DynamicQuasarMessage::new("test")).unwrap();
+        let top = WireMessage::decode(&ok_resp.value).unwrap();
+        let attrs_raw = top.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap();
+        let attrs = WireMessage::decode(attrs_raw).unwrap();
+        let ts_raw = attrs.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap();
+        let ts_msg = WireMessage::decode(ts_raw).unwrap();
+        assert_eq!(ts_msg.fields[0].value.as_varint(), Some(expected_ts));
+        assert_eq!(
+            attrs.fields.iter().find(|f| f.field_number == 2).unwrap().value.as_varint(),
+            Some(expected_status)
+        );
+        let det_raw = attrs.fields.iter().find(|f| f.field_number == 3).unwrap().value.as_bytes().unwrap();
+        let det_msg = WireMessage::decode(det_raw).unwrap();
+        assert_eq!(det_msg.fields[0].field_number, expected_detail_field);
+    }
+
+    let seller_all = dispatch_raw(&seller_ctx, rpc_tx_all, vec![], DynamicQuasarMessage::new("test")).unwrap();
+    let seller_wm = WireMessage::decode(&seller_all.value).unwrap();
+    assert_eq!(seller_wm.fields.len(), 1);
+    let inner_id_msg = WireMessage::decode(seller_wm.fields[0].value.as_bytes().unwrap()).unwrap();
+    assert_eq!(inner_id_msg.fields[0].value.as_bytes(), Some(uuid_skin.as_slice()));
+
+    // --- 4. CDN Signing: WireMessage fallback + query string branching + exact field assertions ---
+    let key_resp = dispatch_raw(&buyer_ctx, "eve.cdn.api.GetActiveURLSigningKeyRequest", vec![], DynamicQuasarMessage::new("test")).unwrap();
+    let key_wm = WireMessage::decode(&key_resp.value).unwrap();
+    assert_eq!(key_wm.fields[0].value.as_str().unwrap(), Some("evomu-cdn-v24"));
+
+    let mut sign_wire_req = Vec::new();
+    encode_string_field(1, "https://cdn.example/skin?v=2", &mut sign_wire_req);
+    let signed_query = dispatch_raw(&buyer_ctx, "eve.cdn.api.SignURLRequest", sign_wire_req, DynamicQuasarMessage::new("test")).unwrap();
+    let sq_wm = WireMessage::decode(&signed_query.value).unwrap();
+    assert_eq!(sq_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_str().unwrap(), Some("https://cdn.example/skin?v=2&sig=evomu_v24_signed"));
+    let sq_ts = WireMessage::decode(sq_wm.fields.iter().find(|f| f.field_number == 2).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(sq_ts.fields[0].value.as_varint(), Some(1_800_000_000));
+    assert_eq!(sq_wm.fields.iter().find(|f| f.field_number == 3).unwrap().value.as_str().unwrap(), Some("evomu-cdn-v24"));
+
+    let signed_default = dispatch_raw(&buyer_ctx, "eve.cdn.api.SignURLRequest", vec![], DynamicQuasarMessage::new("test")).unwrap();
+    let sd_wm = WireMessage::decode(&signed_default.value).unwrap();
+    assert_eq!(sd_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_str().unwrap(), Some("https://cdn.evomu.org/res/asset.fb?sig=evomu_v24_signed"));
+
+    // --- 5. Client Host & Disconnect: exact decoded fields ---
+    let host_resp = dispatch_raw(&buyer_ctx, "eve.client.host.GetRequest", vec![], DynamicQuasarMessage::new("test")).unwrap();
+    let host_wm = WireMessage::decode(&host_resp.value).unwrap();
+    let host_attrs = WireMessage::decode(host_wm.fields[0].value.as_bytes().unwrap()).unwrap();
+    assert_eq!(host_attrs.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_varint(), Some(12345678));
+    assert_eq!(host_attrs.fields.iter().find(|f| f.field_number == 2).unwrap().value.as_str().unwrap(), Some("en_US"));
+    assert_eq!(host_attrs.fields.iter().find(|f| f.field_number == 4).unwrap().value.as_varint(), Some(16384));
+    assert_eq!(host_attrs.fields.iter().find(|f| f.field_number == 10).unwrap().value.as_str().unwrap(), Some("24.01.2024"));
+
+    let disc = dispatch_raw(&buyer_ctx, "DisconnectRequest", vec![], DynamicQuasarMessage::new("test")).unwrap();
+    assert_eq!(disc.type_url, format!("{TYPE_GOOGLEAPIS_PREFIX}google.protobuf.Empty"));
+    assert!(disc.value.is_empty());
+
+    // --- 6. Contacts: unauth/0-char gate + negative/rounded standings math ---
+    assert_eq!(
+        dispatch_raw(&anon, "eve.contacts.GetAllForCharacterRequest", vec![], DynamicQuasarMessage::new("test")).unwrap_err().0,
+        STATUS_UNAUTHORIZED
+    );
+    assert_eq!(
+        dispatch_raw(&zero_char, "eve.contacts.GetAllForCharacterRequest", vec![], DynamicQuasarMessage::new("test")).unwrap_err().0,
+        STATUS_UNAUTHORIZED
+    );
+    db.with_mut_snapshot(|snap| {
+        if let Some(mut ch) = snap.characters.get(&900101).cloned().or_else(|| snap.characters.values().next().cloned()) {
+            ch.character_id = 900101;
+            ch.standings.clear();
+            ch.standings.insert(4001, -10.0);
+            ch.standings.insert(4002, 5.6);
+            snap.characters.insert(900101, ch);
+        }
+    });
+    let contacts_resp = dispatch_raw(&buyer_ctx, "eve.contacts.GetAllForCharacterRequest", vec![], DynamicQuasarMessage::new("test")).unwrap();
+    let contacts_wm = WireMessage::decode(&contacts_resp.value).unwrap();
+    let mut standing_pairs = Vec::new();
+    for f in &contacts_wm.fields {
+        let personal = WireMessage::decode(f.value.as_bytes().unwrap()).unwrap();
+        let ind = WireMessage::decode(personal.fields.iter().find(|x| x.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+        let cid_msg = WireMessage::decode(ind.fields.iter().find(|x| x.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+        let contact_id = cid_msg.fields[0].value.as_varint().unwrap();
+        let rel_val = personal.fields.iter().find(|x| x.field_number == 4).unwrap().value.as_varint().unwrap();
+        standing_pairs.push((contact_id, rel_val));
+    }
+    standing_pairs.sort();
+    assert_eq!(standing_pairs, vec![(4001, 0), (4002, 16)]);
+
+    let missing_char_contacts = dispatch_raw(&outsider_ctx, "eve.contacts.GetAllForCharacterRequest", vec![], DynamicQuasarMessage::new("test")).unwrap();
+    assert!(missing_char_contacts.value.is_empty());
+
+    let label_resp = dispatch_raw(&buyer_ctx, "eve.contact.label.GetForAllianceRequest", vec![], DynamicQuasarMessage::new("test")).unwrap();
+    let label_wm = WireMessage::decode(&label_resp.value).unwrap();
+    let inst = WireMessage::decode(label_wm.fields[0].value.as_bytes().unwrap()).unwrap();
+    let id_msg = WireMessage::decode(inst.fields.iter().find(|x| x.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(id_msg.fields[0].value.as_varint(), Some(1));
+    let attr = WireMessage::decode(inst.fields.iter().find(|x| x.field_number == 2).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(attr.fields[0].value.as_str().unwrap(), Some("Alliance Contacts"));
+
+    // --- 7. Content: exact decoded IDs + submessage-wrapped cid ---
+    let all_c = dispatch_raw(&buyer_ctx, "eve.content.GetAllRequest", vec![], DynamicQuasarMessage::new("test")).unwrap();
+    let all_wm = WireMessage::decode(&all_c.value).unwrap();
+    let ids: Vec<u64> = all_wm.fields.iter().map(|f| {
+        WireMessage::decode(f.value.as_bytes().unwrap()).unwrap().fields[0].value.as_varint().unwrap()
+    }).collect();
+    assert_eq!(ids, vec![1, 2, 3]);
+
+    let mut content_req_wrap = Vec::new();
+    let mut inner_cid = Vec::new();
+    encode_varint_field(1, 42, &mut inner_cid);
+    encode_bytes_field(1, &inner_cid, &mut content_req_wrap);
+    let c_resp = dispatch_raw(&buyer_ctx, "eve.content.GetRequest", content_req_wrap, DynamicQuasarMessage::new("test")).unwrap();
+    let c_wm = WireMessage::decode(&c_resp.value).unwrap();
+    assert_eq!(c_wm.fields.iter().find(|f| f.field_number == 2).unwrap().value.as_str().unwrap(), Some("ccp-content"));
+    let c_attrs = WireMessage::decode(c_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(c_attrs.fields.iter().find(|f| f.field_number == 3).unwrap().value.as_varint(), Some(1));
+    assert_eq!(c_attrs.fields.iter().find(|f| f.field_number == 4).unwrap().value.as_str().unwrap(), Some("Article #42: News from New Eden"));
+    let c_details = WireMessage::decode(c_attrs.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    let c_op = WireMessage::decode(c_details.fields[0].value.as_bytes().unwrap()).unwrap();
+    assert_eq!(c_op.fields[0].value.as_varint(), Some(100));
+    let c_tags = WireMessage::decode(c_attrs.fields.iter().find(|f| f.field_number == 2).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(c_tags.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_str().unwrap(), Some("news"));
+    assert_eq!(c_tags.fields.iter().find(|f| f.field_number == 2).unwrap().value.as_str().unwrap(), Some("community"));
+}
+
+#[test]
+fn mutant_kill_register_handlers_and_contact_char_filter() {
+    use eve_proto::quasar::WireMessage;
+
+    let (router, db) = make_router_and_db();
+    register_handlers(&router, Arc::clone(&db), shared_sde());
+    let handlers = router.handlers.read().unwrap();
+    for expected in [
+        "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSharedRequest",
+        "eve.contacts.GetAllForCharacterRequest",
+        "eve.contact.label.GetForAllianceRequest",
+        "eve.content.GetAllRequest",
+        "eve.content.GetRequest",
+    ] {
+        assert!(handlers.contains_key(expected), "missing registered handler {expected}");
+    }
+    drop(handlers);
+
+    let cid = 90_500_101_u32;
+    db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().unwrap().clone();
+        ch.character_id = i64::from(cid);
+        ch.standings.clear();
+        ch.standings.insert(4011, -5.0);
+        snap.characters.insert(i64::from(cid), ch);
+    });
+
+    let req = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.contacts.GetAllForCharacterRequest"),
+        value: vec![],
+    };
+    assert_eq!(router.dispatch(&make_ctx(None, 0), &req).unwrap_err().0, STATUS_UNAUTHORIZED);
+    assert_eq!(router.dispatch(&make_ctx(Some(0), 0), &req).unwrap_err().0, STATUS_UNAUTHORIZED);
+
+    let resp = router.dispatch(&make_ctx(Some(cid), 0), &req).unwrap();
+    let wm = WireMessage::decode(&resp.value).unwrap();
+    assert_eq!(wm.fields.len(), 1);
+    let personal = WireMessage::decode(wm.fields[0].value.as_bytes().unwrap()).unwrap();
+    let ind = WireMessage::decode(personal.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    let id_msg = WireMessage::decode(ind.fields[0].value.as_bytes().unwrap()).unwrap();
+    assert_eq!(id_msg.fields[0].value.as_varint(), Some(4011));
+    assert_eq!(
+        personal.fields.iter().find(|f| f.field_number == 4).unwrap().value.as_varint(),
+        Some(5)
+    );
+}

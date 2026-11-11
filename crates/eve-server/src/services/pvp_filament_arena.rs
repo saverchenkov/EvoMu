@@ -18,7 +18,20 @@ use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
 
 pub const PROVING_ARENA_BOUNDARY_RADIUS_M: f64 = 75_000.0;
+/// V24 Proving Grounds arena match duration (`pvpFilaments/common/constants.pyj`: `ABYSSAL_PVP_WAIT_TIME = 15 * MIN` = `900` s).
 pub const PROVING_ARENA_DURATION_SECS: u64 = 900;
+/// V24 Proving Grounds matchmaking wait time (`pvpFilaments/common/constants.pyj`: `ABYSSAL_PVP_WAIT_TIME = 15 * MIN` = `900` s).
+pub const ABYSSAL_PVP_WAIT_TIME_SEC: u64 = 900;
+/// V24 Proving Grounds timer seconds (`pvpFilaments/common/constants.pyj`: `ABYSSAL_PVP_TIMER_SECONDS = 918`).
+pub const ABYSSAL_PVP_TIMER_SECONDS: u64 = 918;
+/// V24 Proving Grounds shrinking-area overlap time (`pvpFilaments/common/constants.pyj`: `ABYSSAL_PVP_OVERLAP_TIME = 480000` ms).
+pub const ABYSSAL_PVP_OVERLAP_TIME_MS: u64 = 480_000;
+/// V24 Proving Grounds shrinking-area final radius (`pvpFilaments/common/constants.pyj`: `ABYSSAL_PVP_SHRINKING_AREA_FINAL_RADIUS = 10000` m).
+pub const ABYSSAL_PVP_SHRINKING_AREA_FINAL_RADIUS_M: f64 = 10_000.0;
+/// V24 Proving Grounds filament jump delay (`pvpFilaments/common/constants.pyj`: `JUMP_DELAY_MSECS = 4000` ms).
+pub const ABYSSAL_PVP_JUMP_DELAY_MS: u64 = 4_000;
+/// V24 Crimewatch timer type for Proving Grounds expiration (`crimewatchTimers.pyj::TimerType::AbyssalPvpExpiration = 14`).
+pub const TIMER_TYPE_ABYSSAL_PVP_EXPIRATION: i64 = 14;
 /// DERIVED: Server-only Proving Grounds leaderboard scoring weights (`+100` per win, `+25` per loss); exact Tranquility weights are server-side and absent from V24 client SDE.
 pub const PROVING_WIN_POINTS: i64 = 100;
 pub const PROVING_LOSS_POINTS: i64 = 25;
@@ -1065,7 +1078,7 @@ pub async fn handle_pvp_end_gate_activation(
         return Err(BridgeRpcError::user_error("NoActiveMatch"));
     };
 
-    let match_timed_out = now_unix >= m_started_unix.saturating_add(900);
+    let match_timed_out = now_unix >= m_started_unix.saturating_add(PROVING_ARENA_DURATION_SECS);
     if winner_char_id.is_none() {
         let err_code = if match_timed_out {
             "ArenaCollapsed"

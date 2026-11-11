@@ -557,3 +557,7 @@ pub fn allocate_drifter_hive_bonus_loot(
         (blue_iid, 30_745, 5),
     ]
 }
+
+#[cfg(test)]
+#[path = "pve_special_sites_ops_edges_tests.rs"]
+mod pve_special_sites_ops_edges_tests;

@@ -639,3 +639,7 @@ fn encode_single_freelance_def(name: &str, val: &serde_json::Value, out: &mut Ve
 #[path = "quasar_freelance_defs_tests.rs"]
 mod quasar_freelance_defs_tests;
 
+#[cfg(test)]
+#[path = "quasar_freelance_defs_edges_tests.rs"]
+mod quasar_freelance_defs_edges_tests;
+

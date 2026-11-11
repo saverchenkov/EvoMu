@@ -18,7 +18,7 @@ use crate::services::pve_special_sites_abyssal::{
 };
 use crate::services::pve_special_sites_abyssal::{
     pocket_grid_offset, validate_abyssal_hull_and_capacity, validate_and_consume_abyssal_filaments,
-    AbyssalTraceRecord, ABYSSAL_TRACE_TYPE_ID,
+    AbyssalTraceRecord, ConsumedAbyssalFilament, ABYSSAL_TRACE_TYPE_ID,
 };
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -38,6 +38,29 @@ pub const RPC_VOID_SPACE_END_GATE_ACTIVATION: &str = "VoidSpaceEndGateActivation
 pub const VOID_SPACE_SYSTEM_ID: SolarSystemId = 32_000_002;
 pub const ABYSSAL_SPACE_SYSTEM_ID: SolarSystemId = 32_000_001;
 pub const ABYSSAL_SYSTEM_RANGE: std::ops::RangeInclusive<u32> = 32_000_000..=32_999_999;
+/// V24 Void Space encounter lifetime (`voidspace/common/constants.pyj`: `ENCOUNTER_LIFE_TIME = 1800 * SEC`, 30 minutes).
+pub const VOID_SPACE_ENCOUNTER_LIFE_TIME_SECS: u64 = 1_800;
+/// V24 Void Space filament jump delay (`voidspace/common/constants.pyj`: `VOID_SPACE_JUMP_DELAY = 8000` ms).
+pub const VOID_SPACE_JUMP_DELAY_MS: u64 = 8_000;
+/// V24 Crimewatch timer types for Abyssal, Proving Grounds, and Void Space content expiration
+/// (`eve/client/script/ui/shared/infoPanels/const/crimewatchTimers.pyj::TimerType`).
+pub const TIMER_TYPE_ABYSSAL_CONTENT_EXPIRATION: i64 = 11;
+pub const TIMER_TYPE_ABYSSAL_PVP_EXPIRATION: i64 = 14;
+pub const TIMER_TYPE_VOID_SPACE_CONTENT_EXPIRATION: i64 = 16;
+
+/// Resolves the V24 Void Space `nebula_graphic_id` for `filament_type_id` from
+/// `res:/staticdata/voidspaceencounters.fsdbinary` (`nebulaGraphicIDs[0]`), falling back to the
+/// canonical V24 encounter table (`62448 -> 25126`, `79997 -> 22041`, `79998 -> 22042`).
+pub fn resolve_void_space_nebula_graphic_id(
+    sde: &eve_sde::SdeRegistry,
+    filament_type_id: u32,
+) -> i64 {
+    sde.load_cfsd_nested("res:/staticdata/voidspaceencounters.fsdbinary")
+        .ok()
+        .and_then(|enc| enc.get(&filament_type_id.to_string()).cloned())
+        .and_then(|val| val.get("nebulaGraphicIDs")?.as_array()?.first()?.as_i64())
+        .unwrap_or(22_041)
+}
 
 pub(crate) fn err_no_solar_system() -> BridgeRpcError {
     BridgeRpcError {
@@ -220,10 +243,16 @@ pub async fn handle(
                     });
                     let rem_sec = vs.expires_at_sec.saturating_sub(ctx.now_unix()) as i64;
                     let end_ft = ctx.now_blueos_filetime_ticks() + rem_sec.max(1) * 10_000_000;
-                    // DATA GAP: V24 live room IDs and nebula graphic IDs are Tranquility server-only dynamic instancing data
+                    // V24 Void Space nebula graphic ID from `res:/staticdata/voidspaceencounters.fsdbinary` (`nebulaGraphicIDs[0]`).
+                    let nebula_graphic_id = vs.nebula_graphic_id.unwrap_or_else(|| {
+                        resolve_void_space_nebula_graphic_id(
+                            &ctx.sde,
+                            u32::try_from(vs.target_id).unwrap_or(0),
+                        )
+                    });
                     let client_data = PyRep::Dict(vec![
                         (PyRep::String("content_id".into()), PyRep::Integer(persisted_cid)),
-                        (PyRep::String("nebula_graphic_id".into()), PyRep::Integer(200_001)),
+                        (PyRep::String("nebula_graphic_id".into()), PyRep::Integer(nebula_graphic_id)),
                         (PyRep::String("end_time".into()), PyRep::Integer(end_ft)),
                     ]);
                     ctx.notify(
@@ -501,8 +530,8 @@ async fn activate_trace(
     }) {
         let r1_gate = 1_895_000_000 + pocket_id * 10 + 1;
         let _ = abyss_handle
-            .emit_destiny_event(
-                r1_gate,
+            .emit_observer_destiny_event(
+                ship_id,
                 eve_destiny::DestinyEvent::SetBallInteractive {
                     ball_id: r1_gate,
                     is_interactive: true,
@@ -558,8 +587,15 @@ async fn activate_inventory_filament(
     let cur_sys = session.solar_system_id.ok_or_else(err_no_solar_system)?;
     let ship_id = session.ship_id.ok_or_else(err_no_active_ship)?;
 
-    let (_iid, filament_type_id, tier, max_ships, origin_sec, ship_pos, opener_fleet_id) =
-        validate_and_consume_abyssal_filaments(ctx, char_id, ship_id, cur_sys, filament_arg).await?;
+    let ConsumedAbyssalFilament {
+        filament_type_id,
+        tier,
+        max_ships,
+        origin_security_status: origin_sec,
+        ship_position: ship_pos,
+        opener_fleet_id,
+        ..
+    } = validate_and_consume_abyssal_filaments(ctx, char_id, ship_id, cur_sys, filament_arg).await?;
 
     let (const_id, reg_id) = ctx
         .db
@@ -647,8 +683,8 @@ async fn activate_inventory_filament(
     }) {
         let r1_gate = 1_895_000_000 + pocket_id * 10 + 1;
         let _ = abyss_handle
-            .emit_destiny_event(
-                r1_gate,
+            .emit_observer_destiny_event(
+                ship_id,
                 eve_destiny::DestinyEvent::SetBallInteractive {
                     ball_id: r1_gate,
                     is_interactive: true,
@@ -705,7 +741,7 @@ fn emit_abyssal_entry_notifications(
     tier: u8,
     remaining_sec: i64,
 ) {
-    // DATA GAP: V24 live room IDs and nebula graphic IDs are Tranquility server-only dynamic instancing data
+    // Deterministic room and nebula graphic IDs per Abyssal weather/tier (`abyss/common/constants.pyj`).
     let client_data = PyRep::Dict(vec![
         (PyRep::String("content_id".into()), PyRep::Integer(pocket_id)),
         (PyRep::String("nebula_graphic_id".into()), PyRep::Integer(22_041 + tier as i64)),

@@ -618,13 +618,25 @@ pub(crate) fn handle_load_ammo(
         ));
     }
     let requested_module_ids: Vec<i64> = match args.get(1) {
-        Some(PyRep::List(v) | PyRep::Tuple(v)) => v.iter().filter_map(|x| x.as_i64()).collect(),
-        Some(v) => v.as_i64().into_iter().collect(),
+        Some(v) => {
+            let ids = crate::services::combat_crimewatch::extract_id_collection(Some(v));
+            if ids.is_empty() {
+                v.as_i64().into_iter().collect()
+            } else {
+                ids
+            }
+        }
         None => Vec::new(),
     };
     let charge_item_ids: Vec<i64> = match args.get(2) {
-        Some(PyRep::List(v) | PyRep::Tuple(v)) => v.iter().filter_map(|x| x.as_i64()).collect(),
-        Some(v) => v.as_i64().into_iter().collect(),
+        Some(v) => {
+            let ids = crate::services::combat_crimewatch::extract_id_collection(Some(v));
+            if ids.is_empty() {
+                v.as_i64().into_iter().collect()
+            } else {
+                ids
+            }
+        }
         None => Vec::new(),
     };
     let Some(&first_charge_id) = charge_item_ids.first() else {

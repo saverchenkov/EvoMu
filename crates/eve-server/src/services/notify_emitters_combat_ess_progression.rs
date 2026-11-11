@@ -555,3 +555,7 @@ pub fn emit_security_modified(
 #[path = "notify_emitters_combat_ess_progression_tests.rs"]
 mod notify_emitters_combat_ess_progression_tests;
 
+#[cfg(test)]
+#[path = "notify_emitters_combat_ess_progression_edges_tests.rs"]
+mod notify_emitters_combat_ess_progression_edges_tests;
+

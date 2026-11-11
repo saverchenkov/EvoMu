@@ -119,12 +119,10 @@ fn schedule_upsert_non_omega_renewal_pagination_and_tx_log_ring_buffer() {
 
     process_due_payment_schedules(&router.db, &router.pending_notices, now);
     router.db.with_snapshot(|snap| {
-        let scheds: Vec<PaymentScheduleRecord> =
-            serde_json::from_str(&snap.service_state_blobs["payment_schedules"]).unwrap();
+        let scheds = &snap.quasar_commerce.payment_schedules;
         let s10 = scheds.iter().find(|s| s.user_id == 10).unwrap();
         assert_eq!(s10.next_payment_unix, now + 86_400);
-        let receipts: Vec<PaymentReceiptRecord> =
-            serde_json::from_str(&snap.service_state_blobs["payment_receipts"]).unwrap();
+        let receipts = &snap.quasar_commerce.payment_receipts;
         assert_eq!(receipts[0].amount_in_cents, 0);
         assert_eq!(receipts[0].currency, "USD");
     });
@@ -267,8 +265,10 @@ fn purchase_gift_delivery_fallback_recipient_overflow_and_operation_binary_looku
     encode_varint_field(1, gift_cid as u64, &mut gift_cm);
     let mut gift_gm = Vec::new();
     encode_bytes_field(3, &gift_cm, &mut gift_gm);
+    let mut offer_m = Vec::new();
+    eve_proto::quasar::encode_string_field(1, "3001", &mut offer_m);
     let mut gift_req = Vec::new();
-    encode_varint_field(1, 3001, &mut gift_req);
+    encode_bytes_field(1, &offer_m, &mut gift_req);
     encode_bytes_field(3, &gift_gm, &mut gift_req);
 
     assert_eq!(
@@ -445,8 +445,7 @@ fn admin_store_proto_bytes_extraction_invoice_dedup_and_tag_filtering() {
     // 3. RecordInvoiceRequest deduplication and 1000-entry ring buffer cap
     router.db.with_mut_snapshot(|snap| {
         let full: Vec<String> = (0..1000).map(|i| format!("inv-{i:04}")).collect();
-        snap.service_state_blobs
-            .insert("plex_invoices".into(), serde_json::to_string(&full).unwrap());
+        snap.quasar_commerce.plex_invoices = full;
     });
     let mut inv_sub = DynamicQuasarMessage::new("Id");
     inv_sub.set(1, DynamicValue::String("new-uuid".into()));
@@ -462,8 +461,7 @@ fn admin_store_proto_bytes_extraction_invoice_dedup_and_tag_filtering() {
     )
     .is_ok());
     router.db.with_snapshot(|snap| {
-        let list: Vec<String> =
-            serde_json::from_str(&snap.service_state_blobs["plex_invoices"]).unwrap();
+        let list = &snap.quasar_commerce.plex_invoices;
         assert_eq!(list.len(), 1000);
         assert_eq!(list.first().unwrap(), "inv-0001");
     });

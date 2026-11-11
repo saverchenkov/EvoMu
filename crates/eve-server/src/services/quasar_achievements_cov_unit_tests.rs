@@ -283,7 +283,23 @@ fn flatbuffer_disk_storage_seeding_writes_empty_and_preserves_existing() {
     let _ = std::fs::remove_dir_all(&tmp_base);
     std::fs::create_dir_all(&storage_dir).expect("create temp Storage dir");
 
-    let prev = std::env::var_os("LOCALAPPDATA");
+    struct LocalAppDataGuard {
+        prev: Option<std::ffi::OsString>,
+        _lock: crate::TestEnvWriteGuard,
+    }
+    impl Drop for LocalAppDataGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => std::env::set_var("LOCALAPPDATA", v),
+                None => std::env::remove_var("LOCALAPPDATA"),
+            }
+        }
+    }
+    let _lock = crate::lock_test_env_write();
+    let _env_guard = LocalAppDataGuard {
+        prev: std::env::var_os("LOCALAPPDATA"),
+        _lock,
+    };
     std::env::set_var("LOCALAPPDATA", &tmp_base);
 
     let payload = empty_achievement_flatbuffer();
@@ -299,9 +315,82 @@ fn flatbuffer_disk_storage_seeding_writes_empty_and_preserves_existing() {
     assert_eq!(std::fs::read(&data_path).unwrap(), payload);
     assert_eq!(std::fs::read_to_string(&ver_path).unwrap(), "v1_hash");
 
-    match prev {
-        Some(v) => std::env::set_var("LOCALAPPDATA", v),
-        None => std::env::remove_var("LOCALAPPDATA"),
-    }
+    drop(_env_guard);
     let _ = std::fs::remove_dir_all(&tmp_base);
+}
+
+#[test]
+fn save_to_db_and_rehydrate_refreshes_sde_definitions_kill_mutants() {
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let sde = shared_sde();
+    let cid = 90_000_001_u32;
+
+    let mgr = AchievementManager::new_with_sde(Some(Arc::clone(&db)), Some(Arc::clone(&sde)));
+    let sample_def = mgr
+        .definitions
+        .first()
+        .expect("SDE achievement definitions must be non-empty")
+        .clone();
+
+    // 1. save_to_db writes both `quasar_achievements` and `quasar_achievement_cat_scores` blobs:
+    //    kills `AchievementManager::save_to_db -> ()`.
+    mgr.mark_completed(cid, sample_def.id, 1_776_000_100)
+        .expect("mark_completed succeeds");
+    db.with_mut_snapshot(|s| {
+        s.quasar_state_blobs.remove("quasar_achievements");
+        s.quasar_state_blobs.remove("quasar_achievement_cat_scores");
+    });
+    mgr.save_to_db();
+    db.with_snapshot(|s| {
+        let ach_json = s
+            .quasar_state_blobs
+            .get("quasar_achievements")
+            .expect("save_to_db must write quasar_achievements blob");
+        let parsed: HashMap<u32, Vec<CharacterAchievement>> =
+            serde_json::from_str(ach_json).unwrap();
+        assert!(parsed.get(&cid).is_some_and(|v| v.iter().any(|a| a.def.id == sample_def.id && a.completed)));
+        assert!(s.quasar_state_blobs.contains_key("quasar_achievement_cat_scores"));
+    });
+
+    // 2. rehydrate_from_db reloads DB progress & scores AND refreshes `a.def` from `self.definitions`:
+    //    kills `AchievementManager::rehydrate_from_db -> ()` AND `delete !` on `!defs_by_id.is_empty()`.
+    let mut stale_def = sample_def.clone();
+    stale_def.name = "STALE_OUTDATED_DEF_NAME".into();
+    stale_def.reward_isk = 0;
+    let stale_entry = CharacterAchievement {
+        def: stale_def,
+        progress: sample_def.target,
+        condition_progress: HashMap::new(),
+        completed: true,
+        completed_date: Some(1_776_000_200),
+        reached_milestones: Vec::new(),
+        unclaimed_reward_count: 0,
+    };
+    db.with_mut_snapshot(|s| {
+        s.quasar_state_blobs.insert(
+            "quasar_achievements".into(),
+            serde_json::to_string(&HashMap::from([(cid, vec![stale_entry])])).unwrap(),
+        );
+        s.quasar_state_blobs.insert(
+            "quasar_achievement_cat_scores".into(),
+            serde_json::to_string(&HashMap::from([(format!("{cid}:{}", sample_def.category_id), 999_u32)])).unwrap(),
+        );
+    });
+    mgr.character_achievements.write().unwrap().clear();
+    mgr.category_scores.write().unwrap().clear();
+
+    mgr.rehydrate_from_db();
+    let list = mgr.get_or_init_achievements(cid);
+    let refreshed = list
+        .iter()
+        .find(|a| a.def.id == sample_def.id)
+        .expect("rehydrated achievement must be present");
+    assert_eq!(refreshed.completed_date, Some(1_776_000_200));
+    assert_eq!(refreshed.def.name, sample_def.name);
+    assert_ne!(refreshed.def.name, "STALE_OUTDATED_DEF_NAME");
+    assert_eq!(refreshed.def.reward_isk, sample_def.reward_isk);
+    assert_eq!(
+        mgr.category_scores.read().unwrap().get(&(cid, sample_def.category_id)).copied(),
+        Some(999)
+    );
 }

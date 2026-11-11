@@ -9,6 +9,10 @@ use eve_sde::{SdeRegistry, SolarSystemId};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
+#[cfg(test)]
+#[path = "pve_dungeon_cache_extra_unit_tests.rs"]
+mod extra_unit_tests;
+
 fn shared_sde() -> Arc<SdeRegistry> {
     static SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
     Arc::clone(SDE.get_or_init(|| Arc::new(SdeRegistry::with_canonical_seed())))

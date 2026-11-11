@@ -582,6 +582,40 @@ pub fn emit_module_activation_godma_notifications(
         for (&k, &v) in &inv_item.dynamic_attributes {
             merged_attrs.insert(k, v);
         }
+        if ship_id > 0 {
+            let owner_cid = if char_id > 0 { char_id } else { inv_item.owner_id };
+            if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(owner_cid, ship_id) {
+                if let Some(m_state) = fit.module_state(module_id, &ctx.sde) {
+                    let modified_targets: std::collections::HashSet<u16> = m_state
+                        .modifiers
+                        .iter()
+                        .map(|m| m.target_attribute_id)
+                        .collect();
+                    let all_aids: std::collections::BTreeSet<u16> = m_state
+                        .base_attributes
+                        .keys()
+                        .copied()
+                        .chain(modified_targets.iter().copied())
+                        .collect();
+                    for aid in all_aids {
+                        if inv_item.dynamic_attributes.contains_key(&aid)
+                            && !modified_targets.contains(&aid)
+                        {
+                            continue;
+                        }
+                        merged_attrs.insert(aid, m_state.get_attribute(aid, &ctx.sde));
+                    }
+                    let mut rtc_attrs: std::collections::HashMap<u16, f64> =
+                        merged_attrs.iter().map(|(&k, &v)| (k, v)).collect();
+                    crate::services::tactical_modules::apply_projected_rtc_to_module_attrs(
+                        ctx,
+                        ship_id,
+                        &mut rtc_attrs,
+                    );
+                    merged_attrs = rtc_attrs.into_iter().collect();
+                }
+            }
+        }
         merged_attrs.entry(73).or_insert(dur_ms_f64);
         merged_attrs.insert(2, 1.0);
         let attrs_dict = PyRep::Dict(

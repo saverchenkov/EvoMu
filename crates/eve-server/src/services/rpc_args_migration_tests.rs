@@ -304,3 +304,205 @@ async fn navigation_superweapon_corp_fitting_and_contacts_reject_unchecked_defau
         .expect_err("AddContact with non-bool 2 for inWatchlist must fail");
     assert_eq!(err_contact.code, "InvalidArgument");
 }
+
+#[test]
+fn rpc_args_boundary_labels_nonzero_indices_and_extractors() {
+    use crate::router::rpc_args::RpcArgs;
+    use glam::DVec3;
+
+    // 1. empty_kwargs(), is_empty(), len(), args(), kwargs()
+    let empty = RpcArgs::positional(&[]);
+    assert!(empty.is_empty());
+    assert_eq!(empty.len(), 0);
+    assert!(empty.args().is_empty());
+    assert!(empty.kwargs().is_empty());
+
+    let mut kw = HashMap::new();
+    kw.insert("price".to_string(), PyRep::Real(12.5));
+    kw.insert("noneKw".to_string(), PyRep::None);
+    kw.insert("flagBool".to_string(), PyRep::Bool(false));
+    kw.insert("altId".to_string(), PyRep::Integer(77));
+    kw.insert("label".to_string(), PyRep::String("alpha-7".into()));
+    kw.insert(
+        "ids".to_string(),
+        PyRep::List(vec![PyRep::Integer(2), PyRep::Integer(3)]),
+    );
+    let kw_only = RpcArgs::new(&[], &kw);
+    assert!(!kw_only.is_empty());
+    assert_eq!(kw_only.len(), 0);
+    assert_eq!(kw_only.kwargs().get("altId"), Some(&PyRep::Integer(77)));
+
+    // 2. arg_label() and invalid_arg() error messages (pos vs kw) + get_raw / get_raw_any None handling
+    let err_pos = kw_only.req_i64(0, "").unwrap_err();
+    assert_eq!(err_pos.code, "InvalidArgument");
+    assert!(err_pos.message.contains("arg[0]"), "got: {}", err_pos.message);
+
+    let err_kw = RpcArgs::positional(&[PyRep::String("bad".into())])
+        .req_i64(0, "price")
+        .unwrap_err();
+    assert_eq!(err_kw.code, "InvalidArgument");
+    assert!(
+        err_kw.message.contains("'price' (arg[0])"),
+        "got: {}",
+        err_kw.message
+    );
+
+    assert_eq!(kw_only.get_raw(0, ""), None);
+    assert_eq!(kw_only.get_raw(0, "noneKw"), None);
+    assert_eq!(kw_only.get_raw(0, "altId"), Some(&PyRep::Integer(77)));
+    assert_eq!(
+        kw_only.get_raw_any(0, &["", "noneKw", "missing", "altId"]),
+        Some(&PyRep::Integer(77))
+    );
+
+    let pos_then_kw = [PyRep::None, PyRep::Integer(7)];
+    let mixed = RpcArgs::new(&pos_then_kw, &kw);
+    assert_eq!(mixed.get_raw(1, "altId"), Some(&PyRep::Integer(7)));
+    assert_eq!(mixed.req_i64(1, "altId").unwrap(), 7);
+    assert_eq!(mixed.opt_i64(0, "missing").unwrap(), None);
+    assert_eq!(mixed.opt_i64(1, "missing").unwrap(), Some(7));
+    assert_eq!(mixed.req_i64_any(1, &["altId"]).unwrap(), 7);
+    assert_eq!(
+        mixed.req_i64_any(0, &["", "noneKw", "altId"]).unwrap(),
+        77
+    );
+    assert_eq!(mixed.opt_i64_any(1, &["altId"]).unwrap(), Some(7));
+    assert_eq!(mixed.opt_i64_any(0, &["noneKw"]).unwrap(), None);
+
+    // 3. Positive / non-negative / exact integer extractors (distinct non-0/1/-1 values)
+    let nums = [
+        PyRep::Integer(0),
+        PyRep::Integer(-7),
+        PyRep::Integer(7),
+        PyRep::Integer(i64::from(u32::MAX)),
+        PyRep::Integer(i64::from(u32::MAX) + 1),
+        PyRep::Integer(i64::from(i32::MIN)),
+        PyRep::Integer(i64::from(i32::MIN) - 1),
+        PyRep::Integer(i64::from(i32::MAX)),
+        PyRep::Integer(i64::from(i32::MAX) + 1),
+    ];
+    let nrpc = RpcArgs::positional(&nums);
+    assert_eq!(nrpc.req_positive_i64(2, "").unwrap(), 7);
+    assert!(nrpc.req_positive_i64(0, "").is_err());
+    assert_eq!(nrpc.opt_positive_i64(2, "").unwrap(), Some(7));
+    assert_eq!(nrpc.opt_positive_i64(99, "").unwrap(), None);
+    assert!(nrpc.opt_positive_i64(0, "").is_err());
+
+    assert_eq!(nrpc.req_non_negative_i64(0, "").unwrap(), 0);
+    assert_eq!(nrpc.req_non_negative_i64(2, "").unwrap(), 7);
+    assert!(nrpc.req_non_negative_i64(1, "").is_err());
+
+    assert_eq!(nrpc.req_u64(0, "").unwrap(), 0);
+    assert_eq!(nrpc.req_u64(2, "").unwrap(), 7);
+    assert!(nrpc.req_u64(1, "").is_err());
+    assert_eq!(nrpc.opt_u64(2, "").unwrap(), Some(7));
+    assert_eq!(nrpc.opt_u64(99, "").unwrap(), None);
+    assert!(nrpc.opt_u64(1, "").is_err());
+
+    assert_eq!(nrpc.req_u32(2, "").unwrap(), 7);
+    assert_eq!(nrpc.req_u32(3, "").unwrap(), u32::MAX);
+    assert!(nrpc.req_u32(1, "").is_err());
+    assert!(nrpc.req_u32(4, "").is_err());
+    assert_eq!(nrpc.opt_u32(2, "").unwrap(), Some(7));
+    assert_eq!(nrpc.opt_u32(99, "").unwrap(), None);
+    assert!(nrpc.opt_u32(4, "").is_err());
+
+    assert_eq!(nrpc.req_i32(1, "").unwrap(), -7);
+    assert_eq!(nrpc.req_i32(2, "").unwrap(), 7);
+    assert_eq!(nrpc.req_i32(5, "").unwrap(), i32::MIN);
+    assert_eq!(nrpc.req_i32(7, "").unwrap(), i32::MAX);
+    assert!(nrpc.req_i32(6, "").is_err());
+    assert!(nrpc.req_i32(8, "").is_err());
+    assert_eq!(nrpc.opt_i32(1, "").unwrap(), Some(-7));
+    assert_eq!(nrpc.opt_i32(2, "").unwrap(), Some(7));
+    assert_eq!(nrpc.opt_i32(99, "").unwrap(), None);
+    assert!(nrpc.opt_i32(8, "").is_err());
+
+    // 4. Finite / positive / non-negative floats + start_idx > 0 vec3 (tuple, list, 3 scalars)
+    let floats = [
+        PyRep::Real(0.0),
+        PyRep::Real(-0.25),
+        PyRep::Real(2.5),
+        PyRep::Integer(4),
+        PyRep::Real(f64::NAN),
+        PyRep::Real(f64::NEG_INFINITY),
+    ];
+    let frpc = RpcArgs::positional(&floats);
+    assert_eq!(frpc.req_finite_f64(2, "").unwrap(), 2.5);
+    assert_eq!(frpc.req_finite_f64(3, "").unwrap(), 4.0);
+    assert!(frpc.req_finite_f64(4, "").is_err());
+    assert!(frpc.req_finite_f64(5, "").is_err());
+    assert_eq!(frpc.opt_finite_f64(2, "").unwrap(), Some(2.5));
+    assert_eq!(frpc.opt_finite_f64(99, "").unwrap(), None);
+
+    assert_eq!(frpc.req_positive_f64(2, "").unwrap(), 2.5);
+    assert!(frpc.req_positive_f64(0, "").is_err());
+    assert_eq!(frpc.opt_positive_f64(2, "").unwrap(), Some(2.5));
+    assert_eq!(frpc.opt_positive_f64(99, "").unwrap(), None);
+    assert!(frpc.opt_positive_f64(0, "").is_err());
+
+    assert_eq!(frpc.req_non_negative_f64(0, "").unwrap(), 0.0);
+    assert_eq!(frpc.req_non_negative_f64(2, "").unwrap(), 2.5);
+    assert!(frpc.req_non_negative_f64(1, "").is_err());
+    assert_eq!(frpc.opt_non_negative_f64(0, "").unwrap(), Some(0.0));
+    assert_eq!(frpc.opt_non_negative_f64(2, "").unwrap(), Some(2.5));
+    assert_eq!(frpc.opt_non_negative_f64(99, "").unwrap(), None);
+    assert!(frpc.opt_non_negative_f64(1, "").is_err());
+
+    // start_idx = 1 scalar triplet -> kills start_idx + 1 / start_idx + 2 mutations
+    let vec_scalars = [
+        PyRep::Integer(999),
+        PyRep::Real(2.5),
+        PyRep::Integer(4),
+        PyRep::Real(-1.5),
+    ];
+    let vs = RpcArgs::positional(&vec_scalars);
+    assert_eq!(vs.req_finite_vec3(1).unwrap(), DVec3::new(2.5, 4.0, -1.5));
+    assert_eq!(
+        vs.opt_finite_vec3(1).unwrap(),
+        Some(DVec3::new(2.5, 4.0, -1.5))
+    );
+    assert_eq!(vs.opt_finite_vec3(10).unwrap(), None);
+
+    let vec_list = [
+        PyRep::None,
+        PyRep::List(vec![PyRep::Real(7.0), PyRep::Integer(-3), PyRep::Real(2.25)]),
+    ];
+    let vl = RpcArgs::positional(&vec_list);
+    assert_eq!(vl.req_finite_vec3(1).unwrap(), DVec3::new(7.0, -3.0, 2.25));
+    assert_eq!(
+        vl.opt_finite_vec3(1).unwrap(),
+        Some(DVec3::new(7.0, -3.0, 2.25))
+    );
+
+    // 5. Bool / Boolish (including Bool(false) in kwargs) / Str / ID lists
+    let bool_args = [PyRep::Bool(false), PyRep::Integer(1), PyRep::Integer(0), PyRep::Integer(2)];
+    let brpc = RpcArgs::new(&bool_args, &kw);
+    assert!(!brpc.req_bool(0, "").unwrap());
+    assert!(brpc.req_bool(1, "").unwrap());
+    assert!(!brpc.req_bool(10, "flagBool").unwrap());
+    assert_eq!(brpc.opt_bool(0, "").unwrap(), Some(false));
+    assert_eq!(brpc.opt_bool(1, "").unwrap(), Some(true));
+    assert_eq!(brpc.opt_bool(10, "missing").unwrap(), None);
+    assert!(brpc.req_bool(3, "").is_err());
+
+    assert!(!brpc.req_boolish(0, "").unwrap());
+    assert!(brpc.req_boolish(1, "").unwrap());
+    assert!(!brpc.req_boolish(2, "").unwrap());
+    assert!(!brpc.req_boolish(10, "flagBool").unwrap());
+    assert_eq!(brpc.opt_boolish(0, "").unwrap(), Some(false));
+    assert_eq!(brpc.opt_boolish(1, "").unwrap(), Some(true));
+    assert_eq!(brpc.opt_boolish(10, "missing").unwrap(), None);
+    assert!(brpc.req_boolish(3, "").is_err());
+
+    assert_eq!(mixed.req_str(0, "label").unwrap(), "alpha-7");
+    assert_eq!(mixed.opt_str(0, "label").unwrap(), Some("alpha-7"));
+    assert_eq!(mixed.opt_str(0, "missing").unwrap(), None);
+    assert_eq!(mixed.req_non_empty_str(0, "label").unwrap(), "alpha-7");
+
+    assert_eq!(mixed.req_i64_list(0, "ids").unwrap(), vec![2, 3]);
+    assert_eq!(mixed.opt_i64_list(0, "ids").unwrap(), vec![2, 3]);
+    assert_eq!(mixed.opt_i64_list(0, "missing").unwrap(), Vec::<i64>::new());
+    assert_eq!(mixed.req_id_or_id_list(1, "").unwrap(), vec![7]);
+    assert_eq!(mixed.req_id_or_id_list(0, "ids").unwrap(), vec![2, 3]);
+}

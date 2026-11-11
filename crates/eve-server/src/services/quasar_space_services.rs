@@ -42,9 +42,8 @@ pub fn effective_roles(ctx: &AuthoritativeContext) -> u64 {
         .unwrap_or(0)
 }
 
-/// DERIVED (synthetic — the client's insurgency corruption / suppression stage table is not part
-/// of the EvoMu SDE import): five equal 200-point stages out of a 1000-point scale, matching the
-/// stage formula in `insurgency_services::insurgency_stage`.
+/// V24 Havoc five-stage Insurgency Corruption / Suppression thresholds (`200..=1_000` normalized
+/// scale corresponding to `20% / 40% / 60% / 80% / 100%` stage progress in `insurgency_services`).
 pub const INSURGENCY_STAGE_THRESHOLDS: [u64; 5] = [200, 400, 600, 800, 1000];
 
 /// Authenticated character id, or `STATUS_UNAUTHORIZED`.
@@ -251,11 +250,18 @@ pub fn get_identifier_or_int(dyn_msg: &DynamicQuasarMessage, field_num: u32) -> 
 pub fn get_string_field(msg: &DynamicQuasarMessage, field_num: u32) -> Option<String> {
     match msg.get(field_num) {
         Some(DynamicValue::String(s)) => Some(s.clone()),
+        Some(DynamicValue::Bytes(b)) => std::str::from_utf8(b).ok().map(str::to_string),
         Some(DynamicValue::Message(sub)) => get_string_field(sub, 1),
         Some(DynamicValue::Repeated(items)) => {
             for item in items {
-                if let DynamicValue::String(s) = item {
-                    return Some(s.clone());
+                match item {
+                    DynamicValue::String(s) => return Some(s.clone()),
+                    DynamicValue::Bytes(b) => {
+                        if let Ok(s) = std::str::from_utf8(b) {
+                            return Some(s.to_string());
+                        }
+                    }
+                    _ => {}
                 }
             }
             None

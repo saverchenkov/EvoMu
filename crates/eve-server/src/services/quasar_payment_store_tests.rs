@@ -502,3 +502,395 @@ fn schedules_tokens_fulfillment_cost_and_token_purchase() {
     assert_eq!(call(&router, &player, "eve_public.plex.vault.transaction.api.GetLogRequest", tx_found, now).status_code, STATUS_OK);
     assert_eq!(call(&router, &player, "eve_public.plex.vault.transaction.api.GetStatisticsRequest", Vec::new(), now).status_code, STATUS_OK);
 }
+
+#[test]
+fn sde_hydration_boundary_21_empty_names_and_plex_wire_payload_assertions() {
+    use crate::quasar_gateway::NoticeScope;
+    use eve_proto::quasar::{decode_zigzag64, WireMessage};
+    use eve_sde::{InvType, SkinLicenseInfo};
+
+    // 1. SDE hydration exact `> 20` boundary (`21` passes while `20` does not) + `.take(24)` + empty type_name fallback
+    let mut sde_21 = (*shared_sde()).clone();
+    sde_21.skin_licenses.clear();
+    // Insert a custom type with empty name to trigger `.filter(|n| !n.is_empty()).unwrap_or_else(...)`
+    sde_21.types.insert(
+        34_599,
+        InvType {
+            type_id: 34_599,
+            group_id: 1,
+            category_id: 1,
+            name: String::new(),
+            mass: 1.0,
+            volume: 1.0,
+            capacity: 0.0,
+            radius: 1.0,
+            base_price: 0.0,
+            published: true,
+            portion_size: 1,
+            market_group_id: None,
+            race_id: None,
+            faction_id: None,
+            variation_parent_type_id: None,
+            description_id: None,
+            icon_id: None,
+            graphic_id: None,
+            sound_id: None,
+            meta_group_id: None,
+            meta_level: None,
+            tech_level: None,
+            default_effect_id: None,
+            description: String::new(),
+            effect_ids: Vec::new(),
+            default_attributes: HashMap::new(),
+        },
+    );
+    let mut sample_tids: Vec<u32> = sde_21
+        .types
+        .keys()
+        .copied()
+        .filter(|&tid| tid != 34_599)
+        .take(25)
+        .collect();
+    sample_tids.sort_unstable();
+    for &tid in &sample_tids[..21] {
+        sde_21.skin_licenses.insert(
+            tid,
+            SkinLicenseInfo {
+                license_type_id: tid,
+                skin_id: tid,
+                duration: -1,
+            },
+        );
+    }
+    let db_21 = WorldRepository::new_empty();
+    db_21.with_mut_snapshot(|s| ensure_store_catalog_seeded(s, &sde_21));
+    db_21.with_snapshot(|snap| {
+        let cat = snap
+            .quasar_commerce
+            .nes_store_catalog
+            .as_ref()
+            .expect("21 skin licenses (> 20) must hydrate");
+        assert_eq!(cat.offers.len(), 26); // 5 base + 21 skin offers
+        assert_eq!(cat.products.len(), 26);
+        // Empty InvType name falls back cleanly for 34_599
+        let p102 = cat.products.iter().find(|p| p.id == 102).unwrap();
+        assert_eq!(p102.name, "Multiple Pilot Training Certificate");
+        assert_eq!(p102.description, "Multiple Pilot Training Certificate");
+        // Verify skin formula: oid = 2001 + idx, pid = 200 + idx, price_plex = 55 + (tid % 4) * 55, targeted = idx % 4 == 0
+        for (idx, &tid) in sample_tids[..21].iter().enumerate() {
+            let off = cat.offers.iter().find(|o| o.id == 2001 + idx as u32).unwrap();
+            assert_eq!(off.category_id, 2);
+            assert_eq!(off.product_ids, vec![200 + idx as u32]);
+            assert_eq!(off.price_plex, 55 + i64::from(tid % 4) * 55);
+            assert_eq!(off.targeted, idx % 4 == 0);
+        }
+    });
+
+    // `parse_raw_varints`: exact `idx + len == raw.len()` fits, whereas `len == remaining + 1` is ignored
+    let mut inner_ok = Vec::new();
+    encode_varint_field(5, 77, &mut inner_ok);
+    let mut exact_fit = Vec::new();
+    encode_bytes_field(3, &inner_ok, &mut exact_fit);
+    let parsed_fit = parse_raw_varints(&exact_fit);
+    assert_eq!(parsed_fit.get(&3), Some(&77));
+    assert_eq!(parsed_fit.get(&5), Some(&77));
+
+    let mut one_byte_over = exact_fit.clone();
+    one_byte_over[1] += 1;
+    assert!(parse_raw_varints(&one_byte_over).is_empty());
+
+    // 2. Balance / Deposit / Withdraw exact wire values, 99 vs 100 cent boundary, and BalanceChangedNotice payload
+    let router = new_router();
+    let uid = 71u64;
+    let other_uid = 72u64;
+    let gm = make_sess(Some(uid), Some(90_000_001), service_roles::ROLE_GM_DEFAULT);
+    let player = make_sess(Some(uid), Some(90_000_001), service_roles::ROLE_PLAYER_DEFAULT);
+    let other_player = make_sess(Some(other_uid), None, service_roles::ROLE_PLAYER_DEFAULT);
+    let now = 1_760_000_000u64;
+
+    // 99 cents truncates to 0 PLEX -> rejected (400); 100 cents == 1 PLEX -> accepted (200)
+    let mut req_99 = Vec::new();
+    encode_currency_field(3, 99, &mut req_99);
+    assert_eq!(
+        call(&router, &gm, "eve.plex.vault.assetholding.operation.api.DepositRequest", req_99, now).status_code,
+        STATUS_BAD_REQUEST
+    );
+    let _ = router.pending_notices.write().unwrap().drain(..).count();
+    router.routing_cache.write().unwrap().entries.clear();
+
+    let mut req_100 = Vec::new();
+    encode_currency_field(3, 100, &mut req_100);
+    assert_eq!(
+        call(&router, &gm, "eve.plex.vault.assetholding.operation.api.DepositRequest", req_100, now).status_code,
+        STATUS_OK
+    );
+
+    let dep_notices: Vec<_> = router.routing_cache.write().unwrap().entries.drain(..).collect();
+    assert_eq!(dep_notices.len(), 1);
+    assert_eq!(dep_notices[0].scope, NoticeScope::User(uid as i32));
+    let dep_payload = dep_notices[0].notice.payload.as_ref().unwrap();
+    assert!(dep_payload.type_url.ends_with("BalanceChangedNotice"));
+    let notice_wm = WireMessage::decode(&dep_payload.value).unwrap();
+    let dep_attr_bytes = notice_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_bytes()).unwrap();
+    let dep_attr_wm = WireMessage::decode(dep_attr_bytes).unwrap();
+    let notice_reason = dep_attr_wm.fields.iter().find(|f| f.field_number == 6).and_then(|f| f.value.as_str().ok().flatten());
+    assert_eq!(notice_reason, Some("GM Deposit"));
+    let notice_amt_bytes = dep_attr_wm.fields.iter().find(|f| f.field_number == 4).and_then(|f| f.value.as_bytes()).unwrap();
+    let notice_amt_wm = WireMessage::decode(notice_amt_bytes).unwrap();
+    assert_eq!(decode_zigzag64(notice_amt_wm.fields[0].value.as_varint().unwrap()), 100); // +1 PLEX * 100 cents
+
+    // Seed negative balance on other_uid to verify BalanceResponse zigzag64 negative encoding
+    router.db.with_mut_snapshot(|snap| {
+        snap.account_plex_vault.insert(other_uid, -50);
+    });
+    let neg_bal_rsp = call(&router, &other_player, "eve_public.plex.vault.api.BalanceRequest", Vec::new(), now);
+    assert_eq!(neg_bal_rsp.status_code, STATUS_OK);
+    let bal_outer = WireMessage::decode(&neg_bal_rsp.payload.unwrap().value).unwrap();
+    let bal_curr = WireMessage::decode(bal_outer.fields[0].value.as_bytes().unwrap()).unwrap();
+    assert_eq!(decode_zigzag64(bal_curr.fields[0].value.as_varint().unwrap()), -5_000);
+
+    // 3. Transaction log & statistics exact wire decoding & cross-user isolation & zero/positive/negative classification
+    router.db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.plex_tx_logs.clear();
+        record_plex_transaction(snap, 901, uid, 250, 251, "TopUp", now + 20);
+        record_plex_transaction(snap, 902, uid, 0, 251, "ZeroAdjustment", now + 10);
+        record_plex_transaction(snap, 903, uid, -80, 171, "SkinBuy", now + 30);
+        record_plex_transaction(snap, 904, other_uid, 999, 949, "OtherUser", now + 1);
+    });
+
+    let all_tx_rsp = call(&router, &player, "eve_public.plex.vault.transaction.api.GetAllLoggedForUserRequest", Vec::new(), now);
+    assert_eq!(all_tx_rsp.status_code, STATUS_OK);
+    let all_tx_wm = WireMessage::decode(&all_tx_rsp.payload.unwrap().value).unwrap();
+    let logged_ids: Vec<u64> = all_tx_wm
+        .fields
+        .iter()
+        .map(|f| WireMessage::decode(f.value.as_bytes().unwrap()).unwrap().fields[0].value.as_varint().unwrap())
+        .collect();
+    assert_eq!(logged_ids, vec![901, 902, 903]); // excludes other_uid's 904!
+
+    // Foreign user cannot read uid's transaction 903
+    let mut tx_903 = Vec::new();
+    encode_varint_field(1, 903, &mut tx_903);
+    assert_eq!(
+        call(&router, &other_player, "eve_public.plex.vault.transaction.api.GetLogRequest", tx_903.clone(), now).status_code,
+        STATUS_NOT_FOUND
+    );
+    let log_rsp = call(&router, &player, "eve_public.plex.vault.transaction.api.GetLogRequest", tx_903, now);
+    assert_eq!(log_rsp.status_code, STATUS_OK);
+    let log_attr = WireMessage::decode(WireMessage::decode(&log_rsp.payload.unwrap().value).unwrap().fields[0].value.as_bytes().unwrap()).unwrap();
+    let log_amt_wm = WireMessage::decode(log_attr.fields.iter().find(|f| f.field_number == 4).unwrap().value.as_bytes().unwrap()).unwrap();
+    let log_bal_wm = WireMessage::decode(log_attr.fields.iter().find(|f| f.field_number == 5).unwrap().value.as_bytes().unwrap()).unwrap();
+    let log_desc = log_attr.fields.iter().find(|f| f.field_number == 6).unwrap().value.as_str().unwrap();
+    assert_eq!(decode_zigzag64(log_amt_wm.fields[0].value.as_varint().unwrap()), -8_000);
+    assert_eq!(decode_zigzag64(log_bal_wm.fields[0].value.as_varint().unwrap()), 17_100);
+    assert_eq!(log_desc, Some("SkinBuy"));
+
+    let stats_rsp = call(&router, &player, "eve_public.plex.vault.transaction.api.GetStatisticsRequest", Vec::new(), now);
+    assert_eq!(stats_rsp.status_code, STATUS_OK);
+    let stats_wm = WireMessage::decode(&stats_rsp.payload.unwrap().value).unwrap();
+    let entry_wm = WireMessage::decode(stats_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    let inc_wm = WireMessage::decode(entry_wm.fields.iter().find(|f| f.field_number == 3).unwrap().value.as_bytes().unwrap()).unwrap();
+    let exp_wm = WireMessage::decode(entry_wm.fields.iter().find(|f| f.field_number == 4).unwrap().value.as_bytes().unwrap()).unwrap();
+    let cnt = entry_wm.fields.iter().find(|f| f.field_number == 5).unwrap().value.as_varint().unwrap();
+    let earliest_wm = WireMessage::decode(stats_wm.fields.iter().find(|f| f.field_number == 2).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(decode_zigzag64(inc_wm.fields[0].value.as_varint().unwrap()), 25_000);
+    assert_eq!(decode_zigzag64(exp_wm.fields[0].value.as_varint().unwrap()), 8_000);
+    assert_eq!(cnt, 3);
+    assert_eq!(earliest_wm.fields[0].value.as_varint().unwrap(), now + 10);
+}
+
+#[test]
+fn store_catalog_wire_fields_schedule_token_isolation_and_omega_purchase_edges() {
+    use crate::quasar_gateway::NoticeScope;
+    use eve_proto::quasar::WireMessage;
+
+    let router = new_router();
+    seed_catalog(&router.db);
+    // Add a non-1001 category-1 Omega+item offer (1099) & zero-type product (105) to test category_id==1 + product filtering
+    router.db.with_mut_snapshot(|snap| {
+        let mut cat = read_store_catalog(snap);
+        cat.products.push(StoreProduct {
+            id: 199,
+            name: "VirtualToken".into(),
+            description: "No type_id".into(),
+            type_id: 0,
+            quantity: 1,
+        });
+        cat.offers.push(StoreOffer {
+            id: 1099,
+            name: "Omega+SKIN Bundle".into(),
+            description: "Category 1 + Item".into(),
+            category_id: 1,
+            price_plex: 600,
+            product_ids: vec![102, 199],
+            targeted: false,
+            price_cents: Some(2_500),
+            currency: Some("GBP".into()),
+        });
+        save_store_catalog(snap, &cat);
+    });
+
+    let u1 = 81u64;
+    let u2 = 82u64;
+    let cid1 = 90_000_081i64;
+    let structure_id = 1_000_000_000_777i64;
+    router.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().unwrap().clone();
+        ch.character_id = cid1;
+        ch.user_id = u1;
+        ch.station_id = None;
+        ch.structure_id = Some(structure_id);
+        ch.home_station_id = 60_003_760;
+        snap.characters.insert(cid1, ch);
+        // Existing singleton item of type 34599 in structure hangar must NOT be stacked onto!
+        let sing_id = 990_000_777i64;
+        snap.items.insert(
+            sing_id,
+            eve_db::InventoryItemRecord {
+                item_id: sing_id,
+                type_id: 34_599,
+                owner_id: cid1,
+                location_id: structure_id,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let p1 = make_sess(Some(u1), Some(cid1), service_roles::ROLE_PLAYER_DEFAULT);
+    let gm1 = make_sess(Some(u1), Some(cid1), service_roles::ROLE_GM_DEFAULT);
+    let p2_no_char = make_sess(Some(u2), None, service_roles::ROLE_PLAYER_DEFAULT);
+    let now = 1_760_000_500u64;
+
+    // 1. Store wire decoding: GetAll vs GetAllTargeted strict disjoint filter + Get offer tags & price_plex * 100
+    let off_all = WireMessage::decode(&call(&router, &p1, "eve_public.store.offer.api.GetAllRequest", Vec::new(), now).payload.unwrap().value).unwrap();
+    let pub_ids: Vec<String> = off_all
+        .fields
+        .iter()
+        .map(|f| WireMessage::decode(f.value.as_bytes().unwrap()).unwrap().fields[0].value.as_str().unwrap().unwrap().to_string())
+        .collect();
+    assert_eq!(pub_ids, vec!["1001", "1002", "1099"]);
+
+    let off_tgt = WireMessage::decode(&call(&router, &p1, "eve_public.store.offer.api.GetAllTargetedRequest", Vec::new(), now).payload.unwrap().value).unwrap();
+    let tgt_ids: Vec<String> = off_tgt
+        .fields
+        .iter()
+        .map(|f| WireMessage::decode(f.value.as_bytes().unwrap()).unwrap().fields[0].value.as_str().unwrap().unwrap().to_string())
+        .collect();
+    assert_eq!(tgt_ids, vec!["1003", "1004"]);
+
+    let mut get_1002_inner = Vec::new();
+    encode_string_field(1, "1002", &mut get_1002_inner);
+    let mut get_1002 = Vec::new();
+    encode_bytes_field(1, &get_1002_inner, &mut get_1002);
+    let off_1002_wm = WireMessage::decode(&call(&router, &p1, "eve_public.store.offer.api.GetRequest", get_1002, now).payload.unwrap().value).unwrap();
+    let off_1002_attr = WireMessage::decode(off_1002_wm.fields[0].value.as_bytes().unwrap()).unwrap();
+    let tags: Vec<&str> = off_1002_attr.fields.iter().filter(|f| f.field_number == 2).filter_map(|f| f.value.as_str().ok().flatten()).collect();
+    assert_eq!(tags, vec!["featured", "hot"]);
+    let price_wm = WireMessage::decode(off_1002_attr.fields.iter().find(|f| f.field_number == 12).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(price_wm.fields[0].value.as_varint(), Some(11_000)); // 110 PLEX * 100
+
+    // CostRequest decoded fields for offer 1002 (499 cents EUR)
+    let mut cost_1002 = Vec::new();
+    encode_varint_field(1, 1002, &mut cost_1002);
+    let cost_wm = WireMessage::decode(&call(&router, &p1, "eve_public.payment.purchase.api.CostRequest", cost_1002, now).payload.unwrap().value).unwrap();
+    let cost_inner = WireMessage::decode(cost_wm.fields[0].value.as_bytes().unwrap()).unwrap();
+    assert_eq!(cost_inner.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_varint(), Some(499));
+    assert_eq!(cost_inner.fields.iter().find(|f| f.field_number == 2).unwrap().value.as_varint(), Some(0));
+    assert_eq!(cost_inner.fields.iter().find(|f| f.field_number == 3).unwrap().value.as_varint(), Some(499));
+    assert_eq!(cost_inner.fields.iter().find(|f| f.field_number == 5).unwrap().value.as_str().unwrap(), Some("EUR"));
+
+    // 2. Token isolation (u1 vs u2) & DisableAll only touches caller's user_id & emits QuickPayRemovedNotice
+    add_user_quick_pay_token(&router.db, &router.pending_notices, u1, PaymentTokenRecord { id: 801, user_id: u1, token_str: "u1-qp".into(), is_quick_pay: true, consumed: false });
+    add_user_quick_pay_token(&router.db, &router.pending_notices, u1, PaymentTokenRecord { id: 802, user_id: u1, token_str: "u1-noqp".into(), is_quick_pay: false, consumed: false });
+    add_user_quick_pay_token(&router.db, &router.pending_notices, u2, PaymentTokenRecord { id: 803, user_id: u2, token_str: "u2-qp".into(), is_quick_pay: true, consumed: false });
+    let _ = router.pending_notices.write().unwrap().drain(..).count();
+
+    let qp_u1 = WireMessage::decode(&call(&router, &p1, "eve_public.payment.token.api.GetQuickPayRequest", Vec::new(), now).payload.unwrap().value).unwrap();
+    let qp_ids: Vec<u64> = qp_u1.fields.iter().map(|f| WireMessage::decode(f.value.as_bytes().unwrap()).unwrap().fields[0].value.as_varint().unwrap()).collect();
+    assert_eq!(qp_ids, vec![801]);
+
+    // DisableAllRequest for u1 must NOT disable u2's token 803!
+    let _ = router.pending_notices.write().unwrap().drain(..).count();
+    router.routing_cache.write().unwrap().entries.clear();
+    assert_eq!(call(&router, &p1, "eve_public.payment.token.api.DisableAllRequest", Vec::new(), now).status_code, STATUS_OK);
+    let dis_notices: Vec<_> = router.routing_cache.write().unwrap().entries.drain(..).collect();
+    assert_eq!(dis_notices.len(), 1);
+    assert_eq!(dis_notices[0].scope, NoticeScope::User(u1 as i32));
+    assert!(dis_notices[0].notice.payload.as_ref().unwrap().type_url.ends_with("QuickPayRemovedNotice"));
+    router.db.with_snapshot(|snap| {
+        assert!(!snap.quasar_commerce.payment_tokens.iter().find(|t| t.id == 801).unwrap().is_quick_pay);
+        assert!(snap.quasar_commerce.payment_tokens.iter().find(|t| t.id == 803).unwrap().is_quick_pay);
+    });
+
+    // 3. DeliverItemRequest defaults (type_id=44992, qty=1), structure_id fallback, singleton isolation, version += 1
+    assert_eq!(call(&router, &gm1, "eve.fulfillment.api.DeliverItemRequest", Vec::new(), now).status_code, STATUS_OK);
+    router.db.with_snapshot(|snap| {
+        let plex_stacks: Vec<_> = snap.items.values().filter(|i| i.owner_id == cid1 && i.type_id == 44_992 && i.location_id == structure_id).collect();
+        assert_eq!(plex_stacks.len(), 1);
+        assert_eq!(plex_stacks[0].quantity, 1);
+    });
+
+    // 4. TokenRequest:
+    // - u2 has ZERO characters & no station, yet offer_id == 1001 succeeds!
+    // - qty=0 clamps to 1, qty=20_000 clamps to 10_000; category_id==1 offer 1099 activates Omega + delivers non-singleton stack to structure_id!
+    add_user_quick_pay_token(&router.db, &router.pending_notices, u1, PaymentTokenRecord { id: 804, user_id: u1, token_str: "u1-omega".into(), is_quick_pay: true, consumed: false });
+    add_user_quick_pay_token(&router.db, &router.pending_notices, u2, PaymentTokenRecord { id: 805, user_id: u2, token_str: "u2-nochar".into(), is_quick_pay: true, consumed: false });
+    let _ = router.pending_notices.write().unwrap().drain(..).count();
+
+    let encode_purchase = |off: &str, tok: u64, qty: u64| -> Vec<u8> {
+        let mut req = Vec::new();
+        let mut order = Vec::new();
+        let mut oid = Vec::new();
+        encode_string_field(1, off, &mut oid);
+        encode_bytes_field(1, &oid, &mut order);
+        encode_varint_field(2, qty, &mut order);
+        encode_bytes_field(1, &order, &mut req);
+        let mut t = Vec::new();
+        encode_varint_field(1, tok, &mut t);
+        encode_bytes_field(2, &t, &mut req);
+        req
+    };
+
+    // Offer 1001 for u2 with qty=0 (clamped to 1 -> 1_999 cents, 30 days) even with no characters
+    let rsp_u2 = call(&router, &p2_no_char, "eve_public.payment.purchase.api.TokenRequest", encode_purchase("1001", 805, 0), now);
+    assert_eq!(rsp_u2.status_code, STATUS_OK);
+
+    // Offer 1099 for u1 with qty=20_000 (clamped to 10_000 -> 2_500 * 10_000 cents, product 102 * 2, skips type_id=0 product 105)
+    let rsp_u1 = call(&router, &p1, "eve_public.payment.purchase.api.TokenRequest", encode_purchase("1099", 804, 20_000), now);
+    assert_eq!(rsp_u1.status_code, STATUS_OK);
+    let rsp_u1_wm = WireMessage::decode(&rsp_u1.payload.unwrap().value).unwrap();
+    let rec_wm = WireMessage::decode(rsp_u1_wm.fields[0].value.as_bytes().unwrap()).unwrap();
+    assert_eq!(rec_wm.fields.iter().find(|f| f.field_number == 3).unwrap().value.as_varint(), Some(1));
+    assert_eq!(rec_wm.fields.iter().find(|f| f.field_number == 4).unwrap().value.as_str().unwrap(), Some("Payment completed successfully"));
+
+    router.db.with_snapshot(|snap| {
+        let u2_rec = snap.quasar_commerce.payment_receipts.iter().find(|r| r.user_id == u2).unwrap();
+        assert_eq!(u2_rec.amount_in_cents, 1_999);
+        assert_eq!(u2_rec.offer_id, "1001");
+
+        let u1_rec = snap.quasar_commerce.payment_receipts.iter().find(|r| r.user_id == u1).unwrap();
+        assert_eq!(u1_rec.amount_in_cents, 2_500 * 10_000);
+        assert_eq!(u1_rec.currency, "GBP");
+        assert_eq!(snap.characters[&cid1].clone_grade, 2);
+        // Zero-type product 105 never creates an item with type_id 0
+        assert!(!snap.items.values().any(|i| i.owner_id == cid1 && i.type_id == 0));
+        // Singleton 34599 stays untouched at qty 1 while delivered non-singleton stack holds 2 * 10_000 = 20_000 at structure_id
+        let delivered: Vec<_> = snap.items.values().filter(|i| i.owner_id == cid1 && i.type_id == 34_599 && i.location_id == structure_id).collect();
+        assert_eq!(delivered.len(), 2);
+        assert_eq!(delivered.iter().find(|i| i.singleton).unwrap().quantity, 1);
+        assert_eq!(delivered.iter().find(|i| !i.singleton).unwrap().quantity, 20_000);
+        // Schedule uses VEVC-1099 and interval 30 * 10_000
+        let sched = snap.quasar_commerce.payment_schedules.iter().find(|s| s.user_id == u1).unwrap();
+        assert_eq!(sched.offer_id, "VEVC-1099");
+        assert_eq!(sched.interval_days, 30 * 10_000);
+    });
+}
+
+
+#[cfg(test)]
+#[path = "quasar_payment_store_extra_unit_tests.rs"]
+mod quasar_payment_store_extra_unit_tests;

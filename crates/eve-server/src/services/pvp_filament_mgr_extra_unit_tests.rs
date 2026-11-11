@@ -105,7 +105,10 @@ fn make_pvp_ctx() -> ServerContext {
         .types
         .keys()
         .copied()
-        .find(|&fid| get_pvp_filament_match_spec(&sde, fid).banned_modules_list_id.is_some())
+        .find(|&fid| {
+            let sp = get_pvp_filament_match_spec(&sde, fid);
+            sp.fleet_size == 1 && sp.banned_modules_list_id.is_some()
+        })
         .unwrap_or(56_088);
     sde.types.insert(
         banned_fid,
@@ -184,7 +187,7 @@ fn date_parsing_fallback_specs_and_leaderboard_tiebreakers() {
     assert_eq!(c207.dict_get("rank").and_then(|v| v.as_i64()), Some(7));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn join_pvp_queue_validation_errors_and_full_1v1_matchmaking_and_end_gate() {
     let ctx = make_pvp_ctx();
     let pilot_a = 960_001_i64;
@@ -350,7 +353,10 @@ async fn join_pvp_queue_validation_errors_and_full_1v1_matchmaking_and_end_gate(
         .types
         .keys()
         .copied()
-        .find(|&fid| get_pvp_filament_match_spec(&ctx.sde, fid).banned_modules_list_id.is_some())
+        .find(|&fid| {
+            let sp = get_pvp_filament_match_spec(&ctx.sde, fid);
+            sp.fleet_size == 1 && sp.banned_modules_list_id.is_some()
+        })
         .unwrap_or(56_088);
     ctx.db.with_mut_snapshot(|snap| {
         let mut st = load_pvp_store(snap);
@@ -561,4 +567,647 @@ async fn join_pvp_queue_validation_errors_and_full_1v1_matchmaking_and_end_gate(
     assert_eq!(exit_res.dict_get("activated"), Some(&PyRep::Bool(true)));
     assert_eq!(exit_res.dict_get("originSystemID"), Some(&PyRep::Integer(30_000_142)));
     assert_eq!(sess_a.solar_system_id, Some(30_000_142));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proving_grounds_fleet_queue_errors_type_list_limits_and_ship_heuristics() {
+    let mut ctx = make_pvp_ctx();
+    // Pick real SDE filaments with banned / limited / ship-restriction specs from fsdbinary
+    let sde_snapshot = ctx.sde.clone();
+    let is_active_pvp_filament = |fid: u32| {
+        sde_snapshot.types.get(&fid).is_some_and(|t| {
+            (t.group_id == 4050 || t.group_id == 4743) && !t.name.starts_with("Expired")
+        })
+    };
+    let pick_spec_fid = |pred: fn(&crate::services::pvp_filament_mgr::PvpFilamentMatchSpec) -> bool| -> Option<u32> {
+        sde_snapshot
+            .types
+            .keys()
+            .copied()
+            .filter(|&fid| is_active_pvp_filament(fid) && pred(&get_pvp_filament_match_spec(&sde_snapshot, fid)))
+            .min()
+            .or_else(|| {
+                sde_snapshot
+                    .types
+                    .keys()
+                    .copied()
+                    .filter(|&fid| pred(&get_pvp_filament_match_spec(&sde_snapshot, fid)))
+                    .min()
+            })
+    };
+    let ban_fid = pick_spec_fid(|sp| sp.fleet_size == 1 && sp.banned_modules_list_id.is_some()).unwrap_or(56_088);
+    let ban_sp = get_pvp_filament_match_spec(&sde_snapshot, ban_fid);
+    let lim_fid = pick_spec_fid(|sp| {
+        sp.fleet_size == 1 && sp.limited_modules_list_id.is_some() && sp.number_of_limited_modules > 0
+    });
+    let sde_mut = Arc::make_mut(&mut ctx.sde);
+    if let Some(ban_lid) = ban_sp.banned_modules_list_id {
+        sde_mut.type_lists.entry(ban_lid).or_insert_with(|| eve_sde::TypeListInfo {
+            type_list_id: ban_lid,
+            name: "BannedMods".into(),
+            included_category_ids: vec![],
+            included_group_ids: vec![],
+            included_type_ids: vec![],
+            excluded_category_ids: vec![],
+            excluded_group_ids: vec![],
+            excluded_type_ids: vec![],
+        }).included_type_ids.push(990_011);
+    }
+    if let Some(ship_lid) = ban_sp.ship_restrictions_list_id {
+        sde_mut.type_lists.entry(ship_lid).or_insert_with(|| eve_sde::TypeListInfo {
+            type_list_id: ship_lid,
+            name: "AllowedShips".into(),
+            included_category_ids: vec![],
+            included_group_ids: vec![],
+            included_type_ids: vec![],
+            excluded_category_ids: vec![],
+            excluded_group_ids: vec![],
+            excluded_type_ids: vec![],
+        }).included_type_ids.push(587);
+    }
+    sde_mut.types.insert(990_013, make_filament_type(990_013, 60, 7, "T2 Limited Mod", Some(5), HashMap::from([(633, 5.0)])));
+    if let Some(lfid) = lim_fid {
+        let lsp = get_pvp_filament_match_spec(&sde_snapshot, lfid);
+        if let Some(lim_lid) = lsp.limited_modules_list_id {
+            sde_mut.type_lists.entry(lim_lid).or_insert_with(|| eve_sde::TypeListInfo {
+                type_list_id: lim_lid,
+                name: "LimitedMods".into(),
+                included_category_ids: vec![],
+                included_group_ids: vec![],
+                included_type_ids: vec![],
+                excluded_category_ids: vec![],
+                excluded_group_ids: vec![],
+                excluded_type_ids: vec![],
+            }).included_type_ids.push(990_013);
+        }
+        if let Some(ship_lid) = lsp.ship_restrictions_list_id {
+            sde_mut.type_lists.entry(ship_lid).or_insert_with(|| eve_sde::TypeListInfo {
+                type_list_id: ship_lid,
+                name: "AllowedShipsLim".into(),
+                included_category_ids: vec![],
+                included_group_ids: vec![],
+                included_type_ids: vec![],
+                excluded_category_ids: vec![],
+                excluded_group_ids: vec![],
+                excluded_type_ids: vec![],
+            }).included_type_ids.push(587);
+        }
+    }
+    // Ensure ban_fid / lim_fid have valid non-expired PvP filament group/name so is_sde_pvp_filament passes even if seed omits or marks Expired
+    for fid in std::iter::once(ban_fid).chain(lim_fid) {
+        if let Some(t) = sde_mut.types.get_mut(&fid) {
+            if t.group_id != 4050 && t.group_id != 4743 {
+                t.group_id = 4050;
+            }
+            if t.name.starts_with("Expired") {
+                t.name = format!("Active Test 1v1 Filament {fid}");
+            }
+        } else {
+            sde_mut.types.insert(
+                fid,
+                make_filament_type(fid, 4050, 66, "Restricted 1v1 Proving Filament", None, HashMap::new()),
+            );
+        }
+    }
+    // Custom filaments using name heuristics (Battleship, Battlecruiser, Cruiser, Destroyer, Frigate)
+    for (tid, name) in [
+        (990_061, "Test Battleship Proving Filament"),
+        (990_062, "Test Battlecruiser Proving Filament"),
+        (990_063, "Test Cruiser Proving Filament"),
+        (990_064, "Test Destroyer Proving Filament"),
+        (990_065, "Test Frigate Proving Filament"),
+    ] {
+        sde_mut.types.insert(
+            tid,
+            make_filament_type(tid, 4050, 66, name, None, HashMap::new()),
+        );
+    }
+    // Ship type IDs for Battleship(27), Battlecruiser(419), Cruiser(26), Destroyer(420), Titan(30)
+    sde_mut.types.insert(990_201, make_filament_type(990_201, 27, 6, "Test BS", None, HashMap::new()));
+    sde_mut.types.insert(990_202, make_filament_type(990_202, 419, 6, "Test BC", None, HashMap::new()));
+    sde_mut.types.insert(990_203, make_filament_type(990_203, 26, 6, "Test CR", None, HashMap::new()));
+    sde_mut.types.insert(990_204, make_filament_type(990_204, 420, 6, "Test DD", None, HashMap::new()));
+    sde_mut.types.insert(990_205, make_filament_type(990_205, 30, 6, "Test Titan", None, HashMap::new()));
+
+    // Verify ship restriction list + name heuristic branches through JoinPVPQueue
+    let pilot_a = 95_001_001_i64;
+    let pilot_b = 95_001_002_i64;
+    let ship_a = 95_101_001_i64;
+    let ship_b = 95_101_002_i64;
+    let sys_id = 30_000_142_u32;
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    for (sid, pos) in [(ship_a, DVec3::new(5e7, 0.0, 0.0)), (ship_b, DVec3::new(5e7 + 1e5, 0.0, 0.0))] {
+        sys_h
+            .spawn_ball(Ball {
+                id: sid,
+                type_id: 587,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1e6,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            })
+            .await
+            .unwrap();
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base_ch = snap.characters.values().next().cloned().unwrap();
+        for (pid, sid) in [(pilot_a, ship_a), (pilot_b, ship_b)] {
+            let mut ch = base_ch.clone();
+            ch.character_id = pid;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = sid;
+            snap.characters.insert(pid, ch);
+            snap.items.insert(
+                sid,
+                InventoryItemRecord {
+                    item_id: sid,
+                    type_id: 587,
+                    owner_id: pid,
+                    location_id: sys_id as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+        // Give pilot_a filaments of various types:
+        // 95_200_000..=004 -> 990_061..=990_065 (heuristics)
+        // 95_200_005 -> ban_fid
+        // 95_200_006 -> lim_fid.unwrap_or(ban_fid)
+        // 95_200_007 -> 990_002 (2v2)
+        for (idx, tid) in [990_061, 990_062, 990_063, 990_064, 990_065, ban_fid, lim_fid.unwrap_or(ban_fid), 990_002].iter().enumerate() {
+            let fid = 95_200_000 + idx as i64;
+            snap.items.insert(
+                fid,
+                InventoryItemRecord {
+                    item_id: fid,
+                    type_id: *tid,
+                    owner_id: pilot_a,
+                    location_id: ship_a,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 5,
+                    singleton: false,
+                    ..Default::default()
+                },
+            );
+        }
+        let mut store = load_pvp_store(snap);
+        let now_i = ctx.now_unix() as i64;
+        store.events.push(PvpEventSchedule {
+            event_id: 901,
+            event_name: "ActiveNow".into(),
+            description: String::new(),
+            match_type_id: 990_065,
+            schedule_id: 901,
+            start_unix: now_i - 100,
+            end_unix: now_i + 1000,
+            type_ids: vec![990_065],
+        });
+        store.events.push(PvpEventSchedule {
+            event_id: 902,
+            event_name: "ExpiredEvent".into(),
+            description: String::new(),
+            match_type_id: 990_061,
+            schedule_id: 902,
+            start_unix: now_i - 2000,
+            end_unix: now_i - 1000,
+            type_ids: vec![990_061],
+        });
+        store.seeded_default_events = true;
+        save_pvp_store(snap, &store);
+    });
+
+    let mut sess_a = SessionState {
+        user_id: Some(1),
+        character_id: Some(pilot_a),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_a),
+        ..Default::default()
+    };
+    let kw = HashMap::new();
+
+    // Missing item / type mismatch / inactive event
+    assert_eq!(
+        handle(&ctx, &mut sess_a, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(99_999_999), PyRep::Integer(0)], &kw)
+            .await.unwrap().unwrap_err().code,
+        "ItemNotFound"
+    );
+    assert_eq!(
+        handle(&ctx, &mut sess_a, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(95_200_005), PyRep::Integer(587)], &kw)
+            .await.unwrap().unwrap_err().code,
+        "InvalidFilamentType"
+    );
+    assert_eq!(
+        handle(&ctx, &mut sess_a, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(95_200_000), PyRep::Integer(990_061)], &kw)
+            .await.unwrap().unwrap_err().code,
+        "EventNotActive"
+    );
+
+    // Ship restriction list + name heuristic mismatches (using 990_061..990_064 on a Rifter 587)
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut store = load_pvp_store(snap);
+        store.events.clear();
+        save_pvp_store(snap, &store);
+    });
+    for (idx, tid) in [990_061, 990_062, 990_063, 990_064].iter().enumerate() {
+        let fid = 95_200_000 + idx as i64;
+        assert_eq!(
+            handle(&ctx, &mut sess_a, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(fid), PyRep::Integer(*tid)], &kw)
+                .await.unwrap().unwrap_err().code,
+            "InvalidShipForFilament"
+        );
+    }
+    // Titan ship (group 30) rejected on any filament
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&ship_a).unwrap().type_id = 990_205;
+    });
+    assert_eq!(
+        handle(&ctx, &mut sess_a, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(95_200_004), PyRep::Integer(990_065)], &kw)
+            .await.unwrap().unwrap_err().code,
+        "InvalidShipForFilament"
+    );
+    // Battleship (990_201) allowed by heuristic on Battleship filament? Reverse: rejected on Frigate heuristic (990_065)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&ship_a).unwrap().type_id = 990_201;
+    });
+    assert_eq!(
+        handle(&ctx, &mut sess_a, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(95_200_004), PyRep::Integer(990_065)], &kw)
+            .await.unwrap().unwrap_err().code,
+        "InvalidShipForFilament"
+    );
+    // Restore Rifter 587 and check banned module (if SDE has banned list), limited module cap (if SDE has limited list), unknown implant, high-grade implant
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&ship_a).unwrap().type_id = 587;
+        snap.items.insert(
+            95_300_001,
+            InventoryItemRecord {
+                item_id: 95_300_001,
+                type_id: 990_011,
+                owner_id: pilot_a,
+                location_id: ship_a,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+    if ban_sp.banned_modules_list_id.is_some() {
+        assert_eq!(
+            handle(&ctx, &mut sess_a, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(95_200_005)], &kw)
+                .await.unwrap().unwrap_err().code,
+            "BannedModuleForFilament"
+        );
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&95_300_001);
+    });
+    if let Some(lfid) = lim_fid {
+        let lsp = get_pvp_filament_match_spec(&ctx.sde, lfid);
+        let limit_exceed = lsp.number_of_limited_modules + 1;
+        ctx.db.with_mut_snapshot(|snap| {
+            for i in 0..limit_exceed {
+                snap.items.insert(
+                    95_300_010 + i as i64,
+                    InventoryItemRecord {
+                        item_id: 95_300_010 + i as i64,
+                        type_id: 990_013,
+                        owner_id: pilot_a,
+                        location_id: ship_a,
+                        flag: InventoryFlag::MedSlot0,
+                        quantity: 1,
+                        singleton: true,
+                        ..Default::default()
+                    },
+                );
+            }
+        });
+        assert_eq!(
+            handle(&ctx, &mut sess_a, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(95_200_006)], &kw)
+                .await.unwrap().unwrap_err().code,
+            "InvalidModuleTierForFilament"
+        );
+        ctx.db.with_mut_snapshot(|snap| {
+            for i in 0..limit_exceed {
+                snap.items.remove(&(95_300_010 + i as i64));
+            }
+        });
+    }
+    // Check unknown implant + high-grade implant (> max_meta 5)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            95_300_020,
+            InventoryItemRecord {
+                item_id: 95_300_020,
+                type_id: 999_888, // unknown implant
+                owner_id: pilot_a,
+                location_id: pilot_a,
+                flag: InventoryFlag::Implant,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+    assert_eq!(
+        handle(&ctx, &mut sess_a, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(95_200_004)], &kw)
+            .await.unwrap().unwrap_err().code,
+        "InvalidImplantsForFilament"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&95_300_020);
+        snap.active_implants.insert(pilot_a, vec![990_012]); // meta 6 > 5
+    });
+    assert_eq!(
+        handle(&ctx, &mut sess_a, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(95_200_004)], &kw)
+            .await.unwrap().unwrap_err().code,
+        "InvalidImplantsForFilament"
+    );
+
+    // Fleet checks: NotFleetBoss, FleetMemberOutOfRange, FleetTooLargeForFilament, FleetTooSmallForFilament, AlreadyInPvpQueue, AlreadyInPvpMatch
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_implants.remove(&pilot_a);
+        snap.fleets.insert(
+            555,
+            FleetRecord {
+                fleet_id: 555,
+                boss_id: pilot_b,
+                members: vec![pilot_a, pilot_b],
+                ..Default::default()
+            },
+        );
+    });
+    assert_eq!(
+        handle(&ctx, &mut sess_a, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(95_200_007), PyRep::Integer(990_002)], &kw)
+            .await.unwrap().unwrap_err().code,
+        "NotFleetBoss"
+    );
+    // Make pilot_a boss, but ship_b is 100 km away (> 30 km) -> FleetMemberOutOfRange
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.get_mut(&555).unwrap().boss_id = pilot_a;
+    });
+    assert_eq!(
+        handle(&ctx, &mut sess_a, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(95_200_007), PyRep::Integer(990_002)], &kw)
+            .await.unwrap().unwrap_err().code,
+        "FleetMemberOutOfRange"
+    );
+    // FleetTooLargeForFilament (2 pilots with 1v1 filament)
+    let _ = sys_h.remove_ball(ship_b).await;
+    sys_h.spawn_ball(Ball {
+        id: ship_b,
+        type_id: 587,
+        position: DVec3::new(5e7 + 1_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 1.0,
+        mass: 1e6,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    }).await.unwrap();
+    assert_eq!(
+        handle(&ctx, &mut sess_a, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(95_200_004), PyRep::Integer(990_065)], &kw)
+            .await.unwrap().unwrap_err().code,
+        "FleetTooLargeForFilament"
+    );
+    // FleetTooSmallForFilament (solo pilot with 2v2 filament)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.remove(&555);
+    });
+    assert_eq!(
+        handle(&ctx, &mut sess_a, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(95_200_007), PyRep::Integer(990_002)], &kw)
+            .await.unwrap().unwrap_err().code,
+        "FleetTooSmallForFilament"
+    );
+    // AlreadyInPvpQueue & AlreadyInPvpMatch
+    let _ = handle(&ctx, &mut sess_a, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(95_200_004), PyRep::Integer(990_065)], &kw)
+        .await.unwrap().unwrap();
+    assert_eq!(
+        handle(&ctx, &mut sess_a, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(95_200_004), PyRep::Integer(990_065)], &kw)
+            .await.unwrap().unwrap_err().code,
+        "AlreadyInPvpQueue"
+    );
+    let _ = handle(&ctx, &mut sess_a, "pvpFilamentMgr", "LeavePVPQueue", &[], &kw).await;
+    sess_a.solar_system_id = Some(32_000_001);
+    let arena_h = ctx.systems.get_or_spawn(32_000_001);
+    arena_h.spawn_ball(Ball {
+        id: ship_a,
+        type_id: 587,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 1.0,
+        mass: 1e6,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    }).await.unwrap();
+    assert_eq!(
+        handle(&ctx, &mut sess_a, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(95_200_004), PyRep::Integer(990_065)], &kw)
+            .await.unwrap().unwrap_err().code,
+        "AlreadyInPvpMatch"
+    );
+}
+
+#[tokio::test]
+async fn mutants_cov_pvp_store_and_join_queue_char_item_guards() {
+    let ctx = make_pvp_ctx();
+    let pilot_id = 95_400_001_i64;
+    let ship_id = 95_400_101_i64;
+    let fil_id = 95_400_201_i64;
+    let sys_id = 30_000_142_u32;
+
+    // 1. save_pvp_store & load_pvp_store round-trip non-default state
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut store = PvpFilamentStore {
+            seeded_default_events: true,
+            ..Default::default()
+        };
+        store.events.push(PvpEventSchedule {
+            event_id: 999,
+            event_name: "RoundTripEvent".into(),
+            description: String::new(),
+            match_type_id: 990_004,
+            schedule_id: 999,
+            start_unix: 100,
+            end_unix: i64::MAX / 2,
+            type_ids: vec![990_004],
+        });
+        save_pvp_store(snap, &store);
+        assert!(snap.pvp_filament_state.seeded_default_events);
+        assert_eq!(snap.pvp_filament_state.events.len(), 1);
+    });
+    let loaded = ctx.db.with_snapshot(|snap| load_pvp_store(snap));
+    assert!(loaded.seeded_default_events);
+    assert_eq!(loaded.events.len(), 1);
+    assert_eq!(loaded.events[0].event_id, 999);
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    sys_h
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::new(5e7, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1e6,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut store = load_pvp_store(snap);
+        store.events.clear();
+        store.seeded_default_events = true;
+        save_pvp_store(snap, &store);
+
+        let mut ch = snap.characters.values().next().cloned().unwrap();
+        ch.character_id = pilot_id;
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(pilot_id, ch);
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: pilot_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            fil_id,
+            InventoryItemRecord {
+                item_id: fil_id,
+                type_id: 990_004,
+                owner_id: pilot_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut sess = SessionState {
+        user_id: Some(1),
+        character_id: Some(pilot_id),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let kw = HashMap::new();
+
+    // 2. Non-pvpFilamentMgr returns None
+    let other_svc = ["other", "Svc"].concat();
+    assert!(handle(&ctx, &mut sess, &other_svc, "JoinPVPQueue", &[], &kw).await.is_none());
+
+    // 3. Character snapshot guards (station_id, structure_id, solar_system_id, active_ship_id) -> MustBeInSpace
+    for (st_id, str_id, ch_sys, ch_ship) in [
+        (Some(60_003_760), None, sys_id, ship_id),
+        (None, Some(10_000_000_001), sys_id, ship_id),
+        (None, None, sys_id + 1, ship_id),
+        (None, None, sys_id, ship_id + 1),
+    ] {
+        ctx.db.with_mut_snapshot(|snap| {
+            let ch = snap.characters.get_mut(&pilot_id).unwrap();
+            ch.station_id = st_id;
+            ch.structure_id = str_id;
+            ch.solar_system_id = ch_sys;
+            ch.active_ship_id = ch_ship;
+        });
+        assert_eq!(
+            handle(
+                &ctx,
+                &mut sess,
+                "pvpFilamentMgr",
+                "JoinPVPQueue",
+                &[PyRep::Integer(fil_id), PyRep::Integer(990_004)],
+                &kw,
+            )
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "MustBeInSpace"
+        );
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&pilot_id).unwrap();
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.solar_system_id = sys_id;
+        ch.active_ship_id = ship_id;
+    });
+
+    // 4. Item guards (owner_id, location_id, flag, quantity < 1) -> exact per-guard codes
+    for (owner, loc, flag, qty, expected_code) in [
+        (pilot_id + 1, ship_id, InventoryFlag::Cargo, 1, "ItemNotOwned"),
+        (pilot_id, ship_id + 1, InventoryFlag::Cargo, 1, "ItemNotInCargo"),
+        (pilot_id, ship_id, InventoryFlag::Hangar, 1, "ItemNotInCargo"),
+        (pilot_id, ship_id, InventoryFlag::Cargo, 0, "ItemNotFound"),
+    ] {
+        ctx.db.with_mut_snapshot(|snap| {
+            let it = snap.items.get_mut(&fil_id).unwrap();
+            it.owner_id = owner;
+            it.location_id = loc;
+            it.flag = flag;
+            it.quantity = qty;
+        });
+        assert_eq!(
+            handle(
+                &ctx,
+                &mut sess,
+                "pvpFilamentMgr",
+                "JoinPVPQueue",
+                &[PyRep::Integer(fil_id), PyRep::Integer(990_004)],
+                &kw,
+            )
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+            expected_code
+        );
+    }
+
+    // 5. Restore valid item with quantity == 1 -> succeeds with non-default PyRep
+    ctx.db.with_mut_snapshot(|snap| {
+        let it = snap.items.get_mut(&fil_id).unwrap();
+        it.owner_id = pilot_id;
+        it.location_id = ship_id;
+        it.flag = InventoryFlag::Cargo;
+        it.quantity = 1;
+    });
+    let ok_rep = handle(
+        &ctx,
+        &mut sess,
+        "pvpFilamentMgr",
+        "JoinPVPQueue",
+        &[PyRep::Integer(fil_id), PyRep::Integer(990_004)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("valid JoinPVPQueue with qty=1");
+    assert_eq!(ok_rep, PyRep::Integer(30));
 }

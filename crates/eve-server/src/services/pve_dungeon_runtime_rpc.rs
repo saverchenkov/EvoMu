@@ -9,8 +9,8 @@ use crate::services::pve_dungeon_runtime::{
     apply_dungeon_trigger_actions, dist3, has_dungeon_runtime_store,
     materialize_dungeon_room_entities, unix_to_filetime_ticks, with_dungeon_runtime_store,
     DungeonNpcGroup, DungeonRuntimeInstance, DungeonRuntimeObject, DungeonRuntimeRoom,
-    DungeonTrigger, DungeonTriggerAction, DungeonTriggerKind, DEFAULT_CONTAINER_TYPE_ID,
-    GATE_ACTIVATION_RANGE_M,
+    DungeonTrigger, DungeonTriggerAction, DungeonTriggerKind, MaterializedDungeonRoomEntities,
+    DEFAULT_CONTAINER_TYPE_ID, GATE_ACTIVATION_RANGE_M,
 };
 use eve_destiny::MovementMode;
 use eve_machonet::SessionState;
@@ -153,11 +153,14 @@ pub async fn try_activate_dungeon_runtime_gate(
     }
 
     // Materialize target room entities
-    let (obj_ids, npc_ids, next_gate_id) =
-        match materialize_dungeon_room_entities(ctx, sys_id, instance_id, target_room_idx).await {
-            Ok(v) => v,
-            Err(e) => return Some(Err(e)),
-        };
+    let MaterializedDungeonRoomEntities {
+        object_ids: obj_ids,
+        npc_ids,
+        next_gate_id,
+    } = match materialize_dungeon_room_entities(ctx, sys_id, instance_id, target_room_idx).await {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
 
     // Update current_room_index and get landing destination
     let room_info = with_dungeon_runtime_store(ctx, |store| {

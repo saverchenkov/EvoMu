@@ -68,8 +68,13 @@ pub struct SkinrStaticCatalog {
     pub item_type_to_component: HashMap<u32, (u32, i32)>,
     /// Maps `(category, rarity) -> point_value` from `ship_skin_design_component_point_values.fsdbinary`.
     pub point_values: HashMap<(u32, u32), u32>,
-    /// Maps `tier_level (1..=19) -> min_points` (representative hull threshold table from SDE).
+    /// Maps `tier_level (1..=19) -> max_points` (representative hull threshold table from SDE).
     pub tier_thresholds: BTreeMap<u32, u32>,
+    /// Maps `isis_group_id -> (tier_level 1..=19 -> max_points)` across all 49 hull classes in
+    /// `ship_skin_design_tier_thresholds.fsdbinary`.
+    pub tier_thresholds_by_isis_group: BTreeMap<u32, BTreeMap<u32, u32>>,
+    /// Maps `ship_type_id -> isis_group_id` from `sde_types.isis_group_id`.
+    pub ship_isis_groups: HashMap<u32, u32>,
     /// Maps `slot_id (1..=8) -> allowed_design_component_categories` from `ship_cosmetic_slots.fsdbinary`.
     pub slot_allowed_categories: BTreeMap<u32, Vec<u32>>,
     /// Default allowed slot IDs (`1..=8`) from `ship_cosmetic_slot_configurations.fsdbinary`.
@@ -80,7 +85,10 @@ pub struct SkinrStaticCatalog {
 
 impl SkinrStaticCatalog {
     pub fn load(sde: &SdeRegistry) -> Self {
-        let mut cat = Self::default();
+        let mut cat = Self {
+            ship_isis_groups: sde.type_isis_groups.clone(),
+            ..Self::default()
+        };
 
         if let Ok(raw_comps) = sde.load_cfsd_nested("res:/staticdata/ship_skin_design_components.fsdbinary") {
             for (k, v) in raw_comps {
@@ -143,30 +151,40 @@ impl SkinrStaticCatalog {
             for (c, r, p) in [
                 (1, 1, 25), (1, 2, 50), (1, 3, 100), (1, 4, 200), (1, 5, 400), (1, 6, 600),
                 (2, 1, 75), (2, 2, 150), (2, 3, 250), (2, 4, 350), (2, 5, 500), (2, 6, 750),
-                (3, 1, 25), (3, 2, 50), (3, 3, 100), (3, 4, 200), (3, 5, 400), (3, 6, 600),
+                (3, 1, 100), (3, 2, 200), (3, 3, 300), (3, 4, 400), (3, 5, 600), (3, 6, 900),
             ] {
                 cat.point_values.insert((c, r), p);
             }
         }
 
         if let Ok(raw_tiers) = sde.load_cfsd_nested("res:/staticdata/ship_skin_design_tier_thresholds.fsdbinary") {
-            if let Some(first_table) = raw_tiers.values().next().and_then(Value::as_object) {
-                for (tier_str, thresh_val) in first_table {
+            for (ig_str, tbl_val) in raw_tiers {
+                let Ok(isis_group_id) = ig_str.parse::<u32>() else { continue };
+                let Some(obj) = tbl_val.as_object() else { continue };
+                let mut tbl = BTreeMap::new();
+                for (tier_str, thresh_val) in obj {
                     if let (Ok(tier), Some(thresh)) = (tier_str.parse::<u32>(), thresh_val.as_u64()) {
-                        cat.tier_thresholds.insert(tier, thresh as u32);
+                        tbl.insert(tier, thresh as u32);
                     }
+                }
+                if !tbl.is_empty() {
+                    cat.tier_thresholds_by_isis_group.insert(isis_group_id, tbl);
                 }
             }
         }
-        if cat.tier_thresholds.is_empty() {
-            for (t, pts) in [
-                (1, 0), (2, 350), (3, 700), (4, 1050), (5, 1400),
-                (6, 0), (7, 350), (8, 700), (9, 1050), (10, 1400),
-                (11, 0), (12, 350), (13, 700), (14, 1050), (15, 1400),
-                (16, 0), (17, 500), (18, 1000), (19, 1500),
-            ] {
-                cat.tier_thresholds.insert(t, pts);
-            }
+        if cat.tier_thresholds_by_isis_group.is_empty() {
+            let default_tbl: BTreeMap<u32, u32> = [
+                (1, 125), (2, 250), (3, 400), (4, 625), (5, 850),
+                (6, 1100), (7, 1375), (8, 1650), (9, 1950), (10, 2250),
+                (11, 2575), (12, 2900), (13, 3225), (14, 3550), (15, 3900),
+                (16, 4250), (17, 4600), (18, 4950), (19, 5300),
+            ]
+            .into_iter()
+            .collect();
+            cat.tier_thresholds_by_isis_group.insert(8, default_tbl);
+        }
+        if let Some(default_tbl) = cat.tier_thresholds_by_isis_group.get(&8).cloned() {
+            cat.tier_thresholds = default_tbl;
         }
 
         if let Ok(raw_slots) = sde.load_cfsd_table("res:/staticdata/ship_cosmetic_slots.fsdbinary") {
@@ -223,8 +241,23 @@ impl SkinrStaticCatalog {
             .unwrap_or(&self.default_ship_slots)
     }
 
-    /// Computes total design points and resolves the tier level (1..=5 within standard hull group).
-    pub fn compute_points_and_tier(&self, fitted_components: &[u32]) -> (u32, u32) {
+    /// Resolves the `1..=19` upper-bound point threshold map for `ship_type_id` via its
+    /// `sde_types.isis_group_id` (falling back to frigate group `8` when absent).
+    pub fn thresholds_for_ship(&self, ship_type_id: u32) -> &BTreeMap<u32, u32> {
+        let isis_group_id = self.ship_isis_groups.get(&ship_type_id).copied().unwrap_or(8);
+        self.tier_thresholds_by_isis_group
+            .get(&isis_group_id)
+            .unwrap_or(&self.tier_thresholds)
+    }
+
+    /// Computes total design points and resolves the tier level (`1..=20`) for `ship_type_id`
+    /// using the hull's `isisGroupID` threshold table (`points <= threshold[tier]` for `1..=19`,
+    /// or `20` when exceeding tier 19).
+    pub fn compute_points_and_tier_for_ship(
+        &self,
+        ship_type_id: u32,
+        fitted_components: &[u32],
+    ) -> (u32, u32) {
         let mut points = 0u32;
         for &cid in fitted_components {
             if let Some(comp) = self.components.get(&cid) {
@@ -236,14 +269,19 @@ impl SkinrStaticCatalog {
                 points = points.saturating_add(pt);
             }
         }
-        let mut tier = 1u32;
-        for t in 1..=5u32 {
-            let min_pts = self.tier_thresholds.get(&t).copied().unwrap_or((t - 1) * 350);
-            if points >= min_pts {
-                tier = t;
+        let thresholds = self.thresholds_for_ship(ship_type_id);
+        for (&tier, &max_pts) in thresholds {
+            if points <= max_pts {
+                return (points, tier);
             }
         }
-        (points, tier)
+        let max_tier = thresholds.keys().next_back().copied().unwrap_or(19);
+        (points, (max_tier + 1).min(20))
+    }
+
+    /// Computes total design points and resolves the tier level (`1..=20`) for a standard frigate hull (`587`).
+    pub fn compute_points_and_tier(&self, fitted_components: &[u32]) -> (u32, u32) {
+        self.compute_points_and_tier_for_ship(587, fitted_components)
     }
 }
 

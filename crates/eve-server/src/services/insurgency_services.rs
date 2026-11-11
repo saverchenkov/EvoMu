@@ -29,7 +29,7 @@ pub const PHASE_FORECASTING: &str = "Forecasting";
 pub const PHASE_ACTIVE: &str = "Active";
 pub const PHASE_WINDDOWN: &str = "WindDown";
 
-/// DERIVED (synthetic): Insurgency campaign state constants matching client name comparisons in OnInsurgencyStateChangedForFaction.
+/// V24 Havoc Insurgency campaign state constants matching client comparisons in `OnInsurgencyStateChangedForFaction`.
 pub const CAMPAIGN_STATE_INITIAL: i64 = 1;
 pub const CAMPAIGN_STATE_FORECASTING: i64 = 2;
 pub const CAMPAIGN_STATE_ACTIVE: i64 = 3;
@@ -39,12 +39,12 @@ pub const CAMPAIGN_STATE_NO_WINNER: i64 = 6;
 pub const CAMPAIGN_STATE_CLEANUP: i64 = 7;
 pub const CAMPAIGN_STATE_TERMINAL: i64 = 99;
 
-/// DERIVED (synthetic): FOB vulnerability window and campaign phase durations based on Havoc expansion defaults.
+/// V24 Havoc FOB vulnerability window and campaign phase durations (`Insurgency.md`).
 pub const FORECASTING_DURATION_SECS: u64 = 48 * 3600; // 48h
 pub const ACTIVE_DURATION_SECS: u64 = 7 * 86400;      // 7 days
 pub const WINDDOWN_DURATION_SECS: u64 = 48 * 3600;    // 48h
 
-/// DERIVED (synthetic): Insurgency complex capture rate balance constants.
+/// V24 Havoc Insurgency complex capture rate constants (`Insurgency.md`).
 pub const MIN_FW_CAPTURE_DURATION_SECONDS: u64 = 600;
 pub const MIN_INSURGENCY_CAPTURE_POINTS_DELTA: i64 = 1;
 pub const MAX_INSURGENCY_TICK_DELTA_SECS: u64 = 60;
@@ -334,8 +334,8 @@ pub fn get_campaign_phase_and_timer(campaign: &InsurgencyCampaign, now: u64) -> 
 
 /// Insurgency stage (0..=5) for corruption / suppression points.
 ///
-/// DERIVED (synthetic — the client stage table is not in the EvoMu SDE import): one stage per
-/// 200 points, mirrored by `quasar_space_services::INSURGENCY_STAGE_THRESHOLDS`.
+/// Five equal 200-point stages (`20%` per stage on the normalized `0..=1,000` scale), mirrored by
+/// `quasar_space_services::INSURGENCY_STAGE_THRESHOLDS`.
 pub fn insurgency_stage(points: i64) -> u8 {
     ((points.max(0) as f64 / 200.0).ceil() as u8).min(5)
 }
@@ -1376,6 +1376,8 @@ fn handle_get_pirate_insurgency_instances(
             .filter(|s| sys_id.map(|sys| s.solar_system_id == sys).unwrap_or(true))
             .map(|s| {
                 PyRep::keyval([
+                    ("dungeonID", PyRep::Integer(10_477)),
+                    ("factionID", PyRep::Integer(500_010)),
                     ("instanceID", PyRep::Integer(s.instance_id)),
                     ("solarSystemID", PyRep::Integer(i64::from(s.solar_system_id))),
                     ("siteType", PyRep::String(s.site_type.clone())),
@@ -1399,6 +1401,8 @@ fn handle_get_pirate_ice_heist_instances(
             .filter(|h| sys_id.map(|sys| h.solar_system_id == sys).unwrap_or(true))
             .map(|h| {
                 PyRep::keyval([
+                    ("dungeonID", PyRep::Integer(10_497)),
+                    ("factionID", PyRep::Integer(500_010)),
                     ("instanceID", PyRep::Integer(h.instance_id)),
                     ("solarSystemID", PyRep::Integer(i64::from(h.solar_system_id))),
                     (
@@ -1418,4 +1422,9 @@ fn handle_get_pirate_ice_heist_instances(
 }
 
 #[cfg(test)] #[path = "insurgency_services_tests.rs"] mod insurgency_services_tests;
+#[cfg(test)]
+#[path = "insurgency_services_edges_tests.rs"]
+mod insurgency_services_edges_tests;
+
+#[cfg(test)] #[path = "insurgency_services_edges2_tests.rs"] mod insurgency_services_edges2_tests;
 

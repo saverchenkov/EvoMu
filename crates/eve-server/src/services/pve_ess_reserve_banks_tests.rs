@@ -413,3 +413,365 @@ fn rnd_research_validation_and_storyline_sixteenth_mission_offer() {
         assert!(!is_interbus_or_militia_corp(&sde, 1_000_035));
     });
 }
+
+#[test]
+fn wave4_storyline_qualifying_agent_types_and_datacore_bounds() {
+    for qualifying in [2_u32, 4, 10, 11] {
+        assert!(
+            is_storyline_qualifying_agent_type(qualifying),
+            "agent type {qualifying} must qualify for storyline tally"
+        );
+    }
+    for non_qualifying in [0_u32, 1, 3, 5, 6, 7, 8, 9, 12, 99] {
+        assert!(
+            !is_storyline_qualifying_agent_type(non_qualifying),
+            "agent type {non_qualifying} must not qualify for storyline tally"
+        );
+    }
+
+    assert_eq!(max_affordable_datacores(-50.0), 0);
+    assert_eq!(max_affordable_datacores(0.0), 0);
+    assert_eq!(max_affordable_datacores(99.999), 0);
+    assert_eq!(max_affordable_datacores(100.0), 1);
+    assert_eq!(max_affordable_datacores(299.999), 2);
+    assert_eq!(max_affordable_datacores(300.0), 3);
+
+    assert_eq!(ess_reserve_pulse_weight(1, 0), 300);
+    assert_eq!(ess_reserve_pulse_weight(1, 1), 300);
+    assert!(ess_reserve_pulse_weight(2, 5) > ess_reserve_pulse_weight(1, 5));
+    assert!(ess_reserve_pulse_weight(5, 5) > 0);
+    assert_eq!(compute_ess_reserve_pulse_payout_cents(0, 1, 1), 0);
+    assert_eq!(compute_ess_reserve_pulse_payout_cents(-100, 1, 1), 0);
+    assert_eq!(compute_ess_reserve_pulse_payout_cents(5_000, 1, 1), 5_000);
+    assert_eq!(compute_ess_reserve_pulse_payout_cents(5_000, 1, 0), 0);
+    assert!(ess_reserve_pulse_weight(5, 15) > ess_reserve_pulse_weight(1, 15));
+    assert!(ess_reserve_pulse_weight(5, 15) > ess_reserve_pulse_weight(15, 15));
+}
+
+#[test]
+fn wave4_agent_mission_completion_tracking_and_datacore_exclusions() {
+    let db = eve_db::WorldRepository::new_empty();
+    let char_id = 90_099_101_i64;
+    db.provision_gm_account("ess_w4_trk", "pw", char_id, "EssTracker");
+    let ag1 = 3_099_101_i64;
+    let ag2 = 3_099_102_i64;
+    let ag_pending = 3_099_103_i64;
+    db.with_mut_snapshot(|snap| {
+        assert!(!has_completed_mission_with_agent(snap, char_id, ag1));
+        record_agent_mission_completed(snap, char_id, ag1);
+        record_agent_mission_completed(snap, char_id, ag1);
+        assert!(has_completed_mission_with_agent(snap, char_id, ag1));
+
+        snap.active_missions.insert(
+            (char_id, 8801),
+            eve_db::ActiveMissionRecord {
+                character_id: char_id,
+                mission_id: 8801,
+                agent_id: ag2,
+                state: "Completed".into(),
+                solar_system_id: 30_000_142,
+                current_room_id: 0,
+                npcs_remaining: 0,
+                spawned_npc_ball_ids: vec![],
+                bookmark_id: None,
+            },
+        );
+        snap.active_missions.insert(
+            (char_id, 8802),
+            eve_db::ActiveMissionRecord {
+                character_id: char_id,
+                mission_id: 8802,
+                agent_id: ag_pending,
+                state: "Accepted".into(),
+                solar_system_id: 30_000_142,
+                current_room_id: 0,
+                npcs_remaining: 0,
+                spawned_npc_ball_ids: vec![],
+                bookmark_id: None,
+            },
+        );
+        assert!(has_completed_mission_with_agent(snap, char_id, ag2));
+        assert!(!has_completed_mission_with_agent(snap, char_id, ag_pending));
+    });
+
+    let mut sde = eve_sde::SdeRegistry::with_canonical_seed();
+    assert!(resolve_datacore_for_research_skill(&sde, SKILL_SCIENCE).is_none());
+    assert!(resolve_datacore_for_research_skill(&sde, SKILL_RESEARCH_PROJECT_MANAGEMENT).is_none());
+    assert!(resolve_datacore_for_research_skill(&sde, 34).is_none());
+
+    if let Some(mut base) = sde.types.values().next().cloned() {
+        let mut sk = base.clone();
+        sk.type_id = 99_340;
+        sk.group_id = 270;
+        sk.published = true;
+        sde.types.insert(99_340, sk);
+
+        base.type_id = 99_333;
+        base.group_id = 333;
+        base.published = false;
+        base.default_attributes.insert(182, 99_340.0);
+        sde.types.insert(99_333, base.clone());
+        assert_eq!(resolve_datacore_for_research_skill(&sde, 99_340), None);
+
+        let mut published_dc = base.clone();
+        published_dc.type_id = 99_334;
+        published_dc.published = true;
+        sde.types.insert(99_334, published_dc);
+        assert_eq!(resolve_datacore_for_research_skill(&sde, 99_340), Some(99_334));
+
+        // ESS gate hull eligibility against every allowed and disallowed ship group
+        for (idx, &gid) in ESS_ALLOWED_SHIP_GROUP_IDS.iter().enumerate() {
+            let tid = 98_000 + idx as u32;
+            let mut hull = base.clone();
+            hull.type_id = tid;
+            hull.group_id = gid;
+            sde.types.insert(tid, hull);
+            assert!(
+                is_ess_gate_eligible_hull(&sde, tid),
+                "group {gid} must be allowed through ESS gate"
+            );
+        }
+        for (idx, gid) in [0_u32, 25, 29, 30, 31, 485, 513, 547, 883].into_iter().enumerate() {
+            let tid = 98_500 + idx as u32;
+            let mut hull = base.clone();
+            hull.type_id = tid;
+            hull.group_id = gid;
+            sde.types.insert(tid, hull);
+            assert!(
+                !is_ess_gate_eligible_hull(&sde, tid),
+                "disallowed ship group {gid} must be rejected at ESS gate"
+            );
+        }
+        assert!(!is_ess_gate_eligible_hull(&sde, 99_999_999));
+    }
+
+    if let Some(mut sys) = sde.solar_systems.values().next().cloned() {
+        sys.solar_system_id = 30_999_001;
+        sys.security_status = 0.0;
+        sde.solar_systems.insert(30_999_001, sys.clone());
+        assert!(is_kspace_nullsec(&sde, 30_999_001));
+
+        sys.solar_system_id = 30_999_002;
+        sys.security_status = 0.01;
+        sde.solar_systems.insert(30_999_002, sys.clone());
+        assert!(!is_kspace_nullsec(&sde, 30_999_002));
+
+        sys.solar_system_id = 31_000_001;
+        sys.security_status = -1.0;
+        sde.solar_systems.insert(31_000_001, sys);
+        assert!(!is_kspace_nullsec(&sde, 31_000_001));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wave4_ess_boundary_thresholds_tax_exempt_and_autopayout_edges() {
+    use crate::router::ServerContext;
+    use crate::services::space_destiny::{set_ess_reserve_pulses, EssReservePulseState};
+    use eve_db::clock::VirtualServerClock;
+    use eve_db::{CorporationRecord, IskCents, WorldRepository, WorldStateSnapshot};
+    use eve_destiny::{Ball, CombatState, MovementMode};
+    use glam::DVec3;
+    use std::sync::Arc;
+
+    let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
+    let null_sys = sde
+        .solar_systems
+        .values()
+        .find(|s| s.solar_system_id < 31_000_000 && s.security_status <= 0.0)
+        .map(|s| s.solar_system_id)
+        .unwrap();
+    let char_id = 90_099_201_i64;
+    let ship_id = 1_099_000_201_i64;
+    let player_corp_id = 98_099_201_i64;
+    let cruiser_tid = 626_u32; // Thorax (group 26 Cruiser)
+    let now_unix = 1_785_000_000_u64;
+
+    let db = Arc::new(WorldRepository::new_empty());
+    db.provision_gm_account("ess_w4_b", "pw", char_id, "EssBounds");
+    db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = player_corp_id;
+        corp.name = "EssW4Corp".into();
+        corp.ticker = "EW4".into();
+        corp.ceo_id = char_id;
+        corp.tax_rate = 0.10;
+        snap.corporations.insert(player_corp_id, corp);
+
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = null_sys;
+            ch.active_ship_id = ship_id;
+            ch.corporation_id = 1_000_035; // NPC starter corp initially
+            ch.balance = IskCents(0);
+            ch.security_status = 4.95;
+        }
+    });
+
+    let ctx = ServerContext::with_sde_and_repository(sde.clone(), db.clone());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now_unix)));
+    let sys_handle = ctx.systems.get_or_spawn(null_sys);
+    ensure_ess_intrusion_site_balls(&ctx, null_sys).await;
+    let ess_pos = DVec3::new(50_000_000_000.0, 50_000_000_000.0, 0.0);
+    let gate_pos = DVec3::new(50_000_200_000.0, 50_000_000_000.0, 0.0);
+
+    // 1. Reserve bank unlock exact boundary (unlocked_until_unix == now -> Ok vs now + 1 -> Err; rt_until > now -> Err)
+    let mut tmp_snap = WorldStateSnapshot::default();
+    let mut ps = EssReservePulseState {
+        pulses_total: 15,
+        pulses_remaining: 15,
+        last_pulse_sec: None,
+        reserve_linked_character_id: None,
+        reserve_link_started_tick: None,
+        link_started_unix: None,
+        unlocked_until_unix: now_unix,
+    };
+    set_ess_reserve_pulses(&mut tmp_snap, null_sys, &ps);
+    assert!(ensure_ess_reserve_bank_not_already_unlocked(&tmp_snap, null_sys, now_unix, 0).is_ok());
+    ps.unlocked_until_unix = now_unix + 1;
+    set_ess_reserve_pulses(&mut tmp_snap, null_sys, &ps);
+    assert_eq!(
+        ensure_ess_reserve_bank_not_already_unlocked(&tmp_snap, null_sys, now_unix, 0)
+            .unwrap_err()
+            .code,
+        "EssReserveBankAlreadyUnlocked"
+    );
+    ps.unlocked_until_unix = 0;
+    set_ess_reserve_pulses(&mut tmp_snap, null_sys, &ps);
+    assert!(ensure_ess_reserve_bank_not_already_unlocked(&tmp_snap, null_sys, now_unix, now_unix).is_ok());
+    assert_eq!(
+        ensure_ess_reserve_bank_not_already_unlocked(&tmp_snap, null_sys, now_unix, now_unix + 1)
+            .unwrap_err()
+            .code,
+        "EssReserveBankAlreadyUnlocked"
+    );
+
+    // 2. Spawn cloaked cruiser right inside 75km / 500km / 2500m gate boundaries
+    let mut cs = CombatState::default();
+    cs.is_cloaked = true;
+    let _ = sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: cruiser_tid,
+                position: ess_pos + DVec3::new(74_999.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 10_000_000.0,
+                radius: 0.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            cs,
+        )
+        .await;
+
+    // Inside < 75_000m: mwd/warp/other blocked; at 75_000.1m, mwd/warp allowed
+    assert_eq!(check_ess_intrusion_bubble_restriction(&ctx, null_sys, ship_id, "warp").await.unwrap_err().code, "EssIntrusionBubbleWarpBlocked");
+    assert_eq!(check_ess_intrusion_bubble_restriction(&ctx, null_sys, ship_id, "mwd").await.unwrap_err().code, "EssIntrusionBubbleMwdBlocked");
+    assert_eq!(
+        check_ess_intrusion_bubble_restriction(&ctx, null_sys, ship_id, "custom_unknown")
+            .await
+            .unwrap_err()
+            .code,
+        "EssIntrusionBubbleRestricted"
+    );
+    let _ = sys_handle.set_ball_position(ship_id, ess_pos + DVec3::new(75_000.1, 0.0, 0.0)).await;
+    assert!(check_ess_intrusion_bubble_restriction(&ctx, null_sys, ship_id, "warp").await.is_ok());
+    assert!(check_ess_intrusion_bubble_restriction(&ctx, null_sys, ship_id, "mwd").await.is_ok());
+
+    // Cloak boundary: inside < 500_000.0 blocked, > 500_000.0 allowed
+    let _ = sys_handle.set_ball_position(ship_id, ess_pos + DVec3::new(499_999.0, 0.0, 0.0)).await;
+    assert!(check_ess_intrusion_bubble_restriction(&ctx, null_sys, ship_id, "cloak").await.is_err());
+    let _ = sys_handle.set_ball_position(ship_id, ess_pos + DVec3::new(500_000.1, 0.0, 0.0)).await;
+    assert!(check_ess_intrusion_bubble_restriction(&ctx, null_sys, ship_id, "cloak").await.is_ok());
+
+    // Module check: group_id == 46 with attr 554 (MWD sig radius bonus) blocked, vs group_id == 46 without attr 554 (Afterburner) allowed!
+    let _ = sys_handle.set_ball_position(ship_id, ess_pos + DVec3::new(10_000.0, 0.0, 0.0)).await;
+    let mut mwd_by_attr = sde.types.values().next().cloned().unwrap();
+    mwd_by_attr.group_id = 46;
+    mwd_by_attr.default_attributes.clear();
+    mwd_by_attr.default_attributes.insert(554, 500.0);
+    assert_eq!(
+        check_ess_module_activation_allowed(&ctx, null_sys, ship_id, &mwd_by_attr, "")
+            .await
+            .unwrap_err()
+            .code,
+        "EssIntrusionBubbleMwdBlocked"
+    );
+    mwd_by_attr.default_attributes.clear();
+    assert!(check_ess_module_activation_allowed(&ctx, null_sys, ship_id, &mwd_by_attr, "").await.is_ok());
+
+    // 3. ESS gate exact 2_500.0m boundary + force uncloak on eligible hull activation
+    let gate_id = ESS_GATE_ID_BASE + i64::from(null_sys);
+    let _ = sys_handle.set_ball_position(ship_id, gate_pos + DVec3::new(2_500.1, 0.0, 0.0)).await;
+    assert_eq!(
+        try_activate_ess_acceleration_gate(&ctx, char_id, null_sys, ship_id, gate_id)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "OutsideGateActivationRange"
+    );
+    let _ = sys_handle.set_ball_position(ship_id, gate_pos + DVec3::new(2_500.0, 0.0, 0.0)).await;
+    let res = try_activate_ess_acceleration_gate(&ctx, char_id, null_sys, ship_id, gate_id)
+        .await
+        .unwrap();
+    assert!(res.is_ok(), "cruiser at exact 2500.0m should activate ESS gate");
+    assert!(!sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().is_cloaked);
+
+    // 4. Nullsec NPC < 100k zero-tax exemption vs player corp division tax & sec_status 5.0 cap
+    ctx.db.with_mut_snapshot(|snap| {
+        credit_ballpark_npc_bounty_with_ess_split(
+            &sde,
+            snap,
+            null_sys,
+            char_id,
+            50_000.0,
+            50_000.0,
+            1.0,
+            23_753,
+            now_unix,
+        );
+        assert!(snap.characters[&char_id].balance.0 > 0);
+        assert!(!snap
+            .wallet_journal
+            .iter()
+            .any(|j| j.entry_type == "bounty_prize_corporation_tax"));
+        assert!(snap.characters[&char_id].security_status <= 5.0);
+
+        // Switch to player corp with 10% tax rate -> credit_division(1, tax_cents) + tax journal
+        snap.characters.get_mut(&char_id).unwrap().corporation_id = player_corp_id;
+        credit_ballpark_npc_bounty_with_ess_split(
+            &sde,
+            snap,
+            null_sys,
+            char_id,
+            1_000_000.0,
+            1_000_000.0,
+            1.0,
+            23_753,
+            now_unix,
+        );
+        assert!(snap.corporations[&player_corp_id].master_wallet_balance().0 > 0);
+        assert!(snap
+            .wallet_journal
+            .iter()
+            .any(|j| j.entry_type == "bounty_prize_corporation_tax"));
+
+        // Autopayout exact time boundary (ESS_MAIN_BANK_AUTOPAYOUT_SECS - 1 skipped, == SECS paid)
+        let st = snap.system_states.entry(null_sys).or_default();
+        st.ess_main_bank = IskCents(1_000);
+        st.ess_main_bank_contributors.clear();
+        record_ess_main_bank_contribution(st, char_id, 1_000, now_unix);
+        st.ess_cycle_started_unix = now_unix;
+        st.ess_linked_character_id = None;
+    });
+    assert_eq!(
+        tick_ess_main_bank_autopayout(&ctx, now_unix + ESS_MAIN_BANK_AUTOPAYOUT_SECS - 1),
+        0
+    );
+    assert_eq!(
+        tick_ess_main_bank_autopayout(&ctx, now_unix + ESS_MAIN_BANK_AUTOPAYOUT_SECS),
+        1
+    );
+}

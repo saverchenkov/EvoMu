@@ -94,10 +94,19 @@ fn shipcaster_eligibility_branches_starter_system_locks_cooldown_and_ship_in_spa
 
     // 4. Seed starter_launchers in cluster_misc_state and put character's active ship in space in hisec
     db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(
-            "cluster_misc_state".into(),
-            r#"{"starter_launchers":[1001]}"#.into(),
-        );
+        snap.cluster_and_runtime
+            .cluster_misc_state
+            .get_or_insert_with(Default::default)
+            .starter_launchers
+            .push(eve_db::PersistedStarterLauncherRecord {
+                item_id: 1001,
+                type_id: 77_000,
+                solar_system_id: hisec_sys,
+                faction_id: 500_001,
+                staging_system_id: hisec_sys,
+                staging_station_id: 0,
+                position: [0.0; 3],
+            });
         if let Some(ch) = snap.characters.get_mut(&cid) {
             ch.solar_system_id = hisec_sys;
             ch.active_ship_id = ship_id;
@@ -174,7 +183,7 @@ fn shipcaster_eligibility_branches_starter_system_locks_cooldown_and_ship_in_spa
         Arc::new(sde_mut),
     );
     db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.remove("cluster_misc_state");
+        snap.cluster_and_runtime.cluster_misc_state = None;
         snap.characters.get_mut(&cid).unwrap().jump_cooldown_until_unix = 0;
         snap.structures.insert(
             1_000_000_810,
@@ -436,6 +445,7 @@ fn agents_acls_monolith_and_wire_dynamic_decoding_branches() {
             "quasar_acl_registry".into(),
             serde_json::to_string(&custom_acls).unwrap(),
         );
+        snap.migrate_legacy_service_state();
     });
 
     let mut acl_req = DynamicQuasarMessage::new("Acl");

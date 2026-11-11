@@ -466,3 +466,7 @@ pub(crate) fn parse_skin_license_id(
     let s = String::from_utf8(hb.to_vec()).ok().filter(|s| !s.is_empty())?;
     Some((char_id, s))
 }
+
+#[cfg(test)]
+#[path = "quasar_cosmetics_skinr_wire_edges_tests.rs"]
+mod quasar_cosmetics_skinr_wire_edges_tests;

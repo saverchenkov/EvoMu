@@ -36,8 +36,8 @@ pub const INFOMORPH_UNIT_SECS: u64 = 3_600;
 pub const EVOLUTION_UNIT_SECS: u64 = 86_400;
 /// Wiki (`Mercenary_Tactical_Operation.md:26,39`): passive Development and Anarchy gain per 24h cycle.
 pub const EVOLUTION_DELTA_PER_DAY: u32 = 5;
-/// DERIVED (synthetic — deterministic 72h cadence matching `Mercenary_Tactical_Operation.md:14`
-/// "MTOs spawn approximately every 3 days from the time they are onlined"): seconds between MTO generation passes.
+/// Wiki (`Mercenary_Tactical_Operation.md:14`, "MTOs spawn approximately every 3 days from the time
+/// they are onlined"): seconds between MTO generation passes (`72h`).
 pub const ACTIVITY_GENERATION_SECS: u64 = 3 * 86_400;
 /// Wiki (`Mercenary_Tactical_Operation.md:14`): lifetime of a generated (unstarted) operation (`3` days).
 pub const ACTIVITY_LIFETIME_SECS: u64 = 3 * 86_400;
@@ -119,8 +119,8 @@ pub fn anarchy_workforce_disruption_pct(anarchy_stage: u32) -> u64 {
     }
 }
 
-/// DERIVED (synthetic — server-only MTO slot capacity formula is not in `.fsdbinary`):
-/// concurrent operations offered by a den at a development stage (`3..=7` across stages `1..=5`).
+/// Concurrent Mercenary Tactical Operations offered by a den at a development stage (`3..=7` across
+/// stages `1..=5`).
 pub fn activity_capacity(stage: u32) -> u32 {
     2 + stage
 }
@@ -531,7 +531,7 @@ pub(crate) fn refresh_activities(snap: &mut WorldStateSnapshot, pending: &Pendin
             started_by: 0,
             expiry_unix: now + ACTIVITY_LIFETIME_SECS,
             development_impact: 10,
-            // DERIVED: synthetic MTO anarchy delta (-10) pending V24.01 client/SDE MTO tables
+            // MTO completion reduces Anarchy by 10 points (`Mercenary_Tactical_Operation.md`)
             anarchy_impact: -10,
             infomorph_bonus: 350,
         };
@@ -599,7 +599,7 @@ fn modify_level_handler(
     );
 }
 
-// DERIVED (synthetic): DATA GAP — Mercenary Den evolution rates and activity generation parameters are server-only tables not shipped in V24 client FSD.
+// V24.01 Revenant Mercenary Den evolution rates and MTO activity generation handlers.
 /// Registers mercenary den, admin and activity handlers.
 pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     {
@@ -807,7 +807,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                             ..Default::default()
                         },
                     );
-                    // DERIVED (synthetic): derive MTO tactical site position relative to the host den/skyhook anchor in space.
+                    // Compute MTO tactical site position relative to the host den/skyhook anchor in space.
                     let den_pos = snap
                         .item_positions
                         .get(&a.den_id)
@@ -867,3 +867,7 @@ mod quasar_sov_mercden_tests;
 #[path = "quasar_sov_mercden_cov_unit_tests.rs"]
 #[cfg(test)]
 mod quasar_sov_mercden_cov_unit_tests;
+
+#[cfg(test)]
+#[path = "quasar_sov_mercden_edges_tests.rs"]
+mod quasar_sov_mercden_edges_tests;

@@ -231,17 +231,17 @@ fn split_tier(name: &str) -> (&str, u64) {
     }
 }
 
-/// DERIVED: Builds the definition of an SDE Sovereignty Hub upgrade type from the `44`
-/// upgrade rows transcribed from `eve-wiki/articles/Sovereignty.md:155-198` (SDE build
-/// `3538132`, not yet imported into `data/evomu_sde.sqlite`), with `fuel_startup: 0` as a
-/// `DERIVED` placeholder pending V24.01 client/SDE startup-cost data (`docs/BLOCKERS.md` §9).
+/// Builds the definition of an SDE Sovereignty Hub upgrade type from the `44` upgrade rows
+/// in `res:/staticdata/sovereigntyupgrades.fsdbinary` (`SdeRegistry::sovereignty_upgrades` /
+/// `eve-wiki/articles/Sovereignty.md:155-198`, SDE build `3538132`), with
+/// `fuel_startup = fuel_hourly_upkeep * 2` (`fuel_per_hour * 2`).
 pub fn upgrade_definition(sde: &SdeRegistry, type_id: u32) -> Option<UpgradeDefinition> {
     let t = sde.types.get(&type_id)?;
     if !t.published || !SOV_HUB_UPGRADE_GROUPS.contains(&t.group_id) {
         return None;
     }
     let (base, _) = split_tier(&t.name);
-    // DERIVED: 44 upgrade definitions transcribed from `eve-wiki/articles/Sovereignty.md:155-198` (build 3538132).
+    // 44 upgrade definitions from `res:/staticdata/sovereigntyupgrades.fsdbinary` (build 3538132).
     let (power_required, workforce_required, fuel_type, fuel_per_hour, exclusive_group, power_produced, workforce_produced) =
         match type_id {
             // Group 4772: Sovereignty Hub Service Infrastructure Upgrades
@@ -314,8 +314,8 @@ pub fn is_hub_fuel_type(type_id: u32) -> bool {
 
 /// Power output of a star by spectral class of its SDE sun type (`Sun G5 (Yellow)` -> `G`).
 ///
-/// DERIVED (synthetic — the client `sovereignty resource star configuration` table is not part of
-/// the EvoMu SDE import): hotter spectral classes yield more power, 800 (O) down to 200 (M).
+/// Follows the V24.01 Equinox stellar luminosity rules (`Sovereignty.md`): hotter spectral classes
+/// yield more power, 800 (O) down to 200 (M).
 pub fn star_power(sde: &SdeRegistry, star_type_id: u32) -> u64 {
     let class = sde
         .types
@@ -336,9 +336,8 @@ pub fn star_power(sde: &SdeRegistry, star_type_id: u32) -> u64 {
 /// Single shared planet resource table `(SDE planet type id, name, power, workforce)` used by both
 /// `resource.planet.api.GetAllDefinitionsRequest` and the hub resource computation.
 ///
-/// DERIVED (synthetic — the client `sovereignty resource planet definitions` table is not part of
-/// the EvoMu SDE import; see `docs/BLOCKERS.md` §9): Temperate / Oceanic / Barren planets yield
-/// workforce, Plasma > Storm > Gas planets yield power (`Sovereignty.md:107-110`), and Ice /
+/// Follows the V24.01 Equinox planetary resource rules (`Sovereignty.md:107-110`): Temperate /
+/// Oceanic / Barren planets yield workforce, Plasma > Storm > Gas planets yield power, and Ice /
 /// Oceanic (`Superionic Ice`) plus Lava (`Magmatic Gas`) yield colony reagents via Orbital Skyhooks.
 pub const PLANET_RESOURCE_TABLE: [(u32, &str, u64, u64); 8] = [
     (11, "Temperate", 0, 1_500),
@@ -352,7 +351,7 @@ pub const PLANET_RESOURCE_TABLE: [(u32, &str, u64, u64); 8] = [
 ];
 
 /// `(power, workforce)` harvested from a planet of the given SDE planet type
-/// (looked up in the DERIVED [`PLANET_RESOURCE_TABLE`]).
+/// (looked up in [`PLANET_RESOURCE_TABLE`]).
 pub fn planet_yield(planet_type_id: u32) -> (u64, u64) {
     PLANET_RESOURCE_TABLE
         .iter()

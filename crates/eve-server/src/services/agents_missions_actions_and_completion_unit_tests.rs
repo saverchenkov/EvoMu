@@ -2,21 +2,20 @@
 
 #![forbid(unsafe_code)]
 
-use super::super::*;
 use super::*;
 use crate::services::agents_missions::agents_standings_arcs::{
-    MissionTimingAndCargoMeta, RndResearchEntry, save_mission_meta, save_rnd_research_entries,
+    RndResearchEntry, save_mission_meta, save_rnd_research_entries,
 };
-use crate::services::agents_missions::*;
-use eve_db::{
-    ActiveMissionRecord, BookmarkRecord, InventoryFlag, InventoryItemRecord, WorldRepository,
-};
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_db::{BookmarkRecord, InventoryFlag, InventoryItemRecord};
+use eve_proto::PyRep;
 use std::collections::HashMap;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn journal_expiration_sweep_and_briefing_objective_formatting_branches() {
     let ctx = test_ctx();
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::clock::VirtualServerClock::with_fixed_base(1_800_000_000),
+    ));
     let char_id = 90_000_001_i64;
     let ag = find_standard_agent(&ctx, 1);
     let sys_id = ag.solar_system_id.unwrap();
@@ -128,7 +127,7 @@ async fn journal_expiration_sweep_and_briefing_objective_formatting_branches() {
     assert_eq!(failed_info.dict_get("missionState"), Some(&PyRep::Integer(3)));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn do_action_colocation_fw_cosmos_and_standing_error_branches() {
     let ctx = test_ctx();
     let char_id = 90_000_001_i64;
@@ -224,7 +223,7 @@ async fn do_action_colocation_fw_cosmos_and_standing_error_branches() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mission_completion_expiry_penalty_and_courier_delivery_branches() {
     let ctx = test_ctx();
     let char_id = 90_000_001_i64;
@@ -234,7 +233,22 @@ async fn mission_completion_expiry_penalty_and_courier_delivery_branches() {
     let mut sess = char_session(char_id, Some(sys_id), Some(st_id));
     let kw = HashMap::new();
     let now = ctx.now_unix();
-    let mid = *ctx.sde.missions.keys().next().expect("SDE mission");
+    let mid = ctx
+        .sde
+        .missions
+        .iter()
+        .find(|(_, t)| {
+            t.is_courier
+                && !t.content_template.as_deref().unwrap_or_default().contains("Trade")
+        })
+        .or_else(|| {
+            ctx.sde
+                .missions
+                .iter()
+                .find(|(_, t)| !t.content_template.as_deref().unwrap_or_default().contains("Trade"))
+        })
+        .map(|(&id, _)| id)
+        .unwrap_or_else(|| *ctx.sde.missions.keys().next().expect("SDE mission"));
 
     // 1. Accepting an expired offer returns MissionOfferExpired
     ctx.db.with_mut_snapshot(|snap| {
@@ -266,7 +280,9 @@ async fn mission_completion_expiry_penalty_and_courier_delivery_branches() {
 
     // 2. Completing an expired accepted mission returns MissionExpired and deducts standings
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.get_mut(&(char_id, mid)).unwrap().state = "Accepted".into();
+        let m_mut = snap.active_missions.get_mut(&(char_id, mid)).unwrap();
+        m_mut.state = "Accepted".into();
+        m_mut.npcs_remaining = 0;
         save_mission_meta(
             snap,
             char_id,
@@ -292,9 +308,11 @@ async fn mission_completion_expiry_penalty_and_courier_delivery_branches() {
     });
 
     // 3. Courier mission completion: wrong station -> CourierNotAtDestinationStation, missing cargo -> MissionIncomplete, valid cargo -> Completed
-    let dest_st = *ctx.sde.stations.keys().find(|&&k| k != st_id).unwrap_or(&st_id);
+    let dest_st = *ctx.sde.stations.keys().find(|&&k| k != st_id).unwrap_or(&(st_id + 1));
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.get_mut(&(char_id, mid)).unwrap().state = "Accepted".into();
+        let m_mut = snap.active_missions.get_mut(&(char_id, mid)).unwrap();
+        m_mut.state = "Accepted".into();
+        m_mut.npcs_remaining = 0;
         let mut cmeta = make_meta(mid, ag.agent_id, now + 86_400, Some(now + 86_400));
         cmeta.bonus_expiry_unix = Some(now.saturating_sub(10)); // expired bonus -> bonusReward == 0
         cmeta.required_delivery_type_id = Some(3683);

@@ -459,3 +459,7 @@ fn industry_planets_pi_moons_belts_bloodlines_wallet_and_id_handlers() {
         STATUS_BAD_REQUEST
     );
 }
+
+#[cfg(test)]
+#[path = "quasar_economy_planetary_industry_extra_unit_tests.rs"]
+mod quasar_economy_planetary_industry_extra_unit_tests;

@@ -560,3 +560,7 @@ pub fn handle_operation_slash(
 #[path = "notify_emitters_operations_nodegraph_tests.rs"]
 mod notify_emitters_operations_nodegraph_tests;
 
+#[cfg(test)]
+#[path = "notify_emitters_operations_nodegraph_edges_tests.rs"]
+mod notify_emitters_operations_nodegraph_edges_tests;
+

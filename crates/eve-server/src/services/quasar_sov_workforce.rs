@@ -282,7 +282,16 @@ fn decode_configuration(cfg: &DynamicQuasarMessage) -> Result<PersistedWorkforce
         }
         return Ok(PersistedWorkforceMode::Export { destination, amount: amount as u64 });
     }
-    if matches!(cfg.get(4), Some(DynamicValue::Bool(true))) {
+    if matches!(
+        cfg.get(4),
+        Some(
+            DynamicValue::Bool(true)
+                | DynamicValue::Int64(1)
+                | DynamicValue::Uint64(1)
+                | DynamicValue::Message(_)
+                | DynamicValue::Bytes(_)
+        )
+    ) {
         return Ok(PersistedWorkforceMode::Transit);
     }
     Ok(PersistedWorkforceMode::Inactive)
@@ -574,4 +583,8 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
 #[cfg(test)]
 #[path = "quasar_sov_workforce_tests.rs"]
 mod quasar_sov_workforce_tests;
+
+#[cfg(test)]
+#[path = "quasar_sov_workforce_edges_tests.rs"]
+mod quasar_sov_workforce_edges_tests;
 

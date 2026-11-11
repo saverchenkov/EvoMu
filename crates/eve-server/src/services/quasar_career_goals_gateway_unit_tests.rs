@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 //! Semantic unit tests split from `quasar_career_goals_extra_unit_tests`.
 
 #![forbid(unsafe_code)]

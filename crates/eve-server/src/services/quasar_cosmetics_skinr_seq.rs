@@ -443,32 +443,35 @@ fn induction_time_disc_pct(lvl: u32) -> u32 {
     }
 }
 
-fn skill_discounts_and_cap(state: &SkinrCosmeticsState, cid: Option<u32>) -> (u32, u32, usize) {
-    let Some(c) = cid else { return (0, 0, 5) };
+pub(super) fn skill_discounts_and_cap(state: &SkinrCosmeticsState, cid: Option<u32>) -> (u32, u32, usize) {
+    let Some(c) = cid else { return (0, 0, 1) };
     state.db.with_snapshot(|s| {
-        let Some(sk_map) = s.skills.get(&(c as i64)) else { return (0, 0, 5) };
-        let lvl = |sid: u32| sk_map.get(&sid).map(|sk| sk.level as u32).unwrap_or(0);
+        let Some(sk_map) = s.skills.get(&(c as i64)) else { return (0, 0, 1) };
+        let lvl = |sid: u32| sk_map.get(&sid).map(|sk| sk.level as u32).unwrap_or(0).min(5);
         // SDE group 4734: Basic/Efficiency/Advanced/Peak Induction (81377, 81372, 81373, 81374); no PLEX discount skill.
         let dur_disc = (induction_time_disc_pct(lvl(81377))
             + induction_time_disc_pct(lvl(81372))
             + induction_time_disc_pct(lvl(81373))
             + induction_time_disc_pct(lvl(81374)))
         .min(60);
-        // SDE group 4734: Parallel Sequencing (81366) & Multi-thread Sequencing (81367): +2 concurrent jobs/lvl.
-        let max_jobs = 5 + ((lvl(81366) + lvl(81367)) * 2) as usize;
+        // SDE group 4734: Parallel Sequencing (81366: [0,1,3,5,7,9]) & Multi-thread Sequencing (81367: [0,2,4,6,8,10]).
+        let par_bonus = [0usize, 1, 3, 5, 7, 9][lvl(81366) as usize];
+        let mt_bonus = [0usize, 2, 4, 6, 8, 10][lvl(81367) as usize];
+        let max_jobs = (1 + par_bonus + mt_bonus).min(20);
         (0, dur_disc, max_jobs)
     })
 }
 
-fn max_runs_per_job(state: &SkinrCosmeticsState, cid: u32) -> u32 {
+pub(super) fn max_runs_per_job(state: &SkinrCosmeticsState, cid: u32) -> u32 {
     state.db.with_snapshot(|s| {
-        let Some(sk) = s.skills.get(&(cid as i64)) else { return 100 };
+        let Some(sk) = s.skills.get(&(cid as i64)) else { return 1 };
         let lvl = |sid: u32| sk.get(&sid).map(|r| r.level as usize).unwrap_or(0).min(5);
         // SDE group 4734: Batch (81375), Mass (81364), Industrial Sequencing (81365) -> up to 5,000 SKINs/job.
-        let sde_cap = [0, 5, 10, 20, 30, 50][lvl(81375)]
+        let sde_cap = 1
+            + [0, 4, 9, 19, 29, 49][lvl(81375)]
             + [0, 25, 50, 100, 150, 250][lvl(81364)]
             + [0, 200, 450, 700, 1_700, 4_700][lvl(81365)];
-        sde_cap.max(100)
+        sde_cap.min(5_000)
     })
 }
 
@@ -479,7 +482,7 @@ fn handle_get_tier_pricing(
 ) -> HandlerResult {
     let (discount_pct, _, _) = skill_discounts_and_cap(state, ctx.effective_character_id());
     let mut out = Vec::new();
-    for &tier in state.catalog.tier_thresholds.keys() {
+    for tier in 1..=20u32 {
         let base_plex_cents = tier_base_plex_cents(tier);
         let discounted = base_plex_cents.saturating_mul(100 - discount_pct as u64) / 100;
 
@@ -509,7 +512,7 @@ fn handle_get_tier_durations(
 ) -> HandlerResult {
     let (_, discount_pct, _) = skill_discounts_and_cap(state, ctx.effective_character_id());
     let mut out = Vec::new();
-    for &tier in state.catalog.tier_thresholds.keys() {
+    for tier in 1..=20u32 {
         let base_secs = tier_base_duration_secs(tier);
         let discounted_secs = (base_secs.saturating_mul(100 - discount_pct as u64) / 100).max(600);
 
@@ -807,7 +810,9 @@ fn handle_job_initiate(
     }
 
     let comp_ids: Vec<u32> = required_comps.iter().map(|&(c, _)| c).collect();
-    let (_pts, tier_level) = state.catalog.compute_points_and_tier(&comp_ids);
+    let (_pts, tier_level) = state
+        .catalog
+        .compute_points_and_tier_for_ship(ship_type_id, &comp_ids);
     let base_plex_cents = tier_base_plex_cents(tier_level);
     let unit_plex_cents = (base_plex_cents.saturating_mul(100 - price_disc as u64) / 100).max(100);
     let total_plex_cents = unit_plex_cents.saturating_mul(u64::from(licenses_qty));

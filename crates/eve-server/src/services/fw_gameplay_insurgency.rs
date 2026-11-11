@@ -284,7 +284,7 @@ pub async fn apply_pirate_fob_structure_damage(
         st.last_damage_unix = now;
         let mut rem_dmg = damage.max(0.0);
         let mut dealt = 0.0;
-        // DERIVED (synthetic): scale FOB combat contribution points from fraction of total FOB HP (8,500 HP) dealt relative to 1,000-point stage threshold.
+        // Scale FOB combat contribution points from damage dealt relative to stage threshold.
         let pts_for_dealt = |d: f64| -> i64 { ((d / 8_500.0) * 1_000.0).round().max(1.0) as i64 };
 
         if existing_reinf.is_none() {
@@ -660,7 +660,7 @@ fn system_roamer_waypoints(ctx: &ServerContext, sys_id: u32) -> Vec<DVec3> {
         })
         .collect();
     if wps.len() < 2 {
-        // DERIVED (synthetic): fallback patrol grid waypoints around system origin when SDE celestials < 2.
+        // Fallback patrol grid waypoints around system origin when SDE celestials < 2.
         wps.push(DVec3::new(12_000.0, 0.0, 4_000.0));
         wps.push(DVec3::new(-12_000.0, 0.0, 4_000.0));
         wps.push(DVec3::new(0.0, 0.0, -14_000.0));
@@ -676,8 +676,8 @@ async fn sync_insurgency_system_npcs(
     c_st: u8,
     s_st: u8,
 ) {
-    use crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity;
-    use crate::services::combat_crimewatch::with_mut_combat_ephemeral;
+    use crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_batch_with_start_id;
+    use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_ephemeral};
 
     let desired_pirate: Option<u32> =
         crate::services::insurgency_complex_ops::select_named_or_regular_roamer_type(
@@ -697,8 +697,8 @@ async fn sync_insurgency_system_npcs(
             (s_st >= 3).then(|| select_insurgency_roamer_type(ctx, 4638, None, usize::from(s_st - 3), 2)).flatten()
         });
 
-    let (stale_balls, has_pirate, has_enforcer, has_ci_sentry, idle_roamers) =
-        with_mut_combat_ephemeral(ctx, |rt| {
+    let (stale_balls, has_pirate, has_enforcer, has_ci_sentry, has_deployed_entry, idle_roamers) =
+        with_combat_runtime(ctx, |rt| {
             let mut stale = Vec::new();
             let mut hp = false;
             let mut he = false;
@@ -733,136 +733,135 @@ async fn sync_insurgency_system_npcs(
                     }
                 }
             }
-            for &bid in &stale {
-                rt.npc_entities.remove(&bid);
-            }
-            (stale, hp, he, hs, idle)
+            (stale, hp, he, hs, rt.ci_sentry_deployed_systems.contains(&sys_id), idle)
         });
 
     let need_pirate = desired_pirate.is_some() && !has_pirate;
     let need_enforcer = desired_enforcer.is_some() && !has_enforcer;
-    if stale_balls.is_empty() && idle_roamers.is_empty() && !need_pirate && !need_enforcer && (s_st < 5 || has_ci_sentry) {
-        if s_st < 5 {
-            with_mut_combat_ephemeral(ctx, |rt| {
-                rt.ci_sentry_deployed_systems.remove(&sys_id);
-            });
-        }
+    let should_deploy_ci = s_st >= 5 && !has_ci_sentry && !has_deployed_entry;
+    let need_ci_flag_update = if s_st < 5 {
+        has_deployed_entry
+    } else {
+        !has_deployed_entry
+    };
+
+    if stale_balls.is_empty()
+        && idle_roamers.is_empty()
+        && !need_pirate
+        && !need_enforcer
+        && !should_deploy_ci
+        && !need_ci_flag_update
+    {
         return;
     }
 
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    for bid in stale_balls {
-        let _ = sys_handle.remove_ball(bid).await;
-    }
-
-    let waypoints = system_roamer_waypoints(ctx, sys_id);
-    // DERIVED (synthetic): patrol offsets near celestial/grid anchors so Pirate and Enforcer roamers do not overlap at exact origin.
+    let mut arrived_positions = Vec::new();
     let pirate_offset = DVec3::new(12_000.0, 0.0, 4_000.0);
     let enforcer_offset = DVec3::new(-12_000.0, 0.0, 4_000.0);
+    let mut spawn_specs: Vec<(u32, &'static str, u32, DVec3)> = Vec::new();
 
-    if !idle_roamers.is_empty() {
-        let mut arrived_positions = Vec::new();
-        {
-            let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
-            for (bid, is_pir, cur_anchor) in idle_roamers {
-                let offset = if is_pir { pirate_offset } else { enforcer_offset };
-                let Some((cur_pos, is_warping)) = bp
-                    .balls
-                    .get(&bid)
-                    .map(|b| (b.position, matches!(b.mode, eve_destiny::MovementMode::Warp { .. })))
-                else {
-                    continue;
-                };
-                if is_warping {
-                    continue;
-                }
-                let anchor_pos = if cur_pos.distance(cur_anchor) > 15_000.0 {
-                    arrived_positions.push((bid, cur_pos));
-                    cur_pos
-                } else {
-                    cur_anchor
-                };
-                let cur_idx = waypoints
-                    .iter()
-                    .position(|w| (*w + offset).distance(anchor_pos) < 15_000.0)
-                    .unwrap_or(0);
-                let next_idx = (cur_idx + 1) % waypoints.len();
-                let next_pos = waypoints[next_idx] + offset;
-                if cur_pos.distance(next_pos) >= 150_000.0 {
-                    let _ = bp.set_mode(bid, eve_destiny::MovementMode::new_warp(cur_pos, next_pos, 3.0));
-                } else {
-                    let _ = bp.goto_point(bid, next_pos);
-                }
-            }
-            crate::system_actor::sync_ball_positions(
-                &bp,
-                &sys_handle.ball_positions,
-                &sys_handle.scrambled_balls,
-            );
+    if !stale_balls.is_empty() || !idle_roamers.is_empty() || need_pirate || need_enforcer {
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        for &bid in &stale_balls {
+            let _ = sys_handle.remove_ball(bid).await;
         }
-        if !arrived_positions.is_empty() {
-            with_mut_combat_ephemeral(ctx, |rt| {
-                for (bid, pos) in arrived_positions {
-                    if let Some(npc) = rt.npc_entities.get_mut(&bid) {
-                        npc.spawn_position = pos;
+        if !idle_roamers.is_empty() || need_pirate || need_enforcer {
+            let waypoints = system_roamer_waypoints(ctx, sys_id);
+            if !idle_roamers.is_empty() {
+                let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
+                for (bid, is_pir, cur_anchor) in idle_roamers {
+                    let offset = if is_pir { pirate_offset } else { enforcer_offset };
+                    let Some((cur_pos, is_warping)) = bp
+                        .balls
+                        .get(&bid)
+                        .map(|b| (b.position, matches!(b.mode, eve_destiny::MovementMode::Warp { .. })))
+                    else {
+                        continue;
+                    };
+                    if is_warping {
+                        continue;
+                    }
+                    let anchor_pos = if cur_pos.distance(cur_anchor) > 15_000.0 {
+                        arrived_positions.push((bid, cur_pos));
+                        cur_pos
+                    } else {
+                        cur_anchor
+                    };
+                    let cur_idx = waypoints
+                        .iter()
+                        .position(|w| (*w + offset).distance(anchor_pos) < 15_000.0)
+                        .unwrap_or(0);
+                    let next_idx = (cur_idx + 1) % waypoints.len();
+                    let next_pos = waypoints[next_idx] + offset;
+                    if cur_pos.distance(next_pos) >= 150_000.0 {
+                        let _ = bp.set_mode(bid, eve_destiny::MovementMode::new_warp(cur_pos, next_pos, 3.0));
+                    } else {
+                        let _ = bp.goto_point(bid, next_pos);
                     }
                 }
-            });
+                crate::system_actor::sync_ball_positions(
+                    &bp,
+                    &sys_handle.ball_positions,
+                    &sys_handle.scrambled_balls,
+                );
+            }
+            if let Some(tid) = desired_pirate.filter(|_| !has_pirate) {
+                spawn_specs.push((tid, "InsurgencyPirateRoamer", pirate_fac as u32, waypoints[0] + pirate_offset));
+            }
+            if let Some(tid) = desired_enforcer.filter(|_| !has_enforcer) {
+                spawn_specs.push((tid, "InsurgencyEnforcer", empire_fac as u32, waypoints[0] + enforcer_offset));
+            }
         }
+    }
+    if should_deploy_ci {
+        spawn_specs.push((79_507, "CounterInsurgencySentry", empire_fac as u32, DVec3::new(0.0, 0.0, 5_000.0)));
     }
 
-    if let Some(tid) = desired_pirate {
-        if !has_pirate {
-            let spawn_pos = waypoints[0] + pirate_offset;
-            let bid = spawn_specialized_npc_entity(
-                ctx,
-                sys_id,
-                tid,
-                "InsurgencyPirateRoamer",
-                pirate_fac as u32,
-                spawn_pos,
-            )
-            .await;
-            with_mut_combat_ephemeral(ctx, |rt| {
-                if let Some(npc) = rt.npc_entities.get_mut(&bid) {
-                    npc.custom_cargo_loot = crate::services::insurgency_complex_ops::named_insurgency_roamer_loot_drop(tid);
+    let mut built_entities = Vec::new();
+    if !spawn_specs.is_empty() {
+        let count = spawn_specs.len() as i64;
+        let start_ball_id = ctx.db.with_mut_snapshot(|snap| {
+            let start = snap.next_entity_id + 1;
+            snap.next_entity_id += count;
+            start
+        });
+        let _ = spawn_specialized_npc_batch_with_start_id(
+            ctx,
+            sys_id,
+            &spawn_specs,
+            start_ball_id,
+            |npc| {
+                if npc.type_id != 79_507 {
+                    npc.custom_cargo_loot =
+                        crate::services::insurgency_complex_ops::named_insurgency_roamer_loot_drop(npc.type_id);
                 }
-            });
-        }
+            },
+            &mut built_entities,
+        )
+        .await;
     }
-    if let Some(tid) = desired_enforcer {
-        if !has_enforcer {
-            let spawn_pos = waypoints[0] + enforcer_offset;
-            let bid = spawn_specialized_npc_entity(
-                ctx,
-                sys_id,
-                tid,
-                "InsurgencyEnforcer",
-                empire_fac as u32,
-                spawn_pos,
-            )
-            .await;
-            with_mut_combat_ephemeral(ctx, |rt| {
+
+    if !stale_balls.is_empty() || !arrived_positions.is_empty() || !built_entities.is_empty() || need_ci_flag_update {
+        with_mut_combat_ephemeral(ctx, |rt| {
+            for &bid in &stale_balls {
+                rt.npc_entities.remove(&bid);
+            }
+            for (bid, pos) in arrived_positions {
                 if let Some(npc) = rt.npc_entities.get_mut(&bid) {
-                    npc.custom_cargo_loot = crate::services::insurgency_complex_ops::named_insurgency_roamer_loot_drop(tid);
+                    npc.spawn_position = pos;
                 }
-            });
-        }
-    }
-    let should_deploy_ci = with_mut_combat_ephemeral(ctx, |rt| {
-        if s_st < 5 {
-            rt.ci_sentry_deployed_systems.remove(&sys_id);
-            false
-        } else if has_ci_sentry {
-            rt.ci_sentry_deployed_systems.insert(sys_id);
-            false
-        } else {
-            rt.ci_sentry_deployed_systems.insert(sys_id)
-        }
-    });
-    if should_deploy_ci {
-        // DERIVED (synthetic): Counter-Insurgency Sentry Gun deployment offset near grid anchor.
-        let _ = spawn_specialized_npc_entity(ctx, sys_id, 79_507, "CounterInsurgencySentry", empire_fac as u32, DVec3::new(0.0, 0.0, 5_000.0)).await;
+            }
+            for (bid, entity) in built_entities {
+                rt.npc_entities.insert(bid, entity);
+            }
+            if need_ci_flag_update {
+                if s_st < 5 {
+                    rt.ci_sentry_deployed_systems.remove(&sys_id);
+                } else {
+                    rt.ci_sentry_deployed_systems.insert(sys_id);
+                }
+            }
+        });
     }
 }
 

@@ -2,8 +2,8 @@
 
 #![forbid(unsafe_code)]
 
-use super::quasar_social_freelance::*;
-use super::social_corp_fleet::social_corp_projects;
+use super::super::*;
+use crate::services::social_corp_fleet::social_corp_projects;
 use crate::quasar_gateway::{
     PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
     STATUS_UNAUTHORIZED,
@@ -539,4 +539,59 @@ fn query_admin_kick_and_redeem_reward_error_and_success_branches() {
         .0,
         STATUS_BAD_REQUEST
     );
+}
+
+#[test]
+fn mutant_kill_broadcasted_sys_id_filter_and_register() {
+    use eve_proto::quasar::WireMessage;
+
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let descriptors = Arc::new(QuasarDescriptorRegistry::empty_with_builtins());
+    let router = PublicGatewayRouter::new(descriptors, Arc::clone(&db), sde);
+    register(&router, Arc::clone(&db));
+    let handlers = router.handlers.read().unwrap();
+    assert!(handlers.contains_key("eve_public.freelance.project.api.GetAllBroadcastedRequest"));
+
+    let worker_cid = 90_000_002_u32;
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&(worker_cid as i64)) {
+            ch.solar_system_id = 30_002_187;
+        }
+    });
+
+    let unauth_ctx = AuthoritativeContext::for_session(None, None, None, 0, "tranquility", vec![]);
+    let worker_ctx = AuthoritativeContext::for_session(
+        Some(2),
+        Some(worker_cid),
+        Some(1_000_009),
+        0,
+        "tranquility",
+        vec![],
+    );
+    let any = GoogleAny::default();
+    let bcast_fn = &handlers["eve_public.freelance.project.api.GetAllBroadcastedRequest"];
+
+    let decode_sys = |resp: &GoogleAny| -> u64 {
+        let top = WireMessage::decode(&resp.value).unwrap();
+        let bcast = WireMessage::decode(top.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+        let sys_b = WireMessage::decode(bcast.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+        sys_b.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_varint().unwrap()
+    };
+
+    // Explicit sys_id == 0 is filtered out by `> 0`:
+    // 1) Unauthenticated with sys_id = 0 must fail STATUS_BAD_REQUEST (kills `> 0 -> >= 0` & `== 0`)
+    let mut zero_req = DynamicQuasarMessage::new("Req");
+    zero_req.fields.insert(1, DynamicValue::Int64(0));
+    assert_eq!(bcast_fn(&unauth_ctx, &any, &zero_req).unwrap_err().0, STATUS_BAD_REQUEST);
+
+    // 2) Authenticated with sys_id = 0 must fall back to character's solar_system_id (30_002_187)
+    let fallback_resp = bcast_fn(&worker_ctx, &any, &zero_req).unwrap();
+    assert_eq!(decode_sys(&fallback_resp), 30_002_187);
+
+    // 3) Unauthenticated with explicit positive sys_id = 30_000_142 must succeed with 30_000_142 (kills `== 0` & `< 0`)
+    let mut pos_req = DynamicQuasarMessage::new("Req");
+    pos_req.fields.insert(1, DynamicValue::Repeated(vec![DynamicValue::Int64(30_000_142)]));
+    let pos_resp = bcast_fn(&unauth_ctx, &any, &pos_req).unwrap();
+    assert_eq!(decode_sys(&pos_resp), 30_000_142);
 }

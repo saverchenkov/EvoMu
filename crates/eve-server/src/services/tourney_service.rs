@@ -1279,5 +1279,9 @@ mod tourney_service_cov_unit_tests;
 #[path = "r8_shard_c_exploit_regression_tests.rs"]
 mod r8_shard_c_exploit_regression_tests;
 
+#[cfg(test)]
+#[path = "tourney_service_edges2_tests.rs"]
+mod tourney_service_edges2_tests;
+
 
 

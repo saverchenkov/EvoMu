@@ -255,4 +255,7 @@ pub(crate) fn resolve_valid_home_station(ctx: &ServerContext, snap: &eve_db::Wor
 }
 
 #[cfg(test)] #[path = "tourney_common_tests.rs"] mod tourney_common_tests;
+#[cfg(test)]
+#[path = "tourney_common_edges_tests.rs"]
+mod tourney_common_edges_tests;
 

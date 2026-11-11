@@ -220,3 +220,145 @@ fn tutorial_task_skip_and_operation_slash_commands() {
         PyRep::Bool(true)
     );
 }
+
+#[test]
+fn blackboard_limits_task_skip_next_replay_skip_reset_and_role_variants() {
+    let (ctx, char_id, graph_id_u32) = make_online_ctx();
+    let graph_id = i64::from(graph_id_u32);
+
+    // 1. Blackboard capped at MAX_BLACKBOARD_KEYS (64): start with 70 keys, then verify existing-key update works while new-key insert is ignored
+    let mut big_bb = BTreeMap::new();
+    for i in 0..70 {
+        big_bb.insert(format!("k_{i:02}"), i.to_string());
+    }
+    let inst = start_client_node_graph_instance(&ctx, char_id, graph_id, 5, 77, big_bb)
+        .expect("start with capped bb");
+    on_client_graph_message(&ctx, char_id, 999_999_999, 1, "ignored", &PyRep::Integer(1)); // missing graph_id noop
+    on_client_graph_message(&ctx, char_id, graph_id, 3, "k_00", &PyRep::String("updated".into()));
+    on_client_graph_message(&ctx, char_id, graph_id, 3, "brand_new_key", &PyRep::Integer(1));
+    ctx.db.with_snapshot(|snap| {
+        let graphs = load_active_client_graphs(snap, char_id);
+        let g = &graphs[&inst];
+        assert_eq!(g.blackboard.len(), MAX_BLACKBOARD_KEYS);
+        assert_eq!(g.blackboard.get("k_00").map(String::as_str), Some("updated"));
+        assert!(!g.blackboard.contains_key("brand_new_key"));
+    });
+
+    // stop_active_operation_node_graph_for_category matches operation_id too; unmatched is noop
+    let _ = ctx.drain_notifications_for_char(char_id);
+    stop_active_operation_node_graph_for_category(&ctx, char_id, 999_999);
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+    stop_active_operation_node_graph_for_category(&ctx, char_id, 77);
+    assert_eq!(ctx.drain_notifications_for_char(char_id).len(), 1);
+
+    // 2. emit_operation_task_skipped: middle task -> Integer(next), last task -> None, missing op -> None
+    let mut op_defs = OperationDefinitions::default();
+    op_defs.op_tasks.insert(10, vec![100, 200]);
+    emit_operation_task_skipped(&ctx, char_id, &op_defs, 1, 10, 100);
+    emit_operation_task_skipped(&ctx, char_id, &op_defs, 1, 10, 200);
+    emit_operation_task_skipped(&ctx, char_id, &op_defs, 1, 999, 100);
+    let task_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(task_notifs.len(), 3);
+    assert!(format!("{:?}", task_notifs[0].args).contains("Integer(200)"));
+    assert!(format!("{:?}", task_notifs[1].args).contains("None"));
+    assert!(format!("{:?}", task_notifs[2].args).contains("None"));
+
+    // 3. Valid /operation replay & skip against SDE operation definitions
+    let sde_defs = get_operation_defs(&ctx.sde);
+    if let Some((&valid_op_id, tasks)) = sde_defs.op_tasks.iter().next() {
+        let mut session = SessionState::new(501);
+        session.user_id = Some(1);
+        session.character_id = Some(char_id);
+
+        // Boundary rejections for cat_id/op_id out of 1..=100_000
+        assert!(replay_operation_for_char(&ctx, char_id, 0, valid_op_id).is_err());
+        assert!(replay_operation_for_char(&ctx, char_id, 100_001, valid_op_id).is_err());
+        assert!(skip_operation_for_char(&ctx, char_id, 0, valid_op_id).is_err());
+        assert!(skip_operation_for_char(&ctx, char_id, 1, 100_001).is_err());
+
+        // Pre-seed completed/skipped tasks, then replay clears them and emits OnOperationReplayed
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut st = load_store(snap);
+            let rec = st.by_character.entry(char_id).or_default();
+            for &t in tasks {
+                rec.completed_tasks.insert(t);
+                rec.skipped_tasks.insert(t);
+            }
+            rec.completed_categories.insert(9);
+            rec.completed_operations.insert(99);
+            rec.blocked_tasks.insert(888);
+            save_store(snap, &st, 1_775_400_000);
+        });
+        assert_eq!(
+            handle_operation_slash(&ctx, &session, char_id, &format!("/operation replay 2 {valid_op_id}"))
+                .unwrap()
+                .expect("replay ok"),
+            PyRep::Bool(true)
+        );
+        ctx.db.with_snapshot(|snap| {
+            let st = load_store(snap);
+            let rec = &st.by_character[&char_id];
+            assert_eq!(rec.active_category_id, Some(2));
+            assert_eq!(rec.active_operation_id, Some(valid_op_id));
+            for t in tasks {
+                assert!(!rec.completed_tasks.contains(t));
+                assert!(!rec.skipped_tasks.contains(t));
+            }
+        });
+        let r_notifs = ctx.drain_notifications_for_char(char_id);
+        assert!(r_notifs.iter().any(|n| n.event == "OnOperationReplayed"));
+
+        // Start a node graph tied to valid_op_id, then /operation skip stops it and clears active_operation_id
+        let _ = start_client_node_graph_instance(&ctx, char_id, graph_id, 2, valid_op_id, BTreeMap::new())
+            .expect("graph for skip");
+        let _ = ctx.drain_notifications_for_char(char_id);
+        assert_eq!(
+            handle_operation_slash(&ctx, &session, char_id, &format!("/operation skip 2 {valid_op_id}"))
+                .unwrap()
+                .expect("skip ok"),
+            PyRep::Bool(true)
+        );
+        ctx.db.with_snapshot(|snap| {
+            let st = load_store(snap);
+            let rec = &st.by_character[&char_id];
+            assert!(rec.completed_operations.contains(&valid_op_id));
+            assert_eq!(rec.active_operation_id, None);
+            for t in tasks {
+                assert!(rec.skipped_tasks.contains(t));
+            }
+        });
+        let s_notifs = ctx.drain_notifications_for_char(char_id);
+        assert!(s_notifs.iter().any(|n| n.event == "OnStopClientNodeGraph"));
+        assert!(s_notifs.iter().any(|n| n.event == "OnOperationSkipped"));
+
+        // /operation reset alias clears all sets and emits OnOperationsProgressReset
+        assert_eq!(
+            handle_operation_slash(&ctx, &session, char_id, "/operation reset")
+                .unwrap()
+                .expect("reset alias"),
+            PyRep::Bool(true)
+        );
+        ctx.db.with_snapshot(|snap| {
+            let st = load_store(snap);
+            let rec = &st.by_character[&char_id];
+            assert!(rec.completed_categories.is_empty());
+            assert!(rec.completed_operations.is_empty());
+            assert!(rec.completed_tasks.is_empty());
+            assert!(rec.skipped_tasks.is_empty());
+            assert!(rec.blocked_tasks.is_empty());
+            assert!(rec.active_operation_id.is_some());
+        });
+        let reset_notifs = ctx.drain_notifications_for_char(char_id);
+        assert!(reset_notifs.iter().any(|n| n.event == "OnStopAllClientNodeGraphs"));
+        assert!(reset_notifs.iter().any(|n| n.event == "OnOperationsProgressReset"));
+
+        // ROLE_CONTENT & ROLE_PROGRAMMER also permitted for reload_fsd
+        for role in [service_roles::ROLE_CONTENT, service_roles::ROLE_PROGRAMMER] {
+            session.role = role;
+            assert_eq!(
+                reload_operations_fsd_data(&ctx, &session, char_id).expect("role allowed"),
+                PyRep::Bool(true)
+            );
+        }
+    }
+}

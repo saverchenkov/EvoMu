@@ -131,6 +131,7 @@ fn fob_jitter_contributions_and_docking_enforcement() {
 fn insurgency_spread_fob_siege_and_campaign_payout_resolution() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let ctx = test_ctx();
+    ctx.set_clock(Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(1_800_000_000)));
     let camp_id = 77_i64;
     let fob_sys = 30002506_u32;
     let neighbor_sys = ctx

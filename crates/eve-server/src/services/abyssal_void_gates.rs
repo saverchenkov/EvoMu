@@ -612,12 +612,15 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
             .trigger_suspect_flag(char_id, now_u);
         crate::services::combat_crimewatch::emit_crimewatch_timer_notifications(ctx, char_id, now_u);
     }
-    // DATA GAP: V24 content-finished timer_type enum mappings are Tranquility server-only
+    // V24 `crimewatchTimers.pyj::TimerType::AbyssalContentExpiration = 11` (`abyssalContentService.pyj:107`).
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
         "OnAbyssalContentFinished",
         "charid",
-        vec![PyRep::Integer(exited_pid), PyRep::Integer(1)],
+        vec![
+            PyRep::Integer(exited_pid),
+            PyRep::Integer(crate::services::abyssal_void_mgr::TIMER_TYPE_ABYSSAL_CONTENT_EXPIRATION),
+        ],
     );
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
@@ -679,7 +682,7 @@ pub(crate) async fn handle_void_space_player_jump(
         })
     };
     let ship_vec = DVec3::from_array(ship_pos);
-    let cargo_filament_iid = ctx.db.with_snapshot(|snap| {
+    let cargo_filament = ctx.db.with_snapshot(|snap| {
         snap.items
             .values()
             .find(|i| {
@@ -690,8 +693,17 @@ pub(crate) async fn handle_void_space_player_jump(
                     && i.quantity >= 1
                     && is_void_space_filament_type(ctx, i.type_id)
             })
-            .map(|i| i.item_id)
+            .map(|i| (i.item_id, i.type_id))
     });
+    let cargo_filament_iid = cargo_filament.map(|(iid, _)| iid);
+    let filament_type_id = cargo_filament
+        .map(|(_, tid)| tid)
+        .or_else(|| u32::try_from(target_id).ok().filter(|&tid| is_void_space_filament_type(ctx, tid)))
+        .unwrap_or(0);
+    let nebula_graphic_id = crate::services::abyssal_void_mgr::resolve_void_space_nebula_graphic_id(
+        &ctx.sde,
+        filament_type_id,
+    );
 
     if cargo_filament_iid.is_none() {
         if target_id == ship_id {
@@ -802,6 +814,9 @@ pub(crate) async fn handle_void_space_player_jump(
     })?;
 
     let now_unix = ctx.now_unix();
+    let void_expires_at = now_unix.saturating_add(
+        crate::services::abyssal_void_mgr::VOID_SPACE_ENCOUNTER_LIFE_TIME_SECS,
+    );
     let void_session = crate::services::pve_special_sites::VoidSpaceSessionRecord {
         char_id,
         ship_id,
@@ -809,7 +824,8 @@ pub(crate) async fn handle_void_space_player_jump(
         origin_position: ship_pos,
         target_id,
         entered_unix: now_unix,
-        expires_at_sec: now_unix.saturating_add(1_200),
+        expires_at_sec: void_expires_at,
+        nebula_graphic_id: Some(nebula_graphic_id),
     };
     crate::services::pve_special_sites_abyssal::with_abyssal_state(ctx, |st| {
         st.void_space_sessions.insert(char_id, void_session);
@@ -821,7 +837,7 @@ pub(crate) async fn handle_void_space_player_jump(
         VOID_SPACE_SYSTEM_ID,
         cur_sys,
         now_unix,
-        now_unix.saturating_add(1_200),
+        void_expires_at,
     );
 
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, cur_sys);
@@ -882,7 +898,7 @@ pub(crate) async fn handle_void_space_player_jump(
     );
     crate::services::map_service::record_solar_system_visit(ctx, char_id, VOID_SPACE_SYSTEM_ID);
 
-    // DATA GAP: V24 live room IDs and nebula graphic IDs are Tranquility server-only
+    // V24 Void Space nebula graphic ID from `res:/staticdata/voidspaceencounters.fsdbinary` (`nebulaGraphicIDs[0]`).
     let client_data = PyRep::Dict(vec![
         (
             PyRep::String("content_id".into()),
@@ -890,7 +906,7 @@ pub(crate) async fn handle_void_space_player_jump(
         ),
         (
             PyRep::String("nebula_graphic_id".into()),
-            PyRep::Integer(200_001),
+            PyRep::Integer(nebula_graphic_id),
         ),
     ]);
     ctx.notify(
@@ -899,7 +915,9 @@ pub(crate) async fn handle_void_space_player_jump(
         "charid",
         vec![client_data],
     );
-    let void_end_ft = ctx.now_blueos_filetime_ticks() + 1_200 * 10_000_000;
+    let void_end_ft = ctx.now_blueos_filetime_ticks()
+        + (crate::services::abyssal_void_mgr::VOID_SPACE_ENCOUNTER_LIFE_TIME_SECS as i64)
+            * 10_000_000;
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
         "OnAddExpiryDurationForVoidSpaceContent",
@@ -1076,12 +1094,15 @@ pub(crate) async fn handle_void_space_end_gate_activation(
     );
     ctx.sync_character_local_chat(char_id, Some(VOID_SPACE_SYSTEM_ID), origin_sys);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, origin_sys);
-    // DATA GAP: V24 content-finished timer_type enum mappings are Tranquility server-only
+    // V24 `crimewatchTimers.pyj::TimerType::VoidSpaceContentExpiration = 16` (`voidSpaceContentService.pyj:109`).
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
         "OnVoidSpaceContentFinished",
         "charid",
-        vec![PyRep::Integer(finished_content_id), PyRep::Integer(1)],
+        vec![
+            PyRep::Integer(finished_content_id),
+            PyRep::Integer(crate::services::abyssal_void_mgr::TIMER_TYPE_VOID_SPACE_CONTENT_EXPIRATION),
+        ],
     );
 
     Ok(PyRep::keyval([
