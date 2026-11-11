@@ -985,10 +985,10 @@ async fn step_active_breacher_dots_total_hp_damage_ratios_and_zero_gates_pin_mut
     let notifs = ctx.drain_notifications_for_char(attacker_id);
     let check_dmg_ratios = |ball_id: i64, expected_dmg: f64, exp_s: f64, exp_a: f64, exp_h: f64| {
         let has_msg = notifs.iter().any(|n| {
+            let dict_opt = n.args.first().filter(|d| d.dict_get("target").is_some()).or_else(|| n.args.get(1));
             n.event == "OnDamageMessage"
-                && n.args.get(1).and_then(|d| d.dict_get("target")) == Some(&PyRep::Integer(ball_id))
-                && n.args
-                    .get(1)
+                && dict_opt.and_then(|d| d.dict_get("target")) == Some(&PyRep::Integer(ball_id))
+                && dict_opt
                     .and_then(|d| d.dict_get("damage"))
                     .and_then(|v| v.as_f64())
                     .is_some_and(|d| (d - expected_dmg).abs() < 1e-6)

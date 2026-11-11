@@ -285,6 +285,9 @@ async fn anchor_skyhook_error_branches_and_weapon_damage_reinforcement_transitio
         "StructureNotFound"
     );
     let sh_id = 1_071_000_099_i64;
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::VirtualServerClock::with_fixed_base(1_800_000_000),
+    ));
     let now = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(
@@ -338,6 +341,9 @@ async fn skyhook_damage_nan_in_window_hackable_and_authorisation_branches() {
     let (null_sys, _, _) = find_null_system_with_reagent_planet(&ctx);
     let sh_id = 1_073_000_001_i64;
     let ship_id = 1_073_000_002_i64;
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::VirtualServerClock::with_fixed_base(1_800_000_000),
+    ));
     let now = ctx.now_unix();
     let corp_id = ctx.db.with_snapshot(|s| s.characters[&char_id].corporation_id);
 
@@ -672,6 +678,9 @@ async fn skyhook_anchor_filters_link_silo_initiation_and_tick_skyhooks_lifecycle
     let sh_reinf_zero = 1_074_000_102_i64;
     let sh_hub = 1_074_000_103_i64;
     let sh_raid = 1_074_000_104_i64;
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::VirtualServerClock::with_fixed_base(1_800_000_000),
+    ));
     let now = ctx.now_unix();
     let corp_id = ctx.db.with_snapshot(|s| s.characters[&char_id].corporation_id);
     let ally_id = 99_000_077_i64;

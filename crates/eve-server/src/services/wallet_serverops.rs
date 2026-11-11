@@ -45,9 +45,7 @@ fn check_starbase_auth(
     if owner_corp == char_id { return Ok(()); }
     let (is_ceo, eff_roles) =
         snap.effective_corp_roles_at(char_corp, char_id, None, session.corp_role, 0);
-    let has_role = (snap.corporations.contains_key(&char_corp)
-        && (is_ceo || (eff_roles & ((1 << 0) | (1 << 24) | (1 << 25) | (1 << 40))) != 0))
-        || (session.corp_role & ((1 << 0) | (1 << 24) | (1 << 25) | (1 << 40)) != 0);
+    let has_role = is_ceo || (eff_roles & ((1 << 0) | (1 << 24) | (1 << 25) | (1 << 40))) != 0;
     if !has_role {
         return Err(rpc_err("RoleNotAuthorized", "Starbase operations require Director or Starbase Operator role"));
     }

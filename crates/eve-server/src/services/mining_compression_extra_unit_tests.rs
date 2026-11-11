@@ -159,7 +159,8 @@ fn compressor_hull_limits_reprocessing_service_rig_yields_and_metenox_helpers() 
         assert!(caller_can_take_corp_hangar_item(snap, char_id, corp_id, InventoryFlag::CorpSAG2, 0));
         assert!(!caller_can_take_corp_hangar_item(snap, char_id, corp_id, InventoryFlag::CorpSAG1, 0));
         assert!(!caller_has_structure_extraction_role(snap, char_id, corp_id, 0));
-        assert!(caller_has_structure_extraction_role(snap, char_id, corp_id, corp_roles::ROLE_STATION_MANAGER));
+        assert!(!caller_has_structure_extraction_role(snap, char_id, corp_id, corp_roles::ROLE_STATION_MANAGER));
+        assert!(caller_has_structure_extraction_role(snap, 90_000_077, corp_id, corp_roles::ROLE_STATION_MANAGER));
 
         assert_eq!(inspect_metenox_drill(&ctx.sde, snap, 999_999, char_id, 0.40).err().unwrap().code, "StructureNotFound");
         assert_eq!(inspect_metenox_drill(&ctx.sde, snap, struct_hs, char_id, 0.40).err().unwrap().code, "InvalidStructureType");

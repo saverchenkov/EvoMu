@@ -1215,7 +1215,24 @@ impl WorldStateSnapshot {
         if corp.ceo_id == char_id {
             return (true, u64::MAX);
         }
-        let mut roles = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+        let has_ceo_roles_entry = corp.member_roles.contains_key(&corp.ceo_id);
+        let is_corp_member = corp.members.contains(&char_id)
+            || (!has_ceo_roles_entry
+                && self
+                    .characters
+                    .get(&char_id)
+                    .is_some_and(|ch| ch.corporation_id == corp_id))
+            || (corp.members.is_empty() && !self.characters.contains_key(&char_id));
+        let mut roles = if let Some(&db_roles) = corp.member_roles.get(&char_id) {
+            db_roles
+        } else if self.corp_role_assignments.contains_key(&(corp_id, char_id))
+            || !is_corp_member
+            || session_roles == u64::MAX
+        {
+            0
+        } else {
+            session_roles
+        };
 
         let char_home = self
             .characters

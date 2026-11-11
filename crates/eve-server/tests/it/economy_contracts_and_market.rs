@@ -891,6 +891,10 @@ pub(crate) mod hypernet_raffle_sizing_rng_expiry {
                     weapon_id,
                     make_item(weapon_id, 3_041, char_id, ship_id, InventoryFlag::HiSlot5, 1, true),
                 );
+                snap.items.insert(
+                    740_016,
+                    make_item(740_016, 185, char_id, ship_id, InventoryFlag::HiSlot5, 100, false),
+                );
                 for mid in [bastion_id, rah_id, mutadaptive_id, siege_id, ehe_id, mutated_ar_id, mutated_dcu_id, triage_id, weapon_id] {
                     snap.module_online_states.insert(mid, true);
                 }

@@ -492,11 +492,27 @@ async fn cycle_weapon_damage_flush_and_execute_pending_actions_boundaries() {
         // acid only received AttackHit (OnDamageMessage + OnDamageMessages = 2), no AttackedBy
         let a_list = g.get(&acid).expect("acid notifications");
         assert_eq!(a_list.len(), 2);
-        assert_eq!(a_list[0].args.first(), Some(&PyRep::String("AttackHit".into())));
+        assert_eq!(a_list[0].args.len(), 1);
+        assert_eq!(
+            a_list[0].args.first().and_then(|d| d.dict_get("attackType")),
+            Some(&PyRep::String("me".into()))
+        );
+        assert_eq!(
+            a_list[0].args.first().and_then(|d| d.dict_get("isBanked")),
+            Some(&PyRep::Bool(false))
+        );
         // vcid only received AttackedBy from action[2] (OnDamageMessage + OnDamageMessages = 2)
         let v_list = g.get(&vcid).expect("vcid notifications");
         assert_eq!(v_list.len(), 2);
-        assert_eq!(v_list[0].args.first(), Some(&PyRep::String("AttackedBy".into())));
+        assert_eq!(v_list[0].args.len(), 1);
+        assert_eq!(
+            v_list[0].args.first().and_then(|d| d.dict_get("attackType")),
+            Some(&PyRep::String("other".into()))
+        );
+        assert_eq!(
+            v_list[0].args.first().and_then(|d| d.dict_get("isBanked")),
+            Some(&PyRep::Bool(false))
+        );
     }
     assert!(rx.try_recv().is_ok());
 

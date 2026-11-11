@@ -15,7 +15,7 @@ use eve_server::macho_listener::handle_macho_client;
 use eve_server::quasar_grpc::handle_quasar_grpc_connection;
 use eve_server::router::ServerContext;
 use eve_server::sso::handle_http_connection;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -24,7 +24,7 @@ use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tracing::{error, info, warn};
 
-static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+use eve_server::router::NEXT_TRANSPORT_SESSION_ID as NEXT_SESSION_ID;
 const MAX_CONCURRENT_CONNECTIONS: usize = 512;
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 

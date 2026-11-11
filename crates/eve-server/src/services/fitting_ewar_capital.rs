@@ -79,6 +79,159 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         }
                     }
                 }
+                if matches!(
+                    mod_type.group_id,
+                    53 | 55
+                        | 74
+                        | 1986
+                        | 4060
+                        | 506..=512
+                        | 524
+                        | 771
+                        | 862
+                        | 1245
+                        | 1674
+                        | 4500
+                        | 4805
+                        | 4807
+                ) {
+                    let has_builtin_damage = [114u16, 116, 117, 118].iter().any(|aid| {
+                        mod_type.default_attributes.get(aid).copied().unwrap_or(0.0) > 0.0
+                            || mod_state.get_attribute(*aid, &ctx.sde) > 0.0
+                    });
+                    let uses_charge_groups = mod_type
+                        .default_attributes
+                        .keys()
+                        .any(|&aid| matches!(aid, 604 | 605 | 606 | 609 | 610));
+                    let requires_ammo = uses_charge_groups || !has_builtin_damage;
+                    if requires_ammo {
+                        let has_slot_item = ctx.db.with_snapshot(|snap| {
+                            let bank = snap
+                                .weapon_banks
+                                .get(&ship_id)
+                                .and_then(|b| b.get(&module_id))
+                                .cloned()
+                                .unwrap_or_else(|| vec![module_id]);
+                            bank.iter().any(|&tid| {
+                                let tf = snap
+                                    .items
+                                    .get(&tid)
+                                    .map(|i| i.flag as u16)
+                                    .unwrap_or(m.flag_id);
+                                snap.items.values().any(|i| {
+                                    i.location_id == ship_id
+                                        && (i.flag as u16) == tf
+                                        && i.item_id != tid
+                                        && i.quantity > 0
+                                        && ctx
+                                            .sde
+                                            .types
+                                            .get(&i.type_id)
+                                            .is_none_or(|t| t.group_id != 908)
+                                })
+                            })
+                        });
+                        let mut has_loaded_ammo = has_slot_item;
+                        if !has_loaded_ammo {
+                            has_loaded_ammo = ctx.db.with_mut_snapshot(|snap| {
+                                let bank = snap
+                                    .weapon_banks
+                                    .get(&ship_id)
+                                    .and_then(|b| b.get(&module_id))
+                                    .cloned()
+                                    .unwrap_or_else(|| vec![module_id]);
+                                let cargo_charge = snap
+                                    .items
+                                    .values()
+                                    .find(|i| {
+                                        i.location_id == ship_id
+                                            && matches!(
+                                                i.flag,
+                                                eve_db::InventoryFlag::Cargo
+                                                    | eve_db::InventoryFlag::SpecializedAmmoHold
+                                            )
+                                            && i.quantity > 0
+                                            && ctx.sde.types.get(&i.type_id).is_some_and(|ct| {
+                                                ServerContext::is_charge_compatible_with_weapon(
+                                                    mod_type, ct,
+                                                )
+                                            })
+                                    })
+                                    .map(|i| (i.item_id, i.type_id, i.owner_id, i.quantity));
+                                let Some((stack_id, ammo_tid, owner_id, avail_qty)) = cargo_charge else {
+                                    return false;
+                                };
+                                let charge_vol = ctx
+                                    .sde
+                                    .types
+                                    .get(&ammo_tid)
+                                    .map(|t| t.volume.max(0.0001))
+                                    .unwrap_or(0.0025);
+                                let cap_rounds = if mod_type.capacity > 0.0 {
+                                    (mod_type.capacity / charge_vol).floor() as i32
+                                } else {
+                                    1
+                                }
+                                .max(1);
+                                let num_mods = bank.len().max(1) as i32;
+                                let per_mod = cap_rounds.min((avail_qty / num_mods).max(1));
+                                let total_take = (per_mod * num_mods).min(avail_qty);
+                                if let Some(st) = snap.items.get_mut(&stack_id) {
+                                    if st.quantity > total_take {
+                                        st.quantity -= total_take;
+                                        st.version += 1;
+                                    } else {
+                                        snap.items.remove(&stack_id);
+                                    }
+                                }
+                                for &tid in &bank {
+                                    if let Some(tf) = snap.items.get(&tid).map(|i| i.flag) {
+                                        let cid = snap.alloc_entity_id();
+                                        snap.items.insert(
+                                            cid,
+                                            eve_db::InventoryItemRecord {
+                                                item_id: cid,
+                                                type_id: ammo_tid,
+                                                owner_id,
+                                                location_id: ship_id,
+                                                flag: tf,
+                                                quantity: per_mod,
+                                                singleton: false,
+                                                version: 1,
+                                                ..Default::default()
+                                            },
+                                        );
+                                        snap.module_active_charges.insert(tid, ammo_tid);
+                                    }
+                                }
+                                true
+                            });
+                            if has_loaded_ammo {
+                                ctx.invalidate_ship_fitting(ship_id);
+                            }
+                        }
+                        if !has_loaded_ammo {
+                            has_loaded_ammo = (m.charge_type_id.is_some() && m.charge_quantity > 0)
+                                || ctx.db.with_snapshot(|snap| {
+                                    let bank = snap
+                                        .weapon_banks
+                                        .get(&ship_id)
+                                        .and_then(|b| b.get(&module_id))
+                                        .cloned()
+                                        .unwrap_or_else(|| vec![module_id]);
+                                    bank.iter().any(|&tid| snap.module_active_charges.contains_key(&tid))
+                                });
+                        }
+                        if !has_loaded_ammo {
+                            return Some(Err(BridgeRpcError {
+                                code: "NoAmmoLoaded".into(),
+                                message: format!(
+                                    "Weapon module {module_id} has no compatible ammunition loaded"
+                                ),
+                            }));
+                        }
+                    }
+                }
                 let mut warp_scramble_points = 0i32;
                 let mut disables_target_mwd_mjd = false;
                 let mut warp_core_stab_bonus = 0i32;
@@ -975,7 +1128,7 @@ pub(crate) async fn commit_post_cycle_activation_effects(
                 if let Some(c_owner) = snap.items.get(&charge_id).map(|ci| ci.owner_id) {
                     let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, c_owner);
                     opts.reject_fitted = false;
-                    if matches!(snap.consume_exact_item_quantity(charge_id, 1, opts), Ok(None)) {
+                    if let Ok(None) = snap.consume_exact_item_quantity(charge_id, 1, opts) {
                         snap.module_active_charges.remove(&turret_id);
                     }
                 }

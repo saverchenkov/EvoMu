@@ -19,7 +19,6 @@ pub(crate) fn has_structure_manager_role(snap: &eve_db::WorldStateSnapshot, sess
     let (is_ceo, eff_roles) =
         snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, 0);
     session.has_gm_role()
-        || (session.corp_role & req_roles) != 0
         || is_ceo
         || (eff_roles & req_roles) != 0
 }

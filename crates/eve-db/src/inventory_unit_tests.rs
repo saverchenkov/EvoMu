@@ -2556,3 +2556,66 @@ fn move_stack_split_delete_and_acl_missing_branches() {
     );
 }
 
+#[test]
+fn add_or_stack_item_never_overwrites_existing_item_and_rejects_i32_overflow() {
+    let repo = WorldRepository::with_demo_seed();
+    let owner_id = 90_000_001_i64;
+    let station_id = 60_003_760_i64;
+
+    // Seed an item at `next_entity_id` and `next_entity_id + 1` to simulate high-ID pre-seeded records.
+    let (colliding_id_1, colliding_id_2) = repo.with_mut_snapshot(|snap| {
+        let base = snap.next_entity_id;
+        for (offset, type_id) in [(0_i64, 587_u32), (1_i64, 588_u32)] {
+            let id = base + offset;
+            snap.items.insert(
+                id,
+                InventoryItemRecord {
+                    item_id: id,
+                    type_id,
+                    owner_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    ..InventoryItemRecord::default()
+                },
+            );
+        }
+        (base, base + 1)
+    });
+
+    let added = repo
+        .add_or_stack_item(owner_id, station_id, InventoryFlag::Cargo, 34, 250)
+        .expect("add_or_stack_item should allocate a fresh non-colliding item_id");
+    assert_ne!(added.item_id, colliding_id_1);
+    assert_ne!(added.item_id, colliding_id_2);
+    assert_eq!(added.quantity, 250);
+
+    repo.with_snapshot(|snap| {
+        assert_eq!(snap.items.get(&colliding_id_1).map(|i| i.type_id), Some(587));
+        assert_eq!(snap.items.get(&colliding_id_2).map(|i| i.type_id), Some(588));
+        assert_eq!(snap.items.get(&added.item_id).map(|i| i.quantity), Some(250));
+    });
+
+    // Reject quantity > i32::MAX on creation
+    let overflow_new = repo.add_or_stack_item(
+        owner_id,
+        station_id,
+        InventoryFlag::Cargo,
+        35,
+        i64::from(i32::MAX) + 1,
+    );
+    assert!(matches!(overflow_new, Err(DbError::ValidationError(_))));
+
+    // Reject stack overflow when adding to an existing stack
+    let overflow_stack = repo.add_or_stack_item(
+        owner_id,
+        station_id,
+        InventoryFlag::Cargo,
+        34,
+        i64::from(i32::MAX),
+    );
+    assert!(matches!(overflow_stack, Err(DbError::ValidationError(_))));
+}
+
+

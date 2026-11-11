@@ -776,11 +776,13 @@ pub(super) fn handle_corp_gov(
         ("corpRegistry", "UpdateTitle") | ("corpRegistry", "UpdateTitles") => {
             if !has_director { return deny_role("Updating corporation titles requires CEO or Director role"); }
             let rows_to_update = parse_title_update_rows(args);
-            let changes_out = match ctx.db.try_with_mut_snapshot(|snap| {
+                let (changes_out, sync_updates) = match ctx.db.try_with_mut_snapshot(|snap| {
                 if snap.corporations.contains_key(&corp_id) {
                     snap.seed_default_corp_titles(corp_id);
                 }
+                let corp_ally = snap.corporations.get(&corp_id).and_then(|c| c.alliance_id);
                 let mut results = Vec::with_capacity(rows_to_update.len());
+                let mut sync_updates = Vec::new();
                 for (title_id, title_name, masks) in &rows_to_update {
                     let (title_id, title_name, [roles_mask, grantable_mask, roles_hq_mask, grantable_hq_mask, roles_base_mask, grantable_base_mask, roles_other_mask, grantable_other_mask]) = (*title_id, title_name.as_str(), *masks);
                 let state = snap.corp_governance.entry(corp_id).or_default();
@@ -789,13 +791,13 @@ pub(super) fn handle_corp_gov(
                 let bit = eve_db::snapshot_ext::title_id_to_bit(title_id);
                 let newly_delayed = (roles_mask & !prev_rmask) & corp_roles::CORP_DELAYED_DIVISION_ROLE_MASK;
                 let dropped = (prev_rmask & !roles_mask) != 0;
+                let holders: Vec<i64> = state
+                    .member_titles
+                    .iter()
+                    .filter_map(|(&mid, &tmask)| ((tmask & bit) != 0).then_some(mid))
+                    .collect();
                 if newly_delayed != 0 || dropped {
-                    let holders: Vec<i64> = state
-                        .member_titles
-                        .iter()
-                        .filter_map(|(&mid, &tmask)| ((tmask & bit) != 0).then_some(mid))
-                        .collect();
-                    for mid in holders {
+                    for &mid in &holders {
                         if dropped { state.role_drop_timestamps.insert(mid, now_unix); }
                         if newly_delayed != 0 {
                             let cur_p = state.pending_title_role_grants.get(&mid).filter(|&&(_, e)| now_unix < e).map_or(0, |&(b, _)| b);
@@ -821,13 +823,30 @@ pub(super) fn handle_corp_gov(
                     grantable_roles_at_other: dec(grantable_other_mask),
                 });
                 titles.sort_by_key(|t| t.title_id);
+                if roles_mask != prev_rmask {
+                    for mid in holders {
+                        let (_, new_eff) =
+                            snap.effective_corp_roles_at(corp_id, mid, None, 0, now_unix);
+                        sync_updates.push((mid, (corp_id, corp_ally, new_eff)));
+                    }
+                }
                     results.push((title_id, title_name.to_string(), roles_mask, prev));
                 }
-                Ok::<_, BridgeRpcError>(results)
+                Ok::<_, BridgeRpcError>((results, sync_updates))
             }) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if !sync_updates.is_empty() {
+                super::fleet_social_persistence::with_social_state(ctx, |s| {
+                    for (mid, entry) in sync_updates {
+                        if mid == char_id {
+                            session.corp_role = entry.2;
+                        }
+                        s.forced_session_corp_sync.insert(mid, entry);
+                    }
+                });
+            }
             let mut last_ret = (1_i64, String::new(), 0_u64);
             for (title_id, title_name, roles_mask, prev) in changes_out {
             let (old_name, old_roles) = prev.map_or((PyRep::None, PyRep::Integer(0)), |(n, r)| (PyRep::String(n), PyRep::Integer(r as i64)));
@@ -850,31 +869,51 @@ pub(super) fn handle_corp_gov(
         ("corpRegistry", "DeleteTitle") => {
             if !has_director { return deny_role("Deleting corporation titles requires CEO or Director role"); }
             let title_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-            let prev = match ctx.db.try_with_mut_snapshot(|snap| {
+            let (prev, sync_updates) = match ctx.db.try_with_mut_snapshot(|snap| {
                 if let Some(titles) = snap.corp_titles.get_mut(&corp_id) {
                     titles.retain(|t| t.title_id != title_id);
                 }
+                let corp_ally = snap.corporations.get(&corp_id).and_then(|c| c.alliance_id);
                 let prev = snap.corp_governance.get_mut(&corp_id).and_then(|s| s.titles.remove(&title_id));
+                let mut sync_updates = Vec::new();
                 if let Some((_, prev_rmask)) = prev {
                     if prev_rmask != 0 {
-                        if let Some(state) = snap.corp_governance.get_mut(&corp_id) {
+                        let holders = if let Some(state) = snap.corp_governance.get_mut(&corp_id) {
                             let bit = eve_db::snapshot_ext::title_id_to_bit(title_id);
                             let holders: Vec<i64> = state
                                 .member_titles
                                 .iter()
                                 .filter_map(|(&mid, &tmask)| ((tmask & bit) != 0 || tmask == title_id as u64).then_some(mid))
                                 .collect();
-                            for mid in holders {
+                            for &mid in &holders {
                                 state.role_drop_timestamps.insert(mid, now_unix);
                             }
+                            holders
+                        } else {
+                            Vec::new()
+                        };
+                        for mid in holders {
+                            let (_, new_eff) =
+                                snap.effective_corp_roles_at(corp_id, mid, None, 0, now_unix);
+                            sync_updates.push((mid, (corp_id, corp_ally, new_eff)));
                         }
                     }
                 }
-                Ok::<_, BridgeRpcError>(prev)
+                Ok::<_, BridgeRpcError>((prev, sync_updates))
             }) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if !sync_updates.is_empty() {
+                super::fleet_social_persistence::with_social_state(ctx, |s| {
+                    for (mid, entry) in sync_updates {
+                        if mid == char_id {
+                            session.corp_role = entry.2;
+                        }
+                        s.forced_session_corp_sync.insert(mid, entry);
+                    }
+                });
+            }
             let (old_name, old_roles) = prev.map_or((PyRep::None, PyRep::Integer(0)), |(n, r)| (PyRep::String(n), PyRep::Integer(r as i64)));
             let change = PyRep::Dict(vec![
                 (PyRep::String(("titleName").into()), PyRep::Tuple(vec![old_name, PyRep::String(("").into())])),
@@ -900,6 +939,7 @@ pub(super) fn handle_corp_gov(
                         message: "Cannot resign as CEO without designating a valid member successor while corporation has other members".into(),
                     });
                 }
+                let corp_ally = corp.alliance_id;
                 corp.ceo_id = next_ceo;
                 if next_ceo != char_id {
                     corp.member_roles.insert(char_id, 0);
@@ -908,13 +948,21 @@ pub(super) fn handle_corp_gov(
                     corp.member_roles.insert(next_ceo, u64::MAX);
                 }
                 snap.corp_role_assignments.remove(&(corp_id, char_id));
-                Ok(next_ceo)
+                Ok((next_ceo, corp_ally))
             });
             match res {
-                Ok(next_ceo) => {
+                Ok((next_ceo, corp_ally)) => {
                     if next_ceo != char_id {
                         session.corp_role = 0;
                     }
+                    super::fleet_social_persistence::with_social_state(ctx, |s| {
+                        if next_ceo != char_id {
+                            s.forced_session_corp_sync.insert(char_id, (corp_id, corp_ally, 0));
+                        }
+                        if next_ceo > 0 {
+                            s.forced_session_corp_sync.insert(next_ceo, (corp_id, corp_ally, u64::MAX));
+                        }
+                    });
                     let change = PyRep::Dict(vec![(
                         PyRep::String(("ceoID").into()),
                         PyRep::Tuple(vec![PyRep::Integer(char_id), PyRep::Integer(next_ceo)]),
@@ -1186,6 +1234,9 @@ pub(super) fn handle_corp_gov(
                     }
                     corp.ceo_id = new_ceo_id;
                     corp.member_roles.insert(new_ceo_id, u64::MAX);
+                    if old_ceo_id > 0 && old_ceo_id != new_ceo_id {
+                        snap.corp_role_assignments.remove(&(corp_id, old_ceo_id));
+                    }
                 } else if let Some(new_flag) = item_lock_flag_update {
                     if let Some(it) = snap.items.get_mut(&win_param) {
                         it.flag = new_flag;
@@ -1196,6 +1247,30 @@ pub(super) fn handle_corp_gov(
             });
             match res {
                 Ok(()) => {
+                    if is_ceo_vote {
+                        let (corp_ally, old_ceo_roles) = ctx.db.with_snapshot(|s| {
+                            let ally = s.corporations.get(&corp_id).and_then(|c| c.alliance_id);
+                            let r = if old_ceo_id > 0 && old_ceo_id != new_ceo_id {
+                                s.effective_corp_roles_at(corp_id, old_ceo_id, None, 0, now_unix).1
+                            } else {
+                                0
+                            };
+                            (ally, r)
+                        });
+                        super::fleet_social_persistence::with_social_state(ctx, |s| {
+                            if old_ceo_id > 0 && old_ceo_id != new_ceo_id {
+                                s.forced_session_corp_sync
+                                    .insert(old_ceo_id, (corp_id, corp_ally, old_ceo_roles));
+                            }
+                            s.forced_session_corp_sync
+                                .insert(new_ceo_id, (corp_id, corp_ally, u64::MAX));
+                        });
+                        if session.character_id == Some(old_ceo_id) && old_ceo_id != new_ceo_id {
+                            session.corp_role = old_ceo_roles;
+                        } else if session.character_id == Some(new_ceo_id) {
+                            session.corp_role = u64::MAX;
+                        }
+                    }
                     ctx.notify(NotificationTarget::Corporation(corp_id), "OnSanctionedActionChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(case_id)]);
                     if let Some((holder_id, old_s, new_s)) = share_delta {
                         let s_change = PyRep::Dict(vec![(PyRep::String(("shares").into()), PyRep::Tuple(vec![PyRep::Integer(old_s), PyRep::Integer(new_s)]))]);

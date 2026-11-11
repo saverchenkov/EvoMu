@@ -262,8 +262,16 @@ fn handle_office_manager(
                     message: format!("Pilot must be docked at station or structure {station_id} to rent an office"),
                 }));
             }
-            let (is_ceo, roles) = get_effective_corp_roles(ctx, corp_id, char_id);
-            let effective_roles = session.corp_role | roles;
+            fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
+            let (is_ceo, effective_roles) = ctx.db.with_snapshot(|snap| {
+                snap.effective_corp_roles_at(
+                    corp_id,
+                    char_id,
+                    Some(station_id),
+                    session.corp_role,
+                    ctx.now_unix(),
+                )
+            });
             if !is_ceo && !eve_db::corp_roles::has_role(effective_roles, eve_db::corp_roles::ROLE_RENT_OFFICE) {
                 return Some(Err(BridgeRpcError {
                     code: "CorpRoleDenied".into(),
@@ -468,8 +476,16 @@ fn handle_office_manager(
 
         "UnrentOffice" => {
             let station_id = resolve_office_station_id(ctx, args, bound_entry, default_station_id);
-            let (is_ceo, roles) = get_effective_corp_roles(ctx, corp_id, char_id);
-            let effective_roles = session.corp_role | roles;
+            fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
+            let (is_ceo, effective_roles) = ctx.db.with_snapshot(|snap| {
+                snap.effective_corp_roles_at(
+                    corp_id,
+                    char_id,
+                    Some(station_id),
+                    session.corp_role,
+                    ctx.now_unix(),
+                )
+            });
             if !is_ceo
                 && !eve_db::corp_roles::has_role(
                     effective_roles,

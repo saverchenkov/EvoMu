@@ -205,7 +205,7 @@ async fn provision_contract_player_in_space(
             guns.push(gid);
             transfer_ids.push(gid);
         }
-        ammo_item = create_item_id(ctx, gm, ammo_tid, 1000).await;
+        ammo_item = create_item_id(ctx, gm, ammo_tid, 10_000).await;
         transfer_ids.push(ammo_item);
     }
     let mut extra_ids = Vec::new();

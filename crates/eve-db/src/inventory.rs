@@ -598,6 +598,9 @@ impl WorldRepository {
         if quantity <= 0 {
             return Err(DbError::ValidationError("Quantity must be positive".into()));
         }
+        let qty_i32 = i32::try_from(quantity).map_err(|_| {
+            DbError::ValidationError(format!("Quantity {quantity} exceeds i32::MAX"))
+        })?;
         self.try_with_mut_snapshot(|guard| {
             // Check if existing non-singleton item stack exists at location/flag (ignoring courier cargo stacks)
             let existing_id = guard.items.values().find(|it| {
@@ -611,7 +614,9 @@ impl WorldRepository {
             if let Some(existing_id) = existing_id {
                 let updated = {
                     let existing = guard.items.get_mut(&existing_id).unwrap();
-                    existing.quantity = existing.quantity.saturating_add(quantity as i32);
+                    existing.quantity = existing.quantity.checked_add(qty_i32).ok_or_else(|| {
+                        DbError::ValidationError("Stack quantity overflow".into())
+                    })?;
                     existing.version += 1;
                     existing.clone()
                 };
@@ -619,15 +624,18 @@ impl WorldRepository {
                 return Ok(updated);
             }
 
-            let item_id = guard.next_entity_id;
-            guard.next_entity_id += 1;
+            let mut item_id = guard.alloc_entity_id();
+            while guard.items.contains_key(&item_id) {
+                item_id = guard.alloc_entity_id();
+            }
+            debug_assert!(!guard.items.contains_key(&item_id));
             let item = InventoryItemRecord {
                 item_id,
                 type_id,
                 owner_id,
                 location_id,
                 flag,
-                quantity: quantity as i32,
+                quantity: qty_i32,
                 singleton: false,
                 version: 1,
                 dynamic_attributes: std::collections::HashMap::new(),

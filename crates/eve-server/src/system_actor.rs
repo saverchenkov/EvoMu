@@ -1102,12 +1102,19 @@ impl SystemRegistry {
                                 let _ = reply.send(Ok(()));
                             }
                             SystemCommand::HealCombatState { ball_id, reply } => {
+                                let grid_id = ballpark.ball_grid_ids.get(&ball_id).copied();
                                 let cs = ballpark.combat_states.entry(ball_id).or_default();
                                 cs.shield_hp = cs.max_shield_hp;
                                 cs.armor_hp = cs.max_armor_hp;
                                 cs.structure_hp = cs.max_structure_hp;
                                 cs.capacitor = cs.max_capacitor;
                                 let cloned = cs.clone();
+                                // Queue authoritative Destiny `OnDamageStateChange` / `OnFleetDamageStateChange`
+                                // (`[1.0, 1.0, 1.0]`) in the ballpark so V24 in-space clients receive `DoDestinyUpdate`
+                                // when `/heal` restores ship HP (standalone MachoNet `OnDamageStateChange` is suppressed).
+                                ballpark.emit_damage_and_destruction_events(
+                                    ball_id, grid_id, 1.0, 1.0, 1.0, false,
+                                );
                                 if let Some(db) = &db_opt {
                                     crate::sp6_lifecycle::persist_ship_combat_hp_in_db(db, ball_id, &cloned);
                                 }

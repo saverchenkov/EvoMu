@@ -833,18 +833,24 @@ fn register_payment_token_and_purchase_handlers(
                             format!("{STATUS_BAD_REQUEST}:Target character {target_cid} has no valid station")
                         })?;
 
-                    if let Some(existing) = snap.items.values_mut().find(|it| {
+                    if let Some(existing_id) = snap.items.values().find(|it| {
                         it.owner_id == target_cid
                             && it.location_id == dest_station
                             && it.flag == eve_db::InventoryFlag::Hangar
                             && it.type_id == type_id
                             && !it.singleton
-                    }) {
-                        existing.quantity = existing.quantity.saturating_add(qty);
+                    }).map(|it| it.item_id) {
+                        let existing = snap.items.get_mut(&existing_id).unwrap();
+                        existing.quantity = existing.quantity.checked_add(qty).ok_or_else(|| {
+                            format!("{STATUS_BAD_REQUEST}:Stack quantity overflow")
+                        })?;
                         existing.version += 1;
+                        snap.mark_item_dirty(existing_id);
                     } else {
-                        let item_id = snap.next_entity_id;
-                        snap.next_entity_id += 1;
+                        let mut item_id = snap.alloc_entity_id();
+                        while snap.items.contains_key(&item_id) {
+                            item_id = snap.alloc_entity_id();
+                        }
                         snap.items.insert(
                             item_id,
                             eve_db::InventoryItemRecord {
@@ -859,6 +865,7 @@ fn register_payment_token_and_purchase_handlers(
                                 ..Default::default()
                             },
                         );
+                        snap.mark_item_dirty(item_id);
                     }
                     Ok(())
                 })

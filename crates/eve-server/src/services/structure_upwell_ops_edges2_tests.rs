@@ -830,7 +830,14 @@ async fn mutants_cov_ext_state_safety_roles_and_profile_managers() {
         "InsufficientCorpRoles"
     );
 
-    // Non-CEO with session.corp_role == ROLE_DIRECTOR -> MoveCorpAssetsToSafety succeeds
+    // Non-CEO with DB + session ROLE_DIRECTOR -> MoveCorpAssetsToSafety succeeds
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations
+            .get_mut(&corp_id)
+            .unwrap()
+            .member_roles
+            .insert(char_id, ROLE_DIRECTOR);
+    });
     sess.corp_role = ROLE_DIRECTOR;
     let mv_dir = handle(&ctx, &mut sess, "structureAssetSafety", "MoveCorpAssetsToSafety", &[PyRep::Integer(30_000_142), PyRep::Integer(sid)], &kw)
         .await.unwrap().unwrap();
@@ -852,7 +859,14 @@ async fn mutants_cov_ext_state_safety_roles_and_profile_managers() {
         assert_eq!(load_ext_state(snap).asset_safety_wraps[&wrap_dir].deliverable_after_unix, 123_456);
     });
 
-    // MoveSafetyWrapToStructure on corp wrap: non-CEO + ROLE_STATION_MANAGER rejected -> ROLE_DIRECTOR in session succeeds
+    // MoveSafetyWrapToStructure on corp wrap: non-CEO + ROLE_STATION_MANAGER rejected -> ROLE_DIRECTOR succeeds
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations
+            .get_mut(&corp_id)
+            .unwrap()
+            .member_roles
+            .insert(char_id, ROLE_STATION_MANAGER);
+    });
     let mut non_dir = make_session(char_id, corp_id, None, 0);
     non_dir.corp_role = ROLE_STATION_MANAGER;
     assert_eq!(
@@ -860,6 +874,13 @@ async fn mutants_cov_ext_state_safety_roles_and_profile_managers() {
             .await.unwrap().unwrap_err().code,
         "InsufficientCorpRoles"
     );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations
+            .get_mut(&corp_id)
+            .unwrap()
+            .member_roles
+            .insert(char_id, ROLE_DIRECTOR);
+    });
     let mut dir_only = make_session(char_id, corp_id, None, 0);
     dir_only.corp_role = ROLE_DIRECTOR;
     let del_dir = handle(&ctx, &mut dir_only, "structureAssetSafety", "MoveSafetyWrapToStructure", &[PyRep::Integer(wrap_dir), PyRep::Integer(60_003_760)], &kw)

@@ -384,6 +384,7 @@ async fn test_structures_fulcrum_alignment_services_live() {
     ctx.advance_secs(12);
     rpc(&ctx, &mut pilot.sess, "stationSvc", "Dock", &[PyRep::Integer(FULCRUM_STATION), PyRep::Integer(pilot.ship_id)]).await.unwrap();
     let laser_id = common::stock_ship_bay(&ctx, &mut pilot, 451, 1, InventoryFlag::HiSlot0 as i64).await;
+    let _crystal_id = common::stock_ship_bay(&ctx, &mut pilot, 246, 1, InventoryFlag::HiSlot0 as i64).await;
     rpc(&ctx, &mut pilot.sess, "stationSvc", "Undock", &[]).await.unwrap();
     z_sys.set_ball_position(pilot.ship_id, fulcrum_pos + DVec3::new(100.0, 0.0, 0.0)).await;
     z_sys.set_ball_position(target.ship_id, fulcrum_pos + DVec3::new(600.0, 0.0, 0.0)).await;

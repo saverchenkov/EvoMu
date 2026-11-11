@@ -369,13 +369,18 @@ pub async fn trigger_structure_auto_defense_on_grid(
                         crate::router::NotificationTarget::Character(target_char_id),
                         "OnDamageMessage",
                         "charid",
-                        vec![
-                            PyRep::String("hit".into()),
-                            PyRep::Dict(vec![
-                                (PyRep::String("attackerID".into()), PyRep::Integer(structure_id)),
-                                (PyRep::String("damage".into()), PyRep::Real(dealt)),
-                            ]),
-                        ],
+                        vec![PyRep::Dict(vec![
+                            (PyRep::String("damage".into()), PyRep::Real(dealt)),
+                            (PyRep::String("source".into()), PyRep::Integer(structure_id)),
+                            (PyRep::String("attackerID".into()), PyRep::Integer(structure_id)),
+                            (PyRep::String("target".into()), PyRep::Integer(ship_id)),
+                            (PyRep::String("target_ID".into()), PyRep::Integer(ship_id)),
+                            (PyRep::String("weapon".into()), PyRep::Integer(35_894)),
+                            (PyRep::String("hitQuality".into()), PyRep::Integer(3)),
+                            (PyRep::String("attackType".into()), PyRep::String("other".into())),
+                            (PyRep::String("isWrecking".into()), PyRep::Bool(false)),
+                            (PyRep::String("isBanked".into()), PyRep::Bool(false)),
+                        ])],
                     );
                 }
                 if destroyed && !ctx.db.with_snapshot(|s| s.structures.contains_key(&ship_id)) {

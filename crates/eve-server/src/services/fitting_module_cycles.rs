@@ -705,7 +705,7 @@ pub(crate) async fn handle_module_cycles(
                         || (target_id_opt.is_none()
                             && matches!(
                                 mod_type.group_id,
-                                291 | 208 | 379 | 65 | 1672 | 52 | 201 | 41 | 325 | 2018 | 585 | 67 | 74 | 55 | 53 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807
+                                291 | 208 | 379 | 65 | 1672 | 52 | 201 | 41 | 325 | 2018 | 585 | 67 | 74 | 55 | 53 | 1986 | 4060 | 506..=512 | 524 | 771 | 862 | 1245 | 1674 | 4500 | 4805 | 4807
                             )))
                 {
                     let rep = crate::services::fitting_cycles_overheat::handle_active_overload_toggle(
@@ -1108,6 +1108,7 @@ pub(crate) async fn handle_module_cycles(
                                         crystal_volatility_damage = -1.0;
                                     } else {
                                         crystal_volatility_damage = 0.0;
+                                        crystal_volatility_chance = -1.0;
                                         deferred_post_cycle
                                             .turret_charge_consumptions
                                             .push((tid, charge_item.item_id));
@@ -1600,10 +1601,26 @@ pub(crate) async fn handle_module_cycles(
             if matches!(mod_type.group_id, 72 | 80 | 353 | 862) {
                 ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).trigger_weapon_timer(char_id, ctx.now_unix());
             }
+            let mut slot_still_has_charge = true;
             ctx.db.with_mut_snapshot(|snap| {
                 if snap.items.contains_key(&module_id) {
                     snap.module_active_states.insert(module_id);
-                    if let Some(cid) = active_burst_charge_tid {
+                    let tf = snap
+                        .items
+                        .get(&module_id)
+                        .map(|i| i.flag as u16)
+                        .unwrap_or(m.flag_id);
+                    let has_item = snap.items.values().any(|i| {
+                        i.location_id == ship_id
+                            && (i.flag as u16) == tf
+                            && i.item_id != module_id
+                            && i.quantity > 0
+                            && ctx.sde.types.get(&i.type_id).is_none_or(|t| t.group_id != 908)
+                    });
+                    if !has_item && crystal_volatility_chance < 0.0 {
+                        slot_still_has_charge = false;
+                        snap.module_active_charges.remove(&module_id);
+                    } else if let Some(cid) = active_burst_charge_tid {
                         snap.module_active_charges.insert(module_id, cid);
                     }
                 }
@@ -1637,7 +1654,12 @@ pub(crate) async fn handle_module_cycles(
                     vec![PyRep::Integer(module_id)],
                 );
             }
-            if let Some(cid) = active_burst_charge_tid {
+            if !slot_still_has_charge {
+                if let Some(fm) = fit.modules.get_mut(&module_id) {
+                    fm.charge_type_id = None;
+                    fm.charge_quantity = 0;
+                }
+            } else if let Some(cid) = active_burst_charge_tid {
                 if let Some(fm) = fit.modules.get_mut(&module_id) {
                     fm.charge_type_id = Some(cid);
                     fm.charge_quantity = fm.charge_quantity.max(1);

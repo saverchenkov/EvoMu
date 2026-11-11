@@ -739,22 +739,23 @@ fn caller_has_structure_extraction_role_checks_session_ceo_and_member_roles() {
     assert!(caller_has_structure_extraction_role(&snap, ceo_id, corp_id, 0));
     assert!(caller_has_structure_extraction_role(&snap, config_member, corp_id, 0));
     assert!(!caller_has_structure_extraction_role(&snap, plain_member, corp_id, 0));
-    // Session corp role override grants access without DB role
-    assert!(caller_has_structure_extraction_role(
+    // Stale session corp role cannot override explicit DB member_roles (#837)
+    assert!(!caller_has_structure_extraction_role(
         &snap,
         plain_member,
         corp_id,
         ROLE_DIRECTOR
     ));
-    assert!(caller_has_structure_extraction_role(
+    assert!(!caller_has_structure_extraction_role(
         &snap,
         plain_member,
         corp_id,
         ROLE_STATION_MANAGER
     ));
+    let unlisted_member = 90_000_077;
     assert!(caller_has_structure_extraction_role(
         &snap,
-        plain_member,
+        unlisted_member,
         corp_id,
         ROLE_STARBASE_CONFIG
     ));

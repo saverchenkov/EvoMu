@@ -16,7 +16,7 @@ pub mod rpc_args;
 pub mod session;
 pub mod session_transition;
 
-pub use binding::SessionCleanupGuard;
+pub use binding::{alloc_transport_session_id, SessionCleanupGuard, NEXT_TRANSPORT_SESSION_ID};
 pub use cache_notifications::*;
 pub use context::*;
 pub use dispatch::box_fut;

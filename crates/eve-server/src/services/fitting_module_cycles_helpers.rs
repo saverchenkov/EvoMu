@@ -930,6 +930,36 @@ pub(crate) fn build_all_info(
         for (aid, val) in [(164u16, cha), (165, int), (166, mem), (167, per), (168, wil)] {
             char_attrs_map.insert(aid, val);
         }
+        let (drones_lv, target_mgmt_lv, adv_target_mgmt_lv) = ctx.db.with_snapshot(|snap| {
+            let sk = snap.skills.get(&char_id);
+            let d = sk
+                .and_then(|m| m.get(&3436))
+                .map(|s| f64::from(s.level.min(5)))
+                .unwrap_or(0.0);
+            let tm = sk
+                .and_then(|m| m.get(&3429))
+                .map(|s| f64::from(s.level.min(5)))
+                .unwrap_or(0.0);
+            let atm = sk
+                .and_then(|m| m.get(&3430))
+                .map(|s| f64::from(s.level.min(5)))
+                .unwrap_or(0.0);
+            (d, tm, atm)
+        });
+        let (max_active_drones, max_locked_targets, drone_ctrl_dist) =
+            if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
+                let d = fit.get_character_effective_attribute(352, &ctx.sde).max(drones_lv);
+                let t = fit
+                    .get_character_effective_attribute(192, &ctx.sde)
+                    .max(2.0 + target_mgmt_lv + adv_target_mgmt_lv);
+                let c = fit.get_character_effective_attribute(458, &ctx.sde).max(20_000.0);
+                (d, t, c)
+            } else {
+                (drones_lv, 2.0 + target_mgmt_lv + adv_target_mgmt_lv, 20_000.0)
+            };
+        char_attrs_map.insert(352, max_active_drones);
+        char_attrs_map.insert(192, max_locked_targets);
+        char_attrs_map.insert(458, drone_ctrl_dist);
         let mut char_attrs: Vec<(PyRep, PyRep)> = char_attrs_map
             .into_iter()
             .map(|(k, v)| (PyRep::Integer(i64::from(k)), PyRep::Real(v)))
@@ -1535,6 +1565,7 @@ pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u
                         (PyRep::String("weapon".into()), PyRep::Integer(module_type_id as i64)),
                         (PyRep::String("hitQuality".into()), PyRep::Integer(5)),
                         (PyRep::String("attackType".into()), PyRep::String("me".into())),
+                        (PyRep::String("isBanked".into()), PyRep::Bool(false)),
                     ]);
                     ctx.notify(
                         crate::router::NotificationTarget::Character(attacker_char_id),
@@ -1551,7 +1582,7 @@ pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u
                         module_type_id,
                         false,
                     );
-                    msg_tuples.push(PyRep::Tuple(vec![dmg_dict]));
+                    msg_tuples.push(PyRep::Tuple(vec![PyRep::String("AttackHit".into()), dmg_dict]));
                     let victim_char_opt = ctx.db.with_snapshot(|snap| {
                         snap.characters
                             .values()
@@ -1587,6 +1618,7 @@ pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u
                             (PyRep::String("weapon".into()), PyRep::Integer(module_type_id as i64)),
                             (PyRep::String("hitQuality".into()), PyRep::Integer(5)),
                             (PyRep::String("attackType".into()), PyRep::String("other".into())),
+                            (PyRep::String("isBanked".into()), PyRep::Bool(false)),
                         ]);
                         ctx.notify(
                             crate::router::NotificationTarget::Character(victim_char_id),
@@ -1598,7 +1630,10 @@ pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u
                             crate::router::NotificationTarget::Character(victim_char_id),
                             "OnDamageMessages",
                             "charid",
-                            vec![PyRep::List(vec![PyRep::Tuple(vec![vic_dict])])],
+                            vec![PyRep::List(vec![PyRep::Tuple(vec![
+                                PyRep::String("AttackedBy".into()),
+                                vic_dict,
+                            ])])],
                         );
                     }
                 }
@@ -1650,19 +1685,22 @@ pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u
                             (PyRep::String("hitQuality".into()), PyRep::Integer(3)),
                             (PyRep::String("attackType".into()), PyRep::String("me".into())),
                             (PyRep::String("isWrecking".into()), PyRep::Bool(false)),
+                            (PyRep::String("isBanked".into()), PyRep::Bool(false)),
                         ]);
-                        let msg_args = vec![PyRep::String("AttackHit".into()), dmg_dict];
                         ctx.notify(
                             crate::router::NotificationTarget::Character(acid),
                             "OnDamageMessage",
                             "charid",
-                            msg_args.clone(),
+                            vec![dmg_dict.clone()],
                         );
                         ctx.notify(
                             crate::router::NotificationTarget::Character(acid),
                             "OnDamageMessages",
                             "charid",
-                            vec![PyRep::List(vec![PyRep::Tuple(msg_args)])],
+                            vec![PyRep::List(vec![PyRep::Tuple(vec![
+                                PyRep::String("AttackHit".into()),
+                                dmg_dict,
+                            ])])],
                         );
                     }
                     if let Some(vcid) = target_char_id.filter(|&c| c > 0 && c != owner_cid) {
@@ -1680,19 +1718,22 @@ pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u
                             (PyRep::String("hitQuality".into()), PyRep::Integer(3)),
                             (PyRep::String("attackType".into()), PyRep::String("other".into())),
                             (PyRep::String("isWrecking".into()), PyRep::Bool(false)),
+                            (PyRep::String("isBanked".into()), PyRep::Bool(false)),
                         ]);
-                        let vic_args = vec![PyRep::String("AttackedBy".into()), vic_dict];
                         ctx.notify(
                             crate::router::NotificationTarget::Character(vcid),
                             "OnDamageMessage",
                             "charid",
-                            vic_args.clone(),
+                            vec![vic_dict.clone()],
                         );
                         ctx.notify(
                             crate::router::NotificationTarget::Character(vcid),
                             "OnDamageMessages",
                             "charid",
-                            vec![PyRep::List(vec![PyRep::Tuple(vic_args)])],
+                            vec![PyRep::List(vec![PyRep::Tuple(vec![
+                                PyRep::String("AttackedBy".into()),
+                                vic_dict,
+                            ])])],
                         );
                     }
                 }

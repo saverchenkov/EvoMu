@@ -506,7 +506,7 @@ pub async fn handle_gm_slash_ext(
 
         let (target_char_id, sys_id, target_ship_id) = ctx.db.with_snapshot(|snap| {
             let caller_sys = session.solar_system_id.or_else(|| snap.characters.get(&cid).map(|c| c.solar_system_id)).unwrap_or(0);
-            let caller_ship = snap.characters.get(&cid).map(|c| c.active_ship_id).unwrap_or(0);
+            let caller_ship = session.ship_id.or_else(|| snap.characters.get(&cid).map(|c| c.active_ship_id)).unwrap_or(0);
             if let Some(tid) = arg_id {
                 if let Some(ch) = snap.characters.get(&tid) {
                     (tid, ch.solar_system_id, ch.active_ship_id)
@@ -527,6 +527,7 @@ pub async fn handle_gm_slash_ext(
             if let Ok(cs) = handle.heal_combat_state(target_ship_id).await {
                 combat_healed = cs;
             }
+            let _ = handle.flush_peer_observer_updates(session.ship_id).await;
         }
 
         // Clear module and hull dynamic damage + heat attributes in DB, SP6 HP, and fitting cache

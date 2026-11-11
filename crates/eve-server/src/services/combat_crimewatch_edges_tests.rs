@@ -264,7 +264,19 @@ async fn shield_recharge_damage_log_qualities_and_war_legality_edges() {
     let qualities: Vec<String> = att_notifs
         .iter()
         .filter(|n| n.event == "OnDamageMessage")
-        .filter_map(|n| n.args.first().and_then(|a| a.as_str()).map(|s| s.to_string()))
+        .filter_map(|n| {
+            let d = n.args.first()?;
+            let dmg = d.dict_get("damage").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let wreck = d.dict_get("isWrecking").and_then(|v| v.as_bool()).unwrap_or(false);
+            assert_eq!(d.dict_get("isBanked"), Some(&PyRep::Bool(false)));
+            Some(if dmg <= 0.0 {
+                "miss".to_string()
+            } else if wreck {
+                "wrecking".to_string()
+            } else {
+                "hit".to_string()
+            })
+        })
         .collect();
     assert_eq!(qualities, vec!["miss".to_string(), "wrecking".to_string()]);
     assert!(!att_notifs.iter().any(|n| n.event == "AttackedBy"));

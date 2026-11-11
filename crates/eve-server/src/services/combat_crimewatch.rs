@@ -1149,30 +1149,44 @@ pub(crate) fn emit_combat_log_and_damage_state(
     } else {
         "hit"
     };
-    let msg_args = vec![
-        PyRep::String(hit_quality.into()),
-        PyRep::Dict(vec![
-            (PyRep::String("damage".into()), PyRep::Real(applied_dmg)),
-            (PyRep::String("source".into()), PyRep::Integer(attacker_ship_id)),
-            (PyRep::String("target".into()), PyRep::Integer(target_ball_id)),
-            (
-                PyRep::String("weapon".into()),
-                PyRep::Integer(weapon_type_id as i64),
-            ),
-            (PyRep::String("isWrecking".into()), PyRep::Bool(is_wrecking)),
-        ]),
-    ];
+    let hit_quality_code = if applied_dmg <= 0.0 {
+        0
+    } else if is_wrecking {
+        6
+    } else {
+        3
+    };
+    let dmg_dict = PyRep::Dict(vec![
+        (PyRep::String("damage".into()), PyRep::Real(applied_dmg)),
+        (PyRep::String("source".into()), PyRep::Integer(attacker_ship_id)),
+        (PyRep::String("attackerID".into()), PyRep::Integer(attacker_ship_id)),
+        (PyRep::String("target".into()), PyRep::Integer(target_ball_id)),
+        (PyRep::String("target_ID".into()), PyRep::Integer(target_ball_id)),
+        (
+            PyRep::String("owner".into()),
+            PyRep::Tuple(vec![PyRep::Integer(2), PyRep::Integer(attacker_char_id)]),
+        ),
+        (
+            PyRep::String("weapon".into()),
+            PyRep::Integer(weapon_type_id as i64),
+        ),
+        (PyRep::String("hitQuality".into()), PyRep::Integer(hit_quality_code)),
+        (PyRep::String("attackType".into()), PyRep::String("me".into())),
+        (PyRep::String("isWrecking".into()), PyRep::Bool(is_wrecking)),
+        (PyRep::String("isBanked".into()), PyRep::Bool(false)),
+    ]);
+    let msg_tuple = vec![PyRep::String(hit_quality.into()), dmg_dict.clone()];
     ctx.notify(
         NotificationTarget::Character(attacker_char_id),
         "OnDamageMessage",
         "charid",
-        msg_args.clone(),
+        vec![dmg_dict.clone()],
     );
     ctx.notify(
         NotificationTarget::Character(attacker_char_id),
         "OnDamageMessages",
         "charid",
-        vec![PyRep::List(vec![PyRep::Tuple(msg_args.clone())])],
+        vec![PyRep::List(vec![PyRep::Tuple(msg_tuple)])],
     );
     let _ = ctx.notify_damage_state_change(
         NotificationTarget::Character(attacker_char_id),
@@ -1235,17 +1249,39 @@ pub(crate) fn emit_combat_log_and_damage_state(
             weapon_type_id,
             is_wrecking,
         );
+        let vic_dict = PyRep::Dict(vec![
+            (PyRep::String("damage".into()), PyRep::Real(applied_dmg)),
+            (PyRep::String("source".into()), PyRep::Integer(attacker_ship_id)),
+            (PyRep::String("attackerID".into()), PyRep::Integer(attacker_ship_id)),
+            (PyRep::String("target".into()), PyRep::Integer(target_ball_id)),
+            (PyRep::String("target_ID".into()), PyRep::Integer(target_ball_id)),
+            (
+                PyRep::String("owner".into()),
+                PyRep::Tuple(vec![PyRep::Integer(2), PyRep::Integer(attacker_char_id)]),
+            ),
+            (
+                PyRep::String("weapon".into()),
+                PyRep::Integer(weapon_type_id as i64),
+            ),
+            (PyRep::String("hitQuality".into()), PyRep::Integer(hit_quality_code)),
+            (PyRep::String("attackType".into()), PyRep::String("other".into())),
+            (PyRep::String("isWrecking".into()), PyRep::Bool(is_wrecking)),
+            (PyRep::String("isBanked".into()), PyRep::Bool(false)),
+        ]);
         ctx.notify(
             NotificationTarget::Character(vic_id),
             "OnDamageMessage",
             "charid",
-            msg_args.clone(),
+            vec![vic_dict.clone()],
         );
         ctx.notify(
             NotificationTarget::Character(vic_id),
             "OnDamageMessages",
             "charid",
-            vec![PyRep::List(vec![PyRep::Tuple(msg_args.clone())])],
+            vec![PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::String(hit_quality.into()),
+                vic_dict,
+            ])])],
         );
     }
 }

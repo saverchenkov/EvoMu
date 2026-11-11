@@ -79,6 +79,7 @@ async fn test_batch4_crimewatch_timers_and_system_flag_updates() {
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(gun_id, make_item(gun_id, 484, PILOT_A, ship_a, InventoryFlag::HiSlot0, 1, true));
+        snap.items.insert(gun_id + 1, make_item(gun_id + 1, 178, PILOT_A, ship_a, InventoryFlag::HiSlot0, 100, false));
         snap.module_online_states.insert(gun_id, true);
     });
     ctx.invalidate_ship_fitting(ship_a);
@@ -129,6 +130,7 @@ async fn test_batch4_crimewatch_timers_and_system_flag_updates() {
     let _z_sess_b = login_in_space(&ctx, 92_004, "other", "other-secret", PILOT_B, z_ship_b, 587, SYS_ZARZAKH, DVec3::new(1_000.0, 0.0, 0.0)).await;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(z_gun, make_item(z_gun, 484, PILOT_A, z_ship_a, InventoryFlag::HiSlot0, 1, true));
+        snap.items.insert(z_gun + 1, make_item(z_gun + 1, 178, PILOT_A, z_ship_a, InventoryFlag::HiSlot0, 100, false));
         snap.module_online_states.insert(z_gun, true);
     });
     ctx.invalidate_ship_fitting(z_ship_a);

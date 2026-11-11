@@ -102,6 +102,19 @@ async fn parity_shard_5_crimewatch_kill_rights_and_timers() {
         if let Some(ch) = snap.characters.get_mut(&buyer_id) {
             ch.balance = eve_db::IskCents::from_isk(50_000_000);
         }
+        snap.items.insert(
+            100_999_005,
+            eve_db::InventoryItemRecord {
+                item_id: 100_999_005,
+                type_id: 185,
+                owner_id: CHAR_ALPHA_ATTACKER,
+                location_id: 100_000_001,
+                flag: eve_db::InventoryFlag::HiSlot0,
+                quantity: 5_000,
+                singleton: false,
+                ..Default::default()
+            },
+        );
     });
 
     let mut killer_sess =
@@ -293,18 +306,33 @@ async fn parity_shard_5_crimewatch_kill_rights_and_timers() {
     ctx.advance_secs(905);
     let _ = rpc(&ctx, &mut buyer_sess, "stationSvc", "Undock", &[]).await;
     let gun_for_killer = ctx.db.with_mut_snapshot(|snap| {
+        let ship_id = snap.characters[&CHAR_ALPHA_ATTACKER].active_ship_id;
         let gid = snap.next_entity_id + 1;
-        snap.next_entity_id = gid + 1;
+        let ammo_id = gid + 1;
+        snap.next_entity_id = ammo_id + 1;
         snap.items.insert(
             gid,
             eve_db::InventoryItemRecord {
                 item_id: gid,
                 type_id: MODULE_AUTOCANNON_II,
                 owner_id: CHAR_ALPHA_ATTACKER,
-                location_id: snap.characters[&CHAR_ALPHA_ATTACKER].active_ship_id,
+                location_id: ship_id,
                 flag: eve_db::InventoryFlag::HiSlot0,
                 quantity: 1,
                 singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            ammo_id,
+            eve_db::InventoryItemRecord {
+                item_id: ammo_id,
+                type_id: 185,
+                owner_id: CHAR_ALPHA_ATTACKER,
+                location_id: ship_id,
+                flag: eve_db::InventoryFlag::HiSlot0,
+                quantity: 5000,
+                singleton: false,
                 ..Default::default()
             },
         );

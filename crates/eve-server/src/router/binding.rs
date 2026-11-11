@@ -4,8 +4,17 @@ use crate::router::context::{BoundObjectEntry, ServerContext, NEXT_BOUND_ID};
 use crate::router::{NotificationTarget, PendingMachoNotification};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+/// Unified cluster-wide transport session ID allocator shared by `machoNet` TCP,
+/// Python Client Bridge TCP, and Quasar HTTP/2 gRPC listeners (`#852`).
+pub static NEXT_TRANSPORT_SESSION_ID: AtomicU64 = AtomicU64::new(10_000);
+
+/// Allocates a globally unique transport `session_id` across all client listeners (`#852`).
+pub fn alloc_transport_session_id() -> u64 {
+    NEXT_TRANSPORT_SESSION_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 const ERR_BIND_AUTH_DENIED: &str = "BindAuthorizationDenied";
 const ERR_BOUND_OWNERSHIP: &str = "BoundObjectOwnershipViolation";
@@ -114,7 +123,14 @@ impl ServerContext {
     pub async fn cleanup_disconnected_client_session(&self, session: &mut SessionState) {
         let session_id = session.session_id;
         self.unregister_session_closer(session_id);
-        self.release_session_bindings(session_id);
+        if let Some(uid) = session.user_id {
+            self.bound_objects
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|_, v| !(v.session_id == session_id && (v.user_id == 0 || v.user_id == uid)));
+        } else {
+            self.release_session_bindings(session_id);
+        }
         self.quasar_gateway.unsubscribe_session(session_id);
         if let Some(uid) = session.user_id {
             // A dropped connection that still held the character online is a log-off for watchers and triggers in-space logoff handling.
