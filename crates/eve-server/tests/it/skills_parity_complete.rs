@@ -99,7 +99,6 @@ async fn test_feat_skills_alpha_skill_caps() {
     eve_testkit::attest(&["feat:skills.alpha-skill-caps"]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
-    common::seed_test_nes_store_catalog(&ctx);
 
     let (mut sess, char_id) = create_and_select_alpha_pilot(&ctx, 1001, "alpha_cap_u", "alpha-pass", "Alpha Cap Pilot").await;
     assert_eq!(ctx.db.get_character(char_id).unwrap().clone_grade, 1);
@@ -150,9 +149,11 @@ async fn test_feat_skills_history_events_and_obsolete_refund() {
     let repo = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open sqlite"));
     let ctx = ServerContext::with_repository(repo);
     let demo = WorldRepository::with_demo_seed().with_snapshot(|s| s.clone());
-    ctx.db.with_mut_snapshot(|snap| *snap = demo);
+    ctx.db.with_mut_snapshot(|snap| {
+        *snap = demo;
+        eve_server::services::quasar_payment_store::ensure_store_catalog_seeded(snap, &ctx.sde);
+    });
     common::pin_clock(&ctx);
-    common::seed_test_nes_store_catalog(&ctx);
     eve_server::world_seeder::seed_dual_anchor_markets(&ctx.db, &ctx.sde);
 
     let mut donor = login_and_select(&ctx, 1010, "demo", "demo-secret", 90_000_001).await;
@@ -252,9 +253,11 @@ async fn test_feat_skills_certificates_and_plans_and_accelerators() {
     let repo = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open sqlite"));
     let ctx = ServerContext::with_repository(repo);
     let demo = WorldRepository::with_demo_seed().with_snapshot(|s| s.clone());
-    ctx.db.with_mut_snapshot(|snap| *snap = demo);
+    ctx.db.with_mut_snapshot(|snap| {
+        *snap = demo;
+        eve_server::services::quasar_payment_store::ensure_store_catalog_seeded(snap, &ctx.sde);
+    });
     common::pin_clock(&ctx);
-    common::seed_test_nes_store_catalog(&ctx);
 
     let mut ceo_sess = login_and_select(&ctx, 1020, "demo", "demo-secret", 90_000_001).await;
     let mut member_sess = login_and_select(&ctx, 1021, "other", "other-secret", 90_000_002).await;

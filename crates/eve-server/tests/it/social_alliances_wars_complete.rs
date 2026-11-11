@@ -422,11 +422,20 @@ async fn test_wars_declaration_hq_eligibility_mutual_peace_allies_and_stats() {
     assert_eq!(field(&call(&ctx, &mut sess1, "warsInfoMgr", "GetPublicWarInfo", vec![PyRep::Integer(war_id)]).await.unwrap(), "active"), PyRep::Bool(true));
     ctx.advance_secs(86_401);
     assert_eq!(field(&call(&ctx, &mut sess1, "warsInfoMgr", "GetPublicWarInfo", vec![PyRep::Integer(war_id)]).await.unwrap(), "active"), PyRep::Bool(false));
-    let (tcols, trows) = rows(&call(&ctx, &mut sess1, "peaceTreatyMgr", "GetPeaceTreatiesForSession", vec![]).await.unwrap());
-    assert_eq!(trows[0][col(&tcols, "otherOwnerID")], PyRep::Integer(def));
+    let PyRep::Tuple(treaties_tuple) = call(&ctx, &mut sess1, "peaceTreatyMgr", "GetPeaceTreatiesForSession", vec![]).await.unwrap() else {
+        panic!("expected (outgoing, incoming) tuple from GetPeaceTreatiesForSession");
+    };
+    let PyRep::List(outgoing_treaties) = &treaties_tuple[0] else {
+        panic!("expected outgoing list");
+    };
+    assert_eq!(field(&outgoing_treaties[0], "otherOwnerID"), PyRep::Integer(def));
+    assert_eq!(field(&outgoing_treaties[0], "peaceReason"), PyRep::Integer(4));
     assert_eq!(call(&ctx, &mut sess1, "corpRegistry", "DeclareWarAgainst", declare(995_000_001)).await.expect_err("treaty").code, "PeaceTreatyActive");
     ctx.advance_secs(14 * 86_400);
-    assert!(rows(&call(&ctx, &mut sess1, "peaceTreatyMgr", "GetPeaceTreatiesForSession", vec![]).await.unwrap()).1.is_empty());
+    let PyRep::Tuple(expired_tuple) = call(&ctx, &mut sess1, "peaceTreatyMgr", "GetPeaceTreatiesForSession", vec![]).await.unwrap() else {
+        panic!("expected tuple");
+    };
+    assert_eq!(expired_tuple, vec![PyRep::List(Vec::new()), PyRep::List(Vec::new())]);
 
     // war-eligibility-change: the defender loses its last structure -> ineligible, war ends.
     let war2 = field(&call(&ctx, &mut sess1, "corpRegistry", "DeclareWarAgainst", declare(995_000_001)).await.expect("redeclare after treaty"), "warID").as_i64().unwrap();

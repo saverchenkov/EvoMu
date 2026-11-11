@@ -14,12 +14,30 @@ use eve_server::router::ServerContext;
 use eve_server::system_actor::AsteroidState;
 use glam::DVec3;
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+
+fn shared_sde() -> Arc<eve_sde::SdeRegistry> {
+    static SDE: OnceLock<Arc<eve_sde::SdeRegistry>> = OnceLock::new();
+    Arc::clone(SDE.get_or_init(|| Arc::new(eve_sde::SdeRegistry::with_canonical_seed())))
+}
+
+fn shared_demo_snapshot() -> eve_db::WorldStateSnapshot {
+    static SNAP: OnceLock<eve_db::WorldStateSnapshot> = OnceLock::new();
+    SNAP.get_or_init(|| eve_db::WorldRepository::with_demo_seed().with_snapshot(|s| s.clone()))
+        .clone()
+}
+
+fn fast_demo_ctx() -> ServerContext {
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    db.with_mut_snapshot(|s| *s = shared_demo_snapshot());
+    ServerContext::with_sde_and_repository(shared_sde(), db)
+}
 
 #[tokio::test]
 async fn test_sp3_spatial_grid_bubbles_dynamic_transitions_and_warp_curves() {
     // parity: plan:SP-3, feat:navigation.bubbles-grid, feat:navigation.warp-speed-formula, destiny:AddBalls2, destiny:RemoveBalls
     eve_testkit::attest(&["plan:SP-3", "feat:navigation.bubbles-grid", "feat:navigation.warp-speed-formula", "destiny:AddBalls2", "destiny:RemoveBalls"]);
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     let jita = ctx.systems.get_or_spawn(30_000_142);
 
     let ship_1_id = 100_600_001;
@@ -129,7 +147,7 @@ async fn test_sp3_spatial_grid_bubbles_dynamic_transitions_and_warp_curves() {
 async fn test_sp4_asteroid_belt_entities_collision_bounce_and_respawn_cycle() {
     // parity: feat:mining.depletion, feat:mining.belt-respawn
     eve_testkit::attest(&["feat:mining.depletion", "feat:mining.belt-respawn"]);
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     let perim = ctx.systems.get_or_spawn(30_000_144);
 
     // 1. Populate asteroid belt entities in Perimeter (has 3 SDE asteroid belts)
@@ -234,7 +252,7 @@ async fn test_sp4_asteroid_belt_entities_collision_bounce_and_respawn_cycle() {
 async fn test_sp5_stargate_jumping_session_handoff_and_gate_cloak_invulnerability() {
     // parity: plan:SP-5, feat:navigation.stargate-jump, feat:navigation.gate-cloak, rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID
     eve_testkit::attest(&["plan:SP-5", "feat:navigation.stargate-jump", "feat:navigation.gate-cloak"]);
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     let kw = HashMap::new();
     let mut sess = SessionState::new(955);
 
@@ -381,7 +399,7 @@ async fn test_sp5_stargate_jumping_session_handoff_and_gate_cloak_invulnerabilit
 async fn test_mn01_mining_laser_cycle_yield_residue_and_ore_hold_deposit() {
     // parity: rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID
     eve_testkit::attest(&[]);
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     let kw = HashMap::new();
     let mut sess = SessionState::new(961);
 
@@ -517,7 +535,7 @@ async fn test_mn01_mining_laser_cycle_yield_residue_and_ore_hold_deposit() {
 async fn test_mn02_ice_harvesting_and_gas_harvesting_cycles() {
     // parity: rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID
     eve_testkit::attest(&[]);
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     let kw = HashMap::new();
     let mut sess = SessionState::new(962);
 
@@ -696,7 +714,7 @@ use std::collections::HashMap;
 async fn test_mn03_mining_ledger_recording_and_char_mining_ledger_service() {
     // parity: feat:mining.character-ledger, rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:characterMiningLedger.GetCharacterLogs
     eve_testkit::attest(&["feat:mining.character-ledger"]);
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     let kw = HashMap::new();
     let mut sess = SessionState::new(963);
 
@@ -1028,7 +1046,7 @@ async fn test_mn03_mining_ledger_recording_and_char_mining_ledger_service() {
 
 #[tokio::test]
 async fn test_r3_track1_mining_pve_fw_regressions() {
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     let kw = HashMap::new();
     let mut sess = SessionState::new(964);
 
@@ -1433,7 +1451,7 @@ async fn test_mining_reprocessing_curves_scrapmetal_and_prismaticite() {
         "feat:mining.scrapmetal-yield-exclusions",
         "feat:mining.prismaticite-reprocessing-and-unrefined-reactions",
     ]);
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let char_id = 90_000_001_i64;
@@ -1802,7 +1820,7 @@ async fn test_mining_foreman_burst_charges_orca_porpoise_rorqual_and_preservatio
 
 #[tokio::test]
 async fn test_mining_wormhole_sites_phased_fields_and_market_goals() {
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     crate::common::pin_clock(&ctx);
 
     use eve_server::services::mining_sites::{PhasedAsteroidFieldState, resolve_wormhole_ore_site, WORMHOLE_ORE_SITES};
@@ -1877,7 +1895,7 @@ use crate::common::login_pilot;
 // ============================================================================
 #[tokio::test]
 async fn test_mn01_sde_mining_static_data_and_distributions() {
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     let sde = &ctx.sde;
 
     // Veldspar (1230) -> Tritanium (34) only
@@ -1931,7 +1949,7 @@ async fn test_mn01_sde_mining_static_data_and_distributions() {
 async fn test_mn02_asteroid_belts_as_balls_highsec_and_nullsec() {
     // parity: plan:MN-02
     eve_testkit::attest(&["plan:MN-02"]);
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
 
@@ -2057,7 +2075,7 @@ async fn test_mn02_asteroid_belts_as_balls_highsec_and_nullsec() {
 async fn test_of28_mining_laser_fired_local_and_canonical_ledger_rpc() {
     // parity: notify:OnOreMined, rpc:characterMiningLedger.GetCharacterLogs
     eve_testkit::attest(&["notify:OnOreMined", "rpc:characterMiningLedger.GetCharacterLogs"]);
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     crate::common::pin_clock(&ctx);
     let char_id = 90_000_001i64;
     let mut sess = SessionState::new(9109);
@@ -2151,8 +2169,8 @@ async fn test_of28_mining_laser_fired_local_and_canonical_ledger_rpc() {
     .unwrap();
 
     let _ = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(ast_id)], &kw, None).await.unwrap();
-    for _ in 0..10 {
-        jita.step_manual(1.0).await.unwrap();
+    for _ in 0..3 {
+        jita.step_manual(5.0).await.unwrap();
     }
     let _ = ctx.drain_notifications_for_char(char_id);
     let _ = ctx
@@ -2201,7 +2219,7 @@ async fn test_of28_mining_laser_fired_local_and_canonical_ledger_rpc() {
 async fn test_mn09_mining_drones_ore_hold_delivery_and_range_check() {
     // parity: plan:MN-09, feat:drones.mining-drones, rpc:entity.CmdMineRepeatedly
     eve_testkit::attest(&["plan:MN-09", "feat:drones.mining-drones", "rpc:entity.CmdMineRepeatedly"]);
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     crate::common::pin_clock(&ctx);
     let char_id = 90_000_001i64;
     let mut sess = SessionState::new(9109);
@@ -2395,7 +2413,7 @@ async fn test_mn09_mining_drones_ore_hold_delivery_and_range_check() {
 #[tokio::test]
 async fn test_npc_mining_op_derived_hauler_replenishment() {
     // parity: plan:MN-17
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     let director = LivingWorldDirector::new();
 
     let convoy_id = 800_000_199i64;
@@ -2557,7 +2575,7 @@ async fn bind_service_oid(
 async fn test_e5_agent_finder_and_conversation_lifecycle() {
     // parity: feat:pve.agent-finder, feat:pve.agent-conversation, feat:pve.mission-accept, feat:pve.mission-decline, feat:pve.mission-quit, rpc:agentMgr.GetAgents, rpc:agentMgr.GetMyJournalDetails, rpc:agentMgr.GetSolarSystemOfAgent
     eve_testkit::attest(&["feat:pve.agent-finder", "feat:pve.agent-conversation", "feat:pve.mission-accept", "feat:pve.mission-decline", "feat:pve.mission-quit"]);
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     crate::common::pin_clock(&ctx);
     let mut sess = create_auth_session(&ctx, 1002).await;
     let kw = HashMap::new();
@@ -2900,7 +2918,7 @@ async fn spawn_pilot_ship_in_space(
 
 #[tokio::test]
 async fn test_parity_navy_npc_and_faction_police() {
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     crate::common::pin_clock(&ctx);
 
     let outlaw_ship = 850_001i64;
@@ -2996,7 +3014,7 @@ async fn test_parity_mining_op_npc_and_hauler_convoy() {
     // parity: feat:npc.npc-hauler
     eve_testkit::attest(&["feat:npc.npc-hauler"]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     crate::common::pin_clock(&ctx);
 
     let ship_id = 850_010i64;
@@ -3143,7 +3161,7 @@ async fn test_parity_mining_belts_as_balls_and_ore_distribution() {
         "feat:mining.belt-ore-distribution",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
 
     let perim_handle = ctx.systems.get_or_spawn(PERIMETER_SYS);
     let perim_asts = perim_handle
@@ -3225,7 +3243,7 @@ async fn test_parity_mining_belts_as_balls_and_ore_distribution() {
 #[tokio::test]
 async fn test_parity_excavator_drones_ore_and_ice() {
 
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     crate::common::pin_clock(&ctx);
 
     let rorq_id = 850_020i64;
@@ -3454,7 +3472,6 @@ use eve_db::{CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::living_world::sde_ball_and_combat;
-use eve_server::router::ServerContext;
 use eve_server::services::agents_missions::agents_standings_arcs::apply_faction_standing_with_derived;
 use eve_server::sp6_lifecycle::tick_background_cluster;
 use eve_server::system_actor::AsteroidState;
@@ -3465,7 +3482,7 @@ const JITA_STATION: i64 = 60_003_760;
 
 #[tokio::test]
 async fn test_parity_mining_market_and_mining_goals() {
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     crate::common::pin_clock(&ctx);
 
     let mut s1 = select_pilot(&ctx, 50_030, "demo", "demo-secret", PILOT_1).await;
@@ -3716,7 +3733,7 @@ async fn test_parity_mining_market_and_mining_goals() {
 
 #[tokio::test]
 async fn test_parity_standings_npc_npc_standings() {
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     let mut unauth = SessionState::new(99_999);
     assert!(
         rpc(&ctx, &mut unauth, "standingMgr", "GetNPCNPCStandings", &[])
@@ -3740,7 +3757,7 @@ async fn test_parity_standings_npc_npc_standings() {
     for r in &rows {
         if let (Some(from_id), Some(to_id), Some(val)) = (r[0].as_i64(), r[1].as_i64(), r[2].as_f64()) {
             if from_id == 500_001 && to_id == 500_003 {
-                assert!((val - 5.0).abs() < 1e-6);
+                assert!((val - 7.0).abs() < 1e-6);
                 found_amarr = true;
             }
             if from_id == 500_001 && to_id == 500_004 {
@@ -3772,7 +3789,7 @@ async fn test_parity_ui_lookup_all_methods() {
     // parity: feat:ui.lookup
     eve_testkit::attest(&["feat:ui.lookup"]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     let corp_id = 98_050_001i64;
     let mut sess = select_pilot(&ctx, 50_050, "demo", "demo-secret", PILOT_1).await;
 
@@ -3831,7 +3848,7 @@ async fn test_parity_ui_lookup_all_methods() {
 
 #[tokio::test]
 async fn test_parity_serverops_daily_downtime() {
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     let base_1055 = 1_767_264_900u64;
     ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(
         base_1055,

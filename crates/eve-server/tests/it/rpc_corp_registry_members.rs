@@ -371,6 +371,8 @@ async fn test_corp_creation_info_branding_and_members() {
     assert_eq!(field(&single_mem, "corporationID"), PyRep::Integer(corp_id));
     assert_eq!(field(&single_mem, "titleMask"), PyRep::Integer(1));
     assert_eq!(field(&single_mem, "accountKey"), PyRep::Integer(1000));
+    assert_eq!(field(&single_mem, "blockRoles"), PyRep::Integer(0));
+    assert_eq!(field(&single_mem, "blocksRoles"), PyRep::Integer(0));
     assert!(field(&single_mem, "startDateTime").as_i64().unwrap_or(0) > 0);
     assert!(field(&single_mem, "baseID").as_i64().unwrap_or(0) > 0);
 
@@ -385,6 +387,8 @@ async fn test_corp_creation_info_branding_and_members() {
     .expect("GetMember PILOT_2");
     assert_eq!(field(&mem2_res, "characterID"), PyRep::Integer(PILOT_2));
     assert_eq!(field(&mem2_res, "corporationID"), PyRep::Integer(corp_id));
+    assert_eq!(field(&mem2_res, "blockRoles"), PyRep::Integer(0));
+    assert_eq!(field(&mem2_res, "blocksRoles"), PyRep::Integer(0));
 
     assert!(
         rpc(

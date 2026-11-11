@@ -312,7 +312,7 @@ fn test_parity_plan_t6_client_harness_runner_and_journeys() {
         .expect("run_journeys --help");
     assert!(help_out.status.success(), "--help must exit 0");
     let help_text = String::from_utf8_lossy(&help_out.stdout);
-    for flag in ["--out", "--journeys", "--bridge-port", "--client-app"] {
+    for flag in ["--out", "--journeys", "--bridge-port", "--xmpp-port", "--client-app"] {
         assert!(help_text.contains(flag), "missing CLI flag {flag} in --help");
     }
 

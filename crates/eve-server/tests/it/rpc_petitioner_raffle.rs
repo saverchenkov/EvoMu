@@ -456,6 +456,233 @@ async fn test_raffle_lifecycle_creation_and_ticket_sales() {
         let it = snap.items.get(&rifter_item_id).expect("rifter item");
         assert_eq!(it.owner_id, P2);
     });
+
+    // 11. Completed raffle must contribute its total value (8 * 100k = 800,000 ISK) to historic price
+    let prices_after = rpc(
+        &ctx,
+        &mut p1,
+        "raffleProxy",
+        "GetActiveHistoricPrices",
+        &[PyRep::Integer(587)],
+    )
+    .await
+    .expect("GetActiveHistoricPrices after award");
+    let PyRep::Tuple(after_tuple) = prices_after else {
+        panic!("expected Tuple from GetActiveHistoricPrices");
+    };
+    assert_eq!(after_tuple.len(), 2);
+    let historic_isk = match &after_tuple[1] {
+        PyRep::Real(v) => *v,
+        other => panic!("expected Real historic price, got {other:?}"),
+    };
+    assert!(
+        (historic_isk - 800_000.0).abs() < 1e-6,
+        "historic price must reflect completed 800,000 ISK raffle, got {historic_isk}"
+    );
+}
+
+#[tokio::test]
+async fn test_raffle_npc_station_only_random_tickets_and_historic_prices() {
+    let ctx = ServerContext::new();
+    let mut p1 = select(&ctx, 60_008, "demo", "demo-secret", P1).await;
+    let mut p2 = select(&ctx, 60_009, "other", "other-secret", P2).await;
+
+    let item_1 = seed_item(&ctx, 587, P1, 1);
+    let item_2 = seed_item(&ctx, 587, P1, 1);
+    let _hc = seed_item(&ctx, 52568, P1, 2_000);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c2) = snap.characters.get_mut(&P2) {
+            c2.balance = eve_db::IskCents::from_isk(100_000_000);
+        }
+    });
+
+    let make_req = |item_id: i64, cnt: i64, price: f64| {
+        PyRep::Dict(vec![
+            (PyRep::String("item_id".into()), PyRep::Integer(item_id)),
+            (PyRep::String("ticket_count".into()), PyRep::Integer(cnt)),
+            (PyRep::String("ticket_price".into()), PyRep::Real(price)),
+        ])
+    };
+
+    let set_p1_loc = |sess: &mut SessionState,
+                      station_id: Option<i64>,
+                      structure_id: Option<i64>,
+                      solar_system_id: u32| {
+        sess.station_id = station_id;
+        sess.structure_id = structure_id;
+        sess.solar_system_id = Some(solar_system_id);
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&P1) {
+                ch.station_id = station_id;
+                ch.structure_id = structure_id;
+                ch.solar_system_id = solar_system_id;
+            }
+        });
+    };
+
+    // 1. NpcStationOnly: Upwell structure, wormhole space, and undocked sessions must fail CreateRaffle
+    set_p1_loc(&mut p1, None, Some(1_040_000_001), 30_000_142);
+    let err_upwell = rpc(
+        &ctx,
+        &mut p1,
+        "raffleProxy",
+        "CreateRaffle",
+        &[make_req(item_1, 8, 100_000.0)],
+    )
+    .await
+    .expect_err("Upwell structure session must reject CreateRaffle");
+    assert_eq!(err_upwell.code, "InvalidRaffleLocation");
+
+    set_p1_loc(&mut p1, None, Some(1_040_000_002), 31_000_005); // wormhole system (J-space citadel)
+    let err_wh = rpc(
+        &ctx,
+        &mut p1,
+        "raffleProxy",
+        "CreateRaffle",
+        &[make_req(item_1, 8, 100_000.0)],
+    )
+    .await
+    .expect_err("Wormhole session must reject CreateRaffle");
+    assert_eq!(err_wh.code, "InvalidRaffleLocation");
+
+    set_p1_loc(&mut p1, None, None, 30_000_142);
+    let err_undocked = rpc(
+        &ctx,
+        &mut p1,
+        "raffleProxy",
+        "CreateRaffle",
+        &[make_req(item_1, 8, 100_000.0)],
+    )
+    .await
+    .expect_err("Undocked session must reject CreateRaffle");
+    assert_eq!(err_undocked.code, "InvalidRaffleLocation");
+
+    set_p1_loc(&mut p1, Some(99_999_999), None, 30_000_142);
+    let err_non_npc = rpc(
+        &ctx,
+        &mut p1,
+        "raffleProxy",
+        "CreateRaffle",
+        &[make_req(item_1, 8, 100_000.0)],
+    )
+    .await
+    .expect_err("Non-NPC station must reject CreateRaffle");
+    assert_eq!(err_non_npc.code, "InvalidRaffleLocation");
+
+    // Restore valid Jita NPC station and create a 512-ticket raffle
+    set_p1_loc(&mut p1, Some(JITA_STATION_ID), None, 30_000_142);
+    let PyRep::KeyVal(r1) = rpc(
+        &ctx,
+        &mut p1,
+        "raffleProxy",
+        "CreateRaffle",
+        &[make_req(item_1, 512, 1_000.0)],
+    )
+    .await
+    .expect("CreateRaffle 512 tickets")
+    else {
+        panic!("expected KeyVal");
+    };
+    let raf_1 = r1.get("raffle_id").and_then(|v| v.as_i64()).unwrap();
+
+    // 2. Active price reflects the open 512 * 1,000 = 512,000 ISK raffle
+    let PyRep::Tuple(active_tup) = rpc(
+        &ctx,
+        &mut p1,
+        "raffleProxy",
+        "GetActiveHistoricPrices",
+        &[PyRep::Integer(587)],
+    )
+    .await
+    .expect("GetActiveHistoricPrices active")
+    else {
+        panic!("expected Tuple");
+    };
+    let active_isk = match &active_tup[0] {
+        PyRep::Real(v) => *v,
+        other => panic!("expected Real active price, got {other:?}"),
+    };
+    assert!((active_isk - 512_000.0).abs() < 1e-6, "got {active_isk}");
+
+    // 3. BuyRandomTickets selects non-sequential indices in 0..512
+    let PyRep::KeyVal(buy_rand) = rpc(
+        &ctx,
+        &mut p2,
+        "raffleProxy",
+        "BuyRandomTickets",
+        &[PyRep::Integer(raf_1), PyRep::Integer(8)],
+    )
+    .await
+    .expect("BuyRandomTickets 8")
+    else {
+        panic!("expected KeyVal");
+    };
+    let PyRep::Dict(sold_entries) = buy_rand.get("sold_tickets").expect("sold_tickets dict") else {
+        panic!("expected Dict for sold_tickets");
+    };
+    let mut drawn: Vec<i64> = sold_entries.iter().filter_map(|(k, _)| k.as_i64()).collect();
+    drawn.sort_unstable();
+    assert_eq!(drawn.len(), 8);
+    assert!(drawn.iter().all(|&idx| (0..512).contains(&idx)));
+    assert_ne!(
+        drawn,
+        vec![0, 1, 2, 3, 4, 5, 6, 7],
+        "BuyRandomTickets must draw non-sequential indices rather than 0..count"
+    );
+
+    // 4. Create and finish a 2nd raffle (16 * 100,000 = 1,600,000 ISK) and verify historic avg
+    let PyRep::KeyVal(r2) = rpc(
+        &ctx,
+        &mut p1,
+        "raffleProxy",
+        "CreateRaffle",
+        &[make_req(item_2, 16, 100_000.0)],
+    )
+    .await
+    .expect("CreateRaffle 16 tickets")
+    else {
+        panic!("expected KeyVal");
+    };
+    let raf_2 = r2.get("raffle_id").and_then(|v| v.as_i64()).unwrap();
+    rpc(
+        &ctx,
+        &mut p2,
+        "raffleProxy",
+        "BuyRandomTickets",
+        &[PyRep::Integer(raf_2), PyRep::Integer(16)],
+    )
+    .await
+    .expect("BuyRandomTickets all 16");
+    rpc(
+        &ctx,
+        &mut p2,
+        "raffleProxy",
+        "AwardItem",
+        &[PyRep::Integer(raf_2)],
+    )
+    .await
+    .expect("AwardItem raf_2");
+
+    let PyRep::Tuple(hist_tup) = rpc(
+        &ctx,
+        &mut p1,
+        "raffleProxy",
+        "GetActiveHistoricPrices",
+        &[PyRep::Integer(587)],
+    )
+    .await
+    .expect("GetActiveHistoricPrices historic")
+    else {
+        panic!("expected Tuple");
+    };
+    let hist_isk = match &hist_tup[1] {
+        PyRep::Real(v) => *v,
+        other => panic!("expected Real historic price, got {other:?}"),
+    };
+    assert!(
+        (hist_isk - 1_600_000.0).abs() < 1e-6,
+        "historic price must equal completed raffle total 1,600,000 ISK, got {hist_isk}"
+    );
 }
 
 #[tokio::test]
@@ -467,11 +694,12 @@ async fn test_raffle_queries_and_subscriptions() {
     let mut p1 = select(&ctx, 60_006, "demo", "demo-secret", P1).await;
     let mut p2 = select(&ctx, 60_007, "other", "other-secret", P2).await;
 
+    ctx.db.provision_gm_account("gm", "gm-secret", GM_ID, "GM Amarr");
     let item_a = seed_item(&ctx, 587, P1, 1);
-    let item_b = seed_item(&ctx, 597, P1, 1);
+    let item_b = seed_item(&ctx, 597, GM_ID, 1);
     let item_c = seed_item(&ctx, 593, P1, 1);
     let _hc = seed_item(&ctx, 52568, P1, 500);
-    let hc_b = seed_item(&ctx, 52568, P1, 500);
+    let hc_b = seed_item(&ctx, 52568, GM_ID, 500);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(it) = snap.items.get_mut(&item_b) {
             it.location_id = 60_008_494; // Amarr VIII (solar system 30002187, region 10000043)
@@ -479,10 +707,15 @@ async fn test_raffle_queries_and_subscriptions() {
         if let Some(hc) = snap.items.get_mut(&hc_b) {
             hc.location_id = 60_008_494;
         }
+        if let Some(c_amarr) = snap.characters.get_mut(&GM_ID) {
+            c_amarr.station_id = Some(60_008_494);
+            c_amarr.solar_system_id = 30_002_187;
+        }
         if let Some(c2) = snap.characters.get_mut(&P2) {
             c2.balance = eve_db::IskCents::from_isk(50_000_000);
         }
     });
+    let mut p_amarr = select(&ctx, 60_010, "gm", "gm-secret", GM_ID).await;
 
     let make_raffle = |item_id: i64, cnt: i64, price: f64| {
         PyRep::Dict(vec![
@@ -493,10 +726,8 @@ async fn test_raffle_queries_and_subscriptions() {
     };
     let PyRep::KeyVal(r_a) = rpc(&ctx, &mut p1, "raffleProxy", "CreateRaffle", &[make_raffle(item_a, 8, 100_000.0)]).await.expect("CreateRaffle A") else { panic!("expected KeyVal"); };
     let raf_a = r_a.get("raffle_id").and_then(|v| v.as_i64()).unwrap();
-    ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&P1) { ch.station_id = Some(60_008_494); } });
-    let PyRep::KeyVal(r_b) = rpc(&ctx, &mut p1, "raffleProxy", "CreateRaffle", &[make_raffle(item_b, 16, 500_000.0)]).await.expect("CreateRaffle B") else { panic!("expected KeyVal"); };
+    let PyRep::KeyVal(r_b) = rpc(&ctx, &mut p_amarr, "raffleProxy", "CreateRaffle", &[make_raffle(item_b, 16, 500_000.0)]).await.expect("CreateRaffle B") else { panic!("expected KeyVal"); };
     let raf_b = r_b.get("raffle_id").and_then(|v| v.as_i64()).unwrap();
-    ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&P1) { ch.station_id = Some(60_003_760); } });
     let PyRep::KeyVal(r_c) = rpc(&ctx, &mut p1, "raffleProxy", "CreateRaffle", &[make_raffle(item_c, 8, 50_000.0)]).await.expect("CreateRaffle C") else { panic!("expected KeyVal"); };
     let raf_c = r_c.get("raffle_id").and_then(|v| v.as_i64()).unwrap();
 

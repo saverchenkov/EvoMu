@@ -115,7 +115,7 @@ async fn anchor_hub(ctx: &ServerContext, sess: &mut SessionState, hub_item: i64)
 
 #[tokio::test]
 async fn test_sov_hub_anchor_from_cargo_claims_system_and_rejects_invalid_space() {
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::sovereignty_equinox_gameplay::fast_demo_ctx());
     crate::common::pin_clock(&ctx);
     let mut s_def = select_gm_pilot(&ctx, 74_001, "other", "other-secret", PILOT_2).await;
     let mut s_rival = select_gm_pilot(&ctx, 74_002, "demo", "demo-secret", PILOT_1).await;
@@ -194,7 +194,7 @@ async fn test_sov_adm_scaled_entosis_counter_regen_command_nodes_and_loss() {
         "feat:sovereignty.sov-command-nodes",
     ]);
 
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::sovereignty_equinox_gameplay::fast_demo_ctx());
     crate::common::pin_clock(&ctx);
     let mut s_def = select_gm_pilot(&ctx, 75_001, "other", "other-secret", PILOT_2).await;
     let mut s_atk = select_gm_pilot(&ctx, 75_002, "demo", "demo-secret", PILOT_1).await;
@@ -377,7 +377,7 @@ async fn test_fw_live_plexing_to_vulnerable_ihub_kill_and_downtime_occupier_flip
         "notify:OnVictoryPointStateUpdated",
     ]);
 
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::sovereignty_equinox_gameplay::fast_demo_ctx());
     crate::common::pin_clock(&ctx);
     let mut s_atk = select_gm_pilot(&ctx, 76_001, "demo", "demo-secret", PILOT_1).await;
     let _ = create_corp_and_alliance(&ctx, &mut s_atk, "State Siege Wing", "SSGW", None).await;
@@ -463,16 +463,16 @@ async fn test_fw_live_plexing_to_vulnerable_ihub_kill_and_downtime_occupier_flip
         slash(&ctx, &mut s_atk, &format!("/setattr {g} 64 250.0")).await;
     }
     lock_target(&ctx, &mut s_atk, target, ship, ihub, 1_000.0).await;
-    for _ in 0..100 {
+    for step in 0..100 {
         if ctx.db.with_snapshot(|s| s.structures[&ihub].state == "Destroyed") {
             break;
         }
-        for &g in &guns {
-            let _ = rpc(&ctx, &mut s_atk, "dogmaIM", "Activate", &[PyRep::Integer(g), PyRep::String("targetAttack".into()), PyRep::Integer(ihub)]).await;
+        if step == 0 || step % 8 == 0 {
+            for &g in &guns {
+                let _ = rpc(&ctx, &mut s_atk, "dogmaIM", "Activate", &[PyRep::Integer(g), PyRep::String("targetAttack".into()), PyRep::Integer(ihub)]).await;
+            }
         }
-        for _ in 0..3 {
-            sys.step_manual(1.0).await.unwrap();
-        }
+        sys.step_manual(4.0).await.unwrap();
     }
     assert_eq!(ctx.db.with_snapshot(|s| s.structures[&ihub].state.clone()), "Destroyed", "I-Hub destroyed by weapons fire");
     assert_eq!(fw_occupation(&ctx, target).0, GALLENTE, "occupier unchanged until the next downtime");

@@ -650,7 +650,7 @@ async fn test_rpc_map_agency_presets_and_shared_settings() {
 
 #[tokio::test]
 async fn test_rpc_survey_interference_drones_qa_and_filaments() {
-    // DATA GAP: requires live survey catalog import
+    // Exercises survey, solarsystemInterferenceMgr, ship.ScoopDrone, and randomJumpMgr.
     // parity: rpc:solarsystemInterferenceMgr.GetAllInterferenceBands, rpc:ship.ScoopDrone
     // parity: rpc:publicQaToolsServer.SlashCmd, rpc:randomJumpMgr.ActivateRandomJumpFilament
     let ctx = new_ctx();

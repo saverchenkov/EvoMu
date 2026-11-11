@@ -14,7 +14,56 @@ use eve_server::router::ServerContext;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+fn shared_sde() -> Arc<eve_sde::SdeRegistry> {
+    static SDE: OnceLock<Arc<eve_sde::SdeRegistry>> = OnceLock::new();
+    Arc::clone(SDE.get_or_init(|| {
+        Arc::new(
+            eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path())
+                .expect("open sde"),
+        )
+    }))
+}
+
+async fn shared_comprehensive_ctx() -> Arc<ServerContext> {
+    static BASE: tokio::sync::OnceCell<(Arc<eve_sde::SdeRegistry>, WorldStateSnapshot)> =
+        tokio::sync::OnceCell::const_new();
+    let (sde, snap) = BASE
+        .get_or_init(|| async {
+            let sde = shared_sde();
+            let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+            let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), db);
+            let mut gm = SessionState::new(99_998);
+            gm.user_id = Some(1);
+            gm.character_id = Some(99_999_998);
+            gm.role = eve_machonet::service_roles::ROLE_GM_MASK;
+            ctx.dispatch_rpc(&mut gm, "seasonManager", None, "reload_fsd_data", &[], &HashMap::new(), None)
+                .await
+                .expect("reload_fsd_data");
+            ctx.drain_notifications_for_char(99_999_998);
+            ctx.db.with_mut_snapshot(|s| {
+                s.seasons_and_campaigns.season_states.remove(&99_999_998);
+            });
+            seed_comprehensive_world(&ctx);
+            (sde, ctx.db.with_snapshot(|s| s.clone()))
+        })
+        .await;
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    db.with_mut_snapshot(|s| *s = snap.clone());
+    Arc::new(ServerContext::with_sde_and_repository(Arc::clone(sde), db))
+}
+
+fn shared_demo_ctx() -> Arc<ServerContext> {
+    static SNAP: OnceLock<WorldStateSnapshot> = OnceLock::new();
+    let sde = shared_sde();
+    let snap = SNAP
+        .get_or_init(|| eve_db::WorldRepository::with_demo_seed().with_snapshot(|s| s.clone()))
+        .clone();
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    db.with_mut_snapshot(|s| *s = snap);
+    Arc::new(ServerContext::with_sde_and_repository(sde, db))
+}
 
 const CHAR_ID: i64 = 90_000_001;
 const OTHER_CHAR_ID: i64 = 90_000_002;
@@ -90,9 +139,6 @@ fn expectations_path() -> PathBuf {
 
 fn seed_comprehensive_world(ctx: &ServerContext) {
     common::pin_clock(ctx);
-    common::seed_test_nes_store_catalog(ctx);
-    common::seed_test_lp_store_offers(ctx);
-    common::seed_test_cosmetics_component_listings(ctx);
 
     let now = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
@@ -1625,7 +1671,7 @@ fn default_domain_arg(service: &str, method: &str, idx: usize) -> PyRep {
         },
         "LPStoreMgr" | "LPSvc" => match idx {
             0 => PyRep::Integer(1_000_035),
-            1 => PyRep::Integer(1001),
+            1 => PyRep::Integer(3_414),
             _ => PyRep::Integer(1),
         },
         _ => PyRep::Integer(1),
@@ -1706,7 +1752,7 @@ fn bind_for_service(ctx: &ServerContext, sess: &SessionState, service: &str) -> 
     ctx.bind_object(sess, service, obj_id).ok()
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum SessionProfile {
     DockedStation,
     InSpace,
@@ -1799,12 +1845,7 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
     let root: Value = serde_json::from_str(&raw).expect("parse client_expectations.json");
     let rpc_map = root["rpc"].as_object().expect("rpc map");
 
-    let sde = Arc::new(
-        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).expect("open sde"),
-    );
-    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
-    let ctx = Arc::new(ServerContext::with_sde_and_repository(sde, db));
-    seed_comprehensive_world(&ctx);
+    let ctx = shared_comprehensive_ctx().await;
 
     let mut sess = SessionState::new(77_001);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -2212,12 +2253,7 @@ async fn test_destiny_ballpark_and_slim_item_client_contracts() {
         .as_object()
         .expect("ProcessBallAdd slimItem shape");
 
-    let sde = Arc::new(
-        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).expect("open sde"),
-    );
-    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
-    let ctx = Arc::new(ServerContext::with_sde_and_repository(sde, db));
-    seed_comprehensive_world(&ctx);
+    let ctx = shared_comprehensive_ctx().await;
 
     let mut sess = SessionState::new(77_101);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -2433,12 +2469,7 @@ async fn test_destiny_ballpark_and_slim_item_client_contracts() {
 async fn test_quasar_public_gateway_client_contracts() {
     use eve_proto::quasar::{EvePublicRequest, GoogleAny, TYPE_GOOGLEAPIS_PREFIX};
 
-    let sde = Arc::new(
-        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).expect("open sde"),
-    );
-    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
-    let ctx = Arc::new(ServerContext::with_sde_and_repository(sde, db));
-    seed_comprehensive_world(&ctx);
+    let ctx = shared_comprehensive_ctx().await;
 
     let mut sess = SessionState::new(77_201);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -2539,11 +2570,7 @@ async fn test_quasar_public_gateway_client_contracts() {
 
 #[tokio::test]
 async fn test_v24_live_client_bug_report_regressions_330_to_352() {
-    let sde = Arc::new(
-        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).expect("open sde"),
-    );
-    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
-    let ctx = Arc::new(ServerContext::with_sde_and_repository(sde, db));
+    let ctx = shared_demo_ctx();
     common::pin_clock(&ctx);
 
     let mut sess = SessionState::new(77_301);

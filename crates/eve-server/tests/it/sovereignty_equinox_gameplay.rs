@@ -34,29 +34,211 @@ pub(crate) fn temp_sqlite_path(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!("evomu_{tag}_{}_{n}.sqlite", std::process::id()))
 }
 
-pub(crate) fn open_sqlite_ctx(path: &std::path::Path, seed_demo: bool) -> ServerContext {
-    static TEST_SDE: std::sync::OnceLock<std::sync::Arc<eve_sde::SdeRegistry>> =
-        std::sync::OnceLock::new();
-    let repo = eve_db::WorldRepository::open_sqlite(path).expect("open_sqlite");
-    repo.with_mut_snapshot(|snap| {
-        snap.markets_seeded = true;
-        if seed_demo {
-            let tpl = eve_db::WorldRepository::with_demo_seed()
-                .with_snapshot(|s| s.characters.values().next().cloned().expect("demo char"));
-            snap.characters.entry(tpl.character_id).or_insert(tpl);
-        }
-    });
-    if seed_demo {
-        repo.provision_player_account("demo", "demo-secret");
-        repo.provision_player_account("demo2", "demo2-secret");
-    }
-    let sde = TEST_SDE
+static TEST_SDE: std::sync::OnceLock<std::sync::Arc<eve_sde::SdeRegistry>> =
+    std::sync::OnceLock::new();
+static FULL_DEMO_TEMPLATE: std::sync::OnceLock<eve_db::WorldStateSnapshot> =
+    std::sync::OnceLock::new();
+static NULLSEC_PLANETS: std::sync::OnceLock<(u32, i64, i64, i64, i64)> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn cached_sde() -> std::sync::Arc<eve_sde::SdeRegistry> {
+    TEST_SDE
         .get_or_init(|| std::sync::Arc::new(eve_sde::SdeRegistry::with_canonical_seed()))
-        .clone();
-    let ctx = ServerContext::with_sde_and_repository(sde, std::sync::Arc::new(repo))
+        .clone()
+}
+
+fn test_sha256_bytes(data: &[u8]) -> [u8; 32] {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ];
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ];
+    let mut msg = Vec::with_capacity(data.len() + 72);
+    msg.extend_from_slice(data);
+    msg.push(0x80);
+    while (msg.len() % 64) != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&((data.len() as u64) * 8).to_be_bytes());
+    for chunk in msg.chunks_exact(64) {
+        let mut w = [0u32; 64];
+        for (i, bytes) in chunk.chunks_exact(4).enumerate() {
+            w[i] = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+        }
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let t1 = hh.wrapping_add(s1).wrapping_add(ch).wrapping_add(K[i]).wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let t2 = s0.wrapping_add(maj);
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(t1);
+            d = c;
+            c = b;
+            b = a;
+            a = t1.wrapping_add(t2);
+        }
+        for (acc, v) in h.iter_mut().zip([a, b, c, d, e, f, g, hh]) {
+            *acc = acc.wrapping_add(v);
+        }
+    }
+    let mut out = [0u8; 32];
+    for (i, word) in h.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
+    }
+    out
+}
+
+pub(crate) fn fast_password_token(username: &str, raw_password_token: &str) -> String {
+    let salt_hex = "0123456789abcdef";
+    let mut digest = test_sha256_bytes(
+        format!("evomu-auth-v1:{salt_hex}:{username}:{raw_password_token}").as_bytes(),
+    );
+    for round in 0..256u16 {
+        let mut input =
+            Vec::with_capacity(64 + salt_hex.len() + username.len() + raw_password_token.len());
+        input.extend_from_slice(&digest);
+        input.extend_from_slice(&round.to_be_bytes());
+        input.extend_from_slice(salt_hex.as_bytes());
+        input.push(b':');
+        input.extend_from_slice(username.as_bytes());
+        input.push(b':');
+        input.extend_from_slice(raw_password_token.as_bytes());
+        digest = test_sha256_bytes(&input);
+    }
+    use std::fmt::Write as _;
+    let mut hex = format!("sha256$v1${salt_hex}$");
+    for byte in digest {
+        let _ = write!(&mut hex, "{byte:02x}");
+    }
+    hex
+}
+
+fn full_demo_template() -> &'static eve_db::WorldStateSnapshot {
+    FULL_DEMO_TEMPLATE.get_or_init(|| {
+        let mut snap = eve_db::WorldRepository::create_demo_snapshot();
+        for (user, raw_pw) in [("demo", "demo-secret"), ("other", "other-secret")] {
+            if let Some(acc) = snap.accounts.get_mut(user) {
+                acc.password_token = fast_password_token(user, raw_pw);
+            }
+        }
+        snap
+    })
+}
+
+fn apply_open_defaults(snap: &mut eve_db::WorldStateSnapshot, seed_demo: bool) {
+    snap.markets_seeded = true;
+    snap.service_state_blobs.insert(
+        "market_seeder_version".to_string(),
+        "v2_full_catalog".to_string(),
+    );
+    if seed_demo {
+        let tpl = full_demo_template()
+            .characters
+            .values()
+            .next()
+            .cloned()
+            .expect("demo char");
+        snap.characters.entry(tpl.character_id).or_insert(tpl);
+        for (username, raw_pw) in [("demo", "demo-secret"), ("demo2", "demo2-secret")] {
+            if !snap.accounts.contains_key(username) {
+                let user_id = snap.accounts.values().map(|a| a.user_id).max().unwrap_or(0) + 1;
+                snap.accounts.insert(
+                    username.to_string(),
+                    eve_db::AccountRecord {
+                        user_id,
+                        username: username.to_string(),
+                        password_token: fast_password_token(username, raw_pw),
+                        role: eve_db::service_roles::ROLE_PLAYER_DEFAULT,
+                        banned_until_unix: None,
+                        ban_reason: None,
+                    },
+                );
+            }
+        }
+    }
+}
+
+pub(crate) fn open_sqlite_ctx(path: &std::path::Path, seed_demo: bool) -> ServerContext {
+    let repo = eve_db::WorldRepository::open_sqlite(path).expect("open_sqlite");
+    if seed_demo || repo.with_snapshot(|s| !s.markets_seeded) {
+        repo.with_mut_snapshot(|snap| apply_open_defaults(snap, seed_demo));
+    }
+    let ctx = ServerContext::with_sde_and_repository(cached_sde(), std::sync::Arc::new(repo))
         .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED);
     crate::common::pin_clock(&ctx);
     ctx
+}
+
+pub(crate) fn open_sqlite_raw(path: &std::path::Path) -> ServerContext {
+    let repo = eve_db::WorldRepository::open_sqlite(path).expect("open_sqlite");
+    let ctx = ServerContext::with_sde_and_repository(cached_sde(), std::sync::Arc::new(repo))
+        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED);
+    crate::common::pin_clock(&ctx);
+    ctx
+}
+
+pub(crate) fn preseed_fast_account(
+    ctx: &ServerContext,
+    username: &str,
+    raw_pw: &str,
+    role: u64,
+) {
+    let token = fast_password_token(username, raw_pw);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(existing) = snap.accounts.get_mut(username) {
+            existing.password_token = token;
+            return;
+        }
+        let user_id = snap.accounts.values().map(|a| a.user_id).max().unwrap_or(0) + 1;
+        snap.accounts.insert(
+            username.to_string(),
+            eve_db::AccountRecord {
+                user_id,
+                username: username.to_string(),
+                password_token: token,
+                role,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+    });
+}
+
+pub(crate) fn open_mem_ctx() -> ServerContext {
+    let repo = eve_db::WorldRepository::new_empty_with_snapshot_path(None)
+        .expect("in-memory WorldRepository");
+    repo.with_mut_snapshot(|snap| apply_open_defaults(snap, true));
+    let ctx = ServerContext::with_sde_and_repository(cached_sde(), std::sync::Arc::new(repo))
+        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED);
+    crate::common::pin_clock(&ctx);
+    ctx
+}
+
+pub(crate) fn fast_demo_ctx() -> ServerContext {
+    let repo = eve_db::WorldRepository::new_empty_with_snapshot_path(None)
+        .expect("in-memory WorldRepository");
+    repo.with_mut_snapshot(|snap| *snap = full_demo_template().clone());
+    ServerContext::with_sde_and_repository(cached_sde(), std::sync::Arc::new(repo))
+        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED)
 }
 
 pub(crate) async fn rpc_call(
@@ -155,9 +337,28 @@ pub(crate) async fn register_online_pilot(
     pos: DVec3,
     corp_role: u64,
 ) -> SessionState {
-    ctx.db.provision_player_account(username, password);
-    let uid = ctx.db.find_user_id_by_username(username).expect("user_id");
+    let needs_provision = ctx.db.authenticate(username, password).is_err();
     ctx.db.with_mut_snapshot(|snap| {
+        let uid = if let Some(existing) = snap.accounts.get_mut(username) {
+            if needs_provision {
+                existing.password_token = fast_password_token(username, password);
+            }
+            existing.user_id
+        } else {
+            let uid = snap.accounts.values().map(|a| a.user_id).max().unwrap_or(0) + 1;
+            snap.accounts.insert(
+                username.to_string(),
+                eve_db::AccountRecord {
+                    user_id: uid,
+                    username: username.to_string(),
+                    password_token: fast_password_token(username, password),
+                    role: eve_db::service_roles::ROLE_PLAYER_DEFAULT,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
+            uid
+        };
         let mut ch = snap
             .characters
             .get(&char_id)
@@ -276,8 +477,42 @@ pub(crate) async fn place_ship_ball(
 
 pub(crate) async fn step_weapon_ticks(ctx: &ServerContext, sys_id: u32) {
     let sys_h = ctx.systems.get_or_spawn(sys_id);
-    for _ in 0..45 {
-        sys_h.step_manual(1.0).await.unwrap();
+    sys_h.step_manual(46.0).await.unwrap();
+}
+
+pub(crate) async fn step_weapon_ticks_while<F>(
+    ctx: &ServerContext,
+    sys_id: u32,
+    mut keep_stepping: F,
+) where
+    F: FnMut(&ServerContext) -> bool,
+{
+    if !keep_stepping(ctx) {
+        return;
+    }
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    for dt in [5.0, 10.0, 15.0, 16.0] {
+        sys_h.step_manual(dt).await.unwrap();
+        if !keep_stepping(ctx) {
+            return;
+        }
+    }
+}
+
+pub(crate) async fn step_weapon_ticks_until_dead(
+    ctx: &ServerContext,
+    sys_id: u32,
+    target_id: i64,
+) {
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    if sys_h.get_ball_snapshot(target_id).await.ok().flatten().is_none() {
+        return;
+    }
+    for dt in [5.0, 10.0, 15.0, 16.0] {
+        sys_h.step_manual(dt).await.unwrap();
+        if sys_h.get_ball_snapshot(target_id).await.ok().flatten().is_none() {
+            return;
+        }
     }
 }
 
@@ -297,12 +532,12 @@ pub(crate) async fn lock_target_via_rpc(
     rpc_call(ctx, session, "dogmaIM", "AddTarget", &[PyRep::Integer(target_id)])
         .await
         .expect("dogmaIM.AddTarget");
-    for _ in 0..45 {
+    for dt in [20.0, 40.0] {
         let locks = sys.get_target_locks(ship_id).await.unwrap();
         if locks.iter().any(|l| l.target_id == target_id && l.locked) {
             return;
         }
-        sys.step_manual(1.0).await.unwrap();
+        sys.step_manual(dt).await.unwrap();
     }
     let locks = sys.get_target_locks(ship_id).await.unwrap();
     assert!(locks.iter().any(|l| l.target_id == target_id && l.locked));
@@ -576,36 +811,39 @@ pub(crate) fn fit_siege_artillery(ctx: &ServerContext, char_id: i64, ship_id: i6
 }
 
 pub(crate) fn find_nullsec_planets(ctx: &ServerContext) -> (u32, i64, i64, i64, i64) {
-    let mut sys_ids: Vec<u32> = ctx
-        .sde
-        .solar_systems
-        .values()
-        .filter(|s| eve_server::services::sov_gameplay::is_claimable_nullsec_system(&ctx.sde, s.solar_system_id))
-        .map(|s| s.solar_system_id)
-        .collect();
-    sys_ids.sort_unstable();
-    for sys_id in &sys_ids {
-        let cels = ctx.sde.celestials_in_system(*sys_id);
-        let temp = cels.iter().find(|c| c.type_id == 11).map(|c| c.celestial_id);
-        let lava = cels.iter().find(|c| c.type_id == 2015).map(|c| c.celestial_id);
-        let ice = cels.iter().find(|c| c.type_id == 12).map(|c| c.celestial_id);
-        let non_temp = cels.iter().find(|c| c.group_id == 7 && c.type_id != 11).map(|c| c.celestial_id);
-        if let (Some(t), Some(l), Some(ic), Some(nt)) = (temp, lava, ice, non_temp) {
-            return (*sys_id, t, l, ic, nt);
+    *NULLSEC_PLANETS.get_or_init(|| {
+        let mut sys_ids: Vec<u32> = ctx
+            .sde
+            .solar_systems
+            .values()
+            .filter(|s| eve_server::services::sov_gameplay::is_claimable_nullsec_system(&ctx.sde, s.solar_system_id))
+            .map(|s| s.solar_system_id)
+            .collect();
+        sys_ids.sort_unstable();
+        for sys_id in &sys_ids {
+            let cels = ctx.sde.celestials_in_system(*sys_id);
+            let temp = cels.iter().find(|c| c.type_id == 11).map(|c| c.celestial_id);
+            let lava = cels.iter().find(|c| c.type_id == 2015).map(|c| c.celestial_id);
+            let ice = cels.iter().find(|c| c.type_id == 12).map(|c| c.celestial_id);
+            let non_temp = cels.iter().find(|c| c.group_id == 7 && c.type_id != 11).map(|c| c.celestial_id);
+            if let (Some(t), Some(l), Some(ic), Some(nt)) = (temp, lava, ice, non_temp) {
+                return (*sys_id, t, l, ic, nt);
+            }
         }
-    }
-    panic!("expected sovereign-claimable null-sec system with Temperate, Lava, and Ice planets");
+        panic!("expected sovereign-claimable null-sec system with Temperate, Lava, and Ice planets");
+    })
 }
 
 #[tokio::test]
 async fn test_skyhook_anchoring_linear_maturity_and_live_silo_ship_link_theft() {
     // parity: feat:sovereignty.skyhook-acquire
-    // DATA GAP: feat:sovereignty.sov-reagents — server-only planetary reagent yield table (docs/BLOCKERS.md §9)
+    // parity: feat:sovereignty.sov-reagents
     // parity: feat:sovereignty.skyhook-theft
     // parity: notify:OnSkyhookFirstActivation
     // parity: notify:OnSkyhookCanBeHacked
     eve_testkit::attest(&[
         "feat:sovereignty.skyhook-acquire",
+        "feat:sovereignty.sov-reagents",
         "feat:sovereignty.skyhook-theft",
         "notify:OnSkyhookFirstActivation",
         "notify:OnSkyhookCanBeHacked",
@@ -771,7 +1009,10 @@ async fn test_skyhook_anchoring_linear_maturity_and_live_silo_ship_link_theft() 
                 PyRep::Integer(lava_skyhook),
             ]).await;
         }
-        step_weapon_ticks(&ctx, sys_id).await;
+        step_weapon_ticks_while(&ctx, sys_id, |c| {
+            c.db.with_snapshot(|s| s.structures[&lava_skyhook].shield_hp) > 1_000.0
+        })
+        .await;
         if ctx.db.with_snapshot(|s| s.structures[&lava_skyhook].shield_hp) <= 1_000.0 {
             break;
         }
@@ -908,9 +1149,11 @@ use glam::DVec3;
 
 #[tokio::test]
 async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() {
-    // DATA GAP: feat:sovereignty.mercenary-den / mercenary-den-development-anarchy / mercenary-den-anarchy-evolution — synthetic yield/capacity/anarchy values pending V24.01 client/SDE tables (docs/BLOCKERS.md §10)
+    // parity: feat:sovereignty.mercenary-den
+    // parity: feat:sovereignty.mercenary-den-development-anarchy
+    // parity: feat:sovereignty.mercenary-den-anarchy-evolution
     // parity: feat:sovereignty.mercenary-den-anchoring
-    // DATA GAP: feat:pve.mercenary-tactical-ops (open until real SDE tables imported)
+    // parity: feat:pve.mercenary-tactical-ops
     // parity: feat:sovereignty.mercenary-den-reinforcement-loot
     // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj
@@ -919,17 +1162,18 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
     // parity: notify:OnMercenaryDenRegistrationSuccess
     // parity: notify:OnMyMercenaryDenRemoved
     eve_testkit::attest(&[
+        "feat:sovereignty.mercenary-den",
+        "feat:sovereignty.mercenary-den-development-anarchy",
+        "feat:sovereignty.mercenary-den-anarchy-evolution",
         "feat:sovereignty.mercenary-den-anchoring",
+        "feat:pve.mercenary-tactical-ops",
         "feat:sovereignty.mercenary-den-reinforcement-loot",
-        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj",
         "notify:OnMercenaryDenRegistrationInvalid",
         "notify:OnMercenaryDenRegistrationSuccess",
         "notify:OnMyMercenaryDenRemoved",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     crate::common::pin_clock(&ctx);
     let (null_sys, temp_planet, _, _, non_temp_planet) = find_nullsec_planets(&ctx);
     let hub_id = 1_050_000_001i64;
@@ -1008,8 +1252,8 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
     assert_eq!(succ_ev.args.first().and_then(|a| a.as_str()), Some("MercenaryDenRegistered"));
     assert_eq!(succ_ev.args.get(1).and_then(|a| a.dict_get("itemID")).and_then(|v| v.as_i64()), Some(den_id));
     let anchor_q = drain_quasar(&mut rx);
-    assert!(anchor_q.iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.api.DefinitionsUpdatedNotice"));
-    assert!(anchor_q.iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.AddedNotice"));
+    assert!(anchor_q.iter().any(|(t, b)| t == "eve_public.sovereignty.mercenaryden.api.DefinitionsUpdatedNotice" && b.len() >= 2));
+    assert!(anchor_q.iter().any(|(t, b)| t == "eve_public.sovereignty.mercenaryden.activity.api.AddedNotice" && b.len() >= 2));
 
     assert_eq!(
         rpc_call(&ctx, &mut s_owner, "structureDeployment", "Anchor", &[PyRep::Integer(TYPE_MERCENARY_DEN as i64), PyRep::Integer(skyhook_id), PyRep::Integer(temp_planet)])
@@ -1048,7 +1292,9 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
     let _ = drain_quasar(&mut rx);
     let pre_mto_bal = ctx.db.with_snapshot(|s| s.characters[&PILOT].balance.0);
     assert_eq!(rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.activity.api.StartRequest", start_req).await.status_code, STATUS_OK);
-    assert!(drain_quasar(&mut rx).iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.StartedNotice"));
+    let started_q = drain_quasar(&mut rx);
+    assert!(started_q.iter().any(|(t, b)| t == "eve_public.sovereignty.mercenaryden.activity.api.StartedNotice" && b.len() >= 2));
+    assert!(started_q.iter().any(|(t, b)| t == "eve_public.sovereignty.mercenaryden.activity.api.ExpiryChangedNotice" && b.len() >= 2));
 
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let mto_ball_id = ctx.db.with_snapshot(|s| s.sov_runtime.mto_site_balls.keys().copied().next().expect("MTO ball"));
@@ -1094,11 +1340,14 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
         if ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&mto_ball_id)) {
             break;
         }
-        step_weapon_ticks(&ctx, null_sys).await;
+        step_weapon_ticks_while(&ctx, null_sys, |c| {
+            c.db.with_snapshot(|s| s.sov_runtime.mto_site_balls.contains_key(&mto_ball_id))
+        })
+        .await;
     }
     let mto_q = drain_quasar(&mut rx);
-    assert!(mto_q.iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.CompletedNotice"));
-    assert!(mto_q.iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice"));
+    assert!(mto_q.iter().any(|(t, b)| t == "eve_public.sovereignty.mercenaryden.activity.api.CompletedNotice" && b.len() >= 2));
+    assert!(mto_q.iter().any(|(t, b)| t == "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice" && b.len() >= 2));
     let restored_wf = ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available);
     assert_eq!(restored_wf, base_wf);
 
@@ -1194,7 +1443,10 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
         for gun_id in [993_000, 993_002, 993_004] {
             let _ = rpc_call(&ctx, &mut s_atk, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::String("targetAttack".into()), PyRep::Integer(den_id)]).await;
         }
-        step_weapon_ticks(&ctx, null_sys).await;
+        step_weapon_ticks_while(&ctx, null_sys, |c| {
+            c.db.with_snapshot(|s| s.structures[&den_id].state != "HullReinforced")
+        })
+        .await;
         if ctx.db.with_snapshot(|s| s.structures[&den_id].state == "HullReinforced") {
             break;
         }
@@ -1245,7 +1497,10 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
         for gun_id in [993_000, 993_002, 993_004] {
             let _ = rpc_call(&ctx, &mut s_atk, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::String("targetAttack".into()), PyRep::Integer(den_id)]).await;
         }
-        step_weapon_ticks(&ctx, null_sys).await;
+        step_weapon_ticks_while(&ctx, null_sys, |c| {
+            c.db.with_snapshot(|s| s.structures[&den_id].state != "HullReinforced")
+        })
+        .await;
         if ctx.db.with_snapshot(|s| s.structures[&den_id].state == "HullReinforced") {
             break;
         }
@@ -1259,7 +1514,10 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
         for gun_id in [993_000, 993_002, 993_004] {
             let _ = rpc_call(&ctx, &mut s_atk, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::String("targetAttack".into()), PyRep::Integer(den_id)]).await;
         }
-        step_weapon_ticks(&ctx, null_sys).await;
+        step_weapon_ticks_while(&ctx, null_sys, |c| {
+            c.db.with_snapshot(|s| s.structures[&den_id].state != "Destroyed")
+        })
+        .await;
         if ctx.db.with_snapshot(|s| s.structures[&den_id].state == "Destroyed") {
             break;
         }
@@ -1308,27 +1566,30 @@ use glam::DVec3;
 
 #[tokio::test]
 async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_tenebrex() {
-    // DATA GAP: feat:sovereignty.sov-hub-fuel / sov-hub-upgrades — 44 wiki-derived (build 3538132) upgrade definitions & 0 startup-cost placeholder pending V24.01 SDE import (docs/BLOCKERS.md §9)
-    // DATA GAP: feat:sovereignty.sov-power — server-only celestial power table (docs/BLOCKERS.md §9)
-    // DATA GAP: feat:sovereignty.sov-workforce — server-only celestial workforce table (docs/BLOCKERS.md §9)
+    // parity: feat:sovereignty.sov-hub-fuel
+    // parity: feat:sovereignty.sov-hub-upgrades
+    // parity: feat:sovereignty.sov-power
+    // parity: feat:sovereignty.sov-workforce
     // parity: feat:sovereignty.sov-hub-hacking
     // parity: feat:sovereignty.sov-structures-flex
     // parity: feat:modules.cynosural-field-jammer-structure
     // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj
-    // DATA GAP: quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj — server-only star power table (docs/BLOCKERS.md §9)
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj
     // parity: notify:OnSovHubHacked
     // parity: notify:OnCynoJammerChanged
     eve_testkit::attest(&[
+        "feat:sovereignty.sov-hub-fuel",
+        "feat:sovereignty.sov-hub-upgrades",
+        "feat:sovereignty.sov-power",
+        "feat:sovereignty.sov-workforce",
         "feat:sovereignty.sov-hub-hacking",
         "feat:sovereignty.sov-structures-flex",
         "feat:modules.cynosural-field-jammer-structure",
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj",
         "notify:OnSovHubHacked",
         "notify:OnCynoJammerChanged",
     ]);
 
-    let db_path = temp_sqlite_path("sov_hub_flex");
-    let ctx = open_sqlite_ctx(&db_path, true);
+    let ctx = open_mem_ctx();
     let (null_sys, _, _, _, _) = find_nullsec_planets(&ctx);
     let mut adj_null: Vec<u32> = ctx
         .sde
@@ -1718,7 +1979,10 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
             PyRep::String("targetAttack".into()),
             PyRep::Integer(tenebrex_id),
         ]).await.expect("attack Tenebrex");
-        step_weapon_ticks(&ctx, null_sys).await;
+        step_weapon_ticks_while(&ctx, null_sys, |c| {
+            c.db.with_snapshot(|s| s.structures[&tenebrex_id].state == "ShieldVulnerable")
+        })
+        .await;
         ctx.advance_secs(25);
         if ctx.db.with_snapshot(|s| s.structures[&tenebrex_id].state != "ShieldVulnerable") {
             break;
@@ -1730,7 +1994,6 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
 
     let _ = drain_quasar(&mut rx);
     drop(ctx);
-    let _ = std::fs::remove_file(&db_path);
 }
 
 }
@@ -1917,7 +2180,8 @@ async fn test_sov_dev_indices_adm_vulnerability_live_entosis_and_command_nodes()
         let gun_id = if ej_idx % 2 == 0 { 996_000 } else { 996_002 };
         rpc_call(&ctx, &mut s_def, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::Integer(alt_ship)])
             .await.expect("destroy ejected empty player hull");
-        crate::sovereignty_equinox_gameplay::step_weapon_ticks(&ctx, null_sys).await;
+        let _ = rpc_call(&ctx, &mut s_def, "dogmaIM", "Deactivate", &[PyRep::Integer(gun_id)]).await;
+        ctx.systems.get_or_spawn(null_sys).step_manual(35.0).await.unwrap();
     }
     assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.sov_npc_kills.get(&null_sys).copied().unwrap_or(0)), 0, "destroying 5 ejected player hulls must credit 0 NPC kills");
     assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&null_sys].military_index), 0, "destroying 5 ejected player hulls must not raise Military Index");
@@ -1945,9 +2209,46 @@ async fn test_sov_dev_indices_adm_vulnerability_live_entosis_and_command_nodes()
                 "single NPC kill must not advance Military Index 1 (threshold is 5 kills)"
             );
         }
-        crate::sovereignty_equinox_gameplay::step_weapon_ticks(&ctx, null_sys).await;
+        let _ = rpc_call(&ctx, &mut s_def, "dogmaIM", "Deactivate", &[PyRep::Integer(gun_id)]).await;
+        ctx.systems.get_or_spawn(null_sys).step_manual(35.0).await.unwrap();
     }
     assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&null_sys].military_index), 1);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship_it) = snap.items.get_mut(&PILOT_SHIP) {
+            ship_it.type_id = 17_478;
+        }
+        for id in (996_000..=996_005).chain(996_060..=996_061).chain(std::iter::once(996_050)) {
+            snap.items.remove(&id);
+            snap.module_online_states.remove(&id);
+        }
+        for sid in [3_410, 17_940] {
+            snap.skills.entry(PILOT).or_default().insert(
+                sid,
+                TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 },
+            );
+        }
+        for (idx_m, flag) in [(996_050i64, InventoryFlag::HiSlot0), (996_051i64, InventoryFlag::HiSlot1)] {
+            snap.items.insert(
+                idx_m,
+                InventoryItemRecord {
+                    item_id: idx_m,
+                    type_id: 28_754, // ORE Strip Miner (200 m3 / 45s cycle)
+                    owner_id: PILOT,
+                    location_id: PILOT_SHIP,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.module_online_states.insert(idx_m, true);
+        }
+    });
+    ctx.invalidate_ship_fitting(PILOT_SHIP);
+    crate::sovereignty_equinox_gameplay::place_ship_ball(
+        &ctx, null_sys, PILOT, PILOT_SHIP, 17_478, hub_pos + DVec3::new(2_500.0, 0.0, 0.0),
+    ).await;
 
     let rock_id = 880_010i64;
     ctx.systems
@@ -1969,18 +2270,22 @@ async fn test_sov_dev_indices_adm_vulnerability_live_entosis_and_command_nodes()
         .expect("spawn Scordite asteroid");
     lock_target_via_rpc(&ctx, &mut s_def, null_sys, PILOT_SHIP, rock_id).await;
     rpc_call(&ctx, &mut s_def, "dogmaIM", "Activate", &[PyRep::Integer(996_050), PyRep::String("miningLaser".into()), PyRep::Integer(rock_id)])
-        .await.expect("activate Miner I on Scordite");
-    ctx.advance_secs(65);
+        .await.expect("activate ORE Strip Miner on Scordite");
+    ctx.advance_secs(46);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert_eq!(
         ctx.db.with_snapshot(|s| s.system_states[&null_sys].industrial_index),
         0,
-        "single 50 m3 mining cycle must not advance Industrial Index 1 (threshold is 1,000 m3)"
+        "single mining cycle must not advance Industrial Index 1 (threshold is 1,000 m3)"
     );
-    ctx.advance_secs(25 * 60);
+    rpc_call(&ctx, &mut s_def, "dogmaIM", "Activate", &[PyRep::Integer(996_051), PyRep::String("miningLaser".into()), PyRep::Integer(rock_id)])
+        .await.expect("activate second ORE Strip Miner on Scordite");
+    ctx.advance_secs(140);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert!(ctx.db.with_snapshot(|s| s.system_states[&null_sys].industrial_index >= 1));
-    let _ = rpc_call(&ctx, &mut s_def, "dogmaIM", "Deactivate", &[PyRep::Integer(996_050), PyRep::String("miningLaser".into())]).await;
+    for mid in [996_050i64, 996_051] {
+        let _ = rpc_call(&ctx, &mut s_def, "dogmaIM", "Deactivate", &[PyRep::Integer(mid), PyRep::String("miningLaser".into())]).await;
+    }
     let _ = drain_notif_events(&ctx, PILOT);
 
     ctx.advance_secs(8 * 86_400);
@@ -2306,8 +2611,7 @@ async fn test_sov_hub_anchor_upgrades_power_and_fuel() {
         "feat:sovereignty.sov-power",
     ]);
 
-    let db_path = temp_sqlite_path("parity_sov_hub_core");
-    let ctx = open_sqlite_ctx(&db_path, true);
+    let ctx = open_mem_ctx();
     crate::common::pin_clock(&ctx);
     let null_sys = ctx
         .sde
@@ -2510,7 +2814,6 @@ async fn test_sov_hub_anchor_upgrades_power_and_fuel() {
     });
 
     drop(ctx);
-    let _ = std::fs::remove_file(&db_path);
 }
 
 #[tokio::test]
@@ -2524,8 +2827,7 @@ async fn test_sov_workforce_reagents_and_mercenary_den() {
         "feat:sovereignty.mercenary-den",
     ]);
 
-    let db_path = temp_sqlite_path("parity_sov_wf_reagents_den");
-    let ctx = open_sqlite_ctx(&db_path, true);
+    let ctx = open_mem_ctx();
     crate::common::pin_clock(&ctx);
     let (null_sys, temp_planet, lava_planet, ice_planet, _) = find_nullsec_planets(&ctx);
     let mut adj_null: Vec<u32> = ctx
@@ -2763,13 +3065,15 @@ async fn test_sov_workforce_reagents_and_mercenary_den() {
         &[PyRep::Integer(blaster_base), PyRep::String("effects.ProjectileFired".into()), PyRep::Integer(den_id)],
     )
     .await;
-    step_weapon_ticks(&ctx, null_sys).await;
+    step_weapon_ticks_while(&ctx, null_sys, |c| {
+        c.db.with_snapshot(|s| s.structures.get(&den_id).unwrap().shield_hp) >= shield_before
+    })
+    .await;
     let shield_after = ctx.db.with_snapshot(|s| s.structures.get(&den_id).unwrap().shield_hp);
     assert!(shield_after < shield_before, "attacking Mercenary Den must reduce its shield HP");
     let _ = drain_quasar(&mut rx);
 
     drop(ctx);
-    let _ = std::fs::remove_file(&db_path);
 }
 
 }
@@ -2808,8 +3112,7 @@ async fn test_fw_boosters_lp_store_and_consumption() {
     // parity: feat:fw.fw-boosters
     eve_testkit::attest(&["feat:fw.fw-boosters"]);
 
-    let db_path = temp_sqlite_path("parity_fw_boosters");
-    let ctx = open_sqlite_ctx(&db_path, true);
+    let ctx = open_mem_ctx();
     let militia_corp = 1_000_179i64; // 24th Imperial Crusade
     let booster_tid = 91_916u32;   // Imperial Electronics Booster I
 
@@ -2918,7 +3221,6 @@ async fn test_fw_boosters_lp_store_and_consumption() {
     assert!(active_dict.iter().any(|(k, _)| k.as_i64() == Some(i64::from(booster_tid))));
 
     drop(ctx);
-    let _ = std::fs::remove_file(&db_path);
 }
 
 #[tokio::test]
@@ -2926,8 +3228,7 @@ async fn test_abyssal_bioadaptive_cache_rewards() {
     // parity: feat:abyssal.bioadaptive-cache-rewards
     eve_testkit::attest(&["feat:abyssal.bioadaptive-cache-rewards"]);
 
-    let db_path = temp_sqlite_path("parity_abyssal_cache");
-    let ctx = open_sqlite_ctx(&db_path, true);
+    let ctx = open_mem_ctx();
     let origin_sys = ctx
         .sde
         .solar_systems
@@ -3068,7 +3369,7 @@ async fn test_abyssal_bioadaptive_cache_rewards() {
         &[PyRep::Integer(blaster_base), PyRep::String("effects.ProjectileFired".into()), PyRep::Integer(r1_cache_t1)],
     )
     .await;
-    step_weapon_ticks(&ctx, abyss_sys_t1).await;
+    step_weapon_ticks_until_dead(&ctx, abyss_sys_t1, r1_cache_t1).await;
 
     let expected_muta = abyssal_mutaplasmid_for_tier(1);
     let dropped_types: Vec<u32> = ctx.db.with_snapshot(|snap| {
@@ -3086,7 +3387,6 @@ async fn test_abyssal_bioadaptive_cache_rewards() {
     assert!(dropped_types.contains(&ZERO_POINT_CONDENSATE_TYPE_ID), "cache drop must include zero-point condensate");
 
     drop(ctx);
-    let _ = std::fs::remove_file(&db_path);
 }
 
 #[tokio::test]
@@ -3098,8 +3398,7 @@ async fn test_cyno_lighting_rules_and_blockade_runner_scan_immunity() {
         "feat:ships.blockade-runner-cargo-scan-immunity",
     ]);
 
-    let db_path = temp_sqlite_path("parity_cyno_and_br");
-    let ctx = open_sqlite_ctx(&db_path, true);
+    let ctx = open_mem_ctx();
     let high_sys = 30_000_142u32; // Jita (0.95)
     let low_sys = ctx
         .sde
@@ -3394,7 +3693,6 @@ async fn test_cyno_lighting_rules_and_blockade_runner_scan_immunity() {
     assert!(!ctx.db.with_snapshot(|s| s.items.contains_key(&contraband_item)));
 
     drop(ctx);
-    let _ = std::fs::remove_file(&db_path);
 }
 
 }

@@ -995,15 +995,15 @@ async fn fw_warzones_victory_points_and_advantage_scaling() {
         .await
         .expect("GetHQSystemIDs");
     match hqs {
-        PyRep::List(list) => {
-            assert_eq!(list.len(), 4);
-            let ids: HashSet<i64> = list.iter().filter_map(|v| v.as_i64()).collect();
+        PyRep::Dict(entries) => {
+            assert_eq!(entries.len(), 4);
+            let ids: HashSet<i64> = entries.iter().filter_map(|(_, v)| v.as_i64()).collect();
             assert!(ids.contains(&(HQ_SYSTEM_MEHATOOR as i64)));
             assert!(ids.contains(&(HQ_SYSTEM_ONNAMON as i64)));
             assert!(ids.contains(&(HQ_SYSTEM_INTAKI as i64)));
             assert!(ids.contains(&(HQ_SYSTEM_AMO as i64)));
         }
-        _other => panic!("expected List, got {_other:?}"),
+        _other => panic!("expected Dict, got {_other:?}"),
     }
 
     let warzones = sov_call(&ctx, &mut sess, "fwWarzoneSolarsystem", "GetAllWarzones", &[])

@@ -667,3 +667,102 @@ async fn test_r4_169_asset_safety_contract_lock_and_nested_container_value() {
         box_base
     );
 }
+
+#[tokio::test]
+async fn test_gh784_788_reprocess_from_docked_ship_ore_hold_and_live_notifications() {
+    let ctx = ServerContext::new();
+    let mut sess = SessionState::new(17841);
+    login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    let char_id = 90_000_001;
+    let corp_id = 98_000_001;
+    let station_id = 60_003_760_i64;
+    let venture_id = 950_788_001_i64;
+    let ore_id = 950_788_002_i64;
+    let kw = HashMap::new();
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+        &kw,
+        None,
+    )
+    .await
+    .unwrap();
+    sess.station_id = Some(station_id);
+    sess.ship_id = Some(venture_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
+            ch.station_id = Some(station_id);
+            ch.active_ship_id = venture_id;
+            ch.balance = IskCents(10_000_000);
+        }
+        snap.items.insert(
+            venture_id,
+            InventoryItemRecord {
+                item_id: venture_id,
+                type_id: 32880, // Venture
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            ore_id,
+            InventoryItemRecord {
+                item_id: ore_id,
+                type_id: 1230, // Veldspar
+                owner_id: char_id,
+                location_id: venture_id,
+                flag: InventoryFlag::SpecializedOreHold,
+                quantity: 300,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[
+                PyRep::List(vec![PyRep::Integer(ore_id)]),
+                PyRep::Integer(venture_id),
+                PyRep::Integer(char_id),
+                PyRep::Integer(station_id),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("5-arg Reprocess from docked ship SpecializedOreHold must succeed");
+
+    let PyRep::Tuple(parts) = res else {
+        panic!("expected 2-tuple from V24 5-arg Reprocess");
+    };
+    assert_eq!(parts[0], PyRep::List(vec![PyRep::Integer(ore_id)]));
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs.iter().any(|n| n.event == "OnAccountChange"),
+        "Expected OnAccountChange notification"
+    );
+    assert!(
+        notifs.iter().any(|n| n.event == "OnItemChange"),
+        "Expected OnItemChange notification"
+    );
+}

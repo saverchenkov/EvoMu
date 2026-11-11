@@ -1,7 +1,6 @@
 //! Integration tests for Seasons and Login Campaigns.
 //!
 //! Covers season selection, challenges, login campaigns, and milestone RPCs.
-//! Note: Corresponding parity rows remain open as DATA GAP due to synthetic schedules/definitions.
 
 #![forbid(unsafe_code)]
 
@@ -21,13 +20,32 @@ const PILOT_1: i64 = 90_000_001;
 const PILOT_2: i64 = 90_000_002;
 const STATION_ID: i64 = 60_003_760;
 
+pub(crate) fn fast_demo_snapshot() -> &'static eve_db::WorldStateSnapshot {
+    static SNAP: std::sync::OnceLock<eve_db::WorldStateSnapshot> = std::sync::OnceLock::new();
+    SNAP.get_or_init(|| {
+        let db = eve_db::WorldRepository::with_demo_seed();
+        db.with_mut_snapshot(|s| s.markets_seeded = true);
+        db.with_snapshot(Clone::clone)
+    })
+}
+
+pub(crate) fn fast_real_sde_ctx() -> ServerContext {
+    static SDE: std::sync::OnceLock<std::sync::Arc<eve_sde::SdeRegistry>> =
+        std::sync::OnceLock::new();
+    let sde = SDE.get_or_init(|| {
+        std::sync::Arc::new(
+            eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path())
+                .expect("open evomu_sde.sqlite"),
+        )
+    });
+    let snap = fast_demo_snapshot();
+    let db = std::sync::Arc::new(eve_db::WorldRepository::new_empty());
+    db.with_mut_snapshot(|s| *s = snap.clone());
+    ServerContext::with_sde_and_repository(sde.clone(), db)
+}
+
 fn new_ctx() -> ServerContext {
-    let sde = std::sync::Arc::new(
-        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path())
-            .expect("open evomu_sde.sqlite"),
-    );
-    let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
-    ServerContext::with_sde_and_repository(sde, db)
+    fast_real_sde_ctx()
 }
 
 async fn rpc(
@@ -472,7 +490,7 @@ async fn test_login_campaigns_seasonal_and_milestones() {
         "Claim history must contain entry after claiming seasonal reward"
     );
 
-    // 3. milestoneMgr.ClaimRewards: validates arguments and fails closed with UnimplementedRPC (DATA GAP: feat:pve.milestones)
+    // 3. milestoneMgr.ClaimRewards: validates arguments and enforces 120-minute playtime prerequisite
     // Argument validation: non-positive milestone_id fails with InvalidMilestoneID
     let invalid_id = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(0)])
         .await

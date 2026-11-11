@@ -484,9 +484,6 @@ async fn test_fast_checkout_offers_and_buy_live() {
 async fn test_seasonal_login_campaign_lifecycle_live() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
-    ctx.db.with_mut_snapshot(|s| {
-        s.quasar_commerce.nes_store_catalog = None;
-    });
 
     let mut sess = SessionState::new(96_301);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;

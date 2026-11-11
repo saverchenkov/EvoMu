@@ -133,15 +133,15 @@ async fn test_hypernet_hypercore_sizing_and_expiry_refund_lifecycle() {
         .unwrap_err();
     assert_eq!(wrapped_count.code, "InvalidRaffleTicketCount");
 
-    // 2. Verify HyperCore requirement scaling with estimated value and node counts
+    // 2. Verify HyperCore requirement scaling with total price (V24 node-count invariant)
     let cores_8 = eve_server::services::hypernet_raffle_ops::compute_required_hypercores(100_000_000.0, 8).unwrap();
     let cores_16 = eve_server::services::hypernet_raffle_ops::compute_required_hypercores(100_000_000.0, 16).unwrap();
     let cores_48 = eve_server::services::hypernet_raffle_ops::compute_required_hypercores(100_000_000.0, 48).unwrap();
     let cores_512 = eve_server::services::hypernet_raffle_ops::compute_required_hypercores(100_000_000.0, 512).unwrap();
-    assert!(cores_8 <= cores_16);
-    assert!(cores_16 <= cores_48);
-    assert!(cores_48 <= cores_512);
-    assert_eq!(cores_512, 20);
+    assert_eq!(cores_8, 14);
+    assert_eq!(cores_16, 14);
+    assert_eq!(cores_48, 14);
+    assert_eq!(cores_512, 14);
 
     // 3. Create 48-node raffle and verify HyperCores consumed from hangar
     let create_rep = ctx.dispatch_rpc(&mut s1, "raffleProxy", None, "CreateRaffle", &[PyRep::Dict(vec![

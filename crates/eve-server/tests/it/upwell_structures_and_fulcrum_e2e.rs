@@ -5,8 +5,10 @@
 #![forbid(unsafe_code)]
 
 use crate::sov_and_insurgency_tail_helpers::{
-    call_rpc, new_sqlite_ctx, reload_ctx_from_sqlite, spawn_player_combat_pilot, PlayerPilot,
+    call_rpc, spawn_player_combat_pilot, PlayerPilot,
 };
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
@@ -26,6 +28,26 @@ const KISOGO: u32 = 30_001_392;
 const ZARZAKH: u32 = 30_100_000;
 const FULCRUM_STRUCTURE_ID: i64 = 60_015_187;
 
+fn open_fast_sqlite_ctx(label: &str) -> (PathBuf, Arc<ServerContext>) {
+    let dir = std::env::temp_dir().join(format!(
+        "evomu_shard3_{label}_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let db_path = dir.join(format!("{label}.sqlite"));
+    let ctx = Arc::new(crate::sovereignty_equinox_gameplay::open_sqlite_raw(&db_path));
+    (db_path, ctx)
+}
+
+fn reload_fast_sqlite_ctx(ctx: &ServerContext, path: &Path) -> Arc<ServerContext> {
+    ctx.db.save_to_sqlite(path).expect("flush sqlite world");
+    Arc::new(crate::sovereignty_equinox_gameplay::open_sqlite_raw(path))
+}
+
 async fn setup_corp_director(
     ctx: &ServerContext,
     sess_id: u64,
@@ -34,6 +56,12 @@ async fn setup_corp_director(
     corp_name: &str,
     ticker: &str,
 ) -> (PlayerPilot, i64) {
+    crate::sovereignty_equinox_gameplay::preseed_fast_account(
+        ctx,
+        user,
+        "pw-player",
+        eve_db::service_roles::ROLE_PLAYER_DEFAULT,
+    );
     let mut pilot = spawn_player_combat_pilot(ctx, sess_id, user, name, HURRICANE_TYPE, false).await;
     let sys_id = pilot.sess.solar_system_id.expect("solar_system_id");
     let station_id = ctx
@@ -136,7 +164,7 @@ async fn test_e2e_structures_anchor_restrictions_and_directory() {
         "feat:structures.structure-directory",
     ]);
 
-    let (db_path, ctx) = new_sqlite_ctx("struct_anchor_dir");
+    let (db_path, ctx) = open_fast_sqlite_ctx("struct_anchor_dir");
     crate::common::pin_clock(&ctx);
 
     let (mut pilot, corp_id) =
@@ -295,7 +323,7 @@ async fn test_e2e_structures_anchor_restrictions_and_directory() {
         "Anchored Astrahus visible in GetMyCorporationStructures"
     );
 
-    let ctx2 = reload_ctx_from_sqlite(&ctx, &db_path);
+    let ctx2 = reload_fast_sqlite_ctx(&ctx, &db_path);
     assert_eq!(
         ctx2.db.with_snapshot(|s| s.structures[&sid].owner_corp_id),
         corp_id,
@@ -312,7 +340,7 @@ async fn test_e2e_structures_profiles_and_defense_settings() {
         "feat:structures.defense-settings",
     ]);
 
-    let (db_path, ctx) = new_sqlite_ctx("struct_profiles_def");
+    let (db_path, ctx) = open_fast_sqlite_ctx("struct_profiles_def");
     crate::common::pin_clock(&ctx);
 
     let (mut director, corp_id) =
@@ -403,7 +431,7 @@ async fn test_e2e_structures_profiles_and_defense_settings() {
     assert_eq!(auto_enabled, true, "Defense settings auto_defense_enabled persisted");
     assert_eq!(def_standing, -2.5, "Defense settings standing_threshold (-2.5) persisted");
 
-    let ctx2 = reload_ctx_from_sqlite(&ctx, &db_path);
+    let ctx2 = reload_fast_sqlite_ctx(&ctx, &db_path);
     let persisted_standing = ctx2.db.with_snapshot(|s| {
         assert_eq!(s.structures[&sid].owner_corp_id, corp_id);
         load_defense_settings(s, sid).standing_threshold
@@ -420,7 +448,7 @@ async fn test_e2e_structures_repairshop_quotes_and_fulcrum_alignment_services() 
         "feat:structures.fulcrum-alignment-services",
     ]);
 
-    let (db_path, ctx) = new_sqlite_ctx("repair_fulcrum");
+    let (db_path, ctx) = open_fast_sqlite_ctx("repair_fulcrum");
     crate::common::pin_clock(&ctx);
 
     let (mut pilot, _corp_id) =
@@ -560,6 +588,12 @@ async fn test_e2e_structures_repairshop_quotes_and_fulcrum_alignment_services() 
     assert_eq!(empire_dock_err.code, "FulcrumRefusesEmpireMilitia");
 
     // Pirate militia pilot docks at The Fulcrum successfully
+    crate::sovereignty_equinox_gameplay::preseed_fast_account(
+        &ctx,
+        "fulcrum_pir_p1",
+        "pw-player",
+        eve_db::service_roles::ROLE_PLAYER_DEFAULT,
+    );
     let mut pirate = spawn_player_combat_pilot(&ctx, 83_004, "fulcrum_pir_p1", "Deathless Guest", HURRICANE_TYPE, false).await;
     call_rpc(&ctx, &mut pirate.sess, "facWarMgr", "JoinFactionAsCharacter", &[PyRep::Integer(500_010)])
         .await
@@ -570,7 +604,7 @@ async fn test_e2e_structures_repairshop_quotes_and_fulcrum_alignment_services() 
         .expect("Pirate militia pilot docks at The Fulcrum");
     assert_eq!(pirate.sess.station_id, Some(FULCRUM_STRUCTURE_ID));
 
-    let ctx2 = reload_ctx_from_sqlite(&ctx, &db_path);
+    let ctx2 = reload_fast_sqlite_ctx(&ctx, &db_path);
     assert_eq!(
         ctx2.db.with_snapshot(|s| s.characters[&pirate.char_id].station_id),
         Some(FULCRUM_STRUCTURE_ID),

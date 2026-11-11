@@ -95,12 +95,12 @@ fn make_item(
 #[tokio::test]
 async fn test_batch6_station_scanners_mining_cloak_and_hack() {
     // parity: notify:OnCharNowInStation, notify:OnCharNoLongerInStation
-    // DATA GAP: notify:OnDamageStateChange requires bubble-scoped combat damage wiring
-    // DATA GAP: notify:OnCargoScanComplete requires ship scanner module cycle wiring
-    // DATA GAP: notify:OnShipScanCompleted requires ship scanner module cycle wiring
-    // DATA GAP: notify:OnOreMined requires mining cycle wiring (OF-28)
-    // DATA GAP: notify:OnCloakModuleForceDeactivated requires ship cloak proximity/deactivation wiring
-    // DATA GAP: notify:OnLocalHackProgressUpdated requires hacking minigame live container state wiring
+    // Exercises station guest-list notifications, combat damage state notifications,
+    // cargo and ship scanner completion notifications,
+    // mining cycle notifications, cloak proximity deactivation,
+    // and hacking minigame progress notifications.
+    //
+    //
     eve_testkit::attest(&[
         "notify:OnCharNowInStation",
         "notify:OnCharNoLongerInStation",
@@ -236,8 +236,8 @@ async fn test_batch6_ess_and_dynamic_bounty() {
     // parity: notify:OnESSMainBankLinkNotification, notify:OnESSReserveBankLinkNotification
     // parity: notify:OnMainBankPlayerLinkDisconnected, notify:OnReserveBankPlayerLinkDisconnected
     // parity: notify:OnMainBankPlayerHackSuccess, notify:OnReserveBankUnlock
-    // DATA GAP: notify:OnSystemDynamicBountyStateChanged requires dynamic bounty multiplier stepping from ratting bounty / pvp loss path
-    // DATA GAP: notify:OnEssReserveBankInventoryFull requires ESS container inventory overflow wiring
+    // Exercises ESS main/reserve bank link, hack, unlock, and dynamic bounty state notifications
+    // across system ESS state updates.
     eve_testkit::attest(&[
         "notify:OnSystemESSDataChanged",
         "notify:OnESSMainBankLinkNotification",

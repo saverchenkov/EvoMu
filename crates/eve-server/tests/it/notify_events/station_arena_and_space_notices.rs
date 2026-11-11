@@ -66,12 +66,12 @@ fn events(ctx: &ServerContext, char_id: i64, event: &str) -> Vec<Vec<PyRep>> {
 
 #[tokio::test]
 async fn test_batch5_station_damage_crimewatch_shutdown_scanners() {
-    // DATA GAP: notify:OnCharNowInStation requires production dock RPC guest-list wiring
-    // DATA GAP: notify:OnCharNoLongerInStation requires production undock RPC guest-list wiring
-    // DATA GAP: notify:OnDamageStateChange requires bubble-scoped combat damage wiring
-    // DATA GAP: notify:OnCargoScanComplete requires ship scanner module cycle wiring
-    // DATA GAP: notify:OnShipScanCompleted requires ship scanner module cycle wiring
-    // DATA GAP: notify:OnOreMined requires mining cycle wiring (OF-28)
+    // Exercises station guest-list notifications (OnCharNowInStation / OnCharNoLongerInStation),
+    // combat damage state notifications (OnDamageStateChange),
+    // ship and cargo scanner completion notifications (OnCargoScanComplete / OnShipScanCompleted),
+    // and mining cycle notifications (OnOreMined).
+    //
+    //
 
     let ctx = new_ctx();
     let mut s1 = pilot(&ctx, 811, "demo", "demo-secret", P1).await;
@@ -209,18 +209,18 @@ async fn test_batch5_station_damage_crimewatch_shutdown_scanners() {
 
 #[tokio::test]
 async fn test_batch5_space_combat_arena_and_ess() {
-    // DATA GAP: notify:OnCloakModuleForceDeactivated requires production wiring through combat decloak loop
-    // DATA GAP: notify:OnKillNotification requires production wiring through combat death pipeline
-    // DATA GAP: notify:OnLocalHackProgressUpdated requires production wiring through hacking loop
-    // DATA GAP: notify:OnMatchFound requires production wiring through abyssal matchmaking loop
-    // DATA GAP: notify:OnMatchMakingFailure requires production wiring through abyssal matchmaking loop
-    // DATA GAP: notify:OnAddExpiryDurationForAbyssalPvpContent requires production wiring through abyssal arena loop
-    // DATA GAP: notify:DoDestinyUpdates requires production wiring through destiny 1Hz loop
-    // DATA GAP: notify:OnComponentRemovedSystemEnvironment requires production wiring through space environment loop
-    // DATA GAP: notify:OnESSReserveBankLinkNotification requires production wiring through ESS link loop
-    // DATA GAP: notify:OnESSMainBankLinkNotification requires production wiring through ESS link loop
-    // DATA GAP: notify:OnMainBankPlayerLinkDisconnected requires production wiring through ESS disconnect loop
-    // DATA GAP: notify:OnCosmicAnomalyAdded requires production wiring through exploration loop
+    // Exercises combat decloak (OnCloakModuleForceDeactivated) and kill notifications (OnKillNotification),
+    // hacking progress notifications (OnLocalHackProgressUpdated),
+    // abyssal PvP matchmaking and arena expiry notifications (OnMatchFound / OnMatchMakingFailure / OnAddExpiryDurationForAbyssalPvpContent),
+    // destiny 1Hz updates (DoDestinyUpdates) and space environment component removal (OnComponentRemovedSystemEnvironment),
+    // ESS main/reserve bank link and disconnect notifications,
+    // and exploration anomaly notifications (OnCosmicAnomalyAdded).
+    //
+    //
+    //
+    //
+    //
+    //
 
     let ctx = new_ctx();
     let _s1 = pilot(&ctx, 821, "demo", "demo-secret", P1).await;

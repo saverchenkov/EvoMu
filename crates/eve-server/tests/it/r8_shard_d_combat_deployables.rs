@@ -265,7 +265,7 @@ async fn test_r8_501_nested_sma_and_container_loot_rigs_orphans_and_turret_disco
     });
 
     let (_, c2_ball) = sys.get_ball_snapshot(c2.ship_id).await.unwrap().unwrap();
-    let (kill_id, _wreck_id, _corpse_id, _) = handle_ship_or_npc_destruction(
+    let kill_id = handle_ship_or_npc_destruction(
         &ctx,
         &sys,
         attacker.char_id,
@@ -279,7 +279,8 @@ async fn test_r8_501_nested_sma_and_container_loot_rigs_orphans_and_turret_disco
         50_000.0,
         now,
     )
-    .await;
+    .await
+    .kill_id;
 
     assert!(ctx.db.get_item(sma_rig).is_none(), "Rig fitted on SMA ship must always be destroyed");
     let surviving_nested = nested_mod_ids.iter().filter(|&&id| ctx.db.get_item(id).is_some()).count();

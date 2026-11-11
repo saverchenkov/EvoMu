@@ -510,7 +510,7 @@ async fn test_milestones_and_community_tracks() {
         );
     });
 
-    // 2. milestoneMgr.ClaimRewards: argument validation and DATA GAP fail-closed behavior
+    // 2. milestoneMgr.ClaimRewards: argument validation and prerequisite enforcement
     let missing_milestone = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[]).await.expect_err("missing milestone arg must fail");
     // rpc-lint: allow error code check
     assert_eq!(missing_milestone.code, "InvalidArgument");

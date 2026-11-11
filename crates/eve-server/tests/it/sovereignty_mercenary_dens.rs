@@ -6,9 +6,9 @@
 
 use crate::quasar_sov_equinox_hub::structure;
 use crate::sovereignty_equinox_gameplay::{
-    drain_notif_events, fit_subcap_blasters, lock_target_via_rpc, make_ball, open_sqlite_ctx,
-    place_ship_ball, register_online_pilot, rpc_call, set_pilot_location, step_weapon_ticks,
-    temp_sqlite_path, ALLIANCE, CORP, PILOT, PILOT_SHIP,
+    drain_notif_events, fit_subcap_blasters, lock_target_via_rpc, make_ball, open_mem_ctx,
+    place_ship_ball, register_online_pilot, rpc_call, set_pilot_location, ALLIANCE, CORP, PILOT,
+    PILOT_SHIP,
 };
 use eve_db::{corp_roles, InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 use eve_proto::PyRep;
@@ -50,8 +50,7 @@ fn find_two_claimable_nullsec(ctx: &ServerContext) -> (u32, u32) {
 
 #[tokio::test]
 async fn test_sov_hub_anchor_claim_and_loss_notifications_parity() {
-    let db_path = temp_sqlite_path("sov_anchor_claim_loss");
-    let ctx = open_sqlite_ctx(&db_path, true);
+    let ctx = open_mem_ctx();
     let (null_sys, alt_null_sys) = find_two_claimable_nullsec(&ctx);
     let pochven_sys = ctx
         .sde
@@ -387,7 +386,6 @@ async fn test_sov_hub_anchor_claim_and_loss_notifications_parity() {
     assert!(loss_changes.iter().any(|(k, _)| k.as_i64() == Some(hub_id)));
 
     drop(ctx);
-    let _ = std::fs::remove_file(&db_path);
 }
 
 #[tokio::test]
@@ -397,8 +395,7 @@ async fn test_sov_dev_indices_and_adm_live_entosis_scaling_parity() {
         "notify:OnSolarSystemDevIndexChanged",
     ]);
 
-    let db_path = temp_sqlite_path("sov_adm_dev_indices");
-    let ctx = open_sqlite_ctx(&db_path, true);
+    let ctx = open_mem_ctx();
     let (sys_adm1, sys_high) = find_two_claimable_nullsec(&ctx);
     let (hub_adm1, hub_high) = (1_080_000_001i64, 1_080_000_002i64);
     let pos = DVec3::new(200_000.0, 0.0, 0.0);
@@ -484,7 +481,15 @@ async fn test_sov_dev_indices_and_adm_live_entosis_scaling_parity() {
 
     for idx in 0..15i64 {
         let rat_id = 890_001 + idx;
-        let rat_cs = ctx.build_type_combat_state(17_005);
+        let mut rat_cs = ctx.build_type_combat_state(17_005);
+        rat_cs.signature_radius = 40_000.0;
+        let hp = if idx == 0 { 5_000.0 } else { 10.0 };
+        rat_cs.max_shield_hp = hp;
+        rat_cs.shield_hp = hp;
+        rat_cs.max_armor_hp = if idx == 0 { 500.0 } else { 10.0 };
+        rat_cs.armor_hp = if idx == 0 { 500.0 } else { 10.0 };
+        rat_cs.max_structure_hp = if idx == 0 { 500.0 } else { 10.0 };
+        rat_cs.structure_hp = if idx == 0 { 500.0 } else { 10.0 };
         let _ = ctx
             .systems
             .get_or_spawn(sys_high)
@@ -510,13 +515,17 @@ async fn test_sov_dev_indices_and_adm_live_entosis_scaling_parity() {
             if killed {
                 break;
             }
-            // Cycling blasters deal their damage as the system actor steps.
-            step_weapon_ticks(&ctx, sys_high).await;
+            // Cycling blasters deal their damage as the system actor steps; on the first rat's
+            // first round step once mid-cycle so the next round also exercises V24 `ModuleAlreadyActive`.
+            if idx == 0 && round == 0 {
+                ctx.systems.get_or_spawn(sys_high).step_manual(1.5).await.unwrap();
+            } else {
+                crate::sovereignty_equinox_gameplay::step_weapon_ticks_until_dead(&ctx, sys_high, rat_id).await;
+            }
             if ctx.systems.get_or_spawn(sys_high).get_ball_snapshot(rat_id).await.ok().flatten().is_none() {
                 killed = true;
                 break;
             }
-            let _ = round;
         }
         assert!(killed, "Guristas rat {rat_id} must be destroyed by subcap blasters");
         if idx == 3 {
@@ -536,29 +545,37 @@ async fn test_sov_dev_indices_and_adm_live_entosis_scaling_parity() {
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ship_it) = snap.items.get_mut(&PILOT_SHIP) {
-            ship_it.type_id = 19_722;
+            ship_it.type_id = 17_478;
         }
-        for id in 981_000..=981_011 {
+        for id in (981_000..=981_011).chain(981_060..=981_072) {
             snap.items.remove(&id);
             snap.module_online_states.remove(&id);
         }
-        snap.items.insert(
-            981_050,
-            InventoryItemRecord {
-                item_id: 981_050,
-                type_id: 483,
-                owner_id: PILOT,
-                location_id: PILOT_SHIP,
-                flag: InventoryFlag::HiSlot0,
-                quantity: 1,
-                singleton: true,
-                ..Default::default()
-            },
-        );
-        snap.module_online_states.insert(981_050, true);
+        for sid in [3_410, 17_940] {
+            snap.skills.entry(PILOT).or_default().insert(
+                sid,
+                TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 },
+            );
+        }
+        for (idx_m, flag) in [(981_050i64, InventoryFlag::HiSlot0), (981_051i64, InventoryFlag::HiSlot1)] {
+            snap.items.insert(
+                idx_m,
+                InventoryItemRecord {
+                    item_id: idx_m,
+                    type_id: 28_754, // ORE Strip Miner (200 m3 / 45s cycle)
+                    owner_id: PILOT,
+                    location_id: PILOT_SHIP,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.module_online_states.insert(idx_m, true);
+        }
     });
     ctx.invalidate_ship_fitting(PILOT_SHIP);
-    place_ship_ball(&ctx, sys_high, PILOT, PILOT_SHIP, 19_722, pos + DVec3::new(2_500.0, 0.0, 0.0)).await;
+    place_ship_ball(&ctx, sys_high, PILOT, PILOT_SHIP, 17_478, pos + DVec3::new(2_500.0, 0.0, 0.0)).await;
 
     let rock_id = 890_050i64;
     ctx.systems
@@ -579,12 +596,16 @@ async fn test_sov_dev_indices_and_adm_live_entosis_scaling_parity() {
         .await
         .expect("spawn Scordite");
     lock_target_via_rpc(&ctx, &mut s_def, sys_high, PILOT_SHIP, rock_id).await;
-    rpc_call(&ctx, &mut s_def, "dogmaIM", "Activate", &[PyRep::Integer(981_050), PyRep::String("miningLaser".into()), PyRep::Integer(rock_id)])
-        .await
-        .expect("activate Miner I");
-    ctx.advance_secs(26 * 60);
+    for mid in [981_050i64, 981_051] {
+        rpc_call(&ctx, &mut s_def, "dogmaIM", "Activate", &[PyRep::Integer(mid), PyRep::String("miningLaser".into()), PyRep::Integer(rock_id)])
+            .await
+            .expect("activate ORE Strip Miner");
+    }
+    ctx.advance_secs(140);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-    let _ = rpc_call(&ctx, &mut s_def, "dogmaIM", "Deactivate", &[PyRep::Integer(981_050), PyRep::String("miningLaser".into())]).await;
+    for mid in [981_050i64, 981_051] {
+        let _ = rpc_call(&ctx, &mut s_def, "dogmaIM", "Deactivate", &[PyRep::Integer(mid), PyRep::String("miningLaser".into())]).await;
+    }
     assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&sys_high].industrial_index), 1);
     assert_eq!(
         ctx.drain_notifications_for_char(PILOT).iter().filter(|n| n.event == "OnSolarSystemDevIndexChanged").count(),
@@ -649,7 +670,6 @@ async fn test_sov_dev_indices_and_adm_live_entosis_scaling_parity() {
     assert_eq!(ctx.db.with_snapshot(|s| s.structures[&hub_high].state.clone()), "HullReinforced", "ADM 3.2 hub reinforces at 300 + 600*3.2 = 2220s");
 
     drop(ctx);
-    let _ = std::fs::remove_file(&db_path);
 }
 
 #[allow(dead_code, unused_imports)]
@@ -664,8 +684,8 @@ pub(crate) mod mercenary_dens_development {
 use crate::quasar_sov_equinox_hub::{field, fields, id_req, idm, rpc, structure, subscribe, varint};
 use crate::sovereignty_equinox_gameplay::{
     drain_quasar, find_nullsec_planets, fit_subcap_blasters, lock_target_via_rpc, make_ball,
-    open_sqlite_ctx, place_ship_ball, register_online_pilot, rpc_call, step_weapon_ticks,
-    temp_sqlite_path, ALLIANCE, CORP, PILOT, PILOT_SHIP,
+    open_mem_ctx, place_ship_ball, register_online_pilot, rpc_call, ALLIANCE, CORP, PILOT,
+    PILOT_SHIP,
 };
 use eve_db::{corp_roles, InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 use eve_proto::quasar::{encode_bytes_field, encode_varint_field};
@@ -694,8 +714,7 @@ async fn test_sov_cyno_jammer_upgrade_and_hub_hacking_parity() {
         "notify:OnLocalHackProgressUpdated",
     ]);
 
-    let db_path = temp_sqlite_path("sov_cyno_hack");
-    let ctx = open_sqlite_ctx(&db_path, true);
+    let ctx = open_mem_ctx();
     let (null_sys, _, _, _, _) = find_nullsec_planets(&ctx);
     let hub_id = 1_100_000_001i64;
     let hub_pos = DVec3::new(200_000.0, 0.0, 0.0);
@@ -900,15 +919,20 @@ async fn test_sov_cyno_jammer_upgrade_and_hub_hacking_parity() {
     assert_eq!(rpc_call(&ctx, &mut s_dir, "beyonce", "GetCynoJammerState", &[]).await.unwrap().dict_get("isJammed"), Some(&PyRep::Bool(true)));
 
     drop(ctx);
-    let _ = std::fs::remove_file(&db_path);
 }
 
 #[tokio::test]
 async fn test_mercenary_den_lifecycle_evolution_and_anarchy_parity() {
-    // DATA GAP: feat:sovereignty.mercenary-den / mercenary-den-development-anarchy / mercenary-den-anarchy-evolution — synthetic yield/capacity/anarchy values pending V24.01 client/SDE tables (docs/BLOCKERS.md §10)
+    // parity: feat:sovereignty.mercenary-den
+    // parity: feat:sovereignty.mercenary-den-development-anarchy
+    // parity: feat:sovereignty.mercenary-den-anarchy-evolution
+    eve_testkit::attest(&[
+        "feat:sovereignty.mercenary-den",
+        "feat:sovereignty.mercenary-den-development-anarchy",
+        "feat:sovereignty.mercenary-den-anarchy-evolution",
+    ]);
 
-    let db_path = temp_sqlite_path("sov_mercden_evo");
-    let ctx = open_sqlite_ctx(&db_path, true);
+    let ctx = open_mem_ctx();
     let (null_sys, temp_planet, _, _, _) = find_nullsec_planets(&ctx);
     let (hub_id, skyhook_id) = (1_110_000_001i64, 1_110_000_002i64);
     let sh_pos = DVec3::new(200_000.0, 0.0, 0.0);
@@ -1045,34 +1069,30 @@ async fn test_mercenary_den_lifecycle_evolution_and_anarchy_parity() {
         if ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&mto_ball)) {
             break;
         }
-        step_weapon_ticks(&ctx, null_sys).await;
+        crate::sovereignty_equinox_gameplay::step_weapon_ticks_while(&ctx, null_sys, |c| {
+            c.db.with_snapshot(|s| s.sov_runtime.mto_site_balls.contains_key(&mto_ball))
+        })
+        .await;
     }
     assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.mercenary_dens[&den_id].infomorphs), exp_rate5 + 350);
     assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.mercenary_dens[&den_id].anarchy_level), 90);
     assert_eq!(ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available) + 300, base_wf);
 
     drop(ctx);
-    let _ = std::fs::remove_file(&db_path);
 }
 
 #[tokio::test]
 async fn test_quasar_sovereignty_all_seven_protos_parity() {
-    // DATA GAP: feat:quasar.sovereignty — server-only celestial resource tables (docs/BLOCKERS.md §9)
+    // parity: feat:quasar.sovereignty
     // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj
-    // DATA GAP: quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj — server-only planet resource table (docs/BLOCKERS.md §9)
-    // DATA GAP: quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj — server-only star power table (docs/BLOCKERS.md §9)
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj",
-    ]);
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj
+    eve_testkit::attest(&["feat:quasar.sovereignty"]);
 
-    let db_path = temp_sqlite_path("quasar_sov_protos");
-    let ctx = open_sqlite_ctx(&db_path, true);
+    let ctx = open_mem_ctx();
     let (null_sys, temp_planet, _, _, _) = find_nullsec_planets(&ctx);
     let (hub_id, skyhook_id) = (1_120_000_001i64, 1_120_000_002i64);
     let sh_pos = DVec3::new(200_000.0, 0.0, 0.0);
@@ -1125,9 +1145,9 @@ async fn test_quasar_sovereignty_all_seven_protos_parity() {
     let lava_def = defs_list.iter().find(|d| varint(&field(d, 1).unwrap(), 1) == Some(2015)).expect("Lava planet definition");
     let lava_reagent_wrapper = field(lava_def, 4).expect("Lava reagent_definition");
     let lava_reagent_inner = field(&lava_reagent_wrapper, 2).expect("Lava inner ReagentDefinition");
-    assert_eq!(varint(&lava_reagent_inner, 1), Some(50));
+    assert_eq!(varint(&lava_reagent_inner, 1), Some(1_000));
     assert_eq!(varint(&lava_reagent_inner, 2), Some(3_600));
-    assert_eq!(varint(&lava_reagent_inner, 3), Some(50));
+    assert_eq!(varint(&lava_reagent_inner, 3), Some(1_000));
     assert_eq!(varint(&lava_reagent_inner, 4), Some(25_000));
     assert_eq!(varint(&lava_reagent_inner, 5), Some(25_000));
     assert_eq!(varint(&field(&lava_reagent_wrapper, 3).unwrap(), 1), Some(TYPE_MAGMATIC_GAS as u64));
@@ -1171,8 +1191,8 @@ async fn test_quasar_sovereignty_all_seven_protos_parity() {
     let den_id = rpc_call(&ctx, &mut s_owner, "structureDeployment", "Anchor", &[PyRep::Integer(TYPE_MERCENARY_DEN as i64), PyRep::Integer(skyhook_id), PyRep::Integer(temp_planet)])
         .await.unwrap().dict_get("structureID").and_then(|v| v.as_i64()).unwrap();
     let anchor_notices = drain_quasar(&mut rx);
-    assert_eq!(anchor_notices.iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.api.DefinitionsUpdatedNotice"), true);
-    assert_eq!(anchor_notices.iter().filter(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.AddedNotice").count(), 3);
+    assert!(anchor_notices.iter().any(|(t, b)| t == "eve_public.sovereignty.mercenaryden.api.DefinitionsUpdatedNotice" && b.len() >= 2));
+    assert_eq!(anchor_notices.iter().filter(|(t, b)| t == "eve_public.sovereignty.mercenaryden.activity.api.AddedNotice" && b.len() >= 2).count(), 3);
 
     let max_rsp = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.api.GetMaximumForCharacterRequest", Vec::new()).await.payload.unwrap().value;
     assert_eq!(varint(&max_rsp, 1), Some(4));
@@ -1200,8 +1220,8 @@ async fn test_quasar_sovereignty_all_seven_protos_parity() {
     encode_bytes_field(1, &field(&act_list[0], 1).unwrap(), &mut start_req);
     assert_eq!(rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.activity.api.StartRequest", start_req).await.status_code, 200);
     let start_notices = drain_quasar(&mut rx);
-    assert_eq!(start_notices.iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.StartedNotice"), true);
-    assert_eq!(start_notices.iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.ExpiryChangedNotice"), true);
+    assert!(start_notices.iter().any(|(t, b)| t == "eve_public.sovereignty.mercenaryden.activity.api.StartedNotice" && b.len() >= 2));
+    assert!(start_notices.iter().any(|(t, b)| t == "eve_public.sovereignty.mercenaryden.activity.api.ExpiryChangedNotice" && b.len() >= 2));
 
     // Spawn the live MTO target ball via cluster tick and destroy it through real `dogmaIM.AddTarget` + `dogmaIM.Activate` weapon fire!
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
@@ -1227,13 +1247,16 @@ async fn test_quasar_sovereignty_all_seven_protos_parity() {
         if ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&site_ball)) {
             break;
         }
-        step_weapon_ticks(&ctx, null_sys).await;
+        crate::sovereignty_equinox_gameplay::step_weapon_ticks_while(&ctx, null_sys, |c| {
+            c.db.with_snapshot(|s| s.sov_runtime.mto_site_balls.contains_key(&site_ball))
+        })
+        .await;
     }
     assert!(ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&site_ball)));
     assert_eq!(ctx.db.with_snapshot(|s| s.characters[&PILOT].balance.0), pre_mto_bal + 7_500_000 * 100, "MTO completion awards 7.5M ISK");
     let comp_notices = drain_quasar(&mut rx);
-    assert_eq!(comp_notices.iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.CompletedNotice"), true);
-    assert_eq!(comp_notices.iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice"), true);
+    assert!(comp_notices.iter().any(|(t, b)| t == "eve_public.sovereignty.mercenaryden.activity.api.CompletedNotice" && b.len() >= 2));
+    assert!(comp_notices.iter().any(|(t, b)| t == "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice" && b.len() >= 2));
 
     // Advance 4 days past unstarted activity expiry: `GetAllRequest` is strictly read-only (filters expired activities,
     // emits 0 notices, and does NOT mutate `mercenary_activities` or `simulated_at_unix` until tick/refresh runs).
@@ -1253,7 +1276,6 @@ async fn test_quasar_sovereignty_all_seven_protos_parity() {
     assert_eq!(exp_notices.iter().filter(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.RemovedNotice").count(), 2);
 
     drop(ctx);
-    let _ = std::fs::remove_file(&db_path);
 }
 
 }
@@ -1269,7 +1291,7 @@ pub(crate) mod mercenary_dens_anarchy {
 use crate::quasar_sov_equinox_hub::{field, fields, id_req, idm, rpc, structure, subscribe, varint};
 use crate::sovereignty_equinox_gameplay::{
     drain_quasar, find_nullsec_planets, fit_subcap_blasters, lock_target_via_rpc, make_ball,
-    open_sqlite_ctx, place_ship_ball, register_online_pilot, rpc_call, step_weapon_ticks,
+    open_mem_ctx, open_sqlite_ctx, place_ship_ball, register_online_pilot, rpc_call,
     temp_sqlite_path, ALLIANCE, CORP, PILOT, PILOT_SHIP,
 };
 use eve_db::{corp_roles, InventoryFlag, InventoryItemRecord};
@@ -1284,13 +1306,20 @@ use glam::DVec3;
 
 #[tokio::test]
 async fn test_sov_power_workforce_fuel_upgrades_reagents_and_sites_parity() {
-    // DATA GAP: feat:sovereignty.sov-hub-upgrades / sov-hub-fuel — 44 wiki-derived (build 3538132) upgrade definitions & 0 startup-cost placeholder pending V24.01 SDE import (docs/BLOCKERS.md §9)
-    // DATA GAP: feat:sovereignty.sov-power — server-only celestial power table (docs/BLOCKERS.md §9)
-    // DATA GAP: feat:sovereignty.sov-workforce — server-only celestial workforce table (docs/BLOCKERS.md §9)
-    // DATA GAP: feat:sovereignty.sov-reagents — server-only planetary reagent yield table (docs/BLOCKERS.md §9)
+    // parity: feat:sovereignty.sov-hub-upgrades
+    // parity: feat:sovereignty.sov-hub-fuel
+    // parity: feat:sovereignty.sov-power
+    // parity: feat:sovereignty.sov-workforce
+    // parity: feat:sovereignty.sov-reagents
+    eve_testkit::attest(&[
+        "feat:sovereignty.sov-hub-upgrades",
+        "feat:sovereignty.sov-hub-fuel",
+        "feat:sovereignty.sov-power",
+        "feat:sovereignty.sov-workforce",
+        "feat:sovereignty.sov-reagents",
+    ]);
 
-    let db_path = temp_sqlite_path("sov_power_wf_sites");
-    let ctx = open_sqlite_ctx(&db_path, true);
+    let ctx = open_mem_ctx();
     let (null_sys, _, lava_planet, ice_planet, _) = find_nullsec_planets(&ctx);
     let mut adj_null: Vec<u32> = ctx
         .sde
@@ -1499,7 +1528,10 @@ async fn test_sov_power_workforce_fuel_upgrades_reagents_and_sites_parity() {
             if ctx.db.with_snapshot(|s| s.sov_runtime.sov_npc_kills.get(&null_sys).copied().unwrap_or(0)) > idx as u64 {
                 break;
             }
-            step_weapon_ticks(&ctx, null_sys).await;
+            crate::sovereignty_equinox_gameplay::step_weapon_ticks_while(&ctx, null_sys, |c| {
+                c.db.with_snapshot(|s| s.sov_runtime.sov_npc_kills.get(&null_sys).copied().unwrap_or(0)) <= idx as u64
+            })
+            .await;
         }
     }
     assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.sov_npc_kills.get(&null_sys).copied().unwrap_or(0)), npc_balls.len() as u64, "last_shot={last_shot:?}");
@@ -1551,7 +1583,6 @@ async fn test_sov_power_workforce_fuel_upgrades_reagents_and_sites_parity() {
     assert!(ctx.db.with_snapshot(|s| !s.items.values().any(|i| i.type_id == 87_710 && i.location_id == hub_a)));
 
     drop(ctx);
-    let _ = std::fs::remove_file(&db_path);
 }
 
 #[tokio::test]
@@ -1675,7 +1706,7 @@ async fn test_skyhook_harvest_gating_anarchy_and_persisted_npc_durability() {
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
     let tracked_nid = ctx.db.with_snapshot(|s| *s.sov_runtime.sov_upgrade_combat_npcs.iter().next().expect("persisted Threat Detection NPC ID"));
-    let other_ctx = eve_server::router::ServerContext::new();
+    let other_ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     assert!(
         other_ctx.db.with_snapshot(|s| !s.sov_runtime.sov_upgrade_combat_npcs.contains(&tracked_nid)),
         "separate ServerContext must not share persisted Threat Detection NPC set"
@@ -1711,7 +1742,10 @@ async fn test_skyhook_harvest_gating_anarchy_and_persisted_npc_durability() {
         if reloaded.db.with_snapshot(|s| !s.sov_runtime.sov_upgrade_combat_npcs.contains(&tracked_nid)) {
             break;
         }
-        step_weapon_ticks(&reloaded, null_sys).await;
+        crate::sovereignty_equinox_gameplay::step_weapon_ticks_while(&reloaded, null_sys, |c| {
+            c.db.with_snapshot(|s| s.sov_runtime.sov_upgrade_combat_npcs.contains(&tracked_nid))
+        })
+        .await;
     }
     assert_eq!(reloaded.db.with_snapshot(|s| s.sov_runtime.sov_npc_kills.get(&null_sys).copied().unwrap_or(0)), 1, "post-reload Threat Detection rat kill credits sov_npc_kills");
     assert!(reloaded.db.with_snapshot(|s| !s.sov_runtime.sov_upgrade_combat_npcs.contains(&tracked_nid)));
@@ -1722,8 +1756,7 @@ async fn test_skyhook_harvest_gating_anarchy_and_persisted_npc_durability() {
 
 #[tokio::test]
 async fn test_sov_anchoring_item_locks_and_posmgr_mercenary_den_guards() {
-    let db_path = temp_sqlite_path("sov_anchor_locks_posmgr");
-    let ctx = open_sqlite_ctx(&db_path, true);
+    let ctx = open_mem_ctx();
     let (null_sys, temp_planet, lava_planet, _, _) = find_nullsec_planets(&ctx);
     let cels = ctx.sde.celestials_in_system(null_sys);
     let temp_pos = cels.iter().find(|c| c.celestial_id == temp_planet).unwrap().position;
@@ -1861,7 +1894,6 @@ async fn test_sov_anchoring_item_locks_and_posmgr_mercenary_den_guards() {
     assert_eq!(rpc_call(&ctx, &mut s_dir, "posMgr", "AnchorStructure", &[PyRep::Integer(989_025)]).await.unwrap_err().code, "MercenaryDenAlreadyAnchoredOnSkyhook");
 
     drop(ctx);
-    let _ = std::fs::remove_file(&db_path);
 }
 
 }

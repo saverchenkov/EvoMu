@@ -1397,13 +1397,17 @@ async fn playtest_batch_i_autofit_slash_notifications_and_dogma_get_all_info() {
         .expect("/fit 2048");
     let dcu_id = fit_dcu.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
     assert_eq!(fit_dcu.dict_get("online"), Some(&PyRep::Bool(true)));
-    let fit_notifs: Vec<String> = ctx
-        .drain_notifications_for_char(char_id)
-        .into_iter()
-        .map(|n| n.event)
-        .collect();
+    let raw_fit_notifs = ctx.drain_notifications_for_char(char_id);
+    let fit_notifs: Vec<String> = raw_fit_notifs.iter().map(|n| n.event.clone()).collect();
     assert!(fit_notifs.iter().any(|e| e == "OnItemChange"));
-    assert!(fit_notifs.iter().any(|e| e == "OnModuleFitted"));
+    let mod_fit_notif = raw_fit_notifs
+        .iter()
+        .find(|n| n.event == "OnModuleFitted")
+        .expect("OnModuleFitted");
+    assert_eq!(mod_fit_notif.args.len(), 4);
+    assert_eq!(mod_fit_notif.args[0], PyRep::Integer(char_id));
+    assert_eq!(mod_fit_notif.args[2], PyRep::Integer(2048));
+    assert!(mod_fit_notif.args[3].as_i64().unwrap_or(0) > 0);
     assert!(fit_notifs.iter().any(|e| e == "OnModuleAttributeChanges"));
     assert!(fit_notifs.iter().any(|e| e == "OnGodmaShipEffect"));
 
@@ -1457,8 +1461,13 @@ async fn playtest_batch_i_autofit_slash_notifications_and_dogma_get_all_info() {
         .find(|(k, _)| k.as_i64() == Some(eve_dogma::attr_ids::POWER_LOAD as i64))
         .and_then(|(_, v)| v.as_f64())
         .unwrap();
-    assert_eq!(cpu_load, 0.0, "GetAllInfo shipInfo.attributes CPU_LOAD must be 0.0");
-    assert_eq!(pg_load, 0.0, "GetAllInfo shipInfo.attributes POWER_LOAD must be 0.0");
+    let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
+    let eval_cpu = fit.ship.get_attribute(eve_dogma::attr_ids::CPU_LOAD, &ctx.sde);
+    let eval_pg = fit.ship.get_attribute(eve_dogma::attr_ids::POWER_LOAD, &ctx.sde);
+    assert!(eval_cpu > 0.0, "Evaluated ship CPU_LOAD must be > 0.0");
+    assert!(eval_pg > 0.0, "Evaluated ship POWER_LOAD must be > 0.0");
+    assert!((cpu_load - eval_cpu).abs() < 1e-6, "GetAllInfo shipInfo.attributes CPU_LOAD must match evaluated CPU_LOAD");
+    assert!((pg_load - eval_pg).abs() < 1e-6, "GetAllInfo shipInfo.attributes POWER_LOAD must match evaluated POWER_LOAD");
 }
 
 #[tokio::test]
@@ -1749,6 +1758,19 @@ async fn inventory_autofit_slash_fit_undock_dock_and_mining_ledger_regressions()
         .expect("GetObserverLedger(None)");
     assert!(obs_ledger.is_crowset(), "GetObserverLedger(None) must return CRowset");
     assert_eq!(obs_ledger.crowset_rows().map(<[PyRep]>::len), Some(0));
+    let expected_obs_ledger = eve_proto::DBRowDescriptor::new([
+        ("characterID", eve_proto::DbColumnType::I8),
+        ("corporationID", eve_proto::DbColumnType::I8),
+        ("typeID", eve_proto::DbColumnType::I4),
+        ("quantity", eve_proto::DbColumnType::I8),
+        ("eventDate", eve_proto::DbColumnType::FileTime),
+        ("solarsystemID", eve_proto::DbColumnType::I4),
+    ])
+    .build_crowset(Vec::new());
+    assert_eq!(
+        obs_ledger, expected_obs_ledger,
+        "GetObserverLedger(None) must emit exact V24 descriptor columns including FileTime eventDate and solarsystemID"
+    );
 
     let ast_tid = ctx
         .sde

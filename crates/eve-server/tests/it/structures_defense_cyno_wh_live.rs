@@ -33,6 +33,12 @@ async fn setup_corp_pilot_in_space(
     let user = format!("live{char_id}");
     let pass = format!("{user}-secret");
     ctx.db.provision_gm_account(&user, &pass, char_id, &format!("Live Pilot {char_id}"));
+    crate::sovereignty_equinox_gameplay::preseed_fast_account(
+        ctx,
+        &user,
+        &pass,
+        eve_db::service_roles::ROLE_GM_DEFAULT,
+    );
     let mut sess = SessionState::new(sess_id);
     common::login_pilot(ctx, &mut sess, &user, &pass).await;
     rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)])
@@ -173,7 +179,7 @@ async fn deploy_online_astrahus_with_core(
 // parity: feat:structures.board-structure
 #[tokio::test]
 async fn test_structures_board_structure_control_and_eject_live() {
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     common::pin_clock(&ctx);
 
     const PERIMETER: u32 = 30_000_144;
@@ -313,7 +319,7 @@ async fn test_structures_board_structure_control_and_eject_live() {
 // parity: feat:structures.defense-settings
 #[tokio::test]
 async fn test_structures_defense_settings_and_standup_weapons_live() {
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     common::pin_clock(&ctx);
 
     const RANCER: u32 = 30_002_718;
@@ -459,8 +465,8 @@ async fn test_structures_defense_settings_and_standup_weapons_live() {
     .await
     .expect("AddCorporateContact -5.0");
 
-    for _ in 0..90 {
-        sys_handle.step_manual(1.0).await.unwrap();
+    for _ in 0..18 {
+        sys_handle.step_manual(5.0).await.unwrap();
     }
 
     let hostile_after = sys_handle
@@ -482,7 +488,7 @@ async fn test_structures_defense_settings_and_standup_weapons_live() {
 // parity: feat:structures.mobile-cyno-inhibitor
 #[tokio::test]
 async fn test_structures_mobile_cyno_inhibitor_lifecycle_live() {
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     common::pin_clock(&ctx);
 
     const RANCER: u32 = 30_002_718; // Lowsec (sec < 0.45)
@@ -596,7 +602,7 @@ async fn test_structures_mobile_cyno_inhibitor_lifecycle_live() {
 // parity: feat:wormholes.lifetime-decay-stages
 #[tokio::test]
 async fn test_wormholes_lifetime_decay_stages_and_despawn_live() {
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     common::pin_clock(&ctx);
 
     let long_wh_sys = (31_000_007_u32..=31_002_605)
@@ -640,11 +646,23 @@ async fn test_wormholes_lifetime_decay_stages_and_despawn_live() {
     }
     assert!(!wh_sigs.is_empty(), "W-space systems must spawn live wormholes");
 
-    // Step in 30-minute increments across the full 24h lifetime (48 * 1800s = 24h) so every single decay stage (<1 day, <4h, <1h) is observed
+    // Sample key timestamps across the 24h lifetime (<1 day, <4h, <1h) without stepping every 30m once all 3 stages are observed
     let (mut saw_lt_1d, mut saw_lt_4h, mut saw_lt_1h) = (false, false, false);
-    for step_idx in 0..48_u32 {
-        if step_idx > 0 {
-            ctx.advance_secs(1_800);
+    let mut elapsed_wh_secs = 0_u64;
+    let total_wh_secs = 47 * 1_800_u64;
+    for delta in [
+        0_u64,
+        1_800,
+        11 * 3_600,
+        3_600,
+        3 * 3_600,
+        2 * 3_600,
+        3 * 3_600,
+        3 * 3_600,
+    ] {
+        if delta > 0 {
+            ctx.advance_secs(delta);
+            elapsed_wh_secs += delta;
         }
         for (sys_id, p) in [(long_wh_sys, &mut pilot_long), (C3_SYS, &mut pilot_c3)] {
             let scan = rpc(&ctx, &mut p.sess, "scanMgr", "GetSystemScanMgr", &[])
@@ -677,13 +695,16 @@ async fn test_wormholes_lifetime_decay_stages_and_despawn_live() {
                 }
             }
         }
+        if saw_lt_1d && saw_lt_4h && saw_lt_1h {
+            break;
+        }
     }
     assert!(
         saw_lt_1d && saw_lt_4h && saw_lt_1h,
         "Must observe all 3 wormhole decay stages (<1 day, <4h, <1h)"
     );
 
-    ctx.advance_secs(5 * 3_600);
+    ctx.advance_secs(total_wh_secs.saturating_sub(elapsed_wh_secs) + 5 * 3_600);
     tick_background_cluster(&ctx).await;
 
     for (orig_sys, orig_sig_id, dest_sys) in &wh_sigs {

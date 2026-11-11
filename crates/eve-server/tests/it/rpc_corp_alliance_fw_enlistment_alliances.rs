@@ -32,7 +32,15 @@ fn rows(rep: &PyRep) -> (Vec<String>, Vec<Vec<PyRep>>) {
 fn keyval(rep: &PyRep) -> HashMap<String, PyRep> {
     match rep {
         PyRep::KeyVal(dict) => dict.clone(),
-        other => panic!("expected KeyVal, got {other:?}"),
+        PyRep::Object { args, .. } => match args.as_ref() {
+            PyRep::Dict(entries) => entries
+                .iter()
+                .filter_map(|(k, v)| k.as_str().map(|s| (s.to_owned(), v.clone())))
+                .collect(),
+            PyRep::KeyVal(dict) => dict.clone(),
+            other => panic!("expected Object Dict/KeyVal args, got {other:?}"),
+        },
+        other => panic!("expected KeyVal or Object, got {other:?}"),
     }
 }
 

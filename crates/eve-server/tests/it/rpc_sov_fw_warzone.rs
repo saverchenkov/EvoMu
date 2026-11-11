@@ -453,8 +453,8 @@ async fn test_fw_warzone_solarsystem_states_and_queries() {
         .await
         .expect("GetHQSystemIDs");
     match hqs {
-        PyRep::List(list) => assert_eq!(list.len(), 4, "Must contain 4 FW HQ system IDs"),
-        other => panic!("Expected List for GetHQSystemIDs, got {other:?}"),
+        PyRep::Dict(entries) => assert_eq!(entries.len(), 4, "Must contain 4 FW HQ system IDs"),
+        other => panic!("Expected Dict for GetHQSystemIDs, got {other:?}"),
     }
 
     // 2. GetAllWarzones

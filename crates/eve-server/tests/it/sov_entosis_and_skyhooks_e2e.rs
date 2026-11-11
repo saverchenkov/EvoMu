@@ -11,12 +11,50 @@ use eve_proto::PyRep;
 use eve_server::services::sov_gameplay::{
     advance_skyhook_reagents_in_snap, record_sov_system_activity, SKYHOOK_MATURITY_CYCLE_SECS,
 };
+use eve_server::router::ServerContext;
 use eve_server::services::sov_services::{
     calculate_adm, TYPE_MAGMATIC_GAS, TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB,
     TYPE_SUPERIONIC_ICE,
 };
 use eve_server::sp6_lifecycle::tick_background_cluster;
 use glam::DVec3;
+
+async fn fast_spawn_pilot(
+    ctx: &ServerContext,
+    sess_id: u64,
+    username: &str,
+    char_name: &str,
+    hull_type_id: u32,
+    fit_entosis: bool,
+) -> PlayerPilot {
+    crate::sovereignty_equinox_gameplay::preseed_fast_account(
+        ctx,
+        username,
+        "pw-player",
+        eve_db::service_roles::ROLE_PLAYER_DEFAULT,
+    );
+    spawn_player_combat_pilot(ctx, sess_id, username, char_name, hull_type_id, fit_entosis).await
+}
+
+fn open_fast_sqlite_ctx(label: &str) -> (std::path::PathBuf, std::sync::Arc<ServerContext>) {
+    let dir = std::env::temp_dir().join(format!(
+        "evomu_shard3_{label}_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let db_path = dir.join(format!("{label}.sqlite"));
+    let ctx = std::sync::Arc::new(crate::sovereignty_equinox_gameplay::open_sqlite_raw(&db_path));
+    (db_path, ctx)
+}
+
+fn reload_fast_sqlite_ctx(ctx: &ServerContext, path: &std::path::Path) -> std::sync::Arc<ServerContext> {
+    ctx.db.save_to_sqlite(path).expect("flush sqlite world");
+    std::sync::Arc::new(crate::sovereignty_equinox_gameplay::open_sqlite_raw(path))
+}
 
 // parity: feat:sovereignty.sov-adm
 // parity: feat:sovereignty.sov-dev-indices
@@ -33,10 +71,10 @@ async fn test_e2e_sov_adm_dev_indices_entosis_counter_and_command_nodes() {
         "feat:sovereignty.sov-changed-notifications",
     ]);
 
-    let (db_path, ctx) = new_sqlite_ctx("sov_entosis");
+    let (db_path, ctx) = open_fast_sqlite_ctx("sov_entosis");
     crate::common::pin_clock(&ctx);
 
-    let mut def = spawn_player_combat_pilot(
+    let mut def = fast_spawn_pilot(
         &ctx,
         82_002,
         "sov_def_p1",
@@ -47,7 +85,7 @@ async fn test_e2e_sov_adm_dev_indices_entosis_counter_and_command_nodes() {
     .await;
     let (_, def_alliance) =
         setup_player_alliance(&ctx, &mut def, "Def Corp", "DEFC", "Defenders Union", "DEFU").await;
-    let mut atk = spawn_player_combat_pilot(
+    let mut atk = fast_spawn_pilot(
         &ctx,
         82_003,
         "sov_atk_p1",
@@ -223,8 +261,8 @@ async fn test_e2e_sov_adm_dev_indices_entosis_counter_and_command_nodes() {
     )
     .await
     .expect("Deactivate defender link");
-    for _ in 0..80 {
-        ctx.advance_secs(60);
+    for _ in 0..10 {
+        ctx.advance_secs(600);
         tick_background_cluster(&ctx).await;
         if ctx.db.with_snapshot(|s| s.structures[&hub_id].state == "HullReinforced") {
             break;
@@ -319,8 +357,8 @@ async fn test_e2e_sov_adm_dev_indices_entosis_counter_and_command_nodes() {
         )
         .await
         .expect("Capture Command Node");
-        for _ in 0..8 {
-            advance_avoiding_downtime(300);
+        for step in [1_200_u64, 600, 600, 300] {
+            advance_avoiding_downtime(step);
             tick_background_cluster(&ctx).await;
             if !ctx.db.with_snapshot(|s| s.sov_runtime.command_nodes.contains_key(&nid)) {
                 break;
@@ -389,7 +427,7 @@ async fn test_e2e_sov_adm_dev_indices_entosis_counter_and_command_nodes() {
         "Anchoring Sovereignty Hub after winning command nodes transfers system sovereignty to invading alliance"
     );
 
-    let ctx2 = reload_ctx_from_sqlite(&ctx, &db_path);
+    let ctx2 = reload_fast_sqlite_ctx(&ctx, &db_path);
     assert_eq!(
         ctx2.db.with_snapshot(|s| s.system_states[&sys_id].sov_alliance_id),
         Some(atk_alliance),
@@ -408,10 +446,10 @@ async fn test_e2e_skyhook_reagent_maturity_and_warp_vector() {
         "feat:navigation.warp-vector",
     ]);
 
-    let (db_path, ctx) = new_sqlite_ctx("skyhook_vector");
+    let (db_path, ctx) = open_fast_sqlite_ctx("skyhook_vector");
     crate::common::pin_clock(&ctx);
 
-    let mut pilot = spawn_player_combat_pilot(
+    let mut pilot = fast_spawn_pilot(
         &ctx,
         82_004,
         "sky_vec_p1",
@@ -562,13 +600,15 @@ async fn test_e2e_skyhook_reagent_maturity_and_warp_vector() {
     let _vec_res = call_rpc(&ctx, &mut pilot.sess, "warpVectorMgr", "UseVector", &[PyRep::Integer(vec_item_id)])
         .await
         .expect("warpVectorMgr.UseVector near star");
-    for _ in 0..120 {
-        let _ = sys_h.step_manual(1.0).await;
-        ctx.advance_secs(1);
+    let mut steps = 0_u64;
+    for s in 1..=24_u64 {
+        let _ = sys_h.step_manual(5.0).await;
+        steps = s;
         if sys_h.get_ball_snapshot(pilot.ship_id).await.ok().flatten().is_some_and(|(_, b)| pos_before_vec.distance(b.position) >= 1_000_000.0) {
             break;
         }
     }
+    ctx.advance_secs(steps * 5);
     let pos_after_vec = sys_h.get_ball_snapshot(pilot.ship_id).await.unwrap().unwrap().1.position;
     assert!(
         pos_before_vec.distance(pos_after_vec) >= 150_000.0,
@@ -576,7 +616,7 @@ async fn test_e2e_skyhook_reagent_maturity_and_warp_vector() {
         pos_before_vec.distance(pos_after_vec)
     );
 
-    let ctx2 = reload_ctx_from_sqlite(&ctx, &db_path);
+    let ctx2 = reload_fast_sqlite_ctx(&ctx, &db_path);
     let persisted_sec = ctx2.db.with_snapshot(|s| s.sov_runtime.skyhook_reagent_bays.get(&skyhook_id).map(|b| b.1).unwrap_or(0));
     assert_eq!(persisted_sec, sec_full, "Matured Skyhook Secure bay persists across SQLite reload");
 }

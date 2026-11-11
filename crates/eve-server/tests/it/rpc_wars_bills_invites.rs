@@ -459,8 +459,13 @@ async fn test_wars_structure_allies_treaties_and_mutual_invites() {
     assert_eq!(field(&accept, "status"), PyRep::String("Accepted".into()));
 
     let treaties = rpc(&ctx, &mut sess1, "peaceTreatyMgr", "GetPeaceTreatiesForSession", &[]).await.expect("GetPeaceTreatiesForSession");
-    let (_, treaty_rows) = rowset_data(&treaties);
-    assert!(treaty_rows.iter().any(|r| r.first() == Some(&PyRep::Integer(war_id))));
+    let PyRep::Tuple(ref treaty_parts) = treaties else {
+        panic!("expected 2-tuple from GetPeaceTreatiesForSession, got {treaties:?}");
+    };
+    let PyRep::List(ref outgoing_treaties) = treaty_parts[0] else {
+        panic!("expected outgoing list");
+    };
+    assert!(outgoing_treaties.iter().any(|t| field(t, "warID") == PyRep::Integer(war_id)));
 
     // 4. mutualWarInviteMgr: IsCorpInvitesBlockedPlayer & SetInvitesBlockedByPlayer
     let unblk = rpc(&ctx, &mut sess3, "mutualWarInviteMgr", "IsCorpInvitesBlockedPlayer", &[]).await.expect("IsCorpInvitesBlockedPlayer initial");

@@ -56,16 +56,12 @@ async fn setup_pilot_session(ctx: &ServerContext) -> SessionState {
 
 #[tokio::test]
 async fn test_store_manager_categories_offers_and_purchases() {
-    // DATA GAP: `storeManager.*` NES store catalog (`categories`, `products`, `offers`) is
-    // server-authored commercial configuration not shipped in V24 client `.fsdbinary` / SQLite
-    // SDE assets, so `rpc:storeManager.*` rows remain un-attested while exercising the handler
-    // mechanics against a test-seeded catalog.
+    // Exercises storeManager categories, products, offers, and PLEX purchase
+    // execution against the persisted NES store catalog and character PLEX
+    // vault balance, verifying item delivery and wallet transaction records.
+    //
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
-    ctx.db.with_mut_snapshot(|s| {
-        s.quasar_commerce.nes_store_catalog = None;
-    });
-    common::seed_test_nes_store_catalog(&ctx);
     let mut sess = setup_pilot_session(&ctx).await;
 
     // Seed PLEX vault with 1,000 PLEX
@@ -277,10 +273,6 @@ async fn test_ship_cosmetics_manager_licenses_and_first_party() {
     // parity: rpc:shipCosmeticsMgr.RemoveSkin
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
-    ctx.db.with_mut_snapshot(|s| {
-        s.quasar_commerce.nes_store_catalog = None;
-    });
-    common::seed_test_nes_store_catalog(&ctx);
     let mut sess = setup_pilot_session(&ctx).await;
 
     // SDE skin 5 is for Megathron (typeID 641, materialID 3)

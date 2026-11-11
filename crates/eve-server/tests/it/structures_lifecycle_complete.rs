@@ -184,7 +184,7 @@ async fn attack(ctx: &ServerContext, sess: &mut SessionState, id: i64) -> Result
 async fn test_deploy_anchor_timers_restrictions_and_quantum_core() {
     // parity: feat:structures.deploy-anchor, feat:structures.quantum-core
     eve_testkit::attest(&["feat:structures.deploy-anchor", "feat:structures.quantum-core"]);
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     let clock = std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000));
     ctx.set_clock(clock);
     let mut sess = pilot_in_space(&ctx, 4001).await;
@@ -289,7 +289,7 @@ async fn test_fuel_consumption_low_power_and_abandoned() {
         "feat:structures.abandoned",
         "feat:lifecycle.structure-abandoned_destroyed",
     ]);
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     crate::common::pin_clock(&ctx);
     let mut sess = pilot_in_space(&ctx, 4002).await;
     move_ship(&ctx, &sess, open_space(&ctx, 1.0)).await;
@@ -393,7 +393,7 @@ async fn test_fuel_consumption_low_power_and_abandoned() {
 async fn test_low_power_large_structure_skips_armor_reinforcement() {
     // parity: feat:structures.low-power
     eve_testkit::attest(&["feat:structures.low-power"]);
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     crate::common::pin_clock(&ctx);
     let mut sess = pilot_in_space(&ctx, 4003).await;
     move_ship(&ctx, &sess, open_space(&ctx, 2.0)).await;
@@ -460,7 +460,7 @@ async fn test_reinforcement_cycle_per_size_and_security_band() {
     assert_eq!(life::next_reinforce_exit(86_400 + 5 * 3_600, 3), 2 * 86_400 + 3 * 3_600);
     assert_eq!(life::next_reinforce_exit(86_400 + 5 * 3_600, 19), 86_400 + 19 * 3_600);
 
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     crate::common::pin_clock(&ctx);
     let mut sess = pilot_in_space(&ctx, 4004).await;
     move_ship(&ctx, &sess, open_space(&ctx, 3.0)).await;
@@ -521,7 +521,7 @@ async fn test_reinforcement_cycle_per_size_and_security_band() {
 async fn test_damage_cap_and_repair_timer_with_pause_threshold() {
     // parity: feat:structures.damage-cap, feat:structures.repair-timer
     eve_testkit::attest(&["feat:structures.damage-cap", "feat:structures.repair-timer"]);
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     crate::common::pin_clock(&ctx);
     let mut sess = pilot_in_space(&ctx, 4005).await;
     move_ship(&ctx, &sess, open_space(&ctx, 4.0)).await;
@@ -582,7 +582,7 @@ async fn test_damage_cap_and_repair_timer_with_pause_threshold() {
 async fn test_killmail_core_fitting_drop_and_automatic_asset_safety() {
     // parity: feat:structures.structure-killmail, feat:structures.asset-safety-auto
     eve_testkit::attest(&["feat:structures.structure-killmail", "feat:structures.asset-safety-auto"]);
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     crate::common::pin_clock(&ctx);
     let mut sess = pilot_in_space(&ctx, 4006).await;
     move_ship(&ctx, &sess, open_space(&ctx, 5.0)).await;
@@ -648,7 +648,7 @@ async fn test_unanchor_cancel_and_packaging_after_seven_days() {
     // parity: feat:structures.unanchor
     // parity: feat:lifecycle.structure-leave_space
     eve_testkit::attest(&["feat:structures.unanchor", "feat:lifecycle.structure-leave_space"]);
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     // Deterministic virtual time: the 7-day timer assertion must not race the host wall clock.
     ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
     let mut sess = pilot_in_space(&ctx, 4007).await;
@@ -705,7 +705,7 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn test_r4_170_structure_release_control_restores_docked_ship() {
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     let mut sess = SessionState::new(17001);
     login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     let char_id = 90_000_001;
@@ -807,7 +807,7 @@ async fn test_r4_170_structure_release_control_restores_docked_ship() {
 
 #[tokio::test]
 async fn test_r4_171_ess_concurrent_link_rejection_and_reserve_unlock_window() {
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     let mut sess1 = SessionState::new(17101);
     let mut sess2 = SessionState::new(17102);
     login_pilot(&ctx, &mut sess1, "demo", "demo-secret").await;
@@ -938,7 +938,7 @@ async fn test_r4_171_ess_concurrent_link_rejection_and_reserve_unlock_window() {
 
 #[tokio::test]
 async fn test_r4_172_incursion_wave_respawn_attaches_combat_state_and_site_claim() {
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::sovereignty_equinox_gameplay::fast_demo_ctx());
     let sys_id = 30_000_142u32;
     let site_id = "inc-r4-172-vg";
     let initial_boss_bid = 910_172_000i64;
@@ -1016,7 +1016,7 @@ async fn test_r4_172_incursion_wave_respawn_attaches_combat_state_and_site_claim
 
 #[tokio::test]
 async fn test_r4_173_join_faction_as_character_enforces_cooldown_standing_corp_and_rearguard_lp() {
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     crate::common::pin_clock(&ctx);
     let mut sess = SessionState::new(17301);
     login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -1152,7 +1152,7 @@ async fn test_r4_173_join_faction_as_character_enforces_cooldown_standing_corp_a
 
 #[tokio::test]
 async fn test_r4_174_cannot_mutate_fitted_module() {
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     let mut sess = SessionState::new(17401);
     login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     let char_id = 90_000_001;
@@ -1213,7 +1213,7 @@ async fn test_r4_174_cannot_mutate_fitted_module() {
 
 #[tokio::test]
 async fn test_r4_175_poco_tax_syncs_corp_wallet_division_zero() {
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     let mut sess = SessionState::new(17501);
     login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     let char_id = 90_000_001;

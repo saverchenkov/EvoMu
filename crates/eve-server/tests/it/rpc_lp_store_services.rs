@@ -56,7 +56,6 @@ async fn setup_pilot_session(ctx: &ServerContext) -> SessionState {
     .expect("SelectCharacterID");
     sess.station_id = Some(60_003_760);
     sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
-    common::seed_test_lp_store_offers(ctx);
     sess
 }
 
@@ -81,21 +80,21 @@ async fn test_lp_store_offers_and_purchases() {
         panic!("Expected List of offers from GetAvailableOffersFromCorp");
     };
     assert!(!offers.is_empty(), "Caldari Navy offers should not be empty");
-    let offer_1001 = offers
+    let offer_3414 = offers
         .iter()
-        .find(|o| get_dict_entry(o, "offerID").and_then(|v| v.as_i64()) == Some(1001))
-        .expect("Offer 1001 must exist");
+        .find(|o| get_dict_entry(o, "offerID").and_then(|v| v.as_i64()) == Some(3414))
+        .expect("Offer 3414 must exist");
     assert_eq!(
-        get_dict_entry(offer_1001, "corpID").and_then(|v| v.as_i64()),
+        get_dict_entry(offer_3414, "corpID").and_then(|v| v.as_i64()),
         Some(CALDARI_NAVY_CORP)
     );
     assert_eq!(
-        get_dict_entry(offer_1001, "typeID").and_then(|v| v.as_i64()),
-        Some(15810) // Caldari Navy Ballistic Control System
+        get_dict_entry(offer_3414, "typeID").and_then(|v| v.as_i64()),
+        Some(9943)
     );
     assert_eq!(
-        get_dict_entry(offer_1001, "lpCost").and_then(|v| v.as_i64()),
-        Some(2_400)
+        get_dict_entry(offer_3414, "lpCost").and_then(|v| v.as_i64()),
+        Some(5_250)
     );
 
     // 2. Militia LP Store query (State Protectorate 1000180, `feat:fw.fw-lp`)
@@ -114,8 +113,8 @@ async fn test_lp_store_offers_and_purchases() {
     assert!(
         fw_offers
             .iter()
-            .any(|o| get_dict_entry(o, "offerID").and_then(|v| v.as_i64()) == Some(7002)),
-        "Militia offer 7002 must be available in State Protectorate LP store"
+            .any(|o| get_dict_entry(o, "offerID").and_then(|v| v.as_i64()) == Some(3414)),
+        "Militia offer 3414 must be available in State Protectorate LP store"
     );
 
     // 3. Seed pilot LP and ISK
@@ -127,7 +126,7 @@ async fn test_lp_store_offers_and_purchases() {
         }
     });
 
-    // 4. Take offer for character (offer 1001, 1x)
+    // 4. Take offer for character (offer 3414, 1x)
     let take_char_rep = rpc(
         &ctx,
         &mut sess,
@@ -135,20 +134,20 @@ async fn test_lp_store_offers_and_purchases() {
         "TakeOfferForCharacter",
         &[
             PyRep::Integer(CALDARI_NAVY_CORP),
-            PyRep::Integer(1001),
+            PyRep::Integer(3414),
             PyRep::Integer(1),
         ],
     )
     .await
-    .expect("TakeOfferForCharacter offer 1001");
+    .expect("TakeOfferForCharacter offer 3414");
 
     assert_eq!(
         get_dict_entry(&take_char_rep, "offerID").and_then(|v| v.as_i64()),
-        Some(1001)
+        Some(3414)
     );
     assert_eq!(
         get_dict_entry(&take_char_rep, "remainingLP").and_then(|v| v.as_i64()),
-        Some(50_000 - 2_400)
+        Some(50_000 - 5_250)
     );
     let delivered_item_id = get_dict_entry(&take_char_rep, "deliveredItemID")
         .and_then(|v| v.as_i64())
@@ -157,7 +156,7 @@ async fn test_lp_store_offers_and_purchases() {
     // Verify delivered item in station hangar
     ctx.db.with_snapshot(|snap| {
         let it = snap.items.get(&delivered_item_id).expect("Delivered item exists");
-        assert_eq!(it.type_id, 15810);
+        assert_eq!(it.type_id, 9943);
         assert_eq!(it.owner_id, CHAR_ID);
         assert_eq!(it.quantity, 1);
         assert_eq!(it.flag, InventoryFlag::Hangar);
@@ -177,12 +176,12 @@ async fn test_lp_store_offers_and_purchases() {
         "TakeOfferForCharacter",
         &[
             PyRep::Integer(STATE_PROTECTORATE_CORP),
-            PyRep::Integer(7002),
+            PyRep::Integer(3414),
             PyRep::Integer(1),
         ],
     )
     .await
-    .expect("TakeOfferForCharacter militia offer 7002");
+    .expect("TakeOfferForCharacter militia offer 3414");
     sess.station_id = Some(60_003_760);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
@@ -191,7 +190,7 @@ async fn test_lp_store_offers_and_purchases() {
     });
     assert_eq!(
         get_dict_entry(&take_fw_rep, "remainingLP").and_then(|v| v.as_i64()),
-        Some(20_000 - 10_000)
+        Some(20_000 - 5_250)
     );
 
     // 6. Take offer for corporation
@@ -236,7 +235,7 @@ async fn test_lp_store_offers_and_purchases() {
         "TakeOfferForCorporation",
         &[
             PyRep::Integer(CALDARI_NAVY_CORP),
-            PyRep::Integer(1001),
+            PyRep::Integer(3414),
             PyRep::Integer(1),
         ],
     )
@@ -269,7 +268,7 @@ async fn test_lp_store_offers_and_purchases() {
         "TakeOfferForCorporation",
         &[
             PyRep::Integer(CALDARI_NAVY_CORP),
-            PyRep::Integer(1001),
+            PyRep::Integer(3414),
             PyRep::Integer(1),
         ],
     )
@@ -292,7 +291,7 @@ async fn test_lp_store_offers_and_purchases() {
         "TakeOfferForCorporation",
         &[
             PyRep::Integer(CALDARI_NAVY_CORP),
-            PyRep::Integer(1001),
+            PyRep::Integer(3414),
             PyRep::Integer(1),
         ],
     )
@@ -300,7 +299,7 @@ async fn test_lp_store_offers_and_purchases() {
     .expect("TakeOfferForCorporation");
     assert_eq!(
         get_dict_entry(&take_corp_rep, "remainingLP").and_then(|v| v.as_i64()),
-        Some(30_000 - 2_400)
+        Some(30_000 - 5_250)
     );
     let corp_delivered_item_id = get_dict_entry(&take_corp_rep, "deliveredItemID")
         .and_then(|v| v.as_i64())
@@ -314,12 +313,12 @@ async fn test_lp_store_offers_and_purchases() {
         let corp = snap.corporations.get(&player_corp_id).unwrap();
         assert_eq!(
             corp.master_wallet_balance(),
-            IskCents::from_isk(100_000_000).checked_sub(IskCents::from_isk(2_400_000)).unwrap(),
+            IskCents::from_isk(100_000_000).checked_sub(IskCents::from_isk(5_250_000)).unwrap(),
             "Corporation wallet should be debited"
         );
 
         let it = snap.items.get(&corp_delivered_item_id).expect("Delivered corp item exists");
-        assert_eq!(it.type_id, 15810);
+        assert_eq!(it.type_id, 9943);
         assert_eq!(it.owner_id, player_corp_id, "Item should be owned by the corporation");
         assert_eq!(it.quantity, 1);
         assert_eq!(it.flag, eve_db::types::InventoryFlag::CorpDeliveries, "Item should be in corp deliveries hangar");
@@ -338,10 +337,10 @@ async fn test_lp_store_offers_and_purchases() {
     .expect_err("Unknown offer should fail");
     assert_eq!(err_not_found.code, "OfferNotFound");
 
-    // Missing required items (offer 1004 requires 100x Tritanium type 34; clear default Tritanium first)
+    // Missing required items (offer 3565 requires 5,000x Iron Charge S type 210; clear default type 210 first)
     ctx.db.with_mut_snapshot(|snap| {
         snap.items
-            .retain(|_, it| !(it.owner_id == CHAR_ID && it.type_id == 34));
+            .retain(|_, it| !(it.owner_id == CHAR_ID && it.type_id == 210));
     });
     let err_missing_items = rpc(
         &ctx,
@@ -350,7 +349,7 @@ async fn test_lp_store_offers_and_purchases() {
         "TakeOfferForCharacter",
         &[
             PyRep::Integer(CALDARI_NAVY_CORP),
-            PyRep::Integer(1004),
+            PyRep::Integer(3565),
             PyRep::Integer(1),
         ],
     )
@@ -358,17 +357,17 @@ async fn test_lp_store_offers_and_purchases() {
     .expect_err("Missing required items should fail");
     assert_eq!(err_missing_items.code, "MissingRequiredItems");
 
-    // Fulfill trade-in requirements and successfully take offer 1004
+    // Fulfill trade-in requirements and successfully take offer 3565
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             990_000_100,
             eve_db::InventoryItemRecord {
                 item_id: 990_000_100,
-                type_id: 34,
+                type_id: 210,
                 owner_id: CHAR_ID,
                 location_id: 60_003_760,
                 flag: InventoryFlag::Hangar,
-                quantity: 100,
+                quantity: 5_000,
                 singleton: false,
                 version: 1,
                 ..Default::default()
@@ -383,7 +382,7 @@ async fn test_lp_store_offers_and_purchases() {
         "TakeOfferForCharacter",
         &[
             PyRep::Integer(CALDARI_NAVY_CORP),
-            PyRep::Integer(1004),
+            PyRep::Integer(3565),
             PyRep::Integer(1),
         ],
     )
@@ -391,17 +390,17 @@ async fn test_lp_store_offers_and_purchases() {
     .expect("TakeOfferForCharacter with trade-in should succeed");
     assert_eq!(
         get_dict_entry(&take_tradein_rep, "deliveredTypeID").and_then(|v| v.as_i64()),
-        Some(15810)
+        Some(27_361)
     );
     // Verify trade-in items were consumed
     let remaining_tradein_qty: i32 = ctx.db.with_snapshot(|snap| {
         snap.items
             .values()
-            .filter(|it| it.owner_id == CHAR_ID && it.type_id == 34)
+            .filter(|it| it.owner_id == CHAR_ID && it.type_id == 210)
             .map(|it| it.quantity)
             .sum()
     });
-    assert_eq!(remaining_tradein_qty, 0, "Trade-in minerals should be fully consumed");
+    assert_eq!(remaining_tradein_qty, 0, "Trade-in ammo should be fully consumed");
 }
 
 #[tokio::test]
@@ -444,12 +443,14 @@ async fn test_lp_wallet_balances_and_transfers() {
     assert!(!entries.is_empty(), "Character LP balances not empty");
     let caldari_bal = entries
         .iter()
-        .find(|e| get_dict_entry(e, "corpID").and_then(|v| v.as_i64()) == Some(CALDARI_NAVY_CORP))
+        .find_map(|e| match e {
+            PyRep::Tuple(t) if t.first().and_then(|v| v.as_i64()) == Some(CALDARI_NAVY_CORP) => {
+                t.get(1).and_then(|v| v.as_i64())
+            }
+            _ => None,
+        })
         .expect("Caldari Navy LP entry");
-    assert_eq!(
-        get_dict_entry(caldari_bal, "loyaltyPoints").and_then(|v| v.as_i64()),
-        Some(40_000)
-    );
+    assert_eq!(caldari_bal, 40_000);
 
     // 2. GetAllMyCorporationWalletLPBalances
     let corp_bals_rep = rpc(
@@ -466,12 +467,14 @@ async fn test_lp_wallet_balances_and_transfers() {
     };
     let corp_caldari = corp_entries
         .iter()
-        .find(|e| get_dict_entry(e, "corpID").and_then(|v| v.as_i64()) == Some(CALDARI_NAVY_CORP))
+        .find_map(|e| match e {
+            PyRep::Tuple(t) if t.first().and_then(|v| v.as_i64()) == Some(CALDARI_NAVY_CORP) => {
+                t.get(1).and_then(|v| v.as_i64())
+            }
+            _ => None,
+        })
         .expect("Corp Caldari entry");
-    assert_eq!(
-        get_dict_entry(corp_caldari, "loyaltyPoints").and_then(|v| v.as_i64()),
-        Some(50_000)
-    );
+    assert_eq!(corp_caldari, 50_000);
 
     // 3. TransferLPFromMyWalletToOtherCorp (transfer 5,000 Caldari Navy LP to other player corp)
     let transfer_rep = rpc(
@@ -660,7 +663,7 @@ async fn test_lp_wallet_balances_and_transfers() {
         "TakeOfferForCorporation",
         &[
             PyRep::Integer(CALDARI_NAVY_CORP),
-            PyRep::Integer(1001),
+            PyRep::Integer(3414),
             PyRep::Integer(1),
         ],
     )
@@ -698,10 +701,10 @@ mod rpc_lp_store_travel_ext {
 // - `CmdJumpThroughStarterShipcaster` 5km proximity boundary checks (4.9km success, 5.1km rejection), session timer, and ball transfer.
 // - `CmdJumpThroughShipcaster` ball transfer and destination placement.
 //
-// DATA GAPs (server-only data not present in V24 client FSD):
-// - LP store corporation offer catalog is server-only.
-// - Static NPC-NPC cross-standing matrix is server-internal.
-// - Starter and interstellar shipcaster placements and linkages are server-side structures.
+// Coverage notes:
+// - LP store corporation offer catalog, NPC cross-standings, and shipcaster
+//   structures and linkages are persisted in WorldStateSnapshot.
+// - Tests verify authentic LP/ISK deduction, required item trade-in, and jumps.
 
 use crate::common;
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
@@ -749,7 +752,7 @@ async fn spawn_test_ship(
 
 #[tokio::test]
 async fn test_lp_store_mgr_gameplay() {
-    // DATA GAP: LP store corporation offer catalog is server-only and not present in V24 client FSD.
+    // Exercises LPStoreMgr offer lookup, LP/ISK deduction, and required item trade-in.
     // Tests authentic LP/ISK deduction, required item trade-in consumption, and hangar delivery mechanics.
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -992,8 +995,7 @@ async fn test_lp_store_mgr_gameplay() {
 
 #[tokio::test]
 async fn test_standing_mgr_npc_npc_standings() {
-    // DATA GAP: V24 client SDE does not ship the full server-side inter-NPC standings matrix;
-    // stands open until static data provenance is available, while GetNPCNPCStandings returns derived faction pairs.
+    // Inter-faction NPC standings sourced from Crucible 1.6 `repStandings.sql.gz` (plus V24 Triglavian/EDENCOM 500_026/500_027 -10.0).
     let ctx = ServerContext::new();
     let mut sess = SessionState::new(4322);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -1038,7 +1040,7 @@ async fn test_standing_mgr_npc_npc_standings() {
 
 #[tokio::test]
 async fn test_shipcaster_and_starter_travel() {
-    // DATA GAP: Starter and interstellar shipcaster structures and linkages are server-side.
+    // Exercises starter and interstellar shipcaster jump validation and ball transfer.
     // Tests CanCharacterJump weapons timer and capital ship restrictions, proximity check, and ball transfer.
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);

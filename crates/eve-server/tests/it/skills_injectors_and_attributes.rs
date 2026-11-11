@@ -263,7 +263,6 @@ async fn test_skill_injectors_large_small_alpha_and_nondiminishing() {
     ]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
-    common::seed_test_nes_store_catalog(&ctx);
 
     // --- Part A: Daily Alpha Injector (`46375`, 50,000 SP, Alpha-only, 1 per 24h) ---
     let (mut alpha_sess, alpha_cid) = create_pilot_in_jita(&ctx, 2301, "alpha_inj_u", "secret", "Alpha Injector Pilot", 1, 11, 17).await;

@@ -59,6 +59,7 @@ fn field(rep: &PyRep, key: &str) -> PyRep {
             .iter()
             .find_map(|(k, v)| (k.as_str() == Some(key)).then(|| v.clone()))
             .unwrap_or(PyRep::None),
+        PyRep::Object { args, .. } => field(args, key),
         _ => PyRep::None,
     }
 }
@@ -434,7 +435,11 @@ async fn test_corp_titles_and_bulletins() {
     .await
     .expect("GetTitles");
     let (_, t_rows) = rowset_data(&titles);
-    assert_eq!(t_rows.len(), 2);
+    assert_eq!(t_rows.len(), 16);
+    assert_eq!(t_rows[0][0], PyRep::Integer(1));
+    assert_eq!(t_rows[1][0], PyRep::Integer(2));
+    assert_eq!(t_rows[1][1], PyRep::String("Chief Engineer".into()));
+    assert_eq!(t_rows[15][0], PyRep::Integer(32_768));
 
     let del_t = rpc(
         &ctx,

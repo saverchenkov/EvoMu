@@ -57,6 +57,7 @@ fn field(rep: &PyRep, key: &str) -> PyRep {
             .iter()
             .find_map(|(k, v)| (k.as_str() == Some(key)).then(|| v.clone()))
             .unwrap_or(PyRep::None),
+        PyRep::Object { args, .. } => field(args, key),
         _ => PyRep::None,
     }
 }

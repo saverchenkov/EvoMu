@@ -383,18 +383,15 @@ async fn test_wallet_evermarks_paragon_accrual_and_emblem_store_live() {
     let PyRep::List(char_lps) = char_lp_rep else {
         panic!("expected List of LP balances");
     };
-    let paragon_char_entry = char_lps.iter().find(|row| {
-        row.dict_get("corpID") == Some(&PyRep::Integer(PARAGON_CORP_ID))
-    });
-    assert!(
-        paragon_char_entry.is_some(),
-        "Pilot must have Paragon LP wallet entry"
-    );
-    let char_em = paragon_char_entry
-        .unwrap()
-        .dict_get("loyaltyPoints")
-        .and_then(|v| v.as_i64())
-        .expect("char LP");
+    let char_em = char_lps
+        .iter()
+        .find_map(|row| match row {
+            PyRep::Tuple(t) if t.first() == Some(&PyRep::Integer(PARAGON_CORP_ID)) => {
+                t.get(1).and_then(|v| v.as_i64())
+            }
+            _ => None,
+        })
+        .expect("Pilot must have Paragon LP wallet entry");
     assert_eq!(char_em, 50_000, "Character must have 50,000 EverMarks");
 
     // 3. Verify 1-to-1 corporation EverMark matching in the corp wallet
@@ -410,18 +407,15 @@ async fn test_wallet_evermarks_paragon_accrual_and_emblem_store_live() {
     let PyRep::List(corp_lps) = corp_lp_rep else {
         panic!("expected List of corp LP balances");
     };
-    let paragon_corp_entry = corp_lps.iter().find(|row| {
-        row.dict_get("corpID") == Some(&PyRep::Integer(PARAGON_CORP_ID))
-    });
-    assert!(
-        paragon_corp_entry.is_some(),
-        "Corporation must receive 1:1 EverMark match"
-    );
-    let corp_em = paragon_corp_entry
-        .unwrap()
-        .dict_get("loyaltyPoints")
-        .and_then(|v| v.as_i64())
-        .expect("corp LP");
+    let corp_em = corp_lps
+        .iter()
+        .find_map(|row| match row {
+            PyRep::Tuple(t) if t.first() == Some(&PyRep::Integer(PARAGON_CORP_ID)) => {
+                t.get(1).and_then(|v| v.as_i64())
+            }
+            _ => None,
+        })
+        .expect("Corporation must receive 1:1 EverMark match");
     assert_eq!(corp_em, 50_000, "Corporation must have received 50,000 EverMarks 1:1");
 
     // 4. Retrieve Paragon ship cosmetic emblem offers from SDE catalog

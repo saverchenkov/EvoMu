@@ -41,9 +41,11 @@ pub(crate) fn sp6_item(
 }
 
 pub(crate) fn persist_and_reopen_sqlite(ctx: &ServerContext, tag: &str) -> ServerContext {
+    static NEXT_PERSIST_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let pid = std::process::id();
-    let json_path = std::env::temp_dir().join(format!("evomu_{tag}_{pid}.json"));
-    let sqlite_path = std::env::temp_dir().join(format!("evomu_{tag}_{pid}.sqlite"));
+    let seq = NEXT_PERSIST_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let json_path = std::env::temp_dir().join(format!("evomu_{tag}_{pid}_{seq}.json"));
+    let sqlite_path = std::env::temp_dir().join(format!("evomu_{tag}_{pid}_{seq}.sqlite"));
     let _ = std::fs::remove_file(&json_path);
     let _ = std::fs::remove_file(&sqlite_path);
 

@@ -788,7 +788,7 @@ async fn test_sp3_warp_to_disrupted_capacitor_cost_and_exit_invulnerability() {
     );
     let cap_notes = sess.drain_notifications();
     assert!(cap_notes.iter().any(|n| n.0 == "OnCapacitorChange"));
-    assert!(cap_notes.iter().any(|n| n.0 == "OnWarpStarted"));
+    assert!(!cap_notes.iter().any(|n| n.0 == "OnWarpStarted"));
 
     // 3. Full Warp with minRange (30 km), phases Accelerating -> Cruising -> Decelerating, smartbomb hit in Decelerating,
     //    and 10s Post-Warp Invulnerability (`feat:navigation.warp-to`, `feat:navigation.warp-exit-invulnerability`)

@@ -102,8 +102,8 @@ async fn gm_tr(ctx: &ServerContext, sess: &mut SessionState, username: &str, cha
 
 async fn settle_warp(ctx: &ServerContext, sys_id: u32, ship_id: i64) {
     let sys = ctx.systems.get_or_spawn(sys_id);
-    for _ in 0..120 {
-        sys.step_manual(1.0).await.unwrap();
+    for _ in 0..12 {
+        sys.step_manual(10.0).await.unwrap();
         if sys.get_ball_snapshot(ship_id).await.unwrap().is_some_and(|(_, b)| !matches!(b.mode, MovementMode::Warp { .. })) {
             break;
         }
@@ -117,11 +117,11 @@ async fn lock_target(ctx: &ServerContext, sess: &mut SessionState, sys_id: u32, 
         return;
     }
     rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(target_id)]).await.expect("dogmaIM.AddTarget");
-    for _ in 0..45 {
+    for _ in 0..10 {
         if sys.get_target_locks(ship_id).await.unwrap().iter().any(|l| l.target_id == target_id && l.locked) {
             return;
         }
-        sys.step_manual(1.0).await.unwrap();
+        sys.step_manual(5.0).await.unwrap();
     }
     assert!(sys.get_target_locks(ship_id).await.unwrap().iter().any(|l| l.target_id == target_id && l.locked));
 }
@@ -320,7 +320,7 @@ async fn setup_two_pilots_and_corp(ctx: &ServerContext) -> (SessionState, Sessio
 
 #[tokio::test]
 async fn test_structure_combat_state_ansiblex_acl_and_fitting_dropoff() {
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     crate::common::pin_clock(&ctx);
     let (mut s1, mut s2, corp_id) = setup_two_pilots_and_corp(&ctx).await;
 
@@ -493,12 +493,18 @@ async fn test_structure_combat_state_ansiblex_acl_and_fitting_dropoff() {
 
 #[tokio::test]
 async fn test_ownergroup_v24_roles_and_pos_forcefield_acl_password() {
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     crate::common::pin_clock(&ctx);
     let (mut s1, mut s2, corp_id) = setup_two_pilots_and_corp(&ctx).await;
 
     let p3_outsider = 90_000_093_i64;
     ctx.db.provision_gm_account("out93", "out93-secret", p3_outsider, "Outsider 93");
+    crate::sovereignty_equinox_gameplay::preseed_fast_account(
+        &ctx,
+        "out93",
+        "out93-secret",
+        eve_db::service_roles::ROLE_GM_DEFAULT,
+    );
     let mut s3 = SessionState::new(853);
     crate::common::login_pilot(&ctx, &mut s3, "out93", "out93-secret").await;
     rpc(&ctx, &mut s3, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(p3_outsider)]).await.unwrap();
@@ -579,7 +585,7 @@ async fn test_ownergroup_v24_roles_and_pos_forcefield_acl_password() {
 
 #[tokio::test]
 async fn test_sov_hub_vuln_window_contested_entosis_decap_hacked_recovery_and_cyno_jammer() {
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     crate::common::pin_clock(&ctx);
     let (mut s1, mut s2, corp_id) = setup_two_pilots_and_corp(&ctx).await;
 
@@ -741,7 +747,7 @@ async fn test_sov_hub_vuln_window_contested_entosis_decap_hacked_recovery_and_cy
 
 #[tokio::test]
 async fn test_shipcaster_preserves_combat_damage_and_fw_militia_invariants() {
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     crate::common::pin_clock(&ctx);
     let (mut s1, mut s2, corp_id) = setup_two_pilots_and_corp(&ctx).await;
 
@@ -775,8 +781,8 @@ async fn test_shipcaster_preserves_combat_damage_and_fw_militia_invariants() {
     rpc(&ctx, &mut s2, "dogmaIM", "Activate", &[PyRep::Integer(p2_gun), PyRep::String("default".into()), PyRep::Integer(P1_SHIP)])
         .await.expect("Fire 200mm AC II on P1");
 
-    for _ in 0..45 {
-        turnur.step_manual(1.0).await.unwrap();
+    for _ in 0..15 {
+        turnur.step_manual(3.0).await.unwrap();
         let cs = turnur.get_combat_state(P1_SHIP).await.unwrap().expect("P1 combat state");
         if cs.shield_hp < cs.max_shield_hp * 0.9 && cs.armor_hp < cs.max_armor_hp * 0.9 && cs.capacitor < cs.max_capacitor * 0.95 {
             break;

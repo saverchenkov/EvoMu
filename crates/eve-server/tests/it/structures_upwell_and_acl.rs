@@ -112,7 +112,7 @@ fn seed_citadel(ctx: &ServerContext, sid: i64, tid: u32, corp: i64, sys: u32, po
 
 #[tokio::test]
 async fn test_upwell_anchoring_restrictions_proximity_system_and_roles() {
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     crate::common::pin_clock(&ctx);
 
     let (cid, ship) = (90_000_101, 100_000_101);
@@ -215,7 +215,7 @@ async fn test_upwell_anchoring_restrictions_proximity_system_and_roles() {
 
 #[tokio::test]
 async fn test_upwell_profiles_acl_service_access_and_delayed_transition() {
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     crate::common::pin_clock(&ctx);
 
     let (dir_char, vip_guest, ship) = (90_000_201, 90_000_202, 100_000_201);
@@ -292,7 +292,7 @@ async fn test_upwell_profiles_acl_service_access_and_delayed_transition() {
 
 #[tokio::test]
 async fn test_upwell_defense_settings_retaliation_and_gunner_takeover_sync() {
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     crate::common::pin_clock(&ctx);
 
     let (dir_char, gunner_char, ship) = (90_000_301, 90_000_302, 100_000_301);
@@ -404,7 +404,7 @@ async fn test_upwell_defense_settings_retaliation_and_gunner_takeover_sync() {
 
 #[tokio::test]
 async fn test_upwell_structure_directory_acl_filtering_and_sensitive_masking() {
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     crate::common::pin_clock(&ctx);
 
     let (dir_char, guest, stranger, ship) = (90_000_401, 90_000_402, 90_000_403, 100_000_401);
@@ -462,7 +462,7 @@ async fn test_upwell_structure_directory_acl_filtering_and_sensitive_masking() {
 
 #[tokio::test]
 async fn test_fulcrum_docking_allegiance_gating_and_alignment_speed_buff() {
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     crate::common::pin_clock(&ctx);
 
     let (cid, ship) = (90_000_501, 100_000_501);
@@ -635,7 +635,7 @@ fn grant(
 }
 
 fn new_ctx() -> Arc<ServerContext> {
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::sovereignty_equinox_gameplay::fast_demo_ctx());
     ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
     ctx
 }
@@ -1267,7 +1267,7 @@ fn make_structure(
 }
 
 fn new_ctx() -> Arc<ServerContext> {
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::sovereignty_equinox_gameplay::fast_demo_ctx());
     ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
     ctx
 }
@@ -1979,7 +1979,7 @@ fn grant(
 }
 
 fn new_ctx() -> Arc<ServerContext> {
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::sovereignty_equinox_gameplay::fast_demo_ctx());
     ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
     ctx
 }
@@ -2543,7 +2543,7 @@ fn kv_str(rep: &PyRep, key: &str) -> String {
 }
 
 fn new_ctx() -> Arc<ServerContext> {
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::sovereignty_equinox_gameplay::fast_demo_ctx());
     ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
     ctx
 }
@@ -2812,7 +2812,7 @@ async fn test_structure_directory_and_profiles_visibility() {
                     name: format!("JB {jbid}"),
                     state: life::STATE_SHIELD_VULNERABLE.into(),
                     position: (st_pos + DVec3::new(200_000_000.0, 0.0, 0.0)).to_array(),
-                    quantum_core_installed: false,
+                    quantum_core_installed: true,
                     fuel_blocks: 1_200,
                     shield_hp: 1_000_000.0,
                     armor_hp: 1_000_000.0,
@@ -3228,7 +3228,7 @@ fn kv_i64(rep: &PyRep, key: &str) -> i64 {
 }
 
 fn new_ctx() -> Arc<ServerContext> {
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::sovereignty_equinox_gameplay::fast_demo_ctx());
     ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
     ctx
 }
@@ -3910,7 +3910,7 @@ fn kv_i64(rep: &PyRep, key: &str) -> i64 {
 }
 
 fn new_ctx() -> Arc<ServerContext> {
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::sovereignty_equinox_gameplay::fast_demo_ctx());
     ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
     ctx
 }
@@ -4453,7 +4453,7 @@ fn kv_i64(rep: &PyRep, key: &str) -> i64 {
 }
 
 fn new_ctx() -> Arc<ServerContext> {
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::sovereignty_equinox_gameplay::fast_demo_ctx());
     ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
     ctx
 }
@@ -5126,7 +5126,7 @@ fn attr(ctx: &ServerContext, type_id: u32, attr_id: u16) -> f64 {
 }
 
 fn new_test_ctx() -> Arc<ServerContext> {
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::sovereignty_equinox_gameplay::fast_demo_ctx());
     ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
     ctx
 }
@@ -5743,7 +5743,7 @@ fn attr(ctx: &ServerContext, type_id: u32, attr_id: u16) -> f64 {
 }
 
 fn new_test_ctx() -> ServerContext {
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
     ctx
 }
@@ -6384,7 +6384,7 @@ fn attr(ctx: &ServerContext, type_id: u32, attr_id: u16) -> f64 {
 }
 
 fn new_test_ctx() -> ServerContext {
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
     ctx
 }
@@ -6953,10 +6953,9 @@ fn register_char(ctx: &ServerContext, uid: u64, cid: i64, corp_id: i64, sys_id: 
 #[tokio::test]
 async fn test_wallet_nes_evermarks_hypernet() {
 
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     let t0 = 1_800_000_000_u64;
     ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(t0)));
-    common::seed_test_nes_store_catalog(&ctx);
 
     let corp_id = 98_100_001_i64;
     let cid = 2_100_000_101_i64;
@@ -7143,7 +7142,7 @@ async fn test_wallet_nes_evermarks_hypernet() {
 
 #[tokio::test]
 async fn test_structures_anchoring_profiles_defense_directory() {
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     let t0 = 1_800_000_000_u64;
     ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(t0)));
 
@@ -7313,7 +7312,7 @@ async fn test_structures_anchoring_profiles_defense_directory() {
 
 #[tokio::test]
 async fn test_cosmetics_skinr_designer_and_market() {
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     let t0 = 1_800_000_000_u64;
     ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(t0)));
 
@@ -7416,7 +7415,7 @@ async fn test_cosmetics_skinr_designer_and_market() {
 
 #[tokio::test]
 async fn test_serverops_daily_jobs_and_time_dilation() {
-    let ctx = ServerContext::new();
+    let ctx = crate::sovereignty_equinox_gameplay::fast_demo_ctx();
     let t0 = 1_800_000_000_u64;
     ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(t0)));
 

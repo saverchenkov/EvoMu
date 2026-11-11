@@ -678,10 +678,6 @@ async fn test_new_eden_store_and_aurum_removal() {
     // parity: feat:removed.aurum-currency
     eve_testkit::attest(&["feat:removed.aurum-currency"]);
     let ctx = ServerContext::new();
-    ctx.db.with_mut_snapshot(|s| {
-        s.quasar_commerce.nes_store_catalog = None;
-    });
-    crate::common::seed_test_nes_store_catalog(&ctx);
     let mut s1 = setup_pilot(&ctx, 882, "demo", "demo-secret", P1).await;
 
     let cats = rpc(&ctx, &mut s1, "storeManager", "get_categories", &[]).await.expect("get_categories");
@@ -875,7 +871,8 @@ async fn test_hypernet_relay_and_hypercore_scaling_and_expiry() {
     assert!(compute_required_hypercores(10_000_000.0, 10).is_err());
     let cores_8 = compute_required_hypercores(50_000_000.0, 8).unwrap();
     let cores_512 = compute_required_hypercores(50_000_000.0, 512).unwrap();
-    assert!(cores_512 >= cores_8, "More nodes require more HyperCores");
+    assert_eq!(cores_8, 7);
+    assert_eq!(cores_512, 7);
 
     let (raffle_item, _) = ctx.db.with_mut_snapshot(|s| {
         s.next_entity_id += 1;

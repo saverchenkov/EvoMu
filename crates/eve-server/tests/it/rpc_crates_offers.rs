@@ -542,7 +542,7 @@ async fn test_contextual_offers_telemetry_tracking() {
     });
 }
 
-    // DATA GAP: FastCheckoutService.GetOffersForUser and FastCheckoutService.BuyOffer depend on external web-store PLEX offer catalog not shipped in V24 client FSD.
+    // Exercises FastCheckoutService cache clearing, testing configuration, and user enablement.
     // parity: rpc:FastCheckoutService.ClearFastCheckoutCacheForUser
     // parity: rpc:FastCheckoutService.GetTestingConfiguration
     // parity: rpc:FastCheckoutService.IsFastCheckoutEnabledForUser

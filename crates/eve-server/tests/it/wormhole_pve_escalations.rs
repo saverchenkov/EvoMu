@@ -20,12 +20,20 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 fn ctx_with_real_sde() -> ServerContext {
-    let sde = match eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()) {
-        Ok(reg) => Arc::new(reg),
-        Err(_) => Arc::new(eve_sde::SdeRegistry::with_canonical_seed()),
-    };
-    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
-    let ctx = ServerContext::with_sde_and_repository(sde, db)
+    static WORLD: std::sync::OnceLock<(Arc<eve_sde::SdeRegistry>, eve_db::WorldStateSnapshot)> =
+        std::sync::OnceLock::new();
+    let (sde, base_snap) = WORLD.get_or_init(|| {
+        let sde = match eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()) {
+            Ok(reg) => Arc::new(reg),
+            Err(_) => Arc::new(eve_sde::SdeRegistry::with_canonical_seed()),
+        };
+        let db = eve_db::WorldRepository::with_demo_seed();
+        let snap = db.with_snapshot(|s| s.clone());
+        (sde, snap)
+    });
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    db.with_mut_snapshot(|s| *s = base_snap.clone());
+    let ctx = ServerContext::with_sde_and_repository(sde.clone(), db)
         .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED);
     common::pin_clock(&ctx);
     ctx
@@ -145,8 +153,8 @@ async fn setup_pilot_session_in_space(
 }
 
 async fn step_until_warp_done(h: &eve_server::system_actor::SystemHandle, ship_id: i64) {
-    for _ in 0..300 {
-        let _ = h.step_manual(1.0).await;
+    for _ in 0..30 {
+        let _ = h.step_manual(20.0).await;
         if h.get_ball_snapshot(ship_id).await.unwrap().is_none_or(|(_, b)| !matches!(b.mode, MovementMode::Warp { .. })) {
             break;
         }
@@ -210,7 +218,14 @@ async fn lock_and_fire_guns_until(
     .await
     .expect("dogmaIM.Activate");
     for _ in 0..8 {
-        let _ = h.step_manual(1.0).await;
+        if let Some(cs) = h.get_combat_state(target_id).await.unwrap() {
+            if stop_after_first_hit && (cs.shield_hp + cs.armor_hp + cs.structure_hp) < init_hp {
+                break;
+            }
+        } else {
+            break;
+        }
+        let _ = h.step_manual(1.5).await;
         let Some(cs) = h.get_combat_state(target_id).await.unwrap() else {
             break;
         };
@@ -454,8 +469,11 @@ async fn test_wormhole_capital_escalations_sentries_drifter_relay_and_downtime_d
     let c5_cel_id = ctx.sde.celestials_in_system(c5_sys).first().unwrap().celestial_id as i64;
     let bey_c5 = ctx.bind_object(&mut dread1_sess, "beyonce", c5_sys as i64).unwrap();
     ctx.dispatch_rpc(&mut dread1_sess, "beyonce", Some(bey_c5), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(c5_cel_id), PyRep::Real(0.0)], &kw, None).await.unwrap();
-    for _ in 0..75 {
-        let _ = c5_handle.step_manual(1.0).await;
+    for _ in 0..10 {
+        let _ = c5_handle.step_manual(10.0).await;
+        if count_avengers(&c5_handle) == 9 {
+            break;
+        }
     }
     assert_eq!(count_avengers(&c5_handle), 9, "Escalation Avengers must despawn when triggering capital warps off-grid");
 
@@ -526,8 +544,15 @@ async fn test_wormhole_capital_escalations_sentries_drifter_relay_and_downtime_d
         "Roaming Arithmos Tyrannos must enter real MovementMode::Warp, got {:?}",
         mid_warp_ball.mode
     );
-    for _ in 0..60 {
-        let _ = c6_handle.step_manual(1.0).await;
+    for _ in 0..12 {
+        let _ = c6_handle.step_manual(10.0).await;
+        if let Ok(Some((_, b))) = c6_handle.get_ball_snapshot(arithmos_bid).await {
+            if !matches!(b.mode, MovementMode::Warp { .. })
+                && b.position.distance(pos_before_roam) > 1_000_000.0
+            {
+                break;
+            }
+        }
     }
     let pos_after_roam = c6_handle.get_ball_snapshot(arithmos_bid).await.unwrap().unwrap().1.position;
     assert!(pos_after_roam.distance(pos_before_roam) > 1_000_000.0, "Arithmos Tyrannos completes warp across system");

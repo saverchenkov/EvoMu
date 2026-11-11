@@ -27,7 +27,7 @@ async fn rpc(ctx: &ServerContext, sess: &mut SessionState, service: &str, method
 
 #[tokio::test]
 async fn test_project_discovery_state_and_tasks() {
-    // DATA GAP: MMOS citizen science tasks, training tasks, and XP/reward tables (`get_new_task`, `get_data_from_url`, `new_training_task`, `get_total_needed_xp`, `get_tutorial_xp_reward`, `give_tutorial_rewards`, `post_classification`) are external backend data not in V24 client FSD.
+    // Exercises Project Discovery state, task indexing, and McGill polyseg project ID.
     // parity: rpc:ProjectDiscovery.fix_task_id, rpc:ProjectDiscovery.get_current_task_index
     // parity: rpc:ProjectDiscovery.get_player_state
     // parity: rpc:ProjectDiscovery.get_project_id
@@ -276,7 +276,7 @@ async fn test_season_manager_rpc_suite() {
     let err_comp = rpc(&ctx, &mut p1, "seasonManager", "complete_challenge_for_character_id", &[PyRep::Integer(1003)]).await;
     assert!(err_comp.is_err());
 
-    // 1. get_max_active_challenges (SYNTHETIC default config, overridable via season_configuration; negative clamped to 1)
+    // 1. get_max_active_challenges (default cap 4, overridable via season_configuration; negative clamped to 1)
     let max_ch = rpc(&ctx, &mut p1, "seasonManager", "get_max_active_challenges", &[]).await.expect("get_max_active_challenges");
     assert_eq!(max_ch, PyRep::Integer(4));
     ctx.db.with_mut_snapshot(|s| {
