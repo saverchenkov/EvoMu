@@ -361,16 +361,10 @@ def find_carry_review(root, head, head_pid=None):
         return None, head_pid
     cutoff = (datetime.datetime.now() - datetime.timedelta(days=CARRY_MAX_AGE_DAYS)).strftime("%Y%m%d-%H%M%S")
     cands = []
-    for wt in rl.worktree_roots(root):
-        p = os.path.join(wt, rl.STATE_DIRNAME, "state.json")
-        try:
-            recs = json.load(open(p)).get("reviews", []) if os.path.exists(p) else []
-        except Exception:  # noqa: BLE001
-            continue
-        for r in recs:
-            if (isinstance(r, dict) and r.get("mode", "claims") == "claims" and r.get("verdict") in CARRY_VERDICTS
-                    and not r.get("carried_from") and r.get("timestamp", "") >= cutoff):
-                cands.append(dict(r, worktree=wt))
+    for r in rl.all_review_records(root):
+        if (r.get("mode", "claims") == "claims" and r.get("verdict") in CARRY_VERDICTS
+                and not r.get("carried_from") and r.get("timestamp", "") >= cutoff):
+            cands.append(r)
     cands.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
     for r in cands:
         commit = r.get("snapshot_commit") or r.get("head") or ""
@@ -817,6 +811,10 @@ def snapshot_review(a, root):
                 r["report"] = r["report"].replace(snap_sdir, sdir)
             r["snapshot_commit"] = sha
             st.setdefault("reviews", []).append(r)
+            try:
+                rl.archive_review(root, r, dst)  # survives `git worktree remove` of this track
+            except Exception as e:  # noqa: BLE001
+                print("[review] WARNING: could not archive review %s to the main checkout: %s" % (r.get("timestamp"), e))
         rl.save_state(root, st)
         for f in ("latest.md", "latest_gap_audit.md"):
             if os.path.exists(os.path.join(snap_sdir, f)):

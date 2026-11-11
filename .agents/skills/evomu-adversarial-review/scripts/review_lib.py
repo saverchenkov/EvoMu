@@ -132,6 +132,61 @@ def worktree_roots(root):
     return [ln[len("worktree "):] for ln in out.splitlines() if ln.startswith("worktree ")]
 
 
+# Review archive in the main checkout (2026-11-11). A track's review records live in its worktree's .evomu-reviews/,
+# which disappears when the worktree is removed after landing. Every snapshot review is therefore also copied to
+# <main checkout>/.evomu-reviews/review_archive/<worktree>/<timestamp>/ and indexed in review_archive/index.jsonl, so
+# the evidence for what landed on main survives, and coverage/carry-over lookups still find it.
+ARCHIVE_DIRNAME = "review_archive"
+ARCHIVE_SKIP = ("target", "attest", "diff.patch", "parity.json")  # large and reproducible from git
+
+
+def archive_review(root, rec, run_dir):
+    """Copy one review's run dir and record into the main checkout's archive. Returns the archived record."""
+    import shutil
+    adir = os.path.join(main_state_dir(root), ARCHIVE_DIRNAME)
+    dst = os.path.join(adir, os.path.basename(root), rec.get("timestamp", "unknown"))
+    if run_dir and os.path.isdir(run_dir) and not os.path.exists(dst):
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copytree(run_dir, dst, symlinks=True, ignore=shutil.ignore_patterns(*ARCHIVE_SKIP))
+    arec = dict(rec, worktree=root, archived_at=dst)
+    if rec.get("report") and run_dir:
+        arec["report"] = rec["report"].replace(run_dir, dst)
+    with open(os.path.join(adir, "index.jsonl"), "a", encoding="utf-8") as f:
+        f.write(json.dumps(arec) + "\n")
+    return arec
+
+
+def archived_reviews(root):
+    p = os.path.join(main_state_dir(root), ARCHIVE_DIRNAME, "index.jsonl")
+    out = []
+    if os.path.exists(p):
+        for ln in open(p, encoding="utf-8", errors="replace"):
+            try:
+                r = json.loads(ln)
+            except ValueError:
+                continue
+            if isinstance(r, dict):
+                out.append(r)
+    return out
+
+
+def all_review_records(root):
+    """Review records from every live worktree plus the archive (records of removed worktrees), each with
+    'worktree' set. The same review can appear twice (live and archived); callers pick by timestamp."""
+    recs = []
+    for wt in worktree_roots(root):
+        p = os.path.join(wt, STATE_DIRNAME, "state.json")
+        if not os.path.exists(p):
+            continue
+        try:
+            st = json.load(open(p))
+        except Exception:  # noqa: BLE001
+            continue
+        recs.extend(dict(r, worktree=wt) for r in st.get("reviews", []) if isinstance(r, dict))
+    recs.extend(archived_reviews(root))
+    return recs
+
+
 def working_paths_match_main(root, paths):
     """True when the working-tree content of `paths` (tracked AND untracked files, .gitignore respected) equals
     `main`. Plain `git diff main` misses untracked files, which is how gate files new on main look in a worktree
@@ -159,23 +214,15 @@ def review_covering_tree(root, tree, verdicts=("PASS", "PASS_WITH_ISSUES"), mode
     if not mine:
         return None
     best = None
-    for wt in worktree_roots(root):
-        p = os.path.join(wt, STATE_DIRNAME, "state.json")
-        if not os.path.exists(p):
+    for r in all_review_records(root):
+        if r.get("mode", "claims") != mode or r.get("verdict") not in verdicts:
             continue
-        try:
-            st = json.load(open(p))
-        except Exception:  # noqa: BLE001
+        if models and r.get("model") not in models:
             continue
-        for r in st.get("reviews", []):
-            if r.get("mode", "claims") != mode or r.get("verdict") not in verdicts:
-                continue
-            if models and r.get("model") not in models:
-                continue
-            if final_only and not r.get("final"):
-                continue
-            if code_tree_of(root, r.get("tree")) == mine and (best is None or r.get("timestamp", "") > best.get("timestamp", "")):
-                best = dict(r, worktree=wt)
+        if final_only and not r.get("final"):
+            continue
+        if code_tree_of(root, r.get("tree")) == mine and (best is None or r.get("timestamp", "") > best.get("timestamp", "")):
+            best = dict(r)
     return best
 
 
