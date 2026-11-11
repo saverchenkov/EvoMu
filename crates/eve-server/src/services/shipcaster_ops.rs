@@ -1242,3 +1242,7 @@ fn handle_can_character_jump(
 
 #[cfg(test)] #[path = "shipcaster_ops_tests.rs"] mod shipcaster_ops_tests;
 
+#[cfg(test)]
+#[path = "shipcaster_ops_edges_tests.rs"]
+mod shipcaster_ops_edges_tests;
+

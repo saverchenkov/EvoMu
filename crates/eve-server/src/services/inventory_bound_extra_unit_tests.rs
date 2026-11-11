@@ -175,7 +175,7 @@ fn routing_i2_bound_fallback_and_item_to_packed_cells_branches() {
     assert_eq!(handle_i2_is_primed(&ctx, &gm_sess, Some(station_id)).unwrap(), PyRep::Bool(true));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invbroker_turret_slots_shipping_storage_open_can_and_corp_office_branches() {
     let ctx = test_ctx();
     let char_id = 96_100_010_i64;
@@ -253,7 +253,7 @@ async fn invbroker_turret_slots_shipping_storage_open_can_and_corp_office_branch
     // GetAvailableTurretSlots when neither bound item nor session.ship_id exists -> 0
     let mut no_ship_sess = docked_sess.clone();
     no_ship_sess.ship_id = None;
-    let b_unknown = make_bound("invbroker", char_id, 999_888_777);
+    let b_unknown = make_bound("invbroker", char_id, 199_888_777);
     assert_eq!(
         call_invbroker(&ctx, &no_ship_sess, Some(&b_unknown), "GetAvailableTurretSlots", &[])
             .unwrap()

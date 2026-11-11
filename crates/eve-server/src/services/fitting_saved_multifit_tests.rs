@@ -8,12 +8,16 @@ use eve_sde::SdeRegistry;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
+#[cfg(test)]
+#[path = "fitting_saved_multifit_extra_unit_tests.rs"]
+mod extra_unit_tests;
+
 fn shared_sde() -> Arc<SdeRegistry> {
     static SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
     Arc::clone(SDE.get_or_init(|| Arc::new(SdeRegistry::with_canonical_seed())))
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn saved_multifit_insurance_dynamic_item_repackage_assemble_repair_all_and_set_label() {
     let ctx = ServerContext::with_sde_and_repository(
         shared_sde(),

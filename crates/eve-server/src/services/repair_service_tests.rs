@@ -116,3 +116,7 @@ async fn test_repair_service_quotes_and_repair_in_station_and_structure() {
         Some(0.0)
     );
 }
+
+#[cfg(test)]
+#[path = "repair_service_extra_unit_tests.rs"]
+mod extra_unit_tests;

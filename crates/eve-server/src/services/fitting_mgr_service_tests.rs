@@ -20,7 +20,7 @@ fn test_ctx() -> ServerContext {
     ctx
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn char_corp_alliance_and_community_fittings_save_get_update_delete_lifecycle() {
     let ctx = test_ctx();
     let ceo_id = 95_600_001;
@@ -244,3 +244,7 @@ async fn char_corp_alliance_and_community_fittings_save_get_update_delete_lifecy
     .expect("GetCommunityFittings");
     assert!(matches!(comm_fits, PyRep::Dict(ref d) if d.iter().any(|(k, _)| k.as_i64() == Some(comm_fid))));
 }
+
+#[cfg(test)]
+#[path = "fitting_mgr_service_extra_unit_tests.rs"]
+mod fitting_mgr_service_extra_unit_tests;

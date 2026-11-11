@@ -800,6 +800,8 @@ pub(crate) async fn handle_dogma_ops(
                     PyRep::Bool(b) => Some(*b),
                     PyRep::Integer(0) => Some(false),
                     PyRep::Integer(1) => Some(true),
+                    PyRep::Real(v) if (*v - 0.0).abs() < 1e-9 => Some(false),
+                    PyRep::Real(v) if (*v - 1.0).abs() < 1e-9 => Some(true),
                     _ => None,
                 }
             };
@@ -940,11 +942,28 @@ fn resolve_parent_ship_for_dogma_item(
                 Some((item.owner_id, item.item_id))
             } else if active_ship_id > 0 && item.location_id == active_ship_id {
                 Some((char_id, active_ship_id))
-            } else if let Some(loc_item) = snap.items.get(&item.location_id) {
-                let loc_cat = ctx.sde.types.get(&loc_item.type_id).map(|t| t.category_id);
-                matches!(loc_cat, Some(6 | 65)).then_some((loc_item.owner_id, loc_item.item_id))
             } else {
-                None
+                let mut cur_loc = item.location_id;
+                let mut found = None;
+                for _ in 0..8 {
+                    if active_ship_id > 0 && cur_loc == active_ship_id {
+                        found = Some((char_id, active_ship_id));
+                        break;
+                    }
+                    let Some(loc_item) = snap.items.get(&cur_loc) else {
+                        break;
+                    };
+                    let loc_cat = ctx.sde.types.get(&loc_item.type_id).map(|t| t.category_id);
+                    if matches!(loc_cat, Some(6 | 65)) {
+                        found = Some((loc_item.owner_id, loc_item.item_id));
+                        break;
+                    }
+                    if loc_item.location_id == cur_loc || loc_item.location_id <= 0 {
+                        break;
+                    }
+                    cur_loc = loc_item.location_id;
+                }
+                found
             }
         } else {
             None
@@ -970,7 +989,7 @@ fn resolve_parent_ship_for_dogma_item(
     {
         return (item_opt, Some(probe_parent));
     }
-    let fallback_parent = (active_ship_id > 0).then_some((char_id, active_ship_id));
+    let fallback_parent = (item_opt.is_none() && active_ship_id > 0).then_some((char_id, active_ship_id));
     (item_opt, fallback_parent)
 }
 

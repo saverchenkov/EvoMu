@@ -1679,3 +1679,6 @@ pub(crate) async fn handle_module_cycles(
 #[cfg(test)]
 #[path = "fitting_module_cycles_tests.rs"]
 mod fitting_module_cycles_tests;
+#[cfg(test)]
+#[path = "fitting_module_cycles_edges2_tests.rs"]
+mod fitting_module_cycles_edges2_tests;

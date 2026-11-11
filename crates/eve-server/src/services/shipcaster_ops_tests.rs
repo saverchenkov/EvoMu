@@ -4,7 +4,7 @@ use crate::services::cluster_macho_misc_services::with_misc_state;
 use glam::DVec3;
 use std::collections::{BTreeMap, HashMap};
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_shipcaster_ops_pads_launchers_linking_disruption_and_rpcs() {
     let ctx = test_ctx();
     let mut sess = auth_session(1, 90_000_001, 98_000_001, 30_000_142);
@@ -209,3 +209,8 @@ async fn test_shipcaster_ops_pads_launchers_linking_disruption_and_rpcs() {
     }
     let _ = cid;
 }
+
+#[cfg(test)]
+#[path = "shipcaster_ops_extra_unit_tests.rs"]
+mod extra_unit_tests;
+

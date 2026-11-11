@@ -27,7 +27,7 @@ const SYNTH_STATION_CONT_TID: u32 = 990_204;
 const SYNTH_SIPHON_TID: u32 = 990_205;
 
 fn test_ctx() -> ServerContext {
-    if let Some(sde) = SHARED_SDE.get() {
+    let ctx = if let Some(sde) = SHARED_SDE.get() {
         ServerContext::with_sde_and_repository(
             Arc::clone(sde),
             Arc::new(eve_db::WorldRepository::with_demo_seed()),
@@ -111,7 +111,9 @@ fn test_ctx() -> ServerContext {
             Arc::new(eve_db::WorldRepository::with_demo_seed()),
         )
         .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED)
-    }
+    };
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_770_000_000)));
+    ctx
 }
 
 fn make_docked_session(char_id: i64, station_id: i64, sys_id: u32, ship_id: i64) -> SessionState {
@@ -579,4 +581,169 @@ async fn clear_charges_destroy_fitting_and_in_space_mobile_depot_unfit_rules() {
 
     handle_containers_ships_and_fitting(&ctx, &mut space_sess, None, "invbroker", "DestroyFitting", &[PyRep::Integer(gun_id)], &kw).await.unwrap().unwrap();
     assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&gun_id)));
+}
+
+#[tokio::test]
+async fn mutants_cov_stub_type_alsc_lock_config_log_and_can_open() {
+    use crate::services::inventory_fitting::fitting_containers_ships::resolve_missing_dynamic_ship_stub_type_id;
+
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let other_char = 90_000_002_i64;
+    let station_id = 60_003_760_i64;
+    let sys_id = 30_000_142_u32;
+
+    // 1. resolve_missing_dynamic_ship_stub_type_id range/char/item/killmail boundaries (11 mutants)
+    let existing_dyn = 250_000_000_i64;
+    let missing_dyn = 250_000_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.killmails.clear();
+        snap.items.insert(
+            existing_dyn,
+            make_item(existing_dyn, 587, char_id, station_id, InventoryFlag::Hangar, 1, true),
+        );
+    });
+    assert_eq!(resolve_missing_dynamic_ship_stub_type_id(&ctx, char_id, 199_999_999), None);
+    assert_eq!(resolve_missing_dynamic_ship_stub_type_id(&ctx, char_id, 1_000_000_000_000), None);
+    assert_eq!(resolve_missing_dynamic_ship_stub_type_id(&ctx, 0, missing_dyn), None);
+    assert_eq!(resolve_missing_dynamic_ship_stub_type_id(&ctx, -1, missing_dyn), None);
+    assert_eq!(resolve_missing_dynamic_ship_stub_type_id(&ctx, char_id, existing_dyn), None);
+    assert_eq!(resolve_missing_dynamic_ship_stub_type_id(&ctx, char_id, missing_dyn), Some(670));
+
+    // Distractor killmails: km1 newer with ship_type_id=0, km2 newer with wrong victim=other_char, km3 valid (type 622)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.killmails.insert(
+            1,
+            eve_db::KillmailRecord {
+                kill_id: 1,
+                victim_character_id: char_id,
+                ship_type_id: 0,
+                killed_unix: 9_999,
+                ..Default::default()
+            },
+        );
+        snap.killmails.insert(
+            2,
+            eve_db::KillmailRecord {
+                kill_id: 2,
+                victim_character_id: other_char,
+                ship_type_id: 639,
+                killed_unix: 5_000,
+                ..Default::default()
+            },
+        );
+        snap.killmails.insert(
+            3,
+            eve_db::KillmailRecord {
+                kill_id: 3,
+                victim_character_id: char_id,
+                ship_type_id: 622,
+                killed_unix: 4_000,
+                ..Default::default()
+            },
+        );
+    });
+    assert_eq!(resolve_missing_dynamic_ship_stub_type_id(&ctx, char_id, missing_dyn), Some(622));
+
+    // 2. handle_containers_ships_and_fitting: non-matching service, ALSC lock/unlock, ConfigGet, LogGet, ValidateItemCanBeOpened
+    let cont_id = 58_001_i64;
+    let inner_id = 58_002_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(station_id);
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+        }
+        snap.items.insert(
+            cont_id,
+            make_item(cont_id, SYNTH_STATION_CONT_TID, char_id, station_id, InventoryFlag::Hangar, 1, true),
+        );
+        snap.items.insert(
+            inner_id,
+            make_item(inner_id, 34, char_id, cont_id, InventoryFlag::Unlocked, 10, false),
+        );
+    });
+    let mut sess = make_docked_session(char_id, station_id, sys_id, 56001);
+    let kw = HashMap::new();
+
+    let other_svc = ["other", "Svc"].concat();
+    assert!(
+        handle_containers_ships_and_fitting(&ctx, &mut sess, None, &other_svc, "ALSCConfigGet", &[], &kw)
+            .await
+            .is_none()
+    );
+
+    let can_open = handle_containers_ships_and_fitting(
+        &ctx,
+        &mut sess,
+        None,
+        "invbroker",
+        "ValidateItemCanBeOpened",
+        &[PyRep::Integer(cont_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("ValidateItemCanBeOpened");
+    assert_eq!(can_open, PyRep::Bool(true));
+
+    let lock_rep = handle_containers_ships_and_fitting(
+        &ctx,
+        &mut sess,
+        None,
+        "invbroker",
+        "ALSCLockItems",
+        &[PyRep::Integer(cont_id), PyRep::List(vec![PyRep::Integer(inner_id)])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("ALSCLockItems");
+    assert_eq!(dict_get(&lock_rep, "locked"), Some(&PyRep::Bool(true)));
+    assert_eq!(dict_get(&lock_rep, "count"), Some(&PyRep::Integer(1)));
+
+    let unlock_rep = handle_containers_ships_and_fitting(
+        &ctx,
+        &mut sess,
+        None,
+        "invbroker",
+        "ALSCUnlockItems",
+        &[PyRep::Integer(cont_id), PyRep::List(vec![PyRep::Integer(inner_id)])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("ALSCUnlockItems");
+    assert_eq!(dict_get(&unlock_rep, "locked"), Some(&PyRep::Bool(false)));
+    assert_eq!(dict_get(&unlock_rep, "count"), Some(&PyRep::Integer(1)));
+
+    let cfg_rep = handle_containers_ships_and_fitting(
+        &ctx,
+        &mut sess,
+        None,
+        "invbroker",
+        "ALSCConfigGet",
+        &[PyRep::Integer(cont_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("ALSCConfigGet");
+    assert_eq!(dict_get(&cfg_rep, "containerID"), Some(&PyRep::Integer(cont_id)));
+    assert_eq!(dict_get(&cfg_rep, "hasPassword"), Some(&PyRep::Bool(false)));
+
+    let log_rep = handle_containers_ships_and_fitting(
+        &ctx,
+        &mut sess,
+        None,
+        "invbroker",
+        "ALSCLogGet",
+        &[PyRep::Integer(cont_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("ALSCLogGet");
+    assert_eq!(dict_get(&log_rep, "containerID"), Some(&PyRep::Integer(cont_id)));
+    assert!(dict_get(&log_rep, "logCount").and_then(|v| v.as_i64()).unwrap_or(0) >= 2);
 }

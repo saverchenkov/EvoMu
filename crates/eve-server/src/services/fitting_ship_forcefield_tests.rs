@@ -66,7 +66,7 @@ fn deployable_infrastructure_and_mobile_depot_classification() {
     assert!(!is_deployable_item(&ctx.sde, 999_999_999));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forcefield_entry_permissions_and_ship_configuration_password_flow() {
     let ctx = test_ctx_with_custom(|sde| {
         sde.types.insert(
@@ -230,3 +230,7 @@ async fn forcefield_entry_permissions_and_ship_configuration_password_flow() {
         "OwnershipViolation"
     );
 }
+
+#[cfg(test)]
+#[path = "fitting_ship_forcefield_cov_edges_tests.rs"]
+mod fitting_ship_forcefield_cov_edges_tests;

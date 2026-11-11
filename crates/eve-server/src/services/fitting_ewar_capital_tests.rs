@@ -142,7 +142,7 @@ fn ewar_jamming_type_and_notifications_cover_all_ewar_groups() {
     assert!(notifs.iter().any(|n| n.event == "OnEwarStart"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn prepare_ewar_and_capital_module_validates_hull_groups_and_prepares_adc_and_nullifier() {
     let ctx = ServerContext::with_sde_and_repository(
         shared_sde(),
@@ -244,3 +244,7 @@ async fn prepare_ewar_and_capital_module_validates_hull_groups_and_prepares_adc_
     .expect("Nullifier accepted on group 831");
     assert!(null_prep.grants_interdiction_nullification);
 }
+
+#[cfg(test)]
+#[path = "fitting_ewar_capital_extra_unit_tests.rs"]
+mod extra_unit_tests;

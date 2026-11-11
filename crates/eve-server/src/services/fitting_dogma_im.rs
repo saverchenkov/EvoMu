@@ -484,23 +484,11 @@ pub(crate) async fn handle_dogma_im(
                 return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "No active ship in session".into() }));
             };
 
-            let (ship_type_id, active_stance, mut entries, module_entries) =
+            let (ship_type_id, active_stance, entries, module_entries) =
                 match evaluate_ship_dogma_attributes(ctx, char_id, ship_id) {
                     Ok(v) => v,
                     Err(e) => return Some(Err(e)),
                 };
-            if method == "GetAllInfo" {
-                // V24 clientDogmaLocation primes shipDogmaItem baseValue from GetAllInfo shipInfo.attributes
-                // and then applies online effect modifiers; send 0.0 load here to prevent double-counting.
-                for (k, v) in &mut entries {
-                    if matches!(
-                        k.as_i64(),
-                        Some(id) if id == i64::from(attr_ids::CPU_LOAD) || id == i64::from(attr_ids::POWER_LOAD)
-                    ) {
-                        *v = PyRep::Real(0.0);
-                    }
-                }
-            }
 
             if method == "GetAllInfo" {
                 Some(Ok(build_all_info(ctx, session, char_id, ship_id, ship_type_id, active_stance, entries, module_entries, args)))
@@ -549,6 +537,7 @@ pub(crate) async fn handle_dogma_im(
                 };
                 return Some(Err(BridgeRpcError { code: code.into(), message: e }));
             }
+            let max_vel = fit.ship.get_attribute(eve_sde::attr_ids::MAX_VELOCITY, &ctx.sde);
             ctx.store_ship_fitting(ship_id, fit);
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
@@ -560,7 +549,16 @@ pub(crate) async fn handle_dogma_im(
                 crate::router::NotificationTarget::Character(char_id),
                 "OnModuleAttributeChanges",
                 "charid",
-                vec![PyRep::Integer(ship_id)],
+                vec![PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::String("OnModuleAttributeChange".into()),
+                    PyRep::Integer(char_id),
+                    PyRep::Integer(ship_id),
+                    PyRep::Integer(eve_sde::attr_ids::MAX_VELOCITY as i64),
+                    PyRep::Integer(ctx.now_blueos_filetime_ticks()),
+                    PyRep::Real(max_vel),
+                    PyRep::Real(max_vel),
+                    PyRep::None,
+                ])])],
             );
             Some(Ok(PyRep::Integer(stance_type_id)))
         }
@@ -1378,9 +1376,11 @@ pub(crate) async fn handle_dogma_im(
                 Err(e) => return Some(Err(e)),
             };
             let mut item_ids: Vec<i64> = match args.first() {
-                Some(PyRep::List(l) | PyRep::Tuple(l)) => l.iter().filter_map(|x| x.as_i64()).collect(),
                 Some(PyRep::Integer(id)) if *id > 0 => vec![*id],
-                _ => Vec::new(),
+                arg => crate::services::combat_crimewatch::extract_id_collection(arg)
+                    .into_iter()
+                    .filter(|id| *id > 0)
+                    .collect(),
             };
             if item_ids.is_empty() {
                 if let Some(sid) = session.ship_id {

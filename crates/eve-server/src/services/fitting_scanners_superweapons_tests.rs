@@ -484,3 +484,637 @@ async fn dbuffs_system_wide_effects_and_ship_clone_vat_installation() {
     assert_eq!(accept_rep.dict_get("installed").and_then(|v| v.as_bool()), Some(true));
     assert_eq!(accept_rep.dict_get("locationID").and_then(|v| v.as_i64()), Some(titan_id));
 }
+
+#[tokio::test]
+async fn dbuffs_apply_expired_pruning_storm_system_wide_and_godma_flush() {
+    let storm_tid = 92_975u32;
+    let custom_ship_tid = 92_587u32;
+    let ctx = test_ctx_with_custom(|sde| {
+        sde.effects.insert(
+            59_920,
+            eve_sde::DogmaEffectType {
+                effect_id: 59_920,
+                name: "TestStormEffect".into(),
+                modifiers: vec![
+                    eve_sde::EffectModifierSpec {
+                        domain: "shipID".into(),
+                        func: "ItemModifier".into(),
+                        modified_attribute_id: 552,
+                        modifying_attribute_id: 2469,
+                        operator: 4,
+                        group_id: None,
+                        skill_type_id: None,
+                        effect_id: None,
+                    },
+                    eve_sde::EffectModifierSpec {
+                        domain: "shipID".into(),
+                        func: "ItemModifier".into(),
+                        modified_attribute_id: 9,
+                        modifying_attribute_id: 2471,
+                        operator: 2,
+                        group_id: None,
+                        skill_type_id: None,
+                        effect_id: None,
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        let mut storm_t = custom_inv_type(
+            sde,
+            storm_tid,
+            920,
+            2,
+            "Test Electrical Storm",
+            &[(2469, 1.5), (2471, 250.0)],
+        );
+        storm_t.effect_ids = vec![59_920];
+        sde.types.insert(storm_tid, storm_t);
+        sde.types.insert(
+            custom_ship_tid,
+            custom_inv_type(sde, custom_ship_tid, 25, 6, "Test Ship", &[(9, 500.0), (552, 40.0), (37, 300.0)]),
+        );
+        sde.dbuff_collections.insert(
+            9_001,
+            eve_sde::DbuffCollectionInfo {
+                dbuff_id: 9_001,
+                name: "TestPostMul".into(),
+                operation: "PostMul".into(),
+                aggregate_mode: "Maximum".into(),
+                display_name_id: None,
+                show_output_value_in_ui: None,
+                item_modifiers: vec![552],
+                location_modifiers: Vec::new(),
+                location_group_modifiers: Vec::new(),
+                location_required_skill_modifiers: Vec::new(),
+                target_attribute_ids: vec![552],
+            },
+        );
+        sde.dbuff_collections.insert(
+            9_002,
+            eve_sde::DbuffCollectionInfo {
+                dbuff_id: 9_002,
+                name: "TestModAdd".into(),
+                operation: "ModAdd".into(),
+                aggregate_mode: "Maximum".into(),
+                display_name_id: None,
+                show_output_value_in_ui: None,
+                item_modifiers: vec![9],
+                location_modifiers: Vec::new(),
+                location_group_modifiers: Vec::new(),
+                location_required_skill_modifiers: Vec::new(),
+                target_attribute_ids: vec![9],
+            },
+        );
+        sde.dbuff_collections.insert(
+            9_003,
+            eve_sde::DbuffCollectionInfo {
+                dbuff_id: 9_003,
+                name: "TestPostPercent".into(),
+                operation: "PostPercent".into(),
+                aggregate_mode: "Maximum".into(),
+                display_name_id: None,
+                show_output_value_in_ui: None,
+                item_modifiers: vec![37],
+                location_modifiers: Vec::new(),
+                location_group_modifiers: Vec::new(),
+                location_required_skill_modifiers: Vec::new(),
+                target_attribute_ids: vec![37],
+            },
+        );
+    });
+
+    let sys_id = 30_000_142u32;
+    let char_id = 92_100_001i64;
+    let ship1 = 92_100_011i64;
+    let ship2 = 92_100_012i64;
+    let storm_item_id = 92_100_099i64;
+    let kw = HashMap::new();
+
+    ensure_char(&ctx, char_id, 98_000_001, sys_id, ship1, None);
+    insert_item(&ctx, ship1, custom_ship_tid, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    insert_item(&ctx, ship2, custom_ship_tid, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+
+    let mut non_gm = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship1),
+        ..Default::default()
+    };
+    let mut gm = non_gm.clone();
+    gm.role = u64::MAX;
+
+    // Empty dbuffs on ship2 triggers OnGodmaFlushLocation notification.
+    let _ = handle_superweapons_dbuffs_and_clones(
+        &ctx,
+        &mut non_gm,
+        None,
+        "dogmaIM",
+        "GetMappedDbuffsForItem",
+        &[PyRep::Integer(ship2)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("GetMappedDbuffsForItem empty");
+    let flushed = ctx
+        .pending_notifications
+        .read()
+        .unwrap()
+        .get(&char_id)
+        .is_some_and(|list| {
+            list.iter()
+                .any(|n| n.event == "OnGodmaFlushLocation" && n.args == vec![PyRep::Integer(ship2)])
+        });
+    assert!(flushed, "expected OnGodmaFlushLocation for empty dbuff ship");
+
+    // ApplyBuffsToItems requires GM + validates W2 RpcArgs.
+    assert_eq!(
+        handle_superweapons_dbuffs_and_clones(
+            &ctx,
+            &mut non_gm,
+            None,
+            "dogmaIM",
+            "ApplyBuffsToItems",
+            &[PyRep::List(vec![PyRep::Integer(ship1)]), PyRep::Integer(9_003), PyRep::Real(25.0)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "GMRoleRequired"
+    );
+    assert_eq!(
+        handle_superweapons_dbuffs_and_clones(
+            &ctx,
+            &mut gm,
+            None,
+            "dogmaIM",
+            "ApplyBuffsToItems",
+            &[PyRep::List(vec![PyRep::Integer(ship1)]), PyRep::Integer(-1), PyRep::Real(10.0)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidArgument"
+    );
+    assert_eq!(
+        handle_superweapons_dbuffs_and_clones(
+            &ctx,
+            &mut gm,
+            None,
+            "dogmaIM",
+            "ApplyBuffsToItems",
+            &[PyRep::List(vec![PyRep::Integer(ship1)]), PyRep::Integer(9_003), PyRep::Real(f64::NAN)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidArgument"
+    );
+
+    // Apply batch runtime dbuff 9003 (+25% speed), seed storm object 92975 (PostMul 1.5x sig, ModAdd +250 hull).
+    handle_superweapons_dbuffs_and_clones(
+        &ctx,
+        &mut gm,
+        None,
+        "dogmaIM",
+        "ApplyBuffsToItems",
+        &[
+            PyRep::List(vec![PyRep::Integer(ship1), PyRep::Integer(ship2)]),
+            PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(9_003), PyRep::Real(25.0)])]),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("ApplyBuffsToItems batch");
+    insert_item(&ctx, storm_item_id, storm_tid, 1, sys_id as i64, InventoryFlag::None, 1, true);
+
+    let mut attrs = HashMap::from([(552u16, 40.0), (9u16, 500.0), (37u16, 300.0)]);
+    apply_active_dbuffs_and_system_effects_to_ship_attrs(&ctx, ship1, &mut attrs);
+    assert!((attrs[&552] - 60.0).abs() < 1e-6, "PostMul 40*1.5=60, got {}", attrs[&552]);
+    assert!((attrs[&9] - 750.0).abs() < 1e-6, "ModAdd 500+250=750, got {}", attrs[&9]);
+    assert!((attrs[&37] - 375.0).abs() < 1e-6, "PostPercent 300*1.25=375, got {}", attrs[&37]);
+
+    // Advancing clock expires runtime dbuffs while retaining system-wide storm item effects.
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_005_000)));
+    let mut attrs_after_exp = HashMap::from([(552u16, 40.0), (9u16, 500.0), (37u16, 300.0)]);
+    apply_active_dbuffs_and_system_effects_to_ship_attrs(&ctx, ship1, &mut attrs_after_exp);
+    assert!((attrs_after_exp[&552] - 60.0).abs() < 1e-6);
+    assert!((attrs_after_exp[&9] - 750.0).abs() < 1e-6);
+    assert!((attrs_after_exp[&37] - 300.0).abs() < 1e-6);
+
+    // RefreshSystemWideEnvironment & ResetSystemWideEffects require GM and update active state.
+    assert_eq!(
+        handle_superweapons_dbuffs_and_clones(&ctx, &mut non_gm, None, "dogmaIM", "ResetSystemWideEffects", &[PyRep::Integer(sys_id as i64)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "GMRoleRequired"
+    );
+    let ref_rep = handle_superweapons_dbuffs_and_clones(
+        &ctx,
+        &mut gm,
+        None,
+        "dogmaIM",
+        "RefreshSystemWideEnvironment",
+        &[PyRep::Integer(sys_id as i64), PyRep::String("Electrical Storm".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("RefreshSystemWideEnvironment");
+    assert_eq!(ref_rep.dict_get("solarSystemID"), Some(&PyRep::Integer(sys_id as i64)));
+
+    let reset_rep = handle_superweapons_dbuffs_and_clones(
+        &ctx,
+        &mut gm,
+        None,
+        "dogmaIM",
+        "ResetSystemWideEffects",
+        &[PyRep::Integer(sys_id as i64)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("ResetSystemWideEffects");
+    assert_eq!(reset_rep.dict_get("active"), Some(&PyRep::Bool(false)));
+}
+
+#[tokio::test]
+async fn superweapons_rpc_args_and_jump_clone_cancel_offerer_target_state_edges() {
+    let ctx = test_ctx_with_custom(|_| {});
+    let sys_id = 30_000_142u32;
+    let host_id = 92_200_001i64;
+    let guest_id = 92_200_002i64;
+    let titan_id = 92_200_011i64;
+    let guest_ship_id = 92_200_012i64;
+    let vat_bay_id = 92_200_021i64;
+    let kw = HashMap::new();
+
+    ensure_char(&ctx, host_id, 98_000_001, sys_id, titan_id, Some(92_900_001));
+    ensure_char(&ctx, guest_id, 98_000_001, sys_id, guest_ship_id, Some(92_900_001));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(
+            92_900_001,
+            eve_db::FleetRecord {
+                fleet_id: 92_900_001,
+                boss_id: host_id,
+                members: vec![host_id, guest_id],
+                ..Default::default()
+            },
+        );
+        snap.skills.entry(guest_id).or_default().insert(
+            24242,
+            eve_db::TrainedSkillRecord {
+                type_id: 24242,
+                level: 1,
+                skill_points: 250.0,
+            },
+        );
+    });
+    // Avatar (11567) Titan + Clone Vat Bay (23735) + Liquid Ozone (16273)
+    insert_item(&ctx, titan_id, 11567, host_id, sys_id as i64, InventoryFlag::None, 1, true);
+    insert_item(&ctx, guest_ship_id, 587, guest_id, sys_id as i64, InventoryFlag::None, 1, true);
+    insert_item(&ctx, vat_bay_id, 23735, host_id, titan_id, InventoryFlag::HiSlot0, 1, true);
+    insert_item(&ctx, vat_bay_id + 1, 16273, host_id, titan_id, InventoryFlag::Cargo, 500, false);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(vat_bay_id, true);
+    });
+    spawn_ball(&ctx, sys_id, titan_id, 11567, 30, host_id, DVec3::ZERO).await;
+    spawn_ball(&ctx, sys_id, guest_ship_id, 587, 25, guest_id, DVec3::new(1_000.0, 0.0, 0.0)).await;
+
+    // superWeaponMgr precondition & W2 RpcArgs guards.
+    let mut docked_sess = SessionState {
+        user_id: Some(host_id as u64),
+        character_id: Some(host_id),
+        station_id: Some(60_003_760),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(titan_id),
+        ..Default::default()
+    };
+    assert_eq!(
+        handle_superweapons_dbuffs_and_clones(
+            &ctx,
+            &mut docked_sess,
+            None,
+            "superWeaponMgr",
+            "ActivateSinglePointTargetedModule",
+            &[PyRep::Integer(1)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CantDoThatWhileDocked"
+    );
+
+    let mut no_ship_sess = SessionState {
+        user_id: Some(host_id as u64),
+        character_id: Some(host_id),
+        solar_system_id: Some(sys_id),
+        ship_id: None,
+        ..Default::default()
+    };
+    assert_eq!(
+        handle_superweapons_dbuffs_and_clones(
+            &ctx,
+            &mut no_ship_sess,
+            None,
+            "superWeaponMgr",
+            "ActivateSinglePointTargetedModule",
+            &[PyRep::Integer(1)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "NoActiveShip"
+    );
+
+    let mut no_sys_sess = SessionState {
+        user_id: Some(host_id as u64),
+        character_id: Some(host_id),
+        solar_system_id: None,
+        ship_id: Some(titan_id),
+        ..Default::default()
+    };
+    assert_eq!(
+        handle_superweapons_dbuffs_and_clones(
+            &ctx,
+            &mut no_sys_sess,
+            None,
+            "superWeaponMgr",
+            "ActivateSlashModule",
+            &[PyRep::Integer(1)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "NotInSpace"
+    );
+
+    let mut host_sess = SessionState {
+        user_id: Some(host_id as u64),
+        character_id: Some(host_id),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(titan_id),
+        ..Default::default()
+    };
+    for method in ["ActivateSinglePointTargetedModule", "ActivateSlashModule"] {
+        assert_eq!(
+            handle_superweapons_dbuffs_and_clones(
+                &ctx,
+                &mut host_sess,
+                None,
+                "superWeaponMgr",
+                method,
+                &[PyRep::Integer(0)],
+                &kw,
+            )
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "InvalidArgument" // rpc-lint: allow test fixture
+        );
+    }
+
+    // jumpCloneSvc: Offer error checks before vat bay activation.
+    assert_eq!(
+        handle_superweapons_dbuffs_and_clones(
+            &ctx,
+            &mut host_sess,
+            None,
+            "jumpCloneSvc",
+            "OfferShipCloneInstallation",
+            &[PyRep::Integer(guest_id), PyRep::Integer(titan_id + 999)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "MustPilotHostShip"
+    );
+    assert_eq!(
+        handle_superweapons_dbuffs_and_clones(
+            &ctx,
+            &mut host_sess,
+            None,
+            "jumpCloneSvc",
+            "OfferShipCloneInstallation",
+            &[PyRep::Integer(guest_id), PyRep::Integer(titan_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "NoActiveCloneVatBay"
+    );
+
+    // Activate Clone Vat Bay -> out-of-fleet check -> offer & target-side cancel -> re-offer & offerer-side cancel -> accept & clone limit reached.
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let vat_type = ctx.sde.types.get(&23735).unwrap().clone();
+    let vat_state = DogmaItemState::from_sde(host_id, 23735, &ctx.sde);
+    handle_scanner_analyzer_entosis_activation(&ctx, &sys, host_id, titan_id, vat_bay_id, &vat_type, &vat_state, None)
+        .await
+        .unwrap()
+        .expect("vat bay activation");
+
+    assert_eq!(
+        handle_superweapons_dbuffs_and_clones(
+            &ctx,
+            &mut host_sess,
+            None,
+            "jumpCloneSvc",
+            "OfferShipCloneInstallation",
+            &[PyRep::Integer(99_999_888), PyRep::Integer(titan_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "TargetNotInSameFleetOrSystem"
+    );
+
+    handle_superweapons_dbuffs_and_clones(
+        &ctx,
+        &mut host_sess,
+        None,
+        "jumpCloneSvc",
+        "OfferShipCloneInstallation",
+        &[PyRep::Integer(guest_id), PyRep::Integer(titan_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("OfferShipCloneInstallation 1");
+
+    let mut guest_sess = SessionState {
+        user_id: Some(guest_id as u64),
+        character_id: Some(guest_id),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(guest_ship_id),
+        ..Default::default()
+    };
+    assert_eq!(
+        handle_superweapons_dbuffs_and_clones(
+            &ctx,
+            &mut guest_sess,
+            None,
+            "jumpCloneSvc",
+            "CancelShipCloneInstallation",
+            &[],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(
+        handle_superweapons_dbuffs_and_clones(
+            &ctx,
+            &mut guest_sess,
+            None,
+            "jumpCloneSvc",
+            "AcceptShipCloneInstallation",
+            &[PyRep::Integer(titan_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "NoCloneOfferFound"
+    );
+
+    // Re-offer and cancel from offerer side.
+    handle_superweapons_dbuffs_and_clones(
+        &ctx,
+        &mut host_sess,
+        None,
+        "jumpCloneSvc",
+        "OfferShipCloneInstallation",
+        &[PyRep::Integer(guest_id), PyRep::Integer(titan_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("OfferShipCloneInstallation 2");
+    assert_eq!(
+        handle_superweapons_dbuffs_and_clones(
+            &ctx,
+            &mut host_sess,
+            None,
+            "jumpCloneSvc",
+            "CancelShipCloneInstallation",
+            &[],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(
+        handle_superweapons_dbuffs_and_clones(
+            &ctx,
+            &mut guest_sess,
+            None,
+            "jumpCloneSvc",
+            "AcceptShipCloneInstallation",
+            &[PyRep::Integer(titan_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "NoCloneOfferFound"
+    );
+
+    // Accept once -> GetShipCloneState reflects clone -> 2nd Accept hits JumpCloneLimitReached.
+    handle_superweapons_dbuffs_and_clones(
+        &ctx,
+        &mut host_sess,
+        None,
+        "jumpCloneSvc",
+        "OfferShipCloneInstallation",
+        &[PyRep::Integer(guest_id), PyRep::Integer(titan_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("OfferShipCloneInstallation 3");
+    handle_superweapons_dbuffs_and_clones(
+        &ctx,
+        &mut guest_sess,
+        None,
+        "jumpCloneSvc",
+        "AcceptShipCloneInstallation",
+        &[PyRep::Integer(titan_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("Accept 1");
+    let state_rep = handle_superweapons_dbuffs_and_clones(
+        &ctx,
+        &mut guest_sess,
+        None,
+        "jumpCloneSvc",
+        "GetShipCloneState",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("GetShipCloneState");
+    assert_ne!(state_rep, PyRep::None);
+
+    handle_superweapons_dbuffs_and_clones(
+        &ctx,
+        &mut host_sess,
+        None,
+        "jumpCloneSvc",
+        "OfferShipCloneInstallation",
+        &[PyRep::Integer(guest_id), PyRep::Integer(titan_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("OfferShipCloneInstallation 4");
+    assert_eq!(
+        handle_superweapons_dbuffs_and_clones(
+            &ctx,
+            &mut guest_sess,
+            None,
+            "jumpCloneSvc",
+            "AcceptShipCloneInstallation",
+            &[PyRep::Integer(titan_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "JumpCloneLimitReached"
+    );
+}
+

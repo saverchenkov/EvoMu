@@ -505,7 +505,8 @@ pub(super) fn handle_repair_all(
         0.0
     };
 
-    ctx.db.try_with_mut_snapshot(|snap| {
+    let debited_new_bal = ctx.db.try_with_mut_snapshot(|snap| {
+        let mut new_char_bal = None;
         if cost_isk > 0.0 {
             let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
                 code: "CharacterNotFound".into(),
@@ -517,6 +518,7 @@ pub(super) fn handle_repair_all(
                 message: "Insufficient ISK to pay repair bill".into(),
             })?;
             let bal = ch.balance;
+            new_char_bal = Some(bal);
             snap.append_journal(
                 char_id,
                 "RepairBill",
@@ -541,8 +543,11 @@ pub(super) fn handle_repair_all(
                 crate::sp6_lifecycle::clear_ship_combat_damage_in_snap(snap, id);
             }
         }
-        Ok(())
+        Ok(new_char_bal)
     })?;
+    if let Some(bal) = debited_new_bal {
+        ctx.notify_account_change(char_id, "cash", char_id, bal.to_wire_f64());
+    }
     if ship_at_dock {
         ctx.store_ship_fitting(ship_id, fit);
     }
@@ -556,3 +561,7 @@ pub(super) fn handle_repair_all(
         ("repaired", PyRep::Bool(true)),
     ]))
 }
+
+#[cfg(test)]
+#[path = "fitting_insurance_repair_edges_tests.rs"]
+mod fitting_insurance_repair_edges_tests;

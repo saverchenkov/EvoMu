@@ -44,6 +44,31 @@ pub(crate) struct ContainerConfig {
     pub config_bitmask: u32,
 }
 
+/// Resolves a fallback ship `type_id` (from the character's most recent killmail or `670` Capsule)
+/// when an authenticated session queries `invbroker.GetInventoryFromId` / `GetSelfInvItem` for a
+/// dynamically spawned ship entity (`200_000_000..1_000_000_000_000`) that was just destroyed in
+/// combat (`OnSessionChanged` / `OnCapacityChange` teardown race, GH `#803`).
+pub(crate) fn resolve_missing_dynamic_ship_stub_type_id(
+    ctx: &ServerContext,
+    char_id: i64,
+    item_id: i64,
+) -> Option<u32> {
+    if !(200_000_000..1_000_000_000_000).contains(&item_id) || char_id <= 0 {
+        return None;
+    }
+    ctx.db.with_snapshot(|snap| {
+        if snap.items.contains_key(&item_id) {
+            return None;
+        }
+        snap.killmails
+            .values()
+            .filter(|km| km.victim_character_id == char_id && km.ship_type_id > 0)
+            .max_by_key(|km| (km.killed_unix, km.kill_id))
+            .map(|km| km.ship_type_id)
+            .or(Some(670))
+    })
+}
+
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub(crate) struct ContainerShipRuntimeState {
     pub container_passwords: HashMap<i64, String>,
@@ -1547,3 +1572,7 @@ pub(crate) async fn validate_ship_module_unfit_auth(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "fitting_containers_ships_edges2_tests.rs"]
+mod fitting_containers_ships_edges2_tests;

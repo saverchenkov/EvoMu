@@ -1813,4 +1813,7 @@ fn build_ejected_capsule_ball_and_combat_state(
 #[cfg(test)]
 #[path = "fitting_ships_mastery_tests.rs"]
 mod fitting_ships_mastery_tests;
+#[cfg(test)]
+#[path = "fitting_ships_mastery_edges2_tests.rs"]
+mod fitting_ships_mastery_edges2_tests;
 

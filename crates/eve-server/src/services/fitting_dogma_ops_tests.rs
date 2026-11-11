@@ -346,6 +346,77 @@ async fn dogma_ops_targeting_attribute_queries_online_repair_and_drone_settings(
         .db
         .with_snapshot(|s| s.combat_crimewatch_state.drone_settings.get(&char_id).copied());
     assert_eq!(saved_ds, Some((false, true)));
+
+    // Float 0.0/1.0 accepted via attribute-ID dict, tuple, and kwargs; non-0/1 floats rejected
+    let _ = handle_dogma_ops(
+        &ctx,
+        &mut session,
+        None,
+        "dogmaIM",
+        "ChangeDroneSettings",
+        &[PyRep::Dict(vec![
+            (PyRep::Integer(1297), PyRep::Real(0.0)),
+            (PyRep::Integer(1275), PyRep::Real(1.0)),
+        ])],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("ChangeDroneSettings float attr dict ok");
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.combat_crimewatch_state.drone_settings.get(&char_id).copied()),
+        Some((true, false))
+    );
+
+    let _ = handle_dogma_ops(
+        &ctx,
+        &mut session,
+        None,
+        "dogmaIM",
+        "ChangeDroneSettings",
+        &[PyRep::Tuple(vec![PyRep::Real(0.0), PyRep::Real(1.0)])],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("ChangeDroneSettings float tuple ok");
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.combat_crimewatch_state.drone_settings.get(&char_id).copied()),
+        Some((false, true))
+    );
+
+    let mut kw_float = HashMap::new();
+    kw_float.insert("aggressive".into(), PyRep::Real(1.0));
+    kw_float.insert("focusFire".into(), PyRep::Real(0.0));
+    let _ = handle_dogma_ops(
+        &ctx,
+        &mut session,
+        None,
+        "dogmaIM",
+        "ChangeDroneSettings",
+        &[],
+        &kw_float,
+    )
+    .await
+    .expect("handled")
+    .expect("ChangeDroneSettings float kwargs ok");
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.combat_crimewatch_state.drone_settings.get(&char_id).copied()),
+        Some((true, false))
+    );
+
+    let bad_float = handle_dogma_ops(
+        &ctx,
+        &mut session,
+        None,
+        "dogmaIM",
+        "ChangeDroneSettings",
+        &[PyRep::Tuple(vec![PyRep::Real(0.5), PyRep::Real(1.0)])],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled");
+    assert_eq!(bad_float.unwrap_err().code, "InvalidArgument");
 }
 
 fn make_test_inv_type(
@@ -1028,3 +1099,7 @@ async fn triage_target_cap_does_not_exceed_character_target_management_limit() {
     .unwrap();
     assert_eq!(fourth.unwrap_err().code, "TargetingFailed");
 }
+
+#[cfg(test)]
+#[path = "fitting_dogma_ops_extra_unit_tests.rs"]
+mod extra_unit_tests;

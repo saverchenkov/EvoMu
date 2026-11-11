@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 //! Semantic unit tests split from `inventory_fitting_extra_unit_tests`.
 
 use super::super::*;
@@ -11,7 +12,7 @@ use eve_db::{
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invbroker_add_fitting_prechecks_rig_destruction_charge_load_and_unfit_rules() {
     let (ctx, mut session, char_id, _corp_id, station_id, ship_id) = setup_inv_ctx();
 
@@ -205,6 +206,8 @@ async fn invbroker_add_fitting_prechecks_rig_destruction_charge_load_and_unfit_r
             sh.location_id = station_id;
         }
     });
+    let uid = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map_or(1, |c| c.user_id));
+    let _ = ctx.db.acquire_online_lock(uid, 1, Some(char_id), false, ctx.now_unix());
     let _ = ctx.drain_notifications_for_char(char_id);
     call_add(
         &ctx,
@@ -226,7 +229,7 @@ async fn invbroker_add_fitting_prechecks_rig_destruction_charge_load_and_unfit_r
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invbroker_add_move_auth_quantum_core_escape_bay_and_stack_merge() {
     let (ctx, mut session, char_id, corp_id, station_id, ship_id) = setup_inv_ctx();
     let kw = HashMap::new();
@@ -389,6 +392,11 @@ async fn invbroker_add_move_auth_quantum_core_escape_bay_and_stack_merge() {
         "CorpRoleDenied"
     );
     session.corp_role = corp_roles::ROLE_DIRECTOR;
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(c) = s.corporations.get_mut(&corp_id) {
+            c.member_roles.insert(char_id, corp_roles::ROLE_DIRECTOR);
+        }
+    });
 
     assert_eq!(
         call_add(&ctx, &mut session, &[PyRep::Integer(wrong_core_id), PyRep::Integer(struct_id), PyRep::Integer(180)])

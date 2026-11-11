@@ -163,3 +163,7 @@ pub(crate) fn fallback_fitted_weapon_module(
         })
     })
 }
+
+#[cfg(test)]
+#[path = "fitting_module_cycles_guards_edges_tests.rs"]
+mod fitting_module_cycles_guards_edges_tests;

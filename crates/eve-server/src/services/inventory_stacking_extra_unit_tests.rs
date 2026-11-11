@@ -769,3 +769,746 @@ async fn ship_hold_capacity_errors_match_hold_specific_codes_for_add_and_multi_a
     .unwrap_err();
     assert_eq!(err.code, "NotEnoughFighterBaySpace");
 }
+
+#[tokio::test]
+async fn multi_add_autofit_subsystems_structure_guards_ownership_courier_and_session_fallbacks() {
+    use eve_db::UpwellStructureRecord;
+
+    let ctx = make_ctx();
+    let char_id = 93_000_010;
+    let foreign_char = 93_000_011;
+    let zero_corp_char = 93_000_012;
+    let corp_id = 98_000_040;
+    let struct_npc_corp = 1_000_009;
+    let station_id = 60_003_760;
+    let other_station_id = 60_003_761;
+    let sys_id = 30_000_142;
+    let loki_id = 1_100_001_001;
+    let rifter_id = 1_100_001_002;
+    let struct_id = 1_100_001_050;
+    let owned_struct_id = 1_100_001_051;
+
+    let mut sess = seed_char(&ctx, char_id, corp_id, Some(station_id), sys_id, loki_id);
+    let _ = seed_char(&ctx, foreign_char, corp_id + 1, Some(station_id), sys_id, 1_100_001_003);
+    let mut sess_zero = seed_char(&ctx, zero_corp_char, 0, Some(station_id), sys_id, 1_100_001_004);
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "MultiAdd Corp".into();
+        corp.ticker = "MAD".into();
+        corp.ceo_id = char_id;
+        corp.members = HashSet::from([char_id]);
+        corp.member_roles = HashMap::from([(char_id, u64::MAX)]);
+        snap.corporations.insert(corp_id, corp);
+
+        snap.structures.insert(
+            struct_id,
+            UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35_832,
+                owner_corp_id: struct_npc_corp,
+                solar_system_id: sys_id,
+                name: "NPC Astrahus".into(),
+                position: [0.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            owned_struct_id,
+            UpwellStructureRecord {
+                structure_id: owned_struct_id,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Owned Astrahus (No Fitting)".into(),
+                position: [1_000_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+    });
+
+    // Items setup
+    let subsys_id = 1_100_001_010; // 45607 (category 32 Subsystem)
+    let mod_id = 1_100_001_011;    // 492 (category 7 Module)
+    let spare_mod = 1_100_001_012; // 492 (category 7 Module for Rifter unfit test)
+    let trit_id = 1_100_001_013;   // 34 (category 4 non-fittable)
+    let fuel_to_struct = 1_100_001_014; // 16273 Liquid Ozone
+    let personal_ore = 1_100_001_015;
+    let struct_hi_mod = 1_100_001_016;
+    let struct_svc_mod = 1_100_001_017;
+    let courier_id = 1_100_001_018;
+    let foreign_cont = 1_100_001_019;
+    let unowned_item = 1_100_001_020;
+    let remote_item = 1_100_001_021;
+    let jetcan_id = 1_100_001_022;
+    let jetcan_loot = 1_100_001_023;
+    let same_loc_trit = 1_100_001_024;
+    let space_ship_id = 1_100_001_025;
+    let corp_fuel_src = 1_100_001_026;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2; // Omega so T3C subsystem skill (30551) is not Alpha-capped to 0
+        }
+        let skills = snap.skills.entry(char_id).or_default();
+        for tid in [45607_u32, 492_u32] {
+            for (skill_tid, lvl) in ctx.sde.required_skills_for_type(tid) {
+                skills.insert(
+                    skill_tid,
+                    eve_db::TrainedSkillRecord {
+                        type_id: skill_tid,
+                        level: lvl,
+                        skill_points: 256_000.0,
+                    },
+                );
+            }
+        }
+    });
+    put_item(&ctx, loki_id, 29990, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    put_item(&ctx, rifter_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    put_item(&ctx, subsys_id, 45607, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    put_item(&ctx, mod_id, 492, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    put_item(&ctx, spare_mod, 492, char_id, rifter_id, InventoryFlag::HiSlot0, 1, true);
+    put_item(&ctx, trit_id, 34, char_id, station_id, InventoryFlag::Hangar, 5, false);
+    put_item(&ctx, fuel_to_struct, 16273, char_id, loki_id, InventoryFlag::Cargo, 10, false);
+    put_item(&ctx, personal_ore, 34, char_id, station_id, InventoryFlag::Hangar, 5, false);
+    put_item(&ctx, struct_hi_mod, 492, corp_id, owned_struct_id, InventoryFlag::HiSlot0, 1, true);
+    put_item(&ctx, struct_svc_mod, 492, corp_id, owned_struct_id, InventoryFlag::ServiceSlot0, 1, true);
+    put_item(&ctx, courier_id, 34, char_id, station_id, InventoryFlag::Hangar, 2, false);
+    put_item(&ctx, foreign_cont, 23, foreign_char, station_id, InventoryFlag::Hangar, 1, true);
+    put_item(&ctx, unowned_item, 34, 0, station_id, InventoryFlag::Hangar, 1, false);
+    put_item(&ctx, remote_item, 34, char_id, other_station_id, InventoryFlag::Hangar, 1, false);
+    put_item(&ctx, same_loc_trit, 34, char_id, station_id, InventoryFlag::Hangar, 3, false);
+    put_item(&ctx, corp_fuel_src, 16273, corp_id, owned_struct_id, InventoryFlag::StructureFuel, 5, false);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_custom_names.insert(courier_id, "courier_cargo:55".into());
+    });
+
+    // 1. Auto-fit without explicit flag: Subsystem (category 32) & Module (category 7) auto-fit; non-fittable (Tritanium) goes to Cargo
+    let sub_fit = handle_multi_add(
+        &ctx,
+        &mut sess,
+        None,
+        &[PyRep::List(vec![PyRep::Integer(subsys_id)]), PyRep::Integer(loki_id)],
+        &kw,
+    )
+    .await
+    .expect("auto-fit subsystem");
+    assert_eq!(sub_fit.dict_get("movedCount"), Some(&PyRep::Integer(1)));
+    let mod_fit = handle_multi_add(
+        &ctx,
+        &mut sess,
+        None,
+        &[PyRep::List(vec![PyRep::Integer(mod_id)]), PyRep::Integer(loki_id)],
+        &kw,
+    )
+    .await
+    .expect("auto-fit module onto loki");
+    assert_eq!(mod_fit.dict_get("movedCount"), Some(&PyRep::Integer(1)));
+    let cargo_trit = handle_multi_add(
+        &ctx,
+        &mut sess,
+        None,
+        &[PyRep::List(vec![PyRep::Integer(trit_id)]), PyRep::Integer(loki_id)],
+        &kw,
+    )
+    .await
+    .expect("non-fittable moves to Cargo with no flag");
+    assert_eq!(cargo_trit.dict_get("movedCount"), Some(&PyRep::Integer(1)));
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&trit_id].flag), InventoryFlag::Cargo);
+
+    // 2. Unfitting subsystem while Loki has high-slot module -> SubsystemHasFittedModules (kills all 19 validate_multi_add_in_snap FnValues)
+    let sub_err = handle_multi_add(
+        &ctx,
+        &mut sess,
+        None,
+        &[
+            PyRep::List(vec![PyRep::Integer(subsys_id)]),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::Hangar as i64),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(sub_err.code, "SubsystemHasFittedModules");
+
+    // Unfitting spare_mod from Rifter to Hangar while docked succeeds
+    let mod_unfit = handle_multi_add(
+        &ctx,
+        &mut sess,
+        None,
+        &[
+            PyRep::List(vec![PyRep::Integer(spare_mod)]),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::Hangar as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("docked unfit succeeds");
+    assert_eq!(mod_unfit.dict_get("movedCount"), Some(&PyRep::Integer(1)));
+
+    // 3. New owner rules:
+    // Moving personal_ore into CorpSAG1 (flag 116) -> owner becomes caller corp_id
+    handle_multi_add(
+        &ctx,
+        &mut sess,
+        None,
+        &[
+            PyRep::List(vec![PyRep::Integer(personal_ore)]),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::CorpSAG1 as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("move into CorpSAG1");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&personal_ore].owner_id), corp_id);
+
+    // Moving personal item (same_loc_trit) to Hangar (4) when caller_corp_id > 0 keeps char_id (kills &&->|| on L351)
+    handle_multi_add(
+        &ctx,
+        &mut sess,
+        None,
+        &[
+            PyRep::List(vec![PyRep::Integer(same_loc_trit)]),
+            PyRep::Integer(loki_id),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("move to personal cargo");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&same_loc_trit].owner_id), char_id);
+
+    // 4. Courier cargo to foreign container (flag 5, NOT 116..=122) -> CannotDeliverCourierCargo;
+    // to own loki Cargo (flag 5, !foreign_dest) -> succeeds
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut sess,
+            None,
+            &[
+                PyRep::List(vec![PyRep::Integer(courier_id)]),
+                PyRep::Integer(foreign_cont),
+                PyRep::Integer(InventoryFlag::Cargo as i64),
+            ],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CannotDeliverCourierCargo"
+    );
+    handle_multi_add(
+        &ctx,
+        &mut sess,
+        None,
+        &[
+            PyRep::List(vec![PyRep::Integer(courier_id)]),
+            PyRep::Integer(loki_id),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("courier cargo allowed in own ship cargo");
+
+    // 5. Unowned item (owner 0) moved by zero-corp char (corp_id == 0) -> ItemOwnershipViolation (not CorpRoleDenied)
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut sess_zero,
+            None,
+            &[
+                PyRep::List(vec![PyRep::Integer(unowned_item)]),
+                PyRep::Integer(station_id),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "ItemOwnershipViolation"
+    );
+
+    // Non-colocated remote item -> ItemOwnershipViolation
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut sess,
+            None,
+            &[
+                PyRep::List(vec![PyRep::Integer(remote_item)]),
+                PyRep::Integer(station_id),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "ItemOwnershipViolation"
+    );
+
+    // Structure fitted modules / services -> InvalidLocation ("Structure modules must be unfitted individually")
+    sess.station_id = None;
+    sess.structure_id = Some(owned_struct_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().station_id = None;
+        snap.characters.get_mut(&char_id).unwrap().structure_id = Some(owned_struct_id);
+    });
+    for mod_in_struct in [struct_hi_mod, struct_svc_mod] {
+        assert_eq!(
+            handle_multi_add(
+                &ctx,
+                &mut sess,
+                None,
+                &[
+                    PyRep::List(vec![PyRep::Integer(mod_in_struct)]),
+                    PyRep::Integer(owned_struct_id),
+                    PyRep::Integer(InventoryFlag::Hangar as i64),
+                ],
+                &kw,
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "InvalidLocation"
+        );
+    }
+
+    // Docked at Upwell structure WITHOUT Fitting Service: unfitting a ship module (`mod_id` on Loki) is rejected
+    assert!(
+        handle_multi_add(
+            &ctx,
+            &mut sess,
+            None,
+            &[
+                PyRep::List(vec![PyRep::Integer(mod_id)]),
+                PyRep::Integer(owned_struct_id),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ],
+            &kw,
+        )
+        .await
+        .is_err()
+    );
+
+    // Undocked structure fuel deposit & withdrawal + session ch_dock / ch_sys / caller_ship_id fallbacks + jetcan despawn on old_loc != new_loc
+    sess.structure_id = None;
+    sess.station_id = None;
+    sess.ship_id = None; // tests caller_ship_id fallback to ch.active_ship_id!
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        // Stale ch.station_id with session.station_id == None tests ch_dock == 0 override;
+        // ch.solar_system_id == 0 tests ch_sys fallback to session.solar_system_id!
+        ch.station_id = Some(station_id);
+        ch.structure_id = None;
+        ch.solar_system_id = 0;
+        ch.active_ship_id = space_ship_id;
+        snap.items.insert(
+            space_ship_id,
+            InventoryItemRecord {
+                item_id: space_ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        // Move loki_id item into space_ship_id cargo fuel source & put ship within 5km of NPC struct_id at [0,0,0]
+        snap.items.get_mut(&fuel_to_struct).unwrap().location_id = space_ship_id;
+        snap.item_positions.insert(space_ship_id, [100.0, 0.0, 0.0]);
+    });
+    // Deposit fuel_to_struct -> NPC struct_id owner becomes struct_npc_corp
+    handle_multi_add(
+        &ctx,
+        &mut sess,
+        None,
+        &[
+            PyRep::List(vec![PyRep::Integer(fuel_to_struct)]),
+            PyRep::Integer(struct_id),
+            PyRep::Integer(InventoryFlag::StructureFuel as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("deposit fuel to nearby NPC structure");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&fuel_to_struct].owner_id), struct_npc_corp);
+
+    // Now move space_ship_id near owned_struct_id at [1_000_000, 0, 0] and withdraw corp fuel (src_is_struct_fuel == true)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_positions.insert(space_ship_id, [1_000_100.0, 0.0, 0.0]);
+        // Revoke HangarCanTake1 while keeping StarbaseOperator/Director via corp role? No, CEO bypasses both;
+        // set non-CEO member_roles = StarbaseOperator only (not HangarCanTake1)!
+        let corp = snap.corporations.get_mut(&corp_id).unwrap();
+        corp.ceo_id = foreign_char;
+        corp.member_roles.insert(char_id, eve_db::corp_roles::ROLE_STARBASE_OPERATOR);
+    });
+    handle_multi_add(
+        &ctx,
+        &mut sess,
+        None,
+        &[
+            PyRep::List(vec![PyRep::Integer(corp_fuel_src)]),
+            PyRep::Integer(space_ship_id),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("withdraw structure fuel with fuel-only role (src_is_struct_fuel bypasses hangar take role)");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&corp_fuel_src].owner_id), char_id);
+
+    // Looting last item from space jetcan (`old_loc != new_loc`) despawns empty jetcan
+    sess.ship_id = Some(space_ship_id);
+    put_item(&ctx, jetcan_id, 23, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    put_item(&ctx, jetcan_loot, 34, char_id, jetcan_id, InventoryFlag::Cargo, 4, false);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_positions.insert(jetcan_id, [1_000_200.0, 0.0, 0.0]);
+    });
+    handle_multi_add(
+        &ctx,
+        &mut sess,
+        None,
+        &[
+            PyRep::List(vec![PyRep::Integer(jetcan_loot)]),
+            PyRep::Integer(space_ship_id),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("loot last item from jetcan");
+    assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&jetcan_id)));
+}
+
+#[tokio::test]
+async fn multi_add_multi_item_volume_exact_bounds_across_holds_containers_sma_and_fleet_hangar() {
+    let mut sde = (*shared_sde()).clone();
+    let ship_tid = 999_201_u32;
+    let cont_tid = 999_202_u32;
+    let ore_tid = 999_203_u32;
+    let cargo_tid = 999_204_u32;
+    let hull_tid = 999_205_u32;
+
+    let mut ship_t = sde.types[&587].clone();
+    ship_t.type_id = ship_tid;
+    ship_t.capacity = 50.0; // Cargo cap = 50.0
+    ship_t.default_attributes.insert(1556, 50.0); // Ore Hold cap = 50.0
+    ship_t.default_attributes.insert(908, 100.0); // SMA cap = 100.0
+    ship_t.default_attributes.insert(912, 50.0);  // Fleet Hangar cap = 50.0
+    sde.types.insert(ship_tid, ship_t);
+
+    let mut cont_t = sde.types[&17366].clone();
+    cont_t.type_id = cont_tid;
+    cont_t.group_id = 12;
+    cont_t.category_id = 2;
+    cont_t.capacity = 50.0;
+    sde.types.insert(cont_tid, cont_t);
+
+    let mut ore_t = sde.types[&1230].clone();
+    ore_t.type_id = ore_tid;
+    ore_t.category_id = 25;
+    ore_t.volume = 10.0;
+    sde.types.insert(ore_tid, ore_t);
+
+    let mut cargo_t = sde.types[&34].clone();
+    cargo_t.type_id = cargo_tid;
+    cargo_t.category_id = 4;
+    cargo_t.volume = 10.0;
+    sde.types.insert(cargo_tid, cargo_t);
+
+    let mut hull_t = sde.types[&587].clone();
+    hull_t.type_id = hull_tid;
+    hull_t.category_id = 6;
+    hull_t.volume = 40.0;
+    sde.types.insert(hull_tid, hull_t);
+
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+
+    let char_id = 93_000_020;
+    let station_id = 60_003_760;
+    let sys_id = 30_000_142;
+    let carrier_id = 1_100_002_001;
+    let rifter_id = 1_100_002_002;
+    let cont_id = 1_100_002_003;
+    let mut sess = seed_char(&ctx, char_id, 98_000_050, Some(station_id), sys_id, carrier_id);
+    let kw = HashMap::new();
+
+    put_item(&ctx, carrier_id, ship_tid, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    put_item(&ctx, rifter_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    put_item(&ctx, cont_id, cont_tid, char_id, station_id, InventoryFlag::Hangar, 1, true);
+
+    // 1. Invalid item type for SpecializedOreHold (Tritanium/cargo_tid cat 4) -> InvalidItemTypeForHold
+    let bad_ore_cargo = 1_100_002_010;
+    put_item(&ctx, bad_ore_cargo, cargo_tid, char_id, station_id, InventoryFlag::Hangar, 1, false);
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut sess,
+            None,
+            &[
+                PyRep::List(vec![PyRep::Integer(bad_ore_cargo)]),
+                PyRep::Integer(carrier_id),
+                PyRep::Integer(InventoryFlag::SpecializedOreHold as i64),
+            ],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "InvalidItemTypeForHold"
+    );
+
+    // Rifter OreHold capacity == 0.0 -> NotEnoughSpecialBaySpace
+    let test_ore = 1_100_002_011;
+    put_item(&ctx, test_ore, ore_tid, char_id, station_id, InventoryFlag::Hangar, 1, false);
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut sess,
+            None,
+            &[
+                PyRep::List(vec![PyRep::Integer(test_ore)]),
+                PyRep::Integer(rifter_id),
+                PyRep::Integer(InventoryFlag::SpecializedOreHold as i64),
+            ],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "NotEnoughSpecialBaySpace"
+    );
+
+    // 2. Ship Hold (Cargo flag 5, cap 50.0 m3): pre-existing qty 2 (20 m3) + unrelated flag item (qty 5 in DroneBay);
+    // batch [qty 2 (20 m3), qty 2 (20 m3)] individually fit (20+20=40 <= 50), combined overflow (20+40=60 > 50);
+    // exact batch [qty 2 (20 m3), qty 1 (10 m3)] -> 20+30 = 50.0 == 50.0 succeeds; re-moving both items tests !item_ids.contains!
+    let c_existing = 1_100_002_020;
+    let c_b1 = 1_100_002_021;
+    let c_b2 = 1_100_002_022;
+    let c_b_ok = 1_100_002_023;
+    let c_other_flag = 1_100_002_024;
+    put_item(&ctx, c_existing, cargo_tid, char_id, carrier_id, InventoryFlag::Cargo, 2, false);
+    put_item(&ctx, c_other_flag, 2454, char_id, carrier_id, InventoryFlag::DroneBay, 1, false);
+    put_item(&ctx, c_b1, cargo_tid, char_id, station_id, InventoryFlag::Hangar, 2, false);
+    put_item(&ctx, c_b2, cargo_tid, char_id, station_id, InventoryFlag::Hangar, 2, false);
+    put_item(&ctx, c_b_ok, cargo_tid, char_id, station_id, InventoryFlag::Hangar, 1, false);
+
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut sess,
+            None,
+            &[
+                PyRep::List(vec![PyRep::Integer(c_b1), PyRep::Integer(c_b2)]),
+                PyRep::Integer(carrier_id),
+                PyRep::Integer(InventoryFlag::Cargo as i64),
+            ],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "NotEnoughCargoSpace"
+    );
+    handle_multi_add(
+        &ctx,
+        &mut sess,
+        None,
+        &[
+            PyRep::List(vec![PyRep::Integer(c_b1), PyRep::Integer(c_b_ok)]),
+            PyRep::Integer(carrier_id),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("exact 50.0 == 50.0 ship cargo batch");
+    // Re-add c_existing + c_b1 (40 m3 total out of 50) already inside Cargo -> succeeds only if !item_ids.contains excludes them from used_vol
+    handle_multi_add(
+        &ctx,
+        &mut sess,
+        None,
+        &[
+            PyRep::List(vec![PyRep::Integer(c_existing), PyRep::Integer(c_b1)]),
+            PyRep::Integer(carrier_id),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("!item_ids.contains excludes items being moved within same cargo");
+
+    // 3. Container (`cont_tid`, cap 50.0 m3): pre-existing qty 2 (20 m3), batch [qty 2, qty 2] fails; [qty 2, qty 1] succeeds; self re-add excludes item_ids
+    let k_existing = 1_100_002_030;
+    let k_b1 = 1_100_002_031;
+    let k_b2 = 1_100_002_032;
+    let k_b_ok = 1_100_002_033;
+    put_item(&ctx, k_existing, cargo_tid, char_id, cont_id, InventoryFlag::Cargo, 2, false);
+    put_item(&ctx, k_b1, cargo_tid, char_id, station_id, InventoryFlag::Hangar, 2, false);
+    put_item(&ctx, k_b2, cargo_tid, char_id, station_id, InventoryFlag::Hangar, 2, false);
+    put_item(&ctx, k_b_ok, cargo_tid, char_id, station_id, InventoryFlag::Hangar, 1, false);
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut sess,
+            None,
+            &[
+                PyRep::List(vec![PyRep::Integer(k_b1), PyRep::Integer(k_b2)]),
+                PyRep::Integer(cont_id),
+                PyRep::Integer(InventoryFlag::Cargo as i64),
+            ],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CapacityExceeded"
+    );
+    handle_multi_add(
+        &ctx,
+        &mut sess,
+        None,
+        &[
+            PyRep::List(vec![PyRep::Integer(k_b1), PyRep::Integer(k_b_ok)]),
+            PyRep::Integer(cont_id),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("exact 50.0 == 50.0 container batch");
+    handle_multi_add(
+        &ctx,
+        &mut sess,
+        None,
+        &[
+            PyRep::List(vec![PyRep::Integer(k_existing), PyRep::Integer(k_b1)]),
+            PyRep::Integer(cont_id),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("!item_ids.contains in container");
+
+    // 4. Ship Maintenance Bay (flag 90, cap 100.0 m3): pre-existing hull (40 m3) in flag 138 (`SpecializedShipHold`),
+    // batch [hull_1 (40 m3), hull_2 (40 m3)] fails (40 + 80 = 120 > 100) while [hull_1 (40), hull_3 (20? use 40+40=80)] fits, and exact [hull_1, existing_in_90] self-move passes!
+    let s_138 = 1_100_002_040;
+    let s_h1 = 1_100_002_041;
+    let s_h2 = 1_100_002_042;
+    put_item(&ctx, s_138, hull_tid, char_id, carrier_id, InventoryFlag::SpecializedShipHold, 1, true);
+    put_item(&ctx, s_h1, hull_tid, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    put_item(&ctx, s_h2, hull_tid, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut sess,
+            None,
+            &[
+                PyRep::List(vec![PyRep::Integer(s_h1), PyRep::Integer(s_h2)]),
+                PyRep::Integer(carrier_id),
+                PyRep::Integer(InventoryFlag::ShipHangar as i64),
+            ],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CapacityExceeded"
+    );
+    handle_multi_add(
+        &ctx,
+        &mut sess,
+        None,
+        &[
+            PyRep::List(vec![PyRep::Integer(s_h1)]),
+            PyRep::Integer(carrier_id),
+            PyRep::Integer(InventoryFlag::ShipHangar as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("SMA fits 40 (flag 138) + 40 (flag 90) = 80 <= 100");
+    handle_multi_add(
+        &ctx,
+        &mut sess,
+        None,
+        &[
+            PyRep::List(vec![PyRep::Integer(s_138), PyRep::Integer(s_h1)]),
+            PyRep::Integer(carrier_id),
+            PyRep::Integer(InventoryFlag::ShipHangar as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("!item_ids.contains in SMA (80 + 80 would exceed 100)");
+
+    // 5. Fleet Hangar (flag 155, cap 50.0 m3): pre-existing qty 2 (20 m3) in flag 155, batch [qty 2, qty 2] fails,
+    // [qty 2, qty 1] succeeds (20+30 = 50.0), self re-add passes!
+    let f_existing = 1_100_002_050;
+    let f_b1 = 1_100_002_051;
+    let f_b2 = 1_100_002_052;
+    let f_b_ok = 1_100_002_053;
+    put_item(&ctx, f_existing, cargo_tid, char_id, carrier_id, InventoryFlag::FleetHangar, 2, false);
+    put_item(&ctx, f_b1, cargo_tid, char_id, station_id, InventoryFlag::Hangar, 2, false);
+    put_item(&ctx, f_b2, cargo_tid, char_id, station_id, InventoryFlag::Hangar, 2, false);
+    put_item(&ctx, f_b_ok, cargo_tid, char_id, station_id, InventoryFlag::Hangar, 1, false);
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut sess,
+            None,
+            &[
+                PyRep::List(vec![PyRep::Integer(f_b1), PyRep::Integer(f_b2)]),
+                PyRep::Integer(carrier_id),
+                PyRep::Integer(InventoryFlag::FleetHangar as i64),
+            ],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CapacityExceeded"
+    );
+    handle_multi_add(
+        &ctx,
+        &mut sess,
+        None,
+        &[
+            PyRep::List(vec![PyRep::Integer(f_b1), PyRep::Integer(f_b_ok)]),
+            PyRep::Integer(carrier_id),
+            PyRep::Integer(InventoryFlag::FleetHangar as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("exact 50.0 == 50.0 Fleet Hangar batch");
+    handle_multi_add(
+        &ctx,
+        &mut sess,
+        None,
+        &[
+            PyRep::List(vec![PyRep::Integer(f_existing), PyRep::Integer(f_b1)]),
+            PyRep::Integer(carrier_id),
+            PyRep::Integer(InventoryFlag::FleetHangar as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("!item_ids.contains in Fleet Hangar");
+}

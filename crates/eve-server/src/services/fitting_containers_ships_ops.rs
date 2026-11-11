@@ -1482,3 +1482,7 @@ fn handle_retrieve_password(
 #[path = "fitting_containers_ships_ops_cov_unit_tests.rs"]
 mod fitting_containers_ships_ops_cov_unit_tests;
 
+#[cfg(test)]
+#[path = "fitting_containers_ships_ops_edges_tests.rs"]
+mod fitting_containers_ships_ops_edges_tests;
+

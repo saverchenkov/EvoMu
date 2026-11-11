@@ -1763,7 +1763,23 @@ async fn handle_invbroker_add(
                     if is_fitting_slot {
                         ctx.invalidate_ship_fitting(new_loc);
                         let new_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, new_loc).ok();
-                        ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnModuleFitted", "charid", vec![PyRep::Integer(item_id), PyRep::Integer(flag as i64)]);
+                        let group_id = ctx
+                            .sde
+                            .types
+                            .get(&updated.type_id)
+                            .map(|t| i64::from(t.group_id))
+                            .unwrap_or(0);
+                        ctx.notify(
+                            crate::router::NotificationTarget::Character(char_id),
+                            "OnModuleFitted",
+                            "charid",
+                            vec![
+                                PyRep::Integer(char_id),
+                                PyRep::Integer(flag as i64),
+                                PyRep::Integer(updated.type_id as i64),
+                                PyRep::Integer(group_id),
+                            ],
+                        );
                         let _ = ctx.notify_module_online_state(char_id, item_id, online);
                         if let (Some((old_cpu, old_pg)), Some(new_fit)) = (old_fit_loads, new_fit_opt) {
                             let new_cpu = new_fit.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde);

@@ -296,27 +296,28 @@ pub(crate) fn apply_active_dbuffs_and_system_effects_to_ship_attrs_excluding(
             })
     });
     if let Some(sys_id) = sys_id_opt {
-        if (32_000_000..=32_999_999).contains(&sys_id) {
-            let pocket_weather = crate::services::pve_special_sites_abyssal::read_abyssal_state(ctx, |st| {
-                st.pockets
-                    .values()
-                    .find(|p| {
-                        !p.completed
-                            && !p.collapsed_destroyed
-                            && (p.ship_id == ship_id || p.fleet_ship_ids.contains(&ship_id))
-                    })
-                    .or_else(|| {
+        let in_abyssal_sys = (32_000_000..=32_999_999).contains(&sys_id);
+        let pocket_weather = crate::services::pve_special_sites_abyssal::read_abyssal_state(ctx, |st| {
+            st.pockets
+                .values()
+                .find(|p| {
+                    !p.completed
+                        && !p.collapsed_destroyed
+                        && (p.ship_id == ship_id || p.fleet_ship_ids.contains(&ship_id))
+                })
+                .or_else(|| {
+                    in_abyssal_sys.then(|| {
                         st.pockets
                             .values()
                             .find(|p| !p.completed && !p.collapsed_destroyed && p.abyssal_solar_system_id == sys_id)
-                    })
-                    .map(|p| (p.weather, p.weather_penalty_pct, p.weather_bonus_pct))
-            });
-            if let Some((w, pen, bon)) = pocket_weather {
-                crate::services::pve_abyssal_hazards::apply_abyssal_weather_to_ship_attrs(
-                    w, pen, bon, attrs,
-                );
-            }
+                    })?
+                })
+                .map(|p| (p.weather, p.weather_penalty_pct, p.weather_bonus_pct))
+        });
+        if let Some((w, pen, bon)) = pocket_weather {
+            crate::services::pve_abyssal_hazards::apply_abyssal_weather_to_ship_attrs(
+                w, pen, bon, attrs,
+            );
         }
         if let Some(inc_eff) = crate::services::pve_special_sites::get_incursion_effects_for_system(ctx, sys_id) {
             if let Some(v) = attrs.get_mut(&263) {

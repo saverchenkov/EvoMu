@@ -2,18 +2,14 @@
 
 #![forbid(unsafe_code)]
 
-use super::super::*;
 use super::*;
 use crate::services::inventory_fitting::fitting_ewar_capital::{
     emit_committed_ewar_and_system_wide_notifications, ewar_jamming_type,
-    prepare_ewar_and_capital_module, EwarCapitalPrep,
 };
-use eve_db::{
-    AccountRecord, InventoryFlag, InventoryItemRecord, TrainedSkillRecord, WorldRepository,
-};
-use eve_destiny::{Ball, CombatState, DVec3, MovementMode, SlimItemMeta, WarpPhase};
-use eve_dogma::{attr_ids, DogmaItemState, FittedModule, ModuleState, ShipFittingEngine};
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_db::AccountRecord;
+use eve_destiny::{DVec3, MovementMode};
+use eve_dogma::{attr_ids, FittedModule, ModuleState, ShipFittingEngine};
+use eve_proto::PyRep;
 use std::collections::HashMap;
 
 #[tokio::test]

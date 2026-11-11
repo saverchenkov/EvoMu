@@ -233,7 +233,28 @@ pub(crate) async fn handle_multi_add(
         }
     }
     for &(old_loc, item_id, old_flag) in &fitted_unfit_ids {
-        if (125..=129).contains(&old_flag) {
+        if (125..=132).contains(&old_flag) {
+            let has_remaining_fitted_modules = ctx.db.with_snapshot(|snap| {
+                snap.items.values().any(|other| {
+                    other.location_id == old_loc
+                        && other.item_id != item_id
+                        && !fitted_unfit_ids
+                            .iter()
+                            .any(|&(_, unf_id, _)| unf_id == other.item_id)
+                        && (11..=34).contains(&(other.flag as u16))
+                        && ctx
+                            .sde
+                            .types
+                            .get(&other.type_id)
+                            .is_none_or(|t| t.category_id != 8)
+                })
+            });
+            if has_remaining_fitted_modules {
+                return Err(BridgeRpcError {
+                    code: "SubsystemHasFittedModules".into(),
+                    message: "Cannot unfit a T3 Strategic Cruiser subsystem while modules are fitted".into(),
+                });
+            }
             if let Ok(mut check_fit) = ctx.get_or_rebuild_ship_fitting(char_id, old_loc) {
                 for &(_, other_id, other_flag) in &fitted_unfit_ids {
                     if other_id != item_id && (11..=34).contains(&other_flag) {
@@ -361,9 +382,12 @@ pub(crate) async fn handle_multi_add(
                 it_snapshot.owner_id
             };
             let is_space_loot = looted_from_space_ids.contains(&item_id);
+            let is_struct_fuel_src = snap.structures.contains_key(&old_loc)
+                && (old_flag == InventoryFlag::StructureFuel || old_flag_u16 == 172);
+            let bypass_corp_take = is_space_loot || is_struct_fuel_src;
             let mut spec = eve_db::TransferItemSpec::move_whole(
-                if is_space_loot { None } else { Some(char_id) },
-                if is_space_loot { Some(it_snapshot.owner_id) } else { None },
+                if bypass_corp_take { None } else { Some(char_id) },
+                if bypass_corp_take { Some(it_snapshot.owner_id) } else { None },
                 Some(new_owner),
                 new_loc,
                 flag,
@@ -745,9 +769,9 @@ async fn handle_multi_add_auto_fit(
                 ((92_u16..=94).collect(), false)
             } else if mod_t.effect_ids.contains(&3772) {
                 if let Some(&req_slot_f) = mod_t.default_attributes.get(&1366) {
-                    (vec![req_slot_f as u16], false)
+                    (vec![req_slot_f as u16], true)
                 } else {
-                    ((125_u16..=132).collect(), false)
+                    ((125_u16..=132).collect(), true)
                 }
             } else {
                 return Err(BridgeRpcError {
@@ -923,13 +947,21 @@ async fn handle_multi_add_auto_fit(
                 PyRep::Integer(updated.flag as i64),
             ],
         );
+        let group_id = ctx
+            .sde
+            .types
+            .get(&updated.type_id)
+            .map(|t| i64::from(t.group_id))
+            .unwrap_or(0);
         ctx.notify(
             crate::router::NotificationTarget::Character(char_id),
             "OnModuleFitted",
             "charid",
             vec![
-                PyRep::Integer(updated.item_id),
+                PyRep::Integer(char_id),
                 PyRep::Integer(updated.flag as i64),
+                PyRep::Integer(updated.type_id as i64),
+                PyRep::Integer(group_id),
             ],
         );
         let _ = ctx.notify_module_online_state(char_id, updated.item_id, plan.online);
@@ -946,12 +978,6 @@ async fn handle_multi_add_auto_fit(
                 0,
             );
         }
-        ctx.notify(
-            crate::router::NotificationTarget::Character(char_id),
-            "OnModuleAttributeChanges",
-            "charid",
-            vec![PyRep::Integer(updated.item_id)],
-        );
         if let Some(ref new_fit) = rebuilt_fit {
             let new_cpu = new_fit.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde);
             let new_pg = new_fit.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde);

@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 //! Semantic unit tests split from `fitting_ships_mastery_extra_unit_tests`.
 
 #![forbid(unsafe_code)]

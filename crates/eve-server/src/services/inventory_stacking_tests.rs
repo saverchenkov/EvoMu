@@ -777,6 +777,21 @@ async fn item_change_notifications_omit_ix_quantity_and_autofit_syncs_singleton_
         }),
         "autofit online module must emit ship CPU/PG load change"
     );
+    assert!(
+        n_auto.iter().filter(|n| n.event == "OnModuleAttributeChanges").all(|n| {
+            matches!(n.args.first(), Some(PyRep::List(items)) if items.iter().all(|it| {
+                matches!(
+                    it,
+                    PyRep::Tuple(t)
+                        if t.len() == 8
+                        && t.get(1).and_then(|v| v.as_i64()).is_some_and(|oid| oid > 0)
+                        && t.get(3).and_then(|v| v.as_i64()).is_some_and(|aid| aid > 0)
+                        && !matches!(t.get(7), Some(PyRep::Bool(_)))
+                )
+            }))
+        }),
+        "all OnModuleAttributeChanges tuples must have valid ownerID, non-zero attributeID, and non-bool wallclockTime (#799)"
+    );
 
     // 2. Fill remaining turret hardpoints on Rifter, then verify extra turret fails cleanly
     let max_hi = ctx
@@ -1013,3 +1028,466 @@ async fn multi_add_and_add_redirect_station_source_arg_to_active_ship_for_ship_f
         assert_eq!(snap.items[&cargo_ore_id].flag, InventoryFlag::Cargo);
     });
 }
+
+#[tokio::test]
+async fn group_2b_multi_add_validation_autofit_locks_and_capacity_guards() {
+    let mut sde = (*shared_sde()).clone();
+    let mut base_ship = sde.types.get(&587).expect("Rifter").clone();
+    base_ship.type_id = 999_101;
+    base_ship.name = "Tiny Hold Carrier".into();
+    base_ship.capacity = 20.0;
+    base_ship.default_attributes.insert(908, 100.0); // SMA cap
+    base_ship.default_attributes.insert(912, 20.0);  // Fleet Hangar cap
+    sde.types.insert(999_101, base_ship);
+
+    let mut base_cont = sde.types.get(&1230).expect("Veldspar").clone();
+    base_cont.type_id = 999_102;
+    base_cont.group_id = 12;
+    base_cont.category_id = 2;
+    base_cont.volume = 5.0;
+    base_cont.capacity = 5.0;
+    base_cont.name = "Small Freight Can".into();
+    sde.types.insert(999_102, base_cont);
+
+    let mut base_ore = sde.types.get(&1230).expect("Veldspar").clone();
+    base_ore.type_id = 999_103;
+    base_ore.volume = 10.0;
+    base_ore.name = "Dense Rock".into();
+    sde.types.insert(999_103, base_ore);
+
+    let mut base_ehe = sde.types.get(&484).expect("Light Ion Blaster / module").clone();
+    base_ehe.type_id = 40714;
+    base_ehe.category_id = 7;
+    base_ehe.name = "Capital EHE Test".into();
+    sde.types.insert(40714, base_ehe);
+
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+
+    let char_id = 92_010_001;
+    let stranger_id = 92_010_002;
+    let corp_id = 98_010_001;
+    let station_id = 60_003_760;
+    let sys_id = 30_000_142;
+
+    let ship_id = 1_000_700_001;
+    let carrier_id = 1_000_700_002;
+    let small_cont_id = 1_000_700_003;
+    let foreign_ship_id = 1_000_700_004;
+    let ore_item = 1_000_700_010;
+    let dense_ore_item = 1_000_700_011;
+    let courier_item = 1_000_700_012;
+    let rig_item = 1_000_700_013;
+    let fitted_gun_item = 1_000_700_014;
+    let ehe_item = 1_000_700_015;
+    let spare_frigate = 1_000_700_016;
+    let extra_gun = 1_000_700_017;
+
+    ensure_char(&ctx, char_id, corp_id, Some(station_id), sys_id, ship_id);
+    insert_item(&ctx, ship_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, carrier_id, 999_101, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, small_cont_id, 999_102, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, foreign_ship_id, 587, stranger_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, ore_item, 1230, char_id, station_id, InventoryFlag::Hangar, 10, false);
+    insert_item(&ctx, dense_ore_item, 999_103, char_id, station_id, InventoryFlag::Hangar, 5, false); // 50 m3 > 20/5 m3
+    insert_item(&ctx, courier_item, 1230, char_id, station_id, InventoryFlag::Hangar, 1, false);
+    insert_item(&ctx, rig_item, 482, char_id, ship_id, InventoryFlag::RigSlot0, 1, true);
+    insert_item(&ctx, fitted_gun_item, 482, char_id, ship_id, InventoryFlag::HiSlot0, 1, true);
+    insert_item(&ctx, ehe_item, 40714, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, spare_frigate, 587, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, extra_gun, 482, char_id, station_id, InventoryFlag::Hangar, 1, true);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_custom_names.insert(courier_item, "courier_cargo:77".into());
+        snap.items
+            .get_mut(&ehe_item)
+            .unwrap()
+            .dynamic_attributes
+            .insert(eve_sde::attr_ids::DAMAGE, 50.0);
+    });
+
+    let kw = HashMap::new();
+    let mut sess = make_session(char_id, corp_id, Some(station_id), None, Some(ship_id));
+    let hangar_bound = make_bound(station_id, char_id);
+    let ship_bound = make_bound(ship_id, char_id);
+
+    // Missing destination and no bound on session without station/ship
+    let mut no_loc_sess = make_session(char_id, corp_id, None, None, None);
+    assert_eq!(
+        handle_multi_add(&ctx, &mut no_loc_sess, None, &[PyRep::List(vec![PyRep::Integer(ore_item)])], &kw)
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidLocation"
+    );
+    // Direct module/rig flags rejected by handle_multi_add
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut sess,
+            Some(&hangar_bound),
+            &[PyRep::List(vec![PyRep::Integer(extra_gun)]), PyRep::Integer(ship_id), PyRep::Integer(27)],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "InvalidLocation"
+    );
+    // Restricted destination flags: 36 AssetSafety, 63 Locked, 72 Impounded
+    for (flag_i, expected_code) in [(36, "AssetSafetyLocked"), (63, "ItemLocked"), (72, "ImpoundedItem")] {
+        assert_eq!(
+            handle_multi_add(
+                &ctx,
+                &mut sess,
+                Some(&hangar_bound),
+                &[PyRep::List(vec![PyRep::Integer(ore_item)]), PyRep::Integer(station_id), PyRep::Integer(flag_i)],
+                &kw,
+            )
+            .await
+            .unwrap_err()
+            .code,
+            expected_code
+        );
+    }
+    // CannotMoveActiveShip into another item or corp hangar
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut sess,
+            Some(&hangar_bound),
+            &[PyRep::List(vec![PyRep::Integer(ship_id)]), PyRep::Integer(small_cont_id), PyRep::Integer(4)],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CannotMoveActiveShip"
+    );
+    // CannotUnfitRig
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut sess,
+            Some(&hangar_bound),
+            &[PyRep::List(vec![PyRep::Integer(rig_item)]), PyRep::Integer(station_id), PyRep::Integer(4)],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CannotUnfitRig"
+    );
+    // CannotDeliverCourierCargo to corp division (116)
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut sess,
+            Some(&hangar_bound),
+            &[PyRep::List(vec![PyRep::Integer(courier_item)]), PyRep::Integer(station_id), PyRep::Integer(116)],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CannotDeliverCourierCargo"
+    );
+    // Container CapacityExceeded (50 m3 > 5 m3)
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut sess,
+            Some(&hangar_bound),
+            &[PyRep::List(vec![PyRep::Integer(dense_ore_item)]), PyRep::Integer(small_cont_id), PyRep::Integer(5)],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CapacityExceeded"
+    );
+    // Fleet Hangar (155) CapacityExceeded (50 m3 > 20 m3) and SMA (90) CapacityExceeded (ship > 100 m3)
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut sess,
+            Some(&hangar_bound),
+            &[PyRep::List(vec![PyRep::Integer(dense_ore_item)]), PyRep::Integer(carrier_id), PyRep::Integer(155)],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CapacityExceeded"
+    );
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut sess,
+            Some(&hangar_bound),
+            &[PyRep::List(vec![PyRep::Integer(spare_frigate)]), PyRep::Integer(carrier_id), PyRep::Integer(90)],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CapacityExceeded"
+    );
+
+    // Auto-fit guards: CannotMoveActiveShip (self onto self), InvalidFittingTarget (foreign ship), ItemNotFittableModule (ore), CannotRefitDamagedModule (damaged EHE), InvalidLocation (already fitted)
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut sess,
+            Some(&hangar_bound),
+            &[PyRep::List(vec![PyRep::Integer(ship_id)]), PyRep::Integer(ship_id), PyRep::Integer(0)],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CannotMoveActiveShip"
+    );
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut sess,
+            Some(&hangar_bound),
+            &[PyRep::List(vec![PyRep::Integer(extra_gun)]), PyRep::Integer(foreign_ship_id), PyRep::Integer(0)],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "DestinationAccessDenied"
+    );
+    assert_eq!(
+        handle_multi_add_auto_fit(&ctx, &mut sess, char_id, small_cont_id, &[extra_gun], &kw)
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidFittingTarget"
+    );
+    assert_eq!(
+        handle_multi_add_auto_fit(&ctx, &mut sess, char_id, ship_id, &[ore_item], &kw)
+            .await
+            .unwrap_err()
+            .code,
+        "ItemNotFittableModule"
+    );
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut sess,
+            Some(&hangar_bound),
+            &[PyRep::List(vec![PyRep::Integer(ehe_item)]), PyRep::Integer(ship_id), PyRep::Integer(0)],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CannotRefitDamagedModule"
+    );
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut sess,
+            Some(&ship_bound),
+            &[PyRep::List(vec![PyRep::Integer(fitted_gun_item)]), PyRep::Integer(ship_id), PyRep::Integer(0)],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "InvalidLocation"
+    );
+
+    // In-space refitting guards: CannotUnfitInSpace + CannotRefitWithWeaponsTimer + CannotFitInSpace
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&ship_id).unwrap().location_id = sys_id as i64;
+        snap.items.get_mut(&extra_gun).unwrap().location_id = ship_id;
+        snap.items.get_mut(&extra_gun).unwrap().flag = InventoryFlag::Cargo;
+        snap.characters.get_mut(&char_id).unwrap().station_id = None;
+    });
+    let mut space_sess = make_session(char_id, corp_id, None, Some(sys_id), Some(ship_id));
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut space_sess,
+            Some(&ship_bound),
+            &[PyRep::List(vec![PyRep::Integer(fitted_gun_item)]), PyRep::Integer(ship_id), PyRep::Integer(5)],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CannotUnfitInSpace"
+    );
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut space_sess,
+            Some(&ship_bound),
+            &[PyRep::List(vec![PyRep::Integer(extra_gun)]), PyRep::Integer(ship_id), PyRep::Integer(0)],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CannotFitInSpace"
+    );
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.states.entry(char_id).or_default().weapon_timer_until_unix = u64::MAX / 2;
+    }
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut space_sess,
+            Some(&ship_bound),
+            &[PyRep::List(vec![PyRep::Integer(extra_gun)]), PyRep::Integer(ship_id), PyRep::Integer(0)],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CannotRefitWithWeaponsTimer"
+    );
+}
+
+#[tokio::test]
+async fn group_2b_container_contents_list_alsc_password_corp_role_and_space_range() {
+    let mut sde = (*shared_sde()).clone();
+    let mut alsc_type = sde.types.get(&1230).expect("Veldspar").clone();
+    alsc_type.type_id = 999_110;
+    alsc_type.group_id = 448;
+    alsc_type.category_id = 2;
+    alsc_type.capacity = 10_000.0;
+    alsc_type.radius = 50.0;
+    alsc_type.name = "Audit Log Secure Container Test".into();
+    sde.types.insert(999_110, alsc_type);
+
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+
+    let char_id = 92_020_001;
+    let ceo_id = 92_020_002;
+    let corp_id = 98_020_001;
+    let station_id = 60_003_760;
+    let sys_id = 30_000_142;
+    let ship_id = 1_000_710_001;
+    let docked_alsc_id = 1_000_710_002;
+    let space_cont_id = 1_000_710_003;
+    let alsc_loot_id = 1_000_710_004;
+    let corp_loot_id = 1_000_710_005;
+
+    ensure_char(&ctx, ceo_id, corp_id, Some(station_id), sys_id, ship_id);
+    ensure_char(&ctx, char_id, corp_id, Some(station_id), sys_id, ship_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = snap.corporations.values().next().cloned().expect("demo seed corp");
+        corp.corporation_id = corp_id;
+        corp.ceo_id = ceo_id;
+        corp.members.insert(ceo_id);
+        corp.members.insert(char_id);
+        snap.corporations.insert(corp_id, corp);
+    });
+    insert_item(&ctx, ship_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, docked_alsc_id, 999_110, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, alsc_loot_id, 34, char_id, docked_alsc_id, InventoryFlag::Cargo, 25, false);
+    insert_item(&ctx, corp_loot_id, 34, corp_id, station_id, InventoryFlag::CorpSAG1, 100, false);
+    insert_item(&ctx, space_cont_id, 999_110, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+
+    {
+        let mut st = read_container_ship_state(&ctx);
+        st.container_passwords.insert(docked_alsc_id, "pw448".into());
+        save_container_ship_state(&ctx, &st);
+    }
+
+    let kw = HashMap::new();
+    let sess = make_session(char_id, corp_id, Some(station_id), None, Some(ship_id));
+    let unloc_sess = make_session(char_id, corp_id, None, None, None);
+
+    // GetContainerContents: missing ID -> InvalidArgument
+    assert_eq!(
+        handle_get_container_contents(&ctx, &sess, None, &[], &kw)
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidArgument"
+    );
+    // Wrong / missing password -> ALSCPasswordRequired
+    assert_eq!(
+        handle_get_container_contents(&ctx, &sess, None, &[PyRep::Integer(docked_alsc_id)], &kw)
+            .await
+            .unwrap_err()
+            .code,
+        "ALSCPasswordRequired"
+    );
+    // Unlock with password in kwargs -> succeeds, unlocks container, logs ALSCActionOpen
+    let mut kw_pw = HashMap::new();
+    kw_pw.insert("password".into(), PyRep::String("pw448".into()));
+    assert!(
+        handle_get_container_contents(&ctx, &sess, None, &[PyRep::Integer(docked_alsc_id)], &kw_pw)
+            .await
+            .is_ok()
+    );
+    // Subsequent call without password succeeds from unlocked cache
+    assert!(
+        handle_get_container_contents(&ctx, &sess, None, &[PyRep::Integer(docked_alsc_id)], &kw)
+            .await
+            .is_ok()
+    );
+    let st_after = read_container_ship_state(&ctx);
+    assert!(st_after.unlocked_containers.contains(&(docked_alsc_id, char_id)));
+    assert!(st_after
+        .alsc_logs
+        .get(&docked_alsc_id)
+        .is_some_and(|logs| logs.iter().any(|l| l.action == "ALSCActionOpen")));
+
+    // handle_list: no location -> InvalidLocation
+    assert_eq!(handle_list(&ctx, &unloc_sess, None, &[], &kw).unwrap_err().code, "InvalidLocation");
+    // Station bound while not docked there -> BoundObjectOwnershipViolation
+    let station_bound = make_bound(station_id, char_id);
+    assert_eq!(
+        handle_list(&ctx, &unloc_sess, Some(&station_bound), &[], &kw)
+            .unwrap_err()
+            .code,
+        "BoundObjectOwnershipViolation"
+    );
+
+    // CorpSAG1 (116) query role check via handle_list_by_flags (fails non-CEO without role, passes once CEO)
+    assert_eq!(
+        handle_list_by_flags(&ctx, &sess, Some(&station_bound), &[PyRep::List(vec![PyRep::Integer(116)])], &kw)
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.get_mut(&corp_id).unwrap().ceo_id = char_id;
+    });
+    assert!(
+        handle_list_by_flags(&ctx, &sess, Some(&station_bound), &[PyRep::List(vec![PyRep::Integer(116)])], &kw)
+            .is_ok()
+    );
+
+    // Space container range checks in handle_list
+    let cont_bound = make_bound(space_cont_id, char_id);
+    assert_eq!(handle_list(&ctx, &sess, Some(&cont_bound), &[], &kw).unwrap_err().code, "NotInSameSolarSystem");
+    let space_sess = make_session(char_id, corp_id, None, Some(sys_id), Some(ship_id));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_positions.insert(ship_id, [0.0, 0.0, 0.0]);
+        snap.item_positions.insert(space_cont_id, [10_000.0, 0.0, 0.0]);
+    });
+    assert_eq!(handle_list(&ctx, &space_sess, Some(&cont_bound), &[], &kw).unwrap_err().code, "OutOfRange");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_positions.insert(space_cont_id, [1_000.0, 0.0, 0.0]);
+    });
+    ctx.systems
+        .get_or_spawn(sys_id)
+        .try_set_ball_position(space_cont_id, glam::DVec3::new(1_000.0, 0.0, 0.0));
+    handle_list(&ctx, &space_sess, Some(&cont_bound), &[], &kw)
+        .expect("space container handle_list within range");
+}
+

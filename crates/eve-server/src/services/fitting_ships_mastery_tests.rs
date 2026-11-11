@@ -8,6 +8,10 @@ use eve_sde::SdeRegistry;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
+#[cfg(test)]
+#[path = "fitting_ships_mastery_cov_edges_tests.rs"]
+mod fitting_ships_mastery_cov_edges_tests;
+
 fn shared_sde() -> Arc<SdeRegistry> {
     static SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
     Arc::clone(SDE.get_or_init(|| {
@@ -46,7 +50,7 @@ fn shared_sde() -> Arc<SdeRegistry> {
     }))
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ships_mastery_leave_ship_corvette_mastery_killmarks_repair_simulation_trash_and_dirt() {
     let ctx = ServerContext::with_sde_and_repository(
         shared_sde(),
@@ -371,7 +375,7 @@ async fn ships_mastery_leave_ship_corvette_mastery_killmarks_repair_simulation_t
     assert_eq!(err_already_corv.code, "AlreadyInNewbieShip");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn eject_in_space_sets_capsule_name_and_queues_set_state() {
     let ctx = ServerContext::with_sde_and_repository(
         shared_sde(),
@@ -465,7 +469,7 @@ async fn eject_in_space_sets_capsule_name_and_queues_set_state() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn in_space_eject_and_ship_to_ship_board_lifecycle_and_guards() {
     let ctx = ServerContext::with_sde_and_repository(
         shared_sde(),

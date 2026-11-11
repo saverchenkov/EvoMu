@@ -545,3 +545,369 @@ async fn superweapons_system_wide_effects_and_ship_clone_lifecycle_errors() {
     assert!(handle_superweapons_dbuffs_and_clones(&ctx, &mut sess, None, "jumpCloneSvc", "GetShipCloneState", &[], &kw).await.unwrap().is_ok());
     assert!(handle_superweapons_dbuffs_and_clones(&ctx, &mut sess, None, "jumpCloneSvc", "", &[], &kw).await.is_none());
 }
+
+#[tokio::test]
+async fn mutants_cov_clone_offers_dbuff_expiry_abyssal_weather_and_rpcs() {
+    use crate::services::pve_special_sites_abyssal::{
+        read_abyssal_state, with_abyssal_state, AbyssalWeatherKind,
+    };
+    use eve_db::{AbyssalPocketSession, AbyssalRoomRecord};
+    use eve_machonet::service_roles;
+
+    let ctx = test_ctx_with_custom(|sde| {
+        sde.types.insert(
+            999_701,
+            custom_inv_type(sde, 999_701, 30, 6, "Test Avatar", &[]),
+        );
+        sde.types.insert(
+            23_735,
+            custom_inv_type(sde, 23_735, 725, 7, "Clone Vat Bay I", &[]),
+        );
+        sde.dbuff_collections.insert(
+            911,
+            DbuffCollectionInfo {
+                dbuff_id: 911,
+                name: "dbuff_911".into(),
+                aggregate_mode: "Maximum".into(),
+                operation: "PostMul".into(),
+                display_name_id: None,
+                show_output_value_in_ui: Some("ShowNormal".into()),
+                item_modifiers: vec![263],
+                location_modifiers: Vec::new(),
+                location_group_modifiers: Vec::new(),
+                location_required_skill_modifiers: Vec::new(),
+                target_attribute_ids: Vec::new(),
+            },
+        );
+        sde.dbuff_collections.insert(
+            912,
+            DbuffCollectionInfo {
+                dbuff_id: 912,
+                name: "dbuff_912".into(),
+                aggregate_mode: "Maximum".into(),
+                operation: "ModAdd".into(),
+                display_name_id: None,
+                show_output_value_in_ui: Some("ShowNormal".into()),
+                item_modifiers: vec![37],
+                location_modifiers: Vec::new(),
+                location_group_modifiers: Vec::new(),
+                location_required_skill_modifiers: Vec::new(),
+                target_attribute_ids: Vec::new(),
+            },
+        );
+    });
+
+    let char_id = 96_700_001i64;
+    let target_id = 96_700_002i64;
+    let corp_id = 98_700_001i64;
+    let sys_id = 30_000_142u32;
+    let titan_id = 1_000_750_001i64;
+    let vat_mod_id = 1_000_750_002i64;
+    let target_ship_id = 1_000_750_003i64;
+    let fleet_id = 1_000_750_901i64;
+    let kw = HashMap::new();
+
+    seed_char(&ctx, char_id, corp_id, sys_id, titan_id, Some(fleet_id));
+    seed_char(&ctx, target_id, corp_id, sys_id, target_ship_id, Some(fleet_id));
+    insert_item(&ctx, titan_id, 999_701, char_id, i64::from(sys_id), InventoryFlag::None, 1, true);
+    insert_item(&ctx, vat_mod_id, 23_735, char_id, titan_id, InventoryFlag::HiSlot0, 1, true);
+    insert_item(&ctx, target_ship_id, 587, target_id, i64::from(sys_id), InventoryFlag::None, 1, true);
+
+    let now_unix = ctx.now_unix_secs();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(
+            fleet_id,
+            FleetRecord {
+                fleet_id,
+                boss_id: char_id,
+                motd: String::new(),
+                free_move: false,
+                is_registered: false,
+                members: vec![char_id, target_id],
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(vat_mod_id, true);
+        snap.module_active_states.insert(vat_mod_id);
+        let mut vat_state = crate::services::character_clone_jump_rules::load_clone_vat_bay_state(snap);
+        vat_state.active_by_ship.insert(titan_id, (vat_mod_id, now_unix + 600));
+        crate::services::character_clone_jump_rules::save_clone_vat_bay_state(snap, &vat_state);
+    });
+
+    let mut host_sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(corp_id),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(titan_id),
+        fleet_id: Some(fleet_id),
+        role: service_roles::ROLE_GML,
+        ..Default::default()
+    };
+    let mut target_sess = SessionState {
+        user_id: Some(target_id as u64),
+        character_id: Some(target_id),
+        corporation_id: Some(corp_id),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(target_ship_id),
+        fleet_id: Some(fleet_id),
+        ..Default::default()
+    };
+
+    // 1. load_ship_clone_offers / save_ship_clone_offers via Offer -> Cancel -> Accept failure -> Offer -> Accept success -> duplicate Accept failure
+    let offered = handle_superweapons_dbuffs_and_clones(
+        &ctx, &mut host_sess, None, "jumpCloneSvc", "OfferShipCloneInstallation",
+        &[PyRep::Integer(target_id), PyRep::Integer(titan_id)], &kw,
+    ).await.unwrap().unwrap();
+    assert_eq!(offered.dict_get("offered").and_then(PyRep::as_bool), Some(true));
+    assert_eq!(offered.dict_get("hostShipID").and_then(PyRep::as_i64), Some(titan_id));
+    assert_eq!(offered.dict_get("targetCharID").and_then(PyRep::as_i64), Some(target_id));
+
+    let clone_state_before = handle_superweapons_dbuffs_and_clones(
+        &ctx, &mut target_sess, None, "jumpCloneSvc", "GetShipCloneState", &[], &kw,
+    ).await.unwrap().unwrap();
+    assert!(!matches!(clone_state_before, PyRep::None));
+
+    // Cancel clears persisted offer
+    assert_eq!(
+        handle_superweapons_dbuffs_and_clones(
+            &ctx, &mut target_sess, None, "jumpCloneSvc", "CancelShipCloneInstallation", &[], &kw,
+        ).await.unwrap().unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(
+        handle_superweapons_dbuffs_and_clones(
+            &ctx, &mut target_sess, None, "jumpCloneSvc", "AcceptShipCloneInstallation",
+            &[PyRep::Integer(titan_id)], &kw,
+        ).await.unwrap().unwrap_err().code,
+        "NoCloneOfferFound"
+    );
+
+    // Re-offer -> Accept succeeds & removes offer & persists JumpCloneRecord
+    handle_superweapons_dbuffs_and_clones(
+        &ctx, &mut host_sess, None, "jumpCloneSvc", "OfferShipCloneInstallation",
+        &[PyRep::Integer(target_id), PyRep::Integer(titan_id)], &kw,
+    ).await.unwrap().unwrap();
+    let accepted = handle_superweapons_dbuffs_and_clones(
+        &ctx, &mut target_sess, None, "jumpCloneSvc", "AcceptShipCloneInstallation",
+        &[PyRep::Integer(titan_id)], &kw,
+    ).await.unwrap().unwrap();
+    assert_eq!(accepted.dict_get("installed").and_then(PyRep::as_bool), Some(true));
+    assert_eq!(accepted.dict_get("characterID").and_then(PyRep::as_i64), Some(target_id));
+    assert_eq!(accepted.dict_get("locationID").and_then(PyRep::as_i64), Some(titan_id));
+    let jc_id = accepted.dict_get("jumpCloneID").and_then(PyRep::as_i64).unwrap();
+    ctx.db.with_snapshot(|snap| {
+        let clones = snap.jump_clones.get(&target_id).expect("jump clones");
+        assert!(clones.iter().any(|c| c.jump_clone_id == jc_id && c.location_id == titan_id));
+    });
+    assert_eq!(
+        handle_superweapons_dbuffs_and_clones(
+            &ctx, &mut target_sess, None, "jumpCloneSvc", "AcceptShipCloneInstallation",
+            &[PyRep::Integer(titan_id)], &kw,
+        ).await.unwrap().unwrap_err().code,
+        "NoCloneOfferFound"
+    );
+
+    // 2. active_ship_dbuff_gang_bursts exact expires_at_unix == now_unix pruning boundary
+    assert!(active_ship_dbuff_gang_bursts(&ctx, titan_id, now_unix).is_empty());
+    {
+        let mut st = scanners_superweapons_state().write().unwrap();
+        st.ship_dbuffs.insert(
+            (ctx.instance_id, titan_id),
+            vec![
+                ActiveDbuffEntry { dbuff_id: 911, value: 2.0, expires_at_unix: now_unix - 1, source_module_id: 75 },
+                ActiveDbuffEntry { dbuff_id: 911, value: 3.0, expires_at_unix: now_unix, source_module_id: 76 },
+                ActiveDbuffEntry { dbuff_id: 912, value: 42.0, expires_at_unix: now_unix + 1, source_module_id: 77 },
+            ],
+        );
+    }
+    let bursts = active_ship_dbuff_gang_bursts(&ctx, titan_id, now_unix);
+    assert_eq!(bursts.len(), 1);
+    assert_eq!(bursts[0].source_item_id, 77);
+    assert_eq!(bursts[0].dbuff_id, Some(912));
+    assert_eq!(bursts[0].value, 42.0);
+
+    // 3. apply_active_dbuffs_and_system_effects_to_ship_attrs_excluding: exclusion + Abyssal pocket matching (fleet_ship_ids, completed/collapsed skip, abyssal_solar_system_id fallback)
+    scanners_superweapons_state().write().unwrap().ship_dbuffs.insert(
+        (ctx.instance_id, target_ship_id),
+        vec![
+            ActiveDbuffEntry { dbuff_id: 911, value: 4.0, expires_at_unix: now_unix + 100, source_module_id: 81 },
+            ActiveDbuffEntry { dbuff_id: 912, value: 25.0, expires_at_unix: now_unix + 100, source_module_id: 82 },
+        ],
+    );
+    let mut excl_attrs: HashMap<u16, f64> = HashMap::from([(263u16, 100.0), (37u16, 200.0)]);
+    apply_active_dbuffs_and_system_effects_to_ship_attrs_excluding(&ctx, target_ship_id, &[911], &mut excl_attrs);
+    assert!((excl_attrs[&263] - 100.0).abs() < 1e-6);
+    assert!((excl_attrs[&37] - 225.0).abs() < 1e-6);
+
+    let ab_sys_completed = 32_990_101u32;
+    let ab_sys_active = 32_990_102u32;
+    let completed_ship_id = 1_000_750_101i64;
+    let fleet_ship_id = 1_000_750_102i64;
+    let solo_in_ab_sys_ship_id = 1_000_750_103i64;
+    let collapsed_in_ab_sys_ship_id = 1_000_750_104i64;
+    let leader_ship_id = 1_000_750_105i64;
+    let ab_sys_collapsed = 32_990_103u32;
+    insert_item(&ctx, completed_ship_id, 587, 96_700_010, i64::from(sys_id), InventoryFlag::None, 1, true);
+    insert_item(&ctx, fleet_ship_id, 587, 96_700_011, i64::from(sys_id), InventoryFlag::None, 1, true);
+    insert_item(&ctx, solo_in_ab_sys_ship_id, 587, 96_700_012, i64::from(ab_sys_active), InventoryFlag::None, 1, true);
+    insert_item(&ctx, collapsed_in_ab_sys_ship_id, 587, 96_700_013, i64::from(ab_sys_collapsed), InventoryFlag::None, 1, true);
+
+    let dummy_rooms = |pid: i64| -> [AbyssalRoomRecord; 3] {
+        [1u8, 2, 3].map(|r| AbyssalRoomRecord {
+            room_index: r,
+            dungeon_id: 6046,
+            dungeon_name: "Test".into(),
+            npc_ball_ids: Vec::new(),
+            cache_item_id: 1_896_000_000 + pid * 10 + i64::from(r),
+            cleared: false,
+            gate_unlocked_at_sec: None,
+        })
+    };
+    with_abyssal_state(&ctx, |st| {
+        st.pockets.insert(
+            96_700_010,
+            AbyssalPocketSession {
+                pocket_id: 901,
+                character_id: 96_700_010,
+                ship_id: 1_000_750_199,
+                origin_solar_system_id: sys_id,
+                abyssal_solar_system_id: ab_sys_completed,
+                origin_position: [0.0; 3],
+                grid_offset: [0.0; 3],
+                filament_type_id: 47765,
+                tier: 1,
+                weather: AbyssalWeatherKind::Electrical,
+                weather_penalty_pct: 50.0,
+                weather_bonus_pct: 50.0,
+                npc_difficulty_mult: 1.0,
+                current_room: 1,
+                rooms: dummy_rooms(901),
+                started_at_sec: now_unix,
+                collapse_at_sec: now_unix + 1200,
+                completed: true,
+                collapsed_destroyed: false,
+                trace_ball_id: 0,
+                fleet_ship_ids: vec![completed_ship_id],
+                ship_room: HashMap::new(),
+                max_ships: 3,
+            },
+        );
+        st.pockets.insert(
+            96_700_013,
+            AbyssalPocketSession {
+                pocket_id: 902,
+                character_id: 96_700_013,
+                ship_id: 1_000_750_198,
+                origin_solar_system_id: sys_id,
+                abyssal_solar_system_id: ab_sys_collapsed,
+                origin_position: [0.0; 3],
+                grid_offset: [0.0; 3],
+                filament_type_id: 47765,
+                tier: 1,
+                weather: AbyssalWeatherKind::Electrical,
+                weather_penalty_pct: 50.0,
+                weather_bonus_pct: 50.0,
+                npc_difficulty_mult: 1.0,
+                current_room: 1,
+                rooms: dummy_rooms(902),
+                started_at_sec: now_unix,
+                collapse_at_sec: now_unix + 1200,
+                completed: false,
+                collapsed_destroyed: true,
+                trace_ball_id: 0,
+                fleet_ship_ids: Vec::new(),
+                ship_room: HashMap::new(),
+                max_ships: 1,
+            },
+        );
+        st.pockets.insert(
+            96_700_011,
+            AbyssalPocketSession {
+                pocket_id: 903,
+                character_id: 96_700_011,
+                ship_id: leader_ship_id,
+                origin_solar_system_id: sys_id,
+                abyssal_solar_system_id: ab_sys_active,
+                origin_position: [0.0; 3],
+                grid_offset: [0.0; 3],
+                filament_type_id: 47765,
+                tier: 1,
+                weather: AbyssalWeatherKind::Electrical,
+                weather_penalty_pct: 50.0,
+                weather_bonus_pct: 50.0,
+                npc_difficulty_mult: 1.0,
+                current_room: 1,
+                rooms: dummy_rooms(903),
+                started_at_sec: now_unix,
+                collapse_at_sec: now_unix + 1200,
+                completed: false,
+                collapsed_destroyed: false,
+                trace_ball_id: 0,
+                fleet_ship_ids: vec![leader_ship_id, fleet_ship_id],
+                ship_room: HashMap::new(),
+                max_ships: 3,
+            },
+        );
+    });
+    assert!(read_abyssal_state(&ctx, |st| st.pockets.contains_key(&96_700_011)));
+
+    // Completed & collapsed pockets must NOT apply weather
+    let mut comp_attrs = HashMap::from([(271u16, 0.5)]);
+    apply_active_dbuffs_and_system_effects_to_ship_attrs(&ctx, completed_ship_id, &mut comp_attrs);
+    assert!((comp_attrs[&271] - 0.5).abs() < 1e-6);
+
+    let mut coll_attrs = HashMap::from([(271u16, 0.5)]);
+    apply_active_dbuffs_and_system_effects_to_ship_attrs(&ctx, collapsed_in_ab_sys_ship_id, &mut coll_attrs);
+    assert!((coll_attrs[&271] - 0.5).abs() < 1e-6);
+
+    // Active pocket applies via fleet_ship_ids (when ship_id != leader_ship_id) AND via abyssal_solar_system_id fallback
+    let mut fleet_attrs = HashMap::from([(271u16, 0.5)]);
+    apply_active_dbuffs_and_system_effects_to_ship_attrs(&ctx, fleet_ship_id, &mut fleet_attrs);
+    assert!((fleet_attrs[&271] - 0.75).abs() < 1e-6);
+
+    let mut solo_ab_attrs = HashMap::from([(271u16, 0.5)]);
+    apply_active_dbuffs_and_system_attrs_helper(&ctx, solo_in_ab_sys_ship_id, &mut solo_ab_attrs);
+    assert!((solo_ab_attrs[&271] - 0.75).abs() < 1e-6);
+
+    // 4. Non-default RPC return assertions for ApplyBuffsToItems, GetDbuffStateForClient, RefreshSystemWideEnvironment, GetSystemWideEffectsOnShip, ResetSystemWideEffects
+    let applied = handle_superweapons_dbuffs_and_clones(
+        &ctx, &mut host_sess, None, "dogmaIM", "ApplyBuffsToItems",
+        &[PyRep::Integer(titan_id), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(911), PyRep::Real(2.0)])]), PyRep::Real(60.0)],
+        &kw,
+    ).await.unwrap().unwrap();
+    assert_eq!(applied.dict_get("shipID").and_then(PyRep::as_i64), Some(titan_id));
+    assert!(applied.dict_get("activeCount").and_then(PyRep::as_i64).unwrap_or(0) >= 1);
+
+    let mapped = handle_superweapons_dbuffs_and_clones(
+        &ctx, &mut host_sess, None, "dogmaIM", "GetDbuffStateForClient", &[PyRep::Integer(titan_id)], &kw,
+    ).await.unwrap().unwrap();
+    assert_eq!(mapped.dict_get("shipID").and_then(PyRep::as_i64), Some(titan_id));
+    assert!(mapped.dict_get("dbuffs").is_some());
+
+    let reset = handle_superweapons_dbuffs_and_clones(
+        &ctx, &mut host_sess, None, "dogmaIM", "ResetSystemWideEffects", &[PyRep::Integer(i64::from(sys_id))], &kw,
+    ).await.unwrap().unwrap();
+    assert_eq!(reset.dict_get("solarSystemID").and_then(PyRep::as_i64), Some(i64::from(sys_id)));
+    assert_eq!(reset.dict_get("active").and_then(PyRep::as_bool), Some(false));
+
+    let sys_info = handle_superweapons_dbuffs_and_clones(
+        &ctx, &mut host_sess, None, "dogmaIM", "GetSystemWideEffectsOnShip", &[], &kw,
+    ).await.unwrap().unwrap();
+    assert_eq!(sys_info.dict_get("hudVisible").and_then(PyRep::as_bool), Some(false));
+
+    with_abyssal_state(&ctx, |st| {
+        st.pockets.remove(&96_700_010);
+        st.pockets.remove(&96_700_011);
+        st.pockets.remove(&96_700_013);
+    });
+}
+
+fn apply_active_dbuffs_and_system_attrs_helper(
+    ctx: &ServerContext,
+    ship_id: i64,
+    attrs: &mut HashMap<u16, f64>,
+) {
+    apply_active_dbuffs_and_system_effects_to_ship_attrs_excluding(ctx, ship_id, &[], attrs);
+}
+

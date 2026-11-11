@@ -144,12 +144,8 @@ pub(crate) async fn handle_survey_scanner_activation(
             continue;
         }
         let ast_pos = DVec3::new(ast.position.0, ast.position.1, ast.position.2);
-        let dist = if ship_pos != DVec3::ZERO {
-            (ship_pos - ast_pos).length()
-        } else {
-            0.0
-        };
-        if dist <= scan_range || ship_pos == DVec3::ZERO {
+        let dist = (ship_pos - ast_pos).length();
+        if dist <= scan_range {
             let type_name = ctx
                 .sde
                 .types
@@ -256,8 +252,14 @@ pub(crate) fn handle_unload_ammo(
         });
     }
     let requested_module_ids: Vec<i64> = match args.get(1) {
-        Some(PyRep::List(v) | PyRep::Tuple(v)) => v.iter().filter_map(|x| x.as_i64()).collect(),
-        Some(v) => v.as_i64().into_iter().collect(),
+        Some(v) => {
+            let ids = crate::services::combat_crimewatch::extract_id_collection(Some(v));
+            if ids.is_empty() {
+                v.as_i64().into_iter().collect()
+            } else {
+                ids
+            }
+        }
         None => Vec::new(),
     };
 
@@ -1400,6 +1402,92 @@ pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u
                     );
                 }
             }
+            crate::system_actor::PendingCycleAction::CycleWeaponDamage {
+                attacker_char_id,
+                attacker_ship_id,
+                attacker_ship_type_id,
+                target_id,
+                target_char_id,
+                module_type_id,
+                applied_dmg,
+                notified,
+            } => {
+                if let Some(acid) = attacker_char_id.filter(|&c| c > 0) {
+                    crate::services::combat_crimewatch::record_killmail_assist_action(
+                        ctx,
+                        target_id,
+                        acid,
+                        attacker_ship_type_id,
+                        module_type_id,
+                        applied_dmg,
+                        false,
+                        ctx.now_unix_secs(),
+                    );
+                }
+                if !notified && applied_dmg > 0.0 {
+                    let owner_cid = attacker_char_id.unwrap_or(0);
+                    if let Some(acid) = attacker_char_id.filter(|&c| c > 0) {
+                        let dmg_dict = PyRep::Dict(vec![
+                            (PyRep::String("damage".into()), PyRep::Real(applied_dmg)),
+                            (PyRep::String("source".into()), PyRep::Integer(attacker_ship_id)),
+                            (PyRep::String("attackerID".into()), PyRep::Integer(attacker_ship_id)),
+                            (PyRep::String("target".into()), PyRep::Integer(target_id)),
+                            (PyRep::String("target_ID".into()), PyRep::Integer(target_id)),
+                            (
+                                PyRep::String("owner".into()),
+                                PyRep::Tuple(vec![PyRep::Integer(2), PyRep::Integer(acid)]),
+                            ),
+                            (PyRep::String("weapon".into()), PyRep::Integer(module_type_id as i64)),
+                            (PyRep::String("hitQuality".into()), PyRep::Integer(3)),
+                            (PyRep::String("attackType".into()), PyRep::String("me".into())),
+                            (PyRep::String("isWrecking".into()), PyRep::Bool(false)),
+                        ]);
+                        let msg_args = vec![PyRep::String("AttackHit".into()), dmg_dict];
+                        ctx.notify(
+                            crate::router::NotificationTarget::Character(acid),
+                            "OnDamageMessage",
+                            "charid",
+                            msg_args.clone(),
+                        );
+                        ctx.notify(
+                            crate::router::NotificationTarget::Character(acid),
+                            "OnDamageMessages",
+                            "charid",
+                            vec![PyRep::List(vec![PyRep::Tuple(msg_args)])],
+                        );
+                    }
+                    if let Some(vcid) = target_char_id.filter(|&c| c > 0 && c != owner_cid) {
+                        let vic_dict = PyRep::Dict(vec![
+                            (PyRep::String("damage".into()), PyRep::Real(applied_dmg)),
+                            (PyRep::String("source".into()), PyRep::Integer(attacker_ship_id)),
+                            (PyRep::String("attackerID".into()), PyRep::Integer(attacker_ship_id)),
+                            (PyRep::String("target".into()), PyRep::Integer(target_id)),
+                            (PyRep::String("target_ID".into()), PyRep::Integer(target_id)),
+                            (
+                                PyRep::String("owner".into()),
+                                PyRep::Tuple(vec![PyRep::Integer(2), PyRep::Integer(owner_cid)]),
+                            ),
+                            (PyRep::String("weapon".into()), PyRep::Integer(module_type_id as i64)),
+                            (PyRep::String("hitQuality".into()), PyRep::Integer(3)),
+                            (PyRep::String("attackType".into()), PyRep::String("other".into())),
+                            (PyRep::String("isWrecking".into()), PyRep::Bool(false)),
+                        ]);
+                        let vic_args = vec![PyRep::String("AttackedBy".into()), vic_dict];
+                        ctx.notify(
+                            crate::router::NotificationTarget::Character(vcid),
+                            "OnDamageMessage",
+                            "charid",
+                            vic_args.clone(),
+                        );
+                        ctx.notify(
+                            crate::router::NotificationTarget::Character(vcid),
+                            "OnDamageMessages",
+                            "charid",
+                            vec![PyRep::List(vec![PyRep::Tuple(vic_args)])],
+                        );
+                    }
+                }
+            }
             crate::system_actor::PendingCycleAction::RepeatCycleStart {
                 char_id,
                 ship_id,
@@ -1653,3 +1741,7 @@ fn online_module_active_effects_for_attrs(
 #[cfg(test)]
 #[path = "fitting_module_cycles_helpers_tests.rs"]
 mod fitting_module_cycles_helpers_tests;
+
+#[cfg(test)]
+#[path = "fitting_module_cycles_helpers_edges_tests.rs"]
+mod fitting_module_cycles_helpers_edges_tests;

@@ -240,6 +240,39 @@ pub(crate) async fn handle_mining_and_deactivate(
                     0,
                     0,
                 );
+                if let Some(tid) = mod_type_opt {
+                    if let Some((sfx_guid, is_offensive)) =
+                        crate::router::binding::special_fx_guid_for_module_sde(
+                            &ctx.sde,
+                            tid,
+                            effect_id,
+                            name_opt,
+                        )
+                    {
+                        let now = ctx.now_blueos_filetime_ticks();
+                        ctx.notify(
+                            crate::router::NotificationTarget::Character(char_id),
+                            "OnSpecialFX",
+                            "charid",
+                            vec![
+                                PyRep::Integer(ship_id),
+                                PyRep::Integer(module_id),
+                                PyRep::Integer(tid as i64),
+                                PyRep::None,
+                                PyRep::None,
+                                PyRep::String(sfx_guid),
+                                PyRep::Bool(is_offensive),
+                                PyRep::Integer(0),
+                                PyRep::Integer(0),
+                                PyRep::Real(0.0),
+                                PyRep::Integer(0),
+                                PyRep::Integer(now),
+                                PyRep::Real(0.0),
+                                PyRep::None,
+                            ],
+                        );
+                    }
+                }
             }
 
             ctx.db.with_mut_snapshot(|snap| {
@@ -366,7 +399,16 @@ pub(crate) async fn handle_mining_and_deactivate(
                 crate::router::NotificationTarget::Character(char_id),
                 "OnModuleAttributeChanges",
                 "charid",
-                vec![PyRep::Integer(module_id)],
+                vec![PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::String("OnModuleAttributeChange".into()),
+                    PyRep::Integer(char_id),
+                    PyRep::Integer(module_id),
+                    PyRep::Integer(eve_sde::attr_ids::DAMAGE as i64),
+                    PyRep::Integer(ctx.now_blueos_filetime_ticks()),
+                    PyRep::Real(0.0),
+                    PyRep::Real(0.0),
+                    PyRep::None,
+                ])])],
             );
 
             Some(Ok(PyRep::keyval([

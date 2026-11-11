@@ -593,7 +593,7 @@ async fn get_all_info_includes_offline_missing_skill_modules_and_zeros_base_load
         "missing-skill gun must report isOnline (attr 2) = 0.0 in GetAllInfo"
     );
 
-    // #651: GetAllInfo shipInfo.attributes and shipAttributes prime CPU_LOAD (49) and POWER_LOAD (15) at 0.0
+    // #785: GetAllInfo shipInfo.attributes and shipAttributes carry evaluated CPU_LOAD (49) and POWER_LOAD (15)
     let (_, ship_entry) = ship_info
         .iter()
         .find(|(k, _)| k.as_i64() == Some(ship_id))
@@ -611,15 +611,20 @@ async fn get_all_info_includes_offline_missing_skill_modules_and_zeros_base_load
         .find(|(k, _)| k.as_i64() == Some(attr_ids::POWER_LOAD as i64))
         .and_then(|(_, v)| v.as_f64())
         .expect("POWER_LOAD in GetAllInfo");
-    assert_eq!(cpu_load_info, 0.0, "GetAllInfo CPU_LOAD must be 0.0");
-    assert_eq!(pg_load_info, 0.0, "GetAllInfo POWER_LOAD must be 0.0");
 
-    // ShipFittingEngine itself still calculates positive evaluated CPU_LOAD and POWER_LOAD
     let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
     let eval_cpu_load = fit.ship.get_attribute(attr_ids::CPU_LOAD, &ctx.sde);
     let eval_pg_load = fit.ship.get_attribute(attr_ids::POWER_LOAD, &ctx.sde);
     assert!(eval_cpu_load > 0.0, "Evaluated ship CPU_LOAD should be > 0");
     assert!(eval_pg_load > 0.0, "Evaluated ship POWER_LOAD should be > 0");
+    assert!(
+        (cpu_load_info - eval_cpu_load).abs() < 1e-6,
+        "GetAllInfo CPU_LOAD ({cpu_load_info}) must match evaluated load ({eval_cpu_load})"
+    );
+    assert!(
+        (pg_load_info - eval_pg_load).abs() < 1e-6,
+        "GetAllInfo POWER_LOAD ({pg_load_info}) must match evaluated load ({eval_pg_load})"
+    );
 }
 
 #[tokio::test]

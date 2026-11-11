@@ -24,8 +24,12 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
 use std::collections::HashMap;
 
+/// `inventorycommon/const.pyj: containerGlobal` — global / asset-safety station container.
+const CONTAINER_GLOBAL: i64 = 10_002;
 /// `inventorycommon/const.pyj: containerHangar` — the character's hangar at the docked station.
 const CONTAINER_HANGAR: i64 = 10_004;
+/// `inventorycommon/const.pyj: containerCorpMarket` — corporation deliveries at the docked station.
+const CONTAINER_CORP_MARKET: i64 = 10_012;
 
 /// Error code for calls that arrive without the location-bound moniker.
 const ERR_NOT_BOUND: &str = "InvalidBoundObject";
@@ -94,6 +98,15 @@ pub fn handle(
             // `monolith_task_tracker/client/eventHandler.pyj:38-46` (`OnHighSlotFittingChanged`):
             // calls `sm.GetService('invCache').GetInventoryFromId(shipID).GetAvailableTurretSlots()`
             // and compares `numberOfFreeSlots >= 2`.
+            if crate::services::fitting_containers_ships::resolve_missing_dynamic_ship_stub_type_id(
+                ctx,
+                char_id,
+                location_id,
+            )
+            .is_some()
+            {
+                return Some(Ok(PyRep::Integer(0)));
+            }
             let ship_id = ctx
                 .db
                 .get_item(location_id)
@@ -164,8 +177,16 @@ pub fn handle(
             } else {
                 false
             };
+            let is_missing_dynamic_ship_stub =
+                crate::services::fitting_containers_ships::resolve_missing_dynamic_ship_stub_type_id(
+                    ctx,
+                    char_id,
+                    item_id,
+                )
+                .is_some();
             let item_exists = item_id == char_id
                 || is_storage_auth
+                || is_missing_dynamic_ship_stub
                 || ctx.db.with_snapshot(|snap| snap.items.contains_key(&item_id));
             if !item_exists {
                 return Some(Err(BridgeRpcError::user_error("FakeItemNotFound")));
@@ -182,6 +203,7 @@ pub fn handle(
             };
             let accessible = item_id == char_id
                 || is_storage_auth
+                || is_missing_dynamic_ship_stub
                 || ctx.db.with_snapshot(|snap| {
                     snap.items.get(&item_id).is_some_and(|it| {
                         let has_inventory = crab_allowed
@@ -229,7 +251,10 @@ pub fn handle(
         }
         _ => {
             let container_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            if container_id != CONTAINER_HANGAR {
+            if !matches!(
+                container_id,
+                CONTAINER_HANGAR | CONTAINER_CORP_MARKET | CONTAINER_GLOBAL
+            ) {
                 return err(
                     "UnimplementedRPC",
                     format!("invbroker.GetInventory({container_id}) is not yet implemented"),
@@ -338,6 +363,34 @@ fn self_inv_item(
                 PyRep::String(st.name.clone()),
             ]));
         }
+    }
+    if let Some(stub_type_id) =
+        crate::services::fitting_containers_ships::resolve_missing_dynamic_ship_stub_type_id(
+            ctx, char_id, object_id,
+        )
+    {
+        let (group_id, category_id, type_name) = ctx
+            .sde
+            .types
+            .get(&stub_type_id)
+            .map(|t| (i64::from(t.group_id), i64::from(t.category_id), t.name.clone()))
+            .unwrap_or((29, 6, String::new()));
+        let loc_id = session
+            .station_id
+            .or(session.structure_id)
+            .or_else(|| session.solar_system_id.map(i64::from))
+            .unwrap_or(30_000_142);
+        return Ok(header.build_dbrow(vec![
+            PyRep::Integer(object_id),
+            PyRep::Integer(i64::from(stub_type_id)),
+            PyRep::Integer(char_id),
+            PyRep::Integer(loc_id),
+            PyRep::Integer(0),
+            PyRep::Integer(-1),
+            PyRep::Integer(group_id),
+            PyRep::Integer(category_id),
+            PyRep::String(type_name),
+        ]));
     }
     Err(BridgeRpcError {
         code: "UnimplementedRPC".into(),
@@ -884,7 +937,15 @@ pub(crate) fn resolve_inv_target_location(
                 && ctx
                     .db
                     .with_snapshot(|snap| snap.structures.contains_key(&a1_id));
-            if blocked_by_structure_slots {
+            let target_is_non_ship_container = ctx.db.with_snapshot(|snap| {
+                snap.items.get(&a1_id).is_some_and(|it| {
+                    ctx.sde
+                        .types
+                        .get(&it.type_id)
+                        .map_or(true, |t| !matches!(t.category_id, 6 | 65))
+                })
+            });
+            if blocked_by_structure_slots || target_is_non_ship_container {
                 None
             } else {
                 session.ship_id

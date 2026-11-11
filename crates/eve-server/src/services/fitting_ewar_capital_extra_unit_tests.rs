@@ -4,15 +4,14 @@
 
 use crate::router::ServerContext;
 use crate::services::inventory_fitting::fitting_ewar_capital::{
-    emit_committed_ewar_and_system_wide_notifications, ewar_jamming_type,
-    prepare_ewar_and_capital_module, EwarCapitalPrep,
+    commit_post_cycle_activation_effects, emit_committed_ewar_and_system_wide_notifications,
+    prepare_ewar_and_capital_module, validate_passive_targeter_activation,
+    DeferredPostCycleEffects, EwarCapitalPrep,
 };
-use eve_db::{
-    AccountRecord, InventoryFlag, InventoryItemRecord, TrainedSkillRecord, WorldRepository,
-};
+use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord, WorldRepository};
 use eve_destiny::{Ball, CombatState, DVec3, MovementMode, SlimItemMeta, WarpPhase};
 use eve_dogma::{attr_ids, DogmaItemState, FittedModule, ModuleState, ShipFittingEngine};
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::BridgeRpcError;
 use eve_sde::{DbuffCollectionInfo, InvType, SdeRegistry};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -70,12 +69,18 @@ pub(super) async fn run_prep(
     mod_state: &DogmaItemState, fit: &ShipFittingEngine, target_id_opt: Option<i64>,
     is_overloaded: bool, is_mwd: bool, is_mjd: bool,
 ) -> Result<EwarCapitalPrep, BridgeRpcError> {
-    prepare_ewar_and_capital_module(
+    let mut prep = prepare_ewar_and_capital_module(
         ctx, sys, sys_id, char_id, ship_id, ship_group_id, module_id, fm, mod_type, mod_state,
         fit, target_id_opt, is_overloaded, is_mwd, is_mjd, &HashMap::new(),
     )
     .await
-    .expect("Some")
+    .expect("Some")?;
+    let deferred = std::mem::take(&mut prep.deferred_post_cycle);
+    commit_post_cycle_activation_effects(
+        ctx, sys, char_id, ship_id, module_id, fm, mod_type, mod_state, target_id_opt, deferred,
+    )
+    .await?;
+    Ok(prep)
 }
 
 pub(super) async fn spawn_test_ball(
@@ -93,7 +98,7 @@ pub(super) async fn spawn_test_ball(
     let _ = sys.spawn_ball_with_meta(ball, cs, meta).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn nullifier_adc_cehe_triage_block_and_zpme_branches() {
     let ctx = new_ctx();
     let sys_id = 30_000_142u32;
@@ -219,7 +224,7 @@ async fn nullifier_adc_cehe_triage_block_and_zpme_branches() {
     assert!((zpme_custom.hic_velocity_multiplier.unwrap() - 0.20).abs() < 1e-6);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn siege_triage_bastion_indy_core_phenomena_mwd_and_mjd_branches() {
     let ctx = new_ctx();
     let sys_id = 30_000_142u32;
@@ -365,7 +370,7 @@ async fn siege_triage_bastion_indy_core_phenomena_mwd_and_mjd_branches() {
     assert!(ph_ok.immobilize_self);
     assert!(ctx.db.with_snapshot(|s| !s.items[&victim_id].dynamic_attributes.contains_key(&37)));
     assert!(
-        super::fitting_scanners_superweapons::get_aggregated_ship_dbuffs(
+        crate::services::inventory_fitting::fitting_scanners_superweapons::get_aggregated_ship_dbuffs(
             &ctx,
             victim_id,
             ctx.now_unix_secs()
@@ -407,4 +412,331 @@ async fn siege_triage_bastion_indy_core_phenomena_mwd_and_mjd_branches() {
     assert_eq!(mjd_ok.mjd_jump_distance_m, Some(100_000.0));
     assert_eq!(mjd_ok.mjfg_field_params, Some((6_000.0, 25, 4)));
     assert!((mjd_ok.hic_sig_multiplier.unwrap() - 2.0).abs() < 1e-6);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn passive_targeter_remote_rep_projected_assist_and_deferred_charges_branches() {
+    let ctx = new_ctx();
+    let sys_id = 30_000_142_u32;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let char_id = 97_100_010_i64;
+    let ship_id = 97_100_110_i64;
+    let target_id = 97_100_111_i64;
+    let mod_id = 97_100_210_i64;
+    let fit = ShipFittingEngine::from_sde(ship_id, 587, &ctx.sde);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.get(&90_000_001).cloned().unwrap();
+        ch.character_id = char_id;
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+    });
+
+    // Interdiction Nullifier wrong ship group -> InvalidShipGroup (`L118-123`)
+    let (nul_fm, nul_st) = synth_module_and_state(mod_id, 59600, 27, None, &[]);
+    let nul_type = synth_type(59600, 4117, "Nullifier", &[], &[(1298, 25.0)]);
+    assert_eq!(
+        run_prep(&ctx, &sys, sys_id, char_id, ship_id, 27, mod_id, &nul_fm, &nul_type, &nul_st, &fit, None, false, false, false)
+            .await
+            .err()
+            .unwrap()
+            .code,
+        "InvalidShipGroup"
+    );
+
+    // Passive targeter validation branches (`L852-920`) before spawning balls
+    assert_eq!(
+        validate_passive_targeter_activation(&ctx, &sys, char_id, ship_id, target_id, &fit)
+            .await
+            .unwrap_err()
+            .code,
+        "TargetingFailed"
+    );
+    spawn_test_ball(&sys, ship_id, 587, DVec3::ZERO, MovementMode::Stop, 1000.0).await;
+    assert_eq!(
+        validate_passive_targeter_activation(&ctx, &sys, char_id, ship_id, target_id, &fit)
+            .await
+            .unwrap_err()
+            .code,
+        "TargetingFailed"
+    );
+    spawn_test_ball(&sys, target_id, 587, DVec3::new(1000.0, 0.0, 0.0), MovementMode::Stop, 1000.0).await;
+
+    // Self jammed (`ShipJammed`), self cloaked (`TargetingFailed`), target cloaked (`TargetingFailed`), target tethered (`TargetInvulnerable`)
+    {
+        let mut bp = sys.ballpark.write().unwrap();
+        bp.combat_states.get_mut(&ship_id).unwrap().ecm_jammed_remaining_s = 5.0;
+    }
+    assert_eq!(
+        validate_passive_targeter_activation(&ctx, &sys, char_id, ship_id, target_id, &fit)
+            .await
+            .unwrap_err()
+            .code,
+        "ShipJammed"
+    );
+    {
+        let mut bp = sys.ballpark.write().unwrap();
+        let scs = bp.combat_states.get_mut(&ship_id).unwrap();
+        scs.ecm_jammed_remaining_s = 0.0;
+        scs.is_cloaked = true;
+    }
+    assert_eq!(
+        validate_passive_targeter_activation(&ctx, &sys, char_id, ship_id, target_id, &fit)
+            .await
+            .unwrap_err()
+            .code,
+        "TargetingFailed"
+    );
+    {
+        let mut bp = sys.ballpark.write().unwrap();
+        bp.combat_states.get_mut(&ship_id).unwrap().is_cloaked = false;
+        bp.combat_states.get_mut(&target_id).unwrap().is_cloaked = true;
+    }
+    assert_eq!(
+        validate_passive_targeter_activation(&ctx, &sys, char_id, ship_id, target_id, &fit)
+            .await
+            .unwrap_err()
+            .code,
+        "TargetingFailed"
+    );
+    {
+        let mut bp = sys.ballpark.write().unwrap();
+        let tcs = bp.combat_states.get_mut(&target_id).unwrap();
+        tcs.is_cloaked = false;
+        tcs.is_tethered = true;
+    }
+    assert_eq!(
+        validate_passive_targeter_activation(&ctx, &sys, char_id, ship_id, target_id, &fit)
+            .await
+            .unwrap_err()
+            .code,
+        "TargetInvulnerable"
+    );
+    // Out of range & TooManyLockedTargets
+    {
+        let mut bp = sys.ballpark.write().unwrap();
+        bp.combat_states.get_mut(&target_id).unwrap().is_tethered = false;
+        bp.balls.get_mut(&target_id).unwrap().position = DVec3::new(9_000_000.0, 0.0, 0.0);
+    }
+    assert_eq!(
+        validate_passive_targeter_activation(&ctx, &sys, char_id, ship_id, target_id, &fit)
+            .await
+            .unwrap_err()
+            .code,
+        "TargetOutOfRange"
+    );
+    {
+        let mut bp = sys.ballpark.write().unwrap();
+        bp.balls.get_mut(&target_id).unwrap().position = DVec3::new(1000.0, 0.0, 0.0);
+    }
+    for dummy in 1..=10_i64 {
+        let _ = sys
+            .add_target_lock(
+                ship_id,
+                eve_destiny::TargetLock {
+                    target_id: target_id + dummy,
+                    lock_time_ms: 1000.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: None,
+                },
+            )
+            .await;
+    }
+    assert_eq!(
+        validate_passive_targeter_activation(&ctx, &sys, char_id, ship_id, target_id, &fit)
+            .await
+            .unwrap_err()
+            .code,
+        "TooManyLockedTargets"
+    );
+
+    // Projected remote assist group 290/209: TargetRequired, OutOfRange, success (`L176-195`, `L1026-1035`)
+    let (pa_fm, pa_st) = synth_module_and_state(mod_id, 99801, 19, None, &[(54, 15_000.0), (2044, 5_000.0)]);
+    let pa_type = synth_type(99801, 290, "Remote Tracking Computer I", &[], &[]);
+    assert_eq!(
+        run_prep(&ctx, &sys, sys_id, char_id, ship_id, 25, mod_id, &pa_fm, &pa_type, &pa_st, &fit, None, false, false, false)
+            .await
+            .err()
+            .unwrap()
+            .code,
+        "TargetRequired"
+    );
+    {
+        let mut bp = sys.ballpark.write().unwrap();
+        bp.balls.get_mut(&target_id).unwrap().position = DVec3::new(50_000.0, 0.0, 0.0);
+    }
+    assert_eq!(
+        run_prep(&ctx, &sys, sys_id, char_id, ship_id, 25, mod_id, &pa_fm, &pa_type, &pa_st, &fit, Some(target_id), false, false, false)
+            .await
+            .err()
+            .unwrap()
+            .code,
+        "OutOfRange"
+    );
+    {
+        let mut bp = sys.ballpark.write().unwrap();
+        bp.balls.get_mut(&target_id).unwrap().position = DVec3::new(1_000.0, 0.0, 0.0);
+    }
+    assert!(
+        run_prep(&ctx, &sys, sys_id, char_id, ship_id, 25, mod_id, &pa_fm, &pa_type, &pa_st, &fit, Some(target_id), false, false, false)
+            .await
+            .is_ok()
+    );
+
+    // Remote assistance (group 325/585) TargetRequired, CannotActivateOnSelf, TargetOutOfRange, normal armor repair (`L680-754`)
+    let (rr_fm, rr_st) = synth_module_and_state(mod_id, 3530, 27, None, &[(54, 5_000.0), (84, 100.0)]);
+    let rr_type = synth_type(3530, 325, "Small Remote Armor Repairer I", &[], &[]);
+    assert_eq!(
+        run_prep(&ctx, &sys, sys_id, char_id, ship_id, 25, mod_id, &rr_fm, &rr_type, &rr_st, &fit, None, false, false, false)
+            .await
+            .err()
+            .unwrap()
+            .code,
+        "TargetRequired"
+    );
+    assert_eq!(
+        run_prep(&ctx, &sys, sys_id, char_id, ship_id, 25, mod_id, &rr_fm, &rr_type, &rr_st, &fit, Some(ship_id), false, false, false)
+            .await
+            .err()
+            .unwrap()
+            .code,
+        "CannotActivateOnSelf"
+    );
+    {
+        let mut bp = sys.ballpark.write().unwrap();
+        bp.balls.get_mut(&target_id).unwrap().position = DVec3::new(10_000.0, 0.0, 0.0);
+    }
+    assert_eq!(
+        run_prep(&ctx, &sys, sys_id, char_id, ship_id, 25, mod_id, &rr_fm, &rr_type, &rr_st, &fit, Some(target_id), false, false, false)
+            .await
+            .err()
+            .unwrap()
+            .code,
+        "TargetOutOfRange"
+    );
+    {
+        let mut bp = sys.ballpark.write().unwrap();
+        bp.balls.get_mut(&target_id).unwrap().position = DVec3::new(1_000.0, 0.0, 0.0);
+    }
+    let rr_ok = run_prep(&ctx, &sys, sys_id, char_id, ship_id, 25, mod_id, &rr_fm, &rr_type, &rr_st, &fit, Some(target_id), false, false, false)
+        .await
+        .unwrap();
+    assert!((rr_ok.remote_armor_amount - 100.0).abs() < 1e-6);
+
+    // commit_post_cycle_activation_effects consuming cap booster & turret charge (`L989-1015`) + OnSystemWideEffectStart char fallback (`L1186-1192`)
+    let cap_cid = 97_100_901_i64;
+    let ammo_cid = 97_100_902_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(cap_cid, InventoryItemRecord {
+            item_id: cap_cid, type_id: 263, owner_id: char_id, location_id: ship_id,
+            flag: InventoryFlag::Cargo, quantity: 1, ..Default::default()
+        });
+        snap.items.insert(ammo_cid, InventoryItemRecord {
+            item_id: ammo_cid, type_id: 215, owner_id: char_id, location_id: ship_id,
+            flag: InventoryFlag::HiSlot0, quantity: 1, ..Default::default()
+        });
+        snap.module_active_charges.insert(mod_id, 215);
+    });
+    let mut def = DeferredPostCycleEffects::default();
+    def.cap_booster_charge_id = Some(cap_cid);
+    def.turret_charge_consumptions.push((mod_id, ammo_cid));
+    commit_post_cycle_activation_effects(&ctx, &sys, char_id, ship_id, mod_id, &rr_fm, &rr_type, &rr_st, None, def)
+        .await
+        .unwrap();
+    ctx.db.with_snapshot(|s| {
+        assert!(!s.items.contains_key(&cap_cid));
+        assert!(!s.items.contains_key(&ammo_cid));
+        assert!(!s.module_active_charges.contains_key(&mod_id));
+    });
+    let ph_type = synth_type(43554, 1815, "Amarr Phenomena Generator", &[6753], &[]);
+    emit_committed_ewar_and_system_wide_notifications(&ctx, sys_id, char_id, ship_id, mod_id, 43554, &ph_type, None, false, None, None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn target_painter_threshold_group_guard_and_fuel_boundary_kill_mutants() {
+    let ctx = new_ctx();
+    let sys_id = 30_000_142u32;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let char_id = 90_880_001i64;
+    let ship_id = 97_880_001i64;
+    let target_id = 97_880_002i64;
+    let mod_id = 97_880_010i64;
+
+    spawn_test_ball(&sys, ship_id, 587, DVec3::ZERO, MovementMode::Stop, 5000.0).await;
+    spawn_test_ball(&sys, target_id, 587, DVec3::new(1_000.0, 0.0, 0.0), MovementMode::Stop, 5000.0).await;
+    let fit = ShipFittingEngine::from_sde(ship_id, 587, &ctx.sde);
+
+    // 1. Target Painter (group 379) with bonus=25% -> tp_sig_multiplier == Some(1.25)
+    let tp_type = synth_type(99_881, 379, "Target Painter I", &[], &[]);
+    let (tp_fm, tp_st_25) = synth_module_and_state(mod_id, 99_881, 19, None, &[(54, 50_000.0), (2044, 20_000.0), (554, 25.0)]);
+    let _ = run_prep(&ctx, &sys, sys_id, char_id, ship_id, 25, mod_id, &tp_fm, &tp_type, &tp_st_25, &fit, Some(target_id), false, false, false)
+        .await
+        .unwrap();
+    let tp_25 = sys.get_combat_state(target_id).await.unwrap().unwrap().tp_sig_multiplier;
+    assert!(tp_25.is_some_and(|v| (v - 1.25).abs() < 1e-6), "expected 1.25, got {tp_25:?}");
+
+    // Non-TP EWAR (web group 65) while projected TP exists: clears manual reset first, MUST NOT set tp_sig_multiplier
+    sys.try_recompute_combat_attributes(target_id, |cs| { cs.tp_sig_multiplier = None; });
+    let web_type = synth_type(99_882, 65, "Stasis Webifier I", &[], &[]);
+    let (web_fm, web_st) = synth_module_and_state(mod_id + 1, 99_882, 20, None, &[(54, 10_000.0), (20, -50.0)]);
+    let _ = run_prep(&ctx, &sys, sys_id, char_id, ship_id, 25, mod_id + 1, &web_fm, &web_type, &web_st, &fit, Some(target_id), false, false, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        sys.get_combat_state(target_id).await.unwrap().unwrap().tp_sig_multiplier,
+        None,
+        "group_id != 379 must not recompute tp_sig_multiplier"
+    );
+
+    // Clear projected EWAR and test tp_mult == 1.0 (bonus=0.0 -> None, kills 1.0 - 1e-6 and 1.0 * 1e-6)
+    ctx.projected_ewar.write().unwrap().remove(&target_id);
+    let (_, tp_st_0) = synth_module_and_state(mod_id, 99_881, 19, None, &[(54, 50_000.0), (2044, 20_000.0), (554, 0.0)]);
+    let _ = run_prep(&ctx, &sys, sys_id, char_id, ship_id, 25, mod_id, &tp_fm, &tp_type, &tp_st_0, &fit, Some(target_id), false, false, false)
+        .await
+        .unwrap();
+    assert_eq!(sys.get_combat_state(target_id).await.unwrap().unwrap().tp_sig_multiplier, None);
+
+    // Exact boundary tp_mult == 1.0 + 1e-6 (bonus = 1e-4%) -> strictly `>` must yield None (kills `>` -> `>=`)
+    ctx.projected_ewar.write().unwrap().remove(&target_id);
+    let (_, tp_st_edge) = synth_module_and_state(mod_id, 99_881, 19, None, &[(54, 50_000.0), (2044, 20_000.0), (554, 1e-4)]);
+    let _ = run_prep(&ctx, &sys, sys_id, char_id, ship_id, 25, mod_id, &tp_fm, &tp_type, &tp_st_edge, &fit, Some(target_id), false, false, false)
+        .await
+        .unwrap();
+    assert_eq!(sys.get_combat_state(target_id).await.unwrap().unwrap().tp_sig_multiplier, None);
+
+    // 2. commit_post_cycle_activation_effects fuel deduction exact boundary: avail==4 untouched, avail==5 consumed
+    let fuel_tid = 17888_u32;
+    let fuel_id = 97_880_500_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            fuel_id,
+            InventoryItemRecord {
+                item_id: fuel_id,
+                type_id: fuel_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 4,
+                ..Default::default()
+            },
+        );
+    });
+    let mut def_short = DeferredPostCycleEffects::default();
+    def_short.fuel_to_deduct = Some((fuel_tid, 5, false));
+    commit_post_cycle_activation_effects(&ctx, &sys, char_id, ship_id, mod_id, &tp_fm, &tp_type, &tp_st_25, None, def_short)
+        .await
+        .unwrap();
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&fuel_id].quantity), 4);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&fuel_id).unwrap().quantity = 5;
+    });
+    let mut def_exact = DeferredPostCycleEffects::default();
+    def_exact.fuel_to_deduct = Some((fuel_tid, 5, false));
+    commit_post_cycle_activation_effects(&ctx, &sys, char_id, ship_id, mod_id, &tp_fm, &tp_type, &tp_st_25, None, def_exact)
+        .await
+        .unwrap();
+    assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&fuel_id)));
 }

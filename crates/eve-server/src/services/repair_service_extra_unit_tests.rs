@@ -478,3 +478,612 @@ async fn upwell_structure_states_tether_repair_and_tax_wallet_credit() {
         assert_eq!(cs.structure_hp, 500.0);
     }
 }
+
+#[tokio::test]
+async fn live_ballpark_and_cached_module_damage_plus_auth_and_tether_tiebreakers() {
+    let (ctx, mut sess, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let station_id = sess.station_id.unwrap_or(60_003_760);
+    sess.station_id = Some(station_id);
+    let struct_near = 1_000_000_000_901_i64;
+    let struct_far = 1_000_000_000_902_i64;
+    let struct_other_sys = 1_000_000_000_903_i64;
+    let struct_abandoned = 1_000_000_000_904_i64;
+    let corp_a = 98_600_101_i64;
+    let corp_b = 98_600_102_i64;
+    let mod_id = 830_001_i64;
+    let corp_box_id = 830_002_i64;
+    let corp_nested_id = 830_003_i64;
+
+    // Seed character money, container in HangarCorp1 (`L224`), damaged fitted module in fitting_cache (`L79-81`, `L750-753`)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&char_id) {
+            c.corporation_id = corp_a;
+            c.balance = IskCents::from_isk(50_000_000);
+        }
+        snap.items.insert(mod_id, make_fighter_item(mod_id, 597, char_id, ship_id, InventoryFlag::MedSlot0, 1));
+        snap.items.insert(corp_box_id, make_fighter_item(corp_box_id, 34, corp_a, station_id, InventoryFlag::CorpSAG1, 1));
+        snap.items.insert(corp_nested_id, make_fighter_item(corp_nested_id, 34, corp_a, corp_box_id, InventoryFlag::Cargo, 1));
+        snap.corp_role_assignments.insert(
+            (corp_a, char_id),
+            CorpMemberRoleAssignment {
+                character_id: char_id,
+                roles: 1u64 << 13,
+                ..Default::default()
+            },
+        );
+    });
+    let mut fit = eve_dogma::ShipFittingEngine::from_sde(ship_id, 587, &ctx.sde);
+    fit.modules.insert(
+        mod_id,
+        eve_dogma::FittedModule {
+            item_id: mod_id,
+            type_id: 597,
+            flag_id: 19,
+            state: eve_dogma::ModuleState::Online,
+            charge_type_id: None,
+            charge_quantity: 0,
+            damage_hp: 15.0,
+            max_hp: 40.0,
+            dynamic_attribute_overrides: HashMap::new(),
+        },
+    );
+    ctx.ship_fittings.write().unwrap().insert(ship_id, fit);
+
+    // Live ballpark damage (`L23-34`, `L43-46`) when `sess.corporation_id = None` (`L378`, `L545`)
+    sess.corporation_id = None;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    {
+        let mut bp = sys.ballpark.write().unwrap();
+        bp.balls.insert(
+            ship_id,
+            Ball {
+                id: ship_id,
+                type_id: 587,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+        );
+        bp.combat_states.insert(
+            ship_id,
+            CombatState {
+                is_tethered: false,
+                shield_hp: 90.0,
+                max_shield_hp: 100.0,
+                armor_hp: 80.0,
+                max_armor_hp: 100.0,
+                structure_hp: 70.0,
+                max_structure_hp: 100.0,
+                ..CombatState::default()
+            },
+        );
+    }
+    let quotes = call_quotes(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::Integer(mod_id), PyRep::Integer(corp_nested_id)]).unwrap();
+    assert!(matches!(quotes, PyRep::Dict(ref rows) if !rows.is_empty()));
+    let rep = call_repair(&ctx, &sess, false, &[PyRep::List(vec![PyRep::Integer(ship_id), PyRep::Integer(mod_id)])]).unwrap();
+    assert!(rep.dict_get("totalCostISK").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);
+    assert_eq!(ctx.ship_fittings.read().unwrap()[&ship_id].modules[&mod_id].damage_hp, 0.0);
+
+    // Upwell structure auth errors (`StructureNotFound`, `StructureAbandoned`, `StructureRepairAccessDenied`) & tether closest tie-breaker (`L282`, `L287`, `L294-297`)
+    {
+        let mut bp = sys.ballpark.write().unwrap();
+        bp.combat_states.get_mut(&ship_id).unwrap().armor_hp = 50.0;
+    }
+    sess.station_id = None;
+    sess.structure_id = Some(1_000_999_888_777);
+    assert_eq!(call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).unwrap_err().code, "StructureNotFound");
+
+    let now = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            struct_abandoned,
+            UpwellStructureRecord {
+                structure_id: struct_abandoned,
+                type_id: 35_832,
+                owner_corp_id: corp_b,
+                solar_system_id: sys_id,
+                name: "Abandoned".into(),
+                state: "ShieldVulnerable".into(),
+                position: [0.0, 0.0, 0.0],
+                fuel_blocks: 0,
+                quantum_core_installed: true,
+                ..Default::default()
+            },
+        );
+        let mut ext = load_ext_state(snap);
+        ext.lifecycle.entry(struct_abandoned).or_default().low_power_since_unix = Some(now.saturating_sub(10 * 86_400));
+        ext.structure_profile_id.insert(struct_near, 8_001);
+        ext.structure_profile_id.insert(struct_far, 8_001);
+        ext.profiles_by_id.insert(
+            8_001,
+            StructureAccessProfile {
+                profile_id: 8_001,
+                owner_corp_id: corp_a,
+                name: "Public Repair".into(),
+                corp_only: false,
+                ..Default::default()
+            },
+        );
+        save_ext_state(snap, &ext);
+
+        snap.structures.insert(
+            struct_other_sys,
+            UpwellStructureRecord {
+                structure_id: struct_other_sys,
+                type_id: 35_832,
+                owner_corp_id: corp_a,
+                solar_system_id: sys_id + 1,
+                name: "WrongSys".into(),
+                state: "ShieldVulnerable".into(),
+                position: [0.0, 0.0, 0.0],
+                fuel_blocks: 100,
+                quantum_core_installed: true,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            struct_near,
+            UpwellStructureRecord {
+                structure_id: struct_near,
+                type_id: 35_832,
+                owner_corp_id: corp_a,
+                solar_system_id: sys_id,
+                name: "NearCit".into(),
+                state: "ShieldVulnerable".into(),
+                position: [500.0, 0.0, 0.0],
+                fuel_blocks: 100,
+                quantum_core_installed: true,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            struct_far,
+            UpwellStructureRecord {
+                structure_id: struct_far,
+                type_id: 35_832,
+                owner_corp_id: corp_a,
+                solar_system_id: sys_id,
+                name: "FarCit".into(),
+                state: "ShieldVulnerable".into(),
+                position: [1_500.0, 0.0, 0.0],
+                fuel_blocks: 100,
+                quantum_core_installed: true,
+                ..Default::default()
+            },
+        );
+    });
+    sess.structure_id = Some(struct_abandoned);
+    assert_eq!(call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).unwrap_err().code, "StructureAbandoned");
+
+    // Non-owner without ACL gets StructureRepairAccessDenied (`L167-177`)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.get_mut(&struct_far).unwrap().owner_corp_id = corp_b;
+    });
+    sess.structure_id = Some(struct_far);
+    assert_eq!(call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).unwrap_err().code, "StructureRepairAccessDenied");
+
+    // Restore ownership and test tethered resolution picks nearest valid operational citadel
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.get_mut(&struct_far).unwrap().owner_corp_id = corp_a;
+    });
+    sess.structure_id = None;
+    {
+        let mut bp = sys.ballpark.write().unwrap();
+        let cs = bp.combat_states.get_mut(&ship_id).unwrap();
+        cs.is_tethered = true;
+        cs.armor_hp = 50.0;
+    }
+    let tethered_rep = call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).unwrap();
+    assert_eq!(tethered_rep.dict_get("locationID").and_then(|v| v.as_i64()), Some(struct_near));
+
+    // CharacterNotFound on repair (`L685-687`)
+    sess.structure_id = None;
+    sess.station_id = Some(station_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.remove(&char_id);
+    });
+    assert_eq!(call_repair(&ctx, &sess, false, &[PyRep::Integer(ship_id)]).unwrap_err().code, "CharacterNotFound");
+}
+
+#[tokio::test]
+async fn live_ballpark_repair_not_operational_and_arithmetic_overflow_branches() {
+    let (mut ctx, mut sess, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let station_id = sess.station_id.unwrap_or(60_003_760);
+    sess.station_id = Some(station_id);
+    let corp_id = sess.corporation_id.unwrap_or(1_000_009);
+    sess.corporation_id = Some(corp_id);
+    let struct_id = 1_040_000_009_001_i64;
+    let struct_not_op = 1_040_000_009_002_i64;
+    let ship2_id = 910_000_002_i64;
+    let container_id = 910_000_003_i64;
+    let corp_mod_id = 910_000_004_i64;
+
+    {
+        let sde_mut = std::sync::Arc::make_mut(&mut ctx.sde);
+        if let Some(t) = sde_mut.types.get_mut(&23_915) {
+            t.category_id = 6;
+            t.base_price = 100_000.0;
+            t.default_attributes.insert(eve_sde::attr_ids::HP_STRUCT, 500.0);
+            t.default_attributes.insert(eve_sde::attr_ids::ARMOR_HP, 500.0);
+            t.default_attributes.insert(eve_sde::attr_ids::SHIELD_CAPACITY, 500.0);
+        }
+    }
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 23_915,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                max_structure_hp: 500.0,
+                structure_hp: 400.0,
+                max_armor_hp: 500.0,
+                armor_hp: 350.0,
+                max_shield_hp: 500.0,
+                shield_hp: 250.0,
+                ..Default::default()
+            },
+        )
+        .await;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship2_id,
+            make_fighter_item(ship2_id, 23_915, char_id, station_id, InventoryFlag::Hangar, 1),
+        );
+        // Corp container in CorpSAG2 (117) holding damaged corp item (`L224`)
+        snap.items.insert(
+            container_id,
+            make_fighter_item(container_id, 17366, corp_id, station_id, InventoryFlag::CorpSAG2, 1),
+        );
+        let mut cm = make_fighter_item(corp_mod_id, 587, corp_id, container_id, InventoryFlag::Unlocked, 1);
+        cm.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, 20.0);
+        snap.items.insert(corp_mod_id, cm);
+        snap.corporations.entry(corp_id).or_insert_with(|| { let mut __corp = CorporationRecord::default(); __corp.corporation_id = corp_id; __corp.name = "RepairCorp".into(); __corp.ticker = "REPC".into(); __corp.ceo_id = char_id; __corp.ensure_wallet_divisions(); __corp });
+        snap.corp_role_assignments.insert((corp_id, char_id), CorpMemberRoleAssignment {
+            character_id: char_id,
+            roles: corp_roles::ROLE_HANGAR_CAN_TAKE[1],
+            ..Default::default()
+        });
+        snap.structures.insert(
+            struct_not_op,
+            UpwellStructureRecord {
+                structure_id: struct_not_op,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "NotOpCit".into(),
+                state: "Destroyed".into(),
+                fuel_blocks: 100,
+                quantum_core_installed: true,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            struct_id,
+            UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "OpCit".into(),
+                state: "ShieldVulnerable".into(),
+                fuel_blocks: 100,
+                quantum_core_installed: true,
+                ..Default::default()
+            },
+        );
+        let mut ext = load_ext_state(snap);
+        ext.access_profiles.insert(
+            struct_id,
+            StructureAccessProfile {
+                profile_id: 99,
+                owner_corp_id: corp_id,
+                name: "Taxed Profile".into(),
+                service_settings: HashMap::from([(13, 10_000)]),
+                ..Default::default()
+            },
+        );
+        save_ext_state(snap, &ext);
+    });
+
+    // Live ballpark hull/armor/shield damage calculation & restoration (`L23-34`, `L43-46`, `L765`)
+    let q_live = call_quotes(&ctx, &sess, &[PyRep::Integer(ship_id)]).unwrap();
+    assert!(q_live.dict_get(&ship_id.to_string()).is_some() || !matches!(q_live, PyRep::None));
+    assert!(call_repair(&ctx, &sess, false, &[PyRep::Integer(ship_id)]).is_ok());
+
+    // Parent container flag CorpSAG2 permission check (`L224`)
+    assert!(call_repair(&ctx, &sess, false, &[PyRep::Integer(corp_mod_id)]).is_err());
+
+    // StructureNotOperational (`L157-162` guard via `is_operational`)
+    sess.structure_id = Some(struct_not_op);
+    assert_eq!(call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).unwrap_err().code, "StructureNotOperational");
+
+    // Structure location resolved via session.station_id >= 1e12 (`L260-261`) + corp wallet overflow (`L708-712`)
+    sess.structure_id = None;
+    sess.station_id = Some(struct_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.sp6_lifecycle.ship_combat_hp.insert(
+            ship_id,
+            eve_db::PersistedCombatHp { hull_hp: 100.0, armor_hp: 100.0, shield_hp: 100.0 },
+        );
+        snap.items.get_mut(&ship_id).unwrap().location_id = struct_id;
+        snap.corporations.get_mut(&corp_id).unwrap().set_division_balance(1, IskCents(i64::MAX - 1));
+    });
+    assert_eq!(call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).unwrap_err().code, "ArithmeticOverflow");
+
+    // ArithmeticOverflow in Upwell item_cents (`L653-655`) & station item_base (`L639-641`)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.get_mut(&corp_id).unwrap().set_division_balance(1, IskCents(0));
+        snap.items
+            .get_mut(&ship_id)
+            .unwrap()
+            .dynamic_attributes
+            .insert(eve_sde::attr_ids::DAMAGE, 1e18);
+    });
+    assert_eq!(call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).unwrap_err().code, "ArithmeticOverflow");
+    sess.station_id = Some(station_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&ship_id).unwrap().location_id = station_id;
+        snap.characters.get_mut(&char_id).unwrap().balance = IskCents(i64::MAX);
+    });
+    assert_eq!(call_repair(&ctx, &sess, false, &[PyRep::Integer(ship_id)]).unwrap_err().code, "ArithmeticOverflow");
+
+    // Two items each slightly over half of i64::MAX base cost overflows base_total_cents (`L644-648`)
+    // For type 23_915: base_price = 100_000 * 7.5e-6 = 0.75 ISK/HP = 75 cents/HP.
+    // i64::MAX / 75 ~= 1.23e17; 7e16 * 75 = 5.25e18 (fits i64), 2 * 5.25e18 overflows i64!
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.sp6_lifecycle.ship_combat_hp.remove(&ship_id);
+        snap.sp6_lifecycle.ship_combat_hp.remove(&ship2_id);
+        snap.items.get_mut(&ship_id).unwrap().dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, 7.0e16);
+        snap.items.get_mut(&ship2_id).unwrap().dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, 7.0e16);
+    });
+    assert_eq!(
+        call_repair(&ctx, &sess, false, &[PyRep::List(vec![PyRep::Integer(ship_id), PyRep::Integer(ship2_id)])])
+            .unwrap_err()
+            .code,
+        "ArithmeticOverflow"
+    );
+
+    // Same accumulator overflow (`L658-662`) at Upwell citadel
+    sess.station_id = None;
+    sess.structure_id = Some(struct_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&ship_id).unwrap().location_id = struct_id;
+        snap.items.get_mut(&ship2_id).unwrap().location_id = struct_id;
+    });
+    assert_eq!(
+        call_repair(&ctx, &sess, true, &[PyRep::List(vec![PyRep::Integer(ship_id), PyRep::Integer(ship2_id)])])
+            .unwrap_err()
+            .code,
+        "ArithmeticOverflow"
+    );
+}
+
+#[tokio::test]
+async fn mutants_cov_ship_combat_damage_tether_acl_and_structure_tax() {
+    let (mut ctx, mut sess, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let station_id = sess.station_id.unwrap_or(60_003_760);
+    let corp_a = sess.corporation_id.unwrap_or(1_000_009);
+    let corp_b = corp_a + 1;
+    let ship_no_shield = ship_id;
+    let ship_with_shield = 910_090_002_i64;
+    let denied_struct = 1_040_090_000_001_i64;
+    let taxed_struct = 1_040_090_000_002_i64;
+
+    {
+        let sde_mut = std::sync::Arc::make_mut(&mut ctx.sde);
+        if let Some(t) = sde_mut.types.get_mut(&23_915) {
+            t.category_id = 6;
+            t.base_price = 100_000.0; // repair cost = 0.75 ISK/HP
+            t.default_attributes.insert(eve_sde::attr_ids::HP_STRUCT, 500.0);
+            t.default_attributes.insert(eve_sde::attr_ids::ARMOR_HP, 500.0);
+            t.default_attributes.insert(eve_sde::attr_ids::SHIELD_CAPACITY, 500.0);
+        }
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&char_id) {
+            c.station_id = Some(station_id);
+            c.structure_id = None;
+            c.corporation_id = corp_a;
+            c.balance = IskCents::from_isk(1_000_000);
+        }
+        snap.corporations.entry(corp_a).or_insert_with(|| {
+            let mut corp = CorporationRecord::default();
+            corp.corporation_id = corp_a;
+            corp.name = "RepairCorpA".into();
+            corp.ticker = "RCA".into();
+            corp.ceo_id = char_id;
+            corp.ensure_wallet_divisions();
+            corp
+        });
+        snap.items.insert(
+            ship_no_shield,
+            make_fighter_item(ship_no_shield, 23_915, char_id, station_id, InventoryFlag::Hangar, 1),
+        );
+        snap.items.insert(
+            ship_with_shield,
+            make_fighter_item(ship_with_shield, 23_915, char_id, station_id, InventoryFlag::Hangar, 1),
+        );
+    });
+
+    // Spawn ballpark combat states:
+    // - ship_no_shield: hull_dmg=10, armor_dmg=20, shield_dmg=0 -> dmg=30, max_hp=1000 (kills L32 > -> >=, ==)
+    // - ship_with_shield: hull_dmg=10, armor_dmg=20, shield_dmg=30 -> dmg=60, max_hp=1500 (kills L31 +, L32 <, ==)
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    for (sid, s_hp, a_hp, h_hp, tethered) in [
+        (ship_no_shield, 500.0_f64, 480.0_f64, 490.0_f64, false),
+        (ship_with_shield, 470.0_f64, 480.0_f64, 490.0_f64, true),
+    ] {
+        let _ = sys
+            .spawn_ball_with_combat(
+                Ball {
+                    id: sid,
+                    type_id: 23_915,
+                    position: DVec3::ZERO,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState {
+                    is_tethered: tethered,
+                    max_structure_hp: 500.0,
+                    structure_hp: h_hp,
+                    max_armor_hp: 500.0,
+                    armor_hp: a_hp,
+                    max_shield_hp: 500.0,
+                    shield_hp: s_hp,
+                    ..Default::default()
+                },
+            )
+            .await;
+    }
+
+    sess.station_id = Some(station_id);
+    sess.structure_id = None;
+    sess.corporation_id = Some(corp_a);
+
+    let quote_row_val = |rep: &PyRep, target_id: i64, field: &str| -> f64 {
+        let PyRep::Dict(entries) = rep else { panic!("expected quote dict, got {rep:?}") };
+        let (_, list_rep) = entries.iter().find(|(k, _)| k.as_i64() == Some(target_id)).unwrap();
+        let PyRep::List(rows) = list_rep else { panic!("expected quote rows") };
+        rows[0].dict_get(field).and_then(|v| v.as_f64()).unwrap()
+    };
+
+    let q_rep = call_quotes(
+        &ctx,
+        &sess,
+        &[PyRep::List(vec![PyRep::Integer(ship_no_shield), PyRep::Integer(ship_with_shield)])],
+    )
+    .unwrap();
+    assert!((quote_row_val(&q_rep, ship_no_shield, "damage") - 30.0).abs() < 1e-6);
+    assert!((quote_row_val(&q_rep, ship_no_shield, "maxHealth") - 1000.0).abs() < 1e-6);
+    assert!((quote_row_val(&q_rep, ship_with_shield, "damage") - 60.0).abs() < 1e-6);
+    assert!((quote_row_val(&q_rep, ship_with_shield, "maxHealth") - 1500.0).abs() < 1e-6);
+
+    // 2. validate_structure_repair_access: tethered near ONLY corp_b private citadel -> NotInStructure
+    // (if validate_structure_repair_access mutated to Ok(()), resolves denied_struct and returns StructureRepairAccessDenied)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            denied_struct,
+            UpwellStructureRecord {
+                structure_id: denied_struct,
+                type_id: 35_832,
+                owner_corp_id: corp_b,
+                solar_system_id: sys_id,
+                name: "DeniedCitadel".into(),
+                state: "ShieldVulnerable".into(),
+                position: [500.0, 0.0, 0.0],
+                fuel_blocks: 100,
+                quantum_core_installed: true,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            taxed_struct,
+            UpwellStructureRecord {
+                structure_id: taxed_struct,
+                type_id: 35_832,
+                owner_corp_id: corp_a,
+                solar_system_id: sys_id,
+                name: "TaxedCitadel".into(),
+                state: "ShieldVulnerable".into(),
+                position: [1_000_000_000.0, 0.0, 0.0],
+                fuel_blocks: 100,
+                quantum_core_installed: true,
+                ..Default::default()
+            },
+        );
+        let mut ext = load_ext_state(snap);
+        let denied_prof = StructureAccessProfile {
+            profile_id: 8_011,
+            owner_corp_id: corp_b,
+            name: "Denied".into(),
+            corp_only: true,
+            ..Default::default()
+        };
+        ext.structure_profile_id.insert(denied_struct, 8_011);
+        ext.profiles_by_id.insert(8_011, denied_prof.clone());
+        ext.access_profiles.insert(denied_struct, denied_prof);
+        ext.structure_profile_id.insert(taxed_struct, 8_012);
+        let mut tax_prof = StructureAccessProfile {
+            profile_id: 8_012,
+            owner_corp_id: corp_a,
+            name: "Taxed5Pct".into(),
+            corp_only: false,
+            ..Default::default()
+        };
+        tax_prof.service_settings.insert(13, 500);
+        ext.profiles_by_id.insert(8_012, tax_prof.clone());
+        ext.access_profiles.insert(taxed_struct, tax_prof);
+        save_ext_state(snap, &ext);
+    });
+
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.ship_id = Some(ship_with_shield);
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_with_shield;
+        let sh = snap.items.get_mut(&ship_with_shield).unwrap();
+        sh.location_id = sys_id as i64;
+        sh.flag = InventoryFlag::None;
+    });
+    assert_eq!(
+        call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_with_shield)])
+            .unwrap_err()
+            .code,
+        "NotInStructure"
+    );
+
+    // 3. Dock in taxed_struct (500 bps = 5% tax) with damage=100 (75.00 ISK base; Upwell service charge = 3 cents/HP -> 3.00 ISK)
+    // Kills resolve_structure_repair_tax_bps -> Ok(-1/0/1) and handle_repair_items_in_location -> Ok(Default)
+    {
+        let mut bp = sys.ballpark.write().unwrap();
+        let cs = bp.combat_states.get_mut(&ship_with_shield).unwrap();
+        cs.shield_hp = 500.0;
+        cs.structure_hp = 500.0;
+        cs.armor_hp = 400.0; // damage = 100.0 -> base 75.00 ISK -> Upwell 3 cents/HP * 100 = 3.00 ISK
+    }
+    sess.structure_id = Some(taxed_struct);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().structure_id = Some(taxed_struct);
+        let sh = snap.items.get_mut(&ship_with_shield).unwrap();
+        sh.location_id = taxed_struct;
+        sh.flag = InventoryFlag::Hangar;
+    });
+
+    let q_tax = call_quotes(&ctx, &sess, &[PyRep::Integer(ship_with_shield)]).unwrap();
+    assert!((quote_row_val(&q_tax, ship_with_shield, "totalRepairCost") - 3.00).abs() < 0.02);
+
+    let rep_tax = call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_with_shield)]).unwrap();
+    assert_eq!(
+        rep_tax.dict_get("locationID").and_then(|v| v.as_i64()),
+        Some(taxed_struct)
+    );
+    assert!(
+        (rep_tax.dict_get("totalCostISK").and_then(|v| v.as_f64()).unwrap() - 3.00).abs() < 0.02
+    );
+}

@@ -88,6 +88,7 @@ pub(crate) struct CynoPortalState {
     pub(crate) beacons: HashMap<(usize, i64), FleetModuleBeacon>,
     destroyed_beacons: HashMap<(usize, i64), FleetModuleBeacon>,
     bridges: HashMap<(usize, i64), ActiveJumpBridge>,
+    beacon_cycles: HashMap<(usize, i64), (u32, i64)>,
 }
 
 pub(super) fn purge_expired(st: &mut CynoPortalState, ctx_id: usize, now_unix: u64) {
@@ -129,7 +130,8 @@ pub fn on_cyno_ship_destroyed(ctx: &ServerContext, ship_id: i64) {
     let key = ctx_key(ctx);
     let now = ctx.now_unix_secs();
     let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
-    st.destroyed_beacons.retain(|_, b| b.expires_at_unix > now);
+    st.destroyed_beacons
+        .retain(|&(ck, _), b| ck != key || b.expires_at_unix > now);
     let mut removed_bridges = Vec::new();
     st.bridges.retain(|&(k, _), br| {
         if k == key && br.bridger_ship_id == ship_id {
@@ -153,7 +155,15 @@ pub fn on_cyno_ship_destroyed(ctx: &ServerContext, ship_id: i64) {
     }
     st.beacons
         .retain(|&(k, _), b| !(k == key && b.ship_id == ship_id && b.expires_at_unix <= now));
+    let beacon_cycle = st.beacon_cycles.remove(&(key, ship_id));
     drop(st);
+    if let Some((bsys, bmod)) = beacon_cycle {
+        if bmod != 0 {
+            ctx.systems
+                .get_or_spawn(bsys)
+                .try_remove_module_cycle(ship_id, bmod);
+        }
+    }
     for (sys_id, bridger_ship_id, portal_mod_id, ball_id) in removed_bridges {
         let sys = ctx.systems.get_or_spawn(sys_id);
         if ball_id != 0 {
@@ -620,6 +630,7 @@ async fn light_cyno(
         if st.beacons.get(&(ctx_key(ctx), ship_id)).is_some_and(|b| b.beacon_id == -ship_id) {
             st.beacons.remove(&(ctx_key(ctx), ship_id));
         }
+        st.beacon_cycles.remove(&(ctx_key(ctx), ship_id));
     };
     if let Err(e) = sys.add_module_cycle(self_immobilizing_cycle(
         ship_id,
@@ -633,6 +644,11 @@ async fn light_cyno(
         clear_cyno_claim();
         return Err(err("ModuleActivationFailed", e));
     }
+    cyno_state()
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .beacon_cycles
+        .insert((ctx_key(ctx), ship_id), (sys_id, module_id));
     if fuel_qty > 0 {
         if let Err(e) = consume_or_err(ctx, ship_id, fuel_type, fuel_qty, |have| {
             format!("Requires {fuel_qty} x type {fuel_type}, ship holds {have}")

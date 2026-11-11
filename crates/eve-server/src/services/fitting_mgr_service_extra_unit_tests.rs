@@ -594,3 +594,108 @@ async fn alliance_fittings_community_content_role_update_delete_and_max_cap() {
     .await;
     assert_eq!(del_one, PyRep::List(vec![PyRep::Integer(800_001)]));
 }
+
+#[tokio::test]
+async fn fitting_update_and_delete_arity_unknown_service_and_state_mutants() {
+    let ctx = make_ctx();
+    let cid = 90_000_001_i64;
+    let mut sess = SessionState::new(71_500);
+    sess.user_id = Some(1);
+    sess.character_id = Some(cid);
+    sess.corporation_id = Some(98_000_001);
+
+    // Unknown service returns None
+    assert!(call_fit(&ctx, &mut sess, "nonexistent_svc", "GetFittings", &[])
+        .await
+        .is_none());
+
+    let fid1 = 910_001_i64;
+    let fid2 = 910_002_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        for fid in [fid1, fid2] {
+            snap.saved_fittings.insert(
+                fid,
+                SavedFittingRecord {
+                    fitting_id: fid,
+                    owner_id: cid,
+                    name: format!("Orig {fid}"),
+                    ship_type_id: 587,
+                    description: "Initial".into(),
+                    items: Vec::new(),
+                },
+            );
+        }
+    });
+
+    // 4-arg UpdateNameAndDescription(fid, owner_id, name, desc)
+    let upd4 = fit_ok(
+        &ctx,
+        &mut sess,
+        "charFittingMgr",
+        "UpdateNameAndDescription",
+        &[
+            PyRep::Integer(fid1),
+            PyRep::Integer(cid),
+            PyRep::String("Four Arg Name".into()),
+            PyRep::String("Four Arg Desc".into()),
+        ],
+    )
+    .await;
+    assert_eq!(upd4.dict_get("fittingID"), Some(&PyRep::Integer(fid1)));
+    assert_eq!(upd4.dict_get("name"), Some(&PyRep::String("Four Arg Name".into())));
+    assert_eq!(
+        upd4.dict_get("description"),
+        Some(&PyRep::String("Four Arg Desc".into()))
+    );
+    ctx.db.with_snapshot(|snap| {
+        let f = &snap.saved_fittings[&fid1];
+        assert_eq!((f.name.as_str(), f.description.as_str()), ("Four Arg Name", "Four Arg Desc"));
+    });
+
+    // 3-arg UpdateFitting(fid, name, desc)
+    let upd3 = fit_ok(
+        &ctx,
+        &mut sess,
+        "charFittingMgr",
+        "UpdateFitting",
+        &[
+            PyRep::Integer(fid1),
+            PyRep::String("Three Arg Name".into()),
+            PyRep::String("Three Arg Desc".into()),
+        ],
+    )
+    .await;
+    assert_eq!(upd3.dict_get("name"), Some(&PyRep::String("Three Arg Name".into())));
+    ctx.db.with_snapshot(|snap| {
+        let f = &snap.saved_fittings[&fid1];
+        assert_eq!((f.name.as_str(), f.description.as_str()), ("Three Arg Name", "Three Arg Desc"));
+    });
+
+    // 2-arg DeleteFitting(owner_id, fid1) and 1-arg DeleteFitting(fid2) both delete from DB
+    assert_eq!(
+        fit_ok(
+            &ctx,
+            &mut sess,
+            "charFittingMgr",
+            "DeleteFitting",
+            &[PyRep::Integer(cid), PyRep::Integer(fid1)],
+        )
+        .await,
+        PyRep::Bool(true)
+    );
+    assert_eq!(
+        fit_ok(
+            &ctx,
+            &mut sess,
+            "charFittingMgr",
+            "DeleteFitting",
+            &[PyRep::Integer(fid2)],
+        )
+        .await,
+        PyRep::Bool(true)
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.saved_fittings.contains_key(&fid1));
+        assert!(!snap.saved_fittings.contains_key(&fid2));
+    });
+}

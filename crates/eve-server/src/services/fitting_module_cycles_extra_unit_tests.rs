@@ -524,3 +524,202 @@ async fn interdiction_sphere_target_locks_passive_targeter_cap_booster_and_safet
         "CantDoInCurrentSafetyLevel"
     );
 }
+
+#[tokio::test]
+async fn reloading_survey_scanner_specialized_result_and_unload_ammo_boundaries() {
+    let ctx = test_ctx_with_custom(|sde| {
+        // 999_701: Survey Scanner using attribute 54 (10_000.0) fallback when 197 absent
+        sde.types.insert(
+            999_701,
+            custom_inv_type(sde, 999_701, 49, 7, 5.0, 0.0, "Survey Scanner A54", &[(54, 10_000.0)], &[]),
+        );
+        // 999_702: Survey Scanner with neither 197 nor 54 -> 15_000.0 default fallback
+        sde.types.insert(
+            999_702,
+            custom_inv_type(sde, 999_702, 49, 7, 5.0, 0.0, "Survey Scanner Default", &[], &[]),
+        );
+        // 999_703: HIC WDFG (group 899, attr 2037 = 120_000 ms)
+        sde.types.insert(
+            999_703,
+            custom_inv_type(sde, 999_703, 899, 7, 5.0, 0.0, "Warp Disruption Field Generator", &[(2037, 120_000.0)], &[]),
+        );
+        // 999_704: Command Burst (group 515)
+        sde.types.insert(
+            999_704,
+            custom_inv_type(sde, 999_704, 515, 7, 5.0, 0.0, "Command Burst", &[], &[]),
+        );
+        // 999_705: Normal turret (group 53)
+        sde.types.insert(
+            999_705,
+            custom_inv_type(sde, 999_705, 53, 7, 5.0, 100.0, "Light Ion Blaster", &[], &[]),
+        );
+        // 999_706: Charge (cat 8, vol 0.5)
+        sde.types.insert(
+            999_706,
+            custom_inv_type(sde, 999_706, 85, 8, 0.5, 0.0, "Antimatter Charge S", &[], &[]),
+        );
+        // 999_707: Cargo ship (capacity 10.0)
+        sde.types.insert(
+            999_707,
+            custom_inv_type(sde, 999_707, 25, 6, 1_000.0, 10.0, "Small Cargo Test Ship", &[(38, 10.0)], &[]),
+        );
+        // 999_708: Spacer item (cat 4, vol 1.0)
+        sde.types.insert(
+            999_708,
+            custom_inv_type(sde, 999_708, 18, 4, 1.0, 0.0, "Cargo Filler", &[], &[]),
+        );
+    });
+
+    let char_id = 90_000_001_i64;
+    let ship_id = 77_900_001_i64;
+    let mod_master = 77_900_101_i64;
+    let mod_sibling = 77_900_102_i64;
+    let charge_master = 77_900_201_i64;
+    let charge_sibling = 77_900_202_i64;
+    let filler_id = 77_900_301_i64;
+
+    ensure_char(&ctx, char_id, 98_000_001, 30_000_142, ship_id);
+    insert_item(&ctx, ship_id, 999_707, char_id, 30_000_142, InventoryFlag::None, 1, true);
+    insert_item(&ctx, mod_master, 999_705, char_id, ship_id, InventoryFlag::HiSlot0, 1, true);
+    insert_item(&ctx, mod_sibling, 999_705, char_id, ship_id, InventoryFlag::HiSlot1, 1, true);
+    insert_item(&ctx, charge_master, 999_706, char_id, ship_id, InventoryFlag::HiSlot0, 10, false); // 5.0 m3
+    insert_item(&ctx, charge_sibling, 999_706, char_id, ship_id, InventoryFlag::HiSlot1, 2, false); // 1.0 m3
+    insert_item(&ctx, filler_id, 999_708, char_id, ship_id, InventoryFlag::Cargo, 6, false); // 6.0 m3 used of 10.0 m3
+
+    let sys = ctx.systems.get_or_spawn(30_000_142);
+    spawn_ship_with(&ctx, 30_000_142, ship_id, 999_707, char_id, CombatState::default(), false).await;
+
+    // 1. check_module_reloading boundaries (< until vs == until + weapon_banks sibling propagation)
+    let now_u = ctx.now_unix_secs();
+    set_modules_reload_until(&ctx, &[mod_master], now_u);
+    assert!(check_module_reloading(&ctx, ship_id, mod_master).is_ok());
+    set_modules_reload_until(&ctx, &[mod_master], now_u + 1);
+    assert_eq!(check_module_reloading(&ctx, ship_id, mod_master).unwrap_err().code, "ModuleIsReloading");
+
+    set_modules_reload_until(&ctx, &[mod_master], 0);
+    set_modules_reload_until(&ctx, &[mod_sibling], now_u + 5);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.weapon_banks
+            .entry(ship_id)
+            .or_default()
+            .insert(mod_master, vec![mod_master, mod_sibling]);
+    });
+    assert_eq!(check_module_reloading(&ctx, ship_id, mod_master).unwrap_err().code, "ModuleIsReloading");
+    set_modules_reload_until(&ctx, &[mod_sibling], now_u);
+    assert!(check_module_reloading(&ctx, ship_id, mod_master).is_ok());
+
+    // 2. handle_survey_scanner_activation range <= scan_range & quantity <= 0 & attr 54/15k fallback
+    ctx.db.spawn_asteroid(eve_db::AsteroidRecord {
+        asteroid_id: 88_001,
+        solar_system_id: 30_000_142,
+        belt_id: 1,
+        type_id: 1230,
+        quantity: 100,
+        initial_quantity: 100,
+        position: (20_000.0, 0.0, 0.0), // exact dist == 10_000.0 from ship at 10_000.0 -> included
+        radius: 100.0,
+    });
+    ctx.db.spawn_asteroid(eve_db::AsteroidRecord {
+        asteroid_id: 88_002,
+        solar_system_id: 30_000_142,
+        belt_id: 1,
+        type_id: 1230,
+        quantity: 100,
+        initial_quantity: 100,
+        position: (20_001.0, 0.0, 0.0), // dist == 10_001.0 > 10_000.0 -> excluded
+        radius: 100.0,
+    });
+    ctx.db.spawn_asteroid(eve_db::AsteroidRecord {
+        asteroid_id: 88_003,
+        solar_system_id: 30_000_142,
+        belt_id: 1,
+        type_id: 1230,
+        quantity: 0, // quantity <= 0 -> excluded
+        initial_quantity: 100,
+        position: (10_000.0, 0.0, 0.0),
+        radius: 100.0,
+    });
+
+    let count_from_res = |rep: &PyRep| -> i64 {
+        match rep {
+            PyRep::KeyVal(entries) => entries
+                .iter()
+                .find_map(|(k, v)| match v {
+                    PyRep::Integer(n) if k == "count" => Some(*n),
+                    _ => None,
+                })
+                .unwrap_or(-1),
+            _ => -1,
+        }
+    };
+    let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
+    let mod_54_state = eve_dogma::DogmaItemState::from_sde(90_901, 999_701, &ctx.sde);
+    let res_54_clean = handle_survey_scanner_activation(
+        &ctx,
+        &sys,
+        30_000_142,
+        char_id,
+        ship_id,
+        90_901,
+        &ctx.sde.types[&999_701],
+        &mod_54_state,
+    )
+    .await;
+    assert_eq!(count_from_res(&res_54_clean), 1);
+
+    let mod_15k_state = eve_dogma::DogmaItemState::from_sde(90_902, 999_702, &ctx.sde);
+    let res_15k = handle_survey_scanner_activation(
+        &ctx,
+        &sys,
+        30_000_142,
+        char_id,
+        ship_id,
+        90_902,
+        &ctx.sde.types[&999_702],
+        &mod_15k_state,
+    )
+    .await;
+    // 15k default covers both 88_001 and 88_002, while still skipping depleted 88_003
+    assert_eq!(count_from_res(&res_15k), 2);
+
+    // 3. build_specialized_module_result arms: Overload, HIC 899 (bubble vs scripted), Burst 515, Normal None
+    assert!(build_specialized_module_result("Overload", &fit, &ctx, mod_master, &ctx.sde.types[&999_705], None, 0, None).is_some());
+    assert!(build_specialized_module_result("Activate", &fit, &ctx, mod_master, &ctx.sde.types[&999_703], Some(20_000.0), 0, None).is_some());
+    assert!(build_specialized_module_result("Activate", &fit, &ctx, mod_master, &ctx.sde.types[&999_703], None, 100, None).is_some());
+    assert!(build_specialized_module_result("Activate", &fit, &ctx, mod_master, &ctx.sde.types[&999_704], None, 0, Some(999_706)).is_some());
+    assert!(build_specialized_module_result("Activate", &fit, &ctx, mod_master, &ctx.sde.types[&999_705], None, 0, None).is_none());
+
+    // 4. handle_unload_ammo: NotEnoughCargoSpace (atomic leave in HiSlot0), exact boundary, weapon_banks multi-unload
+    let sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        ship_id: Some(ship_id),
+        solar_system_id: Some(30_000_142),
+        ..Default::default()
+    };
+
+    // Total needed across bank = 5.0 + 1.0 = 6.0 m3; free cargo = 10.0 - 6.0 = 4.0 m3 -> fails on first module!
+    let err = handle_unload_ammo(
+        &ctx,
+        &sess,
+        &[PyRep::Integer(ship_id), PyRep::Integer(mod_master)],
+    )
+    .unwrap_err();
+    assert_eq!(err.code, "NotEnoughCargoSpace");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&charge_master].flag, InventoryFlag::HiSlot0);
+        assert_eq!(snap.items[&charge_sibling].flag, InventoryFlag::HiSlot1);
+    });
+
+    // Reduce charge_master to qty = 6 (3.0 m3) + charge_sibling qty = 2 (1.0 m3) -> 4.0 m3 exact fit (6 + 4 == 10.0)!
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&charge_master).unwrap().quantity = 6;
+    });
+    assert!(
+        handle_unload_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::Integer(mod_master)]).is_ok()
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&charge_master].flag, InventoryFlag::Cargo);
+        assert_eq!(snap.items[&charge_sibling].flag, InventoryFlag::Cargo);
+    });
+}

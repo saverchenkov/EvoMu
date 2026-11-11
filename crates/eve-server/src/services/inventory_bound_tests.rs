@@ -293,18 +293,20 @@ fn invbroker_bound_methods_turret_slots_and_corp_roles_at_location() {
         "InventoryNotAccessible"
     );
 
-    // GetInventory(10004) at docked station vs wrong station
-    assert!(handle(
-        &ctx,
-        &sess,
-        Some(&b_station),
-        "invbroker",
-        "GetInventory",
-        &[PyRep::Integer(10_004)],
-        None,
-    )
-    .unwrap()
-    .is_ok());
+    // GetInventory(10004, 10012, 10002) at docked station vs wrong station
+    for container_id in [10_004i64, 10_012, 10_002] {
+        assert!(handle(
+            &ctx,
+            &sess,
+            Some(&b_station),
+            "invbroker",
+            "GetInventory",
+            &[PyRep::Integer(container_id)],
+            None,
+        )
+        .unwrap()
+        .is_ok());
+    }
     let b_wrong = bound_invbroker(char_id, other_station);
     assert_eq!(
         handle(
@@ -433,4 +435,144 @@ fn issue_552_scoped_stasis_and_corp_office_container_take_rbacs() {
         let it_cont = &snap.items[&item_in_cont];
         assert!(validate_corp_source_item_take_access_in_snap(&ctx, snap, mem_id, corp_id, it_cont).is_ok());
     });
+}
+
+#[cfg(test)]
+#[path = "inventory_bound_extra_unit_tests.rs"]
+mod inventory_bound_extra_unit_tests;
+
+#[test]
+fn issue_803_get_inventory_from_id_and_self_inv_item_on_destroyed_dynamic_ship() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let destroyed_ship_id = 200_125_728_i64;
+    let capsule_id = 200_126_481_i64;
+    let sys_id = 30_000_142_u32;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.killmails.insert(
+            1,
+            eve_db::KillmailRecord {
+                kill_id: 1,
+                solar_system_id: sys_id,
+                killed_unix: 1_700_000_100,
+                victim_character_id: char_id,
+                victim_corp_id: 1_000_009,
+                victim_alliance_id: None,
+                ship_type_id: 587,
+                ..Default::default()
+            },
+        );
+    });
+
+    let sess = SessionState {
+        session_id: 1,
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(1_000_009),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(capsule_id),
+        ..Default::default()
+    };
+
+    let b_sys = bound_invbroker(char_id, i64::from(sys_id));
+    let get_inv = handle(
+        &ctx,
+        &sess,
+        Some(&b_sys),
+        "invbroker",
+        "GetInventoryFromId",
+        &[PyRep::Integer(destroyed_ship_id), PyRep::Integer(0)],
+        None,
+    )
+    .unwrap();
+    assert!(
+        get_inv.is_ok(),
+        "GetInventoryFromId on a just-destroyed dynamic ship must return a stub inventory instead of FakeItemNotFound"
+    );
+
+    let b_destroyed = bound_invbroker(char_id, destroyed_ship_id);
+    let self_row = handle(
+        &ctx,
+        &sess,
+        Some(&b_destroyed),
+        "invbroker",
+        "GetSelfInvItem",
+        &[],
+        None,
+    )
+    .unwrap()
+    .expect("GetSelfInvItem on destroyed dynamic ship");
+    let PyRep::DBRow { columns, .. } = self_row else {
+        panic!("expected DBRow from GetSelfInvItem, got {self_row:?}");
+    };
+    let col = |name: &str| columns.iter().find(|(k, _)| k == name).map(|(_, v)| v);
+    assert_eq!(col("itemID"), Some(&PyRep::Integer(destroyed_ship_id)));
+    assert_eq!(col("typeID"), Some(&PyRep::Integer(587)));
+    assert_eq!(col("ownerID"), Some(&PyRep::Integer(char_id)));
+    assert_eq!(col("locationID"), Some(&PyRep::Integer(i64::from(sys_id))));
+    assert_eq!(col("flagID"), Some(&PyRep::Integer(0)));
+    assert_eq!(col("quantity"), Some(&PyRep::Integer(-1)));
+    assert_eq!(col("groupID"), Some(&PyRep::Integer(25)));
+    assert_eq!(col("categoryID"), Some(&PyRep::Integer(6)));
+    assert_eq!(col("customInfo"), Some(&PyRep::String("Rifter".into())));
+
+    // Verify locationID fallback chain (station_id -> structure_id -> solar_system_id -> 30_000_142)
+    // and unknown stub_type_id fallback (groupID=29, categoryID=6, customInfo="")
+    for (st_id, str_id, sol_id, exp_loc) in [
+        (Some(60_003_760_i64), Some(1_000_000_000_777_i64), Some(sys_id), 60_003_760_i64),
+        (None, Some(1_000_000_000_777_i64), Some(sys_id), 1_000_000_000_777_i64),
+        (None, None, None, 30_000_142_i64),
+    ] {
+        let mut alt_sess = sess.clone();
+        alt_sess.station_id = st_id;
+        alt_sess.structure_id = str_id;
+        alt_sess.solar_system_id = sol_id;
+        let alt_row = handle(
+            &ctx,
+            &alt_sess,
+            Some(&b_destroyed),
+            "invbroker",
+            "GetSelfInvItem",
+            &[],
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(alt_row.dbrow_get("locationID"), Some(&PyRep::Integer(exp_loc)));
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(km) = snap.killmails.get_mut(&1) {
+            km.ship_type_id = 999_888_777;
+        }
+    });
+    let unk_row = handle(
+        &ctx,
+        &sess,
+        Some(&b_destroyed),
+        "invbroker",
+        "GetSelfInvItem",
+        &[],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(unk_row.dbrow_get("typeID"), Some(&PyRep::Integer(999_888_777)));
+    assert_eq!(unk_row.dbrow_get("groupID"), Some(&PyRep::Integer(29)));
+    assert_eq!(unk_row.dbrow_get("categoryID"), Some(&PyRep::Integer(6)));
+    assert_eq!(unk_row.dbrow_get("customInfo"), Some(&PyRep::String(String::new())));
+
+    let free_turrets = handle(
+        &ctx,
+        &sess,
+        Some(&b_destroyed),
+        "invbroker",
+        "GetAvailableTurretSlots",
+        &[],
+        None,
+    )
+    .unwrap()
+    .expect("GetAvailableTurretSlots on destroyed dynamic ship");
+    assert_eq!(free_turrets, PyRep::Integer(0));
 }

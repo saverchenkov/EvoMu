@@ -12,6 +12,10 @@ use eve_sde::{InvType, SdeRegistry, SolarSystem};
 use glam::DVec3;
 use std::sync::{Arc, OnceLock};
 
+#[cfg(test)]
+#[path = "fitting_cyno_portal_extra_unit_tests.rs"]
+mod extra_unit_tests;
+
 fn shared_sde() -> Arc<SdeRegistry> {
     static SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
     Arc::clone(SDE.get_or_init(|| Arc::new(SdeRegistry::with_canonical_seed())))
@@ -197,7 +201,7 @@ fn beacon_types_cyno_jammers_and_jump_fuel_consumption_math() {
     assert!((per_ly - 212.5).abs() < 1e-6);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn light_cyno_validation_guards_active_beacon_count_and_destroyed_fallback() {
     let ctx = test_ctx_with_custom(|sde| {
         sde.solar_systems.insert(30_002_505, custom_system(sde, 30_002_505, 10_000_001, -0.5, [0.0, 0.0, 0.0]));
@@ -308,7 +312,7 @@ async fn light_cyno_validation_guards_active_beacon_count_and_destroyed_fallback
     assert!(was_destroyed);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn jump_to_fleet_beacon_relocates_capital_ship_with_fuel_cap_and_fatigue() {
     let origin_sys = 30_002_505u32;
     let dest_sys = 30_002_506u32;

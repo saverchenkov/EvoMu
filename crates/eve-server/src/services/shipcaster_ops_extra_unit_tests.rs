@@ -1,6 +1,6 @@
 //! Extra branch-coverage and mutation-killing unit tests for `shipcaster_ops`.
 
-use super::shipcaster_ops::*;
+use crate::services::shipcaster_ops::*;
 use crate::router::ServerContext;
 use crate::services::account_services::account_services_tests::{auth_session, test_ctx};
 use crate::services::cluster_macho_misc_services::{
@@ -27,7 +27,7 @@ async fn call_shipcaster_err(
         .expect_err("expected error")
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn beacon_constructor_deploy_contribute_deposit_and_link_limits() {
     let ctx = test_ctx();
     let char_id: i64 = 90_000_001;
@@ -219,7 +219,7 @@ async fn beacon_constructor_deploy_contribute_deposit_and_link_limits() {
     assert!(with_misc_state(&ctx, |st| !st.landing_pads.iter().any(|p| p.item_id == deployed.item_id)));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn starter_and_interstellar_shipcaster_jump_validation_and_execution() {
     let ctx = test_ctx();
     let char_id: i64 = 90_000_001;
@@ -465,4 +465,521 @@ async fn starter_and_interstellar_shipcaster_jump_validation_and_execution() {
         .code,
         "ShipcasterTargetNotActiveInCycle"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn coverage_sweep_contribute_deposit_link_starter_and_full_interstellar_jump() {
+    let ctx = test_ctx();
+    let char_id: i64 = 90_000_001;
+    let ship_id: i64 = 990_700_001;
+    let origin_sys: u32 = 30_000_142;
+    let dest_sys: u32 = ctx
+        .sde
+        .solar_systems
+        .iter()
+        .find(|(&id, s)| {
+            let r = (s.security_status * 10.0).round() / 10.0;
+            id < 31_000_000 && id != 30_100_000 && id != origin_sys && id != 30_000_145 && r > 0.0 && r < 0.45
+        })
+        .map(|(&id, _)| id)
+        .unwrap_or(30_002_056);
+
+    // Seed character with war_faction_id = 500_001
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.war_faction_id = Some(500_001);
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587, // Rifter
+                owner_id: char_id,
+                location_id: origin_sys as i64,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+    let sys_origin = ctx.systems.get_or_spawn(origin_sys);
+    sys_origin
+        .spawn_ball_with_meta(
+            Ball {
+                id: ship_id,
+                type_id: 587,
+                position: DVec3::new(0.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 2.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            eve_destiny::CombatState::new(),
+            eve_destiny::SlimItemMeta {
+                owner_id: char_id,
+                char_id: Some(char_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let sys_dest = ctx.systems.get_or_spawn(dest_sys);
+    sys_dest
+        .spawn_ball_with_meta(
+            Ball {
+                id: ship_id,
+                type_id: 587,
+                position: DVec3::new(1000.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 2.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            eve_destiny::CombatState::new(),
+            eve_destiny::SlimItemMeta {
+                owner_id: char_id,
+                char_id: Some(char_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut sess = auth_session(1, char_id, 98_000_001, origin_sys);
+    sess.ship_id = None;
+    sess.solar_system_id = Some(origin_sys);
+
+    // 1. Starter jump errors: No ship (L683), No solar system (L689)
+    assert_eq!(
+        call_shipcaster_err(&ctx, &mut sess, "starterShipcasterTravelMgr", "CmdJumpThroughStarterShipcaster", &[])
+            .await
+            .code,
+        "CustomError"
+    );
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = None;
+    assert_eq!(
+        call_shipcaster_err(&ctx, &mut sess, "starterShipcasterTravelMgr", "CmdJumpThroughStarterShipcaster", &[])
+            .await
+            .code,
+        "CustomError"
+    );
+    // Contribute material errors: No ship (L329), No solar system (L332)
+    sess.ship_id = None;
+    sess.solar_system_id = Some(origin_sys);
+    assert_eq!(contribute_fw_beacon_material(&ctx, &sess, 1, 1, 1).await.unwrap_err().code, "CustomError");
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = None;
+    assert_eq!(contribute_fw_beacon_material(&ctx, &sess, 1, 1, 1).await.unwrap_err().code, "CustomError");
+
+    // Interstellar jump missing ship / missing system (L842, L848)
+    sess.ship_id = None;
+    sess.solar_system_id = Some(origin_sys);
+    assert_eq!(
+        call_shipcaster_err(&ctx, &mut sess, "shipcasterTravelMgr", "CmdJumpThroughShipcaster", &[PyRep::Integer(1), PyRep::Integer(dest_sys as i64)])
+            .await
+            .code,
+        "CustomError"
+    );
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = None;
+    assert_eq!(
+        call_shipcaster_err(&ctx, &mut sess, "shipcasterTravelMgr", "CmdJumpThroughShipcaster", &[PyRep::Integer(1), PyRep::Integer(dest_sys as i64)])
+            .await
+            .code,
+        "CustomError"
+    );
+
+    // Restore session and test beacon constructor contribute + deposit edge cases
+    sess.solar_system_id = Some(dest_sys);
+    let comps = ctx.sde.shipcaster_sde_components().expect("shipcaster_sde_components");
+    let mut ctor_tid = 0_u32;
+    let mut ctor_faction = 500_001_u32;
+    for (&tid, uc) in &comps.under_construction {
+        let f = comps.landing_pad_factions.get(&uc.built_item_type_id).copied().unwrap_or(500_001);
+        if !uc.input_items.is_empty() && matches!(f, 500_001 | 500_002 | 500_003 | 500_004) {
+            ctor_tid = tid;
+            ctor_faction = f;
+            break;
+        }
+    }
+    if ctor_tid == 0 {
+        for (&tid, uc) in &comps.under_construction {
+            if !uc.input_items.is_empty() {
+                ctor_tid = tid;
+                ctor_faction = comps.landing_pad_factions.get(&uc.built_item_type_id).copied().unwrap_or(500_001);
+                break;
+            }
+        }
+    }
+    assert!(ctor_tid > 0);
+    let ctor_item_id: i64 = 990_700_002;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.war_faction_id = Some(ctor_faction as i64);
+        }
+        snap.fw_system_occupations.insert(
+            dest_sys,
+            eve_db::FwSystemOccupationRecord {
+                solar_system_id: dest_sys,
+                owner_faction_id: ctor_faction as i64,
+                occupier_faction_id: ctor_faction as i64,
+                victory_points: 0,
+                victory_points_threshold: 3_000,
+            },
+        );
+        snap.items.insert(
+            ctor_item_id,
+            InventoryItemRecord {
+                item_id: ctor_item_id,
+                type_id: ctor_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    let pad = deploy_fw_beacon_constructor(&ctx, &sess, ctor_item_id, DVec3::new(1000.0, 0.0, 0.0))
+        .await
+        .unwrap();
+    let (&mat_tid, &req_qty) = pad.required_materials.iter().next().unwrap();
+    let probe_mat_id: i64 = 990_700_007;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            probe_mat_id,
+            InventoryItemRecord {
+                item_id: probe_mat_id,
+                type_id: mat_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 5,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    sess.solar_system_id = Some(origin_sys);
+
+    // Unbuilt pad cannot be linked (L558), missing pad cannot be disrupted (L602)
+    assert_eq!(link_fw_landing_pad(&ctx, pad.item_id).unwrap_err().code, "LandingPadUnavailable");
+    assert_eq!(disrupt_or_destroy_fw_landing_pad(&ctx, 999_888_777, false).await.unwrap_err().code, "LandingPadNotFound");
+
+    // Wrong solar system on contribute (L389)
+    assert_eq!(contribute_fw_beacon_material(&ctx, &sess, pad.item_id, probe_mat_id, 1).await.unwrap_err().code, "InvalidSolarSystem");
+    sess.solar_system_id = Some(dest_sys);
+
+    // Wrong militia on contribute (L395)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().war_faction_id = Some(500_099);
+    });
+    assert_eq!(contribute_fw_beacon_material(&ctx, &sess, pad.item_id, probe_mat_id, 1).await.unwrap_err().code, "FactionShipcasterAccessDenied");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().war_faction_id = Some(ctor_faction as i64);
+    });
+
+    // ItemNotInCargo (item not in ship cargo -> L377)
+    let off_ship_id: i64 = 990_700_003;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            off_ship_id,
+            InventoryItemRecord {
+                item_id: off_ship_id,
+                type_id: mat_tid,
+                owner_id: char_id,
+                location_id: dest_sys as i64,
+                flag: InventoryFlag::Hangar,
+                quantity: 10,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    assert_eq!(contribute_fw_beacon_material(&ctx, &sess, pad.item_id, off_ship_id, 1).await.unwrap_err().code, "ItemNotInCargo");
+
+    // Zero-qty contribute -> InsufficientMaterialQuantity (L416)
+    let zero_item_id: i64 = 990_700_004;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            zero_item_id,
+            InventoryItemRecord {
+                item_id: zero_item_id,
+                type_id: mat_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 5,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    assert_eq!(contribute_fw_beacon_material(&ctx, &sess, pad.item_id, zero_item_id, 0).await.unwrap_err().code, "InvalidArguments");
+
+    // Partial contribute leaving remainder in stack (L444) & deposit edge cases (L504, L508, L526, L533)
+    let surplus_item_id: i64 = 990_700_005;
+    let extra_stack_id: i64 = 990_700_006;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            surplus_item_id,
+            InventoryItemRecord {
+                item_id: surplus_item_id,
+                type_id: mat_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: (req_qty + 50) as i32,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            extra_stack_id,
+            InventoryItemRecord {
+                item_id: extra_stack_id,
+                type_id: mat_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 10,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    let _ = deposit_items_from_ship(
+        &ctx,
+        &sess,
+        pad.item_id,
+        Some(&PyRep::Dict(vec![
+            (PyRep::String("badkey".into()), PyRep::Integer(5)),
+            (PyRep::Integer(mat_tid as i64), PyRep::Integer(0)),
+            (PyRep::Integer(mat_tid as i64), PyRep::Integer(1)),
+            (PyRep::Integer(999_999), PyRep::Integer(3)),
+        ])),
+    )
+    .await
+    .unwrap();
+    // Contribute remaining req_qty -> completes mat_tid, leaving surplus in stack (L444), then MaterialRequirementAlreadyMet (L412)
+    let _ = contribute_fw_beacon_material(&ctx, &sess, pad.item_id, surplus_item_id, req_qty)
+        .await
+        .unwrap();
+    assert_eq!(
+        contribute_fw_beacon_material(&ctx, &sess, pad.item_id, surplus_item_id, 1)
+            .await
+            .unwrap_err()
+            .code,
+        "MaterialRequirementAlreadyMet"
+    );
+
+    // LauncherNotFound on link_fw_landing_pad (L565)
+    let custom_pad_id: i64 = 990_700_010;
+    with_misc_state(&ctx, |st| {
+        st.landing_pads.push(LandingPadRecord {
+            item_id: custom_pad_id,
+            type_id: 77586,
+            built_type_id: 77586,
+            faction_id: 500_099,
+            solar_system_id: dest_sys,
+            position: DVec3::ZERO,
+            is_built: true,
+            is_disrupted: false,
+            link_timestamp: 0,
+            required_materials: BTreeMap::new(),
+            contributed_materials: BTreeMap::new(),
+        });
+    });
+    assert_eq!(link_fw_landing_pad(&ctx, custom_pad_id).unwrap_err().code, "LauncherNotFound");
+
+    // Interstellar jump errors & FULL execution (L908..L1139)
+    let launcher_id: i64 = 990_700_020;
+    let pad_id: i64 = 990_700_021;
+    let pad_unlinked: i64 = 990_700_022;
+    let pad_wrong_sys: i64 = 990_700_023;
+    let zz_sys: u32 = 30_100_000;
+    with_misc_state(&ctx, |st| {
+        st.zarzakh_horizon_siege.phase = crate::services::cluster_macho_misc_services::HorizonSiegePhase::Active;
+        st.launchers.push(LauncherRecord {
+            item_id: launcher_id,
+            type_id: 77583,
+            faction_id: 0, // Deathless
+            solar_system_id: origin_sys,
+            position: DVec3::ZERO,
+            linked_pad_ids: vec![pad_id, pad_wrong_sys],
+        });
+        st.landing_pads.push(LandingPadRecord {
+            item_id: pad_id,
+            type_id: 77586,
+            built_type_id: 77586,
+            faction_id: 500010, // Deathless pirate FOB pad
+            solar_system_id: dest_sys,
+            position: DVec3::new(10_000.0, 0.0, 0.0),
+            is_built: true,
+            is_disrupted: false,
+            link_timestamp: 100,
+            required_materials: BTreeMap::new(),
+            contributed_materials: BTreeMap::new(),
+        });
+        st.landing_pads.push(LandingPadRecord {
+            item_id: pad_unlinked,
+            type_id: 77586,
+            built_type_id: 77586,
+            faction_id: 500_001,
+            solar_system_id: zz_sys,
+            position: DVec3::ZERO,
+            is_built: true,
+            is_disrupted: false,
+            link_timestamp: 0,
+            required_materials: BTreeMap::new(),
+            contributed_materials: BTreeMap::new(),
+        });
+        st.landing_pads.push(LandingPadRecord {
+            item_id: pad_wrong_sys,
+            type_id: 77586,
+            built_type_id: 77586,
+            faction_id: 0,
+            solar_system_id: 30_000_145,
+            position: DVec3::ZERO,
+            is_built: true,
+            is_disrupted: false,
+            link_timestamp: 100,
+            required_materials: BTreeMap::new(),
+            contributed_materials: BTreeMap::new(),
+        });
+    });
+
+    sess.solar_system_id = Some(origin_sys);
+    // LandingPadNotFound when passing unknown to_pad_id (L908)
+    assert_eq!(
+        call_shipcaster_err(&ctx, &mut sess, "shipcasterTravelMgr", "CmdJumpThroughShipcaster", &[PyRep::Integer(launcher_id), PyRep::Integer(dest_sys as i64), PyRep::Integer(999_777_666)])
+            .await
+            .code,
+        "LandingPadNotFound"
+    );
+    // EmpireMilitiaRefused when jumping to Zarzakh via Deathless launcher as empire militia (L944)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().war_faction_id = Some(500_001);
+    });
+    assert_eq!(
+        call_shipcaster_err(&ctx, &mut sess, "shipcasterTravelMgr", "CmdJumpThroughShipcaster", &[PyRep::Integer(launcher_id), PyRep::Integer(zz_sys as i64), PyRep::Integer(pad_unlinked)])
+            .await
+            .code,
+        "EmpireMilitiaRefused"
+    );
+    // HorizonSiegeActive when char_war_faction = None -> Zarzakh (L960)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().war_faction_id = None;
+    });
+    assert_eq!(
+        call_shipcaster_err(&ctx, &mut sess, "shipcasterTravelMgr", "CmdJumpThroughShipcaster", &[PyRep::Integer(launcher_id), PyRep::Integer(zz_sys as i64), PyRep::Integer(pad_unlinked)])
+            .await
+            .code,
+        "HorizonSiegeActive"
+    );
+    with_misc_state(&ctx, |st| {
+        st.zarzakh_horizon_siege.phase = crate::services::cluster_macho_misc_services::HorizonSiegePhase::Normal;
+    });
+
+    // InvalidDestinationSystem (pad_wrong_sys is in 30_000_145, requested dest_sys 30_000_144 -> L1038)
+    assert_eq!(
+        call_shipcaster_err(&ctx, &mut sess, "shipcasterTravelMgr", "CmdJumpThroughShipcaster", &[PyRep::Integer(launcher_id), PyRep::Integer(dest_sys as i64), PyRep::Integer(pad_wrong_sys)])
+            .await
+            .code,
+        "InvalidDestinationSystem"
+    );
+    // LandingPadNotLinked (pad_unlinked -> L1029)
+    assert_eq!(
+        call_shipcaster_err(&ctx, &mut sess, "shipcasterTravelMgr", "CmdJumpThroughShipcaster", &[PyRep::Integer(launcher_id), PyRep::Integer(zz_sys as i64), PyRep::Integer(pad_unlinked)])
+            .await
+            .code,
+        "LandingPadNotLinked"
+    );
+    // Spawn launcher ball near ship first so CapitalShipCannotJumpShipcaster & WeaponsTimerActive reach their checks
+    sys_origin
+        .spawn_ball(Ball {
+            id: launcher_id,
+            type_id: 77583,
+            position: DVec3::new(500.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e9,
+            radius: 500.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+
+    // CapitalShipCannotJumpShipcaster (capital/freighter ship group -> L920)
+    let cap_tid = ctx
+        .sde
+        .types
+        .iter()
+        .find(|(_, t)| matches!(t.group_id, 485 | 513 | 547 | 659))
+        .map(|(&id, _)| id)
+        .unwrap_or(19720);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&ship_id).unwrap().type_id = cap_tid;
+    });
+    assert_eq!(
+        call_shipcaster_err(&ctx, &mut sess, "shipcasterTravelMgr", "CmdJumpThroughShipcaster", &[PyRep::Integer(launcher_id), PyRep::Integer(dest_sys as i64), PyRep::Integer(pad_id)])
+            .await
+            .code,
+        "CapitalShipCannotJumpShipcaster"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&ship_id).unwrap().type_id = 587;
+    });
+
+    // WeaponsTimerActive (L1067-1073)
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.get_or_create(char_id).weapon_timer_until_unix = ctx.now_unix() + 60;
+    }
+    assert_eq!(
+        call_shipcaster_err(&ctx, &mut sess, "shipcasterTravelMgr", "CmdJumpThroughShipcaster", &[PyRep::Integer(launcher_id), PyRep::Integer(dest_sys as i64), PyRep::Integer(pad_id)])
+            .await
+            .code,
+        "WeaponsTimerActive"
+    );
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.get_or_create(char_id).weapon_timer_until_unix = 0;
+    }
+
+    // Move launcher ball far away for proximity fail (L1076), then near ship for full SUCCESS jump (L1089-1139)!
+    sys_origin.set_ball_position(launcher_id, DVec3::new(100_000.0, 0.0, 0.0)).await;
+    assert_eq!(
+        call_shipcaster_err(&ctx, &mut sess, "shipcasterTravelMgr", "CmdJumpThroughShipcaster", &[PyRep::Integer(launcher_id), PyRep::Integer(dest_sys as i64), PyRep::Integer(pad_id)])
+            .await
+            .code,
+        "OutsideOperationalRange"
+    );
+    sys_origin.set_ball_position(launcher_id, DVec3::new(500.0, 0.0, 0.0)).await;
+    let kw = HashMap::new();
+    let jump_ok = crate::services::shipcaster_ops::handle(
+        &ctx,
+        &mut sess,
+        "shipcasterTravelMgr",
+        "CmdJumpThroughShipcaster",
+        &[PyRep::Integer(launcher_id), PyRep::Integer(dest_sys as i64), PyRep::Integer(pad_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(jump_ok, PyRep::None);
+    assert_eq!(sess.solar_system_id, Some(dest_sys));
 }
