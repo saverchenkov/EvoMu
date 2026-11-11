@@ -302,6 +302,104 @@ def run_tests(root, sdir, timeout, attest_dir=None):
     return header + out, {"exit": rc, "santa_blocks": santa, "passed": passed, "failed": failed, "killed": killed}
 
 
+class TestRun(object):
+    """`cargo test --workspace` in a background thread, so it runs while the LLM code review runs (user decision
+    2026-11-11). Results are written to the context dir only after join(), so the reviewer never sees a half-written
+    tests.txt; it reads the provisional one written before the review starts."""
+
+    def __init__(self, root, sdir, timeout, attest_dir):
+        import threading
+        self.result = None
+        self.t0 = time.time()
+
+        def work():
+            try:
+                self.result = run_tests(root, sdir, timeout, attest_dir=attest_dir)
+            except Exception as e:  # noqa: BLE001
+                self.result = ("ORCHESTRATOR SUMMARY: exit=-1 test runner crashed: %r\n" % e,
+                               {"exit": -1, "santa_blocks": 0, "passed": 0, "failed": 0, "killed": True})
+            self.wall = time.time() - self.t0
+
+        self.thread = threading.Thread(target=work, name="evomu-review-tests", daemon=True)
+        self.thread.start()
+
+    def join(self):
+        self.thread.join()
+        return self.result[0], self.result[1], self.wall
+
+
+# Carry-over of a code review across a rebase (user decision 2026-11-11). A track that already has a non-FAIL claims
+# review and is rebased onto a newer `main` with its own change byte-identical (same `git patch-id --verbatim` of its
+# code diff against `main`) keeps that review's verdict; only the test gate is re-run on the rebased tree. The test run
+# is what catches interactions with the commits it was rebased over. --final reviews never carry over.
+CARRY_MAX_AGE_DAYS = 7
+CARRY_VERDICTS = ("PASS", "PASS_WITH_ISSUES")
+
+
+def code_patch_id(root, commit):
+    """Patch id of `commit`'s code change against `main` (merge base to commit, gate/generated paths excluded).
+    Because `main` only moves forward, the merge base of an older commit is the `main` it was branched from, so a
+    clean rebase leaves this value unchanged. Returns "" for an unknown commit or an empty change."""
+    mb = subprocess.run(["git", "merge-base", "main", commit], cwd=root, capture_output=True, text=True).stdout.strip()
+    if not mb or mb == subprocess.run(["git", "rev-parse", commit], cwd=root, capture_output=True,
+                                      text=True).stdout.strip():
+        return ""
+    diff = subprocess.run(["git", "diff", "--binary", mb, commit, "--", "."] +
+                          [":(exclude)%s" % p for p in rl.CODE_TREE_EXCLUDES] + [":(exclude)%s" % rl.AUDITOR_ROWS_REL],
+                          cwd=root, capture_output=True).stdout
+    if not diff.strip():
+        return ""
+    out = subprocess.run(["git", "patch-id", "--verbatim"], cwd=root, input=diff, capture_output=True).stdout.decode()
+    return out.split()[0] if out.split() else ""
+
+
+def find_carry_review(root, head, head_pid=None):
+    """Most recent non-FAIL, non-final claims review (any worktree) of a different commit whose code patch equals
+    `head`'s. Returns (review_dict, head_patch_id); review_dict is None when nothing qualifies."""
+    head_pid = head_pid if head_pid is not None else code_patch_id(root, head)
+    if not head_pid:
+        return None, head_pid
+    cutoff = (datetime.datetime.now() - datetime.timedelta(days=CARRY_MAX_AGE_DAYS)).strftime("%Y%m%d-%H%M%S")
+    cands = []
+    for wt in rl.worktree_roots(root):
+        p = os.path.join(wt, rl.STATE_DIRNAME, "state.json")
+        try:
+            recs = json.load(open(p)).get("reviews", []) if os.path.exists(p) else []
+        except Exception:  # noqa: BLE001
+            continue
+        for r in recs:
+            if (isinstance(r, dict) and r.get("mode", "claims") == "claims" and r.get("verdict") in CARRY_VERDICTS
+                    and not r.get("carried_from") and r.get("timestamp", "") >= cutoff):
+                cands.append(dict(r, worktree=wt))
+    cands.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
+    for r in cands:
+        commit = r.get("snapshot_commit") or r.get("head") or ""
+        if not commit or commit[:9] == head[:9]:
+            continue
+        # A recorded patch id was computed against an older main; it is still valid because the merge base of that
+        # commit with today's main is the same commit (main is append-only). Recompute when none was recorded.
+        pid = r.get("patch_id") or code_patch_id(root, commit)
+        if pid and pid == head_pid:
+            return r, head_pid
+    return None, head_pid
+
+
+def carried_structured(r):
+    """Structured reviewer output for a carried-over review: the original findings are listed, not re-judged."""
+    return {
+        "verdict": r["verdict"],
+        "summary": ("Code review carried over from review %s (%s, verdict %s) of commit %s, after a rebase that left "
+                    "this track's code change byte-identical (git patch-id --verbatim). The code review was not "
+                    "repeated; the test gate below ran on this rebased tree. Original report: %s"
+                    % (r.get("timestamp"), r.get("model"), r["verdict"],
+                       (r.get("snapshot_commit") or r.get("head") or "")[:9], r.get("report"))),
+        "blocking_findings": [],
+        "non_blocking_findings": [],
+        "report_markdown": "## Carried-over review\n\nSee the original report for the code review: `%s`.\n\n"
+                           % r.get("report"),
+    }
+
+
 def py2_check(root):
     p = os.path.join(root, "client-bridge", "evomu_bridge.py")
     if not os.path.exists(p):
@@ -508,8 +606,10 @@ def _launch_one(first_cmd, root, sdir, run_dir, tree_before, ts, valid_verdicts,
     if verdict == "ERROR" and not so.get("summary"):
         so = {"summary": "Reviewer did not return a verdict after %d rounds." % max_rounds,
               "report_markdown": (env.get("response") or "")[-4000:]}
-    tree_after = rl.worktree_fingerprint(root)
-    if tree_after != tree_before and not check_tree:
+    tree_after = rl.worktree_fingerprint(root) if check_tree is not None else tree_before
+    if check_tree is None:
+        pass  # the caller compares trees itself (a concurrent test run may still be writing transient files)
+    elif tree_after != tree_before and not check_tree:
         so["summary"] = ("(Background audit of tree %s; the workspace has since moved to %s, so this audit does "
                          "not count for the final gate on the new tree.) " % (tree_before[:12], tree_after[:12])) \
             + so.get("summary", "")
@@ -817,14 +917,16 @@ def main():
         write(os.path.join(ctx, "tests.txt"), "ORCHESTRATOR SUMMARY: tests skipped by --skip-tests (NOT executed)\n")
         parity, parity_md = run_parity(root, sdir, ctx, assume_tests_pass=False)
     elif a.mode == "claims":
-        # Run LLM code review FIRST; run cargo test --workspace ONCE after code review passes (user decision 2026-10-25).
+        # The LLM code review and `cargo test --workspace` run at the same time (user decision 2026-11-11; before
+        # that, tests ran only after a passing code review). The reviewer sees this provisional tests.txt; the real
+        # results replace it when both finish, and a failing test run downgrades a passing verdict to FAIL.
         sys.path.insert(0, os.path.join(HERE, "parity"))
         import parity_status as ps_mod  # noqa: E402
         fn_names, total_tests, total_ignored = ps_mod.discover_test_fns(ps_mod.rust_files(root))
         provisional_header = (
-            "ORCHESTRATOR SUMMARY: exit=0 santa_blocks=0 passed=%d failed=0 executed=POST_REVIEW_GATE "
-            "(cargo test --workspace runs once immediately after LLM code review passes; any compile/test failure "
-            "or unclosed row automatically downgrades verdict to FAIL)\n\n" % total_tests
+            "ORCHESTRATOR SUMMARY: exit=0 santa_blocks=0 passed=%d failed=0 executed=CONCURRENT_TEST_GATE "
+            "(cargo test --workspace is running while you review; any compile/test failure or unclosed row "
+            "automatically downgrades the verdict to FAIL)\n\n" % total_tests
         )
         synth_body = "\n".join(
             ["test %s ... ok" % fn for fn in sorted(fn_names)] +
@@ -832,7 +934,7 @@ def main():
         )
         write(os.path.join(ctx, "tests.txt"), provisional_header + synth_body + "\n")
         test_meta = {"exit": 0, "santa_blocks": 0, "passed": total_tests, "failed": 0, "killed": False,
-                     "executed": "POST_REVIEW_GATE"}
+                     "executed": "CONCURRENT_TEST_GATE"}
         parity, parity_md = run_parity(root, sdir, ctx, assume_tests_pass=True)
         try:
             pre_test_done_rows = {
@@ -841,7 +943,7 @@ def main():
             }
         except Exception:  # noqa: BLE001
             pre_test_done_rows = set()
-        print("[review] pre-test static parity: %s%% closed (%s/%s rows); cargo test runs once after code review passes"
+        print("[review] pre-test static parity: %s%% closed (%s/%s rows); cargo test runs alongside the code review"
               % (parity.get("percent_closed"), parity.get("closed_rows"), parity.get("total_rows")))
     else:
         print("[review] running cargo test (wrappers scrubbed, isolated target dir)...")
@@ -896,11 +998,15 @@ def main():
             launcher = a.launcher
         return build_reviewer_command(prompt, schema, a.model, a.effort, a.reviewer_timeout, root, launcher)
 
+    extra_meta = {}
+
     def record(mode, verdict, so, conv, prefix, model_used=None):
         meta = {"verdict": verdict, "mode": mode, "timestamp": ts, "model": model_used or a.model, "effort": a.effort,
                 "head": head, "base": base, "tree": tree_before, "tests_executed": test_meta.get("executed"),
                 "test_summary": json.dumps(test_meta), "parity_percent": parity.get("percent_closed"),
                 "parity_complete": parity.get("complete"), "conversation_id": conv}
+        if mode == "claims":
+            meta.update(extra_meta)  # patch_id always; carried_from / carried_from_head on a carried-over review
         if a.final and mode == "claims":
             meta["final"] = True  # reviewed through FINAL_CHAIN; the only kind of PASS final_gate.py accepts
         report = render_report(meta, so, parity_md)
@@ -942,20 +1048,52 @@ def main():
         print("[review] %s reviewer command (%s): %s" % (mode, actual_launcher, " ".join(printable)))
         if a.dry_run:
             continue
-        print("[review] launching headless %s reviewer (this can take a while)..." % mode)
         valid = GAP_EXIT if mode == "gap-audit" else EXIT
         final_run = a.final and mode == "claims"
-        verdict, so, conv, model_used = launch_reviewer(cmd, root, sdir, run_dir, tree_before, ts, valid, prefix,
-                                                        chain=FINAL_CHAIN if final_run else None)
-        if mode == "claims" and verdict in ("PASS", "PASS_WITH_ISSUES") and not a.skip_tests:
-            print("[review] LLM code review returned %s; running post-review cargo test --workspace gate (once)..."
-                  % verdict, flush=True)
-            t0_test = time.time()
-            text, tm = run_tests(root, sdir, a.test_timeout, attest_dir=os.path.join(ctx, "attest"))
-            wall_test = time.time() - t0_test
+        test_run = None
+        carry = None
+        if mode == "claims":
+            carry, extra_meta["patch_id"] = (None, "") if a.final else find_carry_review(root, head)
+            if os.environ.get("EVOMU_REVIEW_NO_CARRY") == "1":
+                carry = None
+            if not a.skip_tests:
+                print("[review] starting cargo test --workspace now, alongside the code review...", flush=True)
+                test_run = TestRun(root, sdir, a.test_timeout, os.path.join(ctx, "attest"))
+        if carry:
+            print("[review] this commit's code change is byte-identical to %s, reviewed %s (%s, %s): carrying that "
+                  "verdict over; only the test gate runs." % ((carry.get("snapshot_commit") or carry.get("head"))[:9],
+                                                              carry.get("timestamp"), carry.get("model"),
+                                                              carry["verdict"]), flush=True)
+            extra_meta.update(carried_from=carry.get("timestamp"),
+                              carried_from_head=carry.get("snapshot_commit") or carry.get("head"),
+                              carried_from_report=carry.get("report"))
+            verdict, so, conv, model_used = carry["verdict"], carried_structured(carry), carry.get("conversation_id"), \
+                carry.get("model")
+            if test_run is None:
+                # A carried verdict rests entirely on the test run; without one there is nothing to record.
+                print("[review] --skip-tests with a carried-over review: nothing was checked; not recording.")
+                return 3
+        else:
+            print("[review] launching headless %s reviewer (this can take a while)..." % mode)
+            verdict, so, conv, model_used = launch_reviewer(cmd, root, sdir, run_dir, tree_before, ts, valid, prefix,
+                                                            check_tree=None if test_run is not None else True,
+                                                            chain=FINAL_CHAIN if final_run else None)
+        if test_run is not None:
+            if verdict not in ("PASS", "PASS_WITH_ISSUES"):
+                print("[review] code review returned %s; waiting for the test run so this report covers both..."
+                      % verdict, flush=True)
+            text, tm, wall_test = test_run.join()
+            # The tree check is done here, after the tests finished, so files a test creates and deletes again
+            # cannot make the review INVALID; files a test (or the reviewer) leaves behind still do.
+            tree_after = rl.worktree_fingerprint(root)
+            if tree_after != tree_before and verdict in EXIT:
+                verdict = "INVALID"
+                so["summary"] = ("INVALID: the workspace changed during the review and test run (tree %s -> %s). "
+                                 "The reviewer or a test wrote files that are not gitignored. Re-run on a quiet "
+                                 "tree. " % (tree_before[:12], tree_after[:12])) + so.get("summary", "")
             write(os.path.join(ctx, "tests.txt"), text)
             test_meta = dict(tm, executed=(tm["passed"] + tm["failed"]) > 0 and not tm.get("killed"))
-            print("[review] post-review tests: %s (wall %.1fs)" % (test_meta, wall_test), flush=True)
+            print("[review] tests: %s (wall %.1fs, ran alongside the code review)" % (test_meta, wall_test), flush=True)
             try:
                 import preflight as pf_mod  # noqa: E402
                 pf_mod.record_timing(root, wall_test, text)
@@ -984,22 +1122,21 @@ def main():
                 reason = ("exit=%d, passed=%d, failed=%d, killed=%s, santa=%d, failing=%s, unclosed_rows=%s"
                           % (tm["exit"], tm["passed"], tm["failed"], tm.get("killed"), tm.get("santa_blocks", 0),
                              failing_names[:10], unclosed_rows[:10]))
-                verdict = "FAIL"
+                downgraded = verdict in ("PASS", "PASS_WITH_ISSUES")
+                if downgraded:
+                    verdict = "FAIL"
                 so.setdefault("blocking_findings", []).insert(0, {
                     "id": "ORCHESTRATOR-POST-REVIEW-TEST-FAIL",
                     "severity": "P0",
-                    "title": "Post-review cargo test --workspace gate failed",
+                    "title": "cargo test --workspace gate failed",
                     "evidence": "%s/tests.txt (%s)" % (ctx, reason),
                     "fix": "Fix the compilation error or failing test(s) in %s/tests.txt and re-run run_review.py." % ctx,
                 })
-                so["summary"] = ("[POST-REVIEW TEST GATE FAILED (%s) -> verdict downgraded to FAIL] " % reason) + so.get("summary", "")
+                so["summary"] = ("[TEST GATE FAILED (%s)%s] " % (reason, " -> verdict downgraded to FAIL" if downgraded else "")) + so.get("summary", "")
                 so["report_markdown"] = (
-                    "## Orchestrator Post-Review Test Gate Failure\n\n`cargo test --workspace --no-fail-fast` failed "
-                    "after the LLM code review (%s).\n\n```\n%s\n```\n\n" % (reason, err_tail)
+                    "## Orchestrator Test Gate Failure\n\n`cargo test --workspace --no-fail-fast` failed "
+                    "(%s).\n\n```\n%s\n```\n\n" % (reason, err_tail)
                 ) + so.get("report_markdown", "")
-        elif mode == "claims" and not a.skip_tests:
-            test_meta = {"executed": False, "note": "skipped because LLM code review returned %s" % verdict}
-            print("[review] LLM code review returned %s; skipping post-review cargo test --workspace." % verdict, flush=True)
         if mode == "gap-audit" and verdict in GAP_EXIT:
             added = apply_gap_audit(so, ts)
             so["summary"] = ("[%d new ledger rows appended to auditor_rows.json] " % added) + so.get("summary", "")
@@ -1014,6 +1151,10 @@ def main():
         if mode == "claims" and verdict not in ("PASS", "PASS_WITH_ISSUES") and len(modes) > 1:
             print("[review] claims verdict %s: skipping the chained gap audit (it only runs on a committable "
                   "tree; fix the findings and re-run)." % verdict)
+            break
+        if mode == "claims" and carry and len(modes) > 1:
+            print("[review] carried-over review: skipping the chained gap audit (the code is unchanged since the "
+                  "review it was carried from).")
             break
     if a.dry_run:
         print("[review] dry run: context in %s" % ctx)
