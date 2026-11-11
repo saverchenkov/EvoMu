@@ -21,25 +21,32 @@ fn test_ctx() -> ServerContext {
     let sde = Arc::clone(SDE.get_or_init(|| {
         Arc::new(SdeRegistry::open(SdeRegistry::default_db_path()).expect("open default SDE"))
     }));
-    ServerContext::with_sde_and_repository(sde, Arc::new(WorldRepository::with_demo_seed()))
-        .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED)
+    let ctx = ServerContext::with_sde_and_repository(sde, Arc::new(WorldRepository::with_demo_seed()))
+        .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(
+        1_800_000_000,
+    )));
+    ctx
 }
 
 fn find_null_system_with_reagent_planet(ctx: &ServerContext) -> (u32, i64, [f64; 3]) {
-    for sys in ctx.sde.solar_systems.values() {
-        if crate::services::sov_gameplay::is_claimable_nullsec_system(&ctx.sde, sys.solar_system_id) {
-            for p in ctx.sde.celestials_in_system(sys.solar_system_id) {
-                if p.group_id == 7 && planet_reagent_type(p.type_id).is_some() {
-                    return (
-                        sys.solar_system_id,
-                        p.celestial_id,
-                        [p.position.x, p.position.y, p.position.z],
-                    );
-                }
-            }
-        }
-    }
-    (30_000_142, 40_009_077, [1.0e9, 0.0, 0.0])
+    ctx.sde
+        .solar_systems
+        .values()
+        .filter(|sys| {
+            crate::services::sov_gameplay::is_claimable_nullsec_system(&ctx.sde, sys.solar_system_id)
+        })
+        .flat_map(|sys| {
+            let sid = sys.solar_system_id;
+            ctx.sde
+                .celestials_in_system(sid)
+                .iter()
+                .filter(|p| p.group_id == 7 && planet_reagent_type(p.type_id).is_some())
+                .map(move |p| (sid, p.celestial_id, [p.position.x, p.position.y, p.position.z]))
+                .collect::<Vec<_>>()
+        })
+        .min_by_key(|&(sid, cid, _)| (sid, cid))
+        .unwrap_or((30_000_142, 40_009_077, [1.0e9, 0.0, 0.0]))
 }
 
 #[test]

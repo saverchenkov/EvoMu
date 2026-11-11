@@ -32,7 +32,7 @@ fn test_ctx() -> ServerContext {
         )
         .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED)
     } else {
-        let ctx = ServerContext::new();
+        let ctx = ServerContext::new().with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
         let _ = SHARED_SDE.set(Arc::clone(&ctx.sde));
         ctx
     }
@@ -54,7 +54,7 @@ fn find_level1_standard_agent(ctx: &ServerContext) -> AgentInfo {
     ctx.sde
         .agents
         .values()
-        .find(|a| {
+        .filter(|a| {
             a.level == 1
                 && a.agent_type_id == 2
                 && a.division_id == 24
@@ -66,6 +66,7 @@ fn find_level1_standard_agent(ctx: &ServerContext) -> AgentInfo {
                 })
                 && a.station_id.is_some()
         })
+        .min_by_key(|a| a.agent_id)
         .cloned()
         .expect("SDE must contain a level 1 standard agent")
 }
@@ -252,7 +253,8 @@ async fn mission_offer_restrictions_enforce_storyline_alpha_rnd_cosmos_and_stand
         .sde
         .agents
         .values()
-        .find(|a| matches!(a.agent_type_id, 6 | 7) && a.solar_system_id.is_some())
+        .filter(|a| matches!(a.agent_type_id, 6 | 7) && a.solar_system_id.is_some())
+        .min_by_key(|a| a.agent_id)
         .cloned()
     {
         let mut sess = char_session(char_id, sl_ag.solar_system_id.unwrap(), sl_ag.station_id);
@@ -275,7 +277,13 @@ async fn mission_offer_restrictions_enforce_storyline_alpha_rnd_cosmos_and_stand
         .sde
         .agents
         .values()
-        .find(|a| a.level == 4 && a.agent_type_id == 2 && a.solar_system_id.is_some())
+        .filter(|a| {
+            a.level == 4
+                && a.agent_type_id == 2
+                && a.solar_system_id.is_some()
+                && a.station_id.is_some()
+        })
+        .min_by_key(|a| a.agent_id)
         .cloned()
     {
         let mut sess = char_session(char_id, l4_ag.solar_system_id.unwrap(), l4_ag.station_id);
@@ -345,7 +353,13 @@ async fn mission_offer_restrictions_enforce_storyline_alpha_rnd_cosmos_and_stand
         .sde
         .agents
         .values()
-        .find(|a| a.agent_type_id == 4 && a.level == 1 && a.solar_system_id.is_some())
+        .filter(|a| {
+            a.agent_type_id == 4
+                && a.level == 1
+                && a.solar_system_id.is_some()
+                && a.station_id.is_some()
+        })
+        .min_by_key(|a| a.agent_id)
         .cloned()
     {
         let mut sess = char_session(char_id, rnd_ag.solar_system_id.unwrap(), rnd_ag.station_id);
@@ -388,7 +402,8 @@ async fn mission_offer_restrictions_enforce_storyline_alpha_rnd_cosmos_and_stand
         .sde
         .agents
         .values()
-        .find(|a| a.agent_type_id == 10 && a.solar_system_id.is_some())
+        .filter(|a| a.agent_type_id == 10 && a.solar_system_id.is_some())
+        .min_by_key(|a| a.agent_id)
         .cloned()
     {
         let now = ctx.now_unix();

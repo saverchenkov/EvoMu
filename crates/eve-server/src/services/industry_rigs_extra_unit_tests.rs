@@ -214,6 +214,9 @@ fn facility_modifiers_and_sde_bonuses_cover_tatara_2721_item_fallbacks_and_npc_s
 
 #[test]
 fn rolling_28_day_ema_window_and_insurance_activity_fallback_and_hull_adj_fallback() {
+    let _adj_lock = super::SDE_ADJ_PRICE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     clear_sde_adjusted_prices();
     let mut ctx = make_ctx();
     let sde_mut = Arc::make_mut(&mut ctx.sde);

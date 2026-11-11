@@ -15,17 +15,21 @@ use std::sync::{Arc, OnceLock};
 static SHARED_SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
 
 fn test_ctx() -> ServerContext {
-    if let Some(sde) = SHARED_SDE.get() {
+    let ctx = if let Some(sde) = SHARED_SDE.get() {
         ServerContext::with_sde_and_repository(
             Arc::clone(sde),
             Arc::new(WorldRepository::with_demo_seed()),
         )
         .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED)
     } else {
-        let ctx = ServerContext::new();
+        let ctx = ServerContext::new().with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
         let _ = SHARED_SDE.set(Arc::clone(&ctx.sde));
         ctx
-    }
+    };
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(
+        1_800_000_000,
+    )));
+    ctx
 }
 
 fn char_session(char_id: i64, corp_id: i64, st_id: Option<i64>) -> SessionState {
@@ -108,13 +112,15 @@ fn tax_note_job_cost_meta_eiv_and_cost_index_edges() {
     });
 
     // 3. compute_blueprint_eiv_per_run & canonical cost index edges
-    let bp_type_id = *ctx.sde.blueprints.keys().next().unwrap();
+    let bp_type_id = *ctx.sde.blueprints.keys().min().unwrap();
     let bp_info = ctx.sde.blueprints.get(&bp_type_id).unwrap();
+    let eiv_rxn = compute_blueprint_eiv_per_run(&ctx, bp_info, 9);
+    assert!(eiv_rxn >= 0.0);
     ctx.db.with_mut_snapshot(|snap| {
         let eiv = compute_blueprint_eiv_per_run_with_snap(&ctx, Some(snap), bp_info, 1);
         assert!(eiv >= 0.0);
-        let eiv_rxn = compute_blueprint_eiv_per_run(&ctx, bp_info, 9);
-        assert!(eiv_rxn >= 0.0);
+        let eiv_rxn_snap = compute_blueprint_eiv_per_run_with_snap(&ctx, Some(snap), bp_info, 9);
+        assert!(eiv_rxn_snap >= 0.0);
 
         // compute_canonical_system_cost_index: empty -> 0.01, Cancelled/Reverted/>28d excluded, floor 0.001 & ceiling 0.50
         let sys_id = 30_000_144_u32;
@@ -303,7 +309,7 @@ fn blueprint_data_by_owner_limits_and_locations_edges() {
     let corp_id = 98_000_001_i64;
     let station_id = 60_003_760_i64;
     let ship_id = 100_000_001_i64;
-    let bp_type_id = *ctx.sde.blueprints.keys().next().unwrap();
+    let bp_type_id = *ctx.sde.blueprints.keys().min().unwrap();
     let prod_type_id = ctx.sde.blueprints.get(&bp_type_id).unwrap().product_type_id;
     let kw = HashMap::new();
     let now = ctx.now_unix();

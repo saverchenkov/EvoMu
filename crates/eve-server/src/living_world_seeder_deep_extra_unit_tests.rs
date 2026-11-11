@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 fn custom_sde_for_world_tests() -> SdeRegistry {
     let mut sde = SdeRegistry::with_canonical_seed();
-    let template_type = sde.types.values().next().unwrap().clone();
+    let template_type = sde.types.values().min_by_key(|t| t.type_id).unwrap().clone();
 
     // Custom types: zero-capacity hull, T2 hull, T2 blueprint, faction module, unpriced BOM component & product
     let mut zero_cap_hull = template_type.clone();
@@ -108,7 +108,12 @@ fn custom_sde_for_world_tests() -> SdeRegistry {
     sde.types.insert(990_007, cosmetic_skin);
 
     // Blueprints: pass-1 component (990_003 from Tritanium 34) + pass-2 T2 hull (990_002 from 990_003)
-    let template_bp = sde.blueprints.values().next().unwrap().clone();
+    let template_bp = sde
+        .blueprints
+        .values()
+        .min_by_key(|b| b.blueprint_type_id)
+        .unwrap()
+        .clone();
     let mut bp1 = template_bp.clone();
     bp1.blueprint_type_id = 990_005;
     bp1.product_type_id = 990_003;

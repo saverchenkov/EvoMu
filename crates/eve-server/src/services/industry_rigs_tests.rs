@@ -212,6 +212,9 @@ fn facility_modifiers_and_adjusted_prices_resolve_correctly() {
         assert!(resolve_facility_modifiers_and_system(&ctx, snap, 999_999_999).is_none());
     });
 
+    let _adj_lock = SDE_ADJ_PRICE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     clear_sde_adjusted_prices();
     set_sde_adjusted_prices(HashMap::from([(34, 5.5)]));
     set_sde_adjusted_price(35, 12.0);
@@ -258,6 +261,8 @@ fn facility_modifiers_and_adjusted_prices_resolve_correctly() {
     assert!(ins_val >= 0.0);
     clear_sde_adjusted_prices();
 }
+
+pub(super) static SDE_ADJ_PRICE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
 fn industry_loc_office_and_delivery_target_helpers_work() {

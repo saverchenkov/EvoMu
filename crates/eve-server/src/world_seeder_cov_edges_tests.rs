@@ -8,9 +8,24 @@ use eve_sde::{BlueprintMaterial, SdeRegistry};
 
 fn sde_with_hubs_and_edges() -> SdeRegistry {
     let mut sde = SdeRegistry::with_canonical_seed();
-    let base_type = sde.types.values().next().expect("seed type").clone();
-    let base_bp = sde.blueprints.values().next().expect("seed bp").clone();
-    let tmpl_st = sde.stations.values().next().expect("seed station").clone();
+    let base_type = sde
+        .types
+        .values()
+        .min_by_key(|t| t.type_id)
+        .expect("seed type")
+        .clone();
+    let base_bp = sde
+        .blueprints
+        .values()
+        .min_by_key(|b| b.blueprint_type_id)
+        .expect("seed bp")
+        .clone();
+    let tmpl_st = sde
+        .stations
+        .values()
+        .min_by_key(|s| s.station_id)
+        .expect("seed station")
+        .clone();
 
     for (sid, rid, owner_corp, faction_id) in [
         (60_003_760i64, 10_000_002u32, 1_000_035i64, 500_001i64),
@@ -35,6 +50,7 @@ fn sde_with_hubs_and_edges() -> SdeRegistry {
         t.group_id = grp;
         t.published = pubd;
         t.market_group_id = mg;
+        t.meta_group_id = meta.map(|m| m as u32);
         t.base_price = bp;
         t.name = format!("Type{tid}");
         t.default_attributes.clear();

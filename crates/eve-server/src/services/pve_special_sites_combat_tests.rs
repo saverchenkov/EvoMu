@@ -25,7 +25,8 @@ async fn special_site_npc_destruction_and_seasonal_sites() {
     let ship_tid = sde
         .types
         .values()
-        .find(|t| t.category_id == 6 && t.capacity > 50.0)
+        .filter(|t| t.category_id == 6 && t.group_id == 25 && t.capacity > 50.0)
+        .min_by_key(|t| t.type_id)
         .map(|t| t.type_id)
         .unwrap_or(587);
 

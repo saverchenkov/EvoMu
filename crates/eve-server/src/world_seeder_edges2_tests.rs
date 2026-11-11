@@ -10,8 +10,13 @@ use std::collections::HashMap;
 #[test]
 fn full_market_types_unpublished_exceptions_and_seeded_type_filters() {
     let mut sde = SdeRegistry::with_canonical_seed();
-    let base = sde.types.values().next().unwrap().clone();
-    let base_bp = sde.blueprints.values().next().unwrap().clone();
+    let base = sde.types.values().min_by_key(|t| t.type_id).unwrap().clone();
+    let base_bp = sde
+        .blueprints
+        .values()
+        .min_by_key(|b| b.blueprint_type_id)
+        .unwrap()
+        .clone();
 
     // 1. Unpublished category 9 (Blueprint) and 16 (Skill) -> included in select_full_market_types.
     for (tid, cat, grp) in [
@@ -126,7 +131,7 @@ fn full_market_types_unpublished_exceptions_and_seeded_type_filters() {
 #[test]
 fn seed_full_catalog_plex_t2_faction_and_preexisting_order_dedup() {
     let mut sde = SdeRegistry::with_canonical_seed();
-    let base = sde.types.values().next().unwrap().clone();
+    let base = sde.types.values().min_by_key(|t| t.type_id).unwrap().clone();
 
     // PLEX (44_992) with base_price == 0.0 -> seeded at 5_000_000.0 ISK fair price + both ask and bid in Jita.
     let mut plex = base.clone();

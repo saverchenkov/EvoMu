@@ -17,8 +17,13 @@ fn gameplay_categories_bom_edge_cases_group_1027_and_t1_blueprints() {
     }
 
     let mut sde = SdeRegistry::with_canonical_seed();
-    let base_type = sde.types.values().next().unwrap().clone();
-    let base_bp = sde.blueprints.values().next().unwrap().clone();
+    let base_type = sde.types.values().min_by_key(|t| t.type_id).unwrap().clone();
+    let base_bp = sde
+        .blueprints
+        .values()
+        .min_by_key(|b| b.blueprint_type_id)
+        .unwrap()
+        .clone();
 
     // 1. Blueprint with empty materials (unit_cost == 0.0 -> not inserted)
     let mut empty_bp = base_bp.clone();
@@ -165,7 +170,7 @@ fn gameplay_categories_bom_edge_cases_group_1027_and_t1_blueprints() {
 #[test]
 fn market_catalog_4_sig_fig_rounding_plex_fallback_and_idempotence() {
     let mut sde = SdeRegistry::with_canonical_seed();
-    let base_type = sde.types.values().next().unwrap().clone();
+    let base_type = sde.types.values().min_by_key(|t| t.type_id).unwrap().clone();
 
     // 1. PLEX (44_992) with base_price == 0.0 -> uses 5_000_000.0 fallback and seeds both ask and bid
     let mut plex = base_type.clone();

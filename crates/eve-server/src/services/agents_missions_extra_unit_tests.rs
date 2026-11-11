@@ -26,7 +26,7 @@ pub(super) fn test_ctx() -> ServerContext {
         )
         .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED)
     } else {
-        let ctx = ServerContext::new();
+        let ctx = ServerContext::new().with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
         let _ = SHARED_SDE.set(Arc::clone(&ctx.sde));
         ctx
     }
@@ -67,7 +67,7 @@ pub(super) fn find_standard_agent(ctx: &ServerContext, level: u8) -> AgentInfo {
     ctx.sde
         .agents
         .values()
-        .find(|a| {
+        .filter(|a| {
             a.level == level
                 && a.agent_type_id == 2
                 && a.division_id == 24
@@ -79,6 +79,7 @@ pub(super) fn find_standard_agent(ctx: &ServerContext, level: u8) -> AgentInfo {
                 })
                 && a.station_id.is_some()
         })
+        .min_by_key(|a| a.agent_id)
         .cloned()
         .expect("SDE must contain standard security agent")
 }
@@ -244,7 +245,7 @@ async fn info_service_details_entry_point_and_simple_rpc_branches() {
     );
 
     // R&D agent (agent_type_id == 4) and Locator agent service list population
-    if let Some(rnd_ag) = ctx.sde.agents.values().find(|a| a.agent_type_id == 4 && a.solar_system_id.is_some()).cloned() {
+    if let Some(rnd_ag) = ctx.sde.agents.values().filter(|a| a.agent_type_id == 4 && a.solar_system_id.is_some()).min_by_key(|a| a.agent_id).cloned() {
         let mut rnd_sess = char_session(char_id, rnd_ag.solar_system_id, rnd_ag.station_id);
         let details = call_agent_mgr(&ctx, &mut rnd_sess, "GetInfoServiceDetails", &[PyRep::Integer(rnd_ag.agent_id)], &kw)
             .await
@@ -253,7 +254,7 @@ async fn info_service_details_entry_point_and_simple_rpc_branches() {
         assert!(svcs.iter().any(|s| s.dict_get("agentServiceType") == Some(&PyRep::String("research".into()))));
     }
 
-    if let Some(loc_ag) = ctx.sde.agents.values().find(|a| a.is_locator && a.solar_system_id.is_some()).cloned() {
+    if let Some(loc_ag) = ctx.sde.agents.values().filter(|a| a.is_locator && a.solar_system_id.is_some()).min_by_key(|a| a.agent_id).cloned() {
         let mut loc_sess = char_session(char_id, loc_ag.solar_system_id, loc_ag.station_id);
         let details = call_agent_mgr(&ctx, &mut loc_sess, "GetInfoServiceDetails", &[PyRep::Integer(loc_ag.agent_id)], &kw)
             .await
@@ -294,7 +295,7 @@ async fn mining_epic_arc_storyline_rnd_colocation_and_remote_branches() {
     );
 
     // CantDoMissionAlphaClone on Lv4 agent (`L746`)
-    if let Some(lv4) = ctx.sde.agents.values().find(|a| a.level == 4 && a.agent_type_id == 2 && a.station_id.is_some()).cloned() {
+    if let Some(lv4) = ctx.sde.agents.values().filter(|a| a.level == 4 && a.agent_type_id == 2 && a.station_id.is_some()).min_by_key(|a| a.agent_id).cloned() {
         let mid_lv4 = 990_001_u32;
         ctx.db.with_mut_snapshot(|snap| {
             if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -319,7 +320,7 @@ async fn mining_epic_arc_storyline_rnd_colocation_and_remote_branches() {
     }
 
     // In-space agent colocation (`station_id == None`, `L62-75`): docked fails, too far (>2500m) fails, within 2500m succeeds
-    if let Some(sp_ag) = ctx.sde.agents.values().find(|a| a.station_id.is_none() && a.solar_system_id.is_some() && a.level == 1).cloned() {
+    if let Some(sp_ag) = ctx.sde.agents.values().filter(|a| a.station_id.is_none() && a.solar_system_id.is_some() && a.level == 1).min_by_key(|a| a.agent_id).cloned() {
         let sp_sys = sp_ag.solar_system_id.unwrap();
         let h = ctx.systems.get_or_spawn(sp_sys);
         let ship_id = 100_000_001_i64;
@@ -370,8 +371,9 @@ async fn mining_epic_arc_storyline_rnd_colocation_and_remote_branches() {
         let mid = ctx.db.with_snapshot(|snap| {
             snap.active_missions
                 .values()
-                .find(|m| m.character_id == char_id && m.agent_id == min_ag.agent_id && m.state == "Offered")
+                .filter(|m| m.character_id == char_id && m.agent_id == min_ag.agent_id && m.state == "Offered")
                 .map(|m| m.mission_id)
+                .min()
                 .unwrap()
         });
 
@@ -442,7 +444,7 @@ async fn mining_epic_arc_storyline_rnd_colocation_and_remote_branches() {
     }
 
     // Epic arc agent completion (`agent_type_id == 7`) & respawn check (`L811-818`, `L1267-1299`)
-    if let Some(ep_ag) = ctx.sde.agents.values().find(|a| a.agent_type_id == 7 && a.station_id.is_some() && a.solar_system_id.is_some()).cloned() {
+    if let Some(ep_ag) = ctx.sde.agents.values().filter(|a| a.agent_type_id == 7 && a.station_id.is_some() && a.solar_system_id.is_some()).min_by_key(|a| a.agent_id).cloned() {
         let e_sys = ep_ag.solar_system_id.unwrap();
         let e_st = ep_ag.station_id.unwrap();
         let mut es = char_session(char_id, Some(e_sys), Some(e_st));
@@ -450,8 +452,9 @@ async fn mining_epic_arc_storyline_rnd_colocation_and_remote_branches() {
             let emid = ctx.db.with_snapshot(|snap| {
                 snap.active_missions
                     .values()
-                    .find(|m| m.character_id == char_id && m.agent_id == ep_ag.agent_id && m.state == "Offered")
+                    .filter(|m| m.character_id == char_id && m.agent_id == ep_ag.agent_id && m.state == "Offered")
                     .map(|m| m.mission_id)
+                    .min()
             });
             if let Some(emid) = emid {
                 let _ = call_agent_mgr(&ctx, &mut es, "DoAction", &[PyRep::Integer(3), PyRep::Integer(ep_ag.agent_id), PyRep::Integer(emid as i64)], &kw).await;
@@ -468,7 +471,7 @@ async fn agents_missions_in_space_rnd_epic_arc_trade_heraldry_and_respawn_branch
     let char_id = 980_444_i64;
     let kw = HashMap::new();
     ctx.db.with_mut_snapshot(|snap| {
-        let mut ch = snap.characters.values().next().cloned().unwrap();
+        let mut ch = snap.characters.values().min_by_key(|c| c.character_id).cloned().unwrap();
         ch.character_id = char_id;
         ch.user_id = 44;
         ch.name = "DeepAgentRunner".into();
@@ -476,17 +479,18 @@ async fn agents_missions_in_space_rnd_epic_arc_trade_heraldry_and_respawn_branch
         ch.solar_system_id = 30_000_142;
         ch.station_id = Some(60_003_760);
         ch.structure_id = None;
+        ch.clone_grade = 2;
         ch.balance = eve_db::IskCents::from_f64_isk(500_000_000.0);
         snap.characters.insert(char_id, ch);
     });
 
     // 1. In-space agent colocation distance/docked/no-ship/missing-ship checks (`L59-77`)
-    if let Some(space_ag) = ctx.sde.agents.values().find(|a| a.station_id.is_none() && a.solar_system_id.is_some() && a.level == 1).cloned() {
+    if let Some(space_ag) = ctx.sde.agents.values().filter(|a| a.station_id.is_none() && a.solar_system_id.is_some() && a.level == 1).min_by_key(|a| a.agent_id).cloned() {
         let s_sys = space_ag.solar_system_id.unwrap();
         let mut ss = char_session(char_id, Some(s_sys), None);
         if call_agent_mgr(&ctx, &mut ss, "DoAction", &[PyRep::Integer(2), PyRep::Integer(space_ag.agent_id)], &kw).await.is_ok() {
             let smid = ctx.db.with_snapshot(|snap| {
-                snap.active_missions.values().find(|m| m.character_id == char_id && m.agent_id == space_ag.agent_id && m.state == "Offered").map(|m| m.mission_id)
+                snap.active_missions.values().filter(|m| m.character_id == char_id && m.agent_id == space_ag.agent_id && m.state == "Offered").map(|m| m.mission_id).min()
             });
             if let Some(smid) = smid {
                 let handle = ctx.systems.get_or_spawn(s_sys);
@@ -520,18 +524,21 @@ async fn agents_missions_in_space_rnd_epic_arc_trade_heraldry_and_respawn_branch
                 // Ship > 2500m fails (`L73-75`)
                 ss.ship_id = Some(ship_id);
                 assert_eq!(call_agent_mgr(&ctx, &mut ss, "DoAction", &[PyRep::Integer(3), PyRep::Integer(space_ag.agent_id), PyRep::Integer(smid as i64)], &kw).await.unwrap_err().code, "AgentNotCoLocated");
+                ctx.db.with_mut_snapshot(|snap| {
+                    snap.active_missions.remove(&(char_id, smid));
+                });
             }
         }
     }
 
     // 2. Special dialogue unbound args[1] (`L467-475`) + missing respawn check + InvalidMissionState (`L811-822`, `L849-852`)
-    let any_ag = ctx.sde.agents.values().find(|a| a.station_id.is_some() && a.solar_system_id.is_some() && a.level == 1).unwrap().clone();
+    let any_ag = ctx.sde.agents.values().filter(|a| a.agent_type_id == 2 && a.station_id.is_some() && a.solar_system_id.is_some() && a.level == 1).min_by_key(|a| a.agent_id).unwrap().clone();
     let any_sys = any_ag.solar_system_id.unwrap();
     let any_st = any_ag.station_id.unwrap();
     let mut s_any = char_session(char_id, Some(any_sys), Some(any_st));
     let _ = handle_with_bound(&ctx, &mut s_any, None, "agentMgr", "DoAction", &[PyRep::Integer(14), PyRep::Integer(any_ag.agent_id)], &kw).await;
 
-    let enc_mid = ctx.sde.missions.keys().copied().next().unwrap();
+    let enc_mid = ctx.sde.missions.keys().copied().min().unwrap();
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = any_sys;
@@ -564,9 +571,12 @@ async fn agents_missions_in_space_rnd_epic_arc_trade_heraldry_and_respawn_branch
             .await.unwrap_err().code,
         "InvalidMissionState"
     );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.remove(&(char_id, enc_mid));
+    });
 
     // 3. R&D agent (`agent_type_id == 4`) completion (`L1246-1256`) + Heraldry (`L631-635`) + fallback pool (`L643-648`)
-    if let Some(rnd_ag) = ctx.sde.agents.values().find(|a| a.agent_type_id == 4 && a.station_id.is_some() && a.solar_system_id.is_some()).cloned() {
+    if let Some(rnd_ag) = ctx.sde.agents.values().filter(|a| a.agent_type_id == 4 && a.level == 1 && a.station_id.is_some() && a.solar_system_id.is_some()).min_by_key(|a| a.agent_id).cloned() {
         let r_sys = rnd_ag.solar_system_id.unwrap();
         let r_st = rnd_ag.station_id.unwrap();
         let mut rs = char_session(char_id, Some(r_sys), Some(r_st));
@@ -583,7 +593,7 @@ async fn agents_missions_in_space_rnd_epic_arc_trade_heraldry_and_respawn_branch
         });
         if call_agent_mgr(&ctx, &mut rs, "DoAction", &[PyRep::Integer(2), PyRep::Integer(rnd_ag.agent_id)], &kw).await.is_ok() {
             let rmid = ctx.db.with_snapshot(|snap| {
-                snap.active_missions.values().find(|m| m.character_id == char_id && m.agent_id == rnd_ag.agent_id && m.state == "Offered").map(|m| m.mission_id)
+                snap.active_missions.values().filter(|m| m.character_id == char_id && m.agent_id == rnd_ag.agent_id && m.state == "Offered").map(|m| m.mission_id).min()
             });
             if let Some(rmid) = rmid {
                 let _ = call_agent_mgr(&ctx, &mut rs, "DoAction", &[PyRep::Integer(3), PyRep::Integer(rnd_ag.agent_id), PyRep::Integer(rmid as i64)], &kw).await;
@@ -598,16 +608,18 @@ async fn agents_missions_in_space_rnd_epic_arc_trade_heraldry_and_respawn_branch
             }
         }
     }
-    if let Some(her_ag) = ctx.sde.agents.values().find(|a| (a.agent_type_id == 13 || a.division_id == 37) && a.solar_system_id.is_some()).cloned() {
+    if let Some(her_ag) = ctx.sde.agents.values().filter(|a| (a.agent_type_id == 13 || a.division_id == 37) && a.solar_system_id.is_some()).min_by_key(|a| a.agent_id).cloned() {
         let mut hs = char_session(char_id, her_ag.solar_system_id, her_ag.station_id);
         let _ = call_agent_mgr(&ctx, &mut hs, "DoAction", &[PyRep::Integer(2), PyRep::Integer(her_ag.agent_id)], &kw).await;
     }
 
     // 4. Epic Arc (`agent_type_id == 10`) new + progression + completed reset (`L99-107`, `L1267-1299`)
-    if let Some(ea_ag) = ctx.sde.agents.values().find(|a| a.agent_type_id == 10 && a.solar_system_id.is_some()).cloned() {
+    if let Some(ea_ag) = ctx.sde.agents.values().filter(|a| a.agent_type_id == 10 && a.solar_system_id.is_some()).min_by_key(|a| a.agent_id).cloned() {
         let e_sys = ea_ag.solar_system_id.unwrap();
         let mut es = char_session(char_id, Some(e_sys), ea_ag.station_id);
-        let ea_mids: Vec<u32> = ctx.sde.missions.keys().copied().take(4).collect();
+        let mut ea_mids: Vec<u32> = ctx.sde.missions.keys().copied().collect();
+        ea_mids.sort_unstable();
+        ea_mids.truncate(4);
         for (idx, &emid) in ea_mids.iter().enumerate() {
             ctx.db.with_mut_snapshot(|snap| {
                 let ch = snap.characters.get_mut(&char_id).unwrap();
@@ -634,11 +646,11 @@ async fn agents_missions_in_space_rnd_epic_arc_trade_heraldry_and_respawn_branch
     }
 
     // 5. Journal info for Mining, Trade, Completed/Declined/Quit (`L390-418`), Trade complete (`L1128-1129`), UnknownAgent (`L1024-1029`)
-    let trade_tmpl = ctx.sde.missions.values().find(|m| m.content_template.as_deref().unwrap_or_default().contains("Trade")).cloned();
-    let mining_tmpl = ctx.sde.missions.values().find(|m| m.content_template.as_deref().unwrap_or_default().contains("Mining")).cloned();
+    let trade_tmpl = ctx.sde.missions.values().filter(|m| m.content_template.as_deref().unwrap_or_default().contains("Trade")).min_by_key(|m| m.mission_id).cloned();
+    let mining_tmpl = ctx.sde.missions.values().filter(|m| m.content_template.as_deref().unwrap_or_default().contains("Mining")).min_by_key(|m| m.mission_id).cloned();
     let mut s_j = char_session(char_id, Some(any_sys), Some(any_st));
     for (idx, state_name) in ["Completed", "Declined", "Quit"].into_iter().enumerate() {
-        let mid = trade_tmpl.as_ref().map(|m| m.mission_id).or_else(|| ctx.sde.missions.keys().nth(idx + 5).copied()).unwrap();
+        let mid = trade_tmpl.as_ref().map(|m| m.mission_id).unwrap_or(idx as u32 + 1);
         ctx.db.with_mut_snapshot(|snap| {
             snap.active_missions.insert((char_id, mid), ActiveMissionRecord {
                 mission_id: mid, character_id: char_id, agent_id: any_ag.agent_id,
@@ -711,7 +723,7 @@ async fn agents_missions_targeted_region_closer_space_rnd_mining_coloc_and_respa
     let char_id = 980_555_i64;
     let kw = HashMap::new();
     ctx.db.with_mut_snapshot(|snap| {
-        let mut ch = snap.characters.values().next().cloned().unwrap();
+        let mut ch = snap.characters.values().min_by_key(|c| c.character_id).cloned().unwrap();
         ch.character_id = char_id;
         ch.user_id = 55;
         ch.name = "RegionCloser".into();
@@ -907,7 +919,7 @@ async fn agents_missions_push_over_90_regions() {
     let char_id = 980_666_i64;
     let kw = HashMap::new();
     ctx.db.with_mut_snapshot(|snap| {
-        let mut ch = snap.characters.values().next().cloned().unwrap();
+        let mut ch = snap.characters.values().min_by_key(|c| c.character_id).cloned().unwrap();
         ch.character_id = char_id;
         ch.user_id = 66;
         ch.name = "RegionPush".into();
@@ -930,9 +942,11 @@ async fn agents_missions_push_over_90_regions() {
     assert_eq!(call_agent_mgr(&ctx, &mut jita_s, "GetMissionBriefingInfo", &[PyRep::Integer(3_008_416)], &kw).await.unwrap_err().code, "MissionNotActive");
 
     // Journal unknown mission state arm (L418) + Quit (L1433) + RemoveOfferFromJournal (L1462-1474)
-    let any_ag = ctx.sde.agents.values().find(|a| a.station_id.is_some() && a.solar_system_id.is_some() && a.level == 1).unwrap().clone();
-    let mid0 = *ctx.sde.missions.keys().next().unwrap();
-    let mid1 = *ctx.sde.missions.keys().nth(1).unwrap();
+    let any_ag = ctx.sde.agents.values().filter(|a| a.agent_type_id == 2 && a.station_id.is_some() && a.solar_system_id.is_some() && a.level == 1).min_by_key(|a| a.agent_id).unwrap().clone();
+    let mut sorted_mids: Vec<u32> = ctx.sde.missions.keys().copied().collect();
+    sorted_mids.sort_unstable();
+    let mid0 = sorted_mids[0];
+    let mid1 = sorted_mids[1];
     let mut ag_s = char_session(char_id, any_ag.solar_system_id, any_ag.station_id);
     ctx.db.with_mut_snapshot(|snap| {
         snap.active_missions.insert((char_id, mid0), ActiveMissionRecord {
@@ -957,15 +971,15 @@ async fn agents_missions_push_over_90_regions() {
     assert!(call_agent_mgr(&ctx, &mut ag_s, "RemoveOfferFromJournal", &[PyRep::Integer(mid1 as i64)], &kw).await.is_ok());
 
     // 2. Agent-type gates in DoAction(2): Aura (11, L517), FW (9, L537), EpicArc cooldown (10, L530), COSMOS Expired (8, L563), L5 highsec (L584), R&D no research (4, L597)
-    if let Some(aura_ag) = ctx.sde.agents.values().find(|a| a.agent_type_id == 11 && a.solar_system_id.is_some()).cloned() {
+    if let Some(aura_ag) = ctx.sde.agents.values().filter(|a| a.agent_type_id == 11 && a.solar_system_id.is_some()).min_by_key(|a| a.agent_id).cloned() {
         let mut s = char_session(char_id, aura_ag.solar_system_id, aura_ag.station_id);
         assert_eq!(call_agent_mgr(&ctx, &mut s, "DoAction", &[PyRep::Integer(2), PyRep::Integer(aura_ag.agent_id)], &kw).await.unwrap_err().code, "UnimplementedRPC");
     }
-    if let Some(fw_ag) = ctx.sde.agents.values().find(|a| a.agent_type_id == 9 && a.solar_system_id.is_some()).cloned() {
+    if let Some(fw_ag) = ctx.sde.agents.values().filter(|a| a.agent_type_id == 9 && a.solar_system_id.is_some()).min_by_key(|a| a.agent_id).cloned() {
         let mut s = char_session(char_id, fw_ag.solar_system_id, fw_ag.station_id);
         assert_eq!(call_agent_mgr(&ctx, &mut s, "DoAction", &[PyRep::Integer(2), PyRep::Integer(fw_ag.agent_id)], &kw).await.unwrap_err().code, "NotEnlistedInMilitia");
     }
-    if let Some(ea_ag) = ctx.sde.agents.values().find(|a| a.agent_type_id == 10 && a.solar_system_id.is_some()).cloned() {
+    if let Some(ea_ag) = ctx.sde.agents.values().filter(|a| a.agent_type_id == 10 && a.solar_system_id.is_some()).min_by_key(|a| a.agent_id).cloned() {
         let (arc_id, _) = crate::services::agents_missions::agents_standings_arcs::resolve_epic_arc_id_for_agent(&ctx, ea_ag.agent_id);
         ctx.db.with_mut_snapshot(|snap| {
             crate::services::agents_missions::agents_standings_arcs::save_epic_arc_states(
@@ -980,7 +994,7 @@ async fn agents_missions_push_over_90_regions() {
         assert_eq!(call_agent_mgr(&ctx, &mut s, "DoAction", &[PyRep::Integer(2), PyRep::Integer(ea_ag.agent_id)], &kw).await.unwrap_err().code, "EpicArcOnCooldown");
     }
     if let Some(cos_ag) = ctx.sde.agents.values().filter(|a| a.agent_type_id == 8 && a.solar_system_id.is_some()).min_by_key(|a| a.agent_id).cloned() {
-        let mid_exp = *ctx.sde.missions.keys().nth(2).unwrap();
+        let mid_exp = sorted_mids[2];
         ctx.db.with_mut_snapshot(|snap| {
             snap.active_missions.insert((char_id, mid_exp), ActiveMissionRecord {
                 mission_id: mid_exp, character_id: char_id, agent_id: cos_ag.agent_id,
@@ -995,7 +1009,7 @@ async fn agents_missions_push_over_90_regions() {
         let mut s = char_session(char_id, l5_hs.solar_system_id, l5_hs.station_id);
         assert_eq!(call_agent_mgr(&ctx, &mut s, "DoAction", &[PyRep::Integer(2), PyRep::Integer(l5_hs.agent_id)], &kw).await.unwrap_err().code, "CantDoMission");
     }
-    if let Some(rnd_ag) = ctx.sde.agents.values().find(|a| a.agent_type_id == 4 && a.solar_system_id.is_some()).cloned() {
+    if let Some(rnd_ag) = ctx.sde.agents.values().filter(|a| a.agent_type_id == 4 && a.solar_system_id.is_some()).min_by_key(|a| a.agent_id).cloned() {
         ctx.db.with_mut_snapshot(|snap| {
             let ch = snap.characters.get_mut(&char_id).unwrap();
             ch.standings.insert(rnd_ag.agent_id, 10.0);
@@ -1006,7 +1020,7 @@ async fn agents_missions_push_over_90_regions() {
     }
 
     // 3. Paragon corp LP balance path (`L1230-1232`) + Heraldry/DC offers (`L669`, `L683`)
-    if let Some(dc_ag) = ctx.sde.agents.values().find(|a| a.agent_type_id == 5 && a.solar_system_id.is_some()).cloned() {
+    if let Some(dc_ag) = ctx.sde.agents.values().filter(|a| a.agent_type_id == 5 && a.solar_system_id.is_some()).min_by_key(|a| a.agent_id).cloned() {
         ctx.db.with_mut_snapshot(|snap| {
             let ch = snap.characters.get_mut(&char_id).unwrap();
             ch.standings.insert(dc_ag.agent_id, 10.0);
@@ -1015,9 +1029,9 @@ async fn agents_missions_push_over_90_regions() {
         let mut s = char_session(char_id, dc_ag.solar_system_id, dc_ag.station_id);
         let _ = call_agent_mgr(&ctx, &mut s, "DoAction", &[PyRep::Integer(2), PyRep::Integer(dc_ag.agent_id)], &kw).await;
     }
-    if let Some(para_ag) = ctx.sde.agents.values().find(|a| a.corporation_id == crate::services::lp_store_catalog::PARAGON_CORP_ID && a.solar_system_id.is_some()).cloned() {
+    if let Some(para_ag) = ctx.sde.agents.values().filter(|a| a.corporation_id == crate::services::lp_store_catalog::PARAGON_CORP_ID && a.solar_system_id.is_some()).min_by_key(|a| a.agent_id).cloned() {
         let p_sys = para_ag.solar_system_id.unwrap();
-        let pmid = *ctx.sde.missions.keys().nth(4).unwrap();
+        let pmid = sorted_mids[4];
         ctx.db.with_mut_snapshot(|snap| {
             let ch = snap.characters.get_mut(&char_id).unwrap();
             ch.solar_system_id = p_sys;
@@ -1036,7 +1050,7 @@ async fn agents_missions_push_over_90_regions() {
     }
 
     // 4. Heraldry offer via explicit agent (L631-635, L683) + Trade offer (L676-678)
-    if let Some(her_ag) = ctx.sde.agents.values().find(|a| (a.agent_type_id == 13 || a.division_id == 37) && a.solar_system_id.is_some()).cloned() {
+    if let Some(her_ag) = ctx.sde.agents.values().filter(|a| (a.agent_type_id == 13 || a.division_id == 37) && a.solar_system_id.is_some()).min_by_key(|a| a.agent_id).cloned() {
         ctx.db.with_mut_snapshot(|snap| {
             let ch = snap.characters.get_mut(&char_id).unwrap();
             ch.standings.insert(her_ag.agent_id, 10.0);
@@ -1051,17 +1065,19 @@ async fn agents_missions_push_over_90_regions() {
 
     // 5. Epic arc (`agent_type_id == 10`) progression + completion + reset (`L1271-1286`), UnknownAgent on GetInfoServiceDetails (`L145`)
     assert!(call_agent_mgr(&ctx, &mut jita_s, "GetInfoServiceDetails", &[PyRep::Integer(99_999_888)], &kw).await.is_ok());
-    if let Some(&empty_sys) = ctx.sde.solar_systems.keys().find(|&&sid| !ctx.sde.agents.values().any(|a| a.solar_system_id == Some(sid))) {
+    if let Some(empty_sys) = ctx.sde.solar_systems.keys().copied().filter(|&sid| !ctx.sde.agents.values().any(|a| a.solar_system_id == Some(sid))).min() {
         let mut es_none = char_session(char_id, Some(empty_sys), None);
         assert_eq!(call_agent_mgr(&ctx, &mut es_none, "GetInfoServiceDetails", &[], &kw).await.unwrap_err().code, "UnknownAgent");
     }
     if let Some(ea_ag) = ctx.sde.agents.values().filter(|a| a.agent_type_id == 10 && a.solar_system_id.is_some()).min_by_key(|a| a.agent_id).cloned() {
         let e_sys = ea_ag.solar_system_id.unwrap();
-        let kill_mids: Vec<u32> = ctx.sde.missions.values().filter(|m| {
+        let mut kill_mids: Vec<u32> = ctx.sde.missions.values().filter(|m| {
             let ct = m.content_template.as_deref().unwrap_or_default().to_lowercase();
             let t = m.title.to_lowercase();
             !m.is_courier && !ct.contains("courier") && !ct.contains("trade") && !ct.contains("mining") && !t.contains("mining") && !t.contains("ore") && !t.contains("mineral")
-        }).take(6).map(|m| m.mission_id).collect();
+        }).map(|m| m.mission_id).collect();
+        kill_mids.sort_unstable();
+        kill_mids.truncate(6);
         let mut es = char_session(char_id, Some(e_sys), ea_ag.station_id);
         for (idx, &emid) in kill_mids.iter().enumerate() {
             ctx.db.with_mut_snapshot(|snap| {
