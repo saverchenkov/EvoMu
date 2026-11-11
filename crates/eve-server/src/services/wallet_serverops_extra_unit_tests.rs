@@ -271,7 +271,7 @@ fn pos_mgr_moon_lookup_permissions_sentry_notifications_password_and_links() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unanchor_orbital_distance_system_ownership_and_ship_cargo_branches() {
     let ctx = test_ctx();
     let ceo_id = 90_000_001_i64;
@@ -481,8 +481,16 @@ fn bills_receivable_access_denied_roles_reload_fsd_and_cluster_stats() {
     );
     assert_eq!(call_ws(&ctx, &mut line_sess, "billMgr", "SendAutomaticPaySettings", &[]).unwrap_err().code, "CorpRoleRequired");
 
-    // Nested dict format in SendAutomaticPaySettings + Junior Accountant role
+    // Nested dict format in SendAutomaticPaySettings + Accountant role in DB
     line_sess.corp_role = corp_roles::ROLE_JUNIOR_ACCOUNTANT;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles.insert(
+                line_id,
+                corp_roles::ROLE_ACCOUNTANT | corp_roles::ROLE_ACCOUNT_CAN_TAKE[2],
+            );
+        }
+    });
     assert!(call_ws(
         &ctx,
         &mut line_sess,
@@ -518,18 +526,14 @@ fn bills_receivable_access_denied_roles_reload_fsd_and_cluster_stats() {
 
     ctx.db.with_mut_snapshot(|snap| {
         let full: Vec<String> = (0..260).map(|i| format!("log-{i}")).collect();
-        snap.service_state_blobs.insert(
-            "client_stat_logger:strings".into(),
-            serde_json::to_string(&full).unwrap(),
-        );
+        snap.cluster_and_runtime.client_stat_logger_strings = full;
     });
     assert_eq!(
         call_ws(&ctx, &mut ceo_sess, "clientStatLogger", "LogString", &[PyRep::String("new-entry".into())]).unwrap(),
         PyRep::None
     );
     ctx.db.with_snapshot(|snap| {
-        let list: Vec<String> =
-            serde_json::from_str(&snap.service_state_blobs["client_stat_logger:strings"]).unwrap();
+        let list = &snap.cluster_and_runtime.client_stat_logger_strings;
         assert_eq!(list.len(), 256);
     });
 }

@@ -37,7 +37,7 @@ fn test_pi_commodity_tier_base_cost_and_parse_extractor_heads() {
     assert!(parse_extractor_heads_rep(None).is_none());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pi_orbitals_flush_launch_import_and_program_rpcs() {
     let ctx = make_ctx();
     let char_id = 90_000_001;
@@ -317,3 +317,7 @@ async fn test_pi_orbitals_flush_launch_import_and_program_rpcs() {
         PyRep::None
     );
 }
+
+#[cfg(test)]
+#[path = "pi_orbitals_extra_unit_tests.rs"]
+mod extra_unit_tests;

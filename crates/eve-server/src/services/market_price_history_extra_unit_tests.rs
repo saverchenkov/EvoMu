@@ -335,3 +335,276 @@ fn build_price_history_fallback_from_transactions_and_corp_transactions_rpc() {
         }
     }
 }
+
+#[test]
+fn mutant_kill_matched_orders_npc_filter_history_and_ceo_char_tx_rpcs() {
+    use crate::services::market_price_history::execute_crossed_order_fills_on_modify;
+    use eve_db::MarketHistoryDayRecord;
+
+    let ctx = test_ctx();
+    let ceo_id = 90_000_001_i64;
+    let player_seller = 95_700_020_i64;
+    let player_buyer = 95_700_021_i64;
+    let unauth_member = 95_700_022_i64;
+    let corp_id = 98_700_020_i64;
+    let region_id = 10_000_002_u32;
+    let station_id = 60_003_760_i64;
+    let test_tid = 99_350_u32;
+    let other_tid = 99_351_u32;
+    let now_unix = 1_750_100_000_u64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base_ch = snap.characters[&ceo_id].clone();
+        for (cid, bal) in [
+            (ceo_id, IskCents(1_000_000)),
+            (player_seller, IskCents(500_000)),
+            (player_buyer, IskCents(500_000)),
+            (unauth_member, IskCents(500_000)),
+        ] {
+            let mut ch = base_ch.clone();
+            ch.character_id = cid;
+            ch.corporation_id = if cid == unauth_member || cid == ceo_id { corp_id } else { 1_000_035 };
+            ch.balance = bal;
+            snap.characters.insert(cid, ch);
+        }
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "CeoTxCorp".into();
+        corp.ticker = "CTC".into();
+        corp.ceo_id = ceo_id;
+        corp.members = HashSet::from([ceo_id, unauth_member]);
+        corp.ensure_wallet_divisions();
+        snap.corporations.insert(corp_id, corp);
+
+        // 1. Buy cross against 1 NPC ask (excluded from matched_orders) and 1 player ask (included)
+        snap.market_orders.insert(
+            9_101,
+            MarketOrderRecord {
+                order_id: 9_101,
+                owner_id: ceo_id,
+                station_id,
+                region_id,
+                type_id: test_tid,
+                is_bid: true,
+                price: IskCents(1_000),
+                vol_entered: 2,
+                vol_remaining: 2,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(2_000),
+            },
+        );
+        snap.market_orders.insert(
+            9_102,
+            MarketOrderRecord {
+                order_id: 9_102,
+                owner_id: 1_000_035,
+                station_id,
+                region_id,
+                type_id: test_tid,
+                is_bid: false,
+                price: IskCents(800),
+                vol_entered: 1,
+                vol_remaining: 1,
+                min_volume: 1,
+                is_npc: true,
+                escrow: IskCents(0),
+            },
+        );
+        snap.market_orders.insert(
+            9_103,
+            MarketOrderRecord {
+                order_id: 9_103,
+                owner_id: player_seller,
+                station_id,
+                region_id,
+                type_id: test_tid,
+                is_bid: false,
+                price: IskCents(900),
+                vol_entered: 1,
+                vol_remaining: 1,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+        let mut bid_meta = make_meta(32767, 90, now_unix, None, None);
+        let buy_cross = execute_crossed_order_fills_on_modify(
+            &ctx,
+            snap,
+            9_101,
+            IskCents(1_000),
+            1.0,
+            false,
+            0,
+            ceo_id,
+            now_unix,
+            &mut bid_meta,
+        )
+        .unwrap();
+        assert_eq!(buy_cross.matched_orders, vec![(9_103, player_seller)]);
+
+        // 2. Sell cross against 1 NPC bid (excluded from matched_orders) and 1 player bid (included)
+        snap.market_orders.insert(
+            9_201,
+            MarketOrderRecord {
+                order_id: 9_201,
+                owner_id: player_seller,
+                station_id,
+                region_id,
+                type_id: test_tid,
+                is_bid: false,
+                price: IskCents(500),
+                vol_entered: 2,
+                vol_remaining: 2,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+        snap.market_orders.insert(
+            9_202,
+            MarketOrderRecord {
+                order_id: 9_202,
+                owner_id: 1_000_035,
+                station_id,
+                region_id,
+                type_id: test_tid,
+                is_bid: true,
+                price: IskCents(700),
+                vol_entered: 1,
+                vol_remaining: 1,
+                min_volume: 1,
+                is_npc: true,
+                escrow: IskCents(700),
+            },
+        );
+        snap.market_orders.insert(
+            9_203,
+            MarketOrderRecord {
+                order_id: 9_203,
+                owner_id: player_buyer,
+                station_id,
+                region_id,
+                type_id: test_tid,
+                is_bid: true,
+                price: IskCents(600),
+                vol_entered: 1,
+                vol_remaining: 1,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(600),
+            },
+        );
+        let mut ask_meta = make_meta(32767, 90, now_unix, None, None);
+        let sell_cross = execute_crossed_order_fills_on_modify(
+            &ctx,
+            snap,
+            9_201,
+            IskCents(500),
+            1.0,
+            false,
+            0,
+            player_seller,
+            now_unix,
+            &mut ask_meta,
+        )
+        .unwrap();
+        assert_eq!(sell_cross.matched_orders, vec![(9_203, player_buyer)]);
+
+        // 3. build_price_history_rows: persisted market_history + mixed-type tx fallback filtering
+        snap.market_transactions.push(MarketTransactionRecord {
+            transaction_id: 8_101,
+            date_unix: now_unix,
+            type_id: other_tid,
+            quantity: 5,
+            price: IskCents(2_000),
+            buyer_id: corp_id,
+            seller_id: player_seller,
+            buyer_account_key: 1000,
+            seller_account_key: 1000,
+            location_id: station_id,
+            journal_ref_id: 8_101,
+        });
+        snap.market_transactions.push(MarketTransactionRecord {
+            transaction_id: 8_102,
+            date_unix: now_unix,
+            type_id: test_tid,
+            quantity: 3,
+            price: IskCents(1_200),
+            buyer_id: player_buyer,
+            seller_id: corp_id,
+            buyer_account_key: 1000,
+            seller_account_key: 1000,
+            location_id: station_id,
+            journal_ref_id: 8_102,
+        });
+
+        let tx_rows = build_price_history_rows(snap, other_tid, region_id);
+        assert_eq!(tx_rows.len(), 1);
+        assert_eq!(tx_rows[0][1], PyRep::Real(20.0));
+        assert_eq!(tx_rows[0][4], PyRep::Integer(5));
+        assert_eq!(tx_rows[0][5], PyRep::Integer(1));
+
+        snap.market_history.insert(
+            (region_id, other_tid),
+            vec![
+                MarketHistoryDayRecord {
+                    date: "2024-03-02".into(),
+                    average: 25.0,
+                    highest: 30.0,
+                    lowest: 20.0,
+                    order_count: 4,
+                    volume: 100,
+                    open_price: Some(20.0),
+                    close_price: Some(30.0),
+                },
+                MarketHistoryDayRecord {
+                    date: "2024-03-01".into(),
+                    average: 15.0,
+                    highest: 18.0,
+                    lowest: 12.0,
+                    order_count: 2,
+                    volume: 40,
+                    open_price: Some(12.0),
+                    close_price: Some(18.0),
+                },
+            ],
+        );
+        let hist_rows = build_price_history_rows(snap, other_tid, region_id);
+        assert_eq!(hist_rows.len(), 2);
+        assert_eq!(hist_rows[0][0], PyRep::Integer(date_str_to_filetime("2024-03-01").unwrap()));
+        assert_eq!(hist_rows[0][1], PyRep::Real(12.0));
+        assert_eq!(hist_rows[1][4], PyRep::Integer(100));
+    });
+
+    // 4. handle_market_transactions_rpc: unknown -> None, CharGetTransactions, CEO (no explicit roles) -> Ok, non-CEO -> CrpAccessDenied
+    let sess_ceo = auth_session(1, ceo_id, corp_id, 30_000_142);
+    let sess_unauth = auth_session(2, unauth_member, corp_id, 30_000_142);
+
+    assert!(handle_market_transactions_rpc(&ctx, &sess_ceo, "UnknownMarketTxRpc", &[]).is_none());
+
+    let char_res = handle_market_transactions_rpc(&ctx, &sess_ceo, "CharGetTransactions", &[])
+        .unwrap()
+        .unwrap();
+    let PyRep::ObjectEx { list: c_rows, .. } = char_res else {
+        panic!("expected CRowset");
+    };
+    assert_eq!(c_rows.len(), 2);
+
+    let corp_ceo_res = handle_market_transactions_rpc(&ctx, &sess_ceo, "CorpGetTransactions", &[])
+        .unwrap()
+        .unwrap();
+    let PyRep::ObjectEx { list: co_rows, .. } = corp_ceo_res else {
+        panic!("expected CRowset");
+    };
+    assert_eq!(co_rows.len(), 2);
+
+    assert_eq!(
+        handle_market_transactions_rpc(&ctx, &sess_unauth, "CorpGetTransactions", &[])
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CrpAccessDenied"
+    );
+}

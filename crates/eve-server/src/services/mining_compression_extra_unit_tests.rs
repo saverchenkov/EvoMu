@@ -182,7 +182,7 @@ fn compressor_hull_limits_reprocessing_service_rig_yields_and_metenox_helpers() 
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn in_space_and_structure_compression_error_branches_fleet_burst_and_corp_hangar() {
     let ctx = make_extra_ctx();
     let miner_id = 90_000_001_i64;
@@ -251,6 +251,11 @@ async fn in_space_and_structure_compression_error_branches_fleet_burst_and_corp_
             name: "Corp Athanor".into(), state: "ShieldVulnerable".into(),
             quantum_core_installed: true, fuel_blocks: 100, ..Default::default()
         });
+        snap.items.insert(920_040, InventoryItemRecord {
+            item_id: 920_040, type_id: 35899, owner_id: corp_id, location_id: struct_id,
+            flag: InventoryFlag::ServiceSlot0, quantity: 1, singleton: true, ..Default::default()
+        });
+        snap.module_online_states.insert(920_040, true);
         for (iid, tid, flag, qty) in [
             (920_030, 1230, InventoryFlag::CorpSAG1, 100),
             (920_031, 1230, InventoryFlag::CorpSAG2, 200),
@@ -303,4 +308,198 @@ async fn in_space_and_structure_compression_error_branches_fleet_burst_and_corp_
     assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "DecompressGasInStructure", &[PyRep::Integer(920_032)]).unwrap().unwrap_err().code, "NotCompressedGas");
     assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "DecompressGasInStructure", &[PyRep::Integer(920_033)]).unwrap().unwrap_err().code, "InsufficientQuantityToDecompress");
     assert_eq!(handle_compression(&ctx, &mut sess, "corpMiningLedger", "GetObserversWithMiningEvents", &[], &HashMap::new()).await.unwrap().unwrap_err().code, "CrpAccessDenied");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compression_decompression_and_observer_ledger_exhaustive_error_branches() {
+    let mut ctx = make_extra_ctx();
+    let sde = Arc::make_mut(&mut ctx.sde);
+    sde.types.insert(45490, make_inv_type(45490, 1884, 25, "Sylvite", 10.0, HashMap::new()));
+    sde.types.insert(62580, make_inv_type(62580, 1884, 25, "Compressed Sylvite", 0.1, HashMap::new()));
+    sde.compressible_types.insert(45490, 62580);
+    sde.types.insert(34, make_inv_type(34, 18, 4, "Tritanium", 0.01, HashMap::new()));
+
+    let char_id = 90_000_001_i64;
+    let other_id = 90_000_002_i64;
+    let corp_id = 98_605_001_i64;
+    let other_corp_id = 98_605_002_i64;
+    let ship_id = 925_001_i64;
+    let struct_id = 1_000_000_925_001_i64;
+    let denied_struct_id = 1_000_000_925_002_i64;
+    let no_reproc_struct_id = 1_000_000_925_003_i64;
+    let sys_id = 30_000_142_u32;
+
+    let now = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        snap.corporations.insert(corp_id, { let mut __corp = CorporationRecord::default(); __corp.corporation_id = corp_id; __corp.ceo_id = other_id; __corp.ticker = "COMP".into(); __corp.ensure_wallet_divisions(); __corp });
+        snap.items.insert(ship_id, InventoryItemRecord {
+            item_id: ship_id, type_id: 28352, owner_id: char_id, location_id: i64::from(sys_id),
+            flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
+        });
+        for (iid, tid, owner, loc, flag, qty) in [
+            (925_010, 1230, other_id, ship_id, InventoryFlag::SpecializedOreHold, 100),
+            (925_011, 1230, char_id, ship_id, InventoryFlag::SpecializedOreHold, 0),
+            (925_012, 34, char_id, ship_id, InventoryFlag::SpecializedOreHold, 100),
+            (925_013, 1230, char_id, ship_id, InventoryFlag::SpecializedOreHold, 100),
+            (925_014, 1230, char_id, struct_id, InventoryFlag::Locked, 100),
+            (925_015, 1230, other_id, struct_id, InventoryFlag::Hangar, 100),
+            (925_016, 1230, char_id, struct_id, InventoryFlag::CorpSAG1, 100),
+            (925_017, 34, char_id, struct_id, InventoryFlag::Hangar, 100),
+            (925_018, 30370, char_id, struct_id, InventoryFlag::Hangar, 100),
+            (925_019, 45490, char_id, struct_id, InventoryFlag::Hangar, 100),
+            (925_020, 1230, char_id, ship_id, InventoryFlag::Cargo, 50),
+            (925_021, 62396, char_id, struct_id, InventoryFlag::Cargo, 100),
+            (925_022, 62396, char_id, struct_id, InventoryFlag::Locked, 100),
+            (925_023, 62396, corp_id, struct_id, InventoryFlag::CorpSAG1, 100),
+            (925_024, 62396, other_id, struct_id, InventoryFlag::Hangar, 100),
+        ] {
+            snap.items.insert(iid, InventoryItemRecord {
+                item_id: iid, type_id: tid, owner_id: owner, location_id: loc, flag, quantity: qty, ..Default::default()
+            });
+        }
+        snap.structures.insert(struct_id, UpwellStructureRecord {
+            structure_id: struct_id, type_id: 35835, owner_corp_id: corp_id, solar_system_id: sys_id,
+            name: "Main Athanor".into(), state: "ShieldVulnerable".into(),
+            quantum_core_installed: true, fuel_blocks: 100, ..Default::default()
+        });
+        snap.items.insert(925_090, InventoryItemRecord {
+            item_id: 925_090, type_id: 35899, owner_id: corp_id, location_id: struct_id,
+            flag: InventoryFlag::ServiceSlot0, quantity: 1, singleton: true, ..Default::default()
+        });
+        snap.module_online_states.insert(925_090, true);
+
+        snap.structures.insert(no_reproc_struct_id, UpwellStructureRecord {
+            structure_id: no_reproc_struct_id, type_id: 35835, owner_corp_id: corp_id, solar_system_id: sys_id,
+            name: "NoReproc Athanor".into(), state: "ShieldVulnerable".into(),
+            quantum_core_installed: true, fuel_blocks: 0, ..Default::default()
+        });
+        snap.structures.insert(denied_struct_id, UpwellStructureRecord {
+            structure_id: denied_struct_id, type_id: 35835, owner_corp_id: other_corp_id, solar_system_id: sys_id,
+            name: "Denied Athanor".into(), state: "ShieldVulnerable".into(),
+            quantum_core_installed: true, fuel_blocks: 100, ..Default::default()
+        });
+        snap.items.insert(925_091, InventoryItemRecord {
+            item_id: 925_091, type_id: 35899, owner_id: other_corp_id, location_id: denied_struct_id,
+            flag: InventoryFlag::ServiceSlot0, quantity: 1, singleton: true, ..Default::default()
+        });
+        snap.module_online_states.insert(925_091, true);
+        let mut ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        let mut prof = crate::services::station_structure::structure_upwell_ops::StructureAccessProfile::default();
+        prof.blocked_characters.insert(char_id);
+        ext.access_profiles.insert(denied_struct_id, prof);
+        crate::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
+
+        snap.observer_mining_ledger.insert(struct_id, vec![
+            eve_db::ObserverMiningRecord {
+                observer_id: struct_id, character_id: char_id, recorded_corporation_id: corp_id, type_id: 1230,
+                quantity: 500, last_updated_date: "2020-01-01".into(), timestamp_unix: 100,
+            },
+            eve_db::ObserverMiningRecord {
+                observer_id: struct_id, character_id: char_id, recorded_corporation_id: corp_id, type_id: 1230,
+                quantity: 300, last_updated_date: "2026-11-08".into(), timestamp_unix: now.saturating_sub(60),
+            },
+        ]);
+    });
+
+    let mut sess = SessionState::default();
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(corp_id);
+    sess.ship_id = Some(ship_id);
+
+    // CompressItemInSpace errors
+    sess.station_id = Some(60_003_760);
+    assert_eq!(handle_in_space_compression_mgr(&ctx, &mut sess, &[PyRep::Integer(925_013)]).await.unwrap_err().code, "MustBeInSpace");
+    sess.station_id = None;
+    assert_eq!(handle_in_space_compression_mgr(&ctx, &mut sess, &[PyRep::Integer(925_013)]).await.unwrap_err().code, "MustBeInSpace");
+    sess.solar_system_id = Some(sys_id);
+    assert_eq!(handle_in_space_compression_mgr(&ctx, &mut sess, &[PyRep::Integer(999_999)]).await.unwrap_err().code, "ItemNotFound");
+    assert_eq!(handle_in_space_compression_mgr(&ctx, &mut sess, &[PyRep::Integer(925_010)]).await.unwrap_err().code, "CompressionFailed");
+    assert_eq!(handle_in_space_compression_mgr(&ctx, &mut sess, &[PyRep::Integer(925_011)]).await.unwrap_err().code, "CompressionFailed");
+    assert_eq!(handle_in_space_compression_mgr(&ctx, &mut sess, &[PyRep::Integer(925_012)]).await.unwrap_err().code, "CompressionFailed");
+    assert_eq!(handle_in_space_compression_mgr(&ctx, &mut sess, &[PyRep::Integer(925_013)]).await.unwrap_err().code, "NoActiveCompressorInRange");
+
+    // Cloaked and tethered ship guards in space
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle.spawn_ball_with_combat(
+        Ball {
+            id: ship_id, type_id: 28352, position: DVec3::ZERO, velocity: DVec3::ZERO,
+            max_velocity: 100.0, inertia: 1.0, mass: 1e6, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+        },
+        eve_destiny::CombatState { is_cloaked: true, ..Default::default() },
+    ).await.unwrap();
+    assert_eq!(handle_in_space_compression_mgr(&ctx, &mut sess, &[PyRep::Integer(925_013)]).await.unwrap_err().code, "CannotCompressWhileCloaked");
+    if let Ok(mut bp) = sys_handle.ballpark.write() {
+        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+            cs.is_cloaked = false;
+            cs.is_tethered = true;
+        }
+    }
+    assert_eq!(handle_in_space_compression_mgr(&ctx, &mut sess, &[PyRep::Integer(925_013)]).await.unwrap_err().code, "CannotCompressWhileTethered");
+    if let Ok(mut bp) = sys_handle.ballpark.write() {
+        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+            cs.is_tethered = false;
+        }
+    }
+
+    // CompressItemInStructure & DecompressGasInStructure error branches
+    assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "CompressItemInStructure", &[PyRep::Integer(925_016)]).unwrap().unwrap_err().code, "NotDocked");
+    assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "DecompressGasInStructure", &[PyRep::Integer(925_021)]).unwrap().unwrap_err().code, "NotDocked");
+    sess.station_id = Some(60_003_760);
+    assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "CompressItemInStructure", &[PyRep::Integer(925_016)]).unwrap().unwrap_err().code, "MustBeInStructure");
+    assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "DecompressGasInStructure", &[PyRep::Integer(925_021)]).unwrap().unwrap_err().code, "MustBeInStructure");
+    sess.station_id = None;
+
+    sess.structure_id = Some(999_888_777);
+    assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "CompressItemInStructure", &[PyRep::Integer(925_016)]).unwrap().unwrap_err().code, "StructureNotFound");
+    assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "DecompressGasInStructure", &[PyRep::Integer(925_021)]).unwrap().unwrap_err().code, "StructureNotFound");
+
+    sess.structure_id = Some(no_reproc_struct_id);
+    assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "CompressItemInStructure", &[PyRep::Integer(925_016)]).unwrap().unwrap_err().code, "ReprocessingServiceOffline");
+    assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "DecompressGasInStructure", &[PyRep::Integer(925_021)]).unwrap().unwrap_err().code, "ReprocessingServiceOffline");
+
+    sess.structure_id = Some(denied_struct_id);
+    assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "CompressItemInStructure", &[PyRep::Integer(925_016)]).unwrap().unwrap_err().code, "AccessDenied");
+    assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "DecompressGasInStructure", &[PyRep::Integer(925_021)]).unwrap().unwrap_err().code, "AccessDenied");
+
+    sess.structure_id = Some(struct_id);
+    assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "CompressItemInStructure", &[PyRep::Integer(denied_struct_id), PyRep::Integer(925_016)]).unwrap().unwrap_err().code, "InvalidStructure");
+    assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "CompressItemInStructure", &[]).unwrap().unwrap_err().code, "InvalidArgument");
+    assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "CompressItemInStructure", &[PyRep::Integer(925_014)]).unwrap().unwrap_err().code, "ItemLocked");
+    assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "CompressItemInStructure", &[PyRep::Integer(925_015)]).unwrap().unwrap_err().code, "AccessDenied");
+    assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "CompressItemInStructure", &[PyRep::Integer(925_016)]).unwrap().unwrap_err().code, "CompressionFailed");
+    assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "CompressItemInStructure", &[PyRep::Integer(925_017)]).unwrap().unwrap_err().code, "CompressionFailed");
+    assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "CompressItemInStructure", &[PyRep::Integer(925_018)]).unwrap().unwrap_err().code, "StructureCannotCompressType");
+    assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "CompressItemInStructure", &[PyRep::Integer(925_019)]).unwrap().unwrap_err().code, "StructureCannotCompressType");
+    // Ship Cargo item IS reachable while docked in structure
+    let ship_comp = handle_structure_compression_mgr(&ctx, &mut sess, "CompressItemInStructure", &[PyRep::Integer(struct_id), PyRep::Integer(925_020)]).unwrap().expect("ship cargo compressed");
+    assert_eq!(ship_comp.dict_get("compressedTypeID").and_then(|v| v.as_i64()), Some(62516));
+
+    // DecompressGasInStructure additional error branches
+    assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "DecompressGasInStructure", &[PyRep::Integer(denied_struct_id), PyRep::Integer(925_021)]).unwrap().unwrap_err().code, "InvalidStructure");
+    assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "DecompressGasInStructure", &[]).unwrap().unwrap_err().code, "InvalidArgument");
+    assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "DecompressGasInStructure", &[PyRep::Integer(999_777)]).unwrap().unwrap_err().code, "ItemNotFound");
+    assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "DecompressGasInStructure", &[PyRep::Integer(925_024)]).unwrap().unwrap_err().code, "AccessDenied");
+    assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "DecompressGasInStructure", &[PyRep::Integer(925_023)]).unwrap().unwrap_err().code, "CrpAccessDenied");
+    assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "DecompressGasInStructure", &[PyRep::Integer(925_022)]).unwrap().unwrap_err().code, "ItemLocked");
+    assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "DecompressGasInStructure", &[PyRep::Integer(925_021)]).unwrap().unwrap_err().code, "ItemNotInStructureHangar");
+    assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "DecompressGasInStructure", &[PyRep::Integer(925_017)]).unwrap().unwrap_err().code, "NotCompressedItem");
+
+    // GetObserverLedger error branches + 90-day cutoff + Accountant success
+    assert_eq!(handle_compression(&ctx, &mut sess, "corpMiningLedger", "GetObserverLedger", &[PyRep::String("bad".into())], &HashMap::new()).await.unwrap().unwrap_err().code, "InvalidArgument");
+    assert_eq!(handle_compression(&ctx, &mut sess, "corpMiningLedger", "GetObserverLedger", &[PyRep::Integer(999_888)], &HashMap::new()).await.unwrap().unwrap_err().code, "CrpAccessDenied");
+    assert_eq!(handle_compression(&ctx, &mut sess, "corpMiningLedger", "GetObserverLedger", &[PyRep::Integer(denied_struct_id)], &HashMap::new()).await.unwrap().unwrap_err().code, "CrpAccessDenied");
+    assert_eq!(handle_compression(&ctx, &mut sess, "corpMiningLedger", "GetObserverLedger", &[PyRep::Integer(struct_id)], &HashMap::new()).await.unwrap().unwrap_err().code, "CrpAccessDenied");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.get_mut(&corp_id).unwrap().member_roles.insert(char_id, corp_roles::ROLE_ACCOUNTANT);
+    });
+    let ledger = handle_compression(&ctx, &mut sess, "corpMiningLedger", "GetObserverLedger", &[PyRep::Integer(struct_id)], &HashMap::new()).await.unwrap().expect("accountant gets ledger");
+    assert_ne!(ledger, PyRep::None);
 }

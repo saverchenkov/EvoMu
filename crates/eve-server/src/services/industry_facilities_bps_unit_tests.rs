@@ -444,3 +444,7 @@ fn blueprint_and_facility_manager_rpcs_work_end_to_end() {
             .is_ok()
     );
 }
+
+#[cfg(test)]
+#[path = "industry_facilities_bps_extra_unit_tests.rs"]
+mod extra_unit_tests;

@@ -1266,3 +1266,7 @@ pub fn handle_pi_colonies(
 #[path = "pi_colonies_tests.rs"]
 mod pi_colonies_tests;
 
+#[cfg(test)]
+#[path = "pi_colonies_edges_tests.rs"]
+mod pi_colonies_edges_tests;
+

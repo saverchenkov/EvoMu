@@ -1239,4 +1239,7 @@ fn handle_get_testing_configuration(
 }
 
 #[cfg(test)] #[path = "fast_checkout_and_activity_tests.rs"] mod fast_checkout_and_activity_tests;
+#[cfg(test)]
+#[path = "fast_checkout_and_activity_edges_tests.rs"]
+mod fast_checkout_and_activity_edges_tests;
 

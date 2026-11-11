@@ -14,9 +14,19 @@ fn hypernet_raffle_helpers_and_rpc_mutations() {
     assert!(compute_required_hypercores(10_000_000.0, 12).is_err());
     assert!(compute_required_hypercores(0.0, 8).is_err());
     assert!(compute_required_hypercores(-5.0, 8).is_err());
+    assert!(compute_required_hypercores(0.0, 8).is_err());
     assert!(compute_required_hypercores(f64::NAN, 8).is_err());
+    assert!(compute_required_hypercores(f64::INFINITY, 8).is_err());
+    assert!(compute_required_hypercores(10_000_000.0, 7).is_err());
     assert_eq!(compute_required_hypercores(1_000_000.0, 8).unwrap(), 1);
-    assert!(compute_required_hypercores(100_000_000.0, 512).unwrap() >= 20);
+    assert_eq!(compute_required_hypercores(6_999_999.0, 8).unwrap(), 1);
+    assert_eq!(compute_required_hypercores(7_000_000.0, 8).unwrap(), 1);
+    assert_eq!(compute_required_hypercores(13_999_999.0, 8).unwrap(), 1);
+    assert_eq!(compute_required_hypercores(14_000_000.0, 8).unwrap(), 2);
+    assert_eq!(compute_required_hypercores(21_000_000.0, 16).unwrap(), 3);
+    for &sz in &ALLOWED_RAFFLE_SIZES {
+        assert_eq!(compute_required_hypercores(100_000_000.0, sz).unwrap(), 14);
+    }
 
     let ctx = test_ctx();
     let mut sess = auth_session(1, 90_000_001, 98_000_001, 30_000_142);
@@ -241,7 +251,7 @@ fn hypernet_raffle_helpers_and_rpc_mutations() {
     assert!(!hist.as_list().unwrap().is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_raffle_rejects_invalid_and_non_finite_ticket_prices_and_counts() {
     let ctx = test_ctx();
     let char_id = 90_000_001_i64;
@@ -353,3 +363,7 @@ async fn create_raffle_rejects_invalid_and_non_finite_ticket_prices_and_counts()
     .expect("valid integer ticket_price must create raffle");
     assert_eq!(ok.dict_get("ticket_price").and_then(|v| v.as_f64()), Some(1_000.0));
 }
+
+#[cfg(test)]
+#[path = "hypernet_raffle_ops_extra_unit_tests.rs"]
+mod extra_unit_tests;

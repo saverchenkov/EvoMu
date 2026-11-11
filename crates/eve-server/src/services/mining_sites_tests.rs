@@ -385,3 +385,270 @@ async fn test_sov_hub_save_and_get_installed_upgrades() {
         Some(3)
     );
 }
+
+#[test]
+fn mining_sites_pure_helpers_dungeon_lookup_offsets_and_templates() {
+    use eve_sde::{DungeonTemplate, RegionInfo, SdeRegistry, SolarSystem};
+
+    // find_dungeon_id picks lowest matching dungeon_id and ignores substring mismatches
+    let mut sde = SdeRegistry::with_canonical_seed();
+    sde.dungeons.insert(
+        50,
+        DungeonTemplate {
+            dungeon_id: 50,
+            name: "Hidden Mercoxit Asteroid Belt".to_string(),
+            archetype_id: None,
+            faction_id: None,
+            difficulty: None,
+        },
+    );
+    sde.dungeons.insert(
+        20,
+        DungeonTemplate {
+            dungeon_id: 20,
+            name: "Mercoxit Asteroid Belt".to_string(),
+            archetype_id: None,
+            faction_id: None,
+            difficulty: None,
+        },
+    );
+    sde.dungeons.insert(
+        10,
+        DungeonTemplate {
+            dungeon_id: 10,
+            name: "Mercoxit Asteroid".to_string(),
+            archetype_id: None,
+            faction_id: None,
+            difficulty: None,
+        },
+    );
+    assert_eq!(find_dungeon_id(&sde, "Mercoxit Asteroid Belt"), Some(20));
+    assert_eq!(find_dungeon_id(&sde, "Nonexistent Belt"), None);
+
+    // asteroid_offset(i) exact radius 1500 + 250*i and y == 0.0
+    for i in [0usize, 1, 7] {
+        let [dx, dy, dz] = asteroid_offset(i);
+        assert_eq!(dy, 0.0);
+        let r = (dx * dx + dz * dz).sqrt();
+        let expected_r = 1500.0 + 250.0 * (i as f64);
+        assert!((r - expected_r).abs() < 1e-6, "i={i} r={r}");
+    }
+
+    // All 5 ICE_BELT_SITES match, plus Heimatar LowSec vs unmapped region -> None
+    assert_eq!(ICE_BELT_SITES.len(), 5);
+    sde.regions.insert(
+        90_000_001,
+        RegionInfo {
+            region_id: 90_000_001,
+            name: "Heimatar".into(),
+            center: [0.0; 3],
+            faction_id: None,
+            wormhole_class_id: None,
+        },
+    );
+    sde.solar_systems.insert(
+        30_900_101,
+        SolarSystem {
+            solar_system_id: 30_900_101,
+            constellation_id: 1,
+            region_id: 90_000_001,
+            name: "Heimatar-Low".into(),
+            security_status: 0.3,
+            radius: 1.0e12,
+            galactic_pos_ly: [0.0; 3],
+            planet_ids: vec![],
+            stations: vec![],
+            wormhole_class_id: None,
+        },
+    );
+    sde.regions.insert(
+        90_000_002,
+        RegionInfo {
+            region_id: 90_000_002,
+            name: "Unknown Neverland Region".into(),
+            center: [0.0; 3],
+            faction_id: None,
+            wormhole_class_id: None,
+        },
+    );
+    sde.solar_systems.insert(
+        30_900_102,
+        SolarSystem {
+            solar_system_id: 30_900_102,
+            constellation_id: 1,
+            region_id: 90_000_002,
+            name: "Neverland-HS".into(),
+            security_status: 0.5,
+            radius: 1.0e12,
+            galactic_pos_ly: [0.0; 3],
+            planet_ids: vec![],
+            stations: vec![],
+            wormhole_class_id: None,
+        },
+    );
+    assert!(resolve_regional_ice_belt(&sde, 30_900_101).is_some());
+    assert!(resolve_regional_ice_belt(&sde, 30_900_102).is_none());
+
+    // resolve_wormhole_gas_site: missing dungeon returns Err
+    let empty_sde = SdeRegistry::default();
+    assert!(resolve_wormhole_gas_site(&empty_sde, &WORMHOLE_GAS_SITES[0]).is_err());
+}
+
+#[tokio::test]
+async fn mining_sites_handle_passthrough_locks_existing_sov_guard_and_hub_selection() {
+    use eve_db::types::{
+        CosmicAnomalyRecord, InventoryItemRecord, OwnerNoteRecord, UpwellStructureRecord,
+    };
+
+    let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    let ctx = ServerContext::with_sde_and_repository(sde, db.clone());
+
+    let char_id = 31_800_001i64;
+    let corp_id = 98_800_001i64;
+    let foreign_corp_id = 98_800_002i64;
+    let nullsec_sys = 30_800_001u32;
+    let ship_id = 1_080_000_001i64;
+    let hub_foreign_low = 1_080_000_010i64;
+    let hub_own_high = 1_080_000_020i64;
+    let hub_nocore = 1_080_000_015i64;
+    let locked_item_id = 1_080_000_030i64;
+
+    db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            hub_foreign_low,
+            UpwellStructureRecord {
+                structure_id: hub_foreign_low,
+                solar_system_id: nullsec_sys,
+                owner_corp_id: foreign_corp_id,
+                state: "ShieldVulnerable".to_string(),
+                quantum_core_installed: true,
+                fuel_blocks: 50,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            hub_nocore,
+            UpwellStructureRecord {
+                structure_id: hub_nocore,
+                solar_system_id: nullsec_sys,
+                owner_corp_id: corp_id,
+                state: "ShieldVulnerable".to_string(),
+                quantum_core_installed: false,
+                fuel_blocks: 50,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            hub_own_high,
+            UpwellStructureRecord {
+                structure_id: hub_own_high,
+                solar_system_id: nullsec_sys,
+                owner_corp_id: corp_id,
+                state: "ShieldVulnerable".to_string(),
+                quantum_core_installed: true,
+                fuel_blocks: 50,
+                ..Default::default()
+            },
+        );
+
+        snap.items.insert(
+            locked_item_id,
+            InventoryItemRecord {
+                item_id: locked_item_id,
+                type_id: 82_589,
+                owner_id: char_id,
+                location_id: ship_id,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+        snap.owner_notes.insert(
+            88_001,
+            OwnerNoteRecord {
+                note_id: 88_001,
+                character_id: -74,
+                item_id: locked_item_id,
+                label: "raffle".to_string(),
+                note: format!(r#"{{"item_id":{locked_item_id},"expired":false,"winner_id":null}}"#),
+                timestamp_unix: 100,
+            },
+        );
+
+        snap.cosmic_anomalies
+            .entry(nullsec_sys)
+            .or_default()
+            .push(CosmicAnomalyRecord {
+                anomaly_id: "ORE-801".to_string(),
+                solar_system_id: nullsec_sys,
+                name: "Existing Deposit".to_string(),
+                anomaly_type: "SovOre".to_string(),
+                position: [1_000.0, 0.0, 0.0],
+                signal_strength: 1.0,
+                ore_types: vec![],
+                remaining_volume: 0.0,
+                created_unix: 100,
+                lifetime_seconds: 0,
+                cleared: true,
+            });
+    });
+
+    let mut session = eve_machonet::SessionState::new(1);
+    session.user_id = Some(1);
+    session.character_id = Some(char_id);
+    session.corporation_id = Some(corp_id);
+    session.corp_role = eve_db::corp_roles::ROLE_STATION_MANAGER;
+    session.solar_system_id = Some(nullsec_sys);
+    session.ship_id = Some(ship_id);
+    let kw = HashMap::new();
+
+    // Pass-through returns None for scanSvc / scanMgr
+    assert!(handle(&ctx, &mut session, "scanSvc", "GetSystemScanMgr", &[], &kw)
+        .await
+        .is_none());
+    assert!(handle(&ctx, &mut session, "scanMgr", "GetScanResults", &[], &kw)
+        .await
+        .is_none());
+
+    // GetInstalledUpgradesLocal selects own-corp lowest structure_id (hub_nocore) while SaveUpgradeConfiguration skips !quantum_core_installed
+    let local = handle(&ctx, &mut session, "sovHubSvc", "GetInstalledUpgradesLocal", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        local.dict_get("hubID").and_then(|v| v.as_i64()),
+        Some(hub_nocore)
+    );
+
+    // GetInstalledUpgradesForHub with explicit hubID pointing to foreign hub returns hub_foreign_low
+    let explicit = handle(
+        &ctx,
+        &mut session,
+        "sovHubSvc",
+        "GetInstalledUpgradesForHub",
+        &[PyRep::Integer(hub_foreign_low)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        explicit.dict_get("hubID").and_then(|v| v.as_i64()),
+        Some(hub_foreign_low)
+    );
+
+    // Missing system security fails when calling SaveUpgradeConfiguration
+    let sec_err = handle(
+        &ctx,
+        &mut session,
+        "sovHubSvc",
+        "SaveUpgradeConfiguration",
+        &[
+            PyRep::Integer(hub_own_high),
+            PyRep::List(vec![PyRep::Integer(locked_item_id)]),
+        ],
+        &kw,
+    )
+    .await;
+    assert!(sec_err.expect("handled").is_err());
+}

@@ -462,35 +462,36 @@ fn damage_crystal(ctx: &ServerContext, cycle: &ActiveMiningCycle, crystal: Cryst
         return (0.0, false);
     }
     let slot = ctx.db.with_snapshot(|s| s.items.get(&cycle.module_id).map(|m| m.flag));
-    let shattered = ctx.db.with_mut_snapshot(|snap| {
+    let (shattered, pre_item, post_item) = ctx.db.with_mut_snapshot(|snap| {
         let Some(item) = snap
             .items
             .values_mut()
             .find(|i| i.location_id == cycle.ship_id && Some(i.flag) == slot && i.type_id == crystal.type_id)
         else {
-            return false;
+            return (false, None, None);
         };
         let total = item.dynamic_attributes.get(&attr::DAMAGE).copied().unwrap_or(0.0) + dmg;
         if total + 1e-9 < hp {
             item.dynamic_attributes.insert(attr::DAMAGE, total);
             item.version += 1;
-            return false;
+            return (false, None, None);
         }
-        let id = item.item_id;
-        let owner_id = item.owner_id;
+        let pre = item.clone();
+        let (id, owner_id) = (item.item_id, item.owner_id);
         let opts = eve_db::ConsumeExactOptions {
             reject_fitted: false,
             ..eve_db::ConsumeExactOptions::for_owner_exact(None, owner_id)
         };
         if snap.consume_exact_item_quantity(id, 1, opts).is_err() {
-            return false;
+            return (false, None, None);
         }
         if let Some(rem) = snap.items.get_mut(&id) {
             rem.dynamic_attributes.remove(&attr::DAMAGE);
         }
-        true
+        (true, Some(pre), snap.items.get(&id).cloned())
     });
     if shattered {
+        ctx.notify_item_mutation(cycle.char_id, pre_item.as_ref(), post_item.as_ref());
         ctx.invalidate_ship_fitting(cycle.ship_id);
     }
     (dmg, shattered)
@@ -545,33 +546,35 @@ async fn resolve_cycle(ctx: &ServerContext, cycle: &ActiveMiningCycle, fraction:
     // 3153, base 1, modified via SDE effect 1200 operator `ModAdd` (2) from crystal attr 3159
     // `crystalWastedVolumeMultiplierBonus`: +18 -> 19x for Type C I, +28 -> 29x for Type C II).
     let waste_chance = (eff(attr::WASTE_PROBABILITY) / 100.0).clamp(0.0, 1.0);
-    let residue_roll = mined > 0 && waste_chance > 0.0 && ctx.mechanic_rng.roll(waste_chance);
+    let attempted = wanted.min(asteroid.quantity);
+    let residue_roll = attempted > 0 && waste_chance > 0.0 && ctx.mechanic_rng.roll(waste_chance);
     let residue_units = if residue_roll {
-        units_for(mined as f64 * eff(attr::WASTED_VOLUME_MULT), 1.0).min(asteroid.quantity - mined)
+        units_for(attempted as f64 * eff(attr::WASTED_VOLUME_MULT), 1.0).min(asteroid.quantity - mined)
     } else {
         0
     };
     let delivered = (mined + bonus_crit_units).min(free_units);
     let (crystal_damage, crystal_shattered) = crystal.map(|c| damage_crystal(ctx, cycle, c)).unwrap_or((0.0, false));
 
-    let remaining = ctx.db.with_mut_snapshot(|snap| {
+    let (remaining, item_change_opt) = ctx.db.with_mut_snapshot(|snap| {
         let mut left = 0;
         if let Some(a) = snap.asteroids.get_mut(&cycle.target_id) {
             a.quantity = (a.quantity - mined - residue_units).max(0);
             left = a.quantity;
         }
-        if delivered > 0 {
+        let item_change = if delivered > 0 {
             let existing = snap.items.values_mut().find(|i| {
                 i.location_id == cycle.ship_id && i.flag == flag && i.type_id == asteroid.type_id && !i.singleton
             });
             if let Some(stack) = existing {
+                let old_qty = i64::from(stack.quantity);
                 stack.quantity = stack.quantity.saturating_add(i32::try_from(delivered).unwrap_or(i32::MAX));
                 stack.version += 1;
+                Some((stack.clone(), vec![(9, PyRep::Integer(old_qty))]))
             } else {
                 snap.next_entity_id += 1;
                 let id = snap.next_entity_id;
-                snap.items.insert(
-                    id,
+                let rec =
                     eve_db::InventoryItemRecord {
                         item_id: id,
                         type_id: asteroid.type_id,
@@ -582,12 +585,18 @@ async fn resolve_cycle(ctx: &ServerContext, cycle: &ActiveMiningCycle, fraction:
                         singleton: false,
                         version: 1,
                         ..Default::default()
-                    },
-                );
+                    };
+                snap.items.insert(id, rec.clone());
+                Some((rec, vec![(3, PyRep::Integer(0))]))
             }
-        }
-        left
+        } else {
+            None
+        };
+        (left, item_change)
     });
+    if let Some((changed_item, changes)) = item_change_opt {
+        ctx.emit_item_change_routed(cycle.char_id, &changed_item, changes);
+    }
     let due_unix = crate::system_actor::next_downtime_unix_secs(
         ctx.now_unix_secs(),
         ctx.systems.belt_respawn_interval_secs(),

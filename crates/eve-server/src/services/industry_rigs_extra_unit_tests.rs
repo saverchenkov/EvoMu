@@ -2,13 +2,14 @@
 
 #![forbid(unsafe_code)]
 
-use super::industry_pi::industry_rigs::{
-    clear_sde_adjusted_prices, collect_live_market_adjusted_prices, compute_activity_ptv_multiplier,
+use crate::services::industry_pi::industry_rigs::{
+    StructureIndustryBonuses, StructureRigBonuses, clear_sde_adjusted_prices,
+    collect_live_market_adjusted_prices, compute_activity_ptv_multiplier,
     compute_market_adjusted_price_from_snap, compute_ship_insurance_reference_value_with_prices,
-    is_industry_loc_at_facility, resolve_corp_office_at_facility, resolve_facility_modifiers_and_system,
-    resolve_industry_delivery_target, resolve_material_adjusted_price,
-    resolve_structure_rig_bonuses_full, set_sde_adjusted_price, structure_sde_industry_bonuses,
-    validate_capital_construction_restrictions,
+    is_industry_loc_at_facility, resolve_corp_office_at_facility,
+    resolve_facility_modifiers_and_system, resolve_industry_delivery_target,
+    resolve_material_adjusted_price, resolve_structure_rig_bonuses_full, set_sde_adjusted_price,
+    structure_sde_industry_bonuses, validate_capital_construction_restrictions,
 };
 use crate::router::ServerContext;
 use crate::services::industry_pi::IndustryJobCostMeta;
@@ -93,7 +94,7 @@ fn rig_bonuses_cover_custom_sde_sec_multipliers_disallow_hs_t2_sde_attr_and_clam
             991_001,
             1800,
             1000.0,
-            &[(422, 2.0), (2355, 1.2), (2356, 2.0), (2357, 2.5)],
+            &[(422, 2.0), (2594, -2.4), (2593, -24.0), (2355, 1.2), (2356, 2.0), (2357, 2.5)],
         ),
     );
     // Type 991_002: Non-reaction rig with disallowInHighSec (1970 = 1.0) and only cost bonus (2595 = -0.15)
@@ -118,26 +119,23 @@ fn rig_bonuses_cover_custom_sde_sec_multipliers_disallow_hs_t2_sde_attr_and_clam
             .insert(1, make_item(1, 991_001, 100, 5000, InventoryFlag::RigSlot0));
 
         // High-Sec (30_000_142) uses custom attr 2355 = 1.2 and T2 defaults (0.024, 0.24)
-        let (m_hs, t_hs, c_hs, sec_hs) =
-            resolve_structure_rig_bonuses_full(&ctx, snap, 5000, 30_000_142);
-        assert!((m_hs - 0.024 * 1.2).abs() < 1e-9);
-        assert!((t_hs - 0.24 * 1.2).abs() < 1e-9);
-        assert!((c_hs - 0.0).abs() < 1e-9);
-        assert!((sec_hs - 1.2).abs() < 1e-9);
+        let hs = resolve_structure_rig_bonuses_full(&ctx, snap, 5000, 30_000_142);
+        assert!((hs.mat_bonus - 0.024 * 1.2).abs() < 1e-9);
+        assert!((hs.time_bonus - 0.24 * 1.2).abs() < 1e-9);
+        assert!((hs.cost_bonus - 0.0).abs() < 1e-9);
+        assert!((hs.sec_multiplier - 1.2).abs() < 1e-9);
 
         // Low-Sec (30_002_537) uses custom attr 2356 = 2.0
-        let (m_ls, t_ls, _, sec_ls) =
-            resolve_structure_rig_bonuses_full(&ctx, snap, 5000, 30_002_537);
-        assert!((m_ls - 0.024 * 2.0).abs() < 1e-9);
-        assert!((t_ls - 0.24 * 2.0).abs() < 1e-9);
-        assert!((sec_ls - 2.0).abs() < 1e-9);
+        let ls = resolve_structure_rig_bonuses_full(&ctx, snap, 5000, 30_002_537);
+        assert!((ls.mat_bonus - 0.024 * 2.0).abs() < 1e-9);
+        assert!((ls.time_bonus - 0.24 * 2.0).abs() < 1e-9);
+        assert!((ls.sec_multiplier - 2.0).abs() < 1e-9);
 
         // Null-Sec (30_004_759) uses custom attr 2357 = 2.5
-        let (m_ns, t_ns, _, sec_ns) =
-            resolve_structure_rig_bonuses_full(&ctx, snap, 5000, 30_004_759);
-        assert!((m_ns - 0.024 * 2.5).abs() < 1e-9);
-        assert!((t_ns - 0.24 * 2.5).abs() < 1e-9);
-        assert!((sec_ns - 2.5).abs() < 1e-9);
+        let ns = resolve_structure_rig_bonuses_full(&ctx, snap, 5000, 30_004_759);
+        assert!((ns.mat_bonus - 0.024 * 2.5).abs() < 1e-9);
+        assert!((ns.time_bonus - 0.24 * 2.5).abs() < 1e-9);
+        assert!((ns.sec_multiplier - 2.5).abs() < 1e-9);
 
         // Test disallow_hs (1970 = 1.0) + cost-only SDE attribute (has_any_sde_ind_attr = true -> mat=0, time=0)
         snap.items.clear();
@@ -145,22 +143,21 @@ fn rig_bonuses_cover_custom_sde_sec_multipliers_disallow_hs_t2_sde_attr_and_clam
             .insert(2, make_item(2, 991_002, 100, 5000, InventoryFlag::RigSlot1));
         assert_eq!(
             resolve_structure_rig_bonuses_full(&ctx, snap, 5000, 30_000_142),
-            (0.0, 0.0, 0.0, 0.0)
+            StructureRigBonuses { mat_bonus: 0.0, time_bonus: 0.0, cost_bonus: 0.0, sec_multiplier: 0.0 }
         );
-        let (m2_ls, t2_ls, c2_ls, sec2_ls) =
-            resolve_structure_rig_bonuses_full(&ctx, snap, 5000, 30_002_537);
-        assert_eq!((m2_ls, t2_ls), (0.0, 0.0));
-        assert!((c2_ls - 0.15 * 1.9).abs() < 1e-9);
-        assert!((sec2_ls - 1.9).abs() < 1e-9);
+        let r2_ls = resolve_structure_rig_bonuses_full(&ctx, snap, 5000, 30_002_537);
+        assert_eq!((r2_ls.mat_bonus, r2_ls.time_bonus), (0.0, 0.0));
+        assert!((r2_ls.cost_bonus - 0.15 * 1.9).abs() < 1e-9);
+        assert!((r2_ls.sec_multiplier - 1.9).abs() < 1e-9);
 
         // Test upper clamping at (0.50, 0.80, 0.50)
         snap.items.clear();
         snap.items
             .insert(3, make_item(3, 991_003, 100, 5000, InventoryFlag::RigSlot2));
-        let (mc, tc, cc, _) = resolve_structure_rig_bonuses_full(&ctx, snap, 5000, 30_004_759);
-        assert!((mc - 0.50).abs() < 1e-9);
-        assert!((tc - 0.80).abs() < 1e-9);
-        assert!((cc - 0.50).abs() < 1e-9);
+        let capped = resolve_structure_rig_bonuses_full(&ctx, snap, 5000, 30_004_759);
+        assert!((capped.mat_bonus - 0.50).abs() < 1e-9);
+        assert!((capped.time_bonus - 0.80).abs() < 1e-9);
+        assert!((capped.cost_bonus - 0.50).abs() < 1e-9);
     });
 }
 
@@ -173,7 +170,10 @@ fn facility_modifiers_and_sde_bonuses_cover_tatara_2721_item_fallbacks_and_npc_s
         35_836,
         make_type(35_836, 1406, 1_000_000.0, &[(2600, 1.0), (2721, 0.75), (2601, 0.95)]),
     );
-    assert_eq!(structure_sde_industry_bonuses(&ctx, 35_836), (1.0, 0.75, 0.95));
+    assert_eq!(
+        structure_sde_industry_bonuses(&ctx, 35_836),
+        StructureIndustryBonuses { material_modifier: 1.0, time_modifier: 0.75, cost_modifier: 0.95 }
+    );
 
     ctx.db.with_mut_snapshot(|snap| {
         let mut tmpl_char = snap.characters.values().next().unwrap().clone();
@@ -187,8 +187,8 @@ fn facility_modifiers_and_sde_bonuses_cover_tatara_2721_item_fallbacks_and_npc_s
             make_item(700_001, 35_836, 98_000_077, 60_003_760, InventoryFlag::Hangar),
         );
         let res_st = resolve_facility_modifiers_and_system(&ctx, snap, 700_001).unwrap();
-        assert_eq!(res_st.0, 35_836);
-        assert_eq!(res_st.2, 30_000_142);
+        assert_eq!(res_st.type_id, 35_836);
+        assert_eq!(res_st.solar_system_id, 30_000_142);
 
         // 2. Item facility with non-station location_id resolved via corporation member's solar_system_id
         tmpl_char.character_id = 90_000_088;
@@ -200,12 +200,15 @@ fn facility_modifiers_and_sde_bonuses_cover_tatara_2721_item_fallbacks_and_npc_s
             make_item(700_002, 35_836, 98_000_088, 999_999_999, InventoryFlag::Unlocked),
         );
         let res_corp = resolve_facility_modifiers_and_system(&ctx, snap, 700_002).unwrap();
-        assert_eq!(res_corp.2, 30_002_537);
+        assert_eq!(res_corp.solar_system_id, 30_002_537);
 
         // 3. Direct NPC station ID (60_003_760) resolves from SDE stations with (1.0, 1.0, 1.0) modifiers
         let res_npc = resolve_facility_modifiers_and_system(&ctx, snap, 60_003_760).unwrap();
-        assert_eq!(res_npc.2, 30_000_142);
-        assert_eq!((res_npc.4, res_npc.5, res_npc.6), (1.0, 1.0, 1.0));
+        assert_eq!(res_npc.solar_system_id, 30_000_142);
+        assert_eq!(
+            (res_npc.material_modifier, res_npc.time_modifier, res_npc.cost_modifier),
+            (1.0, 1.0, 1.0)
+        );
     });
 }
 

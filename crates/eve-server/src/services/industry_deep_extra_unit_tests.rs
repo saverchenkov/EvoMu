@@ -279,17 +279,14 @@ fn cost_index_eiv_job_costs_and_structure_rig_security_multipliers() {
             / 100.0;
         assert!((meta.total_cost_isk - expected_total).abs() < 1e-6);
 
-        let (hs_me, hs_te, hs_cost, hs_mult) =
-            resolve_structure_rig_bonuses_full(&ctx, snap, struct_hs_id, JITA_SYSTEM_ID);
-        let (ls_me, ls_te, _, ls_mult) =
-            resolve_structure_rig_bonuses_full(&ctx, snap, struct_ls_id, ls_sys);
-        assert!(hs_me > 0.0 || hs_te > 0.0 || hs_cost > 0.0 || hs_mult >= 0.0);
-        assert!(ls_me > hs_me || ls_te > hs_te);
-        assert!((ls_mult - 1.9).abs() < 1e-6);
+        let hs = resolve_structure_rig_bonuses_full(&ctx, snap, struct_hs_id, JITA_SYSTEM_ID);
+        let ls = resolve_structure_rig_bonuses_full(&ctx, snap, struct_ls_id, ls_sys);
+        assert!(hs.mat_bonus > 0.0 || hs.time_bonus > 0.0 || hs.cost_bonus > 0.0 || hs.sec_multiplier >= 0.0);
+        assert!(ls.mat_bonus > hs.mat_bonus || ls.time_bonus > hs.time_bonus);
+        assert!((ls.sec_multiplier - 1.9).abs() < 1e-6);
 
-        let (ns_react_me, ns_react_te, _, ns_mult) =
-            resolve_structure_rig_bonuses_full(&ctx, snap, struct_ns_id, ns_sys);
-        assert!(ns_react_me > 0.0 || ns_react_te > 0.0);
-        assert!((ns_mult - 1.1).abs() < 1e-6);
+        let ns = resolve_structure_rig_bonuses_full(&ctx, snap, struct_ns_id, ns_sys);
+        assert!(ns.mat_bonus > 0.0 || ns.time_bonus > 0.0);
+        assert!((ns.sec_multiplier - 1.1).abs() < 1e-6);
     });
 }

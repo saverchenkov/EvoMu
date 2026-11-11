@@ -463,3 +463,7 @@ fn industry_job_queries_and_monitor_connect_disconnect_work() {
         assert_eq!(res, PyRep::None);
     }
 }
+
+#[cfg(test)]
+#[path = "industry_pi_extra_unit_tests.rs"]
+mod industry_pi_extra_unit_tests;

@@ -136,6 +136,9 @@ fn flush_validation_errors_cooldown_poco_tax_and_bound_moniker_routing() {
 
     // Seed colony with NO pins so Flush takes the direct orbital export tax path (`ext_idx.is_none()`)
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = IskCents::from_isk(1_000_000);
+        }
         snap.planetary_colonies.insert(
             (char_id, planet_id),
             PlanetaryColonyRecord {
@@ -339,6 +342,9 @@ fn program_result_cancel_revert_ticking_and_moniker_properties() {
     }
 
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = IskCents::from_isk(1_000_000);
+        }
         snap.planetary_colonies.insert(
             (char_id, planet_id),
             PlanetaryColonyRecord {
@@ -388,4 +394,237 @@ fn program_result_cancel_revert_ticking_and_moniker_properties() {
     );
     assert!(matches!(call_pi(&ctx, &mut sess, "colonies", &[], Some(&bound)).unwrap(), PyRep::Dict(_)));
     assert_eq!(call_pi(&ctx, &mut sess, "id", &[], Some(&bound)).unwrap(), PyRep::Integer(planet_id));
+}
+
+#[test]
+fn transfer_launch_import_export_and_sim_remaining_branches() {
+    let ctx = make_ctx();
+    let char_id = 90_000_001_i64;
+    let planet_id = 40_009_082_i64;
+    let missing_planet = 40_999_999_i64;
+    let sys_id = 30_000_142_u32;
+    let mut sess = char_session(char_id, sys_id);
+    let ship_id = sess.ship_id.unwrap_or(100_000_001);
+    sess.ship_id = Some(ship_id);
+    let bound = make_bound(char_id, planet_id);
+
+    // 1. UserTransferCommodities unbound success (`L457-460`) + Launch ColonyNotFound (`L529-534`)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = IskCents::from_isk(1_000_000);
+        }
+        snap.planetary_colonies.insert(
+            (char_id, planet_id),
+            PlanetaryColonyRecord {
+                planet_id,
+                owner_id: char_id,
+                solar_system_id: sys_id,
+                command_center_level: 2,
+                pins_count: 1,
+                extracted_commodities: HashMap::new(),
+                last_extracted_unix: 0,
+            },
+        );
+        save_pi_network(
+            snap,
+            char_id,
+            planet_id,
+            &PiColonyNetworkState {
+                cpu_max: 7_057.0,
+                pg_max: 9_000.0,
+                last_simulated_unix: 1_775_399_000,
+                pins: vec![
+                    PiPinState {
+                        pin_id: 701,
+                        type_id: 2254, // Launchpad
+                        contents: HashMap::from([(2268, 50)]),
+                        ..Default::default()
+                    },
+                    PiPinState {
+                        pin_id: 702,
+                        type_id: 2541, // Storage
+                        ..Default::default()
+                    },
+                ],
+                links: vec![PiLinkState {
+                    source_pin_id: 701,
+                    dest_pin_id: 702,
+                    level: 1,
+                    bandwidth: 2500.0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+    });
+    assert!(call_pi(
+        &ctx,
+        &mut sess,
+        "UserTransferCommodities",
+        &[
+            PyRep::Integer(planet_id),
+            PyRep::List(vec![PyRep::Integer(701), PyRep::Integer(702)]),
+            PyRep::Dict(vec![(PyRep::Integer(2268), PyRep::Integer(5))]),
+        ],
+        None,
+    )
+    .is_ok());
+
+    // ColonyNotFound on UserLaunchCommodities + Import PinNotFound + Launch PinNotFound
+    assert_eq!(
+        call_pi(
+            &ctx,
+            &mut sess,
+            "UserLaunchCommodities",
+            &[PyRep::Integer(missing_planet), PyRep::Integer(2268), PyRep::Integer(5), PyRep::String("Storage".into())],
+            None,
+        )
+        .unwrap_err()
+        .code,
+        "ColonyNotFound"
+    );
+
+    // ColonyNotInCurrentSystem on bound UserLaunchCommodities with explicit planetID prefix (`L473`, `L537-543`)
+    sess.solar_system_id = Some(30_000_144);
+    assert_eq!(
+        call_pi(
+            &ctx,
+            &mut sess,
+            "UserLaunchCommodities",
+            &[PyRep::Integer(planet_id), PyRep::Integer(701), PyRep::Integer(2268), PyRep::Integer(2), PyRep::String("CommandCenter".into())],
+            Some(&bound),
+        )
+        .unwrap_err()
+        .code,
+        "ColonyNotInCurrentSystem"
+    );
+    sess.solar_system_id = Some(sys_id);
+
+    // Short 2-arg form (`L505-508`) & Import InsufficientFunds (`L596-598`) + Export InsufficientFunds (`L690-692`)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = IskCents(0);
+        }
+    });
+    assert_eq!(
+        call_pi(
+            &ctx,
+            &mut sess,
+            "UserLaunchCommodities",
+            &[PyRep::Integer(9999), PyRep::Integer(2268), PyRep::Integer(5)],
+            Some(&bound),
+        )
+        .unwrap_err()
+        .code,
+        "PinNotFound"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            77_700_001,
+            eve_db::InventoryItemRecord {
+                item_id: 77_700_001,
+                type_id: 2268,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 100,
+                ..Default::default()
+            },
+        );
+    });
+    assert_eq!(
+        call_pi(
+            &ctx,
+            &mut sess,
+            "UserLaunchCommodities",
+            &[PyRep::Integer(2268), PyRep::Integer(10), PyRep::String("ImportToColony".into())],
+            Some(&bound),
+        )
+        .unwrap_err()
+        .code,
+        "InsufficientFunds"
+    );
+    assert_eq!(
+        call_pi(
+            &ctx,
+            &mut sess,
+            "UserLaunchCommodities",
+            &[PyRep::Integer(2268), PyRep::Integer(10), PyRep::String("CustomsOffice".into())],
+            Some(&bound),
+        )
+        .unwrap_err()
+        .code,
+        "InsufficientFunds"
+    );
+
+    // Empty network: PinNotFound for Import and Export + dummy pin in GetLocalDistributionReport (`L563, 649, 1243`)
+    let empty_planet = 40_009_084_i64;
+    let empty_bound = make_bound(char_id, empty_planet);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = IskCents::from_isk(1_000_000);
+        }
+        snap.planetary_colonies.insert(
+            (char_id, empty_planet),
+            PlanetaryColonyRecord {
+                planet_id: empty_planet,
+                owner_id: char_id,
+                solar_system_id: sys_id,
+                command_center_level: 0,
+                pins_count: 0,
+                extracted_commodities: HashMap::new(),
+                last_extracted_unix: 0,
+            },
+        );
+        save_pi_network(snap, char_id, empty_planet, &PiColonyNetworkState {
+            pins: vec![PiPinState {
+                pin_id: 99,
+                type_id: 2469, // Basic Industry (not a Launchpad/Storage/CommandCenter)
+                ..Default::default()
+            }],
+            last_simulated_unix: 1_775_399_000,
+            ..Default::default()
+        });
+    });
+    assert_eq!(
+        call_pi(
+            &ctx,
+            &mut sess,
+            "UserLaunchCommodities",
+            &[PyRep::Integer(2268), PyRep::Integer(1), PyRep::String("ImportToColony".into())],
+            Some(&empty_bound),
+        )
+        .unwrap_err()
+        .code,
+        "PinNotFound"
+    );
+    assert_eq!(
+        call_pi(
+            &ctx,
+            &mut sess,
+            "UserLaunchCommodities",
+            &[PyRep::Integer(2268), PyRep::Integer(1), PyRep::String("ExportFromColony".into())],
+            Some(&empty_bound),
+        )
+        .unwrap_err()
+        .code,
+        "PinNotFound"
+    );
+    assert!(call_pi(&ctx, &mut sess, "StartTicking", &[], Some(&empty_bound)).is_ok());
+    assert!(call_pi(&ctx, &mut sess, "GetLocalDistributionReport", &[PyRep::Integer(999)], Some(&empty_bound)).is_ok());
+    // Bound GetProgramResultInfo with & without planet_id prefix (`L1129-1145`)
+    assert!(call_pi(
+        &ctx,
+        &mut sess,
+        "GetProgramResultInfo",
+        &[PyRep::Integer(empty_planet), PyRep::Integer(1), PyRep::Integer(2268), PyRep::List(vec![]), PyRep::Real(0.02)],
+        Some(&empty_bound),
+    ).is_ok());
+    assert!(call_pi(
+        &ctx,
+        &mut sess,
+        "GetProgramResultInfo",
+        &[PyRep::Integer(1), PyRep::Integer(2268)],
+        Some(&empty_bound),
+    ).is_ok());
 }

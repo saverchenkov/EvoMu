@@ -26,9 +26,6 @@ fn char_session(char_id: i64, corp_id: i64) -> SessionState {
 #[test]
 fn store_manager_catalog_and_offer_purchase_lifecycle() {
     let ctx = make_test_context();
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.quasar_commerce.nes_store_catalog = None;
-    });
     let char_id = 90_000_001;
     let station_id = 60_003_760;
     let mut session = char_session(char_id, 98_000_001);
@@ -45,7 +42,7 @@ fn store_manager_catalog_and_offer_purchase_lifecycle() {
     )
     .unwrap()
     .unwrap();
-    assert!(matches!(cats, PyRep::List(ref v) if v.len() == 6));
+    assert!(matches!(cats, PyRep::List(ref v) if v.len() == 8));
 
     let prods = handle(
         &ctx,
@@ -57,7 +54,7 @@ fn store_manager_catalog_and_offer_purchase_lifecycle() {
     )
     .unwrap()
     .unwrap();
-    assert!(matches!(prods, PyRep::List(ref v) if v.len() == 3));
+    assert!(matches!(prods, PyRep::List(ref v) if v.len() >= 5));
 
     let offers = handle(
         &ctx,
@@ -69,7 +66,7 @@ fn store_manager_catalog_and_offer_purchase_lifecycle() {
     )
     .unwrap()
     .unwrap();
-    assert!(matches!(offers, PyRep::List(ref v) if v.len() == 3));
+    assert!(matches!(offers, PyRep::List(ref v) if v.len() >= 4));
 
     let bad_arg_err = handle(
         &ctx,

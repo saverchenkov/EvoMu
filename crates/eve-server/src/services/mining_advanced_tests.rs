@@ -594,3 +594,7 @@ async fn test_metenox_fuel_no_double_count_disposal_sync_and_reinforce_pause() {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "mining_advanced_extra_unit_tests.rs"]
+mod extra_unit_tests;

@@ -980,11 +980,10 @@ pub async fn handle_compression(
                 for (&obs_id, entries) in &snap.observer_mining_ledger {
                     if let Some(st) = snap.structures.get(&obs_id) {
                         if st.owner_corp_id == caller_corp && !entries.is_empty() {
-                            let last_date = entries.last().map(|e| e.last_updated_date.clone()).unwrap_or_else(|| "2026-10-19".into());
                             list.push(vec![
                                 PyRep::Integer(obs_id),
-                                PyRep::String("structure".to_string()),
-                                PyRep::String(last_date),
+                                PyRep::Integer(i64::from(st.solar_system_id)),
+                                PyRep::String(st.name.clone()),
                             ]);
                         }
                     }
@@ -994,9 +993,9 @@ pub async fn handle_compression(
             match res {
                 Ok(observers) => {
                     let descriptor = DBRowDescriptor::new([
-                        ("observerID", DbColumnType::I8),
-                        ("observerType", DbColumnType::Str),
-                        ("lastUpdated", DbColumnType::Str),
+                        ("itemID", DbColumnType::I8),
+                        ("solarSystemID", DbColumnType::I4),
+                        ("itemName", DbColumnType::Str),
                     ]);
                     Some(Ok(descriptor.build_crowset(observers)))
                 }
@@ -1011,10 +1010,11 @@ pub async fn handle_compression(
             let observer_ledger_descriptor = || {
                 DBRowDescriptor::new([
                     ("characterID", DbColumnType::I8),
-                    ("recordedCorporationID", DbColumnType::I8),
+                    ("corporationID", DbColumnType::I8),
                     ("typeID", DbColumnType::I4),
                     ("quantity", DbColumnType::I8),
-                    ("lastUpdated", DbColumnType::Str),
+                    ("eventDate", DbColumnType::FileTime),
+                    ("solarsystemID", DbColumnType::I4),
                 ])
             };
             let observer_id = match args.first() {
@@ -1059,7 +1059,7 @@ pub async fn handle_compression(
                     char_id,
                     None,
                     sess_role,
-                    ctx.now_unix(),
+                    now,
                 );
                 let has_ledger_role = is_ceo
                     || eve_db::corp_roles::has_role(effective_role, eve_db::corp_roles::ROLE_DIRECTOR)
@@ -1072,9 +1072,11 @@ pub async fn handle_compression(
                         message: "Corporate mining ledger requires Director, Accountant, Junior Accountant, or Station Manager role".into(),
                     });
                 }
+                let solar_system_id = i64::from(st.solar_system_id);
                 let raw = snap.observer_mining_ledger.get(&observer_id).cloned().unwrap_or_default();
                 let mut agg_order: Vec<(i64, i64, TypeId, String)> = Vec::new();
                 let mut agg_qty: HashMap<(i64, i64, TypeId, String), i64> = HashMap::new();
+                let mut agg_ts: HashMap<(i64, i64, TypeId, String), u64> = HashMap::new();
                 for e in raw {
                     if e.timestamp_unix > 0 && e.timestamp_unix < cutoff {
                         continue;
@@ -1083,13 +1085,25 @@ pub async fn handle_compression(
                     if !agg_qty.contains_key(&key) {
                         agg_order.push(key.clone());
                     }
-                    *agg_qty.entry(key).or_insert(0) += e.quantity;
+                    *agg_qty.entry(key.clone()).or_insert(0) += e.quantity;
+                    agg_ts
+                        .entry(key)
+                        .and_modify(|ts| *ts = (*ts).max(e.timestamp_unix))
+                        .or_insert(e.timestamp_unix);
                 }
-                let aggregated: Vec<(i64, i64, TypeId, i64, String)> = agg_order
+                let aggregated: Vec<(i64, i64, TypeId, i64, i64, i64)> = agg_order
                     .into_iter()
-                    .map(|(cid, rcorp, tid, dt)| {
-                        let q = agg_qty.get(&(cid, rcorp, tid, dt.clone())).copied().unwrap_or(0);
-                        (cid, rcorp, tid, q, dt)
+                    .map(|(cid, corp_id, tid, dt)| {
+                        let key = (cid, corp_id, tid, dt.clone());
+                        let q = agg_qty.get(&key).copied().unwrap_or(0);
+                        let raw_ts = agg_ts.get(&key).copied().unwrap_or(0);
+                        let event_unix = if raw_ts > 0 {
+                            raw_ts
+                        } else {
+                            parse_date_string_to_unix_secs(&dt).unwrap_or(now)
+                        };
+                        let event_date_ft = crate::sp6_lifecycle::unix_to_filetime(event_unix);
+                        (cid, corp_id, tid, q, event_date_ft, solar_system_id)
                     })
                     .collect();
                 Ok(aggregated)
@@ -1099,13 +1113,14 @@ pub async fn handle_compression(
                     let descriptor = observer_ledger_descriptor();
                     let rows: Vec<Vec<PyRep>> = entries
                         .into_iter()
-                        .map(|(cid, rcorp, tid, qty, dt)| {
+                        .map(|(cid, corp_id, tid, qty, event_date_ft, sys_id)| {
                             vec![
                                 PyRep::Integer(cid),
-                                PyRep::Integer(rcorp),
+                                PyRep::Integer(corp_id),
                                 PyRep::Integer(tid as i64),
                                 PyRep::Integer(qty),
-                                PyRep::String(dt),
+                                PyRep::Integer(event_date_ft),
+                                PyRep::Integer(sys_id),
                             ]
                         })
                         .collect();

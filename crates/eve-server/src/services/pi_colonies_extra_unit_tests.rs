@@ -373,3 +373,203 @@ fn user_update_network_pin_link_route_head_and_upgrade_edge_cases() {
     assert_eq!(after_del.dict_get("pinsCount").and_then(|v| v.as_i64()), Some(2));
     assert_eq!(after_del.dict_get("linksCount").and_then(|v| v.as_i64()), Some(0));
 }
+
+#[test]
+fn unauth_network_args_and_remaining_command_error_branches() {
+    let (ctx, _clock) = make_ctx();
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let planet_id = ctx.sde.solar_systems[&sys_id].planet_ids[0];
+    let kw = HashMap::new();
+    let mut anon = SessionState::default();
+
+    for m in [
+        "GetColony",
+        "GetFullNetworkForOwner",
+        "GetCommandPinsForPlanet",
+        "GetExtractorsForPlanet",
+        "GetCommandCenterLevel",
+        "GetPin",
+        "UserAbandonPlanet",
+        "UserUpdateNetwork",
+    ] {
+        assert!(
+            handle_pi_colonies(&ctx, &mut anon, "planetMgr", m, &[], &kw, None).unwrap().is_err(),
+            "{m} should require auth"
+        );
+    }
+
+    let mut sess = make_session(char_id, Some(sys_id), None);
+    let bound = BoundObjectEntry {
+        bound_id: 1,
+        session_id: 1,
+        user_id: 1,
+        character_id: char_id,
+        service: "planetMgr".into(),
+        object_id: planet_id,
+        oid_str: "N=1:1".into(),
+        ref_id: 1,
+    };
+
+    // Arg permutations for UserUpdateNetwork (`L350-372`)
+    assert_eq!(
+        handle_pi_colonies(&ctx, &mut sess, "planetMgr", "UserUpdateNetwork", &[], &kw, None).unwrap().unwrap_err().code,
+        "InvalidPlanetID"
+    );
+    assert_eq!(
+        handle_pi_colonies(&ctx, &mut sess, "planetMgr", "UserUpdateNetwork", &[PyRep::Integer(123), PyRep::List(vec![])], &kw, None).unwrap().unwrap_err().code,
+        "InvalidPlanetID"
+    );
+    sess.solar_system_id = None;
+    assert_eq!(
+        handle_pi_colonies(&ctx, &mut sess, "planetMgr", "UserUpdateNetwork", &[PyRep::Integer(planet_id)], &kw, None).unwrap().unwrap_err().code,
+        "NoSolarSystem"
+    );
+    sess.solar_system_id = Some(sys_id);
+
+    // No colony yet -> ColonyNotFound across cmds 1, 2, 3, 4, 5, 6, 10, 14 (`L442`, `587`, `656`, `700`, `770`, `811`, `876`, `1083`, `1143`)
+    let run_upd = |s: &mut SessionState, cmds: Vec<PyRep>| {
+        handle_pi_colonies(&ctx, s, "planetMgr", "UserUpdateNetwork", &[PyRep::List(cmds), PyRep::Integer(planet_id)], &kw, Some(&bound)).unwrap()
+    };
+    assert_eq!(run_upd(&mut sess, vec![PyRep::Integer(1)]).unwrap_err().code, "InvalidCommandStream");
+    for cmd in [
+        PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2469), PyRep::Real(0.1), PyRep::Real(0.1)]),
+        PyRep::Tuple(vec![PyRep::Integer(2), PyRep::Integer(10)]),
+        PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(10), PyRep::Integer(20), PyRep::Integer(0)]),
+        PyRep::Tuple(vec![PyRep::Integer(4), PyRep::Integer(10), PyRep::Integer(20)]),
+        PyRep::Tuple(vec![PyRep::Integer(5), PyRep::Integer(10), PyRep::Integer(20), PyRep::Integer(1)]),
+        PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(1), PyRep::List(vec![PyRep::Integer(10), PyRep::Integer(20)]), PyRep::Integer(2268), PyRep::Integer(10)]),
+        PyRep::Tuple(vec![PyRep::Integer(10), PyRep::Integer(10), PyRep::Integer(2268), PyRep::Real(0.02), PyRep::Integer(1)]),
+        PyRep::Tuple(vec![PyRep::Integer(14), PyRep::Integer(10), PyRep::Integer(1), PyRep::Real(0.0), PyRep::Real(0.0)]),
+    ] {
+        assert_eq!(run_upd(&mut sess, vec![cmd]).unwrap_err().code, "ColonyNotFound");
+    }
+
+    // Seed colony + tight CPU/PG + 0 ISK -> exercise PinNotFound, InsufficientColonyCpuOrPowergrid, InsufficientFunds, Route retention & Head commands
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = IskCents::from_isk(100_000_000);
+        }
+        snap.planetary_colonies.insert(
+            (char_id, planet_id),
+            PlanetaryColonyRecord {
+                planet_id,
+                owner_id: char_id,
+                solar_system_id: sys_id,
+                command_center_level: 1,
+                pins_count: 2,
+                extracted_commodities: HashMap::new(),
+                last_extracted_unix: 0,
+            },
+        );
+        save_pi_network(snap, char_id, planet_id, &PiColonyNetworkState {
+            pins: (0..12)
+                .map(|i| PiPinState {
+                    pin_id: if i == 0 { 20 } else { 30 + i - 1 },
+                    type_id: if i == 0 { 2848 } else { 2469 },
+                    latitude: 0.05 * (i as f64),
+                    longitude: 0.05 * (i as f64),
+                    ..Default::default()
+                })
+                .collect(),
+            links: vec![PiLinkState {
+                source_pin_id: 20,
+                dest_pin_id: 30,
+                level: 2,
+                length_km: 150.0,
+                cpu_usage: 50.0,
+                pg_usage: 50.0,
+                bandwidth: 5_000.0,
+                ..Default::default()
+            }],
+            routes: vec![PiRouteState {
+                route_id: 700,
+                path: vec![20, 30],
+                commodity_type_id: 2268,
+                quantity: 10,
+            }],
+            cpu_used: 7_000.0,
+            cpu_max: 7_057.0,
+            pg_used: 8_900.0,
+            pg_max: 9_000.0,
+            ..Default::default()
+        });
+    });
+
+    for (cmd, expected) in [
+        (PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(99), PyRep::Integer(2469), PyRep::Real(0.3), PyRep::Real(0.3)]), "InsufficientColonyCpuOrPowergrid"),
+        (PyRep::Tuple(vec![PyRep::Integer(2), PyRep::Integer(999)]), "PinNotFound"),
+        (PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(999), PyRep::Integer(30), PyRep::Integer(0)]), "PinNotFound"),
+        (PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(20), PyRep::Integer(999), PyRep::Integer(0)]), "PinNotFound"),
+        (PyRep::Tuple(vec![PyRep::Integer(5), PyRep::Integer(20), PyRep::Integer(30), PyRep::Integer(0)]), "InvalidLinkLevel"),
+        (PyRep::Tuple(vec![PyRep::Integer(5), PyRep::Integer(20), PyRep::Integer(999), PyRep::Integer(3)]), "LinkNotFound"),
+        (PyRep::Tuple(vec![PyRep::Integer(5), PyRep::Integer(20), PyRep::Integer(30), PyRep::Integer(2)]), "InvalidLinkLevel"),
+        (PyRep::Tuple(vec![PyRep::Integer(5), PyRep::Integer(20), PyRep::Integer(30), PyRep::Integer(8)]), "InsufficientColonyCpuOrPowergrid"),
+        (PyRep::Tuple(vec![PyRep::Integer(10), PyRep::Integer(999), PyRep::Integer(2268), PyRep::Real(0.02), PyRep::Integer(1)]), "PinNotFound"),
+        (PyRep::Tuple(vec![PyRep::Integer(10), PyRep::Integer(20), PyRep::Integer(2268), PyRep::Real(0.02), PyRep::Integer(0)]), "InvalidExtractorHeadCount"),
+        (PyRep::Tuple(vec![PyRep::Integer(10), PyRep::Integer(20), PyRep::Integer(2268), PyRep::Integer(300), PyRep::Integer(1), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Real(0.95), PyRep::Real(0.95)])])]), "ExtractorHeadOutOfRange"),
+        (PyRep::Tuple(vec![PyRep::Integer(14), PyRep::Integer(999), PyRep::Integer(1), PyRep::Real(0.0), PyRep::Real(0.0)]), "PinNotFound"),
+    ] {
+        assert_eq!(run_upd(&mut sess, vec![cmd]).unwrap_err().code, expected);
+    }
+
+    // InstallProgram with both 3-tuple and 2-tuple head format + future expiry > now_unix (`L1051-1124`)
+    assert!(run_upd(&mut sess, vec![PyRep::Tuple(vec![
+        PyRep::Integer(10),
+        PyRep::Integer(20),
+        PyRep::Integer(2268),
+        PyRep::Integer(300),
+        PyRep::Integer(2),
+        PyRep::List(vec![
+            PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Real(0.01), PyRep::Real(0.01)]),
+            PyRep::Tuple(vec![PyRep::Real(0.02), PyRep::Real(0.02)]),
+        ]),
+        PyRep::Integer(1_775_403_600),
+    ])]).is_ok());
+
+    // MoveExtractorHead: move existing head 1 (`L1162-1164`), add up to 10, then 11th -> InvalidExtractorHeadCount (`L1166-1169`)
+    assert!(run_upd(&mut sess, vec![PyRep::Tuple(vec![PyRep::Integer(14), PyRep::Integer(20), PyRep::Integer(1), PyRep::Real(0.03), PyRep::Real(0.03)])]).is_ok());
+    let mut add_cmds = Vec::new();
+    for hid in 20..28_i64 {
+        add_cmds.push(PyRep::Tuple(vec![PyRep::Integer(14), PyRep::Integer(20), PyRep::Integer(hid), PyRep::Real(0.01), PyRep::Real(0.01)]));
+    }
+    assert!(run_upd(&mut sess, add_cmds).is_ok());
+    assert_eq!(
+        run_upd(&mut sess, vec![PyRep::Tuple(vec![PyRep::Integer(14), PyRep::Integer(20), PyRep::Integer(99), PyRep::Real(0.01), PyRep::Real(0.01)])])
+            .unwrap_err()
+            .code,
+        "InvalidExtractorHeadCount"
+    );
+
+    // Raise CPU/PG max, keep 0 ISK -> InsufficientFunds on AddPin (cmd 1) & UpgradeLink (cmd 5); then fund and test RemoveLink (cmd 4) pruning route (`L789-793`) & RemovePin (cmd 2) pruning links
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = IskCents(0);
+        }
+        let mut net = load_pi_network(snap, char_id, planet_id, 1);
+        net.cpu_max = 10_000.0;
+        net.pg_max = 10_000.0;
+        save_pi_network(snap, char_id, planet_id, &net);
+    });
+    assert_eq!(
+        run_upd(&mut sess, vec![PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(88), PyRep::Integer(2469), PyRep::Real(0.3), PyRep::Real(0.3)])])
+            .unwrap_err()
+            .code,
+        "InsufficientFunds"
+    );
+    assert_eq!(
+        run_upd(&mut sess, vec![PyRep::Tuple(vec![PyRep::Integer(5), PyRep::Integer(20), PyRep::Integer(30), PyRep::Integer(4)])])
+            .unwrap_err()
+            .code,
+        "InsufficientFunds"
+    );
+
+    // Give ISK and test CreateLink InsufficientColonyCpuOrPowergrid & RemoveLink pruning route
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().balance = IskCents::from_isk(1_000_000);
+        let mut net = load_pi_network(snap, char_id, planet_id, 1);
+        net.links.push(PiLinkState { source_pin_id: 20, dest_pin_id: 30, ..Default::default() });
+        save_pi_network(snap, char_id, planet_id, &net);
+    });
+    assert!(run_upd(&mut sess, vec![PyRep::Tuple(vec![PyRep::Integer(4), PyRep::Integer(20), PyRep::Integer(30)])]).is_ok());
+}

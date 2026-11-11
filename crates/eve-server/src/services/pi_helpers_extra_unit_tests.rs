@@ -574,3 +574,668 @@ fn upgrade_cc_errors_import_consumption_and_transfer_keyval_kwargs_branches() {
         );
     });
 }
+
+#[test]
+fn pi_sim_notification_route_gates_cycle_math_and_last_cycle_boundaries() {
+    let ctx = make_pi_ctx();
+    let char_id = 90_000_001;
+    let planet_id = 40_009_091;
+    let now = ctx.now_unix();
+
+    // Verify queue_pi_notification enqueues both MachO packet and NotificationRecord with exact payload
+    queue_pi_notification(&ctx, char_id, "PlanetExtractorFinished", planet_id, 701, 101, now);
+    {
+        let pending = ctx.pending_notifications.read().unwrap();
+        let queue = pending.get(&char_id).unwrap();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].event, "PlanetExtractorFinished");
+        assert_eq!(queue[0].id_type, "charid");
+        assert_eq!(queue[0].args, vec![PyRep::Integer(planet_id), PyRep::Integer(701)]);
+    }
+    {
+        let recs = ctx.notification_records.read().unwrap();
+        assert!(recs.iter().any(|r| {
+            r.receiver_id == char_id
+                && r.type_id == 101
+                && r.data == format!("PlanetExtractorFinished:{planet_id}:701")
+        }));
+    }
+
+    let make_col = |last_ext: u64| PlanetaryColonyRecord {
+        planet_id,
+        owner_id: char_id,
+        solar_system_id: 30_000_142,
+        command_center_level: 3,
+        pins_count: 2,
+        extracted_commodities: HashMap::new(),
+        last_extracted_unix: last_ext,
+    };
+
+    // Pin.contents input with routed output storage: 2999 fails (< in_qty 3000), exact 3000 runs 1 cycle -> (0, 20)
+    let mut col_insufficient = make_col(now - 1800);
+    let mut net_insufficient = PiColonyNetworkState {
+        pins: vec![
+            PiPinState {
+                pin_id: 30,
+                type_id: 2469,
+                schematic_id: Some(65),
+                contents: HashMap::from([(2268, 2999)]),
+                ..Default::default()
+            },
+            PiPinState {
+                pin_id: 40,
+                type_id: 2257,
+                ..Default::default()
+            },
+        ],
+        links: vec![PiLinkState {
+            source_pin_id: 30,
+            dest_pin_id: 40,
+            level: 1,
+            bandwidth: 2500.0,
+            ..Default::default()
+        }],
+        routes: vec![PiRouteState {
+            route_id: 99,
+            path: vec![30, 40],
+            commodity_type_id: 3645,
+            quantity: 20,
+        }],
+        ..Default::default()
+    };
+    assert_eq!(
+        advance_colony_simulation(&ctx, &mut col_insufficient, &mut net_insufficient, 1800, now),
+        (0, 0)
+    );
+    assert_eq!(net_insufficient.pins[0].contents.get(&2268).copied(), Some(2999));
+
+    let mut col_exact = make_col(now - 1800);
+    let mut net_exact = PiColonyNetworkState {
+        pins: vec![
+            PiPinState {
+                pin_id: 30,
+                type_id: 2469,
+                schematic_id: Some(65),
+                contents: HashMap::from([(2268, 3000)]),
+                ..Default::default()
+            },
+            PiPinState {
+                pin_id: 40,
+                type_id: 2257,
+                ..Default::default()
+            },
+        ],
+        links: vec![PiLinkState {
+            source_pin_id: 30,
+            dest_pin_id: 40,
+            level: 1,
+            bandwidth: 2500.0,
+            ..Default::default()
+        }],
+        routes: vec![PiRouteState {
+            route_id: 99,
+            path: vec![30, 40],
+            commodity_type_id: 3645,
+            quantity: 20,
+        }],
+        ..Default::default()
+    };
+    assert_eq!(
+        advance_colony_simulation(&ctx, &mut col_exact, &mut net_exact, 1800, now),
+        (0, 20)
+    );
+    assert_eq!(net_exact.pins[1].contents.get(&3645).copied(), Some(20));
+
+    // Route predicate isolation checks with empty processor contents & full storage (2268: 6000)
+    // 1) path.last() != Some(&30) (all other route predicates true)
+    let mut col_r1 = make_col(now - 1800);
+    let mut net_r1 = PiColonyNetworkState {
+        pins: vec![
+            PiPinState {
+                pin_id: 20,
+                type_id: 2257,
+                contents: HashMap::from([(2268, 6000)]),
+                ..Default::default()
+            },
+            PiPinState { pin_id: 99, type_id: 2257, ..Default::default() },
+            PiPinState { pin_id: 30, type_id: 2469, schematic_id: Some(65), ..Default::default() },
+        ],
+        links: vec![PiLinkState {
+            source_pin_id: 20,
+            dest_pin_id: 99,
+            level: 1,
+            bandwidth: 2500.0,
+            ..Default::default()
+        }],
+        routes: vec![PiRouteState {
+            route_id: 1,
+            path: vec![20, 99],
+            commodity_type_id: 2268,
+            quantity: 3000,
+        }],
+        ..Default::default()
+    };
+    assert_eq!(advance_colony_simulation(&ctx, &mut col_r1, &mut net_r1, 1800, now), (0, 0));
+
+    // 2) wrong commodity_type_id (all other route predicates true)
+    let mut col_r2 = make_col(now - 1800);
+    let mut net_r2 = PiColonyNetworkState {
+        pins: vec![
+            PiPinState {
+                pin_id: 20,
+                type_id: 2257,
+                contents: HashMap::from([(2268, 6000)]),
+                ..Default::default()
+            },
+            PiPinState { pin_id: 30, type_id: 2469, schematic_id: Some(65), ..Default::default() },
+            PiPinState { pin_id: 40, type_id: 2257, ..Default::default() },
+        ],
+        links: vec![
+            PiLinkState {
+                source_pin_id: 20,
+                dest_pin_id: 30,
+                level: 1,
+                bandwidth: 2500.0,
+                ..Default::default()
+            },
+            PiLinkState {
+                source_pin_id: 30,
+                dest_pin_id: 40,
+                level: 1,
+                bandwidth: 2500.0,
+                ..Default::default()
+            },
+        ],
+        routes: vec![
+            PiRouteState {
+                route_id: 2,
+                path: vec![20, 30],
+                commodity_type_id: 3645,
+                quantity: 3000,
+            },
+            PiRouteState {
+                route_id: 99,
+                path: vec![30, 40],
+                commodity_type_id: 3645,
+                quantity: 20,
+            },
+        ],
+        ..Default::default()
+    };
+    let base_route_pins = net_r2.pins.clone();
+    assert_eq!(advance_colony_simulation(&ctx, &mut col_r2, &mut net_r2, 1800, now), (0, 0));
+
+    // 3) path.len() < 2 ([30])
+    let mut col_r3 = make_col(now - 1800);
+    let mut net_r3 = PiColonyNetworkState {
+        pins: base_route_pins.clone(),
+        links: net_r2.links.clone(),
+        routes: vec![
+            PiRouteState {
+                route_id: 3,
+                path: vec![30],
+                commodity_type_id: 2268,
+                quantity: 3000,
+            },
+            PiRouteState {
+                route_id: 99,
+                path: vec![30, 40],
+                commodity_type_id: 3645,
+                quantity: 20,
+            },
+        ],
+        ..Default::default()
+    };
+    assert_eq!(advance_colony_simulation(&ctx, &mut col_r3, &mut net_r3, 1800, now), (0, 0));
+
+    // 4) missing link (has_pi_link_path Err) with matching path, commodity, and len == 2
+    let mut col_r4 = make_col(now - 1800);
+    let mut net_r4 = PiColonyNetworkState {
+        pins: base_route_pins.clone(),
+        links: vec![],
+        routes: vec![
+            PiRouteState {
+                route_id: 4,
+                path: vec![20, 30],
+                commodity_type_id: 2268,
+                quantity: 3000,
+            },
+            PiRouteState {
+                route_id: 99,
+                path: vec![30, 40],
+                commodity_type_id: 3645,
+                quantity: 20,
+            },
+        ],
+        ..Default::default()
+    };
+    assert_eq!(advance_colony_simulation(&ctx, &mut col_r4, &mut net_r4, 1800, now), (0, 0));
+
+    // 5) valid incoming route consumes storage stock -> (0, 20)
+    let mut col_r5 = make_col(now - 1800);
+    let mut net_r5 = PiColonyNetworkState {
+        pins: base_route_pins,
+        links: net_r2.links.clone(),
+        routes: vec![
+            PiRouteState {
+                route_id: 5,
+                path: vec![20, 30],
+                commodity_type_id: 2268,
+                quantity: 3000,
+            },
+            PiRouteState {
+                route_id: 99,
+                path: vec![30, 40],
+                commodity_type_id: 3645,
+                quantity: 20,
+            },
+        ],
+        ..Default::default()
+    };
+    assert_eq!(advance_colony_simulation(&ctx, &mut col_r5, &mut net_r5, 1800, now), (0, 20));
+    assert_eq!(net_r5.pins[0].contents.get(&2268).copied(), Some(3000));
+
+    let out_pin = PiPinState { pin_id: 40, type_id: 2257, ..Default::default() };
+    let out_link = PiLinkState {
+        source_pin_id: 30,
+        dest_pin_id: 40,
+        level: 1,
+        bandwidth: 2500.0,
+        ..Default::default()
+    };
+    let out_route = PiRouteState {
+        route_id: 99,
+        path: vec![30, 40],
+        commodity_type_id: 3645,
+        quantity: 20,
+    };
+
+    // last_cycle_unix filter boundary checks with 300_000 input capacity (100 cycles worth)
+    // a) last_cycle_unix == Some(now) -> pin_elapsed = 0 -> (0, 0)
+    let mut col_lc_eq = make_col(now - 3600);
+    let mut net_lc_eq = PiColonyNetworkState {
+        pins: vec![
+            PiPinState {
+                pin_id: 30,
+                type_id: 2469,
+                schematic_id: Some(65),
+                contents: HashMap::from([(2268, 300_000)]),
+                last_cycle_unix: Some(now),
+                ..Default::default()
+            },
+            out_pin.clone(),
+        ],
+        links: vec![out_link.clone()],
+        routes: vec![out_route.clone()],
+        ..Default::default()
+    };
+    assert_eq!(advance_colony_simulation(&ctx, &mut col_lc_eq, &mut net_lc_eq, 3600, now), (0, 0));
+
+    // b) last_cycle_unix == Some(now + 500) -> rejected (> now), uses colony_sim_start (now - 3600) -> 2 cycles -> (0, 40)
+    let mut col_lc_future = make_col(now - 3600);
+    let mut net_lc_future = PiColonyNetworkState {
+        pins: vec![
+            PiPinState {
+                pin_id: 30,
+                type_id: 2469,
+                schematic_id: Some(65),
+                contents: HashMap::from([(2268, 300_000)]),
+                last_cycle_unix: Some(now + 500),
+                ..Default::default()
+            },
+            out_pin.clone(),
+        ],
+        links: vec![out_link.clone()],
+        routes: vec![out_route.clone()],
+        ..Default::default()
+    };
+    assert_eq!(
+        advance_colony_simulation(&ctx, &mut col_lc_future, &mut net_lc_future, 3600, now),
+        (0, 40)
+    );
+
+    // c) last_cycle_unix == Some(0) -> rejected (t > 0), uses colony_sim_start (now - 3600) -> 2 cycles -> (0, 40) (not 100)
+    let mut col_lc_zero = make_col(now - 3600);
+    let mut net_lc_zero = PiColonyNetworkState {
+        pins: vec![
+            PiPinState {
+                pin_id: 30,
+                type_id: 2469,
+                schematic_id: Some(65),
+                contents: HashMap::from([(2268, 300_000)]),
+                last_cycle_unix: Some(0),
+                ..Default::default()
+            },
+            out_pin.clone(),
+        ],
+        links: vec![out_link.clone()],
+        routes: vec![out_route.clone()],
+        ..Default::default()
+    };
+    assert_eq!(
+        advance_colony_simulation(&ctx, &mut col_lc_zero, &mut net_lc_zero, 3600, now),
+        (0, 40)
+    );
+
+    // d) last_cycle_unix == Some(now - 1800) with colony_sim_start == now - 3600 -> 1 cycle -> (0, 20)
+    let mut col_lc_recent = make_col(now - 3600);
+    let mut net_lc_recent = PiColonyNetworkState {
+        pins: vec![
+            PiPinState {
+                pin_id: 30,
+                type_id: 2469,
+                schematic_id: Some(65),
+                contents: HashMap::from([(2268, 300_000)]),
+                last_cycle_unix: Some(now - 1800),
+                ..Default::default()
+            },
+            out_pin.clone(),
+        ],
+        links: vec![out_link.clone()],
+        routes: vec![out_route.clone()],
+        ..Default::default()
+    };
+    assert_eq!(
+        advance_colony_simulation(&ctx, &mut col_lc_recent, &mut net_lc_recent, 3600, now),
+        (0, 20)
+    );
+
+    // max_cycles division (`/` vs `%`, `*`) and `cycles_ran += 1` (`+=` vs `-=`, `*=`) with 9_000 input (3 cycles worth)
+    // Exact 3600 / 1800 = 2 cycles -> (0, 40) (whereas 3600 % 1800 = 0 and * capped at 100 runs 3 -> 60)
+    let mut col_div = make_col(now - 3600);
+    let mut net_div = PiColonyNetworkState {
+        pins: vec![
+            PiPinState {
+                pin_id: 30,
+                type_id: 2469,
+                schematic_id: Some(65),
+                contents: HashMap::from([(2268, 9_000)]),
+                last_cycle_unix: Some(now - 3600),
+                ..Default::default()
+            },
+            out_pin.clone(),
+        ],
+        links: vec![out_link.clone()],
+        routes: vec![out_route.clone()],
+        ..Default::default()
+    };
+    assert_eq!(
+        advance_colony_simulation(&ctx, &mut col_div, &mut net_div, 3600, now),
+        (0, 40)
+    );
+    // 4500 / 1800 = 2 cycles with 900s remainder -> updates last_cycle_unix to Some(now - 900)
+    let mut col_rem = make_col(now - 4500);
+    let mut net_rem = PiColonyNetworkState {
+        pins: vec![
+            PiPinState {
+                pin_id: 30,
+                type_id: 2469,
+                schematic_id: Some(65),
+                contents: HashMap::from([(2268, 9_000)]),
+                last_cycle_unix: Some(now - 4500),
+                ..Default::default()
+            },
+            out_pin,
+        ],
+        links: vec![out_link],
+        routes: vec![out_route],
+        ..Default::default()
+    };
+    assert_eq!(
+        advance_colony_simulation(&ctx, &mut col_rem, &mut net_rem, 4500, now),
+        (0, 40)
+    );
+    assert_eq!(net_rem.pins[0].last_cycle_unix, Some(now - 900));
+}
+
+#[test]
+fn pi_background_tick_baselines_filter_boundaries_and_consume_import_locks() {
+    let char_id = 90_000_001;
+    let planet_id = 40_009_092;
+
+    let run_isolated_tick = |build: fn(u64) -> (u64, u64, Vec<PiPinState>)| -> PiColonyNetworkState {
+        let ctx = make_pi_ctx();
+        let now = ctx.now_unix();
+        let (col_last_ext, net_last_sim, mut pins) = build(now);
+        let mut links = Vec::new();
+        let mut routes = Vec::new();
+        if pins.iter().any(|p| p.pin_id == 30) && !pins.iter().any(|p| p.pin_id == 40) {
+            pins.push(PiPinState {
+                pin_id: 40,
+                type_id: 2257,
+                ..Default::default()
+            });
+            links.push(PiLinkState {
+                source_pin_id: 30,
+                dest_pin_id: 40,
+                level: 1,
+                bandwidth: 2500.0,
+                ..Default::default()
+            });
+            routes.push(PiRouteState {
+                route_id: 99,
+                path: vec![30, 40],
+                commodity_type_id: 3645,
+                quantity: 20,
+            });
+        }
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.planetary_colonies.insert(
+                (char_id, planet_id),
+                PlanetaryColonyRecord {
+                    planet_id,
+                    owner_id: char_id,
+                    solar_system_id: 30_000_142,
+                    command_center_level: 3,
+                    pins_count: pins.len() as u32,
+                    extracted_commodities: HashMap::new(),
+                    last_extracted_unix: col_last_ext,
+                },
+            );
+            let net = PiColonyNetworkState {
+                pins,
+                links,
+                routes,
+                last_simulated_unix: net_last_sim,
+                ..Default::default()
+            };
+            save_pi_network(snap, char_id, planet_id, &net);
+        });
+        tick_all_colonies_background(&ctx, now);
+        ctx.db.with_snapshot(|snap| load_pi_network(snap, char_id, planet_id, 3))
+    };
+
+    // 1) col.last_extracted_unix == 0, net.last_simulated_unix == now - 1800 -> runs 1 cycle (20)
+    let net1 = run_isolated_tick(|now| {
+        (
+            0,
+            now - 1800,
+            vec![PiPinState {
+                pin_id: 30,
+                type_id: 2469,
+                schematic_id: Some(65),
+                contents: HashMap::from([(2268, 6000)]),
+                ..Default::default()
+            }],
+        )
+    });
+    assert_eq!(net1.pending_login_processed, 20);
+
+    // 2) col.last_extracted_unix == now - 3600 takes precedence over net.last_simulated_unix == now - 1800 -> 2 cycles (40)
+    let net2 = run_isolated_tick(|now| {
+        (
+            now - 3600,
+            now - 1800,
+            vec![PiPinState {
+                pin_id: 30,
+                type_id: 2469,
+                schematic_id: Some(65),
+                contents: HashMap::from([(2268, 6000)]),
+                ..Default::default()
+            }],
+        )
+    });
+    assert_eq!(net2.pending_login_processed, 40);
+
+    // 3) Both colony/network timestamps 0 -> min pin last_cycle_unix filtering out Some(0) picks Some(now - 1800) -> 1 cycle (20)
+    let net3 = run_isolated_tick(|now| {
+        (
+            0,
+            0,
+            vec![
+                PiPinState {
+                    pin_id: 1,
+                    type_id: 910_001,
+                    last_cycle_unix: Some(0),
+                    ..Default::default()
+                },
+                PiPinState {
+                    pin_id: 30,
+                    type_id: 2469,
+                    schematic_id: Some(65),
+                    contents: HashMap::from([(2268, 6000)]),
+                    last_cycle_unix: Some(now - 1800),
+                    ..Default::default()
+                },
+            ],
+        )
+    });
+    assert_eq!(net3.pending_login_processed, 20);
+
+    // 4) net.last_simulated_unix == now - 3600 takes precedence over pin last_cycle_unix == now - 1800 -> 2 cycles (40)
+    let net4 = run_isolated_tick(|now| {
+        (
+            0,
+            now - 3600,
+            vec![
+                PiPinState {
+                    pin_id: 1,
+                    type_id: 910_001,
+                    last_cycle_unix: Some(now - 1800),
+                    ..Default::default()
+                },
+                PiPinState {
+                    pin_id: 30,
+                    type_id: 2469,
+                    schematic_id: Some(65),
+                    contents: HashMap::from([(2268, 6000)]),
+                    last_cycle_unix: None,
+                    ..Default::default()
+                },
+            ],
+        )
+    });
+    assert_eq!(net4.pending_login_processed, 40);
+
+    // 5) Non-due boundaries (col.last_extracted_unix == now, and pin last_cycle_unix == now) leave colony untouched
+    let net5 = run_isolated_tick(|now| {
+        (
+            now,
+            0,
+            vec![PiPinState {
+                pin_id: 30,
+                type_id: 2469,
+                schematic_id: Some(65),
+                contents: HashMap::from([(2268, 6000)]),
+                last_cycle_unix: Some(now),
+                ..Default::default()
+            }],
+        )
+    });
+    assert_eq!(net5.pending_login_processed, 0);
+    assert_eq!(net5.last_simulated_unix, 0);
+
+    // 6) Non-due pin last_cycle_unix == now when col/net timestamps are 0 leaves colony untouched
+    let net6 = run_isolated_tick(|now| {
+        (
+            0,
+            0,
+            vec![PiPinState {
+                pin_id: 30,
+                type_id: 2469,
+                schematic_id: Some(65),
+                contents: HashMap::from([(2268, 6000)]),
+                last_cycle_unix: Some(now),
+                ..Default::default()
+            }],
+        )
+    });
+    assert_eq!(net6.pending_login_processed, 0);
+    assert_eq!(net6.last_simulated_unix, 0);
+
+    // consume_pi_import_commodities: Locked flag + ContractRecord lock rejection + deterministic multi-stack consumption
+    let ctx = make_pi_ctx();
+    let ship_id = 999;
+    ctx.db.with_mut_snapshot(|snap| {
+        // Locked by InventoryFlag::Locked (not in any contract)
+        snap.items.insert(
+            100_001,
+            InventoryItemRecord {
+                item_id: 100_001,
+                type_id: 3645,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Locked,
+                quantity: 50,
+                ..Default::default()
+            },
+        );
+        // Locked by Outstanding ContractRecord
+        snap.items.insert(
+            100_002,
+            InventoryItemRecord {
+                item_id: 100_002,
+                type_id: 3645,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::SpecializedPlanetaryCommoditiesHold,
+                quantity: 50,
+                ..Default::default()
+            },
+        );
+        snap.contracts.insert(
+            800_001,
+            eve_db::ContractRecord {
+                contract_id: 800_001,
+                issuer_id: char_id,
+                status: "Outstanding".into(),
+                item_ids: vec![100_002],
+                ..Default::default()
+            },
+        );
+
+        assert!(consume_pi_import_commodities(snap, char_id, planet_id, 3645, 5, Some(ship_id), None, None).is_err());
+
+        // Add two unlocked stacks: 4 + 10 -> consume 7 deletes 100_003 (4) and leaves 100_004 with 7
+        snap.items.insert(
+            100_003,
+            InventoryItemRecord {
+                item_id: 100_003,
+                type_id: 3645,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::SpecializedPlanetaryCommoditiesHold,
+                quantity: 4,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            100_004,
+            InventoryItemRecord {
+                item_id: 100_004,
+                type_id: 3645,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::SpecializedPlanetaryCommoditiesHold,
+                quantity: 10,
+                ..Default::default()
+            },
+        );
+
+        consume_pi_import_commodities(snap, char_id, planet_id, 3645, 7, Some(ship_id), None, None).unwrap();
+        assert!(!snap.items.contains_key(&100_003));
+        assert_eq!(snap.items.get(&100_004).unwrap().quantity, 7);
+        assert_eq!(snap.items.get(&100_001).unwrap().quantity, 50);
+        assert_eq!(snap.items.get(&100_002).unwrap().quantity, 50);
+    });
+}

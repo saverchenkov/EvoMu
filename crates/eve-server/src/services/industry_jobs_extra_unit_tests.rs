@@ -297,6 +297,9 @@ fn reactions_lowsec_composite_reactor_ancient_relic_and_decryptor_invention() {
     );
 
     // 4. Normal reaction (46166) at Low-sec Athanor succeeds and completes!
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&70_001).unwrap().type_id = 45_537;
+    });
     let react_rep = handle_industry_jobs(
         &ctx,
         &mut sess,

@@ -523,7 +523,11 @@ async fn test_activate_process_and_deactivate_mining_cycle() {
     assert_eq!(outcomes[0].units_delivered, 600);
     assert_eq!(outcomes[0].asteroid_remaining, 400);
 
-    let _ = ctx.drain_notifications_for_char(char_id);
+    let cycle_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        cycle_notifs.iter().any(|n| n.event == "OnItemChange"),
+        "process_mining_cycles must emit OnItemChange when delivering mined ore"
+    );
     // Deactivate remaining running cycle
     let deact = deactivate(&ctx, char_id, Some(ship_id), mod_id)
         .await
@@ -755,3 +759,7 @@ async fn dedicated_physics_and_cluster_ticks_yield_1x_mining_not_2x() {
         assert_eq!(snap.asteroids[&ast_id].quantity, 9_400);
     });
 }
+
+#[cfg(test)]
+#[path = "mining_cycle_extra_unit_tests.rs"]
+mod extra_unit_tests;

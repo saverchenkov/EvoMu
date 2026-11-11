@@ -143,7 +143,7 @@ fn derive_moon_ores_from_sde_covers_zarzakh_highsec_r4_lowsec_and_sparse_fallbac
     assert_eq!(fb, vec![(45492, 0.40), (45490, 0.35), (45494, 0.25)]);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_cancel_and_fracture_extraction_error_and_rig_bonus_branches() {
     let (ctx, _clock) = make_ctx_and_clock(1_775_400_000);
     let char_id = 90_000_001_i64;
@@ -256,9 +256,24 @@ async fn start_cancel_and_fracture_extraction_error_and_rig_bonus_branches() {
     .expect_err("zero fuel blocks");
     assert_eq!(err.code, "StructureServiceOffline");
 
-    // Restore fuel blocks and fit stability rig (37180, +50% delay -> 16,200s)
+    // Restore fuel blocks, fit online Standup Moon Drill I (45009), and fit stability rig (37180, +50% delay -> 16,200s)
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.get_mut(&struct_id).unwrap().fuel_blocks = 500;
+        snap.items.insert(
+            700_100,
+            InventoryItemRecord {
+                item_id: 700_100,
+                type_id: 45009,
+                owner_id: corp_id,
+                location_id: struct_id,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(700_100, true);
         snap.items.insert(
             700_101,
             InventoryItemRecord {
@@ -428,7 +443,7 @@ async fn start_cancel_and_fracture_extraction_error_and_rig_bonus_branches() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metenox_auto_moon_mining_statuses_and_production_tick() {
     let (ctx, _) = make_ctx_and_clock(1_775_400_000);
     let char_id = 90_000_001_i64;
@@ -587,3 +602,413 @@ async fn metenox_auto_moon_mining_statuses_and_production_tick() {
         assert!(harvested, "Metenox tick must deposit harvested moon materials");
     });
 }
+
+#[tokio::test]
+async fn moon_extractions_and_metenox_edge_branches_kill_mutants() {
+    use eve_db::{ContractRecord, MoonExtractionRecord, UpwellStructureRecord};
+
+    let t0: u64 = 1_776_000_000;
+    let (ctx, _clock) = make_ctx_and_clock(t0);
+
+    // Find a highsec moon system (sec >= 0.45), a lowsec/null moon system (< 0.45, < 31M), and a WH moon system (>= 31M)
+    let hs_sys = 30_000_142_u32;
+    let ls_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| {
+            s.security_status < 0.45
+                && s.solar_system_id < 31_000_000
+                && s.region_id != 10_000_070
+                && s.solar_system_id != 30_100_000
+                && ctx.sde.celestials_in_system(s.solar_system_id).iter().any(|c| c.group_id == 8)
+        })
+        .expect("lowsec/null system with moon")
+        .solar_system_id;
+    let ls_moon = ctx
+        .sde
+        .celestials_in_system(ls_sys)
+        .into_iter()
+        .find(|c| c.group_id == 8)
+        .expect("lowsec moon");
+    let wh_sys_opt = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| {
+            s.solar_system_id >= 31_000_000
+                && ctx.sde.celestials_in_system(s.solar_system_id).iter().any(|c| c.group_id == 8)
+        })
+        .map(|s| s.solar_system_id);
+
+    // Part A: tick_all_moon_extractions boundaries & fractured moon field pruning
+    let st_ready_trans: i64 = 77_101;
+    let st_auto_frac: i64 = 77_102;
+    let st_decay_nat: i64 = 77_103;
+    let st_missing: i64 = 77_104;
+    let st_cancelled: i64 = 77_105;
+    let st_manual_ready: i64 = 77_106;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for sid in [st_ready_trans, st_auto_frac, st_decay_nat, st_cancelled, st_manual_ready] {
+            snap.structures.insert(
+                sid,
+                UpwellStructureRecord {
+                    structure_id: sid,
+                    type_id: 35835, // Athanor
+                    owner_corp_id: 98_000_777,
+                    solar_system_id: ls_sys,
+                    name: format!("Refinery-{sid}"),
+                    position: [ls_moon.position.x + 1_000_000.0, ls_moon.position.y, ls_moon.position.z],
+                    state: "ShieldVulnerable".into(),
+                    quantum_core_installed: true,
+                    fuel_blocks: 100,
+                    ..Default::default()
+                },
+            );
+        }
+        // Fractured fields: exact decay_unix == t0 pruned, t0 + 1 retained
+        snap.mining_and_ess_state.moon_fractured_fields = vec![
+            (900_001, ls_sys, t0, vec![11]),
+            (900_002, ls_sys, t0 + 1, vec![22]),
+        ];
+        // Missing structure -> Cancelled
+        snap.moon_extractions.insert(
+            st_missing,
+            MoonExtractionRecord {
+                structure_id: st_missing,
+                moon_id: ls_moon.celestial_id,
+                extraction_start_unix: t0 - 1_000,
+                chunk_arrival_unix: t0 + 100,
+                natural_decay_unix: t0 + 20_000,
+                status: "Started".into(),
+                auto_fracture: true,
+                event_id: 1,
+                moon_ores: vec![(45492, 1.0)],
+                spawned_asteroid_ids: Vec::new(),
+            },
+        );
+        // Cancelled stays Cancelled
+        snap.moon_extractions.insert(
+            st_cancelled,
+            MoonExtractionRecord {
+                structure_id: st_cancelled,
+                moon_id: ls_moon.celestial_id,
+                extraction_start_unix: t0 - 1_000,
+                chunk_arrival_unix: t0 - 10,
+                natural_decay_unix: t0 + 20_000,
+                status: "Cancelled".into(),
+                auto_fracture: true,
+                event_id: 2,
+                moon_ores: vec![(45492, 1.0)],
+                spawned_asteroid_ids: Vec::new(),
+            },
+        );
+        // Started -> transitions to Ready at chunk_arrival_unix = t0 + 1
+        snap.moon_extractions.insert(
+            st_ready_trans,
+            MoonExtractionRecord {
+                structure_id: st_ready_trans,
+                moon_id: ls_moon.celestial_id,
+                extraction_start_unix: t0 - 1_000,
+                chunk_arrival_unix: t0 + 1,
+                natural_decay_unix: t0 + 50_000,
+                status: "Started".into(),
+                auto_fracture: false,
+                event_id: 3,
+                moon_ores: vec![(45492, 1.0)],
+                spawned_asteroid_ids: Vec::new(),
+            },
+        );
+        // Auto-fracture Ready at chunk_arrival + 10_800
+        snap.moon_extractions.insert(
+            st_auto_frac,
+            MoonExtractionRecord {
+                structure_id: st_auto_frac,
+                moon_id: ls_moon.celestial_id,
+                extraction_start_unix: t0 - 20_000,
+                chunk_arrival_unix: t0 - 10_799, // fractures at t0 + 1, NOT at t0
+                natural_decay_unix: t0 + 20_000,
+                status: "Ready".into(),
+                auto_fracture: true,
+                event_id: 4,
+                moon_ores: vec![(45492, 1.0)],
+                spawned_asteroid_ids: Vec::new(),
+            },
+        );
+        // Extraction before auto-fracture deadline remains Ready past chunk_arrival_unix, while natural decay triggers at t0 + 1
+        snap.moon_extractions.insert(
+            st_manual_ready,
+            MoonExtractionRecord {
+                structure_id: st_manual_ready,
+                moon_id: ls_moon.celestial_id,
+                extraction_start_unix: t0 - 30_000,
+                chunk_arrival_unix: t0 - 5_000,
+                natural_decay_unix: t0 + 500,
+                status: "Ready".into(),
+                auto_fracture: false,
+                event_id: 5,
+                moon_ores: vec![(45492, 1.0)],
+                spawned_asteroid_ids: Vec::new(),
+            },
+        );
+        snap.moon_extractions.insert(
+            st_decay_nat,
+            MoonExtractionRecord {
+                structure_id: st_decay_nat,
+                moon_id: ls_moon.celestial_id,
+                extraction_start_unix: t0 - 30_000,
+                chunk_arrival_unix: t0 - 10_790,
+                natural_decay_unix: t0 + 1,
+                status: "Ready".into(),
+                auto_fracture: true,
+                event_id: 6,
+                moon_ores: vec![(45492, 1.0)],
+                spawned_asteroid_ids: Vec::new(),
+            },
+        );
+    });
+
+    tick_all_moon_extractions(&ctx).await;
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.mining_and_ess_state.moon_fractured_fields.len(), 1);
+        assert_eq!(snap.mining_and_ess_state.moon_fractured_fields[0].0, 900_002);
+        assert_eq!(snap.moon_extractions[&st_missing].status, "Started");
+        assert_eq!(snap.moon_extractions[&st_cancelled].status, "Cancelled");
+        assert_eq!(snap.moon_extractions[&st_ready_trans].status, "Started");
+        assert_eq!(snap.moon_extractions[&st_auto_frac].status, "Ready");
+        assert_eq!(snap.moon_extractions[&st_manual_ready].status, "Ready");
+        assert_eq!(snap.moon_extractions[&st_decay_nat].status, "Ready");
+    });
+
+    ctx.advance_secs(1); // now = t0 + 1
+    tick_all_moon_extractions(&ctx).await;
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            snap.mining_and_ess_state
+                .moon_fractured_fields
+                .iter()
+                .all(|f| f.0 != 900_002),
+            "900_002 expires at t0 + 1"
+        );
+        assert_eq!(snap.moon_extractions[&st_ready_trans].status, "Started");
+        assert_eq!(snap.moon_extractions[&st_auto_frac].status, "Fractured");
+        assert!(!snap.moon_extractions[&st_auto_frac].spawned_asteroid_ids.is_empty());
+        assert!(
+            snap.mining_and_ess_state
+                .moon_fractured_fields
+                .iter()
+                .any(|f| f.0 == st_auto_frac && f.1 == ls_sys && !f.3.is_empty()),
+            "record_fractured_moon_field must persist auto-fractured field"
+        );
+        assert_eq!(snap.moon_extractions[&st_manual_ready].status, "Ready");
+        assert_eq!(snap.moon_extractions[&st_decay_nat].status, "Decayed");
+    });
+
+    // Part B: tick_all_metenox_moon_drills negative gates + multi-stack + locked reagent drain + output bay full
+    let corp_id = 98_000_777_i64;
+    let m_no_core = 78_101_i64;
+    let m_bad_state = 78_102_i64;
+    let m_non_metenox = 78_103_i64;
+    let m_highsec = 78_104_i64;
+    let m_multistack = 78_105_i64;
+    let m_full_bay = 78_106_i64;
+    let m_wh_opt = wh_sys_opt.map(|ws| (ws, 78_107_i64));
+
+    let ls_moon_pos = [ls_moon.position.x + 1_000_000.0, ls_moon.position.y, ls_moon.position.z];
+    let hs_moon_pos = ctx
+        .sde
+        .celestials_in_system(hs_sys)
+        .into_iter()
+        .find(|c| c.group_id == 8)
+        .map(|m| [m.position.x + 1_000_000.0, m.position.y, m.position.z])
+        .unwrap_or([0.0; 3]);
+
+    let mut iid_seq = 88_000_i64;
+    let fuel_locked_id = 88_001_i64;
+    let fuel_small_id = 88_002_i64;
+    let fuel_big_id = 88_003_i64;
+    let gas_small_id = 88_004_i64;
+    let gas_big_id = 88_005_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut add_drill = |sid: i64, type_id: u32, sys: u32, pos: [f64; 3], core: bool, state: &str| {
+            snap.structures.insert(
+                sid,
+                UpwellStructureRecord {
+                    structure_id: sid,
+                    type_id,
+                    owner_corp_id: corp_id,
+                    solar_system_id: sys,
+                    name: format!("Drill-{sid}"),
+                    position: pos,
+                    state: state.into(),
+                    quantum_core_installed: core,
+                    fuel_blocks: 0,
+                    ..Default::default()
+                },
+            );
+            snap.auto_moon_miners.insert(
+                sid,
+                eve_db::AutoMoonMinerRecord {
+                    structure_id: sid,
+                    fuel_units_remaining: 100,
+                    magmatic_gas_remaining: 500,
+                    efficiency: 0.40,
+                    cycle_duration_seconds: 3_600,
+                    last_cycle_unix: t0,
+                    ore_type_id: 45492,
+                    hourly_yield: 0,
+                    status: "Active".into(),
+                },
+            );
+        };
+
+        add_drill(m_no_core, 81826, ls_sys, ls_moon_pos, false, "ShieldVulnerable");
+        add_drill(m_bad_state, 81826, ls_sys, ls_moon_pos, true, "Anchoring");
+        add_drill(m_non_metenox, 35832, ls_sys, ls_moon_pos, true, "ShieldVulnerable");
+        add_drill(m_highsec, 81826, hs_sys, hs_moon_pos, true, "ShieldVulnerable");
+        add_drill(m_multistack, 81826, ls_sys, ls_moon_pos, true, "ShieldVulnerable");
+        add_drill(m_full_bay, 81826, ls_sys, ls_moon_pos, true, "ShieldVulnerable");
+        if let Some((ws, wsid)) = m_wh_opt {
+            let wm_pos = ctx
+                .sde
+                .celestials_in_system(ws)
+                .into_iter()
+                .find(|c| c.group_id == 8)
+                .map(|m| [m.position.x + 1_000_000.0, m.position.y, m.position.z])
+                .unwrap_or([0.0; 3]);
+            add_drill(wsid, 81826, ws, wm_pos, true, "ShieldVulnerable");
+        }
+
+        // Seed fuel & gas into ignored drills too so only structure gate stops them
+        for sid in [m_no_core, m_bad_state, m_non_metenox, m_highsec] {
+            for (tid, qty) in [(4247_u32, 100), (81143_u32, 500)] {
+                iid_seq += 10;
+                snap.items.insert(
+                    iid_seq,
+                    eve_db::InventoryItemRecord {
+                        item_id: iid_seq,
+                        type_id: tid,
+                        owner_id: corp_id,
+                        location_id: sid,
+                        flag: InventoryFlag::SpecializedFuelBay,
+                        quantity: qty,
+                        singleton: false,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+
+        // Multi-stack + locked contract stack for m_multistack
+        for (iid, tid, qty) in [
+            (fuel_locked_id, 4247_u32, 50),
+            (fuel_small_id, 4247_u32, 2),
+            (fuel_big_id, 4247_u32, 50),
+            (gas_small_id, 81143_u32, 4),
+            (gas_big_id, 81143_u32, 500),
+        ] {
+            snap.items.insert(
+                iid,
+                eve_db::InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: corp_id,
+                    location_id: m_multistack,
+                    flag: InventoryFlag::SpecializedFuelBay,
+                    quantity: qty,
+                    singleton: false,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.contracts.insert(
+            990_001,
+            ContractRecord {
+                contract_id: 990_001,
+                status: "Outstanding".into(),
+                item_ids: vec![fuel_locked_id],
+                ..Default::default()
+            },
+        );
+
+        // Full output bay on m_full_bay + fuel/gas
+        for (iid, tid, flag, qty) in [
+            (88_201_i64, 4247_u32, InventoryFlag::SpecializedFuelBay, 100),
+            (88_202_i64, 81143_u32, InventoryFlag::SpecializedFuelBay, 500),
+            (88_203_i64, 45492_u32, InventoryFlag::SpecializedMineralHold, 50_000_000),
+        ] {
+            snap.items.insert(
+                iid,
+                eve_db::InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: corp_id,
+                    location_id: m_full_bay,
+                    flag,
+                    quantity: qty,
+                    singleton: false,
+                    ..Default::default()
+                },
+            );
+        }
+        if let Some((_, wsid)) = m_wh_opt {
+            for (iid, tid, qty) in [(88_301_i64, 4247_u32, 100), (88_302_i64, 81143_u32, 500)] {
+                snap.items.insert(
+                    iid,
+                    eve_db::InventoryItemRecord {
+                        item_id: iid,
+                        type_id: tid,
+                        owner_id: corp_id,
+                        location_id: wsid,
+                        flag: InventoryFlag::SpecializedFuelBay,
+                        quantity: qty,
+                        singleton: false,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+    });
+
+    // Elapsed = 3599 < 3600 -> zero cycle advancement
+    tick_all_metenox_moon_drills(&ctx, t0, t0 + 3_599);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.auto_moon_miners[&m_multistack].last_cycle_unix, t0);
+        assert_eq!(snap.items[&fuel_small_id].quantity, 2);
+    });
+
+    // Elapsed = 3600 -> exactly 1 cycle executes
+    tick_all_metenox_moon_drills(&ctx, t0 + 3_599, t0 + 3_600);
+    ctx.db.with_snapshot(|snap| {
+        for skipped in [m_no_core, m_bad_state, m_non_metenox, m_highsec] {
+            assert_eq!(
+                snap.auto_moon_miners[&skipped].last_cycle_unix, t0,
+                "drill {skipped} must be skipped"
+            );
+        }
+        let fuel_pc = metenox_fuel_per_cycle(&ctx.sde) as i32;
+        assert_eq!(snap.items[&fuel_locked_id].quantity, 50, "locked fuel stack untouched");
+        assert!(!snap.items.contains_key(&fuel_small_id), "small fuel stack exhausted & removed");
+        assert_eq!(
+            snap.items[&fuel_big_id].quantity,
+            50 - (fuel_pc - 2),
+            "second fuel stack drained exactly remaining amount"
+        );
+        let gas_pc = METENOX_MAGMATIC_GAS_PER_CYCLE as i32;
+        assert!(!snap.items.contains_key(&gas_small_id), "small gas stack exhausted & removed");
+        assert_eq!(
+            snap.items[&gas_big_id].quantity,
+            500 - (gas_pc - 4),
+            "second gas stack drained exactly remaining amount"
+        );
+        assert_eq!(snap.auto_moon_miners[&m_multistack].status, "Active");
+        assert_eq!(snap.auto_moon_miners[&m_full_bay].status, "OutputBayFull");
+        if let Some((_, wsid)) = m_wh_opt {
+            assert_eq!(snap.auto_moon_miners[&wsid].last_cycle_unix, t0 + 3_600);
+            assert!(snap.items[&88_301].quantity < 100, "wormhole Metenox consumes fuel");
+        }
+    });
+}
+

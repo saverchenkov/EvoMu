@@ -2239,3 +2239,7 @@ pub fn sweep_expired_contracts_and_notify(ctx: &ServerContext, now_unix: u64) ->
 #[path = "contracts_service_tests.rs"]
 mod contracts_service_tests;
 
+#[cfg(test)]
+#[path = "contracts_service_edges_tests.rs"]
+mod contracts_service_edges_tests;
+

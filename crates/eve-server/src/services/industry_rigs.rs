@@ -39,8 +39,45 @@ pub fn resolve_blueprint_activity_product(
 ///   to matching activities and product categories/groups, and non-industry rigs grant `0.0`.
 /// - Manufacturing/Research/Invention rigs: High-Sec (`1.0x`), Low-Sec (`1.9x`), Null-Sec/WH (`2.1x`).
 /// - Reaction rigs (`1933..=1939`, `2713`/`2714`, `1970` `disallowInHighSec`): High-Sec (`0.0x`), Low-Sec (`1.0x`), Null-Sec/WH (`1.1x`).
+/// Resolved structure industry rig bonuses (`mat_bonus`, `time_bonus`, `cost_bonus`, `sec_multiplier`).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct StructureRigBonuses {
+    pub mat_bonus: f64,
+    pub time_bonus: f64,
+    pub cost_bonus: f64,
+    pub sec_multiplier: f64,
+}
+
+/// Legacy 3-field view of structure industry rig bonuses (`mat_bonus`, `time_bonus`, `sec_multiplier`).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct StructureRigBonus {
+    pub mat_bonus: f64,
+    pub time_bonus: f64,
+    pub sec_multiplier: f64,
+}
+
+/// Resolved Upwell structure hull industry modifiers (`material_modifier`, `time_modifier`, `cost_modifier`).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct StructureIndustryBonuses {
+    pub material_modifier: f64,
+    pub time_modifier: f64,
+    pub cost_modifier: f64,
+}
+
+/// Resolved facility metadata and effective industry modifiers for a job/facility lookup.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct FacilityModifiersAndSystem {
+    pub type_id: eve_sde::TypeId,
+    pub owner_corp_id: i64,
+    pub solar_system_id: u32,
+    pub region_id: u32,
+    pub material_modifier: f64,
+    pub time_modifier: f64,
+    pub cost_modifier: f64,
+}
+
 /// - Outpost Conversion rigs (`group_id == 1984`): flat `1.0x` security multiplier.
-/// Returns `(rig_mat_bonus, rig_time_bonus, rig_cost_bonus, sec_multiplier)`.
+/// Returns `StructureRigBonuses { mat_bonus, time_bonus, cost_bonus, sec_multiplier }`.
 pub fn resolve_structure_rig_bonuses_for_job(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
@@ -48,7 +85,7 @@ pub fn resolve_structure_rig_bonuses_for_job(
     solar_system_id: u32,
     activity_id: Option<u8>,
     product_type_id: Option<eve_sde::TypeId>,
-) -> (f64, f64, f64, f64) {
+) -> StructureRigBonuses {
     let sec = ctx
         .sde
         .solar_systems
@@ -77,7 +114,12 @@ pub fn resolve_structure_rig_bonuses_for_job(
         })
         .collect();
     if fitted_rigs.is_empty() {
-        return (0.0, 0.0, 0.0, default_sec_mult);
+        return StructureRigBonuses {
+            mat_bonus: 0.0,
+            time_bonus: 0.0,
+            cost_bonus: 0.0,
+            sec_multiplier: default_sec_mult,
+        };
     }
 
     let norm_frac = |v: f64| -> f64 {
@@ -88,7 +130,14 @@ pub fn resolve_structure_rig_bonuses_for_job(
     let req_act_key = match activity_id {
         Some(aid) => match ctx.sde.industry_activity_key(aid) {
             Some(k) => Some(k),
-            None => return (0.0, 0.0, 0.0, default_sec_mult),
+            None => {
+                return StructureRigBonuses {
+                    mat_bonus: 0.0,
+                    time_bonus: 0.0,
+                    cost_bonus: 0.0,
+                    sec_multiplier: default_sec_mult,
+                };
+            }
         },
         None => None,
     };
@@ -205,7 +254,12 @@ pub fn resolve_structure_rig_bonuses_for_job(
         cost_bonus = cost_bonus.max((rig_cost * rig_sec_mult).clamp(0.0, 0.50));
     }
 
-    (mat_bonus, time_bonus, cost_bonus, active_sec_mult)
+    StructureRigBonuses {
+        mat_bonus,
+        time_bonus,
+        cost_bonus,
+        sec_multiplier: active_sec_mult,
+    }
 }
 
 pub fn resolve_structure_rig_bonuses_full(
@@ -213,7 +267,7 @@ pub fn resolve_structure_rig_bonuses_full(
     snap: &eve_db::WorldStateSnapshot,
     facility_id: i64,
     solar_system_id: u32,
-) -> (f64, f64, f64, f64) {
+) -> StructureRigBonuses {
     resolve_structure_rig_bonuses_for_job(ctx, snap, facility_id, solar_system_id, None, None)
 }
 
@@ -222,10 +276,13 @@ pub fn resolve_structure_rig_bonus(
     snap: &eve_db::WorldStateSnapshot,
     facility_id: i64,
     solar_system_id: u32,
-) -> (f64, f64, f64) {
-    let (mat, time, _, sec_mult) =
-        resolve_structure_rig_bonuses_full(ctx, snap, facility_id, solar_system_id);
-    (mat, time, sec_mult)
+) -> StructureRigBonus {
+    let full = resolve_structure_rig_bonuses_full(ctx, snap, facility_id, solar_system_id);
+    StructureRigBonus {
+        mat_bonus: full.mat_bonus,
+        time_bonus: full.time_bonus,
+        sec_multiplier: full.sec_multiplier,
+    }
 }
 
 /// Resolves Upwell structure hull role bonuses (`2600` ME, `2602`/`2721` TE, `2601` job cost)
@@ -235,17 +292,29 @@ pub fn structure_sde_industry_bonuses_for_activity(
     ctx: &ServerContext,
     type_id: eve_sde::TypeId,
     activity_id: Option<u8>,
-) -> (f64, f64, f64) {
+) -> StructureIndustryBonuses {
     let Some(t) = ctx.sde.types.get(&type_id) else {
-        return (1.0, 1.0, 1.0);
+        return StructureIndustryBonuses {
+            material_modifier: 1.0,
+            time_modifier: 1.0,
+            cost_modifier: 1.0,
+        };
     };
     if let Some(mod_sources) = ctx.sde.industry_modifier_sources.get(&type_id) {
         if let Some(aid) = activity_id {
             let Some(act_key) = ctx.sde.industry_activity_key(aid) else {
-                return (1.0, 1.0, 1.0);
+                return StructureIndustryBonuses {
+                    material_modifier: 1.0,
+                    time_modifier: 1.0,
+                    cost_modifier: 1.0,
+                };
             };
             let Some(kind_map) = mod_sources.get(act_key) else {
-                return (1.0, 1.0, 1.0);
+                return StructureIndustryBonuses {
+                    material_modifier: 1.0,
+                    time_modifier: 1.0,
+                    cost_modifier: 1.0,
+                };
             };
             let read_hull_mod = |kind: &str| -> f64 {
                 kind_map
@@ -254,11 +323,11 @@ pub fn structure_sde_industry_bonuses_for_activity(
                     .and_then(|e| t.default_attributes.get(&e.dogma_attribute_id).copied())
                     .unwrap_or(1.0)
             };
-            return (
-                read_hull_mod("material"),
-                read_hull_mod("time"),
-                read_hull_mod("cost"),
-            );
+            return StructureIndustryBonuses {
+                material_modifier: read_hull_mod("material"),
+                time_modifier: read_hull_mod("time"),
+                cost_modifier: read_hull_mod("cost"),
+            };
         }
     }
     let allow_react = matches!(activity_id, None | Some(9 | 11));
@@ -286,10 +355,17 @@ pub fn structure_sde_industry_bonuses_for_activity(
     } else {
         1.0
     };
-    (mat_mod, time_mod, cost_mod)
+    StructureIndustryBonuses {
+        material_modifier: mat_mod,
+        time_modifier: time_mod,
+        cost_modifier: cost_mod,
+    }
 }
 
-pub fn structure_sde_industry_bonuses(ctx: &ServerContext, type_id: eve_sde::TypeId) -> (f64, f64, f64) {
+pub fn structure_sde_industry_bonuses(
+    ctx: &ServerContext,
+    type_id: eve_sde::TypeId,
+) -> StructureIndustryBonuses {
     structure_sde_industry_bonuses_for_activity(ctx, type_id, None)
 }
 
@@ -299,7 +375,7 @@ pub fn resolve_facility_modifiers_and_system_for_job(
     facility_id: i64,
     activity_id: Option<u8>,
     product_type_id: Option<eve_sde::TypeId>,
-) -> Option<(eve_sde::TypeId, i64, u32, u32, f64, f64, f64)> {
+) -> Option<FacilityModifiersAndSystem> {
     if let Some(st) = snap.structures.get(&facility_id) {
         if st.state == "Destroyed" {
             return None;
@@ -310,9 +386,8 @@ pub fn resolve_facility_modifiers_and_system_for_job(
             .get(&st.solar_system_id)
             .map(|sys| sys.region_id)
             .unwrap_or(10000002);
-        let (base_mat_mod, base_time_mod, cost_mod) =
-            structure_sde_industry_bonuses_for_activity(ctx, st.type_id, activity_id);
-        let (_, rig_time, rig_cost, _) = resolve_structure_rig_bonuses_for_job(
+        let hull = structure_sde_industry_bonuses_for_activity(ctx, st.type_id, activity_id);
+        let rigs = resolve_structure_rig_bonuses_for_job(
             ctx,
             snap,
             facility_id,
@@ -320,17 +395,17 @@ pub fn resolve_facility_modifiers_and_system_for_job(
             activity_id,
             product_type_id,
         );
-        let eff_time_mod = base_time_mod * (1.0 - rig_time);
-        let eff_cost_mod = cost_mod * (1.0 - rig_cost);
-        return Some((
-            st.type_id,
-            st.owner_corp_id,
-            st.solar_system_id,
+        let eff_time_mod = hull.time_modifier * (1.0 - rigs.time_bonus);
+        let eff_cost_mod = hull.cost_modifier * (1.0 - rigs.cost_bonus);
+        return Some(FacilityModifiersAndSystem {
+            type_id: st.type_id,
+            owner_corp_id: st.owner_corp_id,
+            solar_system_id: st.solar_system_id,
             region_id,
-            base_mat_mod,
-            eff_time_mod,
-            eff_cost_mod,
-        ));
+            material_modifier: hull.material_modifier,
+            time_modifier: eff_time_mod,
+            cost_modifier: eff_cost_mod,
+        });
     }
     if let Some(it) = snap.items.get(&facility_id) {
         if matches!(it.type_id, 35825 | 35826 | 35827 | 35835 | 35836 | 47512..=47516) {
@@ -353,9 +428,8 @@ pub fn resolve_facility_modifiers_and_system_for_job(
                 .get(&sys_id)
                 .map(|sys| sys.region_id)
                 .unwrap_or(0);
-            let (base_mat_mod, base_time_mod, cost_mod) =
-                structure_sde_industry_bonuses_for_activity(ctx, it.type_id, activity_id);
-            let (_, rig_time, rig_cost, _) = resolve_structure_rig_bonuses_for_job(
+            let hull = structure_sde_industry_bonuses_for_activity(ctx, it.type_id, activity_id);
+            let rigs = resolve_structure_rig_bonuses_for_job(
                 ctx,
                 snap,
                 facility_id,
@@ -363,41 +437,41 @@ pub fn resolve_facility_modifiers_and_system_for_job(
                 activity_id,
                 product_type_id,
             );
-            let eff_time_mod = base_time_mod * (1.0 - rig_time);
-            let eff_cost_mod = cost_mod * (1.0 - rig_cost);
-            return Some((
-                it.type_id,
-                it.owner_id,
-                sys_id,
+            let eff_time_mod = hull.time_modifier * (1.0 - rigs.time_bonus);
+            let eff_cost_mod = hull.cost_modifier * (1.0 - rigs.cost_bonus);
+            return Some(FacilityModifiersAndSystem {
+                type_id: it.type_id,
+                owner_corp_id: it.owner_id,
+                solar_system_id: sys_id,
                 region_id,
-                base_mat_mod,
-                eff_time_mod,
-                eff_cost_mod,
-            ));
+                material_modifier: hull.material_modifier,
+                time_modifier: eff_time_mod,
+                cost_modifier: eff_cost_mod,
+            });
         }
     }
     if let Some(station) = ctx.sde.stations.get(&facility_id) {
-        return Some((
-            station.station_type_id,
-            station.owner_corporation_id,
-            station.solar_system_id,
-            station.region_id,
-            1.0,
-            1.0,
-            1.0,
-        ));
+        return Some(FacilityModifiersAndSystem {
+            type_id: station.station_type_id,
+            owner_corp_id: station.owner_corporation_id,
+            solar_system_id: station.solar_system_id,
+            region_id: station.region_id,
+            material_modifier: 1.0,
+            time_modifier: 1.0,
+            cost_modifier: 1.0,
+        });
     }
     for sys in ctx.sde.solar_systems.values() {
         if let Some(station) = sys.stations.iter().find(|s| s.station_id == facility_id) {
-            return Some((
-                station.station_type_id,
-                station.owner_corporation_id,
-                sys.solar_system_id,
-                sys.region_id,
-                1.0,
-                1.0,
-                1.0,
-            ));
+            return Some(FacilityModifiersAndSystem {
+                type_id: station.station_type_id,
+                owner_corp_id: station.owner_corporation_id,
+                solar_system_id: sys.solar_system_id,
+                region_id: sys.region_id,
+                material_modifier: 1.0,
+                time_modifier: 1.0,
+                cost_modifier: 1.0,
+            });
         }
     }
     None
@@ -407,7 +481,7 @@ pub fn resolve_facility_modifiers_and_system(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
     facility_id: i64,
-) -> Option<(eve_sde::TypeId, i64, u32, u32, f64, f64, f64)> {
+) -> Option<FacilityModifiersAndSystem> {
     resolve_facility_modifiers_and_system_for_job(ctx, snap, facility_id, None, None)
 }
 

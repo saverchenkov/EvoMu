@@ -48,6 +48,23 @@ pub fn is_structure_industry_service_online_for_bp(
     if !matches!(activity_id, 9 | 11) || !snap.structures.contains_key(&facility_id) {
         return true;
     }
+    let req_tid_opt = match sde.types.get(&bp_type_id).map(|t| t.group_id) {
+        Some(1888) => Some(45537u32),
+        Some(1889) => Some(45538u32),
+        Some(1890) => Some(45539u32),
+        _ => None,
+    };
+    if let Some(req_tid) = req_tid_opt {
+        if snap.items.values().any(|it| {
+            it.location_id == facility_id
+                && (164..=171).contains(&(it.flag as u16))
+                && it.type_id == req_tid
+                && snap.module_online_states.get(&it.item_id).copied().unwrap_or(true)
+                && it.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0
+        }) {
+            return true;
+        }
+    }
     if !sde.industry_installation_types.is_empty() {
         if let Some(prod_type) = sde
             .blueprints
@@ -58,7 +75,6 @@ pub fn is_structure_industry_service_online_for_bp(
                     .or_else(|| bp.activities.get("9"))
                     .and_then(|a| a.products.first())
                     .map(|p| p.type_id)
-                    .or_else(|| (bp.product_type_id != 0).then_some(bp.product_type_id))
             })
             .and_then(|ptid| sde.types.get(&ptid))
         {
@@ -74,21 +90,7 @@ pub fn is_structure_industry_service_online_for_bp(
             });
         }
     }
-    let Some(req_tid) = (match sde.types.get(&bp_type_id).map(|t| t.group_id) {
-        Some(1888) => Some(45537u32),
-        Some(1889) => Some(45538u32),
-        Some(1890) => Some(45539u32),
-        _ => None,
-    }) else {
-        return true;
-    };
-    snap.items.values().any(|it| {
-        it.location_id == facility_id
-            && (164..=171).contains(&(it.flag as u16))
-            && it.type_id == req_tid
-            && snap.module_online_states.get(&it.item_id).copied().unwrap_or(true)
-            && it.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0
-    })
+    req_tid_opt.is_none()
 }
 
 /// Synchronizes active/paused industry jobs when a host structure loses or regains fuel/service (`feat:industry.job-pause-on-service-offline`, `feat:lifecycle.industry-pause-and-many`).
@@ -194,7 +196,7 @@ pub fn is_fulcrum_pirate_ship_bonus_applicable(
         .is_some_and(|wf| matches!(wf, 500_010 | 500_011));
     let is_fulcrum = facility_id == 60_015_187
         || super::resolve_facility_modifiers_and_system(ctx, snap, facility_id)
-            .is_some_and(|(ftype, _, sys_id, _, _, _, _)| ftype == 78_334 || sys_id == 30_100_000);
+            .is_some_and(|fac| fac.type_id == 78_334 || fac.solar_system_id == 30_100_000);
     if !pirate_enlisted || !is_fulcrum {
         return false;
     }
@@ -221,4 +223,187 @@ pub fn facility_tax_note_id(facility_id: i64) -> i64 {
 #[cfg(test)]
 #[path = "industry_facilities_bps_helpers_cov_unit_tests.rs"]
 mod industry_facilities_bps_helpers_cov_unit_tests;
+
+#[cfg(test)]
+mod w3_mutants_tests {
+    use super::*;
+    use eve_db::{IndustryJobRecord, UpwellStructureRecord, WorldRepository};
+    use eve_sde::{InvType, SdeRegistry};
+    use std::sync::Arc;
+
+    #[test]
+    fn fulcrum_pirate_ship_bonus_disjoint_facility_and_group_exclusions() {
+        let mut sde = SdeRegistry::with_canonical_seed();
+        let base_inv = sde.types.values().next().cloned().expect("seed type");
+        let bp_tmpl = sde.blueprints.values().next().cloned().expect("seed bp");
+
+        let valid_ship_tid = 998_500_u32;
+        let valid_bp_tid = 998_501_u32;
+        sde.types.insert(
+            valid_ship_tid,
+            InvType {
+                type_id: valid_ship_tid,
+                name: "Pirate Cruiser".into(),
+                group_id: 26,
+                category_id: 6,
+                faction_id: Some(500_010),
+                ..base_inv.clone()
+            },
+        );
+        let mut valid_bp = bp_tmpl.clone();
+        valid_bp.blueprint_type_id = valid_bp_tid;
+        valid_bp.product_type_id = valid_ship_tid;
+        sde.blueprints.insert(valid_bp_tid, valid_bp);
+
+        let excluded_groups = [30_u32, 485, 513, 547, 659, 883, 902, 1538, 4594, 5120];
+        for (idx, grp) in excluded_groups.iter().enumerate() {
+            let stid = 998_600 + (idx as u32) * 2;
+            let btid = stid + 1;
+            sde.types.insert(
+                stid,
+                InvType {
+                    type_id: stid,
+                    name: format!("Excl {grp}"),
+                    group_id: *grp,
+                    category_id: 6,
+                    faction_id: Some(500_011),
+                    ..base_inv.clone()
+                },
+            );
+            let mut bp = bp_tmpl.clone();
+            bp.blueprint_type_id = btid;
+            bp.product_type_id = stid;
+            sde.blueprints.insert(btid, bp);
+        }
+
+        let ctx = ServerContext::with_sde_and_repository(
+            Arc::new(sde),
+            Arc::new(WorldRepository::with_demo_seed()),
+        );
+        let fac_by_type = 1_000_899_001_i64;
+        let fac_by_sys = 1_000_899_002_i64;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.characters.get_mut(&90_000_001).unwrap().war_faction_id = Some(500_010);
+            // ftype == 78_334 in non-Zarzakh system (kills `|| -> &&`)
+            snap.structures.insert(
+                fac_by_type,
+                UpwellStructureRecord {
+                    structure_id: fac_by_type,
+                    name: "Fulcrum Type Only".into(),
+                    type_id: 78_334,
+                    owner_corp_id: 98_000_001,
+                    solar_system_id: 30_000_142,
+                    position: [0.0, 0.0, 0.0],
+                    state: "ShieldVulnerable".into(),
+                    hull_hp: 1.0,
+                    armor_hp: 1.0,
+                    shield_hp: 1.0,
+                    reinforced_until_unix: 0,
+                    fuel_blocks: 10,
+                    quantum_core_installed: true,
+                    last_damage_tick: 0,
+                    last_damage_unix: 0,
+                    self_destruct_at_unix: None,
+                },
+            );
+            // ftype != 78_334 in Zarzakh 30_100_000 (kills `|| -> &&`)
+            snap.structures.insert(
+                fac_by_sys,
+                UpwellStructureRecord {
+                    structure_id: fac_by_sys,
+                    name: "Zarzakh Sotiyo".into(),
+                    type_id: 35_827,
+                    owner_corp_id: 98_000_001,
+                    solar_system_id: 30_100_000,
+                    position: [0.0, 0.0, 0.0],
+                    state: "ShieldVulnerable".into(),
+                    hull_hp: 1.0,
+                    armor_hp: 1.0,
+                    shield_hp: 1.0,
+                    reinforced_until_unix: 0,
+                    fuel_blocks: 10,
+                    quantum_core_installed: true,
+                    last_damage_tick: 0,
+                    last_damage_unix: 0,
+                    self_destruct_at_unix: None,
+                },
+            );
+
+            assert!(is_fulcrum_pirate_ship_bonus_applicable(
+                &ctx,
+                snap,
+                Some(90_000_001),
+                valid_bp_tid,
+                1,
+                fac_by_type
+            ));
+            assert!(is_fulcrum_pirate_ship_bonus_applicable(
+                &ctx,
+                snap,
+                Some(90_000_001),
+                valid_bp_tid,
+                1,
+                fac_by_sys
+            ));
+            assert!(!is_fulcrum_pirate_ship_bonus_applicable(
+                &ctx,
+                snap,
+                Some(90_000_001),
+                valid_bp_tid,
+                8,
+                fac_by_type
+            ));
+
+            for idx in 0..excluded_groups.len() {
+                let btid = 998_601 + (idx as u32) * 2;
+                assert!(!is_fulcrum_pirate_ship_bonus_applicable(
+                    &ctx,
+                    snap,
+                    Some(90_000_001),
+                    btid,
+                    1,
+                    60_015_187
+                ));
+            }
+
+            // Also verify pause_ts clamps to start_unix when low_power_since_unix < start_unix
+            let jid = 88_900_001_i64;
+            snap.structures.get_mut(&fac_by_type).unwrap().fuel_blocks = 0;
+            let mut ext =
+                crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+            ext.lifecycle.insert(
+                fac_by_type,
+                crate::services::station_structure::structure_upwell_ops::StructureLifecycleState {
+                    low_power_since_unix: Some(500),
+                    ..Default::default()
+                },
+            );
+            crate::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
+            snap.industry_jobs.insert(
+                jid,
+                IndustryJobRecord {
+                    job_id: jid,
+                    installer_id: 90_000_001,
+                    facility_id: fac_by_type,
+                    blueprint_item_id: 1,
+                    blueprint_type_id: valid_bp_tid,
+                    activity_id: 1,
+                    runs: 1,
+                    product_type_id: valid_ship_tid,
+                    status: "Active".into(),
+                    duration_seconds: 1_000,
+                    start_unix: 1_200,
+                    ..Default::default()
+                },
+            );
+            sync_industry_job_pause_states_at(snap, 1_500, false);
+            assert_eq!(
+                crate::services::industry_pi::load_job_cost_meta(snap, jid)
+                    .unwrap()
+                    .paused_at_unix,
+                Some(1_200)
+            );
+        });
+    }
+}
 

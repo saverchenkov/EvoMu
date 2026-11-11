@@ -327,10 +327,15 @@ fn get_journal(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> R
                 year.map_or(true, |v| v == y) && month.map_or(true, |v| v == mo)
             })
             .map(|(j, m)| {
+                let reference_id = if m.ref_type_id == ref_types::INSURANCE && m.context != JournalContext::Type {
+                    670
+                } else {
+                    m.context_id
+                };
                 vec![
                     PyRep::Integer(j.entry_id),
                     PyRep::Integer(filetime(m.date_unix)),
-                    PyRep::Integer(m.context_id),
+                    PyRep::Integer(reference_id),
                     PyRep::Integer(m.ref_type_id as i64),
                     PyRep::Integer(m.first_party_id),
                     PyRep::Integer(m.second_party_id),
@@ -437,12 +442,23 @@ fn market_transactions(
     Ok(descriptor.build_crowset(rows))
 }
 
+#[derive(Default)]
+struct DepositPlexOutcome {
+    entity_id: i64,
+    user_id: u64,
+    tx_id: u64,
+    rem_plex: i64,
+    qty: i64,
+    pre_item: Option<eve_db::InventoryItemRecord>,
+    post_item: Option<eve_db::InventoryItemRecord>,
+}
+
 fn deposit_plex_inner(
     ctx: &ServerContext,
     session: &SessionState,
     char_id: i64,
     args: &[PyRep],
-) -> Result<(i64, u64, u64, i64, i64, Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>), BridgeRpcError> {
+) -> Result<DepositPlexOutcome, BridgeRpcError> {
     let rpc = RpcArgs::positional(args);
     let location_id = rpc.req_positive_i64(0, "locationID")?;
     let item_id = rpc.req_positive_i64(1, "itemID")?;
@@ -549,7 +565,15 @@ fn deposit_plex_inner(
             "PLEX Vault Deposit from hangar",
             ctx.now_unix(),
         );
-        Ok((snap.next_entity_id, user_id, tx_id, rem_plex, qty, pre_item, post_item))
+        Ok(DepositPlexOutcome {
+            entity_id: snap.next_entity_id,
+            user_id,
+            tx_id,
+            rem_plex,
+            qty,
+            pre_item,
+            post_item,
+        })
     })
 }
 
@@ -560,8 +584,15 @@ fn deposit_plex(
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let (entity_id, user_id, tx_id, rem_plex, qty, pre_item, post_item) =
-        match deposit_plex_inner(ctx, session, char_id, args) {
+    let DepositPlexOutcome {
+        entity_id,
+        user_id,
+        tx_id,
+        rem_plex,
+        qty,
+        pre_item,
+        post_item,
+    } = match deposit_plex_inner(ctx, session, char_id, args) {
             Ok(v) => v,
             Err(e) => {
                 if let Some(reference) = kwargs.get("reference").or_else(|| args.get(3)).cloned() {
@@ -589,13 +620,39 @@ fn deposit_plex(
     Ok(PyRep::Integer(entity_id))
 }
 
+struct WithdrawPlexOutcome {
+    rep: PyRep,
+    final_item_id: i64,
+    user_id: u64,
+    tx_id: u64,
+    rem_plex: i64,
+    qty: i64,
+    pre_item: Option<eve_db::InventoryItemRecord>,
+    post_item: Option<eve_db::InventoryItemRecord>,
+}
+
+impl Default for WithdrawPlexOutcome {
+    fn default() -> Self {
+        Self {
+            rep: PyRep::None,
+            final_item_id: 0,
+            user_id: 0,
+            tx_id: 0,
+            rem_plex: 0,
+            qty: 0,
+            pre_item: None,
+            post_item: None,
+        }
+    }
+}
+
 fn withdraw_plex_inner(
     ctx: &ServerContext,
     session: &SessionState,
     char_id: i64,
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
-) -> Result<(PyRep, i64, u64, u64, i64, i64, Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>), BridgeRpcError> {
+) -> Result<WithdrawPlexOutcome, BridgeRpcError> {
 
     let mut qty = kwargs
         .get("quantity")
@@ -747,8 +804,8 @@ fn withdraw_plex_inner(
             (None, Some(new_rec), nid)
         };
 
-        Ok((
-            PyRep::keyval([
+        Ok(WithdrawPlexOutcome {
+            rep: PyRep::keyval([
                 ("itemID", PyRep::Integer(final_item_id)),
                 ("quantityWithdrawn", PyRep::Integer(qty)),
                 ("remainingVaultBalance", PyRep::Integer(rem_plex)),
@@ -763,7 +820,7 @@ fn withdraw_plex_inner(
             qty,
             pre_item,
             post_item,
-        ))
+        })
     })
 }
 
@@ -774,8 +831,16 @@ fn withdraw_plex(
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let (rep, final_item_id, user_id, tx_id, rem_plex, qty, pre_item, post_item) =
-        match withdraw_plex_inner(ctx, session, char_id, args, kwargs) {
+    let WithdrawPlexOutcome {
+        rep,
+        final_item_id,
+        user_id,
+        tx_id,
+        rem_plex,
+        qty,
+        pre_item,
+        post_item,
+    } = match withdraw_plex_inner(ctx, session, char_id, args, kwargs) {
             Ok(v) => v,
             Err(e) => {
                 if let Some(reference) = kwargs.get("reference").or_else(|| args.get(3)).cloned() {

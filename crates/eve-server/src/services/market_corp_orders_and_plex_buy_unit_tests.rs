@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 //! Semantic unit tests split from `market_orders_escrow_extra_unit_tests`.
 
 #![forbid(unsafe_code)]
@@ -59,20 +60,20 @@ fn corporate_sell_and_cancel_orders_and_margin_trading_insolvency() {
     );
 
     // Grant accountant + trader roles and place corporate resting sell order using division 1001 (div 2)
+    let trader_roles = corp_roles::ROLE_ACCOUNTANT
+        | corp_roles::ROLE_JUNIOR_ACCOUNTANT
+        | corp_roles::ROLE_ACCOUNT_CAN_TAKE[1]
+        | (1u64 << 20)
+        | corp_roles::ROLE_TRADER;
     ctx.db.with_mut_snapshot(|s| {
         let corp = s.corporations.get_mut(&corp_id).unwrap();
-        corp.member_roles.insert(
-            char_id,
-            corp_roles::ROLE_ACCOUNTANT
-                | corp_roles::ROLE_JUNIOR_ACCOUNTANT
-                | (1u64 << 20)
-                | corp_roles::ROLE_TRADER,
-        );
+        corp.member_roles.insert(char_id, trader_roles);
         corp.ensure_wallet_divisions();
         if let Some(d) = corp.wallet_divisions.iter_mut().find(|d| d.division_id == 2) {
             d.balance = IskCents::from_isk(500_000);
         }
     });
+    sess.corp_role = trader_roles;
     sess.corp_account_key = 1001;
     let res = call_escrow(
         &ctx,
@@ -89,6 +90,7 @@ fn corporate_sell_and_cancel_orders_and_margin_trading_insolvency() {
         corp.member_roles.insert(char_id, 0);
         corp.ceo_id = 90_000_099;
     });
+    sess.corp_role = 0;
     let mut other_sess = jita_session(other_char, corp_id);
     assert_eq!(
         call_escrow(&ctx, &mut other_sess, "CancelCharOrder", &[PyRep::Integer(corp_sell_oid)])

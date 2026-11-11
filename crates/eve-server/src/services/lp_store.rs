@@ -853,13 +853,7 @@ fn handle_get_character_lp_balances(
         entries.sort_by_key(|&(c, _)| c);
         entries
             .into_iter()
-            .map(|(corp_id, lp)| {
-                PyRep::keyval([
-                    ("corpID", PyRep::Integer(corp_id)),
-                    ("loyaltyPoints", PyRep::Integer(lp)),
-                    ("lp", PyRep::Integer(lp)),
-                ])
-            })
+            .map(|(corp_id, lp)| PyRep::Tuple(vec![PyRep::Integer(corp_id), PyRep::Integer(lp)]))
             .collect()
     });
 
@@ -1117,12 +1111,7 @@ pub fn handle(
                 Ok(entries
                     .into_iter()
                     .map(|(npc_corp_id, lp)| {
-                        PyRep::keyval([
-                            ("corpID", PyRep::Integer(npc_corp_id)),
-                            ("ownerCorpID", PyRep::Integer(corp_id)),
-                            ("loyaltyPoints", PyRep::Integer(lp)),
-                            ("lp", PyRep::Integer(lp)),
-                        ])
+                        PyRep::Tuple(vec![PyRep::Integer(npc_corp_id), PyRep::Integer(lp)])
                     })
                     .collect::<Vec<_>>())
             });
@@ -1404,3 +1393,7 @@ pub fn handle(
 #[cfg(test)]
 #[path = "lp_store_tests.rs"]
 mod lp_store_tests;
+
+#[cfg(test)]
+#[path = "lp_store_edges2_tests.rs"]
+mod lp_store_edges2_tests;

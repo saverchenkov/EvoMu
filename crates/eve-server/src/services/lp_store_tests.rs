@@ -76,7 +76,12 @@ fn test_lp_store_reward_log_and_balances_and_transfers() {
     )
     .unwrap()
     .unwrap();
-    assert!(matches!(char_bals, PyRep::List(ref items) if items.len() == 2));
+    assert!(matches!(
+        char_bals,
+        PyRep::List(ref items)
+            if items.len() == 2
+                && items.iter().all(|it| matches!(it, PyRep::Tuple(t) if t.len() == 2))
+    ));
 
     // GetAllMyCorporationWalletLPBalances
     let corp_bals = handle(
@@ -89,7 +94,12 @@ fn test_lp_store_reward_log_and_balances_and_transfers() {
     )
     .unwrap()
     .unwrap();
-    assert!(matches!(corp_bals, PyRep::List(ref items) if !items.is_empty()));
+    assert!(matches!(
+        corp_bals,
+        PyRep::List(ref items)
+            if !items.is_empty()
+                && items.iter().all(|it| matches!(it, PyRep::Tuple(t) if t.len() == 2))
+    ));
 
     // ExchangeConcordLP
     let ex_err = handle(
@@ -271,3 +281,7 @@ fn test_lp_store_offers_and_take_offer_char_and_corp() {
     .unwrap();
     assert!(matches!(delayed, PyRep::Dict(_)));
 }
+
+#[cfg(test)]
+#[path = "lp_store_extra_unit_tests.rs"]
+mod extra_unit_tests;

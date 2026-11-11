@@ -1,6 +1,6 @@
 //! Extra branch-coverage and mutation-killing unit tests for `industry_pi`.
 
-use super::industry_pi::*;
+use crate::services::industry_pi::*;
 use crate::router::{BoundObjectEntry, ServerContext};
 use eve_db::{
     CorporationRecord, IndustryJobRecord, InventoryFlag, InventoryItemRecord,

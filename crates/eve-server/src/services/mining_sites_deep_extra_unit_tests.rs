@@ -561,3 +561,169 @@ fn test_phased_asteroid_field_fracture_and_industrial_ship_efficiency() {
     assert!((field.mining_efficiency() - 0.0).abs() < 1e-9);
     assert!(!field.connect_industrial_command_ship(5003, 200));
 }
+
+#[tokio::test]
+async fn mining_sites_handle_unknown_none_and_save_upgrade_config_kill_mutants() {
+    let sde = build_mining_test_sde();
+    let db = Arc::new(WorldRepository::new_empty());
+    let ctx = ServerContext::with_sde_and_repository(sde.clone(), db.clone());
+    let mut sess = SessionState::new(71);
+    sess.user_id = Some(1);
+    sess.character_id = Some(90_710_001);
+
+    // 1. Unrelated service returns None (kills `handle -> Some(Ok(Default::default()))`)
+    assert!(
+        crate::services::mining_sites::handle(
+            &ctx,
+            &mut sess,
+            "marketProxy",
+            "GetMarketGroups",
+            &[],
+            &HashMap::new(),
+        )
+        .await
+        .is_none()
+    );
+
+    // 2. NotNullSecSystem error in high-sec (`handle -> None` / `Ok(Default::default())` / delete arm)
+    sess.solar_system_id = Some(30_000_142);
+    let hi_err = crate::services::mining_sites::handle(
+        &ctx,
+        &mut sess,
+        "sovHubSvc",
+        "SaveUpgradeConfiguration",
+        &[],
+        &HashMap::new(),
+    )
+    .await
+    .expect("sovHubSvc.SaveUpgradeConfiguration handled")
+    .unwrap_err();
+    assert_eq!(hi_err.code, "NotNullSecSystem");
+
+    // 3. Valid null-sec SaveUpgradeConfiguration spawns anomaly and returns populated keyval
+    let null_sys_id = sde
+        .solar_systems
+        .values()
+        .find(|s| s.security_status < -0.1 && s.region_id != 10_000_070 && s.solar_system_id < 31_000_000)
+        .map(|s| s.solar_system_id)
+        .expect("null-sec system");
+    let char_id = 90_710_001_i64;
+    let corp_id = 98_710_001_i64;
+    let alliance_id = 99_710_001_i64;
+    let hub_id = 1_030_710_000_001_i64;
+    let ship_id = 1_000_710_001_i64;
+
+    db.with_mut_snapshot(|snap| {
+        snap.characters.insert(
+            char_id,
+            CharacterRecord {
+                activity_status: None,
+                character_id: char_id,
+                user_id: 1,
+                name: "SovHubTester".into(),
+                corporation_id: corp_id,
+                alliance_id: Some(alliance_id),
+                war_faction_id: None,
+                station_id: None,
+                structure_id: Some(hub_id),
+                solar_system_id: null_sys_id,
+                constellation_id: 20_000_001,
+                region_id: 10_000_001,
+                active_ship_id: ship_id,
+                balance: Default::default(),
+                plex_balance: 0,
+                loyalty_points: HashMap::new(),
+                standings: HashMap::new(),
+                security_status: 5.0,
+                clone_grade: 2,
+                home_station_id: 60_003_760,
+                race_id: 1,
+                bloodline_id: 1,
+                ancestry_id: 1,
+                school_id: 1,
+                neural: NeuralAttributes {
+                    intelligence: 20,
+                    memory: 20,
+                    perception: 20,
+                    willpower: 20,
+                    charisma: 19,
+                    bonus_remaps: 0,
+                    last_remap_unix: None,
+                    remap_cooldown_until_unix: None,
+                },
+                skill_points: 0.0,
+                free_skill_points: 0.0,
+                last_clone_jump_unix: 0,
+                jump_fatigue_minutes: 0.0,
+                jump_cooldown_until_unix: 0,
+                jump_fatigue_until_unix: 0,
+                description: String::new(),
+                title: String::new(),
+                gender: 1,
+                create_date_unix: 0,
+                fleet_id: None,
+                autopilot_waypoints: Vec::new(),
+                version: 1,
+                system_epoch: 1,
+            },
+        );
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "SovCorp".into();
+        corp.ticker = "SOVC".into();
+        corp.ceo_id = char_id;
+        corp.alliance_id = Some(alliance_id);
+        snap.corporations.insert(corp_id, corp);
+        snap.system_states.entry(null_sys_id).or_default().sov_alliance_id = Some(alliance_id);
+        snap.structures.insert(
+            hub_id,
+            UpwellStructureRecord {
+                structure_id: hub_id,
+                type_id: 32458,
+                solar_system_id: null_sys_id,
+                owner_corp_id: corp_id,
+                name: "NullHub".into(),
+                position: [500_000.0, 0.0, 500_000.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            1_000_710_999,
+            InventoryItemRecord {
+                item_id: 1_000_710_999,
+                type_id: 82589,
+                owner_id: corp_id,
+                location_id: hub_id,
+                flag: InventoryFlag::CorpSAG1,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    sess.corporation_id = Some(corp_id);
+    sess.alliance_id = Some(alliance_id);
+    sess.solar_system_id = Some(null_sys_id);
+    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+
+    let res = crate::services::mining_sites::handle(
+        &ctx,
+        &mut sess,
+        "sovHubSvc",
+        "SaveUpgradeConfiguration",
+        &[PyRep::Integer(hub_id), PyRep::List(vec![PyRep::Integer(82589)])],
+        &HashMap::new(),
+    )
+    .await
+    .expect("sovHubSvc.SaveUpgradeConfiguration must return Some")
+    .expect("null-sec upgrade succeeds");
+    assert_eq!(res.dict_get("prospectingLevel").and_then(|v| v.as_i64()), Some(1));
+    assert!(db.with_snapshot(|s| s
+        .cosmic_anomalies
+        .get(&null_sys_id)
+        .is_some_and(|list| list.iter().any(|a| a.anomaly_type == "SovOre"))));
+}

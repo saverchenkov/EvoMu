@@ -262,3 +262,7 @@ fn test_pi_colonies_user_update_network_queries_and_abandon() {
     .unwrap();
     assert_eq!(aband, PyRep::Bool(true));
 }
+
+#[cfg(test)]
+#[path = "pi_colonies_extra_unit_tests.rs"]
+mod extra_unit_tests;

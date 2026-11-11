@@ -266,7 +266,7 @@ pub fn compute_canonical_system_cost_index(
         if !act_match || (j.start_unix > 0 && j.start_unix < cutoff) {
             continue;
         }
-        let job_sys = resolve_facility_modifiers_and_system(ctx, snap, j.facility_id).map(|m| m.2);
+        let job_sys = resolve_facility_modifiers_and_system(ctx, snap, j.facility_id).map(|m| m.solar_system_id);
         let work = j.duration_seconds;
         if job_sys == Some(sys_id) {
             sys_work = sys_work.saturating_add(work);
@@ -319,9 +319,8 @@ pub fn compute_industry_job_costs_with_step(
     let fallback_sys = char_id
         .and_then(|cid| snap.characters.get(&cid).map(|c| c.solar_system_id))
         .unwrap_or_else(|| ctx.sde.solar_systems.keys().copied().next().unwrap_or(0));
-    let fallback_reg = ctx.sde.solar_systems.get(&fallback_sys).map(|s| s.region_id).unwrap_or(0);
     let target_prod_tid = resolve_blueprint_activity_product(bp, activity_id);
-    let (_, _, sys_id, _, _, _, structure_cost_modifier) =
+    let (sys_id, structure_cost_modifier) =
         resolve_facility_modifiers_and_system_for_job(
             ctx,
             snap,
@@ -329,7 +328,7 @@ pub fn compute_industry_job_costs_with_step(
             Some(activity_id),
             target_prod_tid,
         )
-        .unwrap_or((1529, 0, fallback_sys, fallback_reg, 1.0, 1.0, 1.0));
+        .map_or((fallback_sys, 1.0), |f| (f.solar_system_id, f.cost_modifier));
     let system_cost_index = compute_canonical_system_cost_index(ctx, snap, sys_id, activity_id);
     let base_job_cost_isk =
         ((total_eiv * system_cost_index * structure_cost_modifier) * 100.0).round() / 100.0;
@@ -408,10 +407,19 @@ pub fn build_facility_pyrep(
     snap: &eve_db::WorldStateSnapshot,
     facility_id: i64,
 ) -> Option<PyRep> {
-    let (type_id, owner_id, sys_id, region_id, mat_mod, time_mod, cost_mod) =
-        resolve_facility_modifiers_and_system(ctx, snap, facility_id)?;
-    let (rig_mat, rig_time, rig_cost, rig_sec_mult) =
-        resolve_structure_rig_bonuses_full(ctx, snap, facility_id, sys_id);
+    let fac = resolve_facility_modifiers_and_system(ctx, snap, facility_id)?;
+    let type_id = fac.type_id;
+    let owner_id = fac.owner_corp_id;
+    let sys_id = fac.solar_system_id;
+    let region_id = fac.region_id;
+    let mat_mod = fac.material_modifier;
+    let time_mod = fac.time_modifier;
+    let cost_mod = fac.cost_modifier;
+    let rigs = resolve_structure_rig_bonuses_full(ctx, snap, facility_id, sys_id);
+    let rig_mat = rigs.mat_bonus;
+    let rig_time = rigs.time_bonus;
+    let rig_cost = rigs.cost_bonus;
+    let rig_sec_mult = rigs.sec_multiplier;
     let taxes = load_facility_taxes_with_sde(Some(&ctx.sde), snap, facility_id);
     let mfg_tax = taxes.get(&1).copied().unwrap_or(0.0025);
     let sys_cost_index = compute_canonical_system_cost_index(ctx, snap, sys_id, 1);
@@ -600,7 +608,11 @@ pub fn handle_industry_facilities_bps(
                         }
                     }
                     let mut owned: Vec<&eve_db::InventoryItemRecord> = snap.items.values()
-                        .filter(|it| it.owner_id == owner_id && ctx.sde.blueprints.contains_key(&it.type_id))
+                        .filter(|it| {
+                            it.owner_id == owner_id
+                                && it.flag != eve_db::InventoryFlag::Impounded
+                                && ctx.sde.blueprints.contains_key(&it.type_id)
+                        })
                         .collect();
                     owned.sort_by_key(|it| it.item_id);
                     let mut counts: std::collections::BTreeMap<Option<i64>, i64> = std::collections::BTreeMap::new();
@@ -1165,12 +1177,13 @@ pub fn handle_industry_facilities_bps(
             }
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some((_, _, sys_id, ..)) = resolve_facility_modifiers_and_system(ctx, snap, facility_id) else {
+                let Some(fac) = resolve_facility_modifiers_and_system(ctx, snap, facility_id) else {
                     return Err(BridgeRpcError {
                         code: "FacilityNotFound".into(),
                         message: format!("Industry facility {facility_id} not found"),
                     });
                 };
+                let sys_id = fac.solar_system_id;
                 let owner_id = snap
                     .structures
                     .get(&facility_id)
@@ -1296,14 +1309,11 @@ pub fn handle_industry_facilities_bps(
                     if st.state == "Destroyed" {
                         continue;
                     }
-                    if let Some((_, _, sys_id, _, mat_mod, time_mod, cost_mod)) =
-                        resolve_facility_modifiers_and_system(ctx, snap, sid)
-                    {
-                        let (rig_mat, _, _, _) =
-                            resolve_structure_rig_bonuses_full(ctx, snap, sid, sys_id);
-                        best_mat = best_mat.min((mat_mod * (1.0 - rig_mat)).clamp(0.01, 1.0));
-                        best_time = best_time.min(time_mod.clamp(0.01, 1.0));
-                        best_cost = best_cost.min(cost_mod.clamp(0.01, 1.0));
+                    if let Some(fac) = resolve_facility_modifiers_and_system(ctx, snap, sid) {
+                        let rigs = resolve_structure_rig_bonuses_full(ctx, snap, sid, fac.solar_system_id);
+                        best_mat = best_mat.min((fac.material_modifier * (1.0 - rigs.mat_bonus)).clamp(0.01, 1.0));
+                        best_time = best_time.min(fac.time_modifier.clamp(0.01, 1.0));
+                        best_cost = best_cost.min(fac.cost_modifier.clamp(0.01, 1.0));
                     }
                 }
             });
@@ -1370,3 +1380,4 @@ pub fn handle_industry_facilities_bps(
 }
 
 #[cfg(test)] #[path = "industry_facilities_bps_unit_tests.rs"] mod industry_facilities_bps_unit_tests;
+#[cfg(test)] #[path = "industry_facilities_bps_edges2_tests.rs"] mod industry_facilities_bps_edges2_tests;

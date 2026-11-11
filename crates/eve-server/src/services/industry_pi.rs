@@ -764,7 +764,7 @@ pub(crate) fn emit_industry_job(
         let fac_sys = ctx.db.with_snapshot(|snap| {
             snap.industry_jobs.get(&job_id).and_then(|j| {
                 resolve_facility_modifiers_and_system(ctx, snap, j.facility_id)
-                    .map(|(_, _, sys, _, _, _, _)| sys)
+                    .map(|fac| fac.solar_system_id)
             })
         });
         if let Some(sys_id) = fac_sys {

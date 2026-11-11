@@ -64,7 +64,7 @@ pub fn handle_orders_escrow(
                 }));
             }
             let rpc = RpcArgs::new(args, _kwargs);
-            let use_corp = match rpc.opt_bool(1, "useCorp") {
+            let use_corp = match rpc.opt_boolish(1, "useCorp") {
                 Ok(v) => v.unwrap_or(false),
                 Err(e) => return Some(Err(e)),
             };
@@ -386,6 +386,7 @@ pub fn handle_orders_escrow(
                     }
                     let old_qty = item.quantity;
                     let old_loc = item.location_id;
+                    let old_flag = item.flag;
                     let mut sell_opts = eve_db::ConsumeExactOptions::for_character_stack(char_id);
                     sell_opts.expected_owner_id = item.owner_id;
                     sell_opts.reject_non_empty_container = true;
@@ -403,10 +404,13 @@ pub fn handle_orders_escrow(
                             removed_rec.location_id = 6;
                             removed_rec.flag = InventoryFlag::None;
                             removed_rec.quantity = 0;
-                            consumed_items.push((
-                                removed_rec,
-                                vec![(3, PyRep::Integer(old_loc)), (9, PyRep::Integer(old_qty as i64))],
-                            ));
+                            removed_rec.singleton = false;
+                            let changes = vec![
+                                (3, PyRep::Integer(old_loc)),
+                                (4, PyRep::Integer(old_flag as i64)),
+                                (9, PyRep::Integer(old_qty as i64)),
+                            ];
+                            consumed_items.push((removed_rec, changes));
                         }
                         Err(e) => {
                             return Err(BridgeRpcError {
@@ -1295,7 +1299,7 @@ pub fn handle_orders_escrow(
                 let mut orders_created = Vec::with_capacity(planned_fills.len());
                 let tax_collector = crate::services::wallet_serverops::tax_collector_id(ctx);
                 let mut buyer_bal_final: Option<IskCents> = None;
-                let mut seller_acct_updates: Vec<(bool, i64, u8, IskCents)> = Vec::new();
+                let mut touched_seller_accts: Vec<(bool, i64, u8)> = Vec::new();
                 let mut delivered_item_records: Vec<InventoryItemRecord> = Vec::new();
                 let mut matched_sellers: Vec<(i64, i64)> = Vec::new();
 
@@ -1317,12 +1321,18 @@ pub fn handle_orders_escrow(
                         if let Some(seller) = snap.characters.get_mut(&seller_id) {
                             seller.balance = seller.balance.checked_add(seller_net).unwrap_or(seller.balance);
                             seller_bal = Some(seller.balance);
-                            seller_acct_updates.push((false, seller_id, 1, seller.balance));
+                            let key = (false, seller_id, 1);
+                            if !touched_seller_accts.contains(&key) {
+                                touched_seller_accts.push(key);
+                            }
                         } else if let Some(seller_corp) = snap.corporations.get_mut(&seller_id) {
                             let s_div = seller_meta.and_then(|m| m.account_key).map(|k| (k.saturating_sub(999)).clamp(1, 7) as u8).unwrap_or(1);
                             let sb = seller_corp.credit_division(s_div, seller_net);
                             seller_bal = Some(sb);
-                            seller_acct_updates.push((true, seller_id, s_div, sb));
+                            let key = (true, seller_id, s_div);
+                            if !touched_seller_accts.contains(&key) {
+                                touched_seller_accts.push(key);
+                            }
                         }
                     }
 
@@ -1389,6 +1399,22 @@ pub fn handle_orders_escrow(
                     ]));
                 }
 
+                let seller_acct_updates: Vec<(bool, i64, u8, IskCents)> = touched_seller_accts
+                    .into_iter()
+                    .filter_map(|(is_corp, oid, div)| {
+                        let bal = if is_corp {
+                            snap.corporations.get(&oid)?.division_balance(div)
+                        } else {
+                            snap.characters.get(&oid)?.balance
+                        };
+                        if !is_corp && oid == char_id && div == 1 && buyer_bal_final == Some(bal) {
+                            None
+                        } else {
+                            Some((is_corp, oid, div, bal))
+                        }
+                    })
+                    .collect();
+
                 Ok((purchased_lines, total_qty_bought, total_cost, total_sales_tax, orders_created, item_statuses, buyer_bal_final, seller_acct_updates, delivered_item_records, matched_sellers))
             });
 
@@ -1397,11 +1423,11 @@ pub fn handle_orders_escrow(
                     for (matched_oid, seller_id) in matched_sellers {
                         super::notify_own_order_changed(ctx, seller_id, 0, matched_oid, "Change");
                     }
-                    for (s_is_corp, s_owner, s_div, s_bal) in seller_acct_updates {
-                        super::emit_market_account_change(ctx, s_is_corp, s_owner, s_div, s_bal);
-                    }
                     if let Some(b_bal) = buyer_bal_final {
                         super::emit_market_account_change(ctx, false, char_id, 1, b_bal);
+                    }
+                    for (s_is_corp, s_owner, s_div, s_bal) in seller_acct_updates {
+                        super::emit_market_account_change(ctx, s_is_corp, s_owner, s_div, s_bal);
                     }
                     for rec in &delivered_item_records {
                         super::emit_market_item_change(ctx, char_id, rec, vec![(3, PyRep::Integer(0))]);

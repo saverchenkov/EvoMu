@@ -358,3 +358,280 @@ fn plex_sell_order_and_contract_proxy_escrow_and_lookup_branches() {
     let escrow = handle(&ctx, &mut sess, "contractProxy", "GetMyContractEscrow", &[], &kw).unwrap().unwrap();
     assert_eq!(escrow.dict_get("iskEscrow").and_then(PyRep::as_f64), Some(1_050_000.0));
 }
+
+#[test]
+fn sweep_expired_order_notifications_and_handle_edge_mutants() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let other_char = 90_000_002_i64;
+    let corp_id = 98_700_020_i64;
+    let mut sess = jita_session(char_id, corp_id);
+    let kw = HashMap::new();
+    let now = ctx.now_unix();
+
+    ctx.db.provision_gm_account("mkt_edge_p", "pw", char_id, "MktEdge");
+    let uid = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.user_id).unwrap_or(1));
+    let _ = ctx.db.acquire_online_lock(uid, sess.session_id, Some(char_id), true, now);
+
+    // 1. sweep_expired_orders_and_notify returns 0 when nothing expired
+    ctx.db.with_mut_snapshot(|s| s.market_orders.clear());
+    assert_eq!(sweep_expired_orders_and_notify(&ctx, now), 0);
+
+    // 2. Seed rich mix of expired orders to verify exact return count and every OnAccountChange / OnItemChange / OnMarketItemReceived branch
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&char_id).unwrap().corporation_id = corp_id;
+        s.characters.get_mut(&char_id).unwrap().balance = IskCents::from_isk(100_000);
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.ceo_id = char_id;
+        corp.name = "Notify Corp".into();
+        corp.ticker = "NCRP".into();
+        corp.set_division_balance(1, IskCents::from_isk(500_000));
+        corp.set_division_balance(3, IskCents::from_isk(700_000));
+        corp.member_roles.insert(char_id, corp_roles::ROLE_TRADER);
+        s.corporations.insert(corp_id, corp);
+
+        // Clear demo items for char_id/corp_id so returned stacks match exact fixture expectations
+        s.items.retain(|_, it| it.owner_id != char_id && it.owner_id != corp_id);
+        // Decoys that must NOT match returned item stack lookup in emit_expired_order_notifications
+        s.items.insert(930_001, InventoryItemRecord {
+            item_id: 930_001, type_id: 34, owner_id: char_id, location_id: JITA_STATION_ID,
+            flag: InventoryFlag::Cargo, quantity: 999, singleton: false, version: 1, ..Default::default()
+        });
+        s.items.insert(930_002, InventoryItemRecord {
+            item_id: 930_002, type_id: 34, owner_id: char_id, location_id: JITA_STATION_ID,
+            flag: InventoryFlag::Hangar, quantity: 998, singleton: true, version: 1, ..Default::default()
+        });
+        // Existing stack of 20 Tritanium for char_id in Hangar -> after +5 return becomes 25 (> ret_qty branch -> col 9 = 20)
+        s.items.insert(930_003, InventoryItemRecord {
+            item_id: 930_003, type_id: 34, owner_id: char_id, location_id: JITA_STATION_ID,
+            flag: InventoryFlag::Hangar, quantity: 20, singleton: false, version: 1, ..Default::default()
+        });
+
+        let expired_specs: &[(i64, i64, bool, u32, i64, i32, i64, Option<u16>)] = &[
+            // (oid, owner, is_bid, tid, price_cents, vol_rem, esc_cents, acct_key)
+            // Personal bid with price > 0 & vol_rem > 0 -> OnAccountChange cash
+            (940_001, char_id, true, 34, 10_00, 10, 100_00, None),
+            // Corp bid with account_key=1002 (div 3) -> OnAccountChange cash3 for corp_id
+            (940_002, corp_id, true, 34, 20_00, 5, 100_00, Some(1002)),
+            // Zero-price bid -> NO OnAccountChange (`o.price.0 > 0`)
+            (940_003, char_id, true, 35, 0, 5, 0, None),
+            // Personal sell order on type 34 (merges into 930_003: 20 + 5 = 25 > 5 -> change col 9 = 20)
+            (940_004, char_id, false, 34, 5_00, 5, 0, None),
+            // Personal sell order on type 36 (NO existing stack -> creates 8 -> rec.quantity == ret_qty -> change col 3 = 0)
+            (940_005, char_id, false, 36, 5_00, 8, 0, None),
+            // Corp sell order on type 37 -> target_flag = Deliveries -> change col 3 = 0
+            (940_006, corp_id, false, 37, 5_00, 4, 0, Some(1000)),
+            // Personal PLEX sell order -> skips OnItemChange for `!is_corp && type_id == PLEX_TYPE_ID`, still sends OnMarketItemReceived
+            (940_007, char_id, false, PLEX_TYPE_ID, 5_000_000_00, 2, 0, None),
+        ];
+        for &(oid, owner, is_bid, tid, price_cents, vol_rem, esc_cents, ak) in expired_specs {
+            s.market_orders.insert(oid, MarketOrderRecord {
+                order_id: oid, owner_id: owner, station_id: JITA_STATION_ID, region_id: THE_FORGE_REGION_ID,
+                type_id: tid, is_bid, price: IskCents(price_cents), vol_entered: vol_rem,
+                vol_remaining: vol_rem, min_volume: 1, is_npc: false, escrow: IskCents(esc_cents),
+            });
+            save_market_order_meta(s, oid, MarketOrderMeta {
+                range: 32_767, duration: 1, issue_unix: now.saturating_sub(2 * 86_400),
+                order_state: None, account_key: ak, final_vol_remaining: None, closed_unix: None,
+            });
+        }
+        // Zero-price test bypasses other_char; add corp PLEX sell order (is_corp && PLEX) so `!is_corp` negation mutant fails
+        s.market_orders.insert(940_008, MarketOrderRecord {
+            order_id: 940_008, owner_id: corp_id, station_id: JITA_STATION_ID, region_id: THE_FORGE_REGION_ID,
+            type_id: PLEX_TYPE_ID, is_bid: false, price: IskCents::from_isk(5_000_000), vol_entered: 3,
+            vol_remaining: 3, min_volume: 1, is_npc: false, escrow: IskCents(0),
+        });
+        save_market_order_meta(s, 940_008, MarketOrderMeta {
+            range: 32_767, duration: 1, issue_unix: now.saturating_sub(2 * 86_400),
+            order_state: None, account_key: Some(1000), final_vol_remaining: None, closed_unix: None,
+        });
+    });
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let swept_cnt = sweep_expired_orders_and_notify(&ctx, now);
+    assert_eq!(swept_cnt, 8);
+    assert_eq!(sweep_expired_orders_and_notify(&ctx, now), 0);
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    // Personal bid (cash) + Corp bid div 3 (cash3) only — NOT 3 accounts (zero-price skipped)
+    let acct_keys: Vec<(i64, String)> = notifs
+        .iter()
+        .filter(|n| n.event == "OnAccountChange")
+        .filter_map(|n| Some((n.args.get(1)?.as_i64()?, n.args.first()?.as_str()?.to_string())))
+        .collect();
+    assert!(acct_keys.contains(&(char_id, "cash".to_string())), "got {acct_keys:?}");
+    assert!(acct_keys.contains(&(corp_id, "cash3".to_string())), "got {acct_keys:?}");
+    assert_eq!(acct_keys.len(), 2, "zero-price bid must not emit OnAccountChange: {acct_keys:?}");
+
+    // OnMarketItemReceived emitted for all 5 sell orders (940_004..=940_008)
+    let mkt_recv_oids: Vec<i64> = notifs
+        .iter()
+        .filter(|n| n.event == "OnMarketItemReceived")
+        .filter_map(|n| n.args.first()?.as_i64())
+        .collect();
+    for expected_oid in [940_004_i64, 940_005, 940_006, 940_007, 940_008] {
+        assert!(mkt_recv_oids.contains(&expected_oid), "missing {expected_oid}");
+    }
+
+    // OnItemChange emitted for Tritanium (type 34, merge diff col 9 = 20), Mexallon (type 36, new diff col 3 = 0),
+    // Isogen corp deliveries (type 37, col 3 = 0), Corp PLEX (type 44992), and NOT personal PLEX
+    let item_changes: Vec<(u32, i64, Vec<(i64, i64)>)> = notifs
+        .iter()
+        .filter(|n| n.event == "OnItemChange")
+        .filter_map(|n| {
+            let (tid, owner) = match &n.args[0] {
+                PyRep::DBRow { columns, .. } => {
+                    let tid = columns.iter().find(|(k, _)| k == "typeID")?.1.as_i64()? as u32;
+                    let own = columns.iter().find(|(k, _)| k == "ownerID")?.1.as_i64()?;
+                    (tid, own)
+                }
+                _ => return None,
+            };
+            let cols = match &n.args[1] {
+                PyRep::Dict(entries) => entries
+                    .iter()
+                    .filter_map(|(k, v)| Some((k.as_i64()?, v.as_i64()?)))
+                    .collect(),
+                _ => return None,
+            };
+            Some((tid, owner, cols))
+        })
+        .collect();
+    assert!(item_changes.contains(&(34, char_id, vec![(9, 20)])), "{item_changes:?}");
+    assert!(item_changes.contains(&(36, char_id, vec![(3, 0)])), "{item_changes:?}");
+    assert!(item_changes.contains(&(37, corp_id, vec![(3, 0)])), "{item_changes:?}");
+    assert!(item_changes.contains(&(PLEX_TYPE_ID, corp_id, vec![(3, 0)])), "{item_changes:?}");
+    assert!(!item_changes.iter().any(|(tid, own, _)| *tid == PLEX_TYPE_ID && *own == char_id));
+
+    // Also test emit_expired_order_notifications directly with zero-remaining sell order & final_vol_remaining == 0 bid
+    ctx.db.with_mut_snapshot(|s| {
+        s.market_orders.insert(940_020, MarketOrderRecord {
+            order_id: 940_020, owner_id: char_id, station_id: JITA_STATION_ID, region_id: THE_FORGE_REGION_ID,
+            type_id: 34, is_bid: true, price: IskCents::from_isk(100), vol_entered: 10, vol_remaining: 0,
+            min_volume: 1, is_npc: false, escrow: IskCents(0),
+        });
+        save_market_order_meta(s, 940_020, MarketOrderMeta {
+            range: 32_767, duration: 1, issue_unix: now - 100, order_state: Some(4),
+            account_key: None, final_vol_remaining: Some(0), closed_unix: Some(now),
+        });
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    emit_expired_order_notifications(&ctx, &[(940_020, char_id, true, 34, JITA_STATION_ID)]);
+    let dir_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(!dir_notifs.iter().any(|n| n.event == "OnAccountChange"));
+    assert!(dir_notifs.iter().any(|n| n.event == "OnOwnOrdersChanged"));
+
+    // 3. `handle` unknown service -> None; PlacePlexSellOrder KeyVal price Integer / non-finite / bad quantity guards;
+    //    ModifyPlexCharOrder non-PLEX rejection & success; GetItemsInContainer; GetCourierContractFromItemID None.
+    assert!(handle(&ctx, &mut sess, "nonexistent_svc", "Ping", &[], &kw).is_none());
+
+    let kv_nan = PyRep::KeyVal(HashMap::from([
+        ("price".into(), PyRep::Real(f64::NAN)),
+        ("quantity".into(), PyRep::Integer(1)),
+    ]));
+    assert_eq!(
+        handle(&ctx, &mut sess, "marketProxy", "PlacePlexSellOrder", &[kv_nan], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "InvalidMarketOrder"
+    );
+    let kv_bad_qty = PyRep::KeyVal(HashMap::from([
+        ("price".into(), PyRep::Integer(5_000_000)),
+        ("quantity".into(), PyRep::String("bad".into())),
+    ]));
+    assert_eq!(
+        handle(&ctx, &mut sess, "marketProxy", "PlacePlexSellOrder", &[kv_bad_qty], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "InvalidMarketOrder"
+    );
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&char_id).unwrap().balance = IskCents::from_isk(1_000_000);
+        s.items.insert(930_100, InventoryItemRecord {
+            item_id: 930_100, type_id: PLEX_TYPE_ID, owner_id: char_id, location_id: JITA_STATION_ID,
+            flag: InventoryFlag::Hangar, quantity: 5, singleton: false, version: 1, ..Default::default()
+        });
+    });
+    let kv_int_ok = PyRep::KeyVal(HashMap::from([
+        ("price".into(), PyRep::Integer(6_000_000)),
+        ("quantity".into(), PyRep::Integer(2)),
+    ]));
+    let plex_order_rep = handle(&ctx, &mut sess, "marketProxy", "PlacePlexSellOrder", &[kv_int_ok], &kw)
+        .unwrap()
+        .unwrap();
+    let plex_oid = plex_order_rep.dict_get("orderID").and_then(PyRep::as_i64).unwrap();
+    // ModifyPlexCharOrder succeeds on PLEX order once past cooldown, rejects non-PLEX order
+    ctx.db.with_mut_snapshot(|s| {
+        let mut m = load_market_order_meta(s, &s.market_orders[&plex_oid], now);
+        m.issue_unix = now.saturating_sub(600);
+        save_market_order_meta(s, plex_oid, m);
+        s.market_orders.insert(940_050, MarketOrderRecord {
+            order_id: 940_050, owner_id: char_id, station_id: JITA_STATION_ID, region_id: THE_FORGE_REGION_ID,
+            type_id: 34, is_bid: false, price: IskCents::from_isk(10), vol_entered: 5, vol_remaining: 5,
+            min_volume: 1, is_npc: false, escrow: IskCents(0),
+        });
+        save_market_order_meta(s, 940_050, MarketOrderMeta {
+            range: 32_767, duration: 90, issue_unix: now.saturating_sub(600),
+            order_state: None, account_key: None, final_vol_remaining: None, closed_unix: None,
+        });
+    });
+    assert_eq!(
+        handle(&ctx, &mut sess, "marketProxy", "ModifyPlexCharOrder", &[PyRep::Integer(940_050), PyRep::Real(12.0)], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "InvalidPlexOrder"
+    );
+    assert!(
+        handle(&ctx, &mut sess, "marketProxy", "ModifyPlexCharOrder", &[PyRep::Integer(plex_oid), PyRep::Real(5_900_000.0)], &kw)
+            .unwrap()
+            .is_ok()
+    );
+
+    // GetItemsInContainer returns owned/corp items in container_id (arg 0 and arg 1) and ignores foreign items
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(930_201, InventoryItemRecord {
+            item_id: 930_201, type_id: 34, owner_id: char_id, location_id: 955_000,
+            flag: InventoryFlag::Cargo, quantity: 42, singleton: false, ..Default::default()
+        });
+        s.items.insert(930_202, InventoryItemRecord {
+            item_id: 930_202, type_id: 35, owner_id: other_char, location_id: 955_000,
+            flag: InventoryFlag::Cargo, quantity: 99, singleton: false, ..Default::default()
+        });
+    });
+    let in_cont0 = handle(&ctx, &mut sess, "contractProxy", "GetItemsInContainer", &[PyRep::Integer(955_000)], &kw)
+        .unwrap()
+        .unwrap();
+    match &in_cont0 {
+        PyRep::List(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].dict_get("itemID").and_then(PyRep::as_i64), Some(930_201));
+        }
+        other => panic!("expected List, got {other:?}"),
+    }
+    let in_cont1 = handle(
+        &ctx,
+        &mut sess,
+        "contractProxy",
+        "GetItemsInContainer",
+        &[PyRep::Integer(char_id), PyRep::Integer(955_000)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    match &in_cont1 {
+        PyRep::List(rows) => assert_eq!(rows.len(), 1),
+        other => panic!("expected List, got {other:?}"),
+    }
+
+    // Unknown courier item -> PyRep::None
+    assert_eq!(
+        handle(&ctx, &mut sess, "contractProxy", "GetCourierContractFromItemID", &[PyRep::Integer(888_777)], &kw)
+            .unwrap()
+            .unwrap(),
+        PyRep::None
+    );
+}

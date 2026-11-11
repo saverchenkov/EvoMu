@@ -348,7 +348,13 @@ fn concord_lp_exchange_transfers_corp_balances_and_delayed_rewards() {
         });
     });
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(format!("delayed_rewards:{char_id}"), "{\"555\":[{\"isk\":5000,\"lp\":250}]}".into());
+        snap.fleet_and_social_ops.delayed_rewards.insert(
+            char_id,
+            HashMap::from([(
+                "555".to_string(),
+                vec![serde_json::json!({"isk": 5000, "lp": 250})],
+            )]),
+        );
     });
     let delayed = call_lp(&ctx, &mut sess, "rewardMgr", "GetDelayedRewardsByGroupIDs", &[PyRep::Integer(555)]).unwrap();
     if let PyRep::Dict(entries) = delayed {

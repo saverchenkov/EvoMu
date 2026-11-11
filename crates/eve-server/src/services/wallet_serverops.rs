@@ -336,7 +336,10 @@ pub fn handle(
             let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let is_tower_owner = ctx.db.with_snapshot(|snap| {
                 let owner_id = snap.items.get(&item_id).map(|i| i.owner_id).or_else(|| snap.structures.get(&item_id).map(|s| s.owner_corp_id));
-                let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                let corp_id = session
+                    .corporation_id
+                    .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id))
+                    .unwrap_or(0);
                 owner_id == Some(char_id) || (corp_id != 0 && owner_id == Some(corp_id))
             });
             if !is_tower_owner {

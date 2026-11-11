@@ -2,15 +2,12 @@
 
 #![forbid(unsafe_code)]
 
-use super::super::*;
 use super::*;
-use crate::services::industry_pi::industry_facilities_bps::*;
 use eve_db::{
-    ContractRecord, CorporationRecord, FwSystemOccupationRecord, InventoryFlag,
-    InventoryItemRecord, IskCents, TrainedSkillRecord, UpwellStructureRecord, WorldRepository,
-    corp_roles,
+    ContractRecord, CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents,
+    TrainedSkillRecord, UpwellStructureRecord, corp_roles,
 };
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::PyRep;
 use std::collections::HashMap;
 
 #[test]
@@ -60,7 +57,7 @@ fn blueprint_data_corp_permissions_contract_visibility_and_nested_container_reso
                 type_id: bp_tid,
                 owner_id: corp_id,
                 location_id: container_id,
-                flag: InventoryFlag::Impounded,
+                flag: InventoryFlag::CorpSAG1,
                 quantity: 1,
                 singleton: true,
                 is_blueprint_copy: true,
@@ -118,7 +115,7 @@ fn blueprint_data_corp_permissions_contract_visibility_and_nested_container_reso
     assert_eq!(list[0].dict_get("original"), Some(&PyRep::Bool(false)));
     assert_eq!(list[0].dict_get("runs"), Some(&PyRep::Integer(7)));
     assert_eq!(list[0].dict_get("quantity"), Some(&PyRep::Integer(-2)));
-    assert_eq!(list[0].dict_get("isImpounded"), Some(&PyRep::Bool(true)));
+    assert_eq!(list[0].dict_get("isImpounded"), Some(&PyRep::Bool(false)));
 
     // 3. GetBlueprintData: missing arg -> InvalidBlueprintTypeID; other player's BP not in contract -> CrpAccessDenied
     assert_eq!(

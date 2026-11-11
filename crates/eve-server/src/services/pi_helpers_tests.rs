@@ -256,6 +256,22 @@ fn test_orbital_access_tax_upgrade_cc_and_expedited_transfer() {
             "CustomsOfficeAccessDenied"
         );
 
+        // Exact minimum_standing boundary (-5.0 >= -5.0) -> allowed with bad standing tax rate (0.12)
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.standings.insert(owner_corp, -5.0);
+        }
+        let (rate_bad, _) =
+            resolve_character_orbital_access_and_tax(snap, char_id, planet_id).unwrap();
+        assert!((rate_bad - 0.12).abs() < 1e-6);
+
+        // Good standing (> 0.0 and <= 5.0) -> 0.04
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.standings.insert(owner_corp, 5.0);
+        }
+        let (rate_good, _) =
+            resolve_character_orbital_access_and_tax(snap, char_id, planet_id).unwrap();
+        assert!((rate_good - 0.04).abs() < 1e-6);
+
         // Setup colony + skill 2505 and test upgrade_command_center_logic & user_transfer_commodities_logic
         snap.skills.entry(char_id).or_default().insert(
             2505,

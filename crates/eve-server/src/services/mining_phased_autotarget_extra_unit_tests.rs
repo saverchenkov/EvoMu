@@ -66,7 +66,7 @@ fn make_ctx() -> ServerContext {
     ServerContext::with_sde_and_repository(shared_sde(), db)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn maybe_spawn_connect_ics_rejection_branches_and_collapse_cleanup() {
     let ctx = make_ctx();
     let low_sec = 30_002_537_u32;
@@ -278,8 +278,7 @@ async fn maybe_spawn_connect_ics_rejection_branches_and_collapse_cleanup() {
     // tick_phased_asteroid_fields with elapsed == 0 reconciles without advancing fracture; elapsed == 14_400 collapses field
     let base_now = ctx.now_unix_secs();
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs
-            .insert("phased_field_last_tick_unix".into(), base_now.to_string());
+        snap.mining_and_ess_state.phased_field_last_tick_unix = base_now;
     });
     tick_phased_asteroid_fields(&ctx, base_now).await;
     assert!(!ctx.phased_asteroid_fields.read().unwrap()[&low_sec].collapsed);
@@ -293,7 +292,7 @@ async fn maybe_spawn_connect_ics_rejection_branches_and_collapse_cleanup() {
     assert_eq!( PRISMATICITE_ORE_TYPES.len(), 4 );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn offensive_cycles_fw_militia_hostility_crimewatch_and_autotarget_limits() {
     let ctx = make_ctx();
 
@@ -484,4 +483,341 @@ async fn offensive_cycles_fw_militia_hostility_crimewatch_and_autotarget_limits(
     let locks2: Vec<TargetLock> = bp.get_target_locks(100);
     assert_eq!(locks2.len(), 2);
     assert_eq!(locks2[1].target_id, 601);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn maybe_spawn_phased_field_fleet_ics_tether_and_sde_fallback_autotarget() {
+    let mut sde = (*shared_sde()).clone();
+    sde.types.insert(
+        550_099,
+        InvType {
+            type_id: 550_099,
+            group_id: 550,
+            category_id: 11,
+            name: "NoMeta Rat".into(),
+            mass: 1.0,
+            volume: 10.0,
+            capacity: 0.0,
+            radius: 75.0,
+            base_price: 100.0,
+            published: true,
+            portion_size: 1,
+            market_group_id: None,
+            race_id: None,
+            faction_id: None,
+            variation_parent_type_id: None,
+            description_id: None,
+            icon_id: None,
+            graphic_id: None,
+            sound_id: None,
+            meta_group_id: None,
+            meta_level: None,
+            tech_level: None,
+            default_effect_id: None,
+            description: String::new(),
+            effect_ids: Vec::new(),
+            default_attributes: HashMap::from([(552_u16, 125.0)]),
+        },
+    );
+    let ctx = ServerContext::with_sde_and_repository(
+        Arc::new(sde),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+
+    // Find a solar_system_id whose deterministic roll < 20 so maybe_spawn_phased_asteroid_field spawns.
+    let mut spawned_sys = None;
+    for candidate_sys in 30_000_001_u32..30_000_500 {
+        if let Some(st) = maybe_spawn_phased_asteroid_field(&ctx, candidate_sys).await {
+            spawned_sys = Some((candidate_sys, st));
+            break;
+        }
+    }
+    let (sys_id, first_state) = spawned_sys.expect("at least one system spawns phased field");
+    assert!(!first_state.collapsed);
+    assert!(
+        maybe_spawn_phased_asteroid_field(&ctx, sys_id).await.is_none(),
+        "already active field must not spawn a second field"
+    );
+
+    // Clear cosmic_signatures so advance_phased_asteroid_field uses the snap.asteroids position fallback.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cosmic_signatures.remove(&sys_id);
+    });
+    let half = advance_phased_asteroid_field(&ctx, sys_id, 0.5).expect("advance to 0.5");
+    assert!(half.beacon_spawned);
+    assert!(!half.collapsed);
+
+    // Seed fleet anchor + two fleetmate Orcas (active cores in tether -> 50+50=100 energy), non-core ship, and warping ship.
+    let anchor_owner = 970_001_i64;
+    let fleetmate = 970_002_i64;
+    let uncored = 970_003_i64;
+    let warping = 970_004_i64;
+    let fleetmate2 = 970_005_i64;
+    let anchor_id = 970_100_i64;
+    let orca_ship = 970_101_i64;
+    let uncored_ship = 970_102_i64;
+    let warping_ship = 970_103_i64;
+    let orca2_ship = 970_104_i64;
+    let core_mod = 970_201_i64;
+    let warp_core_mod = 970_202_i64;
+    let core_mod2 = 970_203_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base_char = snap.characters.values().next().unwrap().clone();
+        for (cid, sid) in [
+            (anchor_owner, 0),
+            (fleetmate, orca_ship),
+            (uncored, uncored_ship),
+            (warping, warping_ship),
+            (fleetmate2, orca2_ship),
+        ] {
+            let mut ch = base_char.clone();
+            ch.character_id = cid;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = sid;
+            snap.characters.insert(cid, ch);
+        }
+        snap.fleets.insert(
+            970_900,
+            FleetRecord {
+                fleet_id: 970_900,
+                boss_id: anchor_owner,
+                members: vec![anchor_owner, fleetmate, uncored, warping, fleetmate2],
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            anchor_id,
+            InventoryItemRecord {
+                item_id: anchor_id,
+                type_id: TYPE_MOBILE_PHASE_ANCHOR,
+                owner_id: anchor_owner,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        for (sid, owner, tid) in [
+            (orca_ship, fleetmate, 28_606_u32),
+            (uncored_ship, uncored, 42_244),
+            (warping_ship, warping, 28_606),
+            (orca2_ship, fleetmate2, 28_606),
+        ] {
+            snap.items.insert(
+                sid,
+                InventoryItemRecord {
+                    item_id: sid,
+                    type_id: tid,
+                    owner_id: owner,
+                    location_id: i64::from(sys_id),
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+        for (mid, sid, owner) in [
+            (core_mod, orca_ship, fleetmate),
+            (warp_core_mod, warping_ship, warping),
+            (core_mod2, orca2_ship, fleetmate2),
+        ] {
+            snap.items.insert(
+                mid,
+                InventoryItemRecord {
+                    item_id: mid,
+                    type_id: 28583,
+                    owner_id: owner,
+                    location_id: sid,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.module_active_states.insert(mid);
+        }
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for (bid, tid, x, mode) in [
+        (anchor_id, TYPE_MOBILE_PHASE_ANCHOR, 0.0, MovementMode::Stop),
+        (orca_ship, 28_606, 2_000.0, MovementMode::Stop),
+        (orca2_ship, 28_606, 2_500.0, MovementMode::Stop),
+        (uncored_ship, 42_244, 1_500.0, MovementMode::Stop),
+        (
+            warping_ship,
+            28_606,
+            1_000.0,
+            MovementMode::Warp {
+                origin: DVec3::ZERO,
+                destination: DVec3::new(1e7, 0.0, 0.0),
+                warp_speed_au_s: 3.0,
+                total_distance: 1e7,
+                phase: eve_destiny::WarpPhase::Cruising,
+                elapsed_warp_time: 1.0,
+            },
+        ),
+    ] {
+        sys_handle
+            .spawn_ball(Ball {
+                id: bid,
+                type_id: tid,
+                position: DVec3::new(x, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 100.0,
+                inertia: 1.0,
+                mass: 1e6,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode,
+            })
+            .await
+            .unwrap();
+    }
+
+    let tick_ts = ctx.now_unix_secs() + 10;
+    tick_phased_asteroid_fields(&ctx, tick_ts).await;
+    let fields = ctx.phased_asteroid_fields.read().unwrap().clone();
+    let f = fields.get(&sys_id).expect("phased field present");
+    assert!(f.phased_in);
+    assert!(f.connected_ship_ids.contains(&orca_ship));
+    assert!(f.connected_ship_ids.contains(&orca2_ship));
+    assert!(f.mobile_phase_anchor_energy >= 100);
+
+    // Ballpark autotargeter with no-SlimItemMeta NPC (SDE fallback) and category-6 ship (ignored)
+    let mut bp = Ballpark::new(sys_id);
+    bp.balls.insert(
+        100,
+        Ball {
+            id: 100,
+            type_id: 28_606,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 100.0,
+            inertia: 1.0,
+            mass: 1e6,
+            radius: 100.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+    );
+    bp.balls.insert(
+        701,
+        Ball {
+            id: 701,
+            type_id: 550_099,
+            position: DVec3::new(4_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 100.0,
+            inertia: 1.0,
+            mass: 1e4,
+            radius: 75.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+    );
+    bp.balls.insert(
+        702,
+        Ball {
+            id: 702,
+            type_id: 28_606,
+            position: DVec3::new(3_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 100.0,
+            inertia: 1.0,
+            mass: 1e6,
+            radius: 100.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+    );
+    bp.set_ball_slim_meta(
+        702,
+        SlimItemMeta {
+            owner_id: 888,
+            char_id: Some(888),
+            corp_id: 999,
+            alliance_id: -1,
+            group_id: 941,
+            category_id: 6,
+            security_status: 0.0,
+            is_cloaked: false,
+            ..Default::default()
+        },
+    );
+    run_auto_targeter_ballpark_tick(&mut bp, Some(&ctx.sde), None, 100, 20_000.0, 5, 250.0, &[], &[]);
+    let locks = bp.get_target_locks(100);
+    assert_eq!(locks.len(), 1);
+    assert_eq!(locks[0].target_id, 701);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn phased_fields_persistence_multi_system_and_tick_timestamp_zero_boundary() {
+    let ctx = make_ctx();
+    let clock: Arc<dyn eve_db::clock::ServerClock> =
+        Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(1_776_500_000));
+    ctx.set_clock(clock);
+
+    let hi_sec = 30_000_142_u32;
+    let mut low_null_systems: Vec<u32> = ctx
+        .sde
+        .solar_systems
+        .values()
+        .filter(|s| s.security_status < 0.45 && s.region_id != 10_000_070)
+        .map(|s| s.solar_system_id)
+        .collect();
+    low_null_systems.sort_unstable();
+    assert!(low_null_systems.len() >= 2, "seed must have >= 2 low/null systems");
+    let low_a = low_null_systems[0];
+    let low_b = low_null_systems[1];
+
+    // 1. High-sec returns None; valid low/null returns populated PhasedAsteroidFieldState & persists to DB
+    assert!(spawn_phased_asteroid_field(&ctx, hi_sec, "HI-NOPE", 990_000, 1000, (0.0, 0.0, 0.0)).is_none());
+
+    let f_a = spawn_phased_asteroid_field(&ctx, low_a, "PH-ALPHA", 990_001, 5000, (10.0, 20.0, 30.0))
+        .expect("low_a field spawns");
+    assert_eq!(f_a.signature_id, "PH-ALPHA");
+    assert_eq!(f_a.solar_system_id, low_a);
+    assert_eq!(f_a.asteroid_ids, vec![990_001]);
+
+    // 2. Spawning low_b loads existing low_a (kills HashMap::new / [(0,_)] / [(1,_)] and persist_phased_fields -> ())
+    let f_b = spawn_phased_asteroid_field(&ctx, low_b, "PH-BETA", 990_002, 6000, (40.0, 50.0, 60.0))
+        .expect("low_b field spawns");
+    assert_eq!(f_b.signature_id, "PH-BETA");
+    ctx.db.with_snapshot(|snap| {
+        let fields = &snap.mining_and_ess_state.phased_asteroid_fields;
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields.get(&low_a).map(|f| f.signature_id.as_str()), Some("PH-ALPHA"));
+        assert_eq!(fields.get(&low_b).map(|f| f.signature_id.as_str()), Some("PH-BETA"));
+        assert!(!fields.contains_key(&0));
+        assert!(!fields.contains_key(&1));
+    });
+
+    // 3. tick_phased_asteroid_fields when phased_field_last_tick_unix == 0:
+    //    must anchor last_tick = now_unix without jumping/collapsing (kills `> -> >=`),
+    //    then next tick +3600s advances progress by 0.25 from 0.10 -> 0.35 (kills `tick -> ()`, `> -> ==`, `> -> <`).
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.mining_and_ess_state.phased_field_last_tick_unix = 0;
+    });
+    tick_phased_asteroid_fields(&ctx, 1_776_500_000).await;
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.mining_and_ess_state.phased_field_last_tick_unix, 1_776_500_000);
+        let fa = &snap.mining_and_ess_state.phased_asteroid_fields[&low_a];
+        assert!(!fa.collapsed);
+        assert!((fa.progress - 0.1).abs() < 1e-6, "progress was {}", fa.progress);
+    });
+
+    tick_phased_asteroid_fields(&ctx, 1_776_503_600).await;
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.mining_and_ess_state.phased_field_last_tick_unix, 1_776_503_600);
+        let fa = &snap.mining_and_ess_state.phased_asteroid_fields[&low_a];
+        let fb = &snap.mining_and_ess_state.phased_asteroid_fields[&low_b];
+        assert!((fa.progress - 0.35).abs() < 1e-6, "expected 0.35, got {}", fa.progress);
+        assert!((fb.progress - 0.35).abs() < 1e-6, "expected 0.35, got {}", fb.progress);
+    });
 }

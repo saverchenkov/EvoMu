@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 //! Additional unit and mutation-killing tests for `market_orders_escrow`.
 
 #![forbid(unsafe_code)]
@@ -296,4 +297,138 @@ fn place_multi_sell_order_damaged_ship_and_container_auto_discovery_errors() {
             expected
         );
     }
+}
+
+#[test]
+fn issue_789_buy_multiple_items_multi_fill_emits_final_deduped_account_change() {
+    let ctx = test_ctx();
+    let buyer_id = 90_000_001_i64;
+    let seller_id = 90_000_002_i64;
+    let corp_id = ctx.db.with_snapshot(|s| s.characters[&buyer_id].corporation_id);
+    let mut sess = jita_session(buyer_id, corp_id);
+
+    ctx.db.with_mut_snapshot(|s| {
+        s.market_orders.clear();
+        s.characters.get_mut(&buyer_id).unwrap().balance = IskCents::from_isk(1_000_000);
+        if let Some(ch2) = s.characters.get_mut(&seller_id) {
+            ch2.balance = IskCents::from_isk(50_000);
+        } else {
+            let mut ch2 = s.characters[&buyer_id].clone();
+            ch2.character_id = seller_id;
+            ch2.user_id = 2;
+            ch2.name = "ThirdParty Seller".to_string();
+            ch2.balance = IskCents::from_isk(50_000);
+            s.characters.insert(seller_id, ch2);
+        }
+        s.next_entity_id += 1;
+        let oid_self = s.next_entity_id;
+        s.market_orders.insert(
+            oid_self,
+            MarketOrderRecord {
+                order_id: oid_self,
+                owner_id: buyer_id,
+                station_id: JITA_STATION_ID,
+                region_id: THE_FORGE_REGION_ID,
+                type_id: 34,
+                is_bid: false,
+                price: IskCents::from_isk(100),
+                vol_entered: 10,
+                vol_remaining: 10,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+        s.next_entity_id += 1;
+        let oid_third_a = s.next_entity_id;
+        s.market_orders.insert(
+            oid_third_a,
+            MarketOrderRecord {
+                order_id: oid_third_a,
+                owner_id: seller_id,
+                station_id: JITA_STATION_ID,
+                region_id: THE_FORGE_REGION_ID,
+                type_id: 35,
+                is_bid: false,
+                price: IskCents::from_isk(200),
+                vol_entered: 10,
+                vol_remaining: 10,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+        s.next_entity_id += 1;
+        let oid_third_b = s.next_entity_id;
+        s.market_orders.insert(
+            oid_third_b,
+            MarketOrderRecord {
+                order_id: oid_third_b,
+                owner_id: seller_id,
+                station_id: JITA_STATION_ID,
+                region_id: THE_FORGE_REGION_ID,
+                type_id: 36,
+                is_bid: false,
+                price: IskCents::from_isk(300),
+                vol_entered: 5,
+                vol_remaining: 5,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+    });
+    ctx.db
+        .acquire_online_lock(1, 9401, Some(buyer_id), true, ctx.now_unix())
+        .unwrap();
+    ctx.db
+        .acquire_online_lock(2, 9402, Some(seller_id), true, ctx.now_unix())
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(buyer_id);
+    let _ = ctx.drain_notifications_for_char(seller_id);
+
+    // Self-fill on type 34, followed by two fills from seller_id on types 35 and 36.
+    let reqs = PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Integer(34), PyRep::Integer(10), PyRep::Real(100.0)]),
+        PyRep::Tuple(vec![PyRep::Integer(35), PyRep::Integer(10), PyRep::Real(200.0)]),
+        PyRep::Tuple(vec![PyRep::Integer(36), PyRep::Integer(5), PyRep::Real(300.0)]),
+    ]);
+    call_escrow(&ctx, &mut sess, "BuyMultipleItems", &[reqs]).unwrap();
+
+    let buyer_final = ctx.db.get_character(buyer_id).unwrap().balance.to_wire_f64();
+    let seller_final = ctx.db.get_character(seller_id).unwrap().balance.to_wire_f64();
+
+    let buyer_bals: Vec<f64> = ctx
+        .drain_notifications_for_char(buyer_id)
+        .into_iter()
+        .filter(|n| n.event == "OnAccountChange")
+        .filter_map(|n| n.args.get(2).and_then(PyRep::as_f64))
+        .collect();
+    assert_eq!(
+        buyer_bals.len(),
+        1,
+        "Mixed self-fill + third-party BuyMultipleItems must emit only the true final buyer balance: {buyer_bals:?}"
+    );
+    assert!(
+        (buyer_bals[0] - buyer_final).abs() < 1e-2,
+        "Buyer OnAccountChange ({:?}) must match final balance ({buyer_final})",
+        buyer_bals[0]
+    );
+
+    let seller_bals: Vec<f64> = ctx
+        .drain_notifications_for_char(seller_id)
+        .into_iter()
+        .filter(|n| n.event == "OnAccountChange")
+        .filter_map(|n| n.args.get(2).and_then(PyRep::as_f64))
+        .collect();
+    assert_eq!(
+        seller_bals.len(),
+        1,
+        "Third-party seller appearing across multiple BuyMultipleItems lines must get one deduplicated final OnAccountChange: {seller_bals:?}"
+    );
+    assert!(
+        (seller_bals[0] - seller_final).abs() < 1e-2,
+        "Seller OnAccountChange ({:?}) must match final balance ({seller_final})",
+        seller_bals[0]
+    );
 }

@@ -501,14 +501,14 @@ async fn fast_checkout_activity_mgr_and_bounties_taxes_kill_mutations() {
     crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
         rt.pending_bounty_ticks.insert((sys_id, char1), 99_999.0);
     });
-    let (pilot_sub, _, _) = flush_npc_bounty_tick(&ctx, sys_id, char1, 0.0);
+    let pilot_sub = flush_npc_bounty_tick(&ctx, sys_id, char1, 0.0).pilot_isk;
     assert!((pilot_sub - 99_999.0).abs() < 1e-6, "< 100k bounty tick must be untaxed");
     assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp1].master_wallet_balance()), corp1_before);
 
     crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
         rt.pending_bounty_ticks.insert((sys_id, char1), 100_000.0);
     });
-    let (pilot_taxed, _, _) = flush_npc_bounty_tick(&ctx, sys_id, char1, 0.0);
+    let pilot_taxed = flush_npc_bounty_tick(&ctx, sys_id, char1, 0.0).pilot_isk;
     assert!((pilot_taxed - 80_000.0).abs() < 1e-6, "== 100k bounty tick taxed at 20%");
     assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp1].master_wallet_balance().0), corp1_before.0 + IskCents::from_isk(20_000).0);
     assert_eq!(ctx.db.with_snapshot(|s| s.characters[&char1].balance.0), char1_before.0 + IskCents::from_isk(99_999 + 80_000).0);

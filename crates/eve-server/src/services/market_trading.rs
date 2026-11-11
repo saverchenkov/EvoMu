@@ -845,7 +845,8 @@ pub fn handle(
                 }
             };
             let is_bid = true;
-            let is_v24_buy_sig = matches!(args.get(6), Some(PyRep::Integer(_)));
+            let is_buy_stuff_sig = args.len() >= 8 && matches!(args.get(6), Some(PyRep::None));
+            let is_v24_buy_sig = matches!(args.get(6), Some(PyRep::Integer(_))) || is_buy_stuff_sig;
             let order_range = if is_v24_buy_sig {
                 match rpc.opt_i64(4, "orderRange") {
                     Ok(v) => v.unwrap_or(-1),
@@ -861,7 +862,12 @@ pub fn handle(
                 Ok(v) => v.unwrap_or(1).min(i32::MAX as i64) as i32,
                 Err(mut e) => { e.code = "InvalidMarketOrder".into(); return Some(Err(e)); }
             };
-            let duration_days = if is_v24_buy_sig {
+            let duration_days = if is_buy_stuff_sig {
+                match rpc.opt_i64(8, "duration") {
+                    Ok(v) => v.unwrap_or(0),
+                    Err(mut e) => { e.code = "InvalidMarketOrder".into(); return Some(Err(e)); }
+                }
+            } else if is_v24_buy_sig {
                 match rpc.opt_i64(6, "duration") {
                     Ok(v) => v.unwrap_or(90),
                     Err(mut e) => { e.code = "InvalidMarketOrder".into(); return Some(Err(e)); }
@@ -873,12 +879,12 @@ pub fn handle(
                 }
             };
 
-            let use_corp = match rpc.opt_bool(7, "useCorp") {
+            let use_corp = match rpc.opt_boolish(7, "useCorp") {
                 Ok(v) => v.unwrap_or(false),
                 Err(mut e) => { e.code = "InvalidMarketOrder".into(); return Some(Err(e)); }
             };
-            let account_key = if is_v24_buy_sig && matches!(args.get(8), Some(PyRep::Real(_))) {
-                match rpc.opt_i64(99, "accountKey") {
+            let account_key = if is_buy_stuff_sig || (is_v24_buy_sig && matches!(args.get(8), Some(PyRep::Real(_)))) {
+                match rpc.opt_i64(9, "accountKey") {
                     Ok(v) => v.unwrap_or(session.corp_account_key as i64).clamp(1000, 1006) as u16,
                     Err(mut e) => { e.code = "InvalidMarketOrder".into(); return Some(Err(e)); }
                 }
@@ -1007,7 +1013,8 @@ pub fn handle(
                     }));
                 }
             }
-            if type_id != PLEX_TYPE_ID
+            if (!is_buy_stuff_sig || duration_days > 0)
+                && type_id != PLEX_TYPE_ID
                 && order_range > super::market_contracts::max_remote_jumps_for_skill_level(vis_lvl)
             {
                 return Some(Err(BridgeRpcError {
@@ -1134,7 +1141,28 @@ pub fn handle(
                 let mut delivered_items: Vec<(i64, TypeId, i64, i64)> = Vec::new();
                 let mut delivered_item_records: Vec<InventoryItemRecord> = Vec::new();
                 let mut buyer_acct_after: Option<(bool, i64, u8, IskCents)> = None;
-                let mut seller_acct_updates: Vec<(bool, i64, u8, IskCents)> = Vec::new();
+                let mut touched_seller_accts: Vec<(bool, i64, u8)> = Vec::new();
+                let resolve_seller_acct_updates =
+                    |snap: &eve_db::snapshot_ext::WorldStateSnapshot,
+                     accts: Vec<(bool, i64, u8)>,
+                     buyer_after: Option<(bool, i64, u8, IskCents)>|
+                     -> Vec<(bool, i64, u8, IskCents)> {
+                        accts
+                            .into_iter()
+                            .filter_map(|(is_corp, oid, div)| {
+                                let bal = if is_corp {
+                                    snap.corporations.get(&oid)?.division_balance(div)
+                                } else {
+                                    snap.characters.get(&oid)?.balance
+                                };
+                                if buyer_after == Some((is_corp, oid, div, bal)) {
+                                    None
+                                } else {
+                                    Some((is_corp, oid, div, bal))
+                                }
+                            })
+                            .collect()
+                    };
 
                 for (oid, _) in candidate_ids {
                     if remaining_qty <= 0 {
@@ -1201,12 +1229,18 @@ pub fn handle(
                             if let Some(seller) = snap.characters.get_mut(&resting.owner_id) {
                                 seller.balance = seller.balance.checked_add(seller_net).unwrap_or(seller.balance);
                                 seller_bal = Some(seller.balance);
-                                seller_acct_updates.push((false, resting.owner_id, 1, seller.balance));
+                                let key = (false, resting.owner_id, 1);
+                                if !touched_seller_accts.contains(&key) {
+                                    touched_seller_accts.push(key);
+                                }
                             } else if let Some(seller_corp) = snap.corporations.get_mut(&resting.owner_id) {
                                 let s_div = (seller_meta.account_key.unwrap_or(1000).saturating_sub(999)).clamp(1, 7) as u8;
                                 let s_bal = seller_corp.credit_division(s_div, seller_net);
                                 seller_bal = Some(s_bal);
-                                seller_acct_updates.push((true, resting.owner_id, s_div, s_bal));
+                                let key = (true, resting.owner_id, s_div);
+                                if !touched_seller_accts.contains(&key) {
+                                    touched_seller_accts.push(key);
+                                }
                             }
                         }
                         snap.journal_market_fill(eve_db::ledger::MarketFill {
@@ -1300,6 +1334,11 @@ pub fn handle(
                 }
 
                 if remaining_qty == 0 {
+                    let seller_acct_updates = resolve_seller_acct_updates(
+                        snap,
+                        touched_seller_accts,
+                        buyer_acct_after,
+                    );
                     return Ok((
                         first_matched_oid.unwrap_or(0),
                         order_owner_id,
@@ -1455,6 +1494,11 @@ pub fn handle(
                         });
                     }
                 }
+                let seller_acct_updates = resolve_seller_acct_updates(
+                    snap,
+                    touched_seller_accts,
+                    buyer_acct_after,
+                );
                 Ok((new_oid, order_owner_id, false, broker_fee, actual_sales_tax_charged, escrow, matched_sellers, delivered_items, delivered_item_records, buyer_acct_after, seller_acct_updates))
             });
 
@@ -1463,11 +1507,11 @@ pub fn handle(
                     for (matched_oid, seller_id) in matched_sellers {
                         notify_own_order_changed(ctx, seller_id, 0, matched_oid, "Change");
                     }
-                    for (s_is_corp, s_owner, s_div, s_bal) in seller_acct_updates {
-                        emit_market_account_change(ctx, s_is_corp, s_owner, s_div, s_bal);
-                    }
                     if let Some((b_is_corp, b_owner, b_div, b_bal)) = buyer_acct_after {
                         emit_market_account_change(ctx, b_is_corp, b_owner, b_div, b_bal);
+                    }
+                    for (s_is_corp, s_owner, s_div, s_bal) in seller_acct_updates {
+                        emit_market_account_change(ctx, s_is_corp, s_owner, s_div, s_bal);
                     }
                     for rec in &delivered_item_records {
                         emit_market_item_change(ctx, char_id, rec, vec![(3, PyRep::Integer(0))]);

@@ -240,3 +240,73 @@ fn plex_vault_deposit_withdraw_cargo_and_error_paths() {
     let _ = IskCents(0);
     let _ = ServerContext::require_character;
 }
+
+#[test]
+fn insurance_journal_legacy_non_type_context_falls_back_to_ship_class_type() {
+    let ctx = make_ctx();
+    let char_id = 90_000_001i64;
+    let corp_id = 98_000_001i64;
+    let now = ctx.now_unix();
+    let (yr, mo) = year_month(now);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.append_journal_entry(JournalEntryInput {
+            owner_id: char_id,
+            entry_type: "InsurancePayout",
+            amount: IskCents(1_000_00),
+            balance_after: IskCents(5_000_00),
+            reason: "legacy-insurance-char-ctx".into(),
+            meta: JournalMeta::new(ref_types::INSURANCE, 10_000_132, char_id, now)
+                .with_context(JournalContext::Character, 90_000_001)
+                .with_account_key(ACCOUNTING_KEY_CASH),
+        });
+        snap.append_journal_entry(JournalEntryInput {
+            owner_id: char_id,
+            entry_type: "InsurancePayout",
+            amount: IskCents(2_000_00),
+            balance_after: IskCents(7_000_00),
+            reason: "modern-insurance-type-ctx".into(),
+            meta: JournalMeta::new(ref_types::INSURANCE, 10_000_132, char_id, now)
+                .with_context(JournalContext::Type, 587)
+                .with_account_key(ACCOUNTING_KEY_CASH),
+        });
+        snap.append_journal_entry(JournalEntryInput {
+            owner_id: char_id,
+            entry_type: "PlayerDonation",
+            amount: IskCents(3_000_00),
+            balance_after: IskCents(10_000_00),
+            reason: "non-insurance-char-ctx".into(),
+            meta: JournalMeta::new(ref_types::PLAYER_DONATION, 90_000_002, char_id, now)
+                .with_context(JournalContext::Character, 90_000_002)
+                .with_account_key(ACCOUNTING_KEY_CASH),
+        });
+    });
+
+    let mut sess = make_session(char_id, corp_id);
+    let rep = handle(
+        &ctx,
+        &mut sess,
+        "account",
+        "GetTransactions",
+        &[
+            PyRep::Integer(ACCOUNTING_KEY_CASH as i64),
+            PyRep::Integer(yr),
+            PyRep::Integer(mo),
+            PyRep::Bool(false),
+        ],
+        &HashMap::new(),
+    )
+    .expect("handled")
+    .expect("GetTransactions ok");
+    let rows = rep.crowset_rows().expect("crowset rows");
+    let ref_for = |desc: &str| {
+        rows.iter()
+            .find(|r| r.dbrow_get("description").and_then(|v| v.as_str()) == Some(desc))
+            .unwrap_or_else(|| panic!("missing journal row {desc}"))
+            .dbrow_get("referenceID")
+            .and_then(|v| v.as_i64())
+    };
+    assert_eq!(ref_for("legacy-insurance-char-ctx"), Some(670));
+    assert_eq!(ref_for("modern-insurance-type-ctx"), Some(587));
+    assert_eq!(ref_for("non-insurance-char-ctx"), Some(90_000_002));
+}

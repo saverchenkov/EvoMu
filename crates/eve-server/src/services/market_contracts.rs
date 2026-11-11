@@ -316,16 +316,40 @@ pub(crate) fn emit_expired_order_notifications(ctx: &ServerContext, expired: &[(
             } else {
                 None
             };
-            (acct_update, returned_item)
+            (acct_update, returned_item, is_corp)
         });
         if let Some((is_c, own, div, bal)) = follow_up.0 {
             ctx.notify_wallet_balance(is_c, own, div, bal);
         }
         if let Some((rec, changes)) = follow_up.1 {
-            ctx.emit_item_change_routed(*owner_id, &rec, changes);
+            if follow_up.2 {
+                ctx.notify_item_record_change_with_target(
+                    NotificationTarget::Corporation(*owner_id),
+                    "corpid",
+                    &rec,
+                    changes,
+                );
+            } else {
+                ctx.emit_item_change_routed(*owner_id, &rec, changes);
+            }
         }
         if !*is_bid {
-            notify_char(ctx, *owner_id, "OnMarketItemReceived", vec![PyRep::Integer(*oid), PyRep::Integer(*type_id as i64), PyRep::Integer(4), PyRep::Integer(*station_id)]);
+            let item_received_args = vec![
+                PyRep::Integer(*oid),
+                PyRep::Integer(*type_id as i64),
+                PyRep::Integer(4),
+                PyRep::Integer(*station_id),
+            ];
+            if follow_up.2 {
+                ctx.notify(
+                    NotificationTarget::Corporation(*owner_id),
+                    "OnMarketItemReceived",
+                    "corpid",
+                    item_received_args,
+                );
+            } else {
+                notify_char(ctx, *owner_id, "OnMarketItemReceived", item_received_args);
+            }
         }
     }
 }
@@ -513,7 +537,7 @@ pub fn handle(
                     Err(e) => return Some(Err(e)),
                 };
                 let rpc = RpcArgs::new(args, _kwargs);
-                let include_corp = match rpc.opt_bool(0, "isCorp") {
+                let include_corp = match rpc.opt_boolish(0, "isCorp") {
                     Ok(v) => v.unwrap_or(false),
                     Err(e) => return Some(Err(e)),
                 };
@@ -1574,3 +1598,6 @@ pub fn handle(
 #[cfg(test)]
 #[path = "market_contracts_tests.rs"]
 mod market_contracts_tests;
+#[cfg(test)]
+#[path = "market_contracts_edges2_tests.rs"]
+mod market_contracts_edges2_tests;

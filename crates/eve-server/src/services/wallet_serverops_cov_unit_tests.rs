@@ -241,3 +241,445 @@ fn account_give_cash_contact_cost_and_utility_endpoints() {
         .expect("reload pickle with programmer role");
     assert_eq!(reload, PyRep::Bool(true));
 }
+
+#[test]
+fn check_starbase_auth_all_role_bitshifts_and_ownership_combinations() {
+    let (ctx, ceo_id, member_id, corp_a, corp_b) = setup_wallet_ops_world();
+    let tower_corp = 96_920_001_i64;
+    let tower_char = 96_920_002_i64;
+    let unreg_corp = 98_999_777_i64;
+    let member_unreg = 96_910_003_i64;
+    let tower_unreg = 96_920_003_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            tower_corp,
+            eve_db::UpwellStructureRecord {
+                structure_id: tower_corp,
+                type_id: 16_213,
+                owner_corp_id: corp_a,
+                solar_system_id: 30_000_142,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            tower_char,
+            eve_db::InventoryItemRecord {
+                item_id: tower_char,
+                type_id: 16_213,
+                owner_id: member_id,
+                location_id: 30_000_142,
+                ..Default::default()
+            },
+        );
+        let mut mem_u = snap.characters[&member_id].clone();
+        mem_u.character_id = member_unreg;
+        mem_u.user_id = 9_399;
+        mem_u.corporation_id = unreg_corp;
+        snap.characters.insert(member_unreg, mem_u);
+        snap.items.insert(
+            tower_unreg,
+            eve_db::InventoryItemRecord {
+                item_id: tower_unreg,
+                type_id: 16_213,
+                owner_id: unreg_corp,
+                location_id: 30_000_142,
+                ..Default::default()
+            },
+        );
+    });
+
+    let foreign_sess = make_session(member_id, corp_b, 0);
+    let gm_sess = make_session(member_id, corp_b, eve_db::service_roles::ROLE_GMH);
+    let mut mem_sess = make_session(member_id, corp_a, 0);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        // GM bypasses foreign check
+        assert!(check_starbase_auth(snap, &gm_sess, member_id, tower_corp).is_ok());
+        // Missing structure -> StructureNotFound
+        assert_eq!(check_starbase_auth(snap, &mem_sess, member_id, 999_888_111).unwrap_err().code, "StructureNotFound");
+        // Foreign corp -> NotStarbaseOwner
+        assert_eq!(check_starbase_auth(snap, &foreign_sess, member_id, tower_corp).unwrap_err().code, "NotStarbaseOwner");
+        // Personal tower owned by member_id even if session is in corp_b (or corp_a) -> Ok(())
+        assert!(check_starbase_auth(snap, &foreign_sess, member_id, tower_char).is_ok());
+        // CEO with 0 bitmask -> Ok(())
+        let ceo_zero = make_session(ceo_id, corp_a, 0);
+        assert!(check_starbase_auth(snap, &ceo_zero, ceo_id, tower_corp).is_ok());
+    });
+
+    // Test every allowed bitshift individually in session.corp_role (with eff_roles == 0): 1<<0, 1<<24, 1<<25, 1<<40
+    for shift in [0_u32, 24, 25, 40] {
+        mem_sess.corp_role = 1_u64 << shift;
+        ctx.db.with_snapshot(|snap| {
+            assert!(
+                check_starbase_auth(snap, &mem_sess, member_id, tower_corp).is_ok(),
+                "session shift {shift} must authorize"
+            );
+        });
+    }
+    // Every neighboring non-starbase bit must FAIL in session.corp_role when eff_roles == 0
+    for bad_shift in [1_u32, 2, 23, 26, 39, 41] {
+        mem_sess.corp_role = 1_u64 << bad_shift;
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(
+                check_starbase_auth(snap, &mem_sess, member_id, tower_corp).unwrap_err().code,
+                "RoleNotAuthorized",
+                "bad session shift {bad_shift} must reject"
+            );
+        });
+    }
+
+    // Now test session.corp_role == 0 and DB member_roles containing each allowed bit individually!
+    mem_sess.corp_role = 0;
+    for shift in [0_u32, 24, 25, 40] {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.corporations.get_mut(&corp_a).unwrap().member_roles.insert(member_id, 1_u64 << shift);
+            assert!(
+                check_starbase_auth(snap, &mem_sess, member_id, tower_corp).is_ok(),
+                "DB eff_roles shift {shift} must authorize"
+            );
+        });
+    }
+    for bad_shift in [1_u32, 2, 23, 26, 39, 41] {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.corporations.get_mut(&corp_a).unwrap().member_roles.insert(member_id, 1_u64 << bad_shift);
+            assert_eq!(
+                check_starbase_auth(snap, &mem_sess, member_id, tower_corp).unwrap_err().code,
+                "RoleNotAuthorized",
+                "bad DB shift {bad_shift} must reject"
+            );
+        });
+    }
+
+    // Unregistered corp (not in snap.corporations) only authorizes via session.corp_role
+    let mut unreg_sess = make_session(member_unreg, unreg_corp, 0);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(check_starbase_auth(snap, &unreg_sess, member_unreg, tower_unreg).unwrap_err().code, "RoleNotAuthorized");
+    });
+    unreg_sess.corp_role = 1_u64 << 25;
+    ctx.db.with_snapshot(|snap| {
+        assert!(check_starbase_auth(snap, &unreg_sess, member_unreg, tower_unreg).is_ok());
+    });
+}
+
+#[test]
+fn pos_mgr_all_arms_bill_mgr_autopay_count_give_cash_contact_cost_and_telemetry_limits() {
+    let (ctx, ceo_id, member_id, corp_a, corp_b) = setup_wallet_ops_world();
+    let kw = HashMap::new();
+    let ally_id = 99_910_001_i64;
+    let tower_id = 96_930_001_i64;
+    let silo_id = 96_930_002_i64;
+    let moon_item_id = 96_930_003_i64;
+    let orbital_id = 96_930_004_i64;
+    let orbital_no_ship = 96_930_005_i64;
+    let ship_id = 96_930_100_i64;
+    let sys_id = 30_000_142_u32;
+
+    let moon_mat_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 427)
+        .map(|t| t.type_id)
+        .unwrap_or(16_634);
+    let moon_pos = ctx
+        .sde
+        .celestials_in_system(sys_id)
+        .iter()
+        .find(|c| c.group_id == 8)
+        .map(|c| [c.position.x, c.position.y, c.position.z])
+        .unwrap_or([1_000.0, 0.0, 0.0]);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.get_mut(&corp_a).unwrap().alliance_id = Some(ally_id);
+        snap.system_states.entry(sys_id).or_default().sov_alliance_id = Some(ally_id);
+        snap.characters.get_mut(&ceo_id).unwrap().solar_system_id = sys_id;
+        snap.characters.get_mut(&ceo_id).unwrap().active_ship_id = ship_id;
+        snap.items.insert(
+            ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: ceo_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            tower_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: tower_id,
+                type_id: 16_213,
+                owner_corp_id: corp_a,
+                solar_system_id: sys_id,
+                position: moon_pos,
+                state: "Online".into(),
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            silo_id,
+            eve_db::InventoryItemRecord {
+                item_id: silo_id,
+                type_id: 14_343, // POS Silo
+                owner_id: corp_a,
+                location_id: tower_id,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            moon_item_id,
+            eve_db::InventoryItemRecord {
+                item_id: moon_item_id,
+                type_id: 16_213,
+                owner_id: corp_a,
+                location_id: i64::from(sys_id),
+                dynamic_attributes: HashMap::from([(600, 40_123_456.0)]),
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            orbital_id,
+            eve_db::InventoryItemRecord {
+                item_id: orbital_id,
+                type_id: 2233,
+                owner_id: corp_a,
+                location_id: i64::from(sys_id),
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            orbital_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: orbital_id,
+                type_id: 2233,
+                owner_corp_id: corp_a,
+                solar_system_id: sys_id,
+                position: [1_000.0, 0.0, 0.0],
+                state: "Online".into(),
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            orbital_no_ship,
+            eve_db::InventoryItemRecord {
+                item_id: orbital_no_ship,
+                type_id: 2233,
+                owner_id: ceo_id,
+                location_id: i64::from(sys_id),
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut ceo_sess = make_session(ceo_id, corp_a, 0);
+    ceo_sess.solar_system_id = Some(sys_id);
+    ceo_sess.ship_id = Some(ship_id);
+
+    let mut mem_sess = make_session(member_id, corp_a, 0);
+    mem_sess.solar_system_id = Some(sys_id);
+    mem_sess.ship_id = Some(ship_id);
+
+    // posMgr.GetMoonForTower (structure, dynamic attr 600, item in moon 40..49M, negative <= 0 -> None)
+    assert!(handle(&ctx, &mut ceo_sess, "posMgr", "GetMoonForTower", &[PyRep::Integer(tower_id)], &kw).unwrap().is_ok());
+    assert_eq!(
+        handle(&ctx, &mut ceo_sess, "posMgr", "GetMoonForTower", &[PyRep::Integer(moon_item_id)], &kw).unwrap().unwrap(),
+        PyRep::Integer(40_123_456)
+    );
+    assert_eq!(
+        handle(&ctx, &mut ceo_sess, "posMgr", "GetMoonForTower", &[PyRep::Integer(0)], &kw).unwrap().unwrap(),
+        PyRep::None
+    );
+
+    // posMgr.GetMoonProcessInfoForTower (absent -> None; after ChangeStructureProvisionType -> Some)
+    assert_eq!(
+        handle(&ctx, &mut ceo_sess, "posMgr", "GetMoonProcessInfoForTower", &[PyRep::Integer(silo_id)], &kw).unwrap().unwrap(),
+        PyRep::None
+    );
+    assert_eq!(
+        handle(&ctx, &mut ceo_sess, "posMgr", "ChangeStructureProvisionType", &[PyRep::Integer(tower_id), PyRep::Integer(silo_id), PyRep::Integer(-5)], &kw).unwrap().unwrap_err().code,
+        "InvalidTypeID"
+    );
+    assert_eq!(
+        handle(&ctx, &mut ceo_sess, "posMgr", "ChangeStructureProvisionType", &[PyRep::Integer(tower_id), PyRep::Integer(silo_id), PyRep::Integer(34)], &kw).unwrap().unwrap_err().code,
+        "InvalidProvisionType"
+    );
+    handle(&ctx, &mut ceo_sess, "posMgr", "ChangeStructureProvisionType", &[PyRep::Integer(tower_id), PyRep::Integer(silo_id), PyRep::Integer(i64::from(moon_mat_tid))], &kw).unwrap().unwrap();
+    assert_eq!(
+        handle(&ctx, &mut ceo_sess, "posMgr", "GetMoonProcessInfoForTower", &[PyRep::Integer(silo_id)], &kw).unwrap().unwrap(),
+        PyRep::Integer(i64::from(moon_mat_tid))
+    );
+
+    // posMgr.SetSessionCheck -> true
+    assert_eq!(
+        handle(&ctx, &mut ceo_sess, "posMgr", "SetSessionCheck", &[], &kw).unwrap().unwrap(),
+        PyRep::Bool(true)
+    );
+
+    // posMgr.AssumeStructureControl & RelinquishStructureControl
+    let mut foreign_sess = make_session(member_id, corp_b, 0);
+    foreign_sess.ship_id = Some(ship_id);
+    assert_eq!(
+        handle(&ctx, &mut foreign_sess, "posMgr", "AssumeStructureControl", &[PyRep::Integer(tower_id)], &kw).unwrap().unwrap_err().code,
+        "ForcefieldPasswordMismatch"
+    );
+    handle(&ctx, &mut ceo_sess, "posMgr", "AssumeStructureControl", &[PyRep::Integer(tower_id)], &kw).unwrap().unwrap();
+    ctx.db.with_snapshot(|snap| assert_eq!(snap.starbase_settings[&tower_id].active_controller_id, Some(ceo_id)));
+    handle(&ctx, &mut ceo_sess, "posMgr", "RelinquishStructureControl", &[PyRep::Integer(tower_id)], &kw).unwrap().unwrap();
+    ctx.db.with_snapshot(|snap| assert_eq!(snap.starbase_settings[&tower_id].active_controller_id, None));
+
+    // posMgr.SetStarbasePermissions & GetStarbasePermissions ("alliance" = 2, "starbase" = 3, "corp" = 1)
+    handle(
+        &ctx,
+        &mut ceo_sess,
+        "posMgr",
+        "SetStarbasePermissions",
+        &[
+            PyRep::Integer(tower_id),
+            PyRep::String("alliance".into()),
+            PyRep::String("starbase".into()),
+            PyRep::String("corp".into()),
+            PyRep::String("alliance".into()),
+        ],
+        &kw,
+    ).unwrap().unwrap();
+    let perms = handle(&ctx, &mut ceo_sess, "posMgr", "GetStarbasePermissions", &[PyRep::Integer(tower_id)], &kw).unwrap().unwrap();
+    assert!(matches!(perms, PyRep::Tuple(ref v) if v.len() == 2));
+
+    // posMgr.SetTowerNotifications & GetTowerNotificationSettings
+    handle(&ctx, &mut ceo_sess, "posMgr", "SetTowerNotifications", &[PyRep::Integer(tower_id), PyRep::Bool(true), PyRep::Bool(false)], &kw).unwrap().unwrap();
+    let t_notif = handle(&ctx, &mut ceo_sess, "posMgr", "GetTowerNotificationSettings", &[PyRep::Integer(tower_id)], &kw).unwrap().unwrap();
+    assert!(format!("{t_notif:?}").contains("false") && format!("{t_notif:?}").contains("true"));
+
+    // posMgr.SetTowerSentrySettings & GetTowerSentrySettings (default & updated)
+    assert!(handle(&ctx, &mut ceo_sess, "posMgr", "GetTowerSentrySettings", &[PyRep::Integer(tower_id)], &kw).unwrap().is_ok());
+    handle(
+        &ctx,
+        &mut ceo_sess,
+        "posMgr",
+        "SetTowerSentrySettings",
+        &[PyRep::Integer(tower_id), PyRep::Real(-2.5), PyRep::Real(-5.0), PyRep::Bool(true), PyRep::Bool(false), PyRep::Bool(true)],
+        &kw,
+    ).unwrap().unwrap();
+    let sentry = handle(&ctx, &mut ceo_sess, "posMgr", "GetTowerSentrySettings", &[PyRep::Integer(tower_id)], &kw).unwrap().unwrap();
+    assert!(format!("{sentry:?}").contains("-2.5"));
+
+    // posMgr.SetTowerPassword
+    handle(&ctx, &mut ceo_sess, "posMgr", "SetTowerPassword", &[PyRep::Integer(tower_id), PyRep::String("secret123".into()), PyRep::Bool(true), PyRep::Bool(false)], &kw).unwrap().unwrap();
+
+    // posMgr.GetConsumptionFactor: sov_ally == tower_ally (> 0) -> 0.75; mismatch -> 1.0
+    assert_eq!(
+        handle(&ctx, &mut ceo_sess, "posMgr", "GetConsumptionFactor", &[PyRep::Integer(tower_id)], &kw).unwrap().unwrap(),
+        PyRep::Real(0.75)
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.system_states.get_mut(&sys_id).unwrap().sov_alliance_id = Some(ally_id + 1);
+    });
+    assert_eq!(
+        handle(&ctx, &mut ceo_sess, "posMgr", "GetConsumptionFactor", &[PyRep::Integer(tower_id)], &kw).unwrap().unwrap(),
+        PyRep::Real(1.0)
+    );
+
+    // posMgr.GetSiloCapacityByItemID & RunMoonProcessCycleforTower & LinkResourceForTower
+    assert!(handle(&ctx, &mut ceo_sess, "posMgr", "GetSiloCapacityByItemID", &[PyRep::Integer(silo_id)], &kw).unwrap().is_ok());
+    assert_eq!(
+        handle(&ctx, &mut ceo_sess, "posMgr", "GetSiloCapacityByItemID", &[PyRep::Integer(999_888_777)], &kw).unwrap().unwrap(),
+        PyRep::Real(20_000.0)
+    );
+    assert_eq!(
+        handle(&ctx, &mut ceo_sess, "posMgr", "RunMoonProcessCycleforTower", &[], &kw).unwrap().unwrap_err().code,
+        "UnimplementedRPC"
+    );
+    assert_eq!(
+        handle(&ctx, &mut ceo_sess, "posMgr", "LinkResourceForTower", &[PyRep::Integer(tower_id), PyRep::Integer(moon_item_id)], &kw).unwrap().unwrap_err().code,
+        "InvalidLinkTarget"
+    );
+    handle(&ctx, &mut ceo_sess, "posMgr", "LinkResourceForTower", &[PyRep::Integer(tower_id), PyRep::List(vec![PyRep::Integer(silo_id)])], &kw).unwrap().unwrap();
+    ctx.db.with_snapshot(|snap| assert!(snap.starbase_settings[&tower_id].linked_resources.contains(&silo_id)));
+
+    // posMgr.UnanchorOrbital error gates + distance + RoleNotAuthorized + cargo move vs hangar move
+    assert_eq!(
+        handle(&ctx, &mut mem_sess, "posMgr", "UnanchorOrbital", &[PyRep::Integer(orbital_id)], &kw).unwrap().unwrap_err().code,
+        "RoleNotAuthorized"
+    );
+    let mut wrong_sys_sess = ceo_sess.clone();
+    wrong_sys_sess.solar_system_id = Some(30_000_144);
+    assert_eq!(
+        handle(&ctx, &mut wrong_sys_sess, "posMgr", "UnanchorOrbital", &[PyRep::Integer(orbital_id)], &kw).unwrap().unwrap_err().code,
+        "NotInSameSystem"
+    );
+    let kv_ship = handle(&ctx, &mut ceo_sess, "posMgr", "UnanchorOrbital", &[PyRep::Integer(orbital_id)], &kw).unwrap().unwrap();
+    assert_eq!(kv_ship.dict_get("state"), Some(&PyRep::String("Unanchored".into())));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&orbital_id].location_id, ship_id);
+        assert_eq!(snap.items[&orbital_id].flag, InventoryFlag::Cargo);
+    });
+    let mut no_ship_sess = ceo_sess.clone();
+    no_ship_sess.ship_id = None;
+    handle(&ctx, &mut no_ship_sess, "posMgr", "UnanchorOrbital", &[PyRep::Integer(orbital_no_ship)], &kw).unwrap().unwrap();
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&orbital_no_ship].location_id, ceo_id);
+        assert_eq!(snap.items[&orbital_no_ship].flag, InventoryFlag::Hangar);
+    });
+
+    // billMgr: foreign CorpAccessDenied, empty/non-corp fallback (corp_id == 0 -> skips role check), process_due_automatic_bills == 2
+    assert_eq!(
+        handle(&ctx, &mut ceo_sess, "billMgr", "GetCorporationBills", &[PyRep::Integer(corp_b)], &kw).unwrap().unwrap_err().code,
+        "CorpAccessDenied"
+    );
+    let b_due1 = create_bill(&ctx, 2, corp_a, corp_b, 1_000_000.0, 1_699_999_000, 0.0, 1, 0);
+    let b_due2 = create_bill(&ctx, 2, corp_a, corp_b, 1_000_000.0, 1_699_999_500, 0.0, 2, 0);
+    assert!(b_due1 != b_due2);
+    assert_eq!(process_due_automatic_bills(&ctx), 0); // autopay not enabled yet
+    handle(
+        &ctx,
+        &mut ceo_sess,
+        "billMgr",
+        "SendAutomaticPaySettings",
+        &[PyRep::Dict(vec![(PyRep::Integer(2), PyRep::Bool(true)), (PyRep::String("divisionID".into()), PyRep::Integer(1000))])],
+        &kw,
+    ).unwrap().unwrap();
+    // Both due bills paid cleanly when autopay was saved! Also create two more & run direct helper count == 2
+    let _b_due3 = create_bill(&ctx, 2, corp_a, corp_b, 100_000.0, 1_699_999_000, 0.0, 3, 0);
+    let _b_due4 = create_bill(&ctx, 2, corp_a, corp_b, 100_000.0, 1_699_999_500, 0.0, 4, 0);
+    assert_eq!(process_due_automatic_bills(&ctx), 2);
+
+    // account.GiveCash error guards & SetContactCost(0.0) removal -> None
+    assert_eq!(
+        handle(&ctx, &mut ceo_sess, "account", "GiveCash", &[PyRep::Integer(ceo_id), PyRep::Real(100.0), PyRep::String(String::new())], &kw).unwrap().unwrap_err().code,
+        "InvalidArgument"
+    );
+    assert_eq!(
+        handle(&ctx, &mut ceo_sess, "account", "GiveCash", &[PyRep::Integer(999_777_666), PyRep::Real(100.0), PyRep::String(String::new())], &kw).unwrap().unwrap_err().code,
+        "InvalidRecipient"
+    );
+    assert_eq!(
+        handle(&ctx, &mut ceo_sess, "account", "GiveCash", &[PyRep::Integer(member_id), PyRep::Real(999_000_000_000.0), PyRep::String("huge".into())], &kw).unwrap().unwrap_err().code,
+        "NotEnoughMoney"
+    );
+    handle(&ctx, &mut ceo_sess, "account", "SetContactCost", &[PyRep::Real(100.0)], &kw).unwrap().unwrap();
+    assert_eq!(handle(&ctx, &mut ceo_sess, "account", "GetDefaultContactCost", &[], &kw).unwrap().unwrap(), PyRep::Real(100.0));
+    handle(&ctx, &mut ceo_sess, "account", "SetContactCost", &[PyRep::Real(0.0)], &kw).unwrap().unwrap();
+    assert_eq!(handle(&ctx, &mut ceo_sess, "account", "GetDefaultContactCost", &[], &kw).unwrap().unwrap(), PyRep::None);
+
+    // clientStatLogger.LogString trims > 256 down to 256, and eveguard_report returns None
+    for i in 0..260 {
+        handle(&ctx, &mut ceo_sess, "clientStatLogger", "LogString", &[PyRep::String(format!("entry-{i}"))], &kw).unwrap().unwrap();
+    }
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.cluster_and_runtime.client_stat_logger_strings.len(), 256);
+        assert_eq!(snap.cluster_and_runtime.client_stat_logger_strings.first().map(String::as_str), Some("entry-4"));
+    });
+    assert_eq!(handle(&ctx, &mut ceo_sess, "eveguard_report", "heartbeat_started", &[], &kw).unwrap().unwrap(), PyRep::None);
+    assert_eq!(handle(&ctx, &mut ceo_sess, "eveguard_report", "heartbeat_stopped", &[], &kw).unwrap().unwrap(), PyRep::None);
+}
+

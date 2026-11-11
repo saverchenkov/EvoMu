@@ -602,3 +602,366 @@ fn corp_roles_funds_containers_cancel_refund_and_complete_guards() {
     });
     assert_eq!(handle_industry_jobs(&ctx, &mut sess, "industryManager", "CompleteJob", &[PyRep::Integer(pj_id)], &kw).unwrap().unwrap_err().code, "BlueprintMissingOrUnlocked");
 }
+
+#[test]
+fn lifecycle_cancel_paused_ceo_refund_stacking_and_complete_edge_paths() {
+    let (ctx, mut sess, char_id, corp_id, station_id) = build_ctx();
+    let other_char = 90_000_002_i64;
+    let kw = HashMap::new();
+
+    // Non-lifecycle method returns None from handle_cancel_or_complete_industry_job
+    assert!(super::industry_jobs_lifecycle::handle_cancel_or_complete_industry_job(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "GetJobCounts",
+        &[]
+    )
+    .is_none());
+
+    // CancelJob on missing job -> JobNotFound
+    assert_eq!(
+        handle_industry_jobs(&ctx, &mut sess, "industryManager", "CancelJob", &[PyRep::Integer(999_999)], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "JobNotFound"
+    );
+
+    // Seed corp member roles & CEO & items
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch2) = snap.characters.get_mut(&other_char) {
+            ch2.corporation_id = corp_id;
+        }
+        if let Some(c) = snap.corporations.get_mut(&corp_id) {
+            c.ceo_id = other_char;
+        }
+        snap.items.retain(|_, i| !(i.owner_id == char_id && i.type_id == 34 && i.location_id == station_id));
+        snap.items.insert(74_001, mk_item(74_001, 688, char_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(74_002, mk_item(74_002, 34, char_id, station_id, InventoryFlag::Hangar, 200, false));
+        // Corp BPO + materials + existing CorpSAG1 stack to verify refund accumulation
+        snap.items.insert(74_003, mk_item(74_003, 688, corp_id, station_id, InventoryFlag::CorpSAG1, 1, true));
+        snap.items.insert(74_004, mk_item(74_004, 34, corp_id, station_id, InventoryFlag::CorpSAG1, 150, false));
+    });
+
+    // Install personal job, then mark it Paused and cancel it -> allowed & refunds onto existing stack 74_002 + skips 0-qty entry
+    let p_rep = handle_industry_jobs(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::Integer(688), PyRep::Integer(1), PyRep::Integer(1)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let p_jid = p_rep.dict_get("jobID").unwrap().as_i64().unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.industry_jobs.get_mut(&p_jid).unwrap().status = "Paused".into();
+        let mut m = load_job_cost_meta(snap, p_jid).unwrap();
+        m.consumed_materials.push((34, 0)); // skipped on refund
+        save_job_cost_meta(snap, p_jid, &m);
+    });
+    let cancel_paused = handle_industry_jobs(&ctx, &mut sess, "industryManager", "CancelJob", &[PyRep::Integer(p_jid)], &kw)
+        .unwrap()
+        .unwrap();
+    assert_eq!(cancel_paused.dict_get("status").and_then(|v| v.as_str()), Some("Cancelled"));
+    ctx.db.with_snapshot(|snap| {
+        let total_trit: i32 = snap
+            .items
+            .values()
+            .filter(|i| i.owner_id == char_id && i.type_id == 34 && i.location_id == station_id)
+            .map(|i| i.quantity)
+            .sum();
+        assert_eq!(total_trit, 200);
+    });
+
+    // Cancelling an already-Cancelled job -> InvalidJobState
+    assert_eq!(
+        handle_industry_jobs(&ctx, &mut sess, "industryManager", "CancelJob", &[PyRep::Integer(p_jid)], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "InvalidJobState"
+    );
+
+    // Corp job installed by char_id, cancelled by CEO (other_char) with session.corp_role == 0
+    let corp_install_roles =
+        corp_roles::ROLE_FACTORY_MANAGER | (1u64 << 13) | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0];
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.corporations.get_mut(&corp_id) {
+            c.member_roles.insert(char_id, corp_install_roles);
+        }
+    });
+    sess.corp_role = corp_install_roles; // Factory Manager + CorpSAG1 take + Div 1 Account Take
+    let c_rep = handle_industry_jobs(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintItemID", PyRep::Integer(74_003)),
+            ("blueprintTypeID", PyRep::Integer(688)),
+            ("ownerID", PyRep::Integer(corp_id)),
+            ("inputFlag", PyRep::Integer(InventoryFlag::CorpSAG1 as i64)),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let c_jid = c_rep.dict_get("jobID").unwrap().as_i64().unwrap();
+    let mut ceo_sess = sess.clone();
+    ceo_sess.character_id = Some(other_char);
+    ceo_sess.corp_role = 0; // relies on snap.corporations CEO check
+    let ceo_cancel = handle_industry_jobs(&ctx, &mut ceo_sess, "industryManager", "CancelJob", &[PyRep::Integer(c_jid)], &kw)
+        .unwrap()
+        .unwrap();
+    assert_eq!(ceo_cancel.dict_get("status").and_then(|v| v.as_str()), Some("Cancelled"));
+    // Existing CorpSAG1 stack (50 remaining) received the 100 refunded back -> 150
+    ctx.db.with_snapshot(|snap| assert_eq!(snap.items[&74_004].quantity, 150));
+
+    // JobNotYetComplete when start_unix + duration_seconds > now_unix
+    let early_rep = handle_industry_jobs(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::Integer(688), PyRep::Integer(1), PyRep::Integer(1)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let early_jid = early_rep.dict_get("jobID").unwrap().as_i64().unwrap();
+    assert_eq!(
+        handle_industry_jobs(&ctx, &mut sess, "industryManager", "CompleteJob", &[PyRep::Integer(early_jid)], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "JobNotYetComplete"
+    );
+    handle_industry_jobs(&ctx, &mut sess, "industryManager", "CancelJob", &[PyRep::Integer(early_jid)], &kw).unwrap().unwrap();
+
+    // ME research (activity 4) increments ME capped at 10.0; TE research (activity 3) caps TE at 20.0;
+    // Copy (activity 5) inherits parent ME/TE & handles licensed_runs: None -> 1;
+    // CompleteManyJobs with empty list -> JobNotFound; with List of 2 jobs -> returns List of 2 results
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&74_001).unwrap().dynamic_attributes.insert(crate::services::industry_pi::ATTR_BLUEPRINT_ME, 8.0);
+        snap.items.get_mut(&74_001).unwrap().dynamic_attributes.insert(ATTR_BLUEPRINT_TE, 18.0);
+        snap.items.insert(74_005, mk_item(74_005, 688, char_id, station_id, InventoryFlag::Hangar, 1, true));
+    });
+    let me_rep = handle_industry_jobs(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintItemID", PyRep::Integer(74_001)),
+            ("blueprintTypeID", PyRep::Integer(688)),
+            ("activityID", PyRep::Integer(4)),
+            ("runs", PyRep::Integer(2)),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let me_jid = me_rep.dict_get("jobID").unwrap().as_i64().unwrap();
+
+    let te_rep = handle_industry_jobs(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintItemID", PyRep::Integer(74_005)),
+            ("blueprintTypeID", PyRep::Integer(688)),
+            ("activityID", PyRep::Integer(3)),
+            ("runs", PyRep::Integer(10)),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let te_jid = te_rep.dict_get("jobID").unwrap().as_i64().unwrap();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.industry_jobs.get_mut(&me_jid).unwrap().start_unix = 0;
+        snap.industry_jobs.get_mut(&te_jid).unwrap().start_unix = 0;
+        // Set TE to 18.0 so runs=10 (+20) tests .min(20.0) clamp on CompleteJob
+        snap.items
+            .get_mut(&74_005)
+            .unwrap()
+            .dynamic_attributes
+            .insert(ATTR_BLUEPRINT_TE, 18.0);
+    });
+    assert_eq!(
+        handle_industry_jobs(&ctx, &mut sess, "industryManager", "CompleteManyJobs", &[PyRep::List(vec![])], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "JobNotFound"
+    );
+    let many_rep = handle_industry_jobs(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "CompleteManyJobs",
+        &[PyRep::List(vec![PyRep::Integer(me_jid), PyRep::Integer(te_jid)])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(matches!(many_rep, PyRep::List(ref l) if l.len() == 2));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&74_001].dynamic_attributes.get(&crate::services::industry_pi::ATTR_BLUEPRINT_ME), Some(&10.0));
+        assert_eq!(snap.items[&74_005].dynamic_attributes.get(&ATTR_BLUEPRINT_TE), Some(&20.0));
+    });
+
+    // Manufacturing on multi-run BPC inside a container decrements runs_remaining without deleting BPC
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(74_010, mk_item(74_010, 3293, char_id, station_id, InventoryFlag::Hangar, 1, true));
+        let mut bpc = mk_item(74_011, 688, char_id, 74_010, InventoryFlag::Hangar, 1, true);
+        bpc.is_blueprint_copy = true;
+        bpc.blueprint_runs_remaining = Some(5);
+        snap.items.insert(74_011, bpc);
+        snap.items.insert(74_012, mk_item(74_012, 34, char_id, station_id, InventoryFlag::Hangar, 500, false));
+    });
+    let mfg_bpc_rep = handle_industry_jobs(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintItemID", PyRep::Integer(74_011)),
+            ("blueprintTypeID", PyRep::Integer(688)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(2)),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let mfg_bpc_jid = mfg_bpc_rep.dict_get("jobID").unwrap().as_i64().unwrap();
+    ctx.db.with_mut_snapshot(|snap| snap.industry_jobs.get_mut(&mfg_bpc_jid).unwrap().start_unix = 0);
+    handle_industry_jobs(&ctx, &mut sess, "industryManager", "CompleteJob", &[PyRep::Integer(mfg_bpc_jid)], &kw)
+        .unwrap()
+        .unwrap();
+    ctx.db.with_snapshot(|snap| {
+        let bpc = &snap.items[&74_011];
+        assert_eq!(bpc.blueprint_runs_remaining, Some(3));
+        assert_eq!(bpc.flag, InventoryFlag::Hangar);
+    });
+
+    // Invention fallback branches:
+    // (a) multi-run BPC decrements runs instead of removing
+    // (b) meta.inv_prob == 0.0 computes probability from skills/SDE
+    // (c) job.product_type_id == 0 -> fallback 11372 and meta.invented_runs == 0 -> ME=2, TE=4, runs=1
+    // (d) ancient relic with quantity == 1 is removed on completion
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut inv_bpc = mk_item(74_020, 688, char_id, station_id, InventoryFlag::Locked, 1, true);
+        inv_bpc.is_blueprint_copy = true;
+        inv_bpc.blueprint_runs_remaining = Some(4);
+        snap.items.insert(74_020, inv_bpc);
+        let job_id_inv = 980_001_i64;
+        snap.industry_jobs.insert(
+            job_id_inv,
+            eve_db::IndustryJobRecord {
+                job_id: job_id_inv,
+                installer_id: char_id,
+                facility_id: station_id,
+                blueprint_item_id: 74_020,
+                blueprint_type_id: 688,
+                blueprint_location_id: station_id,
+                activity_id: 8,
+                product_type_id: 0, // triggers 11372 fallback!
+                runs: 1,
+                licensed_runs: None,
+                status: "Active".into(),
+                start_unix: 0,
+                duration_seconds: 10,
+                cost: Some(100.0),
+                ..Default::default()
+            },
+        );
+        // Save zeroed JobCostMeta so inv_prob == 0.0 and invented_runs == 0
+        save_job_cost_meta(snap, job_id_inv, &Default::default());
+
+        // Single-qty ancient relic (qty == runs == 1) -> removed on CompleteJob
+        snap.items.insert(74_021, mk_item(74_021, 30_752, char_id, station_id, InventoryFlag::Locked, 1, false));
+        let relic_jid = 980_002_i64;
+        snap.industry_jobs.insert(
+            relic_jid,
+            eve_db::IndustryJobRecord {
+                job_id: relic_jid,
+                installer_id: char_id,
+                facility_id: station_id,
+                blueprint_item_id: 74_021,
+                blueprint_type_id: 30_752,
+                blueprint_location_id: station_id,
+                activity_id: 8,
+                product_type_id: 29_984,
+                runs: 1,
+                licensed_runs: None,
+                status: "Active".into(),
+                start_unix: 0,
+                duration_seconds: 10,
+                cost: Some(100.0),
+                ..Default::default()
+            },
+        );
+        save_job_cost_meta(snap, relic_jid, &Default::default());
+
+        // Copy job with licensed_runs: None -> defaults to 1 copy run and inherits ME/TE
+        let copy_jid = 980_003_i64;
+        snap.items.get_mut(&74_001).unwrap().flag = InventoryFlag::Locked;
+        snap.industry_jobs.insert(
+            copy_jid,
+            eve_db::IndustryJobRecord {
+                job_id: copy_jid,
+                installer_id: char_id,
+                facility_id: station_id,
+                blueprint_item_id: 74_001,
+                blueprint_type_id: 688,
+                blueprint_location_id: station_id,
+                activity_id: 5,
+                product_type_id: 688,
+                runs: 1,
+                licensed_runs: None,
+                status: "Active".into(),
+                start_unix: 0,
+                duration_seconds: 10,
+                cost: Some(100.0),
+                ..Default::default()
+            },
+        );
+        save_job_cost_meta(snap, copy_jid, &Default::default());
+    });
+
+    let inv_done = handle_industry_jobs(&ctx, &mut sess, "industryManager", "CompleteJob", &[PyRep::Integer(980_001)], &kw)
+        .unwrap()
+        .unwrap();
+    assert_eq!(inv_done.dict_get("productTypeID"), Some(&PyRep::Integer(11_372)));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&74_020].blueprint_runs_remaining, Some(3));
+        let prod_id = inv_done.dict_get("deliveredItemID").unwrap().as_i64().unwrap();
+        let prod = &snap.items[&prod_id];
+        assert_eq!(prod.blueprint_runs_remaining, Some(1));
+        assert_eq!(prod.dynamic_attributes.get(&crate::services::industry_pi::ATTR_BLUEPRINT_ME), Some(&2.0));
+        assert_eq!(prod.dynamic_attributes.get(&ATTR_BLUEPRINT_TE), Some(&4.0));
+    });
+
+    handle_industry_jobs(&ctx, &mut sess, "industryManager", "CompleteJob", &[PyRep::Integer(980_002)], &kw)
+        .unwrap()
+        .unwrap();
+    ctx.db.with_snapshot(|snap| assert!(!snap.items.contains_key(&74_021)));
+
+    let copy_done = handle_industry_jobs(&ctx, &mut sess, "industryManager", "CompleteJob", &[PyRep::Integer(980_003)], &kw)
+        .unwrap()
+        .unwrap();
+    let copy_pid = copy_done.dict_get("deliveredItemID").unwrap().as_i64().unwrap();
+    ctx.db.with_snapshot(|snap| {
+        let copy = &snap.items[&copy_pid];
+        assert!(copy.is_blueprint_copy);
+        assert_eq!(copy.blueprint_runs_remaining, Some(1));
+        assert_eq!(copy.dynamic_attributes.get(&crate::services::industry_pi::ATTR_BLUEPRINT_ME), Some(&10.0));
+    });
+}

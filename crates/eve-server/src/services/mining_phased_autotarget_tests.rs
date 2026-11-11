@@ -496,3 +496,7 @@ async fn test_fleet_ships_hostile_npc_group_and_auto_targeter_tick() {
         .await
     );
 }
+
+#[cfg(test)]
+#[path = "mining_phased_autotarget_extra_unit_tests.rs"]
+mod extra_unit_tests;

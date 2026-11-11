@@ -580,18 +580,14 @@ fn market_proxy_error_guards_and_corporate_buy_order_matching() {
     // Issue #622: Undocked (in space) immediate PlaceBuyOrder & BuyMultipleItems succeed,
     // while resting PlaceBuyOrder in space requires Procurement skill.
     let seller_id = 90_000_099;
+    const JITA_SYSTEM_ID: u32 = 30_000_142;
     ctx.db.with_mut_snapshot(|s| {
-        s.characters.insert(
-            seller_id,
-            CharacterRecord {
-                character_id: seller_id,
-                balance: IskCents::from_isk(1_000_000),
-                station_id: Some(JITA_STATION_ID),
-                solar_system_id: Some(JITA_SYSTEM_ID),
-                region_id: Some(THE_FORGE_REGION_ID),
-                ..Default::default()
-            },
-        );
+        let mut seller = s.characters.get(&buyer_id).unwrap().clone();
+        seller.character_id = seller_id;
+        seller.balance = IskCents::from_isk(1_000_000);
+        seller.station_id = Some(JITA_STATION_ID);
+        seller.solar_system_id = JITA_SYSTEM_ID;
+        s.characters.insert(seller_id, seller);
         s.market_orders.insert(
             860_002,
             MarketOrderRecord {
@@ -612,8 +608,10 @@ fn market_proxy_error_guards_and_corporate_buy_order_matching() {
         if let Some(ch) = s.characters.get_mut(&buyer_id) {
             ch.balance = IskCents::from_isk(100_000);
             ch.station_id = None;
-            ch.solar_system_id = Some(JITA_SYSTEM_ID);
+            ch.structure_id = None;
+            ch.solar_system_id = JITA_SYSTEM_ID;
         }
+        s.skills.remove(&buyer_id);
     });
     let mut space_sess = SessionState::default();
     space_sess.character_id = Some(buyer_id);
@@ -671,10 +669,14 @@ fn market_proxy_error_guards_and_corporate_buy_order_matching() {
 
     // With Procurement >= 1, resting buy order in same solar system succeeds from space
     ctx.db.with_mut_snapshot(|s| {
-        s.skills
-            .entry(buyer_id)
-            .or_default()
-            .insert(16594, SkillRecord { type_id: 16594, skillpoints: 1000, level: 1 });
+        s.skills.entry(buyer_id).or_default().insert(
+            16594,
+            eve_db::TrainedSkillRecord {
+                type_id: 16594,
+                level: 1,
+                skill_points: 1000.0,
+            },
+        );
     });
     let space_rest_ok = handle(
         &ctx,
@@ -701,7 +703,7 @@ fn market_proxy_error_guards_and_corporate_buy_order_matching() {
     );
 
     // BuyMultipleItems with explicit stationID while in space succeeds
-    let space_multi = crate::services::market_orders_escrow::handle(
+    let space_multi = handle(
         &ctx,
         &mut space_sess,
         "marketProxy",
@@ -718,4 +720,247 @@ fn market_proxy_error_guards_and_corporate_buy_order_matching() {
         space_multi.dict_get("totalQuantity").and_then(|v| v.as_i64()),
         Some(5)
     );
+
+    // Direct unit checks for `notify_own_order_changed` (corp order non-member fallback + char order)
+    // and `can_caller_view_upwell_market_orders`
+    let buyer_uid = ctx.db.with_mut_snapshot(|snap| {
+        let uid = snap.characters[&buyer_id].user_id;
+        if !snap.accounts.values().any(|a| a.user_id == uid) {
+            snap.accounts.insert(
+                format!("mkt_buyer_{uid}"),
+                eve_db::AccountRecord {
+                    user_id: uid,
+                    username: format!("mkt_buyer_{uid}"),
+                    password_token: String::new(),
+                    role: eve_db::service_roles::ROLE_PLAYER_DEFAULT,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
+        }
+        uid
+    });
+    ctx.db
+        .acquire_online_lock(buyer_uid, 9301, Some(buyer_id), true, ctx.now_unix())
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(buyer_id);
+    super::notify_own_order_changed(&ctx, buyer_id, 0, 860_002, "Add");
+    assert!(ctx
+        .drain_notifications_for_char(buyer_id)
+        .iter()
+        .any(|n| n.event == "OnOwnOrdersChanged"));
+
+    // When `owner_id` is a corporation and `fallback_char_id` is not in `corp.members`, fallback_char_id still receives `OnOwnOrdersChanged`.
+    super::notify_own_order_changed(&ctx, corp_id, buyer_id, 860_001, "Change");
+    assert!(ctx
+        .drain_notifications_for_char(buyer_id)
+        .iter()
+        .any(|n| n.event == "OnOwnOrdersChanged"));
+
+    ctx.db.with_snapshot(|s| {
+        assert!(super::can_caller_view_upwell_market_orders(
+            &ctx,
+            s,
+            buyer_id,
+            JITA_STATION_ID,
+            ctx.now_unix()
+        ));
+    });
+}
+
+#[test]
+fn issue_789_partial_self_fill_resting_buy_emits_single_final_account_change() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let other_seller_id = 90_000_002_i64;
+    let corp_id = ctx.db.with_snapshot(|s| s.characters[&char_id].corporation_id);
+    let mut sess = jita_session(char_id, corp_id);
+    let kw = HashMap::new();
+
+    // Case 1: Partial self-fill (10 units) + resting buy remainder (15 units with broker fee & escrow).
+    // Seller account snapshot captured mid-loop must NOT overwrite buyer_acct_after with a stale
+    // pre-broker / pre-escrow balance (#789 Bug A).
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.market_orders.clear();
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = IskCents::from_isk(1_000_000);
+        }
+        snap.market_orders.insert(
+            99_789_001,
+            MarketOrderRecord {
+                order_id: 99_789_001,
+                owner_id: char_id,
+                station_id: JITA_STATION_ID,
+                region_id: THE_FORGE_REGION_ID,
+                type_id: 34,
+                is_bid: false,
+                price: IskCents::from_f64_isk(100.0),
+                vol_entered: 10,
+                vol_remaining: 10,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+    });
+    ctx.db
+        .acquire_online_lock(1, 9301, Some(char_id), true, ctx.now_unix())
+        .unwrap();
+    let other_uid = ctx.db.with_mut_snapshot(|snap| {
+        let uid = snap.characters[&other_seller_id].user_id;
+        if !snap.accounts.values().any(|a| a.user_id == uid) {
+            snap.accounts.insert(
+                format!("mkt_seller_{uid}"),
+                eve_db::AccountRecord {
+                    user_id: uid,
+                    username: format!("mkt_seller_{uid}"),
+                    password_token: String::new(),
+                    role: eve_db::service_roles::ROLE_PLAYER_DEFAULT,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
+        }
+        uid
+    });
+    ctx.db
+        .acquire_online_lock(other_uid, 9302, Some(other_seller_id), true, ctx.now_unix())
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let partial_rep = handle(
+        &ctx,
+        &mut sess,
+        "marketProxy",
+        "PlaceBuyOrder",
+        &[
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::Integer(34),
+            PyRep::Real(100.0),
+            PyRep::Integer(25),
+            PyRep::Integer(-1),
+            PyRep::Integer(1),
+            PyRep::Integer(90),
+            PyRep::Bool(false),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .expect("partial self-fill + resting buy remainder succeeds");
+    assert_eq!(
+        partial_rep.dict_get("filledImmediately").and_then(PyRep::as_bool),
+        Some(false)
+    );
+    let final_bal_1 = ctx.db.get_character(char_id).unwrap().balance.to_wire_f64();
+    let acct_bals_1: Vec<f64> = ctx
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .filter(|n| n.event == "OnAccountChange")
+        .filter_map(|n| n.args.get(2).and_then(PyRep::as_f64))
+        .collect();
+    assert_eq!(
+        acct_bals_1.len(),
+        1,
+        "Partial self-fill + resting buy must emit single final OnAccountChange without stale pre-escrow overwrite: {acct_bals_1:?}"
+    );
+    assert!(
+        (acct_bals_1[0] - final_bal_1).abs() < 1e-2,
+        "OnAccountChange balance {} must equal final post-escrow balance {final_bal_1}",
+        acct_bals_1[0]
+    );
+
+    // Case 2: Immediate multi-fill where fill #1 is a self-fill and fill #2 buys from another seller.
+    // Fill #1's stale post-self-fill balance must NOT overwrite fill #2's final buyer balance.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.market_orders.clear();
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = IskCents::from_isk(1_000_000);
+        }
+        snap.market_orders.insert(
+            99_789_002,
+            MarketOrderRecord {
+                order_id: 99_789_002,
+                owner_id: char_id,
+                station_id: JITA_STATION_ID,
+                region_id: THE_FORGE_REGION_ID,
+                type_id: 34,
+                is_bid: false,
+                price: IskCents::from_f64_isk(50.0),
+                vol_entered: 10,
+                vol_remaining: 10,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+        snap.market_orders.insert(
+            99_789_003,
+            MarketOrderRecord {
+                order_id: 99_789_003,
+                owner_id: other_seller_id,
+                station_id: JITA_STATION_ID,
+                region_id: THE_FORGE_REGION_ID,
+                type_id: 34,
+                is_bid: false,
+                price: IskCents::from_f64_isk(60.0),
+                vol_entered: 10,
+                vol_remaining: 10,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let _ = ctx.drain_notifications_for_char(other_seller_id);
+
+    let multi_rep = handle(
+        &ctx,
+        &mut sess,
+        "marketProxy",
+        "PlaceBuyOrder",
+        &[
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::Integer(34),
+            PyRep::Real(60.0),
+            PyRep::Integer(20),
+            PyRep::Integer(-1),
+            PyRep::Integer(1),
+            PyRep::Integer(0),
+            PyRep::Bool(false),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .expect("immediate self-fill + third-party fill succeeds");
+    assert_eq!(
+        multi_rep.dict_get("filledImmediately").and_then(PyRep::as_bool),
+        Some(true)
+    );
+    let final_bal_2 = ctx.db.get_character(char_id).unwrap().balance.to_wire_f64();
+    let acct_bals_2: Vec<f64> = ctx
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .filter(|n| n.event == "OnAccountChange")
+        .filter_map(|n| n.args.get(2).and_then(PyRep::as_f64))
+        .collect();
+    assert_eq!(
+        acct_bals_2.len(),
+        1,
+        "Multi-fill starting with self-fill must emit single final OnAccountChange: {acct_bals_2:?}"
+    );
+    assert!(
+        (acct_bals_2[0] - final_bal_2).abs() < 1e-2,
+        "OnAccountChange balance {} must equal final balance {final_bal_2}",
+        acct_bals_2[0]
+    );
+    let other_bal = ctx.db.get_character(other_seller_id).unwrap().balance.to_wire_f64();
+    let other_bals: Vec<f64> = ctx
+        .drain_notifications_for_char(other_seller_id)
+        .into_iter()
+        .filter(|n| n.event == "OnAccountChange")
+        .filter_map(|n| n.args.get(2).and_then(PyRep::as_f64))
+        .collect();
+    assert_eq!(other_bals.len(), 1);
+    assert!((other_bals[0] - other_bal).abs() < 1e-2);
 }

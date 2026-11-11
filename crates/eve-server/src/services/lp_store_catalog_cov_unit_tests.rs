@@ -468,3 +468,107 @@ fn check_corp_lp_role_and_hangar_flag_authorization_matrix() {
         InventoryFlag::Hangar
     ));
 }
+
+#[test]
+fn lp_store_offers_roundtrip_pyrep_and_role_bitmask_kill_mutants() {
+    let mut snap = WorldStateSnapshot::default();
+    let offer_with_standing = LPOffer {
+        offer_id: 901,
+        corp_id: CONCORD_CORP_ID,
+        type_id: 34,
+        quantity: 25,
+        lp_cost: 5_000,
+        isk_cost: IskCents(125_050),
+        req_items: vec![(35, 10), (36, 2)],
+        ak_cost: 42,
+        min_standing: Some(2.75),
+    };
+    let offer_no_standing = LPOffer {
+        offer_id: 902,
+        corp_id: PARAGON_CORP_ID,
+        type_id: 37,
+        quantity: 1,
+        lp_cost: 100,
+        isk_cost: IskCents(0),
+        req_items: Vec::new(),
+        ak_cost: -9,
+        min_standing: None,
+    };
+
+    // Persist via save_lp_store_offers and reload via load_lp_store_offers + get_corp_lp_offers
+    save_lp_store_offers(&mut snap, &[offer_with_standing.clone(), offer_no_standing.clone()]);
+    let loaded = load_lp_store_offers(&snap);
+    assert_eq!(loaded.len(), 2);
+    assert_eq!(loaded[0].offer_id, 901);
+    assert_eq!(loaded[0].corp_id, CONCORD_CORP_ID);
+    assert_eq!(loaded[0].ak_cost, 42);
+    assert_eq!(loaded[1].offer_id, 902);
+    assert_eq!(get_corp_lp_offers(&snap, CONCORD_CORP_ID).len(), 1);
+
+    // Exact offer_to_pyrep field verification including minStanding
+    let rep = offer_to_pyrep(&offer_with_standing);
+    assert_eq!(rep.dict_get("offerID").and_then(|v| v.as_i64()), Some(901));
+    assert_eq!(rep.dict_get("corpID").and_then(|v| v.as_i64()), Some(CONCORD_CORP_ID));
+    assert_eq!(rep.dict_get("typeID").and_then(|v| v.as_i64()), Some(34));
+    assert_eq!(rep.dict_get("quantity").and_then(|v| v.as_i64()), Some(25));
+    assert_eq!(rep.dict_get("lpCost").and_then(|v| v.as_i64()), Some(5_000));
+    assert_eq!(rep.dict_get("iskCost").and_then(|v| v.as_f64()), Some(1_250.5));
+    assert_eq!(rep.dict_get("akCost").and_then(|v| v.as_i64()), Some(42));
+    assert_eq!(rep.dict_get("minStanding").and_then(|v| v.as_f64()), Some(2.75));
+    let rep_no_st = offer_to_pyrep(&offer_no_standing);
+    assert_eq!(rep_no_st.dict_get("akCost").and_then(|v| v.as_i64()), Some(0));
+    assert!(rep_no_st.dict_get("minStanding").is_none());
+
+    // Role checks with multi-bit masks to kill `== -> !=`, `& -> |`, `& -> ^`, and return tuple mutants
+    let corp_id = 98_600_001_i64;
+    let ceo_id = 90_600_001_i64;
+    let member_id = 90_600_002_i64;
+    let mut sess = SessionState::default();
+
+    // Missing corporation fallback: non-director bit (ROLE_ACCOUNTANT) must still be denied
+    sess.corp_role = corp_roles::ROLE_ACCOUNTANT;
+    assert_eq!(
+        check_corp_lp_role(&snap, &sess, member_id, corp_id, 1_000)
+            .unwrap_err()
+            .code,
+        "InsufficientCorporationRole"
+    );
+    let multi_dir = corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_ACCOUNTANT;
+    sess.corp_role = multi_dir;
+    assert_eq!(
+        check_corp_lp_role(&snap, &sess, member_id, corp_id, 1_000).unwrap(),
+        (false, multi_dir)
+    );
+
+    // Existing corporation: CEO returns (true, u64::MAX); non-director w/ ACCOUNTANT rejected;
+    // director w/ ACCOUNTANT returns exact (false, multi_dir)
+    let mut corp = CorporationRecord::default();
+    corp.corporation_id = corp_id;
+    corp.ceo_id = ceo_id;
+    corp.name = "LP Mutant Corp".into();
+    corp.ticker = "LPMC".into();
+    corp.member_roles.insert(member_id, corp_roles::ROLE_ACCOUNTANT);
+    snap.corporations.insert(corp_id, corp);
+    sess.corp_role = 0;
+
+    assert_eq!(
+        check_corp_lp_role(&snap, &sess, ceo_id, corp_id, 1_000).unwrap(),
+        (true, u64::MAX)
+    );
+    assert_eq!(
+        check_corp_lp_role(&snap, &sess, member_id, corp_id, 1_000)
+            .unwrap_err()
+            .code,
+        "InsufficientCorporationRole"
+    );
+
+    snap.corporations
+        .get_mut(&corp_id)
+        .unwrap()
+        .member_roles
+        .insert(member_id, multi_dir);
+    assert_eq!(
+        check_corp_lp_role(&snap, &sess, member_id, corp_id, 1_000).unwrap(),
+        (false, multi_dir)
+    );
+}

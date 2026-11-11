@@ -245,3 +245,7 @@ fn is_item_sellable_on_market_inner(
         _ => false,
     }
 }
+
+#[cfg(test)]
+#[path = "market_orders_corp_auth_edges_tests.rs"]
+mod market_orders_corp_auth_edges_tests;

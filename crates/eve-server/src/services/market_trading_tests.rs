@@ -1277,3 +1277,378 @@ fn place_buy_order_v24_mining_laser_immediate_crosses_seeded_sell_order_issue_73
     assert!(notifs.iter().any(|n| n.event == "OnAccountChange"));
     assert!(notifs.iter().any(|n| n.event == "OnItemChange"));
 }
+
+#[test]
+fn test_issue_789_795_place_buy_order_v24_buystuff_9tuple_and_self_trade_account_change_order() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.market_orders.clear();
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = IskCents::from_isk(1_000_000);
+        }
+        // Self-owned sell order for type 3651 at 165.0 ISK in Jita
+        snap.market_orders.insert(
+            99_001_795,
+            eve_db::MarketOrderRecord {
+                order_id: 99_001_795,
+                type_id: 3651,
+                owner_id: char_id,
+                station_id: JITA_STATION_ID,
+                region_id: 10_000_002,
+                price: IskCents::from_f64_isk(165.0),
+                vol_entered: 10,
+                vol_remaining: 10,
+                is_bid: false,
+                is_npc: false,
+                min_volume: 1,
+                escrow: IskCents(0),
+            },
+        );
+    });
+
+    let mut sess = jita_session(char_id, 1_000_009);
+    ctx.db
+        .acquire_online_lock(1, 9795, Some(char_id), true, ctx.now_unix())
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // Live V24.01 marketsvc.py:298 BuyStuff 9-tuple:
+    // (stationID, typeID, price, quantity, orderRange=32767, minVolume=1, orderID=None, useCorp=0, duration=0)
+    let buy_res = handle(
+        &ctx,
+        &mut sess,
+        "marketProxy",
+        "PlaceBuyOrder",
+        &[
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::Integer(3651),
+            PyRep::Real(165.0),
+            PyRep::Integer(2),
+            PyRep::Integer(32767),
+            PyRep::Integer(1),
+            PyRep::None,
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .expect("V24.01 BuyStuff 9-tuple with args[6]=None and useCorp=Integer(0) must succeed");
+
+    assert_eq!(
+        buy_res.dict_get("filledImmediately").and_then(PyRep::as_bool),
+        Some(true)
+    );
+    let final_bal = ctx.db.get_character(char_id).unwrap().balance.to_wire_f64();
+    let acct_balances: Vec<f64> = ctx
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .filter(|n| n.event == "OnAccountChange")
+        .filter_map(|n| n.args.get(2).and_then(PyRep::as_f64))
+        .collect();
+    assert!(
+        acct_balances.len() >= 2,
+        "Self-trade must emit buyer debit and seller credit OnAccountChange notifications"
+    );
+    assert!(
+        acct_balances[0] < acct_balances[1],
+        "Buyer debit OnAccountChange must precede seller credit so last notification is final balance: {acct_balances:?}"
+    );
+    assert!(
+        (acct_balances.last().copied().unwrap() - final_bal).abs() < 1e-2,
+        "Last OnAccountChange balance must equal final wallet balance ({final_bal})"
+    );
+}
+
+#[test]
+fn place_multi_sell_order_full_stack_emits_ixflag_and_ixsingleton_in_tombstone() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let corp_id = ctx.db.with_snapshot(|s| s.characters[&char_id].corporation_id);
+    let mut sess = jita_session(char_id, corp_id);
+    let kw = HashMap::new();
+    let stack_id = 889_901_i64;
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(
+            stack_id,
+            InventoryItemRecord {
+                item_id: stack_id,
+                type_id: 34,
+                owner_id: char_id,
+                location_id: JITA_STATION_ID,
+                flag: InventoryFlag::Hangar,
+                quantity: 10,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let uid = ctx.db.with_mut_snapshot(|s| {
+        let uid = s.characters[&char_id].user_id;
+        if !s.accounts.values().any(|a| a.user_id == uid) {
+            s.accounts.insert(
+                format!("mkt_char_{uid}"),
+                eve_db::AccountRecord {
+                    user_id: uid,
+                    username: format!("mkt_char_{uid}"),
+                    password_token: String::new(),
+                    role: eve_db::service_roles::ROLE_PLAYER_DEFAULT,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
+        }
+        uid
+    });
+    ctx.db
+        .acquire_online_lock(uid, 1, Some(char_id), true, ctx.now_unix())
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let entry = PyRep::keyval([
+        ("itemID", PyRep::Integer(stack_id)),
+        ("typeID", PyRep::Integer(34)),
+        ("price", PyRep::Real(12.5)),
+        ("quantity", PyRep::Integer(10)),
+        ("officeID", PyRep::None),
+    ]);
+    handle(
+        &ctx,
+        &mut sess,
+        "marketProxy",
+        "PlaceMultiSellOrder",
+        &[
+            PyRep::List(vec![entry]),
+            PyRep::Integer(0),
+            PyRep::Integer(90),
+            PyRep::None,
+        ],
+        &kw,
+    )
+    .unwrap()
+    .expect("PlaceMultiSellOrder full stack");
+
+    let item_notifs: Vec<_> = ctx
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .filter(|n| n.event == "OnItemChange")
+        .collect();
+    assert_eq!(item_notifs.len(), 1, "Expected 1 OnItemChange tombstone notification");
+    let PyRep::Dict(change_entries) = &item_notifs[0].args[1] else {
+        panic!("expected Dict for OnItemChange change map");
+    };
+    let old_loc = change_entries
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(3))
+        .and_then(|(_, v)| v.as_i64());
+    let old_flag = change_entries
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(4))
+        .and_then(|(_, v)| v.as_i64());
+    let old_qty = change_entries
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(9))
+        .and_then(|(_, v)| v.as_i64());
+    assert_eq!(old_loc, Some(JITA_STATION_ID));
+    assert_eq!(old_flag, Some(InventoryFlag::Hangar as i64));
+    assert_eq!(old_qty, Some(10));
+    assert!(
+        !change_entries.iter().any(|(k, _)| k.as_i64() == Some(10)),
+        "Non-singleton stack must not include ixSingleton (10) in tombstone"
+    );
+
+    // Verify assembled/singleton items are rejected by PlaceMultiSellOrder with CannotSellAssembledItem
+    let singleton_id = 889_902_i64;
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(
+            singleton_id,
+            InventoryItemRecord {
+                item_id: singleton_id,
+                type_id: 34,
+                owner_id: char_id,
+                location_id: JITA_STATION_ID,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let singleton_entry = PyRep::keyval([
+        ("itemID", PyRep::Integer(singleton_id)),
+        ("typeID", PyRep::Integer(34)),
+        ("price", PyRep::Real(12.5)),
+        ("quantity", PyRep::Integer(1)),
+        ("officeID", PyRep::None),
+    ]);
+    let err = handle(
+        &ctx,
+        &mut sess,
+        "marketProxy",
+        "PlaceMultiSellOrder",
+        &[
+            PyRep::List(vec![singleton_entry]),
+            PyRep::Integer(0),
+            PyRep::Integer(90),
+            PyRep::None,
+        ],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err.code, "CannotSellAssembledItem");
+    assert!(ctx
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .all(|n| n.event != "OnItemChange"));
+    ctx.db.with_snapshot(|s| assert!(s.items.contains_key(&singleton_id)));
+}
+
+#[test]
+fn place_buy_order_immediate_non_buy_stuff_enforces_visibility_skill() {
+    let ctx = test_ctx();
+    let buyer_id = 90_000_001_i64;
+    let seller_id = 90_000_002_i64;
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|s| {
+        s.market_orders.clear();
+        if let Some(ch) = s.characters.get_mut(&buyer_id) {
+            ch.balance = IskCents::from_isk(100_000_000);
+        }
+        let mut seller = s.characters[&buyer_id].clone();
+        seller.character_id = seller_id;
+        seller.user_id = 2;
+        seller.balance = IskCents::from_isk(1_000_000);
+        s.characters.insert(seller_id, seller);
+        // Ensure buyer has Visibility = 0 (max_remote_jumps = 0)
+        s.skills.entry(buyer_id).or_default().remove(&3447);
+        s.market_orders.insert(
+            820_501,
+            MarketOrderRecord {
+                order_id: 820_501,
+                owner_id: seller_id,
+                station_id: JITA_STATION_ID,
+                region_id: THE_FORGE_REGION_ID,
+                type_id: 34,
+                is_bid: false,
+                price: IskCents::from_isk(10),
+                vol_entered: 20,
+                vol_remaining: 20,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+    });
+
+    let corp_id = ctx.db.with_snapshot(|s| s.characters[&buyer_id].corporation_id);
+    let mut sess = jita_session(buyer_id, corp_id);
+
+    // 1. Non-BuyStuff 8-arg immediate order (args[6] = Integer(0), duration = 0) with remote range 32767
+    //    must still enforce VisibilitySkillRequired.
+    let err = handle(
+        &ctx,
+        &mut sess,
+        "marketProxy",
+        "PlaceBuyOrder",
+        &[
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::Integer(34),
+            PyRep::Real(10.0),
+            PyRep::Integer(2),
+            PyRep::Integer(32767),
+            PyRep::Integer(1),
+            PyRep::Integer(0),
+            PyRep::Bool(false),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err.code, "VisibilitySkillRequired");
+
+    // 2. BuyStuff 9-arg signature with duration = 1 (> 0) and range = 32767 also enforces VisibilitySkillRequired.
+    let err_bs_dur = handle(
+        &ctx,
+        &mut sess,
+        "marketProxy",
+        "PlaceBuyOrder",
+        &[
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::Integer(34),
+            PyRep::Real(10.0),
+            PyRep::Integer(2),
+            PyRep::Integer(32767),
+            PyRep::Integer(1),
+            PyRep::None,
+            PyRep::Integer(0),
+            PyRep::Integer(1),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_bs_dur.code, "VisibilitySkillRequired");
+
+    // 3. BuyStuff 9-arg signature with duration = 0 exempts VisibilitySkillRequired even with Visibility = 0.
+    let ok_bs = handle(
+        &ctx,
+        &mut sess,
+        "marketProxy",
+        "PlaceBuyOrder",
+        &[
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::Integer(34),
+            PyRep::Real(10.0),
+            PyRep::Integer(2),
+            PyRep::Integer(32767),
+            PyRep::Integer(1),
+            PyRep::None,
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .expect("BuyStuff duration=0 bypasses Visibility check");
+    assert_eq!(
+        ok_bs.dict_get("filledImmediately").and_then(PyRep::as_bool),
+        Some(true)
+    );
+
+    // 4. Non-BuyStuff immediate order at station range (-1 <= 0) passes Visibility check cleanly.
+    let ok_local = handle(
+        &ctx,
+        &mut sess,
+        "marketProxy",
+        "PlaceBuyOrder",
+        &[
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::Integer(34),
+            PyRep::Real(10.0),
+            PyRep::Integer(2),
+            PyRep::Integer(-1),
+            PyRep::Integer(1),
+            PyRep::Integer(0),
+            PyRep::Bool(false),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .expect("Non-BuyStuff duration=0 at station range succeeds");
+    assert_eq!(
+        ok_local.dict_get("filledImmediately").and_then(PyRep::as_bool),
+        Some(true)
+    );
+}
+
+#[cfg(test)]
+#[path = "market_trading_extra_unit_tests.rs"]
+mod market_trading_extra_unit_tests;

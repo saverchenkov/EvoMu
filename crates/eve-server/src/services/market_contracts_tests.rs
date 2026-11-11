@@ -419,3 +419,7 @@ fn get_system_asks_and_plex_best_sweep_expired_orders() {
         assert_eq!(s.market_orders[&710_002].escrow, IskCents(0));
     });
 }
+
+#[cfg(test)]
+#[path = "market_contracts_extra_unit_tests.rs"]
+mod market_contracts_extra_unit_tests;

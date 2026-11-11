@@ -53,11 +53,12 @@ pub(crate) fn raffle_note_id(raffle_id: i64) -> i64 {
     -(7_400_000_000_000_i64.saturating_add(raffle_id.abs()))
 }
 
-/// Computes required HyperCores (`type_id = 52568`) proportional to estimated item value and node count (`8, 16, 48, 512`).
+/// Computes required HyperCores (`type_id = 52568`) from total raffle price using the exact V24 client formula.
 ///
-/// DATA GAP: CCP's exact server-side HyperCore coefficient curve is not present in V24 client FSD or public wiki
-/// (`HyperNet_Relay.md:36` specifies only that HyperCore count scales with Total Cost set by the host).
-/// DERIVED: `max(1, ceil(est_value_isk * (ticket_count / 512)^0.25 / 5_000_000))`.
+/// Provenance: V24 client `eve/client/script/ui/shared/raffle/raffleCreationData.py:303` (`token_amount`):
+/// `max(1, int(math.floor(total_price / _get_hypercore_base_price() * TOKEN_PRICE_RATIO)))` where
+/// `TOKEN_PRICE_RATIO = 0.05` (`raffleConst.py:42`) and `typeID 52568` `basePrice = 350_000.0`
+/// (equivalent to `max(1, floor(est_value_isk / 7_000_000.0))`, independent of `ticket_count`).
 pub fn compute_required_hypercores(est_value_isk: f64, ticket_count: u32) -> Result<i32, BridgeRpcError> {
     if !ALLOWED_RAFFLE_SIZES.contains(&ticket_count) {
         return Err(rpc_err(
@@ -68,9 +69,12 @@ pub fn compute_required_hypercores(est_value_isk: f64, ticket_count: u32) -> Res
     if !est_value_isk.is_finite() || est_value_isk <= 0.0 {
         return Err(rpc_err("InvalidRafflePrice", "Estimated raffle value must be positive"));
     }
-    let size_factor = (ticket_count as f64 / 512.0).powf(0.25);
-    let cores = ((est_value_isk * size_factor) / 5_000_000.0).ceil() as i32;
-    Ok(cores.max(1))
+    const HYPERCORE_BASE_PRICE: f64 = 350_000.0;
+    const TOKEN_PRICE_RATIO: f64 = 0.05;
+    let cores = ((est_value_isk / HYPERCORE_BASE_PRICE) * TOKEN_PRICE_RATIO)
+        .floor()
+        .clamp(1.0, i32::MAX as f64) as i32;
+    Ok(cores)
 }
 
 /// Sweeps expired HyperNet raffles (`now_unix >= expires_unix` and not sold out), refunding ticket buyers' ISK
@@ -1458,4 +1462,5 @@ pub fn handle_character_seeding(
 }
 
 #[cfg(test)] #[path = "hypernet_raffle_ops_tests.rs"] mod hypernet_raffle_ops_tests;
+#[cfg(test)] #[path = "hypernet_raffle_ops_edges_tests.rs"] mod hypernet_raffle_ops_edges_tests;
 

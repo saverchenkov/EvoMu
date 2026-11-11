@@ -1367,3 +1367,7 @@ pub fn handle_pi_orbitals(
 #[path = "pi_orbitals_tests.rs"]
 mod pi_orbitals_tests;
 
+#[cfg(test)]
+#[path = "pi_orbitals_edges2_tests.rs"]
+mod pi_orbitals_edges2_tests;
+

@@ -88,19 +88,19 @@ fn structure_rig_bonuses_and_security_multipliers_cover_hs_ls_ns_wh_and_reaction
     ctx.db.with_mut_snapshot(|snap| {
         assert_eq!(
             resolve_structure_rig_bonuses_full(&ctx, snap, 5000, 30000142),
-            (0.0, 0.0, 0.0, 1.0)
+            StructureRigBonuses { mat_bonus: 0.0, time_bonus: 0.0, cost_bonus: 0.0, sec_multiplier: 1.0 }
         );
         assert_eq!(
             resolve_structure_rig_bonuses_full(&ctx, snap, 5000, 30002537),
-            (0.0, 0.0, 0.0, 1.9)
+            StructureRigBonuses { mat_bonus: 0.0, time_bonus: 0.0, cost_bonus: 0.0, sec_multiplier: 1.9 }
         );
         assert_eq!(
             resolve_structure_rig_bonuses_full(&ctx, snap, 5000, 30004759),
-            (0.0, 0.0, 0.0, 2.1)
+            StructureRigBonuses { mat_bonus: 0.0, time_bonus: 0.0, cost_bonus: 0.0, sec_multiplier: 2.1 }
         );
         assert_eq!(
             resolve_structure_rig_bonuses_full(&ctx, snap, 5000, 31000005),
-            (0.0, 0.0, 0.0, 2.1)
+            StructureRigBonuses { mat_bonus: 0.0, time_bonus: 0.0, cost_bonus: 0.0, sec_multiplier: 2.1 }
         );
 
         let mut rig_t1 = make_item(5001, 999990, 98000001, 5000, InventoryFlag::RigSlot0);
@@ -109,45 +109,40 @@ fn structure_rig_bonuses_and_security_multipliers_cover_hs_ls_ns_wh_and_reaction
         rig_t1.dynamic_attributes.insert(2595, -10.0);
         snap.items.insert(5001, rig_t1);
 
-        let (mat_hs, time_hs, cost_hs, sec_hs) =
-            resolve_structure_rig_bonuses_full(&ctx, snap, 5000, 30000142);
-        assert!((mat_hs - 0.02).abs() < 1e-9);
-        assert!((time_hs - 0.20).abs() < 1e-9);
-        assert!((cost_hs - 0.10).abs() < 1e-9);
-        assert!((sec_hs - 1.0).abs() < 1e-9);
+        let hs = resolve_structure_rig_bonuses_full(&ctx, snap, 5000, 30000142);
+        assert!((hs.mat_bonus - 0.02).abs() < 1e-9);
+        assert!((hs.time_bonus - 0.20).abs() < 1e-9);
+        assert!((hs.cost_bonus - 0.10).abs() < 1e-9);
+        assert!((hs.sec_multiplier - 1.0).abs() < 1e-9);
 
-        let (mat_ls, time_ls, sec_ls) = resolve_structure_rig_bonus(&ctx, snap, 5000, 30002537);
-        assert!((mat_ls - 0.038).abs() < 1e-9);
-        assert!((time_ls - 0.38).abs() < 1e-9);
-        assert!((sec_ls - 1.9).abs() < 1e-9);
+        let ls = resolve_structure_rig_bonus(&ctx, snap, 5000, 30002537);
+        assert!((ls.mat_bonus - 0.038).abs() < 1e-9);
+        assert!((ls.time_bonus - 0.38).abs() < 1e-9);
+        assert!((ls.sec_multiplier - 1.9).abs() < 1e-9);
 
         let mut rig_t2 = make_item(5002, 999991, 98000001, 5000, InventoryFlag::RigSlot1);
         rig_t2.dynamic_attributes.insert(422, 2.0);
         rig_t2.dynamic_attributes.insert(2594, -2.4);
         rig_t2.dynamic_attributes.insert(2593, -24.0);
         snap.items.insert(5002, rig_t2);
-        let (mat_ns, time_ns, _, sec_ns) =
-            resolve_structure_rig_bonuses_full(&ctx, snap, 5000, 30004759);
-        assert!((mat_ns - 0.024 * 2.1).abs() < 1e-9);
-        assert!((time_ns - 0.24 * 2.1).abs() < 1e-9);
-        assert!((sec_ns - 2.1).abs() < 1e-9);
+        let ns = resolve_structure_rig_bonuses_full(&ctx, snap, 5000, 30004759);
+        assert!((ns.mat_bonus - 0.024 * 2.1).abs() < 1e-9);
+        assert!((ns.time_bonus - 0.24 * 2.1).abs() < 1e-9);
+        assert!((ns.sec_multiplier - 2.1).abs() < 1e-9);
 
         snap.items.clear();
         let react_rig = make_item(5003, 990001, 98000001, 5000, InventoryFlag::RigSlot2);
         snap.items.insert(5003, react_rig);
-        let (rm_hs, rt_hs, _, rsec_hs) =
-            resolve_structure_rig_bonuses_full(&ctx, snap, 5000, 30000142);
-        assert_eq!((rm_hs, rt_hs, rsec_hs), (0.0, 0.0, 0.0));
-        let (rm_ls, rt_ls, _, rsec_ls) =
-            resolve_structure_rig_bonuses_full(&ctx, snap, 5000, 30002537);
-        assert!((rm_ls - 0.02).abs() < 1e-9);
-        assert!((rt_ls - 0.20).abs() < 1e-9);
-        assert!((rsec_ls - 1.0).abs() < 1e-9);
-        let (rm_ns, rt_ns, _, rsec_ns) =
-            resolve_structure_rig_bonuses_full(&ctx, snap, 5000, 30004759);
-        assert!((rm_ns - 0.022).abs() < 1e-9);
-        assert!((rt_ns - 0.22).abs() < 1e-9);
-        assert!((rsec_ns - 1.1).abs() < 1e-9);
+        let r_hs = resolve_structure_rig_bonuses_full(&ctx, snap, 5000, 30000142);
+        assert_eq!((r_hs.mat_bonus, r_hs.time_bonus, r_hs.sec_multiplier), (0.0, 0.0, 0.0));
+        let r_ls = resolve_structure_rig_bonuses_full(&ctx, snap, 5000, 30002537);
+        assert!((r_ls.mat_bonus - 0.02).abs() < 1e-9);
+        assert!((r_ls.time_bonus - 0.20).abs() < 1e-9);
+        assert!((r_ls.sec_multiplier - 1.0).abs() < 1e-9);
+        let r_ns = resolve_structure_rig_bonuses_full(&ctx, snap, 5000, 30004759);
+        assert!((r_ns.mat_bonus - 0.022).abs() < 1e-9);
+        assert!((r_ns.time_bonus - 0.22).abs() < 1e-9);
+        assert!((r_ns.sec_multiplier - 1.1).abs() < 1e-9);
     });
 }
 
@@ -168,10 +163,14 @@ fn facility_modifiers_and_adjusted_prices_resolve_correctly() {
 
     assert_eq!(
         structure_sde_industry_bonuses(&ctx, 99999999),
-        (1.0, 1.0, 1.0)
+        StructureIndustryBonuses { material_modifier: 1.0, time_modifier: 1.0, cost_modifier: 1.0 }
     );
-    let (m, t, c) = structure_sde_industry_bonuses(&ctx, 35825);
-    assert!((m - 0.99).abs() < 1e-9 && (t - 0.85).abs() < 1e-9 && (c - 0.97).abs() < 1e-9);
+    let hull = structure_sde_industry_bonuses(&ctx, 35825);
+    assert!(
+        (hull.material_modifier - 0.99).abs() < 1e-9
+            && (hull.time_modifier - 0.85).abs() < 1e-9
+            && (hull.cost_modifier - 0.97).abs() < 1e-9
+    );
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(
@@ -192,9 +191,9 @@ fn facility_modifiers_and_adjusted_prices_resolve_correctly() {
         snap.structures.get_mut(&1_000_000_000_100).unwrap().state = "ShieldVulnerable".into();
         let resolved =
             resolve_facility_modifiers_and_system(&ctx, snap, 1_000_000_000_100).unwrap();
-        assert_eq!(resolved.0, 35825);
-        assert_eq!(resolved.1, 98000001);
-        assert_eq!(resolved.2, 30000142);
+        assert_eq!(resolved.type_id, 35825);
+        assert_eq!(resolved.owner_corp_id, 98000001);
+        assert_eq!(resolved.solar_system_id, 30000142);
 
         let item_fac = make_item(
             1_000_000_000_200,
@@ -206,9 +205,9 @@ fn facility_modifiers_and_adjusted_prices_resolve_correctly() {
         snap.items.insert(1_000_000_000_200, item_fac);
         let item_res =
             resolve_facility_modifiers_and_system(&ctx, snap, 1_000_000_000_200).unwrap();
-        assert_eq!(item_res.0, 35825);
-        assert_eq!(item_res.1, 98000002);
-        assert_eq!(item_res.2, 30000142);
+        assert_eq!(item_res.type_id, 35825);
+        assert_eq!(item_res.owner_corp_id, 98000002);
+        assert_eq!(item_res.solar_system_id, 30000142);
 
         assert!(resolve_facility_modifiers_and_system(&ctx, snap, 999_999_999).is_none());
     });
@@ -529,7 +528,7 @@ fn sde_rig_target_filters_scope_bonuses_by_activity_and_product() {
         );
 
         // Matches Ammunition manufacturing (activity 1, Antimatter Charge S = 222)
-        let (ammo_mat, ammo_time, _, _) = resolve_structure_rig_bonuses_for_job(
+        let ammo = resolve_structure_rig_bonuses_for_job(
             &ctx,
             snap,
             5000,
@@ -537,11 +536,11 @@ fn sde_rig_target_filters_scope_bonuses_by_activity_and_product() {
             Some(1),
             Some(222),
         );
-        assert!(ammo_mat > 0.0, "Ammunition rig must bonus ammo manufacturing");
-        assert_eq!(ammo_time, 0.0);
+        assert!(ammo.mat_bonus > 0.0, "Ammunition rig must bonus ammo manufacturing");
+        assert_eq!(ammo.time_bonus, 0.0);
 
         // Does NOT bonus Capital Ship manufacturing (19720 Revelation)
-        let (cap_mat, cap_time, _, _) = resolve_structure_rig_bonuses_for_job(
+        let cap = resolve_structure_rig_bonuses_for_job(
             &ctx,
             snap,
             5000,
@@ -549,10 +548,10 @@ fn sde_rig_target_filters_scope_bonuses_by_activity_and_product() {
             Some(1),
             Some(19720),
         );
-        assert_eq!((cap_mat, cap_time), (0.0, 0.0));
+        assert_eq!((cap.mat_bonus, cap.time_bonus), (0.0, 0.0));
 
         // Does NOT bonus Invention (activity 8) or Reactions (activity 9)
-        let (inv_mat, inv_time, _, _) = resolve_structure_rig_bonuses_for_job(
+        let inv = resolve_structure_rig_bonuses_for_job(
             &ctx,
             snap,
             5000,
@@ -560,9 +559,9 @@ fn sde_rig_target_filters_scope_bonuses_by_activity_and_product() {
             Some(8),
             Some(222),
         );
-        assert_eq!((inv_mat, inv_time), (0.0, 0.0));
+        assert_eq!((inv.mat_bonus, inv.time_bonus), (0.0, 0.0));
 
-        let (react_mat, react_time, _, _) = resolve_structure_rig_bonuses_for_job(
+        let react = resolve_structure_rig_bonuses_for_job(
             &ctx,
             snap,
             5000,
@@ -570,6 +569,265 @@ fn sde_rig_target_filters_scope_bonuses_by_activity_and_product() {
             Some(9),
             Some(222),
         );
-        assert_eq!((react_mat, react_time), (0.0, 0.0));
+        assert_eq!((react.mat_bonus, react.time_bonus), (0.0, 0.0));
     });
 }
+
+#[test]
+fn w3_mutant_killers_rig_security_boundaries_activity_products_and_hull_bonuses() {
+    let mut ctx = make_test_context();
+    let mut sde = (*ctx.sde).clone();
+
+    // Synthetic solar systems at exact security boundaries: 0.45 HS, 0.449 LS, 0.0 NS, 0.90 WH (>= 31_000_000)
+    let base_sys = sde.solar_systems.get(&30000142).unwrap().clone();
+    for (sys_id, sec) in [
+        (30_999_001_u32, 0.45_f64),
+        (30_999_002_u32, 0.449_f64),
+        (30_999_003_u32, 0.0_f64),
+        (31_000_000_u32, 0.90_f64),
+    ] {
+        let mut sys = base_sys.clone();
+        sys.solar_system_id = sys_id;
+        sys.security_status = sec;
+        sde.solar_systems.insert(sys_id, sys);
+    }
+
+    let base_type = sde.types.get(&35825).unwrap().clone();
+    // Outpost conversion rig (group_id == 1984)
+    let mut outpost_rig = base_type.clone();
+    outpost_rig.type_id = 990_101;
+    outpost_rig.group_id = 1984;
+    outpost_rig.default_attributes = HashMap::from([(2594, -2.0), (2593, -20.0), (2595, -10.0)]);
+    sde.types.insert(990_101, outpost_rig);
+
+    // Reaction rig via group 1933..=1939 and explicit 2713/2714
+    let mut react_rig = base_type.clone();
+    react_rig.type_id = 990_102;
+    react_rig.group_id = 1935;
+    react_rig.default_attributes = HashMap::from([(2714, -2.4), (2713, -24.0)]);
+    sde.types.insert(990_102, react_rig);
+
+    // Engineering rig with disallowInHighSec (1970 = 1.0) and custom sec mults (2356 = 2.0, 2357 = 2.5)
+    let mut disallow_hs_rig = base_type.clone();
+    disallow_hs_rig.type_id = 990_103;
+    disallow_hs_rig.group_id = 1816;
+    disallow_hs_rig.default_attributes = HashMap::from([
+        (1970, 1.0),
+        (2356, 2.0),
+        (2357, 2.5),
+        (2594, -0.25), // already fractional <= 1.0 -> norm_frac preserves 0.25 (25% * 2.5 = 62.5% -> clamped to 0.50)
+        (2593, -0.40), // 0.40 * 2.5 = 1.0 -> clamped to 0.80
+        (2595, -0.30), // 0.30 * 2.5 = 0.75 -> clamped to 0.50
+    ]);
+    sde.types.insert(990_103, disallow_hs_rig);
+
+    // Custom structure hull not in industry_modifier_sources to exercise fallback attributes 2600/2601/2602/2721
+    let mut custom_hull = base_type.clone();
+    custom_hull.type_id = 990_104;
+    custom_hull.default_attributes = HashMap::from([
+        (2600, 0.99),
+        (2601, 0.95),
+        (2602, 0.80),
+        (2721, 0.75),
+    ]);
+    sde.types.insert(990_104, custom_hull);
+
+    ctx.sde = Arc::new(sde);
+
+    // 1. resolve_blueprint_activity_product across activities 1, 8, 9, 11, and zero product fallback
+    let mut bp = BlueprintInfo {
+        blueprint_type_id: 990_200,
+        product_type_id: 587,
+        product_quantity: 1,
+        max_production_limit: 10,
+        manufacturing_time_sec: 100,
+        research_me_time_sec: 100,
+        research_te_time_sec: 100,
+        copy_time_sec: 100,
+        invention_time_sec: 100,
+        invention_base_probability: 0.4,
+        materials: vec![],
+        activities: HashMap::from([
+            (
+                "manufacturing".into(),
+                BlueprintActivity {
+                    time: 100,
+                    materials: vec![],
+                    products: vec![eve_sde::BlueprintProduct {
+                        type_id: 588,
+                        quantity: 1,
+                        probability: None,
+                    }],
+                    skills: vec![],
+                },
+            ),
+            (
+                "8".into(),
+                BlueprintActivity {
+                    time: 100,
+                    materials: vec![],
+                    products: vec![eve_sde::BlueprintProduct {
+                        type_id: 11379,
+                        quantity: 1,
+                        probability: Some(0.3),
+                    }],
+                    skills: vec![],
+                },
+            ),
+            (
+                "9".into(),
+                BlueprintActivity {
+                    time: 100,
+                    materials: vec![],
+                    products: vec![eve_sde::BlueprintProduct {
+                        type_id: 16670,
+                        quantity: 100,
+                        probability: None,
+                    }],
+                    skills: vec![],
+                },
+            ),
+        ]),
+    };
+    assert_eq!(resolve_blueprint_activity_product(&bp, 1), Some(588));
+    assert_eq!(resolve_blueprint_activity_product(&bp, 8), Some(11379));
+    assert_eq!(resolve_blueprint_activity_product(&bp, 9), Some(16670));
+    assert_eq!(resolve_blueprint_activity_product(&bp, 11), Some(16670));
+    bp.activities.clear();
+    assert_eq!(resolve_blueprint_activity_product(&bp, 1), Some(587));
+    bp.product_type_id = 0;
+    assert_eq!(resolve_blueprint_activity_product(&bp, 1), None);
+
+    // 2. structure_sde_industry_bonuses_for_activity fallback & unknown activity
+    assert_eq!(
+        structure_sde_industry_bonuses_for_activity(&ctx, 999_888_777, Some(1)),
+        StructureIndustryBonuses { material_modifier: 1.0, time_modifier: 1.0, cost_modifier: 1.0 }
+    );
+    assert_eq!(
+        structure_sde_industry_bonuses_for_activity(&ctx, 990_104, Some(1)),
+        StructureIndustryBonuses { material_modifier: 0.99, time_modifier: 0.80, cost_modifier: 0.95 }
+    );
+    assert_eq!(
+        structure_sde_industry_bonuses_for_activity(&ctx, 990_104, Some(9)),
+        StructureIndustryBonuses { material_modifier: 1.0, time_modifier: 0.75, cost_modifier: 1.0 }
+    );
+    assert_eq!(
+        structure_sde_industry_bonuses_for_activity(&ctx, 990_104, Some(11)),
+        StructureIndustryBonuses { material_modifier: 1.0, time_modifier: 0.75, cost_modifier: 1.0 }
+    );
+
+    // 3. Security boundary & rig multiplier checks
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.clear();
+        // Empty rigs -> default_sec_mult: 0.45 HS -> 1.0, 0.449 LS -> 1.9, 0.0 NS -> 2.1, 31_000_000 WH -> 2.1
+        assert_eq!(
+            resolve_structure_rig_bonuses_for_job(&ctx, snap, 6000, 30_999_001, Some(1), None),
+            StructureRigBonuses { mat_bonus: 0.0, time_bonus: 0.0, cost_bonus: 0.0, sec_multiplier: 1.0 }
+        );
+        assert_eq!(
+            resolve_structure_rig_bonuses_for_job(&ctx, snap, 6000, 30_999_002, Some(1), None),
+            StructureRigBonuses { mat_bonus: 0.0, time_bonus: 0.0, cost_bonus: 0.0, sec_multiplier: 1.9 }
+        );
+        assert_eq!(
+            resolve_structure_rig_bonuses_for_job(&ctx, snap, 6000, 30_999_003, Some(1), None),
+            StructureRigBonuses { mat_bonus: 0.0, time_bonus: 0.0, cost_bonus: 0.0, sec_multiplier: 2.1 }
+        );
+        assert_eq!(
+            resolve_structure_rig_bonuses_for_job(&ctx, snap, 6000, 31_000_000, Some(1), None),
+            StructureRigBonuses { mat_bonus: 0.0, time_bonus: 0.0, cost_bonus: 0.0, sec_multiplier: 2.1 }
+        );
+
+        // Outpost conversion rig (1984): 1.0x even in Null-Sec!
+        snap.items.insert(
+            6101,
+            make_item(6101, 990_101, 98000001, 6000, InventoryFlag::RigSlot0),
+        );
+        let out = resolve_structure_rig_bonuses_for_job(&ctx, snap, 6000, 30_999_003, Some(1), None);
+        assert!((out.mat_bonus - 0.02).abs() < 1e-9);
+        assert!((out.time_bonus - 0.20).abs() < 1e-9);
+        assert!((out.cost_bonus - 0.10).abs() < 1e-9);
+        assert!((out.sec_multiplier - 1.0).abs() < 1e-9);
+        // Unknown activity_id returns zero bonuses + default_sec_mult
+        assert_eq!(
+            resolve_structure_rig_bonuses_for_job(&ctx, snap, 6000, 30_999_003, Some(99), None),
+            StructureRigBonuses { mat_bonus: 0.0, time_bonus: 0.0, cost_bonus: 0.0, sec_multiplier: 2.1 }
+        );
+
+        // Reaction rig (990_102): HS -> 0.0x, LS -> 1.0x, NS -> 1.1x
+        snap.items.clear();
+        snap.items.insert(
+            6102,
+            make_item(6102, 990_102, 98000001, 6000, InventoryFlag::RigSlot1),
+        );
+        assert_eq!(
+            resolve_structure_rig_bonuses_for_job(&ctx, snap, 6000, 30_999_001, Some(9), None),
+            StructureRigBonuses { mat_bonus: 0.0, time_bonus: 0.0, cost_bonus: 0.0, sec_multiplier: 0.0 }
+        );
+        let r_ls = resolve_structure_rig_bonuses_for_job(&ctx, snap, 6000, 30_999_002, Some(9), None);
+        assert!((r_ls.mat_bonus - 0.024).abs() < 1e-9);
+        assert!((r_ls.time_bonus - 0.24).abs() < 1e-9);
+        assert!((r_ls.sec_multiplier - 1.0).abs() < 1e-9);
+        let r_ns = resolve_structure_rig_bonuses_for_job(&ctx, snap, 6000, 30_999_003, Some(9), None);
+        assert!((r_ns.mat_bonus - 0.024 * 1.1).abs() < 1e-9);
+        assert!((r_ns.time_bonus - 0.24 * 1.1).abs() < 1e-9);
+        assert!((r_ns.sec_multiplier - 1.1).abs() < 1e-9);
+
+        // Disallow-in-HS engineering rig (990_103) with custom 2356/2357 & cap clamping (0.50 / 0.80 / 0.50)
+        snap.items.clear();
+        snap.items.insert(
+            6103,
+            make_item(6103, 990_103, 98000001, 6000, InventoryFlag::RigSlot2),
+        );
+        assert_eq!(
+            resolve_structure_rig_bonuses_for_job(&ctx, snap, 6000, 30_999_001, Some(1), None),
+            StructureRigBonuses { mat_bonus: 0.0, time_bonus: 0.0, cost_bonus: 0.0, sec_multiplier: 0.0 }
+        );
+        let capped =
+            resolve_structure_rig_bonuses_for_job(&ctx, snap, 6000, 30_999_003, Some(1), None);
+        assert!((capped.mat_bonus - 0.50).abs() < 1e-9);
+        assert!((capped.time_bonus - 0.80).abs() < 1e-9);
+        assert!((capped.cost_bonus - 0.50).abs() < 1e-9);
+        assert!((capped.sec_multiplier - 2.5).abs() < 1e-9);
+
+        // `resolve_structure_rig_bonus` view struct and `resolve_facility_modifiers_and_system_for_job`
+        let view3 = resolve_structure_rig_bonus(&ctx, snap, 6000, 30_999_003);
+        assert!((view3.mat_bonus - 0.50).abs() < 1e-9);
+        assert!((view3.time_bonus - 0.80).abs() < 1e-9);
+        assert!((view3.sec_multiplier - 2.5).abs() < 1e-9);
+
+        snap.structures.insert(
+            6000,
+            UpwellStructureRecord {
+                structure_id: 6000,
+                type_id: 35825,
+                owner_corp_id: 98_000_001,
+                solar_system_id: 30_999_003,
+                name: "Raitaru".into(),
+                state: "ShieldVulnerable".into(),
+                position: [0.0; 3],
+                ..Default::default()
+            },
+        );
+        let fac_live =
+            resolve_facility_modifiers_and_system_for_job(&ctx, snap, 6000, Some(1), None)
+                .expect("active structure resolves facility modifiers");
+        assert_eq!(fac_live.type_id, 35825);
+        assert_eq!(fac_live.owner_corp_id, 98_000_001);
+        assert_eq!(fac_live.solar_system_id, 30_999_003);
+        assert!(
+            (fac_live.material_modifier - 0.99).abs() < 1e-6
+                && fac_live.time_modifier < 0.20
+                && fac_live.cost_modifier < 0.50
+        );
+
+        snap.structures.get_mut(&6000).unwrap().state = "Destroyed".into();
+        assert!(
+            resolve_facility_modifiers_and_system_for_job(&ctx, snap, 6000, Some(1), None)
+                .is_none()
+        );
+    });
+}
+
+#[cfg(test)]
+#[path = "industry_rigs_extra_unit_tests.rs"]
+mod extra_unit_tests;

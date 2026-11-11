@@ -9,6 +9,10 @@ use eve_sde::{InvType, SdeRegistry};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[cfg(test)]
+#[path = "wallet_serverops_extra_unit_tests.rs"]
+mod wallet_serverops_extra_unit_tests;
+
 fn make_test_context() -> ServerContext {
     let sde = Arc::new(SdeRegistry::with_canonical_seed());
     let db = Arc::new(WorldRepository::with_demo_seed());

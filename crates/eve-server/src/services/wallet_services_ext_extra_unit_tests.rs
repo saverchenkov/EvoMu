@@ -305,3 +305,234 @@ fn note_helpers_and_store_manager_targeted_omega_kwargs_and_overflow_branches() 
         "InvalidQuantity"
     );
 }
+
+#[test]
+fn store_handlers_inventory_fields_and_direct_trade_partial_and_full_item_versions() {
+    let ctx = test_ctx();
+    let station_id = 60_003_760_i64;
+    let char_a = 90_710_001_i64;
+    let char_b = 90_710_002_i64;
+    let item_a_partial = 971_101_i64;
+    let item_a_full = 971_102_i64;
+    let item_b_partial = 971_201_i64;
+    let item_b_full = 971_202_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base_ch = snap.characters.values().next().unwrap().clone();
+        for (cid, active_ship) in [(char_a, 971_901_i64), (char_b, 971_902_i64)] {
+            let mut ch = base_ch.clone();
+            ch.character_id = cid;
+            ch.station_id = Some(station_id);
+            ch.structure_id = None;
+            ch.solar_system_id = 30_000_142;
+            ch.active_ship_id = active_ship;
+            ch.balance = eve_db::IskCents(100_000_000);
+            snap.characters.insert(cid, ch);
+        }
+        snap.adjust_plex_vault(char_a, 500);
+        let cat = StoreCatalog {
+            categories: vec![StoreCategory {
+                id: 7,
+                name: "Ship Skins".into(),
+                description: "Cosmetics".into(),
+            }],
+            products: vec![StoreProduct {
+                id: 701,
+                name: "Tritanium Crate".into(),
+                description: "Crate".into(),
+                type_id: 34,
+                quantity: 5,
+            }],
+            offers: vec![StoreOffer {
+                id: 7001,
+                name: "Tritanium Bundle".into(),
+                description: "Bundle".into(),
+                category_id: 7,
+                price_plex: 15,
+                product_ids: vec![701],
+                targeted: false,
+                price_cents: None,
+                currency: None,
+            }],
+        };
+        save_store_catalog(snap, &cat);
+        for (iid, owner, qty) in [
+            (item_a_partial, char_a, 10_i32),
+            (item_a_full, char_a, 4_i32),
+            (item_b_partial, char_b, 12_i32),
+            (item_b_full, char_b, 6_i32),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: 34,
+                    owner_id: owner,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: qty,
+                    singleton: false,
+                    version: 3,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let mut sess_a = SessionState::new(7101);
+    sess_a.user_id = Some(1);
+    sess_a.character_id = Some(char_a);
+    sess_a.station_id = Some(station_id);
+    sess_a.ship_id = Some(971_901);
+
+    let mut sess_b = SessionState::new(7102);
+    sess_b.user_id = Some(2);
+    sess_b.character_id = Some(char_b);
+    sess_b.station_id = Some(station_id);
+    sess_b.ship_id = Some(971_902);
+
+    let kw = HashMap::new();
+    // 1. Store get_categories, get_products, get_offers (kills L102, L133, L161 FnValue mutants)
+    let PyRep::List(cats) = call_wallet_ext(&ctx, &mut sess_a, "storeManager", "get_categories", &[], &kw)
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("categories list");
+    };
+    assert_eq!(cats.len(), 2);
+    assert_eq!(cats[0].dict_get("name"), Some(&PyRep::String("Ship Skins".into())));
+
+    let PyRep::List(prods) = call_wallet_ext(&ctx, &mut sess_a, "storeManager", "get_products", &[], &kw)
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("products list");
+    };
+    assert_eq!(prods.len(), 1);
+    assert_eq!(prods[0].dict_get("typeID"), Some(&PyRep::Integer(34)));
+
+    let PyRep::List(offers) = call_wallet_ext(&ctx, &mut sess_a, "storeManager", "get_offers", &[], &kw)
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("offers list");
+    };
+    assert_eq!(offers.len(), 1);
+    assert_eq!(offers[0].dict_get("offerID"), Some(&PyRep::Integer(7001)));
+
+    // 2. Store can_purchase_offer & buy_offer item delivery field checks (kills L264, L420..427)
+    let can = call_wallet_ext(
+        &ctx,
+        &mut sess_a,
+        "storeManager",
+        "can_purchase_offer",
+        &[PyRep::Integer(7001), PyRep::String("PLEX".into()), PyRep::Integer(3)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(can, PyRep::Bool(true));
+
+    let buy = call_wallet_ext(
+        &ctx,
+        &mut sess_a,
+        "storeManager",
+        "buy_offer",
+        &[PyRep::Integer(7001), PyRep::String("PLEX".into()), PyRep::Integer(3)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let delivered_id = buy.dict_get("deliveredItemID").and_then(|v| v.as_i64()).unwrap();
+    assert!(delivered_id > 0);
+    ctx.db.with_snapshot(|snap| {
+        let rec = &snap.items[&delivered_id];
+        assert_eq!(rec.item_id, delivered_id);
+        assert_eq!(rec.type_id, 34);
+        assert_eq!(rec.owner_id, char_a);
+        assert_eq!(rec.location_id, station_id);
+        assert_eq!(rec.flag, InventoryFlag::Hangar);
+        assert_eq!(rec.quantity, 15);
+        assert!(!rec.singleton);
+        assert_eq!(rec.version, 1);
+    });
+
+    // 3. Two-party direct trade with partial and full stack items from both A and B (kills L624, L771, L862, L906)
+    let trade = call_wallet_ext(
+        &ctx,
+        &mut sess_a,
+        "trademgr",
+        "InitiateTrade",
+        &[PyRep::Integer(char_b)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let trade_id = trade.dict_get("tradeContainerID").and_then(|v| v.as_i64()).unwrap();
+    assert!(trade_id > 0);
+
+    for (iid, qty) in [(item_a_partial, 3_i64), (item_a_full, 4_i64)] {
+        let added = call_wallet_ext(
+            &ctx,
+            &mut sess_a,
+            "trademgr",
+            "AddItem",
+            &[PyRep::Integer(trade_id), PyRep::Integer(iid), PyRep::Integer(qty)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(added.dict_get("tradeContainerID"), Some(&PyRep::Integer(trade_id)));
+    }
+    for (iid, qty) in [(item_b_partial, 5_i64), (item_b_full, 6_i64)] {
+        let added = call_wallet_ext(
+            &ctx,
+            &mut sess_b,
+            "trademgr",
+            "AddItem",
+            &[PyRep::Integer(trade_id), PyRep::Integer(iid), PyRep::Integer(qty)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(added.dict_get("tradeContainerID"), Some(&PyRep::Integer(trade_id)));
+    }
+
+    let first_accept = call_wallet_ext(
+        &ctx,
+        &mut sess_a,
+        "trademgr",
+        "MakeOffer",
+        &[PyRep::Integer(trade_id), PyRep::Bool(true)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(first_accept.dict_get("completed"), Some(&PyRep::Bool(false)));
+
+    let second_accept = call_wallet_ext(
+        &ctx,
+        &mut sess_b,
+        "trademgr",
+        "MakeOffer",
+        &[PyRep::Integer(trade_id), PyRep::Bool(true)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(second_accept.dict_get("completed"), Some(&PyRep::Bool(true)));
+
+    ctx.db.with_snapshot(|snap| {
+        // Both partial stacks reduced cleanly and bumped version 3 -> 4
+        assert_eq!(snap.items[&item_a_partial].quantity, 7);
+        assert_eq!(snap.items[&item_a_partial].version, 4);
+        assert_eq!(snap.items[&item_b_partial].quantity, 7);
+        assert_eq!(snap.items[&item_b_partial].version, 4);
+
+        // Both full stacks changed owner in-place and bumped version 3 -> 4 (kills += -> -= / *=)
+        assert_eq!(snap.items[&item_a_full].owner_id, char_b);
+        assert_eq!(snap.items[&item_a_full].version, 4);
+        assert_eq!(snap.items[&item_b_full].owner_id, char_a);
+        assert_eq!(snap.items[&item_b_full].version, 4);
+    });
+}

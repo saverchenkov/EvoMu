@@ -500,3 +500,7 @@ fn test_copy_licensed_runs_validation_scaling_and_multi_bpc_mint() {
         }
     });
 }
+
+#[cfg(test)]
+#[path = "industry_jobs_extra_unit_tests.rs"]
+mod extra_unit_tests;

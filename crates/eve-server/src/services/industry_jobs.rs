@@ -246,14 +246,14 @@ pub fn handle_industry_jobs(
                         .or_else(|| session.station_id.and_then(|sid| ctx.sde.location_solar_system(sid)))
                         .or_else(|| session.structure_id.and_then(|sid| snap.structures.get(&sid).map(|s| s.solar_system_id)))
                         .unwrap_or(0);
-                    let Some((_, _, f_sys, _, _, _, _)) =
-                        resolve_facility_modifiers_and_system(ctx, snap, station_id)
+                    let Some(fac) = resolve_facility_modifiers_and_system(ctx, snap, station_id)
                     else {
                         return Err(BridgeRpcError {
                             code: "FacilityNotFound".into(),
                             message: format!("Industry facility {station_id} not found"),
                         });
                     };
+                    let f_sys = fac.solar_system_id;
                     if f_sys == current_sys {
                         return Ok(());
                     }
@@ -313,7 +313,7 @@ pub fn handle_industry_jobs(
                     .map(|c| c.solar_system_id)
                     .unwrap_or_else(|| ctx.sde.solar_systems.keys().copied().next().unwrap_or(0));
                 let job_target_prod_tid = resolve_blueprint_activity_product(bp, activity_id);
-                let (fac_type_id, _, fac_sys_id, _, mat_mod, time_mod, _) =
+                let (fac_type_id, fac_sys_id, mat_mod, time_mod) =
                     resolve_facility_modifiers_and_system_for_job(
                         ctx,
                         snap,
@@ -321,7 +321,9 @@ pub fn handle_industry_jobs(
                         Some(activity_id),
                         job_target_prod_tid,
                     )
-                    .unwrap_or((1529, 1000035, fallback_sys, 10000002, 1.0, 1.0, 1.0));
+                    .map_or((1529, fallback_sys, 1.0, 1.0), |f| {
+                        (f.type_id, f.solar_system_id, f.material_modifier, f.time_modifier)
+                    });
                 if activity_id == 9 {
                     if !matches!(fac_type_id, 35835 | 35836) {
                         return Err(BridgeRpcError {
@@ -431,14 +433,15 @@ pub fn handle_industry_jobs(
                     (char_id, false, 0u64)
                 };
 
-                let (rig_mat_bonus, _, _, _) = resolve_structure_rig_bonuses_for_job(
+                let rig_mat_bonus = resolve_structure_rig_bonuses_for_job(
                     ctx,
                     snap,
                     station_id,
                     fac_sys_id,
                     Some(activity_id),
                     job_target_prod_tid,
-                );
+                )
+                .mat_bonus;
                 let fulcrum_bonus = is_fulcrum_pirate_ship_bonus_applicable(
                     ctx,
                     snap,
@@ -1222,7 +1225,10 @@ pub fn handle_industry_jobs(
                         .structures
                         .get(&station_id)
                         .map(|s| s.owner_corp_id)
-                        .or_else(|| resolve_facility_modifiers_and_system(ctx, snap, station_id).map(|m| m.1));
+                        .or_else(|| {
+                            resolve_facility_modifiers_and_system(ctx, snap, station_id)
+                                .map(|m| m.owner_corp_id)
+                        });
                     if let Some(fac_corp) = fac_owner_corp {
                         if !use_corp || fac_corp != job_owner_id {
                             let scorp = snap.corporations.entry(fac_corp).or_insert_with(|| {
@@ -1336,4 +1342,7 @@ mod industry_jobs_tests;
 #[path = "industry_jobs_cov_unit_tests.rs"]
 #[cfg(test)]
 mod industry_jobs_cov_unit_tests;
+#[cfg(test)]
+#[path = "industry_jobs_edges2_tests.rs"]
+mod industry_jobs_edges2_tests;
 
