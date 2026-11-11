@@ -679,7 +679,24 @@ pub(crate) fn validate_container_and_bay_move(
         let moving_grp = moving_type.map(|t| t.group_id).unwrap_or(0);
         let moving_cat = moving_type.map(|t| t.category_id).unwrap_or(0);
         let move_qty = requested_qty.unwrap_or(moving_item.quantity as i64).max(1) as f64;
-        let moving_total_vol = effective_item_unit_volume(&ctx.sde, moving_item) * move_qty;
+        let extra_charge_vol: f64 = if !matches!(flag_u16, 11..=34 | 92..=94 | 125..=132)
+            && moving_cat != 8
+            && (11..=34).contains(&(moving_item.flag as u16))
+        {
+            snap.items
+                .values()
+                .filter(|i| {
+                    i.location_id == moving_item.location_id
+                        && i.flag == moving_item.flag
+                        && i.item_id != item_id
+                        && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 8)
+                })
+                .map(|i| effective_item_unit_volume(&ctx.sde, i) * (i.quantity.max(1) as f64))
+                .sum()
+        } else {
+            0.0
+        };
+        let moving_total_vol = effective_item_unit_volume(&ctx.sde, moving_item) * move_qty + extra_charge_vol;
 
         let Some(dest_item) = snap.items.get(&new_loc) else { return Ok(None); };
         let Some(dest_type) = ctx.sde.types.get(&dest_item.type_id) else { return Ok(None); };
@@ -722,22 +739,41 @@ pub(crate) fn validate_container_and_bay_move(
                     message: "Cannot place a container inside another container".into(),
                 });
             }
-            let cap = dest_type.capacity;
-            if cap > 0.0 {
-                let used: f64 = snap
-                    .items
-                    .values()
-                    .filter(|i| i.location_id == new_loc && i.item_id != item_id)
-                    .map(|i| effective_item_unit_volume(&ctx.sde, i) * (i.quantity as f64))
-                    .sum();
-                if used + moving_total_vol > cap + 1e-4 {
-                    return Err(BridgeRpcError {
-                        code: "CapacityExceeded".into(),
-                        message: format!(
-                            "Container capacity of {cap} m³ exceeded (used {used:.1} m³, adding {moving_total_vol:.1} m³)"
-                        ),
-                    });
-                }
+            let cap = dest_item
+                .dynamic_attributes
+                .get(&eve_sde::attr_ids::CAPACITY)
+                .copied()
+                .filter(|&c| c > 0.0)
+                .unwrap_or_else(|| {
+                    if dest_type.capacity > 0.0 {
+                        dest_type.capacity
+                    } else {
+                        dest_type
+                            .default_attributes
+                            .get(&eve_sde::attr_ids::CAPACITY)
+                            .copied()
+                            .unwrap_or(0.0)
+                    }
+                });
+            if cap <= 0.0 {
+                return Err(BridgeRpcError {
+                    code: "CapacityExceeded".into(),
+                    message: format!("Container {} has no storage capacity", dest_type.name),
+                });
+            }
+            let used: f64 = snap
+                .items
+                .values()
+                .filter(|i| i.location_id == new_loc && i.item_id != item_id)
+                .map(|i| effective_item_unit_volume(&ctx.sde, i) * (i.quantity as f64))
+                .sum();
+            if used + moving_total_vol > cap + 1e-4 {
+                return Err(BridgeRpcError {
+                    code: "CapacityExceeded".into(),
+                    message: format!(
+                        "Container capacity of {cap} m³ exceeded (used {used:.1} m³, adding {moving_total_vol:.1} m³)"
+                    ),
+                });
             }
             return Ok(Some((dest_type.group_id, moving_item.type_id, moving_item.quantity)));
         }

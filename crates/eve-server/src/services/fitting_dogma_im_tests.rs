@@ -1113,6 +1113,10 @@ async fn destroy_fitting_removes_loaded_charges_and_notifies_947() {
                 ..Default::default()
             },
         );
+        snap.weapon_banks
+            .entry(ship_id)
+            .or_default()
+            .insert(gun_id, vec![gun_id, 96_309_499]);
     });
 
     let mut session = SessionState {
@@ -1126,6 +1130,21 @@ async fn destroy_fitting_removes_loaded_charges_and_notifies_947() {
     ctx.db
         .acquire_online_lock(1, 1, Some(char_id), true, ctx.now_unix_secs())
         .expect("online lock");
+
+    // Destroying the active ship itself via DestroyFitting while docked must be rejected
+    let active_ship_err = handle_dogma_im(
+        &ctx,
+        &mut session,
+        None,
+        "dogmaIM",
+        "DestroyFitting",
+        &[PyRep::Integer(ship_id)],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .unwrap_err();
+    assert_eq!(active_ship_err.code, "ItemNotFittedToActiveShip");
 
     let _ = ctx.drain_notifications_for_char(char_id);
     let res = handle_dogma_im(
@@ -1141,6 +1160,10 @@ async fn destroy_fitting_removes_loaded_charges_and_notifies_947() {
     .expect("handled")
     .expect("DestroyFitting ok");
     assert_eq!(res.dict_get("destroyed").and_then(|v| v.as_bool()), Some(true));
+    assert!(
+        ctx.db.with_snapshot(|s| s.weapon_banks.get(&ship_id).is_none_or(|b| b.is_empty())),
+        "DestroyFitting must remove destroyed weapon from weapon_banks"
+    );
 
     assert!(ctx.db.get_item(gun_id).is_none(), "destroyed module must be removed");
     assert!(

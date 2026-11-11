@@ -635,9 +635,14 @@ pub(crate) async fn handle_dogma_im(
                         }
                     } else if item.owner_id != char_id {
                         return Err(BridgeRpcError { code: "ItemNotOwnedByCharacter".into(), message: "Cannot destroy an item not owned by character".into() });
-                    } else if undocked && (Some(loc) != session.ship_id || !matches!(flag_u16, 11..=34 | 92..=94 | 125..=132 | 164..=171)) {
-                        return Err(BridgeRpcError { code: "ItemNotFittedToActiveShip".into(), message: "In-space DestroyFitting requires a fitted item on the active ship".into() });
+                    } else if Some(item_id) == session.ship_id
+                        || snap.characters.get(&char_id).is_some_and(|c| c.active_ship_id == item_id)
+                        || (undocked && (Some(loc) != session.ship_id || !matches!(flag_u16, 11..=34 | 92..=94 | 125..=132 | 164..=171)))
+                        || (!undocked && flag_u16 != 4 && !matches!(flag_u16, 11..=34 | 92..=94 | 125..=132 | 164..=171))
+                    {
+                        return Err(BridgeRpcError { code: "ItemNotFittedToActiveShip".into(), message: "DestroyFitting requires a fitted item".into() });
                     }
+                    crate::services::fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, item)?;
                     if snap.module_active_states.contains(&item_id) {
                         return Err(BridgeRpcError { code: "ModuleIsActive".into(), message: format!("Module {item_id} cannot be destroyed while active") });
                     }
@@ -672,6 +677,12 @@ pub(crate) async fn handle_dogma_im(
                             }
                             snap.remove_system_cleanup_item(cid);
                         }
+                    }
+                    if let Some(banks) = snap.weapon_banks.get_mut(&loc) {
+                        for list in banks.values_mut() {
+                            list.retain(|&id| id != item_id);
+                        }
+                        banks.retain(|k, v| *k != item_id && v.len() > 1);
                     }
                     snap.remove_system_cleanup_item(item_id);
                     Ok(Some((found, removed_charges)))

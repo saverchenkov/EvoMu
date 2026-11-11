@@ -590,7 +590,37 @@ fn unload_ammo_docked_station_hangar_destination_and_invalid_dest_946() {
     .unwrap_err();
     assert_eq!(err_dest.code, "InvalidDestination");
 
-    // 4. Unloading to ship cargo when cargo is full fails with NotEnoughCargoSpace
+    // 3b. Active module rejected with ModuleIsActive, Hangar(4) on ship rejected, 2-tuple (ship_id, Cargo) supported
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.insert(gun_id);
+    });
+    let err_active = handle_unload_ammo(
+        &ctx,
+        &sess,
+        &[PyRep::Integer(ship_id), PyRep::List(vec![PyRep::Integer(gun_id)])],
+    )
+    .unwrap_err();
+    assert_eq!(err_active.code, "ModuleIsActive");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.remove(&gun_id);
+    });
+
+    let err_ship_hangar = handle_unload_ammo(
+        &ctx,
+        &sess,
+        &[
+            PyRep::Integer(ship_id),
+            PyRep::List(vec![PyRep::Integer(gun_id)]),
+            PyRep::Tuple(vec![
+                PyRep::Integer(ship_id),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ]),
+        ],
+    )
+    .unwrap_err();
+    assert_eq!(err_ship_hangar.code, "InvalidInventoryFlag");
+
+    // 4. Unloading to ship cargo when cargo is full or ship capacity is unknown/zero fails closed with NotEnoughCargoSpace
     let err_cargo = handle_unload_ammo(
         &ctx,
         &sess,
@@ -599,13 +629,77 @@ fn unload_ammo_docked_station_hangar_destination_and_invalid_dest_946() {
             PyRep::List(vec![PyRep::Integer(gun_id)]),
             PyRep::Tuple(vec![
                 PyRep::Integer(ship_id),
-                PyRep::Integer(char_id),
                 PyRep::Integer(InventoryFlag::Cargo as i64),
             ]),
         ],
     )
     .unwrap_err();
     assert_eq!(err_cargo.code, "NotEnoughCargoSpace");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.type_id = 999_999_999; // unknown ship type -> eval_cargo_cap is None -> fail closed
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    let err_unknown_cap = handle_unload_ammo(
+        &ctx,
+        &sess,
+        &[PyRep::Integer(ship_id), PyRep::List(vec![PyRep::Integer(gun_id)])],
+    )
+    .unwrap_err();
+    assert_eq!(err_unknown_cap.code, "NotEnoughCargoSpace");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.type_id = 587;
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    // 4b. Unloading into a packaged container (!singleton) or another owned ship in station hangar is rejected
+    let packaged_cont_id = 1_000_300_605;
+    let other_ship_id = 1_000_300_606;
+    insert_item(&ctx, packaged_cont_id, 3297, char_id, station_id, InventoryFlag::Hangar, 1, false);
+    insert_item(&ctx, other_ship_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    let err_pkg_cont = handle_unload_ammo(
+        &ctx,
+        &sess,
+        &[
+            PyRep::Integer(ship_id),
+            PyRep::List(vec![PyRep::Integer(gun_id)]),
+            PyRep::Integer(packaged_cont_id),
+        ],
+    )
+    .unwrap_err();
+    assert_eq!(err_pkg_cont.code, "ContainerNotAssembled");
+
+    let err_other_ship = handle_unload_ammo(
+        &ctx,
+        &sess,
+        &[
+            PyRep::Integer(ship_id),
+            PyRep::List(vec![PyRep::Integer(gun_id)]),
+            PyRep::Integer(other_ship_id),
+        ],
+    )
+    .unwrap_err();
+    assert_eq!(err_other_ship.code, "InvalidDestination");
+
+    // 4c. Malformed args[2] (<= 0 or non-integer), CorpSAG flag (116), or Hangar flag (4) on container fail closed
+    assert_eq!(
+        handle_unload_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::List(vec![PyRep::Integer(gun_id)]), PyRep::Integer(0)]).unwrap_err().code,
+        "InvalidDestination"
+    );
+    assert_eq!(
+        handle_unload_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::List(vec![PyRep::Integer(gun_id)]), PyRep::Tuple(vec![PyRep::Integer(station_id), PyRep::Integer(116)])]).unwrap_err().code,
+        "InvalidInventoryFlag"
+    );
+    let assembled_cont_id = 1_000_300_607;
+    insert_item(&ctx, assembled_cont_id, 3297, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    assert_eq!(
+        handle_unload_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::List(vec![PyRep::Integer(gun_id)]), PyRep::Tuple(vec![PyRep::Integer(assembled_cont_id), PyRep::Integer(InventoryFlag::Hangar as i64)])]).unwrap_err().code,
+        "InvalidInventoryFlag"
+    );
 
     // 5. Unloading to docked station hangar (station_id, char_id, 4) succeeds and moves charge to station hangar
     let _ = ctx.drain_notifications_for_char(char_id);

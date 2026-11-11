@@ -290,140 +290,143 @@ pub(crate) fn handle_unload_ammo(
         None | Some(PyRep::None) => (ship_id, None, None),
         Some(PyRep::Integer(loc_id)) if *loc_id > 0 => (*loc_id, None, None),
         Some(PyRep::Tuple(elems) | PyRep::List(elems)) => {
-            let loc_id = elems
-                .first()
-                .and_then(|e| e.as_i64())
-                .filter(|&id| id > 0)
-                .unwrap_or(ship_id);
-            let owner_opt = elems.get(1).and_then(|e| e.as_i64()).filter(|&id| id > 0);
-            let flag_opt = elems.get(2).and_then(|e| e.as_i64());
-            (loc_id, owner_opt, flag_opt)
+            let Some(loc_id) = elems.first().and_then(|e| e.as_i64()).filter(|&id| id > 0) else {
+                return Err(BridgeRpcError { code: "InvalidDestination".into(), message: "Unload destination locationID must be a positive integer".into() });
+            };
+            let parse_flag = |rep: Option<&PyRep>| -> Result<Option<i64>, BridgeRpcError> {
+                match rep {
+                    None | Some(PyRep::None) => Ok(None),
+                    Some(e) => e.as_i64().map(Some).ok_or_else(|| BridgeRpcError { code: "InvalidInventoryFlag".into(), message: "Invalid unload destination flag".into() }),
+                }
+            };
+            match elems.len() {
+                1 => (loc_id, None, None),
+                2 => (loc_id, None, parse_flag(elems.get(1))?),
+                _ => {
+                    let owner_opt = match elems.get(1) {
+                        None | Some(PyRep::None) => None,
+                        Some(e) => Some(e.as_i64().filter(|&id| id > 0).ok_or_else(|| BridgeRpcError { code: "ItemOwnershipViolation".into(), message: "Invalid unload destination ownerID".into() })?),
+                    };
+                    (loc_id, owner_opt, parse_flag(elems.get(2))?)
+                }
+            }
         }
-        Some(_) => (ship_id, None, None),
+        Some(_) => return Err(BridgeRpcError { code: "InvalidDestination".into(), message: "Invalid unload destination".into() }),
     };
     if let Some(dest_owner) = dest_owner_opt {
-        let char_corp = session.corporation_id.or_else(|| {
-            ctx.db
-                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
-        });
-        if dest_owner != char_id && Some(dest_owner) != char_corp {
-            return Err(BridgeRpcError {
-                code: "ItemOwnershipViolation".into(),
-                message: format!("Destination owner {dest_owner} does not match character {char_id}"),
-            });
+        if dest_owner != char_id {
+            return Err(BridgeRpcError { code: "ItemOwnershipViolation".into(), message: format!("Destination owner {dest_owner} does not match character {char_id}") });
         }
     }
-    let dest_flag = match dest_flag_raw_opt {
-        Some(rf) => {
-            if !matches!(
-                rf,
-                4 | 5 | 116..=122 | 133..=151 | 155 | 177 | 179 | 181 | 182 | 185
-            ) {
-                return Err(BridgeRpcError {
-                    code: "InvalidInventoryFlag".into(),
-                    message: format!("Invalid unload destination flag {rf}"),
-                });
-            }
-            InventoryFlag::from_u16(rf as u16)
+    if let Some(rf) = dest_flag_raw_opt {
+        if !matches!(rf, 4 | 5 | 64 | 133..=151 | 155 | 177 | 179 | 181 | 182 | 185) || (dest_loc_id == ship_id && matches!(rf, 4 | 64)) {
+            return Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: format!("Invalid unload destination flag {rf}") });
         }
-        None => {
-            if dest_loc_id == ship_id {
-                InventoryFlag::Cargo
-            } else {
-                InventoryFlag::Hangar
-            }
-        }
-    };
+    }
 
-    let ship_cargo_cap = if dest_loc_id == ship_id && dest_flag == InventoryFlag::Cargo {
-        Some(
-            ctx.get_or_rebuild_ship_fitting(char_id, ship_id)
-                .ok()
-                .map(|f| f.ship.get_attribute(attr_ids::CAPACITY, &ctx.sde))
-                .or_else(|| {
-                    ctx.db.with_snapshot(|s| {
-                        s.items
-                            .get(&ship_id)
-                            .and_then(|sh| ctx.sde.types.get(&sh.type_id))
-                            .map(|t| t.capacity)
-                    })
-                })
-                .unwrap_or(1_000_000.0),
-        )
-    } else {
-        None
-    };
+    let eval_cargo_cap = (dest_loc_id == ship_id)
+        .then(|| {
+            ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok().map(|f| f.ship.get_attribute(attr_ids::CAPACITY, &ctx.sde))
+                .or_else(|| ctx.db.with_snapshot(|s| s.items.get(&ship_id).and_then(|sh| ctx.sde.types.get(&sh.type_id)).map(|t| t.capacity)))
+        })
+        .flatten();
 
     let item_diffs = ctx.db.try_with_mut_snapshot(|snap| {
-        if dest_loc_id != ship_id {
-            let ch_dock = session
-                .station_id
-                .or(session.structure_id)
-                .or_else(|| snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id)));
+        let mut is_owned_container_target = false;
+        let dest_flag = if dest_loc_id == ship_id {
+            dest_flag_raw_opt.map(|rf| InventoryFlag::from_u16(rf as u16)).unwrap_or(InventoryFlag::Cargo)
+        } else {
+            let ch_dock = session.station_id.or(session.structure_id).or_else(|| snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id)));
             let is_docked_target = ch_dock == Some(dest_loc_id);
-            let is_owned_container_target = snap.items.get(&dest_loc_id).is_some_and(|d| {
-                d.owner_id == char_id
-                    && (d.location_id == ship_id || (ch_dock.is_some() && Some(d.location_id) == ch_dock))
-            });
-            if !is_docked_target && !is_owned_container_target {
-                return Err(BridgeRpcError {
-                    code: "InvalidDestination".into(),
-                    message: format!("Unload destination {dest_loc_id} is not accessible to character {char_id}"),
-                });
+            if is_docked_target {
+                if dest_flag_raw_opt.is_some_and(|rf| rf != 4) {
+                    return Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: "Station/structure unload requires Hangar flag (4)".into() });
+                }
+                InventoryFlag::Hangar
+            } else {
+                let Some(d) = snap.items.get(&dest_loc_id) else {
+                    return Err(BridgeRpcError { code: "InvalidDestination".into(), message: format!("Unload destination {dest_loc_id} is not accessible to character {char_id}") });
+                };
+                let d_grp = ctx.sde.types.get(&d.type_id).map(|t| t.group_id).unwrap_or(0);
+                if d.owner_id != char_id
+                    || (d.location_id != ship_id && !(ch_dock.is_some() && Some(d.location_id) == ch_dock))
+                    || !crate::services::fitting_containers_ships::is_container_group(d_grp, d.type_id)
+                    || d_grp == crate::services::mobile_deployables::GROUP_CRAB_BEACON
+                    || d_grp == 1247
+                {
+                    return Err(BridgeRpcError { code: "InvalidDestination".into(), message: format!("Unload destination {dest_loc_id} is not an accessible container") });
+                }
+                if !d.singleton && d_grp != crate::services::mobile_deployables::GROUP_MOBILE_DEPOT {
+                    return Err(BridgeRpcError { code: "ContainerNotAssembled".into(), message: format!("Target container {dest_loc_id} must be assembled before storing items") });
+                }
+                if dest_flag_raw_opt.is_some_and(|rf| !matches!(rf, 5 | 64)) {
+                    return Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: "Container unload requires Cargo (5) or Unlocked (64) flag".into() });
+                }
+                crate::services::fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, d)?;
+                let st = crate::services::fitting_containers_ships::read_container_ship_state_snap(snap);
+                if st.container_passwords.get(&dest_loc_id).is_some_and(|pw| !pw.is_empty() && !st.unlocked_containers.contains(&(dest_loc_id, char_id))) {
+                    return Err(BridgeRpcError { code: "ALSCPasswordRequired".into(), message: format!("Password required to move items into container {dest_loc_id}") });
+                }
+                is_owned_container_target = true;
+                if dest_flag_raw_opt == Some(64) { InventoryFlag::Unlocked } else { InventoryFlag::Cargo }
             }
-        }
-        let mut diffs: Vec<(Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>)> =
-            Vec::new();
-        let mut used_cargo: f64 = if ship_cargo_cap.is_some() {
-            snap.items
-                .values()
-                .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::Cargo)
-                .map(|i| {
-                    ctx.sde
-                        .types
-                        .get(&i.type_id)
-                        .map(|t| t.volume * (i.quantity.max(1) as f64))
-                        .unwrap_or(0.0)
+        };
+        let ship_type = snap.items.get(&ship_id).and_then(|sh| ctx.sde.types.get(&sh.type_id));
+        let dest_cap: Option<f64> = if dest_loc_id == ship_id {
+            let hold_cap = if dest_flag == InventoryFlag::Cargo {
+                eval_cargo_cap.unwrap_or(0.0)
+            } else {
+                ship_type.map(|st| crate::services::fitting_saved_apply::get_ship_hold_capacity(dest_flag as u16, st, eval_cargo_cap)).unwrap_or(0.0)
+            };
+            if hold_cap <= 0.0 {
+                return Err(BridgeRpcError { code: "NotEnoughCargoSpace".into(), message: "Not enough cargo space to unload ammo".into() });
+            }
+            Some(hold_cap)
+        } else if is_owned_container_target {
+            let cont_cap = snap.items.get(&dest_loc_id).and_then(|d| {
+                d.dynamic_attributes.get(&attr_ids::CAPACITY).copied().filter(|&c| c > 0.0).or_else(|| {
+                    ctx.sde.types.get(&d.type_id).map(|t| if t.capacity > 0.0 { t.capacity } else { t.default_attributes.get(&attr_ids::CAPACITY).copied().unwrap_or(0.0) })
                 })
+            }).unwrap_or(0.0);
+            if cont_cap <= 0.0 {
+                return Err(BridgeRpcError { code: "NotEnoughCargoSpace".into(), message: "Not enough cargo space to unload ammo".into() });
+            }
+            Some(cont_cap)
+        } else {
+            None
+        };
+        let mut diffs: Vec<(Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>)> = Vec::new();
+        let mut used_cargo: f64 = if dest_cap.is_some() {
+            snap.items.values()
+                .filter(|i| i.location_id == dest_loc_id && (dest_loc_id != ship_id || i.flag == dest_flag))
+                .map(|i| crate::services::fitting_containers_ships::effective_item_unit_volume(&ctx.sde, i) * (i.quantity.max(1) as f64))
                 .sum()
         } else {
             0.0
         };
 
         for &mod_id in &all_target_modules {
-            let Some(mod_item) = snap.items.get(&mod_id).cloned() else {
-                continue;
-            };
-            if mod_item.location_id != ship_id || !matches!(mod_item.flag as u16, 11..=34 | 125..=132) {
-                continue;
-            };
+            let Some(mod_item) = snap.items.get(&mod_id).cloned() else { continue };
+            if mod_item.location_id != ship_id || !matches!(mod_item.flag as u16, 11..=34 | 125..=132) { continue; }
             let slot_flag = mod_item.flag;
-            let charges: Vec<(i64, f64)> = snap
-                .items
-                .values()
-                .filter(|i| {
-                    i.location_id == ship_id
-                        && i.flag == slot_flag
-                        && i.item_id != mod_id
-                        && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 8)
-                })
-                .map(|i| {
-                    let vol = ctx
-                        .sde
-                        .types
-                        .get(&i.type_id)
-                        .map(|t| t.volume * (i.quantity.max(1) as f64))
-                        .unwrap_or(0.0);
-                    (i.item_id, vol)
-                })
+            let charges: Vec<(i64, u32, f64)> = snap.items.values()
+                .filter(|i| i.location_id == ship_id && i.flag == slot_flag && i.item_id != mod_id && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 8))
+                .map(|i| (i.item_id, i.type_id, crate::services::fitting_containers_ships::effective_item_unit_volume(&ctx.sde, i) * (i.quantity.max(1) as f64)))
                 .collect();
-            for (cid, vol) in charges {
-                if let Some(cap) = ship_cargo_cap {
+            if !charges.is_empty() && snap.module_active_states.contains(&mod_id) {
+                return Err(BridgeRpcError::user_error("ModuleIsActive"));
+            }
+            for (cid, charge_tid, vol) in charges {
+                if dest_loc_id == ship_id {
+                    if let (Some(st), Some(ct)) = (ship_type, ctx.sde.types.get(&charge_tid)) {
+                        if !crate::services::fitting_saved_apply::is_item_allowed_in_ship_hold(dest_flag as u16, ct, st) {
+                            return Err(BridgeRpcError::user_error("InvalidItemTypeForHold"));
+                        }
+                    }
+                }
+                if let Some(cap) = dest_cap {
                     if cap > 0.0 && used_cargo + vol > cap + 1e-4 {
-                        return Err(BridgeRpcError {
-                            code: "NotEnoughCargoSpace".into(),
-                            message: "Not enough cargo space to unload ammo".into(),
-                        });
+                        return Err(BridgeRpcError { code: "NotEnoughCargoSpace".into(), message: "Not enough cargo space to unload ammo".into() });
                     }
                 }
                 if let Some(ci) = snap.items.get_mut(&cid) {
@@ -436,6 +439,19 @@ pub(crate) fn handle_unload_ammo(
                     used_cargo += vol;
                 }
             }
+        }
+        if !diffs.is_empty() {
+            crate::services::fitting_containers_ships::write_container_ship_state_snap(snap, |st| {
+                for (_, post_opt) in &diffs {
+                    if let Some(post) = post_opt {
+                        if dest_loc_id == ship_id && dest_flag_raw_opt == Some(155) {
+                            st.custom_item_flags.insert(post.item_id, 155);
+                        } else {
+                            st.custom_item_flags.remove(&post.item_id);
+                        }
+                    }
+                }
+            });
         }
         Ok(diffs)
     })?;
