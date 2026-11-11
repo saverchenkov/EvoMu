@@ -1,5 +1,5 @@
-//! Independent raw client-file verification of all 9 `res:/localizationfsd/localization_fsd_*.pickle`
-//! V24.01 resources (`main`, `en-us`, `de`, `es`, `fr`, `ja`, `ko`, `ru`, `zh`).
+//! Independent raw client-file verification of all 10 `res:/localizationfsd/localization_fsd_*.pickle`
+//! V24.01 resources (`main`, `en-us`, `de`, `es`, `fr`, `it`, `ja`, `ko`, `ru`, `zh`).
 
 #![forbid(unsafe_code)]
 
@@ -9,7 +9,7 @@ use eve_sde::SdeRegistry;
 use raw_client::{md5_hex, resfiles_dir, unpickle, PyVal};
 use std::collections::HashSet;
 
-fn verify_language_pickle(
+fn verify_language_pickle_entries(
     sde: &SdeRegistry,
     lang: &str,
     rel_path: &str,
@@ -73,6 +73,24 @@ fn verify_language_pickle(
             "localized text mismatch in {lang} for messageID {msg_id}"
         );
     }
+}
+
+fn verify_language_pickle(
+    sde: &SdeRegistry,
+    lang: &str,
+    rel_path: &str,
+    expected_size: usize,
+    expected_md5: &str,
+    expected_records: usize,
+) {
+    verify_language_pickle_entries(
+        sde,
+        lang,
+        rel_path,
+        expected_size,
+        expected_md5,
+        expected_records,
+    );
 
     assert!(
         sde.localized_type_name(lang, 587).is_some(),
@@ -262,5 +280,29 @@ fn test_sde_localization_fsd_cjk_ru_locales_full_verification() {
         61_334_886,
         "468af73100512587c6eab7ea5a1528ca",
         305_235,
+    );
+}
+
+// parity: sde:res:/localizationfsd/localization_fsd_it.pickle
+#[test]
+fn test_sde_localization_fsd_it_locale_full_verification() {
+    eve_testkit::attest(&["sde:res:/localizationfsd/localization_fsd_it.pickle"]);
+
+    let sde = SdeRegistry::open(&SdeRegistry::default_db_path())
+        .expect("SdeRegistry::open must succeed");
+
+    // Italian is a partial V24.01 localization pickle (7,452 legacy UI strings, not full type names).
+    verify_language_pickle_entries(
+        &sde,
+        "it",
+        "9f/9f056f7130bc9bf8_2bafd91c1bc13ff34c615e5536baa74a",
+        1_711_389,
+        "2bafd91c1bc13ff34c615e5536baa74a",
+        7_452,
+    );
+    assert_eq!(sde.localized_message("it", 47).as_deref(), Some("Gennaio"));
+    assert_eq!(
+        sde.localized_message("it-IT,it;q=0.9", 48).as_deref(),
+        Some("Febbraio")
     );
 }

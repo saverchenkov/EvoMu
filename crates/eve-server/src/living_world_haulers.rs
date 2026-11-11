@@ -295,3 +295,6 @@ mod living_world_haulers_tests;
 #[cfg(test)] #[path = "living_world_haulers_extra_tests.rs"]
 mod living_world_haulers_extra_tests;
 
+#[cfg(test)] #[path = "living_world_haulers_edges2_tests.rs"]
+mod living_world_haulers_edges2_tests;
+

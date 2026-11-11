@@ -200,15 +200,69 @@ fn seed_market_catalog_internal(
     sde: &SdeRegistry,
     full_jita_catalog: bool,
 ) -> usize {
-    let baseline_type_ids = select_seeded_market_types(sde);
-    let baseline_set: std::collections::HashSet<TypeId> =
-        baseline_type_ids.iter().copied().collect();
-    let full_type_ids = if full_jita_catalog {
-        select_full_market_types(sde)
+    type MarketCatalogCacheKey = (std::path::PathBuf, u64, usize, usize, usize, bool);
+    type MarketCatalogPrecomp = std::sync::Arc<(
+        Vec<TypeId>,
+        std::collections::HashSet<TypeId>,
+        Vec<TypeId>,
+        std::collections::HashMap<TypeId, f64>,
+    )>;
+    static MARKET_CATALOG_CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<MarketCatalogCacheKey, MarketCatalogPrecomp>>,
+    > = std::sync::OnceLock::new();
+
+    let precomp: MarketCatalogPrecomp = if let Some(key) = sde.db_path.as_ref().and_then(|p| {
+        std::fs::metadata(p).ok().map(|m| {
+            (
+                p.clone(),
+                m.len(),
+                sde.types.len(),
+                sde.blueprints.len(),
+                sde.resources.len(),
+                full_jita_catalog,
+            )
+        })
+    }) {
+        let cache = MARKET_CATALOG_CACHE
+            .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+        let hit = cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned();
+        if let Some(found) = hit {
+            found
+        } else {
+            let baseline_type_ids = select_seeded_market_types(sde);
+            let baseline_set: std::collections::HashSet<TypeId> =
+                baseline_type_ids.iter().copied().collect();
+            let full_type_ids = if full_jita_catalog {
+                select_full_market_types(sde)
+            } else {
+                Vec::new()
+            };
+            let bom_map = build_bom_cost_map(sde);
+            let built =
+                std::sync::Arc::new((baseline_type_ids, baseline_set, full_type_ids, bom_map));
+            cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(key, std::sync::Arc::clone(&built));
+            built
+        }
     } else {
-        Vec::new()
+        let baseline_type_ids = select_seeded_market_types(sde);
+        let baseline_set: std::collections::HashSet<TypeId> =
+            baseline_type_ids.iter().copied().collect();
+        let full_type_ids = if full_jita_catalog {
+            select_full_market_types(sde)
+        } else {
+            Vec::new()
+        };
+        let bom_map = build_bom_cost_map(sde);
+        std::sync::Arc::new((baseline_type_ids, baseline_set, full_type_ids, bom_map))
     };
-    let bom_map = build_bom_cost_map(sde);
+    let (baseline_type_ids, baseline_set, full_type_ids, bom_map) = &*precomp;
 
     db.try_with_mut_snapshot::<_, usize, String>(|snap| {
         snap.markets_seeded = true;
@@ -225,10 +279,10 @@ fn seed_market_catalog_internal(
             .map(|o| (o.owner_id, o.station_id, o.type_id, o.is_bid))
             .collect();
         for &(station_id, region_id, hub_mult) in TRADE_HUB_STATIONS {
-            let station_types = if full_jita_catalog && station_id == 60_003_760 {
-                &full_type_ids
+            let station_types: &[TypeId] = if full_jita_catalog && station_id == 60_003_760 {
+                full_type_ids.as_slice()
             } else {
-                &baseline_type_ids
+                baseline_type_ids.as_slice()
             };
             for &type_id in station_types {
                 let Some(inv_type) = sde.types.get(&type_id) else {
@@ -314,7 +368,7 @@ fn seed_market_catalog_internal(
                 }
             }
         }
-        inserted += seed_npc_skillbooks_and_faction_items(snap, sde, &bom_map, &mut existing);
+        inserted += seed_npc_skillbooks_and_faction_items(snap, sde, bom_map, &mut existing);
         Ok(inserted)
     })
     .unwrap_or(0)
@@ -401,4 +455,8 @@ mod world_seeder_tests;
 #[cfg(test)]
 #[path = "world_seeder_extra_tests.rs"]
 mod world_seeder_extra_tests;
+
+#[cfg(test)]
+#[path = "world_seeder_edges2_tests.rs"]
+mod world_seeder_edges2_tests;
 

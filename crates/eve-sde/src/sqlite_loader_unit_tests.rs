@@ -274,3 +274,242 @@ fn load_uncached_populates_all_domain_tables_and_handles_edge_cases() {
     assert!(sde_leg.type_materials.contains_key(&34));
     let _ = std::fs::remove_file(&legacy_path);
 }
+
+#[test]
+fn load_uncached_reads_belt_asteroid_tables_from_sqlite_without_resfiles() {
+    let db_path = std::env::temp_dir().join(format!(
+        "evomu_belt_sqlite_only_{}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&db_path);
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        create_base_sde_schema(&conn, true);
+        conn.execute_batch(
+            "ALTER TABLE sde_types ADD COLUMN isis_group_id INTEGER;
+             CREATE TABLE sde_belt_asteroid_counts (belt_id INTEGER PRIMARY KEY, counts_json TEXT NOT NULL);
+             CREATE TABLE sde_system_asteroid_types (system_id INTEGER PRIMARY KEY, type_ids_json TEXT NOT NULL);
+             INSERT INTO sde_solar_systems VALUES (30000142, 20000020, 10000002, 'Jita', 0.9, 0.0, 0.0, 0.0, 1000.0, '[]', NULL);
+             INSERT INTO sde_types (type_id, group_id, category_id, name, mass, volume, capacity, portion_size, base_price, radius, market_group_id, race_id, faction_id, variation_parent_type_id, wreck_type_id, published, attributes_json, effects_json, isis_group_id) VALUES
+                (1230, 462, 25, 'Veldspar', 1.0, 0.1, 0.0, 100, 10.0, 200.0, NULL, NULL, NULL, NULL, NULL, 1, '{}', '[]', 8),
+                (1228, 460, 25, 'Scordite', 1.0, 0.15, 0.0, 100, 12.0, 200.0, NULL, NULL, NULL, NULL, NULL, 1, '{}', '[]', 0),
+                (1229, 460, 25, 'Pyroxeres', 1.0, 0.15, 0.0, 100, 12.0, 200.0, NULL, NULL, NULL, NULL, NULL, 1, '{}', '[]', -3);
+             INSERT INTO sde_belt_asteroid_counts VALUES
+                (40009080, '{\"1228\":8,\"1230\":21}');
+             INSERT INTO sde_system_asteroid_types VALUES
+                (30000142, '[1230,1228,1230]');",
+        )
+        .unwrap();
+    }
+
+    let sde = SdeRegistry::load_uncached(db_path.clone()).expect("sqlite-only belt tables must load");
+    assert_eq!(sde.type_isis_group_id(1230), Some(8));
+    assert_eq!(sde.type_isis_group_id(1228), None);
+    assert_eq!(sde.type_isis_group_id(1229), None);
+    assert!(sde.resources.is_empty(), "No ResFiles catalog needed for SQLite belt tables");
+    assert_eq!(sde.asteroid_counts_by_belt.len(), 1);
+    let counts = sde.belt_asteroid_counts(40_009_080).expect("belt counts present");
+    assert_eq!(counts.get(&1228), Some(&8));
+    assert_eq!(counts.get(&1230), Some(&21));
+    assert_eq!(sde.system_asteroid_types(30_000_142), &[1228, 1230]);
+    let belt_ores: Vec<TypeId> = sde
+        .belt_ores_for_system(30_000_142)
+        .into_iter()
+        .map(|t| t.type_id)
+        .collect();
+    assert_eq!(belt_ores, vec![1230, 1228]);
+
+    // Empty SQLite tables should gracefully keep empty maps when ResFiles also do not exist
+    let empty_db = std::env::temp_dir().join(format!(
+        "evomu_belt_sqlite_empty_{}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&empty_db);
+    {
+        let conn = Connection::open(&empty_db).unwrap();
+        create_base_sde_schema(&conn, true);
+        conn.execute_batch(
+            "CREATE TABLE sde_belt_asteroid_counts (belt_id INTEGER PRIMARY KEY, counts_json TEXT NOT NULL);
+             CREATE TABLE sde_system_asteroid_types (system_id INTEGER PRIMARY KEY, type_ids_json TEXT NOT NULL);",
+        )
+        .unwrap();
+    }
+    let sde_empty = SdeRegistry::load_uncached(empty_db.clone()).expect("empty tables fallback");
+    assert!(sde_empty.asteroid_counts_by_belt.is_empty());
+    assert!(sde_empty.asteroid_types_by_system.is_empty());
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(&empty_db);
+}
+
+#[test]
+fn load_belt_and_system_asteroid_tables_sqlite_fallback_and_sanitization() {
+    let conn = Connection::open_in_memory().unwrap();
+    // Missing tables -> None
+    assert!(SdeRegistry::load_belt_asteroid_counts_from_sqlite(&conn).is_none());
+    assert!(SdeRegistry::load_system_asteroid_types_from_sqlite(&conn).is_none());
+
+    conn.execute_batch(
+        "CREATE TABLE sde_belt_asteroid_counts (belt_id INTEGER PRIMARY KEY, counts_json TEXT NOT NULL);
+         CREATE TABLE sde_system_asteroid_types (system_id INTEGER PRIMARY KEY, type_ids_json TEXT NOT NULL);
+         INSERT INTO sde_belt_asteroid_counts VALUES (40000003, 'not-json');
+         INSERT INTO sde_system_asteroid_types VALUES (30000144, 'not-json');",
+    )
+    .unwrap();
+    // Corrupt JSON rows -> None fallback
+    assert!(SdeRegistry::load_belt_asteroid_counts_from_sqlite(&conn).is_none());
+    assert!(SdeRegistry::load_system_asteroid_types_from_sqlite(&conn).is_none());
+
+    conn.execute_batch(
+        "DELETE FROM sde_belt_asteroid_counts;
+         DELETE FROM sde_system_asteroid_types;
+         INSERT INTO sde_belt_asteroid_counts VALUES (40000001, '{\"1230\":15,\"1228\":5}');
+         INSERT INTO sde_system_asteroid_types VALUES (30000142, '[1230, 1228, 1230]');",
+    )
+    .unwrap();
+
+    let belts = SdeRegistry::load_belt_asteroid_counts_from_sqlite(&conn).expect("loaded belts");
+    assert_eq!(belts.len(), 1);
+    assert_eq!(
+        belts[&40_000_001],
+        HashMap::from([(1230u32, 15u32), (1228u32, 5u32)])
+    );
+
+    let sys = SdeRegistry::load_system_asteroid_types_from_sqlite(&conn).expect("loaded sys");
+    assert_eq!(sys.len(), 1);
+    assert_eq!(sys[&30_000_142], vec![1228u32, 1230u32]);
+}
+
+#[test]
+fn load_uncached_rejects_every_missing_required_table() {
+    let tables = [
+        "sde_resources",
+        "sde_categories",
+        "sde_groups",
+        "sde_types",
+        "sde_dogma_attributes",
+        "sde_dogma_effects",
+        "sde_type_materials",
+        "sde_blueprints",
+        "sde_regions",
+        "sde_constellations",
+        "sde_station_operations",
+        "sde_station_services",
+        "sde_factions",
+        "sde_npc_corporations",
+        "sde_stations",
+        "sde_solar_systems",
+        "sde_stargates",
+        "sde_races",
+        "sde_bloodlines",
+        "sde_ancestries",
+        "sde_schools",
+        "sde_agents",
+        "sde_market_groups",
+        "sde_planet_schematics",
+        "sde_wormhole_types",
+        "sde_npc_spawn_groups",
+        "sde_clone_grades",
+        "sde_dbuff_collections",
+        "sde_fighter_abilities",
+        "sde_compressible_types",
+        "sde_type_lists",
+        "sde_dungeon_asteroid_counts",
+        "sde_dungeon_gas_types",
+        "sde_dynamic_item_attributes",
+        "sde_space_components",
+        "sde_missions",
+        "sde_dungeons",
+        "sde_epic_arcs",
+        "sde_node_graphs",
+        "sde_fighter_abilities_by_type",
+    ];
+    let db_path = std::env::temp_dir().join(format!(
+        "evomu_missing_tbl_{}.sqlite",
+        std::process::id()
+    ));
+    for tbl in tables {
+        let _ = std::fs::remove_file(&db_path);
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            create_base_sde_schema(&conn, true);
+            conn.execute(&format!("DROP TABLE {tbl}"), []).unwrap();
+        }
+        assert!(
+            SdeRegistry::load_uncached(db_path.clone()).is_err(),
+            "expected error when {tbl} is dropped"
+        );
+    }
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn load_uncached_rejects_bad_column_types_in_early_tables() {
+    let db_path = std::env::temp_dir().join(format!(
+        "evomu_bad_cols_sde_{}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&db_path);
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        create_base_sde_schema(&conn, true);
+    }
+    let stmts = [
+        // sde_resources (7 cols: res_path, cdn_relative_path, md5, byte_size, format, record_count, spot)
+        ("DELETE FROM sde_resources", "INSERT INTO sde_resources VALUES (X'FF', 'a', 'm', 1, 'cfsd', 0, '')"),
+        ("DELETE FROM sde_resources", "INSERT INTO sde_resources VALUES ('r', X'FF', 'm', 1, 'cfsd', 0, '')"),
+        ("DELETE FROM sde_resources", "INSERT INTO sde_resources VALUES ('r', 'a', X'FF', 1, 'cfsd', 0, '')"),
+        ("DELETE FROM sde_resources", "INSERT INTO sde_resources VALUES ('r', 'a', 'm', 'bad', 'cfsd', 0, '')"),
+        ("DELETE FROM sde_resources", "INSERT INTO sde_resources VALUES ('r', 'a', 'm', 1, X'FF', 0, '')"),
+        ("DELETE FROM sde_resources", "INSERT INTO sde_resources VALUES ('r', 'a', 'm', 1, 'cfsd', 'bad', '')"),
+        ("DELETE FROM sde_resources", "INSERT INTO sde_resources VALUES ('r', 'a', 'm', 1, 'cfsd', 0, X'FF')"),
+        // sde_categories
+        ("DELETE FROM sde_resources; DELETE FROM sde_categories", "INSERT INTO sde_categories VALUES (1, X'FF', 1)"),
+        ("DELETE FROM sde_categories", "INSERT INTO sde_categories VALUES (1, 'Cat', 'bad')"),
+        // sde_groups (8 cols)
+        ("DELETE FROM sde_categories; DELETE FROM sde_groups", "INSERT INTO sde_groups VALUES (1, 'bad', 'G', 0, 0, 0, 0, 1)"),
+        ("DELETE FROM sde_groups", "INSERT INTO sde_groups VALUES (1, 1, X'FF', 0, 0, 0, 0, 1)"),
+        ("DELETE FROM sde_groups", "INSERT INTO sde_groups VALUES (1, 1, 'G', 'bad', 0, 0, 0, 1)"),
+        ("DELETE FROM sde_groups", "INSERT INTO sde_groups VALUES (1, 1, 'G', 0, 'bad', 0, 0, 1)"),
+        ("DELETE FROM sde_groups", "INSERT INTO sde_groups VALUES (1, 1, 'G', 0, 0, 'bad', 0, 1)"),
+        ("DELETE FROM sde_groups", "INSERT INTO sde_groups VALUES (1, 1, 'G', 0, 0, 0, 'bad', 1)"),
+        ("DELETE FROM sde_groups", "INSERT INTO sde_groups VALUES (1, 1, 'G', 0, 0, 0, 0, 'bad')"),
+        // sde_types bad non-PK cols & JSON parse failures
+        ("DELETE FROM sde_groups; DELETE FROM sde_types", "INSERT INTO sde_types VALUES (1, 1, 1, 'T', 1.0, 1.0, 0.0, 1, 0.0, 1.0, NULL, NULL, NULL, NULL, NULL, 1, '{bad', '[]', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"),
+        ("DELETE FROM sde_types", "INSERT INTO sde_types VALUES (1, 1, 1, 'T', 1.0, 1.0, 0.0, 1, 0.0, 1.0, NULL, NULL, NULL, NULL, NULL, 1, '{}', '{bad', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"),
+        ("DELETE FROM sde_types", "INSERT INTO sde_types VALUES (1, 1, 1, 'T', 1.0, 1.0, 0.0, 1, 0.0, 1.0, NULL, NULL, NULL, NULL, 'bad', 1, '{}', '[]', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"),
+        ("DELETE FROM sde_types", "INSERT INTO sde_types VALUES (1, 1, 1, 'T', 1.0, 1.0, 0.0, 1, 0.0, 1.0, NULL, NULL, NULL, NULL, NULL, 1, '{}', '[]', 'bad', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"),
+        ("DELETE FROM sde_types", "INSERT INTO sde_types VALUES (1, 1, 1, 'T', 1.0, 1.0, 0.0, 1, 0.0, 1.0, NULL, NULL, NULL, NULL, NULL, 1, '{}', '[]', NULL, 'bad', NULL, NULL, NULL, NULL, NULL, NULL, NULL)"),
+        ("DELETE FROM sde_types", "INSERT INTO sde_types VALUES (1, 1, 1, 'T', 1.0, 1.0, 0.0, 1, 0.0, 1.0, NULL, NULL, NULL, NULL, NULL, 1, '{}', '[]', NULL, NULL, 'bad', NULL, NULL, NULL, NULL, NULL, NULL)"),
+        ("DELETE FROM sde_types", "INSERT INTO sde_types VALUES (1, 1, 1, 'T', 1.0, 1.0, 0.0, 1, 0.0, 1.0, NULL, NULL, NULL, NULL, NULL, 1, '{}', '[]', NULL, NULL, NULL, 'bad', NULL, NULL, NULL, NULL, NULL)"),
+        ("DELETE FROM sde_types", "INSERT INTO sde_types VALUES (1, 1, 1, 'T', 1.0, 1.0, 0.0, 1, 0.0, 1.0, NULL, NULL, NULL, NULL, NULL, 1, '{}', '[]', NULL, NULL, NULL, NULL, 'bad', NULL, NULL, NULL, NULL)"),
+        ("DELETE FROM sde_types", "INSERT INTO sde_types VALUES (1, 1, 1, 'T', 1.0, 1.0, 0.0, 1, 0.0, 1.0, NULL, NULL, NULL, NULL, NULL, 1, '{}', '[]', NULL, NULL, NULL, NULL, NULL, 'bad', NULL, NULL, NULL)"),
+        ("DELETE FROM sde_types", "INSERT INTO sde_types VALUES (1, 1, 1, 'T', 1.0, 1.0, 0.0, 1, 0.0, 1.0, NULL, NULL, NULL, NULL, NULL, 1, '{}', '[]', NULL, NULL, NULL, NULL, NULL, NULL, 'bad', NULL, NULL)"),
+        ("DELETE FROM sde_types", "INSERT INTO sde_types VALUES (1, 1, 1, 'T', 1.0, 1.0, 0.0, 1, 0.0, 1.0, NULL, NULL, NULL, NULL, NULL, 1, '{}', '[]', NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'bad', NULL)"),
+        ("DELETE FROM sde_types", "INSERT INTO sde_types VALUES (1, 1, 1, 'T', 1.0, 1.0, 0.0, 1, 0.0, 1.0, NULL, NULL, NULL, NULL, NULL, 1, '{}', '[]', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, X'FF')"),
+        ("DELETE FROM sde_types", "INSERT INTO sde_types VALUES (1, 'bad', 1, 'T', 1.0, 1.0, 0.0, 1, 0.0, 1.0, NULL, NULL, NULL, NULL, NULL, 1, '{}', '[]', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"),
+        ("DELETE FROM sde_types", "INSERT INTO sde_types VALUES (1, 1, 'bad', 'T', 1.0, 1.0, 0.0, 1, 0.0, 1.0, NULL, NULL, NULL, NULL, NULL, 1, '{}', '[]', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"),
+        ("DELETE FROM sde_types", "INSERT INTO sde_types VALUES (1, 1, 1, X'FF', 1.0, 1.0, 0.0, 1, 0.0, 1.0, NULL, NULL, NULL, NULL, NULL, 1, '{}', '[]', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"),
+        ("DELETE FROM sde_types", "INSERT INTO sde_types VALUES (1, 1, 1, 'T', 'bad', 1.0, 0.0, 1, 0.0, 1.0, NULL, NULL, NULL, NULL, NULL, 1, '{}', '[]', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"),
+        ("DELETE FROM sde_types", "INSERT INTO sde_types VALUES (1, 1, 1, 'T', 1.0, 'bad', 0.0, 1, 0.0, 1.0, NULL, NULL, NULL, NULL, NULL, 1, '{}', '[]', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"),
+        ("DELETE FROM sde_types", "INSERT INTO sde_types VALUES (1, 1, 1, 'T', 1.0, 1.0, 'bad', 1, 0.0, 1.0, NULL, NULL, NULL, NULL, NULL, 1, '{}', '[]', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"),
+        ("DELETE FROM sde_types", "INSERT INTO sde_types VALUES (1, 1, 1, 'T', 1.0, 1.0, 0.0, 'bad', 0.0, 1.0, NULL, NULL, NULL, NULL, NULL, 1, '{}', '[]', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"),
+        ("DELETE FROM sde_types", "INSERT INTO sde_types VALUES (1, 1, 1, 'T', 1.0, 1.0, 0.0, 1, 'bad', 1.0, NULL, NULL, NULL, NULL, NULL, 1, '{}', '[]', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"),
+        ("DELETE FROM sde_types", "INSERT INTO sde_types VALUES (1, 1, 1, 'T', 1.0, 1.0, 0.0, 1, 0.0, 'bad', NULL, NULL, NULL, NULL, NULL, 1, '{}', '[]', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"),
+        ("DELETE FROM sde_types", "INSERT INTO sde_types VALUES (1, 1, 1, 'T', 1.0, 1.0, 0.0, 1, 0.0, 1.0, 'bad', NULL, NULL, NULL, NULL, 1, '{}', '[]', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"),
+        ("DELETE FROM sde_types", "INSERT INTO sde_types VALUES (1, 1, 1, 'T', 1.0, 1.0, 0.0, 1, 0.0, 1.0, NULL, 'bad', NULL, NULL, NULL, 1, '{}', '[]', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"),
+        ("DELETE FROM sde_types", "INSERT INTO sde_types VALUES (1, 1, 1, 'T', 1.0, 1.0, 0.0, 1, 0.0, 1.0, NULL, NULL, 'bad', NULL, NULL, 1, '{}', '[]', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"),
+    ];
+    for (prep, ins) in stmts {
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(prep).unwrap();
+            conn.execute_batch(ins).unwrap();
+        }
+        assert!(
+            SdeRegistry::load_uncached(db_path.clone()).is_err(),
+            "expected error for {ins}"
+        );
+    }
+    let _ = std::fs::remove_file(&db_path);
+}

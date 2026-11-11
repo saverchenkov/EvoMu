@@ -317,3 +317,58 @@ fn sync_extension_tables_propagates_sql_errors_across_all_tables() {
         }
     }
 }
+
+#[test]
+fn load_and_rollback_corrupt_or_missing_tables_graceful_paths() {
+    use crate::sqlite_store::load::load_snapshot_from_sqlite;
+    use crate::sqlite_store::rollback::rollback_dirty_from_sqlite;
+    use crate::sqlite_store::schema::apply_migrations;
+
+    // Missing optional/late tables in load_snapshot_from_sqlite gracefully leave defaults
+    let conn = Connection::open_in_memory().unwrap();
+    apply_migrations(&conn).unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO skill_history (character_id, history_json) VALUES (90000001, '{bad')",
+        [],
+    )
+    .unwrap();
+    let (loaded, _fp) = load_snapshot_from_sqlite(&conn).unwrap();
+    assert!(!loaded.skill_history.contains_key(&90_000_001));
+
+    // Rollback against empty DB where fp expected populated rows does not panic
+    let mut snap = WorldStateSnapshot::default();
+    let mut expect_fp = TableFingerprints::default();
+    expect_fp.skill_history.insert(90_000_001, 12345);
+    expect_fp.item_custom_names.insert(100, 123);
+    expect_fp.item_positions.insert(100, 123);
+    expect_fp.structure_vulnerability_windows.insert(1_000_000_000_001, (1, 2));
+    expect_fp.character_doll_info.insert(90_000_001, 123);
+    expect_fp.asteroids.insert(700, 123);
+    expect_fp.character_last_jump_unix.insert(90_000_001, 1);
+    expect_fp.character_cspa_charges.insert(90_000_001, 1);
+    expect_fp.mail_timestamps.insert(1, 1);
+    expect_fp.character_login_stats.insert(90_000_001, 1);
+    rollback_dirty_from_sqlite(&conn, &mut snap, &expect_fp).unwrap();
+
+    for tbl in [
+        "asteroids",
+        "character_last_jump_unix",
+        "character_cspa_charges",
+        "mail_timestamps",
+        "character_login_stats",
+        "item_custom_names",
+        "item_positions",
+        "structure_vulnerability_windows",
+        "skill_history",
+        "character_doll_info",
+    ] {
+        let c2 = Connection::open_in_memory().unwrap();
+        apply_migrations(&c2).unwrap();
+        c2.execute(&format!("DROP TABLE {tbl}"), []).unwrap();
+        let (s2, _) = load_snapshot_from_sqlite(&c2).unwrap();
+        let mut r2 = WorldStateSnapshot::default();
+        rollback_dirty_from_sqlite(&c2, &mut r2, &expect_fp).unwrap();
+        let _ = s2;
+    }
+    drop(conn);
+}

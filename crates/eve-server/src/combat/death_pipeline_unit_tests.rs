@@ -104,9 +104,10 @@ fn spawn_ship(
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn death_pipeline_rejects_non_ship_and_covers_all_insurance_branches() {
     let ctx = test_ctx();
+    ctx.set_clock(Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(1_800_000_000)));
     let sys_id = 30_000_142;
     let victim = 90_000_001;
     let attacker = 90_000_002;
@@ -226,7 +227,7 @@ async fn death_pipeline_rejects_non_ship_and_covers_all_insurance_branches() {
     assert_eq!(cs_res.insurance_payout_isk, 612_345.0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn death_pipeline_rigs_orphans_nested_courier_disconnected_and_lowsec_pod_stage5() {
     let ctx = test_ctx();
     let sys_id = 30_002_813; // Low-sec system
@@ -361,7 +362,7 @@ async fn death_pipeline_rigs_orphans_nested_courier_disconnected_and_lowsec_pod_
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn self_destruct_assist_attribution_and_timer_boundaries() {
     let ctx = test_ctx();
     let sys_id = 30_000_142;
@@ -454,7 +455,7 @@ async fn self_destruct_assist_attribution_and_timer_boundaries() {
     assert!(!mgr.is_self_destructing(ship2));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_self_destruct_sync_denies_uncontested_insurance_loot_validates_ownership_and_credits_aggressor() {
     let ctx = test_ctx();
     let sys_id = 30_000_142_u32;
@@ -572,7 +573,7 @@ async fn live_self_destruct_sync_denies_uncontested_insurance_loot_validates_own
     assert_eq!(km.attacker_character_id, attacker);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn death_pipeline_sets_wreck_and_capsule_names_queues_set_state_and_emits_insurance_journal_and_mail() {
     let ctx = test_ctx();
     let sys_id = 30_000_142_u32;
@@ -692,4 +693,447 @@ async fn death_pipeline_sets_wreck_and_capsule_names_queues_set_state_and_emits_
         notifs.iter().any(|n| n.event == "OnMailSent"),
         "insurance payout must emit OnMailSent mail notification (#731)"
     );
+}
+
+#[test]
+fn descendant_check_drain_nested_and_resolve_ship_contents_cover_all_edges() {
+    let ctx = test_ctx();
+    let ship_id = 200_100_001;
+    let esc_frig_id = 200_100_002;
+    let cargo_frig_id = 200_100_003;
+    let wrap_id = 200_100_004;
+    let wrapped_item_id = 200_100_005;
+    let container_id = 200_100_006;
+    let nested_item_id = 200_100_007;
+    let unknown_type_item_id = 200_100_008;
+    let rig_item_id = 200_100_009;
+    let self_loop_id = 200_100_010;
+
+    // Register fittings on both nested frigates
+    {
+        let mut guard = ctx.ship_fittings.write().unwrap();
+        let mut f_esc = eve_dogma::ShipFittingEngine::from_sde(esc_frig_id, 587, &ctx.sde);
+        f_esc.modules.insert(
+            200_100_101,
+            eve_dogma::FittedModule {
+                item_id: 200_100_101,
+                type_id: 2048,
+                flag_id: 11,
+                state: eve_dogma::ModuleState::Online,
+                damage_hp: 0.0,
+                max_hp: 40.0,
+                charge_type_id: None,
+                charge_quantity: 0,
+                dynamic_attribute_overrides: HashMap::new(),
+            },
+        );
+        guard.insert(esc_frig_id, f_esc);
+
+        let mut f_cargo = eve_dogma::ShipFittingEngine::from_sde(cargo_frig_id, 587, &ctx.sde);
+        f_cargo.modules.insert(
+            200_100_102,
+            eve_dogma::FittedModule {
+                item_id: 200_100_102,
+                type_id: 2048,
+                flag_id: 12,
+                state: eve_dogma::ModuleState::Online,
+                damage_hp: 0.0,
+                max_hp: 40.0,
+                charge_type_id: None,
+                charge_quantity: 0,
+                dynamic_attribute_overrides: HashMap::new(),
+            },
+        );
+        guard.insert(cargo_frig_id, f_cargo);
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            make_item(ship_id, 638, 90_000_001, 30_000_142, InventoryFlag::None, 1, 0.0),
+        );
+        snap.items.insert(
+            esc_frig_id,
+            make_item(
+                esc_frig_id,
+                587,
+                90_000_001,
+                ship_id,
+                InventoryFlag::from_u16(177),
+                1,
+                0.0,
+            ),
+        );
+        snap.items.insert(
+            cargo_frig_id,
+            make_item(cargo_frig_id, 587, 90_000_001, ship_id, InventoryFlag::Cargo, 1, 0.0),
+        );
+        snap.items.insert(
+            self_loop_id,
+            make_item(self_loop_id, 34, 90_000_001, self_loop_id, InventoryFlag::Cargo, 1, 0.0),
+        );
+        snap.items.insert(
+            wrap_id,
+            make_item(wrap_id, 3468, 90_000_001, ship_id, InventoryFlag::Cargo, 1, 0.0),
+        );
+        snap.items.insert(
+            wrapped_item_id,
+            make_item(wrapped_item_id, 34, 90_000_001, wrap_id, InventoryFlag::None, 10, 0.0),
+        );
+        snap.items.insert(
+            container_id,
+            make_item(container_id, 23, 90_000_001, ship_id, InventoryFlag::Cargo, 1, 0.0),
+        );
+        snap.items.insert(
+            nested_item_id,
+            make_item(nested_item_id, 34, 90_000_001, container_id, InventoryFlag::Cargo, 25, 0.0),
+        );
+        snap.items.insert(
+            unknown_type_item_id,
+            make_item(unknown_type_item_id, 999_999_888, 90_000_001, ship_id, InventoryFlag::Cargo, 3, 0.0),
+        );
+        snap.items.insert(
+            rig_item_id,
+            make_item(rig_item_id, 31_790, 90_000_001, ship_id, InventoryFlag::RigSlot0, 1, 0.0),
+        );
+
+        // Deep chain > 8 hops
+        let mut prev = ship_id;
+        for i in 0..10 {
+            let nid = 200_100_200 + i;
+            snap.items.insert(
+                nid,
+                make_item(nid, 23, 90_000_001, prev, InventoryFlag::Cargo, 1, 0.0),
+            );
+            prev = nid;
+        }
+        assert!(is_item_descendant_of_in_snap(snap, wrapped_item_id, ship_id));
+        assert!(!is_item_descendant_of_in_snap(snap, self_loop_id, ship_id));
+        assert!(!is_item_descendant_of_in_snap(snap, 999_999_999, ship_id));
+        assert!(!is_item_descendant_of_in_snap(snap, 200_100_209, ship_id));
+    });
+
+    // drain_nested_ship_fittings with exclude_escape_bay = true drains only cargo_frig_id
+    let drained_no_esc = drain_nested_ship_fittings(&ctx, ship_id, true);
+    assert_eq!(drained_no_esc.len(), 1);
+    assert_eq!(drained_no_esc[0].0, cargo_frig_id);
+    // drain_nested_ship_fittings with exclude_escape_bay = false drains esc_frig_id too
+    let drained_esc = drain_nested_ship_fittings(&ctx, ship_id, false);
+    assert_eq!(drained_esc.len(), 1);
+    assert_eq!(drained_esc[0].0, esc_frig_id);
+
+    // resolve_destroyed_ship_contents_in_snap:
+    // - wrap 3468 removed and wrapped_item_id forced to InventoryFlag::Cargo
+    // - override_owner_id = Some(90_000_002)
+    // - unknown_type_item_id contributes 3 * 100.0 = 300.0 ISK fallback
+    // - rig_item_id destroyed even when roll_fn returns 0.0
+    ctx.db.with_mut_snapshot(|snap| {
+        let out = resolve_destroyed_ship_contents_in_snap(
+            snap,
+            &ctx.sde,
+            ship_id,
+            888_001,
+            Some(90_000_002),
+            Some(esc_frig_id),
+            false,
+            0.5,
+            |i| matches!(i.flag as u16, 4 | 5 | 92..=94),
+            |iid| if iid == container_id || iid == wrapped_item_id || iid == nested_item_id || iid == unknown_type_item_id {
+                0.1
+            } else {
+                0.9
+            },
+        );
+        assert!(!snap.items.contains_key(&wrap_id));
+        assert_eq!(snap.items[&wrapped_item_id].location_id, 888_001);
+        assert_eq!(snap.items[&wrapped_item_id].flag, InventoryFlag::Cargo);
+        assert_eq!(snap.items[&wrapped_item_id].owner_id, 90_000_002);
+        assert_eq!(snap.items[&nested_item_id].location_id, container_id);
+        assert!(out.dropped_ids.contains(&wrapped_item_id));
+        assert!(out.dropped_ids.contains(&container_id));
+        assert!(out.dropped_ids.contains(&nested_item_id));
+        assert!(out.destroyed_ids.contains(&rig_item_id));
+        assert!(out.items_isk >= 300.0);
+
+        // wreck_id == 0 forces everything left to be destroyed
+        let out_no_wreck = resolve_destroyed_ship_contents_in_snap(
+            snap,
+            &ctx.sde,
+            ship_id,
+            0,
+            None,
+            None,
+            false,
+            1.0,
+            |_| true,
+            |_| 0.0,
+        );
+        assert!(out_no_wreck.dropped_ids.is_empty());
+        assert!(!out_no_wreck.destroyed_ids.is_empty());
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn death_pipeline_escape_bay_pod_implants_insurance_kill_rights_and_structure_control() {
+    let ctx = test_ctx();
+    let sys_hi = 30_000_142_u32; // High-sec (1.0)
+    let sys_null = 30_003_729_u32; // Null-sec (or fallback check)
+    let victim = 90_000_001_i64;
+    let attacker = 90_000_002_i64;
+    let now = ctx.now_unix();
+
+    // 1. Missing ship returns Err
+    let missing_err =
+        execute_death_pipeline(&ctx, sys_hi, victim, 999_888_777, attacker, DVec3::ZERO, 1)
+            .await
+            .unwrap_err();
+    assert!(missing_err.contains("not found"));
+
+    // 2. Battleship (638 Raven, group 27 -> has Frigate Escape Bay) with escape frigate (587, flag 177),
+    //    active character-owned rt_contract, ship_fittings module, and plastic wrap (3468)
+    let bs_id = 200_200_001_i64;
+    let esc_frig = 200_200_002_i64;
+    let wrap_id = 200_200_003_i64;
+    let wrapped_trit = 200_200_004_i64;
+    let fitted_mod_id = 200_200_005_i64;
+    spawn_ship(&ctx, sys_hi, bs_id, victim, 638, DVec3::new(100.0, 0.0, 0.0), 0.0);
+    {
+        let mut guard = ctx.ship_fittings.write().unwrap();
+        let mut fit = eve_dogma::ShipFittingEngine::from_sde(bs_id, 638, &ctx.sde);
+        fit.modules.insert(
+            fitted_mod_id,
+            eve_dogma::FittedModule {
+                item_id: fitted_mod_id,
+                type_id: 2048,
+                flag_id: 11,
+                state: eve_dogma::ModuleState::Online,
+                damage_hp: 0.0,
+                max_hp: 40.0,
+                charge_type_id: None,
+                charge_quantity: 0,
+                dynamic_attribute_overrides: HashMap::new(),
+            },
+        );
+        guard.insert(bs_id, fit);
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&victim) {
+            ch.security_status = 5.0;
+        }
+        if let Some(att) = snap.characters.get_mut(&attacker) {
+            att.security_status = 5.0;
+        }
+        snap.items.insert(
+            esc_frig,
+            make_item(esc_frig, 587, victim, bs_id, InventoryFlag::from_u16(177), 1, 0.0),
+        );
+        snap.items.insert(
+            wrap_id,
+            make_item(wrap_id, 3468, victim, bs_id, InventoryFlag::Cargo, 1, 0.0),
+        );
+        snap.items.insert(
+            wrapped_trit,
+            make_item(wrapped_trit, 34, victim, wrap_id, InventoryFlag::None, 200, 0.0),
+        );
+    });
+    let vic_bal_before = ctx.db.with_snapshot(|s| s.characters[&victim].balance);
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.insurance_contracts.insert(
+            bs_id,
+            InsuranceContractState {
+                ship_id: bs_id,
+                ship_type_id: 638,
+                owner_id: victim,
+                level_name: "Platinum".into(),
+                level_fraction: 1.0,
+                cost_isk: 500_000.0,
+                payout_isk: 1_234_567.0,
+                start_unix: now.saturating_sub(100),
+                end_unix: now + 1_000,
+            },
+        );
+    });
+
+    let bs_res = execute_death_pipeline(
+        &ctx,
+        sys_hi,
+        victim,
+        bs_id,
+        attacker,
+        DVec3::new(100.0, 0.0, 0.0),
+        0, // exercises getrandom entropy path
+    )
+    .await
+    .unwrap();
+    assert_eq!(bs_res.ejected_capsule_id, Some(esc_frig));
+    assert_eq!(bs_res.insurance_payout_isk, 1_234_567.0);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&esc_frig].location_id, sys_hi as i64);
+        assert_eq!(snap.items[&esc_frig].flag, InventoryFlag::None);
+        assert_eq!(snap.characters[&victim].active_ship_id, esc_frig);
+        assert!(!snap.items.contains_key(&wrap_id));
+        assert_eq!(
+            snap.characters[&victim].balance,
+            vic_bal_before.checked_add(IskCents::from_f64_isk(1_234_567.0)).unwrap()
+        );
+        assert!(snap
+            .wallet_journal
+            .iter()
+            .any(|j| j.character_id == victim && j.entry_type == "insurance_payout"));
+        assert!(snap
+            .mails
+            .iter()
+            .any(|m| m.recipient_id == victim && m.subject.contains(&bs_id.to_string())));
+        // Illegal Highsec kill granted Kill Right and reduced attacker sec status
+        assert!(snap
+            .kill_rights
+            .values()
+            .any(|kr| kr.owner_id == victim && kr.target_id == attacker));
+        assert!(snap.characters[&attacker].security_status < 5.0);
+    });
+    // Detailed killmail includes escape frigate entry with 0 dropped & 0 destroyed
+    crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        let dkm = &rt.detailed_killmails[&bs_res.killmail_id];
+        assert!(dkm
+            .dropped_items
+            .iter()
+            .any(|i| i.type_id == 587 && i.qty_dropped == 0 && i.qty_destroyed == 0));
+    });
+
+    // 3. Pod death (type 670): wreck type 25, boosters & implants destroyed, zarzakh_gate_locks cleared, home station respawn
+    let pod_id = 200_200_020_i64;
+    let booster_id = 200_200_021_i64;
+    let implant_id = 200_200_022_i64;
+    spawn_ship(&ctx, sys_hi, pod_id, victim, 670, DVec3::new(200.0, 0.0, 0.0), 500_000.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            booster_id,
+            make_item(booster_id, 28_672, victim, victim, InventoryFlag::Booster, 1, 0.0),
+        );
+        snap.items.insert(
+            implant_id,
+            make_item(implant_id, 9_899, victim, victim, InventoryFlag::Implant, 1, 0.0),
+        );
+        snap.active_implants.insert(victim, vec![9_899, 10_208]);
+        snap.zarzakh_gate_locks.insert(victim, (40_000_001, now + 3600));
+    });
+    let pod_res = execute_death_pipeline_sync(&ctx, sys_hi, victim, pod_id, attacker, DVec3::ZERO, 77)
+        .unwrap();
+    assert_eq!(pod_res.wreck_type_id, 25);
+    assert_eq!(pod_res.ejected_capsule_id, None);
+    assert_eq!(pod_res.insurance_payout_isk, 0.0);
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&booster_id));
+        assert!(!snap.items.contains_key(&implant_id));
+        assert!(!snap.active_implants.contains_key(&victim));
+        assert!(!snap.zarzakh_gate_locks.contains_key(&victim));
+    });
+    crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        let dkm = &rt.detailed_killmails[&pod_res.killmail_id];
+        assert!(dkm.destroyed_items.iter().any(|i| i.type_id == 9_899));
+        assert!(dkm.destroyed_items.iter().any(|i| i.type_id == 10_208));
+    });
+
+    // 4. Expired cs_contract falls back to 40% base quote; insured_payout > 0 pays directly when no contract;
+    //    victim controlling structure suppresses capsule ejection; null-sec skips sec loss & kill rights
+    let expired_cs_ship = 200_200_030_i64;
+    spawn_ship(&ctx, sys_null, expired_cs_ship, victim, 587, DVec3::ZERO, 0.0);
+    crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(
+        &ctx,
+        |st| {
+            st.insurance_contracts.insert(
+                expired_cs_ship,
+                crate::services::inventory_fitting::fitting_containers_ships::InsuranceContractRecord {
+                    ship_id: expired_cs_ship,
+                    ship_type_id: 587,
+                    owner_id: victim,
+                    level_name: "Gold".into(),
+                    level_fraction: 0.8,
+                    cost_isk: 80_000.0,
+                    payout_isk: 999_999.0,
+                    start_unix: now.saturating_sub(100),
+                    end_unix: now,
+                },
+            );
+        },
+    );
+    let base_587 = ctx.sde.types.get(&587).map(|t| t.base_price).unwrap_or(230_000.0);
+    let expected_40 = compute_insurance_quote(base_587, 0.40).1;
+    let exp_cs_res =
+        execute_death_pipeline_sync(&ctx, sys_null, victim, expired_cs_ship, attacker, DVec3::ZERO, 1)
+            .unwrap();
+    assert!((exp_cs_res.insurance_payout_isk - expected_40).abs() < 1e-6);
+
+    // Direct insured_payout_isk & structure control
+    let direct_ship = 200_200_031_i64;
+    let fake_struct_id = 200_200_032_i64;
+    spawn_ship(&ctx, sys_hi, direct_ship, victim, 587, DVec3::ZERO, 333_333.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(fake_struct_id, Default::default());
+        if let Some(ch) = snap.characters.get_mut(&victim) {
+            ch.active_ship_id = fake_struct_id;
+        }
+    });
+    // Mark victim suspect so kill is legal and sec loss / KR are skipped
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.get_or_create(victim).suspect_flag_until_unix = now + 900;
+    }
+    let att_sec_before = ctx.db.with_snapshot(|s| s.characters[&attacker].security_status);
+    let dir_res =
+        execute_death_pipeline_sync(&ctx, sys_hi, victim, direct_ship, attacker, DVec3::ZERO, 1)
+            .unwrap();
+    assert_eq!(dir_res.insurance_payout_isk, 333_333.0);
+    assert_eq!(dir_res.ejected_capsule_id, None);
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.characters[&attacker].security_status),
+        att_sec_before
+    );
+
+    // 5. SelfDestructManager::abort_self_destruct(active) returns true, execute_self_destruct without assist credits self
+    let mut mgr = SelfDestructManager::new();
+    let sd_ship = 200_200_040_i64;
+    spawn_ship(&ctx, sys_hi, sd_ship, victim, 587, DVec3::ZERO, 0.0);
+    mgr.start_self_destruct(sd_ship, victim, sys_hi, now);
+    assert!(mgr.abort_self_destruct(sd_ship));
+    assert!(!mgr.is_self_destructing(sd_ship));
+
+    let self_res = execute_self_destruct(&ctx, sys_hi, victim, sd_ship, DVec3::ZERO, 5)
+        .await
+        .unwrap();
+    let self_km = ctx.db.with_snapshot(|s| s.killmails[&self_res.killmail_id].clone());
+    assert_eq!(self_km.attacker_character_id, victim);
+
+    // 6. execute_live_self_destruct_sync rejects missing ship, wrong system, structure_id, wrong active_ship_id
+    assert!(execute_live_self_destruct_sync(&ctx, sys_hi, victim, 999_777_666, DVec3::ZERO, now)
+        .unwrap()
+        .is_none());
+    let sd2 = 200_200_041_i64;
+    spawn_ship(&ctx, sys_hi, sd2, victim, 587, DVec3::ZERO, 0.0);
+    // Wrong location_id
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&sd2).unwrap().location_id = 30_000_144;
+    });
+    assert!(execute_live_self_destruct_sync(&ctx, sys_hi, victim, sd2, DVec3::ZERO, now)
+        .unwrap()
+        .is_none());
+    // Docked in structure
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&sd2).unwrap().location_id = i64::from(sys_hi);
+        let ch = snap.characters.get_mut(&victim).unwrap();
+        ch.structure_id = Some(999_001);
+        ch.active_ship_id = sd2;
+    });
+    assert!(execute_live_self_destruct_sync(&ctx, sys_hi, victim, sd2, DVec3::ZERO, now)
+        .unwrap()
+        .is_none());
+    // Wrong active_ship_id
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&victim).unwrap();
+        ch.structure_id = None;
+        ch.active_ship_id = sd2 + 1;
+    });
+    assert!(execute_live_self_destruct_sync(&ctx, sys_hi, victim, sd2, DVec3::ZERO, now)
+        .unwrap()
+        .is_none());
 }

@@ -408,7 +408,7 @@ pub fn dispatch_char_calendar_route(
                     format!("Character {char_id} is not invited to calendar event {event_id}"),
                 ));
             }
-            let Some((owner_id, event_date_time, duration, title, importance)) =
+            let Some(meta) =
                 crate::services::fleet_social::update_calendar_response_from_esi(
                     ctx,
                     char_id,
@@ -425,11 +425,11 @@ pub fn dispatch_char_calendar_route(
                 ctx,
                 char_id,
                 event_id,
-                owner_id,
-                event_date_time,
-                duration,
-                &title,
-                importance,
+                meta.owner_id,
+                meta.event_date_time,
+                meta.duration,
+                &meta.title,
+                meta.importance,
                 response_code,
             );
             Some(RouteExecutionResult::no_content(0))
@@ -498,4 +498,8 @@ pub fn dispatch_char_calendar_route(
 #[cfg(test)]
 #[path = "char_calendar_routes_unit_tests.rs"]
 mod char_calendar_routes_unit_tests;
+
+#[cfg(test)]
+#[path = "char_calendar_routes_edges_tests.rs"]
+mod char_calendar_routes_edges_tests;
 

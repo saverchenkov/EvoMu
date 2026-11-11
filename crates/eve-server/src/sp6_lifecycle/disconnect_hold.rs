@@ -288,3 +288,7 @@ pub(super) async fn build_disconnected_ship_entry(
         pre_warp_position,
     }
 }
+
+#[cfg(test)]
+#[path = "disconnect_hold_edges_tests.rs"]
+mod disconnect_hold_edges_tests;

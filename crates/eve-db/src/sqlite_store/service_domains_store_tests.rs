@@ -379,3 +379,41 @@ fn service_state_blobs_enforces_size_and_key_limits() {
     drop(tx);
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn rollback_domain_row_expected_fp_zero_and_missing_table_branches() {
+    use crate::sqlite_store::service_domains_store::{
+        load_service_domains, rollback_service_domains, ServiceDomainsFingerprints,
+    };
+    use crate::sqlite_store::fingerprints::TableFingerprints;
+
+    let path = temp_db_path("fp_zero_rollback");
+    let mut conn = Connection::open(&path).expect("open");
+    apply_migrations(&conn).expect("migrate");
+
+    let mut base = WorldStateSnapshot::default();
+    base.fleet_and_social_ops.contract_deposits.insert(1, 500);
+    let _fp = replace_sqlite_from_snapshot(&mut conn, &base).expect("seed");
+    let (loaded, loaded_fp) = load_snapshot_from_sqlite(&conn).expect("load");
+
+    // Mutate a domain whose committed baseline was default (expected_fp == 0) AND revert a persisted domain to default.
+    let mut dirty = loaded;
+    dirty.node_graph_state.certificates.insert(90_000_001, Default::default());
+    dirty.fleet_and_social_ops.contract_deposits.clear();
+    rollback_dirty_from_sqlite(&conn, &mut dirty, &loaded_fp).expect("rollback");
+    assert!(dirty.node_graph_state.certificates.is_empty());
+    assert_eq!(dirty.fleet_and_social_ops.contract_deposits.get(&1), Some(&500));
+
+    // Missing table in fresh SQLite connection hits Err(_) arms cleanly without panicking.
+    let mem = Connection::open_in_memory().expect("mem");
+    let mut s = WorldStateSnapshot::default();
+    load_service_domains(&mem, &mut s);
+    let mut fake_fp = TableFingerprints::default();
+    fake_fp.service_domains = ServiceDomainsFingerprints {
+        node_graph_state: 123,
+        ..Default::default()
+    };
+    rollback_service_domains(&mem, &mut s, &fake_fp);
+
+    let _ = std::fs::remove_file(&path);
+}

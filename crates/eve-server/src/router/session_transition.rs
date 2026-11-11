@@ -472,6 +472,16 @@ fn is_known_solar_system(snap: &WorldStateSnapshot, sde: &SdeRegistry, sys_id: u
             || sys_id >= 31_000_000)
 }
 
+/// Resolved destination solar-system hierarchy and docking container IDs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResolvedDestinationLocation {
+    pub solar_system_id: u32,
+    pub constellation_id: u32,
+    pub region_id: u32,
+    pub station_id: Option<i64>,
+    pub structure_id: Option<i64>,
+}
+
 /// Resolves destination `(solar_system_id, constellation_id, region_id, station_id, structure_id)`
 /// and optionally validates that the target system/station/structure exists and is usable.
 pub fn resolve_destination_location(
@@ -481,7 +491,7 @@ pub fn resolve_destination_location(
     current_ch: &CharacterRecord,
     location: TransitionLocation,
     validate_destination: bool,
-) -> Result<(u32, u32, u32, Option<i64>, Option<i64>), DbError> {
+) -> Result<ResolvedDestinationLocation, DbError> {
     match location {
         TransitionLocation::KeepCurrent | TransitionLocation::ClearAll => {
             let (const_id, reg_id) = resolve_system_hierarchy(
@@ -490,13 +500,13 @@ pub fn resolve_destination_location(
                 current_ch.constellation_id,
                 current_ch.region_id,
             );
-            Ok((
-                current_ch.solar_system_id,
-                const_id,
-                reg_id,
-                current_ch.station_id,
-                current_ch.structure_id,
-            ))
+            Ok(ResolvedDestinationLocation {
+                solar_system_id: current_ch.solar_system_id,
+                constellation_id: const_id,
+                region_id: reg_id,
+                station_id: current_ch.station_id,
+                structure_id: current_ch.structure_id,
+            })
         }
         TransitionLocation::Space { solar_system_id } => {
             if solar_system_id == 0
@@ -513,7 +523,13 @@ pub fn resolve_destination_location(
                 current_ch.constellation_id,
                 current_ch.region_id,
             );
-            Ok((solar_system_id, const_id, reg_id, None, None))
+            Ok(ResolvedDestinationLocation {
+                solar_system_id,
+                constellation_id: const_id,
+                region_id: reg_id,
+                station_id: None,
+                structure_id: None,
+            })
         }
         TransitionLocation::Station {
             solar_system_id,
@@ -544,7 +560,13 @@ pub fn resolve_destination_location(
                 current_ch.constellation_id,
                 current_ch.region_id,
             );
-            Ok((sys_id, const_id, reg_id, Some(station_id), None))
+            Ok(ResolvedDestinationLocation {
+                solar_system_id: sys_id,
+                constellation_id: const_id,
+                region_id: reg_id,
+                station_id: Some(station_id),
+                structure_id: None,
+            })
         }
         TransitionLocation::Structure {
             solar_system_id,
@@ -581,7 +603,13 @@ pub fn resolve_destination_location(
                 current_ch.constellation_id,
                 current_ch.region_id,
             );
-            Ok((sys_id, const_id, reg_id, None, Some(structure_id)))
+            Ok(ResolvedDestinationLocation {
+                solar_system_id: sys_id,
+                constellation_id: const_id,
+                region_id: reg_id,
+                station_id: None,
+                structure_id: Some(structure_id),
+            })
         }
     }
 }
@@ -604,7 +632,13 @@ pub fn apply_character_transition_in_snap(
         .cloned()
         .ok_or(DbError::CharacterNotFound(char_id))?;
 
-    let (sys_id, const_id, reg_id, station_id, structure_id) = resolve_destination_location(
+    let ResolvedDestinationLocation {
+        solar_system_id: sys_id,
+        constellation_id: const_id,
+        region_id: reg_id,
+        station_id,
+        structure_id,
+    } = resolve_destination_location(
         snap,
         sde,
         char_id,
@@ -1433,6 +1467,16 @@ mod tests {
                     ..Default::default()
                 },
             );
+            snap.accounts
+                .entry("u_9001".to_string())
+                .or_insert_with(|| eve_db::AccountRecord {
+                    user_id: 9_001,
+                    username: "u_9001".into(),
+                    password_token: "test".into(),
+                    role: eve_db::service_roles::ROLE_PLAYER,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                });
         });
     }
 
@@ -1709,5 +1753,454 @@ mod tests {
         assert_eq!(session.solar_system_id, None);
         assert_eq!(session.station_id, None);
         assert_eq!(session.ship_id, None);
+    }
+
+    #[test]
+    fn transition_kind_destination_and_target_ship_id_and_spec_builders() {
+        // 1. Exhaustive `TransitionKind::destination_location()` and `target_ship_id()`
+        let dock_st = TransitionKind::Dock {
+            dock_id: 60_003_760,
+            is_structure: false,
+        };
+        assert_eq!(
+            dock_st.destination_location(),
+            TransitionLocation::Station {
+                solar_system_id: None,
+                station_id: 60_003_760,
+            }
+        );
+        assert_eq!(dock_st.target_ship_id(), None);
+
+        let dock_struct = TransitionKind::Dock {
+            dock_id: 1_000_000_000_001,
+            is_structure: true,
+        };
+        assert_eq!(
+            dock_struct.destination_location(),
+            TransitionLocation::Structure {
+                solar_system_id: None,
+                structure_id: 1_000_000_000_001,
+            }
+        );
+        assert_eq!(dock_struct.target_ship_id(), None);
+
+        let undock = TransitionKind::Undock {
+            solar_system_id: 30_000_142,
+        };
+        assert_eq!(
+            undock.destination_location(),
+            TransitionLocation::Space {
+                solar_system_id: 30_000_142,
+            }
+        );
+        assert_eq!(undock.target_ship_id(), None);
+
+        let jump = TransitionKind::JumpSystem {
+            solar_system_id: 30_002_187,
+        };
+        assert_eq!(
+            jump.destination_location(),
+            TransitionLocation::Space {
+                solar_system_id: 30_002_187,
+            }
+        );
+        assert_eq!(jump.target_ship_id(), None);
+
+        let board = TransitionKind::BoardShip { ship_id: 501 };
+        assert_eq!(board.destination_location(), TransitionLocation::KeepCurrent);
+        assert_eq!(board.target_ship_id(), Some(501));
+
+        let eject = TransitionKind::EjectToPod { capsule_id: 502 };
+        assert_eq!(eject.destination_location(), TransitionLocation::KeepCurrent);
+        assert_eq!(eject.target_ship_id(), Some(502));
+
+        for (dock_opt, expected) in [
+            (
+                Some((60_003_760, false)),
+                TransitionLocation::Station {
+                    solar_system_id: Some(30_000_142),
+                    station_id: 60_003_760,
+                },
+            ),
+            (
+                Some((1_000_000_000_002, true)),
+                TransitionLocation::Structure {
+                    solar_system_id: Some(30_000_142),
+                    structure_id: 1_000_000_000_002,
+                },
+            ),
+            (
+                None,
+                TransitionLocation::Space {
+                    solar_system_id: 30_000_142,
+                },
+            ),
+        ] {
+            let cj = TransitionKind::CloneJump {
+                solar_system_id: 30_000_142,
+                dock_id: dock_opt,
+                ship_id: Some(601),
+            };
+            assert_eq!(cj.destination_location(), expected);
+            assert_eq!(cj.target_ship_id(), Some(601));
+
+            let tp = TransitionKind::Teleport {
+                solar_system_id: 30_000_142,
+                dock_id: dock_opt,
+                ship_id: None,
+            };
+            assert_eq!(tp.destination_location(), expected);
+            assert_eq!(tp.target_ship_id(), None);
+
+            let login = TransitionKind::CharacterLogin {
+                solar_system_id: 30_000_142,
+                dock_id: dock_opt,
+                ship_id: Some(602),
+            };
+            assert_eq!(login.destination_location(), expected);
+            assert_eq!(login.target_ship_id(), Some(602));
+
+            let death = TransitionKind::DeathRespawn {
+                solar_system_id: 30_000_142,
+                dock_id: dock_opt,
+                ship_id: 603,
+            };
+            assert_eq!(death.destination_location(), expected);
+            assert_eq!(death.target_ship_id(), Some(603));
+        }
+
+        assert_eq!(
+            TransitionKind::Logout.destination_location(),
+            TransitionLocation::ClearAll
+        );
+        assert_eq!(TransitionKind::Logout.target_ship_id(), None);
+
+        // 2. `SessionTransitionSpec::for_kind` default matrix across all 10 kinds + all 9 `with_*` builders
+        let spec_dock = SessionTransitionSpec::for_kind(1, dock_st, "dock");
+        assert!(spec_dock.validate_destination);
+        assert!(spec_dock.move_ship_item);
+        assert!(spec_dock.cleanup_departing_space);
+        assert!(spec_dock.deactivate_modules);
+        assert!(spec_dock.abort_self_destruct);
+        assert!(spec_dock.abandon_drones);
+        assert!(!spec_dock.sync_local_chat);
+        assert!(spec_dock.invalidate_bounds);
+        assert!(spec_dock.sync_quasar_gateway);
+        assert!(spec_dock.emit_on_session_changed);
+
+        let spec_login = SessionTransitionSpec::for_kind(
+            1,
+            TransitionKind::CharacterLogin {
+                solar_system_id: 30_000_142,
+                dock_id: None,
+                ship_id: Some(10),
+            },
+            "login",
+        );
+        assert!(!spec_login.validate_destination);
+        assert!(!spec_login.move_ship_item);
+        assert!(!spec_login.apply_db);
+        assert!(spec_login.sync_local_chat);
+        assert!(!spec_login.invalidate_bounds);
+        assert!(spec_login.sync_quasar_gateway);
+        assert!(!spec_login.emit_on_session_changed);
+
+        let spec_logout = SessionTransitionSpec::for_kind(1, TransitionKind::Logout, "logout");
+        assert!(!spec_logout.apply_db);
+        assert!(spec_logout.invalidate_bounds);
+        assert!(!spec_logout.sync_quasar_gateway);
+        assert!(!spec_logout.emit_on_session_changed);
+
+        let custom = spec_dock
+            .with_apply_db(false)
+            .with_move_ship_item(false)
+            .with_validate_destination(false)
+            .with_emit_on_session_changed(false)
+            .with_sync_local_chat(true)
+            .with_invalidate_bounds(false)
+            .with_cleanup_departing_space(false)
+            .with_arrive_ball_pos(DVec3::new(1.0, 2.0, 3.0))
+            .with_accept_ballpark_dock(60_003_760, DVec3::new(4.0, 5.0, 6.0))
+            .with_preserve_session_ship(true);
+        assert!(!custom.apply_db);
+        assert!(!custom.move_ship_item);
+        assert!(!custom.validate_destination);
+        assert!(!custom.emit_on_session_changed);
+        assert!(custom.sync_local_chat);
+        assert!(!custom.invalidate_bounds);
+        assert!(!custom.cleanup_departing_space);
+        assert_eq!(custom.arrive_ball_pos, Some(DVec3::new(1.0, 2.0, 3.0)));
+        assert!(custom.spawn_destination_ball);
+        assert_eq!(
+            custom.accept_ballpark_dock,
+            Some((60_003_760, DVec3::new(4.0, 5.0, 6.0)))
+        );
+        assert!(custom.preserve_session_ship);
+    }
+
+    #[test]
+    fn resolve_destination_and_apply_character_transition_edge_branches() {
+        let ctx = test_ctx();
+        let char_id = 92_001;
+        let ship_id = 92_101;
+        let jita_station = 60_003_760;
+        seed_test_character_and_ship(&ctx, char_id, ship_id, jita_station);
+
+        // 1. `db_err_to_rpc` maps all 4 branches distinctly.
+        assert_eq!(
+            db_err_to_rpc(DbError::InvalidDestinationLocation {
+                character_id: char_id,
+                location_id: 999
+            })
+            .code,
+            "InvalidDestinationLocation"
+        );
+        assert_eq!(
+            db_err_to_rpc(DbError::CharacterNotFound(char_id)).code,
+            "CharacterNotFound"
+        );
+        assert_eq!(
+            db_err_to_rpc(DbError::NotDocked(char_id)).code,
+            "NotDocked"
+        );
+        assert_eq!(
+            db_err_to_rpc(DbError::ItemNotFound(ship_id)).code,
+            "SessionTransitionFailed"
+        );
+
+        // 2. `resolve_system_hierarchy` fallback when system is unknown:
+        //    non-zero fallback_const/fallback_reg preserved, zero falls back to `(20_000_020, 10_000_002)`.
+        assert_eq!(
+            resolve_system_hierarchy(&ctx.sde, 999_999_999, 20_000_777, 10_000_888),
+            (20_000_777, 10_000_888)
+        );
+        assert_eq!(
+            resolve_system_hierarchy(&ctx.sde, 999_999_999, 0, 0),
+            (20_000_020, 10_000_002)
+        );
+
+        // 3. `is_known_solar_system`: `0 -> false`, SDE system -> `true`, wormhole `>= 31_000_000 -> true`,
+        //    unknown `< 31_000_000 -> false` unless in `snap.system_states`.
+        ctx.db.with_snapshot(|snap| {
+            assert!(!is_known_solar_system(snap, &ctx.sde, 0));
+            assert!(is_known_solar_system(snap, &ctx.sde, 30_000_142));
+            assert!(is_known_solar_system(snap, &ctx.sde, 31_000_005));
+            assert!(!is_known_solar_system(snap, &ctx.sde, 29_999_999));
+
+            let ch = &snap.characters[&char_id];
+            // Space(0) fails even when `validate_destination == false`.
+            assert!(matches!(
+                resolve_destination_location(
+                    snap,
+                    &ctx.sde,
+                    char_id,
+                    ch,
+                    TransitionLocation::Space { solar_system_id: 0 },
+                    false,
+                ),
+                Err(DbError::InvalidDestinationLocation { .. })
+            ));
+            // Station with unknown station_id and `solar_system_id: None` fails even when `validate_destination == false`.
+            assert!(matches!(
+                resolve_destination_location(
+                    snap,
+                    &ctx.sde,
+                    char_id,
+                    ch,
+                    TransitionLocation::Station {
+                        solar_system_id: None,
+                        station_id: 999_999_999,
+                    },
+                    false,
+                ),
+                Err(DbError::InvalidDestinationLocation { .. })
+            ));
+            // Station with unknown station_id fails when `validate_destination == true`, succeeds when `false` with explicit system.
+            assert!(resolve_destination_location(
+                snap,
+                &ctx.sde,
+                char_id,
+                ch,
+                TransitionLocation::Station {
+                    solar_system_id: Some(30_000_142),
+                    station_id: 999_999_999,
+                },
+                true,
+            )
+            .is_err());
+            assert!(resolve_destination_location(
+                snap,
+                &ctx.sde,
+                char_id,
+                ch,
+                TransitionLocation::Station {
+                    solar_system_id: Some(30_000_142),
+                    station_id: 999_999_999,
+                },
+                false,
+            )
+            .is_ok());
+        });
+
+        // 4. Destroyed structure rejected when `validate_destination == true`, accepted when `false`.
+        let destroyed_struct = 1_000_000_999_001;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.structures.insert(
+                destroyed_struct,
+                UpwellStructureRecord {
+                    structure_id: destroyed_struct,
+                    type_id: 35_832,
+                    owner_corp_id: 98_000_001,
+                    solar_system_id: 30_000_142,
+                    name: "Destroyed Astrahus".into(),
+                    position: [0.0; 3],
+                    state: "Destroyed".into(),
+                    ..Default::default()
+                },
+            );
+            let ch = snap.characters[&char_id].clone();
+            assert!(resolve_destination_location(
+                snap,
+                &ctx.sde,
+                char_id,
+                &ch,
+                TransitionLocation::Structure {
+                    solar_system_id: None,
+                    structure_id: destroyed_struct,
+                },
+                true,
+            )
+            .is_err());
+            assert!(resolve_destination_location(
+                snap,
+                &ctx.sde,
+                char_id,
+                &ch,
+                TransitionLocation::Structure {
+                    solar_system_id: None,
+                    structure_id: destroyed_struct,
+                },
+                false,
+            )
+            .is_ok());
+
+            // 5. `apply_character_transition_in_snap`:
+            // - `KeepCurrent` increments `version` by 1, leaves `system_epoch` and ship item `version` unchanged,
+            //   and backfills `constellation_id == 0` / `region_id == 0`.
+            snap.characters.get_mut(&char_id).unwrap().constellation_id = 0;
+            snap.characters.get_mut(&char_id).unwrap().region_id = 0;
+            let v_before = snap.characters[&char_id].version;
+            let ep_before = snap.characters[&char_id].system_epoch;
+            let ship_v_before = snap.items[&ship_id].version;
+
+            let ch_keep = apply_character_transition_in_snap(
+                snap,
+                &ctx.sde,
+                char_id,
+                TransitionLocation::KeepCurrent,
+                None,
+                true,
+                true,
+            )
+            .unwrap();
+            assert_eq!(ch_keep.version, v_before + 1);
+            assert_eq!(ch_keep.system_epoch, ep_before);
+            assert_ne!(ch_keep.constellation_id, 0);
+            assert_ne!(ch_keep.region_id, 0);
+            assert_eq!(snap.items[&ship_id].version, ship_v_before);
+        });
+    }
+
+    #[test]
+    fn session_state_helpers_keyval_and_emit_on_session_changed() {
+        let ctx = test_ctx();
+        let char_id = 93_001;
+        let ship_id = 93_101;
+        let jita_station = 60_003_760;
+        seed_test_character_and_ship(&ctx, char_id, ship_id, jita_station);
+        let ch = ctx.db.get_character(char_id).unwrap();
+
+        // 1. `apply_session_from_character` with `override_ship`: `None`, `Some(Some(999))`, `Some(None)`,
+        //    plus `ch.active_ship_id == 0 -> ship_id: None`.
+        let mut sess = SessionState::new(1);
+        apply_session_from_character(&mut sess, &ch, None, Some(&ctx.sde));
+        assert_eq!(sess.ship_id, Some(ship_id));
+        apply_session_from_character(&mut sess, &ch, Some(Some(777_777)), Some(&ctx.sde));
+        assert_eq!(sess.ship_id, Some(777_777));
+        apply_session_from_character(&mut sess, &ch, Some(None), Some(&ctx.sde));
+        assert_eq!(sess.ship_id, None);
+
+        let mut ch_no_ship = ch.clone();
+        ch_no_ship.active_ship_id = 0;
+        apply_session_from_character(&mut sess, &ch_no_ship, None, None);
+        assert_eq!(sess.ship_id, None);
+
+        // 2. `build_session_state_keyval`:
+        // - While docked at station: `solarsystemid` is `PyRep::None`, `solarsystemid2` is `Integer(30_000_142)`,
+        //   `locationid` is `Integer(jita_station)`.
+        apply_session_from_character(&mut sess, &ch, None, Some(&ctx.sde));
+        let kv_docked = build_session_state_keyval(&sess, char_id);
+        assert_eq!(kv_docked.dict_get("solarsystemid"), Some(&PyRep::None));
+        assert_eq!(
+            kv_docked.dict_get("solarsystemid2"),
+            Some(&PyRep::Integer(30_000_142))
+        );
+        assert_eq!(
+            kv_docked.dict_get("locationid"),
+            Some(&PyRep::Integer(jita_station))
+        );
+
+        // - While in space: both `solarsystemid` and `solarsystemid2` are `Integer(30_000_142)`.
+        sess.station_id = None;
+        sess.structure_id = None;
+        let kv_space = build_session_state_keyval(&sess, char_id);
+        assert_eq!(
+            kv_space.dict_get("solarsystemid"),
+            Some(&PyRep::Integer(30_000_142))
+        );
+        assert_eq!(
+            kv_space.dict_get("locationid"),
+            Some(&PyRep::Integer(30_000_142))
+        );
+
+        // 3. `emit_on_session_changed`: empty diff is a no-op; non-empty diff pushes notification
+        //    to both `session` and `ctx.pending_notifications`.
+        let empty_diff = HashMap::new();
+        let snap_empty = sess.clone();
+        emit_on_session_changed(&ctx, Some(&mut sess), &snap_empty, char_id, &empty_diff);
+        assert!(sess.drain_notifications().is_empty());
+        assert!(ctx.drain_notifications(char_id).is_empty());
+
+        let mut non_empty_diff = HashMap::new();
+        non_empty_diff.insert(
+            "shipid".to_string(),
+            (PyRep::Integer(ship_id), PyRep::Integer(ship_id + 1)),
+        );
+        let uid = ctx
+            .db
+            .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.user_id).unwrap_or(1));
+        ctx.db
+            .acquire_online_lock(uid, 1, Some(char_id), false, ctx.now_unix())
+            .unwrap();
+        let snap_s = sess.clone();
+        emit_on_session_changed(&ctx, Some(&mut sess), &snap_s, char_id, &non_empty_diff);
+        assert_eq!(sess.drain_notifications().len(), 1);
+        assert_eq!(ctx.drain_notifications(char_id).len(), 1);
+
+        // 4. `execute_session_transition_sync` with `preserve_session_ship = true` preserves `session.ship_id`.
+        sess.ship_id = Some(888_888);
+        let res_sync = ctx
+            .execute_session_transition_sync(
+                Some(&mut sess),
+                SessionTransitionSpec::for_kind(
+                    char_id,
+                    TransitionKind::BoardShip { ship_id },
+                    "board_preserve",
+                )
+                .with_preserve_session_ship(true),
+            )
+            .expect("sync transition succeeds");
+        assert_eq!(sess.ship_id, Some(888_888));
+        assert!(!res_sync.diff.contains_key("shipid"));
     }
 }

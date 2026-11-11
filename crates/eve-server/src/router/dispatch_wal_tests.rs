@@ -53,3 +53,20 @@ async fn test_b11r2_p1_01_second_with_mut_snapshot_refused_after_wal_error() {
     let _ = std::fs::remove_file(&tmp_path);
     let _ = std::fs::remove_dir_all(&wal_dir);
 }
+
+#[tokio::test]
+async fn test_wal_rollback_rehydrate_runtime_from_db_inside_poisoned_scope_is_read_only() {
+    ensure_wal_error_hook_installed();
+    let ctx = ServerContext::with_repository(std::sync::Arc::new(eve_db::WorldRepository::new_empty()));
+    let recorded_err = DISPATCH_WAL_ERROR
+        .scope(
+            std::cell::RefCell::new(Some("synthetic WAL error".to_string())),
+            async {
+                assert!(current_dispatch_wal_error().is_some());
+                ctx.rehydrate_runtime_from_db();
+                take_dispatch_wal_error()
+            },
+        )
+        .await;
+    assert_eq!(recorded_err.as_deref(), Some("synthetic WAL error"));
+}

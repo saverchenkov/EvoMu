@@ -4,7 +4,12 @@
 #![cfg(test)]
 
 use crate::physics::{compute_subwarp_goal_velocity, step_warp_ball};
-use crate::{Ball, BallId, Ballpark, DestinyEvent, MiniballState, MovementMode, WarpPhase, AU_METERS};
+use crate::wire::{encode_add_balls, encode_destiny_event, resolve_slim_item_meta, slim_item_dict};
+use crate::{
+    Ball, BallId, Ballpark, CombatState, DestinyEvent, MiniballState, MovementMode, TargetLock,
+    WarpPhase, AU_METERS,
+};
+use eve_proto::PyRep;
 use glam::DVec3;
 use std::collections::BTreeMap;
 
@@ -468,4 +473,584 @@ fn test_ballpark_step_warp_exit_clamp_and_set_mode_grid_faces() {
     park.step(1.0);
     assert_eq!(park.balls[&60].mode, MovementMode::Stop);
     assert!(park.balls[&60].velocity.length() <= 100.0 + 1e-6);
+}
+
+#[test]
+fn test_ballpark_attribute_caps_damage_mjfg_cloak_and_grid_position_edges() {
+    let mut park = Ballpark::new(30_000_142);
+
+    // 1. recompute_ball_attributes branches:
+    //    - (None, None) -> no-op
+    park.recompute_ball_attributes(9_999);
+    //    - (None, Some(cs)) -> recompute_combat_attributes without Ball
+    let mut stray_cs = CombatState::default();
+    stray_cs.signature_radius = 40.0;
+    stray_cs.capacitor_recharge_time_ms = 0.0;
+    stray_cs.rah_armor_resonance = Some([0.4, 0.5, 0.6, 0.7]);
+    stray_cs.crab_resonance_multiplier = Some(0.5);
+    stray_cs.ehe_hull_resists = Some([0.05, 0.05, 0.05, 0.05]);
+    park.combat_states.insert(7001, stray_cs);
+    park.recompute_ball_attributes(7001);
+    let cs_no_ball = &park.combat_states[&7001];
+    assert_eq!(cs_no_ball.base_signature_radius, Some(40.0));
+    assert_eq!(cs_no_ball.capacitor_recharge_time_ms, 0.0);
+    assert_eq!(cs_no_ball.armor_resonance, [0.2, 0.25, 0.3, 0.35]);
+    assert_eq!(cs_no_ball.structure_resonance, [0.05, 0.05, 0.05, 0.05]);
+    assert!((cs_no_ball.shield_resonance[0] - 0.5).abs() < 1e-9);
+
+    // adc_active overrides all three layers to [0.25; 4]
+    park.combat_states.get_mut(&7001).unwrap().adc_active = true;
+    park.recompute_ball_attributes(7001);
+    let cs_adc = &park.combat_states[&7001];
+    assert_eq!(cs_adc.shield_resonance, [0.25; 4]);
+    assert_eq!(cs_adc.armor_resonance, [0.25; 4]);
+    assert_eq!(cs_adc.structure_resonance, [0.25; 4]);
+
+    // 2. (Some(ball), Some(cs)) with module_immobilized, cloak_velocity_multiplier, and cloud_cap_recharge_multiplier
+    let ship = ball_with(101, DVec3::ZERO, DVec3::ZERO, 200.0, 2.0, 1e6, 30.0);
+    assert!(park.add_ball(ship));
+    park.combat_states.insert(101, CombatState::default());
+    {
+        let cs = park.combat_states.get_mut(&101).unwrap();
+        cs.cloud_cap_recharge_multiplier = Some(0.005); // 120_000 * 0.005 = 600 -> clamped to 1_000.0
+        cs.module_immobilized = true;
+    }
+    park.recompute_ball_attributes(101);
+    assert_eq!(park.balls[&101].max_velocity, 0.0);
+    assert_eq!(park.combat_states[&101].capacitor_recharge_time_ms, 1_000.0);
+
+    {
+        let cs = park.combat_states.get_mut(&101).unwrap();
+        cs.module_immobilized = false;
+        cs.base_max_velocity = Some(200.0);
+        cs.cloak_velocity_multiplier = Some(0.25);
+        cs.hic_velocity_multiplier = 0.5;
+    }
+    park.recompute_ball_attributes(101);
+    assert!((park.balls[&101].max_velocity - 25.0).abs() < 1e-9);
+
+    // 3. set_ball_max_velocity & set_ball_max_velocity_cap
+    assert!(!park.set_ball_max_velocity(9_999, 50.0));
+    assert!(!park.set_ball_max_velocity_cap(9_999, Some(50.0)));
+    park.pending_events.clear();
+    assert!(park.set_ball_max_velocity(101, -12.0));
+    assert_eq!(park.balls[&101].max_velocity, 0.0);
+    assert!(park.pending_events.iter().any(|ev| matches!(
+        ev,
+        DestinyEvent::SetMaxSpeed { ball_id: 101, max_speed } if *max_speed == 0.0
+    )));
+
+    // Restore cloak off so cap math runs against base=200
+    {
+        let cs = park.combat_states.get_mut(&101).unwrap();
+        cs.cloak_velocity_multiplier = None;
+        cs.hic_velocity_multiplier = 1.0;
+    }
+    park.recompute_ball_attributes(101);
+    assert!((park.balls[&101].max_velocity - 200.0).abs() < 1e-9);
+    park.pending_events.clear();
+    assert!(park.set_ball_max_velocity_cap(101, Some(40.0)));
+    assert!((park.balls[&101].max_velocity - 40.0).abs() < 1e-9);
+    let set_count_after_cap = park
+        .pending_events
+        .iter()
+        .filter(|ev| matches!(ev, DestinyEvent::SetMaxSpeed { ball_id: 101, .. }))
+        .count();
+    assert_eq!(set_count_after_cap, 1);
+    // Repeat identical cap does not emit duplicate SetMaxSpeed
+    assert!(park.set_ball_max_velocity_cap(101, Some(40.0)));
+    let set_count_repeat = park
+        .pending_events
+        .iter()
+        .filter(|ev| matches!(ev, DestinyEvent::SetMaxSpeed { ball_id: 101, .. }))
+        .count();
+    assert_eq!(set_count_repeat, 1);
+    // Clearing cap restores 200.0 and emits SetMaxSpeed
+    assert!(park.set_ball_max_velocity_cap(101, None));
+    assert!((park.balls[&101].max_velocity - 200.0).abs() < 1e-9);
+
+    // 4. deactivate_cloak with non-gate-cloak sets decloak_targeting_delay_remaining_s
+    {
+        let cs = park.combat_states.get_mut(&101).unwrap();
+        cs.is_cloaked = true;
+        cs.gate_cloak_remaining_ticks = 0;
+        cs.cloak_velocity_multiplier = Some(0.25);
+        cs.cloak_configured_targeting_delay_s = 7.5;
+    }
+    park.pending_events.clear();
+    assert!(park.deactivate_cloak(101));
+    assert!(!park.combat_states[&101].is_cloaked);
+    assert_eq!(park.combat_states[&101].cloak_velocity_multiplier, None);
+    assert!((park.combat_states[&101].decloak_targeting_delay_remaining_s - 7.5).abs() < 1e-9);
+    assert!(park.pending_events.iter().any(|ev| matches!(
+        ev,
+        DestinyEvent::CloakBall { ball_id: 101, cloaked: 0 }
+    )));
+    assert!(!park.pending_events.iter().any(|ev| matches!(
+        ev,
+        DestinyEvent::OnSpecialFX { ball_id: 101, guid, .. } if guid == "effects.Cloak"
+    )));
+
+    // 5. apply_breacher_dot_with_expiry explicit expiry_filetime > 0
+    park.pending_events.clear();
+    assert!(park.apply_breacher_dot_with_expiry(101, 25.0, 0.0, 5, 134_000_000_000_000_000));
+    assert!(park.pending_events.iter().any(|ev| matches!(
+        ev,
+        DestinyEvent::OnDotVictimUpdated {
+            ball_id: 101,
+            remaining_ticks: 5,
+            expiry_filetime: 134_000_000_000_000_000,
+            ..
+        }
+    )));
+
+    // 6. apply_true_damage_to_ball (partial + lethal)
+    let target = ball_with(102, DVec3::new(1000.0, 0.0, 0.0), DVec3::ZERO, 200.0, 2.0, 1e6, 30.0);
+    assert!(park.add_ball(target));
+    park.combat_states.insert(102, CombatState::default()); // 450 shield + 450 armor + 350 hull = 1250 EHP
+    let (applied_1, destroyed_1, _) = park.apply_true_damage_to_ball(102, 450.0).unwrap();
+    assert!((applied_1 - 450.0).abs() < 1e-6);
+    assert!(!destroyed_1);
+    assert!((park.combat_states[&102].shield_hp - 0.0).abs() < 1e-6);
+    let (_, destroyed_2, _) = park.apply_true_damage_to_ball(102, 900.0).unwrap();
+    assert!(destroyed_2);
+    assert!(!park.balls.contains_key(&102));
+
+    // 7. micro_jump_field_with_capitals skips invulnerable target in radius while jumping normal target
+    let caster = ball_with(201, DVec3::new(0.0, 0.0, 0.0), DVec3::ZERO, 250.0, 2.0, 1e6, 40.0);
+    let valid_bystander = ball_with(202, DVec3::new(2_000.0, 0.0, 0.0), DVec3::ZERO, 250.0, 2.0, 1e6, 40.0);
+    let invuln_bystander = ball_with(203, DVec3::new(2_500.0, 0.0, 0.0), DVec3::ZERO, 250.0, 2.0, 1e6, 40.0);
+    assert!(park.add_ball(caster));
+    assert!(park.add_ball(valid_bystander));
+    assert!(park.add_ball(invuln_bystander));
+    park.combat_states.insert(202, CombatState::default());
+    let mut inv_cs = CombatState::default();
+    inv_cs.undock_invulnerable_remaining_ticks = 5;
+    park.combat_states.insert(203, inv_cs);
+    let jumped = park
+        .micro_jump_field_with_capitals(201, 100_000.0, 6_000.0, 25, 0)
+        .expect("mjfg should succeed");
+    assert!(jumped.contains(&201));
+    assert!(jumped.contains(&202));
+    assert!(!jumped.contains(&203));
+
+    // 8. set_ball_position across grid boundary collapses old grid and notifies old + new observers
+    let mut gpark = Ballpark::new(30_000_142);
+    let obs_old = ball_with(301, DVec3::new(100.0, 0.0, 0.0), DVec3::ZERO, 200.0, 2.0, 1e6, 30.0);
+    let mover = ball_with(302, DVec3::new(200.0, 0.0, 0.0), DVec3::ZERO, 200.0, 2.0, 1e6, 30.0);
+    let obs_new = ball_with(
+        303,
+        DVec3::new(30_000_000.0, 0.0, 0.0),
+        DVec3::ZERO,
+        200.0,
+        2.0,
+        1e6,
+        30.0,
+    );
+    assert!(gpark.add_ball(obs_old));
+    assert!(gpark.add_ball(mover));
+    assert!(gpark.add_ball(obs_new));
+    gpark.observer_events.clear();
+    assert!(gpark.set_ball_position(302, DVec3::new(30_000_500.0, 0.0, 0.0)));
+    assert!(gpark.in_same_bubble(302, 303));
+    assert!(!gpark.in_same_bubble(301, 302));
+    assert!(gpark.observer_events[&301]
+        .iter()
+        .any(|ev| matches!(ev, DestinyEvent::RemoveBalls { ball_ids } if ball_ids == &[302])));
+    assert!(gpark.observer_events[&303]
+        .iter()
+        .any(|ev| matches!(ev, DestinyEvent::AddBalls2 { balls } if balls.iter().any(|b| b.id == 302))));
+    assert!(gpark.observer_events[&302]
+        .iter()
+        .any(|ev| matches!(ev, DestinyEvent::AddBalls { balls } if balls.iter().any(|b| b.id == 303))));
+}
+
+#[test]
+fn test_navigation_targeting_dedup_collision_bumping_and_step_edges() {
+    let mut park = Ballpark::new(30_000_142);
+    park.sim_unix_secs = 1_700_000_000;
+
+    // 1. Non-covert cloaked set_mode(Warp) returns Err
+    let cloaker = ball_with(10, DVec3::ZERO, DVec3::ZERO, 200.0, 2.0, 1e6, 30.0);
+    assert!(park.add_ball(cloaker));
+    let mut cloak_cs = CombatState::default();
+    cloak_cs.is_cloaked = true;
+    cloak_cs.gate_cloak_remaining_ticks = 0;
+    cloak_cs.is_covert_cloak = false;
+    park.combat_states.insert(10, cloak_cs);
+    let warp_err = park
+        .set_mode(10, MovementMode::new_warp(DVec3::ZERO, DVec3::new(1e9, 0.0, 0.0), 3.0))
+        .unwrap_err();
+    assert!(warp_err.contains("CloakedCannotWarp"));
+
+    // 2. Gate cloak cleared by set_mode(Stop)
+    {
+        let cs = park.combat_states.get_mut(&10).unwrap();
+        cs.is_cloaked = true;
+        cs.gate_cloak_remaining_ticks = 15;
+    }
+    park.pending_events.clear();
+    assert!(park.set_mode(10, MovementMode::Stop).is_ok());
+    assert!(!park.combat_states[&10].is_cloaked);
+    assert_eq!(park.combat_states[&10].gate_cloak_remaining_ticks, 0);
+    assert!(park
+        .pending_events
+        .iter()
+        .any(|ev| matches!(ev, DestinyEvent::CloakBall { ball_id: 10, cloaked: 0 })));
+
+    // 3. Gate cloak cleared by set_speed_fraction > 0
+    {
+        let cs = park.combat_states.get_mut(&10).unwrap();
+        cs.is_cloaked = true;
+        cs.gate_cloak_remaining_ticks = 15;
+    }
+    assert!(park.set_speed_fraction(10, 0.75));
+    assert!(!park.combat_states[&10].is_cloaked);
+    assert_eq!(park.combat_states[&10].gate_cloak_remaining_ticks, 0);
+
+    // 4. Gate cloak cleared by add_target_lock + target lock deduplication rules (#749)
+    let tgt = ball_with(11, DVec3::new(2_000.0, 0.0, 0.0), DVec3::ZERO, 200.0, 2.0, 1e6, 30.0);
+    assert!(park.add_ball(tgt));
+    {
+        let cs = park.combat_states.get_mut(&10).unwrap();
+        cs.is_cloaked = true;
+        cs.gate_cloak_remaining_ticks = 15;
+    }
+    assert!(park.add_target_lock(
+        10,
+        TargetLock {
+            target_id: 11,
+            lock_time_ms: 4_000.0,
+            remaining_lock_ms: 4_000.0,
+            locked: false,
+            max_range_m: Some(50_000.0),
+        }
+    ));
+    assert!(!park.combat_states[&10].is_cloaked);
+    assert_eq!(park.target_locks[&10].len(), 1);
+    // Upgrade unlocked -> locked keeps len == 1
+    assert!(park.add_target_lock(
+        10,
+        TargetLock {
+            target_id: 11,
+            lock_time_ms: 4_000.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: Some(50_000.0),
+        }
+    ));
+    assert_eq!(park.target_locks[&10].len(), 1);
+    assert!(park.target_locks[&10][0].locked);
+    // Locked -> unlocked does NOT downgrade
+    assert!(park.add_target_lock(
+        10,
+        TargetLock {
+            target_id: 11,
+            lock_time_ms: 4_000.0,
+            remaining_lock_ms: 3_000.0,
+            locked: false,
+            max_range_m: Some(50_000.0),
+        }
+    ));
+    assert_eq!(park.target_locks[&10].len(), 1);
+    assert!(park.target_locks[&10][0].locked);
+
+    // 5. Stray combat_state (missing ball), cap recharge + last_step_capacitor, sim_unix_secs increment
+    let mut stray = CombatState::default();
+    stray.capacitor = 100.0;
+    stray.max_capacitor = 250.0;
+    stray.capacitor_recharge_time_ms = 60_000.0;
+    park.combat_states.insert(9_001, stray);
+    {
+        let cs = park.combat_states.get_mut(&10).unwrap();
+        cs.capacitor = 120.0;
+        cs.max_capacitor = 250.0;
+        cs.capacitor_recharge_time_ms = 60_000.0;
+    }
+    park.step(1.0);
+    assert_eq!(park.sim_unix_secs, 1_700_000_001);
+    assert!(park.combat_states[&10].capacitor > 120.0);
+    assert_eq!(
+        park.combat_states[&10].last_step_capacitor,
+        Some(park.combat_states[&10].capacitor)
+    );
+
+    // 6. Collision bumping:
+    //    a) Static ball id < dynamic ball id (`is_static_a && !is_static_b` branch)
+    //    b) Aligning warp ship bumped resets to Aligning and emits observer SetBallPosition/Velocity
+    //    c) Zero-radius swept crossing at exact origin triggers dist_c == 0 -> DVec3::X fallback
+    let mut cpark = Ballpark::new(30_000_142);
+    let mut static_gate = ball_with(5, DVec3::new(0.0, 0.0, 0.0), DVec3::ZERO, 0.0, 1.0, 1e9, 100.0);
+    static_gate.mode = MovementMode::Rigid;
+    assert!(cpark.add_ball(static_gate));
+    cpark.static_ball_ids.insert(5);
+    let mut bumper = ball_with(6, DVec3::new(90.0, 0.0, 0.0), DVec3::new(-20.0, 0.0, 0.0), 100.0, 2.0, 1e6, 20.0);
+    bumper.mode = MovementMode::GotoDirection { direction: DVec3::NEG_X };
+    assert!(cpark.add_ball(bumper));
+
+    // Zero-radius symmetric crossing at (5000, 0, 0)
+    let mut z1 = ball_with(21, DVec3::new(4_995.0, 0.0, 0.0), DVec3::new(20.0, 0.0, 0.0), 100.0, 2.0, 1e6, 0.0);
+    z1.mode = MovementMode::GotoDirection { direction: DVec3::X };
+    let mut z2 = ball_with(22, DVec3::new(5_005.0, 0.0, 0.0), DVec3::new(-20.0, 0.0, 0.0), 100.0, 2.0, 1e6, 0.0);
+    z2.mode = MovementMode::GotoDirection { direction: DVec3::NEG_X };
+    assert!(cpark.add_ball(z1));
+    assert!(cpark.add_ball(z2));
+
+    // Aligning warp ship overlapping dynamic ship at (10_000, 0, 0)
+    let mut w_ship = ball_with(31, DVec3::new(10_000.0, 0.0, 0.0), DVec3::ZERO, 100.0, 2.0, 1e6, 40.0);
+    w_ship.mode = MovementMode::Warp {
+        origin: DVec3::new(10_000.0, 0.0, 0.0),
+        destination: DVec3::new(1e7, 0.0, 0.0),
+        warp_speed_au_s: 3.0,
+        total_distance: 1e7,
+        phase: WarpPhase::Aligning,
+        elapsed_warp_time: 2.0,
+    };
+    let blocker = ball_with(32, DVec3::new(10_020.0, 0.0, 0.0), DVec3::new(-10.0, 0.0, 0.0), 100.0, 2.0, 1e6, 40.0);
+    assert!(cpark.add_ball(w_ship));
+    assert!(cpark.add_ball(blocker));
+
+    cpark.observer_events.clear();
+    cpark.step(1.0);
+    assert!(cpark.balls[&6].position.x >= 119.0);
+    assert!(cpark.balls[&6].velocity.x > 0.0);
+    assert!(matches!(
+        cpark.balls[&31].mode,
+        MovementMode::Warp { phase: WarpPhase::Aligning, elapsed_warp_time, .. } if elapsed_warp_time == 0.0
+    ));
+    assert!(cpark.observer_events[&32]
+        .iter()
+        .any(|ev| matches!(ev, DestinyEvent::SetBallPosition { ball_id: 31, .. })));
+
+    // 7. warp_exit_stops: NAN velocity and max_velocity == 0.0 clamping + observer broadcasts
+    let mut wpark = Ballpark::new(30_000_142);
+    let obs = ball_with(40, DVec3::new(1e6, 0.0, 0.0), DVec3::ZERO, 100.0, 2.0, 1e6, 30.0);
+    let mut nan_ship = ball_with(41, DVec3::new(1e6 - 10.0, 0.0, 0.0), DVec3::NAN, 100.0, 2.0, 1e6, 30.0);
+    nan_ship.mode = MovementMode::Warp {
+        origin: DVec3::ZERO,
+        destination: DVec3::new(1e6, 0.0, 0.0),
+        warp_speed_au_s: 3.0,
+        total_distance: 1e6,
+        phase: WarpPhase::Decelerating,
+        elapsed_warp_time: 100.0,
+    };
+    let mut zero_cap_ship = ball_with(42, DVec3::new(1e6 - 10.0, 0.0, 0.0), DVec3::new(500.0, 0.0, 0.0), 0.0, 2.0, 1e6, 30.0);
+    zero_cap_ship.mode = MovementMode::Warp {
+        origin: DVec3::ZERO,
+        destination: DVec3::new(1e6, 0.0, 0.0),
+        warp_speed_au_s: 3.0,
+        total_distance: 1e6,
+        phase: WarpPhase::Decelerating,
+        elapsed_warp_time: 100.0,
+    };
+    assert!(wpark.add_ball(obs));
+    assert!(wpark.add_ball(nan_ship));
+    assert!(wpark.add_ball(zero_cap_ship));
+    wpark.observer_events.clear();
+    wpark.step(1.0);
+    assert_eq!(wpark.balls[&41].mode, MovementMode::Stop);
+    assert!(wpark.balls[&41].velocity.is_finite());
+    assert!(wpark.balls[&41].velocity.length() <= wpark.balls[&41].max_velocity + 1e-9);
+    assert_eq!(wpark.balls[&42].velocity, DVec3::ZERO);
+    assert!(wpark.observer_events[&40]
+        .iter()
+        .any(|ev| matches!(ev, DestinyEvent::Stop { ball_id: 41 })));
+}
+
+#[test]
+fn test_wire_encoding_slim_meta_and_destiny_event_edges() {
+    let mut align_ball = ball_with(801, DVec3::ZERO, DVec3::ZERO, 200.0, 2.0, 1e6, 30.0);
+    align_ball.mode = MovementMode::Warp {
+        origin: DVec3::ZERO,
+        destination: DVec3::new(50_000.0, 0.0, 0.0),
+        warp_speed_au_s: 3.0,
+        total_distance: 0.0,
+        phase: WarpPhase::Aligning,
+        elapsed_warp_time: 0.0,
+    };
+    let buf_align = encode_add_balls(10, &[&align_ball]);
+    assert!(!buf_align.is_empty());
+
+    let mut cruise_ball = align_ball.clone();
+    cruise_ball.id = 802;
+    cruise_ball.mode = MovementMode::Warp {
+        origin: DVec3::ZERO,
+        destination: DVec3::new(50_000.0, 0.0, 0.0),
+        warp_speed_au_s: 3.0,
+        total_distance: 0.0, // falls back to (destination - origin).length()
+        phase: WarpPhase::Cruising,
+        elapsed_warp_time: 3.0,
+    };
+    let buf_cruise = encode_add_balls(10, &[&cruise_ball]);
+    assert_ne!(buf_align, buf_cruise);
+
+    // Rigid Upwell structure group 4079 + wire_type_id mapping (0 -> 6, 32882 -> 55914)
+    let mut upwell_ball = ball_with(1_000_000_001, DVec3::ZERO, DVec3::ZERO, 0.0, 1.0, 1e9, 5000.0);
+    upwell_ball.type_id = 32882;
+    upwell_ball.mode = MovementMode::Rigid;
+    let meta = resolve_slim_item_meta(None, &upwell_ball);
+    assert_eq!(meta.group_id, 4079);
+    assert_eq!(meta.category_id, 2);
+    let dict = slim_item_dict(&upwell_ball, &meta);
+    let PyRep::Dict(entries) = dict else {
+        panic!("expected PyRep::Dict");
+    };
+    assert!(entries
+        .iter()
+        .any(|(k, v)| matches!(k, PyRep::String(s) if s == "typeID") && *v == PyRep::Integer(55914)));
+
+    let mut zero_type_ball = upwell_ball.clone();
+    zero_type_ball.type_id = 0;
+    let zero_dict = slim_item_dict(&zero_type_ball, &meta);
+    let PyRep::Dict(z_entries) = zero_dict else {
+        panic!("expected PyRep::Dict");
+    };
+    assert!(z_entries
+        .iter()
+        .any(|(k, v)| matches!(k, PyRep::String(s) if s == "typeID") && *v == PyRep::Integer(6)));
+
+    // encode_destiny_event SetMaxSpeed and OnDotVictimUpdated with explicit expiry_filetime > 0
+    let max_speed_wire = encode_destiny_event(
+        5,
+        &DestinyEvent::SetMaxSpeed {
+            ball_id: 801,
+            max_speed: 312.5,
+        },
+        None,
+    );
+    let PyRep::Tuple(ms_pair) = max_speed_wire else {
+        panic!("expected tuple");
+    };
+    assert_eq!(ms_pair[0], PyRep::Integer(5));
+
+    let dot_wire = encode_destiny_event(
+        5,
+        &DestinyEvent::OnDotVictimUpdated {
+            ball_id: 801,
+            flat_dps: 15.0,
+            pct_dps: 0.01,
+            remaining_ticks: 4,
+            expiry_filetime: 135_000_000_000_000_000,
+        },
+        None,
+    );
+    let PyRep::Tuple(dot_pair) = dot_wire else {
+        panic!("expected tuple");
+    };
+    assert_eq!(dot_pair[0], PyRep::Integer(5));
+}
+
+#[test]
+fn mutant_killers_grid_no_expand_while_warping_and_decelerating_dest_bounds_all_six_faces() {
+    use crate::{BUBBLE_RADIUS_METERS, GRID_WALL_EXPANSION_THRESHOLD_METERS};
+
+    // 1. physics::step L604 (`!is_warping && !exited_warp`): while `still_in_old` and Aligning (`is_warping`),
+    //    moving near the grid expansion wall must NOT expand the grid.
+    let mut gpark = Ballpark::new(30_000_142);
+    gpark.add_ball(ball_with(1, DVec3::ZERO, DVec3::ZERO, 300.0, 1.0, 1e6, 40.0));
+    let gid = gpark.ball_grid_ids[&1];
+    let init_max_x = gpark.grids[&gid].max_bounds.x;
+    let near_wall_x = init_max_x - GRID_WALL_EXPANSION_THRESHOLD_METERS * 0.25;
+    let mut b_warp = ball_with(2, DVec3::new(near_wall_x, 0.0, 0.0), DVec3::new(100.0, 0.0, 0.0), 300.0, 1.0, 1e6, 40.0);
+    b_warp.mode = MovementMode::Warp {
+        origin: DVec3::new(near_wall_x, 0.0, 0.0),
+        destination: DVec3::new(1e10, 0.0, 0.0),
+        warp_speed_au_s: 3.0,
+        total_distance: 1e10,
+        phase: WarpPhase::Aligning,
+        elapsed_warp_time: 0.0,
+    };
+    gpark.add_ball(b_warp);
+    let max_x_after_add = gpark.grids[&gid].max_bounds.x;
+    gpark.step(0.1);
+    assert!(
+        (gpark.grids[&gid].max_bounds.x - max_x_after_add).abs() < 1e-6,
+        "warping ball inside old grid must not expand grid"
+    );
+
+    // 2. physics::step L650-656: Decelerating into `destination` with NO existing destination grid
+    //    must reject entry when OUTSIDE any single face (-X/+X/-Y/+Y/-Z/+Z) and accept when INSIDE all 6 faces.
+    let dest = DVec3::new(100_000_000.0, 100_000_000.0, 100_000_000.0);
+    let raw_dist = 1_000_000_000.0_f64;
+    let warp_speed = 3.0_f64;
+    let k_a = warp_speed;
+    let k_d = k_a / 3.0;
+    let eff_total = raw_dist + 1.0;
+    let v_peak = (warp_speed * AU_METERS).min(eff_total * k_a * k_d / (k_a + k_d));
+    let t_accel_end = (v_peak / k_a).ln() / k_a;
+    let t_cruise_dur = (eff_total / v_peak - 1.0 / k_a - 1.0 / k_d).max(0.0);
+    let s_decel_start = v_peak / k_d;
+
+    let time_for_rem = |rem_dist: f64| -> f64 {
+        t_accel_end + t_cruise_dur + (s_decel_start / (rem_dist + 1.0)).ln() / k_d
+    };
+
+    for axis in [
+        DVec3::X,
+        -DVec3::X,
+        DVec3::Y,
+        -DVec3::Y,
+        DVec3::Z,
+        -DVec3::Z,
+    ] {
+        // Outside by 50 km along `axis` -> must NOT create destination grid
+        let mut p_out = Ballpark::new(30_000_142);
+        p_out.balls.insert(
+            77,
+            Ball {
+                id: 77,
+                type_id: 587,
+                position: dest - axis * (BUBBLE_RADIUS_METERS + 50_000.0),
+                velocity: axis * 1_000.0,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1e6,
+                radius: 40.0,
+                speed_fraction: 1.0,
+                mode: MovementMode::Warp {
+                    origin: dest - axis * raw_dist,
+                    destination: dest,
+                    warp_speed_au_s: warp_speed,
+                    total_distance: raw_dist,
+                    phase: WarpPhase::Decelerating,
+                    elapsed_warp_time: time_for_rem(BUBBLE_RADIUS_METERS + 50_000.0),
+                },
+            },
+        );
+        p_out.step(0.001);
+        assert!(
+            p_out.grids.is_empty() && !p_out.ball_grid_ids.contains_key(&77),
+            "decelerating ball outside face {axis:?} must not enter/create dest grid"
+        );
+
+        // Inside by 50 km along `axis` -> MUST create destination grid and attach ball
+        let mut p_in = Ballpark::new(30_000_142);
+        p_in.balls.insert(
+            77,
+            Ball {
+                id: 77,
+                type_id: 587,
+                position: dest - axis * (BUBBLE_RADIUS_METERS - 50_000.0),
+                velocity: axis * 1_000.0,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1e6,
+                radius: 40.0,
+                speed_fraction: 1.0,
+                mode: MovementMode::Warp {
+                    origin: dest - axis * raw_dist,
+                    destination: dest,
+                    warp_speed_au_s: warp_speed,
+                    total_distance: raw_dist,
+                    phase: WarpPhase::Decelerating,
+                    elapsed_warp_time: time_for_rem(BUBBLE_RADIUS_METERS - 50_000.0),
+                },
+            },
+        );
+        p_in.step(0.001);
+        assert!(
+            p_in.ball_grid_ids.contains_key(&77),
+            "decelerating ball inside all 6 faces ({axis:?}) must enter/create dest grid"
+        );
+    }
 }

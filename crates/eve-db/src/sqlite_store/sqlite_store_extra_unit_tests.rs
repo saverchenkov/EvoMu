@@ -537,3 +537,188 @@ fn social_store_and_sync_ext_cover_all_collections_and_deletions() {
     assert!(fp.skill_history.is_empty());
     assert!(fp.character_doll_info.is_empty());
 }
+
+#[test]
+fn ws_a3_fingerprints_fnv_serializer_all_primitives_and_order_independence() {
+    use serde::{ser::Error as _, Serialize, Serializer};
+
+    // FnvSerError trait impls: Display, Debug, Error, serde::ser::Error::custom
+    let err = fingerprints::FnvSerError::custom("bad");
+    assert_eq!(err.to_string(), "fnv serialization error");
+    assert!(!format!("{err:?}").is_empty());
+    let _dyn_err: &dyn std::error::Error = &err;
+
+    // Raw bytes wrapper triggering FnvSerializer::serialize_bytes (tag 6)
+    struct BytesWrap<'a>(&'a [u8]);
+    impl Serialize for BytesWrap<'_> {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.serialize_bytes(self.0)
+        }
+    }
+
+    // Order-variant map wrapper exercising SerializeMap::serialize_key / serialize_value directly
+    struct KVSlice<'a>(&'a [(&'static str, i64)]);
+    impl Serialize for KVSlice<'_> {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeMap;
+            let mut m = serializer.serialize_map(Some(self.0.len()))?;
+            for &(k, v) in self.0 {
+                m.serialize_key(k)?;
+                m.serialize_value(&v)?;
+            }
+            m.end()
+        }
+    }
+
+    // Open-length seq wrapper exercising serialize_seq(None)
+    struct UnboundedSeq<'a>(&'a [u8]);
+    impl Serialize for UnboundedSeq<'_> {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeSeq;
+            let mut seq = serializer.serialize_seq(None)?;
+            for b in self.0 {
+                seq.serialize_element(b)?;
+            }
+            seq.end()
+        }
+    }
+
+    #[derive(Serialize)]
+    struct UnitStruct;
+    #[derive(Serialize)]
+    struct NewtypeStruct(u16);
+    #[derive(Serialize)]
+    struct TupleStruct(i8, i16);
+    #[derive(Serialize)]
+    enum AllVariants {
+        UnitVar,
+        NewtypeVar(u32),
+        TupleVar(f32, char),
+        StructVar { flag: bool, small: u8 },
+    }
+    #[derive(Serialize)]
+    struct FullShowcase<'a> {
+        b: bool,
+        i8v: i8,
+        i16v: i16,
+        i32v: i32,
+        i64v: i64,
+        u8v: u8,
+        u16v: u16,
+        u32v: u32,
+        u64v: u64,
+        f32v: f32,
+        neg_zero_f64: f64,
+        pos_f64: f64,
+        ch: char,
+        s: &'a str,
+        raw: BytesWrap<'a>,
+        none_v: Option<u32>,
+        some_v: Option<u32>,
+        unit_v: (),
+        unit_s: UnitStruct,
+        newtype_s: NewtypeStruct,
+        tup_s: TupleStruct,
+        tup: (i32, &'static str),
+        e1: AllVariants,
+        e2: AllVariants,
+        e3: AllVariants,
+        e4: AllVariants,
+        seq_unbounded: UnboundedSeq<'a>,
+    }
+
+    let make = |neg_zero: f64| FullShowcase {
+        b: true,
+        i8v: -7,
+        i16v: -300,
+        i32v: -70_000,
+        i64v: -9_000_000,
+        u8v: 250,
+        u16v: 65_000,
+        u32v: 4_000_000,
+        u64v: 99_000_000_000,
+        f32v: 1.25,
+        neg_zero_f64: neg_zero,
+        pos_f64: -0.0,
+        ch: 'λ',
+        s: "hello",
+        raw: BytesWrap(b"\x01\x02\x03"),
+        none_v: None,
+        some_v: Some(42),
+        unit_v: (),
+        unit_s: UnitStruct,
+        newtype_s: NewtypeStruct(9),
+        tup_s: TupleStruct(-1, 2),
+        tup: (3, "tup"),
+        e1: AllVariants::UnitVar,
+        e2: AllVariants::NewtypeVar(77),
+        e3: AllVariants::TupleVar(2.5, 'Z'),
+        e4: AllVariants::StructVar { flag: false, small: 8 },
+        seq_unbounded: UnboundedSeq(&[10, 20]),
+    };
+
+    // -0.0 and +0.0 canonicalize identically
+    let fp_pos0 = fingerprints::canonical_fp(&make(0.0));
+    let fp_neg0 = fingerprints::canonical_fp(&make(-0.0));
+    assert_eq!(fp_pos0, fp_neg0);
+    assert_ne!(fp_pos0, fingerprints::canonical_fp(&BytesWrap(b"\x01\x02\x04")));
+
+    // Map key-order independence via xor & sum
+    let m1 = KVSlice(&[("alpha", 1), ("beta", 2), ("gamma", 3)]);
+    let m2 = KVSlice(&[("gamma", 3), ("alpha", 1), ("beta", 2)]);
+    assert_eq!(fingerprints::canonical_fp(&m1), fingerprints::canonical_fp(&m2));
+
+    let mut m3_base = KVSlice(&[("alpha", 1), ("beta", 99), ("gamma", 3)]);
+    assert_ne!(fingerprints::canonical_fp(&m1), fingerprints::canonical_fp(&m3_base));
+    m3_base = KVSlice(&[("alpha", 1), ("beta", 2)]);
+    assert_ne!(fingerprints::canonical_fp(&m1), fingerprints::canonical_fp(&m3_base));
+}
+
+#[test]
+fn service_domains_store_hash_json_all_variants_and_corrupt_load() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    apply_migrations(&conn).unwrap();
+
+    let mut snap = WorldStateSnapshot::default();
+    // Populate JSON Null, Bool, Number, String, Array, Object in session_registry so hash_json_value covers all variants
+    snap.cluster_and_runtime.session_registry.insert(
+        "mix".into(),
+        serde_json::json!({
+            "null_v": null,
+            "bool_v": true,
+            "num_v": 42,
+            "str_v": "hi",
+            "arr_v": [1, false, null, "x", {"inner": 9}],
+        }),
+    );
+
+    let mut fp = TableFingerprints::default();
+    {
+        let tx = conn.transaction().unwrap();
+        assert!(service_domains_store::sync_service_domains(&tx, &snap, &mut fp).unwrap());
+        tx.commit().unwrap();
+    }
+    assert_ne!(fp.service_domains.cluster_and_runtime, 0);
+
+    // Rollback restores mutated cluster_and_runtime
+    let expected = snap.cluster_and_runtime.session_registry.clone();
+    snap.cluster_and_runtime.session_registry.clear();
+    service_domains_store::rollback_service_domains(&conn, &mut snap, &fp);
+    assert_eq!(snap.cluster_and_runtime.session_registry, expected);
+
+    // Corrupt rows in service_domain_state are gracefully skipped by load_service_domains
+    conn.execute(
+        "UPDATE service_domain_state SET payload_json = '{corrupt' WHERE domain_key = 'cluster_and_runtime'",
+        [],
+    )
+    .unwrap();
+    let mut loaded = WorldStateSnapshot::default();
+    service_domains_store::load_service_domains(&conn, &mut loaded);
+    assert!(loaded.cluster_and_runtime.session_registry.is_empty());
+
+    // Dropping service_domain_state fails sync cleanly
+    conn.execute("DROP TABLE service_domain_state", []).unwrap();
+    let mut empty_fp = TableFingerprints::default();
+    let tx = conn.transaction().unwrap();
+    assert!(service_domains_store::sync_service_domains(&tx, &snap, &mut empty_fp).is_err());
+}

@@ -9,7 +9,7 @@ use crate::sp6_lifecycle::{
     PersistedSpaceObjectMeta, SafeLogoffEntry, MOBILE_WARP_DISRUPTOR_DECAY_SECS,
     SECURE_CONTAINER_DECAY_SECS,
 };
-use eve_db::{ActiveMissionRecord, InventoryFlag, InventoryItemRecord, WorldRepository};
+use eve_db::{ActiveMissionRecord, InventoryFlag, InventoryItemRecord, ServerClock, WorldRepository};
 use eve_destiny::Ballpark;
 use eve_sde::SdeRegistry;
 use glam::DVec3;
@@ -449,4 +449,404 @@ async fn deep_disconnected_warp_and_safe_logoff_abort_transitions() {
             .get(&cid_warp)
             .is_some_and(|d| d.removed_from_space)
     }));
+}
+
+#[tokio::test]
+async fn advance_secs_sim_clock_rebase_suppress_vs_emit_and_abyssal_trace_zarzakh_expiry() {
+    let ctx = test_ctx();
+    let base_unix = 1_800_000_000u64;
+    let clock = Arc::new(eve_db::VirtualServerClock::with_fixed_base(base_unix));
+    ctx.set_clock(clock.clone());
+
+    let sys_id = 30_000_142u32;
+    let (cid, uid) = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.values_mut().next().expect("seed char");
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        (ch.character_id, ch.user_id)
+    });
+    let _ = ctx
+        .db
+        .acquire_online_lock(uid, 9_500_001, Some(cid), true, base_unix);
+    let _ = ctx.drain_notifications_for_char(cid);
+
+    let tid_exp = 900_901i64;
+    let tid_live = 900_902i64;
+    let tid_zero = 900_903i64;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    for tid in [tid_exp, tid_live, tid_zero] {
+        sys.spawn_ball_with_meta(
+            eve_destiny::Ball {
+                id: tid,
+                type_id: 47961,
+                position: DVec3::new((tid - 900_900) as f64 * 1000.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 1_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            eve_destiny::CombatState::default(),
+            eve_destiny::SlimItemMeta::default(),
+        )
+        .await
+        .unwrap();
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (tid, exp) in [
+            (tid_exp, base_unix + 10),  // exact boundary == now_unix after +10s
+            (tid_live, base_unix + 11), // 1s later -> kept
+            (tid_zero, 0),              // 0 -> never expires
+        ] {
+            snap.abyssal_state.traces.insert(
+                tid,
+                eve_db::service_domains::AbyssalTraceRecord {
+                    trace_ball_id: tid,
+                    char_id: cid,
+                    filament_type_id: 47757,
+                    origin_solar_system_id: sys_id,
+                    position: [0.0, 0.0, 0.0],
+                    created_unix: base_unix,
+                    expires_at_sec: exp,
+                    max_ships: 1,
+                    entered_char_ids: vec![cid],
+                    pocket_id: None,
+                    fleet_id: None,
+                },
+            );
+        }
+        snap.zarzakh_gate_locks.insert(1001, (50_000_001, base_unix + 10));
+        snap.zarzakh_gate_locks.insert(1002, (50_000_002, base_unix + 11));
+    });
+
+    // Advance 10s with emit_sim_clock_rebase = false -> suppresses DoSimClockRebase, still expires trace & gate lock
+    clock.advance_secs(10);
+    on_advance_secs_with_sim_clock_rebase(&ctx, base_unix, 10, false);
+
+    let notes_suppressed = ctx.drain_notifications_for_char(cid);
+    assert!(
+        !notes_suppressed.iter().any(|n| n.event == "DoSimClockRebase"),
+        "expected DoSimClockRebase to be suppressed when emit_sim_clock_rebase == false"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.abyssal_state.traces.contains_key(&tid_exp));
+        assert!(snap.abyssal_state.traces.contains_key(&tid_live));
+        assert!(snap.abyssal_state.traces.contains_key(&tid_zero));
+        assert!(!snap.zarzakh_gate_locks.contains_key(&1001));
+        assert!(snap.zarzakh_gate_locks.contains_key(&1002));
+    });
+    assert!(sys.get_ball_snapshot(tid_exp).await.unwrap().is_none());
+    assert!(sys.get_ball_snapshot(tid_live).await.unwrap().is_some());
+
+    // Advance 5s with on_advance_secs (emit == true) -> emits DoSimClockRebase
+    clock.advance_secs(5);
+    on_advance_secs(&ctx, base_unix + 10, 5);
+    let notes_emitted = ctx.drain_notifications_for_char(cid);
+    assert!(
+        notes_emitted.iter().any(|n| n.event == "DoSimClockRebase"),
+        "expected DoSimClockRebase notification when on_advance_secs advances clock"
+    );
+}
+
+#[test]
+fn downtime_cleanup_syncs_runtime_to_db() {
+    let ctx = test_ctx();
+    {
+        let mut ex = ctx.fleet_extras.lock().unwrap_or_else(|e| e.into_inner());
+        ex.fleet_names.insert(999_001, "DowntimeSyncFleet".into());
+    }
+    assert!(
+        !ctx.db.with_snapshot(|s| s
+            .cluster_and_runtime
+            .server_runtime_json
+            .as_deref()
+            .is_some_and(|j| j.contains("DowntimeSyncFleet")))
+    );
+
+    let _ = crate::sp6_lifecycle::cluster_tick_downtime::cleanup_npc_wrecks_and_reset_missions_on_downtime(&ctx);
+    assert!(
+        ctx.db.with_snapshot(|s| s
+            .cluster_and_runtime
+            .server_runtime_json
+            .as_deref()
+            .is_some_and(|j| j.contains("DowntimeSyncFleet")))
+    );
+}
+
+#[tokio::test]
+async fn tick_background_cluster_cosmic_expiry_wormholes_metenox_and_bounty_ticks() {
+    let ctx = test_ctx();
+    let now_unix = 1_800_000_000u64;
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(now_unix)));
+
+    let sys_id = 30_000_142u32;
+    let char_a = 90_700_001i64;
+    let char_b = 90_700_002i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base_ch = snap.characters.values().next().cloned().expect("seed char");
+        for cid in [char_a, char_b] {
+            let mut ch = base_ch.clone();
+            ch.character_id = cid;
+            ch.user_id = cid as u64;
+            ch.solar_system_id = sys_id;
+            snap.characters.insert(cid, ch);
+        }
+
+        snap.cosmic_anomalies.insert(
+            sys_id,
+            vec![
+                eve_db::CosmicAnomalyRecord {
+                    anomaly_id: "anom-exp".into(),
+                    solar_system_id: sys_id,
+                    name: "Expired Anom".into(),
+                    anomaly_type: "Combat".into(),
+                    position: [0.0; 3],
+                    signal_strength: 1.0,
+                    ore_types: Vec::new(),
+                    remaining_volume: 0.0,
+                    created_unix: now_unix - 100,
+                    lifetime_seconds: 100, // exact expiry boundary now_unix == created + lifetime
+                    cleared: false,
+                },
+                eve_db::CosmicAnomalyRecord {
+                    anomaly_id: "anom-live".into(),
+                    solar_system_id: sys_id,
+                    name: "Live Anom".into(),
+                    anomaly_type: "Combat".into(),
+                    position: [0.0; 3],
+                    signal_strength: 1.0,
+                    ore_types: Vec::new(),
+                    remaining_volume: 0.0,
+                    created_unix: now_unix - 99,
+                    lifetime_seconds: 100,
+                    cleared: false,
+                },
+                eve_db::CosmicAnomalyRecord {
+                    anomaly_id: "anom-perm".into(),
+                    solar_system_id: sys_id,
+                    name: "Immortal Anom".into(),
+                    anomaly_type: "Ore".into(),
+                    position: [0.0; 3],
+                    signal_strength: 1.0,
+                    ore_types: Vec::new(),
+                    remaining_volume: 0.0,
+                    created_unix: now_unix - 500,
+                    lifetime_seconds: 0,
+                    cleared: false,
+                },
+            ],
+        );
+
+        snap.cosmic_signatures.insert(
+            sys_id,
+            vec![
+                eve_db::CosmicSignatureRecord {
+                    signature_id: "SIG-EXP".into(),
+                    solar_system_id: sys_id,
+                    sig_group: "Data".into(),
+                    type_name: "Expired Data".into(),
+                    position: [0.0; 3],
+                    signal_strength: 0.0,
+                    wormhole_type_id: None,
+                    destination_system_id: None,
+                    created_unix: now_unix - 100,
+                    lifetime_seconds: 100,
+                    max_mass_kg: 0.0,
+                    remaining_mass_kg: 0.0,
+                    max_jump_mass_kg: 0.0,
+                    collapsed: false,
+                },
+                eve_db::CosmicSignatureRecord {
+                    signature_id: "SIG-WH".into(),
+                    solar_system_id: sys_id,
+                    sig_group: "Wormhole".into(), // case-insensitive wormhole exemption!
+                    type_name: "Wormhole K162".into(),
+                    position: [0.0; 3],
+                    signal_strength: 0.0,
+                    wormhole_type_id: None,
+                    destination_system_id: None,
+                    created_unix: now_unix - 500,
+                    lifetime_seconds: 100,
+                    max_mass_kg: 0.0,
+                    remaining_mass_kg: 0.0,
+                    max_jump_mass_kg: 0.0,
+                    collapsed: false,
+                },
+                eve_db::CosmicSignatureRecord {
+                    signature_id: "SIG-LIVE".into(),
+                    solar_system_id: sys_id,
+                    sig_group: "Relic".into(),
+                    type_name: "Live Relic".into(),
+                    position: [0.0; 3],
+                    signal_strength: 0.0,
+                    wormhole_type_id: None,
+                    destination_system_id: None,
+                    created_unix: now_unix - 50,
+                    lifetime_seconds: 100,
+                    max_mass_kg: 0.0,
+                    remaining_mass_kg: 0.0,
+                    max_jump_mass_kg: 0.0,
+                    collapsed: false,
+                },
+            ],
+        );
+
+        // If seed SDE includes Metenox Moon Drill (group 4744), exercise the prev_metenox_tick > 0 branch
+        let corp_id = snap.corporations.keys().copied().next().unwrap_or(1_000_009);
+        if let Some(met_type) = ctx.sde.types.values().find(|t| t.group_id == 4744) {
+            let met_sys_id = ctx
+                .sde
+                .solar_systems
+                .values()
+                .find(|s| {
+                    (s.security_status < 0.45 || s.solar_system_id >= 31_000_000)
+                        && ctx
+                            .sde
+                            .celestials_in_system(s.solar_system_id)
+                            .iter()
+                            .any(|c| c.group_id == 8)
+                })
+                .map(|s| s.solar_system_id)
+                .unwrap_or(30_000_144);
+            snap.mining_and_ess_state.metenox_last_tick_unix = now_unix - 3_600;
+            snap.structures.insert(
+                1_088_000_001,
+                eve_db::UpwellStructureRecord {
+                    structure_id: 1_088_000_001,
+                    type_id: met_type.type_id,
+                    owner_corp_id: corp_id,
+                    solar_system_id: met_sys_id,
+                    name: "Test Metenox".into(),
+                    position: [10_000.0, 0.0, 0.0],
+                    state: "Operating".into(),
+                    quantum_core_installed: true,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.pending_bounty_ticks.insert((sys_id, char_a), 1_000.0); // no next_flush yet -> scheduled for +1200
+        rt.pending_bounty_ticks.insert((sys_id, char_b), 2_000.0);
+        rt.bounty_tick_next_flush_unix.insert((sys_id, char_b), now_unix); // due immediately (`now >= next_flush`)
+    });
+
+    tick_background_cluster(&ctx).await;
+
+    ctx.db.with_snapshot(|snap| {
+        let anoms: Vec<&str> = snap.cosmic_anomalies[&sys_id]
+            .iter()
+            .map(|a| a.anomaly_id.as_str())
+            .collect();
+        assert_eq!(anoms, vec!["anom-live", "anom-perm"]);
+
+        let sigs: Vec<&str> = snap.cosmic_signatures[&sys_id]
+            .iter()
+            .map(|s| s.signature_id.as_str())
+            .collect();
+        assert!(!sigs.contains(&"SIG-EXP"));
+        assert!(sigs.contains(&"SIG-WH"));
+        assert!(sigs.contains(&"SIG-LIVE"));
+
+        if ctx.sde.types.values().any(|t| t.group_id == 4744) {
+            assert_eq!(snap.mining_and_ess_state.metenox_last_tick_unix, now_unix);
+        }
+    });
+
+    crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        assert_eq!(
+            rt.bounty_tick_next_flush_unix.get(&(sys_id, char_a)).copied(),
+            Some(now_unix + 1_200)
+        );
+        assert!(!rt.bounty_tick_next_flush_unix.contains_key(&(sys_id, char_b)));
+        assert!(!rt.pending_bounty_ticks.contains_key(&(sys_id, char_b)));
+    });
+}
+
+#[test]
+fn seed_persisted_abandoned_drones_classifies_sentry_mobile_and_fighter() {
+    let sde_arc = Arc::clone(SHARED_SDE.get_or_init(|| Arc::new(SdeRegistry::with_canonical_seed())));
+    let mut sde = (*sde_arc).clone();
+    let mut base_type = sde.types.values().next().expect("seed type").clone();
+    base_type.type_id = 996_001;
+    base_type.category_id = 18;
+    base_type.group_id = 100;
+    base_type.default_attributes.clear();
+    base_type.default_attributes.insert(37, 0.0); // max_vel < 1.0 -> sentry
+    base_type.default_attributes.insert(1272, 25.0);
+    sde.types.insert(996_001, base_type.clone());
+
+    let mut mobile = base_type.clone();
+    mobile.type_id = 996_002;
+    mobile.default_attributes.insert(37, 1_500.0); // max_vel >= 1.0 -> mobile drone
+    mobile.default_attributes.insert(1272, 5.0);
+    sde.types.insert(996_002, mobile);
+
+    let mut fighter = base_type;
+    fighter.type_id = 996_003;
+    fighter.category_id = 87;
+    fighter.default_attributes.clear();
+    fighter.default_attributes.insert(2215, 9.0);
+    sde.types.insert(996_003, fighter);
+
+    let ctx = ServerContext::with_sde_and_repository(
+        Arc::new(sde),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let sys_id = 30_000_142i64;
+    let sentry_id = 1_096_001i64;
+    let mobile_item_id = 1_096_002i64;
+    let mobile_ball_id = 1_096_902i64;
+    let fighter_id = 1_096_003i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let owner_id = snap.characters.keys().copied().next().expect("seed char");
+        snap.items.insert(
+            sentry_id,
+            make_item(sentry_id, 996_001, owner_id, sys_id, InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            mobile_item_id,
+            make_item(mobile_item_id, 996_002, owner_id, sys_id, InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            fighter_id,
+            make_item(fighter_id, 996_003, owner_id, sys_id, InventoryFlag::None, 5),
+        );
+        snap.sp6_lifecycle.space_object_meta.insert(
+            mobile_item_id,
+            PersistedSpaceObjectMeta {
+                drone_ball_id: Some(mobile_ball_id),
+                ..Default::default()
+            },
+        );
+    });
+
+    seed_persisted_abandoned_drones(&ctx);
+
+    crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        let s = rt.active_drones_in_space.get(&sentry_id).expect("sentry seeded");
+        assert!(s.is_abandoned);
+        assert!(s.is_sentry);
+
+        let m = rt.active_drones_in_space.get(&mobile_ball_id).expect("mobile drone under drone_ball_id");
+        assert!(m.is_abandoned);
+        assert!(!m.is_sentry);
+        assert_eq!(m.drone_item_id, mobile_item_id);
+    });
+    let f = ctx
+        .active_fighters
+        .read()
+        .unwrap()
+        .get(&fighter_id)
+        .cloned()
+        .expect("fighter squadron seeded");
+    assert!(f.is_abandoned);
+    assert_eq!(f.squadron_size, 5);
 }

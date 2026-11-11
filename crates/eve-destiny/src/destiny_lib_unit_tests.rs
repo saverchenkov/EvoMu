@@ -337,3 +337,233 @@ fn coverage_and_mutants_lib_damage_spillover_invuln_and_bubbles() {
         .is_ok());
     assert_eq!(fpark.balls[&2].speed_fraction, 1.0);
 }
+
+#[test]
+fn combat_state_recompute_attributes_baselines_clamps_and_resonance_precedence() {
+    let mut ball = Ball {
+        id: 77,
+        type_id: 587,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        radius: 40.0,
+        mass: 1_000_000.0,
+        inertia: 2.5,
+        speed_fraction: 1.0,
+        mode: MovementMode::Stop,
+    };
+    let mut cs = CombatState::new();
+    cs.max_shield_hp = 1_000.0;
+    cs.shield_hp = 1_000.0;
+    cs.max_armor_hp = 2_000.0;
+    cs.armor_hp = 2_000.0;
+    cs.max_structure_hp = 3_000.0;
+    cs.structure_hp = 3_000.0;
+    cs.signature_radius = 50.0;
+    cs.capacitor_recharge_time_ms = 200_000.0;
+
+    // 1. `capture_missing_baselines` guard: when `is_cloaked && ball.max_velocity == 0.0`
+    //    or `module_immobilized`, `base_max_velocity` is NOT captured.
+    cs.is_cloaked = true;
+    cs.capture_missing_baselines(&ball);
+    assert_eq!(cs.base_max_velocity, None);
+
+    cs.is_cloaked = false;
+    cs.module_immobilized = true;
+    ball.max_velocity = 250.0;
+    cs.capture_missing_baselines(&ball);
+    assert_eq!(cs.base_max_velocity, None);
+
+    // Once uncloaked and not immobilized, `base_max_velocity` is captured and never overwritten.
+    cs.module_immobilized = false;
+    cs.recompute_attributes(&mut ball);
+    assert_eq!(cs.base_max_velocity, Some(250.0));
+    ball.max_velocity = 999.0;
+    cs.capture_missing_baselines(&ball);
+    assert_eq!(cs.base_max_velocity, Some(250.0));
+
+    // 2. Velocity multiplier chain across all 3 `self_v` branches + `max_velocity_cap`:
+    //    `base_v (250) * ext (1.2) * cloud (0.8) * self_v * web (0.5)`
+    cs.external_velocity_multiplier = Some(1.2);
+    cs.cloud_velocity_multiplier = Some(0.8);
+    cs.web_velocity_multiplier = 0.5;
+    cs.prop_velocity_multiplier = 2.0;
+    cs.hic_velocity_multiplier = 0.75;
+
+    // Branch A: normal propulsion (`self_v = prop * hic = 1.5`) -> `250 * 1.2 * 0.8 * 1.5 * 0.5 = 180.0`
+    cs.recompute_attributes(&mut ball);
+    assert!((ball.max_velocity - 180.0).abs() < 1e-6);
+
+    // Branch B: cloaked (`self_v = cloak_mul * hic = 0.4 * 0.75 = 0.3`, ignoring `prop_velocity_multiplier`)
+    //           -> `250 * 1.2 * 0.8 * 0.3 * 0.5 = 36.0`
+    cs.cloak_velocity_multiplier = Some(0.4);
+    cs.recompute_attributes(&mut ball);
+    assert!((ball.max_velocity - 36.0).abs() < 1e-6);
+
+    // Branch C: `module_immobilized = true` (`self_v = 0.0`) -> `0.0`
+    cs.module_immobilized = true;
+    cs.recompute_attributes(&mut ball);
+    assert_eq!(ball.max_velocity, 0.0);
+
+    // `max_velocity_cap` clamps positive speeds and floors negative caps at `0.0`.
+    cs.module_immobilized = false;
+    cs.cloak_velocity_multiplier = None;
+    cs.max_velocity_cap = Some(120.0);
+    cs.recompute_attributes(&mut ball);
+    assert!((ball.max_velocity - 120.0).abs() < 1e-6);
+    cs.max_velocity_cap = Some(-10.0);
+    cs.recompute_attributes(&mut ball);
+    assert_eq!(ball.max_velocity, 0.0);
+    cs.max_velocity_cap = None;
+
+    // 3. Mass `(base_m * module_mass_multiplier + module_mass_addition).max(1.0)`
+    //    and Inertia `(base_i * external_inertia_multiplier * cloud_inertia_multiplier).max(0.001)`
+    cs.module_mass_multiplier = 1.5;
+    cs.module_mass_addition = 250_000.0;
+    cs.external_inertia_multiplier = Some(0.8);
+    cs.cloud_inertia_multiplier = Some(1.25);
+    cs.recompute_attributes(&mut ball);
+    assert!((ball.mass - 1_750_000.0).abs() < 1e-6);
+    assert!((ball.inertia - 2.5).abs() < 1e-6);
+
+    cs.module_mass_multiplier = 0.0;
+    cs.module_mass_addition = -500.0;
+    cs.external_inertia_multiplier = Some(0.0);
+    cs.recompute_attributes(&mut ball);
+    assert_eq!(ball.mass, 1.0);
+    assert_eq!(ball.inertia, 0.001);
+
+    // 4. Signature radius product of all 6 multipliers + `.max(1.0)` floor.
+    cs.module_sig_multiplier = 1.5;
+    cs.mjfg_sig_multiplier = Some(2.0);
+    cs.env_sig_multiplier = Some(1.2);
+    cs.external_sig_multiplier = Some(1.1);
+    cs.cloud_sig_multiplier = Some(1.25);
+    cs.tp_sig_multiplier = Some(1.4);
+    cs.recompute_combat_attributes();
+    let expected_sig = 50.0 * 2.0 * 1.5 * 1.2 * 1.1 * 1.25 * 1.4;
+    assert!((cs.signature_radius - expected_sig).abs() < 1e-6);
+    cs.tp_sig_multiplier = Some(0.0);
+    cs.recompute_combat_attributes();
+    assert_eq!(cs.signature_radius, 1.0);
+    cs.tp_sig_multiplier = Some(1.0);
+
+    // 5. Capacitor recharge time: positive scaled with `.max(1_000.0)` floor; `<= 0.0` stays `0.0`.
+    cs.cloud_cap_recharge_multiplier = Some(0.5);
+    cs.recompute_combat_attributes();
+    assert!((cs.capacitor_recharge_time_ms - 100_000.0).abs() < 1e-6);
+    cs.cloud_cap_recharge_multiplier = Some(0.0001);
+    cs.recompute_combat_attributes();
+    assert_eq!(cs.capacitor_recharge_time_ms, 1_000.0);
+    cs.base_capacitor_recharge_time_ms = Some(0.0);
+    cs.recompute_combat_attributes();
+    assert_eq!(cs.capacitor_recharge_time_ms, 0.0);
+
+    // 6. Environmental max shield / armor / cap multipliers clamp current pools down to new max.
+    cs.env_max_shield_multiplier = Some(0.5);
+    cs.env_max_armor_multiplier = Some(0.25);
+    cs.env_max_cap_multiplier = Some(0.4);
+    cs.base_max_capacitor = Some(500.0);
+    cs.capacitor = 500.0;
+    cs.recompute_combat_attributes();
+    assert!((cs.max_shield_hp - 500.0).abs() < 1e-6);
+    assert!((cs.shield_hp - 500.0).abs() < 1e-6);
+    assert!((cs.max_armor_hp - 500.0).abs() < 1e-6);
+    assert!((cs.armor_hp - 500.0).abs() < 1e-6);
+    assert!((cs.max_capacitor - 200.0).abs() < 1e-6);
+    assert!((cs.capacitor - 200.0).abs() < 1e-6);
+
+    // 7. Resonance precedence chain:
+    //    `base_*_resonance` -> `rah_armor_resonance` -> `crab_resonance_multiplier` (clamped `[0.01, 1.0]`)
+    //    -> `ehe_hull_resists` (overrides CRAB on structure) -> `adc_active` (`[0.25; 4]` overrides all).
+    cs.base_shield_resonance = Some([0.8, 0.6, 0.4, 0.2]);
+    cs.base_armor_resonance = Some([0.5, 0.5, 0.5, 0.5]);
+    cs.base_structure_resonance = Some([0.9, 0.9, 0.9, 0.9]);
+    cs.rah_armor_resonance = Some([0.4, 0.3, 0.2, 0.1]);
+    cs.crab_resonance_multiplier = Some(2.0); // tests `.clamp(0.01, 1.0)` upper clamp on `0.8 * 2.0 -> 1.0`
+    cs.recompute_combat_attributes();
+    assert!((cs.shield_resonance[0] - 1.0).abs() < 1e-6);
+    assert!((cs.shield_resonance[3] - 0.4).abs() < 1e-6);
+    assert!((cs.armor_resonance[0] - 0.8).abs() < 1e-6);
+    assert!((cs.armor_resonance[3] - 0.2).abs() < 1e-6);
+    assert!((cs.structure_resonance[0] - 1.0).abs() < 1e-6);
+
+    // Lower clamp `[0.01, 1.0]` on CRAB multiplier + EHE override on hull only:
+    cs.crab_resonance_multiplier = Some(0.001);
+    cs.ehe_hull_resists = Some([0.05; 4]);
+    cs.recompute_combat_attributes();
+    assert_eq!(cs.shield_resonance, [0.01; 4]);
+    assert_eq!(cs.armor_resonance, [0.01; 4]);
+    assert_eq!(cs.structure_resonance, [0.05; 4]);
+
+    // ADC overrides RAH, CRAB, and EHE across all 3 layers to `[0.25; 4]`.
+    cs.adc_active = true;
+    cs.recompute_combat_attributes();
+    assert_eq!(cs.shield_resonance, [0.25; 4]);
+    assert_eq!(cs.armor_resonance, [0.25; 4]);
+    assert_eq!(cs.structure_resonance, [0.25; 4]);
+}
+
+#[test]
+fn mutant_killers_capture_missing_baselines_and_recompute_combat_boundaries() {
+    use crate::{Ball, MovementMode};
+    use glam::DVec3;
+
+    let make_ball = |max_v: f64, mass: f64, inertia: f64| Ball {
+        id: 500,
+        type_id: 587,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: max_v,
+        inertia,
+        mass,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+
+    // 1. capture_missing_baselines: `!self.is_cloaked || ball.max_velocity > 0.0`
+    //    Cloaked with max_velocity == 0.0 -> base_max_velocity stays None.
+    let mut cs_clk0 = CombatState::default();
+    cs_clk0.is_cloaked = true;
+    cs_clk0.signature_radius = 0.0;
+    cs_clk0.capture_missing_baselines(&make_ball(0.0, 0.0, 0.0));
+    assert_eq!(cs_clk0.base_max_velocity, None);
+    assert_eq!(cs_clk0.base_mass, None);
+    assert_eq!(cs_clk0.base_inertia, None);
+    assert_eq!(cs_clk0.base_signature_radius, None);
+
+    //    Cloaked with max_velocity > 0.0 -> MUST still capture base_max_velocity (`||` vs `&&`, `>` vs `<`).
+    let mut cs_clkv = CombatState::default();
+    cs_clkv.is_cloaked = true;
+    cs_clkv.signature_radius = 45.0;
+    cs_clkv.capture_missing_baselines(&make_ball(120.0, 1_500.0, 2.5));
+    assert_eq!(cs_clkv.base_max_velocity, Some(120.0));
+    assert_eq!(cs_clkv.base_mass, Some(1_500.0));
+    assert_eq!(cs_clkv.base_inertia, Some(2.5));
+    assert_eq!(cs_clkv.base_signature_radius, Some(45.0));
+
+    //    Pre-set baselines must NOT be overwritten when ball/self have different positive values (`&&` vs `||`).
+    let mut cs_pre = CombatState::default();
+    cs_pre.base_mass = Some(500.0);
+    cs_pre.base_inertia = Some(1.5);
+    cs_pre.base_signature_radius = Some(25.0);
+    cs_pre.signature_radius = 999.0;
+    cs_pre.capture_missing_baselines(&make_ball(200.0, 9_999.0, 9.0));
+    assert_eq!(cs_pre.base_mass, Some(500.0));
+    assert_eq!(cs_pre.base_inertia, Some(1.5));
+    assert_eq!(cs_pre.base_signature_radius, Some(25.0));
+
+    // 2. recompute_combat_attributes: base_signature_radius stays None if signature_radius == 0.0 (`>` vs `>=`),
+    //    and crab_resonance_multiplier multiplies hull resists (`*` vs `+` when < 1.0 and hull < 1.0).
+    let mut cs_rc = CombatState::default();
+    cs_rc.signature_radius = 0.0;
+    cs_rc.base_structure_resonance = Some([0.5; 4]);
+    cs_rc.crab_resonance_multiplier = Some(0.90);
+    cs_rc.recompute_combat_attributes();
+    assert_eq!(cs_rc.base_signature_radius, None);
+    for r in cs_rc.structure_resonance {
+        assert!((r - 0.45).abs() < 1e-9, "0.5 * 0.90 = 0.45, got {r}");
+    }
+}
+

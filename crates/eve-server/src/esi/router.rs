@@ -1090,3 +1090,7 @@ fn required_corp_roles_for_route(method: &str, path_pattern: &str) -> u64 {
 #[path = "router_unit_tests.rs"]
 mod router_unit_tests;
 
+#[cfg(test)]
+#[path = "router_edges_tests.rs"]
+mod router_edges_tests;
+

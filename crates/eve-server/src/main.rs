@@ -46,16 +46,24 @@ async fn main() -> Result<()> {
         .with(ring_layer)
         .init();
 
-    let cfg = eve_server::config::ServerConfig::load_default_or_env()
+    let mut cfg = eve_server::config::ServerConfig::load_default_or_env()
         .map_err(|e| anyhow::anyhow!(e))?;
+    if let Some(cli_xmpp_port) = eve_server::config::ServerConfig::parse_cli_xmpp_port(std::env::args().skip(1))
+        .map_err(|e| anyhow::anyhow!(e))?
+    {
+        cfg.xmpp_port = cli_xmpp_port;
+    }
+    let xmpp_listener = TcpListener::bind((cfg.bind_address.as_str(), cfg.xmpp_port))
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to bind XMPP listener on {}:{}: {e}", cfg.bind_address, cfg.xmpp_port))?;
+    let bound_xmpp_port = xmpp_listener.local_addr()?.port();
+    cfg.xmpp_port = bound_xmpp_port;
     let ctx = Arc::new(ServerContext::from_config(&cfg).map_err(|e| anyhow::anyhow!(e))?);
     eve_server::starter_characters::provision_starter_characters(&ctx, &cfg).await;
-    if let Ok(admin_token) = std::env::var("EVOMU_ADMIN_TOKEN") {
-        if !admin_token.trim().is_empty() {
-            ctx.db
-                .provision_gm_account("admin", admin_token.trim(), 90_000_003, "ISD Polaris");
-            info!("Provisioned GM account 'admin' via EVOMU_ADMIN_TOKEN");
-        }
+    if let Some(token) = parse_admin_token(std::env::var("EVOMU_ADMIN_TOKEN").ok().as_deref()) {
+        ctx.db
+            .provision_gm_account("admin", token, 90_000_003, "ISD Polaris");
+        info!("Provisioned GM account 'admin' via EVOMU_ADMIN_TOKEN");
     }
     let conn_limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
     let http_conn_limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
@@ -87,7 +95,7 @@ async fn main() -> Result<()> {
     }
 
     // World tick: advance live server clock (`tick_wall_second`, honoring pause/pause_on_tick/acceleration)
-    // and run the unified 1 Hz cluster tick pipeline (`MN-04`, `T-7`, `plan:SP-7`).
+    // and run the unified 1 Hz cluster tick pipeline.
     {
         let tick_ctx = Arc::clone(&ctx);
         tokio::spawn(async move {
@@ -111,6 +119,7 @@ async fn main() -> Result<()> {
         sde_path = %cfg.sde_path,
         world_db_path = %cfg.world_db_path,
         esi_port = cfg.esi_port,
+        xmpp_port = cfg.xmpp_port,
         quasar_grpc_port = cfg.quasar_grpc_port,
         enable_quasar_gateway = cfg.feature_flags.enable_quasar_gateway,
         enable_esi_http = cfg.feature_flags.enable_esi_http,
@@ -139,7 +148,7 @@ async fn main() -> Result<()> {
             bind_address = %cfg.bind_address,
             quasar_grpc_port = cfg.quasar_grpc_port,
             "Listening on Quasar Public Gateway HTTP/2 gRPC TCP (set EVE_PUBLIC_GATEWAY_ADDRESS={}:{} on client)",
-            if cfg.bind_address == "0.0.0.0" { "127.0.0.1" } else { cfg.bind_address.as_str() },
+            quasar_advertise_host(&cfg.bind_address),
             cfg.quasar_grpc_port,
         );
         Some(l)
@@ -147,19 +156,17 @@ async fn main() -> Result<()> {
         None
     };
 
-    // Best-effort XMPP client sink on TCP port 5222 (`ejabberd_client_address`) so V24.01
-    // `XmppChatService.Login` (`xmpp/xmppConnection.py::_connectToXmppServer`) does not hit
+    // XMPP client sink on `cfg.xmpp_port` (default TCP port 5222, `ejabberd_client_address` / `ejabberd_client_port`)
+    // so V24.01 `XmppChatService.Login` (`xmpp/xmppConnection.py::_connectToXmppServer`) does not hit
     // `ECONNREFUSED` (`socket.error`) and pop up `RetryChatServerConnection` when local chat
     // is handled over Quasar / machoNet (`LSC`).
-    let xmpp_bind = cfg.bind_address.clone();
+    info!(
+        bind_address = %cfg.bind_address,
+        xmpp_port = bound_xmpp_port,
+        "Listening on XMPP Chat TCP"
+    );
     let xmpp_limiter = Arc::clone(&conn_limiter);
     tokio::spawn(async move {
-        let xmpp_listener = loop {
-            match TcpListener::bind((xmpp_bind.as_str(), 5222u16)).await {
-                Ok(listener) => break listener,
-                Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
-            }
-        };
         while let Ok((mut stream, _addr)) = xmpp_listener.accept().await {
             let Ok(permit) = Arc::clone(&xmpp_limiter).try_acquire_owned() else {
                 continue;
@@ -176,46 +183,9 @@ async fn main() -> Result<()> {
                         break;
                     }
                     let chunk = String::from_utf8_lossy(&buf[..n]);
-                    if chunk.contains("<stream:stream") {
-                        stream_count += 1;
-                        let reply: &[u8] = if stream_count == 1 {
-                            b"<?xml version='1.0'?><stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' from='chat.evomu.local' id='evomu1' version='1.0'><stream:features><mechanisms xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><mechanism>PLAIN</mechanism><mechanism>ANONYMOUS</mechanism></mechanisms></stream:features>"
-                        } else {
-                            b"<?xml version='1.0'?><stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' from='chat.evomu.local' id='evomu2' version='1.0'><stream:features><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/><session xmlns='urn:ietf:params:xml:ns:xmpp-session'/></stream:features>"
-                        };
-                        if stream.write_all(reply).await.is_err() {
+                    if let Some(reply) = xmpp_stanza_reply(&chunk, &mut stream_count) {
+                        if stream.write_all(reply.as_bytes()).await.is_err() {
                             break;
-                        }
-                    } else if chunk.contains("<auth") {
-                        let reply = b"<success xmlns='urn:ietf:params:xml:ns:xmpp-sasl'/>";
-                        if stream.write_all(reply).await.is_err() {
-                            break;
-                        }
-                    } else if chunk.contains("<presence") {
-                        if let Some(to_pos) = chunk.find("to='").or_else(|| chunk.find("to=\"")) {
-                            let rest = &chunk[to_pos + 4..];
-                            if let Some(end_pos) = rest.find(['\'', '"']) {
-                                let room_jid = &rest[..end_pos];
-                                let p_reply = if chunk.contains("unavailable") {
-                                    format!("<presence from='{room_jid}' to='user@chat.evomu.local/eve' type='unavailable'><x xmlns='http://jabber.org/protocol/muc#user'><item affiliation='member' role='none'/><status code='110'/></x></presence>")
-                                } else {
-                                    format!("<presence from='{room_jid}' to='user@chat.evomu.local/eve'><x xmlns='http://jabber.org/protocol/muc#user'><item affiliation='member' role='participant'/><status code='110'/></x></presence>")
-                                };
-                                if stream.write_all(p_reply.as_bytes()).await.is_err() {
-                                    break;
-                                }
-                            }
-                        }
-                    } else if let Some(id_pos) = chunk.find("id='").or_else(|| chunk.find("id=\"")) {
-                        let rest = &chunk[id_pos + 4..];
-                        if let Some(end_pos) = rest.find(['\'', '"']) {
-                            let stanza_id = &rest[..end_pos];
-                            let iq_reply = eve_server::services::fleet_social::xmpp_iq_reply(
-                                &chunk, stanza_id,
-                            );
-                            if stream.write_all(iq_reply.as_bytes()).await.is_err() {
-                                break;
-                            }
                         }
                     }
                 }
@@ -455,32 +425,7 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
                         let diff = prev_session.compute_diff(&session);
                         let sess_diff_sent = !diff.is_empty();
                         if sess_diff_sent {
-                            let changes_dict = PyRep::Dict(
-                                diff.into_iter()
-                                    .map(|(k, (old_v, new_v))| {
-                                        (PyRep::String(k), PyRep::Tuple(vec![old_v, new_v]))
-                                    })
-                                    .collect(),
-                            );
-                            let in_space = session.station_id.is_none() && session.structure_id.is_none();
-                            let sess_rep = PyRep::keyval([
-                                ("sessionID", PyRep::Integer(session.session_id as i64)),
-                                ("charid", session.character_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                                ("userid", session.user_id.map(|u| PyRep::Integer(u as i64)).unwrap_or(PyRep::None)),
-                                ("corpid", session.corporation_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                                ("allianceid", session.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                                ("stationid", session.station_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                                ("structureid", session.structure_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                                ("solarsystemid2", session.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None)),
-                                ("solarsystemid", if in_space { session.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None) } else { PyRep::None }),
-                                ("shipid", session.ship_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                                ("corprole", PyRep::Integer(session.corp_role as i64)),
-                            ]);
-                            let session_event = BridgeEnvelope::ServerEvent {
-                                tick: 0,
-                                event: "OnSessionChanged".to_string(),
-                                args: vec![PyRep::Bool(false), sess_rep, changes_dict],
-                            };
+                            let session_event = build_session_changed_envelope(&session, diff);
                             let sess_bytes = serde_json::to_vec(&session_event)?;
                             write_bounded_frame(&mut writer, &sess_bytes).await?;
                         }
@@ -614,6 +559,131 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
     reader_task.abort();
     ctx.cleanup_disconnected_client_session(&mut session).await;
     res
+}
+
+fn parse_admin_token(raw: Option<&str>) -> Option<&str> {
+    raw.map(str::trim).filter(|t| !t.is_empty())
+}
+
+fn quasar_advertise_host(bind_address: &str) -> &str {
+    if bind_address == "0.0.0.0" {
+        "127.0.0.1"
+    } else {
+        bind_address
+    }
+}
+
+fn xmpp_stanza_reply(chunk: &str, stream_count: &mut u32) -> Option<String> {
+    if chunk.contains("<stream:stream") {
+        *stream_count += 1;
+        let reply = if *stream_count == 1 {
+            "<?xml version='1.0'?><stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' from='chat.evomu.local' id='evomu1' version='1.0'><stream:features><mechanisms xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><mechanism>PLAIN</mechanism><mechanism>ANONYMOUS</mechanism></mechanisms></stream:features>"
+        } else {
+            "<?xml version='1.0'?><stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' from='chat.evomu.local' id='evomu2' version='1.0'><stream:features><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/><session xmlns='urn:ietf:params:xml:ns:xmpp-session'/></stream:features>"
+        };
+        return Some(reply.to_string());
+    }
+    if chunk.contains("<auth") {
+        return Some("<success xmlns='urn:ietf:params:xml:ns:xmpp-sasl'/>".to_string());
+    }
+    if chunk.contains("<presence") {
+        if let Some(to_pos) = chunk.find("to='").or_else(|| chunk.find("to=\"")) {
+            let rest = &chunk[to_pos + 4..];
+            if let Some(end_pos) = rest.find(['\'', '"']) {
+                let room_jid = &rest[..end_pos];
+                let p_reply = if chunk.contains("unavailable") {
+                    format!("<presence from='{room_jid}' to='user@chat.evomu.local/eve' type='unavailable'><x xmlns='http://jabber.org/protocol/muc#user'><item affiliation='member' role='none'/><status code='110'/></x></presence>")
+                } else {
+                    format!("<presence from='{room_jid}' to='user@chat.evomu.local/eve'><x xmlns='http://jabber.org/protocol/muc#user'><item affiliation='member' role='participant'/><status code='110'/></x></presence>")
+                };
+                return Some(p_reply);
+            }
+        }
+        return None;
+    }
+    if let Some(id_pos) = chunk.find("id='").or_else(|| chunk.find("id=\"")) {
+        let rest = &chunk[id_pos + 4..];
+        if let Some(end_pos) = rest.find(['\'', '"']) {
+            let stanza_id = &rest[..end_pos];
+            return Some(eve_server::services::fleet_social::xmpp_iq_reply(
+                chunk, stanza_id,
+            ));
+        }
+    }
+    None
+}
+
+fn build_session_changed_envelope(
+    session: &SessionState,
+    diff: std::collections::HashMap<String, (PyRep, PyRep)>,
+) -> BridgeEnvelope {
+    let changes_dict = PyRep::Dict(
+        diff.into_iter()
+            .map(|(k, (old_v, new_v))| (PyRep::String(k), PyRep::Tuple(vec![old_v, new_v])))
+            .collect(),
+    );
+    let in_space = session.station_id.is_none() && session.structure_id.is_none();
+    let sess_rep = PyRep::keyval([
+        ("sessionID", PyRep::Integer(session.session_id as i64)),
+        (
+            "charid",
+            session.character_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+        ),
+        (
+            "userid",
+            session
+                .user_id
+                .map(|u| PyRep::Integer(u as i64))
+                .unwrap_or(PyRep::None),
+        ),
+        (
+            "corpid",
+            session
+                .corporation_id
+                .map(PyRep::Integer)
+                .unwrap_or(PyRep::None),
+        ),
+        (
+            "allianceid",
+            session.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+        ),
+        (
+            "stationid",
+            session.station_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+        ),
+        (
+            "structureid",
+            session.structure_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+        ),
+        (
+            "solarsystemid2",
+            session
+                .solar_system_id
+                .map(|s| PyRep::Integer(s as i64))
+                .unwrap_or(PyRep::None),
+        ),
+        (
+            "solarsystemid",
+            if in_space {
+                session
+                    .solar_system_id
+                    .map(|s| PyRep::Integer(s as i64))
+                    .unwrap_or(PyRep::None)
+            } else {
+                PyRep::None
+            },
+        ),
+        (
+            "shipid",
+            session.ship_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+        ),
+        ("corprole", PyRep::Integer(session.corp_role as i64)),
+    ]);
+    BridgeEnvelope::ServerEvent {
+        tick: 0,
+        event: "OnSessionChanged".to_string(),
+        args: vec![PyRep::Bool(false), sess_rep, changes_dict],
+    }
 }
 
 #[cfg(test)]
@@ -924,3 +994,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "main_unit_tests.rs"]
+mod main_unit_tests;

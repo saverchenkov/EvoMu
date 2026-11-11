@@ -252,11 +252,277 @@ fn localized_group_category_and_market_group_cfsd_id_lookups() {
         Some("No Desc Group")
     );
     assert_eq!(sde.localized_market_group_description("en", 10), None);
-    assert_eq!(
-        sde.localized_market_group_name("en", 11).as_deref(),
-        Some("Zero Desc Group")
-    );
+    assert_eq!(sde.localized_market_group_name("en", 11).as_deref(), Some("Zero Desc Group"));
     assert_eq!(sde.localized_market_group_description("en", 11), None);
 
     let _ = fs::remove_dir_all(&dir);
+}
+
+fn make_temp_sde_with_files(entries: &[(&str, &str, Vec<u8>)]) -> (PathBuf, SdeRegistry) {
+    let seq = TEMP_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "evomu_sde_loader_edges_{}_{}",
+        std::process::id(),
+        seq
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create temp sde edge dir");
+    let db_path = dir.join("evomu_sde.sqlite");
+    fs::write(&db_path, b"").expect("create marker db");
+
+    let mut resources = HashMap::new();
+    for (res_path, fname, data) in entries {
+        let fpath = dir.join(fname);
+        fs::write(&fpath, data).expect("write fixture");
+        resources.insert(
+            (*res_path).to_string(),
+            SdeResourceInfo {
+                res_path: (*res_path).to_string(),
+                cdn_relative_path: fpath.display().to_string(),
+                md5: String::new(),
+                byte_size: data.len() as u64,
+                format: "bin".to_string(),
+                record_count: 0,
+                spot: String::new(),
+            },
+        );
+    }
+    let sde = SdeRegistry {
+        db_path: Some(db_path),
+        resources,
+        ..SdeRegistry::default()
+    };
+    (dir, sde)
+}
+
+fn build_fsd_single_dict_body(entries: &[(u32, &[u8])]) -> Vec<u8> {
+    let mut inner = Vec::new();
+    let mut offsets = Vec::with_capacity(entries.len());
+    for (_, payload) in entries {
+        offsets.push(inner.len() as u32);
+        inner.extend_from_slice(payload);
+    }
+    let cnt = entries.len() as u32;
+    let footer_size = 4u32 + cnt * 8;
+    let body_size = inner.len() as u32 + footer_size + 4;
+    let mut out = Vec::with_capacity(8 + body_size as usize);
+    out.extend_from_slice(&0u32.to_le_bytes()); // sch_len = 0
+    out.extend_from_slice(&body_size.to_le_bytes());
+    out.extend_from_slice(&inner);
+    out.extend_from_slice(&cnt.to_le_bytes());
+    for ((key, _), off) in entries.iter().zip(offsets.iter()) {
+        out.extend_from_slice(&key.to_le_bytes());
+        out.extend_from_slice(&off.to_le_bytes());
+    }
+    out.extend_from_slice(&footer_size.to_le_bytes());
+    out
+}
+
+#[test]
+fn fsd_and_cfsd_overflow_truncation_and_domain_loader_error_branches() {
+    // 1. fsd_dict_entries: footer_size > footer_len_pos (L262), item_size overflow (L271), val_off > body_end (L281)
+    let mut buf_bad_footer = vec![0u8; 16];
+    buf_bad_footer[0..4].copy_from_slice(&12u32.to_le_bytes());
+    buf_bad_footer[12..16].copy_from_slice(&99u32.to_le_bytes());
+    assert!(fsd_dict_entries(&buf_bad_footer, 0, 8).is_empty());
+
+    let mut buf_mul_overflow = vec![0u8; 20];
+    buf_mul_overflow[0..4].copy_from_slice(&16u32.to_le_bytes()); // body_start=4, body_end=20
+    buf_mul_overflow[4..8].copy_from_slice(&2u32.to_le_bytes()); // footer=4, cnt=2
+    buf_mul_overflow[8..12].copy_from_slice(&55u32.to_le_bytes()); // key 0 = 55
+    buf_mul_overflow[12..16].copy_from_slice(&0u32.to_le_bytes()); // val_off = 4
+    buf_mul_overflow[16..20].copy_from_slice(&12u32.to_le_bytes()); // footer_size = 12
+    assert_eq!(fsd_dict_entries(&buf_mul_overflow, 0, usize::MAX), vec![(55, 4)]);
+
+    let mut buf_val_oob = vec![0u8; 20];
+    buf_val_oob[0..4].copy_from_slice(&16u32.to_le_bytes());
+    buf_val_oob[4..8].copy_from_slice(&1u32.to_le_bytes());
+    buf_val_oob[8..12].copy_from_slice(&77u32.to_le_bytes());
+    buf_val_oob[12..16].copy_from_slice(&999u32.to_le_bytes()); // 4 + 999 > 20
+    buf_val_oob[16..20].copy_from_slice(&12u32.to_le_bytes());
+    assert!(fsd_dict_entries(&buf_val_oob, 0, 8).is_empty());
+
+    // 2. cfsd_domain_loaders: cfsd_str checked_add overflow (L155), len OOB (L164), bucket boff overflow (L191)
+    let mut cfsd_buf = vec![0u8; 160];
+    cfsd_buf[48..56].copy_from_slice(&2u64.to_le_bytes()); // 2 buckets
+    cfsd_buf[56..64].copy_from_slice(&(u64::MAX - 5).to_le_bytes()); // bucket 0 overflows 32 + boff (L191)
+    cfsd_buf[64..72].copy_from_slice(&48u64.to_le_bytes()); // bucket 1: abs=80, cnt_pos=72
+    cfsd_buf[72..80].copy_from_slice(&2u64.to_le_bytes()); // 2 dogmaunit records (stride 32 at 80..144)
+    // record 0 (80..112): unit 1, name_rel = u64::MAX - 5 -> L155
+    cfsd_buf[80..88].copy_from_slice(&1u64.to_le_bytes());
+    cfsd_buf[88..96].copy_from_slice(&(u64::MAX - 5).to_le_bytes());
+    // record 1 (112..144): unit 2, name_rel = 120 -> abs=152, len at 144..152 = u64::MAX - 5 -> L164
+    cfsd_buf[112..120].copy_from_slice(&2u64.to_le_bytes());
+    cfsd_buf[120..128].copy_from_slice(&120u64.to_le_bytes());
+    cfsd_buf[144..152].copy_from_slice(&(u64::MAX - 5).to_le_bytes());
+
+    let (dir_du, sde_du) =
+        make_temp_sde_with_files(&[("res:/staticdata/dogmaunits.fsdbinary", "du.bin", cfsd_buf)]);
+    let units = sde_du.load_dogma_units().expect("load_dogma_units overflow");
+    assert_eq!(units[&1].name, "");
+    assert_eq!(units[&2].name, "");
+    let _ = fs::remove_dir_all(&dir_du);
+
+    // 3. load_brackets: fsd_str past EOF returns "" cleanly (static_domain_loaders.rs L232)
+    let mut bracket_rec = vec![0u8; 20];
+    // mask = 0 -> present = ["name", "texturePath"], data_start = 16; first string at apos=16 has len=999
+    bracket_rec[16..20].copy_from_slice(&999u32.to_le_bytes());
+    let br_blob = build_fsd_single_dict_body(&[(1, &bracket_rec)]);
+    let (dir_br, sde_br) =
+        make_temp_sde_with_files(&[("res:/staticdata/brackets.static", "brackets.static", br_blob)]);
+    let brackets = sde_br.load_brackets().expect("load_brackets truncated string");
+    assert_eq!(brackets[&1].name, "");
+    let _ = fs::remove_dir_all(&dir_br);
+
+    // 4. load_certificates_and_masteries: has_recommended == false branch (static_domain_loaders.rs L734)
+    let empty_fsd_dict = build_fsd_single_dict_body(&[]);
+    let empty_dict_body = &empty_fsd_dict[4..]; // starts directly with length prefix (skip 4-byte sch_len)
+    let mut cert_rec = vec![0u8; 24];
+    cert_rec[0..4].copy_from_slice(&10u32.to_le_bytes());
+    cert_rec[4..8].copy_from_slice(&20u32.to_le_bytes());
+    cert_rec[8..12].copy_from_slice(&30u32.to_le_bytes());
+    // mask at +12..+20 = 0 (no recommended_for), st_rel at +20..+24 = 0
+    cert_rec.extend_from_slice(empty_dict_body);
+    let certs_dict_wrapped = build_fsd_single_dict_body(&[(1, &cert_rec)]);
+    let certs_dict_body = &certs_dict_wrapped[4..];
+    let masteries_body = empty_dict_body;
+    let mut certs_static = Vec::new();
+    certs_static.extend_from_slice(&0u32.to_le_bytes()); // sch_len = 0
+    certs_static.extend_from_slice(&0u64.to_le_bytes()); // body + 0..+8 unused header
+    certs_static.extend_from_slice(&0u32.to_le_bytes()); // c_off = 0
+    certs_static.extend_from_slice(&(certs_dict_body.len() as u32).to_le_bytes()); // m_off
+    certs_static.extend_from_slice(certs_dict_body);
+    certs_static.extend_from_slice(masteries_body);
+    let (dir_cert, sde_cert) = make_temp_sde_with_files(&[(
+        "res:/staticdata/certificates.static",
+        "certs.static",
+        certs_static,
+    )]);
+    let certs_bundle = sde_cert
+        .load_certificates_and_masteries()
+        .expect("load_certificates_and_masteries mask=0");
+    assert!(certs_bundle.certificates[&1].recommended_for.is_empty());
+    let _ = fs::remove_dir_all(&dir_cert);
+
+    // 5. load_achievements: L782 (< 14 bytes), L792 (< var_base), L798 (absent opt), L841 (cond < 20 bytes)
+    let mut inner_cond_dict = build_fsd_single_dict_body(&[(7, &[])]);
+    let ic_body_rel = (inner_cond_dict.len() - 8) as u32; // body_end - body_start == 16 -> cond_pos sits right at start of outer 16B footer (<20B left!)
+    inner_cond_dict[16..20].copy_from_slice(&ic_body_rel.to_le_bytes());
+    let mut ach3 = Vec::new();
+    ach3.extend_from_slice(&3u32.to_le_bytes());
+    ach3.push(1);
+    ach3.push(1);
+    ach3.extend_from_slice(&0x08u32.to_le_bytes()); // bitfield: only simpleConditions (0x08), no name/desc/notif (L798)
+    ach3.extend_from_slice(&0u32.to_le_bytes());
+    ach3.extend_from_slice(&0u32.to_le_bytes()); // rel_off = 0 at offsets_start
+    ach3.extend_from_slice(&inner_cond_dict[4..]); // var_base = sc_pos
+    let ach3_blob = build_fsd_single_dict_body(&[(3, &ach3)]);
+
+    // pos+14 <= raw.len() but raw.len() < var_base (L792)
+    let mut ach2_data = vec![0u8; 10];
+    ach2_data[6..10].copy_from_slice(&0x1Fu32.to_le_bytes()); // n_opt = 5 -> var_base = pos + 34 > raw.len()
+    let ach2_blob = build_fsd_single_dict_body(&[(2, &ach2_data)]);
+
+    // For L782 (< 14 bytes remaining): N=1 entry with val_off pointing 8 bytes before EOF
+    let mut ach1_blob = build_fsd_single_dict_body(&[(1, &[])]);
+    let ach1_end = ach1_blob.len() as u32;
+    ach1_blob[16..20].copy_from_slice(&(ach1_end - 16).to_le_bytes());
+
+    // bitfield = 0 (no 0x08 simpleConditions) to hit None branch on static_domain_loaders.rs L841
+    let mut ach0_data = vec![0u8; 14];
+    ach0_data[0..4].copy_from_slice(&4u32.to_le_bytes());
+    ach0_data[4] = 1;
+    ach0_data[5] = 1;
+    let ach0_blob = build_fsd_single_dict_body(&[(4, &ach0_data)]);
+
+    for blob in [ach3_blob, ach2_blob, ach1_blob, ach0_blob] {
+        let (dir_a, sde_a) = make_temp_sde_with_files(&[
+            ("res:/staticdata/achievements.static", "ach.static", blob),
+            (
+                "res:/localizationfsd/localization_fsd_en-us.pickle",
+                "en.pickle",
+                b"(dp0\n.".to_vec(),
+            ),
+        ]);
+        let res = sde_a.load_achievements().expect("load_achievements edge");
+        if let Some(a) = res.get(&3) {
+            assert!(a.conditions.is_empty());
+        }
+        let _ = fs::remove_dir_all(&dir_a);
+    }
+
+    // 6. load_raw_fighter_abilities_static: corrupt/non-sqlite file returns Err (static_domain_loaders.rs L1164)
+    let (dir_fa, sde_fa) = make_temp_sde_with_files(&[(
+        "res:/staticdata/fighterabilities.static",
+        "bad_fa.static",
+        b"not a sqlite file".to_vec(),
+    )]);
+    assert!(sde_fa.load_raw_fighter_abilities_static().is_err());
+    let _ = fs::remove_dir_all(&dir_fa);
+
+    // 7. load_secondary_suns: L1226 (< fixed_end + 8) and L1238 (spos + 36 > raw.len())
+    let make_sys_fsd = |data: &[u8], rel_off: u32| -> Vec<u8> {
+        let footer_size = 16u32; // 4 + 1 * 12
+        let body_size = data.len() as u32 + footer_size + 4;
+        let mut v = Vec::new();
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&body_size.to_le_bytes());
+        v.extend_from_slice(data);
+        v.extend_from_slice(&1u32.to_le_bytes()); // cnt = 1
+        v.extend_from_slice(&30000142u32.to_le_bytes()); // sys_id
+        v.extend_from_slice(&rel_off.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes()); // 4B padding for item_size=12
+        v.extend_from_slice(&footer_size.to_le_bytes());
+        v
+    };
+    let blob_sun_short = make_sys_fsd(&[0u8; 8], 0); // only 8 + 20 = 28 bytes < 106 -> L1226
+    let mut sun_spos_oob_data = vec![0u8; 98 + 8 + 12]; // fixed_end(98)+mask(8)+3 offsets(12) = 118
+    sun_spos_oob_data[98..106].copy_from_slice(&4u64.to_le_bytes()); // mask = 4 (bit 2 -> n_present=3, sec_idx=1)
+    sun_spos_oob_data[98 + 8 + 4..98 + 8 + 8].copy_from_slice(&500u32.to_le_bytes()); // spos out of bounds -> L1238
+    let blob_sun_spos_oob = make_sys_fsd(&sun_spos_oob_data, 0);
+    for sblob in [blob_sun_short, blob_sun_spos_oob] {
+        let (dir_s, sde_s) = make_temp_sde_with_files(&[(
+            "res:/staticdata/solarsystemcontent.static",
+            "sc.static",
+            sblob,
+        )]);
+        assert!(sde_s.load_secondary_suns().expect("load_secondary_suns edge").is_empty());
+        let _ = fs::remove_dir_all(&dir_s);
+    }
+
+    // 8. static_localization_loaders: L72 (bad escape), L118 (non-UTF8 id), main pickle ops & malformed types
+    //    (L158, L163, L175, L185, L210, L239, L245, L259, L272)
+    let bad_lang_pickle = b"(dp0\nI\xff\n(Vignored\np1\nsI7\n(Va\\nb\\u0041\\U00000042\np2\ns.";
+    let main_p1 = b"a\ns\n(dpbad\n(lpbad\npbad\n(l\nI1\nI2\ns\n(dp65\nI3\na\n(lp65\np65\n(d\nS'languages'\nI1\ns\nS'labels'\nI2\ns\n.";
+    let main_p2 = b"(d\nS'languages'\n(l\nI99\na\nS'en'\na\ns\nS'labels'\n(d\nS'badkey'\n(d\ns\nI42\n(d\nS'extra'\nS'x'\ns\nS'label'\nS'lbl'\ns\ns\ns\n.";
+
+    let (dir_l1, sde_l1) = make_temp_sde_with_files(&[
+        (
+            "res:/localizationfsd/localization_fsd_en-us.pickle",
+            "lang.pickle",
+            bad_lang_pickle.to_vec(),
+        ),
+        (
+            "res:/localizationfsd/localization_fsd_main.pickle",
+            "main.pickle",
+            main_p1.to_vec(),
+        ),
+    ]);
+    let lang_map = sde_l1.load_all_localized_messages("en").expect("lang edge");
+    assert_eq!(lang_map.get(&7).map(String::as_str), Some("a\\nbAB"));
+    assert!(!lang_map.contains_key(&0));
+    let m1 = sde_l1.load_localization_main().expect("main p1 edge");
+    assert!(m1.languages.is_empty());
+    assert!(m1.labels.is_empty());
+    let _ = fs::remove_dir_all(&dir_l1);
+
+    let (dir_l2, sde_l2) = make_temp_sde_with_files(&[(
+        "res:/localizationfsd/localization_fsd_main.pickle",
+        "main2.pickle",
+        main_p2.to_vec(),
+    )]);
+    let m2 = sde_l2.load_localization_main().expect("main p2 edge");
+    assert_eq!(m2.languages, vec!["en".to_string()]);
+    assert_eq!(m2.labels[&42].label, "lbl");
+    let _ = fs::remove_dir_all(&dir_l2);
 }

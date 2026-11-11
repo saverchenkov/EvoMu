@@ -11,7 +11,7 @@ use super::dispatch::{
     tick_sov_prospecting_deposit_respawn,
 };
 use super::ServerContext;
-use crate::services::mining_sites::SOV_PROSPECTING_DEPOSITS;
+use crate::services::mining_sites::{seed_system_mining_sites_from_sde, SOV_PROSPECTING_DEPOSITS};
 use eve_db::{
     AsteroidRecord, CosmicAnomalyRecord, CosmicSignatureRecord, InventoryFlag, InventoryItemRecord,
     UpwellStructureRecord, VirtualServerClock, WorldRepository,
@@ -55,7 +55,7 @@ fn make_authed_session(session_id: u64, user_id: u64, char_id: i64, role: u64) -
     s
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_revocation_multilogin_blocked_exemptions_and_kick_ban_state_wipe() {
     let ctx = test_ctx();
     let now = 1_800_000_000u64;
@@ -154,7 +154,7 @@ async fn session_revocation_multilogin_blocked_exemptions_and_kick_ban_state_wip
     assert_eq!((sess30.user_id, sess30.character_id), (None, None));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn feature_flags_time_control_and_gm_qa_role_bitmask_enforcement_matrix() {
     let mut ctx = test_ctx();
     let now = 1_800_000_000u64;
@@ -311,7 +311,7 @@ async fn feature_flags_time_control_and_gm_qa_role_bitmask_enforcement_matrix() 
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn macho_resolve_and_bind_object_argument_shapes_beyonce_and_piggybacked_subcalls() {
     let ctx = test_ctx();
     let char_id = 90_000_001i64;
@@ -428,7 +428,7 @@ async fn macho_resolve_and_bind_object_argument_shapes_beyonce_and_piggybacked_s
     assert!(first_kv.dict_get("effectiveSkillLevel").is_some());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wal_error_rollback_and_sov_prospecting_deposit_respawn_lifecycle() {
     let ctx = test_ctx();
     let now = 1_800_000_000u64;
@@ -558,4 +558,524 @@ async fn wal_error_rollback_and_sov_prospecting_deposit_respawn_lifecycle() {
             .any(|a| a.solar_system_id == sys_id && a.quantity > 0);
         assert!(has_fresh_asteroids, "respawned SovOre site must seed fresh asteroids");
     });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dispatch_switch_char_dock_undock_charges_and_gas_site_seeding() {
+    let ctx = test_ctx();
+    let now = 1_800_000_000_u64;
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now)));
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(991);
+    sess.user_id = Some(1);
+    sess.role = eve_machonet::service_roles::ROLE_PLAYER;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c2) = snap.characters.get_mut(&90_000_002) {
+            c2.user_id = 1;
+        }
+    });
+
+    // 1. Select character A then switch to character B (triggers pause_milestone_playtime for old_cid)
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .unwrap();
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_002)],
+        &kw,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Select back 90_000_001, Undock -> OnCharNoLongerInStation, then advance clock & Dock -> OnCharNowInStation
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .unwrap();
+    let st_id = sess.station_id.unwrap_or(60_003_760);
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .unwrap();
+    ctx.advance_virtual_clock(15);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "stationSvc",
+        None,
+        "Dock",
+        &[PyRep::Integer(st_id)],
+        &kw,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // 2. scanMgr.GetSystemScanMgr over machoNet:26000 rewrites boundID into bound_object_rep
+    ctx.advance_virtual_clock(15);
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .unwrap();
+    let scan_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "scanMgr",
+            None,
+            "GetSystemScanMgr",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(scan_rep, PyRep::SubStruct(_)));
+
+    // 3. WAL failure during dispatch_rpc overrides Ok result with DatabasePersistenceError
+    let wal_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/".into())],
+            &kw,
+            None,
+        )
+        .await;
+    assert!(wal_err.is_err());
+
+    // 4. seed_system_mining_sites_from_sde in a system whose region has GAS_SITES (e.g. Delve)
+    let gas_sys_id = crate::services::mining_sites::GAS_SITES
+        .first()
+        .and_then(|def| {
+            ctx.sde.solar_systems.values().find(|sys| {
+                def.band.matches_system(sys)
+                    && ctx
+                        .sde
+                        .regions
+                        .get(&sys.region_id)
+                        .is_some_and(|r| def.region_names.contains(&r.name.as_str()))
+            })
+        })
+        .map(|s| s.solar_system_id);
+    if let Some(gsid) = gas_sys_id {
+        seed_system_mining_sites_from_sde(&ctx, gsid).await;
+        ctx.db.with_snapshot(|snap| {
+            assert!(
+                snap.cosmic_signatures
+                    .get(&gsid)
+                    .is_some_and(|l| l.iter().any(|s| s.sig_group == "Gas"))
+            );
+        });
+    }
+
+    // 5. context_charges: swap ammo when no matching cargo stack exists (moves old charge to Cargo),
+    //    plus UnknownWeaponType / UnknownChargeType error paths.
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let weapon_id = 966_001_i64;
+    let old_charge_id = 966_002_i64;
+    let new_charge_id = 966_003_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&char_id) {
+            c.station_id = Some(60_003_760);
+            c.structure_id = None;
+            c.active_ship_id = ship_id;
+        }
+        if let Some(s) = snap.items.get_mut(&ship_id) {
+            s.owner_id = char_id;
+            s.location_id = 60_003_760;
+        }
+        snap.items.insert(
+            weapon_id,
+            InventoryItemRecord {
+                item_id: weapon_id,
+                type_id: 2881, // 150mm Light AutoCannon I
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            old_charge_id,
+            InventoryItemRecord {
+                item_id: old_charge_id,
+                type_id: 178, // EMP S
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 10,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            new_charge_id,
+            InventoryItemRecord {
+                item_id: new_charge_id,
+                type_id: 180, // Phased Plasma S
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 10,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let res = ctx.load_charge_into_weapon_slot(
+        char_id,
+        ship_id,
+        InventoryFlag::HiSlot0,
+        new_charge_id,
+        Some(60_003_760),
+    );
+    assert!(res.is_ok(), "swap ammo to unstacked cargo should succeed: {res:?}");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&old_charge_id].flag, InventoryFlag::Cargo);
+    });
+    assert_eq!(
+        ctx.load_charge_into_weapon_slot(
+            char_id,
+            ship_id,
+            InventoryFlag::HiSlot1,
+            new_charge_id,
+            Some(60_003_760),
+        )
+        .unwrap_err()
+        .code,
+        "NoWeaponFitted"
+    );
+    assert_eq!(
+        ctx.load_charge_into_weapon_slot(
+            char_id,
+            ship_id,
+            InventoryFlag::HiSlot0,
+            999_999_777,
+            Some(60_003_760),
+        )
+        .unwrap_err()
+        .code,
+        "ItemNotFound"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.items.get_mut(&old_charge_id) {
+            c.type_id = 999_999_888;
+        }
+    });
+    assert_eq!(
+        ctx.load_charge_into_weapon_slot(
+            char_id,
+            ship_id,
+            InventoryFlag::HiSlot0,
+            old_charge_id,
+            Some(60_003_760),
+        )
+        .unwrap_err()
+        .code,
+        "UnknownChargeType"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.items.get_mut(&old_charge_id) {
+            c.type_id = 212; // Scourge Light Missile incompatible with 150mm AutoCannon
+        }
+    });
+    assert_eq!(
+        ctx.load_charge_into_weapon_slot(
+            char_id,
+            ship_id,
+            InventoryFlag::HiSlot0,
+            old_charge_id,
+            Some(60_003_760),
+        )
+        .unwrap_err()
+        .code,
+        "IncompatibleAmmo"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dispatch_box_fut_station_peer_notify_seq_filter_market_cache_and_wal_pre_seq() {
+    let ctx = test_ctx();
+    let now = 1_800_100_000_u64;
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now)));
+    let kw = HashMap::new();
+
+    // 1. box_fut helper preserves inner Future output
+    assert_eq!(super::dispatch::box_fut(|| async { 4242_i64 }).await, 4242);
+
+    // 2. Undock/Dock notify ONLY OTHER peers at station (peer_cid != cid, L258 & L274),
+    //    NOT the acting character itself, and dispatch_rpc delivers only seq_id > pre_seq when !live_notify_listener (L313, L317).
+    let char_a = 90_000_001_i64;
+    let char_b = 90_000_002_i64;
+    let station_id = 60_003_760_i64;
+    ctx.db.provision_gm_account("peer_b_acct", "pw", char_b, "PeerB");
+    let uid_b = ctx.db.with_snapshot(|s| s.characters[&char_b].user_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        for cid in [char_a, char_b] {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.station_id = Some(station_id);
+                ch.structure_id = None;
+                ch.solar_system_id = 30_000_142;
+            }
+        }
+    });
+    ctx.db
+        .acquire_online_lock(1, 51_001, Some(char_a), true, now)
+        .expect("online lock char_a");
+    ctx.db
+        .acquire_online_lock(uid_b, 51_002, Some(char_b), true, now)
+        .expect("online lock char_b");
+
+    let mut sess_a = make_authed_session(51_001, 1, char_a, ROLE_GML | ROLE_PLAYER);
+    sess_a.station_id = Some(station_id);
+    ctx.pending_notifications.write().unwrap().clear();
+
+    // Undock char_a -> char_b gets OnCharNoLongerInStation; char_a does NOT
+    ctx.dispatch_rpc(&mut sess_a, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock char_a");
+    {
+        let pending = ctx.pending_notifications.read().unwrap();
+        let b_events: Vec<&str> = pending
+            .get(&char_b)
+            .map(|v| v.iter().map(|n| n.event.as_str()).collect())
+            .unwrap_or_default();
+        let a_events: Vec<&str> = pending
+            .get(&char_a)
+            .map(|v| v.iter().map(|n| n.event.as_str()).collect())
+            .unwrap_or_default();
+        assert!(b_events.contains(&"OnCharNoLongerInStation"));
+        assert!(!a_events.contains(&"OnCharNoLongerInStation"));
+    }
+
+    // Dock char_a -> char_b gets OnCharNowInStation; char_a does NOT
+    ctx.pending_notifications.write().unwrap().clear();
+    ctx.advance_virtual_clock(15);
+    ctx.dispatch_rpc(
+        &mut sess_a,
+        "stationSvc",
+        None,
+        "Dock",
+        &[PyRep::Integer(station_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Dock char_a");
+    {
+        let pending = ctx.pending_notifications.read().unwrap();
+        let b_events: Vec<&str> = pending
+            .get(&char_b)
+            .map(|v| v.iter().map(|n| n.event.as_str()).collect())
+            .unwrap_or_default();
+        let a_events: Vec<&str> = pending
+            .get(&char_a)
+            .map(|v| v.iter().map(|n| n.event.as_str()).collect())
+            .unwrap_or_default();
+        assert!(b_events.contains(&"OnCharNowInStation"));
+        assert!(!a_events.contains(&"OnCharNowInStation"));
+    }
+
+    // Pre-existing notifications (seq <= pre_seq) must NOT be forwarded when !live_notify_listener;
+    // ONLY new seq > pre_seq from `/giveisk 500` is forwarded. With live_notify_listener=true, nothing is pushed.
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_a),
+        "OldPreSeq1",
+        "charid",
+        vec![],
+    );
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_a),
+        "OldPreSeq2",
+        "charid",
+        vec![],
+    );
+    let _ = sess_a.drain_notifications();
+    sess_a.live_notify_listener = false;
+    ctx.dispatch_rpc(
+        &mut sess_a,
+        "slash",
+        None,
+        "SlashCmd",
+        &[PyRep::String("/giveisk 500".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("/giveisk 500");
+    let pushed = sess_a.drain_notifications();
+    assert_eq!(pushed.len(), 1, "expected only 1 post-pre_seq notification, got {pushed:?}");
+    assert_eq!(pushed[0].0, "OnAccountChange");
+
+    sess_a.live_notify_listener = true;
+    ctx.dispatch_rpc(
+        &mut sess_a,
+        "slash",
+        None,
+        "SlashCmd",
+        &[PyRep::String("/giveisk 250".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("/giveisk 250 with live_notify_listener");
+    assert!(sess_a.drain_notifications().is_empty());
+
+    // 3. machoNet:26000 marketProxy caching gate (L357-358):
+    //    `marketProxy.GetOrders` / `GetPlexOrders` wrapped in CachedMethodCallResult,
+    //    while `marketProxy.StartupCheck` and `charMgr.GetPublicInfo` are NOT wrapped.
+    let orders_rep = ctx
+        .dispatch_rpc(
+            &mut sess_a,
+            "marketProxy",
+            None,
+            "GetOrders",
+            &[PyRep::Integer(34)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("marketProxy.GetOrders");
+    assert!(matches!(
+        &orders_rep,
+        PyRep::Object { type_name, .. } if type_name == "objectCaching.CachedMethodCallResult"
+    ));
+
+    let plex_rep = ctx
+        .dispatch_rpc(
+            &mut sess_a,
+            "marketProxy",
+            None,
+            "GetPlexOrders",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("marketProxy.GetPlexOrders");
+    assert!(matches!(
+        &plex_rep,
+        PyRep::Object { type_name, .. } if type_name == "objectCaching.CachedMethodCallResult"
+    ));
+
+    let startup_rep = ctx
+        .dispatch_rpc(
+            &mut sess_a,
+            "marketProxy",
+            None,
+            "StartupCheck",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("marketProxy.StartupCheck");
+    assert!(!matches!(
+        &startup_rep,
+        PyRep::Object { type_name, .. } if type_name == "objectCaching.CachedMethodCallResult"
+    ));
+
+    let pub_rep = ctx
+        .dispatch_rpc(
+            &mut sess_a,
+            "charMgr",
+            None,
+            "GetPublicInfo",
+            &[PyRep::Integer(char_a)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("charMgr.GetPublicInfo");
+    assert!(!matches!(
+        &pub_rep,
+        PyRep::Object { type_name, .. } if type_name == "objectCaching.CachedMethodCallResult"
+    ));
+
+    // 4. WAL failure drops post-pre_seq notifications and retains <= pre_seq notifications (L213)
+    super::dispatch::ensure_wal_error_hook_installed();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let wal_tmp = std::env::temp_dir().join(format!(
+        "evomu_dispatch_wal_deep_{}_{}.json",
+        std::process::id(),
+        nanos
+    ));
+    let wal_dir = wal_tmp.with_extension("json.wal");
+    let _ = std::fs::remove_file(&wal_tmp);
+    let _ = std::fs::remove_dir_all(&wal_dir);
+    let wal_repo = WorldRepository::new_empty_with_snapshot_path(Some(wal_tmp.clone()))
+        .expect("wal repo");
+    std::fs::write(&wal_tmp, b"{}").expect("seed wal json");
+    let wal_ctx = ServerContext::with_sde_and_repository(Arc::clone(&ctx.sde), Arc::new(wal_repo));
+    let ch_seed = ctx.db.get_character(char_a).unwrap();
+    let wal_uid = ch_seed.user_id;
+    let wal_acct = ctx.db.with_snapshot(|s| s.accounts.values().find(|a| a.user_id == wal_uid).cloned());
+    wal_ctx.db.with_mut_snapshot(|snap| {
+        if let Some(a) = wal_acct {
+            snap.accounts.insert(a.username.clone(), a);
+        }
+        snap.characters.insert(char_a, ch_seed);
+    });
+    wal_ctx
+        .db
+        .acquire_online_lock(wal_uid, 51_901, Some(char_a), true, wal_ctx.now_unix())
+        .expect("wal online lock");
+    let mut wal_sess = make_authed_session(51_901, wal_uid, char_a, ROLE_GML | ROLE_PLAYER);
+    wal_ctx.notify(
+        crate::router::NotificationTarget::Character(char_a),
+        "PreWalRetained",
+        "charid",
+        vec![],
+    );
+    let _ = std::fs::remove_file(&wal_dir);
+    std::fs::create_dir_all(&wal_dir).expect("block wal path");
+    let wal_err = wal_ctx
+        .dispatch_rpc(
+            &mut wal_sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/giveisk 999".into())],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    let _ = std::fs::remove_dir_all(&wal_dir);
+    let _ = std::fs::remove_file(&wal_tmp);
+    assert_eq!(wal_err.code, "PersistenceFailure");
+    let retained = wal_ctx.pending_notifications.read().unwrap();
+    let evs: Vec<&str> = retained
+        .get(&char_a)
+        .map(|v| v.iter().map(|n| n.event.as_str()).collect())
+        .unwrap_or_default();
+    assert_eq!(evs, vec!["PreWalRetained"]);
 }

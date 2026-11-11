@@ -594,3 +594,265 @@ fn test_issue_423_two_pass_cpu_pg_load_and_self_location_modifier_preservation()
     let self_mod_state = ctx.ship_located_items.iter().find(|i| i.item_id == 11).unwrap();
     assert!((self_mod_state.get_attribute(attr_ids::CPU, &sde) - 50.0).abs() < 1e-6);
 }
+
+#[test]
+fn context_all_domains_removal_isolation_and_stacking_order_mutants() {
+    let mut sde = SdeRegistry::default();
+    sde.attributes.insert(
+        200,
+        DogmaAttributeType {
+            attribute_id: 200,
+            name: "nonStackLowGood".into(),
+            default_value: 100.0,
+            high_is_good: false,
+            stackable: false,
+            published: true,
+        },
+    );
+    sde.attributes.insert(
+        201,
+        DogmaAttributeType {
+            attribute_id: 201,
+            name: "freeStackHighGood".into(),
+            default_value: 100.0,
+            high_is_good: true,
+            stackable: true,
+            published: true,
+        },
+    );
+
+    // 1. remove_effect removes ONLY (source_item_id, Some(effect_id)) across ALL 6 entities + 6 located lists + owned_items,
+    //    preserving modifiers from another effect_id on the SAME source_item_id AND from another source_item_id!
+    let mk = |id: i64| empty_item(id, 1);
+    let mut ctx = DogmaEffectContext::new(mk(1), mk(2), mk(3), mk(4), mk(5), mk(6));
+    ctx.ship_located_items.push(mk(11));
+    ctx.structure_located_items.push(mk(12));
+    ctx.char_located_items.push(mk(13));
+    ctx.target_located_items.push(mk(14));
+    ctx.other_located_items.push(mk(15));
+    ctx.item_located_items.push(mk(16));
+    ctx.owned_items.push(mk(17));
+
+    let keep_same_src_diff_eff = AttributeModifier {
+        source_item_id: 77,
+        effect_id: Some(888),
+        target_attribute_id: 37,
+        operator: ModifierOperator::ModAdd,
+        value: 5.0,
+        stacking_penalized: false,
+    };
+    let drop_target = AttributeModifier {
+        source_item_id: 77,
+        effect_id: Some(999),
+        target_attribute_id: 37,
+        operator: ModifierOperator::ModAdd,
+        value: 10.0,
+        stacking_penalized: false,
+    };
+    for ent in [
+        &mut ctx.item,
+        &mut ctx.ship,
+        &mut ctx.character,
+        &mut ctx.target,
+        &mut ctx.other,
+        &mut ctx.structure,
+        &mut ctx.ship_located_items[0],
+        &mut ctx.structure_located_items[0],
+        &mut ctx.char_located_items[0],
+        &mut ctx.target_located_items[0],
+        &mut ctx.other_located_items[0],
+        &mut ctx.item_located_items[0],
+        &mut ctx.owned_items[0],
+    ] {
+        ent.add_modifier(drop_target);
+        ent.add_modifier(keep_same_src_diff_eff);
+    }
+
+    let eff_999 = DogmaEffectType {
+        effect_id: 999,
+        modifiers: vec![EffectModifierSpec {
+            domain: "structureID".into(),
+            func: "ItemModifierWithFalloff".into(),
+            modified_attribute_id: 37,
+            modifying_attribute_id: 20,
+            operator: 6,
+            group_id: None,
+            skill_type_id: None,
+            effect_id: None,
+        }],
+        ..Default::default()
+    };
+    ctx.remove_effect(77, &eff_999);
+    for ent in [
+        &ctx.item,
+        &ctx.ship,
+        &ctx.character,
+        &ctx.target,
+        &ctx.other,
+        &ctx.structure,
+        &ctx.ship_located_items[0],
+        &ctx.structure_located_items[0],
+        &ctx.char_located_items[0],
+        &ctx.target_located_items[0],
+        &ctx.other_located_items[0],
+        &ctx.item_located_items[0],
+        &ctx.owned_items[0],
+    ] {
+        assert_eq!(ent.modifiers, vec![keep_same_src_diff_eff]);
+    }
+
+    // remove_modifiers_from_source clears ALL effects from that source
+    ctx.ship.remove_modifiers_from_source_effect(77, None);
+    assert!(ctx.ship.modifiers.is_empty());
+
+    // ItemModifierWithFalloff & bad operator return 0 on error
+    ctx.item.base_attributes.insert(20, 40.0);
+    let struct_fall = EffectModifierSpec {
+        domain: "structureID".into(),
+        func: "ItemModifierWithFalloff".into(),
+        modified_attribute_id: 37,
+        modifying_attribute_id: 20,
+        operator: 6,
+        group_id: None,
+        skill_type_id: None,
+        effect_id: None,
+    };
+    assert_eq!(
+        ctx.apply_modifier_spec_with_falloff(90, Some(1), &struct_fall, 15_000.0, 10_000.0, 5_000.0, &sde),
+        1
+    );
+    assert!((ctx.structure.modifiers.last().unwrap().value - 20.0).abs() < 1e-9);
+    let bad_op = EffectModifierSpec { operator: 99, ..struct_fall };
+    assert_eq!(ctx.apply_modifier_spec(90, &bad_op, &sde), 0);
+
+    // 2. Falloff cutoff & passive recharge / capacitor negative/overflow boundaries
+    assert_eq!(compute_falloff_with_cutoff(20_000.0, 10_000.0, -5.0), 1.0);
+    assert!(compute_falloff_with_cutoff(24_999.9, 10_000.0, 5_000.0) > 0.0);
+    assert_eq!(compute_falloff_with_cutoff(25_000.1, 10_000.0, 5_000.0), 0.0);
+    assert_eq!(compute_passive_recharge(50.0, 0.0, 1000.0, 500.0), 0.0);
+    let from_neg = compute_passive_recharge(-50.0, 100.0, 50_000.0, 10_000.0);
+    assert!((from_neg - 100.0 * (1.0 - (-1.0_f64).exp()).powi(2)).abs() < 1e-12);
+    assert_eq!(simulate_capacitor(900.0, 1000.0, 10.0, 1000.0), 1000.0);
+    assert_eq!(capacitor_c_dot(-10.0, 1000.0, 10.0), 0.0);
+    assert_eq!(capacitor_c_dot(1100.0, 1000.0, 10.0), 0.0);
+
+    // 3. Operator & stacking mutants: PreAssign min (high_is_good=false), PostAssign max (high_is_good=true),
+    //    non-zero PostDiv(2.0), stackable=true exemption, PostPercentUnNerfed exemption, and UNSORTED pos+neg deltas!
+    let mut low_good = empty_item(50, 1);
+    low_good.add_modifier(AttributeModifier {
+        source_item_id: 1,
+        effect_id: None,
+        target_attribute_id: 200,
+        operator: ModifierOperator::PreAssign,
+        value: 80.0,
+        stacking_penalized: false,
+    });
+    low_good.add_modifier(AttributeModifier {
+        source_item_id: 2,
+        effect_id: None,
+        target_attribute_id: 200,
+        operator: ModifierOperator::PreAssign,
+        value: 40.0,
+        stacking_penalized: false,
+    });
+    assert_eq!(low_good.get_attribute(200, &sde), 40.0);
+
+    // Non-zero PostDiv(2.0) halves value; unsorted penalized positive [+10, +30] & negative [-10, -30] MUST sort!
+    low_good.add_modifier(AttributeModifier {
+        source_item_id: 3,
+        effect_id: None,
+        target_attribute_id: 200,
+        operator: ModifierOperator::PostDiv,
+        value: 2.0,
+        stacking_penalized: false,
+    });
+    assert_eq!(low_good.get_attribute(200, &sde), 20.0);
+
+    // PostPercentUnNerfed never penalized even on stackable=false with stacking_penalized=true
+    let mut unnerfed = empty_item(51, 1);
+    for src in [1_i64, 2] {
+        unnerfed.add_modifier(AttributeModifier {
+            source_item_id: src,
+            effect_id: None,
+            target_attribute_id: 200,
+            operator: ModifierOperator::PostPercentUnNerfed,
+            value: 50.0,
+            stacking_penalized: true,
+        });
+    }
+    assert!((unnerfed.get_attribute(200, &sde) - 225.0).abs() < 1e-9);
+
+    // Unsorted penalized deltas: small pushed BEFORE large kills .sort_by deletion or ascending/descending flip
+    let mut unsorted = empty_item(52, 1);
+    for (src, val) in [(1, 10.0), (2, 30.0), (3, -10.0), (4, -30.0)] {
+        unsorted.add_modifier(AttributeModifier {
+            source_item_id: src,
+            effect_id: None,
+            target_attribute_id: 200,
+            operator: ModifierOperator::PostPercent,
+            value: val,
+            stacking_penalized: true,
+        });
+    }
+    let exp_unsorted = 100.0
+        * (1.0 + 0.30 * stacking_penalty_factor(0))
+        * (1.0 + 0.10 * stacking_penalty_factor(1))
+        * (1.0 - 0.30 * stacking_penalty_factor(0))
+        * (1.0 - 0.10 * stacking_penalty_factor(1));
+    assert!((unsorted.get_attribute(200, &sde) - exp_unsorted).abs() < 1e-9);
+
+    // stackable = true attribute ignores stacking_penalized=true AND PostAssign picks max for high_is_good=true
+    let mut free_stack = empty_item(53, 1);
+    for src in [1_i64, 2] {
+        free_stack.add_modifier(AttributeModifier {
+            source_item_id: src,
+            effect_id: None,
+            target_attribute_id: 201,
+            operator: ModifierOperator::PostPercent,
+            value: 20.0,
+            stacking_penalized: true,
+        });
+    }
+    assert!((free_stack.get_attribute(201, &sde) - 144.0).abs() < 1e-9);
+    free_stack.add_modifier(AttributeModifier {
+        source_item_id: 3,
+        effect_id: None,
+        target_attribute_id: 201,
+        operator: ModifierOperator::PostAssign,
+        value: 50.0,
+        stacking_penalized: false,
+    });
+    free_stack.add_modifier(AttributeModifier {
+        source_item_id: 4,
+        effect_id: None,
+        target_attribute_id: 201,
+        operator: ModifierOperator::PostAssign,
+        value: 300.0,
+        stacking_penalized: false,
+    });
+    assert_eq!(free_stack.get_attribute(201, &sde), 300.0);
+
+    // EWAR normalization across all 9 attrs + exact 1e-4 vs 1.01e-4 threshold vs unlisted attr
+    // (must have >= 1 modifier so get_attribute executes the operator & normalization pipeline)
+    let mut ewar_item = empty_item(54, 1);
+    for aid in [2045_u16, 2112, 2113, 2114, 2115, 2116, 2135, 2253, 6463, 2046] {
+        ewar_item.add_modifier(AttributeModifier {
+            source_item_id: 90,
+            effect_id: None,
+            target_attribute_id: aid,
+            operator: ModifierOperator::ModAdd,
+            value: 0.0,
+            stacking_penalized: false,
+        });
+    }
+    for aid in [2045_u16, 2112, 2113, 2114, 2115, 2116, 2135, 2253, 6463] {
+        ewar_item.base_attributes.insert(aid, 1e-4);
+        assert_eq!(ewar_item.get_attribute(aid, &sde), 0.0);
+        ewar_item.base_attributes.insert(aid, -1e-4);
+        assert_eq!(ewar_item.get_attribute(aid, &sde), 0.0);
+        ewar_item.base_attributes.insert(aid, 1.01e-4);
+        assert_eq!(ewar_item.get_attribute(aid, &sde), 1.01e-4);
+    }
+    ewar_item.base_attributes.insert(2046, 1e-5);
+    assert_eq!(ewar_item.get_attribute(2046, &sde), 1e-5);
+}

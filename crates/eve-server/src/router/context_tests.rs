@@ -143,6 +143,7 @@ fn character_skill_levels_respects_alpha_cap_and_omega() {
 #[test]
 fn module_reactivation_delay_lifecycle_and_clock_controls() {
     let ctx = test_ctx();
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
     let ship_id = 930_000_001_i64;
     let mod_id = 930_000_002_i64;
     ctx.db.with_mut_snapshot(|snap| {

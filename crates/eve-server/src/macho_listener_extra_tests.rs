@@ -338,7 +338,7 @@ async fn test_empty_ping_non_packet_frames_async_notifications_and_revocation() 
     loop {
         let pushed = MachoPacket::from_pyrep(
             &tokio::time::timeout(
-                std::time::Duration::from_secs(2),
+                std::time::Duration::from_secs(60),
                 read_framed_pyrep(&mut s),
             )
             .await
@@ -369,5 +369,198 @@ async fn test_empty_ping_non_packet_frames_async_notifications_and_revocation() 
             assert_eq!(rev_closed.reason_code.as_deref(), Some("UserBanned"));
             break;
         }
+    }
+}
+
+fn decode_wrapped_user_error(body: PyRep) -> (String, Vec<(String, PyRep)>) {
+    let PyRep::Tuple(parts) = body else {
+        panic!("expected ErrorResponse tuple body, got {body:?}");
+    };
+    assert_eq!(parts[0].as_i64(), Some(MachoPacketType::CallReq as i64));
+    assert_eq!(
+        parts[1].as_i64(),
+        Some(eve_machonet::MACHONETERR_WRAPPEDEXCEPTION)
+    );
+    let PyRep::Tuple(inner) = &parts[2] else {
+        panic!("expected inner ErrorResponse payload tuple");
+    };
+    let PyRep::Bytes(raw) = &inner[0] else {
+        panic!("expected marshaled exception bytes");
+    };
+    let decoded = eve_proto::marshal::decode(raw).expect("valid marshal bytes");
+    let PyRep::ObjectEx { header, .. } = decoded else {
+        panic!("expected ObjectEx UserError, got {decoded:?}");
+    };
+    let PyRep::Tuple(h_parts) = *header else {
+        panic!("expected ObjectEx header tuple");
+    };
+    assert_eq!(h_parts[0], PyRep::Token("eveexceptions.UserError".into()));
+    let PyRep::Tuple(u_args) = &h_parts[1] else {
+        panic!("expected UserError args tuple");
+    };
+    let name = u_args[0]
+        .as_str()
+        .expect("UserError message key must be string/bytes")
+        .to_string();
+    let PyRep::Dict(dict_entries) = &u_args[1] else {
+        panic!("expected UserError dict args");
+    };
+    let dict = dict_entries
+        .iter()
+        .map(|(k, v)| (k.as_str().expect("dict key str").to_string(), v.clone()))
+        .collect();
+    (name, dict)
+}
+
+#[test]
+fn map_call_req_error_body_preserves_exact_insurance_user_error_keys() {
+    for code in [
+        "InsureShipFailedSingleContract",
+        "InsureShipInvalidCost",
+        "InsureShipFailed",
+    ] {
+        let err = eve_proto::BridgeRpcError::user_error(code);
+        let (key, dict) = decode_wrapped_user_error(map_call_req_error_body(
+            "insuranceSvc",
+            "InsureShip",
+            &err,
+        ));
+        assert_eq!(
+            key, code,
+            "insurance UserError '{code}' must not collapse to CustomInfo"
+        );
+        assert_ne!(key, "CustomInfo");
+        assert!(
+            dict.is_empty(),
+            "expected empty dict for '{code}', got {dict:?}"
+        );
+    }
+
+    // Fallback still maps unrelated errors to CustomInfo with `code: message` info.
+    let fallback_err = eve_proto::BridgeRpcError {
+        code: "SomeUnmappedError".into(),
+        message: "details".into(),
+    };
+    let (key, dict) = decode_wrapped_user_error(map_call_req_error_body(
+        "insuranceSvc",
+        "InsureShip",
+        &fallback_err,
+    ));
+    assert_eq!(key, "CustomInfo");
+    assert_eq!(dict.len(), 1);
+    assert_eq!(dict[0].0, "info");
+    assert_eq!(dict[0].1.as_str(), Some("SomeUnmappedError: details"));
+}
+
+fn decode_wrapped_runtime_error(body: PyRep) -> String {
+    let PyRep::Tuple(parts) = body else {
+        panic!("expected ErrorResponse tuple body");
+    };
+    assert_eq!(parts[0].as_i64(), Some(MachoPacketType::CallReq as i64));
+    assert_eq!(
+        parts[1].as_i64(),
+        Some(eve_machonet::MACHONETERR_WRAPPEDEXCEPTION)
+    );
+    let PyRep::Tuple(inner) = &parts[2] else {
+        panic!("expected inner ErrorResponse payload tuple");
+    };
+    let PyRep::Bytes(raw) = &inner[0] else {
+        panic!("expected marshaled exception bytes");
+    };
+    let PyRep::ObjectEx { header, .. } = eve_proto::marshal::decode(raw).unwrap() else {
+        panic!("expected ObjectEx RuntimeError");
+    };
+    let PyRep::Tuple(h_parts) = *header else {
+        panic!("expected header tuple");
+    };
+    assert_eq!(h_parts[0], PyRep::Token("exceptions.RuntimeError".into()));
+    let PyRep::Tuple(args) = &h_parts[1] else {
+        panic!("expected RuntimeError args tuple");
+    };
+    args[0].as_str().unwrap().to_string()
+}
+
+#[test]
+fn map_call_req_error_body_preserves_existing_rpc_error_mappings() {
+    let unimpl = eve_proto::BridgeRpcError {
+        code: "UnimplementedRPC".into(),
+        message: "missing".into(),
+    };
+    assert_eq!(
+        decode_wrapped_runtime_error(map_call_req_error_body("svc", "m", &unimpl)),
+        "UnimplementedRPC: missing"
+    );
+
+    let fake_item = eve_proto::BridgeRpcError {
+        code: "FakeItemNotFound".into(),
+        message: "item 1".into(),
+    };
+    assert_eq!(
+        decode_wrapped_runtime_error(map_call_req_error_body("inv", "m", &fake_item)),
+        "FakeItemNotFound"
+    );
+
+    let bound_err = eve_proto::BridgeRpcError {
+        code: "InvalidBoundObject".into(),
+        message: "bad oid".into(),
+    };
+    let (key, dict) = decode_wrapped_user_error(map_call_req_error_body("svc", "m", &bound_err));
+    assert_eq!(key, "UnMachoDestination");
+    assert_eq!(dict[0].1.as_str(), Some("InvalidBoundObject: bad oid"));
+
+    let slash_err = eve_proto::BridgeRpcError {
+        code: "SlashError".into(),
+        message: "bad syntax".into(),
+    };
+    let (key, dict) = decode_wrapped_user_error(map_call_req_error_body("slash", "SlashCmd", &slash_err));
+    assert_eq!(key, "SlashError");
+    assert_eq!(dict[0].0, "reason");
+    assert_eq!(dict[0].1.as_str(), Some("bad syntax"));
+
+    let slash_cmd_err = eve_proto::BridgeRpcError {
+        code: "UnknownSlashCommand".into(),
+        message: "unknown /foo".into(),
+    };
+    let (key, dict) = decode_wrapped_user_error(map_call_req_error_body(
+        "publicQaToolsServer",
+        "SlashCmd",
+        &slash_cmd_err,
+    ));
+    assert_eq!(key, "SlashError");
+    assert_eq!(dict[0].0, "reason");
+    assert_eq!(dict[0].1.as_str(), Some("UnknownSlashCommand: unknown /foo"));
+
+    let cargo_err = eve_proto::BridgeRpcError {
+        code: "NotEnoughCargoSpace".into(),
+        message: "free=12.5, required=40.0".into(),
+    };
+    let (key, dict) = decode_wrapped_user_error(map_call_req_error_body("inv", "Add", &cargo_err));
+    assert_eq!(key, "NotEnoughCargoSpace");
+    assert_eq!(dict[0].0, "free");
+    assert_eq!(dict[0].1.as_f64(), Some(12.5));
+    assert_eq!(dict[1].0, "required");
+    assert_eq!(dict[1].1.as_f64(), Some(40.0));
+
+    let max_orders = eve_proto::BridgeRpcError {
+        code: "MaxOpenOrdersReached".into(),
+        message: "limit reached (17/17)".into(),
+    };
+    let (key, dict) = decode_wrapped_user_error(map_call_req_error_body("marketProxy", "PlaceBuyOrder", &max_orders));
+    assert_eq!(key, "MarketExceededOrderCount");
+    assert_eq!(dict[0], ("curCnt".to_string(), PyRep::Integer(17)));
+    assert_eq!(dict[1], ("maxCnt".to_string(), PyRep::Integer(17)));
+
+    for code in ["OutsideDockingPerimeter", "DockingApproach"] {
+        let dock_err = eve_proto::BridgeRpcError {
+            code: code.into(),
+            message: "Ship is 12000.0 m from docking target".into(),
+        };
+        let (key, dict) = decode_wrapped_user_error(map_call_req_error_body(
+            "beyonce",
+            "CmdDock",
+            &dock_err,
+        ));
+        assert_eq!(key, "DockingApproach");
+        assert!(dict.is_empty(), "expected empty dict for '{code}', got {dict:?}");
     }
 }

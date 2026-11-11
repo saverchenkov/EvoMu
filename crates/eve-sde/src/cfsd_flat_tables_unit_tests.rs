@@ -202,16 +202,30 @@ fn load_cfsd_table_decodes_all_25_flat_layouts_and_validates_errors() {
         let _ = std::fs::remove_file(&tmp);
     }
 
-    // Exercise CfsdFieldKind::I32 directly via synthetic custom decode check
-    let custom_lay = CfsdLayout {
-        res_path: "res:/staticdata/agenttypes.fsdbinary",
-        key_width: 4,
-        stride: 16,
-        mask_offset: None,
-        fields: &[("signedVal", CfsdFieldKind::I32, 4, None)],
-    };
+    // Exercise CfsdFieldKind::I32 and runtime layout() helper directly
+    let custom_lay = layout(
+        "res:/staticdata/agenttypes.fsdbinary",
+        4,
+        16,
+        None,
+        &[("signedVal", CfsdFieldKind::I32, 4, None)],
+    );
     let raw_i32 = build_synthetic_flat_table(&custom_lay);
     let buf = super::super::cfsd_nested_tables::CfsdBuf(&raw_i32);
     let recs = buf.dict_entries(56, 16).unwrap();
     assert_eq!(buf.u32(recs[0] + 4).unwrap() as i32, -10);
+
+    // Call runtime layout() constructor to verify CfsdLayout fields directly
+    let runtime_lay = layout(
+        "res:/staticdata/runtime_check.fsdbinary",
+        4,
+        16,
+        Some(12),
+        &[("signedVal", CfsdFieldKind::I32, 4, Some(1))],
+    );
+    assert_eq!(runtime_lay.res_path, "res:/staticdata/runtime_check.fsdbinary");
+    assert_eq!(runtime_lay.key_width, 4);
+    assert_eq!(runtime_lay.stride, 16);
+    assert_eq!(runtime_lay.mask_offset, Some(12));
+    assert_eq!(runtime_lay.fields.len(), 1);
 }

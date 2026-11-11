@@ -559,15 +559,18 @@ impl WorldRepository {
     /// Creates a production `WorldRepository` with an empty account, character, and player item table
     /// prior to loading `EVOMU_DB_PATH` or `EVOMU_SNAPSHOT_PATH` (`R22-P1-5`, `R23-P0-1`, `R24-P1-1`, `D-3`).
     pub fn new_empty() -> Self {
-        let db_or_snapshot_path = std::env::var("EVOMU_DB_PATH")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| {
-                std::env::var("EVOMU_SNAPSHOT_PATH")
-                    .ok()
-                    .filter(|s| !s.trim().is_empty())
-            })
-            .map(std::path::PathBuf::from);
+        let db_or_snapshot_path = {
+            let _env_guard = crate::lock_test_env_read();
+            std::env::var("EVOMU_DB_PATH")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| {
+                    std::env::var("EVOMU_SNAPSHOT_PATH")
+                        .ok()
+                        .filter(|s| !s.trim().is_empty())
+                })
+                .map(std::path::PathBuf::from)
+        };
         Self::new_empty_with_snapshot_path(db_or_snapshot_path)
             .expect("Failed to load or initialize persisted WorldRepository database")
     }
@@ -976,6 +979,7 @@ impl WorldRepository {
         let guard = std::sync::Arc::make_mut(&mut *arc_guard);
         let mut conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut fp = self.sqlite_fp.lock().unwrap_or_else(|e| e.into_inner());
+        guard.dirty_hints.clear();
         if f(guard) {
             if let Some(poison_err) = check_wal_poison() {
                 sqlite_store::rollback_dirty_from_sqlite(&conn, guard, &fp).expect(
@@ -988,21 +992,19 @@ impl WorldRepository {
                 st.solar_system_id = sid;
             }
             let prev_wal_seq = fp.wal_seq;
+            let prev_cw_fp = fp.d6_corp_crimewatch.crimewatch_fp;
             let need_wal_delta = self.snapshot_path.is_some() && self.sqlite_path.is_none();
-            let mut staged_fp = Box::new(fp.clone());
             let persist_res = self.persist_dirty_sqlite_and_wal(
                 &mut conn,
                 guard,
-                &mut staged_fp,
+                &mut fp,
                 prev_wal_seq,
                 need_wal_delta,
             );
-            let crimewatch_changed =
-                staged_fp.d6_corp_crimewatch.crimewatch_fp != fp.d6_corp_crimewatch.crimewatch_fp;
+            let crimewatch_changed = fp.d6_corp_crimewatch.crimewatch_fp != prev_cw_fp;
             match persist_res {
                 Ok(did_mutate) => {
                     if did_mutate {
-                        *fp = *staged_fp;
                         self.bump_state_epoch();
                         if crimewatch_changed {
                             self.bump_combat_state_epoch();
@@ -1011,6 +1013,9 @@ impl WorldRepository {
                     Ok(())
                 }
                 Err(persist_err) => {
+                    if let Ok((_, clean_fp)) = sqlite_store::load_snapshot_from_sqlite(&conn) {
+                        *fp = clean_fp;
+                    }
                     sqlite_store::rollback_dirty_from_sqlite(&conn, guard, &fp)
                         .expect("Fatal: failed to roll back dirty state from SQLite after persist error");
                     self.bump_rollback_epoch();
@@ -1128,6 +1133,7 @@ impl WorldRepository {
 
     pub fn spawn_asteroid(&self, record: AsteroidRecord) {
         self.with_mut_snapshot(|snap| {
+            snap.mark_asteroids_dirty();
             snap.asteroids.insert(record.asteroid_id, record);
         });
     }
@@ -1227,5 +1233,6 @@ mod r4_persistence_tests {
     }
 }
 #[cfg(test)] #[path = "persistence_unit_tests.rs"] mod persistence_unit_tests;
+#[cfg(test)] #[path = "persistence_edges_tests.rs"] mod persistence_edges_tests;
 
 

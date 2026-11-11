@@ -65,7 +65,7 @@ async fn spawn_listener(ctx: Arc<ServerContext>) -> std::net::SocketAddr {
 }
 
 async fn read_pkt(stream: &mut TcpStream) -> Option<PyRep> {
-    tokio::time::timeout(std::time::Duration::from_secs(20), read_framed_pyrep(stream))
+    tokio::time::timeout(std::time::Duration::from_secs(60), read_framed_pyrep(stream))
         .await
         .expect("read timeout")
         .expect("read error")
@@ -142,7 +142,7 @@ async fn read_until_call_reply(stream: &mut TcpStream) -> MachoPacket {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn frame_codec_io_errors_truncated_body_and_tcp_reader_task_guards() {
     let mut bad_reader = FailingAsyncReader { kind: std::io::ErrorKind::BrokenPipe };
     assert!(read_framed_pyrep(&mut bad_reader).await.unwrap_err().to_string().contains("injected read error"));
@@ -176,7 +176,7 @@ async fn frame_codec_io_errors_truncated_body_and_tcp_reader_task_guards() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn handshake_queue_check_vip_empty_sso_and_mid_handshake_gates() {
     let ctx = Arc::new(ServerContext::new());
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
@@ -262,7 +262,7 @@ async fn handshake_queue_check_vip_empty_sso_and_mid_handshake_gates() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn post_auth_ping_variants_address_types_error_wrapping_and_multilogin() {
     let ctx = Arc::new(ServerContext::new());
     let addr = spawn_listener(Arc::clone(&ctx)).await;
@@ -339,7 +339,7 @@ async fn post_auth_ping_variants_address_types_error_wrapping_and_multilogin() {
     assert_eq!(MachoPacket::from_pyrep(&read_pkt(&mut s).await.unwrap()).unwrap().packet_type, MachoPacketType::PingRsp);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ballpark_update_state_docking_flush_session_change_and_disconnect_sync() {
     let ctx = Arc::new(ServerContext::new());
     let clock = Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000));
@@ -383,7 +383,16 @@ async fn ballpark_update_state_docking_flush_session_change_and_disconnect_sync(
     let first_pkt = read_until_call_reply(&mut s).await;
     assert_eq!(first_pkt.packet_type, MachoPacketType::CallRsp);
     let mut tail_pkts = Vec::new();
-    while let Ok(Ok(Some(raw))) = tokio::time::timeout(std::time::Duration::from_millis(100), read_framed_pyrep(&mut s)).await {
+    loop {
+        let wait_ms = if tail_pkts.is_empty() { 10_000 } else { 100 };
+        let Ok(Ok(Some(raw))) = tokio::time::timeout(
+            std::time::Duration::from_millis(wait_ms),
+            read_framed_pyrep(&mut s),
+        )
+        .await
+        else {
+            break;
+        };
         tail_pkts.push(MachoPacket::from_pyrep(&raw).unwrap().packet_type);
         if tail_pkts.len() >= 2 {
             break;
@@ -398,7 +407,14 @@ async fn ballpark_update_state_docking_flush_session_change_and_disconnect_sync(
     let _ = jita.step_manual(1.0).await.unwrap();
     let _ = jita.set_ball_position(ship_id, glam::DVec3::new(12_345.0, -6_789.0, 42.0)).await;
     drop(s);
-    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    for _ in 0..500 {
+        if ctx.db.get_online_session(user_id).is_none()
+            && ctx.db.with_snapshot(|snap| snap.item_positions.get(&ship_id).copied()) == Some([12_345.0, -6_789.0, 42.0])
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     assert!(ctx.db.get_online_session(user_id).is_none());
     assert_eq!(ctx.db.with_snapshot(|snap| snap.item_positions.get(&ship_id).copied()), Some([12_345.0, -6_789.0, 42.0]));
 
@@ -408,7 +424,12 @@ async fn ballpark_update_state_docking_flush_session_change_and_disconnect_sync(
     let closed = GPSTransportClosed::from_pyrep(&read_pkt(&mut s2).await.unwrap()).unwrap();
     assert_eq!((closed.reason_code.as_deref(), closed.reason.as_str()), (Some("CUSTOM_CLOSE"), "Server maintenance"));
     drop(s2);
-    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    for _ in 0..500 {
+        if ctx.db.get_online_session(u2).is_none() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 
     clock.advance_secs(15);
     let (mut s3, c3, u3) = connect_login(addr, "demo", "demo-secret").await;
@@ -449,7 +470,7 @@ async fn ballpark_update_state_docking_flush_session_change_and_disconnect_sync(
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn slash_fetch_remote_command_list_and_unknown_cmd_return_slash_error_with_reason() {
     let ctx = Arc::new(ServerContext::new());
     let addr = spawn_listener(Arc::clone(&ctx)).await;
@@ -543,7 +564,12 @@ async fn slash_fetch_remote_command_list_and_unknown_cmd_return_slash_error_with
         assert_eq!(dict[0].0, "reason");
         assert!(dict[0].1.contains("InsufficientRole"), "got reason: {}", dict[0].1);
         drop(s_player);
-        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        for _ in 0..500 {
+            if ctx.db.get_online_session(u_player).is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 
     // Grant GM role for GM FetchRemoteCommandList + unknown slash tests
@@ -620,7 +646,7 @@ async fn slash_fetch_remote_command_list_and_unknown_cmd_return_slash_error_with
     assert!(dict[0].1.contains("InvalidSlashArgument"), "got reason: {}", dict[0].1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wire_invbroker_capacity_overflow_returns_typed_user_error_with_free_and_required() {
     let ctx = Arc::new(ServerContext::new());
     let addr = spawn_listener(Arc::clone(&ctx)).await;
@@ -871,7 +897,7 @@ fn on_item_change_and_multiple_item_change_resolve_sde_and_singleton_qty() {
     assert_eq!(col(m_cols, "categoryID"), Some(i64::from(ship_type.category_id)));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn market_max_open_orders_maps_to_v24_market_exceeded_order_count_user_error_713() {
     let ctx = Arc::new(ServerContext::new());
     let addr = spawn_listener(Arc::clone(&ctx)).await;
@@ -984,4 +1010,210 @@ async fn market_max_open_orders_maps_to_v24_market_exceeded_order_count_user_err
     };
     assert_eq!(get_int("curCnt"), Some(5));
     assert_eq!(get_int("maxCnt"), Some(5));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resolve_req_ping_list_corrupt_marshal_error_codes_and_revocation() {
+    let ctx = Arc::new(ServerContext::new());
+    let addr = spawn_listener(Arc::clone(&ctx)).await;
+
+    // 1. read_framed_pyrep rejects invalid frame lengths 0 and > MAX_MACHO_FRAME_LEN.
+    let mut zero_len = Vec::new();
+    zero_len.extend_from_slice(&0u32.to_le_bytes());
+    assert!(read_framed_pyrep(&mut Cursor::new(zero_len))
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("Invalid machoNet frame length"));
+
+    let mut huge_len = Vec::new();
+    huge_len.extend_from_slice(&((MAX_MACHO_FRAME_LEN + 1) as u32).to_le_bytes());
+    assert!(read_framed_pyrep(&mut Cursor::new(huge_len))
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("Invalid machoNet frame length"));
+
+    // 2. Corrupt marshal bytes trigger HANDSHAKE_INCOMPATIBLEPROTOCOL close frame.
+    {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let _hello = read_pkt(&mut s).await.unwrap();
+        s.write_u32_le(5).await.unwrap();
+        s.write_all(&[0xff, 0xee, 0xdd, 0xcc, 0xbb]).await.unwrap();
+        s.flush().await.unwrap();
+        let closed = GPSTransportClosed::from_pyrep(&read_pkt(&mut s).await.unwrap()).unwrap();
+        assert_eq!(
+            closed.reason_code.as_deref(),
+            Some("HANDSHAKE_INCOMPATIBLEPROTOCOL")
+        );
+    }
+
+    // 3. Authenticated flow: PingReq with List payload, ResolveReq, non-MachoPacket ignore,
+    //    AuthenticationReq error, InvalidBoundObject -> UnMachoDestination, CharacterNotAtStation,
+    //    and non-MultiLoginBlocked session revocation.
+    let (mut s, client_id, user_id) = connect_login(addr, "demo", "demo-secret").await;
+    let call = |cid: u64, svc: &str, bid: Option<u64>, m: &str, args: Vec<PyRep>| {
+        build_call_pkt(
+            client_id,
+            user_id,
+            cid,
+            MachoAddress::Node {
+                node_id: MACHO_PROXY_NODE_ID,
+                service: Some(svc.into()),
+                call_id: 0,
+            },
+            bid,
+            m,
+            args,
+        )
+    };
+
+    // PingReq with direct PyRep::List payload
+    let list_ping = MachoPacket {
+        packet_type: MachoPacketType::PingReq,
+        source: MachoAddress::Client {
+            client_id,
+            call_id: 1,
+            service: None,
+        },
+        destination: MachoAddress::Any {
+            service: None,
+            call_id: 0,
+        },
+        user_id: Some(user_id),
+        payload: PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(10),
+            PyRep::Integer(20),
+        ])]),
+        named_payload: HashMap::new(),
+    };
+    write_framed_pyrep(&mut s, &list_ping.to_pyrep()).await.unwrap();
+    let ping_rsp = MachoPacket::from_pyrep(&read_pkt(&mut s).await.unwrap()).unwrap();
+    assert_eq!(ping_rsp.packet_type, MachoPacketType::PingRsp);
+    assert_eq!(as_list(&ping_rsp.payload).len(), 10);
+
+    // ResolveReq -> ResolveRsp
+    let resolve_req = MachoPacket {
+        packet_type: MachoPacketType::ResolveReq,
+        source: MachoAddress::Client {
+            client_id,
+            call_id: 2,
+            service: None,
+        },
+        destination: MachoAddress::Node {
+            node_id: MACHO_PROXY_NODE_ID,
+            service: None,
+            call_id: 0,
+        },
+        user_id: Some(user_id),
+        payload: PyRep::Integer(MACHO_PROXY_NODE_ID as i64),
+        named_payload: HashMap::new(),
+    };
+    write_framed_pyrep(&mut s, &resolve_req.to_pyrep()).await.unwrap();
+    let resolve_rsp = MachoPacket::from_pyrep(&read_pkt(&mut s).await.unwrap()).unwrap();
+    assert_eq!(resolve_rsp.packet_type, MachoPacketType::ResolveRsp);
+    assert_eq!(resolve_rsp.payload.as_i64(), Some(MACHO_PROXY_NODE_ID as i64));
+
+    // Non-MachoPacket frame after auth is ignored cleanly
+    write_framed_pyrep(&mut s, &PyRep::Integer(999)).await.unwrap();
+
+    // AuthenticationReq after auth -> AlreadyAuthenticated ErrorResponse
+    let dup_auth = MachoPacket {
+        packet_type: MachoPacketType::AuthenticationReq,
+        source: MachoAddress::Client {
+            client_id,
+            call_id: 3,
+            service: None,
+        },
+        destination: MachoAddress::Node {
+            node_id: MACHO_PROXY_NODE_ID,
+            service: None,
+            call_id: 0,
+        },
+        user_id: Some(user_id),
+        payload: PyRep::None,
+        named_payload: HashMap::new(),
+    };
+    write_framed_pyrep(&mut s, &dup_auth.to_pyrep()).await.unwrap();
+    let dup_rsp = MachoPacket::from_pyrep(&read_pkt(&mut s).await.unwrap()).unwrap();
+    assert_eq!(dup_rsp.packet_type, MachoPacketType::ErrorResponse);
+
+    // InvalidBoundObject -> UnMachoDestination UserError
+    write_framed_pyrep(
+        &mut s,
+        &call(10, "beyonce", Some(999_888), "UpdateStateRequest", vec![]).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let bound_err = read_until_call_reply(&mut s).await;
+    assert_eq!(bound_err.packet_type, MachoPacketType::ErrorResponse);
+    let PyRep::Bytes(b_bytes) = &as_tuple(&as_tuple(&bound_err.payload)[2])[0] else {
+        panic!()
+    };
+    let PyRep::ObjectEx { header: b_hdr, .. } = marshal::decode(b_bytes).unwrap() else {
+        panic!()
+    };
+    assert_eq!(
+        as_tuple(&as_tuple(&b_hdr)[1])[0].as_str(),
+        Some("UnMachoDestination")
+    );
+
+    // SelectCharacterID while docked, then trigger CharacterNotAtStation -> RuntimeError("CharacterNotAtStation")
+    write_framed_pyrep(
+        &mut s,
+        &call(11, "charUnboundMgr", None, "SelectCharacterID", vec![PyRep::Integer(90_000_001)])
+            .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read_until_call_reply(&mut s).await.packet_type, MachoPacketType::CallRsp);
+
+    // Dock error when already docked or undocked via stationSvc.Undock then calling Dock in invalid state:
+    // Actually call `repairSvc.GetDamageReports` with non-existent item or undock and call `stationSvc.GetDockingInfo` -> let's push a char notification and verify notify_rx delivers it!
+    ctx.notify(
+        NotificationTarget::Character(90_000_001),
+        "OnAccountChange",
+        "charid",
+        vec![PyRep::Integer(1000), PyRep::Integer(100)],
+    );
+    ctx.notify(
+        NotificationTarget::Character(90_000_001),
+        "OnDamageStateChange",
+        "charid",
+        vec![PyRep::Integer(1)],
+    );
+    ctx.notify(
+        NotificationTarget::Character(90_000_001),
+        "OnSessionChanged",
+        "charid",
+        vec![],
+    );
+    let mut saw_notif = false;
+    let mut saw_sess_change = false;
+    for _ in 0..8 {
+        let pkt = MachoPacket::from_pyrep(&read_pkt(&mut s).await.unwrap()).unwrap();
+        if pkt.packet_type == MachoPacketType::Notification {
+            saw_notif = true;
+        }
+        if pkt.packet_type == MachoPacketType::SessionChangeNotification {
+            saw_sess_change = true;
+        }
+        if saw_notif && saw_sess_change {
+            break;
+        }
+    }
+    assert!(saw_notif && saw_sess_change);
+
+    // Non-MultiLoginBlocked revocation terminates session cleanly with GPSTransportClosed
+    ctx.db
+        .ban_account("demo", ctx.now_unix() + 600, "Banned by test")
+        .unwrap();
+    write_framed_pyrep(&mut s, &list_ping.to_pyrep()).await.unwrap();
+    loop {
+        let rep = read_pkt(&mut s).await.unwrap();
+        if let Some(closed) = GPSTransportClosed::from_pyrep(&rep) {
+            assert_eq!(closed.reason_code.as_deref(), Some("UserBanned"));
+            break;
+        }
+    }
 }

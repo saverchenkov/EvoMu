@@ -641,12 +641,18 @@ pub(crate) fn collapse_stranded_abyssal_if_needed_sync(
                 char_id,
             )
             .1;
+            let default_lifetime_secs =
+                if ch.solar_system_id == crate::services::abyssal_void_mgr::VOID_SPACE_SYSTEM_ID {
+                    crate::services::abyssal_void_mgr::VOID_SPACE_ENCOUNTER_LIFE_TIME_SECS
+                } else {
+                    1_200
+                };
             return Some(AbyssalPersistedSession {
                 char_id,
                 ship_id: ch.active_ship_id,
                 pocket_system_id: ch.solar_system_id,
                 origin_system_id: origin_sys,
-                entered_unix: now_unix.saturating_sub(1_200),
+                entered_unix: now_unix.saturating_sub(default_lifetime_secs),
                 collapse_at_unix: now_unix,
             });
         }
@@ -677,6 +683,7 @@ fn execute_due_abyssal_collapse_sync(
             target_id: 0,
             entered_unix: sess.entered_unix,
             expires_at_sec: sess.collapse_at_unix,
+            nebula_graphic_id: None,
         });
         crate::services::pve_abyssal_lifecycle::evacuate_void_space_session_sync(
             ctx,
@@ -742,43 +749,45 @@ pub fn on_advance_secs_internal(
         crate::services::market_contracts::emit_expired_order_notifications(ctx, &swept);
     }
 
-    let mut cw_pilots: Vec<i64> = with_combat_runtime(ctx, |rt| {
-        let mut ids: Vec<i64> = rt.crimewatch_timer_states.keys().copied().collect();
-        for &cid in rt.disapproval_flags.keys() {
-            if !ids.contains(&cid) { ids.push(cid); }
-        }
-        for &cid in rt.npc_timers.keys() {
-            if !ids.contains(&cid) { ids.push(cid); }
-        }
-        ids
+    let mut cw_pilots: std::collections::BTreeSet<i64> = with_combat_runtime(ctx, |rt| {
+        rt.crimewatch_timer_states
+            .keys()
+            .chain(rt.disapproval_flags.keys())
+            .chain(rt.npc_timers.keys())
+            .copied()
+            .collect()
     });
-    if let Ok(cw) = ctx.crimewatch.read() {
-        for (&cid, st) in &cw.states {
-            if (st.weapon_timer_until_unix > 0
-                || st.pvp_timer_until_unix > 0
-                || st.suspect_flag_until_unix > 0
-                || st.criminal_flag_until_unix > 0)
-                && !cw_pilots.contains(&cid)
-            {
-                cw_pilots.push(cid);
+    let pilot_states: Vec<(i64, crate::combat::CharacterCrimeWatchState)> =
+        ctx.db.with_snapshot(|s| {
+            for (&cid, st) in &s.crimewatch_states {
+                if st.weapon_timer_until_unix > 0
+                    || st.pvp_timer_until_unix > 0
+                    || st.suspect_flag_until_unix > 0
+                    || st.criminal_flag_until_unix > 0
+                {
+                    cw_pilots.insert(cid);
+                }
             }
-        }
-    }
-    for pid in cw_pilots {
-        crate::services::combat_crimewatch::crimewatch_timers::emit_crimewatch_timer_notifications(ctx, pid, now_unix);
+            cw_pilots
+                .into_iter()
+                .map(|pid| (pid, s.crimewatch_states.get(&pid).cloned().unwrap_or_default()))
+                .collect()
+        });
+    for (pid, st) in pilot_states {
+        crate::services::combat_crimewatch::crimewatch_timers::emit_crimewatch_timer_notifications_with_state(ctx, pid, &st, now_unix);
     }
 
     // Sweep expired CrimeWatch timers and runtime maps (`#736`).
-    let has_expired_cw = ctx.crimewatch.read().is_ok_and(|cw| {
-        cw.states.values().any(|st| {
+    let has_expired_cw = ctx.db.with_snapshot(|s| {
+        s.crimewatch_states.values().any(|st| {
             (st.weapon_timer_until_unix > 0 && now_unix >= st.weapon_timer_until_unix)
                 || (st.pvp_timer_until_unix > 0 && now_unix >= st.pvp_timer_until_unix)
                 || (st.suspect_flag_until_unix > 0 && now_unix >= st.suspect_flag_until_unix)
                 || (st.criminal_flag_until_unix > 0 && now_unix >= st.criminal_flag_until_unix)
-        }) || cw.aggression_mgr.records.values().any(|r| r.expires_unix <= now_unix)
+        }) || s.crimewatch_aggressions.values().any(|r| r.expires_unix <= now_unix)
     });
     if has_expired_cw {
-        if let Ok(mut cw) = ctx.crimewatch.write() {
+        ctx.crimewatch.with_mut_crimewatch(|cw| {
             cw.states.retain(|_, st| {
                 if st.weapon_timer_until_unix > 0 && now_unix >= st.weapon_timer_until_unix {
                     st.weapon_timer_until_unix = 0;
@@ -799,7 +808,7 @@ pub fn on_advance_secs_internal(
                     || st.pending_concord_arrival.is_some()
             });
             cw.aggression_mgr.records.retain(|_, r| r.expires_unix > now_unix);
-        }
+        });
     }
     let has_expired_rt_cw = with_combat_runtime(ctx, |rt| {
         rt.disapproval_flags.values().any(|&exp| now_unix >= exp)
@@ -1037,8 +1046,10 @@ pub fn on_advance_secs_internal(
             for &sys_id in active_systems.keys() {
                 crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync(ctx, sys_id);
                 if let Some(mgr) = ctx.npc_spawns.write().unwrap_or_else(|e| e.into_inner()).get_mut(&sys_id) {
-                    let tick = ctx.systems.get_or_spawn(sys_id).ballpark.read().map(|b| b.current_tick).unwrap_or(0);
-                    mgr.step_ai_sync(ctx, sys_id, tick, 1.0);
+                    if !mgr.entities.is_empty() {
+                        let tick = ctx.systems.get_or_spawn(sys_id).ballpark.read().map(|b| b.current_tick).unwrap_or(0);
+                        mgr.step_ai_sync(ctx, sys_id, tick, 1.0);
+                    }
                 }
             }
         }
@@ -1366,7 +1377,7 @@ pub fn on_advance_secs_internal(
     }
 }
 
-/// Production 1 Hz background cluster tick (`plan:SP-7`, `#735`).
+/// Production 1 Hz background cluster tick (`#735`).
 /// Honors `ctx.is_clock_paused()` and `ctx.time_acceleration_multiplier()`, running the unified
 /// synchronous subsystem pipeline (`run_clock_advanced_sync_pipeline`) alongside async cluster tasks.
 pub async fn tick_background_cluster(ctx: &ServerContext) {
@@ -1663,22 +1674,162 @@ pub async fn tick_background_cluster_with_step(ctx: &ServerContext, explicit_ste
         .await;
     crate::services::pve_fob_observatory::step_living_world_fob_and_observatory_spawns(ctx).await;
 
-    for (sys_id, handle) in active_handles {
+    for &(sys_id, _) in &active_handles {
         let _ = crate::services::combat_npc_police::check_and_spawn_faction_police(ctx, sys_id).await;
-        let _ = crate::services::combat_npc_police::step_empire_navy_patrols(ctx, sys_id).await;
-        {
-            let mut mgr = ctx
-                .npc_spawns
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&sys_id)
-                .unwrap_or_default();
-            let _ = mgr.spawn_belt_rats_for_system(ctx, sys_id).await;
-            ctx.npc_spawns
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(sys_id, mgr);
+    }
+    if !active_handles.is_empty() {
+        let active_sys_set: std::collections::HashSet<u32> =
+            active_handles.iter().map(|&(sys_id, _)| sys_id).collect();
+        let (
+            navy_present,
+            drifter_present,
+            cs_alive_set,
+            mordu_alive_set,
+            officer_alive_set,
+            cs_cooldowns,
+        ) = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+            let mut navy_present = std::collections::HashSet::new();
+            let mut drifter_present = std::collections::HashSet::new();
+            let mut cs_alive = std::collections::HashSet::new();
+            let mut mordu_alive = std::collections::HashSet::new();
+            let mut officer_alive = std::collections::HashSet::new();
+            for n in rt.npc_entities.values() {
+                if !active_sys_set.contains(&n.solar_system_id) {
+                    continue;
+                }
+                if n.archetype == "Navy" || n.archetype.ends_with("Navy") {
+                    navy_present.insert(n.solar_system_id);
+                } else if n.archetype == "Drifter" {
+                    drifter_present.insert(n.solar_system_id);
+                } else if n.archetype == "CloneSoldier" {
+                    cs_alive.insert(n.solar_system_id);
+                } else if n.archetype == "MorduCommander" {
+                    mordu_alive.insert(n.solar_system_id);
+                } else if ctx
+                    .sde
+                    .types
+                    .get(&n.type_id)
+                    .is_some_and(|t| matches!(t.group_id, 553 | 559 | 564 | 569 | 574))
+                {
+                    officer_alive.insert(n.solar_system_id);
+                }
+            }
+            (
+                navy_present,
+                drifter_present,
+                cs_alive,
+                mordu_alive,
+                officer_alive,
+                rt.clone_soldier_cooldown_until.clone(),
+            )
+        });
+        let piloted_ships_by_sys: std::collections::HashMap<u32, i64> = ctx.db.with_snapshot(|snap| {
+            let mut map = std::collections::HashMap::new();
+            for c in snap.characters.values() {
+                if active_sys_set.contains(&c.solar_system_id)
+                    && c.station_id.is_none()
+                    && c.active_ship_id > 0
+                {
+                    map.entry(c.solar_system_id).or_insert(c.active_ship_id);
+                }
+            }
+            map
+        });
+        let mut navy_plans = Vec::new();
+        for &(sys_id, _) in &active_handles {
+            if let Some(plan) =
+                crate::services::combat_npc_police::plan_empire_navy_patrol_with_preloaded(
+                    ctx,
+                    sys_id,
+                    navy_present.contains(&sys_id),
+                    piloted_ships_by_sys.get(&sys_id).copied(),
+                )
+                .await
+            {
+                navy_plans.push(plan);
+            }
         }
+        let mut managers: Vec<(u32, crate::combat::npc_ai::NpcSpawnManager)> = {
+            let mut guard = ctx.npc_spawns.write().unwrap_or_else(|e| e.into_inner());
+            active_handles
+                .iter()
+                .map(|&(sys_id, _)| (sys_id, guard.remove(&sys_id).unwrap_or_default()))
+                .collect()
+        };
+        let mut belt_plans = Vec::new();
+        let mut belt_id_total: i64 = 0;
+        for (idx, (sys_id, mgr)) in managers.iter_mut().enumerate() {
+            let s = *sys_id;
+            let (planned_groups, special_specs) = mgr.plan_belt_rats_for_system(
+                ctx,
+                s,
+                drifter_present.contains(&s),
+                cs_cooldowns.get(&s).copied(),
+                cs_alive_set.contains(&s),
+                mordu_alive_set.contains(&s),
+                officer_alive_set.contains(&s),
+            );
+            let group_npcs: i64 = planned_groups
+                .iter()
+                .map(|(_, sg, _)| sg.npc_type_ids.len() as i64)
+                .sum();
+            let count = group_npcs + special_specs.len() as i64;
+            if count > 0 {
+                belt_id_total += count;
+                belt_plans.push((idx, s, planned_groups, special_specs, count));
+            }
+        }
+        let navy_id_total: i64 = navy_plans.iter().map(|p| p.specs.len() as i64).sum();
+        let total_new_ids = navy_id_total + belt_id_total;
+        if total_new_ids > 0 {
+            let mut next_start_id = ctx.db.with_mut_snapshot(|snap| {
+                let start = snap.next_entity_id + 1;
+                snap.next_entity_id += total_new_ids;
+                start
+            });
+            let mut built_specialized = Vec::new();
+            for plan in navy_plans {
+                let count = plan.specs.len() as i64;
+                let _ = crate::services::combat_npc_police::execute_navy_patrol_plan_with_start_id(
+                    ctx,
+                    plan,
+                    next_start_id,
+                    &mut built_specialized,
+                )
+                .await;
+                next_start_id += count;
+            }
+            for (mgr_idx, sys_id, planned_groups, special_specs, count) in belt_plans {
+                let _ = managers[mgr_idx]
+                    .1
+                    .execute_belt_rat_plan_with_start_id(
+                        ctx,
+                        sys_id,
+                        planned_groups,
+                        special_specs,
+                        next_start_id,
+                        &mut built_specialized,
+                    )
+                    .await;
+                next_start_id += count;
+            }
+            if !built_specialized.is_empty() {
+                crate::services::combat_crimewatch::with_mut_combat_ephemeral(ctx, |rt| {
+                    for (ball_id, entity) in built_specialized {
+                        rt.npc_entities.insert(ball_id, entity);
+                    }
+                });
+            }
+        }
+        {
+            let mut guard = ctx.npc_spawns.write().unwrap_or_else(|e| e.into_inner());
+            for (sys_id, mgr) in managers {
+                guard.insert(sys_id, mgr);
+            }
+        }
+    }
+
+    for (sys_id, handle) in active_handles {
         if !ctx
             .dedicated_physics_ticker_active
             .load(std::sync::atomic::Ordering::Acquire)
@@ -1709,9 +1860,8 @@ async fn step_single_system_physics_step(
     handle: &crate::system_actor::SystemHandle,
 ) {
     let _tick = handle
-        .step_manual(1.0)
+        .step_manual_tick_only(1.0)
         .await
-        .map(|b| b.tick)
         .unwrap_or(0);
     crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai(ctx, sys_id).await;
     if let Some(mgr) = ctx

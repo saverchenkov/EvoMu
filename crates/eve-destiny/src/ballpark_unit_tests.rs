@@ -644,4 +644,626 @@ fn ball_interactive_overrides_wire_and_recompute_emits_set_max_speed() {
     // 4. remove_ball cleans up ball_interactive_overrides.
     assert!(park.remove_ball(501).is_some());
     assert!(!park.ball_interactive_overrides.contains_key(&501));
+
+    // 5. Category 25 asteroid balls are treated as static during step_bumps (#792).
+    let mut bump_park = Ballpark::new(30_000_142);
+    let mut ast_ball = make_ship(701, DVec3::ZERO);
+    ast_ball.radius = 200.0;
+    ast_ball.mode = MovementMode::Stop;
+    bump_park.add_ball(ast_ball);
+    bump_park.set_ball_slim_meta(
+        701,
+        SlimItemMeta {
+            group_id: 462,
+            category_id: 25,
+            owner_id: 1,
+            ..Default::default()
+        },
+    );
+    let mut rammer = make_ship(702, DVec3::new(100.0, 0.0, 0.0));
+    rammer.velocity = DVec3::new(-300.0, 0.0, 0.0);
+    bump_park.add_ball(rammer);
+    bump_park.step(1.0);
+    assert_eq!(
+        bump_park.balls[&701].position,
+        DVec3::ZERO,
+        "Asteroid (category 25) must remain stationary when bumped by a ship"
+    );
+    assert_eq!(bump_park.balls[&701].velocity, DVec3::ZERO);
 }
+
+#[test]
+fn prospective_grid_bounds_clamps_against_all_six_faces_and_falls_back_to_pos() {
+    let r = BUBBLE_RADIUS_METERS;
+    let empty_park = Ballpark::new(30_000_142);
+    let p0 = DVec3::new(10_000.0, -20_000.0, 30_000.0);
+    let (min0, max0) = empty_park.prospective_grid_bounds(p0);
+    assert_eq!(min0, p0 - DVec3::splat(r));
+    assert_eq!(max0, p0 + DVec3::splat(r));
+    assert!(empty_park.grids.is_empty());
+
+    // Place a single reference grid centered at the origin `[-r, +r]^3` and test all 6 faces.
+    let mut park = Ballpark::new(30_000_142);
+    park.add_ball(make_ship(1, DVec3::ZERO));
+    assert_eq!(park.grids.len(), 1);
+    let g_origin = &park.grids[&1];
+    assert_eq!(g_origin.min_bounds, DVec3::splat(-r));
+    assert_eq!(g_origin.max_bounds, DVec3::splat(r));
+
+    let d = 1.5 * r;
+    // +X neighbor: pos.x > existing.max_bounds.x -> min_b.x clamped to +r
+    let (min_px, max_px) = park.prospective_grid_bounds(DVec3::new(d, 0.0, 0.0));
+    assert!((min_px.x - r).abs() < 1e-6);
+    assert!((max_px.x - (d + r)).abs() < 1e-6);
+    assert!((min_px.y - (-r)).abs() < 1e-6);
+    assert!((min_px.z - (-r)).abs() < 1e-6);
+
+    // -X neighbor: pos.x < existing.min_bounds.x -> max_b.x clamped to -r
+    let (min_nx, max_nx) = park.prospective_grid_bounds(DVec3::new(-d, 0.0, 0.0));
+    assert!((min_nx.x - (-d - r)).abs() < 1e-6);
+    assert!((max_nx.x - (-r)).abs() < 1e-6);
+
+    // +Y neighbor: pos.y > existing.max_bounds.y -> min_b.y clamped to +r
+    let (min_py, max_py) = park.prospective_grid_bounds(DVec3::new(0.0, d, 0.0));
+    assert!((min_py.y - r).abs() < 1e-6);
+    assert!((max_py.y - (d + r)).abs() < 1e-6);
+    assert!((min_py.x - (-r)).abs() < 1e-6);
+
+    // -Y neighbor: pos.y < existing.min_bounds.y -> max_b.y clamped to -r
+    let (min_ny, max_ny) = park.prospective_grid_bounds(DVec3::new(0.0, -d, 0.0));
+    assert!((min_ny.y - (-d - r)).abs() < 1e-6);
+    assert!((max_ny.y - (-r)).abs() < 1e-6);
+
+    // +Z neighbor: pos.z > existing.max_bounds.z -> min_b.z clamped to +r
+    let (min_pz, max_pz) = park.prospective_grid_bounds(DVec3::new(0.0, 0.0, d));
+    assert!((min_pz.z - r).abs() < 1e-6);
+    assert!((max_pz.z - (d + r)).abs() < 1e-6);
+
+    // -Z neighbor: pos.z < existing.min_bounds.z -> max_b.z clamped to -r
+    let (min_nz, max_nz) = park.prospective_grid_bounds(DVec3::new(0.0, 0.0, -d));
+    assert!((min_nz.z - (-d - r)).abs() < 1e-6);
+    assert!((max_nz.z - (-r)).abs() < 1e-6);
+
+    // Degenerate enclosed / inverted case: if an existing grid has min_bounds > max_bounds around pos
+    // such that clamping pushes min_b > pos or max_b < pos, `min_b.min(pos)` and `max_b.max(pos)`
+    // guarantee `min_b <= pos <= max_b`.
+    let mut deg_park = Ballpark::new(30_000_142);
+    deg_park.grids.insert(
+        10,
+        GridBubble {
+            id: 10,
+            center: DVec3::ZERO,
+            min_bounds: DVec3::new(-100.0, -100.0, -100.0),
+            max_bounds: DVec3::new(500_000.0, 100.0, 100.0),
+            base_radius: r,
+            members: std::collections::BTreeSet::new(),
+        },
+    );
+    deg_park.grids.insert(
+        11,
+        GridBubble {
+            id: 11,
+            center: DVec3::ZERO,
+            min_bounds: DVec3::new(-500_000.0, -100.0, -100.0),
+            max_bounds: DVec3::new(100.0, 100.0, 100.0),
+            base_radius: r,
+            members: std::collections::BTreeSet::new(),
+        },
+    );
+    let probe = DVec3::new(0.0, 200.0, 0.0);
+    let (min_deg, max_deg) = deg_park.prospective_grid_bounds(probe);
+    assert!(min_deg.x <= probe.x && probe.x <= max_deg.x);
+    assert!(min_deg.y <= probe.y && probe.y <= max_deg.y);
+    assert!(min_deg.z <= probe.z && probe.z <= max_deg.z);
+}
+
+#[test]
+fn queue_event_for_all_grid_observers_recompute_quiet_and_apply_true_damage() {
+    let mut park = Ballpark::new(30_000_142);
+    // Grid A: balls 1 and 2 near origin; Grid B: ball 3 far away (`50,000 km`).
+    park.add_ball(make_ship(1, DVec3::ZERO));
+    park.add_ball(make_ship(2, DVec3::new(1_000.0, 0.0, 0.0)));
+    park.add_ball(make_ship(3, DVec3::new(50_000_000.0, 0.0, 0.0)));
+    assert_eq!(park.grids.len(), 2);
+    let _ = park.drain_all_observer_events();
+
+    // 1. `queue_event_for_all_grid_observers` with `Some(2)` delivers to 1 and 3, skipping 2.
+    let sample_ev = DestinyEvent::SetBallMassive {
+        ball_id: 99,
+        is_massive: false,
+    };
+    park.queue_event_for_all_grid_observers(Some(2), &sample_ev);
+    assert_eq!(park.drain_observer_events(1).len(), 1);
+    assert!(park.drain_observer_events(2).is_empty());
+    assert_eq!(park.drain_observer_events(3).len(), 1);
+
+    // With `None`, all 3 observers across both grids receive the event.
+    park.queue_event_for_all_grid_observers(None, &sample_ev);
+    assert_eq!(park.drain_observer_events(1).len(), 1);
+    assert_eq!(park.drain_observer_events(2).len(), 1);
+    assert_eq!(park.drain_observer_events(3).len(), 1);
+
+    // 2. `recompute_ball_attributes_quiet`:
+    // - Static ball returns `None` even if velocity multiplier changes.
+    let mut station = make_ship(60_003_760, DVec3::new(5_000.0, 0.0, 0.0));
+    station.mode = MovementMode::Rigid;
+    station.max_velocity = 10.0;
+    park.add_static_ball(station, 15);
+    park.combat_states.entry(60_003_760).or_default().prop_velocity_multiplier = 3.0;
+    assert_eq!(park.recompute_ball_attributes_quiet(60_003_760), None);
+
+    // - Dynamic ball with unchanged speed returns `None`.
+    assert_eq!(park.recompute_ball_attributes_quiet(1), None);
+
+    // - Dynamic ball with changed speed returns `Some(new_v)` and queues ZERO `SetMaxSpeed` events.
+    park.combat_states.get_mut(&1).unwrap().prop_velocity_multiplier = 2.0;
+    let quiet_v = park.recompute_ball_attributes_quiet(1);
+    assert_eq!(quiet_v, Some(600.0));
+    assert!((park.balls[&1].max_velocity - 600.0).abs() < 1e-6);
+    assert!(park.drain_observer_events(2).is_empty());
+
+    // - Orphan `CombatState` without a `Ball` (`(None, Some(cs))`) updates combat attributes and returns `None`.
+    let mut orphan_cs = crate::CombatState::new();
+    orphan_cs.adc_active = true;
+    park.combat_states.insert(999, orphan_cs);
+    assert_eq!(park.recompute_ball_attributes_quiet(999), None);
+    assert_eq!(park.combat_states[&999].shield_resonance, [0.25; 4]);
+    assert_eq!(park.combat_states[&999].armor_resonance, [0.25; 4]);
+    assert_eq!(park.combat_states[&999].structure_resonance, [0.25; 4]);
+    park.combat_states.remove(&999);
+
+    // - Unknown ball (`(None, None)`) returns `None`.
+    assert_eq!(park.recompute_ball_attributes_quiet(888_888), None);
+
+    // 3. `apply_true_damage_to_ball`:
+    // Configure ball 1 with 99% resistances (`resonance = 0.01`), normal cloak (`is_cloaked = true`),
+    // and `100 / 100 / 100` HP.
+    {
+        let cs = park.combat_states.get_mut(&1).unwrap();
+        cs.max_shield_hp = 100.0;
+        cs.shield_hp = 100.0;
+        cs.max_armor_hp = 100.0;
+        cs.armor_hp = 100.0;
+        cs.max_structure_hp = 100.0;
+        cs.structure_hp = 100.0;
+        cs.shield_resonance = [0.01; 4];
+        cs.armor_resonance = [0.01; 4];
+        cs.structure_resonance = [0.01; 4];
+        cs.is_cloaked = true;
+        cs.is_tethered = true;
+    }
+    let _ = park.drain_all_observer_events();
+    park.pending_events.clear();
+
+    // While tethered (invulnerable), true damage deals `0.0` and does not destroy the ship.
+    let (applied_inv, destroyed_inv, snap_inv) = park.apply_true_damage_to_ball(1, 150.0).unwrap();
+    assert_eq!(applied_inv, 0.0);
+    assert!(!destroyed_inv);
+    assert!(snap_inv.is_some());
+    assert_eq!(park.combat_states[&1].shield_hp, 100.0);
+
+    // Untethered (still cloaked with 99% resists): `150.0` true damage ignores resists & normal cloak,
+    // depleting all `100` shield and `50` armor.
+    park.combat_states.get_mut(&1).unwrap().is_tethered = false;
+    let (applied_hit, destroyed_hit, _) = park.apply_true_damage_to_ball(1, 150.0).unwrap();
+    assert!((applied_hit - 150.0).abs() < 1e-6);
+    assert!(!destroyed_hit);
+    assert!((park.combat_states[&1].shield_hp - 0.0).abs() < 1e-6);
+    assert!((park.combat_states[&1].armor_hp - 50.0).abs() < 1e-6);
+    assert!((park.combat_states[&1].structure_hp - 100.0).abs() < 1e-6);
+
+    // Lethal true damage (`200.0` vs `150.0` remaining HP) destroys ball 1, removes it from `balls`,
+    // queues `OnDamageStateChange`, `OnFleetDamageStateChange`, and `TerminalExplosion`, and preserves
+    // `observer_events[&1]` so the dying victim can still flush its final tick updates.
+    let (applied_kill, destroyed_kill, snap_kill) = park.apply_true_damage_to_ball(1, 200.0).unwrap();
+    assert!((applied_kill - 150.0).abs() < 1e-6);
+    assert!(destroyed_kill);
+    assert_eq!(snap_kill.unwrap().id, 1);
+    assert!(!park.balls.contains_key(&1));
+    let victim_events = park.drain_observer_events(1);
+    assert!(victim_events
+        .iter()
+        .any(|e| matches!(e, DestinyEvent::OnDamageStateChange { ball_id: 1, structure_ratio, .. } if *structure_ratio == 0.0)));
+    assert!(victim_events
+        .iter()
+        .any(|e| matches!(e, DestinyEvent::OnFleetDamageStateChange { ball_id: 1, structure_ratio, .. } if *structure_ratio == 0.0)));
+    assert!(victim_events
+        .iter()
+        .any(|e| matches!(e, DestinyEvent::TerminalExplosion { ball_id: 1, .. })));
+}
+
+#[test]
+fn proximity_decloak_emits_set_max_speed_after_add_balls2_and_warp_cancel_clamps_velocity() {
+    // 1. Proximity decloak in `step`: AddBalls2 is queued strictly BEFORE SetMaxSpeed,
+    //    `meta.is_cloaked` is cleared, and `decloak_targeting_delay_remaining_s` is armed.
+    let mut park = Ballpark::new(30_000_142);
+    park.add_ball(make_ship(1, DVec3::ZERO));
+    park.add_ball(make_ship(2, DVec3::new(1_500.0, 0.0, 0.0))); // within 2,000 m decloak radius
+    park.set_ball_slim_meta(
+        1,
+        SlimItemMeta {
+            group_id: 25,
+            category_id: 6,
+            is_cloaked: true,
+            ..Default::default()
+        },
+    );
+    {
+        let b1 = park.balls.get_mut(&1).unwrap();
+        b1.max_velocity = 75.0;
+        let cs1 = park.combat_states.get_mut(&1).unwrap();
+        cs1.is_cloaked = true;
+        cs1.base_max_velocity = Some(300.0);
+        cs1.cloak_velocity_multiplier = Some(0.25);
+        cs1.cloak_configured_targeting_delay_s = 6.0;
+    }
+    let _ = park.drain_all_observer_events();
+    park.pending_events.clear();
+
+    park.step(1.0);
+    assert!(!park.combat_states[&1].is_cloaked);
+    assert_eq!(park.combat_states[&1].cloak_velocity_multiplier, None);
+    assert!((park.combat_states[&1].decloak_targeting_delay_remaining_s - 6.0).abs() < 1e-6);
+    assert!(!park.ball_slim_meta[&1].is_cloaked);
+    assert!((park.balls[&1].max_velocity - 300.0).abs() < 1e-6);
+
+    let obs2 = park.drain_observer_events(2);
+    let add_idx = obs2
+        .iter()
+        .position(|e| matches!(e, DestinyEvent::AddBalls2 { balls } if balls.iter().any(|b| b.id == 1)))
+        .expect("observer 2 must receive AddBalls2 when ball 1 decloaks");
+    let speed_idx = obs2
+        .iter()
+        .position(|e| matches!(e, DestinyEvent::SetMaxSpeed { ball_id: 1, max_speed } if (*max_speed - 300.0).abs() < 1e-6))
+        .expect("observer 2 must receive SetMaxSpeed(300.0) when ball 1 decloaks");
+    assert!(
+        add_idx < speed_idx,
+        "AddBalls2 (idx {add_idx}) must precede SetMaxSpeed (idx {speed_idx}) on proximity decloak"
+    );
+
+    // 2. Cancelling an Aligning warp via `goto_point` or `set_mode(Stop)` clamps superluminal/excessive
+    //    velocity to `max_velocity`, clears `is_emergency_warping`, and emits `SetBallMassive(true)`,
+    //    `OnSpecialFX("effects.Warping", false)`, and `OnDeactivatingWarp` (in `pending_events` only).
+    let mut wpark = Ballpark::new(30_000_142);
+    wpark.add_ball(make_ship(10, DVec3::ZERO));
+    wpark.add_ball(make_ship(11, DVec3::new(500.0, 0.0, 0.0)));
+    assert!(wpark
+        .set_mode(
+            10,
+            MovementMode::Warp {
+                origin: DVec3::ZERO,
+                destination: DVec3::new(100_000_000.0, 0.0, 0.0),
+                warp_speed_au_s: 3.0,
+                total_distance: 100_000_000.0,
+                elapsed_warp_time: 0.0,
+                phase: WarpPhase::Aligning,
+            },
+        )
+        .is_ok());
+    wpark.balls.get_mut(&10).unwrap().velocity = DVec3::new(1_200.0, 0.0, 0.0); // > 300.0 max_velocity
+    wpark.combat_states.get_mut(&10).unwrap().is_emergency_warping = true;
+    let _ = wpark.drain_all_observer_events();
+    wpark.pending_events.clear();
+
+    assert!(wpark.goto_point(10, DVec3::new(0.0, 10_000.0, 0.0)).is_ok());
+    assert!((wpark.balls[&10].velocity.length() - 300.0).abs() < 1e-6);
+    assert!(!wpark.combat_states[&10].is_emergency_warping);
+    let pending_cancel = std::mem::take(&mut wpark.pending_events);
+    assert!(pending_cancel
+        .iter()
+        .any(|e| matches!(e, DestinyEvent::OnDeactivatingWarp { ball_id: 10 })));
+    let obs11 = wpark.drain_observer_events(11);
+    assert!(!obs11
+        .iter()
+        .any(|e| matches!(e, DestinyEvent::OnDeactivatingWarp { .. })));
+    assert!(obs11
+        .iter()
+        .any(|e| matches!(e, DestinyEvent::SetBallMassive { ball_id: 10, is_massive: true })));
+    assert!(obs11.iter().any(|e| matches!(
+        e,
+        DestinyEvent::OnSpecialFX { ball_id: 10, guid, is_active: false, .. } if guid == "effects.Warping"
+    )));
+
+    // Also verify `set_mode(Stop)` from `WarpPhase::Aligning` clamps velocity and clears emergency warp.
+    assert!(wpark
+        .set_mode(
+            10,
+            MovementMode::Warp {
+                origin: DVec3::ZERO,
+                destination: DVec3::new(100_000_000.0, 0.0, 0.0),
+                warp_speed_au_s: 3.0,
+                total_distance: 100_000_000.0,
+                elapsed_warp_time: 0.0,
+                phase: WarpPhase::Aligning,
+            },
+        )
+        .is_ok());
+    wpark.balls.get_mut(&10).unwrap().velocity = DVec3::new(900.0, 0.0, 0.0);
+    wpark.combat_states.get_mut(&10).unwrap().is_emergency_warping = true;
+    assert!(wpark.set_mode(10, MovementMode::Stop).is_ok());
+    assert!((wpark.balls[&10].velocity.length() - 300.0).abs() < 1e-6);
+    assert!(!wpark.combat_states[&10].is_emergency_warping);
+
+    // 3. Warp exit in `step`: clamps residual warp velocity to `max_velocity`, emits `SetBallPosition`
+    //    before `Stop`, `SetBallMassive(true)`, and `OnSpecialFX("effects.Warping", false)`.
+    let dest = DVec3::new(50_000_000.0, 0.0, 0.0);
+    wpark.add_ball(make_ship(12, dest));
+    {
+        let b10 = wpark.balls.get_mut(&10).unwrap();
+        b10.position = dest - DVec3::new(50.0, 0.0, 0.0);
+        b10.velocity = DVec3::new(5_000.0, 0.0, 0.0);
+        b10.mode = MovementMode::Warp {
+            origin: DVec3::ZERO,
+            destination: dest,
+            warp_speed_au_s: 3.0,
+            total_distance: 50_000_000.0,
+            elapsed_warp_time: 100.0,
+            phase: WarpPhase::Decelerating,
+        };
+    }
+    let _ = wpark.drain_all_observer_events();
+    wpark.pending_events.clear();
+    wpark.step(1.0);
+    assert_eq!(wpark.balls[&10].mode, MovementMode::Stop);
+    assert!(wpark.balls[&10].velocity.length() <= wpark.balls[&10].max_velocity + 1e-6);
+    let obs10 = wpark.drain_observer_events(10);
+    let pos_idx = obs10
+        .iter()
+        .position(|e| matches!(e, DestinyEvent::SetBallPosition { ball_id: 10, .. }))
+        .expect("SetBallPosition must be emitted on warp exit");
+    let stop_idx = obs10
+        .iter()
+        .position(|e| matches!(e, DestinyEvent::Stop { ball_id: 10 }))
+        .expect("Stop must be emitted on warp exit");
+    assert!(pos_idx < stop_idx, "SetBallPosition must precede Stop on warp exit");
+
+    // 4. Sub-warp grid wall crossing (`obs_before != obs_after` vs `obs_before == obs_after`):
+    //    Mover crossing from Grid A into adjacent Grid B gets `AddBalls` (for B's stationary ball)
+    //    and `RemoveBalls` (for A's stationary ball), while B's stationary ball gets `AddBalls2`
+    //    (for the newcomer) and A's stationary ball gets `RemoveBalls`.
+    let r = BUBBLE_RADIUS_METERS;
+    let mut gpark = Ballpark::new(30_000_142);
+    gpark.add_ball(make_ship(21, DVec3::ZERO)); // Stationary in Grid A `[-r, +r]`
+    gpark.add_ball(make_ship(22, DVec3::new(1.5 * r, 0.0, 0.0))); // Stationary in Grid B `[+r, 2.5*r]`
+    let mut mover = make_ship(23, DVec3::new(r - 50.0, 0.0, 0.0)); // Starts inside Grid A near +r wall
+    mover.velocity = DVec3::new(200.0, 0.0, 0.0);
+    mover.max_velocity = 300.0;
+    mover.mode = MovementMode::GotoDirection { direction: DVec3::X };
+    gpark.add_ball(mover);
+    assert_eq!(gpark.ball_grid_ids[&21], gpark.ball_grid_ids[&23]);
+    assert_ne!(gpark.ball_grid_ids[&21], gpark.ball_grid_ids[&22]);
+    let _ = gpark.drain_all_observer_events();
+
+    gpark.step(1.0);
+    assert_eq!(gpark.ball_grid_ids[&23], gpark.ball_grid_ids[&22]);
+    let ev_mover = gpark.drain_observer_events(23);
+    assert!(ev_mover
+        .iter()
+        .any(|e| matches!(e, DestinyEvent::AddBalls { balls } if balls.iter().any(|b| b.id == 22))));
+    assert!(ev_mover
+        .iter()
+        .any(|e| matches!(e, DestinyEvent::RemoveBalls { ball_ids } if ball_ids.contains(&21))));
+
+    let ev_dest_stationary = gpark.drain_observer_events(22);
+    assert!(ev_dest_stationary
+        .iter()
+        .any(|e| matches!(e, DestinyEvent::AddBalls2 { balls } if balls.iter().any(|b| b.id == 23))));
+
+    let ev_dep_stationary = gpark.drain_observer_events(21);
+    assert!(ev_dep_stationary
+        .iter()
+        .any(|e| matches!(e, DestinyEvent::RemoveBalls { ball_ids } if ball_ids.contains(&23))));
+
+    // 5. Asteroid (`SlimItemMeta.category_id == 25`) with non-Rigid mode and not in `static_ball_ids`
+    //    is treated as static during collision resolution (`ballpark_targeting.rs:330`), so a moving
+    //    ship bounces off it without displacing the asteroid.
+    let mut cpark = Ballpark::new(30_000_142);
+    let ast_id = 401_i64;
+    let ship_id = 402_i64;
+    let ast_pos = DVec3::new(80.0, 0.0, 0.0);
+    cpark.add_ball(Ball {
+        id: ast_id,
+        type_id: 1230,
+        position: ast_pos,
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 500.0,
+        radius: 60.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    });
+    cpark.set_ball_slim_meta(
+        ast_id,
+        SlimItemMeta {
+            group_id: 462,
+            category_id: 25,
+            ..Default::default()
+        },
+    );
+    cpark.add_ball(Ball {
+        id: ship_id,
+        type_id: 587,
+        position: DVec3::ZERO,
+        velocity: DVec3::new(200.0, 0.0, 0.0),
+        max_velocity: 300.0,
+        inertia: 1.0,
+        mass: 1_000_000.0,
+        radius: 50.0,
+        speed_fraction: 1.0,
+        mode: MovementMode::GotoDirection { direction: DVec3::X },
+    });
+    cpark.step(1.0);
+    assert_eq!(cpark.balls[&ast_id].position, ast_pos);
+    assert_eq!(cpark.balls[&ast_id].velocity, DVec3::ZERO);
+}
+
+#[test]
+fn mutant_killers_remove_static_recompute_eps_and_true_damage_ratios() {
+    // 1. remove_ball (`was_static = static_ball_ids.remove || matches!(mode, Rigid)`) when old_grid_id is None
+    let mut rpark = Ballpark::new(30_000_142);
+    rpark.add_ball(Ball {
+        id: 1,
+        type_id: 587,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 1.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    });
+    let _ = rpark.drain_observer_events(1);
+
+    // Rigid ball NOT in static_ball_ids and NOT in ball_grid_ids
+    rpark.balls.insert(
+        2,
+        Ball {
+            id: 2,
+            type_id: 587,
+            position: DVec3::new(10_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e9,
+            radius: 100.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Rigid,
+        },
+    );
+    assert!(rpark.remove_ball(2).is_some());
+    assert!(
+        rpark
+            .drain_observer_events(1)
+            .iter()
+            .any(|e| matches!(e, DestinyEvent::RemoveBall { ball_id: 2 })),
+        "non-grid Rigid ball must emit RemoveBall to all grid observers"
+    );
+
+    // Non-Rigid ball IN static_ball_ids and NOT in ball_grid_ids
+    rpark.balls.insert(
+        3,
+        Ball {
+            id: 3,
+            type_id: 587,
+            position: DVec3::new(20_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e9,
+            radius: 100.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+    );
+    rpark.static_ball_ids.insert(3);
+    assert!(rpark.remove_ball(3).is_some());
+    assert!(
+        rpark
+            .drain_observer_events(1)
+            .iter()
+            .any(|e| matches!(e, DestinyEvent::RemoveBall { ball_id: 3 })),
+        "non-grid static_ball_ids entry must emit RemoveBall even if mode != Rigid"
+    );
+
+    // 2. Exact 1e-6 boundary in recompute_ball_attributes_quiet and set_ball_max_velocity_cap (`> 1e-6` vs `>= 1e-6`)
+    rpark.balls.get_mut(&1).unwrap().max_velocity = 0.0;
+    let mut cs1 = crate::CombatState::default();
+    cs1.base_max_velocity = Some(1e-6);
+    cs1.base_mass = Some(1_000_000.0);
+    cs1.base_inertia = Some(1.0);
+    rpark.combat_states.insert(1, cs1);
+    assert_eq!(rpark.recompute_ball_attributes_quiet(1), None);
+
+    rpark.balls.get_mut(&1).unwrap().max_velocity = 0.0;
+    let _ = rpark.drain_observer_events(1);
+    assert!(rpark.set_ball_max_velocity_cap(1, Some(1e-6)));
+    assert!(
+        !rpark
+            .drain_observer_events(1)
+            .iter()
+            .any(|e| matches!(e, DestinyEvent::SetMaxSpeed { ball_id: 1, .. })),
+        "delta == 1e-6 must NOT emit SetMaxSpeed (`> 1e-6`)"
+    );
+
+    // 3. apply_true_damage_to_ball exact ratios across positive layers AND zero-max layers (`> 0.0` vs `>= 0.0`, `/` vs `% / *`)
+    let mut dpark = Ballpark::new(30_000_142);
+    dpark.add_ball(Ball {
+        id: 10,
+        type_id: 587,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 1.0,
+        mass: 1e6,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    });
+    dpark.combat_states.insert(
+        10,
+        crate::CombatState {
+            shield_hp: 200.0,
+            max_shield_hp: 200.0,
+            armor_hp: 200.0,
+            max_armor_hp: 200.0,
+            structure_hp: 400.0,
+            max_structure_hp: 400.0,
+            ..Default::default()
+        },
+    );
+    let _ = dpark.drain_observer_events(10);
+    dpark.apply_true_damage_to_ball(10, 50.0);
+    assert!(dpark.drain_observer_events(10).into_iter().any(|e| matches!(
+        e,
+        DestinyEvent::OnDamageStateChange { ball_id: 10, shield_ratio, armor_ratio, structure_ratio }
+            if (shield_ratio - 0.75).abs() < 1e-9 && (armor_ratio - 1.0).abs() < 1e-9 && (structure_ratio - 1.0).abs() < 1e-9
+    )));
+    dpark.apply_true_damage_to_ball(10, 200.0);
+    assert!(dpark.drain_observer_events(10).into_iter().any(|e| matches!(
+        e,
+        DestinyEvent::OnDamageStateChange { ball_id: 10, shield_ratio, armor_ratio, structure_ratio }
+            if shield_ratio.abs() < 1e-9 && (armor_ratio - 0.75).abs() < 1e-9 && (structure_ratio - 1.0).abs() < 1e-9
+    )));
+    dpark.apply_true_damage_to_ball(10, 200.0);
+    assert!(dpark.drain_observer_events(10).into_iter().any(|e| matches!(
+        e,
+        DestinyEvent::OnDamageStateChange { ball_id: 10, shield_ratio, armor_ratio, structure_ratio }
+            if shield_ratio.abs() < 1e-9 && armor_ratio.abs() < 1e-9 && (structure_ratio - 0.875).abs() < 1e-9
+    )));
+
+    // Zero max HP layers -> ratios MUST be finite 0.0 (never NaN or 1.0)
+    dpark.add_ball(Ball {
+        id: 11,
+        type_id: 587,
+        position: DVec3::new(1000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 1.0,
+        mass: 1e6,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    });
+    dpark.combat_states.insert(
+        11,
+        crate::CombatState {
+            shield_hp: 50.0,
+            max_shield_hp: 0.0,
+            armor_hp: 50.0,
+            max_armor_hp: 0.0,
+            structure_hp: 0.0,
+            max_structure_hp: 0.0,
+            ..Default::default()
+        },
+    );
+    let _ = dpark.drain_observer_events(11);
+    dpark.apply_true_damage_to_ball(11, 0.0);
+    assert!(dpark.drain_observer_events(11).into_iter().any(|e| matches!(
+        e,
+        DestinyEvent::OnDamageStateChange { ball_id: 11, shield_ratio, armor_ratio, structure_ratio }
+            if shield_ratio == 0.0 && armor_ratio == 0.0 && structure_ratio == 0.0
+    )));
+}
+

@@ -109,7 +109,7 @@ impl ServerContext {
     /// Unregisters the session closer, releases all bound objects, unsubscribes any
     /// `PublicGatewayRouter` notice subscriber and stream receiver for `session.session_id`,
     /// and—if this session still held the account's active online lock—releases structure
-    /// control, persists in-space ship ball coordinates, runs SP-6 logoff/disconnect
+    /// control, persists in-space ship ball coordinates, runs in-space logoff/disconnect
     /// lifecycle, and notifies watchlist and fleet/social presence listeners.
     pub async fn cleanup_disconnected_client_session(&self, session: &mut SessionState) {
         let session_id = session.session_id;
@@ -117,7 +117,7 @@ impl ServerContext {
         self.release_session_bindings(session_id);
         self.quasar_gateway.unsubscribe_session(session_id);
         if let Some(uid) = session.user_id {
-            // A dropped connection that still held the character online is a log-off for watchers and triggers SP-6 in-space logoff handling.
+            // A dropped connection that still held the character online is a log-off for watchers and triggers in-space logoff handling.
             if self.db.release_online_lock(uid, session_id) {
                 if let Some(cid) = session.character_id {
                     crate::services::structure_control_ops::release_all_structure_control_for_character(
@@ -1018,17 +1018,20 @@ impl ServerContext {
             }
             let _ = notify_tx.send((char_id, notif));
 
-            if sde.types.get(&cycle.module_type_id).is_some_and(|t| t.group_id == 330)
-                || cycle.effect_name.to_ascii_lowercase().contains("cloak")
-            {
+            if let Some((sfx_guid, is_offensive)) = special_fx_guid_for_module_sde(
+                &sde,
+                cycle.module_type_id,
+                effect_id,
+                Some(&cycle.effect_name),
+            ) {
                 let sfx_args = vec![
                     PyRep::Integer(cycle.ship_id),
                     PyRep::Integer(cycle.module_id),
                     PyRep::Integer(cycle.module_type_id as i64),
+                    cycle.target_id.map(PyRep::Integer).unwrap_or(PyRep::None),
                     PyRep::None,
-                    PyRep::None,
-                    PyRep::String("effects.Cloak".to_string()),
-                    PyRep::Bool(false),
+                    PyRep::String(sfx_guid),
+                    PyRep::Bool(is_offensive),
                     PyRep::Integer(0),
                     PyRep::Integer(0),
                     PyRep::Real(cycle.duration_s * 1000.0),
@@ -1236,6 +1239,7 @@ impl ServerContext {
             location_change_invuln: std::sync::Mutex::new(std::collections::HashMap::new()),
             feature_flags: crate::config::FeatureFlagsConfig::default(),
             esi_port: 0,
+            xmpp_port: 5222,
             esi_state,
             fleet_extras: std::sync::Mutex::new(Default::default()),
             social_extras: std::sync::Mutex::new(Default::default()),
@@ -1479,6 +1483,8 @@ impl ServerContext {
     }
 }
 
-pub use crate::router::binding_effects::effect_id_for_module_sde;
+pub use crate::router::binding_effects::{
+    effect_id_for_module_sde, special_fx_guid_for_module_sde,
+};
 
 #[cfg(test)] #[path = "binding_unit_tests.rs"] mod binding_unit_tests;

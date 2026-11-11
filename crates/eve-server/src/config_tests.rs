@@ -37,6 +37,7 @@ fn server_config_defaults_accounts_and_boundary_validation() {
     assert_eq!(def.bridge_port, 26_002);
     assert_eq!(def.esi_port, 26_004);
     assert_eq!(def.quasar_grpc_port, 26_005);
+    assert_eq!(def.xmpp_port, 5222);
     assert_eq!(def.sde_path, "data/evomu_sde.sqlite");
     assert_eq!(def.world_db_path, "data/evomu_world.sqlite");
     assert_eq!(def.belt_respawn_interval_secs, 86_400);
@@ -117,6 +118,8 @@ fn server_config_load_from_toml_and_env_overrides() {
         "EVOMU_ACCOUNTS",
         "EVOMU_GM_ACCOUNT",
         "EVOMU_QUASAR_GRPC_PORT",
+        "EVOMU_XMPP_PORT",
+        "EVEMU_XMPP_PORT",
     ]);
 
     let tmp_dir = std::env::temp_dir().join(format!("evomu_cfg_test_{}", std::process::id()));
@@ -169,6 +172,47 @@ fn server_config_load_from_toml_and_env_overrides() {
     std::env::set_var("EVOMU_QUASAR_GRPC_PORT", "not_a_u16");
     let port_err = ServerConfig::load_default_or_env().unwrap_err();
     assert!(port_err.contains("Invalid EVOMU_QUASAR_GRPC_PORT"));
+    std::env::remove_var("EVOMU_QUASAR_GRPC_PORT");
+
+    // TOML xmpp_port = 0 (OS ephemeral) and xmpp_port = 25232 deserialize cleanly.
+    assert_eq!(
+        ServerConfig::from_toml_str("xmpp_port = 0\n").expect("ephemeral xmpp_port").xmpp_port,
+        0
+    );
+    assert_eq!(
+        ServerConfig::from_toml_str("xmpp_port = 25232\n").expect("custom xmpp_port").xmpp_port,
+        25_232
+    );
+
+    // EVOMU_XMPP_PORT ("0" and "25232") and EVEMU_XMPP_PORT fallback override TOML/default.
+    std::env::set_var("EVOMU_XMPP_PORT", "0");
+    assert_eq!(ServerConfig::load_default_or_env().expect("xmpp 0").xmpp_port, 0);
+    std::env::set_var("EVOMU_XMPP_PORT", "25232");
+    assert_eq!(ServerConfig::load_default_or_env().expect("xmpp 25232").xmpp_port, 25_232);
+    std::env::set_var("EVOMU_XMPP_PORT", "   ");
+    std::env::set_var("EVEMU_XMPP_PORT", "25233");
+    assert_eq!(ServerConfig::load_default_or_env().expect("evemu xmpp fallback").xmpp_port, 25_233);
+    std::env::set_var("EVOMU_XMPP_PORT", "not_a_u16");
+    assert!(
+        ServerConfig::load_default_or_env()
+            .unwrap_err()
+            .contains("Invalid EVOMU_XMPP_PORT")
+    );
+    std::env::remove_var("EVOMU_XMPP_PORT");
+    std::env::remove_var("EVEMU_XMPP_PORT");
+
+    // CLI --xmpp-port parser supports both `--xmpp-port <N>` and `--xmpp-port=<N>` and rejects invalid values.
+    assert_eq!(ServerConfig::parse_cli_xmpp_port(Vec::<&str>::new()).unwrap(), None);
+    assert_eq!(
+        ServerConfig::parse_cli_xmpp_port(["--xmpp-port", "25232"]).unwrap(),
+        Some(25_232)
+    );
+    assert_eq!(
+        ServerConfig::parse_cli_xmpp_port(["--xmpp-port=0"]).unwrap(),
+        Some(0)
+    );
+    assert!(ServerConfig::parse_cli_xmpp_port(["--xmpp-port"]).is_err());
+    assert!(ServerConfig::parse_cli_xmpp_port(["--xmpp-port=bad"]).is_err());
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }

@@ -479,3 +479,220 @@ fn offline_fitting_allows_missing_skills_while_online_enforces_skills() {
     eng.set_module_online(5001, &sde).unwrap();
     assert_eq!(eng.modules.get(&5001).map(|m| m.state), Some(ModuleState::Online));
 }
+
+#[test]
+fn has_required_skills_for_type_checks_unknown_zero_boundaries_and_all_six_tiers() {
+    let mut sde = SdeRegistry::default();
+    sde.types.insert(
+        587,
+        make_type(
+            587,
+            25,
+            6,
+            &[
+                (attr_ids::LOW_SLOTS, 2.0),
+                (attr_ids::CPU_OUTPUT, 200.0),
+                (attr_ids::POWER_OUTPUT, 200.0),
+            ],
+            &[],
+        ),
+    );
+    sde.types.insert(2001, make_type(2001, 60, 7, &[], &[11]));
+    sde.types.insert(
+        2002,
+        make_type(2002, 60, 7, &[(attr_ids::REQUIRED_SKILL_1, 0.0)], &[11]),
+    );
+    sde.types.insert(
+        2003,
+        make_type(2003, 60, 7, &[(attr_ids::REQUIRED_SKILL_1, 3300.0)], &[11]),
+    );
+    sde.types.insert(
+        2004,
+        make_type(
+            2004,
+            60,
+            7,
+            &[
+                (attr_ids::REQUIRED_SKILL_1, 3300.0),
+                (attr_ids::REQUIRED_SKILL_1_LEVEL, 0.0),
+            ],
+            &[11],
+        ),
+    );
+    sde.types.insert(
+        2005,
+        make_type(
+            2005,
+            60,
+            7,
+            &[
+                (attr_ids::REQUIRED_SKILL_1, 3301.0),
+                (attr_ids::REQUIRED_SKILL_1_LEVEL, 1.0),
+                (attr_ids::REQUIRED_SKILL_2, 3302.0),
+                (attr_ids::REQUIRED_SKILL_2_LEVEL, 2.0),
+                (attr_ids::REQUIRED_SKILL_3, 3303.0),
+                (attr_ids::REQUIRED_SKILL_3_LEVEL, 3.0),
+                (1285, 3304.0),
+                (1286, 4.0),
+                (1289, 3305.0),
+                (1287, 5.0),
+                (1290, 3306.0),
+                (1288, 2.0),
+            ],
+            &[11],
+        ),
+    );
+
+    let mut eng = ShipFittingEngine::from_sde(100, 587, &sde);
+    assert!(!eng.has_required_skills_for_type(999_999, &sde));
+    assert!(eng.has_required_skills_for_type(2001, &sde));
+    assert!(eng.has_required_skills_for_type(2002, &sde));
+    assert!(!eng.has_required_skills_for_type(2003, &sde));
+    assert!(!eng.has_required_skills_for_type(2004, &sde));
+
+    eng.set_character_skills(HashMap::from([(3300, 0)]));
+    assert!(!eng.has_required_skills_for_type(2003, &sde));
+    assert!(!eng.has_required_skills_for_type(2004, &sde));
+
+    eng.set_character_skills(HashMap::from([(3300, 1)]));
+    assert!(eng.has_required_skills_for_type(2003, &sde));
+    assert!(eng.has_required_skills_for_type(2004, &sde));
+
+    let full_tiers = [(3301, 1), (3302, 2), (3303, 3), (3304, 4), (3305, 5), (3306, 2)];
+    eng.set_character_skills(full_tiers.iter().copied().collect());
+    assert!(eng.has_required_skills_for_type(2005, &sde));
+
+    for &(skill_id, req_lvl) in &full_tiers {
+        let mut degraded: HashMap<TypeId, u8> = full_tiers.iter().copied().collect();
+        degraded.insert(skill_id, req_lvl - 1);
+        eng.set_character_skills(degraded);
+        assert!(
+            !eng.has_required_skills_for_type(2005, &sde),
+            "tier skill {skill_id} below req {req_lvl} must fail"
+        );
+    }
+}
+
+#[test]
+fn set_module_online_skip_skills_bypasses_skills_but_enforces_burnout_max_group_and_resources() {
+    let mut sde = SdeRegistry::default();
+    sde.types.insert(
+        587,
+        make_type(
+            587,
+            25,
+            6,
+            &[
+                (attr_ids::LOW_SLOTS, 5.0),
+                (attr_ids::CPU_OUTPUT, 100.0),
+                (attr_ids::POWER_OUTPUT, 100.0),
+            ],
+            &[],
+        ),
+    );
+    sde.types.insert(
+        2048,
+        make_type(
+            2048,
+            60,
+            7,
+            &[
+                (attr_ids::CPU, 30.0),
+                (attr_ids::POWER, 20.0),
+                (978, 1.0),
+                (attr_ids::REQUIRED_SKILL_1, 3300.0),
+                (attr_ids::REQUIRED_SKILL_1_LEVEL, 5.0),
+            ],
+            &[11, 16],
+        ),
+    );
+    sde.types.insert(
+        2049,
+        make_type(
+            2049,
+            61,
+            7,
+            &[
+                (attr_ids::CPU, 90.0),
+                (attr_ids::POWER, 10.0),
+                (attr_ids::REQUIRED_SKILL_1, 3300.0),
+                (attr_ids::REQUIRED_SKILL_1_LEVEL, 5.0),
+            ],
+            &[11, 16],
+        ),
+    );
+    sde.types.insert(
+        2050,
+        make_type(
+            2050,
+            62,
+            7,
+            &[
+                (attr_ids::CPU, 10.0),
+                (attr_ids::POWER, 90.0),
+                (attr_ids::REQUIRED_SKILL_1, 3300.0),
+                (attr_ids::REQUIRED_SKILL_1_LEVEL, 5.0),
+            ],
+            &[11, 16],
+        ),
+    );
+    sde.types.insert(
+        2051,
+        make_type(
+            2051,
+            63,
+            7,
+            &[
+                (attr_ids::CPU, 5.0),
+                (attr_ids::POWER, 5.0),
+                (attr_ids::REQUIRED_SKILL_1, 3300.0),
+                (attr_ids::REQUIRED_SKILL_1_LEVEL, 5.0),
+            ],
+            &[11, 16],
+        ),
+    );
+
+    let mut eng = ShipFittingEngine::from_sde(100, 587, &sde);
+    eng.fit_module_with_state(5001, 2048, 11, false, &sde).unwrap();
+    eng.fit_module_with_state(5002, 2048, 12, false, &sde).unwrap();
+    eng.fit_module_with_state(5003, 2049, 13, false, &sde).unwrap();
+    eng.fit_module_with_state(5004, 2050, 14, false, &sde).unwrap();
+    eng.fit_module_with_state(5005, 2051, 15, false, &sde).unwrap();
+
+    // Missing skills must fail set_module_online, but succeed on set_module_online_skip_skills.
+    let err = eng.set_module_online(5001, &sde).unwrap_err();
+    assert!(err.contains("Missing required skill"), "got: {err}");
+    eng.set_module_online_skip_skills(5001, &sde).unwrap();
+    assert_eq!(eng.modules.get(&5001).map(|m| m.state), Some(ModuleState::Online));
+    assert!((eng.ship.get_attribute(attr_ids::CPU_LOAD, &sde) - 30.0).abs() < 1e-6);
+    assert!((eng.ship.get_attribute(attr_ids::POWER_LOAD, &sde) - 20.0).abs() < 1e-6);
+
+    // MaxGroupOnlineExceeded is still enforced.
+    let err_group = eng.set_module_online_skip_skills(5002, &sde).unwrap_err();
+    assert!(err_group.contains("MaxGroupOnlineExceeded"), "got: {err_group}");
+    assert_eq!(eng.modules.get(&5002).map(|m| m.state), Some(ModuleState::Offline));
+
+    // CPU cap is still enforced and rolls back state + CPU load.
+    let err_cpu = eng.set_module_online_skip_skills(5003, &sde).unwrap_err();
+    assert!(err_cpu.contains("Insufficient CPU"), "got: {err_cpu}");
+    assert_eq!(eng.modules.get(&5003).map(|m| m.state), Some(ModuleState::Offline));
+    assert!((eng.ship.get_attribute(attr_ids::CPU_LOAD, &sde) - 30.0).abs() < 1e-6);
+
+    // Powergrid cap is still enforced and rolls back state + PG load.
+    let err_pg = eng.set_module_online_skip_skills(5004, &sde).unwrap_err();
+    assert!(err_pg.contains("Insufficient Powergrid"), "got: {err_pg}");
+    assert_eq!(eng.modules.get(&5004).map(|m| m.state), Some(ModuleState::Offline));
+    assert!((eng.ship.get_attribute(attr_ids::POWER_LOAD, &sde) - 20.0).abs() < 1e-6);
+
+    // Burnout guard is still enforced.
+    if let Some(m) = eng.modules.get_mut(&5005) {
+        m.max_hp = 40.0;
+        m.damage_hp = 40.0;
+    }
+    let err_burn = eng.set_module_online_skip_skills(5005, &sde).unwrap_err();
+    assert!(err_burn.contains("ModuleBurnedOut"), "got: {err_burn}");
+    assert_eq!(eng.modules.get(&5005).map(|m| m.state), Some(ModuleState::Offline));
+
+    let err_missing = eng.set_module_online_skip_skills(9999, &sde).unwrap_err();
+    assert!(err_missing.contains("is not fitted"), "got: {err_missing}");
+}

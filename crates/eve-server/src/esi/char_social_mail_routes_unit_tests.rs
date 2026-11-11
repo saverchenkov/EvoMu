@@ -541,3 +541,296 @@ fn mail_put_labels_crud_and_mailing_lists_cover_all_branches() {
     assert_eq!(lists.status_code, 200);
     assert!(body(&lists).is_array());
 }
+
+#[test]
+fn char_social_mail_errors_corp_alliance_contacts_mail_update_labels_and_lists() {
+    let (ctx, _token, char_id, corp_id, _planet_id) = seed_full_esi_context();
+    let empty_p = HashMap::new();
+    let empty_q = HashMap::new();
+    let p_char = params(&[("character_id", &char_id.to_string())]);
+    let p_missing_char = params(&[("character_id", "90999888")]);
+    let p_corp = params(&[("corporation_id", &corp_id.to_string())]);
+    let p_missing_corp = params(&[("corporation_id", "98999888")]);
+    let p_ally = params(&[("alliance_id", "99000001")]);
+    let p_missing_ally = params(&[("alliance_id", "99999888")]);
+    let bad_page_999 = params(&[("page", "999")]);
+
+    for (method, path, body_bytes, q) in [
+        ("POST", "/characters/{character_id}/contacts", b"[90000002]".as_slice(), params(&[("standing", "1")])),
+        ("DELETE", "/characters/{character_id}/contacts", b"".as_slice(), params(&[("contact_ids", "90000002")])),
+        ("GET", "/characters/{character_id}/contacts/labels", b"".as_slice(), empty_q.clone()),
+        ("GET", "/corporations/{corporation_id}/contacts", b"".as_slice(), empty_q.clone()),
+        ("GET", "/corporations/{corporation_id}/contacts/labels", b"".as_slice(), empty_q.clone()),
+        ("GET", "/alliances/{alliance_id}/contacts", b"".as_slice(), empty_q.clone()),
+        ("GET", "/alliances/{alliance_id}/contacts/labels", b"".as_slice(), empty_q.clone()),
+        ("PUT", "/characters/{character_id}/mail/{mail_id}", b"{\"read\":true}".as_slice(), empty_q.clone()),
+        ("GET", "/characters/{character_id}/mail/labels", b"".as_slice(), empty_q.clone()),
+        ("POST", "/characters/{character_id}/mail/labels", b"{\"name\":\"Ops\"}".as_slice(), empty_q.clone()),
+        ("DELETE", "/characters/{character_id}/mail/labels/{label_id}", b"".as_slice(), empty_q.clone()),
+        ("GET", "/characters/{character_id}/mail/lists", b"".as_slice(), empty_q.clone()),
+    ] {
+        assert_eq!(
+            dispatch_char_social_mail_route(&ctx, method, path, &empty_p, &q, body_bytes)
+                .unwrap()
+                .status_code,
+            400,
+            "missing path param 400 on {method} {path}"
+        );
+        let missing_p = if path.contains("corporation_id") {
+            p_missing_corp.clone()
+        } else if path.contains("alliance_id") {
+            p_missing_ally.clone()
+        } else if path.contains("mail_id") {
+            params(&[("character_id", "90999888"), ("mail_id", "1")])
+        } else if path.contains("label_id") {
+            params(&[("character_id", "90999888"), ("label_id", "64")])
+        } else {
+            p_missing_char.clone()
+        };
+        assert_eq!(
+            dispatch_char_social_mail_route(&ctx, method, path, &missing_p, &q, body_bytes)
+                .unwrap()
+                .status_code,
+            404,
+            "404 on {method} {path}"
+        );
+    }
+
+    // Contact CRUD validation errors
+    assert_eq!(
+        dispatch_char_social_mail_route(
+            &ctx,
+            "POST",
+            "/characters/{character_id}/contacts",
+            &p_char,
+            &params(&[("standing", "1"), ("label_ids", "bad")]),
+            b"[90000002]",
+        )
+        .unwrap()
+        .status_code,
+        400
+    );
+    assert_eq!(
+        dispatch_char_social_mail_route(
+            &ctx,
+            "POST",
+            "/characters/{character_id}/contacts",
+            &p_char,
+            &params(&[("standing", "1")]),
+            b"not-json",
+        )
+        .unwrap()
+        .status_code,
+        400
+    );
+    assert_eq!(
+        dispatch_char_social_mail_route(
+            &ctx,
+            "DELETE",
+            "/characters/{character_id}/contacts",
+            &p_char,
+            &params(&[("contact_ids", "bad")]),
+            b"",
+        )
+        .unwrap()
+        .status_code,
+        400
+    );
+    assert_eq!(
+        dispatch_char_social_mail_route(
+            &ctx,
+            "GET",
+            "/alliances/{alliance_id}/contacts",
+            &p_ally,
+            &params(&[("page", "0")]),
+            b"",
+        )
+        .unwrap()
+        .status_code,
+        400
+    );
+
+    // Seed corp/alliance contacts, unread mail, custom DB mail label, and mailing list
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corp_contacts.insert(
+            corp_id,
+            vec![eve_db::SocialContactRecord {
+                contact_id: 90_000_002,
+                contact_type: "character".to_string(),
+                standing: 5.0,
+                is_watched: true,
+                is_blocked: false,
+                label_ids: vec![1],
+            }],
+        );
+        snap.alliance_contacts.insert(
+            99_000_001,
+            vec![eve_db::SocialContactRecord {
+                contact_id: corp_id,
+                contact_type: "corporation".to_string(),
+                standing: 10.0,
+                is_watched: false,
+                is_blocked: false,
+                label_ids: vec![2],
+            }],
+        );
+        snap.mail_labels.insert(
+            char_id,
+            vec![eve_db::MailLabelRecord {
+                label_id: 128,
+                name: "DbOnlyLabel".to_string(),
+                color: "#ffffff".to_string(),
+            }],
+        );
+        snap.mails.push(eve_db::MailRecord {
+            message_id: 777_001,
+            sender_id: 90_000_002,
+            recipient_id: char_id,
+            subject: "Unread Social Mail".to_string(),
+            body: "Body".to_string(),
+        });
+        snap.mail_timestamps.insert(777_001, 1_700_000_000);
+        snap.mail_assigned_labels.insert((char_id, 777_001), vec![128]);
+        let mut members = HashMap::new();
+        members.insert(char_id, 0);
+        snap.mailing_lists.insert(
+            50_001,
+            eve_db::MailingListRecord {
+                list_id: 50_001,
+                name: "Fleet Ops List".to_string(),
+                owner_id: char_id,
+                default_access: 0,
+                default_role: 0,
+                cost: 0,
+                members,
+                entity_access: HashMap::new(),
+                welcome_mail: None,
+                mail_ids: std::collections::HashSet::new(),
+            },
+        );
+    });
+
+    // Corp & alliance contacts populated + page 999 -> 404
+    let cc = dispatch_char_social_mail_route(&ctx, "GET", "/corporations/{corporation_id}/contacts", &p_corp, &empty_q, b"").unwrap();
+    assert_eq!(cc.status_code, 200);
+    assert_eq!(body(&cc)[0]["label_ids"], json!([1]));
+    assert_eq!(
+        dispatch_char_social_mail_route(&ctx, "GET", "/corporations/{corporation_id}/contacts", &p_corp, &bad_page_999, b"")
+            .unwrap()
+            .status_code,
+        404
+    );
+
+    let ac = dispatch_char_social_mail_route(&ctx, "GET", "/alliances/{alliance_id}/contacts", &p_ally, &empty_q, b"").unwrap();
+    assert_eq!(ac.status_code, 200);
+    assert_eq!(body(&ac)[0]["label_ids"], json!([2]));
+    assert_eq!(
+        dispatch_char_social_mail_route(&ctx, "GET", "/alliances/{alliance_id}/contacts", &p_ally, &bad_page_999, b"")
+            .unwrap()
+            .status_code,
+        404
+    );
+
+    // Mail labels (custom DB-only label + unread count)
+    let lbls = dispatch_char_social_mail_route(&ctx, "GET", "/characters/{character_id}/mail/labels", &p_char, &empty_q, b"").unwrap();
+    assert_eq!(lbls.status_code, 200);
+    assert!(body(&lbls)["total_unread_count"].as_i64().unwrap() >= 1);
+    assert!(body(&lbls)["labels"].as_array().unwrap().iter().any(|l| l["label_id"] == 128));
+
+    // PUT mail validation + 404 + read=false/labels=[128]
+    let p_mail = params(&[("character_id", &char_str(&char_id)), ("mail_id", "777001")]);
+    assert_eq!(
+        dispatch_char_social_mail_route(
+            &ctx,
+            "PUT",
+            "/characters/{character_id}/mail/{mail_id}",
+            &params(&[("character_id", &char_str(&char_id)), ("mail_id", "bad")]),
+            &empty_q,
+            b"{\"read\":true}",
+        )
+        .unwrap()
+        .status_code,
+        400
+    );
+    assert_eq!(
+        dispatch_char_social_mail_route(&ctx, "PUT", "/characters/{character_id}/mail/{mail_id}", &p_mail, &empty_q, b"bad")
+            .unwrap()
+            .status_code,
+        400
+    );
+    assert_eq!(
+        dispatch_char_social_mail_route(&ctx, "PUT", "/characters/{character_id}/mail/{mail_id}", &p_mail, &empty_q, b"{\"labels\":[\"str\"]}")
+            .unwrap()
+            .status_code,
+        400
+    );
+    assert_eq!(
+        dispatch_char_social_mail_route(
+            &ctx,
+            "PUT",
+            "/characters/{character_id}/mail/{mail_id}",
+            &params(&[("character_id", &char_str(&char_id)), ("mail_id", "999999")]),
+            &empty_q,
+            b"{\"read\":true}",
+        )
+        .unwrap()
+        .status_code,
+        404
+    );
+    assert_eq!(
+        dispatch_char_social_mail_route(
+            &ctx,
+            "PUT",
+            "/characters/{character_id}/mail/{mail_id}",
+            &p_mail,
+            &empty_q,
+            b"{\"read\":false,\"labels\":[128]}",
+        )
+        .unwrap()
+        .status_code,
+        204
+    );
+
+    // POST/DELETE label bad id + bad json + DB-only delete
+    assert_eq!(
+        dispatch_char_social_mail_route(&ctx, "POST", "/characters/{character_id}/mail/labels", &p_char, &empty_q, b"bad")
+            .unwrap()
+            .status_code,
+        400
+    );
+    assert_eq!(
+        dispatch_char_social_mail_route(
+            &ctx,
+            "DELETE",
+            "/characters/{character_id}/mail/labels/{label_id}",
+            &params(&[("character_id", &char_str(&char_id)), ("label_id", "bad")]),
+            &empty_q,
+            b"",
+        )
+        .unwrap()
+        .status_code,
+        400
+    );
+    assert_eq!(
+        dispatch_char_social_mail_route(
+            &ctx,
+            "DELETE",
+            "/characters/{character_id}/mail/labels/{label_id}",
+            &params(&[("character_id", &char_str(&char_id)), ("label_id", "128")]),
+            &empty_q,
+            b"",
+        )
+        .unwrap()
+        .status_code,
+        204
+    );
+
+    // Mailing lists populated
+    let lists = dispatch_char_social_mail_route(&ctx, "GET", "/characters/{character_id}/mail/lists", &p_char, &empty_q, b"").unwrap();
+    assert_eq!(lists.status_code, 200);
+    assert_eq!(body(&lists)[0]["mailing_list_id"], 50_001);
+}
+
+fn char_str(id: &i64) -> String {
+    id.to_string()
+}

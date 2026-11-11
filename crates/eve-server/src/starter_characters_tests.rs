@@ -21,7 +21,7 @@ fn fast_test_context() -> ServerContext {
     ServerContext::with_sde_and_repository(shared_sde(), db)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn provision_starter_characters_creates_overrides_and_skips_invalid_or_existing() {
     let ctx = fast_test_context();
 
@@ -157,7 +157,7 @@ async fn provision_starter_characters_creates_overrides_and_skips_invalid_or_exi
     assert!(ctx.db.get_characters_for_user(uid_bad).is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn starter_plex_grant_is_one_time_per_account_across_creations_and_deletions() {
     let mut ctx = fast_test_context();
     ctx.feature_flags.starter_plex_balance = 500;
@@ -273,4 +273,222 @@ async fn starter_plex_grant_is_one_time_per_account_across_creations_and_deletio
         .collect();
     assert_eq!(txs.len(), 1);
     assert!(txs[0].id > 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn starter_station_transition_resolves_system_when_none_moves_ship_and_skips_validation() {
+    let ctx = fast_test_context();
+
+    // Pick a non-Jita SDE station so resolving solar_system_id / constellation_id / region_id is observable.
+    let target_station = ctx
+        .sde
+        .stations
+        .values()
+        .find(|s| s.solar_system_id != 30_000_142)
+        .expect("non-Jita SDE station")
+        .clone();
+    let expected_sys = ctx
+        .sde
+        .solar_systems
+        .get(&target_station.solar_system_id)
+        .expect("station solar system in SDE");
+
+    let uid_none_sys = ctx
+        .db
+        .provision_player_account("pilot_station_none_sys", "pw_1");
+    let uid_other_sys = ctx
+        .db
+        .provision_player_account("pilot_station_other_sys", "pw_2");
+
+    let mut cfg = ServerConfig::default();
+    cfg.player_accounts = vec![
+        PlayerAccountConfig {
+            username: "pilot_station_none_sys".into(),
+            password_token: "pw_1".into(),
+            starter_character: Some(StarterCharacterConfig {
+                name: "StationNoneSys".into(),
+                bloodline_id: 3,
+                gender: 1,
+                ancestry_id: 19,
+                school_id: 14,
+                solar_system_id: None,
+                station_id: Some(target_station.station_id),
+                initial_balance_isk: None,
+                initial_balance_plex: None,
+            }),
+        },
+        PlayerAccountConfig {
+            username: "pilot_station_other_sys".into(),
+            password_token: "pw_2".into(),
+            starter_character: Some(StarterCharacterConfig {
+                name: "StationOtherSys".into(),
+                bloodline_id: 3,
+                gender: 0,
+                ancestry_id: 19,
+                school_id: 14,
+                solar_system_id: Some(30_000_142),
+                station_id: Some(target_station.station_id),
+                initial_balance_isk: None,
+                initial_balance_plex: None,
+            }),
+        },
+    ];
+
+    let created = provision_starter_characters(&ctx, &cfg).await;
+    assert_eq!(created.len(), 2);
+
+    let c_none = created[0];
+    let c_other = created[1];
+    ctx.db.with_snapshot(|snap| {
+        for (cid, label) in [(c_none, "solar_system_id=None"), (c_other, "solar_system_id=Jita")] {
+            let ch = &snap.characters[&cid];
+            assert_eq!(ch.user_id, if cid == c_none { uid_none_sys } else { uid_other_sys });
+            assert_eq!(ch.station_id, Some(target_station.station_id), "{label}");
+            assert_eq!(ch.home_station_id, target_station.station_id, "{label}");
+            assert_eq!(ch.solar_system_id, target_station.solar_system_id, "{label}");
+            assert_eq!(ch.constellation_id, expected_sys.constellation_id, "{label}");
+            assert_eq!(ch.region_id, expected_sys.region_id, "{label}");
+            assert!(ch.structure_id.is_none(), "{label}");
+            let ship_item = &snap.items[&ch.active_ship_id];
+            assert_eq!(
+                ship_item.location_id, target_station.station_id,
+                "move_ship_item=true must place starter ship in station for {label}"
+            );
+        }
+    });
+
+    // Directly verify TransitionLocation::Station validate_destination = false vs true with a synthetic station ID.
+    let synthetic_station_id = 69_999_123_i64;
+    ctx.db
+        .try_with_mut_snapshot(|snap| {
+            let err = crate::router::apply_character_transition_in_snap(
+                snap,
+                &ctx.sde,
+                c_none,
+                crate::router::TransitionLocation::Station {
+                    solar_system_id: Some(30_000_142),
+                    station_id: synthetic_station_id,
+                },
+                None,
+                true,
+                true,
+            )
+            .expect_err("validate_destination=true must reject non-SDE station");
+            assert!(matches!(err, eve_db::DbError::InvalidDestinationLocation { .. }));
+
+            crate::router::apply_character_transition_in_snap(
+                snap,
+                &ctx.sde,
+                c_none,
+                crate::router::TransitionLocation::Station {
+                    solar_system_id: Some(30_000_142),
+                    station_id: synthetic_station_id,
+                },
+                None,
+                true,
+                false,
+            )?;
+            let ch = &snap.characters[&c_none];
+            assert_eq!(ch.station_id, Some(synthetic_station_id));
+            assert_eq!(ch.solar_system_id, 30_000_142);
+            assert_eq!(snap.items[&ch.active_ship_id].location_id, synthetic_station_id);
+            Ok::<(), eve_db::DbError>(())
+        })
+        .expect("validate_destination=false transition succeeds");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn existing_character_tops_up_starter_plex_when_below_target_and_skips_when_at_or_above() {
+    let ctx = fast_test_context();
+    let uid_low = ctx.db.provision_player_account("existing_low_plex", "pw_low");
+    let uid_full = ctx.db.provision_player_account("existing_full_plex", "pw_full");
+    let uid_zero_target = ctx.db.provision_player_account("existing_zero_target", "pw_zero");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base_ch = snap.characters.values().next().expect("demo char").clone();
+
+        let mut ch_low = base_ch.clone();
+        ch_low.character_id = 90_088_001;
+        ch_low.user_id = uid_low;
+        ch_low.name = "ExistingLowPlex".into();
+        snap.characters.insert(ch_low.character_id, ch_low);
+        snap.account_plex_vault.insert(uid_low, 150);
+
+        let mut ch_full = base_ch.clone();
+        ch_full.character_id = 90_088_002;
+        ch_full.user_id = uid_full;
+        ch_full.name = "ExistingFullPlex".into();
+        snap.characters.insert(ch_full.character_id, ch_full);
+        snap.account_plex_vault.insert(uid_full, 500);
+
+        let mut ch_zero = base_ch;
+        ch_zero.character_id = 90_088_003;
+        ch_zero.user_id = uid_zero_target;
+        ch_zero.name = "ExistingZeroTarget".into();
+        snap.characters.insert(ch_zero.character_id, ch_zero);
+        snap.account_plex_vault.insert(uid_zero_target, 25);
+    });
+
+    let mut cfg = ServerConfig::default();
+    cfg.player_accounts = vec![
+        PlayerAccountConfig {
+            username: "existing_low_plex".into(),
+            password_token: "pw_low".into(),
+            starter_character: Some(StarterCharacterConfig {
+                name: "ExistingLowPlex".into(),
+                bloodline_id: 3,
+                gender: 1,
+                ancestry_id: 19,
+                school_id: 14,
+                initial_balance_plex: Some(500),
+                ..Default::default()
+            }),
+        },
+        PlayerAccountConfig {
+            username: "existing_full_plex".into(),
+            password_token: "pw_full".into(),
+            starter_character: Some(StarterCharacterConfig {
+                name: "ExistingFullPlex".into(),
+                bloodline_id: 3,
+                gender: 1,
+                ancestry_id: 19,
+                school_id: 14,
+                initial_balance_plex: Some(400),
+                ..Default::default()
+            }),
+        },
+        PlayerAccountConfig {
+            username: "existing_zero_target".into(),
+            password_token: "pw_zero".into(),
+            starter_character: Some(StarterCharacterConfig {
+                name: "ExistingZeroTarget".into(),
+                bloodline_id: 3,
+                gender: 1,
+                ancestry_id: 19,
+                school_id: 14,
+                initial_balance_plex: Some(0),
+                ..Default::default()
+            }),
+        },
+    ];
+
+    let created = provision_starter_characters(&ctx, &cfg).await;
+    assert!(created.is_empty(), "existing accounts must not create duplicate characters");
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.unified_plex_balance_for_user(uid_low), 500);
+        assert_eq!(snap.unified_plex_balance_for_user(uid_full), 500);
+        assert_eq!(snap.unified_plex_balance_for_user(uid_zero_target), 25);
+    });
+
+    let txs_low: Vec<_> = ctx
+        .db
+        .with_snapshot(crate::services::quasar_payment_store::get_plex_transactions)
+        .into_iter()
+        .filter(|t| t.user_id == uid_low)
+        .collect();
+    assert_eq!(txs_low.len(), 1);
+    assert_eq!(txs_low[0].amount, 350);
+    assert_eq!(txs_low[0].balance_after, 500);
+    assert_eq!(txs_low[0].description, "Starter PLEX Grant");
 }

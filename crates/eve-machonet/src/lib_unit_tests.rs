@@ -436,3 +436,162 @@ fn session_state_notifications_locations_and_full_diff_matrix() {
         MachoPacketType::SessionChangeNotification
     );
 }
+
+#[test]
+fn session_state_live_notify_listener_defaults_serde_skip_and_diff_invariance() {
+    let def_sess = SessionState::default();
+    assert!(!def_sess.live_notify_listener);
+
+    let mut sess = SessionState::new(42);
+    assert!(!sess.live_notify_listener);
+    sess.live_notify_listener = true;
+    sess.push_notification("OnTest", vec![PyRep::Integer(1)]); // rpc-lint: allow test fixture
+
+    // Toggling live_notify_listener does not emit any session diff keys or SessionChangeNotification
+    let mut sess_no_listener = sess.clone();
+    sess_no_listener.live_notify_listener = false;
+    assert!(sess.compute_diff(&sess_no_listener).is_empty());
+    assert_eq!(sess.to_session_change_pyrep(&sess_no_listener, vec![888_444]), None);
+
+    // #[serde(skip)] omits both live_notify_listener and notifications during serialization
+    // and resets them to false / empty on deserialization
+    let json = serde_json::to_string(&sess).unwrap();
+    assert!(!json.contains("live_notify_listener"));
+    assert!(!json.contains("notifications"));
+    let restored: SessionState = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored.session_id, 42);
+    assert!(!restored.live_notify_listener);
+    assert!(restored.notifications.is_empty());
+}
+
+#[test]
+fn wrapped_user_error_dict_dict_key_and_named_helpers_roundtrip_all_fields() {
+    // 1. wrapped_user_error_with_dict_body with multiple entries and empty entries
+    let multi = wrapped_user_error_with_dict_body(
+        6,
+        "NotEnoughCargoSpace",
+        vec![
+            (PyRep::ascii_bytes("free"), PyRep::Real(10.5)),
+            (PyRep::ascii_bytes("required"), PyRep::Real(25.0)),
+        ],
+    );
+    let PyRep::Tuple(multi_outer) = multi else {
+        panic!("expected outer tuple");
+    };
+    assert_eq!(multi_outer[0], PyRep::Integer(6));
+    assert_eq!(multi_outer[1], PyRep::Integer(MACHONETERR_WRAPPEDEXCEPTION));
+    let PyRep::Tuple(multi_inner) = &multi_outer[2] else {
+        panic!("expected inner tuple");
+    };
+    let PyRep::Bytes(multi_bytes) = &multi_inner[0] else {
+        panic!("expected marshaled bytes");
+    };
+    let PyRep::ObjectEx {
+        is_type_2,
+        header,
+        list,
+        dict,
+    } = marshal::decode(multi_bytes).unwrap()
+    else {
+        panic!("expected ObjectEx");
+    };
+    assert!(!is_type_2);
+    assert!(list.is_empty());
+    assert!(dict.is_empty());
+    assert_eq!(
+        *header,
+        PyRep::Tuple(vec![
+            PyRep::Token("eveexceptions.UserError".into()),
+            PyRep::Tuple(vec![
+                PyRep::ascii_bytes("NotEnoughCargoSpace"),
+                PyRep::Dict(vec![
+                    (PyRep::ascii_bytes("free"), PyRep::Real(10.5)),
+                    (PyRep::ascii_bytes("required"), PyRep::Real(25.0)),
+                ]),
+            ]),
+        ])
+    );
+
+    let empty_dict_err = wrapped_user_error_with_dict_body(10, "EmptyDictErr", Vec::new());
+    let PyRep::Tuple(ed_outer) = empty_dict_err else {
+        panic!("expected tuple");
+    };
+    assert_eq!(ed_outer[0], PyRep::Integer(10));
+    let PyRep::Tuple(ed_inner) = &ed_outer[2] else {
+        panic!("expected inner tuple");
+    };
+    let PyRep::Bytes(ed_bytes) = &ed_inner[0] else {
+        panic!("expected bytes");
+    };
+    let PyRep::ObjectEx { header: ed_hdr, .. } = marshal::decode(ed_bytes).unwrap() else {
+        panic!("expected ObjectEx");
+    };
+    assert_eq!(
+        *ed_hdr,
+        PyRep::Tuple(vec![
+            PyRep::Token("eveexceptions.UserError".into()),
+            PyRep::Tuple(vec![
+                PyRep::ascii_bytes("EmptyDictErr"),
+                PyRep::Dict(Vec::new()),
+            ]),
+        ])
+    );
+
+    // 2. wrapped_user_error_with_dict_key_body with custom key
+    let custom_key =
+        wrapped_user_error_with_dict_key_body(6, "CustomKeyErr", "customKey", "customVal");
+    let PyRep::Tuple(ck_outer) = custom_key else {
+        panic!("expected tuple");
+    };
+    let PyRep::Tuple(ck_inner) = &ck_outer[2] else {
+        panic!("expected inner tuple");
+    };
+    let PyRep::Bytes(ck_bytes) = &ck_inner[0] else {
+        panic!("expected bytes");
+    };
+    let PyRep::ObjectEx { header: ck_hdr, .. } = marshal::decode(ck_bytes).unwrap() else {
+        panic!("expected ObjectEx");
+    };
+    assert_eq!(
+        *ck_hdr,
+        PyRep::Tuple(vec![
+            PyRep::Token("eveexceptions.UserError".into()),
+            PyRep::Tuple(vec![
+                PyRep::ascii_bytes("CustomKeyErr"),
+                PyRep::Dict(vec![(
+                    PyRep::ascii_bytes("customKey"),
+                    PyRep::ascii_bytes("customVal"),
+                )]),
+            ]),
+        ])
+    );
+
+    // 3. wrapped_named_user_error_body uses "info" key
+    let named = wrapped_named_user_error_body(6, "UnMachoDestination", "Node moved");
+    let PyRep::Tuple(nm_outer) = named else {
+        panic!("expected tuple");
+    };
+    let PyRep::Tuple(nm_inner) = &nm_outer[2] else {
+        panic!("expected inner tuple");
+    };
+    let PyRep::Bytes(nm_bytes) = &nm_inner[0] else {
+        panic!("expected bytes");
+    };
+    let PyRep::ObjectEx { header: nm_hdr, .. } = marshal::decode(nm_bytes).unwrap() else {
+        panic!("expected ObjectEx");
+    };
+    assert_eq!(
+        *nm_hdr,
+        PyRep::Tuple(vec![
+            PyRep::Token("eveexceptions.UserError".into()),
+            PyRep::Tuple(vec![
+                PyRep::ascii_bytes("UnMachoDestination"),
+                PyRep::Dict(vec![(
+                    PyRep::ascii_bytes("info"),
+                    PyRep::ascii_bytes("Node moved"),
+                )]),
+            ]),
+        ])
+    );
+}
+

@@ -200,6 +200,44 @@ pub struct Sp6PersistedState {
     pub server_runtime_json: Option<String>,
 }
 
+static TEST_ENV_RW: std::sync::RwLock<()> = std::sync::RwLock::new(());
+thread_local! {
+    static TEST_ENV_WRITE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TEST_ENV_READ_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub struct TestEnvWriteGuard(Option<std::sync::RwLockWriteGuard<'static, ()>>);
+impl Drop for TestEnvWriteGuard {
+    fn drop(&mut self) {
+        self.0.take();
+        TEST_ENV_WRITE_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
+
+pub struct TestEnvReadGuard(Option<std::sync::RwLockReadGuard<'static, ()>>);
+impl Drop for TestEnvReadGuard {
+    fn drop(&mut self) {
+        self.0.take();
+        TEST_ENV_READ_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
+
+pub fn lock_test_env_write() -> TestEnvWriteGuard {
+    let depth = TEST_ENV_WRITE_DEPTH.with(|d| d.get());
+    let g = (depth == 0).then(|| TEST_ENV_RW.write().unwrap_or_else(|e| e.into_inner()));
+    TEST_ENV_WRITE_DEPTH.with(|d| d.set(depth + 1));
+    TestEnvWriteGuard(g)
+}
+
+pub fn lock_test_env_read() -> TestEnvReadGuard {
+    let w_depth = TEST_ENV_WRITE_DEPTH.with(|d| d.get());
+    let r_depth = TEST_ENV_READ_DEPTH.with(|d| d.get());
+    let g = (w_depth == 0 && r_depth == 0)
+        .then(|| TEST_ENV_RW.read().unwrap_or_else(|e| e.into_inner()));
+    TEST_ENV_READ_DEPTH.with(|d| d.set(r_depth + 1));
+    TestEnvReadGuard(g)
+}
+
 #[cfg(test)] mod db_lib_extra_tests;
 #[cfg(test)] mod db_deep_extra_unit_tests;
 #[cfg(test)]

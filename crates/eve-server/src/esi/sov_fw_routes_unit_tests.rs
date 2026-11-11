@@ -130,3 +130,200 @@ fn dispatch_sov_map_structures_campaigns_incursions_and_fw_wars() {
         Some(json!([{"faction_id": 500_001, "against_id": 500_002}]))
     );
 }
+
+#[test]
+fn sov_map_structures_campaigns_and_fw_wars_cover_edge_branches() {
+    let (ctx, _token, _char_id, _corp_id, _planet_id) = seed_full_esi_context();
+    let sov_types = sov_structure_type_ids(&ctx.sde);
+    let ihub_tid = sov_types.iter().copied().next().expect("sov structure type");
+    let now = ctx.now_unix();
+    let day_mod = now % 86_400;
+
+    let ally_corp_id = 98_555_001_i64;
+    let no_ally_corp_id = 98_555_002_i64;
+    let ally_id = 99_555_001_i64;
+    let s_adm_wrap = 1_000_555_001_i64;
+    let s_adm_prev_day = 1_000_555_002_i64;
+    let s_onlining = 1_000_555_003_i64;
+    let s_no_ally = 1_000_555_004_i64;
+    let s_hull_camp = 1_000_555_005_i64;
+    let s_no_score = 1_000_555_006_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.alliances.insert(
+            ally_id,
+            eve_db::AllianceRecord {
+                alliance_id: ally_id,
+                name: "Sov Ally".to_string(),
+                short_name: "SOV".to_string(),
+                executor_corp_id: ally_corp_id,
+                member_corp_ids: std::iter::once(ally_corp_id).collect(),
+            },
+        );
+        snap.corporations.insert(
+            ally_corp_id,
+            { let mut __corp = eve_db::CorporationRecord::default(); __corp.corporation_id = ally_corp_id; __corp.name = "SovCorp".to_string(); __corp.ticker = "SOVC".to_string(); __corp.ceo_id = 90_555_001; __corp.tax_rate = 0.0; __corp.hq_station_id = None; __corp.alliance_id = Some(ally_id); __corp.members = Default::default(); __corp.member_roles = Default::default(); __corp.applications = Default::default(); __corp.wallet_divisions = eve_db::CorporationRecord::default_wallet_divisions(
+                    eve_db::IskCents(0),
+                ); __corp.description = String::new(); __corp.url = String::new(); let __mw = eve_db::IskCents(0); if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); } __corp },
+        );
+        snap.corporations.insert(
+            no_ally_corp_id,
+            { let mut __corp = eve_db::CorporationRecord::default(); __corp.corporation_id = no_ally_corp_id; __corp.name = "NoAllyCorp".to_string(); __corp.ticker = "NOAL".to_string(); __corp.ceo_id = 90_555_002; __corp.tax_rate = 0.0; __corp.hq_station_id = None; __corp.alliance_id = None; __corp.members = Default::default(); __corp.member_roles = Default::default(); __corp.applications = Default::default(); __corp.wallet_divisions = eve_db::CorporationRecord::default_wallet_divisions(
+                    eve_db::IskCents(0),
+                ); __corp.description = String::new(); __corp.url = String::new(); let __mw = eve_db::IskCents(0); if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); } __corp },
+        );
+
+        let sys_state = snap
+            .system_states
+            .entry(30_000_142)
+            .or_insert_with(|| eve_db::SystemDynamicState {
+                solar_system_id: 30_000_142,
+                ..Default::default()
+            });
+        sys_state.sov_alliance_id = Some(ally_id);
+        sys_state.military_index = 2;
+        sys_state.industrial_index = 2;
+        sys_state.strategic_index = 2;
+
+        snap.structures.insert(
+            s_adm_wrap,
+            eve_db::UpwellStructureRecord {
+                structure_id: s_adm_wrap,
+                type_id: ihub_tid,
+                owner_corp_id: ally_corp_id,
+                solar_system_id: 30_000_142,
+                name: "Sov ADM Wrap".to_string(),
+                state: "ShieldVulnerable".to_string(),
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            s_adm_prev_day,
+            eve_db::UpwellStructureRecord {
+                structure_id: s_adm_prev_day,
+                type_id: ihub_tid,
+                owner_corp_id: ally_corp_id,
+                solar_system_id: 30_000_142,
+                name: "Sov ADM CrossMidnight".to_string(),
+                state: "ShieldVulnerable".to_string(),
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            s_onlining,
+            eve_db::UpwellStructureRecord {
+                structure_id: s_onlining,
+                type_id: ihub_tid,
+                owner_corp_id: ally_corp_id,
+                solar_system_id: 30_000_142,
+                name: "Sov Onlining".to_string(),
+                state: "Onlining".to_string(),
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            s_no_ally,
+            eve_db::UpwellStructureRecord {
+                structure_id: s_no_ally,
+                type_id: ihub_tid,
+                owner_corp_id: no_ally_corp_id,
+                solar_system_id: 30_000_144,
+                name: "No Ally Struct".to_string(),
+                state: "ShieldVulnerable".to_string(),
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            s_hull_camp,
+            eve_db::UpwellStructureRecord {
+                structure_id: s_hull_camp,
+                type_id: ihub_tid,
+                owner_corp_id: no_ally_corp_id,
+                solar_system_id: 30_000_142,
+                name: "Hull Camp".to_string(),
+                state: "HullReinforced".to_string(),
+                reinforced_until_unix: now + 3600,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            s_no_score,
+            eve_db::UpwellStructureRecord {
+                structure_id: s_no_score,
+                type_id: ihub_tid,
+                owner_corp_id: ally_corp_id,
+                solar_system_id: 30_000_142,
+                name: "No Score Camp".to_string(),
+                state: "ArmorReinforced".to_string(),
+                reinforced_until_unix: now + 3600,
+                ..Default::default()
+            },
+        );
+
+        // s_adm_wrap: ev <= day_mod -> triggers end_u <= now (+= 86_400)
+        // s_adm_prev_day: ev <= sv -> triggers midnight-crossing branch
+        let past_sv = if day_mod > 20 { day_mod - 15 } else { 0 };
+        let past_ev = if day_mod > 20 { day_mod - 5 } else { 1 };
+        snap.sov_runtime
+            .adm_vulnerability_windows
+            .insert(s_adm_wrap, (past_sv, past_ev));
+        snap.sov_runtime
+            .adm_vulnerability_windows
+            .insert(s_adm_prev_day, (86_000, day_mod + 3600));
+        snap.sov_runtime
+            .command_node_scores
+            .insert(s_hull_camp, vec![(1, 0.35)]);
+
+        snap.fw_wars = vec![(500_001, 500_002)];
+        snap.wars.insert(
+            55_001,
+            eve_db::WarRecord {
+                war_id: 55_001,
+                aggressor_corp_id: 500_003,
+                defender_corp_id: 500_004,
+                mutual: false,
+                started_unix: now,
+                active: true,
+            },
+        );
+    });
+
+    let map_res = dispatch_sov_route(&ctx, "GET", "/sovereignty/map").unwrap();
+    assert_eq!(map_res.status_code, 200);
+    let m_entry = map_res
+        .body
+        .as_ref()
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["system_id"] == 30_000_142)
+        .unwrap();
+    assert_eq!(m_entry["alliance_id"], ally_id);
+    assert_eq!(m_entry["corporation_id"], ally_corp_id);
+
+    let st_res = dispatch_sov_route(&ctx, "GET", "/sovereignty/structures").unwrap();
+    assert_eq!(st_res.status_code, 200);
+    let st_arr = st_res.body.as_ref().unwrap().as_array().unwrap();
+    assert!(!st_arr.iter().any(|s| s["structure_id"] == s_no_ally));
+    let onl_entry = st_arr.iter().find(|s| s["structure_id"] == s_onlining).unwrap();
+    assert!(onl_entry.get("vulnerable_start_time").is_none());
+    let wrap_entry = st_arr.iter().find(|s| s["structure_id"] == s_adm_wrap).unwrap();
+    assert!(wrap_entry.get("vulnerable_start_time").is_some());
+
+    let camp_res = dispatch_sov_route(&ctx, "GET", "/sovereignty/campaigns").unwrap();
+    assert_eq!(camp_res.status_code, 200);
+    let camp_arr = camp_res.body.as_ref().unwrap().as_array().unwrap();
+    assert!(camp_arr.iter().any(|c| c["structure_id"] == s_hull_camp && c["defender_id"] == ally_id));
+    assert!(!camp_arr.iter().any(|c| c["structure_id"] == s_no_score));
+
+    let fw_res = dispatch_sov_route(&ctx, "GET", "/fw/wars").unwrap();
+    assert_eq!(fw_res.status_code, 200);
+    let fw_arr = fw_res.body.as_ref().unwrap().as_array().unwrap();
+    assert!(fw_arr
+        .iter()
+        .any(|p| p["faction_id"] == 500_003 && p["against_id"] == 500_004));
+    assert!(fw_arr
+        .iter()
+        .any(|p| p["faction_id"] == 500_004 && p["against_id"] == 500_003));
+}

@@ -240,6 +240,11 @@ impl QuasarDescriptorRegistry {
         if let Some(reg) = DEFAULT_QUASAR_REGISTRY.get() {
             return Ok(Arc::clone(reg));
         }
+        static INIT_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = INIT_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(reg) = DEFAULT_QUASAR_REGISTRY.get() {
+            return Ok(Arc::clone(reg));
+        }
         let root = workspace_root();
         let sqlite_path = std::env::var("EVOMU_QUASAR_DESCRIPTORS_PATH")
             .map(PathBuf::from)
@@ -1063,4 +1068,7 @@ impl QuasarDescriptorRegistry {
 #[cfg(test)]
 #[path = "registry_unit_tests.rs"]
 mod registry_unit_tests;
+#[cfg(test)]
+#[path = "registry_edges_tests.rs"]
+mod registry_edges_tests;
 

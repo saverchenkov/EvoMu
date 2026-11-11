@@ -78,6 +78,7 @@ pub struct ServerContext {
     pub location_change_invuln: std::sync::Mutex<HashMap<i64, u64>>,
     pub feature_flags: crate::config::FeatureFlagsConfig,
     pub esi_port: u16,
+    pub xmpp_port: u16,
     pub esi_state: Arc<crate::esi::runtime_state::EsiRuntimeState>,
     /// Per-world fleet state not persisted in `WorldRepository` (names, invites, adverts, watchlists).
     pub(crate) fleet_extras: std::sync::Mutex<crate::services::fleet_social::fleet_social_fleets::FleetExtrasState>,
@@ -122,12 +123,24 @@ impl ServerContext {
         let _ = world_seeder::seed_dual_anchor_markets(&db, &sde);
         let clock = db.clock();
 
-        let catalog_map: HashMap<String, serde_json::Value> =
-            serde_json::from_str(EMBEDDED_RPC_CATALOG_JSON).unwrap_or_default();
-        let cataloged_services: HashSet<String> = catalog_map.into_keys().collect();
-        let quasar_map: HashMap<String, serde_json::Value> =
-            serde_json::from_str(EMBEDDED_QUASAR_CATALOG_JSON).unwrap_or_default();
-        let quasar_domains: HashSet<String> = quasar_map.into_keys().collect();
+        static CATALOGED_SERVICES: std::sync::OnceLock<HashSet<String>> =
+            std::sync::OnceLock::new();
+        static QUASAR_DOMAINS: std::sync::OnceLock<HashSet<String>> =
+            std::sync::OnceLock::new();
+        let cataloged_services = CATALOGED_SERVICES
+            .get_or_init(|| {
+                let catalog_map: HashMap<String, serde_json::Value> =
+                    serde_json::from_str(EMBEDDED_RPC_CATALOG_JSON).unwrap_or_default();
+                catalog_map.into_keys().collect()
+            })
+            .clone();
+        let quasar_domains = QUASAR_DOMAINS
+            .get_or_init(|| {
+                let quasar_map: HashMap<String, serde_json::Value> =
+                    serde_json::from_str(EMBEDDED_QUASAR_CATALOG_JSON).unwrap_or_default();
+                quasar_map.into_keys().collect()
+            })
+            .clone();
         let (notify_tx, _) = tokio::sync::broadcast::channel(256);
         let instance_id = NEXT_CTX_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let pending_notifications = Arc::new(RwLock::new(HashMap::new()));
@@ -370,6 +383,7 @@ impl ServerContext {
             location_change_invuln: std::sync::Mutex::new(HashMap::new()),
             feature_flags: crate::config::FeatureFlagsConfig::default(),
             esi_port: 26_004,
+            xmpp_port: 5222,
             esi_state: Arc::new(crate::esi::runtime_state::EsiRuntimeState::new()),
             fleet_extras: std::sync::Mutex::new(Default::default()),
             social_extras: std::sync::Mutex::new(crate::services::fleet_social::fleet_social_chat::SocialExtrasState::new()),
@@ -395,6 +409,7 @@ impl ServerContext {
             }
         });
         crate::services::fleet_social::hydrate_social_state_from_db(&ctx);
+        crate::services::fleet_social::fleet_social_notify::prune_offline_fleets_and_channels(&ctx);
         ctx.hydrate_server_runtime_from_db();
         crate::services::combat_crimewatch::sync_combat_runtime_from_db(&ctx);
         crate::sp6_lifecycle::seed_persisted_abandoned_drones(&ctx);
@@ -407,6 +422,32 @@ impl ServerContext {
     pub fn with_repository(db: Arc<WorldRepository>) -> Self {
         let sde = Arc::new(SdeRegistry::with_canonical_seed());
         Self::with_sde_and_repository(sde, db)
+    }
+
+    /// Initializes a default `ServerContext` for unit tests.
+    pub fn for_tests() -> Self {
+        Self::new()
+    }
+
+    /// Alias for `drain_notifications_for_char` used by unit tests.
+    pub fn drain_notifications(
+        &self,
+        char_id: i64,
+    ) -> Vec<crate::router::cache_notifications::PendingMachoNotification> {
+        self.drain_notifications_for_char(char_id)
+    }
+
+    /// Applies active dbuffs and system effects to a ship's evaluated dogma attribute map.
+    pub fn apply_active_dbuffs_and_system_effects_to_ship_attrs(
+        &self,
+        ship_id: i64,
+        attrs: &mut HashMap<u16, f64>,
+    ) {
+        crate::services::inventory_fitting::fitting_scanners_superweapons::apply_active_dbuffs_and_system_effects_to_ship_attrs(
+            self,
+            ship_id,
+            attrs,
+        );
     }
 
     /// Initializes a `ServerContext` backed by a SQLite world database at `path`.
@@ -449,10 +490,11 @@ impl ServerContext {
                 .load(std::sync::atomic::Ordering::Relaxed);
         }
         ctx.esi_port = cfg.esi_port;
+        ctx.xmpp_port = cfg.xmpp_port;
         if cfg.feature_flags.seed_demo {
             ctx.seed_demo_world_fixtures();
             ctx.db.with_mut_snapshot(|snap| {
-                crate::services::quasar_payment_store::seed_default_store_catalog_if_empty(snap, &ctx.sde);
+                crate::services::quasar_payment_store::ensure_store_catalog_seeded(snap, &ctx.sde);
             });
         }
         Ok(ctx)
@@ -1065,7 +1107,7 @@ impl ServerContext {
     }
 
     /// Steps the server clock by `base_secs` real seconds scaled by the time-acceleration multiplier,
-    /// running the unified synchronous tick pipeline (`T-7`, `#735`).
+    /// running the unified synchronous tick pipeline (`#735`).
     pub fn step_clock_tick(&self, base_secs: u64) -> u64 {
         let prev_unix = self.now_unix_secs();
         let advanced = self.clock().step_tick(base_secs);
@@ -1075,7 +1117,7 @@ impl ServerContext {
         advanced
     }
 
-    /// Steps a 1 Hz live server wall-clock tick, running the unified synchronous tick pipeline (`T-7`, `#735`).
+    /// Steps a 1 Hz live server wall-clock tick, running the unified synchronous tick pipeline (`#735`).
     pub fn tick_wall_second(&self) -> u64 {
         let prev_unix = self.now_unix_secs();
         let advanced = self.clock().tick_wall_second();
@@ -1652,11 +1694,14 @@ impl ServerContext {
 fn acquire_test_env_read_guard() {}
 
 #[cfg(test)]
-fn acquire_test_env_read_guard() -> Option<std::sync::RwLockReadGuard<'static, ()>> {
+fn acquire_test_env_read_guard() -> crate::TestEnvReadGuard {
     crate::lock_test_env_read()
 }
 
 #[cfg(test)]
 #[path = "context_tests.rs"]
 mod context_tests;
+#[cfg(test)]
+#[path = "context_edges_tests.rs"]
+mod context_edges_tests;
 

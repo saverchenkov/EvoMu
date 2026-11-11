@@ -476,3 +476,105 @@ fn item_trader_new_activities_wrappers_and_starter_shipcaster_systems() {
     let _ = std::fs::remove_file(&sc_tmp);
     let _ = std::fs::remove_file(&na_tmp);
 }
+
+#[test]
+fn load_cfsd_nested_errors_empty_buckets_and_starter_fallbacks() {
+    // 1. dict_entries with an empty bucket (off == 0) + non-empty bucket
+    let mut raw = vec![0u8; 72];
+    raw[32..40].copy_from_slice(&2u64.to_le_bytes()); // 2 buckets at abs=40
+    // bucket 0 (abs 40..48) = 0 (empty!)
+    // bucket 1 (abs 48..56) -> rel=32 (abs=64), count=1 at 56..64
+    raw[48..56].copy_from_slice(&32u64.to_le_bytes());
+    raw[56..64].copy_from_slice(&1u64.to_le_bytes());
+    let buf = CfsdBuf(&raw);
+    assert_eq!(buf.dict_entries(40, 8).unwrap(), vec![64]);
+
+    // 2. load_cfsd_nested size mismatch & header count mismatch
+    let mut sde = SdeRegistry::default();
+    let res_path = "res:/staticdata/contributionmethods.fsdbinary";
+    let lay = SdeRegistry::cfsd_nested_layout(res_path).expect("nested layout");
+    let mut nested_raw = vec![0u8; 64];
+    nested_raw[40..48].copy_from_slice(&99u64.to_le_bytes()); // header count = 99
+    nested_raw[48..56].copy_from_slice(&1u64.to_le_bytes()); // 1 bucket
+    // bucket 0 = 0 (0 records)
+    let tmp = std::env::temp_dir().join(format!(
+        "evomu_nested_err_{}.fsdbinary",
+        std::process::id()
+    ));
+    std::fs::write(&tmp, &nested_raw).unwrap();
+    sde.resources.insert(
+        res_path.to_string(),
+        SdeResourceInfo {
+            res_path: res_path.to_string(),
+            cdn_relative_path: tmp.display().to_string(),
+            md5: String::new(),
+            byte_size: (nested_raw.len() + 1) as u64,
+            format: "cfsd".to_string(),
+            record_count: 0,
+            spot: String::new(),
+        },
+    );
+    assert!(sde.load_cfsd_nested(res_path).is_err(), "size mismatch");
+
+    sde.resources.get_mut(res_path).unwrap().byte_size = nested_raw.len() as u64;
+    let err = sde.load_cfsd_nested(res_path).unwrap_err();
+    assert!(err.to_string().contains("header says 99"), "unexpected: {err}");
+    let _ = lay;
+    let _ = std::fs::remove_file(&tmp);
+
+    // 3. starter_shipcaster_systems_by_race when db_path is missing or has empty schema / invalid JSON
+    sde.db_path = Some(std::env::temp_dir().join("evomu_nonexistent_starter.sqlite"));
+    assert!(sde.starter_shipcaster_systems_by_race().is_empty());
+
+    let empty_db = std::env::temp_dir().join(format!(
+        "evomu_starter_empty_{}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&empty_db);
+    {
+        let conn = Connection::open(&empty_db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sde_schools (school_id INTEGER, race_id INTEGER, starting_stations_json TEXT, career_agents_json TEXT);
+             INSERT INTO sde_schools VALUES (11, 1, 'bad-json', 'bad-json');
+             CREATE TABLE sde_solar_systems (system_id INTEGER, region_id INTEGER, faction_id INTEGER);
+             INSERT INTO sde_solar_systems VALUES (30000142, 10001004, 500001);",
+        )
+        .unwrap();
+    }
+    sde.db_path = Some(empty_db.clone());
+    sde.solar_systems.insert(
+        30_000_142,
+        SolarSystem {
+            solar_system_id: 30_000_142,
+            constellation_id: 20_000_020,
+            region_id: 10_001_004,
+            name: "Jita".to_string(),
+            security_status: 0.9,
+            galactic_pos_ly: [0.0; 3],
+            radius: 1000.0,
+            wormhole_class_id: None,
+            stations: vec![StationInfo {
+                station_id: 60_003_760,
+                solar_system_id: 30_000_142,
+                constellation_id: 20_000_020,
+                region_id: 10_001_004,
+                station_type_id: 1529,
+                name: "Sta".to_string(),
+                position: DVec3::ZERO,
+                owner_corporation_id: 1_000_035,
+                owner_faction_id: None,
+                operation_id: 1,
+                reprocessing_efficiency: 0.5,
+                reprocessing_stations_take: 0.05,
+                is_conquerable: false,
+                orbit_id: None,
+                has_clone_bay: true,
+            }],
+            planet_ids: Vec::new(),
+        },
+    );
+    Arc::make_mut(&mut sde.solar_system_factions).insert(30_000_142, 500_001);
+    let res = sde.starter_shipcaster_systems_by_race();
+    assert_eq!(res.get(&30_000_142), Some(&(1, Some(60_003_760))));
+    let _ = std::fs::remove_file(&empty_db);
+}

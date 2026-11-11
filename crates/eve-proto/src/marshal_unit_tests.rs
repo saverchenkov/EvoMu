@@ -487,3 +487,139 @@ fn test_issue_415_quasar_packed_repeated_appends_across_chunks() {
         ]))
     );
 }
+
+#[test]
+fn pack_dbrow_normalizes_cy_variants_unsigned_and_preserves_unknown_dbtypes() {
+    let row = pack_dbrow(&[
+        ("cy_int", 6, PyRep::Integer(40)),
+        ("cy_frac", 6, PyRep::Real(12.3456)),
+        ("cy_neg", 6, PyRep::Real(-98.7654)),
+        ("cy_nan", 6, PyRep::Real(f64::NAN)),
+        ("cy_inf", 6, PyRep::Real(f64::INFINITY)),
+        ("cy_null", 6, PyRep::None),
+        ("ui1_neg", 17, PyRep::Integer(-1)),
+        ("ui2_neg", 18, PyRep::Integer(-1)),
+        ("ui4_neg", 19, PyRep::Integer(-1)),
+        ("unk_col", 999, PyRep::String("preserved".into())),
+    ]);
+    assert_eq!(row.dbrow_get("cy_int"), Some(&PyRep::Real(40.0)));
+    assert_eq!(row.dbrow_get("cy_frac"), Some(&PyRep::Real(12.3456)));
+    assert_eq!(row.dbrow_get("cy_neg"), Some(&PyRep::Real(-98.7654)));
+    assert_eq!(row.dbrow_get("cy_nan"), Some(&PyRep::Real(0.0)));
+    assert_eq!(row.dbrow_get("cy_inf"), Some(&PyRep::Real(0.0)));
+    assert_eq!(row.dbrow_get("cy_null"), Some(&PyRep::None));
+    assert_eq!(row.dbrow_get("ui1_neg"), Some(&PyRep::Integer(255)));
+    assert_eq!(row.dbrow_get("ui2_neg"), Some(&PyRep::Integer(65_535)));
+    assert_eq!(
+        row.dbrow_get("ui4_neg"),
+        Some(&PyRep::Integer(i64::from(u32::MAX)))
+    );
+    assert_eq!(
+        row.dbrow_get("unk_col"),
+        Some(&PyRep::String("preserved".into()))
+    );
+
+    // Wire roundtrip preserves all normalized fixed-width columns
+    let dec = decode(&encode(&row)).unwrap();
+    assert_eq!(dec.dbrow_get("cy_int"), Some(&PyRep::Real(40.0)));
+    assert_eq!(dec.dbrow_get("cy_frac"), Some(&PyRep::Real(12.3456)));
+    assert_eq!(dec.dbrow_get("cy_neg"), Some(&PyRep::Real(-98.7654)));
+    assert_eq!(dec.dbrow_get("cy_nan"), Some(&PyRep::Real(0.0)));
+    assert_eq!(dec.dbrow_get("cy_inf"), Some(&PyRep::Real(0.0)));
+    assert_eq!(dec.dbrow_get("cy_null"), Some(&PyRep::None));
+    assert_eq!(dec.dbrow_get("ui1_neg"), Some(&PyRep::Integer(255)));
+    assert_eq!(dec.dbrow_get("ui2_neg"), Some(&PyRep::Integer(65_535)));
+    assert_eq!(
+        dec.dbrow_get("ui4_neg"),
+        Some(&PyRep::Integer(i64::from(u32::MAX)))
+    );
+}
+
+#[test]
+fn is_zlib_stream_header_and_marshal_decode_error_arms_exhaustive() {
+    // Direct boundary tests on is_zlib_stream_header
+    assert!(!is_zlib_stream_header(&[]));
+    assert!(!is_zlib_stream_header(&[0x58]));
+    assert!(is_zlib_stream_header(&[crate::ZLIB_HEADER_BYTE]));
+    assert!(is_zlib_stream_header(&[0x58, 0x85])); // (0x58 << 8 | 0x85) == 22661 == 31 * 731
+    assert!(is_zlib_stream_header(&[0x78, 0x9C])); // CM=8, CINFO=7 (window <= 32K)
+    assert!(!is_zlib_stream_header(&[0x58, 0x86])); // % 31 != 0
+    assert!(!is_zlib_stream_header(&[0x88, 0x13])); // CINFO=8 (> 7) despite % 31 == 0
+    assert!(!is_zlib_stream_header(&[0x59, 0x67])); // CM=9 (!= 8) despite % 31 == 0
+    assert!(!is_zlib_stream_header(&[MARSHAL_HEADER_BYTE, 0, 0, 0, 0]));
+
+    // Valid zlib stream roundtrip via encode_zlib -> decode
+    let sample = PyRep::Tuple(vec![PyRep::Integer(12345), PyRep::String("zlib-ok".into())]);
+    let compressed = encode_zlib(&sample).unwrap();
+    assert_eq!(decode(&compressed).unwrap(), sample);
+
+    // FrameTooLarge on outer slice and on inflated stream exceeding max_inflate_bytes
+    assert_eq!(
+        decode_with_limits(&[MARSHAL_HEADER_BYTE, 0, 0, 0, 0, MarshalOpcode::PyNone as u8], 3, 100),
+        Err(ProtoError::FrameTooLarge(6))
+    );
+    let big_compressed = encode_zlib(&PyRep::String("a".repeat(256))).unwrap();
+    assert!(matches!(
+        decode_with_limits(&big_compressed, big_compressed.len(), 100),
+        Err(ProtoError::FrameTooLarge(_))
+    ));
+
+    // TrailingBytes when extra bytes follow the root value before save_map
+    assert_eq!(
+        decode(&[
+            MARSHAL_HEADER_BYTE,
+            0,
+            0,
+            0,
+            0,
+            MarshalOpcode::PyNone as u8,
+            MarshalOpcode::PyTrue as u8,
+        ]),
+        Err(ProtoError::TrailingBytes(1))
+    );
+
+    // CollectionTooLarge when save_count > MAX_COLLECTION_LEN
+    let too_many_saves = (crate::MAX_COLLECTION_LEN as u32) + 1;
+    let mut bad_save_cnt = vec![MARSHAL_HEADER_BYTE];
+    bad_save_cnt.extend_from_slice(&too_many_saves.to_le_bytes());
+    bad_save_cnt.push(MarshalOpcode::PyNone as u8);
+    assert_eq!(
+        decode(&bad_save_cnt),
+        Err(ProtoError::CollectionTooLarge(too_many_saves as usize))
+    );
+
+    // InvalidUtf8 on PyWStringUTF8 with invalid UTF-8 byte 0xFF
+    assert!(matches!(
+        decode(&[
+            MARSHAL_HEADER_BYTE,
+            0,
+            0,
+            0,
+            0,
+            MarshalOpcode::PyWStringUTF8 as u8,
+            1,
+            0xFF,
+        ]),
+        Err(ProtoError::Utf8(_))
+    ));
+
+    // RecursionLimitExceeded on deeply nested PyOneTuple (> MAX_RECURSION_DEPTH)
+    let mut deep = vec![MARSHAL_HEADER_BYTE, 0, 0, 0, 0];
+    deep.extend(std::iter::repeat_n(
+        MarshalOpcode::PyOneTuple as u8,
+        crate::MAX_RECURSION_DEPTH + 2,
+    ));
+    deep.push(MarshalOpcode::PyNone as u8);
+    assert_eq!(decode(&deep), Err(ProtoError::RecursionLimitExceeded));
+
+    // NodeBudgetExceeded when max_nodes is exhausted
+    assert_eq!(
+        decode_with_limits(
+            &encode(&PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2)])),
+            1024,
+            1,
+        ),
+        Err(ProtoError::NodeBudgetExceeded)
+    );
+}
+

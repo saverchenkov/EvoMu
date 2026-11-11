@@ -342,9 +342,9 @@ pub fn flush_pending_bounty_ticks_on_downtime(ctx: &ServerContext) -> usize {
     pending_keys.sort_unstable();
     let mut flushed = 0usize;
     for (sys_id, char_id) in pending_keys {
-        let (pilot, tax, ess) =
+        let payout =
             crate::services::combat_npc_encounters::flush_npc_bounty_tick(ctx, sys_id, char_id, 0.0);
-        if pilot > 0.0 || tax > 0.0 || ess > 0.0 {
+        if payout.pilot_isk > 0.0 || payout.main_ess_isk > 0.0 || payout.reserve_ess_isk > 0.0 {
             flushed += 1;
         }
     }

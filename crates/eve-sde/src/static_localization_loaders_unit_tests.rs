@@ -203,3 +203,154 @@ fn sde_registry_localization_loaders_and_fallbacks() {
     let _ = std::fs::remove_file(en_path);
     let _ = std::fs::remove_file(it_path);
 }
+
+#[test]
+fn pickle_malformed_escapes_memo_limits_and_market_group_description_filters() {
+    // decode_pickle_raw_unicode: replacement char on invalid codepoint, truncated escape, trailing backslash
+    assert_eq!(decode_pickle_raw_unicode(b"\\Uffffffff"), "\u{fffd}");
+    assert_eq!(decode_pickle_raw_unicode(b"\\u12"), "\\u12");
+    assert_eq!(decode_pickle_raw_unicode(b"abc\\"), "abc\\");
+    assert_eq!(decode_pickle_raw_unicode(b"abc\\\\"), "abc\\\\");
+
+    // parse_localization_fsd_lang_bytes: sI prefix, invalid utf8 id, non-numeric id, non-(V line, filter early stop
+    let raw_lang = b"sI10\n(VTen\nIbad\n(VSkip\nI\xff\n(VBadUtf8\nsI20\nVNotParenV\nsI30\n(VThirty\nsI40\n(VForty\n";
+    let all = parse_localization_fsd_lang_bytes(raw_lang, None);
+    assert_eq!(all.len(), 3);
+    assert_eq!(all[&10], "Ten");
+    assert_eq!(all[&30], "Thirty");
+    assert_eq!(all[&40], "Forty");
+    let sub = parse_localization_fsd_lang_bytes(raw_lang, Some(&HashSet::from([10u32, 30])));
+    assert_eq!(sub.len(), 2);
+
+    // parse_localization_fsd_main_bytes: empty -> err, memo > 64 ignored, unknown keys/types skipped
+    assert!(parse_localization_fsd_main_bytes(b"").is_err());
+    let main_edge = b"(dp0\n\
+I999\nS'ignored_non_str_key'\ns\
+S'languages'\n\
+(lp65\n\
+I1\naS'fr'\na\
+sS'labels'\n\
+(dp10\n\
+S'not_an_int'\n(d\ns\
+I7\nS'not_a_dict'\ns\
+I8\n(dp66\nS'unknown'\nS'x'\nsS'FullPath'\nS'A/B'\nsS'label'\nS'lbl'\ns\
+ss.";
+    let bundle = parse_localization_fsd_main_bytes(main_edge).unwrap();
+    assert_eq!(bundle.languages, vec!["fr".to_string()]);
+    assert_eq!(bundle.labels[&8].message_id, 8);
+    assert_eq!(bundle.labels[&8].full_path, "A/B");
+    assert_eq!(bundle.labels[&8].label, "lbl");
+
+    // Unindexed resource -> InvalidSchema; indexed missing file -> MissingDatabase
+    let mut sde = SdeRegistry::default();
+    assert!(matches!(
+        sde.load_all_localized_messages("en"),
+        Err(SdeError::InvalidSchema(_))
+    ));
+    assert!(matches!(
+        sde.load_localized_messages("de", &HashSet::from([1u32])),
+        Err(SdeError::InvalidSchema(_))
+    ));
+    sde.resources.insert(
+        "res:/localizationfsd/localization_fsd_de.pickle".to_string(),
+        SdeResourceInfo {
+            res_path: "res:/localizationfsd/localization_fsd_de.pickle".to_string(),
+            cdn_relative_path: "/nonexistent/evomu_missing_de.pickle".to_string(),
+            md5: String::new(),
+            byte_size: 0,
+            format: String::new(),
+            record_count: 0,
+            spot: String::new(),
+        },
+    );
+    assert!(matches!(
+        sde.load_localized_messages("de", &HashSet::from([1u32])),
+        Err(SdeError::MissingDatabase(_))
+    ));
+
+    // load_market_group_descriptions + localized_type_name from CFSD blob
+    let pid = std::process::id();
+    let dir = std::env::temp_dir().join(format!("evomu_loc_edge_{pid}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Build minimal CFSD blob using the 72-byte CFSD header expected by `cfsd_records`:
+    // header: [40..48] record_count, [48..56] bucket_count=2, [56..64] bucket0=0, [64..72] bucket1=boff,
+    // followed at 72..80 by [u64 count] and then the fixed-stride records at offset 80.
+    let build_cfsd = |recs: &[&[u8]]| -> Vec<u8> {
+        let mut buf = vec![0u8; 72];
+        buf[40..48].copy_from_slice(&(recs.len() as u64).to_le_bytes());
+        buf[48..56].copy_from_slice(&2u64.to_le_bytes());
+        buf[56..64].copy_from_slice(&0u64.to_le_bytes());
+        buf.extend_from_slice(&(recs.len() as u64).to_le_bytes());
+        let boff = (buf.len() - 32) as u64;
+        buf[64..72].copy_from_slice(&boff.to_le_bytes());
+        for r in recs {
+            buf.extend_from_slice(r);
+        }
+        buf
+    };
+
+    // marketgroups.fsdbinary (stride 28): mg1 (mask=1, desc=101 -> "Good Desc"), mg2 (mask=1, desc=102 -> "" filtered!), mg3 (mask=0 -> skipped)
+    let mut mg1 = [0u8; 28];
+    mg1[0..4].copy_from_slice(&1u32.to_le_bytes());
+    mg1[4..8].copy_from_slice(&101u32.to_le_bytes());
+    mg1[12..16].copy_from_slice(&103u32.to_le_bytes());
+    mg1[24..28].copy_from_slice(&1u32.to_le_bytes());
+
+    let mut mg2 = [0u8; 28];
+    mg2[0..4].copy_from_slice(&2u32.to_le_bytes());
+    mg2[4..8].copy_from_slice(&102u32.to_le_bytes());
+    mg2[24..28].copy_from_slice(&1u32.to_le_bytes());
+
+    let mut mg3 = [0u8; 28];
+    mg3[0..4].copy_from_slice(&3u32.to_le_bytes());
+    mg3[4..8].copy_from_slice(&101u32.to_le_bytes());
+    mg3[24..28].copy_from_slice(&0u32.to_le_bytes());
+
+    // types.fsdbinary (stride 152): type 587 with description_id at offset 68 (mask bit 1<<3 = 8 at offset 148) and type_name_id at offset 132
+    let mut t1 = [0u8; 152];
+    t1[0..8].copy_from_slice(&587u64.to_le_bytes());
+    t1[68..72].copy_from_slice(&101u32.to_le_bytes()); // description_id
+    t1[132..136].copy_from_slice(&103u32.to_le_bytes()); // type_name_id
+    t1[148..152].copy_from_slice(&8u32.to_le_bytes()); // has description_id bit (1 << 3)
+
+    let mg_path = dir.join("mg.bin");
+    let ty_path = dir.join("types.bin");
+    let en_path = dir.join("en.pickle");
+    std::fs::write(&mg_path, build_cfsd(&[&mg1, &mg2, &mg3])).unwrap();
+    std::fs::write(&ty_path, build_cfsd(&[&t1])).unwrap();
+    std::fs::write(&en_path, b"(dp0\nI101\n(VGood Desc\nsI102\n(V\nsI103\n(VRifter\ns.").unwrap();
+
+    for (res, path) in [
+        ("res:/staticdata/marketgroups.fsdbinary", &mg_path),
+        ("res:/staticdata/types.fsdbinary", &ty_path),
+        ("res:/localizationfsd/localization_fsd_en-us.pickle", &en_path),
+    ] {
+        sde.resources.insert(
+            res.to_string(),
+            SdeResourceInfo {
+                res_path: res.to_string(),
+                cdn_relative_path: path.display().to_string(),
+                md5: String::new(),
+                byte_size: 128,
+                format: String::new(),
+                record_count: 1,
+                spot: String::new(),
+            },
+        );
+    }
+
+    let descs = sde.load_market_group_descriptions().unwrap();
+    assert_eq!(descs.get(&1).map(String::as_str), Some("Good Desc"));
+    assert!(!descs.contains_key(&2));
+    assert!(!descs.contains_key(&3));
+
+    assert_eq!(sde.localized_type_name("en", 587).as_deref(), Some("Rifter"));
+    assert_eq!(
+        sde.localized_type_description("en", 587).as_deref(),
+        Some("Good Desc")
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

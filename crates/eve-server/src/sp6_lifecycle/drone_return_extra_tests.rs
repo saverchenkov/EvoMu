@@ -306,3 +306,284 @@ async fn cmd_return_bay_error_guards_filter_variants_exact_2500m_and_capacity_ch
         assert!(!rt.active_drones_in_space.contains_key(&kwarg_drone));
     });
 }
+
+#[tokio::test]
+async fn drone_scoop_bay_full_missing_items_abandon_reconnect_limits_and_mining_holds() {
+    use super::{step_repeating_drone_mining, step_returning_drones};
+    use crate::sp6_lifecycle::{handle_cmd_abandon_drone, handle_cmd_reconnect_to_drones};
+
+    let ctx = test_ctx();
+    let sys_id = 30_000_142u32;
+    let char_id = 90_993_001i64;
+    let ship_full_bay = 943_000_001i64;
+    let ship_missing_drone = 943_000_002i64;
+    let ghost_ship = 943_000_003i64;
+    let d_bay_full = 943_000_010i64;
+    let d_item_missing = 943_000_011i64;
+    let d_ghost_ship = 943_000_012i64;
+    let filler_drones = 943_000_013i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut c = snap.characters[&90_000_001].clone();
+        c.character_id = char_id;
+        c.user_id = char_id as u64;
+        c.name = "DroneExtra".into();
+        c.solar_system_id = sys_id;
+        c.active_ship_id = ship_full_bay;
+        c.station_id = None;
+        c.structure_id = None;
+        snap.characters.insert(char_id, c);
+        snap.skills.entry(char_id).or_default().insert(
+            3436,
+            eve_db::TrainedSkillRecord {
+                type_id: 3436,
+                level: 2,
+                skill_points: 1_415.0,
+            },
+        );
+        // Rifter (587) has small/zero drone capacity or Ibis (606) / Tristan (593) with 10m3 drone bay
+        for sid in [ship_full_bay, ship_missing_drone] {
+            snap.items.insert(
+                sid,
+                InventoryItemRecord {
+                    item_id: sid,
+                    type_id: 593, // Tristan (40m3 drone bay)
+                    owner_id: char_id,
+                    location_id: sys_id as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        // Fill ship_full_bay drone bay past 40m3 (10x 5m3 drones = 50m3)
+        snap.items.insert(
+            filler_drones,
+            InventoryItemRecord {
+                item_id: filler_drones,
+                type_id: 2454,
+                owner_id: char_id,
+                location_id: ship_full_bay,
+                flag: InventoryFlag::DroneBay,
+                quantity: 10,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            d_bay_full,
+            InventoryItemRecord {
+                item_id: d_bay_full,
+                type_id: 2454,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    spawn_ball(&ctx, sys_id, ship_full_bay, 593, DVec3::ZERO);
+    spawn_ball(&ctx, sys_id, ship_missing_drone, 593, DVec3::new(100.0, 0.0, 0.0));
+    spawn_ball(&ctx, sys_id, ghost_ship, 593, DVec3::new(200.0, 0.0, 0.0));
+    spawn_ball(&ctx, sys_id, d_bay_full, 2454, DVec3::new(500.0, 0.0, 0.0));
+    spawn_ball(&ctx, sys_id, d_item_missing, 2454, DVec3::new(550.0, 0.0, 0.0));
+    spawn_ball(&ctx, sys_id, d_ghost_ship, 2454, DVec3::new(600.0, 0.0, 0.0));
+
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.active_drones_in_space.insert(
+            d_bay_full,
+            make_drone_state(d_bay_full, d_bay_full, 2454, char_id, ship_full_bay, sys_id, false, 4),
+        );
+        rt.active_drones_in_space.insert(
+            d_item_missing,
+            make_drone_state(d_item_missing, d_item_missing, 2454, char_id, ship_missing_drone, sys_id, false, 4),
+        );
+        rt.active_drones_in_space.insert(
+            d_ghost_ship,
+            make_drone_state(d_ghost_ship, d_ghost_ship, 2454, char_id, ghost_ship, sys_id, false, 4),
+        );
+    });
+
+    // `step_returning_drones` exercises BayFull (`L179`, `196-200`) and ItemMissing (`L156`, `182`, `202-204`)
+    step_returning_drones(&ctx).await;
+    with_combat_runtime(&ctx, |rt| {
+        assert!(rt.active_drones_in_space.contains_key(&d_bay_full)); // restored on BayFull
+        assert!(!rt.active_drones_in_space.contains_key(&d_item_missing)); // purged ItemMissing
+        assert!(!rt.active_drones_in_space.contains_key(&d_ghost_ship)); // purged missing ship
+    });
+
+    // `handle_cmd_abandon_drone` with PyRep::Integer single ID & `handle_cmd_reconnect_to_drones`
+    // error branches (NoActiveShip, NoSolarSystem, empty reconnected -> finish_reconnect_drones(&[]),
+    // OutOfRange > 250km, MaxDronesExceeded, InsufficientBandwidth)
+    let mut sess = SessionState {
+        user_id: Some(1),
+        character_id: Some(char_id),
+        ship_id: Some(ship_full_bay),
+        solar_system_id: Some(sys_id),
+        ..Default::default()
+    };
+    let _ = handle_cmd_abandon_drone(&ctx, &mut sess, &[PyRep::Integer(d_bay_full)], &HashMap::new())
+        .await
+        .unwrap();
+    assert!(with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&d_bay_full].is_abandoned));
+
+    // Reconnect error guards
+    let mut sess_no_ship = SessionState {
+        user_id: Some(1),
+        character_id: Some(char_id),
+        solar_system_id: Some(sys_id),
+        ..Default::default()
+    };
+    assert_eq!(
+        handle_cmd_reconnect_to_drones(&ctx, &mut sess_no_ship, &[], &HashMap::new())
+            .await
+            .unwrap_err()
+            .code,
+        "NoActiveShip"
+    );
+    let mut sess_no_sys = SessionState {
+        user_id: Some(1),
+        character_id: Some(char_id),
+        ship_id: Some(ship_full_bay),
+        ..Default::default()
+    };
+    assert_eq!(
+        handle_cmd_reconnect_to_drones(&ctx, &mut sess_no_sys, &[], &HashMap::new())
+            .await
+            .unwrap_err()
+            .code,
+        "NoSolarSystem"
+    );
+
+    // Empty candidate reconnect (`drone_reconnect_finish.rs:23`)
+    let empty_rep = handle_cmd_reconnect_to_drones(
+        &ctx,
+        &mut sess,
+        &[PyRep::Integer(999_888_777)],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(empty_rep, PyRep::Dict(_)));
+
+    // Seed far abandoned drone (>250km) and active drones up to limit -> OutOfRange & MaxDronesExceeded / InsufficientBandwidth
+    let d_far_aban = 943_000_020i64;
+    let d_heavy_aban = 943_000_021i64;
+    let d_extra_aban = 943_000_022i64;
+    spawn_ball(&ctx, sys_id, d_far_aban, 2454, DVec3::new(300_000.0, 0.0, 0.0));
+    spawn_ball(&ctx, sys_id, d_heavy_aban, 2454, DVec3::new(500.0, 0.0, 0.0));
+    spawn_ball(&ctx, sys_id, d_extra_aban, 2454, DVec3::new(600.0, 0.0, 0.0));
+    with_mut_combat_runtime(&ctx, |rt| {
+        let mut st_far = make_drone_state(d_far_aban, d_far_aban, 2454, 0, 0, sys_id, false, 0);
+        st_far.is_abandoned = true;
+        st_far.original_owner_char_id = char_id;
+        rt.active_drones_in_space.insert(d_far_aban, st_far);
+
+        let mut st_heavy = make_drone_state(d_heavy_aban, d_heavy_aban, 2454, 0, 0, sys_id, false, 0);
+        st_heavy.is_abandoned = true;
+        st_heavy.original_owner_char_id = char_id;
+        st_heavy.bandwidth_used = 500.0; // > Tristan ship_bw
+        rt.active_drones_in_space.insert(d_heavy_aban, st_heavy);
+
+        let mut st_ok = make_drone_state(d_extra_aban, d_extra_aban, 2454, 0, 0, sys_id, false, 0);
+        st_ok.is_abandoned = true;
+        st_ok.original_owner_char_id = char_id;
+        rt.active_drones_in_space.insert(d_extra_aban, st_ok);
+    });
+    let rec_errs = handle_cmd_reconnect_to_drones(
+        &ctx,
+        &mut sess,
+        &[PyRep::List(vec![
+            PyRep::Integer(d_far_aban),
+            PyRep::Integer(d_heavy_aban),
+        ])],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap();
+    let rec_str = format!("{rec_errs:?}");
+    assert!(
+        rec_str.contains("OutOfRange") && rec_str.contains("InsufficientBandwidth"),
+        "unexpected reconnect errs: {rec_str}"
+    );
+
+    // Saturate max_drones_allowed (2) then reconnect d_extra_aban -> MaxDronesExceeded
+    with_mut_combat_runtime(&ctx, |rt| {
+        for active_id in [943_000_023i64, 943_000_024i64] {
+            let mut st = make_drone_state(active_id, active_id, 2454, char_id, ship_full_bay, sys_id, false, 1);
+            st.bandwidth_used = 1.0;
+            rt.active_drones_in_space.insert(active_id, st);
+        }
+    });
+    let max_err = handle_cmd_reconnect_to_drones(
+        &ctx,
+        &mut sess,
+        &[PyRep::List(vec![PyRep::Integer(d_extra_aban)])],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap();
+    assert!(format!("{max_err:?}").contains("MaxDronesExceeded"));
+
+    // Repeating drone mining missing asteroid error branch + specialized hold flags (134, 135, 181) (`drone_return.rs:506-549`)
+    let d_mine_err = 943_000_030i64;
+    let d_mine_hold = 943_000_031i64;
+    spawn_ball(&ctx, sys_id, d_mine_err, 32787, DVec3::new(500.0, 0.0, 0.0));
+    spawn_ball(&ctx, sys_id, d_mine_hold, 32787, DVec3::new(600.0, 0.0, 0.0));
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.active_drones_in_space.insert(
+            d_mine_err,
+            make_drone_state(d_mine_err, d_mine_err, 32787, char_id, ship_full_bay, sys_id, false, 1),
+        );
+        rt.active_drone_miners.insert(
+            d_mine_err,
+            DroneMiningState {
+                drone_id: d_mine_err,
+                asteroid_id: 999_777_666, // missing asteroid triggers mine_asteroid Err (`L536-549`)
+                ship_id: ship_full_bay,
+                owner_char_id: char_id,
+                solar_system_id: sys_id,
+                yield_units: 1,
+                duration_secs: 60,
+                next_cycle_unix: 1,
+                waste_prob: 0.0,
+                ore_type_id: 1230,
+                destination_flag: InventoryFlag::Cargo,
+            },
+        );
+        rt.active_drones_in_space.insert(
+            d_mine_hold,
+            make_drone_state(d_mine_hold, d_mine_hold, 32787, char_id, ship_full_bay, sys_id, false, 1),
+        );
+        rt.active_drone_miners.insert(
+            d_mine_hold,
+            DroneMiningState {
+                drone_id: d_mine_hold,
+                asteroid_id: 999_777_666,
+                ship_id: ship_full_bay,
+                owner_char_id: char_id,
+                solar_system_id: sys_id,
+                yield_units: 1,
+                duration_secs: 60,
+                next_cycle_unix: 1,
+                waste_prob: 0.0,
+                ore_type_id: 1230,
+                destination_flag: InventoryFlag::from_u16(181),
+            },
+        );
+    });
+    step_repeating_drone_mining(&ctx, 5_000).await;
+    with_combat_runtime(&ctx, |rt| {
+        assert!(!rt.active_drone_miners.contains_key(&d_mine_err));
+        assert_eq!(rt.active_drones_in_space[&d_mine_err].activity_state, 0);
+        assert!(!rt.active_drone_miners.contains_key(&d_mine_hold));
+    });
+}
+

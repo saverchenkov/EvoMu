@@ -575,8 +575,73 @@ fn persisted_dogma_context_and_invalidation_on_direct_mutation() {
     assert!((eng.get_charge_effective_attribute(12, 783, &sde) - 0.07).abs() < 1e-9);
     assert!((eng.get_drone_effective_attribute(901, attr_ids::DAMAGE_MULTIPLIER, &sde) - 1.5).abs() < 1e-9);
 
-    // Negative / edge-case: mutating character_skills or gang_bursts directly without calling recalculate_stats
-    // immediately invalidates persisted_context() and recomputes fresh non-stale values!
+    // Negative / edge-case: mutating any of the 12 EvalInputsSnapshot fields directly without calling
+    // recalculate_stats immediately invalidates persisted_context() and recomputes fresh non-stale values!
+    let orig_ship_id = eng.ship.item_id;
+    eng.ship.item_id = 999;
+    assert!(eng.persisted_context().is_none());
+    eng.ship.item_id = orig_ship_id;
+    assert!(eng.persisted_context().is_some());
+
+    let orig_ship_tid = eng.ship.type_id;
+    eng.ship.type_id = 9999;
+    assert!(eng.persisted_context().is_none());
+    eng.ship.type_id = orig_ship_tid;
+    assert!(eng.persisted_context().is_some());
+
+    eng.active_stance_type_id = Some(34319);
+    assert!(eng.persisted_context().is_none());
+    eng.active_stance_type_id = None;
+    assert!(eng.persisted_context().is_some());
+
+    eng.modules.get_mut(&11).unwrap().damage_hp = 1.0;
+    assert!(eng.persisted_context().is_none());
+    eng.modules.get_mut(&11).unwrap().damage_hp = 0.0;
+    assert!(eng.persisted_context().is_some());
+
+    eng.implants.push(19540);
+    assert!(eng.persisted_context().is_none());
+    eng.implants.clear();
+    assert!(eng.persisted_context().is_some());
+
+    eng.boosters.push(28672);
+    assert!(eng.persisted_context().is_none());
+    eng.boosters.clear();
+    assert!(eng.persisted_context().is_some());
+
+    eng.booster_side_effects.insert(28672, vec![1]);
+    assert!(eng.persisted_context().is_none());
+    eng.booster_side_effects.clear();
+    assert!(eng.persisted_context().is_some());
+
+    eng.projected_ewar.push(ProjectedEwarEffect {
+        source_module_id: 777,
+        source_module_type_id: 439,
+        charge_type_id: None,
+        distance: 1000.0,
+        overloaded: false,
+        effective_module: DogmaItemState::from_sde(777, 439, &sde),
+    });
+    assert!(eng.persisted_context().is_none());
+    eng.projected_ewar.clear();
+    assert!(eng.persisted_context().is_some());
+
+    eng.drones.push((902, 2454));
+    assert!(eng.persisted_context().is_none());
+    eng.drones.pop();
+    assert!(eng.persisted_context().is_some());
+
+    eng.ship.base_attributes.insert(9999, 1.0);
+    assert!(eng.persisted_context().is_none());
+    eng.ship.base_attributes.remove(&9999);
+    assert!(eng.persisted_context().is_some());
+
+    let saved_bursts = eng.gang_bursts.clone();
+    eng.gang_bursts.clear();
+    assert!(eng.persisted_context().is_none());
+    eng.gang_bursts = saved_bursts;
+    assert!(eng.persisted_context().is_some());
+
     eng.character_skills.insert(3436, 2);
     assert!(eng.persisted_context().is_none());
     assert!((eng.get_drone_effective_attribute(901, attr_ids::DAMAGE_MULTIPLIER, &sde) - 1.2).abs() < 1e-9);
@@ -677,3 +742,670 @@ fn missile_damage_multiplier_propagates_to_missile_charges_not_turret_ammo() {
         "Turret ammo must not receive missileDamageMultiplier"
     );
 }
+
+#[test]
+fn eval_inputs_snapshot_invalidates_independently_on_all_12_fields() {
+    let mut sde = SdeRegistry::default();
+    sde.types.insert(
+        602,
+        make_type(602, 25, 6, &[(attr_ids::MAX_VELOCITY, 250.0)], &[]),
+    );
+    sde.types.insert(
+        603,
+        make_type(603, 25, 6, &[(attr_ids::MAX_VELOCITY, 300.0)], &[]),
+    );
+    sde.types
+        .insert(439, make_type(439, 46, 7, &[(attr_ids::CPU, 10.0)], &[]));
+    sde.types
+        .insert(3436, make_type(3436, 273, 16, &[(292, 10.0)], &[1730]));
+    sde.types.insert(4001, make_type(4001, 300, 20, &[], &[]));
+    sde.types.insert(4500, make_type(4500, 303, 20, &[], &[]));
+    sde.types.insert(34321, make_type(34321, 1306, 6, &[], &[]));
+    sde.types.insert(2454, make_type(2454, 100, 18, &[], &[]));
+
+    let mut eng = ShipFittingEngine::from_sde(10, 602, &sde);
+    eng.modules.insert(
+        11,
+        FittedModule {
+            item_id: 11,
+            type_id: 439,
+            flag_id: 19,
+            state: ModuleState::Online,
+            damage_hp: 0.0,
+            max_hp: 40.0,
+            charge_type_id: None,
+            charge_quantity: 0,
+            dynamic_attribute_overrides: HashMap::new(),
+        },
+    );
+    eng.character_skills.insert(3436, 5);
+    eng.implants = vec![4001];
+    eng.boosters = vec![4500];
+    eng.booster_side_effects.insert(4500, vec![8004]);
+    eng.projected_ewar.push(ProjectedEwarEffect {
+        source_module_id: 700,
+        source_module_type_id: 439,
+        effective_module: DogmaItemState::from_sde(700, 439, &sde),
+        distance: 5_000.0,
+        charge_type_id: None,
+        overloaded: false,
+    });
+    eng.gang_bursts.push(GangBurstEffect {
+        source_item_id: 800,
+        source_type_id: None,
+        dbuff_id: Some(22),
+        value: 15.0,
+        modifiers: Vec::new(),
+    });
+    eng.active_stance_type_id = Some(34321);
+    eng.drones.push((901, 2454));
+
+    eng.recalculate_stats(&sde);
+    assert!(eng.has_fresh_evaluation());
+    assert!(eng.persisted_context().is_some());
+
+    // Non-snapshot fields do not invalidate the evaluation cache
+    let mut non_snap = eng.clone();
+    non_snap.rack_heat[0] = 0.75;
+    non_snap.last_stance_switch_ms = Some(42_000);
+    assert!(non_snap.has_fresh_evaluation());
+    assert!(non_snap.persisted_context().is_some());
+
+    // Clearing evaluated_context_cache while snapshot remains Some invalidates has_fresh_evaluation
+    let mut missing_cache = eng.clone();
+    missing_cache.evaluated_context_cache = None;
+    assert!(!missing_cache.has_fresh_evaluation());
+    assert!(missing_cache.persisted_context().is_none());
+
+    // Mutate each of the 12 snapshot fields one at a time and verify independent invalidation
+    let mut c1 = eng.clone();
+    c1.ship.item_id = 999;
+    assert!(!c1.has_fresh_evaluation() && c1.persisted_context().is_none());
+
+    let mut c2 = eng.clone();
+    c2.ship.type_id = 603;
+    assert!(!c2.has_fresh_evaluation() && c2.persisted_context().is_none());
+
+    let mut c3 = eng.clone();
+    c3.active_stance_type_id = None;
+    assert!(!c3.has_fresh_evaluation() && c3.persisted_context().is_none());
+
+    let mut c4 = eng.clone();
+    c4.modules.get_mut(&11).unwrap().state = ModuleState::Active;
+    assert!(!c4.has_fresh_evaluation() && c4.persisted_context().is_none());
+
+    let mut c5 = eng.clone();
+    c5.character_skills.insert(3436, 4);
+    assert!(!c5.has_fresh_evaluation() && c5.persisted_context().is_none());
+
+    let mut c6 = eng.clone();
+    c6.implants.push(4002);
+    assert!(!c6.has_fresh_evaluation() && c6.persisted_context().is_none());
+
+    let mut c7 = eng.clone();
+    c7.boosters.clear();
+    assert!(!c7.has_fresh_evaluation() && c7.persisted_context().is_none());
+
+    let mut c8 = eng.clone();
+    c8.booster_side_effects.get_mut(&4500).unwrap().clear();
+    assert!(!c8.has_fresh_evaluation() && c8.persisted_context().is_none());
+
+    let mut c9 = eng.clone();
+    c9.projected_ewar[0].distance += 1.0;
+    assert!(!c9.has_fresh_evaluation() && c9.persisted_context().is_none());
+
+    let mut c10 = eng.clone();
+    c10.gang_bursts[0].value += 5.0;
+    assert!(!c10.has_fresh_evaluation() && c10.persisted_context().is_none());
+
+    let mut c11 = eng.clone();
+    c11.drones[0].1 = 2456;
+    assert!(!c11.has_fresh_evaluation() && c11.persisted_context().is_none());
+
+    let mut c12 = eng.clone();
+    c12.ship
+        .base_attributes
+        .insert(attr_ids::MAX_VELOCITY, 260.0);
+    assert!(!c12.has_fresh_evaluation() && c12.persisted_context().is_none());
+}
+
+#[test]
+fn fresh_and_stale_accessors_hit_expected_paths_and_isolate_owned_slices() {
+    let mut sde = SdeRegistry::default();
+    sde.types.insert(602, make_type(602, 25, 6, &[], &[]));
+    // Drone type 2454 with DAMAGE_MULTIPLIER = 1.5
+    sde.types.insert(
+        2454,
+        make_type(2454, 100, 18, &[(attr_ids::DAMAGE_MULTIPLIER, 1.5)], &[]),
+    );
+    // Launcher module type 1877 with MAX_RANGE = 55.0 and DURATION = 4000.0
+    sde.types.insert(
+        1877,
+        make_type(
+            1877,
+            509,
+            7,
+            &[(attr_ids::MAX_RANGE, 55.0), (attr_ids::DURATION, 4000.0)],
+            &[],
+        ),
+    );
+    // Charge type 27361 with explicit MAX_RANGE = 0.0 and KINETIC_DAMAGE = 80.0 (no DURATION)
+    sde.types.insert(
+        27361,
+        make_type(
+            27361,
+            384,
+            8,
+            &[(attr_ids::MAX_RANGE, 0.0), (attr_ids::KINETIC_DAMAGE, 80.0)],
+            &[],
+        ),
+    );
+
+    let mut eng = ShipFittingEngine::from_sde(1, 602, &sde);
+    // Use overlapping ID 901 for both a drone and a charged launcher module so .take(drones_len)
+    // vs .skip(drones_len) slice boundaries are strictly verified in stale mode!
+    eng.drones.push((901, 2454));
+    eng.drones.push((902, 2454));
+    eng.modules.insert(
+        901,
+        FittedModule {
+            item_id: 901,
+            type_id: 1877,
+            flag_id: 27,
+            state: ModuleState::Online,
+            damage_hp: 0.0,
+            max_hp: 40.0,
+            charge_type_id: Some(27361),
+            charge_quantity: 10,
+            dynamic_attribute_overrides: HashMap::from([(attr_ids::DURATION, 3500.0)]),
+        },
+    );
+    // Offline module 903 with dynamic override (not in ship_located_items, hits fallback in get_module_effective_attribute)
+    eng.modules.insert(
+        903,
+        FittedModule {
+            item_id: 903,
+            type_id: 1877,
+            flag_id: 28,
+            state: ModuleState::Offline,
+            damage_hp: 0.0,
+            max_hp: 40.0,
+            charge_type_id: None,
+            charge_quantity: 0,
+            dynamic_attribute_overrides: HashMap::from([(attr_ids::DURATION, 2500.0)]),
+        },
+    );
+
+    // 1. Stale mode (before recalculate_stats)
+    assert!(!eng.has_fresh_evaluation());
+    assert_eq!(eng.get_character_effective_attribute(192, &sde), 2.0);
+    assert_eq!(eng.drone_state(901, &sde).unwrap().type_id, 2454);
+    assert!(eng.drone_state(999_999, &sde).is_none());
+    assert_eq!(
+        eng.get_drone_effective_attribute(901, attr_ids::DAMAGE_MULTIPLIER, &sde),
+        1.5
+    );
+    assert_eq!(
+        eng.get_drone_effective_attribute(999_999, attr_ids::DAMAGE_MULTIPLIER, &sde),
+        0.0
+    );
+    assert_eq!(eng.module_state(901, &sde).unwrap().type_id, 1877);
+    assert!(eng.module_state(903, &sde).is_none());
+    assert_eq!(
+        eng.get_module_effective_attribute(901, attr_ids::DURATION, &sde),
+        3500.0
+    );
+    assert_eq!(
+        eng.get_module_effective_attribute(903, attr_ids::DURATION, &sde),
+        2500.0
+    );
+    assert_eq!(
+        eng.get_module_effective_attribute(999_999, attr_ids::DURATION, &sde),
+        0.0
+    );
+    // Charge state at ID 901 must skip the drone at ID 901 and find the charge (type 27361)!
+    assert_eq!(eng.charge_state(901, &sde).unwrap().type_id, 27361);
+    assert!(eng.charge_state(999_999, &sde).is_none());
+    // Charge attribute cases in stale mode:
+    // - non-zero on charge (80.0)
+    assert_eq!(
+        eng.get_charge_effective_attribute(901, attr_ids::KINETIC_DAMAGE, &sde),
+        80.0
+    );
+    // - explicit 0.0 in charge base_attributes (must return 0.0, NOT fall back to launcher's 55.0)
+    assert_eq!(
+        eng.get_charge_effective_attribute(901, attr_ids::MAX_RANGE, &sde),
+        0.0
+    );
+    // - absent on charge -> falls back to launcher module's effective DURATION (3500.0)
+    assert_eq!(
+        eng.get_charge_effective_attribute(901, attr_ids::DURATION, &sde),
+        3500.0
+    );
+    assert_eq!(eng.evaluated_context(&sde).owned_items.len(), 3);
+
+    // 2. Fresh mode (after recalculate_stats)
+    eng.recalculate_stats(&sde);
+    assert!(eng.has_fresh_evaluation());
+    assert_eq!(eng.get_character_effective_attribute(192, &sde), 2.0);
+    assert_eq!(eng.drone_state(901, &sde).unwrap().type_id, 2454);
+    assert!(eng.drone_state(999_999, &sde).is_none());
+    assert_eq!(
+        eng.get_drone_effective_attribute(901, attr_ids::DAMAGE_MULTIPLIER, &sde),
+        1.5
+    );
+    assert_eq!(eng.module_state(901, &sde).unwrap().type_id, 1877);
+    assert!(eng.module_state(903, &sde).is_none());
+    assert_eq!(
+        eng.get_module_effective_attribute(901, attr_ids::DURATION, &sde),
+        3500.0
+    );
+    // Offline module 903 is not in evaluated_modules, so fresh path falls back to modules.get(&903)
+    assert_eq!(
+        eng.get_module_effective_attribute(903, attr_ids::DURATION, &sde),
+        2500.0
+    );
+    assert_eq!(
+        eng.get_module_effective_attribute(999_999, attr_ids::DURATION, &sde),
+        0.0
+    );
+    assert_eq!(eng.charge_state(901, &sde).unwrap().type_id, 27361);
+    assert!(eng.charge_state(999_999, &sde).is_none());
+    assert_eq!(
+        eng.get_charge_effective_attribute(901, attr_ids::KINETIC_DAMAGE, &sde),
+        80.0
+    );
+    assert_eq!(
+        eng.get_charge_effective_attribute(901, attr_ids::MAX_RANGE, &sde),
+        0.0
+    );
+    assert_eq!(
+        eng.get_charge_effective_attribute(901, attr_ids::DURATION, &sde),
+        3500.0
+    );
+    assert_eq!(eng.evaluated_context(&sde).owned_items.len(), 3);
+
+    // Exercise fresh-mode fallback when evaluated_drones entry is missing while cache is still fresh
+    eng.evaluated_drones.remove(&902);
+    assert!(eng.has_fresh_evaluation());
+    assert_eq!(
+        eng.get_drone_effective_attribute(902, attr_ids::DAMAGE_MULTIPLIER, &sde),
+        1.5
+    );
+}
+
+#[test]
+fn offline_charged_modules_populate_owned_items_sorted_skip_unknown_and_receive_bcs() {
+    let mut sde = SdeRegistry::default();
+    sde.types.insert(602, make_type(602, 25, 6, &[], &[]));
+    sde.effects.insert(
+        763,
+        DogmaEffectType {
+            effect_id: 763,
+            name: "bcsBonus".to_string(),
+            effect_category: 0,
+            modifiers: vec![EffectModifierSpec {
+                domain: "charID".to_string(),
+                func: "ItemModifier".to_string(),
+                modified_attribute_id: 212,
+                modifying_attribute_id: 213,
+                operator: 4,
+                group_id: None,
+                skill_type_id: None,
+                effect_id: None,
+            }],
+            ..Default::default()
+        },
+    );
+    sde.types
+        .insert(22291, make_type(22291, 367, 7, &[(213, 1.10)], &[763]));
+    sde.types.insert(1877, make_type(1877, 509, 7, &[], &[]));
+    sde.types.insert(
+        27361,
+        make_type(27361, 384, 8, &[(attr_ids::KINETIC_DAMAGE, 100.0)], &[]),
+    );
+
+    let mut eng = ShipFittingEngine::from_sde(1, 602, &sde);
+    // Online BCS
+    eng.modules.insert(
+        10,
+        FittedModule {
+            item_id: 10,
+            type_id: 22291,
+            flag_id: 11,
+            state: ModuleState::Online,
+            damage_hp: 0.0,
+            max_hp: 40.0,
+            charge_type_id: None,
+            charge_quantity: 0,
+            dynamic_attribute_overrides: HashMap::new(),
+        },
+    );
+    // Two offline charged launchers (flag 28 id 30, flag 27 id 25) + offline uncharged + offline unknown charge
+    for (id, flag, charge) in [
+        (30_i64, 28_u16, Some(27361_u32)),
+        (25, 27, Some(27361)),
+        (40, 29, None),
+        (50, 30, Some(999_999)),
+    ] {
+        eng.modules.insert(
+            id,
+            FittedModule {
+                item_id: id,
+                type_id: 1877,
+                flag_id: flag,
+                state: ModuleState::Offline,
+                damage_hp: 0.0,
+                max_hp: 40.0,
+                charge_type_id: charge,
+                charge_quantity: if charge.is_some() { 5 } else { 0 },
+                dynamic_attribute_overrides: HashMap::new(),
+            },
+        );
+    }
+
+    eng.recalculate_stats(&sde);
+    assert!(!eng.evaluated_modules.contains_key(&25));
+    assert!(!eng.evaluated_modules.contains_key(&30));
+    assert!(eng.evaluated_charges.contains_key(&25));
+    assert!(eng.evaluated_charges.contains_key(&30));
+    assert!(!eng.evaluated_charges.contains_key(&40));
+    assert!(!eng.evaluated_charges.contains_key(&50));
+
+    let ctx = eng.persisted_context().unwrap();
+    let owned_ids: Vec<i64> = ctx.owned_items.iter().map(|i| i.item_id).collect();
+    assert_eq!(owned_ids, vec![25, 30]);
+
+    // Offline missile charges still receive character's missileDamageMultiplier (100 * 1.10 = 110.0)
+    assert!(
+        (eng.get_charge_effective_attribute(25, attr_ids::KINETIC_DAMAGE, &sde) - 110.0).abs()
+            < 1e-9
+    );
+    assert!(
+        (eng.get_charge_effective_attribute(30, attr_ids::KINETIC_DAMAGE, &sde) - 110.0).abs()
+            < 1e-9
+    );
+}
+
+#[test]
+fn launcher_structural_attributes_excluded_from_charge_propagation_and_deduped() {
+    let mut sde = SdeRegistry::default();
+    // Hull effect modifying launcher structural attrs (9, 30, 50, 1153, 1211) AND missile attr (281)
+    let mut hull_mods = Vec::new();
+    for target_attr in [9_u16, 30, 50, 1153, 1211, 281] {
+        hull_mods.push(EffectModifierSpec {
+            domain: "shipID".to_string(),
+            func: "LocationGroupModifier".to_string(),
+            modified_attribute_id: target_attr,
+            modifying_attribute_id: 20,
+            operator: 6, // PreMul / PostPercent
+            group_id: Some(509),
+            skill_type_id: None,
+            effect_id: None,
+        });
+    }
+    sde.effects.insert(
+        9001,
+        DogmaEffectType {
+            effect_id: 9001,
+            name: "hullLauncherMods".to_string(),
+            effect_category: 0,
+            modifiers: hull_mods,
+            ..Default::default()
+        },
+    );
+    sde.types
+        .insert(602, make_type(602, 25, 6, &[(20, 25.0)], &[9001]));
+    sde.types.insert(
+        1877,
+        make_type(
+            1877,
+            509,
+            7,
+            &[(9, 40.0), (30, 10.0), (50, 20.0), (1153, 50.0), (1211, 1.0)],
+            &[],
+        ),
+    );
+    sde.types.insert(
+        27361,
+        make_type(
+            27361,
+            384,
+            8,
+            &[(9, 1.0), (30, 1.0), (50, 1.0), (1153, 1.0), (1211, 1.0), (281, 5000.0)],
+            &[],
+        ),
+    );
+    // Dbuff 22 applying identical modifier to both launcher and charge via LocationRequiredSkillModifier
+    // to exercise !ch.modifiers.contains(m) deduplication
+    sde.dbuff_collections.insert(
+        22,
+        eve_sde::DbuffCollectionInfo {
+            dbuff_id: 22,
+            name: "dupCheck".to_string(),
+            operation: "PostPercent".to_string(),
+            aggregate_mode: "Maximum".to_string(),
+            display_name_id: None,
+            show_output_value_in_ui: None,
+            item_modifiers: Vec::new(),
+            location_modifiers: Vec::new(),
+            location_group_modifiers: Vec::new(),
+            location_required_skill_modifiers: vec![eve_sde::DbuffSkillModifier {
+                attribute_id: 281,
+                skill_id: 3319,
+            }],
+            target_attribute_ids: Vec::new(),
+        },
+    );
+    sde.types
+        .get_mut(&1877)
+        .unwrap()
+        .default_attributes
+        .insert(attr_ids::REQUIRED_SKILL_1, 3319.0);
+    sde.types
+        .get_mut(&27361)
+        .unwrap()
+        .default_attributes
+        .insert(attr_ids::REQUIRED_SKILL_1, 3319.0);
+
+    let mut eng = ShipFittingEngine::from_sde(1, 602, &sde);
+    eng.modules.insert(
+        20,
+        FittedModule {
+            item_id: 20,
+            type_id: 1877,
+            flag_id: 27,
+            state: ModuleState::Online,
+            damage_hp: 0.0,
+            max_hp: 40.0,
+            charge_type_id: Some(27361),
+            charge_quantity: 10,
+            dynamic_attribute_overrides: HashMap::new(),
+        },
+    );
+    eng.add_gang_burst(GangBurstEffect {
+        source_item_id: 5000,
+        source_type_id: None,
+        dbuff_id: Some(22),
+        value: 10.0,
+        modifiers: Vec::new(),
+    });
+    eng.recalculate_stats(&sde);
+
+    let ch = eng.charge_state(20, &sde).unwrap();
+    for excluded_attr in [9_u16, 30, 50, 1153, 1211] {
+        assert!(
+            !ch.modifiers
+                .iter()
+                .any(|m| m.target_attribute_id == excluded_attr),
+            "structural launcher attribute {excluded_attr} must NOT propagate onto charge"
+        );
+        assert_eq!(ch.get_attribute(excluded_attr, &sde), 1.0);
+    }
+    // Non-structural attr 281 gets the hull modifier (+25%) AND the dbuff modifier (+10%, deduped to 1 copy)
+    let dbuff_count = ch
+        .modifiers
+        .iter()
+        .filter(|m| m.source_item_id == 5000 && m.target_attribute_id == 281)
+        .count();
+    assert_eq!(dbuff_count, 1, "shared dbuff modifier must not be duplicated");
+    assert!((ch.get_attribute(281, &sde) - 5000.0 * 1.25 * 1.10).abs() < 1e-6);
+}
+
+#[test]
+fn missile_damage_multiplier_or_legs_are_independently_necessary_and_modifier_only_damage_scales() {
+    let mut sde = SdeRegistry::default();
+    sde.types.insert(602, make_type(602, 25, 6, &[], &[]));
+    // BCS giving 1.25x missileDamageMultiplier (attr 212)
+    sde.effects.insert(
+        763,
+        DogmaEffectType {
+            effect_id: 763,
+            name: "bcsBonus".to_string(),
+            effect_category: 0,
+            modifiers: vec![EffectModifierSpec {
+                domain: "charID".to_string(),
+                func: "ItemModifier".to_string(),
+                modified_attribute_id: 212,
+                modifying_attribute_id: 213,
+                operator: 4,
+                group_id: None,
+                skill_type_id: None,
+                effect_id: None,
+            }],
+            ..Default::default()
+        },
+    );
+    sde.types
+        .insert(22291, make_type(22291, 367, 7, &[(213, 1.25)], &[763]));
+
+    // Effect on launcher adding +50 THERMAL_DAMAGE to launcher (propagated to charge via Step 7)
+    // while charge has base EM_DAMAGE = 100.0 and base THERMAL_DAMAGE = 0.0 (modifier-only damage!)
+    sde.effects.insert(
+        9002,
+        DogmaEffectType {
+            effect_id: 9002,
+            name: "addThermal".to_string(),
+            effect_category: 0,
+            modifiers: vec![EffectModifierSpec {
+                domain: "itemID".to_string(),
+                func: "ItemModifier".to_string(),
+                modified_attribute_id: attr_ids::THERMAL_DAMAGE,
+                modifying_attribute_id: 20,
+                operator: 2, // ModAdd
+                group_id: None,
+                skill_type_id: None,
+                effect_id: None,
+            }],
+            ..Default::default()
+        },
+    );
+
+    // 6 distinct (launcher_type_id, charge_type_id) pairs isolating each `is_missile_charge` OR leg:
+    // 1. charge effect_id == 9 only
+    sde.types
+        .insert(7001, make_type(7001, 1, 7, &[(20, 50.0)], &[9002]));
+    sde.types.insert(
+        8001,
+        make_type(8001, 1, 8, &[(attr_ids::EM_DAMAGE, 100.0)], &[9]),
+    );
+    // 2. charge effect_id == 104 only
+    sde.types.insert(7002, make_type(7002, 1, 7, &[], &[]));
+    sde.types.insert(
+        8002,
+        make_type(8002, 1, 8, &[(attr_ids::EM_DAMAGE, 100.0)], &[104]),
+    );
+    // 3. charge group_id == 89 (torpedo) only
+    sde.types.insert(7003, make_type(7003, 1, 7, &[], &[]));
+    sde.types.insert(
+        8003,
+        make_type(8003, 89, 8, &[(attr_ids::EM_DAMAGE, 100.0)], &[]),
+    );
+    // 4. launcher effect_id == 101 only
+    sde.types.insert(7004, make_type(7004, 1, 7, &[], &[101]));
+    sde.types.insert(
+        8004,
+        make_type(8004, 1, 8, &[(attr_ids::EM_DAMAGE, 100.0)], &[]),
+    );
+    // 5. launcher group_id == 506 only
+    sde.types.insert(7005, make_type(7005, 506, 7, &[], &[]));
+    sde.types.insert(
+        8005,
+        make_type(8005, 1, 8, &[(attr_ids::EM_DAMAGE, 100.0)], &[]),
+    );
+    // 6. charge requires skill 3319 (Missile Launcher Operation) only
+    sde.types.insert(7006, make_type(7006, 1, 7, &[], &[]));
+    sde.types.insert(
+        8006,
+        make_type(
+            8006,
+            1,
+            8,
+            &[(attr_ids::EM_DAMAGE, 100.0), (attr_ids::REQUIRED_SKILL_1, 3319.0)],
+            &[],
+        ),
+    );
+
+    let mut eng = ShipFittingEngine::from_sde(1, 602, &sde);
+    eng.modules.insert(
+        10,
+        FittedModule {
+            item_id: 10,
+            type_id: 22291,
+            flag_id: 11,
+            state: ModuleState::Online,
+            damage_hp: 0.0,
+            max_hp: 40.0,
+            charge_type_id: None,
+            charge_quantity: 0,
+            dynamic_attribute_overrides: HashMap::new(),
+        },
+    );
+    for (idx, (ltid, ctid)) in [
+        (7001_u32, 8001_u32),
+        (7002, 8002),
+        (7003, 8003),
+        (7004, 8004),
+        (7005, 8005),
+        (7006, 8006),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let item_id = 100 + (idx as i64);
+        eng.modules.insert(
+            item_id,
+            FittedModule {
+                item_id,
+                type_id: ltid,
+                flag_id: 27 + (idx as u16),
+                state: ModuleState::Online,
+                damage_hp: 0.0,
+                max_hp: 40.0,
+                charge_type_id: Some(ctid),
+                charge_quantity: 10,
+                dynamic_attribute_overrides: HashMap::new(),
+            },
+        );
+    }
+
+    eng.recalculate_stats(&sde);
+    for item_id in 100..106 {
+        assert!(
+            (eng.get_charge_effective_attribute(item_id, attr_ids::EM_DAMAGE, &sde) - 125.0).abs()
+                < 1e-9,
+            "missile charge leg on module {item_id} must receive 1.25x BCS multiplier"
+        );
+    }
+    // Verify modifier-only THERMAL_DAMAGE (+50 ModAdd on launcher 100) also receives 1.25x PostMul -> 62.5,
+    // while zero/unmodified EXPLOSIVE_DAMAGE receives no PostMul modifier.
+    let ch100 = eng.charge_state(100, &sde).unwrap();
+    assert!((ch100.get_attribute(attr_ids::THERMAL_DAMAGE, &sde) - 62.5).abs() < 1e-9);
+    assert!(
+        !ch100
+            .modifiers
+            .iter()
+            .any(|m| m.target_attribute_id == attr_ids::EXPLOSIVE_DAMAGE)
+    );
+}
+

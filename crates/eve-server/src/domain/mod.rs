@@ -13,6 +13,8 @@ pub mod market_acl;
 
 #[cfg(test)]
 mod parity_tests;
+#[cfg(test)]
+mod domain_unit_tests;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DomainErrorKind {

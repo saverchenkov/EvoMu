@@ -139,3 +139,50 @@ fn require_bound_system_validates_presence_and_service_name_and_returns_system_i
         .expect("matching bound service must succeed");
     assert_eq!(sys_id, 30_000_142);
 }
+
+#[test]
+fn is_shutting_down_recovers_poisoned_lock_and_role_service_boundaries() {
+    use eve_machonet::service_roles::{
+        ROLE_ADMIN, ROLE_GMH, ROLE_GML, ROLE_PLAYER, ROLE_QA,
+    };
+
+    let ctx = test_ctx();
+    ctx.cluster_state.write().unwrap().shutdown_in_progress = true;
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = ctx.cluster_state.write().unwrap();
+        panic!("deliberately poison cluster_state rwlock");
+    }));
+    assert!(ctx.cluster_state.is_poisoned());
+    assert!(
+        !ctx.is_shutting_down(),
+        "is_shutting_down falls back to false on poisoned RwLock via unwrap_or(false)"
+    );
+
+    let mut sess = SessionState::new(8_900);
+    sess.user_id = Some(99);
+    for gm_mask in [ROLE_GML, ROLE_GMH, ROLE_ADMIN] {
+        sess.role = gm_mask;
+        assert_eq!(ServerContext::require_gm_role(&sess).unwrap(), 99);
+    }
+    sess.role = ROLE_PLAYER | ROLE_QA;
+    let qa_err = ServerContext::require_gm_role(&sess).unwrap_err();
+    assert_eq!(qa_err.code, "CustomError");
+
+    // Case-sensitive bound service match and boundary object_id values
+    let entry = BoundObjectEntry {
+        bound_id: 77,
+        session_id: 8_900,
+        user_id: 99,
+        character_id: 90_000_001,
+        service: "beyonce".to_string(),
+        object_id: 30_000_142,
+        oid_str: "30000142".to_string(),
+        ref_id: 0,
+    };
+    let case_err = ServerContext::require_bound_system(Some(&entry), "BEYONCE").unwrap_err(); // rpc-lint: allow test fixture
+    assert_eq!(case_err.code, "InvalidBoundService");
+    assert_eq!(
+        ServerContext::require_bound_system(Some(&entry), "beyonce").unwrap(),
+        30_000_142
+    );
+}

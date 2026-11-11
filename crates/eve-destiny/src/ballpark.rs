@@ -302,30 +302,34 @@ impl Ballpark {
 
     /// Contracts an expanded grid back toward its `base_radius` around `center` or deletes the grid if empty (`Grid.md:13`).
     pub fn contract_or_delete_grid(&mut self, grid_id: u64) {
-        let Some(is_empty) = self.grids.get(&grid_id).map(|g| g.members.is_empty()) else {
+        let Some(grid) = self.grids.get(&grid_id) else {
             return;
         };
-        if is_empty {
+        if grid.members.is_empty() {
             self.grids.remove(&grid_id);
             return;
         }
-        let member_positions: Vec<DVec3> = self
-            .grids
-            .get(&grid_id)
-            .map(|g| {
-                g.members
-                    .iter()
-                    .filter_map(|id| self.balls.get(id).map(|b| b.position))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let base_min = grid.center - DVec3::splat(grid.base_radius);
+        let base_max = grid.center + DVec3::splat(grid.base_radius);
+        if grid.min_bounds.x >= base_min.x
+            && grid.min_bounds.y >= base_min.y
+            && grid.min_bounds.z >= base_min.z
+            && grid.max_bounds.x <= base_max.x
+            && grid.max_bounds.y <= base_max.y
+            && grid.max_bounds.z <= base_max.z
+        {
+            return;
+        }
+        let member_positions: Vec<DVec3> = grid
+            .members
+            .iter()
+            .filter_map(|id| self.balls.get(id).map(|b| b.position))
+            .collect();
         if let Some(g) = self.grids.get_mut(&grid_id) {
             let thresh = DVec3::splat(GRID_WALL_EXPANSION_THRESHOLD_METERS);
             let max_ext = MAX_GRID_EXTENT_METERS.max(g.base_radius);
             let max_min = g.center - DVec3::splat(max_ext);
             let max_max = g.center + DVec3::splat(max_ext);
-            let base_min = g.center - DVec3::splat(g.base_radius);
-            let base_max = g.center + DVec3::splat(g.base_radius);
             let mut req_min = base_min;
             let mut req_max = base_max;
             for p in member_positions {

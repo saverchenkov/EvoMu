@@ -888,3 +888,7 @@ pub fn legacy_operations() -> Vec<OperationSpec> {
 #[path = "openapi_unit_tests.rs"]
 mod openapi_unit_tests;
 
+#[cfg(test)]
+#[path = "openapi_edges_tests.rs"]
+mod openapi_edges_tests;
+

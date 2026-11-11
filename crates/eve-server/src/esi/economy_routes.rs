@@ -1222,3 +1222,7 @@ pub fn dispatch_economy_route(
 #[path = "economy_routes_unit_tests.rs"]
 mod economy_routes_unit_tests;
 
+#[cfg(test)]
+#[path = "economy_routes_edges_tests.rs"]
+mod economy_routes_edges_tests;
+

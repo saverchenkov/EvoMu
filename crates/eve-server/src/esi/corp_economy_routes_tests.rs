@@ -554,3 +554,321 @@ fn esi_markets_contracts_and_industry_mining_pi_pocos_populated() {
         400
     );
 }
+
+#[test]
+fn esi_economy_routes_auth_acl_prices_and_contract_edge_statuses() {
+    use eve_db::ContractRecord;
+    use eve_db::snapshot_ext::MarketHistoryDayRecord;
+    use serde_json::Value;
+
+    let (ctx, token, char_id, corp_id, _planet_id) = seed_full_esi_context();
+    let router = EsiRouter::new(Arc::clone(&ctx));
+    let structure_id = 1_055_000_001_i64;
+    let non_party_char_id = 90_000_002_i64;
+    let now = ctx.now_unix();
+    let some_mg_id = ctx
+        .sde
+        .market_groups
+        .values()
+        .find(|m| m.parent_group_id.is_some())
+        .map(|m| m.market_group_id)
+        .unwrap_or(2);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if !snap.characters.contains_key(&non_party_char_id) {
+            let mut ch2 = snap.characters[&char_id].clone();
+            ch2.character_id = non_party_char_id;
+            snap.characters.insert(non_party_char_id, ch2);
+        }
+        // Ensure `structure_id` has an online Market Hub (`35_892`) owned by `corp_id` so ACL & hub checks pass (`?page=99` -> 404)
+        if let Some(st) = snap.structures.get_mut(&structure_id) {
+            st.type_id = 35_833;
+            st.owner_corp_id = corp_id;
+            st.state = "ShieldVulnerable".into();
+            st.quantum_core_installed = true;
+            st.fuel_blocks = 500;
+        }
+        snap.items.insert(
+            1_055_000_099,
+            InventoryItemRecord {
+                item_id: 1_055_000_099,
+                type_id: 35_892,
+                owner_id: corp_id,
+                location_id: structure_id,
+                flag: InventoryFlag::from_u16(164),
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::from([(2, 1.0)]),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        snap.module_online_states.insert(1_055_000_099, true);
+
+        // Clear any pre-seeded entries for test type_ids 35 & 36 so price math isolates our test rows
+        snap.market_history.retain(|&(_, tid), _| tid != 35 && tid != 36);
+        snap.market_orders.retain(|_, o| o.type_id != 35 && o.type_id != 36);
+        // Market prices cases: zero-volume history fallback, order-only fallback, zero-remaining ignored
+        snap.market_history.insert(
+            (10_000_002, 35),
+            vec![MarketHistoryDayRecord {
+                date: "2026-01-01".into(),
+                average: 25.0,
+                highest: 30.0,
+                lowest: 20.0,
+                order_count: 1,
+                volume: 0,
+                open_price: None,
+                close_price: None,
+            }],
+        );
+        snap.market_orders.insert(
+            88_101,
+            MarketOrderRecord {
+                order_id: 88_101,
+                owner_id: char_id,
+                station_id: 60_003_760,
+                region_id: 10_000_002,
+                type_id: 36,
+                is_bid: false,
+                price: IskCents::from_isk(42),
+                vol_entered: 100,
+                vol_remaining: 50,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+        // Corp historical order WITHOUT issued_by still renders in corp orders history, while one WITHOUT state is omitted
+        snap.market_orders.insert(
+            88_102,
+            MarketOrderRecord {
+                order_id: 88_102,
+                owner_id: corp_id,
+                station_id: 60_003_760,
+                region_id: 10_000_002,
+                type_id: 36,
+                is_bid: true,
+                price: IskCents::from_isk(10),
+                vol_entered: 10,
+                vol_remaining: 0,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+        snap.market_order_meta.insert(
+            88_102,
+            MarketOrderMeta {
+                issued_unix: now.saturating_sub(1200),
+                duration_days: 7,
+                range: "station".into(),
+                issued_by: None,
+                wallet_division: Some(2),
+                is_corporation: true,
+                state: Some("expired".into()),
+            },
+        );
+
+        // Contracts:
+        // - 66_010: public expired -> 204 on /contracts/public/items|bids and omitted from /contracts/public/{region}
+        // - 66_011: personal contract between char2 -> non_party_char -> 403 on char_id items/bids!
+        // - 66_012: corp contract with `for_corp == true`, `issuer_corp_id == 0`, `issuer_id == char_id` (member of corp)
+        // - 66_013: old InProgress > 30d (retained in list) vs old Completed > 30d (66_014 dropped)
+        snap.contracts.insert(
+            66_010,
+            ContractRecord {
+                contract_id: 66_010,
+                issuer_id: non_party_char_id,
+                contract_type: "Auction".into(),
+                status: "Outstanding".into(),
+                start_station_id: 60_003_760,
+                end_station_id: 60_003_760,
+                availability: "Public".into(),
+                expiration_unix: now.saturating_sub(60),
+                date_issued_unix: now.saturating_sub(1_000),
+                bid_history: vec![(char_id, IskCents::from_isk(500), now.saturating_sub(120))],
+                ..Default::default()
+            },
+        );
+        snap.contracts.insert(
+            66_011,
+            ContractRecord {
+                contract_id: 66_011,
+                issuer_id: non_party_char_id,
+                assignee_id: non_party_char_id,
+                contract_type: "ItemExchange".into(),
+                status: "Outstanding".into(),
+                start_station_id: 60_003_760,
+                end_station_id: 60_003_760,
+                availability: "Personal".into(),
+                expiration_unix: now + 86_400,
+                date_issued_unix: now.saturating_sub(60),
+                ..Default::default()
+            },
+        );
+        snap.contracts.insert(
+            66_012,
+            ContractRecord {
+                contract_id: 66_012,
+                issuer_id: char_id,
+                issuer_corp_id: 0,
+                for_corp: true,
+                contract_type: "Courier".into(),
+                status: "Outstanding".into(),
+                start_station_id: 60_003_760,
+                end_station_id: 60_003_760,
+                availability: "Corporation".into(),
+                expiration_unix: now + 86_400,
+                date_issued_unix: now.saturating_sub(60),
+                ..Default::default()
+            },
+        );
+        snap.contracts.insert(
+            66_013,
+            ContractRecord {
+                contract_id: 66_013,
+                issuer_id: char_id,
+                contract_type: "ItemExchange".into(),
+                status: "InProgress".into(),
+                start_station_id: 60_003_760,
+                end_station_id: 60_003_760,
+                availability: "Personal".into(),
+                date_issued_unix: now.saturating_sub(45 * 86_400),
+                expiration_unix: now + 86_400,
+                ..Default::default()
+            },
+        );
+        snap.contracts.insert(
+            66_014,
+            ContractRecord {
+                contract_id: 66_014,
+                issuer_id: char_id,
+                contract_type: "ItemExchange".into(),
+                status: "Completed".into(),
+                start_station_id: 60_003_760,
+                end_station_id: 60_003_760,
+                availability: "Personal".into(),
+                date_issued_unix: now.saturating_sub(45 * 86_400),
+                expiration_unix: now.saturating_sub(40 * 86_400),
+                ..Default::default()
+            },
+        );
+    });
+
+    let get_auth = |path: &str| router.handle_request(&EsiHttpRequest::new("GET", path).with_bearer_token(&token));
+
+    // Market groups: valid + localized query + 404 + 400
+    assert_eq!(get_auth(&format!("/latest/markets/groups/{some_mg_id}?language=de")).status_code, 200);
+    assert_eq!(get_auth("/latest/markets/groups/99999999").status_code, 404);
+    assert_eq!(get_auth("/latest/markets/groups/0").status_code, 400);
+
+    // Market prices includes zero-volume history average (25.0) & order-only type 36 (42.0)
+    let prices_resp = get_auth("/latest/markets/prices");
+    assert_eq!(prices_resp.status_code, 200);
+    let prices: Value = serde_json::from_slice(&prices_resp.body).unwrap();
+    let arr = prices.as_array().unwrap();
+    assert!(arr.iter().any(|r| r["type_id"] == 35 && r["average_price"] == 25.0));
+    assert!(arr.iter().any(|r| r["type_id"] == 36 && r["average_price"] == 42.0));
+
+    // Market history & orders & types validation errors
+    assert_eq!(get_auth("/latest/markets/99999999/orders").status_code, 400);
+    assert_eq!(get_auth("/latest/markets/99999999/orders?order_type=all").status_code, 404);
+    assert_eq!(get_auth("/latest/markets/10000002/orders?order_type=bad").status_code, 400);
+    assert_eq!(get_auth("/latest/markets/10000002/orders?order_type=all&type_id=0").status_code, 400);
+    assert_eq!(get_auth("/latest/markets/10000002/history").status_code, 400);
+    assert_eq!(get_auth("/latest/markets/10000002/history?type_id=abc").status_code, 400);
+    assert_eq!(get_auth("/latest/markets/10000002/history?type_id=99999999").status_code, 404);
+    assert_eq!(get_auth("/latest/markets/99999999/history?type_id=34").status_code, 404);
+    assert_eq!(get_auth("/latest/markets/99999999/types").status_code, 404);
+    assert_eq!(get_auth("/latest/markets/10000002/types?page=99").status_code, 404);
+
+    // Upwell structure market access: missing auth -> 401, unknown -> 404, bad page -> 404, offline/no market hub -> 403
+    assert_eq!(
+        router
+            .handle_request(&EsiHttpRequest::new("GET", &format!("/latest/markets/structures/{structure_id}")))
+            .status_code,
+        401
+    );
+    assert_eq!(get_auth("/latest/markets/structures/9999999999").status_code, 404);
+    assert_eq!(get_auth(&format!("/latest/markets/structures/{structure_id}?page=99")).status_code, 404);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            structure_id + 1,
+            eve_db::UpwellStructureRecord {
+                structure_id: structure_id + 1,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142,
+                name: "No Market Hub".into(),
+                position: [0.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+    });
+    assert_eq!(get_auth(&format!("/latest/markets/structures/{}", structure_id + 1)).status_code, 403);
+
+    // Character & corporation orders error / history branches (403 via EsiRouter ACL, 404 inside economy_routes)
+    assert_eq!(get_auth("/latest/characters/99999999/orders").status_code, 403);
+    assert_eq!(get_auth("/latest/corporations/99999999/orders").status_code, 403);
+    assert_eq!(
+        super::economy_routes::dispatch_economy_route(
+            &ctx,
+            "GET",
+            "/characters/{character_id}/orders",
+            &HashMap::from([("character_id".to_string(), "99999999".to_string())]),
+            &HashMap::new(),
+            None,
+            1,
+        )
+        .unwrap()
+        .status_code,
+        404
+    );
+    assert_eq!(
+        super::economy_routes::dispatch_economy_route(
+            &ctx,
+            "GET",
+            "/corporations/{corporation_id}/orders",
+            &HashMap::from([("corporation_id".to_string(), "99999999".to_string())]),
+            &HashMap::new(),
+            None,
+            1,
+        )
+        .unwrap()
+        .status_code,
+        404
+    );
+    let corp_hist: Value = serde_json::from_slice(&get_auth(&format!("/latest/corporations/{corp_id}/orders/history")).body).unwrap();
+    assert!(corp_hist.as_array().unwrap().iter().any(|o| o["order_id"] == 88_102 && o.get("issued_by").is_none()));
+
+    // Contracts edge statuses:
+    // - Expired public contract -> 204 No Content on items & bids, excluded from regional public list
+    assert_eq!(get_auth("/latest/contracts/public/items/66010").status_code, 204);
+    assert_eq!(get_auth("/latest/contracts/public/bids/66010").status_code, 204);
+    assert_eq!(get_auth("/latest/contracts/public/items/99999999").status_code, 404);
+    assert_eq!(get_auth("/latest/contracts/public/bids/66011").status_code, 404);
+    let pub_contracts: Value = serde_json::from_slice(&get_auth("/latest/contracts/public/10000002").body).unwrap();
+    assert!(!pub_contracts.as_array().unwrap().iter().any(|c| c["contract_id"] == 66_010));
+
+    // - Character contracts: excludes for_corp (66_012) & old Completed (66_014), retains old InProgress (66_013); 403 on non-party contract (66_011)
+    let char_contracts: Value = serde_json::from_slice(&get_auth(&format!("/latest/characters/{char_id}/contracts")).body).unwrap();
+    let char_cids: Vec<i64> = char_contracts.as_array().unwrap().iter().map(|c| c["contract_id"].as_i64().unwrap()).collect();
+    assert!(char_cids.contains(&66_013));
+    assert!(!char_cids.contains(&66_012));
+    assert!(!char_cids.contains(&66_014));
+    assert_eq!(get_auth(&format!("/latest/characters/{char_id}/contracts/66011/items")).status_code, 403);
+    assert_eq!(get_auth(&format!("/latest/characters/{char_id}/contracts/66011/bids")).status_code, 403);
+    assert_eq!(get_auth(&format!("/latest/characters/{char_id}/contracts/99999999/items")).status_code, 404);
+
+    // - Corporation contracts: includes `for_corp == true` with `issuer_corp_id == 0` falling back to `corp_id`, 404 on non-corp contract
+    let corp_contracts: Value = serde_json::from_slice(&get_auth(&format!("/latest/corporations/{corp_id}/contracts")).body).unwrap();
+    let corp_c12 = corp_contracts.as_array().unwrap().iter().find(|c| c["contract_id"] == 66_012).expect("66_012 in corp contracts");
+    assert_eq!(corp_c12["issuer_corporation_id"], corp_id);
+    assert_eq!(get_auth(&format!("/latest/corporations/{corp_id}/contracts/66011/items")).status_code, 404);
+    assert_eq!(get_auth(&format!("/latest/corporations/{corp_id}/contracts/66011/bids")).status_code, 404);
+}

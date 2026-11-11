@@ -1144,3 +1144,11 @@ mod sso_tests;
 #[path = "sso_extra_tests.rs"]
 mod sso_extra_tests;
 
+#[cfg(test)]
+#[path = "sso_edges_tests.rs"]
+mod sso_edges_tests;
+
+#[cfg(test)]
+#[path = "sso_edges2_tests.rs"]
+mod sso_edges2_tests;
+

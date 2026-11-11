@@ -495,4 +495,12 @@ async fn tractor_beam_drone_bandwidth_and_drone_controller_exact_checks() {
     assert_eq!(recalled, vec![valid_drone_1]);
     assert!(!ctrl.active_drones.contains_key(&b1));
     assert!(ctrl.active_drones.contains_key(&b2));
+
+    // recall_drones for other_ship_id recalls valid_drone_2 and leaves active_drones empty
+    let recalled_other = ctrl
+        .recall_drones(&ctx, sys_id, other_ship_id)
+        .await
+        .unwrap();
+    assert_eq!(recalled_other, vec![valid_drone_2]);
+    assert!(ctrl.active_drones.is_empty());
 }

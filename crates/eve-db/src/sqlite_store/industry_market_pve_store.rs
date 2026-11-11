@@ -42,7 +42,24 @@ pub fn apply_d6_batch4_migration(conn: &Connection) -> Result<(), String> {
 }
 
 fn fp_str_map(map: &HashMap<String, String>) -> u64 {
-    super::fingerprints::canonical_fp(map)
+    use std::hash::Hasher;
+    let mut xor = 0u64;
+    let mut sum = 0u64;
+    for (k, v) in map {
+        let mut eh = std::collections::hash_map::DefaultHasher::new();
+        eh.write_usize(k.len());
+        eh.write(k.as_bytes());
+        eh.write_usize(v.len());
+        eh.write(v.as_bytes());
+        let entry_fp = eh.finish();
+        xor ^= entry_fp;
+        sum = sum.wrapping_add(entry_fp.rotate_left(13));
+    }
+    let mut out = FnvHasher::new();
+    out.write_u64(map.len() as u64);
+    out.write_u64(xor);
+    out.write_u64(sum);
+    out.finish()
 }
 
 fn fp_map<K: Serialize, V: Serialize>(map: &HashMap<K, V>) -> u64 {

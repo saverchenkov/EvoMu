@@ -370,3 +370,159 @@ fn dispatch_medals_roles_titles_bookmarks_projects_and_opportunities() {
     assert!(opp_arr.len() >= 2);
     assert_eq!(opp_arr[0]["task_id"], 1);
 }
+
+#[test]
+fn corp_bookmarks_membership_and_cspa_alliance_and_standing_boundaries() {
+    let (ctx, _token, char_id, corp_id, _planet_id) = seed_full_esi_context();
+    let other_corp_id = 98_000_555_i64;
+    let member_via_set_id = 90_000_201_i64;
+    let outsider_id = 90_000_202_i64;
+    let ally_diff_corp_id = 90_000_203_i64;
+    let neg10_id = 90_000_204_i64;
+    let neg99_id = 90_000_205_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let alliance_id = snap.characters[&char_id].alliance_id.unwrap();
+        let mut base = snap.characters[&char_id].clone();
+
+        // Caller is NOT ch.corporation_id, NOT ceo_id, NOT in member_roles, ONLY in corp.members!
+        base.character_id = member_via_set_id;
+        base.name = "CorpMembersOnly".into();
+        base.corporation_id = other_corp_id;
+        base.alliance_id = None;
+        snap.characters.insert(member_via_set_id, base.clone());
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.members.insert(member_via_set_id);
+        }
+
+        // Outsider in another corp and not in corp.members
+        base.character_id = outsider_id;
+        base.name = "CorpOutsider".into();
+        snap.characters.insert(outsider_id, base.clone());
+
+        // Same-alliance, different-corp character with a CSPA fee (must STILL be charged!)
+        base.character_id = ally_diff_corp_id;
+        base.name = "SameAllianceDiffCorp".into();
+        base.corporation_id = other_corp_id;
+        base.alliance_id = Some(alliance_id);
+        snap.characters.insert(ally_diff_corp_id, base.clone());
+        snap.character_cspa_charges
+            .insert(ally_diff_corp_id, eve_db::IskCents::from_isk(2_500));
+
+        // -10.0 standing boundary (NOT > -10.0 -> charged) vs -9.9 (> -10.0 -> exempt)
+        base.character_id = neg10_id;
+        base.name = "Neg10Target".into();
+        base.alliance_id = None;
+        snap.characters.insert(neg10_id, base.clone());
+        snap.character_cspa_charges
+            .insert(neg10_id, eve_db::IskCents::from_isk(1_000));
+        snap.char_contacts.insert(
+            neg10_id,
+            vec![eve_db::SocialContactRecord {
+                contact_id: char_id,
+                standing: -10.0,
+                is_blocked: false,
+                is_watched: false,
+                label_ids: Vec::new(),
+                contact_type: "character".into(),
+            }],
+        );
+
+        base.character_id = neg99_id;
+        base.name = "Neg99Target".into();
+        snap.characters.insert(neg99_id, base);
+        snap.character_cspa_charges
+            .insert(neg99_id, eve_db::IskCents::from_isk(3_000));
+        snap.char_contacts.insert(
+            neg99_id,
+            vec![eve_db::SocialContactRecord {
+                contact_id: char_id,
+                standing: -9.9,
+                is_blocked: false,
+                is_watched: false,
+                label_ids: Vec::new(),
+                contact_type: "character".into(),
+            }],
+        );
+    });
+
+    let empty_q = HashMap::new();
+    let p_corp = params(&[("corporation_id", &corp_id.to_string())]);
+    let mk_claims = |cid: i64| eve_db::SsoTokenClaims {
+        sub: format!("CHARACTER:EVE:{cid}"),
+        name: "SocialTester".into(),
+        owner: "h".into(),
+        user_id: 1,
+        character_id: cid,
+        scp: Vec::new(),
+        iss: "evomu".into(),
+        aud: vec!["EVE Online".into()],
+        iat: 1_700_000_000,
+        exp: 1_800_000_000,
+        jti: "jti-social".into(),
+    };
+
+    // 1. esi_caller_in_corp accepts caller solely via corp.members.contains(&caller_cid), rejects outsider.
+    let ok_bm = dispatch_char_social_route_with_claims(
+        &ctx,
+        "GET",
+        "/corporations/{corporation_id}/bookmarks",
+        &p_corp,
+        &empty_q,
+        Some(&mk_claims(member_via_set_id)),
+        b"",
+    )
+    .unwrap();
+    assert_eq!(ok_bm.status_code, 200);
+
+    let denied_bm = dispatch_char_social_route_with_claims(
+        &ctx,
+        "GET",
+        "/corporations/{corporation_id}/bookmarks",
+        &p_corp,
+        &empty_q,
+        Some(&mk_claims(outsider_id)),
+        b"",
+    )
+    .unwrap();
+    assert_eq!(denied_bm.status_code, 403);
+
+    // 2. POST /characters/{id}/cspa: same-alliance different-corp target is NOT exempt (exempt_on_same_alliance: false).
+    let p_char = params(&[("character_id", &char_id.to_string())]);
+    let ally_cspa = dispatch_char_social_route(
+        &ctx,
+        "POST",
+        "/characters/{character_id}/cspa",
+        &p_char,
+        &empty_q,
+        &serde_json::to_vec(&vec![ally_diff_corp_id]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(ally_cspa.status_code, 201);
+    assert!((body(&ally_cspa).as_f64().unwrap() - 2_500.0).abs() < 1e-6);
+
+    // 3. Standing boundary: -10.0 charges 1_000.0, -9.9 charges 0.0.
+    let neg10_cspa = dispatch_char_social_route(
+        &ctx,
+        "POST",
+        "/characters/{character_id}/cspa",
+        &p_char,
+        &empty_q,
+        &serde_json::to_vec(&vec![neg10_id]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(neg10_cspa.status_code, 201);
+    assert!((body(&neg10_cspa).as_f64().unwrap() - 1_000.0).abs() < 1e-6);
+
+    let neg99_cspa = dispatch_char_social_route(
+        &ctx,
+        "POST",
+        "/characters/{character_id}/cspa",
+        &p_char,
+        &empty_q,
+        &serde_json::to_vec(&vec![neg99_id]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(neg99_cspa.status_code, 201);
+    assert!((body(&neg99_cspa).as_f64().unwrap() - 0.0).abs() < 1e-6);
+}

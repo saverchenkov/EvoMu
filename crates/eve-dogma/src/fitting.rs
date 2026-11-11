@@ -1437,4 +1437,9 @@ mod tests {
 #[cfg(test)]
 #[path = "fitting_unit_tests.rs"]
 mod fitting_unit_tests;
-
+#[cfg(test)]
+#[path = "fitting_edges_tests.rs"]
+mod fitting_edges_tests;
+#[cfg(test)]
+#[path = "fitting_edges_b4_tests.rs"]
+mod fitting_edges_b4_tests;

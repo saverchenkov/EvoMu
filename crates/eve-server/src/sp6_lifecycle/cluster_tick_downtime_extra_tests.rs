@@ -358,3 +358,514 @@ async fn spawn_mission_wave_handles_custom_types_fallback_stats_and_geometry() {
         assert!((e2.spawn_position.x - (origin.x - 4_500.0)).abs() < 1e-6);
     });
 }
+
+fn seeded_downtime_ctx() -> ServerContext {
+    let base = test_ctx();
+    base.with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED)
+}
+
+#[tokio::test]
+async fn recover_scanner_probes_on_downtime_covers_expiry_launcher_cargo_and_missing_ship() {
+    let ctx = seeded_downtime_ctx();
+    let char_id = 90_000_001i64;
+    let sys_id = 30_000_142u32;
+    let now_unix = 1_700_005_000u64;
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::clock::VirtualServerClock::with_fixed_base(now_unix),
+    ));
+
+    let ship_room = 920_000_001i64;
+    let launcher_ok = 920_000_010i64;
+    let charge_ok = 920_000_011i64;
+    let launcher_full = 920_000_012i64;
+    let charge_full = 920_000_013i64;
+    let launcher_mismatch = 920_000_014i64;
+    let charge_mismatch = 920_000_015i64;
+    let launcher_empty = 920_000_016i64;
+
+    let ship_full_cargo = 920_000_020i64;
+    let cargo_blocker = 920_000_021i64;
+    let ship_exact_cargo = 920_000_030i64;
+    let cargo_nearly_full = 920_000_031i64;
+    let cargo_probe_stack = 920_000_032i64;
+    let missing_ship = 920_999_999i64;
+
+    let probe_vol = ctx
+        .sde
+        .types
+        .get(&30_013)
+        .map(|t| t.volume.max(0.01))
+        .unwrap_or(0.1);
+    let tritanium_tid = 34u32;
+    let trit_vol = ctx
+        .sde
+        .types
+        .get(&tritanium_tid)
+        .map(|t| t.volume)
+        .unwrap_or(0.01);
+    let ship_cap = ctx
+        .sde
+        .types
+        .get(&587)
+        .map(|t| t.capacity)
+        .unwrap_or(140.0);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for sid in [ship_room, ship_full_cargo, ship_exact_cargo] {
+            snap.items.insert(
+                sid,
+                InventoryItemRecord {
+                    item_id: sid,
+                    type_id: 587,
+                    owner_id: char_id,
+                    location_id: 60_003_760,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        // Launchers on ship_room:
+        // HiSlot0: 7 probes in launcher -> recovers to 8
+        snap.items.insert(
+            launcher_ok,
+            InventoryItemRecord {
+                item_id: launcher_ok,
+                type_id: 17_938,
+                owner_id: char_id,
+                location_id: ship_room,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            charge_ok,
+            InventoryItemRecord {
+                item_id: charge_ok,
+                type_id: 30_013,
+                owner_id: char_id,
+                location_id: ship_room,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 7,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        // HiSlot1: already 8 probes -> overflows to cargo
+        snap.items.insert(
+            launcher_full,
+            InventoryItemRecord {
+                item_id: launcher_full,
+                type_id: 17_938,
+                owner_id: char_id,
+                location_id: ship_room,
+                flag: InventoryFlag::HiSlot1,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            charge_full,
+            InventoryItemRecord {
+                item_id: charge_full,
+                type_id: 30_013,
+                owner_id: char_id,
+                location_id: ship_room,
+                flag: InventoryFlag::HiSlot1,
+                quantity: 8,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        // HiSlot2: combat probes 30028 loaded -> mismatch with 30013 -> overflows to cargo
+        snap.items.insert(
+            launcher_mismatch,
+            InventoryItemRecord {
+                item_id: launcher_mismatch,
+                type_id: 17_938,
+                owner_id: char_id,
+                location_id: ship_room,
+                flag: InventoryFlag::HiSlot2,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            charge_mismatch,
+            InventoryItemRecord {
+                item_id: charge_mismatch,
+                type_id: 30_028,
+                owner_id: char_id,
+                location_id: ship_room,
+                flag: InventoryFlag::HiSlot2,
+                quantity: 4,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        // HiSlot3: empty launcher -> loads directly into HiSlot3
+        snap.items.insert(
+            launcher_empty,
+            InventoryItemRecord {
+                item_id: launcher_empty,
+                type_id: 17_938,
+                owner_id: char_id,
+                location_id: ship_room,
+                flag: InventoryFlag::HiSlot3,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+
+        // Full cargo on ship_full_cargo (remaining < probe_vol)
+        let full_qty = ((ship_cap / trit_vol).floor() as i32).max(1) + 5;
+        snap.items.insert(
+            cargo_blocker,
+            InventoryItemRecord {
+                item_id: cargo_blocker,
+                type_id: tritanium_tid,
+                owner_id: char_id,
+                location_id: ship_full_cargo,
+                flag: InventoryFlag::Cargo,
+                quantity: full_qty,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+
+        // Exact remaining capacity for 1 probe + existing probe stack on ship_exact_cargo
+        // Leave enough room for 1 probe_vol (and slightly under 2 * probe_vol)
+        let target_used = (ship_cap - probe_vol * 1.25).max(0.0);
+        let near_qty = ((target_used - probe_vol).max(0.0) / trit_vol).floor() as i32;
+        if near_qty > 0 {
+            snap.items.insert(
+                cargo_nearly_full,
+                InventoryItemRecord {
+                    item_id: cargo_nearly_full,
+                    type_id: tritanium_tid,
+                    owner_id: char_id,
+                    location_id: ship_exact_cargo,
+                    flag: InventoryFlag::Cargo,
+                    quantity: near_qty,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.items.insert(
+            cargo_probe_stack,
+            InventoryItemRecord {
+                item_id: cargo_probe_stack,
+                type_id: 30_013,
+                owner_id: char_id,
+                location_id: ship_exact_cargo,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let base_probe = |probe_id: i64, ship_id: i64, launcher_module_id: i64| {
+        crate::router::ActiveScannerProbe {
+            probe_id,
+            probe_type_id: 30_013,
+            owner_char_id: char_id,
+            ship_id,
+            launcher_module_id,
+            solar_system_id: sys_id,
+            position: [0.0; 3],
+            destination: [0.0; 3],
+            range_step: 1,
+            scan_range_m: 1_000_000.0,
+            base_sensor_strength: 40.0,
+            max_flight_time_s: 3_600.0,
+            launched_at_unix: now_unix - 100,
+            state: 2,
+            warp_end_ft: Some(123_456),
+        }
+    };
+
+    {
+        let mut probes = ctx.active_scanner_probes.write().unwrap();
+        // Expired by state < 0
+        let mut p_neg_state = base_probe(921_001, ship_room, launcher_ok);
+        p_neg_state.state = -1;
+        probes.insert(p_neg_state.probe_id, p_neg_state);
+
+        // Expired by exact boundary now_unix == launched_at_unix + max_flight_time_s
+        let mut p_expired_boundary = base_probe(921_002, ship_room, launcher_ok);
+        p_expired_boundary.launched_at_unix = now_unix - 3_600;
+        probes.insert(p_expired_boundary.probe_id, p_expired_boundary);
+
+        // Alive (1 sec before expiry): merges into charge_ok (7 -> 8)
+        let mut p_recover_launcher = base_probe(921_003, ship_room, launcher_ok);
+        p_recover_launcher.launched_at_unix = now_unix - 3_599;
+        probes.insert(p_recover_launcher.probe_id, p_recover_launcher);
+
+        // Launcher full (8/8) -> spills to Cargo (new stack)
+        probes.insert(921_004, base_probe(921_004, ship_room, launcher_full));
+
+        // Mismatched launcher charge -> spills to Cargo (merges into new stack)
+        probes.insert(921_005, base_probe(921_005, ship_room, launcher_mismatch));
+
+        // Empty launcher -> inserts into HiSlot3
+        probes.insert(921_006, base_probe(921_006, ship_room, launcher_empty));
+
+        // Full cargo -> stays in active_scanner_probes with state = 0, warp_end_ft = None
+        probes.insert(921_007, base_probe(921_007, ship_full_cargo, 0));
+
+        // Existing cargo stack fits +1 on exact_cargo
+        probes.insert(921_008, base_probe(921_008, ship_exact_cargo, 0));
+
+        // Second probe on exact_cargo overflows cargo -> stays active with state = 0
+        probes.insert(921_009, base_probe(921_009, ship_exact_cargo, 0));
+
+        // Missing ship_id -> stays active with state = 0
+        probes.insert(921_010, base_probe(921_010, missing_ship, 0));
+    }
+
+    let (recovered, expired_or_lost) = super::recover_scanner_probes_on_downtime(&ctx);
+    assert_eq!(recovered, 5);
+    assert_eq!(expired_or_lost, 2);
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&charge_ok].quantity, 8);
+        assert_eq!(snap.items[&cargo_probe_stack].quantity, 2);
+        // Empty launcher HiSlot3 got 1 probe of 30_013
+        assert!(snap.items.values().any(|it| {
+            it.location_id == ship_room
+                && it.flag == InventoryFlag::HiSlot3
+                && it.type_id == 30_013
+                && it.quantity == 1
+                && !it.singleton
+        }));
+        // Two spilled probes in ship_room Cargo (launcher_full + launcher_mismatch)
+        let room_cargo_probes: i32 = snap
+            .items
+            .values()
+            .filter(|it| {
+                it.location_id == ship_room
+                    && it.flag == InventoryFlag::Cargo
+                    && it.type_id == 30_013
+            })
+            .map(|it| it.quantity)
+            .sum();
+        assert_eq!(room_cargo_probes, 2);
+    });
+
+    // Unrecovered probes stay in active_scanner_probes with state = 0 and warp_end_ft = None
+    {
+        let probes = ctx.active_scanner_probes.read().unwrap();
+        assert!(!probes.contains_key(&921_001));
+        assert!(!probes.contains_key(&921_002));
+        for kept in [921_007, 921_009, 921_010] {
+            let p = &probes[&kept];
+            assert_eq!(p.state, 0);
+            assert_eq!(p.warp_end_ft, None);
+        }
+    }
+}
+
+#[tokio::test]
+async fn flush_bounties_safe_logoff_and_pocket_entry_mission_edge_paths() {
+    let ctx = seeded_downtime_ctx();
+    let c1 = 90_000_001i64;
+    let c2 = 90_000_002i64;
+    let sys1 = 30_000_142u32;
+    let sys2 = 30_000_144u32;
+
+    // 1. flush_pending_bounty_ticks_on_downtime skips <= 0.0 and flushes positive across systems/chars
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.pending_bounty_ticks.clear();
+        rt.pending_bounty_ticks.insert((sys2, c2), 12_500.0);
+        rt.pending_bounty_ticks.insert((sys1, c1), 25_000.0);
+        rt.pending_bounty_ticks.insert((sys1, c2), 0.0);
+        rt.pending_bounty_ticks.insert((sys2, c1), -5.0);
+    });
+    let flushed = super::flush_pending_bounty_ticks_on_downtime(&ctx);
+    assert_eq!(flushed, 2);
+    with_combat_runtime(&ctx, |rt| {
+        assert!(!rt.pending_bounty_ticks.contains_key(&(sys1, c1)));
+        assert!(!rt.pending_bounty_ticks.contains_key(&(sys2, c2)));
+    });
+
+    // 2. clear_safe_logoff and disconnect_safe_logoff_sessions
+    let ship1 = 930_000_001i64;
+    let ship2 = 930_000_002i64;
+    with_mut_sp6_state(&ctx.db, |st, _| {
+        st.safe_logoffs.insert(
+            c1,
+            crate::sp6_lifecycle::SafeLogoffEntry {
+                char_id: c1,
+                ship_id: ship1,
+                solar_system_id: sys1,
+                started_unix: 100,
+                complete_at_unix: 130,
+                completed: false,
+            },
+        );
+        st.safe_logoffs.insert(
+            c2,
+            crate::sp6_lifecycle::SafeLogoffEntry {
+                char_id: c2,
+                ship_id: ship2,
+                solar_system_id: sys1,
+                started_unix: 100,
+                complete_at_unix: 130,
+                completed: false,
+            },
+        );
+    });
+    super::clear_safe_logoff(&ctx.db, c2);
+    with_sp6_state(&ctx.db, |st| {
+        assert!(st.safe_logoffs.contains_key(&c1));
+        assert!(!st.safe_logoffs.contains_key(&c2));
+    });
+
+    ctx.db
+        .acquire_online_lock_with_computer_hash(1, 77_001, Some(c1), None, true, 100)
+        .expect("lock c1");
+    ctx.db
+        .acquire_online_lock_with_computer_hash(2, 77_002, Some(c2), None, true, 100)
+        .expect("lock c2");
+    ctx.bound_objects.write().unwrap().insert(
+        55_001,
+        crate::router::BoundObjectEntry {
+            bound_id: 55_001,
+            session_id: 77_003,
+            user_id: 1,
+            character_id: c1,
+            service: "ship".into(),
+            object_id: ship1,
+            oid_str: "55001".into(),
+            ref_id: 0,
+        },
+    );
+    ctx.bound_objects.write().unwrap().insert(
+        55_002,
+        crate::router::BoundObjectEntry {
+            bound_id: 55_002,
+            session_id: 77_002,
+            user_id: 2,
+            character_id: c2,
+            service: "ship".into(),
+            object_id: ship2,
+            oid_str: "55002".into(),
+            ref_id: 0,
+        },
+    );
+    super::disconnect_safe_logoff_sessions(&ctx, c1);
+    super::clear_safe_logoff(&ctx.db, c1);
+    with_sp6_state(&ctx.db, |st| {
+        assert!(!st.safe_logoffs.contains_key(&c1));
+    });
+    assert!(ctx.db.get_online_session(1).is_none());
+    assert!(ctx.db.get_online_session(2).is_some());
+    assert!(!ctx.bound_objects.read().unwrap().contains_key(&55_001));
+    assert!(ctx.bound_objects.read().unwrap().contains_key(&55_002));
+
+    // 3. cleanup_npc_wrecks_and_reset_missions_on_downtime:
+    //    - non-Accepted mission cleaned out of mission_initial_npc_counts & awaiting
+    //    - has_combat_wave == false clears npcs_remaining without awaiting respawn
+    //    - initial_count == 0, spawned=1, npcs_remaining=1 -> target_count floor 4
+    let m_offered = 3_020_001u32;
+    let m_non_combat = 3_020_002u32;
+    let m_floor4 = 3_020_003u32;
+    let origin = DVec3::new(10_000.0, 0.0, 20_000.0);
+
+    with_mut_sp6_state(&ctx.db, |st, snap| {
+        snap.active_missions.clear();
+        st.mission_initial_npc_counts.clear();
+        st.missions_awaiting_downtime_respawn.clear();
+
+        snap.active_missions.insert(
+            (c1, m_offered),
+            ActiveMissionRecord {
+                character_id: c1,
+                agent_id: m_offered as i64,
+                mission_id: 1,
+                solar_system_id: sys1,
+                state: "Offered".into(),
+                current_room_id: 1,
+                npcs_remaining: 0,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: None,
+            },
+        );
+        st.mission_initial_npc_counts.insert(format!("{c1}:1"), 6);
+        st.missions_awaiting_downtime_respawn.push((c1, m_offered));
+
+        snap.active_missions.insert(
+            (c1, m_non_combat),
+            ActiveMissionRecord {
+                character_id: c1,
+                agent_id: m_non_combat as i64,
+                mission_id: 2,
+                solar_system_id: sys1,
+                state: "Accepted".into(),
+                current_room_id: 1,
+                npcs_remaining: 0,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: None,
+            },
+        );
+
+        snap.active_missions.insert(
+            (c1, m_floor4),
+            ActiveMissionRecord {
+                character_id: c1,
+                agent_id: m_floor4 as i64,
+                mission_id: 3,
+                solar_system_id: sys1,
+                state: "Accepted".into(),
+                current_room_id: 1,
+                npcs_remaining: 1,
+                spawned_npc_ball_ids: vec![990_000_001],
+                bookmark_id: None,
+            },
+        );
+    });
+
+    let (purged_wrecks, reset_missions) =
+        cleanup_npc_wrecks_and_reset_missions_on_downtime(&ctx);
+    assert_eq!(purged_wrecks, 0);
+    assert_eq!(reset_missions, 1);
+
+    with_sp6_state(&ctx.db, |st| {
+        assert!(!st.mission_initial_npc_counts.contains_key(&format!("{c1}:1")));
+        assert!(!st.missions_awaiting_downtime_respawn.contains(&(c1, m_offered)));
+        assert!(!st.missions_awaiting_downtime_respawn.contains(&(c1, m_non_combat)));
+        assert!(st.missions_awaiting_downtime_respawn.contains(&(c1, m_floor4)));
+    });
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.active_missions[&(c1, m_non_combat)].npcs_remaining, 0);
+        assert_eq!(snap.active_missions[&(c1, m_floor4)].npcs_remaining, 4);
+    });
+
+    // Pocket entry clears awaiting respawn and respawns 4 NPCs (even without prior initial_count)
+    let spawned = spawn_mission_wave_on_pocket_entry_if_needed(&ctx, c1, sys1, origin);
+    assert_eq!(spawned, 4);
+    with_sp6_state(&ctx.db, |st| {
+        assert!(!st.missions_awaiting_downtime_respawn.contains(&(c1, m_floor4)));
+    });
+}
+

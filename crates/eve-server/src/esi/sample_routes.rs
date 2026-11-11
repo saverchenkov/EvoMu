@@ -1257,3 +1257,7 @@ pub fn dispatch_operation(
 #[path = "sample_routes_unit_tests.rs"]
 mod sample_routes_unit_tests;
 
+#[cfg(test)]
+#[path = "sample_routes_edges_tests.rs"]
+mod sample_routes_edges_tests;
+

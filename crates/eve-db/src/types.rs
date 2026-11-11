@@ -902,12 +902,13 @@ pub struct MailRecord {
     pub body: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum FleetRole {
     FleetCommander = 1,
     WingCommander = 2,
     SquadCommander = 3,
+    #[default]
     SquadMember = 4,
 }
 
@@ -915,7 +916,7 @@ const fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct FleetMemberRecord {
     pub character_id: i64,
     pub role: FleetRole,
@@ -1364,7 +1365,7 @@ pub struct AllianceRecord {
     pub member_corp_ids: HashSet<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WarRecord {
     pub war_id: i64,
     pub aggressor_corp_id: i64,

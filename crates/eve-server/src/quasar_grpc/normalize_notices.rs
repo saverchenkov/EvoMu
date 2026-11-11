@@ -2,6 +2,9 @@
 
 #![forbid(unsafe_code)]
 
+#[allow(unused_imports)]
+pub use crate::router::client_compat::normalize_macho_notification;
+
 /// Normalizes a Quasar `EvePublicResponse` payload against the 1,455-file `QuasarDescriptorRegistry`
 /// so all responses transmitted over `:26005` strictly conform to the V24.01 `.proto` wire schema.
 pub fn normalize_quasar_client_response(

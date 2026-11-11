@@ -338,3 +338,510 @@ async fn self_destruct_battleship_escape_bay_plastic_wrap_salvage_and_npc_office
         }
     }
 }
+
+#[tokio::test]
+async fn npc_ai_lowsec_mordu_clone_soldier_officer_fallback_and_drifter() {
+    use super::npc_ai::NpcSpawnManager;
+    use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime};
+
+    let mut ctx = test_ctx();
+    // Pick real solar systems that already contain Asteroid Belts (`group_id == 9`) and Stargates (`group_id == 10`) in SQLite SDE
+    let mut rich_sys_ids: Vec<u32> = ctx
+        .sde
+        .solar_systems
+        .keys()
+        .copied()
+        .filter(|&sid| sid < 31_000_000)
+        .filter(|&sid| {
+            let cs = ctx.sde.celestials_in_system(sid);
+            let belts = cs.iter().filter(|c| c.group_id == 9).count();
+            (1..=2).contains(&belts) && cs.iter().any(|c| c.group_id == 10)
+        })
+        .take(6)
+        .collect();
+    rich_sys_ids.sort_unstable();
+    assert!(rich_sys_ids.len() >= 5, "expected at least 5 real systems with belts and gates");
+
+    {
+        let sde = std::sync::Arc::make_mut(&mut ctx.sde);
+        let sample_cid = sde.solar_systems[&rich_sys_ids[0]].constellation_id;
+        if let Some(c) = sde.constellations.get(&sample_cid).cloned() {
+            let mut c_known = c.clone();
+            c_known.constellation_id = 29_099_101;
+            c_known.faction_id = Some(500_007);
+            sde.constellations.insert(29_099_101, c_known);
+
+            let mut c_unknown = c;
+            c_unknown.constellation_id = 29_099_102;
+            c_unknown.faction_id = Some(500_999);
+            sde.constellations.insert(29_099_102, c_unknown);
+        }
+
+        let overrides = [
+            (10_000_020u32, 29_099_102u32, 0.35f64),  // Blood Raiders region fallback, Mordu >=0.30 & Clone Soldier
+            (10_000_001u32, 29_099_102u32, 0.20f64),  // Sansha region fallback, Mordu >=0.15
+            (10_000_027u32, 29_099_102u32, 0.10f64),  // Serpentis region fallback, Mordu <0.15
+            (10_000_005u32, 29_099_102u32, -0.50f64), // Angel region fallback, Null-sec Officer + Commander
+            (10_000_999u32, 29_099_101u32, 0.25f64),  // Constellation 500_007 fallback
+            (10_000_999u32, 29_099_102u32, 0.60f64),  // Unknown region default (500_010)
+        ];
+        for (&sid, &(rid, cid, sec)) in rich_sys_ids.iter().zip(overrides.iter()) {
+            if let Some(sys) = sde.solar_systems.get_mut(&sid) {
+                sys.region_id = rid;
+                sys.constellation_id = cid;
+                sys.security_status = sec;
+            }
+        }
+    }
+
+    let mut mgr = NpcSpawnManager::default();
+    let counts = [12usize, 12, 12, 20, 2, 2];
+    for (&sid, &iters) in rich_sys_ids.iter().zip(counts.iter()) {
+        for _ in 0..iters {
+            mgr.entities.clear();
+            mgr.respawn_timers.clear();
+            mgr.clone_soldier_respawn_timers.clear();
+            if with_combat_runtime(&ctx, |rt| rt.clone_soldier_cooldown_until.contains_key(&sid)) {
+                with_mut_combat_runtime(&ctx, |rt| rt.clone_soldier_cooldown_until.remove(&sid));
+            }
+            let spawned = mgr.spawn_belt_rats_for_system(&ctx, sid).await.unwrap();
+            assert!(!spawned.is_empty());
+        }
+    }
+
+    // Active Clone Soldier cooldown skips duplicate Clone Soldier spawn (`npc_ai.rs` cooldown branch)
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.clone_soldier_cooldown_until.insert(rich_sys_ids[0], u64::MAX / 2);
+    });
+    mgr.entities.clear();
+    mgr.clone_soldier_respawn_timers.clear();
+    let _ = mgr.spawn_belt_rats_for_system(&ctx, rich_sys_ids[0]).await.unwrap();
+    assert!(with_combat_runtime(&ctx, |rt| {
+        rt.clone_soldier_cooldown_until.get(&rich_sys_ids[0]).copied().unwrap_or(0) > 0
+    }));
+
+    // Empty faction-matched npc_spawn_groups + missing clone soldier groups exercise fallback branches
+    let mut fallback_ctx = test_ctx();
+    {
+        let sde = std::sync::Arc::make_mut(&mut fallback_ctx.sde);
+        if let Some(sys) = sde.solar_systems.get_mut(&rich_sys_ids[0]) {
+            sys.region_id = 10_000_020;
+            sys.constellation_id = 29_099_102;
+            sys.security_status = 0.30;
+        }
+        sde.npc_spawn_groups.retain(|_, g| g.faction_id == 0);
+        sde.types.retain(|_, t| !matches!(t.group_id, 1174 | 1285 | 1286 | 1287));
+    }
+    let mut fb_mgr = NpcSpawnManager::default();
+    for _ in 0..10 {
+        fb_mgr.entities.clear();
+        fb_mgr.respawn_timers.clear();
+        fb_mgr.clone_soldier_respawn_timers.clear();
+        if with_combat_runtime(&fallback_ctx, |rt| {
+            !rt.clone_soldier_cooldown_until.is_empty()
+        }) {
+            with_mut_combat_runtime(&fallback_ctx, |rt| rt.clone_soldier_cooldown_until.clear());
+        }
+        let _ = fb_mgr.spawn_belt_rats_for_system(&fallback_ctx, rich_sys_ids[0]).await;
+    }
+
+    // Drifter wormhole BS spawn branches (group 1530 in C5/C6 vs group 1310 in Thera/other WH)
+    let mut wh_mgr = NpcSpawnManager::default();
+    for wh_sid in [31_000_005u32, 31_000_099u32] {
+        for _ in 0..20 {
+            wh_mgr.entities.clear();
+            let ids = wh_mgr.spawn_belt_rats_for_system(&ctx, wh_sid).await.unwrap();
+            if !ids.is_empty() {
+                break;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn npc_ai_ball_destructions_drone_disconnected_assist_and_sleeper_interval() {
+    use super::npc_ai::{
+        compute_sleeper_sentry_interval_s, handle_npc_ai_ball_destructions, NpcAiState,
+        NpcCombatEntity, NpcSpawnManager,
+    };
+    use crate::services::combat_crimewatch::{
+        with_combat_runtime, with_mut_combat_runtime, AssistLogEntry, DroneSpaceState,
+        ExtendedNpcEntity,
+    };
+    use crate::sp6_lifecycle::{with_mut_sp6_state, DisconnectedShipEntry};
+
+    let mut ctx = test_ctx();
+    let sys_id = 30_000_142u32;
+    let char_on = 90_000_001i64;
+    let char_att = 90_000_002i64;
+    let char_disc = 90_000_003i64;
+    let char_item_only = 90_094_888i64;
+    let ship_on = 100_094_801i64;
+    let ship_disc = 100_094_802i64;
+    let ship_item = 100_094_803i64;
+    let drone_id = 100_094_804i64;
+    let ext_npc_id = 100_094_805i64;
+    let live_kill_ship = 100_094_806i64;
+    let npc_killer_id = 100_094_807i64;
+    let now = ctx.now_unix();
+
+    spawn_ship(&ctx, sys_id, ship_on, char_on, 587, DVec3::new(1_000.0, 0.0, 0.0));
+    spawn_ship(&ctx, sys_id, ship_disc, char_disc, 587, DVec3::new(2_000.0, 0.0, 0.0));
+    spawn_ship(&ctx, sys_id, ship_item, char_item_only, 587, DVec3::new(3_000.0, 0.0, 0.0));
+    spawn_ship(&ctx, sys_id, live_kill_ship, char_att, 587, DVec3::new(5_000.0, 0.0, 0.0));
+
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut tmpl = snap.characters[&char_on].clone();
+        if let Some(ch_disc) = snap.characters.get_mut(&char_disc) {
+            ch_disc.active_ship_id = 0;
+        }
+        snap.items.insert(
+            drone_id,
+            make_item(drone_id, 2454, char_on, sys_id as i64, InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            ship_item,
+            make_item(ship_item, 587, char_item_only, sys_id as i64, InventoryFlag::None, 1),
+        );
+        tmpl.character_id = char_item_only;
+        tmpl.user_id = 94_888;
+        tmpl.name = "ItemOwnerFallback".into();
+        tmpl.solar_system_id = sys_id;
+        tmpl.active_ship_id = 999_999_001;
+        snap.characters.insert(char_item_only, tmpl);
+    });
+    with_mut_sp6_state(&ctx.db, |st, _snap| {
+        st.disconnected_ships.insert(
+            char_disc,
+            DisconnectedShipEntry {
+                char_id: char_disc,
+                ship_id: ship_disc,
+                ship_type_id: 587,
+                solar_system_id: sys_id,
+                last_position: [2_000.0, 0.0, 0.0],
+                emergency_warp_dest: None,
+                pre_warp_position: None,
+                disconnected_at_unix: now,
+                remove_at_unix: now + 300,
+                removed_from_space: false,
+            },
+        );
+    });
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.active_drones_in_space.insert(
+            drone_id,
+            DroneSpaceState {
+                ball_id: drone_id,
+                drone_item_id: drone_id,
+                type_id: 2454,
+                group_id: 100,
+                owner_char_id: char_on,
+                original_owner_char_id: char_on,
+                parent_ship_id: ship_on,
+                solar_system_id: sys_id,
+                activity_state: 0,
+                target_id: None,
+                assist_char_id: None,
+                guard_char_id: None,
+                is_abandoned: false,
+                is_sentry: false,
+                bandwidth_used: 5.0,
+                max_velocity: 1_500.0,
+                optimal_range: 5_000.0,
+                damage_vector: eve_destiny::DamageVector::default(),
+                shield_repair_amount: 0.0,
+                armor_repair_amount: 0.0,
+                hull_repair_amount: 0.0,
+                web_speed_factor: 1.0,
+                neut_amount: 0.0,
+                ecm_strength: 0.0,
+                tp_sig_bonus_pct: 0.0,
+            },
+        );
+        rt.aggression_assist_log.insert(
+            ship_on,
+            vec![
+                AssistLogEntry {
+                    attacker_char_id: 0,
+                    corporation_id: 1_000_009,
+                    alliance_id: None,
+                    ship_type_id: 0,
+                    weapon_type_id: 0,
+                    damage_done: 10.0,
+                    is_ewar: false,
+                    last_action_unix: now - 10,
+                },
+                AssistLogEntry {
+                    attacker_char_id: char_att,
+                    corporation_id: 1_000_009,
+                    alliance_id: None,
+                    ship_type_id: 587,
+                    weapon_type_id: 0,
+                    damage_done: 500.0,
+                    is_ewar: false,
+                    last_action_unix: now - 2,
+                },
+            ],
+        );
+        rt.npc_entities.insert(
+            ext_npc_id,
+            ExtendedNpcEntity {
+                ball_id: ext_npc_id,
+                type_id: 10_019,
+                faction_id: 500_010,
+                archetype: "Pirate".into(),
+                solar_system_id: sys_id,
+                spawn_group_id: 1,
+                target_id: None,
+                aggression_threat: HashMap::new(),
+                threat_table: HashMap::new(),
+                bounty_isk: 10_000.0,
+                optimal_range: 10_000.0,
+                orbit_range: 5_000.0,
+                damage_vector: eve_destiny::DamageVector::default(),
+                entropic_cycles: 0,
+                drifter_overshield_hp: 0.0,
+                drifter_doomsday_fired: false,
+                web_speed_factor: 0.0,
+                web_range: 0.0,
+                scram_strength: 0.0,
+                scram_range: 0.0,
+                neut_amount: 0.0,
+                ecm_jammed: false,
+                remote_shield_rep: 0.0,
+                remote_armor_rep: 0.0,
+                remote_rep_range: 0.0,
+                tag_drop_type_id: None,
+                custom_cargo_loot: None,
+                spawn_position: DVec3::ZERO,
+                sleeper_wh_class: 0,
+            },
+        );
+    });
+
+    let make_dead_ball = |id: i64, type_id: u32, pos: DVec3| Ball {
+        id,
+        type_id,
+        position: pos,
+        velocity: DVec3::ZERO,
+        max_velocity: 100.0,
+        inertia: 1.0,
+        mass: 1_000.0,
+        radius: 30.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+
+    handle_npc_ai_ball_destructions(
+        &ctx,
+        sys_id,
+        vec![
+            (npc_killer_id, drone_id, make_dead_ball(drone_id, 2454, DVec3::ZERO)),
+            (
+                npc_killer_id,
+                ship_on,
+                make_dead_ball(ship_on, 587, DVec3::new(1_000.0, 0.0, 0.0)),
+            ),
+            (
+                npc_killer_id,
+                ship_disc,
+                make_dead_ball(ship_disc, 587, DVec3::new(2_000.0, 0.0, 0.0)),
+            ),
+            (
+                npc_killer_id,
+                ship_item,
+                make_dead_ball(ship_item, 587, DVec3::new(3_000.0, 0.0, 0.0)),
+            ),
+            (
+                ship_on,
+                ext_npc_id,
+                make_dead_ball(ext_npc_id, 10_019, DVec3::new(4_000.0, 0.0, 0.0)),
+            ),
+        ],
+    );
+
+    with_combat_runtime(&ctx, |rt| {
+        assert!(!rt.active_drones_in_space.contains_key(&drone_id));
+        assert!(!rt.npc_entities.contains_key(&ext_npc_id));
+    });
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&drone_id));
+    });
+
+    // Trigger live kill inside NpcSpawnManager::step_ai_sync (`L845` + `L924`)
+    let mut low_hp_cs = eve_destiny::CombatState::default();
+    low_hp_cs.max_shield_hp = 10.0;
+    low_hp_cs.shield_hp = 0.0;
+    low_hp_cs.max_armor_hp = 10.0;
+    low_hp_cs.armor_hp = 0.0;
+    low_hp_cs.max_structure_hp = 1.0;
+    low_hp_cs.structure_hp = 1.0;
+    let _ = handle.set_combat_state(live_kill_ship, low_hp_cs).await;
+    handle.try_spawn_ball_with_combat(
+        make_dead_ball(npc_killer_id, 10_019, DVec3::new(5_500.0, 0.0, 0.0)),
+        eve_destiny::CombatState::default(),
+    );
+    let mut mgr = NpcSpawnManager::default();
+    mgr.entities.insert(
+        npc_killer_id,
+        NpcCombatEntity {
+            ball_id: npc_killer_id,
+            type_id: 10_019,
+            faction_id: 500_010,
+            state: NpcAiState::Attack,
+            spawn_group_id: 550,
+            spawn_pos: DVec3::new(5_500.0, 0.0, 0.0),
+            target_id: Some(live_kill_ship),
+            bounty_isk: 5_000.0,
+            optimal_range: 15_000.0,
+            orbit_range: 5_000.0,
+            base_dps: 400.0,
+            damage_vector: eve_destiny::DamageVector::new(100.0, 100.0, 100.0, 100.0),
+            last_attack_tick: 0,
+            has_shield_rep: false,
+            has_armor_rep: false,
+        },
+    );
+    mgr.step_ai_sync(&ctx, sys_id, 10, 1.0);
+    assert!(ctx.db.with_snapshot(|snap| !snap.items.contains_key(&live_kill_ship)));
+
+    // Sleeper sentry interval helper coverage across default and attribute-overridden types
+    let base_interval = compute_sleeper_sentry_interval_s(&ctx, 999_991);
+    assert!(base_interval >= 1.0);
+    {
+        let sde = std::sync::Arc::make_mut(&mut ctx.sde);
+        let mut t = sde.types[&587].clone();
+        t.type_id = 999_992;
+        t.default_attributes.insert(51, 6_000.0);
+        sde.types.insert(999_992, t);
+    }
+    let custom_interval = compute_sleeper_sentry_interval_s(&ctx, 999_992);
+    assert!((custom_interval - 6.0).abs() < 1e-6);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn death_pipeline_self_destruct_guards_nested_fittings_and_escape_frigate() {
+    use super::death_pipeline::{
+        drain_nested_ship_fittings, execute_live_self_destruct_sync, is_item_descendant_of_in_snap,
+    };
+    use crate::services::combat_crimewatch::{with_mut_combat_runtime, AssistLogEntry};
+
+    let ctx = test_ctx();
+    let sys_id = 30_000_142u32;
+    let char_id = 90_000_001i64;
+    let other_char = 90_000_002i64;
+    let missing_ship = 100_094_900i64;
+    let alien_ship = 100_094_901i64;
+    let missing_char_ship = 100_094_902i64;
+    let now = ctx.now_unix();
+
+    // Self-destruct validation guard branches (`L1324`, `L1327`, `L1330`)
+    assert!(execute_live_self_destruct_sync(&ctx, sys_id, char_id, missing_ship, DVec3::ZERO, now).unwrap().is_none());
+    spawn_ship(&ctx, sys_id, alien_ship, other_char, 587, DVec3::ZERO);
+    assert!(execute_live_self_destruct_sync(&ctx, sys_id, char_id, alien_ship, DVec3::ZERO, now).unwrap().is_none());
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            missing_char_ship,
+            make_item(missing_char_ship, 587, 999_888_777, sys_id as i64, InventoryFlag::None, 1),
+        );
+    });
+    assert!(
+        execute_live_self_destruct_sync(&ctx, sys_id, 999_888_777, missing_char_ship, DVec3::ZERO, now)
+            .unwrap()
+            .is_none()
+    );
+
+    // Battleship with Frigate Escape Bay (`group_id == 27`) + nested fitted ship + cycle/orphan checks
+    let main_bs = 100_094_910i64;
+    let esc_frig = 100_094_911i64;
+    let esc_mod = 100_094_912i64;
+    let nested_frig = 100_094_913i64;
+    let nested_mod = 100_094_914i64;
+    let main_mod = 100_094_915i64;
+    let cyc_a = 100_094_916i64;
+    let cyc_b = 100_094_917i64;
+    let orphan = 100_094_918i64;
+
+    spawn_ship(&ctx, sys_id, main_bs, char_id, 641, DVec3::ZERO);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut esc_it = make_item(
+            esc_frig,
+            587,
+            char_id,
+            main_bs,
+            InventoryFlag::from_u16(177),
+            1,
+        );
+        esc_it.singleton = true;
+        snap.items.insert(esc_frig, esc_it);
+        snap.items.insert(
+            nested_frig,
+            make_item(nested_frig, 587, char_id, main_bs, InventoryFlag::Cargo, 1),
+        );
+        snap.items.insert(
+            orphan,
+            make_item(orphan, 34, char_id, 0, InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            cyc_a,
+            make_item(cyc_a, 34, char_id, cyc_b, InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            cyc_b,
+            make_item(cyc_b, 34, char_id, cyc_a, InventoryFlag::None, 1),
+        );
+        assert!(!is_item_descendant_of_in_snap(snap, orphan, main_bs));
+        assert!(!is_item_descendant_of_in_snap(snap, cyc_a, main_bs));
+    });
+
+    // Build real fitting engines via get_or_rebuild_ship_fitting and seed missing-in-snap FittedModules (`L543-567`, `L76-85`)
+    let _ = ctx.get_or_rebuild_ship_fitting(char_id, main_bs);
+    let _ = ctx.get_or_rebuild_ship_fitting(char_id, esc_frig);
+    let _ = ctx.get_or_rebuild_ship_fitting(char_id, nested_frig);
+    {
+        let mut guard = ctx.ship_fittings.write().unwrap();
+        let mk_mod = |item_id: i64| eve_dogma::FittedModule {
+            item_id,
+            type_id: 2048,
+            flag_id: 11,
+            state: eve_dogma::ModuleState::Online,
+            damage_hp: 0.0,
+            max_hp: 40.0,
+            charge_type_id: None,
+            charge_quantity: 0,
+            dynamic_attribute_overrides: HashMap::new(),
+        };
+        if let Some(f) = guard.get_mut(&main_bs) {
+            f.modules.insert(main_mod, mk_mod(main_mod));
+        }
+        if let Some(f) = guard.get_mut(&esc_frig) {
+            f.modules.insert(esc_mod, mk_mod(esc_mod));
+        }
+        if let Some(f) = guard.get_mut(&nested_frig) {
+            f.modules.insert(nested_mod, mk_mod(nested_mod));
+        }
+    }
+
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.aggression_assist_log.insert(
+            main_bs,
+            vec![AssistLogEntry {
+                attacker_char_id: other_char,
+                corporation_id: 1_000_009,
+                alliance_id: None,
+                ship_type_id: 587,
+                weapon_type_id: 0,
+                damage_done: 250.0,
+                is_ewar: false,
+                last_action_unix: now - 5,
+            }],
+        );
+    });
+    let res = execute_live_self_destruct_sync(&ctx, sys_id, char_id, main_bs, DVec3::ZERO, now)
+        .unwrap()
+        .expect("live self destruct fires");
+    assert_eq!(res.ejected_capsule_id, Some(esc_frig));
+    assert!(drain_nested_ship_fittings(&ctx, main_bs, false).is_empty());
+}
+

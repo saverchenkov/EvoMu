@@ -1260,3 +1260,7 @@ impl DroneController {
 #[cfg(test)] #[path = "drones_salvage_tractor_unit_tests.rs"]
 mod drones_salvage_tractor_unit_tests;
 
+#[cfg(test)]
+#[path = "drones_salvage_tractor_edges_tests.rs"]
+mod drones_salvage_tractor_edges_tests;
+

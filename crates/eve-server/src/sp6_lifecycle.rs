@@ -87,8 +87,7 @@ pub fn with_sp6_state<R>(
     db: &Arc<WorldRepository>,
     f: impl FnOnce(&Sp6PersistedState) -> R,
 ) -> R {
-    let st = db.with_snapshot(|snap| snap.sp6_lifecycle.clone());
-    f(&st)
+    db.with_snapshot(|snap| f(&snap.sp6_lifecycle))
 }
 
 pub fn try_with_mut_sp6_state<R>(

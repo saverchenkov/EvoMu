@@ -2170,3 +2170,11 @@ mod tests {
         srv_task.await.expect("server flow-control test passed");
     }
 }
+
+#[cfg(test)]
+#[path = "normalize_notices_tests.rs"]
+mod normalize_notices_tests;
+
+#[cfg(test)]
+#[path = "quasar_grpc_edges_tests.rs"]
+mod quasar_grpc_edges_tests;

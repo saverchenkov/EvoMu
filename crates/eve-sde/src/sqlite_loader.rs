@@ -124,12 +124,23 @@ impl SdeRegistry {
         }
 
         let mut types = HashMap::new();
+        let mut type_isis_groups: HashMap<TypeId, u32> = HashMap::new();
         let mut variations_by_parent: HashMap<TypeId, Vec<TypeId>> = HashMap::new();
         let mut wrecks = HashMap::new();
         {
-            let mut stmt = conn.prepare(
-                "SELECT type_id, group_id, category_id, name, mass, volume, capacity, portion_size, base_price, radius, market_group_id, race_id, faction_id, variation_parent_type_id, wreck_type_id, published, attributes_json, effects_json, description_id, icon_id, graphic_id, sound_id, meta_group_id, meta_level, tech_level, default_effect_id, description FROM sde_types",
-            )?;
+            let has_isis_col = conn
+                .prepare("PRAGMA table_info(sde_types)")
+                .and_then(|mut s| {
+                    let cols = s.query_map([], |r| r.get::<_, String>(1))?;
+                    Ok(cols.flatten().any(|c| c == "isis_group_id"))
+                })
+                .unwrap_or(false);
+            let sql = if has_isis_col {
+                "SELECT type_id, group_id, category_id, name, mass, volume, capacity, portion_size, base_price, radius, market_group_id, race_id, faction_id, variation_parent_type_id, wreck_type_id, published, attributes_json, effects_json, description_id, icon_id, graphic_id, sound_id, meta_group_id, meta_level, tech_level, default_effect_id, description, isis_group_id FROM sde_types"
+            } else {
+                "SELECT type_id, group_id, category_id, name, mass, volume, capacity, portion_size, base_price, radius, market_group_id, race_id, faction_id, variation_parent_type_id, wreck_type_id, published, attributes_json, effects_json, description_id, icon_id, graphic_id, sound_id, meta_group_id, meta_level, tech_level, default_effect_id, description, NULL FROM sde_types"
+            };
+            let mut stmt = conn.prepare(sql)?;
             let rows = stmt.query_map([], |r| {
                 let tid = r.get::<_, i64>(0)? as TypeId;
                 let wreck_tid: Option<i64> = r.get(14)?;
@@ -158,6 +169,10 @@ impl SdeRegistry {
                     .get::<_, Option<i64>>(25)?
                     .and_then(|v| u16::try_from(v).ok());
                 let description: String = r.get::<_, Option<String>>(26)?.unwrap_or_default();
+                let isis_group_id: Option<u32> = r
+                    .get::<_, Option<i64>>(27)?
+                    .filter(|&v| v > 0)
+                    .map(|v| v as u32);
                 Ok((
                     InvType {
                         type_id: tid,
@@ -188,12 +203,16 @@ impl SdeRegistry {
                         default_attributes,
                     },
                     wreck_tid.map(|w| w as TypeId),
+                    isis_group_id,
                 ))
             })?;
             for r in rows {
-                let (inv_type, wreck_tid) = r?;
+                let (inv_type, wreck_tid, isis_group_id) = r?;
                 if let Some(w) = wreck_tid {
                     wrecks.insert(inv_type.type_id, w);
+                }
+                if let Some(ig) = isis_group_id {
+                    type_isis_groups.insert(inv_type.type_id, ig);
                 }
                 if let Some(parent_tid) = inv_type.variation_parent_type_id {
                     variations_by_parent
@@ -1297,6 +1316,7 @@ impl SdeRegistry {
             categories,
             groups,
             types,
+            type_isis_groups,
             variations_by_parent,
             attributes,
             effects,
@@ -1395,14 +1415,94 @@ impl SdeRegistry {
             registry.wrecks_by_group_and_race = Arc::new(wrecks_by_grp);
             registry.wreck_group_race_by_wreck_type = Arc::new(reverse_wrecks);
         }
-        if let Ok(belt_counts) = registry.load_asteroid_counts_by_belt() {
+        if let Ok(belt_counts) = Self::load_belt_asteroid_counts_from_sqlite(&conn)
+            .filter(|m| !m.is_empty())
+            .or_else(|| registry.load_asteroid_counts_by_belt().ok())
+            .ok_or(())
+        {
             registry.asteroid_counts_by_belt = Arc::new(belt_counts);
         }
-        if let Ok(sys_ores) = registry.load_asteroid_types_by_solar_system() {
+        if let Ok(sys_ores) = Self::load_system_asteroid_types_from_sqlite(&conn)
+            .filter(|m| !m.is_empty())
+            .or_else(|| registry.load_asteroid_types_by_solar_system().ok())
+            .ok_or(())
+        {
             registry.asteroid_types_by_system = Arc::new(sys_ores);
         }
 
         Ok(registry)
+    }
+
+    /// Loads `sde_belt_asteroid_counts` (`belt_id -> {type_id: count}`) directly from SQLite when
+    /// present and populated, returning `None` on older schemas so callers can fall back cleanly to
+    /// `ResFiles` (`#743`).
+    fn load_belt_asteroid_counts_from_sqlite(
+        conn: &Connection,
+    ) -> Option<HashMap<i64, HashMap<TypeId, u32>>> {
+        let has_table: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sde_belt_asteroid_counts'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        if !has_table {
+            return None;
+        }
+        let mut stmt = conn
+            .prepare("SELECT belt_id, counts_json FROM sde_belt_asteroid_counts")
+            .ok()?;
+        let rows = stmt
+            .query_map([], |r| {
+                let belt_id: i64 = r.get(0)?;
+                let json_str: String = r.get(1)?;
+                let counts: HashMap<TypeId, u32> = parse_json_col(1, &json_str)?;
+                Ok((belt_id, counts))
+            })
+            .ok()?;
+        let mut out = HashMap::new();
+        for row in rows {
+            let (belt_id, counts) = row.ok()?;
+            out.insert(belt_id, counts);
+        }
+        Some(out)
+    }
+
+    /// Loads `sde_system_asteroid_types` (`system_id -> sorted [type_id]`) directly from SQLite
+    /// when present and populated, returning `None` on older schemas so callers can fall back
+    /// cleanly to `ResFiles` (`#743`).
+    fn load_system_asteroid_types_from_sqlite(
+        conn: &Connection,
+    ) -> Option<HashMap<SolarSystemId, Vec<TypeId>>> {
+        let has_table: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sde_system_asteroid_types'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        if !has_table {
+            return None;
+        }
+        let mut stmt = conn
+            .prepare("SELECT system_id, type_ids_json FROM sde_system_asteroid_types")
+            .ok()?;
+        let rows = stmt
+            .query_map([], |r| {
+                let sys_id = r.get::<_, i64>(0)? as SolarSystemId;
+                let json_str: String = r.get(1)?;
+                let mut type_ids: Vec<TypeId> = parse_json_col(1, &json_str)?;
+                type_ids.sort_unstable();
+                type_ids.dedup();
+                Ok((sys_id, type_ids))
+            })
+            .ok()?;
+        let mut out = HashMap::new();
+        for row in rows {
+            let (sys_id, type_ids) = row.ok()?;
+            out.insert(sys_id, type_ids);
+        }
+        Some(out)
     }
 
     /// Loads the runtime SQLite SDE database at [`Self::default_db_path`] (`data/evomu_sde.sqlite`,
@@ -1417,5 +1517,10 @@ impl SdeRegistry {
         })
     }
 }
-#[cfg(test)] #[path = "sqlite_loader_unit_tests.rs"] mod sqlite_loader_unit_tests;
+#[cfg(test)]
+#[path = "sqlite_loader_unit_tests.rs"]
+mod sqlite_loader_unit_tests;
+#[cfg(test)]
+#[path = "sqlite_loader_edges_tests.rs"]
+mod sqlite_loader_edges_tests;
 

@@ -295,3 +295,177 @@ fn neural_remap_bounds_cooldown_and_mining_ledger_with_waste_and_observers() {
     assert_eq!(repo.get_observers_with_mining_events(), vec![obs_id]);
     assert_eq!(repo.get_observer_mining_ledger(obs_id).len(), 1);
 }
+
+#[test]
+fn dock_if_in_space_transition_fallback_and_mining_waste_edges() {
+    let repo = WorldRepository::with_demo_seed();
+    let sde = test_sde();
+    let cid = 90_000_001_i64;
+    let ship_id = repo.with_snapshot(|s| s.characters[&cid].active_ship_id);
+    let station_id = 60_003_760_i64;
+    let bad_sys_struct = 1_000_000_555_001_i64;
+    let destroyed_struct = 1_000_000_555_002_i64;
+    let live_struct = 1_000_000_555_003_i64;
+
+    repo.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            bad_sys_struct,
+            UpwellStructureRecord {
+                structure_id: bad_sys_struct,
+                solar_system_id: 30_002_187,
+                state: "ShieldVulnerable".into(),
+                name: "WrongSys".into(),
+                ..UpwellStructureRecord::default()
+            },
+        );
+        snap.structures.insert(
+            destroyed_struct,
+            UpwellStructureRecord {
+                structure_id: destroyed_struct,
+                solar_system_id: 30_000_142,
+                state: "Destroyed".into(),
+                name: "Wreck".into(),
+                ..UpwellStructureRecord::default()
+            },
+        );
+        snap.structures.insert(
+            live_struct,
+            UpwellStructureRecord {
+                structure_id: live_struct,
+                solar_system_id: 30_000_142,
+                state: "ShieldVulnerable".into(),
+                name: "LiveFort".into(),
+                ..UpwellStructureRecord::default()
+            },
+        );
+    });
+
+    // dock_character rejects wrong-system and Destroyed structures, and skips ship relocation when ship isn't in space.
+    assert!(matches!(
+        repo.dock_character(cid, bad_sys_struct, true),
+        Err(DbError::InvalidDestinationLocation { .. })
+    ));
+    assert!(matches!(
+        repo.dock_character(cid, destroyed_struct, true),
+        Err(DbError::InvalidDestinationLocation { .. })
+    ));
+    repo.with_mut_snapshot(|snap| {
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = station_id;
+        }
+    });
+    let docked_with_distant_ship = repo.dock_character(cid, live_struct, true).unwrap();
+    assert_eq!(docked_with_distant_ship.structure_id, Some(live_struct));
+    assert_eq!(docked_with_distant_ship.station_id, None);
+    assert_eq!(repo.with_snapshot(|s| s.items[&ship_id].location_id), station_id);
+
+    // Put character in space with matching ship location and zeroed constellation/region.
+    repo.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&cid).unwrap();
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.solar_system_id = 30_000_142;
+        ch.constellation_id = 0;
+        ch.region_id = 0;
+        let ship = snap.items.get_mut(&ship_id).unwrap();
+        ship.location_id = 30_000_142;
+        ship.flag = InventoryFlag::None;
+    });
+
+    // Empty SDE fallback defaults zero constellation/region to 20_000_020 / 10_000_002 and preserves +1 increments.
+    let empty_sde = SdeRegistry::default();
+    let (v_before, e_before, sv_before) = repo.with_snapshot(|s| {
+        (s.characters[&cid].version, s.characters[&cid].system_epoch, s.items[&ship_id].version)
+    });
+    let jumped = repo
+        .transition_character_solar_system_if_at(cid, 30_000_142, 30_000_144, &empty_sde)
+        .unwrap();
+    assert_eq!(jumped.constellation_id, 20_000_020);
+    assert_eq!(jumped.region_id, 10_000_002);
+    assert_eq!(jumped.version, v_before + 1);
+    assert_eq!(jumped.system_epoch, e_before + 1);
+    assert_eq!(repo.with_snapshot(|s| s.items[&ship_id].version), sv_before + 1);
+
+    // Transition back to 30_000_142 and test dock_character_if_in_space guards and station path.
+    let jumped2 = repo
+        .transition_character_solar_system_if_at(cid, 30_000_144, 30_000_142, &sde)
+        .unwrap();
+    assert_eq!(jumped2.solar_system_id, 30_000_142);
+
+    assert!(matches!(
+        repo.dock_character_if_in_space(cid, 30_002_187, station_id, false),
+        Err(DbError::ValidationError(_))
+    ));
+    assert!(matches!(
+        repo.dock_character_if_in_space(cid, 30_000_142, destroyed_struct, true),
+        Err(DbError::InvalidDestinationLocation { .. })
+    ));
+
+    // Docking at structure sets structure_id & clears station_id; docking at station sets station_id & clears structure_id.
+    let (sv2, cv2, ce2) = repo.with_snapshot(|s| {
+        (s.items[&ship_id].version, s.characters[&cid].version, s.characters[&cid].system_epoch)
+    });
+    let docked_st = repo
+        .dock_character_if_in_space(cid, 30_000_142, live_struct, true)
+        .unwrap();
+    assert_eq!(docked_st.structure_id, Some(live_struct));
+    assert_eq!(docked_st.station_id, None);
+    assert_eq!(docked_st.version, cv2 + 1);
+    assert_eq!(docked_st.system_epoch, ce2 + 1);
+    assert_eq!(repo.with_snapshot(|s| s.items[&ship_id].version), sv2 + 1);
+
+    // While docked in a structure (with station_id == None), both in-space guards reject.
+    assert!(matches!(
+        repo.dock_character_if_in_space(cid, 30_000_142, station_id, false),
+        Err(DbError::ValidationError(_))
+    ));
+    assert!(matches!(
+        repo.transition_character_solar_system_if_at(cid, 30_000_142, 30_000_144, &sde),
+        Err(DbError::ValidationError(_))
+    ));
+
+    // Undock to test station branch + distant ship branch in dock_character_if_in_space.
+    repo.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&cid).unwrap();
+        ch.station_id = None;
+        ch.structure_id = None;
+        let ship = snap.items.get_mut(&ship_id).unwrap();
+        ship.location_id = live_struct; // not in space!
+    });
+    let ship_ver_kept = repo.with_snapshot(|s| s.items[&ship_id].version);
+    let docked_sta = repo
+        .dock_character_if_in_space(cid, 30_000_142, station_id, false)
+        .unwrap();
+    assert_eq!(docked_sta.station_id, Some(station_id));
+    assert_eq!(docked_sta.structure_id, None);
+    assert_eq!(repo.with_snapshot(|s| s.items[&ship_id].location_id), live_struct);
+    assert_eq!(repo.with_snapshot(|s| s.items[&ship_id].version), ship_ver_kept);
+
+    // Mining ledger waste boundary: 0 and negative waste omit waste-map entries; positive waste records.
+    repo.with_mut_snapshot(|snap| {
+        snap.mining_ledger.retain(|r| r.character_id != cid);
+        snap.mining_and_ess_state.mining_ledger_waste.clear();
+    });
+    let base_idx = repo.with_snapshot(|s| s.mining_ledger.len());
+    repo.record_mining_ledger_entry_with_waste(cid, 30_000_142, 1230, 100, -5, 1_704_067_200)
+        .unwrap();
+    repo.record_mining_ledger_entry_with_waste(cid, 30_000_142, 1230, 100, 0, 1_704_067_200)
+        .unwrap();
+    repo.record_mining_ledger_entry_with_waste(cid, 30_000_142, 1228, 250, 40, 1_704_067_200)
+        .unwrap();
+    repo.record_mining_ledger_entry_with_waste(cid, 30_000_142, 1228, 250, 15, 1_704_067_200)
+        .unwrap();
+    let ledger = repo.get_mining_ledger_with_waste(cid);
+    assert_eq!(ledger.len(), 4);
+    assert_eq!((ledger[0].0.type_id, ledger[0].1), (1230, 0));
+    assert_eq!((ledger[1].0.type_id, ledger[1].1), (1230, 0));
+    assert_eq!((ledger[2].0.type_id, ledger[2].1), (1228, 40));
+    assert_eq!((ledger[3].0.type_id, ledger[3].1), (1228, 15));
+    repo.with_snapshot(|s| {
+        assert!(!s.mining_and_ess_state.mining_ledger_waste.contains_key(&base_idx));
+        assert!(!s
+            .mining_and_ess_state
+            .mining_ledger_waste
+            .contains_key(&(base_idx + 1)));
+    });
+}

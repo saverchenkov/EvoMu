@@ -19,30 +19,57 @@ impl FnvHasher {
 
     #[inline]
     pub(crate) fn write_bytes(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.0 ^= b as u64;
-            self.0 = self.0.wrapping_mul(Self::PRIME);
+        if bytes.len() <= 64 {
+            let mut i = 0;
+            while i + 8 <= bytes.len() {
+                let word = u64::from_le_bytes([
+                    bytes[i],
+                    bytes[i + 1],
+                    bytes[i + 2],
+                    bytes[i + 3],
+                    bytes[i + 4],
+                    bytes[i + 5],
+                    bytes[i + 6],
+                    bytes[i + 7],
+                ]);
+                self.mix_word(word);
+                i += 8;
+            }
+            if i < bytes.len() {
+                let mut buf = [0u8; 8];
+                let rem = &bytes[i..];
+                buf[..rem.len()].copy_from_slice(rem);
+                self.mix_word(u64::from_le_bytes(buf) ^ ((rem.len() as u64) << 56));
+            } else if bytes.is_empty() {
+                self.mix_word(0);
+            }
+            return;
         }
+        use std::hash::Hasher;
+        let mut dh = std::collections::hash_map::DefaultHasher::new();
+        dh.write(bytes);
+        self.mix_word(dh.finish());
     }
 
     #[inline]
     pub(crate) fn write_u64(&mut self, v: u64) {
-        self.write_bytes(&v.to_le_bytes());
+        self.mix_word(v);
     }
 
     #[inline]
     pub(crate) fn write_i64(&mut self, v: i64) {
-        self.write_bytes(&v.to_le_bytes());
+        self.mix_word(v as u64);
     }
 
     #[inline]
     pub(crate) fn write_u32(&mut self, v: u32) {
-        self.write_bytes(&v.to_le_bytes());
+        self.mix_word(v as u64);
     }
 
     #[inline]
     pub(crate) fn write_u8(&mut self, v: u8) {
-        self.write_bytes(&[v]);
+        self.0 ^= v as u64;
+        self.0 = self.0.wrapping_mul(Self::PRIME);
     }
 
     #[inline]
@@ -60,6 +87,14 @@ impl FnvHasher {
     pub(crate) fn write_str(&mut self, s: &str) {
         self.write_u64(s.len() as u64);
         self.write_bytes(s.as_bytes());
+    }
+
+    #[inline]
+    pub(crate) fn mix_word(&mut self, v: u64) {
+        self.0 = (self.0 ^ v)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .rotate_left(27)
+            .wrapping_mul(Self::PRIME);
     }
 
     #[inline]
@@ -424,12 +459,37 @@ pub(crate) fn fp_item(i: &InventoryItemRecord) -> u64 {
 
 #[inline]
 pub(crate) fn fp_market_order(o: &MarketOrderRecord) -> u64 {
-    canonical_fp(o)
+    let mut h = FnvHasher::new();
+    h.mix_word(o.order_id as u64);
+    h.mix_word(o.owner_id as u64);
+    h.mix_word(o.station_id as u64);
+    h.mix_word(((o.region_id as u64) << 32) | (o.type_id as u64));
+    h.mix_word(((o.vol_entered as u32 as u64) << 32) | (o.vol_remaining as u32 as u64));
+    h.mix_word(
+        ((o.min_volume as u32 as u64) << 2)
+            | (u64::from(o.is_bid) << 1)
+            | u64::from(o.is_npc),
+    );
+    h.mix_word(o.price.0 as u64);
+    h.mix_word(o.escrow.0 as u64);
+    h.finish()
+}
+
+#[inline]
+pub(crate) fn fp_market_orders_digest_entry(oid: i64, order_fp: u64) -> u64 {
+    let mut h = FnvHasher::new();
+    h.write_i64(oid);
+    h.write_u64(order_fp);
+    h.finish()
 }
 
 #[inline]
 pub(crate) fn fp_market_orders_digest(orders: &HashMap<i64, MarketOrderRecord>) -> u64 {
-    canonical_fp(orders)
+    let mut acc = 0u64;
+    for (&oid, ord) in orders {
+        acc ^= fp_market_orders_digest_entry(oid, fp_market_order(ord));
+    }
+    acc
 }
 
 #[inline]

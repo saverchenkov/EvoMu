@@ -263,6 +263,14 @@ pub fn build_client_global_config(
         PyRep::ascii_bytes(host.as_bytes()),
     );
     cfg.insert(
+        "ejabberdPort".to_string(),
+        PyRep::Integer(i64::from(ctx.xmpp_port)),
+    );
+    cfg.insert(
+        "ejabberd_client_port".to_string(),
+        PyRep::Integer(i64::from(ctx.xmpp_port)),
+    );
+    cfg.insert(
         "chatserver_disable_tls".to_string(),
         PyRep::ascii_bytes(b"1"),
     );
@@ -1300,4 +1308,5 @@ fn handle_post_bug_attachment(
 #[path = "bug_reporting_tests.rs"]
 mod bug_reporting_tests;
 #[cfg(test)] #[path = "bug_reporting_extra_tests.rs"] mod bug_reporting_extra_tests;
+#[cfg(test)] #[path = "bug_reporting_edges_tests.rs"] mod bug_reporting_edges_tests;
 

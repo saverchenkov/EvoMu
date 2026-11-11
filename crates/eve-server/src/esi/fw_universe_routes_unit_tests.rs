@@ -246,3 +246,163 @@ fn dispatch_meta_universe_killmail_and_fw_routes_cover_all_branches() {
     .unwrap();
     assert_eq!(corp_fw.status_code, 200);
 }
+
+#[test]
+fn fw_universe_routes_errors_enlisted_on_pod_kills_and_solarsystemcontent_parser() {
+    let (ctx, _token, char_id, corp_id, _planet_id) = seed_full_esi_context();
+    let empty_p = HashMap::new();
+    let empty_q = HashMap::new();
+    let now = ctx.now_unix();
+
+    // 400 missing params & 404 unknown entities
+    for (path, missing_p) in [
+        ("/universe/graphics/{graphic_id}", params(&[("graphic_id", "999999999")])),
+        ("/universe/stars/{star_id}", params(&[("star_id", "999999999")])),
+        ("/universe/stations/{station_id}", params(&[("station_id", "999999999")])),
+        ("/killmails/{killmail_id}/{killmail_hash}", params(&[("killmail_id", "999999999"), ("killmail_hash", "abc")])),
+        ("/characters/{character_id}/fw/stats", params(&[("character_id", "90999666")])),
+        ("/corporations/{corporation_id}/fw/stats", params(&[("corporation_id", "98999666")])),
+    ] {
+        assert_eq!(
+            dispatch_fw_universe_route(&ctx, "GET", path, &empty_p, &empty_q)
+                .unwrap()
+                .status_code,
+            400,
+            "missing param 400 on {path}"
+        );
+        assert_eq!(
+            dispatch_fw_universe_route(&ctx, "GET", path, &missing_p, &empty_q)
+                .unwrap()
+                .status_code,
+            404,
+            "404 on {path}"
+        );
+    }
+    assert_eq!(
+        dispatch_fw_universe_route(
+            &ctx,
+            "GET",
+            "/killmails/{killmail_id}/{killmail_hash}",
+            &params(&[("killmail_id", "55001")]),
+            &empty_q,
+        )
+        .unwrap()
+        .status_code,
+        400
+    );
+
+    // /sovereignty/campaigns delegation (line 691)
+    assert_eq!(
+        dispatch_fw_universe_route(&ctx, "GET", "/sovereignty/campaigns", &empty_p, &empty_q)
+            .unwrap()
+            .status_code,
+        200
+    );
+
+    // Seed fw_corp_enlisted_on + corp_war_factions + pod kill detail
+    let pod_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.name == "Capsule")
+        .map(|t| t.type_id)
+        .unwrap_or(670);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.war_faction_id = Some(500_001);
+        }
+        snap.fw_runtime.corp_war_factions.insert(corp_id, 500_001);
+        snap.fw_corp_enlisted_on.insert(corp_id, now.saturating_sub(3600));
+        snap.fw_character_stats.remove(&char_id);
+
+        snap.killmails.insert(
+            992_001,
+            eve_db::KillmailRecord {
+                kill_id: 992_001,
+                victim_character_id: char_id,
+                attacker_character_id: 90_000_002,
+                solar_system_id: 30_000_142,
+                ship_type_id: pod_tid,
+                total_value_isk: 100.0,
+                killed_unix: now.saturating_sub(60),
+                ..Default::default()
+            },
+        );
+        snap.killmail_details.insert(
+            992_001,
+            eve_db::KillmailDetailRecord {
+                kill_id: 992_001,
+                killmail_time_unix: now.saturating_sub(60),
+                damage_taken: 100,
+                victim_position: Some([0.0, 0.0, 0.0]),
+                attackers: Vec::new(),
+            },
+        );
+    });
+
+    let sys_kills = dispatch_fw_universe_route(&ctx, "GET", "/universe/system_kills", &empty_p, &empty_q).unwrap();
+    assert_eq!(sys_kills.status_code, 200);
+    let jita = body(&sys_kills).as_array().unwrap().iter().find(|k| k["system_id"] == 30_000_142).unwrap();
+    assert!(jita["pod_kills"].as_i64().unwrap() >= 1);
+
+    let ch_fw = dispatch_fw_universe_route(
+        &ctx,
+        "GET",
+        "/characters/{character_id}/fw/stats",
+        &params(&[("character_id", &char_id.to_string())]),
+        &empty_q,
+    )
+    .unwrap();
+    assert_eq!(ch_fw.status_code, 200);
+    assert!(body(&ch_fw).get("enlisted_on").is_some());
+
+    let corp_fw = dispatch_fw_universe_route(
+        &ctx,
+        "GET",
+        "/corporations/{corporation_id}/fw/stats",
+        &params(&[("corporation_id", &corp_id.to_string())]),
+        &empty_q,
+    )
+    .unwrap();
+    assert_eq!(corp_fw.status_code, 200);
+    assert!(body(&corp_fw).get("enlisted_on").is_some());
+
+    // Helper coverage: derive_star_stats_from_sde fallback + parse_solarsystemcontent_stars bounds
+    let (sc, temp, _) = derive_star_stats_from_sde("Unknown Star", 0.5, 40_000_001);
+    assert_eq!(sc, "G5 V");
+    assert!(temp >= 2500);
+    assert!(parse_solarsystemcontent_stars(&[]).is_none());
+    assert!(parse_solarsystemcontent_stars(&[0u8; 16])
+        .is_some_and(|m| m.is_empty()));
+    // Synthetic solarsystemcontent.static binary payload with 1 valid star record
+    let mut bin = Vec::new();
+    bin.extend_from_slice(&0u32.to_le_bytes()); // schema_len = 0
+    bin.extend_from_slice(&0u32.to_le_bytes()); // reserved -> data_base = 8
+    // rec at offset 8: 98 pad + bf(u64=128) + 3*4 var rels ([0,0,0])
+    bin.resize(8 + 98, 0);
+    bin.extend_from_slice(&128u64.to_le_bytes());
+    bin.extend_from_slice(&[0u8; 12]); // total_var = 3 -> star_idx = 1 -> star_rel = 0 -> star_pos right here
+    bin.extend_from_slice(&40_000_001u32.to_le_bytes()); // star_id
+    bin.extend_from_slice(&500_000u32.to_le_bytes()); // radius
+    bin.extend_from_slice(&45041u32.to_le_bytes()); // type_id
+    bin.extend_from_slice(&1u64.to_le_bytes()); // star_bf = 1 -> star_total_var = 1
+    bin.extend_from_slice(&0u32.to_le_bytes()); // stats_rel = 0 -> stats_pos right here
+    // 33 bytes of stats: age_f32(0..4), pad(4..9), lum_f32(9..13), pad(13..17), temp_f32(17..21), pad(21..29), spec_rel(29..33)=0
+    bin.extend_from_slice(&1.0e9f32.to_le_bytes());
+    bin.extend_from_slice(&[0u8; 5]);
+    bin.extend_from_slice(&0.5f32.to_le_bytes());
+    bin.extend_from_slice(&[0u8; 4]);
+    bin.extend_from_slice(&5500.0f32.to_le_bytes());
+    bin.extend_from_slice(&[0u8; 8]);
+    bin.extend_from_slice(&0u32.to_le_bytes()); // spec_rel = 0
+    bin.extend_from_slice(&4u32.to_le_bytes()); // spec_len = 4
+    bin.extend_from_slice(b"G5 V");
+    // Footer: count(1), system_id(30000142), off(0), pad(0), footer_bytes(16)
+    bin.extend_from_slice(&1u32.to_le_bytes());
+    bin.extend_from_slice(&30_000_142u32.to_le_bytes());
+    bin.extend_from_slice(&0u32.to_le_bytes());
+    bin.extend_from_slice(&0u32.to_le_bytes());
+    bin.extend_from_slice(&16u32.to_le_bytes());
+    let parsed_stars = parse_solarsystemcontent_stars(&bin).unwrap();
+    assert_eq!(parsed_stars[&40_000_001].spectral_class, "G5 V");
+}

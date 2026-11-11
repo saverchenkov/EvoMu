@@ -356,3 +356,7 @@ fn persistent_sqlite_world_upgrades_from_v1_to_v2_full_catalog() {
     drop(db);
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[cfg(test)]
+#[path = "world_seeder_cov_edges_tests.rs"]
+mod world_seeder_cov_edges_tests;

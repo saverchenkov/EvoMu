@@ -471,3 +471,481 @@ fn research_medals_scoped_roles_titles_calendar_bookmarks_and_mail_delegation() 
     assert_eq!(dispatch_char_social_route(&ctx, "GET", "/characters/{character_id}/mail/lists", &p_char, &empty, b"").unwrap().status_code, 200);
     assert!(dispatch_char_social_route(&ctx, "GET", "/unknown/route", &empty, &empty, b"").is_none());
 }
+
+#[test]
+fn notification_type_variants_cspa_errors_roles_fallback_and_corp_bookmark_claims_acl() {
+    use eve_db::SsoTokenClaims;
+
+    let (ctx, _tok, char_id, corp_id, _pid) = seed_full_esi_context();
+    let now = ctx.now_unix();
+    let empty = HashMap::new();
+    let char_s = char_id.to_string();
+    let corp_s = corp_id.to_string();
+    let p_char = params(&[("character_id", &char_s)]);
+    let p_corp = params(&[("corporation_id", &corp_s)]);
+    let outsider_cid = 90_820_001_i64;
+    let role_fallback_cid = 90_820_002_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let tpl = snap.characters[&char_id].clone();
+        let mut out_ch = tpl.clone();
+        out_ch.character_id = outsider_cid;
+        out_ch.corporation_id = corp_id + 100;
+        snap.characters.insert(outsider_cid, out_ch);
+
+        let mut role_ch = tpl;
+        role_ch.character_id = role_fallback_cid;
+        role_ch.corporation_id = corp_id;
+        snap.characters.insert(role_fallback_cid, role_ch);
+        snap.char_scoped_roles.remove(&role_fallback_cid);
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.members.insert(role_fallback_cid);
+            corp.ceo_id = role_fallback_cid;
+        }
+
+        // Open corp bookmark folder vs restricted (non-shared) corp folder
+        snap.bookmark_folders.clear();
+        snap.bookmarks.clear();
+        snap.bookmark_folders.insert(
+            201,
+            BookmarkFolderRecord {
+                folder_id: 201,
+                owner_id: corp_id,
+                folder_name: "Open Corp Spots".into(),
+                is_shared: true,
+                corporation_id: Some(corp_id),
+                ..Default::default()
+            },
+        );
+        snap.bookmark_folders.insert(
+            202,
+            BookmarkFolderRecord {
+                folder_id: 202,
+                owner_id: corp_id,
+                folder_name: "Secret Corp Spots".into(),
+                is_shared: false,
+                corporation_id: Some(corp_id),
+                ..Default::default()
+            },
+        );
+        snap.bookmarks.insert(
+            301,
+            BookmarkRecord {
+                bookmark_id: 301,
+                owner_id: corp_id,
+                label: "OpenBM".into(),
+                solar_system_id: 30_000_142,
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+                item_id: None,
+                memo: String::new(),
+                folder_id: Some(201),
+                is_shared: true,
+            },
+        );
+        snap.bookmarks.insert(
+            302,
+            BookmarkRecord {
+                bookmark_id: 302,
+                owner_id: corp_id,
+                label: "SecretBM".into(),
+                solar_system_id: 30_000_142,
+                x: 4.0,
+                y: 5.0,
+                z: 6.0,
+                item_id: None,
+                memo: String::new(),
+                folder_id: Some(202),
+                is_shared: false,
+            },
+        );
+    });
+
+    // 1. All remaining notification type_ids + `parse_path_i64` zero/negative rejections
+    assert_eq!(
+        dispatch_char_social_route(
+            &ctx,
+            "GET",
+            "/characters/{character_id}",
+            &params(&[("character_id", "0")]),
+            &empty,
+            b""
+        )
+        .unwrap()
+        .status_code,
+        400
+    );
+    assert_eq!(
+        dispatch_char_social_route(
+            &ctx,
+            "GET",
+            "/characters/{character_id}",
+            &params(&[("character_id", "-7")]),
+            &empty,
+            b""
+        )
+        .unwrap()
+        .status_code,
+        400
+    );
+
+    {
+        let mut recs = ctx.notification_records.write().unwrap();
+        recs.clear();
+        for (idx, type_id) in [(1, 14), (2, 16), (3, 34), (4, 45), (5, 138), (6, 9999)] {
+            recs.push(NotificationRecord {
+                notification_id: idx,
+                type_id,
+                group_id: 1,
+                sender_id: char_id,
+                receiver_id: char_id,
+                processed: false,
+                created: (11_644_473_600 + now as i64) * 10_000_000,
+                data: format!("t={type_id}"),
+                deleted: false,
+                interacted: false,
+            });
+        }
+    }
+    let notif_res = dispatch_char_social_route(
+        &ctx,
+        "GET",
+        "/characters/{character_id}/notifications",
+        &p_char,
+        &empty,
+        b"",
+    )
+    .unwrap();
+    let types_seen: Vec<String> = body(&notif_res)
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["type"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        types_seen,
+        vec![
+            "AllWarDeclaredMsg",
+            "CloneActivationMsg2",
+            "AllAnchoringMsg",
+            "InsuranceFirstShipMsg",
+            "CorpAppAcceptMsg",
+            "CorpAppNewMsg",
+        ]
+    );
+
+    // 2. Runtime `char_corp_history` override including `is_deleted: true`
+    ctx.esi_state.char_corp_history.write().unwrap().insert(
+        char_id,
+        vec![
+            crate::esi::runtime_state::EsiCorpHistoryEntry {
+                record_id: 1,
+                corporation_id: 1_000_009,
+                start_date_unix: 1_600_000_000,
+                is_deleted: true,
+            },
+            crate::esi::runtime_state::EsiCorpHistoryEntry {
+                record_id: 2,
+                corporation_id: corp_id,
+                start_date_unix: 1_700_000_000,
+                is_deleted: false,
+            },
+        ],
+    );
+    let hist = dispatch_char_social_route(
+        &ctx,
+        "GET",
+        "/characters/{character_id}/corporationhistory",
+        &p_char,
+        &empty,
+        b"",
+    )
+    .unwrap();
+    assert!(body(&hist)[0].get("is_deleted").is_none());
+    assert_eq!(body(&hist)[1]["is_deleted"], true);
+
+    // 3. CSPA body validation errors: malformed JSON, empty array, > 100 items
+    assert_eq!(
+        dispatch_char_social_route(&ctx, "POST", "/characters/{character_id}/cspa", &p_char, &empty, b"{bad").unwrap().status_code,
+        400
+    );
+    assert_eq!(
+        dispatch_char_social_route(&ctx, "POST", "/characters/{character_id}/cspa", &p_char, &empty, b"[]").unwrap().status_code,
+        400
+    );
+    let over_100: Vec<i64> = vec![char_id; 101];
+    assert_eq!(
+        dispatch_char_social_route(
+            &ctx,
+            "POST",
+            "/characters/{character_id}/cspa",
+            &p_char,
+            &empty,
+            &serde_json::to_vec(&over_100).unwrap()
+        )
+        .unwrap()
+        .status_code,
+        400
+    );
+
+    // 4. `/characters/{character_id}/roles` breakdown fallback when `char_scoped_roles` absent
+    let roles_fb = dispatch_char_social_route(
+        &ctx,
+        "GET",
+        "/characters/{character_id}/roles",
+        &params(&[("character_id", &role_fallback_cid.to_string())]),
+        &empty,
+        b"",
+    )
+    .unwrap();
+    assert_eq!(roles_fb.status_code, 200);
+    assert!(body(&roles_fb)["roles"].is_array());
+    assert!(body(&roles_fb)["roles_at_hq"].is_array());
+
+    // 5. `dispatch_char_social_route_with_claims` enforces corp membership (403) and folder ACL filtering
+    let make_claims = |cid: i64| SsoTokenClaims {
+        sub: format!("CHARACTER:EVE:{cid}"),
+        name: "Pilot".into(),
+        owner: "owner".into(),
+        user_id: 1,
+        character_id: cid,
+        scp: vec![],
+        iss: "https://login.eveonline.com".into(),
+        aud: vec!["EVE Online".into()],
+        iat: now,
+        exp: now + 3600,
+        jti: "jti".into(),
+    };
+    let outsider_claims = make_claims(outsider_cid);
+    assert_eq!(
+        dispatch_char_social_route_with_claims(
+            &ctx,
+            "GET",
+            "/corporations/{corporation_id}/bookmarks",
+            &p_corp,
+            &empty,
+            Some(&outsider_claims),
+            b"",
+        )
+        .unwrap()
+        .status_code,
+        403
+    );
+    assert_eq!(
+        dispatch_char_social_route_with_claims(
+            &ctx,
+            "GET",
+            "/corporations/{corporation_id}/bookmarks/folders",
+            &p_corp,
+            &empty,
+            Some(&outsider_claims),
+            b"",
+        )
+        .unwrap()
+        .status_code,
+        403
+    );
+
+    // Member claims: filters out secret folder 202 (AccessLevel::None) & bookmark 302 while returning 201 & 301
+    let member_claims = make_claims(role_fallback_cid);
+    let member_bms = dispatch_char_social_route_with_claims(
+        &ctx,
+        "GET",
+        "/corporations/{corporation_id}/bookmarks",
+        &p_corp,
+        &empty,
+        Some(&member_claims),
+        b"",
+    )
+    .unwrap();
+    let mbm_arr = body(&member_bms).as_array().unwrap();
+    assert_eq!(mbm_arr.len(), 1);
+    assert_eq!(mbm_arr[0]["bookmark_id"], 301);
+
+    let member_flds = dispatch_char_social_route_with_claims(
+        &ctx,
+        "GET",
+        "/corporations/{corporation_id}/bookmarks/folders",
+        &p_corp,
+        &empty,
+        Some(&member_claims),
+        b"",
+    )
+    .unwrap();
+    let mfld_arr = body(&member_flds).as_array().unwrap();
+    assert_eq!(mfld_arr.len(), 1);
+    assert_eq!(mfld_arr[0]["folder_id"], 201);
+}
+
+#[test]
+fn esi_caller_in_corp_individual_signals_dispatch_and_cspa_standing_threshold() {
+    let (ctx, _tok, caller_cid, _corp_id, _pid) = seed_full_esi_context();
+    let target_corp_id = 98_600_001_i64;
+    let other_corp_id = 98_600_002_i64;
+    let cid_by_char_corp = 90_600_001_i64;
+    let cid_by_ceo = 90_600_002_i64;
+    let cid_by_member = 90_600_003_i64;
+    let cid_by_roles = 90_600_004_i64;
+    let cid_outsider = 90_600_005_i64;
+    let target_mid_standing = 90_600_006_i64;
+    let target_neg10_standing = 90_600_007_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = target_corp_id;
+        corp.name = "Signal Corp".into();
+        corp.ticker = "SGC".into();
+        corp.ceo_id = cid_by_ceo;
+        corp.members.insert(cid_by_member);
+        corp.member_roles.insert(cid_by_roles, 1);
+        corp.ensure_wallet_divisions();
+        snap.corporations.insert(target_corp_id, corp);
+
+        let tpl = snap.characters[&caller_cid].clone();
+        for (cid, c_corp) in [
+            (cid_by_char_corp, target_corp_id),
+            (cid_by_ceo, 1_000_009),
+            (cid_by_member, 1_000_009),
+            (cid_by_roles, 1_000_009),
+            (cid_outsider, other_corp_id),
+            (target_mid_standing, other_corp_id),
+            (target_neg10_standing, other_corp_id),
+        ] {
+            let mut ch = tpl.clone();
+            ch.character_id = cid;
+            ch.name = format!("Char {cid}");
+            ch.corporation_id = c_corp;
+            ch.alliance_id = None;
+            snap.characters.insert(cid, ch);
+        }
+
+        snap.character_cspa_charges
+            .insert(target_mid_standing, IskCents::from_isk(2_500));
+        snap.character_cspa_charges
+            .insert(target_neg10_standing, IskCents::from_isk(3_000));
+        snap.char_contacts.insert(
+            target_mid_standing,
+            vec![eve_db::SocialContactRecord {
+                contact_id: caller_cid,
+                standing: 0.0,
+                is_blocked: false,
+                is_watched: false,
+                label_ids: Vec::new(),
+                contact_type: "character".into(),
+            }],
+        );
+        snap.char_contacts.insert(
+            target_neg10_standing,
+            vec![eve_db::SocialContactRecord {
+                contact_id: caller_cid,
+                standing: -10.0,
+                is_blocked: false,
+                is_watched: false,
+                label_ids: Vec::new(),
+                contact_type: "character".into(),
+            }],
+        );
+
+        let folder = BookmarkFolderRecord {
+            folder_id: 601,
+            folder_name: "Shared".into(),
+            owner_id: target_corp_id,
+            corporation_id: Some(target_corp_id),
+            is_shared: true,
+            ..Default::default()
+        };
+        snap.bookmark_folders.insert(601, folder);
+    });
+
+    // 1. Direct unit checks & route checks for each `esi_caller_in_corp` boolean term independently
+    ctx.db.with_snapshot(|snap| {
+        assert!(esi_caller_in_corp(snap, target_corp_id, cid_by_char_corp));
+        assert!(esi_caller_in_corp(snap, target_corp_id, cid_by_ceo));
+        assert!(esi_caller_in_corp(snap, target_corp_id, cid_by_member));
+        assert!(esi_caller_in_corp(snap, target_corp_id, cid_by_roles));
+        assert!(!esi_caller_in_corp(snap, target_corp_id, cid_outsider));
+    });
+
+    let empty = HashMap::new();
+    let p_corp = params(&[("corporation_id", &target_corp_id.to_string())]);
+    let mk_claims = |cid: i64| eve_db::SsoTokenClaims {
+        sub: format!("CHARACTER:EVE:{cid}"),
+        name: "Pilot".into(),
+        owner: "o".into(),
+        user_id: 1,
+        character_id: cid,
+        scp: vec![],
+        iss: "https://login.eveonline.com".into(),
+        aud: vec!["EVE Online".into()],
+        iat: 1_700_000_000,
+        exp: 1_800_000_000,
+        jti: "jti".into(),
+    };
+
+    for allowed_cid in [cid_by_char_corp, cid_by_ceo, cid_by_member, cid_by_roles] {
+        let res = dispatch_char_social_route_with_claims(
+            &ctx,
+            "GET",
+            "/corporations/{corporation_id}/bookmarks/folders",
+            &p_corp,
+            &empty,
+            Some(&mk_claims(allowed_cid)),
+            b"",
+        )
+        .unwrap();
+        assert_eq!(res.status_code, 200, "member cid {allowed_cid} should get 200");
+        assert_eq!(body(&res).as_array().unwrap().len(), 1);
+    }
+    let denied = dispatch_char_social_route_with_claims(
+        &ctx,
+        "GET",
+        "/corporations/{corporation_id}/bookmarks/folders",
+        &p_corp,
+        &empty,
+        Some(&mk_claims(cid_outsider)),
+        b"",
+    )
+    .unwrap();
+    assert_eq!(denied.status_code, 403);
+
+    // 2. Unmatched route returns None (kills `-> Some(Default::default())`)
+    assert!(dispatch_char_social_route_with_claims(
+        &ctx,
+        "GET",
+        "/characters/{character_id}/nonexistent_social_path",
+        &empty,
+        &empty,
+        None,
+        b"",
+    )
+    .is_none());
+
+    // 3. `POST /characters/{character_id}/cspa`: standing 0.0 is exempt (`> -10.0` vs `+10.0`), -10.0 is charged
+    let p_caller = params(&[("character_id", &caller_cid.to_string())]);
+    let cspa_zero = dispatch_char_social_route_with_claims(
+        &ctx,
+        "POST",
+        "/characters/{character_id}/cspa",
+        &p_caller,
+        &empty,
+        None,
+        &serde_json::to_vec(&vec![target_mid_standing]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(cspa_zero.status_code, 201);
+    assert_eq!(body(&cspa_zero).as_f64().unwrap(), 0.0);
+
+    let cspa_neg10 = dispatch_char_social_route_with_claims(
+        &ctx,
+        "POST",
+        "/characters/{character_id}/cspa",
+        &p_caller,
+        &empty,
+        None,
+        &serde_json::to_vec(&vec![target_neg10_standing]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(cspa_neg10.status_code, 201);
+    assert_eq!(body(&cspa_neg10).as_f64().unwrap(), 3_000.0);
+}

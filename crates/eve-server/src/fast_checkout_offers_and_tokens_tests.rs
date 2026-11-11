@@ -270,7 +270,7 @@ async fn fast_checkout_consumes_tokens_blocks_negative_vault_and_rejects_unprice
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.account_plex_vault.insert(uid, 600);
-        crate::services::quasar_payment_store::seed_default_store_catalog_if_empty(snap, &ctx.sde);
+        crate::services::quasar_payment_store::ensure_store_catalog_seeded(snap, &ctx.sde);
         let mut cat = crate::services::quasar_payment_store_types::read_store_catalog(snap);
         cat.offers.push(crate::services::quasar_payment_store_types::StoreOffer {
             id: 9901,

@@ -377,3 +377,161 @@ fn load_charge_into_weapon_slot_error_branches_and_slot_boundaries() {
         assert!(!loaded.singleton);
     });
 }
+
+#[test]
+fn load_charge_into_weapon_slot_emits_exact_item_change_diffs_and_splits_from_hangar() {
+    let ctx = test_ctx();
+    let char1 = 90_000_001_i64;
+    let station_id = 60_003_760_i64;
+    let dock = Some(station_id);
+    let ship_id = 921_000_001_i64;
+    let wep_id = 921_000_002_i64;
+
+    let (w_tid, c1_tid, c2_tid) = ctx
+        .sde
+        .types
+        .values()
+        .find_map(|w| {
+            if w.category_id == 7 && w.group_id == 55 && w.capacity >= 5.0 {
+                let charges: Vec<u32> = ctx
+                    .sde
+                    .types
+                    .values()
+                    .filter(|c| ServerContext::is_charge_compatible_with_weapon(w, c) && c.volume <= 0.05)
+                    .map(|c| c.type_id)
+                    .take(2)
+                    .collect();
+                (charges.len() == 2).then(|| (w.type_id, charges[0], charges[1]))
+            } else {
+                None
+            }
+        })
+        .expect("SDE has projectile turret and two ammo types");
+
+    let max_cap = ServerContext::weapon_slot_max_charge_capacity(
+        ctx.sde.get_type(w_tid).unwrap(),
+        ctx.sde.get_type(c1_tid).unwrap(),
+    );
+    let hangar_stack_id = 921_000_010_i64;
+    let c2_cargo_id = 921_000_011_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char1) {
+            ch.station_id = Some(station_id);
+        }
+        snap.items.insert(ship_id, make_item(ship_id, 587, char1, station_id, InventoryFlag::Hangar, 1));
+        snap.items.insert(wep_id, make_item(wep_id, w_tid, char1, ship_id, InventoryFlag::HiSlot7, 1));
+        // Oversized stack in Station Hangar (location_id != ship_id) so pre_map MUST capture it via i.item_id == charge_item_id
+        snap.items.insert(
+            hangar_stack_id,
+            make_item(hangar_stack_id, c1_tid, char1, station_id, InventoryFlag::Hangar, max_cap + 17),
+        );
+        snap.items.insert(
+            c2_cargo_id,
+            make_item(c2_cargo_id, c2_tid, char1, ship_id, InventoryFlag::Cargo, 9),
+        );
+        for tid in [w_tid, c1_tid, c2_tid] {
+            for (sk_tid, _) in ctx.sde.required_skills_for_type(tid) {
+                snap.skills.entry(char1).or_default().insert(
+                    sk_tid,
+                    TrainedSkillRecord { type_id: sk_tid, level: 5, skill_points: 256_000.0 },
+                );
+            }
+        }
+    });
+
+    let uid = ctx.db.with_snapshot(|s| s.characters[&char1].user_id);
+    ctx.db
+        .acquire_online_lock(uid, 501, Some(char1), true, ctx.now_unix())
+        .expect("online lock");
+
+    // Helper: extract (item_id, change_cols_dict) from OnItemChange notifications
+    let item_changes = |notifs: Vec<crate::router::PendingMachoNotification>| -> HashMap<i64, Vec<(i64, i64)>> {
+        let mut out = HashMap::new();
+        for n in notifs {
+            if n.event != "OnItemChange" {
+                continue;
+            }
+            let iid = match &n.args[0] {
+                eve_proto::PyRep::DBRow { columns, .. } => columns
+                    .iter()
+                    .find(|(k, _)| k == "itemID")
+                    .and_then(|(_, v)| v.as_i64())
+                    .unwrap(),
+                _ => panic!("expected DBRow"),
+            };
+            let cols = match &n.args[1] {
+                eve_proto::PyRep::Dict(entries) => entries
+                    .iter()
+                    .filter_map(|(k, v)| Some((k.as_i64()?, v.as_i64()?)))
+                    .collect(),
+                _ => panic!("expected Dict"),
+            };
+            out.insert(iid, cols);
+        }
+        out
+    };
+
+    // 1) Split oversized Hangar stack into an EMPTY weapon slot -> brand new loaded_id (`!touched_ids.contains(&loaded.0)`)
+    let _ = ctx.drain_notifications_for_char(char1);
+    let (new_loaded_id, tid_out, qty_out, ver_out) = ctx
+        .load_charge_into_weapon_slot(char1, ship_id, InventoryFlag::HiSlot7, hangar_stack_id, dock)
+        .expect("split from hangar into empty weapon slot");
+    assert_eq!((tid_out, qty_out, ver_out), (c1_tid, max_cap, 1));
+    assert_ne!(new_loaded_id, hangar_stack_id);
+    let ch1 = item_changes(ctx.drain_notifications_for_char(char1));
+    // Hangar stack MUST have pre captured -> exact delta column (9 = ixStackSize -> max_cap + 17)
+    assert_eq!(ch1.get(&hangar_stack_id), Some(&vec![(9, (max_cap + 17) as i64)]));
+    // New loaded stack MUST be in notifications with empty create diff `vec![]`
+    assert_eq!(ch1.get(&new_loaded_id), Some(&vec![]));
+
+    // 2) Swap to c2_tid when NO c1_tid exists in Cargo (moves new_loaded_id to Cargo, c2_cargo_id to HiSlot7)
+    let _ = ctx.drain_notifications_for_char(char1);
+    let (swapped_id, swapped_tid, swapped_qty, swapped_ver) = ctx
+        .load_charge_into_weapon_slot(char1, ship_id, InventoryFlag::HiSlot7, c2_cargo_id, dock)
+        .expect("swap charge into weapon slot moving previous to cargo");
+    assert_eq!((swapped_id, swapped_tid, swapped_qty, swapped_ver), (c2_cargo_id, c2_tid, 9, 2));
+    let ch2 = item_changes(ctx.drain_notifications_for_char(char1));
+    // Old loaded charge had pre captured in HiSlot7 -> change col 4 (ixFlag = HiSlot7 = 34)
+    assert_eq!(
+        ch2.get(&new_loaded_id),
+        Some(&vec![(4, InventoryFlag::HiSlot7 as i64)])
+    );
+    // New charge from Cargo had pre captured -> change col 4 (ixFlag = Cargo = 5)
+    assert_eq!(
+        ch2.get(&c2_cargo_id),
+        Some(&vec![(4, InventoryFlag::Cargo as i64)])
+    );
+
+    // 3) Swap BACK to c1_tid (using remainder in hangar_stack_id) when Cargo ALSO already has a stack of c2_tid!
+    // This exercises pre_map capture for BOTH `i.flag == flag` (c2_cargo_id) AND `i.flag == Cargo` (c2_cargo_merge_id).
+    let c2_cargo_merge_id = 921_000_012_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            c2_cargo_merge_id,
+            make_item(c2_cargo_merge_id, c2_tid, char1, ship_id, InventoryFlag::Cargo, 4),
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(char1);
+    let (back_id, back_tid, back_qty, back_ver) = ctx
+        .load_charge_into_weapon_slot(char1, ship_id, InventoryFlag::HiSlot7, hangar_stack_id, dock)
+        .expect("swap back merging old weapon charge into Cargo stack");
+    assert_eq!((back_id, back_tid, back_qty, back_ver), (hangar_stack_id, c1_tid, 17, 3));
+    let ch3 = item_changes(ctx.drain_notifications_for_char(char1));
+    // Existing Cargo merge target stack had pre captured (quantity was 4 before +9 = 13) -> col 9 = 4
+    assert_eq!(ch3.get(&c2_cargo_merge_id), Some(&vec![(9, 4)]));
+    // Unloaded old weapon charge c2_cargo_id was deleted into Cargo merge -> tombstone (loc 6, col 9 = 9)
+    assert_eq!(
+        ch3.get(&c2_cargo_id),
+        Some(&vec![
+            (3, ship_id),
+            (4, InventoryFlag::HiSlot7 as i64),
+            (9, 9),
+        ])
+    );
+    // Hangar stack moved into weapon slot -> cols 3 (station_id) & 4 (Hangar)
+    assert_eq!(
+        ch3.get(&hangar_stack_id),
+        Some(&vec![(3, station_id), (4, InventoryFlag::Hangar as i64)])
+    );
+}

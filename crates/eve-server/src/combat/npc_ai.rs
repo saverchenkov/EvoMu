@@ -236,16 +236,28 @@ impl NpcSpawnManager {
             .get(&spawn_group_id)
             .cloned()
             .ok_or_else(|| format!("SDE NPC spawn group {spawn_group_id} not found"))?;
-
-        let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        let mut spawned_ball_ids = Vec::new();
-
         let count = spawn_group.npc_type_ids.len() as i64;
         let start_ball_id = ctx.db.with_mut_snapshot(|snap| {
             let start = snap.next_entity_id + 1;
             snap.next_entity_id += count;
             start
         });
+        Ok(self
+            .spawn_group_with_start_id(ctx, sys_id, spawn_group_id, &spawn_group, spawn_pos, start_ball_id)
+            .await)
+    }
+
+    async fn spawn_group_with_start_id(
+        &mut self,
+        ctx: &ServerContext,
+        sys_id: u32,
+        spawn_group_id: u32,
+        spawn_group: &eve_sde::NpcSpawnGroupInfo,
+        spawn_pos: DVec3,
+        start_ball_id: i64,
+    ) -> Vec<i64> {
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        let mut spawned_ball_ids = Vec::with_capacity(spawn_group.npc_type_ids.len());
 
         for (idx, &npc_type_id) in spawn_group.npc_type_ids.iter().enumerate() {
             let ball_id = start_ball_id + idx as i64;
@@ -301,7 +313,7 @@ impl NpcSpawnManager {
                 category_id: sde_t.map(|t| t.category_id).unwrap_or(11),
                 owner_id: fac_owner,
                 char_id: None,
-                corp_id: fac_owner,
+                corp_id: crate::services::combat_crimewatch::combat_npc_ai::resolve_npc_corp_id_for_faction(ctx, fac_owner),
                 alliance_id: -1,
                 security_status: -1.0,
                 is_cloaked: false,
@@ -336,23 +348,22 @@ impl NpcSpawnManager {
             spawned_ball_ids.push(ball_id);
         }
 
-        Ok(spawned_ball_ids)
+        spawned_ball_ids
     }
 
-    /// Spawns belt rats at asteroid belts in a solar system based on system security and region (`feat:npc.belt-rats`, `feat:npc.clone-soldier-spawns`, `feat:npc.officer-npc`, `feat:npc.drifters`).
-    pub async fn spawn_belt_rats_for_system(
+    pub(crate) fn plan_belt_rats_for_system(
         &mut self,
         ctx: &ServerContext,
         sys_id: u32,
-    ) -> Result<Vec<i64>, String> {
+        drifter_alive: bool,
+        rt_until_opt: Option<u64>,
+        cs_alive: bool,
+        mordu_alive: bool,
+        officer_alive: bool,
+    ) -> (Vec<(u32, eve_sde::NpcSpawnGroupInfo, DVec3)>, Vec<(u32, &'static str, u32, DVec3)>) {
         let now_unix = ctx.now_unix();
         // Wormhole & Drifter Hive systems (31_000_000..32_000_000): spawn Drifter Cruiser + Battleship (`feat:npc.drifters`)
         if (31_000_000..32_000_000).contains(&sys_id) {
-            let drifter_alive = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                rt.npc_entities
-                    .values()
-                    .any(|n| n.solar_system_id == sys_id && n.archetype == "Drifter")
-            });
             let on_cd = self
                 .respawn_timers
                 .get(&(sys_id, 500_024))
@@ -387,27 +398,20 @@ impl NpcSpawnManager {
                     .map(|t| t.type_id)
                     .min()
                     .unwrap_or(34495);
-                let c_bid = crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity(
-                    ctx,
-                    sys_id,
-                    cruiser_tid,
-                    "Drifter",
-                    500_024,
-                    anchor_pos,
-                )
-                .await;
-                let b_bid = crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity(
-                    ctx,
-                    sys_id,
-                    bs_tid,
-                    "Drifter",
-                    500_024,
-                    anchor_pos + DVec3::new(2_500.0, 0.0, 0.0),
-                )
-                .await;
-                return Ok(vec![c_bid, b_bid]);
+                return (
+                    Vec::new(),
+                    vec![
+                        (cruiser_tid, "Drifter", 500_024, anchor_pos),
+                        (
+                            bs_tid,
+                            "Drifter",
+                            500_024,
+                            anchor_pos + DVec3::new(2_500.0, 0.0, 0.0),
+                        ),
+                    ],
+                );
             }
-            return Ok(Vec::new());
+            return (Vec::new(), Vec::new());
         }
 
         let belt_positions: Vec<DVec3> = ctx
@@ -419,7 +423,7 @@ impl NpcSpawnManager {
             .collect();
 
         if belt_positions.is_empty() {
-            return Ok(Vec::new());
+            return (Vec::new(), Vec::new());
         }
 
         let sys_sec = ctx
@@ -461,7 +465,7 @@ impl NpcSpawnManager {
         }
         candidate_groups.sort_unstable();
 
-        let mut all_spawned = Vec::new();
+        let mut planned_groups: Vec<(u32, eve_sde::NpcSpawnGroupInfo, DVec3)> = Vec::new();
         if !candidate_groups.is_empty() {
             for (idx, &belt_pos) in belt_positions.iter().take(3).enumerate() {
                 let group_id = candidate_groups[idx % candidate_groups.len()];
@@ -477,8 +481,8 @@ impl NpcSpawnManager {
                 {
                     continue;
                 }
-                if let Ok(spawned) = self.spawn_group(ctx, sys_id, group_id, belt_pos).await {
-                    all_spawned.extend(spawned);
+                if let Some(sg) = ctx.sde.npc_spawn_groups.get(&group_id) {
+                    planned_groups.push((group_id, sg.clone(), belt_pos));
                 }
             }
             if sys_sec < 0.45 {
@@ -501,21 +505,21 @@ impl NpcSpawnManager {
                             .get(&(sys_id, gate_group_id))
                             .is_some_and(|&until| now_unix < until)
                     {
-                        if let Ok(spawned) =
-                            self.spawn_group(ctx, sys_id, gate_group_id, gate_pos).await
-                        {
-                            all_spawned.extend(spawned);
+                        if let Some(sg) = ctx.sde.npc_spawn_groups.get(&gate_group_id) {
+                            planned_groups.push((gate_group_id, sg.clone(), gate_pos));
                         }
                     }
                 }
             }
         }
 
+        let need_cs = clone_soldier_tier_for_security(sys_sec).is_some();
+        let need_officer = sys_sec < 0.0 && sys_id < 31_000_000;
+        let mut special_specs: Vec<(u32, &'static str, u32, DVec3)> = Vec::new();
+
         // In low-sec (0.1..=0.4), spawn a Clone Soldier at the first asteroid belt if not on respawn cooldown (`feat:npc.clone-soldier-spawns`).
-        if clone_soldier_tier_for_security(sys_sec).is_some() {
-            if let Some(rt_until) = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                rt.clone_soldier_cooldown_until.get(&sys_id).copied()
-            }) {
+        if need_cs {
+            if let Some(rt_until) = rt_until_opt {
                 let entry = self.clone_soldier_respawn_timers.entry(sys_id).or_insert(rt_until);
                 if rt_until > *entry {
                     *entry = rt_until;
@@ -525,25 +529,17 @@ impl NpcSpawnManager {
                 .clone_soldier_respawn_timers
                 .get(&sys_id)
                 .is_some_and(|&until| now_unix < until)
-                || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                    rt.npc_entities.values().any(|n| {
-                        n.solar_system_id == sys_id && n.archetype == "CloneSoldier"
-                    })
-                });
+                || cs_alive;
             if !on_cooldown {
                 if let Some(cs_type_id) =
                     clone_soldier_type_for_security_and_faction(&ctx.sde, sys_sec, reg_faction)
                 {
-                    let cs_ball_id = crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity(
-                        ctx,
-                        sys_id,
+                    special_specs.push((
                         cs_type_id,
                         "CloneSoldier",
                         reg_faction,
                         belt_positions[0],
-                    )
-                    .await;
-                    all_spawned.push(cs_ball_id);
+                    ));
                 }
             }
 
@@ -552,11 +548,7 @@ impl NpcSpawnManager {
                 .respawn_timers
                 .get(&(sys_id, 500_018))
                 .is_some_and(|&until| now_unix < until)
-                || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                    rt.npc_entities
-                        .values()
-                        .any(|n| n.solar_system_id == sys_id && n.archetype == "MorduCommander")
-                });
+                || mordu_alive;
             if !mordu_cd {
                 self.respawn_timers
                     .insert((sys_id, 500_018), now_unix.saturating_add(300));
@@ -581,16 +573,7 @@ impl NpcSpawnManager {
                             .copied()
                             .unwrap_or(belt_positions[0])
                             + DVec3::new(2_500.0, 0.0, 0.0);
-                        let m_bid = crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity(
-                            ctx,
-                            sys_id,
-                            mordu_tid,
-                            "MorduCommander",
-                            500_018,
-                            m_pos,
-                        )
-                        .await;
-                        all_spawned.push(m_bid);
+                        special_specs.push((mordu_tid, "MorduCommander", 500_018, m_pos));
                     }
                 }
             }
@@ -639,36 +622,23 @@ impl NpcSpawnManager {
                 cmd_tids.sort_unstable();
                 if !cmd_tids.is_empty() {
                     let pick = (ctx.mechanic_rng.try_next_u64().unwrap_or(0) as usize) % cmd_tids.len();
-                    let cmd_bid = crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity(
-                        ctx,
-                        sys_id,
+                    special_specs.push((
                         cmd_tids[pick],
                         "Officer",
                         reg_faction,
                         belt_positions[0] + DVec3::new(1_800.0, 0.0, -1_200.0),
-                    )
-                    .await;
-                    all_spawned.push(cmd_bid);
+                    ));
                 }
             }
         }
 
         // Rare Named Officer spawn in true null-sec asteroid belts (`sys_sec < 0.0`, `feat:npc.officer-npc`)
-        if sys_sec < 0.0 && sys_id < 31_000_000 {
+        if need_officer {
             let off_cd = self
                 .respawn_timers
                 .get(&(sys_id, 900_099))
                 .is_some_and(|&until| now_unix < until)
-                || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                    rt.npc_entities.values().any(|n| {
-                        n.solar_system_id == sys_id
-                            && ctx
-                                .sde
-                                .types
-                                .get(&n.type_id)
-                                .is_some_and(|t| matches!(t.group_id, 553 | 559 | 564 | 569 | 574))
-                    })
-                });
+                || officer_alive;
             if !off_cd {
                 self.respawn_timers
                     .insert((sys_id, 900_099), now_unix.saturating_add(600));
@@ -691,21 +661,153 @@ impl NpcSpawnManager {
                     if !off_tids.is_empty() {
                         let pick =
                             (ctx.mechanic_rng.try_next_u64().unwrap_or(0) as usize) % off_tids.len();
-                        let off_bid = crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity(
-                            ctx,
-                            sys_id,
+                        special_specs.push((
                             off_tids[pick],
                             "Officer",
                             reg_faction,
                             belt_positions[0] + DVec3::new(-2_500.0, 0.0, 1_500.0),
-                        )
-                        .await;
-                        all_spawned.push(off_bid);
+                        ));
                     }
                 }
             }
         }
 
+        (planned_groups, special_specs)
+    }
+
+    pub(crate) async fn execute_belt_rat_plan_with_start_id(
+        &mut self,
+        ctx: &ServerContext,
+        sys_id: u32,
+        planned_groups: Vec<(u32, eve_sde::NpcSpawnGroupInfo, DVec3)>,
+        special_specs: Vec<(u32, &'static str, u32, DVec3)>,
+        mut next_start_id: i64,
+        out_entities: &mut Vec<(i64, crate::services::combat_crimewatch::ExtendedNpcEntity)>,
+    ) -> Vec<i64> {
+        let mut all_spawned = Vec::new();
+        for (group_id, sg, spawn_pos) in planned_groups {
+            let count = sg.npc_type_ids.len() as i64;
+            let spawned = self
+                .spawn_group_with_start_id(ctx, sys_id, group_id, &sg, spawn_pos, next_start_id)
+                .await;
+            all_spawned.extend(spawned);
+            next_start_id += count;
+        }
+        if !special_specs.is_empty() {
+            let special_ids = crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_batch_with_start_id(
+                ctx,
+                sys_id,
+                &special_specs,
+                next_start_id,
+                |_| {},
+                out_entities,
+            )
+            .await;
+            all_spawned.extend(special_ids);
+        }
+        all_spawned
+    }
+
+    /// Spawns belt rats at asteroid belts in a solar system based on system security and region (`feat:npc.belt-rats`, `feat:npc.clone-soldier-spawns`, `feat:npc.officer-npc`, `feat:npc.drifters`).
+    pub async fn spawn_belt_rats_for_system(
+        &mut self,
+        ctx: &ServerContext,
+        sys_id: u32,
+    ) -> Result<Vec<i64>, String> {
+        let (drifter_alive, rt_until_opt, cs_alive, mordu_alive, officer_alive) =
+            if (31_000_000..32_000_000).contains(&sys_id) {
+                let da = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                    rt.npc_entities
+                        .values()
+                        .any(|n| n.solar_system_id == sys_id && n.archetype == "Drifter")
+                });
+                (da, None, false, false, false)
+            } else {
+                let sys_sec = ctx
+                    .sde
+                    .solar_systems
+                    .get(&sys_id)
+                    .map(|s| s.security_status as f64)
+                    .unwrap_or(0.5);
+                let need_cs = clone_soldier_tier_for_security(sys_sec).is_some();
+                let need_officer = sys_sec < 0.0 && sys_id < 31_000_000;
+                if need_cs || need_officer {
+                    let (rt_until_opt, cs_alive, mordu_alive, officer_alive) =
+                        crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                            let mut cs_alive = false;
+                            let mut mordu_alive = false;
+                            let mut officer_alive = false;
+                            for n in rt.npc_entities.values() {
+                                if n.solar_system_id != sys_id {
+                                    continue;
+                                }
+                                if n.archetype == "CloneSoldier" {
+                                    cs_alive = true;
+                                } else if n.archetype == "MorduCommander" {
+                                    mordu_alive = true;
+                                } else if need_officer
+                                    && ctx
+                                        .sde
+                                        .types
+                                        .get(&n.type_id)
+                                        .is_some_and(|t| matches!(t.group_id, 553 | 559 | 564 | 569 | 574))
+                                {
+                                    officer_alive = true;
+                                }
+                            }
+                            (
+                                rt.clone_soldier_cooldown_until.get(&sys_id).copied(),
+                                cs_alive,
+                                mordu_alive,
+                                officer_alive,
+                            )
+                        });
+                    (false, rt_until_opt, cs_alive, mordu_alive, officer_alive)
+                } else {
+                    (false, None, false, false, false)
+                }
+            };
+
+        let (planned_groups, special_specs) = self.plan_belt_rats_for_system(
+            ctx,
+            sys_id,
+            drifter_alive,
+            rt_until_opt,
+            cs_alive,
+            mordu_alive,
+            officer_alive,
+        );
+        let group_npcs: i64 = planned_groups
+            .iter()
+            .map(|(_, sg, _)| sg.npc_type_ids.len() as i64)
+            .sum();
+        let total_npcs = group_npcs + special_specs.len() as i64;
+        if total_npcs == 0 {
+            return Ok(Vec::new());
+        }
+        let start_id = ctx.db.with_mut_snapshot(|snap| {
+            let start = snap.next_entity_id + 1;
+            snap.next_entity_id += total_npcs;
+            start
+        });
+        let mut built_special = Vec::with_capacity(special_specs.len());
+        let all_spawned = self
+            .execute_belt_rat_plan_with_start_id(
+                ctx,
+                sys_id,
+                planned_groups,
+                special_specs,
+                start_id,
+                &mut built_special,
+            )
+            .await;
+        if !built_special.is_empty() {
+            crate::services::combat_crimewatch::with_mut_combat_ephemeral(ctx, |rt| {
+                for (ball_id, entity) in built_special {
+                    rt.npc_entities.insert(ball_id, entity);
+                }
+            });
+        }
         Ok(all_spawned)
     }
 
@@ -721,58 +823,102 @@ impl NpcSpawnManager {
         current_tick: u64,
         _dt: f64,
     ) {
+        if self.entities.is_empty() {
+            return;
+        }
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        let (all_balls, cloaked_or_dead): (Vec<Ball>, std::collections::HashSet<i64>) = {
+        let (ball_positions, mut cand_targets): (
+            HashMap<i64, DVec3>,
+            Vec<(i64, u32, DVec3)>,
+        ) = {
             let bp = sys_handle
                 .ballpark
                 .read()
                 .unwrap_or_else(|e| e.into_inner());
-            let balls = bp.balls.values().cloned().collect();
-            let invalid = bp
-                .combat_states
-                .iter()
-                .filter(|(_, cs)| cs.is_cloaked || cs.structure_hp <= 0.0)
-                .map(|(&id, _)| id)
-                .collect();
-            (balls, invalid)
+            let mut npc_pos = HashMap::with_capacity(self.entities.len());
+            for &nid in self.entities.keys() {
+                if let Some(b) = bp.balls.get(&nid) {
+                    npc_pos.insert(nid, b.position);
+                }
+            }
+            let mut cands = Vec::new();
+            for (&id, b) in &bp.balls {
+                if self.entities.contains_key(&id)
+                    || bp.static_ball_ids.contains(&id)
+                    || bp.non_free_ball_ids.contains(&id)
+                    || b.type_id == 670
+                    || b.max_velocity <= 0.0
+                    || matches!(b.mode, MovementMode::Warp { .. } | MovementMode::Rigid)
+                    || bp
+                        .combat_states
+                        .get(&id)
+                        .is_some_and(|cs| cs.is_cloaked || cs.structure_hp <= 0.0)
+                {
+                    continue;
+                }
+                let cat_id = bp
+                    .ball_slim_meta
+                    .get(&id)
+                    .map(|m| m.category_id)
+                    .or_else(|| ctx.sde.types.get(&b.type_id).map(|t| t.category_id))
+                    .unwrap_or(6);
+                if matches!(cat_id, 6 | 18 | 65) {
+                    cands.push((id, b.type_id, b.position));
+                }
+            }
+            (npc_pos, cands)
         };
-        let ball_positions: HashMap<i64, DVec3> =
-            all_balls.iter().map(|b| (b.id, b.position)).collect();
 
-        // Find potential player targets (ships that are not NPCs, not capsules, not cloaked, not warping, and alive)
-        let player_targets: Vec<(i64, DVec3, f64)> = all_balls
-            .into_iter()
-            .filter(|b| {
-                !self.entities.contains_key(&b.id)
-                    && b.type_id != 670
-                    && b.max_velocity > 0.0
-                    && !matches!(b.mode, MovementMode::Warp { .. })
-                    && !cloaked_or_dead.contains(&b.id)
-            })
-            .map(|b| {
-                let weight = ctx.db.with_snapshot(|snap| {
-                    let sig = ctx.sde.types.get(&b.type_id).and_then(|t| t.default_attributes.get(&552).copied()).unwrap_or(40.0);
-                    let mut ewar = false;
-                    let mut logi = false;
+        if !cand_targets.is_empty() {
+            crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                cand_targets.retain(|(id, _, _)| !rt.npc_entities.contains_key(id));
+            });
+        }
+
+        // Find potential player targets (ships/drones/structures that are not NPCs, not asteroids/celestials, not capsules, not cloaked, not warping, and alive)
+        let player_targets: Vec<(i64, DVec3, f64)> = if cand_targets.is_empty() {
+            Vec::new()
+        } else {
+            ctx.db.with_snapshot(|snap| {
+                let mut ewar_set: std::collections::HashSet<i64> = std::collections::HashSet::new();
+                let mut logi_set: std::collections::HashSet<i64> = std::collections::HashSet::new();
+                if !snap.module_active_states.is_empty() {
                     for &aid in &snap.module_active_states {
-                        if let Some(it) = snap.items.get(&aid).filter(|i| i.location_id == b.id) {
+                        if let Some(it) = snap.items.get(&aid) {
                             if let Some(mt) = ctx.sde.types.get(&it.type_id) {
-                                if matches!(mt.group_id, 52 | 65 | 201 | 208 | 291 | 357) { ewar = true; }
-                                if matches!(mt.group_id, 41 | 325 | 585) { logi = true; }
+                                if matches!(mt.group_id, 52 | 65 | 201 | 208 | 291 | 357) {
+                                    ewar_set.insert(it.location_id);
+                                }
+                                if matches!(mt.group_id, 41 | 325 | 585) {
+                                    logi_set.insert(it.location_id);
+                                }
                             }
                         }
                     }
-                    // DERIVED: EWAR 1.5x, logistics 1.3x, and signature radius threat weight.
-                    let mult = if ewar { 1.5 } else if logi { 1.3 } else { 1.0 };
-                    (100.0 + (sig / 40.0).clamp(0.5, 5.0) * 10.0) * mult
-                });
-                (b.id, b.position, weight)
+                }
+                cand_targets
+                    .into_iter()
+                    .map(|(bid, type_id, pos)| {
+                        let sig = ctx
+                            .sde
+                            .types
+                            .get(&type_id)
+                            .and_then(|t| t.default_attributes.get(&552).copied())
+                            .unwrap_or(40.0);
+                        let ewar = ewar_set.contains(&bid);
+                        let logi = logi_set.contains(&bid);
+                        // DERIVED: EWAR 1.5x, logistics 1.3x, and signature radius threat weight.
+                        let mult = if ewar { 1.5 } else if logi { 1.3 } else { 1.0 };
+                        let weight = (100.0 + (sig / 40.0).clamp(0.5, 5.0) * 10.0) * mult;
+                        (bid, pos, weight)
+                    })
+                    .collect()
             })
-            .collect();
+        };
 
         let mut to_remove = Vec::new();
         let mut mode_updates: Vec<(i64, MovementMode)> = Vec::new();
-        let mut dmg_updates: Vec<(i64, i64, DamageVector)> = Vec::new();
+        let mut dmg_updates: Vec<(i64, u32, i64, DamageVector)> = Vec::new();
 
         for (&ball_id, entity) in self.entities.iter_mut() {
             let Some(&npc_pos) = ball_positions.get(&ball_id) else {
@@ -829,7 +975,7 @@ impl NpcSpawnManager {
                             if current_tick >= entity.last_attack_tick.saturating_add(2) {
                                 entity.last_attack_tick = current_tick;
                                 let dmg = entity.damage_vector.scaled(0.5);
-                                dmg_updates.push((ball_id, target_id, dmg));
+                                dmg_updates.push((ball_id, entity.type_id, target_id, dmg));
                             }
                         }
                     }
@@ -845,8 +991,9 @@ impl NpcSpawnManager {
             }
         }
 
-        let damaged_target_ids: Vec<i64> = dmg_updates.iter().map(|&(_, tid, _)| tid).collect();
+        let damaged_target_ids: Vec<i64> = dmg_updates.iter().map(|&(_, _, tid, _)| tid).collect();
         let mut destroyed_balls: Vec<(i64, i64, Ball)> = Vec::new();
+        let mut applied_hits: Vec<(i64, u32, i64, f64, f64, f64, f64)> = Vec::new();
         if !mode_updates.is_empty() || !dmg_updates.is_empty() {
             let mut bp = sys_handle
                 .ballpark
@@ -860,9 +1007,35 @@ impl NpcSpawnManager {
             for (bid, mode) in mode_updates {
                 let _ = bp.set_mode(bid, mode);
             }
-            for (attacker_id, tid, dmg) in dmg_updates {
-                if let Some((_, true, Some(dead_ball))) = bp.apply_damage_to_ball(tid, dmg) {
-                    destroyed_balls.push((attacker_id, tid, dead_ball));
+            for (attacker_id, npc_type_id, tid, dmg) in dmg_updates {
+                bp.emit_event(
+                    Some(attacker_id),
+                    eve_destiny::DestinyEvent::OnSpecialFX {
+                        ball_id: attacker_id,
+                        module_id: Some(tid),
+                        guid: "effects.Laser".to_string(),
+                        is_active: true,
+                    },
+                );
+                if let Some((applied, destroyed, dead_ball_opt)) = bp.apply_damage_to_ball(tid, dmg)
+                {
+                    let (s_r, a_r, h_r) = bp
+                        .combat_states
+                        .get(&tid)
+                        .map(|cs| {
+                            (
+                                (cs.shield_hp / cs.max_shield_hp.max(1.0)).clamp(0.0, 1.0),
+                                (cs.armor_hp / cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0),
+                                (cs.structure_hp / cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0),
+                            )
+                        })
+                        .unwrap_or((0.0, 0.0, 0.0));
+                    applied_hits.push((attacker_id, npc_type_id, tid, applied, s_r, a_r, h_r));
+                    if destroyed {
+                        if let Some(dead_ball) = dead_ball_opt {
+                            destroyed_balls.push((attacker_id, tid, dead_ball));
+                        }
+                    }
                 }
             }
             let deact_guard = sys_handle
@@ -883,6 +1056,41 @@ impl NpcSpawnManager {
                 &sys_handle.ball_positions,
                 &sys_handle.scrambled_balls,
             );
+        }
+
+        if !applied_hits.is_empty() {
+            for (attacker_id, npc_type_id, tid, applied, s_r, a_r, h_r) in applied_hits {
+                let victim_char_opt = ctx.db.with_snapshot(|snap| {
+                    snap.characters
+                        .get(&tid)
+                        .map(|c| c.character_id)
+                        .or_else(|| {
+                            snap.characters
+                                .values()
+                                .find(|c| c.active_ship_id == tid)
+                                .map(|c| c.character_id)
+                        })
+                        .or_else(|| {
+                            snap.items
+                                .get(&tid)
+                                .map(|i| i.owner_id)
+                                .filter(|id| snap.characters.contains_key(id))
+                        })
+                });
+                crate::services::combat_crimewatch::emit_combat_log_and_damage_state(
+                    ctx,
+                    attacker_id,
+                    victim_char_opt,
+                    attacker_id,
+                    tid,
+                    npc_type_id,
+                    applied,
+                    false,
+                    s_r,
+                    a_r,
+                    h_r,
+                );
+            }
         }
 
         let now_unix = ctx.now_unix();
@@ -1256,4 +1464,8 @@ pub(crate) fn compute_sleeper_sentry_interval_s(ctx: &ServerContext, npc_type_id
 
 #[cfg(test)] #[path = "npc_ai_unit_tests.rs"]
 mod npc_ai_unit_tests;
+
+#[cfg(test)]
+#[path = "npc_ai_edges_tests.rs"]
+mod npc_ai_edges_tests;
 

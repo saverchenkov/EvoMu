@@ -1338,3 +1338,7 @@ mod living_world_extra_tests;
 #[cfg(test)]
 mod living_world_cov_unit_tests;
 
+#[cfg(test)]
+#[path = "living_world_edges2_tests.rs"]
+mod living_world_edges2_tests;
+

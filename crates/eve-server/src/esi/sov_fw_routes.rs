@@ -359,3 +359,7 @@ pub fn dispatch_sov_route(
 #[path = "sov_fw_routes_unit_tests.rs"]
 mod sov_fw_routes_unit_tests;
 
+#[cfg(test)]
+#[path = "sov_fw_routes_edges_tests.rs"]
+mod sov_fw_routes_edges_tests;
+

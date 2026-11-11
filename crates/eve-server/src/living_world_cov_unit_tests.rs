@@ -323,3 +323,63 @@ async fn mining_op_hauler_lost_in_transit_station_stacking_and_depleted_belts() 
         assert_eq!(npc_ord.price, IskCents::from_isk(17));
     });
 }
+
+#[tokio::test]
+async fn mining_op_depletion_cleanup_and_hauler_cooldown_respawn_guard() {
+    let sde = shared_sde();
+    let clock = Arc::new(VirtualServerClock::with_fixed_base(1_770_000_000));
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    db.set_clock(clock.clone());
+    let dir = LivingWorldDirector::new();
+
+    // Unknown faction fallback in ensure_system_navy_patrol returns None
+    let mut custom_sde = (*sde).clone();
+    if let Some(sys) = custom_sde.solar_systems.get_mut(&30_000_142) {
+        sys.stations.clear();
+        if let Some(c) = custom_sde.constellations.get_mut(&sys.constellation_id) {
+            c.faction_id = Some(500_999);
+        }
+        if let Some(r) = custom_sde.regions.get_mut(&sys.region_id) {
+            r.faction_id = Some(500_999);
+        }
+    }
+    assert_eq!(dir.ensure_system_navy_patrol(30_000_142, &custom_sde), None);
+
+    // Mining op with 0 remaining minable asteroids removes companion hauler/miner/escort balls
+    let cid = 800_700_001_i64;
+    let hauler_ball_id = cid + 1_000_000;
+    let sys_id = 30_000_144_u32;
+    let dest_sta = sde.solar_systems[&sys_id].stations[0].station_id;
+    let mut no_sys_sde = (*sde).clone();
+    no_sys_sde.solar_systems.remove(&sys_id);
+    let no_belt_systems = Arc::new(SystemRegistry::with_sde_and_db(
+        Arc::new(no_sys_sde),
+        Arc::clone(&db),
+    ));
+    let handle = no_belt_systems.get_or_spawn(sys_id);
+    let (hb, hc) = sde_ball_and_combat(&sde, hauler_ball_id, 648, glam::DVec3::ZERO);
+    let _ = handle.spawn_ball_with_combat(hb, hc).await;
+    dir.register_convoy(LivingWorldConvoy {
+        convoy_id: cid,
+        archetype: NpcArchetype::MiningOp,
+        ship_type_id: 32880,
+        origin_system_id: sys_id,
+        current_system_id: sys_id,
+        destination_system_id: sys_id,
+        destination_station_id: dest_sta,
+        cargo_type_id: 1230,
+        cargo_quantity: 0,
+        lod_level: 2,
+        destroyed: false,
+    });
+    assert!(dir
+        .step_npc_mining_op(cid, &no_belt_systems, &db, &sde)
+        .await
+        .is_err());
+    assert!(handle.get_ball_snapshot(hauler_ball_id).await.unwrap().is_none());
+
+    // mark_convoy_destroyed_in_combat on HaulerConvoy + ensure_system_hauler_convoy with expired cooldown
+    let hc_id = dir.ensure_system_hauler_convoy(30_000_142, &sde);
+    dir.mark_convoy_destroyed_in_combat(hc_id);
+    assert_eq!(dir.ensure_system_hauler_convoy(30_000_142, &sde), hc_id);
+}

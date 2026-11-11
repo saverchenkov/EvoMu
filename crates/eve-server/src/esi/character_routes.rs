@@ -1212,3 +1212,7 @@ pub fn dispatch_character_routes(
 #[path = "character_routes_unit_tests.rs"]
 mod character_routes_unit_tests;
 
+#[cfg(test)]
+#[path = "character_routes_edges_tests.rs"]
+mod character_routes_edges_tests;
+

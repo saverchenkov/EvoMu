@@ -269,3 +269,102 @@ fn belt_ores_security_bands_factions_pochven_and_sorting() {
         .collect();
     assert_eq!(jita_ores, vec!["Veldspar", "Scordite"]);
 }
+
+#[test]
+fn belt_ores_tiebreaks_filtering_and_region_constellation_mutants() {
+    let mut sde = populate_synthetic_ore_sde();
+
+    // Decoys filtered out: wrong category_id, unpublished, and non-base name ("Dense Veldspar")
+    let mut base_veld = sde.types[&1012].clone();
+    base_veld.type_id = 9001;
+    base_veld.category_id = 4;
+    sde.types.insert(9001, base_veld.clone());
+
+    let mut unpub_veld = sde.types[&1012].clone();
+    unpub_veld.type_id = 9002;
+    unpub_veld.published = false;
+    sde.types.insert(9002, unpub_veld);
+
+    let mut dense_veld = sde.types[&1012].clone();
+    dense_veld.type_id = 9003;
+    dense_veld.name = "Dense Veldspar".to_string();
+    sde.types.insert(9003, dense_veld);
+
+    // Same-volume tiebreak on type_id: two published types matching group name "Omber" (volume 0.6)
+    let mut omber_tie = sde.types[&1015].clone();
+    omber_tie.type_id = 500; // < 1015 -> must sort strictly before 1015
+    sde.types.insert(500, omber_tie);
+
+    let low_ids: Vec<u32> = sde
+        .belt_ores_for_security_and_region(0.3, 10)
+        .into_iter()
+        .map(|t| t.type_id)
+        .collect();
+    let idx_500 = low_ids.iter().position(|&id| id == 500).unwrap();
+    let idx_1015 = low_ids.iter().position(|&id| id == 1015).unwrap();
+    assert!(idx_500 < idx_1015, "equal volume must sort ascending by type_id");
+    assert!(!low_ids.contains(&9001));
+    assert!(!low_ids.contains(&9002));
+    assert!(!low_ids.contains(&9003));
+
+    // Region with multiple constellations: lowest has faction_id=None (must skip),
+    // middle has Some(500_003) (Amarr -> Pyroxeres), highest has Some(500_001) (Caldari -> Plagioclase).
+    // Kills min_by_key -> max_by_key or dropping `faction_id.is_some()` mutants!
+    sde.constellations.insert(
+        20_000_001,
+        ConstellationInfo {
+            constellation_id: 20_000_001,
+            region_id: 10_000_888,
+            name: "NoFactionLow".into(),
+            center: [0.0; 3],
+            faction_id: None,
+            wormhole_class_id: None,
+        },
+    );
+    sde.constellations.insert(
+        20_000_002,
+        ConstellationInfo {
+            constellation_id: 20_000_002,
+            region_id: 10_000_888,
+            name: "AmarrMid".into(),
+            center: [0.0; 3],
+            faction_id: Some(500_003),
+            wormhole_class_id: None,
+        },
+    );
+    sde.constellations.insert(
+        20_000_003,
+        ConstellationInfo {
+            constellation_id: 20_000_003,
+            region_id: 10_000_888,
+            name: "CaldariHigh".into(),
+            center: [0.0; 3],
+            faction_id: Some(500_001),
+            wormhole_class_id: None,
+        },
+    );
+    let mid_highsec: Vec<&str> = sde
+        .belt_ores_for_security_and_region(0.7, 10_000_888)
+        .into_iter()
+        .map(|t| t.name.as_str())
+        .collect();
+    assert_eq!(mid_highsec, vec!["Veldspar", "Scordite", "Pyroxeres"]);
+}
+
+#[test]
+fn belt_ores_for_system_filters_unpublished_and_non_asteroid_types() {
+    let mut sde = populate_synthetic_ore_sde();
+    // Override type 9001 in populate_synthetic_ore_sde? In populate_synthetic_ore_sde:
+    // 9001 was (cat 25, pub false), 9002 was (cat 6, pub true), 1012 is Veldspar (cat 25, pub true).
+    // Include an unpublished cat-25 ore and a published non-cat-25 item alongside valid Veldspar (1012).
+    std::sync::Arc::make_mut(&mut sde.asteroid_types_by_system).insert(
+        30000142,
+        vec![9001, 9002, 1012],
+    );
+    let ids: Vec<u32> = sde
+        .belt_ores_for_system(30000142)
+        .into_iter()
+        .map(|t| t.type_id)
+        .collect();
+    assert_eq!(ids, vec![1012]);
+}

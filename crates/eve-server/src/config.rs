@@ -116,6 +116,8 @@ pub struct ServerConfig {
     pub esi_port: u16,
     #[serde(default = "default_quasar_grpc_port")]
     pub quasar_grpc_port: u16,
+    #[serde(default = "default_xmpp_port")]
+    pub xmpp_port: u16,
     #[serde(default = "default_sde_path")]
     pub sde_path: String,
     #[serde(default = "default_world_db_path")]
@@ -152,6 +154,10 @@ fn default_quasar_grpc_port() -> u16 {
     26_005
 }
 
+fn default_xmpp_port() -> u16 {
+    5222
+}
+
 fn default_sde_path() -> String {
     "data/evomu_sde.sqlite".to_string()
 }
@@ -176,6 +182,7 @@ impl Default for ServerConfig {
             bridge_port: default_bridge_port(),
             esi_port: default_esi_port(),
             quasar_grpc_port: default_quasar_grpc_port(),
+            xmpp_port: default_xmpp_port(),
             sde_path: default_sde_path(),
             world_db_path: default_world_db_path(),
             admin_accounts: Vec::new(),
@@ -308,6 +315,20 @@ impl ServerConfig {
                 })?;
             }
         }
+        let xmpp_port_env = std::env::var("EVOMU_XMPP_PORT")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                std::env::var("EVEMU_XMPP_PORT")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+            });
+        if let Some(xmpp_port_str) = xmpp_port_env {
+            let trimmed = xmpp_port_str.trim();
+            cfg.xmpp_port = trimmed.parse::<u16>().map_err(|e| {
+                format!("Invalid EVOMU_XMPP_PORT '{trimmed}': {e}")
+            })?;
+        }
         if let Ok(dev_jwt_str) = std::env::var("EVOMU_ALLOW_LOCAL_DEV_JWT") {
             let v = dev_jwt_str.trim().to_ascii_lowercase();
             if matches!(v.as_str(), "1" | "true" | "yes" | "on") {
@@ -317,6 +338,39 @@ impl ServerConfig {
             }
         }
         Ok(cfg)
+    }
+
+    /// Parses optional `--xmpp-port <N>` or `--xmpp-port=<N>` CLI flag (`0` = OS ephemeral port).
+    pub fn parse_cli_xmpp_port<I, S>(args: I) -> Result<Option<u16>, String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut iter = args.into_iter();
+        let mut out = None;
+        while let Some(raw) = iter.next() {
+            let arg = raw.as_ref();
+            if arg == "--" {
+                break;
+            }
+            if arg == "--xmpp-port" {
+                let Some(val) = iter.next() else {
+                    return Err("Missing port value after --xmpp-port".to_string());
+                };
+                let trimmed = val.as_ref().trim();
+                let port = trimmed.parse::<u16>().map_err(|e| {
+                    format!("Invalid --xmpp-port '{trimmed}': {e}")
+                })?;
+                out = Some(port);
+            } else if let Some(rest) = arg.strip_prefix("--xmpp-port=") {
+                let trimmed = rest.trim();
+                let port = trimmed.parse::<u16>().map_err(|e| {
+                    format!("Invalid --xmpp-port '{trimmed}': {e}")
+                })?;
+                out = Some(port);
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -377,4 +431,7 @@ info_gathering_interval_secs = 600
 #[path = "config_tests.rs"]
 mod config_tests;
 #[cfg(test)] #[path = "config_extra_tests.rs"] mod config_extra_tests;
+#[cfg(test)]
+#[path = "config_edges_tests.rs"]
+mod config_edges_tests;
 

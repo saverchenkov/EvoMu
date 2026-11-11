@@ -230,11 +230,11 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
     assert_eq!(sqlite_static_verified, 14);
     assert_eq!(attested_sde_rows.len(), 14);
 
-    // 2. Verify all 47 SQLite table_counts in manifest against data/evomu_sde.sqlite and SdeRegistry
+    // 2. Verify all 49 SQLite table_counts in manifest against data/evomu_sde.sqlite and SdeRegistry
     let tc = manifest_val["table_counts"]
         .as_object()
         .expect("table_counts object");
-    assert_eq!(tc.len(), 47);
+    assert_eq!(tc.len(), 49);
     for (table_name, expected_val) in tc {
         let expected_cnt = expected_val.as_u64().expect("u64 table count") as usize;
         let actual_cnt: i64 = sde_conn
@@ -247,6 +247,14 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
             "SQLite table count mismatch for {table_name}"
         );
     }
+    assert_eq!(
+        sde.asteroid_counts_by_belt.len(),
+        tc["sde_belt_asteroid_counts"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        sde.asteroid_types_by_system.len(),
+        tc["sde_system_asteroid_types"].as_u64().unwrap() as usize
+    );
     let rand_mat_db_cnt: i64 = sde_conn
         .query_row(
             "SELECT count(*) FROM sde_type_materials WHERE randomized_materials_json != '[]'",

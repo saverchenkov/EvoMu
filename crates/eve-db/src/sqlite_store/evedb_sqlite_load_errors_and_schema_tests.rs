@@ -322,4 +322,75 @@ fn sqlite_store_schema_and_jwt_secret_error_and_edge_branches() {
     }
 }
 
+#[test]
+fn sqlite_store_load_row_decode_error_branches() {
+    // Inserting a BLOB into a typed TEXT/INTEGER column causes rusqlite `r.get::<_, T>(col)?`
+    // inside `query_map` to yield `Err(InvalidColumnType)` during iteration, exercising every
+    // `for r in rows { ... r.map_err(|e| e.to_string())? }` error path in `load.rs` & `social_store.rs`.
+    let blob_row_inserts = [
+        "INSERT OR REPLACE INTO world_meta (meta_key, meta_value) VALUES ('wal_seq', X'DEAD')",
+        "INSERT INTO accounts (username, user_id, password_token, role, banned_until_unix, ban_reason) VALUES ('u', X'DEAD', 'p', 0, NULL, NULL)",
+        "INSERT INTO characters (character_id, user_id, name, corporation_id, solar_system_id, active_ship_id, balance_cents, version, record_json) VALUES (1, 1, 'x', 1, 30000142, 1, 0, 1, X'DEAD')",
+        "INSERT INTO skills (character_id, type_id, level, skill_points) VALUES (1, X'DEAD', 1, 0.0)",
+        "INSERT INTO skill_queues (character_id, queue_index, type_id, target_level, start_sp, end_sp, duration_seconds, started_at_unix) VALUES (1, 0, X'DEAD', 1, 0.0, 100.0, 10.0, NULL)",
+        "INSERT INTO jump_clones (character_id, clones_json) VALUES (1, X'DEAD')",
+        "INSERT INTO active_implants (character_id, implants_json) VALUES (1, X'DEAD')",
+        "INSERT INTO items (item_id, type_id, owner_id, location_id, flag, quantity, singleton, version, record_json) VALUES (1, 1, 1, 1, 1, 1, 0, 1, X'DEAD')",
+        "INSERT INTO saved_fittings (fitting_id, owner_id, name, ship_type_id, description, record_json) VALUES (1, 1, 'f', 1, '', X'DEAD')",
+        "INSERT INTO market_orders (order_id, owner_id, station_id, region_id, type_id, is_bid, price_cents, vol_entered, vol_remaining, min_volume, is_npc, escrow_cents) VALUES (1, X'DEAD', 1, 1, 34, 0, 10, 1, 1, 1, 0, 0)",
+        "INSERT INTO wallet_journal (entry_id, seq_idx, character_id, entry_type, amount_cents, balance_after_cents, reason) VALUES (1, 0, X'DEAD', 't', 1, 1, 'r')",
+        "INSERT INTO contracts (contract_id, issuer_id, acceptor_id, contract_type, status, start_station_id, end_station_id, price_cents, reward_cents, collateral_cents, expiration_unix, record_json) VALUES (1, 1, NULL, 'Courier', 'Outstanding', 60003760, 60003760, 0, 0, 0, 1, X'DEAD')",
+        "INSERT INTO industry_jobs (job_id, installer_id, facility_id, blueprint_item_id, blueprint_type_id, activity_id, runs, product_type_id, status, duration_seconds, start_unix, blueprint_location_id, output_location_id) VALUES (1, X'DEAD', 1, 1, 1, 1, 1, 1, 'Active', 10, 10, 1, 1)",
+        "INSERT INTO planetary_colonies (owner_id, planet_id, solar_system_id, command_center_level, pins_count, last_extracted_unix, record_json) VALUES (1, 1, 30000142, 1, 0, 1, X'DEAD')",
+        "INSERT INTO missions (character_id, mission_id, agent_id, solar_system_id, state, current_room_id, npcs_remaining, record_json) VALUES (1, 1, 1, 30000142, 'Offered', 0, 0, X'DEAD')",
+        "INSERT INTO mission_tally (character_id, tally) VALUES (1, X'DEAD')",
+        "INSERT INTO standings (character_id, tx_json) VALUES (1, X'DEAD')",
+        "INSERT INTO npe_progress (character_id, node_graph_id, current_node_id, completed, record_json) VALUES (1, 1, 1, 0, X'DEAD')",
+        "INSERT INTO bookmarks (bookmark_id, owner_id, label, solar_system_id, x, y, z, item_id, memo, folder_id, is_shared) VALUES (1, X'DEAD', 'b', 30000142, 0.0, 0.0, 0.0, NULL, '', NULL, 0)",
+        "INSERT INTO mail (message_id, seq_idx, sender_id, recipient_id, subject, body) VALUES (1, 0, X'DEAD', 1, 's', 'b')",
+        "INSERT INTO fleets (fleet_id, boss_id, free_move, is_registered, record_json) VALUES (1, 1, 0, 0, X'DEAD')",
+        "INSERT INTO corps (corporation_id, name, ticker, ceo_id, alliance_id, tax_rate, master_wallet_cents, record_json) VALUES (1, 'c', 'C', 1, NULL, 0.0, 0, X'DEAD')",
+        "INSERT INTO alliances (alliance_id, name, short_name, executor_corp_id, record_json) VALUES (1, 'a', 'A', 1, X'DEAD')",
+        "INSERT INTO wars (war_id, aggressor_corp_id, defender_corp_id, mutual, started_unix, active) VALUES (1, X'DEAD', 2, 0, 1, 1)",
+        "INSERT INTO corp_projects (project_id, corporation_id, name, target_quantity, current_quantity, isk_per_unit_cents, escrow_remaining_cents) VALUES (1, X'DEAD', 'p', 1, 0, 1, 1)",
+        "INSERT INTO killmails (kill_id, victim_character_id, attacker_character_id, solar_system_id, ship_type_id, total_value_isk, killed_unix, victim_corp_id, victim_alliance_id, attacker_corp_id, attacker_alliance_id) VALUES (1, X'DEAD', 1, 30000142, 587, 1.0, 1, 1, NULL, 1, NULL)",
+        "INSERT INTO kill_rights (kill_right_id, owner_id, target_id, activation_fee_cents, is_active_suspect) VALUES (1, X'DEAD', 2, 1, 0)",
+        "INSERT INTO structures (structure_id, type_id, owner_corp_id, solar_system_id, name, state, quantum_core_installed, fuel_blocks, shield_hp, armor_hp, hull_hp, record_json) VALUES (1, 35832, 1, 30000142, 's', 'ShieldVulnerable', 0, 0, 1.0, 1.0, 1.0, X'DEAD')",
+        "INSERT INTO system_states (solar_system_id, dbs_multiplier, ess_main_bank_cents, ess_reserve_bank_cents, sov_alliance_id, record_json) VALUES (30000142, 1.0, 0, 0, NULL, X'DEAD')",
+        "INSERT INTO idempotency_keys (character_id, idem_key) VALUES (1, X'DEAD')",
+        "INSERT INTO licensed_skins (character_id, skins_json) VALUES (1, X'DEAD')",
+        "INSERT INTO applied_ship_skins (ship_id, skin_id) VALUES (1, X'DEAD')",
+        "INSERT INTO read_mails (character_id, mail_id) VALUES (1, X'DEAD')",
+        "INSERT INTO deleted_mails (character_id, mail_id) VALUES (1, X'DEAD')",
+        "INSERT INTO trashed_mails (character_id, mail_id) VALUES (1, X'DEAD')",
+        "INSERT INTO mail_labels (character_id, labels_json) VALUES (1, X'DEAD')",
+        "INSERT INTO mail_assigned_labels (character_id, mail_id, labels_json) VALUES (1, 1, X'DEAD')",
+        "INSERT INTO mailing_lists (list_id, record_json) VALUES (1, X'DEAD')",
+        "INSERT INTO calendar_events (event_id, record_json) VALUES (1, X'DEAD')",
+        "INSERT INTO bookmark_meta (bookmark_id, record_json) VALUES (1, X'DEAD')",
+        "INSERT INTO bookmark_folders (folder_id, record_json) VALUES (1, X'DEAD')",
+        "INSERT INTO access_groups (group_id, members_json) VALUES (1, X'DEAD')",
+        "INSERT INTO chat_channels (channel_id, record_json) VALUES ('c1', X'DEAD')",
+        "INSERT INTO char_contacts (character_id, contacts_json) VALUES (1, X'DEAD')",
+        "INSERT INTO char_contact_notifications (character_id, notifications_json) VALUES (1, X'DEAD')",
+        "INSERT INTO char_contact_labels (character_id, labels_json) VALUES (1, X'DEAD')",
+        "INSERT INTO corp_contacts (corporation_id, contacts_json) VALUES (1, X'DEAD')",
+        "INSERT INTO corp_contact_labels (corporation_id, labels_json) VALUES (1, X'DEAD')",
+        "INSERT INTO alliance_contacts (alliance_id, contacts_json) VALUES (1, X'DEAD')",
+        "INSERT INTO alliance_contact_labels (alliance_id, labels_json) VALUES (1, X'DEAD')",
+        "INSERT INTO char_notes (character_id, item_id, note) VALUES (1, 1, X'DEAD')",
+    ];
+    for sql in blob_row_inserts {
+        let conn = open_migrated_conn();
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        conn.execute(sql, [])
+            .unwrap_or_else(|e| panic!("insert blob row ({sql}): {e}"));
+        assert!(
+            load_snapshot_from_sqlite(&conn).is_err(),
+            "expected load error for blob column SQL: {sql}"
+        );
+    }
+}
+
+
 

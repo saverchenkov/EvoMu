@@ -377,3 +377,186 @@ fn corp_division_single_entrypoint_credit_debit_and_builder() {
     );
     assert_eq!(corp.master_wallet_balance(), IskCents::from_isk(1_250));
 }
+
+#[test]
+#[should_panic(expected = "Durable WAL persistence failure: infallible panic")]
+#[allow(unreachable_code)]
+fn from_wal_error_infallible_panics() {
+    let _ = <std::convert::Infallible>::from_wal_error("infallible panic".to_string());
+}
+
+#[test]
+fn db_error_display_and_isk_cents_additional_edge_cases() {
+    let cases = [
+        (DbError::InvalidCredentials, "Invalid credentials"),
+        (
+            DbError::AccountBanned {
+                until_unix: 10,
+                reason: "tos".into(),
+            },
+            "Account banned until 10: tos",
+        ),
+        (
+            DbError::AccountSuspended {
+                until_unix: 20,
+                reason: "cooloff".into(),
+            },
+            "Account suspended until 20: cooloff",
+        ),
+        (
+            DbError::AlreadyLoggedIn {
+                user_id: 1,
+                active_session_id: 2,
+            },
+            "Account 1 already has an active online session (2)",
+        ),
+        (DbError::CharacterNotFound(90), "Character 90 not found"),
+        (DbError::NotDocked(90), "Character 90 is already undocked in space"),
+        (
+            DbError::CharacterOwnershipViolation {
+                user_id: 1,
+                character_id: 90,
+            },
+            "Character 90 is not owned by user 1",
+        ),
+        (DbError::ItemNotFound(55), "Item 55 not found"),
+        (
+            DbError::ItemOwnershipViolation {
+                character_id: 90,
+                item_id: 55,
+            },
+            "Item 55 is not owned by character 90",
+        ),
+        (
+            DbError::ItemLocked(55),
+            "Item 55 is locked in escrow or an active job and cannot be modified",
+        ),
+        (
+            DbError::InvalidDestinationLocation {
+                character_id: 90,
+                location_id: 600,
+            },
+            "Destination location 600 is not authorized for character 90",
+        ),
+        (
+            DbError::VersionConflict {
+                expected: 3,
+                actual: 2,
+            },
+            "Stale entity version (expected 3, found 2)",
+        ),
+        (
+            DbError::InsufficientFunds {
+                required: 500,
+                available: 100,
+            },
+            "Insufficient ISK balance (required 500, available 100)",
+        ),
+        (
+            DbError::AlphaCloneSpCapExceeded,
+            "Alpha clone skill point cap (5,000,000 SP) exceeded",
+        ),
+        (
+            DbError::ShipNotAtDockedStation {
+                ship_id: 10,
+                ship_location_id: 20,
+                station_id: 30,
+            },
+            "Active ship 10 is located at 20, not at docked station 30",
+        ),
+        (
+            DbError::ValidationError("bad input".into()),
+            "Domain validation error: bad input",
+        ),
+    ];
+    for (err, expected) in cases {
+        assert_eq!(err.to_string(), expected);
+    }
+
+    assert_eq!(IskCents::default(), IskCents::ZERO);
+    assert_eq!(IskCents::from_isk(i64::MIN).raw_cents(), i64::MIN);
+    assert_eq!(IskCents::from_f64_isk(0.0), IskCents::ZERO);
+    assert_eq!(IskCents::from_f64_isk(-0.0), IskCents::ZERO);
+    assert_eq!(IskCents(-1).checked_sub(IskCents(0)), None);
+    assert_eq!(IskCents(-1).checked_mul_qty(0), None);
+    assert_eq!(IskCents(0).checked_mul_qty(-1), None);
+    assert!(IskCents(100) < IskCents(200));
+}
+
+#[test]
+fn corporation_credit_division_sorting_and_record_serde_edges() {
+    let mut corp = CorporationRecord {
+        master_wallet: IskCents(1_000),
+        wallet_divisions: vec![
+            CorpWalletDivisionRecord {
+                division_id: 5,
+                name: "Div 5".into(),
+                balance: IskCents(500),
+            },
+            CorpWalletDivisionRecord {
+                division_id: 1,
+                name: "Master Wallet".into(),
+                balance: IskCents(2_000),
+            },
+        ],
+        ..Default::default()
+    };
+
+    // division_balance(1) returns non-zero div1.balance rather than master_wallet
+    assert_eq!(corp.division_balance(1), IskCents(2_000));
+    corp.ensure_wallet_divisions();
+    let ids: Vec<u8> = corp.wallet_divisions.iter().map(|d| d.division_id).collect();
+    assert_eq!(ids, vec![1, 2, 3, 4, 5, 6, 7]);
+    assert_eq!(corp.master_wallet, IskCents(2_000));
+
+    // credit_division on div 1 and div 5 and overflow guard
+    assert_eq!(corp.credit_division(1, IskCents(300)), IskCents(2_300));
+    assert_eq!(corp.master_wallet, IskCents(2_300));
+    assert_eq!(corp.credit_division(5, IskCents(250)), IskCents(750));
+    assert_eq!(corp.credit_division(5, IskCents(-10)), IskCents(750));
+
+    corp.set_division_balance(2, IskCents(i64::MAX));
+    assert_eq!(corp.credit_division(2, IskCents(1)), IskCents(i64::MAX));
+    // Invalid division id is a safe no-op
+    corp.set_division_balance(99, IskCents(123));
+    assert_eq!(corp.division_balance(99), IskCents(0));
+
+    // corp_roles mask invariants
+    assert_eq!(corp_roles::ROLE_CONFIG_EQUIPMENT, corp_roles::ROLE_EQUIPMENT_CONFIG);
+    for r in corp_roles::ROLE_HANGAR_CAN_TAKE
+        .into_iter()
+        .chain(corp_roles::ROLE_HANGAR_CAN_QUERY)
+        .chain(corp_roles::ROLE_ACCOUNT_CAN_TAKE)
+    {
+        assert_ne!(corp_roles::CORP_DELAYED_DIVISION_ROLE_MASK & r, 0);
+    }
+    assert_eq!(
+        corp_roles::CORP_DELAYED_DIVISION_ROLE_MASK & corp_roles::ROLE_DIRECTOR,
+        0
+    );
+    assert_eq!(
+        corp_roles::CORP_DELAYED_DIVISION_ROLE_MASK & corp_roles::ROLE_DIPLOMAT,
+        0
+    );
+
+    // FleetRole, KillmailRecord, UpwellStructureRecord, SystemDynamicState defaults
+    for role in [
+        FleetRole::FleetCommander,
+        FleetRole::WingCommander,
+        FleetRole::SquadCommander,
+        FleetRole::SquadMember,
+    ] {
+        let j = serde_json::to_string(&role).unwrap();
+        let back: FleetRole = serde_json::from_str(&j).unwrap();
+        assert_eq!(back, role);
+    }
+    let km_legacy: KillmailRecord = serde_json::from_str(
+        r#"{"kill_id":1,"victim_character_id":2,"attacker_character_id":3,"solar_system_id":30000142,"ship_type_id":587,"total_value_isk":100.0}"#,
+    )
+    .unwrap();
+    assert_eq!(km_legacy.killed_unix, 0);
+    assert_eq!(km_legacy.victim_corp_id, 0);
+    assert_eq!(km_legacy.victim_alliance_id, None);
+    assert_eq!(UpwellStructureRecord::default().shield_hp, 0.0);
+    assert_eq!(SystemDynamicState::default().sov_alliance_id, None);
+}

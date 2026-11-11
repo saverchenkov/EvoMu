@@ -148,6 +148,93 @@ fn with_demo_seed_initializes_working_sqlite_backed_repository() {
         assert_eq!(snap.accounts.len(), 2);
         assert_eq!(snap.characters.len(), 2);
         assert_eq!(snap.fw_system_occupations.len(), 175);
+        assert_eq!(snap.corporations[&98_000_001].wallet_divisions.len(), 7);
     });
+}
+
+#[test]
+fn demo_snapshot_starter_items_system_states_corp_roles_and_partial_populate() {
+    let snap = WorldRepository::create_demo_snapshot();
+
+    // Verify every seeded starter item 100_000_003..=100_000_012
+    let expected_items = [
+        (100_000_003i64, 438u32, 1i32, true),
+        (100_000_004, 1236, 2, true),
+        (100_000_007, 691, 1, true),
+        (100_000_008, 34, 100_000, false),
+        (100_000_009, 35, 50_000, false),
+        (100_000_010, 36, 20_000, false),
+        (100_000_011, 37, 5_000, false),
+        (100_000_012, 1230, 10_000, false),
+    ];
+    for (id, tid, qty, single) in expected_items {
+        let item = &snap.items[&id];
+        assert_eq!(item.type_id, tid);
+        assert_eq!(item.quantity, qty);
+        assert_eq!(item.singleton, single);
+        assert_eq!(item.owner_id, 90_000_001);
+        assert_eq!(item.location_id, 60_003_760);
+        assert_eq!(item.flag, InventoryFlag::Hangar);
+    }
+
+    // All 5 seeded systems
+    for sys_id in [30_000_142u32, 30_000_144, 30_002_813, 30_002_904, 31_000_005] {
+        let st = &snap.system_states[&sys_id];
+        assert_eq!(st.solar_system_id, sys_id);
+        assert_eq!(st.dbs_multiplier, 1.35);
+        assert_eq!(st.industrial_index, 2);
+        assert_eq!(st.strategic_index, 3);
+    }
+
+    // Demo corporation wallet divisions & member roles
+    let corp = &snap.corporations[&98_000_001];
+    assert_eq!(corp.master_wallet, IskCents::from_isk(100_000_000));
+    assert_eq!(corp.wallet_divisions[0].balance, IskCents::from_isk(100_000_000));
+    assert_eq!(corp.member_roles.get(&90_000_001), Some(&u64::MAX));
+    assert_eq!(corp.member_roles.get(&90_000_002), Some(&0));
+    assert!(corp.members.contains(&90_000_001));
+    assert!(corp.members.contains(&90_000_002));
+
+    // Starter skill history sorted ascending by skill_type_id
+    let hist = &snap.skill_history[&90_000_001];
+    assert!(hist.windows(2).all(|w| w[0].skill_type_id <= w[1].skill_type_id));
+    assert_eq!(hist[0].log_date_ft, 133_485_408_000_000_000);
+
+    // Partial populate_demo_snapshot preserves pre-existing entries across all maps while filling missing ones
+    let mut partial = WorldStateSnapshot::default();
+    partial.account_plex_vault.insert(1, 999);
+    partial.items.insert(
+        100_000_008,
+        InventoryItemRecord {
+            item_id: 100_000_008,
+            type_id: 34,
+            quantity: 7,
+            ..Default::default()
+        },
+    );
+    partial.market_orders.insert(
+        700_000_001,
+        MarketOrderRecord {
+            order_id: 700_000_001,
+            owner_id: 1,
+            station_id: 60_003_760,
+            region_id: 10_000_002,
+            type_id: 34,
+            is_bid: false,
+            price: IskCents::from_isk(99),
+            vol_entered: 1,
+            vol_remaining: 1,
+            min_volume: 1,
+            is_npc: false,
+            escrow: IskCents::ZERO,
+        },
+    );
+    WorldRepository::populate_demo_snapshot(&mut partial);
+    assert_eq!(partial.account_plex_vault[&1], 999);
+    assert_eq!(partial.account_plex_vault[&2], 100);
+    assert_eq!(partial.items[&100_000_008].quantity, 7);
+    assert_eq!(partial.items.len(), 12);
+    assert_eq!(partial.market_orders[&700_000_001].price, IskCents::from_isk(99));
+    assert_eq!(partial.market_orders.len(), 2);
 }
 

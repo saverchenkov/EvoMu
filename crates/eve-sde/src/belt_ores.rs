@@ -67,7 +67,7 @@ impl crate::SdeRegistry {
         ores
     }
 
-    /// Returns the asteroid ore types eligible to spawn in belts for `solar_system_id` (`MN-01`, `MN-02`).
+    /// Returns the asteroid ore types eligible to spawn in belts for `solar_system_id`.
     /// Prefers the V24.01 client static table `res:/staticdata/asteroidtypesbysolarsystemid.pickle`
     /// (`3,974` belt systems) when loaded, falling back to [`Self::belt_ores_for_security_and_region`]
     /// for beltless special systems (such as Pochven anomalies) or synthetic test registries.

@@ -169,3 +169,221 @@ fn const_constructors_and_all_23_nested_layouts_decode_cleanly() {
         let _ = std::fs::remove_file(&tmp);
     }
 }
+
+#[test]
+fn cfsd_nested_empty_bucket_masked_attrs_pin_mismatch_count_error_and_starter_systems() {
+    // 1. Cover empty bucket (L68), masked optional attr skip (L224), pin size mismatch (L252-254), and record count mismatch (L279-282)
+    let masked_lay = CFSD_NESTED_LAYOUTS
+        .iter()
+        .find(|l| {
+            !l.single
+                && !l.bare
+                && l.record.mask_offset.is_some()
+                && l.record.attrs.iter().any(|a| a.bit != 0)
+        })
+        .expect("masked nested layout exists");
+    let mask_off = masked_lay.record.mask_offset.unwrap();
+
+    // Build 2-bucket CFSD buffer with bucket 0 = 0 (empty -> L68) and bucket 1 holding 1 record with mask = 0 (L224)
+    let mut buf = vec![0u8; 72];
+    buf[40..48].copy_from_slice(&1u64.to_le_bytes()); // count = 1
+    buf[48..56].copy_from_slice(&2u64.to_le_bytes()); // buckets = 2
+    buf[56..64].copy_from_slice(&0u64.to_le_bytes()); // bucket 0 empty (L68)
+    buf.extend_from_slice(&1u64.to_le_bytes()); // bucket 1 count = 1
+    let rec_abs = buf.len();
+    let boff = (rec_abs - 32) as u64;
+    buf[64..72].copy_from_slice(&boff.to_le_bytes());
+    buf.extend_from_slice(&vec![0u8; masked_lay.record.stride]);
+    populate_cfsd_type(&mut buf, rec_abs, &masked_lay.key, 777);
+    populate_cfsd_obj(&mut buf, rec_abs, &masked_lay.record, 20);
+    // Clear optional mask after populate_cfsd_obj so all non-zero-bit attrs are masked out (L224)
+    buf[rec_abs + mask_off..rec_abs + mask_off + 4].copy_from_slice(&0u32.to_le_bytes());
+
+    let tmp = std::env::temp_dir().join(format!(
+        "evomu_nested_edge_{}.fsdbinary",
+        std::process::id()
+    ));
+    std::fs::write(&tmp, &buf).expect("write nested edge blob");
+
+    let mut sde = SdeRegistry::default();
+    sde.resources.insert(
+        masked_lay.res_path.to_string(),
+        SdeResourceInfo {
+            res_path: masked_lay.res_path.to_string(),
+            cdn_relative_path: tmp.display().to_string(),
+            md5: String::new(),
+            byte_size: buf.len() as u64,
+            format: "cfsd".to_string(),
+            record_count: 1,
+            spot: String::new(),
+        },
+    );
+    let decoded = sde.load_cfsd_nested(masked_lay.res_path).expect("masked nested decode");
+    assert_eq!(decoded.len(), 1);
+    let obj_map = decoded.values().next().unwrap().as_object().unwrap();
+    for a in masked_lay.record.attrs {
+        if a.bit != 0 {
+            assert!(
+                !obj_map.contains_key(a.name),
+                "masked-out attr {} must be omitted",
+                a.name
+            );
+        }
+    }
+
+    // Importer pin byte_size mismatch (L252-254)
+    sde.resources.get_mut(masked_lay.res_path).unwrap().byte_size = (buf.len() + 1) as u64;
+    assert!(matches!(
+        sde.load_cfsd_nested(masked_lay.res_path),
+        Err(crate::SdeError::InvalidSchema(msg)) if msg.contains("size differs from importer pin")
+    ));
+
+    // Restore size, mismatch header record count (L279-282)
+    sde.resources.get_mut(masked_lay.res_path).unwrap().byte_size = buf.len() as u64;
+    buf[40..48].copy_from_slice(&99u64.to_le_bytes());
+    std::fs::write(&tmp, &buf).expect("rewrite mismatched count blob");
+    assert!(matches!(
+        sde.load_cfsd_nested(masked_lay.res_path),
+        Err(crate::SdeError::InvalidSchema(msg)) if msg.contains("header says 99")
+    ));
+    let _ = std::fs::remove_file(&tmp);
+
+    // 2. starter_shipcaster_systems_by_race branches (cfsd_nested_tables.rs L540, L547, L549, L551-552, L575-578)
+    let sde_no_db = SdeRegistry::default();
+    assert!(sde_no_db.starter_shipcaster_systems_by_race().is_empty());
+    let sde_missing_db = SdeRegistry {
+        db_path: Some(std::env::temp_dir().join(format!(
+            "evomu_starter_nonexistent_{}.sqlite",
+            std::process::id()
+        ))),
+        ..SdeRegistry::default()
+    };
+    assert!(sde_missing_db.starter_shipcaster_systems_by_race().is_empty());
+
+    let empty_db = std::env::temp_dir().join(format!(
+        "evomu_starter_empty_{}.sqlite",
+        std::process::id()
+    ));
+    let schools_db = std::env::temp_dir().join(format!(
+        "evomu_starter_schools_{}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&empty_db);
+    let _ = std::fs::remove_file(&schools_db);
+    {
+        let _c = rusqlite::Connection::open(&empty_db).expect("create empty db");
+    }
+    let sde_empty_db = SdeRegistry {
+        db_path: Some(empty_db.clone()),
+        ..SdeRegistry::default()
+    };
+    assert!(sde_empty_db.starter_shipcaster_systems_by_race().is_empty());
+
+    {
+        let conn = rusqlite::Connection::open(&schools_db).expect("create starter schools db");
+        conn.execute_batch(
+            "CREATE TABLE sde_schools (school_id INTEGER, race_id INTEGER, starting_stations_json TEXT, career_agents_json TEXT);
+             CREATE TABLE sde_solar_systems (system_id INTEGER, region_id INTEGER, faction_id INTEGER);
+             INSERT INTO sde_schools VALUES (11, 1, '{bad_json', '{bad_json');
+             INSERT INTO sde_schools VALUES (12, 2, '[60000001]', '[8801, 8802, 8899]');
+             INSERT INTO sde_solar_systems VALUES (30009101, 10001004, 500001);
+             INSERT INTO sde_solar_systems VALUES (30009102, 10001004, 500002);
+             INSERT INTO sde_solar_systems VALUES (30009103, 10001004, 500003);
+             INSERT INTO sde_solar_systems VALUES (30009104, 10001004, 500004);
+             INSERT INTO sde_solar_systems VALUES (30009105, 10001004, 500999);",
+        )
+        .expect("populate starter db");
+    }
+    let mut sde_sc = SdeRegistry {
+        db_path: Some(schools_db.clone()),
+        ..SdeRegistry::default()
+    };
+    std::sync::Arc::make_mut(&mut sde_sc.school_starting_stations)
+        .insert(12, (2, vec![60000001]));
+    std::sync::Arc::make_mut(&mut sde_sc.school_career_agents)
+        .insert(12, (2, vec![8801, 8802, 8899]));
+    for (sys_id, fac_id) in [
+        (30009101u32, 500001u32),
+        (30009102, 500002),
+        (30009103, 500003),
+        (30009104, 500004),
+        (30009105, 500999),
+    ] {
+        std::sync::Arc::make_mut(&mut sde_sc.solar_system_factions).insert(sys_id, fac_id);
+        sde_sc.solar_systems.insert(
+            sys_id,
+            crate::SolarSystem {
+                solar_system_id: sys_id,
+                constellation_id: 20001001,
+                region_id: 10001004,
+                name: format!("Sys_{sys_id}"),
+                security_status: 1.0,
+                radius: 1.0e12,
+                galactic_pos_ly: [0.0; 3],
+                planet_ids: Vec::new(),
+                stations: Vec::new(),
+                wormhole_class_id: None,
+            },
+        );
+    }
+    sde_sc.stations.insert(
+        60000001,
+        crate::StationInfo {
+            station_id: 60000001,
+            solar_system_id: 30009001,
+            constellation_id: 20000001,
+            region_id: 10000001,
+            owner_corporation_id: 1000001,
+            owner_faction_id: None,
+            station_type_id: 1529,
+            operation_id: 0,
+            name: "Starter Station".into(),
+            position: glam::DVec3::ZERO,
+            reprocessing_efficiency: 0.5,
+            reprocessing_stations_take: 0.05,
+            is_conquerable: false,
+            orbit_id: None,
+            has_clone_bay: true,
+        },
+    );
+    sde_sc.agents.insert(
+        8801,
+        crate::AgentInfo {
+            agent_id: 8801,
+            name: "Career With Sys".into(),
+            corporation_id: 1000001,
+            station_id: Some(60000002),
+            solar_system_id: Some(30009002),
+            level: 1,
+            division_id: 22,
+            agent_type_id: 7,
+            is_locator: false,
+            research_skills: Vec::new(),
+        },
+    );
+    sde_sc.agents.insert(
+        8802,
+        crate::AgentInfo {
+            agent_id: 8802,
+            name: "Career No Sys".into(),
+            corporation_id: 1000001,
+            station_id: None,
+            solar_system_id: None,
+            level: 1,
+            division_id: 22,
+            agent_type_id: 7,
+            is_locator: false,
+            research_skills: Vec::new(),
+        },
+    );
+    let starters = sde_sc.starter_shipcaster_systems_by_race();
+    assert_eq!(starters.get(&30009001), Some(&(2, Some(60000001))));
+    assert_eq!(starters.get(&30009002), Some(&(2, Some(60000002))));
+    assert_eq!(starters.get(&30009101), Some(&(1, None)));
+    assert_eq!(starters.get(&30009102), Some(&(2, None)));
+    assert_eq!(starters.get(&30009103), Some(&(4, None)));
+    assert_eq!(starters.get(&30009104), Some(&(8, None)));
+    assert!(!starters.contains_key(&30009105));
+    let _ = std::fs::remove_file(&empty_db);
+    let _ = std::fs::remove_file(&schools_db);
+}

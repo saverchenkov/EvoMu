@@ -503,7 +503,7 @@ pub fn rollback_d6_corp_crimewatch(
                     payload.apply_to_snapshot(snap);
                 }
             }
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
+            Err(_) => {
                 let empty = WorldStateSnapshot::default();
                 if dfp.corp_governance_fp
                     == canonical_fp(&CorpGovernanceDomainRef::from_snapshot(&empty))
@@ -511,7 +511,6 @@ pub fn rollback_d6_corp_crimewatch(
                     CorpGovernanceDomainPayload::default().apply_to_snapshot(snap);
                 }
             }
-            Err(_) => {}
         }
     }
 
@@ -526,13 +525,12 @@ pub fn rollback_d6_corp_crimewatch(
                     payload.apply_to_snapshot(snap);
                 }
             }
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
+            Err(_) => {
                 let empty = WorldStateSnapshot::default();
                 if dfp.crimewatch_fp == canonical_fp(&CrimewatchDomainRef::from_snapshot(&empty)) {
                     CrimewatchDomainPayload::default().apply_to_snapshot(snap);
                 }
             }
-            Err(_) => {}
         }
     }
 
@@ -547,15 +545,15 @@ pub fn rollback_d6_corp_crimewatch(
                     payload.apply_to_snapshot(snap);
                 }
             }
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
+            Err(_) => {
                 let empty = WorldStateSnapshot::default();
                 if dfp.warfare_fp == canonical_fp(&WarfareDomainRef::from_snapshot(&empty)) {
                     WarfareDomainPayload::default().apply_to_snapshot(snap);
                 }
             }
-            Err(_) => {}
         }
     }
 }
 #[cfg(test)] #[path = "corp_crimewatch_store_unit_tests.rs"] mod corp_crimewatch_store_unit_tests;
+#[cfg(test)] #[path = "corp_crimewatch_store_edges_tests.rs"] mod corp_crimewatch_store_edges_tests;
 

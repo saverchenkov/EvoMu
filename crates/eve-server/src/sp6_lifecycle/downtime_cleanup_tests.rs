@@ -18,6 +18,10 @@ use std::sync::{Arc, OnceLock};
 #[path = "cluster_advance_and_reload_tests.rs"]
 mod cluster_advance_and_reload_tests;
 
+#[cfg(test)]
+#[path = "downtime_cleanup_cov_edges_tests.rs"]
+mod downtime_cleanup_cov_edges_tests;
+
 pub(super) static SHARED_SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
 
 pub(super) fn test_ctx() -> ServerContext {
@@ -34,7 +38,7 @@ pub(super) fn test_ctx() -> ServerContext {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn downtime_purges_npc_wrecks_resets_missions_and_respawns_wave() {
     let ctx = test_ctx();
     let sys_id = 30_000_142;
@@ -232,7 +236,7 @@ async fn downtime_purges_npc_wrecks_resets_missions_and_respawns_wave() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn populate_space_objects_decays_expired_containers_bubbles_and_deployables() {
     let ctx = test_ctx();
     let sys_id = 30_000_142;

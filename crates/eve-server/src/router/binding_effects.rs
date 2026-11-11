@@ -23,3 +23,122 @@ pub fn effect_id_for_module_sde(
     }
     ty.and_then(|t| t.default_effect_id).map(|e| e as i64)
 }
+
+/// Resolves the `OnSpecialFX` `(guid, is_offensive)` tuple for an activated/deactivated space module
+/// (GH `#804`, `eve/client/script/parklife/fxSequencer.pyj:344`).
+/// Returns `None` for mining modules (which emit their own `OnSpecialFX` in `mining_cycle.rs`) and
+/// passive modules without a visual space effect.
+pub fn special_fx_guid_for_module_sde(
+    sde: &eve_sde::SdeRegistry,
+    type_id: u32,
+    effect_id: i64,
+    effect_name: Option<&str>,
+) -> Option<(String, bool)> {
+    let ty = sde.types.get(&type_id);
+    let group_id = ty.map(|t| t.group_id).unwrap_or(0);
+    let eff_name = effect_name.unwrap_or("");
+    if matches!(group_id, 54 | 464 | 483 | 737 | 2004 | 4138)
+        || matches!(effect_id, 17 | 67 | 2726)
+        || matches!(eff_name, "miningLaser" | "miningClouds" | "mining")
+    {
+        return None;
+    }
+    if group_id == 330 || eff_name.to_ascii_lowercase().contains("cloak") {
+        return Some(("effects.Cloak".to_string(), false));
+    }
+    let name_lower = ty
+        .map(|t| t.name.to_ascii_lowercase())
+        .unwrap_or_default();
+    if group_id == 74
+        || eff_name == "hybridFired"
+        || (group_id == 53
+            && (name_lower.contains("blaster") || name_lower.contains("railgun")))
+    {
+        return Some(("effects.HybridFired".to_string(), true));
+    }
+    if group_id == 55 || eff_name == "projectileFired" {
+        return Some(("effects.ProjectileFired".to_string(), true));
+    }
+    if group_id == 53 || eff_name == "targetAttack" {
+        return Some(("effects.Laser".to_string(), true));
+    }
+    let resolved_eid = if effect_id > 0 {
+        u16::try_from(effect_id).ok()
+    } else {
+        ty.and_then(|t| t.default_effect_id)
+    };
+    if let Some(eid) = resolved_eid {
+        if let Some(eff) = sde.effects.get(&eid) {
+            if let Some(ref raw_guid) = eff.guid {
+                if let Some(g) = raw_guid
+                    .split(',')
+                    .next()
+                    .map(str::trim)
+                    .filter(|s| s.starts_with("effects."))
+                {
+                    return Some((g.to_string(), eff.is_offensive));
+                }
+            }
+        }
+    }
+    match group_id {
+        65 => Some(("effects.ModifyTargetSpeed".to_string(), true)),
+        52 => Some(("effects.WarpScramble".to_string(), true)),
+        201 | 208 | 291 | 842 => Some(("effects.ElectronicAttributeModifyTarget".to_string(), true)),
+        379 => Some(("effects.TargetPaint".to_string(), true)),
+        71 => Some(("effects.EnergyDestabilization".to_string(), true)),
+        68 => Some(("effects.EnergyVampire".to_string(), true)),
+        46 => {
+            let is_mwd = eff_name == "moduleBonusMicrowarpdrive"
+                || ty.is_some_and(|t| t.effect_ids.contains(&6730))
+                || name_lower.contains("microwarp");
+            Some((
+                if is_mwd {
+                    "effects.MicroWarpDrive".to_string()
+                } else {
+                    "effects.Afterburner".to_string()
+                },
+                false,
+            ))
+        }
+        40 | 1156 => Some(("effects.ShieldBoosting".to_string(), false)),
+        62 | 1199 => Some(("effects.ArmorRepair".to_string(), false)),
+        506..=511 | 524 | 1245 => Some(("effects.MissileDeployment".to_string(), true)),
+        _ => match eff_name {
+            "remoteWebifierFalloff" | "modifyTargetSpeed2" | "decreaseTargetSpeed" => {
+                Some(("effects.ModifyTargetSpeed".to_string(), true))
+            }
+            "warpScramble"
+            | "warpScrambleForEntity"
+            | "warpScrambleBlockMWDWithNPCEffect" => {
+                Some(("effects.WarpScramble".to_string(), true))
+            }
+            "remoteSensorDampFalloff"
+            | "remoteECMFalloff"
+            | "structureModuleEffectRemoteSensorDampener"
+            | "remoteWeaponDisruptFalloff" => {
+                Some(("effects.ElectronicAttributeModifyTarget".to_string(), true))
+            }
+            "ewTargetPaint" | "remoteTargetPaintFalloff" => {
+                Some(("effects.TargetPaint".to_string(), true))
+            }
+            "energyDestabilizationNew" | "energyNeutralizerFalloff" => {
+                Some(("effects.EnergyDestabilization".to_string(), true))
+            }
+            "energyVampire" | "energyNosferatuFalloff" => {
+                Some(("effects.EnergyVampire".to_string(), true))
+            }
+            "moduleBonusMicrowarpdrive" => Some(("effects.MicroWarpDrive".to_string(), false)),
+            "moduleBonusAfterburner" | "speedBoost" => {
+                Some(("effects.Afterburner".to_string(), false))
+            }
+            "shieldBoosting" | "fueledShieldBoosting" => {
+                Some(("effects.ShieldBoosting".to_string(), false))
+            }
+            "armorRepair" | "fueledArmorRepair" => {
+                Some(("effects.ArmorRepair".to_string(), false))
+            }
+            _ => None,
+        },
+    }
+}

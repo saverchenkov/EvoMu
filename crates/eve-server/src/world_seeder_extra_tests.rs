@@ -161,3 +161,74 @@ fn gameplay_categories_bom_edge_cases_group_1027_and_t1_blueprints() {
         );
     });
 }
+
+#[test]
+fn market_catalog_4_sig_fig_rounding_plex_fallback_and_idempotence() {
+    let mut sde = SdeRegistry::with_canonical_seed();
+    let base_type = sde.types.values().next().unwrap().clone();
+
+    // 1. PLEX (44_992) with base_price == 0.0 -> uses 5_000_000.0 fallback and seeds both ask and bid
+    let mut plex = base_type.clone();
+    plex.type_id = 44_992;
+    plex.category_id = 17; // Commodity (not NPC-seeded category 9/16)
+    plex.group_id = 1875;
+    plex.base_price = 0.0;
+    plex.published = true;
+    plex.market_group_id = Some(1922);
+    plex.default_attributes.clear();
+    sde.types.insert(44_992, plex);
+
+    // 2. Category 9 blueprint with non-4-sig-fig base_price -> ask rounded to 4 sig figs (123_456.78 -> 123_500.0)
+    let mut bp_round = base_type.clone();
+    bp_round.type_id = 890_501;
+    bp_round.category_id = 9;
+    bp_round.group_id = 9950;
+    bp_round.base_price = 123_456.78;
+    bp_round.published = true;
+    bp_round.market_group_id = Some(20);
+    bp_round.default_attributes.clear();
+    sde.types.insert(890_501, bp_round);
+
+    // 3. Category 16 skillbook with tiny base_price (0.001) -> clamped to >= 0.01 ISK
+    let mut sb_tiny = base_type;
+    sb_tiny.type_id = 890_502;
+    sb_tiny.category_id = 16;
+    sb_tiny.group_id = 255;
+    sb_tiny.base_price = 0.001;
+    sb_tiny.published = true;
+    sb_tiny.market_group_id = Some(150);
+    sb_tiny.default_attributes.clear();
+    sde.types.insert(890_502, sb_tiny);
+
+    let db = WorldRepository::new_empty();
+    let first_inserted = seed_full_market_catalog(&db, &sde);
+    assert!(first_inserted > 0);
+    // Second call skips all existing orders (idempotent)
+    let second_inserted = seed_full_market_catalog(&db, &sde);
+    assert_eq!(second_inserted, 0);
+
+    db.with_snapshot(|snap| {
+        let bp_order = snap
+            .market_orders
+            .values()
+            .find(|o| o.station_id == 60_003_760 && o.type_id == 890_501 && !o.is_bid)
+            .expect("rounded blueprint ask order");
+        assert_eq!(bp_order.price, IskCents::from_f64_isk(123_500.0));
+        assert!(bp_order.is_npc);
+
+        let tiny_order = snap
+            .market_orders
+            .values()
+            .find(|o| o.station_id == 60_003_760 && o.type_id == 890_502 && !o.is_bid)
+            .expect("tiny skillbook ask order");
+        assert_eq!(tiny_order.price, IskCents(1));
+
+        // PLEX bid order should exist even though 44_992 is seeded via special rule
+        let plex_bid = snap
+            .market_orders
+            .values()
+            .find(|o| o.station_id == 60_003_760 && o.type_id == 44_992 && o.is_bid)
+            .expect("PLEX bid order");
+        assert!(plex_bid.price.0 > 0);
+    });
+}

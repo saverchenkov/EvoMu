@@ -204,3 +204,7 @@ pub async fn provision_starter_characters(ctx: &ServerContext, cfg: &ServerConfi
 #[cfg(test)]
 #[path = "starter_characters_tests.rs"]
 mod starter_characters_tests;
+
+#[cfg(test)]
+#[path = "starter_characters_edges2_tests.rs"]
+mod starter_characters_edges2_tests;

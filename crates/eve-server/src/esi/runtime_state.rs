@@ -213,3 +213,7 @@ impl EsiRuntimeState {
 #[path = "runtime_state_unit_tests.rs"]
 mod runtime_state_unit_tests;
 
+#[cfg(test)]
+#[path = "runtime_state_edges_tests.rs"]
+mod runtime_state_edges_tests;
+

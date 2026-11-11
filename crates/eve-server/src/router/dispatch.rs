@@ -182,9 +182,9 @@ impl ServerContext {
         let prev_station_id = session.station_id;
         ensure_wal_error_hook_installed();
         let start_time = std::time::Instant::now();
-        let (mut res, wal_err) = DISPATCH_WAL_ERROR
+        let mut res = DISPATCH_WAL_ERROR
             .scope(std::cell::RefCell::new(None), async {
-                let r = dispatch_rpc_inner_boxed(
+                let mut res = dispatch_rpc_inner_boxed(
                     self,
                     session,
                     service,
@@ -195,10 +195,7 @@ impl ServerContext {
                     caller_trace,
                 )
                 .await;
-                let err = DISPATCH_WAL_ERROR.with(|slot| slot.borrow_mut().take());
-                (r, err)
-            })
-            .await;
+                let wal_err = DISPATCH_WAL_ERROR.with(|slot| slot.borrow().clone());
         let wal_failed = wal_err.is_some();
         if let Some(wal_err) = wal_err {
             if res.is_ok() {
@@ -218,6 +215,10 @@ impl ServerContext {
                 }
             }
         }
+                let _ = DISPATCH_WAL_ERROR.with(|slot| slot.borrow_mut().take());
+                res
+            })
+            .await;
         let duration = start_time.elapsed();
 
         let status_desc = match &res {
@@ -250,21 +251,35 @@ impl ServerContext {
                 };
                 if method == "Undock" {
                     if let Some(st_id) = prev_station_id.filter(|_| session.station_id.is_none()) {
-                        self.notify(
-                            crate::router::NotificationTarget::Station(st_id),
-                            "OnCharNoLongerInStation",
-                            "charid",
-                            vec![guest_row()],
-                        );
+                        let row = guest_row();
+                        for (peer_cid, _) in self.resolve_notification_recipients(
+                            &crate::router::NotificationTarget::Station(st_id),
+                        ) {
+                            if peer_cid != cid {
+                                self.notify(
+                                    crate::router::NotificationTarget::Character(peer_cid),
+                                    "OnCharNoLongerInStation",
+                                    "charid",
+                                    vec![row.clone()],
+                                );
+                            }
+                        }
                     }
                 } else if matches!(method, "Dock" | "CmdDock") {
                     if let Some(st_id) = session.station_id.filter(|_| prev_station_id.is_none()) {
-                        self.notify(
-                            crate::router::NotificationTarget::Station(st_id),
-                            "OnCharNowInStation",
-                            "charid",
-                            vec![guest_row()],
-                        );
+                        let row = guest_row();
+                        for (peer_cid, _) in self.resolve_notification_recipients(
+                            &crate::router::NotificationTarget::Station(st_id),
+                        ) {
+                            if peer_cid != cid {
+                                self.notify(
+                                    crate::router::NotificationTarget::Character(peer_cid),
+                                    "OnCharNowInStation",
+                                    "charid",
+                                    vec![row.clone()],
+                                );
+                            }
+                        }
                     }
                     crate::services::fleet_social::execute_pending_auto_kicks_for_docked_char(
                         self, session, cid,
@@ -339,6 +354,22 @@ impl ServerContext {
                 method,
                 res,
             );
+            if effective_service == "marketProxy"
+                && matches!(method, "GetOrders" | "GetPlexOrders")
+            {
+                if let Ok(rep) = res {
+                    let already_cached = matches!(
+                        &rep,
+                        PyRep::Object { type_name, .. }
+                            if type_name == "objectCaching.CachedMethodCallResult"
+                    );
+                    res = Ok(if already_cached {
+                        rep
+                    } else {
+                        self.cache_method_call_result("marketProxy", method, rep, "always", None)
+                    });
+                }
+            }
         }
 
         res
@@ -1454,3 +1485,6 @@ mod wal_poison_tests;
 #[cfg(test)]
 #[path = "dispatch_unit_tests.rs"]
 mod dispatch_unit_tests;
+#[cfg(test)]
+#[path = "dispatch_edges_tests.rs"]
+mod dispatch_edges_tests;

@@ -295,3 +295,7 @@ impl PublicGatewayRouter {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "quasar_gateway_helpers_edges_tests.rs"]
+mod quasar_gateway_helpers_edges_tests;

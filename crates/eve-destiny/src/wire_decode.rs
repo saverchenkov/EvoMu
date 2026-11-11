@@ -239,3 +239,7 @@ pub fn decode_add_balls(bytes: &[u8]) -> Result<(u8, u32, Vec<DecodedBall>), Str
 
     Ok((packet_type, stamp, balls))
 }
+
+#[cfg(test)]
+#[path = "wire_decode_edges_tests.rs"]
+mod wire_decode_edges_tests;

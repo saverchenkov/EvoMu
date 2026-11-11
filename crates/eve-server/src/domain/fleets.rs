@@ -1506,6 +1506,14 @@ pub fn kick_or_remove_fleet_member(
                 format!("Character {target_id} is not in fleet {fleet_id}"),
             ));
         }
+        if let Some(caller_id) = caller_char_id {
+            if !is_fleet_member(fleet, caller_id) {
+                return Err(DomainError::forbidden(
+                    "NotInFleet",
+                    "Caller is not in fleet",
+                ));
+            }
+        }
         if target_id == fleet.boss_id
             && (forbid_boss_even_self || caller_char_id.is_some_and(|cid| cid != target_id))
         {
@@ -1515,12 +1523,6 @@ pub fn kick_or_remove_fleet_member(
             ));
         }
         if let Some(caller_id) = caller_char_id {
-            if !is_fleet_member(fleet, caller_id) {
-                return Err(DomainError::forbidden(
-                    "NotInFleet",
-                    "Caller is not in fleet",
-                ));
-            }
             if target_id != caller_id && !can_act_on_member(fleet, caller_id, target_id, None) {
                 return Err(DomainError::forbidden(
                     "FleetPermissionDenied",

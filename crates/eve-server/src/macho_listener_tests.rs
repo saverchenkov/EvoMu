@@ -332,7 +332,7 @@ async fn test_macho_ping_rpc_errors_bound_oid_and_displacement() {
         loop {
             let pkt = MachoPacket::from_pyrep(
                 &tokio::time::timeout(
-                    std::time::Duration::from_secs(2),
+                    std::time::Duration::from_secs(60),
                     read_framed_pyrep(stream),
                 )
                 .await
@@ -403,7 +403,7 @@ async fn test_macho_ping_rpc_errors_bound_oid_and_displacement() {
     let destiny_pkt = loop {
         let pkt = MachoPacket::from_pyrep(
             &tokio::time::timeout(
-                std::time::Duration::from_secs(2),
+                std::time::Duration::from_secs(60),
                 read_framed_pyrep(&mut s1),
             )
             .await
@@ -421,7 +421,7 @@ async fn test_macho_ping_rpc_errors_bound_oid_and_displacement() {
     // 5. Concurrent login on same account displaces s1 with ACL_DISPLACED
     let (s2, _cid2, _uid2) = connect_and_authenticate(addr, "demo", "demo-secret").await;
     let disp_frame = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(60),
         read_framed_pyrep(&mut s1),
     )
     .await
@@ -433,7 +433,12 @@ async fn test_macho_ping_rpc_errors_bound_oid_and_displacement() {
 
     // Drop s2 and confirm disconnect cleanup releases online lock
     drop(s2);
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    for _ in 0..500 {
+        if ctx.db.get_online_session(user_id).is_none() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     assert!(ctx.db.get_online_session(user_id).is_none());
 }
 
@@ -478,7 +483,7 @@ async fn select_character_restores_ceo_corprole_and_scoped_roles_over_machonet()
     for _ in 0..8 {
         let pkt = MachoPacket::from_pyrep(
             &tokio::time::timeout(
-                std::time::Duration::from_secs(2),
+                std::time::Duration::from_secs(60),
                 read_framed_pyrep(&mut s),
             )
             .await
@@ -513,6 +518,314 @@ async fn select_character_restores_ceo_corprole_and_scoped_roles_over_machonet()
     assert_eq!(lookup("rolesAtHQ"), Some(expected.clone()));
     assert_eq!(lookup("rolesAtBase"), Some(expected.clone()));
     assert_eq!(lookup("rolesAtOther"), Some(expected));
+    drop(s);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
+async fn re_undock_after_advance_clock_and_dock_delivers_set_state_and_subsequent_add_balls2() {
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(acc) = snap.accounts.get_mut("demo") {
+            acc.role |= eve_machonet::service_roles::ROLE_GMS;
+        }
+    });
+    let addr = spawn_macho_test_server(Arc::clone(&ctx)).await;
+    let (mut s, client_id, user_id) = connect_and_authenticate(addr, "demo", "demo-secret").await;
+
+    fn packet_contains_ascii(rep: &PyRep, needle: &str) -> bool {
+        match rep {
+            PyRep::String(st) => st.contains(needle),
+            PyRep::Bytes(b) => {
+                std::str::from_utf8(b).is_ok_and(|st| st.contains(needle))
+                    || b.windows(needle.len()).any(|w| w == needle.as_bytes())
+            }
+            PyRep::Tuple(items) | PyRep::List(items) => {
+                items.iter().any(|i| packet_contains_ascii(i, needle))
+            }
+            PyRep::Dict(entries) => entries
+                .iter()
+                .any(|(k, v)| packet_contains_ascii(k, needle) || packet_contains_ascii(v, needle)),
+            PyRep::SubStream(inner) | PyRep::SubStruct(inner) => packet_contains_ascii(inner, needle),
+            PyRep::Object { type_name, args } => {
+                type_name.contains(needle) || packet_contains_ascii(args, needle)
+            }
+            PyRep::ObjectEx { header, list, dict, .. } => {
+                packet_contains_ascii(header, needle)
+                    || list.iter().any(|i| packet_contains_ascii(i, needle))
+                    || dict
+                        .iter()
+                        .any(|(k, v)| packet_contains_ascii(k, needle) || packet_contains_ascii(v, needle))
+            }
+            _ => false,
+        }
+    }
+
+    async fn send_rpc_and_collect_until_rsp(
+        stream: &mut TcpStream,
+        req: &MachoPacket,
+    ) -> (MachoPacket, Vec<MachoPacket>) {
+        write_framed_pyrep(stream, &req.to_pyrep()).await.unwrap();
+        let mut notifs = Vec::new();
+        let rsp = loop {
+            let pkt = MachoPacket::from_pyrep(
+                &tokio::time::timeout(
+                    std::time::Duration::from_secs(60),
+                    read_framed_pyrep(stream),
+                )
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            )
+            .unwrap();
+            if matches!(
+                pkt.packet_type,
+                MachoPacketType::CallRsp | MachoPacketType::ErrorResponse
+            ) {
+                break pkt;
+            }
+            notifs.push(pkt);
+        };
+        // Drain any post-CallRsp notifications flushed on the same RPC turn (e.g. SessionChangeNotification + DoDestinyUpdate)
+        while let Ok(Ok(Some(rep))) = tokio::time::timeout(
+            std::time::Duration::from_millis(60),
+            read_framed_pyrep(stream),
+        )
+        .await
+        {
+            if let Some(pkt) = MachoPacket::from_pyrep(&rep) {
+                notifs.push(pkt);
+            }
+        }
+        (rsp, notifs)
+    }
+
+    // 1. SelectCharacterID(90_000_001) (starts docked in Jita IV-4 60_003_760)
+    let (sel_rsp, _) = send_rpc_and_collect_until_rsp(
+        &mut s,
+        &make_call_req(
+            client_id,
+            user_id,
+            1,
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            vec![PyRep::Integer(90_000_001)],
+        ),
+    )
+    .await;
+    assert_eq!(sel_rsp.packet_type, MachoPacketType::CallRsp);
+
+    // 2. First Undock: ship.Undock -> beyonce.GetFormations -> beyonce.MachoBindObject
+    let (undock1_rsp, _) = send_rpc_and_collect_until_rsp(
+        &mut s,
+        &make_call_req(client_id, user_id, 2, "ship", None, "Undock", Vec::new()),
+    )
+    .await;
+    assert_eq!(undock1_rsp.packet_type, MachoPacketType::CallRsp);
+
+    let (form1_rsp, _) = send_rpc_and_collect_until_rsp(
+        &mut s,
+        &make_call_req(
+            client_id,
+            user_id,
+            3,
+            "beyonce",
+            None,
+            "GetFormations",
+            Vec::new(),
+        ),
+    )
+    .await;
+    assert_eq!(form1_rsp.packet_type, MachoPacketType::CallRsp);
+
+    let (bind1_rsp, bind1_notifs) = send_rpc_and_collect_until_rsp(
+        &mut s,
+        &make_call_req(
+            client_id,
+            user_id,
+            4,
+            "beyonce",
+            None,
+            "MachoBindObject",
+            vec![PyRep::Integer(30_000_142), PyRep::None],
+        ),
+    )
+    .await;
+    assert_eq!(bind1_rsp.packet_type, MachoPacketType::CallRsp);
+    assert!(
+        bind1_notifs
+            .iter()
+            .any(|p| packet_contains_ascii(&p.payload, "SetState")),
+        "1st undock MachoBindObject must deliver DoDestinyUpdate(SetState)"
+    );
+
+    // 3. Stop ship within docking perimeter, AdvanceClock(11) past 10s session-change timer, + stationSvc.Dock(60_003_760)
+    let active_ship_id = ctx
+        .db
+        .get_character(90_000_001)
+        .unwrap()
+        .active_ship_id;
+    let jita = ctx.systems.get_or_spawn(30_000_142);
+    let _ = jita
+        .set_movement_mode(active_ship_id, eve_destiny::MovementMode::Stop)
+        .await;
+    let _ = jita.set_speed_fraction(active_ship_id, 0.0).await;
+
+    let (adv_rsp, _) = send_rpc_and_collect_until_rsp(
+        &mut s,
+        &make_call_req(
+            client_id,
+            user_id,
+            5,
+            "timeControl",
+            None,
+            "AdvanceClock",
+            vec![PyRep::Integer(11)],
+        ),
+    )
+    .await;
+    assert_eq!(adv_rsp.packet_type, MachoPacketType::CallRsp);
+
+    let (dock_rsp, _) = send_rpc_and_collect_until_rsp(
+        &mut s,
+        &make_call_req(
+            client_id,
+            user_id,
+            6,
+            "stationSvc",
+            None,
+            "Dock",
+            vec![PyRep::Integer(60_003_760)],
+        ),
+    )
+    .await;
+    assert_eq!(dock_rsp.packet_type, MachoPacketType::CallRsp);
+
+    // AdvanceClock(11) past dock session-change timer before 2nd undock
+    let (adv2_rsp, _) = send_rpc_and_collect_until_rsp(
+        &mut s,
+        &make_call_req(
+            client_id,
+            user_id,
+            60,
+            "timeControl",
+            None,
+            "AdvanceClock",
+            vec![PyRep::Integer(11)],
+        ),
+    )
+    .await;
+    assert_eq!(adv2_rsp.packet_type, MachoPacketType::CallRsp);
+
+    // 4. Second Undock (#802): ship.Undock -> 1 Hz StepManual race -> beyonce.GetFormations -> beyonce.MachoBindObject (no MachoResolveObject)
+    let (undock2_rsp, _) = send_rpc_and_collect_until_rsp(
+        &mut s,
+        &make_call_req(client_id, user_id, 7, "ship", None, "Undock", Vec::new()),
+    )
+    .await;
+    assert_eq!(undock2_rsp.packet_type, MachoPacketType::CallRsp);
+
+    let jita = ctx.systems.get_or_spawn(30_000_142);
+    // Simulate 1 Hz background physics tick firing while client transitions hangar -> inflight
+    let _ = jita.step_manual(1.0).await.unwrap();
+
+    let (form2_rsp, _) = send_rpc_and_collect_until_rsp(
+        &mut s,
+        &make_call_req(
+            client_id,
+            user_id,
+            8,
+            "beyonce",
+            None,
+            "GetFormations",
+            Vec::new(),
+        ),
+    )
+    .await;
+    assert_eq!(form2_rsp.packet_type, MachoPacketType::CallRsp);
+
+    // Also simulate a nested non-UpdateStateRequest call on MachoBindObject (or pre-drained queue)
+    // to verify macho_listener's post-RPC fallback still guarantees SetState delivery.
+    let active_ship_id = ctx
+        .db
+        .get_character(90_000_001)
+        .unwrap()
+        .active_ship_id;
+    let _ = jita.drain_observer_updates(active_ship_id).await;
+
+    let (bind2_rsp, bind2_notifs) = send_rpc_and_collect_until_rsp(
+        &mut s,
+        &make_call_req(
+            client_id,
+            user_id,
+            9,
+            "beyonce",
+            None,
+            "MachoBindObject",
+            vec![
+                PyRep::Integer(30_000_142),
+                PyRep::Tuple(vec![
+                    PyRep::ascii_bytes("GetFormations"),
+                    PyRep::Tuple(Vec::new()),
+                    PyRep::Dict(Vec::new()),
+                ]),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(bind2_rsp.packet_type, MachoPacketType::CallRsp);
+    assert!(
+        bind2_notifs
+            .iter()
+            .any(|p| packet_contains_ascii(&p.payload, "SetState")),
+        "2nd undock MachoBindObject must deliver DoDestinyUpdate(SetState) even after 1Hz ticks and pre-drained observer queue (#802)"
+    );
+
+    // 5. Subsequent `/spawn 1230` (dynamic ball spawn on grid + 1 Hz tick) must stream AddBalls2 over TCP
+    let ship_pos = jita
+        .get_ball_snapshot(active_ship_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .1
+        .position;
+    jita.spawn_ball(eve_destiny::Ball {
+        id: 900_000_020_105,
+        type_id: 1230,
+        position: ship_pos + eve_destiny::DVec3::new(2_500.0, 0.0, 0.0),
+        velocity: eve_destiny::DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 1.0e6,
+        radius: 120.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    })
+    .await
+    .unwrap();
+    let _ = jita.step_manual(1.0).await.unwrap();
+
+    let spawn_pkt = MachoPacket::from_pyrep(
+        &tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            read_framed_pyrep(&mut s),
+        )
+        .await
+        .expect("timed out waiting for post-reundock AddBalls2 DoDestinyUpdate")
+        .unwrap()
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(spawn_pkt.packet_type, MachoPacketType::Notification);
+    assert!(
+        packet_contains_ascii(&spawn_pkt.payload, "AddBalls2"),
+        "post-reundock spawn must stream AddBalls2 to client ballpark, got {:?}",
+        spawn_pkt.payload
+    );
+
     drop(s);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 }

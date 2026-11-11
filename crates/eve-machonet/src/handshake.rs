@@ -1299,3 +1299,7 @@ impl MachoHandshakeStateMachine {
 #[path = "handshake_unit_tests.rs"]
 mod handshake_unit_tests;
 
+#[cfg(test)]
+#[path = "handshake_edges_tests.rs"]
+mod handshake_edges_tests;
+

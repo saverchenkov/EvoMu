@@ -657,4 +657,26 @@ fn arch_585_three_way_ship_hp_sync_and_unified_repair_clear() {
     assert!((restored.shield_hp - 1_000.0).abs() < 1e-6);
     assert!((restored.armor_hp - 1_600.0).abs() < 1e-6);
     assert!((restored.structure_hp - 2_750.0).abs() < 1e-6);
+
+    // `persist_ship_combat_hp_batch_inner` skips unknown entities when `require_persisted_entity=true`
+    // and records `ship_combat_hp` when `require_persisted_entity=false`.
+    let unknown_ball = 999_888_777_i64;
+    super::persist_ship_combat_hp_batch_inner(&ctx.db, [(unknown_ball, &cs)], true);
+    assert!(ctx
+        .db
+        .with_snapshot(|s| !s.sp6_lifecycle.ship_combat_hp.contains_key(&unknown_ball)));
+    super::persist_ship_combat_hp_batch_inner(&ctx.db, [(unknown_ball, &cs)], false);
+    assert_eq!(
+        ctx.db
+            .with_snapshot(|s| s.sp6_lifecycle.ship_combat_hp.get(&unknown_ball).cloned()),
+        Some(PersistedCombatHp {
+            shield_hp: 400.0,
+            armor_hp: 1_200.0,
+            hull_hp: 2_500.0,
+        })
+    );
+    // Repeat identical batch call is a zero-write no-op.
+    let epoch_before = ctx.db.state_epoch();
+    super::persist_ship_combat_hp_batch_inner(&ctx.db, [(unknown_ball, &cs)], false);
+    assert_eq!(ctx.db.state_epoch(), epoch_before);
 }

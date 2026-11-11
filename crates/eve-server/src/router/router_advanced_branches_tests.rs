@@ -413,3 +413,689 @@ async fn test_sqlite_context_charges_skill_queue_and_dispatch_edges() {
     });
     super::dispatch::tick_sov_prospecting_deposit_respawn(&ctx, null_sys).await;
 }
+
+#[test]
+fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical_rekey() {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+
+    use eve_db::{OwnerNoteRecord, WorldRepository};
+    use eve_proto::PyRep;
+
+    use crate::router::cache_notifications::NotificationRecord;
+    use crate::router::context::ActiveScannerProbe;
+    use crate::router::context_runtime_persistence::SERVER_RUNTIME_STATE_BLOB_KEY;
+    use crate::services::tactical_modules::db_ptr_key;
+
+    let ctx1 = test_ctx();
+    let sde = Arc::clone(&ctx1.sde);
+    let ship_a = 100_000_701_i64;
+    let ship_b = 100_000_702_i64;
+    let probe_active = 700_000_001_i64;
+    let probe_neg_state = 700_000_002_i64;
+
+    // 1. Write-lock deadlock guard: persist inside with_mut_snapshot returns safely without deadlocking.
+    ctx1.active_ewar_starts
+        .write()
+        .unwrap()
+        .insert((ship_a, ship_b), vec![(1, "warpScramblerMWD")]);
+    ctx1.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs
+            .insert("stale".into(), "keep".into());
+        ctx1.persist_server_runtime_to_db();
+        // Should not have written server_runtime_json while write-locked by current thread.
+        assert!(snap.cluster_and_runtime.server_runtime_json.is_none());
+    });
+
+    // 2. Populate tactical_state with both instance_id-keyed (tag 1) and db_ptr_key-keyed (tag 0) entries
+    let inst1 = ctx1.instance_id as usize;
+    let dbk1 = db_ptr_key(&ctx1.db);
+    {
+        let mut tac = ctx1.tactical_state.write().unwrap();
+        tac.lance_caster_lock_until.insert((inst1, ship_a), 1_001);
+        tac.lance_caster_lock_until.insert((dbk1, ship_b), 1_002);
+        tac.lance_victim_debuff_until.insert((inst1, ship_a), 2_001);
+        tac.lance_victim_debuff_until.insert((dbk1, ship_b), 2_002);
+        tac.tsb_self_penalty_until.insert((inst1, ship_a), 3_001);
+        tac.tsb_self_penalty_until.insert((dbk1, ship_b), 3_002);
+        tac.clone_vat_bay_activated_ships.insert((inst1, ship_a));
+        tac.clone_vat_bay_activated_ships.insert((dbk1, ship_b));
+        tac.entosis_target_cycles
+            .insert((inst1, ship_a, 99), 4);
+        tac.entosis_target_cycles
+            .insert((dbk1, ship_b, 98), 5);
+        tac.system_sim_time_s.insert((inst1, 30_000_142), 12.5);
+        tac.system_sim_time_s.insert((dbk1, 30_000_144), 25.0);
+    }
+
+    // Populate scanners + negative probe (filtered on hydrate) and Persist.
+    let make_probe = |probe_id: i64, state: i32| ActiveScannerProbe {
+        probe_id,
+        probe_type_id: 30_013,
+        owner_char_id: 90_000_001,
+        ship_id: ship_a,
+        launcher_module_id: 100_000_999,
+        solar_system_id: 30_000_142,
+        position: [1.0, 2.0, 3.0],
+        destination: [4.0, 5.0, 6.0],
+        range_step: 4,
+        scan_range_m: 1_000_000.0,
+        base_sensor_strength: 40.0,
+        max_flight_time_s: 3_600.0,
+        launched_at_unix: 1_700_000_000,
+        state,
+        warp_end_ft: Some(133_500_000_000_000_000),
+    };
+    ctx1.active_scanner_probes
+        .write()
+        .unwrap()
+        .insert(probe_active, make_probe(probe_active, 2));
+    ctx1.active_scanner_probes
+        .write()
+        .unwrap()
+        .insert(probe_neg_state, make_probe(probe_neg_state, -1));
+
+    // Seed legacy blob key to verify persist clears legacy keys once persisted to cluster_and_runtime.
+    ctx1.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs
+            .insert(SERVER_RUNTIME_STATE_BLOB_KEY.into(), "{}".into());
+        snap.sp6_lifecycle.server_runtime_json = Some("{}".into());
+    });
+
+    ctx1.persist_server_runtime_to_db();
+
+    let (exported_json, exported_sp6) = ctx1.db.with_snapshot(|snap| {
+        assert!(!snap
+            .service_state_blobs
+            .contains_key(SERVER_RUNTIME_STATE_BLOB_KEY));
+        assert!(snap.sp6_lifecycle.server_runtime_json.is_none());
+        assert!(snap.sp6_lifecycle.active_scanner_probes.contains_key(&probe_active));
+        (
+            snap.cluster_and_runtime
+                .server_runtime_json
+                .clone()
+                .expect("persisted json"),
+            snap.sp6_lifecycle.active_scanner_probes.clone(),
+        )
+    });
+
+    // 3. Hydrate into a distinct ServerContext + WorldRepository and verify tactical re-keying,
+    // probe state normalization (`state > 0 -> 0`, `state < 0` dropped, `warp_end_ft -> None`),
+    // owner_notes `-79` notification filtering/sorting, and `macho_global_config`.
+    let db2 = Arc::new(WorldRepository::with_demo_seed());
+    let ctx2 = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db2));
+    assert_ne!(ctx1.instance_id, ctx2.instance_id);
+    assert_ne!(db_ptr_key(&ctx1.db), db_ptr_key(&ctx2.db));
+
+    // Build all 11 canonical EWAR kind strings + two distinct unknown strings hitting `_ => "electronic"` fallback.
+    let ewar_cases: [(&str, &str); 13] = [
+        ("warpScramblerMWD", "warpScramblerMWD"),
+        ("warpScrambler", "warpScrambler"),
+        ("focusedWarpScrambler", "focusedWarpScrambler"),
+        ("webify", "webify"),
+        ("electronic", "electronic"),
+        ("ewRemoteSensorDamp", "ewRemoteSensorDamp"),
+        ("ewGuidanceDisrupt", "ewGuidanceDisrupt"),
+        ("ewTrackingDisrupt", "ewTrackingDisrupt"),
+        ("ewTargetPaint", "ewTargetPaint"),
+        ("ewEnergyNeut", "ewEnergyNeut"),
+        ("ewEnergyVampire", "ewEnergyVampire"),
+        ("unrecognizedCustomEwarA", "electronic"),
+        ("unrecognizedCustomEwarB", "electronic"),
+    ];
+    let mut ewar_json_val: serde_json::Value = serde_json::from_str(&exported_json).unwrap();
+    let ewar_entries: Vec<serde_json::Value> = ewar_cases
+        .iter()
+        .enumerate()
+        .map(|(i, &(raw, _))| serde_json::json!([i as i64 + 1, raw]))
+        .collect();
+    ewar_json_val["active_ewar_starts"] = serde_json::json!([[[ship_a, ship_b], ewar_entries]]);
+    let mutated_json = serde_json::to_string(&ewar_json_val).unwrap();
+
+    // Verify legacy fallback priority: first via service_state_blobs[SERVER_RUNTIME_STATE_BLOB_KEY]
+    // when both cluster_and_runtime.server_runtime_json and sp6_lifecycle.server_runtime_json are None.
+    let n_rec_10 = NotificationRecord {
+        notification_id: 10,
+        type_id: 5,
+        group_id: 1,
+        sender_id: 1,
+        receiver_id: 90_000_001,
+        processed: false,
+        created: 100,
+        data: "ten".into(),
+        deleted: false,
+        interacted: false,
+    };
+    let mut n_rec_2 = n_rec_10.clone();
+    n_rec_2.notification_id = 2;
+    n_rec_2.data = "two".into();
+    let mut n_rec_other = n_rec_10.clone();
+    n_rec_other.notification_id = 99;
+    n_rec_other.data = "ignored_char_neg_80".into();
+
+    ctx2.db.with_mut_snapshot(|snap| {
+        snap.cluster_and_runtime.server_runtime_json = None;
+        snap.sp6_lifecycle.server_runtime_json = None;
+        snap.service_state_blobs
+            .insert(SERVER_RUNTIME_STATE_BLOB_KEY.into(), mutated_json.clone());
+        snap.service_state_blobs.insert(
+            "macho_global_config".into(),
+            serde_json::to_string(&HashMap::from([("maxUsers".to_string(), PyRep::Integer(500))])).unwrap(),
+        );
+        snap.sp6_lifecycle.active_scanner_probes = exported_sp6;
+        snap.owner_notes.insert(
+            1,
+            OwnerNoteRecord {
+                note_id: 1,
+                character_id: -79,
+                item_id: 90_000_001,
+                label: "notif:10".into(),
+                note: serde_json::to_string(&n_rec_10).unwrap(),
+                timestamp_unix: 10,
+            },
+        );
+        snap.owner_notes.insert(
+            2,
+            OwnerNoteRecord {
+                note_id: 2,
+                character_id: -79,
+                item_id: 90_000_001,
+                label: "notif:2".into(),
+                note: serde_json::to_string(&n_rec_2).unwrap(),
+                timestamp_unix: 2,
+            },
+        );
+        snap.owner_notes.insert(
+            3,
+            OwnerNoteRecord {
+                note_id: 3,
+                character_id: -79,
+                item_id: 90_000_001,
+                label: "notif:bad".into(),
+                note: "{corrupt".into(),
+                timestamp_unix: 3,
+            },
+        );
+        snap.owner_notes.insert(
+            4,
+            OwnerNoteRecord {
+                note_id: 4,
+                character_id: -80,
+                item_id: 90_000_001,
+                label: "other".into(),
+                note: serde_json::to_string(&n_rec_other).unwrap(),
+                timestamp_unix: 4,
+            },
+        );
+    });
+    ctx2.hydrate_server_runtime_from_db();
+
+    // Verify EWAR interning to canonical static slices
+    {
+        let ewar = ctx2.active_ewar_starts.read().unwrap();
+        let list = &ewar[&(ship_a, ship_b)];
+        assert_eq!(list.len(), ewar_cases.len());
+        for (idx, &(_, expected)) in ewar_cases.iter().enumerate() {
+            assert_eq!(list[idx].1, expected);
+        }
+        assert!(
+            std::ptr::eq(list[11].1, list[12].1),
+            "unknown EWAR kinds must intern to the same static fallback literal"
+        );
+    }
+
+    // Verify notifications sorted and `-80` / corrupt JSON excluded
+    {
+        let notifs = ctx2.notification_records.read().unwrap();
+        let ids: Vec<i64> = notifs.iter().map(|n| n.notification_id).collect();
+        assert_eq!(ids, vec![2, 10]);
+    }
+    assert_eq!(
+        ctx2.global_config_values.read().unwrap().get("maxUsers"),
+        Some(&PyRep::Integer(500))
+    );
+
+    // Verify scanner probes: state > 0 reset to 0, warp_end_ft cleared, state < 0 dropped
+    {
+        let probes = ctx2.active_scanner_probes.read().unwrap();
+        assert!(!probes.contains_key(&probe_neg_state));
+        let p = &probes[&probe_active];
+        assert_eq!(p.state, 0);
+        assert_eq!(p.warp_end_ft, None);
+    }
+
+    // Verify tactical_state cross-context key migration
+    let inst2 = ctx2.instance_id as usize;
+    let dbk2 = db_ptr_key(&ctx2.db);
+    {
+        let tac = ctx2.tactical_state.read().unwrap();
+        assert_eq!(tac.lance_caster_lock_until.get(&(inst2, ship_a)), Some(&1_001));
+        assert_eq!(tac.lance_caster_lock_until.get(&(dbk2, ship_b)), Some(&1_002));
+        assert_eq!(tac.lance_victim_debuff_until.get(&(inst2, ship_a)), Some(&2_001));
+        assert_eq!(tac.lance_victim_debuff_until.get(&(dbk2, ship_b)), Some(&2_002));
+        assert_eq!(tac.tsb_self_penalty_until.get(&(inst2, ship_a)), Some(&3_001));
+        assert_eq!(tac.tsb_self_penalty_until.get(&(dbk2, ship_b)), Some(&3_002));
+        assert!(tac.clone_vat_bay_activated_ships.contains(&(inst2, ship_a)));
+        assert!(tac.clone_vat_bay_activated_ships.contains(&(dbk2, ship_b)));
+        assert_eq!(tac.entosis_target_cycles.get(&(inst2, ship_a, 99)), Some(&4));
+        assert_eq!(tac.entosis_target_cycles.get(&(dbk2, ship_b, 98)), Some(&5));
+        assert_eq!(tac.system_sim_time_s.get(&(inst2, 30_000_142)), Some(&12.5));
+        assert_eq!(tac.system_sim_time_s.get(&(dbk2, 30_000_144)), Some(&25.0));
+    }
+
+    // 4. Dirty in-memory mutations are discarded cleanly on `rehydrate_runtime_from_db()`
+    ctx2.scanned_signatures.write().unwrap().insert((90_000_001, 30_000_142, 42));
+    ctx2.rehydrate_runtime_from_db();
+    assert!(ctx2.scanned_signatures.read().unwrap().is_empty());
+
+    // 5. Corrupt JSON in server_runtime_json clears runtime state gracefully
+    ctx2.db.with_mut_snapshot(|snap| {
+        snap.cluster_and_runtime.server_runtime_json = Some("{invalid_json".into());
+    });
+    ctx2.hydrate_server_runtime_from_db();
+    assert!(ctx2.active_ewar_starts.read().unwrap().is_empty());
+
+    // 6. Diff sync of removed scanner probe & clearing empty server_runtime_json + legacy keys
+    ctx2.active_scanner_probes.write().unwrap().clear();
+    ctx2.persist_server_runtime_to_db();
+    ctx2.db.with_snapshot(|snap| {
+        assert!(snap.cluster_and_runtime.server_runtime_json.is_none());
+        assert!(snap.sp6_lifecycle.server_runtime_json.is_none());
+        assert!(!snap
+            .service_state_blobs
+            .contains_key(SERVER_RUNTIME_STATE_BLOB_KEY));
+        assert!(snap.sp6_lifecycle.active_scanner_probes.is_empty());
+    });
+    let _ = HashSet::<i64>::new();
+}
+
+#[tokio::test]
+async fn session_transition_variants_builders_resolution_and_sync_branches() {
+    use eve_db::{InventoryFlag, UpwellStructureRecord};
+    use eve_machonet::SessionState;
+    use eve_proto::PyRep;
+
+    use crate::router::{
+        apply_character_transition_in_snap, apply_session_from_character,
+        build_session_state_keyval, clear_session_character_state, emit_on_session_changed,
+        resolve_destination_location, sync_session_from_character, SessionTransitionSpec,
+        TransitionKind, TransitionLocation,
+    };
+
+    // 1. All 10 TransitionKind::destination_location & target_ship_id branches
+    let cid = 90_000_001_i64;
+    let jita_sys = 30_000_142_u32;
+    let amarr_sys = 30_002_187_u32;
+    let jita_station = 60_003_760_i64;
+    let upwell_id = 1_055_000_111_i64;
+
+    assert_eq!(
+        TransitionKind::Dock { dock_id: jita_station, is_structure: false }.destination_location(),
+        TransitionLocation::Station { solar_system_id: None, station_id: jita_station }
+    );
+    assert_eq!(
+        TransitionKind::Dock { dock_id: upwell_id, is_structure: true }.destination_location(),
+        TransitionLocation::Structure { solar_system_id: None, structure_id: upwell_id }
+    );
+    assert_eq!(
+        TransitionKind::Undock { solar_system_id: jita_sys }.destination_location(),
+        TransitionLocation::Space { solar_system_id: jita_sys }
+    );
+    assert_eq!(
+        TransitionKind::JumpSystem { solar_system_id: amarr_sys }.destination_location(),
+        TransitionLocation::Space { solar_system_id: amarr_sys }
+    );
+    assert_eq!(
+        TransitionKind::BoardShip { ship_id: 55 }.destination_location(),
+        TransitionLocation::KeepCurrent
+    );
+    assert_eq!(TransitionKind::BoardShip { ship_id: 55 }.target_ship_id(), Some(55));
+    assert_eq!(
+        TransitionKind::EjectToPod { capsule_id: 77 }.destination_location(),
+        TransitionLocation::KeepCurrent
+    );
+    assert_eq!(TransitionKind::EjectToPod { capsule_id: 77 }.target_ship_id(), Some(77));
+    assert_eq!(
+        TransitionKind::CloneJump {
+            solar_system_id: jita_sys,
+            dock_id: Some((upwell_id, true)),
+            ship_id: Some(88),
+        }
+        .destination_location(),
+        TransitionLocation::Structure { solar_system_id: Some(jita_sys), structure_id: upwell_id }
+    );
+    assert_eq!(
+        TransitionKind::CloneJump {
+            solar_system_id: jita_sys,
+            dock_id: None,
+            ship_id: None,
+        }
+        .destination_location(),
+        TransitionLocation::Space { solar_system_id: jita_sys }
+    );
+    assert_eq!(
+        TransitionKind::DeathRespawn {
+            solar_system_id: jita_sys,
+            dock_id: Some((jita_station, false)),
+            ship_id: 66,
+        }
+        .target_ship_id(),
+        Some(66)
+    );
+    assert_eq!(
+        TransitionKind::Teleport {
+            solar_system_id: amarr_sys,
+            dock_id: Some((jita_station, false)),
+            ship_id: Some(99),
+        }
+        .target_ship_id(),
+        Some(99)
+    );
+    assert_eq!(
+        TransitionKind::CharacterLogin {
+            solar_system_id: jita_sys,
+            dock_id: None,
+            ship_id: None,
+        }
+        .destination_location(),
+        TransitionLocation::Space { solar_system_id: jita_sys }
+    );
+    assert_eq!(TransitionKind::Logout.destination_location(), TransitionLocation::ClearAll);
+    assert_eq!(TransitionKind::Logout.target_ship_id(), None);
+
+    // 2. SessionTransitionSpec defaults & all 10 builders
+    let pos = glam::DVec3::new(100.0, 200.0, 300.0);
+    let spec = SessionTransitionSpec::for_kind(
+        cid,
+        TransitionKind::Teleport { solar_system_id: jita_sys, dock_id: None, ship_id: None },
+        "teleport",
+    )
+    .with_apply_db(false)
+    .with_move_ship_item(false)
+    .with_validate_destination(false)
+    .with_emit_on_session_changed(false)
+    .with_sync_local_chat(false)
+    .with_invalidate_bounds(false)
+    .with_cleanup_departing_space(false)
+    .with_arrive_ball_pos(pos)
+    .with_accept_ballpark_dock(upwell_id, pos)
+    .with_preserve_session_ship(true);
+    assert!(!spec.apply_db);
+    assert!(!spec.move_ship_item);
+    assert!(!spec.validate_destination);
+    assert!(!spec.emit_on_session_changed);
+    assert!(!spec.sync_local_chat);
+    assert!(!spec.invalidate_bounds);
+    assert!(!spec.cleanup_departing_space);
+    assert_eq!(spec.arrive_ball_pos, Some(pos));
+    assert_eq!(spec.accept_ballpark_dock, Some((upwell_id, pos)));
+    assert!(spec.preserve_session_ship);
+
+    // 3. resolve_destination_location & apply_character_transition_in_snap edges
+    let ctx = test_ctx();
+    let ship_id = ctx.db.with_snapshot(|s| s.characters[&cid].active_ship_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            upwell_id,
+            UpwellStructureRecord {
+                structure_id: upwell_id,
+                type_id: 35_832,
+                owner_corp_id: 98_000_001,
+                solar_system_id: jita_sys,
+                name: "Citadel".into(),
+                position: [0.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            upwell_id + 1,
+            UpwellStructureRecord {
+                structure_id: upwell_id + 1,
+                type_id: 35_832,
+                owner_corp_id: 98_000_001,
+                solar_system_id: jita_sys,
+                name: "Wrecked".into(),
+                position: [0.0, 0.0, 0.0],
+                state: "Destroyed".into(),
+                ..Default::default()
+            },
+        );
+    });
+
+    ctx.db.with_mut_snapshot(|snap| {
+        // Space(0) rejected even when validate_destination == false
+        let ch = snap.characters[&cid].clone();
+        assert!(resolve_destination_location(
+            snap,
+            &ctx.sde,
+            cid,
+            &ch,
+            TransitionLocation::Space { solar_system_id: 0 },
+            false,
+        )
+        .is_err());
+
+        // Unknown system accepted iff validate_destination == false
+        assert!(resolve_destination_location(
+            snap,
+            &ctx.sde,
+            cid,
+            &ch,
+            TransitionLocation::Space { solar_system_id: 999_999 },
+            true,
+        )
+        .is_err());
+        let res_no_val = resolve_destination_location(
+            snap,
+            &ctx.sde,
+            cid,
+            &ch,
+            TransitionLocation::Space { solar_system_id: 999_999 },
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            (res_no_val.solar_system_id, res_no_val.station_id, res_no_val.structure_id),
+            (999_999, None, None)
+        );
+
+        // Destroyed Upwell structure rejected
+        assert!(resolve_destination_location(
+            snap,
+            &ctx.sde,
+            cid,
+            &ch,
+            TransitionLocation::Structure {
+                solar_system_id: None,
+                structure_id: upwell_id + 1,
+            },
+            true,
+        )
+        .is_err());
+
+        // Active Upwell structure resolves system hierarchy and clears station_id
+        let resolved_st = resolve_destination_location(
+            snap,
+            &ctx.sde,
+            cid,
+            &ch,
+            TransitionLocation::Structure {
+                solar_system_id: None,
+                structure_id: upwell_id,
+            },
+            true,
+        )
+        .unwrap();
+        assert_eq!(resolved_st.solar_system_id, jita_sys);
+        assert_ne!(resolved_st.constellation_id, 0);
+        assert_ne!(resolved_st.region_id, 0);
+        assert_eq!(resolved_st.station_id, None);
+        assert_eq!(resolved_st.structure_id, Some(upwell_id));
+
+        // KeepCurrent fills 0 constellation/region without incrementing system_epoch
+        let ch_mut = snap.characters.get_mut(&cid).unwrap();
+        ch_mut.constellation_id = 0;
+        ch_mut.region_id = 0;
+        let epoch_before = ch_mut.system_epoch;
+        let kept = apply_character_transition_in_snap(
+            snap,
+            &ctx.sde,
+            cid,
+            TransitionLocation::KeepCurrent,
+            None,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(kept.system_epoch, epoch_before);
+        assert_ne!(kept.constellation_id, 0);
+        assert_ne!(kept.region_id, 0);
+
+        // Moving to Space moves ship item to system with Flag None and bumps system_epoch
+        let spaced = apply_character_transition_in_snap(
+            snap,
+            &ctx.sde,
+            cid,
+            TransitionLocation::Space { solar_system_id: jita_sys },
+            None,
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(spaced.system_epoch, epoch_before + 1);
+        assert_eq!(snap.items[&ship_id].location_id, jita_sys as i64);
+        assert_eq!(snap.items[&ship_id].flag, InventoryFlag::None);
+
+        // Moving to Structure moves ship item to structure Hangar
+        let docked_str = apply_character_transition_in_snap(
+            snap,
+            &ctx.sde,
+            cid,
+            TransitionLocation::Structure {
+                solar_system_id: Some(jita_sys),
+                structure_id: upwell_id,
+            },
+            None,
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(docked_str.structure_id, Some(upwell_id));
+        assert_eq!(snap.items[&ship_id].location_id, upwell_id);
+        assert_eq!(snap.items[&ship_id].flag, InventoryFlag::Hangar);
+    });
+
+    // 4. apply_session_from_character, build_session_state_keyval (structure vs space),
+    // clear_session_character_state, emit_on_session_changed, sync_session_from_character(None)
+    let mut sess = SessionState::new(77_501);
+    sess.user_id = Some(1);
+    sess.character_id = Some(cid);
+    let mut ch_for_sess = ctx.db.get_character(cid).unwrap();
+    // Active ship <= 0 + structure_id Some(..) -> keyval omits shipid/stationid/solarsystemid, includes structureid
+    ch_for_sess.active_ship_id = 0;
+    apply_session_from_character(&mut sess, &ch_for_sess, Some(Some(ship_id)), Some(&ctx.sde));
+    assert_eq!(sess.ship_id, Some(ship_id));
+    apply_session_from_character(&mut sess, &ch_for_sess, None, None);
+    assert_eq!(sess.ship_id, None);
+    let kv_struct = build_session_state_keyval(&sess, cid);
+    assert_eq!(
+        kv_struct.dict_get("structureid"),
+        Some(&PyRep::Integer(upwell_id))
+    );
+    assert_eq!(kv_struct.dict_get("solarsystemid"), Some(&PyRep::None));
+    assert_eq!(kv_struct.dict_get("shipid"), Some(&PyRep::None));
+    let snap_sess = sess.clone();
+    let empty_diff = std::collections::HashMap::new();
+    let notif_len_before = sess.notifications.len();
+    emit_on_session_changed(&ctx, Some(&mut sess), &snap_sess, cid, &empty_diff);
+    assert_eq!(sess.notifications.len(), notif_len_before);
+    let non_empty_diff = std::collections::HashMap::from([(
+        "solarsystemid".to_string(),
+        (PyRep::None, PyRep::Integer(jita_sys as i64)),
+    )]);
+    emit_on_session_changed(&ctx, Some(&mut sess), &snap_sess, cid, &non_empty_diff);
+    assert_eq!(sess.notifications.len(), notif_len_before + 1);
+
+    // Clear session via sync_session_from_character(None) & clear_session_character_state
+    sync_session_from_character(&ctx, &mut sess, Some(&snap_sess), None, "logout", false, false, false);
+    assert_eq!(sess.solar_system_id, None);
+    assert_eq!(sess.structure_id, None);
+    clear_session_character_state(&mut sess);
+
+    // 5. execute_session_transition_sync(None) + async Teleport + CharacterLogin
+    let sync_res = ctx
+        .execute_session_transition_sync(
+            None,
+            SessionTransitionSpec::for_kind(
+                cid,
+                TransitionKind::Undock { solar_system_id: jita_sys },
+                "sync_undock",
+            ),
+        )
+        .expect("sync undock without caller session");
+    assert_eq!(sync_res.updated_character.as_ref().unwrap().station_id, None);
+    assert_eq!(sync_res.updated_character.as_ref().unwrap().structure_id, None);
+    assert!(!sync_res.diff.is_empty());
+
+    let tp_res = ctx
+        .execute_session_transition(
+            Some(&mut sess),
+            SessionTransitionSpec::for_kind(
+                cid,
+                TransitionKind::Teleport {
+                    solar_system_id: amarr_sys,
+                    dock_id: None,
+                    ship_id: Some(ship_id),
+                },
+                "teleport_amarr",
+            ),
+        )
+        .await
+        .expect("teleport to Amarr space");
+    assert_eq!(tp_res.updated_character.as_ref().unwrap().solar_system_id, amarr_sys);
+    assert_eq!(sess.solar_system_id, Some(amarr_sys));
+    assert_eq!(sess.ship_id, Some(ship_id));
+
+    // Default CharacterLogin has apply_db=false and uses persisted character location from DB
+    let login_res = ctx
+        .execute_session_transition(
+            Some(&mut sess),
+            SessionTransitionSpec::for_kind(
+                cid,
+                TransitionKind::CharacterLogin {
+                    solar_system_id: jita_sys,
+                    dock_id: Some((jita_station, false)),
+                    ship_id: Some(ship_id),
+                },
+                "login",
+            ),
+        )
+        .await
+        .expect("character login transition");
+    assert_eq!(login_res.updated_character.as_ref().unwrap().solar_system_id, amarr_sys);
+    assert_eq!(login_res.updated_character.as_ref().unwrap().station_id, None);
+    assert_eq!(sess.station_id, None);
+
+    // CharacterLogin with explicit with_apply_db(true) commits the dock destination to DB and session
+    let login_db_res = ctx
+        .execute_session_transition(
+            Some(&mut sess),
+            SessionTransitionSpec::for_kind(
+                cid,
+                TransitionKind::CharacterLogin {
+                    solar_system_id: jita_sys,
+                    dock_id: Some((jita_station, false)),
+                    ship_id: Some(ship_id),
+                },
+                "login_commit",
+            )
+            .with_apply_db(true),
+        )
+        .await
+        .expect("character login with_apply_db");
+    assert_eq!(login_db_res.updated_character.as_ref().unwrap().station_id, Some(jita_station));
+    assert_eq!(sess.station_id, Some(jita_station));
+}

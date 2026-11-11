@@ -430,3 +430,15 @@ fn prune_in_tx(tx: &rusqlite::Transaction<'_>, now_unix: u64) -> Result<usize, S
         .map_err(|e| e.to_string())?;
     Ok(jti_pruned + rt_pruned)
 }
+
+#[cfg(test)]
+#[path = "auth_store_gap_unit_tests.rs"]
+mod auth_store_gap_unit_tests;
+
+#[cfg(test)]
+#[path = "auth_store_unit_tests.rs"]
+mod auth_store_unit_tests;
+
+#[cfg(test)]
+#[path = "auth_store_edges_tests.rs"]
+mod auth_store_edges_tests;

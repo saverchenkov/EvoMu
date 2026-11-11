@@ -47,4 +47,8 @@ mod ledger_store_cov_unit_tests;
 mod social_store_r8b_unit_tests;
 #[cfg(test)]
 mod service_domains_store_tests;
+#[cfg(test)]
+mod auth_store_cov_unit_tests;
+#[cfg(test)]
+mod load_rollback_social_cov_unit_tests;
 

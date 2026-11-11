@@ -782,3 +782,705 @@ fn combat_runtime_rehydrates_on_mut_snapshot_without_clobbering_unflushed_npcs()
         assert_eq!(st.modified_system_securities.get(&sys_id), Some(&0.75));
     });
 }
+
+#[test]
+fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
+    use crate::router::context::{ActiveMoonSurveyProbe, ModuleCooldownEntry};
+    use crate::services::cluster_macho_misc_services::{
+        LandingPadRecord, LauncherRecord, StarterLauncherRecord,
+    };
+    use crate::services::fleet_social::fleet_social_fleets::FleetAdvertState;
+    use crate::services::mining_cycle::{ActiveMiningCycle, MiningKind};
+    use crate::services::space_destiny::SessionChangeTimerState;
+    use crate::services::space_mining_harvest::PhasedAsteroidFieldState;
+    use crate::services::tactical_module_mechanics::{ActiveInterdictionProbe, LauncherFireStamp};
+    use crate::services::tactical_modules::{ActiveEntosisLinkState, ProjectedRemoteAssistance};
+    use crate::services::tactical_modules_probes::{ActiveWubbleDebuff, PendingWubbleProbe};
+    use eve_db::{
+        FleetSetupRecord, HorizonSiegePhase, OfferedLoadSlot, OwnerNoteRecord,
+        PendingZarzakhTollQuote,
+    };
+    use eve_dogma::{DogmaItemState, ProjectedEwarEffect};
+    use eve_proto::PyRep;
+    use glam::DVec3;
+    use std::collections::{BTreeMap, HashMap, HashSet};
+    use std::sync::atomic::Ordering;
+
+    let dir = TempTestDir::new("w4_runtime_persistence_killers");
+    let db_path = dir.path().join("w4_runtime.sqlite");
+    let sde = shared_sde();
+
+    // Helper: fresh empty DB + context where server_runtime_json starts None
+    let fresh_ctx = |name: &str| {
+        let p = dir.path().join(name);
+        let db = Arc::new(WorldRepository::open_sqlite(&p).expect("open sqlite"));
+        let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db));
+        ctx.active_moon_probes.write().unwrap().clear();
+        ctx.scanned_signatures.write().unwrap().clear();
+        ctx.character_scan_progress.write().unwrap().clear();
+        ctx.active_fighters.write().unwrap().clear();
+        ctx.fighter_cooldown_state.write().unwrap().clear();
+        ctx.fighter_charge_state.write().unwrap().clear();
+        ctx.fighter_tube_loads.write().unwrap().clear();
+        ctx.module_reactivation_cooldowns.write().unwrap().clear();
+        ctx.mining_cycles.write().unwrap().clear();
+        ctx.phased_asteroid_fields.write().unwrap().clear();
+        ctx.session_change_timers.lock().unwrap().clear();
+        ctx.active_warps.lock().unwrap().clear();
+        ctx.location_change_invuln.lock().unwrap().clear();
+        ctx.weapon_cycle_state.write().unwrap().clear();
+        ctx.projected_ewar.write().unwrap().clear();
+        ctx.projected_ewar_sources.write().unwrap().clear();
+        ctx.active_ewar_starts.write().unwrap().clear();
+        ctx.map_landmarks.write().unwrap().clear();
+        ctx.global_config_values.write().unwrap().clear();
+        ctx.fw_idle_last_step_unix.write().unwrap().clear();
+        ctx.combat_rng_seq.store(0, Ordering::Relaxed);
+        ctx.cluster_tick_last_unix.store(0, Ordering::Relaxed);
+        ctx.cluster_tick_persisted_unix.store(0, Ordering::Relaxed);
+        *ctx.tactical_state.write().unwrap() = Default::default();
+        *ctx.fleet_extras.lock().unwrap() = Default::default();
+        *ctx.social_extras.lock().unwrap() = Default::default();
+        *ctx.cluster_misc_state.lock().unwrap() = Default::default();
+        *ctx.cluster_state.write().unwrap() = Default::default();
+        *ctx.alert_telemetry.lock().unwrap() = Default::default();
+        ctx.persist_server_runtime_to_db();
+        (db, ctx)
+    };
+
+    // 1. All 11 `intern_ewar_kind` strings + unknown fallback -> `"electronic"`
+    {
+        let (db, ctx) = fresh_ctx("ewar_kinds.sqlite");
+        assert!(db.with_snapshot(|s| s.cluster_and_runtime.server_runtime_json.is_none()));
+        ctx.active_ewar_starts
+            .write()
+            .unwrap()
+            .insert((101, 202), vec![(303, "warpScramblerMWD")]);
+        ctx.persist_server_runtime_to_db();
+        let base_json = db
+            .with_snapshot(|s| s.cluster_and_runtime.server_runtime_json.clone())
+            .expect("base json");
+        for (input_kind, expected_static) in [
+            ("warpScramblerMWD", "warpScramblerMWD"),
+            ("warpScrambler", "warpScrambler"),
+            ("focusedWarpScrambler", "focusedWarpScrambler"),
+            ("webify", "webify"),
+            ("ewTargetPaint", "ewTargetPaint"),
+            ("ewRemoteSensorDamp", "ewRemoteSensorDamp"),
+            ("ewTrackingDisrupt", "ewTrackingDisrupt"),
+            ("ewGuidanceDisrupt", "ewGuidanceDisrupt"),
+            ("electronic", "electronic"),
+            ("ewEnergyNeut", "ewEnergyNeut"),
+            ("ewEnergyVampire", "ewEnergyVampire"),
+            ("custom_unknown_ewar", "electronic"),
+        ] {
+            let mutated_json = base_json.replace("\"warpScramblerMWD\"", &format!("\"{input_kind}\""));
+            db.with_mut_snapshot(|s| {
+                s.cluster_and_runtime.server_runtime_json = Some(mutated_json);
+            });
+            ctx.active_ewar_starts.write().unwrap().clear();
+            ctx.hydrate_server_runtime_from_db();
+            let got = ctx.active_ewar_starts.read().unwrap()[&(101, 202)][0].1;
+            assert_eq!(got, expected_static, "ewar kind {input_kind}");
+        }
+    }
+
+    // 2. Every field of `PersistedTacticalModulesPayload` (all 12 fields + foreign tag ignore + roundtrip)
+    {
+        let (db, ctx) = fresh_ctx("tactical_fields.sqlite");
+        let dk = crate::services::tactical_modules::db_ptr_key(&ctx.db);
+        let inst = ctx.instance_id as usize;
+        // Foreign tag must be ignored
+        ctx.tactical_state
+            .write()
+            .unwrap()
+            .lance_caster_lock_until
+            .insert((999_888_777, 1), 100);
+        ctx.persist_server_runtime_to_db();
+        assert!(
+            db.with_snapshot(|s| s.cluster_and_runtime.server_runtime_json.is_none()),
+            "foreign tag must not persist"
+        );
+        ctx.tactical_state.write().unwrap().lance_caster_lock_until.clear();
+
+        let assert_tac_persists = |label: &str, set: &dyn Fn(&mut crate::services::tactical_modules::TacticalModulesState, usize)| {
+            {
+                let mut ts = ctx.tactical_state.write().unwrap();
+                set(&mut ts, dk);
+            }
+            ctx.persist_server_runtime_to_db();
+            assert!(
+                db.with_snapshot(|s| s.cluster_and_runtime.server_runtime_json.is_some()),
+                "tactical field `{label}` must make payload non-empty"
+            );
+            // Verify hydration into fresh context tagged with db_ptr_key or inst
+            let ctx2 = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db));
+            ctx2.hydrate_server_runtime_from_db();
+            *ctx.tactical_state.write().unwrap() = Default::default();
+            ctx.persist_server_runtime_to_db();
+            assert!(
+                db.with_snapshot(|s| s.cluster_and_runtime.server_runtime_json.is_none()),
+                "clearing `{label}` must clear server_runtime_json"
+            );
+        };
+
+        assert_tac_persists("remote_assistance", &|ts, k| {
+            ts.remote_assistance.insert(
+                (k, 10),
+                vec![ProjectedRemoteAssistance {
+                    source_ship_id: 1,
+                    module_id: 2,
+                    module_type_id: 3,
+                    max_target_range_bonus_pct: 5.0,
+                    scan_resolution_bonus_pct: 5.0,
+                    sensor_strength_bonus_pct: 5.0,
+                    optimal_range_bonus_pct: 5.0,
+                    falloff_bonus_pct: 5.0,
+                    tracking_speed_bonus_pct: 5.0,
+                }],
+            );
+        });
+        assert_tac_persists("lance_caster_lock_until_inst", &|ts, _| {
+            ts.lance_caster_lock_until.insert((inst, 11), 500);
+        });
+        assert_tac_persists("lance_victim_debuff_until", &|ts, k| {
+            ts.lance_victim_debuff_until.insert((k, 12), 600);
+        });
+        assert_tac_persists("entosis_active_links", &|ts, k| {
+            ts.entosis_active_links.insert(
+                (k, 13),
+                ActiveEntosisLinkState {
+                    ship_id: 13,
+                    char_id: 1,
+                    side_id: 2,
+                    module_id: 3,
+                    target_id: 4,
+                    cycle_index: 1,
+                    cycle_duration_s: 300.0,
+                    started_unix: 100,
+                    expires_unix: 400,
+                    is_capital: false,
+                },
+            );
+        });
+        assert_tac_persists("entosis_target_cycles", &|ts, k| {
+            ts.entosis_target_cycles.insert((k, 14, 15), 2);
+        });
+        assert_tac_persists("pending_wubble_probes", &|ts, k| {
+            ts.pending_wubble_probes.push((
+                k,
+                PendingWubbleProbe {
+                    probe_id: 16,
+                    solar_system_id: 30_000_142,
+                    position: DVec3::ZERO,
+                    radius_m: 15_000.0,
+                    remaining_arming_s: 1.0,
+                    duration_s: 30.0,
+                    velocity_multiplier: 0.7,
+                    detonated: false,
+                },
+            ));
+        });
+        assert_tac_persists("active_wubble_debuffs", &|ts, k| {
+            ts.active_wubble_debuffs.insert(
+                (k, 17),
+                ActiveWubbleDebuff {
+                    remaining_s: 12.0,
+                    velocity_multiplier: 0.7,
+                },
+            );
+        });
+        assert_tac_persists("tsb_self_penalty_until", &|ts, k| {
+            ts.tsb_self_penalty_until.insert((k, 18), 700);
+        });
+        assert_tac_persists("clone_vat_bay_activated_ships", &|ts, k| {
+            ts.clone_vat_bay_activated_ships.insert((k, 19));
+        });
+        assert_tac_persists("active_interdiction_probes", &|ts, k| {
+            ts.active_interdiction_probes.insert(
+                (k, 20),
+                ActiveInterdictionProbe {
+                    probe_id: 20,
+                    probe_type_id: 22778,
+                    solar_system_id: 30_000_142,
+                    remaining_s: 60.0,
+                    is_wubble: false,
+                },
+            );
+        });
+        assert_tac_persists("launcher_last_fire", &|ts, k| {
+            ts.launcher_last_fire.insert(
+                (k, 21),
+                LauncherFireStamp {
+                    fired_unix: 100,
+                    fired_tick: 5,
+                    fired_sim_s: 5.0,
+                },
+            );
+        });
+        assert_tac_persists("system_sim_time_s", &|ts, k| {
+            ts.system_sim_time_s.insert((k, 30_000_142), 12.5);
+        });
+    }
+
+    // 3. Every clause in `PersistedServerRuntimeState::is_empty()` (`&& -> ||` killers)
+    {
+        let (db, ctx) = fresh_ctx("runtime_is_empty.sqlite");
+        let check_one = |label: &str, set: &dyn Fn(&ServerContext), clear: &dyn Fn(&ServerContext)| {
+            set(&ctx);
+            ctx.persist_server_runtime_to_db();
+            assert!(
+                db.with_snapshot(|s| s.cluster_and_runtime.server_runtime_json.is_some()),
+                "field `{label}` must persist server_runtime_json = Some"
+            );
+            clear(&ctx);
+            ctx.persist_server_runtime_to_db();
+            assert!(
+                db.with_snapshot(|s| s.cluster_and_runtime.server_runtime_json.is_none()),
+                "clearing `{label}` must clear server_runtime_json = None"
+            );
+        };
+
+        check_one(
+            "active_moon_probes",
+            &|c| {
+                c.active_moon_probes.write().unwrap().push(ActiveMoonSurveyProbe {
+                    probe_id: 1,
+                    probe_type_id: 22778,
+                    owner_char_id: 90_000_001,
+                    solar_system_id: 30_000_142,
+                    hit_moon_id: None,
+                    arrival_unix_secs: 1000,
+                });
+            },
+            &|c| c.active_moon_probes.write().unwrap().clear(),
+        );
+        check_one(
+            "scanned_signatures",
+            &|c| {
+                c.scanned_signatures.write().unwrap().insert((1, 30_000_142, 2));
+            },
+            &|c| c.scanned_signatures.write().unwrap().clear(),
+        );
+        check_one(
+            "character_scan_progress",
+            &|c| {
+                c.character_scan_progress
+                    .write()
+                    .unwrap()
+                    .insert((1, 30_000_142, "ABC-123".into()), 0.5);
+            },
+            &|c| c.character_scan_progress.write().unwrap().clear(),
+        );
+        check_one(
+            "active_fighters",
+            &|c| {
+                c.active_fighters.write().unwrap().insert(
+                    1,
+                    ActiveFighterSquadron {
+                        ball_id: 1,
+                        item_id: 1,
+                        type_id: 23_057,
+                        owner_char_id: 1,
+                        parent_ship_id: 2,
+                        tube_index: 0,
+                        squadron_size: 9,
+                        target_id: None,
+                        is_abandoned: false,
+                        mwd_active: false,
+                    },
+                );
+            },
+            &|c| c.active_fighters.write().unwrap().clear(),
+        );
+        check_one(
+            "fighter_cooldown_state",
+            &|c| {
+                c.fighter_cooldown_state.write().unwrap().insert((1, 0), 100);
+            },
+            &|c| c.fighter_cooldown_state.write().unwrap().clear(),
+        );
+        check_one(
+            "fighter_charge_state",
+            &|c| {
+                c.fighter_charge_state.write().unwrap().insert((1, 2), 6);
+            },
+            &|c| c.fighter_charge_state.write().unwrap().clear(),
+        );
+        check_one(
+            "fighter_tube_loads",
+            &|c| {
+                c.fighter_tube_loads.write().unwrap().insert((2, 0), 1);
+            },
+            &|c| c.fighter_tube_loads.write().unwrap().clear(),
+        );
+        check_one(
+            "module_reactivation_cooldowns",
+            &|c| {
+                c.module_reactivation_cooldowns.write().unwrap().insert(
+                    (1, 2, 0),
+                    ModuleCooldownEntry {
+                        recorded_unix_f64: 100.0,
+                        delay_s: 10.0,
+                        solar_system_id: Some(30_000_142),
+                        recorded_sys_sim_s: 5.0,
+                    },
+                );
+            },
+            &|c| c.module_reactivation_cooldowns.write().unwrap().clear(),
+        );
+        check_one(
+            "mining_cycles",
+            &|c| {
+                c.mining_cycles.write().unwrap().insert(
+                    1,
+                    ActiveMiningCycle {
+                        char_id: 1,
+                        ship_id: 2,
+                        module_id: 1,
+                        target_id: 3,
+                        solar_system_id: 30_000_142,
+                        kind: MiningKind::Asteroid,
+                        effect_name: "miningLaser".into(),
+                        cycle_start_ms: 100,
+                        duration_ms: 60_000,
+                    },
+                );
+            },
+            &|c| c.mining_cycles.write().unwrap().clear(),
+        );
+        check_one(
+            "phased_asteroid_fields",
+            &|c| {
+                c.phased_asteroid_fields.write().unwrap().insert(
+                    30_000_142,
+                    PhasedAsteroidFieldState::new("PH-1".into(), 30_000_142),
+                );
+            },
+            &|c| c.phased_asteroid_fields.write().unwrap().clear(),
+        );
+        check_one(
+            "session_change_timers",
+            &|c| {
+                c.session_change_timers.lock().unwrap().insert(
+                    1,
+                    SessionChangeTimerState {
+                        expires_unix: 1000,
+                        system_id: 30_000_142,
+                        started_tick: 1,
+                        reason: "dock".into(),
+                        location_change_invul_until: 0,
+                    },
+                );
+            },
+            &|c| c.session_change_timers.lock().unwrap().clear(),
+        );
+        check_one(
+            "active_warps",
+            &|c| {
+                c.active_warps.lock().unwrap().insert(1, 2);
+            },
+            &|c| c.active_warps.lock().unwrap().clear(),
+        );
+        check_one(
+            "location_change_invuln",
+            &|c| {
+                c.location_change_invuln.lock().unwrap().insert(1, 500);
+            },
+            &|c| c.location_change_invuln.lock().unwrap().clear(),
+        );
+        check_one(
+            "weapon_cycle_state",
+            &|c| {
+                c.weapon_cycle_state
+                    .write()
+                    .unwrap()
+                    .insert(1, (Some(2), 1, None));
+            },
+            &|c| c.weapon_cycle_state.write().unwrap().clear(),
+        );
+        check_one(
+            "projected_ewar",
+            &|c| {
+                c.projected_ewar.write().unwrap().insert(
+                    1,
+                    vec![ProjectedEwarEffect {
+                        source_module_id: 10,
+                        source_module_type_id: 527,
+                        charge_type_id: None,
+                        distance: 1000.0,
+                        overloaded: false,
+                        effective_module: DogmaItemState::from_sde(10, 587, &c.sde),
+                    }],
+                );
+            },
+            &|c| c.projected_ewar.write().unwrap().clear(),
+        );
+        check_one(
+            "projected_ewar_sources",
+            &|c| {
+                c.projected_ewar_sources.write().unwrap().insert(10, 20);
+            },
+            &|c| c.projected_ewar_sources.write().unwrap().clear(),
+        );
+        check_one(
+            "active_ewar_starts",
+            &|c| {
+                c.active_ewar_starts
+                    .write()
+                    .unwrap()
+                    .insert((1, 2), vec![(3, "ecm")]);
+            },
+            &|c| c.active_ewar_starts.write().unwrap().clear(),
+        );
+        check_one(
+            "map_landmarks",
+            &|c| {
+                c.map_landmarks
+                    .write()
+                    .unwrap()
+                    .push((30_000_142, "LM".into(), 1.0, 2.0, 3.0));
+            },
+            &|c| c.map_landmarks.write().unwrap().clear(),
+        );
+        // Fleet extras sub-fields
+        check_one(
+            "fleet_extras.fleet_names",
+            &|c| {
+                c.fleet_extras.lock().unwrap().fleet_names.insert(1, "F".into());
+            },
+            &|c| {
+                c.fleet_extras.lock().unwrap().fleet_names.clear();
+            },
+        );
+        check_one(
+            "fleet_extras.adverts",
+            &|c| {
+                c.fleet_extras.lock().unwrap().adverts.insert(
+                    1,
+                    FleetAdvertState {
+                        fleet_id: 1,
+                        leader_id: 2,
+                        fleet_name: "Ad".into(),
+                        description: "".into(),
+                        solar_system_id: 30_000_142,
+                        invite_scope: 1,
+                        auto_join: true,
+                        min_standing: 0.0,
+                        min_security: -10.0,
+                        allowed_entities: HashSet::new(),
+                        _created_unix: 100,
+                    },
+                );
+            },
+            &|c| {
+                c.fleet_extras.lock().unwrap().adverts.clear();
+            },
+        );
+        check_one(
+            "fleet_extras.saved_setups",
+            &|c| {
+                c.fleet_extras.lock().unwrap().saved_setups.insert(
+                    1,
+                    HashMap::from([(
+                        "Std".into(),
+                        FleetSetupRecord {
+                            setup_name: "Std".into(),
+                            motd: "".into(),
+                            is_free_move: false,
+                            max_size: 256,
+                            default_squad_id: None,
+                            wings: Vec::new(),
+                        },
+                    )]),
+                );
+            },
+            &|c| {
+                c.fleet_extras.lock().unwrap().saved_setups.clear();
+            },
+        );
+
+        // Social extras persisted sub-fields
+        check_one(
+            "social_extras.delayed_local_speakers",
+            &|c| {
+                c.social_extras
+                    .lock()
+                    .unwrap()
+                    .delayed_local_speakers
+                    .insert("31000001".into(), HashSet::from([1]));
+            },
+            &|c| {
+                c.social_extras.lock().unwrap().delayed_local_speakers.clear();
+            },
+        );
+
+        // 4. Alert telemetry, ephemeral runtime fields (`calls_received`, `bean_counts`, `fw_idle_last_step_unix`,
+        //    `combat_rng_seq`, `cluster_tick_last_unix`), and separately-persisted domains (`global_config_values`,
+        //    `cluster_misc_state`) remain excluded from `server_runtime_json`
+        ctx.cluster_state.write().unwrap().calls_received.insert("svc".into(), 3);
+        ctx.alert_telemetry.lock().unwrap().bean_counts.insert(1, 5);
+        ctx.global_config_values.write().unwrap().insert("k".into(), PyRep::Integer(1));
+        ctx.fw_idle_last_step_unix.write().unwrap().insert(1, 500);
+        ctx.combat_rng_seq.store(7, Ordering::Relaxed);
+        ctx.cluster_tick_last_unix.store(1_700_000_123, Ordering::Relaxed);
+        {
+            let mut cm = ctx.cluster_misc_state.lock().unwrap();
+            cm.char_settings
+                .insert(1, BTreeMap::from([("ui".into(), PyRep::Bool(true))]));
+            cm.landing_pads.push(LandingPadRecord {
+                item_id: 1,
+                type_id: 30_000,
+                built_type_id: 0,
+                solar_system_id: 30_000_142,
+                faction_id: 500_001,
+                is_built: true,
+                link_timestamp: 100,
+                is_disrupted: false,
+                position: DVec3::ZERO,
+                required_materials: BTreeMap::new(),
+                contributed_materials: BTreeMap::new(),
+            });
+            cm.launchers.push(LauncherRecord {
+                item_id: 2,
+                type_id: 30_001,
+                solar_system_id: 30_000_142,
+                faction_id: 500_001,
+                linked_pad_ids: Vec::new(),
+                position: DVec3::ZERO,
+            });
+            cm.starter_launchers.push(StarterLauncherRecord {
+                item_id: 3,
+                type_id: 30_002,
+                solar_system_id: 30_000_142,
+                faction_id: 500_001,
+                staging_system_id: 30_000_142,
+                staging_station_id: 60_003_760,
+                position: DVec3::ZERO,
+            });
+            cm.offered_load_slots.insert(
+                1,
+                OfferedLoadSlot {
+                    slot_key: "s1".into(),
+                    original_system_id: 30_000_142,
+                    offered_system_ids: vec![30_000_144],
+                    expires_unix: 1000,
+                },
+            );
+            cm.zarzakh_toll_quotes.insert(
+                1,
+                PendingZarzakhTollQuote {
+                    from_gate_id: 1,
+                    to_gate_id: 2,
+                    ship_id: 3,
+                    quoted_toll_cents: eve_db::IskCents(10_000),
+                    expires_unix: 9999,
+                },
+            );
+            cm.zarzakh_horizon_siege.phase = HorizonSiegePhase::Warning;
+        }
+        ctx.persist_server_runtime_to_db();
+        assert!(db.with_snapshot(|s| s.cluster_and_runtime.server_runtime_json.is_none()));
+        *ctx.cluster_state.write().unwrap() = Default::default();
+        *ctx.alert_telemetry.lock().unwrap() = Default::default();
+        ctx.global_config_values.write().unwrap().clear();
+        ctx.fw_idle_last_step_unix.write().unwrap().clear();
+        ctx.combat_rng_seq.store(0, Ordering::Relaxed);
+        ctx.cluster_tick_last_unix.store(0, Ordering::Relaxed);
+        *ctx.cluster_misc_state.lock().unwrap() = Default::default();
+        ctx.persist_server_runtime_to_db();
+    }
+
+    // 5. `hydrate_server_runtime_from_db`: scanner probes (`state < 0` dropped, `0` kept, `> 0` reset to `0`),
+    //    `owner_notes` (`character_id == -79`), legacy blob cleanup, and `probes_differ`!
+    {
+        let db = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open sqlite"));
+        let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db));
+        ctx.active_moon_probes.write().unwrap().clear();
+        ctx.active_scanner_probes.write().unwrap().clear();
+
+        let make_probe = |pid: i64, state: i32| ActiveScannerProbe {
+            probe_id: pid,
+            probe_type_id: 30_013,
+            owner_char_id: 90_000_001,
+            ship_id: 100_000_001,
+            launcher_module_id: 100_000_002,
+            solar_system_id: 30_000_142,
+            position: [0.0; 3],
+            destination: [0.0; 3],
+            range_step: 4,
+            scan_range_m: 1000.0,
+            base_sensor_strength: 40.0,
+            max_flight_time_s: 3600.0,
+            launched_at_unix: 100,
+            state,
+            warp_end_ft: None,
+        };
+        db.with_mut_snapshot(|snap| {
+            snap.sp6_lifecycle.active_scanner_probes.clear();
+            snap.sp6_lifecycle.active_scanner_probes.insert(800_001, make_probe(800_001, -1));
+            snap.sp6_lifecycle.active_scanner_probes.insert(800_002, make_probe(800_002, 0));
+            snap.sp6_lifecycle.active_scanner_probes.insert(800_003, make_probe(800_003, 2));
+            snap.service_state_blobs
+                .insert("server_runtime_state".into(), "{\"stale\":1}".into());
+            snap.owner_notes.insert(
+                1,
+                OwnerNoteRecord {
+                    note_id: 1,
+                    character_id: -79,
+                    item_id: 5001,
+                    label: "Landmark-Sys".into(),
+                    note: "1.0,2.0,3.0".into(),
+                    timestamp_unix: 100,
+                },
+            );
+            snap.owner_notes.insert(
+                2,
+                OwnerNoteRecord {
+                    note_id: 2,
+                    character_id: 90_000_001,
+                    item_id: 5002,
+                    label: "PersonalNote".into(),
+                    note: "hello".into(),
+                    timestamp_unix: 100,
+                },
+            );
+        });
+
+        ctx.hydrate_server_runtime_from_db();
+        {
+            let probes = ctx.active_scanner_probes.read().unwrap();
+            assert!(!probes.contains_key(&800_001), "state < 0 probe must be dropped");
+            assert_eq!(probes.get(&800_002).map(|p| p.state), Some(0));
+            assert_eq!(probes.get(&800_003).map(|p| p.state), Some(0), "active probe must recover to state=0");
+        }
+
+        // Persist clears legacy `server_runtime_state` blob and detects probe content diff (`probes_differ`)
+        ctx.persist_server_runtime_to_db();
+        assert!(db.with_snapshot(|s| !s.service_state_blobs.contains_key("server_runtime_state")));
+        ctx.active_scanner_probes
+            .write()
+            .unwrap()
+            .get_mut(&800_002)
+            .unwrap()
+            .scan_range_m = 2000.0;
+        ctx.sync_runtime_to_db();
+        let saved_range = db.with_snapshot(|s| {
+            s.sp6_lifecycle
+                .active_scanner_probes
+                .get(&800_002)
+                .map(|p| p.scan_range_m)
+        });
+        assert_eq!(saved_range, Some(2000.0));
+
+        // Second persist without change hits `already_matches` and still clears any re-injected legacy blob
+        db.with_mut_snapshot(|snap| {
+            snap.service_state_blobs
+                .insert("server_runtime_state".into(), "{}".into());
+        });
+        ctx.persist_server_runtime_to_db();
+        assert!(db.with_snapshot(|s| !s.service_state_blobs.contains_key("server_runtime_state")));
+        assert!(db.with_snapshot(|s| s.owner_notes.contains_key(&2)));
+    }
+}
+

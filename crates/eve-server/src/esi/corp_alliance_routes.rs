@@ -912,3 +912,7 @@ pub fn dispatch_corp_alliance_route(
 #[path = "corp_alliance_routes_unit_tests.rs"]
 mod corp_alliance_routes_unit_tests;
 
+#[cfg(test)]
+#[path = "corp_alliance_routes_edges_tests.rs"]
+mod corp_alliance_routes_edges_tests;
+

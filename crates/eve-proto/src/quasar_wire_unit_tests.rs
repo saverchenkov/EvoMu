@@ -225,3 +225,57 @@ fn pyrep_accessors_node_count_bridge_envelope_and_gateway_frame_roundtrip() {
     assert_eq!(GatewayFrame::from_pyrep(&gf_rep).unwrap(), gf);
 }
 
+#[test]
+fn quasar_wire_boundary_error_and_overflow_regions() {
+    // 1. read_varint shift >= 64 (10 bytes with continuation bit 0x80 set -> UnexpectedEof)
+    let over_shift = [0x80u8; 11];
+    assert_eq!(decode_fields(&over_shift), Err(ProtoError::UnexpectedEof));
+
+    // 2. Tag >> 3 exceeding u32::MAX -> field_num try_from failure -> UnexpectedEof
+    let huge_tag = (u64::from(u32::MAX) + 1) << 3;
+    let mut huge_tag_buf = Vec::new();
+    write_varint(huge_tag, &mut huge_tag_buf);
+    huge_tag_buf.push(0x01);
+    assert_eq!(decode_fields(&huge_tag_buf), Err(ProtoError::UnexpectedEof));
+
+    // 3. field_num == 0 -> UnsupportedOpcode(wire_type)
+    assert_eq!(decode_fields(&[0x00, 0x01]), Err(ProtoError::UnsupportedOpcode(0)));
+
+    // 4. Unsupported wire types (3, 4, 6, 7) and truncated Fixed64 / Fixed32 / Bytes
+    for wt in [3u8, 4, 6, 7] {
+        let tag = (1u8 << 3) | wt;
+        assert_eq!(decode_fields(&[tag]), Err(ProtoError::UnsupportedOpcode(wt)));
+    }
+    assert_eq!(
+        decode_fields(&[(1 << 3) | 1, 1, 2, 3, 4, 5, 6, 7]),
+        Err(ProtoError::UnexpectedEof)
+    );
+    assert_eq!(
+        decode_fields(&[(1 << 3) | 5, 1, 2, 3]),
+        Err(ProtoError::UnexpectedEof)
+    );
+
+    // 5. Length-delimited field declaring len > MAX_FRAME_SIZE -> UnexpectedEof
+    let mut over_len_bytes = vec![(1u8 << 3) | 2];
+    write_varint((MAX_FRAME_SIZE + 1) as u64, &mut over_len_bytes);
+    assert_eq!(decode_fields(&over_len_bytes), Err(ProtoError::UnexpectedEof));
+
+    // 6. decode_fields frame larger than MAX_FRAME_SIZE -> FrameTooLarge
+    let huge_frame = vec![0u8; MAX_FRAME_SIZE + 1];
+    assert_eq!(
+        decode_fields(&huge_frame),
+        Err(ProtoError::FrameTooLarge(MAX_FRAME_SIZE + 1))
+    );
+
+    // 7. decode_envelope ignores unknown fields & rejects invalid UTF-8 type_url
+    let with_unknown = encode_fields(&[
+        (99, ProtoWireValue::Varint(123)),
+        (1, ProtoWireValue::Bytes(b"type.googleapis.com/x".to_vec())),
+    ]);
+    let env = decode_envelope(&with_unknown).unwrap();
+    assert_eq!(env.type_url, "type.googleapis.com/x");
+
+    let bad_utf8_env = encode_fields(&[(1, ProtoWireValue::Bytes(vec![0xFF, 0xFE]))]);
+    assert!(matches!(decode_envelope(&bad_utf8_env), Err(ProtoError::Utf8(_))));
+}
+

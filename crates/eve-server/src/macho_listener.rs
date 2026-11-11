@@ -17,7 +17,7 @@ use eve_machonet::{
     MachoHandshakeStateMachine, MachoPacket, MachoPacketType, SessionState, VersionExchange,
     MACHO_PROXY_NODE_ID,
 };
-use eve_proto::{marshal, PyRep};
+use eve_proto::{marshal, BridgeRpcError, PyRep};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -37,6 +37,116 @@ pub const IDLE_READ_TIMEOUT_SECS: u64 = 300;
 pub const FRAME_BODY_TIMEOUT_SECS: u64 = 30;
 
 static NEXT_MACHO_SESSION_ID: AtomicU64 = AtomicU64::new(10_000);
+
+/// Maps a `CallReq` dispatch failure into a V24 `machoNet` `ErrorResponse` body, preserving
+/// client-handled `UserError` keys (including `InsureShip*` and `DockingApproach` prompts)
+/// instead of collapsing them into `"CustomInfo"`.
+pub(crate) fn map_call_req_error_body(
+    service: &str,
+    method: &str,
+    err: &BridgeRpcError,
+) -> PyRep {
+    let err_msg = format!("{}: {}", err.code, err.message);
+    if matches!(
+        err.code.as_str(),
+        "UnimplementedRPC" | "InternalError" | "DatabasePersistenceError"
+    ) {
+        eve_machonet::wrapped_runtime_error_body(MachoPacketType::CallReq as i64, &err_msg)
+    } else if matches!(
+        err.code.as_str(),
+        "FakeItemNotFound" | "CharacterNotAtStation"
+    ) {
+        eve_machonet::wrapped_runtime_error_body(MachoPacketType::CallReq as i64, &err.code)
+    } else if matches!(
+        err.code.as_str(),
+        "InvalidBoundObject" | "BoundObjectNotOwned" | "UnMachoDestination"
+    ) {
+        eve_machonet::wrapped_named_user_error_body(
+            MachoPacketType::CallReq as i64,
+            "UnMachoDestination",
+            &err_msg,
+        )
+    } else if err.code == "SlashError" {
+        eve_machonet::wrapped_slash_error_body(MachoPacketType::CallReq as i64, &err.message)
+    } else if matches!(
+        err.code.as_str(),
+        "UnknownSlashCommand" | "InvalidSlashArgument" | "InvalidSlashArguments"
+    ) || (matches!(service.trim(), "slash" | "publicQaToolsServer") && method == "SlashCmd")
+    {
+        eve_machonet::wrapped_slash_error_body(MachoPacketType::CallReq as i64, &err_msg)
+    } else if matches!(
+        err.code.as_str(),
+        "NotEnoughCargoSpace"
+            | "NotEnoughCargoSpaceOverload"
+            | "NotEnoughDroneBaySpace"
+            | "NotEnoughDroneBaySpaceOverload"
+            | "NotEnoughFighterBaySpace"
+            | "NotEnoughSpecialBaySpace"
+            | "NotEnoughSpecialBaySpaceOverload"
+            | "NotEnoughSpace"
+            | "NotEnoughChargeSpace"
+            | "NoSpaceForThat"
+            | "NoSpaceForThatOverload"
+    ) {
+        let parse_val = |prefix: &str| -> Option<f64> {
+            let start = err.message.find(prefix)? + prefix.len();
+            let rest = &err.message[start..];
+            let end = rest.find(',').unwrap_or(rest.len());
+            rest[..end].trim().parse::<f64>().ok()
+        };
+        let free = parse_val("free=").unwrap_or(0.0);
+        let required = parse_val("required=").unwrap_or(0.0);
+        eve_machonet::wrapped_user_error_with_dict_body(
+            MachoPacketType::CallReq as i64,
+            err.code.trim(),
+            vec![
+                (PyRep::ascii_bytes("free"), PyRep::Real(free)),
+                (PyRep::ascii_bytes("required"), PyRep::Real(required)),
+            ],
+        )
+    } else if err.code == "MaxOpenOrdersReached" {
+        let (cur_cnt, max_cnt) = err
+            .message
+            .rsplit_once('(')
+            .and_then(|(_, rest)| rest.strip_suffix(')'))
+            .and_then(|pair| pair.split_once('/'))
+            .and_then(|(c, m)| {
+                Some((
+                    c.trim().parse::<i64>().ok()?,
+                    m.trim().parse::<i64>().ok()?,
+                ))
+            })
+            .unwrap_or((0, 0));
+        eve_machonet::wrapped_user_error_with_dict_body(
+            MachoPacketType::CallReq as i64,
+            "MarketExceededOrderCount",
+            vec![
+                (PyRep::ascii_bytes("curCnt"), PyRep::Integer(cur_cnt)),
+                (PyRep::ascii_bytes("maxCnt"), PyRep::Integer(max_cnt)),
+            ],
+        )
+    } else if matches!(
+        err.code.as_str(),
+        "InsureShipFailedSingleContract" | "InsureShipInvalidCost" | "InsureShipFailed"
+    ) {
+        eve_machonet::wrapped_user_error_with_dict_body(
+            MachoPacketType::CallReq as i64,
+            err.code.trim(),
+            vec![],
+        )
+    } else if matches!(
+        err.code.as_str(),
+        "OutsideDockingPerimeter" | "DockingApproach"
+    ) {
+        eve_machonet::wrapped_user_error_with_dict_body(
+            MachoPacketType::CallReq as i64,
+            "DockingApproach",
+            vec![],
+        )
+    } else {
+        eve_machonet::wrapped_user_error_body(MachoPacketType::CallReq as i64, &err_msg)
+    }
+}
 
 fn reply_source_address(dest: &MachoAddress) -> MachoAddress {
     match dest {
@@ -76,7 +186,7 @@ pub async fn write_framed_pyrep<W: AsyncWriteExt + Unpin>(
 /// Reads and decodes a single length-prefixed (`u32` little-endian) marshaled `PyRep` frame from an async reader.
 pub async fn read_framed_pyrep<R: AsyncReadExt + Unpin>(stream: &mut R) -> Result<Option<PyRep>> {
     let frame_len = match tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(60),
         stream.read_u32_le(),
     )
     .await
@@ -84,18 +194,18 @@ pub async fn read_framed_pyrep<R: AsyncReadExt + Unpin>(stream: &mut R) -> Resul
         Ok(Ok(len)) => len as usize,
         Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
         Ok(Err(e)) => return Err(e.into()),
-        Err(_) => anyhow::bail!("Timed out waiting for machoNet frame header after 5s"),
+        Err(_) => anyhow::bail!("Timed out waiting for machoNet frame header after 60s"),
     };
     if frame_len == 0 || frame_len > MAX_MACHO_FRAME_LEN {
         anyhow::bail!("Invalid machoNet frame length: {frame_len} bytes");
     }
     let mut payload = vec![0u8; frame_len];
     tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(60),
         stream.read_exact(&mut payload),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("Timed out waiting for machoNet frame body after 5s"))??;
+    .map_err(|_| anyhow::anyhow!("Timed out waiting for machoNet frame body after 60s"))??;
     let rep = marshal::decode(&payload)?;
     Ok(Some(rep))
 }
@@ -368,6 +478,65 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             };
                             if write_framed_pyrep(&mut writer, &sess_pkt.to_pyrep()).await.is_err() {
                                 break;
+                            }
+                            if session.station_id.is_none()
+                                && session.structure_id.is_none()
+                                && session.ship_id != prev_session.ship_id
+                            {
+                                if let (Some(new_ship_id), Some(sys_id)) =
+                                    (session.ship_id, session.solar_system_id)
+                                {
+                                    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+                                    if let Ok((mut tick, mut events, mut updates_pyrep)) =
+                                        sys_handle.drain_observer_updates(new_ship_id).await
+                                    {
+                                        let has_set_state = events.iter().any(|e| {
+                                            matches!(e, eve_destiny::DestinyEvent::SetState { .. })
+                                        });
+                                        if ballpark_ready && !has_set_state {
+                                            if sys_handle.push_set_state(new_ship_id).await.is_ok() {
+                                                if let Ok((t2, ev2, up2)) =
+                                                    sys_handle.drain_observer_updates(new_ship_id).await
+                                                {
+                                                    tick = t2;
+                                                    events = ev2;
+                                                    updates_pyrep = up2;
+                                                }
+                                            }
+                                        }
+                                        if !events.is_empty() {
+                                            if events.iter().any(|e| {
+                                                matches!(
+                                                    e,
+                                                    eve_destiny::DestinyEvent::SetState { .. }
+                                                )
+                                            }) {
+                                                ballpark_ready = true;
+                                            }
+                                            last_destiny_tick = last_destiny_tick.max(tick);
+                                            let norm_args = crate::router::client_compat::normalize_macho_notification(
+                                                "DoDestinyUpdate",
+                                                vec![updates_pyrep, PyRep::Bool(false)],
+                                            );
+                                            let destiny_pkt = MachoPacket::new_broadcast_notification(
+                                                MACHO_PROXY_NODE_ID,
+                                                client_id,
+                                                session.user_id,
+                                                "DoDestinyUpdate",
+                                                norm_args,
+                                            );
+                                            if write_framed_pyrep(
+                                                &mut writer,
+                                                &destiny_pkt.to_pyrep(),
+                                            )
+                                            .await
+                                            .is_err()
+                                            {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -744,11 +913,11 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             subscribed_sys_id = session.solar_system_id;
                         }
                         let was_ballpark_ready = ballpark_ready;
-                        if (method == "UpdateStateRequest"
+                        let is_ballpark_init_rpc = (method == "UpdateStateRequest"
                             || (service == "beyonce" && method == "MachoBindObject"))
                             && session.station_id.is_none()
-                            && session.structure_id.is_none()
-                        {
+                            && session.structure_id.is_none();
+                        if is_ballpark_init_rpc {
                             if !ballpark_ready {
                                 // Drain any pre-bind 1Hz ticks buffered in `sys_rx` between `SelectCharacterID`
                                 // and `beyonce.MachoBindObject` / `UpdateStateRequest` so stale ticks (e.g. tick N-1)
@@ -794,112 +963,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 }
                             }
                             Err(err) => {
-                                let err_msg = format!("{}: {}", err.code, err.message);
-                                let payload = if matches!(
-                                    err.code.as_str(),
-                                    "UnimplementedRPC"
-                                        | "InternalError"
-                                        | "DatabasePersistenceError"
-                                ) {
-                                    eve_machonet::wrapped_runtime_error_body(
-                                        MachoPacketType::CallReq as i64,
-                                        &err_msg,
-                                    )
-                                } else if matches!(
-                                    err.code.as_str(),
-                                    "FakeItemNotFound" | "CharacterNotAtStation"
-                                ) {
-                                    eve_machonet::wrapped_runtime_error_body(
-                                        MachoPacketType::CallReq as i64,
-                                        &err.code,
-                                    )
-                                } else if matches!(
-                                    err.code.as_str(),
-                                    "InvalidBoundObject"
-                                        | "BoundObjectNotOwned"
-                                        | "UnMachoDestination"
-                                ) {
-                                    eve_machonet::wrapped_named_user_error_body(
-                                        MachoPacketType::CallReq as i64,
-                                        "UnMachoDestination",
-                                        &err_msg,
-                                    )
-                                } else if err.code == "SlashError" {
-                                    eve_machonet::wrapped_slash_error_body(
-                                        MachoPacketType::CallReq as i64,
-                                        &err.message,
-                                    )
-                                } else if matches!(
-                                    err.code.as_str(),
-                                    "UnknownSlashCommand"
-                                        | "InvalidSlashArgument"
-                                        | "InvalidSlashArguments"
-                                ) || (matches!(
-                                    service.trim(),
-                                    "slash" | "publicQaToolsServer"
-                                ) && method == "SlashCmd")
-                                {
-                                    eve_machonet::wrapped_slash_error_body(
-                                        MachoPacketType::CallReq as i64,
-                                        &err_msg,
-                                    )
-                                } else if matches!(
-                                    err.code.as_str(),
-                                    "NotEnoughCargoSpace"
-                                        | "NotEnoughCargoSpaceOverload"
-                                        | "NotEnoughDroneBaySpace"
-                                        | "NotEnoughDroneBaySpaceOverload"
-                                        | "NotEnoughFighterBaySpace"
-                                        | "NotEnoughSpecialBaySpace"
-                                        | "NotEnoughSpecialBaySpaceOverload"
-                                        | "NotEnoughSpace"
-                                        | "NotEnoughChargeSpace"
-                                        | "NoSpaceForThat"
-                                        | "NoSpaceForThatOverload"
-                                ) {
-                                    let parse_val = |prefix: &str| -> Option<f64> {
-                                        let start = err.message.find(prefix)? + prefix.len();
-                                        let rest = &err.message[start..];
-                                        let end = rest.find(',').unwrap_or(rest.len());
-                                        rest[..end].trim().parse::<f64>().ok()
-                                    };
-                                    let free = parse_val("free=").unwrap_or(0.0);
-                                    let required = parse_val("required=").unwrap_or(0.0);
-                                    eve_machonet::wrapped_user_error_with_dict_body(
-                                        MachoPacketType::CallReq as i64,
-                                        err.code.trim(),
-                                        vec![
-                                            (PyRep::ascii_bytes("free"), PyRep::Real(free)),
-                                            (PyRep::ascii_bytes("required"), PyRep::Real(required)),
-                                        ],
-                                    )
-                                } else if err.code == "MaxOpenOrdersReached" {
-                                    let (cur_cnt, max_cnt) = err
-                                        .message
-                                        .rsplit_once('(')
-                                        .and_then(|(_, rest)| rest.strip_suffix(')'))
-                                        .and_then(|pair| pair.split_once('/'))
-                                        .and_then(|(c, m)| {
-                                            Some((
-                                                c.trim().parse::<i64>().ok()?,
-                                                m.trim().parse::<i64>().ok()?,
-                                            ))
-                                        })
-                                        .unwrap_or((0, 0));
-                                    eve_machonet::wrapped_user_error_with_dict_body(
-                                        MachoPacketType::CallReq as i64,
-                                        "MarketExceededOrderCount",
-                                        vec![
-                                            (PyRep::ascii_bytes("curCnt"), PyRep::Integer(cur_cnt)),
-                                            (PyRep::ascii_bytes("maxCnt"), PyRep::Integer(max_cnt)),
-                                        ],
-                                    )
-                                } else {
-                                    eve_machonet::wrapped_user_error_body(
-                                        MachoPacketType::CallReq as i64,
-                                        &err_msg,
-                                    )
-                                };
+                                let payload = map_call_req_error_body(&service, &method, &err);
                                 MachoPacket {
                                     packet_type: MachoPacketType::ErrorResponse,
                                     source: reply_source_address(&pkt.destination),
@@ -1022,15 +1086,32 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 session.ship_id.or(prev_session.ship_id),
                             ) {
                                 let sys_handle = ctx.systems.get_or_spawn(sys_id);
-                                if let Ok((tick, obs_evs, updates_pyrep)) =
+                                if let Ok((mut tick, mut obs_evs, mut updates_pyrep)) =
                                     sys_handle.drain_observer_updates(ship_id).await
                                 {
-                                    let has_set_state = obs_evs
+                                    let mut has_set_state = obs_evs
                                         .iter()
                                         .any(|ev| matches!(ev, eve_destiny::DestinyEvent::SetState { .. }));
+                                    if is_ballpark_init_rpc && !has_set_state {
+                                        let _ = sys_handle.push_set_state(ship_id).await;
+                                        if let Ok((retry_tick, retry_evs, retry_pyrep)) =
+                                            sys_handle.drain_observer_updates(ship_id).await
+                                        {
+                                            tick = retry_tick;
+                                            obs_evs = retry_evs;
+                                            updates_pyrep = retry_pyrep;
+                                            has_set_state = obs_evs
+                                                .iter()
+                                                .any(|ev| matches!(ev, eve_destiny::DestinyEvent::SetState { .. }));
+                                        }
+                                        while sys_rx.try_recv().is_ok() {}
+                                    }
                                     if !was_ballpark_ready && !has_set_state {
                                         ballpark_ready = false;
                                     } else if !obs_evs.is_empty() {
+                                        if !was_ballpark_ready && has_set_state {
+                                            while sys_rx.try_recv().is_ok() {}
+                                        }
                                         last_destiny_tick = last_destiny_tick.max(tick);
                                         let norm_args = crate::router::client_compat::normalize_macho_notification(
                                             "DoDestinyUpdate",

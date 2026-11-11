@@ -572,3 +572,238 @@ async fn http2_grpc_requests_notices_stream_jwt_variants_and_wire_coercion_mutan
     normalize_quasar_any_payload(&synth_desc, &mut any_sint);
     assert!(!any_sint.value.is_empty());
 }
+
+#[test]
+fn test_quasar_gateway_unsubscribe_user_and_eviction_clean_both_maps() {
+    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let sde = Arc::new(SdeRegistry::with_canonical_seed());
+    let descriptors = Arc::new(QuasarDescriptorRegistry::empty_with_builtins());
+    let router = PublicGatewayRouter::new(descriptors, db, sde);
+    let empty_kw = HashMap::new();
+
+    // Populate both `subscribers` and `stream_receivers` via `Subscribe` RPC for user 10 (sids 100, 101)
+    // and user 20 (sid 200).
+    for (sid, uid, ts) in [(100_u64, 10_u64, 500_u64), (101, 10, 501), (200, 20, 10)] {
+        let mut s = SessionState::new(sid);
+        s.user_id = Some(uid);
+        router
+            .dispatch_public_gateway_rpc(&s, "Subscribe", &[], &empty_kw, ts)
+            .unwrap()
+            .unwrap();
+        assert!(router.has_subscriber(sid));
+        assert!(router.stream_receivers.read().unwrap().contains_key(&sid));
+    }
+
+    // Out-of-i32-range user_id is a safe no-op.
+    router.unsubscribe_user(u64::MAX);
+    assert_eq!(router.subscribers.read().unwrap().len(), 3);
+    assert_eq!(router.stream_receivers.read().unwrap().len(), 3);
+
+    // `unsubscribe_user(10)` removes sids 100 and 101 from BOTH `subscribers` and `stream_receivers`,
+    // while preserving user 20's sid 200 in both maps.
+    router.unsubscribe_user(10);
+    assert!(!router.has_subscriber(100));
+    assert!(!router.has_subscriber(101));
+    assert!(router.has_subscriber(200));
+    {
+        let rxs = router.stream_receivers.read().unwrap();
+        assert!(!rxs.contains_key(&100));
+        assert!(!rxs.contains_key(&101));
+        assert!(rxs.contains_key(&200));
+    }
+
+    // Fill to `MAX_GATEWAY_SUBSCRIBERS` with newer timestamps (`subscribed_at_unix >= 1_000`)
+    // so `sid = 200` (`subscribed_at_unix = 10`) is evicted on the next new session subscription,
+    // and verify `200` is removed from BOTH `subscribers` and `stream_receivers`.
+    for idx in 0..MAX_GATEWAY_SUBSCRIBERS as u64 {
+        let sid = 10_000 + idx;
+        let mut s = SessionState::new(sid);
+        s.user_id = Some(30);
+        let _rx = router.subscribe_session(&s, Vec::new(), 1_000 + idx);
+    }
+    assert!(!router.has_subscriber(200));
+    assert!(!router.stream_receivers.read().unwrap().contains_key(&200));
+}
+
+#[test]
+fn gateway_persistence_hooks_rollback_epoch_hijack_and_subscriber_boundaries() {
+    struct TempDirGuard(std::path::PathBuf);
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("evomu_qgw_rb_{}_{}", std::process::id(), nanos));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let _guard = TempDirGuard(dir.clone());
+
+    let db_path = dir.join("world.sqlite");
+    let db = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("open sqlite"));
+    let sde = Arc::new(SdeRegistry::with_canonical_seed());
+    let descriptors = Arc::new(QuasarDescriptorRegistry::empty_with_builtins());
+    let router = PublicGatewayRouter::new(descriptors, Arc::clone(&db), sde);
+    let now = 1_750_000_000_u64;
+
+    // 1. Persistence hooks + sync_all_to_db + rehydrate_all_from_db + sync_meta_into_snapshot
+    let rehydrate_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let sync_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let rh_clone = Arc::clone(&rehydrate_hits);
+    let sh_clone = Arc::clone(&sync_hits);
+    router.register_persistence_hooks(
+        Arc::new(move || {
+            rh_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }),
+        Arc::new(move || {
+            sh_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }),
+    );
+
+    router.set_server_hijack_mode(true, Some(503), Some(1.5));
+    assert!(router.is_server_hijack_mode_enabled());
+    router.sync_all_to_db();
+    assert_eq!(sync_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    let meta_json = db
+        .with_snapshot(|snap| snap.quasar_state_blobs.get("quasar_gateway_meta").cloned())
+        .expect("quasar_gateway_meta must be synced to DB");
+    assert!(meta_json.contains("503"));
+
+    // Mutate DB blob directly without `next_notice_seq` (`default_notice_seq` -> 1) and hydrate
+    db.with_mut_snapshot(|snap| {
+        snap.quasar_state_blobs.insert(
+            "quasar_gateway_meta".into(),
+            r#"{"server_hijack_state":{"enabled":true,"error_code":418,"latency_sec":null}}"#.into(),
+        );
+    });
+    router.rehydrate_all_from_db();
+    assert_eq!(rehydrate_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(router.is_server_hijack_mode_enabled());
+
+    let mut sess = SessionState::new(71_001);
+    sess.user_id = Some(1);
+    sess.character_id = Some(90_000_001);
+    let empty_req = EvePublicRequest {
+        correlation_uuid: vec![1, 2, 3, 4],
+        payload: Some(GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}google.protobuf.Empty"),
+            value: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    let rsp_418 = router.handle_public_request(&sess, &empty_req, None, false, now);
+    assert_eq!(rsp_418.status_code, 418);
+    assert_eq!(rsp_418.correlation_uuid, vec![1, 2, 3, 4]);
+
+    // Direct sync_meta_into_snapshot + absent meta resets hijack state on hydrate
+    router.set_server_hijack_mode(false, None, None);
+    assert!(!router.is_server_hijack_mode_enabled());
+    db.with_mut_snapshot(|snap| {
+        snap.quasar_state_blobs.remove("quasar_gateway_meta");
+        router.sync_meta_into_snapshot(snap);
+        assert!(snap.quasar_state_blobs.contains_key("quasar_gateway_meta"));
+        snap.quasar_state_blobs.remove("quasar_gateway_meta");
+    });
+    router.set_server_hijack_mode(true, Some(500), None);
+    db.with_mut_snapshot(|snap| {
+        snap.quasar_state_blobs.remove("quasar_gateway_meta");
+    });
+    router.hydrate_meta_from_db();
+    assert!(!router.is_server_hijack_mode_enabled());
+
+    // 2. ensure_rollback_synced: no-op when synced epoch == db epoch; rehydrates when db rollback_epoch bumps
+    router.set_server_hijack_mode(false, None, None);
+    *router.server_hijack_state.write().unwrap() = crate::quasar_gateway::QuasarHijackState {
+        enabled: true,
+        error_code: Some(502),
+        latency_sec: None,
+    };
+    // Epoch still matches -> must NOT wipe uncommitted in-memory state
+    router.ensure_rollback_synced();
+    assert!(
+        router.is_server_hijack_mode_enabled(),
+        "ensure_rollback_synced must only run when rollback_epoch differs"
+    );
+    // Abort a snapshot transaction to trigger rollback_dirty_from_sqlite & bump rollback_epoch
+    let rb0 = db.rollback_epoch();
+    let abort_res: Result<(), String> = db.try_with_mut_snapshot(|snap| {
+        snap.service_state_blobs.insert("rb_probe".into(), "{}".into());
+        Err("simulated rollback".into())
+    });
+    assert!(abort_res.is_err());
+    assert!(db.rollback_epoch() > rb0);
+    router.ensure_rollback_synced();
+    assert!(
+        !router.is_server_hijack_mode_enabled(),
+        "ensure_rollback_synced must rehydrate when db.rollback_epoch advanced"
+    );
+
+    // 3. handle_public_request OK path & publish_notice delivered counts (0 vs 2) & live Receiver channel
+    let ok_rsp = router.handle_public_request(&sess, &empty_req, None, false, now);
+    assert_eq!(ok_rsp.status_code, STATUS_OK);
+    assert!(ok_rsp.payload.is_some());
+
+    let notice_payload = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.test.CustomNotice"),
+        value: vec![1, 2, 3],
+    };
+    let (unmatched_notice, unmatched_count) = router
+        .publish_notice(NoticeScope::Character(90_000_001), notice_payload.clone(), now)
+        .unwrap();
+    assert_eq!(unmatched_count, 0);
+    assert_eq!(unmatched_notice.internal_origin, "evomu.quasar.notice_publisher");
+    assert_eq!(unmatched_notice.uuid.len(), 16);
+    assert!(unmatched_notice.dispatched.is_some());
+
+    // Re-subscribe two sessions for user/char, verify rx receives notice and delivered == 2
+    let mut s1 = SessionState::new(72_001);
+    s1.user_id = Some(101);
+    s1.character_id = Some(90_000_101);
+    let mut s2 = SessionState::new(72_002);
+    s2.user_id = Some(102);
+    s2.character_id = Some(90_000_101);
+    let mut rx1 = router.subscribe_session(&s1, Vec::new(), now + 1);
+    let mut rx2 = router.subscribe_session(&s2, Vec::new(), now + 2);
+    let (_, matched_count) = router
+        .publish_notice(NoticeScope::Character(90_000_101), notice_payload, now + 3)
+        .unwrap();
+    assert_eq!(matched_count, 2);
+    assert!(rx1.try_recv().is_ok(), "subscribe_session must return live receiver");
+    assert!(rx2.try_recv().is_ok(), "second subscriber must also receive via live channel");
+
+    // 4. `subs.len() >= MAX_GATEWAY_SUBSCRIBERS && !subs.contains_key(&sid)` exact eviction guards
+    assert!(router.has_subscriber(72_001));
+    assert!(router.has_subscriber(72_002));
+    // Re-subscribing existing sid=72_001 below cap must not evict sid=72_002
+    let _rx1b = router.subscribe_session(&s1, Vec::new(), now + 4);
+    assert!(router.has_subscriber(72_001));
+    assert!(router.has_subscriber(72_002));
+    assert_eq!(router.subscribers.read().unwrap().len(), 2);
+
+    // Fill to exact MAX_GATEWAY_SUBSCRIBERS (already have 2 subscribers: 72_001, 72_002)
+    for i in 0..(MAX_GATEWAY_SUBSCRIBERS as u64 - 2) {
+        let sid = 80_000 + i;
+        let mut sx = SessionState::new(sid);
+        sx.user_id = Some(200);
+        let _ = router.subscribe_session(&sx, Vec::new(), now + 100 + i);
+    }
+    assert_eq!(router.subscribers.read().unwrap().len(), MAX_GATEWAY_SUBSCRIBERS);
+    assert!(router.has_subscriber(72_002), "oldest subscriber 72_002 still present at exact cap");
+
+    // Re-subscribing an ALREADY present sid=72_001 at exact cap must NOT evict oldest sid=72_002!
+    let _rx1c = router.subscribe_session(&s1, Vec::new(), now + 10_000);
+    assert!(router.has_subscriber(72_002));
+    assert_eq!(router.subscribers.read().unwrap().len(), MAX_GATEWAY_SUBSCRIBERS);
+
+    // Subscribing one NEW sid at exact cap evicts oldest (72_002, subscribed_at = now+2)
+    let mut s_new = SessionState::new(99_999);
+    s_new.user_id = Some(300);
+    let _rx_new = router.subscribe_session(&s_new, Vec::new(), now + 10_001);
+    assert!(!router.has_subscriber(72_002));
+    assert!(router.has_subscriber(99_999));
+    assert_eq!(router.subscribers.read().unwrap().len(), MAX_GATEWAY_SUBSCRIBERS);
+}

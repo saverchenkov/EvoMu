@@ -812,13 +812,35 @@ impl ServerContext {
             .write()
             .unwrap_or_else(|e| e.into_inner());
         for (cid, uid) in recipients {
+            let mut recipient_args = args.clone();
+            if event == "OnModuleAttributeChanges" {
+                recipient_args = crate::router::client_compat::normalize_macho_notification_with_sde(
+                    event,
+                    recipient_args,
+                    Some(&self.sde),
+                );
+                if cid > 0 {
+                    if let Some(PyRep::List(items)) = recipient_args.first_mut() {
+                        for item in items.iter_mut() {
+                            if let PyRep::Tuple(t) = item {
+                                if matches!(t.get(1), Some(PyRep::None)) {
+                                    t[1] = PyRep::Integer(cid);
+                                }
+                                if matches!(t.get(4), Some(PyRep::Integer(0))) {
+                                    t[4] = PyRep::Integer(now_ft);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             let (packet, marshaled_packet) =
-                Self::build_macho_notification_packet(cid, uid, event, id_type, args.clone());
+                Self::build_macho_notification_packet(cid, uid, event, id_type, recipient_args.clone());
             let notif = PendingMachoNotification::new(
                 cid,
                 event,
                 id_type,
-                args.clone(),
+                recipient_args,
                 packet,
                 marshaled_packet,
                 now_ft,
@@ -1312,16 +1334,29 @@ impl ServerContext {
     ) -> Vec<PendingMachoNotification> {
         let effect_id = self.effect_id_for_module(module_type_id, effect_name).unwrap_or(0);
         let duration_ms = self
-            .sde
-            .types
-            .get(&module_type_id)
-            .and_then(|t| {
-                t.default_attributes
-                    .get(&73)
-                    .or_else(|| t.default_attributes.get(&51))
-                    .copied()
+            .ship_fittings
+            .read()
+            .ok()
+            .and_then(|map| map.get(&ship_id).cloned())
+            .filter(|fit| fit.modules.contains_key(&module_id))
+            .map(|fit| {
+                let d73 = fit.get_module_effective_attribute(module_id, 73, &self.sde);
+                if d73 > 0.0 {
+                    d73
+                } else {
+                    fit.get_module_effective_attribute(module_id, 51, &self.sde)
+                }
+            })
+            .or_else(|| {
+                self.sde.types.get(&module_type_id).and_then(|t| {
+                    t.default_attributes
+                        .get(&73)
+                        .or_else(|| t.default_attributes.get(&51))
+                        .copied()
+                })
             })
             .unwrap_or(0.0);
+        let repeat = if effect_id == 16 { 0 } else { 1000 };
         let now = self.now_blueos_filetime_ticks();
         let environment = PyRep::Tuple(vec![
             PyRep::Integer(module_id),
@@ -1332,7 +1367,7 @@ impl ServerContext {
             PyRep::List(vec![]),
             PyRep::Integer(effect_id),
         ]);
-        self.notify(
+        let notifs = self.notify(
             NotificationTarget::Character(char_id),
             "OnGodmaShipEffect",
             "charid",
@@ -1345,10 +1380,42 @@ impl ServerContext {
                 environment,
                 PyRep::Integer(now),
                 PyRep::Real(duration_ms),
-                PyRep::Integer(0),
+                PyRep::Integer(repeat),
                 PyRep::None,
             ],
-        )
+        );
+        if let Some((sfx_guid, is_offensive)) =
+            crate::router::binding::special_fx_guid_for_module_sde(
+                &self.sde,
+                module_type_id,
+                effect_id,
+                effect_name,
+            )
+            .filter(|(guid, _)| guid != "effects.Cloak")
+        {
+            self.notify(
+                NotificationTarget::Character(char_id),
+                "OnSpecialFX",
+                "charid",
+                vec![
+                    PyRep::Integer(ship_id),
+                    PyRep::Integer(module_id),
+                    PyRep::Integer(module_type_id as i64),
+                    target_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                    PyRep::None,
+                    PyRep::String(sfx_guid),
+                    PyRep::Bool(is_offensive),
+                    PyRep::Integer(1),
+                    PyRep::Integer(1),
+                    PyRep::Real(duration_ms),
+                    PyRep::Integer(0),
+                    PyRep::Integer(now),
+                    PyRep::Real(0.0),
+                    PyRep::None,
+                ],
+            );
+        }
+        notifs
     }
 
     pub fn notify_module_online_state(
@@ -1688,3 +1755,4 @@ impl ServerContext {
 }
 
 #[cfg(test)] #[path = "cache_notifications_unit_tests.rs"] mod cache_notifications_unit_tests;
+#[cfg(test)] #[path = "cache_notifications_edges_tests.rs"] mod cache_notifications_edges_tests;

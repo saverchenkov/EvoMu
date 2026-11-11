@@ -466,6 +466,120 @@ fn packed_row_unsigned_high_bit_zero_extension_and_signed_negative_roundtrip() {
 }
 
 #[test]
+fn dbrow_normalization_overflow_fallback_and_header_parsing_edge_cases() {
+    // Integer bit-width truncation & non-integer fallbacks
+    assert_eq!(
+        DbColumnType::I8.normalize_value(PyRep::String("bad".into())),
+        PyRep::Integer(0)
+    );
+    assert_eq!(
+        DbColumnType::I4.normalize_value(PyRep::Integer((i32::MAX as i64) + 1)),
+        PyRep::Integer(i32::MIN as i64)
+    );
+    assert_eq!(
+        DbColumnType::Ui4.normalize_value(PyRep::Integer((u32::MAX as i64) + 2)),
+        PyRep::Integer(1)
+    );
+    assert_eq!(
+        DbColumnType::I2.normalize_value(PyRep::Integer(32_768)),
+        PyRep::Integer(-32_768)
+    );
+    assert_eq!(
+        DbColumnType::Ui2.normalize_value(PyRep::Integer(65_537)),
+        PyRep::Integer(1)
+    );
+    assert_eq!(
+        DbColumnType::I1.normalize_value(PyRep::Integer(128)),
+        PyRep::Integer(-128)
+    );
+    assert_eq!(
+        DbColumnType::Ui1.normalize_value(PyRep::Integer(257)),
+        PyRep::Integer(1)
+    );
+    assert_eq!(
+        DbColumnType::R8.normalize_value(PyRep::String("bad".into())),
+        PyRep::Real(0.0)
+    );
+    assert_eq!(
+        DbColumnType::R4.normalize_value(PyRep::Real(1.123456789)),
+        PyRep::Real((1.123456789f64 as f32) as f64)
+    );
+    assert_eq!(
+        DbColumnType::Bool.normalize_value(PyRep::String("true".into())),
+        PyRep::Bool(false)
+    );
+    assert_eq!(
+        DbColumnType::Bytes.normalize_value(PyRep::String("abc".into())),
+        PyRep::Bytes(b"abc".to_vec())
+    );
+    assert_eq!(
+        DbColumnType::Str.normalize_value(PyRep::String("hello".into())),
+        PyRep::String("hello".into())
+    );
+    assert_eq!(
+        DbColumnType::WStr.normalize_value(PyRep::Bytes(vec![0xFF, 0xFE])),
+        PyRep::String("\u{FFFD}\u{FFFD}".into())
+    );
+
+    // Direct tuple of (name, dbtype) pairs without extra outer 1-tuple wrapper
+    let direct_cols = PyRep::Tuple(vec![
+        PyRep::Tuple(vec![PyRep::String("a".into()), PyRep::Integer(3)]),
+        PyRep::Tuple(vec![PyRep::String("b".into()), PyRep::Integer(11)]),
+    ]);
+    assert_eq!(
+        extract_dbrow_col_defs(&direct_cols),
+        Some(vec![("a".into(), 3), ("b".into(), 11)])
+    );
+    assert_eq!(extract_dbrow_col_defs(&PyRep::None), None);
+    assert_eq!(extract_dbrow_header_col_defs(&PyRep::None), None);
+    assert_eq!(
+        extract_dbrow_header_col_defs(&PyRep::ObjectEx {
+            is_type_2: false,
+            header: Box::new(PyRep::None),
+            list: Vec::new(),
+            dict: Vec::new(),
+        }),
+        None
+    );
+    assert_eq!(
+        extract_dbrow_col_defs(&PyRep::Tuple(vec![PyRep::Tuple(vec![
+            PyRep::Integer(1),
+            PyRep::Integer(3),
+        ])])),
+        None
+    );
+
+    // DBRowDescriptor::from_pyrep ignores malformed keyword entries & handles empty descriptor
+    let empty_desc = DBRowDescriptor::new(Vec::<(String, DbColumnType)>::new());
+    let empty_rep = empty_desc.to_pyrep();
+    assert_eq!(DBRowDescriptor::from_pyrep(&empty_rep), Some(empty_desc));
+
+    let objex_bad_kw = PyRep::ObjectEx {
+        is_type_2: false,
+        header: Box::new(PyRep::Tuple(vec![
+            PyRep::Token("blue.DBRowDescriptor".into()),
+            PyRep::Tuple(vec![PyRep::Tuple(vec![PyRep::Tuple(vec![
+                PyRep::String("x".into()),
+                PyRep::Integer(3),
+            ])])]),
+            PyRep::List(vec![
+                PyRep::Integer(1),
+                PyRep::Tuple(vec![PyRep::String("only_one".into())]),
+                PyRep::Tuple(vec![PyRep::Integer(2), PyRep::Token("tok".into())]),
+                PyRep::Tuple(vec![PyRep::String("ok".into()), PyRep::Token("fn".into())]),
+            ]),
+        ])),
+        list: Vec::new(),
+        dict: Vec::new(),
+    };
+    let parsed_kw = DBRowDescriptor::from_pyrep(&objex_bad_kw);
+    assert!(parsed_kw.is_some());
+    if let Some(d) = parsed_kw {
+        assert_eq!(d.keywords, vec![("ok".into(), "fn".into())]);
+    }
+}
+
+#[test]
 fn packed_row_currency_cy_ten_thousand_scale_symmetry_and_edge_cases() {
     assert_eq!(DBTYPE_CY_SCALE_F64, 10_000.0);
     assert_eq!(DBTYPE_CY_SCALE_I64, 10_000);
@@ -619,4 +733,227 @@ fn packed_row_currency_cy_ten_thousand_scale_symmetry_and_edge_cases() {
         try_unpack_packed_row_columns(&unknown_hdr, &unk_rle).unwrap(),
         vec![("mystery".into(), PyRep::None)]
     );
+}
+
+#[test]
+fn dbrow_cy_sub_unit_rounding_negative_symmetry_and_overflow_saturation() {
+    let desc = DBRowDescriptor::new([
+        ("min_pos", DbColumnType::Cy),
+        ("min_neg", DbColumnType::Cy),
+        ("round_down", DbColumnType::Cy),
+        ("round_up_pos", DbColumnType::Cy),
+        ("round_up_neg", DbColumnType::Cy),
+        ("sat_pos_f64", DbColumnType::Cy),
+        ("sat_neg_f64", DbColumnType::Cy),
+        ("sat_pos_i64", DbColumnType::Cy),
+        ("sat_neg_i64", DbColumnType::Cy),
+    ]);
+    let defs = desc.raw_defs();
+    let expected_len = packed_row_expected_bytes(&defs);
+    let row = desc.build_dbrow(vec![
+        PyRep::Real(0.0001),
+        PyRep::Real(-0.0001),
+        PyRep::Real(0.00004),
+        PyRep::Real(0.00005),
+        PyRep::Real(-0.00005),
+        PyRep::Real(1e30),
+        PyRep::Real(-1e30),
+        PyRep::Integer(i64::MAX / 10_000 + 1),
+        PyRep::Integer(i64::MIN / 10_000 - 1),
+    ]);
+
+    let PyRep::DBRow { ref raw_rle, .. } = row else {
+        panic!("expected PyRep::DBRow");
+    };
+    let raw = decode_rle(raw_rle, expected_len).unwrap();
+    let read_i64 = |idx: usize| -> i64 {
+        i64::from_le_bytes(raw[idx * 8..(idx + 1) * 8].try_into().unwrap())
+    };
+    assert_eq!(read_i64(0), 1);
+    assert_eq!(read_i64(1), -1);
+    assert_eq!(read_i64(2), 0);
+    assert_eq!(read_i64(3), 1);
+    assert_eq!(read_i64(4), -1);
+    assert_eq!(read_i64(5), i64::MAX);
+    assert_eq!(read_i64(6), i64::MIN);
+    assert_eq!(read_i64(7), i64::MAX);
+    assert_eq!(read_i64(8), i64::MIN);
+
+    let unpacked: std::collections::HashMap<String, PyRep> =
+        try_unpack_packed_row_columns(&desc.to_pyrep(), raw_rle)
+            .unwrap()
+            .into_iter()
+            .collect();
+    assert_eq!(unpacked.get("min_pos"), Some(&PyRep::Real(0.0001)));
+    assert_eq!(unpacked.get("min_neg"), Some(&PyRep::Real(-0.0001)));
+    if let Some(PyRep::Real(z)) = unpacked.get("round_down") {
+        assert_eq!(*z, 0.0);
+        assert!(z.is_sign_positive());
+    } else {
+        panic!("expected Real(0.0)");
+    }
+    assert_eq!(unpacked.get("round_up_pos"), Some(&PyRep::Real(0.0001)));
+    assert_eq!(unpacked.get("round_up_neg"), Some(&PyRep::Real(-0.0001)));
+    assert_eq!(
+        unpacked.get("sat_pos_f64"),
+        Some(&PyRep::Real((i64::MAX as f64) / 10_000.0))
+    );
+    assert_eq!(
+        unpacked.get("sat_neg_f64"),
+        Some(&PyRep::Real((i64::MIN as f64) / 10_000.0))
+    );
+}
+
+#[test]
+fn dbrow_zero_header_empty_column_and_variable_bytes_wstr_roundtrip() {
+    assert_eq!(packed_row_expected_bytes(&[]), 0);
+    let empty_desc = DBRowDescriptor::new(Vec::<(&str, DbColumnType)>::new());
+    let empty_hdr = empty_desc.to_pyrep();
+    assert_eq!(
+        try_unpack_packed_row_columns(&empty_hdr, &[]).unwrap(),
+        Vec::new()
+    );
+    assert_eq!(
+        try_unpack_packed_row_columns(&PyRep::None, &[1, 2, 3]).unwrap(),
+        Vec::new()
+    );
+
+    let var_desc = DBRowDescriptor::new([
+        ("empty_col", DbColumnType::Empty),
+        ("bytes_col", DbColumnType::Bytes),
+        ("str_col", DbColumnType::Str),
+        ("wstr_col", DbColumnType::WStr),
+        ("flag_col", DbColumnType::Bool),
+    ]);
+    let row = var_desc.build_dbrow(vec![
+        PyRep::Integer(999), // normalized to None for Empty
+        PyRep::Buffer(vec![0xDE, 0xAD]),
+        PyRep::Token("ascii.token".into()),
+        PyRep::Bytes(b"wide-utf8".to_vec()),
+        PyRep::Bool(true),
+    ]);
+    let wire = crate::marshal::encode(&row);
+    let decoded = crate::marshal::decode(&wire).unwrap();
+    assert_eq!(decoded.dbrow_get("empty_col"), Some(&PyRep::None));
+    assert_eq!(
+        decoded.dbrow_get("bytes_col"),
+        Some(&PyRep::Bytes(vec![0xDE, 0xAD]))
+    );
+    assert_eq!(
+        decoded.dbrow_get("str_col"),
+        Some(&PyRep::String("ascii.token".into()))
+    );
+    assert_eq!(
+        decoded.dbrow_get("wstr_col"),
+        Some(&PyRep::String("wide-utf8".into()))
+    );
+    assert_eq!(decoded.dbrow_get("flag_col"), Some(&PyRep::Bool(true)));
+}
+
+#[test]
+fn dbrow_short_rows_missing_key_column_null_offset_alignment_and_bounds() {
+    let desc = DBRowDescriptor::new([
+        ("id", DbColumnType::I4),
+        ("flag", DbColumnType::Bool),
+        ("score", DbColumnType::R8),
+        ("empty_col", DbColumnType::Empty),
+        ("tag", DbColumnType::WStr),
+    ]);
+
+    // build_dbrow with short values pads missing columns with None, extra values ignored
+    let short_row = desc.build_dbrow(vec![PyRep::Integer(42)]);
+    if let PyRep::DBRow { columns, raw_rle, .. } = &short_row {
+        assert_eq!(columns.len(), 5);
+        assert_eq!(columns[0], ("id".into(), PyRep::Integer(42)));
+        assert_eq!(columns[1], ("flag".into(), PyRep::None));
+        assert_eq!(columns[2], ("score".into(), PyRep::None));
+        assert_eq!(columns[3], ("empty_col".into(), PyRep::None));
+        assert_eq!(columns[4], ("tag".into(), PyRep::None));
+        let unpacked = try_unpack_packed_row_columns(&desc.to_pyrep(), raw_rle).unwrap();
+        assert_eq!(unpacked[0], ("id".into(), PyRep::Integer(42)));
+        assert_eq!(unpacked[2], ("score".into(), PyRep::None));
+    } else {
+        panic!("expected PyRep::DBRow");
+    }
+
+    // Interleaved null wide column + non-null narrower column verifies offset advances for null fixed-width cols
+    let align_desc = DBRowDescriptor::new([
+        ("wide_null", DbColumnType::I8),
+        ("wide_val", DbColumnType::Ui8),
+        ("mid_null", DbColumnType::I4),
+        ("mid_val", DbColumnType::R4),
+        ("short_null", DbColumnType::I2),
+        ("short_val", DbColumnType::Ui2),
+        ("byte_null", DbColumnType::I1),
+        ("byte_val", DbColumnType::Ui1),
+    ]);
+    let align_hdr = align_desc.to_pyrep();
+    let align_rle = pack_packed_row_columns(
+        &align_hdr,
+        &[
+            ("wide_val".into(), PyRep::Integer(1_234_567_890)),
+            ("mid_val".into(), PyRep::Real(3.5)),
+            ("short_val".into(), PyRep::Integer(40_000)),
+            ("byte_val".into(), PyRep::Integer(200)),
+        ],
+    );
+    let align_dec: std::collections::HashMap<_, _> =
+        try_unpack_packed_row_columns(&align_hdr, &align_rle)
+            .unwrap()
+            .into_iter()
+            .collect();
+    assert_eq!(align_dec["wide_null"], PyRep::None);
+    assert_eq!(align_dec["wide_val"], PyRep::Integer(1_234_567_890));
+    assert_eq!(align_dec["mid_null"], PyRep::None);
+    assert_eq!(align_dec["mid_val"], PyRep::Real(3.5));
+    assert_eq!(align_dec["short_null"], PyRep::None);
+    assert_eq!(align_dec["short_val"], PyRep::Integer(40_000));
+    assert_eq!(align_dec["byte_null"], PyRep::None);
+    assert_eq!(align_dec["byte_val"], PyRep::Integer(200));
+
+    // build_cindexed_rowset and build_index_rowset fallback to col 0 on unknown key_column, and empty row -> None
+    let cidx = desc.build_cindexed_rowset("nonexistent", vec![vec![], vec![PyRep::Integer(99)]]);
+    let entries = cidx.cindexed_rowset_entries().expect("cindexed entries");
+    assert_eq!(entries[0].0, PyRep::None);
+    assert_eq!(entries[1].0, PyRep::Integer(99));
+
+    let idx_rs = desc.build_index_rowset("nonexistent", vec![vec![]]);
+    if let PyRep::IndexRowset { items, .. } = idx_rs {
+        assert_eq!(items[0].0, PyRep::None);
+    } else {
+        panic!("expected IndexRowset");
+    }
+
+    // packed_row_expected_bytes boundaries
+    assert_eq!(packed_row_expected_bytes(&[]), 0);
+    assert_eq!(packed_row_expected_bytes(&[("a".into(), 20)]), 9); // 8 bytes + ((0+1)>>3)+1 = 9
+    let seven_bools: Vec<(String, i64)> = (0..7).map(|i| (format!("b{i}"), 11)).collect();
+    // 7 bools + 7 null bits = 14 bits -> (14 >> 3) + 1 = 2 bytes
+    assert_eq!(packed_row_expected_bytes(&seven_bools), 2);
+    let four_bools: Vec<(String, i64)> = (0..4).map(|i| (format!("b{i}"), 11)).collect();
+    // 4 bools + 4 null bits = 8 bits -> (8 >> 3) + 1 = 2 bytes
+    assert_eq!(packed_row_expected_bytes(&four_bools), 2);
+    let three_bools: Vec<(String, i64)> = (0..3).map(|i| (format!("b{i}"), 11)).collect();
+    // 3 bools + 3 null bits = 6 bits -> (6 >> 3) + 1 = 1 byte
+    assert_eq!(packed_row_expected_bytes(&three_bools), 1);
+
+    // try_unpack_packed_row_columns: invalid header -> Ok(empty), empty header -> Ok(empty), oversized -> CollectionTooLarge
+    assert_eq!(try_unpack_packed_row_columns(&PyRep::None, &[]), Ok(Vec::new()));
+    assert_eq!(
+        try_unpack_packed_row_columns(&DBRowDescriptor::new(Vec::<(String, DbColumnType)>::new()).to_pyrep(), &[]),
+        Ok(Vec::new())
+    );
+    let huge_cols: Vec<(String, DbColumnType)> =
+        (0..16_400).map(|i| (format!("c{i}"), DbColumnType::I8)).collect();
+    let huge_hdr = DBRowDescriptor::new(huge_cols).to_pyrep();
+    assert!(matches!(
+        try_unpack_packed_row_columns(&huge_hdr, &[]),
+        Err(ProtoError::CollectionTooLarge(_))
+    ));
+
+    // decode_rle second-nibble overflow / truncation
+    // Byte 0xF8 followed by 0x88: first nibble = 8 (1 zero), second nibble = 15 (8 zeros) -> 9 zeros > expected_len 4
+    assert_eq!(decode_rle(&[0xF8, 0x88], 4), None);
+    // Byte 0x18 followed by 0xAA: first nibble = 8 (1 zero), second nibble = 1 (7 literals) with only 1 trailing byte
+    assert_eq!(decode_rle(&[0x18, 0xAA], 10), None);
 }

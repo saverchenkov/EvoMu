@@ -607,4 +607,330 @@ fn compute_item_change_dict_and_mutation_router_v24_parity() {
             && n.id_type == "corpid"
             && n.args[0] == PyRep::String("cash3".into())
     }));
+
+    // Master corp wallet (`div_id == 0` or `1`) uses `"cash"`, while divisions `2..=7` use `"cash2".."cash7"`.
+    ctx.notify_wallet_balance(true, corp_id, 1, eve_db::IskCents(500_000));
+    ctx.notify_wallet_balance(true, corp_id, 0, eve_db::IskCents(600_000));
+    let wn_master = ctx.drain_notifications_for_char(other_char);
+    assert_eq!(wn_master.len(), 2);
+    assert!(wn_master.iter().all(|n| n.args[0] == PyRep::String("cash".into())));
+
+    // `resolve_item_notification_target` routes items owned by another character (`is_other_char`)
+    // to `NotificationTarget::Character(other_char)` when not in a corp hangar flag.
+    let other_personal_item = InventoryItemRecord {
+        item_id: 880_099,
+        type_id: 34,
+        owner_id: other_char,
+        location_id: 60_003_760,
+        flag: InventoryFlag::Hangar,
+        quantity: 10,
+        singleton: false,
+        ..Default::default()
+    };
+    assert_eq!(
+        ctx.resolve_item_notification_target(char_id, &other_personal_item),
+        (NotificationTarget::Character(other_char), "charid")
+    );
+
+    // `notify_item_mutation`: `(None, Some)` creation, `(Some, Some)` identical no-op, and `(None, None)` no-op.
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let _ = ctx.drain_notifications_for_char(other_char);
+    ctx.notify_item_mutation(char_id, None, None);
+    ctx.notify_item_mutation(char_id, Some(&other_personal_item), Some(&other_personal_item));
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+    assert!(ctx.drain_notifications_for_char(other_char).is_empty());
+
+    ctx.notify_item_mutation(char_id, None, Some(&other_personal_item));
+    let created_other = ctx.drain_notifications_for_char(other_char);
+    assert_eq!(created_other.len(), 1);
+    assert_eq!(created_other[0].event, "OnItemChange");
+    assert_eq!(created_other[0].args[1], PyRep::Dict(Vec::new()));
+}
+
+#[test]
+fn mutants_cov_notification_seq_flag_module_fx_tombstone_and_target_edges() {
+    use crate::router::cache_notifications::{
+        is_corp_hangar_flag, next_notification_seq_id, push_pending_notification_capped,
+        PendingMachoNotification,
+    };
+
+    // 1. Monotonic seq IDs > 1
+    let s1 = next_notification_seq_id();
+    let s2 = next_notification_seq_id();
+    assert_eq!(s2, s1 + 1);
+    assert!(s2 > 1);
+
+    // 2. is_corp_hangar_flag & ServerContext::is_corp_hangar_flag for CorpDeliveries/CorpSAG1..7 vs Hangar/Cargo
+    for f in [
+        InventoryFlag::CorpDeliveries,
+        InventoryFlag::CorpSAG1,
+        InventoryFlag::CorpSAG7,
+    ] {
+        assert!(is_corp_hangar_flag(f));
+        assert!(ServerContext::is_corp_hangar_flag(f));
+    }
+    for f in [InventoryFlag::None, InventoryFlag::Hangar, InventoryFlag::Cargo] {
+        assert!(!is_corp_hangar_flag(f));
+        assert!(!ServerContext::is_corp_hangar_flag(f));
+    }
+
+    // 3. push_pending_notification_capped evicts only at >= MAX_PENDING_NOTIFICATIONS_PER_CHAR
+    let mut queue = Vec::new();
+    let (dummy_pkt, dummy_raw) =
+        ServerContext::build_macho_notification_packet(1, Some(1), "Dummy", "charid", vec![]);
+    for i in 0..MAX_PENDING_NOTIFICATIONS_PER_CHAR {
+        push_pending_notification_capped(
+            &mut queue,
+            PendingMachoNotification::new(
+                1,
+                format!("Ev{i}"),
+                "charid",
+                vec![],
+                dummy_pkt.clone(),
+                dummy_raw.clone(),
+                i as i64,
+            ),
+        );
+    }
+    assert_eq!(queue.len(), MAX_PENDING_NOTIFICATIONS_PER_CHAR);
+    assert_eq!(queue[0].event, "Ev0");
+    push_pending_notification_capped(
+        &mut queue,
+        PendingMachoNotification::new(
+            1,
+            "EvOverflow",
+            "charid",
+            vec![],
+            dummy_pkt,
+            dummy_raw,
+            999,
+        ),
+    );
+    assert_eq!(queue.len(), MAX_PENDING_NOTIFICATIONS_PER_CHAR);
+    assert_eq!(queue[0].event, "Ev1");
+    assert_eq!(queue.last().unwrap().event, "EvOverflow");
+
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let other_char = 90_000_002_i64;
+    let corp_id = 1_000_399_i64;
+    let zero_uid = 888_000_u64;
+    let (u1, u2) = ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "Target Corp".into();
+        corp.ceo_id = char_id;
+        corp.members.insert(char_id);
+        corp.members.insert(other_char);
+        snap.corporations.insert(corp_id, corp);
+
+        // Insert a character at id 0 and backing account to exercise `owner_id > 0` boundary (>= mutant) cleanly.
+        if let Some(mut zero_acct) = snap.accounts.values().next().cloned() {
+            zero_acct.user_id = zero_uid;
+            zero_acct.username = "zero_char_uid".into();
+            snap.accounts.insert("zero_char_uid".into(), zero_acct);
+        }
+        let mut zero_ch = snap.characters[&char_id].clone();
+        zero_ch.character_id = 0;
+        zero_ch.user_id = zero_uid;
+        snap.characters.insert(0, zero_ch);
+
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
+        }
+        if let Some(ch) = snap.characters.get_mut(&other_char) {
+            ch.corporation_id = corp_id;
+        }
+
+        (snap.characters[&char_id].user_id, snap.characters[&other_char].user_id)
+    });
+    let _ = ctx.db.acquire_online_lock(u1, 411, Some(char_id), false, ctx.now_unix());
+    let _ = ctx.db.acquire_online_lock(u2, 412, Some(other_char), false, ctx.now_unix());
+    ctx.db
+        .acquire_online_lock(zero_uid, 413, Some(0), false, ctx.now_unix())
+        .expect("zero_uid online lock");
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let _ = ctx.drain_notifications_for_char(other_char);
+    let _ = ctx.drain_notifications_for_char(0);
+
+    // 4. `notify` OnModuleAttributeChanges cid == 0 preserves None in Tuple[1] while cid > 0 populates cid
+    let attr_change_arg = || {
+        vec![PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::String("OnModuleAttributeChange".into()),
+            PyRep::None,
+            PyRep::Integer(700_001),
+            PyRep::Integer(9),
+            PyRep::Integer(0),
+            PyRep::Real(100.0),
+            PyRep::Real(90.0),
+        ])])]
+    };
+    let res_zero = ctx.notify(
+        NotificationTarget::Character(0),
+        "OnModuleAttributeChanges",
+        "charid",
+        attr_change_arg(),
+    );
+    assert_eq!(res_zero.len(), 1);
+    if let PyRep::List(items) = &res_zero[0].args[0] {
+        if let PyRep::Tuple(t) = &items[0] {
+            assert_eq!(t[1], PyRep::None);
+        } else {
+            panic!("expected tuple");
+        }
+    }
+    let res_pos = ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnModuleAttributeChanges",
+        "charid",
+        attr_change_arg(),
+    );
+    assert_eq!(res_pos.len(), 1);
+    if let PyRep::List(items) = &res_pos[0].args[0] {
+        if let PyRep::Tuple(t) = &items[0] {
+            assert_eq!(t[1], PyRep::Integer(char_id));
+            assert_ne!(t[4], PyRep::Integer(0));
+        } else {
+            panic!("expected tuple");
+        }
+    }
+
+    // 5. `notify_module_effect_started` d73 == 0 fallback to attr 51 & d73 > 0 precedence
+    let ship_id = 100_880_001_i64;
+    let mod_d73_zero = 770_001_i64;
+    let mod_d73_pos = 770_002_i64;
+    let mod_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.category_id == 7 && t.effect_ids.contains(&16))
+        .map(|t| t.type_id)
+        .unwrap_or(2048);
+    {
+        let mut fit = eve_dogma::ShipFittingEngine::from_sde(ship_id, 587, &ctx.sde);
+        let mut dyn_zero = std::collections::HashMap::new();
+        dyn_zero.insert(73_u16, 0.0);
+        dyn_zero.insert(51_u16, 4_321.0);
+        fit.modules.insert(
+            mod_d73_zero,
+            eve_dogma::FittedModule {
+                item_id: mod_d73_zero,
+                type_id: mod_tid,
+                flag_id: 27,
+                state: eve_dogma::ModuleState::Active,
+                damage_hp: 0.0,
+                max_hp: 40.0,
+                charge_type_id: None,
+                charge_quantity: 0,
+                dynamic_attribute_overrides: dyn_zero,
+            },
+        );
+        let mut dyn_pos = std::collections::HashMap::new();
+        dyn_pos.insert(73_u16, 7_654.0);
+        dyn_pos.insert(51_u16, 4_321.0);
+        fit.modules.insert(
+            mod_d73_pos,
+            eve_dogma::FittedModule {
+                item_id: mod_d73_pos,
+                type_id: mod_tid,
+                flag_id: 28,
+                state: eve_dogma::ModuleState::Active,
+                damage_hp: 0.0,
+                max_hp: 40.0,
+                charge_type_id: None,
+                charge_quantity: 0,
+                dynamic_attribute_overrides: dyn_pos,
+            },
+        );
+        fit.recalculate_stats(&ctx.sde);
+        ctx.ship_fittings.write().unwrap().insert(ship_id, fit);
+    }
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let n_zero = ctx.notify_module_effect_started(char_id, ship_id, mod_d73_zero, mod_tid, None, None);
+    assert_eq!(n_zero[0].args[7], PyRep::Real(4_321.0));
+    let n_pos = ctx.notify_module_effect_started(char_id, ship_id, mod_d73_pos, mod_tid, None, None);
+    assert_eq!(n_pos[0].args[7], PyRep::Real(7_654.0));
+    let n_online = ctx.notify_module_effect_started(char_id, ship_id, mod_d73_zero, mod_tid, Some("online"), None);
+    assert_eq!(n_online[0].args[8], PyRep::Integer(0));
+
+    // 6. Direct `notify_item_record_change` + `build_item_tombstone` + `resolve_item_notification_target` matrix
+    let personal_item = InventoryItemRecord {
+        item_id: 881_001,
+        type_id: 34,
+        owner_id: char_id,
+        location_id: 60_003_760,
+        flag: InventoryFlag::Hangar,
+        quantity: 42,
+        singleton: false,
+        ..Default::default()
+    };
+    let direct_change = ctx.notify_item_record_change(char_id, &personal_item, vec![(9, PyRep::Integer(50))]);
+    assert_eq!(direct_change.len(), 1);
+    assert_eq!(direct_change[0].event, "OnItemChange");
+
+    let (tomb, tomb_changes) = ServerContext::build_item_tombstone(&personal_item);
+    assert_eq!(tomb.item_id, 881_001);
+    assert_eq!(tomb.type_id, 34);
+    assert_eq!(tomb.owner_id, char_id);
+    assert_eq!(tomb.location_id, 6);
+    assert_eq!(tomb.flag, InventoryFlag::None);
+    assert_eq!(tomb.quantity, 0);
+    assert!(!tomb.singleton);
+    assert_eq!(
+        tomb_changes,
+        vec![
+            (3, PyRep::Integer(60_003_760)),
+            (4, PyRep::Integer(InventoryFlag::Hangar as i64)),
+            (9, PyRep::Integer(42)),
+        ]
+    );
+
+    // Corp hangar flag owned by a non-corp character must NOT route to Corporation
+    let char_sag = InventoryItemRecord {
+        flag: InventoryFlag::CorpSAG1,
+        owner_id: char_id,
+        ..personal_item.clone()
+    };
+    assert_eq!(
+        ctx.resolve_item_notification_target(char_id, &char_sag),
+        (NotificationTarget::Character(char_id), "charid")
+    );
+    // Non-corp-hangar flag owned by a corp must NOT route to Corporation
+    let corp_hangar_flag = InventoryItemRecord {
+        flag: InventoryFlag::Hangar,
+        owner_id: corp_id,
+        ..personal_item.clone()
+    };
+    assert_eq!(
+        ctx.resolve_item_notification_target(char_id, &corp_hangar_flag),
+        (NotificationTarget::Character(char_id), "charid")
+    );
+    // Unknown owner_id (>0, not in characters) routes to fallback_char_id
+    let unknown_owner = InventoryItemRecord {
+        owner_id: 999_888_777,
+        ..personal_item.clone()
+    };
+    assert_eq!(
+        ctx.resolve_item_notification_target(char_id, &unknown_owner),
+        (NotificationTarget::Character(char_id), "charid")
+    );
+    // Zero owner_id (even if char 0 is in characters map) must NOT trigger > 0 `other_char` branch
+    let zero_owner = InventoryItemRecord {
+        owner_id: 0,
+        ..personal_item.clone()
+    };
+    assert_eq!(
+        ctx.resolve_item_notification_target(char_id, &zero_owner),
+        (NotificationTarget::Character(char_id), "charid")
+    );
+
+    // 7. Return value assertions for `notify_wallet_balance` personal + corp div 1 vs div 2
+    let w_pers = ctx.notify_wallet_balance(false, char_id, 1, eve_db::IskCents(77_000));
+    assert_eq!(w_pers.len(), 1);
+    assert_eq!(w_pers[0].event, "OnAccountChange");
+    assert_eq!(w_pers[0].args[0], PyRep::String("cash".into()));
+
+    let w_corp2 = ctx.notify_wallet_balance(true, corp_id, 2, eve_db::IskCents(88_000));
+    assert_eq!(w_corp2.len(), 2);
+    assert!(w_corp2.iter().all(|n| n.args[0] == PyRep::String("cash2".into())));
 }

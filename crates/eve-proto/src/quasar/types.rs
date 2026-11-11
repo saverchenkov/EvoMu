@@ -787,5 +787,8 @@ impl QuasarMessage for NetworkRttSample {
 #[cfg(test)]
 #[path = "types_unit_tests.rs"]
 mod types_unit_tests;
+#[cfg(test)]
+#[path = "types_edges_tests.rs"]
+mod types_edges_tests;
 
 

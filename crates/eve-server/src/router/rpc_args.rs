@@ -56,7 +56,18 @@ fn parse_strict_finite_f64(rep: &PyRep, label: &str) -> Result<f64, BridgeRpcErr
 fn parse_strict_bool(rep: &PyRep, label: &str) -> Result<bool, BridgeRpcError> {
     match rep {
         PyRep::Bool(b) => Ok(*b),
+        PyRep::Integer(0) => Ok(false),
+        PyRep::Integer(1) => Ok(true),
         _ => Err(invalid_arg(format!("Expected boolean for {label}"))),
+    }
+}
+
+fn parse_boolish(rep: &PyRep, label: &str) -> Result<bool, BridgeRpcError> {
+    match rep {
+        PyRep::Bool(b) => Ok(*b),
+        PyRep::Integer(0) => Ok(false),
+        PyRep::Integer(1) => Ok(true),
+        _ => Err(invalid_arg(format!("Expected boolean or 0/1 for {label}"))),
     }
 }
 
@@ -426,6 +437,23 @@ impl<'a> RpcArgs<'a> {
         parse_strict_bool(rep, &arg_label(idx, kw_name)).map(Some)
     }
 
+    /// Extracts a required boolean or integer `0`/`1` (`PyRep::Bool` or `PyRep::Integer(0 | 1)`).
+    pub fn req_boolish(&self, idx: usize, kw_name: &str) -> Result<bool, BridgeRpcError> {
+        let label = arg_label(idx, kw_name);
+        let rep = self
+            .get_raw(idx, kw_name)
+            .ok_or_else(|| invalid_arg(format!("Missing required boolean {label}")))?;
+        parse_boolish(rep, &label)
+    }
+
+    /// Extracts an optional boolean or integer `0`/`1` (`PyRep::Bool` or `PyRep::Integer(0 | 1)`).
+    pub fn opt_boolish(&self, idx: usize, kw_name: &str) -> Result<Option<bool>, BridgeRpcError> {
+        let Some(rep) = self.get_raw(idx, kw_name) else {
+            return Ok(None);
+        };
+        parse_boolish(rep, &arg_label(idx, kw_name)).map(Some)
+    }
+
     /// Extracts a required string (`String`, `Token`, or UTF-8 `Bytes`).
     pub fn req_str(&self, idx: usize, kw_name: &str) -> Result<&'a str, BridgeRpcError> {
         let label = arg_label(idx, kw_name);
@@ -646,16 +674,32 @@ mod tests {
             PyRep::Integer(1),
             PyRep::Integer(0),
             PyRep::String("true".to_string()),
+            PyRep::Integer(2),
+            PyRep::Integer(-1),
         ];
         let rpc = RpcArgs::new(&args, &kw);
 
         assert!(rpc.req_bool(0, "").unwrap());
         assert!(!rpc.req_bool(10, "accept").unwrap());
-        for idx in 1..=4 {
+        assert!(rpc.req_bool(2, "").unwrap());
+        assert!(!rpc.req_bool(3, "").unwrap());
+        assert_eq!(rpc.opt_bool(2, "").unwrap(), Some(true));
+        assert_eq!(rpc.opt_bool(3, "").unwrap(), Some(false));
+        for idx in [1, 4, 5, 6] {
             assert_eq!(rpc.req_bool(idx, "").unwrap_err().code, "InvalidArgument");
             assert_eq!(rpc.opt_bool(idx, "").unwrap_err().code, "InvalidArgument");
         }
         assert_eq!(rpc.opt_bool(10, "missing").unwrap(), None);
+
+        // req_boolish / opt_boolish accept Bool and Integer(0 | 1), reject other integers and strings
+        assert!(rpc.req_boolish(0, "").unwrap());
+        assert!(rpc.req_boolish(2, "").unwrap());
+        assert!(!rpc.req_boolish(3, "").unwrap());
+        assert_eq!(rpc.opt_boolish(2, "").unwrap(), Some(true));
+        assert_eq!(rpc.opt_boolish(3, "").unwrap(), Some(false));
+        assert_eq!(rpc.opt_boolish(10, "missing").unwrap(), None);
+        assert_eq!(rpc.req_boolish(1, "").unwrap_err().code, "InvalidArgument");
+        assert_eq!(rpc.opt_boolish(4, "").unwrap_err().code, "InvalidArgument");
     }
 
     #[test]
@@ -678,5 +722,269 @@ mod tests {
         assert_eq!(rpc.req_i64_list(2, "").unwrap(), vec![10, 20]);
         assert_eq!(rpc.req_i64_list(3, "").unwrap_err().code, "InvalidArgument");
         assert_eq!(rpc.opt_i64_list(9, "missing").unwrap(), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn metadata_aliases_optional_bounds_and_collection_variants_kill_boundary_mutants() {
+        // 1. Container metadata accessors: `is_empty` must require BOTH args and kwargs empty
+        let empty = RpcArgs::positional(&[]);
+        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 0);
+        assert!(empty.args().is_empty());
+        assert!(empty.kwargs().is_empty());
+
+        let mut kw = HashMap::new();
+        kw.insert("altID".to_string(), PyRep::Integer(77));
+        kw.insert("noneKw".to_string(), PyRep::None);
+        kw.insert("badAlias".to_string(), PyRep::String("bad".into()));
+        let only_kw = RpcArgs::new(&[], &kw);
+        assert!(!only_kw.is_empty());
+        assert_eq!(only_kw.len(), 0);
+        assert_eq!(only_kw.kwargs().len(), 3);
+
+        let args_only = [PyRep::Integer(1)];
+        let only_args = RpcArgs::positional(&args_only);
+        assert!(!only_args.is_empty());
+        assert_eq!(only_args.len(), 1);
+        assert_eq!(only_args.args().len(), 1);
+
+        // 2. `get_raw_any`, `req_i64_any`, `opt_i64_any`
+        let none_then_pos = [PyRep::None, PyRep::Integer(99)];
+        let any_rpc = RpcArgs::new(&none_then_pos, &kw);
+        assert_eq!(
+            any_rpc
+                .req_i64_any(0, &["", "noneKw", "missing", "altID"])
+                .unwrap(),
+            77
+        );
+        assert_eq!(any_rpc.req_i64_any(1, &["altID"]).unwrap(), 99);
+        assert_eq!(
+            any_rpc.req_i64_any(0, &[]).unwrap_err().code,
+            "InvalidArgument"
+        );
+        assert_eq!(any_rpc.opt_i64_any(0, &["missing"]).unwrap(), None);
+        assert_eq!(
+            any_rpc.opt_i64_any(0, &["badAlias"]).unwrap_err().code,
+            "InvalidArgument"
+        );
+        assert_eq!(
+            any_rpc.opt_i64_any(0, &["altID"]).unwrap(),
+            Some(77)
+        );
+
+        // 3. Exact boundary coverage for opt_positive_i64, req_non_negative_i64, opt_u64, u32, i32
+        let boundary_args = [
+            PyRep::Integer(0),
+            PyRep::Integer(-1),
+            PyRep::Integer(1),
+            PyRep::Integer(i64::from(u32::MAX)),
+            PyRep::Integer(i64::from(u32::MAX) + 1),
+            PyRep::Integer(i64::from(i32::MIN)),
+            PyRep::Integer(i64::from(i32::MIN) - 1),
+            PyRep::Integer(i64::from(i32::MAX)),
+            PyRep::Integer(i64::from(i32::MAX) + 1),
+            PyRep::Bool(false),
+        ];
+        let brpc = RpcArgs::positional(&boundary_args);
+        assert_eq!(brpc.opt_positive_i64(20, "").unwrap(), None);
+        assert_eq!(
+            brpc.opt_positive_i64(0, "").unwrap_err().code,
+            "InvalidArgument"
+        );
+        assert_eq!(
+            brpc.opt_positive_i64(1, "").unwrap_err().code,
+            "InvalidArgument"
+        );
+        assert_eq!(brpc.opt_positive_i64(2, "").unwrap(), Some(1));
+
+        assert_eq!(brpc.req_non_negative_i64(0, "").unwrap(), 0);
+        assert_eq!(
+            brpc.req_non_negative_i64(1, "").unwrap_err().code,
+            "InvalidArgument"
+        );
+
+        assert_eq!(brpc.opt_u64(20, "").unwrap(), None);
+        assert_eq!(brpc.opt_u64(0, "").unwrap(), Some(0));
+        assert_eq!(brpc.opt_u64(1, "").unwrap_err().code, "InvalidArgument");
+        assert_eq!(brpc.opt_u64(9, "").unwrap_err().code, "InvalidArgument");
+
+        assert_eq!(brpc.req_u32(0, "").unwrap(), 0);
+        assert_eq!(brpc.req_u32(3, "").unwrap(), u32::MAX);
+        assert_eq!(brpc.req_u32(1, "").unwrap_err().code, "InvalidArgument");
+        assert_eq!(brpc.req_u32(4, "").unwrap_err().code, "InvalidArgument");
+
+        assert_eq!(brpc.opt_u32(20, "").unwrap(), None);
+        assert_eq!(brpc.opt_u32(3, "").unwrap(), Some(u32::MAX));
+        assert_eq!(brpc.opt_u32(1, "").unwrap_err().code, "InvalidArgument");
+        assert_eq!(brpc.opt_u32(4, "").unwrap_err().code, "InvalidArgument");
+        assert_eq!(brpc.opt_u32(9, "").unwrap_err().code, "InvalidArgument");
+
+        assert_eq!(brpc.req_i32(5, "").unwrap(), i32::MIN);
+        assert_eq!(brpc.req_i32(7, "").unwrap(), i32::MAX);
+        assert_eq!(brpc.req_i32(6, "").unwrap_err().code, "InvalidArgument");
+        assert_eq!(brpc.req_i32(8, "").unwrap_err().code, "InvalidArgument");
+
+        assert_eq!(brpc.opt_i32(20, "").unwrap(), None);
+        assert_eq!(brpc.opt_i32(5, "").unwrap(), Some(i32::MIN));
+        assert_eq!(brpc.opt_i32(7, "").unwrap(), Some(i32::MAX));
+        assert_eq!(brpc.opt_i32(6, "").unwrap_err().code, "InvalidArgument");
+        assert_eq!(brpc.opt_i32(8, "").unwrap_err().code, "InvalidArgument");
+
+        // 4. Optional float positivity / non-negativity exact boundaries
+        let flt_args = [
+            PyRep::Real(0.0),
+            PyRep::Real(-0.001),
+            PyRep::Real(0.5),
+            PyRep::Real(f64::NAN),
+        ];
+        let frpc = RpcArgs::positional(&flt_args);
+        assert_eq!(frpc.opt_positive_f64(10, "").unwrap(), None);
+        assert_eq!(
+            frpc.opt_positive_f64(0, "").unwrap_err().code,
+            "InvalidArgument"
+        );
+        assert_eq!(
+            frpc.opt_positive_f64(1, "").unwrap_err().code,
+            "InvalidArgument"
+        );
+        assert_eq!(frpc.opt_positive_f64(2, "").unwrap(), Some(0.5));
+        assert_eq!(
+            frpc.opt_positive_f64(3, "").unwrap_err().code,
+            "InvalidArgument"
+        );
+
+        assert_eq!(frpc.req_non_negative_f64(0, "").unwrap(), 0.0);
+        assert_eq!(frpc.opt_non_negative_f64(10, "").unwrap(), None);
+        assert_eq!(frpc.opt_non_negative_f64(0, "").unwrap(), Some(0.0));
+        assert_eq!(
+            frpc.opt_non_negative_f64(1, "").unwrap_err().code,
+            "InvalidArgument"
+        );
+        assert_eq!(
+            frpc.opt_non_negative_f64(3, "").unwrap_err().code,
+            "InvalidArgument"
+        );
+
+        // 5. req_finite_vec3 / opt_finite_vec3 missing scalars, 4-tuple, malformed elements
+        assert_eq!(
+            RpcArgs::positional(&[]).req_finite_vec3(0).unwrap_err().code,
+            "InvalidArgument"
+        );
+        assert_eq!(
+            RpcArgs::positional(&[PyRep::Real(1.0)])
+                .req_finite_vec3(0)
+                .unwrap_err()
+                .code,
+            "InvalidArgument"
+        );
+        assert_eq!(
+            RpcArgs::positional(&[PyRep::Real(1.0), PyRep::Real(2.0)])
+                .req_finite_vec3(0)
+                .unwrap_err()
+                .code,
+            "InvalidArgument"
+        );
+        assert_eq!(
+            RpcArgs::positional(&[PyRep::Tuple(vec![PyRep::Real(1.0); 4])])
+                .req_finite_vec3(0)
+                .unwrap_err()
+                .code,
+            "InvalidArgument"
+        );
+        assert_eq!(
+            RpcArgs::positional(&[PyRep::Tuple(vec![
+                PyRep::Real(f64::NAN),
+                PyRep::Real(1.0),
+                PyRep::Real(2.0),
+            ])])
+            .req_finite_vec3(0)
+            .unwrap_err()
+            .code,
+            "InvalidArgument"
+        );
+        assert_eq!(
+            RpcArgs::positional(&[PyRep::Tuple(vec![
+                PyRep::Real(1.0),
+                PyRep::Real(2.0),
+                PyRep::Real(f64::NEG_INFINITY),
+            ])])
+            .req_finite_vec3(0)
+            .unwrap_err()
+            .code,
+            "InvalidArgument"
+        );
+        assert_eq!(
+            RpcArgs::positional(&[PyRep::String("bad".into())])
+                .opt_finite_vec3(0)
+                .unwrap_err()
+                .code,
+            "InvalidArgument"
+        );
+        assert_eq!(RpcArgs::positional(&[]).opt_finite_vec3(0).unwrap(), None);
+
+        // 6. non-empty str trimming + Set / PySet / Tuple / scalar ID list variants
+        assert_eq!(
+            RpcArgs::positional(&[PyRep::String(" ok ".into())])
+                .req_non_empty_str(0, "")
+                .unwrap(),
+            " ok "
+        );
+        let list_args = [
+            PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2)]),
+            PyRep::Set(vec![PyRep::Integer(3)]),
+            PyRep::PySet(vec![PyRep::Integer(4), PyRep::Integer(5)]),
+            PyRep::Integer(99),
+            PyRep::String("not-list".into()),
+        ];
+        let lrpc = RpcArgs::positional(&list_args);
+        assert_eq!(lrpc.req_i64_list(0, "").unwrap(), vec![1, 2]);
+        assert_eq!(lrpc.req_i64_list(1, "").unwrap(), vec![3]);
+        assert_eq!(lrpc.req_i64_list(2, "").unwrap(), vec![4, 5]);
+        assert_eq!(
+            lrpc.req_i64_list(4, "").unwrap_err().code,
+            "InvalidArgument"
+        );
+        assert_eq!(lrpc.opt_i64_list(0, "").unwrap(), vec![1, 2]);
+        assert_eq!(lrpc.opt_i64_list(1, "").unwrap(), vec![3]);
+        assert_eq!(lrpc.opt_i64_list(2, "").unwrap(), vec![4, 5]);
+        assert_eq!(
+            lrpc.opt_i64_list(4, "").unwrap_err().code,
+            "InvalidArgument"
+        );
+
+        assert_eq!(lrpc.req_id_or_id_list(3, "").unwrap(), vec![99]);
+        assert_eq!(lrpc.req_id_or_id_list(0, "").unwrap(), vec![1, 2]);
+        assert_eq!(lrpc.req_id_or_id_list(1, "").unwrap(), vec![3]);
+        assert_eq!(lrpc.req_id_or_id_list(2, "").unwrap(), vec![4, 5]);
+        assert_eq!(
+            lrpc.req_id_or_id_list(4, "").unwrap_err().code,
+            "InvalidArgument"
+        );
+        assert_eq!(
+            lrpc.req_id_or_id_list(20, "").unwrap_err().code,
+            "InvalidArgument"
+        );
+
+        // 7. `opt_str` Some/None paths + `get_raw` with empty `kw_name` vs `PyRep::None` in `kwargs`
+        assert_eq!(
+            RpcArgs::positional(&[PyRep::String("hello".into())])
+                .opt_str(0, "msg")
+                .unwrap(),
+            Some("hello")
+        );
+        assert_eq!(only_kw.opt_str(0, "noneKw").unwrap(), None);
+        assert_eq!(only_kw.get_raw(0, ""), None);
+        assert_eq!(only_kw.get_raw(0, "noneKw"), None);
+        assert_eq!(only_kw.get_raw(0, "altID"), Some(&PyRep::Integer(77)));
+        assert_eq!(
+            RpcArgs::positional(&[PyRep::Tuple(vec![
+                PyRep::Integer(1),
+                PyRep::String("bad".into()),
+            ])])
+            .req_id_or_id_list(0, "ids")
+            .unwrap_err()
+            .code,
+            "InvalidArgument"
+        );
     }
 }

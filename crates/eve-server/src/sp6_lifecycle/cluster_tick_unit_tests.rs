@@ -301,7 +301,9 @@ async fn on_advance_secs_collapse_abyssal_and_tick_background_cluster() {
                 ship_id,
                 pocket_system_id: crate::services::abyssal_void_mgr::VOID_SPACE_SYSTEM_ID,
                 origin_system_id: sys_id,
-                entered_unix: now_unix.saturating_sub(1_200),
+                entered_unix: now_unix.saturating_sub(
+                    crate::services::abyssal_void_mgr::VOID_SPACE_ENCOUNTER_LIFE_TIME_SECS,
+                ),
                 collapse_at_unix: now_unix,
             },
         );
@@ -428,7 +430,6 @@ async fn idle_cluster_tick_avoids_per_tick_sqlite_wal_writes() {
     let sde = Arc::new(eve_sde::SdeRegistry::open(&sde_path).unwrap_or_default());
     let ctx = ServerContext::with_sde_and_repository(sde, db);
     ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_770_000_010)));
-    ctx.clock().set_paused(true);
     ctx.seed_demo_world_fixtures();
     // Place demo char in space in Maurasi (30000140) with active Venture (32880) like Batch P
     let char_id = 90_000_001_i64;
@@ -560,10 +561,7 @@ async fn sov_claimed_without_sov_hubs_entry_stays_idle_clean_and_advances_indice
     let sde = Arc::new(eve_sde::SdeRegistry::open(&sde_path).unwrap_or_default());
     let ctx = ServerContext::with_sde_and_repository(sde, db);
     // Freeze wall-clock drift and keep the 2 warmup + 5 measured 1 Hz ticks clear of a `% 60 == 0` periodic NPC-mining DB sync.
-    ctx.clock().set_paused(true);
-    if ctx.now_unix() % 60 >= 50 || ctx.now_unix() % 60 == 0 {
-        ctx.clock().advance_secs(61 - (ctx.now_unix() % 60));
-    }
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_770_000_010)));
     ctx.seed_demo_world_fixtures();
 
     let claimed_sys = 30_004_759_u32;
@@ -789,4 +787,171 @@ async fn idle_1hz_cluster_ticks_do_not_append_wal_snapshots() {
     drop(ctx);
     let _ = std::fs::remove_file(&snap_path);
     let _ = std::fs::remove_file(&wal_path);
+}
+
+#[tokio::test]
+async fn sweep_expired_cosmic_anomalies_and_execute_due_abyssal_collapse_sync_branches() {
+    use eve_db::types::{CosmicAnomalyRecord, CosmicSignatureRecord};
+
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let sys_id = 30_000_142_u32;
+    let now_unix = 2_000_000_u64;
+
+    // 0-step background tick is a no-op.
+    tick_background_cluster_with_step(&ctx, 0).await;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cosmic_anomalies.insert(
+            sys_id,
+            vec![
+                CosmicAnomalyRecord {
+                    anomaly_id: "ANO-EXPIRED".into(),
+                    solar_system_id: sys_id,
+                    name: "Expired Hideaway".into(),
+                    anomaly_type: "Combat".into(),
+                    position: [1_000.0, 0.0, 0.0],
+                    signal_strength: 1.0,
+                    ore_types: vec![],
+                    remaining_volume: 0.0,
+                    created_unix: 1_000,
+                    lifetime_seconds: 500,
+                    cleared: false,
+                },
+                CosmicAnomalyRecord {
+                    anomaly_id: "ANO-ICE".into(),
+                    solar_system_id: sys_id,
+                    name: "Ice Belt".into(),
+                    anomaly_type: "IceBelt".into(),
+                    position: [2_000.0, 0.0, 0.0],
+                    signal_strength: 1.0,
+                    ore_types: vec![],
+                    remaining_volume: 0.0,
+                    created_unix: 1_000,
+                    lifetime_seconds: 500,
+                    cleared: false,
+                },
+                CosmicAnomalyRecord {
+                    anomaly_id: "ANO-ORE".into(),
+                    solar_system_id: sys_id,
+                    name: "Ore Belt".into(),
+                    anomaly_type: "OreAnomaly".into(),
+                    position: [3_000.0, 0.0, 0.0],
+                    signal_strength: 1.0,
+                    ore_types: vec![],
+                    remaining_volume: 0.0,
+                    created_unix: 1_000,
+                    lifetime_seconds: 500,
+                    cleared: false,
+                },
+                CosmicAnomalyRecord {
+                    anomaly_id: "ANO-INF".into(),
+                    solar_system_id: sys_id,
+                    name: "Permanent".into(),
+                    anomaly_type: "Combat".into(),
+                    position: [4_000.0, 0.0, 0.0],
+                    signal_strength: 1.0,
+                    ore_types: vec![],
+                    remaining_volume: 0.0,
+                    created_unix: 1_000,
+                    lifetime_seconds: 0,
+                    cleared: false,
+                },
+                CosmicAnomalyRecord {
+                    anomaly_id: "ANO-FRESH".into(),
+                    solar_system_id: sys_id,
+                    name: "Fresh".into(),
+                    anomaly_type: "Combat".into(),
+                    position: [5_000.0, 0.0, 0.0],
+                    signal_strength: 1.0,
+                    ore_types: vec![],
+                    remaining_volume: 0.0,
+                    created_unix: now_unix - 100,
+                    lifetime_seconds: 500,
+                    cleared: false,
+                },
+            ],
+        );
+        snap.cosmic_signatures.insert(
+            sys_id,
+            vec![
+                CosmicSignatureRecord {
+                    signature_id: "SIG-EXPIRED".into(),
+                    solar_system_id: sys_id,
+                    sig_group: "Relic".into(),
+                    type_name: "Ruins".into(),
+                    position: [1_000.0, 0.0, 0.0],
+                    signal_strength: 1.0,
+                    wormhole_type_id: None,
+                    destination_system_id: None,
+                    created_unix: 1_000,
+                    lifetime_seconds: 500,
+                    max_mass_kg: 0.0,
+                    remaining_mass_kg: 0.0,
+                    max_jump_mass_kg: 0.0,
+                    collapsed: false,
+                },
+                CosmicSignatureRecord {
+                    signature_id: "SIG-WH".into(),
+                    solar_system_id: sys_id,
+                    sig_group: "Wormhole".into(),
+                    type_name: "K162".into(),
+                    position: [2_000.0, 0.0, 0.0],
+                    signal_strength: 1.0,
+                    wormhole_type_id: None,
+                    destination_system_id: None,
+                    created_unix: 1_000,
+                    lifetime_seconds: 500,
+                    max_mass_kg: 0.0,
+                    remaining_mass_kg: 0.0,
+                    max_jump_mass_kg: 0.0,
+                    collapsed: false,
+                },
+                CosmicSignatureRecord {
+                    signature_id: "SIG-GAS".into(),
+                    solar_system_id: sys_id,
+                    sig_group: "Gas".into(),
+                    type_name: "Gas Cloud".into(),
+                    position: [3_000.0, 0.0, 0.0],
+                    signal_strength: 1.0,
+                    wormhole_type_id: None,
+                    destination_system_id: None,
+                    created_unix: 1_000,
+                    lifetime_seconds: 500,
+                    max_mass_kg: 0.0,
+                    remaining_mass_kg: 0.0,
+                    max_jump_mass_kg: 0.0,
+                    collapsed: false,
+                },
+            ],
+        );
+    });
+
+    sweep_expired_cosmic_anomalies_and_signatures(&ctx, now_unix);
+    ctx.db.with_snapshot(|snap| {
+        let anoms: Vec<&str> = snap.cosmic_anomalies[&sys_id]
+            .iter()
+            .map(|a| a.anomaly_id.as_str())
+            .collect();
+        assert_eq!(anoms, vec!["ANO-ICE", "ANO-ORE", "ANO-INF", "ANO-FRESH"]);
+        let sigs: Vec<&str> = snap.cosmic_signatures[&sys_id]
+            .iter()
+            .map(|s| s.signature_id.as_str())
+            .collect();
+        assert_eq!(sigs, vec!["SIG-WH", "SIG-GAS"]);
+    });
+
+    // `execute_due_abyssal_collapse_sync` Void Space branch vs regular Abyssal branch.
+    let void_sess = AbyssalPersistedSession {
+        char_id: 90_000_001,
+        ship_id: 100_000_001,
+        pocket_system_id: crate::services::abyssal_void_mgr::VOID_SPACE_SYSTEM_ID,
+        origin_system_id: sys_id,
+        entered_unix: 1_000,
+        collapse_at_unix: 1_500,
+    };
+    execute_due_abyssal_collapse_sync(&ctx, &void_sess, now_unix);
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.characters[&90_000_001].solar_system_id),
+        sys_id
+    );
 }

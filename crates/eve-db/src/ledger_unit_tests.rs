@@ -202,3 +202,140 @@ fn adjust_plex_vault_automatically_folds_legacy_balances() {
     assert_eq!(snap.adjust_plex_vault(90_001, -51), None);
     assert_eq!(snap.unified_plex_balance(90_001), 50);
 }
+
+#[test]
+fn journal_clamping_market_fill_fallbacks_daily_summary_edges_and_unified_plex() {
+    let mut snap = WorldStateSnapshot::default();
+    snap.characters.insert(90_001, make_char(90_001, 7, 120));
+    snap.characters.insert(90_002, make_char(90_002, 7, 80));
+    snap.characters.insert(90_003, make_char(90_003, 9, 50));
+    snap.corporations.insert(
+        98_001,
+        CorporationRecord {
+            corporation_id: 98_001,
+            name: "Corp".into(),
+            ticker: "CRP".into(),
+            ..Default::default()
+        },
+    );
+
+    // JournalContext::default & JournalMeta::default
+    assert_eq!(JournalContext::default(), JournalContext::None);
+    assert_eq!(JournalMeta::default().ref_type_id, 0);
+
+    // Character journal entry does NOT populate corp_wallet_journals
+    let char_eid = snap.append_journal_entry(JournalEntryInput {
+        owner_id: 90_001,
+        entry_type: "PlayerDonation",
+        amount: IskCents::from_isk(100),
+        balance_after: IskCents::from_isk(10_100),
+        reason: "Gift".into(),
+        meta: JournalMeta::new(ref_types::PLAYER_DONATION, 90_002, 90_001, 100),
+    });
+    assert!(snap.wallet_journal_meta.contains_key(&char_eid));
+    assert!(snap.corp_wallet_journals.is_empty());
+
+    // Corporation account_key clamping: < 1000 -> div 1, > 1006 -> div 7
+    snap.append_journal_entry(JournalEntryInput {
+        owner_id: 98_001,
+        entry_type: "LowKey",
+        amount: IskCents::from_isk(10),
+        balance_after: IskCents::from_isk(10),
+        reason: "Clamp low".into(),
+        meta: JournalMeta::new(1, 90_001, 98_001, 100).with_account_key(500),
+    });
+    snap.append_journal_entry(JournalEntryInput {
+        owner_id: 98_001,
+        entry_type: "HighKey",
+        amount: IskCents::from_isk(20),
+        balance_after: IskCents::from_isk(30),
+        reason: "Clamp high".into(),
+        meta: JournalMeta::new(1, 90_001, 98_001, 100).with_account_key(1099),
+    });
+    assert_eq!(snap.corp_wallet_journals[&(98_001, 1)].len(), 1);
+    assert_eq!(snap.corp_wallet_journals[&(98_001, 7)].len(), 1);
+
+    // MarketFill with neither player buyer nor seller balance, unknown entities, qty <= 0 -> 1, fallback region 10_000_002
+    let tx_npc = snap.journal_market_fill(MarketFill {
+        buyer_id: 1_000_035,
+        seller_id: 1_000_036,
+        type_id: 35,
+        quantity: 0,
+        price: IskCents::from_isk(25),
+        location_id: 60_003_760,
+        date_unix: 1_709_164_800, // 2024-02-29
+        gross: IskCents::from_isk(25),
+        buyer_balance_after: None,
+        seller_net: IskCents::from_isk(25),
+        seller_balance_after: None,
+        sales_tax: IskCents::ZERO,
+        tax_collector_id: 1_000_132,
+        region_id: None,
+    });
+    let tx_rec = snap.market_transactions.iter().find(|t| t.transaction_id == tx_npc).unwrap();
+    assert_eq!(tx_rec.journal_ref_id, 0);
+    assert_eq!(snap.market_history[&(10_000_002, 35)][0].date, "2024-02-29");
+    assert_eq!(snap.market_history[&(10_000_002, 35)][0].volume, 1);
+
+    // record_market_trade_daily_summary: pre-existing day with open_price = None and new_vol == 0 guard + lower/higher bounds
+    snap.market_history.insert(
+        (10_000_002, 36),
+        vec![crate::MarketHistoryDayRecord {
+            date: "2024-03-01".into(),
+            average: 50.0,
+            highest: 60.0,
+            lowest: 40.0,
+            order_count: 0,
+            volume: 0,
+            open_price: None,
+            close_price: None,
+        }],
+    );
+    snap.record_market_trade_daily_summary(10_000_002, 36, 1_709_251_200, 45.0, 0);
+    let d36 = &snap.market_history[&(10_000_002, 36)][0];
+    assert_eq!(d36.average, 50.0);
+    assert_eq!(d36.open_price, Some(50.0));
+    assert_eq!(d36.close_price, Some(45.0));
+    assert_eq!(d36.highest, 60.0);
+    assert_eq!(d36.lowest, 40.0);
+
+    snap.record_market_trade_daily_summary(10_000_002, 36, 1_709_251_200, 30.0, 10);
+    assert_eq!(snap.market_history[&(10_000_002, 36)][0].lowest, 30.0);
+    snap.record_market_trade_daily_summary(10_000_002, 36, 1_709_251_200, 80.0, 10);
+    assert_eq!(snap.market_history[&(10_000_002, 36)][0].highest, 80.0);
+
+    // Leap / non-leap date edge cases
+    assert_eq!(unix_secs_to_date_str(951_782_400), "2000-02-29");
+    assert_eq!(unix_secs_to_date_str(1_740_700_800), "2025-02-28");
+    assert_eq!(unix_secs_to_date_str(1_740_787_200), "2025-03-01");
+
+    // Unified PLEX vault methods
+    assert_eq!(snap.unified_plex_balance_for_user(7), 200);
+    assert_eq!(snap.unified_plex_balance_for_user(9), 50);
+    assert_eq!(snap.unified_plex_balance(90_001), 200);
+    assert_eq!(snap.unified_plex_balance(99_999), 0);
+
+    // Overdraft does NOT fold legacy balances or mutate state
+    assert_eq!(snap.adjust_unified_plex_for_user(7, -201), None);
+    assert_eq!(snap.characters[&90_001].plex_balance, 120);
+    assert_eq!(snap.characters[&90_002].plex_balance, 80);
+    assert!(!snap.account_plex_vault.contains_key(&7));
+
+    // Unknown char returns None
+    assert_eq!(snap.adjust_unified_plex(99_999, 10), None);
+
+    // Successful unified adjust folds legacy balances for user 7 only
+    assert_eq!(snap.adjust_unified_plex(90_001, -50), Some(150));
+    assert_eq!(snap.characters[&90_001].plex_balance, 0);
+    assert_eq!(snap.characters[&90_002].plex_balance, 0);
+    assert_eq!(snap.characters[&90_003].plex_balance, 50);
+    assert_eq!(snap.account_plex_vault[&7], 150);
+
+    // Overflow checks on adjust_unified_plex_for_user & adjust_plex_vault
+    assert_eq!(snap.adjust_unified_plex_for_user(7, i64::MAX), None);
+    snap.account_plex_vault.insert(7, i64::MAX);
+    assert_eq!(snap.adjust_plex_vault(90_001, 1), None);
+    snap.characters.get_mut(&90_003).unwrap().plex_balance = i64::MAX;
+    snap.account_plex_vault.insert(9, 1);
+    assert_eq!(snap.adjust_unified_plex_for_user(9, 0), None);
+}

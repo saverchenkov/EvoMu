@@ -339,3 +339,169 @@ fn test_cov_skills_index_fighters_and_cfsd_mutants() {
     assert!(sde.load_cfsd_nested("res:/staticdata/unknown_nested.fsdbinary").is_err());
 }
 
+#[test]
+fn test_cov_incremental_sqlite_table_errors_dbuff_fighter_and_skin_fallbacks() {
+    let real_conn = rusqlite::Connection::open_with_flags(
+        SdeRegistry::default_db_path(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("open real sde for schema inspection");
+    let mut ddl_stmt = real_conn
+        .prepare("SELECT name, sql FROM sqlite_master WHERE type='table' AND sql IS NOT NULL")
+        .expect("prepare sqlite_master");
+    let ddl_rows = ddl_stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .expect("query sqlite_master");
+    let mut ddls: HashMap<String, String> = HashMap::new();
+    for r in ddl_rows {
+        let (name, sql) = r.expect("ddl row");
+        ddls.insert(name, sql);
+    }
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "evomu_sde_inc_schema_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).expect("create temp inc schema dir");
+    let inc_db = tmp_dir.join("inc.sqlite");
+
+    {
+        let c = rusqlite::Connection::open(&inc_db).expect("create inc sqlite");
+        c.execute_batch(
+            "CREATE TABLE sde_meta (key TEXT PRIMARY KEY, value TEXT);
+             INSERT INTO sde_meta VALUES ('schema_version', '1');",
+        )
+        .expect("init sde_meta");
+    }
+
+    // Exact preparation order in sqlite_loader::load_uncached + sqlite_loader_skins::load_skin_tables
+    let load_order = [
+        "sde_resources",
+        "sde_categories",
+        "sde_groups",
+        "sde_types",
+        "sde_dogma_attributes",
+        "sde_dogma_effects",
+        "sde_type_materials",
+        "sde_blueprints",
+        "sde_regions",
+        "sde_constellations",
+        "sde_station_operations",
+        "sde_station_services",
+        "sde_factions",
+        "sde_npc_corporations",
+        "sde_stations",
+        "sde_solar_systems",
+        "sde_stargates",
+        "sde_celestials",
+        "sde_races",
+        "sde_bloodlines",
+        "sde_ancestries",
+        "sde_schools",
+        "sde_agents",
+        "sde_market_groups",
+        "sde_planet_schematics",
+        "sde_wormhole_types",
+        "sde_npc_spawn_groups",
+        "sde_clone_grades",
+        "sde_dbuff_collections",
+        "sde_fighter_abilities",
+        "sde_compressible_types",
+        "sde_type_lists",
+        "sde_dungeon_asteroid_counts",
+        "sde_dungeon_gas_types",
+        "sde_dynamic_item_attributes",
+        "sde_space_components",
+        "sde_missions",
+        "sde_dungeons",
+        "sde_epic_arcs",
+        "sde_node_graphs",
+        "sde_fighter_abilities_by_type",
+        "sde_skin_licenses",
+        "sde_skins",
+    ];
+
+    for table in load_order {
+        assert!(
+            SdeRegistry::open(&inc_db).is_err(),
+            "missing table {table} must fail SdeRegistry::open cleanly"
+        );
+        let c = rusqlite::Connection::open(&inc_db).expect("reopen inc sqlite");
+        c.execute_batch(&ddls[table])
+            .unwrap_or_else(|e| panic!("create {table}: {e}"));
+    }
+
+    // Trigger sqlite_loader_skins.rs L55 (`sde_skin_materials` present with wrong columns)
+    {
+        let c = rusqlite::Connection::open(&inc_db).expect("reopen for bad skin_materials");
+        c.execute_batch("CREATE TABLE sde_skin_materials (bad INT);")
+            .expect("create broken skin_materials");
+    }
+    assert!(SdeRegistry::open(&inc_db).is_err());
+
+    // Fix `sde_skin_materials` and insert malformed modifier / fighter slot JSON rows
+    // covering sqlite_loader.rs L914, L922, L936, L953, L1283, L1286
+    {
+        let c = rusqlite::Connection::open(&inc_db).expect("reopen to fix skin_materials");
+        c.execute_batch("DROP TABLE sde_skin_materials;")
+            .expect("drop broken skin_materials");
+        c.execute_batch(&ddls["sde_skin_materials"])
+            .expect("create valid skin_materials");
+        c.execute(
+            "INSERT INTO sde_dbuff_collections (dbuff_id, operation_name, data_json) VALUES (1, 'add', ?1)",
+            [r#"{"developerDescription":"test","aggregateMode":"Maximum","itemModifiers":[{}],"locationModifiers":[{}],"locationGroupModifiers":[{}],"locationRequiredSkillModifiers":[{}]}"#],
+        )
+        .expect("insert malformed dbuff");
+        c.execute(
+            "INSERT INTO sde_dbuff_collections (dbuff_id, operation_name, data_json) VALUES (2, 'add', ?1)",
+            [r#"{"developerDescription":"minimal","aggregateMode":"Minimum"}"#],
+        )
+        .expect("insert minimal dbuff");
+        c.execute(
+            "INSERT INTO sde_fighter_abilities_by_type (type_id, data_json) VALUES (999, ?1)",
+            [r#"{"abilitySlot0":{},"abilitySlot1":{"abilityID":1,"charges":{}},"abilitySlot2":{"abilityID":"bad"}}"#],
+        )
+        .expect("insert malformed fighter slots");
+        c.execute(
+            "INSERT INTO sde_fighter_abilities_by_type (type_id, data_json) VALUES (1000, '[]')",
+            [],
+        )
+        .expect("insert non-object fighter row");
+    }
+    let opened = SdeRegistry::open(&inc_db).expect("complete minimal sqlite opens");
+    assert_eq!(opened.dbuff_collections[&1].target_attribute_ids.len(), 0);
+    assert!(opened.dbuff_collections[&2].target_attribute_ids.is_empty());
+    assert_eq!(opened.fighter_abilities_by_type[&999].len(), 1);
+    assert!(opened.fighter_abilities_by_type[&999][0].charges.is_none());
+    assert!(opened.fighter_abilities_by_type[&1000].is_empty());
+
+    // Empty SQLite DB missing sde_celestials / sde_solar_systems + missing db path errors
+    // covering sqlite_loader_skins.rs L122, L159, L164, L231, L261
+    let empty_only_db = tmp_dir.join("empty_only.sqlite");
+    {
+        let _ = rusqlite::Connection::open(&empty_only_db).expect("create empty db");
+    }
+    let sde_empty_tables = SdeRegistry {
+        db_path: Some(empty_only_db),
+        ..SdeRegistry::default()
+    };
+    assert!(sde_empty_tables.celestials_in_system(30000142).is_empty());
+    assert!(sde_empty_tables.all_stars().is_empty());
+    assert_eq!(sde_empty_tables.location_solar_system(40000001), None);
+    assert!(sde_empty_tables.location_solar_system_map().is_empty());
+    assert!(sde_empty_tables.factions_owning_solar_systems().is_empty());
+
+    let sde_missing_db = SdeRegistry {
+        db_path: Some(tmp_dir.join("does_not_exist.sqlite")),
+        ..SdeRegistry::default()
+    };
+    assert!(sde_missing_db.celestials_in_system(30000142).is_empty());
+    assert!(sde_missing_db.all_stars().is_empty());
+    assert_eq!(sde_missing_db.location_solar_system(40000001), None);
+    assert!(sde_missing_db.location_solar_system_map().is_empty());
+    assert!(sde_missing_db.factions_owning_solar_systems().is_empty());
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+

@@ -109,7 +109,7 @@ fn router_session_guards_and_shutdown_flags() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn context_constructors_production_accounts_and_demo_world_fixtures() {
     let tmp_dir = std::env::temp_dir().join(format!("evomu_ctx_ctor_{}", Uuid::new_v4()));
     std::fs::create_dir_all(&tmp_dir).unwrap();
@@ -310,7 +310,7 @@ fn context_clocks_cooldowns_scans_skills_and_all_fleet_extras_branches() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn context_advance_secs_and_skill_queues_omega_lapse_alpha_caps_and_partial_training() {
     let base = 1_800_000_000_u64;
     let (ctx, _clock) = fast_test_context(base);
@@ -553,4 +553,267 @@ fn context_ship_fitting_cache_recalc_structure_fallback_and_charges_drones() {
         ball_id: 1, item_id: 1, type_id: 23055, owner_char_id: char_id, parent_ship_id: ship_id,
         tube_index: 0, squadron_size: 9, target_id: None, is_abandoned: false, mwd_active: false,
     };
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn skill_queue_alpha_caps_expired_jetcans_moon_decay_and_auto_offline() {
+    let (ctx, _clock) = fast_test_context(1_800_000_000);
+
+    let char_id = 90_000_001_i64;
+    let char2 = 90_000_002_i64;
+    let sys_id = 30_000_142_u32;
+
+    // 1. advance_skill_queues early guards: <= 0.0 / NaN, paused char, Alpha 5M SP cap mid-queue,
+    //    Alpha target_level > alpha_cap, and remaining_queue head started_at_unix = None.
+    ctx.advance_skill_queues(0.0);
+    ctx.advance_skill_queues(f64::NAN);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&char_id) {
+            c.clone_grade = 1; // Alpha
+            c.skill_points = 4_999_990.0;
+            c.free_skill_points = 0.0;
+        }
+        snap.skill_queues.insert(
+            char_id,
+            vec![
+                eve_db::SkillQueueEntry {
+                    type_id: 3300,
+                    target_level: 1,
+                    start_sp: 0.0,
+                    end_sp: 250.0,
+                    duration_seconds: 600.0,
+                    started_at_unix: Some(1_800_000_000),
+                },
+                eve_db::SkillQueueEntry {
+                    type_id: 3301,
+                    target_level: 1,
+                    start_sp: 0.0,
+                    end_sp: 250.0,
+                    duration_seconds: 600.0,
+                    started_at_unix: None,
+                },
+            ],
+        );
+        // Second char already paused -> skipped cleanly
+        snap.paused_skill_queues.insert(char2);
+        snap.skill_queues.insert(
+            char2,
+            vec![eve_db::SkillQueueEntry {
+                type_id: 3300,
+                target_level: 1,
+                start_sp: 0.0,
+                end_sp: 250.0,
+                duration_seconds: 600.0,
+                started_at_unix: None,
+            }],
+        );
+    });
+    ctx.advance_skill_queues(1_200.0);
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.paused_skill_queues.contains(&char_id));
+        assert!(snap.skill_queues[&char_id].len() >= 1);
+    });
+
+    // Alpha target_level > alpha_cap (level 5 on a skill capped lower)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.paused_skill_queues.remove(&char_id);
+        if let Some(c) = snap.characters.get_mut(&char_id) {
+            c.skill_points = 1_000.0;
+        }
+        snap.skill_queues.insert(
+            char_id,
+            vec![eve_db::SkillQueueEntry {
+                type_id: 3300,
+                target_level: 5,
+                start_sp: 0.0,
+                end_sp: 256_000.0,
+                duration_seconds: 100_000.0,
+                started_at_unix: None,
+            }],
+        );
+    });
+    ctx.advance_skill_queues(10.0);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.skill_queues[&char_id].first().and_then(|q| q.started_at_unix),
+            Some(1_800_000_000)
+        );
+    });
+
+    // 2. Expired jetcans, decayed moon extraction, and empty-composition moon survey probe
+    let jetcan_id = 955_001_i64;
+    let jetcan_loot_id = 955_002_i64;
+    let ast_id = 955_003_i64;
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let mk_ball = |id, tid| eve_destiny::Ball {
+        id,
+        type_id: tid,
+        position: glam::DVec3::ZERO,
+        velocity: glam::DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 1000.0,
+        radius: 50.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    };
+    sys_handle.try_spawn_ball_with_combat(mk_ball(jetcan_id, 23), eve_destiny::CombatState::default());
+    sys_handle.try_spawn_ball_with_combat(mk_ball(ast_id, 1230), eve_destiny::CombatState::default());
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            jetcan_id,
+            InventoryItemRecord {
+                item_id: jetcan_id,
+                type_id: 23, // group 12 Cargo Container
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            jetcan_loot_id,
+            InventoryItemRecord {
+                item_id: jetcan_loot_id,
+                type_id: 34,
+                owner_id: char_id,
+                location_id: jetcan_id,
+                flag: InventoryFlag::None,
+                quantity: 10,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.sp6_lifecycle.space_object_meta.insert(
+            jetcan_id,
+            eve_db::PersistedSpaceObjectMeta {
+                created_unix: Some(1_800_000_000 - 4_000),
+                ..Default::default()
+            },
+        );
+        snap.asteroids.insert(
+            ast_id,
+            eve_db::AsteroidRecord {
+                asteroid_id: ast_id,
+                solar_system_id: sys_id,
+                belt_id: 0,
+                type_id: 1230,
+                quantity: 100,
+                initial_quantity: 100,
+                position: (0.0, 0.0, 0.0),
+                radius: 50.0,
+            },
+        );
+        snap.moon_extractions.insert(
+            955_010,
+            eve_db::MoonExtractionRecord {
+                structure_id: 1_000_955_010,
+                moon_id: 40_000_001,
+                extraction_start_unix: 1_799_000_000,
+                chunk_arrival_unix: 1_799_500_000,
+                natural_decay_unix: 1_800_000_000 - 10,
+                status: "Ready".into(),
+                auto_fracture: false,
+                event_id: 955_010,
+                moon_ores: Vec::new(),
+                spawned_asteroid_ids: vec![ast_id],
+            },
+        );
+        if let Some(c) = snap.characters.get_mut(&char_id) {
+            c.station_id = None;
+            c.structure_id = None;
+            c.solar_system_id = 30_100_000; // Zarzakh -> empty moon composition
+        }
+    });
+    ctx.active_moon_probes.write().unwrap().push(crate::router::ActiveMoonSurveyProbe {
+        probe_id: 955_020,
+        probe_type_id: 30488,
+        owner_char_id: char_id,
+        solar_system_id: 30_100_000,
+        hit_moon_id: Some(40_000_001),
+        arrival_unix_secs: 1_800_000_000 - 1,
+    });
+    let _ = ctx.db.acquire_online_lock(1, 555, Some(char_id), true, 1_800_000_000);
+    ctx.advance_secs(1);
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&jetcan_id));
+        assert!(!snap.items.contains_key(&jetcan_loot_id));
+        assert!(!snap.asteroids.contains_key(&ast_id));
+        assert_eq!(snap.moon_extractions[&955_010].status, "Decayed");
+    });
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(notifs.iter().any(|n| n.event == "OnScanNoMaterials"));
+    assert!(notifs.iter().any(|n| n.event == "OnRemoveMoonProbe"));
+
+    // 3. get_or_rebuild_ship_fitting auto-offlines modules that exceed CPU/Powergrid
+    let clean_ship_id = 955_099_i64;
+    let oversized_mod_id = 955_090_i64;
+    let lo_mod_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| {
+            t.published
+                && t.category_id == 7
+                && t.effect_ids.contains(&11)
+                && !t.default_attributes.contains_key(&182)
+                && !t.default_attributes.contains_key(&1298)
+                && !t.default_attributes.contains_key(&1302)
+                && t.default_attributes
+                    .get(&eve_sde::attr_ids::CPU)
+                    .copied()
+                    .unwrap_or(0.0)
+                    > 0.0
+        })
+        .map(|t| t.type_id)
+        .unwrap_or(2046);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            clean_ship_id,
+            InventoryItemRecord {
+                item_id: clean_ship_id,
+                type_id: 587, // Rifter (3 mid, 3 low)
+                owner_id: char_id,
+                location_id: 60_003_760,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        let mut mod_rec = InventoryItemRecord {
+            item_id: oversized_mod_id,
+            type_id: lo_mod_tid,
+            owner_id: char_id,
+            location_id: clean_ship_id,
+            flag: InventoryFlag::LoSlot0,
+            quantity: 1,
+            singleton: true,
+            version: 1,
+            ..Default::default()
+        };
+        mod_rec
+            .dynamic_attributes
+            .insert(eve_sde::attr_ids::CPU, 99_999.0);
+        mod_rec
+            .dynamic_attributes
+            .insert(eve_sde::attr_ids::POWER, 99_999.0);
+        snap.items.insert(oversized_mod_id, mod_rec);
+        snap.module_online_states.insert(oversized_mod_id, true);
+        snap.module_active_states.insert(oversized_mod_id);
+    });
+    let fit = ctx.get_or_rebuild_ship_fitting(char_id, clean_ship_id).unwrap();
+    assert!(fit.modules.contains_key(&oversized_mod_id));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.module_online_states.get(&oversized_mod_id), Some(&false));
+        assert!(!snap.module_active_states.contains(&oversized_mod_id));
+    });
 }

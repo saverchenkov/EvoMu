@@ -564,3 +564,353 @@ fn handshake_state_machine_full_lifecycle_and_error_branches() {
     assert!(sm_bad_res_frame.step(&PyRep::None).is_err());
 }
 
+#[test]
+fn gps_transport_closed_and_crypto_request_edge_cases() {
+    // Non-string keys inside reason_args dict are ignored gracefully
+    let closed_non_str_arg = PyRep::Object {
+        type_name: "exceptions.GPSRemoteTransportClosed".into(),
+        args: Box::new(PyRep::Tuple(vec![
+            PyRep::String("Remote shutdown".into()),
+            PyRep::None,
+            PyRep::Dict(vec![
+                (PyRep::Integer(42), PyRep::String("ignored".into())),
+                (PyRep::String("kept".into()), PyRep::Integer(7)),
+            ]),
+        ])),
+    };
+    let parsed = GPSTransportClosed::from_pyrep(&closed_non_str_arg);
+    assert!(parsed.is_some());
+    if let Some(c) = parsed {
+        assert_eq!(c.reason, "Remote shutdown");
+        assert_eq!(c.reason_code, None);
+        assert_eq!(c.reason_args.len(), 1);
+        assert_eq!(c.reason_args.get("kept"), Some(&PyRep::Integer(7)));
+    }
+
+    // ObjectEx with non-string class name or non-string reason -> None
+    let objex_bad_class = PyRep::ObjectEx {
+        is_type_2: false,
+        header: Box::new(PyRep::Tuple(vec![PyRep::Integer(1), PyRep::String("x".into())])),
+        list: Vec::new(),
+        dict: Vec::new(),
+    };
+    assert_eq!(GPSTransportClosed::from_pyrep(&objex_bad_class), None);
+
+    let objex_non_str_reason = PyRep::ObjectEx {
+        is_type_2: false,
+        header: Box::new(PyRep::Tuple(vec![
+            PyRep::Token("exceptions.GPSTransportClosed".into()),
+            PyRep::Tuple(vec![PyRep::Integer(123)]),
+        ])),
+        list: Vec::new(),
+        dict: Vec::new(),
+    };
+    assert_eq!(GPSTransportClosed::from_pyrep(&objex_non_str_reason), None);
+
+    // CryptoRequestPacket: non-string key_version -> None, non-string dict keys ignored
+    assert_eq!(
+        CryptoRequestPacket::from_pyrep(&PyRep::Tuple(vec![
+            PyRep::Integer(1),
+            PyRep::Dict(Vec::new()),
+        ])),
+        None
+    );
+    let cr_mixed_keys = PyRep::Tuple(vec![
+        PyRep::String("placebo".into()),
+        PyRep::Dict(vec![
+            (PyRep::Integer(99), PyRep::Integer(1)),
+            (PyRep::String("ok".into()), PyRep::Bool(true)),
+        ]),
+    ]);
+    let cr_parsed = CryptoRequestPacket::from_pyrep(&cr_mixed_keys);
+    assert!(cr_parsed.is_some());
+    if let Some(cr) = cr_parsed {
+        assert_eq!(cr.key_params.len(), 1);
+        assert_eq!(cr.key_params.get("ok"), Some(&PyRep::Bool(true)));
+    }
+
+    // HandshakeCommand boundary shapes
+    assert_eq!(
+        HandshakeCommand::from_pyrep(&PyRep::Tuple(vec![
+            PyRep::Integer(0),
+            PyRep::String("QC".into()),
+        ])),
+        None
+    );
+    assert_eq!(
+        HandshakeCommand::from_pyrep(&PyRep::Tuple(vec![
+            PyRep::None,
+            PyRep::String("VK".into()),
+        ])),
+        None
+    );
+    assert_eq!(
+        HandshakeCommand::from_pyrep(&PyRep::Tuple(vec![
+            PyRep::None,
+            PyRep::String("QC".into()),
+            PyRep::String("extra".into()),
+        ])),
+        None
+    );
+}
+
+#[test]
+fn crypto_challenge_server_hs_and_ack_fallback_branches() {
+    // CryptoChallengePacket malformed shapes and missing keys
+    assert_eq!(CryptoChallengePacket::from_pyrep(&PyRep::None), None);
+    assert_eq!(
+        CryptoChallengePacket::from_pyrep(&PyRep::Tuple(vec![PyRep::Bytes(vec![1])])),
+        None
+    );
+    assert_eq!(
+        CryptoChallengePacket::from_pyrep(&PyRep::Tuple(vec![
+            PyRep::Integer(7),
+            PyRep::Dict(Vec::new()),
+        ])),
+        None
+    );
+    assert_eq!(
+        CryptoChallengePacket::from_pyrep(&PyRep::Tuple(vec![
+            PyRep::Buffer(vec![1, 2]),
+            PyRep::Integer(7),
+        ])),
+        None
+    );
+    // Missing boot_version or non-numeric boot_version -> None
+    assert_eq!(
+        CryptoChallengePacket::from_pyrep(&PyRep::Tuple(vec![
+            PyRep::Buffer(vec![1, 2]),
+            PyRep::Dict(vec![
+                (PyRep::String("macho_version".into()), PyRep::Integer(496)),
+                (PyRep::String("boot_version".into()), PyRep::String("bad".into())),
+            ]),
+        ])),
+        None
+    );
+
+    // extract_password_str variants: invalid UTF-8 bytes, Tuple wrapper, Object with non-tuple
+    assert_eq!(
+        extract_password_str(&PyRep::Bytes(vec![0xFF, 0xFE])),
+        None
+    );
+    assert_eq!(
+        extract_password_str(&PyRep::Tuple(vec![PyRep::String("tup_pw".into())])).as_deref(),
+        Some("tup_pw")
+    );
+    assert_eq!(
+        extract_password_str(&PyRep::Object {
+            type_name: "util.PasswordString".into(),
+            args: Box::new(PyRep::None),
+        }),
+        None
+    );
+
+    // validate_version boundary: boot_version below expected by > 1e-4, exact build match
+    let expected = VersionExchange::default();
+    let mut ver_low = CryptoChallengePacket::new_password_login("u", "p");
+    ver_low.boot_version = expected.version_number - 2e-4;
+    assert_eq!(
+        ver_low.validate_version(&expected).err().and_then(|e| e.reason_code),
+        Some("HANDSHAKE_INCOMPATIBLEVERSION".into())
+    );
+    let mut build_exact = CryptoChallengePacket::new_password_login("u", "p");
+    build_exact.boot_build = expected.build_version;
+    assert!(build_exact.validate_version(&expected).is_ok());
+
+    // CryptoServerHandshake::from_pyrep edge cases (Buffer/String, integer verification & boot_version, omitted defaults)
+    let sh_minimal = PyRep::Tuple(vec![
+        PyRep::Buffer(b"srv".to_vec()),
+        PyRep::Tuple(vec![PyRep::String("code".into()), PyRep::Integer(1)]),
+        PyRep::None,
+        PyRep::Dict(vec![
+            (PyRep::String("challenge_responsehash".into()), PyRep::String("h".into())),
+            (PyRep::String("macho_version".into()), PyRep::Integer(496)),
+            (PyRep::String("boot_version".into()), PyRep::Integer(24)),
+            (PyRep::String("boot_build".into()), PyRep::Integer(3624425)),
+            (PyRep::String("boot_codename".into()), PyRep::String("V24.01".into())),
+            (PyRep::String("boot_region".into()), PyRep::String("ccp".into())),
+        ]),
+    ]);
+    let parsed_sh = CryptoServerHandshake::from_pyrep(&sh_minimal);
+    assert!(parsed_sh.is_some());
+    if let Some(sh) = parsed_sh {
+        assert_eq!(sh.server_challenge, b"srv");
+        assert_eq!(sh.func_marshaled_code, b"code");
+        assert!(sh.verification);
+        assert_eq!(sh.boot_version, 24.0);
+        assert_eq!(sh.cluster_user_count, 1);
+        assert_eq!(sh.proxy_node_id, 888444);
+        assert_eq!(sh.user_logon_queue_position, 1);
+    }
+
+    // Invalid CryptoServerHandshake shapes
+    assert_eq!(
+        CryptoServerHandshake::from_pyrep(&PyRep::Tuple(vec![
+            PyRep::Integer(1),
+            PyRep::Tuple(vec![PyRep::Bytes(vec![]), PyRep::Bool(false)]),
+            PyRep::Dict(vec![]),
+            PyRep::Dict(vec![]),
+        ])),
+        None
+    );
+    assert_eq!(
+        CryptoServerHandshake::from_pyrep(&PyRep::Tuple(vec![
+            PyRep::String("s".into()),
+            PyRep::None,
+            PyRep::Dict(vec![]),
+            PyRep::Dict(vec![]),
+        ])),
+        None
+    );
+    assert_eq!(
+        CryptoServerHandshake::from_pyrep(&PyRep::Tuple(vec![
+            PyRep::String("s".into()),
+            PyRep::Tuple(vec![PyRep::Integer(1), PyRep::None]),
+            PyRep::Dict(vec![]),
+            PyRep::Dict(vec![]),
+        ])),
+        None
+    );
+    assert_eq!(
+        CryptoServerHandshake::from_pyrep(&PyRep::Tuple(vec![
+            PyRep::String("s".into()),
+            PyRep::Tuple(vec![PyRep::Bytes(vec![]), PyRep::None]),
+            PyRep::Dict(vec![]),
+            PyRep::None,
+        ])),
+        None
+    );
+
+    // CryptoHandshakeResult Buffer & fallback branches
+    let res_buf = PyRep::Tuple(vec![
+        PyRep::String("999".into()),
+        PyRep::Buffer(b"out".to_vec()),
+        PyRep::None,
+    ]);
+    let parsed_res = CryptoHandshakeResult::from_pyrep(&res_buf);
+    assert!(parsed_res.is_some());
+    if let Some(r) = parsed_res {
+        assert_eq!(r.func_output, b"out");
+    }
+    let res_fallback = PyRep::Tuple(vec![
+        PyRep::String("999".into()),
+        PyRep::Integer(123),
+        PyRep::Bool(true),
+    ]);
+    let parsed_res2 = CryptoHandshakeResult::from_pyrep(&res_fallback);
+    assert!(parsed_res2.is_some());
+    if let Some(r) = parsed_res2 {
+        assert!(r.func_output.is_empty());
+        assert_eq!(r.func_result, PyRep::Bool(true));
+    }
+
+    // CryptoHandshakeAck: computer_hash without access_token, and omitted optional defaults
+    let ack_hw_only = CryptoHandshakeAck {
+        session_id: 1,
+        user_id: 2,
+        role: 3,
+        language_id: "EN".into(),
+        user_type: 30,
+        max_session_time: None,
+        address: "127.0.0.1:1".into(),
+        in_detention: None,
+        client_id: 4,
+        client_hash: None,
+        live_updates: Vec::new(),
+        access_token: None,
+        computer_hash: Some("hw-hash".into()),
+    };
+    let ack_rep = ack_hw_only.to_pyrep();
+    assert_eq!(ack_rep.dict_get("access_token"), None);
+    assert_eq!(
+        ack_rep.dict_get("computer_hash").and_then(|v| v.as_str()),
+        Some("hw-hash")
+    );
+    let ack_dec = CryptoHandshakeAck::from_pyrep(&ack_rep);
+    assert_eq!(ack_dec, Some(ack_hw_only));
+
+    // Omitted optional keys in session_init default cleanly
+    let ack_minimal = PyRep::Dict(vec![
+        (PyRep::String("sessionID".into()), PyRep::Integer(10)),
+        (PyRep::String("user_clientid".into()), PyRep::Integer(20)),
+        (
+            PyRep::String("session_init".into()),
+            PyRep::Dict(vec![
+                (PyRep::String("userid".into()), PyRep::Integer(30)),
+                (PyRep::String("role".into()), PyRep::Integer(40)),
+                (PyRep::String("inDetention".into()), PyRep::None),
+            ]),
+        ),
+    ]);
+    let parsed_min = CryptoHandshakeAck::from_pyrep(&ack_minimal);
+    assert!(parsed_min.is_some());
+    if let Some(a) = parsed_min {
+        assert_eq!(a.language_id, "EN");
+        assert_eq!(a.user_type, 30);
+        assert_eq!(a.address, "");
+        assert_eq!(a.in_detention, None);
+        assert!(a.live_updates.is_empty());
+    }
+    assert_eq!(
+        CryptoHandshakeAck::from_pyrep(&PyRep::Dict(vec![
+            (PyRep::String("sessionID".into()), PyRep::Integer(1)),
+            (PyRep::String("user_clientid".into()), PyRep::Integer(2)),
+            (PyRep::String("session_init".into()), PyRep::None),
+        ])),
+        None
+    );
+}
+
+#[test]
+fn handshake_state_machine_retry_bounds_and_missing_identity_error() {
+    let ver = VersionExchange::default();
+
+    // 1. In AwaitingCryptoChallenge, empty username with None password/token goes straight to NeedsAuthentication
+    let mut sm = MachoHandshakeStateMachine::new(ver.clone(), MACHO_PROXY_NODE_ID, 700, 800);
+    assert!(sm.step(&ver.to_pyrep()).is_ok());
+    assert!(sm
+        .step(&HandshakeCommand::CryptoRequest(CryptoRequestPacket::placebo()).to_pyrep())
+        .is_ok());
+
+    let mut empty_user = CryptoChallengePacket::new_password_login("", "secret");
+    empty_user.user_password = None;
+    let out_empty = sm.step(&empty_user.to_pyrep());
+    assert!(matches!(out_empty, Ok(HandshakeStepOutput::NeedsAuthentication(_))));
+
+    // 2. Password attempt 1 triggers passwordVersion = 1, attempt 2 with password=None does NOT loop
+    let mut sm_retry = MachoHandshakeStateMachine::new(ver.clone(), MACHO_PROXY_NODE_ID, 701, 801);
+    assert!(sm_retry.step(&ver.to_pyrep()).is_ok());
+    assert!(sm_retry
+        .step(&HandshakeCommand::CryptoRequest(CryptoRequestPacket::placebo()).to_pyrep())
+        .is_ok());
+    let mut attempt = CryptoChallengePacket::new_password_login("pilot", "secret");
+    attempt.user_password = None;
+    let first = sm_retry.step(&attempt.to_pyrep());
+    assert!(matches!(first, Ok(HandshakeStepOutput::SendFramesAndContinue(_))));
+    let second = sm_retry.step(&attempt.to_pyrep());
+    assert!(matches!(second, Ok(HandshakeStepOutput::NeedsAuthentication(_))));
+
+    // 3. Missing pending_identity in AwaitingHandshakeResult returns HANDSHAKE_FAILEDVERIFICATION
+    let id = HandshakeIdentity {
+        user_id: 55,
+        role: crate::service_roles::ROLE_PLAYER_DEFAULT,
+        language_id: "EN".into(),
+        user_type: 30,
+        address: "127.0.0.1:1".into(),
+        access_token: None,
+        computer_hash: None,
+    };
+    let mut chal_ok = CryptoChallengePacket::new_password_login("pilot", "secret");
+    chal_ok.user_password = Some("secret".into());
+    assert!(sm_retry.complete_challenge(&chal_ok, Ok(id), 1).is_ok());
+    sm_retry.set_pending_identity_for_test(None);
+    let good_res =
+        CryptoHandshakeResult::for_server_challenge(&vec![0u8; DEFAULT_HANDSHAKE_PADDING_LEN]);
+    let missing_err = sm_retry.step(&good_res.to_pyrep());
+    assert_eq!(
+        missing_err.err().and_then(|e| e.reason_code),
+        Some("HANDSHAKE_FAILEDVERIFICATION".into())
+    );
+    assert!(matches!(sm_retry.phase, HandshakePhase::Failed(_)));
+}
+

@@ -434,3 +434,225 @@ async fn test_sso_tcp_empty_eof_oversized_headers_and_bug_attachment_limit() {
 
     server_task.await.unwrap();
 }
+
+#[tokio::test]
+async fn test_sso_esi_delegation_authorize_edge_branches_and_tcp_100_continue_body_timeout() {
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let (verifier, challenge) = test_pkce_pair();
+    let empty_hdrs = HashMap::new();
+
+    // 1. ESI delegation via handle_http_request_with_ctx across status codes and context switch
+    let r_esi_200 = handle_http_request_with_ctx(&ctx, "GET", "/latest/status", &empty_hdrs, b"");
+    assert_eq!(r_esi_200.status_code, 200);
+    assert_eq!(r_esi_200.status_text, "OK");
+    assert!(!r_esi_200
+        .headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("content-type") || k.eq_ignore_ascii_case("content-length")));
+
+    let r_esi_405 = handle_http_request_with_ctx(&ctx, "DELETE", "/latest/status", &empty_hdrs, b"");
+    assert_eq!(r_esi_405.status_code, 405);
+    assert_eq!(r_esi_405.status_text, "Method Not Allowed");
+
+    let r_esi_400 = handle_http_request_with_ctx(&ctx, "GET", "/v1/status/?page=0", &empty_hdrs, b"");
+    assert_eq!(r_esi_400.status_code, 400);
+
+    let r_esi_401 = handle_http_request_with_ctx(
+        &ctx,
+        "GET",
+        "/latest/characters/90000001/wallet",
+        &empty_hdrs,
+        b"",
+    );
+    assert_eq!(r_esi_401.status_code, 401);
+    assert_eq!(r_esi_401.status_text, "Unauthorized");
+
+    let r_esi_404 =
+        handle_http_request_with_ctx(&ctx, "GET", "/v1/does_not_exist_endpoint", &empty_hdrs, b"");
+    assert_eq!(r_esi_404.status_code, 404);
+
+    // Switching ServerContext swaps the cached EsiRouter cleanly
+    let ctx2 = Arc::new(ServerContext::new());
+    let r_ctx2 = handle_http_request_with_ctx(&ctx2, "GET", "/latest/status", &empty_hdrs, b"");
+    assert_eq!(r_ctx2.status_code, 200);
+
+    // 2. OAuth authorize edge branches: unsupported_response_type, bad redirect_uri, plain PKCE, redirect with '?' + encoded state, Basic auth
+    let bad_rt = handle_http_request(
+        &ctx,
+        "POST",
+        "/v2/oauth/authorize",
+        &empty_hdrs,
+        b"response_type=token&client_id=c1&redirect_uri=http://127.0.0.1/cb&code_challenge=abc",
+    );
+    assert_eq!(bad_rt.status_code, 400);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&bad_rt.body).unwrap()["error"],
+        json!("unsupported_response_type")
+    );
+
+    let bad_redir = handle_http_request(
+        &ctx,
+        "POST",
+        "/v2/oauth/authorize",
+        &empty_hdrs,
+        b"client_id=c1&redirect_uri=https://evil.example/cb&code_challenge=abc",
+    );
+    assert_eq!(bad_redir.status_code, 400);
+
+    let bad_pkce_method = handle_http_request(
+        &ctx,
+        "POST",
+        "/v2/oauth/authorize",
+        &empty_hdrs,
+        b"client_id=c1&redirect_uri=http://127.0.0.1/cb&code_challenge=abc&code_challenge_method=plain",
+    );
+    assert_eq!(bad_pkce_method.status_code, 400);
+
+    // Basic auth credentials + redirect URI already containing '?' + percent-encoded state
+    let mut basic_hdrs = HashMap::new();
+    // Base64("demo:demo-secret") == "ZGVtbzpkZW1vLXNlY3JldA=="
+    basic_hdrs.insert(
+        "authorization".to_string(),
+        "Basic ZGVtbzpkZW1vLXNlY3JldA==".to_string(),
+    );
+    let q_auth = handle_http_request(
+        &ctx,
+        "POST",
+        "/v2/oauth/authorize",
+        &basic_hdrs,
+        format!(
+            "client_id=eve-cli&redirect_uri=http%3A%2F%2F127.0.0.1%2Fcb%3Ffoo%3Dbar&code_challenge={challenge}&code_challenge_method=S256&state=a%2Bb%20c"
+        )
+        .as_bytes(),
+    );
+    assert_eq!(q_auth.status_code, 302);
+    let q_json: serde_json::Value = serde_json::from_slice(&q_auth.body).unwrap();
+    let redir_loc = q_json["redirect_uri"].as_str().unwrap();
+    assert!(redir_loc.starts_with("http://127.0.0.1/cb?foo=bar&code="));
+    assert!(redir_loc.contains("&state=a%2Bb%20c"));
+
+    // Invalid JSON / unsupported_grant_type / missing client_id on /v2/oauth/token
+    let tok_no_cid = handle_http_request(
+        &ctx,
+        "POST",
+        "/v2/oauth/token",
+        &empty_hdrs,
+        b"grant_type=authorization_code",
+    );
+    assert_eq!(tok_no_cid.status_code, 400);
+
+    let tok_bad_grant = handle_http_request(
+        &ctx,
+        "POST",
+        "/v2/oauth/token",
+        &empty_hdrs,
+        b"client_id=eve-cli&grant_type=client_credentials",
+    );
+    assert_eq!(tok_bad_grant.status_code, 400);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&tok_bad_grant.body).unwrap()["error"],
+        json!("unsupported_grant_type")
+    );
+
+    // Banned and suspended account checks directly on /v2/oauth/authorize
+    let _u_ban = ctx.db.provision_player_account("sso_auth_ban", "pw");
+    ctx.db
+        .ban_account("sso_auth_ban", 1_800_005_000, "ban-auth")
+        .unwrap();
+    let ban_auth = handle_http_request(
+        &ctx,
+        "POST",
+        "/v2/oauth/authorize",
+        &empty_hdrs,
+        format!(
+            "client_id=eve-cli&redirect_uri=http://127.0.0.1/cb&code_challenge={challenge}&username=sso_auth_ban&password=pw"
+        )
+        .as_bytes(),
+    );
+    assert_eq!(ban_auth.status_code, 403);
+    assert!(String::from_utf8_lossy(&ban_auth.body).contains("banned_until_unix"));
+
+    let _u_susp = ctx.db.provision_player_account("sso_auth_susp", "pw");
+    ctx.db
+        .suspend_account("sso_auth_susp", 1_800_005_000, "susp-auth")
+        .unwrap();
+    let susp_auth = handle_http_request(
+        &ctx,
+        "POST",
+        "/v2/oauth/authorize",
+        &empty_hdrs,
+        format!(
+            "client_id=eve-cli&redirect_uri=http://127.0.0.1/cb&code_challenge={challenge}&username=sso_auth_susp&password=pw"
+        )
+        .as_bytes(),
+    );
+    assert_eq!(susp_auth.status_code, 403);
+    assert!(String::from_utf8_lossy(&susp_auth.body).contains("suspended_until_unix"));
+
+    // Exchange code obtained via Basic auth + query-bearing redirect_uri
+    let code = q_json["code"].as_str().unwrap();
+    let ok_tok = handle_http_request(
+        &ctx,
+        "POST",
+        "/v2/oauth/token",
+        &empty_hdrs,
+        format!("client_id=eve-cli&grant_type=authorization_code&code={code}&code_verifier={verifier}&redirect_uri=http%3A%2F%2F127.0.0.1%2Fcb%3Ffoo%3Dbar")
+            .as_bytes(),
+    );
+    assert_eq!(ok_tok.status_code, 200);
+
+    // 3. TCP Expect: 100-continue followed by complete body, plus body-read timeout
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let (srv_acc1, cli_res1) = tokio::join!(listener.accept(), TcpStream::connect(addr));
+    let (srv1, _) = srv_acc1.unwrap();
+    let mut cli1 = cli_res1.unwrap();
+    let ctx_tcp = Arc::clone(&ctx);
+    let srv_task1 = tokio::spawn(async move {
+        let _ = handle_http_connection_with_timeout(
+            srv1,
+            ctx_tcp,
+            std::time::Duration::from_millis(500),
+        )
+        .await;
+    });
+    let body_payload = b"grant_type=unknown";
+    cli1.write_all(
+        format!(
+            "POST /v2/oauth/token HTTP/1.1\r\nHost: 127.0.0.1\r\nExpect: 100-continue\r\nContent-Length: {}\r\n\r\n",
+            body_payload.len()
+        )
+        .as_bytes(),
+    )
+    .await
+    .unwrap();
+    let mut cont_buf = [0u8; 64];
+    let n_cont = cli1.read(&mut cont_buf).await.unwrap();
+    assert!(String::from_utf8_lossy(&cont_buf[..n_cont]).starts_with("HTTP/1.1 100 Continue"));
+    cli1.write_all(body_payload).await.unwrap();
+    let mut final_resp = Vec::new();
+    cli1.read_to_end(&mut final_resp).await.unwrap();
+    assert!(String::from_utf8_lossy(&final_resp).contains("400 Bad Request"));
+    srv_task1.await.unwrap();
+
+    // 4. Stalled body after headers triggers body-read timeout and exits cleanly
+    let (srv_acc2, cli_res2) = tokio::join!(listener.accept(), TcpStream::connect(addr));
+    let (srv2, _) = srv_acc2.unwrap();
+    let mut cli2 = cli_res2.unwrap();
+    cli2.write_all(b"POST /v2/oauth/token HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 200\r\n\r\npartial")
+        .await
+        .unwrap();
+    let timed = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        handle_http_connection_with_timeout(
+            srv2,
+            Arc::clone(&ctx),
+            std::time::Duration::from_millis(35),
+        ),
+    )
+    .await;
+    assert!(timed.is_ok());
+    assert!(timed.unwrap().is_ok());
+}

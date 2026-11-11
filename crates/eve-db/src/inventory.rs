@@ -600,17 +600,23 @@ impl WorldRepository {
         }
         self.try_with_mut_snapshot(|guard| {
             // Check if existing non-singleton item stack exists at location/flag (ignoring courier cargo stacks)
-            if let Some(existing) = guard.items.values_mut().find(|it| {
+            let existing_id = guard.items.values().find(|it| {
                 it.owner_id == owner_id
                     && it.location_id == location_id
                     && it.flag == flag
                     && it.type_id == type_id
                     && !it.singleton
                     && !guard.item_custom_names.get(&it.item_id).map_or(false, |tag| tag.starts_with("courier_cargo:"))
-            }) {
-                existing.quantity = existing.quantity.saturating_add(quantity as i32);
-                existing.version += 1;
-                return Ok(existing.clone());
+            }).map(|it| it.item_id);
+            if let Some(existing_id) = existing_id {
+                let updated = {
+                    let existing = guard.items.get_mut(&existing_id).unwrap();
+                    existing.quantity = existing.quantity.saturating_add(quantity as i32);
+                    existing.version += 1;
+                    existing.clone()
+                };
+                guard.mark_item_dirty(existing_id);
+                return Ok(updated);
             }
 
             let item_id = guard.next_entity_id;
@@ -631,6 +637,7 @@ impl WorldRepository {
                 blueprint_runs_remaining: None,
             };
             guard.items.insert(item_id, item.clone());
+            guard.mark_item_dirty(item_id);
             Ok(item)
         })
     }

@@ -745,3 +745,7 @@ mod tests {
 #[cfg(test)] #[path = "formulas_extra_tests.rs"]
 mod formulas_extra_tests;
 
+#[cfg(test)]
+#[path = "formulas_edges_tests.rs"]
+mod formulas_edges_tests;
+

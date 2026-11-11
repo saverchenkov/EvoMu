@@ -278,3 +278,92 @@ fn test_gateway_frame_protobuf_wire_and_pyrep_roundtrips_and_errors() {
         Err(ProtoError::UnexpectedEof)
     );
 }
+
+#[test]
+fn test_proto_error_rmp_from_rowset_header_fallbacks_and_util_row_dict_get_misses() {
+    // 1. From<rmp_serde::encode::Error> & From<rmp_serde::decode::Error> for ProtoError (lib.rs L71-73, L77-79)
+    struct FailingSerialize;
+    impl serde::Serialize for FailingSerialize {
+        fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("forced msgpack encode failure"))
+        }
+    }
+    let enc_err = rmp_serde::to_vec(&FailingSerialize).expect_err("must fail serialization");
+    let proto_enc: ProtoError = enc_err.into();
+    assert!(matches!(proto_enc, ProtoError::MsgPackEncode(ref s) if s.contains("forced msgpack encode failure")));
+
+    let dec_err = rmp_serde::from_slice::<PyRep>(&[0xC1]).expect_err("0xC1 is invalid msgpack marker");
+    let proto_dec: ProtoError = dec_err.into();
+    assert!(matches!(proto_dec, ProtoError::MsgPackDecode(_)));
+
+    // 2. is_crowset / is_cindexed_rowset / crowset_rows / cindexed_rowset_entries fallback paths (L223-224, L247-248)
+    for bad in [
+        PyRep::ObjectEx {
+            is_type_2: false,
+            header: Box::new(PyRep::Tuple(vec![PyRep::Tuple(vec![PyRep::Token("dbutil.CRowset".into())])])),
+            list: vec![PyRep::Integer(1)],
+            dict: vec![(PyRep::Integer(1), PyRep::Integer(2))],
+        },
+        PyRep::ObjectEx {
+            is_type_2: true,
+            header: Box::new(PyRep::Integer(99)),
+            list: vec![PyRep::Integer(1)],
+            dict: vec![(PyRep::Integer(1), PyRep::Integer(2))],
+        },
+        PyRep::ObjectEx {
+            is_type_2: true,
+            header: Box::new(PyRep::Tuple(vec![PyRep::Integer(1)])),
+            list: vec![PyRep::Integer(1)],
+            dict: vec![(PyRep::Integer(1), PyRep::Integer(2))],
+        },
+        PyRep::ObjectEx {
+            is_type_2: true,
+            header: Box::new(PyRep::Tuple(vec![PyRep::Tuple(vec![PyRep::Token("other.Type".into())])])),
+            list: vec![PyRep::Integer(1)],
+            dict: vec![(PyRep::Integer(1), PyRep::Integer(2))],
+        },
+    ] {
+        assert!(!bad.is_crowset());
+        assert!(!bad.is_cindexed_rowset());
+        assert!(bad.crowset_rows().is_none());
+        assert!(bad.cindexed_rowset_entries().is_none());
+    }
+
+    // 3. dict_get on util.Row missing key & short vals & non-Tuple fallback (lib.rs L327-330)
+    let short_util_row = PyRep::Object {
+        type_name: "util.Row".into(),
+        args: Box::new(PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::String("colA".into()), PyRep::String("colB".into())]),
+            PyRep::List(vec![PyRep::Integer(10)]), // no value at idx 1
+        ])),
+    };
+    assert_eq!(short_util_row.dict_get("colA"), Some(&PyRep::Integer(10)));
+    assert_eq!(short_util_row.dict_get("colB"), None);
+    assert_eq!(short_util_row.dict_get("absent"), None);
+
+    let non_tuple_util_row = PyRep::Object {
+        type_name: "Row".into(),
+        args: Box::new(PyRep::Dict(vec![(
+            PyRep::String("fallbackKey".into()),
+            PyRep::Integer(77),
+        )])),
+    };
+    assert_eq!(
+        non_tuple_util_row.dict_get("fallbackKey"),
+        Some(&PyRep::Integer(77))
+    );
+    assert_eq!(non_tuple_util_row.dict_get("missing"), None);
+
+    // util.Row with Tuple args where (first, second) are NOT (List, List) (lib.rs L327)
+    let non_list_tuple_util_row = PyRep::Object {
+        type_name: "util.Row".into(),
+        args: Box::new(PyRep::Tuple(vec![PyRep::Dict(vec![(
+            PyRep::String("k".into()),
+            PyRep::Integer(55),
+        )])])),
+    };
+    assert_eq!(
+        non_list_tuple_util_row.dict_get("k"),
+        Some(&PyRep::Integer(55))
+    );
+}

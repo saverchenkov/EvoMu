@@ -36,7 +36,7 @@ fn test_ctx() -> ServerContext {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn downtime_purges_npc_wreck_children_container_lifetimes_and_preserves_player_wrecks() {
     let ctx = test_ctx();
     let sys_id = 30_000_142u32;
@@ -287,4 +287,102 @@ async fn downtime_purges_npc_wreck_children_container_lifetimes_and_preserves_pl
             .missions_awaiting_downtime_respawn
             .contains(&(char_id, agent_accepted)));
     });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn downtime_probe_recovery_cargo_fallback_expired_missing_ship_and_safe_logoff_disconnect() {
+    let ctx = test_ctx();
+    let now_unix = 1_800_000_000_u64;
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(now_unix)));
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let full_ship_id = 955_888_002_i64;
+    let missing_ship_id = 955_888_999_i64;
+    let sys_id = 30_000_142_u32;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            full_ship_id,
+            InventoryItemRecord {
+                item_id: full_ship_id,
+                type_id: 587, // Rifter
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        // Fill full_ship_id cargo so probe cannot fit
+        snap.items.insert(
+            955_888_010,
+            InventoryItemRecord {
+                item_id: 955_888_010,
+                type_id: 34,
+                owner_id: char_id,
+                location_id: full_ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 100_000,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mk_probe = |probe_id, sid, state, launched| crate::router::ActiveScannerProbe {
+        probe_id,
+        probe_type_id: 30013,
+        owner_char_id: char_id,
+        ship_id: sid,
+        launcher_module_id: 0,
+        solar_system_id: sys_id,
+        position: [0.0; 3],
+        destination: [0.0; 3],
+        range_step: 1,
+        scan_range_m: 1_000_000.0,
+        base_sensor_strength: 40.0,
+        max_flight_time_s: 3600.0,
+        launched_at_unix: launched,
+        state,
+        warp_end_ft: None,
+    };
+
+    {
+        let mut map = ctx.active_scanner_probes.write().unwrap();
+        // 1. Expired probe (purged)
+        map.insert(955_901, mk_probe(955_901, ship_id, 1, now_unix - 4_000));
+        // 2. Missing ship probe (unrecovered)
+        map.insert(955_902, mk_probe(955_902, missing_ship_id, 1, now_unix));
+        // 3 & 4. Two valid probes for ship_id with no launcher -> Cargo fallback (creates stack + merges stack)
+        map.insert(955_903, mk_probe(955_903, ship_id, 1, now_unix));
+        map.insert(955_904, mk_probe(955_904, ship_id, 1, now_unix));
+        // 5. Full cargo ship probe -> unrecovered
+        map.insert(955_905, mk_probe(955_905, full_ship_id, 1, now_unix));
+    }
+
+    let (recovered, purged) =
+        crate::sp6_lifecycle::cluster_tick_downtime::recover_scanner_probes_on_downtime(&ctx);
+    assert_eq!(recovered, 2);
+    assert_eq!(purged, 1);
+    assert!(ctx.active_scanner_probes.read().unwrap().contains_key(&955_902));
+    assert!(ctx.active_scanner_probes.read().unwrap().contains_key(&955_905));
+
+    // Test disconnect_safe_logoff_sessions with active online session and bound_objects entry
+    ctx.db
+        .acquire_online_lock(1, 888, Some(char_id), true, now_unix)
+        .unwrap();
+    let sess = eve_machonet::SessionState {
+        session_id: 889,
+        user_id: Some(1),
+        character_id: Some(char_id),
+        solar_system_id: Some(sys_id),
+        ..Default::default()
+    };
+    let _ = ctx.bind_object(&sess, "beyonce", sys_id as i64);
+    crate::sp6_lifecycle::cluster_tick_downtime::disconnect_safe_logoff_sessions(&ctx, char_id);
+    assert!(ctx.db.get_online_session(1).is_none());
+    assert!(ctx.bound_objects.read().unwrap().is_empty());
 }

@@ -580,6 +580,7 @@ impl Ballpark {
         // Warping balls stay in their departure bubble throughout Aligning, Accelerating, and Cruising
         // and only transition once Decelerating (or landing) inside their destination grid, avoiding
         // orphan intermediate GridBubbles and spurious mid-warp AddBalls/RemoveBalls (`DestinyManager.cpp:365-380`).
+        let mut grids_to_contract: Vec<u64> = Vec::new();
         for &ball_id in &dynamic_ids {
             let Some((new_pos, mode)) = self
                 .balls
@@ -604,7 +605,9 @@ impl Ballpark {
                 if !is_warping && !exited_warp {
                     if let Some(gid) = old_gid {
                         let _ = self.try_expand_grid(gid, new_pos);
-                        self.contract_or_delete_grid(gid);
+                        if !grids_to_contract.contains(&gid) {
+                            grids_to_contract.push(gid);
+                        }
                     }
                 }
                 continue;
@@ -693,58 +696,60 @@ impl Ballpark {
             }
             self.ball_grid_ids.insert(ball_id, new_gid);
         }
+        for gid in grids_to_contract {
+            self.contract_or_delete_grid(gid);
+        }
 
         // Emit AddBalls2 and RemoveBalls for grid wall crossings (`SP-2`).
-        for &obs_id in &dynamic_ids {
-            let Some(&obs_before) = grids_before.get(&obs_id) else {
-                continue;
-            };
-            let Some(&obs_after) = self.ball_grid_ids.get(&obs_id) else {
-                continue;
-            };
-            let mut entered = Vec::new();
-            let mut left = Vec::new();
-            for &other_id in &dynamic_ids {
-                if obs_id == other_id {
-                    continue;
+        let mut any_changed_or_cloaked = false;
+        let dyn_grid_info: Vec<(BallId, u64, u64, bool)> = dynamic_ids
+            .iter()
+            .filter_map(|&id| {
+                let &before = grids_before.get(&id)?;
+                let &after = self.ball_grid_ids.get(&id)?;
+                let cloaked = self.combat_states.get(&id).is_some_and(|c| c.is_cloaked);
+                if before != after || cloaked {
+                    any_changed_or_cloaked = true;
                 }
-                let Some(&other_before) = grids_before.get(&other_id) else {
-                    continue;
-                };
-                let Some(&other_after) = self.ball_grid_ids.get(&other_id) else {
-                    continue;
-                };
-                let other_cloaked = self
-                    .combat_states
-                    .get(&other_id)
-                    .is_some_and(|c| c.is_cloaked);
-                let was_same = obs_before == other_before;
-                let now_same = obs_after == other_after && !other_cloaked;
-                if !was_same && now_same {
-                    if let Some(other_ball) = self.balls.get(&other_id) {
-                        entered.push(other_ball.clone());
+                Some((id, before, after, cloaked))
+            })
+            .collect();
+        if any_changed_or_cloaked {
+            for &(obs_id, obs_before, obs_after, _) in &dyn_grid_info {
+                let mut entered = Vec::new();
+                let mut left = Vec::new();
+                for &(other_id, other_before, other_after, other_cloaked) in &dyn_grid_info {
+                    if obs_id == other_id {
+                        continue;
                     }
-                } else if was_same && !now_same {
-                    left.push(other_id);
+                    let was_same = obs_before == other_before;
+                    let now_same = obs_after == other_after && !other_cloaked;
+                    if !was_same && now_same {
+                        if let Some(other_ball) = self.balls.get(&other_id) {
+                            entered.push(other_ball.clone());
+                        }
+                    } else if was_same && !now_same {
+                        left.push(other_id);
+                    }
                 }
-            }
-            if !entered.is_empty() {
-                // A ball that itself crossed into another grid is sent that grid's balls with
-                // `AddBalls`, as evemu_Crucible `SystemBubble::Add` -> `SendAddBalls(pSE)` does for an
-                // entity entering a bubble (`SystemBubble.cpp:330-332`, `:697-745`). Balls that stay
-                // put get the newcomer via `AddBalls2`.
-                let ev = if obs_before != obs_after {
-                    DestinyEvent::AddBalls { balls: entered }
-                } else {
-                    DestinyEvent::AddBalls2 { balls: entered }
-                };
-                self.observer_events.entry(obs_id).or_default().push(ev);
-            }
-            if !left.is_empty() {
-                self.observer_events
-                    .entry(obs_id)
-                    .or_default()
-                    .push(DestinyEvent::RemoveBalls { ball_ids: left });
+                if !entered.is_empty() {
+                    // A ball that itself crossed into another grid is sent that grid's balls with
+                    // `AddBalls`, as evemu_Crucible `SystemBubble::Add` -> `SendAddBalls(pSE)` does for an
+                    // entity entering a bubble (`SystemBubble.cpp:330-332`, `:697-745`). Balls that stay
+                    // put get the newcomer via `AddBalls2`.
+                    let ev = if obs_before != obs_after {
+                        DestinyEvent::AddBalls { balls: entered }
+                    } else {
+                        DestinyEvent::AddBalls2 { balls: entered }
+                    };
+                    self.observer_events.entry(obs_id).or_default().push(ev);
+                }
+                if !left.is_empty() {
+                    self.observer_events
+                        .entry(obs_id)
+                        .or_default()
+                        .push(DestinyEvent::RemoveBalls { ball_ids: left });
+                }
             }
         }
 

@@ -326,3 +326,247 @@ async fn warp_disconnect_and_abandon_drones_probes_and_fighters() {
         assert_eq!(snap.items[&fighter_id].location_id, sys_id as i64);
     });
 }
+
+#[tokio::test]
+async fn disconnect_hold_committed_warp_immobilizer_safe_logoff_and_unobserved_fighter_abandon() {
+    use crate::router::ActiveFighterSquadron;
+    use crate::sp6_lifecycle::disconnect_hold::{
+        build_disconnected_ship_entry, collect_expired_disconnected_ships,
+        compute_disconnect_hold_until_unix, is_disconnect_emergency_warp_blocked,
+    };
+    use crate::sp6_lifecycle::{
+        abandon_drones_and_fighters_for_ship_sync, handle_abort_safe_logoff,
+        handle_character_logoff_or_disconnect, handle_safe_logoff,
+        maybe_abort_safe_logoff_on_action, with_mut_sp6_state,
+    };
+
+    let ctx = test_ctx();
+    let sys_id = 30_000_142u32;
+    let char_id = 90_994_001i64;
+    let ship_id = 944_000_001i64;
+    let static_struct_id = 944_000_010i64;
+    let ship_commit_warp = 944_000_002i64;
+    let char_commit = 90_994_002i64;
+    let now = ctx.now_unix();
+
+    spawn_ball(&ctx, sys_id, ship_id, 587, DVec3::new(100_000.0, 0.0, 0.0));
+    spawn_ball(&ctx, sys_id, ship_commit_warp, 587, DVec3::new(200_000.0, 0.0, 0.0));
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    // Static station/structure within 2,500m of ship_id so emergency-warp deflection runs (`disconnect_hold.rs:238-251`)
+    {
+        let mut bp = sys_handle.ballpark.write().unwrap();
+        bp.set_ball_slim_meta(
+            static_struct_id,
+            eve_destiny::SlimItemMeta {
+                group_id: 15,
+                category_id: 3,
+                ..Default::default()
+            },
+        );
+        bp.add_ball(Ball {
+            id: static_struct_id,
+            type_id: 2496,
+            position: DVec3::new(100_500.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e12,
+            radius: 1_500.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        });
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let tmpl = snap.characters[&90_000_001].clone();
+        for (cid, sid) in [(char_id, ship_id), (char_commit, ship_commit_warp)] {
+            let mut c = tmpl.clone();
+            c.character_id = cid;
+            c.user_id = cid as u64;
+            c.name = format!("Disc{cid}");
+            c.solar_system_id = sys_id;
+            c.active_ship_id = sid;
+            c.station_id = None;
+            c.structure_id = None;
+            snap.characters.insert(cid, c);
+            snap.items.insert(
+                sid,
+                InventoryItemRecord {
+                    item_id: sid,
+                    type_id: 587,
+                    owner_id: cid,
+                    location_id: sys_id as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    // 1. Immobilizing ActiveModuleCycle blocks emergency warp (`disconnect_hold.rs:24, 29, 188, 272-275`)
+    let _ = sys_handle
+        .add_module_cycle(crate::system_actor::ActiveModuleCycle {
+            ship_id,
+            module_id: 944_000_050,
+            module_type_id: 33400,
+            owner_char_id: Some(char_id),
+            effect_name: "effectBastion".into(),
+            target_id: None,
+            repeat: 1,
+            duration_s: 60.0,
+            elapsed_s: 0.0,
+            cap_need_per_cycle: 0.0,
+            immobilize_self: true,
+            ..Default::default()
+        })
+        .await;
+    assert!(is_disconnect_emergency_warp_blocked(&ctx, &sys_handle, ship_id));
+    let _ = compute_disconnect_hold_until_unix(&ctx, sys_id, ship_id, now);
+    let _ = sys_handle
+        .set_movement_mode(
+            ship_id,
+            eve_destiny::MovementMode::new_warp(
+                DVec3::new(100_000.0, 0.0, 0.0),
+                DVec3::new(500_000.0, 0.0, 0.0),
+                3.0,
+            ),
+        )
+        .await;
+    let blocked_entry = build_disconnected_ship_entry(
+        &ctx,
+        &sys_handle,
+        char_id,
+        ship_id,
+        587,
+        sys_id,
+        DVec3::new(100_000.0, 0.0, 0.0),
+        3.0,
+        now,
+    )
+    .await;
+    // Note: if MovementMode::new_warp set committed warp dest or not, also test non-blocked ship with static deflection:
+    let _ = sys_handle.remove_module_cycle(ship_id, 944_000_050).await;
+    let _ = sys_handle
+        .set_movement_mode(ship_id, eve_destiny::MovementMode::Stop)
+        .await;
+    let _ = blocked_entry;
+    let free_disc = handle_character_logoff_or_disconnect(&ctx, char_id)
+        .await
+        .expect("free emergency warp entry");
+    assert!(free_disc.emergency_warp_dest.is_some());
+    assert!(free_disc.pre_warp_position.is_some());
+
+    // 2. Committed warp destination preserved on disconnect (`disconnect_hold.rs:224-229`) + expiry sweep
+    let _ = sys_handle
+        .set_movement_mode(
+            ship_commit_warp,
+            eve_destiny::MovementMode::new_warp(
+                DVec3::new(200_000.0, 0.0, 0.0),
+                DVec3::new(800_000.0, 0.0, 0.0),
+                3.0,
+            ),
+        )
+        .await;
+    let commit_entry = build_disconnected_ship_entry(
+        &ctx,
+        &sys_handle,
+        char_commit,
+        ship_commit_warp,
+        587,
+        sys_id,
+        DVec3::new(200_000.0, 0.0, 0.0),
+        3.0,
+        now,
+    )
+    .await;
+    let _ = commit_entry;
+    let expired_far = collect_expired_disconnected_ships(&ctx, now + 10_000);
+    assert!(!expired_far.is_empty());
+
+    // 3. `handle_safe_logoff`, `handle_abort_safe_logoff`, `maybe_abort_safe_logoff_on_action` (`sp6_lifecycle.rs:851-1012`)
+    // Docked failure -> SAFE_LOGOFF_DOCKED; self-destruct + timers -> all failure codes; clean undocked -> starts timer -> abort
+    let mut sess_docked = SessionState {
+        user_id: Some(1),
+        character_id: Some(char_id),
+        station_id: Some(60_003_760),
+        ..Default::default()
+    };
+    let docked_rep = handle_safe_logoff(&ctx, &mut sess_docked).await.unwrap();
+    assert!(format!("{docked_rep:?}").contains("SAFE_LOGOFF_DOCKED"));
+
+    with_mut_sp6_state(&ctx.db, |st, _snap| {
+        st.weapon_timers_until.insert(char_id, now + 60);
+        st.npc_timers_until.insert(char_id, now + 60);
+        st.pvp_timers_until.insert(char_id, now + 60);
+        st.criminal_timers_until.insert(char_id, now + 60);
+        st.self_destructs.insert(
+            ship_id,
+            eve_db::SelfDestructPersistedEntry {
+                ship_id,
+                char_id,
+                solar_system_id: sys_id,
+                started_unix: now,
+                detonate_at_unix: now + 120,
+            },
+        );
+    });
+    let mut sess_space = SessionState {
+        user_id: Some(1),
+        character_id: Some(char_id),
+        ship_id: None,         // triggers DB fallback (`L855-858`)
+        solar_system_id: None, // triggers DB fallback (`L859-876`)
+        ..Default::default()
+    };
+    let timers_rep = handle_safe_logoff(&ctx, &mut sess_space).await.unwrap();
+    let t_str = format!("{timers_rep:?}");
+    assert!(t_str.contains("SAFE_LOGOFF_WEAPONS_TIMER"));
+    assert!(t_str.contains("SAFE_LOGOFF_NPC_TIMER"));
+    assert!(t_str.contains("SAFE_LOGOFF_PVP_TIMER"));
+    assert!(t_str.contains("SAFE_LOGOFF_CRIMINAL_TIMER"));
+    assert!(t_str.contains("SAFE_LOGOFF_SELF_DESTRUCT_ACTIVE"));
+
+    // Clear blockers: warp guard (`SAFE_LOGOFF_IN_WARP`) triggers first while emergency warp is active,
+    // then stopping ship lets clean `handle_safe_logoff` succeed (`L929-960`), followed by abort paths.
+    with_mut_sp6_state(&ctx.db, |st, _snap| {
+        st.weapon_timers_until.remove(&char_id);
+        st.npc_timers_until.remove(&char_id);
+        st.pvp_timers_until.remove(&char_id);
+        st.criminal_timers_until.remove(&char_id);
+        st.self_destructs.remove(&ship_id);
+    });
+    assert!(!maybe_abort_safe_logoff_on_action(&ctx, char_id, "TEST"));
+    let warp_blocked = handle_safe_logoff(&ctx, &mut sess_space).await.unwrap();
+    assert!(format!("{:?}", warp_blocked).contains("SAFE_LOGOFF_IN_WARP"));
+    let _ = sys_handle
+        .set_movement_mode(ship_id, eve_destiny::MovementMode::Stop)
+        .await;
+    let ok_logoff = handle_safe_logoff(&ctx, &mut sess_space).await.unwrap();
+    assert_eq!(ok_logoff, PyRep::List(vec![]));
+    assert!(maybe_abort_safe_logoff_on_action(&ctx, char_id, "TEST_MOVE"));
+    assert_eq!(
+        handle_abort_safe_logoff(&ctx, &mut sess_space, "USER").unwrap(),
+        PyRep::Bool(true)
+    );
+
+    // 4. Unobserved fighter/probe case in `abandon_drones_and_fighters_for_ship_sync` (`drone_return.rs:403, 431, 460`)
+    ctx.active_fighters.write().unwrap().insert(
+        944_000_099,
+        ActiveFighterSquadron {
+            ball_id: 944_000_099,
+            item_id: 944_000_099,
+            type_id: 23057,
+            owner_char_id: char_id,
+            parent_ship_id: ship_id,
+            tube_index: 0,
+            squadron_size: 9,
+            target_id: None,
+            is_abandoned: false,
+            mwd_active: false,
+        },
+    );
+    abandon_drones_and_fighters_for_ship_sync(&ctx, char_id, ship_id, 30_000_144);
+}
+

@@ -621,3 +621,786 @@ async fn restarted_structures_belt_asteroids_wrecks_drones_and_specialized_npcs_
     assert!(npc_slim.dict_get("hostile_response_threshold").is_some());
     assert!(npc_slim.dict_get("friendly_response_threshold").is_some());
 }
+
+#[test]
+fn cosmic_anomaly_and_signature_sweep_respects_exemptions_and_exact_expiry() {
+    use eve_db::{CosmicAnomalyRecord, CosmicSignatureRecord};
+
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let now = 1_794_300_000_u64;
+
+    let mk_anom = |id: &str, typ: &str, created: u64, life: u64, cleared: bool| CosmicAnomalyRecord {
+        anomaly_id: id.into(),
+        solar_system_id: sys_id,
+        name: id.into(),
+        anomaly_type: typ.into(),
+        position: [0.0; 3],
+        signal_strength: 1.0,
+        ore_types: Vec::new(),
+        remaining_volume: 100.0,
+        created_unix: created,
+        lifetime_seconds: life,
+        cleared,
+    };
+    let mk_sig = |id: &str, grp: &str, created: u64, life: u64, collapsed: bool| CosmicSignatureRecord {
+        signature_id: id.into(),
+        solar_system_id: sys_id,
+        sig_group: grp.into(),
+        type_name: grp.into(),
+        position: [0.0; 3],
+        signal_strength: 0.25,
+        wormhole_type_id: None,
+        destination_system_id: None,
+        created_unix: created,
+        lifetime_seconds: life,
+        max_mass_kg: 0.0,
+        remaining_mass_kg: 0.0,
+        max_jump_mass_kg: 0.0,
+        collapsed,
+    };
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cosmic_anomalies.insert(
+            sys_id,
+            vec![
+                mk_anom("A-ICE", "IceBelt", now - 1000, 10, false),       // exempt type
+                mk_anom("A-ORE", "OreAnomaly", now - 1000, 10, false),    // exempt type
+                mk_anom("A-ZERO", "Combat", now - 1000, 0, false),        // lifetime 0 kept
+                mk_anom("A-ALIVE", "Combat", now - 9, 10, false),         // now < created+life (9 < 10) kept
+                mk_anom("A-EXACT", "Combat", now - 10, 10, false),        // now == created+life swept!
+                mk_anom("A-CLEARED", "Combat", now - 10, 10, true),       // cleared swept silently
+            ],
+        );
+        snap.cosmic_signatures.insert(
+            sys_id,
+            vec![
+                mk_sig("S-WH", "Wormhole", now - 1000, 10, false),        // exempt case-insensitive wormhole
+                mk_sig("S-ICE", "IceBelt", now - 1000, 10, false),        // exempt
+                mk_sig("S-OA", "OreAnomaly", now - 1000, 10, false),      // exempt
+                mk_sig("S-ORE", "Ore", now - 1000, 10, false),            // exempt
+                mk_sig("S-GAS", "Gas", now - 1000, 10, false),            // exempt
+                mk_sig("S-ZERO", "Data", now - 1000, 0, false),           // lifetime 0 kept
+                mk_sig("S-ALIVE", "Data", now - 9, 10, false),            // now < created+life kept
+                mk_sig("S-EXACT", "Combat", now - 10, 10, false),         // now == created+life swept!
+                mk_sig("S-COL", "Relic", now - 10, 10, true),             // collapsed swept silently
+            ],
+        );
+    });
+
+    super::sweep_expired_cosmic_anomalies_and_signatures(&ctx, now);
+
+    ctx.db.with_snapshot(|snap| {
+        let a_ids: Vec<&str> = snap.cosmic_anomalies[&sys_id]
+            .iter()
+            .map(|a| a.anomaly_id.as_str())
+            .collect();
+        assert_eq!(a_ids, vec!["A-ICE", "A-ORE", "A-ZERO", "A-ALIVE"]);
+
+        let s_ids: Vec<&str> = snap.cosmic_signatures[&sys_id]
+            .iter()
+            .map(|s| s.signature_id.as_str())
+            .collect();
+        assert_eq!(
+            s_ids,
+            vec!["S-WH", "S-ICE", "S-OA", "S-ORE", "S-GAS", "S-ZERO", "S-ALIVE"]
+        );
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn on_advance_secs_internal_sweeps_crimewatch_timers_abyssal_traces_and_ticks() {
+    use crate::combat::CharacterCrimeWatchState;
+    use crate::services::pve_special_sites::AbyssalTraceRecord;
+    use eve_db::KillRightRecord;
+    use crate::services::pve_special_sites_abyssal::with_abyssal_state;
+    use eve_db::PersistedAggressionRecord;
+
+    let ctx = test_ctx();
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_776_300_000)));
+    let now = ctx.now_unix();
+    let p_weap = 91_800_001_i64;
+    let p_pvp = 91_800_002_i64;
+    let p_susp = 91_800_003_i64;
+    let p_crim = 91_800_004_i64;
+    let p_concord_keep = 91_800_005_i64;
+    let p_alive = 91_800_006_i64;
+    let p_dis = 91_800_007_i64;
+    let p_npc = 91_800_008_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        // DB crimewatch_states + crimewatch_aggressions + kill_rights
+        snap.crimewatch_states.insert(
+            p_weap,
+            CharacterCrimeWatchState {
+                character_id: p_weap,
+                weapon_timer_until_unix: now,
+                ..Default::default()
+            },
+        );
+        snap.crimewatch_states.insert(
+            p_pvp,
+            CharacterCrimeWatchState {
+                character_id: p_pvp,
+                pvp_timer_until_unix: now,
+                ..Default::default()
+            },
+        );
+        snap.crimewatch_states.insert(
+            p_susp,
+            CharacterCrimeWatchState {
+                character_id: p_susp,
+                suspect_flag_until_unix: now,
+                ..Default::default()
+            },
+        );
+        snap.crimewatch_states.insert(
+            p_crim,
+            CharacterCrimeWatchState {
+                character_id: p_crim,
+                criminal_flag_until_unix: now,
+                ..Default::default()
+            },
+        );
+        snap.crimewatch_states.insert(
+            p_alive,
+            CharacterCrimeWatchState {
+                character_id: p_alive,
+                weapon_timer_until_unix: now + 1,
+                ..Default::default()
+            },
+        );
+        snap.crimewatch_aggressions.insert(
+            (p_weap, p_pvp),
+            PersistedAggressionRecord {
+                aggressor_char_id: p_weap,
+                victim_char_id: p_pvp,
+                system_id: 30_000_142,
+                started_unix: now.saturating_sub(100),
+                expires_unix: now, // boundary `<= now`
+                is_legal: false,
+                is_pod: false,
+            },
+        );
+        snap.kill_rights.insert(
+            77_001,
+            KillRightRecord {
+                kill_right_id: 77_001,
+                owner_id: p_weap,
+                target_id: p_crim,
+                activation_fee: eve_db::IskCents(0),
+                is_active_suspect: false,
+            },
+        );
+        snap.kill_rights.insert(
+            77_002,
+            KillRightRecord {
+                kill_right_id: 77_002,
+                owner_id: p_weap,
+                target_id: p_alive,
+                activation_fee: eve_db::IskCents(0),
+                is_active_suspect: false,
+            },
+        );
+    });
+
+    ctx.crimewatch.with_mut_crimewatch(|cw| {
+        for (pid, st) in [
+            (
+                p_weap,
+                CharacterCrimeWatchState {
+                    character_id: p_weap,
+                    weapon_timer_until_unix: now,
+                    ..Default::default()
+                },
+            ),
+            (
+                p_pvp,
+                CharacterCrimeWatchState {
+                    character_id: p_pvp,
+                    pvp_timer_until_unix: now,
+                    ..Default::default()
+                },
+            ),
+            (
+                p_susp,
+                CharacterCrimeWatchState {
+                    character_id: p_susp,
+                    suspect_flag_until_unix: now,
+                    ..Default::default()
+                },
+            ),
+            (
+                p_crim,
+                CharacterCrimeWatchState {
+                    character_id: p_crim,
+                    criminal_flag_until_unix: now,
+                    ..Default::default()
+                },
+            ),
+            (
+                p_concord_keep,
+                CharacterCrimeWatchState {
+                    character_id: p_concord_keep,
+                    criminal_flag_until_unix: now,
+                    pending_concord_arrival: Some((30_000_142, now + 30, 555, p_pvp)),
+                    ..Default::default()
+                },
+            ),
+            (
+                p_alive,
+                CharacterCrimeWatchState {
+                    character_id: p_alive,
+                    weapon_timer_until_unix: now + 1,
+                    pvp_timer_until_unix: now + 1,
+                    suspect_flag_until_unix: now + 1,
+                    criminal_flag_until_unix: now + 1,
+                    pending_concord_arrival: None,
+                },
+            ),
+        ] {
+            cw.states.insert(pid, st);
+        }
+        cw.aggression_mgr.records.insert(
+            (p_weap, p_pvp),
+            PersistedAggressionRecord {
+                aggressor_char_id: p_weap,
+                victim_char_id: p_pvp,
+                system_id: 30_000_142,
+                started_unix: now.saturating_sub(10),
+                expires_unix: now,
+                is_legal: false,
+                is_pod: false,
+            },
+        );
+        cw.aggression_mgr.records.insert(
+            (p_alive, p_pvp),
+            PersistedAggressionRecord {
+                aggressor_char_id: p_alive,
+                victim_char_id: p_pvp,
+                system_id: 30_000_142,
+                started_unix: now.saturating_sub(10),
+                expires_unix: now + 1,
+                is_legal: false,
+                is_pod: false,
+            },
+        );
+    });
+
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.disapproval_flags.insert(p_dis, now);
+        rt.disapproval_flags.insert(p_alive, now + 1);
+        rt.npc_timers.insert(p_npc, now);
+        rt.npc_timers.insert(p_alive, now + 1);
+        rt.duel_challenges.insert((p_weap, p_pvp), now);
+        rt.duel_challenges.insert((p_alive, p_pvp), now + 1);
+        rt.kill_right_expires_unix.insert(77_001, now);
+        rt.kill_right_restricted_to.insert(77_001, p_crim);
+        rt.kill_right_expires_unix.insert(77_002, now + 1);
+        rt.limited_engagements
+            .entry(p_weap)
+            .or_default()
+            .insert(p_pvp, now);
+        rt.limited_engagements
+            .entry(p_alive)
+            .or_default()
+            .insert(p_pvp, now + 1);
+        rt.limited_engagements
+            .entry(p_alive)
+            .or_default()
+            .insert(p_crim, now);
+    });
+
+    with_abyssal_state(&ctx, |ab| {
+        for (tid, exp) in [(88_001, 0), (88_002, now + 1), (88_003, now)] {
+            ab.traces.insert(
+                tid,
+                AbyssalTraceRecord {
+                    trace_ball_id: tid,
+                    char_id: p_weap,
+                    filament_type_id: 47762,
+                    origin_solar_system_id: 30_000_142,
+                    position: [0.0; 3],
+                    created_unix: now.saturating_sub(60),
+                    expires_at_sec: exp,
+                    max_ships: 1,
+                    entered_char_ids: Vec::new(),
+                    pocket_id: None,
+                    fleet_id: None,
+                },
+            );
+        }
+    });
+
+    super::on_advance_secs_internal(&ctx, now.saturating_sub(1), 1, false, false);
+
+    ctx.crimewatch.with_crimewatch(|cw| {
+        assert!(!cw.states.contains_key(&p_weap));
+        assert!(!cw.states.contains_key(&p_pvp));
+        assert!(!cw.states.contains_key(&p_susp));
+        assert!(!cw.states.contains_key(&p_crim));
+        assert!(cw.states.contains_key(&p_concord_keep));
+        assert!(cw.states.contains_key(&p_alive));
+        assert!(!cw.aggression_mgr.records.contains_key(&(p_weap, p_pvp)));
+        assert!(cw.aggression_mgr.records.contains_key(&(p_alive, p_pvp)));
+    });
+    with_combat_runtime(&ctx, |rt| {
+        assert!(!rt.disapproval_flags.contains_key(&p_dis));
+        assert!(rt.disapproval_flags.contains_key(&p_alive));
+        assert!(!rt.npc_timers.contains_key(&p_npc));
+        assert!(rt.npc_timers.contains_key(&p_alive));
+        assert!(!rt.duel_challenges.contains_key(&(p_weap, p_pvp)));
+        assert!(rt.duel_challenges.contains_key(&(p_alive, p_pvp)));
+        assert!(!rt.kill_right_expires_unix.contains_key(&77_001));
+        assert!(!rt.kill_right_restricted_to.contains_key(&77_001));
+        assert!(rt.kill_right_expires_unix.contains_key(&77_002));
+        assert!(!rt.limited_engagements.contains_key(&p_weap));
+        assert!(rt.limited_engagements[&p_alive].contains_key(&p_pvp));
+        assert!(!rt.limited_engagements[&p_alive].contains_key(&p_crim));
+    });
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.kill_rights.contains_key(&77_001));
+        assert!(snap.kill_rights.contains_key(&77_002));
+    });
+    with_abyssal_state(&ctx, |ab| {
+        assert!(ab.traces.contains_key(&88_001), "expires_at_sec==0 trace kept");
+        assert!(ab.traces.contains_key(&88_002), "unexpired trace kept");
+        assert!(!ab.traces.contains_key(&88_003), "exact boundary trace swept");
+    });
+
+    // `tick_background_cluster_with_step(0)` is a no-op; `>= 60s` with `pve_special_sites.initialized` persists DB timestamp
+    ctx.cluster_tick_last_unix
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    super::tick_background_cluster_with_step(&ctx, 0).await;
+    assert_eq!(
+        ctx.cluster_tick_last_unix
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.pve_special_sites.initialized = true;
+        snap.service_state_blobs
+            .insert("cluster_tick_last_unix".into(), now.saturating_sub(65).to_string());
+    });
+    ctx.cluster_tick_persisted_unix
+        .store(now.saturating_sub(65), std::sync::atomic::Ordering::Relaxed);
+    super::tick_background_cluster_with_step(&ctx, 5).await;
+    assert!(
+        ctx.cluster_tick_last_unix
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= now
+    );
+    assert!(
+        ctx.cluster_tick_persisted_unix
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= now
+    );
+
+    // `step_active_systems_physics_tick` runs cleanly when dedicated physics ticker is inactive
+    let _ = ctx.systems.get_or_spawn(30_000_142);
+    super::step_active_systems_physics_tick(&ctx, 1).await;
+
+    // Abyssal Void Space collapse path (`collapse_stranded_abyssal_if_needed_sync`)
+    let void_char = 91_800_020_i64;
+    let void_ship = 101_800_020_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = void_char;
+        ch.solar_system_id = crate::services::abyssal_void_mgr::VOID_SPACE_SYSTEM_ID;
+        ch.active_ship_id = void_ship;
+        snap.characters.insert(void_char, ch);
+        snap.items.insert(
+            void_ship,
+            InventoryItemRecord {
+                item_id: void_ship,
+                type_id: 587,
+                owner_id: void_char,
+                location_id: crate::services::abyssal_void_mgr::VOID_SPACE_SYSTEM_ID as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    collapse_stranded_abyssal_if_needed_sync(&ctx, void_char, now);
+    ctx.db.with_snapshot(|snap| {
+        assert_ne!(
+            snap.characters[&void_char].solar_system_id,
+            crate::services::abyssal_void_mgr::VOID_SPACE_SYSTEM_ID
+        );
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sp6_lifecycle_hp_persistence_unification_filament_gates_logoff_and_reconnect() {
+    use super::super::{
+        apply_persisted_hp_to_combat_state, clear_ship_combat_damage_in_snap,
+        handle_character_logoff_or_disconnect, maybe_abort_safe_logoff_on_action,
+        persist_ship_combat_hp_batch_inner, read_unified_ship_damage_state,
+        reconnect_character_in_space_sync, require_ship_ready_for_filament_jump, PersistedCombatHp,
+    };
+
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let char_id = 91_810_001_i64;
+    let docked_char = 91_810_002_i64;
+    let ship_id = 101_810_001_i64;
+    let ghost_ship_id = 101_810_999_i64;
+    let wreck_non_free = 101_810_010_i64;
+    let drone_free = 101_810_011_i64;
+    let struct_id = 1_066_810_001_i64;
+    let now = ctx.now_unix();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.solar_system_id = sys_id;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch.clone());
+
+        let mut dch = ch;
+        dch.character_id = docked_char;
+        dch.station_id = Some(60_003_760);
+        snap.characters.insert(docked_char, dch);
+
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.item_positions.insert(ship_id, [15_000.0, 0.0, 0.0]);
+
+        snap.structures.insert(
+            struct_id,
+            UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35_832,
+                owner_corp_id: 98_810_001,
+                solar_system_id: sys_id,
+                name: "PersistedCitadel".into(),
+                position: [5_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 50,
+                shield_hp: 1000.0,
+                armor_hp: 1000.0,
+                hull_hp: 1000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        snap.items.insert(
+            wreck_non_free,
+            InventoryItemRecord {
+                item_id: wreck_non_free,
+                type_id: 26557,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.item_positions.insert(wreck_non_free, [1_000.0, 0.0, 0.0]);
+        snap.items.insert(
+            drone_free,
+            InventoryItemRecord {
+                item_id: drone_free,
+                type_id: 2454,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.item_positions.insert(drone_free, [2_000.0, 0.0, 0.0]);
+    });
+
+    // 1. `populate_persisted_space_objects`: non-drone is marked non-free, drone stays free, structure SlimItemMeta fields exact
+    let mut bp = eve_destiny::Ballpark::new(sys_id);
+    let _ = populate_persisted_space_objects(&mut bp, sys_id, &ctx.sde, &ctx.db);
+    assert!(bp.non_free_ball_ids.contains(&wreck_non_free));
+    assert!(!bp.non_free_ball_ids.contains(&drone_free));
+    let st_meta = bp.ball_slim_meta(struct_id).expect("structure slim meta");
+    assert_eq!(st_meta.owner_id, 98_810_001);
+    assert_eq!(st_meta.char_id, None);
+    assert_eq!(st_meta.corp_id, 98_810_001);
+    assert_eq!(st_meta.alliance_id, -1);
+
+    // 2. `persist_ship_combat_hp_batch_inner` + `with_sp6_state` + `clear_ship_combat_damage_in_snap`
+    let mut dmg_cs = CombatState::default();
+    dmg_cs.max_shield_hp = 500.0;
+    dmg_cs.shield_hp = 400.0;
+    dmg_cs.max_armor_hp = 400.0;
+    dmg_cs.armor_hp = 300.0;
+    dmg_cs.max_structure_hp = 300.0;
+    dmg_cs.structure_hp = 200.0;
+
+    // require_persisted_entity=true ignores ghost_ship_id
+    persist_ship_combat_hp_batch_inner(&ctx.db, [(ghost_ship_id, &dmg_cs)], true);
+    assert!(!with_sp6_state(&ctx.db, |s| s.ship_combat_hp.contains_key(&ghost_ship_id)));
+
+    // require_persisted_entity=false writes ghost_ship_id too; ship_id updates both sp6 & item dynamic_attributes & bumps version
+    persist_ship_combat_hp_batch_inner(
+        &ctx.db,
+        [(ship_id, &dmg_cs), (ghost_ship_id, &dmg_cs)],
+        false,
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.sp6_lifecycle.ship_combat_hp[&ship_id].shield_hp, 400.0);
+        assert_eq!(snap.items[&ship_id].version, 2);
+        assert_eq!(
+            snap.items[&ship_id]
+                .dynamic_attributes
+                .get(&eve_sde::attr_ids::ARMOR_DAMAGE)
+                .copied(),
+            Some(100.0)
+        );
+        assert_eq!(
+            snap.items[&ship_id]
+                .dynamic_attributes
+                .get(&eve_sde::attr_ids::DAMAGE)
+                .copied(),
+            Some(100.0)
+        );
+        assert!(snap.sp6_lifecycle.ship_combat_hp.contains_key(&ghost_ship_id));
+    });
+
+    // No-op repeat MUST NOT bump item version again
+    persist_ship_combat_hp_batch_inner(&ctx.db, [(ship_id, &dmg_cs)], true);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&ship_id].version, 2);
+    });
+
+    // Zero damage removes DAMAGE & ARMOR_DAMAGE and bumps version; zero max_*_hp sets 0.0 damage
+    let mut full_cs = CombatState::default();
+    full_cs.max_shield_hp = 500.0;
+    full_cs.shield_hp = 500.0;
+    full_cs.max_armor_hp = 400.0;
+    full_cs.armor_hp = 400.0;
+    full_cs.max_structure_hp = 300.0;
+    full_cs.structure_hp = 300.0;
+    persist_ship_combat_hp_batch_inner(&ctx.db, [(ship_id, &full_cs)], true);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&ship_id].version, 3);
+        assert!(!snap.items[&ship_id]
+            .dynamic_attributes
+            .contains_key(&eve_sde::attr_ids::ARMOR_DAMAGE));
+        assert!(!snap.items[&ship_id]
+            .dynamic_attributes
+            .contains_key(&eve_sde::attr_ids::DAMAGE));
+    });
+
+    // `read_unified_ship_damage_state` + `apply_persisted_hp_to_combat_state` + `clear_ship_combat_damage_in_snap`
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    sys_h.try_spawn_ball_with_combat(
+        Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::new(15_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        CombatState {
+            shield_hp: 450.0,
+            max_shield_hp: 500.0, // live shield dmg = 50
+            armor_hp: 380.0,
+            max_armor_hp: 400.0,  // live armor dmg = 20
+            structure_hp: 290.0,
+            max_structure_hp: 300.0, // live hull dmg = 10
+            ..CombatState::default()
+        },
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.sp6_lifecycle.ship_combat_hp.insert(
+            ship_id,
+            PersistedCombatHp {
+                shield_hp: 420.0, // persisted shield dmg = 80 > live 50
+                armor_hp: 350.0,  // persisted armor dmg = 50 > live 20
+                hull_hp: 250.0,   // persisted hull dmg = 50 > live 10
+            },
+        );
+        snap.items
+            .get_mut(&ship_id)
+            .unwrap()
+            .dynamic_attributes
+            .insert(eve_sde::attr_ids::ARMOR_DAMAGE, 120.0); // dyn armor dmg = 120 highest!
+        snap.items
+            .get_mut(&ship_id)
+            .unwrap()
+            .dynamic_attributes
+            .insert(eve_sde::attr_ids::DAMAGE, 90.0); // dyn hull dmg = 90 highest!
+    });
+    ctx.db.with_snapshot(|snap| {
+        let u = read_unified_ship_damage_state(&ctx, snap, ship_id, 587, Some((300.0, 400.0, 500.0)));
+        assert!((u.shield_damage - 80.0).abs() < 1e-6);
+        assert!((u.shield_hp - 420.0).abs() < 1e-6);
+        assert!((u.armor_damage - 120.0).abs() < 1e-6);
+        assert!((u.hull_damage - 90.0).abs() < 1e-6);
+
+        let zero_u = read_unified_ship_damage_state(&ctx, snap, ghost_ship_id, 587, Some((0.0, 0.0, 0.0)));
+        assert_eq!(zero_u.shield_damage, 0.0);
+        assert_eq!(zero_u.armor_damage, 0.0);
+        assert_eq!(zero_u.hull_damage, 0.0);
+    });
+
+    // apply_persisted_hp_to_combat_state respects persisted hull_hp > 0 AND dynamic_attributes fallback
+    let mut restored_cs = full_cs.clone();
+    apply_persisted_hp_to_combat_state(&ctx, ship_id, &mut restored_cs);
+    assert_eq!(restored_cs.shield_hp, 420.0);
+    assert_eq!(restored_cs.armor_hp, 350.0);
+    assert_eq!(restored_cs.structure_hp, 250.0);
+
+    // Clear removes both dynamic_attributes and persisted HP entry
+    ctx.db.with_mut_snapshot(|snap| {
+        clear_ship_combat_damage_in_snap(snap, ship_id);
+        assert!(!snap.sp6_lifecycle.ship_combat_hp.contains_key(&ship_id));
+        assert!(!snap.items[&ship_id]
+            .dynamic_attributes
+            .contains_key(&eve_sde::attr_ids::ARMOR_DAMAGE));
+        assert!(!snap.items[&ship_id]
+            .dynamic_attributes
+            .contains_key(&eve_sde::attr_ids::DAMAGE));
+        assert_eq!(snap.items[&ship_id].version, 4);
+
+        // Dynamic attribute fallback when persisted entry is cleared
+        snap.items
+            .get_mut(&ship_id)
+            .unwrap()
+            .dynamic_attributes
+            .insert(eve_sde::attr_ids::ARMOR_DAMAGE, 40.0);
+        snap.items
+            .get_mut(&ship_id)
+            .unwrap()
+            .dynamic_attributes
+            .insert(eve_sde::attr_ids::DAMAGE, 30.0);
+    });
+    let mut fallback_cs = full_cs.clone();
+    apply_persisted_hp_to_combat_state(&ctx, ship_id, &mut fallback_cs);
+    assert_eq!(fallback_cs.armor_hp, 360.0);
+    assert_eq!(fallback_cs.structure_hp, 270.0);
+
+    // 3. `require_ship_ready_for_filament_jump`: weapons timer, lance debuff, warp scramble
+    assert!(require_ship_ready_for_filament_jump(&ctx, char_id, ship_id, sys_id).is_ok());
+    ctx.crimewatch.with_mut_crimewatch(|cw| {
+        cw.states.insert(
+            char_id,
+            crate::combat::CharacterCrimeWatchState {
+                character_id: char_id,
+                weapon_timer_until_unix: now + 30,
+                ..Default::default()
+            },
+        );
+    });
+    assert_eq!(
+        require_ship_ready_for_filament_jump(&ctx, char_id, ship_id, sys_id)
+            .unwrap_err()
+            .code,
+        "WeaponsTimerActive"
+    );
+    ctx.crimewatch.with_mut_crimewatch(|cw| cw.states.clear());
+    {
+        let mut bp_w = sys_h.ballpark.write().unwrap();
+        bp_w.combat_states.get_mut(&ship_id).unwrap().lance_disrupted_remaining_s = 12.0;
+    }
+    assert_eq!(
+        require_ship_ready_for_filament_jump(&ctx, char_id, ship_id, sys_id)
+            .unwrap_err()
+            .code,
+        "DisruptiveLanceDebuffActive"
+    );
+    {
+        let mut bp_w = sys_h.ballpark.write().unwrap();
+        let cs = bp_w.combat_states.get_mut(&ship_id).unwrap();
+        cs.lance_disrupted_remaining_s = 0.0;
+        cs.warp_scramble_strength = 2;
+    }
+    assert_eq!(
+        require_ship_ready_for_filament_jump(&ctx, char_id, ship_id, sys_id)
+            .unwrap_err()
+            .code,
+        "WarpScrambled"
+    );
+    {
+        let mut bp_w = sys_h.ballpark.write().unwrap();
+        bp_w.combat_states.get_mut(&ship_id).unwrap().warp_scramble_strength = 0;
+    }
+
+    // 4. `maybe_abort_safe_logoff_on_action`, `handle_character_logoff_or_disconnect`, `reconnect_character_in_space_sync`
+    assert!(!maybe_abort_safe_logoff_on_action(&ctx, char_id, "ModuleActivated"));
+    with_mut_sp6_state(&ctx.db, |st, _snap| {
+        st.safe_logoffs.insert(
+            char_id,
+            SafeLogoffEntry {
+                char_id,
+                ship_id,
+                solar_system_id: sys_id,
+                started_unix: now,
+                complete_at_unix: now + 30,
+                completed: true,
+            },
+        );
+    });
+    assert!(!maybe_abort_safe_logoff_on_action(&ctx, char_id, "ModuleActivated"));
+    with_mut_sp6_state(&ctx.db, |st, _snap| {
+        st.safe_logoffs.insert(
+            char_id,
+            SafeLogoffEntry {
+                char_id,
+                ship_id,
+                solar_system_id: sys_id,
+                started_unix: now,
+                complete_at_unix: now + 30,
+                completed: false,
+            },
+        );
+    });
+    assert!(maybe_abort_safe_logoff_on_action(&ctx, char_id, "ModuleActivated"));
+
+    assert!(handle_character_logoff_or_disconnect(&ctx, docked_char).await.is_none());
+    let disc = handle_character_logoff_or_disconnect(&ctx, char_id)
+        .await
+        .expect("undocked char creates DisconnectedShipEntry");
+    assert_eq!(disc.char_id, char_id);
+    assert_eq!(disc.ship_id, ship_id);
+
+    // Move live ship >10km from pre_warp_position and test reconnect initiates return warp
+    with_mut_sp6_state(&ctx.db, |st, _snap| {
+        if let Some(d) = st.disconnected_ships.get_mut(&char_id) {
+            d.pre_warp_position = Some([0.0, 0.0, 0.0]);
+        }
+    });
+    let rec = reconnect_character_in_space_sync(&ctx, char_id).expect("reconnect in space");
+    assert_eq!(rec.0, sys_id);
+    assert_eq!(rec.1, ship_id);
+    assert!(matches!(
+        sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap().1.mode,
+        MovementMode::Warp { .. }
+    ));
+}

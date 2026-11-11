@@ -539,3 +539,214 @@ async fn npc_ai_spawn_belt_rats_step_machine_and_destruction() {
     assert!(bounty > 0.0);
     assert!(mgr.respawn_timers.contains_key(&(sys_id, group_id)));
 }
+
+#[tokio::test]
+async fn crimewatch_step_concord_guards_despawns_tick_and_kill_right_reuse() {
+    use super::crimewatch::{
+        tick_concord_responses, AggressionEvaluation, CharacterCrimeWatchState, CrimeWatchDirector,
+    };
+    use crate::services::combat_crimewatch::{with_mut_combat_runtime, SecStatusTransaction};
+
+    let ctx = test_ctx();
+    let sys_id = 30_000_142u32;
+    let now = ctx.now_unix();
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+
+    // 1. try_with_mut_crimewatch persists pending_concord_despawns diff (`L365-369`)
+    let due_ball = 100_085_001i64;
+    let keep_ball = 100_085_002i64;
+    for bid in [due_ball, keep_ball] {
+        let _ = sys_handle
+            .spawn_ball(Ball {
+                id: bid,
+                type_id: 3764,
+                position: DVec3::new(500.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 100.0,
+                inertia: 1.0,
+                mass: 1_000.0,
+                radius: 30.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            })
+            .await;
+    }
+    let _: Result<(), String> = ctx.crimewatch.try_with_mut_crimewatch(|dir| {
+        dir.pending_concord_despawns.push((sys_id, due_ball, now));
+        dir.pending_concord_despawns
+            .push((sys_id, keep_ball, now + 500));
+        Ok(())
+    });
+    assert_eq!(ctx.crimewatch.read().unwrap().pending_concord_despawns.len(), 2);
+
+    // 2. Criminal flag expiration & invalid criminal ship guards in `CrimeWatchDirector::step_concord` (`L549-614`)
+    let mut cw = CrimeWatchDirector::new();
+    cw.pending_concord_despawns.push((sys_id, due_ball, now));
+    cw.pending_concord_despawns.push((sys_id, keep_ball, now + 500));
+
+    // Expired criminal flag clears pending_concord_arrival (`L562-565`)
+    cw.states.insert(
+        90_085_001,
+        CharacterCrimeWatchState {
+            criminal_flag_until_unix: now,
+            pending_concord_arrival: Some((sys_id, now, 100_085_101, 90_000_002)),
+            ..Default::default()
+        },
+    );
+    // Missing character (`L579`)
+    cw.states.insert(
+        90_085_002,
+        CharacterCrimeWatchState {
+            pending_concord_arrival: Some((sys_id, now, 100_085_102, 90_000_002)),
+            ..Default::default()
+        },
+    );
+    // Docked character (`L581-585`), wrong system (`L583`), zero/mismatched ship (`L588`), missing ship item (`L591`), capsule (`L593-600`), unspawned ball (`L607-613`)
+    let char_docked = 90_085_003i64;
+    let char_wrong_sys = 90_085_004i64;
+    let char_mismatch_ship = 90_085_005i64;
+    let char_missing_item = 90_085_006i64;
+    let char_capsule = 90_085_007i64;
+    let char_no_ball = 90_085_008i64;
+    let capsule_ship = 100_085_107i64;
+    let unspawned_ship = 100_085_108i64;
+    let ship_wrong_sys = 100_085_104i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let tmpl = snap.characters[&90_000_001].clone();
+        let mk_char = |cid: i64, st: Option<i64>, sid: u32, ship: i64| {
+            let mut c = tmpl.clone();
+            c.character_id = cid;
+            c.user_id = cid as u64;
+            c.name = format!("CW{cid}");
+            c.station_id = st;
+            c.solar_system_id = sid;
+            c.active_ship_id = ship;
+            c.security_status = 2.0;
+            c
+        };
+        snap.characters.insert(char_docked, mk_char(char_docked, Some(60_003_760), sys_id, 100_085_103));
+        snap.characters.insert(char_wrong_sys, mk_char(char_wrong_sys, None, 30_000_144, ship_wrong_sys));
+        snap.characters.insert(char_mismatch_ship, mk_char(char_mismatch_ship, None, sys_id, 100_085_199));
+        snap.characters.insert(char_missing_item, mk_char(char_missing_item, None, sys_id, 100_085_106));
+        snap.characters.insert(char_capsule, mk_char(char_capsule, None, sys_id, capsule_ship));
+        snap.characters.insert(char_no_ball, mk_char(char_no_ball, None, sys_id, unspawned_ship));
+
+        let mk_item = |iid: i64, tid: u32, owner: i64| eve_db::InventoryItemRecord {
+            item_id: iid,
+            type_id: tid,
+            owner_id: owner,
+            location_id: sys_id as i64,
+            flag: InventoryFlag::None,
+            quantity: 1,
+            singleton: true,
+            version: 1,
+            ..Default::default()
+        };
+        snap.items.insert(ship_wrong_sys, mk_item(ship_wrong_sys, 587, char_wrong_sys));
+        snap.items.insert(capsule_ship, mk_item(capsule_ship, 670, char_capsule));
+        snap.items.insert(unspawned_ship, mk_item(unspawned_ship, 587, char_no_ball));
+    });
+    for (cid, sid_item) in [
+        (char_docked, 100_085_103i64),
+        (char_wrong_sys, ship_wrong_sys),
+        (char_mismatch_ship, 100_085_105i64),
+        (char_missing_item, 100_085_106i64),
+        (char_capsule, capsule_ship),
+        (char_no_ball, unspawned_ship),
+    ] {
+        cw.states.insert(
+            cid,
+            CharacterCrimeWatchState {
+                pending_concord_arrival: Some((sys_id, now, sid_item, 90_000_002)),
+                ..Default::default()
+            },
+        );
+    }
+
+    let guard_reports = cw.step_concord(&ctx, now, 77).await;
+    assert!(guard_reports.is_empty());
+    assert_eq!(cw.pending_concord_despawns.len(), 1);
+    assert!(sys_handle.get_ball_snapshot(due_ball).await.unwrap().is_none());
+    assert!(sys_handle.get_ball_snapshot(keep_ball).await.unwrap().is_some());
+
+    // 3. tick_concord_responses (`L819-858`) with valid live criminal, recent sec-loss tx (`L741-748`),
+    // persisted DB kill_right (`L770-775`), AND self-aggression (`L796` -> kill_right_id == 0)
+    let live_crim = 90_000_001i64;
+    let live_ship = 100_085_201i64;
+    let self_ship = 100_085_202i64;
+    let self_char = 90_085_020i64;
+    spawn_test_ship(&ctx, sys_id, live_ship, live_crim, 587, DVec3::new(2_000.0, 0.0, 0.0));
+    spawn_test_ship(&ctx, sys_id, self_ship, self_char, 587, DVec3::new(4_000.0, 0.0, 0.0));
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.kill_right_expires_unix.insert(980_001, now + 3_600);
+        rt.sec_status_transactions.insert(
+            live_crim,
+            vec![SecStatusTransaction {
+                timestamp_unix: now,
+                old_sec: 2.0,
+                new_sec: 1.8,
+                delta: -0.2,
+                reason: "Illegal Aggression".into(),
+                solar_system_id: sys_id,
+                event_type_id: 1,
+                other_owner_id: Some(90_000_002),
+                other_type_id: None,
+            }],
+        );
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut sc = snap.characters[&live_crim].clone();
+        if let Some(ch) = snap.characters.get_mut(&live_crim) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = live_ship;
+        }
+        sc.character_id = self_char;
+        sc.user_id = self_char as u64;
+        sc.name = "SelfCrim".into();
+        sc.solar_system_id = sys_id;
+        sc.active_ship_id = self_ship;
+        sc.security_status = 2.0;
+        sc.station_id = None;
+        sc.structure_id = None;
+        snap.characters.insert(self_char, sc);
+        snap.kill_rights.insert(
+            980_001,
+            eve_db::KillRightRecord {
+                kill_right_id: 980_001,
+                owner_id: 90_000_002,
+                target_id: live_crim,
+                activation_fee: eve_db::IskCents::ZERO,
+                is_active_suspect: false,
+            },
+        );
+        snap.combat_crimewatch_state
+            .kill_right_expires_unix
+            .insert(980_001, now + 3_600);
+    });
+    {
+        let mut guard = ctx.crimewatch.write().unwrap();
+        let eval = guard.handle_combat_aggression(live_crim, 90_000_002, live_ship, sys_id, 0.9, false, now);
+        assert!(matches!(eval, AggressionEvaluation::CriminalFlagTriggered { .. }));
+        guard.states.insert(
+            self_char,
+            CharacterCrimeWatchState {
+                criminal_flag_until_unix: now + 900,
+                pending_concord_arrival: Some((sys_id, now + 1, self_ship, self_char)),
+                ..Default::default()
+            },
+        );
+    }
+
+    tick_concord_responses(&ctx, now + 100).await;
+    let reports = ctx.crimewatch.concord_reports();
+    assert!(
+        reports.iter().any(|r| r.criminal_char_id == live_crim && r.kill_right_id == 980_001),
+        "expected report for {live_crim} with kr 980_001, got: {reports:?}"
+    );
+    assert!(reports.iter().any(|r| r.criminal_char_id == self_char && r.kill_right_id == 0));
+    assert!(ctx.crimewatch.read().unwrap().pending_concord_despawns.iter().any(|&(s, b, _)| s == sys_id && b == keep_ball));
+}
+

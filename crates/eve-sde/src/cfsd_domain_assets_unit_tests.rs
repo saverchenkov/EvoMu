@@ -254,6 +254,7 @@ fn units_accounting_metagroups_graphics_icons_sounds_and_raw_types() {
     b_ty.write_i32(t0 + 80, 46); // graphic_id (bit 6)
     b_ty.write_i32(t0 + 84, 25); // group_id
     b_ty.write_i32(t0 + 88, 21); // icon_id (bit 7)
+    b_ty.write_i32(t0 + 92, 8); // isis_group_id (bit 9)
     b_ty.write_i32(t0 + 96, 64); // market_group_id (bit 10)
     b_ty.write_i32(t0 + 100, 1); // meta_group_id (bit 12)
     b_ty.write_i32(t0 + 104, 0); // meta_level (bit 13)
@@ -270,6 +271,7 @@ fn units_accounting_metagroups_graphics_icons_sounds_and_raw_types() {
         | (1 << 5)
         | (1 << 6)
         | (1 << 7)
+        | (1 << 9)
         | (1 << 10)
         | (1 << 11)
         | (1 << 12)
@@ -315,6 +317,7 @@ fn units_accounting_metagroups_graphics_icons_sounds_and_raw_types() {
             faction_id: Some(500_002),
             graphic_id: Some(46),
             icon_id: Some(21),
+            isis_group_id: Some(8),
             market_group_id: Some(64),
             meta_group_id: Some(1),
             meta_level: Some(0),
@@ -334,6 +337,7 @@ fn units_accounting_metagroups_graphics_icons_sounds_and_raw_types() {
     assert_eq!(raw_types[&588].volume, 0.0);
     assert!(!raw_types[&588].published);
     assert_eq!(raw_types[&588].description_id, None);
+    assert_eq!(raw_types[&588].isis_group_id, None);
     assert_eq!(raw_types[&588].wreck_type_id, None);
 
     for f in files {

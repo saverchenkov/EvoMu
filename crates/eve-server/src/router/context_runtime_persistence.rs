@@ -64,67 +64,91 @@ struct PersistedTacticalModulesPayload {
 }
 
 impl PersistedTacticalModulesPayload {
+    #[cfg(test)]
     fn from_state(st: &TacticalModulesState, cur_inst_key: usize) -> Self {
+        Self::from_state_for_keys(st, None, cur_inst_key)
+    }
+
+    fn from_state_for_keys(
+        st: &TacticalModulesState,
+        cur_db_key: Option<usize>,
+        cur_inst_key: usize,
+    ) -> Self {
+        let keep_key = |k: usize| -> bool {
+            cur_db_key.is_none_or(|db_key| k == db_key || k == cur_inst_key)
+        };
         let tag_of = |k: usize| -> u8 { u8::from(k == cur_inst_key) };
         let mut payload = Self {
             remote_assistance: st
                 .remote_assistance
                 .iter()
+                .filter(|(&(k, _), _)| keep_key(k))
                 .map(|(&(k, sid), v)| ((tag_of(k), sid), v.clone()))
                 .collect(),
             lance_caster_lock_until: st
                 .lance_caster_lock_until
                 .iter()
+                .filter(|(&(k, _), _)| keep_key(k))
                 .map(|(&(k, sid), &v)| ((tag_of(k), sid), v))
                 .collect(),
             lance_victim_debuff_until: st
                 .lance_victim_debuff_until
                 .iter()
+                .filter(|(&(k, _), _)| keep_key(k))
                 .map(|(&(k, sid), &v)| ((tag_of(k), sid), v))
                 .collect(),
             entosis_active_links: st
                 .entosis_active_links
                 .iter()
+                .filter(|(&(k, _), _)| keep_key(k))
                 .map(|(&(k, sid), v)| ((tag_of(k), sid), v.clone()))
                 .collect(),
             entosis_target_cycles: st
                 .entosis_target_cycles
                 .iter()
+                .filter(|(&(k, _, _), _)| keep_key(k))
                 .map(|(&(k, sid, tid), &v)| ((tag_of(k), sid, tid), v))
                 .collect(),
             pending_wubble_probes: st
                 .pending_wubble_probes
                 .iter()
+                .filter(|(k, _)| keep_key(*k))
                 .map(|(k, v)| (tag_of(*k), v.clone()))
                 .collect(),
             active_wubble_debuffs: st
                 .active_wubble_debuffs
                 .iter()
+                .filter(|(&(k, _), _)| keep_key(k))
                 .map(|(&(k, sid), v)| ((tag_of(k), sid), v.clone()))
                 .collect(),
             tsb_self_penalty_until: st
                 .tsb_self_penalty_until
                 .iter()
+                .filter(|(&(k, _), _)| keep_key(k))
                 .map(|(&(k, sid), &v)| ((tag_of(k), sid), v))
                 .collect(),
             clone_vat_bay_activated_ships: st
                 .clone_vat_bay_activated_ships
                 .iter()
+                .filter(|&&(k, _)| keep_key(k))
                 .map(|&(k, sid)| (tag_of(k), sid))
                 .collect(),
             active_interdiction_probes: st
                 .active_interdiction_probes
                 .iter()
+                .filter(|(&(k, _), _)| keep_key(k))
                 .map(|(&(k, pid), v)| ((tag_of(k), pid), v.clone()))
                 .collect(),
             launcher_last_fire: st
                 .launcher_last_fire
                 .iter()
+                .filter(|(&(k, _), _)| keep_key(k))
                 .map(|(&(k, mid), &v)| ((tag_of(k), mid), v))
                 .collect(),
             system_sim_time_s: st
                 .system_sim_time_s
                 .iter()
+                .filter(|(&(k, _), _)| keep_key(k))
                 .map(|(&(k, sys), &v)| ((tag_of(k), sys), v))
                 .collect(),
         };
@@ -281,10 +305,11 @@ struct PersistedServerRuntimeState {
 
 impl PersistedServerRuntimeState {
     fn from_ctx(ctx: &ServerContext) -> Self {
+        let cur_db_key = db_ptr_key(&ctx.db);
         let cur_inst_key = ctx.instance_id as usize;
         let tactical_state = {
             let tac = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
-            PersistedTacticalModulesPayload::from_state(&tac, cur_inst_key)
+            PersistedTacticalModulesPayload::from_state_for_keys(&tac, Some(cur_db_key), cur_inst_key)
         };
         let fleet_extras_runtime = {
             let ex = ctx.fleet_extras.lock().unwrap_or_else(|e| e.into_inner());
@@ -745,5 +770,424 @@ impl ServerContext {
         self.hydrate_server_runtime_from_db();
         sync_combat_runtime_from_db(self);
         self.quasar_gateway.rehydrate_all_from_db();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eve_db::{OwnerNoteRecord, WorldRepository};
+    use glam::DVec3;
+    use std::sync::Arc;
+
+    fn test_ctx() -> ServerContext {
+        ServerContext::with_repository(Arc::new(WorldRepository::new_empty()))
+    }
+
+    #[test]
+    fn intern_ewar_kind_returns_static_exact_matches_and_default() {
+        for expected in [
+            "warpScramblerMWD",
+            "warpScrambler",
+            "focusedWarpScrambler",
+            "webify",
+            "electronic",
+            "ewRemoteSensorDamp",
+            "ewGuidanceDisrupt",
+            "ewTrackingDisrupt",
+            "ewTargetPaint",
+            "ewEnergyNeut",
+            "ewEnergyVampire",
+        ] {
+            let owned = String::from(expected);
+            assert_eq!(intern_ewar_kind(&owned), expected);
+        }
+        assert_eq!(intern_ewar_kind("unknownCustomEwar"), "electronic");
+        assert_eq!(intern_ewar_kind(""), "electronic");
+    }
+
+    #[test]
+    fn persisted_tactical_payload_tagging_remapping_sorting_and_is_empty() {
+        let mut st = TacticalModulesState::default();
+        let db_k = 1_111_usize;
+        let inst_k = 2_222_usize;
+
+        assert!(PersistedTacticalModulesPayload::from_state(&st, inst_k).is_empty());
+
+        // Populate entries keyed by both `db_k` (tag 0) and `inst_k` (tag 1) in reverse order to test sorting.
+        st.remote_assistance.insert(
+            (inst_k, 20),
+            vec![ProjectedRemoteAssistance {
+                source_ship_id: 1,
+                module_id: 2,
+                module_type_id: 3,
+                max_target_range_bonus_pct: 10.0,
+                scan_resolution_bonus_pct: 20.0,
+                sensor_strength_bonus_pct: 0.0,
+                optimal_range_bonus_pct: 0.0,
+                falloff_bonus_pct: 0.0,
+                tracking_speed_bonus_pct: 0.0,
+            }],
+        );
+        st.remote_assistance.insert((db_k, 10), Vec::new());
+        st.lance_caster_lock_until.insert((inst_k, 30), 100);
+        st.lance_caster_lock_until.insert((db_k, 40), 200);
+        st.lance_victim_debuff_until.insert((db_k, 50), 300);
+        st.entosis_active_links.insert(
+            (inst_k, 60),
+            ActiveEntosisLinkState {
+                ship_id: 60,
+                char_id: 9_001,
+                side_id: 500_001,
+                module_id: 70,
+                target_id: 80,
+                cycle_index: 1,
+                cycle_duration_s: 120.0,
+                started_unix: 10,
+                expires_unix: 130,
+                is_capital: false,
+            },
+        );
+        st.entosis_target_cycles.insert((db_k, 60, 80), 3);
+        st.pending_wubble_probes.push((
+            inst_k,
+            PendingWubbleProbe {
+                probe_id: 90,
+                solar_system_id: 30_000_142,
+                position: DVec3::ZERO,
+                radius_m: 10_000.0,
+                remaining_arming_s: 3.0,
+                duration_s: 30.0,
+                velocity_multiplier: 0.5,
+                detonated: false,
+            },
+        ));
+        st.active_wubble_debuffs.insert(
+            (db_k, 100),
+            ActiveWubbleDebuff {
+                remaining_s: 15.0,
+                velocity_multiplier: 0.5,
+            },
+        );
+        st.tsb_self_penalty_until.insert((inst_k, 110), 400);
+        st.clone_vat_bay_activated_ships.insert((db_k, 120));
+        st.clone_vat_bay_activated_ships.insert((inst_k, 121));
+        st.active_interdiction_probes.insert(
+            (db_k, 130),
+            ActiveInterdictionProbe {
+                probe_id: 130,
+                probe_type_id: 22_778,
+                solar_system_id: 30_000_142,
+                remaining_s: 60.0,
+                is_wubble: false,
+            },
+        );
+        st.launcher_last_fire.insert(
+            (inst_k, 140),
+            LauncherFireStamp {
+                fired_unix: 500,
+                fired_tick: 12,
+                fired_sim_s: 12.0,
+            },
+        );
+        st.system_sim_time_s.insert((db_k, 30_000_142), 42.5);
+
+        let payload = PersistedTacticalModulesPayload::from_state(&st, inst_k);
+        assert!(!payload.is_empty());
+        // Tag `0` (`db_k`) sorts before tag `1` (`inst_k`)
+        assert_eq!(payload.remote_assistance[0].0, (0, 10));
+        assert_eq!(payload.remote_assistance[1].0, (1, 20));
+        assert_eq!(payload.lance_caster_lock_until[0].0, (0, 40));
+        assert_eq!(payload.lance_caster_lock_until[1].0, (1, 30));
+
+        // Remap into a fresh `new_db_k` and `new_inst_k`
+        let new_db_k = 8_888_usize;
+        let new_inst_k = 9_999_usize;
+        let mut restored = TacticalModulesState::default();
+        payload.apply_to_state(&mut restored, new_db_k, new_inst_k);
+        assert!(restored.remote_assistance.contains_key(&(new_db_k, 10)));
+        assert!(restored.remote_assistance.contains_key(&(new_inst_k, 20)));
+        assert_eq!(restored.lance_caster_lock_until[&(new_db_k, 40)], 200);
+        assert_eq!(restored.lance_caster_lock_until[&(new_inst_k, 30)], 100);
+        assert_eq!(restored.lance_victim_debuff_until[&(new_db_k, 50)], 300);
+        assert!(restored.entosis_active_links.contains_key(&(new_inst_k, 60)));
+        assert_eq!(restored.entosis_target_cycles[&(new_db_k, 60, 80)], 3);
+        assert_eq!(restored.pending_wubble_probes[0].0, new_inst_k);
+        assert!(restored.active_wubble_debuffs.contains_key(&(new_db_k, 100)));
+        assert_eq!(restored.tsb_self_penalty_until[&(new_inst_k, 110)], 400);
+        assert!(restored.clone_vat_bay_activated_ships.contains(&(new_db_k, 120)));
+        assert!(restored.clone_vat_bay_activated_ships.contains(&(new_inst_k, 121)));
+        assert!(restored.active_interdiction_probes.contains_key(&(new_db_k, 130)));
+        assert_eq!(restored.launcher_last_fire[&(new_inst_k, 140)].fired_unix, 500);
+        assert_eq!(restored.system_sim_time_s[&(new_db_k, 30_000_142)], 42.5);
+    }
+
+    #[test]
+    fn persisted_server_runtime_state_is_empty_and_write_lock_guard() {
+        let ctx = test_ctx();
+        assert!(PersistedServerRuntimeState::from_ctx(&ctx).is_empty());
+
+        // 1. Re-entrancy guard: calling `persist_server_runtime_to_db` while holding `with_mut_snapshot`
+        //    must return immediately without deadlocking or writing `server_runtime_json`.
+        ctx.map_landmarks
+            .write()
+            .unwrap()
+            .push((1, "Landmark".into(), 1.0, 2.0, 3.0));
+        assert!(!PersistedServerRuntimeState::from_ctx(&ctx).is_empty());
+
+        ctx.db.with_mut_snapshot(|snap| {
+            ctx.persist_server_runtime_to_db();
+            assert!(snap.cluster_and_runtime.server_runtime_json.is_none());
+        });
+
+        // 2. Outside the write lock, `persist_server_runtime_to_db` writes `server_runtime_json`
+        //    and clears legacy `sp6_lifecycle.server_runtime_json` + `service_state_blobs`.
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.sp6_lifecycle.server_runtime_json = Some("{\"legacy\":true}".into());
+            snap.service_state_blobs
+                .insert(SERVER_RUNTIME_STATE_BLOB_KEY.into(), "{\"legacy\":true}".into());
+        });
+        ctx.persist_server_runtime_to_db();
+        ctx.db.with_snapshot(|snap| {
+            assert!(snap.cluster_and_runtime.server_runtime_json.is_some());
+            assert!(snap.sp6_lifecycle.server_runtime_json.is_none());
+            assert!(!snap
+                .service_state_blobs
+                .contains_key(SERVER_RUNTIME_STATE_BLOB_KEY));
+        });
+
+        // 3. Clearing all runtime fields and persisting removes `server_runtime_json`.
+        ctx.map_landmarks.write().unwrap().clear();
+        assert!(PersistedServerRuntimeState::from_ctx(&ctx).is_empty());
+        ctx.persist_server_runtime_to_db();
+        ctx.db.with_snapshot(|snap| {
+            assert!(snap.cluster_and_runtime.server_runtime_json.is_none());
+        });
+    }
+
+    #[test]
+    fn hydrate_server_runtime_resets_probes_sorts_notifications_and_ignores_corrupt_json() {
+        let ctx = test_ctx();
+
+        // Seed:
+        // - Active scanner probes: one `state = 2` (active -> must reset to `state = 0` and `warp_end_ft = None`),
+        //   and one `state = -1` (destroyed/expired -> must be filtered out).
+        // - Owner notes with `character_id == -79` out of order (`notification_id: 20` then `10`) plus one for another char.
+        // - Corrupt JSON in `server_runtime_json` (must fall back cleanly to default without panicking).
+        let notif_20 = super::super::cache_notifications::NotificationRecord {
+            notification_id: 20,
+            type_id: 5,
+            group_id: 1,
+            sender_id: 100,
+            receiver_id: 200,
+            processed: false,
+            created: 2_000,
+            data: String::new(),
+            deleted: false,
+            interacted: false,
+        };
+        let notif_10 = super::super::cache_notifications::NotificationRecord {
+            notification_id: 10,
+            type_id: 5,
+            group_id: 1,
+            sender_id: 100,
+            receiver_id: 200,
+            processed: true,
+            created: 1_000,
+            data: String::new(),
+            deleted: false,
+            interacted: false,
+        };
+
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.sp6_lifecycle.active_scanner_probes.insert(
+                501,
+                ActiveScannerProbe {
+                    probe_id: 501,
+                    probe_type_id: 30_013,
+                    owner_char_id: 9_001,
+                    ship_id: 200_125_728,
+                    launcher_module_id: 10_002,
+                    solar_system_id: 30_000_142,
+                    position: [1.0, 2.0, 3.0],
+                    destination: [4.0, 5.0, 6.0],
+                    scan_range_m: 1_000_000.0,
+                    range_step: 3,
+                    base_sensor_strength: 40.0,
+                    max_flight_time_s: 3600.0,
+                    launched_at_unix: 1000,
+                    state: 2,
+                    warp_end_ft: Some(888_888),
+                },
+            );
+            snap.sp6_lifecycle.active_scanner_probes.insert(
+                502,
+                ActiveScannerProbe {
+                    probe_id: 502,
+                    probe_type_id: 30_013,
+                    owner_char_id: 9_001,
+                    ship_id: 200_125_728,
+                    launcher_module_id: 10_002,
+                    solar_system_id: 30_000_142,
+                    position: [0.0; 3],
+                    destination: [0.0; 3],
+                    scan_range_m: 500_000.0,
+                    range_step: 1,
+                    base_sensor_strength: 40.0,
+                    max_flight_time_s: 3600.0,
+                    launched_at_unix: 1000,
+                    state: -1,
+                    warp_end_ft: None,
+                },
+            );
+            snap.owner_notes.insert(
+                1,
+                OwnerNoteRecord {
+                    note_id: 1,
+                    character_id: -79,
+                    item_id: 0,
+                    label: "n20".into(),
+                    note: serde_json::to_string(&notif_20).unwrap(),
+                    timestamp_unix: 2_000,
+                },
+            );
+            snap.owner_notes.insert(
+                2,
+                OwnerNoteRecord {
+                    note_id: 2,
+                    character_id: -79,
+                    item_id: 0,
+                    label: "n10".into(),
+                    note: serde_json::to_string(&notif_10).unwrap(),
+                    timestamp_unix: 1_000,
+                },
+            );
+            snap.owner_notes.insert(
+                3,
+                OwnerNoteRecord {
+                    note_id: 3,
+                    character_id: 9_001,
+                    item_id: 0,
+                    label: "player_note".into(),
+                    note: serde_json::to_string(&notif_20).unwrap(),
+                    timestamp_unix: 2_000,
+                },
+            );
+            snap.cluster_and_runtime.server_runtime_json = Some("{corrupt_json".into());
+        });
+
+        ctx.hydrate_server_runtime_from_db();
+
+        let probes = ctx.active_scanner_probes.read().unwrap();
+        assert_eq!(probes.len(), 1);
+        assert_eq!(probes[&501].state, 0);
+        assert_eq!(probes[&501].warp_end_ft, None);
+        assert!(!probes.contains_key(&502));
+
+        let notifs = ctx.notification_records.read().unwrap();
+        assert_eq!(notifs.len(), 2);
+        assert_eq!(notifs[0].notification_id, 10);
+        assert_eq!(notifs[1].notification_id, 20);
+    }
+
+    #[test]
+    fn intern_ewar_kind_tactical_payload_tags_and_session_transition_helpers() {
+        for k in [
+            "warpScramblerMWD",
+            "warpScrambler",
+            "focusedWarpScrambler",
+            "webify",
+            "electronic",
+            "ewRemoteSensorDamp",
+            "ewGuidanceDisrupt",
+            "ewTrackingDisrupt",
+            "ewTargetPaint",
+            "ewEnergyNeut",
+            "ewEnergyVampire",
+        ] {
+            assert_eq!(intern_ewar_kind(k), k);
+        }
+        assert_eq!(intern_ewar_kind("unknown_ewar"), "electronic");
+
+        // PersistedTacticalModulesPayload::is_empty and tag/untag round-trip across db_key vs inst_key
+        let mut st = TacticalModulesState::default();
+        let empty_p = PersistedTacticalModulesPayload::from_state(&st, 200);
+        assert!(empty_p.is_empty());
+
+        st.lance_caster_lock_until.insert((100, 5001), 99);
+        st.lance_caster_lock_until.insert((200, 5002), 88);
+        let non_empty_p = PersistedTacticalModulesPayload::from_state(&st, 200);
+        assert!(!non_empty_p.is_empty());
+
+        let mut restored = TacticalModulesState::default();
+        non_empty_p.apply_to_state(&mut restored, 300, 400);
+        assert_eq!(restored.lance_caster_lock_until.get(&(300, 5001)), Some(&99));
+        assert_eq!(restored.lance_caster_lock_until.get(&(400, 5002)), Some(&88));
+
+        // session_transition helpers: clear_session_character_state, apply_session_from_character, build_session_state_keyval, spec builders
+        let ctx = ServerContext::new();
+        let char_id = 90_000_001_i64;
+        let ch = ctx.db.with_snapshot(|s| s.characters[&char_id].clone());
+        let mut sess = eve_machonet::SessionState::new(42);
+        sess.user_id = Some(ch.user_id);
+        sess.character_id = Some(char_id);
+        sess.corporation_id = Some(ch.corporation_id);
+
+        crate::router::session_transition::apply_session_from_character(
+            &mut sess,
+            &ch,
+            Some(Some(777_888)),
+            Some(&ctx.sde),
+        );
+        assert_eq!(sess.ship_id, Some(777_888));
+        assert_eq!(sess.solar_system_id, Some(ch.solar_system_id));
+        let kv_docked = crate::router::session_transition::build_session_state_keyval(&sess, char_id);
+        assert_eq!(kv_docked.dict_get("solarsystemid"), Some(&eve_proto::PyRep::None));
+        assert_eq!(kv_docked.dict_get("shipid"), Some(&eve_proto::PyRep::Integer(777_888)));
+
+        sess.station_id = None;
+        sess.structure_id = None;
+        let kv_space = crate::router::session_transition::build_session_state_keyval(&sess, char_id);
+        assert_eq!(
+            kv_space.dict_get("solarsystemid"),
+            Some(&eve_proto::PyRep::Integer(i64::from(ch.solar_system_id)))
+        );
+
+        crate::router::session_transition::clear_session_character_state(&mut sess);
+        assert!(sess.station_id.is_none());
+        assert!(sess.structure_id.is_none());
+        assert!(sess.solar_system_id.is_none());
+        assert!(sess.constellation_id.is_none());
+        assert!(sess.region_id.is_none());
+        assert!(sess.ship_id.is_none());
+
+        let spec = crate::router::session_transition::SessionTransitionSpec::for_kind(
+            char_id,
+            crate::router::session_transition::TransitionKind::Undock {
+                solar_system_id: 30_000_142,
+            },
+            "test",
+        )
+        .with_apply_db(false)
+        .with_move_ship_item(false)
+        .with_validate_destination(false)
+        .with_emit_on_session_changed(false)
+        .with_sync_local_chat(false)
+        .with_invalidate_bounds(false)
+        .with_cleanup_departing_space(true)
+        .with_arrive_ball_pos(glam::DVec3::new(1.0, 2.0, 3.0))
+        .with_accept_ballpark_dock(60_003_760, glam::DVec3::ZERO)
+        .with_preserve_session_ship(true);
+        assert!(!spec.apply_db);
+        assert!(!spec.move_ship_item);
+        assert!(!spec.validate_destination);
+        assert!(!spec.emit_on_session_changed);
+        assert!(!spec.sync_local_chat);
+        assert!(!spec.invalidate_bounds);
+        assert!(spec.cleanup_departing_space);
+        assert!(spec.spawn_destination_ball);
+        assert_eq!(spec.arrive_ball_pos, Some(glam::DVec3::new(1.0, 2.0, 3.0)));
+        assert_eq!(spec.accept_ballpark_dock, Some((60_003_760, glam::DVec3::ZERO)));
+        assert!(spec.preserve_session_ship);
     }
 }

@@ -226,7 +226,7 @@ fn normalize_quasar_any_payload_coerces_types_and_wire_mismatches() {
     assert_eq!(decoded.fields.len(), 12);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn quasar_grpc_error_branches_compression_and_unauthenticated_paths() {
     let ctx = Arc::new(ServerContext::with_repository(Arc::new(
         eve_db::WorldRepository::with_demo_seed(),
@@ -312,4 +312,336 @@ async fn quasar_grpc_error_branches_compression_and_unauthenticated_paths() {
         let mut body = rsp.into_body();
         assert_eq!(body.data().await.unwrap().unwrap().chunk(), &[0, 0, 0, 0, 0]);
     }
+}
+
+#[test]
+fn normalize_notices_covers_all_remaining_event_and_coercion_branches() {
+    use eve_proto::quasar::{
+        encode_bytes_field, encode_fixed32_field, encode_varint_field,
+        DescriptorProto, FieldDescriptorProto, FieldLabel, FieldType, QuasarDescriptorRegistry,
+    };
+
+    // 1. DoDestinyUpdate with OnDockingAccepted having < 3 args falls through to recursive tuple normalization
+    let du_short = normalize_macho_notification(
+        "DoDestinyUpdate",
+        vec![PyRep::Tuple(vec![
+            PyRep::String("OnDockingAccepted".into()),
+            PyRep::Tuple(vec![PyRep::Integer(1)]),
+        ])],
+    );
+    assert_eq!(
+        du_short,
+        vec![PyRep::Tuple(vec![
+            PyRep::String("OnDockingAccepted".into()),
+            PyRep::Tuple(vec![PyRep::Integer(1)]),
+        ])]
+    );
+
+    // 2. OnSharedBookmarksFolderUpdated: list entries with existing bookmarkID, bare id, non-list, and already-tuple
+    let sb = normalize_macho_notification(
+        "OnSharedBookmarksFolderUpdated",
+        vec![PyRep::List(vec![
+            PyRep::Tuple(vec![
+                PyRep::Integer(1),
+                PyRep::Integer(10),
+                PyRep::List(vec![
+                    PyRep::keyval([("bookmarkID", PyRep::Integer(500))]),
+                    PyRep::Integer(501),
+                ]),
+            ]),
+            PyRep::Tuple(vec![
+                PyRep::Integer(2),
+                PyRep::Integer(10),
+                PyRep::Integer(999),
+            ]),
+            PyRep::Tuple(vec![
+                PyRep::Integer(3),
+                PyRep::Integer(10),
+                PyRep::Tuple(vec![PyRep::List(Vec::new()), PyRep::List(Vec::new())]),
+            ]),
+        ])],
+    );
+    assert!(matches!(sb.as_slice(), [PyRep::List(entries)] if entries.len() == 3));
+    if let PyRep::List(entries) = &sb[0] {
+        if let PyRep::Tuple(parts) = &entries[0] {
+            if let PyRep::Tuple(inner) = &parts[2] {
+                if let PyRep::List(bms) = &inner[0] {
+                    assert_eq!(bms[0].dict_get("bookmarkID"), Some(&PyRep::Integer(500)));
+                    assert_eq!(bms[1].dict_get("bookmarkID"), Some(&PyRep::Integer(501)));
+                } else {
+                    panic!("expected bookmarks list");
+                }
+            } else {
+                panic!("expected tuple wrapper");
+            }
+        }
+        if let PyRep::Tuple(parts) = &entries[1] {
+            assert_eq!(
+                parts[2],
+                PyRep::Tuple(vec![PyRep::List(Vec::new()), PyRep::List(Vec::new())])
+            );
+        }
+    }
+
+    // 3. OnBeanPrime: single list (Integer, Dict, KeyVal, ignored non-bean), single scalar, multi-arg
+    let bp_list = normalize_macho_notification(
+        "OnBeanPrime",
+        vec![PyRep::List(vec![
+            PyRep::Integer(111),
+            PyRep::Dict(vec![
+                (PyRep::String("errorID".into()), PyRep::Integer(222)),
+                (PyRep::Integer(99), PyRep::Bool(true)),
+            ]),
+            PyRep::keyval([("errorKeyHash", PyRep::String("abc".into()))]),
+            PyRep::None,
+        ])],
+    );
+    if let [PyRep::List(beans)] = bp_list.as_slice() {
+        assert_eq!(beans.len(), 3);
+        assert_eq!(beans[0].dict_get("errorID"), Some(&PyRep::Integer(111)));
+        assert_eq!(beans[1].dict_get("errorID"), Some(&PyRep::Integer(222)));
+        assert_eq!(beans[2].dict_get("errorID"), Some(&PyRep::Integer(0)));
+        assert_eq!(
+            beans[2].dict_get("errorKeyHash"),
+            Some(&PyRep::String("abc".into()))
+        );
+    } else {
+        panic!("expected single list of beans");
+    }
+    let bp_single = normalize_macho_notification("OnBeanPrime", vec![PyRep::Integer(333)]);
+    assert!(matches!(bp_single.as_slice(), [PyRep::List(v)] if v.len() == 1));
+    let bp_multi = normalize_macho_notification(
+        "OnBeanPrime",
+        vec![PyRep::Integer(1), PyRep::Integer(2)],
+    );
+    assert!(matches!(bp_multi.as_slice(), [PyRep::List(v)] if v.len() == 2));
+
+    // 4. OnOrganizationContactsUpdated: non-list second arg + standing field
+    let org_non_list = normalize_macho_notification(
+        "OnOrganizationContactsUpdated",
+        vec![PyRep::Integer(98_000_001), PyRep::None],
+    );
+    assert_eq!(org_non_list, vec![PyRep::Integer(98_000_001), PyRep::List(Vec::new())]);
+    let org_standing = normalize_macho_notification(
+        "OnOrganizationContactsUpdated",
+        vec![
+            PyRep::Integer(98_000_001),
+            PyRep::List(vec![PyRep::keyval([
+                ("contactID", PyRep::Integer(77)),
+                ("standing", PyRep::Real(10.0)),
+            ])]),
+        ],
+    );
+    assert_eq!(
+        org_standing[1],
+        PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(77),
+            PyRep::Real(10.0),
+            PyRep::Integer(0),
+        ])])
+    );
+
+    // 5. OnGodmaShipEffect empty args
+    assert!(normalize_macho_notification("OnGodmaShipEffect", Vec::new()).is_empty());
+
+    // 6. OnModuleAttributeChanges: 1-arg List/Tuple with 8-tuple, 7-tuple, scalar; multi-arg
+    let t8 = PyRep::Tuple(vec![PyRep::Integer(1); 8]);
+    let t7 = PyRep::Tuple(vec![PyRep::Integer(2); 7]);
+    let mac_list = normalize_macho_notification(
+        "OnModuleAttributeChanges",
+        vec![PyRep::List(vec![t8.clone(), t7.clone(), PyRep::Integer(3)])],
+    );
+    if let [PyRep::List(items)] = mac_list.as_slice() {
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0], t8);
+        assert!(matches!(&items[1], PyRep::Tuple(v) if v.len() == 8 && v[7] == PyRep::None));
+        assert!(matches!(&items[2], PyRep::Tuple(v) if v.len() == 8 && v[2] == PyRep::Integer(3)));
+    } else {
+        panic!("expected list");
+    }
+    let mac_tuple = normalize_macho_notification(
+        "OnModuleAttributeChanges",
+        vec![PyRep::Tuple(vec![t8.clone()])],
+    );
+    assert!(matches!(mac_tuple.as_slice(), [PyRep::List(items)] if items.len() == 1));
+    let mac_multi = normalize_macho_notification("OnModuleAttributeChanges", vec![t7, t8]);
+    assert!(matches!(mac_multi.as_slice(), [PyRep::List(items)] if items.len() == 2));
+
+    // 7. OnItemChange: 1-arg Dict, 1-arg non-dict scalar, and empty args
+    let ic_dict = normalize_macho_notification(
+        "OnItemChange",
+        vec![PyRep::Dict(vec![(
+            PyRep::String("itemID".into()),
+            PyRep::Integer(10),
+        )])],
+    );
+    assert_eq!(ic_dict.len(), 1);
+    assert_eq!(ic_dict[0].dict_get("itemID"), Some(&PyRep::Integer(10)));
+    let ic_scalar = normalize_macho_notification("OnItemChange", vec![PyRep::Integer(5)]);
+    assert_eq!(ic_scalar.len(), 1);
+    assert!(normalize_macho_notification("OnItemChange", Vec::new()).is_empty());
+
+    // 8. Coercion depth limits, UTF-8 / invalid UTF-8 leaf on String field, wire skips, unknown nested type, and empty-out leaf fallback
+    let mut reg = QuasarDescriptorRegistry::empty_with_builtins();
+    let mk_field = |number: u32, name: &str, field_type: FieldType, type_name: &str| {
+        FieldDescriptorProto {
+            name: name.into(),
+            number,
+            label: FieldLabel::Optional,
+            field_type,
+            type_name: type_name.into(),
+            oneof_index: None,
+            json_name: name.into(),
+        }
+    };
+    let mk_msg = |full_name: &str, fields: Vec<FieldDescriptorProto>| DescriptorProto {
+        name: full_name.rsplit('.').next().unwrap_or(full_name).into(),
+        full_name: full_name.into(),
+        fields,
+        nested_types: Vec::new(),
+        enum_types: Vec::new(),
+        oneofs: Vec::new(),
+        is_map_entry: false,
+    };
+
+    reg.messages_by_full_name.insert(
+        "eve_public.test.StrLeaf".into(),
+        mk_msg("eve_public.test.StrLeaf", vec![mk_field(1, "text", FieldType::String, "")]),
+    );
+    reg.messages_by_full_name.insert(
+        "eve_public.test.UnknownChildHolder".into(),
+        mk_msg(
+            "eve_public.test.UnknownChildHolder",
+            vec![mk_field(1, "missing", FieldType::Message, "eve_public.test.DoesNotExist")],
+        ),
+    );
+    reg.messages_by_full_name.insert(
+        "eve_public.test.MsgHolder".into(),
+        mk_msg(
+            "eve_public.test.MsgHolder",
+            vec![
+                mk_field(1, "sub", FieldType::Message, "eve_public.test.StrLeaf"),
+                mk_field(2, "str_f", FieldType::String, ""),
+                mk_field(3, "bytes_f", FieldType::Bytes, ""),
+                mk_field(4, "u64_f", FieldType::Uint64, ""),
+                mk_field(5, "f64_f", FieldType::Fixed64, ""),
+                mk_field(6, "f32_f", FieldType::Fixed32, ""),
+            ],
+        ),
+    );
+    // Chain of 10 nested messages D0 -> D1 -> ... -> D9 -> StrLeaf to hit `depth > 8`
+    for d in 0..=9 {
+        let next = if d == 9 {
+            "eve_public.test.StrLeaf".to_string()
+        } else {
+            format!("eve_public.test.D{}", d + 1)
+        };
+        reg.messages_by_full_name.insert(
+            format!("eve_public.test.D{d}"),
+            mk_msg(
+                &format!("eve_public.test.D{d}"),
+                vec![mk_field(1, "next", FieldType::Message, &next)],
+            ),
+        );
+    }
+
+    // Valid UTF-8 non-wire `"!"` (0x21 = field 4 Fixed64 truncated) -> coerce_raw_leaf_bytes_to_message valid UTF-8
+    let mut any_valid_utf8_leaf = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.test.StrLeaf"),
+        value: b"!".to_vec(),
+    };
+    normalize_quasar_any_payload(&reg, &mut any_valid_utf8_leaf);
+    let dec = reg
+        .decode_dynamic("eve_public.test.StrLeaf", &any_valid_utf8_leaf.value)
+        .unwrap();
+    assert_eq!(
+        dec.fields.get(&1),
+        Some(&eve_proto::quasar::DynamicValue::String("!".into()))
+    );
+
+    // Invalid UTF-8 non-wire `[0xFF, 0x21]` -> coerce_raw_leaf_bytes_to_message hex fallback
+    let mut any_bad_utf8_leaf = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.test.StrLeaf"),
+        value: vec![0xFF, 0x21],
+    };
+    normalize_quasar_any_payload(&reg, &mut any_bad_utf8_leaf);
+    let dec = reg
+        .decode_dynamic("eve_public.test.StrLeaf", &any_bad_utf8_leaf.value)
+        .unwrap();
+    assert_eq!(
+        dec.fields.get(&1),
+        Some(&eve_proto::quasar::DynamicValue::String("ff21".into()))
+    );
+
+    // UnknownChildHolder with varint and invalid wire triggers unknown sub_desc branches in varint & leaf coercion
+    let mut unk_var = Vec::new();
+    encode_varint_field(1, 5, &mut unk_var);
+    let mut any_unk = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.test.UnknownChildHolder"),
+        value: unk_var,
+    };
+    normalize_quasar_any_payload(&reg, &mut any_unk);
+    let mut any_unk_leaf = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.test.UnknownChildHolder"),
+        value: vec![0xFF, 0x21],
+    };
+    normalize_quasar_any_payload(&reg, &mut any_unk_leaf);
+
+    // MsgHolder: empty sub-message bytes, Fixed32 on Message/String/Bytes/Fixed64, Varint & Fixed32 alongside bad field
+    let mut msg_wire = Vec::new();
+    encode_bytes_field(1, &[], &mut msg_wire);
+    encode_fixed32_field(1, 1, &mut msg_wire);
+    encode_fixed32_field(2, 2, &mut msg_wire);
+    encode_fixed32_field(3, 3, &mut msg_wire);
+    encode_varint_field(4, 44, &mut msg_wire);
+    encode_fixed32_field(5, 5, &mut msg_wire);
+    encode_fixed32_field(6, 66, &mut msg_wire);
+    encode_varint_field(99, 1, &mut msg_wire); // force coercion pass
+    let mut any_holder = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.test.MsgHolder"),
+        value: msg_wire,
+    };
+    normalize_quasar_any_payload(&reg, &mut any_holder);
+    assert!(reg
+        .decode_dynamic("eve_public.test.MsgHolder", &any_holder.value)
+        .is_ok());
+
+    // Valid WireMessage with ONLY unknown field 99 on StrLeaf -> out.is_empty() fallback to coerce_raw_leaf_bytes_to_message
+    let mut only_unknown = Vec::new();
+    encode_varint_field(99, 7, &mut only_unknown);
+    let mut any_fallback = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.test.StrLeaf"),
+        value: only_unknown,
+    };
+    normalize_quasar_any_payload(&reg, &mut any_fallback);
+    assert!(!any_fallback.value.is_empty());
+
+    // Depth > 8 on bytes, varint, and raw leaf chains (D0 -> ... -> D9 -> StrLeaf)
+    let mut deep_bytes = vec![0xFF, 0x21]; // raw leaf at bottom
+    for _ in 0..=9 {
+        let mut outer = Vec::new();
+        encode_bytes_field(1, &deep_bytes, &mut outer);
+        deep_bytes = outer;
+    }
+    // Add unknown field 99 at top so top-level fails decode_dynamic and enters coerce_quasar_bytes_to_message
+    encode_varint_field(99, 1, &mut deep_bytes);
+    let mut any_deep_bytes = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.test.D0"),
+        value: deep_bytes,
+    };
+    normalize_quasar_any_payload(&reg, &mut any_deep_bytes);
+
+    let mut deep_varint = Vec::new();
+    encode_varint_field(1, 777, &mut deep_varint);
+    let mut any_deep_varint = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.test.D0"),
+        value: deep_varint,
+    };
+    normalize_quasar_any_payload(&reg, &mut any_deep_varint);
+
+    let mut any_deep_leaf = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.test.D0"),
+        value: vec![0xFF, 0x21],
+    };
+    normalize_quasar_any_payload(&reg, &mut any_deep_leaf);
 }

@@ -165,18 +165,35 @@ fn test_client_global_config_host_normalization_and_extras() {
             Some(&PyRep::ascii_bytes(expected_ejabberd))
         );
         assert_eq!(
+            cfg.get("ejabberdPort"),
+            Some(&PyRep::Integer(5222))
+        );
+        assert_eq!(
+            cfg.get("ejabberd_client_port"),
+            Some(&PyRep::Integer(5222))
+        );
+        assert_eq!(
             cfg.get("customFlag"),
             Some(&PyRep::ascii_bytes("enabled"))
         );
     }
 
     ctx.esi_port = 0;
+    ctx.xmpp_port = 25_232;
     let no_http_cfg = build_client_global_config(&ctx, Some("127.0.0.1"));
     assert!(!no_http_cfg.contains_key("bugReporting_BugReportServer"));
     assert!(!no_http_cfg.contains_key("bugReporting_ShowButton"));
     assert_eq!(
         no_http_cfg.get("ejabberd_client_address"),
         Some(&PyRep::ascii_bytes("127.0.0.1"))
+    );
+    assert_eq!(
+        no_http_cfg.get("ejabberdPort"),
+        Some(&PyRep::Integer(25_232))
+    );
+    assert_eq!(
+        no_http_cfg.get("ejabberd_client_port"),
+        Some(&PyRep::Integer(25_232))
     );
 }
 

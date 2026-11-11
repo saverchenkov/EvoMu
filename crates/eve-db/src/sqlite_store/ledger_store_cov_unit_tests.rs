@@ -327,3 +327,69 @@ fn rollback_ledger_clean_noop_and_selective_deletion_restoration() {
     assert_eq!(snap.market_transactions[0].quantity, 5);
     assert_eq!(snap.market_transactions[1].quantity, 15);
 }
+
+#[test]
+fn ledger_store_corrupt_rows_and_dropped_table_error_paths() {
+    use crate::sqlite_store::ledger_store::{
+        apply_ledger_migration, load_ledger, rollback_ledger, sync_ledger,
+    };
+
+    // Corrupt JSON rows are ignored gracefully by load_ledger while valid rows still load
+    let conn = Connection::open_in_memory().unwrap();
+    apply_migrations(&conn).unwrap();
+    conn.execute("INSERT INTO wallet_journal_meta (entry_id, meta_json) VALUES (1, '{bad')", []).unwrap();
+    conn.execute("INSERT INTO market_transactions (transaction_id, tx_json) VALUES (1, '{bad')", []).unwrap();
+    conn.execute("INSERT INTO account_plex_vault (user_id, plex) VALUES (7, 99)", []).unwrap();
+    let mut s = WorldStateSnapshot::default();
+    load_ledger(&conn, &mut s);
+    assert!(s.wallet_journal_meta.is_empty());
+    assert!(s.market_transactions.is_empty());
+    assert_eq!(s.account_plex_vault.get(&7), Some(&99));
+
+    // Dropping each ledger table triggers load_ledger / sync_ledger error paths cleanly
+    let mut pop = WorldStateSnapshot::default();
+    pop.wallet_journal_meta.insert(
+        1,
+        JournalMeta {
+            ref_type_id: 1,
+            first_party_id: 1,
+            second_party_id: 2,
+            context_id: 0,
+            context: JournalContext::default(),
+            account_key: 1000,
+            date_unix: 100,
+        },
+    );
+    pop.market_transactions.push(sample_tx(2, 1));
+    pop.account_plex_vault.insert(7, 50);
+    let pop_fp = crate::sqlite_store::fingerprints::compute_fingerprints(&pop);
+
+    for tbl in ["wallet_journal_meta", "market_transactions", "account_plex_vault"] {
+        let mut c2 = Connection::open_in_memory().unwrap();
+        apply_migrations(&c2).unwrap();
+        c2.execute(&format!("DROP TABLE {tbl}"), []).unwrap();
+        let mut ls = WorldStateSnapshot::default();
+        load_ledger(&c2, &mut ls);
+        let mut e_fp = TableFingerprints::default();
+        {
+            let tx = c2.transaction().unwrap();
+            assert!(sync_ledger(&tx, &pop, &mut e_fp).is_err());
+        }
+        let mut p_fp = pop_fp.clone();
+        {
+            let tx = c2.transaction().unwrap();
+            assert!(sync_ledger(&tx, &WorldStateSnapshot::default(), &mut p_fp).is_err());
+        }
+        let mut mutated = pop.clone();
+        mutated.wallet_journal_meta.clear();
+        mutated.market_transactions.clear();
+        mutated.account_plex_vault.clear();
+        rollback_ledger(&c2, &mut mutated, &pop_fp);
+    }
+
+    // View collision on wallet_journal_meta causes apply_ledger_migration error
+    let c_view = Connection::open_in_memory().unwrap();
+    c_view.execute("CREATE VIEW wallet_journal_meta AS SELECT 1", []).unwrap();
+    assert!(apply_ledger_migration(&c_view).is_err());
+    drop(conn);
+}

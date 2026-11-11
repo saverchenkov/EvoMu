@@ -503,6 +503,81 @@ pub fn normalize_macho_rpc_reply(
             return Ok(PyRep::Dict(out));
         }
     }
+    if service == "dungeonInstanceCacheMgr"
+        && matches!(
+            method,
+            "GetCombatAnomalyInstances"
+                | "GetOreAnomalyInstances"
+                | "GetIceBeltInstances"
+                | "GetFactionWarfareInstances"
+        )
+    {
+        if let Ok(PyRep::Dict(entries)) = rpc_res {
+            let out = entries
+                .into_iter()
+                .map(|(sys_key, val)| {
+                    let mut list = Vec::new();
+                    if let PyRep::Dict(by_dungeon) = val {
+                        for (did_key, iids_val) in by_dungeon {
+                            let faction_id = match did_key.as_i64().unwrap_or(0) {
+                                2894 | 2900 | 2908 | 2911 | 9892 | 9909 => 500_002,
+                                2774 | 2789 | 2799 | 2805 | 9578 | 9736 => 500_003,
+                                2868 | 2879 | 2893 | 2903 | 9893 | 9911 => 500_004,
+                                10485 => 500_011,
+                                _ => 500_001,
+                            };
+                            if let PyRep::List(iids) = iids_val {
+                                for iid in iids {
+                                    list.push(PyRep::keyval([
+                                        ("dungeonID", did_key.clone()),
+                                        ("instanceID", iid),
+                                        ("solarSystemID", sys_key.clone()),
+                                        ("factionID", PyRep::Integer(faction_id)),
+                                    ]));
+                                }
+                            }
+                        }
+                    }
+                    (sys_key, PyRep::List(list))
+                })
+                .collect();
+            return Ok(PyRep::Dict(out));
+        }
+    }
+    if service == "dungeonInstanceCacheMgr"
+        && matches!(
+            method,
+            "GetPirateInsurgencyInstances" | "GetPirateInsurgencyIceHeistInstances"
+        )
+    {
+        if let Ok(PyRep::List(items)) = rpc_res {
+            let default_did = if method == "GetPirateInsurgencyIceHeistInstances" {
+                10_497
+            } else {
+                10_477
+            };
+            let mut by_sys: std::collections::BTreeMap<i64, Vec<PyRep>> =
+                std::collections::BTreeMap::new();
+            for mut item in items {
+                let sys_id = item
+                    .dict_get("solarSystemID")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(30_000_142);
+                if let PyRep::KeyVal(ref mut map) = item {
+                    map.entry("dungeonID".to_string())
+                        .or_insert(PyRep::Integer(default_did));
+                    map.entry("factionID".to_string())
+                        .or_insert(PyRep::Integer(500_010));
+                }
+                by_sys.entry(sys_id).or_default().push(item);
+            }
+            let out = by_sys
+                .into_iter()
+                .map(|(sys_id, list)| (PyRep::Integer(sys_id), PyRep::List(list)))
+                .collect();
+            return Ok(PyRep::Dict(out));
+        }
+    }
     if matches!(service, "corpRegistry" | "machoNet") && method == "GetMembersPaged" {
         if let Ok(PyRep::ObjectEx {
             is_type_2: false,
@@ -1085,8 +1160,13 @@ pub fn normalize_macho_rpc_reply(
             ]));
         }
     } else if service == "peaceTreatyMgr" && method == "GetPeaceTreatiesForSession" {
-        if let Ok(rep) = rpc_res {
-            return Ok(PyRep::Tuple(vec![rep.clone(), rep]));
+        if let Ok(rep) = &rpc_res {
+            if !matches!(rep, PyRep::Tuple(items) if items.len() == 2) {
+                return Ok(PyRep::Tuple(vec![
+                    PyRep::List(Vec::new()),
+                    PyRep::List(Vec::new()),
+                ]));
+            }
         }
     } else if service == "petitioner" && method == "GetCategoryHierarchicalInfo" {
         if let Ok(PyRep::Tuple(mut parts)) = rpc_res {
@@ -1745,8 +1825,109 @@ fn normalize_agent_mission_objective_rep(rep: PyRep) -> PyRep {
         ])]),
         _ => PyRep::List(Vec::new()),
     };
+    let agent_id = rep
+        .dict_get("agentID")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(3_008_416);
+    let sys_id = rep
+        .dict_get("solarsystemID")
+        .or_else(|| rep.dict_get("solarSystemID"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(30_000_142);
+    let origin_sid = rep
+        .dict_get("originStationID")
+        .and_then(|v| v.as_i64())
+        .filter(|&v| v > 0)
+        .unwrap_or(60_003_760);
+    let dest_sid_opt = rep
+        .dict_get("destinationStationID")
+        .and_then(|v| v.as_i64())
+        .filter(|&v| v > 0);
+    let make_loc_dict = |loc_id: i64, loc_type: &str| {
+        PyRep::Dict(vec![
+            (PyRep::String("locationID".into()), PyRep::Integer(loc_id)),
+            (PyRep::String("solarsystemID".into()), PyRep::Integer(sys_id)),
+            (PyRep::String("stationID".into()), PyRep::Integer(loc_id)),
+            (PyRep::String("typeID".into()), PyRep::Integer(1529)),
+            (PyRep::String("agentID".into()), PyRep::Integer(agent_id)),
+            (PyRep::String("referringAgentID".into()), PyRep::None),
+            (PyRep::String("shipTypeID".into()), PyRep::None),
+            (PyRep::String("locationType".into()), PyRep::String(loc_type.into())),
+            (PyRep::String("coords".into()), PyRep::None),
+            (PyRep::String("BookmarkID".into()), PyRep::None),
+        ])
+    };
+    let origin_loc = make_loc_dict(origin_sid, "agenthomebase");
     let objectives = match rep.dict_get("objectives") {
-        Some(PyRep::List(items)) => PyRep::List(items.clone()),
+        Some(PyRep::List(items)) if !items.is_empty() => PyRep::List(items.clone()),
+        _ => {
+            let mut objs = vec![PyRep::Tuple(vec![
+                PyRep::String("agent".into()),
+                PyRep::Tuple(vec![PyRep::Integer(agent_id), origin_loc.clone()]),
+            ])];
+            if let Some(dest_sid) = dest_sid_opt {
+                let req_tid = rep
+                    .dict_get("requiredTypeID")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(34);
+                let req_qty = rep
+                    .dict_get("requiredQuantity")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(1);
+                let dest_loc = make_loc_dict(dest_sid, "objective.destination");
+                let cargo_dict = PyRep::Dict(vec![
+                    (PyRep::String("typeID".into()), PyRep::Integer(req_tid)),
+                    (PyRep::String("quantity".into()), PyRep::Integer(req_qty)),
+                    (PyRep::String("volume".into()), PyRep::Real(req_qty as f64)),
+                    (
+                        PyRep::String("hasCargo".into()),
+                        PyRep::Bool(completion_status > 0 || mission_state >= 2),
+                    ),
+                ]);
+                objs.push(PyRep::Tuple(vec![
+                    PyRep::String("transport".into()),
+                    PyRep::Tuple(vec![
+                        PyRep::Integer(1),
+                        origin_loc.clone(),
+                        PyRep::Integer(2),
+                        dest_loc,
+                        cargo_dict,
+                    ]),
+                ]));
+            }
+            PyRep::List(objs)
+        }
+    };
+    let locations = match rep.dict_get("locations") {
+        Some(PyRep::List(items)) if !items.is_empty() => PyRep::List(items.clone()),
+        _ => {
+            let mut locs = vec![origin_loc];
+            if let Some(dest_sid) = dest_sid_opt {
+                locs.push(make_loc_dict(dest_sid, "objective.destination"));
+            }
+            PyRep::List(locs)
+        }
+    };
+    let dungeons = match rep.dict_get("dungeons") {
+        Some(PyRep::List(items)) if !items.is_empty() => PyRep::List(items.clone()),
+        _ if dest_sid_opt.is_none() => {
+            let mid_i64 = content_id.as_i64().unwrap_or(1).max(1);
+            PyRep::List(vec![PyRep::Dict(vec![
+                (PyRep::String("dungeonID".into()), PyRep::Integer(mid_i64)),
+                (PyRep::String("solarsystemID".into()), PyRep::Integer(sys_id)),
+                (PyRep::String("locationID".into()), PyRep::Integer(origin_sid)),
+                (PyRep::String("ownerID".into()), PyRep::Integer(agent_id)),
+                (PyRep::String("shipRestrictions".into()), PyRep::Integer(0)),
+                (
+                    PyRep::String("completed".into()),
+                    PyRep::Bool(completion_status > 0),
+                ),
+                (
+                    PyRep::String("completionStatus".into()),
+                    PyRep::Integer(completion_status),
+                ),
+            ])])
+        }
         _ => PyRep::List(Vec::new()),
     };
     PyRep::Dict(vec![
@@ -1755,8 +1936,8 @@ fn normalize_agent_mission_objective_rep(rep: PyRep) -> PyRep {
         (PyRep::String("missionState".into()), PyRep::Integer(mission_state)),
         (PyRep::String("missionName".into()), mission_name),
         (PyRep::String("objectives".into()), objectives),
-        (PyRep::String("dungeons".into()), PyRep::List(Vec::new())),
-        (PyRep::String("locations".into()), PyRep::List(Vec::new())),
+        (PyRep::String("dungeons".into()), dungeons),
+        (PyRep::String("locations".into()), locations),
         (PyRep::String("agentGift".into()), PyRep::List(Vec::new())),
         (PyRep::String("normalRewards".into()), normal_rewards),
         (PyRep::String("loyaltyPoints".into()), PyRep::Integer(lp_reward)),
@@ -2481,7 +2662,16 @@ pub fn normalize_macho_notification_with_sde(
         "OnModuleAttributeChanges" => {
             let raw_items = if args.len() == 1 {
                 match args.into_iter().next().unwrap() {
-                    PyRep::List(items) | PyRep::Tuple(items) => items,
+                    PyRep::List(items) => items,
+                    PyRep::Tuple(items)
+                        if items.is_empty()
+                            || (items.len() != 7 && items.len() != 8)
+                            || items
+                                .iter()
+                                .any(|el| matches!(el, PyRep::Tuple(_) | PyRep::List(_))) =>
+                    {
+                        items
+                    }
                     other => vec![other],
                 }
             } else {
@@ -2490,8 +2680,19 @@ pub fn normalize_macho_notification_with_sde(
             let norm_items: Vec<PyRep> = raw_items
                 .into_iter()
                 .map(|el| match el {
-                    PyRep::Tuple(t) if t.len() == 8 => PyRep::Tuple(t),
+                    PyRep::Tuple(mut t) if t.len() == 8 => {
+                        if t.get(3) == Some(&PyRep::Integer(0)) {
+                            t[3] = PyRep::Integer(2);
+                        }
+                        if matches!(t.get(7), Some(PyRep::Bool(_))) {
+                            t[7] = PyRep::None;
+                        }
+                        PyRep::Tuple(t)
+                    }
                     PyRep::Tuple(mut t) if t.len() == 7 => {
+                        if t.get(3) == Some(&PyRep::Integer(0)) {
+                            t[3] = PyRep::Integer(2);
+                        }
                         t.push(PyRep::None);
                         PyRep::Tuple(t)
                     }
@@ -2499,11 +2700,11 @@ pub fn normalize_macho_notification_with_sde(
                         PyRep::String("OnModuleAttributeChange".into()),
                         PyRep::None,
                         other,
-                        PyRep::Integer(0),
+                        PyRep::Integer(2),
                         PyRep::Integer(0),
                         PyRep::Real(0.0),
                         PyRep::Real(0.0),
-                        PyRep::Bool(true),
+                        PyRep::None,
                     ]),
                 })
                 .collect();
@@ -3092,6 +3293,138 @@ mod client_compat_tests {
             .collect();
         assert_eq!(by_sys.get(&30_000_142), Some(&3));
         assert_eq!(by_sys.get(&30_002_187), Some(&0));
+
+        // #806: GetIceBeltInstances / GetCombatAnomalyInstances / GetOreAnomalyInstances /
+        // GetFactionWarfareInstances must normalize `{sys_id: {did: [iid, ...]}}` into
+        // `{sys_id: [KeyVal(dungeonID=..., instanceID=..., solarSystemID=..., factionID=...), ...]}`.
+        for method in [
+            "GetIceBeltInstances",
+            "GetCombatAnomalyInstances",
+            "GetOreAnomalyInstances",
+            "GetFactionWarfareInstances",
+        ] {
+            let raw = PyRep::Dict(vec![(
+                PyRep::Integer(30_000_142),
+                PyRep::Dict(vec![(
+                    PyRep::Integer(2868),
+                    PyRep::List(vec![PyRep::Integer(9001), PyRep::Integer(9002)]),
+                )]),
+            )]);
+            let norm =
+                normalize_macho_rpc_reply("dungeonInstanceCacheMgr", method, Ok(raw)).unwrap();
+            let PyRep::Dict(sys_entries) = norm else {
+                panic!("expected Dict from {method}");
+            };
+            assert_eq!(sys_entries[0].0, PyRep::Integer(30_000_142));
+            let (_, PyRep::List(dng_list)) = &sys_entries[0] else {
+                panic!("expected List of KeyVals per solarSystemID from {method}");
+            };
+            assert_eq!(dng_list.len(), 2);
+            assert_eq!(
+                dng_list[0].dict_get("dungeonID"),
+                Some(&PyRep::Integer(2868))
+            );
+            assert_eq!(
+                dng_list[0].dict_get("instanceID"),
+                Some(&PyRep::Integer(9001))
+            );
+            assert_eq!(
+                dng_list[0].dict_get("solarSystemID"),
+                Some(&PyRep::Integer(30_000_142))
+            );
+            assert_eq!(
+                dng_list[0].dict_get("factionID"),
+                Some(&PyRep::Integer(500_004))
+            );
+        }
+
+        // Verify every FW faction_id mapping arm in GetFactionWarfareInstances normalization.
+        for &(did, expected_fac) in &[
+            (2894_i64, 500_002_i64),
+            (2900, 500_002),
+            (2908, 500_002),
+            (2911, 500_002),
+            (9892, 500_002),
+            (9909, 500_002),
+            (2774, 500_003),
+            (2789, 500_003),
+            (2799, 500_003),
+            (2805, 500_003),
+            (9578, 500_003),
+            (9736, 500_003),
+            (2868, 500_004),
+            (2879, 500_004),
+            (2893, 500_004),
+            (2903, 500_004),
+            (9893, 500_004),
+            (9911, 500_004),
+            (10485, 500_011),
+            (2869, 500_001),
+            (100, 500_001),
+        ] {
+            let raw = PyRep::Dict(vec![(
+                PyRep::Integer(30_002_813),
+                PyRep::Dict(vec![(
+                    PyRep::Integer(did),
+                    PyRep::List(vec![PyRep::Integer(1)]),
+                )]),
+            )]);
+            let norm = normalize_macho_rpc_reply(
+                "dungeonInstanceCacheMgr",
+                "GetFactionWarfareInstances",
+                Ok(raw),
+            )
+            .unwrap();
+            let PyRep::Dict(entries) = norm else {
+                panic!("expected Dict");
+            };
+            let (_, PyRep::List(items)) = &entries[0] else {
+                panic!("expected List");
+            };
+            assert_eq!(
+                items[0].dict_get("factionID"),
+                Some(&PyRep::Integer(expected_fac)),
+                "did {did} must map to faction {expected_fac}"
+            );
+        }
+
+        // #806: GetPirateInsurgencyInstances and GetPirateInsurgencyIceHeistInstances must group
+        // flat KeyVal lists by solarSystemID and populate default dungeonID and factionID.
+        for (method, expected_did) in [
+            ("GetPirateInsurgencyInstances", 10_477_i64),
+            ("GetPirateInsurgencyIceHeistInstances", 10_497_i64),
+        ] {
+            let ins_raw = PyRep::List(vec![
+                PyRep::keyval([
+                    ("instanceID", PyRep::Integer(7001)),
+                    ("solarSystemID", PyRep::Integer(30_002_813)),
+                ]),
+                PyRep::keyval([("instanceID", PyRep::Integer(7002))]),
+            ]);
+            let ins_norm =
+                normalize_macho_rpc_reply("dungeonInstanceCacheMgr", method, Ok(ins_raw)).unwrap();
+            let PyRep::Dict(ins_sys) = ins_norm else {
+                panic!("expected Dict from {method}");
+            };
+            assert_eq!(ins_sys.len(), 2);
+            assert_eq!(ins_sys[0].0, PyRep::Integer(30_000_142));
+            assert_eq!(ins_sys[1].0, PyRep::Integer(30_002_813));
+            let (_, PyRep::List(ins_items)) = &ins_sys[1] else {
+                panic!("expected List under solarSystemID");
+            };
+            assert_eq!(
+                ins_items[0].dict_get("dungeonID"),
+                Some(&PyRep::Integer(expected_did))
+            );
+            assert_eq!(
+                ins_items[0].dict_get("factionID"),
+                Some(&PyRep::Integer(500_010))
+            );
+            assert_eq!(
+                ins_items[0].dict_get("instanceID"),
+                Some(&PyRep::Integer(7001))
+            );
+        }
     }
 
     #[test]
@@ -3448,3 +3781,7 @@ mod client_compat_tests {
 #[cfg(test)]
 #[path = "client_compat_cov_unit_tests.rs"]
 mod client_compat_cov_unit_tests;
+
+#[cfg(test)]
+#[path = "client_compat_extra_tests.rs"]
+mod client_compat_extra_tests;

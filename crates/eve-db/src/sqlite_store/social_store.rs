@@ -1302,3 +1302,7 @@ pub(super) fn rollback_d6_social(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "social_store_edges_tests.rs"]
+mod social_store_edges_tests;

@@ -488,7 +488,7 @@ impl CombatState {
     /// Captures any unset (`None`) immutable baselines from the current `ball` + `self` attributes (`#584`).
     pub fn capture_missing_baselines(&mut self, ball: &Ball) {
         if self.base_max_velocity.is_none()
-            && (!self.is_cloaked || ball.max_velocity > 0.0)
+            && ball.max_velocity > 0.0
             && !self.module_immobilized
         {
             self.base_max_velocity = Some(ball.max_velocity);
@@ -670,7 +670,7 @@ impl CombatState {
         self.is_interdiction_nullified = nullified;
     }
 
-    pub(crate) fn is_warp_scrambled(&self) -> bool {
+    pub fn is_warp_scrambled(&self) -> bool {
         self.warp_core_strength < 0
             || (self.warp_scramble_strength > 0
                 && self.warp_scramble_strength >= self.warp_core_strength)

@@ -810,3 +810,417 @@ fn non_free_stop_and_rigid_static_balls_encode_flags_omit_data_sector_and_resist
         .iter()
         .any(|e| matches!(e, DestinyEvent::RemoveBall { ball_id } if *ball_id == ast_id)));
 }
+
+#[test]
+fn warp_phases_fallbacks_and_park_metadata_edges_roundtrip() {
+    // 1. WarpPhase::Aligning -> effect_stamp == -1, total_distance == -1.0
+    let align_ball = sample_ball(
+        501,
+        MovementMode::Warp {
+            origin: DVec3::ZERO,
+            destination: DVec3::new(3.0e9, 4.0e9, 0.0),
+            warp_speed_au_s: 4.5,
+            total_distance: 5.0e9,
+            phase: WarpPhase::Aligning,
+            elapsed_warp_time: 2.0,
+        },
+    );
+    // 2. WarpPhase::Cruising with total_distance == 0.0 (uses destination - origin) and elapsed_warp_time > stamp (clamped to 0)
+    let cruise_zero_dist = sample_ball(
+        502,
+        MovementMode::Warp {
+            origin: DVec3::ZERO,
+            destination: DVec3::new(3.0e8, 4.0e8, 0.0),
+            warp_speed_au_s: 3.0,
+            total_distance: 0.0,
+            phase: WarpPhase::Cruising,
+            elapsed_warp_time: 99.0,
+        },
+    );
+    // 3. Mushroom, Troll, Formation without park entries (unwrap_or fallbacks)
+    let mush_def = sample_ball(503, MovementMode::Mushroom);
+    let troll_def = sample_ball(504, MovementMode::Troll);
+    let form_def = sample_ball(505, MovementMode::Formation);
+
+    let refs = [&align_ball, &cruise_zero_dist, &mush_def, &troll_def, &form_def];
+    let buf = encode_add_balls_with_type(1, 20, &refs);
+    let dec = decode_add_balls(&buf);
+    assert!(dec.is_ok());
+    if let Ok((pkt, stamp, balls)) = dec {
+        assert_eq!(pkt, 1);
+        assert_eq!(stamp, 20);
+        assert_eq!(balls.len(), 5);
+        assert_eq!(balls[0].effect_stamp, Some(-1));
+        assert_eq!(balls[0].warp_speed_milli_au_s, Some(4500));
+        assert_eq!(balls[1].effect_stamp, Some(0));
+        assert_eq!(balls[2].effect_stamp, Some(20));
+        assert_eq!(balls[2].owner_id, Some(1));
+        assert!((balls[2].follow_range.unwrap_or_default() - 42.0).abs() < 1e-3);
+        assert_eq!(balls[3].effect_stamp, Some(20));
+        assert_eq!(balls[4].target_id, Some(0));
+        assert_eq!(balls[4].effect_stamp, Some(20));
+    }
+
+    // 4. Negative corp_id clamped to 0, non-positive alliance_id -> -1, combat_states cloak without slim_meta
+    let mut buf_neg = Vec::new();
+    let neg_meta = SlimItemMeta {
+        corp_id: -50,
+        alliance_id: 0,
+        is_cloaked: false,
+        ..Default::default()
+    };
+    encode_single_ball_with_meta(&mut buf_neg, &mush_def, 10, Some(&neg_meta));
+    let mut full_neg = vec![0u8];
+    full_neg.extend_from_slice(&10u32.to_le_bytes());
+    full_neg.extend_from_slice(&buf_neg);
+    let (_, _, neg_dec) = decode_add_balls(&full_neg).expect("decode neg meta");
+    assert_eq!(neg_dec[0].corp_id, Some(0));
+    assert_eq!(neg_dec[0].alliance_id, Some(-1));
+
+    // Rigid ball truncation checks across all prefix cuts & multi-ball second-ball truncation
+    let rigid = sample_ball(60_000_001, MovementMode::Rigid);
+    let rigid_buf = encode_add_balls(1, &[&rigid]);
+    assert_eq!(decode_add_balls(&rigid_buf[..5]).unwrap(), (0, 1, vec![]));
+    for cut in 6..rigid_buf.len() {
+        assert!(decode_add_balls(&rigid_buf[..cut]).is_err());
+    }
+    let two_buf = encode_add_balls(1, &[&rigid, &mush_def]);
+    assert!(decode_add_balls(&two_buf[..two_buf.len() - 3]).is_err());
+}
+
+#[test]
+fn slim_item_meta_boundaries_wire_type_remapping_and_remaining_events() {
+    let mut park = Ballpark::new(30_000_142);
+
+    // 1. park.ball_slim_meta and ball_group_id category mappings
+    let mut b_gate = sample_ball(1001, MovementMode::Rigid);
+    b_gate.type_id = 0; // remapped to 6 in slim_item_dict
+    park.add_static_ball(b_gate.clone(), 10);
+    assert_eq!(resolve_slim_item_meta(Some(&park), &b_gate).category_id, 2);
+
+    let b_station = sample_ball(1002, MovementMode::Rigid);
+    park.add_static_ball(b_station.clone(), 15);
+    assert_eq!(resolve_slim_item_meta(Some(&park), &b_station).category_id, 3);
+
+    let b_other = sample_ball(1003, MovementMode::Rigid);
+    park.set_ball_group_id(b_other.id, 25);
+    assert_eq!(resolve_slim_item_meta(Some(&park), &b_other).category_id, 6);
+
+    // 2. Rigid heuristics boundaries without park
+    let gate_lo = sample_ball(50_000_000, MovementMode::Rigid);
+    let gate_hi = sample_ball(59_999_999, MovementMode::Rigid);
+    let st_lo = sample_ball(60_000_000, MovementMode::Rigid);
+    let st_hi = sample_ball(69_999_999, MovementMode::Rigid);
+    let beyond_hi = sample_ball(70_000_000, MovementMode::Rigid);
+    let mut abyss_gate = sample_ball(40_000_010, MovementMode::Rigid);
+    abyss_gate.type_id = 32882;
+    assert_eq!(resolve_slim_item_meta(None, &gate_lo).group_id, 10);
+    assert_eq!(resolve_slim_item_meta(None, &gate_hi).group_id, 10);
+    assert_eq!(resolve_slim_item_meta(None, &st_lo).group_id, 15);
+    assert_eq!(resolve_slim_item_meta(None, &st_hi).group_id, 15);
+    assert_eq!(resolve_slim_item_meta(None, &beyond_hi).group_id, 6);
+    assert_eq!(resolve_slim_item_meta(None, &abyss_gate).group_id, 4079);
+
+    // 3. slim_item_dict remaps type_id 0->6, 32882/56002->55914, war_faction_id, empty gate jumps, wormhole defaults
+    let gate_no_jump_meta = SlimItemMeta {
+        group_id: 10,
+        category_id: 2,
+        war_faction_id: Some(500_001),
+        jump_target: None,
+        ..Default::default()
+    };
+    let gate_dict = slim_item_dict(&b_gate, &gate_no_jump_meta);
+    assert_eq!(gate_dict.dict_get("typeID"), Some(&PyRep::Integer(6)));
+    assert_eq!(
+        gate_dict.dict_get("warFactionID"),
+        Some(&PyRep::Integer(500_001))
+    );
+    assert_eq!(gate_dict.dict_get("jumps"), Some(&PyRep::List(Vec::new())));
+
+    let abyss_dict = slim_item_dict(&abyss_gate, &resolve_slim_item_meta(None, &abyss_gate));
+    assert_eq!(abyss_dict.dict_get("typeID"), Some(&PyRep::Integer(55914)));
+
+    let wh_meta = SlimItemMeta {
+        group_id: 988,
+        category_id: 2,
+        war_faction_id: Some(0),
+        ..Default::default()
+    };
+    let wh_obj = encode_slim_item_with_meta(&b_other, &wh_meta);
+    if let PyRep::Object { args, .. } = wh_obj {
+        assert_eq!(args.dict_get("warFactionID"), Some(&PyRep::None));
+        assert_eq!(args.dict_get("wormholeAge"), Some(&PyRep::Integer(0)));
+        assert_eq!(args.dict_get("wormholeSize"), Some(&PyRep::Real(1.0)));
+    } else {
+        panic!("expected foo.SlimItem Object");
+    }
+
+    // 4. encode_damage_state_tuple: None fallback, zero max_*_hp guard, clamping
+    let def_dmg = encode_damage_state_tuple(None, 12);
+    if let PyRep::Tuple(top) = def_dmg {
+        assert_eq!(
+            top[0],
+            PyRep::Tuple(vec![
+                PyRep::Real(1.0),
+                PyRep::Real(120_000.0),
+                PyRep::Integer(12),
+            ])
+        );
+        assert_eq!(top[1], PyRep::Real(1.0));
+        assert_eq!(top[2], PyRep::Real(1.0));
+    }
+    let clamped_cs = CombatState {
+        shield_hp: 999.0,
+        max_shield_hp: 0.0,
+        armor_hp: -5.0,
+        max_armor_hp: 0.0,
+        structure_hp: 50.0,
+        max_structure_hp: 100.0,
+        shield_recharge_time_ms: 45_000.0,
+        ..Default::default()
+    };
+    let clamped_dmg = encode_damage_state_tuple(Some(&clamped_cs), 15);
+    if let PyRep::Tuple(top) = clamped_dmg {
+        assert_eq!(
+            top[0],
+            PyRep::Tuple(vec![
+                PyRep::Real(1.0),
+                PyRep::Real(45_000.0),
+                PyRep::Integer(15),
+            ])
+        );
+        assert_eq!(top[1], PyRep::Real(0.0));
+        assert_eq!(top[2], PyRep::Real(0.5));
+    }
+
+    // 5. Uncovered DestinyEvent branches: SetMaxSpeed, CloakBall(0), OnDotVictimUpdated(0 & auto-expiry),
+    //    SetBallHarmonic with positive alliance/corp, OnDamageStateChange/OnFleetDamageStateChange with park tau
+    park.combat_states.insert(1003, clamped_cs);
+    park.ball_slim_meta.insert(
+        1003,
+        SlimItemMeta {
+            alliance_id: 99_000_007,
+            corp_id: 98_000_007,
+            ..Default::default()
+        },
+    );
+
+    let max_spd = encode_destiny_event(
+        5,
+        &DestinyEvent::SetMaxSpeed {
+            ball_id: 1003,
+            max_speed: 420.5,
+        },
+        None,
+    );
+    assert_eq!(
+        max_spd,
+        PyRep::Tuple(vec![
+            PyRep::Integer(5),
+            PyRep::Tuple(vec![
+                PyRep::String("SetMaxSpeed".into()),
+                PyRep::Tuple(vec![PyRep::Integer(1003), PyRep::Real(420.5)]),
+            ]),
+        ])
+    );
+
+    let uncloak = encode_destiny_event(
+        5,
+        &DestinyEvent::CloakBall {
+            ball_id: 1003,
+            cloaked: 0,
+        },
+        None,
+    );
+    if let PyRep::Tuple(outer) = uncloak {
+        if let PyRep::Tuple(call) = &outer[1] {
+            assert_eq!(
+                call[1],
+                PyRep::Tuple(vec![PyRep::Integer(1003), PyRep::Bool(false)])
+            );
+        }
+    }
+
+    let dot_empty = encode_destiny_event(
+        5,
+        &DestinyEvent::OnDotVictimUpdated {
+            ball_id: 1003,
+            flat_dps: 10.0,
+            pct_dps: 0.01,
+            remaining_ticks: 0,
+            expiry_filetime: 0,
+        },
+        Some(&park),
+    );
+    if let PyRep::Tuple(outer) = dot_empty {
+        if let PyRep::Tuple(call) = &outer[1] {
+            if let PyRep::Tuple(args) = &call[1] {
+                assert_eq!(args[1], PyRep::PySet(Vec::new()));
+            }
+        }
+    }
+
+    let dot_auto = encode_destiny_event(
+        5,
+        &DestinyEvent::OnDotVictimUpdated {
+            ball_id: 1003,
+            flat_dps: 25.0,
+            pct_dps: 0.02,
+            remaining_ticks: 5,
+            expiry_filetime: 0,
+        },
+        Some(&park),
+    );
+    if let PyRep::Tuple(outer) = dot_auto {
+        if let PyRep::Tuple(call) = &outer[1] {
+            if let PyRep::Tuple(args) = &call[1] {
+                if let PyRep::PySet(items) = &args[1] {
+                    assert_eq!(items.len(), 1);
+                    assert_eq!(items[0].dict_get("maxDamage"), Some(&PyRep::Real(25.0)));
+                } else {
+                    panic!("expected PySet");
+                }
+            }
+        }
+    }
+
+    let harm_pos = encode_destiny_event(
+        5,
+        &DestinyEvent::SetBallHarmonic {
+            ball_id: 1003,
+            harmonic: 2,
+        },
+        Some(&park),
+    );
+    if let PyRep::Tuple(outer) = harm_pos {
+        if let PyRep::Tuple(call) = &outer[1] {
+            assert_eq!(
+                call[1],
+                PyRep::Tuple(vec![
+                    PyRep::Integer(1003),
+                    PyRep::Integer(99_000_007),
+                    PyRep::Integer(98_000_007),
+                    PyRep::Integer(-1),
+                    PyRep::Integer(2),
+                ])
+            );
+        }
+    }
+
+    let dmg_park = encode_destiny_event(
+        7,
+        &DestinyEvent::OnDamageStateChange {
+            ball_id: 1003,
+            shield_ratio: 0.6,
+            armor_ratio: 0.7,
+            structure_ratio: 0.8,
+        },
+        Some(&park),
+    );
+    if let PyRep::Tuple(outer) = dmg_park {
+        if let PyRep::Tuple(call) = &outer[1] {
+            if let PyRep::Tuple(args) = &call[1] {
+                if let PyRep::Tuple(state) = &args[1] {
+                    assert_eq!(
+                        state[0],
+                        PyRep::Tuple(vec![
+                            PyRep::Real(0.6),
+                            PyRep::Real(45_000.0),
+                            PyRep::Integer(7),
+                        ])
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn mutant_killers_ball_flags_stargate_owner_gt_1_and_set_state_static_damage() {
+    // 1. encode_single_ball_with_park exact flag byte (byte 37): Stop normal, Stop non_free, Field + interactive override
+    let mut park = Ballpark::new(30_000_142);
+    let stop_free = sample_ball(501, MovementMode::Stop);
+    park.add_ball(stop_free.clone());
+    let mut buf1 = Vec::new();
+    encode_single_ball_with_park(&mut buf1, &stop_free, 0, None, Some(&park));
+    assert_eq!(
+        buf1[37],
+        BALL_FLAG_IS_FREE | BALL_FLAG_IS_MASSIVE | BALL_FLAG_IS_INTERACTIVE
+    );
+
+    park.non_free_ball_ids.insert(501);
+    let mut buf2 = Vec::new();
+    encode_single_ball_with_park(&mut buf2, &stop_free, 0, None, Some(&park));
+    assert_eq!(buf2[37], BALL_FLAG_IS_MASSIVE | BALL_FLAG_IS_INTERACTIVE);
+
+    let field_ball = sample_ball(502, MovementMode::Field);
+    park.add_ball(field_ball.clone());
+    park.ball_interactive_overrides.insert(502, true);
+    let mut buf3 = Vec::new();
+    encode_single_ball_with_park(&mut buf3, &field_ball, 0, None, Some(&park));
+    assert_eq!(buf3[37], BALL_FLAG_IS_GLOBAL | BALL_FLAG_IS_INTERACTIVE);
+
+    // 2. slim_item_dict group_id == 10 stargate owner IDs filter `> 1` (ID == 1 must yield PyRep::None; ID == 500_001 -> Integer)
+    let gate_ball = sample_ball(601, MovementMode::Rigid);
+    let meta_sys = SlimItemMeta {
+        group_id: 10,
+        owner_id: 1,
+        origin_system_owner_id: Some(1),
+        dest_system_owner_id: Some(1),
+        ..Default::default()
+    };
+    let PyRep::Dict(d_sys) = slim_item_dict(&gate_ball, &meta_sys) else {
+        panic!("expected Dict");
+    };
+    let find_k = |entries: &[(PyRep, PyRep)], key: &str| -> PyRep {
+        entries
+            .iter()
+            .find(|(k, _)| matches!(k, PyRep::String(s) if s == key))
+            .map(|(_, v)| v.clone())
+            .unwrap()
+    };
+    assert_eq!(find_k(&d_sys, "originSystemOwnerID"), PyRep::None);
+    assert_eq!(find_k(&d_sys, "destinationSystemOwnerID"), PyRep::None);
+
+    let meta_fac = SlimItemMeta {
+        group_id: 10,
+        owner_id: 500_001,
+        origin_system_owner_id: None,
+        dest_system_owner_id: Some(500_002),
+        ..Default::default()
+    };
+    let PyRep::Dict(d_fac) = slim_item_dict(&gate_ball, &meta_fac) else {
+        panic!("expected Dict");
+    };
+    assert_eq!(find_k(&d_fac, "originSystemOwnerID"), PyRep::Integer(500_001));
+    assert_eq!(find_k(&d_fac, "destinationSystemOwnerID"), PyRep::Integer(500_002));
+
+    // 3. encode_set_state_payload damageState inclusion: static without combat excluded, static WITH combat included
+    let mut sp = Ballpark::new(30_000_142);
+    let mut obs = sample_ball(701, MovementMode::Stop);
+    obs.position = DVec3::ZERO;
+    sp.add_ball(obs);
+    let mut st_no_combat = sample_ball(702, MovementMode::Rigid);
+    st_no_combat.position = DVec3::new(1_000.0, 0.0, 0.0);
+    sp.add_static_ball(st_no_combat, 0);
+    let mut st_with_combat = sample_ball(703, MovementMode::Rigid);
+    st_with_combat.position = DVec3::new(2_000.0, 0.0, 0.0);
+    sp.add_static_ball(st_with_combat, 0);
+    sp.combat_states.insert(703, CombatState::default());
+
+    let PyRep::KeyVal(kv) = encode_set_state_payload(&sp, 701) else {
+        panic!("expected SetState KeyVal");
+    };
+    let PyRep::Dict(dmg_entries) = kv
+        .into_iter()
+        .find(|(k, _)| k == "damageState")
+        .unwrap()
+        .1
+    else {
+        panic!("expected damageState Dict");
+    };
+    let dmg_ids: Vec<i64> = dmg_entries.iter().filter_map(|(k, _)| k.as_i64()).collect();
+    assert!(dmg_ids.contains(&701));
+    assert!(!dmg_ids.contains(&702), "static without combat must NOT appear in damageState");
+    assert!(dmg_ids.contains(&703), "static WITH combat MUST appear in damageState");
+}

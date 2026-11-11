@@ -534,3 +534,282 @@ fn sqlite_store_sync_insert_and_delete_error_paths_on_dropped_tables() {
         );
     }
 }
+
+fn build_social_populated_snapshot() -> WorldStateSnapshot {
+    use crate::durable_domain_types::SocialContactNotificationRecord;
+    use crate::types::{
+        BookmarkFolderRecord, CalendarEventRecord, ChatChannelAclRecord, ChatChannelRecord,
+        MailLabelRecord, MailingListRecord, SocialContactRecord,
+    };
+    let mut snap = WorldStateSnapshot::default();
+    let cid = 90_000_001_i64;
+    snap.read_mails.insert((cid, 1));
+    snap.deleted_mails.insert((cid, 2));
+    snap.trashed_mails.insert((cid, 3));
+    snap.mail_labels.insert(cid, vec![MailLabelRecord { label_id: 1, name: "L".into(), color: "#000000".into() }]);
+    snap.mail_assigned_labels.insert((cid, 1), vec![1]);
+    snap.mailing_lists.insert(
+        10,
+        MailingListRecord {
+            list_id: 10, name: "ML".into(), owner_id: cid, default_access: 1, default_role: 0,
+            cost: 0, members: HashMap::from([(cid, 1)]), entity_access: HashMap::new(),
+            welcome_mail: None, mail_ids: HashSet::new(),
+        },
+    );
+    snap.calendar_events.insert(
+        20,
+        CalendarEventRecord {
+            event_id: 20, owner_id: cid, creator_id: cid, event_date_time: 100, duration: 30,
+            importance: 0, title: "Ev".into(), description: "D".into(), scope: "Personal".into(),
+            responses: HashMap::new(), is_deleted: false,
+        },
+    );
+    snap.bookmarks.insert(
+        30,
+        BookmarkRecord {
+            bookmark_id: 30, owner_id: cid, label: "B".into(), solar_system_id: 30_000_142,
+            x: 1.0, y: 2.0, z: 3.0, item_id: None, memo: String::new(), folder_id: Some(40), is_shared: true,
+        },
+    );
+    snap.bookmark_folders.insert(40, BookmarkFolderRecord { folder_id: 40, owner_id: cid, folder_name: "F".into(), ..Default::default() });
+    snap.bookmark_subfolders.insert(30, 40);
+    snap.bookmark_expiries.insert(30, 1_900_000_000);
+    snap.access_groups.insert(50, vec![cid]);
+    snap.chat_channels.insert(
+        "ch1".into(),
+        ChatChannelRecord {
+            channel_id: "ch1".into(), name: "Ch".into(), motd: String::new(), owner_id: Some(cid),
+            members: HashSet::from([cid]), is_system_local: false, solar_system_id: None,
+            is_private: false, operators: HashSet::new(), password: None, is_delayed_local: false,
+        },
+    );
+    let c = SocialContactRecord {
+        contact_id: 90_000_002, contact_type: "character".into(), standing: 1.0,
+        is_watched: false, is_blocked: false, label_ids: vec![],
+    };
+    snap.char_contacts.insert(cid, vec![c.clone()]);
+    snap.char_contact_notifications.insert(
+        cid,
+        vec![SocialContactNotificationRecord {
+            notification_id: 1, sender_character_id: 90_000_002,
+            send_date_unix: 100, standing_level: 1.0, message: "Hi".into(),
+        }],
+    );
+    snap.char_contact_labels.insert(cid, vec![(1, "F".into())]);
+    snap.corp_contacts.insert(98_000_001, vec![c.clone()]);
+    snap.corp_contact_labels.insert(98_000_001, vec![(1, "C".into(), 1)]);
+    snap.alliance_contacts.insert(99_000_001, vec![c]);
+    snap.alliance_contact_labels.insert(99_000_001, vec![(1, "A".into())]);
+    snap.char_notes.insert((cid, 90_000_002), "note".into());
+    snap.chat_channel_acl.insert(
+        "ch1".into(),
+        ChatChannelAclRecord { allow_list: HashSet::new(), deny_list: HashSet::new(), muted_until: HashMap::new() },
+    );
+    snap
+}
+
+#[test]
+fn social_store_dropped_tables_corrupt_json_and_migration_error_paths() {
+    use crate::sqlite_store::social_store::{
+        apply_d6_social_migration, load_d6_social_into_snapshot, sync_d6_social,
+    };
+
+    let pop = build_social_populated_snapshot();
+    let base_fp = compute_fingerprints(&pop);
+    let empty = WorldStateSnapshot::default();
+    let social_tables = [
+        "read_mails",
+        "deleted_mails",
+        "trashed_mails",
+        "mail_labels",
+        "mail_assigned_labels",
+        "mailing_lists",
+        "calendar_events",
+        "bookmark_meta",
+        "bookmark_folders",
+        "chat_channels",
+        "char_contacts",
+        "char_contact_notifications",
+        "char_contact_labels",
+        "corp_contacts",
+        "corp_contact_labels",
+        "alliance_contacts",
+        "alliance_contact_labels",
+        "char_notes",
+        "access_groups",
+    ];
+
+    for tbl in social_tables {
+        // 1. Insert sync error when table dropped
+        let mut ins_conn = open_migrated_conn();
+        ins_conn.execute(&format!("DROP TABLE {tbl}"), []).unwrap();
+        let mut e_fp = TableFingerprints::default();
+        {
+            let tx = ins_conn.transaction().unwrap();
+            assert!(sync_d6_social(&tx, &pop, &mut e_fp).is_err(), "insert missing {tbl}");
+        }
+        // 2. Load error when table dropped
+        let mut s = WorldStateSnapshot::default();
+        assert!(load_d6_social_into_snapshot(&ins_conn, &mut s).is_err(), "load missing {tbl}");
+
+        // 3. Delete sync error when table dropped
+        let mut del_conn = open_migrated_conn();
+        del_conn.execute(&format!("DROP TABLE {tbl}"), []).unwrap();
+        let mut p_fp = base_fp.clone();
+        {
+            let tx = del_conn.transaction().unwrap();
+            assert!(sync_d6_social(&tx, &empty, &mut p_fp).is_err(), "delete missing {tbl}");
+        }
+    }
+
+    // Corrupt JSON rows in each JSON-carrying social table fail load cleanly
+    let json_corrupt_sql = [
+        "INSERT INTO mail_labels (character_id, labels_json) VALUES (1, '{bad')",
+        "INSERT INTO mail_assigned_labels (character_id, mail_id, labels_json) VALUES (1, 1, '{bad')",
+        "INSERT INTO mailing_lists (list_id, record_json) VALUES (1, '{bad')",
+        "INSERT INTO calendar_events (event_id, record_json) VALUES (1, '{bad')",
+        "INSERT INTO bookmark_meta (bookmark_id, record_json) VALUES (1, '{bad')",
+        "INSERT INTO bookmark_folders (folder_id, record_json) VALUES (1, '{bad')",
+        "INSERT INTO chat_channels (channel_id, record_json) VALUES ('x', '{bad')",
+        "INSERT INTO char_contacts (character_id, contacts_json) VALUES (1, '{bad')",
+        "INSERT INTO char_contact_notifications (character_id, notifications_json) VALUES (1, '{bad')",
+        "INSERT INTO char_contact_labels (character_id, labels_json) VALUES (1, '{bad')",
+        "INSERT INTO corp_contacts (corporation_id, contacts_json) VALUES (1, '{bad')",
+        "INSERT INTO corp_contact_labels (corporation_id, labels_json) VALUES (1, '{bad')",
+        "INSERT INTO alliance_contacts (alliance_id, contacts_json) VALUES (1, '{bad')",
+        "INSERT INTO alliance_contact_labels (alliance_id, labels_json) VALUES (1, '{bad')",
+        "INSERT INTO access_groups (group_id, members_json) VALUES (1, '{bad')",
+    ];
+    for sql in json_corrupt_sql {
+        let conn = open_migrated_conn();
+        conn.execute(sql, []).unwrap();
+        let mut s = WorldStateSnapshot::default();
+        assert!(load_d6_social_into_snapshot(&conn, &mut s).is_err(), "expected json err for: {sql}");
+    }
+
+    // Migration error when conflicting view replaces read_mails or schema_migrations is dropped
+    let bad_mig = Connection::open_in_memory().unwrap();
+    bad_mig.execute("CREATE VIEW read_mails AS SELECT 1 AS character_id, 2 AS mail_id", []).unwrap();
+    assert!(apply_d6_social_migration(&bad_mig).is_err());
+
+    let conn2 = Connection::open_in_memory().unwrap();
+    conn2.execute_batch("CREATE TABLE read_mails (character_id INTEGER, mail_id INTEGER); CREATE VIEW deleted_mails AS SELECT 1;").unwrap();
+    assert!(apply_d6_social_migration(&conn2).is_err());
+    drop(bad_mig);
+}
+
+#[test]
+fn schema_and_cold_stores_dropped_table_and_corrupt_paths() {
+    use crate::sqlite_store::corp_crimewatch_store::{load_d6_corp_crimewatch, sync_d6_corp_crimewatch};
+    use crate::sqlite_store::industry_market_pve_store::{load_d6_batch4, sync_d6_batch4};
+    use crate::sqlite_store::notes_lp_sequence_store::{load_d6, sync_d6};
+    use crate::sqlite_store::schema::{load_or_init_jwt_secret, save_jwt_secret};
+
+    // 1. JWT secret invalid length, non-hex 64-char string, and missing table error paths
+    let conn = open_migrated_conn();
+    conn.execute(
+        "INSERT OR REPLACE INTO auth_secrets (secret_key, secret_hex) VALUES ('jwt_signing_secret', 'short')",
+        [],
+    )
+    .unwrap();
+    let s1 = load_or_init_jwt_secret(&conn, || [0x11u8; 32]).unwrap();
+    assert_eq!(s1, [0x11u8; 32]);
+
+    conn.execute(
+        "INSERT OR REPLACE INTO auth_secrets (secret_key, secret_hex) VALUES ('jwt_signing_secret', ?1)",
+        rusqlite::params!["zz".repeat(32)],
+    )
+    .unwrap();
+    let s2 = load_or_init_jwt_secret(&conn, || [0x22u8; 32]).unwrap();
+    assert_eq!(s2, [0x22u8; 32]);
+
+    conn.execute("DROP TABLE auth_secrets", []).unwrap();
+    assert!(load_or_init_jwt_secret(&conn, || [0x33u8; 32]).is_err());
+    assert!(save_jwt_secret(&conn, &[0x44u8; 32]).is_err());
+
+    // 2. PRAGMA query_only triggers apply_migrations and submodule migration error paths cleanly
+    let c_ro = Connection::open_in_memory().unwrap();
+    c_ro.execute_batch("PRAGMA query_only = ON;").unwrap();
+    assert!(apply_migrations(&c_ro).is_err());
+    assert!(crate::sqlite_store::auth_store::apply_auth_migration(&c_ro).is_err());
+    assert!(crate::sqlite_store::ledger_store::apply_ledger_migration(&c_ro).is_err());
+    assert!(crate::sqlite_store::notes_lp_sequence_store::apply_d6_migration(&c_ro).is_err());
+    assert!(crate::sqlite_store::social_store::apply_d6_social_migration(&c_ro).is_err());
+    assert!(crate::sqlite_store::corp_crimewatch_store::apply_d6_corp_crimewatch_migration(&c_ro).is_err());
+    assert!(crate::sqlite_store::industry_market_pve_store::apply_d6_batch4_migration(&c_ro).is_err());
+    assert!(crate::sqlite_store::service_domains_store::apply_service_domains_migration(&c_ro).is_err());
+    // View collision on items triggers index/alter/schema failure during apply_migrations
+    let c_view = Connection::open_in_memory().unwrap();
+    c_view.execute("CREATE VIEW schema_migrations AS SELECT 1 AS version", []).unwrap();
+    let _ = apply_migrations(&c_view);
+
+    // Read-only SQLite file DB triggers execute_batch/schema errors cleanly
+    let tmp = std::env::temp_dir().join(format!("evomu_ro_mig_{}.sqlite", std::process::id()));
+    {
+        let rw = Connection::open(&tmp).unwrap();
+        apply_migrations(&rw).unwrap();
+    }
+    if let Ok(ro) = Connection::open_with_flags(&tmp, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) {
+        let _ = apply_migrations(&ro);
+    }
+    let _ = std::fs::remove_file(&tmp);
+
+    // 3. Cold stores unknown keys, dropped tables on sync/load
+    let mut c_cw = open_migrated_conn();
+    c_cw.execute("INSERT INTO d6_corp_crimewatch_kv (store_key, payload_json) VALUES ('unknown_k', '{}')", []).unwrap();
+    let mut cw_snap = WorldStateSnapshot::default();
+    load_d6_corp_crimewatch(&c_cw, &mut cw_snap);
+    c_cw.execute("DROP TABLE d6_corp_crimewatch_kv", []).unwrap();
+    load_d6_corp_crimewatch(&c_cw, &mut cw_snap);
+    let mut cw_pop = WorldStateSnapshot::default();
+    cw_pop.wars.insert(1, WarRecord {
+        war_id: 1, aggressor_corp_id: 1, defender_corp_id: 2, mutual: false, started_unix: 1, active: true,
+    });
+    let mut fp_cw = TableFingerprints::default();
+    {
+        let tx = c_cw.transaction().unwrap();
+        assert!(sync_d6_corp_crimewatch(&tx, &cw_pop, &mut fp_cw).is_err());
+    }
+
+    // notes_lp_sequence_store dropped tables & unknown sequence key
+    let c_notes = open_migrated_conn();
+    c_notes.execute("INSERT INTO sp6_lifecycle_state (singleton_id, state_json) VALUES (1, '{\"next_alliance_id\":5}')", []).ok();
+    c_notes.execute("INSERT INTO corp_lp_balances (corporation_id, issuer_corp_id, lp_balance) VALUES (1, 2, 10)", []).unwrap();
+    c_notes.execute("INSERT INTO char_lp_logs (character_id, logs_json) VALUES (1, '[]')", []).unwrap();
+    let mut n_snap = WorldStateSnapshot::default();
+    load_d6(&c_notes, &mut n_snap);
+    for t in ["owner_notes", "corp_lp_balances", "char_lp_logs", "sp6_lifecycle_state"] {
+        let mut c2 = open_migrated_conn();
+        c2.execute(&format!("DROP TABLE {t}"), []).unwrap();
+        let mut s2 = WorldStateSnapshot::default();
+        load_d6(&c2, &mut s2);
+        let mut pop_n = WorldStateSnapshot::default();
+        pop_n.owner_notes.insert(1, OwnerNoteRecord { note_id: 1, character_id: 1, item_id: 1, label: "L".into(), note: "N".into(), timestamp_unix: 1 });
+        pop_n.corp_lp_balances.insert((1, 2), 10);
+        pop_n.char_lp_logs.insert(1, vec![]);
+        let mut fp_n = TableFingerprints::default();
+        let tx = c2.transaction().unwrap();
+        assert!(sync_d6(&tx, &pop_n, &mut fp_n).is_err());
+    }
+
+    // industry_market_pve_store unknown key + dropped tables on load/sync/rollback
+    let c_b4 = open_migrated_conn();
+    c_b4.execute("INSERT INTO world_kv_blobs (blob_key, blob_json) VALUES ('unknown_blob', '[]')", []).unwrap();
+    let mut b4_snap = WorldStateSnapshot::default();
+    load_d6_batch4(&c_b4, &mut b4_snap);
+    for t in ["world_kv_blobs", "char_mining_ledger"] {
+        let mut c2 = open_migrated_conn();
+        c2.execute(&format!("DROP TABLE {t}"), []).unwrap();
+        let mut s2 = WorldStateSnapshot::default();
+        load_d6_batch4(&c2, &mut s2);
+        let mut pop_b4 = WorldStateSnapshot::default();
+        pop_b4.mining_ledger.push(MiningLedgerRecord {
+            character_id: 1, solar_system_id: 30_000_142, type_id: 1230, quantity: 10, date: "d".into(), timestamp_unix: 1,
+        });
+        pop_b4.quasar_state_blobs.insert("k".into(), "v".into());
+        let mut fp_b4 = TableFingerprints::default();
+        crate::sqlite_store::industry_market_pve_store::rollback_d6_batch4(&c2, &mut pop_b4, &fp_b4);
+        let tx = c2.transaction().unwrap();
+        assert!(sync_d6_batch4(&tx, &pop_b4, &mut fp_b4).is_err());
+    }
+}

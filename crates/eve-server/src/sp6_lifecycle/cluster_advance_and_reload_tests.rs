@@ -8,7 +8,7 @@ use eve_destiny::{Ball, MovementMode};
 use glam::DVec3;
 use std::collections::HashMap;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cluster_advance_handles_safe_logoff_abort_scrambled_warp_bounty_concord_and_void() {
     let ctx = test_ctx();
     let sys_id = 30_000_142;
@@ -197,7 +197,7 @@ async fn cluster_advance_handles_safe_logoff_abort_scrambled_warp_bounty_concord
     assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&abyss_ship)));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reload_space_objects_and_advance_disconnected_warp_expiry_and_self_destruct() {
     use crate::sp6_lifecycle::{
         on_advance_secs, populate_persisted_space_objects, with_mut_sp6_state,
@@ -306,5 +306,214 @@ async fn reload_space_objects_and_advance_disconnected_warp_expiry_and_self_dest
     with_sp6_state(&ctx.db, |st| {
         assert!(st.disconnected_ships[&90_000_002].removed_from_space);
         assert!(st.disconnected_ships[&90_000_001].emergency_warp_dest.is_none());
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cluster_advance_aborts_blocked_logoff_prunes_docked_disc_and_reload_skips_destroyed_and_expired() {
+    use crate::sp6_lifecycle::{
+        on_advance_secs_with_sim_clock_rebase, populate_persisted_space_objects,
+        with_mut_sp6_state, DisconnectedShipEntry, PersistedSpaceObjectMeta, SafeLogoffEntry,
+    };
+    use eve_destiny::Ballpark;
+
+    let ctx = test_ctx();
+    let sys_id = 30_000_142u32;
+    let now = ctx.now_unix();
+    let char_sd = 97_200_001i64;
+    let ship_sd = 97_200_101i64;
+    let char_docked = 97_200_002i64;
+    let ship_docked = 97_200_102i64;
+    let active_struct_id = 1_000_000_700_001i64;
+    let destroyed_struct_id = 1_000_000_700_002i64;
+    let expired_wreck_id = 97_200_201i64;
+    let fresh_wreck_id = 97_200_202i64;
+    let expired_jetcan_id = 97_200_203i64;
+    let asteroid_id = 97_200_204i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, sid, st_opt) in [(char_sd, ship_sd, None), (char_docked, ship_docked, Some(60_003_760))] {
+            let mut ch = snap.characters.values().next().cloned().unwrap();
+            ch.character_id = cid;
+            ch.user_id = cid as u64;
+            ch.solar_system_id = sys_id;
+            ch.station_id = st_opt;
+            ch.active_ship_id = sid;
+            snap.characters.insert(cid, ch);
+            snap.items.insert(
+                sid,
+                InventoryItemRecord {
+                    item_id: sid,
+                    type_id: 587,
+                    owner_id: cid,
+                    location_id: st_opt.unwrap_or(sys_id as i64),
+                    flag: if st_opt.is_some() { InventoryFlag::Hangar } else { InventoryFlag::None },
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.structures.insert(
+            active_struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: active_struct_id,
+                type_id: 35_832,
+                owner_corp_id: 1_000_009,
+                solar_system_id: sys_id,
+                name: "ActiveFort".into(),
+                position: [20_000.0, 0.0, 0.0],
+                state: "Online".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 1000.0,
+                armor_hp: 1000.0,
+                hull_hp: 1000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        snap.structures.insert(
+            destroyed_struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: destroyed_struct_id,
+                type_id: 35_832,
+                owner_corp_id: 1_000_009,
+                solar_system_id: sys_id,
+                name: "DestroyedFort".into(),
+                position: [30_000.0, 0.0, 0.0],
+                state: "Destroyed".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 0,
+                shield_hp: 0.0,
+                armor_hp: 0.0,
+                hull_hp: 0.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        for (id, tid, pos) in [
+            (expired_wreck_id, 26557u32, [1_000.0, 0.0, 0.0]),
+            (fresh_wreck_id, 26557u32, [2_000.0, 0.0, 0.0]),
+            (expired_jetcan_id, 23u32, [3_000.0, 0.0, 0.0]),
+            (asteroid_id, 1230u32, [4_000.0, 0.0, 0.0]),
+        ] {
+            snap.items.insert(
+                id,
+                InventoryItemRecord {
+                    item_id: id,
+                    type_id: tid,
+                    owner_id: char_sd,
+                    location_id: sys_id as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.item_positions.insert(id, pos);
+        }
+        snap.asteroids.insert(
+            asteroid_id,
+            eve_db::AsteroidRecord {
+                asteroid_id,
+                solar_system_id: sys_id,
+                belt_id: 40_000_001,
+                type_id: 1230,
+                quantity: 1000,
+                initial_quantity: 1000,
+                position: (4_000.0, 0.0, 0.0),
+                radius: 500.0,
+            },
+        );
+    });
+
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.self_destruct_countdowns.insert(
+            ship_sd,
+            crate::services::combat_crimewatch::SelfDestructCountdown {
+                ship_id: ship_sd,
+                char_id: char_sd,
+                solar_system_id: sys_id,
+                started_unix: now,
+                detonate_at_unix: now + 60,
+            },
+        );
+    });
+    with_mut_sp6_state(&ctx.db, |st, _snap| {
+        st.space_object_meta.insert(
+            expired_wreck_id,
+            PersistedSpaceObjectMeta {
+                created_unix: Some(now.saturating_sub(crate::sp6_lifecycle::WRECK_DECAY_LIFETIME_SECS + 10)),
+                ..Default::default()
+            },
+        );
+        st.space_object_meta.insert(
+            fresh_wreck_id,
+            PersistedSpaceObjectMeta {
+                created_unix: Some(now),
+                ..Default::default()
+            },
+        );
+        st.space_object_meta.insert(
+            expired_jetcan_id,
+            PersistedSpaceObjectMeta {
+                created_unix: Some(now.saturating_sub(crate::sp6_lifecycle::JETCAN_DECAY_LIFETIME_SECS + 10)),
+                ..Default::default()
+            },
+        );
+        st.safe_logoffs.insert(
+            char_sd,
+            SafeLogoffEntry {
+                char_id: char_sd,
+                ship_id: ship_sd,
+                solar_system_id: sys_id,
+                started_unix: now,
+                complete_at_unix: now + 5,
+                completed: false,
+            },
+        );
+        st.disconnected_ships.insert(
+            char_docked,
+            DisconnectedShipEntry {
+                char_id: char_docked,
+                ship_id: ship_docked,
+                ship_type_id: 587,
+                solar_system_id: sys_id,
+                disconnected_at_unix: now,
+                remove_at_unix: now + 60,
+                emergency_warp_dest: None,
+                last_position: [0.0, 0.0, 0.0],
+                removed_from_space: false,
+                pre_warp_position: None,
+            },
+        );
+    });
+
+    let mut bp = Ballpark::new(sys_id);
+    let _ = populate_persisted_space_objects(&mut bp, sys_id, &ctx.sde, &ctx.db);
+    assert!(bp.balls.contains_key(&active_struct_id));
+    assert!(!bp.balls.contains_key(&destroyed_struct_id));
+    assert!(!bp.balls.contains_key(&expired_wreck_id));
+    assert!(bp.balls.contains_key(&fresh_wreck_id));
+    assert!(!bp.balls.contains_key(&expired_jetcan_id));
+    assert!(!bp.balls.contains_key(&asteroid_id));
+
+    ctx.drain_notifications_for_char(char_sd);
+    on_advance_secs_with_sim_clock_rebase(&ctx, now, 10, false);
+    assert!(
+        !ctx.drain_notifications_for_char(char_sd)
+            .iter()
+            .any(|n| n.event == "DoSimClockRebase")
+    );
+    with_sp6_state(&ctx.db, |st| {
+        assert!(!st.safe_logoffs.contains_key(&char_sd));
+        assert!(!st.disconnected_ships.contains_key(&char_docked));
     });
 }

@@ -973,6 +973,8 @@ pub struct SdeRegistry {
     pub groups: HashMap<GroupId, GroupInfo>,
     pub types: HashMap<TypeId, InvType>,
     #[serde(default)]
+    pub type_isis_groups: HashMap<TypeId, u32>,
+    #[serde(default)]
     pub variations_by_parent: HashMap<TypeId, Vec<TypeId>>,
     pub attributes: HashMap<AttributeId, DogmaAttributeType>,
     pub effects: HashMap<EffectId, DogmaEffectType>,
@@ -1231,6 +1233,7 @@ impl SdeRegistry {
     }
 
     pub fn get_type(&self, type_id: TypeId) -> Option<&InvType> { self.types.get(&type_id) }
+    pub fn type_isis_group_id(&self, type_id: TypeId) -> Option<u32> { self.type_isis_groups.get(&type_id).copied() }
     pub fn get_type_category(&self, type_id: TypeId) -> Option<CategoryId> { self.types.get(&type_id).map(|t| t.category_id) }
     pub fn group(&self, group_id: GroupId) -> Option<&GroupInfo> { self.groups.get(&group_id) }
     pub fn category(&self, category_id: CategoryId) -> Option<&CategoryInfo> { self.categories.get(&category_id) }

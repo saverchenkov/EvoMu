@@ -1136,3 +1136,7 @@ pub fn dispatch_fw_universe_route(
 #[path = "fw_universe_routes_unit_tests.rs"]
 mod fw_universe_routes_unit_tests;
 
+#[cfg(test)]
+#[path = "fw_universe_routes_edges_tests.rs"]
+mod fw_universe_routes_edges_tests;
+

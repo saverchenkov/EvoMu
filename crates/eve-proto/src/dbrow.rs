@@ -953,4 +953,7 @@ pub fn try_unpack_packed_row_columns(
 #[cfg(test)]
 #[path = "dbrow_unit_tests.rs"]
 mod dbrow_unit_tests;
+#[cfg(test)]
+#[path = "dbrow_edges_tests.rs"]
+mod dbrow_edges_tests;
 

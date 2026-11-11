@@ -242,6 +242,7 @@ impl EsiServer {
                 });
             }
         });
+        tokio::task::yield_now().await;
         Ok((local_addr, handle))
     }
 }
@@ -424,13 +425,6 @@ pub async fn send_raw_esi_request(
     addr: SocketAddr,
     req: &EsiHttpRequest,
 ) -> std::io::Result<EsiHttpResponse> {
-    let mut stream = match TcpStream::connect(addr).await {
-        Ok(s) => s,
-        Err(_) => {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            TcpStream::connect(addr).await?
-        }
-    };
     let mut wire = format!("{} {} HTTP/1.1\r\nHost: {}\r\n", req.method, req.raw_target, addr);
     for (k, v) in &req.headers {
         if !k.eq_ignore_ascii_case("host")
@@ -449,11 +443,47 @@ pub async fn send_raw_esi_request(
 
     let mut out = wire.into_bytes();
     out.extend_from_slice(&req.body);
-    stream.write_all(&out).await?;
+
+    let mut last_err = None;
+    for attempt in 0..8 {
+        if attempt > 0 {
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        match send_raw_esi_request_once(addr, &out).await {
+            Ok(resp) => return Ok(resp),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::TimedOut, "send_raw_esi_request exhausted retries")
+    }))
+}
+
+async fn send_raw_esi_request_once(
+    addr: SocketAddr,
+    out: &[u8],
+) -> std::io::Result<EsiHttpResponse> {
+    tokio::task::yield_now().await;
+    let mut stream = timeout(Duration::from_millis(500), TcpStream::connect(addr))
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "ESI connect timeout"))??;
+    let _ = stream.set_nodelay(true);
+    timeout(Duration::from_secs(5), stream.write_all(out))
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "ESI write timeout"))??;
 
     let mut reader = BufReader::new(stream);
     let mut status_line = String::new();
-    reader.read_line(&mut status_line).await?;
+    let n_status = timeout(Duration::from_secs(5), reader.read_line(&mut status_line))
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "ESI status read timeout"))??;
+    if n_status == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "Empty ESI status line",
+        ));
+    }
     let status_code = status_line
         .split_whitespace()
         .nth(1)
@@ -463,7 +493,9 @@ pub async fn send_raw_esi_request(
     let mut headers = HashMap::new();
     loop {
         let mut line = String::new();
-        let n = reader.read_line(&mut line).await?;
+        let n = timeout(Duration::from_secs(5), reader.read_line(&mut line))
+            .await
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "ESI header read timeout"))??;
         if n == 0 {
             break;
         }
@@ -477,7 +509,9 @@ pub async fn send_raw_esi_request(
     }
 
     let mut body = Vec::new();
-    reader.read_to_end(&mut body).await?;
+    timeout(Duration::from_secs(5), reader.read_to_end(&mut body))
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "ESI body read timeout"))??;
     Ok(EsiHttpResponse {
         status_code,
         headers,

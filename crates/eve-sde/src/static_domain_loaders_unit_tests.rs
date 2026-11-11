@@ -553,3 +553,320 @@ fn certificates_achievements_empire_selection_and_dialogs_loaders() {
     }
 }
 
+#[test]
+fn fsd_primitives_and_dict_malformed_buffer_edges() {
+    let short = [0x01u8, 0x02, 0x03];
+    assert_eq!(u32_le(&short, 0), 0);
+    assert_eq!(u32_le(&short, usize::MAX), 0);
+    assert_eq!(i32_le(&short, 0), 0);
+    assert_eq!(u64_le(&short, 0), 0);
+    assert_eq!(f32_le(&short, 0), 0.0);
+    assert_eq!(f64_le(&short, 0), 0.0);
+
+    // fsd_str: out-of-bounds length, overflow, invalid utf8
+    assert_eq!(fsd_str(&short, 0), "");
+    let bad_len = [100u8, 0, 0, 0, b'a', b'b'];
+    assert_eq!(fsd_str(&bad_len, 0), "");
+    let bad_utf8 = [2u8, 0, 0, 0, 0xff, 0xfe];
+    assert_eq!(fsd_str(&bad_utf8, 0), "");
+
+    // fsd_dict_entries guards
+    assert!(fsd_dict_entries(&[], 0, 4).is_empty()); // item_size < 8
+    assert!(fsd_dict_entries(&[0u8; 16], usize::MAX, 8).is_empty()); // pos overflow
+    let too_big_body = [200u8, 0, 0, 0, 0, 0, 0, 0];
+    assert!(fsd_dict_entries(&too_big_body, 0, 8).is_empty()); // body_end > buf.len()
+    let body_lt_4 = [2u8, 0, 0, 0, 0, 0];
+    assert!(fsd_dict_entries(&body_lt_4, 0, 8).is_empty()); // footer_len_pos checked_sub
+    let bad_footer_size = [4u8, 0, 0, 0, 99, 0, 0, 0];
+    assert!(fsd_dict_entries(&bad_footer_size, 0, 8).is_empty()); // footer_size > footer_len_pos
+
+    // Footer count larger than remaining bytes + out-of-range val_off
+    let mut bad_cnt = Vec::new();
+    bad_cnt.extend_from_slice(&16u32.to_le_bytes()); // body_len = 16 -> body_end = 20
+    bad_cnt.extend_from_slice(&999u32.to_le_bytes()); // footer at 4: cnt = 999
+    bad_cnt.extend_from_slice(&1u32.to_le_bytes()); // entry 0 key = 1
+    bad_cnt.extend_from_slice(&999u32.to_le_bytes()); // entry 0 val_off = 999 -> out of range (> body_end)
+    bad_cnt.extend_from_slice(&12u32.to_le_bytes()); // footer_size = 12 -> footer = 16 - 12 = 4
+    assert!(fsd_dict_entries(&bad_cnt, 0, 8).is_empty());
+}
+
+#[test]
+fn domain_loaders_partial_masks_localization_and_error_fallbacks() {
+    let mut sde = SdeRegistry::default();
+    let mut files = Vec::new();
+
+    // Unindexed resource -> InvalidSchema; indexed missing file -> MissingDatabase
+    assert!(matches!(
+        sde.load_industry_activities(),
+        Err(SdeError::InvalidSchema(_))
+    ));
+    assert!(matches!(
+        sde.load_wrecks_by_group_and_race(),
+        Err(SdeError::InvalidSchema(_))
+    ));
+    assert!(matches!(
+        sde.load_raw_fighter_abilities_static(),
+        Err(SdeError::InvalidSchema(_))
+    ));
+    sde.resources.insert(
+        "res:/staticdata/wrecks.static".to_string(),
+        SdeResourceInfo {
+            res_path: "res:/staticdata/wrecks.static".to_string(),
+            cdn_relative_path: "/nonexistent/evomu_missing_wrecks.static".to_string(),
+            md5: String::new(),
+            byte_size: 0,
+            format: String::new(),
+            record_count: 0,
+            spot: String::new(),
+        },
+    );
+    assert!(matches!(
+        sde.load_wrecks_by_group_and_race(),
+        Err(SdeError::MissingDatabase(_))
+    ));
+
+    // 1. brackets.static with mask=0 (required only) and mask=2 (only minVisibleDistance)
+    let mut b0_val = 0u64.to_le_bytes().to_vec();
+    let b0_s1 = fsd_string_bytes("MinBracket");
+    let b0_s2 = fsd_string_bytes("res:/min.png");
+    b0_val.extend_from_slice(&0u32.to_le_bytes());
+    b0_val.extend_from_slice(&(b0_s1.len() as u32).to_le_bytes());
+    b0_val.extend_from_slice(&b0_s1);
+    b0_val.extend_from_slice(&b0_s2);
+
+    let mut b2_val = 2u64.to_le_bytes().to_vec();
+    let b2_s1 = fsd_string_bytes("DistBracket");
+    let b2_s2 = fsd_string_bytes("res:/dist.png");
+    b2_val.extend_from_slice(&0u32.to_le_bytes());
+    b2_val.extend_from_slice(&(b2_s1.len() as u32).to_le_bytes());
+    b2_val.extend_from_slice(&((b2_s1.len() + b2_s2.len()) as u32).to_le_bytes());
+    b2_val.extend_from_slice(&b2_s1);
+    b2_val.extend_from_slice(&b2_s2);
+    b2_val.extend_from_slice(&42.5f32.to_le_bytes());
+
+    files.push(register_temp_res(
+        &mut sde,
+        "res:/staticdata/brackets.static",
+        "brackets_partial",
+        &with_zero_schema(build_fsd_dict_raw(&[(1, b0_val), (2, b2_val)], 12)),
+    ));
+    let br = sde.load_brackets().unwrap();
+    assert_eq!(br[&1].texture_path_empty, None);
+    assert_eq!(br[&1].min_visible_distance, None);
+    assert_eq!(br[&1].max_visible_distance, None);
+    assert_eq!(br[&1].icon_offset, None);
+    assert_eq!(br[&2].min_visible_distance, Some(42.5));
+    assert_eq!(br[&2].max_visible_distance, None);
+
+    // 2. certificates.static with mask=0 (no recommended_for) and unsorted mastery levels
+    let sk_levels: Vec<u8> = [1u32, 2, 3, 4, 5].into_iter().flat_map(|v| v.to_le_bytes()).collect();
+    let st_dict = build_fsd_dict_raw(&[(3300, sk_levels)], 8);
+    let mut cert_val = Vec::new();
+    cert_val.extend_from_slice(&10u32.to_le_bytes());
+    cert_val.extend_from_slice(&20u32.to_le_bytes());
+    cert_val.extend_from_slice(&30u32.to_le_bytes());
+    cert_val.extend_from_slice(&0u64.to_le_bytes()); // mask = 0 (no recommended)
+    cert_val.extend_from_slice(&0u32.to_le_bytes());
+    cert_val.extend_from_slice(&st_dict);
+    let c_dict = build_fsd_dict_raw(&[(11, cert_val)], 12);
+
+    let mut lvl0 = 1u32.to_le_bytes().to_vec();
+    lvl0.extend_from_slice(&11u32.to_le_bytes());
+    let mut lvl2 = 1u32.to_le_bytes().to_vec();
+    lvl2.extend_from_slice(&22u32.to_le_bytes());
+    let ship_lvl_dict = build_fsd_dict_raw(&[(2, lvl2), (0, lvl0)], 8);
+    let m_dict = build_fsd_dict_raw(&[(588, ship_lvl_dict)], 8);
+    let mut cert_file = vec![0u8; 20];
+    cert_file[16..20].copy_from_slice(&(c_dict.len() as u32).to_le_bytes());
+    cert_file.extend_from_slice(&c_dict);
+    cert_file.extend_from_slice(&m_dict);
+    files.push(register_temp_res(
+        &mut sde,
+        "res:/staticdata/certificates.static",
+        "certs_norec",
+        &cert_file,
+    ));
+    let cb = sde.load_certificates_and_masteries().unwrap();
+    assert!(cb.certificates[&11].recommended_for.is_empty());
+    assert_eq!(cb.masteries_by_ship_type[&588], vec![vec![11], vec![22]]);
+
+    // 3. achievements.static: truncated entry (raw.len() < pos + 14) is skipped, and bitfield=0 / localized pickle work
+    let mut trunc_ach_file = Vec::new();
+    trunc_ach_file.extend_from_slice(&0u32.to_le_bytes()); // sch_len = 0 -> dict at 4
+    trunc_ach_file.extend_from_slice(&16u32.to_le_bytes()); // body_len = 16 -> body_start = 8, body_end = 24
+    trunc_ach_file.extend_from_slice(&1u32.to_le_bytes()); // footer at 8: cnt = 1
+    trunc_ach_file.extend_from_slice(&1u32.to_le_bytes()); // key = 1
+    trunc_ach_file.extend_from_slice(&12u32.to_le_bytes()); // val_off = 12 -> pos = 20 (<= 24, raw.len() = 24 < 20 + 14)
+    trunc_ach_file.extend_from_slice(&12u32.to_le_bytes()); // footer_size = 12
+    files.push(register_temp_res(
+        &mut sde,
+        "res:/staticdata/achievements.static",
+        "ach_trunc",
+        &trunc_ach_file,
+    ));
+    let trunc_achs = sde.load_achievements().unwrap();
+    assert!(!trunc_achs.contains_key(&1));
+
+    files.push(register_temp_res(
+        &mut sde,
+        "res:/localizationfsd/localization_fsd_en-us.pickle",
+        "ach_loc_en",
+        b"(dp0\nI1001\n(VAch Name\nsI1002\n(VAch Desc\nsI1003\n(VAch Notif\ns.",
+    ));
+    let mut short_var_ach = Vec::new();
+    short_var_ach.extend_from_slice(&2u32.to_le_bytes());
+    short_var_ach.push(0);
+    short_var_ach.push(0);
+    short_var_ach.extend_from_slice(&0xffff_ffffu32.to_le_bytes()); // n_opt = 32 -> var_base exceeds raw.len()
+    short_var_ach.extend_from_slice(&0u32.to_le_bytes());
+
+    let mut zero_mask_ach = Vec::new();
+    zero_mask_ach.extend_from_slice(&88u32.to_le_bytes());
+    zero_mask_ach.push(0);
+    zero_mask_ach.push(0);
+    zero_mask_ach.extend_from_slice(&0u32.to_le_bytes()); // bitfield = 0
+    zero_mask_ach.extend_from_slice(&0u32.to_le_bytes());
+
+    let mut loc_ach = Vec::new();
+    loc_ach.extend_from_slice(&89u32.to_le_bytes());
+    loc_ach.push(1);
+    loc_ach.push(1);
+    loc_ach.extend_from_slice(&0x07u32.to_le_bytes());
+    loc_ach.extend_from_slice(&0u32.to_le_bytes());
+    for off in [0u32, 4, 8] {
+        loc_ach.extend_from_slice(&off.to_le_bytes());
+    }
+    for mid in [1001u32, 1002, 1003] {
+        loc_ach.extend_from_slice(&mid.to_le_bytes());
+    }
+
+    files.push(register_temp_res(
+        &mut sde,
+        "res:/staticdata/achievements.static",
+        "ach_edge",
+        &with_zero_schema(build_fsd_dict_raw(
+            &[(88, zero_mask_ach), (89, loc_ach), (2, short_var_ach)],
+            8,
+        )),
+    ));
+    let achs = sde.load_achievements().unwrap();
+    assert!(!achs.contains_key(&2));
+    assert_eq!(achs[&88].name, "Achievement 88");
+    assert_eq!(achs[&88].target_value, 1);
+    assert_eq!(achs[&89].name, "Ach Name");
+    assert_eq!(achs[&89].description, "Ach Desc");
+    assert_eq!(achs[&89].notification_text, "Ach Notif");
+
+    // 4. solarsystemcontent.static: mask=0 (skipped), short (skipped), mask=0x07 (extra bits -> sec_idx=3)
+    let mut ss_no_sun = vec![0u8; 98];
+    ss_no_sun.extend_from_slice(&0u64.to_le_bytes());
+
+    let mut ss_bit7 = vec![0u8; 98];
+    ss_bit7.extend_from_slice(&0x07u64.to_le_bytes()); // n_present = 2 + 3 = 5, sec_idx = 1 + 2 = 3
+    for _ in 0..5u32 {
+        ss_bit7.extend_from_slice(&0u32.to_le_bytes());
+    }
+    ss_bit7.extend_from_slice(&5001u32.to_le_bytes());
+    ss_bit7.extend_from_slice(&45041u32.to_le_bytes());
+    ss_bit7.extend_from_slice(&30845u32.to_le_bytes());
+    for f in [1.0f64, 2.0, 3.0] {
+        ss_bit7.extend_from_slice(&f.to_le_bytes());
+    }
+    files.push(register_temp_res(
+        &mut sde,
+        "res:/staticdata/solarsystemcontent.static",
+        "ssc_edge",
+        &with_zero_schema(build_fsd_dict_raw(
+            &[(31000002, ss_no_sun), (31000003, ss_bit7)],
+            12,
+        )),
+    ));
+    let suns = sde.load_secondary_suns().unwrap();
+    assert!(!suns.contains_key(&31000002));
+    assert_eq!(suns[&31000003].effect_beacon_type_id, 30845);
+
+    // 5. fighterabilities.static with integer key, abilityNameID override, and malformed JSON error
+    let fa_path = std::env::temp_dir().join(format!("evomu_sdl_fa_int_{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&fa_path);
+    {
+        let conn = Connection::open(&fa_path).unwrap();
+        conn.execute("CREATE TABLE cache (key INTEGER, value TEXT)", []).unwrap();
+        conn.execute(
+            "INSERT INTO cache VALUES (?1, ?2)",
+            (
+                15i64,
+                r#"{"displayNameID":100,"abilityNameID":200}"#,
+            ),
+        )
+        .unwrap();
+    }
+    sde.resources.insert(
+        "res:/staticdata/fighterabilities.static".to_string(),
+        SdeResourceInfo {
+            res_path: "res:/staticdata/fighterabilities.static".to_string(),
+            cdn_relative_path: fa_path.display().to_string(),
+            md5: String::new(),
+            byte_size: 1024,
+            format: String::new(),
+            record_count: 1,
+            spot: String::new(),
+        },
+    );
+    let (_, fas) = sde.load_raw_fighter_abilities_static().unwrap();
+    assert_eq!(fas[&15].target_mode, "");
+    assert!(!fas[&15].disallow_in_high_sec);
+    assert_eq!(fas[&15].display_name_id, Some(100));
+    assert_eq!(fas[&15].ability_name_id, Some(200));
+
+    {
+        let conn = Connection::open(&fa_path).unwrap();
+        conn.execute("INSERT INTO cache VALUES (16, 'not-json')", []).unwrap();
+    }
+    assert!(sde.load_raw_fighter_abilities_static().is_err());
+    let _ = std::fs::remove_file(fa_path);
+
+    for p in files {
+        let _ = std::fs::remove_file(p);
+    }
+
+    // 6. IndustryAssemblyLineInfo::accepts_product & IndustryAssemblyLineCategoryDetail default_multiplier_one
+    let cat_detail: IndustryAssemblyLineCategoryDetail =
+        serde_json::from_str(r#"{"categoryID":6}"#).unwrap();
+    assert_eq!(cat_detail.category_id, 6);
+    assert_eq!(cat_detail.time_multiplier, 1.0);
+    assert_eq!(cat_detail.material_multiplier, 1.0);
+    assert_eq!(cat_detail.cost_multiplier, 1.0);
+
+    let grp_detail: IndustryAssemblyLineGroupDetail =
+        serde_json::from_str(r#"{"groupID":25}"#).unwrap();
+    assert_eq!(grp_detail.group_id, 25);
+    assert_eq!(grp_detail.time_multiplier, 1.0);
+    assert_eq!(grp_detail.material_multiplier, 1.0);
+    assert_eq!(grp_detail.cost_multiplier, 1.0);
+
+    let mut line = IndustryAssemblyLineInfo {
+        id: 1,
+        name: "Test Line".into(),
+        activity: 1,
+        base_time_multiplier: 1.0,
+        base_material_multiplier: 1.0,
+        base_cost_multiplier: 1.0,
+        details_per_group: vec![],
+        details_per_category: vec![],
+    };
+    assert!(line.accepts_product(99, 999));
+
+    line.details_per_group.push(grp_detail);
+    assert!(line.accepts_product(99, 25));
+    assert!(!line.accepts_product(6, 999));
+
+    line.details_per_category.push(cat_detail);
+    assert!(line.accepts_product(6, 999));
+    assert!(line.accepts_product(99, 25));
+    assert!(!line.accepts_product(99, 999));
+
+    line.details_per_group.clear();
+    assert!(line.accepts_product(6, 999));
+    assert!(!line.accepts_product(99, 25));
+}
+

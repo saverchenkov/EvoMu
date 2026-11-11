@@ -484,7 +484,34 @@ impl PublicGatewayRouter {
         if self.db.is_write_locked_by_current_thread() {
             return;
         }
-        self.db.with_mut_snapshot(|snap| self.sync_meta_into_snapshot(snap));
+        let payload = QuasarGatewayMetaPayload {
+            server_hijack_state: self
+                .server_hijack_state
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            next_notice_seq: self.next_notice_seq.load(Ordering::Relaxed).max(1),
+            free_fast_checkout_plex: if self.has_persisted_free_fast_checkout_plex.load(Ordering::Relaxed) {
+                Some(self.free_fast_checkout_plex.load(Ordering::Relaxed))
+            } else {
+                None
+            },
+        };
+        let Ok(json) = serde_json::to_string(&payload) else {
+            return;
+        };
+        let unchanged = self.db.with_snapshot(|snap| {
+            snap.quasar_state_blobs
+                .get(QUASAR_GATEWAY_META_BLOB_KEY)
+                .is_some_and(|existing| existing == &json)
+        });
+        if unchanged {
+            return;
+        }
+        self.db.with_mut_snapshot(|snap| {
+            snap.quasar_state_blobs
+                .insert(QUASAR_GATEWAY_META_BLOB_KEY.to_string(), json);
+        });
     }
 
     pub fn sync_all_to_db(&self) {
@@ -1328,4 +1355,8 @@ mod quasar_gateway_rpc_tests;
 
 #[cfg(test)] #[path = "quasar_gateway_extra_tests.rs"]
 mod quasar_gateway_extra_tests;
+
+#[cfg(test)]
+#[path = "quasar_gateway_edges_tests.rs"]
+mod quasar_gateway_edges_tests;
 

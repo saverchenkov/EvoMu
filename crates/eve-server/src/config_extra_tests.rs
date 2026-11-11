@@ -155,3 +155,70 @@ fn test_exact_error_messages_for_invalid_fields() {
         "feature_flags.info_gathering_interval_secs in evomu.toml must be >= 1"
     );
 }
+
+#[test]
+fn test_env_sde_path_and_local_dev_jwt_flag_overrides() {
+    struct LocalEnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+    impl LocalEnvGuard {
+        fn capture(keys: &[&'static str]) -> Self {
+            Self {
+                saved: keys
+                    .iter()
+                    .map(|&k| (k, std::env::var(k).ok()))
+                    .collect(),
+            }
+        }
+    }
+    impl Drop for LocalEnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in self.saved.drain(..) {
+                if let Some(val) = v {
+                    std::env::set_var(k, val);
+                } else {
+                    std::env::remove_var(k);
+                }
+            }
+        }
+    }
+
+    let _lock = crate::lock_test_env_write();
+    let _guard = LocalEnvGuard::capture(&[
+        "EVOMU_CONFIG_PATH",
+        "EVOMU_SDE_PATH",
+        "EVOMU_ALLOW_LOCAL_DEV_JWT",
+    ]);
+
+    std::env::set_var("EVOMU_CONFIG_PATH", "  ");
+    std::env::set_var("EVOMU_SDE_PATH", "  /custom/path/evomu_sde.sqlite  ");
+    std::env::set_var("EVOMU_ALLOW_LOCAL_DEV_JWT", "YES");
+    let cfg_yes = ServerConfig::load_default_or_env().expect("YES truthy");
+    assert_eq!(cfg_yes.sde_path, "/custom/path/evomu_sde.sqlite");
+    assert!(cfg_yes.feature_flags.allow_local_dev_gateway_jwt);
+
+    for truthy in ["1", "true", "on"] {
+        std::env::set_var("EVOMU_ALLOW_LOCAL_DEV_JWT", truthy);
+        assert!(
+            ServerConfig::load_default_or_env()
+                .expect(truthy)
+                .feature_flags
+                .allow_local_dev_gateway_jwt
+        );
+    }
+
+    // Blank EVOMU_SDE_PATH leaves default intact; falsey values disable local dev JWT
+    std::env::set_var("EVOMU_SDE_PATH", "   ");
+    for falsey in ["0", "false", "NO", "off"] {
+        std::env::set_var("EVOMU_ALLOW_LOCAL_DEV_JWT", falsey);
+        let cfg = ServerConfig::load_default_or_env().expect(falsey);
+        assert_eq!(cfg.sde_path, ServerConfig::default().sde_path);
+        assert!(!cfg.feature_flags.allow_local_dev_gateway_jwt);
+    }
+
+    // Invalid EVOMU_CONFIG_PATH errors cleanly
+    let bad_path = std::env::temp_dir().join(format!("missing_cfg_{}.toml", Uuid::new_v4()));
+    std::env::set_var("EVOMU_CONFIG_PATH", bad_path.to_str().unwrap());
+    let err = ServerConfig::load_default_or_env().unwrap_err();
+    assert!(err.contains("Failed to read config file"));
+}

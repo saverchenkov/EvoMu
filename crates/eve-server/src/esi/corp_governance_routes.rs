@@ -658,3 +658,7 @@ pub fn dispatch_corp_governance_route(
 #[path = "corp_governance_routes_unit_tests.rs"]
 mod corp_governance_routes_unit_tests;
 
+#[cfg(test)]
+#[path = "corp_governance_routes_edges_tests.rs"]
+mod corp_governance_routes_edges_tests;
+

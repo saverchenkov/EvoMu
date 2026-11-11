@@ -404,3 +404,243 @@ fn test_issue_426_default_required_skill_level_1_and_safe_fsd_helpers() {
     let truncated_fsd = [4_u8, 0, 0, 0, 1, 2]; // body_end - 4 = 2, footer_size large/corrupt
     assert!(crate::static_domain_loaders::fsd_dict_entries(&truncated_fsd, 0, 8).is_empty());
 }
+
+#[test]
+fn load_career_goals_table_sqlite_and_json_fallback() {
+    let conn = Connection::open_in_memory().unwrap();
+    // Without sde_career_goals table -> falls back to embedded air_career_goals.json
+    let fallback = load_career_goals_table(&conn).expect("json fallback");
+    assert!(!fallback.is_empty());
+
+    // With sde_career_goals table -> reads directly from SQLite and clamps negative values to 0
+    conn.execute_batch(
+        "CREATE TABLE sde_career_goals (
+            goal_id INTEGER PRIMARY KEY,
+            career_path TEXT NOT NULL,
+            name TEXT NOT NULL,
+            target_progress INTEGER NOT NULL,
+            sp_reward INTEGER NOT NULL
+         );
+         INSERT INTO sde_career_goals VALUES (77, 'enforcer', 'Destroy 10 NPCs', -5, -100);",
+    )
+    .unwrap();
+    let from_db = load_career_goals_table(&conn).expect("sqlite table");
+    assert_eq!(from_db.len(), 1);
+    assert_eq!(from_db[&77].target_progress, 0);
+    assert_eq!(from_db[&77].sp_reward, 0);
+}
+
+#[test]
+fn load_universe_aux_and_career_tables_edge_schemas() {
+    let conn = Connection::open_in_memory().unwrap();
+    // 2-column sde_solar_systems (no security_class) + 1-column sde_celestials (count-only fallback)
+    conn.execute_batch(
+        "CREATE TABLE sde_celestials (celestial_id INTEGER PRIMARY KEY);
+         INSERT INTO sde_celestials VALUES (40000001), (40000002);
+         CREATE TABLE sde_solar_systems (system_id INTEGER PRIMARY KEY, faction_id INTEGER);
+         INSERT INTO sde_solar_systems VALUES (30000142, 500001), (30000143, NULL);",
+    )
+    .unwrap();
+    let aux = load_universe_aux_and_career_tables(&conn).expect("edge schema");
+    assert_eq!(aux.celestial_count, 2);
+    assert!(aux.celestials_by_system.is_empty());
+    assert_eq!(aux.solar_system_factions.get(&30_000_142), Some(&500_001));
+    assert!(aux.solar_system_security_classes.is_empty());
+}
+
+#[test]
+fn skin_tables_and_celestial_queries_handle_missing_tables_and_bad_dbs() {
+    // parse_json_col error branch
+    assert!(parse_json_col::<Vec<u32>>(0, "{not-json").is_err());
+
+    // load_skin_tables with missing sde_skin_licenses
+    let empty_conn = Connection::open_in_memory().unwrap();
+    assert!(load_skin_tables(&empty_conn).is_err());
+
+    // load_skin_tables with sde_skin_licenses present, sde_skins missing
+    empty_conn
+        .execute_batch(
+            "CREATE TABLE sde_skin_licenses (license_type_id INTEGER, skin_id INTEGER, duration INTEGER);",
+        )
+        .unwrap();
+    assert!(load_skin_tables(&empty_conn).is_err());
+
+    // On-demand SQLite queries with nonexistent file path
+    let mut sde = SdeRegistry::default();
+    sde.db_path = Some(std::env::temp_dir().join("evomu_no_such_skins_db.sqlite"));
+    assert!(sde.celestials_in_system(30000142).is_empty());
+    assert!(sde.all_stars().is_empty());
+    assert_eq!(sde.location_solar_system(40000001), None);
+    assert!(sde.location_solar_system_map().is_empty());
+    assert!(sde.factions_owning_solar_systems().is_empty());
+
+    // On-demand SQLite queries with valid SQLite file missing sde_celestials & sde_solar_systems
+    let empty_db_path = std::env::temp_dir().join(format!(
+        "evomu_empty_skins_tables_{}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&empty_db_path);
+    {
+        let c = Connection::open(&empty_db_path).unwrap();
+        c.execute_batch("CREATE TABLE dummy (x INTEGER);").unwrap();
+    }
+    sde.db_path = Some(empty_db_path.clone());
+    assert!(sde.celestials_in_system(30000142).is_empty());
+    assert!(sde.all_stars().is_empty());
+    assert_eq!(sde.location_solar_system(40000001), None);
+    assert!(sde.location_solar_system_map().is_empty());
+    assert!(sde.factions_owning_solar_systems().is_empty());
+    let _ = std::fs::remove_file(&empty_db_path);
+
+    // Corrupt row column types across skin_licenses, skin_materials, skins, celestials & solar_systems
+    let bad_conn = Connection::open_in_memory().unwrap();
+    bad_conn
+        .execute_batch(
+            "CREATE TABLE sde_skin_licenses (license_type_id ANY, skin_id ANY, duration ANY);
+             INSERT INTO sde_skin_licenses VALUES ('x', 1, 0);
+             INSERT INTO sde_skin_licenses VALUES (1, 'x', 0);
+             INSERT INTO sde_skin_licenses VALUES (1, 2, 'x');",
+        )
+        .unwrap();
+    assert!(load_skin_tables(&bad_conn).is_err());
+
+    let bad_mat_conn = Connection::open_in_memory().unwrap();
+    bad_mat_conn
+        .execute_batch(
+            "CREATE TABLE sde_skin_licenses (license_type_id INTEGER, skin_id INTEGER, duration INTEGER);
+             CREATE TABLE sde_skin_materials (wrong_col INTEGER);
+             CREATE TABLE sde_skins (skin_id INTEGER, internal_name TEXT, skin_material_id INTEGER, types_json TEXT, allow_ccp_devs INTEGER, visible_serenity INTEGER, visible_tranquility INTEGER, is_structure_skin INTEGER, skin_description TEXT);",
+        )
+        .unwrap();
+    assert!(load_skin_tables(&bad_mat_conn).is_err());
+
+    let bad_mat_rows = Connection::open_in_memory().unwrap();
+    bad_mat_rows
+        .execute_batch(
+            "CREATE TABLE sde_skin_licenses (license_type_id INTEGER, skin_id INTEGER, duration INTEGER);
+             CREATE TABLE sde_skin_materials (skin_material_id ANY, display_name_id ANY, material_set_id ANY);
+             INSERT INTO sde_skin_materials VALUES ('x', 1, 1);
+             INSERT INTO sde_skin_materials VALUES (1, 'x', 1);
+             INSERT INTO sde_skin_materials VALUES (1, 1, 'x');",
+        )
+        .unwrap();
+    assert!(load_skin_tables(&bad_mat_rows).is_err());
+
+    let bad_skins_rows = Connection::open_in_memory().unwrap();
+    bad_skins_rows
+        .execute_batch(
+            "CREATE TABLE sde_skin_licenses (license_type_id INTEGER, skin_id INTEGER, duration INTEGER);
+             CREATE TABLE sde_skins (skin_id ANY, internal_name ANY, skin_material_id ANY, types_json ANY, allow_ccp_devs ANY, visible_serenity ANY, visible_tranquility ANY, is_structure_skin ANY, skin_description ANY);
+             INSERT INTO sde_skins VALUES (1, 'n', 1, '{bad', 0, 0, 0, 0, '');",
+        )
+        .unwrap();
+    assert!(load_skin_tables(&bad_skins_rows).is_err());
+
+    let missing_skin_cols_conn = Connection::open_in_memory().unwrap();
+    missing_skin_cols_conn
+        .execute_batch(
+            "CREATE TABLE sde_skin_licenses (license_type_id INTEGER, skin_id INTEGER, duration INTEGER);
+             CREATE TABLE sde_skins (wrong_col INTEGER);",
+        )
+        .unwrap();
+    assert!(load_skin_tables(&missing_skin_cols_conn).is_err());
+
+    let bad_cel_path = std::env::temp_dir().join(format!(
+        "evomu_bad_cel_types_{}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&bad_cel_path);
+    {
+        let c = Connection::open(&bad_cel_path).unwrap();
+        c.execute_batch(
+            "CREATE TABLE sde_celestials (celestial_id ANY, system_id ANY, type_id ANY, group_id ANY, name ANY, radius ANY, x ANY, y ANY, z ANY, orbit_id ANY, orbit_index ANY, celestial_index ANY);
+             INSERT INTO sde_celestials VALUES ('bad', 30000142, 6, 6, 'S', 1.0, 0.0, 0.0, 0.0, NULL, NULL, NULL);
+             INSERT INTO sde_celestials VALUES (40000001, 'bad', 6, 6, 'S', 1.0, 0.0, 0.0, 0.0, NULL, NULL, NULL);
+             INSERT INTO sde_celestials VALUES (40000002, 30000142, 'bad', 6, 'S', 1.0, 0.0, 0.0, 0.0, NULL, NULL, NULL);
+             INSERT INTO sde_celestials VALUES (40000003, 30000142, 6, 'bad', 'S', 1.0, 0.0, 0.0, 0.0, NULL, NULL, NULL);
+             INSERT INTO sde_celestials VALUES (40000004, 30000142, 6, 6, X'FF', 1.0, 0.0, 0.0, 0.0, NULL, NULL, NULL);
+             INSERT INTO sde_celestials VALUES (40000005, 30000142, 6, 6, 'S', 'bad', 0.0, 0.0, 0.0, NULL, NULL, NULL);
+             INSERT INTO sde_celestials VALUES (40000006, 30000142, 6, 6, 'S', 1.0, 'bad', 0.0, 0.0, NULL, NULL, NULL);
+             INSERT INTO sde_celestials VALUES (40000007, 30000142, 6, 6, 'S', 1.0, 0.0, 'bad', 0.0, NULL, NULL, NULL);
+             INSERT INTO sde_celestials VALUES (40000008, 30000142, 6, 6, 'S', 1.0, 0.0, 0.0, 'bad', NULL, NULL, NULL);
+             INSERT INTO sde_celestials VALUES (40000009, 30000142, 6, 6, 'S', 1.0, 0.0, 0.0, 0.0, 'bad', NULL, NULL);
+             INSERT INTO sde_celestials VALUES (40000010, 30000142, 6, 6, 'S', 1.0, 0.0, 0.0, 0.0, NULL, 'bad', NULL);
+             INSERT INTO sde_celestials VALUES (40000011, 30000142, 6, 6, 'S', 1.0, 0.0, 0.0, 0.0, NULL, NULL, 'bad');
+             CREATE TABLE sde_solar_systems (faction_id ANY);
+             INSERT INTO sde_solar_systems VALUES ('bad');",
+        )
+        .unwrap();
+    }
+    sde.db_path = Some(bad_cel_path.clone());
+    assert!(sde.celestials_in_system(30000142).is_empty());
+    assert_eq!(sde.all_stars().len(), 0);
+    assert_eq!(sde.location_solar_system(40000001), None);
+    assert_eq!(sde.location_solar_system_map().len(), 0);
+    assert!(sde.factions_owning_solar_systems().is_empty());
+    let _ = std::fs::remove_file(&bad_cel_path);
+}
+
+#[test]
+fn load_career_goals_json_fallback_and_all_stars_edge_branches() {
+    // Missing sde_career_goals table triggers air_career_goals.json fallback:
+    // First goal has uuid[2] == 1, uuid[15] == 1 -> goal_id = 10_001 (kills + -> - at 319:53)
+    let empty_conn = Connection::open_in_memory().unwrap();
+    let goals = load_career_goals_table(&empty_conn).unwrap();
+    assert!(goals.contains_key(&10_001));
+    assert!(!goals.contains_key(&9_999));
+
+    // all_stars: prefers non-empty `self.stars` sorted by ID, ignoring `celestials_by_system`
+    let mut sde = SdeRegistry::default();
+    sde.insert_star(StarInfo {
+        star_id: 40_000_020,
+        solar_system_id: 30_000_142,
+        type_id: 45041,
+        radius: 100_000,
+        age: 1_000,
+        luminosity: 0.5,
+        temperature: 5000,
+        spectral_class: "G2 V".into(),
+    });
+    sde.insert_star(StarInfo {
+        star_id: 40_000_010,
+        solar_system_id: 30_000_144,
+        type_id: 45042,
+        radius: 100_000,
+        age: 1_000,
+        luminosity: 0.5,
+        temperature: 5000,
+        spectral_class: "K2 V".into(),
+    });
+    sde.insert_celestial(CelestialInfo {
+        celestial_id: 40_000_099,
+        solar_system_id: 30_000_142,
+        type_id: 11,
+        group_id: 7,
+        name: "Planet".into(),
+        radius: 5000.0,
+        position: crate::DVec3::ZERO,
+        orbit_id: None,
+        orbit_index: Some(1),
+        celestial_index: Some(1),
+    });
+    assert_eq!(
+        sde.all_stars(),
+        vec![(40_000_010, 45042), (40_000_020, 45041)]
+    );
+
+    // Fallback when `self.stars` is empty: returns only group_id == 6 celestials, excluding group_id != 6
+    Arc::make_mut(&mut sde.stars).clear();
+    sde.insert_celestial(CelestialInfo {
+        celestial_id: 40_000_005,
+        solar_system_id: 30_000_142,
+        type_id: 6,
+        group_id: 6,
+        name: "Star".into(),
+        radius: 50_000.0,
+        position: crate::DVec3::ZERO,
+        orbit_id: None,
+        orbit_index: None,
+        celestial_index: None,
+    });
+    assert_eq!(sde.all_stars(), vec![(40_000_005, 6)]);
+}

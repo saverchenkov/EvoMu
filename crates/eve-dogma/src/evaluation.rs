@@ -1295,7 +1295,7 @@ impl ShipFittingEngine {
             }
         }
 
-        // 6. Apply any explicit ship-level gang burst modifiers (`feat:dogma.gang-bursts`, `T-12`).
+        // 6. Apply any explicit ship-level gang burst modifiers.
         for burst in &self.gang_bursts {
             for m in &burst.modifiers {
                 ctx.ship.modifiers.push(*m);
@@ -1414,7 +1414,7 @@ impl ShipFittingEngine {
 
     /// Evaluates the ship's passive hull effects, character skill effects (`category_id == 16`),
     /// and fitted module passive/online/active/overload effects through [`DogmaEffectContext`]
-    /// over real V24.01 SDE `modifierInfo` records (`DG-1`, `OF-31`), persisting the evaluated
+    /// over real V24.01 SDE `modifierInfo` records, persisting the evaluated
     /// context, module states, charge states, and drone states on `self`.
     pub fn recalculate_stats(&mut self, sde: &SdeRegistry) {
         let mut hi_mod = 0.0;
@@ -1568,7 +1568,7 @@ impl ShipFittingEngine {
     }
 
     /// Returns the effective evaluated [`DogmaItemState`] of a module (fitted or hypothetical),
-    /// including character skill bonuses, overload bonuses, and any loaded charge/script modifiers (`DG-5`, `DG-6`).
+    /// including character skill bonuses, overload bonuses, and any loaded charge/script modifiers.
     pub fn build_effective_module_state(
         &self,
         module_item_id: i64,
@@ -1630,4 +1630,7 @@ impl ShipFittingEngine {
 #[cfg(test)]
 #[path = "evaluation_unit_tests.rs"]
 mod evaluation_unit_tests;
+#[cfg(test)]
+#[path = "evaluation_edges_tests.rs"]
+mod evaluation_edges_tests;
 

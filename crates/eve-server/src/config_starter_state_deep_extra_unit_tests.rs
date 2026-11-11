@@ -75,6 +75,8 @@ fn config_load_default_or_env_and_cwd_toml_paths() {
         "EVOMU_ACCOUNTS",
         "EVOMU_GM_ACCOUNT",
         "EVOMU_QUASAR_GRPC_PORT",
+        "EVOMU_XMPP_PORT",
+        "EVEMU_XMPP_PORT",
     ];
     let _env = ScopedEnv::capture(&keys);
     for k in keys {

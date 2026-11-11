@@ -490,3 +490,258 @@ fn command_burst_repair_ecm_scripts_and_capacitor_stability() {
     let r_assist = make_item(24, 1, &[(566, 50.0), (attr_ids::MAX_RANGE, 10_000.0)]);
     assert!((eng.evaluate_projected_remote_assistance(&r_assist, 566, 5_000.0, &sde) - 30.0).abs() < 1e-9);
 }
+
+#[test]
+fn propulsion_nosferatu_burst_and_hull_detection_edge_mutants() {
+    let mut sde = SdeRegistry::default();
+    sde.attributes.insert(
+        796,
+        eve_sde::DogmaAttributeType {
+            attribute_id: 796,
+            name: "massAddition".into(),
+            default_value: 500_000.0,
+            high_is_good: true,
+            stackable: true,
+            published: true,
+        },
+    );
+    sde.types
+        .insert(1, make_inv_type(1, 46, "AB_Default796", &[(796, 500_000.0)], &[6731]));
+    sde.types
+        .insert(2, make_inv_type(2, 46, "MWD", &[], &[6730]));
+    sde.types
+        .insert(3, make_inv_type(3, 46, "AB_No796", &[], &[6731]));
+
+    let ship = make_item(
+        10,
+        587,
+        &[
+            (attr_ids::MAX_VELOCITY, 200.0),
+            (attr_ids::MASS, 1_000_000.0),
+            (attr_ids::SIGNATURE_RADIUS, 40.0),
+        ],
+    );
+
+    // Inactive scrambled MWD still sets can_activate=false, is_scrambled=true, is_overloaded=false
+    let mwd_inactive = make_item(11, 2, &[(attr_ids::SPEED_FACTOR, 500.0)]);
+    let res_inact_scram = eval_propulsion_module(&ship, &mwd_inactive, false, true, true, &sde);
+    assert!(!res_inact_scram.can_activate);
+    assert!(res_inact_scram.is_scrambled);
+    assert!(!res_inact_scram.is_overloaded);
+    assert_eq!(res_inact_scram.max_velocity, 200.0);
+
+    // AB with NO 796 in base_attributes takes sde.types default_attributes check into get_attribute(796) (500_000, not MASS 999_999)
+    let ab_sde_796 = make_item(
+        12,
+        1,
+        &[(attr_ids::SPEED_FACTOR, 100.0), (attr_ids::MASS, 999_999.0)],
+    );
+    let res_ab = eval_propulsion_module(&ship, &ab_sde_796, true, false, false, &sde);
+    assert!(res_ab.can_activate);
+    assert!(!res_ab.is_overloaded);
+    assert_eq!(res_ab.mass_addition, 500_000.0);
+    assert_eq!(res_ab.mass, 1_500_000.0);
+    assert_eq!(res_ab.speed_factor, 100.0);
+    assert_eq!(res_ab.max_velocity, 400.0);
+
+    // AB with NO 796 in base_attributes OR sde.types.default_attributes falls back to attr MASS
+    let ab_fallback_mass = make_item(
+        19,
+        3,
+        &[(attr_ids::SPEED_FACTOR, 100.0), (attr_ids::MASS, 250_000.0)],
+    );
+    let res_ab_mass = eval_propulsion_module(&ship, &ab_fallback_mass, true, false, false, &sde);
+    assert_eq!(res_ab_mass.mass_addition, 250_000.0);
+    assert_eq!(res_ab_mass.mass, 1_250_000.0);
+
+    // MWD with negative overload attr 1223 <= 0 falls back to default 30.0%; overloaded MWD still blooms sig
+    let mwd_neg_ovl = make_item(
+        13,
+        2,
+        &[(attr_ids::SPEED_FACTOR, 500.0), (1223, -10.0), (554, 50.0)],
+    );
+    let res_mwd_ovl = eval_propulsion_module(&ship, &mwd_neg_ovl, true, true, false, &sde);
+    assert!((res_mwd_ovl.speed_factor - 650.0).abs() < 1e-9);
+    assert!((res_mwd_ovl.signature_radius - 60.0).abs() < 1e-9);
+
+    // get_module_falloff explicit 0.0 in attr 2044 beats attr 158
+    sde.types
+        .insert(101, make_inv_type(101, 71, "Neut", &[(158, 5_000.0)], &[]));
+    let zero_2044 = make_item(14, 101, &[(2044, 0.0), (158, 5_000.0)]);
+    assert_eq!(get_module_falloff(&zero_2044, &sde), 0.0);
+
+    // Energy neutralizer negative target cap + partial drain
+    let neut = make_item(15, 101, &[(97, 60.0), (attr_ids::MAX_RANGE, 10_000.0), (2044, 5_000.0)]);
+    let neut_neg = eval_energy_neutralizer(&neut, 0.0, -10.0, &sde);
+    assert_eq!(neut_neg.actual_drain, 0.0);
+    assert_eq!(neut_neg.target_remaining_cap, 0.0);
+    let neut_part = eval_energy_neutralizer(&neut, 10_000.0, 100.0, &sde);
+    assert_eq!(neut_part.actual_drain, 60.0);
+    assert_eq!(neut_part.target_remaining_cap, 40.0);
+
+    // Energy nosferatu exact comparison boundaries & overcharged source & exact 3*falloff cutoff
+    let nos = make_item(16, 101, &[(90, 80.0), (attr_ids::MAX_RANGE, 10_000.0), (2044, 5_000.0)]);
+    // target = 500 + 1e-6 > 500 drains target excess when not BR
+    let tiny = eval_energy_nosferatu_with_hull(&nos, 10_000.0, 500.0, 1000.0, 500.0001, false, &sde);
+    assert!((tiny.actual_transferred - 80.0).abs() < 1e-9);
+    // Negative target cap with BR override transfers 0
+    let neg_t = eval_energy_nosferatu_with_hull(&nos, 10_000.0, 100.0, 1000.0, -5.0, true, &sde);
+    assert_eq!(neg_t.actual_transferred, 0.0);
+    assert_eq!(neg_t.target_new_cap, 0.0);
+    // Overcharged source_current_cap > source_max_cap caps missing capacity at 0
+    let over = eval_energy_nosferatu_with_hull(&nos, 10_000.0, 1100.0, 1000.0, 1500.0, false, &sde);
+    assert_eq!(over.actual_transferred, 0.0);
+    assert_eq!(over.source_new_cap, 1000.0);
+    // Exact 3*falloff boundary: 25_000.0 drains 80 / 512, 25_000.001 drops to 0.0
+    let at_cut = eval_energy_nosferatu_with_hull(&nos, 25_000.0, 0.0, 1000.0, 500.0, true, &sde);
+    assert!((at_cut.falloff_factor - 0.5_f64.powi(9)).abs() < 1e-12);
+    assert!((at_cut.actual_transferred - 80.0 / 512.0).abs() < 1e-12);
+    let past_cut = eval_energy_nosferatu_with_hull(&nos, 25_000.001, 0.0, 1000.0, 500.0, true, &sde);
+    assert_eq!(past_cut.falloff_factor, 0.0);
+    assert_eq!(past_cut.actual_transferred, 0.0);
+
+    // Burst jammer: explicit 0.0 in attr 142 overrides default 10_000; negative MAX_RANGE ignored
+    let bj_type = make_inv_type(580, 80, "Burst Jammer I", &[(142, 10_000.0)], &[]);
+    let bj_zero_override = make_item(17, 580, &[(attr_ids::MAX_RANGE, -1.0), (142, 0.0)]);
+    assert_eq!(compute_burst_jammer_radius_m(&bj_type, &bj_zero_override, &sde), 5_000.0);
+
+    // Blood Raider hull detection: all 6 names + attr 1945 decimal > 0 + negative control
+    for (idx, name) in ["Cruor", "Ashimmu", "Bhaalgorn", "Sentinel", "Curse", "Dagon"]
+        .into_iter()
+        .enumerate()
+    {
+        let tid = 3000 + idx as u32;
+        sde.types.insert(tid, make_inv_type(tid, 25, name, &[], &[]));
+        assert!(is_blood_raider_nosferatu_hull(tid, &sde), "name {name} must match");
+    }
+    sde.types.insert(3010, make_inv_type(3010, 25, "Vigil", &[(1945, 0.0)], &[]));
+    assert!(!is_blood_raider_nosferatu_hull(3010, &sde));
+    sde.types.insert(3011, make_inv_type(3011, 25, "CustomBR", &[(1945, 0.1)], &[]));
+    assert!(is_blood_raider_nosferatu_hull(3011, &sde));
+}
+
+#[test]
+fn ewar_sorting_multi_module_clamping_cap_and_projected_boundaries() {
+    let sde = SdeRegistry::default();
+
+    // Unsorted painter slice + filtered zero/negatives before indexing kills sort deletion/inversion
+    let tp_sorted = eval_target_painters_sig_radius(100.0, &[40.0, 20.0, 10.0]);
+    let tp_unsorted = eval_target_painters_sig_radius(100.0, &[0.0, 10.0, -5.0, 40.0, 20.0]);
+    assert!((tp_unsorted - tp_sorted).abs() < 1e-12);
+    let expected_tp = 100.0
+        * (1.0 + 0.4 * stacking_penalty_factor(0))
+        * (1.0 + 0.2 * stacking_penalty_factor(1))
+        * (1.0 + 0.1 * stacking_penalty_factor(2));
+    assert!((tp_unsorted - expected_tp).abs() < 1e-9);
+
+    // Multi-module unsorted stacking for web, TP, damp, TD + empty distances & >=0 floors
+    let w_small = make_item(1, 526, &[(20, -20.0), (attr_ids::MAX_RANGE, 10_000.0)]);
+    let w_large = make_item(2, 526, &[(20, -60.0), (attr_ids::MAX_RANGE, 10_000.0)]);
+    let w_over = make_item(3, 526, &[(20, -120.0), (attr_ids::MAX_RANGE, 10_000.0)]);
+    let web_unsorted = eval_stasis_webifier_stacking(&[&w_small, &w_large], &[], 1000.0, &sde);
+    let exp_web = 1000.0 * (1.0 - 0.6) * (1.0 - 0.2 * stacking_penalty_factor(1));
+    assert!((web_unsorted - exp_web).abs() < 1e-9);
+    assert_eq!(eval_stasis_webifier_stacking(&[&w_over], &[0.0], 1000.0, &sde), 0.0);
+
+    let tp_small = make_item(4, 379, &[(554, 15.0), (attr_ids::MAX_RANGE, 20_000.0)]);
+    let tp_large = make_item(5, 379, &[(554, 45.0), (attr_ids::MAX_RANGE, 20_000.0)]);
+    let tp_multi = eval_target_painter_stacking(&[&tp_small, &tp_large], &[0.0], 100.0, &sde);
+    let exp_tp_multi = 100.0 * 1.45 * (1.0 + 0.15 * stacking_penalty_factor(1));
+    assert!((tp_multi - exp_tp_multi).abs() < 1e-9);
+
+    let damp_s = make_item(6, 208, &[(566, -15.0), (309, -20.0), (attr_ids::MAX_RANGE, 20_000.0)]);
+    let damp_l = make_item(7, 208, &[(566, -50.0), (309, -45.0), (attr_ids::MAX_RANGE, 20_000.0)]);
+    let (sr_m, mr_m) = eval_sensor_dampener_stacking(&[&damp_s, &damp_l], &[0.0], 200.0, 1000.0, &sde);
+    assert!((sr_m - 200.0 * 0.5 * (1.0 - 0.15 * stacking_penalty_factor(1))).abs() < 1e-9);
+    assert!((mr_m - 1000.0 * 0.55 * (1.0 - 0.20 * stacking_penalty_factor(1))).abs() < 1e-9);
+
+    let td_s = make_item(8, 209, &[(767, -10.0), (351, -15.0), (349, -20.0), (attr_ids::MAX_RANGE, 20_000.0)]);
+    let td_l = make_item(9, 209, &[(767, -40.0), (351, -50.0), (349, -60.0), (attr_ids::MAX_RANGE, 20_000.0)]);
+    let (t_m, o_m, f_m) = eval_tracking_disruptor_stacking(&[&td_s, &td_l], &[], 1.0, 1000.0, 1000.0, &sde);
+    assert!((t_m - 0.6 * (1.0 - 0.1 * stacking_penalty_factor(1))).abs() < 1e-9);
+    assert!((o_m - 1000.0 * 0.5 * (1.0 - 0.15 * stacking_penalty_factor(1))).abs() < 1e-9);
+    assert!((f_m - 1000.0 * 0.4 * (1.0 - 0.2 * stacking_penalty_factor(1))).abs() < 1e-9);
+    let td_over = make_item(10, 209, &[(767, -150.0), (351, -150.0), (349, -150.0), (attr_ids::MAX_RANGE, 20_000.0)]);
+    assert_eq!(eval_tracking_disruptor_stacking(&[&td_over], &[0.0], 1.0, 1000.0, 1000.0, &sde), (0.0, 0.0, 0.0));
+
+    // compute_ecm_jam_chance clamps & intermediate falloff math
+    assert_eq!(compute_ecm_jam_chance(-5.0, 20.0, 0.0, 10_000.0, 5_000.0), 0.0);
+    assert_eq!(compute_ecm_jam_chance(5.0, 0.0, 0.0, 10_000.0, 5_000.0), 1.0);
+    assert!((compute_ecm_jam_chance(6.0, 20.0, 15_000.0, 10_000.0, 5_000.0) - 0.15).abs() < 1e-9);
+
+    // Warp scram: pts.max(1) fallback when 105=0 & 104=0, rounding 1.6 -> 2, out-of-range doesn't block MWD
+    let mut sde_scram = SdeRegistry::default();
+    sde_scram.effects.insert(
+        9001,
+        DogmaEffectType {
+            effect_id: 9001,
+            name: "stop".into(),
+            modifiers: vec![EffectModifierSpec {
+                domain: "targetID".into(),
+                func: "EffectStopper".into(),
+                modified_attribute_id: 0,
+                modifying_attribute_id: 0,
+                operator: 0,
+                group_id: None,
+                skill_type_id: None,
+                effect_id: Some(6730),
+            }],
+            ..Default::default()
+        },
+    );
+    sde_scram.types.insert(448, make_inv_type(448, 52, "Scram", &[], &[9001]));
+    let scram_zero_pts = make_item(11, 1, &[(attr_ids::MAX_RANGE, 10_000.0)]);
+    let scram_round = make_item(12, 1, &[(105, 1.6), (attr_ids::MAX_RANGE, 10_000.0)]);
+    let scram_oor = make_item(13, 448, &[(105, 2.0), (attr_ids::MAX_RANGE, 9_000.0)]);
+    let ws = eval_warp_scrambler_effects(&[&scram_zero_pts, &scram_round, &scram_oor], &[5_000.0, 5_000.0, 9_001.0], &sde_scram);
+    assert_eq!(ws.scramble_strength, 3);
+    assert!(!ws.blocks_mwd);
+
+    // Command burst zero attr 2470 fallback & empty distances; local repair duration_ms=0 -> 1s
+    let cb = eval_command_burst(&make_item(14, 1, &[]), Some(&make_item(15, 2, &[(2470, 0.0)])), &[], &sde);
+    assert_eq!(cb.affected_fleet_count, 0);
+    assert_eq!(cb.aggregated_bonus, 15.0);
+    assert_eq!(compute_local_repair_cycle(&make_item(16, 1, &[(68, 50.0)]), false, &sde).duration_s, 1.0);
+
+    // Ship sensor strength all-zero ties to Gravimetric
+    assert_eq!(get_ship_sensor_strength(&make_item(17, 587, &[]), &sde), (ShipSensorType::Gravimetric, 0.0));
+
+    // Scripted damp / TD / overloaded TP unknown script, clamp [0.01, 1.0], and falloff
+    let extreme_damp = make_item(18, 208, &[(566, -150.0), (309, 25.0), (attr_ids::MAX_RANGE, 10_000.0), (2044, 5_000.0)]);
+    assert_eq!(eval_scripted_sensor_dampener(&extreme_damp, Some(99_999), 0.0, &sde), (0.01, 1.0));
+    let extreme_td = make_item(19, 209, &[(767, -80.0), (351, -150.0), (349, 20.0), (attr_ids::MAX_RANGE, 10_000.0), (2044, 5_000.0)]);
+    assert_eq!(eval_scripted_tracking_disruptor(&extreme_td, Some(99_999), 15_000.0, &sde), (0.6, 0.25, 1.0));
+    let tp_fall = make_item(20, 379, &[(554, 50.0), (attr_ids::MAX_RANGE, 10_000.0), (2044, 5_000.0)]);
+    assert!((eval_target_painter_with_overload(&tp_fall, true, 15_000.0, &sde) - 1.3).abs() < 1e-9);
+
+    // Capacitor stability intermediate curve: peak = 10.0 GJ/s, draw = 6.4 -> rate_norm = 0.16 -> 64.0%
+    let cap_mid = evaluate_capacitor_stability(1000.0, 250.0, 6.4);
+    assert!(cap_mid.is_stable);
+    assert!((cap_mid.peak_recharge_per_sec - 10.0).abs() < 1e-9);
+    assert!((cap_mid.stable_level_pct.unwrap() - 64.0).abs() < 1e-9);
+    assert!(cap_mid.depletion_time_s.is_none());
+    let cap_zero_tau = evaluate_capacitor_stability(1000.0, 0.0, 0.0);
+    assert!(cap_zero_tau.is_stable);
+
+    // Lock time clamps & exact formula, plus skill level cap 5
+    let exp_lock = 40_000.0 / (2.0 * 1.0_f64.asinh().powi(2));
+    assert!((compute_target_lock_time(2.0, 0.0) - exp_lock).abs() < 1e-9);
+    assert_eq!(compute_effective_max_locked_targets(15, 7, 9), 12);
+    assert_eq!(compute_effective_max_locked_targets(4, 5, 5), 4);
+
+    // ShipFittingEngine projected EWAR/repair/assist: resist clamp, shield & hull repair, 3*falloff cutoff divergence
+    let mut eng = ShipFittingEngine::from_sde(100, 587, &sde);
+    eng.ship.base_attributes.extend([(2045, 1.5), (2116, -0.5), (2135, 1.5)]);
+    let neut_long = make_item(21, 1, &[(97, 100.0), (attr_ids::MAX_RANGE, 10_000.0), (2044, 5_000.0)]);
+    // At distance 30_000 (beyond optimal + 3*falloff=25_000), EW & assist do NOT cut off, whereas remote_repair DOES!
+    assert!(eng.evaluate_projected_energy_warfare(&neut_long, 30_000.0, &sde) > 0.0);
+    assert!(eng.evaluate_projected_remote_assistance(&neut_long, 97, 30_000.0, &sde) > 0.0);
+    eng.ship.base_attributes.insert(2116, 0.5);
+    let rep_shield = make_item(22, 1, &[(attr_ids::SHIELD_BONUS, 200.0), (attr_ids::MAX_RANGE, 10_000.0), (2044, 5_000.0)]);
+    let rep_hull = make_item(23, 1, &[(83, 120.0), (attr_ids::MAX_RANGE, 10_000.0), (2044, 5_000.0)]);
+    assert!((eng.evaluate_projected_remote_repair(&rep_shield, 15_000.0, &sde) - 50.0).abs() < 1e-9);
+    assert!((eng.evaluate_projected_remote_repair(&rep_hull, 10_000.0, &sde) - 60.0).abs() < 1e-9);
+    assert_eq!(eng.evaluate_projected_remote_repair(&rep_shield, 25_001.0, &sde), 0.0);
+    eng.ship.base_attributes.insert(2116, -0.5);
+    assert_eq!(eng.evaluate_projected_remote_repair(&rep_shield, 0.0, &sde), 0.0);
+}

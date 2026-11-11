@@ -549,3 +549,129 @@ fn facilities_jobs_format_mining_extractions_and_observers_edge_cases() {
     assert_eq!(body(&obs_det).as_array().unwrap()[0]["last_updated"], "2023-11-14");
     assert!(dispatch_economy_industry_route(&ctx, "GET", "/unknown/route", &empty, &empty, None, 1).is_none());
 }
+
+#[test]
+fn dispatch_economy_industry_facilities_all_sources_fields_and_unmatched_none() {
+    let (base_ctx, _tok, char_id, corp_id, _pid) = seed_full_esi_context();
+    let mut sde = (*base_ctx.sde).clone();
+
+    let sys_id = 30_000_142_u32;
+    let region_id = sde.solar_systems.get(&sys_id).expect("Jita system").region_id;
+
+    let st_tpl: StationInfo = sde.stations.values().next().cloned().expect("seed station");
+    let ind_npc_st_id = 60_999_801_i64;
+    let job_npc_st_id = 60_999_802_i64;
+    sde.station_operations.insert(
+        251,
+        eve_sde::StationOperationInfo {
+            operation_id: 251,
+            name: "Industry Op".into(),
+            activity_id: None,
+            services: vec![14],
+        },
+    );
+    sde.station_operations.insert(
+        252,
+        eve_sde::StationOperationInfo {
+            operation_id: 252,
+            name: "No Industry Op".into(),
+            activity_id: None,
+            services: vec![1],
+        },
+    );
+    let mut ind_st = st_tpl.clone();
+    ind_st.station_id = ind_npc_st_id;
+    ind_st.solar_system_id = sys_id;
+    ind_st.region_id = region_id;
+    ind_st.owner_corporation_id = 1_000_035;
+    ind_st.station_type_id = 1529;
+    ind_st.operation_id = 251;
+    sde.stations.insert(ind_npc_st_id, ind_st);
+
+    let mut job_st = st_tpl;
+    job_st.station_id = job_npc_st_id;
+    job_st.solar_system_id = sys_id;
+    job_st.region_id = region_id;
+    job_st.owner_corporation_id = 1_000_036;
+    job_st.station_type_id = 1530;
+    job_st.operation_id = 252;
+    sde.stations.insert(job_npc_st_id, job_st);
+
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), Arc::clone(&base_ctx.db));
+    let upwell_id = 1_078_000_001_i64;
+    let mod_id = upwell_id + 500;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            upwell_id,
+            UpwellStructureRecord {
+                structure_id: upwell_id,
+                type_id: 35_835,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Public Reaction Struct".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mod_id,
+            InventoryItemRecord {
+                item_id: mod_id,
+                type_id: 45_539,
+                owner_id: corp_id,
+                location_id: upwell_id,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(mod_id, true);
+        save_facility_taxes(snap, upwell_id, &HashMap::from([(9, 0.042)]));
+        let mut ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        ext.access_profiles.insert(
+            upwell_id,
+            crate::services::station_structure::structure_upwell_ops::StructureAccessProfile {
+                corp_only: false,
+                ..Default::default()
+            },
+        );
+        crate::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
+        snap.industry_jobs.insert(
+            900_001,
+            mk_job(900_001, char_id, job_npc_st_id, 1, 555_001, 688, 587, 1, 1_700_000_000, 300, "Active"),
+        );
+    });
+
+    let empty = HashMap::new();
+    assert!(dispatch_economy_industry_route(&ctx, "GET", "/not/economy/route", &empty, &empty, None, 1).is_none());
+
+    let res = dispatch_economy_industry_route(&ctx, "GET", "/industry/facilities", &empty, &empty, None, 1)
+        .expect("matched /industry/facilities");
+    assert_eq!(res.status_code, 200);
+    assert_eq!(res.max_age_secs, 3600);
+    let rows = body(&res).as_array().expect("facilities array");
+
+    let up_row = rows.iter().find(|r| r["facility_id"] == upwell_id).expect("Upwell facility");
+    assert_eq!(up_row["owner_id"], corp_id);
+    assert_eq!(up_row["region_id"], i64::from(region_id));
+    assert_eq!(up_row["solar_system_id"], i64::from(sys_id));
+    assert_eq!(up_row["type_id"], 35_835);
+    assert_eq!(up_row["tax"], 0.042);
+
+    let npc_row = rows.iter().find(|r| r["facility_id"] == ind_npc_st_id).expect("NPC industry station");
+    assert_eq!(npc_row["owner_id"], 1_000_035);
+    assert_eq!(npc_row["region_id"], i64::from(region_id));
+    assert_eq!(npc_row["solar_system_id"], i64::from(sys_id));
+    assert_eq!(npc_row["type_id"], 1529);
+    assert_eq!(npc_row["tax"], NPC_STATION_INDUSTRY_TAX_RATE);
+
+    let job_row = rows.iter().find(|r| r["facility_id"] == job_npc_st_id).expect("job-referenced NPC station");
+    assert_eq!(job_row["owner_id"], 1_000_036);
+    assert_eq!(job_row["region_id"], i64::from(region_id));
+    assert_eq!(job_row["solar_system_id"], i64::from(sys_id));
+    assert_eq!(job_row["type_id"], 1530);
+    assert_eq!(job_row["tax"], NPC_STATION_INDUSTRY_TAX_RATE);
+}

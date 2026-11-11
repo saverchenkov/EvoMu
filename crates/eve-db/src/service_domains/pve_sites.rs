@@ -396,7 +396,7 @@ pub struct AbyssalTraceRecord {
     pub fleet_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct VoidSpaceSessionRecord {
     pub char_id: i64,
     pub ship_id: i64,
@@ -405,6 +405,8 @@ pub struct VoidSpaceSessionRecord {
     pub target_id: i64,
     pub entered_unix: u64,
     pub expires_at_sec: u64,
+    #[serde(default)]
+    pub nebula_graphic_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

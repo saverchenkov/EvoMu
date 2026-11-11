@@ -445,3 +445,487 @@ fn private_structure_is_hidden_from_public_list_detail_and_search() {
     assert!(owner_hits.contains(&json!(private_sid)));
     assert!(owner_hits.contains(&json!(public_sid)));
 }
+
+#[test]
+fn universe_routes_errors_routing_variants_celestials_and_autopilot() {
+    let (ctx, _token, char_id, _corp_id, planet_id) = seed_full_esi_context();
+    let claims = make_claims(char_id);
+    let empty = HashMap::new();
+
+    // 1. /route/{origin}/{destination} validation, variants, and unreachable 404
+    for (pp, qp, want) in [
+        (params(&[("origin", "bad"), ("destination", "30000142")]), empty.clone(), 400),
+        (params(&[("origin", "30000142"), ("destination", "bad")]), empty.clone(), 400),
+        (params(&[("origin", "5000000000"), ("destination", "30000142")]), empty.clone(), 404),
+        (params(&[("origin", "30000142"), ("destination", "99999999")]), empty.clone(), 404),
+        (
+            params(&[("origin", "30000142"), ("destination", "30000144")]),
+            params(&[("flag", "bogus")]),
+            400,
+        ),
+        (
+            params(&[("origin", "30000142"), ("destination", "30000144")]),
+            params(&[("avoid", "bad")]),
+            400,
+        ),
+        (
+            params(&[("origin", "30000142"), ("destination", "30000144")]),
+            params(&[("waypoints", "bad")]),
+            400,
+        ),
+        (
+            params(&[("origin", "30000142"), ("destination", "30000144")]),
+            params(&[("connections", "bad")]),
+            400,
+        ),
+        (
+            params(&[("origin", "30000142"), ("destination", "30000144")]),
+            params(&[("connections", "30000142|bad")]),
+            400,
+        ),
+    ] {
+        let r = dispatch_universe_and_nav(
+            &ctx,
+            "GET",
+            "/route/{origin}/{destination}",
+            &pp,
+            &qp,
+            None,
+            1,
+            b"",
+        );
+        assert_eq!(r.status_code, want, "route pp={pp:?} qp={qp:?}");
+    }
+
+    // Secure, insecure, avoid-self-success, and unreachable waypoint/destination -> 404
+    let r_sec = dispatch_universe_and_nav(
+        &ctx,
+        "GET",
+        "/route/{origin}/{destination}",
+        &params(&[("origin", "30000142"), ("destination", "30002187")]),
+        &params(&[("flag", "secure")]),
+        None,
+        1,
+        b"",
+    );
+    assert_eq!(r_sec.status_code, 200);
+    let r_insec = dispatch_universe_and_nav(
+        &ctx,
+        "GET",
+        "/route/{origin}/{destination}",
+        &params(&[("origin", "30000142"), ("destination", "30002187")]),
+        &params(&[("flag", "insecure")]),
+        None,
+        1,
+        b"",
+    );
+    assert_eq!(r_insec.status_code, 200);
+
+    // Disconnected wormhole system (no k-space stargates)
+    let wh_sys = ctx
+        .sde
+        .solar_systems
+        .keys()
+        .find(|&&sid| sid >= 31_000_000 && sid < 32_000_000)
+        .copied()
+        .unwrap();
+    let r_unreach = dispatch_universe_and_nav(
+        &ctx,
+        "GET",
+        "/route/{origin}/{destination}",
+        &params(&[
+            ("origin", "30000142"),
+            ("destination", &wh_sys.to_string()),
+        ]),
+        &empty,
+        None,
+        1,
+        b"",
+    );
+    assert_eq!(r_unreach.status_code, 404);
+    let r_unreach_wp = dispatch_universe_and_nav(
+        &ctx,
+        "GET",
+        "/route/{origin}/{destination}",
+        &params(&[("origin", "30000142"), ("destination", "30000144")]),
+        &params(&[("waypoints", &wh_sys.to_string())]),
+        None,
+        1,
+        b"",
+    );
+    assert_eq!(r_unreach_wp.status_code, 404);
+
+    // Search unsupported category & corp/faction/agent coverage
+    let p_search_char = params(&[("character_id", &char_id.to_string())]);
+    let q_term = "Jita";
+    let mut q_search_bogus = params(&[("categories", "bogus")]);
+    q_search_bogus.insert("search".into(), q_term.into());
+    assert_eq!(
+        dispatch_universe_and_nav(
+            &ctx,
+            "GET",
+            "/characters/{character_id}/search",
+            &p_search_char,
+            &q_search_bogus,
+            Some(&claims),
+            1,
+            b"",
+        )
+        .status_code,
+        400
+    );
+    assert_eq!(
+        dispatch_universe_and_nav(
+            &ctx,
+            "GET",
+            "/characters/{character_id}/search",
+            &p_search_char,
+            &params(&[
+                ("categories", "corporation,alliance,faction,agent,character"),
+                ("search", "Caldari"),
+            ]),
+            Some(&claims),
+            1,
+            b"",
+        )
+        .status_code,
+        200
+    );
+
+    // 2. Sovereignty delegation endpoints
+    assert_eq!(
+        dispatch_universe_and_nav(&ctx, "GET", "/sovereignty/map", &empty, &empty, None, 1, b"")
+            .status_code,
+        200
+    );
+    assert_eq!(
+        dispatch_universe_and_nav(
+            &ctx,
+            "GET",
+            "/sovereignty/structures",
+            &empty,
+            &empty,
+            None,
+            1,
+            b"",
+        )
+        .status_code,
+        200
+    );
+
+    // 3. Categories, groups, types (localized & 400/404), regions, constellations
+    for (pat, key) in [
+        ("/universe/categories/{category_id}", "category_id"),
+        ("/universe/groups/{group_id}", "group_id"),
+        ("/universe/types/{type_id}", "type_id"),
+        ("/universe/regions/{region_id}", "region_id"),
+        ("/universe/constellations/{constellation_id}", "constellation_id"),
+        ("/universe/systems/{system_id}", "system_id"),
+        ("/universe/planets/{planet_id}", "planet_id"),
+        ("/universe/moons/{moon_id}", "moon_id"),
+        ("/universe/asteroid_belts/{asteroid_belt_id}", "asteroid_belt_id"),
+        ("/universe/stargates/{stargate_id}", "stargate_id"),
+    ] {
+        assert_eq!(
+            dispatch_universe_and_nav(&ctx, "GET", pat, &params(&[(key, "bad")]), &empty, None, 1, b"")
+                .status_code,
+            400,
+            "{pat} bad id"
+        );
+        assert_eq!(
+            dispatch_universe_and_nav(
+                &ctx,
+                "GET",
+                pat,
+                &params(&[(key, "5000000000")]),
+                &empty,
+                None,
+                1,
+                b"",
+            )
+            .status_code,
+            404,
+            "{pat} missing/overflow id"
+        );
+    }
+
+    assert_eq!(
+        dispatch_universe_and_nav(
+            &ctx,
+            "GET",
+            "/universe/categories/{category_id}",
+            &params(&[("category_id", "6")]),
+            &params(&[("language", "de")]),
+            None,
+            1,
+            b"",
+        )
+        .status_code,
+        200
+    );
+    assert_eq!(
+        dispatch_universe_and_nav(&ctx, "GET", "/universe/groups", &empty, &empty, None, 1, b"")
+            .status_code,
+        200
+    );
+    assert_eq!(
+        dispatch_universe_and_nav(
+            &ctx,
+            "GET",
+            "/universe/groups/{group_id}",
+            &params(&[("group_id", "25")]),
+            &params(&[("language", "de")]),
+            None,
+            1,
+            b"",
+        )
+        .status_code,
+        200
+    );
+    let r_type = dispatch_universe_and_nav(
+        &ctx,
+        "GET",
+        "/universe/types/{type_id}",
+        &params(&[("type_id", "587")]),
+        &params(&[("language", "de")]),
+        None,
+        1,
+        b"",
+    );
+    assert_eq!(r_type.status_code, 200);
+    assert!(r_type.body.unwrap()["market_group_id"].as_i64().is_some());
+
+    assert_eq!(
+        dispatch_universe_and_nav(&ctx, "GET", "/universe/regions", &empty, &empty, None, 1, b"")
+            .status_code,
+        200
+    );
+    assert_eq!(
+        dispatch_universe_and_nav(
+            &ctx,
+            "GET",
+            "/universe/regions/{region_id}",
+            &params(&[("region_id", "10000002")]),
+            &empty,
+            None,
+            1,
+            b"",
+        )
+        .status_code,
+        200
+    );
+    assert_eq!(
+        dispatch_universe_and_nav(&ctx, "GET", "/universe/constellations", &empty, &empty, None, 1, b"")
+            .status_code,
+        200
+    );
+    assert_eq!(
+        dispatch_universe_and_nav(
+            &ctx,
+            "GET",
+            "/universe/constellations/{constellation_id}",
+            &params(&[("constellation_id", "20000020")]),
+            &empty,
+            None,
+            1,
+            b"",
+        )
+        .status_code,
+        200
+    );
+    assert_eq!(
+        dispatch_universe_and_nav(
+            &ctx,
+            "GET",
+            "/universe/systems/{system_id}",
+            &params(&[("system_id", "30000142")]),
+            &empty,
+            None,
+            1,
+            b"",
+        )
+        .status_code,
+        200
+    );
+    assert_eq!(
+        dispatch_universe_and_nav(
+            &ctx,
+            "GET",
+            "/universe/planets/{planet_id}",
+            &params(&[("planet_id", &planet_id.to_string())]),
+            &empty,
+            None,
+            1,
+            b"",
+        )
+        .status_code,
+        200
+    );
+
+    // Look up a real moon and belt from SDE SQLite + a stargate from ctx.sde.jumps
+    if let Some(conn) = rusqlite::Connection::open_with_flags(
+        ctx.sde.db_path.clone().unwrap_or_else(eve_sde::SdeRegistry::default_db_path),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ).ok() {
+        if let Ok(mid) = conn.query_row(
+            "SELECT celestial_id FROM sde_celestials WHERE group_id = 8 LIMIT 1",
+            [],
+            |r| r.get::<_, i64>(0),
+        ) {
+            assert_eq!(
+                dispatch_universe_and_nav(
+                    &ctx,
+                    "GET",
+                    "/universe/moons/{moon_id}",
+                    &params(&[("moon_id", &mid.to_string())]),
+                    &empty,
+                    None,
+                    1,
+                    b"",
+                )
+                .status_code,
+                200
+            );
+        }
+        if let Ok(bid) = conn.query_row(
+            "SELECT celestial_id FROM sde_celestials WHERE group_id = 9 LIMIT 1",
+            [],
+            |r| r.get::<_, i64>(0),
+        ) {
+            assert_eq!(
+                dispatch_universe_and_nav(
+                    &ctx,
+                    "GET",
+                    "/universe/asteroid_belts/{asteroid_belt_id}",
+                    &params(&[("asteroid_belt_id", &bid.to_string())]),
+                    &empty,
+                    None,
+                    1,
+                    b"",
+                )
+                .status_code,
+                200
+            );
+        }
+    }
+    if let Some(&gid) = ctx.sde.jumps.keys().next() {
+        assert_eq!(
+            dispatch_universe_and_nav(
+                &ctx,
+                "GET",
+                "/universe/stargates/{stargate_id}",
+                &params(&[("stargate_id", &gid.to_string())]),
+                &empty,
+                None,
+                1,
+                b"",
+            )
+            .status_code,
+            200
+        );
+    }
+
+    // 4. /ui/autopilot/waypoint validation, offline 501, online 204, unknown op 501
+    for (qp, want) in [
+        (empty.clone(), 400),
+        (params(&[("destination_id", "bad")]), 400),
+        (params(&[("destination_id", "30000142")]), 400),
+        (
+            params(&[("destination_id", "30000142"), ("add_to_beginning", "nope")]),
+            400,
+        ),
+        (
+            params(&[
+                ("destination_id", "30000142"),
+                ("add_to_beginning", "true"),
+                ("clear_other_waypoints", "nope"),
+            ]),
+            400,
+        ),
+        (
+            params(&[
+                ("destination_id", "99999999"),
+                ("add_to_beginning", "false"),
+                ("clear_other_waypoints", "false"),
+            ]),
+            404,
+        ),
+        (
+            params(&[
+                ("destination_id", "30000142"),
+                ("add_to_beginning", "false"),
+                ("clear_other_waypoints", "false"),
+            ]),
+            501,
+        ),
+    ] {
+        assert_eq!(
+            dispatch_universe_and_nav(
+                &ctx,
+                "POST",
+                "/ui/autopilot/waypoint",
+                &empty,
+                &qp,
+                Some(&claims),
+                1,
+                b"",
+            )
+            .status_code,
+            want,
+            "autopilot qp={qp:?}"
+        );
+    }
+
+    let uid = ctx
+        .db
+        .with_snapshot(|snap| snap.characters[&char_id].user_id);
+    ctx.db
+        .acquire_online_lock(uid, 9123, Some(char_id), true, 1_700_000_000)
+        .expect("online lock");
+    assert_eq!(
+        dispatch_universe_and_nav(
+            &ctx,
+            "POST",
+            "/ui/autopilot/waypoint",
+            &empty,
+            &params(&[
+                ("destination_id", "30000142"),
+                ("add_to_beginning", "false"),
+                ("clear_other_waypoints", "false"),
+            ]),
+            Some(&claims),
+            1,
+            b"",
+        )
+        .status_code,
+        204
+    );
+    assert_eq!(
+        dispatch_universe_and_nav(
+            &ctx,
+            "POST",
+            "/ui/autopilot/waypoint",
+            &empty,
+            &params(&[
+                ("destination_id", "30002187"),
+                ("add_to_beginning", "true"),
+                ("clear_other_waypoints", "true"),
+            ]),
+            Some(&claims),
+            1,
+            b"",
+        )
+        .status_code,
+        204
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&char_id].autopilot_waypoints, vec![30_002_187]);
+    });
+
+    assert_eq!(
+        dispatch_universe_and_nav(&ctx, "GET", "/unimplemented/op", &empty, &empty, None, 1, b"")
+            .status_code,
+        501
+    );
+}
+

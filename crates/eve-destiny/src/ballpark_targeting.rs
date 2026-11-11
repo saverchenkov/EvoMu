@@ -267,11 +267,15 @@ impl Ballpark {
         struct BumpEntry<'a> {
             id: BallId,
             uncol: &'a crate::Ball,
+            pre_pos: DVec3,
             cur_pos: DVec3,
             cur_vel: DVec3,
+            aabb_min: DVec3,
+            aabb_max: DVec3,
             radius: f64,
             mass: f64,
             is_static: bool,
+            is_aligning: bool,
             mb_parent: Option<BallId>,
             modified: bool,
         }
@@ -281,12 +285,13 @@ impl Ballpark {
 
         for (&id, ball) in &self.balls {
             let group_id = self.ball_group_ids.get(&id).copied().unwrap_or(0);
-            // Asteroid Belt (`group 9`), Abyssal Spatial Hazard Clouds (`group 1971`), and
+            // Asteroid Belt (`group 9`), Mobile Warp Disruptor (`group 361`),
+            // Abyssal Spatial Hazard Clouds (`group 1971`), and
             // Abyssal Automated Pylons (`group 1973`/`1981`, whose `radius` encodes their
-            // 15-40 km aura range) are volumetric/non-solid markers that must not eject ships;
+            // 5-40 km bubble/aura range) are volumetric/non-solid markers that must not eject ships;
             // solid celestial hulls (Star `group 6`, Planet `group 7`, Moon `group 8`),
             // stations, structures, stargates, and asteroids collide normally.
-            if matches!(group_id, 9 | 1971 | 1973 | 1981)
+            if matches!(group_id, 9 | 361 | 1971 | 1973 | 1981)
                 || matches!(
                     ball.type_id,
                     47_437
@@ -305,18 +310,28 @@ impl Ballpark {
                 )
                 || matches!(ball.mode, MovementMode::Field | MovementMode::Mushroom)
                 || matches!(ball.mode, MovementMode::Warp { phase, .. } if phase != WarpPhase::Aligning)
-                || matches!(
-                    pre_step_balls.get(&id).map(|b| &b.mode),
-                    Some(MovementMode::Warp { phase, .. }) if *phase != WarpPhase::Aligning
-                )
-                || self.combat_states.get(&id).is_some_and(|cs| {
-                    let mut c = cs.clone();
-                    c.sync_action_breaks();
-                    c.gate_cloak_remaining_ticks > 0
-                        || c.undock_invulnerable_remaining_ticks > 0
-                        || c.is_cloaked
-                })
             {
+                continue;
+            }
+            let pre_ball_opt = pre_step_balls.get(&id);
+            if matches!(
+                pre_ball_opt.map(|b| &b.mode),
+                Some(MovementMode::Warp { phase, .. }) if *phase != WarpPhase::Aligning
+            ) || self.combat_states.get(&id).is_some_and(|cs| {
+                let action_broken =
+                    cs.sync_invuln_with_undock_timer && cs.undock_invulnerable_remaining_ticks == 0;
+                let gate_cloak = if action_broken {
+                    0
+                } else {
+                    cs.gate_cloak_remaining_ticks
+                };
+                let is_cloaked = if action_broken && cs.gate_cloak_remaining_ticks > 0 {
+                    false
+                } else {
+                    cs.is_cloaked
+                };
+                gate_cloak > 0 || cs.undock_invulnerable_remaining_ticks > 0 || is_cloaked
+            }) {
                 continue;
             }
             let slim_cat = self.ball_slim_meta.get(&id).map(|m| m.category_id).unwrap_or(0);
@@ -327,7 +342,24 @@ impl Ballpark {
                 || self.non_free_ball_ids.contains(&id)
                 || matches!(ball.mode, MovementMode::Miniball)
                 || is_station_or_struct
-                || matches!(slim_cat, 2 | 3 | 22 | 23 | 40 | 46 | 65);
+                || matches!(slim_cat, 2 | 3 | 22 | 23 | 25 | 40 | 46 | 65);
+            let pre_pos = pre_ball_opt.map_or(ball.position, |b| b.position);
+            let is_aligning = matches!(
+                ball.mode,
+                MovementMode::Warp {
+                    phase: WarpPhase::Aligning,
+                    ..
+                }
+            ) || matches!(
+                pre_ball_opt.map(|b| &b.mode),
+                Some(MovementMode::Warp {
+                    phase: WarpPhase::Aligning,
+                    ..
+                })
+            );
+            let rad_vec = DVec3::splat(ball.radius.max(0.0));
+            let aabb_min = pre_pos.min(ball.position) - rad_vec;
+            let aabb_max = pre_pos.max(ball.position) + rad_vec;
             let mb_parent = self.miniball_states.get(&id).map(|m| m.parent_id);
             let idx = entries.len();
             if !is_static {
@@ -336,11 +368,15 @@ impl Ballpark {
             entries.push(BumpEntry {
                 id,
                 uncol: ball,
+                pre_pos,
                 cur_pos: ball.position,
                 cur_vel: ball.velocity,
+                aabb_min,
+                aabb_max,
                 radius: ball.radius,
                 mass: ball.mass.max(1.0),
                 is_static,
+                is_aligning,
                 mb_parent,
                 modified: false,
             });
@@ -388,42 +424,27 @@ impl Ballpark {
                     continue;
                 }
 
-                let uncol_a = a.uncol;
-                let uncol_b = b.uncol;
-                let pre_a = pre_step_balls.get(&id_a).unwrap_or(uncol_a);
-                let pre_b = pre_step_balls.get(&id_b).unwrap_or(uncol_b);
-                let is_aligning_a = matches!(
-                    uncol_a.mode,
-                    MovementMode::Warp {
-                        phase: WarpPhase::Aligning,
-                        ..
-                    }
-                ) || matches!(
-                    pre_a.mode,
-                    MovementMode::Warp {
-                        phase: WarpPhase::Aligning,
-                        ..
-                    }
-                );
-                let is_aligning_b = matches!(
-                    uncol_b.mode,
-                    MovementMode::Warp {
-                        phase: WarpPhase::Aligning,
-                        ..
-                    }
-                ) || matches!(
-                    pre_b.mode,
-                    MovementMode::Warp {
-                        phase: WarpPhase::Aligning,
-                        ..
-                    }
-                );
+                if a.aabb_max.x < b.aabb_min.x
+                    || b.aabb_max.x < a.aabb_min.x
+                    || a.aabb_max.y < b.aabb_min.y
+                    || b.aabb_max.y < a.aabb_min.y
+                    || a.aabb_max.z < b.aabb_min.z
+                    || b.aabb_max.z < a.aabb_min.z
+                {
+                    continue;
+                }
+
                 // Ships aligning for warp must clear static station/gate/celestial bounding spheres
                 // (e.g. undocking 500m off a 100 km station sphere and warping to a celestial behind
                 // it) without bouncing indefinitely, while remaining bumpable by other dynamic ships.
-                if (is_aligning_a && is_static_b) || (is_aligning_b && is_static_a) {
+                if (a.is_aligning && is_static_b) || (b.is_aligning && is_static_a) {
                     continue;
                 }
+
+                let uncol_a = a.uncol;
+                let uncol_b = b.uncol;
+                let pre_pos_a = a.pre_pos;
+                let pre_pos_b = b.pre_pos;
                 let rad_a = a.radius;
                 let rad_b = b.radius;
                 let mass_a = a.mass;
@@ -432,8 +453,8 @@ impl Ballpark {
 
                 // Exact `_destiny.so` `DoCollision` swept-sphere collision (`0x293d4`):
                 // solves quadratic intersection between pre-tick and uncollided post-tick positions.
-                let dp0 = pre_a.position - pre_b.position;
-                let dv = (uncol_a.position - pre_a.position) - (uncol_b.position - pre_b.position);
+                let dp0 = pre_pos_a - pre_pos_b;
+                let dv = (uncol_a.position - pre_pos_a) - (uncol_b.position - pre_pos_b);
                 let a_coef = dv.length_squared();
                 let b_coef = 2.0 * dp0.dot(dv);
                 let c_coef = dp0.length_squared() - min_dist * min_dist;
@@ -442,6 +463,8 @@ impl Ballpark {
                     if disc >= 0.0 {
                         let t_col = (-b_coef - disc.sqrt()) / (2.0 * a_coef);
                         if (0.0..=1.0).contains(&t_col) {
+                            let pre_a = pre_step_balls.get(&id_a).unwrap_or(uncol_a);
+                            let pre_b = pre_step_balls.get(&id_b).unwrap_or(uncol_b);
                             let dt1 = t_col * dt;
                             let dt2 = (1.0 - t_col) * dt;
                             let goal_a = crate::physics::compute_subwarp_goal_velocity(

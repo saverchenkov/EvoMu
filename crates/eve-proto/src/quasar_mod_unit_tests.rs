@@ -325,3 +325,94 @@ fn field_types_labels_and_file_descriptor_wire_roundtrip() {
     assert_eq!(decoded.sha256, sha256_hex(&wire));
     assert_eq!(decoded.md5, md5_hex(&wire));
 }
+
+#[test]
+fn quasar_wire_message_limits_and_descriptor_error_and_fallback_arms() {
+    // 1. WireMessage::decode exceeding MAX_FRAME_SIZE & MAX_COLLECTION_LEN (quasar.rs L427, L433)
+    let oversize = vec![0u8; MAX_FRAME_SIZE + 1];
+    assert_eq!(
+        WireMessage::decode(&oversize),
+        Err(QuasarError::FrameTooLarge(MAX_FRAME_SIZE + 1))
+    );
+
+    let mut over_collection = Vec::with_capacity((MAX_COLLECTION_LEN + 1) * 2);
+    for _ in 0..=MAX_COLLECTION_LEN {
+        over_collection.push(0x08); // tag: field 1 varint
+        over_collection.push(0x01);
+    }
+    assert_eq!(
+        WireMessage::decode(&over_collection),
+        Err(QuasarError::CollectionTooLarge(MAX_COLLECTION_LEN))
+    );
+
+    // 2. decode_enum_descriptor: unknown field + non-bytes field 2 + invalid UTF-8 enum value (quasar.rs L767)
+    let mut bad_enum_val = Vec::new();
+    encode_bytes_field(1, &[0xFF], &mut bad_enum_val); // invalid UTF-8 enum value name
+    let mut bad_enum_desc = Vec::new();
+    encode_string_field(1, "BadEnum", &mut bad_enum_desc);
+    encode_varint_field(2, 1, &mut bad_enum_desc); // wrong wire type for value
+    encode_bytes_field(2, &bad_enum_val, &mut bad_enum_desc);
+    let mut fd_bad_enum = Vec::new();
+    encode_string_field(1, "e.proto", &mut fd_bad_enum);
+    encode_bytes_field(5, &bad_enum_desc, &mut fd_bad_enum);
+    assert!(matches!(
+        FileDescriptorProto::decode_wire("e.pyj", "e", fd_bad_enum),
+        Err(QuasarError::InvalidUtf8(_))
+    ));
+
+    // 3. decode_message_descriptor: bad FieldDescriptorProto + options(f7) without f7 sub + oneof(f8) bad/extra fields (quasar.rs L806, L826, L837, L840)
+    let mut bad_field_bytes = Vec::new();
+    encode_bytes_field(1, &[0xFF], &mut bad_field_bytes); // invalid UTF-8 field name
+    let mut msg_bad_field = Vec::new();
+    encode_string_field(1, "M", &mut msg_bad_field);
+    encode_bytes_field(2, &bad_field_bytes, &mut msg_bad_field);
+    let mut fd_bad_field = Vec::new();
+    encode_bytes_field(4, &msg_bad_field, &mut fd_bad_field);
+    assert!(matches!(
+        FileDescriptorProto::decode_wire("f.pyj", "f", fd_bad_field),
+        Err(QuasarError::InvalidUtf8(_))
+    ));
+
+    let mut non_map_opts = Vec::new();
+    encode_varint_field(1, 1, &mut non_map_opts); // option field_number != 7
+    let mut oneof_good_with_unknown = Vec::new();
+    encode_string_field(1, "choice", &mut oneof_good_with_unknown);
+    encode_varint_field(9, 42, &mut oneof_good_with_unknown); // unknown sub-field in OneofDescriptorProto
+    let mut msg_opts_and_oneof = Vec::new();
+    encode_string_field(1, "OptsMsg", &mut msg_opts_and_oneof);
+    encode_varint_field(2, 1, &mut msg_opts_and_oneof); // wrong wire type for field descriptor (quasar.rs L806)
+    encode_varint_field(7, 1, &mut msg_opts_and_oneof); // wrong wire type for options
+    encode_bytes_field(7, &non_map_opts, &mut msg_opts_and_oneof);
+    encode_varint_field(8, 1, &mut msg_opts_and_oneof); // wrong wire type for oneof
+    encode_bytes_field(8, &oneof_good_with_unknown, &mut msg_opts_and_oneof);
+    let mut fd_opts = Vec::new();
+    encode_bytes_field(4, &msg_opts_and_oneof, &mut fd_opts);
+    let decoded_opts = FileDescriptorProto::decode_wire("o.pyj", "o", fd_opts).unwrap();
+    assert!(!decoded_opts.messages[0].is_map_entry);
+    assert_eq!(decoded_opts.messages[0].oneofs.len(), 1);
+
+    let mut bad_oneof = Vec::new();
+    encode_bytes_field(1, &[0xFF], &mut bad_oneof);
+    let mut msg_bad_oneof = Vec::new();
+    encode_bytes_field(8, &bad_oneof, &mut msg_bad_oneof);
+    let mut fd_bad_oneof = Vec::new();
+    encode_bytes_field(4, &msg_bad_oneof, &mut fd_bad_oneof);
+    assert!(matches!(
+        FileDescriptorProto::decode_wire("o2.pyj", "o2", fd_bad_oneof),
+        Err(QuasarError::InvalidUtf8(_))
+    ));
+
+    // 4. decode_service_descriptor: unknown subfields + wrong wire type (quasar.rs L912, L922, L924)
+    let mut method_bytes = Vec::new();
+    encode_string_field(1, "DoWork", &mut method_bytes);
+    encode_varint_field(99, 1, &mut method_bytes); // unknown method subfield (L912)
+    let mut svc_bytes = Vec::new();
+    encode_string_field(1, "Svc", &mut svc_bytes);
+    encode_varint_field(2, 1, &mut svc_bytes); // wrong wire type for method (L922)
+    encode_bytes_field(2, &method_bytes, &mut svc_bytes);
+    encode_varint_field(99, 1, &mut svc_bytes); // unknown service field (L924)
+    let mut fd_svc = Vec::new();
+    encode_bytes_field(6, &svc_bytes, &mut fd_svc);
+    let decoded_svc = FileDescriptorProto::decode_wire("s.pyj", "s", fd_svc).unwrap();
+    assert_eq!(decoded_svc.services[0].methods[0].name, "DoWork");
+}

@@ -308,3 +308,132 @@ fn internal_request_response_and_gateway_subscription_envelopes_roundtrip() {
         gw_rsp
     );
 }
+
+#[test]
+fn envelopes_decode_unknown_fields_wrong_wire_types_and_corrupt_submessages() {
+    // Unknown field number + wrong wire types for all field numbers 1..=13 (both varint and bytes)
+    let mut all_varints = Vec::new();
+    for fnum in 1..=13 {
+        encode_varint_field(fnum, 1, &mut all_varints);
+    }
+    encode_varint_field(99, 7, &mut all_varints);
+
+    assert!(ActiveIdentity::decode_proto(&all_varints).is_ok());
+    assert!(AuthoritativeContext::decode_proto(&all_varints).is_ok());
+    assert!(EvePublicRequest::decode_proto(&all_varints).is_ok());
+    assert!(EvePublicResponse::decode_proto(&all_varints).is_ok());
+    assert!(NoticeTargetGroup::decode_proto(&all_varints).is_ok());
+    assert!(EvePublicNotice::decode_proto(&all_varints).is_ok());
+    assert!(EvePublicEvent::decode_proto(&all_varints).is_ok());
+    assert!(EveInternalRequest::decode_proto(&all_varints).is_ok());
+    assert!(EveInternalResponse::decode_proto(&all_varints).is_ok());
+    assert!(InternalGatewayRequest::decode_proto(&all_varints).is_ok());
+    assert!(InternalGatewayConsumerInfo::decode_proto(&all_varints).is_ok());
+    assert!(InternalGatewayRequestsSubscriptionInfo::decode_proto(&all_varints).is_ok());
+    assert!(InternalGatewayResponse::decode_proto(&all_varints).is_ok());
+
+    // Wrong wire type (bytes) for varint fields & empty bytes / unknown field 99
+    let mut all_empty_bytes = Vec::new();
+    for fnum in 1..=13 {
+        encode_bytes_field(fnum, &[], &mut all_empty_bytes);
+    }
+    encode_bytes_field(99, b"unknown", &mut all_empty_bytes);
+    assert!(ActiveIdentity::decode_proto(&all_empty_bytes).is_ok());
+    assert!(AuthoritativeContext::decode_proto(&all_empty_bytes).is_ok());
+    assert!(EvePublicRequest::decode_proto(&all_empty_bytes).is_ok());
+    assert!(EvePublicResponse::decode_proto(&all_empty_bytes).is_ok());
+    assert!(NoticeTargetGroup::decode_proto(&all_empty_bytes).is_ok());
+    assert!(EvePublicNotice::decode_proto(&all_empty_bytes).is_ok());
+    assert!(EvePublicEvent::decode_proto(&all_empty_bytes).is_ok());
+    assert!(EveInternalRequest::decode_proto(&all_empty_bytes).is_ok());
+    assert!(EveInternalResponse::decode_proto(&all_empty_bytes).is_ok());
+    assert!(InternalGatewayRequest::decode_proto(&all_empty_bytes).is_ok());
+    assert!(InternalGatewayConsumerInfo::decode_proto(&all_empty_bytes).is_ok());
+    assert!(InternalGatewayRequestsSubscriptionInfo::decode_proto(&all_empty_bytes).is_ok());
+    assert!(InternalGatewayResponse::decode_proto(&all_empty_bytes).is_ok());
+
+    // Invalid protobuf bytes inside each nested message / invalid UTF-8 inside string fields
+    let bad_proto = [0x08u8]; // truncated varint
+    let bad_utf8 = [0xFFu8, 0xFEu8];
+
+    let check_bad_bytes = |fnum: u32, payload: &[u8], decode_fn: fn(&[u8]) -> Result<(), QuasarError>| {
+        let mut buf = Vec::new();
+        encode_bytes_field(fnum, payload, &mut buf);
+        assert!(decode_fn(&buf).is_err(), "expected err for field {fnum}");
+    };
+
+    for f in [1, 2, 3] {
+        check_bad_bytes(f, &bad_proto, |b| ActiveIdentity::decode_proto(b).map(|_| ()));
+    }
+    for f in [1, 2, 5, 7, 10] {
+        check_bad_bytes(f, &bad_proto, |b| AuthoritativeContext::decode_proto(b).map(|_| ()));
+    }
+    check_bad_bytes(3, &bad_utf8, |b| AuthoritativeContext::decode_proto(b).map(|_| ()));
+
+    for f in [1, 3, 6, 7] {
+        check_bad_bytes(f, &bad_proto, |b| EvePublicRequest::decode_proto(b).map(|_| ()));
+    }
+    check_bad_bytes(4, &bad_utf8, |b| EvePublicRequest::decode_proto(b).map(|_| ()));
+
+    for f in [1, 5, 9] {
+        check_bad_bytes(f, &bad_proto, |b| EvePublicResponse::decode_proto(b).map(|_| ()));
+    }
+    for f in [4, 6] {
+        check_bad_bytes(f, &bad_utf8, |b| EvePublicResponse::decode_proto(b).map(|_| ()));
+    }
+
+    for f in [1, 5, 6, 7] {
+        check_bad_bytes(f, &bad_proto, |b| EvePublicNotice::decode_proto(b).map(|_| ()));
+    }
+    for f in [3, 4] {
+        check_bad_bytes(f, &bad_utf8, |b| EvePublicNotice::decode_proto(b).map(|_| ()));
+    }
+
+    for f in [1, 3, 6, 8] {
+        check_bad_bytes(f, &bad_proto, |b| EvePublicEvent::decode_proto(b).map(|_| ()));
+    }
+    check_bad_bytes(5, &bad_utf8, |b| EvePublicEvent::decode_proto(b).map(|_| ()));
+
+    for f in [2, 7, 9] {
+        check_bad_bytes(f, &bad_proto, |b| EveInternalRequest::decode_proto(b).map(|_| ()));
+    }
+    for f in [1, 4, 5, 6] {
+        check_bad_bytes(f, &bad_utf8, |b| EveInternalRequest::decode_proto(b).map(|_| ()));
+    }
+
+    for f in [4, 8, 10, 12, 13] {
+        check_bad_bytes(f, &bad_proto, |b| EveInternalResponse::decode_proto(b).map(|_| ()));
+    }
+    for f in [1, 3, 5, 6, 11] {
+        check_bad_bytes(f, &bad_utf8, |b| EveInternalResponse::decode_proto(b).map(|_| ()));
+    }
+
+    check_bad_bytes(2, &bad_proto, |b| InternalGatewayRequest::decode_proto(b).map(|_| ()));
+    for f in [1, 2, 3] {
+        check_bad_bytes(f, &bad_utf8, |b| InternalGatewayConsumerInfo::decode_proto(b).map(|_| ()));
+    }
+    for f in [1, 2, 4] {
+        check_bad_bytes(f, &bad_proto, |b| {
+            InternalGatewayRequestsSubscriptionInfo::decode_proto(b).map(|_| ())
+        });
+    }
+    for f in [1, 3] {
+        check_bad_bytes(f, &bad_proto, |b| InternalGatewayResponse::decode_proto(b).map(|_| ()));
+    }
+
+    // NoticeTargetGroup invalid UTF-8 / truncated wire
+    assert!(NoticeTargetGroup::decode_proto(&bad_proto).is_err());
+    // Truncated envelope bytes
+    assert!(ActiveIdentity::decode_proto(&bad_proto).is_err());
+    assert!(AuthoritativeContext::decode_proto(&bad_proto).is_err());
+    assert!(EvePublicRequest::decode_proto(&bad_proto).is_err());
+    assert!(EvePublicResponse::decode_proto(&bad_proto).is_err());
+    assert!(EvePublicNotice::decode_proto(&bad_proto).is_err());
+    assert!(EvePublicEvent::decode_proto(&bad_proto).is_err());
+    assert!(EveInternalRequest::decode_proto(&bad_proto).is_err());
+    assert!(EveInternalResponse::decode_proto(&bad_proto).is_err());
+    assert!(InternalGatewayRequest::decode_proto(&bad_proto).is_err());
+    assert!(InternalGatewayConsumerInfo::decode_proto(&bad_proto).is_err());
+    assert!(InternalGatewayRequestsSubscriptionInfo::decode_proto(&bad_proto).is_err());
+    assert!(InternalGatewayResponse::decode_proto(&bad_proto).is_err());
+}

@@ -599,4 +599,66 @@ fn coverage_and_mutants_targeting_gate_decloak_and_collision_branches() {
     assert!(p3.dynamic_balls_in_bubble(2).iter().any(|b| b.id == 2));
     assert!(p3.balls_in_bubble(500_001, 200.0).is_empty());
     p3.step_collision_bumping(&pre3, &pos3, 1.0);
+
+    // Pre-step WarpPhase::Aligning exempts dynamic-vs-static bounce even after post-step mode leaves Aligning (`||` vs `&&`).
+    let mut apark = Ballpark::new(30_000_142);
+    let dyn_pre = Ball {
+        id: 1,
+        type_id: 587,
+        position: DVec3::ZERO,
+        velocity: DVec3::new(100.0, 0.0, 0.0),
+        max_velocity: 300.0,
+        inertia: 1.0,
+        mass: 1_000_000.0,
+        radius: 50.0,
+        speed_fraction: 1.0,
+        mode: MovementMode::Warp {
+            origin: DVec3::ZERO,
+            destination: DVec3::new(1e9, 0.0, 0.0),
+            warp_speed_au_s: 3.0,
+            total_distance: 1e9,
+            phase: WarpPhase::Aligning,
+            elapsed_warp_time: 1.0,
+        },
+    };
+    let mut dyn_post = dyn_pre.clone();
+    dyn_post.mode = MovementMode::Stop;
+    let stat_high = Ball {
+        id: 2,
+        type_id: 19,
+        position: DVec3::new(10.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 1e12,
+        radius: 100.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Rigid,
+    };
+    apark.add_ball(dyn_post.clone());
+    apark.add_static_ball(stat_high.clone(), 0);
+
+    let mut stat_low = stat_high.clone();
+    stat_low.id = 3;
+    stat_low.position = DVec3::new(0.0, 50_000.0, 0.0);
+    let mut dyn_high_pre = dyn_pre.clone();
+    dyn_high_pre.id = 4;
+    dyn_high_pre.position = DVec3::new(10.0, 50_000.0, 0.0);
+    let mut dyn_high_post = dyn_high_pre.clone();
+    dyn_high_post.mode = MovementMode::Stop;
+    apark.add_static_ball(stat_low.clone(), 0);
+    apark.add_ball(dyn_high_post.clone());
+
+    let mut pre_a_b = BTreeMap::new();
+    pre_a_b.insert(1, dyn_pre);
+    pre_a_b.insert(2, stat_high);
+    pre_a_b.insert(3, stat_low);
+    pre_a_b.insert(4, dyn_high_pre);
+    let mut pre_pos_ab = BTreeMap::new();
+    for (&id, b) in &pre_a_b {
+        pre_pos_ab.insert(id, (b.position, b.velocity, b.radius));
+    }
+    apark.step_collision_bumping(&pre_a_b, &pre_pos_ab, 1.0);
+    assert_eq!(apark.balls[&1].position, dyn_post.position);
+    assert_eq!(apark.balls[&4].position, dyn_high_post.position);
 }

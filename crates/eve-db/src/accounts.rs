@@ -1123,4 +1123,7 @@ impl WorldRepository {
     }
 }
 #[cfg(test)] #[path = "accounts_unit_tests.rs"] mod accounts_unit_tests;
+#[cfg(test)]
+#[path = "accounts_edges_tests.rs"]
+mod accounts_edges_tests;
 

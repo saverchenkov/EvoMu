@@ -437,3 +437,201 @@ fn noop_mut_snapshot_skips_wal_and_skill_tick_emits_incremental_delta() {
     let _ = std::fs::remove_file(&snap_path);
     let _ = std::fs::remove_file(&wal_path);
 }
+
+#[test]
+fn persistence_auth_prune_wal_skip_and_missing_snapshot_fallback() {
+    let pid = std::process::id();
+    let db_path = std::env::temp_dir().join(format!("evomu_auth_prune_{pid}.sqlite"));
+    let _ = std::fs::remove_file(&db_path);
+    {
+        let repo = WorldRepository::open_sqlite(&db_path).expect("open_sqlite");
+        {
+            let mut rt = repo.auth_runtime.write().unwrap();
+            rt.revoked_jtis.insert("jti-exp-1".into());
+            rt.revoked_jti_expiries.insert("jti-exp-1".into(), 100);
+            rt.revoked_jtis.insert("jti-keep-1".into());
+            rt.revoked_jti_expiries.insert("jti-keep-1".into(), 5_000);
+            rt.refresh_tokens.insert(
+                "tok-exp".into(),
+                SsoRefreshTokenRecord {
+                    refresh_token: "tok-exp".into(),
+                    user_id: 1,
+                    character_id: 90_000_001,
+                    client_id: "cli".into(),
+                    scopes: vec!["s".into()],
+                    expires_at_unix: 200,
+                    revoked: false,
+                    last_access_token_jti: "j".into(),
+                    last_access_token_exp_unix: 200,
+                },
+            );
+            rt.refresh_tokens.insert(
+                "tok-keep".into(),
+                SsoRefreshTokenRecord {
+                    refresh_token: "tok-keep".into(),
+                    user_id: 1,
+                    character_id: 90_000_001,
+                    client_id: "cli".into(),
+                    scopes: vec!["s".into()],
+                    expires_at_unix: 6_000,
+                    revoked: false,
+                    last_access_token_jti: "j2".into(),
+                    last_access_token_exp_unix: 6_000,
+                },
+            );
+        }
+        let pruned = repo.prune_expired_auth_runtime(1_000);
+        assert!(pruned >= 2);
+        let rt = repo.auth_runtime.read().unwrap();
+        assert!(rt.revoked_jtis.contains("jti-keep-1"));
+        assert!(!rt.revoked_jtis.contains("jti-exp-1"));
+        assert!(rt.refresh_tokens.contains_key("tok-keep"));
+        assert!(!rt.refresh_tokens.contains_key("tok-exp"));
+    }
+    let _ = std::fs::remove_file(&db_path);
+
+    // append_wal_delta_locked when snap_path does not exist falls back to save_snapshot_locked
+    let snap_path = std::env::temp_dir().join(format!("evomu_missing_snap_fallback_{pid}.json"));
+    let wal_path = WorldRepository::wal_path_for(&snap_path);
+    let _ = std::fs::remove_file(&snap_path);
+    let _ = std::fs::remove_file(&wal_path);
+    let repo = WorldRepository::new_empty_with_snapshot_path(Some(snap_path.clone())).unwrap();
+    let _ = std::fs::remove_file(&snap_path);
+    repo.with_mut_snapshot(|s| {
+        s.next_entity_id = 200_000_123;
+    });
+    assert!(snap_path.exists());
+
+    // load_snapshot_from_file skips WAL deltas with delta.seq <= snap.wal_seq
+    {
+        use std::io::Write as _;
+        let mut f = std::fs::File::create(&wal_path).unwrap();
+        f.write_all(b"{\"seq\":1,\"next_entity_id\":199999999}\n")
+            .unwrap();
+    }
+    repo.load_snapshot_from_file(&snap_path).unwrap();
+    assert_eq!(repo.with_snapshot(|s| s.next_entity_id), 200_000_123);
+
+    drop(repo);
+    let _ = std::fs::remove_file(&snap_path);
+    let _ = std::fs::remove_file(&wal_path);
+}
+
+#[test]
+fn run_mut_snapshot_tx_clean_tracked_fastpath_and_persist_error_fp_rollback() {
+    let repo = WorldRepository::with_demo_seed();
+    let cid = 90_000_001;
+    let orig_bal = repo.with_snapshot(|s| s.characters[&cid].balance);
+    let seq0 = repo.with_snapshot(|s| s.wal_seq);
+    let ep0 = repo.state_epoch();
+
+    // 1. Clean tracked transaction (`enable_dirty_tracking` with no dirty hints or meta change)
+    // returns early without opening a SQLite transaction or bumping wal_seq / state_epoch.
+    repo.with_mut_snapshot(|snap| {
+        snap.enable_dirty_tracking();
+    });
+    assert_eq!(repo.with_snapshot(|s| s.wal_seq), seq0);
+    assert_eq!(repo.state_epoch(), ep0);
+
+    // 1b. spawn_asteroid sets `dirty_hints.asteroids_dirty`, and the next `with_mut_snapshot` clears `dirty_hints`;
+    // `add_or_stack_item` marks both newly inserted and merged item stacks in `dirty_hints.touched_items`.
+    let cw_ep0 = repo.combat_state_epoch();
+    repo.spawn_asteroid(AsteroidRecord {
+        asteroid_id: 77_001,
+        solar_system_id: 30_000_142,
+        belt_id: 40_000_001,
+        type_id: 1230,
+        quantity: 100,
+        initial_quantity: 100,
+        position: (0.0, 0.0, 0.0),
+        radius: 10.0,
+    });
+    assert!(repo.with_snapshot(|s| s.dirty_hints.asteroids_dirty));
+    assert_eq!(repo.combat_state_epoch(), cw_ep0);
+    repo.with_mut_snapshot(|_| {});
+    assert!(!repo.with_snapshot(|s| s.dirty_hints.asteroids_dirty));
+
+    let created = repo
+        .add_or_stack_item(cid, 60_003_760, InventoryFlag::Hangar, 38, 10)
+        .unwrap();
+    assert_eq!(created.quantity, 10);
+    assert!(repo.with_snapshot(|s| s.dirty_hints.touched_items.contains(&created.item_id)));
+    let stacked = repo
+        .add_or_stack_item(cid, 60_003_760, InventoryFlag::Hangar, 38, 5)
+        .unwrap();
+    assert_eq!(stacked.item_id, created.item_id);
+    assert_eq!(stacked.quantity, 15);
+    assert!(repo.with_snapshot(|s| s.dirty_hints.touched_items.contains(&stacked.item_id)));
+
+    repo.with_mut_snapshot(|snap| {
+        snap.crimewatch_states.insert(
+            cid,
+            PersistedCrimeWatchState {
+                character_id: cid,
+                weapon_timer_until_unix: 9_999,
+                ..Default::default()
+            },
+        );
+        snap.mark_crimewatch_dirty(false);
+    });
+    assert_eq!(repo.combat_state_epoch(), cw_ep0 + 1);
+
+    // 2. Persist error mid-sync after mutating fp.characters in-place reloads clean `fp` from SQLite
+    // and rolls back `snap` so subsequent mutations to the same character still persist cleanly.
+    {
+        let conn = repo.sqlite_conn.lock().unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_struct_ins BEFORE INSERT ON structures BEGIN SELECT RAISE(ABORT, 'inject_struct_abort'); END;",
+        )
+        .unwrap();
+    }
+    let rb0 = repo.rollback_epoch();
+    let err_res: Result<(), String> = repo.try_with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&cid).unwrap().balance = IskCents(777_666_555);
+        snap.structures.insert(
+            999_888,
+            UpwellStructureRecord {
+                structure_id: 999_888,
+                type_id: 35832,
+                owner_corp_id: 98_000_001,
+                solar_system_id: 30_000_142,
+                name: "FailStruct".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        Ok(())
+    });
+    assert!(
+        err_res
+            .as_ref()
+            .is_err_and(|e| e.contains("inject_struct_abort")),
+        "expected inject_struct_abort, got {err_res:?}"
+    );
+    assert_eq!(repo.rollback_epoch(), rb0 + 1);
+    assert_eq!(repo.with_snapshot(|s| s.characters[&cid].balance), orig_bal);
+    assert!(!repo.with_snapshot(|s| s.structures.contains_key(&999_888)));
+
+    // Drop the fault trigger and apply the exact same character balance mutation (`777_666_555`).
+    // Because `*fp = clean_fp` restored `fp.characters[&cid]` to `orig_bal`'s fingerprint,
+    // `sync_dirty_to_sqlite` detects the change and commits it to SQLite.
+    {
+        let conn = repo.sqlite_conn.lock().unwrap();
+        conn.execute_batch("DROP TRIGGER fail_struct_ins;").unwrap();
+    }
+    repo.with_mut_snapshot(|snap| {
+        snap.enable_dirty_tracking();
+        snap.characters.get_mut(&cid).unwrap().balance = IskCents(777_666_555);
+        snap.mark_character_dirty(cid);
+    });
+    let sql_bal: i64 = {
+        let conn = repo.sqlite_conn.lock().unwrap();
+        conn.query_row(
+            "SELECT balance_cents FROM characters WHERE character_id = ?1",
+            rusqlite::params![cid],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(sql_bal, 777_666_555);
+}

@@ -620,10 +620,13 @@ impl WorldRepository {
             wal_fault_mode: std::sync::atomic::AtomicU8::new(0),
         };
 
-        let snapshot_path = std::env::var("EVOMU_SNAPSHOT_PATH")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .map(std::path::PathBuf::from);
+        let snapshot_path = {
+            let _env_guard = crate::lock_test_env_read();
+            std::env::var("EVOMU_SNAPSHOT_PATH")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .map(std::path::PathBuf::from)
+        };
 
         if let Some(ref p) = snapshot_path {
             if p.exists() {

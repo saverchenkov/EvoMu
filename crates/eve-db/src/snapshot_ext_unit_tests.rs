@@ -484,3 +484,507 @@ fn effective_corp_roles_at_enforces_24h_stasis_location_scoping_and_ceo_immunity
     assert_eq!(roles_after_at_other & role_take_2, 0);
 }
 
+#[test]
+fn trade_raffle_and_contract_job_lock_edges() {
+    let mut snap = WorldStateSnapshot::default();
+    snap.contracts.insert(
+        10,
+        ContractRecord {
+            contract_id: 10,
+            status: "InProgress".into(),
+            item_ids: vec![101],
+            ..Default::default()
+        },
+    );
+    snap.contracts.insert(
+        11,
+        ContractRecord {
+            contract_id: 11,
+            status: "Completed".into(),
+            item_ids: vec![102],
+            ..Default::default()
+        },
+    );
+    assert!(snap.is_item_locked_in_contract_or_job(101));
+    assert!(!snap.is_item_locked_in_contract_or_job(102));
+
+    snap.industry_jobs.insert(
+        20,
+        IndustryJobRecord {
+            job_id: 20,
+            status: "Active".into(),
+            blueprint_item_id: 201,
+            ..Default::default()
+        },
+    );
+    snap.industry_jobs.insert(
+        21,
+        IndustryJobRecord {
+            job_id: 21,
+            status: "Delivered".into(),
+            blueprint_item_id: 202,
+            ..Default::default()
+        },
+    );
+    assert!(snap.is_item_locked_in_contract_or_job(201));
+    assert!(!snap.is_item_locked_in_contract_or_job(202));
+
+    // Direct trade (-73) active items_a & items_b + exempt_trade_id + completed/cancelled/malformed
+    snap.owner_notes.insert(
+        1,
+        OwnerNoteRecord {
+            note_id: 1,
+            character_id: -73,
+            item_id: 0,
+            label: "trade".into(),
+            note: r#"{"trade_id":50,"items_a":[[301,1]],"items_b":[[302,2]],"completed":false,"cancelled":false}"#.into(),
+            timestamp_unix: 0,
+        },
+    );
+    snap.owner_notes.insert(
+        2,
+        OwnerNoteRecord {
+            note_id: 2,
+            character_id: -73,
+            item_id: 0,
+            label: "trade_done".into(),
+            note: r#"{"trade_id":51,"items_a":[[303,1]],"items_b":[],"completed":true,"cancelled":false}"#.into(),
+            timestamp_unix: 0,
+        },
+    );
+    snap.owner_notes.insert(
+        3,
+        OwnerNoteRecord {
+            note_id: 3,
+            character_id: -73,
+            item_id: 0,
+            label: "trade_cancel".into(),
+            note: r#"{"trade_id":52,"items_a":[],"items_b":[[304,1]],"completed":false,"cancelled":true}"#.into(),
+            timestamp_unix: 0,
+        },
+    );
+    snap.owner_notes.insert(
+        4,
+        OwnerNoteRecord {
+            note_id: 4,
+            character_id: -73,
+            item_id: 0,
+            label: "trade_bad".into(),
+            note: "not-json".into(),
+            timestamp_unix: 0,
+        },
+    );
+    assert!(snap.is_item_locked_in_contract_or_job(301));
+    assert!(snap.is_item_locked_in_contract_or_job(302));
+    assert!(!snap.is_item_locked_excluding_trade(301, Some(50)));
+    assert!(snap.is_item_locked_excluding_trade(301, Some(99)));
+    assert!(!snap.is_item_locked_in_contract_or_job(303));
+    assert!(!snap.is_item_locked_in_contract_or_job(304));
+
+    // HyperNet raffle (-74) active vs expired vs won vs malformed vs unrelated note
+    snap.owner_notes.insert(
+        5,
+        OwnerNoteRecord {
+            note_id: 5,
+            character_id: -74,
+            item_id: 0,
+            label: "raffle_active".into(),
+            note: r#"{"item_id":401}"#.into(),
+            timestamp_unix: 0,
+        },
+    );
+    snap.owner_notes.insert(
+        6,
+        OwnerNoteRecord {
+            note_id: 6,
+            character_id: -74,
+            item_id: 0,
+            label: "raffle_expired".into(),
+            note: r#"{"item_id":402,"expired":true}"#.into(),
+            timestamp_unix: 0,
+        },
+    );
+    snap.owner_notes.insert(
+        7,
+        OwnerNoteRecord {
+            note_id: 7,
+            character_id: -74,
+            item_id: 0,
+            label: "raffle_won".into(),
+            note: r#"{"item_id":403,"winner_id":90001}"#.into(),
+            timestamp_unix: 0,
+        },
+    );
+    snap.owner_notes.insert(
+        8,
+        OwnerNoteRecord {
+            note_id: 8,
+            character_id: -74,
+            item_id: 0,
+            label: "raffle_bad".into(),
+            note: "{bad".into(),
+            timestamp_unix: 0,
+        },
+    );
+    snap.owner_notes.insert(
+        9,
+        OwnerNoteRecord {
+            note_id: 9,
+            character_id: 90_001,
+            item_id: 0,
+            label: "player_note".into(),
+            note: r#"{"item_id":404}"#.into(),
+            timestamp_unix: 0,
+        },
+    );
+    assert!(snap.is_item_locked_in_contract_or_job(401));
+    assert!(!snap.is_item_locked_in_contract_or_job(402));
+    assert!(!snap.is_item_locked_in_contract_or_job(403));
+    assert!(!snap.is_item_locked_in_contract_or_job(404));
+}
+
+#[test]
+fn ship_colocation_consumability_and_cosmetics_stripping_edges() {
+    let mut snap = WorldStateSnapshot::default();
+    assert!(!snap.is_structure_controller_saved_ship(200_001));
+    snap.item_custom_names.insert(-7_700_001, "malformed-json".into());
+    assert!(!snap.is_structure_controller_saved_ship(200_001));
+
+    let char_id = 90_001;
+    let other_char = 90_002;
+    let ship_id = 200_001;
+    let mut ch = sample_character(char_id, 1, 98_001, None);
+    ch.active_ship_id = ship_id;
+    ch.solar_system_id = 30_000_142;
+    snap.characters.insert(char_id, ch);
+    snap.items.insert(
+        ship_id,
+        sample_item(ship_id, 587, char_id, 30_000_999, InventoryFlag::None, 1),
+    );
+
+    // Owner mismatch & undocked solar system mismatch & missing char
+    assert!(!snap.is_ship_colocated_with_character(other_char, ship_id, Some(30_000_999)));
+    assert!(!snap.is_ship_colocated_with_character(char_id, ship_id, None));
+    assert!(!snap.is_ship_colocated_with_character(99_999, ship_id, None));
+
+    // Item consumability negative edges
+    let foreign = sample_item(200_050, 34, other_char, 60_003_760, InventoryFlag::Hangar, 10);
+    let hangar_item = sample_item(200_051, 34, char_id, 60_003_760, InventoryFlag::Hangar, 10);
+    let fitted_item = sample_item(200_052, 2889, char_id, ship_id, InventoryFlag::HiSlot0, 1);
+    let cargo_item = sample_item(200_053, 34, char_id, ship_id, InventoryFlag::Cargo, 5);
+    assert!(!snap.is_item_consumable_by(&foreign, char_id, Some(60_003_760), Some(ship_id)));
+    assert!(!snap.is_item_consumable_by(&hangar_item, char_id, None, Some(ship_id)));
+    assert!(!snap.is_item_consumable_by(&fitted_item, char_id, Some(60_003_760), Some(ship_id)));
+    // Ship is not colocated at station 60_003_760
+    assert!(!snap.is_item_consumable_by(&cargo_item, char_id, Some(60_003_760), Some(ship_id)));
+    // Ship colocated, but locked in contract -> cargo not consumable
+    snap.items.get_mut(&ship_id).unwrap().location_id = 60_003_760;
+    snap.contracts.insert(
+        88,
+        ContractRecord {
+            contract_id: 88,
+            status: "Outstanding".into(),
+            item_ids: vec![ship_id],
+            ..Default::default()
+        },
+    );
+    assert!(!snap.is_item_consumable_by(&cargo_item, char_id, Some(60_003_760), Some(ship_id)));
+
+    // strip_ship_cosmetics: empty, negative IDs, valid JSON blobs, malformed JSON blobs
+    snap.strip_ship_cosmetics(&[]);
+    snap.applied_ship_skins.insert(-5, 99);
+    snap.applied_ship_skins.insert(200_001, 101);
+    snap.applied_ship_skins.insert(200_002, 102);
+    snap.quasar_state_blobs.insert(
+        "quasar_cosmetics_skinr".into(),
+        r#"{"applied_thirdparty_skins":{"200001":{"skin":1},"200002":{"skin":2}},"other":1}"#.into(),
+    );
+    snap.quasar_state_blobs.insert(
+        "quasar_cosmetics_live".into(),
+        r#"{"ship_logos":{"200001":{"logo":9},"200002":{"logo":8}}}"#.into(),
+    );
+    snap.strip_ship_cosmetics(&[-5]);
+    assert!(!snap.applied_ship_skins.contains_key(&-5));
+    assert!(snap.applied_ship_skins.contains_key(&200_001));
+
+    snap.strip_ship_cosmetics(&[200_001]);
+    assert!(!snap.applied_ship_skins.contains_key(&200_001));
+    assert_eq!(snap.applied_ship_skins.get(&200_002), Some(&102));
+    let skinr: serde_json::Value =
+        serde_json::from_str(&snap.quasar_state_blobs["quasar_cosmetics_skinr"]).unwrap();
+    assert!(skinr["applied_thirdparty_skins"].get("200001").is_none());
+    assert!(skinr["applied_thirdparty_skins"].get("200002").is_some());
+    assert_eq!(skinr["other"], 1);
+    let live: serde_json::Value =
+        serde_json::from_str(&snap.quasar_state_blobs["quasar_cosmetics_live"]).unwrap();
+    assert!(live["ship_logos"].get("200001").is_none());
+    assert!(live["ship_logos"].get("200002").is_some());
+
+    // Malformed blobs should not panic
+    snap.quasar_state_blobs
+        .insert("quasar_cosmetics_skinr".into(), "{broken".into());
+    snap.quasar_state_blobs
+        .insert("quasar_cosmetics_live".into(), "{broken".into());
+    snap.strip_ship_cosmetics(&[200_002]);
+    assert!(!snap.applied_ship_skins.contains_key(&200_002));
+}
+
+#[test]
+fn contract_credit_expiration_fallback_courier_errors_and_append_journal() {
+    let mut snap = WorldStateSnapshot::default();
+    snap.characters.insert(90_001, sample_character(90_001, 1, 98_001, None));
+    let mut corp = CorporationRecord {
+        corporation_id: 98_001,
+        name: "Corp".into(),
+        ticker: "CRP".into(),
+        ceo_id: 90_001,
+        master_wallet: IskCents::from_isk(500),
+        wallet_divisions: CorporationRecord::default_wallet_divisions(IskCents::from_isk(500)),
+        ..Default::default()
+    };
+    corp.wallet_divisions[1].balance = IskCents::from_isk(25);
+    snap.corporations.insert(98_001, corp);
+    snap.corporations.insert(
+        98_002,
+        CorporationRecord {
+            corporation_id: 98_002,
+            name: "Buyer Corp".into(),
+            ticker: "BUY".into(),
+            ..Default::default()
+        },
+    );
+
+    // credit_contract_issuer edge cases: zero/negative amount, non-empty divisions, missing corp fallback
+    let corp_contract = ContractRecord {
+        for_corp: true,
+        issuer_id: 90_001,
+        issuer_corp_id: 98_001,
+        ..Default::default()
+    };
+    snap.credit_contract_issuer(&corp_contract, IskCents(0));
+    snap.credit_contract_issuer(&corp_contract, IskCents(-50));
+    assert_eq!(snap.corporations[&98_001].master_wallet, IskCents::from_isk(500));
+
+    snap.credit_contract_issuer(&corp_contract, IskCents::from_isk(100));
+    assert_eq!(snap.corporations[&98_001].master_wallet, IskCents::from_isk(600));
+    assert_eq!(snap.corporations[&98_001].wallet_divisions[0].balance, IskCents::from_isk(600));
+    assert_eq!(snap.corporations[&98_001].wallet_divisions[1].balance, IskCents::from_isk(25));
+
+    let missing_corp_contract = ContractRecord {
+        for_corp: true,
+        issuer_id: 90_001,
+        issuer_corp_id: 98_999,
+        ..Default::default()
+    };
+    snap.credit_contract_issuer(&missing_corp_contract, IskCents::from_isk(50));
+    assert_eq!(snap.characters[&90_001].balance, IskCents::from_isk(1_050));
+
+    // resolve_expired_contract: missing, expiration_unix == 0, terminal status
+    assert_eq!(snap.resolve_expired_contract(999, 1_000), None);
+    snap.contracts.insert(
+        1,
+        ContractRecord {
+            contract_id: 1,
+            status: "Outstanding".into(),
+            expiration_unix: 0,
+            ..Default::default()
+        },
+    );
+    assert_eq!(snap.resolve_expired_contract(1, 1_000), None);
+    snap.contracts.insert(
+        2,
+        ContractRecord {
+            contract_id: 2,
+            status: "Completed".into(),
+            expiration_unix: 100,
+            ..Default::default()
+        },
+    );
+    assert_eq!(snap.resolve_expired_contract(2, 1_000), None);
+
+    // Auction won by a corporation -> CorpDeliveries + extra_ids + cosmetics stripped
+    snap.items.insert(400_001, sample_item(400_001, 587, 90_001, 3, InventoryFlag::Locked, 1));
+    snap.items.insert(400_002, sample_item(400_002, 587, 90_001, 3, InventoryFlag::Locked, 1));
+    snap.applied_ship_skins.insert(400_001, 77);
+    snap.applied_ship_skins.insert(400_002, 88);
+    snap.contracts.insert(
+        3,
+        ContractRecord {
+            contract_id: 3,
+            issuer_id: 90_001,
+            contract_type: "Auction".into(),
+            status: "Outstanding".into(),
+            start_station_id: 60_003_760,
+            current_bid: IskCents::from_isk(200),
+            current_bidder_id: Some(98_002),
+            item_ids: vec![400_001],
+            expiration_unix: 500,
+            ..Default::default()
+        },
+    );
+    assert_eq!(snap.resolve_expired_contract(3, 500), Some("Completed"));
+    assert_eq!(snap.items[&400_001].flag, InventoryFlag::CorpDeliveries);
+    assert_eq!(snap.items[&400_002].flag, InventoryFlag::CorpDeliveries);
+    assert_eq!(snap.items[&400_002].owner_id, 98_002);
+    assert!(!snap.applied_ship_skins.contains_key(&400_001));
+    assert!(!snap.applied_ship_skins.contains_key(&400_002));
+
+    // Auction with no bids expires -> refunds reward + deposit and restores orig_flag (or Hangar if Locked/invalid)
+    snap.items.insert(400_010, sample_item(400_010, 34, 90_001, 4, InventoryFlag::Locked, 10));
+    snap.items.insert(400_011, sample_item(400_011, 35, 90_001, 4, InventoryFlag::Locked, 10));
+    snap.items.insert(400_012, sample_item(400_012, 36, 90_001, 4, InventoryFlag::Locked, 10));
+    snap.service_state_blobs.insert("contract_deposit:4".into(), "2500".into());
+    snap.service_state_blobs.insert("contract_orig_flag:4:400010".into(), "5".into()); // Cargo
+    snap.service_state_blobs.insert("contract_orig_flag:4:400011".into(), "63".into()); // Locked -> Hangar fallback
+    snap.service_state_blobs.insert("contract_orig_flag:4:400012".into(), "bad".into()); // invalid -> Hangar fallback
+    snap.contracts.insert(
+        4,
+        ContractRecord {
+            contract_id: 4,
+            issuer_id: 90_001,
+            issuer_corp_id: 98_001,
+            for_corp: true,
+            contract_type: "Auction".into(),
+            status: "Outstanding".into(),
+            start_station_id: 60_003_760,
+            reward: IskCents::from_isk(30),
+            item_ids: vec![400_010],
+            expiration_unix: 500,
+            ..Default::default()
+        },
+    );
+    let before_corp = snap.corporations[&98_001].master_wallet;
+    assert_eq!(snap.resolve_expired_contract(4, 500), Some("Expired"));
+    assert_eq!(
+        snap.corporations[&98_001].master_wallet,
+        IskCents(before_corp.0 + 3000 + 2500)
+    );
+    assert_eq!(snap.items[&400_010].flag, InventoryFlag::Cargo);
+    assert_eq!(snap.items[&400_010].owner_id, 98_001);
+    assert_eq!(snap.items[&400_011].flag, InventoryFlag::Hangar);
+    assert_eq!(snap.items[&400_012].flag, InventoryFlag::Hangar);
+
+    // fail_courier_contract false branches + acceptor_id == None + deposit + Hangar fallback
+    assert!(!snap.fail_courier_contract(999, 100));
+    assert!(!snap.fail_courier_contract(3, 100));
+    snap.contracts.insert(
+        5,
+        ContractRecord {
+            contract_id: 5,
+            contract_type: "ItemExchange".into(),
+            status: "InProgress".into(),
+            ..Default::default()
+        },
+    );
+    assert!(!snap.fail_courier_contract(5, 100));
+
+    snap.items.insert(400_020, sample_item(400_020, 34, 90_001, 60_003_760, InventoryFlag::Locked, 5));
+    snap.service_state_blobs.insert("contract_deposit:6".into(), "1500".into());
+    snap.contracts.insert(
+        6,
+        ContractRecord {
+            contract_id: 6,
+            issuer_id: 90_001,
+            issuer_corp_id: 98_001,
+            for_corp: true,
+            acceptor_id: None,
+            contract_type: "Courier".into(),
+            status: "InProgress".into(),
+            reward: IskCents::from_isk(10),
+            collateral: IskCents::from_isk(20),
+            item_ids: vec![400_020],
+            ..Default::default()
+        },
+    );
+    let before_corp2 = snap.corporations[&98_001].master_wallet;
+    assert!(snap.fail_courier_contract(6, 700));
+    assert_eq!(snap.contracts[&6].status, "Failed");
+    assert_eq!(
+        snap.corporations[&98_001].master_wallet,
+        IskCents(before_corp2.0 + 3000 + 1500)
+    );
+    assert_eq!(snap.items[&400_020].owner_id, 98_001);
+    assert_eq!(snap.items[&400_020].flag, InventoryFlag::Hangar);
+
+    // append_journal
+    let jid = snap.append_journal(90_001, "Bounty", IskCents::from_isk(500), IskCents::from_isk(1_550), "Ratting");
+    assert_eq!(snap.wallet_journal.len(), 1);
+    assert_eq!(snap.wallet_journal[0].entry_id, jid);
+    assert_eq!(snap.wallet_journal[0].character_id, 90_001);
+    assert_eq!(snap.wallet_journal[0].entry_type, "Bounty");
+    assert_eq!(snap.wallet_journal[0].reason, "Ratting");
+}
+
+#[test]
+fn id_allocation_and_reconciliation_across_all_tables_and_leap_dates() {
+    let mut snap = WorldStateSnapshot::default();
+    snap.alliances.insert(99_000_050, AllianceRecord::default());
+    assert_eq!(snap.allocate_alliance_id(), 99_000_051);
+
+    // Corps <= 98_000_000 (NPC corps) do not bump next_corporation_id above 98_100_000
+    snap.corporations.insert(1_000_035, CorporationRecord::default());
+    assert_eq!(snap.allocate_corporation_id(), 98_100_001);
+    snap.corporations.insert(98_200_000, CorporationRecord::default());
+    assert_eq!(snap.allocate_corporation_id(), 98_200_001);
+
+    // Notification & report notes
+    snap.owner_notes.insert(
+        -7_900_000_600_000,
+        OwnerNoteRecord {
+            note_id: -7_900_000_600_000,
+            character_id: -79,
+            item_id: 0,
+            label: String::new(),
+            note: String::new(),
+            timestamp_unix: 0,
+        },
+    );
+    assert_eq!(snap.allocate_notification_id(), 600_001);
+    assert_eq!(snap.allocate_notification_id_above(750_000), 750_001);
+
+    snap.owner_notes.insert(
+        780_800_000,
+        OwnerNoteRecord {
+            note_id: 780_800_000,
+            character_id: -78,
+            item_id: 0,
+            label: String::new(),
+            note: String::new(),
+            timestamp_unix: 0,
+        },
+    );
+    assert_eq!(snap.allocate_report_id(), 800_001);
+
+    // Reconcile from spawned_npc_ball_ids while ignoring >= 900_000_000 and <= 0
+    snap.active_missions.insert(
+        (90_001, 1),
+        ActiveMissionRecord {
+            mission_id: 1,
+            character_id: 90_001,
+            agent_id: 3_000_001,
+            solar_system_id: 30_000_142,
+            state: "Accepted".into(),
+            current_room_id: 1,
+            npcs_remaining: 1,
+            spawned_npc_ball_ids: vec![-5, 250_000_123, 950_000_000],
+            bookmark_id: None,
+        },
+    );
+    snap.next_entity_id = 0;
+    snap.next_alliance_id = 0;
+    snap.next_corporation_id = 0;
+    snap.next_notification_id = 0;
+    snap.next_report_id = 0;
+    snap.reconcile_id_counters();
+    assert_eq!(snap.next_entity_id, 250_000_123);
+    assert_eq!(snap.next_alliance_id, 99_000_050);
+    assert_eq!(snap.next_corporation_id, 98_200_000);
+    assert_eq!(snap.next_notification_id, 600_000);
+    assert_eq!(snap.next_report_id, 800_000);
+
+    // Leap year and non-leap year date formatting
+    assert_eq!(unix_secs_to_date_string(951_782_400), "2000-02-29");
+    assert_eq!(unix_secs_to_date_string(1_709_164_800), "2024-02-29");
+    assert_eq!(unix_secs_to_date_string(1_740_700_800), "2025-02-28");
+    assert_eq!(unix_secs_to_date_string(1_740_787_200), "2025-03-01");
+}

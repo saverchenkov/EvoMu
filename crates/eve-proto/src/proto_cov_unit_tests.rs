@@ -421,3 +421,474 @@ fn pyrep_node_count_and_wire_boundaries_cover_all_arithmetic_branches() {
     assert_eq!(map["b_9"], PyRep::Bool(true));
 }
 
+#[test]
+fn quasar_registry_open_validation_and_dynamic_wire_edge_cases() {
+    use crate::quasar::registry::{DynamicQuasarMessage, DynamicValue, QuasarManifest};
+    use crate::quasar::{
+        encode_bytes_field, encode_varint_field, EnumDescriptorProto, EnumValueDescriptorProto,
+        FileDescriptorProto, OneofDescriptorProto, ServiceDescriptorProto,
+    };
+    use crate::MAX_RECURSION_DEPTH;
+
+    // 1. QuasarDescriptorRegistry::open error paths with temp sqlite + manifest files
+    let pid = std::process::id();
+    let db_path = std::env::temp_dir().join(format!("evomu_qreg_test_{pid}.sqlite"));
+    let mf_path = std::env::temp_dir().join(format!("evomu_qreg_mf_{pid}.json"));
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(&mf_path);
+
+    {
+        let conn = rusqlite::Connection::open(&db_path).expect("create temp sqlite");
+        conn.execute(
+            "CREATE TABLE other_table (id INTEGER PRIMARY KEY)",
+            [],
+        )
+        .expect("create other_table");
+    }
+
+    // Missing manifest
+    assert!(matches!(
+        QuasarDescriptorRegistry::open(&db_path, std::path::Path::new("/nonexistent/mf.json")),
+        Err(QuasarError::ManifestMismatch(_))
+    ));
+
+    // Invalid JSON manifest
+    std::fs::write(&mf_path, b"{not-json").expect("write bad json");
+    assert!(matches!(
+        QuasarDescriptorRegistry::open(&db_path, &mf_path),
+        Err(QuasarError::ManifestMismatch(_))
+    ));
+
+    // Valid JSON manifest, missing table in sqlite -> DatabaseError
+    let valid_mf = QuasarManifest {
+        schema_version: 1,
+        domain_count: 1,
+        descriptor_file_count: 1,
+        unique_package_count: 1,
+        top_level_message_count: 0,
+        total_message_count: 0,
+        total_enum_count: 0,
+        total_service_count: 0,
+        total_field_count: 0,
+        total_serialized_pb_bytes: 0,
+        combined_serialized_pb_sha256: "0".into(),
+        combined_serialized_pb_md5: "0".into(),
+        per_domain_file_counts: std::collections::BTreeMap::from([("test".into(), 1)]),
+    };
+    std::fs::write(&mf_path, serde_json::to_vec(&valid_mf).unwrap()).expect("write manifest");
+    assert!(matches!(
+        QuasarDescriptorRegistry::open(&db_path, &mf_path),
+        Err(QuasarError::DatabaseError(_))
+    ));
+
+    // Table exists with wrong checksum -> ManifestMismatch
+    {
+        let conn = rusqlite::Connection::open(&db_path).expect("reopen sqlite");
+        conn.execute(
+            "CREATE TABLE quasar_file_descriptors (
+                pyj_path TEXT, domain TEXT, sha256 TEXT, md5 TEXT, serialized_pb BLOB
+            )",
+            [],
+        )
+        .expect("create table");
+        let fd = FileDescriptorProto {
+            pyj_path: "a.pyj".into(),
+            domain: "test".into(),
+            name: "a.proto".into(),
+            package: "test".into(),
+            syntax: "proto3".into(),
+            dependencies: vec![],
+            messages: vec![],
+            enums: vec![],
+            services: vec![],
+            sha256: String::new(),
+            md5: String::new(),
+            raw_bytes: vec![],
+        };
+        let wire = fd.encode_wire();
+        conn.execute(
+            "INSERT INTO quasar_file_descriptors VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params!["a.pyj", "test", "bad_sha", "bad_md5", wire],
+        )
+        .expect("insert row");
+    }
+    assert!(matches!(
+        QuasarDescriptorRegistry::open(&db_path, &mf_path),
+        Err(QuasarError::ManifestMismatch(_))
+    ));
+
+    // Fix row checksum -> fails on descriptor file count mismatch (1 != EXPECTED_QUASAR_FILE_COUNT)
+    {
+        let conn = rusqlite::Connection::open(&db_path).expect("reopen sqlite");
+        let fd = FileDescriptorProto {
+            pyj_path: "a.pyj".into(),
+            domain: "test".into(),
+            name: "a.proto".into(),
+            package: "test".into(),
+            syntax: "proto3".into(),
+            dependencies: vec![],
+            messages: vec![],
+            enums: vec![],
+            services: vec![],
+            sha256: String::new(),
+            md5: String::new(),
+            raw_bytes: vec![],
+        };
+        let wire = fd.encode_wire();
+        let sha = crate::quasar::sha256_hex(&wire);
+        let md5 = crate::quasar::md5_hex(&wire);
+        conn.execute("DELETE FROM quasar_file_descriptors", []).unwrap();
+        conn.execute(
+            "INSERT INTO quasar_file_descriptors VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params!["a.pyj", "test", sha, md5, wire],
+        )
+        .unwrap();
+    }
+    assert!(matches!(
+        QuasarDescriptorRegistry::open(&db_path, &mf_path),
+        Err(QuasarError::ManifestMismatch(_))
+    ));
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(&mf_path);
+
+    // 2. open_default_or_empty always yields usable registry with builtins
+    let fallback_reg = QuasarDescriptorRegistry::open_default_or_empty();
+    assert!(fallback_reg.get_message("google.protobuf.Timestamp").is_some());
+
+    // 3. Unknown-type encode_dynamic across every DynamicValue variant + empty Repeated
+    let mut reg = QuasarDescriptorRegistry::empty_with_builtins();
+    let mut sub = DynamicQuasarMessage::new("custom.Sub");
+    sub.set(1, DynamicValue::String("nested".into()));
+
+    let mut untyped = DynamicQuasarMessage::new("custom.Untyped");
+    untyped.set(1, DynamicValue::Double(1.25));
+    untyped.set(2, DynamicValue::Float(-2.5));
+    untyped.set(3, DynamicValue::Int64(-100));
+    untyped.set(4, DynamicValue::Uint64(200));
+    untyped.set(5, DynamicValue::Int32(-30));
+    untyped.set(6, DynamicValue::Uint32(40));
+    untyped.set(7, DynamicValue::Sint32(-50));
+    untyped.set(8, DynamicValue::Sint64(-60));
+    untyped.set(9, DynamicValue::Fixed32(70));
+    untyped.set(10, DynamicValue::Fixed64(80));
+    untyped.set(11, DynamicValue::Sfixed32(-90));
+    untyped.set(12, DynamicValue::Sfixed64(-100));
+    untyped.set(13, DynamicValue::Bool(true));
+    untyped.set(14, DynamicValue::String("hello".into()));
+    untyped.set(15, DynamicValue::Bytes(vec![0xAA, 0xBB]));
+    untyped.set(16, DynamicValue::Enum(7));
+    untyped.set(17, DynamicValue::Message(Box::new(sub.clone())));
+    untyped.set(18, DynamicValue::Repeated(vec![]));
+    untyped.set(
+        19,
+        DynamicValue::Repeated(vec![
+            DynamicValue::String("a".into()),
+            DynamicValue::String("b".into()),
+        ]),
+    );
+    let untyped_wire = reg.encode_dynamic(&untyped).expect("encode untyped");
+    let wire_dec = reg
+        .decode_dynamic_or_wire("custom.Untyped", &untyped_wire)
+        .expect("decode wire fallback");
+    assert_eq!(wire_dec.get(14), Some(&DynamicValue::String("hello".into())));
+    assert_eq!(wire_dec.get(18), None);
+    assert_eq!(
+        wire_dec.get(19),
+        Some(&DynamicValue::Repeated(vec![
+            DynamicValue::String("a".into()),
+            DynamicValue::String("b".into()),
+        ]))
+    );
+
+    // 4. Typed descriptor covering unknown field skip, invalid UTF-8, repeated Message/String,
+    //    packed scalar repeated error paths, and recursion depth > MAX_RECURSION_DEPTH
+    reg.insert_message_for_test(DescriptorProto {
+        name: "Node".into(),
+        full_name: "test.Node".into(),
+        fields: vec![
+            FieldDescriptorProto {
+                name: "child".into(),
+                number: 1,
+                label: FieldLabel::Optional,
+                field_type: FieldType::Message,
+                type_name: "test.Node".into(),
+                oneof_index: None,
+                json_name: "child".into(),
+            },
+            FieldDescriptorProto {
+                name: "text".into(),
+                number: 2,
+                label: FieldLabel::Optional,
+                field_type: FieldType::String,
+                type_name: String::new(),
+                oneof_index: None,
+                json_name: "text".into(),
+            },
+            FieldDescriptorProto {
+                name: "tags".into(),
+                number: 3,
+                label: FieldLabel::Repeated,
+                field_type: FieldType::String,
+                type_name: String::new(),
+                oneof_index: None,
+                json_name: "tags".into(),
+            },
+            FieldDescriptorProto {
+                name: "ints".into(),
+                number: 4,
+                label: FieldLabel::Repeated,
+                field_type: FieldType::Int64,
+                type_name: String::new(),
+                oneof_index: None,
+                json_name: "ints".into(),
+            },
+            FieldDescriptorProto {
+                name: "doubles".into(),
+                number: 5,
+                label: FieldLabel::Repeated,
+                field_type: FieldType::Double,
+                type_name: String::new(),
+                oneof_index: None,
+                json_name: "doubles".into(),
+            },
+        ],
+        nested_types: vec![],
+        enum_types: vec![],
+        oneofs: vec![],
+        is_map_entry: false,
+    });
+
+    assert!(matches!(
+        reg.decode_dynamic("test.Missing", &[]),
+        Err(QuasarError::UnknownMessageType(_))
+    ));
+
+    // Unknown field #999 skipped, repeated tags aggregated
+    let mut node_wire = Vec::new();
+    encode_varint_field(999, 123, &mut node_wire);
+    crate::quasar::encode_string_field(3, "t1", &mut node_wire);
+    crate::quasar::encode_string_field(3, "t2", &mut node_wire);
+    let node_dec = reg.decode_dynamic("test.Node", &node_wire).unwrap();
+    assert_eq!(
+        node_dec.get(3),
+        Some(&DynamicValue::Repeated(vec![
+            DynamicValue::String("t1".into()),
+            DynamicValue::String("t2".into()),
+        ]))
+    );
+
+    // Invalid UTF-8 in String field -> InvalidUtf8
+    let mut bad_utf8 = Vec::new();
+    encode_bytes_field(2, &[0xFF, 0xFE], &mut bad_utf8);
+    assert!(matches!(
+        reg.decode_dynamic("test.Node", &bad_utf8),
+        Err(QuasarError::InvalidUtf8(_))
+    ));
+
+    // Truncated packed varint in field 4 and truncated 8-byte double in field 5
+    let mut bad_packed_varint = Vec::new();
+    encode_bytes_field(4, &[0x80], &mut bad_packed_varint);
+    assert_eq!(
+        reg.decode_dynamic("test.Node", &bad_packed_varint),
+        Err(QuasarError::UnexpectedEof)
+    );
+    let mut bad_packed_f64 = Vec::new();
+    encode_bytes_field(5, &[1, 2, 3, 4, 5], &mut bad_packed_f64);
+    assert_eq!(
+        reg.decode_dynamic("test.Node", &bad_packed_f64),
+        Err(QuasarError::UnexpectedEof)
+    );
+
+    // RecursionLimitExceeded in both decode_dynamic and decode_wire_fallback (> MAX_RECURSION_DEPTH)
+    let mut deep_wire = Vec::new();
+    for _ in 0..=(MAX_RECURSION_DEPTH + 1) {
+        let mut outer = Vec::new();
+        encode_bytes_field(1, &deep_wire, &mut outer);
+        deep_wire = outer;
+    }
+    assert_eq!(
+        reg.decode_dynamic("test.Node", &deep_wire),
+        Err(QuasarError::RecursionLimitExceeded)
+    );
+    // decode_wire_fallback safely stops recursing beyond MAX_RECURSION_DEPTH and falls back to DynamicValue::Bytes
+    let mut deep_fallback = vec![0x08, 0x01];
+    for _ in 0..=(MAX_RECURSION_DEPTH + 1) {
+        let mut outer = Vec::new();
+        encode_bytes_field(1, &deep_fallback, &mut outer);
+        deep_fallback = outer;
+    }
+    let decoded_deep_fallback = reg
+        .decode_dynamic_or_wire("unknown.Deep", &deep_fallback)
+        .expect("decode_wire_fallback degrades depth overflow to Bytes");
+    let mut cursor = &decoded_deep_fallback;
+    let mut nested_depth = 0usize;
+    while let Some(DynamicValue::Message(inner)) = cursor.get(1) {
+        nested_depth += 1;
+        cursor = inner;
+    }
+    assert_eq!(nested_depth, MAX_RECURSION_DEPTH);
+    assert!(matches!(cursor.get(1), Some(DynamicValue::Bytes(_))));
+
+    // decode_wire_fallback: valid UTF-8 with control char that is valid nested wire vs raw bytes
+    let mut ctrl_msg = Vec::new();
+    encode_bytes_field(1, &[0x08, 0x07], &mut ctrl_msg); // "\x08\x07" has ASCII control 0x08 & 0x07, valid proto field 1 varint 7
+    let dec_ctrl = reg.decode_dynamic_or_wire("unknown.Ctrl", &ctrl_msg).unwrap();
+    assert!(matches!(dec_ctrl.get(1), Some(DynamicValue::Message(_))));
+
+    let mut ctrl_raw = Vec::new();
+    encode_bytes_field(1, &[0x00, 0x01], &mut ctrl_raw); // wire type 0 field 0? wait 0x00 is field 0 wire type 0, followed by 0x01 -> invalid wire type 1? no, tag 0x00 varint 0x01... let's use 0x03 (invalid wire type 3)
+    let mut ctrl_bad_wire = Vec::new();
+    encode_bytes_field(1, &[0x03, 0x04], &mut ctrl_bad_wire);
+    let dec_raw = reg
+        .decode_dynamic_or_wire("unknown.CtrlRaw", &ctrl_bad_wire)
+        .unwrap();
+    assert_eq!(dec_raw.get(1), Some(&DynamicValue::Bytes(vec![0x03, 0x04])));
+
+    // 5. generate_rust_module_for_file covering all FieldTypes and all reserved keywords
+    let all_kw_file = FileDescriptorProto {
+        pyj_path: "kw_pb2.pyj".into(),
+        domain: "kw".into(),
+        name: "kw.proto".into(),
+        package: "kw".into(),
+        syntax: "proto3".into(),
+        dependencies: vec![],
+        messages: vec![DescriptorProto {
+            name: "AllFieldKinds".into(),
+            full_name: "kw.AllFieldKinds".into(),
+            fields: vec![
+                FieldDescriptorProto { name: "loop".into(), number: 1, label: FieldLabel::Optional, field_type: FieldType::Double, type_name: String::new(), oneof_index: None, json_name: "loop".into() },
+                FieldDescriptorProto { name: "in".into(), number: 2, label: FieldLabel::Optional, field_type: FieldType::Float, type_name: String::new(), oneof_index: None, json_name: "in".into() },
+                FieldDescriptorProto { name: "ref".into(), number: 3, label: FieldLabel::Optional, field_type: FieldType::Int64, type_name: String::new(), oneof_index: None, json_name: "ref".into() },
+                FieldDescriptorProto { name: "mod".into(), number: 4, label: FieldLabel::Optional, field_type: FieldType::Uint64, type_name: String::new(), oneof_index: None, json_name: "mod".into() },
+                FieldDescriptorProto { name: "self".into(), number: 5, label: FieldLabel::Optional, field_type: FieldType::Sint32, type_name: String::new(), oneof_index: None, json_name: "self".into() },
+                FieldDescriptorProto { name: "super".into(), number: 6, label: FieldLabel::Optional, field_type: FieldType::Fixed32, type_name: String::new(), oneof_index: None, json_name: "super".into() },
+                FieldDescriptorProto { name: "crate".into(), number: 7, label: FieldLabel::Optional, field_type: FieldType::Bool, type_name: String::new(), oneof_index: None, json_name: "crate".into() },
+                FieldDescriptorProto { name: "raw".into(), number: 8, label: FieldLabel::Optional, field_type: FieldType::Bytes, type_name: String::new(), oneof_index: None, json_name: "raw".into() },
+                FieldDescriptorProto { name: "grp".into(), number: 9, label: FieldLabel::Optional, field_type: FieldType::Group, type_name: "kw.Other".into(), oneof_index: None, json_name: "grp".into() },
+            ],
+            nested_types: vec![],
+            enum_types: vec![EnumDescriptorProto {
+                name: "Kind".into(),
+                full_name: "kw.AllFieldKinds.Kind".into(),
+                values: vec![EnumValueDescriptorProto { name: "A".into(), number: 0 }],
+            }],
+            oneofs: vec![OneofDescriptorProto { name: "o".into() }],
+            is_map_entry: false,
+        }],
+        enums: vec![],
+        services: vec![ServiceDescriptorProto {
+            name: "Svc".into(),
+            full_name: "kw.Svc".into(),
+            methods: vec![],
+        }],
+        sha256: String::new(),
+        md5: String::new(),
+        raw_bytes: vec![],
+    };
+    let generated = QuasarDescriptorRegistry::generate_rust_module_for_file(&all_kw_file);
+    for kw in ["r#loop: f64", "r#in: f32", "r#ref: i64", "r#mod: u64", "r#self: i32", "r#super: u32", "r#crate: bool", "raw: Vec<u8>", "grp: Option<Box<Other>>"] {
+        assert!(generated.contains(kw), "missing {kw} in:\n{generated}");
+    }
+}
+
+#[test]
+fn quasar_types_unknown_fields_corrupt_nested_messages_and_zero_sign_bits() {
+    use crate::quasar::types::{
+        ColorRgb, DeviceUserIdentifier, EveIdempotencyToken, EvePublicUserId, GoogleAny,
+        GoogleDuration, GoogleEmpty, MathFraction, MathVector3, MathVector4, NetworkRttSample,
+        SemanticVersionSpec,
+    };
+    use crate::quasar::{encode_bytes_field, encode_varint_field};
+
+    // 1. Unknown field numbers & mismatched wire types skipped cleanly on core Quasar types
+    let unknown_wire = {
+        let mut b = Vec::new();
+        encode_varint_field(99, 777, &mut b);
+        b
+    };
+    assert_eq!(GoogleTimestamp::decode_proto(&unknown_wire).unwrap(), GoogleTimestamp::default());
+    assert_eq!(GoogleDuration::decode_proto(&unknown_wire).unwrap(), GoogleDuration::default());
+    assert_eq!(GoogleAny::decode_proto(&unknown_wire).unwrap(), GoogleAny::default());
+    assert_eq!(GoogleEmpty::decode_proto(&unknown_wire).unwrap(), GoogleEmpty);
+    assert_eq!(EvePublicUserId::decode_proto(&unknown_wire).unwrap(), EvePublicUserId::default());
+    assert_eq!(EvePublicCharacterId::decode_proto(&unknown_wire).unwrap(), EvePublicCharacterId::default());
+    assert_eq!(EvePublicCorporationId::decode_proto(&unknown_wire).unwrap(), EvePublicCorporationId::default());
+    assert_eq!(EvePublicCorpRoleCollection::decode_proto(&unknown_wire).unwrap(), EvePublicCorpRoleCollection::default());
+    assert_eq!(EveIdempotencyToken::decode_proto(&unknown_wire).unwrap(), EveIdempotencyToken::default());
+    assert_eq!(EveIpAddress::decode_proto(&[]).unwrap(), EveIpAddress::V4(0));
+    assert_eq!(EveIpAddress::decode_proto(&unknown_wire).unwrap(), EveIpAddress::V4(0));
+    assert_eq!(TraceContext::decode_proto(&unknown_wire).unwrap(), TraceContext::default());
+    assert_eq!(SemanticVersionSpec::decode_proto(&unknown_wire).unwrap(), SemanticVersionSpec::default());
+    assert_eq!(ColorRgb::decode_proto(&unknown_wire).unwrap(), ColorRgb::default());
+    assert_eq!(MathFraction::decode_proto(&unknown_wire).unwrap(), MathFraction::default());
+    assert_eq!(MathVector3::decode_proto(&unknown_wire).unwrap(), MathVector3::default());
+    assert_eq!(MathVector4::decode_proto(&unknown_wire).unwrap(), MathVector4::default());
+    assert_eq!(DeviceUserIdentifier::decode_proto(&unknown_wire).unwrap(), DeviceUserIdentifier::default());
+    assert_eq!(NetworkRttSample::decode_proto(&unknown_wire).unwrap(), NetworkRttSample::default());
+
+    // 2. GoogleAny::from_any accepts type.evetech.net/ prefix and leading dot, and propagates inner decode error
+    let uid = EvePublicUserId { sequential: -42 };
+    let evetech_any = GoogleAny {
+        type_url: "type.evetech.net/.eve_public.user.Identifier".into(),
+        value: uid.encode_proto(),
+    };
+    assert_eq!(EvePublicUserId::from_any(&evetech_any).unwrap(), uid);
+
+    let corrupt_any = GoogleAny {
+        type_url: GoogleAny::type_url(),
+        value: vec![0x08], // truncated varint
+    };
+    assert_eq!(
+        GoogleAny::from_any(&corrupt_any),
+        Err(QuasarError::UnexpectedEof)
+    );
+
+    // 3. Invalid UTF-8 in GoogleAny::type_url and SemanticVersionSpec tags
+    let mut bad_any_str = Vec::new();
+    encode_bytes_field(1, &[0xFF, 0xFE], &mut bad_any_str);
+    assert!(matches!(GoogleAny::decode_proto(&bad_any_str), Err(QuasarError::InvalidUtf8(_))));
+
+    let mut bad_semver_pre = Vec::new();
+    encode_bytes_field(4, &[0xFF, 0xFE], &mut bad_semver_pre);
+    assert!(matches!(SemanticVersionSpec::decode_proto(&bad_semver_pre), Err(QuasarError::InvalidUtf8(_))));
+
+    let mut bad_semver_build = Vec::new();
+    encode_bytes_field(5, &[0xFF, 0xFE], &mut bad_semver_build);
+    assert!(matches!(SemanticVersionSpec::decode_proto(&bad_semver_build), Err(QuasarError::InvalidUtf8(_))));
+
+    // 4. Corrupt nested messages in TraceContext, DeviceUserIdentifier, NetworkRttSample
+    let mut bad_trace_flags = Vec::new();
+    encode_bytes_field(3, &[0x08], &mut bad_trace_flags);
+    assert_eq!(TraceContext::decode_proto(&bad_trace_flags), Err(QuasarError::UnexpectedEof));
+
+    let mut bad_trace_state = Vec::new();
+    encode_bytes_field(4, &[0x08], &mut bad_trace_state);
+    assert_eq!(TraceContext::decode_proto(&bad_trace_state), Err(QuasarError::UnexpectedEof));
+
+    let mut bad_dev_user = Vec::new();
+    encode_bytes_field(2, &[0x08], &mut bad_dev_user);
+    assert_eq!(DeviceUserIdentifier::decode_proto(&bad_dev_user), Err(QuasarError::UnexpectedEof));
+
+    let mut bad_rtt = Vec::new();
+    encode_bytes_field(2, &[0x08], &mut bad_rtt);
+    assert_eq!(NetworkRttSample::decode_proto(&bad_rtt), Err(QuasarError::UnexpectedEof));
+
+    // 5. MathVector3 & MathVector4: +0.0 omits wire bytes, -0.0 preserves sign bit
+    let zero_v3 = MathVector3::default();
+    assert!(zero_v3.encode_proto().is_empty());
+    let neg_zero_v3 = MathVector3 { x: -0.0, y: -0.0, z: -0.0 };
+    let enc_nz3 = neg_zero_v3.encode_proto();
+    assert!(!enc_nz3.is_empty());
+    let dec_nz3 = MathVector3::decode_proto(&enc_nz3).unwrap();
+    assert!(dec_nz3.x.is_sign_negative() && dec_nz3.y.is_sign_negative() && dec_nz3.z.is_sign_negative());
+
+    let zero_v4 = MathVector4::default();
+    assert!(zero_v4.encode_proto().is_empty());
+    let neg_zero_v4 = MathVector4 { x: -0.0, y: -0.0, z: -0.0, w: -0.0 };
+    let enc_nz4 = neg_zero_v4.encode_proto();
+    assert!(!enc_nz4.is_empty());
+    let dec_nz4 = MathVector4::decode_proto(&enc_nz4).unwrap();
+    assert!(dec_nz4.w.is_sign_negative());
+}
+

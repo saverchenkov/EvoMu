@@ -341,3 +341,185 @@ fn hijack_arg_parsing_and_all_rpc_method_aliases_and_error_paths() {
         .dispatch_public_gateway_rpc(&sess, "Send", &[], &kwargs, now)
         .is_none());
 }
+
+#[test]
+fn quasar_gateway_meta_hydration_clamping_and_empty_reset() {
+    use std::sync::atomic::Ordering;
+
+    let router = new_router();
+    // Dirty RAM state on empty DB -> hydrate_meta_from_db resets all fields to defaults
+    *router.server_hijack_state.write().unwrap() = QuasarHijackState {
+        enabled: true,
+        error_code: Some(503),
+        latency_sec: Some(1.25),
+    };
+    router.next_notice_seq.store(42, Ordering::Relaxed);
+    router.free_fast_checkout_plex.store(true, Ordering::Relaxed);
+    router
+        .has_persisted_free_fast_checkout_plex
+        .store(true, Ordering::Relaxed);
+
+    router.hydrate_meta_from_db();
+    let hijack = router.server_hijack_state.read().unwrap().clone();
+    assert!(!hijack.enabled);
+    assert_eq!(hijack.error_code, None);
+    assert_eq!(hijack.latency_sec, None);
+    assert_eq!(router.next_notice_seq.load(Ordering::Relaxed), 1);
+    assert!(!router.free_fast_checkout_plex.load(Ordering::Relaxed));
+    assert!(
+        !router
+            .has_persisted_free_fast_checkout_plex
+            .load(Ordering::Relaxed)
+    );
+
+    // Seed meta blob with next_notice_seq: 0 and free_fast_checkout_plex: None while RAM flag is true
+    router.free_fast_checkout_plex.store(true, Ordering::Relaxed);
+    router.db.with_mut_snapshot(|snap| {
+        snap.quasar_state_blobs.insert(
+            QUASAR_GATEWAY_META_BLOB_KEY.to_string(),
+            serde_json::json!({
+                "server_hijack_state": { "enabled": false, "error_code": null, "latency_sec": null },
+                "next_notice_seq": 0,
+                "free_fast_checkout_plex": null
+            })
+            .to_string(),
+        );
+    });
+    router.hydrate_meta_from_db();
+    assert_eq!(router.next_notice_seq.load(Ordering::Relaxed), 1);
+    assert!(
+        !router
+            .has_persisted_free_fast_checkout_plex
+            .load(Ordering::Relaxed)
+    );
+
+    // Seed free_fast_checkout_plex: Some(false) -> clears RAM flag & sets has_persisted = true
+    router.free_fast_checkout_plex.store(true, Ordering::Relaxed);
+    router.db.with_mut_snapshot(|snap| {
+        snap.quasar_state_blobs.insert(
+            QUASAR_GATEWAY_META_BLOB_KEY.to_string(),
+            serde_json::json!({
+                "server_hijack_state": { "enabled": false, "error_code": null, "latency_sec": null },
+                "next_notice_seq": 7,
+                "free_fast_checkout_plex": false
+            })
+            .to_string(),
+        );
+    });
+    router.hydrate_meta_from_db();
+    assert_eq!(router.next_notice_seq.load(Ordering::Relaxed), 7);
+    assert!(!router.free_fast_checkout_plex.load(Ordering::Relaxed));
+    assert!(
+        router
+            .has_persisted_free_fast_checkout_plex
+            .load(Ordering::Relaxed)
+    );
+
+    // sync_meta_into_snapshot clamping & ternary None vs Some(false)
+    let mut snap = router.db.with_snapshot(|s| s.clone());
+    router.next_notice_seq.store(0, Ordering::Relaxed);
+    router
+        .has_persisted_free_fast_checkout_plex
+        .store(false, Ordering::Relaxed);
+    router.sync_meta_into_snapshot(&mut snap);
+    let parsed: QuasarGatewayMetaPayload =
+        serde_json::from_str(&snap.quasar_state_blobs[QUASAR_GATEWAY_META_BLOB_KEY]).unwrap();
+    assert_eq!(parsed.next_notice_seq, 1);
+    assert_eq!(parsed.free_fast_checkout_plex, None);
+
+    router
+        .has_persisted_free_fast_checkout_plex
+        .store(true, Ordering::Relaxed);
+    router.free_fast_checkout_plex.store(false, Ordering::Relaxed);
+    router.sync_meta_into_snapshot(&mut snap);
+    let parsed2: QuasarGatewayMetaPayload =
+        serde_json::from_str(&snap.quasar_state_blobs[QUASAR_GATEWAY_META_BLOB_KEY]).unwrap();
+    assert_eq!(parsed2.free_fast_checkout_plex, Some(false));
+}
+
+#[test]
+fn quasar_gateway_sync_meta_reentrancy_direct_persistence_and_hooks() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let router1 = new_router();
+    // publish_notice & set_server_hijack_mode persist directly via sync_meta_to_db without sync_all_to_db
+    router1
+        .publish_notice(NoticeScope::Broadcast, GoogleAny::default(), 1_700_000_000)
+        .expect("publish notice");
+    router1.set_server_hijack_mode(true, Some(502), Some(0.5));
+
+    let router2 = PublicGatewayRouter::new(
+        QuasarDescriptorRegistry::open_default_or_empty(),
+        Arc::clone(&router1.db),
+        shared_sde(),
+    );
+    assert_eq!(router2.next_notice_seq.load(Ordering::Relaxed), 2);
+    let h2 = router2.server_hijack_state.read().unwrap().clone();
+    assert!(h2.enabled);
+    assert_eq!(h2.error_code, Some(502));
+    assert_eq!(h2.latency_sec, Some(0.5));
+
+    // Reentrancy guard: calling sync_meta_to_db inside with_mut_snapshot must not deadlock or overwrite snapshot
+    router1.next_notice_seq.store(99, Ordering::Relaxed);
+    router1.db.with_mut_snapshot(|snap| {
+        snap.quasar_state_blobs.insert(
+            QUASAR_GATEWAY_META_BLOB_KEY.to_string(),
+            "{\"next_notice_seq\":12}".to_string(),
+        );
+        router1.sync_meta_to_db();
+        assert_eq!(
+            snap.quasar_state_blobs[QUASAR_GATEWAY_META_BLOB_KEY],
+            "{\"next_notice_seq\":12}"
+        );
+    });
+
+    // register_persistence_hooks ordering & distinct dispatch for sync_all_to_db vs rehydrate_all_from_db
+    let rehydrate_calls = Arc::new(AtomicUsize::new(0));
+    let sync_calls = Arc::new(AtomicUsize::new(0));
+    let r_c = Arc::clone(&rehydrate_calls);
+    let s_c = Arc::clone(&sync_calls);
+    router1.register_persistence_hooks(
+        Arc::new(move || {
+            r_c.fetch_add(1, Ordering::Relaxed);
+        }),
+        Arc::new(move || {
+            s_c.fetch_add(1, Ordering::Relaxed);
+        }),
+    );
+    router1.sync_all_to_db();
+    assert_eq!(sync_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(rehydrate_calls.load(Ordering::Relaxed), 0);
+
+    router1.rehydrate_all_from_db();
+    assert_eq!(sync_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(rehydrate_calls.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn quasar_gateway_ensure_rollback_synced_epoch_equality_guard() {
+    use std::sync::atomic::Ordering;
+
+    let router = new_router();
+    router.sync_all_to_db();
+    assert_eq!(router.next_notice_seq.load(Ordering::Relaxed), 1);
+
+    // Mutate RAM only (no DB sync) while rollback_epoch is unchanged -> ensure_rollback_synced must NOT clobber RAM
+    router.next_notice_seq.store(9, Ordering::Relaxed);
+    router.ensure_rollback_synced();
+    assert_eq!(router.next_notice_seq.load(Ordering::Relaxed), 9);
+
+    // Trigger rollback via failing try_with_mut_snapshot -> bumps rollback_epoch
+    let err: Result<(), String> = router
+        .db
+        .try_with_mut_snapshot(|_| Err("force rollback".to_string()));
+    assert!(err.is_err());
+
+    // Epoch changed -> ensure_rollback_synced rehydrates persisted DB state (`next_notice_seq = 1`)
+    router.ensure_rollback_synced();
+    assert_eq!(router.next_notice_seq.load(Ordering::Relaxed), 1);
+
+    // Subsequent in-memory change while epoch matches again stays untouched
+    router.next_notice_seq.store(15, Ordering::Relaxed);
+    router.ensure_rollback_synced();
+    assert_eq!(router.next_notice_seq.load(Ordering::Relaxed), 15);
+}

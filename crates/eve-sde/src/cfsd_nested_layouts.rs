@@ -187,6 +187,8 @@ pub static CFSD_NESTED_LAYOUTS: &[CfsdNestedLayout] = &[
         ),
         false,
     ),
+    // V24 Void Space encounters (`res:/staticdata/voidspaceencounters.fsdbinary`):
+    // keyed by filament typeID (62448, 79997, 79998) with `nebulaGraphicIDs` and `validShipTypeListID`.
     rec(
         "res:/staticdata/voidspaceencounters.fsdbinary",
         U64,
@@ -445,5 +447,8 @@ pub static CFSD_NESTED_LAYOUTS: &[CfsdNestedLayout] = &[
     ),
 ];
 #[cfg(test)] #[path = "cfsd_nested_layouts_unit_tests.rs"] mod cfsd_nested_layouts_unit_tests;
+#[cfg(test)]
+#[path = "cfsd_nested_layouts_edges_tests.rs"]
+mod cfsd_nested_layouts_edges_tests;
 
 

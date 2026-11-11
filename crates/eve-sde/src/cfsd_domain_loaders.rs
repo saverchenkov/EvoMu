@@ -549,6 +549,7 @@ impl SdeRegistry {
                     faction_id: ((mask & (1 << 5)) != 0).then(|| i32_at(rec + 72) as u32),
                     graphic_id: ((mask & (1 << 6)) != 0).then(|| i32_at(rec + 80) as u32),
                     icon_id: ((mask & (1 << 7)) != 0).then(|| i32_at(rec + 88) as u32),
+                    isis_group_id: ((mask & (1 << 9)) != 0).then(|| i32_at(rec + 92) as u32),
                     market_group_id: ((mask & (1 << 10)) != 0).then(|| i32_at(rec + 96) as u32),
                     meta_group_id: ((mask & (1 << 12)) != 0).then(|| i32_at(rec + 100) as u32),
                     meta_level: ((mask & (1 << 13)) != 0).then(|| i64::from(i32_at(rec + 104))),
@@ -581,6 +582,7 @@ pub struct RawCfsdTypeRecord {
     pub faction_id: Option<u32>,
     pub graphic_id: Option<u32>,
     pub icon_id: Option<u32>,
+    pub isis_group_id: Option<u32>,
     pub market_group_id: Option<u32>,
     pub meta_group_id: Option<u32>,
     pub meta_level: Option<i64>,
@@ -592,5 +594,9 @@ pub struct RawCfsdTypeRecord {
     pub type_name_id: u32,
 }
 #[cfg(test)] #[path = "cfsd_domain_loaders_unit_tests.rs"] mod cfsd_domain_loaders_unit_tests;
+
+#[cfg(test)]
+#[path = "cfsd_domain_loaders_edges_tests.rs"]
+mod cfsd_domain_loaders_edges_tests;
 
 

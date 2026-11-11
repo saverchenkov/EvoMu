@@ -2,6 +2,7 @@
 //! market order updates, and multi-system hauler convoy route stepping.
 
 use super::*;
+use eve_db::ServerClock;
 use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
 use eve_destiny::MovementMode;
 use eve_sde::{FactionInfo, NpcCorporationInfo, SdeRegistry, SolarSystem, StationInfo};
@@ -333,4 +334,141 @@ fn hauler_cargo_units_and_companion_convoy_boundaries() {
         );
     });
     assert_eq!(director.hauler_cargo_units(&db, 1), 500);
+}
+
+#[tokio::test]
+async fn mining_op_ore_4_sig_fig_price_fallback_and_60s_cadence_sync() {
+    let mut sde = SdeRegistry::with_canonical_seed();
+    // Set Veldspar (1230) base_price to non-4-sig-fig value and ensure no regional sell orders exist
+    if let Some(veld) = sde.types.get_mut(&1230) {
+        veld.base_price = 12_345.67;
+    }
+    let sde = std::sync::Arc::new(sde);
+
+    let clock = std::sync::Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(1_800_000_000));
+    let db = std::sync::Arc::new(WorldRepository::new_empty());
+    db.set_clock(clock.clone());
+    let systems = std::sync::Arc::new(crate::system_actor::SystemRegistry::with_sde_and_db(
+        std::sync::Arc::clone(&sde),
+        std::sync::Arc::clone(&db),
+    ));
+    let dir = LivingWorldDirector::new();
+
+    let cid = 800_850_001_i64;
+    let dest_sta = 60_003_766_i64;
+    dir.register_convoy(LivingWorldConvoy {
+        convoy_id: cid,
+        archetype: NpcArchetype::MiningOp,
+        ship_type_id: 32880,
+        origin_system_id: 30_000_144,
+        current_system_id: 30_000_144,
+        destination_system_id: 30_000_144,
+        destination_station_id: dest_sta,
+        cargo_type_id: 1230,
+        cargo_quantity: 49_999,
+        lod_level: 1,
+        destroyed: false,
+    });
+
+    // Step 1 (t=0): elapsed == 0.0
+    let r1 = dir.step_npc_mining_op(cid, &systems, &db, &sde).await.unwrap();
+    assert_eq!(r1.mined_units, 0);
+
+    // Step 2 (t=+15s): non-multiple of 60 -> mines >= 1 unit, fills hold & spawns hauler in transit
+    clock.advance_secs(15);
+    let r2 = dir.step_npc_mining_op(cid, &systems, &db, &sde).await.unwrap();
+    assert!(r2.mined_units >= 1);
+    assert!(dir.hauler_cargo_units(&db, cid) >= 50_000);
+
+    // Step 3 (t=+45s -> 1_800_000_060, now_unix % 60 == 0 && elapsed != 0.0):
+    // triggers 60s persistence cadence AND hauler arrival creating fresh hangar item + 4-sig-fig fallback NPC order
+    clock.advance_secs(45);
+    let r3 = dir.step_npc_mining_op(cid, &systems, &db, &sde).await.unwrap();
+    assert!(r3.hauled_to_station);
+    db.with_snapshot(|snap| {
+        let hangar_item = snap
+            .items
+            .values()
+            .find(|it| {
+                it.owner_id == 1
+                    && it.location_id == dest_sta
+                    && it.type_id == 1230
+                    && it.flag == InventoryFlag::Hangar
+            })
+            .expect("created station hangar stack");
+        assert!(hangar_item.quantity >= 50_000);
+
+        let npc_ord = snap
+            .market_orders
+            .values()
+            .find(|o| o.is_npc && o.station_id == dest_sta && o.type_id == 1230)
+            .expect("created fallback NPC sell order");
+        assert_eq!(npc_ord.price, eve_db::IskCents::from_f64_isk(12_350.0));
+    });
+}
+
+#[tokio::test]
+async fn step_all_hauler_convoys_and_query_boundary_checks() {
+    let sde = std::sync::Arc::new(SdeRegistry::with_canonical_seed());
+    let db = std::sync::Arc::new(WorldRepository::new_empty());
+    let systems = std::sync::Arc::new(crate::system_actor::SystemRegistry::with_sde_and_db(
+        std::sync::Arc::clone(&sde),
+        std::sync::Arc::clone(&db),
+    ));
+    let dir = LivingWorldDirector::new();
+
+    // Unknown convoy queries & navy patrol on missing solar system
+    assert!(dir.get_convoy_route(999_999).is_none());
+    assert!(!dir.is_convoy_docked(999_999));
+    assert!(dir.ensure_system_navy_patrol(99_999_999, &sde).is_none());
+
+    // Docked, destroyed, and MiningOp convoys must be skipped by step_all_hauler_convoys
+    dir.register_convoy(LivingWorldConvoy {
+        convoy_id: 801,
+        archetype: NpcArchetype::HaulerConvoy,
+        ship_type_id: 648,
+        origin_system_id: 30_000_142,
+        current_system_id: 30_000_142,
+        destination_system_id: 30_000_142,
+        destination_station_id: 60_003_760,
+        cargo_type_id: 34,
+        cargo_quantity: 100,
+        lod_level: 1,
+        destroyed: true,
+    });
+    dir.set_convoy_route(801, vec![30_000_142]);
+
+    dir.register_convoy(LivingWorldConvoy {
+        convoy_id: 802,
+        archetype: NpcArchetype::MiningOp,
+        ship_type_id: 32880,
+        origin_system_id: 30_000_142,
+        current_system_id: 30_000_142,
+        destination_system_id: 30_000_142,
+        destination_station_id: 60_003_760,
+        cargo_type_id: 1230,
+        cargo_quantity: 100,
+        lod_level: 1,
+        destroyed: false,
+    });
+    dir.set_convoy_route(802, vec![30_000_142]);
+
+    let active_cid = dir.ensure_system_hauler_convoy(30_000_142, &sde);
+    assert_eq!(dir.ensure_system_hauler_convoy(30_000_142, &sde), active_cid);
+
+    let step_results = dir.step_all_hauler_convoys(&systems, &db, &sde).await;
+    assert_eq!(step_results.len(), 1);
+    assert_eq!(step_results[0].0, active_cid);
+    assert!(step_results[0].1.is_ok());
+
+    // Unknown ship type falls back to canonical transit physics defaults (15 AU if gates missing)
+    let transit = LivingWorldDirector::compute_hauler_transit_duration_secs(
+        &sde,
+        999_999_999,
+        99_999_999,
+        None,
+        None,
+        0,
+    );
+    assert!(transit >= 5);
 }

@@ -181,6 +181,23 @@ pub struct CorpTitleEntry {
     pub grantable_roles_at_other: Vec<String>,
 }
 
+/// Maps a corporation `titleID` to its `titleMask` bit (`#787`).
+///
+/// V24.01 `bco_titles.pyj` and `corp_ui_member_titles.pyj` use power-of-two `titleID` bitmasks
+/// (`1, 2, 4, 8, 16, 32, ..., 32768`, i.e. `1i64 << i` for `i in 0..16`). Non-power-of-two
+/// legacy 1-based ordinal IDs (`3, 5, ... <= 64`) fall back to `1u64 << (title_id - 1)`.
+pub fn title_id_to_bit(title_id: i64) -> u64 {
+    if title_id <= 0 {
+        0
+    } else if (title_id as u64).is_power_of_two() {
+        title_id as u64
+    } else if (1..=64).contains(&title_id) {
+        1u64 << ((title_id - 1) as u32)
+    } else {
+        0
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CorpMemberRoleAssignment {
     pub character_id: i64,
@@ -874,6 +891,60 @@ pub struct WorldStateSnapshot {
     pub cluster_and_runtime: crate::service_domains::ClusterAndRuntimeStore,
     #[serde(default)]
     pub insurance_contracts: HashMap<i64, PersistedInsuranceContractRecord>,
+    /// Transaction-scoped dirty tracking hints.
+    #[serde(skip, default)]
+    pub dirty_hints: SnapshotDirtyHints,
+}
+
+/// Per-transaction dirty domain and touched-key tracking hints.
+///
+/// When `tracked` is `true`, `sync_dirty_to_sqlite` skips unchanged domains and hashes only
+/// `touched_*` keys. `PartialEq` always returns `true` so transient hints never affect
+/// `WorldStateSnapshot` equality comparisons.
+#[derive(Debug, Clone, Default)]
+pub struct SnapshotDirtyHints {
+    pub tracked: bool,
+    pub touched_items: HashSet<i64>,
+    pub deleted_items: HashSet<i64>,
+    pub touched_characters: HashSet<i64>,
+    pub touched_skills: HashSet<i64>,
+    pub touched_skill_queues: HashSet<i64>,
+    pub touched_market_orders: HashSet<i64>,
+    pub deleted_market_orders: HashSet<i64>,
+    pub asteroids_dirty: bool,
+    pub system_states_dirty: bool,
+    pub crimewatch_dirty: bool,
+    pub other_domains_dirty: bool,
+}
+
+impl PartialEq for SnapshotDirtyHints {
+    #[inline]
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+impl Eq for SnapshotDirtyHints {}
+
+impl SnapshotDirtyHints {
+    #[inline]
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    #[inline]
+    pub fn is_any_dirty(&self) -> bool {
+        !self.touched_items.is_empty()
+            || !self.deleted_items.is_empty()
+            || !self.touched_characters.is_empty()
+            || !self.touched_skills.is_empty()
+            || !self.touched_skill_queues.is_empty()
+            || !self.touched_market_orders.is_empty()
+            || !self.deleted_market_orders.is_empty()
+            || self.asteroids_dirty
+            || self.system_states_dirty
+            || self.crimewatch_dirty
+            || self.other_domains_dirty
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -971,6 +1042,61 @@ pub struct ObserverMiningRecord {
 }
 
 impl WorldStateSnapshot {
+    /// Enables per-domain dirty tracking for the current write transaction.
+    #[inline]
+    pub fn enable_dirty_tracking(&mut self) { self.dirty_hints.tracked = true; }
+    #[inline]
+    pub fn mark_item_dirty(&mut self, item_id: i64) {
+        self.dirty_hints.tracked = true;
+        self.dirty_hints.deleted_items.remove(&item_id);
+        self.dirty_hints.touched_items.insert(item_id);
+    }
+    #[inline]
+    pub fn mark_item_deleted(&mut self, item_id: i64) {
+        self.dirty_hints.tracked = true;
+        self.dirty_hints.touched_items.remove(&item_id);
+        self.dirty_hints.deleted_items.insert(item_id);
+    }
+    #[inline]
+    pub fn mark_character_dirty(&mut self, char_id: i64) {
+        self.dirty_hints.tracked = true;
+        self.dirty_hints.touched_characters.insert(char_id);
+    }
+    #[inline]
+    pub fn mark_skills_dirty(&mut self, char_id: i64) {
+        self.dirty_hints.tracked = true;
+        self.dirty_hints.touched_skills.insert(char_id);
+    }
+    #[inline]
+    pub fn mark_skill_queue_dirty(&mut self, char_id: i64) {
+        self.dirty_hints.tracked = true;
+        self.dirty_hints.touched_skill_queues.insert(char_id);
+    }
+    #[inline]
+    pub fn mark_market_order_dirty(&mut self, order_id: i64) {
+        self.dirty_hints.tracked = true;
+        self.dirty_hints.deleted_market_orders.remove(&order_id);
+        self.dirty_hints.touched_market_orders.insert(order_id);
+    }
+    #[inline]
+    pub fn mark_market_order_deleted(&mut self, order_id: i64) {
+        self.dirty_hints.tracked = true;
+        self.dirty_hints.touched_market_orders.remove(&order_id);
+        self.dirty_hints.deleted_market_orders.insert(order_id);
+    }
+    #[inline]
+    pub fn mark_asteroids_dirty(&mut self) { self.dirty_hints.tracked = true; self.dirty_hints.asteroids_dirty = true; }
+    #[inline]
+    pub fn mark_crimewatch_dirty(&mut self, system_states_also: bool) {
+        self.dirty_hints.tracked = true;
+        self.dirty_hints.crimewatch_dirty = true;
+        if system_states_also {
+            self.dirty_hints.system_states_dirty = true;
+        }
+    }
+    #[inline]
+    pub fn mark_other_domains_dirty(&mut self) { self.dirty_hints.tracked = true; self.dirty_hints.other_domains_dirty = true; }
+
     /// Persists a killmail stamped with the kill time and the victim's and final-blow attacker's
     /// corporation/alliance as they are at the moment of the kill. Affiliations already set on
     /// `km` (e.g. a structure's owning corporation) are kept when the id is not a known pilot.
@@ -1148,18 +1274,25 @@ impl WorldStateSnapshot {
             }
             if let Some(&tmask) = gov.member_titles.get(&char_id) {
                 for (&tid, &(_, troles)) in &gov.titles {
-                    if (1..=64).contains(&tid) && (tmask & (1u64 << (tid - 1))) != 0 {
+                    let bit = title_id_to_bit(tid);
+                    if (tmask & bit) != 0 {
                         roles |= troles & !unmatured_title_bits;
                     }
                 }
             }
         }
 
-        if let (Some(tids), Some(titles)) = (
-            self.corp_member_titles.get(&(corp_id, char_id)),
-            self.corp_titles.get(&corp_id),
-        ) {
-            for t in titles.iter().filter(|t| tids.contains(&t.title_id)) {
+        let member_tmask = self
+            .corp_governance
+            .get(&corp_id)
+            .and_then(|g| g.member_titles.get(&char_id).copied())
+            .unwrap_or(0);
+        let tids_opt = self.corp_member_titles.get(&(corp_id, char_id));
+        if let Some(titles) = self.corp_titles.get(&corp_id) {
+            for t in titles.iter().filter(|t| {
+                tids_opt.is_some_and(|tids| tids.contains(&t.title_id))
+                    || (member_tmask & title_id_to_bit(t.title_id)) != 0
+            }) {
                 roles |= crate::corp_roles::encode_corp_role_names(&t.roles) & !unmatured_title_bits;
                 if loc_station_id > 0 {
                     if loc_station_id == hq_station_id {
@@ -1182,6 +1315,28 @@ impl WorldStateSnapshot {
 
         roles &= !(unmatured_role_bits | unmatured_title_bits);
         (false, roles)
+    }
+
+    /// Ensures the 16 canonical V24 power-of-two corporation title slots (`1i64 << i` for `i in 0..16`,
+    /// i.e. `1, 2, 4, 8, ..., 32768`) exist in `corp_governance[corp_id].titles` and `corp_titles[corp_id]`.
+    pub fn seed_default_corp_titles(&mut self, corp_id: i64) {
+        let state = self.corp_governance.entry(corp_id).or_default();
+        let entries = self.corp_titles.entry(corp_id).or_default();
+        for i in 0..16u32 {
+            let tid = 1i64 << i;
+            state
+                .titles
+                .entry(tid)
+                .or_insert_with(|| (String::new(), 0));
+            if !entries.iter().any(|t| t.title_id == tid) {
+                entries.push(CorpTitleEntry {
+                    title_id: tid,
+                    name: String::new(),
+                    ..Default::default()
+                });
+            }
+        }
+        entries.sort_by_key(|t| t.title_id);
     }
 
     /// Returns `true` if `char_id` is within the 24-hour (`86_400s`) role-drop stasis window in `corp_id`.
@@ -1774,7 +1929,7 @@ pub fn unix_secs_to_date_string(secs: u64) -> String {
     let z = days + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
     let doe = (z - era * 146097) as u32;
-    let yoe = (doe - doe / 1020 + doe / 1461 - doe / 146096) / 365;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
     let y = (yoe as i64) + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
@@ -1784,4 +1939,5 @@ pub fn unix_secs_to_date_string(secs: u64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 #[cfg(test)] #[path = "snapshot_ext_unit_tests.rs"] mod snapshot_ext_unit_tests;
+#[cfg(test)] #[path = "snapshot_ext_edges_tests.rs"] mod snapshot_ext_edges_tests;
 

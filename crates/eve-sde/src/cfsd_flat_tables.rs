@@ -431,4 +431,8 @@ impl SdeRegistry {
 }
 #[cfg(test)] #[path = "cfsd_flat_tables_unit_tests.rs"] mod cfsd_flat_tables_unit_tests;
 
+#[cfg(test)]
+#[path = "cfsd_flat_tables_edges_tests.rs"]
+mod cfsd_flat_tables_edges_tests;
+
 

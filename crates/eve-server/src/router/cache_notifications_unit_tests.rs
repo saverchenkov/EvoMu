@@ -272,3 +272,202 @@ fn macho_packets_notification_targets_and_helper_emitters_work_end_to_end() {
             .is_some_and(|c| c.members.contains(&char_id))
     }));
 }
+
+#[test]
+fn ship_fitting_load_changes_corp_hangar_flags_and_trashed_quantity_boundaries() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    let _ = ctx
+        .db
+        .acquire_online_lock(uid, 501, Some(char_id), false, ctx.now_unix());
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. `is_corp_hangar_flag` exact boundaries: `CorpDeliveries` (62) and `CorpSAG1..7` (116..=122)
+    assert!(is_corp_hangar_flag(eve_db::InventoryFlag::CorpDeliveries));
+    assert!(ServerContext::is_corp_hangar_flag(eve_db::InventoryFlag::CorpSAG1));
+    assert!(is_corp_hangar_flag(eve_db::InventoryFlag::CorpSAG7));
+    assert!(!is_corp_hangar_flag(eve_db::InventoryFlag::Hangar));
+    assert!(!is_corp_hangar_flag(eve_db::InventoryFlag::Cargo));
+    assert!(!is_corp_hangar_flag(eve_db::InventoryFlag::DroneBay));
+
+    // 2. `notify_ship_fitting_load_changes` emits 2-entry `OnModuleAttributeChanges` list
+    //    with `CPU_LOAD` (49) and `POWER_LOAD` (15), `new_val` at index 5, `old_val` at index 6.
+    let load_notifs = ctx.notify_ship_fitting_load_changes(char_id, 100_000_001, 12.5, 45.0, 5.0, 20.0);
+    assert_eq!(load_notifs.len(), 1);
+    assert_eq!(load_notifs[0].event, "OnModuleAttributeChanges");
+    let PyRep::List(ref entries) = load_notifs[0].args[0] else {
+        panic!("expected List in OnModuleAttributeChanges");
+    };
+    assert_eq!(entries.len(), 2);
+    let PyRep::Tuple(ref cpu_tup) = entries[0] else { panic!("expected Tuple") };
+    assert_eq!(cpu_tup[0], PyRep::String("OnModuleAttributeChange".into()));
+    assert_eq!(cpu_tup[1], PyRep::Integer(char_id));
+    assert_eq!(cpu_tup[2], PyRep::Integer(100_000_001));
+    assert_eq!(cpu_tup[3], PyRep::Integer(i64::from(eve_sde::attr_ids::CPU_LOAD)));
+    assert_eq!(cpu_tup[5], PyRep::Real(45.0));
+    assert_eq!(cpu_tup[6], PyRep::Real(12.5));
+    assert_eq!(cpu_tup[7], PyRep::None);
+
+    let PyRep::Tuple(ref pg_tup) = entries[1] else { panic!("expected Tuple") };
+    assert_eq!(pg_tup[3], PyRep::Integer(i64::from(eve_sde::attr_ids::POWER_LOAD)));
+    assert_eq!(pg_tup[5], PyRep::Real(20.0));
+    assert_eq!(pg_tup[6], PyRep::Real(5.0));
+
+    // 3. `notify_fitted_item_trashed` with `quantity > 1` preserves positive stack quantity,
+    //    and unknown `type_id` falls back to `(group_id, category_id) == (0, 0)`.
+    let stack_trashed = ctx.notify_fitted_item_trashed(char_id, 501, 999_999_999, 7, 100_000_001, 27);
+    assert_eq!(stack_trashed.len(), 1);
+    assert_eq!(stack_trashed[0].args[0].dbrow_get("quantity"), Some(&PyRep::Integer(7)));
+    assert_eq!(stack_trashed[0].args[0].dbrow_get("groupID"), Some(&PyRep::Integer(0)));
+    assert_eq!(stack_trashed[0].args[0].dbrow_get("categoryID"), Some(&PyRep::Integer(0)));
+}
+
+#[test]
+fn issue_804_notify_module_effect_started_emits_on_special_fx_for_turrets_ewar_prop_and_repairs() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let ship_id = 200_125_728_i64;
+    let target_id = 200_125_590_i64;
+    let uid = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.user_id).unwrap_or(1));
+    ctx.db
+        .acquire_online_lock(uid, 1, Some(char_id), false, ctx.now_unix())
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let cases: &[(u32, Option<&str>, Option<i64>, &str, bool)] = &[
+        (3640, Some("targetAttack"), Some(target_id), "effects.HybridFired", true),
+        (526, Some("remoteWebifierFalloff"), Some(target_id), "effects.ModifyTargetSpeed", true),
+        (447, Some("warpScramble"), Some(target_id), "effects.WarpScramble", true),
+        (434, Some("moduleBonusAfterburner"), None, "effects.Afterburner", false),
+        (399, Some("shieldBoosting"), None, "effects.ShieldBoosting", false),
+        (3530, Some("armorRepair"), None, "effects.ArmorRepair", false),
+    ];
+
+    for &(type_id, eff_name, tgt, expected_guid, expected_offensive) in cases {
+        let _ = ctx.drain_notifications_for_char(char_id);
+        let mod_id = 200_126_000 + i64::from(type_id);
+        let ret = ctx.notify_module_effect_started(
+            char_id,
+            ship_id,
+            mod_id,
+            type_id,
+            eff_name,
+            tgt,
+        );
+        assert_eq!(ret.len(), 1);
+        assert_eq!(ret[0].event, "OnGodmaShipEffect");
+        assert!(ret[0].args.get(7).and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);
+        assert_eq!(ret[0].args.get(8), Some(&PyRep::Integer(1000)));
+        let all = ctx.drain_notifications_for_char(char_id);
+        let sfx = all
+            .iter()
+            .find(|n| n.event == "OnSpecialFX")
+            .unwrap_or_else(|| panic!("missing OnSpecialFX for type_id={type_id}"));
+        assert_eq!(sfx.args.len(), 14);
+        assert_eq!(sfx.args.first(), Some(&PyRep::Integer(ship_id)));
+        assert_eq!(sfx.args.get(1), Some(&PyRep::Integer(mod_id)));
+        assert_eq!(sfx.args.get(2), Some(&PyRep::Integer(i64::from(type_id))));
+        assert_eq!(
+            sfx.args.get(3),
+            Some(&tgt.map(PyRep::Integer).unwrap_or(PyRep::None))
+        );
+        assert_eq!(sfx.args.get(4), Some(&PyRep::None));
+        assert_eq!(sfx.args.get(5), Some(&PyRep::String(expected_guid.into())));
+        assert_eq!(sfx.args.get(6), Some(&PyRep::Bool(expected_offensive)));
+        assert_eq!(sfx.args.get(7), Some(&PyRep::Integer(1)));
+        assert_eq!(sfx.args.get(8), Some(&PyRep::Integer(1)));
+        assert!(sfx.args.get(9).and_then(|v| v.as_f64()).is_some());
+        assert_eq!(sfx.args.get(10), Some(&PyRep::Integer(0)));
+        assert!(sfx.args.get(11).and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+        assert_eq!(sfx.args.get(12), Some(&PyRep::Real(0.0)));
+        assert_eq!(sfx.args.get(13), Some(&PyRep::None));
+    }
+
+    // Cloaking module (`effects.Cloak`) must be filtered out in `notify_module_effect_started`
+    // because cloak activation/deactivation emits its own `OnSpecialFX` in `binding.rs`.
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let cloak_ret = ctx.notify_module_effect_started(
+        char_id,
+        ship_id,
+        200_199_999,
+        11_370,
+        Some("cloaking"),
+        None,
+    );
+    assert_eq!(cloak_ret.len(), 1);
+    assert_eq!(cloak_ret[0].args.get(8), Some(&PyRep::Integer(1000)));
+    let cloak_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        !cloak_notifs.iter().any(|n| n.event == "OnSpecialFX"),
+        "notify_module_effect_started must filter out effects.Cloak OnSpecialFX"
+    );
+
+    // Issue #819: passive `online` (effect_id == 16) and `notify_godma_ship_effect(..., false, ...)`
+    // emit `repeat == 0` at `args[8]`, while fitted modules with skill-modified attr 73 (`duration`)
+    // or attr 51 (`speed`) emit the evaluated `duration_ms` at `args[7]` and `repeat == 1000` at `args[8]`.
+    let online_ret = ctx.notify_module_effect_started(
+        char_id,
+        ship_id,
+        200_199_998,
+        2048,
+        Some("online"),
+        None,
+    );
+    assert_eq!(online_ret.len(), 1);
+    assert_eq!(online_ret[0].args.get(1), Some(&PyRep::Integer(16)));
+    assert_eq!(online_ret[0].args.get(8), Some(&PyRep::Integer(0)));
+
+    let deact_ret = ctx.notify_godma_ship_effect(
+        NotificationTarget::Character(char_id),
+        200_199_998,
+        10,
+        false,
+        0,
+        0,
+    );
+    assert_eq!(deact_ret.len(), 1);
+    assert_eq!(deact_ret[0].args.get(3), Some(&PyRep::Integer(0)));
+    assert_eq!(deact_ret[0].args.get(4), Some(&PyRep::Integer(0)));
+    assert_eq!(deact_ret[0].args.get(8), Some(&PyRep::Integer(0)));
+
+    let fitted_ship_id = 100_000_001_i64;
+    let fitted_ab_id = 200_199_901_i64;
+    let fitted_turret_id = 200_199_902_i64;
+    let mut fit = ctx.get_or_rebuild_ship_fitting(char_id, fitted_ship_id).expect("rebuild ship fitting");
+    let _ = fit.fit_module(fitted_ab_id, 439, 19, &ctx.sde);
+    let _ = fit.fit_module(fitted_turret_id, 2889, 28, &ctx.sde);
+    if let Some(ab_mod) = fit.modules.get_mut(&fitted_ab_id) {
+        ab_mod.dynamic_attribute_overrides.insert(73, 6_250.0);
+    }
+    ctx.store_ship_fitting(fitted_ship_id, fit.clone());
+
+    let ab_eval_ms = fit.get_module_effective_attribute(fitted_ab_id, 73, &ctx.sde);
+    assert!(ab_eval_ms > 0.0);
+    let ab_started = ctx.notify_module_effect_started(
+        char_id,
+        fitted_ship_id,
+        fitted_ab_id,
+        439,
+        Some("moduleBonusAfterburner"),
+        None,
+    );
+    assert_eq!(ab_started[0].args.get(7), Some(&PyRep::Real(ab_eval_ms)));
+    assert_eq!(ab_started[0].args.get(8), Some(&PyRep::Integer(1000)));
+
+    let turret_eval_ms = fit.get_module_effective_attribute(fitted_turret_id, 51, &ctx.sde);
+    let turret_sde_ms = ctx.sde.types[&2889].default_attributes[&51];
+    assert!(turret_eval_ms > 0.0 && (turret_eval_ms - turret_sde_ms).abs() > 1.0);
+    let turret_started = ctx.notify_module_effect_started(
+        char_id,
+        fitted_ship_id,
+        fitted_turret_id,
+        2889,
+        Some("projectileFired"),
+        Some(target_id),
+    );
+    assert_eq!(turret_started[0].args.get(7), Some(&PyRep::Real(turret_eval_ms)));
+    assert_eq!(turret_started[0].args.get(8), Some(&PyRep::Integer(1000)));
+}
