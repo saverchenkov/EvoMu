@@ -54,6 +54,28 @@ pub(crate) fn register_db_system_ballpark(
     );
 }
 
+fn committed_warp_cache_map(
+) -> &'static std::sync::Mutex<HashMap<usize, std::sync::Weak<RwLock<HashMap<BallId, DVec3>>>>> {
+    static MAP: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<usize, std::sync::Weak<RwLock<HashMap<BallId, DVec3>>>>>,
+    > = std::sync::OnceLock::new();
+    MAP.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+pub(crate) fn register_committed_warp_cache(
+    cache: &Arc<RwLock<HashMap<BallId, DVec3>>>,
+    committed_warps: &Arc<RwLock<HashMap<BallId, DVec3>>>,
+) {
+    let key = Arc::as_ptr(cache) as usize;
+    let mut g = committed_warp_cache_map()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if g.len() > 256 {
+        g.retain(|_, w| w.strong_count() > 0);
+    }
+    g.insert(key, Arc::downgrade(committed_warps));
+}
+
 pub(crate) fn sync_ball_positions(
     ballpark: &Ballpark,
     cache: &RwLock<HashMap<BallId, DVec3>>,
@@ -63,10 +85,31 @@ pub(crate) fn sync_ball_positions(
     let mut scram_guard = scrambled.write().unwrap_or_else(|e| e.into_inner());
     guard.clear();
     scram_guard.clear();
+    let warp_arc_opt = committed_warp_cache_map()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&(cache as *const RwLock<HashMap<BallId, DVec3>> as usize))
+        .and_then(|w| w.upgrade());
+    let mut warp_guard = warp_arc_opt
+        .as_ref()
+        .map(|arc| arc.write().unwrap_or_else(|e| e.into_inner()));
+    if let Some(ref mut wg) = warp_guard {
+        wg.clear();
+    }
     for (&id, ball) in &ballpark.balls {
         guard.insert(id, ball.position);
         if ballpark.is_ball_scrambled(id) {
             scram_guard.insert(id);
+        }
+        if let Some(ref mut wg) = warp_guard {
+            if let eve_destiny::MovementMode::Warp {
+                destination, phase, ..
+            } = ball.mode
+            {
+                if phase != eve_destiny::WarpPhase::Aligning {
+                    wg.insert(id, destination);
+                }
+            }
         }
     }
 }

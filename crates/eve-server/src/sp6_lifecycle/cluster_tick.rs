@@ -910,6 +910,24 @@ pub fn on_advance_secs_internal(
         });
 
     if needs_sp6_lifecycle_sync {
+        // Pre-evaluate system-actor tackle & committed-warp predicates outside `with_mut_sp6_state`
+        // so the world DB write lock is never held while reading ballpark/system-actor state (`#831`).
+        let disc_candidates: Vec<(u32, i64)> = super::with_sp6_state(&ctx.db, |st| {
+            st.disconnected_ships
+                .values()
+                .filter(|d| !d.removed_from_space)
+                .map(|d| (d.solar_system_id, d.ship_id))
+                .collect()
+        });
+        let scrambled_uncommitted_disc_ships: std::collections::HashSet<i64> = disc_candidates
+            .into_iter()
+            .filter(|&(sys_id, ship_id)| {
+                ctx.systems.is_ball_scrambled_sync(sys_id, ship_id)
+                    && !ctx.systems.is_ball_in_committed_warp_sync(sys_id, ship_id)
+            })
+            .map(|(_, ship_id)| ship_id)
+            .collect();
+
         with_mut_sp6_state(&ctx.db, |st, snap| {
             for cd in rt_self_destructs {
                 st.self_destructs.entry(cd.ship_id).or_insert(cd);
@@ -948,11 +966,7 @@ pub fn on_advance_secs_internal(
 
             for disc in st.disconnected_ships.values_mut() {
                 if !disc.removed_from_space {
-                    if ctx.systems.is_ball_scrambled_sync(disc.solar_system_id, disc.ship_id)
-                        && !ctx
-                            .systems
-                            .is_ball_in_committed_warp_sync(disc.solar_system_id, disc.ship_id)
-                    {
+                    if scrambled_uncommitted_disc_ships.contains(&disc.ship_id) {
                         disc.emergency_warp_dest = None;
                     } else if disc.emergency_warp_dest.is_some() {
                         active_warping_disconnected.push(disc.clone());
@@ -1040,21 +1054,26 @@ pub fn on_advance_secs_internal(
     } else {
         secs.min(45)
     };
+    let dedicated_physics_active = ctx
+        .dedicated_physics_ticker_active
+        .load(std::sync::atomic::Ordering::Acquire);
     let mut finished_warps: std::collections::HashSet<i64> = std::collections::HashSet::new();
     for _ in 0..step_iters {
-        if step_active_npc_ai_sync {
+        if step_active_npc_ai_sync && !dedicated_physics_active {
             for &sys_id in active_systems.keys() {
                 crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync(ctx, sys_id);
                 if let Some(mgr) = ctx.npc_spawns.write().unwrap_or_else(|e| e.into_inner()).get_mut(&sys_id) {
                     if !mgr.entities.is_empty() {
-                        let tick = ctx.systems.get_or_spawn(sys_id).ballpark.read().map(|b| b.current_tick).unwrap_or(0);
+                        let tick = ctx.systems.get_or_spawn(sys_id).ballpark.try_read().map(|b| b.current_tick).unwrap_or(0);
                         mgr.step_ai_sync(ctx, sys_id, tick, 1.0);
                     }
                 }
             }
         }
         for (&sys_id, handle) in &disconnected_systems {
-            let _tick = handle.try_step_full_tick(1.0);
+            if !dedicated_physics_active {
+                let _tick = handle.try_step_full_tick(1.0);
+            }
             for disc in active_warping_disconnected
                 .iter()
                 .filter(|d| d.solar_system_id == sys_id)
@@ -1073,7 +1092,7 @@ pub fn on_advance_secs_internal(
             }
         }
     }
-    if step_iters > 0 {
+    if step_iters > 0 && !dedicated_physics_active {
         for handle in disconnected_systems.values() {
             handle.set_last_auto_stepped_unix(now_unix);
         }
@@ -1854,23 +1873,79 @@ pub async fn tick_background_cluster_with_step(ctx: &ServerContext, explicit_ste
     }
 }
 
+/// Maximum physics steps replayed per ticker wake when the runtime falls behind (`#870`).
+pub const MAX_PHYSICS_BACKLOG_STEPS: u64 = 3;
+/// Per-system physics step ask timeout so a wedged actor never hangs the ticker (`#841`).
+pub const SYSTEM_STEP_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Clamps wall-clock physics ticker elapsed seconds to `1..=MAX_PHYSICS_BACKLOG_STEPS` (`#870`).
+pub fn clamp_physics_ticker_backlog(raw_elapsed_secs: u64) -> u64 {
+    raw_elapsed_secs.clamp(1, MAX_PHYSICS_BACKLOG_STEPS)
+}
+
+struct CatchUnwindBoxFuture<F>(std::pin::Pin<Box<F>>);
+
+impl<F: std::future::Future> std::future::Future for CatchUnwindBoxFuture<F> {
+    type Output = std::thread::Result<F::Output>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let inner = &mut self.0;
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.as_mut().poll(cx)))?
+            .map(Ok)
+    }
+}
+
+/// Runs `fut` inside `catch_unwind` across every poll so panics inside ticker futures are logged
+/// and counted rather than killing the background ticker task (`#841`).
+pub async fn catch_unwind_future<F: std::future::Future>(fut: F) -> Result<F::Output, String> {
+    CatchUnwindBoxFuture(Box::pin(fut)).await.map_err(|payload| {
+        payload
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "non-string panic payload".to_string())
+    })
+}
+
 async fn step_single_system_physics_step(
     ctx: &ServerContext,
     sys_id: u32,
     handle: &crate::system_actor::SystemHandle,
 ) {
-    let _tick = handle
-        .step_manual_tick_only(1.0)
-        .await
-        .unwrap_or(0);
-    crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai(ctx, sys_id).await;
+    match tokio::time::timeout(SYSTEM_STEP_ASK_TIMEOUT, handle.step_manual_tick_only(1.0)).await {
+        Ok(Ok(_tick)) => {}
+        Ok(Err(err)) => {
+            tracing::warn!(
+                solar_system_id = sys_id,
+                error = %err,
+                "SystemActor step_manual_tick_only returned error"
+            );
+            return;
+        }
+        Err(_) => {
+            tracing::warn!(
+                solar_system_id = sys_id,
+                timeout_ms = SYSTEM_STEP_ASK_TIMEOUT.as_millis() as u64,
+                "SystemActor step_manual_tick_only timed out; skipping stuck system step"
+            );
+            return;
+        }
+    }
+    let _ = tokio::time::timeout(
+        SYSTEM_STEP_ASK_TIMEOUT,
+        crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai(ctx, sys_id),
+    )
+    .await;
     if let Some(mgr) = ctx
         .npc_spawns
         .write()
         .unwrap_or_else(|e| e.into_inner())
         .get_mut(&sys_id)
     {
-        let tick = handle.ballpark.read().map(|b| b.current_tick).unwrap_or(0);
+        let tick = handle.ballpark.try_read().map(|b| b.current_tick).unwrap_or(0);
         let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, sys_id);
         mgr.step_ai_sync(ctx, sys_id, tick, 1.0 * tidi);
     }
@@ -1879,10 +1954,13 @@ async fn step_single_system_physics_step(
 /// Steps 1 Hz Destiny physics and NPC AI across all active solar systems.
 /// Runs on a dedicated wall-clock ticker in production so slow mining or
 /// SQLite persistence in `tick_background_cluster` cannot delay warp completion.
+/// Capped at [`MAX_PHYSICS_BACKLOG_STEPS`] (`3`) steps per wake (`#870`).
 pub async fn step_active_systems_physics_tick(ctx: &ServerContext, elapsed_secs: u64) {
     let now_unix = ctx.now_unix();
     let mult = ctx.time_acceleration_multiplier();
-    let steps = elapsed_secs.saturating_mul(mult).clamp(1, 60);
+    let steps = elapsed_secs
+        .saturating_mul(mult)
+        .clamp(1, MAX_PHYSICS_BACKLOG_STEPS);
     let active_handles = ctx.systems.active_system_handles();
     for (sys_id, handle) in active_handles {
         for step_idx in 0..steps {

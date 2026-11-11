@@ -216,3 +216,68 @@ fn server_config_load_from_toml_and_env_overrides() {
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn storage_backend_validation_and_server_context_initialization_877_907() {
+    let _lock = crate::lock_test_env_write();
+    let _guard = EnvVarGuard::capture(&[
+        "EVOMU_CONFIG_PATH",
+        "EVOMU_DB_PATH",
+        "EVOMU_SNAPSHOT_PATH",
+        "EVOMU_STORAGE_BACKEND",
+    ]);
+
+    // Default storage backend is "sqlite" with `.sqlite` path.
+    let def = ServerConfig::default();
+    assert_eq!(def.storage.backend, "sqlite");
+    assert_eq!(def.validate_storage_backend().unwrap(), "sqlite");
+
+    // `.sqlite`, `.db`, and `.sqlite3` are accepted when backend = "sqlite".
+    for valid_path in [
+        "data/world.sqlite",
+        "data/world.db",
+        "data/world.sqlite3",
+    ] {
+        let cfg = ServerConfig::from_toml_str(&format!(
+            "world_db_path = \"{valid_path}\"\n[storage]\nbackend = \"sqlite\"\n"
+        ))
+        .expect("valid sqlite path");
+        assert_eq!(cfg.storage.backend, "sqlite");
+    }
+
+    // `.json` or non-SQLite extensions are refused when backend = "sqlite" (#877).
+    let json_err = ServerConfig::from_toml_str(
+        "world_db_path = \"data/evomu_world.json\"\n[storage]\nbackend = \"sqlite\"\n",
+    )
+    .unwrap_err();
+    assert!(json_err.contains("must use a SQLite file extension"));
+
+    // Unknown storage.backend values are refused (#877).
+    let unknown_err =
+        ServerConfig::from_toml_str("[storage]\nbackend = \"postgres\"\n").unwrap_err();
+    assert!(unknown_err.contains("Unsupported storage.backend"));
+
+    // `storage.backend = "memory"` succeeds regardless of `world_db_path` and initializes an ephemeral context.
+    let mem_cfg = ServerConfig::from_toml_str(
+        "world_db_path = \"ephemeral\"\n[storage]\nbackend = \"memory\"\n",
+    )
+    .expect("memory backend valid");
+    assert_eq!(mem_cfg.validate_storage_backend().unwrap(), "memory");
+    let mem_ctx = crate::router::ServerContext::from_config(&mem_cfg)
+        .expect("ServerContext::from_config with memory backend");
+    assert!(mem_ctx.db.sqlite_path().is_none());
+
+    // `ServerContext::from_sqlite` rejects `.json` paths as well.
+    let bad_sqlite = crate::router::ServerContext::from_sqlite("data/world_snapshot.json");
+    assert!(bad_sqlite.is_err());
+
+    // `EVOMU_STORAGE_BACKEND` env var overrides `[storage] backend`.
+    std::env::remove_var("EVOMU_CONFIG_PATH");
+    std::env::set_var("EVOMU_STORAGE_BACKEND", "memory");
+    let env_mem = ServerConfig::load_default_or_env().expect("env memory backend");
+    assert_eq!(env_mem.storage.backend, "memory");
+
+    std::env::set_var("EVOMU_STORAGE_BACKEND", "invalid_backend");
+    assert!(ServerConfig::load_default_or_env().is_err());
+    std::env::remove_var("EVOMU_STORAGE_BACKEND");
+}

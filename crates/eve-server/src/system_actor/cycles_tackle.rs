@@ -1274,7 +1274,16 @@ impl SystemHandle {
     }
 
     pub fn committed_warp_destination_sync(&self, ship_id: BallId) -> Option<DVec3> {
-        self.ballpark.read().ok().and_then(|bp| {
+        if let Some(dest) = self
+            .committed_warp_balls
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&ship_id)
+            .copied()
+        {
+            return Some(dest);
+        }
+        self.ballpark.try_read().ok().and_then(|bp| {
             bp.balls.get(&ship_id).and_then(|b| match b.mode {
                 MovementMode::Warp { destination, phase, .. }
                     if phase != eve_destiny::WarpPhase::Aligning =>

@@ -256,6 +256,10 @@ fn implant_and_booster_stack_split_expiry_and_error_guards() {
                 && t.default_attributes
                     .get(&ATTR_BOOSTERNESS)
                     .is_some_and(|&v| v >= 1.0)
+                && t.default_attributes
+                    .get(&ATTR_BOOSTER_DURATION_MS)
+                    .is_some_and(|&d| d > 0.0)
+                && !t.default_attributes.contains_key(&182)
         })
         .map(|t| t.type_id)
         .unwrap_or(9951);

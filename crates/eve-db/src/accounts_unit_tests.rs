@@ -165,3 +165,134 @@ fn online_session_locks_alpha_conflict_kick_and_sso_pkce_lifecycle() {
     assert!(repo.kicked_reason(1).is_none());
     assert!(!repo.release_online_lock(1, 102));
 }
+
+#[test]
+fn auth_sqlite_dedicated_connection_fail_closed_persistence_and_lock_ordering_838_879_907() {
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "evomu_auth_sqlite_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let db_path = tmp_dir.join("world.sqlite");
+
+    let repo = WorldRepository::open_sqlite(&db_path).expect("open_sqlite");
+    repo.with_mut_snapshot(WorldRepository::populate_demo_snapshot);
+    repo.ensure_auth_sqlite_connection()
+        .expect("dedicated auth sqlite connection");
+
+    // 1. Minting tokens persists to SQLite; fault injection fails closed BEFORE mutating auth_runtime (#879).
+    let verifier = "pkce-secret-verifier-0123456789abcdef";
+    let challenge = base64url_encode_no_pad(&sha256_bytes(verifier.as_bytes()));
+    let code = repo
+        .authorize_pkce(
+            "demo",
+            "demo-secret",
+            90_000_001,
+            "evomu-launcher",
+            "https://localhost/cb",
+            vec!["esi-mail".into()],
+            &challenge,
+            "S256",
+            1_700_000_100,
+        )
+        .unwrap();
+    let bundle = repo
+        .exchange_pkce_code(&code, "evomu-launcher", verifier, 1_700_000_102)
+        .unwrap();
+    assert!(repo.verify_sso_access_token(&bundle.access_token, 1_700_000_105).is_ok());
+
+    repo.set_auth_sqlite_fault_for_test(true);
+
+    // Fault on JWT secret rotation: fails closed and preserves existing secret.
+    let old_kid = repo.jwt_key_id();
+    let secret_err = repo.set_jwt_signing_secret(&[0x77u8; 32]).unwrap_err();
+    assert!(secret_err.contains("Injected auth SQLite persistence failure"));
+    assert_eq!(repo.jwt_key_id(), old_kid);
+
+    // Fault on refresh token rotation: fails closed and leaves existing refresh token unrevoked in memory.
+    let refresh_err = repo
+        .refresh_sso_token(&bundle.refresh_token, "evomu-launcher", 1_700_000_110)
+        .unwrap_err();
+    assert!(matches!(refresh_err, DbError::PersistenceFailure(_)));
+
+    // Fault on revoke_sso_refresh_token: fails closed and leaves access token valid in memory.
+    let revoke_err = repo
+        .try_revoke_sso_refresh_token(&bundle.refresh_token)
+        .unwrap_err();
+    assert!(matches!(revoke_err, DbError::PersistenceFailure(_)));
+    assert!(repo.verify_sso_access_token(&bundle.access_token, 1_700_000_115).is_ok());
+
+    // Fault on kick_user: fails closed and does not mark user kicked in memory.
+    let kick_err = repo
+        .try_kick_user(1, "Faulted Kick", 1_700_000_120)
+        .unwrap_err();
+    assert!(matches!(kick_err, DbError::PersistenceFailure(_)));
+    assert!(repo.kicked_reason(1).is_none());
+
+    // Clear fault: operations now persist to SQLite and apply in memory.
+    repo.set_auth_sqlite_fault_for_test(false);
+    let rotated = repo
+        .refresh_sso_token(&bundle.refresh_token, "evomu-launcher", 1_700_000_125)
+        .expect("refresh succeeds after fault cleared");
+    assert!(repo
+        .try_revoke_sso_refresh_token(&rotated.refresh_token)
+        .expect("revoke succeeds"));
+    assert!(repo
+        .verify_sso_access_token(&rotated.access_token, 1_700_000_130)
+        .is_err());
+
+    repo.try_kick_user(1, "Durable Kick", 1_700_000_135)
+        .expect("kick succeeds");
+    assert_eq!(repo.kicked_reason(1), Some("Durable Kick".into()));
+
+    // Fault on clear_revocation_on_fresh_login: fails closed and preserves kicked state.
+    repo.set_auth_sqlite_fault_for_test(true);
+    assert!(matches!(
+        repo.try_clear_revocation_on_fresh_login(1, 500),
+        Err(DbError::PersistenceFailure(_))
+    ));
+    assert_eq!(repo.kicked_reason(1), Some("Durable Kick".into()));
+
+    // Verify reopened repository sees identical durable state (#879).
+    let reopened = WorldRepository::open_sqlite(&db_path).expect("reopen_sqlite");
+    assert_eq!(reopened.kicked_reason(1), Some("Durable Kick".into()));
+    assert!(reopened
+        .verify_sso_access_token(&rotated.access_token, 1_700_000_130)
+        .is_err());
+
+    repo.set_auth_sqlite_fault_for_test(false);
+    repo.try_clear_revocation_on_fresh_login(1, 500)
+        .expect("clear kick succeeds");
+    assert!(repo.kicked_reason(1).is_none());
+
+    // 2. Lock-order regression (#838): holding `sqlite_conn` (world write lock) on another thread
+    // does NOT block auth operations because auth uses its own dedicated SQLite connection and
+    // never acquires `inner` while holding `auth_runtime`.
+    let world_conn_guard = repo.sqlite_conn.lock().unwrap();
+    let code2 = repo
+        .authorize_pkce(
+            "demo",
+            "demo-secret",
+            90_000_001,
+            "evomu-launcher",
+            "https://localhost/cb",
+            vec!["esi-mail".into()],
+            &challenge,
+            "S256",
+            1_700_000_200,
+        )
+        .unwrap();
+    let fresh_bundle = repo
+        .exchange_pkce_code(&code2, "evomu-launcher", verifier, 1_700_000_202)
+        .expect("auth mint succeeds even while world sqlite_conn mutex is held");
+    drop(world_conn_guard);
+    assert!(repo
+        .verify_sso_access_token(&fresh_bundle.access_token, 1_700_000_205)
+        .is_ok());
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

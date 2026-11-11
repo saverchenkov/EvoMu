@@ -130,7 +130,7 @@ pub fn create_ccp_calendar_event(
         .db
         .with_snapshot(|snap| snap.calendar_events.keys().copied().max().unwrap_or(0));
     let eid = {
-        let mut s = ctx.social_extras.lock().unwrap();
+        let mut s = ctx.social_extras.lock().unwrap_or_else(|e| e.into_inner());
         s.next_id = s.next_id.max(max_db_id) + 1;
         let id = s.next_id;
         s.calendar_events.insert(
@@ -152,13 +152,17 @@ pub fn create_ccp_calendar_event(
         id
     };
     persist_social_state(ctx);
-    let online_cids: Vec<i64> = ctx.db.with_snapshot(|snap| {
+    let char_users: Vec<(i64, u64)> = ctx.db.with_snapshot(|snap| {
         snap.characters
             .values()
-            .filter(|c| ctx.is_character_online(c.character_id, c.user_id))
-            .map(|c| c.character_id)
+            .map(|c| (c.character_id, c.user_id))
             .collect()
     });
+    let online_cids: Vec<i64> = char_users
+        .into_iter()
+        .filter(|&(cid, uid)| ctx.is_character_online(cid, uid))
+        .map(|(cid, _)| cid)
+        .collect();
     for cid in online_cids {
         emit_new_calendar_event(
             ctx,

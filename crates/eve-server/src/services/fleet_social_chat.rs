@@ -19,18 +19,25 @@ pub(crate) use super::fleet_social_persistence::{
     CalendarEventState, SocialExtrasState,
 };
 
-pub(crate) fn prune_delayed_local_speakers_on_leave(
-    ctx: &ServerContext,
+pub(crate) fn get_delayed_local_speakers(ctx: &ServerContext, chan_id: &str) -> Vec<i64> {
+    ctx.social_extras
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .delayed_local_speakers
+        .get(chan_id)
+        .map(|s| s.iter().copied().collect())
+        .unwrap_or_default()
+}
+
+pub(crate) fn collect_wh_local_witness_speakers_to_drop_in_snap(
     snap: &mut eve_db::WorldStateSnapshot,
     chan_id: &str,
     leaving_char_id: i64,
     remaining_members: &HashSet<i64>,
-) {
-    let mut s = ctx.social_extras.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(speakers) = s.delayed_local_speakers.get_mut(chan_id) else {
-        return;
-    };
-    speakers.retain(|&spk| {
+    candidate_speakers: &[i64],
+) -> Vec<i64> {
+    let mut dropped = Vec::new();
+    for &spk in candidate_speakers {
         let wit_key = format!("{chan_id}:{spk}");
         let mut keep = remaining_members.contains(&spk);
         if let Some(wit) = snap.fleet_and_social_ops.wh_local_witnesses.get_mut(&wit_key) {
@@ -39,9 +46,45 @@ pub(crate) fn prune_delayed_local_speakers_on_leave(
         }
         if !keep {
             snap.fleet_and_social_ops.wh_local_witnesses.remove(&wit_key);
+            dropped.push(spk);
         }
-        keep
-    });
+    }
+    dropped
+}
+
+pub(crate) fn remove_delayed_local_speakers(
+    ctx: &ServerContext,
+    chan_id: &str,
+    dropped_speakers: &[i64],
+) {
+    if dropped_speakers.is_empty() {
+        return;
+    }
+    let mut s = ctx.social_extras.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(speakers) = s.delayed_local_speakers.get_mut(chan_id) {
+        for spk in dropped_speakers {
+            speakers.remove(spk);
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn prune_delayed_local_speakers_on_leave(
+    ctx: &ServerContext,
+    snap: &mut eve_db::WorldStateSnapshot,
+    chan_id: &str,
+    leaving_char_id: i64,
+    remaining_members: &HashSet<i64>,
+) {
+    let candidates = get_delayed_local_speakers(ctx, chan_id);
+    let dropped = collect_wh_local_witness_speakers_to_drop_in_snap(
+        snap,
+        chan_id,
+        leaving_char_id,
+        remaining_members,
+        &candidates,
+    );
+    remove_delayed_local_speakers(ctx, chan_id, &dropped);
 }
 
 pub(super) fn handle_chat_and_social(
@@ -192,18 +235,27 @@ fn handle_chat_rpc(
             ) {
                 return Some(Err(e));
             }
-            let social_blocked_chans: HashSet<String> = if session.has_gm_role() {
-                HashSet::new()
-            } else {
-                ctx.social_extras
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .blocked_in_channel
+            let (social_blocked_chans, delayed_speakers_snapshot): (
+                HashSet<String>,
+                HashMap<String, Vec<i64>>,
+            ) = {
+                let s = ctx.social_extras.lock().unwrap_or_else(|e| e.into_inner());
+                let blocked = if session.has_gm_role() {
+                    HashSet::new()
+                } else {
+                    s.blocked_in_channel
+                        .iter()
+                        .filter_map(|(k, b)| b.contains(&char_id).then(|| k.to_ascii_lowercase()))
+                        .collect()
+                };
+                let speakers = s
+                    .delayed_local_speakers
                     .iter()
-                    .filter_map(|(k, b)| b.contains(&char_id).then(|| k.to_ascii_lowercase()))
-                    .collect()
+                    .map(|(k, v)| (k.clone(), v.iter().copied().collect()))
+                    .collect();
+                (blocked, speakers)
             };
-            let (local_chan, synced_channels, is_delayed) = ctx.db.with_mut_snapshot(|snap| {
+            let (local_chan, synced_channels, is_delayed, dropped_by_channel) = ctx.db.with_mut_snapshot(|snap| {
                 let ch = snap.characters.get(&char_id);
                 let sys_id = explicit_arg
                     .and_then(parse_channel_system_id)
@@ -240,8 +292,18 @@ fn handle_chat_rpc(
                         left_delayed.push((c.channel_id.clone(), c.members.clone()));
                     }
                 }
+                let mut dropped_by_channel = Vec::new();
                 for (lcid, rem_m) in left_delayed {
-                    prune_delayed_local_speakers_on_leave(ctx, snap, &lcid, char_id, &rem_m);
+                    let candidates = delayed_speakers_snapshot
+                        .get(&lcid)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    let dropped = collect_wh_local_witness_speakers_to_drop_in_snap(
+                        snap, &lcid, char_id, &rem_m, candidates,
+                    );
+                    if !dropped.is_empty() {
+                        dropped_by_channel.push((lcid, dropped));
+                    }
                 }
                 for cid in &target_chans {
                     if !session.has_gm_role()
@@ -266,8 +328,11 @@ fn handle_chat_rpc(
                     chan.members.insert(char_id);
                 }
                 let is_del = is_delayed_local_channel(&local_id);
-                (local_id, target_chans, is_del)
+                (local_id, target_chans, is_del, dropped_by_channel)
             });
+            for (lcid, dropped) in dropped_by_channel {
+                remove_delayed_local_speakers(ctx, &lcid, &dropped);
+            }
             Some(Ok(PyRep::keyval([
                 ("channelID", PyRep::String(local_chan)),
                 ("exists", PyRep::Bool(true)),
@@ -695,18 +760,33 @@ fn handle_chat_rpc(
             let Some(chan_id) = args.first().and_then(|a| a.as_str()) else {
                 return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "LeaveChannel requires channelID string".into() }));
             };
-            ctx.db.with_mut_snapshot(|snap| {
+            let is_delayed = is_delayed_local_channel(chan_id);
+            let candidate_speakers = if is_delayed {
+                get_delayed_local_speakers(ctx, chan_id)
+            } else {
+                Vec::new()
+            };
+            let dropped_speakers = ctx.db.with_mut_snapshot(|snap| {
                 let rem_members = if let Some(chan) = snap.chat_channels.get_mut(chan_id) {
                     chan.members.remove(&char_id);
                     chan.members.clone()
                 } else {
                     HashSet::new()
                 };
-                if is_delayed_local_channel(chan_id) {
-                    prune_delayed_local_speakers_on_leave(ctx, snap, chan_id, char_id, &rem_members);
+                if is_delayed {
+                    collect_wh_local_witness_speakers_to_drop_in_snap(
+                        snap,
+                        chan_id,
+                        char_id,
+                        &rem_members,
+                        &candidate_speakers,
+                    )
+                } else {
+                    Vec::new()
                 }
             });
-            if !is_delayed_local_channel(chan_id) {
+            remove_delayed_local_speakers(ctx, chan_id, &dropped_speakers);
+            if !is_delayed {
                 ctx.notify(NotificationTarget::All, "OnChannelLeft", "channelid", vec![PyRep::String(chan_id.to_string()), PyRep::Integer(char_id)]);
             }
             Some(Ok(PyRep::keyval([("channelID", PyRep::String(chan_id.to_string())), ("left", PyRep::Bool(true))])))

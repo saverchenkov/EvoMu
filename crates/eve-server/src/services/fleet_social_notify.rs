@@ -256,7 +256,7 @@ pub fn remove_character_from_all_fleets(
     char_id: i64,
 ) -> Vec<(i64, bool, Option<i64>)> {
     {
-        let mut ex = ctx.fleet_extras.lock().unwrap();
+        let mut ex = ctx.fleet_extras.lock().unwrap_or_else(|e| e.into_inner());
         ex.disconnected_members.remove(&char_id);
         ex.invite_details.retain(|&(_, cid), _| cid != char_id);
         ex.invite_timestamps.retain(|&(_, cid), _| cid != char_id);
@@ -302,16 +302,42 @@ pub fn remove_character_from_chat_channels(
     });
 
     if !left_channels.is_empty() {
-        ctx.db.with_mut_snapshot(|snap| {
+        let candidates_by_chan: std::collections::HashMap<String, Vec<i64>> = left_channels
+            .iter()
+            .filter(|(chan_id, _)| chan_id.starts_with("solarsystemid2:"))
+            .map(|(chan_id, _)| {
+                (
+                    chan_id.clone(),
+                    crate::services::fleet_social::fleet_social_chat::get_delayed_local_speakers(
+                        ctx, chan_id,
+                    ),
+                )
+            })
+            .collect();
+        let dropped_by_chan: Vec<(String, Vec<i64>)> = ctx.db.with_mut_snapshot(|snap| {
+            let mut dropped = Vec::new();
             for (chan_id, remaining) in &left_channels {
                 if chan_id.starts_with("solarsystemid2:") {
                     let rem_set: std::collections::HashSet<i64> = remaining.iter().copied().collect();
-                    crate::services::fleet_social::fleet_social_chat::prune_delayed_local_speakers_on_leave(
-                        ctx, snap, chan_id, char_id, &rem_set,
+                    let candidates = candidates_by_chan
+                        .get(chan_id)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    let spk_dropped = crate::services::fleet_social::fleet_social_chat::collect_wh_local_witness_speakers_to_drop_in_snap(
+                        snap, chan_id, char_id, &rem_set, candidates,
                     );
+                    if !spk_dropped.is_empty() {
+                        dropped.push((chan_id.clone(), spk_dropped));
+                    }
                 }
             }
+            dropped
         });
+        for (chan_id, spk_dropped) in dropped_by_chan {
+            crate::services::fleet_social::fleet_social_chat::remove_delayed_local_speakers(
+                ctx, &chan_id, &spk_dropped,
+            );
+        }
     }
 
     for (chan_id, remaining_members) in left_channels {
@@ -383,7 +409,7 @@ pub fn handle_character_disconnect(ctx: &ServerContext, char_id: i64) {
     if in_fleet {
         ctx.fleet_extras
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .disconnected_members
             .insert(char_id, ctx.now_unix());
         reassign_fleet_boss_on_disconnect(ctx, char_id);
@@ -396,7 +422,7 @@ pub fn reassign_fleet_boss_on_disconnect(ctx: &ServerContext, char_id: i64) {
     let disconnected: std::collections::HashSet<i64> = ctx
         .fleet_extras
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .disconnected_members
         .keys()
         .copied()
@@ -444,7 +470,7 @@ pub fn reassign_fleet_boss_on_disconnect(ctx: &ServerContext, char_id: i64) {
         res
     });
     for (fid, new_boss_id, old_rec, new_rec) in handovers {
-        if let Some(ad) = ctx.fleet_extras.lock().unwrap().adverts.get_mut(&fid) {
+        if let Some(ad) = ctx.fleet_extras.lock().unwrap_or_else(|e| e.into_inner()).adverts.get_mut(&fid) {
             if ad.leader_id == char_id {
                 ad.leader_id = new_boss_id;
             }
@@ -477,7 +503,7 @@ pub fn handle_fleet_member_disconnect(ctx: &ServerContext, session: &mut Session
 pub fn tick_fleet_lifecycle(ctx: &ServerContext) {
     let now = ctx.now_unix();
     let (expired_invites, expired_members) = {
-        let mut ex = ctx.fleet_extras.lock().unwrap();
+        let mut ex = ctx.fleet_extras.lock().unwrap_or_else(|e| e.into_inner());
         let exp_inv: Vec<(i64, i64)> = ex
             .invite_timestamps
             .iter()
@@ -544,7 +570,7 @@ pub fn on_character_select(
     let within_grace = ctx
         .fleet_extras
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .disconnected_members
         .remove(&char_id)
         .is_some();
@@ -593,19 +619,23 @@ pub fn sync_session_fleet(ctx: &ServerContext, session: &mut SessionState, char_
 /// on server startup/restart (`hydrate_social_state_from_db`) and daily downtime.
 pub fn prune_offline_fleets_and_channels(ctx: &ServerContext) {
     {
-        let mut ex = ctx.fleet_extras.lock().unwrap();
+        let mut ex = ctx.fleet_extras.lock().unwrap_or_else(|e| e.into_inner());
         ex.disconnected_members.clear();
         ex.invite_timestamps.clear();
         ex.invite_details.clear();
     }
-    let disbanded_fids: Vec<i64> = ctx.db.with_mut_snapshot(|snap| {
-        let online_chars: std::collections::HashSet<i64> = snap
-            .characters
+    let char_users: Vec<(i64, u64)> = ctx.db.with_snapshot(|snap| {
+        snap.characters
             .values()
-            .filter(|c| ctx.is_character_online(c.character_id, c.user_id))
-            .map(|c| c.character_id)
-            .collect();
-
+            .map(|c| (c.character_id, c.user_id))
+            .collect()
+    });
+    let online_chars: std::collections::HashSet<i64> = char_users
+        .into_iter()
+        .filter(|&(cid, uid)| ctx.is_character_online(cid, uid))
+        .map(|(cid, _)| cid)
+        .collect();
+    let disbanded_fids: Vec<i64> = ctx.db.with_mut_snapshot(|snap| {
         let mut to_remove = Vec::new();
         for (&fid, fleet) in snap.fleets.iter_mut() {
             fleet.invites.clear();
@@ -653,7 +683,7 @@ pub fn prune_offline_fleets_and_channels(ctx: &ServerContext) {
     });
     if !disbanded_fids.is_empty() {
         {
-            let mut ex = ctx.fleet_extras.lock().unwrap();
+            let mut ex = ctx.fleet_extras.lock().unwrap_or_else(|e| e.into_inner());
             for fid in disbanded_fids {
                 ex.adverts.remove(&fid);
                 ex.fleet_names.remove(&fid);
@@ -670,14 +700,14 @@ pub fn prune_offline_fleets_and_channels(ctx: &ServerContext) {
 }
 
 pub fn sync_fleet_join_requests_to_db(ctx: &ServerContext) {
-    let map = ctx.fleet_extras.lock().unwrap().join_requests.clone();
+    let map = ctx.fleet_extras.lock().unwrap_or_else(|e| e.into_inner()).join_requests.clone();
     ctx.db.with_mut_snapshot(|snap| {
         snap.fleet_and_social_ops.fleet_join_requests = map;
     });
 }
 
 pub fn sync_fleet_watchlist_to_db(ctx: &ServerContext) {
-    let map = ctx.fleet_extras.lock().unwrap().watchlist.clone();
+    let map = ctx.fleet_extras.lock().unwrap_or_else(|e| e.into_inner()).watchlist.clone();
     ctx.db.with_mut_snapshot(|snap| {
         snap.fleet_and_social_ops.fleet_watchlist = map;
     });
@@ -685,7 +715,7 @@ pub fn sync_fleet_watchlist_to_db(ctx: &ServerContext) {
 
 pub fn sync_fleet_options_to_db(ctx: &ServerContext) {
     let (voice, loot) = {
-        let ex = ctx.fleet_extras.lock().unwrap();
+        let ex = ctx.fleet_extras.lock().unwrap_or_else(|e| e.into_inner());
         (ex.voice_enabled.clone(), ex.loot_logging.clone())
     };
     ctx.db.with_mut_snapshot(|snap| {
@@ -696,7 +726,7 @@ pub fn sync_fleet_options_to_db(ctx: &ServerContext) {
 
 pub fn get_fleet_options(ctx: &ServerContext, fleet_id: i64) -> (bool, bool) {
     {
-        let ex = ctx.fleet_extras.lock().unwrap();
+        let ex = ctx.fleet_extras.lock().unwrap_or_else(|e| e.into_inner());
         if let (Some(&v), Some(&l)) = (ex.voice_enabled.get(&fleet_id), ex.loot_logging.get(&fleet_id)) {
             return (v, l);
         }
@@ -716,7 +746,7 @@ pub fn get_fleet_options(ctx: &ServerContext, fleet_id: i64) -> (bool, bool) {
     if let Some((v_map, l_map)) = persisted {
         let v_out = v_map.get(&fleet_id).copied().unwrap_or(false);
         let l_out = l_map.get(&fleet_id).copied().unwrap_or(false);
-        let mut ex = ctx.fleet_extras.lock().unwrap();
+        let mut ex = ctx.fleet_extras.lock().unwrap_or_else(|e| e.into_inner());
         for (fid, v) in v_map {
             ex.voice_enabled.entry(fid).or_insert(v);
         }
@@ -725,7 +755,7 @@ pub fn get_fleet_options(ctx: &ServerContext, fleet_id: i64) -> (bool, bool) {
         }
         return (v_out, l_out);
     }
-    let ex = ctx.fleet_extras.lock().unwrap();
+    let ex = ctx.fleet_extras.lock().unwrap_or_else(|e| e.into_inner());
     (
         ex.voice_enabled.get(&fleet_id).copied().unwrap_or(false),
         ex.loot_logging.get(&fleet_id).copied().unwrap_or(false),
@@ -734,7 +764,7 @@ pub fn get_fleet_options(ctx: &ServerContext, fleet_id: i64) -> (bool, bool) {
 
 pub fn ensure_fleet_watchlist_loaded(ctx: &ServerContext) {
     {
-        let mut ex = ctx.fleet_extras.lock().unwrap();
+        let mut ex = ctx.fleet_extras.lock().unwrap_or_else(|e| e.into_inner());
         if ex.watchlist_loaded {
             return;
         }
@@ -745,7 +775,7 @@ pub fn ensure_fleet_watchlist_loaded(ctx: &ServerContext) {
             .then(|| snap.fleet_and_social_ops.fleet_watchlist.clone())
     });
     if let Some(map) = persisted {
-        let mut ex = ctx.fleet_extras.lock().unwrap();
+        let mut ex = ctx.fleet_extras.lock().unwrap_or_else(|e| e.into_inner());
         for (wid, set) in map {
             ex.watchlist.entry(wid).or_insert(set);
         }
@@ -757,7 +787,7 @@ pub use super::fleet_social_finder_tactical::handle_fleet_watchlist_ops;
 
 pub fn get_fleet_join_requests(ctx: &ServerContext, fleet_id: i64) -> std::collections::HashSet<i64> {
     {
-        let ex = ctx.fleet_extras.lock().unwrap();
+        let ex = ctx.fleet_extras.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(set) = ex.join_requests.get(&fleet_id) {
             return set.clone();
         }
@@ -768,7 +798,7 @@ pub fn get_fleet_join_requests(ctx: &ServerContext, fleet_id: i64) -> std::colle
     });
     if let Some(map) = persisted {
         let out = map.get(&fleet_id).cloned().unwrap_or_default();
-        let mut ex = ctx.fleet_extras.lock().unwrap();
+        let mut ex = ctx.fleet_extras.lock().unwrap_or_else(|e| e.into_inner());
         for (fid, set) in map {
             ex.join_requests.entry(fid).or_insert(set);
         }
@@ -786,7 +816,7 @@ pub fn build_fleet_state_keyval(
     hull_ratio: f64,
 ) -> PyRep {
     let (tags_dict, auto_join) = {
-        let ex = ctx.fleet_extras.lock().unwrap();
+        let ex = ctx.fleet_extras.lock().unwrap_or_else(|e| e.into_inner());
         let tags = fleet_id
             .and_then(|fid| ex.target_tags.get(&fid))
             .map(|m| {
@@ -838,7 +868,7 @@ pub fn stream_fleet_watchlist_damage(
 ) {
     ensure_fleet_watchlist_loaded(ctx);
     let watchers: Vec<i64> = {
-        let ex = ctx.fleet_extras.lock().unwrap();
+        let ex = ctx.fleet_extras.lock().unwrap_or_else(|e| e.into_inner());
         ex.watchlist
             .iter()
             .filter_map(|(&watcher_id, targets)| {
