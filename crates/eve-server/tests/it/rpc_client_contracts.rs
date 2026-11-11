@@ -1034,372 +1034,23 @@ fn has_column_in_collection(val: &PyRep, col: &str) -> bool {
 }
 
 /// Validates a `PyRep` response against the client's `reply_shape` expectations
-/// (including Phase 2 semantic foreign-key and unit sink validation).
-/// Returns a list of human-readable contract violations (empty if compliant).
+/// by delegating to the strict validator in [`eve_testkit::client_contract`] (`C-1`, `#912`).
 fn validate_reply_shape(
     ctx: &ServerContext,
     rpc_name: &str,
     raw_reply: &PyRep,
     reply_shape: &serde_json::Map<String, Value>,
 ) -> Vec<String> {
-    let mut violations = Vec::new();
-    let root_ops: Vec<&str> = reply_shape
-        .get("$")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|x| x.as_str()).collect())
-        .unwrap_or_default();
-
-    let preserve_cached = root_ops.contains(&"attr:GetCachedObject");
-    let root = unwrap_envelope(raw_reply, preserve_cached);
-
-    // Check if root is only discarded (`["discard"]`)
-    if reply_shape.len() == 1 && root_ops.iter().all(|&o| o == "discard") {
-        return violations;
-    }
-
-    for (path, ops_val) in reply_shape {
-        let Some(ops_arr) = ops_val.as_array() else {
-            continue;
-        };
-        let ops: Vec<&str> = ops_arr.iter().filter_map(|v| v.as_str()).collect();
-        let values = resolve_path(&root, path);
-
-        // If path is `$` and `unpack:N` is present without null-check guards, `None` is a violation
-        let unpack_arities: Vec<usize> = ops
-            .iter()
-            .filter_map(|o| o.strip_prefix("unpack:")?.parse::<usize>().ok())
-            .collect();
-        let has_null_guard = ops.iter().any(|o| {
-            matches!(
-                *o,
-                "truthy" | "compareisNone" | "compareisnull" | "compareis_notnull" | "compare==null" | "compare!=null"
-            )
-        });
-
-        if path == "$" && !unpack_arities.is_empty() && !has_null_guard && matches!(root, PyRep::None)
-        {
-            violations.push(format!(
-                "{rpc_name}: path `$` returned None, but client unconditionally unpacks {unpack_arities:?}"
-            ));
-            continue;
-        }
-
-        for val in &values {
-            let val = unwrap_envelope(val, preserve_cached);
-            if matches!(val, PyRep::None) {
-                continue;
-            }
-
-            // 1. Validate `unpack:N`
-            if !unpack_arities.is_empty() {
-                let actual_len = match &val {
-                    PyRep::Tuple(items) | PyRep::List(items) | PyRep::Set(items) | PyRep::PySet(items) => {
-                        Some(items.len())
-                    }
-                    PyRep::TupleSet { .. } => Some(2),
-                    PyRep::DBRow { columns, .. } => Some(columns.len()),
-                    PyRep::Object { type_name, args }
-                        if type_name.ends_with(".Row") || type_name == "Row" =>
-                    {
-                        if let PyRep::Tuple(parts) = args.as_ref() {
-                            parts.get(1).and_then(|p| match p {
-                                PyRep::List(l) | PyRep::Tuple(l) => Some(l.len()),
-                                _ => None,
-                            })
-                        } else if let Some(PyRep::List(vals)) = get_subscript_str(args, "line") {
-                            Some(vals.len())
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                };
-                match actual_len {
-                    None => {
-                        let is_sublocation_union = ops.iter().any(|o| o.contains("IsSubLocation"));
-                        if !(is_sublocation_union && matches!(val, PyRep::Integer(_))) {
-                            violations.push(format!(
-                                "{rpc_name}: path `{path}` expected unpackable sequence {unpack_arities:?}, got non-sequence {val:?}"
-                            ));
-                        }
-                    }
-                    Some(n) if !unpack_arities.contains(&n) => {
-                        // Allow variable-length list unpacking only when `slice` is also used
-                        let has_slice = ops.iter().any(|o| o.starts_with("slice"));
-                        if !has_slice {
-                            violations.push(format!(
-                                "{rpc_name}: path `{path}` expected tuple/list arity in {unpack_arities:?}, got len {n} ({val:?})"
-                            ));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-
-            // 1b. Validate `iter` at path when the client actually iterates elements (`[]` child path)
-            // and is not guarded by `isinstance:?`. (Avoids false positives from `max(a, b)`/`min(a, b)` on scalars.)
-            let child_iter_path = if path == "$" {
-                "[]".to_string()
-            } else {
-                format!("{path}[]")
-            };
-            let has_isinstance_guard = ops.iter().any(|o| o.starts_with("isinstance:"));
-            if ops.contains(&"iter")
-                && reply_shape.contains_key(&child_iter_path)
-                && !has_isinstance_guard
-            {
-                let is_iterable = matches!(
-                    val,
-                    PyRep::List(_)
-                        | PyRep::Tuple(_)
-                        | PyRep::Set(_)
-                        | PyRep::PySet(_)
-                        | PyRep::Dict(_)
-                        | PyRep::Rowset { .. }
-                        | PyRep::IndexRowset { .. }
-                        | PyRep::TupleSet { .. }
-                        | PyRep::DBRow { .. }
-                        | PyRep::ObjectEx { .. }
-                        | PyRep::Object { .. }
-                );
-                if !is_iterable {
-                    violations.push(format!(
-                        "{rpc_name}: path `{path}` expected iterable (`iter`), got non-iterable {val:?}"
-                    ));
-                }
-            }
-
-            // 2. Validate `rowset_index["col"]` and `rowset_filter["col"]`
-            for op in &ops {
-                if let Some(col_raw) = op
-                    .strip_prefix("rowset_index[")
-                    .or_else(|| op.strip_prefix("rowset_filter["))
-                    .and_then(|s| s.strip_suffix(']'))
-                {
-                    let col = col_raw.trim_matches('"');
-                    if !has_column_in_collection(&val, col) {
-                        violations.push(format!(
-                            "{rpc_name}: path `{path}` requires Rowset/CRowset with column `{col}` ({op}), got {val:?}"
-                        ));
-                    }
-                }
-            }
-
-            // 3. Validate `attr:<field>`
-            for op in &ops {
-                let Some(field) = op.strip_prefix("attr:") else {
-                    continue;
-                };
-                // Skip Python collection/string method names and internal bound-object methods
-                if matches!(
-                    field,
-                    "append"
-                        | "extend"
-                        | "insert"
-                        | "remove"
-                        | "pop"
-                        | "sort"
-                        | "reverse"
-                        | "count"
-                        | "index"
-                        | "update"
-                        | "clear"
-                        | "setdefault"
-                        | "add"
-                        | "discard"
-                        | "union"
-                        | "intersection"
-                        | "difference"
-                        | "split"
-                        | "strip"
-                        | "lower"
-                        | "upper"
-                        | "replace"
-                        | "startswith"
-                        | "endswith"
-                        | "format"
-                        | "join"
-                        | "encode"
-                        | "decode"
-                        | "iterkeys"
-                        | "itervalues"
-                        | "iteritems"
-                        | "has_key"
-                        | "viewkeys"
-                        | "viewvalues"
-                        | "viewitems"
-                        | "__dict__"
-                        | "__keys__"
-                        | "__columns__"
-                        | "__header__"
-                        | "header"
-                        | "columns"
-                        | "lines"
-                        | "line"
-                        | "clear_memoized"
-                        | "remove_from_cache"
-                        | "prime_cache_result"
-                        | "virtual"
-                        | "GetCachedObject"
-                        | "GetNextPendingChangeTime"
-                        | "IsFriendlyFireLegalAtTime"
-                        | "GetAllBehaviorEntriesByKey"
-                        | "List"
-                ) {
-                    if matches!(field, "append" | "extend" | "insert" | "sort" | "reverse")
-                        && !matches!(val, PyRep::List(_) | PyRep::Rowset { .. })
-                        && !val.is_crowset()
-                    {
-                        violations.push(format!(
-                            "{rpc_name}: path `{path}` calls list method `.{field}()`, but server returned non-List {val:?}"
-                        ));
-                    }
-                    continue;
-                }
-
-                // Skip if guarded by `hasattr["field"]` or `getattr["field"]`
-                let has_guard = ops.iter().any(|o| {
-                    *o == format!("hasattr[\"{field}\"]")
-                        || *o == format!("getattr[\"{field}\"]")
-                        || o.starts_with("isinstance:")
-                });
-                if has_guard {
-                    continue;
-                }
-
-                // A raw `PyRep::Dict` raises `AttributeError` in Python on `.field` access!
-                if matches!(val, PyRep::Dict(_)) {
-                    violations.push(format!(
-                        "{rpc_name}: path `{path}` accesses `.{field}` (`attr:{field}`), but server returned raw `PyRep::Dict` instead of `KeyVal`/`DBRow`/`Rowset`"
-                    ));
-                    continue;
-                }
-
-                // If `val` is a Rowset/CRowset at `$` and client accesses `.<field>` directly (e.g. `corpmgr.GetCorporations`),
-                // check either direct attribute or column presence.
-                if matches!(
-                    val,
-                    PyRep::Rowset { .. } | PyRep::IndexRowset { .. } | PyRep::TupleSet { .. }
-                ) || val.is_crowset()
-                    || val.is_cindexed_rowset()
-                {
-                    if !has_column_in_collection(&val, field) && get_attr(&val, field).is_none() {
-                        violations.push(format!(
-                            "{rpc_name}: path `{path}` accesses `.{field}` on Rowset/CRowset, but column `{field}` is missing from header"
-                        ));
-                    }
-                    continue;
-                }
-
-                // If `val` is a `SubStruct` (bound object OID), skip attribute check
-                if matches!(val, PyRep::SubStruct(_)) {
-                    continue;
-                }
-
-                if get_attr(&val, field).is_none() {
-                    violations.push(format!(
-                        "{rpc_name}: path `{path}` missing required attribute `.{field}` in {val:?}"
-                    ));
-                }
-            }
-
-            // 4. Phase 2: Semantic foreign-key and unit sink validation (`passed_to:...`)
-            for op in &ops {
-                let Some(sink) = op.strip_prefix("passed_to:") else {
-                    continue;
-                };
-                if sink.starts_with("evetypes.")
-                    || sink.starts_with("typeHelpers.")
-                    || sink.starts_with("inventorycommon.typeHelpers.")
-                {
-                    if let PyRep::Integer(tid) = val {
-                        let is_existence_check = sink.starts_with("evetypes.Exists");
-                        if !is_existence_check {
-                            if tid < 0 || (tid == 0 && !has_null_guard) {
-                                violations.push(format!(
-                                    "{rpc_name}: path `{path}` passes invalid typeID={tid} to `{sink}`"
-                                ));
-                            } else if tid > 0
-                                && !ctx.sde.types.contains_key(&(tid as u32))
-                            {
-                                violations.push(format!(
-                                    "{rpc_name}: path `{path}` passes unknown SDE typeID={tid} to `{sink}`"
-                                ));
-                            }
-                        }
-                    }
-                } else if sink.starts_with("cfg.eveowners.Get#0") {
-                    if let PyRep::Integer(oid) = val {
-                        if oid < 0 || (oid == 0 && !has_null_guard) {
-                            violations.push(format!(
-                                "{rpc_name}: path `{path}` passes invalid ownerID={oid} to `{sink}`"
-                            ));
-                        } else if oid > 0 {
-                            let is_polymorphic_type_or_sys = ops.iter().any(|o| {
-                                o.starts_with("passed_to:evetypes.")
-                                    || o.contains("SolarSystem")
-                            });
-                            let valid_owner = oid <= 10_000
-                                || (500_000..=4_000_000).contains(&oid)
-                                || ctx.sde.factions.contains_key(&(oid as u32))
-                                || ctx.sde.npc_corporations.contains_key(&oid)
-                                || ctx.sde.agents.contains_key(&oid)
-                                || (is_polymorphic_type_or_sys
-                                    && (ctx.sde.types.contains_key(&(oid as u32))
-                                        || ctx.sde.solar_systems.contains_key(&(oid as u32))))
-                                || ctx.db.with_snapshot(|snap| {
-                                    snap.characters.contains_key(&oid)
-                                        || snap.corporations.contains_key(&oid)
-                                        || snap.alliances.contains_key(&oid)
-                                });
-                            if !valid_owner {
-                                violations.push(format!(
-                                    "{rpc_name}: path `{path}` passes unresolvable ownerID={oid} to `{sink}` (not in SDE or WorldRepository)"
-                                ));
-                            }
-                        }
-                    }
-                } else if sink.starts_with("cfg.evelocations.Get#0") {
-                    if let PyRep::Integer(lid) = val {
-                        if lid < 0 || (lid == 0 && !has_null_guard) {
-                            violations.push(format!(
-                                "{rpc_name}: path `{path}` passes invalid locationID={lid} to `{sink}`"
-                            ));
-                        } else if lid > 0 {
-                            let valid_loc = (10_000_000..=85_000_000).contains(&lid)
-                                || lid >= 1_000_000_000_000
-                                || ctx.sde.regions.contains_key(&(lid as u32))
-                                || ctx.sde.constellations.contains_key(&(lid as u32))
-                                || ctx.sde.solar_systems.contains_key(&(lid as u32))
-                                || ctx.sde.stations.contains_key(&lid)
-                                || ctx.db.with_snapshot(|snap| snap.structures.contains_key(&lid));
-                            if !valid_loc {
-                                violations.push(format!(
-                                    "{rpc_name}: path `{path}` passes unresolvable locationID={lid} to `{sink}`"
-                                ));
-                            }
-                        }
-                    }
-                } else if (sink.starts_with("FmtDate#0")
-                    || sink.starts_with("datetimeutils.filetime_to_datetime#0")
-                    || sink.starts_with("blue.os.GetTimeParts#0"))
-                    && !ops.contains(&"arith")
-                {
-                    if let PyRep::Integer(ts) = val {
-                        // Windows FILETIME ticks since 1601-01-01 are >= 116_444_736_000_000_000.
-                        // Values in (1..100_000_000_000_000) are raw Unix seconds/milliseconds or small integers!
-                        if ts > 0 && ts < 100_000_000_000_000 {
-                            violations.push(format!(
-                                "{rpc_name}: path `{path}` passes non-FILETIME integer {ts} to `{sink}` (expected Windows FILETIME 100ns ticks or 0)"
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    violations
+    let sem = eve_testkit::client_contract::SemanticLookupContext {
+        sde: &ctx.sde,
+        db: &ctx.db,
+    };
+    eve_testkit::client_contract::validate_reply_shape(
+        Some(&sem),
+        rpc_name,
+        raw_reply,
+        reply_shape,
+    )
 }
 
 fn parse_const_repr(s: &str) -> PyRep {
@@ -2015,8 +1666,10 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
 
     let total_unique_rpcs: BTreeSet<String> =
         pending_sigs.iter().map(|p| p.rpc_key.clone()).collect();
+    let mut rpc_paths_checked: BTreeMap<String, usize> = BTreeMap::new();
+    let mut rpc_non_vacuous: BTreeSet<String> = BTreeSet::new();
 
-    // Multi-profile execution:
+    // Multi-profile execution (strictly on client transport `Some("machoNet:26000")`, C-1 #912):
     // Pass 1: Docked in NPC Station
     // Pass 2: In Space (undocked with active ship ball)
     // Pass 3: Docked in Upwell Structure
@@ -2039,7 +1692,7 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
                         &sig.method,
                         cand_args,
                         &sig.kw,
-                        None,
+                        Some("machoNet:26000"),
                     )
                     .await;
                 for (ev, nargs) in sess.drain_notifications() {
@@ -2053,38 +1706,25 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
                     Ok(rep) => {
                         succeeded_rpcs.insert(sig.rpc_key.clone());
                         sig_ok = true;
-                        let mut v =
-                            validate_reply_shape(&ctx, &sig.rpc_key, &rep, &sig.effective_shape);
-                        if !v.is_empty() {
-                            if sig.destructive {
-                                ctx.db.with_mut_snapshot(|snap| *snap = base_snapshot.clone());
-                            }
-                            restore_session_profile(&ctx, &mut sess, profile);
-                            let bound_id = bind_for_service(&ctx, &sess, &sig.service);
-                            if let Ok(rep_macho) = ctx
-                                .dispatch_rpc(
-                                    &mut sess,
-                                    &sig.service,
-                                    bound_id,
-                                    &sig.method,
-                                    cand_args,
-                                    &sig.kw,
-                                    Some("machoNet:26000"),
-                                )
-                                .await
-                            {
-                                let v_macho = validate_reply_shape(
-                                    &ctx,
-                                    &sig.rpc_key,
-                                    &rep_macho,
-                                    &sig.effective_shape,
-                                );
-                                if v_macho.len() < v.len() {
-                                    v = v_macho;
-                                }
-                            }
+                        let sem = eve_testkit::client_contract::SemanticLookupContext {
+                            sde: &ctx.sde,
+                            db: &ctx.db,
+                        };
+                        let outcome = eve_testkit::client_contract::validate_reply_shape_with_metrics(
+                            Some(&sem),
+                            &sig.rpc_key,
+                            &rep,
+                            &sig.effective_shape,
+                        );
+                        *rpc_paths_checked.entry(sig.rpc_key.clone()).or_insert(0) +=
+                            outcome.paths_checked;
+                        if matches!(
+                            outcome.classification(),
+                            eve_testkit::client_contract::RpcValidationClass::Validated { .. }
+                        ) {
+                            rpc_non_vacuous.insert(sig.rpc_key.clone());
                         }
-                        shape_violations.extend(v);
+                        shape_violations.extend(outcome.violations);
                         if sig.destructive {
                             ctx.db.with_mut_snapshot(|snap| *snap = base_snapshot.clone());
                         }
@@ -2108,10 +1748,6 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
         .into_iter()
         .filter(|k| !succeeded_rpcs.contains(k))
         .collect();
-    let succeeded_count = succeeded_rpcs.len();
-    let domain_rejected_count = total_unique_rpcs
-        .len()
-        .saturating_sub(succeeded_count + unimplemented_rpcs.len());
 
     // Validate all emitted notifications against `notify` expectations (both arity and `reads`)
     let notify_map = root["notify"].as_object().expect("notify map");
@@ -2223,29 +1859,54 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
         }
     }
 
-    println!(
-        "=== RPC CONTRACT REPORT: succeeded={succeeded_count}, domain_rejected={domain_rejected_count}, unimplemented={}, shape_violations={}, notify_violations={} ===",
-        unimplemented_rpcs.len(),
-        shape_violations.len(),
-        notify_violations.len(),
-    );
-    for u in &unimplemented_rpcs {
+    let mut report = eve_testkit::client_contract::ContractSweepReport {
+        expectations_version: root
+            .get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unversioned-main")
+            .to_string(),
+        expectations_sha256: eve_proto::quasar::sha256_hex(raw.as_bytes()),
+        ..Default::default()
+    };
+    for rpc_key in &total_unique_rpcs {
+        if succeeded_rpcs.contains(rpc_key) {
+            if rpc_non_vacuous.contains(rpc_key) {
+                report.validated.insert(
+                    rpc_key.clone(),
+                    rpc_paths_checked.get(rpc_key).copied().unwrap_or(1),
+                );
+            } else {
+                report.vacuous.insert(rpc_key.clone());
+            }
+        } else if unimplemented_rpcs.contains(rpc_key) {
+            report.unimplemented.insert(rpc_key.clone());
+        } else {
+            report.domain_rejected.insert(rpc_key.clone());
+        }
+    }
+    report.shape_violations = shape_violations;
+    report.notify_violations = notify_violations;
+
+    report.print_summary();
+    for u in &report.unimplemented {
         println!("  [UNIMPLEMENTED] {u}");
     }
-    for v in &shape_violations {
+    for v in &report.shape_violations {
         println!("  [SHAPE VIOLATION] {v}");
     }
-    for nv in &notify_violations {
+    for nv in &report.notify_violations {
         println!("  [NOTIFY VIOLATION] {nv}");
     }
 
-    assert!(
-        unimplemented_rpcs.is_empty() && shape_violations.is_empty() && notify_violations.is_empty(),
-        "Found {} unimplemented RPCs, {} reply_shape violations, and {} notify violations",
-        unimplemented_rpcs.len(),
-        shape_violations.len(),
-        notify_violations.len()
-    );
+    let ratchet = eve_testkit::client_contract::ClientContractRatchet::load_default()
+        .expect("load client_contract_ratchet.json");
+    ratchet
+        .verify_expectations_integrity(raw.as_bytes(), &root)
+        .expect("verify client_expectations.json version and sha256");
+    ratchet
+        .assert_sweep_report(&report)
+        .expect("client contract sweep must satisfy ratchet");
+    common::assert_teardown_invariants(&ctx);
 }
 
 #[tokio::test]
@@ -2507,6 +2168,7 @@ async fn test_quasar_public_gateway_client_contracts() {
 
     let now_unix = ctx.now_unix();
     let mut gateway_violations = Vec::new();
+    let mut tap_violations = Vec::new();
     let mut ok_200_count = 0usize;
 
     for req_type in &handler_names {
@@ -2538,38 +2200,46 @@ async fn test_quasar_public_gateway_client_contracts() {
         }
         if rsp.status_code == 200 {
             ok_200_count += 1;
-            if let Some(any_out) = &rsp.payload {
-                let rsp_norm = any_out.normalized_type_name();
-                if ctx.quasar_gateway.descriptors.get_message(rsp_norm).is_none()
-                    && rsp_norm != "google.protobuf.Empty"
-                {
-                    gateway_violations.push(format!(
-                        "Quasar request `{req_type}` returned unknown protobuf type_url `{}`",
-                        any_out.type_url
-                    ));
-                } else if let Err(e) = ctx
-                    .quasar_gateway
-                    .descriptors
-                    .decode_dynamic_or_wire(rsp_norm, &any_out.value)
-                {
-                    gateway_violations.push(format!(
-                        "Quasar request `{req_type}` returned invalid protobuf wire bytes for `{rsp_norm}`: {e}"
-                    ));
-                }
-            }
+            let notice_anys: Vec<GoogleAny> = ctx
+                .quasar_gateway
+                .pending_notices
+                .write()
+                .map(|mut q| q.drain(..).map(|(_, n)| n).collect())
+                .unwrap_or_default();
+            tap_violations.extend(common::tap_quasar_exchange(
+                &ctx,
+                req_type,
+                &rsp,
+                &notice_anys,
+            ));
         }
     }
 
+    let tap_ratchet = eve_testkit::quasar_tap::QuasarTapRatchet::load_default()
+        .expect("load quasar_tap_ratchet.json");
     println!(
-        "=== QUASAR CONTRACT REPORT: registered_handlers={}, ok_200={}, violations={} ===",
+        "=== QUASAR CONTRACT REPORT: registered_handlers={}, ok_200={}, gateway_violations={}, tap_violations={} ===",
         handler_names.len(),
         ok_200_count,
-        gateway_violations.len()
+        gateway_violations.len(),
+        tap_violations.len()
     );
     assert!(
         gateway_violations.is_empty(),
         "Found Quasar Public Gateway contract violations: {gateway_violations:#?}"
     );
+    eve_testkit::quasar_tap::assert_quasar_tap_ratchet(&tap_violations, &tap_ratchet)
+        .expect("Quasar Public Gateway tap must satisfy ratchet");
+}
+
+#[tokio::test]
+async fn test_world_invariants_and_persist_reload_equivalence_guard_908() {
+    let demo_repo = eve_db::WorldRepository::with_demo_seed();
+    let sde = shared_sde();
+    eve_testkit::pre_check::assert_world_and_pre_guards(&demo_repo, Some(&sde), true);
+
+    let comp_ctx = shared_comprehensive_ctx().await;
+    common::assert_teardown_invariants(&comp_ctx);
 }
 
 #[tokio::test]

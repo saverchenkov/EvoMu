@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "expectations_version": "unversioned-main",
+  "expectations_sha256": "6f7f2df789c190e68962123a8abfa9589d3039716626e37409144f67124e3f23",
+  "min_validated_rpcs": 530,
+  "allowed_shape_violations": [
+    "XmppChatMgr.CreatePlayerOwnedChannel: path `$` calls string method `.split()`, but server returned non-string KeyVal({...})",
+    "XmppChatMgr.CreatePlayerOwnedChannel: path `$` requires string (`type:str`), got KeyVal({...})",
+    "alert.GetLogModeForError: path `[0]` returned None without null-guard, but client dereferences [\"method:iteritems\", \"passed_to:self.LogInfo#2\"]",
+    "alert.GetLogModeForError: path `[1]` returned None without null-guard, but client dereferences [\"contains[*]\", \"len\", \"passed_to:self.ConvertFloodingGroupBeansToBeans#0\", \"passed_to:self.LogInfo#2\", \"returned\"]",
+    "corpRegistry.GetAllianceApplications: path `$` requires key-indexed mapping (`contains[*]` + `subscript[*]`), got flat Rowset Rowset { columns: [\"allianceID\", \"corporationID\", \"applicationText\", \"applicationDateTime\", \"status\", \"joinEffectiveTime\"], rows: [] }",
+    "corpRegistry.GetApplications: path `$` requires key-indexed mapping (`contains[*]` + `subscript[*]`), got flat Rowset Rowset { columns: [\"applicationID\", \"characterID\", \"message\", \"status\", \"createdDate\"], rows: [[Integer(1), Integer(90000002), String(\"Please let me join\"), String(\"Pending\"), Integer(1800000000)]] }",
+    "corpRegistry.GetApplications: path `[*]` expected iterable (`iter`), got non-iterable KeyVal({...})",
+    "corpRegistry.GetMyApplications: path `$` requires key-indexed mapping (`contains[*]` + `subscript[*]`), got flat Rowset Rowset { columns: [\"applicationID\", \"corporationID\", \"characterID\", \"message\", \"status\", \"createdDate\"], rows: [] }",
+    "dungeonInstanceCacheMgr.GetCombatAnomaliesCount: path `$` calls dict method `.iteritems()`, but server returned non-mapping Integer(2)",
+    "dungeonInstanceCacheMgr.GetIceBeltsCount: path `$` calls dict method `.iteritems()`, but server returned non-mapping Integer(1)",
+    "dungeonInstanceCacheMgr.GetOreAnomaliesCount: path `$` calls dict method `.iteritems()`, but server returned non-mapping Integer(0)",
+    "facilityManager.GetFacilityLocations: path `[]` missing required attribute `.GetInvController` in KeyVal({...})",
+    "fighterMgr.RecallFightersToTubes: path `$` calls dict method `.iteritems()`, but server returned non-mapping List([])",
+    "home_station.get_next_remote_change_time: path `$` requires datetime.datetime object (`type:datetime`), got Integer(0)",
+    "i2.GetItem: path `$` returned None without null-guard, but client dereferences [\"attr:typeID\"]",
+    "posMgr.GetMoonProcessInfoForTower: path `$` returned None without null-guard, but client dereferences [\"iter\"]",
+    "seasonalLoginCampaignManager.get_active_campaign: path `[3]` returned None without null-guard, but client dereferences [\"arith\", \"compare>0\", \"iter\", \"returned\", \"stored_attr:number_of_reward_days_remaining\"]",
+    "tourneyMgr.GetFancyDetails: path `[2][4]` returned None without null-guard, but client dereferences [\"arith\", \"passed_to:TournamentTimerFormatter.GetTimerTextAndColor#4\"]",
+    "voteManager.GetCorpSanctionedActions: path `$` calls dict method `.itervalues()`, but server returned non-mapping Rowset { columns: [\"voteCaseID\", \"corporationID\", \"voteCaseText\", \"description\", \"voteType\", \"parameter\", \"startDateTime\", \"endDateTime\", \"status\", \"votesFor\", \"inEffect\"], rows: [] }",
+    "warStatisticMgr.GetKillsByGroup: path `$` calls dict method `.iteritems()`, but server returned non-mapping Rowset { columns: [\"groupID\", \"kills\", \"iskDestroyed\"], rows: [] }",
+    "warsInfoMgr.GetWarsByOwners: path `$` calls dict method `.iteritems()`, but server returned non-mapping Rowset { columns: [\"warID\", \"declaredByID\", \"againstID\", \"timeDeclared\", \"timeStarted\", \"timeFinished\", \"mutual\", \"openForAllies\", \"warHQ\", \"active\", \"combatActive\"], rows: [] }"
+  ],
+  "allowed_notify_violations": []
+}

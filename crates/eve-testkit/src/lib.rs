@@ -5,6 +5,10 @@
 
 #![forbid(unsafe_code)]
 
+pub mod client_contract;
+pub mod pre_check;
+pub mod quasar_tap;
+
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -241,6 +245,7 @@ mod tests {
 
     #[test]
     fn test_resolve_crate_and_test_name_edge_cases() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(resolve_crate_name(Some("eve-sde")), "eve_sde");
         assert_eq!(resolve_crate_name(Some("")), "eve_workspace");
         assert_eq!(resolve_crate_name(None), "eve_workspace");

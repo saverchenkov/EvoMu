@@ -144,17 +144,20 @@ fn skill_plan_and_character_milestone_rpc_handlers() {
         .expect("get all skill plans");
     assert!(all_resp.type_url.ends_with("eve_public.skill.plan.GetAllResponse"));
 
-    handlers["eve_public.skill.plan.SetActiveRequest"](&ctx, &dummy_any, &uuid_msg(1, plan_uuid))
+    let set_act_resp = handlers["eve_public.skill.plan.SetActiveRequest"](&ctx, &dummy_any, &uuid_msg(1, plan_uuid))
         .expect("set active plan");
+    assert!(set_act_resp.type_url.ends_with("eve_public.skill.plan.SetActiveResponse"));
     let act_resp = handlers["eve_public.skill.plan.GetActiveRequest"](&ctx, &dummy_any, &DynamicQuasarMessage::new("Active"))
         .expect("get active plan");
     assert!(act_resp.type_url.ends_with("eve_public.skill.plan.GetActiveResponse"));
 
     // Clear active plan
-    handlers["eve_public.skill.plan.SetActiveRequest"](&ctx, &dummy_any, &DynamicQuasarMessage::new("Clear"))
+    let clr_act_resp = handlers["eve_public.skill.plan.SetActiveRequest"](&ctx, &dummy_any, &DynamicQuasarMessage::new("Clear"))
         .expect("clear active plan");
-    handlers["eve_public.skill.plan.DeleteRequest"](&ctx, &dummy_any, &uuid_msg(1, plan_uuid))
+    assert!(clr_act_resp.type_url.ends_with("eve_public.skill.plan.SetActiveResponse"));
+    let del_plan_resp = handlers["eve_public.skill.plan.DeleteRequest"](&ctx, &dummy_any, &uuid_msg(1, plan_uuid))
         .expect("delete skill plan");
+    assert!(del_plan_resp.type_url.ends_with("eve_public.skill.plan.DeleteResponse"));
 
     // 2. eve_public.character.skill.plan.* + milestones lifecycle
     let mut attr = DynamicQuasarMessage::new("Attr");
@@ -178,18 +181,21 @@ fn skill_plan_and_character_milestone_rpc_handlers() {
         assert!(r.type_url.ends_with(suffix));
     }
 
-    handlers["eve_public.character.skill.plan.SetActiveRequest"](&ctx, &dummy_any, &uuid_msg(1, ch_uuid))
+    let ch_set_act = handlers["eve_public.character.skill.plan.SetActiveRequest"](&ctx, &dummy_any, &uuid_msg(1, ch_uuid))
         .expect("set char active plan");
+    assert!(ch_set_act.type_url.ends_with("eve_public.character.skill.plan.SetActiveResponse"));
 
     let mut set_name = uuid_msg(1, ch_uuid);
     set_name.fields.insert(2, DynamicValue::String("Renamed Char Plan".into()));
-    handlers["eve_public.character.skill.plan.SetNameRequest"](&ctx, &dummy_any, &set_name)
+    let ch_set_name = handlers["eve_public.character.skill.plan.SetNameRequest"](&ctx, &dummy_any, &set_name)
         .expect("set char plan name");
+    assert!(ch_set_name.type_url.ends_with("eve_public.character.skill.plan.SetNameResponse"));
 
     let mut set_desc = uuid_msg(1, ch_uuid);
     set_desc.fields.insert(2, DynamicValue::String("New desc".into()));
-    handlers["eve_public.character.skill.plan.SetDescriptionRequest"](&ctx, &dummy_any, &set_desc)
+    let ch_set_desc = handlers["eve_public.character.skill.plan.SetDescriptionRequest"](&ctx, &dummy_any, &set_desc)
         .expect("set char plan desc");
+    assert!(ch_set_desc.type_url.ends_with("eve_public.character.skill.plan.SetDescriptionResponse"));
 
     let mut req_item = DynamicQuasarMessage::new("ReqItem");
     req_item.fields.insert(1, DynamicValue::Uint32(3300));
@@ -199,8 +205,9 @@ fn skill_plan_and_character_milestone_rpc_handlers() {
         2,
         DynamicValue::Repeated(vec![DynamicValue::Message(Box::new(req_item))]),
     );
-    handlers["eve_public.character.skill.plan.SetSkillRequirementsRequest"](&ctx, &dummy_any, &set_reqs)
+    let ch_set_reqs = handlers["eve_public.character.skill.plan.SetSkillRequirementsRequest"](&ctx, &dummy_any, &set_reqs)
         .expect("set char plan skill requirements");
+    assert!(ch_set_reqs.type_url.ends_with("eve_public.character.skill.plan.SetSkillRequirementsResponse"));
 
     // Milestone create, list, set description, delete
     let mut ms_attr = uuid_msg(1, ch_uuid);
@@ -229,13 +236,16 @@ fn skill_plan_and_character_milestone_rpc_handlers() {
 
     let mut ms_desc = uuid_msg(1, ms_uuid);
     ms_desc.fields.insert(2, DynamicValue::String("Updated milestone".into()));
-    handlers["eve_public.character.skill.plan.milestone.SetDescriptionRequest"](&ctx, &dummy_any, &ms_desc)
+    let ms_set_desc = handlers["eve_public.character.skill.plan.milestone.SetDescriptionRequest"](&ctx, &dummy_any, &ms_desc)
         .expect("set milestone desc");
+    assert!(ms_set_desc.type_url.ends_with("eve_public.character.skill.plan.milestone.SetDescriptionResponse"));
 
-    handlers["eve_public.character.skill.plan.milestone.DeleteRequest"](&ctx, &dummy_any, &uuid_msg(1, ms_uuid))
+    let ms_del = handlers["eve_public.character.skill.plan.milestone.DeleteRequest"](&ctx, &dummy_any, &uuid_msg(1, ms_uuid))
         .expect("delete milestone");
-    handlers["eve_public.character.skill.plan.DeleteRequest"](&ctx, &dummy_any, &uuid_msg(1, ch_uuid))
+    assert!(ms_del.type_url.ends_with("eve_public.character.skill.plan.milestone.DeleteResponse"));
+    let ch_del = handlers["eve_public.character.skill.plan.DeleteRequest"](&ctx, &dummy_any, &uuid_msg(1, ch_uuid))
         .expect("delete char plan");
+    assert!(ch_del.type_url.ends_with("eve_public.character.skill.plan.DeleteResponse"));
 
     // 3. Skill metadata, character skill level, implants, injector/extractor stubs
     let st_resp = handlers["eve.skilltype.GetRequest"](&ctx, &dummy_any, &DynamicQuasarMessage::new("Req"))

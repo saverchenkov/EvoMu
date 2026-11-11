@@ -224,6 +224,27 @@ impl ServerClock for VirtualServerClock {
     }
 }
 
+impl crate::WorldRepository {
+    /// Reloads the persisted [`crate::WorldStateSnapshot`] directly from the attached SQLite
+    /// connection without mutating in-memory state (`P2-0g`, `#908`).
+    pub fn reload_snapshot_from_sqlite(&self) -> Result<crate::WorldStateSnapshot, String> {
+        let guard = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
+        let (snap, _fp) = crate::sqlite_store::load_snapshot_from_sqlite(&guard)?;
+        Ok(snap)
+    }
+
+    /// Mutates the in-memory [`crate::WorldStateSnapshot`] without syncing to the attached SQLite
+    /// connection (`#908`). Used by `eve-testkit` PRE check tests to verify that unpersisted
+    /// in-memory mutations are detected on teardown.
+    pub fn inject_unpersisted_mutation_for_test<F>(&self, f: F)
+    where
+        F: FnOnce(&mut crate::WorldStateSnapshot),
+    {
+        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        f(std::sync::Arc::make_mut(&mut *guard));
+    }
+}
+
 #[cfg(test)]
 #[path = "clock_unit_tests.rs"]
 mod clock_unit_tests;

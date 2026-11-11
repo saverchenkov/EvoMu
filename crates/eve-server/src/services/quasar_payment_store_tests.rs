@@ -633,11 +633,18 @@ fn sde_hydration_boundary_21_empty_names_and_plex_wire_payload_assertions() {
     let notice_wm = WireMessage::decode(&dep_payload.value).unwrap();
     let dep_attr_bytes = notice_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_bytes()).unwrap();
     let dep_attr_wm = WireMessage::decode(dep_attr_bytes).unwrap();
-    let notice_reason = dep_attr_wm.fields.iter().find(|f| f.field_number == 6).and_then(|f| f.value.as_str().ok().flatten());
-    assert_eq!(notice_reason, Some("GM Deposit"));
-    let notice_amt_bytes = dep_attr_wm.fields.iter().find(|f| f.field_number == 4).and_then(|f| f.value.as_bytes()).unwrap();
+    // V24.01 `eve_public.plex.vault.transaction.Attributes` (#893): field 1 = timestamp, field 2 = amount_transferred, field 3 = resulting_balance
+    assert!(
+        dep_attr_wm.fields.iter().all(|f| matches!(f.field_number, 1..=3)),
+        "#893: BalanceChangedNotice.attributes must only encode fields 1..=3, got {:?}",
+        dep_attr_wm.fields
+    );
+    let notice_amt_bytes = dep_attr_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_bytes()).unwrap();
     let notice_amt_wm = WireMessage::decode(notice_amt_bytes).unwrap();
     assert_eq!(decode_zigzag64(notice_amt_wm.fields[0].value.as_varint().unwrap()), 100); // +1 PLEX * 100 cents
+    let notice_bal_bytes = dep_attr_wm.fields.iter().find(|f| f.field_number == 3).and_then(|f| f.value.as_bytes()).unwrap();
+    let notice_bal_wm = WireMessage::decode(notice_bal_bytes).unwrap();
+    assert_eq!(decode_zigzag64(notice_bal_wm.fields[0].value.as_varint().unwrap()), 100);
 
     // Seed negative balance on other_uid to verify BalanceResponse zigzag64 negative encoding
     router.db.with_mut_snapshot(|snap| {

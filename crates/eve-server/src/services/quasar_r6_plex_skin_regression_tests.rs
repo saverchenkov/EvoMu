@@ -188,6 +188,36 @@ fn regression_403_unified_plex_vault_across_deposit_paragon_hub_and_withdraw() {
     assert!(dep_notices
         .iter()
         .any(|t| t.ends_with("BalanceChangedNotice")));
+    // Verify #893: encode_plex_balance_changed_notice encodes V24.01 eve_public.plex.vault.transaction.Attributes fields 1, 2, 3
+    let raw_notice = super::quasar_payment_store_types::encode_plex_balance_changed_notice(
+        buyer_uid,
+        1,
+        250,
+        750,
+        "Deposit",
+        now,
+    );
+    let raw_notice_wm = WireMessage::decode(&raw_notice.value).unwrap();
+    let raw_attr_wm = WireMessage::decode(
+        raw_notice_wm
+            .fields
+            .iter()
+            .find(|f| f.field_number == 2)
+            .unwrap()
+            .value
+            .as_bytes()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        raw_attr_wm
+            .fields
+            .iter()
+            .map(|f| f.field_number)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3],
+        "#893: BalanceChangedNotice.attributes must have fields 1 (timestamp), 2 (amount_transferred), 3 (resulting_balance)"
+    );
 
     // 2. Grant seller an unactivated 3rd-party SKIN license & buyer EverMarks for tax
     let skin_hex = "aabbccdd11223344556677889900aabb".to_string();

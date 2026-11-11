@@ -12,11 +12,11 @@ use eve_proto::quasar::{
 use std::sync::{Arc, RwLock};
 
 pub(crate) fn encode_plex_balance_changed_notice(
-    user_id: u64,
+    _user_id: u64,
     tx_id: u64,
     amount: i64,
     balance_after: i64,
-    description: &str,
+    _description: &str,
     now_unix: u64,
 ) -> GoogleAny {
     let mut notice_bytes = Vec::new();
@@ -24,24 +24,23 @@ pub(crate) fn encode_plex_balance_changed_notice(
     encode_varint_field(1, tx_id, &mut ident);
     encode_bytes_field(1, &ident, &mut notice_bytes);
 
+    // V24.01 `eve_public.plex.vault.transaction.Attributes` (`#893`):
+    //   field 1 (`timestamp`): `google.protobuf.Timestamp`
+    //   field 2 (`amount_transferred`): `eve_public.plex.Currency` (field 1: `total_in_cents`, sint64 zigzag)
+    //   field 3 (`resulting_balance`): `eve_public.plex.Currency` (field 1: `total_in_cents`, sint64 zigzag)
     let mut attr = Vec::new();
     let mut ts_bytes = Vec::new();
     encode_varint_field(1, now_unix, &mut ts_bytes);
     encode_bytes_field(1, &ts_bytes, &mut attr);
 
-    let mut user_ident = Vec::new();
-    encode_varint_field(1, user_id, &mut user_ident);
-    encode_bytes_field(2, &user_ident, &mut attr);
-
     let mut amt_curr = Vec::new();
     encode_varint_field(1, encode_zigzag64(amount * 100), &mut amt_curr);
-    encode_bytes_field(4, &amt_curr, &mut attr);
+    encode_bytes_field(2, &amt_curr, &mut attr);
 
     let mut bal_curr = Vec::new();
     encode_varint_field(1, encode_zigzag64(balance_after * 100), &mut bal_curr);
-    encode_bytes_field(5, &bal_curr, &mut attr);
+    encode_bytes_field(3, &bal_curr, &mut attr);
 
-    encode_string_field(6, description, &mut attr);
     encode_bytes_field(2, &attr, &mut notice_bytes);
 
     GoogleAny {
