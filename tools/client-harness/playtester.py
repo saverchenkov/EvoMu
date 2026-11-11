@@ -2202,6 +2202,7 @@ macho_port = {self.ports['macho']}
 bridge_port = {self.ports['bridge']}
 esi_port = {self.ports['http']}
 quasar_grpc_port = {self.ports['gateway']}
+xmpp_port = {self.ports['xmpp']}
 sde_path = "{sde_path}"
 world_db_path = "{self.world_db_path}"
 
@@ -2313,7 +2314,7 @@ role_mask = 9223372036854775807
 
         log_info(
             f"Launching eve-server ({get_git_head(self.worktree_dir)}) on "
-            f"Macho={self.ports['macho']} ESI/HTTP={self.ports['http']} Quasar={self.ports['gateway']}"
+            f"Macho={self.ports['macho']} ESI/HTTP={self.ports['http']} Quasar={self.ports['gateway']} XMPP={self.ports['xmpp']}"
         )
         self.server_proc = subprocess.Popen(
             [str(binary)],
@@ -2327,6 +2328,7 @@ role_mask = 9223372036854775807
             self.wait_for_port(self.ports["macho"], timeout=25.0, proc=self.server_proc)
             and self.wait_for_port(self.ports["http"], timeout=10.0, proc=self.server_proc)
             and self.wait_for_port(self.ports["gateway"], timeout=10.0, proc=self.server_proc)
+            and self.wait_for_port(self.ports["xmpp"], timeout=10.0, proc=self.server_proc)
         ):
             log_info(f"eve-server ready (PID {self.server_proc.pid})")
             return True

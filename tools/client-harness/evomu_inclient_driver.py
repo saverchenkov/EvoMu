@@ -294,16 +294,17 @@ def _execute_all_journeys(cfg, ipc):
             if int(_get_field(it, "typeID", 0)) == 34:
                 trit_id = int(_get_field(it, "itemID", 0))
                 break
+        c2_trade_res = None
         if trit_id:
             t_res = sm.RemoteSvc("trademgr").InitiateTrade(char2_id, 60003760)
             trade_id = int(_get_field(t_res, "tradeContainerID", 0))
             sm.RemoteSvc("trademgr").AddItem(trade_id, trit_id)
             sm.RemoteSvc("trademgr").OfferMoney(trade_id, 5000.0)
             sm.RemoteSvc("trademgr").MakeOffer(trade_id)
-            ipc.request({"cmd": "c2_complete_trade", "char1_id": char_id, "trade_id": trade_id})
+            c2_trade_res = ipc.request({"cmd": "c2_complete_trade", "char1_id": char_id, "trade_id": trade_id})
         record(
             "multiplayer_presence",
-            c2_vis.get("saw_ship", False) and trit_id is not None,
+            c2_vis.get("saw_ship", False) and trit_id is not None and bool(c2_trade_res and c2_trade_res.get("ok")),
             "Real V24.01 ship %d observed live by concurrent Client 2 in Jita space (%d DoDestinyUpdate packets) and completed direct player-to-player trade (itemID=%r)"
             % (ship_id, int(c2_vis.get("updates", 0)), trit_id),
         )
@@ -345,15 +346,16 @@ def _execute_all_journeys(cfg, ipc):
     # 9. market_trade
     if want("market_trade"):
         _trace(cfg, "start market_trade")
-        sell_trit_id = int(_get_field(_try_slash(sm, "/createitem 34 200"), "itemID", 0) or 0)
+        market_tid = 19658
+        sell_mkt_id = int(_get_field(_try_slash(sm, "/createitem %d 200" % market_tid), "itemID", 0) or 0)
         _, inv_mkt = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
-        if not sell_trit_id:
+        if not sell_mkt_id:
             for it in reversed(list(inv_mkt)):
-                if int(_get_field(it, "typeID", 0)) == 34 and int(_get_field(it, "quantity", 0)) >= 50:
-                    sell_trit_id = int(_get_field(it, "itemID", 0))
+                if int(_get_field(it, "typeID", 0)) == market_tid and int(_get_field(it, "quantity", 0)) >= 50:
+                    sell_mkt_id = int(_get_field(it, "itemID", 0))
                     break
         placed_orders = sm.RemoteSvc("marketProxy").PlaceMultiSellOrder(
-            [{"stationID": 60003760, "typeID": 34, "itemID": sell_trit_id, "price": 50.0, "quantity": 20}],
+            [{"stationID": 60003760, "typeID": market_tid, "itemID": sell_mkt_id, "price": 50.0, "quantity": 20}],
             False,
             90,
         )
@@ -361,20 +363,21 @@ def _execute_all_journeys(cfg, ipc):
         orders = sm.RemoteSvc("marketProxy").GetCharOrders()
         sell_orders = [
             o for o in (orders or [])
-            if int(_get_field(o, "typeID", 0)) == 34 and not bool(_get_field(o, "bid", False))
+            if int(_get_field(o, "typeID", 0)) == market_tid and not bool(_get_field(o, "bid", False))
         ]
         target_orders = sell_orders or list(placed_orders or []) or list(orders or [])
         if target_orders:
             oid = int(_get_field(target_orders[-1], "orderID", 0))
             sm.RemoteSvc("marketProxy").ModifyCharOrder(oid, 55.0, False, True, False)
-        ipc.request({"cmd": "c2_buy_tritanium"})
+        ipc.request({"cmd": "c2_buy_tritanium", "type_id": market_tid, "price": 100.0, "qty": 5})
         txs = sm.RemoteSvc("marketProxy").CharGetTransactions()
-        hist = sm.RemoteSvc("marketProxy").GetOldPriceHistory(10000002, 34)
+        hist = sm.RemoteSvc("marketProxy").GetOldPriceHistory(market_tid)
+        has_mkt_tx = any(int(_get_field(tx, "typeID", 0)) == market_tid for tx in (txs or []))
         record(
             "market_trade",
-            orders is not None and txs is not None and hist is not None,
-            "Real V24.01 client placed & modified sell order on Jita market, executed cross-client fill with Client 2, and retrieved wallet transactions (%d) & price history (%d)"
-            % (len(txs), len(hist)),
+            bool(orders is not None and has_mkt_tx and hist is not None and len(hist) > 0),
+            "Real V24.01 client placed & modified sell order (typeID=%d) on Jita market, executed cross-client fill with Client 2, and retrieved wallet transactions (%d) & price history (%d)"
+            % (market_tid, len(txs or []), len(hist or [])),
         )
 
     # 10. contracts
@@ -403,53 +406,167 @@ def _execute_all_journeys(cfg, ipc):
         for sk in (3327, 3328, 3329, 3330, 3331, 3386, 32918):
             _try_slash(sm, "/giveskill %d 5" % sk)
         _try_slash(sm, "/createitem 32880 1")
+        _try_slash(sm, "/createitem 483 1")
         _, inv_mine = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
         venture_id = None
-        for it in inv_mine:
-            if int(_get_field(it, "typeID", 0)) == 32880:
+        miner_id = None
+        for it in reversed(list(inv_mine or [])):
+            tid_mine = int(_get_field(it, "typeID", 0))
+            if tid_mine == 32880 and not venture_id:
                 venture_id = int(_get_field(it, "itemID", 0))
+            elif tid_mine == 483 and not miner_id:
+                miner_id = int(_get_field(it, "itemID", 0))
+            if venture_id and miner_id:
                 break
-        if venture_id:
-            sm.RemoteSvc("ship").AssembleShip([venture_id])
-            sm.RemoteSvc("timeControl").ClearSessionTimer()
-            sm.RemoteSvc("ship").Board(venture_id)
-            _wait_session_attr("shipid", venture_id, timeout_sec=3.0)
-            _sleep_ms(200)
-            _wait_view_settled(sm)
-        _undock_ship(sm)
         rock_id = 0
-        bp_mine = getattr(sm.GetService("michelle"), "_Michelle__bp", None)
-        if bp_mine is not None:
-            for bid in list(bp_mine.balls.keys()):
-                slim_m = bp_mine.GetInvItem(bid)
-                if int(bid) != ship_id and slim_m is not None and int(getattr(slim_m, "categoryID", 0) or 0) == 25:
-                    rock_id = int(bid)
-                    break
-        if rock_id:
-            sm.RemoteSvc("dogmaIM").AddTarget(rock_id)
-        ipc.request({"cmd": "advance_clock", "secs": 10})
-        _try_slash(sm, "/createitem 1228 200")
-        _dock_station(sm, 60003760)
-        _, inv_ore = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
+        mine_rep = None
         ore_id = None
-        for it in inv_ore:
-            if int(_get_field(it, "typeID", 0)) == 1228 and int(_get_field(it, "quantity", 0)) >= 100:
-                ore_id = int(_get_field(it, "itemID", 0))
-                break
-        if ore_id:
-            inv_reproc, _ = sm.RemoteSvc("invbroker").MachoBindObject(60003760, None)
-            inv_reproc.Reprocess([ore_id], 60003760)
-        sm.RemoteSvc("timeControl").ClearSessionTimer()
-        sm.RemoteSvc("ship").Board(ship_id)
-        _wait_session_attr("shipid", ship_id, timeout_sec=3.0)
-        _sleep_ms(200)
-        _wait_view_settled(sm)
-        sm.RemoteSvc("timeControl").ClearSessionTimer()
+        reproc_quotes = None
+        reproc_res = None
+        try:
+            if venture_id:
+                try:
+                    sm.RemoteSvc("ship").AssembleShip([venture_id])
+                except Exception:
+                    pass
+                sm.RemoteSvc("timeControl").ClearSessionTimer()
+                sm.RemoteSvc("ship").Board(venture_id)
+                _wait_session_attr("shipid", venture_id, timeout_sec=3.0)
+                _sleep_ms(200)
+                _wait_view_settled(sm)
+                if miner_id:
+                    try:
+                        inv_v, _ = sm.RemoteSvc("invbroker").MachoBindObject(venture_id, None)
+                        inv_v.Add(miner_id, 60003760, flag=27)
+                        dogma_v, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(venture_id, None)
+                        dogma_v.SetModuleOnline(venture_id, miner_id)
+                    except Exception:
+                        pass
+            _undock_ship(sm)
+            active_mine_ship = venture_id or ship_id
+            bp_mine = getattr(sm.GetService("michelle"), "_Michelle__bp", None)
+            if bp_mine is not None:
+                for bid in list(bp_mine.balls.keys()):
+                    slim_m = bp_mine.GetInvItem(bid)
+                    if int(bid) != active_mine_ship and slim_m is not None and int(getattr(slim_m, "categoryID", 0) or 0) == 25:
+                        rock_id = int(bid)
+                        break
+            if not rock_id:
+                try:
+                    b_jita_mine = _get_beyonce(sm, 30000142)
+                    _warp_full(sm, b_jita_mine, 50001249)
+                    sm.RemoteSvc("timeControl").ClearSessionTimer()
+                    sm.RemoteSvc("beyonce").CmdStargateJump(50001249)
+                    _wait_session_attr("solarsystemid2", 30000144, timeout_sec=3.0)
+                    b_perim_mine = _get_beyonce(sm, 30000144)
+                    _ensure_view(sm, "inflight")
+                    _wait_view_settled(sm)
+                    bp_perim = getattr(sm.GetService("michelle"), "_Michelle__bp", None)
+                    belt_id = 40009232
+                    if bp_perim is not None:
+                        for bid in list(bp_perim.balls.keys()):
+                            slim_b = bp_perim.GetInvItem(bid)
+                            if slim_b is not None and int(getattr(slim_b, "groupID", 0) or 0) == 9:
+                                belt_id = int(bid)
+                                break
+                    _warp_full(sm, b_perim_mine, belt_id)
+                    _wait_view_settled(sm)
+                    bp_mine = getattr(sm.GetService("michelle"), "_Michelle__bp", None)
+                    if bp_mine is not None:
+                        for bid in list(bp_mine.balls.keys()):
+                            slim_m = bp_mine.GetInvItem(bid)
+                            if int(bid) != active_mine_ship and slim_m is not None and int(getattr(slim_m, "categoryID", 0) or 0) == 25:
+                                rock_id = int(bid)
+                                break
+                except Exception:
+                    pass
+            if rock_id:
+                try:
+                    sm.RemoteSvc("dogmaIM").AddTarget(rock_id)
+                    if venture_id and miner_id:
+                        dogma_mine, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(venture_id, None)
+                        mine_rep = dogma_mine.Activate(miner_id, "mining", rock_id)
+                except Exception:
+                    pass
+            ipc.request({"cmd": "advance_clock", "secs": 65})
+            if venture_id and miner_id and mine_rep is not None:
+                try:
+                    dogma_mine, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(venture_id, None)
+                    dogma_mine.Deactivate(miner_id)
+                except Exception:
+                    pass
+            if int(_live_session_attr("solarsystemid2", 30000142) or 30000142) == 30000144:
+                b_perim_ret = _get_beyonce(sm, 30000144)
+                _warp_full(sm, b_perim_ret, 50002185)
+                sm.RemoteSvc("timeControl").ClearSessionTimer()
+                sm.RemoteSvc("beyonce").CmdStargateJump(50002185)
+                _wait_session_attr("solarsystemid2", 30000142, timeout_sec=3.0)
+                _ensure_view(sm, "inflight")
+                _wait_view_settled(sm)
+                b_jita_ret = _get_beyonce(sm, 30000142)
+                _warp_full(sm, b_jita_ret, 60003760)
+            _dock_station(sm, 60003760)
+            if venture_id:
+                try:
+                    inv_hangar, _ = sm.RemoteSvc("invbroker").MachoBindObject(60003760, None)
+                    _, ship_ore_items = sm.RemoteSvc("invbroker").MachoBindObject(venture_id, ("List", (), {}))
+                    for it in (ship_ore_items or []):
+                        if int(_get_field(it, "typeID", 0)) in (1228, 1230):
+                            inv_hangar.Add(int(_get_field(it, "itemID", 0)), venture_id)
+                except Exception:
+                    pass
+            _, inv_ore = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
+            for it in inv_ore:
+                if int(_get_field(it, "typeID", 0)) in (1228, 1230) and int(_get_field(it, "quantity", 0)) >= 100:
+                    ore_id = int(_get_field(it, "itemID", 0))
+                    break
+            if not ore_id:
+                _try_slash(sm, "/createitem 1228 200")
+                _, inv_ore = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
+                for it in inv_ore:
+                    if int(_get_field(it, "typeID", 0)) == 1228 and int(_get_field(it, "quantity", 0)) >= 100:
+                        ore_id = int(_get_field(it, "itemID", 0))
+                        break
+            if ore_id:
+                try:
+                    reproc_svc, _ = sm.RemoteSvc("reprocessingSvc").MachoBindObject(60003760, None)
+                    reproc_quotes = reproc_svc.GetQuotes([ore_id], 60003760)
+                    reproc_res = reproc_svc.Reprocess([ore_id], 60003760)
+                except Exception:
+                    pass
+        finally:
+            try:
+                if int(_live_session_attr("solarsystemid2", 30000142) or 30000142) == 30000144:
+                    b_perim_ret = _get_beyonce(sm, 30000144)
+                    _warp_full(sm, b_perim_ret, 50002185)
+                    sm.RemoteSvc("timeControl").ClearSessionTimer()
+                    sm.RemoteSvc("beyonce").CmdStargateJump(50002185)
+                    _wait_session_attr("solarsystemid2", 30000142, timeout_sec=3.0)
+                    _ensure_view(sm, "inflight")
+                    _wait_view_settled(sm)
+                if int(_live_session_attr("stationid", 0) or 0) != 60003760:
+                    if not int(_live_session_attr("stationid", 0) or 0):
+                        b_jita_ret = _get_beyonce(sm, 30000142)
+                        _warp_full(sm, b_jita_ret, 60003760)
+                        _dock_station(sm, 60003760)
+            except Exception:
+                pass
+            _ensure_docked_jita(sm, ipc)
+            try:
+                if int(_live_session_attr("shipid", ship_id) or ship_id) != ship_id:
+                    sm.RemoteSvc("timeControl").ClearSessionTimer()
+                    sm.RemoteSvc("ship").Board(ship_id)
+                    _wait_session_attr("shipid", ship_id, timeout_sec=3.0)
+                    _sleep_ms(200)
+                    _wait_view_settled(sm)
+                sm.RemoteSvc("timeControl").ClearSessionTimer()
+            except Exception:
+                pass
         record(
             "mining_loop",
-            True,
-            "Real V24.01 client boarded Venture (%r), undocked, targeted Veldspar asteroid (%r), cycled mining harvest, docked, and reprocessed ore into minerals"
-            % (venture_id, rock_id),
+            bool(venture_id and miner_id and rock_id and mine_rep is not None and ore_id and reproc_quotes is not None and reproc_res is not None),
+            "Real V24.01 client boarded Venture (%r), fitted & activated Miner I (%r) on asteroid (%r), docked, quoted & reprocessed ore (%r) via reprocessingSvc"
+            % (venture_id, miner_id, rock_id, ore_id),
         )
 
     # 12. pve_combat
@@ -475,19 +592,55 @@ def _execute_all_journeys(cfg, ipc):
         _trace(cfg, "start missions")
         agents_rows = sm.RemoteSvc("agentMgr").GetAgents()
         sec_ag_id = None
-        for r in agents_rows:
+        sec_ag_station_id = 0
+        sec_ag_sys_id = 0
+        for r in (agents_rows or []):
             if int(_get_field(r, "level", 0)) == 1 and int(_get_field(r, "solarSystemID", 0)) == 30000142:
                 sec_ag_id = int(_get_field(r, "agentID", 0))
+                sec_ag_station_id = int(_get_field(r, "stationID", 0) or (60015169 if sec_ag_id == 3020034 else 0))
+                sec_ag_sys_id = int(_get_field(r, "solarSystemID", 0) or 0)
                 break
         if not sec_ag_id and agents_rows:
             sec_ag_id = int(_get_field(agents_rows[0], "agentID", 0))
-        sm.RemoteSvc("agentMgr").MachoBindObject(sec_ag_id, None)
-        lp_offers = sm.RemoteSvc("LPStoreMgr").GetAvailableOffersFromCorp(1000035)
+            sec_ag_station_id = int(_get_field(agents_rows[0], "stationID", 0) or (60015169 if sec_ag_id == 3020034 else 0))
+            sec_ag_sys_id = int(_get_field(agents_rows[0], "solarSystemID", 0) or 0)
+        ag_action = None
+        lp_offers = None
+        moved_ag_station = False
+        try:
+            if sec_ag_station_id and sec_ag_station_id != 60003760 and sec_ag_sys_id == 30000142:
+                _undock_ship(sm)
+                moved_ag_station = True
+                b_ag = _get_beyonce(sm, 30000142)
+                _warp_full(sm, b_ag, sec_ag_station_id)
+                _dock_station(sm, sec_ag_station_id)
+            if sec_ag_id:
+                try:
+                    bound_ag, _ = sm.RemoteSvc("agentMgr").MachoBindObject(sec_ag_id, None)
+                    ag_action = bound_ag.DoAction(2)
+                except Exception:
+                    pass
+            try:
+                lp_offers = sm.RemoteSvc("LPStoreMgr").GetAvailableOffersFromCorp(1000035)
+            except Exception:
+                pass
+        finally:
+            if moved_ag_station:
+                try:
+                    if int(_live_session_attr("stationid", 0) or 0) != 60003760:
+                        if int(_live_session_attr("stationid", 0) or 0):
+                            _undock_ship(sm)
+                        b_ag_ret = _get_beyonce(sm, 30000142)
+                        _warp_full(sm, b_ag_ret, 60003760)
+                        _dock_station(sm, 60003760)
+                except Exception:
+                    pass
+                _ensure_docked_jita(sm, ipc)
         record(
             "missions",
-            agents_rows is not None and len(agents_rows) > 0,
-            "Real V24.01 client queried %d agents via agentMgr.GetAgents, bound agent %r, and queried LPStoreMgr offers (%d)"
-            % (len(agents_rows), sec_ag_id, len(lp_offers or [])),
+            bool(agents_rows and len(agents_rows) > 0 and sec_ag_id and ag_action is not None and lp_offers is not None),
+            "Real V24.01 client queried %d agents via agentMgr.GetAgents, called DoAction(2) on agent %r (station %r), and queried LPStoreMgr offers (%d)"
+            % (len(agents_rows or []), sec_ag_id, sec_ag_station_id, len(lp_offers or [])),
         )
 
     # 14. exploration (probe scan, directional scan, hacking minigame)
@@ -536,7 +689,7 @@ def _execute_all_journeys(cfg, ipc):
             1,
         )
         ipc.request({"cmd": "advance_clock", "secs": 15})
-        sm.RemoteSvc("scanMgr").RequestScans()
+        scan_res = sm.RemoteSvc("scanMgr").RequestScans()
         beyonce_exp = _get_beyonce(sm, 30000142)
         _warp_full(sm, beyonce_exp, "DAT-30000142", stuff_type="scan")
         hack_res = sm.RemoteSvc("hackingMgr").StartNewGameInstance(1870014200)
@@ -546,9 +699,9 @@ def _execute_all_journeys(cfg, ipc):
         _dock_station(sm, 60003760)
         record(
             "exploration",
-            dscan_res is not None and hack_res is not None,
-            "Real V24.01 client executed ConeScan (D-scan results=%d) and hacking minigame StartNewGameInstance + ClickedOnTile"
-            % (len(dscan_res) if isinstance(dscan_res, (list, tuple)) else 1,),
+            bool(dscan_res is not None and len(probe_pids) > 0 and scan_res is not None and hack_res is not None),
+            "Real V24.01 client executed ConeScan (D-scan=%d), launched %d probes & RequestScans (%d), and ran hacking minigame"
+            % (len(dscan_res) if isinstance(dscan_res, (list, tuple)) else 1, len(probe_pids), len(scan_res) if isinstance(scan_res, (list, tuple)) else 1),
         )
 
     # 15. wormholes_filaments
@@ -821,10 +974,13 @@ def _execute_all_journeys(cfg, ipc):
             sm.RemoteSvc("timeControl").ClearSessionTimer()
         except Exception:
             pass
+        corp_info = sm.RemoteSvc("corpRegistry").GetCorporation(corp_id)
+        ali_info = sm.RemoteSvc("allianceRegistry").GetAlliance(ali_id)
+        wars_rep = sm.RemoteSvc("warsInfoMgr").GetWarsByOwners([corp_id, ali_id])
         record(
             "corporation",
-            corp_id > 0 and ali_id > 0,
-            "Real V24.01 client founded corporation %d, rented Jita 4-4 office (%r), and created alliance %d"
+            corp_id > 0 and ali_id > 0 and corp_info is not None and ali_info is not None and wars_rep is not None,
+            "Real V24.01 client founded corp %d, rented office (%r), created alliance %d, and verified GetCorporation/GetAlliance/GetWarsByOwners"
             % (corp_id, office_res, ali_id),
         )
 
@@ -966,10 +1122,13 @@ def _execute_all_journeys(cfg, ipc):
         _wait_session_attr("warfactionid", 500001, timeout_sec=3.0)
         fw_stats = sm.RemoteSvc("facWarMgr").GetStats_Character()
         fw_occ = sm.RemoteSvc("fwWarzoneSolarsystem").GetLocalOccupationState(30000142)
+        fw_warzones = sm.RemoteSvc("fwWarzoneSolarsystem").GetAllWarzones()
+        fw_states = sm.RemoteSvc("fwWarzoneSolarsystem").GetAllWarzonesOccupationStates()
         record(
             "sovereignty_fw",
-            fw_stats is not None and fw_occ is not None,
-            "Real V24.01 client enlisted in Caldari Factional Warfare (factionID=500001) and queried character FW stats & warzone occupation state",
+            fw_stats is not None and fw_occ is not None and bool(fw_warzones) and fw_states is not None,
+            "Real V24.01 client enlisted in Caldari FW (factionID=500001) and queried stats, local occupation, GetAllWarzones (%d), and warzone states"
+            % (len(fw_warzones) if isinstance(fw_warzones, (list, tuple, dict)) else 1,),
         )
 
     # 24. daily_goals_events
@@ -978,19 +1137,23 @@ def _execute_all_journeys(cfg, ipc):
         pgw = _sync_quasar_gateway(sm, char_id) or pgw or sm.GetService("publicGatewaySvc")
         gw_obj = getattr(pgw, "publicGateway", None)
         broker_det = gw_obj.get_request_broker_details() if gw_obj is not None and hasattr(gw_obj, "get_request_broker_details") else {}
-        res_dg = broker_det or bool(pgw.is_available())
+        goals_cur = None
+        goal_prog = None
         try:
             from dailygoals.client.goalMessenger import DailyGoalMessenger
-            goals_cur = DailyGoalMessenger.get_instance().get_current_goals()
-            if goals_cur is not None:
-                res_dg = goals_cur
+            goals_cur = DailyGoalMessenger.get_instance(pgw).get_current_goals()
+        except Exception:
+            pass
+        try:
+            goal_prog = sm.RemoteSvc("seasonManager").get_character_progress_by_character_id(2)
         except Exception:
             pass
         ops_cat = sm.RemoteSvc("operationsManager").can_character_play_the_tutorial()
+        res_dg = goals_cur or broker_det or bool(pgw.is_available())
         record(
             "daily_goals_events",
-            pgw.is_available() and ops_cat is not None,
-            "Real V24.01 client connected Quasar publicGatewaySvc HTTP/2 gRPC channel (%r) and queried AIR opportunities/operations state"
+            bool(pgw.is_available() and ops_cat is not None and goals_cur and goal_prog is not None),
+            "Real V24.01 client connected Quasar publicGatewaySvc HTTP/2 gRPC channel (%r), queried DailyGoalMessenger goals & AIR operations state"
             % (res_dg,),
         )
 

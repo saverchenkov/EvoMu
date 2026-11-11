@@ -390,10 +390,15 @@ class IpcCoordinator(object):
             return {"ok": True, "saw_ship": saw or len(updates2) > 0, "updates": len(updates2)}
         if cmd == "c2_complete_trade":
             tid = int(req.get("trade_id", 0))
-            self.sm2.RemoteSvc("trademgr").MakeOffer(tid) if tid > 0 else self.sm2.RemoteSvc("trademgr").MakeOffer()
-            return {"ok": True}
+            if tid <= 0:
+                return {"ok": False, "error": "missing trade_id"}
+            trade_rep = self.sm2.RemoteSvc("trademgr").MakeOffer(tid, True)
+            return {"ok": trade_rep is not None, "trade_id": tid}
         if cmd == "c2_buy_tritanium":
-            self.sm2.RemoteSvc("marketProxy").PlaceBuyOrder(60003760, 34, 100.0, 5, -1, 1, 90, False)
+            mkt_tid = int(req.get("type_id", 34))
+            mkt_price = float(req.get("price", 100.0))
+            mkt_qty = int(req.get("qty", 5))
+            self.sm2.RemoteSvc("marketProxy").PlaceBuyOrder(60003760, mkt_tid, mkt_price, mkt_qty, -1, 1, 90, False)
             return {"ok": True}
         if cmd == "c2_process_contracts":
             cp = self.sm2.RemoteSvc("contractProxy")
@@ -1133,6 +1138,7 @@ def main():
     )
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--bridge-port", type=int, default=0, help="Existing server bridge port (0 = spawn server)")
+    ap.add_argument("--xmpp-port", type=int, default=0, help="XMPP server port when spawning server (0 = allocate free port)")
     ap.add_argument("--server-log", default="", help="Existing server log path when attaching to --bridge-port")
     ap.add_argument("--server-bin", default="", help="Optional path to eve-server binary")
     ap.add_argument("--client-app", default=DEFAULT_CLIENT_APP, help="Path to V24.01 EVE.app bundle")
@@ -1163,6 +1169,7 @@ def main():
     macho_port = None
     esi_port = 26004
     quasar_grpc_port = 26005
+    xmpp_port = args.xmpp_port if args.xmpp_port > 0 else 5222
     bridge_port = args.bridge_port
     real_outcomes = {}
     bridge_outcomes = {}
@@ -1172,6 +1179,7 @@ def main():
             bridge_port = find_free_port()
             esi_port = find_free_port()
             quasar_grpc_port = find_free_port()
+            xmpp_port = args.xmpp_port if args.xmpp_port > 0 else find_free_port()
             sde_path = os.environ.get("EVOMU_SDE_PATH", "")
             if not sde_path or not os.path.exists(sde_path):
                 cand = os.path.join(REPO_ROOT, "data", "evomu_sde.sqlite")
@@ -1189,7 +1197,7 @@ def main():
             with open(cfg_path, "w") as cf:
                 cf.write(
                     'bind_address = "127.0.0.1"\nmacho_port = %d\nbridge_port = %d\n'
-                    'esi_port = %d\nquasar_grpc_port = %d\nsde_path = "%s"\nworld_db_path = "%s"\n\n'
+                    'esi_port = %d\nquasar_grpc_port = %d\nxmpp_port = %d\nsde_path = "%s"\nworld_db_path = "%s"\n\n'
                     '[feature_flags]\nenable_quasar_gateway = true\nenable_esi_http = true\n'
                     'enable_living_world = true\nseed_demo = true\nfree_fast_checkout_plex = true\n'
                     'starter_plex_balance = 50000\n\n'
@@ -1202,7 +1210,7 @@ def main():
                     'character_id = 90000001\ncharacter_name = "Demo Pilot"\n\n'
                     '[[admin_accounts]]\nusername = "other"\npassword_token = "other-secret"\n'
                     'character_id = 90000004\ncharacter_name = "ISD Other"\n'
-                    % (macho_port, bridge_port, esi_port, quasar_grpc_port, sde_path, db_path)
+                    % (macho_port, bridge_port, esi_port, quasar_grpc_port, xmpp_port, sde_path, db_path)
                 )
             srv_bin = find_server_binary(args.server_bin)
             if srv_bin is None:
@@ -1212,6 +1220,7 @@ def main():
             srv_env["EVOMU_CONFIG_PATH"] = cfg_path
             srv_env["EVOMU_SDE_PATH"] = sde_path
             srv_env["EVOMU_QUASAR_DESCRIPTORS_PATH"] = qdesc_path
+            srv_env["EVOMU_XMPP_PORT"] = str(xmpp_port)
             server_proc = subprocess.Popen(
                 [srv_bin],
                 cwd=REPO_ROOT,
@@ -1222,6 +1231,8 @@ def main():
             _SPAWNED.append(server_proc)
             if not wait_for_tcp(args.host, bridge_port, timeout_sec=20.0):
                 raise RuntimeError("Timed out waiting for eve-server bridge port %d" % bridge_port)
+            if not wait_for_tcp(args.host, xmpp_port, timeout_sec=10.0):
+                raise RuntimeError("Timed out waiting for eve-server XMPP port %d" % xmpp_port)
         else:
             if not os.path.exists(server_log_path):
                 with open(server_log_path, "w") as sf:
@@ -1243,6 +1254,7 @@ def main():
                 "macho_port": macho_port,
                 "esi_port": esi_port,
                 "quasar_grpc_port": quasar_grpc_port,
+                "xmpp_port": xmpp_port,
                 "user": user_pw[0],
                 "password": pw,
                 "char_id": int(args.auto_select_character or 90000001),

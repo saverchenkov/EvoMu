@@ -10,6 +10,7 @@ import hashlib
 import json
 import pickle
 import sqlite3
+import struct
 import subprocess
 import zipfile
 import zlib
@@ -266,6 +267,7 @@ for tid, t in types_raw.iteritems():
         'tech_level': getattr(t, 'techLevel', None),
         'variation_parent_type_id': getattr(t, 'variationParentTypeID', None),
         'wreck_type_id': getattr(t, 'wreckTypeID', None),
+        'isis_group_id': getattr(t, 'isisGroupID', None),
         'published': int(bool(getattr(t, 'published', 0))),
         'attrs': td_entry[0] if td_entry else [],
         'effs': td_entry[1] if td_entry else [],
@@ -1087,6 +1089,7 @@ def build_types_wormholes_and_blueprints(
                 t.get("tech_level"),
                 default_eff_id,
                 tdesc,
+                t.get("isis_group_id"),
             )
         )
 
@@ -1117,3 +1120,62 @@ def build_types_wormholes_and_blueprints(
         )
 
     return type_rows, wormhole_rows, bp_rows
+
+
+def _fsd_dict_entries(buf: bytes, pos: int, item_size: int) -> list[tuple[int, int]]:
+    """Parses an FSD pickled-schema-header dict footer into `(key, value_offset)` pairs."""
+    if item_size < 8 or pos + 4 > len(buf):
+        return []
+    body_start = pos + 4
+    body_len = struct.unpack_from("<I", buf, pos)[0]
+    body_end = body_start + body_len
+    if body_end > len(buf) or body_end < body_start + 4:
+        return []
+    footer_len_pos = body_end - 4
+    footer_size = struct.unpack_from("<I", buf, footer_len_pos)[0]
+    footer = footer_len_pos - footer_size
+    if footer < body_start or footer + 4 > footer_len_pos:
+        return []
+    cnt = struct.unpack_from("<I", buf, footer)[0]
+    entries: list[tuple[int, int]] = []
+    for i in range(cnt):
+        at = footer + 4 + i * item_size
+        if at + 8 > footer_len_pos:
+            break
+        key, raw_off = struct.unpack_from("<II", buf, at)
+        val_off = body_start + raw_off
+        if val_off <= body_end:
+            entries.append((key, val_off))
+    return entries
+
+
+def extract_belt_asteroid_counts(raw: bytes) -> list[tuple[int, dict[int, int]]]:
+    """Decodes `res:/staticdata/asteroidcountbytypeidbeltid.static` (`belt_id -> {type_id: count}`)."""
+    if len(raw) < 8:
+        raise ValueError("asteroidcountbytypeidbeltid.static buffer too short")
+    sch_len = struct.unpack_from("<I", raw, 0)[0]
+    root_pos = 4 + sch_len
+    entries = _fsd_dict_entries(raw, root_pos, 12)
+    out: list[tuple[int, dict[int, int]]] = []
+    for belt_id, bpos in entries:
+        inner = _fsd_dict_entries(raw, bpos, 8)
+        counts: dict[int, int] = {}
+        for tid, vpos in inner:
+            if vpos + 4 <= len(raw):
+                counts[int(tid)] = int(struct.unpack_from("<I", raw, vpos)[0])
+        out.append((int(belt_id), dict(sorted(counts.items()))))
+    out.sort(key=lambda pair: pair[0])
+    return out
+
+
+def extract_system_asteroid_types(raw: bytes) -> list[tuple[int, list[int]]]:
+    """Decodes `res:/staticdata/asteroidtypesbysolarsystemid.pickle` (`system_id -> sorted [type_id]`)."""
+    loaded = pickle.loads(raw, encoding="latin1")
+    if not isinstance(loaded, dict):
+        raise ValueError("asteroidtypesbysolarsystemid.pickle root must be a dict")
+    out: list[tuple[int, list[int]]] = []
+    for sys_id, tids in loaded.items():
+        clean_tids = sorted({int(t) for t in tids})
+        out.append((int(sys_id), clean_tids))
+    out.sort(key=lambda pair: pair[0])
+    return out

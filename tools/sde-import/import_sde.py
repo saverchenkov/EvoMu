@@ -31,7 +31,9 @@ from sde_extractors import (
     build_cfsd_runner,
     build_types_wormholes_and_blueprints,
     build_v24_npc_spawn_groups,
+    extract_belt_asteroid_counts,
     extract_celestials_and_stations,
+    extract_system_asteroid_types,
     verify_sde_resources,
 )
 
@@ -89,6 +91,8 @@ def run_import(
         )
 
     fsd_data = json.loads(py2_out_json.read_text(encoding="utf-8"))
+    if not force_extract and fsd_data.get("types") and "isis_group_id" not in fsd_data["types"][0]:
+        return run_import(shared_cache, out_db, manifest_path, force_extract=True)
     catalog = json.loads(STATIC_CATALOG.read_text(encoding="utf-8"))
     rfi_map = {}
     for line in rfi_path.read_text(encoding="utf-8", errors="ignore").splitlines():
@@ -135,6 +139,15 @@ def run_import(
     skinlicenses_cache = read_sqlite_cache("res:/staticdata/skinlicenses.static")
     skinmaterials_cache = read_sqlite_cache("res:/staticdata/skinmaterials.static")
 
+    belt_counts_raw = (
+        res_dir / cat_by_path["res:/staticdata/asteroidcountbytypeidbeltid.static"]["cdn_relative_path"]
+    ).read_bytes()
+    belt_asteroid_counts = extract_belt_asteroid_counts(belt_counts_raw)
+    system_types_raw = (
+        res_dir / cat_by_path["res:/staticdata/asteroidtypesbysolarsystemid.pickle"]["cdn_relative_path"]
+    ).read_bytes()
+    system_asteroid_types = extract_system_asteroid_types(system_types_raw)
+
     # Build lookup maps for naming
     sys_name_by_id = {}
     sys_const_by_id = {}
@@ -173,8 +186,14 @@ def run_import(
 
     # Create data/evomu_sde.sqlite
     out_db.parent.mkdir(parents=True, exist_ok=True)
-    if out_db.exists():
-        out_db.unlink()
+    for stale_path in [
+        out_db,
+        Path(f"{out_db}-wal"),
+        Path(f"{out_db}-shm"),
+        *out_db.parent.glob(f"{out_db.name}.tmp*"),
+    ]:
+        if stale_path.exists():
+            stale_path.unlink()
 
     conn = sqlite3.connect(str(out_db))
     conn.execute("PRAGMA journal_mode = WAL")
@@ -236,7 +255,8 @@ def run_import(
             meta_level INTEGER,
             tech_level INTEGER,
             default_effect_id INTEGER,
-            description TEXT NOT NULL DEFAULT ''
+            description TEXT NOT NULL DEFAULT '',
+            isis_group_id INTEGER
         );
         CREATE TABLE sde_dogma_attributes (
             attribute_id INTEGER PRIMARY KEY,
@@ -575,6 +595,14 @@ def run_import(
             type_id INTEGER NOT NULL,
             PRIMARY KEY (dungeon_id, type_id)
         );
+        CREATE TABLE sde_belt_asteroid_counts (
+            belt_id INTEGER PRIMARY KEY,
+            counts_json TEXT NOT NULL
+        );
+        CREATE TABLE sde_system_asteroid_types (
+            system_id INTEGER PRIMARY KEY,
+            type_ids_json TEXT NOT NULL
+        );
         CREATE TABLE sde_dynamic_item_attributes (
             mutaplasmid_type_id INTEGER PRIMARY KEY,
             mappings_json TEXT NOT NULL,
@@ -652,7 +680,7 @@ def run_import(
             fsd_data["types"], blueprints_cache, label
         )
         conn.executemany(
-            "INSERT INTO sde_types VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO sde_types VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             type_rows,
         )
 
@@ -1150,6 +1178,7 @@ def run_import(
             "INSERT INTO sde_dungeon_gas_types VALUES (?, ?)",
             [(r["dungeon_id"], r["type_id"]) for r in fsd_data["dungeon_gas_types"]],
         )
+        write_belt_asteroid_tables(conn, belt_asteroid_counts, system_asteroid_types)
         conn.executemany(
             "INSERT INTO sde_dynamic_item_attributes VALUES (?, ?, ?)",
             [
@@ -1196,6 +1225,11 @@ def run_import(
         "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
     ).fetchall():
         table_counts[tname] = int(conn.execute(f'SELECT count(*) FROM "{tname}"').fetchone()[0])
+    # Finalize WAL back into a self-contained DELETE-journal SQLite file so
+    # read-only `mode=ro&immutable=1` readers never hit SQLITE_CANTOPEN on
+    # missing `-wal` / `-shm` sidecars after `conn.close()`.
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    conn.execute("PRAGMA journal_mode = DELETE")
     conn.close()
 
     manifest_resources = [
@@ -1224,6 +1258,34 @@ def run_import(
     for tname, cnt in table_counts.items():
         print(f"  {tname:32s}: {cnt:10,d} rows")
     return manifest
+
+
+def write_belt_asteroid_tables(
+    conn: sqlite3.Connection,
+    belt_asteroid_counts: list[tuple[int, dict[int, int]]],
+    system_asteroid_types: list[tuple[int, list[int]]],
+) -> None:
+    """Inserts `sde_belt_asteroid_counts` and `sde_system_asteroid_types` rows."""
+    conn.executemany(
+        "INSERT INTO sde_belt_asteroid_counts VALUES (?, ?)",
+        [
+            (
+                belt_id,
+                json.dumps(
+                    {str(tid): cnt for tid, cnt in sorted(counts.items())},
+                    separators=(",", ":"),
+                ),
+            )
+            for belt_id, counts in belt_asteroid_counts
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO sde_system_asteroid_types VALUES (?, ?)",
+        [
+            (sys_id, json.dumps(sorted(set(type_ids)), separators=(",", ":")))
+            for sys_id, type_ids in system_asteroid_types
+        ],
+    )
 
 
 def main() -> int:

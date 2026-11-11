@@ -19,6 +19,8 @@ sys.dont_write_bytecode = True
 _HOOKED_LOGMODULE = False
 _HOOKED_TARGETS = set()
 _HOOKED_XMPP_PREFS = False
+_HOOKED_XMPP_PORT = False
+_HOOKED_TYPELIST_PRELOAD = False
 _DRIVER_SCHEDULED = False
 _META_HOOK_INSTALLED = False
 _RECENT_EXCEPTIONS = []
@@ -198,6 +200,113 @@ def _install_xmpp_plaintext_guard():
             pass
 
 
+def _resolve_xmpp_port():
+    """Return configured non-default XMPP TCP port (or None to keep default 5222)."""
+    cfg_path = os.environ.get("EVOMU_INCLIENT_CFG", "")
+    if cfg_path and os.path.exists(cfg_path):
+        try:
+            import json
+            with open(cfg_path, "r") as f:
+                p = int(json.load(f).get("xmpp_port", 0) or 0)
+            if 1 <= p <= 65535:
+                return p
+        except Exception:
+            pass
+    for env_key in ("EVOMU_XMPP_PORT", "EVEMU_XMPP_PORT"):
+        raw = os.environ.get(env_key, "").strip()
+        if raw.isdigit():
+            p = int(raw)
+            if 1 <= p <= 65535:
+                return p
+    try:
+        sm = getattr(__builtin__, "sm", None)
+        if sm is not None:
+            mn = sm.GetService("machoNet")
+            gcfg = mn.GetGlobalConfig() if mn is not None and hasattr(mn, "GetGlobalConfig") else {}
+            if hasattr(gcfg, "get"):
+                val = gcfg.get("ejabberd_client_port") or gcfg.get("ejabberdPort")
+                if val is not None:
+                    p = int(val)
+                    if 1 <= p <= 65535:
+                        return p
+    except Exception:
+        pass
+    return None
+
+
+def _install_xmpp_port_guard():
+    """Monkey-patch `xmpp.xmppConnection.XmppConnection.__init__` so `self.port`
+    uses `_resolve_xmpp_port()` instead of the hardcoded `self.port = 5222` in V24.01."""
+    global _HOOKED_XMPP_PORT
+    if _HOOKED_XMPP_PORT:
+        return
+    xc_mod = sys.modules.get("xmpp.xmppConnection")
+    if xc_mod is None:
+        return
+    xc_cls = getattr(xc_mod, "XmppConnection", None)
+    if xc_cls is None:
+        return
+    orig_init = getattr(xc_cls, "__init__", None)
+    if orig_init is None or getattr(orig_init, "_evomu_xmpp_port_patched", False):
+        _HOOKED_XMPP_PORT = True
+        return
+
+    def _patched_init(self, *args, **kwargs):
+        orig_init(self, *args, **kwargs)
+        port = _resolve_xmpp_port()
+        if port is not None:
+            self.port = int(port)
+
+    _patched_init._evomu_xmpp_port_patched = True
+    try:
+        xc_cls.__init__ = _patched_init
+        _HOOKED_XMPP_PORT = True
+    except Exception:
+        pass
+
+
+def _install_fsd_typelist_preload_hook():
+    """Ensure BuiltDataLoader.GetData never returns None when asynchronous loading
+    has not finished yet, and eagerly pre-load evetypes.storages.TypeListLoader (#796, #797)."""
+    global _HOOKED_TYPELIST_PRELOAD
+    if _HOOKED_TYPELIST_PRELOAD:
+        return
+    bdl_mod = sys.modules.get("fsdBuiltData.common.base")
+    if bdl_mod is not None:
+        bdl_cls = getattr(bdl_mod, "BuiltDataLoader", None)
+        if bdl_cls is not None and not getattr(bdl_cls, "_evomu_getdata_patched", False):
+            orig_get_data = getattr(bdl_cls, "GetData", None)
+            if callable(orig_get_data):
+                def _evomu_safe_get_data(cls):
+                    data = orig_get_data.im_func(cls) if hasattr(orig_get_data, "im_func") else orig_get_data()
+                    if data is None:
+                        load_bin = getattr(cls, "_BuiltDataLoader__LoadBinary", None)
+                        if callable(load_bin):
+                            try:
+                                load_bin(False)
+                            except Exception:
+                                pass
+                            data = getattr(cls, "_BuiltDataLoader__data", None)
+                    return data
+                try:
+                    bdl_cls.GetData = classmethod(_evomu_safe_get_data)
+                    bdl_cls._evomu_getdata_patched = True
+                except Exception:
+                    pass
+    et_storages = sys.modules.get("evetypes.storages")
+    if et_storages is not None:
+        tll = getattr(et_storages, "TypeListLoader", None)
+        if tll is not None:
+            try:
+                if getattr(tll, "_BuiltDataLoader__data", None) is None:
+                    load_bin = getattr(tll, "_BuiltDataLoader__LoadBinary", None)
+                    if callable(load_bin):
+                        load_bin(False)
+                _HOOKED_TYPELIST_PRELOAD = True
+            except Exception:
+                pass
+
+
 def _maybe_schedule_driver_on_main_thread():
     global _DRIVER_SCHEDULED
     if _DRIVER_SCHEDULED:
@@ -212,6 +321,7 @@ def _maybe_schedule_driver_on_main_thread():
             return
     except Exception:
         return
+    _install_fsd_typelist_preload_hook()
     _DRIVER_SCHEDULED = True
     try:
         if os.environ.get("EVOMU_PLAYTESTER_PORT") or os.environ.get("EVOMU_PLAYTESTER_CFG"):
@@ -228,6 +338,8 @@ class _EvomuMetaHook(object):
     def find_module(self, fullname, path=None):
         _install_logmodule_hook()
         _install_xmpp_plaintext_guard()
+        _install_xmpp_port_guard()
+        _install_fsd_typelist_preload_hook()
         _maybe_schedule_driver_on_main_thread()
         return None
 
