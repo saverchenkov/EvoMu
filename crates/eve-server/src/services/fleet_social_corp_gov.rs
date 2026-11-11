@@ -250,6 +250,7 @@ pub(super) fn handle_add_corporation(
                 share_count: 1_000,
             }],
         );
+        snap.seed_default_corp_titles(cid);
         let released = super::fleet_social_corps::record_corp_join_in_snap(snap, char_id, old_corp_id, cid, now_unix);
         Ok((old_corp_id, cid, released))
     });
@@ -774,24 +775,18 @@ pub(super) fn handle_corp_gov(
 
         ("corpRegistry", "UpdateTitle") | ("corpRegistry", "UpdateTitles") => {
             if !has_director { return deny_role("Updating corporation titles requires CEO or Director role"); }
-            let title_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1).clamp(1, 16);
-            let title_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("Squad Leader");
-            let role_arg = |idx: usize| -> u64 {
-                (args.get(idx).and_then(|a| a.as_i64()).unwrap_or(0) as u64) & !corp_roles::ROLE_DIRECTOR
-            };
-            let roles_mask = role_arg(2);
-            let grantable_mask = role_arg(3);
-            let roles_hq_mask = role_arg(4);
-            let grantable_hq_mask = role_arg(5);
-            let roles_base_mask = role_arg(6);
-            let grantable_base_mask = role_arg(7);
-            let roles_other_mask = role_arg(8);
-            let grantable_other_mask = role_arg(9);
-            let prev = match ctx.db.try_with_mut_snapshot(|snap| {
+            let rows_to_update = parse_title_update_rows(args);
+            let changes_out = match ctx.db.try_with_mut_snapshot(|snap| {
+                if snap.corporations.contains_key(&corp_id) {
+                    snap.seed_default_corp_titles(corp_id);
+                }
+                let mut results = Vec::with_capacity(rows_to_update.len());
+                for (title_id, title_name, masks) in &rows_to_update {
+                    let (title_id, title_name, [roles_mask, grantable_mask, roles_hq_mask, grantable_hq_mask, roles_base_mask, grantable_base_mask, roles_other_mask, grantable_other_mask]) = (*title_id, title_name.as_str(), *masks);
                 let state = snap.corp_governance.entry(corp_id).or_default();
                 let prev = state.titles.insert(title_id, (title_name.to_string(), roles_mask));
                 let prev_rmask = prev.as_ref().map_or(0, |&(_, r)| r);
-                let bit = if (1..=16).contains(&title_id) { 1u64 << ((title_id - 1) as u64) } else { 0 };
+                let bit = eve_db::snapshot_ext::title_id_to_bit(title_id);
                 let newly_delayed = (roles_mask & !prev_rmask) & corp_roles::CORP_DELAYED_DIVISION_ROLE_MASK;
                 let dropped = (prev_rmask & !roles_mask) != 0;
                 if newly_delayed != 0 || dropped {
@@ -826,21 +821,27 @@ pub(super) fn handle_corp_gov(
                     grantable_roles_at_other: dec(grantable_other_mask),
                 });
                 titles.sort_by_key(|t| t.title_id);
-                Ok::<_, BridgeRpcError>(prev)
+                    results.push((title_id, title_name.to_string(), roles_mask, prev));
+                }
+                Ok::<_, BridgeRpcError>(results)
             }) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let mut last_ret = (1_i64, String::new(), 0_u64);
+            for (title_id, title_name, roles_mask, prev) in changes_out {
             let (old_name, old_roles) = prev.map_or((PyRep::None, PyRep::Integer(0)), |(n, r)| (PyRep::String(n), PyRep::Integer(r as i64)));
             let change = PyRep::Dict(vec![
                 (PyRep::String(("titleName").into()), PyRep::Tuple(vec![old_name, PyRep::String(title_name.to_string())])),
                 (PyRep::String(("roles").into()), PyRep::Tuple(vec![old_roles, PyRep::Integer(roles_mask as i64)])),
             ]);
             ctx.notify(NotificationTarget::Corporation(corp_id), "OnTitleChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(title_id), change]);
+                last_ret = (title_id, title_name, roles_mask);
+            }
             Some(Ok(PyRep::keyval([
-                ("titleID", PyRep::Integer(title_id)),
-                ("titleName", PyRep::String(title_name.to_string())),
-                ("roles", PyRep::Integer(roles_mask as i64)),
+                ("titleID", PyRep::Integer(last_ret.0)),
+                ("titleName", PyRep::String(last_ret.1)),
+                ("roles", PyRep::Integer(last_ret.2 as i64)),
             ])))
         }
 
@@ -857,7 +858,7 @@ pub(super) fn handle_corp_gov(
                 if let Some((_, prev_rmask)) = prev {
                     if prev_rmask != 0 {
                         if let Some(state) = snap.corp_governance.get_mut(&corp_id) {
-                            let bit = if (1..=16).contains(&title_id) { 1u64 << ((title_id - 1) as u64) } else { 0 };
+                            let bit = eve_db::snapshot_ext::title_id_to_bit(title_id);
                             let holders: Vec<i64> = state
                                 .member_titles
                                 .iter()
@@ -1579,6 +1580,131 @@ fn encode_corp_roles(names: &[String]) -> u64 {
     mask
 }
 
+const TITLE_ROLE_COLS: [&str; 8] = [
+    "roles",
+    "grantableRoles",
+    "rolesAtHQ",
+    "grantableRolesAtHQ",
+    "rolesAtBase",
+    "grantableRolesAtBase",
+    "rolesAtOther",
+    "grantableRolesAtOther",
+];
+
+pub(super) fn parse_title_row_cells(cols: Option<&[String]>, cells: &[PyRep]) -> Option<(i64, String, [u64; 8])> {
+    let col_idx = |name: &str, default_idx: usize| -> usize {
+        cols.and_then(|c| c.iter().position(|n| n == name)).unwrap_or(default_idx)
+    };
+    let tid = cells.get(col_idx("titleID", 0)).and_then(PyRep::as_i64)?;
+    if tid <= 0 {
+        return None;
+    }
+    let tname = cells
+        .get(col_idx("titleName", 1))
+        .and_then(PyRep::as_str)
+        .unwrap_or("")
+        .to_string();
+    let mut masks = [0u64; 8];
+    for (i, col_name) in TITLE_ROLE_COLS.iter().enumerate() {
+        let idx = col_idx(col_name, i + 2);
+        masks[i] = (cells.get(idx).and_then(PyRep::as_i64).unwrap_or(0) as u64)
+            & !corp_roles::ROLE_DIRECTOR;
+    }
+    Some((tid, tname, masks))
+}
+
+pub(super) fn parse_title_dict_entry(entry: &PyRep) -> Option<(i64, String, [u64; 8])> {
+    let tid = entry.dict_get("titleID").and_then(PyRep::as_i64)?;
+    if tid <= 0 {
+        return None;
+    }
+    let tname = entry
+        .dict_get("titleName")
+        .and_then(PyRep::as_str)
+        .unwrap_or("")
+        .to_string();
+    let mut masks = [0u64; 8];
+    for (i, col_name) in TITLE_ROLE_COLS.iter().enumerate() {
+        masks[i] = (entry.dict_get(col_name).and_then(PyRep::as_i64).unwrap_or(0) as u64)
+            & !corp_roles::ROLE_DIRECTOR;
+    }
+    Some((tid, tname, masks))
+}
+
+pub(super) fn parse_title_update_rows(args: &[PyRep]) -> Vec<(i64, String, [u64; 8])> {
+    if let Some(first) = args.first() {
+        match first {
+            PyRep::Rowset { columns, rows } => {
+                let out: Vec<_> = rows
+                    .iter()
+                    .filter_map(|r| parse_title_row_cells(Some(columns), r))
+                    .collect();
+                if !out.is_empty() {
+                    return out;
+                }
+            }
+            PyRep::Object { args: obj_args, .. } => {
+                if let (
+                    Some(PyRep::List(hdr) | PyRep::Tuple(hdr)),
+                    Some(PyRep::List(lines) | PyRep::Tuple(lines)),
+                ) = (obj_args.dict_get("header"), obj_args.dict_get("lines"))
+                {
+                    let cols: Vec<String> = hdr
+                        .iter()
+                        .filter_map(|c| c.as_str().map(String::from))
+                        .collect();
+                    let out: Vec<_> = lines
+                        .iter()
+                        .filter_map(|line| match line {
+                            PyRep::List(cells) | PyRep::Tuple(cells) => {
+                                parse_title_row_cells(Some(&cols), cells)
+                            }
+                            _ => parse_title_dict_entry(line),
+                        })
+                        .collect();
+                    if !out.is_empty() {
+                        return out;
+                    }
+                }
+                if let Some(single) = parse_title_dict_entry(first) {
+                    return vec![single];
+                }
+            }
+            PyRep::List(entries) | PyRep::Tuple(entries) => {
+                let out: Vec<_> = entries
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        PyRep::List(cells) | PyRep::Tuple(cells) => {
+                            parse_title_row_cells(None, cells)
+                        }
+                        _ => parse_title_dict_entry(entry),
+                    })
+                    .collect();
+                if !out.is_empty() {
+                    return out;
+                }
+            }
+            _ => {
+                if let Some(single) = parse_title_dict_entry(first) {
+                    return vec![single];
+                }
+            }
+        }
+    }
+    let title_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1).max(1);
+    let title_name = args
+        .get(1)
+        .and_then(|a| a.as_str())
+        .unwrap_or("Squad Leader")
+        .to_string();
+    let mut masks = [0u64; 8];
+    for i in 0..8 {
+        masks[i] = (args.get(i + 2).and_then(|a| a.as_i64()).unwrap_or(0) as u64)
+            & !corp_roles::ROLE_DIRECTOR;
+    }
+    vec![(title_id, title_name, masks)]
+}
+
 fn handle_get_titles(
     ctx: &ServerContext,
     corp_id: i64,
@@ -1586,6 +1712,11 @@ fn handle_get_titles(
     let mut by_id: std::collections::BTreeMap<i64, (String, [u64; 8])> =
         std::collections::BTreeMap::new();
     ctx.db.with_snapshot(|snap| {
+        if snap.corporations.contains_key(&corp_id) {
+            for i in 0..16 {
+                by_id.insert(1i64 << i, (String::new(), [0; 8]));
+            }
+        }
         if let Some(entries) = snap.corp_titles.get(&corp_id) {
             for t in entries {
                 by_id.insert(
@@ -1671,3 +1802,7 @@ fn handle_get_recruiters(
 #[cfg(test)]
 #[path = "fleet_social_corp_gov_tests.rs"]
 pub(crate) mod fleet_social_corp_gov_tests;
+
+#[cfg(test)]
+#[path = "fleet_social_corp_gov_edges_tests.rs"]
+mod fleet_social_corp_gov_edges_tests;

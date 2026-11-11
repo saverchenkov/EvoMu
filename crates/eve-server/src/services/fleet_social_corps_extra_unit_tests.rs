@@ -433,7 +433,7 @@ fn applications_leave_kick_war_blockers_and_wallet_division_take_bits() {
     ctx.db.with_mut_snapshot(|s| {
         let c = s.corporations.get_mut(&98_000_001).unwrap();
         c.members.insert(90_000_002);
-        c.member_roles.insert(90_000_002, 1u64 << 20); // div 1 take bit only
+        c.member_roles.insert(90_000_002, eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]); // div 1 take bit only
     });
     let div_xfer = call_corps(
         &ctx,

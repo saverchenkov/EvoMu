@@ -555,10 +555,12 @@ async fn shared_bookmark_creator_revoked_or_view_only_cannot_bypass_acl() {
     let creator_id = 100_000_031_i64;
     let corp_id = 1_000_009_i64;
     let other_corp_id = 1_000_010_i64;
-    let mut owner_sess = make_session(owner_id, corp_id, 0);
+    let mut owner_sess = make_session(owner_id, corp_id, 1);
     let mut creator_sess = make_session(creator_id, other_corp_id, 0);
 
-    // Owner creates shared folder with an ACL that initially gives creator_id Use access via char_acl
+    // Owner creates shared folder with access groups: creator_id initially has Use access via use_group_id
+    let use_gid = 910_001_i64;
+    let view_gid = 910_002_i64;
     let added = call_agbm(
         &ctx,
         &mut owner_sess,
@@ -569,14 +571,11 @@ async fn shared_bookmark_creator_revoked_or_view_only_cannot_bypass_acl() {
     .unwrap();
     let shared_fid = added.dict_get("folderID").and_then(|v| v.as_i64()).unwrap();
     ctx.db.with_mut_snapshot(|snap| {
-        snap.bookmark_folder_acls.insert(
-            shared_fid,
-            eve_db::BookmarkFolderAclRecord {
-                folder_id: shared_fid,
-                char_acl: HashMap::from([(creator_id, 2)]), // Use
-                ..Default::default()
-            },
-        );
+        let folder = snap.bookmark_folders.get_mut(&shared_fid).unwrap();
+        folder.use_group_id = Some(use_gid);
+        folder.view_group_id = Some(view_gid);
+        snap.access_groups.insert(use_gid, vec![creator_id]);
+        snap.access_groups.insert(view_gid, vec![]);
     });
 
     let bm_res = call_agbm(
@@ -598,14 +597,23 @@ async fn shared_bookmark_creator_revoked_or_view_only_cannot_bypass_acl() {
     };
     let shared_bm_id = bm_tup[0].as_i64().unwrap();
 
-    // Downgrade creator_id to View (1): can copy, must NOT update/delete/move
+    // Downgrade creator_id to View (1): can copy into personal folder, must NOT copy into shared folder or update/delete/move
     ctx.db.with_mut_snapshot(|snap| {
-        snap.bookmark_folder_acls
-            .get_mut(&shared_fid)
-            .unwrap()
-            .char_acl
-            .insert(creator_id, 1);
+        snap.access_groups.insert(use_gid, vec![]);
+        snap.access_groups.insert(view_gid, vec![creator_id]);
     });
+    assert!(call_agbm(
+        &ctx,
+        &mut creator_sess,
+        "CopyBookmarksToFolderAndSubfolder",
+        &[
+            PyRep::Integer(creator_id),
+            PyRep::None,
+            PyRep::List(vec![PyRep::Integer(shared_bm_id)]),
+        ],
+    )
+    .await
+    .is_ok());
     assert!(call_agbm(
         &ctx,
         &mut creator_sess,
@@ -617,7 +625,7 @@ async fn shared_bookmark_creator_revoked_or_view_only_cannot_bypass_acl() {
         ],
     )
     .await
-    .is_ok());
+    .is_err());
     assert!(call_agbm(
         &ctx,
         &mut creator_sess,
@@ -652,20 +660,16 @@ async fn shared_bookmark_creator_revoked_or_view_only_cannot_bypass_acl() {
     .await
     .is_err());
 
-    // Revoke creator_id completely (None = 0): even copy must now fail
+    // Revoke creator_id completely (None = 0): even copy to personal folder must now fail
     ctx.db.with_mut_snapshot(|snap| {
-        snap.bookmark_folder_acls
-            .get_mut(&shared_fid)
-            .unwrap()
-            .char_acl
-            .remove(&creator_id);
+        snap.access_groups.insert(view_gid, vec![]);
     });
     assert!(call_agbm(
         &ctx,
         &mut creator_sess,
         "CopyBookmarksToFolderAndSubfolder",
         &[
-            PyRep::Integer(shared_fid),
+            PyRep::Integer(creator_id),
             PyRep::None,
             PyRep::List(vec![PyRep::Integer(shared_bm_id)]),
         ],
@@ -673,4 +677,362 @@ async fn shared_bookmark_creator_revoked_or_view_only_cannot_bypass_acl() {
     .await
     .is_err());
     assert!(ctx.db.with_snapshot(|s| s.bookmarks.contains_key(&shared_bm_id)));
+}
+
+#[tokio::test]
+async fn coverage_sweep_effective_corp_folder_subfolder_known_info_and_search() {
+    use crate::services::fleet_social::fleet_social_access_group_bookmarks::effective_char_corp_and_alliance;
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let corp_id = 98_100_001_i64;
+    let alliance_id = 99_100_001_i64;
+    let other_corp_id = 98_100_002_i64;
+    let ceo_id = 100_000_111_i64;
+    let outsider_id = 100_000_112_i64;
+
+    // Seed character with NPC corp vs player corp + session overrides for effective_char_corp_and_alliance
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut base = snap.characters.values().next().unwrap().clone();
+        base.character_id = ceo_id;
+        base.corporation_id = 1_000_999;
+        base.alliance_id = None;
+        snap.characters.insert(ceo_id, base.clone());
+        base.character_id = outsider_id;
+        snap.characters.insert(outsider_id, base);
+        snap.corporations.insert(
+            corp_id,
+            { let mut __corp = eve_db::CorporationRecord::default(); __corp.corporation_id = corp_id; __corp.name = "TestCorp".into(); __corp.ticker = "TCRP".into(); __corp.ceo_id = ceo_id; __corp.alliance_id = Some(alliance_id); __corp.members = [ceo_id].into_iter().collect(); __corp.ensure_wallet_divisions(); __corp },
+        );
+    });
+    // Outsider in NPC corp -> session player corp (not member/ceo) must NOT override
+    let mut sess_outsider = make_session(outsider_id, corp_id, 1);
+    sess_outsider.alliance_id = None;
+    assert_eq!(
+        ctx.db.with_snapshot(|s| effective_char_corp_and_alliance(s, &sess_outsider, outsider_id)),
+        (Some(1_000_999), None)
+    );
+    // CEO in NPC corp -> session player corp overrides when CEO
+    let mut sess_npc = make_session(ceo_id, corp_id, 1);
+    assert_eq!(
+        ctx.db.with_snapshot(|s| effective_char_corp_and_alliance(s, &sess_npc, ceo_id)),
+        (Some(corp_id), Some(alliance_id))
+    );
+    // Player corp on character keeps char's corp regardless of session corp override
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&ceo_id).unwrap().corporation_id = corp_id;
+        snap.characters.get_mut(&ceo_id).unwrap().alliance_id = Some(alliance_id);
+    });
+    sess_npc.corporation_id = Some(other_corp_id);
+    assert_eq!(
+        ctx.db.with_snapshot(|s| effective_char_corp_and_alliance(s, &sess_npc, ceo_id)),
+        (Some(corp_id), Some(alliance_id))
+    );
+    // Unknown char falls back to session corporation_id / alliance_id (L48)
+    assert_eq!(
+        ctx.db.with_snapshot(|s| effective_char_corp_and_alliance(s, &sess_npc, 999_999_999)),
+        (Some(other_corp_id), sess_npc.alliance_id)
+    );
+    // Player corp on character + session has NPC/no corp -> keeps char's corp
+    sess_npc.corporation_id = Some(1_000_125);
+    assert_eq!(
+        ctx.db.with_snapshot(|s| effective_char_corp_and_alliance(s, &sess_npc, ceo_id)),
+        (Some(corp_id), Some(alliance_id))
+    );
+    sess_npc.corporation_id = None;
+    assert_eq!(
+        ctx.db.with_snapshot(|s| effective_char_corp_and_alliance(s, &sess_npc, ceo_id)),
+        (Some(corp_id), Some(alliance_id))
+    );
+
+    // Unknown RPC method returns None
+    let kw = HashMap::new();
+    let unknown_method = ["Unmapped", "Method"].concat();
+    assert!(handle(&ctx, &mut sess_npc, "accessGroupBookmarkMgr", &unknown_method, &[], &kw).await.is_none());
+
+    // Corp/alliance membership in is_in_access_group (L78, L83)
+    let grp_corp = 920_001_i64;
+    let grp_ally = 920_002_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.access_groups.insert(grp_corp, vec![corp_id]);
+        snap.access_groups.insert(grp_ally, vec![alliance_id]);
+    });
+    let f_corp = BookmarkFolderRecord {
+        folder_id: 920_100,
+        owner_id: outsider_id,
+        folder_name: "GrpCorp".into(),
+        is_shared: true,
+        corporation_id: Some(other_corp_id),
+        description: String::new(),
+        admin_group_id: Some(grp_corp),
+        manage_group_id: None,
+        use_group_id: None,
+        view_group_id: Some(grp_ally),
+    };
+    assert_eq!(
+        ctx.db.with_snapshot(|s| folder_access_level(s, &sess_npc, ceo_id, &f_corp)),
+        AccessLevel::Admin
+    );
+
+    // AddFolder integer shared flag (L297), and without DB corp (L336), and MaxSharedFoldersReached (L361-364)
+    let mut sess_nocorp = SessionState {
+        user_id: Some(outsider_id as u64),
+        character_id: Some(outsider_id),
+        corporation_id: None,
+        corp_role: 1,
+        ..Default::default()
+    };
+    assert_eq!(
+        call_agbm(&ctx, &mut sess_nocorp, "AddFolder", &[PyRep::String("FailNoCorp".into()), PyRep::Integer(1)])
+            .await
+            .unwrap_err()
+            .code,
+        "BookmarkAccessDenied"
+    );
+
+    let mut ceo_sess = make_session(ceo_id, corp_id, 1);
+    ceo_sess.corporation_id = None; // AddFolder populates session.corporation_id from db_corp_id (L312)
+    let shared_ok = call_agbm(&ctx, &mut ceo_sess, "AddFolder", &[PyRep::String("SharedInt".into()), PyRep::Integer(1)])
+        .await
+        .unwrap();
+    let sfid = shared_ok.dict_get("folderID").and_then(|v| v.as_i64()).unwrap();
+    assert_eq!(ceo_sess.corporation_id, Some(corp_id));
+
+    // Seed 29 more shared folders in corp_id to hit MaxSharedFoldersReached on 31st
+    ctx.db.with_mut_snapshot(|snap| {
+        for i in 0..29 {
+            let id = 921_000 + i;
+            snap.bookmark_folders.insert(
+                id,
+                BookmarkFolderRecord {
+                    folder_id: id,
+                    owner_id: ceo_id,
+                    folder_name: format!("Bulk{i}"),
+                    is_shared: true,
+                    corporation_id: Some(corp_id),
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    assert_eq!(
+        call_agbm(&ctx, &mut ceo_sess, "AddFolder", &[PyRep::Bool(false), PyRep::String("OverLimit".into())])
+            .await
+            .unwrap_err()
+            .code,
+        "MaxSharedFoldersReached"
+    );
+
+    // UpdateFolder: missing folder (L508), legacy ACL list non-empty + empty clear (L537, L542-547)
+    assert_eq!(
+        call_agbm(&ctx, &mut ceo_sess, "UpdateFolder", &[PyRep::Integer(999_999), PyRep::String("X".into())])
+            .await
+            .unwrap_err()
+            .code,
+        "UserError"
+    );
+    call_agbm(
+        &ctx,
+        &mut ceo_sess,
+        "UpdateFolder",
+        &[PyRep::Integer(sfid), PyRep::String("SharedInt2".into()), PyRep::List(vec![PyRep::Integer(ceo_id)])],
+    )
+    .await
+    .unwrap();
+    assert_eq!(ctx.db.with_snapshot(|s| s.bookmark_folder_acls.get(&sfid).cloned()), Some(vec![ceo_id]));
+    call_agbm(
+        &ctx,
+        &mut ceo_sess,
+        "UpdateFolder",
+        &[PyRep::Integer(sfid), PyRep::String("SharedInt3".into()), PyRep::List(vec![])],
+    )
+    .await
+    .unwrap();
+    assert!(ctx.db.with_snapshot(|s| !s.bookmark_folder_acls.contains_key(&sfid)));
+    // 7-arg UpdateFolder with all None clears bookmark_folder_acls (L537)
+    call_agbm(
+        &ctx,
+        &mut ceo_sess,
+        "UpdateFolder",
+        &[
+            PyRep::Integer(sfid),
+            PyRep::String("SharedInt4".into()),
+            PyRep::String("desc".into()),
+            PyRep::None,
+            PyRep::None,
+            PyRep::None,
+            PyRep::None,
+        ],
+    )
+    .await
+    .unwrap();
+
+    // CreateSubfolder & UpdateSubfolder & DeleteSubfolder error + notification paths
+    assert_eq!(
+        call_agbm(&ctx, &mut ceo_sess, "CreateSubfolder", &[]).await.unwrap_err().code,
+        "InvalidArgument"
+    );
+    assert_eq!(
+        call_agbm(&ctx, &mut ceo_sess, "CreateSubfolder", &[PyRep::Integer(999_999), PyRep::String("Sub".into())])
+            .await
+            .unwrap_err()
+            .code,
+        "UserError"
+    );
+    let mut outsider_sess = make_session(outsider_id, other_corp_id, 0);
+    assert_eq!(
+        call_agbm(&ctx, &mut outsider_sess, "CreateSubfolder", &[PyRep::Integer(sfid), PyRep::String("Sub".into())])
+            .await
+            .unwrap_err()
+            .code,
+        "UserError"
+    );
+    let sub_ok = call_agbm(&ctx, &mut ceo_sess, "CreateSubfolder", &[PyRep::Integer(sfid), PyRep::String("SubA".into())])
+        .await
+        .unwrap();
+    let sub_id = sub_ok.dict_get("subfolderID").and_then(|v| v.as_i64()).unwrap();
+
+    // Create another parent folder to test wrong-parent checks
+    let pf_other = call_agbm(&ctx, &mut ceo_sess, "AddFolder", &[PyRep::Bool(true), PyRep::String("OtherP".into())])
+        .await
+        .unwrap()
+        .dict_get("folderID")
+        .and_then(|v| v.as_i64())
+        .unwrap();
+
+    // UpdateSubfolder errors (L790-812) and shared corp notification (L827-834)
+    assert_eq!(
+        call_agbm(&ctx, &mut ceo_sess, "UpdateSubfolder", &[PyRep::Integer(pf_other), PyRep::Integer(sub_id), PyRep::String("Bad".into())])
+            .await
+            .unwrap_err()
+            .code,
+        "UserError"
+    );
+    assert_eq!(
+        call_agbm(&ctx, &mut ceo_sess, "UpdateSubfolder", &[PyRep::Integer(sfid), PyRep::Integer(999_998), PyRep::String("Bad".into())])
+            .await
+            .unwrap_err()
+            .code,
+        "UserError"
+    );
+    assert_eq!(
+        call_agbm(&ctx, &mut outsider_sess, "UpdateSubfolder", &[PyRep::Integer(sfid), PyRep::Integer(sub_id), PyRep::String("Denied".into())])
+            .await
+            .unwrap_err()
+            .code,
+        "UserError"
+    );
+    call_agbm(&ctx, &mut ceo_sess, "UpdateSubfolder", &[PyRep::Integer(sfid), PyRep::Integer(sub_id), PyRep::String("SubRenamed".into())])
+        .await
+        .unwrap();
+
+    // Add a bookmark inside sfid linked via bookmark_subfolders so AddToKnownFolders returns it (L1020-1038)
+    // and DeleteSubfolder / DeleteFolder clean it up (L636, L894-903)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.bookmarks.insert(
+            922_001,
+            BookmarkRecord {
+                bookmark_id: 922_001,
+                owner_id: ceo_id,
+                label: "InSub".into(),
+                solar_system_id: 30_000_142,
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+                item_id: None,
+                memo: "M".into(),
+                folder_id: Some(sfid),
+                is_shared: true,
+            },
+        );
+        snap.bookmark_subfolders.insert(922_001, sub_id);
+        snap.bookmarks.insert(
+            922_002,
+            BookmarkRecord {
+                bookmark_id: 922_002,
+                owner_id: ceo_id,
+                label: "DirectSub".into(),
+                solar_system_id: 30_000_142,
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+                item_id: None,
+                memo: "M2".into(),
+                folder_id: Some(sub_id),
+                is_shared: true,
+            },
+        );
+    });
+
+    // AddToKnownFolders / UpdateKnownFolderState error paths (L931-966) + active bookmarks list (L1020-1038)
+    assert_eq!(call_agbm(&ctx, &mut ceo_sess, "AddToKnownFolders", &[]).await.unwrap_err().code, "InvalidArgument");
+    assert_eq!(call_agbm(&ctx, &mut ceo_sess, "AddToKnownFolders", &[PyRep::Integer(sub_id)]).await.unwrap_err().code, "UserError");
+    assert_eq!(call_agbm(&ctx, &mut ceo_sess, "AddToKnownFolders", &[PyRep::Integer(999_997)]).await.unwrap_err().code, "UserError");
+    assert_eq!(call_agbm(&ctx, &mut outsider_sess, "AddToKnownFolders", &[PyRep::Integer(sfid)]).await.unwrap_err().code, "UserError");
+    // Unsubscribe ceo first so UpdateKnownFolderState hits "Folder is not in known folders" (L956), then re-add via AddToKnownFolders
+    ctx.db.with_mut_snapshot(|s| {
+        s.bookmark_folder_known_by.remove(&(sfid, ceo_id));
+    });
+    assert_eq!(
+        call_agbm(&ctx, &mut ceo_sess, "UpdateKnownFolderState", &[PyRep::Integer(sfid), PyRep::Integer(1)])
+            .await
+            .unwrap_err()
+            .code,
+        "UserError"
+    );
+    let known_res = call_agbm(&ctx, &mut ceo_sess, "AddToKnownFolders", &[PyRep::Integer(sfid), PyRep::Bool(true)])
+        .await
+        .unwrap();
+    let PyRep::Tuple(tup) = known_res else { panic!("expected tuple"); };
+    assert!(matches!(&tup[1], PyRep::List(bms) if bms.len() == 1));
+
+    // SearchFoldersWithAdminAccess (L1224-1240)
+    let search_res = call_agbm(&ctx, &mut ceo_sess, "SearchFoldersWithAdminAccess", &[PyRep::String("sharedint".into())])
+        .await
+        .unwrap();
+    assert!(format!("{search_res:?}").contains("SharedInt4"));
+
+    // GetFolderInfo errors (L1162-1180)
+    assert_eq!(call_agbm(&ctx, &mut ceo_sess, "GetFolderInfo", &[]).await.unwrap_err().code, "UserError");
+    assert_eq!(call_agbm(&ctx, &mut ceo_sess, "GetFolderInfo", &[PyRep::Integer(999_996)]).await.unwrap_err().code, "UserError");
+    assert_eq!(call_agbm(&ctx, &mut outsider_sess, "GetFolderInfo", &[PyRep::Integer(sfid)]).await.unwrap_err().code, "UserError");
+
+    // RemoveFromKnownFolders errors (L1116-1131)
+    assert_eq!(call_agbm(&ctx, &mut ceo_sess, "RemoveFromKnownFolders", &[]).await.unwrap_err().code, "InvalidArgument");
+    assert_eq!(call_agbm(&ctx, &mut ceo_sess, "RemoveFromKnownFolders", &[PyRep::Integer(999_995)]).await.unwrap_err().code, "UserError");
+
+    // DeleteSubfolder errors + success cleaning 922_001/922_002 + notification (L864-916)
+    assert_eq!(call_agbm(&ctx, &mut ceo_sess, "DeleteSubfolder", &[PyRep::Integer(pf_other), PyRep::Integer(sub_id)]).await.unwrap_err().code, "UserError");
+    assert_eq!(call_agbm(&ctx, &mut ceo_sess, "DeleteSubfolder", &[PyRep::Integer(sfid), PyRep::Integer(999_994)]).await.unwrap_err().code, "UserError");
+    assert_eq!(call_agbm(&ctx, &mut outsider_sess, "DeleteSubfolder", &[PyRep::Integer(sfid), PyRep::Integer(sub_id)]).await.unwrap_err().code, "UserError");
+    call_agbm(&ctx, &mut ceo_sess, "DeleteSubfolder", &[PyRep::Integer(sfid), PyRep::Integer(sub_id)]).await.unwrap();
+    assert!(ctx.db.with_snapshot(|s| !s.bookmarks.contains_key(&922_001) && !s.bookmarks.contains_key(&922_002)));
+
+    // Re-create a subfolder and bookmark inside sfid, then DeleteFolder (L596, L609, L636)
+    let sub2_id = call_agbm(&ctx, &mut ceo_sess, "CreateSubfolder", &[PyRep::Integer(sfid), PyRep::String("SubB".into())])
+        .await
+        .unwrap()
+        .dict_get("subfolderID")
+        .and_then(|v| v.as_i64())
+        .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.bookmarks.insert(
+            922_003,
+            BookmarkRecord {
+                bookmark_id: 922_003,
+                owner_id: ceo_id,
+                label: "Casc".into(),
+                solar_system_id: 30_000_142,
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                item_id: None,
+                memo: String::new(),
+                folder_id: Some(sub2_id),
+                is_shared: true,
+            },
+        );
+    });
+    assert_eq!(call_agbm(&ctx, &mut ceo_sess, "DeleteFolder", &[]).await.unwrap_err().code, "InvalidArgument");
+    assert_eq!(call_agbm(&ctx, &mut ceo_sess, "DeleteFolder", &[PyRep::Integer(999_993)]).await.unwrap_err().code, "UserError");
+    call_agbm(&ctx, &mut ceo_sess, "DeleteFolder", &[PyRep::Integer(sfid)]).await.unwrap();
+    assert!(ctx.db.with_snapshot(|s| !s.bookmarks.contains_key(&922_003)));
 }

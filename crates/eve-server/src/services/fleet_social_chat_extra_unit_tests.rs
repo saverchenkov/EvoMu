@@ -33,31 +33,34 @@ async fn delayed_local_witness_pruning_keeps_witnessed_and_removes_unwitnessed_s
         );
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(
-            format!("wh_local_witnesses:{chan_id}:{spk_in_chan}"),
-            serde_json::to_string(&HashSet::from([leaving_char])).unwrap(),
+        snap.fleet_and_social_ops.wh_local_witnesses.insert(
+            format!("{chan_id}:{spk_in_chan}"),
+            HashSet::from([leaving_char]),
         );
-        snap.service_state_blobs.insert(
-            format!("wh_local_witnesses:{chan_id}:{spk_with_witness}"),
-            serde_json::to_string(&HashSet::from([leaving_char, staying_witness])).unwrap(),
+        snap.fleet_and_social_ops.wh_local_witnesses.insert(
+            format!("{chan_id}:{spk_with_witness}"),
+            HashSet::from([leaving_char, staying_witness]),
         );
-        snap.service_state_blobs.insert(
-            format!("wh_local_witnesses:{chan_id}:{spk_no_witness}"),
-            serde_json::to_string(&HashSet::from([leaving_char])).unwrap(),
+        snap.fleet_and_social_ops.wh_local_witnesses.insert(
+            format!("{chan_id}:{spk_no_witness}"),
+            HashSet::from([leaving_char]),
         );
 
         let remaining = HashSet::from([spk_in_chan, staying_witness]);
         prune_delayed_local_speakers_on_leave(&ctx, snap, chan_id, leaving_char, &remaining);
 
         assert!(snap
-            .service_state_blobs
-            .contains_key(&format!("wh_local_witnesses:{chan_id}:{spk_in_chan}")));
+            .fleet_and_social_ops
+            .wh_local_witnesses
+            .contains_key(&format!("{chan_id}:{spk_in_chan}")));
         assert!(snap
-            .service_state_blobs
-            .contains_key(&format!("wh_local_witnesses:{chan_id}:{spk_with_witness}")));
+            .fleet_and_social_ops
+            .wh_local_witnesses
+            .contains_key(&format!("{chan_id}:{spk_with_witness}")));
         assert!(!snap
-            .service_state_blobs
-            .contains_key(&format!("wh_local_witnesses:{chan_id}:{spk_no_witness}")));
+            .fleet_and_social_ops
+            .wh_local_witnesses
+            .contains_key(&format!("{chan_id}:{spk_no_witness}")));
     });
 
     let speakers = ctx

@@ -394,3 +394,7 @@ async fn active_bookmarks_and_get_bookmarks_populate_v24_creator_owner_dates_and
         );
     }
 }
+
+#[cfg(test)]
+#[path = "fleet_social_bookmarks_extra_unit_tests.rs"]
+mod fleet_social_bookmarks_extra_unit_tests;

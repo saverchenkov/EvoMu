@@ -316,11 +316,16 @@ pub(crate) fn handle_mail_headers(
     };
 
     let trashed = crate::services::fleet_social::get_trashed_mails(ctx);
+    let meta_map = ctx
+        .social_extras
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .mail_headers_meta
+        .clone();
     let (rows, status_rows) = ctx.db.with_snapshot(|snap| {
         let mut hdrs = Vec::new();
         let mut statuses = Vec::new();
         let mut seen = HashSet::new();
-        let meta_map = ctx.social_extras.lock().unwrap().mail_headers_meta.clone();
         let allowed_window = active_mailbox_window_ids(snap, char_id);
 
         for m in snap.mails.iter() {

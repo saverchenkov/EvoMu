@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "project_discovery_ops_rewards_cov_tests.rs"]
+mod project_discovery_ops_rewards_cov_tests;
+
 use super::*;
 use crate::services::account_services::account_services_tests::{auth_session, test_ctx};
 use std::collections::HashMap;

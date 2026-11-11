@@ -4,6 +4,10 @@
 #[path = "fleet_social_chat_channels_tests.rs"]
 mod fleet_social_chat_channels_tests;
 
+#[cfg(test)]
+#[path = "fleet_social_chat_auth_ops_cov_tests.rs"]
+mod fleet_social_chat_auth_ops_cov_tests;
+
 use super::*;
 use crate::services::fleet_social::fleet_social_fleet_ops::fleet_social_fleet_ops_tests::{
     clone_char_with, test_ctx_with_clock,
@@ -326,4 +330,333 @@ fn xmpp_iq_reply_includes_query_child_for_disco_muc_and_expiring_record() {
 
     let fallback = xmpp_iq_reply("<iq type='get' id='iq-7'><ping xmlns='urn:xmpp:ping'/></iq>", "iq-7");
     assert_eq!(fallback, "<iq type='result' id='iq-7'/>");
+}
+
+#[test]
+fn social_extras_leaf_lock_order_and_poison_recovery_across_chat_ops() {
+    let ctx = test_ctx_with_clock(1_800_006_000);
+    let kw = HashMap::new();
+    ctx.db.with_mut_snapshot(|snap| {
+        let base = snap.characters.get(&90_000_001).cloned().unwrap();
+        let mut p1 = base.clone();
+        p1.solar_system_id = 31_000_005;
+        snap.characters.insert(90_000_001, p1);
+        let mut p2 = clone_char_with(snap, 90_000_002, "ChatPilot2", 98_000_001, 31_000_005, 100_000_002);
+        p2.alliance_id = Some(99_000_001);
+        p2.solar_system_id = 31_000_005;
+        snap.characters.insert(90_000_002, p2);
+        snap.character_cspa_charges
+            .insert(90_000_002, IskCents::from_f64_isk(500.0));
+    });
+
+    // Poison `social_extras` to verify `.unwrap_or_else(|e| e.into_inner())` recovery across all handlers.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = ctx.social_extras.lock().unwrap();
+        panic!("simulate social_extras poison");
+    }));
+    assert!(ctx.social_extras.is_poisoned());
+
+    let mut s1 = SessionState::new(10);
+    s1.user_id = Some(90_000_001);
+    s1.character_id = Some(90_000_001);
+    s1.corporation_id = Some(98_000_001);
+    s1.solar_system_id = Some(31_000_005);
+
+    let mut s2 = SessionState::new(11);
+    s2.user_id = Some(90_000_002);
+    s2.character_id = Some(90_000_002);
+    s2.corporation_id = Some(98_000_001);
+    s2.solar_system_id = Some(31_000_005);
+
+    // Delayed local JoinChannel + AddCharacterToChannel + SendMessage
+    let join_wh = handle_chat_and_social(
+        &ctx,
+        &mut s1,
+        "LSC",
+        "JoinChannel",
+        &[PyRep::String("solarsystemid2:31000005".into())],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(join_wh.dict_get("memberCount").and_then(|v| v.as_i64()), Some(0));
+    let add_wh = handle_chat_and_social(
+        &ctx,
+        &mut s2,
+        "XmppChatMgr",
+        "AddCharacterToChannel",
+        &[PyRep::String("solarsystemid2:31000005".into())],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(add_wh.dict_get("memberCount").and_then(|v| v.as_i64()), Some(0));
+    handle_chat_and_social(
+        &ctx,
+        &mut s1,
+        "LSC",
+        "SendMessage",
+        &[
+            PyRep::String("solarsystemid2:31000005".into()),
+            PyRep::String("wh ping".into()),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let join_wh_after = handle_chat_and_social(
+        &ctx,
+        &mut s2,
+        "LSC",
+        "JoinChannel",
+        &[PyRep::String("solarsystemid2:31000005".into())],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(join_wh_after.dict_get("memberCount").and_then(|v| v.as_i64()), Some(1));
+    let add_wh_after = handle_chat_and_social(
+        &ctx,
+        &mut s2,
+        "XmppChatMgr",
+        "AddCharacterToChannel",
+        &[PyRep::String("solarsystemid2:31000005".into())],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(add_wh_after.dict_get("memberCount").and_then(|v| v.as_i64()), Some(1));
+    assert!(ctx.db.with_snapshot(|snap| {
+        let w = snap
+            .fleet_and_social_ops
+            .wh_local_witnesses
+            .get("solarsystemid2:31000005:90000001")
+            .unwrap();
+        w.contains(&90_000_002) && !w.contains(&90_000_001)
+    }));
+
+    // Direct helper coverage for is_character_blocked_in_social_extras, is_character_blocked_in_acl,
+    // clear_channel_acl_restrictions, clear_social_extras_channel_restrictions, and apply_post_access_control_social_op
+    {
+        let mut s = ctx.social_extras.lock().unwrap_or_else(|e| e.into_inner());
+        s.blocked_in_channel
+            .entry("channel:other".into())
+            .or_default()
+            .insert(90_000_002);
+        s.blocked_in_channel
+            .entry("channel:leaf-acl".into())
+            .or_default()
+            .insert(90_000_099);
+        s.muted_in_channel
+            .insert(("channel:other".into(), 90_000_002), (1_900_000_000, "m".into()));
+        s.muted_in_channel
+            .insert(("channel:leaf-acl".into(), 90_000_099), (1_900_000_000, "m".into()));
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.chat_channel_acl
+            .entry("channel:other".into())
+            .or_default()
+            .deny_list
+            .insert(90_000_002);
+        snap.chat_channel_acl
+            .entry("channel:leaf-acl".into())
+            .or_default()
+            .deny_list
+            .insert(90_000_099);
+    });
+    assert!(!is_character_blocked_in_social_extras(&ctx, "channel:leaf-acl", 90_000_002));
+    assert!(ctx.db.with_snapshot(|snap| !is_character_blocked_in_acl(snap, "channel:leaf-acl", 90_000_002)));
+
+    // Player channel AccessControl modes (-2, -1, 1, 0, 3) + GrantChannelOwnership + Invite
+    let join_leaf = handle_chat_and_social(
+        &ctx,
+        &mut s1,
+        "LSC",
+        "JoinChannel",
+        &[PyRep::String("channel:leaf-acl".into())],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(join_leaf.dict_get("memberCount").and_then(|v| v.as_i64()), Some(1));
+    handle_chat_and_social(
+        &ctx,
+        &mut s1,
+        "LSC",
+        "AccessControl",
+        &[
+            PyRep::String("channel:leaf-acl".into()),
+            PyRep::Integer(90_000_002),
+            PyRep::Integer(-2),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(is_character_blocked_in_social_extras(&ctx, "channel:leaf-acl", 90_000_002));
+    assert!(ctx.db.with_snapshot(|snap| is_character_blocked_in_acl(snap, "channel:leaf-acl", 90_000_002)));
+
+    // Test social-only block vs ACL-only block across JoinChannel, AddCharacterToChannel, SendMessage, ResyncSystemChannelAccess
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.chat_channel_acl
+            .get_mut("channel:leaf-acl")
+            .unwrap()
+            .deny_list
+            .remove(&90_000_002);
+        snap.chat_channels
+            .get_mut("channel:leaf-acl")
+            .unwrap()
+            .members
+            .insert(90_000_002);
+    });
+    assert!(handle_chat_and_social(&ctx, &mut s2, "LSC", "JoinChannel", &[PyRep::String("channel:leaf-acl".into())], &kw).unwrap().is_err());
+    assert!(handle_chat_and_social(&ctx, &mut s1, "XmppChatMgr", "AddCharacterToChannel", &[PyRep::String("channel:leaf-acl".into()), PyRep::Integer(90_000_002)], &kw).unwrap().is_err());
+    assert!(handle_chat_and_social(&ctx, &mut s2, "LSC", "SendMessage", &[PyRep::String("channel:leaf-acl".into()), PyRep::String("hi".into())], &kw).unwrap().is_err());
+
+    // Now flip to ACL-only block (not in social_extras)
+    ctx.social_extras
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .blocked_in_channel
+        .get_mut("channel:leaf-acl")
+        .unwrap()
+        .remove(&90_000_002);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.chat_channel_acl
+            .get_mut("channel:leaf-acl")
+            .unwrap()
+            .deny_list
+            .insert(90_000_002);
+    });
+    assert!(handle_chat_and_social(&ctx, &mut s2, "LSC", "JoinChannel", &[PyRep::String("channel:leaf-acl".into())], &kw).unwrap().is_err());
+    assert!(handle_chat_and_social(&ctx, &mut s1, "XmppChatMgr", "AddCharacterToChannel", &[PyRep::String("channel:leaf-acl".into()), PyRep::Integer(90_000_002)], &kw).unwrap().is_err());
+    assert!(handle_chat_and_social(&ctx, &mut s2, "LSC", "SendMessage", &[PyRep::String("channel:leaf-acl".into()), PyRep::String("hi".into())], &kw).unwrap().is_err());
+
+    // ResyncSystemChannelAccess: social-blocked vs ACL-blocked vs GM override
+    ctx.social_extras
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .blocked_in_channel
+        .entry("corpid:98000001".into())
+        .or_default()
+        .insert(90_000_002);
+    handle_chat_and_social(&ctx, &mut s2, "XmppChatMgr", "ResyncSystemChannelAccess", &[], &kw).unwrap().unwrap();
+    assert!(ctx.db.with_snapshot(|snap| !snap.chat_channels.get("corpid:98000001").is_some_and(|c| c.members.contains(&90_000_002))));
+    s2.role = eve_machonet::service_roles::ROLE_GMH;
+    handle_chat_and_social(&ctx, &mut s2, "XmppChatMgr", "ResyncSystemChannelAccess", &[], &kw).unwrap().unwrap();
+    assert!(ctx.db.with_snapshot(|snap| snap.chat_channels.get("corpid:98000001").is_some_and(|c| c.members.contains(&90_000_002))));
+    s2.role = 0;
+
+    // AccessControl mode -1 (Mute), mode 1 (AllowAndUnmute), mode 0 (Clear), mode 3 (Transfer ownership)
+    handle_chat_and_social(
+        &ctx,
+        &mut s1,
+        "LSC",
+        "AccessControl",
+        &[
+            PyRep::String("channel:leaf-acl".into()),
+            PyRep::Integer(90_000_002),
+            PyRep::Integer(-1),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(ctx.social_extras.lock().unwrap_or_else(|e| e.into_inner()).muted_in_channel.contains_key(&("channel:leaf-acl".into(), 90_000_002)));
+    handle_chat_and_social(
+        &ctx,
+        &mut s1,
+        "LSC",
+        "AccessControl",
+        &[
+            PyRep::String("channel:leaf-acl".into()),
+            PyRep::Integer(90_000_002),
+            PyRep::Integer(1),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(!ctx.social_extras.lock().unwrap_or_else(|e| e.into_inner()).muted_in_channel.contains_key(&("channel:leaf-acl".into(), 90_000_002)));
+    handle_chat_and_social(
+        &ctx,
+        &mut s1,
+        "LSC",
+        "AccessControl",
+        &[
+            PyRep::String("channel:leaf-acl".into()),
+            PyRep::Integer(90_000_002),
+            PyRep::Integer(0),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    ctx.social_extras.lock().unwrap_or_else(|e| e.into_inner()).muted_in_channel.insert(("channel:leaf-acl".into(), 90_000_002), (1_900_000_000, "m".into()));
+    handle_chat_and_social(
+        &ctx,
+        &mut s1,
+        "LSC",
+        "AccessControl",
+        &[
+            PyRep::String("channel:leaf-acl".into()),
+            PyRep::Integer(90_000_002),
+            PyRep::Integer(3),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    {
+        let s = ctx.social_extras.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(!s.muted_in_channel.contains_key(&("channel:leaf-acl".into(), 90_000_002)));
+        assert!(s.muted_in_channel.contains_key(&("channel:other".into(), 90_000_002)));
+        assert!(s.muted_in_channel.contains_key(&("channel:leaf-acl".into(), 90_000_099)));
+        assert!(s.blocked_in_channel["channel:other"].contains(&90_000_002));
+        assert!(s.blocked_in_channel["channel:leaf-acl"].contains(&90_000_099));
+    }
+    handle_chat_and_social(
+        &ctx,
+        &mut s2,
+        "XmppChatMgr",
+        "GrantChannelOwnership",
+        &[
+            PyRep::String("channel:leaf-acl".into()),
+            PyRep::Integer(90_000_001),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+
+    // Invite: ESI contact blocked with standing 0.0 rejects, standing 5.0 overrides block & waives CSPA
+    ctx.esi_state.char_contacts.write().unwrap().insert(
+        90_000_002,
+        vec![crate::esi::runtime_state::EsiContactEntry {
+            contact_id: 90_000_001,
+            contact_type: "character".into(),
+            standing: 0.0,
+            is_watched: false,
+            is_blocked: true,
+            label_ids: vec![],
+        }],
+    );
+    assert_eq!(
+        handle_chat_and_social(&ctx, &mut s1, "LSC", "Invite", &[PyRep::Integer(90_000_002)], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "SenderBlockedByRecipient"
+    );
+    ctx.esi_state.char_contacts.write().unwrap().get_mut(&90_000_002).unwrap()[0].standing = 5.0;
+    handle_chat_and_social(
+        &ctx,
+        &mut s1,
+        "LSC",
+        "Invite",
+        &[PyRep::Integer(90_000_002)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
 }

@@ -341,7 +341,7 @@ pub(super) fn check_channel_or_global_mute(
     if let Some((_, reason)) = db_mute {
         return Some(reason);
     }
-    let s = ctx.social_extras.lock().unwrap();
+    let s = ctx.social_extras.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(&(until, ref reason)) = s.muted_in_channel.get(&(chan_id.to_string(), char_id)) {
         if now_unix < until {
             return Some(reason.clone());
@@ -416,7 +416,7 @@ pub(super) fn handle_contacts_notifications_calendar(
             }
             ctx.social_extras
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .cspa_charges
                 .insert(char_id, charge);
             Some(Ok(PyRep::Real(isk)))
@@ -472,7 +472,7 @@ pub(super) fn handle_contacts_notifications_calendar(
                 }
                 ctx.social_extras
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|e| e.into_inner())
                     .char_notes
                     .insert((char_id, item_id), note.to_string());
                 Some(Ok(PyRep::Bool(true)))
@@ -483,7 +483,7 @@ pub(super) fn handle_contacts_notifications_calendar(
                     .or_else(|| {
                         ctx.social_extras
                             .lock()
-                            .unwrap()
+                            .unwrap_or_else(|e| e.into_inner())
                             .char_notes
                             .get(&(char_id, item_id))
                             .cloned()

@@ -204,3 +204,7 @@ fn transfer_bookmarks_to_folder_and_subfolder(
         Err(e) => Some(Err(e)),
     }
 }
+
+#[cfg(test)]
+#[path = "fleet_social_bookmarks_transfer_edges_tests.rs"]
+mod fleet_social_bookmarks_transfer_edges_tests;

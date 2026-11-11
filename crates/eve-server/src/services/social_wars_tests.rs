@@ -2,6 +2,10 @@ use super::*;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_ctx_and_session;
 use eve_db::{CorporationRecord, IskCents, KillmailRecord, UpwellStructureRecord};
 
+#[cfg(test)]
+#[path = "social_wars_extra_unit_tests.rs"]
+mod extra_unit_tests;
+
 fn dict_i64(r: &PyRep, k: &str) -> Option<i64> {
     r.dict_get(k).and_then(|v| v.as_i64())
 }
@@ -322,7 +326,21 @@ fn test_declare_war_allies_surrender_peace_treaty_and_statistics() {
     )
     .unwrap()
     .unwrap();
-    assert!(!matches!(treaties, PyRep::None));
+    let PyRep::Tuple(ref parts) = treaties else {
+        panic!("expected (outgoing, incoming) 2-tuple from GetPeaceTreatiesForSession");
+    };
+    assert_eq!(parts.len(), 2);
+    let PyRep::List(ref outgoing) = parts[0] else {
+        panic!("expected outgoing List");
+    };
+    let PyRep::List(ref incoming) = parts[1] else {
+        panic!("expected incoming List");
+    };
+    assert_eq!(outgoing.len(), 1);
+    assert!(incoming.is_empty());
+    assert_eq!(dict_i64(&outgoing[0], "otherOwnerID"), Some(def_corp));
+    assert_eq!(dict_i64(&outgoing[0], "peaceReason"), Some(4));
+    assert!(dict_i64(&outgoing[0], "expiryDate").unwrap_or(0) > 100_000_000_000_000_000);
 }
 
 #[test]
@@ -467,5 +485,299 @@ fn war_ally_24h_effective_delay_and_sync_wars_enforced() {
             social_wars_helpers::is_war_participant_corp(snap, war_id, ally_corp, eff),
             "ally becomes active war participant once now >= effective_unix"
         );
+    });
+}
+
+#[test]
+fn test_social_wars_helpers_predicates_sync_notifications_and_resolution() {
+    use super::social_wars_helpers::*;
+    use eve_db::{PersistedNegKind, PersistedWarMeta, PersistedWarNegotiation, WarRecord};
+
+    let (ctx, agg_sess, agg_corp, _def_sess, def_corp, _ally_sess, ally_corp, agg_hq_id) =
+        setup_wars_ctx();
+    let other_corp = 98_000_199_i64;
+    let lowsec_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| s.solar_system_id < 31_000_000 && s.security_status < 0.45)
+        .map(|s| s.solar_system_id)
+        .unwrap_or(30_002_813);
+
+    // 1. err() helper
+    let e = err("TestErr", "bad input").unwrap().unwrap_err();
+    assert_eq!(e.code, "TestErr");
+    assert_eq!(e.message, "bad input");
+
+    // 2. is_valid_war_hq exhaustive matrix
+    ctx.db.with_snapshot(|snap| {
+        let base = snap.structures[&agg_hq_id].clone();
+        assert!(is_valid_war_hq(&ctx, &snap.corporations, agg_corp, &base));
+
+        // Wrong owner
+        assert!(!is_valid_war_hq(&ctx, &snap.corporations, def_corp, &base));
+
+        // No quantum core
+        let mut no_core = base.clone();
+        no_core.quantum_core_installed = false;
+        assert!(!is_valid_war_hq(&ctx, &snap.corporations, agg_corp, &no_core));
+
+        // Allowed vs disallowed states
+        for valid_state in [
+            "ShieldVulnerable",
+            "ArmorReinforced",
+            "ArmorVulnerable",
+            "HullReinforced",
+            "HullVulnerable",
+        ] {
+            let mut st = base.clone();
+            st.state = valid_state.into();
+            assert!(is_valid_war_hq(&ctx, &snap.corporations, agg_corp, &st), "state {valid_state} should be valid");
+        }
+        for bad_state in ["Anchoring", "Unanchored", "Destroyed"] {
+            let mut st = base.clone();
+            st.state = bad_state.into();
+            assert!(!is_valid_war_hq(&ctx, &snap.corporations, agg_corp, &st), "state {bad_state} should be invalid");
+        }
+
+        // Wormhole solar system >= 31_000_000
+        let mut wh = base.clone();
+        wh.solar_system_id = 31_000_005;
+        assert!(!is_valid_war_hq(&ctx, &snap.corporations, agg_corp, &wh));
+
+        // Low/null-sec solar system (< 0.45)
+        let mut low = base.clone();
+        low.solar_system_id = lowsec_sys;
+        assert!(!is_valid_war_hq(&ctx, &snap.corporations, agg_corp, &low));
+
+        // FLEX structure (35841 Ansiblex Jump Gate)
+        let mut flex = base.clone();
+        flex.type_id = 35841;
+        assert!(!is_valid_war_hq(&ctx, &snap.corporations, agg_corp, &flex));
+    });
+
+    // 3. same_alliance, already_at_war, war_eligible, debit_corp, credit_corp
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.insert(
+            other_corp,
+            { let mut __corp = CorporationRecord::default(); __corp.corporation_id = other_corp; __corp.name = "Other".into(); __corp.ticker = "OTHR".into(); __corp.ceo_id = 90_000_199; __corp.alliance_id = Some(99_000_555); __corp.ensure_wallet_divisions(); __corp },
+        );
+        // None / Some(0) / mismatched / matched alliances
+        assert!(!same_alliance(snap, agg_corp, def_corp));
+        snap.corporations.get_mut(&agg_corp).unwrap().alliance_id = Some(0);
+        snap.corporations.get_mut(&def_corp).unwrap().alliance_id = Some(0);
+        assert!(!same_alliance(snap, agg_corp, def_corp));
+        snap.corporations.get_mut(&agg_corp).unwrap().alliance_id = Some(99_000_100);
+        snap.corporations.get_mut(&def_corp).unwrap().alliance_id = Some(99_000_200);
+        assert!(!same_alliance(snap, agg_corp, def_corp));
+        snap.corporations.get_mut(&ally_corp).unwrap().alliance_id = Some(99_000_100);
+        assert!(same_alliance(snap, agg_corp, ally_corp));
+
+        // war_eligible: Destroyed structure doesn't count
+        assert!(!war_eligible(snap, ally_corp));
+        snap.structures.insert(
+            1_000_000_100_099,
+            UpwellStructureRecord {
+                structure_id: 1_000_000_100_099,
+                type_id: 35832,
+                owner_corp_id: ally_corp,
+                solar_system_id: 30_000_142,
+                state: "Destroyed".into(),
+                ..Default::default()
+            },
+        );
+        assert!(!war_eligible(snap, ally_corp));
+
+        // debit_corp errors & credit_corp
+        assert_eq!(
+            debit_corp(snap, 99_999_999, IskCents::from_isk(100))
+                .unwrap_err()
+                .code,
+            "CorporationNotFound"
+        );
+        assert_eq!(
+            debit_corp(snap, other_corp, IskCents::from_isk(100))
+                .unwrap_err()
+                .code,
+            "InsufficientFunds"
+        );
+        let before = snap.corporations[&agg_corp].division_balance(1);
+        credit_corp(snap, agg_corp, IskCents::from_isk(5_000));
+        assert_eq!(
+            snap.corporations[&agg_corp].division_balance(1),
+            IskCents(before.0 + 5_000 * 100)
+        );
+        // credit_corp on missing corp is a safe no-op
+        credit_corp(snap, 99_999_999, IskCents::from_isk(500));
+
+        // Wars for already_at_war and is_war_participant_corp
+        snap.wars.insert(
+            5001,
+            WarRecord {
+                war_id: 5001,
+                aggressor_corp_id: agg_corp,
+                defender_corp_id: def_corp,
+                mutual: false,
+                started_unix: 1_700_000_000,
+                active: false,
+            },
+        );
+        assert!(!already_at_war(snap, agg_corp, def_corp));
+        snap.wars.get_mut(&5001).unwrap().active = true;
+        assert!(already_at_war(snap, agg_corp, def_corp));
+        assert!(already_at_war(snap, def_corp, agg_corp));
+
+        // is_war_participant_corp
+        assert!(!is_war_participant_corp(snap, 99_999, agg_corp, 2_000_000_000));
+        assert!(is_war_participant_corp(snap, 5001, agg_corp, 2_000_000_000));
+        assert!(is_war_participant_corp(snap, 5001, def_corp, 2_000_000_000));
+        assert!(is_war_participant_corp(snap, 5001, ally_corp, 2_000_000_000)); // same alliance as agg_corp
+        assert!(!is_war_participant_corp(snap, 5001, other_corp, 2_000_000_000));
+
+        // Pending ally neg doesn't make other_corp participant; Accepted does
+        snap.war_state.negotiations.push(PersistedWarNegotiation {
+            id: 7001,
+            war_id: 5001,
+            kind: PersistedNegKind::Ally,
+            from_corp: other_corp,
+            isk: IskCents::from_isk(1_000),
+            message: "pending".into(),
+            status: "Pending".into(),
+            effective_unix: None,
+        });
+        assert!(!is_war_participant_corp(snap, 5001, other_corp, 2_000_000_000));
+        snap.war_state.negotiations.push(PersistedWarNegotiation {
+            id: 7002,
+            war_id: 5001,
+            kind: PersistedNegKind::Ally,
+            from_corp: other_corp,
+            isk: IskCents::from_isk(2_000),
+            message: "accepted".into(),
+            status: "Accepted".into(),
+            effective_unix: Some(1_700_001_000),
+        });
+        assert!(is_war_participant_corp(snap, 5001, other_corp, 2_000_000_000));
+
+        // Third corp (not participant) with its own ally offer for neg_rows_for_caller
+        snap.war_state.negotiations.push(PersistedWarNegotiation {
+            id: 7003,
+            war_id: 5001,
+            kind: PersistedNegKind::Ally,
+            from_corp: 98_000_888,
+            isk: IskCents::from_isk(3_000),
+            message: "third".into(),
+            status: "Pending".into(),
+            effective_unix: None,
+        });
+    });
+
+    // 4. neg_rows_for_caller ACL & filtering
+    assert_eq!(
+        neg_rows_for_caller(&ctx, 5001, PersistedNegKind::Surrender, 98_000_888)
+            .unwrap_err()
+            .code,
+        "NotWarParticipant"
+    );
+    let non_part_ally_rows =
+        neg_rows_for_caller(&ctx, 5001, PersistedNegKind::Ally, 98_000_888).unwrap();
+    assert_eq!(non_part_ally_rows.len(), 1);
+    assert_eq!(non_part_ally_rows[0][0], PyRep::Integer(7003));
+    let part_ally_rows =
+        neg_rows_for_caller(&ctx, 5001, PersistedNegKind::Ally, def_corp).unwrap();
+    assert_eq!(part_ally_rows.len(), 3);
+
+    // 5. war_row combatActive before vs after WAR_TIMER_SECS
+    let w_sample = WarRecord {
+        war_id: 5001,
+        aggressor_corp_id: agg_corp,
+        defender_corp_id: def_corp,
+        mutual: false,
+        started_unix: 1_000,
+        active: true,
+    };
+    let meta_sample = PersistedWarMeta {
+        war_hq_id: Some(agg_hq_id),
+        open_for_allies: true,
+        finish_at_unix: Some(100_000),
+    };
+    let row_before = war_row(&w_sample, &meta_sample, 1_000 + WAR_TIMER_SECS - 1);
+    assert_eq!(row_before[10], PyRep::Bool(false));
+    let row_at = war_row(&w_sample, &meta_sample, 1_000 + WAR_TIMER_SECS);
+    assert_eq!(row_at[10], PyRep::Bool(true));
+
+    // 6. resolve_war_stat_id priority: arg0 > bound_obj_id > session bound_objects > DB fallback > 0
+    assert_eq!(resolve_war_stat_id(&ctx, &agg_sess, Some(11), Some(22), agg_corp), 11);
+    assert_eq!(resolve_war_stat_id(&ctx, &agg_sess, Some(0), Some(22), agg_corp), 22);
+    ctx.bound_objects.write().unwrap().insert(
+        901,
+        crate::router::BoundObjectEntry {
+            bound_id: 901,
+            session_id: agg_sess.session_id,
+            user_id: 1,
+            character_id: agg_sess.character_id.unwrap(),
+            service: "warStatisticMgr".into(),
+            object_id: 33,
+            oid_str: String::new(),
+            ref_id: 1,
+        },
+    );
+    assert_eq!(resolve_war_stat_id(&ctx, &agg_sess, None, None, agg_corp), 33);
+    ctx.bound_objects.write().unwrap().clear();
+    assert_eq!(resolve_war_stat_id(&ctx, &agg_sess, None, None, agg_corp), 5001);
+    assert_eq!(resolve_war_stat_id(&ctx, &agg_sess, None, None, 98_999_999), 0);
+
+    // 7. emit_war_changed & emit_mutual_wars_updated notifications
+    let agg_char = agg_sess.character_id.unwrap();
+    let agg_uid = ctx.db.with_snapshot(|s| s.characters[&agg_char].user_id);
+    ctx.db
+        .acquire_online_lock(agg_uid, 701, Some(agg_char), true, ctx.now_unix())
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(agg_char);
+    emit_war_changed(&ctx, 999_999, vec![]); // non-existent war_id -> no-op
+    emit_war_changed(&ctx, 5001, vec![("active", PyRep::Bool(true), PyRep::Bool(false))]);
+    emit_mutual_wars_updated(&ctx, agg_char, agg_corp, def_corp);
+    let notifs = ctx.drain_notifications_for_char(agg_char);
+    assert!(notifs.iter().any(|n| n.event == "OnWarChanged"));
+    assert!(notifs.iter().any(|n| n.event == "OnMutualWarsUpdated_Remote"));
+
+    // 8. sync_wars: finish_at_unix <= now ends war; mutual war without defender structures stays active; non-mutual ends
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.wars.insert(
+            5002,
+            WarRecord {
+                war_id: 5002,
+                aggressor_corp_id: agg_corp,
+                defender_corp_id: other_corp, // has no structures
+                mutual: true,
+                started_unix: 100,
+                active: true,
+            },
+        );
+        snap.wars.insert(
+            5003,
+            WarRecord {
+                war_id: 5003,
+                aggressor_corp_id: agg_corp,
+                defender_corp_id: other_corp, // has no structures, not mutual -> ends!
+                mutual: false,
+                started_unix: 100,
+                active: true,
+            },
+        );
+        snap.war_state.wars.insert(
+            5001,
+            PersistedWarMeta {
+                war_hq_id: Some(agg_hq_id),
+                open_for_allies: false,
+                finish_at_unix: Some(1), // already past ctx.now_unix()
+            },
+        );
+    });
+    sync_wars(&ctx);
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.wars[&5001].active);
+        assert!(snap.wars[&5002].active);
+        assert!(!snap.wars[&5003].active);
+        assert!(snap.war_state.wars[&5003].finish_at_unix.is_some());
     });
 }

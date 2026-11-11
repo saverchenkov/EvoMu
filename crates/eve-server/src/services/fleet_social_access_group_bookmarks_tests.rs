@@ -321,3 +321,8 @@ fn folder_access_level_enforces_owner_groups_exclusions_and_strips_shared_owner_
         );
     });
 }
+
+#[cfg(test)]
+#[path = "fleet_social_access_group_bookmarks_extra_unit_tests.rs"]
+mod extra_unit_tests;
+

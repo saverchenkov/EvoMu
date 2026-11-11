@@ -1712,3 +1712,7 @@ pub(super) use super::fleet_social_corp_tail::handle_insert_vote_case;
 #[path = "fleet_social_corps_tests.rs"]
 pub(crate) mod fleet_social_corps_tests;
 
+#[cfg(test)]
+#[path = "fleet_social_corps_edges_tests.rs"]
+mod fleet_social_corps_edges_tests;
+

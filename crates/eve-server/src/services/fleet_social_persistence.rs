@@ -365,9 +365,12 @@ pub(crate) fn sync_mailing_lists_to_db(ctx: &ServerContext) {
             })
             .collect()
     };
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.mailing_lists = lists;
-    });
+    let matches_db = ctx.db.with_snapshot(|snap| snap.mailing_lists == lists);
+    if !matches_db {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.mailing_lists = lists;
+        });
+    }
 }
 
 pub fn persist_social_state(ctx: &ServerContext) {
@@ -403,9 +406,21 @@ pub(crate) fn sync_calendar_events_to_db(ctx: &ServerContext) {
             })
             .collect()
     };
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.calendar_events = events;
-    });
+    let matches_db = ctx.db.with_snapshot(|snap| snap.calendar_events == events);
+    if !matches_db {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.calendar_events = events;
+        });
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CalendarEventResponseMeta {
+    pub owner_id: i64,
+    pub event_date_time: i64,
+    pub duration: i64,
+    pub title: String,
+    pub importance: i64,
 }
 
 pub(crate) fn update_calendar_response_from_esi(
@@ -413,12 +428,12 @@ pub(crate) fn update_calendar_response_from_esi(
     char_id: i64,
     event_id: i64,
     response_code: i64,
-) -> Option<(i64, i64, i64, String, i64)> {
+) -> Option<CalendarEventResponseMeta> {
     let mut meta = None;
+    let db_ev = ctx.db.with_snapshot(|snap| snap.calendar_events.get(&event_id).cloned());
     {
-        let mut s = ctx.social_extras.lock().unwrap();
+        let mut s = ctx.social_extras.lock().unwrap_or_else(|e| e.into_inner());
         if !s.calendar_events.contains_key(&event_id) {
-            let db_ev = ctx.db.with_snapshot(|snap| snap.calendar_events.get(&event_id).cloned());
             if let Some(ev) = db_ev {
                 s.next_id = s.next_id.max(ev.event_id);
                 s.calendar_events.insert(
@@ -442,7 +457,13 @@ pub(crate) fn update_calendar_response_from_esi(
         if let Some(ev) = s.calendar_events.get_mut(&event_id) {
             if !ev.is_deleted {
                 ev.responses.insert(char_id, response_code);
-                meta = Some((ev.owner_id, ev.event_date_time, ev.duration, ev.title.clone(), ev.importance));
+                meta = Some(CalendarEventResponseMeta {
+                    owner_id: ev.owner_id,
+                    event_date_time: ev.event_date_time,
+                    duration: ev.duration,
+                    title: ev.title.clone(),
+                    importance: ev.importance,
+                });
             }
         }
     }
@@ -660,7 +681,6 @@ pub fn hydrate_social_state_from_db(ctx: &ServerContext) {
         ex.voice_enabled = voice_enabled;
         ex.loot_logging = loot_logging;
     }
-    super::fleet_social_notify::prune_offline_fleets_and_channels(ctx);
 }
 
 pub(crate) use super::fleet_social_corp_tail::{handle_kick_out_members, handle_update_members};

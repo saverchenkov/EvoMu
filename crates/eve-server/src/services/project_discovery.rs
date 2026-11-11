@@ -694,31 +694,20 @@ pub fn handle_project_discovery(
             });
 
             match res {
-                Ok((
-                    rep,
-                    player_state_rep,
-                    new_bal,
-                    _xp_gain,
-                    total_xp,
-                    old_rank,
-                    new_rank,
-                    xp_for_new_rank,
-                    xp_for_next_rank,
-                    ak_gain,
-                )) => {
-                    if let Some(bal) = new_bal {
+                Ok(out) => {
+                    if let Some(bal) = out.new_bal {
                         let _ = ctx.notify_account_change(char_id, "cash", char_id, bal.to_wire_f64());
                     }
                     crate::services::notify_emitters_skills_trade_godma::emit_player_state_updated(
                         ctx,
                         char_id,
-                        player_state_rep,
+                        out.player_state_rep,
                     );
-                    if ak_gain > 0 {
+                    if out.ak_gain > 0 {
                         session.push_notification("OnAnalysisKreditsChange", vec![]);
                         crate::services::notify_emitters_tournaments_anomalies::emit_analysis_kredits_change(ctx, char_id);
                     }
-                    let xp_args = vec![PyRep::Real(total_xp)];
+                    let xp_args = vec![PyRep::Real(out.total_xp)];
                     session.push_notification("OnProjectDiscoveryExperience", xp_args.clone());
                     let _ = ctx.notify(
                         crate::router::NotificationTarget::Character(char_id),
@@ -726,11 +715,11 @@ pub fn handle_project_discovery(
                         "charid",
                         xp_args,
                     );
-                    if new_rank > old_rank {
+                    if out.new_rank > out.prev_rank {
                         let lvl_args = vec![
-                            PyRep::Integer(new_rank),
-                            PyRep::Real(xp_for_new_rank),
-                            PyRep::Real(xp_for_next_rank),
+                            PyRep::Integer(out.new_rank),
+                            PyRep::Real(out.xp_for_new_rank),
+                            PyRep::Real(out.xp_for_next_rank),
                         ];
                         session.push_notification("OnProjectDiscoveryLevelUp", lvl_args.clone());
                         let _ = ctx.notify(
@@ -740,7 +729,7 @@ pub fn handle_project_discovery(
                             lvl_args,
                         );
                     }
-                    Some(Ok(rep))
+                    Some(Ok(out.rep))
                 }
                 Err(e) => Some(Err(e)),
             }
@@ -1009,4 +998,7 @@ pub fn handle_project_discovery_slash(
 }
 
 #[cfg(test)] #[path = "project_discovery_tests.rs"] mod project_discovery_tests;
+#[cfg(test)]
+#[path = "project_discovery_edges_tests.rs"]
+mod project_discovery_edges_tests;
 

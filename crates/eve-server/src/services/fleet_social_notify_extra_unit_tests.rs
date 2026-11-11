@@ -265,7 +265,7 @@ async fn disconnect_grace_lifecycle_tick_select_sync_and_prune() {
     });
 
     // sync_session_fleet clears fleet_id for kicked/expired member 90_000_004
-    let mut kicked_sess = SessionState::new(3);
+    let mut kicked_sess = SessionState::new(33_001);
     kicked_sess.character_id = Some(90_000_004);
     kicked_sess.fleet_id = Some(fleet_id);
     let (tx, _rx) = tokio::sync::mpsc::channel(16);

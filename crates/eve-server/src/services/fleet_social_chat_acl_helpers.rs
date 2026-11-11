@@ -62,7 +62,7 @@ pub(crate) fn validate_and_apply_channel_invite(
     let chan_blocked = ctx
         .social_extras
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .blocked_in_channel
         .get(&chan_id)
         .is_some_and(|b| b.contains(&char_id) || b.contains(&recipient_id));
@@ -136,7 +136,7 @@ pub(crate) fn authorize_and_fetch_channel_members(
     let blocked_in_chan = ctx
         .social_extras
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .blocked_in_channel
         .get(chan_id)
         .is_some_and(|b| b.contains(&char_id));

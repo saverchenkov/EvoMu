@@ -4,6 +4,9 @@
 #[path = "fleet_social_corp_gov_votes_tests.rs"]
 mod fleet_social_corp_gov_votes_tests;
 
+use crate::services::fleet_social::fleet_social_corp_gov::{
+    parse_title_dict_entry, parse_title_row_cells, parse_title_update_rows,
+};
 use crate::services::fleet_social::fleet_social_corps::fleet_social_corps_tests::seed_player_corps;
 use crate::services::fleet_social::fleet_social_fleet_ops::fleet_social_fleet_ops_tests::{
     clone_char_with, test_ctx_and_clock,
@@ -204,7 +207,85 @@ async fn corp_gov_shares_dividends_titles_and_ceo_resign() {
     let titles = call_gov(&ctx, &mut ceo, "corpRegistry", "GetTitles", vec![])
         .await
         .unwrap();
-    assert_eq!(rs_rows(&titles).len(), 1);
+    assert_eq!(rs_rows(&titles).len(), 16);
+    assert_eq!(rs_rows(&titles)[0][0].as_i64(), Some(1));
+    assert_eq!(rs_rows(&titles)[0][1].as_str(), Some("Fleet Commander"));
+    assert_eq!(rs_rows(&titles)[15][0].as_i64(), Some(32_768));
+
+    // UpdateTitles with a V24 Rowset containing power-of-two titleIDs 32 and 32768
+    let rowset_update = PyRep::rowset(
+        vec![
+            "titleID",
+            "titleName",
+            "roles",
+            "grantableRoles",
+            "rolesAtHQ",
+            "grantableRolesAtHQ",
+            "rolesAtBase",
+            "grantableRolesAtBase",
+            "rolesAtOther",
+            "grantableRolesAtOther",
+        ],
+        vec![
+            vec![
+                PyRep::Integer(32),
+                PyRep::String("Logistics Chief".into()),
+                PyRep::Integer(corp_roles::ROLE_FACTORY_MANAGER as i64),
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+            ],
+            vec![
+                PyRep::Integer(32_768),
+                PyRep::String("Senior Admiral".into()),
+                PyRep::Integer(corp_roles::ROLE_STATION_MANAGER as i64),
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+            ],
+        ],
+    );
+    call_gov(&ctx, &mut ceo, "corpRegistry", "UpdateTitles", vec![rowset_update])
+        .await
+        .unwrap();
+    let titles_after_batch = call_gov(&ctx, &mut ceo, "corpRegistry", "GetTitles", vec![])
+        .await
+        .unwrap();
+    assert_eq!(rs_rows(&titles_after_batch).len(), 16);
+    let row_32 = rs_rows(&titles_after_batch)
+        .iter()
+        .find(|r| r[0].as_i64() == Some(32))
+        .expect("titleID 32");
+    assert_eq!(row_32[1].as_str(), Some("Logistics Chief"));
+    assert_eq!(row_32[2].as_i64(), Some(corp_roles::ROLE_FACTORY_MANAGER as i64));
+    let row_32768 = rs_rows(&titles_after_batch)
+        .iter()
+        .find(|r| r[0].as_i64() == Some(32_768))
+        .expect("titleID 32768");
+    assert_eq!(row_32768[1].as_str(), Some("Senior Admiral"));
+
+    // Verify member with titleMask = 32 | 32768 inherits both roles via effective_corp_roles_at
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corp_governance
+            .entry(98_000_001)
+            .or_default()
+            .member_titles
+            .insert(90_000_002, 32 | 32_768);
+    });
+    let (_, eff_roles) = ctx
+        .db
+        .with_snapshot(|s| s.effective_corp_roles_at(98_000_001, 90_000_002, None, 0, 1_700_000_000));
+    assert_ne!(eff_roles & corp_roles::ROLE_FACTORY_MANAGER, 0);
+    assert_ne!(eff_roles & corp_roles::ROLE_STATION_MANAGER, 0);
+
     let del_title = call_gov(&ctx, &mut ceo, "corpRegistry", "DeleteTitle", vec![PyRep::Integer(1)])
         .await
         .unwrap();
@@ -449,4 +530,178 @@ async fn corp_gov_recruitment_contacts_labels_and_add_corp() {
     let key_idx = columns.iter().position(|c| c == "key").unwrap();
     let keys: Vec<i64> = rows.iter().filter_map(|r| r[key_idx].as_i64()).collect();
     assert_eq!(keys, vec![1000, 1001, 1002, 1003, 1004, 1005, 1006]);
+
+    // Verify AddCorporation seeded the 16 power-of-two titles
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.corp_titles[&new_cid].len(), 16);
+        assert_eq!(s.corp_titles[&new_cid][0].title_id, 1);
+        assert_eq!(s.corp_titles[&new_cid][15].title_id, 32_768);
+    });
+}
+
+#[tokio::test]
+async fn title_parsers_delayed_grants_role_drop_and_kick_blocker_boundaries() {
+    // 1. parse_title_row_cells boundaries (tid <= 0, reordered columns, ROLE_DIRECTOR stripping across all 8 masks)
+    assert!(parse_title_row_cells(None, &[PyRep::Integer(0)]).is_none());
+    assert!(parse_title_row_cells(None, &[PyRep::Integer(-1)]).is_none());
+    let dir_plus = (corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_STATION_MANAGER) as i64;
+    let default_cells = vec![
+        PyRep::Integer(64),
+        PyRep::String("Quartermaster".into()),
+        PyRep::Integer(dir_plus),
+        PyRep::Integer(dir_plus),
+        PyRep::Integer(dir_plus),
+        PyRep::Integer(dir_plus),
+        PyRep::Integer(dir_plus),
+        PyRep::Integer(dir_plus),
+        PyRep::Integer(dir_plus),
+        PyRep::Integer(dir_plus),
+    ];
+    let (tid, tname, masks) = parse_title_row_cells(None, &default_cells).unwrap();
+    assert_eq!(tid, 64);
+    assert_eq!(tname, "Quartermaster");
+    assert_eq!(masks, [corp_roles::ROLE_STATION_MANAGER; 8]);
+
+    let custom_cols = vec!["titleName".to_string(), "titleID".to_string(), "rolesAtOther".to_string()];
+    let reordered = vec![
+        PyRep::String("Outpost Lead".into()),
+        PyRep::Integer(128),
+        PyRep::Integer(dir_plus),
+    ];
+    let (rtid, rtname, rmasks) = parse_title_row_cells(Some(&custom_cols), &reordered).unwrap();
+    assert_eq!(rtid, 128);
+    assert_eq!(rtname, "Outpost Lead");
+    assert_eq!(rmasks[6], corp_roles::ROLE_STATION_MANAGER);
+
+    // 2. parse_title_dict_entry boundaries (tid <= 0, all 8 role columns)
+    assert!(parse_title_dict_entry(&PyRep::keyval([("titleID", PyRep::Integer(0))])).is_none());
+    assert!(parse_title_dict_entry(&PyRep::keyval([("titleID", PyRep::Integer(-5))])).is_none());
+    let dict_entry = PyRep::Dict(vec![
+        (PyRep::String("titleID".into()), PyRep::Integer(256)),
+        (PyRep::String("titleName".into()), PyRep::String("Treasurer".into())),
+        (PyRep::String("roles".into()), PyRep::Integer(dir_plus)),
+        (PyRep::String("grantableRoles".into()), PyRep::Integer(dir_plus)),
+        (PyRep::String("rolesAtHQ".into()), PyRep::Integer(dir_plus)),
+        (PyRep::String("grantableRolesAtHQ".into()), PyRep::Integer(dir_plus)),
+        (PyRep::String("rolesAtBase".into()), PyRep::Integer(dir_plus)),
+        (PyRep::String("grantableRolesAtBase".into()), PyRep::Integer(dir_plus)),
+        (PyRep::String("rolesAtOther".into()), PyRep::Integer(dir_plus)),
+        (PyRep::String("grantableRolesAtOther".into()), PyRep::Integer(dir_plus)),
+    ]);
+    let (dtid, dtname, dmasks) = parse_title_dict_entry(&dict_entry).unwrap();
+    assert_eq!(dtid, 256);
+    assert_eq!(dtname, "Treasurer");
+    assert_eq!(dmasks, [corp_roles::ROLE_STATION_MANAGER; 8]);
+
+    // 3. parse_title_update_rows across Object(header/lines), Object(KeyVal), List(cells), List(dict), Dict, and positional fallback
+    let obj_rowset = PyRep::Object {
+        type_name: "util.Rowset".into(),
+        args: Box::new(PyRep::Dict(vec![
+            (
+                PyRep::String("header".into()),
+                PyRep::List(vec![PyRep::String("titleID".into()), PyRep::String("titleName".into())]),
+            ),
+            (
+                PyRep::String("lines".into()),
+                PyRep::List(vec![
+                    PyRep::List(vec![PyRep::Integer(512), PyRep::String("ObjRow".into())]),
+                    dict_entry.clone(),
+                ]),
+            ),
+        ])),
+    };
+    let parsed_obj_rs = parse_title_update_rows(&[obj_rowset]);
+    assert_eq!(parsed_obj_rs.len(), 2);
+    assert_eq!(parsed_obj_rs[0].0, 512);
+    assert_eq!(parsed_obj_rs[1].0, 256);
+
+    let parsed_kv = parse_title_update_rows(&[PyRep::keyval([
+        ("titleID", PyRep::Integer(1024)),
+        ("titleName", PyRep::String("KVTitle".into())),
+    ])]);
+    assert_eq!(parsed_kv[0].0, 1024);
+
+    let parsed_list = parse_title_update_rows(&[PyRep::List(vec![PyRep::List(default_cells.clone()), dict_entry.clone()])]);
+    assert_eq!(parsed_list.len(), 2);
+    assert_eq!(parsed_list[0].0, 64);
+    assert_eq!(parsed_list[1].0, 256);
+
+    let parsed_dict = parse_title_update_rows(&[dict_entry]);
+    assert_eq!(parsed_dict[0].0, 256);
+
+    let parsed_pos = parse_title_update_rows(&[
+        PyRep::Integer(0),
+        PyRep::String("FallbackPos".into()),
+        PyRep::Integer(dir_plus),
+        PyRep::Integer(dir_plus),
+        PyRep::Integer(dir_plus),
+        PyRep::Integer(dir_plus),
+        PyRep::Integer(dir_plus),
+        PyRep::Integer(dir_plus),
+        PyRep::Integer(dir_plus),
+        PyRep::Integer(dir_plus),
+    ]);
+    assert_eq!(parsed_pos[0].0, 1);
+    assert_eq!(parsed_pos[0].1, "FallbackPos");
+    assert_eq!(parsed_pos[0].2, [corp_roles::ROLE_STATION_MANAGER; 8]);
+
+    // 4. Delayed division role grant, role drop timestamp on UpdateTitle & DeleteTitle, and title_mask_grants_roles
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let (mut ceo, _member) = seed_player_corps(&ctx);
+    ctx.db.with_mut_snapshot(|snap| {
+        let g = snap.corp_governance.entry(98_000_001).or_default();
+        g.member_titles.insert(90_000_002, 16);
+    });
+    let delayed_role = corp_roles::CORP_DELAYED_DIVISION_ROLE_MASK
+        & !(corp_roles::CORP_DELAYED_DIVISION_ROLE_MASK - 1);
+    call_gov(
+        &ctx,
+        &mut ceo,
+        "corpRegistry",
+        "UpdateTitle",
+        vec![
+            PyRep::Integer(16),
+            PyRep::String("Hangar Chief".into()),
+            PyRep::Integer(delayed_role as i64),
+        ],
+    )
+    .await
+    .unwrap();
+    ctx.db.with_snapshot(|snap| {
+        let g = &snap.corp_governance[&98_000_001];
+        assert_eq!(
+            g.pending_title_role_grants.get(&90_000_002).copied(),
+            Some((delayed_role, 1_700_000_000 + 86_400))
+        );
+        assert!(crate::services::fleet_social::fleet_social_corp_tail::title_mask_grants_roles(
+            snap, 98_000_001, 16
+        ));
+        assert!(!crate::services::fleet_social::fleet_social_corp_tail::title_mask_grants_roles(
+            snap, 98_000_001, 0
+        ));
+    });
+
+    // Dropping the role records role_drop_timestamps
+    call_gov(
+        &ctx,
+        &mut ceo,
+        "corpRegistry",
+        "UpdateTitle",
+        vec![
+            PyRep::Integer(16),
+            PyRep::String("Hangar Chief".into()),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap();
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.corp_governance[&98_000_001]
+                .role_drop_timestamps
+                .get(&90_000_002)
+                .copied(),
+            Some(1_700_000_000)
+        );
+    });
 }

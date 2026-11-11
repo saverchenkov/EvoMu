@@ -596,3 +596,113 @@ async fn update_delete_shared_bookmarks_sweep_notify_and_scan_result_branches() 
         "SignatureNotFound"
     );
 }
+
+#[tokio::test]
+async fn corp_bookmark_admin_roles_add_update_folder_and_unmatched_dispatch() {
+    let ctx = test_ctx();
+    let corp_id = 98_710_001_i64;
+    let ceo_cid = 90_710_001_i64;
+    let dir_cid = 90_710_002_i64;
+    let pm_cid = 90_710_003_i64;
+    let plain_cid = 90_710_004_i64;
+    let sys_id = 30_000_142_u32;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "BM Corp".into();
+        corp.ticker = "BMC".into();
+        corp.ceo_id = ceo_cid;
+        corp.members.insert(ceo_cid);
+        corp.members.insert(dir_cid);
+        corp.members.insert(pm_cid);
+        corp.members.insert(plain_cid);
+        corp.member_roles.insert(ceo_cid, 0);
+        corp.member_roles.insert(dir_cid, corp_roles::ROLE_DIRECTOR);
+        corp.member_roles.insert(pm_cid, corp_roles::ROLE_PERSONNEL_MANAGER);
+        corp.member_roles.insert(plain_cid, 0);
+        corp.ensure_wallet_divisions();
+        snap.corporations.insert(corp_id, corp);
+
+        let tpl = snap.characters.values().next().unwrap().clone();
+        for cid in [ceo_cid, dir_cid, pm_cid, plain_cid] {
+            let mut ch = tpl.clone();
+            ch.character_id = cid;
+            ch.name = format!("BMChar {cid}");
+            ch.corporation_id = corp_id;
+            snap.characters.insert(cid, ch);
+        }
+    });
+
+    let mut ceo_s = make_session(ceo_cid, corp_id, Some(sys_id), 0);
+    let mut dir_s = make_session(dir_cid, corp_id, Some(sys_id), corp_roles::ROLE_DIRECTOR);
+    let mut pm_s = make_session(pm_cid, corp_id, Some(sys_id), corp_roles::ROLE_PERSONNEL_MANAGER);
+    let mut plain_s = make_session(plain_cid, corp_id, Some(sys_id), 0);
+    let kw = HashMap::new();
+
+    // 1. Direct `has_corp_bookmark_admin_role` kills `-> true`, `-> false`, and both `|| -> &&`
+    ctx.db.with_snapshot(|snap| {
+        assert!(super::super::has_corp_bookmark_admin_role(snap, &ceo_s, ceo_cid, corp_id));
+        assert!(super::super::has_corp_bookmark_admin_role(snap, &dir_s, dir_cid, corp_id));
+        assert!(super::super::has_corp_bookmark_admin_role(snap, &pm_s, pm_cid, corp_id));
+        assert!(!super::super::has_corp_bookmark_admin_role(snap, &plain_s, plain_cid, corp_id));
+    });
+
+    // 2. Unmatched service returns None (kills `handle_bookmarks -> Some(Ok(Default))`)
+    let no_svc = ["unmatched", "_svc"].concat();
+    let no_meth = ["unmatched", "_meth"].concat();
+    assert!(handle(&ctx, &mut ceo_s, &no_svc, &no_meth, &[], &kw).await.is_none());
+
+    // 3. `AddFolder` (shared corp folder) exercises CEO / DIRECTOR / PERSONNEL_MANAGER independently + denies plain member
+    for (sess_mut, label) in [
+        (&mut ceo_s, "Shared CEO"),
+        (&mut dir_s, "Shared Dir"),
+        (&mut pm_s, "Shared PM"),
+    ] {
+        let res = handle(
+            &ctx,
+            sess_mut,
+            "bookmark",
+            "AddFolder",
+            &[PyRep::String(label.into()), PyRep::Bool(true)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let fid = res.dict_get("folderID").and_then(|v| v.as_i64()).unwrap();
+        assert_eq!(res.dict_get("folderName"), Some(&PyRep::String(label.into())));
+
+        // 4. `UpdateFolder` renames the created folder in snapshot
+        let renamed = format!("{label} Renamed");
+        let upd = handle(
+            &ctx,
+            sess_mut,
+            "bookmark",
+            "UpdateFolder",
+            &[PyRep::Integer(fid), PyRep::String(renamed.clone())],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(upd.dict_get("folderName"), Some(&PyRep::String(renamed.clone())));
+        assert_eq!(
+            ctx.db.with_snapshot(|s| s.bookmark_folders[&fid].folder_name.clone()),
+            renamed
+        );
+    }
+
+    let denied = handle(
+        &ctx,
+        &mut plain_s,
+        "bookmark",
+        "AddFolder",
+        &[PyRep::String("Denied".into()), PyRep::Bool(true)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(denied.code, "BookmarkAccessDenied");
+}

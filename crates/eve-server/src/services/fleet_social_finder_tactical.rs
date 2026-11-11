@@ -72,6 +72,7 @@ fn leader_keyval(leader_id: i64, leader_meta: Option<(i64, Option<i64>, f64)>) -
                 .map(PyRep::Integer)
                 .unwrap_or(PyRep::None),
         ),
+        ("warFactionID", PyRep::None),
         ("securityStatus", PyRep::Real(sec)),
     ])
 }
@@ -382,10 +383,17 @@ fn require_fleet_advert_auth(ctx: &ServerContext, session: &SessionState) -> Res
         code: "NotInFleet".into(),
         message: "Character is not in a fleet".into(),
     })?;
-    let is_auth = ctx.db.with_snapshot(|snap| {
+    let is_boss = ctx.db.with_snapshot(|snap| {
         snap.fleets.get(&fleet_id).is_some_and(|fl| fl.boss_id == char_id)
-            || ctx.fleet_extras.lock().unwrap().adverts.get(&fleet_id).is_some_and(|ad| ad.leader_id == char_id)
     });
+    let is_auth = is_boss
+        || ctx
+            .fleet_extras
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .adverts
+            .get(&fleet_id)
+            .is_some_and(|ad| ad.leader_id == char_id);
     if !is_auth {
         return Err(BridgeRpcError {
             code: "FleetRoleDenied".into(),
@@ -877,6 +885,7 @@ pub(super) async fn handle_finder_and_tactical(
         // parity: rpc:fleetProxy.AddFleetFinderAdvert
         ("fleetProxy", "AddFleetFinderAdvert") => {
             let (char_id, fleet_id) = match require_fleet_advert_auth(ctx, session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let mut initial_allowed = HashSet::new();
             let (fleet_name, description, invite_scope, auto_join, min_standing, min_security) =
                 if let Some(advert_obj) = args.first().filter(|a| a.dict_get("fleetName").is_some() || a.dict_get("inviteScope").is_some() || a.dict_get("joinNeedsApproval").is_some()).or_else(|| kwargs.get("advertKeyVal").or_else(|| kwargs.get("advert"))) {
                     let fn_name = advert_obj.dict_get("fleetName").and_then(|a| a.as_str()).unwrap_or("Public Standing Fleet").to_string();
@@ -885,6 +894,9 @@ pub(super) async fn handle_finder_and_tactical(
                     let needs_appr = advert_obj.dict_get("joinNeedsApproval").and_then(|a| match a { PyRep::Bool(b) => Some(*b), PyRep::Integer(i) => Some(*i != 0), _ => None }).unwrap_or(false);
                     let min_st = advert_obj.dict_get("minStanding").and_then(|a| a.as_f64()).unwrap_or(-10.0);
                     let min_sec = advert_obj.dict_get("minSecurity").and_then(|a| a.as_f64()).unwrap_or(-10.0);
+                    for key in ["allowedEntities", "public_allowedEntities", "membergroups_allowedEntities"] {
+                        extract_id_set(advert_obj.dict_get(key), &mut initial_allowed);
+                    }
                     (fn_name, desc, scope, !needs_appr, min_st, min_sec)
                 } else {
                     let fn_name = args.first().and_then(|a| a.as_str()).unwrap_or("Public Standing Fleet").to_string();
@@ -920,7 +932,7 @@ pub(super) async fn handle_finder_and_tactical(
             let ad_state = FleetAdvertState {
                 fleet_id, leader_id: char_id, fleet_name: fleet_name.clone(), description: description.clone(),
                 solar_system_id: sys_id, invite_scope, auto_join, min_standing, min_security,
-                allowed_entities: HashSet::new(), _created_unix: now_unix,
+                allowed_entities: initial_allowed, _created_unix: now_unix,
             };
             let auto_join_squad = {
                 let mut ex = ctx.fleet_extras.lock().unwrap();
@@ -929,7 +941,7 @@ pub(super) async fn handle_finder_and_tactical(
             };
             sync_fleet_advert_snapshot_to_db(ctx, fleet_id);
             notify::sync_fleet_options_to_db(ctx);
-            if let Some((free_move, false)) = reg_change {
+            if let Some((free_move, _)) = reg_change {
                 notify::emit_options_changed(
                     ctx,
                     fleet_id,
@@ -1442,4 +1454,11 @@ pub fn clear_destroyed_target_tag(ctx: &ServerContext, target_id: i64) {
 #[cfg(test)]
 #[path = "fleet_social_finder_tactical_tests.rs"]
 mod fleet_social_finder_tactical_tests;
+#[cfg(test)]
+#[path = "fleet_social_finder_tactical_edges_tests.rs"]
+mod fleet_social_finder_tactical_edges_tests;
+
+#[cfg(test)]
+#[path = "fleet_social_finder_tactical_edges2_tests.rs"]
+mod fleet_social_finder_tactical_edges2_tests;
 

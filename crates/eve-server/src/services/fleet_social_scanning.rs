@@ -1066,7 +1066,7 @@ pub(crate) fn resolve_anomaly_dungeon_metadata(
         } else if matches!(lower_type.as_str(), "icebelt" | "ice") {
             (5_496_u32, 28_u32, 500_021_u32, 2_u32)
         } else if matches!(lower_type.as_str(), "gas" | "gas site") {
-            (3_807_u32, 30_u32, 500_021_u32, 2_u32)
+            (1_427_u32, 30_u32, 500_021_u32, 2_u32)
         } else if matches!(lower_type.as_str(), "relic" | "relic site") {
             (1_612_u32, 44_u32, 500_011_u32, 2_u32)
         } else if matches!(lower_type.as_str(), "data" | "data site") {
@@ -1377,4 +1377,7 @@ pub(crate) fn emit_signal_tracker_site_removed_with_db(
 
 #[cfg(test)] #[path = "fleet_social_scanning_tests.rs"]
 mod fleet_social_scanning_tests;
+#[cfg(test)]
+#[path = "fleet_social_scanning_edges_tests.rs"]
+mod fleet_social_scanning_edges_tests;
 

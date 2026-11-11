@@ -536,3 +536,227 @@ fn mailing_lists_operator_hierarchy_protections_and_permission_gates() {
         assert!(!ml.members.contains_key(&op_a));
     }
 }
+
+#[test]
+fn mutant_kill_all_mailing_list_ops_arms_roundtrip_and_unknown_dispatch() {
+    let ctx = make_ctx(1_775_410_000);
+    let owner_id = 90_000_001_i64;
+    let member_id = 90_000_002_i64;
+    let bystander_id = 90_000_003_i64;
+
+    ctx.db
+        .acquire_online_lock(1, 801, Some(owner_id), true, 1_775_410_000)
+        .unwrap();
+    ctx.db
+        .acquire_online_lock(2, 802, Some(member_id), true, 1_775_410_000)
+        .unwrap();
+
+    let mut owner_sess = char_sess(1, owner_id, 98_000_001);
+    let mut member_sess = char_sess(2, member_id, 98_000_002);
+    let kw = HashMap::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let call_ops = |sess: &mut SessionState, svc: &str, method: &str, args: &[PyRep]| {
+        rt.block_on(handle(&ctx, sess, svc, method, args, &kw))
+    };
+
+    // Unknown method must return None from handle_mailing_list_ops
+    assert!(call_ops(&mut owner_sess, "mailingListsMgr", "unmatched_method", &[]).is_none());
+    assert!(call_ops(&mut owner_sess, "nonmatching_service", "Create", &[]).is_none());
+
+    // Create + Join + GetMembers
+    let lid = call_ops(
+        &mut owner_sess,
+        "mailingListsMgr",
+        "Create",
+        &[PyRep::String("Ops Dispatch".into()), PyRep::Integer(1), PyRep::Integer(1), PyRep::Integer(0)],
+    )
+    .unwrap()
+    .unwrap()
+    .as_i64()
+    .unwrap();
+    let _ = call_ops(&mut member_sess, "mailingListsMgr", "Join", &[PyRep::Integer(lid)])
+        .unwrap()
+        .unwrap();
+
+    let members_dict = call_ops(&mut owner_sess, "mailingListsMgr", "GetMembers", &[PyRep::Integer(lid)])
+        .unwrap()
+        .unwrap();
+    if let PyRep::Dict(entries) = members_dict {
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|(k, v)| *k == PyRep::Integer(member_id) && v.dict_get("role") == Some(&PyRep::Integer(1))));
+    } else {
+        panic!("expected GetMembers Dict");
+    }
+
+    // SetEntityAccess + ClearEntityAccess + GetSettings
+    let ent_set = call_ops(
+        &mut owner_sess,
+        "mailingListsMgr",
+        "SetEntityAccess",
+        &[PyRep::Integer(lid), PyRep::Integer(bystander_id), PyRep::Integer(2)],
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(ent_set.dict_get("entityAccessCount"), Some(&PyRep::Integer(1)));
+
+    let settings1 = call_ops(&mut owner_sess, "mailingListsMgr", "GetSettings", &[PyRep::Integer(lid)])
+        .unwrap()
+        .unwrap();
+    assert_eq!(settings1.dict_get("listID"), Some(&PyRep::Integer(lid)));
+    assert_eq!(settings1.dict_get("defaultAccess"), Some(&PyRep::Integer(1)));
+    assert_eq!(settings1.dict_get("welcomeMail"), Some(&PyRep::None));
+
+    assert_eq!(
+        call_ops(
+            &mut owner_sess,
+            "mailingListsMgr",
+            "ClearEntityAccess",
+            &[PyRep::Integer(lid), PyRep::Integer(bystander_id)],
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert!(ctx.social_extras.lock().unwrap().mailing_lists[&lid].entity_access.is_empty());
+
+    // SetDefaultAccess updates access/role/cost
+    let def_set = call_ops(
+        &mut owner_sess,
+        "mailingListsMgr",
+        "SetDefaultAccess",
+        &[PyRep::Integer(lid), PyRep::Integer(2), PyRep::Integer(0), PyRep::Integer(250)],
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(def_set.dict_get("defaultAccess"), Some(&PyRep::Integer(2)));
+    assert_eq!(def_set.dict_get("defaultRole"), Some(&PyRep::Integer(0)));
+    assert_eq!(def_set.dict_get("cost"), Some(&PyRep::Integer(250)));
+
+    // SaveWelcomeMail -> GetWelcomeMail -> ClearWelcomeMail -> GetWelcomeMail
+    let saved_wm = call_ops(
+        &mut owner_sess,
+        "mailingListsMgr",
+        "SaveWelcomeMail",
+        &[PyRep::Integer(lid), PyRep::String("Title".into()), PyRep::String("Body".into())],
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(saved_wm.dict_get("title"), Some(&PyRep::String("Title".into())));
+
+    let got_wm = call_ops(&mut member_sess, "mailingListsMgr", "GetWelcomeMail", &[PyRep::Integer(lid)])
+        .unwrap()
+        .unwrap();
+    assert!(matches!(got_wm, PyRep::List(ref l) if l.len() == 1 && l[0].dict_get("body") == Some(&PyRep::String("Body".into()))));
+
+    assert_eq!(
+        call_ops(&mut owner_sess, "mailingListsMgr", "ClearWelcomeMail", &[PyRep::Integer(lid)])
+            .unwrap()
+            .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(
+        call_ops(&mut member_sess, "mailingListsMgr", "GetWelcomeMail", &[PyRep::Integer(lid)])
+            .unwrap()
+            .unwrap(),
+        PyRep::List(vec![])
+    );
+
+    // SendWelcomeMail positive path creates MailRecord and notifies recipient member
+    let _ = ctx.drain_notifications_for_char(member_id);
+    assert_eq!(
+        call_ops(
+            &mut owner_sess,
+            "mailingListsMgr",
+            "SendWelcomeMail",
+            &[PyRep::Integer(lid), PyRep::String("Subj".into()), PyRep::String("Msg".into())],
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.mails.iter().any(|m| m.recipient_id == member_id && m.subject == "Subj" && m.body == "Msg"));
+    });
+    assert!(!ctx.drain_notifications_for_char(member_id).is_empty());
+
+    // SetMembersOperator -> SetMembersMuted -> SetMembersClear -> KickMembers -> Leave -> Delete
+    assert_eq!(
+        call_ops(
+            &mut owner_sess,
+            "mailingListsMgr",
+            "SetMembersOperator",
+            &[PyRep::Integer(lid), PyRep::List(vec![PyRep::Integer(member_id)])],
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(ctx.social_extras.lock().unwrap().mailing_lists[&lid].members.get(&member_id), Some(&2));
+    assert!(ctx.drain_notifications_for_char(member_id).iter().any(|n| n.event == "OnMailingListSetOperator"));
+
+    assert_eq!(
+        call_ops(
+            &mut owner_sess,
+            "mailingListsMgr",
+            "SetMembersMuted",
+            &[PyRep::Integer(lid), PyRep::List(vec![PyRep::Integer(member_id)])],
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(ctx.social_extras.lock().unwrap().mailing_lists[&lid].members.get(&member_id), Some(&0));
+    assert!(ctx.drain_notifications_for_char(member_id).iter().any(|n| n.event == "OnMailingListSetMuted"));
+
+    assert_eq!(
+        call_ops(
+            &mut owner_sess,
+            "mailingListsMgr",
+            "SetMembersClear",
+            &[PyRep::Integer(lid), PyRep::List(vec![PyRep::Integer(member_id)])],
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(ctx.social_extras.lock().unwrap().mailing_lists[&lid].members.get(&member_id), Some(&1));
+    assert!(ctx.drain_notifications_for_char(member_id).iter().any(|n| n.event == "OnMailingListSetClear"));
+
+    assert_eq!(
+        call_ops(
+            &mut owner_sess,
+            "mailingListsMgr",
+            "KickMembers",
+            &[PyRep::Integer(lid), PyRep::List(vec![PyRep::Integer(member_id)])],
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert!(!ctx.social_extras.lock().unwrap().mailing_lists[&lid].members.contains_key(&member_id));
+    assert!(ctx.drain_notifications_for_char(member_id).iter().any(|n| n.event == "OnMailingListLeave"));
+
+    // Re-join, verify Leave removes self, re-join once more so Delete notifies remaining member
+    let _ = call_ops(&mut member_sess, "mailingListsMgr", "Join", &[PyRep::Integer(lid)]);
+    assert_eq!(
+        call_ops(&mut member_sess, "mailingListsMgr", "Leave", &[PyRep::Integer(lid)])
+            .unwrap()
+            .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert!(!ctx.social_extras.lock().unwrap().mailing_lists[&lid].members.contains_key(&member_id));
+
+    let _ = call_ops(&mut member_sess, "mailingListsMgr", "Join", &[PyRep::Integer(lid)]);
+    let _ = ctx.drain_notifications_for_char(member_id);
+    assert_eq!(
+        call_ops(&mut owner_sess, "mailingListsMgr", "Delete", &[PyRep::Integer(lid)])
+            .unwrap()
+            .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert!(!ctx.social_extras.lock().unwrap().mailing_lists.contains_key(&lid));
+    assert!(ctx.drain_notifications_for_char(member_id).iter().any(|n| n.event == "OnMailingListDeleted"));
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.mailing_lists.contains_key(&lid));
+    });
+}

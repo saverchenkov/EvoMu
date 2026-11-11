@@ -919,11 +919,7 @@ pub(super) fn handle_get_init_state(
                 PyRep::Integer(skill_lvl(SKILL_WING_COMMAND)),
                 PyRep::Integer(skill_lvl(SKILL_FLEET_COMMAND)),
             ]);
-            let opt_outs = PyRep::keyval([
-                ("acceptsFleetWarp", PyRep::Bool(m.takes_fleet_warp)),
-                ("acceptsRegroup", PyRep::Bool(m.accepts_regroup)),
-                ("acceptsConduitJumps", PyRep::Bool(m.accepts_conduit_jumps)),
-            ]);
+            let opt_outs = fleet_social_notify::member_opt_outs(m);
             members_dict.push((
                 PyRep::Integer(m.character_id),
                 PyRep::keyval([

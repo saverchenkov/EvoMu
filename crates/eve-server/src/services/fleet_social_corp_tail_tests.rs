@@ -261,3 +261,61 @@ fn insert_vote_case_covers_ceo_election_and_share_creation_branches() {
     assert_eq!(sv_kv.get("voteType").unwrap().as_i64().unwrap(), 5);
     assert_eq!(sv_kv.get("parameter").unwrap().as_i64().unwrap(), 250);
 }
+
+#[test]
+fn aggression_settings_serializes_v24_object_and_filetime_ticks_gh794() {
+    let ctx = test_ctx_with_clock(1_800_022_000);
+    let (mut ceo_sess, _mem_sess) = seed_player_corps(&ctx);
+    let corp_id = 98_000_001_i64;
+    let ceo_id = 90_000_001_i64;
+    let now_unix = 1_800_022_000_u64;
+
+    let init_agg = super::super::fleet_social_corp_tail_dispatch::handle_corp_gov_tail(
+        &ctx,
+        &mut ceo_sess,
+        "corpRegistry",
+        "GetAggressionSettings",
+        &[PyRep::Integer(corp_id)],
+        corp_id,
+        ceo_id,
+        now_unix,
+    )
+    .unwrap()
+    .unwrap();
+    let PyRep::Object { type_name, args } = &init_agg else {
+        panic!("expected AggressionSettings PyRep::Object, got {init_agg:?}");
+    };
+    assert_eq!(
+        type_name,
+        "crimewatch.corp_aggression.settings.AggressionSettings"
+    );
+    assert_eq!(args.dict_get("_enableAfter"), Some(&PyRep::None));
+    assert_eq!(args.dict_get("_disableAfter"), Some(&PyRep::Integer(0)));
+
+    let encoded = eve_proto::marshal::encode(&init_agg);
+    let decoded = eve_proto::marshal::decode(&encoded).expect("decode AggressionSettings");
+    assert!(matches!(
+        &decoded,
+        PyRep::Object { type_name, .. }
+            if type_name == "crimewatch.corp_aggression.settings.AggressionSettings"
+    ));
+
+    let reg_agg = super::super::fleet_social_corp_tail_dispatch::handle_corp_gov_tail(
+        &ctx,
+        &mut ceo_sess,
+        "corpRegistry",
+        "RegisterNewAggressionSettings",
+        &[PyRep::Bool(true)],
+        corp_id,
+        ceo_id,
+        now_unix,
+    )
+    .unwrap()
+    .unwrap();
+    let expected_ft = crate::sp6_lifecycle::unix_to_filetime(now_unix + 86_400);
+    assert_eq!(
+        reg_agg.dict_get("_enableAfter"),
+        Some(&PyRep::Integer(expected_ft))
+    );
+    assert_eq!(reg_agg.dict_get("_disableAfter"), Some(&PyRep::Integer(0)));
+}

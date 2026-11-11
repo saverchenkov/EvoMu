@@ -404,3 +404,219 @@ fn project_validation_limits_auto_payout_freelance_batches_and_expiry_sweep() {
         None
     );
 }
+
+#[test]
+fn non_auto_payout_corp_goal_redeem_wallet_sync_and_detailed_activity_notices() {
+    let (ctx, sess, char_id, corp_id) = setup_projects_ctx();
+    let now = ctx.now_unix();
+    let _rx = ctx.quasar_gateway.subscribe_session(&sess, Vec::new(), now);
+
+    // 1. read_synced_corp_wallet_balance: empty wallet_divisions must sync div 1 from master_wallet
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.get_mut(&corp_id).unwrap();
+        corp.set_division_balance(1, IskCents::from_isk(2_000_000));
+        corp.wallet_divisions.clear();
+    });
+    assert!(
+        create_canonical_project(
+            &ctx.db,
+            CanonicalProjectSpec {
+                corp_id,
+                creator_id: char_id,
+                name: "Over Master".into(),
+                description: String::new(),
+                target_quantity: 5,
+                initial_quantity: 0,
+                escrow: IskCents::from_isk(2_500_000),
+                isk_per_unit: IskCents::from_isk(500_000),
+                wallet_division: 1,
+                matcher_type: "MineMaterials".into(),
+                is_freelance: false,
+                auto_payout_on_contribution: false,
+                max_per_character: None,
+                expires_unix: None,
+                filter_id: None,
+                batch_size: 1,
+                now_unix: now,
+                min_project_id: 500,
+            },
+        )
+        .is_err()
+    );
+
+    // 2. Seed: expired project + manual corp goal + auto-payout completing corp goal + completing freelance project
+    let (exp_pid, _) = create_canonical_project(
+        &ctx.db,
+        CanonicalProjectSpec {
+            corp_id,
+            creator_id: char_id,
+            name: "Expired Project".into(),
+            description: String::new(),
+            target_quantity: 10,
+            initial_quantity: 0,
+            escrow: IskCents::from_isk(40_000),
+            isk_per_unit: IskCents::from_isk(4_000),
+            wallet_division: 1,
+            matcher_type: "MineMaterials".into(),
+            is_freelance: false,
+            auto_payout_on_contribution: false,
+            max_per_character: None,
+            expires_unix: Some(now + 100),
+            filter_id: None,
+            batch_size: 1,
+            now_unix: now,
+            min_project_id: 501,
+        },
+    )
+    .unwrap();
+    let _ = now;
+
+    let (manual_pid, _) = create_canonical_project(
+        &ctx.db,
+        CanonicalProjectSpec {
+            corp_id,
+            creator_id: char_id,
+            name: "Manual Ore Goal".into(),
+            description: String::new(),
+            target_quantity: 50,
+            initial_quantity: 0,
+            escrow: IskCents::from_isk(500_000),
+            isk_per_unit: IskCents::from_isk(10_000),
+            wallet_division: 1,
+            matcher_type: "MineMaterials".into(),
+            is_freelance: false,
+            auto_payout_on_contribution: false,
+            max_per_character: None,
+            expires_unix: None,
+            filter_id: Some(34),
+            batch_size: 1,
+            now_unix: now,
+            min_project_id: 502,
+        },
+    )
+    .unwrap();
+
+    let (auto_goal_pid, auto_goal_uuid) = create_canonical_project(
+        &ctx.db,
+        CanonicalProjectSpec {
+            corp_id,
+            creator_id: char_id,
+            name: "Auto Completing Goal".into(),
+            description: String::new(),
+            target_quantity: 5,
+            initial_quantity: 2,
+            escrow: IskCents::from_isk(100_000),
+            isk_per_unit: IskCents::from_isk(25_000),
+            wallet_division: 1,
+            matcher_type: "MineMaterials".into(),
+            is_freelance: false,
+            auto_payout_on_contribution: true,
+            max_per_character: None,
+            expires_unix: None,
+            filter_id: Some(34),
+            batch_size: 1,
+            now_unix: now,
+            min_project_id: 503,
+        },
+    )
+    .unwrap();
+
+    let (fl_pid, fl_uuid) = create_canonical_project(
+        &ctx.db,
+        CanonicalProjectSpec {
+            corp_id,
+            creator_id: char_id,
+            name: "Completing Freelance".into(),
+            description: String::new(),
+            target_quantity: 3,
+            initial_quantity: 0,
+            escrow: IskCents::from_isk(60_000),
+            isk_per_unit: IskCents::from_isk(15_000),
+            wallet_division: 1,
+            matcher_type: "MineMaterials".into(),
+            is_freelance: true,
+            auto_payout_on_contribution: false,
+            max_per_character: None,
+            expires_unix: None,
+            filter_id: Some(34),
+            batch_size: 1,
+            now_unix: now,
+            min_project_id: 504,
+        },
+    )
+    .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.alliance_war_state
+            .project_details
+            .get_mut(&fl_pid)
+            .unwrap()
+            .committed_participants
+            .push(char_id);
+        snap.alliance_war_state
+            .project_details
+            .get_mut(&exp_pid)
+            .unwrap()
+            .expires_unix = Some(now.saturating_sub(1));
+    });
+
+    let _ = ctx.quasar_gateway.poll_notices(sess.session_id);
+    record_server_project_activity(&ctx, char_id, &["MineMaterials"], 3, Some(34));
+
+    let notices = ctx.quasar_gateway.poll_notices(sess.session_id);
+    fn url_of(n: &eve_proto::quasar::EvePublicNotice) -> &str {
+        n.payload.as_ref().map(|p| p.type_url.as_str()).unwrap_or("")
+    }
+    fn bytes_of(n: &eve_proto::quasar::EvePublicNotice) -> &[u8] {
+        n.payload.as_ref().map(|p| p.value.as_slice()).unwrap_or(&[])
+    }
+
+    assert!(
+        notices.iter().any(|n| url_of(n).ends_with(".ExpiredNotice")),
+        "record_server_project_activity_detailed must return expired items"
+    );
+    assert!(
+        notices.iter().any(|n| url_of(n).ends_with("eve_public.goal.contribution.api.ContributedNotice")
+            && bytes_of(n).windows(16).any(|w| w == auto_goal_uuid)),
+        "expected ContributedNotice for corp goal uuid"
+    );
+    assert!(
+        notices.iter().any(|n| url_of(n).ends_with("eve_public.goal.api.CompletedNotice")
+            && bytes_of(n).windows(16).any(|w| w == auto_goal_uuid)),
+        "expected CompletedNotice for completing corp goal"
+    );
+    assert!(
+        notices.iter().any(|n| url_of(n).ends_with("corporationgoal.api.RedeemedNotice")
+            && bytes_of(n).windows(16).any(|w| w == auto_goal_uuid)),
+        "expected RedeemedNotice for auto_paid_isk > 0"
+    );
+    assert!(
+        notices.iter().any(|n| url_of(n).ends_with("freelance.project.api.ParticipantContributedNotice")
+            && bytes_of(n).windows(16).any(|w| w == fl_uuid)),
+        "expected freelance ParticipantContributedNotice"
+    );
+    assert!(
+        notices.iter().any(|n| url_of(n).ends_with("freelance.project.api.ProgressedNotice")
+            && bytes_of(n).windows(16).any(|w| w == fl_uuid)),
+        "expected freelance ProgressedNotice"
+    );
+    assert!(
+        notices.iter().any(|n| url_of(n).ends_with("freelance.project.api.CompletedNotice")
+            && bytes_of(n).windows(16).any(|w| w == fl_uuid)),
+        "expected freelance CompletedNotice"
+    );
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.corp_projects[&auto_goal_pid].current_quantity),
+        5
+    );
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.corp_projects[&fl_pid].current_quantity),
+        3
+    );
+
+    // 3. Non-auto-payout manual corp goal redeem_corp_goal_reward_for_char returns exact 30,000 ISK
+    let bal_before = ctx.db.with_snapshot(|s| s.characters[&char_id].balance);
+    let paid_isk = redeem_corp_goal_reward_for_char(&ctx.db, manual_pid, char_id, now).unwrap();
+    assert_eq!(paid_isk, 30_000);
+    let bal_after = ctx.db.with_snapshot(|s| s.characters[&char_id].balance);
+    assert_eq!(bal_after, bal_before.checked_add(IskCents::from_isk(30_000)).unwrap());
+}

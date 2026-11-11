@@ -198,9 +198,15 @@ fn asset_inventory_which_filters_search_assets_and_aggression_timer_promotion() 
     )
     .unwrap()
     .unwrap();
+    let expected_ft = crate::sp6_lifecycle::unix_to_filetime(1_700_086_400);
+    assert!(matches!(
+        &reg_false,
+        PyRep::Object { type_name, .. }
+            if type_name == "crimewatch.corp_aggression.settings.AggressionSettings"
+    ));
     assert_eq!(
         reg_false.dict_get("_disableAfter").and_then(|v| v.as_i64()),
-        Some(1_700_086_400)
+        Some(expected_ft)
     );
 
     let _ = call_reg(
@@ -233,8 +239,12 @@ fn asset_inventory_which_filters_search_assets_and_aggression_timer_promotion() 
         Some(true)
     );
     assert_eq!(
+        before_eff.dict_get("_enableAfter").and_then(|v| v.as_i64()),
+        Some(expected_ft)
+    );
+    assert_eq!(
         before_eff.dict_get("changeAtTime").and_then(|v| v.as_i64()),
-        Some(1_700_086_400)
+        Some(expected_ft)
     );
 
     let after_eff = call_mgr(

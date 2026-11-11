@@ -283,8 +283,8 @@ fn calendar_esi_response_mailing_lists_and_full_db_hydration_kill_mutations() {
 
     // update_calendar_response_from_esi loads uncached event 850_001 from DB, updates response, and rejects deleted 850_002
     let meta = update_calendar_response_from_esi(&ctx, cid, 850_001, 1).unwrap();
-    assert_eq!(meta.0, cid);
-    assert_eq!(meta.3, "CTA Op");
+    assert_eq!(meta.owner_id, cid);
+    assert_eq!(meta.title, "CTA Op");
     assert!(update_calendar_response_from_esi(&ctx, cid, 850_002, 1).is_none());
     assert!(update_calendar_response_from_esi(&ctx, cid, 999_999, 1).is_none());
 

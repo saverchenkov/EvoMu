@@ -63,28 +63,8 @@ pub(crate) fn member_kick_blocker(
             return Some("MemberHasRoles");
         }
         if let Some(&tmask) = g.member_titles.get(&target_id) {
-            if tmask != 0 {
-                for (&tid, &(_, troles)) in &g.titles {
-                    let bit = 1u64 << ((tid - 1).clamp(0, 62) as u64);
-                    let alt_bit = 1u64 << (tid.rem_euclid(16) as u64);
-                    if ((tmask & bit) != 0 || (tmask & alt_bit) != 0) && troles != 0 {
-                        return Some("MemberHasRoleGrantingTitle");
-                    }
-                }
-                if let Some(titles) = snap.corp_titles.get(&corp_id) {
-                    for t in titles {
-                        let bit = 1u64 << ((t.title_id - 1).clamp(0, 62) as u64);
-                        if (tmask & bit) != 0
-                            && (!t.roles.is_empty()
-                                || !t.grantable_roles.is_empty()
-                                || !t.roles_at_hq.is_empty()
-                                || !t.roles_at_base.is_empty()
-                                || !t.roles_at_other.is_empty())
-                        {
-                            return Some("MemberHasRoleGrantingTitle");
-                        }
-                    }
-                }
+            if title_mask_grants_roles(snap, corp_id, tmask) {
+                return Some("MemberHasRoleGrantingTitle");
             }
         }
         if let Some(&drop_ts) = g.role_drop_timestamps.get(&target_id) {
@@ -96,22 +76,25 @@ pub(crate) fn member_kick_blocker(
     None
 }
 
-fn title_mask_grants_roles(snap: &eve_db::WorldStateSnapshot, corp_id: i64, tmask: u64) -> bool {
+pub(crate) fn title_mask_grants_roles(
+    snap: &eve_db::WorldStateSnapshot,
+    corp_id: i64,
+    tmask: u64,
+) -> bool {
     if tmask == 0 {
         return false;
     }
     if let Some(g) = snap.corp_governance.get(&corp_id) {
         for (&tid, &(_, troles)) in &g.titles {
-            let bit = 1u64 << ((tid - 1).clamp(0, 62) as u64);
-            let alt_bit = 1u64 << (tid.rem_euclid(16) as u64);
-            if ((tmask & bit) != 0 || (tmask & alt_bit) != 0) && troles != 0 {
+            let bit = eve_db::snapshot_ext::title_id_to_bit(tid);
+            if (tmask & bit) != 0 && troles != 0 {
                 return true;
             }
         }
     }
     if let Some(titles) = snap.corp_titles.get(&corp_id) {
         for t in titles {
-            let bit = 1u64 << ((t.title_id - 1).clamp(0, 62) as u64);
+            let bit = eve_db::snapshot_ext::title_id_to_bit(t.title_id);
             if (tmask & bit) != 0
                 && (!t.roles.is_empty()
                     || !t.grantable_roles.is_empty()
@@ -445,7 +428,7 @@ pub(crate) fn handle_update_members(
                 let mut old_title_delayed = 0u64;
                 let mut desired_title_delayed = 0u64;
                 for (&tid, &(_, troles)) in &state.titles {
-                    let bit = if (1..=64).contains(&tid) { 1u64 << (tid - 1) } else { 0 };
+                    let bit = eve_db::snapshot_ext::title_id_to_bit(tid);
                     if (old_title_mask & bit) != 0 {
                         old_title_delayed |= troles & HANGAR_DIV_MASK;
                     }
@@ -474,14 +457,23 @@ pub(crate) fn handle_update_members(
                     state.pending_title_role_grants.remove(&target_char_id);
                 }
                 state.member_titles.insert(target_char_id, tm);
-                let mut tids: Vec<i64> = (0..16u64)
-                    .filter(|&b| (tm & (1u64 << b)) != 0)
-                    .map(|b| (b + 1) as i64)
+                let mut tids: std::collections::BTreeSet<i64> = state
+                    .titles
+                    .keys()
+                    .copied()
+                    .filter(|&tid| (tm & eve_db::snapshot_ext::title_id_to_bit(tid)) != 0)
                     .collect();
-                if tids.is_empty() && tm > 0 {
-                    tids.push(tm as i64);
+                for b in 0..16u64 {
+                    if (tm & (1u64 << b)) != 0 {
+                        tids.insert(1i64 << b);
+                        tids.insert((b + 1) as i64);
+                    }
                 }
-                snap.corp_member_titles.insert((corp_id, target_char_id), tids);
+                if tids.is_empty() && tm > 0 {
+                    tids.insert(tm as i64);
+                }
+                snap.corp_member_titles
+                    .insert((corp_id, target_char_id), tids.into_iter().collect());
             }
             if sp.new_roles_opt.is_some() {
                 if pending_hangar != 0 {
@@ -1410,4 +1402,8 @@ pub(super) fn handle_insert_vote_case(
 #[cfg(test)]
 #[path = "fleet_social_corp_tail_tests.rs"]
 pub(crate) mod fleet_social_corp_tail_tests;
+
+#[cfg(test)]
+#[path = "fleet_social_corp_tail_edges_tests.rs"]
+mod fleet_social_corp_tail_edges_tests;
 

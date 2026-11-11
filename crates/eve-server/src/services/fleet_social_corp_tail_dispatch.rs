@@ -626,31 +626,26 @@ pub fn handle_corp_gov_tail(
                         (false, None, None)
                     }
                 });
-                let enable_after = match (ff, pending_val, pending_until) {
-                    (_, Some(true), Some(ts)) => PyRep::Integer(ts),
+                let eff_ft = pending_until
+                    .map(|ts| crate::sp6_lifecycle::unix_to_filetime(ts.max(0) as u64));
+                let enable_after = match (ff, pending_val, eff_ft) {
+                    (_, Some(true), Some(ft)) => PyRep::Integer(ft),
                     (true, _, _) => PyRep::Integer(0),
                     _ => PyRep::None,
                 };
-                let disable_after = match (ff, pending_val, pending_until) {
-                    (_, Some(false), Some(ts)) => PyRep::Integer(ts),
+                let disable_after = match (ff, pending_val, eff_ft) {
+                    (_, Some(false), Some(ft)) => PyRep::Integer(ft),
                     (false, _, _) => PyRep::Integer(0),
                     _ => PyRep::None,
                 };
-                PyRep::keyval([
-                    ("corporationID", PyRep::Integer(target_corp_id)),
-                    ("isFriendlyFireLegal", PyRep::Bool(ff)),
-                    ("friendlyFireLegal", PyRep::Bool(ff)),
-                    ("_enableAfter", enable_after),
-                    ("_disableAfter", disable_after),
-                    (
-                        "pendingFriendlyFireLegal",
-                        pending_val.map(PyRep::Bool).unwrap_or(PyRep::None),
-                    ),
-                    (
-                        "changeAtTime",
-                        pending_until.map(PyRep::Integer).unwrap_or(PyRep::None),
-                    ),
-                ])
+                build_aggression_settings_object(
+                    target_corp_id,
+                    ff,
+                    enable_after,
+                    disable_after,
+                    pending_val,
+                    eff_ft,
+                )
             };
             if method == "GetAggressionSettingsForCorps" {
                 let corp_ids: Vec<i64> = match args.first() {
@@ -688,45 +683,76 @@ pub fn handle_corp_gov_tail(
             }
             let ff = matches!(args.first(), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
             let effective_at = now_unix + 86_400;
-            ctx.db.with_mut_snapshot(|snap| {
-                snap.corp_governance
-                    .entry(corp_id)
-                    .or_default()
-                    .pending_friendly_fire = Some((ff, effective_at));
+            let current_ff = ctx.db.with_mut_snapshot(|snap| {
+                let gov = snap.corp_governance.entry(corp_id).or_default();
+                let cur = gov.friendly_fire_legal;
+                gov.pending_friendly_fire = Some((ff, effective_at));
+                cur
             });
-            let settings_kv = PyRep::keyval([
-                ("corporationID", PyRep::Integer(corp_id)),
-                ("isFriendlyFireLegal", PyRep::Bool(ff)),
-                ("friendlyFireLegal", PyRep::Bool(ff)),
-                (
-                    "_enableAfter",
-                    if ff { PyRep::Integer(effective_at as i64) } else { PyRep::None },
-                ),
-                (
-                    "_disableAfter",
-                    if !ff {
-                        PyRep::Integer(effective_at as i64)
-                    } else {
-                        PyRep::Integer(0)
-                    },
-                ),
-                ("changeAtTime", PyRep::Integer(effective_at as i64)),
-            ]);
-            let notif_kv = PyRep::keyval([
-                ("corporationID", PyRep::Integer(corp_id)),
-                ("isFriendlyFireLegal", PyRep::Bool(ff)),
-                ("changeAtTime", PyRep::Integer(effective_at as i64)),
-            ]);
+            let eff_ft = crate::sp6_lifecycle::unix_to_filetime(effective_at);
+            let enable_after = if ff {
+                PyRep::Integer(eff_ft)
+            } else if current_ff {
+                PyRep::Integer(0)
+            } else {
+                PyRep::None
+            };
+            let disable_after = if !ff {
+                PyRep::Integer(eff_ft)
+            } else if !current_ff {
+                PyRep::Integer(0)
+            } else {
+                PyRep::None
+            };
+            let settings_obj = build_aggression_settings_object(
+                corp_id,
+                ff,
+                enable_after,
+                disable_after,
+                Some(ff),
+                Some(eff_ft),
+            );
             ctx.notify(
                 NotificationTarget::Corporation(corp_id),
                 "OnCorpAggressionSettingsChange",
                 "corpid",
-                vec![notif_kv],
+                vec![settings_obj.clone()],
             );
-            Some(Ok(settings_kv))
+            Some(Ok(settings_obj))
         }
 
         _ => None,
+    }
+}
+
+pub(crate) const AGGRESSION_SETTINGS_CLASS: &str =
+    "crimewatch.corp_aggression.settings.AggressionSettings";
+
+pub(crate) fn build_aggression_settings_object(
+    corp_id: i64,
+    ff: bool,
+    enable_after: PyRep,
+    disable_after: PyRep,
+    pending_val: Option<bool>,
+    change_at_ft: Option<i64>,
+) -> PyRep {
+    PyRep::Object {
+        type_name: AGGRESSION_SETTINGS_CLASS.into(),
+        args: Box::new(PyRep::Dict(vec![
+            (PyRep::String("_enableAfter".into()), enable_after),
+            (PyRep::String("_disableAfter".into()), disable_after),
+            (PyRep::String("corporationID".into()), PyRep::Integer(corp_id)),
+            (PyRep::String("isFriendlyFireLegal".into()), PyRep::Bool(ff)),
+            (PyRep::String("friendlyFireLegal".into()), PyRep::Bool(ff)),
+            (
+                PyRep::String("pendingFriendlyFireLegal".into()),
+                pending_val.map(PyRep::Bool).unwrap_or(PyRep::None),
+            ),
+            (
+                PyRep::String("changeAtTime".into()),
+                change_at_ft.map(PyRep::Integer).unwrap_or(PyRep::None),
+            ),
+        ])),
     }
 }
 

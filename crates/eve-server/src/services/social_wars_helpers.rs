@@ -408,3 +408,7 @@ pub(super) fn resolve_war_stat_id(
         })
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+#[path = "social_wars_helpers_edges_tests.rs"]
+mod social_wars_helpers_edges_tests;

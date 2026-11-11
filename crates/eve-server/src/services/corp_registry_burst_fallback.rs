@@ -214,3 +214,7 @@ pub(super) async fn handle_fleet_burst_fallback(
         ("affectedShipIDs", PyRep::List(affected_ships)),
     ])))
 }
+
+#[cfg(test)]
+#[path = "corp_registry_burst_fallback_edges_tests.rs"]
+mod corp_registry_burst_fallback_edges_tests;

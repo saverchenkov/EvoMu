@@ -57,7 +57,7 @@ fn seed_access_group(ctx: &ServerContext, group_id: i64, members: &[i64]) {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn acl_active_bookmarks_and_static_location_all_entity_and_error_branches() {
     let ctx = new_ctx();
     let sys_id = 30_000_142u32;
@@ -347,7 +347,7 @@ async fn acl_active_bookmarks_and_static_location_all_entity_and_error_branches(
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn update_delete_copy_and_move_bookmarks_limits_and_access_branches() {
     let ctx = new_ctx();
     let sys_id = 30_000_142u32;
@@ -375,6 +375,17 @@ async fn update_delete_copy_and_move_bookmarks_limits_and_access_branches() {
                 folder_id: 402,
                 owner_id: char_id,
                 folder_name: "MyShared".into(),
+                is_shared: true,
+                corporation_id: Some(corp_id),
+                ..Default::default()
+            },
+        );
+        snap.bookmark_folders.insert(
+            450,
+            BookmarkFolderRecord {
+                folder_id: 450,
+                owner_id: char_id,
+                folder_name: "MyShared/Sub450".into(),
                 is_shared: true,
                 corporation_id: Some(corp_id),
                 ..Default::default()
@@ -568,4 +579,299 @@ async fn update_delete_copy_and_move_bookmarks_limits_and_access_branches() {
         "MaxSharedFolderBookmarksReached"
     );
     let _ = handle_get_my_active_bookmarks(&ctx, &sess, &[]).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn coverage_sweep_static_implicit_limits_moves_and_dynamic_errors() {
+    let ctx = new_ctx();
+    let char_id = 90_000_777_i64;
+    let corp_id = 1_000_777_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = 88_000_777_i64;
+
+    // Seed ship item and ballpark ball
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.bookmark_folders.insert(
+            7701,
+            BookmarkFolderRecord {
+                folder_id: 7701,
+                owner_id: char_id,
+                folder_name: "CorpShared".into(),
+                is_shared: true,
+                corporation_id: Some(corp_id),
+                ..Default::default()
+            },
+        );
+        snap.bookmark_folders.insert(
+            7702,
+            BookmarkFolderRecord {
+                folder_id: 7702,
+                owner_id: char_id,
+                folder_name: "CorpShared/Sub77".into(),
+                is_shared: true,
+                corporation_id: Some(corp_id),
+                ..Default::default()
+            },
+        );
+        snap.bookmark_subfolder_parents.insert(7702, 7701);
+        snap.bookmark_folders.insert(
+            7703,
+            BookmarkFolderRecord {
+                folder_id: 7703,
+                owner_id: char_id,
+                folder_name: "PersonalFolder".into(),
+                is_shared: false,
+                corporation_id: None,
+                ..Default::default()
+            },
+        );
+    });
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball_with_meta(
+            Ball {
+                id: ship_id,
+                type_id: 587,
+                position: DVec3::new(100.0, 200.0, 300.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 2.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::new(),
+            SlimItemMeta {
+                owner_id: char_id,
+                char_id: Some(char_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // 1. Implicit station not in sde.stations (L268-276)
+    let mut sess_st = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(corp_id),
+        corp_role: 1,
+        solar_system_id: Some(sys_id),
+        station_id: Some(60_999_999),
+        ..Default::default()
+    };
+    let kw = HashMap::new();
+    let res_st = handle_bookmark_static_location(
+        &ctx,
+        &sess_st,
+        &[PyRep::Integer(sys_id as i64), PyRep::String("UnknownStation".into())],
+        &kw,
+    )
+    .await
+    .unwrap();
+    let PyRep::Tuple(tup_st) = res_st else { panic!(); };
+    let bm_st_id = tup_st[0].as_i64().unwrap();
+
+    // 2. Implicit ship_id in space (L291-294)
+    let sess_space = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(corp_id),
+        corp_role: 1,
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let res_ship = handle_bookmark_static_location(
+        &ctx,
+        &sess_space,
+        &[PyRep::Integer(sys_id as i64), PyRep::String("InSpace".into())],
+        &kw,
+    )
+    .await
+    .unwrap();
+    let PyRep::Tuple(tup_ship) = res_ship else { panic!(); };
+    let bm_ship_id = tup_ship[0].as_i64().unwrap();
+
+    // 3. Implicit fallback with no station/structure/ship (L302)
+    sess_st.station_id = None;
+    let res_none = handle_bookmark_static_location(
+        &ctx,
+        &sess_st,
+        &[PyRep::Integer(sys_id as i64), PyRep::String("ZeroFallback".into())],
+        &kw,
+    )
+    .await
+    .unwrap();
+    let PyRep::Tuple(tup_none) = res_none else { panic!(); };
+    let bm_none_id = tup_none[0].as_i64().unwrap();
+
+    // 4. MoveBookmarksToFolderAndSubfolder into subfolder (L907) + Copy/Move error cases (L785, L806, L812, L867)
+    handle_copy_move_bookmarks(
+        &ctx,
+        &sess_space,
+        &[PyRep::Integer(7701), PyRep::Integer(7702), PyRep::List(vec![PyRep::Integer(bm_ship_id)])],
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ctx.db.with_snapshot(|s| s.bookmark_subfolders.get(&bm_ship_id).copied()), Some(7702));
+
+    assert!(handle_copy_move_bookmarks(&ctx, &sess_space, &[PyRep::Integer(999_991), PyRep::None, PyRep::List(vec![PyRep::Integer(bm_ship_id)])], false).await.is_err());
+    assert!(handle_copy_move_bookmarks(&ctx, &sess_space, &[PyRep::None, PyRep::Integer(7702), PyRep::List(vec![PyRep::Integer(bm_ship_id)])], false).await.is_err());
+    assert!(handle_copy_move_bookmarks(&ctx, &sess_space, &[PyRep::Integer(7703), PyRep::Integer(7702), PyRep::List(vec![PyRep::Integer(bm_ship_id)])], false).await.is_err());
+    assert!(handle_copy_move_bookmarks(&ctx, &sess_space, &[PyRep::Integer(7703), PyRep::None, PyRep::List(vec![PyRep::Integer(888_888)])], false).await.is_err());
+
+    // 5. Delete shared bookmark -> triggers OnSharedBookmarksFolderUpdated notification (L725-727, L738-749)
+    handle_delete_bookmarks(&ctx, &sess_space, &[PyRep::List(vec![PyRep::Integer(bm_ship_id)])])
+        .await
+        .unwrap();
+
+    // 6. Seed 500 personal and 500 shared bookmarks to test limits in BookmarkStaticLocation, UpdateBookmark, Copy
+    let shared_bm_to_move = handle_bookmark_static_location(
+        &ctx,
+        &sess_space,
+        &[
+            PyRep::Integer(sys_id as i64),
+            PyRep::Integer(7701),
+            PyRep::String("MovableShared".into()),
+            PyRep::String("m".into()),
+            PyRep::Integer(1),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap();
+    let PyRep::Tuple(sm_t) = shared_bm_to_move else { panic!(); };
+    let sm_id = sm_t[0].as_i64().unwrap();
+
+    // Move shared -> personal when under 500 sets bm.owner_id = char_id (L590)
+    handle_update_bookmark(
+        &ctx,
+        &sess_space,
+        &[PyRep::Integer(sm_id), PyRep::Integer(7703), PyRep::String("NowPersonal".into()), PyRep::String("m".into())],
+    )
+    .await
+    .unwrap();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for i in 0..500 {
+            snap.bookmarks.insert(
+                80_000 + i,
+                BookmarkRecord {
+                    bookmark_id: 80_000 + i,
+                    owner_id: char_id,
+                    label: "P".into(),
+                    solar_system_id: sys_id,
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                    item_id: None,
+                    memo: String::new(),
+                    folder_id: Some(7703),
+                    is_shared: false,
+                },
+            );
+            snap.bookmarks.insert(
+                81_000 + i,
+                BookmarkRecord {
+                    bookmark_id: 81_000 + i,
+                    owner_id: char_id,
+                    label: "S".into(),
+                    solar_system_id: sys_id,
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                    item_id: None,
+                    memo: String::new(),
+                    folder_id: Some(7701),
+                    is_shared: true,
+                },
+            );
+        }
+    });
+
+    // BookmarkStaticLocation hitting MaxBookmarksReached (L327-330) & MaxSharedFolderBookmarksReached (L315-318)
+    assert_eq!(
+        handle_bookmark_static_location(&ctx, &sess_space, &[PyRep::Integer(sys_id as i64), PyRep::String("CapP".into())], &kw)
+            .await
+            .unwrap_err()
+            .code,
+        "MaxBookmarksReached"
+    );
+    assert_eq!(
+        handle_bookmark_static_location(
+            &ctx,
+            &sess_space,
+            &[PyRep::Integer(sys_id as i64), PyRep::Integer(7701), PyRep::String("CapS".into()), PyRep::String("m".into()), PyRep::Integer(1)],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "MaxSharedFolderBookmarksReached"
+    );
+
+    // UpdateBookmark hitting MaxBookmarksReached (L559-569) and MaxSharedFolderBookmarksReached (L577-580)
+    assert_eq!(
+        handle_update_bookmark(&ctx, &sess_space, &[PyRep::Integer(81_000), PyRep::String("X".into()), PyRep::String("m".into()), PyRep::Integer(7703)])
+            .await
+            .unwrap_err()
+            .code,
+        "MaxBookmarksReached"
+    );
+    assert_eq!(
+        handle_update_bookmark(&ctx, &sess_space, &[PyRep::Integer(bm_st_id), PyRep::String("X".into()), PyRep::String("m".into()), PyRep::Integer(7701)])
+            .await
+            .unwrap_err()
+            .code,
+        "MaxSharedFolderBookmarksReached"
+    );
+
+    // CopyBookmarks hitting personal MaxBookmarksReached (L856-859)
+    assert_eq!(
+        handle_copy_move_bookmarks(&ctx, &sess_space, &[PyRep::Integer(7703), PyRep::None, PyRep::List(vec![PyRep::Integer(bm_none_id)])], false)
+            .await
+            .unwrap_err()
+            .code,
+        "MaxBookmarksReached"
+    );
+
+    // 7. validate_dynamic_entity_bookmark_coords errors via BookmarkStaticLocation(itemID = 123_456_789)
+    // Case A: not in space (no ship_id) -> L988-991
+    assert!(handle_bookmark_static_location(
+        &ctx,
+        &sess_st,
+        &[PyRep::Integer(123_456_789), PyRep::String("DynNoShip".into()), PyRep::String("m".into()), PyRep::Integer(sys_id as i64)],
+        &kw,
+    ).await.is_err());
+    // Case B: caller ship not in ballpark -> L1000-1003
+    let sess_missing_ship = SessionState { ship_id: Some(777_999_999), ..sess_space.clone() };
+    assert!(handle_bookmark_static_location(
+        &ctx,
+        &sess_missing_ship,
+        &[PyRep::Integer(123_456_789), PyRep::String("DynNoBall".into()), PyRep::String("m".into()), PyRep::Integer(sys_id as i64)],
+        &kw,
+    ).await.is_err());
+    // Case C: target entity not visible in ballpark -> L1012-1015
+    assert!(handle_bookmark_static_location(
+        &ctx,
+        &sess_space,
+        &[PyRep::Integer(123_456_789), PyRep::String("DynNoTarget".into()), PyRep::String("m".into()), PyRep::Integer(sys_id as i64)],
+        &kw,
+    ).await.is_err());
 }

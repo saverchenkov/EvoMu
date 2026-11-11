@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 //! Semantic unit tests split from `fleet_social_chat_extra_unit_tests`.
 
 use super::super::*;

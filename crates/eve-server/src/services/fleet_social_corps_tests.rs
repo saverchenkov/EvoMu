@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 //! Unit tests for `fleet_social_corps` public info, updates, divisions, members, and cash transfers.
 
 #[cfg(test)]
@@ -8,7 +9,7 @@ use super::*;
 use crate::services::fleet_social::fleet_social_fleet_ops::fleet_social_fleet_ops_tests::{
     clone_char_with, test_ctx_with_clock,
 };
-use eve_db::{corp_roles, CorporationRecord, IskCents};
+use eve_db::{corp_roles, CorpWalletDivisionRecord, CorporationRecord, IskCents};
 use eve_machonet::SessionState;
 use std::collections::{HashMap, HashSet};
 
@@ -401,3 +402,7 @@ fn get_corporation_omits_zero_station_and_ceo_ids() {
         PyRep::None
     );
 }
+
+#[cfg(test)]
+#[path = "fleet_social_corps_extra_unit_tests.rs"]
+mod fleet_social_corps_extra_unit_tests;

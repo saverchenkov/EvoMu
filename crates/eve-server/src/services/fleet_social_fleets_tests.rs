@@ -189,3 +189,91 @@ async fn create_fleet_wing_squad_invite_and_move_lifecycle() {
         .unwrap();
     assert_eq!(member_session.fleet_id, None);
 }
+
+#[tokio::test]
+async fn get_init_state_member_opt_outs_uses_accepts_fleet_regroups() {
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let boss_id = 90_000_001;
+    let mut boss_session = make_session(boss_id);
+    let kw = HashMap::new();
+
+    let created = handle_fleets(
+        &ctx,
+        &mut boss_session,
+        "fleetMgr",
+        "CreateFleet",
+        &[PyRep::String("optout fleet".into()), PyRep::String("".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let fleet_id = created.dict_get("fleetID").and_then(|v| v.as_i64()).unwrap();
+    assert_eq!(boss_session.fleet_id, Some(fleet_id));
+
+    let extract_boss_opt_outs = |init_state: &PyRep| -> PyRep {
+        let PyRep::Dict(entries) = init_state.dict_get("members").expect("members dict") else {
+            panic!("expected members dict");
+        };
+        let boss_rec = entries
+            .iter()
+            .find(|(k, _)| k.as_i64() == Some(boss_id))
+            .map(|(_, v)| v)
+            .expect("boss record in GetInitState");
+        boss_rec
+            .dict_get("memberOptOuts")
+            .cloned()
+            .expect("memberOptOuts keyval")
+    };
+
+    let init_state = handle_fleets(
+        &ctx,
+        &mut boss_session,
+        "fleetObjectHandler",
+        "GetInitState",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let opt_outs = extract_boss_opt_outs(&init_state);
+    assert_eq!(opt_outs.dict_get("acceptsFleetWarp"), Some(&PyRep::Bool(true)));
+    assert_eq!(opt_outs.dict_get("acceptsConduitJumps"), Some(&PyRep::Bool(true)));
+    assert_eq!(opt_outs.dict_get("acceptsFleetRegroups"), Some(&PyRep::Bool(true)));
+    assert_eq!(opt_outs.dict_get("acceptsRegroup"), Some(&PyRep::Bool(true)));
+
+    crate::services::fleet_social::fleet_social_fleet_ops::handle_fleet_ops(
+        &ctx,
+        &mut boss_session,
+        "fleetObjectHandler",
+        "SetAcceptsRegroupValue",
+        &[PyRep::Bool(false)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let init_state_after = handle_fleets(
+        &ctx,
+        &mut boss_session,
+        "fleetObjectHandler",
+        "GetInitState",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let opt_outs_after = extract_boss_opt_outs(&init_state_after);
+    assert_eq!(opt_outs_after.dict_get("acceptsFleetWarp"), Some(&PyRep::Bool(true)));
+    assert_eq!(opt_outs_after.dict_get("acceptsConduitJumps"), Some(&PyRep::Bool(true)));
+    assert_eq!(opt_outs_after.dict_get("acceptsFleetRegroups"), Some(&PyRep::Bool(false)));
+    assert_eq!(opt_outs_after.dict_get("acceptsRegroup"), Some(&PyRep::Bool(false)));
+}
+
+#[cfg(test)]
+#[path = "fleet_social_fleets_extra_unit_tests.rs"]
+mod extra_unit_tests;
+

@@ -2,6 +2,10 @@ use super::*;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_ctx_and_session;
 use eve_db::{CorporationRecord, IskCents};
 
+#[cfg(test)]
+#[path = "social_corp_projects_extra_unit_tests.rs"]
+mod social_corp_projects_extra_unit_tests;
+
 fn setup_corp_projects_ctx() -> (ServerContext, SessionState, i64, i64) {
     let (ctx, mut sess, char_id, _ship_id, _sys_id) = make_fighter_ctx_and_session();
     let corp_id = 98_000_020_i64;

@@ -41,10 +41,17 @@ struct WarKill {
     isk: f64,
 }
 
+struct WarKillsSummary {
+    aggressor_corp_id: i64,
+    defender_corp_id: i64,
+    ally_corp_ids: Vec<i64>,
+    kills: Vec<WarKill>,
+}
+
 /// Per-war kills DERIVED from persisted killmails: a killmail counts towards a war when the
 /// final-blow attacker's corporation and the victim's corporation are on opposite sides of the war
 /// (including accepted defender allies) and the kill timestamp falls within the war window.
-fn war_kills_in_snap(ctx: &ServerContext, snap: &WorldStateSnapshot, war_id: i64) -> Option<(i64, i64, Vec<i64>, Vec<WarKill>)> {
+fn war_kills_in_snap(ctx: &ServerContext, snap: &WorldStateSnapshot, war_id: i64) -> Option<WarKillsSummary> {
     let w = snap.wars.get(&war_id)?;
     let (agg, def) = (w.aggressor_corp_id, w.defender_corp_id);
     let meta = snap.war_state.wars.get(&war_id).cloned().unwrap_or_default();
@@ -102,10 +109,15 @@ fn war_kills_in_snap(ctx: &ServerContext, snap: &WorldStateSnapshot, war_id: i64
         .collect();
     kills.sort_by_key(|k| k.kill_id);
     let ally_ids = allies.into_iter().map(|(cid, _)| cid).collect();
-    Some((agg, def, ally_ids, kills))
+    Some(WarKillsSummary {
+        aggressor_corp_id: agg,
+        defender_corp_id: def,
+        ally_corp_ids: ally_ids,
+        kills,
+    })
 }
 
-fn war_kills(ctx: &ServerContext, war_id: i64) -> Option<(i64, i64, Vec<i64>, Vec<WarKill>)> {
+fn war_kills(ctx: &ServerContext, war_id: i64) -> Option<WarKillsSummary> {
     ctx.db.with_snapshot(|snap| war_kills_in_snap(ctx, snap, war_id))
 }
 
@@ -352,7 +364,12 @@ pub(super) fn handle_wars(
                     .map(|w| {
                         let meta = snap.war_state.wars.get(&w.war_id).cloned().unwrap_or_default();
                         let (k_cnt, k_isk) = war_kills_in_snap(ctx, snap, w.war_id)
-                            .map(|(_, _, _, ks)| (ks.len(), ks.iter().map(|k| k.isk).sum::<f64>().to_bits()))
+                            .map(|summary| {
+                                (
+                                    summary.kills.len(),
+                                    summary.kills.iter().map(|k| k.isk).sum::<f64>().to_bits(),
+                                )
+                            })
                             .unwrap_or((0, 0));
                         (w.war_id, k_cnt, k_isk, war_row(w, &meta, now))
                     })
@@ -952,22 +969,41 @@ pub(super) fn handle_wars(
         }
 
         ("peaceTreatyMgr", "GetPeaceTreatiesForSession") => {
-            let rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
-                snap.war_state
-                    .peace_treaties
-                    .iter()
-                    .filter(|t| t.expiry_unix > now && (t.corp_a == my_corp || t.corp_b == my_corp))
-                    .map(|t| {
-                        let other = if t.corp_a == my_corp { t.corp_b } else { t.corp_a };
-                        vec![
-                            PyRep::Integer(t.war_id),
-                            PyRep::Integer(other),
-                            PyRep::Integer(t.expiry_unix as i64),
-                        ]
-                    })
-                    .collect()
+            let my_alliance = session.alliance_id.filter(|&a| a > 0);
+            let (outgoing, incoming) = ctx.db.with_snapshot(|snap| {
+                let mut outgoing = Vec::new();
+                let mut incoming = Vec::new();
+                for t in &snap.war_state.peace_treaties {
+                    if t.expiry_unix <= now {
+                        continue;
+                    }
+                    let is_agg = t.corp_a == my_corp || Some(t.corp_a) == my_alliance;
+                    let is_def = t.corp_b == my_corp || Some(t.corp_b) == my_alliance;
+                    if !is_agg && !is_def {
+                        continue;
+                    }
+                    let other_owner_id = if is_agg { t.corp_b } else { t.corp_a };
+                    let entry = PyRep::keyval([
+                        ("warID", PyRep::Integer(t.war_id)),
+                        ("otherOwnerID", PyRep::Integer(other_owner_id)),
+                        (
+                            "expiryDate",
+                            PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(t.expiry_unix)),
+                        ),
+                        ("peaceReason", PyRep::Integer(4)),
+                    ]);
+                    if is_agg {
+                        outgoing.push(entry);
+                    } else {
+                        incoming.push(entry);
+                    }
+                }
+                (outgoing, incoming)
             });
-            Some(Ok(PyRep::rowset(vec!["warID", "otherOwnerID", "expiryDate"], rows)))
+            Some(Ok(PyRep::Tuple(vec![
+                PyRep::List(outgoing),
+                PyRep::List(incoming),
+            ])))
         }
 
         ("mutualWarInviteMgr", "IsCorpInvitesBlockedPlayer") => {
@@ -1145,7 +1181,13 @@ pub(super) fn handle_wars(
 
         ("warStatisticMgr", "GetBaseInfo") => {
             let war_id = resolve_war_stat_id(ctx, session, arg_i64(0), bound_obj_id, my_corp);
-            let Some((agg_id, def_id, allies, kills)) = war_kills(ctx, war_id) else {
+            let Some(WarKillsSummary {
+                aggressor_corp_id: agg_id,
+                defender_corp_id: def_id,
+                ally_corp_ids: allies,
+                kills,
+            }) = war_kills(ctx, war_id)
+            else {
                 return err("WarNotFound", format!("War {war_id} not found"));
             };
             let (mutual, open_for_allies, war_hq) = ctx.db.with_snapshot(|snap| {
@@ -1298,7 +1340,7 @@ fn handle_war_statistic_kills(
         bound_obj_id,
         my_corp,
     );
-    let Some((_, _, _, kills)) = war_kills(ctx, war_id) else {
+    let Some(WarKillsSummary { kills, .. }) = war_kills(ctx, war_id) else {
         return Some(Err(BridgeRpcError {
             code: "WarNotFound".into(),
             message: format!("War {war_id} not found"),
@@ -1367,4 +1409,8 @@ fn handle_war_statistic_kills(
 #[cfg(test)]
 #[path = "social_wars_tests.rs"]
 mod social_wars_tests;
+
+#[cfg(test)]
+#[path = "social_wars_edges2_tests.rs"]
+mod social_wars_edges2_tests;
 

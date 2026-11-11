@@ -6,6 +6,7 @@ use eve_db::{
 };
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
+use glam::DVec3;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -264,3 +265,7 @@ pub(crate) async fn seed_multi_member_fleet(ctx: &ServerContext) -> (i64, Sessio
     session.fleet_id = Some(fleet_id);
     (fleet_id, session)
 }
+
+#[cfg(test)]
+#[path = "fleet_social_fleet_ops_extra_unit_tests.rs"]
+mod fleet_social_fleet_ops_extra_unit_tests;

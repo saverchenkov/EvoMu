@@ -35,7 +35,11 @@ pub(crate) fn effective_char_corp_and_alliance(
                 && snap
                     .corporations
                     .get(&scid)
-                    .map_or(true, |c| c.ceo_id == char_id || c.members.contains(&char_id))
+                    .map_or(true, |c| {
+                        c.ceo_id == char_id
+                            || c.members.contains(&char_id)
+                            || c.member_roles.contains_key(&char_id)
+                    })
             {
                 Some(scid)
             } else {

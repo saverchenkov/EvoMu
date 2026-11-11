@@ -100,3 +100,8 @@ fn extract_label_bits_and_mail_lifecycle() {
     .unwrap();
     assert_eq!(rem.dict_get("removed").and_then(|v| v.as_bool()), Some(true));
 }
+
+#[cfg(test)]
+#[path = "fleet_social_mail_extra_unit_tests.rs"]
+mod extra_unit_tests;
+

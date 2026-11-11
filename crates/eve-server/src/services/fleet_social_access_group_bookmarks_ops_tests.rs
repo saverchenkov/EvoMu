@@ -126,3 +126,8 @@ async fn bookmark_static_location_and_active_bookmarks_ops() {
     .unwrap();
     assert_eq!(deleted, PyRep::List(vec![PyRep::Integer(bm_id)]));
 }
+
+#[cfg(test)]
+#[path = "fleet_social_access_group_bookmarks_ops_extra_unit_tests.rs"]
+mod extra_unit_tests;
+

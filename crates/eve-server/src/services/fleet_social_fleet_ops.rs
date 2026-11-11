@@ -885,11 +885,15 @@ fn handle_fleet_member_preference(
     match res {
         Ok((before, after, only)) => {
             notify::emit_member_changed(ctx, fleet_id, &before, &after, only);
+            let opt_outs = notify::member_opt_outs(&after);
             Some(Ok(PyRep::keyval([
                 ("characterID", PyRep::Integer(char_id)),
                 ("takesFleetWarp", PyRep::Bool(after.takes_fleet_warp)),
+                ("acceptsFleetWarp", PyRep::Bool(after.takes_fleet_warp)),
                 ("acceptsRegroup", PyRep::Bool(after.accepts_regroup)),
+                ("acceptsFleetRegroups", PyRep::Bool(after.accepts_regroup)),
                 ("acceptsConduitJumps", PyRep::Bool(after.accepts_conduit_jumps)),
+                ("memberOptOuts", opt_outs),
             ])))
         }
         Err(e) => Some(Err(e)),
@@ -1425,3 +1429,7 @@ fn handle_get_broadcast_history(
 #[cfg(test)]
 #[path = "fleet_social_fleet_ops_tests.rs"]
 pub(crate) mod fleet_social_fleet_ops_tests;
+
+#[cfg(test)]
+#[path = "fleet_social_fleet_ops_edges_tests.rs"]
+mod fleet_social_fleet_ops_edges_tests;

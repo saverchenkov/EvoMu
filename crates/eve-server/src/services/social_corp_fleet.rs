@@ -714,9 +714,16 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError { code: "InvalidStanding".into(), message: "Standing must be between -10 and +10".into() }));
                 }
             };
-            let label_mask = match rpc.opt_u64(2, "labelMask") {
-                Ok(v) => v.unwrap_or(0),
-                Err(e) => return Some(Err(e)),
+            let label_mask = if matches!(args.get(2), Some(PyRep::Bool(_))) {
+                args.get(4)
+                    .and_then(|a| a.as_i64())
+                    .map(|v| v.max(0) as u64)
+                    .unwrap_or(0)
+            } else {
+                match rpc.opt_u64(2, "labelMask") {
+                    Ok(v) => v.unwrap_or(0),
+                    Err(e) => return Some(Err(e)),
+                }
             };
             let prev = ctx.db.with_mut_snapshot(|snap| {
                 let ctype = if snap.alliances.contains_key(&contact_id) {
@@ -2288,3 +2295,9 @@ fn handle_update_alliance_bulletin_order(
 #[path = "social_corp_fleet_tests.rs"]
 mod social_corp_fleet_tests;
 
+#[cfg(test)]
+#[path = "social_corp_fleet_edges_tests.rs"]
+mod social_corp_fleet_edges_tests;
+#[cfg(test)]
+#[path = "social_corp_fleet_edges_b4_tests.rs"]
+mod social_corp_fleet_edges_b4_tests;

@@ -684,7 +684,7 @@ pub fn handle(
                                     let prev_tp = state.pending_title_role_grants.get(&tid).filter(|&&(_, e)| now_unix < e).map_or(0, |&(b, _)| b & HANGAR_DIV_MASK);
                                     let (mut old_td, mut new_td, mut old_tr_all, mut new_tr_all) = (0u64, 0u64, 0u64, 0u64);
                                     for (&t_id, &(_, tr)) in &state.titles {
-                                        let bit = if (1..=64).contains(&t_id) { 1u64 << (t_id - 1) } else { 0 };
+                                        let bit = eve_db::snapshot_ext::title_id_to_bit(t_id);
                                         if (cur_t & bit) != 0 {
                                             old_td |= tr & HANGAR_DIV_MASK;
                                             old_tr_all |= tr;
@@ -939,11 +939,7 @@ pub fn handle(
                                             let (mut old_td, mut new_td, mut old_tr_all, mut new_tr_all) =
                                                 (0u64, 0u64, 0u64, 0u64);
                                             for (&t_id, &(_, tr)) in &state.titles {
-                                                let bit = if (1..=64).contains(&t_id) {
-                                                    1u64 << (t_id - 1)
-                                                } else {
-                                                    0
-                                                };
+                                                let bit = eve_db::snapshot_ext::title_id_to_bit(t_id);
                                                 if (cur_t & bit) != 0 {
                                                     old_td |= tr & HANGAR_DIV_MASK;
                                                     old_tr_all |= tr;
@@ -1311,14 +1307,16 @@ pub(crate) fn handle_get_member(
             let tmask = gov.and_then(|g| g.member_titles.get(&target_char_id).copied()).unwrap_or(0);
             let title_str = gov
                 .and_then(|g| {
-                    let mut names = Vec::new();
-                    for idx in 1..=16i64 {
-                        if (tmask & (1u64 << (idx - 1))) != 0 || tmask == idx as u64 {
-                            if let Some((n, _)) = g.titles.get(&idx) {
-                                names.push(n.clone());
-                            }
-                        }
-                    }
+                    let mut matched: Vec<(i64, String)> = g
+                        .titles
+                        .iter()
+                        .filter_map(|(&tid, (n, _))| {
+                            let bit = eve_db::snapshot_ext::title_id_to_bit(tid);
+                            (!n.is_empty() && (tmask & bit) != 0).then(|| (tid, n.clone()))
+                        })
+                        .collect();
+                    matched.sort_by_key(|(tid, _)| *tid);
+                    let names: Vec<String> = matched.into_iter().map(|(_, n)| n).collect();
                     (!names.is_empty()).then(|| names.join(", "))
                 })
                 .unwrap_or_else(|| if target_char_id == corp.ceo_id { "CEO".into() } else { String::new() });
@@ -1344,6 +1342,7 @@ pub(crate) fn handle_get_member(
                 ("title", PyRep::String(title_str)), ("baseID", base_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
                 ("startDateTime", PyRep::Integer(start_dt as i64)), ("accountKey", PyRep::Integer(acct_key)),
                 ("divisionID", PyRep::Integer(div_id)), ("squadronID", PyRep::Integer(sq_id)),
+                ("blockRoles", PyRep::Integer(0)), ("blocksRoles", PyRep::Integer(0)),
             ]));
         }
 
@@ -1381,6 +1380,7 @@ pub(crate) fn handle_get_member(
             ("title", PyRep::String(String::new())), ("baseID", base_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
             ("startDateTime", PyRep::Integer(start_dt as i64)), ("accountKey", PyRep::Integer(1000)),
             ("divisionID", PyRep::Integer(0)), ("squadronID", PyRep::Integer(0)),
+            ("blockRoles", PyRep::Integer(0)), ("blocksRoles", PyRep::Integer(0)),
         ]))
     });
     Some(res)
@@ -1474,5 +1474,9 @@ pub(crate) fn handle_get_member_tracking_info(
 #[path = "corp_registry_ops_tests.rs"]
 #[cfg(test)]
 mod corp_registry_ops_tests;
+
+#[cfg(test)]
+#[path = "corp_registry_ops_edges2_tests.rs"]
+mod corp_registry_ops_edges2_tests;
 
 

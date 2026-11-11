@@ -222,11 +222,25 @@ fn corp_gov_tail_settings_assets_and_applications() {
     )
     .unwrap()
     .unwrap();
+    assert!(matches!(
+        &agg,
+        PyRep::Object { type_name, .. }
+            if type_name == "crimewatch.corp_aggression.settings.AggressionSettings"
+    ));
     assert_eq!(agg.dict_get("isFriendlyFireLegal").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        agg.dict_get("_enableAfter").and_then(|v| v.as_i64()),
+        Some(crate::sp6_lifecycle::unix_to_filetime(1000 + 86_400))
+    );
 
     let get_agg = handle_corp_gov_tail(&ctx, &mut session, svc_mgr, "GetAggressionSettings", &[], corp_id, char_id, 1000)
         .unwrap()
         .unwrap();
+    assert!(matches!(
+        &get_agg,
+        PyRep::Object { type_name, .. }
+            if type_name == "crimewatch.corp_aggression.settings.AggressionSettings"
+    ));
     assert_eq!(get_agg.dict_get("corporationID").and_then(|v| v.as_i64()), Some(corp_id));
 
     let my_apps = handle_get_my_applications_rpc(&ctx, &session, false).unwrap().unwrap();

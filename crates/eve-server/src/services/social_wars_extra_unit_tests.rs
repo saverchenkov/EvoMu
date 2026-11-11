@@ -224,7 +224,7 @@ async fn declare_war_validation_matrix_and_sync_wars_hq_defender_loss() {
     let sur_id = sur.dict_get("negotiationID").and_then(|v| v.as_i64()).unwrap();
     let _ = call_wars(&ctx, &mut agg_sess, "warsInfoMgr", "AcceptSurrender", &[PyRep::Integer(sur_id)], None).await.unwrap();
     let treaties = call_wars(&ctx, &mut agg_sess, "peaceTreatyMgr", "GetPeaceTreatiesForSession", &[], None).await.unwrap();
-    assert!(matches!(treaties, PyRep::Rowset { .. }));
+    assert!(matches!(treaties, PyRep::Tuple(ref parts) if parts.len() == 2));
     assert_eq!(
         call_wars(&ctx, &mut agg_sess, "warRegistry", "DeclareWarAgainst", &[PyRep::Integer(def_corp)], None).await.unwrap_err().code,
         "PeaceTreatyActive"
@@ -384,5 +384,220 @@ async fn war_negotiations_decline_retract_mutual_invites_and_statistics_groups()
     assert_eq!(
         call_wars(&ctx, &mut agg_sess, "warStatisticMgr", "GetKillMail", &[PyRep::Integer(999_999)], Some(war_id)).await.unwrap_err().code,
         "KillmailNotFound"
+    );
+}
+
+#[tokio::test]
+async fn war_registry_timers_surrender_ally_retract_mutual_and_error_guards() {
+    let (ctx, mut agg_sess, agg_corp, mut def_sess, def_corp, mut ally_sess, ally_corp, _agg_hq, _def_st) =
+        setup_extra_wars_ctx();
+    let def_char = def_sess.character_id.unwrap();
+
+    let mut non_dir_sess = def_sess.clone();
+    non_dir_sess.corp_role = 0;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.corporations.get_mut(&def_corp) {
+            c.member_roles.insert(def_char, 0);
+            c.ceo_id = 90_999_999; // demote def_char from CEO so CorpRoleDenied fires
+        }
+    });
+
+    // warRegistry timeDeclared/timeStarted/timeFinished when no war exists -> WarNotFound (both 0-arg & missing ID)
+    let err_war_not_found = "WarNotFound";
+    assert_eq!(
+        call_wars(&ctx, &mut agg_sess, "warRegistry", "timeDeclared", &[], None).await.unwrap_err().code,
+        err_war_not_found
+    );
+    assert_eq!(
+        call_wars(&ctx, &mut agg_sess, "warRegistry", "timeStarted", &[], None).await.unwrap_err().code,
+        err_war_not_found
+    );
+    assert_eq!(
+        call_wars(&ctx, &mut agg_sess, "warRegistry", "timeFinished", &[], None).await.unwrap_err().code,
+        err_war_not_found
+    );
+    assert_eq!(
+        call_wars(&ctx, &mut agg_sess, "warRegistry", "timeDeclared", &[PyRep::Integer(999_999)], None).await.unwrap_err().code,
+        err_war_not_found
+    );
+    assert_eq!(
+        call_wars(&ctx, &mut agg_sess, "warRegistry", "timeStarted", &[PyRep::Integer(999_999)], None).await.unwrap_err().code,
+        err_war_not_found
+    );
+    assert_eq!(
+        call_wars(&ctx, &mut agg_sess, "warRegistry", "timeFinished", &[PyRep::Integer(999_999)], None).await.unwrap_err().code,
+        err_war_not_found
+    );
+    assert_eq!(
+        call_wars(&ctx, &mut agg_sess, "warsInfoMgr", "GetPublicWarInfo", &[PyRep::Integer(999_999)], None).await.unwrap_err().code,
+        err_war_not_found
+    );
+
+    // Declare war
+    let decl = call_wars(&ctx, &mut agg_sess, "warRegistry", "DeclareWarAgainst", &[PyRep::Integer(def_corp)], None).await.unwrap();
+    let war_id = decl.dict_get("warID").and_then(|v| v.as_i64()).unwrap();
+
+    // timeDeclared, timeStarted, timeFinished (0-arg + explicit war_id), GetPublicWarInfo, UnBind, SetSessionCheck
+    assert!(call_wars(&ctx, &mut agg_sess, "warRegistry", "timeDeclared", &[], None).await.unwrap().as_i64().is_some());
+    assert!(call_wars(&ctx, &mut agg_sess, "warRegistry", "timeStarted", &[], None).await.unwrap().as_i64().is_some());
+    assert_eq!(
+        call_wars(&ctx, &mut agg_sess, "warRegistry", "timeFinished", &[], None).await.unwrap(),
+        PyRep::None
+    );
+    assert!(call_wars(&ctx, &mut agg_sess, "warRegistry", "timeDeclared", &[PyRep::Integer(war_id)], None).await.unwrap().as_i64().is_some());
+    assert!(call_wars(&ctx, &mut agg_sess, "warRegistry", "timeStarted", &[PyRep::Integer(war_id)], None).await.unwrap().as_i64().is_some());
+    assert_eq!(
+        call_wars(&ctx, &mut agg_sess, "warRegistry", "timeFinished", &[PyRep::Integer(war_id)], None).await.unwrap(),
+        PyRep::None
+    );
+    let _ = call_wars(&ctx, &mut agg_sess, "warStatisticMgr", "SetSessionCheck", &[PyRep::Bool(true)], Some(war_id)).await.unwrap();
+    let pub_info = call_wars(&ctx, &mut agg_sess, "warsInfoMgr", "GetPublicWarInfo", &[PyRep::Integer(war_id)], None).await.unwrap();
+    assert_eq!(pub_info.dict_get("warID"), Some(&PyRep::Integer(war_id)));
+    let _ = call_wars(&ctx, &mut agg_sess, "warRegistry", "UnBind", &[PyRep::Integer(war_id)], None).await;
+    let _ = call_wars(&ctx, &mut agg_sess, "warStatisticMgr", "UnBind", &[PyRep::Integer(war_id)], None).await;
+
+    // SetOpenForAllies: CorpRoleDenied, NotWarDefender, WarNotFound, then 1-arg warRegistry bound form
+    assert_eq!(
+        call_wars(&ctx, &mut non_dir_sess, "warsInfoMgr", "SetOpenForAllies", &[PyRep::Integer(war_id), PyRep::Bool(true)], None).await.unwrap_err().code,
+        "CorpRoleDenied"
+    );
+    assert_eq!(
+        call_wars(&ctx, &mut agg_sess, "warsInfoMgr", "SetOpenForAllies", &[PyRep::Integer(war_id), PyRep::Bool(true)], None).await.unwrap_err().code,
+        "NotWarDefender"
+    );
+    // Re-promote def_char as CEO so def_sess has war director role
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.get_mut(&def_corp).unwrap().ceo_id = def_char;
+    });
+    assert_eq!(
+        call_wars(&ctx, &mut def_sess, "warsInfoMgr", "SetOpenForAllies", &[PyRep::Integer(999_999), PyRep::Bool(true)], None).await.unwrap_err().code,
+        "WarNotFound"
+    );
+    // Ally offer before open -> WarNotOpenForAllies; party offering -> CannotAllyOwnWar
+    assert_eq!(
+        call_wars(&ctx, &mut agg_sess, "warsInfoMgr", "CreateWarAllyOffer", &[PyRep::Integer(war_id), PyRep::Real(1_000.0)], None).await.unwrap_err().code,
+        "CannotAllyOwnWar"
+    );
+    assert_eq!(
+        call_wars(&ctx, &mut ally_sess, "warsInfoMgr", "CreateWarAllyOffer", &[PyRep::Integer(war_id), PyRep::Real(1_000.0)], None).await.unwrap_err().code,
+        "WarNotOpenForAllies"
+    );
+    let _ = call_wars(&ctx, &mut def_sess, "warRegistry", "SetOpenForAllies", &[PyRep::Bool(true)], Some(war_id)).await.unwrap();
+    let offer1 = call_wars(&ctx, &mut ally_sess, "warsInfoMgr", "CreateWarAllyOffer", &[PyRep::Integer(war_id), PyRep::Real(1_000_000.0), PyRep::String("Help".into())], None).await.unwrap();
+    let offer1_id = offer1.dict_get("negotiationID").and_then(|v| v.as_i64()).unwrap();
+    assert_eq!(
+        call_wars(&ctx, &mut ally_sess, "warsInfoMgr", "CreateWarAllyOffer", &[PyRep::Integer(war_id), PyRep::Real(1_000_000.0)], None).await.unwrap_err().code,
+        "AllyOfferAlreadyExists"
+    );
+    let acc_ally = call_wars(&ctx, &mut def_sess, "warsInfoMgr", "AcceptAllyNegotiation", &[PyRep::Integer(offer1_id)], None).await.unwrap();
+    assert_eq!(acc_ally.dict_get("status").and_then(|v| v.as_str()), Some("Accepted"));
+    let ally_rows = call_wars(&ctx, &mut def_sess, "warsInfoMgr", "GetAllyRowsByWarID", &[PyRep::Integer(war_id)], None).await.unwrap();
+    assert!(matches!(ally_rows, PyRep::Rowset { ref rows, .. } if rows.len() == 1));
+
+    // Surrender negotiation error guards + creating new surrender cancels previous + AcceptSurrender creates peace treaty
+    assert_eq!(
+        call_wars(&ctx, &mut def_sess, "warsInfoMgr", "CreateSurrenderNegotiation", &[PyRep::Integer(war_id), PyRep::Real(-5.0)], None).await.unwrap_err().code,
+        "InvalidIskValue"
+    );
+    assert_eq!(
+        call_wars(&ctx, &mut ally_sess, "warsInfoMgr", "CreateSurrenderNegotiation", &[PyRep::Integer(war_id), PyRep::Real(0.0)], None).await.unwrap_err().code,
+        "NotWarParticipant"
+    );
+    let s1 = call_wars(&ctx, &mut def_sess, "warsInfoMgr", "CreateSurrenderNegotiation", &[PyRep::Integer(war_id), PyRep::Real(100_000.0)], None).await.unwrap();
+    let s1_id = s1.dict_get("negotiationID").and_then(|v| v.as_i64()).unwrap();
+    let s2 = call_wars(&ctx, &mut def_sess, "warsInfoMgr", "CreateSurrenderNegotiation", &[PyRep::Integer(war_id), PyRep::Real(200_000.0)], None).await.unwrap();
+    let s2_id = s2.dict_get("negotiationID").and_then(|v| v.as_i64()).unwrap();
+    assert_eq!(
+        call_wars(&ctx, &mut agg_sess, "warsInfoMgr", "AcceptSurrender", &[PyRep::Integer(s1_id)], None).await.unwrap_err().code,
+        "NegotiationNotFound"
+    );
+    assert_eq!(
+        call_wars(&ctx, &mut def_sess, "warsInfoMgr", "AcceptSurrender", &[PyRep::Integer(s2_id)], None).await.unwrap_err().code,
+        "NotNegotiationCounterparty"
+    );
+    let acc_surr = call_wars(&ctx, &mut agg_sess, "warsInfoMgr", "AcceptSurrender", &[PyRep::Integer(s2_id)], None).await.unwrap();
+    assert_eq!(acc_surr.dict_get("status").and_then(|v| v.as_str()), Some("Accepted"));
+    assert_eq!(
+        call_wars(&ctx, &mut def_sess, "warsInfoMgr", "CreateSurrenderNegotiation", &[PyRep::Integer(war_id), PyRep::Real(100.0)], None).await.unwrap_err().code,
+        "WarAlreadyEnding"
+    );
+    let treaties = call_wars(&ctx, &mut agg_sess, "peaceTreatyMgr", "GetPeaceTreatiesForSession", &[], None).await.unwrap();
+    assert!(matches!(treaties, PyRep::Tuple(ref parts) if parts.len() == 2 && matches!(&parts[0], PyRep::List(v) if v.len() == 1)));
+    assert!(call_wars(&ctx, &mut agg_sess, "warRegistry", "timeFinished", &[PyRep::Integer(war_id)], None).await.unwrap().as_i64().is_some());
+
+    // Mutual war invites: decline, not found, same alliance, accept, retract errors
+    assert_eq!(
+        call_wars(&ctx, &mut agg_sess, "mutualWarInviteMgr", "RespondToInviteByPlayer", &[PyRep::Integer(ally_corp), PyRep::Bool(true)], None).await.unwrap_err().code,
+        "MutualWarInviteNotFound"
+    );
+    let _ = call_wars(&ctx, &mut agg_sess, "mutualWarInviteMgr", "SendInviteByPlayer", &[PyRep::Integer(ally_corp)], None).await.unwrap();
+    let declined = call_wars(&ctx, &mut ally_sess, "mutualWarInviteMgr", "RespondToInviteByPlayer", &[PyRep::Integer(agg_corp), PyRep::Bool(false)], None).await.unwrap();
+    assert_eq!(declined.dict_get("accepted"), Some(&PyRep::Bool(false)));
+
+    let _ = call_wars(&ctx, &mut agg_sess, "mutualWarInviteMgr", "SendInviteByPlayer", &[PyRep::Integer(ally_corp)], None).await.unwrap();
+    let accepted = call_wars(&ctx, &mut ally_sess, "mutualWarInviteMgr", "RespondToInviteByPlayer", &[PyRep::Integer(agg_corp), PyRep::Bool(true)], None).await.unwrap();
+    let mutual_wid = accepted.dict_get("warID").and_then(|v| v.as_i64()).unwrap();
+    assert_eq!(
+        call_wars(&ctx, &mut def_sess, "warsInfoMgr", "RetractMutualWar", &[PyRep::Integer(mutual_wid)], None).await.unwrap_err().code,
+        "NotWarParticipant"
+    );
+    assert_eq!(
+        call_wars(&ctx, &mut agg_sess, "warsInfoMgr", "RetractMutualWar", &[PyRep::Integer(war_id)], None).await.unwrap_err().code,
+        "NotActiveMutualWar"
+    );
+    let retracted = call_wars(&ctx, &mut agg_sess, "warsInfoMgr", "RetractMutualWar", &[PyRep::Integer(mutual_wid)], None).await.unwrap();
+    assert_eq!(retracted.dict_get("warID"), Some(&PyRep::Integer(mutual_wid)));
+
+    // Cover DeclineAllyOffer, RetractWarAllyOffer, GetWarNegotiation (ally + NotWarParticipant), and RespondToInviteByPlayer SameAlliance/AlreadyAtWar
+    let _ = call_wars(&ctx, &mut agg_sess, "warRegistry", "GetWars", &[], None).await.unwrap();
+    let _ = call_wars(&ctx, &mut def_sess, "warsInfoMgr", "GetAllyRowsByWarID", &[], None).await.unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.war_state.peace_treaties.clear();
+        snap.wars.remove(&war_id);
+    });
+    let decl2 = call_wars(&ctx, &mut agg_sess, "warRegistry", "DeclareWarAgainst", &[PyRep::Integer(def_corp)], None).await.unwrap();
+    let war2_id = decl2.dict_get("warID").and_then(|v| v.as_i64()).unwrap();
+    let _ = call_wars(&ctx, &mut def_sess, "warRegistry", "SetOpenForAllies", &[PyRep::Bool(true)], Some(war2_id)).await.unwrap();
+    let offer_r = call_wars(&ctx, &mut ally_sess, "warsInfoMgr", "CreateWarAllyOffer", &[PyRep::Integer(war2_id), PyRep::Real(50_000.0), PyRep::String("RetractMe".into())], None).await.unwrap();
+    let offer_r_id = offer_r.dict_get("negotiationID").and_then(|v| v.as_i64()).unwrap();
+    // Inspect ally negotiation as offeror (ally_sess) -> succeeds
+    let neg_kv = call_wars(&ctx, &mut ally_sess, "warRegistry", "GetWarNegotiation", &[PyRep::Integer(offer_r_id)], None).await.unwrap();
+    assert_eq!(neg_kv.dict_get("warNegotiationID"), Some(&PyRep::Integer(offer_r_id)));
+    let _ = call_wars(&ctx, &mut ally_sess, "warsInfoMgr", "RetractWarAllyOffer", &[PyRep::Integer(offer_r_id)], None).await.unwrap();
+    let offer_d = call_wars(&ctx, &mut ally_sess, "warsInfoMgr", "CreateWarAllyOffer", &[PyRep::Integer(war2_id), PyRep::Real(50_000.0), PyRep::String("DeclineMe".into())], None).await.unwrap();
+    let offer_d_id = offer_d.dict_get("negotiationID").and_then(|v| v.as_i64()).unwrap();
+    let mut no_role_sess = non_dir_sess.clone();
+    no_role_sess.character_id = Some(90_888_999);
+    no_role_sess.corp_role = 0;
+    assert_eq!(
+        call_wars(&ctx, &mut no_role_sess, "warsInfoMgr", "DeclineAllyOffer", &[PyRep::Integer(offer_d_id)], None).await.unwrap_err().code,
+        "CorpRoleDenied"
+    );
+    let _ = call_wars(&ctx, &mut def_sess, "warsInfoMgr", "DeclineAllyOffer", &[PyRep::Integer(offer_d_id)], None).await.unwrap();
+    // NotWarParticipant for an unrelated non-offeror corp on GetWarNegotiation
+    let mut outsider_sess = def_sess.clone();
+    outsider_sess.character_id = Some(90_999_999);
+    outsider_sess.corporation_id = Some(98_999_999);
+    assert_eq!(
+        call_wars(&ctx, &mut outsider_sess, "warRegistry", "GetWarNegotiation", &[PyRep::Integer(offer_d_id)], Some(war2_id)).await.unwrap_err().code,
+        "NotWarParticipant"
+    );
+    // RespondToInviteByPlayer when already at war -> AlreadyAtWar
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.war_state.mutual_invites.insert((agg_corp, def_corp), ctx.now_unix());
+    });
+    assert_eq!(
+        call_wars(&ctx, &mut def_sess, "mutualWarInviteMgr", "RespondToInviteByPlayer", &[PyRep::Integer(agg_corp), PyRep::Bool(true)], None).await.unwrap_err().code,
+        "AlreadyAtWar"
+    );
+    // RespondToInviteByPlayer when later moved into same alliance -> InvalidWarTarget
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.get_mut(&agg_corp).unwrap().alliance_id = Some(99_777_001);
+        snap.corporations.get_mut(&ally_corp).unwrap().alliance_id = Some(99_777_001);
+        snap.war_state.mutual_invites.insert((agg_corp, ally_corp), ctx.now_unix());
+    });
+    assert_eq!(
+        call_wars(&ctx, &mut ally_sess, "mutualWarInviteMgr", "RespondToInviteByPlayer", &[PyRep::Integer(agg_corp), PyRep::Bool(true)], None).await.unwrap_err().code,
+        "InvalidWarTarget"
     );
 }

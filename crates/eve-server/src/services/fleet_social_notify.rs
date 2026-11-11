@@ -27,11 +27,12 @@ pub(super) const BROADCAST_UP: i64 = 2;
 /// `evefleet/members.pyj` `GetNewMemberOptOutsKeyval(acceptsFleetWarp)`: `KeyVal(acceptsFleetWarp,
 /// acceptsConduitJumps=True, acceptsFleetRegroups=True)`. `FleetMemberRecord` stores one flag, so the
 /// conduit/regroup opt-outs use that function's defaults.
-pub(super) fn member_opt_outs(m: &FleetMemberRecord) -> PyRep {
+pub(crate) fn member_opt_outs(m: &FleetMemberRecord) -> PyRep {
     PyRep::keyval([
         ("acceptsFleetWarp", PyRep::Bool(m.takes_fleet_warp)),
         ("acceptsConduitJumps", PyRep::Bool(m.accepts_conduit_jumps)),
         ("acceptsFleetRegroups", PyRep::Bool(m.accepts_regroup)),
+        ("acceptsRegroup", PyRep::Bool(m.accepts_regroup)),
     ])
 }
 

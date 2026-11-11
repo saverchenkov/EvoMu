@@ -347,3 +347,7 @@ pub fn grade_and_record_classification(
     save_vote_map(snap, &votes);
     (sample_acc, is_accurate)
 }
+
+#[cfg(test)]
+#[path = "project_discovery_ops_edges_tests.rs"]
+mod project_discovery_ops_edges_tests;

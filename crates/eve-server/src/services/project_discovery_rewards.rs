@@ -160,8 +160,39 @@ pub fn format_player_statistics_rep(st: &PlayerProjectState) -> PyRep {
     ])
 }
 
+/// Outcome returned by [`execute_post_classification`] for caller formatting and notifications.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PostClassificationOutcome {
+    pub rep: PyRep,
+    pub player_state_rep: PyRep,
+    pub new_bal: Option<eve_db::IskCents>,
+    pub xp_gain: f64,
+    pub total_xp: f64,
+    pub prev_rank: i64,
+    pub new_rank: i64,
+    pub xp_for_new_rank: f64,
+    pub xp_for_next_rank: f64,
+    pub ak_gain: i64,
+}
+
+impl Default for PostClassificationOutcome {
+    fn default() -> Self {
+        Self {
+            rep: PyRep::None,
+            player_state_rep: PyRep::None,
+            new_bal: None,
+            xp_gain: 0.0,
+            total_xp: 0.0,
+            prev_rank: 0,
+            new_rank: 0,
+            xp_for_new_rank: 0.0,
+            xp_for_next_rank: 0.0,
+            ak_gain: 0,
+        }
+    }
+}
+
 /// Process a citizen-science classification submission end-to-end inside a snapshot transaction.
-#[allow(clippy::type_complexity)]
 pub fn execute_post_classification(
     snap: &mut WorldStateSnapshot,
     st: &mut PlayerProjectState,
@@ -169,21 +200,7 @@ pub fn execute_post_classification(
     req_task_index: i64,
     classification_arg: &PyRep,
     now_unix: u64,
-) -> Result<
-    (
-        PyRep,
-        PyRep,
-        Option<eve_db::IskCents>,
-        f64,
-        f64,
-        i64,
-        i64,
-        f64,
-        f64,
-        i64,
-    ),
-    BridgeRpcError,
-> {
+) -> Result<PostClassificationOutcome, BridgeRpcError> {
     if st.last_submission_unix > 0
         && (now_unix <= st.last_submission_unix
             || now_unix.saturating_sub(st.last_submission_unix) < MIN_SUBMISSION_INTERVAL_SECS)
@@ -344,16 +361,20 @@ pub fn execute_post_classification(
         ("player", PyRep::keyval([("score", PyRep::Real(st.accuracy))])),
         ("rank", PyRep::Integer(st.rank)),
     ]);
-    Ok((
+    Ok(PostClassificationOutcome {
         rep,
         player_state_rep,
         new_bal,
         xp_gain,
-        st.experience,
+        total_xp: st.experience,
         prev_rank,
-        st.rank,
+        new_rank: st.rank,
         xp_for_new_rank,
         xp_for_next_rank,
         ak_gain,
-    ))
+    })
 }
+
+#[cfg(test)]
+#[path = "project_discovery_rewards_edges_tests.rs"]
+mod project_discovery_rewards_edges_tests;
