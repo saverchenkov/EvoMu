@@ -764,10 +764,14 @@ def _unpack_packed_row_columns(header_node, raw_rle):
     bool_bit_idx = 0
     decoded_by_idx = []
     for orig_idx, (name, dt) in indexed:
-        if dt in (20, 21, 64, 6) and offset + 8 <= len(unpacked):
+        if dt in (20, 21, 64) and offset + 8 <= len(unpacked):
             v = struct.unpack("<q", bytes(unpacked[offset:offset + 8]))[0]
             offset += 8
             node = {"$py": "Integer", "val": v}
+        elif dt == 6 and offset + 8 <= len(unpacked):
+            v = struct.unpack("<q", bytes(unpacked[offset:offset + 8]))[0]
+            offset += 8
+            node = {"$py": "Real", "val": float(v) / 10000.0}
         elif dt == 5 and offset + 8 <= len(unpacked):
             v = struct.unpack("<d", bytes(unpacked[offset:offset + 8]))[0]
             offset += 8
@@ -1235,6 +1239,30 @@ def _run_binary_codec_self_tests():
     sample = {"$py": "Tuple", "val": [{"$py": "Integer", "val": 30000142}, {"$py": "String", "val": "Jita"}]}
     encoded = marshal_encode_pyrep(sample)
     assert marshal_decode_pyrep(encoded) == sample
+    cy_hdr = {
+        "$py": "Tuple",
+        "val": [
+            {"$py": "String", "val": "dbutil.CRowset"},
+            {
+                "$py": "Tuple",
+                "val": [
+                    {
+                        "$py": "Tuple",
+                        "val": [
+                            {"$py": "String", "val": "balance"},
+                            {"$py": "Integer", "val": 6},
+                        ],
+                    }
+                ],
+            },
+        ],
+    }
+    cy_pos = _unpack_packed_row_columns(cy_hdr, rle_encode(struct.pack("<q", 123456)))
+    assert len(cy_pos) == 1 and cy_pos[0][0] == "balance" and cy_pos[0][1]["$py"] == "Real"
+    assert abs(cy_pos[0][1]["val"] - 12.3456) < 1e-9
+    cy_neg = _unpack_packed_row_columns(cy_hdr, rle_encode(struct.pack("<q", -50000)))
+    assert len(cy_neg) == 1 and cy_neg[0][1]["$py"] == "Real"
+    assert abs(cy_neg[0][1]["val"] - (-5.0)) < 1e-9
 
 
 def _run_live_demo(host="127.0.0.1", port=26001):

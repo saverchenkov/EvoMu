@@ -5,6 +5,7 @@
   "table_counts": {
     "sde_agents": 10972,
     "sde_ancestries": 43,
+    "sde_belt_asteroid_counts": 40928,
     "sde_bloodlines": 18,
     "sde_blueprints": 5100,
     "sde_categories": 48,
@@ -46,6 +47,7 @@
     "sde_station_operations": 69,
     "sde_station_services": 27,
     "sde_stations": 5210,
+    "sde_system_asteroid_types": 3974,
     "sde_type_lists": 469,
     "sde_type_materials": 9866,
     "sde_types": 53288,

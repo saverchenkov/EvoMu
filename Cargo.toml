@@ -48,3 +48,4 @@ warnings = "deny"
 
 [profile.dev.package."*"]
 debug = false
+opt-level = 2
