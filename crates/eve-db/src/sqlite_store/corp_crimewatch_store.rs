@@ -404,35 +404,84 @@ pub fn compute_d6_corp_crimewatch_fingerprints(
     }
 }
 
-pub fn load_d6_corp_crimewatch(conn: &Connection, snap: &mut WorldStateSnapshot) {
+pub fn load_d6_corp_crimewatch_checked(
+    conn: &Connection,
+    snap: &mut WorldStateSnapshot,
+    ctx: &mut super::quarantine::LoadContext,
+) -> Result<(), String> {
     if let Ok(mut stmt) =
-        conn.prepare("SELECT store_key, payload_json FROM d6_corp_crimewatch_kv")
+        conn.prepare("SELECT rowid, store_key, payload_json FROM d6_corp_crimewatch_kv")
     {
-        if let Ok(rows) =
-            stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-        {
-            for (key, js) in rows.flatten() {
-                match key.as_str() {
-                    KEY_CORP_GOV => {
-                        if let Ok(p) = serde_json::from_str::<CorpGovernanceDomainPayload>(&js) {
-                            p.apply_to_snapshot(snap);
+        if let Ok(mut rows) = stmt.query([]) {
+            while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+                let rowid = r.get::<_, i64>(0).ok();
+                let key = super::quarantine::row_col_string(r, 1);
+                let payload = super::quarantine::row_col_string(r, 2);
+                let js_res = r.get::<_, String>(2).map_err(|e| e.to_string());
+                match (key.as_str(), js_res) {
+                    (KEY_CORP_GOV, Ok(js)) => {
+                        match serde_json::from_str::<CorpGovernanceDomainPayload>(&js) {
+                            Ok(p) => p.apply_to_snapshot(snap),
+                            Err(e) => ctx.record_bad_row(
+                                "d6_corp_crimewatch_kv",
+                                "d6_corp_crimewatch_kv",
+                                key,
+                                payload,
+                                e.to_string(),
+                                rowid,
+                            )?,
                         }
                     }
-                    KEY_CRIMEWATCH => {
-                        if let Ok(p) = serde_json::from_str::<CrimewatchDomainPayload>(&js) {
-                            p.apply_to_snapshot(snap);
+                    (KEY_CRIMEWATCH, Ok(js)) => {
+                        match serde_json::from_str::<CrimewatchDomainPayload>(&js) {
+                            Ok(p) => p.apply_to_snapshot(snap),
+                            Err(e) => ctx.record_bad_row(
+                                "d6_corp_crimewatch_kv",
+                                "d6_corp_crimewatch_kv",
+                                key,
+                                payload,
+                                e.to_string(),
+                                rowid,
+                            )?,
                         }
                     }
-                    KEY_WARFARE => {
-                        if let Ok(p) = serde_json::from_str::<WarfareDomainPayload>(&js) {
-                            p.apply_to_snapshot(snap);
+                    (KEY_WARFARE, Ok(js)) => {
+                        match serde_json::from_str::<WarfareDomainPayload>(&js) {
+                            Ok(p) => p.apply_to_snapshot(snap),
+                            Err(e) => ctx.record_bad_row(
+                                "d6_corp_crimewatch_kv",
+                                "d6_corp_crimewatch_kv",
+                                key,
+                                payload,
+                                e.to_string(),
+                                rowid,
+                            )?,
                         }
                     }
-                    _ => {}
+                    (_, Ok(_)) => {}
+                    (_, Err(err)) => {
+                        ctx.record_bad_row(
+                            "d6_corp_crimewatch_kv",
+                            "d6_corp_crimewatch_kv",
+                            key,
+                            payload,
+                            err,
+                            rowid,
+                        )?;
+                    }
                 }
             }
         }
     }
+    Ok(())
+}
+
+pub fn load_d6_corp_crimewatch(conn: &Connection, snap: &mut WorldStateSnapshot) {
+    let _ = load_d6_corp_crimewatch_checked(
+        conn,
+        snap,
+        &mut super::quarantine::LoadContext::quarantine_in_memory(),
+    );
 }
 
 pub fn sync_d6_corp_crimewatch(
@@ -447,7 +496,7 @@ pub fn sync_d6_corp_crimewatch(
     if dfp.corp_governance_fp != corp_h {
         changed = true;
         let corp_payload = CorpGovernanceDomainPayload::from_snapshot(snap);
-        let js = serde_json::to_string(&corp_payload).map_err(|e| e.to_string())?;
+        let js = super::fingerprints::to_checked_json_string(&corp_payload)?;
         tx.execute(
             "INSERT OR REPLACE INTO d6_corp_crimewatch_kv (store_key, payload_json) VALUES (?1, ?2)",
             params![KEY_CORP_GOV, js],
@@ -460,7 +509,7 @@ pub fn sync_d6_corp_crimewatch(
     if dfp.crimewatch_fp != cw_h {
         changed = true;
         let cw_payload = CrimewatchDomainPayload::from_snapshot(snap);
-        let js = serde_json::to_string(&cw_payload).map_err(|e| e.to_string())?;
+        let js = super::fingerprints::to_checked_json_string(&cw_payload)?;
         tx.execute(
             "INSERT OR REPLACE INTO d6_corp_crimewatch_kv (store_key, payload_json) VALUES (?1, ?2)",
             params![KEY_CRIMEWATCH, js],
@@ -473,7 +522,7 @@ pub fn sync_d6_corp_crimewatch(
     if dfp.warfare_fp != war_h {
         changed = true;
         let war_payload = WarfareDomainPayload::from_snapshot(snap);
-        let js = serde_json::to_string(&war_payload).map_err(|e| e.to_string())?;
+        let js = super::fingerprints::to_checked_json_string(&war_payload)?;
         tx.execute(
             "INSERT OR REPLACE INTO d6_corp_crimewatch_kv (store_key, payload_json) VALUES (?1, ?2)",
             params![KEY_WARFARE, js],

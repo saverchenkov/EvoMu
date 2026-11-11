@@ -324,7 +324,7 @@ fn load_and_rollback_corrupt_or_missing_tables_graceful_paths() {
     use crate::sqlite_store::rollback::rollback_dirty_from_sqlite;
     use crate::sqlite_store::schema::apply_migrations;
 
-    // Missing optional/late tables in load_snapshot_from_sqlite gracefully leave defaults
+    // Corrupt skill_history fails closed by default and quarantines when enabled (#906)
     let conn = Connection::open_in_memory().unwrap();
     apply_migrations(&conn).unwrap();
     conn.execute(
@@ -332,7 +332,10 @@ fn load_and_rollback_corrupt_or_missing_tables_graceful_paths() {
         [],
     )
     .unwrap();
-    let (loaded, _fp) = load_snapshot_from_sqlite(&conn).unwrap();
+    let err = load_snapshot_from_sqlite(&conn).expect_err("corrupt skill_history must fail closed");
+    assert!(err.contains("skill_history") && err.contains("90000001"));
+    let (loaded, _fp) =
+        crate::sqlite_store::load_snapshot_from_sqlite_with_options(&conn, true).unwrap();
     assert!(!loaded.skill_history.contains_key(&90_000_001));
 
     // Rollback against empty DB where fp expected populated rows does not panic

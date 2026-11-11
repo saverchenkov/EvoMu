@@ -144,6 +144,49 @@ fn persist_corruption_stage_diffs(
     }
 }
 
+struct CrimeWatchRestoreGuard<'a> {
+    snap: &'a mut eve_db::WorldStateSnapshot,
+    orig_stages: HashMap<u32, u8>,
+    dir: CrimeWatchDirector,
+}
+
+impl<'a> CrimeWatchRestoreGuard<'a> {
+    fn new(
+        snap: &'a mut eve_db::WorldStateSnapshot,
+        now_unix: u64,
+        pending_concord_despawns: Vec<(u32, i64, u64)>,
+    ) -> Self {
+        let orig_stages = snapshot_corruption_stages(snap, now_unix);
+        let dir = CrimeWatchDirector {
+            states: std::mem::take(&mut snap.crimewatch_states),
+            aggression_mgr: AggressionManager {
+                records: std::mem::take(&mut snap.crimewatch_aggressions),
+            },
+            system_corruption_stages: orig_stages.clone(),
+            pending_concord_despawns,
+        };
+        Self {
+            snap,
+            orig_stages,
+            dir,
+        }
+    }
+}
+
+impl<'a> Drop for CrimeWatchRestoreGuard<'a> {
+    fn drop(&mut self) {
+        let stages_changed = self.dir.system_corruption_stages != self.orig_stages;
+        self.snap.crimewatch_states = std::mem::take(&mut self.dir.states);
+        self.snap.crimewatch_aggressions = std::mem::take(&mut self.dir.aggression_mgr.records);
+        persist_corruption_stage_diffs(
+            self.snap,
+            &self.orig_stages,
+            &self.dir.system_corruption_stages,
+        );
+        self.snap.mark_crimewatch_dirty(stages_changed);
+    }
+}
+
 impl CrimeWatchLock {
     pub fn new(db: std::sync::Arc<eve_db::WorldRepository>) -> Self {
         Self {
@@ -196,22 +239,10 @@ impl CrimeWatchLock {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let out = self.db.with_mut_snapshot(|snap| {
-            let orig_stages = snapshot_corruption_stages(snap, now_unix);
-            let mut dir = CrimeWatchDirector {
-                states: std::mem::take(&mut snap.crimewatch_states),
-                aggression_mgr: AggressionManager {
-                    records: std::mem::take(&mut snap.crimewatch_aggressions),
-                },
-                system_corruption_stages: orig_stages.clone(),
-                pending_concord_despawns: std::mem::take(&mut pending_despawns),
-            };
-            let out = f(&mut dir);
-            let stages_changed = dir.system_corruption_stages != orig_stages;
-            snap.crimewatch_states = dir.states;
-            snap.crimewatch_aggressions = dir.aggression_mgr.records;
-            persist_corruption_stage_diffs(snap, &orig_stages, &dir.system_corruption_stages);
-            snap.mark_crimewatch_dirty(stages_changed);
-            pending_despawns = dir.pending_concord_despawns;
+            let mut cw_guard =
+                CrimeWatchRestoreGuard::new(snap, now_unix, std::mem::take(&mut pending_despawns));
+            let out = f(&mut cw_guard.dir);
+            pending_despawns = std::mem::take(&mut cw_guard.dir.pending_concord_despawns);
             out
         });
         *self
@@ -233,28 +264,20 @@ impl CrimeWatchLock {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let res = self.db.try_with_mut_snapshot(|snap| {
-            let orig_stages = snapshot_corruption_stages(snap, now_unix);
-            let mut dir = CrimeWatchDirector {
-                states: std::mem::take(&mut snap.crimewatch_states),
-                aggression_mgr: AggressionManager {
-                    records: std::mem::take(&mut snap.crimewatch_aggressions),
-                },
-                system_corruption_stages: orig_stages.clone(),
-                pending_concord_despawns: std::mem::take(&mut pending_despawns),
-            };
-            let res = f(&mut dir);
-            let stages_changed = dir.system_corruption_stages != orig_stages;
-            snap.crimewatch_states = dir.states;
-            snap.crimewatch_aggressions = dir.aggression_mgr.records;
-            persist_corruption_stage_diffs(snap, &orig_stages, &dir.system_corruption_stages);
-            snap.mark_crimewatch_dirty(stages_changed);
-            pending_despawns = dir.pending_concord_despawns;
+            let mut cw_guard =
+                CrimeWatchRestoreGuard::new(snap, now_unix, std::mem::take(&mut pending_despawns));
+            let res = f(&mut cw_guard.dir);
+            if res.is_ok() {
+                pending_despawns = std::mem::take(&mut cw_guard.dir.pending_concord_despawns);
+            }
             res
         });
-        *self
-            .pending_concord_despawns
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = pending_despawns;
+        if res.is_ok() {
+            *self
+                .pending_concord_despawns
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = pending_despawns;
+        }
         res
     }
 
@@ -354,6 +377,9 @@ pub fn concord_delay_for_security(sys_sec: f64) -> f64 {
 
 impl<'a> Drop for CrimeWatchWriteGuard<'a> {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            return;
+        }
         let stages_changed = self.director.system_corruption_stages != self.orig_stages;
         let changed = stages_changed
             || self.db.with_snapshot(|s| {

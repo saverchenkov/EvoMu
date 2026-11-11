@@ -62,6 +62,17 @@ impl FnvHasher {
     }
 
     #[inline]
+    pub(crate) fn write_u128(&mut self, v: u128) {
+        self.mix_word(v as u64);
+        self.mix_word((v >> 64) as u64);
+    }
+
+    #[inline]
+    pub(crate) fn write_i128(&mut self, v: i128) {
+        self.write_u128(v as u128);
+    }
+
+    #[inline]
     pub(crate) fn write_u32(&mut self, v: u32) {
         self.mix_word(v as u64);
     }
@@ -122,19 +133,20 @@ pub(crate) fn fnv1a_hasher() -> FnvHasher {
 }
 
 #[derive(Debug)]
-pub(crate) struct FnvSerError;
+pub(crate) struct FnvSerError(pub(crate) String);
 
 impl std::fmt::Display for FnvSerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("fnv serialization error")
+        let _ = &self.0;
+        write!(f, "fnv serialization error")
     }
 }
 
 impl std::error::Error for FnvSerError {}
 
 impl serde::ser::Error for FnvSerError {
-    fn custom<T: std::fmt::Display>(_msg: T) -> Self {
-        Self
+    fn custom<T: std::fmt::Display>(msg: T) -> Self {
+        Self(msg.to_string())
     }
 }
 
@@ -200,7 +212,9 @@ impl serde::ser::SerializeMap for FnvMapSer<'_> {
     type Ok = ();
     type Error = FnvSerError;
     fn serialize_key<T: ?Sized + Serialize>(&mut self, key: &T) -> Result<(), FnvSerError> {
-        self.pending_key_hash = canonical_fp(key);
+        let mut kh = FnvHasher::new();
+        key.serialize(FnvSerializer(&mut kh))?;
+        self.pending_key_hash = kh.finish();
         Ok(())
     }
     fn serialize_value<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), FnvSerError> {
@@ -283,6 +297,11 @@ impl<'a> serde::Serializer for FnvSerializer<'a> {
         self.0.write_i64(v);
         Ok(())
     }
+    fn serialize_i128(self, v: i128) -> Result<(), FnvSerError> {
+        self.0.write_u8(20);
+        self.0.write_i128(v);
+        Ok(())
+    }
     fn serialize_u8(self, v: u8) -> Result<(), FnvSerError> {
         self.serialize_u64(u64::from(v))
     }
@@ -295,6 +314,11 @@ impl<'a> serde::Serializer for FnvSerializer<'a> {
     fn serialize_u64(self, v: u64) -> Result<(), FnvSerError> {
         self.0.write_u8(3);
         self.0.write_u64(v);
+        Ok(())
+    }
+    fn serialize_u128(self, v: u128) -> Result<(), FnvSerError> {
+        self.0.write_u8(21);
+        self.0.write_u128(v);
         Ok(())
     }
     fn serialize_f32(self, v: f32) -> Result<(), FnvSerError> {
@@ -438,8 +462,262 @@ impl<'a> serde::Serializer for FnvSerializer<'a> {
 #[inline]
 pub(crate) fn canonical_fp<T: Serialize + ?Sized>(val: &T) -> u64 {
     let mut h = FnvHasher::new();
-    let _ = val.serialize(FnvSerializer(&mut h));
+    if let Err(err) = val.serialize(FnvSerializer(&mut h)) {
+        debug_assert!(false, "FnvSerializer failed in canonical_fp: {err}");
+        h = FnvHasher::new();
+        if let Ok(bytes) = serde_json::to_vec(val) {
+            h.write_bytes(&bytes);
+        }
+    }
     h.finish()
+}
+
+pub(crate) struct FiniteFloatChecker;
+
+impl serde::ser::SerializeSeq for FiniteFloatChecker {
+    type Ok = ();
+    type Error = FnvSerError;
+    fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), FnvSerError> {
+        value.serialize(FiniteFloatChecker)
+    }
+    fn end(self) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeTuple for FiniteFloatChecker {
+    type Ok = ();
+    type Error = FnvSerError;
+    fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), FnvSerError> {
+        value.serialize(FiniteFloatChecker)
+    }
+    fn end(self) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeTupleStruct for FiniteFloatChecker {
+    type Ok = ();
+    type Error = FnvSerError;
+    fn serialize_field<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), FnvSerError> {
+        value.serialize(FiniteFloatChecker)
+    }
+    fn end(self) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeTupleVariant for FiniteFloatChecker {
+    type Ok = ();
+    type Error = FnvSerError;
+    fn serialize_field<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), FnvSerError> {
+        value.serialize(FiniteFloatChecker)
+    }
+    fn end(self) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeMap for FiniteFloatChecker {
+    type Ok = ();
+    type Error = FnvSerError;
+    fn serialize_key<T: ?Sized + Serialize>(&mut self, key: &T) -> Result<(), FnvSerError> {
+        key.serialize(FiniteFloatChecker)
+    }
+    fn serialize_value<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), FnvSerError> {
+        value.serialize(FiniteFloatChecker)
+    }
+    fn end(self) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeStruct for FiniteFloatChecker {
+    type Ok = ();
+    type Error = FnvSerError;
+    fn serialize_field<T: ?Sized + Serialize>(
+        &mut self,
+        _key: &'static str,
+        value: &T,
+    ) -> Result<(), FnvSerError> {
+        value.serialize(FiniteFloatChecker)
+    }
+    fn end(self) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeStructVariant for FiniteFloatChecker {
+    type Ok = ();
+    type Error = FnvSerError;
+    fn serialize_field<T: ?Sized + Serialize>(
+        &mut self,
+        _key: &'static str,
+        value: &T,
+    ) -> Result<(), FnvSerError> {
+        value.serialize(FiniteFloatChecker)
+    }
+    fn end(self) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+}
+
+impl serde::Serializer for FiniteFloatChecker {
+    type Ok = ();
+    type Error = FnvSerError;
+    type SerializeSeq = Self;
+    type SerializeTuple = Self;
+    type SerializeTupleStruct = Self;
+    type SerializeTupleVariant = Self;
+    type SerializeMap = Self;
+    type SerializeStruct = Self;
+    type SerializeStructVariant = Self;
+
+    fn serialize_bool(self, _v: bool) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+    fn serialize_i8(self, _v: i8) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+    fn serialize_i16(self, _v: i16) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+    fn serialize_i32(self, _v: i32) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+    fn serialize_i64(self, _v: i64) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+    fn serialize_i128(self, _v: i128) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+    fn serialize_u8(self, _v: u8) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+    fn serialize_u16(self, _v: u16) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+    fn serialize_u32(self, _v: u32) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+    fn serialize_u64(self, _v: u64) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+    fn serialize_u128(self, _v: u128) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+    fn serialize_f32(self, v: f32) -> Result<(), FnvSerError> {
+        if v.is_finite() {
+            Ok(())
+        } else {
+            Err(FnvSerError(format!(
+                "non-finite f32 ({v}) cannot be persisted to SQLite JSON"
+            )))
+        }
+    }
+    fn serialize_f64(self, v: f64) -> Result<(), FnvSerError> {
+        if v.is_finite() {
+            Ok(())
+        } else {
+            Err(FnvSerError(format!(
+                "non-finite f64 ({v}) cannot be persisted to SQLite JSON"
+            )))
+        }
+    }
+    fn serialize_char(self, _v: char) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+    fn serialize_str(self, _v: &str) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+    fn serialize_bytes(self, _v: &[u8]) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+    fn serialize_none(self) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+    fn serialize_some<T: ?Sized + Serialize>(self, value: &T) -> Result<(), FnvSerError> {
+        value.serialize(self)
+    }
+    fn serialize_unit(self) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+    fn serialize_unit_struct(self, _name: &'static str) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+    fn serialize_unit_variant(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        _variant: &'static str,
+    ) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+    fn serialize_newtype_struct<T: ?Sized + Serialize>(
+        self,
+        _name: &'static str,
+        value: &T,
+    ) -> Result<(), FnvSerError> {
+        value.serialize(self)
+    }
+    fn serialize_newtype_variant<T: ?Sized + Serialize>(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        _variant: &'static str,
+        value: &T,
+    ) -> Result<(), FnvSerError> {
+        value.serialize(self)
+    }
+    fn serialize_seq(self, _len: Option<usize>) -> Result<Self, FnvSerError> {
+        Ok(Self)
+    }
+    fn serialize_tuple(self, _len: usize) -> Result<Self, FnvSerError> {
+        Ok(Self)
+    }
+    fn serialize_tuple_struct(
+        self,
+        _name: &'static str,
+        _len: usize,
+    ) -> Result<Self, FnvSerError> {
+        Ok(Self)
+    }
+    fn serialize_tuple_variant(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        _variant: &'static str,
+        _len: usize,
+    ) -> Result<Self, FnvSerError> {
+        Ok(Self)
+    }
+    fn serialize_map(self, _len: Option<usize>) -> Result<Self, FnvSerError> {
+        Ok(Self)
+    }
+    fn serialize_struct(
+        self,
+        _name: &'static str,
+        _len: usize,
+    ) -> Result<Self, FnvSerError> {
+        Ok(Self)
+    }
+    fn serialize_struct_variant(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        _variant: &'static str,
+        _len: usize,
+    ) -> Result<Self, FnvSerError> {
+        Ok(Self)
+    }
+}
+
+/// Validates that `val` contains no non-finite floats (`NaN` or `±Infinity`) before serializing to JSON,
+/// preventing `serde_json` from silently emitting `null` for float fields (`#856`).
+#[inline]
+pub(crate) fn to_checked_json_string<T: Serialize + ?Sized>(val: &T) -> Result<String, String> {
+    val.serialize(FiniteFloatChecker).map_err(|e| e.0)?;
+    serde_json::to_string(val).map_err(|e| e.to_string())
 }
 
 #[inline]

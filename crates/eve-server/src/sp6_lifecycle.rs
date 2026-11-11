@@ -90,15 +90,32 @@ pub fn with_sp6_state<R>(
     db.with_snapshot(|snap| f(&snap.sp6_lifecycle))
 }
 
+struct Sp6RestoreGuard<'a> {
+    snap: &'a mut eve_db::WorldStateSnapshot,
+    state: Sp6PersistedState,
+}
+
+impl<'a> Sp6RestoreGuard<'a> {
+    fn new(snap: &'a mut eve_db::WorldStateSnapshot) -> Self {
+        let state = std::mem::take(&mut snap.sp6_lifecycle);
+        Self { snap, state }
+    }
+}
+
+impl<'a> Drop for Sp6RestoreGuard<'a> {
+    fn drop(&mut self) {
+        self.snap.sp6_lifecycle = std::mem::take(&mut self.state);
+        self.snap.mark_other_domains_dirty();
+    }
+}
+
 pub fn try_with_mut_sp6_state<R>(
     db: &Arc<WorldRepository>,
     f: impl FnOnce(&mut Sp6PersistedState, &mut eve_db::WorldStateSnapshot) -> Result<R, String>,
 ) -> Result<R, String> {
     db.try_with_mut_snapshot(|snap| {
-        let mut st = std::mem::take(&mut snap.sp6_lifecycle);
-        let res = f(&mut st, snap);
-        snap.sp6_lifecycle = st;
-        res
+        let mut guard = Sp6RestoreGuard::new(snap);
+        f(&mut guard.state, guard.snap)
     })
 }
 
@@ -106,7 +123,10 @@ pub fn with_mut_sp6_state<R>(
     db: &Arc<WorldRepository>,
     f: impl FnOnce(&mut Sp6PersistedState, &mut eve_db::WorldStateSnapshot) -> R,
 ) -> R {
-    try_with_mut_sp6_state(db, |st, snap| Ok(f(st, snap))).expect("sp6_lifecycle snapshot commit")
+    db.with_mut_snapshot(|snap| {
+        let mut guard = Sp6RestoreGuard::new(snap);
+        f(&mut guard.state, guard.snap)
+    })
 }
 
 /// Records wreck, jetcan, or corpse creation metadata in `snap.sp6_lifecycle.space_object_meta`.

@@ -9,7 +9,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 // Quasar Commerce, Payments, NES Catalog, Cosmetics Market, Orchestrator & ACL
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PlexTransactionRecord {
     pub id: u64,
     pub user_id: u64,
@@ -19,14 +20,16 @@ pub struct PlexTransactionRecord {
     pub description: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StoreCategory {
     pub id: u32,
     pub name: String,
     pub description: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StoreProduct {
     pub id: u32,
     pub name: String,
@@ -35,7 +38,8 @@ pub struct StoreProduct {
     pub quantity: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StoreOffer {
     pub id: u32,
     pub name: String,
@@ -51,13 +55,15 @@ pub struct StoreOffer {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StoreCatalog {
     pub categories: Vec<StoreCategory>,
     pub products: Vec<StoreProduct>,
     pub offers: Vec<StoreOffer>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PaymentScheduleRecord {
     pub id: u64,
     pub user_id: u64,
@@ -68,7 +74,8 @@ pub struct PaymentScheduleRecord {
     pub created_unix: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PaymentTokenRecord {
     pub id: u32,
     pub user_id: u64,
@@ -78,7 +85,8 @@ pub struct PaymentTokenRecord {
     pub consumed: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PaymentReceiptRecord {
     pub receipt_id: u64,
     pub user_id: u64,
@@ -108,7 +116,8 @@ impl ListingTargetRecord {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ComponentListingRecord {
     pub uuid: [u8; 16],
     pub sale_end_unix: u64,
@@ -119,7 +128,8 @@ pub struct ComponentListingRecord {
     pub discount_percent: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SkinListingRecord {
     pub uuid: [u8; 16],
     pub seller_id: u32,
@@ -133,14 +143,16 @@ pub struct SkinListingRecord {
     pub branded: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CosmeticTransactionDetails {
+    #[default]
     PurchasingComponent,
     PurchasingSkin,
     CreatingSkinListing,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CosmeticTransactionRecord {
     pub uuid: [u8; 16],
     pub last_updated_unix: u64,
@@ -151,6 +163,7 @@ pub struct CosmeticTransactionRecord {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CosmeticsMarketData {
     pub component_listings: BTreeMap<String, ComponentListingRecord>,
     pub skin_listings: BTreeMap<String, SkinListingRecord>,
@@ -185,6 +198,7 @@ impl CosmeticsMarketData {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct SemVerSpec {
     pub major: u32,
     pub minor: u32,
@@ -205,7 +219,8 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DeploymentRecord {
     pub id: u64,
     pub name: String,
@@ -217,7 +232,8 @@ pub struct DeploymentRecord {
     pub no_region_limit: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ContentGroupRecord {
     pub id: u64,
     pub name: String,
@@ -225,7 +241,8 @@ pub struct ContentGroupRecord {
     pub weight: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ContentTypeRecord {
     pub id: u64,
     pub name: String,
@@ -233,7 +250,8 @@ pub struct ContentTypeRecord {
     pub dungeon_id: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DeploymentInstanceRecord {
     pub uuid: Vec<u8>,
     pub deployment_id: u64,
@@ -244,6 +262,7 @@ pub struct DeploymentInstanceRecord {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OrchestratorState {
     pub default_tenant_version: SemVerSpec,
     pub tenant_version: Option<SemVerSpec>,
@@ -253,7 +272,8 @@ pub struct OrchestratorState {
     pub instances: Vec<DeploymentInstanceRecord>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FailedFulfillmentRecord {
     pub id: u32,
     pub user_id: u64,
@@ -262,7 +282,8 @@ pub struct FailedFulfillmentRecord {
     pub fulfilled: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TargetedOfferAdminRecord {
     pub user_id: u64,
     pub catalogue_entry_name: String,
@@ -272,7 +293,8 @@ pub struct TargetedOfferAdminRecord {
     pub partner_code: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct QuasarAclRecord {
     pub acl_id: u32,
     pub name: String,
@@ -307,7 +329,8 @@ pub struct QuasarCommerceStore {
 // Fleet, Corp Ads/Wars, Hypernet, Contracts, Reports, Agents, LP & Scanning
 // ============================================================================
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FleetSetupRecord {
     pub setup_name: String,
     pub motd: String,
@@ -317,7 +340,8 @@ pub struct FleetSetupRecord {
     pub wings: Vec<(String, Vec<String>)>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FleetAdvertRecord {
     pub fleet_id: i64,
     pub leader_id: i64,
@@ -331,7 +355,8 @@ pub struct FleetAdvertRecord {
     pub allowed_entities: Vec<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CorpRecruitmentAd {
     pub ad_id: i64,
     pub corp_id: i64,
@@ -345,7 +370,8 @@ pub struct CorpRecruitmentAd {
     pub lang_mask: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct InGameReportRecord {
     pub report_id: i64,
     pub reporter_char_id: i64,
@@ -357,7 +383,8 @@ pub struct InGameReportRecord {
     pub created_at: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LPOffer {
     pub offer_id: i64,
     pub corp_id: i64,
@@ -410,6 +437,7 @@ pub struct FleetAndSocialOpsStore {
 // ============================================================================
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CharacterEnergyState {
     pub current_energy: i64,
     pub max_energy: i64,
@@ -431,7 +459,8 @@ impl Default for CharacterEnergyState {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedLandingPadRecord {
     pub item_id: i64,
     pub type_id: u32,
@@ -449,7 +478,8 @@ pub struct PersistedLandingPadRecord {
     pub contributed_materials: BTreeMap<u32, u32>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedLauncherRecord {
     pub item_id: i64,
     pub type_id: u32,
@@ -459,7 +489,8 @@ pub struct PersistedLauncherRecord {
     pub position: [f64; 3],
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedStarterLauncherRecord {
     pub item_id: i64,
     pub type_id: u32,
@@ -471,7 +502,8 @@ pub struct PersistedStarterLauncherRecord {
     pub position: [f64; 3],
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OfferedLoadSlot {
     pub slot_key: String,
     pub original_system_id: u32,
@@ -479,7 +511,8 @@ pub struct OfferedLoadSlot {
     pub expires_unix: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PendingZarzakhTollQuote {
     pub from_gate_id: i64,
     pub to_gate_id: i64,
@@ -509,6 +542,7 @@ impl HorizonSiegePhase {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct ZarzakhHorizonSiegeState {
     pub phase: HorizonSiegePhase,
     pub phase_started_unix: u64,
@@ -544,6 +578,7 @@ pub struct CloneVatBayState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StructureDefenseSettings {
     pub structure_id: i64,
     pub auto_defense_enabled: bool,
@@ -606,6 +641,7 @@ impl StructureDefenseSettings {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AllianceSovConfig {
     #[serde(default)]
     pub capital_system_id: Option<i64>,
@@ -657,6 +693,7 @@ pub struct LoadServiceState {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedDowntimeState {
     pub emitted_warnings_by_day: BTreeMap<u64, Vec<u64>>,
     pub last_shutdown_epoch_day: Option<u64>,
@@ -667,19 +704,22 @@ pub struct PersistedDowntimeState {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SolarSystemVisitRecord {
     pub visits: i64,
     #[serde(default)]
     pub last_visited_ticks: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FlaggedSiteEntry {
     pub site_url: String,
     pub site_flag: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct BrowserLockdownPolicyState {
     pub lockdown: bool,
     pub default_home_page: String,

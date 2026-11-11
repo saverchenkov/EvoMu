@@ -157,6 +157,9 @@ pub(crate) fn sync_extension_tables(
     for (&k, v) in &snap.item_positions {
         let h = fp_json(v);
         if fp.item_positions.get(&k) != Some(&h) {
+            if !v[0].is_finite() || !v[1].is_finite() || !v[2].is_finite() {
+                return Err(format!("non-finite float in item_positions[{k}]: {v:?}"));
+            }
             cold_changed = true;
             tx.execute(
                 "INSERT OR REPLACE INTO item_positions (item_id, x, y, z) VALUES (?1, ?2, ?3, ?4)",
@@ -209,7 +212,7 @@ pub(crate) fn sync_extension_tables(
         let h = fp_json(v);
         if fp.skill_history.get(&k) != Some(&h) {
             cold_changed = true;
-            let js = serde_json::to_string(v).map_err(|e| e.to_string())?;
+            let js = to_checked_json_string(v)?;
             tx.execute(
                 "INSERT OR REPLACE INTO skill_history (character_id, history_json) VALUES (?1, ?2)",
                 params![k, js],

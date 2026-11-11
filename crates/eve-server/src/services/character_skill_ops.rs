@@ -393,11 +393,15 @@ pub(crate) fn handle_omega_weekly_free_sp_offer(
     let grant = sp_grant.max(1);
     let new_free_sp = ctx.db.try_with_mut_snapshot(|snap| {
         let exp_opt = super::account_services::subscription_expiry_for_user(snap, user_id);
-        let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
-            code: "CharacterNotFound".into(),
-            message: format!("Character {char_id} not found"),
-        })?;
-        let is_omega = ch.clone_grade >= 2 && exp_opt.map(|u| u > now_unix).unwrap_or(true);
+        let clone_grade = snap
+            .characters
+            .get(&char_id)
+            .ok_or_else(|| BridgeRpcError {
+                code: "CharacterNotFound".into(),
+                message: format!("Character {char_id} not found"),
+            })?
+            .clone_grade;
+        let is_omega = clone_grade >= 2 && exp_opt.map(|u| u > now_unix).unwrap_or(true);
         if !is_omega {
             return Err(BridgeRpcError {
                 code: "OmegaRequired".into(),
@@ -414,10 +418,14 @@ pub(crate) fn handle_omega_weekly_free_sp_offer(
                 message: "Weekly free SP offer has already been claimed this week".into(),
             });
         }
+        snap.set_service_state_blob(blob_key, week_id.to_string())
+            .map_err(|e| BridgeRpcError {
+                code: "ServiceStateLimitExceeded".into(),
+                message: e,
+            })?;
+        let ch = snap.characters.get_mut(&char_id).unwrap();
         ch.free_skill_points += grant as f64;
         let updated_sp = ch.free_skill_points;
-        snap.service_state_blobs
-            .insert(blob_key, week_id.to_string());
         Ok(updated_sp)
     })?;
 

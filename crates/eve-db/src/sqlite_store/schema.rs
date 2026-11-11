@@ -408,6 +408,20 @@ CREATE TABLE IF NOT EXISTS character_doll_info (
     doll_dna TEXT NOT NULL,
     portrait_meta TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS quarantine_rows (
+    source_table TEXT NOT NULL,
+    key BLOB NOT NULL,
+    payload BLOB NOT NULL,
+    error TEXT NOT NULL,
+    quarantined_unix INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS service_domain_blobs (
+    domain_key TEXT PRIMARY KEY,
+    payload_json TEXT,
+    domain_json TEXT
+);
 "#;
 
 pub fn apply_migrations(conn: &Connection) -> Result<(), String> {

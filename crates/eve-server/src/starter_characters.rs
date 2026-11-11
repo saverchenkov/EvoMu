@@ -64,8 +64,9 @@ pub(crate) fn grant_starter_plex_in_snapshot(
         now_unix,
     );
     if let Ok(json) = serde_json::to_string(&granted_users) {
-        snap.service_state_blobs
-            .insert(STARTER_PLEX_GRANTED_USERS_BLOB.to_string(), json);
+        if let Err(err) = snap.set_service_state_blob(STARTER_PLEX_GRANTED_USERS_BLOB.to_string(), json) {
+            warn!(error = %err, "failed to persist starter_plex_granted_users blob");
+        }
     }
 }
 

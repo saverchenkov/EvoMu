@@ -63,22 +63,46 @@ fn fp_domain<T: Default + PartialEq + Serialize>(val: &T) -> u64 {
     }
 }
 
-fn load_domain_row<T: Default + DeserializeOwned>(conn: &Connection, key: &str, dst: &mut T) {
-    match conn.query_row(
-        "SELECT payload_json FROM service_domain_state WHERE domain_key = ?1",
-        params![key],
-        |r| r.get::<_, String>(0),
-    ) {
-        Ok(json) => {
-            if let Ok(parsed) = serde_json::from_str::<T>(&json) {
+fn load_domain_row_checked<T: Default + DeserializeOwned>(
+    conn: &Connection,
+    key: &str,
+    dst: &mut T,
+    ctx: &mut super::quarantine::LoadContext,
+) -> Result<(), String> {
+    let mut stmt = match conn
+        .prepare("SELECT rowid, payload_json FROM service_domain_state WHERE domain_key = ?1")
+    {
+        Ok(s) => s,
+        Err(_) => return Ok(()),
+    };
+    let mut rows = stmt.query(params![key]).map_err(|e| e.to_string())?;
+    if let Some(r) = rows.next().map_err(|e| e.to_string())? {
+        let rowid = r.get::<_, i64>(0).ok();
+        let raw_payload = super::quarantine::row_col_string(r, 1);
+        match r
+            .get::<_, String>(1)
+            .map_err(|e| e.to_string())
+            .and_then(|json| serde_json::from_str::<T>(&json).map_err(|e| e.to_string()))
+        {
+            Ok(parsed) => {
                 *dst = parsed;
             }
+            Err(err) => {
+                *dst = T::default();
+                ctx.record_bad_row(
+                    "service_domain_state",
+                    "service_domain_state (service_domain_blobs)",
+                    key,
+                    raw_payload,
+                    err,
+                    rowid,
+                )?;
+            }
         }
-        Err(rusqlite::Error::QueryReturnedNoRows) => {
-            *dst = T::default();
-        }
-        Err(_) => {}
+    } else {
+        *dst = T::default();
     }
+    Ok(())
 }
 
 fn rollback_domain_row<T: Default + DeserializeOwned>(
@@ -122,7 +146,7 @@ fn sync_domain_row<T: Default + PartialEq + Serialize>(
         )
         .map_err(|e| e.to_string())?;
     } else {
-        let json = serde_json::to_string(val).map_err(|e| e.to_string())?;
+        let json = super::fingerprints::to_checked_json_string(val)?;
         tx.execute(
             "INSERT OR REPLACE INTO service_domain_state (domain_key, payload_json) VALUES (?1, ?2)",
             params![key, json],
@@ -168,13 +192,89 @@ pub fn compute_service_domains_fingerprints(
     fp
 }
 
-pub fn load_service_domains(conn: &Connection, snap: &mut WorldStateSnapshot) {
+pub fn load_service_domains_checked(
+    conn: &Connection,
+    snap: &mut WorldStateSnapshot,
+    ctx: &mut super::quarantine::LoadContext,
+) -> Result<(), String> {
+    let mut known_keys = std::collections::HashSet::with_capacity(20);
     macro_rules! load_one {
         ($field:ident, $key:expr) => {
-            load_domain_row(conn, $key, &mut snap.$field);
+            known_keys.insert($key);
+            load_domain_row_checked(conn, $key, &mut snap.$field, ctx)?;
         };
     }
     for_each_service_domain!(load_one);
+
+    // Validate any extra rows in `service_domain_state` or alias table `service_domain_blobs`.
+    if let Ok(mut stmt) =
+        conn.prepare("SELECT rowid, domain_key, payload_json FROM service_domain_state")
+    {
+        if let Ok(mut rows) = stmt.query([]) {
+            while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+                let rowid = r.get::<_, i64>(0).ok();
+                let key = super::quarantine::row_col_string(r, 1);
+                if known_keys.contains(key.as_str()) {
+                    continue;
+                }
+                let raw_payload = super::quarantine::row_col_string(r, 2);
+                if let Err(err) = r
+                    .get::<_, String>(2)
+                    .map_err(|e| e.to_string())
+                    .and_then(|s| {
+                        serde_json::from_str::<serde_json::Value>(&s).map_err(|e| e.to_string())
+                    })
+                {
+                    ctx.record_bad_row(
+                        "service_domain_state",
+                        "service_domain_state (service_domain_blobs)",
+                        key,
+                        raw_payload,
+                        err,
+                        rowid,
+                    )?;
+                }
+            }
+        }
+    }
+
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT rowid, domain_key, COALESCE(payload_json, domain_json) FROM service_domain_blobs",
+    ) {
+        if let Ok(mut rows) = stmt.query([]) {
+            while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+                let rowid = r.get::<_, i64>(0).ok();
+                let key = super::quarantine::row_col_string(r, 1);
+                let raw_payload = super::quarantine::row_col_string(r, 2);
+                if let Err(err) = r
+                    .get::<_, String>(2)
+                    .map_err(|e| e.to_string())
+                    .and_then(|s| {
+                        serde_json::from_str::<serde_json::Value>(&s).map_err(|e| e.to_string())
+                    })
+                {
+                    ctx.record_bad_row(
+                        "service_domain_blobs",
+                        "service_domain_blobs (service_domain_state)",
+                        key,
+                        raw_payload,
+                        err,
+                        rowid,
+                    )?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub fn load_service_domains(conn: &Connection, snap: &mut WorldStateSnapshot) {
+    let _ = load_service_domains_checked(
+        conn,
+        snap,
+        &mut super::quarantine::LoadContext::quarantine_in_memory(),
+    );
 }
 
 pub fn sync_service_domains(
@@ -182,7 +282,6 @@ pub fn sync_service_domains(
     snap: &WorldStateSnapshot,
     fp: &mut TableFingerprints,
 ) -> Result<bool, String> {
-    crate::service_domains::validate_service_state_blobs(&snap.service_state_blobs)?;
     let mut changed = false;
     macro_rules! sync_one {
         ($field:ident, $key:expr) => {

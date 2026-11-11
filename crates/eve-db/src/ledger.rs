@@ -41,6 +41,7 @@ pub enum JournalContext {
 
 /// Parties/context metadata for one wallet journal entry (`ownerID1`, `ownerID2`, `referenceID`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct JournalMeta {
     pub ref_type_id: i32,
     /// Party the ISK came from (`ownerID1`).
@@ -54,7 +55,8 @@ pub struct JournalMeta {
 }
 
 /// One market fill, recorded at fill time (`marketProxy.CharGetTransactions` rows).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MarketTransactionRecord {
     pub transaction_id: i64,
     pub date_unix: u64,

@@ -107,6 +107,7 @@ pub mod sorted_map_of_sets_serde {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CorpGovState {
     #[serde(default)]
     pub role_audit_log: Vec<(i64, i64, u64, u64, u64)>,
@@ -185,6 +186,7 @@ pub struct CorpGovState {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedAllianceMeta {
     #[serde(default)]
     pub description: String,
@@ -211,6 +213,7 @@ pub struct PersistedAllianceMeta {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedProjectDetails {
     #[serde(default)]
     pub wallet_division: u8,
@@ -253,6 +256,7 @@ pub struct PersistedProjectDetails {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedAllianceWarState {
     #[serde(default)]
     pub alliances: HashMap<i64, PersistedAllianceMeta>,
@@ -263,6 +267,7 @@ pub struct PersistedAllianceWarState {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedWarMeta {
     #[serde(default)]
     pub war_hq_id: Option<i64>,
@@ -272,13 +277,15 @@ pub struct PersistedWarMeta {
     pub finish_at_unix: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PersistedNegKind {
+    #[default]
     Surrender,
     Ally,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedWarNegotiation {
     pub id: i64,
     pub war_id: i64,
@@ -290,7 +297,8 @@ pub struct PersistedWarNegotiation {
     pub effective_unix: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedPeaceTreaty {
     pub war_id: i64,
     pub corp_a: i64,
@@ -299,6 +307,7 @@ pub struct PersistedPeaceTreaty {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedWarState {
     #[serde(default)]
     pub wars: HashMap<i64, PersistedWarMeta>,
@@ -314,7 +323,8 @@ pub struct PersistedWarState {
     pub peace_treaties: Vec<PersistedPeaceTreaty>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedBattlefieldRecord {
     pub instance_id: i64,
     pub solar_system_id: u32,
@@ -325,6 +335,7 @@ pub struct PersistedBattlefieldRecord {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedFwState {
     #[serde(default)]
     pub system_victory_points: HashMap<u32, i64>,
@@ -404,7 +415,8 @@ pub struct PersistedFwState {
 }
 
 /// Timestamped FW PvP kill and victory-point event for rolling `yesterday` / `lastWeek` / `total` leaderboards.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedFwStatEvent {
     pub timestamp_unix: u64,
     pub character_id: i64,
@@ -417,6 +429,7 @@ pub struct PersistedFwStatEvent {
 
 /// One upgrade installed into a Sovereignty Hub (`eve_public.sovereignty.hub.upgrade`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedHubUpgrade {
     /// SDE installation type (`invTypes` row in a Sovereignty Hub upgrade group).
     pub type_id: u32,
@@ -439,6 +452,7 @@ pub enum PersistedWorkforceMode {
 
 /// Mutable Equinox runtime state of a Sovereignty Hub structure.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedSovHubData {
     pub hub_id: i64,
     #[serde(default)]
@@ -455,6 +469,7 @@ pub struct PersistedSovHubData {
 
 /// Mercenary Den runtime state (`eve_public.sovereignty.mercenaryden`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedMercenaryDen {
     pub den_id: i64,
     pub type_id: u32,
@@ -473,6 +488,7 @@ pub struct PersistedMercenaryDen {
 
 /// Mercenary Tactical Operation offered by a den (`eve_public.sovereignty.mercenaryden.activity`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedMercenaryActivity {
     pub uuid: Vec<u8>,
     pub den_id: i64,
@@ -487,6 +503,7 @@ pub struct PersistedMercenaryActivity {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedSovState {
     #[serde(default)]
     pub fuel_access_groups: HashMap<i64, i64>,
@@ -575,7 +592,8 @@ pub struct PersistedSovState {
     pub command_node_regen_last_unix: HashMap<i64, u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedInsurgencyCampaign {
     pub campaign_id: i64,
     pub pirate_faction_id: i64,
@@ -592,7 +610,8 @@ pub struct PersistedInsurgencyCampaign {
     pub suppression_points: HashMap<u32, i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedInsurgencySiteRecord {
     pub instance_id: i64,
     pub solar_system_id: u32,
@@ -602,7 +621,8 @@ pub struct PersistedInsurgencySiteRecord {
     pub completed: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedIceHeistRecord {
     pub instance_id: i64,
     pub solar_system_id: u32,
@@ -612,6 +632,7 @@ pub struct PersistedIceHeistRecord {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedInsurgencyState {
     #[serde(default)]
     pub campaigns: HashMap<i64, PersistedInsurgencyCampaign>,
@@ -636,6 +657,7 @@ pub struct PersistedInsurgencyState {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedCrimeWatchState {
     pub character_id: i64,
     /// 60-second weapon timer: blocks docking, jumping stargates, or ejecting.
@@ -668,7 +690,8 @@ impl PersistedCrimeWatchState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedAggressionRecord {
     pub aggressor_char_id: i64,
     pub victim_char_id: i64,
@@ -679,7 +702,8 @@ pub struct PersistedAggressionRecord {
     pub is_pod: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedSecStatusTransaction {
     pub timestamp_unix: u64,
     pub old_sec: f64,
@@ -695,7 +719,8 @@ pub struct PersistedSecStatusTransaction {
     pub other_type_id: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct KillmailAttackerEntry {
     pub character_id: i64,
     pub corporation_id: i64,
@@ -707,7 +732,8 @@ pub struct KillmailAttackerEntry {
     pub security_status: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct KillmailItemEntry {
     pub type_id: u32,
     pub flag: u16,
@@ -716,7 +742,8 @@ pub struct KillmailItemEntry {
     pub singleton: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DetailedKillmail {
     pub kill_id: i64,
     pub kill_time_unix: u64,
@@ -735,6 +762,7 @@ pub struct DetailedKillmail {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedCombatCrimewatchState {
     #[serde(default)]
     pub sec_status_transactions: HashMap<i64, Vec<PersistedSecStatusTransaction>>,
@@ -775,6 +803,7 @@ pub struct PersistedCombatCrimewatchState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct SocialContactNotificationRecord {
     pub notification_id: i64,
     pub sender_character_id: i64,

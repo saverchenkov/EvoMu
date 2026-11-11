@@ -93,68 +93,170 @@ pub fn compute_d6_fingerprints(snap: &WorldStateSnapshot) -> D6Fingerprints {
     }
 }
 
-pub fn load_d6(conn: &Connection, snap: &mut WorldStateSnapshot) {
-    if let Ok(mut stmt) = conn.prepare("SELECT meta_key, meta_value FROM world_meta") {
-        if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))) {
-            for (k, v) in rows.flatten() {
-                match k.as_str() {
-                    "next_alliance_id" => snap.next_alliance_id = v,
-                    "next_corporation_id" => snap.next_corporation_id = v,
-                    "next_notification_id" => snap.next_notification_id = v,
-                    "next_report_id" => snap.next_report_id = v,
-                    _ => {}
+pub fn load_d6_checked(
+    conn: &Connection,
+    snap: &mut WorldStateSnapshot,
+    ctx: &mut super::quarantine::LoadContext,
+) -> Result<(), String> {
+    if let Ok(mut stmt) = conn.prepare("SELECT rowid, meta_key, meta_value FROM world_meta") {
+        if let Ok(mut rows) = stmt.query([]) {
+            while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+                let rowid = r.get::<_, i64>(0).ok();
+                let key = super::quarantine::row_col_string(r, 1);
+                let payload = super::quarantine::row_payload_summary(r, 1, 3);
+                match (|| -> Result<(String, i64), String> {
+                    Ok((
+                        r.get(1).map_err(|e| e.to_string())?,
+                        r.get(2).map_err(|e| e.to_string())?,
+                    ))
+                })() {
+                    Ok((k, v)) => match k.as_str() {
+                        "next_alliance_id" => snap.next_alliance_id = v,
+                        "next_corporation_id" => snap.next_corporation_id = v,
+                        "next_notification_id" => snap.next_notification_id = v,
+                        "next_report_id" => snap.next_report_id = v,
+                        _ => {}
+                    },
+                    Err(err) => {
+                        ctx.record_bad_row("world_meta", "world_meta", key, payload, err, rowid)?;
+                    }
                 }
             }
         }
     }
     if let Ok(mut stmt) = conn.prepare(
-        "SELECT note_id, character_id, item_id, label, note, timestamp_unix FROM owner_notes",
+        "SELECT rowid, note_id, character_id, item_id, label, note, timestamp_unix FROM owner_notes",
     ) {
-        if let Ok(rows) = stmt.query_map([], |r| {
-            Ok(OwnerNoteRecord {
-                note_id: r.get(0)?,
-                character_id: r.get(1)?,
-                item_id: r.get(2)?,
-                label: r.get(3)?,
-                note: r.get(4)?,
-                timestamp_unix: r.get::<_, i64>(5)? as u64,
-            })
-        }) {
-            for note in rows.flatten() {
-                snap.owner_notes.insert(note.note_id, note);
-            }
-        }
-    }
-    if let Ok(mut stmt) =
-        conn.prepare("SELECT corporation_id, issuer_corp_id, lp_balance FROM corp_lp_balances")
-    {
-        if let Ok(rows) = stmt.query_map([], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
-        }) {
-            for (corp_id, issuer_corp_id, lp) in rows.flatten() {
-                snap.corp_lp_balances.insert((corp_id, issuer_corp_id), lp);
-            }
-        }
-    }
-    if let Ok(mut stmt) = conn.prepare("SELECT character_id, logs_json FROM char_lp_logs") {
-        if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))) {
-            for (cid, js) in rows.flatten() {
-                if let Ok(entries) = serde_json::from_str::<Vec<LpRewardLogEntry>>(&js) {
-                    snap.char_lp_logs.insert(cid, entries);
+        if let Ok(mut rows) = stmt.query([]) {
+            while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+                let rowid = r.get::<_, i64>(0).ok();
+                let key = super::quarantine::row_col_string(r, 1);
+                let payload = super::quarantine::row_payload_summary(r, 1, 7);
+                match (|| -> Result<OwnerNoteRecord, String> {
+                    Ok(OwnerNoteRecord {
+                        note_id: r.get(1).map_err(|e| e.to_string())?,
+                        character_id: r.get(2).map_err(|e| e.to_string())?,
+                        item_id: r.get(3).map_err(|e| e.to_string())?,
+                        label: r.get(4).map_err(|e| e.to_string())?,
+                        note: r.get(5).map_err(|e| e.to_string())?,
+                        timestamp_unix: r.get::<_, i64>(6).map_err(|e| e.to_string())? as u64,
+                    })
+                })() {
+                    Ok(note) => {
+                        snap.owner_notes.insert(note.note_id, note);
+                    }
+                    Err(err) => {
+                        ctx.record_bad_row("owner_notes", "owner_notes", key, payload, err, rowid)?;
+                    }
                 }
             }
         }
     }
-    if let Ok(js) = conn.query_row(
-        "SELECT state_json FROM sp6_lifecycle_state WHERE singleton_id = 1",
-        [],
-        |r| r.get::<_, String>(0),
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT rowid, corporation_id, issuer_corp_id, lp_balance FROM corp_lp_balances",
     ) {
-        if let Ok(st) = serde_json::from_str::<Sp6PersistedState>(&js) {
-            snap.sp6_lifecycle = st;
+        if let Ok(mut rows) = stmt.query([]) {
+            while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+                let rowid = r.get::<_, i64>(0).ok();
+                let key = super::quarantine::row_composite_key_string(r, 1, 2);
+                let payload = super::quarantine::row_payload_summary(r, 1, 4);
+                match (|| -> Result<(i64, i64, i64), String> {
+                    Ok((
+                        r.get(1).map_err(|e| e.to_string())?,
+                        r.get(2).map_err(|e| e.to_string())?,
+                        r.get(3).map_err(|e| e.to_string())?,
+                    ))
+                })() {
+                    Ok((corp_id, issuer_corp_id, lp)) => {
+                        snap.corp_lp_balances.insert((corp_id, issuer_corp_id), lp);
+                    }
+                    Err(err) => {
+                        ctx.record_bad_row(
+                            "corp_lp_balances",
+                            "corp_lp_balances",
+                            key,
+                            payload,
+                            err,
+                            rowid,
+                        )?;
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(mut stmt) =
+        conn.prepare("SELECT rowid, character_id, logs_json FROM char_lp_logs")
+    {
+        if let Ok(mut rows) = stmt.query([]) {
+            while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+                let rowid = r.get::<_, i64>(0).ok();
+                let key = super::quarantine::row_col_string(r, 1);
+                let payload = super::quarantine::row_col_string(r, 2);
+                match (|| -> Result<(i64, Vec<LpRewardLogEntry>), String> {
+                    let cid: i64 = r.get(1).map_err(|e| e.to_string())?;
+                    let js: String = r.get(2).map_err(|e| e.to_string())?;
+                    let entries: Vec<LpRewardLogEntry> =
+                        serde_json::from_str(&js).map_err(|e| e.to_string())?;
+                    Ok((cid, entries))
+                })() {
+                    Ok((cid, entries)) => {
+                        snap.char_lp_logs.insert(cid, entries);
+                    }
+                    Err(err) => {
+                        ctx.record_bad_row(
+                            "char_lp_logs",
+                            "char_lp_logs",
+                            key,
+                            payload,
+                            err,
+                            rowid,
+                        )?;
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT rowid, singleton_id, state_json FROM sp6_lifecycle_state WHERE singleton_id = 1",
+    ) {
+        if let Ok(mut rows) = stmt.query([]) {
+            if let Some(r) = rows.next().map_err(|e| e.to_string())? {
+                let rowid = r.get::<_, i64>(0).ok();
+                let key = super::quarantine::row_col_string(r, 1);
+                let payload = super::quarantine::row_col_string(r, 2);
+                match r
+                    .get::<_, String>(2)
+                    .map_err(|e| e.to_string())
+                    .and_then(|js| {
+                        serde_json::from_str::<Sp6PersistedState>(&js).map_err(|e| e.to_string())
+                    }) {
+                    Ok(st) => {
+                        snap.sp6_lifecycle = st;
+                    }
+                    Err(err) => {
+                        ctx.record_bad_row(
+                            "sp6_lifecycle_state",
+                            "sp6_lifecycle_state",
+                            key,
+                            payload,
+                            err,
+                            rowid,
+                        )?;
+                    }
+                }
+            }
         }
     }
     snap.reconcile_id_counters();
+    Ok(())
+}
+
+pub fn load_d6(conn: &Connection, snap: &mut WorldStateSnapshot) {
+    let _ = load_d6_checked(
+        conn,
+        snap,
+        &mut super::quarantine::LoadContext::quarantine_in_memory(),
+    );
 }
 
 /// Writes changed `D-6` rows (`owner_notes`, `corp_lp_balances`, `char_lp_logs`, and ID counters);
@@ -259,7 +361,7 @@ pub fn sync_d6(
         let h = fp_json(entries);
         if df.char_lp_logs.get(&cid) != Some(&h) {
             changed = true;
-            let js = serde_json::to_string(entries).map_err(|e| e.to_string())?;
+            let js = super::fingerprints::to_checked_json_string(entries)?;
             tx.execute(
                 "INSERT OR REPLACE INTO char_lp_logs (character_id, logs_json) VALUES (?1, ?2)",
                 params![cid, js],
@@ -272,7 +374,7 @@ pub fn sync_d6(
     let sp6_h = super::fingerprints::fp_sp6_lifecycle(&snap.sp6_lifecycle);
     if df.sp6_lifecycle_fp != sp6_h {
         changed = true;
-        let js = serde_json::to_string(&snap.sp6_lifecycle).map_err(|e| e.to_string())?;
+        let js = super::fingerprints::to_checked_json_string(&snap.sp6_lifecycle)?;
         tx.execute(
             "INSERT OR REPLACE INTO sp6_lifecycle_state (singleton_id, state_json) VALUES (1, ?1)",
             params![js],

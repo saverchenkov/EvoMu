@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 // ============================================================================
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AirNpeRunnerState {
     pub char_id: i64,
     pub state_id: i64,
@@ -35,7 +36,8 @@ pub struct AirNpeRunnerState {
     pub blackboard: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ActiveClientNodeGraph {
     pub instance_id: i64,
     pub node_graph_id: i64,
@@ -44,7 +46,8 @@ pub struct ActiveClientNodeGraph {
     pub blackboard: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ExpertSystemRecord {
     pub type_id: i64,
     pub inserted_at_ft: i64,
@@ -54,6 +57,7 @@ pub struct ExpertSystemRecord {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CharacterCertificateState {
     #[serde(default)]
     pub certificates: HashMap<u32, u8>,
@@ -78,6 +82,7 @@ pub struct NodeGraphAndProgressionStore {
 // ============================================================================
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SeasonalChallengeDef {
     pub challenge_id: i64,
     pub season_id: i64,
@@ -147,7 +152,8 @@ impl Default for SeasonConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CharacterChallenge {
     pub challenge_id: i64,
     pub season_id: i64,
@@ -171,6 +177,7 @@ pub struct CharacterChallenge {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CharacterSeasonState {
     #[serde(default)]
     pub selected_season_id: i64,
@@ -185,6 +192,7 @@ pub struct CharacterSeasonState {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CharacterMilestoneState {
     pub first_logon_unix: u64,
     pub last_activity_unix: u64,
@@ -206,7 +214,8 @@ impl CharacterMilestoneState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ScheduledDailyCampaign {
     pub campaign_id: i64,
     pub start_unix: u64,
@@ -216,7 +225,8 @@ pub struct ScheduledDailyCampaign {
     pub is_rookie: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SeasonalCampaignSchedule {
     pub campaign_id: i64,
     pub start_unix: u64,
@@ -225,7 +235,8 @@ pub struct SeasonalCampaignSchedule {
     pub turnover_secs: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ProjectDiscoveryTaskData {
     pub task_id: String,
     pub task_number: i64,
@@ -241,6 +252,7 @@ pub struct ProjectDiscoveryTaskData {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ProjectDiscoveryStore {
     #[serde(default)]
     pub tasks: HashMap<i64, ProjectDiscoveryTaskData>,
@@ -267,6 +279,7 @@ pub struct ProjectDiscoveryStore {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PlayerProjectState {
     pub rank: i64,
     pub experience: f64,
@@ -327,12 +340,14 @@ impl Default for PlayerProjectState {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TaskVoteBucket {
     pub submissions: Vec<(i64, [f64; 2], bool)>,
     pub consensus_centroid: Option<[f64; 2]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct CharacterActivityState {
     #[serde(default)]
     pub seen_activities: Vec<i64>,
@@ -340,13 +355,15 @@ pub struct CharacterActivityState {
     pub pop_state: Vec<(PyRep, PyRep)>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FastCheckoutProductRecord {
     pub type_id: u32,
     pub quantity: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FastCheckoutOfferRecord {
     pub offer_id: i64,
     pub plex_amount: i64,
@@ -363,6 +380,7 @@ pub struct FastCheckoutOfferRecord {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct UserFastCheckoutState {
     pub enabled: bool,
     #[serde(default)]

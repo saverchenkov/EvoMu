@@ -635,3 +635,338 @@ fn run_mut_snapshot_tx_clean_tracked_fastpath_and_persist_error_fp_rollback() {
     };
     assert_eq!(sql_bal, 777_666_555);
 }
+
+#[test]
+fn w5a_p2_0a_service_state_blob_write_time_enforcement_and_non_fatal_sync() {
+    let dir = std::env::temp_dir();
+    let db_path = dir.join(format!("evomu_w5a_p2_0a_{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&db_path);
+    let repo = WorldRepository::open_sqlite(&db_path).expect("open_sqlite");
+
+    let violations_before = crate::service_domains::service_state_blob_limit_violations_total();
+
+    // 1. Write-time enforcement via set_service_state_blob rejects oversized value and total byte overflow
+    //    without mutating service_state_blobs, and increments counter (#902 / #832).
+    repo.with_mut_snapshot(|snap| {
+        let oversized_val = "x".repeat(crate::service_domains::MAX_SERVICE_STATE_BLOB_VALUE_BYTES + 1);
+        assert!(snap
+            .set_service_state_blob("char_admin:oversized".into(), oversized_val)
+            .is_err());
+        assert!(!snap.service_state_blobs.contains_key("char_admin:oversized"));
+
+        snap.set_service_state_blob("char_admin:valid".into(), "{\"ok\":true}".into())
+            .expect("within bounds succeeds");
+    });
+    assert!(
+        crate::service_domains::service_state_blob_limit_violations_total() >= violations_before + 1
+    );
+
+    // 2. Even if raw service_state_blobs.insert bypasses set_service_state_blob with an oversized value,
+    //    sync_service_domains logs and increments the counter WITHOUT aborting unrelated SQLite writes (#902 / #832).
+    let violations_mid = crate::service_domains::service_state_blob_limit_violations_total();
+    repo.with_mut_snapshot(|snap| {
+        snap.next_entity_id = 200_555_001;
+        snap.service_state_blobs.insert(
+            "raw_oversized_bypass".into(),
+            "y".repeat(crate::service_domains::MAX_SERVICE_STATE_BLOB_VALUE_BYTES + 1),
+        );
+    });
+    assert!(
+        crate::service_domains::service_state_blob_limit_violations_total() > violations_mid,
+        "sync_service_domains must record limit violation on raw bypass (#902)"
+    );
+    drop(repo);
+
+    let reopened = WorldRepository::open_sqlite(&db_path).expect("reopen_sqlite");
+    assert_eq!(reopened.with_snapshot(|s| s.next_entity_id), 200_555_001);
+    assert_eq!(
+        reopened.with_snapshot(|s| s.service_state_blobs.get("char_admin:valid").cloned()),
+        Some("{\"ok\":true}".into())
+    );
+    assert!(
+        !reopened.with_snapshot(|s| s.service_state_blobs.contains_key("raw_oversized_bypass")),
+        "oversized service_state_blobs must be skipped during SQLite sync and not persisted to world_kv_blobs (#902)"
+    );
+    drop(reopened);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn w5a_p2_0b_non_panicking_with_mut_snapshot_and_rollback_reload_fallback() {
+    let dir = std::env::temp_dir();
+    let snap_path = dir.join(format!("evomu_w5a_p2_0b_{}.json", std::process::id()));
+    let wal_path = WorldRepository::wal_path_for(&snap_path);
+    let _ = std::fs::remove_file(&snap_path);
+    let _ = std::fs::remove_file(&wal_path);
+
+    let repo =
+        WorldRepository::new_empty_with_snapshot_path(Some(snap_path.clone())).expect("init json");
+    let init_id = repo.with_snapshot(|s| s.next_entity_id);
+    let failures_before = crate::persist_failures_total();
+    let rb_before = repo.rollback_epoch();
+
+    // 1. with_mut_snapshot does NOT panic on WAL write failure outside dispatch_rpc;
+    //    instead it rolls back in-memory state, bumps rollback_epoch, and increments persist_failures_total (#903 / #833).
+    repo.wal_fault_mode.store(1, Ordering::SeqCst);
+    let ret = repo.with_mut_snapshot(|snap| {
+        snap.next_entity_id = 200_999_111;
+        42_u32
+    });
+    assert_eq!(ret, 42);
+    assert_eq!(
+        repo.with_snapshot(|s| s.next_entity_id),
+        init_id,
+        "with_mut_snapshot must roll back in-memory state when persistence fails (#903)"
+    );
+    assert_eq!(repo.rollback_epoch(), rb_before + 1);
+    assert!(crate::persist_failures_total() > failures_before);
+
+    // 2. When incremental rollback_dirty_from_sqlite fails (e.g. a row in accounts has a corrupt column
+    //    or table is altered so rollback_dirty_from_sqlite errors), rollback_or_reload_from_sqlite falls
+    //    back to full reload from SQLite without panicking (#903 / #833).
+    {
+        let conn = repo.sqlite_conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO accounts (username, user_id, password_token, role) VALUES ('u1', 1, 'tok', 0)",
+            [],
+        )
+        .unwrap();
+        repo.sqlite_fp
+            .lock()
+            .unwrap()
+            .accounts
+            .insert("missing_in_sqlite".into(), 123_456);
+    }
+    let rb_mid = repo.rollback_epoch();
+    let err_res: Result<(), String> = repo.try_with_mut_snapshot(|snap| {
+        snap.next_entity_id = 200_888_777;
+        Err("abort transaction to trigger rollback fallback".into())
+    });
+    assert!(err_res.is_err());
+    assert_eq!(repo.rollback_epoch(), rb_mid + 1);
+    assert_eq!(repo.with_snapshot(|s| s.next_entity_id), init_id);
+    assert!(repo.with_snapshot(|s| s.accounts.contains_key("u1")));
+    assert!(!repo.quarantine_unreadable);
+    assert!(repo.quarantined_rows().expect("quarantine_rows").is_empty());
+
+    drop(repo);
+    let _ = std::fs::remove_file(&snap_path);
+    let _ = std::fs::remove_file(&wal_path);
+}
+
+#[test]
+fn w5a_p2_0c_closure_panic_catch_unwind_rolls_back_snapshot_and_bumps_counter() {
+    let repo = WorldRepository::with_demo_seed();
+    let cid = 90_000_001;
+    let orig_bal = repo.with_snapshot(|s| s.characters[&cid].balance);
+    let orig_next_id = repo.with_snapshot(|s| s.next_entity_id);
+    let panics_before = crate::tx_panics_total();
+    let rb_before = repo.rollback_epoch();
+
+    // 1. Panic inside try_with_mut_snapshot is caught by run_mut_snapshot_tx, rolls back partial
+    //    in-memory mutations from SQLite, increments tx_panics_total(), and returns Err (#904 / #833).
+    let res: Result<(), String> = repo.try_with_mut_snapshot(|snap| {
+        snap.next_entity_id = 999_111_222;
+        snap.characters.get_mut(&cid).unwrap().balance = IskCents(123);
+        panic!("simulated try_with_mut_snapshot panic");
+    });
+    let err_msg = res.expect_err("panic in try_with_mut_snapshot must return Err");
+    assert!(err_msg.contains("Write closure panicked: simulated try_with_mut_snapshot panic"));
+    assert_eq!(crate::tx_panics_total(), panics_before + 1);
+    assert_eq!(repo.rollback_epoch(), rb_before + 1);
+    assert_eq!(repo.with_snapshot(|s| s.next_entity_id), orig_next_id);
+    assert_eq!(repo.with_snapshot(|s| s.characters[&cid].balance), orig_bal);
+
+    // 2. Panic inside with_mut_snapshot rolls back in-memory mutations from SQLite and releases all
+    //    locks cleanly before propagating the panic (#904 / #833).
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        repo.with_mut_snapshot(|snap| {
+            snap.next_entity_id = 888_222_333;
+            snap.characters.get_mut(&cid).unwrap().balance = IskCents(456);
+            panic!("simulated with_mut_snapshot panic");
+        });
+    }));
+    assert!(caught.is_err());
+    assert_eq!(crate::tx_panics_total(), panics_before + 2);
+    assert_eq!(repo.rollback_epoch(), rb_before + 2);
+    assert_eq!(repo.with_snapshot(|s| s.next_entity_id), orig_next_id);
+    assert_eq!(repo.with_snapshot(|s| s.characters[&cid].balance), orig_bal);
+    assert!(!repo.inner.is_poisoned(), "inner RwLock must not be poisoned");
+    assert!(
+        !repo.sqlite_conn.is_poisoned(),
+        "sqlite_conn Mutex must not be poisoned"
+    );
+}
+
+#[test]
+fn w5a_p2_0d_fnv_serializer_i128_u128_map_key_errors_and_json_fallback() {
+    use crate::sqlite_store::fingerprints::{canonical_fp, FnvHasher, FnvSerializer};
+    use serde::ser::SerializeMap;
+
+    #[derive(Serialize)]
+    struct WideInts {
+        signed: i128,
+        unsigned: u128,
+    }
+
+    let h1 = canonical_fp(&WideInts {
+        signed: -1,
+        unsigned: 1,
+    });
+    let h2 = canonical_fp(&WideInts {
+        signed: -2,
+        unsigned: 1,
+    });
+    let h3 = canonical_fp(&WideInts {
+        signed: -1,
+        unsigned: u128::MAX,
+    });
+    assert_ne!(h1, 0);
+    assert_ne!(h1, h2, "i128 mutation must change canonical_fp (#905 / #855)");
+    assert_ne!(h1, h3, "u128 mutation must change canonical_fp (#905 / #855)");
+    assert_ne!(canonical_fp(&1i128), canonical_fp(&1u128));
+    assert_ne!(canonical_fp(&1i128), canonical_fp(&1i64));
+    assert_ne!(canonical_fp(&i128::MIN), canonical_fp(&i128::MAX));
+
+    // Map key error propagation (#905 / #855): a map key whose Serialize implementation returns Err
+    // must propagate the error out of FnvMapSer::serialize_key instead of hashing key_hash = 0.
+    struct FailingKey;
+    impl Serialize for FailingKey {
+        fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("failing map key"))
+        }
+    }
+    struct MapWithFailingKey;
+    impl Serialize for MapWithFailingKey {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut m = serializer.serialize_map(Some(1))?;
+            m.serialize_entry(&FailingKey, &123i64)?;
+            m.end()
+        }
+    }
+    let mut hasher = FnvHasher::new();
+    let ser_res = MapWithFailingKey.serialize(FnvSerializer(&mut hasher));
+    assert!(
+        ser_res.is_err(),
+        "FnvMapSer::serialize_key must propagate map key serialization errors (#905)"
+    );
+}
+
+#[test]
+fn w5a_p2_0e_fail_closed_loader_quarantine_unreadable_finite_floats_and_serde_defaults() {
+    let dir = std::env::temp_dir();
+    let db_path = dir.join(format!("evomu_w5a_p2_0e_{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&db_path);
+
+    let repo = WorldRepository::open_sqlite(&db_path).expect("open_sqlite");
+    repo.with_mut_snapshot(|snap| {
+        snap.char_notes.insert((90_000_001, 1), "good note".into());
+    });
+
+    // 1. Non-finite float check (#906 / #856): NaN or Infinity in a float field or JSON-serialized
+    //    struct is rejected before serde_json can silently write `null`, rolling back cleanly.
+    let nan_res: Result<(), String> = repo.try_with_mut_snapshot(|snap| {
+        snap.incursions.insert(
+            20_000_001,
+            IncursionRecord {
+                constellation_id: 20_000_001,
+                staging_solar_system_id: 30_000_142,
+                infested_solar_systems: vec![30_000_142],
+                faction_id: 500_019,
+                has_boss: true,
+                influence: f64::NAN,
+                state: "Mobilizing".into(),
+                incursion_type: "Incursion".into(),
+            },
+        );
+        Ok(())
+    });
+    assert!(
+        nan_res.is_err(),
+        "NaN float inside JSON-serialized record must be rejected before writing null (#906)"
+    );
+    assert!(repo.with_snapshot(|s| s.incursions.is_empty()));
+
+    // 2. Inject corrupt JSON into char_lp_logs and social_store (`char_contact_labels`), then verify
+    //    default `open_sqlite` fails closed naming the table and primary key (#906 / #856).
+    {
+        let conn = repo.sqlite_conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO char_lp_logs (character_id, logs_json) VALUES (90000088, '{corrupt')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO char_contact_labels (character_id, labels_json) VALUES (90000077, '{corrupt')",
+            [],
+        )
+        .unwrap();
+    }
+    drop(repo);
+
+    let fail_closed_err = match WorldRepository::open_sqlite(&db_path) {
+        Ok(_) => panic!("open_sqlite must fail closed on corrupt row by default (#906)"),
+        Err(e) => e,
+    };
+    assert!(
+        fail_closed_err.contains("char_lp_logs") || fail_closed_err.contains("char_contact_labels"),
+        "expected table name in error, got: {fail_closed_err}"
+    );
+
+    // 3. Opening with `open_sqlite_with_options(&db_path, true)` (`--quarantine-unreadable`)
+    //    moves both corrupt rows into `quarantine_rows`, deletes them from the source tables,
+    //    and preserves healthy rows (`char_notes`) (#906 / #856).
+    let quarantined_repo =
+        WorldRepository::open_sqlite_with_options(&db_path, true).expect("quarantine open");
+    assert_eq!(
+        quarantined_repo.with_snapshot(|s| s.char_notes.get(&(90_000_001, 1)).cloned()),
+        Some("good note".into())
+    );
+    let q_rows = quarantined_repo.quarantined_rows().expect("quarantined_rows");
+    assert_eq!(q_rows.len(), 2);
+    assert!(q_rows
+        .iter()
+        .any(|r| r.source_table == "char_lp_logs" && r.key == "90000088"));
+    assert!(q_rows
+        .iter()
+        .any(|r| r.source_table == "char_contact_labels" && r.key == "90000077"));
+    drop(quarantined_repo);
+
+    // Subsequent default `open_sqlite` now succeeds cleanly because corrupt rows were moved to `quarantine_rows`!
+    let clean_reopen = WorldRepository::open_sqlite(&db_path).expect("clean reopen after quarantine");
+    assert_eq!(clean_reopen.quarantined_rows().unwrap().len(), 2);
+    drop(clean_reopen);
+
+    // 4. Container-level `#[serde(default)]` (#906 / #856): partial JSON `{}` deserializes cleanly
+    //    into persisted domain records without failing when new fields are added.
+    let _ch: CharacterRecord = serde_json::from_str("{}").expect("CharacterRecord serde(default)");
+    let _it: InventoryItemRecord =
+        serde_json::from_str("{}").expect("InventoryItemRecord serde(default)");
+    let _ct: ContractRecord = serde_json::from_str("{}").expect("ContractRecord serde(default)");
+    let _cp: CorporationRecord =
+        serde_json::from_str("{}").expect("CorporationRecord serde(default)");
+    let _sp6: crate::Sp6PersistedState =
+        serde_json::from_str("{}").expect("Sp6PersistedState serde(default)");
+
+    // 5. CLI flag parser helper (#906)
+    assert!(crate::parse_cli_quarantine_unreadable(&[
+        "eve-server",
+        "--quarantine-unreadable"
+    ]));
+    assert!(!crate::parse_cli_quarantine_unreadable(&["eve-server"]));
+
+    // 6. Startup migration flush error propagation (#878 / #906): if the startup migration flush
+    //    in `load_snapshot_from_sqlite` fails, the error is propagated via `?` instead of ignored.
+    let mig_conn = rusqlite::Connection::open_in_memory().unwrap();
+    crate::sqlite_store::apply_migrations(&mig_conn).unwrap();
+    mig_conn
+        .execute_batch(
+            "CREATE TRIGGER fail_startup_flush BEFORE INSERT ON d6_corp_crimewatch_kv BEGIN SELECT RAISE(ABORT, 'startup_flush_abort'); END;",
+        )
+        .unwrap();
+    let flush_err = crate::sqlite_store::load_snapshot_from_sqlite(&mig_conn)
+        .expect_err("startup migration flush failure must propagate (#878)");
+    assert!(flush_err.contains("startup_flush_abort"));
+
+    let _ = std::fs::remove_file(&db_path);
+}

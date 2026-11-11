@@ -131,8 +131,11 @@ fn sqlite_store_malformed_json_and_unknown_kv_keys_coverage() {
         dirty.skill_history.get_mut(&90_000_001).unwrap()[0].skill_level = 99;
         rollback_dirty_from_sqlite(&conn, &mut dirty, &fp)
             .expect("rollback skips corrupt optional skill_history JSON cleanly");
+        let err = load_snapshot_from_sqlite(&conn).expect_err("corrupt skill_history fails closed");
+        assert!(err.contains("skill_history") && err.contains("90000001"));
         let (reloaded, _) =
-            load_snapshot_from_sqlite(&conn).expect("load skips corrupt optional skill_history");
+            crate::sqlite_store::load_snapshot_from_sqlite_with_options(&conn, true)
+                .expect("quarantine mode skips and moves corrupt skill_history");
         assert!(reloaded.skill_history.is_empty());
     }
 

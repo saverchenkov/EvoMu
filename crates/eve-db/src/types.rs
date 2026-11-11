@@ -157,8 +157,9 @@ impl IskCents {
 
 /// Standard EVE inventory location flags (`invFlags`).
 #[repr(u16)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum InventoryFlag {
+    #[default]
     None = 0,
     Wardrobe = 3,
     Hangar = 4,
@@ -345,7 +346,8 @@ impl InventoryFlag {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AccountRecord {
     pub user_id: u64,
     pub username: String,
@@ -380,7 +382,8 @@ impl AccountRecord {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OnlineSessionRecord {
     pub user_id: u64,
     pub username: String,
@@ -391,7 +394,8 @@ pub struct OnlineSessionRecord {
     pub computer_hash: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PkceAuthCode {
     pub code: String,
     pub user_id: u64,
@@ -404,7 +408,8 @@ pub struct PkceAuthCode {
     pub expires_at_unix: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SsoTokenBundle {
     pub access_token: String,
     pub token_type: String,
@@ -412,7 +417,8 @@ pub struct SsoTokenBundle {
     pub refresh_token: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SsoTokenClaims {
     pub sub: String,
     pub name: String,
@@ -427,7 +433,8 @@ pub struct SsoTokenClaims {
     pub jti: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SsoRefreshTokenRecord {
     pub refresh_token: String,
     pub user_id: u64,
@@ -474,6 +481,7 @@ impl AuthRuntimeState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct NeuralAttributes {
     pub charisma: u8,
     pub intelligence: u8,
@@ -515,7 +523,8 @@ impl Default for NeuralAttributes {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CharacterRecord {
     #[serde(default)]
     pub activity_status: Option<String>,
@@ -570,7 +579,8 @@ pub struct CharacterRecord {
     pub system_epoch: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OwnerNoteRecord {
     pub note_id: i64,
     pub character_id: i64,
@@ -580,14 +590,16 @@ pub struct OwnerNoteRecord {
     pub timestamp_unix: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TrainedSkillRecord {
     pub type_id: TypeId,
     pub level: u8,
     pub skill_points: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SkillQueueEntry {
     pub type_id: TypeId,
     pub target_level: u8,
@@ -598,7 +610,8 @@ pub struct SkillQueueEntry {
     pub started_at_unix: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct JumpCloneRecord {
     pub jump_clone_id: i64,
     pub character_id: i64,
@@ -607,6 +620,7 @@ pub struct JumpCloneRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct InventoryItemRecord {
     pub item_id: i64,
     pub type_id: TypeId,
@@ -648,7 +662,8 @@ impl Default for InventoryItemRecord {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SavedFittingRecord {
     pub fitting_id: i64,
     pub owner_id: i64,
@@ -658,7 +673,8 @@ pub struct SavedFittingRecord {
     pub items: Vec<(TypeId, InventoryFlag, i32)>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MarketOrderRecord {
     pub order_id: i64,
     pub owner_id: i64,
@@ -674,7 +690,8 @@ pub struct MarketOrderRecord {
     pub escrow: IskCents,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct WalletJournalEntry {
     pub entry_id: i64,
     pub character_id: i64,
@@ -685,6 +702,7 @@ pub struct WalletJournalEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ContractRecord {
     pub contract_id: i64,
     pub issuer_id: i64,
@@ -761,6 +779,7 @@ impl Default for ContractRecord {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct IndustryJobRecord {
     pub job_id: i64,
     pub installer_id: i64,
@@ -790,7 +809,8 @@ pub struct IndustryJobRecord {
     pub completed_character_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PlanetaryColonyRecord {
     pub planet_id: i64,
     pub owner_id: i64,
@@ -802,7 +822,8 @@ pub struct PlanetaryColonyRecord {
     pub last_extracted_unix: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ActiveMissionRecord {
     pub mission_id: u32,
     pub character_id: i64,
@@ -818,7 +839,8 @@ pub struct ActiveMissionRecord {
     pub bookmark_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct NpeProgressRecord {
     pub character_id: i64,
     pub node_graph_id: u32,
@@ -829,7 +851,8 @@ pub struct NpeProgressRecord {
     pub claimed_goals: HashSet<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct BookmarkRecord {
     pub bookmark_id: i64,
     pub owner_id: i64,
@@ -848,7 +871,8 @@ pub struct BookmarkRecord {
     pub is_shared: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MailLabelRecord {
     pub label_id: i64,
     pub name: String,
@@ -856,6 +880,7 @@ pub struct MailLabelRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct BookmarkFolderRecord {
     pub folder_id: i64,
     pub owner_id: i64,
@@ -893,7 +918,8 @@ impl Default for BookmarkFolderRecord {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MailRecord {
     pub message_id: i64,
     pub sender_id: i64,
@@ -917,6 +943,7 @@ const fn default_true() -> bool {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FleetMemberRecord {
     pub character_id: i64,
     pub role: FleetRole,
@@ -938,7 +965,8 @@ pub struct FleetMemberRecord {
     pub join_time_unix: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FleetWingRecord {
     pub wing_id: i64,
     pub name: String,
@@ -948,7 +976,8 @@ pub struct FleetWingRecord {
     pub squad_ids: Vec<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FleetSquadRecord {
     pub squad_id: i64,
     pub wing_id: i64,
@@ -957,7 +986,8 @@ pub struct FleetSquadRecord {
     pub commander_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FleetBroadcastRecord {
     pub broadcast_id: i64,
     pub broadcast_type: String,
@@ -969,6 +999,7 @@ pub struct FleetBroadcastRecord {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FleetRecord {
     pub fleet_id: i64,
     pub boss_id: i64,
@@ -1129,7 +1160,8 @@ pub mod corp_roles {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CorpApplicationRecord {
     pub application_id: i64,
     pub character_id: i64,
@@ -1139,7 +1171,8 @@ pub struct CorpApplicationRecord {
     pub status: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CorpWalletDivisionRecord {
     pub division_id: u8,
     pub name: String,
@@ -1147,6 +1180,7 @@ pub struct CorpWalletDivisionRecord {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CorporationRecord {
     pub corporation_id: i64,
     pub name: String,
@@ -1293,7 +1327,8 @@ impl CorporationRecord {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ChatChannelRecord {
     pub channel_id: String,
     pub name: String,
@@ -1312,7 +1347,8 @@ pub struct ChatChannelRecord {
     pub is_delayed_local: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ChatMessageRecord {
     pub message_id: i64,
     pub channel_id: String,
@@ -1322,7 +1358,8 @@ pub struct ChatMessageRecord {
     pub timestamp_ft: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CosmicSignatureRecord {
     pub signature_id: String,
     pub solar_system_id: SolarSystemId,
@@ -1340,7 +1377,8 @@ pub struct CosmicSignatureRecord {
     pub collapsed: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CosmicAnomalyRecord {
     pub anomaly_id: String,
     pub solar_system_id: SolarSystemId,
@@ -1356,6 +1394,7 @@ pub struct CosmicAnomalyRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct AllianceRecord {
     pub alliance_id: i64,
     pub name: String,
@@ -1366,6 +1405,7 @@ pub struct AllianceRecord {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct WarRecord {
     pub war_id: i64,
     pub aggressor_corp_id: i64,
@@ -1375,7 +1415,8 @@ pub struct WarRecord {
     pub active: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CorpProjectRecord {
     pub project_id: i64,
     pub corporation_id: i64,
@@ -1387,6 +1428,7 @@ pub struct CorpProjectRecord {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct KillmailRecord {
     pub kill_id: i64,
     pub victim_character_id: i64,
@@ -1409,7 +1451,8 @@ pub struct KillmailRecord {
     pub attacker_alliance_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct KillRightRecord {
     pub kill_right_id: i64,
     pub owner_id: i64,
@@ -1423,6 +1466,7 @@ fn default_structure_hp() -> f64 {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct UpwellStructureRecord {
     pub structure_id: i64,
     pub type_id: TypeId,
@@ -1450,6 +1494,7 @@ pub struct UpwellStructureRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct SystemDynamicState {
     pub solar_system_id: SolarSystemId,
     pub dbs_multiplier: f64,
@@ -1488,7 +1533,8 @@ pub struct SystemDynamicState {
 }
 
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StandingTransactionRecord {
     pub event_id: i64,
     pub from_id: i64,
@@ -1497,7 +1543,8 @@ pub struct StandingTransactionRecord {
     pub event_type_id: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AsteroidRecord {
     pub asteroid_id: i64,
     pub solar_system_id: u32,

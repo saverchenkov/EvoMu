@@ -343,7 +343,6 @@ async fn keeper_and_agency_warp_to_content_branches() {
 
     ctx.db.with_mut_snapshot(|snap| {
         let list = snap.cosmic_anomalies.entry(sys_id).or_default();
-        list.push(make_anom("DNG-100-900001", sys_id, "OreAnomaly", [f64::NAN, 0.0, 0.0], 1000, 0, false));
         list.push(make_anom("DNG-100-900002", sys_id, "OreAnomaly", [50_000.0, 0.0, 0.0], 1000, 0, false));
         snap.cosmic_signatures.entry(sys_id).or_default().push(CosmicSignatureRecord {
             signature_id: "DNG-101-900003".into(),
@@ -362,8 +361,19 @@ async fn keeper_and_agency_warp_to_content_branches() {
             collapsed: false,
         });
     });
+    ctx.db.corrupt_in_memory_snapshot_for_test(|snap| {
+        snap.cosmic_anomalies
+            .entry(sys_id)
+            .or_default()
+            .push(make_anom("DNG-100-900001", sys_id, "OreAnomaly", [f64::NAN, 0.0, 0.0], 1000, 0, false));
+    });
 
     assert_eq!(call_cache_err(&ctx, &mut non_gm, &cap, "warp_to_content", &[PyRep::Integer(900_001)], &kw).await.code, "InvalidCoordinates");
+    ctx.db.corrupt_in_memory_snapshot_for_test(|snap| {
+        if let Some(list) = snap.cosmic_anomalies.get_mut(&sys_id) {
+            list.retain(|a| a.anomaly_id != "DNG-100-900001");
+        }
+    });
     assert_eq!(call_cache_err(&ctx, &mut non_gm, &cap, "warp_to_content", &[PyRep::Integer(900_002)], &kw).await.code, "ShipNotInSpace");
 
     let sys_h = ctx.systems.get_or_spawn(sys_id);

@@ -30,8 +30,9 @@ fn load_alpha_avail_notified(snap: &WorldStateSnapshot) -> HashMap<i64, bool> {
 
 fn save_alpha_avail_notified(snap: &mut WorldStateSnapshot, map: &HashMap<i64, bool>) {
     if let Ok(s) = serde_json::to_string(map) {
-        snap.service_state_blobs
-            .insert(BLOB_ALPHA_AVAIL_NOTIFIED.to_string(), s);
+        if let Err(err) = snap.set_service_state_blob(BLOB_ALPHA_AVAIL_NOTIFIED.to_string(), s) {
+            tracing::warn!(error = %err, "failed to persist alpha_avail_notified blob");
+        }
     }
 }
 

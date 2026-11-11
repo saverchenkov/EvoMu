@@ -600,6 +600,9 @@ async fn use_warp_vector_rollback_and_session_check_edges() {
     ctx.db.with_mut_snapshot(|snap| {
         let it = snap.items.get_mut(&vec_id).unwrap();
         it.quantity = 1;
+    });
+    ctx.db.corrupt_in_memory_snapshot_for_test(|snap| {
+        let it = snap.items.get_mut(&vec_id).unwrap();
         it.dynamic_attributes.insert(5429, f64::NAN);
     });
     assert_eq!(

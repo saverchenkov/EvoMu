@@ -371,6 +371,32 @@ impl Drop for DbWriteLockDepthGuard {
 static NEXT_REPO_INSTANCE_ID: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(1);
 
+static PERSIST_FAILURES_TOTAL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+static PERSIST_TX_PANICS_TOTAL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Returns the cumulative count of durable SQLite/WAL persistence or rollback failures (`#903` / `#833`).
+pub fn persist_failures_total() -> u64 {
+    PERSIST_FAILURES_TOTAL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Returns the cumulative count of panics caught inside `run_mut_snapshot_tx` write closures (`#904` / `#833`).
+pub fn tx_panics_total() -> u64 {
+    PERSIST_TX_PANICS_TOTAL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
+}
+
 /// Encapsulated transactional world repository backed by SQLite (`D-3`, `D-4`).
 pub struct WorldRepository {
     pub(crate) instance_id: u64,
@@ -378,6 +404,7 @@ pub struct WorldRepository {
     pub(crate) sqlite_conn: std::sync::Mutex<rusqlite::Connection>,
     pub(crate) sqlite_fp: std::sync::Mutex<sqlite_store::TableFingerprints>,
     pub(crate) sqlite_path: Option<std::path::PathBuf>,
+    pub(crate) quarantine_unreadable: bool,
     pub(crate) auth_runtime: RwLock<AuthRuntimeState>,
     pub(crate) clock: std::sync::RwLock<std::sync::Arc<dyn crate::clock::ServerClock>>,
     pub(crate) wal_lock: std::sync::Mutex<()>,
@@ -494,6 +521,20 @@ impl WorldRepository {
     /// Opens or initializes a durable relational SQLite world database at `path`, applies schema
     /// migrations (`schema_migrations`), and loads the persisted world state (`D-3`).
     pub fn open_sqlite(path: impl AsRef<Path>) -> Result<Self, String> {
+        Self::open_sqlite_with_options(path, sqlite_store::default_quarantine_unreadable())
+    }
+
+    /// Opens or initializes a durable relational SQLite world database at `path` with explicit
+    /// `quarantine_unreadable` behavior (`#906` / `#856`).
+    ///
+    /// When `quarantine_unreadable` is `false` (the default), any unreadable or corrupt row in any
+    /// SQLite table fails closed with an error naming the table and primary key. When `true`,
+    /// unreadable rows are moved into `quarantine_rows` inside a transaction and deleted from the
+    /// source table before startup proceeds.
+    pub fn open_sqlite_with_options(
+        path: impl AsRef<Path>,
+        quarantine_unreadable: bool,
+    ) -> Result<Self, String> {
         let target = path.as_ref();
         if let Some(parent) = target.parent() {
             if !parent.as_os_str().is_empty() {
@@ -502,7 +543,8 @@ impl WorldRepository {
         }
         let conn = rusqlite::Connection::open(target).map_err(|e| e.to_string())?;
         sqlite_store::apply_migrations(&conn)?;
-        let (snap, fp) = sqlite_store::load_snapshot_from_sqlite(&conn)?;
+        let (snap, fp) =
+            sqlite_store::load_snapshot_from_sqlite_with_options(&conn, quarantine_unreadable)?;
         let jwt_secret =
             sqlite_store::load_or_init_jwt_secret(&conn, Self::generate_random_secret_32)?;
         let auth_runtime = sqlite_store::load_auth_runtime_from_sqlite(&conn, jwt_secret)?;
@@ -512,6 +554,7 @@ impl WorldRepository {
             sqlite_conn: std::sync::Mutex::new(conn),
             sqlite_fp: std::sync::Mutex::new(fp),
             sqlite_path: Some(target.to_path_buf()),
+            quarantine_unreadable,
             auth_runtime: RwLock::new(auth_runtime),
             clock: std::sync::RwLock::new(std::sync::Arc::new(
                 crate::clock::VirtualServerClock::new(),
@@ -525,6 +568,12 @@ impl WorldRepository {
             #[cfg(test)]
             wal_fault_mode: std::sync::atomic::AtomicU8::new(0),
         })
+    }
+
+    /// Returns all rows quarantined into `quarantine_rows` in the backing SQLite database (`#906`).
+    pub fn quarantined_rows(&self) -> Result<Vec<sqlite_store::QuarantinedRow>, String> {
+        let conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
+        sqlite_store::list_quarantined_rows(&conn)
     }
 
     /// Returns the file path of the backing SQLite database if opened via [`Self::open_sqlite`].
@@ -675,6 +724,7 @@ impl WorldRepository {
             sqlite_conn: std::sync::Mutex::new(conn),
             sqlite_fp: std::sync::Mutex::new(fp),
             sqlite_path: None,
+            quarantine_unreadable: sqlite_store::default_quarantine_unreadable(),
             auth_runtime: RwLock::new(AuthRuntimeState::new(jwt_secret)),
             clock: std::sync::RwLock::new(std::sync::Arc::new(
                 crate::clock::VirtualServerClock::new(),
@@ -970,6 +1020,35 @@ impl WorldRepository {
         Ok(true)
     }
 
+    fn rollback_or_reload_from_sqlite(
+        &self,
+        conn: &rusqlite::Connection,
+        guard: &mut WorldStateSnapshot,
+        fp: &mut sqlite_store::TableFingerprints,
+        context: &str,
+    ) {
+        if let Err(rb_err) = sqlite_store::rollback_dirty_from_sqlite(conn, guard, fp) {
+            tracing::error!(
+                "rollback_dirty_from_sqlite failed during {context}: {rb_err}; attempting full reload from SQLite"
+            );
+            match sqlite_store::load_snapshot_from_sqlite_with_options(
+                conn,
+                self.quarantine_unreadable,
+            ) {
+                Ok((clean_snap, clean_fp)) => {
+                    *guard = clean_snap;
+                    *fp = clean_fp;
+                }
+                Err(reload_err) => {
+                    PERSIST_FAILURES_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tracing::error!(
+                        "Full SQLite reload fallback also failed during {context}: {reload_err}"
+                    );
+                }
+            }
+        }
+    }
+
     fn run_mut_snapshot_tx(
         &self,
         f: &mut dyn FnMut(&mut WorldStateSnapshot) -> bool,
@@ -980,18 +1059,33 @@ impl WorldRepository {
         let mut conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut fp = self.sqlite_fp.lock().unwrap_or_else(|e| e.into_inner());
         guard.dirty_hints.clear();
-        if f(guard) {
-            if let Some(poison_err) = check_wal_poison() {
-                sqlite_store::rollback_dirty_from_sqlite(&conn, guard, &fp).expect(
-                    "Fatal: failed to roll back dirty state from SQLite after poisoned dispatch",
+        let closure_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(guard)));
+        let should_commit = match closure_res {
+            Ok(commit) => commit,
+            Err(panic_payload) => {
+                let msg = panic_payload_message(&*panic_payload);
+                PERSIST_TX_PANICS_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::error!(
+                    "Snapshot write closure panicked (rolling back dirty state from SQLite): {msg}"
                 );
+                self.rollback_or_reload_from_sqlite(&conn, guard, &mut fp, "closure panic");
+                self.bump_rollback_epoch();
+                return Err(format!("Write closure panicked: {msg}"));
+            }
+        };
+        if should_commit {
+            if let Some(poison_err) = check_wal_poison() {
+                PERSIST_FAILURES_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.rollback_or_reload_from_sqlite(&conn, guard, &mut fp, "poisoned dispatch");
                 self.bump_rollback_epoch();
                 return Err(poison_err);
             }
             for (&sid, st) in &mut guard.system_states {
                 st.solar_system_id = sid;
             }
+            let prev_next_entity_id = fp.next_entity_id;
             let prev_wal_seq = fp.wal_seq;
+            let prev_markets_seeded = fp.markets_seeded;
             let prev_cw_fp = fp.d6_corp_crimewatch.crimewatch_fp;
             let need_wal_delta = self.snapshot_path.is_some() && self.sqlite_path.is_none();
             let persist_res = self.persist_dirty_sqlite_and_wal(
@@ -1013,19 +1107,23 @@ impl WorldRepository {
                     Ok(())
                 }
                 Err(persist_err) => {
-                    if let Ok((_, clean_fp)) = sqlite_store::load_snapshot_from_sqlite(&conn) {
+                    PERSIST_FAILURES_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    fp.next_entity_id = prev_next_entity_id;
+                    fp.wal_seq = prev_wal_seq;
+                    fp.markets_seeded = prev_markets_seeded;
+                    if let Ok((_, clean_fp)) = sqlite_store::load_snapshot_from_sqlite_with_options(
+                        &conn,
+                        self.quarantine_unreadable,
+                    ) {
                         *fp = clean_fp;
                     }
-                    sqlite_store::rollback_dirty_from_sqlite(&conn, guard, &fp)
-                        .expect("Fatal: failed to roll back dirty state from SQLite after persist error");
+                    self.rollback_or_reload_from_sqlite(&conn, guard, &mut fp, "persist error");
                     self.bump_rollback_epoch();
                     Err(persist_err)
                 }
             }
         } else {
-            sqlite_store::rollback_dirty_from_sqlite(&conn, guard, &fp).expect(
-                "Fatal: failed to roll back dirty state from SQLite after transaction error",
-            );
+            self.rollback_or_reload_from_sqlite(&conn, guard, &mut fp, "transaction error");
             self.bump_rollback_epoch();
             Ok(())
         }
@@ -1064,9 +1162,11 @@ impl WorldRepository {
 
     /// Delegates infallible snapshot mutations through `run_mut_snapshot_tx`.
     /// On a durable SQLite/WAL persistence failure, `run_mut_snapshot_tx` rolls back
-    /// `WorldStateSnapshot` from the committed SQLite tables and records the error in
-    /// `LAST_WAL_PERSIST_ERROR` so `ServerContext::dispatch_rpc` can return an atomic RPC error
-    /// without panicking.
+    /// `WorldStateSnapshot` from the committed SQLite tables, increments `persist_failures_total()`,
+    /// and records the error via `record_last_wal_error` (`#903` / `#833`).
+    /// If the closure itself panics, `run_mut_snapshot_tx` catches the panic, rolls back
+    /// `WorldStateSnapshot` from SQLite, increments `tx_panics_total()`, releases all locks without
+    /// poisoning, and then propagates the panic (`#904` / `#833`).
     pub fn with_mut_snapshot<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut WorldStateSnapshot) -> R,
@@ -1079,11 +1179,28 @@ impl WorldRepository {
             }
             true
         }) {
-            if !record_last_wal_error(&persist_err) {
-                panic!("WAL persistence failed outside dispatch_rpc: {persist_err}");
+            let _ = record_last_wal_error(&persist_err);
+            if out.is_none() {
+                panic!("{persist_err}");
             }
         }
         out.expect("with_mut_snapshot closure must run")
+    }
+
+    /// Mutates the in-memory `WorldStateSnapshot` directly without running a SQLite/WAL commit,
+    /// allowing unit tests to inject corrupted in-memory state (such as `NaN` or `Infinity` floats
+    /// that `FiniteFloatChecker` rejects at SQLite commit time) to test defensive RPC guards.
+    #[doc(hidden)]
+    pub fn corrupt_in_memory_snapshot_for_test<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut WorldStateSnapshot) -> R,
+    {
+        let mut arc_guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        let guard = std::sync::Arc::make_mut(&mut *arc_guard);
+        let mut fp = self.sqlite_fp.lock().unwrap_or_else(|e| e.into_inner());
+        let out = f(guard);
+        *fp = sqlite_store::compute_fingerprints(guard);
+        out
     }
 
     /// Returns `true` if the current thread currently holds the `WorldRepository` write lock
@@ -1096,7 +1213,7 @@ impl WorldRepository {
     /// Transactionally applies a fallible closure `f` in-place (with zero whole-world `WorldStateSnapshot`
     /// cloning) and commits dirty rows inside an immediate `rusqlite::Transaction` ONLY when `f` returns
     /// `Ok(val)` AND durable persistence succeeds, rolling back in-memory state from the committed SQLite
-    /// tables on any error (`D-3`, `R21-P1-5`, `R24-P1-1`).
+    /// tables on any error or closure panic (`D-3`, `R21-P1-5`, `R24-P1-1`, `#903`, `#904`).
     pub fn try_with_mut_snapshot<F, T, E>(&self, f: F) -> Result<T, E>
     where
         F: FnOnce(&mut WorldStateSnapshot) -> Result<T, E>,
@@ -1110,10 +1227,15 @@ impl WorldRepository {
             out = Some(res);
             is_ok
         });
-        match (out.expect("try_with_mut_snapshot closure must run"), persist_res) {
-            (Ok(val), Ok(())) => Ok(val),
-            (Ok(_), Err(persist_err)) => Err(E::from_wal_error(persist_err)),
-            (Err(err), _) => Err(err),
+        match (out, persist_res) {
+            (Some(Ok(val)), Ok(())) => Ok(val),
+            (Some(Ok(_)), Err(persist_err)) | (None, Err(persist_err)) => {
+                Err(E::from_wal_error(persist_err))
+            }
+            (Some(Err(err)), _) => Err(err),
+            (None, Ok(())) => {
+                unreachable!("try_with_mut_snapshot closure must produce output or error")
+            }
         }
     }
 

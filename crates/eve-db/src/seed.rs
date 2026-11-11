@@ -606,6 +606,7 @@ impl WorldRepository {
             sqlite_conn: std::sync::Mutex::new(conn),
             sqlite_fp: std::sync::Mutex::new(fp),
             sqlite_path: None,
+            quarantine_unreadable: sqlite_store::default_quarantine_unreadable(),
             auth_runtime: RwLock::new(AuthRuntimeState::new(jwt_secret)),
             clock: std::sync::RwLock::new(std::sync::Arc::new(
                 crate::clock::VirtualServerClock::new(),

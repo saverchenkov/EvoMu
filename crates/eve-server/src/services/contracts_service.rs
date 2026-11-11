@@ -799,10 +799,11 @@ pub fn handle(
                         item.version += 1;
                     }
                     if for_corp {
-                        snap.service_state_blobs.insert(
+                        snap.set_service_state_blob(
                             format!("contract_orig_flag:{id}:{iid}"),
                             (orig_flag as u16).to_string(),
-                        );
+                        )
+                        .map_err(|e| rpc_err("ServiceStateLimitExceeded", e))?;
                     }
                     escrowed_items.push(iid);
                 }
@@ -1314,13 +1315,15 @@ pub fn handle(
                 }
 
                 if bid_for_corp {
-                    if let Some(corp) = snap.corporations.get_mut(&effective_caller_corp) {
-                        let new_bal = corp.division_balance(bidder_div_num).checked_sub(effective_bid).unwrap_or(IskCents(0));
-                        corp.set_division_balance(bidder_div_num, new_bal);
-                        snap.service_state_blobs.insert(
+                    if snap.corporations.contains_key(&effective_caller_corp) {
+                        snap.set_service_state_blob(
                             format!("contract_bid_div:{cid}:{effective_caller_corp}"),
                             bidder_div_num.to_string(),
-                        );
+                        )
+                        .map_err(|e| rpc_err("ServiceStateLimitExceeded", e))?;
+                        let corp = snap.corporations.get_mut(&effective_caller_corp).unwrap();
+                        let new_bal = corp.division_balance(bidder_div_num).checked_sub(effective_bid).unwrap_or(IskCents(0));
+                        corp.set_division_balance(bidder_div_num, new_bal);
                         snap.append_journal(effective_caller_corp, "ContractAuctionBid", effective_bid, new_bal, format!("Corporate bid placed on auction contract {cid}"));
                     }
                 } else if let Some(bidder_ch) = snap.characters.get_mut(&char_id) {

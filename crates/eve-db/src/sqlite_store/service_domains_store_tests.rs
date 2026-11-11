@@ -365,7 +365,7 @@ fn service_state_blobs_enforces_size_and_key_limits() {
         .set_service_state_blob("c_overflow".into(), chunk)
         .is_err());
 
-    // Direct push bypassing set_service_state_blob is also rejected by sqlite sync.
+    // Direct push bypassing set_service_state_blob is logged and increments counter without aborting sqlite sync (#902).
     let path = temp_db_path("blob_limit");
     let mut conn = Connection::open(&path).expect("open");
     apply_migrations(&conn).expect("migrate");
@@ -374,8 +374,10 @@ fn service_state_blobs_enforces_size_and_key_limits() {
     let mut bad = WorldStateSnapshot::default();
     bad.service_state_blobs
         .insert("bad_key".into(), "z".repeat(MAX_SERVICE_STATE_BLOB_VALUE_BYTES + 1));
+    let before = crate::service_domains::service_state_blob_limit_violations_total();
     let tx = conn.transaction().expect("tx");
-    assert!(sync_dirty_to_sqlite(&tx, &bad, &mut fp, false).is_err());
+    assert!(sync_dirty_to_sqlite(&tx, &bad, &mut fp, false).is_ok());
+    assert!(crate::service_domains::service_state_blob_limit_violations_total() > before);
     drop(tx);
     let _ = std::fs::remove_file(&path);
 }

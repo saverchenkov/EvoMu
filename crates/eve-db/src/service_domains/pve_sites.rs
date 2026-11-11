@@ -8,7 +8,8 @@ pub type ConstellationId = u32;
 // PvE Special Sites (Incursions, Homefront, Storms, Drifter Hives, Triglavian)
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct HomefrontSiteRecord {
     pub instance_id: i64,
     pub dungeon_id: u32,
@@ -23,7 +24,8 @@ pub struct HomefrontSiteRecord {
     pub boss_type_id: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DrifterHiveRoom {
     pub room_index: u8,
     pub room_name: String,
@@ -35,7 +37,8 @@ pub struct DrifterHiveRoom {
     pub destroyed_npc_ball_ids: Vec<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DrifterHiveRecord {
     pub site_id: String,
     pub dungeon_id: u32,
@@ -51,7 +54,8 @@ pub struct DrifterHiveRecord {
     pub rooms: Vec<DrifterHiveRoom>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TriglavianSiteRecord {
     pub instance_id: i64,
     pub dungeon_id: u32,
@@ -72,7 +76,8 @@ pub struct TriglavianSiteRecord {
     pub beacon_ball_id: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SystemInterferenceRecord {
     pub solar_system_id: SolarSystemId,
     pub interference_level: f64,
@@ -81,7 +86,8 @@ pub struct SystemInterferenceRecord {
     pub last_updated_sec: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SeasonalEventSiteRecord {
     pub instance_id: i64,
     pub season_id: i64,
@@ -99,7 +105,8 @@ pub struct SeasonalEventSiteRecord {
     pub completed: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct IncursionNpcSpawn {
     pub npc_ball_id: i64,
     pub type_id: u32,
@@ -112,7 +119,8 @@ fn default_boss_type_id() -> u32 {
     2933
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct IncursionSiteEntry {
     pub site_id: String,
     pub dungeon_id: u32,
@@ -141,7 +149,8 @@ pub struct IncursionSiteEntry {
     pub killer_fleet_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct IncursionTaleRecord {
     pub tale_id: i64,
     pub constellation_id: ConstellationId,
@@ -162,6 +171,7 @@ pub struct IncursionTaleRecord {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct IncursionLifecycleMeta {
     #[serde(default)]
     pub spawned_at_sec: u64,
@@ -183,6 +193,7 @@ fn default_three_u8() -> u8 {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct IncursionSiteWaveMeta {
     #[serde(default = "default_one_u8")]
     pub current_wave: u8,
@@ -190,7 +201,8 @@ pub struct IncursionSiteWaveMeta {
     pub total_waves: u8,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct WorldEventTaleRecord {
     pub tale_id: i64,
     pub template_id: i64,
@@ -204,7 +216,8 @@ pub struct WorldEventTaleRecord {
     pub end_unix: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct IncursionLPLogEntry {
     pub log_id: i64,
     pub character_id: i64,
@@ -219,8 +232,9 @@ pub struct IncursionLPLogEntry {
     pub timestamp_filetime: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AbyssalWeatherKind {
+    #[default]
     Electrical,
     Dark,
     Exotic,
@@ -240,7 +254,8 @@ impl AbyssalWeatherKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RoamingStormRecord {
     pub storm_id: u32,
     pub weather: AbyssalWeatherKind,
@@ -280,8 +295,9 @@ pub struct PveSpecialSitesState {
 // CRAB Beacons (decoupled from PveSpecialSitesState)
 // ============================================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CrabBeaconPhase {
+    #[default]
     Idle,
     Linking,
     Scanning,
@@ -301,7 +317,8 @@ impl CrabBeaconPhase {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CrabBeaconRecord {
     pub beacon_id: i64,
     pub type_id: TypeId,
@@ -331,7 +348,8 @@ pub struct CrabBeaconStore {
 // Abyssal Pockets, Traces, Hazards, Boundary Ticks, Void Space
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AbyssalRoomRecord {
     pub room_index: u8,
     pub dungeon_id: u32,
@@ -343,7 +361,8 @@ pub struct AbyssalRoomRecord {
     pub gate_unlocked_at_sec: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AbyssalPocketSession {
     pub pocket_id: i64,
     pub character_id: i64,
@@ -376,7 +395,8 @@ pub struct AbyssalPocketSession {
     pub max_ships: u8,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AbyssalTraceRecord {
     pub trace_ball_id: i64,
     pub char_id: i64,
@@ -397,6 +417,7 @@ pub struct AbyssalTraceRecord {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct VoidSpaceSessionRecord {
     pub char_id: i64,
     pub ship_id: i64,
@@ -481,7 +502,8 @@ pub struct DungeonTrigger {
     pub fired: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DungeonRuntimeObject {
     #[serde(default)]
     pub ball_id: i64,
@@ -497,7 +519,8 @@ pub struct DungeonRuntimeObject {
     pub spawned: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DungeonNpcGroup {
     pub group_id: u8,
     pub wave: u8,
@@ -512,7 +535,8 @@ pub struct DungeonNpcGroup {
     pub cleared: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DungeonRuntimeRoom {
     pub room_index: usize,
     pub room_id: i64,
@@ -538,7 +562,8 @@ pub struct DungeonRuntimeRoom {
     pub cleared: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DungeonRuntimeInstance {
     pub instance_id: i64,
     pub dungeon_id: u32,
@@ -578,6 +603,7 @@ fn default_next_dungeon_instance_id() -> i64 {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DungeonRuntimeStore {
     #[serde(default)]
     pub instances: BTreeMap<i64, DungeonRuntimeInstance>,
@@ -594,7 +620,8 @@ impl Default for DungeonRuntimeStore {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DungeonRoomObject {
     pub object_id: i64,
     pub room_id: i64,
@@ -609,7 +636,8 @@ pub struct DungeonRoomObject {
     pub roll: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DungeonEditorRoom {
     pub room_id: i64,
     pub room_name: String,
@@ -620,6 +648,7 @@ pub struct DungeonEditorRoom {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct GmActiveEditorState {
     pub dungeon_id: Option<i64>,
     pub room_id: Option<i64>,
@@ -630,6 +659,7 @@ pub struct GmActiveEditorState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DungeonEditorStore {
     pub rooms_by_dungeon: BTreeMap<i64, Vec<DungeonEditorRoom>>,
     #[serde(default)]
@@ -655,7 +685,8 @@ impl Default for DungeonEditorStore {
 // FOBs & Jovian Observatories
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ObservatorySiteState {
     pub site_id: i64,
     pub solar_system_id: u32,
@@ -686,6 +717,7 @@ pub struct FobObservatoryStore {
 // ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
 pub struct EssReservePulseState {
     pub pulses_total: u32,
     pub pulses_remaining: u32,
@@ -700,7 +732,8 @@ pub struct EssReservePulseState {
     pub unlocked_until_unix: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PhasedAsteroidFieldState {
     pub signature_id: String,
     pub solar_system_id: u32,

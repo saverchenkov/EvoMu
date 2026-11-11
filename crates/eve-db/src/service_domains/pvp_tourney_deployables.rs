@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 // PvP Filaments / Proving Grounds
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PvpQueueCharacterEntry {
     pub item_id: i64,
     pub type_id: u32,
@@ -16,7 +17,8 @@ pub struct PvpQueueCharacterEntry {
     pub joined_unix: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PvpEventSchedule {
     pub event_id: i64,
     pub schedule_id: i64,
@@ -28,7 +30,8 @@ pub struct PvpEventSchedule {
     pub type_ids: Vec<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PvpArenaMatchInstance {
     pub match_id: i64,
     pub event_id: i64,
@@ -82,8 +85,9 @@ impl PvpFilamentStore {
 // Alliance Tournaments
 // ============================================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TourneyMatchState {
+    #[default]
     Setup,
     Banning,
     Countdown,
@@ -103,7 +107,8 @@ impl TourneyMatchState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct TourneyPilot {
     pub character_id: i64,
     pub ship_type_id: i64,
@@ -111,7 +116,8 @@ pub struct TourneyPilot {
     pub points: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TourneyMatch {
     pub match_id: i64,
     pub tourney_id: i64,
@@ -222,6 +228,7 @@ impl TourneyMatch {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TourneyArenaSystem {
     pub combat_beacons: Vec<i64>,
     pub warp_bubbles: Vec<i64>,
@@ -241,7 +248,8 @@ pub struct TourneyStore {
 // Mobile Deployables
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MmjuSpoolEntry {
     pub ship_id: i64,
     pub char_id: i64,
@@ -252,14 +260,16 @@ pub struct MmjuSpoolEntry {
     pub direction: [f64; 3],
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PendingDecloakNotice {
     pub char_id: i64,
     pub ship_id: i64,
     pub module_id: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MobileDeployableRecord {
     pub item_id: i64,
     pub type_id: u32,
@@ -281,7 +291,8 @@ pub struct MobileDeployableRecord {
     pub deployed_fleet_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedDamageRecord {
     pub shield_hp: f64,
     pub max_shield_hp: f64,
@@ -393,7 +404,8 @@ pub struct PersistedSuperweaponCycle {
     pub mobility_restored: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedWarpSuppression {
     pub sys_id: u32,
     pub ship_id: i64,
@@ -412,8 +424,9 @@ pub struct PersistedSuperweaponRuntime {
 // Pirate Insurgency Complexes & Ice Heist
 // ============================================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OutpostRaidSize {
+    #[default]
     Small,
     Medium,
     Moderate,
@@ -524,7 +537,8 @@ impl OutpostRaidSize {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OutpostRaidInstance {
     pub gate_id: i64,
     pub beacon_id: i64,
@@ -545,7 +559,8 @@ pub struct OutpostRaidInstance {
     pub respawn_at_unix: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MiningAmbushInstance {
     pub campaign_id: i64,
     pub solar_system_id: u32,

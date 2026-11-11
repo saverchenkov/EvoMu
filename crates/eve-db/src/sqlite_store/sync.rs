@@ -102,7 +102,7 @@ fn sync_part1_hot_tables_incremental(
         if let Some(v) = snap.characters.get(&k) {
             let h = fp_character(v);
             if fp.characters.get(&k) != Some(&h) {
-                let rec_json = serde_json::to_string(v).map_err(|e| e.to_string())?;
+                let rec_json = to_checked_json_string(v)?;
                 tx.execute(
                     "INSERT INTO characters (character_id, user_id, name, corporation_id, alliance_id, station_id, structure_id, solar_system_id, active_ship_id, balance_cents, activity_status, version, record_json)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
@@ -203,7 +203,7 @@ fn sync_part1_hot_tables_incremental(
         if let Some(item) = snap.items.get(&id) {
             let h = fp_item(item);
             if fp.items.get(&id) != Some(&h) {
-                let rec_json = serde_json::to_string(item).map_err(|e| e.to_string())?;
+                let rec_json = to_checked_json_string(item)?;
                 tx.execute(
                     "INSERT OR REPLACE INTO items (item_id, type_id, owner_id, location_id, flag, quantity, singleton, version, record_json)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -332,7 +332,7 @@ fn sync_part1_hot_tables(
     for (&k, v) in &snap.characters {
         let h = fp_character(v);
         if fp.characters.get(&k) != Some(&h) {
-            let rec_json = serde_json::to_string(v).map_err(|e| e.to_string())?;
+            let rec_json = to_checked_json_string(v)?;
             tx.execute(
                 "INSERT INTO characters (character_id, user_id, name, corporation_id, alliance_id, station_id, structure_id, solar_system_id, active_ship_id, balance_cents, activity_status, version, record_json)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
@@ -480,7 +480,7 @@ fn sync_part1_hot_tables(
         let h = fp_json(clones);
         if fp.jump_clones.get(&cid) != Some(&h) {
             cold_changed = true;
-            let js = serde_json::to_string(clones).map_err(|e| e.to_string())?;
+            let js = to_checked_json_string(clones)?;
             tx.execute(
                 "INSERT OR REPLACE INTO jump_clones (character_id, clones_json) VALUES (?1, ?2)",
                 params![cid, js],
@@ -509,7 +509,7 @@ fn sync_part1_hot_tables(
         let h = fp_json(imps);
         if fp.active_implants.get(&cid) != Some(&h) {
             cold_changed = true;
-            let js = serde_json::to_string(imps).map_err(|e| e.to_string())?;
+            let js = to_checked_json_string(imps)?;
             tx.execute(
                 "INSERT OR REPLACE INTO active_implants (character_id, implants_json) VALUES (?1, ?2)",
                 params![cid, js],
@@ -535,7 +535,7 @@ fn sync_part1_hot_tables(
     for (&id, item) in &snap.items {
         let h = fp_item(item);
         if fp.items.get(&id) != Some(&h) {
-            let rec_json = serde_json::to_string(item).map_err(|e| e.to_string())?;
+            let rec_json = to_checked_json_string(item)?;
             tx.execute(
                 "INSERT OR REPLACE INTO items (item_id, type_id, owner_id, location_id, flag, quantity, singleton, version, record_json)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -577,7 +577,7 @@ fn sync_part1_hot_tables(
         let h = fp_json(fit);
         if fp.saved_fittings.get(&fid) != Some(&h) {
             cold_changed = true;
-            let js = serde_json::to_string(fit).map_err(|e| e.to_string())?;
+            let js = to_checked_json_string(fit)?;
             tx.execute(
                 "INSERT OR REPLACE INTO saved_fittings (fitting_id, owner_id, name, ship_type_id, description, record_json)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -704,7 +704,7 @@ fn sync_part2_activity_tables(
     for (&cid, c) in &snap.contracts {
         let h = fp_contract(c);
         if fp.contracts.get(&cid) != Some(&h) {
-            let js = serde_json::to_string(c).map_err(|e| e.to_string())?;
+            let js = to_checked_json_string(c)?;
             tx.execute(
                 "INSERT OR REPLACE INTO contracts (contract_id, issuer_id, acceptor_id, contract_type, status, start_station_id, end_station_id, price_cents, reward_cents, collateral_cents, expiration_unix, record_json)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
@@ -745,6 +745,11 @@ fn sync_part2_activity_tables(
     for (&jid, j) in &snap.industry_jobs {
         let h = fp_json(j);
         if fp.industry_jobs.get(&jid) != Some(&h) {
+            if j.cost.is_some_and(|c| !c.is_finite())
+                || j.probability.is_some_and(|p| !p.is_finite())
+            {
+                return Err(format!("non-finite float in industry_jobs[{jid}]"));
+            }
             cold_changed = true;
             tx.execute(
                 "INSERT OR REPLACE INTO industry_jobs (job_id, installer_id, facility_id, blueprint_item_id, blueprint_type_id, activity_id, runs, product_type_id, status, duration_seconds, start_unix, blueprint_location_id, output_location_id, cost, licensed_runs, probability, completed_unix, completed_character_id)
@@ -795,7 +800,7 @@ fn sync_part2_activity_tables(
         let h = fp_json(col);
         if fp.planetary_colonies.get(&(oid, pid)) != Some(&h) {
             cold_changed = true;
-            let js = serde_json::to_string(col).map_err(|e| e.to_string())?;
+            let js = to_checked_json_string(col)?;
             tx.execute(
                 "INSERT OR REPLACE INTO planetary_colonies (owner_id, planet_id, solar_system_id, command_center_level, pins_count, last_extracted_unix, record_json)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -834,7 +839,7 @@ fn sync_part2_activity_tables(
         let h = fp_json(m);
         if fp.active_missions.get(&(cid, mid)) != Some(&h) {
             cold_changed = true;
-            let js = serde_json::to_string(m).map_err(|e| e.to_string())?;
+            let js = to_checked_json_string(m)?;
             tx.execute(
                 "INSERT OR REPLACE INTO missions (character_id, mission_id, agent_id, solar_system_id, state, current_room_id, npcs_remaining, record_json)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -902,7 +907,7 @@ fn sync_part2_activity_tables(
         let h = fp_json(list);
         if fp.standing_transactions.get(&cid) != Some(&h) {
             cold_changed = true;
-            let js = serde_json::to_string(list).map_err(|e| e.to_string())?;
+            let js = to_checked_json_string(list)?;
             tx.execute(
                 "INSERT OR REPLACE INTO standings (character_id, tx_json) VALUES (?1, ?2)",
                 params![cid, js],
@@ -932,7 +937,7 @@ fn sync_part2_activity_tables(
         let h = fp_json(npe);
         if fp.npe_progress.get(&cid) != Some(&h) {
             cold_changed = true;
-            let js = serde_json::to_string(npe).map_err(|e| e.to_string())?;
+            let js = to_checked_json_string(npe)?;
             tx.execute(
                 "INSERT OR REPLACE INTO npe_progress (character_id, node_graph_id, current_node_id, completed, record_json)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -965,6 +970,9 @@ fn sync_part2_activity_tables(
     for (&bid, bm) in &snap.bookmarks {
         let h = fp_json(bm);
         if fp.bookmarks.get(&bid) != Some(&h) {
+            if !bm.x.is_finite() || !bm.y.is_finite() || !bm.z.is_finite() {
+                return Err(format!("non-finite float in bookmarks[{bid}]"));
+            }
             cold_changed = true;
             tx.execute(
                 "INSERT OR REPLACE INTO bookmarks (bookmark_id, owner_id, label, solar_system_id, x, y, z, item_id, memo, folder_id, is_shared)
@@ -1040,7 +1048,7 @@ fn sync_part3_social_corp_tables(
         let h = fp_json(fl);
         if fp.fleets.get(&fid) != Some(&h) {
             cold_changed = true;
-            let js = serde_json::to_string(fl).map_err(|e| e.to_string())?;
+            let js = to_checked_json_string(fl)?;
             tx.execute(
                 "INSERT OR REPLACE INTO fleets (fleet_id, boss_id, free_move, is_registered, record_json)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -1068,7 +1076,7 @@ fn sync_part3_social_corp_tables(
         let h = fp_json(corp);
         if fp.corporations.get(&cid) != Some(&h) {
             cold_changed = true;
-            let js = serde_json::to_string(corp).map_err(|e| e.to_string())?;
+            let js = to_checked_json_string(corp)?;
             tx.execute(
                 "INSERT OR REPLACE INTO corps (corporation_id, name, ticker, ceo_id, alliance_id, tax_rate, master_wallet_cents, record_json)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -1105,7 +1113,7 @@ fn sync_part3_social_corp_tables(
         let h = fp_json(al);
         if fp.alliances.get(&aid) != Some(&h) {
             cold_changed = true;
-            let js = serde_json::to_string(al).map_err(|e| e.to_string())?;
+            let js = to_checked_json_string(al)?;
             tx.execute(
                 "INSERT OR REPLACE INTO alliances (alliance_id, name, short_name, executor_corp_id, record_json)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -1294,7 +1302,7 @@ fn sync_part4_world_tail_tables(
         let h = fp_structure(st);
         if fp.structures.get(&stid) != Some(&h) {
             cold_changed = true;
-            let js = serde_json::to_string(st).map_err(|e| e.to_string())?;
+            let js = to_checked_json_string(st)?;
             tx.execute(
                 "INSERT OR REPLACE INTO structures (structure_id, type_id, owner_corp_id, solar_system_id, name, state, quantum_core_installed, fuel_blocks, shield_hp, armor_hp, hull_hp, record_json)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
@@ -1337,7 +1345,7 @@ fn sync_part4_world_tail_tables(
     for (&sys_id, st) in &snap.system_states {
         let h = fp_system_state(st);
         if fp.system_states.get(&sys_id) != Some(&h) {
-            let js = serde_json::to_string(st).map_err(|e| e.to_string())?;
+            let js = to_checked_json_string(st)?;
             tx.execute(
                 "INSERT OR REPLACE INTO system_states (solar_system_id, dbs_multiplier, ess_main_bank_cents, ess_reserve_bank_cents, sov_alliance_id, record_json)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -1404,7 +1412,7 @@ fn sync_part4_world_tail_tables(
         let h = fp_json(skins);
         if fp.licensed_skins.get(&cid) != Some(&h) {
             cold_changed = true;
-            let js = serde_json::to_string(skins).map_err(|e| e.to_string())?;
+            let js = to_checked_json_string(skins)?;
             tx.execute(
                 "INSERT OR REPLACE INTO licensed_skins (character_id, skins_json) VALUES (?1, ?2)",
                 params![cid, js],
@@ -1460,6 +1468,13 @@ fn sync_part4_world_tail_tables(
     for (&id, ast) in &snap.asteroids {
         let h = fp_asteroid(ast);
         if fp.asteroids.get(&id) != Some(&h) {
+            if !ast.position.0.is_finite()
+                || !ast.position.1.is_finite()
+                || !ast.position.2.is_finite()
+                || !ast.radius.is_finite()
+            {
+                return Err(format!("non-finite float in asteroids[{id}]"));
+            }
             cold_changed = true;
             tx.execute(
                 "INSERT OR REPLACE INTO asteroids (asteroid_id, solar_system_id, belt_id, type_id, quantity, initial_quantity, x, y, z, radius) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",

@@ -728,6 +728,9 @@ async fn agency_warp_interdiction_bubbles_capacitor_tier_rollback_and_session_ti
     ctx.db.with_mut_snapshot(|snap| {
         let it = snap.items.get_mut(&vec_iid).unwrap();
         it.flag = InventoryFlag::Cargo;
+    });
+    ctx.db.corrupt_in_memory_snapshot_for_test(|snap| {
+        let it = snap.items.get_mut(&vec_iid).unwrap();
         it.dynamic_attributes.insert(5429, f64::INFINITY);
     });
     assert_eq!(
@@ -737,6 +740,11 @@ async fn agency_warp_interdiction_bubbles_capacitor_tier_rollback_and_session_ti
             .code,
         "InvalidArgument"
     );
+    ctx.db.corrupt_in_memory_snapshot_for_test(|snap| {
+        if let Some(it) = snap.items.get_mut(&vec_iid) {
+            it.dynamic_attributes.remove(&5429);
+        }
+    });
 
     // Deadspace rollback with no prior cooldown removes cooldown entry and restores quantity
     let gated_pocket_site_pos = [star_pos.x, star_pos.y, star_pos.z];

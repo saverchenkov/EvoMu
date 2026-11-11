@@ -680,3 +680,71 @@ fn arch_585_three_way_ship_hp_sync_and_unified_repair_clear() {
     super::persist_ship_combat_hp_batch_inner(&ctx.db, [(unknown_ball, &cs)], false);
     assert_eq!(ctx.db.state_epoch(), epoch_before);
 }
+
+#[test]
+fn w5a_p2_0c_sp6_and_crimewatch_restore_guards_preserve_state_across_closure_panic() {
+    let ctx = test_ctx();
+    let char_id = 90_904_001_i64;
+    let ship_id = 885_904_001_i64;
+
+    with_mut_sp6_state(&ctx.db, |st, _snap| {
+        st.ship_combat_hp.insert(
+            ship_id,
+            PersistedCombatHp {
+                shield_hp: 500.0,
+                armor_hp: 600.0,
+                hull_hp: 700.0,
+            },
+        );
+    });
+    ctx.crimewatch.with_mut_crimewatch(|dir| {
+        dir.trigger_suspect_flag(char_id, 10_000);
+        dir.aggression_mgr
+            .record_aggression(char_id, 90_904_002, 30_000_142, false, false, 10_000);
+    });
+
+    // 1. Panic inside try_with_mut_sp6_state restores sp6_lifecycle via Sp6RestoreGuard and rolls
+    //    back from SQLite without wiping pre-existing sp6_lifecycle state (#904 / #833).
+    let sp6_err = try_with_mut_sp6_state(&ctx.db, |st, _snap| -> Result<(), String> {
+        st.ship_combat_hp.clear();
+        st.ship_combat_hp.insert(
+            999_999,
+            PersistedCombatHp {
+                shield_hp: 1.0,
+                armor_hp: 1.0,
+                hull_hp: 1.0,
+            },
+        );
+        panic!("simulated sp6 closure panic");
+    });
+    assert!(sp6_err.is_err());
+    assert_eq!(
+        with_sp6_state(&ctx.db, |st| st.ship_combat_hp.get(&ship_id).cloned()),
+        Some(PersistedCombatHp {
+            shield_hp: 500.0,
+            armor_hp: 600.0,
+            hull_hp: 700.0,
+        }),
+        "Sp6RestoreGuard + SQLite rollback must preserve pre-panic sp6_lifecycle state (#904)"
+    );
+    assert!(!with_sp6_state(&ctx.db, |st| st.ship_combat_hp.contains_key(&999_999)));
+
+    // 2. Panic inside try_with_mut_crimewatch restores crimewatch_states and crimewatch_aggressions
+    //    via CrimeWatchRestoreGuard and rolls back from SQLite without wiping pre-existing state (#904 / #833).
+    let cw_err: Result<(), String> = ctx.crimewatch.try_with_mut_crimewatch(|dir| {
+        dir.states.clear();
+        dir.aggression_mgr.records.clear();
+        panic!("simulated crimewatch closure panic");
+    });
+    assert!(cw_err.is_err());
+    ctx.crimewatch.with_crimewatch(|dir| {
+        assert!(
+            dir.is_suspect(char_id, 10_100),
+            "CrimeWatchRestoreGuard + SQLite rollback must preserve pre-panic suspect state (#904)"
+        );
+        assert!(
+            dir.get_aggression(char_id, 90_904_002, 10_100).is_some(),
+            "CrimeWatchRestoreGuard + SQLite rollback must preserve pre-panic aggressions (#904)"
+        );
+    });
+}

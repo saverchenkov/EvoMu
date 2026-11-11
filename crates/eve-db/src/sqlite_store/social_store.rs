@@ -10,7 +10,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use rusqlite::{params, Connection, Transaction};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-use super::fingerprints::{fp_json, TableFingerprints};
+use super::fingerprints::{fp_json, to_checked_json_string, TableFingerprints};
 use crate::durable_domain_types::SocialContactNotificationRecord;
 use crate::snapshot_ext::{
     CalendarEventRecord, ChatChannelAclRecord, MailingListRecord, SocialContactRecord,
@@ -126,30 +126,26 @@ CREATE TABLE IF NOT EXISTS access_groups (
 "#;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
 struct PersistedBookmarkMeta {
-    #[serde(default)]
     subfolder_id: Option<i64>,
-    #[serde(default)]
     expiry_unix: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
 struct PersistedBookmarkFolder {
     record: BookmarkFolderRecord,
-    #[serde(default)]
     access_group_ids: Vec<i64>,
-    #[serde(default)]
     known_by: Vec<(i64, bool)>,
-    #[serde(default)]
     parent_folder_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
 struct PersistedChatChannel {
     record: ChatChannelRecord,
-    #[serde(default)]
     acl: ChatChannelAclRecord,
-    #[serde(default)]
     standalone_acl_only: bool,
 }
 
@@ -324,127 +320,165 @@ pub(super) fn compute_d6_social_fp(snap: &WorldStateSnapshot) -> D6SocialFingerp
     }
 }
 
+#[cfg(test)]
 pub(super) fn load_d6_social_into_snapshot(
     conn: &Connection,
     snap: &mut WorldStateSnapshot,
 ) -> Result<(), String> {
-    // 1. read_mails, deleted_mails, trashed_mails
-    snap.read_mails.clear();
-    {
-        let mut stmt = conn
-            .prepare("SELECT character_id, mail_id FROM read_mails")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            snap.read_mails.insert(row.map_err(|e| e.to_string())?);
+    let mut ctx = super::quarantine::LoadContext::new(false);
+    load_d6_social_into_snapshot_with_ctx(conn, snap, &mut ctx)
+}
+
+pub(super) fn load_d6_social_into_snapshot_with_ctx(
+    conn: &Connection,
+    snap: &mut WorldStateSnapshot,
+    ctx: &mut super::quarantine::LoadContext,
+) -> Result<(), String> {
+    use super::quarantine::{row_col_string, row_composite_key_string, row_payload_summary};
+
+    fn load_pair_set(
+        conn: &Connection,
+        ctx: &mut super::quarantine::LoadContext,
+        table: &'static str,
+        dst: &mut HashSet<(i64, i64)>,
+    ) -> Result<(), String> {
+        dst.clear();
+        let sql = format!("SELECT rowid, character_id, mail_id FROM {table}");
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+            let rowid = r.get::<_, i64>(0).ok();
+            let res: Result<(i64, i64), String> =
+                (|| Ok((r.get::<_, i64>(1).map_err(|e| e.to_string())?, r.get::<_, i64>(2).map_err(|e| e.to_string())?)))();
+            match res {
+                Ok(pair) => {
+                    dst.insert(pair);
+                }
+                Err(err) => {
+                    let key = row_composite_key_string(r, 1, 2);
+                    let payload = row_payload_summary(r, 1, 2);
+                    ctx.record_bad_row(table, table, key, payload, err, rowid)?;
+                }
+            }
         }
-    }
-    snap.deleted_mails.clear();
-    {
-        let mut stmt = conn
-            .prepare("SELECT character_id, mail_id FROM deleted_mails")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            snap.deleted_mails.insert(row.map_err(|e| e.to_string())?);
-        }
-    }
-    snap.trashed_mails.clear();
-    {
-        let mut stmt = conn
-            .prepare("SELECT character_id, mail_id FROM trashed_mails")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            snap.trashed_mails.insert(row.map_err(|e| e.to_string())?);
-        }
+        Ok(())
     }
 
-    // 2. mail_labels & mail_assigned_labels
-    snap.mail_labels.clear();
-    {
-        let mut stmt = conn
-            .prepare("SELECT character_id, labels_json FROM mail_labels")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            let (cid, js) = row.map_err(|e| e.to_string())?;
-            let labels: Vec<MailLabelRecord> = serde_json::from_str(&js).map_err(|e| e.to_string())?;
-            snap.mail_labels.insert(cid, labels);
+    fn load_i64_json_map<T: DeserializeOwned>(
+        conn: &Connection,
+        ctx: &mut super::quarantine::LoadContext,
+        table: &'static str,
+        pk_col: &str,
+        json_col: &str,
+        dst: &mut HashMap<i64, T>,
+    ) -> Result<(), String> {
+        dst.clear();
+        let sql = format!("SELECT rowid, {pk_col}, {json_col} FROM {table}");
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+            let rowid = r.get::<_, i64>(0).ok();
+            let res: Result<(i64, T), String> = (|| {
+                let id: i64 = r.get(1).map_err(|e| e.to_string())?;
+                let js: String = r.get(2).map_err(|e| e.to_string())?;
+                let val: T = serde_json::from_str(&js).map_err(|e| e.to_string())?;
+                Ok((id, val))
+            })();
+            match res {
+                Ok((id, val)) => {
+                    dst.insert(id, val);
+                }
+                Err(err) => {
+                    let key = row_col_string(r, 1);
+                    let payload = row_col_string(r, 2);
+                    ctx.record_bad_row(table, table, key, payload, err, rowid)?;
+                }
+            }
         }
+        Ok(())
     }
+
+    // 1. read_mails, deleted_mails, trashed_mails
+    load_pair_set(conn, ctx, "read_mails", &mut snap.read_mails)?;
+    load_pair_set(conn, ctx, "deleted_mails", &mut snap.deleted_mails)?;
+    load_pair_set(conn, ctx, "trashed_mails", &mut snap.trashed_mails)?;
+
+    // 2. mail_labels & mail_assigned_labels
+    load_i64_json_map::<Vec<MailLabelRecord>>(
+        conn,
+        ctx,
+        "mail_labels",
+        "character_id",
+        "labels_json",
+        &mut snap.mail_labels,
+    )?;
     snap.mail_assigned_labels.clear();
     {
         let mut stmt = conn
-            .prepare("SELECT character_id, mail_id, labels_json FROM mail_assigned_labels")
+            .prepare("SELECT rowid, character_id, mail_id, labels_json FROM mail_assigned_labels")
             .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            let (cid, mid, js) = row.map_err(|e| e.to_string())?;
-            let labels: Vec<i64> = serde_json::from_str(&js).map_err(|e| e.to_string())?;
-            snap.mail_assigned_labels.insert((cid, mid), labels);
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+            let rowid = r.get::<_, i64>(0).ok();
+            let res: Result<((i64, i64), Vec<i64>), String> = (|| {
+                let cid: i64 = r.get(1).map_err(|e| e.to_string())?;
+                let mid: i64 = r.get(2).map_err(|e| e.to_string())?;
+                let js: String = r.get(3).map_err(|e| e.to_string())?;
+                let labels: Vec<i64> = serde_json::from_str(&js).map_err(|e| e.to_string())?;
+                Ok(((cid, mid), labels))
+            })();
+            match res {
+                Ok((k, labels)) => {
+                    snap.mail_assigned_labels.insert(k, labels);
+                }
+                Err(err) => {
+                    let key = row_composite_key_string(r, 1, 2);
+                    let payload = row_col_string(r, 3);
+                    ctx.record_bad_row(
+                        "mail_assigned_labels",
+                        "mail_assigned_labels",
+                        key,
+                        payload,
+                        err,
+                        rowid,
+                    )?;
+                }
+            }
         }
     }
 
     // 3. mailing_lists & calendar_events
-    snap.mailing_lists.clear();
-    {
-        let mut stmt = conn
-            .prepare("SELECT list_id, record_json FROM mailing_lists")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            let (lid, js) = row.map_err(|e| e.to_string())?;
-            let rec: MailingListRecord = serde_json::from_str(&js).map_err(|e| e.to_string())?;
-            snap.mailing_lists.insert(lid, rec);
-        }
-    }
-    snap.calendar_events.clear();
-    {
-        let mut stmt = conn
-            .prepare("SELECT event_id, record_json FROM calendar_events")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            let (eid, js) = row.map_err(|e| e.to_string())?;
-            let rec: CalendarEventRecord = serde_json::from_str(&js).map_err(|e| e.to_string())?;
-            snap.calendar_events.insert(eid, rec);
-        }
-    }
+    load_i64_json_map::<MailingListRecord>(
+        conn,
+        ctx,
+        "mailing_lists",
+        "list_id",
+        "record_json",
+        &mut snap.mailing_lists,
+    )?;
+    load_i64_json_map::<CalendarEventRecord>(
+        conn,
+        ctx,
+        "calendar_events",
+        "event_id",
+        "record_json",
+        &mut snap.calendar_events,
+    )?;
 
     // 4. bookmark_meta & bookmark_folders
     snap.bookmark_subfolders.clear();
     snap.bookmark_expiries.clear();
     {
-        let mut stmt = conn
-            .prepare("SELECT bookmark_id, record_json FROM bookmark_meta")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            let (bid, js) = row.map_err(|e| e.to_string())?;
-            let meta: PersistedBookmarkMeta = serde_json::from_str(&js).map_err(|e| e.to_string())?;
+        let mut meta_map = HashMap::<i64, PersistedBookmarkMeta>::new();
+        load_i64_json_map(
+            conn,
+            ctx,
+            "bookmark_meta",
+            "bookmark_id",
+            "record_json",
+            &mut meta_map,
+        )?;
+        for (bid, meta) in meta_map {
             if snap.bookmarks.contains_key(&bid) {
                 if let Some(sf) = meta.subfolder_id {
                     snap.bookmark_subfolders.insert(bid, sf);
@@ -462,16 +496,16 @@ pub(super) fn load_d6_social_into_snapshot(
     snap.bookmark_folder_known_by.clear();
     snap.bookmark_subfolder_parents.clear();
     {
-        let mut stmt = conn
-            .prepare("SELECT folder_id, record_json FROM bookmark_folders")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            let (fid, js) = row.map_err(|e| e.to_string())?;
-            let persisted: PersistedBookmarkFolder =
-                serde_json::from_str(&js).map_err(|e| e.to_string())?;
+        let mut folder_map = HashMap::<i64, PersistedBookmarkFolder>::new();
+        load_i64_json_map(
+            conn,
+            ctx,
+            "bookmark_folders",
+            "folder_id",
+            "record_json",
+            &mut folder_map,
+        )?;
+        for (fid, persisted) in folder_map {
             snap.bookmark_folders.insert(fid, persisted.record);
             if !persisted.access_group_ids.is_empty() {
                 snap.bookmark_folder_acls
@@ -486,167 +520,133 @@ pub(super) fn load_d6_social_into_snapshot(
         }
     }
 
-    snap.access_groups.clear();
-    {
-        let mut stmt = conn
-            .prepare("SELECT group_id, members_json FROM access_groups")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            let (gid, js) = row.map_err(|e| e.to_string())?;
-            let members: Vec<i64> = serde_json::from_str(&js).map_err(|e| e.to_string())?;
-            snap.access_groups.insert(gid, members);
-        }
-    }
+    load_i64_json_map::<Vec<i64>>(
+        conn,
+        ctx,
+        "access_groups",
+        "group_id",
+        "members_json",
+        &mut snap.access_groups,
+    )?;
 
     // 5. chat_channels & chat_channel_acl
     snap.chat_channels.clear();
     snap.chat_channel_acl.clear();
     {
         let mut stmt = conn
-            .prepare("SELECT channel_id, record_json FROM chat_channels")
+            .prepare("SELECT rowid, channel_id, record_json FROM chat_channels")
             .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            let (cid, js) = row.map_err(|e| e.to_string())?;
-            let persisted: PersistedChatChannel =
-                serde_json::from_str(&js).map_err(|e| e.to_string())?;
-            if !persisted.standalone_acl_only {
-                snap.chat_channels.insert(cid.clone(), persisted.record);
-            }
-            if is_chat_acl_non_empty(&persisted.acl) {
-                snap.chat_channel_acl.insert(cid, persisted.acl);
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+            let rowid = r.get::<_, i64>(0).ok();
+            let res: Result<(String, PersistedChatChannel), String> = (|| {
+                let cid: String = r.get(1).map_err(|e| e.to_string())?;
+                let js: String = r.get(2).map_err(|e| e.to_string())?;
+                let persisted: PersistedChatChannel =
+                    serde_json::from_str(&js).map_err(|e| e.to_string())?;
+                Ok((cid, persisted))
+            })();
+            match res {
+                Ok((cid, persisted)) => {
+                    if !persisted.standalone_acl_only {
+                        snap.chat_channels.insert(cid.clone(), persisted.record);
+                    }
+                    if is_chat_acl_non_empty(&persisted.acl) {
+                        snap.chat_channel_acl.insert(cid, persisted.acl);
+                    }
+                }
+                Err(err) => {
+                    let key = row_col_string(r, 1);
+                    let payload = row_col_string(r, 2);
+                    ctx.record_bad_row("chat_channels", "chat_channels", key, payload, err, rowid)?;
+                }
             }
         }
     }
 
     // 6. char/corp/alliance contacts and contact labels
-    snap.char_contacts.clear();
-    {
-        let mut stmt = conn
-            .prepare("SELECT character_id, contacts_json FROM char_contacts")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            let (cid, js) = row.map_err(|e| e.to_string())?;
-            let list: Vec<SocialContactRecord> =
-                serde_json::from_str(&js).map_err(|e| e.to_string())?;
-            snap.char_contacts.insert(cid, list);
-        }
-    }
-    snap.char_contact_notifications.clear();
-    {
-        let mut stmt = conn
-            .prepare("SELECT character_id, notifications_json FROM char_contact_notifications")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            let (cid, js) = row.map_err(|e| e.to_string())?;
-            let list: Vec<SocialContactNotificationRecord> =
-                serde_json::from_str(&js).map_err(|e| e.to_string())?;
-            snap.char_contact_notifications.insert(cid, list);
-        }
-    }
-    snap.char_contact_labels.clear();
-    {
-        let mut stmt = conn
-            .prepare("SELECT character_id, labels_json FROM char_contact_labels")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            let (cid, js) = row.map_err(|e| e.to_string())?;
-            let list: Vec<(i64, String)> = serde_json::from_str(&js).map_err(|e| e.to_string())?;
-            snap.char_contact_labels.insert(cid, list);
-        }
-    }
-    snap.corp_contacts.clear();
-    {
-        let mut stmt = conn
-            .prepare("SELECT corporation_id, contacts_json FROM corp_contacts")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            let (cid, js) = row.map_err(|e| e.to_string())?;
-            let list: Vec<SocialContactRecord> =
-                serde_json::from_str(&js).map_err(|e| e.to_string())?;
-            snap.corp_contacts.insert(cid, list);
-        }
-    }
-    snap.corp_contact_labels.clear();
-    {
-        let mut stmt = conn
-            .prepare("SELECT corporation_id, labels_json FROM corp_contact_labels")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            let (cid, js) = row.map_err(|e| e.to_string())?;
-            let list: Vec<(i64, String, u32)> =
-                serde_json::from_str(&js).map_err(|e| e.to_string())?;
-            snap.corp_contact_labels.insert(cid, list);
-        }
-    }
-    snap.alliance_contacts.clear();
-    {
-        let mut stmt = conn
-            .prepare("SELECT alliance_id, contacts_json FROM alliance_contacts")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            let (aid, js) = row.map_err(|e| e.to_string())?;
-            let list: Vec<SocialContactRecord> =
-                serde_json::from_str(&js).map_err(|e| e.to_string())?;
-            snap.alliance_contacts.insert(aid, list);
-        }
-    }
-    snap.alliance_contact_labels.clear();
-    {
-        let mut stmt = conn
-            .prepare("SELECT alliance_id, labels_json FROM alliance_contact_labels")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            let (aid, js) = row.map_err(|e| e.to_string())?;
-            let list: Vec<(i64, String)> = serde_json::from_str(&js).map_err(|e| e.to_string())?;
-            snap.alliance_contact_labels.insert(aid, list);
-        }
-    }
+    load_i64_json_map::<Vec<SocialContactRecord>>(
+        conn,
+        ctx,
+        "char_contacts",
+        "character_id",
+        "contacts_json",
+        &mut snap.char_contacts,
+    )?;
+    load_i64_json_map::<Vec<SocialContactNotificationRecord>>(
+        conn,
+        ctx,
+        "char_contact_notifications",
+        "character_id",
+        "notifications_json",
+        &mut snap.char_contact_notifications,
+    )?;
+    load_i64_json_map::<Vec<(i64, String)>>(
+        conn,
+        ctx,
+        "char_contact_labels",
+        "character_id",
+        "labels_json",
+        &mut snap.char_contact_labels,
+    )?;
+    load_i64_json_map::<Vec<SocialContactRecord>>(
+        conn,
+        ctx,
+        "corp_contacts",
+        "corporation_id",
+        "contacts_json",
+        &mut snap.corp_contacts,
+    )?;
+    load_i64_json_map::<Vec<(i64, String, u32)>>(
+        conn,
+        ctx,
+        "corp_contact_labels",
+        "corporation_id",
+        "labels_json",
+        &mut snap.corp_contact_labels,
+    )?;
+    load_i64_json_map::<Vec<SocialContactRecord>>(
+        conn,
+        ctx,
+        "alliance_contacts",
+        "alliance_id",
+        "contacts_json",
+        &mut snap.alliance_contacts,
+    )?;
+    load_i64_json_map::<Vec<(i64, String)>>(
+        conn,
+        ctx,
+        "alliance_contact_labels",
+        "alliance_id",
+        "labels_json",
+        &mut snap.alliance_contact_labels,
+    )?;
 
     // 7. char_notes
     snap.char_notes.clear();
     {
         let mut stmt = conn
-            .prepare("SELECT character_id, item_id, note FROM char_notes")
+            .prepare("SELECT rowid, character_id, item_id, note FROM char_notes")
             .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            let (cid, iid, note) = row.map_err(|e| e.to_string())?;
-            snap.char_notes.insert((cid, iid), note);
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+            let rowid = r.get::<_, i64>(0).ok();
+            let res: Result<((i64, i64), String), String> = (|| {
+                let cid: i64 = r.get(1).map_err(|e| e.to_string())?;
+                let iid: i64 = r.get(2).map_err(|e| e.to_string())?;
+                let note: String = r.get(3).map_err(|e| e.to_string())?;
+                Ok(((cid, iid), note))
+            })();
+            match res {
+                Ok((k, note)) => {
+                    snap.char_notes.insert(k, note);
+                }
+                Err(err) => {
+                    let key = row_composite_key_string(r, 1, 2);
+                    let payload = row_col_string(r, 3);
+                    ctx.record_bad_row("char_notes", "char_notes", key, payload, err, rowid)?;
+                }
+            }
         }
     }
 
@@ -705,7 +705,7 @@ fn sync_i64_json_table<V: Serialize>(
         let h = fp_json(v);
         if fp_map.get(&k) != Some(&h) {
             changed = true;
-            let js = serde_json::to_string(v).map_err(|e| e.to_string())?;
+            let js = to_checked_json_string(v)?;
             tx.execute(&ups_sql, params![k, js])
                 .map_err(|e| e.to_string())?;
             fp_map.insert(k, h);
@@ -765,7 +765,7 @@ pub(super) fn sync_d6_social(
             let h = fp_json(labels);
             if staged.mail_assigned_labels.get(&(cid, mid)) != Some(&h) {
                 changed = true;
-                let js = serde_json::to_string(labels).map_err(|e| e.to_string())?;
+                let js = to_checked_json_string(labels)?;
                 tx.execute(
                     "INSERT OR REPLACE INTO mail_assigned_labels (character_id, mail_id, labels_json) VALUES (?1, ?2, ?3)",
                     params![cid, mid, js],
@@ -816,7 +816,7 @@ pub(super) fn sync_d6_social(
             let h = fp_json(&meta);
             if staged.bookmark_meta.get(&bid) != Some(&h) {
                 changed = true;
-                let js = serde_json::to_string(&meta).map_err(|e| e.to_string())?;
+                let js = to_checked_json_string(&meta)?;
                 tx.execute(
                     "INSERT OR REPLACE INTO bookmark_meta (bookmark_id, record_json) VALUES (?1, ?2)",
                     params![bid, js],
@@ -848,7 +848,7 @@ pub(super) fn sync_d6_social(
             let h = fp_json(&persisted);
             if staged.bookmark_folders.get(&fid) != Some(&h) {
                 changed = true;
-                let js = serde_json::to_string(&persisted).map_err(|e| e.to_string())?;
+                let js = to_checked_json_string(&persisted)?;
                 tx.execute(
                     "INSERT OR REPLACE INTO bookmark_folders (folder_id, record_json) VALUES (?1, ?2)",
                     params![fid, js],
@@ -889,7 +889,7 @@ pub(super) fn sync_d6_social(
             if staged.chat_channels.get(cid) != Some(&h) {
                 if let Some(persisted) = build_persisted_chat_channel(snap, cid) {
                     changed = true;
-                    let js = serde_json::to_string(&persisted).map_err(|e| e.to_string())?;
+                    let js = to_checked_json_string(&persisted)?;
                     tx.execute(
                         "INSERT OR REPLACE INTO chat_channels (channel_id, record_json) VALUES (?1, ?2)",
                         params![cid, js],

@@ -532,9 +532,27 @@ async fn test_people_and_places_search_query_and_quick_query() {
 
     // hideNPC=1 must drop NPC agents (group 1), NPC corporations (group 3), and factions (group 5)
     // while keeping player characters (group 2), player corporations (group 3), and player alliances (group 4).
-    let sample_agent = ctx.sde.agents.values().find(|a| a.name.len() >= 3).expect("SDE agent");
-    let sample_npc_corp = ctx.sde.npc_corporations.values().find(|c| c.name.len() >= 3).expect("SDE NPC corp");
-    let sample_faction = ctx.sde.factions.values().find(|f| f.name.len() >= 3).expect("SDE faction");
+    let sample_agent = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| a.name.len() >= 3 && eve_server::services::lookup_svc::is_word_allowed(&a.name))
+        .min_by_key(|a| a.agent_id)
+        .expect("SDE agent");
+    let sample_npc_corp = ctx
+        .sde
+        .npc_corporations
+        .values()
+        .filter(|c| c.name.len() >= 3 && eve_server::services::lookup_svc::is_word_allowed(&c.name))
+        .min_by_key(|c| c.corporation_id)
+        .expect("SDE NPC corp");
+    let sample_faction = ctx
+        .sde
+        .factions
+        .values()
+        .filter(|f| f.name.len() >= 3 && eve_server::services::lookup_svc::is_word_allowed(&f.name))
+        .min_by_key(|f| f.faction_id)
+        .expect("SDE faction");
 
     for (query_str, grp_id, expected_id) in [
         (sample_agent.name.clone(), 1i64, sample_agent.agent_id),

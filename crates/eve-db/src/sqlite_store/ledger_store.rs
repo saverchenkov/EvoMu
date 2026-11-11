@@ -57,34 +57,111 @@ pub fn compute_ledger_fingerprints(snap: &WorldStateSnapshot) -> LedgerFingerpri
     }
 }
 
-pub fn load_ledger(conn: &Connection, snap: &mut WorldStateSnapshot) {
-    if let Ok(mut stmt) = conn.prepare("SELECT entry_id, meta_json FROM wallet_journal_meta") {
-        if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))) {
-            for (id, js) in rows.flatten() {
-                if let Ok(m) = serde_json::from_str::<JournalMeta>(&js) {
-                    snap.wallet_journal_meta.insert(id, m);
-                }
-            }
-        }
-    }
+pub fn load_ledger_checked(
+    conn: &Connection,
+    snap: &mut WorldStateSnapshot,
+    ctx: &mut super::quarantine::LoadContext,
+) -> Result<(), String> {
     if let Ok(mut stmt) =
-        conn.prepare("SELECT tx_json FROM market_transactions ORDER BY transaction_id ASC")
+        conn.prepare("SELECT rowid, entry_id, meta_json FROM wallet_journal_meta")
     {
-        if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
-            for js in rows.flatten() {
-                if let Ok(t) = serde_json::from_str::<MarketTransactionRecord>(&js) {
-                    snap.market_transactions.push(t);
+        if let Ok(mut rows) = stmt.query([]) {
+            while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+                let rowid = r.get::<_, i64>(0).ok();
+                let key = super::quarantine::row_col_string(r, 1);
+                let payload = super::quarantine::row_col_string(r, 2);
+                match (|| -> Result<(i64, JournalMeta), String> {
+                    let id: i64 = r.get(1).map_err(|e| e.to_string())?;
+                    let js: String = r.get(2).map_err(|e| e.to_string())?;
+                    let meta: JournalMeta =
+                        serde_json::from_str(&js).map_err(|e| e.to_string())?;
+                    Ok((id, meta))
+                })() {
+                    Ok((id, m)) => {
+                        snap.wallet_journal_meta.insert(id, m);
+                    }
+                    Err(err) => {
+                        ctx.record_bad_row(
+                            "wallet_journal_meta",
+                            "wallet_journal_meta",
+                            key,
+                            payload,
+                            err,
+                            rowid,
+                        )?;
+                    }
                 }
             }
         }
     }
-    if let Ok(mut stmt) = conn.prepare("SELECT user_id, plex FROM account_plex_vault") {
-        if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))) {
-            for (uid, plex) in rows.flatten() {
-                snap.account_plex_vault.insert(uid as u64, plex);
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT rowid, transaction_id, tx_json FROM market_transactions ORDER BY transaction_id ASC",
+    ) {
+        if let Ok(mut rows) = stmt.query([]) {
+            while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+                let rowid = r.get::<_, i64>(0).ok();
+                let key = super::quarantine::row_col_string(r, 1);
+                let payload = super::quarantine::row_col_string(r, 2);
+                match r
+                    .get::<_, String>(2)
+                    .map_err(|e| e.to_string())
+                    .and_then(|js| {
+                        serde_json::from_str::<MarketTransactionRecord>(&js)
+                            .map_err(|e| e.to_string())
+                    }) {
+                    Ok(t) => snap.market_transactions.push(t),
+                    Err(err) => {
+                        ctx.record_bad_row(
+                            "market_transactions",
+                            "market_transactions",
+                            key,
+                            payload,
+                            err,
+                            rowid,
+                        )?;
+                    }
+                }
             }
         }
     }
+    if let Ok(mut stmt) = conn.prepare("SELECT rowid, user_id, plex FROM account_plex_vault") {
+        if let Ok(mut rows) = stmt.query([]) {
+            while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+                let rowid = r.get::<_, i64>(0).ok();
+                let key = super::quarantine::row_col_string(r, 1);
+                let payload = super::quarantine::row_payload_summary(r, 1, 3);
+                match (|| -> Result<(i64, i64), String> {
+                    Ok((
+                        r.get(1).map_err(|e| e.to_string())?,
+                        r.get(2).map_err(|e| e.to_string())?,
+                    ))
+                })() {
+                    Ok((uid, plex)) => {
+                        snap.account_plex_vault.insert(uid as u64, plex);
+                    }
+                    Err(err) => {
+                        ctx.record_bad_row(
+                            "account_plex_vault",
+                            "account_plex_vault",
+                            key,
+                            payload,
+                            err,
+                            rowid,
+                        )?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn load_ledger(conn: &Connection, snap: &mut WorldStateSnapshot) {
+    let _ = load_ledger_checked(
+        conn,
+        snap,
+        &mut super::quarantine::LoadContext::quarantine_in_memory(),
+    );
 }
 
 /// Writes changed ledger rows; returns `true` if anything changed.
@@ -107,7 +184,7 @@ pub fn sync_ledger(
         let h = fp_json(v);
         if lf.journal_meta.get(&k) != Some(&h) {
             changed = true;
-            let js = serde_json::to_string(v).map_err(|e| e.to_string())?;
+            let js = super::fingerprints::to_checked_json_string(v)?;
             tx.execute(
                 "INSERT OR REPLACE INTO wallet_journal_meta (entry_id, meta_json) VALUES (?1, ?2)",
                 params![k, js],
@@ -129,7 +206,7 @@ pub fn sync_ledger(
         let h = fp_json(t);
         if lf.market_transactions.get(&t.transaction_id) != Some(&h) {
             changed = true;
-            let js = serde_json::to_string(t).map_err(|e| e.to_string())?;
+            let js = super::fingerprints::to_checked_json_string(t)?;
             tx.execute(
                 "INSERT OR REPLACE INTO market_transactions (transaction_id, tx_json) VALUES (?1, ?2)",
                 params![t.transaction_id, js],

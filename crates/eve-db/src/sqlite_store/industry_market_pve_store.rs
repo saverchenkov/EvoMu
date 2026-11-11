@@ -89,14 +89,14 @@ fn fp_nested_map<K1: Serialize, K2: Serialize, V: Serialize>(
 
 fn map_to_json<K: Serialize, V: Serialize>(map: &HashMap<K, V>) -> Result<String, String> {
     let entries: Vec<(&K, &V)> = map.iter().collect();
-    serde_json::to_string(&entries).map_err(|e| e.to_string())
+    super::fingerprints::to_checked_json_string(&entries)
 }
 
 fn map_from_json<K: DeserializeOwned + Eq + Hash, V: DeserializeOwned>(
     s: &str,
-) -> Option<HashMap<K, V>> {
-    let entries: Vec<(K, V)> = serde_json::from_str(s).ok()?;
-    Some(entries.into_iter().collect())
+) -> Result<HashMap<K, V>, String> {
+    let entries: Vec<(K, V)> = serde_json::from_str(s).map_err(|e| e.to_string())?;
+    Ok(entries.into_iter().collect())
 }
 
 fn nested_map_to_json<K1: Serialize + Copy, K2: Serialize + Copy, V: Serialize>(
@@ -106,7 +106,7 @@ fn nested_map_to_json<K1: Serialize + Copy, K2: Serialize + Copy, V: Serialize>(
         .iter()
         .map(|(&k1, inner)| (k1, inner.iter().map(|(&k2, v)| (k2, v)).collect()))
         .collect();
-    serde_json::to_string(&entries).map_err(|e| e.to_string())
+    super::fingerprints::to_checked_json_string(&entries)
 }
 
 fn nested_map_from_json<
@@ -115,9 +115,9 @@ fn nested_map_from_json<
     V: DeserializeOwned,
 >(
     s: &str,
-) -> Option<HashMap<K1, HashMap<K2, V>>> {
-    let entries: Vec<(K1, Vec<(K2, V)>)> = serde_json::from_str(s).ok()?;
-    Some(
+) -> Result<HashMap<K1, HashMap<K2, V>>, String> {
+    let entries: Vec<(K1, Vec<(K2, V)>)> = serde_json::from_str(s).map_err(|e| e.to_string())?;
+    Ok(
         entries
             .into_iter()
             .map(|(k1, inner)| (k1, inner.into_iter().collect()))
@@ -189,14 +189,14 @@ fn serialize_blob(snap: &WorldStateSnapshot, key: &str) -> Result<String, String
         "module_active_states" => {
             let mut sorted: Vec<i64> = snap.module_active_states.iter().copied().collect();
             sorted.sort_unstable();
-            serde_json::to_string(&sorted).map_err(|e| e.to_string())
+            super::fingerprints::to_checked_json_string(&sorted)
         }
         "module_active_charges" => map_to_json(&snap.module_active_charges),
         "weapon_banks" => nested_map_to_json(&snap.weapon_banks),
         "paused_skill_queues" => {
             let mut sorted: Vec<i64> = snap.paused_skill_queues.iter().copied().collect();
             sorted.sort_unstable();
-            serde_json::to_string(&sorted).map_err(|e| e.to_string())
+            super::fingerprints::to_checked_json_string(&sorted)
         }
         "starbase_settings" => map_to_json(&snap.starbase_settings),
         "corp_container_logs" => map_to_json(&snap.corp_container_logs),
@@ -206,10 +206,10 @@ fn serialize_blob(snap: &WorldStateSnapshot, key: &str) -> Result<String, String
         "corp_project_contributors" => map_to_json(&snap.corp_project_contributors),
         "loyalty_store_offers" => map_to_json(&snap.loyalty_store_offers),
         "system_jump_events" => {
-            serde_json::to_string(&snap.system_jump_events).map_err(|e| e.to_string())
+            super::fingerprints::to_checked_json_string(&snap.system_jump_events)
         }
         "system_kill_events" => {
-            serde_json::to_string(&snap.system_kill_events).map_err(|e| e.to_string())
+            super::fingerprints::to_checked_json_string(&snap.system_kill_events)
         }
         "quasar_state_blobs" => map_to_json(&snap.quasar_state_blobs),
         "service_state_blobs" => map_to_json(&snap.service_state_blobs),
@@ -218,185 +218,54 @@ fn serialize_blob(snap: &WorldStateSnapshot, key: &str) -> Result<String, String
     }
 }
 
-fn apply_blob_json(snap: &mut WorldStateSnapshot, key: &str, js: &str) {
+fn apply_blob_json_checked(snap: &mut WorldStateSnapshot, key: &str, js: &str) -> Result<(), String> {
     match key {
-        "moon_extractions" => {
-            if let Some(m) = map_from_json(js) {
-                snap.moon_extractions = m;
-            }
-        }
-        "auto_moon_miners" => {
-            if let Some(m) = map_from_json(js) {
-                snap.auto_moon_miners = m;
-            }
-        }
-        "observer_mining_ledger" => {
-            if let Some(m) = map_from_json(js) {
-                snap.observer_mining_ledger = m;
-            }
-        }
-        "char_research_agents" => {
-            if let Some(m) = map_from_json(js) {
-                snap.char_research_agents = m;
-            }
-        }
-        "planetary_colony_layouts" => {
-            if let Some(m) = map_from_json(js) {
-                snap.planetary_colony_layouts = m;
-            }
-        }
-        "corp_customs_offices" => {
-            if let Some(m) = map_from_json(js) {
-                snap.corp_customs_offices = m;
-            }
-        }
-        "orbital_provision_types" => {
-            if let Some(m) = map_from_json(js) {
-                snap.orbital_provision_types = m;
-            }
-        }
-        "wallet_journal_timestamps" => {
-            if let Some(m) = map_from_json(js) {
-                snap.wallet_journal_timestamps = m;
-            }
-        }
-        "char_wallet_transactions" => {
-            if let Some(m) = map_from_json(js) {
-                snap.char_wallet_transactions = m;
-            }
-        }
-        "corp_wallet_journals" => {
-            if let Some(m) = map_from_json(js) {
-                snap.corp_wallet_journals = m;
-            }
-        }
-        "corp_wallet_transactions" => {
-            if let Some(m) = map_from_json(js) {
-                snap.corp_wallet_transactions = m;
-            }
-        }
-        "market_order_meta" => {
-            if let Some(m) = map_from_json(js) {
-                snap.market_order_meta = m;
-            }
-        }
-        "market_history" => {
-            if let Some(m) = map_from_json(js) {
-                snap.market_history = m;
-            }
-        }
-        "cosmic_signatures" => {
-            if let Some(m) = map_from_json(js) {
-                snap.cosmic_signatures = m;
-            }
-        }
-        "cosmic_anomalies" => {
-            if let Some(m) = map_from_json(js) {
-                snap.cosmic_anomalies = m;
-            }
-        }
-        "incursions" => {
-            if let Some(m) = map_from_json(js) {
-                snap.incursions = m;
-            }
-        }
-        "last_mission_decline_times" => {
-            if let Some(m) = map_from_json(js) {
-                snap.last_mission_decline_times = m;
-            }
-        }
-        "wh_polarizations" => {
-            if let Some(m) = map_from_json(js) {
-                snap.wh_polarizations = m;
-            }
-        }
-        "module_online_states" => {
-            if let Some(m) = map_from_json(js) {
-                snap.module_online_states = m;
-            }
-        }
+        "moon_extractions" => snap.moon_extractions = map_from_json(js)?,
+        "auto_moon_miners" => snap.auto_moon_miners = map_from_json(js)?,
+        "observer_mining_ledger" => snap.observer_mining_ledger = map_from_json(js)?,
+        "char_research_agents" => snap.char_research_agents = map_from_json(js)?,
+        "planetary_colony_layouts" => snap.planetary_colony_layouts = map_from_json(js)?,
+        "corp_customs_offices" => snap.corp_customs_offices = map_from_json(js)?,
+        "orbital_provision_types" => snap.orbital_provision_types = map_from_json(js)?,
+        "wallet_journal_timestamps" => snap.wallet_journal_timestamps = map_from_json(js)?,
+        "char_wallet_transactions" => snap.char_wallet_transactions = map_from_json(js)?,
+        "corp_wallet_journals" => snap.corp_wallet_journals = map_from_json(js)?,
+        "corp_wallet_transactions" => snap.corp_wallet_transactions = map_from_json(js)?,
+        "market_order_meta" => snap.market_order_meta = map_from_json(js)?,
+        "market_history" => snap.market_history = map_from_json(js)?,
+        "cosmic_signatures" => snap.cosmic_signatures = map_from_json(js)?,
+        "cosmic_anomalies" => snap.cosmic_anomalies = map_from_json(js)?,
+        "incursions" => snap.incursions = map_from_json(js)?,
+        "last_mission_decline_times" => snap.last_mission_decline_times = map_from_json(js)?,
+        "wh_polarizations" => snap.wh_polarizations = map_from_json(js)?,
+        "module_online_states" => snap.module_online_states = map_from_json(js)?,
         "module_active_states" => {
-            if let Ok(s) = serde_json::from_str(js) {
-                snap.module_active_states = s;
-            }
+            snap.module_active_states = serde_json::from_str(js).map_err(|e| e.to_string())?;
         }
-        "module_active_charges" => {
-            if let Some(m) = map_from_json(js) {
-                snap.module_active_charges = m;
-            }
-        }
-        "weapon_banks" => {
-            if let Some(m) = nested_map_from_json(js) {
-                snap.weapon_banks = m;
-            }
-        }
+        "module_active_charges" => snap.module_active_charges = map_from_json(js)?,
+        "weapon_banks" => snap.weapon_banks = nested_map_from_json(js)?,
         "paused_skill_queues" => {
-            if let Ok(s) = serde_json::from_str(js) {
-                snap.paused_skill_queues = s;
-            }
+            snap.paused_skill_queues = serde_json::from_str(js).map_err(|e| e.to_string())?;
         }
-        "starbase_settings" => {
-            if let Some(m) = map_from_json(js) {
-                snap.starbase_settings = m;
-            }
-        }
-        "corp_container_logs" => {
-            if let Some(m) = map_from_json(js) {
-                snap.corp_container_logs = m;
-            }
-        }
-        "killmail_details" => {
-            if let Some(m) = map_from_json(js) {
-                snap.killmail_details = m;
-            }
-        }
-        "station_office_rental_costs" => {
-            if let Some(m) = map_from_json(js) {
-                snap.station_office_rental_costs = m;
-            }
-        }
-        "structure_esi_timer_meta" => {
-            if let Some(m) = map_from_json(js) {
-                snap.structure_esi_timer_meta = m;
-            }
-        }
-        "corp_project_contributors" => {
-            if let Some(m) = map_from_json(js) {
-                snap.corp_project_contributors = m;
-            }
-        }
-        "loyalty_store_offers" => {
-            if let Some(m) = map_from_json(js) {
-                snap.loyalty_store_offers = m;
-            }
-        }
+        "starbase_settings" => snap.starbase_settings = map_from_json(js)?,
+        "corp_container_logs" => snap.corp_container_logs = map_from_json(js)?,
+        "killmail_details" => snap.killmail_details = map_from_json(js)?,
+        "station_office_rental_costs" => snap.station_office_rental_costs = map_from_json(js)?,
+        "structure_esi_timer_meta" => snap.structure_esi_timer_meta = map_from_json(js)?,
+        "corp_project_contributors" => snap.corp_project_contributors = map_from_json(js)?,
+        "loyalty_store_offers" => snap.loyalty_store_offers = map_from_json(js)?,
         "system_jump_events" => {
-            if let Ok(v) = serde_json::from_str(js) {
-                snap.system_jump_events = v;
-            }
+            snap.system_jump_events = serde_json::from_str(js).map_err(|e| e.to_string())?;
         }
         "system_kill_events" => {
-            if let Ok(v) = serde_json::from_str(js) {
-                snap.system_kill_events = v;
-            }
+            snap.system_kill_events = serde_json::from_str(js).map_err(|e| e.to_string())?;
         }
-        "quasar_state_blobs" => {
-            if let Some(m) = map_from_json(js) {
-                snap.quasar_state_blobs = m;
-            }
-        }
-        "service_state_blobs" => {
-            if let Some(m) = map_from_json(js) {
-                snap.service_state_blobs = m;
-            }
-        }
-        "insurance_contracts" => {
-            if let Some(m) = map_from_json(js) {
-                snap.insurance_contracts = m;
-            }
-        }
+        "quasar_state_blobs" => snap.quasar_state_blobs = map_from_json(js)?,
+        "service_state_blobs" => snap.service_state_blobs = map_from_json(js)?,
+        "insurance_contracts" => snap.insurance_contracts = map_from_json(js)?,
         _ => {}
     }
+    Ok(())
 }
 
 pub fn compute_d6_batch4_fingerprints(snap: &WorldStateSnapshot) -> D6Batch4Fingerprints {
@@ -406,14 +275,48 @@ pub fn compute_d6_batch4_fingerprints(snap: &WorldStateSnapshot) -> D6Batch4Fing
     }
 }
 
-pub fn load_d6_batch4(conn: &Connection, snap: &mut WorldStateSnapshot) {
-    if let Ok(mut stmt) = conn.prepare("SELECT blob_key, blob_json FROM world_kv_blobs") {
-        if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
-            for (k, js) in rows.flatten() {
-                apply_blob_json(snap, &k, &js);
+pub fn load_d6_batch4_checked(
+    conn: &Connection,
+    snap: &mut WorldStateSnapshot,
+    ctx: &mut super::quarantine::LoadContext,
+) -> Result<(), String> {
+    if let Ok(mut stmt) =
+        conn.prepare("SELECT rowid, blob_key, blob_json FROM world_kv_blobs")
+    {
+        if let Ok(mut rows) = stmt.query([]) {
+            while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+                let rowid = r.get::<_, i64>(0).ok();
+                let key = super::quarantine::row_col_string(r, 1);
+                let payload = super::quarantine::row_col_string(r, 2);
+                match r
+                    .get::<_, String>(2)
+                    .map_err(|e| e.to_string())
+                    .and_then(|js| apply_blob_json_checked(snap, &key, &js))
+                {
+                    Ok(()) => {}
+                    Err(err) => {
+                        ctx.record_bad_row(
+                            "world_kv_blobs",
+                            "world_kv_blobs",
+                            key,
+                            payload,
+                            err,
+                            rowid,
+                        )?;
+                    }
+                }
             }
         }
     }
+    Ok(())
+}
+
+pub fn load_d6_batch4(conn: &Connection, snap: &mut WorldStateSnapshot) {
+    let _ = load_d6_batch4_checked(
+        conn,
+        snap,
+        &mut super::quarantine::LoadContext::quarantine_in_memory(),
+    );
 }
 
 pub fn sync_d6_batch4(
@@ -425,6 +328,14 @@ pub fn sync_d6_batch4(
     let new_hashes = compute_blob_hashes(snap);
     for (key, new_h) in new_hashes {
         if fp.d6_batch4.blobs.get(key) != Some(&new_h) {
+            if key == "service_state_blobs" {
+                if let Err(msg) =
+                    crate::service_domains::validate_service_state_blobs(&snap.service_state_blobs)
+                {
+                    crate::service_domains::record_service_state_blob_limit_violation(&msg);
+                    continue;
+                }
+            }
             changed = true;
             let js = serialize_blob(snap, key)?;
             tx.execute(

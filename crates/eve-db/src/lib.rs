@@ -57,7 +57,13 @@ pub use gateway_tokens::QuasarVerifiedToken;
 pub use inventory::{ConsumeExactOptions, TransferItemSpec};
 pub use ledger::{JournalEntryInput, JournalMeta};
 pub use persistence::{
-    record_last_wal_error, set_wal_error_hook, set_wal_poison_check_hook, WorldRepository,
+    persist_failures_total, record_last_wal_error, set_wal_error_hook, set_wal_poison_check_hook,
+    tx_panics_total, WorldRepository,
+};
+pub use sqlite_store::{
+    clear_quarantine_unreadable_override, default_quarantine_unreadable, list_quarantined_rows,
+    parse_cli_quarantine_unreadable, set_quarantine_unreadable,
+    with_quarantine_unreadable_for_test, QuarantinedRow,
 };
 pub use snapshot_ext::{
     CalendarEventRecord, ChatChannelAclRecord, CorpVoteBallotRecord, CorpVoteCaseRecord,
@@ -74,6 +80,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct SafeLogoffEntry {
     pub char_id: i64,
     pub ship_id: i64,
@@ -83,7 +90,8 @@ pub struct SafeLogoffEntry {
     pub completed: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DisconnectedShipEntry {
     pub char_id: i64,
     pub ship_id: i64,
@@ -98,7 +106,8 @@ pub struct DisconnectedShipEntry {
     pub pre_warp_position: Option<[f64; 3]>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SelfDestructPersistedEntry {
     pub ship_id: i64,
     pub char_id: i64,
@@ -107,7 +116,8 @@ pub struct SelfDestructPersistedEntry {
     pub detonate_at_unix: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AbyssalPersistedSession {
     pub char_id: i64,
     pub ship_id: i64,
@@ -118,6 +128,7 @@ pub struct AbyssalPersistedSession {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct PersistedCombatHp {
     pub shield_hp: f64,
     pub armor_hp: f64,
@@ -125,6 +136,7 @@ pub struct PersistedCombatHp {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct PersistedSpaceObjectMeta {
     #[serde(default)]
     pub created_unix: Option<u64>,
@@ -144,7 +156,8 @@ pub struct PersistedSpaceObjectMeta {
     pub planet_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedScannerProbe {
     pub probe_id: i64,
     pub probe_type_id: u32,
@@ -165,6 +178,7 @@ pub struct PersistedScannerProbe {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct Sp6PersistedState {
     #[serde(default)]
     pub safe_logoffs: HashMap<i64, SafeLogoffEntry>,

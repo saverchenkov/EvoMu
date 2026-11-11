@@ -21,6 +21,64 @@ pub const MAX_SERVICE_STATE_BLOB_VALUE_BYTES: usize = 4096;
 /// Maximum total byte size across all keys and values in `service_state_blobs`.
 pub const MAX_SERVICE_STATE_BLOB_TOTAL_BYTES: usize = 65_536;
 
+static SERVICE_STATE_BLOB_LIMIT_VIOLATIONS_TOTAL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Returns the cumulative count of `service_state_blobs` limit violations observed at write or commit time.
+pub fn service_state_blob_limit_violations_total() -> u64 {
+    SERVICE_STATE_BLOB_LIMIT_VIOLATIONS_TOTAL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Logs a `service_state_blobs` limit violation and increments the violation metric counter.
+pub fn record_service_state_blob_limit_violation(err: &str) {
+    SERVICE_STATE_BLOB_LIMIT_VIOLATIONS_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    tracing::error!(error = %err, "service_state_blobs limit violation");
+}
+
+/// Validates a single write `(key, value)` against `service_state_blobs` limits without failing
+/// because of an unrelated pre-existing oversized entry in `blobs`.
+pub fn validate_service_state_blob_write(
+    blobs: &HashMap<String, String>,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    if value.len() > MAX_SERVICE_STATE_BLOB_VALUE_BYTES {
+        return Err(format!(
+            "service_state_blobs key '{key}' value length {} exceeds limit {MAX_SERVICE_STATE_BLOB_VALUE_BYTES}",
+            value.len()
+        ));
+    }
+    let is_existing = blobs.contains_key(key);
+    let new_key_count = if is_existing {
+        blobs.len()
+    } else {
+        blobs.len().saturating_add(1)
+    };
+    if new_key_count > MAX_SERVICE_STATE_BLOB_KEYS && !is_existing {
+        return Err(format!(
+            "service_state_blobs key count {new_key_count} exceeds limit {MAX_SERVICE_STATE_BLOB_KEYS}"
+        ));
+    }
+    let current_total: usize = blobs
+        .iter()
+        .map(|(k, v)| k.len().saturating_add(v.len()))
+        .sum();
+    let old_entry_bytes = blobs
+        .get(key)
+        .map(|v| key.len().saturating_add(v.len()))
+        .unwrap_or(0);
+    let new_entry_bytes = key.len().saturating_add(value.len());
+    let total_bytes = current_total
+        .saturating_sub(old_entry_bytes)
+        .saturating_add(new_entry_bytes);
+    if total_bytes > MAX_SERVICE_STATE_BLOB_TOTAL_BYTES && new_entry_bytes >= old_entry_bytes {
+        return Err(format!(
+            "service_state_blobs total size {total_bytes} exceeds limit {MAX_SERVICE_STATE_BLOB_TOTAL_BYTES}"
+        ));
+    }
+    Ok(())
+}
+
 /// Validates that `service_state_blobs` strictly holds bounded small opaque metadata.
 pub fn validate_service_state_blobs(blobs: &HashMap<String, String>) -> Result<(), String> {
     if blobs.len() > MAX_SERVICE_STATE_BLOB_KEYS {
