@@ -20,7 +20,7 @@ pub use fleet_social_calendar_ops::create_ccp_calendar_event;
 pub(crate) use fleet_social_calendar_ops::*;
 #[path = "fleet_social_chat.rs"]
 pub(crate) mod fleet_social_chat;
-pub use fleet_social_chat::xmpp_iq_reply;
+pub use fleet_social_chat::{xmpp_iq_reply, xmpp_iq_reply_with_ctx};
 #[path = "fleet_social_corp_gov.rs"]
 mod fleet_social_corp_gov;
 #[path = "fleet_social_corp_tail.rs"]

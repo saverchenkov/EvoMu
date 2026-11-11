@@ -1338,13 +1338,30 @@ fn is_delayed_local_channel(chan_id: &str) -> bool {
 
 fn find_existing_channel_key(snap: &eve_db::WorldStateSnapshot, chan_id: &str) -> Option<String> {
     if snap.chat_channels.contains_key(chan_id) {
-        Some(chan_id.to_string())
-    } else {
-        snap.chat_channels
-            .keys()
-            .find(|k| k.eq_ignore_ascii_case(chan_id))
-            .cloned()
+        return Some(chan_id.to_string());
     }
+    if let Some(found) = snap
+        .chat_channels
+        .keys()
+        .find(|k| k.eq_ignore_ascii_case(chan_id))
+    {
+        return Some(found.clone());
+    }
+    let localpart = chan_id.split('@').next().unwrap_or(chan_id);
+    if let Some(slug) = localpart
+        .strip_prefix("player_")
+        .or_else(|| localpart.strip_prefix("PLAYER_"))
+    {
+        let candidate = format!("channel:{slug}");
+        if let Some(found) = snap
+            .chat_channels
+            .keys()
+            .find(|k| k.eq_ignore_ascii_case(&candidate))
+        {
+            return Some(found.clone());
+        }
+    }
+    None
 }
 
 fn resolve_channel_key(snap: &eve_db::WorldStateSnapshot, chan_id: &str) -> String {
@@ -1617,27 +1634,165 @@ fn handle_xmpp_hostname(ctx: &ServerContext) -> Option<Result<PyRep, BridgeRpcEr
     Some(Ok(PyRep::String(host)))
 }
 
+fn extract_xml_attr<'a>(xml: &'a str, attr: &str) -> Option<&'a str> {
+    let single_pat = format!("{attr}='");
+    if let Some(pos) = xml.find(&single_pat) {
+        let rest = &xml[pos + single_pat.len()..];
+        if let Some(end) = rest.find('\'') {
+            return Some(&rest[..end]);
+        }
+    }
+    let double_pat = format!("{attr}=\"");
+    if let Some(pos) = xml.find(&double_pat) {
+        let rest = &xml[pos + double_pat.len()..];
+        if let Some(end) = rest.find('"') {
+            return Some(&rest[..end]);
+        }
+    }
+    None
+}
+
+fn escape_xml_attr(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '\'' => out.push_str("&apos;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn unescape_xml_attr(raw: &str) -> String {
+    raw.replace("&apos;", "'")
+        .replace("&quot;", "\"")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
 /// Build an XMPP `<iq type='result'>` stanza matching the client's IQ query namespace.
 /// V24.01 `xmppchatsvc.GetChannels` reads `response.children[0].children` on `disco#items`,
 /// raising `IndexError` if the server returns an empty `<iq type='result' id='...'/>`.
 pub fn xmpp_iq_reply(chunk: &str, stanza_id: &str) -> String {
+    xmpp_iq_reply_with_ctx(None, chunk, stanza_id)
+}
+
+/// Context-aware XMPP `<iq type='result'>` builder that populates `disco#items` (`byname/<displayName>`
+/// and `forme`) and `disco#info` from `snap.chat_channels` so V24.01 `XmppChatChannels` can discover
+/// and join player-created chat channels (`#940`).
+pub fn xmpp_iq_reply_with_ctx(
+    ctx: Option<&ServerContext>,
+    chunk: &str,
+    stanza_id: &str,
+) -> String {
     if chunk.contains("<bind") {
         format!(
             "<iq type='result' id='{stanza_id}'><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'><jid>user@chat.evomu.local/eve</jid></bind></iq>"
         )
     } else if chunk.contains("http://jabber.org/protocol/disco#items") {
-        if chunk.contains("node='forme'") || chunk.contains("node=\"forme\"") {
+        let query_slice = chunk
+            .find("<query")
+            .map(|idx| &chunk[idx..])
+            .unwrap_or(chunk);
+        let node_opt = extract_xml_attr(query_slice, "node");
+        if let Some(node) = node_opt.filter(|n| n.starts_with("byname/")) {
+            let target = unescape_xml_attr(&node["byname/".len()..]);
+            let target_trimmed = target.trim();
+            let mut items: Vec<(String, String)> = Vec::new();
+            if let Some(c) = ctx {
+                c.db.with_snapshot(|snap| {
+                    for (key, chan) in &snap.chat_channels {
+                        let Some(slug) = key
+                            .strip_prefix("channel:")
+                            .or_else(|| key.strip_prefix("CHANNEL:"))
+                        else {
+                            continue;
+                        };
+                        let xmpp_room = format!("player_{slug}");
+                        if chan.name.eq_ignore_ascii_case(target_trimmed)
+                            || slug.eq_ignore_ascii_case(target_trimmed)
+                            || xmpp_room.eq_ignore_ascii_case(target_trimmed)
+                        {
+                            items.push((
+                                format!("{xmpp_room}@conference.chat.evomu.local"),
+                                chan.name.clone(),
+                            ));
+                        }
+                    }
+                });
+            }
+            items.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut body = String::new();
+            for (jid, display_name) in items {
+                let esc_jid = escape_xml_attr(&jid);
+                let esc_name = escape_xml_attr(&display_name);
+                body.push_str(&format!("<item jid='{esc_jid}' name='{esc_name}'/>"));
+            }
+            let esc_node = escape_xml_attr(node);
             format!(
-                "<iq type='result' id='{stanza_id}'><query xmlns='http://jabber.org/protocol/disco#items' node='forme'/></iq>"
+                "<iq type='result' id='{stanza_id}'><query xmlns='http://jabber.org/protocol/disco#items' node='{esc_node}'>{body}</query></iq>"
             )
         } else {
-            format!(
-                "<iq type='result' id='{stanza_id}'><query xmlns='http://jabber.org/protocol/disco#items'/></iq>"
-            )
+            let is_forme = node_opt == Some("forme");
+            let mut items: Vec<(String, String)> = Vec::new();
+            if let Some(c) = ctx {
+                c.db.with_snapshot(|snap| {
+                    for (key, chan) in &snap.chat_channels {
+                        let Some(slug) = key
+                            .strip_prefix("channel:")
+                            .or_else(|| key.strip_prefix("CHANNEL:"))
+                        else {
+                            continue;
+                        };
+                        items.push((
+                            format!("player_{slug}@conference.chat.evomu.local"),
+                            chan.name.clone(),
+                        ));
+                    }
+                });
+            }
+            items.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut body = String::new();
+            for (jid, display_name) in items {
+                let esc_jid = escape_xml_attr(&jid);
+                let esc_name = escape_xml_attr(&display_name);
+                body.push_str(&format!(
+                    "<item jid='{esc_jid}' name='{esc_name}' node='owner'/>"
+                ));
+            }
+            if is_forme {
+                format!(
+                    "<iq type='result' id='{stanza_id}'><query xmlns='http://jabber.org/protocol/disco#items' node='forme'>{body}</query></iq>"
+                )
+            } else {
+                format!(
+                    "<iq type='result' id='{stanza_id}'><query xmlns='http://jabber.org/protocol/disco#items'>{body}</query></iq>"
+                )
+            }
         }
     } else if chunk.contains("http://jabber.org/protocol/disco#info") {
+        let mut display_name = "Conference".to_string();
+        if let Some(c) = ctx {
+            let target_ref = extract_xml_attr(chunk, "to")
+                .or_else(|| extract_xml_attr(chunk, "node"))
+                .unwrap_or("");
+            let localpart = target_ref.split('@').next().unwrap_or(target_ref);
+            c.db.with_snapshot(|snap| {
+                if let Some(key) = find_existing_channel_key(snap, localpart) {
+                    if let Some(chan) = snap.chat_channels.get(&key) {
+                        display_name = chan.name.clone();
+                    }
+                }
+            });
+        }
+        let esc_name = escape_xml_attr(&display_name);
         format!(
-            "<iq type='result' id='{stanza_id}'><query xmlns='http://jabber.org/protocol/disco#info'><identity category='conference' type='text' name='Conference'/><feature var='http://jabber.org/protocol/muc'/></query></iq>"
+            "<iq type='result' id='{stanza_id}'><query xmlns='http://jabber.org/protocol/disco#info'><identity category='conference' type='text' name='{esc_name}'/><feature var='http://jabber.org/protocol/muc'/></query></iq>"
         )
     } else if chunk.contains("http://jabber.org/protocol/muc#admin") {
         format!(

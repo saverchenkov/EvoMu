@@ -333,6 +333,84 @@ fn xmpp_iq_reply_includes_query_child_for_disco_muc_and_expiring_record() {
 }
 
 #[test]
+fn xmpp_iq_reply_with_ctx_discovers_player_channels_by_name_forme_and_joins_by_xmpp_room_jid() {
+    let ctx = test_ctx_with_clock(1_800_006_000);
+    let kw = HashMap::new();
+    let mut owner_sess = SessionState::new(101);
+    owner_sess.user_id = Some(90_000_001);
+    owner_sess.character_id = Some(90_000_001);
+
+    let created = handle_chat_and_social(
+        &ctx,
+        &mut owner_sess,
+        "XmppChatMgr",
+        "CreatePlayerOwnedChannel",
+        &[PyRep::String("Playtest Alpha".into())],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let PyRep::KeyVal(info_kv) = created else {
+        panic!("expected CreatePlayerOwnedChannel KeyVal");
+    };
+    assert_eq!(
+        info_kv.get("channelID").and_then(|v| v.as_str()),
+        Some("channel:playtest_alpha")
+    );
+
+    // 1. `disco#items` with `node="byname/Playtest Alpha"` returns `<item jid='player_playtest_alpha@conference.chat.evomu.local' name='Playtest Alpha'/>`
+    let byname = xmpp_iq_reply_with_ctx(
+        Some(&ctx),
+        "<iq type='get' id='iq-byname' to='conference.chat.evomu.local'><query xmlns='http://jabber.org/protocol/disco#items' node=\"byname/Playtest Alpha\"/></iq>",
+        "iq-byname",
+    );
+    assert!(byname.contains("node='byname/Playtest Alpha'"));
+    assert!(byname.contains(
+        "<item jid='player_playtest_alpha@conference.chat.evomu.local' name='Playtest Alpha'/>"
+    ));
+
+    // 2. `disco#items` with `node='forme'` includes the player-created channel with `node='owner'`
+    let forme = xmpp_iq_reply_with_ctx(
+        Some(&ctx),
+        "<iq type='get' id='iq-forme' to='conference.chat.evomu.local'><query xmlns='http://jabber.org/protocol/disco#items' node='forme'/></iq>",
+        "iq-forme",
+    );
+    assert!(forme.contains(
+        "<item jid='player_playtest_alpha@conference.chat.evomu.local' name='Playtest Alpha' node='owner'/>"
+    ));
+
+    // 3. `disco#info` on `player_playtest_alpha@conference.chat.evomu.local` returns `name='Playtest Alpha'`
+    let info = xmpp_iq_reply_with_ctx(
+        Some(&ctx),
+        "<iq type='get' id='iq-info' to='player_playtest_alpha@conference.chat.evomu.local'><query xmlns='http://jabber.org/protocol/disco#info'/></iq>",
+        "iq-info",
+    );
+    assert!(info.contains("name='Playtest Alpha'"));
+
+    // 4. Joining via LSC using the XMPP room name `player_playtest_alpha` resolves to `channel:playtest_alpha`
+    let mut joiner_sess = SessionState::new(102);
+    joiner_sess.user_id = Some(90_000_002);
+    joiner_sess.character_id = Some(90_000_002);
+    let joined = handle_chat_and_social(
+        &ctx,
+        &mut joiner_sess,
+        "LSC",
+        "JoinChannel",
+        &[PyRep::String("player_playtest_alpha".into())],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let PyRep::KeyVal(joined_kv) = joined else {
+        panic!("expected JoinChannel KeyVal");
+    };
+    assert_eq!(
+        joined_kv.get("channelID").and_then(|v| v.as_str()),
+        Some("channel:playtest_alpha")
+    );
+}
+
+#[test]
 fn social_extras_leaf_lock_order_and_poison_recovery_across_chat_ops() {
     let ctx = test_ctx_with_clock(1_800_006_000);
     let kw = HashMap::new();

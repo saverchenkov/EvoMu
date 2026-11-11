@@ -172,9 +172,9 @@ pub(super) fn finalize_expired_disconnected_ship(
     });
 }
 
-/// Evaluates logoff hold timers and emergency-warp vs mid-tunnel-warp preservation for an ungraceful disconnect.
+/// Evaluates logoff hold timers and emergency-warp vs mid-tunnel-warp preservation for an ungraceful disconnect (`#851` / `B13`).
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn build_disconnected_ship_entry(
+pub(super) fn build_disconnected_ship_entry_sync(
     ctx: &ServerContext,
     sys_handle: &SystemHandle,
     char_id: i64,
@@ -187,12 +187,12 @@ pub(super) async fn build_disconnected_ship_entry(
 ) -> DisconnectedShipEntry {
     let (weap_until, npc_until, pvp_until, crim_until) =
         super::active_timers_for_char(ctx, char_id, now_unix);
+    let has_target_locks = sys_handle
+        .ballpark
+        .read()
+        .is_ok_and(|bp| bp.target_locks.get(&ship_id).is_some_and(|l| !l.is_empty()));
     let has_active_combat_engagement = sys_handle.has_active_modules_or_cloak_sync(ship_id)
-        || !sys_handle
-            .get_target_locks(ship_id)
-            .await
-            .unwrap_or_default()
-            .is_empty()
+        || has_target_locks
         || has_tactical_engagement_on_disconnect(ctx, ship_id);
     let base_remove_secs = if has_active_combat_engagement {
         NPC_TIMER_SECS
@@ -264,17 +264,15 @@ pub(super) async fn build_disconnected_ship_entry(
         } else {
             raw_dest
         };
-        let _ = sys_handle
-            .modify_combat_state(ship_id, |cs| {
+        if let Ok(mut bp) = sys_handle.ballpark.write() {
+            if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
                 cs.is_emergency_warping = true;
-            })
-            .await;
-        let _ = sys_handle
-            .set_movement_mode(
+            }
+            let _ = bp.set_mode(
                 ship_id,
                 eve_destiny::MovementMode::new_warp(current_pos, dest, warp_speed_au_s),
-            )
-            .await;
+            );
+        }
         (
             Some([dest.x, dest.y, dest.z]),
             Some([current_pos.x, current_pos.y, current_pos.z]),
@@ -298,6 +296,33 @@ pub(super) async fn build_disconnected_ship_entry(
         removed_from_space: false,
         pre_warp_position,
     }
+}
+
+/// Evaluates logoff hold timers and emergency-warp vs mid-tunnel-warp preservation for an ungraceful disconnect.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn build_disconnected_ship_entry(
+    ctx: &ServerContext,
+    sys_handle: &SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    ship_type_id: u32,
+    sys_id: u32,
+    current_pos: glam::DVec3,
+    warp_speed_au_s: f64,
+    now_unix: u64,
+) -> DisconnectedShipEntry {
+    build_disconnected_ship_entry_sync(
+        ctx,
+        sys_handle,
+        char_id,
+        ship_id,
+        ship_type_id,
+        sys_id,
+        current_pos,
+        warp_speed_au_s,
+        now_unix,
+    )
 }
 
 #[cfg(test)]

@@ -376,6 +376,7 @@ pub async fn handle(
             // Watchers of this character get OnClientContactChange(charID, False).
             crate::services::character_skills::notify_watchlist_presence(ctx, cid, false);
             crate::services::fleet_social::fleet_social_notify::on_character_logout(ctx, cid);
+            ctx.clear_notifications_for_char(cid);
         }
         if let Some(uid) = session.user_id {
             on_logout(ctx, uid);
@@ -414,6 +415,7 @@ pub async fn handle(
         );
         crate::services::character_skills::notify_watchlist_presence(ctx, cid, false);
         crate::services::fleet_social::fleet_social_notify::on_character_logout(ctx, cid);
+        ctx.clear_notifications_for_char(cid);
         if let Some(uid) = session.user_id {
             let _ = ctx
                 .db
@@ -480,19 +482,7 @@ pub async fn handle(
                 if let Some(prev) = displaced {
                     if prev.session_id != session.session_id {
                         if let Some(prev_cid) = prev.character_id {
-                            let _ = crate::sp6_lifecycle::handle_character_logoff_or_disconnect(
-                                ctx, prev_cid,
-                            )
-                            .await;
-                            crate::services::character_skills::notify_watchlist_presence(
-                                ctx, prev_cid, false,
-                            );
-                            crate::services::fleet_social::fleet_social_notify::on_character_logout(
-                                ctx, prev_cid,
-                            );
-                            crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(
-                                ctx, prev_cid,
-                            );
+                            ctx.logoff_character_sync(prev_cid, None);
                         }
                         ctx.disconnect_session(
                             prev.session_id,

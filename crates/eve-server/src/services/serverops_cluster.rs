@@ -681,6 +681,9 @@ pub fn initiate_cluster_downtime_shutdown(ctx: &ServerContext) -> usize {
     for uid in non_gm_users {
         let _ = ctx.db.release_online_lock(uid, 0);
     }
+    for cid in non_gm_char_ids {
+        ctx.logoff_character_sync(cid, None);
+    }
     disconnected.len()
 }
 

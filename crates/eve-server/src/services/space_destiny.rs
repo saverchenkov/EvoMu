@@ -903,7 +903,13 @@ pub(crate) async fn handle_update_state_request(
     if is_client_initiated_active_warp {
         return Ok(PyRep::None);
     }
-    if matches!(ship_ball.mode, MovementMode::Warp { .. }) {
+    if matches!(
+        ship_ball.mode,
+        MovementMode::Warp {
+            phase: eve_destiny::WarpPhase::Aligning,
+            ..
+        }
+    ) {
         // Emergency logoff return-warp from a prior disconnected session has no entry in `active_warps`;
         // stop the ship at its current coordinates before pushing `SetState` on reconnect.
         let _ = handle.force_stop_warp(ship_id);

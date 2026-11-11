@@ -1084,5 +1084,251 @@ async fn macho_bind_error_mappings_lagged_broadcasts_and_multilogin_displacement
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 }
 
+#[tokio::test]
+async fn wave5b_b4_session_wire_bound_objects_notifications_logoff_and_warp_regressions() {
+    use crate::router::binding::MAX_BOUND_OBJECTS_PER_SESSION;
+    use crate::router::cache_notifications::{
+        with_active_dispatch_char, MAX_PENDING_NOTIFICATIONS_PER_CHAR,
+    };
+
+    let ctx = Arc::new(ServerContext::new().with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED));
+
+    // 1. #853: Per-IP pre-auth connection guard caps at MAX_PREAUTH_CONNECTIONS_PER_IP (32)
+    // and frees the slot upon `complete_auth()` or drop.
+    {
+        let mut guards = Vec::new();
+        for _ in 0..MAX_PREAUTH_CONNECTIONS_PER_IP {
+            guards.push(
+                PreAuthConnectionGuard::try_acquire(&ctx, "198.51.100.77".into())
+                    .expect("within per-IP preauth cap"),
+            );
+        }
+        assert!(
+            PreAuthConnectionGuard::try_acquire(&ctx, "198.51.100.77".into()).is_none(),
+            "33rd concurrent pre-auth connection from same IP must be rejected"
+        );
+        // Completing auth on one guard immediately frees a pre-auth slot for that IP.
+        guards[0].complete_auth();
+        let extra = PreAuthConnectionGuard::try_acquire(&ctx, "198.51.100.77".into())
+            .expect("slot freed after complete_auth");
+        drop(extra);
+        drop(guards);
+    }
+
+    // 2. #880: write_framed_pyrep_with_timeout errors promptly when peer stops reading.
+    {
+        let ( _client_read, mut server_write) = tokio::io::duplex(16);
+        let big_rep = PyRep::Bytes(vec![0x42; 4096]);
+        let res = write_framed_pyrep_with_timeout(
+            &mut server_write,
+            &big_rep,
+            std::time::Duration::from_millis(20),
+        )
+        .await;
+        assert!(res.is_err(), "stalled peer write must time out");
+    }
+
+    // 3. #882: Per-session bound_objects cap (256) evicts oldest and honors OID- & ClientHasReleasedTheseObjects.
+    {
+        let sid = 777_001u64;
+        let mut sess = eve_machonet::SessionState::new(sid);
+        sess.user_id = Some(1);
+        sess.character_id = Some(90_000_001);
+        sess.station_id = Some(60_003_760);
+        let mut issued = Vec::new();
+        for _i in 0..(MAX_BOUND_OBJECTS_PER_SESSION + 10) {
+            let bid = ctx
+                .bind_object(&sess, "invbroker", 60_003_760)
+                .expect("bind invbroker");
+            issued.push(bid);
+        }
+        let count_for_sid = ctx
+            .bound_objects
+            .read()
+            .unwrap()
+            .values()
+            .filter(|b| b.session_id == sid)
+            .count();
+        assert_eq!(count_for_sid, MAX_BOUND_OBJECTS_PER_SESSION);
+        assert!(
+            !ctx.bound_objects.read().unwrap().contains_key(&issued[0]),
+            "oldest bound object must be evicted when exceeding MAX_BOUND_OBJECTS_PER_SESSION"
+        );
+        let kept_bid = *issued.last().unwrap();
+        assert!(ctx.bound_objects.read().unwrap().contains_key(&kept_bid));
+
+        // Release via `OID-` in named_payload
+        let mut named = HashMap::new();
+        named.insert(
+            "OID-".to_string(),
+            PyRep::Dict(vec![(
+                PyRep::String(format!("N=888444:{kept_bid}")),
+                PyRep::Integer(1),
+            )]),
+        );
+        let pkt_with_oid_minus = MachoPacket {
+            packet_type: MachoPacketType::CallReq,
+            source: MachoAddress::Client {
+                client_id: sid,
+                call_id: 1,
+                service: None,
+            },
+            destination: MachoAddress::Node {
+                node_id: MACHO_PROXY_NODE_ID,
+                service: Some("config".into()),
+                call_id: 1,
+            },
+            user_id: Some(1),
+            payload: PyRep::None,
+            named_payload: named,
+        };
+        let (released, is_dedicated) =
+            ctx.process_client_bound_object_releases(sid, &pkt_with_oid_minus);
+        assert_eq!(released, 1);
+        assert!(!is_dedicated);
+        assert!(!ctx.bound_objects.read().unwrap().contains_key(&kept_bid));
+
+        // Release via `ClientHasReleasedTheseObjects` notification frame
+        let prev_bid = issued[issued.len() - 2];
+        assert!(ctx.bound_objects.read().unwrap().contains_key(&prev_bid));
+        let release_notif_pkt = MachoPacket {
+            packet_type: MachoPacketType::Notification,
+            source: MachoAddress::Client {
+                client_id: sid,
+                call_id: 0,
+                service: None,
+            },
+            destination: MachoAddress::Node {
+                node_id: MACHO_PROXY_NODE_ID,
+                service: Some("machoNet".into()),
+                call_id: 0,
+            },
+            user_id: Some(1),
+            payload: PyRep::Tuple(vec![PyRep::SubStream(Box::new(PyRep::Tuple(vec![
+                PyRep::String("ClientHasReleasedTheseObjects".into()),
+                PyRep::Tuple(vec![PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::String(format!("N=888444:{prev_bid}")),
+                ])])]),
+                PyRep::Dict(vec![]),
+            ])))]),
+            named_payload: HashMap::new(),
+        };
+        let (released2, is_dedicated2) =
+            ctx.process_client_bound_object_releases(sid, &release_notif_pkt);
+        assert_eq!(released2, 1);
+        assert!(is_dedicated2);
+        assert!(!ctx.bound_objects.read().unwrap().contains_key(&prev_bid));
+    }
+
+    // 4. #850 & #881: Active RPC dispatch preserves > 128 notifications (bulk MultiAdd),
+    // while background notifications cap at 128 and logoff purges the queue.
+    {
+        let char_id = 90_000_001i64;
+        ctx.db
+            .acquire_online_lock(1, 888_001, Some(char_id), false, ctx.now_unix())
+            .unwrap();
+        ctx.clear_notifications_for_char(char_id);
+
+        with_active_dispatch_char(Some(char_id), async {
+            for i in 0..250 {
+                ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnItemChange",
+                    "charid",
+                    vec![PyRep::Integer(i)],
+                );
+            }
+        })
+        .await;
+        let drained = ctx.drain_notifications_for_char(char_id);
+        assert_eq!(
+            drained.len(),
+            250,
+            "active RPC caller must not drop notifications at 128 during bulk MultiAdd (#850)"
+        );
+
+        // Background push (outside active dispatch for `char_id`) caps at 128
+        for i in 0..200 {
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnAccountChange",
+                "charid",
+                vec![PyRep::Integer(i)],
+            );
+        }
+        let bg_drained = ctx.drain_notifications_for_char(char_id);
+        assert_eq!(bg_drained.len(), MAX_PENDING_NOTIFICATIONS_PER_CHAR);
+        assert_eq!(bg_drained.first().unwrap().args[0].as_i64(), Some(72));
+
+        // Re-populate and verify logoff purges pending notifications (#881) and registers in-space hold (#851)
+        ctx.notify(
+            crate::router::NotificationTarget::Character(char_id),
+            "OnAccountChange",
+            "charid",
+            vec![PyRep::Integer(1)],
+        );
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.station_id = None;
+                ch.structure_id = None;
+                ch.solar_system_id = 30_000_142;
+            }
+        });
+        // Even if the online lock is released BEFORE cleanup (e.g. by kick/ban/downtime),
+        // `logoff_character_sync` still registers the in-space ship in `disconnected_ships` (#851)
+        // and purges `pending_notifications` (#881).
+        ctx.db.release_online_lock(1, 888_001);
+        ctx.logoff_character_sync(char_id, None);
+        assert!(
+            ctx.drain_notifications_for_char(char_id).is_empty(),
+            "logoff_character_sync must purge pending_notifications (#881)"
+        );
+        assert!(
+            crate::sp6_lifecycle::has_active_disconnected_ship(&ctx.db, char_id),
+            "logoff_character_sync must register in-space ship hold even after online lock release (#851)"
+        );
+    }
+
+    // 5. #843: `beyonce.MachoBindObject` while in active warp (`Accelerating` / `Cruising`) must NOT
+    // remove `ship_id` from `ctx.active_warps` or force-stop the ship mid-tunnel.
+    {
+        let char_id = 90_000_001i64;
+        let ship_id = ctx.db.with_mut_snapshot(|snap| {
+            let ch = snap.characters.get_mut(&char_id).unwrap();
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = 30_000_142;
+            ch.active_ship_id
+        });
+        ctx.active_warps
+            .lock()
+            .unwrap()
+            .insert(ship_id, 40_000_001);
+        let mut sess = eve_machonet::SessionState::new(888_002);
+        sess.user_id = Some(1);
+        sess.character_id = Some(char_id);
+        sess.solar_system_id = Some(30_000_142);
+        sess.ship_id = Some(ship_id);
+
+        let bind_res = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "beyonce",
+                None,
+                "MachoBindObject",
+                &[PyRep::Integer(30_000_142), PyRep::None],
+                &HashMap::new(),
+                None,
+            )
+            .await;
+        assert!(bind_res.is_ok());
+        assert!(
+            ctx.active_warps.lock().unwrap().contains_key(&ship_id),
+            "beyonce.MachoBindObject must not clear active_warps (#843)"
+        );
+    }
+}
+
+
 
 

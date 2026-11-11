@@ -435,15 +435,7 @@ pub async fn handle(
             }
 
             if let Some(prev_cid) = session.character_id {
-                let _ = crate::sp6_lifecycle::handle_character_logoff_or_disconnect(ctx, prev_cid)
-                    .await;
-                crate::services::character_skills::notify_watchlist_presence(ctx, prev_cid, false);
-                crate::services::fleet_social::fleet_social_notify::on_character_logout(
-                    ctx, prev_cid,
-                );
-                crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(
-                    ctx, prev_cid,
-                );
+                ctx.logoff_character_sync(prev_cid, Some(session));
             }
             if let Some(prev_uid) = session.user_id {
                 if prev_uid != acc.user_id {
@@ -459,18 +451,7 @@ pub async fn handle(
             ctx.db.set_online_session_peer_ip(acc.user_id, session.session_id, &session.address);
             if let Ok(Some(displaced)) = lock_res {
                 if let Some(disp_cid) = displaced.character_id {
-                    let _ =
-                        crate::sp6_lifecycle::handle_character_logoff_or_disconnect(ctx, disp_cid)
-                            .await;
-                    crate::services::character_skills::notify_watchlist_presence(
-                        ctx, disp_cid, false,
-                    );
-                    crate::services::fleet_social::fleet_social_notify::on_character_logout(
-                        ctx, disp_cid,
-                    );
-                    crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(
-                        ctx, disp_cid,
-                    );
+                    ctx.logoff_character_sync(disp_cid, None);
                 }
                 ctx.disconnect_session(
                     displaced.session_id,
@@ -601,20 +582,7 @@ pub async fn handle(
                     if let Some(prev) = displaced {
                         if prev.session_id != session.session_id {
                             if let Some(prev_cid) = prev.character_id {
-                                let _ =
-                                    crate::sp6_lifecycle::handle_character_logoff_or_disconnect(
-                                        ctx, prev_cid,
-                                    )
-                                    .await;
-                                crate::services::character_skills::notify_watchlist_presence(
-                                    ctx, prev_cid, false,
-                                );
-                                crate::services::fleet_social::fleet_social_notify::on_character_logout(
-                                    ctx, prev_cid,
-                                );
-                                crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(
-                                    ctx, prev_cid,
-                                );
+                                ctx.logoff_character_sync(prev_cid, None);
                             }
                             ctx.disconnect_session(
                                 prev.session_id,
@@ -825,6 +793,9 @@ pub async fn handle(
                                 &format!("Account banned until unix={until_unix}: {reason}"),
                             );
                             let _ = ctx.db.release_online_lock(uid, s.session_id);
+                            if let Some(banned_cid) = s.character_id {
+                                ctx.logoff_character_sync(banned_cid, None);
+                            }
                         }
                         Some(Ok(PyRep::keyval([
                             ("command", PyRep::String(cmd.to_string())),
@@ -928,6 +899,9 @@ pub async fn handle(
                                 &format!("Account suspended until unix={until_unix}: {reason}"),
                             );
                             let _ = ctx.db.release_online_lock(uid, s.session_id);
+                            if let Some(susp_cid) = s.character_id {
+                                ctx.logoff_character_sync(susp_cid, None);
+                            }
                         }
                         Some(Ok(PyRep::keyval([
                             ("command", PyRep::String(cmd.to_string())),
@@ -1109,7 +1083,7 @@ pub async fn handle(
                 if let Some(ref s) = kicked_sess {
                     ctx.disconnect_session(s.session_id, "SessionKicked", reason);
                     if let Some(kicked_cid) = s.character_id {
-                        crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(ctx, kicked_cid);
+                        ctx.logoff_character_sync(kicked_cid, None);
                     }
                 }
                 Some(Ok(PyRep::keyval([

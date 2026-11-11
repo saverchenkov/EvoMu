@@ -366,3 +366,62 @@ async fn handle_bridge_client_handles_errors_notifications_ticks_and_kick() -> R
     assert_eq!(tb.tick, 5);
     Ok(())
 }
+
+#[tokio::test]
+async fn xmpp_stream_times_out_idle_connections_and_discovers_player_channels() {
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(
+        Arc::new(eve_sde::SdeRegistry::default()),
+        Arc::new(eve_db::WorldRepository::with_demo_seed()),
+    ));
+    let mut owner_sess = SessionState::new(1);
+    owner_sess.user_id = Some(90_000_001);
+    owner_sess.character_id = Some(90_000_001);
+    ctx.dispatch_rpc(
+        &mut owner_sess,
+        "XmppChatMgr",
+        None,
+        "CreatePlayerOwnedChannel",
+        &[PyRep::String("Playtest Room".into())],
+        &std::collections::HashMap::new(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    // 1. Idle XMPP connection times out within `read_timeout` (#853)
+    let (client_io, server_io) = duplex(1024);
+    handle_xmpp_stream_with_timeouts(
+        server_io,
+        Some(&ctx),
+        Duration::from_millis(25),
+        Duration::from_millis(25),
+    )
+    .await;
+    drop(client_io);
+
+    // 2. XMPP IQ `byname/Playtest Room` over `handle_xmpp_stream_with_timeouts` returns player room JID (#940)
+    let (mut cli, srv) = duplex(4096);
+    let ctx_clone = ctx.clone();
+    let srv_task = tokio::spawn(async move {
+        handle_xmpp_stream_with_timeouts(
+            srv,
+            Some(&ctx_clone),
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+        )
+        .await;
+    });
+    cli.write_all(
+        b"<iq type='get' id='disc_1' to='conference.chat.evomu.local'><query xmlns='http://jabber.org/protocol/disco#items' node='byname/Playtest Room'/></iq>",
+    )
+    .await
+    .unwrap();
+    let mut rbuf = [0u8; 1024];
+    let n = cli.read(&mut rbuf).await.unwrap();
+    let reply = String::from_utf8_lossy(&rbuf[..n]);
+    assert!(reply.contains(
+        "<item jid='player_playtest_room@conference.chat.evomu.local' name='Playtest Room'/>"
+    ));
+    drop(cli);
+    srv_task.await.unwrap();
+}

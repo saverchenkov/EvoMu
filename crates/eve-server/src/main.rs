@@ -27,6 +27,8 @@ use tracing::{error, info, warn};
 use eve_server::router::NEXT_TRANSPORT_SESSION_ID as NEXT_SESSION_ID;
 const MAX_CONCURRENT_CONNECTIONS: usize = 512;
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
+const XMPP_READ_TIMEOUT: Duration = Duration::from_secs(300);
+const XMPP_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -195,30 +197,23 @@ async fn main() -> Result<()> {
         xmpp_port = bound_xmpp_port,
         "Listening on XMPP Chat TCP"
     );
-    let xmpp_limiter = Arc::clone(&conn_limiter);
+    let xmpp_limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    let xmpp_ctx = Arc::clone(&ctx);
     tokio::spawn(async move {
-        while let Ok((mut stream, _addr)) = xmpp_listener.accept().await {
+        while let Ok((stream, _addr)) = xmpp_listener.accept().await {
             let Ok(permit) = Arc::clone(&xmpp_limiter).try_acquire_owned() else {
                 continue;
             };
+            let client_ctx = Arc::clone(&xmpp_ctx);
             tokio::spawn(async move {
                 let _permit = permit;
-                let mut buf = [0u8; 2048];
-                let mut stream_count = 0u32;
-                loop {
-                    let Ok(n) = stream.read(&mut buf).await else {
-                        break;
-                    };
-                    if n == 0 {
-                        break;
-                    }
-                    let chunk = String::from_utf8_lossy(&buf[..n]);
-                    if let Some(reply) = xmpp_stanza_reply(&chunk, &mut stream_count) {
-                        if stream.write_all(reply.as_bytes()).await.is_err() {
-                            break;
-                        }
-                    }
-                }
+                handle_xmpp_stream_with_timeouts(
+                    stream,
+                    Some(&client_ctx),
+                    XMPP_READ_TIMEOUT,
+                    XMPP_WRITE_TIMEOUT,
+                )
+                .await;
             });
         }
     });
@@ -603,7 +598,45 @@ fn quasar_advertise_host(bind_address: &str) -> &str {
     }
 }
 
+async fn handle_xmpp_stream_with_timeouts<S>(
+    mut stream: S,
+    ctx: Option<&ServerContext>,
+    read_timeout: Duration,
+    write_timeout: Duration,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let mut buf = [0u8; 2048];
+    let mut stream_count = 0u32;
+    loop {
+        let Ok(Ok(n)) = timeout(read_timeout, stream.read(&mut buf)).await else {
+            break;
+        };
+        if n == 0 {
+            break;
+        }
+        let chunk = String::from_utf8_lossy(&buf[..n]);
+        if let Some(reply) = xmpp_stanza_reply_with_ctx(ctx, &chunk, &mut stream_count) {
+            if timeout(write_timeout, stream.write_all(reply.as_bytes()))
+                .await
+                .map_or(true, |r| r.is_err())
+            {
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 fn xmpp_stanza_reply(chunk: &str, stream_count: &mut u32) -> Option<String> {
+    xmpp_stanza_reply_with_ctx(None, chunk, stream_count)
+}
+
+fn xmpp_stanza_reply_with_ctx(
+    ctx: Option<&ServerContext>,
+    chunk: &str,
+    stream_count: &mut u32,
+) -> Option<String> {
     if chunk.contains("<stream:stream") {
         *stream_count += 1;
         let reply = if *stream_count == 1 {
@@ -635,8 +668,8 @@ fn xmpp_stanza_reply(chunk: &str, stream_count: &mut u32) -> Option<String> {
         let rest = &chunk[id_pos + 4..];
         if let Some(end_pos) = rest.find(['\'', '"']) {
             let stanza_id = &rest[..end_pos];
-            return Some(eve_server::services::fleet_social::xmpp_iq_reply(
-                chunk, stanza_id,
+            return Some(eve_server::services::fleet_social::xmpp_iq_reply_with_ctx(
+                ctx, chunk, stanza_id,
             ));
         }
     }

@@ -197,12 +197,52 @@ impl PendingMachoNotification {
     }
 }
 
+/// Maximum queued real-time notifications per online character (`R51-P1-3`).
+pub const MAX_PENDING_NOTIFICATIONS_PER_CHAR: usize = 128;
+
+/// Hard ceiling for notifications emitted to the active RPC caller during a single in-flight RPC (`#850` / `B12`).
+pub const MAX_ACTIVE_RPC_NOTIFICATIONS_PER_CHAR: usize = 4_096;
+
+tokio::task_local! {
+    static DISPATCH_ACTIVE_CHAR_ID: std::cell::Cell<Option<i64>>;
+}
+
+/// Returns `true` if `char_id` is the character executing the current in-flight `dispatch_rpc` call (`#850`).
+pub fn is_active_dispatch_char(char_id: i64) -> bool {
+    DISPATCH_ACTIVE_CHAR_ID
+        .try_with(|c| c.get() == Some(char_id))
+        .unwrap_or(false)
+}
+
+/// Updates the active character ID inside an in-flight `dispatch_rpc` scope (e.g. during `SelectCharacterID`).
+pub fn set_active_dispatch_char(char_id: Option<i64>) {
+    let _ = DISPATCH_ACTIVE_CHAR_ID.try_with(|c| c.set(char_id));
+}
+
+/// Runs `fut` with `char_id` registered as the active `dispatch_rpc` caller so bulk RPCs (`MultiAdd`, `FitMany`)
+/// do not evict their own in-flight notifications at `MAX_PENDING_NOTIFICATIONS_PER_CHAR` (`#850` / `B12`).
+pub async fn with_active_dispatch_char<F, R>(char_id: Option<i64>, fut: F) -> R
+where
+    F: std::future::Future<Output = R>,
+{
+    DISPATCH_ACTIVE_CHAR_ID
+        .scope(std::cell::Cell::new(char_id), fut)
+        .await
+}
+
 /// Pushes `notif` into `queue`, evicting the oldest entry if the per-character cap is reached.
+/// When `notif.recipient_char_id` is the active `dispatch_rpc` caller (`#850`), all notifications emitted
+/// by the in-flight RPC are preserved up to [`MAX_ACTIVE_RPC_NOTIFICATIONS_PER_CHAR`] until the post-RPC drain.
 pub fn push_pending_notification_capped(
     queue: &mut Vec<PendingMachoNotification>,
     notif: PendingMachoNotification,
 ) {
-    if queue.len() >= MAX_PENDING_NOTIFICATIONS_PER_CHAR {
+    let cap = if is_active_dispatch_char(notif.recipient_char_id) {
+        MAX_ACTIVE_RPC_NOTIFICATIONS_PER_CHAR
+    } else {
+        MAX_PENDING_NOTIFICATIONS_PER_CHAR
+    };
+    while queue.len() >= cap {
         queue.remove(0);
     }
     queue.push(notif);
@@ -227,9 +267,6 @@ pub struct NotificationRecord {
 pub fn is_corp_hangar_flag(flag: eve_db::InventoryFlag) -> bool {
     matches!(flag as i64, 62 | 116..=122)
 }
-
-/// Maximum queued real-time notifications per online character (`R51-P1-3`).
-pub const MAX_PENDING_NOTIFICATIONS_PER_CHAR: usize = 128;
 
 impl ServerContext {
     pub fn is_corp_hangar_flag(flag: eve_db::InventoryFlag) -> bool {
@@ -873,6 +910,14 @@ impl ServerContext {
             .unwrap_or_else(|e| e.into_inner())
             .remove(&char_id)
             .unwrap_or_default()
+    }
+
+    /// Purges all pending notifications queued for `char_id` on logoff or character re-selection (`#881` / `C19`).
+    pub fn clear_notifications_for_char(&self, char_id: i64) {
+        self.pending_notifications
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&char_id);
     }
 
     /// Emits an `OnRemoteMessage` notification (`msg_key`, `dict`).

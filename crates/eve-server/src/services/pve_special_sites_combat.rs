@@ -70,7 +70,10 @@ pub fn notify_special_site_account_changes(
             created_filetime: now_ft,
         };
         if let Ok(mut map) = pending_notifications.write() {
-            map.entry(char_id).or_default().push(notif.clone());
+            crate::router::cache_notifications::push_pending_notification_capped(
+                map.entry(char_id).or_default(),
+                notif.clone(),
+            );
         }
         let _ = notify_tx.send((char_id, notif));
     }

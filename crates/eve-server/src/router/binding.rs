@@ -19,10 +19,13 @@ pub fn alloc_transport_session_id() -> u64 {
 const ERR_BIND_AUTH_DENIED: &str = "BindAuthorizationDenied";
 const ERR_BOUND_OWNERSHIP: &str = "BoundObjectOwnershipViolation";
 
+/// Maximum concurrent bound objects retained per client session (`#882` / `C20`).
+pub const MAX_BOUND_OBJECTS_PER_SESSION: usize = 256;
+
 /// RAII guard for TCP client connection tasks (`machoNet` and Python Client Bridge) ensuring
 /// synchronous session state (`session_closers`, `bound_objects`, and `PublicGatewayRouter`
-/// notice subscribers/receivers) and any spawned frame-reader task are always cleaned up,
-/// even if the connection future returns early or is aborted/dropped mid-await.
+/// notice subscribers/receivers), online lock release, and in-space logoff handling are always
+/// cleaned up, even if the connection future returns early, panics, or is aborted/dropped mid-await.
 pub struct SessionCleanupGuard {
     ctx: Arc<ServerContext>,
     session_id: u64,
@@ -51,6 +54,19 @@ impl Drop for SessionCleanupGuard {
         self.ctx.unregister_session_closer(self.session_id);
         self.ctx.release_session_bindings(self.session_id);
         self.ctx.quasar_gateway.unsubscribe_session(self.session_id);
+        let active_for_session = self.ctx.db.with_snapshot(|snap| {
+            snap.sessions
+                .values()
+                .find(|os| os.session_id == self.session_id)
+                .map(|os| (os.user_id, os.character_id))
+        });
+        if let Some((uid, char_opt)) = active_for_session {
+            if self.ctx.db.release_online_lock(uid, self.session_id) {
+                if let Some(cid) = char_opt {
+                    self.ctx.logoff_character_sync(cid, None);
+                }
+            }
+        }
     }
 }
 
@@ -112,14 +128,63 @@ impl ServerContext {
         self.quasar_gateway.unsubscribe_user(user_id);
     }
 
+    /// Unified character logoff/disconnect teardown shared across socket disconnects,
+    /// `/kick`, `/ban`, `/suspend`, scheduled daily downtime, `authentication.Logout`,
+    /// `userSvc.UserLogOffCharacter`, and task panic/abort cleanup (`#851` / `B13`, `#881` / `C19`).
+    pub fn logoff_character_sync(
+        &self,
+        char_id: i64,
+        mut session_opt: Option<&mut SessionState>,
+    ) {
+        crate::services::wallet_services_ext::cancel_open_trades_for_character(self, char_id);
+        crate::services::structure_control_ops::release_all_structure_control_for_character(
+            self,
+            session_opt.as_deref_mut(),
+            char_id,
+        );
+        let space_loc = session_opt
+            .as_ref()
+            .and_then(|s| {
+                if s.station_id.is_none() && s.structure_id.is_none() {
+                    s.solar_system_id.zip(s.ship_id)
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                self.db.with_snapshot(|snap| {
+                    snap.characters
+                        .get(&char_id)
+                        .filter(|c| c.station_id.is_none() && c.structure_id.is_none() && c.active_ship_id > 0)
+                        .map(|c| (c.solar_system_id, c.active_ship_id))
+                })
+            });
+        if let Some((sys_id, ship_id)) = space_loc {
+            let handle = self.systems.get_or_spawn(sys_id);
+            if let Some(pos) = handle.get_ball_position_sync(ship_id) {
+                self.db.with_mut_snapshot(|snap| {
+                    snap.item_positions.insert(ship_id, [pos.x, pos.y, pos.z]);
+                });
+            }
+        }
+        let _ = crate::sp6_lifecycle::handle_character_logoff_or_disconnect_sync(self, char_id);
+        crate::services::character_skills::notify_watchlist_presence(self, char_id, false);
+        crate::services::fleet_social::fleet_social_notify::on_character_logout(self, char_id);
+        crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(
+            self, char_id,
+        );
+        self.clear_notifications_for_char(char_id);
+    }
+
     /// Unified disconnect cleanup shared by both native `machoNet` TCP (`handle_macho_client`)
     /// and Python Client Bridge TCP (`handle_bridge_client`) listeners.
     ///
     /// Unregisters the session closer, releases all bound objects, unsubscribes any
     /// `PublicGatewayRouter` notice subscriber and stream receiver for `session.session_id`,
-    /// and—if this session still held the account's active online lock—releases structure
+    /// and—if this session still held the account's active online lock (or was revoked via
+    /// `/kick`, `/ban`, or downtime without another session taking over)—releases structure
     /// control, persists in-space ship ball coordinates, runs in-space logoff/disconnect
-    /// lifecycle, and notifies watchlist and fleet/social presence listeners.
+    /// lifecycle, purges pending notifications, and notifies watchlist and fleet/social presence listeners.
     pub async fn cleanup_disconnected_client_session(&self, session: &mut SessionState) {
         let session_id = session.session_id;
         self.unregister_session_closer(session_id);
@@ -133,41 +198,15 @@ impl ServerContext {
         }
         self.quasar_gateway.unsubscribe_session(session_id);
         if let Some(uid) = session.user_id {
-            // A dropped connection that still held the character online is a log-off for watchers and triggers in-space logoff handling.
-            if self.db.release_online_lock(uid, session_id) {
-                if let Some(cid) = session.character_id {
-                    crate::services::wallet_services_ext::cancel_open_trades_for_character(
-                        self, cid,
-                    );
-                    crate::services::structure_control_ops::release_all_structure_control_for_character(
-                        self,
-                        Some(session),
-                        cid,
-                    );
-                }
-                if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
-                    if session.station_id.is_none() && session.structure_id.is_none() {
-                        let handle = self.systems.get_or_spawn(sys_id);
-                        if let Ok(Some((_, ball))) = handle.get_ball_snapshot(ship_id).await {
-                            self.db.with_mut_snapshot(|snap| {
-                                snap.item_positions.insert(
-                                    ship_id,
-                                    [ball.position.x, ball.position.y, ball.position.z],
-                                );
-                            });
-                        }
-                    }
-                }
-                if let Some(cid) = session.character_id {
-                    let _ = crate::sp6_lifecycle::handle_character_logoff_or_disconnect(self, cid)
-                        .await;
-                    crate::services::character_skills::notify_watchlist_presence(self, cid, false);
-                    crate::services::fleet_social::fleet_social_notify::on_character_logout(
-                        self, cid,
-                    );
-                    crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(
-                        self, cid,
-                    );
+            let released = self.db.release_online_lock(uid, session_id);
+            if let Some(cid) = session.character_id {
+                let needs_logoff = released
+                    || (!self.is_character_online(cid, uid)
+                        && !crate::sp6_lifecycle::has_active_disconnected_ship(&self.db, cid));
+                if needs_logoff {
+                    self.logoff_character_sync(cid, Some(session));
+                } else {
+                    self.clear_notifications_for_char(cid);
                 }
             }
         }
@@ -253,22 +292,142 @@ impl ServerContext {
     ) {
         let oid_str = format!("N={}:{bound_id}", eve_machonet::MACHO_PROXY_NODE_ID);
         let ref_id = (self.now_unix() as i64 + 11_644_473_600).saturating_mul(10_000_000);
-        self.bound_objects
+        let mut map = self
+            .bound_objects
             .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(
+            .unwrap_or_else(|e| e.into_inner());
+        let session_count = map
+            .values()
+            .filter(|e| e.session_id == session.session_id)
+            .count();
+        if session_count >= MAX_BOUND_OBJECTS_PER_SESSION {
+            let excess = session_count - MAX_BOUND_OBJECTS_PER_SESSION + 1;
+            let mut session_bids: Vec<u64> = map
+                .values()
+                .filter(|e| e.session_id == session.session_id)
+                .map(|e| e.bound_id)
+                .collect();
+            session_bids.sort_unstable();
+            for old_bid in session_bids.into_iter().take(excess) {
+                map.remove(&old_bid);
+            }
+        }
+        map.insert(
+            bound_id,
+            BoundObjectEntry {
                 bound_id,
-                BoundObjectEntry {
-                    bound_id,
-                    session_id: session.session_id,
-                    user_id,
-                    character_id: char_id,
-                    service: service.to_string(),
-                    object_id,
-                    oid_str,
-                    ref_id,
-                },
-            );
+                session_id: session.session_id,
+                user_id,
+                character_id: char_id,
+                service: service.to_string(),
+                object_id,
+                oid_str,
+                ref_id,
+            },
+        );
+    }
+
+    /// Parses a bound object ID from either an `"N=<nodeID>:<boundID>"` string or an integer `bound_id`.
+    fn parse_bound_id_rep(rep: &PyRep) -> Option<u64> {
+        match rep {
+            PyRep::Integer(v) if *v > 0 => Some(*v as u64),
+            _ => {
+                let s = rep.as_str()?;
+                let (_, right) = s.trim().rsplit_once(':')?;
+                right.parse::<u64>().ok()
+            }
+        }
+    }
+
+    fn collect_bound_ids_from_pyrep(rep: &PyRep, out: &mut Vec<u64>) {
+        if let Some(bid) = Self::parse_bound_id_rep(rep) {
+            out.push(bid);
+            return;
+        }
+        match rep {
+            PyRep::List(items) | PyRep::Tuple(items) => {
+                for item in items {
+                    Self::collect_bound_ids_from_pyrep(item, out);
+                }
+            }
+            PyRep::Dict(entries) => {
+                for (k, v) in entries {
+                    if let Some(bid) = Self::parse_bound_id_rep(k) {
+                        out.push(bid);
+                    } else {
+                        Self::collect_bound_ids_from_pyrep(k, out);
+                        Self::collect_bound_ids_from_pyrep(v, out);
+                    }
+                }
+            }
+            PyRep::SubStream(inner) | PyRep::SubStruct(inner) => {
+                Self::collect_bound_ids_from_pyrep(inner, out);
+            }
+            _ => {}
+        }
+    }
+
+    /// Releases bound objects owned by `session_id` referenced in `rep` (`OID-` or `ClientHasReleasedTheseObjects`, `#882` / `C20`).
+    pub fn release_bound_objects_from_pyrep(&self, session_id: u64, rep: &PyRep) -> usize {
+        let mut target_bids = Vec::new();
+        Self::collect_bound_ids_from_pyrep(rep, &mut target_bids);
+        if target_bids.is_empty() {
+            return 0;
+        }
+        let mut map = self
+            .bound_objects
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut removed = 0;
+        for bid in target_bids {
+            if map.get(&bid).is_some_and(|e| e.session_id == session_id) {
+                map.remove(&bid);
+                removed += 1;
+            }
+        }
+        removed
+    }
+
+    /// Processes client-initiated bound object releases from `pkt.named_payload["OID-"]` and
+    /// `ClientHasReleasedTheseObjects` packets (`#882` / `C20`).
+    /// Returns `(released_count, is_dedicated_release_notification)`.
+    pub fn process_client_bound_object_releases(
+        &self,
+        session_id: u64,
+        pkt: &eve_machonet::MachoPacket,
+    ) -> (usize, bool) {
+        let mut released = 0;
+        if let Some(oid_minus) = pkt.named_payload.get("OID-") {
+            released += self.release_bound_objects_from_pyrep(session_id, oid_minus);
+        }
+        let is_release_broadcast = matches!(
+            &pkt.destination,
+            eve_machonet::MachoAddress::Broadcast { broadcast_id, .. }
+                if broadcast_id == "ClientHasReleasedTheseObjects"
+        );
+        let is_release_method = Self::pyrep_contains_method(&pkt.payload, "ClientHasReleasedTheseObjects");
+        if is_release_broadcast || is_release_method {
+            released += self.release_bound_objects_from_pyrep(session_id, &pkt.payload);
+            let is_notif = pkt.packet_type == eve_machonet::MachoPacketType::Notification
+                || is_release_broadcast;
+            return (released, is_notif);
+        }
+        (released, false)
+    }
+
+    fn pyrep_contains_method(rep: &PyRep, target: &str) -> bool {
+        if rep.as_str() == Some(target) {
+            return true;
+        }
+        match rep {
+            PyRep::List(items) | PyRep::Tuple(items) => {
+                items.iter().any(|i| Self::pyrep_contains_method(i, target))
+            }
+            PyRep::SubStream(inner) | PyRep::SubStruct(inner) => {
+                Self::pyrep_contains_method(inner, target)
+            }
+            _ => false,
+        }
     }
 
     /// Wire form of a bound-object reference. The native client (`caller_trace == "machoNet:26000"`)
