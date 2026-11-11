@@ -355,8 +355,8 @@ def code_patch_id(root, commit):
 
 def code_review_verdict(r):
     """The code reviewer's own verdict for a claims review record. A review the code reviewer passed but the test
-    gate downgraded is recorded as FAIL; its code verdict is still PASS/PASS_WITH_ISSUES when the test gate was the
-    only blocking finding (result.json keeps the reviewer's structured verdict). Returns None when unknown."""
+    gate downgraded is recorded as FAIL; its code verdict is still PASS/PASS_WITH_ISSUES when the test gate failed
+    and the reviewer raised no P0 of its own (result.json keeps the reviewer's structured verdict). None when unknown."""
     if r.get("verdict") in CARRY_VERDICTS:
         return r["verdict"]
     if r.get("verdict") != "FAIL" or not r.get("report"):
@@ -365,8 +365,10 @@ def code_review_verdict(r):
         so = json.load(open(os.path.join(os.path.dirname(r["report"]), "result.json"))).get("structured", {})
     except Exception:  # noqa: BLE001
         return None
-    own = [f for f in so.get("blocking_findings", []) or [] if f.get("id") != "ORCHESTRATOR-POST-REVIEW-TEST-FAIL"]
-    if own or so.get("verdict") not in CARRY_VERDICTS:
+    # PASS_WITH_ISSUES reviews list their P1 findings as blocking too; only a P0 of the reviewer's own disqualifies.
+    own_p0 = [f for f in so.get("blocking_findings", []) or []
+              if f.get("id") != "ORCHESTRATOR-POST-REVIEW-TEST-FAIL" and f.get("severity") == "P0"]
+    if own_p0 or so.get("verdict") not in CARRY_VERDICTS:
         return None
     return so["verdict"]
 
