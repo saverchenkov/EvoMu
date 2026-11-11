@@ -246,6 +246,105 @@ pub struct SemanticLookupContext<'a> {
     pub db: &'a WorldRepository,
 }
 
+/// V24.01 classic old-style class paths (`Op_PyObject` `0x17`, whitelisted in `carbon/common/lib/whitelist.pyj`, `#954`).
+pub const V24_CACHED_OBJECT_CLASS: &str = "carbon.common.script.net.objectCaching.CachedObject";
+pub const V24_CACHED_METHOD_CALL_RESULT_CLASS: &str =
+    "carbon.common.script.net.objectCaching.CachedMethodCallResult";
+pub const V24_CACHE_HINT_CLASS: &str = "carbon.common.script.net.cachedObject.CachedObject";
+
+fn is_legacy_unwhitelisted_caching_class(type_name: &str) -> bool {
+    type_name.starts_with("objectCaching.")
+        || matches!(
+            type_name,
+            "util.CachedObject"
+                | "util.CachedMethodCallResult"
+                | "utillib.CachedMethodCallResult"
+        )
+}
+
+fn collect_legacy_caching_class_violations(
+    rpc_name: &str,
+    rep: &PyRep,
+    violations: &mut Vec<String>,
+) {
+    match rep {
+        PyRep::SubStream(inner) | PyRep::SubStruct(inner) => {
+            collect_legacy_caching_class_violations(rpc_name, inner, violations);
+        }
+        PyRep::ChecksumedStream { body, .. } => {
+            collect_legacy_caching_class_violations(rpc_name, body, violations);
+        }
+        PyRep::Object { type_name, args } => {
+            if is_legacy_unwhitelisted_caching_class(type_name) {
+                let msg = format!(
+                    "{rpc_name}: unwhitelisted V24.01 caching class `{type_name}` in PyRep::Object (use `carbon.common.script.net.objectCaching.*` / `carbon.common.script.net.cachedObject.CachedObject`, #954)"
+                );
+                if !violations.contains(&msg) {
+                    violations.push(msg);
+                }
+            }
+            collect_legacy_caching_class_violations(rpc_name, args, violations);
+            if matches!(
+                type_name.as_str(),
+                V24_CACHED_OBJECT_CLASS
+                    | V24_CACHE_HINT_CLASS
+                    | "objectCaching.CachedObject"
+                    | "util.CachedObject"
+            ) {
+                if let PyRep::Tuple(items) = args.as_ref() {
+                    if let Some(PyRep::Buffer(bytes) | PyRep::Bytes(bytes)) = items.get(4) {
+                        if let Ok(decoded) = eve_proto::marshal::decode(bytes) {
+                            collect_legacy_caching_class_violations(rpc_name, &decoded, violations);
+                        }
+                    }
+                }
+            }
+        }
+        PyRep::ObjectEx {
+            header, list, dict, ..
+        } => {
+            if let Some(cls) = object_ex_class_name(header) {
+                if is_legacy_unwhitelisted_caching_class(cls) {
+                    let msg = format!(
+                        "{rpc_name}: unwhitelisted V24.01 caching class `{cls}` in PyRep::ObjectEx (use `carbon.common.script.net.objectCaching.*` / `carbon.common.script.net.cachedObject.CachedObject`, #954)"
+                    );
+                    if !violations.contains(&msg) {
+                        violations.push(msg);
+                    }
+                }
+            }
+            collect_legacy_caching_class_violations(rpc_name, header, violations);
+            for item in list {
+                collect_legacy_caching_class_violations(rpc_name, item, violations);
+            }
+            for (k, v) in dict {
+                collect_legacy_caching_class_violations(rpc_name, k, violations);
+                collect_legacy_caching_class_violations(rpc_name, v, violations);
+            }
+        }
+        PyRep::Tuple(items)
+        | PyRep::List(items)
+        | PyRep::Set(items)
+        | PyRep::PySet(items) => {
+            for item in items {
+                collect_legacy_caching_class_violations(rpc_name, item, violations);
+            }
+        }
+        PyRep::Dict(entries) => {
+            for (k, v) in entries {
+                collect_legacy_caching_class_violations(rpc_name, k, violations);
+                collect_legacy_caching_class_violations(rpc_name, v, violations);
+            }
+        }
+        PyRep::KeyVal(map) => {
+            for v in map.values() {
+                collect_legacy_caching_class_violations(rpc_name, v, violations);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub fn unwrap_envelope(rep: &PyRep, preserve_cached_obj: bool) -> PyRep {
     match rep {
         PyRep::SubStream(inner) | PyRep::SubStruct(inner) => {
@@ -253,7 +352,8 @@ pub fn unwrap_envelope(rep: &PyRep, preserve_cached_obj: bool) -> PyRep {
         }
         PyRep::ChecksumedStream { body, .. } => unwrap_envelope(body, preserve_cached_obj),
         PyRep::Object { type_name, args }
-            if type_name == "objectCaching.CachedMethodCallResult"
+            if type_name == V24_CACHED_METHOD_CALL_RESULT_CLASS
+                || type_name == "objectCaching.CachedMethodCallResult"
                 || type_name == "util.CachedMethodCallResult"
                 || type_name == "utillib.CachedMethodCallResult" =>
         {
@@ -266,7 +366,9 @@ pub fn unwrap_envelope(rep: &PyRep, preserve_cached_obj: bool) -> PyRep {
         }
         PyRep::Object { type_name, args }
             if !preserve_cached_obj
-                && (type_name == "objectCaching.CachedObject"
+                && (type_name == V24_CACHED_OBJECT_CLASS
+                    || type_name == V24_CACHE_HINT_CLASS
+                    || type_name == "objectCaching.CachedObject"
                     || type_name == "util.CachedObject") =>
         {
             if let PyRep::Tuple(items) = args.as_ref() {
@@ -1002,6 +1104,7 @@ pub fn validate_reply_shape_with_metrics(
         reply_shape
     };
     let mut outcome = ReplyValidationOutcome::default();
+    collect_legacy_caching_class_violations(rpc_name, raw_reply, &mut outcome.violations);
     let root_ops: Vec<&str> = reply_shape
         .get("$")
         .and_then(|v| v.as_array())
@@ -1656,6 +1759,98 @@ mod tests {
             good_dt.is_empty(),
             "#945 datetime.datetime object for home_station.get_next_remote_change_time must be accepted: {good_dt:#?}"
         );
+    }
+
+    #[test]
+    fn must_reject_954_bare_object_caching_class_names_and_accept_v24_carbon_paths() {
+        let (_, exp) = load_expectations_json();
+        let shape = rpc_reply_shape(&exp, "marketProxy.GetOrders");
+        let inner_orders = PyRep::List(vec![PyRep::List(Vec::new()), PyRep::List(Vec::new())]);
+        let marshaled_orders = eve_proto::marshal::encode(&inner_orders);
+
+        // 1. Broken #954 shapes: bare `objectCaching.*`, `util.CachedObject`, `util.CachedMethodCallResult`, `utillib.CachedMethodCallResult`
+        for bad_class in [
+            "objectCaching.CachedMethodCallResult",
+            "util.CachedMethodCallResult",
+            "utillib.CachedMethodCallResult",
+        ] {
+            let broken_cmcr = PyRep::Object {
+                type_name: bad_class.into(),
+                args: Box::new(PyRep::Tuple(vec![
+                    PyRep::Dict(vec![(
+                        PyRep::String("versionCheck".into()),
+                        PyRep::String("always".into()),
+                    )]),
+                    PyRep::SubStream(Box::new(inner_orders.clone())),
+                    PyRep::Tuple(vec![PyRep::Integer(133_500_000_000_000_000), PyRep::Integer(1)]),
+                ])),
+            };
+            let bad_v = validate_reply_shape(None, "marketProxy.GetOrders", &broken_cmcr, shape);
+            assert!(
+                bad_v.iter().any(|v| v.contains(bad_class) && v.contains("#954")),
+                "#954 unwhitelisted `{bad_class}` must be rejected: {bad_v:#?}"
+            );
+        }
+
+        for bad_co_class in ["objectCaching.CachedObject", "util.CachedObject"] {
+            let broken_co = PyRep::Object {
+                type_name: bad_co_class.into(),
+                args: Box::new(PyRep::Tuple(vec![
+                    PyRep::Tuple(vec![PyRep::Integer(133_500_000_000_000_000), PyRep::Integer(1)]),
+                    PyRep::None,
+                    PyRep::Integer(1),
+                    PyRep::Integer(1),
+                    PyRep::Buffer(marshaled_orders.clone()),
+                    PyRep::Integer(0),
+                    PyRep::String("marketProxy::GetOrders".into()),
+                ])),
+            };
+            let bad_v = validate_reply_shape(None, "marketProxy.GetOrders", &broken_co, shape);
+            assert!(
+                bad_v
+                    .iter()
+                    .any(|v| v.contains(bad_co_class) && v.contains("#954")),
+                "#954 unwhitelisted `{bad_co_class}` must be rejected: {bad_v:#?}"
+            );
+        }
+
+        // 2. Fixed V24.01 shapes: `carbon.common.script.net.objectCaching.*` and `carbon.common.script.net.cachedObject.CachedObject`
+        let fixed_cmcr = PyRep::Object {
+            type_name: V24_CACHED_METHOD_CALL_RESULT_CLASS.into(),
+            args: Box::new(PyRep::Tuple(vec![
+                PyRep::Dict(vec![(
+                    PyRep::String("versionCheck".into()),
+                    PyRep::String("always".into()),
+                )]),
+                PyRep::SubStream(Box::new(inner_orders)),
+                PyRep::Tuple(vec![PyRep::Integer(133_500_000_000_000_000), PyRep::Integer(1)]),
+            ])),
+        };
+        let good_cmcr = validate_reply_shape(None, "marketProxy.GetOrders", &fixed_cmcr, shape);
+        assert!(
+            good_cmcr.is_empty(),
+            "#954 V24 `{V24_CACHED_METHOD_CALL_RESULT_CLASS}` must be accepted: {good_cmcr:#?}"
+        );
+
+        for good_co_class in [V24_CACHED_OBJECT_CLASS, V24_CACHE_HINT_CLASS] {
+            let fixed_co = PyRep::Object {
+                type_name: good_co_class.into(),
+                args: Box::new(PyRep::Tuple(vec![
+                    PyRep::Tuple(vec![PyRep::Integer(133_500_000_000_000_000), PyRep::Integer(1)]),
+                    PyRep::None,
+                    PyRep::Integer(1),
+                    PyRep::Integer(1),
+                    PyRep::Buffer(marshaled_orders.clone()),
+                    PyRep::Integer(0),
+                    PyRep::String("marketProxy::GetOrders".into()),
+                ])),
+            };
+            let good_co = validate_reply_shape(None, "marketProxy.GetOrders", &fixed_co, shape);
+            assert!(
+                good_co.is_empty(),
+                "#954 V24 `{good_co_class}` must be accepted: {good_co:#?}"
+            );
+        }
     }
 
     #[test]
