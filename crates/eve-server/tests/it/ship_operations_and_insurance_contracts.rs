@@ -74,9 +74,13 @@ async fn test_insurance_contracts_get_for_ship_and_corp_roles() {
     assert_eq!(bal0.0 - bal1.0, eve_db::IskCents::from_f64_isk(cost).0);
 
     // Attempting to insure an already insured ship without voidOld fails with InsureShipFailedSingleContract
+    // and includes the existing contract owner's integer ID in `ownerName` (#828).
     let single_err = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_id), PyRep::Real(0.5)], &kw, None).await.unwrap_err();
     assert_eq!(single_err.code, "InsureShipFailedSingleContract");
-    assert_eq!(single_err.message, "InsureShipFailedSingleContract");
+    assert_eq!(
+        single_err.message,
+        format!("InsureShipFailedSingleContract (ownerName={char_id})")
+    );
     assert_eq!(ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance), bal1);
 
     // Contract details after first insurance
@@ -180,8 +184,18 @@ async fn test_insurance_contracts_get_for_ship_and_corp_roles() {
     sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
     let mut kw_corp = HashMap::new();
     kw_corp.insert("isCorpItem".into(), PyRep::Bool(true));
-    let corp_ins = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(corp_ship_id), PyRep::Real(1.0)], &kw_corp, None).await.unwrap();
+    let corp_ins = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(corp_ship_id), PyRep::Real(0.5)], &kw_corp, None).await.unwrap();
     assert!(matches!(corp_ins, PyRep::KeyVal(_)));
+    let corp_single_err = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(corp_ship_id), PyRep::Real(1.0)], &kw_corp, None).await.unwrap_err();
+    assert_eq!(corp_single_err.code, "InsureShipFailedSingleContract");
+    assert_eq!(
+        corp_single_err.message,
+        format!("InsureShipFailedSingleContract (ownerName={test_corp_id})")
+    );
+    let mut kw_corp_void = kw_corp.clone();
+    kw_corp_void.insert("voidOld".into(), PyRep::Bool(true));
+    let corp_ins_replaced = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(corp_ship_id), PyRep::Real(1.0)], &kw_corp_void, None).await.unwrap();
+    assert!(matches!(corp_ins_replaced, PyRep::KeyVal(_)));
     let corp_j = ctx.db.with_snapshot(|s| s.wallet_journal.iter().any(|j| j.character_id == test_corp_id && j.entry_type == "19"));
     assert!(corp_j, "Corporate insurance must append WalletJournalEntry type 19 with corp as payer");
 
