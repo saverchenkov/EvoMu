@@ -367,9 +367,23 @@ impl ServerContext {
     /// cloak rules, hull/mass limits, and system/location locks (`#591`).
     pub async fn validate_ship_movement(
         &self,
+        char_id: i64,
+        ship_id: i64,
+        intent: MovementIntent,
+    ) -> Result<ValidatedShipMovement, BridgeRpcError> {
+        self.validate_ship_movement_with_warp_arrival(char_id, ship_id, intent, false)
+            .await
+    }
+
+    /// Pre-movement validator with an opt-in override allowing `MovementMode::Warp` only when
+    /// a destination arrival perimeter check (e.g. `CmdStargateJump` finishing warp onto gate)
+    /// explicitly clears the active warp check, while still enforcing all other locks/tackle.
+    pub(crate) async fn validate_ship_movement_with_warp_arrival(
+        &self,
         _char_id: i64,
         ship_id: i64,
         intent: MovementIntent,
+        allow_arriving_warp: bool,
     ) -> Result<ValidatedShipMovement, BridgeRpcError> {
         validate_system_movement_locks(self, ship_id, &intent)?;
 
@@ -409,7 +423,7 @@ impl ServerContext {
                         &ball.mode,
                     )?;
                 }
-            } else if matches!(ball.mode, MovementMode::Warp { .. }) {
+            } else if matches!(ball.mode, MovementMode::Warp { .. }) && !allow_arriving_warp {
                 let code = match intent {
                     MovementIntent::RandomFilament { .. } => "CannotActivateFilamentInWarp",
                     _ => "ShipInWarp",

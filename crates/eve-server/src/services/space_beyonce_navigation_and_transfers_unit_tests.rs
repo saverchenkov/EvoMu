@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 //! Semantic unit tests split from `space_entity_ops_extra_unit_tests`.
 
 #![forbid(unsafe_code)]
@@ -18,7 +19,7 @@ use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
 use std::collections::HashMap;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn beyonce_regroup_tag_target_and_goto_bookmark_validation_and_partial_warp() {
     let ctx = test_ctx();
     let sys_id = 30_000_142_u32;
@@ -231,7 +232,7 @@ async fn beyonce_regroup_tag_target_and_goto_bookmark_validation_and_partial_war
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn beyonce_corp_asset_transfer_self_destruct_siphon_expiry_and_spawnpoint_branches() {
     let ctx = test_ctx();
     let sys_id = 30_000_142_u32;

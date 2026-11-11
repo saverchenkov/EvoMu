@@ -529,3 +529,127 @@ async fn structure_cyno_beacon_validation_and_cone_scan_inhibitor_and_radians() 
     assert!(scanned_ids.contains(&visible_ball_id));
     assert!(!scanned_ids.contains(&cloaked_ball_id) && !scanned_ids.contains(&behind_cone_ball_id) && !scanned_ids.contains(&far_ball_id));
 }
+
+#[tokio::test]
+async fn update_state_request_dungeon_trigger_unmatched_rpc_and_main_bank_unlink() {
+    let ctx = test_ctx();
+    let (char_id, ship_id, sys_id) = (90_000_001_i64, 100_000_001_i64, 30_000_142_u32);
+    let mut sess = make_session(char_id, 98_000_001, Some(sys_id), Some(ship_id), service_roles::ROLE_PLAYER);
+    let bnd = bound_sys(sys_id);
+    let empty_kw = HashMap::new();
+
+    // 1. Unmatched service/method returns None (never Some(Ok(Default)))
+    let unknown_svc = ["unmatched", "_svc"].concat();
+    let unknown_meth = ["unmatched", "_meth"].concat();
+    assert!(handle(&ctx, &mut sess, Some(&bnd), &unknown_svc, &unknown_meth, &[], &empty_kw).await.is_none());
+
+    // 2. RequestMainBankUnlink unlinks main bank while leaving Reserve Bank state untouched
+    ctx.db.with_mut_snapshot(|snap| {
+        let ss = snap.system_states.entry(sys_id).or_default();
+        ss.ess_linked_character_id = Some(char_id);
+        ss.ess_link_started_tick = Some(42);
+        set_ess_reserve_pulses(snap, sys_id, &EssReservePulseState::default());
+    });
+    let mb_res = handle(&ctx, &mut sess, None, "essMgr", "RequestMainBankUnlink", &[], &empty_kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(mb_res, PyRep::Bool(true));
+    assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&sys_id].ess_linked_character_id), None);
+
+    // 3. `handle_update_state_request` stops orphan emergency warp & fires `check_dungeon_triggers` only when `!instances.is_empty()`
+    let inst_id = 950_777_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.dungeon_runtime.instances.insert(
+            inst_id,
+            eve_db::service_domains::pve_sites::DungeonRuntimeInstance {
+                instance_id: inst_id,
+                dungeon_id: 4001,
+                dungeon_name: "Test Dungeon".into(),
+                category: "Deadspace".into(),
+                archetype: "Combat".into(),
+                solar_system_id: sys_id,
+                owner_char_id: char_id,
+                base_position: [0.0, 0.0, 0.0],
+                disallow_mwd: false,
+                entry_gate_ball_id: None,
+                entry_gate_pos: None,
+                entry_gate_locked: false,
+                current_room_index: 0,
+                rooms: vec![eve_db::service_domains::pve_sites::DungeonRuntimeRoom {
+                    room_index: 0,
+                    room_id: 1,
+                    room_name: "Room 0".into(),
+                    position: [0.0, 0.0, 0.0],
+                    gate_destination_pos: [0.0, 0.0, 0.0],
+                    gated: false,
+                    disallow_mwd: None,
+                    gate_ball_id: None,
+                    gate_locked: true,
+                    objects: Vec::new(),
+                    npc_groups: Vec::new(),
+                    triggers: vec![eve_db::service_domains::pve_sites::DungeonTrigger {
+                        trigger_id: 1,
+                        kind: eve_db::service_domains::pve_sites::DungeonTriggerKind::OnApproach {
+                            target_ball_id: None,
+                            target_object_index: None,
+                            anchor_pos: [0.0, 0.0, 0.0],
+                            radius_m: 5_000.0,
+                        },
+                        action: eve_db::service_domains::pve_sites::DungeonTriggerAction::UnlockGate,
+                        fired: false,
+                    }],
+                    spawned: true,
+                    cleared: false,
+                }],
+                completed: false,
+                despawned: false,
+                active_objective_id: 0,
+                last_completed_task_id: None,
+                completed_task_ids: Vec::new(),
+                created_unix: 1_700_000_000,
+            },
+        );
+    });
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let mut warp_ball = mk_ball(ship_id, 587, DVec3::ZERO);
+    warp_ball.mode = MovementMode::Warp {
+        origin: DVec3::ZERO,
+        destination: DVec3::new(1e9, 0.0, 0.0),
+        warp_speed_au_s: 3.0,
+        total_distance: 1e9,
+        phase: eve_destiny::WarpPhase::Cruising,
+        elapsed_warp_time: 5.0,
+    };
+    let _ = sys_handle.spawn_ball(warp_ball).await;
+
+    let upd_res = handle(&ctx, &mut sess, Some(&bnd), "beyonce", "UpdateStateRequest", &[], &empty_kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(upd_res, PyRep::None);
+
+    let (_, post_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(matches!(post_ball.mode, MovementMode::Stop));
+    ctx.db.with_snapshot(|snap| {
+        let room = &snap.dungeon_runtime.instances[&inst_id].rooms[0];
+        assert!(room.triggers[0].fired, "OnApproach trigger must fire when instances is non-empty");
+        assert!(!room.gate_locked, "UnlockGate action must unlock room gate");
+    });
+
+    // 4. `record_session_change_timer_with_invuln` side effects on timer, invuln, and OnSessionChanged notice
+    let _ = ctx
+        .db
+        .acquire_online_lock(1, 9501, Some(char_id), false, ctx.now_unix());
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let t_now = ctx.now_unix();
+    record_session_change_timer(&ctx, char_id, t_now, sys_id, 55, "jump_drive");
+    let st = get_session_change_timer(&ctx, char_id).expect("session change timer stored");
+    assert_eq!(st.expires_unix, t_now + 10);
+    assert_eq!(st.location_change_invul_until, t_now + 60);
+    assert!(is_location_change_invulnerable(&ctx, char_id, t_now + 30));
+    assert!(ctx
+        .drain_notifications_for_char(char_id)
+        .iter()
+        .any(|n| n.event == "OnSessionChanged"));
+}

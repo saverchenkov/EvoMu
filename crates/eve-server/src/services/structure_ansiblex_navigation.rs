@@ -198,15 +198,7 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
     let structure_id = args.first().and_then(|a| a.as_i64()).ok_or_else(|| err("MissingStructureId", "CmdJumpThroughStructureStargate requires structureID"))?;
     let sys_id = session.solar_system_id.ok_or_else(|| err("NoSolarSystem", "Session has no solarSystemID"))?;
     let ship_id = session.ship_id.ok_or_else(|| err("NoActiveShip", "Session has no active ship"))?;
-    ctx.validate_ship_movement(
-        char_id,
-        ship_id,
-        crate::services::space_nav_movement_guard::MovementIntent::AnsiblexJump {
-            from_sys: sys_id,
-            to_sys: sys_id,
-        },
-    )
-    .await?;
+    crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "jump")?;
     let now_unix = ctx.now_unix();
     if ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner()).states.get(&char_id).is_some_and(|st| st.is_weapon_timer_active(now_unix)) {
         return Err(err("WeaponsTimerActive", "Cannot jump through structure stargate while weapons timer is active"));
@@ -220,14 +212,14 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
         {
             return Err(err("StructureNotOperational", "Ansiblex stargate is offline, unpowered, or not in this solar system"));
         }
+        if st.type_id != ANSIBLEX_TYPE_ID {
+            return Err(err("StructureNotOperational", "Structure is not an Ansiblex Jump Gate"));
+        }
         if !crate::services::structure_profile_services::can_character_use_jump_bridge(snap, st.structure_id, char_id, now_unix) {
             return Err(err("AccessDenied", "Structure access list denies jump bridge usage"));
         }
         let ext = load_ext_state(snap);
         let linked = resolve_linked_structure_id(snap, &ext, structure_id).ok_or_else(|| err("NoLinkedStructure", "Ansiblex has no linked destination stargate"))?;
-        if st.type_id != ANSIBLEX_TYPE_ID {
-            return Err(err("StructureNotOperational", "Structure is not an Ansiblex Jump Gate"));
-        }
         let dest_st = snap.structures.get(&linked).cloned().ok_or_else(|| err("DestinationStructureNotFound", "Linked destination structure not found"))?;
         if dest_st.state == "Destroyed" {
             return Err(err("DestinationStructureDestroyed", "Linked destination stargate is destroyed"));
@@ -258,6 +250,15 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
         let rad = ctx.sde.types.get(&st.type_id).map(|t| t.radius).unwrap_or(500.0);
         Ok((glam::DVec3::from_array(st.position), rad, dest_st.solar_system_id, glam::DVec3::from_array(dest_st.position)))
     })?;
+    ctx.validate_ship_movement(
+        char_id,
+        ship_id,
+        crate::services::space_nav_movement_guard::MovementIntent::AnsiblexJump {
+            from_sys: sys_id,
+            to_sys: dest_sys_id,
+        },
+    )
+    .await?;
     let old_handle = ctx.systems.get_or_spawn(sys_id);
     let Some((cur_tick, ship_ball)) = old_handle.get_ball_snapshot(ship_id).await.map_err(|e| err("DestinyQueryFailed", e))? else {
         return Err(err("ShipNotInSpace", "Ship is not in space"));
@@ -394,4 +395,8 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
 
 #[cfg(test)] #[path = "structure_ansiblex_navigation_tests.rs"]
 mod structure_ansiblex_navigation_tests;
+
+#[cfg(test)]
+#[path = "structure_ansiblex_navigation_edges_tests.rs"]
+mod structure_ansiblex_navigation_edges_tests;
 

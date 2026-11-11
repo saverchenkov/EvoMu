@@ -137,6 +137,22 @@ fn deposit_mined_ore_records_personal_and_observer_ledgers_and_zero_units_noop()
         assert!(!snap.observer_mining_ledger.contains_key(&refinery_id));
     });
 
+    let uid = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.user_id).unwrap_or(1));
+    let _ = ctx.db.acquire_online_lock(uid, 501, Some(char_id), false, ctx.now_unix());
+    let _ = ctx.drain_notifications_for_char(char_id);
+    deposit_mined_ore_for_asteroid_and_record_ledger_with_waste(
+        &ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        InventoryFlag::Cargo,
+        ore_tid,
+        0,
+        0,
+        Some(asteroid_id),
+        Some([0.0, 0.0, 0.0]),
+    );
+    assert!(ctx.drain_notifications_for_char(char_id).iter().all(|n| n.event != "OnItemChange"));
     deposit_mined_ore_for_asteroid_and_record_ledger_with_waste(
         &ctx,
         char_id,
@@ -149,6 +165,32 @@ fn deposit_mined_ore_records_personal_and_observer_ledgers_and_zero_units_noop()
         Some(asteroid_id),
         Some([0.0, 0.0, 0.0]),
     );
+    let notes_new = ctx.drain_notifications_for_char(char_id);
+    let chg_new = notes_new
+        .iter()
+        .find(|n| n.event == "OnItemChange")
+        .expect("deposit_mined_ore must emit OnItemChange for new stack");
+    assert!(matches!(&chg_new.args[1], eve_proto::PyRep::Dict(d) if d.contains(&(eve_proto::PyRep::Integer(3), eve_proto::PyRep::Integer(0))) && !d.iter().any(|(k, _)| k == &eve_proto::PyRep::Integer(9))));
+
+    deposit_mined_ore_for_asteroid_and_record_ledger_with_waste(
+        &ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        InventoryFlag::Cargo,
+        ore_tid,
+        30,
+        5,
+        Some(asteroid_id),
+        Some([0.0, 0.0, 0.0]),
+    );
+    let notes_stack = ctx.drain_notifications_for_char(char_id);
+    let chg_stack = notes_stack
+        .iter()
+        .find(|n| n.event == "OnItemChange")
+        .expect("deposit_mined_ore must emit OnItemChange for stacked ore");
+    assert!(matches!(&chg_stack.args[1], eve_proto::PyRep::Dict(d) if d.contains(&(eve_proto::PyRep::Integer(9), eve_proto::PyRep::Integer(120))) && !d.iter().any(|(k, _)| k == &eve_proto::PyRep::Integer(3))));
+
     ctx.db.with_snapshot(|snap| {
         let cargo_qty: i64 = snap
             .items
@@ -156,10 +198,11 @@ fn deposit_mined_ore_records_personal_and_observer_ledgers_and_zero_units_noop()
             .filter(|i| i.location_id == ship_id && i.type_id == ore_tid)
             .map(|i| i.quantity as i64)
             .sum();
-        assert_eq!(cargo_qty, 120);
+        assert_eq!(cargo_qty, 150);
         let obs = snap.observer_mining_ledger.get(&refinery_id).expect("observer ledger entry");
-        assert_eq!(obs.len(), 1);
+        assert_eq!(obs.len(), 2);
         assert_eq!(obs[0].quantity, 120);
+        assert_eq!(obs[1].quantity, 30);
         assert_eq!(obs[0].character_id, char_id);
         assert!(snap
             .mining_ledger
@@ -396,3 +439,7 @@ fn dispatch_mining_gameplay_events_and_resolve_wormhole_ore_site_coverage() {
         let _ = resolve_wormhole_ore_site_with_dungeon(&ctx.sde, def);
     }
 }
+
+#[cfg(test)]
+#[path = "space_mining_harvest_extra_unit_tests.rs"]
+mod extra_unit_tests;

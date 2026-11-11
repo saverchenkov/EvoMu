@@ -12,6 +12,10 @@ use eve_sde::SdeRegistry;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
+#[cfg(test)]
+#[path = "sov_fw_insurgency_extra_unit_tests.rs"]
+mod sov_fw_insurgency_extra_unit_tests;
+
 static SHARED_SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
 
 fn test_ctx() -> ServerContext {
@@ -28,7 +32,7 @@ fn test_ctx() -> ServerContext {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sov_prospecting_deposit_respawn_and_site_seeding() {
     let ctx = test_ctx();
     let null_sys = ctx
@@ -100,7 +104,7 @@ async fn sov_prospecting_deposit_respawn_and_site_seeding() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fw_direct_enlistment_and_sov_mgr_info_rpcs() {
     let ctx = test_ctx();
     let char_id = 90_000_001_i64;
@@ -363,5 +367,214 @@ async fn fw_direct_enlistment_and_sov_mgr_info_rpcs() {
     assert!(handle(&ctx, &mut sess, "sovMgr", "", &[], &kw)
         .await
         .is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sov_fw_insurgency_join_faction_guards_and_sov_structures_branches() {
+    let ctx = test_ctx();
+    let null_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| crate::services::sov_gameplay::is_claimable_nullsec_system(&ctx.sde, s.solar_system_id))
+        .map(|s| s.solar_system_id)
+        .unwrap_or(30_004_759);
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_999_001_i64;
+    let hub_id = 1_099_000_001_i64;
+    let kw = HashMap::new();
+    let now = ctx.now_unix();
+
+    let (militia_fid, opp_fid) = {
+        let mut fids: Vec<i64> = ctx
+            .sde
+            .factions
+            .values()
+            .filter(|f| f.militia_corporation_id.is_some())
+            .map(|f| i64::from(f.faction_id))
+            .collect();
+        fids.sort_unstable();
+        (fids[0], fids[1])
+    };
+
+    // Seed character in player corp with cooldown, low standing, corp restriction -> hit all JoinFactionAsCharacter guards, then join cleanly
+    let corp_id = ctx.db.with_mut_snapshot(|snap| {
+        let cid = 98_920_001_i64;
+        snap.corporations.insert(
+            cid,
+            { let mut __corp = eve_db::CorporationRecord::default(); __corp.corporation_id = cid; __corp.ceo_id = char_id; __corp.name = "FwJoinGuardCorp".into(); __corp.ticker = "FJGC".into(); __corp.ensure_wallet_divisions(); __corp },
+        );
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.corporation_id = cid;
+        ch.war_faction_id = None;
+        ch.standings.insert(militia_fid, -5.0);
+        snap.structures.insert(hub_id, UpwellStructureRecord {
+            structure_id: hub_id,
+            type_id: TYPE_SOVEREIGNTY_HUB,
+            owner_corp_id: cid,
+            solar_system_id: null_sys,
+            name: "Null Hub".into(),
+            position: [1_000.0, 0.0, 0.0],
+            state: "ShieldVulnerable".into(),
+            shield_hp: 0.0,
+            armor_hp: 0.0,
+            hull_hp: 0.0,
+            ..Default::default()
+        });
+        snap.sov_runtime.adm_vulnerability_windows.insert(hub_id, (3_600, 7_200));
+        snap.sov_campaign_scores.insert(hub_id, eve_db::snapshot_ext::SovCampaignScoreRecord {
+            structure_id: hub_id,
+            attackers_score: 0.25,
+            defender_score: 0.75,
+        });
+        cid
+    });
+
+    let mut sess = SessionState::new(9201);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(corp_id);
+    sess.solar_system_id = Some(null_sys);
+    sess.ship_id = Some(ship_id);
+
+    // InvalidWarFaction (missing arg & non-militia faction)
+    assert_eq!(handle(&ctx, &mut sess, "facWarMgr", "JoinFactionAsCharacter", &[], &kw).await.unwrap().unwrap_err().code, "InvalidWarFaction");
+    assert_eq!(handle(&ctx, &mut sess, "facWarMgr", "JoinFactionAsCharacter", &[PyRep::Integer(500_021)], &kw).await.unwrap().unwrap_err().code, "InvalidWarFaction");
+
+    // Restricted corp factions guard (FwFactionNotAllowedByCorp), then FwStandingTooLow, then FwAlreadyEnlisted
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().standings.insert(militia_fid, 1.0);
+    });
+    let mut sess_corp = sess.clone();
+    sess_corp.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    let _ = handle(
+        &ctx,
+        &mut sess_corp,
+        "fwCharacterEnlistmentMgr",
+        "SetMyCorpAllowedEnlistmentFactions",
+        &[PyRep::List(vec![PyRep::Integer(opp_fid)])],
+        &kw,
+    )
+    .await;
+    assert_eq!(
+        handle(&ctx, &mut sess, "facWarMgr", "JoinFactionAsCharacter", &[PyRep::Integer(militia_fid)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "FwFactionNotAllowedByCorp"
+    );
+    let _ = handle(
+        &ctx,
+        &mut sess_corp,
+        "fwCharacterEnlistmentMgr",
+        "SetMyCorpAllowedEnlistmentFactions",
+        &[PyRep::List(vec![PyRep::Integer(militia_fid), PyRep::Integer(opp_fid)])],
+        &kw,
+    )
+    .await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().standings.insert(militia_fid, -5.0);
+        snap.characters.get_mut(&char_id).unwrap().war_faction_id = Some(opp_fid);
+    });
+    assert_eq!(handle(&ctx, &mut sess, "facWarMgr", "JoinFactionAsCharacter", &[PyRep::Integer(militia_fid)], &kw).await.unwrap().unwrap_err().code, "FwAlreadyEnlisted");
+
+    // FwStandingTooLow then success (and triggers militia corp join)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().war_faction_id = None;
+    });
+    assert_eq!(handle(&ctx, &mut sess, "facWarMgr", "JoinFactionAsCharacter", &[PyRep::Integer(militia_fid)], &kw).await.unwrap().unwrap_err().code, "FwStandingTooLow");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().standings.insert(militia_fid, 1.0);
+        snap.corporations.remove(&corp_id);
+    });
+    let joined = handle(&ctx, &mut sess, "facWarMgr", "JoinFactionAsCharacter", &[PyRep::Integer(militia_fid)], &kw).await.unwrap().unwrap();
+    assert_eq!(joined.dict_get("enlisted"), Some(&PyRep::Bool(true)));
+    ctx.db.with_mut_snapshot(|snap| {
+        let new_cid = snap.characters[&char_id].corporation_id;
+        sess.corporation_id = Some(new_cid);
+        if let Some(st) = snap.structures.get_mut(&hub_id) {
+            st.owner_corp_id = new_cid;
+        }
+    });
+
+    // AcquireSkyhooks guards: docked, NotNullSecSystem, OutsideSovStructureProximity
+    sess.station_id = Some(60_003_760);
+    assert_eq!(handle(&ctx, &mut sess, "sovMgr", "AcquireSkyhooks", &[PyRep::Integer(i64::from(null_sys))], &kw).await.unwrap().unwrap_err().code, "ShipDocked");
+    sess.station_id = None;
+    assert_eq!(handle(&ctx, &mut sess, "sovMgr", "AcquireSkyhooks", &[PyRep::Integer(30_000_142)], &kw).await.unwrap().unwrap_err().code, "NotNullSecSystem");
+
+    let sys_h = ctx.systems.get_or_spawn(null_sys);
+    let _ = sys_h.spawn_ball(eve_destiny::Ball {
+        id: ship_id,
+        type_id: 587,
+        position: glam::DVec3::new(500_000.0, 0.0, 0.0),
+        velocity: glam::DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 1.0,
+        mass: 1.0e6,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    }).await;
+    assert_eq!(handle(&ctx, &mut sess, "sovMgr", "AcquireSkyhooks", &[PyRep::Integer(i64::from(null_sys))], &kw).await.unwrap().unwrap_err().code, "OutsideSovStructureProximity");
+
+    // GetSovStructuresInfoForSolarSystem: invalid sys, no solar system, valid with ADM window & campaign score & zero fractions
+    assert_eq!(handle(&ctx, &mut sess, "sovMgr", "GetSovStructuresInfoForSolarSystem", &[PyRep::Integer(99_999_999)], &kw).await.unwrap().unwrap_err().code, "InvalidSolarSystemID");
+    let mut nosys = sess.clone();
+    nosys.solar_system_id = None;
+    assert_eq!(handle(&ctx, &mut nosys, "sovMgr", "GetSovStructuresInfoForSolarSystem", &[], &kw).await.unwrap().unwrap_err().code, "NoSolarSystem");
+    assert_eq!(handle(&ctx, &mut nosys, "sovMgr", "GetSovStructuresInfoForLocalSolarSystem", &[], &kw).await.unwrap().unwrap_err().code, "NoSolarSystem");
+
+    let info_res = handle(&ctx, &mut sess, "sovMgr", "GetSovStructuresInfoForSolarSystem", &[PyRep::Integer(i64::from(null_sys))], &kw).await.unwrap().unwrap();
+    let PyRep::List(items) = info_res else { panic!("expected List"); };
+    assert!(!items.is_empty());
+    assert_eq!(items[0].dict_get("shieldFraction"), Some(&PyRep::Real(0.0)));
+    assert_eq!(items[0].dict_get("campaignEventType"), Some(&PyRep::Integer(i64::from(TYPE_SOVEREIGNTY_HUB))));
+
+    // Deposit respawn: install prospecting upgrade in SubSystemSlot0 on hub + cleared SovOre -> executes full respawn!
+    let upg_tid = crate::services::mining_sites::SOV_PROSPECTING_DEPOSITS[0].upgrade_type_id;
+    ctx.db.with_mut_snapshot(|snap| {
+        let hub_id = snap.structures.values().find(|s| s.solar_system_id == null_sys).map(|s| s.structure_id).unwrap();
+        snap.items.insert(888_444_001, eve_db::InventoryItemRecord {
+            item_id: 888_444_001,
+            type_id: upg_tid,
+            owner_id: corp_id,
+            location_id: hub_id,
+            flag: eve_db::InventoryFlag::SubSystemSlot0,
+            quantity: 1,
+            ..Default::default()
+        });
+        snap.asteroids.retain(|_, a| a.solar_system_id != null_sys);
+        let list = snap.cosmic_anomalies.entry(null_sys).or_default();
+        list.retain(|a| a.anomaly_type != "SovOre");
+        list.push(eve_db::CosmicAnomalyRecord {
+            anomaly_id: "SOV-RESPAWN-1".into(),
+            solar_system_id: null_sys,
+            anomaly_type: "SovOre".into(),
+            name: "Cleared SovOre".into(),
+            position: [0.0, 0.0, 0.0],
+            signal_strength: 1.0,
+            ore_types: vec![],
+            remaining_volume: 0.0,
+            created_unix: now.saturating_sub(1_000_000_000),
+            lifetime_seconds: 1,
+            cleared: true,
+        });
+    });
+    tick_sov_prospecting_deposit_respawn(&ctx, null_sys).await;
+    assert!(ctx.db.with_snapshot(|s| s.cosmic_anomalies.get(&null_sys).is_some_and(|l| l.iter().any(|a| a.anomaly_type == "SovOre" && !a.cleared))));
+
+    // Also test seed_system_mining_sites_from_sde in LowSec The Forge (triggers both Ore Signature & Gas site + already_seeded guard)
+    if let Some(forge_low) = ctx.sde.solar_systems.values().find(|s| s.region_id == 10_000_002 && s.security_status > 0.0 && s.security_status < 0.45).map(|s| s.solar_system_id) {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.cosmic_anomalies.remove(&forge_low);
+            snap.cosmic_signatures.remove(&forge_low);
+        });
+        seed_system_mining_sites_from_sde(&ctx, forge_low).await;
+        assert!(ctx.db.with_snapshot(|s| s.cosmic_signatures.get(&forge_low).is_some_and(|l| l.iter().any(|x| x.sig_group == "Gas"))));
+        seed_system_mining_sites_from_sde(&ctx, forge_low).await;
+    }
 }
 

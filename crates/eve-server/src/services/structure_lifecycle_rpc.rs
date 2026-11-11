@@ -40,7 +40,7 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
             if item.owner_id != char_id && item.owner_id != corp_id {
                 return Err(err("ItemOwnershipViolation", format!("Character {char_id} does not own structure item {first_arg}")));
             }
-            if item.location_id != ship_id {
+            if item.location_id != ship_id || item.flag != InventoryFlag::Cargo {
                 return Err(err("ItemNotInCargo", format!("Item {first_arg} is not in active ship {ship_id} cargo")));
             }
             Ok((Some(first_arg), item.type_id))
@@ -562,9 +562,20 @@ pub fn validate_upwell_structure_attack_precheck(
     })
 }
 
+/// Result of applying live combat damage against an Upwell structure.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UpwellCombatDamageOutcome {
+    pub applied_damage: f64,
+    pub destroyed: bool,
+    pub shield_ratio: f64,
+    pub armor_ratio: f64,
+    pub hull_ratio: f64,
+    pub became_invulnerable: bool,
+}
+
 /// Routes live weapon, missile, fighter, drone, or superweapon damage against an Upwell structure
 /// through [`life::apply_structure_damage_typed`], syncing ballpark `CombatState` and returning
-/// `Some((applied_damage, destroyed, shield_ratio, armor_ratio, hull_ratio, became_invuln_or_destroyed))`.
+/// [`UpwellCombatDamageOutcome`].
 pub async fn apply_live_combat_damage_to_upwell_structure(
     ctx: &ServerContext,
     sys_handle: &crate::system_actor::SystemHandle,
@@ -574,7 +585,7 @@ pub async fn apply_live_combat_damage_to_upwell_structure(
     dmg: eve_destiny::DamageVector,
     cycle_secs: f64,
     now_unix: u64,
-) -> Result<Option<(f64, bool, f64, f64, f64, bool)>, BridgeRpcError> {
+) -> Result<Option<UpwellCombatDamageOutcome>, BridgeRpcError> {
     if !validate_upwell_structure_attack_precheck(ctx, sys_id, attacker_char_id, target_ball_id, now_unix)? {
         return Ok(None);
     }
@@ -596,7 +607,14 @@ pub async fn apply_live_combat_damage_to_upwell_structure(
                 (true, 0.0, 0.0, 0.0)
             }
         });
-        return Ok(Some((dmg.total(), dest, s_r, a_r, h_r, dest)));
+        return Ok(Some(UpwellCombatDamageOutcome {
+            applied_damage: dmg.total(),
+            destroyed: dest,
+            shield_ratio: s_r,
+            armor_ratio: a_r,
+            hull_ratio: h_r,
+            became_invulnerable: dest,
+        }));
     }
     if st_type == Some(crate::services::sov_services::TYPE_ORBITAL_SKYHOOK) {
         let rep = crate::services::sov_gameplay::sov_gameplay_skyhook::apply_skyhook_weapon_damage_typed(ctx, target_ball_id, dmg.em, dmg.thermal, dmg.kinetic, dmg.explosive)?;
@@ -612,7 +630,14 @@ pub async fn apply_live_combat_damage_to_upwell_structure(
                 (true, 0.0, 0.0, 0.0, true)
             }
         });
-        return Ok(Some((rep.dict_get("appliedDamage").and_then(eve_proto::PyRep::as_f64).unwrap_or(dmg.total()), dest, s_r, a_r, h_r, inv)));
+        return Ok(Some(UpwellCombatDamageOutcome {
+            applied_damage: rep.dict_get("appliedDamage").and_then(eve_proto::PyRep::as_f64).unwrap_or(dmg.total()),
+            destroyed: dest,
+            shield_ratio: s_r,
+            armor_ratio: a_r,
+            hull_ratio: h_r,
+            became_invulnerable: inv,
+        }));
     }
     if matches!(
         st_type,
@@ -621,17 +646,23 @@ pub async fn apply_live_combat_damage_to_upwell_structure(
                 | crate::services::pve_fob_observatory::FOB_BLOOD_RAIDER_TYPE_ID
         )
     ) {
-        return Ok(Some(
-            crate::services::pve_fob_observatory::apply_live_combat_damage_to_pirate_fob(
-                ctx,
-                sys_id,
-                &sys_handle,
-                attacker_char_id,
-                target_ball_id,
-                dmg.total(),
-            )
-            .await,
-        ));
+        let out = crate::services::pve_fob_observatory::apply_live_combat_damage_to_pirate_fob(
+            ctx,
+            sys_id,
+            &sys_handle,
+            attacker_char_id,
+            target_ball_id,
+            dmg.total(),
+        )
+        .await;
+        return Ok(Some(UpwellCombatDamageOutcome {
+            applied_damage: out.applied_damage,
+            destroyed: out.destroyed,
+            shield_ratio: out.shield_ratio,
+            armor_ratio: out.armor_ratio,
+            hull_ratio: out.hull_ratio,
+            became_invulnerable: out.invulnerable,
+        }));
     }
     if is_fw_site
         || matches!(
@@ -656,7 +687,14 @@ pub async fn apply_live_combat_damage_to_upwell_structure(
                 (true, 0.0, 0.0, 0.0, true)
             }
         });
-        return Ok(Some((dmg.total(), dest, s_r, a_r, h_r, inv)));
+        return Ok(Some(UpwellCombatDamageOutcome {
+            applied_damage: dmg.total(),
+            destroyed: dest,
+            shield_ratio: s_r,
+            armor_ratio: a_r,
+            hull_ratio: h_r,
+            became_invulnerable: inv,
+        }));
     }
     let (out, sr, ar, hr) = ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_ext_state(snap);
@@ -737,7 +775,14 @@ pub async fn apply_live_combat_damage_to_upwell_structure(
         }
         crate::services::structure_weapons_ops::trigger_structure_auto_defense_on_grid(ctx, sys_handle, sys_id, target_ball_id, Some(attacker_char_id), now_unix).await;
     }
-    Ok(Some((out.applied_damage, destroyed, sr, ar, hr, became_invuln)))
+    Ok(Some(UpwellCombatDamageOutcome {
+        applied_damage: out.applied_damage,
+        destroyed,
+        shield_ratio: sr,
+        armor_ratio: ar,
+        hull_ratio: hr,
+        became_invulnerable: became_invuln,
+    }))
 }
 
 /// Applies live combat damage to `target_ball_id`, routing Upwell structures through
@@ -752,7 +797,7 @@ pub async fn apply_damage_structure_or_ball(
     cycle_secs: f64,
     now_unix: u64,
 ) -> Result<Option<(f64, bool, bool)>, BridgeRpcError> {
-    if let Some((app, dest, _, _, _, inv)) = apply_live_combat_damage_to_upwell_structure(
+    if let Some(outcome) = apply_live_combat_damage_to_upwell_structure(
         ctx,
         sys_handle,
         sys_id,
@@ -764,7 +809,7 @@ pub async fn apply_damage_structure_or_ball(
     )
     .await?
     {
-        return Ok(Some((app, dest, inv)));
+        return Ok(Some((outcome.applied_damage, outcome.destroyed, outcome.became_invulnerable)));
     }
     if crate::services::insurgency_services::is_insurgency_stronghold_invulnerable(ctx, sys_id, target_ball_id) {
         return Ok(Some((0.0, false, false)));
@@ -1260,3 +1305,5 @@ pub(crate) use super::structure_ansiblex_navigation::*;
 pub(crate) use crate::services::station_structure_handlers::{handle_get_structure_info, handle_get_structures};
 #[cfg(test)] #[path = "structure_lifecycle_rpc_tests.rs"]
 mod structure_lifecycle_rpc_tests;
+#[cfg(test)] #[path = "structure_lifecycle_rpc_edges2_tests.rs"]
+mod structure_lifecycle_rpc_edges2_tests;

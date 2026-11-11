@@ -104,3 +104,7 @@ fn test_map_service_visits_jumps_and_all_rpc_handlers() {
         panic!("expected list");
     }
 }
+
+#[cfg(test)]
+#[path = "map_service_extra_unit_tests.rs"]
+mod map_service_extra_unit_tests;

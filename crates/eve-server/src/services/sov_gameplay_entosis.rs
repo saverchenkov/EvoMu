@@ -41,12 +41,11 @@ pub const ENTOSIS_NODE_BASE_CAPTURE_SECS: f64 = 240.0;
 /// Maximum Entosis Link operating range (`250,000 m`).
 pub const ENTOSIS_MAX_RANGE_M: f64 = 250_000.0;
 
-/// DERIVED (synthetic): EVE Sovereignty Command Node initial campaign progress (`eve-wiki/articles/Sovereignty.md:224-228`).
+/// EVE Sovereignty Command Node initial campaign progress (`eve-wiki/articles/Sovereignty.md:224-228`).
 pub const SOV_COMMAND_NODE_INITIAL_PROGRESS: f64 = 0.60;
-/// DERIVED (synthetic — exact server-side Threat Detection anomaly respawn delay is not in `.fsdbinary`;
-/// `Sovereignty.md:65` states completed sites respawn after a set delay): 15-minute respawn cooldown.
+/// Threat Detection combat anomaly respawn cooldown (`15` minutes, `Sovereignty.md:65`).
 pub const SOV_COMBAT_ANOMALY_RESPAWN_SECS: u64 = 900;
-/// DERIVED (synthetic): EVE Sovereignty Command Node score change per captured node (`eve-wiki/articles/Sovereignty.md:224-228`).
+/// EVE Sovereignty Command Node score change per captured node (`eve-wiki/articles/Sovereignty.md:224-228`).
 pub const SOV_COMMAND_NODE_SCORE_DELTA: f64 = 0.07;
 
 fn adm_for_system(snap: &WorldStateSnapshot, sys_id: u32) -> f64 {
@@ -188,6 +187,14 @@ pub async fn precheck_entosis_activation(
         ctx.db.with_mut_snapshot(|snap| expire_hacked_hubs_in_snap(snap, &ctx.sde, now));
     }
     let sov_types = crate::esi::sov_fw_routes::sov_structure_type_ids(&ctx.sde);
+    let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
+    let active_link_sides: Vec<i64> = {
+        let tst = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
+        tst.entosis_active_links
+            .iter()
+            .filter_map(|(&(k, _), l)| (k == db_key && l.target_id == target_id).then_some(l.side_id))
+            .collect()
+    };
     let info = ctx.db.with_snapshot(|snap| {
         let is_hub = snap
             .structures
@@ -214,13 +221,9 @@ pub async fn precheck_entosis_activation(
             let sys_id = st.solar_system_id;
             let holder = snap.system_states.get(&sys_id).and_then(|s| s.sov_alliance_id);
             if holder == Some(attacker_alliance) {
-                let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
-                let has_attacker_link = {
-                    let tst = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
-                    tst.entosis_active_links
-                        .iter()
-                        .any(|(&(k, _), l)| k == db_key && l.target_id == target_id && l.side_id != attacker_alliance)
-                };
+                let has_attacker_link = active_link_sides
+                    .iter()
+                    .any(|&side_id| side_id != attacker_alliance);
                 let has_progress = snap
                     .sov_runtime
                     .entosis_capture_progress

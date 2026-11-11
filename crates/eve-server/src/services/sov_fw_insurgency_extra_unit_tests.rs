@@ -465,3 +465,127 @@ async fn sov_mgr_skyhook_proximity_nullsec_checks_and_vuln_window_campaigns() {
     .unwrap();
     assert!(format!("{structs_list:?}").contains("campaignEventType"));
 }
+
+#[tokio::test]
+async fn sov_fw_npc_militia_corp_swap_already_enlisted_docked_and_online_ihub_branches() {
+    let ctx = test_ctx();
+    let char_id = 90_000_002_i64;
+    let npc_corp_id = 1_000_167_i64; // State War Academy (not in snap.corporations)
+    let sys_id = null_sec_sys(&ctx);
+    let fac_info = ctx
+        .sde
+        .factions
+        .values()
+        .find(|f| f.militia_corporation_id.is_some())
+        .expect("SDE has militia faction");
+    let fac_id = i64::from(fac_info.faction_id);
+    let militia_corp_id = i64::from(fac_info.militia_corporation_id.unwrap());
+
+    let mut sess = SessionState::new(722);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(npc_corp_id);
+    sess.solar_system_id = Some(sys_id);
+
+    // 1. Invalid non-militia faction -> InvalidWarFaction
+    assert_eq!(
+        call_sov_fw(
+            &ctx,
+            &mut sess,
+            "facWarMgr",
+            "JoinFactionAsCharacter",
+            &[PyRep::Integer(999_999)]
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "InvalidWarFaction"
+    );
+
+    // 2. NPC-corp character joins militia faction -> swaps corporation_id to militia_corp_id & sets enlisted
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = npc_corp_id;
+            ch.war_faction_id = None;
+            ch.standings.insert(fac_id, 0.5);
+        }
+        snap.corporations.remove(&npc_corp_id);
+    });
+    let joined = call_sov_fw(
+        &ctx,
+        &mut sess,
+        "facWarMgr",
+        "JoinFactionAsCharacter",
+        &[PyRep::Integer(fac_id)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(joined.dict_get("factionID").and_then(PyRep::as_i64), Some(fac_id));
+    assert_eq!(sess.corporation_id, Some(militia_corp_id));
+    assert_eq!(sess.war_faction_id, Some(fac_id));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&char_id].corporation_id, militia_corp_id);
+        assert_eq!(snap.characters[&char_id].war_faction_id, Some(fac_id));
+    });
+
+    // 3. Re-enlisting while already enlisted -> FwAlreadyEnlisted
+    assert_eq!(
+        call_sov_fw(
+            &ctx,
+            &mut sess,
+            "facWarMgr",
+            "JoinFactionAsCharacter",
+            &[PyRep::Integer(fac_id)]
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "FwAlreadyEnlisted"
+    );
+
+    // 4. AcquireSkyhooks while docked -> ShipDocked; empty nullsec -> skyhookOnline=false
+    sess.station_id = Some(60_003_760);
+    assert_eq!(
+        call_sov_fw(&ctx, &mut sess, "sovMgr", "AcquireSkyhooks", &[])
+            .await
+            .unwrap_err()
+            .code,
+        "ShipDocked"
+    );
+    sess.station_id = None;
+    let empty_sky = call_sov_fw(&ctx, &mut sess, "sovMgr", "AcquireSkyhooks", &[])
+        .await
+        .unwrap();
+    assert_eq!(empty_sky.dict_get("skyhookOnline").and_then(PyRep::as_bool), Some(false));
+
+    // 5. Online IHub (ShieldVulnerable + fuel_blocks > 0) reports online=true & system indices
+    let hub_id = 1_098_000_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.system_states.entry(sys_id).or_default();
+        st.solar_system_id = sys_id;
+        st.military_index = 3;
+        st.industrial_index = 2;
+        st.strategic_index = 4;
+        snap.sov_prospecting_levels.insert(sys_id, 5);
+        snap.structures.insert(
+            hub_id,
+            UpwellStructureRecord {
+                structure_id: hub_id,
+                type_id: 32458,
+                owner_corp_id: 98_000_001,
+                solar_system_id: sys_id,
+                name: "Online Hub".into(),
+                position: [0.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                fuel_blocks: 500,
+                ..Default::default()
+            },
+        );
+    });
+    let hub_info = call_sov_fw(&ctx, &mut sess, "sovMgr", "GetInfrastructureHubInfo", &[])
+        .await
+        .unwrap();
+    assert_eq!(hub_info.dict_get("online").and_then(PyRep::as_bool), Some(true));
+    assert_eq!(hub_info.dict_get("militaryIndex").and_then(PyRep::as_i64), Some(3));
+    assert_eq!(hub_info.dict_get("prospectingLevel").and_then(PyRep::as_i64), Some(5));
+}

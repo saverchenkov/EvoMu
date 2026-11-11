@@ -31,7 +31,7 @@ use glam::DVec3;
 
 /// Skyhook reagent maturity cycle (24 hours = 86,400 seconds).
 pub const SKYHOOK_MATURITY_CYCLE_SECS: u64 = 24 * 3_600;
-/// DERIVED (synthetic): matches the 50 units / 3,600s planetary reagent harvest rate in `quasar_sov_resources.rs`.
+/// Baseline hourly planetary reagent harvest rate (scaled per planet in `quasar_sov_skyhook.rs`).
 pub const SKYHOOK_HOURLY_REAGENT_YIELD: u64 = 50;
 /// Orbital Skyhook Reagent Silo ship-link duration (10 minutes = 600 seconds, `Orbital_Skyhook.md`).
 pub const SKYHOOK_SILO_LINK_DURATION_SECS: u64 = 600;
@@ -66,9 +66,74 @@ pub(crate) fn extract_extra_var(extra: Option<&PyRep>, key: &str) -> Option<i64>
     }
 }
 
+/// Computes the next 2-hour Skyhook reagent theft vulnerability window `(start, start + 7_200)`
+/// every 3–4 days (`72h..=96h`) centered around the defender corporation's configured `reinforce_hour`
+/// (`Orbital_Skyhook.md`).
+pub fn next_skyhook_theft_window(
+    skyhook_id: i64,
+    prev_start: u64,
+    reinforce_hour: Option<u8>,
+    now_unix: u64,
+) -> (u64, u64) {
+    let mut start = prev_start;
+    let mut cycle = 0u64;
+    while start.saturating_add(7_200) <= now_unix || cycle == 0 {
+        let hash = (skyhook_id.unsigned_abs())
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(cycle.saturating_add(1).wrapping_mul(1_442_695_040_888_963_407));
+        let days = if (hash >> 8) % 2 == 0 { 3 } else { 4 };
+        let mut next = start.saturating_add(days * 86_400);
+        if let Some(rh) = reinforce_hour {
+            // Align to UTC day boundary + defender reinforce_hour ± 1h bell jitter, clamped inside 3–4d cadence.
+            let day_base = (next / 86_400) * 86_400;
+            let jitter_secs = match hash % 3 {
+                0 => -3_600i64,
+                1 => 0i64,
+                _ => 3_600i64,
+            };
+            let target = (day_base as i64)
+                .saturating_add(i64::from(rh % 24) * 3_600)
+                .saturating_add(jitter_secs)
+                .max(0) as u64;
+            if target >= start.saturating_add(259_200) && target <= start.saturating_add(345_600) {
+                next = target;
+            }
+        }
+        start = next;
+        cycle = cycle.saturating_add(1);
+        if cycle > 10_000 {
+            let interval = 302_400u64;
+            start = prev_start + ((now_unix.saturating_sub(prev_start) / interval) + 1) * interval;
+            break;
+        }
+    }
+    (start, start.saturating_add(7_200))
+}
+
+/// Rolls an expired 2-hour Skyhook theft window forward to its next 3–4 day window and clears stale hackable state.
+pub fn advance_skyhook_theft_window_in_snap(
+    snap: &mut WorldStateSnapshot,
+    skyhook_id: i64,
+    now_unix: u64,
+) -> Option<(u64, u64)> {
+    let reinforce_hour = snap
+        .structures
+        .get(&skyhook_id)
+        .and_then(|st| snap.corp_governance.get(&st.owner_corp_id))
+        .map(|g| g.reinforce_hour);
+    let window = snap.sov_runtime.skyhook_theft_windows.get_mut(&skyhook_id)?;
+    if now_unix >= window.1 {
+        *window = next_skyhook_theft_window(skyhook_id, window.0, reinforce_hour, now_unix);
+        if now_unix < window.0 {
+            snap.sov_runtime.skyhook_hackable.insert(skyhook_id, false);
+        }
+    }
+    Some(*window)
+}
+
 /// Advances hourly planetary reagent harvesting into `insecure_qty` and linear 24h maturity from
 /// `insecure_qty` into `secure_qty` using persisted `(batch_qty, rem)` remainder state so 1 Hz
-/// ticks never integer-truncate maturity progress.
+/// ticks never integer-truncate maturity progress, and advances expired 3–4 day theft windows.
 pub fn advance_skyhook_reagents_in_snap(
     snap: &mut WorldStateSnapshot,
     sde: &eve_sde::SdeRegistry,
@@ -161,6 +226,7 @@ pub fn advance_skyhook_reagents_in_snap(
     snap.sov_runtime
         .skyhook_reagents
         .insert(skyhook_id, (reagent_type, secure_qty.saturating_add(insecure_qty)));
+    let _ = advance_skyhook_theft_window_in_snap(snap, skyhook_id, now_unix);
     Some((reagent_type, secure_qty, insecure_qty))
 }
 
@@ -915,20 +981,20 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
                 }
             }
             let _ = advance_skyhook_reagents_in_snap(snap, &ctx.sde, id, now_unix);
-            let window = snap
-                .sov_runtime
-                .skyhook_theft_windows
-                .entry(id)
-                .or_insert_with(|| (now_unix, now_unix + 7_200));
-            if now_unix >= window.1 {
-                let interval = 302_400; // ~3.5 days offset
-                let mut start = window.0 + interval;
-                if start + 7_200 <= now_unix {
-                    start += ((now_unix - (start + 7_200)) / interval + 1) * interval;
-                }
-                *window = (start, start + 7_200);
+            if !snap.sov_runtime.skyhook_theft_windows.contains_key(&id) {
+                let reinforce_hour = snap
+                    .structures
+                    .get(&id)
+                    .and_then(|st| snap.corp_governance.get(&st.owner_corp_id))
+                    .map(|g| g.reinforce_hour);
+                let initial_window =
+                    next_skyhook_theft_window(id, now_unix, reinforce_hour, now_unix);
+                snap.sov_runtime
+                    .skyhook_theft_windows
+                    .insert(id, initial_window);
             }
-            let (start, end) = *window;
+            let (start, end) = advance_skyhook_theft_window_in_snap(snap, id, now_unix)
+                .unwrap_or_else(|| next_skyhook_theft_window(id, now_unix, None, now_unix));
             let open_now = start <= now_unix && now_unix < end;
             let shield_low = snap.structures.get(&id).is_some_and(|st| {
                 st.state != "Destroyed" && st.shield_hp <= SKYHOOK_BASE_SHIELD_HP * 0.10 + 1e-9
@@ -1110,3 +1176,6 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
 
 #[cfg(test)] #[path = "sov_gameplay_skyhook_tests.rs"]
 mod sov_gameplay_skyhook_tests;
+
+#[cfg(test)] #[path = "sov_gameplay_skyhook_edges2_tests.rs"]
+mod sov_gameplay_skyhook_edges2_tests;

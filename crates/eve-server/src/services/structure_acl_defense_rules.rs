@@ -1325,3 +1325,7 @@ pub(crate) fn handle_character_has_setting(ctx: &ServerContext, session: &mut Se
 #[cfg(test)]
 #[path = "structure_acl_defense_rules_tests.rs"]
 mod structure_acl_defense_rules_tests;
+
+#[cfg(test)]
+#[path = "structure_acl_defense_rules_edges2_tests.rs"]
+mod structure_acl_defense_rules_edges2_tests;

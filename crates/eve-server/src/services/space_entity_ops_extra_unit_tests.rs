@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 //! Additional unit and mutation-killing tests for `space_entity_ops`.
 
 #![forbid(unsafe_code)]
@@ -83,7 +84,7 @@ pub(super) fn make_ball(id: i64, type_id: u32, pos: DVec3) -> Ball {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn entity_unanchor_behavior_debug_extra_fleet_members_and_shipping_unit_branches() {
     let mut ctx = test_ctx();
     let sys_id = 30_000_142_u32;
@@ -103,12 +104,17 @@ async fn entity_unanchor_behavior_debug_extra_fleet_members_and_shipping_unit_br
         reg.types.insert(33_474, t);
     }
 
-    // 1. CmdUnanchor with 2-arg ([ids], target_id) and structure owned by caller_corp_id
+    // 1. CmdUnanchor with 2-arg ([ids], target_id): Upwell structures reject with CannotUnanchorStructure;
+    // corp-owned deployables/starbases succeed via entity.CmdUnanchor
     let struct_id = 1_000_000_800_001_i64;
+    let dep_id = 1_000_000_800_002_i64;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let _ = sys_handle.spawn_ball(make_ball(ship_id, 587, DVec3::ZERO)).await;
     let _ = sys_handle
         .spawn_ball(make_ball(struct_id, 35832, DVec3::new(1_000.0, 0.0, 0.0)))
+        .await;
+    let _ = sys_handle
+        .spawn_ball(make_ball(dep_id, 33_474, DVec3::new(1_500.0, 0.0, 0.0)))
         .await;
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(
@@ -123,13 +129,39 @@ async fn entity_unanchor_behavior_debug_extra_fleet_members_and_shipping_unit_br
                 ..Default::default()
             },
         );
+        snap.items.insert(
+            dep_id,
+            InventoryItemRecord {
+                item_id: dep_id,
+                type_id: 33_474,
+                owner_id: corp_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
     });
+    assert_eq!(
+        call_ops(
+            &ctx,
+            &mut sess,
+            "entity",
+            "CmdUnanchor",
+            &[PyRep::List(vec![]), PyRep::Integer(struct_id)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CannotUnanchorStructure"
+    );
     let res = call_ops(
         &ctx,
         &mut sess,
         "entity",
         "CmdUnanchor",
-        &[PyRep::List(vec![]), PyRep::Integer(struct_id)],
+        &[PyRep::List(vec![]), PyRep::Integer(dep_id)],
     )
     .await
     .unwrap();

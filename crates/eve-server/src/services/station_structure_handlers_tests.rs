@@ -10,6 +10,10 @@ use eve_db::{corp_roles, CorporationRecord, InventoryFlag, InventoryItemRecord, 
 use eve_destiny::{Ball, MovementMode};
 use glam::DVec3;
 
+#[cfg(test)]
+#[path = "station_structure_handlers_extra_unit_tests.rs"]
+mod station_structure_handlers_extra_unit_tests;
+
 #[test]
 fn standing_skills_fulcrum_multiplier_and_upwell_dock_hull_matrix() {
     assert!((effective_standing_with_skills(0.0, 5, 5) - 0.0).abs() < 1e-9);

@@ -5,6 +5,10 @@ use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::
 use eve_db::InventoryFlag;
 use std::sync::Arc;
 
+#[cfg(test)]
+#[path = "wormhole_lifecycle_edges_tests.rs"]
+mod wormhole_lifecycle_edges_tests;
+
 #[tokio::test]
 async fn test_wormhole_lifecycle_profiles_mass_statics_and_k162() {
     let (mut ctx, _session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
@@ -102,4 +106,29 @@ async fn test_wormhole_lifecycle_profiles_mass_statics_and_k162() {
     let drk_sig = drifter_tpl.iter().find(|s| s.signature_id.starts_with("DRK-")).unwrap();
     let guards = ensure_drifter_kspace_guards(&ctx, sys_id, drk_sig, 950_000, DVec3::ZERO).await;
     assert_eq!(guards.len(), 2);
+
+    // Verify full-SDE `WORMHOLE_PROFILES_CACHE` does not shadow a subsequent synthetic `SdeRegistry`
+    let full_ctx = crate::router::ServerContext::for_tests();
+    assert_eq!(system_wormhole_profile_sde(&full_ctx.sde, 31_000_005).0, 12);
+    let mut custom_sde = eve_sde::SdeRegistry::default();
+    custom_sde.solar_systems.insert(
+        31_000_007,
+        eve_sde::SolarSystem {
+            solar_system_id: 31_000_007,
+            constellation_id: 21_000_001,
+            region_id: 11_000_001,
+            name: "J-SyntheticC6".into(),
+            security_status: -1.0,
+            radius: 1.0e12,
+            galactic_pos_ly: [0.0; 3],
+            planet_ids: Vec::new(),
+            stations: Vec::new(),
+            wormhole_class_id: Some(6),
+        },
+    );
+    assert_eq!(
+        system_wormhole_profile_sde(&custom_sde, 31_000_007).0,
+        6,
+        "synthetic SdeRegistry with <= 100 systems must not be shadowed by WORMHOLE_PROFILES_CACHE"
+    );
 }

@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 //! Semantic unit tests split from `space_entity_mining_extra_unit_tests`.
 
 #![forbid(unsafe_code)]
@@ -18,7 +19,7 @@ use glam::DVec3;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_discovered_drones_ownership_and_ice_drone_harvesting() {
     let mut ctx = test_ctx();
     let (sys_id, char_id, corp_id) = (30_000_142, 90_000_001, 98_000_001);
@@ -144,7 +145,7 @@ async fn auto_discovered_drones_ownership_and_ice_drone_harvesting() {
     assert_eq!(st.destination_flag, InventoryFlag::Cargo);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reprocessing_npc_station_corp_hangar_locks_singleton_and_insufficient_funds() {
     let mut ctx = test_ctx();
     let (sys_id, char_id, corp_id) = (30_000_142, 90_000_001, 98_000_001);

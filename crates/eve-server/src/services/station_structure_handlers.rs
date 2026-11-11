@@ -186,7 +186,7 @@ pub fn handle_upgrade_gantry(
             snap.consume_exact_item_quantity(
                 up_iid,
                 1,
-                eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), u_owner),
+                eve_db::ConsumeExactOptions::for_owner_exact((u_owner == char_id).then_some(char_id), u_owner),
             )
             .map_err(|e| err("CustomsOfficeItemLocked", e.to_string()))?;
         }

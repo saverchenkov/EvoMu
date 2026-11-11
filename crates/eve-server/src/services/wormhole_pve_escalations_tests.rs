@@ -2,6 +2,10 @@ use super::*;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_ctx_and_session;
 use crate::services::pve_exploration::{with_pve_exploration_reg, PveSiteInstance};
 
+#[cfg(test)]
+#[path = "wormhole_pve_escalations_edges_tests.rs"]
+mod wormhole_pve_escalations_edges_tests;
+
 #[tokio::test]
 async fn test_wormhole_pve_escalations_avengers_relays_and_downtime() {
     let (ctx, _session, char_id, _ship_id, _sys_id) = make_fighter_ctx_and_session();

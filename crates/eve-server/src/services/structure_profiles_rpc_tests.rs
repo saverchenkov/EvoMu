@@ -369,3 +369,7 @@ async fn create_duplicate_update_default_save_change_and_delete_profiles() {
         .await
         .is_none());
 }
+
+#[cfg(test)]
+#[path = "structure_profiles_rpc_extra_unit_tests.rs"]
+mod extra_unit_tests;

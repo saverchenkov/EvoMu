@@ -540,3 +540,350 @@ async fn mercden_partial_extraction_expired_vuln_reset_aftermath_and_sov_hub_anc
     );
     assert!(ctx.crimewatch.read().unwrap().states.contains_key(&char_id));
 }
+
+#[tokio::test]
+async fn sov_mercden_repair_skyhook_tax_sov_hub_hack_and_anchor_sov_hub_all_branches() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let (null_sys, _, _) = find_claimable_null_with_temperate_planet(&ctx);
+    let ship_id = 1_093_000_001_i64;
+    let den_id = 1_093_000_002_i64;
+    let skyhook_id = 1_093_000_003_i64;
+    let hub_id = 1_093_000_004_i64;
+    let now = ctx.now_unix();
+    let corp_id = ctx.db.with_snapshot(|s| s.characters[&char_id].corporation_id);
+    let ally_id = 99_000_199_i64;
+    let other_corp_id = 98_000_999_i64;
+    let other_ally_id = 99_000_299_i64;
+
+    // 1. apply_mercenary_den_shield_repair: ShipNotInSpace -> MercenaryDenNotFound -> TargetNotInSystem -> TargetOutOfRange -> InReinforcement -> partial -> >= 50% re-enable
+    assert_eq!(
+        apply_mercenary_den_shield_repair(&ctx, null_sys, ship_id, den_id, 1_000.0)
+            .await
+            .unwrap_err()
+            .code,
+        "ShipNotInSpace"
+    );
+    let null_h = ctx.systems.get_or_spawn(null_sys);
+    let _ = null_h
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 648,
+            position: DVec3::new(100_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 200.0,
+            inertia: 1.0,
+            mass: 1.0e6,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    assert_eq!(
+        apply_mercenary_den_shield_repair(&ctx, null_sys, ship_id, den_id, 1_000.0)
+            .await
+            .unwrap_err()
+            .code,
+        "MercenaryDenNotFound"
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            den_id,
+            UpwellStructureRecord {
+                structure_id: den_id,
+                type_id: TYPE_MERCENARY_DEN,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142, // mismatch first
+                name: "Repair Den".into(),
+                position: [0.0, 0.0, 0.0],
+                state: "ArmorReinforced".into(),
+                shield_hp: 0.0,
+                armor_hp: MERC_DEN_BASE_HP,
+                hull_hp: MERC_DEN_BASE_HP,
+                reinforced_until_unix: now + 3_600,
+                ..Default::default()
+            },
+        );
+        snap.sov_runtime.mercenary_dens.insert(
+            den_id,
+            PersistedMercenaryDen {
+                den_id,
+                owner_char_id: char_id,
+                skyhook_id,
+                solar_system_id: null_sys,
+                planet_id: 40_009_077,
+                type_id: TYPE_MERCENARY_DEN,
+                enabled: false,
+                cargo_extraction_enabled: true,
+                development_level: 1,
+                anarchy_level: 0,
+                simulated_at_unix: now,
+                infomorphs: 0,
+                next_activity_generation_unix: now + 3_600,
+            },
+        );
+        snap.sov_runtime
+            .mercenary_den_reinforcement
+            .insert(den_id, (now + 3_600, 0, 0));
+    });
+    assert_eq!(
+        apply_mercenary_den_shield_repair(&ctx, null_sys, ship_id, den_id, 1_000.0)
+            .await
+            .unwrap_err()
+            .code,
+        "TargetNotInSystem"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.get_mut(&den_id).unwrap().solar_system_id = null_sys;
+    });
+    assert_eq!(
+        apply_mercenary_den_shield_repair(&ctx, null_sys, ship_id, den_id, 1_000.0)
+            .await
+            .unwrap_err()
+            .code,
+        "TargetOutOfRange"
+    );
+    let _ = null_h.set_ball_position(ship_id, DVec3::new(1_000.0, 0.0, 0.0)).await;
+    assert_eq!(
+        apply_mercenary_den_shield_repair(&ctx, null_sys, ship_id, den_id, 1_000.0)
+            .await
+            .unwrap_err()
+            .code,
+        "MercenaryDenStillInReinforcement"
+    );
+
+    // Expire reinforcement -> partial repair (< 50%) stays disabled; >= 50% re-enables and clears reinforcement
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.sov_runtime.mercenary_den_reinforcement.insert(den_id, (now - 1, 0, 0));
+    });
+    let (pct1, en1) = apply_mercenary_den_shield_repair(&ctx, null_sys, ship_id, den_id, 1_500.0)
+        .await
+        .unwrap();
+    assert_eq!(pct1, 30);
+    assert!(!en1);
+    let (pct2, en2) = apply_mercenary_den_shield_repair(&ctx, null_sys, ship_id, den_id, 1_500.0)
+        .await
+        .unwrap();
+    assert_eq!(pct2, 60);
+    assert!(en2);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&den_id].state, "ShieldVulnerable");
+        assert!(snap.sov_runtime.mercenary_dens[&den_id].enabled);
+    });
+
+    // 2. handle_confirm_skyhook_sov_management validation, auth, and tax clamping
+    let mut sess = SessionState::new(9603);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(corp_id);
+    assert_eq!(
+        handle_confirm_skyhook_sov_management(&ctx, &sess, &[])
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidArguments"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.entry(corp_id).or_default().ceo_id = char_id + 1;
+        snap.corporations.entry(corp_id).or_default().alliance_id = Some(ally_id);
+        snap.structures.insert(
+            skyhook_id,
+            UpwellStructureRecord {
+                structure_id: skyhook_id,
+                type_id: TYPE_ORBITAL_SKYHOOK,
+                owner_corp_id: corp_id,
+                solar_system_id: null_sys,
+                name: "Tax Hook".into(),
+                position: [0.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+    });
+    assert_eq!(
+        handle_confirm_skyhook_sov_management(&ctx, &sess, &[PyRep::Integer(skyhook_id), PyRep::Integer(25)])
+            .await
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.entry(corp_id).or_default().ceo_id = char_id;
+    });
+    let tax_res = handle_confirm_skyhook_sov_management(
+        &ctx,
+        &sess,
+        &[PyRep::Integer(skyhook_id), PyRep::Integer(150)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(tax_res.dict_get("taxPercent").and_then(PyRep::as_i64), Some(100));
+
+    // 3. try_handle_sov_hub_data_hack: non-hub None, Relic error, Destroyed error, Friendly error, missing skill, success
+    let mut data_mod = ctx.sde.types.values().next().unwrap().clone();
+    data_mod.type_id = 30829;
+    data_mod.name = "Data Analyzer II".into();
+    let mut relic_mod = data_mod.clone();
+    relic_mod.type_id = 22177;
+    relic_mod.name = "Relic Analyzer I".into();
+    assert!(try_handle_sov_hub_data_hack(&ctx, char_id, 999_999_999, 1, &data_mod, 50.0, 20.0).is_none());
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.entry(other_corp_id).or_default().alliance_id = Some(other_ally_id);
+        snap.structures.insert(
+            hub_id,
+            UpwellStructureRecord {
+                structure_id: hub_id,
+                type_id: crate::services::sov_services::TYPE_SOVEREIGNTY_HUB,
+                owner_corp_id: corp_id,
+                solar_system_id: null_sys,
+                name: "Sov Hub".into(),
+                position: [0.0, 0.0, 0.0],
+                state: "Destroyed".into(),
+                ..Default::default()
+            },
+        );
+    });
+    assert_eq!(
+        try_handle_sov_hub_data_hack(&ctx, char_id, hub_id, 1, &relic_mod, 50.0, 20.0)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "DataAnalyzerRequired"
+    );
+    assert_eq!(
+        try_handle_sov_hub_data_hack(&ctx, char_id, hub_id, 1, &data_mod, 50.0, 20.0)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "TargetDestroyed"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.get_mut(&hub_id).unwrap().state = "ShieldVulnerable".into();
+    });
+    assert_eq!(
+        try_handle_sov_hub_data_hack(&ctx, char_id, hub_id, 1, &data_mod, 50.0, 20.0)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CannotHackFriendlySovHub"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.get_mut(&hub_id).unwrap().owner_corp_id = other_corp_id;
+        if let Some(m) = snap.skills.get_mut(&char_id) {
+            m.remove(&3405);
+            m.remove(&3408);
+        }
+    });
+    assert_eq!(
+        try_handle_sov_hub_data_hack(&ctx, char_id, hub_id, 1, &data_mod, 50.0, 20.0)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "HackingSkillRequired"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            3405,
+            TrainedSkillRecord {
+                type_id: 3405,
+                level: 4,
+                skill_points: 50_000.0,
+            },
+        );
+    });
+    let hack_ok = try_handle_sov_hub_data_hack(&ctx, char_id, hub_id, 55, &data_mod, 50.0, 20.0)
+        .unwrap()
+        .unwrap();
+    assert_eq!(hack_ok.dict_get("virusCoherence").and_then(PyRep::as_f64), Some(90.0));
+    assert_eq!(hack_ok.dict_get("virusStrength").and_then(PyRep::as_f64), Some(28.0));
+
+    // 4. handle_anchor_sov_hub_rpc guards and full success path
+    sess.station_id = Some(60_003_760);
+    assert_eq!(handle_anchor_sov_hub_rpc(&ctx, &mut sess, &[]).await.unwrap_err().code, "ShipDocked");
+    sess.station_id = None;
+    sess.solar_system_id = None;
+    assert_eq!(handle_anchor_sov_hub_rpc(&ctx, &mut sess, &[]).await.unwrap_err().code, "NoSolarSystem");
+    sess.solar_system_id = Some(30_000_142);
+    assert_eq!(handle_anchor_sov_hub_rpc(&ctx, &mut sess, &[]).await.unwrap_err().code, "CannotAnchorSovHubOutsideNullSec");
+    sess.solar_system_id = Some(null_sys);
+    sess.ship_id = Some(ship_id + 999);
+    assert_eq!(handle_anchor_sov_hub_rpc(&ctx, &mut sess, &[]).await.unwrap_err().code, "ShipNotInSpace");
+    sess.ship_id = Some(ship_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.entry(corp_id).or_default().alliance_id = None;
+    });
+    sess.alliance_id = None;
+    assert_eq!(handle_anchor_sov_hub_rpc(&ctx, &mut sess, &[]).await.unwrap_err().code, "AllianceRequired");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.entry(corp_id).or_default().alliance_id = Some(ally_id);
+        snap.corporations.entry(corp_id).or_default().ceo_id = char_id + 1;
+    });
+    assert_eq!(handle_anchor_sov_hub_rpc(&ctx, &mut sess, &[]).await.unwrap_err().code, "CorpRoleDenied");
+
+    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.system_states.entry(null_sys).or_default().sov_alliance_id = Some(other_ally_id);
+    });
+    assert_eq!(handle_anchor_sov_hub_rpc(&ctx, &mut sess, &[]).await.unwrap_err().code, "SovereigntyHeldByAnotherAlliance");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.system_states.entry(null_sys).or_default().sov_alliance_id = Some(ally_id);
+    });
+    assert_eq!(handle_anchor_sov_hub_rpc(&ctx, &mut sess, &[]).await.unwrap_err().code, "SovHubAlreadyPresent");
+
+    let hub_item_id = 1_093_000_050_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.remove(&hub_id);
+    });
+    assert_eq!(handle_anchor_sov_hub_rpc(&ctx, &mut sess, &[]).await.unwrap_err().code, "MissingStructureItem");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            hub_item_id,
+            InventoryItemRecord {
+                item_id: hub_item_id,
+                type_id: crate::services::sov_services::TYPE_SOVEREIGNTY_HUB,
+                owner_id: char_id + 123,
+                location_id: ship_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+    });
+    assert_eq!(
+        handle_anchor_sov_hub_rpc(&ctx, &mut sess, &[PyRep::Integer(hub_item_id)])
+            .await
+            .unwrap_err()
+            .code,
+        "ItemOwnershipViolation"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&hub_item_id).unwrap().owner_id = char_id;
+    });
+    assert_eq!(
+        handle_anchor_sov_hub_rpc(&ctx, &mut sess, &[PyRep::Integer(hub_item_id)])
+            .await
+            .unwrap_err()
+            .code,
+        "ItemNotInCargo"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&hub_item_id).unwrap().flag = InventoryFlag::Cargo;
+    });
+    let anchored_hub = handle_anchor_sov_hub_rpc(
+        &ctx,
+        &mut sess,
+        &[PyRep::Integer(hub_item_id), PyRep::String("Custom Hub".into())],
+    )
+    .await
+    .unwrap();
+    assert_eq!(anchored_hub.dict_get("state").and_then(PyRep::as_str), Some("Onlining"));
+    let new_hub_id = anchored_hub.dict_get("structureID").and_then(PyRep::as_i64).unwrap();
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&new_hub_id].name, "Custom Hub");
+        assert!(!snap.items.contains_key(&hub_item_id));
+    });
+}

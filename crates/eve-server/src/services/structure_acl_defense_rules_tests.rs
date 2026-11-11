@@ -527,3 +527,7 @@ fn ex_director_creator_loses_corp_acl_admin_and_can_be_demoted_by_director() {
         "AccessGroupAccessDenied"
     );
 }
+
+#[cfg(test)]
+#[path = "structure_acl_defense_rules_extra_unit_tests.rs"]
+mod extra_unit_tests;

@@ -13,6 +13,10 @@ use eve_sde::{InvType, SdeRegistry, WormholeTypeInfo};
 use glam::DVec3;
 use std::sync::{Arc, OnceLock};
 
+#[cfg(test)]
+#[path = "space_docking_cloaking_extra_unit_tests.rs"]
+mod extra_unit_tests;
+
 static SHARED_SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
 
 fn test_ctx() -> ServerContext {
@@ -182,7 +186,7 @@ fn compute_wormhole_stages_reports_all_mass_and_lifetime_states() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ensure_system_signatures_seeds_and_expires_wormholes_and_sites() {
     let ctx = test_ctx();
     let wh_sys = ctx
@@ -233,7 +237,7 @@ async fn ensure_system_signatures_seeds_and_expires_wormholes_and_sites() {
     expire_and_respawn_wormholes_in_cluster(&ctx, now_u).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn execute_cosmic_wormhole_jump_roundtrips_k162_and_handles_collapse_and_polarization() {
     let mut ctx = test_ctx();
     let wh_type_id = 99_710;
@@ -430,7 +434,7 @@ async fn execute_cosmic_wormhole_jump_roundtrips_k162_and_handles_collapse_and_p
     assert!(is_collapsed_after);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn criminal_cosmic_wormhole_jump_into_highsec_schedules_concord() {
     let mut ctx = test_ctx();
     let wh_type_id = 99_801_u32;

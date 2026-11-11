@@ -326,3 +326,7 @@ async fn structure_defense_volley_target_locking_weapon_activation_and_auto_defe
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&charge_id].quantity), charge_before);
     assert!(sys_handle.get_target_locks(st_id).await.unwrap().is_empty());
 }
+
+#[cfg(test)]
+#[path = "structure_weapons_ops_extra_unit_tests.rs"]
+mod extra_unit_tests;

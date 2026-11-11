@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 //! Extra unit and mutation-killing tests for `space_entity_mining.rs`.
 
 #![forbid(unsafe_code)]
@@ -126,7 +127,7 @@ pub(super) fn make_ship_ball(ship_id: i64, type_id: u32, pos: DVec3) -> Ball {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ice_harvesting_module_compatibility_and_bound_system_resolution() {
     let mut ctx = test_ctx();
     let (sys_id, char_id, corp_id) = (30_000_142, 90_000_001, 98_000_001);

@@ -303,9 +303,6 @@ pub fn system_wormhole_profile_sde(
     sde: &eve_sde::SdeRegistry,
     sys_id: SolarSystemId,
 ) -> (u8, bool, bool, &'static str) {
-    if let Some(map) = WORMHOLE_PROFILES_CACHE.get() {
-        return map.get(&sys_id).copied().unwrap_or((0, false, false, "None"));
-    }
     if sde.solar_systems.len() > 100 {
         let map = WORMHOLE_PROFILES_CACHE.get_or_init(|| build_wormhole_profiles_map(sde));
         return map.get(&sys_id).copied().unwrap_or((0, false, false, "None"));
@@ -1389,4 +1386,8 @@ pub async fn ensure_drifter_kspace_guards(
 #[cfg(test)]
 #[path = "wormhole_lifecycle_ops_tests.rs"]
 mod wormhole_lifecycle_ops_tests;
+
+#[cfg(test)]
+#[path = "wormhole_lifecycle_ops_edges_tests.rs"]
+mod wormhole_lifecycle_ops_edges_tests;
 

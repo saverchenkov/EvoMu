@@ -2,14 +2,14 @@
 
 #![forbid(unsafe_code)]
 
-use super::station_structure::structure_profiles_rpc::*;
-use super::station_structure::structure_upwell_ops::{
+use crate::services::station_structure::structure_profiles_rpc::*;
+use crate::services::station_structure::structure_upwell_ops::{
     load_ext_state, save_ext_state, AccessGroupRecord,
 };
-use super::structure_acl_defense_rules::{
+use crate::services::structure_acl_defense_rules::{
     load_defense_settings, save_defense_settings, StructureDefenseSettings,
 };
-use super::structure_profile_services::{
+use crate::services::structure_profile_services::{
     CATEGORY_HULL_DEFENSE, SETTING_DEFENSE_CAN_CONTROL_STRUCTURE, SETTING_HOUSING_CAN_DOCK,
 };
 use crate::router::ServerContext;
@@ -486,4 +486,216 @@ fn save_profile_settings_3tuple_2tuple_and_dict_matrix() {
             expected
         );
     }
+}
+
+#[test]
+fn save_profile_settings_remaining_matrix_duplicate_and_validation_branches() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let corp_id = 98_000_001_i64;
+    let sess = make_session(char_id, corp_id, service_roles::ROLE_ADMIN);
+
+    let gid_ok = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
+        }
+        let mut ext = load_ext_state(snap);
+        ext.owner_groups.insert(
+            901_001,
+            AccessGroupRecord {
+                group_id: 901_001,
+                creator_id: char_id,
+                owner_corp_id: corp_id,
+                name: "Allowed".into(),
+                description: String::new(),
+                ..Default::default()
+            },
+        );
+        save_ext_state(snap, &ext);
+        901_001_i64
+    });
+
+    let p1 = handle_create_profile(&ctx, &sess, &[PyRep::String("MatrixBase".into())])
+        .unwrap()
+        .as_i64()
+        .unwrap();
+    let p2 = handle_create_profile(&ctx, &sess, &[PyRep::String("MatrixTarget".into())])
+        .unwrap()
+        .as_i64()
+        .unwrap();
+
+    // Tuple-list payload covering 3-tuples & 2-tuples (setting 17, setting 1, setting 12, service taxes)
+    let list_payload = PyRep::List(vec![
+        PyRep::Tuple(vec![
+            PyRep::Integer(SETTING_DEFENSE_CAN_CONTROL_STRUCTURE),
+            PyRep::Integer(gid_ok),
+            PyRep::Bool(false),
+        ]),
+        PyRep::Tuple(vec![
+            PyRep::Integer(SETTING_DEFENSE_CAN_CONTROL_STRUCTURE),
+            PyRep::Integer(0),
+            PyRep::Integer(1),
+        ]),
+        PyRep::Tuple(vec![
+            PyRep::Integer(SETTING_DEFENSE_CAN_CONTROL_STRUCTURE),
+            PyRep::Integer(0),
+            PyRep::Bool(true),
+        ]),
+        PyRep::Tuple(vec![
+            PyRep::Integer(SETTING_HOUSING_CAN_DOCK),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+        ]),
+        PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(0), PyRep::Real(0.05)]),
+        PyRep::Tuple(vec![
+            PyRep::Integer(SETTING_DEFENSE_CAN_CONTROL_STRUCTURE),
+            PyRep::Integer(0),
+        ]),
+        PyRep::Tuple(vec![
+            PyRep::Integer(SETTING_DEFENSE_CAN_CONTROL_STRUCTURE),
+            PyRep::Integer(char_id),
+        ]),
+        PyRep::Tuple(vec![
+            PyRep::Integer(SETTING_DEFENSE_CAN_CONTROL_STRUCTURE),
+            PyRep::Bool(true),
+        ]),
+        PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Bool(true)]),
+        PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(1)]),
+        PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(gid_ok)]),
+        PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Real(0.05)]),
+        PyRep::Tuple(vec![PyRep::Integer(8), PyRep::Real(0.15)]),
+        PyRep::Tuple(vec![PyRep::Integer(9), PyRep::Integer(1)]),
+        PyRep::Tuple(vec![PyRep::Integer(10), PyRep::Bool(true)]),
+    ]);
+    assert_eq!(
+        handle_save_profile_settings(&ctx, &sess, &[PyRep::Integer(p1), list_payload]).unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(
+        handle_save_profile_settings(
+            &ctx,
+            &sess,
+            &[
+                PyRep::Integer(p1),
+                PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(8), PyRep::Real(1.25)])]),
+            ],
+        )
+        .unwrap_err()
+        .code,
+        "InvalidStructureTaxRate"
+    );
+
+    // Dict payload covering empty lists, integer lists, tuple/kv items, scalars
+    let dict_payload = PyRep::Dict(vec![
+        (
+            PyRep::Integer(SETTING_DEFENSE_CAN_CONTROL_STRUCTURE),
+            PyRep::Bool(false),
+        ),
+        (PyRep::Integer(SETTING_HOUSING_CAN_DOCK), PyRep::List(vec![])),
+        (PyRep::Integer(8), PyRep::List(vec![])),
+        (
+            PyRep::Integer(SETTING_DEFENSE_CAN_CONTROL_STRUCTURE),
+            PyRep::List(vec![
+                PyRep::Integer(char_id),
+                PyRep::Tuple(vec![PyRep::Integer(gid_ok), PyRep::Integer(-1)]),
+                PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Bool(true)]),
+                PyRep::keyval([
+                    ("groupID", PyRep::Integer(gid_ok)),
+                    ("value", PyRep::Bool(false)),
+                ]),
+                PyRep::Dict(vec![
+                    (PyRep::String("groupID".into()), PyRep::Integer(0)),
+                    (PyRep::String("value".into()), PyRep::Real(0.0)),
+                ]),
+            ]),
+        ),
+        (
+            PyRep::Integer(1),
+            PyRep::List(vec![
+                PyRep::Integer(gid_ok),
+                PyRep::keyval([
+                    ("groupID", PyRep::Integer(0)),
+                    ("value", PyRep::Bool(true)),
+                ]),
+                PyRep::keyval([
+                    ("groupID", PyRep::Integer(0)),
+                    ("value", PyRep::Integer(0)),
+                ]),
+                PyRep::keyval([
+                    ("groupID", PyRep::Integer(0)),
+                    ("value", PyRep::Real(0.05)),
+                ]),
+                PyRep::keyval([
+                    ("groupID", PyRep::Integer(gid_ok)),
+                    ("value", PyRep::Integer(1)),
+                ]),
+            ]),
+        ),
+        (
+            PyRep::Integer(12),
+            PyRep::List(vec![
+                PyRep::Integer(gid_ok),
+                PyRep::keyval([
+                    ("groupID", PyRep::Integer(0)),
+                    ("value", PyRep::Real(0.15)),
+                ]),
+            ]),
+        ),
+        (PyRep::Integer(19), PyRep::Integer(1)),
+        (PyRep::Integer(13), PyRep::Real(0.25)),
+        (PyRep::Integer(14), PyRep::Bool(false)),
+        (PyRep::Integer(15), PyRep::Integer(2)),
+    ]);
+    assert_eq!(
+        handle_save_profile_settings(&ctx, &sess, &[PyRep::Integer(p1), dict_payload]).unwrap(),
+        PyRep::Bool(true)
+    );
+    let dict_scalar = PyRep::Dict(vec![
+        (
+            PyRep::Integer(SETTING_DEFENSE_CAN_CONTROL_STRUCTURE),
+            PyRep::Integer(char_id),
+        ),
+        (PyRep::Integer(SETTING_HOUSING_CAN_DOCK), PyRep::Integer(0)),
+    ]);
+    assert_eq!(
+        handle_save_profile_settings(&ctx, &sess, &[PyRep::Integer(p1), dict_scalar]).unwrap(),
+        PyRep::Bool(true)
+    );
+
+    // DuplicateProfile copying into existing target_id (`L1033-1036`)
+    assert!(handle_duplicate_profile(&ctx, &sess, &[PyRep::Integer(p1), PyRep::Integer(p2)]).is_ok());
+
+    // Invalid defense policy fields (`L537-550`) + invalid character id (`L1000-1003`)
+    for (bad_val, expected) in [
+        (
+            PyRep::Tuple(vec![PyRep::Bool(true), PyRep::Bool(true), PyRep::String("bad".into())]),
+            "InvalidDefenseSettings",
+        ),
+        (
+            PyRep::Tuple(vec![PyRep::Bool(true), PyRep::Bool(true), PyRep::Bool(false), PyRep::String("bad".into())]),
+            "InvalidDefenseStandingThreshold",
+        ),
+        (
+            PyRep::Tuple(vec![PyRep::Bool(true), PyRep::Bool(true), PyRep::Bool(false), PyRep::Real(0.0), PyRep::String("bad".into())]),
+            "InvalidDefenseSettings",
+        ),
+    ] {
+        let p = PyRep::Dict(vec![(PyRep::Integer(CATEGORY_HULL_DEFENSE), bad_val)]);
+        assert_eq!(
+            handle_save_profile_settings(&ctx, &sess, &[PyRep::Integer(p1), p])
+                .unwrap_err()
+                .code,
+            expected
+        );
+    }
+    assert_eq!(
+        handle_save_profile_settings(
+            &ctx,
+            &sess,
+            &[PyRep::Integer(p1), PyRep::Dict(vec![(PyRep::Integer(SETTING_DEFENSE_CAN_CONTROL_STRUCTURE), PyRep::Integer(99_999_999))])],
+        )
+        .unwrap_err()
+        .code,
+        "InvalidAccessEntity"
+    );
 }

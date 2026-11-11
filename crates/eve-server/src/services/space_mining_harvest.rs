@@ -191,12 +191,21 @@ pub fn deposit_mined_ore_for_asteroid_and_record_ledger_with_waste(
     asteroid_id: Option<i64>,
     ast_pos: Option<[f64; 3]>,
 ) {
-    if mined_units > 0
-        && ctx
-            .db
-            .add_or_stack_item(char_id, ship_id, target_flag, ore_type_id, mined_units as i64)
-            .is_ok()
+    if let Some(item) = (mined_units > 0)
+        .then(|| {
+            ctx.db
+                .add_or_stack_item(char_id, ship_id, target_flag, ore_type_id, mined_units as i64)
+                .ok()
+        })
+        .flatten()
     {
+        let prev_qty = i64::from(item.quantity).saturating_sub(mined_units as i64);
+        let changes = if prev_qty > 0 {
+            vec![(9, eve_proto::PyRep::Integer(prev_qty))]
+        } else {
+            vec![(3, eve_proto::PyRep::Integer(0))]
+        };
+        ctx.emit_item_change_routed(char_id, &item, changes);
         let now_unix = ctx.now_unix_secs();
         let _ = ctx.db.record_mining_ledger_entry_with_waste(
             char_id,
@@ -860,7 +869,27 @@ pub async fn spawn_wormhole_ore_guards(
             max_velocity: max_vel, inertia, mass: npc_mass, radius: npc_rad,
             speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop,
         };
-        let _ = handle.spawn_ball_with_combat(ball, ctx.build_type_combat_state(npc_tid)).await;
+        let fac_owner = npc_rec
+            .and_then(|t| t.faction_id)
+            .filter(|&f| f > 0)
+            .map(i64::from)
+            .unwrap_or(500_021);
+        let npc_meta = eve_destiny::SlimItemMeta {
+            group_id: npc_rec.map(|t| t.group_id).unwrap_or(301),
+            category_id: npc_rec.map(|t| t.category_id).unwrap_or(11),
+            owner_id: fac_owner,
+            char_id: None,
+            corp_id: crate::services::combat_crimewatch::combat_npc_ai::resolve_npc_corp_id_for_faction(
+                ctx,
+                fac_owner,
+            ),
+            alliance_id: -1,
+            security_status: -1.0,
+            is_cloaked: false,
+            name: npc_rec.and_then(|t| (!t.name.is_empty()).then(|| t.name.clone())),
+            ..Default::default()
+        };
+        let _ = handle.spawn_ball_with_meta(ball, ctx.build_type_combat_state(npc_tid), npc_meta).await;
     }
 }
 

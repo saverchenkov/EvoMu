@@ -747,14 +747,15 @@ fn handle_move_eject_time_gm(
     let wrap_id = rpc.req_positive_i64(0, "wrapID")?;
     let new_eject_time = rpc.req_non_negative_i64(1, "newEjectTime")?;
     {
-        let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+        ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
             let mut ext = load_ext_state(snap);
-            if let Some(wrap) = ext.asset_safety_wraps.get_mut(&wrap_id) {
-                wrap.deliverable_after_unix = new_eject_time as u64;
-                save_ext_state(snap, &ext);
-            }
+            let Some(wrap) = ext.asset_safety_wraps.get_mut(&wrap_id) else {
+                return Err(err("AssetSafetyWrapNotFound", format!("Asset safety wrap {wrap_id} not found")));
+            };
+            wrap.deliverable_after_unix = new_eject_time as u64;
+            save_ext_state(snap, &ext);
             Ok(())
-        });
+        })?;
     }
     Ok(PyRep::Bool(true))
 }
@@ -1285,3 +1286,6 @@ pub(crate) fn transfer_structure_corp_ownership_in_snap(
 #[cfg(test)]
 #[path = "structure_upwell_ops_tests.rs"]
 mod structure_upwell_ops_tests;
+#[cfg(test)]
+#[path = "structure_upwell_ops_edges2_tests.rs"]
+mod structure_upwell_ops_edges2_tests;

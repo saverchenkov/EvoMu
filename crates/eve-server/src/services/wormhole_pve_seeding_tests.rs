@@ -1,21 +1,34 @@
 use super::*;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_ctx_and_session;
 
+#[cfg(test)]
+#[path = "wormhole_pve_seeding_extra_unit_tests.rs"]
+mod wormhole_pve_seeding_extra_unit_tests;
+
 #[tokio::test]
 async fn test_wormhole_pve_seeding_sentries_loot_and_special_systems() {
     let (ctx, _session, char_id, _ship_id, sys_id) = make_fighter_ctx_and_session();
 
     // Test sentry type classification and capital group helpers
     assert_eq!(sleeper_sentry_type_for_class(1), 30_460);
+    assert_eq!(sleeper_sentry_type_for_class(2), 30_460);
     assert_eq!(sleeper_sentry_type_for_class(3), 30_461);
+    assert_eq!(sleeper_sentry_type_for_class(4), 30_461);
+    assert_eq!(sleeper_sentry_type_for_class(5), 30_462);
     assert_eq!(sleeper_sentry_type_for_class(6), 30_462);
     assert!(is_sleeper_sentry_type(30_460));
+    assert!(is_sleeper_sentry_type(30_461));
+    assert!(is_sleeper_sentry_type(30_462));
     assert!(!is_sleeper_sentry_type(34));
 
     assert_eq!(capital_escalation_class_for_group(485), Some(true));
+    assert_eq!(capital_escalation_class_for_group(4594), Some(true));
     assert_eq!(capital_escalation_class_for_group(547), Some(false));
+    assert_eq!(capital_escalation_class_for_group(1538), Some(false));
     assert_eq!(capital_escalation_class_for_group(25), None);
-    assert!(is_any_capital_group(30));
+    for g in [485, 4594, 547, 1538, 30, 659] {
+        assert!(is_any_capital_group(g));
+    }
     assert!(!is_any_capital_group(25));
 
     // Test spawn_sleeper_sentry_tower and can_sentry_fire_and_record

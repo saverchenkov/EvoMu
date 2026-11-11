@@ -372,3 +372,101 @@ async fn warzone_fallback_sov_decay_and_partial_command_node_regeneration() {
         assert!((sc.attackers_score - 0.30).abs() < 1e-6);
     });
 }
+
+#[test]
+fn adm_vulnerability_window_refresh_full_boundary_matrix() {
+    let ctx = test_ctx();
+    let null_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| s.security_status < 0.0 && s.solar_system_id < 31_000_000)
+        .map(|s| s.solar_system_id)
+        .unwrap_or(30_002_505);
+    let hub_id = 1_091_000_777_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.system_states.insert(
+            null_sys,
+            SystemDynamicState {
+                solar_system_id: null_sys,
+                sov_alliance_id: Some(99_000_001),
+                military_index: 0,
+                industrial_index: 0,
+                strategic_index: 0,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            hub_id,
+            UpwellStructureRecord {
+                structure_id: hub_id,
+                type_id: 32458,
+                owner_corp_id: 98_000_001,
+                solar_system_id: null_sys,
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+
+        // Invalid sentinel / out-of-range pairs must NOT trigger refresh (must stay skipped):
+        // - (0, 0): sv == 0 && ev == 0
+        // - (0, 86_400): sv == 0 && ev >= 86_400
+        // - (90_000, 3_600): sv > 86_400
+        // - (3_600, 90_000): ev > 86_400
+        for &(sv, ev) in &[(0_u64, 0_u64), (0, 86_400), (90_000, 3_600), (3_600, 90_000)] {
+            snap.sov_runtime
+                .adm_vulnerability_windows
+                .insert(hub_id, (sv, ev));
+            snap.structure_vulnerability_windows.remove(&hub_id);
+            refresh_system_adm_vulnerability_windows_in_snap(snap, null_sys);
+            assert_eq!(
+                snap.sov_runtime.adm_vulnerability_windows.get(&hub_id).copied(),
+                Some((sv, ev)),
+                "invalid window ({sv}, {ev}) should not be refreshed"
+            );
+            assert!(
+                !snap.structure_vulnerability_windows.contains_key(&hub_id),
+                "invalid window ({sv}, {ev}) should not update structure_vulnerability_windows"
+            );
+        }
+
+        // Valid boundary pairs MUST trigger refresh and populate structure_vulnerability_windows:
+        // - (0, 3_600): sv == 0, non-zero ev < 86_400
+        // - (3_600, 0): non-zero sv <= 86_400, ev == 0
+        // - (3_600, 86_400): non-zero sv, ev == 86_400 (boundary of > 86_400 and != sv==0)
+        // - (86_400, 3_600): sv == 86_400 (boundary of > 86_400)
+        // - (3_600, 7_200): both strictly inside (0, 86_400)
+        for &(sv, ev) in &[
+            (0_u64, 3_600_u64),
+            (3_600, 0),
+            (3_600, 86_400),
+            (86_400, 3_600),
+            (3_600, 7_200),
+        ] {
+            snap.sov_runtime
+                .adm_vulnerability_windows
+                .insert(hub_id, (sv, ev));
+            snap.structure_vulnerability_windows.remove(&hub_id);
+            refresh_system_adm_vulnerability_windows_in_snap(snap, null_sys);
+            let refreshed = snap
+                .structure_vulnerability_windows
+                .get(&hub_id)
+                .copied();
+            assert!(
+                refreshed.is_some(),
+                "valid window ({sv}, {ev}) must refresh structure_vulnerability_windows"
+            );
+            assert_eq!(
+                snap.sov_runtime.adm_vulnerability_windows.get(&hub_id).copied(),
+                refreshed,
+                "valid window ({sv}, {ev}) must sync adm_vulnerability_windows"
+            );
+            assert_ne!(
+                snap.sov_runtime.adm_vulnerability_windows.get(&hub_id).copied(),
+                Some((sv, ev)),
+                "valid window ({sv}, {ev}) must change to ADM-scaled duration"
+            );
+        }
+    });
+}

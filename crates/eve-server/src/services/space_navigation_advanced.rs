@@ -10,7 +10,6 @@
 use crate::router::ServerContext;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
-use std::sync::OnceLock;
 
 fn err(code: &str, msg: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
@@ -30,10 +29,8 @@ struct NavDogmaAttrIds {
     max_velocity_modifier: Option<u16>,
 }
 
-static NAV_DOGMA_ATTR_IDS: OnceLock<NavDogmaAttrIds> = OnceLock::new();
-
 fn nav_attr_ids(sde: &eve_sde::SdeRegistry) -> NavDogmaAttrIds {
-    *NAV_DOGMA_ATTR_IDS.get_or_init(|| NavDogmaAttrIds {
+    NavDogmaAttrIds {
         disallow_docking: find_attr_id_by_name(sde, "disallowDocking"),
         disallow_tethering: find_attr_id_by_name(sde, "disallowTethering"),
         siege_warp_status: find_attr_id_by_name(sde, "siegeModeWarpStatus"),
@@ -46,7 +43,7 @@ fn nav_attr_ids(sde: &eve_sde::SdeRegistry) -> NavDogmaAttrIds {
         ),
         max_velocity_modifier: find_attr_id_by_name(sde, "maxVelocityModifier")
             .or_else(|| find_attr_id_by_name(sde, "maxVelocityCloaked")),
-    })
+    }
 }
 
 /// Cached lookup for cloak velocity multiplier attribute ID.

@@ -2,17 +2,12 @@
 
 #![forbid(unsafe_code)]
 
-use super::super::*;
 use super::*;
 use crate::services::station_structure::structure_upwell_ops::{
-    load_ext_state, save_ext_state, AccessGroupRecord, StructureAccessProfile,
-    StructureLifecycleState,
+    load_ext_state, save_ext_state, StructureAccessProfile, StructureLifecycleState,
 };
 use crate::services::structure_acl_defense_rules::{save_defense_settings, StructureDefenseSettings};
-use crate::services::structure_control_ops::*;
-use eve_db::{
-    CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents, UpwellStructureRecord,
-};
+use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, CombatState, MovementMode, SlimItemMeta};
 use eve_machonet::{service_roles, SessionState};
 use eve_proto::PyRep;

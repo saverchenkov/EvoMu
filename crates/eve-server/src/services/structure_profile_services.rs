@@ -856,6 +856,30 @@ pub fn require_structure_service_access_in_snap(
             )
         }
         StructureServiceKind::JumpBridge => {
+            let has_jb_service = if let Some(c) = ctx {
+                is_v24_or_legacy_service_online(c, snap, structure_id, SERVICE_JUMP_BRIDGE)
+            } else {
+                life::is_operational(&st.state)
+                    && ((st.type_id == 35_841 && st.quantum_core_installed && st.fuel_blocks > 0)
+                        || (st.quantum_core_installed
+                            && snap.items.values().any(|it| {
+                                it.location_id == structure_id
+                                    && it.type_id == 35_913
+                                    && it.quantity > 0
+                                    && (164..=171).contains(&(it.flag as u16))
+                                    && snap
+                                        .module_online_states
+                                        .get(&it.item_id)
+                                        .copied()
+                                        .unwrap_or(false)
+                            })))
+            };
+            if !has_jb_service {
+                return Err(err(
+                    "StructureServiceAccessDenied",
+                    format!("Structure {structure_id} does not have an online jump bridge service"),
+                ));
+            }
             let ext = load_ext_state(snap);
             if let Some(prof) = effective_profile_for_structure(&ext, structure_id, now_opt) {
                 if prof.blocked_characters.contains(&char_id) {

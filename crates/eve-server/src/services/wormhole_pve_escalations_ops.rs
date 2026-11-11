@@ -185,3 +185,7 @@ pub fn configure_drifter_response_boss_entity(sde: &SdeRegistry, entity: &mut Ex
         DRIFTER_BOSS_BLUE_LOOT_QUANTITY,
     ));
 }
+
+#[cfg(test)]
+#[path = "wormhole_pve_escalations_ops_edges_tests.rs"]
+mod wormhole_pve_escalations_ops_edges_tests;

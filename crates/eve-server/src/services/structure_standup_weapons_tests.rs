@@ -13,6 +13,10 @@ use eve_sde::{InvType, SdeRegistry};
 use glam::DVec3;
 use std::sync::{Arc, OnceLock};
 
+#[cfg(test)]
+#[path = "structure_standup_weapons_extra_unit_tests.rs"]
+mod structure_standup_weapons_extra_unit_tests;
+
 static SHARED_SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
 
 fn test_ctx() -> ServerContext {

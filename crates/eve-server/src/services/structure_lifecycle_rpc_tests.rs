@@ -20,6 +20,10 @@ use std::sync::{Arc, OnceLock};
 #[path = "structure_combat_and_fitting_rpc_tests.rs"]
 mod structure_combat_and_fitting_rpc_tests;
 
+#[cfg(test)]
+#[path = "structure_lifecycle_cargo_fuel_edge_tests.rs"]
+mod structure_lifecycle_cargo_fuel_edge_tests;
+
 pub(super) static SHARED_SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
 
 pub(super) fn test_ctx() -> ServerContext {
@@ -367,7 +371,7 @@ async fn anchor_validates_docked_ship_cargo_highsec_palatine_and_succeeds_v24() 
     assert!(ball.is_some());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn anchor_ansiblex_with_v24_extra_vars_auto_links_reciprocal_gates() {
     let ctx = test_ctx();
     let sov_systems: Vec<u32> = ctx

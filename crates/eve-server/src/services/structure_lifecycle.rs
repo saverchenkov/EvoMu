@@ -1241,13 +1241,10 @@ fn burn_fuel(ctx: &ServerContext, snap: &mut WorldStateSnapshot, life: &mut Stru
         }
     }
     life.online_modules.retain(|iid| snap.module_online_states.get(iid).copied().unwrap_or(false));
-    let mut tick = life.last_fuel_tick_unix.unwrap_or(now);
-    while tick + SECS_PER_HOUR <= now {
-        tick += SECS_PER_HOUR;
-        let online = online_service_modules(ctx, snap, structure_id);
-        if online.is_empty() {
-            continue;
-        }
+    let start_tick = life.last_fuel_tick_unix.unwrap_or(now);
+    let elapsed_hours = now.saturating_sub(start_tick) / SECS_PER_HOUR;
+    let mut online = online_service_modules(ctx, snap, structure_id);
+    if elapsed_hours > 0 && !online.is_empty() {
         if !snap.structures.contains_key(&structure_id) {
             return;
         }
@@ -1257,16 +1254,37 @@ fn burn_fuel(ctx: &ServerContext, snap: &mut WorldStateSnapshot, life: &mut Stru
             let mod_burn = (f64::from(per_hour) * mod_mult).round().max(1.0) as u32;
             need = need.saturating_add(mod_burn);
         }
-        if !rules::consume_structure_fuel_blocks(ctx, snap, structure_id, need) {
-            for m in &online {
-                snap.module_online_states.insert(m.0, false);
+        if need > 0 {
+            let bay_blocks: u32 = snap
+                .items
+                .values()
+                .filter(|i| {
+                    i.location_id == structure_id
+                        && rules::is_structure_fuel_flag(i.flag)
+                        && i.quantity > 0
+                        && rules::is_fuel_block_type(ctx, i.type_id)
+                })
+                .map(|i| i.quantity as u32)
+                .fold(0u32, u32::saturating_add);
+            let st_blocks = snap.structures.get(&structure_id).map(|s| s.fuel_blocks).unwrap_or(0);
+            let avail = if bay_blocks > 0 { bay_blocks } else { st_blocks };
+            let affordable = u64::from(avail / need);
+            let paid_hours = elapsed_hours.min(affordable);
+            let paid_ok = paid_hours == 0
+                || rules::consume_structure_fuel_blocks(ctx, snap, structure_id, need * (paid_hours as u32));
+            if !paid_ok || affordable < elapsed_hours {
+                let fail_tick = start_tick + (paid_hours + 1).min(elapsed_hours) * SECS_PER_HOUR;
+                for m in &online {
+                    snap.module_online_states.insert(m.0, false);
+                }
+                life.online_modules.clear();
+                online.clear();
+                life.low_power_since_unix.get_or_insert(fail_tick);
             }
-            life.online_modules.clear();
-            life.low_power_since_unix.get_or_insert(tick);
         }
     }
-    life.last_fuel_tick_unix = Some(tick);
-    if online_service_modules(ctx, snap, structure_id).is_empty() {
+    life.last_fuel_tick_unix = Some(start_tick + elapsed_hours * SECS_PER_HOUR);
+    if online.is_empty() {
         life.low_power_since_unix.get_or_insert(now);
     } else {
         life.low_power_since_unix = None;
@@ -1880,3 +1898,7 @@ pub fn validate_structure_refit(ctx: &ServerContext, snap: &WorldStateSnapshot, 
 #[cfg(test)]
 #[path = "structure_lifecycle_tests.rs"]
 mod structure_lifecycle_tests;
+
+#[cfg(test)]
+#[path = "structure_lifecycle_edges_tests.rs"]
+mod structure_lifecycle_edges_tests;

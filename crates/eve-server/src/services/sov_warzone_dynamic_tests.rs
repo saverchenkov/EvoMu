@@ -2,7 +2,11 @@ use super::*;
 use crate::services::account_services::account_services_tests::{auth_session, test_ctx};
 use std::collections::HashMap;
 
-#[tokio::test]
+#[cfg(test)]
+#[path = "sov_warzone_dynamic_extra_unit_tests.rs"]
+mod sov_warzone_dynamic_extra_unit_tests;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_sov_warzone_dynamic_dbs_ess_fw_and_sov_indices() {
     let ctx = test_ctx();
     let mut sess = auth_session(1, 90_000_001, 98_000_001, 30_000_142);

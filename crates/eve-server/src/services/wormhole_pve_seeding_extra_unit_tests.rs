@@ -382,3 +382,63 @@ async fn shattered_resource_fields_dungeon_variants_and_sde_npc_attribute_branch
         assert!((ent_p.damage_vector.total() - 100.0).abs() < 1e-6);
     }
 }
+
+#[tokio::test]
+async fn sleeper_sentry_and_site_loot_container_slim_item_meta_fields() {
+    let (mut ctx, _sess, char_id, _ship_id, _k_sys) = make_fighter_ctx_and_session();
+    let wh_sys = 31_000_801_u32;
+    let sentry_tid = sleeper_sentry_type_for_class(3);
+    if !ctx.sde.types.contains_key(&sentry_tid) {
+        let sde = std::sync::Arc::make_mut(&mut ctx.sde);
+        let mut st = crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_type(
+            sentry_tid,
+            959,
+            11,
+            5_000_000.0,
+            vec![],
+        );
+        st.name = "Sleeper Point Defense Battery".into();
+        sde.types.insert(sentry_tid, st);
+    }
+
+    let sde_t = ctx.sde.types.get(&sentry_tid).cloned().expect("sentry SDE type");
+    let expected_group = sde_t.group_id;
+    let expected_cat = sde_t.category_id;
+    let expected_corp =
+        crate::services::combat_crimewatch::combat_npc_ai::resolve_npc_corp_id_for_sde_faction(
+            &ctx.sde,
+            500_005,
+        );
+
+    let sentry_id = spawn_sleeper_sentry_tower(&ctx, wh_sys, 3, DVec3::new(500.0, 0.0, 0.0)).await;
+    assert!(sentry_id > 0);
+
+    let loot_item_id =
+        drop_site_loot_into_space(&ctx, wh_sys, char_id, [1_000.0, 2_000.0, 3_000.0], 34, 42).await;
+    assert!(loot_item_id > 0);
+    let container_id = ctx.db.with_snapshot(|snap| snap.items[&loot_item_id].location_id);
+
+    let sys_handle = ctx.systems.get_or_spawn(wh_sys);
+    let bp = sys_handle.ballpark.read().unwrap();
+
+    let sm = bp.ball_slim_meta.get(&sentry_id).expect("sentry SlimItemMeta");
+    assert_eq!(sm.group_id, expected_group);
+    assert_eq!(sm.category_id, expected_cat);
+    assert_eq!(sm.owner_id, 500_005);
+    assert_eq!(sm.char_id, None);
+    assert_eq!(sm.corp_id, expected_corp);
+    assert_eq!(sm.alliance_id, -1);
+    assert!((sm.security_status - (-1.0)).abs() < 1e-6);
+    assert!(!sm.is_cloaked);
+    assert_eq!(sm.name.as_deref(), Some(sde_t.name.as_str()));
+
+    let cm = bp.ball_slim_meta.get(&container_id).expect("container SlimItemMeta");
+    assert_eq!(cm.group_id, 340);
+    assert_eq!(cm.category_id, 2);
+    assert_eq!(cm.owner_id, char_id);
+    assert_eq!(cm.char_id, None);
+    assert_eq!(cm.corp_id, -1);
+    assert_eq!(cm.alliance_id, -1);
+    assert_eq!(cm.security_status, 0.0);
+    assert!(!cm.is_cloaked);
+}

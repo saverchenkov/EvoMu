@@ -894,6 +894,9 @@ pub async fn handle(
                     args.first(),
                     Some(PyRep::List(_) | PyRep::Dict(_) | PyRep::Tuple(_))
                 );
+            let from_loc = is_multi_arg
+                .then(|| args.get(1).and_then(PyRep::as_i64).filter(|&id| id > 0))
+                .flatten();
             let explicit_out_owner = is_multi_arg
                 .then(|| args.get(2).and_then(PyRep::as_i64).filter(|&id| id > 0))
                 .flatten();
@@ -921,6 +924,13 @@ pub async fn handle(
                     message: "Reprocess requires at least one integer itemID".into(),
                 }));
             }
+
+            enum ReprocessItemDelta {
+                Updated(InventoryItemRecord, Vec<(i32, PyRep)>),
+                Deleted(InventoryItemRecord),
+            }
+            let mut item_deltas: Vec<ReprocessItemDelta> = Vec::new();
+            let mut wallet_notify: Option<f64> = None;
 
             let now_unix = ctx.now_unix();
             if let Some(cid) = session.corporation_id.filter(|&id| id > 0) {
@@ -979,7 +989,25 @@ pub async fn handle(
                             Some(station_id),
                             now_unix,
                         );
-                    if (!personal_ok && !corp_ok) || item.location_id != station_id || item.quantity <= 0 {
+                    let in_station_hangar = item.location_id == station_id;
+                    let in_docked_parent = personal_ok
+                        && matches!(
+                            item.flag,
+                            InventoryFlag::Cargo
+                                | InventoryFlag::SpecializedAsteroidHold
+                                | InventoryFlag::SpecializedOreHold
+                                | InventoryFlag::SpecializedIceHold
+                                | InventoryFlag::SpecializedGasHold
+                        )
+                        && snap.items.get(&item.location_id).is_some_and(|parent| {
+                            parent.location_id == station_id
+                                && parent.flag == InventoryFlag::Hangar
+                                && parent.owner_id == char_id
+                                && !snap.is_item_or_ancestor_locked_or_impounded(item.location_id)
+                        });
+                    let from_loc_ok = from_loc.is_none_or(|fl| fl == item.location_id);
+                    let valid_location = (in_station_hangar || in_docked_parent) && from_loc_ok;
+                    if (!personal_ok && !corp_ok) || !valid_location || item.quantity <= 0 {
                         return Err(BridgeRpcError {
                             code: "OwnershipOrLocationViolation".into(),
                             message: format!("Item {item_id} must be owned by character {char_id} or an authorized corporate division at station {station_id}"),
@@ -1045,14 +1073,30 @@ pub async fn handle(
                             return Err(BridgeRpcError { code: "InsufficientFunds".into(), message: format!("Insufficient ISK to pay reprocessing tax ({:.2} ISK required)", tax_isk) });
                         }
                     }
+                    let old_qty = item.quantity;
                     if remainder > 0 {
                         if let Some(im) = snap.items.get_mut(&item_id) {
                             im.quantity = remainder;
                             im.version += 1;
+                            item_deltas.push(ReprocessItemDelta::Updated(
+                                im.clone(),
+                                vec![(9, PyRep::Integer(old_qty as i64))],
+                            ));
                         }
                     } else {
                         snap.items.remove(&item_id);
+                        item_deltas.push(ReprocessItemDelta::Deleted(item.clone()));
                     }
+                    let default_station_flag = match item.flag {
+                        InventoryFlag::CorpSAG1
+                        | InventoryFlag::CorpSAG2
+                        | InventoryFlag::CorpSAG3
+                        | InventoryFlag::CorpSAG4
+                        | InventoryFlag::CorpSAG5
+                        | InventoryFlag::CorpSAG6
+                        | InventoryFlag::CorpSAG7 => item.flag,
+                        _ => InventoryFlag::Hangar,
+                    };
                     let (out_owner, out_loc, out_flag) = if is_multi_arg {
                         let requested_loc = explicit_out_loc.unwrap_or(station_id);
                         let valid_container = requested_loc != station_id
@@ -1066,7 +1110,21 @@ pub async fn handle(
                         } else {
                             station_id
                         };
-                        let requested_flag = explicit_out_flag.unwrap_or(item.flag);
+                        let raw_flag = explicit_out_flag.unwrap_or(default_station_flag);
+                        let requested_flag = if target_loc == station_id
+                            && matches!(
+                                raw_flag,
+                                InventoryFlag::Cargo
+                                    | InventoryFlag::SpecializedAsteroidHold
+                                    | InventoryFlag::SpecializedOreHold
+                                    | InventoryFlag::SpecializedIceHold
+                                    | InventoryFlag::SpecializedGasHold
+                            )
+                        {
+                            default_station_flag
+                        } else {
+                            raw_flag
+                        };
                         let is_corp_sag = matches!(
                             requested_flag,
                             InventoryFlag::CorpSAG1
@@ -1082,10 +1140,10 @@ pub async fn handle(
                         } else if !is_corp_sag && (explicit_out_owner.is_none() || explicit_out_owner == Some(char_id)) {
                             (char_id, target_loc, requested_flag)
                         } else {
-                            (item.owner_id, station_id, item.flag)
+                            (item.owner_id, station_id, default_station_flag)
                         }
                     } else {
-                        (item.owner_id, station_id, item.flag)
+                        (item.owner_id, station_id, default_station_flag)
                     };
                     let mut outputs: Vec<(i64, TypeId, i32)> = Vec::with_capacity(materials.len());
                     for mat in &materials {
@@ -1093,8 +1151,7 @@ pub async fn handle(
                         if out_qty <= 0 { continue; }
                         snap.next_entity_id += 1;
                         let mid = snap.next_entity_id;
-                        snap.items.insert(
-                            mid,
+                        let new_item =
                             InventoryItemRecord {
                                 item_id: mid,
                                 type_id: mat.material_type_id,
@@ -1105,8 +1162,12 @@ pub async fn handle(
                                 singleton: false,
                                 version: 1,
                                 ..Default::default()
-                            },
-                        );
+                            };
+                        snap.items.insert(mid, new_item.clone());
+                        item_deltas.push(ReprocessItemDelta::Updated(
+                            new_item,
+                            vec![(3, PyRep::Integer(0))],
+                        ));
                         outputs.push((mid, mat.material_type_id, out_qty));
                     }
 
@@ -1117,6 +1178,7 @@ pub async fn handle(
                         } else {
                             IskCents(0)
                         };
+                        wallet_notify = Some(bal_after.to_wire_f64());
                         if station_id >= 1_000_000_000_000 {
                             if let Some(owner_corp_id) = snap.structures.get(&station_id).map(|s| s.owner_corp_id) {
                                 crate::services::station_structure::structure_upwell_ops::credit_structure_owner_corp_div1(
@@ -1171,6 +1233,19 @@ pub async fn handle(
 
             match res {
                 Ok(mut batch_results) => {
+                    if let Some(bal) = wallet_notify {
+                        ctx.notify_account_change(char_id, "cash", char_id, bal);
+                    }
+                    for delta in item_deltas {
+                        match delta {
+                            ReprocessItemDelta::Updated(rec, changes) => {
+                                ctx.emit_item_change_routed(char_id, &rec, changes);
+                            }
+                            ReprocessItemDelta::Deleted(rec) => {
+                                ctx.emit_item_deleted_routed(char_id, &rec);
+                            }
+                        }
+                    }
                     ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(
                         char_id as u32,
                         &["refineOreCount", "finishedReprocessingCount", "reprocessingInput", "reprocessingOutput"],

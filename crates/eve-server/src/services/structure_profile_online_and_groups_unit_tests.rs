@@ -187,6 +187,45 @@ fn v24_service_online_matrix_candidate_settings_market_and_industry_checks() {
         assert_eq!(owner, corp_id);
         assert_eq!(bps, Some(150));
         assert!((rate - 0.02).abs() < 1e-6);
+
+        // check_service_domain_acl_and_tax & can_character_use_jump_bridge & external evaluate_character_setting
+        assert_eq!(
+            check_service_domain_acl_and_tax(
+                snap,
+                fort_id,
+                pilot_id,
+                &[SETTING_MARKET_TAX],
+                false,
+                Some(1_800_000_000),
+                "Denied",
+                "Market",
+            )
+            .unwrap(),
+            Some(150)
+        );
+        assert_eq!(
+            check_service_domain_acl_and_tax(
+                snap,
+                fort_id,
+                pilot_id,
+                &[SETTING_CLONINGBAY_TAX],
+                false,
+                Some(1_800_000_000),
+                "Denied",
+                "Clone",
+            )
+            .unwrap(),
+            None
+        );
+        assert!(can_character_use_jump_bridge(snap, jb_id, pilot_id, 1_800_000_000));
+        assert!(!can_character_use_jump_bridge(snap, fort_id, pilot_id, 1_800_000_000));
+        assert!(!evaluate_character_setting(
+            &ctx,
+            snap,
+            jb_id,
+            pilot_id,
+            SETTING_JUMP_BRIDGE_ACTIVATION
+        ));
     });
 }
 

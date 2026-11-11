@@ -62,9 +62,15 @@ pub fn register_entosis_capture_target(
 
 pub(super) fn remove_ship_entosis_link(ctx: &ServerContext, ship_id: i64) {
     let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
-    let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
-    if let Some(link) = st.entosis_active_links.remove(&(db_key, ship_id)) {
-        st.entosis_target_cycles.remove(&(db_key, link.target_id, ship_id));
+    let removed = {
+        let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
+        let link = st.entosis_active_links.remove(&(db_key, ship_id));
+        if let Some(ref l) = link {
+            st.entosis_target_cycles.remove(&(db_key, l.target_id, ship_id));
+        }
+        link
+    };
+    if let Some(link) = removed {
         ctx.db.with_mut_snapshot(|snap| {
             snap.module_active_states.remove(&link.module_id);
         });
@@ -547,3 +553,7 @@ async fn complete_command_node_capture(
         None => {}
     }
 }
+
+#[cfg(test)]
+#[path = "sov_gameplay_entosis_capture_edges_tests.rs"]
+mod sov_gameplay_entosis_capture_edges_tests;

@@ -164,8 +164,20 @@ pub async fn activate_scan_probe_launcher(
     let now_unix = ctx.now_unix_secs();
     let _ = expire_overdue_probes_for_char(ctx, char_id, now_unix).await;
 
-    let loaded_charge_opt = ctx.db.with_snapshot(|snap| {
-        snap.items
+    let loaded_charge_opt = ctx.db.with_snapshot(|snap| -> Result<Option<(i64, u32, i32)>, BridgeRpcError> {
+        if let Some(ch) = snap.characters.get(&char_id) {
+            if ch.station_id.is_some()
+                || ch.structure_id.is_some()
+                || ch.solar_system_id != sys_id
+                || ch.active_ship_id != ship_id
+            {
+                return Err(BridgeRpcError {
+                    code: "ShipNotInSpace".into(),
+                    message: format!("Active ship {ship_id} is not in space in solar system {sys_id}"),
+                });
+            }
+        }
+        Ok(snap.items
             .values()
             .find(|i| {
                 i.location_id == ship_id
@@ -174,8 +186,8 @@ pub async fn activate_scan_probe_launcher(
                     && i.quantity > 0
                     && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 479)
             })
-            .map(|i| (i.item_id, i.type_id, i.quantity))
-    });
+            .map(|i| (i.item_id, i.type_id, i.quantity)))
+    })?;
     let Some((charge_item_id, probe_type_id, loaded_qty)) = loaded_charge_opt else {
         return Err(BridgeRpcError {
             code: "NoProbesLoaded".into(),
@@ -1841,3 +1853,7 @@ pub(crate) fn sync_scanner_probes_to_db(ctx: &ServerContext) {
     }
     ctx.persist_server_runtime_to_db();
 }
+
+#[cfg(test)]
+#[path = "space_probe_scanning_edges2_tests.rs"]
+mod space_probe_scanning_edges2_tests;

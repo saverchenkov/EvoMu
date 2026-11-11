@@ -309,4 +309,34 @@ fn zarzakh_gravity_hazard_respects_safe_zones_and_damages_exposed_ships() {
     let destroyed = step_zarzakh_gravity_hazard_in_ballpark(&mut bp, Some(&ctx.sde), 30_100_000);
     assert_eq!(destroyed, vec![80_002]);
     assert!((bp.combat_states[&80_001].structure_hp - 100.0).abs() < 1e-6);
+
+    // Verify `nav_attr_ids` / `max_velocity_cloak_attr_id` resolves primary and fallback attributes on both full and synthetic SdeRegistry
+    assert!(max_velocity_cloak_attr_id(&ctx.sde).is_some());
+    let mut synth_sde = eve_sde::SdeRegistry::default();
+    synth_sde.attributes.insert(
+        9901,
+        eve_sde::DogmaAttributeType {
+            attribute_id: 9901,
+            name: "decloakTargetingDelay".into(),
+            default_value: 0.0,
+            high_is_good: false,
+            stackable: true,
+            published: true,
+        },
+    );
+    synth_sde.attributes.insert(
+        9902,
+        eve_sde::DogmaAttributeType {
+            attribute_id: 9902,
+            name: "maxVelocityCloaked".into(),
+            default_value: 0.0,
+            high_is_good: true,
+            stackable: true,
+            published: true,
+        },
+    );
+    let synth_ids = nav_attr_ids(&synth_sde);
+    assert_eq!(synth_ids.cloaking_targeting_delay, Some(9901));
+    assert_eq!(synth_ids.max_velocity_modifier, Some(9902));
+    assert_eq!(max_velocity_cloak_attr_id(&synth_sde), Some(9902));
 }

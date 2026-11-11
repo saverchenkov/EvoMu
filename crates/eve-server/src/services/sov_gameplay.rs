@@ -1416,4 +1416,8 @@ pub async fn handle_anchor_sov_hub_rpc(
 #[cfg(test)] #[path = "sov_gameplay_tests.rs"]
 mod sov_gameplay_tests;
 
+#[cfg(test)]
+#[path = "sov_gameplay_edges2_tests.rs"]
+mod sov_gameplay_edges2_tests;
+
 

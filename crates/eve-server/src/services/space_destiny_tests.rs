@@ -543,3 +543,241 @@ async fn ess_mgr_clear_cache_evicts_ess_entries_only() {
     assert!(!cache.contains_key(&crate::router::cache_object_key(&ess_oid)));
     assert!(cache.contains_key(&crate::router::cache_object_key(&other_oid)));
 }
+
+#[tokio::test]
+async fn space_destiny_edge_guards_bubble_errors_warp_recovery_and_timers() {
+    let ctx = test_ctx();
+    let sys_id = 30000142;
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_h
+        .spawn_ball(test_ship_ball(88601, 588, DVec3::new(1000.0, 0.0, 0.0)))
+        .await;
+    let bound = bound_sys(sys_id);
+
+    // 1. AdminGetBubbleID edge errors: unauth, NoActiveShip, BallNotVisible, BallNotFound, InvalidBound
+    let mut unauth = SessionState::new(711);
+    assert!(
+        handle(&ctx, &mut unauth, Some(&bound), "beyonce", "AdminGetBubbleID", &[], &HashMap::new())
+            .await
+            .unwrap()
+            .is_err()
+    );
+
+    let mut gm_no_ship = make_session(9410, 98000001, Some(sys_id), None, service_roles::ROLE_GMH);
+    let no_ship_err = handle(
+        &ctx,
+        &mut gm_no_ship,
+        Some(&bound),
+        "beyonce",
+        "AdminGetBubbleID",
+        &[],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .expect_err("NoActiveShip");
+    assert_eq!(no_ship_err.code, "NoActiveShip");
+
+    // Ship 88601 is in space; target 99999999 is not in bubble -> BallNotVisible
+    let mut gm_ship = make_session(
+        9410,
+        98000001,
+        Some(sys_id),
+        Some(88601),
+        service_roles::ROLE_GMH,
+    );
+    let not_vis_err = handle(
+        &ctx,
+        &mut gm_ship,
+        Some(&bound),
+        "beyonce",
+        "AdminGetBubbleID",
+        &[PyRep::Integer(99_999_999)],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .expect_err("BallNotVisible");
+    assert_eq!(not_vis_err.code, "BallNotVisible");
+
+    // Own ship 88602 is unspawned and no arg -> target_ball_id == ship_id -> BallNotFound
+    let mut gm_unspawned = make_session(
+        9411,
+        98000001,
+        Some(sys_id),
+        Some(88602),
+        service_roles::ROLE_GMH,
+    );
+    let not_found_err = handle(
+        &ctx,
+        &mut gm_unspawned,
+        Some(&bound),
+        "beyonce",
+        "AdminGetBubbleID",
+        &[],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .expect_err("BallNotFound");
+    assert_eq!(not_found_err.code, "BallNotFound");
+
+    // 2. handle_update_state_request: BoundObjectOwnershipViolation, NoSolarSystem, docked, no ship,
+    // missing snapshot item, active warp early-return, and emergency-logoff warp stop
+    let mut wrong_sys = make_session(9412, 98000001, Some(30002187), Some(88601), 0);
+    let mis_err = handle(
+        &ctx,
+        &mut wrong_sys,
+        Some(&bound),
+        "beyonce",
+        "UpdateStateRequest",
+        &[],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .expect_err("BoundObjectOwnershipViolation");
+    assert_eq!(mis_err.code, "BoundObjectOwnershipViolation");
+
+    let mut no_sys = make_session(9412, 98000001, None, Some(88601), 0);
+    let no_sys_err = handle(&ctx, &mut no_sys, None, "beyonce", "UpdateStateRequest", &[], &HashMap::new())
+        .await
+        .unwrap()
+        .expect_err("NoSolarSystem");
+    assert_eq!(no_sys_err.code, "NoSolarSystem");
+
+    let mut docked = make_session(9412, 98000001, Some(sys_id), Some(88601), 0);
+    docked.station_id = Some(60_003_760);
+    assert_eq!(
+        handle(&ctx, &mut docked, None, "beyonce", "UpdateStateRequest", &[], &HashMap::new())
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::None
+    );
+
+    let mut no_ship_sess = make_session(9412, 98000001, Some(sys_id), None, 0);
+    assert_eq!(
+        handle(&ctx, &mut no_ship_sess, None, "beyonce", "UpdateStateRequest", &[], &HashMap::new())
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::None
+    );
+
+    // Ship ID absent from both ballpark and snap.items returns Ok(None) cleanly
+    let mut missing_item = make_session(9412, 98000001, Some(sys_id), Some(88699), 0);
+    assert_eq!(
+        handle(&ctx, &mut missing_item, None, "beyonce", "UpdateStateRequest", &[], &HashMap::new())
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::None
+    );
+
+    // Spawn warping ball: when registered in ctx.active_warps, UpdateStateRequest returns Ok(None)
+    // and leaves MovementMode::Warp intact; when absent (emergency logoff return-warp), forces Stop.
+    let mut warp_ball = test_ship_ball(88603, 588, DVec3::new(5_000.0, 0.0, 0.0));
+    warp_ball.mode = MovementMode::new_warp(
+        warp_ball.position,
+        DVec3::new(1_000_000.0, 0.0, 0.0),
+        3.0,
+    );
+    let _ = sys_h.spawn_ball(warp_ball).await;
+    ctx.active_warps.lock().unwrap().insert(88603, 1);
+
+    let mut warp_sess = make_session(9413, 98000001, Some(sys_id), Some(88603), 0);
+    assert_eq!(
+        handle(&ctx, &mut warp_sess, Some(&bound), "beyonce", "UpdateStateRequest", &[], &HashMap::new())
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::None
+    );
+    let (_, snap_after_active) = sys_h.get_ball_snapshot(88603).await.unwrap().unwrap();
+    assert!(matches!(snap_after_active.mode, MovementMode::Warp { .. }));
+
+    // Clear active_warps to simulate stale emergency-logoff warp -> force_stop_warp triggers
+    ctx.active_warps.lock().unwrap().clear();
+    assert_eq!(
+        handle(&ctx, &mut warp_sess, Some(&bound), "beyonce", "UpdateStateRequest", &[], &HashMap::new())
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::None
+    );
+    let (_, snap_after_stop) = sys_h.get_ball_snapshot(88603).await.unwrap().unwrap();
+    assert!(matches!(snap_after_stop.mode, MovementMode::Stop));
+
+    // 3. essMgr clear_cache unauth, thefts with solar_system_id == None, and prime_cache_result RPC
+    assert!(
+        handle(&ctx, &mut unauth, None, "essMgr", "clear_cache", &[], &HashMap::new())
+            .await
+            .unwrap()
+            .is_err()
+    );
+    let mut no_sys_ess = make_session(9414, 98000001, None, None, 0);
+    let empty_thefts = handle(
+        &ctx,
+        &mut no_sys_ess,
+        None,
+        "essMgr",
+        "GetMainBankTheftsForClientSolarSystem",
+        &[],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(rep_list_len(&empty_thefts), Some(0));
+    assert!(
+        handle(
+            &ctx,
+            &mut warp_sess,
+            None,
+            "essMgr",
+            "prime_cache_result",
+            &[PyRep::Integer(i64::from(sys_id))],
+            &HashMap::new(),
+        )
+        .await
+        .unwrap()
+        .is_ok()
+    );
+
+    // 4. record_session_change_timer_with_invuln notification suppression & structure dock formatting
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters[&90_000_001].clone();
+        ch.character_id = 9415;
+        ch.station_id = None;
+        ch.structure_id = Some(1_000_000_999);
+        ch.active_ship_id = 88604;
+        snap.characters.insert(9415, ch);
+    });
+    ctx.db
+        .acquire_online_lock(1, 9415, Some(9415), true, 1_700_020_000)
+        .expect("online lock for 9415");
+    record_session_change_timer(&ctx, 9415, 1_700_020_000, sys_id, 5, "dock");
+    let notes_dock = ctx.drain_notifications_for_char(9415);
+    assert!(notes_dock.iter().any(|n| n.event == "OnSessionChanged"));
+    assert!(is_location_change_invulnerable(&ctx, 9415, 1_700_020_010) == false);
+
+    record_session_change_timer_with_invuln(
+        &ctx,
+        9415,
+        1_700_020_005,
+        sys_id,
+        5,
+        "jump_drive",
+        true,
+    );
+    assert!(is_location_change_invulnerable(&ctx, 9415, 1_700_020_050));
+    let _ = ctx.drain_notifications_for_char(9415);
+
+    record_session_change_timer(&ctx, 9415, 1_700_020_010, sys_id, 6, "board_or_eject");
+    assert!(ctx.drain_notifications_for_char(9415).is_empty());
+
+    // Empty entries suppression (set_account_key in system with no character row -> has_entries = false)
+    record_client_session_check_timer(&ctx, 9499, 1_700_020_020, 0, 7, "set_account_key");
+    assert!(ctx.drain_notifications_for_char(9499).is_empty());
+}

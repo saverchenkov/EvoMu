@@ -520,3 +520,169 @@ fn get_structures_directory_info_standing_gates_and_fulcrum_timers() {
         );
     });
 }
+
+#[tokio::test]
+async fn mutant_kill_anchor_orbital_and_upgrade_gantry_role_bitmasks_and_outputs() {
+    let ctx = test_ctx_with_clock(1_800_000_000);
+    let (low_sys, planet) = ctx
+        .sde
+        .solar_systems
+        .values()
+        .filter(|s| {
+            s.security_status > 0.0 && s.security_status < 0.45 && s.solar_system_id < 31_000_000
+        })
+        .find_map(|s| {
+            ctx.sde
+                .celestials_in_system(s.solar_system_id)
+                .into_iter()
+                .find(|c| c.group_id == 7)
+                .map(|p| (s.solar_system_id, p))
+        })
+        .expect("low-sec planet");
+
+    let player_corp = 98_715_201_i64;
+    let npc_corp = 1_000_125_i64;
+    let ceo_cid = 915_501_i64;
+    let dir_cid = 915_502_i64;
+    let sm_cid = 915_503_i64;
+    let aud_cid = 915_504_i64;
+    let npc_sess_dir_cid = 915_505_i64;
+    let ship_id = 915_601_i64;
+    let gantry_id = 915_602_i64;
+    let upgrade_id = 915_603_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = player_corp;
+        corp.ceo_id = ceo_cid;
+        corp.member_roles.insert(dir_cid, corp_roles::ROLE_DIRECTOR);
+        corp.member_roles
+            .insert(sm_cid, corp_roles::ROLE_STATION_MANAGER);
+        corp.member_roles.insert(aud_cid, corp_roles::ROLE_AUDITOR);
+        snap.corporations.insert(player_corp, corp);
+
+        for (cid, co) in [
+            (ceo_cid, player_corp),
+            (dir_cid, player_corp),
+            (sm_cid, player_corp),
+            (aud_cid, player_corp),
+            (npc_sess_dir_cid, npc_corp),
+        ] {
+            let ch = clone_char_with(snap, cid, "OrbRoleTester", co, low_sys, ship_id);
+            snap.characters.insert(cid, ch);
+        }
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(low_sys);
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 587,
+            position: planet.position + DVec3::new(5_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 2.0,
+            mass: 1e6,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+
+    let mk_sess = |cid: i64, co: i64, crole: u64| {
+        let mut s = SessionState::new(cid as u64);
+        s.user_id = Some(cid as u64);
+        s.character_id = Some(cid);
+        s.corporation_id = Some(co);
+        s.solar_system_id = Some(low_sys);
+        s.ship_id = Some(ship_id);
+        s.role = 0;
+        s.corp_role = crole;
+        s
+    };
+
+    let orbital_tag = format!("Orbital:{}", planet.celestial_id);
+    let reset_items_and_clear_orbital = |snap: &mut eve_db::WorldStateSnapshot, owner_cid: i64, owner_corp: i64| {
+        snap.structures.remove(&gantry_id);
+        snap.structures.retain(|_, st| st.name != orbital_tag);
+        snap.items.insert(
+            gantry_id,
+            InventoryItemRecord {
+                item_id: gantry_id,
+                type_id: 3_962,
+                owner_id: owner_cid,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            upgrade_id,
+            InventoryItemRecord {
+                item_id: upgrade_id,
+                type_id: 2_233,
+                owner_id: owner_corp,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+    };
+
+    // 1. Auditor (both sess.corp_role and DB member_roles = ROLE_AUDITOR, not CEO) -> CrpAccessDenied on both
+    ctx.db.with_mut_snapshot(|snap| reset_items_and_clear_orbital(snap, aud_cid, player_corp));
+    let aud_sess = mk_sess(aud_cid, player_corp, corp_roles::ROLE_AUDITOR);
+    assert_eq!(
+        handle_anchor_orbital(&ctx, &aud_sess, &[PyRep::Integer(gantry_id)])
+            .unwrap_err()
+            .code,
+        "CrpAccessDenied"
+    );
+    assert_eq!(
+        handle_upgrade_gantry(&ctx, &aud_sess, &[PyRep::Integer(gantry_id)])
+            .unwrap_err()
+            .code,
+        "CrpAccessDenied"
+    );
+
+    // 2. NPC corp character with session ROLE_DIRECTOR owns anchored gantry -> passes upgrade_gantry L69 role check
+    ctx.db.with_mut_snapshot(|snap| reset_items_and_clear_orbital(snap, npc_sess_dir_cid, npc_corp));
+    let npc_dir_sess = mk_sess(npc_sess_dir_cid, npc_corp, corp_roles::ROLE_DIRECTOR);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(it) = snap.items.get_mut(&gantry_id) {
+            it.location_id = planet.celestial_id;
+            it.flag = InventoryFlag::None;
+        }
+        snap.structures.insert(
+            gantry_id,
+            UpwellStructureRecord {
+                structure_id: gantry_id,
+                type_id: 3_962,
+                owner_corp_id: npc_corp,
+                solar_system_id: low_sys,
+                name: orbital_tag.clone(),
+                position: (planet.position + DVec3::new(5_000.0, 0.0, 0.0)).to_array(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+    });
+    let npc_upg = handle_upgrade_gantry(&ctx, &npc_dir_sess, &[PyRep::Integer(gantry_id)]).unwrap();
+    assert_eq!(npc_upg.dict_get("typeID"), Some(&PyRep::Integer(2_233)));
+
+    // 3. CEO, Director (DB-only, sess.corp_role = 0), and StationManager (DB-only, sess.corp_role = 0)
+    // all pass both handle_anchor_orbital and handle_upgrade_gantry with valid return payloads
+    for cid in [ceo_cid, dir_cid, sm_cid] {
+        ctx.db.with_mut_snapshot(|snap| reset_items_and_clear_orbital(snap, cid, player_corp));
+        let sess = mk_sess(cid, player_corp, 0);
+        let anchored = handle_anchor_orbital(&ctx, &sess, &[PyRep::Integer(gantry_id)]).unwrap();
+        assert_eq!(anchored.dict_get("orbitalID"), Some(&PyRep::Integer(gantry_id)));
+        assert_eq!(anchored.dict_get("typeID"), Some(&PyRep::Integer(3_962)));
+        let upg = handle_upgrade_gantry(&ctx, &sess, &[PyRep::Integer(gantry_id)]).unwrap();
+        assert_eq!(upg.dict_get("orbitalID"), Some(&PyRep::Integer(gantry_id)));
+        assert_eq!(upg.dict_get("typeID"), Some(&PyRep::Integer(2_233)));
+    }
+}

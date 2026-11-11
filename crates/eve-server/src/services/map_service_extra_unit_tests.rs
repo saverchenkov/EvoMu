@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use super::map_service::{
+use crate::services::map_service::{
     handle, record_solar_system_jump, record_solar_system_visit, SolarSystemVisitRecord,
 };
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
@@ -59,6 +59,7 @@ fn visit_and_jump_recording_guards_and_legacy_deserialization_branches() {
             key,
             r#"{"30000142": 7, "30000144": {"visits": 3, "last_visited_ticks": 123456}}"#.into(),
         );
+        snap.migrate_legacy_service_state();
     });
 
     let visits_rep = call_map_rpc(&ctx, &session, "GetSolarSystemVisits", &[])
@@ -578,4 +579,37 @@ fn deadspace_maps_incursions_extra_info_and_history_stat_types_cover_all_branche
         .unwrap();
     assert!(format!("{ag_st:?}").contains("3019001"));
     assert!(!format!("{ag_st:?}").contains("9999999"));
+}
+
+#[test]
+fn mutant_kill_positive_record_visit_and_dispatch_guards() {
+    let (ctx, session, char_id, _ship_id, _sys_id) = make_fighter_ctx_and_session();
+    let kw = HashMap::new();
+
+    // Non-map service and unknown method must return None
+    assert!(handle(&ctx, &session, "nonmatching_service", "GetSolarSystemVisits", &[], &kw).is_none());
+    assert!(handle(&ctx, &session, "map", "unmatched_method", &[], &kw).is_none());
+
+    // Positive record_solar_system_visit increments visits count and sets last_visited_ticks
+    record_solar_system_visit(&ctx, char_id, 30_000_142);
+    record_solar_system_visit(&ctx, char_id, 30_000_142);
+    ctx.db.with_snapshot(|snap| {
+        let rec = &snap.cluster_and_runtime.char_system_visits[&char_id][&30_000_142];
+        assert_eq!(rec.visits, 2);
+        assert!(rec.last_visited_ticks > 0);
+    });
+
+    // GetSolarSystemVisits exposes updated visit count & timestamp
+    let PyRep::List(rows) = call_map_rpc(&ctx, &session, "GetSolarSystemVisits", &[])
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("expected List");
+    };
+    let entry = rows
+        .iter()
+        .find(|r| r.dict_get("solarSystemID") == Some(&PyRep::Integer(30_000_142)))
+        .expect("expected 30000142 visit row");
+    assert_eq!(entry.dict_get("visits"), Some(&PyRep::Integer(2)));
+    assert!(entry.dict_get("lastDateTime").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
 }

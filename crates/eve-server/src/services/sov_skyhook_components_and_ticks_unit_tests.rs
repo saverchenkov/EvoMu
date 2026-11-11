@@ -2,13 +2,9 @@
 
 #![forbid(unsafe_code)]
 
-use super::super::*;
 use super::*;
-use crate::services::sov_gameplay::sov_gameplay_skyhook::*;
-use crate::services::sov_services::{
-    TYPE_MAGMATIC_GAS, TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB, TYPE_SUPERIONIC_ICE,
-};
-use eve_db::{InventoryFlag, InventoryItemRecord, UpwellStructureRecord, WorldStateSnapshot};
+use crate::services::sov_services::{TYPE_MAGMATIC_GAS, TYPE_ORBITAL_SKYHOOK};
+use eve_db::{InventoryFlag, InventoryItemRecord, UpwellStructureRecord};
 use eve_destiny::{Ball, CombatState, MovementMode};
 use eve_machonet::SessionState;
 use glam::DVec3;

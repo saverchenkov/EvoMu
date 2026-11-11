@@ -2,19 +2,18 @@
 
 #![forbid(unsafe_code)]
 
-use super::super::*;
 use super::*;
 use crate::services::mobile_deployables::{write_deployable_state_snap, MobileDeployableRecord};
 use crate::services::space_destiny::space_cyno_filaments::{
     active_scan_inhibitor_positions, handle,
 };
-use eve_db::types::{FleetRecord, UpwellStructureRecord};
+use eve_db::types::UpwellStructureRecord;
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::PyRep;
 use glam::DVec3;
 use std::collections::HashMap;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn structure_beacon_validation_fleet_beacon_jump_and_dscan_inhibitor_recon_immunity() {
     let mut ctx = test_ctx();
     clone_type_with(

@@ -247,7 +247,8 @@ pub async fn handle(
             ])))
         }
 
-        ("station", "GetGuests") => {
+        // parity: feat:ui.station-guests
+        ("station", "GetGuests") | ("stationSvc", "GetGuests") => {
             let (_, caller_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -269,6 +270,7 @@ pub async fn handle(
                     .map(|c| (c.character_id, c.corporation_id, c.alliance_id, c.war_faction_id))
                     .collect();
                 guests.sort_by_key(|g| g.0);
+                guests.dedup_by_key(|g| g.0);
                 let opt = |v: Option<i64>| v.map(PyRep::Integer).unwrap_or(PyRep::None);
                 guests
                     .into_iter()

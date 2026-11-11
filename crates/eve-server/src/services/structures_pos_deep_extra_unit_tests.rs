@@ -329,3 +329,141 @@ fn upwell_sync_core_insertion_damage_pause_and_destruction_quantum_core_drop() {
         assert_eq!(disp.asset_safety_wrap_ids.len(), 2);
     });
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn sync_all_structures_sovhub_tenebrex_core_and_repair_timeout_matrix() {
+    use crate::services::sov_gameplay::TYPE_TENEBREX_CYNO_JAMMER;
+    use crate::services::sov_services::TYPE_SOVEREIGNTY_HUB;
+    use crate::services::station_structure::structure_upwell_ops::{save_ext_state};
+    use eve_db::{CorporationRecord, PersistedSovHubData};
+
+    let ctx = test_ctx();
+    let now = ctx.now_unix();
+    let corp_id = 98_880_001_i64;
+    let ally_id = 99_880_001_i64;
+    let ceo_id = 880_001_i64;
+    let hub_id = 10_000_880_101_i64;
+    let jammer_id = 10_000_880_102_i64;
+    let custom_core_sid = 10_000_880_103_i64;
+    let repair_sid = 10_000_880_104_i64;
+    let unanchor_hub_id = 10_000_880_105_i64;
+    let capsule_pilot_id = 880_002_i64;
+    let capsule_id = 880_901_i64;
+
+    let mut sde = Arc::clone(&ctx.sde);
+    insert_custom_type(&mut sde, 999_570, 1657, 65, 1_000_000.0, &[(5701, 56_748.0)]);
+    let ctx = ServerContext::with_sde_and_repository(sde, Arc::clone(&ctx.db));
+
+    let sys_hub = 30_000_144_u32;
+    let sys_unanchor = 30_000_145_u32;
+    let skin_id_opt = ctx.sde.skin_licenses.keys().next().copied();
+
+    ctx.db.acquire_online_lock(1, 77_001, Some(ceo_id), true, now).unwrap();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::new(corp_id, "Lifecycle Corp", "LIFE", ceo_id);
+        corp.alliance_id = Some(ally_id);
+        corp.members.insert(ceo_id);
+        corp.members.insert(capsule_pilot_id);
+        snap.corporations.insert(corp_id, corp);
+
+        let base_ch = snap.characters.values().next().unwrap().clone();
+        for (cid, loc_st, ship) in [(ceo_id, None, 0), (capsule_pilot_id, Some(unanchor_hub_id), capsule_id)] {
+            let mut ch = base_ch.clone();
+            ch.character_id = cid;
+            ch.corporation_id = corp_id;
+            ch.alliance_id = Some(ally_id);
+            ch.solar_system_id = if loc_st.is_some() { sys_unanchor } else { sys_hub };
+            ch.station_id = None;
+            ch.structure_id = loc_st;
+            ch.active_ship_id = ship;
+            snap.characters.insert(cid, ch);
+        }
+
+        // Docked capsule with optional applied skin
+        snap.items.insert(
+            capsule_id,
+            InventoryItemRecord {
+                item_id: capsule_id,
+                type_id: 670,
+                owner_id: capsule_pilot_id,
+                location_id: unanchor_hub_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        if let Some(sk) = skin_id_opt {
+            snap.applied_ship_skins.insert(capsule_id, sk);
+        }
+
+        // 1. SovHub ONLINING ready to complete
+        let mut hub = make_structure_rec(hub_id, TYPE_SOVEREIGNTY_HUB, corp_id, sys_hub, STATE_ONLINING, true, 500);
+        hub.reinforced_until_unix = now.saturating_sub(5);
+        snap.structures.insert(hub_id, hub);
+
+        // 2. Tenebrex ONLINING ready to transition -> ShieldVulnerable + sets tenebrex spool
+        let mut jammer = make_structure_rec(jammer_id, TYPE_TENEBREX_CYNO_JAMMER, corp_id, sys_hub, STATE_ONLINING, true, 500);
+        jammer.reinforced_until_unix = now.saturating_sub(5);
+        snap.structures.insert(jammer_id, jammer);
+
+        // 3. Custom core attribute 5701 structure transitioning Anchoring -> NoCore -> Onlining with core in QuantumCoreRoom
+        let mut core_st = make_structure_rec(custom_core_sid, 999_570, corp_id, sys_hub, STATE_ANCHORING, false, 500);
+        core_st.reinforced_until_unix = now.saturating_sub(5);
+        snap.structures.insert(custom_core_sid, core_st);
+        snap.items.insert(
+            custom_core_sid + 50,
+            InventoryItemRecord {
+                item_id: custom_core_sid + 50,
+                type_id: 56_748,
+                owner_id: corp_id,
+                location_id: custom_core_sid,
+                flag: InventoryFlag::QuantumCoreRoom,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+
+        // 4. ArmorVulnerable repair_until_unix expired -> full_repair
+        let mut rep_st = make_structure_rec(repair_sid, 35_832, corp_id, sys_hub, STATE_ARMOR_VULNERABLE, true, 500);
+        rep_st.armor_hp = 100.0;
+        rep_st.hull_hp = 200.0;
+        snap.structures.insert(repair_sid, rep_st);
+
+        // 5. SovHub UNANCHORING past deadline -> package_structure + sov wipe + notifications + capsule evict
+        let unanchor_hub = make_structure_rec(unanchor_hub_id, TYPE_SOVEREIGNTY_HUB, corp_id, sys_unanchor, "Unanchoring", true, 500);
+        snap.structures.insert(unanchor_hub_id, unanchor_hub);
+        snap.sov_runtime.sov_claimed_since_unix.insert(sys_unanchor, now - 100);
+        snap.sov_runtime.sov_hubs.insert(unanchor_hub_id, PersistedSovHubData::default());
+
+        let mut ext = load_ext_state(snap);
+        ext.unanchoring_until_unix.insert(unanchor_hub_id, now.saturating_sub(1));
+        ext.lifecycle.insert(
+            repair_sid,
+            StructureLifecycleState {
+                repair_until_unix: Some(now.saturating_sub(1)),
+                armor_reinforce_secs_applied: Some(86_400),
+                ..Default::default()
+            },
+        );
+        save_ext_state(snap, &ext);
+    });
+
+    sync_asset_safety_wraps(&ctx);
+    sync_all_structures(&ctx);
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&hub_id].state, STATE_SHIELD_VULNERABLE);
+        assert!(snap.sov_runtime.adm_vulnerability_windows.contains_key(&hub_id));
+        assert!(snap.sov_runtime.tenebrex_spool_ready_unix.contains_key(&jammer_id));
+        assert!(snap.structures[&custom_core_sid].quantum_core_installed);
+        assert_eq!(snap.structures[&repair_sid].state, STATE_SHIELD_VULNERABLE);
+        assert!(!snap.structures.contains_key(&unanchor_hub_id));
+        assert!(!snap.sov_runtime.sov_hubs.contains_key(&unanchor_hub_id));
+        assert_eq!(snap.characters[&capsule_pilot_id].structure_id, None);
+    });
+}

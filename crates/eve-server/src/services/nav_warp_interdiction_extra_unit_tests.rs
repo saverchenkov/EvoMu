@@ -468,3 +468,369 @@ async fn warp_vector_consumption_guards_cooldown_star_distance_and_session_check
         "SessionChangeInProgress"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agency_warp_interdiction_bubbles_capacitor_tier_rollback_and_session_timer_expiry() {
+    use crate::services::nav_warp_interdiction::{
+        check_warp_interdiction_and_adjust_dest, execute_agency_content_warp, on_warp_initiated_hooks,
+    };
+    use crate::services::pve_exploration::{with_pve_exploration_reg, PveSiteInstance};
+    use eve_db::TrainedSkillRecord;
+
+    let (ctx, clock) = test_ctx_with_warp_vector_type();
+    let cid = 90_000_001_i64;
+    let corp_id = 98_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = 970_000_101_i64;
+    let shuttle_id = 970_000_102_i64;
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587, // Rifter
+                owner_id: cid,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.skills.entry(cid).or_default().insert(
+            3455,
+            TrainedSkillRecord {
+                type_id: 3455,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+    });
+
+    let origin = DVec3::new(10_000_000.0, 0.0, 0.0);
+    let far_dest = DVec3::new(50_000_000_000.0, 0.0, 0.0);
+    let ship_ball = Ball {
+        id: ship_id,
+        type_id: 587,
+        position: origin,
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 2.5,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    let _ = sys_handle
+        .spawn_ball_with_combat(
+            ship_ball.clone(),
+            CombatState {
+                capacitor: 250.0,
+                max_capacitor: 250.0,
+                gate_cloak_remaining_ticks: 10,
+                ..Default::default()
+            },
+        )
+        .await;
+    let _ = sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: shuttle_id,
+                type_id: 672, // Caldari Shuttle (group 31 bubble immune)
+                position: origin,
+                velocity: DVec3::ZERO,
+                max_velocity: 500.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 30.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                is_interdiction_nullified: true,
+                ..Default::default()
+            },
+        )
+        .await;
+    {
+        let mut bp = sys_handle.ballpark.write().unwrap();
+        bp.ball_group_ids.insert(shuttle_id, 31);
+    }
+
+    // 1. check_warp_interdiction_and_adjust_dest: clear, destination bubble intercept, origin bubble scram, bubble-immune bypass
+    assert_eq!(
+        check_warp_interdiction_and_adjust_dest(&sys_handle, ship_id, origin, far_dest).unwrap(),
+        far_dest
+    );
+    let mid_bubble = far_dest - DVec3::new(200_000.0, 0.0, 0.0);
+    let _ = sys_handle.add_warp_bubble(970_100_001, mid_bubble, 20_000.0).await;
+    let intercepted = check_warp_interdiction_and_adjust_dest(&sys_handle, ship_id, origin, far_dest)
+        .expect("intercepted inside path bubble");
+    assert!(intercepted.x < far_dest.x);
+    assert!((intercepted.distance(mid_bubble) - 20_000.0).abs() < 5_000.0);
+
+    // Bubble-immune ship ignores both destination interception and origin scram bubble
+    assert_eq!(
+        check_warp_interdiction_and_adjust_dest(&sys_handle, shuttle_id, origin, far_dest).unwrap(),
+        far_dest
+    );
+
+    let _ = sys_handle.add_warp_bubble(970_100_002, origin, 15_000.0).await;
+    assert_eq!(
+        check_warp_interdiction_and_adjust_dest(&sys_handle, ship_id, origin, far_dest)
+            .unwrap_err()
+            .code,
+        "WarpScrambled"
+    );
+    assert_eq!(
+        check_warp_interdiction_and_adjust_dest(&sys_handle, shuttle_id, origin, far_dest).unwrap(),
+        far_dest
+    );
+    let _ = sys_handle.remove_warp_bubble(970_100_002).await;
+
+    // 2. execute_agency_content_warp: already in warp -> ShipAlreadyInWarp
+    let mut cruising_ball = ship_ball.clone();
+    cruising_ball.mode = MovementMode::new_warp(origin, far_dest, 3.0);
+    if let MovementMode::Warp { ref mut phase, .. } = cruising_ball.mode {
+        *phase = WarpPhase::Cruising;
+    }
+    assert_eq!(
+        execute_agency_content_warp(&ctx, &sys_handle, cid, ship_id, sys_id, &cruising_ball, far_dest)
+            .await
+            .unwrap_err()
+            .code,
+        "ShipAlreadyInWarp"
+    );
+
+    // Low capacitor where affordable_dist_m < 150_000 -> NotEnoughCapacitor
+    let _ = sys_handle.remove_warp_bubble(970_100_001).await;
+    let _ = sys_handle
+        .set_combat_state(
+            ship_id,
+            CombatState {
+                capacitor: 0.000_001,
+                max_capacitor: 400.0,
+                ..Default::default()
+            },
+        )
+        .await;
+    assert_eq!(
+        execute_agency_content_warp(&ctx, &sys_handle, cid, ship_id, sys_id, &ship_ball, far_dest)
+            .await
+            .unwrap_err()
+            .code,
+        "NotEnoughCapacitor"
+    );
+
+    // Partial cap short-warp (affordable >= 150_000 m, < requested) & gate cloak break + active_warps insertion
+    let _ = sys_handle
+        .set_combat_state(
+            ship_id,
+            CombatState {
+                capacitor: 250.0,
+                max_capacitor: 250.0,
+                gate_cloak_remaining_ticks: 10,
+                ..Default::default()
+            },
+        )
+        .await;
+    // Huge distance so 300-400 GJ capacitor yields short-warp (capacitor drained to 0.0)
+    let huge_dest = origin + DVec3::new(100_000.0 * 149_597_870_700.0, 0.0, 0.0);
+    execute_agency_content_warp(&ctx, &sys_handle, cid, ship_id, sys_id, &ship_ball, huge_dest)
+        .await
+        .expect("short warp succeeds with drained cap");
+    let after_short = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert_eq!(after_short.capacitor, 0.0);
+    assert!(ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+    let b_warping = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
+    assert!(matches!(b_warping.mode, MovementMode::Warp { .. }));
+
+    // Full cap warp succeeds leaving remaining capacitor > 0 and calls on_warp_initiated_hooks
+    let _ = sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await;
+    let _ = sys_handle
+        .set_combat_state(
+            ship_id,
+            CombatState {
+                capacitor: 5_000.0,
+                max_capacitor: 5_000.0,
+                ..Default::default()
+            },
+        )
+        .await;
+    let near_dest = origin + DVec3::new(500_000.0, 0.0, 0.0);
+    execute_agency_content_warp(&ctx, &sys_handle, cid, ship_id, sys_id, &ship_ball, near_dest)
+        .await
+        .expect("full cap warp succeeds");
+    assert!(sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().capacitor > 4_900.0);
+    on_warp_initiated_hooks(&ctx, &sys_handle, cid, ship_id, sys_id).await;
+
+    // 3. handle_use_warp_vector edge validation, star-radius clamping, deadspace rollback (None + Some(old_cd)), and full consumption
+    let _ = sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await;
+    let mut sess = auth_session(1, cid, corp_id, sys_id);
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.ship_id = Some(ship_id);
+
+    let star_pos = ctx
+        .sde
+        .celestials_in_system(sys_id)
+        .into_iter()
+        .find(|c| c.group_id == 6)
+        .map(|c| c.position)
+        .unwrap_or(DVec3::ZERO);
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 587,
+            position: star_pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 2.5,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+
+    let vec_iid = 970_200_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            vec_iid,
+            InventoryItemRecord {
+                item_id: vec_iid,
+                type_id: 77_825,
+                owner_id: cid,
+                location_id: ship_id,
+                flag: InventoryFlag::Hangar, // Wrong flag -> InvalidVectorItem
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+    });
+    assert_eq!(
+        handle_use_warp_vector(&ctx, &mut sess, &[PyRep::Integer(vec_iid)])
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidVectorItem"
+    );
+
+    // Non-finite delta -> InvalidArgument
+    ctx.db.with_mut_snapshot(|snap| {
+        let it = snap.items.get_mut(&vec_iid).unwrap();
+        it.flag = InventoryFlag::Cargo;
+        it.dynamic_attributes.insert(5429, f64::INFINITY);
+    });
+    assert_eq!(
+        handle_use_warp_vector(&ctx, &mut sess, &[PyRep::Integer(vec_iid)])
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidArgument"
+    );
+
+    // Deadspace rollback with no prior cooldown removes cooldown entry and restores quantity
+    let gated_pocket_site_pos = [star_pos.x, star_pos.y, star_pos.z];
+    with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system.insert(
+            sys_id,
+            vec![PveSiteInstance {
+                site_id: "GATED-TEST-DS".into(),
+                solar_system_id: sys_id,
+                total_rooms: 2,
+                current_room: 2,
+                cleared: false,
+                position: gated_pocket_site_pos,
+                ..Default::default()
+            }],
+        );
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        let it = snap.items.get_mut(&vec_iid).unwrap();
+        it.dynamic_attributes.insert(5429, 500_000.0);
+        it.dynamic_attributes.insert(5430, 0.0);
+        it.dynamic_attributes.insert(5431, 0.0);
+        snap.cluster_and_runtime.warp_vector_cooldown_until.remove(&cid);
+    });
+    assert_eq!(
+        handle_use_warp_vector(&ctx, &mut sess, &[PyRep::Integer(vec_iid)])
+            .await
+            .unwrap_err()
+            .code,
+        "NaturalPhenomenaDisruptingWarp"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items.get(&vec_iid).map(|i| i.quantity), Some(1));
+        assert!(!snap.cluster_and_runtime.warp_vector_cooldown_until.contains_key(&cid));
+    });
+
+    // Deadspace rollback when expired prior cooldown existed restores that exact timestamp!
+    let expired_cd = clock.now_unix_secs() - 10;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cluster_and_runtime
+            .warp_vector_cooldown_until
+            .insert(cid, expired_cd);
+    });
+    assert_eq!(
+        handle_use_warp_vector(&ctx, &mut sess, &[PyRep::Integer(vec_iid)])
+            .await
+            .unwrap_err()
+            .code,
+        "NaturalPhenomenaDisruptingWarp"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.cluster_and_runtime.warp_vector_cooldown_until.get(&cid).copied(),
+            Some(expired_cd)
+        );
+    });
+
+    // Clear deadspace site, use huge delta (> sys.radius) -> clamped to system radius AND quantity == 0 deletes item
+    with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system.remove(&sys_id);
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items
+            .get_mut(&vec_iid)
+            .unwrap()
+            .dynamic_attributes
+            .insert(5429, 1e18);
+    });
+    let clamped_ok = handle_use_warp_vector(&ctx, &mut sess, &[PyRep::Integer(vec_iid)])
+        .await
+        .expect("clamped warp vector succeeds");
+    assert_eq!(clamped_ok.dict_get("remainingQuantity"), Some(&PyRep::Integer(0)));
+    assert!(ctx.db.with_snapshot(|snap| !snap.items.contains_key(&vec_iid)));
+
+    // 4. Session change timer expiry + solarsystemid check + unauthenticated rejection
+    let mut unauth = eve_machonet::SessionState::default();
+    assert!(handle_set_session_check(&ctx, &mut unauth, &[]).await.is_err());
+
+    let mut sess_no_sys = auth_session(2, cid, corp_id, sys_id);
+    sess_no_sys.solar_system_id = None;
+    let bad_sys = PyRep::keyval([("solarsystemid", PyRep::Integer(30_000_144))]);
+    assert_eq!(
+        handle_set_session_check(&ctx, &mut sess_no_sys, &[bad_sys])
+            .await
+            .unwrap_err()
+            .code,
+        "SessionCheckMismatch"
+    );
+    let ok_trigger = handle_set_session_check(&ctx, &mut sess_no_sys, &[PyRep::String("wormhole_jump".into())])
+        .await
+        .unwrap();
+    assert_eq!(ok_trigger.dict_get("trigger"), Some(&PyRep::String("wormhole_jump".into())));
+    clock.advance_secs(11);
+    let expired_state = handle_set_session_check(&ctx, &mut sess_no_sys, &[]).await.unwrap();
+    assert_eq!(expired_state.dict_get("active"), Some(&PyRep::Bool(false)));
+}
+

@@ -11,6 +11,10 @@ use glam::DVec3;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
+#[cfg(test)]
+#[path = "space_warp_jump_extra_unit_tests.rs"]
+mod extra_unit_tests;
+
 static SHARED_SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
 
 fn test_ctx() -> ServerContext {
@@ -120,7 +124,7 @@ fn resolve_bound_or_session_sys_and_bookmark_expired_err_cover_branches() {
     assert_eq!(bm_err.code.to_ascii_lowercase(), "bookmarkexpired");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn warp_to_stuff_validates_all_preconditions_and_initiates_warp() {
     let ctx = test_ctx();
     let char_id = 90_000_001_i64;
@@ -367,7 +371,7 @@ async fn warp_to_stuff_validates_all_preconditions_and_initiates_warp() {
     assert!(warp_ok.as_i64().is_some());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stargate_jump_and_dock_enforce_range_timers_and_complete_transitions() {
     let ctx = test_ctx();
     let char_id = 90_000_001_i64;
@@ -523,7 +527,7 @@ async fn stargate_jump_and_dock_enforce_range_timers_and_complete_transitions() 
     assert_eq!(sess.station_id, Some(st_id));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cmd_dock_warp_deceleration_1s_tolerance_and_mid_warp_rejection() {
     let ctx = test_ctx();
     let char_id = 90_000_001_i64;

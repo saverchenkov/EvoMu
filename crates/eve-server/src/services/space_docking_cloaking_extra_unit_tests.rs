@@ -571,3 +571,241 @@ async fn execute_cosmic_wormhole_jump_covers_timers_mass_limits_collapsed_and_en
     assert_eq!(jump_res.dict_get("destinationSystemID").and_then(PyRep::as_i64), Some(c13_dest as i64));
     assert_eq!(jump_res.dict_get("delayedLocal").and_then(PyRep::as_bool), Some(true));
 }
+
+#[tokio::test]
+async fn mutant_kill_wormhole_jump_phenomena_multipliers_and_fallback_branches() {
+    use std::collections::HashMap;
+
+    let mut ctx = test_ctx();
+    let _ = system_wormhole_profile_sde(&ctx.sde, 31_000_001);
+
+    let frig_tid = 99_772_u32;
+    clone_type_with(&mut ctx.sde, 587, frig_tid, 25, 6, 1_500_000.0);
+
+    let find_sys = |sde: &SdeRegistry, phenom: &str| -> u32 {
+        *sde.solar_systems
+            .keys()
+            .find(|&&id| {
+                eve_dogma::resolve_system_wormhole_phenomenon(sde, id, None)
+                    .is_some_and(|(_, _, name, _)| name == phenom)
+            })
+            .expect("phenomenon system")
+    };
+
+    let bh_sys = find_sys(&ctx.sde, "Black Hole");
+    let pulsar_sys = find_sys(&ctx.sde, "Pulsar");
+    let wr_sys = find_sys(&ctx.sde, "Wolf-Rayet");
+    let cv_sys = find_sys(&ctx.sde, "Cataclysmic Variable");
+
+    let bh_eff_tid = eve_dogma::resolve_system_wormhole_phenomenon(&ctx.sde, bh_sys, None)
+        .unwrap()
+        .3;
+    let mut eff_attrs = HashMap::from([
+        (eve_sde::attr_ids::MAX_VELOCITY, 300.0_f64),
+        (eve_sde::attr_ids::AGILITY, 2.0_f64),
+    ]);
+    assert!(eve_dogma::apply_wormhole_phenomenon_to_attributes(
+        &ctx.sde,
+        bh_eff_tid,
+        6,
+        false,
+        &mut eff_attrs,
+    ));
+    let expected_v_mult = eff_attrs[&eve_sde::attr_ids::MAX_VELOCITY] / 300.0;
+    let expected_in_mult = eff_attrs[&eve_sde::attr_ids::AGILITY] / 2.0;
+
+    let host_sys = 30_000_142_u32;
+    let char_id = 96_299_i64;
+    let ship_id = 78_299_i64;
+    let now_u = ctx.now_unix();
+    let pos = [10_000.0, 0.0, 0.0];
+
+    let seed_and_jump = |ctx: &ServerContext, dest_sys: u32, sig_id: &str| {
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut ch = snap.characters.values().next().cloned().expect("demo char");
+            ch.character_id = char_id;
+            ch.solar_system_id = host_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+            snap.characters.insert(char_id, ch);
+            snap.items.insert(
+                ship_id,
+                InventoryItemRecord {
+                    item_id: ship_id,
+                    type_id: frig_tid,
+                    owner_id: char_id,
+                    location_id: host_sys as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.cosmic_signatures.insert(
+                host_sys,
+                vec![make_wh_sig(
+                    sig_id,
+                    host_sys,
+                    pos,
+                    Some(30_001),
+                    Some(dest_sys),
+                    now_u - 60,
+                    86_400,
+                    500_000_000.0,
+                    500_000_000.0,
+                    20_000_000.0,
+                )],
+            );
+        });
+    };
+
+    // Part 1: Real SDE phenomena (Black Hole modifies velocity + inertia, Pulsar leaves them None)
+    {
+        seed_and_jump(&ctx, bh_sys, "WH-BH");
+        clear_session_change_timer(&ctx, char_id);
+        let host_h = ctx.systems.get_or_spawn(host_sys);
+        let ball = make_ship_ball(ship_id, frig_tid, 1_500_000.0, DVec3::new(11_000.0, 0.0, 0.0));
+        let _ = host_h.spawn_ball_with_meta(ball.clone(), CombatState::default(), SlimItemMeta::default()).await;
+        let mut sess = make_session(char_id, 98_000_001, Some(host_sys), Some(ship_id));
+        let res = execute_cosmic_wormhole_jump(&ctx, &mut sess, char_id, host_sys, ship_id, ball, None, Some("WH-BH"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(res.dict_get("destinationSystemID"), Some(&PyRep::Integer(bh_sys as i64)));
+        let dest_h = ctx.systems.get_or_spawn(bh_sys);
+        let bp = dest_h.ballpark.read().unwrap();
+        let cs = bp.combat_states.get(&ship_id).expect("Black Hole combat state");
+        assert!(
+            (cs.external_velocity_multiplier.unwrap() - expected_v_mult).abs() < 1e-6,
+            "got {:?}, expected {expected_v_mult}",
+            cs.external_velocity_multiplier
+        );
+        assert!(
+            (cs.external_inertia_multiplier.unwrap() - expected_in_mult).abs() < 1e-6,
+            "got {:?}, expected {expected_in_mult}",
+            cs.external_inertia_multiplier
+        );
+    }
+    {
+        seed_and_jump(&ctx, pulsar_sys, "WH-PUL");
+        clear_session_change_timer(&ctx, char_id);
+        let host_h = ctx.systems.get_or_spawn(host_sys);
+        let ball = make_ship_ball(ship_id, frig_tid, 1_500_000.0, DVec3::new(11_000.0, 0.0, 0.0));
+        let _ = host_h.spawn_ball_with_meta(ball.clone(), CombatState::default(), SlimItemMeta::default()).await;
+        let mut sess = make_session(char_id, 98_000_001, Some(host_sys), Some(ship_id));
+        let res = execute_cosmic_wormhole_jump(&ctx, &mut sess, char_id, host_sys, ship_id, ball, None, Some("WH-PUL"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(res.dict_get("destinationSystemID"), Some(&PyRep::Integer(pulsar_sys as i64)));
+        let dest_h = ctx.systems.get_or_spawn(pulsar_sys);
+        let bp = dest_h.ballpark.read().unwrap();
+        let cs = bp.combat_states.get(&ship_id).expect("Pulsar combat state");
+        assert!(cs.external_velocity_multiplier.is_none());
+        assert!(cs.external_inertia_multiplier.is_none());
+    }
+
+    // Part 2: Clear wormhole_class_id on cloned SDE for 4 distinct system IDs so
+    // resolve_system_wormhole_phenomenon returns None while system_wormhole_profile_sde
+    // still returns Pulsar / Wolf-Rayet / Black Hole / Cataclysmic Variable -> fallback match arms
+    let mut fb_ctx = test_ctx();
+    clone_type_with(&mut fb_ctx.sde, 587, frig_tid, 25, 6, 1_500_000.0);
+    {
+        let reg = Arc::make_mut(&mut fb_ctx.sde);
+        let mut no_wh_reg = reg.regions.values().next().unwrap().clone();
+        no_wh_reg.region_id = 99_777_002;
+        no_wh_reg.wormhole_class_id = None;
+        reg.regions.insert(99_777_002, no_wh_reg);
+        let mut no_wh_const = reg.constellations.values().next().unwrap().clone();
+        no_wh_const.constellation_id = 99_777_001;
+        no_wh_const.region_id = 99_777_002;
+        no_wh_const.wormhole_class_id = None;
+        reg.constellations.insert(99_777_001, no_wh_const);
+        for sys_id in [pulsar_sys, wr_sys, bh_sys, cv_sys] {
+            if let Some(sys) = reg.solar_systems.get_mut(&sys_id) {
+                sys.wormhole_class_id = None;
+                sys.constellation_id = 99_777_001;
+                sys.region_id = 99_777_002;
+            }
+        }
+    }
+
+    for (dest_sys, sig_id, label) in [
+        (pulsar_sys, "FB-PUL", "Pulsar"),
+        (wr_sys, "FB-WR", "Wolf-Rayet"),
+        (bh_sys, "FB-BH", "Black Hole"),
+        (cv_sys, "FB-CV", "Cataclysmic Variable"),
+    ] {
+        assert!(eve_dogma::resolve_system_wormhole_phenomenon(&fb_ctx.sde, dest_sys, None).is_none());
+        assert_eq!(system_wormhole_profile_sde(&fb_ctx.sde, dest_sys).3, label);
+
+        fb_ctx.db.with_mut_snapshot(|snap| {
+            let mut ch = snap.characters.values().next().cloned().expect("demo char");
+            ch.character_id = char_id;
+            ch.solar_system_id = host_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+            snap.characters.insert(char_id, ch);
+            snap.items.insert(
+                ship_id,
+                InventoryItemRecord {
+                    item_id: ship_id,
+                    type_id: frig_tid,
+                    owner_id: char_id,
+                    location_id: host_sys as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.cosmic_signatures.insert(
+                host_sys,
+                vec![make_wh_sig(
+                    sig_id,
+                    host_sys,
+                    pos,
+                    Some(30_001),
+                    Some(dest_sys),
+                    now_u - 60,
+                    86_400,
+                    500_000_000.0,
+                    500_000_000.0,
+                    20_000_000.0,
+                )],
+            );
+        });
+        clear_session_change_timer(&fb_ctx, char_id);
+        let host_h = fb_ctx.systems.get_or_spawn(host_sys);
+        let ball = make_ship_ball(ship_id, frig_tid, 1_500_000.0, DVec3::new(11_000.0, 0.0, 0.0));
+        let _ = host_h.spawn_ball_with_meta(ball.clone(), CombatState::default(), SlimItemMeta::default()).await;
+        let mut sess = make_session(char_id, 98_000_001, Some(host_sys), Some(ship_id));
+        execute_cosmic_wormhole_jump(&fb_ctx, &mut sess, char_id, host_sys, ship_id, ball, None, Some(sig_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let dest_h = fb_ctx.systems.get_or_spawn(dest_sys);
+        let bp = dest_h.ballpark.read().unwrap();
+        let cs = bp.combat_states.get(&ship_id).expect("fallback env combat state");
+        match label {
+            "Pulsar" => {
+                assert_eq!(cs.env_max_shield_multiplier, Some(1.30));
+                assert_eq!(cs.env_sig_multiplier, Some(1.30));
+            }
+            "Wolf-Rayet" => {
+                assert_eq!(cs.env_max_armor_multiplier, Some(1.30));
+                assert_eq!(cs.env_sig_multiplier, Some(0.85));
+            }
+            "Black Hole" => {
+                assert_eq!(cs.external_velocity_multiplier, Some(1.30));
+                assert_eq!(cs.external_inertia_multiplier, Some(1.15));
+            }
+            "Cataclysmic Variable" => {
+                assert_eq!(cs.env_max_cap_multiplier, Some(1.30));
+            }
+            _ => unreachable!(),
+        }
+    }
+}

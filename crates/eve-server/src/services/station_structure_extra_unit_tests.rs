@@ -655,3 +655,352 @@ async fn station_dock_invalidates_space_bound_objects_and_emits_ship_item_change
         "Dock must emit OnItemChange moving the active ship into station hangar: {notifs:?}"
     );
 }
+
+#[tokio::test]
+async fn undock_fulcrum_inertia_structure_notice_and_anchor_structure_all_gates_slim_meta() {
+    use crate::router::ServerContext;
+    use eve_db::{ContractRecord, WorldRepository};
+    use eve_destiny::Ball;
+    use eve_sde::SdeRegistry;
+    use std::sync::Arc;
+
+    let kw = HashMap::new();
+    let jita_station = 60_003_760_i64;
+    let fulcrum_station = 60_015_187_i64;
+    let zarzakh_sys = 30_100_000_u32;
+    let jita_sys = 30_000_142_u32;
+    let st_zarzakh = 1_000_000_999_001_i64;
+    let corp_id = 98_299_001_i64;
+    let ally_id = 99_299_001_i64;
+
+    // Build ServerContext with custom named & unnamed Secure Cargo Containers (category 22, group 340)
+    let mut sde = SdeRegistry::with_canonical_seed();
+    let cont_named_tid = 929_001_u32;
+    let cont_unnamed_tid = 929_002_u32;
+    let base_cont = sde.types.get(&587).cloned().expect("seed frigate");
+    let mut named_cont = base_cont.clone();
+    named_cont.type_id = cont_named_tid;
+    named_cont.group_id = 340;
+    named_cont.category_id = 22;
+    named_cont.name = "Custom Anchor Container".into();
+    named_cont.capacity = 1_000.0;
+    named_cont.mass = 50_000.0;
+    named_cont.radius = 50.0;
+    named_cont.default_attributes = HashMap::from([(553, 5_000.0)]);
+    let mut unnamed_cont = named_cont.clone();
+    unnamed_cont.type_id = cont_unnamed_tid;
+    unnamed_cont.category_id = 2;
+    unnamed_cont.effect_ids.push(649);
+    unnamed_cont.name = String::new();
+    sde.types.insert(cont_named_tid, named_cont);
+    sde.types.insert(cont_unnamed_tid, unnamed_cont);
+
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
+    ctx.set_clock(Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(1_800_100_000)));
+
+    let null_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| {
+            s.solar_system_id >= 30_000_000
+                && s.solar_system_id < 31_000_000
+                && s.security_status <= 0.0
+                && s.solar_system_id != zarzakh_sys
+        })
+        .map(|s| s.solar_system_id)
+        .unwrap_or(30_004_759);
+
+    let neutral_pilot = 929_101_i64;
+    let pirate_fulcrum = 929_102_i64;
+    let pirate_zarzakh_st = 929_103_i64;
+    let jita_pilot = 929_104_i64;
+    let ship_neutral = 929_201_i64;
+    let ship_pirate_f = 929_202_i64;
+    let ship_pirate_z = 929_203_i64;
+    let ship_jita = 929_204_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.insert(corp_id, {
+            let mut c = CorporationRecord::default();
+            c.corporation_id = corp_id;
+            c.alliance_id = Some(ally_id);
+            c
+        });
+        snap.structures.insert(
+            st_zarzakh,
+            UpwellStructureRecord {
+                structure_id: st_zarzakh,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: zarzakh_sys,
+                name: "Zarzakh Citadel".into(),
+                position: [150_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                shield_hp: 100_000.0,
+                armor_hp: 100_000.0,
+                hull_hp: 100_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+
+        for (cid, uid, name, sys_id, stn, struc, ship_id, war_faction) in [
+            (neutral_pilot, 101_u64, "NeutralFulcrum", zarzakh_sys, Some(fulcrum_station), None, ship_neutral, None),
+            (pirate_fulcrum, 102, "PirateFulcrum", zarzakh_sys, Some(fulcrum_station), None, ship_pirate_f, Some(500_010)),
+            (pirate_zarzakh_st, 103, "PirateZarzakhSt", zarzakh_sys, None, Some(st_zarzakh), ship_pirate_z, Some(500_010)),
+            (jita_pilot, 104, "JitaNpcUndock", jita_sys, Some(jita_station), None, ship_jita, None),
+        ] {
+            let uname = format!("u_{uid}");
+            snap.accounts.insert(
+                uname.clone(),
+                eve_db::AccountRecord {
+                    user_id: uid,
+                    username: uname,
+                    password_token: "test".into(),
+                    role: eve_db::service_roles::ROLE_PLAYER,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
+            let mut ch = clone_char_with(snap, cid, name, corp_id, sys_id, ship_id);
+            ch.user_id = uid;
+            ch.station_id = stn;
+            ch.structure_id = struc;
+            ch.alliance_id = Some(ally_id);
+            ch.war_faction_id = war_faction;
+            snap.characters.insert(cid, ch);
+            snap.items.insert(
+                ship_id,
+                InventoryItemRecord {
+                    item_id: ship_id,
+                    type_id: 587,
+                    owner_id: cid,
+                    location_id: stn.or(struc).unwrap(),
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    for (uid, cid) in [
+        (101_u64, neutral_pilot),
+        (102, pirate_fulcrum),
+        (103, pirate_zarzakh_st),
+        (104, jita_pilot),
+    ] {
+        ctx.db
+            .acquire_online_lock(uid, uid, Some(cid), true, ctx.now_unix())
+            .expect("online lock");
+    }
+
+    // 1. Fulcrum Undock: neutral mult==1.0 leaves base_inertia/external_inertia_multiplier None;
+    //    pirate at Fulcrum AND pirate at non-Fulcrum Zarzakh Upwell structure apply 0.80 multiplier;
+    //    Upwell structure (>= 1_000_000_000_000) emits OnCharacterLeftStructure, NPC station does not.
+    let mut s_neu = make_sess(neutral_pilot, corp_id, Some(zarzakh_sys), Some(fulcrum_station), None, Some(ship_neutral));
+    s_neu.user_id = Some(101);
+    handle(&ctx, &mut s_neu, "stationSvc", "Undock", &[], &kw).await.unwrap().expect("neutral undock");
+    let z_sys_h = ctx.systems.get_or_spawn(zarzakh_sys);
+    let (_, neu_ball) = z_sys_h.get_ball_snapshot(ship_neutral).await.unwrap().unwrap();
+    let neu_cs = z_sys_h.get_combat_state(ship_neutral).await.unwrap().unwrap();
+    assert_eq!(neu_cs.base_inertia, Some(neu_ball.inertia));
+    assert_eq!(neu_cs.external_inertia_multiplier, None);
+
+    let mut s_pir_f = make_sess(pirate_fulcrum, corp_id, Some(zarzakh_sys), Some(fulcrum_station), None, Some(ship_pirate_f));
+    s_pir_f.user_id = Some(102);
+    handle(&ctx, &mut s_pir_f, "stationSvc", "Undock", &[], &kw).await.unwrap().expect("pirate fulcrum undock");
+    let (_, pir_f_ball) = z_sys_h.get_ball_snapshot(ship_pirate_f).await.unwrap().unwrap();
+    let pir_f_cs = z_sys_h.get_combat_state(ship_pirate_f).await.unwrap().unwrap();
+    assert!(pir_f_cs.base_inertia.is_some());
+    assert_eq!(pir_f_cs.external_inertia_multiplier, Some(0.80));
+    assert!((pir_f_ball.inertia - neu_ball.inertia * 0.80).abs() < 1e-6);
+
+    let _ = ctx.drain_notifications_for_char(pirate_zarzakh_st);
+    let mut s_pir_z = make_sess(pirate_zarzakh_st, corp_id, Some(zarzakh_sys), None, Some(st_zarzakh), Some(ship_pirate_z));
+    s_pir_z.user_id = Some(103);
+    handle(&ctx, &mut s_pir_z, "stationSvc", "Undock", &[], &kw).await.unwrap().expect("pirate zarzakh upwell undock");
+    let (_, pir_z_ball) = z_sys_h.get_ball_snapshot(ship_pirate_z).await.unwrap().unwrap();
+    let pir_z_cs = z_sys_h.get_combat_state(ship_pirate_z).await.unwrap().unwrap();
+    assert!(pir_z_cs.base_inertia.is_some());
+    assert_eq!(pir_z_cs.external_inertia_multiplier, Some(0.80));
+    assert!((pir_z_ball.inertia - neu_ball.inertia * 0.80).abs() < 1e-6);
+    let upwell_notifs = ctx.drain_notifications_for_char(pirate_zarzakh_st);
+    assert!(
+        upwell_notifs.iter().any(|n| n.event == "OnCharacterLeftStructure" && n.args == vec![PyRep::Integer(pirate_zarzakh_st)]),
+        "Upwell undock must emit OnCharacterLeftStructure: {upwell_notifs:?}"
+    );
+
+    let _ = ctx.drain_notifications_for_char(jita_pilot);
+    let mut s_jita = make_sess(jita_pilot, corp_id, Some(jita_sys), Some(jita_station), None, Some(ship_jita));
+    s_jita.user_id = Some(104);
+    handle(&ctx, &mut s_jita, "stationSvc", "Undock", &[], &kw).await.unwrap().expect("jita npc undock");
+    let jita_notifs = ctx.drain_notifications_for_char(jita_pilot);
+    assert!(
+        !jita_notifs.iter().any(|n| n.event == "OnCharacterLeftStructure"),
+        "NPC station undock must NOT emit OnCharacterLeftStructure: {jita_notifs:?}"
+    );
+
+    // 2. posMgr.AnchorStructure DB transaction gates & SlimItemMeta fields
+    let anchor_pilot = 929_301_i64;
+    let anchor_ship = 929_302_i64;
+    let cont_cargo = 929_401_i64;
+    let cont_flag_locked = 929_402_i64;
+    let cont_space = 929_403_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = clone_char_with(snap, anchor_pilot, "AnchorTester", corp_id, null_sys, anchor_ship);
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.alliance_id = Some(ally_id);
+        snap.characters.insert(anchor_pilot, ch);
+        for (item_id, tid, loc, flag) in [
+            (anchor_ship, 587_u32, null_sys as i64, InventoryFlag::None),
+            (cont_cargo, cont_named_tid, anchor_ship, InventoryFlag::Cargo),
+            (cont_flag_locked, cont_named_tid, anchor_ship, InventoryFlag::Locked),
+            (cont_space, cont_unnamed_tid, null_sys as i64, InventoryFlag::None),
+        ] {
+            snap.items.insert(
+                item_id,
+                InventoryItemRecord {
+                    item_id,
+                    type_id: tid,
+                    owner_id: anchor_pilot,
+                    location_id: loc,
+                    flag,
+                    quantity: 1,
+                    singleton: false,
+                    version: 7,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.contracts.insert(
+            929_501,
+            ContractRecord {
+                contract_id: 929_501,
+                issuer_id: anchor_pilot,
+                contract_type: "ItemExchange".into(),
+                status: "Outstanding".into(),
+                item_ids: vec![cont_cargo],
+                ..Default::default()
+            },
+        );
+    });
+
+    let null_h = ctx.systems.get_or_spawn(null_sys);
+    null_h
+        .spawn_ball(Ball {
+            id: anchor_ship,
+            type_id: 587,
+            position: DVec3::new(100_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+
+    let mut a_sess = make_sess(anchor_pilot, corp_id, Some(null_sys), None, None, Some(anchor_ship));
+    a_sess.alliance_id = Some(ally_id);
+
+    // Every DB character mismatch branch inside AnchorStructure tx -> ShipNotInSpace
+    for (stn, struc, sys, sh) in [
+        (Some(jita_station), None, null_sys, anchor_ship),
+        (None, Some(st_zarzakh), null_sys, anchor_ship),
+        (None, None, jita_sys, anchor_ship),
+        (None, None, null_sys, anchor_ship + 1),
+    ] {
+        ctx.db.with_mut_snapshot(|snap| {
+            let ch = snap.characters.get_mut(&anchor_pilot).unwrap();
+            ch.station_id = stn;
+            ch.structure_id = struc;
+            ch.solar_system_id = sys;
+            ch.active_ship_id = sh;
+        });
+        assert_eq!(
+            handle(&ctx, &mut a_sess, "posMgr", "AnchorStructure", &[PyRep::Integer(cont_cargo)], &kw)
+                .await
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "ShipNotInSpace"
+        );
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&anchor_pilot).unwrap();
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.solar_system_id = null_sys;
+        ch.active_ship_id = anchor_ship;
+    });
+
+    // Locked by contract AND locked by InventoryFlag::Locked -> ItemLocked
+    assert_eq!(
+        handle(&ctx, &mut a_sess, "posMgr", "AnchorStructure", &[PyRep::Integer(cont_cargo)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "ItemLocked"
+    );
+    assert_eq!(
+        handle(&ctx, &mut a_sess, "posMgr", "AnchorStructure", &[PyRep::Integer(cont_flag_locked)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "ItemLocked"
+    );
+
+    // Unlock contract -> anchor named container from ship cargo: version bumps 7 -> 8 & SlimItemMeta populates
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.contracts.clear();
+    });
+    handle(&ctx, &mut a_sess, "posMgr", "AnchorStructure", &[PyRep::Integer(cont_cargo)], &kw)
+        .await
+        .unwrap()
+        .expect("anchor named container from cargo");
+    ctx.db.with_snapshot(|snap| {
+        let it = &snap.items[&cont_cargo];
+        assert_eq!(it.version, 8);
+        assert_eq!(it.location_id, null_sys as i64);
+        assert_eq!(it.flag, InventoryFlag::Hangar);
+        assert!(it.singleton);
+    });
+    let slim_named = null_h.get_ball_slim_item(cont_cargo).await.unwrap().unwrap();
+    assert_eq!(slim_named.dict_get("groupID"), Some(&PyRep::Integer(340)));
+    assert_eq!(slim_named.dict_get("categoryID"), Some(&PyRep::Integer(22)));
+    assert_eq!(slim_named.dict_get("ownerID"), Some(&PyRep::Integer(anchor_pilot)));
+    assert_eq!(slim_named.dict_get("charID"), Some(&PyRep::None));
+    assert_eq!(slim_named.dict_get("corpID"), Some(&PyRep::Integer(corp_id)));
+    assert_eq!(slim_named.dict_get("allianceID"), Some(&PyRep::Integer(ally_id)));
+    assert_eq!(slim_named.dict_get("securityStatus"), Some(&PyRep::Real(0.0)));
+    assert_eq!(slim_named.dict_get("name"), Some(&PyRep::String("Custom Anchor Container".into())));
+
+    // Anchor unnamed container already in space with session corp/alliance = None -> corpID/allianceID None, fallback name
+    a_sess.corporation_id = None;
+    a_sess.alliance_id = None;
+    handle(&ctx, &mut a_sess, "posMgr", "AnchorStructure", &[PyRep::Integer(cont_space)], &kw)
+        .await
+        .unwrap()
+        .expect("anchor unnamed container in space");
+    let slim_unnamed = null_h.get_ball_slim_item(cont_space).await.unwrap().unwrap();
+    assert_eq!(slim_unnamed.dict_get("corpID"), Some(&PyRep::None));
+    assert_eq!(slim_unnamed.dict_get("allianceID"), Some(&PyRep::None));
+    assert_eq!(
+        slim_unnamed.dict_get("name"),
+        Some(&PyRep::String(format!("Item {cont_space}")))
+    );
+}

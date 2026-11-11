@@ -103,6 +103,20 @@ fn deposit_mined_ore_structure_belt_filtering_and_wormhole_class_tables() {
                 ..Default::default()
             },
         );
+        snap.items.insert(
+            1_095_000_060,
+            InventoryItemRecord {
+                item_id: 1_095_000_060,
+                type_id: 45009,
+                owner_id: 1_000_009,
+                location_id: struct_belt_id,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(1_095_000_060, true);
         snap.asteroids.insert(
             1_095_000_050,
             AsteroidRecord {
@@ -249,7 +263,7 @@ fn reprocessable_materials_single_entry_swapped_bounds_and_zero_sum_branches() {
     assert!(zero_out.is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hydrate_wormhole_guards_adopts_nearby_balls_and_spawns_unpersisted_anomalies() {
     let mut ctx = test_ctx();
     let sys_id = 31_000_009_u32;
@@ -358,4 +372,344 @@ fn phased_asteroid_field_exact_boundary_thresholds() {
     // Connecting another ship after collapse does NOT re-enable phased_in
     assert!(!f.connect_industrial_command_ship(103, 200));
     assert!(!f.phased_in);
+}
+
+#[test]
+fn deposit_mined_ore_zero_first_and_stack_notifications_and_sample_shattered_system() {
+    let mut ctx = test_ctx();
+    let char_id = 90_000_111_i64;
+    let ship_id = 1_095_100_001_i64;
+    let sys_id = 30_000_142_u32;
+    let ore_tid = 996_511_u32;
+    ensure_type(&mut ctx.sde, ore_tid, 1921, 0.1, 50.0);
+    ctx.db
+        .provision_gm_account(&format!("miner_{char_id}"), "pw", char_id, "Miner");
+    let uid = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).expect("miner char");
+        ch.corporation_id = 1_000_009;
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+        let uid = ch.user_id;
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 606,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        uid
+    });
+    let _ = ctx
+        .db
+        .acquire_online_lock(uid, 9911, Some(char_id), false, ctx.now_unix());
+
+    // 1. mined_units == 0 must insert nothing, notify nothing, and record no ledger entry
+    let _ = ctx.drain_notifications_for_char(char_id);
+    deposit_mined_ore_for_asteroid_and_record_ledger_with_waste(
+        &ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        InventoryFlag::Cargo,
+        ore_tid,
+        0,
+        0,
+        None,
+        None,
+    );
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.mining_ledger.iter().all(|e| e.character_id != char_id));
+        assert!(!snap
+            .items
+            .values()
+            .any(|i| i.location_id == ship_id && i.type_id == ore_tid));
+    });
+
+    // 2. First deposit (prev_qty == 0) emits OnItemChange with ixFlag=3 -> 0
+    deposit_mined_ore_for_asteroid_and_record_ledger_with_waste(
+        &ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        InventoryFlag::Cargo,
+        ore_tid,
+        10,
+        0,
+        None,
+        None,
+    );
+    let first_notifs = ctx.drain_notifications_for_char(char_id);
+    let first_change = first_notifs
+        .iter()
+        .find(|n| n.event == "OnItemChange")
+        .expect("first deposit emits OnItemChange");
+    assert_eq!(
+        first_change.args.get(1),
+        Some(&eve_proto::PyRep::Dict(vec![(
+            eve_proto::PyRep::Integer(3),
+            eve_proto::PyRep::Integer(0),
+        )]))
+    );
+
+    // 3. Stacked deposit (prev_qty == 10 > 0) emits OnItemChange with ixQuantity=9 -> old qty 10
+    deposit_mined_ore_for_asteroid_and_record_ledger_with_waste(
+        &ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        InventoryFlag::Cargo,
+        ore_tid,
+        5,
+        0,
+        None,
+        None,
+    );
+    let second_notifs = ctx.drain_notifications_for_char(char_id);
+    let second_change = second_notifs
+        .iter()
+        .find(|n| n.event == "OnItemChange")
+        .expect("second deposit emits OnItemChange");
+    assert_eq!(
+        second_change.args.get(1),
+        Some(&eve_proto::PyRep::Dict(vec![(
+            eve_proto::PyRep::Integer(9),
+            eve_proto::PyRep::Integer(10),
+        )]))
+    );
+
+    // 4. sample_wormhole_ore_sites_for_system: shattered celestial (type_id 30889) vs normal C3
+    let normal_sys = 31_000_701_u32;
+    let shattered_sys = 31_000_702_u32;
+    {
+        let sde = Arc::make_mut(&mut ctx.sde);
+        let mut by_sys = (*sde.celestials_by_system).clone();
+        by_sys.insert(
+            shattered_sys,
+            vec![eve_sde::CelestialInfo {
+                celestial_id: 40_999_001,
+                solar_system_id: shattered_sys,
+                type_id: 30889,
+                group_id: 7,
+                name: "Shattered Planet".into(),
+                radius: 1_000_000.0,
+                position: DVec3::ZERO,
+                orbit_id: None,
+                orbit_index: None,
+                celestial_index: None,
+            }],
+        );
+        sde.celestials_by_system = Arc::new(by_sys);
+    }
+    let normal_sites = sample_wormhole_ore_sites_for_system(&ctx.sde, &ctx.mechanic_rng, normal_sys, 3);
+    assert!(!normal_sites.is_empty());
+    assert!(!normal_sites
+        .iter()
+        .any(|s| s.dungeon_name == "Shattered Debris Field"));
+
+    let shattered_sites = sample_wormhole_ore_sites_for_system(&ctx.sde, &ctx.mechanic_rng, shattered_sys, 3);
+    assert!(!shattered_sites.is_empty());
+    assert_eq!(shattered_sites[0].dungeon_name, "Shattered Debris Field");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tick_all_ice_belt_respawns_matrix_and_wormhole_ore_guard_slim_meta() {
+    let mut ctx = test_ctx();
+    let now = ctx.now_unix();
+    let ready_sys = 30_000_180_u32;
+    let ore_only_sys = 30_000_156_u32;
+    let partial_sys = 30_002_510_u32;
+    let recent_sys = 30_002_659_u32;
+    let cleared_ore_sys = 30_003_495_u32;
+
+    for sys in [ready_sys, ore_only_sys, partial_sys, recent_sys, cleared_ore_sys] {
+        if let Some(Ok(site)) = crate::services::mining_sites::resolve_regional_ice_belt(&ctx.sde, sys) {
+            for a in &site.asteroids {
+                ensure_type(&mut ctx.sde, a.type_id, 465, 1_000.0, 120.0);
+            }
+        }
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        // 1. Only non-IceBelt cleared & old -> must NOT trigger IceBelt respawn
+        snap.cosmic_anomalies.insert(
+            ore_only_sys,
+            vec![CosmicAnomalyRecord {
+                anomaly_id: "ORE-OLD".into(),
+                solar_system_id: ore_only_sys,
+                name: "Ore Site".into(),
+                anomaly_type: "OreAnomaly".into(),
+                position: [0.0, 0.0, 0.0],
+                signal_strength: 1.0,
+                ore_types: vec![],
+                remaining_volume: 0.0,
+                created_unix: 1,
+                lifetime_seconds: 86_400,
+                cleared: false,
+            }],
+        );
+        // 2. One cleared old IceBelt PLUS one uncleared IceBelt (no non-Ice anomalies) -> must NOT respawn
+        snap.cosmic_anomalies.insert(
+            partial_sys,
+            vec![
+                CosmicAnomalyRecord {
+                    anomaly_id: "ICE-CLEARED".into(),
+                    solar_system_id: partial_sys,
+                    name: "Ice Belt".into(),
+                    anomaly_type: "IceBelt".into(),
+                    position: [0.0, 0.0, 0.0],
+                    signal_strength: 1.0,
+                    ore_types: vec![16264],
+                    remaining_volume: 0.0,
+                    created_unix: 1,
+                    lifetime_seconds: 14_400,
+                    cleared: true,
+                },
+                CosmicAnomalyRecord {
+                    anomaly_id: "ICE-ACTIVE".into(),
+                    solar_system_id: partial_sys,
+                    name: "Ice Belt Active".into(),
+                    anomaly_type: "IceBelt".into(),
+                    position: [200_000.0, 0.0, 0.0],
+                    signal_strength: 1.0,
+                    ore_types: vec![16264],
+                    remaining_volume: 10_000.0,
+                    created_unix: now,
+                    lifetime_seconds: 14_400,
+                    cleared: false,
+                },
+            ],
+        );
+        // 3. One cleared IceBelt, NOT yet expired -> must NOT respawn
+        snap.cosmic_anomalies.insert(
+            recent_sys,
+            vec![CosmicAnomalyRecord {
+                anomaly_id: "ICE-RECENT".into(),
+                solar_system_id: recent_sys,
+                name: "Ice Belt".into(),
+                anomaly_type: "IceBelt".into(),
+                position: [0.0, 0.0, 0.0],
+                signal_strength: 1.0,
+                ore_types: vec![16264],
+                remaining_volume: 0.0,
+                created_unix: now.saturating_sub(10),
+                lifetime_seconds: 14_400,
+                cleared: true,
+            }],
+        );
+        // 4. Cleared old non-IceBelt anomaly -> tests `a.anomaly_type == "IceBelt" && a.cleared` (L475)
+        snap.cosmic_anomalies.insert(
+            cleared_ore_sys,
+            vec![CosmicAnomalyRecord {
+                anomaly_id: "ORE-CLEARED".into(),
+                solar_system_id: cleared_ore_sys,
+                name: "Cleared Ore".into(),
+                anomaly_type: "OreAnomaly".into(),
+                position: [0.0, 0.0, 0.0],
+                signal_strength: 1.0,
+                ore_types: vec![],
+                remaining_volume: 0.0,
+                created_unix: 1,
+                lifetime_seconds: 86_400,
+                cleared: true,
+            }],
+        );
+        // 5. Cleared & expired IceBelt -> MUST respawn
+        snap.cosmic_anomalies.insert(
+            ready_sys,
+            vec![CosmicAnomalyRecord {
+                anomaly_id: "ICE-READY".into(),
+                solar_system_id: ready_sys,
+                name: "Ice Belt".into(),
+                anomaly_type: "IceBelt".into(),
+                position: [0.0, 0.0, 0.0],
+                signal_strength: 1.0,
+                ore_types: vec![16264],
+                remaining_volume: 0.0,
+                created_unix: now.saturating_sub(crate::services::mining_sites::ICE_BELT_RESPAWN_DELAY_SECS + 60),
+                lifetime_seconds: 14_400,
+                cleared: true,
+            }],
+        );
+    });
+
+    tick_all_ice_belt_respawns_sync(&ctx);
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.cosmic_anomalies[&ore_only_sys]
+            .iter()
+            .all(|a| a.anomaly_type != "IceBelt"));
+        assert!(snap.cosmic_anomalies[&cleared_ore_sys]
+            .iter()
+            .all(|a| a.anomaly_type != "IceBelt"));
+        assert!(snap.cosmic_anomalies[&partial_sys]
+            .iter()
+            .any(|a| a.anomaly_id == "ICE-CLEARED"));
+        assert!(snap.cosmic_anomalies[&recent_sys]
+            .iter()
+            .any(|a| a.anomaly_id == "ICE-RECENT"));
+        let ready_anoms = &snap.cosmic_anomalies[&ready_sys];
+        assert!(
+            ready_anoms
+                .iter()
+                .any(|a| a.anomaly_type == "IceBelt" && !a.cleared && a.anomaly_id != "ICE-READY"),
+            "expired cleared ice belt must respawn"
+        );
+    });
+
+    // spawn_wormhole_ore_guards: SlimItemMeta coverage + faction_id == 0 fallback -> 500_021
+    let g_sys = 31_000_703_u32;
+    let f0_tid = 998_601_u32;
+    let f510_tid = 998_602_u32;
+    ensure_type(&mut ctx.sde, f0_tid, 551, 1_000_000.0, 40.0);
+    ensure_type(&mut ctx.sde, f510_tid, 552, 1_000_000.0, 40.0);
+    {
+        let reg = Arc::make_mut(&mut ctx.sde);
+        let t0 = reg.types.get_mut(&f0_tid).unwrap();
+        t0.name = "Zero Faction Guard".into();
+        t0.category_id = 11;
+        t0.faction_id = Some(0);
+        let t510 = reg.types.get_mut(&f510_tid).unwrap();
+        t510.name = "Guristas Ore Guard".into();
+        t510.category_id = 11;
+        t510.faction_id = Some(500_010);
+    }
+    let g0_id = 77_900_001_i64;
+    let g510_id = 77_900_002_i64;
+    spawn_wormhole_ore_guards(
+        &ctx,
+        g_sys,
+        vec![
+            (g0_id, f0_tid, DVec3::new(1_000.0, 0.0, 0.0)),
+            (g510_id, f510_tid, DVec3::new(2_000.0, 0.0, 0.0)),
+        ],
+    )
+    .await;
+
+    let g_handle = ctx.systems.get_or_spawn(g_sys);
+    let bp = g_handle.ballpark.read().unwrap();
+    let m0 = bp.ball_slim_meta.get(&g0_id).expect("f0 guard meta");
+    assert_eq!(m0.group_id, 551);
+    assert_eq!(m0.category_id, 11);
+    assert_eq!(m0.owner_id, 500_021);
+    assert_eq!(m0.char_id, None);
+    assert_eq!(m0.corp_id, 1_000_431);
+    assert_eq!(m0.alliance_id, -1);
+    assert!((m0.security_status - (-1.0)).abs() < 1e-6);
+    assert!(!m0.is_cloaked);
+    assert_eq!(m0.name.as_deref(), Some("Zero Faction Guard"));
+
+    let m510 = bp.ball_slim_meta.get(&g510_id).expect("f510 guard meta");
+    assert_eq!(m510.group_id, 552);
+    assert_eq!(m510.owner_id, 500_010);
+    assert_eq!(m510.corp_id, 1_000_127);
+    assert_eq!(m510.name.as_deref(), Some("Guristas Ore Guard"));
 }

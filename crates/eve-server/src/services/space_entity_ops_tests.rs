@@ -22,6 +22,9 @@ use std::sync::{Arc, OnceLock};
 #[cfg(test)]
 #[path = "space_entity_fleet_and_bookmarks_tests.rs"]
 mod space_entity_fleet_and_bookmarks_tests;
+#[cfg(test)]
+#[path = "space_entity_ops_edges_tests.rs"]
+mod space_entity_ops_edges_tests;
 
 pub(super) static SHARED_SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
 
@@ -143,7 +146,7 @@ pub(super) fn make_fleet(fleet_id: i64, boss_id: i64, members: &[(i64, FleetRole
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cmd_unanchor_validates_auth_range_single_use_and_mutates_drone_and_deployable() {
     let mut ctx = test_ctx();
     let (sys_id, char_id, corp_id) = (30_000_142, 90_000_001, 98_000_001);

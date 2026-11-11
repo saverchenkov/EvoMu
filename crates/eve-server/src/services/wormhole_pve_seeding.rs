@@ -159,7 +159,10 @@ pub async fn spawn_sleeper_sentry_tower_for_class(
         category_id: sde_t.map(|t| t.category_id).unwrap_or(11),
         owner_id: fac_owner,
         char_id: None,
-        corp_id: fac_owner,
+        corp_id: crate::services::combat_crimewatch::combat_npc_ai::resolve_npc_corp_id_for_sde_faction(
+            sde,
+            fac_owner,
+        ),
         alliance_id: -1,
         security_status: -1.0,
         is_cloaked: false,
@@ -706,19 +709,37 @@ pub async fn seed_special_wormhole_pve_sites(
 
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
     for (aid, tid, apos, rad) in spawned_ast_balls {
+        let uvol = ctx
+            .sde
+            .types
+            .get(&tid)
+            .map(|t| t.volume.max(0.1))
+            .unwrap_or(1.0);
         let _ = sys_handle
-            .spawn_ball(Ball {
-                id: aid,
-                type_id: tid,
-                position: DVec3::from_array(apos),
-                velocity: DVec3::ZERO,
-                max_velocity: 0.0,
-                inertia: 1.0,
-                mass: 100_000_000.0,
-                radius: rad,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            })
+            .spawn_asteroid(
+                crate::system_actor::AsteroidState {
+                    asteroid_id: aid,
+                    belt_id: 0,
+                    type_id: tid,
+                    initial_units: 25_000,
+                    remaining_units: 25_000,
+                    unit_volume: uvol,
+                    depleted: false,
+                    respawn_at_tick: None,
+                },
+                Ball {
+                    id: aid,
+                    type_id: tid,
+                    position: DVec3::from_array(apos),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 0.0,
+                    mass: 100_000_000.0,
+                    radius: rad,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Rigid,
+                },
+            )
             .await;
     }
 
@@ -773,23 +794,64 @@ pub fn build_specialized_npc_components(
     } else {
         attr(481).unwrap_or(0.0)
     };
-    let resolved_faction_id = sde_type.and_then(|t| t.faction_id).unwrap_or_else(|| match archetype {
-        "Navy" | "FactionPolice" | "Police" => {
-            if (500_001..=500_030).contains(&spawn_group_id) { spawn_group_id } else { 500_001 }
-        }
-        "Sleeper" | "PochvenHypnosianSleeper" => 500_021,
-        "RogueDrone" => 500_008,
-        "EDENCOM" => 500_027,
-        "Drifter" => 500_024,
-        "Triglavian" => 500_026,
-        _ => {
-            if (500_001..=500_030).contains(&spawn_group_id) {
-                spawn_group_id
-            } else {
-                crate::combat::npc_ai::regional_pirate_faction_id(ctx, solar_system_id)
-            }
-        }
-    });
+    let is_navy_or_police = matches!(
+        archetype,
+        "Navy"
+            | "FactionPolice"
+            | "Police"
+            | "CaldariNavy"
+            | "MinmatarNavy"
+            | "AmarrNavy"
+            | "GallenteNavy"
+    );
+    let resolved_faction_id = if is_navy_or_police && (500_001..=500_030).contains(&spawn_group_id) {
+        spawn_group_id
+    } else {
+        let type_name = sde_type.map(|t| t.name.as_str()).unwrap_or("");
+        sde_type
+            .and_then(|t| t.faction_id)
+            .filter(|&f| !(is_navy_or_police && f == 500_027))
+            .unwrap_or_else(|| match archetype {
+                "Navy"
+                | "FactionPolice"
+                | "Police"
+                | "CaldariNavy"
+                | "MinmatarNavy"
+                | "AmarrNavy"
+                | "GallenteNavy" => {
+                    if type_name.contains("Republic Fleet")
+                        || type_name.contains("Minmatar")
+                        || archetype == "MinmatarNavy"
+                    {
+                        500_002
+                    } else if type_name.contains("Imperial Navy")
+                        || type_name.contains("Amarr")
+                        || archetype == "AmarrNavy"
+                    {
+                        500_003
+                    } else if type_name.contains("Federal Navy")
+                        || type_name.contains("Gallente")
+                        || archetype == "GallenteNavy"
+                    {
+                        500_004
+                    } else {
+                        500_001
+                    }
+                }
+                "Sleeper" | "PochvenHypnosianSleeper" => 500_021,
+                "RogueDrone" => 500_008,
+                "EDENCOM" => 500_027,
+                "Drifter" => 500_024,
+                "Triglavian" => 500_026,
+                _ => {
+                    if (500_001..=500_030).contains(&spawn_group_id) {
+                        spawn_group_id
+                    } else {
+                        crate::combat::npc_ai::regional_pirate_faction_id(ctx, solar_system_id)
+                    }
+                }
+            })
+    };
     let dmg_mult = attr(64).unwrap_or(2.0).max(1.0);
     let (raw_em, raw_exp, raw_kin, raw_thm) = (
         attr(114).unwrap_or(0.0),
@@ -942,4 +1004,8 @@ pub fn build_specialized_npc_components(
 #[cfg(test)]
 #[path = "wormhole_pve_seeding_tests.rs"]
 mod wormhole_pve_seeding_tests;
+
+#[cfg(test)]
+#[path = "wormhole_pve_seeding_edges_tests.rs"]
+mod wormhole_pve_seeding_edges_tests;
 

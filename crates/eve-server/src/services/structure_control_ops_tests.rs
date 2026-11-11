@@ -446,3 +446,7 @@ async fn unauthorized_controller_revocation_and_auto_defense_tick_work() {
     let after_cs = sys.get_combat_state(63099).await.expect("ok").expect("cs");
     assert!(after_cs.shield_hp < 50_000.0);
 }
+
+#[cfg(test)]
+#[path = "structure_control_ops_extra_unit_tests.rs"]
+mod extra_unit_tests;

@@ -589,3 +589,220 @@ async fn inventory_stacking_split_merge_stackall_and_loot_rules() {
     inventory_stacking::despawn_empty_jetcan_if_needed(&ctx, Some(sys_id), jetcan_id).await;
     assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&jetcan_id)));
 }
+
+#[test]
+fn mutants_cov_split_stack_args_and_multi_merge_forms() {
+    let ctx = test_ctx(1_800_100_000);
+    let char_id = 91_000_555_i64;
+    let corp_id = 98_000_555_i64;
+    let station_id = 60_003_760_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = 1_000_910_000_i64;
+    let id_a = 1_000_910_001_i64;
+    let id_b = 1_000_910_002_i64;
+    let id_c = 1_000_910_003_i64;
+
+    ensure_char(&ctx, char_id, corp_id, Some(station_id), sys_id, ship_id);
+    insert_item(&ctx, ship_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, id_a, 34, char_id, station_id, InventoryFlag::Hangar, 100, false);
+    insert_item(&ctx, id_b, 34, char_id, station_id, InventoryFlag::Hangar, 40, false);
+    insert_item(&ctx, id_c, 34, char_id, station_id, InventoryFlag::Hangar, 10, false);
+
+    let mut sess = make_session(char_id, corp_id, Some(station_id), Some(sys_id), Some(ship_id));
+    let kw = HashMap::new();
+
+    // Unhandled route returns None; unauthenticated returns Unauthorized
+    assert!(inventory_stacking::handle_stack_ops(&ctx, &mut sess, None, "invbroker", "Unknown", &[], &kw).is_none());
+    let mut unauth = SessionState::new(999);
+    for method in ["SplitStack", "MultiMerge", "StackAll"] {
+        assert_eq!(
+            inventory_stacking::handle_stack_ops(&ctx, &mut unauth, None, "invbroker", method, &[], &kw)
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "Unauthorized"
+        );
+    }
+
+    // parse_split_args boundary coverage:
+    // 1. bound_entry.object_id == 0 -> filtered out (> 0), so loc_hint = None -> SplitStack succeeds
+    let bound_zero = make_bound(0, char_id);
+    let sp0 = inventory_stacking::handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&bound_zero),
+        "invbroker",
+        "SplitStack",
+        &[PyRep::Integer(id_a), PyRep::Integer(7)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(dict_get(&sp0, "originalItemID"), Some(&PyRep::Integer(id_a)));
+    assert_eq!(dict_get(&sp0, "originalQuantity"), Some(&PyRep::Integer(93)));
+    assert_eq!(dict_get(&sp0, "newQuantity"), Some(&PyRep::Integer(7)));
+
+    // 2. bound_entry.object_id < 0 -> filtered out (> 0), succeeds
+    let bound_neg = make_bound(-5, char_id);
+    let sp_neg = inventory_stacking::handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&bound_neg),
+        "invbroker",
+        "SplitStack",
+        &[PyRep::Integer(id_a), PyRep::Integer(3)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(dict_get(&sp_neg, "originalQuantity"), Some(&PyRep::Integer(90)));
+    assert_eq!(dict_get(&sp_neg, "newQuantity"), Some(&PyRep::Integer(3)));
+
+    // 3. bound_entry.object_id == wrong positive station -> loc_hint retained and rejected
+    let bound_wrong = make_bound(station_id + 1, char_id);
+    assert_eq!(
+        inventory_stacking::handle_stack_ops(
+            &ctx,
+            &mut sess,
+            Some(&bound_wrong),
+            "invbroker",
+            "SplitStack",
+            &[PyRep::Integer(id_a), PyRep::Integer(2)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "SplitFailed"
+    );
+
+    // 4. kwargs "qty", kwargs "quantity", omitted qty -> default 1, and contractProxy.SplitStack
+    let kw_qty = HashMap::from([("qty".to_string(), PyRep::Integer(4))]);
+    let sp_kw1 = inventory_stacking::handle_stack_ops(
+        &ctx,
+        &mut sess,
+        None,
+        "invbroker",
+        "SplitStack",
+        &[PyRep::Integer(id_a)],
+        &kw_qty,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(dict_get(&sp_kw1, "originalQuantity"), Some(&PyRep::Integer(86)));
+    assert_eq!(dict_get(&sp_kw1, "newQuantity"), Some(&PyRep::Integer(4)));
+
+    let kw_quantity = HashMap::from([("quantity".to_string(), PyRep::Integer(5))]);
+    let sp_kw2 = inventory_stacking::handle_stack_ops(
+        &ctx,
+        &mut sess,
+        None,
+        "invbroker",
+        "SplitStack",
+        &[PyRep::Integer(id_a)],
+        &kw_quantity,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(dict_get(&sp_kw2, "originalQuantity"), Some(&PyRep::Integer(81)));
+    assert_eq!(dict_get(&sp_kw2, "newQuantity"), Some(&PyRep::Integer(5)));
+
+    let sp_default = inventory_stacking::handle_stack_ops(
+        &ctx,
+        &mut sess,
+        None,
+        "contractProxy",
+        "SplitStack",
+        &[PyRep::Integer(id_a)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(dict_get(&sp_default, "originalQuantity"), Some(&PyRep::Integer(80)));
+    assert_eq!(dict_get(&sp_default, "newQuantity"), Some(&PyRep::Integer(1)));
+
+    // 3-arg wrong location & overflow errors
+    assert_eq!(
+        inventory_stacking::handle_stack_ops(
+            &ctx,
+            &mut sess,
+            None,
+            "invbroker",
+            "SplitStack",
+            &[PyRep::Integer(station_id + 1), PyRep::Integer(id_a), PyRep::Integer(2)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "SplitFailed"
+    );
+    assert_eq!(
+        inventory_stacking::handle_stack_ops(
+            &ctx,
+            &mut sess,
+            None,
+            "invbroker",
+            "SplitStack",
+            &[PyRep::Integer(station_id), PyRep::Integer(id_a), PyRep::Integer(i64::from(i32::MAX) + 1)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "SplitFailed"
+    );
+
+    // MultiMerge: list-of-tuple form (partial merge id_b -> id_a by 10)
+    let bound_ok = make_bound(station_id, char_id);
+    let m1 = inventory_stacking::handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&bound_ok),
+        "invbroker",
+        "MultiMerge",
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(id_b),
+            PyRep::Integer(id_a),
+            PyRep::Integer(10),
+        ])])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(dict_get(&m1, "itemID"), Some(&PyRep::Integer(id_a)));
+    assert_eq!(dict_get(&m1, "quantity"), Some(&PyRep::Integer(90)));
+    assert_eq!(dict_get(&m1, "mergedCount"), Some(&PyRep::Integer(1)));
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&id_b].quantity), 30);
+
+    // MultiMerge: scalar PyRep::Integer(dst_id) form (partial merge id_b -> id_a by 5, then whole id_c -> id_a)
+    let m2 = inventory_stacking::handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&bound_ok),
+        "invbroker",
+        "MultiMerge",
+        &[PyRep::Integer(id_a), PyRep::Integer(id_b), PyRep::Integer(5)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(dict_get(&m2, "itemID"), Some(&PyRep::Integer(id_a)));
+    assert_eq!(dict_get(&m2, "quantity"), Some(&PyRep::Integer(95)));
+    assert_eq!(dict_get(&m2, "mergedCount"), Some(&PyRep::Integer(1)));
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&id_b].quantity), 25);
+
+    let m3 = inventory_stacking::handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&bound_ok),
+        "invbroker",
+        "MultiMerge",
+        &[PyRep::Integer(id_a), PyRep::Integer(id_c)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(dict_get(&m3, "quantity"), Some(&PyRep::Integer(105)));
+    assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&id_c)));
+}

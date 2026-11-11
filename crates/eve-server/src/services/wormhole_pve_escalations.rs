@@ -1121,3 +1121,7 @@ pub(crate) fn register_test_triggered_drifter_relay(
 #[path = "wormhole_pve_escalations_tests.rs"]
 mod wormhole_pve_escalations_tests;
 
+#[cfg(test)]
+#[path = "wormhole_pve_escalations_edges_b4_tests.rs"]
+mod wormhole_pve_escalations_edges_b4_tests;
+

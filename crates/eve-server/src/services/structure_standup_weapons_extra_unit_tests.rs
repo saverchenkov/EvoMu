@@ -256,7 +256,7 @@ async fn standup_weapon_preconditions_and_point_defense_hostility_and_ammo_branc
         "RequiresXLStructure"
     );
 
-    // 4. Upgrade to Keepstar: NoAmmoLoaded, NotEnoughCapacitor, then fire using CorpSAG1 ammo & test hostility filters
+    // 4. Upgrade to Keepstar: NoAmmoLoaded, NotEnoughCapacitor, then fire using SpecializedAmmoHold ammo & test hostility filters
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.get_mut(&sid).unwrap().type_id = TYPE_KEEPSTAR;
     });
@@ -274,7 +274,7 @@ async fn standup_weapon_preconditions_and_point_defense_hostility_and_ammo_branc
                 type_id: flak_tid,
                 owner_id: st_corp,
                 location_id: sid,
-                flag: InventoryFlag::CorpSAG1,
+                flag: InventoryFlag::SpecializedAmmoHold,
                 quantity: 2,
                 singleton: false,
                 ..Default::default()
@@ -572,4 +572,120 @@ async fn guided_bomb_launcher_step_and_arcing_vorton_error_and_safety_branches()
     assert!(ctx.db.with_snapshot(|s| load_ext_state(s).in_flight_guided_bombs.is_empty()));
     let post_cs = sys.get_combat_state(77_001).await.unwrap().unwrap();
     assert!(post_cs.capacitor < 1_000.0);
+}
+
+#[test]
+fn consume_structure_charge_direct_true_false_locked_and_ammo_bay_edges() {
+    let ctx = new_ctx();
+    let sid = 10_000_970_001_i64;
+    let st_corp = 98_701_i64;
+    let mod_id = 87_001_i64;
+    let charge_tid = 40_001_u32;
+
+    // 1. No ammo items seeded -> false.
+    assert!(!super::super::consume_structure_charge(
+        &ctx,
+        sid,
+        st_corp,
+        mod_id,
+        InventoryFlag::HiSlot0,
+        charge_tid,
+        2,
+    ));
+
+    // 2. Insufficient quantity -> false, item untouched.
+    let charge_slot_item = 87_101_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            charge_slot_item,
+            InventoryItemRecord {
+                item_id: charge_slot_item,
+                type_id: charge_tid,
+                owner_id: st_corp,
+                location_id: sid,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    assert!(!super::super::consume_structure_charge(
+        &ctx,
+        sid,
+        st_corp,
+        mod_id,
+        InventoryFlag::HiSlot0,
+        charge_tid,
+        2,
+    ));
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&charge_slot_item].quantity), 1);
+
+    // 3. Sufficient quantity but locked in outstanding contract -> false, quantity untouched.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&charge_slot_item).unwrap().quantity = 5;
+        snap.contracts.insert(
+            77_701,
+            eve_db::ContractRecord {
+                contract_id: 77_701,
+                status: "Outstanding".into(),
+                item_ids: vec![charge_slot_item],
+                ..Default::default()
+            },
+        );
+    });
+    assert!(!super::super::consume_structure_charge(
+        &ctx,
+        sid,
+        st_corp,
+        mod_id,
+        InventoryFlag::HiSlot0,
+        charge_tid,
+        2,
+    ));
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&charge_slot_item].quantity), 5);
+
+    // 4. Unlocked in HiSlot0 -> true, consumes exact quantity (5 -> 3).
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.contracts.clear();
+    });
+    assert!(super::super::consume_structure_charge(
+        &ctx,
+        sid,
+        st_corp,
+        mod_id,
+        InventoryFlag::HiSlot0,
+        charge_tid,
+        2,
+    ));
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&charge_slot_item].quantity), 3);
+
+    // 5. Fallback to SpecializedAmmoHold -> true and removes stack cleanly when exact qty consumed.
+    let ammo_bay_item = 87_102_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&charge_slot_item);
+        snap.items.insert(
+            ammo_bay_item,
+            InventoryItemRecord {
+                item_id: ammo_bay_item,
+                type_id: charge_tid,
+                owner_id: st_corp,
+                location_id: sid,
+                flag: InventoryFlag::SpecializedAmmoHold,
+                quantity: 4,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    assert!(super::super::consume_structure_charge(
+        &ctx,
+        sid,
+        st_corp,
+        mod_id,
+        InventoryFlag::HiSlot0,
+        charge_tid,
+        4,
+    ));
+    assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&ammo_bay_item)));
 }

@@ -167,7 +167,7 @@ async fn station_queries_guests_standing_check_and_undock_dock_cycle() {
     assert_eq!(bits.len(), 4);
     assert_eq!(bits[1], PyRep::Integer(jita_station));
 
-    // station.GetGuests returns docked caller
+    // station.GetGuests and stationSvc.GetGuests return docked caller without duplicates
     let PyRep::List(guests) = handle(&ctx, &mut session, "station", "GetGuests", &[], &kw)
         .await
         .unwrap()
@@ -175,7 +175,21 @@ async fn station_queries_guests_standing_check_and_undock_dock_cycle() {
     else {
         panic!("expected list");
     };
-    assert!(guests.iter().any(|g| matches!(g, PyRep::Tuple(t) if t.first() == Some(&PyRep::Integer(char_id)))));
+    assert_eq!(
+        guests
+            .iter()
+            .filter(|g| matches!(g, PyRep::Tuple(t) if t.first() == Some(&PyRep::Integer(char_id))))
+            .count(),
+        1
+    );
+    let PyRep::List(svc_guests) = handle(&ctx, &mut session, "stationSvc", "GetGuests", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("expected list");
+    };
+    assert_eq!(svc_guests, guests);
 
     // DoStandingCheckForStationService
     assert_eq!(

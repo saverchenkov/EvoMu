@@ -749,7 +749,7 @@ pub(crate) fn refresh_system_adm_vulnerability_windows_in_snap(
                 .sov_runtime
                 .adm_vulnerability_windows
                 .get(&st.structure_id)?;
-            if sv == 0 && ev == 0 {
+            if (sv == 0 && ev == 0) || (sv == 0 && ev >= 86_400) || sv > 86_400 || ev > 86_400 {
                 return None;
             }
             let dur_s = (ev + 86_400 - (sv % 86_400)) % 86_400;
@@ -821,4 +821,5 @@ pub(crate) async fn spawn_command_nodes_for_hub(ctx: &ServerContext, hub_id: i64
 }
 
 #[cfg(test)] #[path = "sov_warzone_dynamic_tests.rs"] mod sov_warzone_dynamic_tests;
+#[cfg(test)] #[path = "sov_warzone_dynamic_edges2_tests.rs"] mod sov_warzone_dynamic_edges2_tests;
 

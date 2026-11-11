@@ -642,15 +642,6 @@ async fn handle_cmd_warp_to_stuff(
                     crate::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &ext);
                 }
             });
-            ctx.notify(
-                crate::router::NotificationTarget::Character(char_id),
-                "OnWarpStarted",
-                "charid",
-                vec![
-                    PyRep::Integer(ship_id),
-                    PyRep::Integer(i64::from(current_ball.type_id)),
-                ],
-            );
             ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["timesWarped"], 1, ctx.now_unix(), &ctx.quasar_gateway);
             crate::services::operations_manager_helpers::record_server_operation_event(
                 ctx,
@@ -777,8 +768,26 @@ async fn handle_cmd_stargate_jump(
         });
     }
 
+    let gate_ball_radius = old_handle
+        .get_ball_snapshot(gate_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|(_, b)| b.radius)
+        .filter(|&r| r > 0.0);
+    let gate_radius = gate_ball_radius.unwrap_or_else(|| {
+        ctx.sde
+            .types
+            .get(&16)
+            .map(|t| t.radius)
+            .filter(|&r| r > 0.0)
+            .unwrap_or(14_051.0)
+    });
+    let warp_perimeter = evaluate_stargate_jump_perimeter(&current_ball, jump.position, gate_radius);
+    let allow_arriving_warp = matches!(warp_perimeter, Ok(true));
+
     // Pochven Triglavian Clade Home Systems & Zarzakh Horizon Siege checked after unified movement validation.
-    ctx.validate_ship_movement(
+    ctx.validate_ship_movement_with_warp_arrival(
         char_id,
         ship_id,
         crate::services::space_nav_movement_guard::MovementIntent::StargateJump {
@@ -786,6 +795,7 @@ async fn handle_cmd_stargate_jump(
             to_sys: jump.to_solar_system_id,
             gate_id,
         },
+        allow_arriving_warp,
     )
     .await?;
 
@@ -821,31 +831,7 @@ async fn handle_cmd_stargate_jump(
         }
     }
 
-    let gate_ball_radius = old_handle
-        .get_ball_snapshot(gate_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|(_, b)| b.radius)
-        .filter(|&r| r > 0.0);
-    let gate_radius = gate_ball_radius.unwrap_or_else(|| {
-        ctx.sde
-            .types
-            .get(&16)
-            .map(|t| t.radius)
-            .filter(|&r| r > 0.0)
-            .unwrap_or(14_051.0)
-    });
-    let dist = (current_ball.position.distance(jump.position) - gate_radius).max(0.0);
-    if dist > 2_500.0 {
-        return Err(BridgeRpcError {
-            code: "OutsideStargateJumpRange".into(),
-            message: format!(
-                "Ship is {:.1} m from stargate {gate_id} (must be <= 2500 m)",
-                dist
-            ),
-        });
-    }
+    let arrived_at_warp_dest = warp_perimeter?;
 
     let dest_sys_id = jump.to_solar_system_id;
     let dest_gate_pos = ctx
@@ -921,6 +907,13 @@ async fn handle_cmd_stargate_jump(
                 Ok(res)
             })?
     };
+    if arrived_at_warp_dest {
+        let _ = old_handle.force_stop_warp(ship_id);
+        ctx.active_warps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&ship_id);
+    }
     deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
 
@@ -1027,6 +1020,54 @@ async fn handle_cmd_stargate_jump(
         ("jumpFatigueMinutes", PyRep::Real(0.0)),
         ("sessionChangeTimerSeconds", PyRep::Integer(10)),
     ]))
+}
+
+/// Evaluates the unconditional `gate_radius + 2,500 m` EVE stargate jump perimeter,
+/// mirroring `evaluate_dock_perimeter`:
+///
+/// - When `ball.mode` is `MovementMode::Warp`, jumping is permitted (`Ok(true)`, signalling
+///   that the active warp must be terminated on jump) only when `destination` lies inside
+///   `gate_radius + 2,500 m` of `gate_pos` AND the ship is either already inside that range or
+///   within the final `<= 1.0 s` of `WarpPhase::Decelerating`; all other warp states return
+///   `ShipInWarp`.
+/// - For non-warp movement modes, returns `OutsideStargateJumpRange` when `(dist - gate_radius).max(0.0) > 2_500.0`
+///   and `Ok(false)` otherwise.
+pub(crate) fn evaluate_stargate_jump_perimeter(
+    ball: &eve_destiny::Ball,
+    gate_pos: DVec3,
+    gate_radius: f64,
+) -> Result<bool, BridgeRpcError> {
+    let max_jump_dist = gate_radius + 2_500.0;
+    let dist = ball.position.distance(gate_pos);
+    match ball.mode {
+        MovementMode::Warp { destination, .. } => {
+            if destination.distance(gate_pos) <= max_jump_dist
+                && (dist <= max_jump_dist
+                    || eve_destiny::physics::is_warp_finishing_within_1s(ball))
+            {
+                Ok(true)
+            } else {
+                Err(BridgeRpcError {
+                    code: "ShipInWarp".into(),
+                    message: "Cannot jump stargate while ship is still in warp".into(),
+                })
+            }
+        }
+        _ => {
+            let surface_dist = (dist - gate_radius).max(0.0);
+            if surface_dist > 2_500.0 {
+                Err(BridgeRpcError {
+                    code: "OutsideStargateJumpRange".into(),
+                    message: format!(
+                        "Ship is {:.1} m from stargate (must be <= 2500 m)",
+                        surface_dist
+                    ),
+                })
+            } else {
+                Ok(false)
+            }
+        }
+    }
 }
 
 /// Evaluates the unconditional `target_radius + 2,500 m` EVE docking perimeter (`SP-4`) across

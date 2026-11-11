@@ -642,15 +642,6 @@ pub(crate) async fn execute_agency_content_warp(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(ship_id, char_id);
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnWarpStarted",
-        "charid",
-        vec![
-            PyRep::Integer(ship_id),
-            PyRep::Integer(i64::from(current_ball.type_id)),
-        ],
-    );
     Ok(())
 }
 
@@ -925,15 +916,6 @@ pub async fn handle_use_warp_vector(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(ship_id, char_id);
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnWarpStarted",
-        "charid",
-        vec![
-            PyRep::Integer(ship_id),
-            PyRep::Integer(ship_ball.type_id as i64),
-        ],
-    );
 
     let align_dir = (dest_pos - ship_ball.position).normalize_or_zero();
     let entry_speed = (ship_ball.max_velocity * 0.75).max(1.0);
@@ -1117,4 +1099,8 @@ pub(crate) async fn handle_set_session_check(
 #[cfg(test)]
 #[path = "nav_warp_interdiction_tests.rs"]
 mod nav_warp_interdiction_tests;
+
+#[cfg(test)]
+#[path = "nav_warp_interdiction_edges_tests.rs"]
+mod nav_warp_interdiction_edges_tests;
 

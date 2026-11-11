@@ -387,3 +387,7 @@ pub(crate) async fn handle_cargo_dropoff(ctx: &ServerContext, session: &mut Sess
         Ok(PyRep::None)
     })
 }
+
+#[cfg(test)]
+#[path = "structure_lifecycle_cargo_fuel_edges_tests.rs"]
+mod structure_lifecycle_cargo_fuel_edges_tests;

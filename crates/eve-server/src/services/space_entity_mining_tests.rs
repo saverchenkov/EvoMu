@@ -534,3 +534,186 @@ async fn issue_776_reprocess_five_arg_returns_v24_tuple() {
     };
     assert_eq!(parts2[0], PyRep::List(vec![PyRep::Integer(ore_b)]));
 }
+
+/// #784 + #788: `reprocessingSvc.Reprocess` must accept ore inside a docked ship's
+/// `SpecializedOreHold` (`fromLocation == ship_id`), route outputs to the target location
+/// (`station_id`, `InventoryFlag::Hangar`), and emit `OnAccountChange` + `OnItemChange`.
+#[tokio::test]
+async fn issue_784_788_reprocess_from_docked_ship_ore_hold_emits_item_and_account_changes() {
+    let ctx = test_ctx();
+    let (char_id, corp_id, station_id, venture_id) =
+        (90_000_001_i64, 98_000_001_i64, 60_003_760_i64, 88_788_001_i64);
+    let ore_full = 88_788_002_i64;
+    let ore_partial = 88_788_003_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
+            ch.solar_system_id = 30_000_142;
+            ch.station_id = Some(station_id);
+            ch.active_ship_id = venture_id;
+            ch.balance = IskCents(10_000_000);
+        }
+        snap.items.insert(
+            venture_id,
+            InventoryItemRecord {
+                item_id: venture_id,
+                type_id: 32880, // Venture
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            ore_full,
+            InventoryItemRecord {
+                item_id: ore_full,
+                type_id: 1230, // Veldspar (portion_size = 100)
+                owner_id: char_id,
+                location_id: venture_id,
+                flag: InventoryFlag::SpecializedOreHold,
+                quantity: 200,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            ore_partial,
+            InventoryItemRecord {
+                item_id: ore_partial,
+                type_id: 1230,
+                owner_id: char_id,
+                location_id: venture_id,
+                flag: InventoryFlag::SpecializedOreHold,
+                quantity: 150,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let _ = ctx
+        .db
+        .acquire_online_lock(1, 788, Some(char_id), true, 1_700_000_000);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let mut sess = SessionState::new(788);
+    sess.character_id = Some(char_id);
+    sess.user_id = Some(1);
+    sess.corporation_id = Some(corp_id);
+    sess.station_id = Some(station_id);
+    sess.ship_id = Some(venture_id);
+
+    let kw = std::collections::HashMap::new();
+    let res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[
+                PyRep::List(vec![PyRep::Integer(ore_full), PyRep::Integer(ore_partial)]),
+                PyRep::Integer(venture_id),
+                PyRep::Integer(char_id),
+                PyRep::Integer(station_id),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("Reprocess from Venture SpecializedOreHold must succeed");
+
+    let PyRep::Tuple(parts) = res else {
+        panic!("expected 2-tuple from V24 5-arg Reprocess");
+    };
+    assert_eq!(
+        parts[0],
+        PyRep::List(vec![PyRep::Integer(ore_full), PyRep::Integer(ore_partial)])
+    );
+
+    // ore_full deleted, ore_partial reduced to 50 in Venture SpecializedOreHold, outputs in station Hangar
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&ore_full));
+        let rem = snap.items.get(&ore_partial).expect("remainder stack");
+        assert_eq!(rem.quantity, 50);
+        assert_eq!(rem.location_id, venture_id);
+        assert_eq!(rem.flag, InventoryFlag::SpecializedOreHold);
+        let trit_items: Vec<_> = snap
+            .items
+            .values()
+            .filter(|i| i.owner_id == char_id && i.location_id == station_id && i.type_id == 34)
+            .collect();
+        assert!(!trit_items.is_empty());
+        assert!(trit_items.iter().all(|i| i.flag == InventoryFlag::Hangar));
+    });
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    let saw_account_change = notifs.iter().any(|n| n.event == "OnAccountChange");
+    let item_changes: Vec<_> = notifs
+        .iter()
+        .filter(|n| n.event == "OnItemChange")
+        .collect();
+    assert!(saw_account_change, "Expected OnAccountChange notification on reprocessing tax");
+    assert!(
+        item_changes.len() >= 3,
+        "Expected OnItemChange for deleted stack, updated remainder stack, and created mineral stacks"
+    );
+
+    // Verify fromLocation mismatch, fitted module in docked ship, non-hangar parent, and fromLocation <= 0 fallback
+    let err_wrong_from_loc = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[
+                PyRep::List(vec![PyRep::Integer(ore_partial)]),
+                PyRep::Integer(station_id),
+                PyRep::Integer(char_id),
+                PyRep::Integer(station_id),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect_err("Mismatched fromLocation must fail");
+    assert_eq!(err_wrong_from_loc.code, "OwnershipOrLocationViolation");
+
+    // Reprocess another 100 units from Venture with fromLocation = 0 (treated as None) and output raw_flag = SpecializedOreHold normalizing to Hangar at station
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&ore_partial).unwrap().quantity = 100;
+    });
+    ctx.dispatch_rpc(
+        &mut sess,
+        "reprocessingSvc",
+        None,
+        "Reprocess",
+        &[
+            PyRep::List(vec![PyRep::Integer(ore_partial)]),
+            PyRep::Integer(0),
+            PyRep::Integer(char_id),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::SpecializedOreHold as i64),
+        ],
+        &kw,
+        Some("machoNet:26000"),
+    )
+    .await
+    .expect("fromLocation = 0 must be ignored and SpecializedOreHold output at station must normalize to Hangar");
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&ore_partial));
+        assert!(snap
+            .items
+            .values()
+            .filter(|i| i.owner_id == char_id && i.location_id == station_id && i.type_id == 34)
+            .all(|i| i.flag == InventoryFlag::Hangar));
+    });
+}

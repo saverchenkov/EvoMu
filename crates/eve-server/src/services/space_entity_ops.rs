@@ -524,7 +524,7 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let target_corp_id = match rpc.req_positive_i64(1, "targetCorpID") {
+            let target_corp_id = match rpc.req_i64(1, "targetCorpID") {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };

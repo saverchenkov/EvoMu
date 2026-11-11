@@ -18,6 +18,10 @@ use std::sync::{Arc, OnceLock};
 #[path = "space_filaments_and_dscan_tests.rs"]
 mod space_filaments_and_dscan_tests;
 
+#[cfg(test)]
+#[path = "space_cyno_filaments_extra_unit_tests.rs"]
+mod extra_unit_tests;
+
 pub(super) static SHARED_SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
 
 pub(super) fn test_ctx() -> ServerContext {
@@ -165,7 +169,7 @@ pub(super) fn online_pharolux(struct_id: i64, sys_id: u32, corp_id: i64) -> Upwe
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn validate_and_get_structure_cyno_beacons_filters_invalid_states() {
     let ctx = test_ctx();
     let corp_id = 98_111_001;
@@ -230,7 +234,7 @@ async fn validate_and_get_structure_cyno_beacons_filters_invalid_states() {
     assert!(!ids.contains(&unanchored_id));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn jump_bridge_and_group_jump_to_structure_beacon_execute() {
     let mut ctx = test_ctx();
     let corp_id = 98_222_001;
@@ -489,7 +493,7 @@ async fn jump_bridge_and_group_jump_to_structure_beacon_execute() {
     assert_eq!(sess.solar_system_id, Some(dst_sys));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn criminal_wormhole_jump_from_lowsec_into_highsec_schedules_concord() {
     let ctx = test_ctx();
     let old_sys = ctx
@@ -555,7 +559,7 @@ async fn criminal_wormhole_jump_from_lowsec_into_highsec_schedules_concord() {
     assert_eq!(pending.map(|p| (p.0, p.2)), Some((dest_hs_sys, ship_id)));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_cyno_jammer_covert_bypass_abyssal_pochven_cloak_and_no_fallback() {
     let mut ctx = test_ctx();
     let mut low_systems: Vec<u32> = ctx
@@ -818,7 +822,7 @@ async fn test_cyno_jammer_covert_bypass_abyssal_pochven_cloak_and_no_fallback() 
     ab_sess.solar_system_id = Some(cur_sys);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn random_jump_filament_guards_cloak_lock_origins_and_fleet_groups() {
     let mut ctx = test_ctx();
     let needlejack_tid = 53_947_u32; // Noise-5 'Needlejack' Filament
