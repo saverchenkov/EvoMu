@@ -42,11 +42,18 @@ pub fn encode_zlib(rep: &PyRep) -> Result<Vec<u8>, ProtoError> {
 }
 
 /// Module paths blue imports when unpickling these classes in the V24.01 client (there is no
-/// `util` module there): `utillib.KeyVal`, `eve/common/script/sys/rowset.pyj`, `carbon/common/script/sys/row.pyj`.
+/// `util` or `objectCaching` top-level module there): `utillib.KeyVal`,
+/// `eve/common/script/sys/rowset.pyj`, `carbon/common/script/sys/row.pyj`,
+/// `carbon/common/script/net/objectCaching.pyj`, `carbon/common/script/net/cachedObject.pyj`.
 pub const V24_KEYVAL_CLASS: &str = "utillib.KeyVal";
 pub const V24_ROWSET_CLASS: &str = "eve.common.script.sys.rowset.Rowset";
 pub const V24_INDEX_ROWSET_CLASS: &str = "eve.common.script.sys.rowset.IndexRowset";
 pub const V24_ROW_CLASS: &str = "carbon.common.script.sys.row.Row";
+/// V24.01 classic old-style class paths (`Op_PyObject` `0x17`, whitelisted in `carbon/common/lib/whitelist.pyj`).
+pub const V24_CACHED_OBJECT_CLASS: &str = "carbon.common.script.net.objectCaching.CachedObject";
+pub const V24_CACHED_METHOD_CALL_RESULT_CLASS: &str =
+    "carbon.common.script.net.objectCaching.CachedMethodCallResult";
+pub const V24_CACHE_HINT_CLASS: &str = "carbon.common.script.net.cachedObject.CachedObject";
 
 fn encode_inner(rep: &PyRep, out: &mut Vec<u8>) {
     match rep {
@@ -282,11 +289,20 @@ fn encode_inner(rep: &PyRep, out: &mut Vec<u8>) {
                     out,
                 );
             } else {
+                // V24.01 has no top-level `objectCaching` module and `util.pyj` lacks `CachedObject`,
+                // so remap legacy short names if a caller passes them; all three are classic classes
+                // (`BUILD_TUPLE 0` in `code.ccp`) and marshal via `Op_PyObject` (`0x17`).
+                let wire_type_name = match type_name.as_str() {
+                    "objectCaching.CachedObject" => V24_CACHED_OBJECT_CLASS,
+                    "objectCaching.CachedMethodCallResult" => V24_CACHED_METHOD_CALL_RESULT_CLASS,
+                    "util.CachedObject" => V24_CACHE_HINT_CLASS,
+                    other => other,
+                };
                 out.push(MarshalOpcode::PyObject as u8);
                 // blue reads the `PyObject` class name as a plain string (the V24 client writes
                 // `0x17 0x13 <len> carbon.common...CallReq`); a `PyToken` here makes it fail with
                 // "expected string" when unpickling.
-                encode_inner(&PyRep::Bytes(type_name.clone().into_bytes()), out);
+                encode_inner(&PyRep::Bytes(wire_type_name.as_bytes().to_vec()), out);
                 encode_inner(args, out);
             }
         }

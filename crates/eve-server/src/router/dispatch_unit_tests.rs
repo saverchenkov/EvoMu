@@ -801,7 +801,7 @@ async fn market_get_orders_cached_result_and_station_dock_undock_excludes_self()
     sess_a.live_notify_listener = true;
     let kw = HashMap::new();
 
-    // 1. marketProxy.GetOrders & GetPlexOrders over machoNet:26000 return objectCaching.CachedMethodCallResult (#789)
+    // 1. marketProxy.GetOrders & GetPlexOrders over machoNet:26000 return V24 CachedMethodCallResult (#954, #789)
     for (method, call_args) in [
         ("GetOrders", vec![PyRep::Integer(34)]),
         ("GetPlexOrders", vec![]),
@@ -820,7 +820,7 @@ async fn market_get_orders_cached_result_and_station_dock_undock_excludes_self()
             .expect(method);
         match rep {
             PyRep::Object { type_name, args } => {
-                assert_eq!(type_name, "objectCaching.CachedMethodCallResult");
+                assert_eq!(type_name, eve_proto::marshal::V24_CACHED_METHOD_CALL_RESULT_CLASS);
                 if let PyRep::Tuple(items) = *args {
                     assert_eq!(items.len(), 3);
                     if let PyRep::Dict(entries) = &items[0] {
@@ -844,7 +844,7 @@ async fn market_get_orders_cached_result_and_station_dock_undock_excludes_self()
                     panic!("expected 3-tuple args in CachedMethodCallResult");
                 }
             }
-            other => panic!("expected objectCaching.CachedMethodCallResult, got {other:?}"),
+            other => panic!("expected V24 CachedMethodCallResult, got {other:?}"),
         }
     }
 

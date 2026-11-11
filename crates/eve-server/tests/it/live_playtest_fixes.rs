@@ -505,3 +505,395 @@ async fn on_item_change_emitters_include_owner_group_category_and_singleton() {
     assert_eq!(reward_ic.args[0].dict_get("categoryID").and_then(|v| v.as_i64()), Some(6));
     assert_eq!(reward_ic.args[0].dict_get("quantity").and_then(|v| v.as_i64()), Some(-1));
 }
+
+/// Regression test for `#954` & `#789`: verifies over the real TCP `machoNet` client path that:
+/// 1. `marketProxy.GetOrders` / `GetPlexOrders` wrap results in V24's whitelisted classic class
+///    `carbon.common.script.net.objectCaching.CachedMethodCallResult` via `Op_PyObject` (`0x17`),
+///    never emitting unimportable bare `objectCaching.*` on the wire.
+/// 2. Subsequent `GetOrders` after `PlaceBuyOrder` advances `[timestamp, crc32]` so V24
+///    `marketsvc.RefreshOrderCache` updates `volRemaining` instead of discarding fresh rows.
+/// 3. `objectCaching.GetCachableObject` & `machoNet.GetCachedObject` emit V24's whitelisted
+///    `carbon.common.script.net.objectCaching.CachedObject` via `Op_PyObject` (`0x17`).
+#[tokio::test]
+async fn test_954_789_machonet_market_orders_and_cached_objects_use_v24_object_caching_classes() {
+    use eve_db::{IskCents, MarketOrderRecord};
+    use eve_machonet::{
+        placebo_crypto_hash, CryptoChallengePacket, CryptoHandshakeResult, CryptoRequestPacket,
+        CryptoServerHandshake, MachoAddress, MachoPacket, MachoPacketType, MACHO_PROXY_NODE_ID,
+    };
+    use eve_proto::marshal::{
+        self, V24_CACHED_METHOD_CALL_RESULT_CLASS, V24_CACHED_OBJECT_CLASS,
+    };
+    use eve_proto::MarshalOpcode;
+    use eve_server::macho_listener::{handle_macho_client, read_framed_pyrep, write_framed_pyrep};
+    use std::sync::Arc;
+    use tokio::io::AsyncReadExt;
+    use tokio::net::{TcpListener, TcpStream};
+
+    let ctx = Arc::new(ServerContext::new());
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.market_orders.retain(|_, o| o.type_id != 34 && o.type_id != 44_992);
+        snap.market_orders.insert(
+            954_001,
+            MarketOrderRecord {
+                order_id: 954_001,
+                owner_id: 90_000_002,
+                station_id: 60_003_760,
+                region_id: 10_000_002,
+                type_id: 34,
+                is_bid: false,
+                price: IskCents(204), // 2.04 ISK
+                vol_entered: 1_962,
+                vol_remaining: 1_962,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+        snap.market_orders.insert(
+            954_002,
+            MarketOrderRecord {
+                order_id: 954_002,
+                owner_id: 90_000_002,
+                station_id: 60_003_760,
+                region_id: 10_000_002,
+                type_id: 44_992,
+                is_bid: false,
+                price: IskCents::from_isk(5_000_000),
+                vol_entered: 10,
+                vol_remaining: 10,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+    });
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind macho");
+    let addr = listener.local_addr().unwrap();
+    let ctx_server = Arc::clone(&ctx);
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let c = Arc::clone(&ctx_server);
+            tokio::spawn(async move {
+                let _ = handle_macho_client(stream, c).await;
+            });
+        }
+    });
+
+    let mut s = TcpStream::connect(addr).await.unwrap();
+    let _hello = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+    let client_ver = PyRep::Tuple(vec![
+        PyRep::Integer(170_472),
+        PyRep::Integer(496),
+        PyRep::Integer(0),
+        PyRep::Real(24.01),
+        PyRep::Integer(3_624_425),
+        PyRep::ascii_bytes("V24.01@ccp"),
+    ]);
+    write_framed_pyrep(&mut s, &client_ver).await.unwrap();
+    write_framed_pyrep(&mut s, &CryptoRequestPacket::placebo().to_pyrep())
+        .await
+        .unwrap();
+    assert_eq!(read_framed_pyrep(&mut s).await.unwrap().unwrap().as_str(), Some("OK CC"));
+
+    let challenge = CryptoChallengePacket::new_password_login("demo", "demo-secret");
+    write_framed_pyrep(&mut s, &challenge.to_pyrep()).await.unwrap();
+    assert_eq!(read_framed_pyrep(&mut s).await.unwrap().unwrap(), PyRep::Integer(2));
+    let srv_hs_rep = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+    let srv_hs = CryptoServerHandshake::from_pyrep(&srv_hs_rep).expect("CryptoServerHandshake");
+    let hs_res = CryptoHandshakeResult {
+        challenge_response_hash: placebo_crypto_hash(&srv_hs.server_challenge),
+        func_output: Vec::new(),
+        func_result: PyRep::Integer(0),
+    };
+    write_framed_pyrep(&mut s, &hs_res.to_pyrep()).await.unwrap();
+    let _ack = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+    let init_pkt =
+        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    let MachoAddress::Client { client_id, .. } = init_pkt.destination else {
+        panic!("expected Client destination on SessionInitialStateNotification");
+    };
+    let _sess_chg0 = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+
+    let send_call = |call_id: u64,
+                     service: &str,
+                     method: &str,
+                     args: Vec<PyRep>,
+                     kwargs: Vec<(PyRep, PyRep)>| {
+        let inner_tuple = PyRep::Tuple(vec![
+            PyRep::ascii_bytes(method),
+            PyRep::Tuple(args),
+            PyRep::Dict(kwargs),
+        ]);
+        MachoPacket {
+            packet_type: MachoPacketType::CallReq,
+            source: MachoAddress::Client {
+                client_id,
+                call_id,
+                service: None,
+            },
+            destination: MachoAddress::Node {
+                node_id: MACHO_PROXY_NODE_ID,
+                service: Some(service.into()),
+                call_id: 0,
+            },
+            user_id: Some(1001),
+            payload: PyRep::Tuple(vec![PyRep::Tuple(vec![
+                PyRep::Integer(0),
+                PyRep::SubStream(Box::new(inner_tuple)),
+            ])]),
+            named_payload: HashMap::new(),
+        }
+    };
+
+    // SelectCharacterID(90_000_001)
+    write_framed_pyrep(
+        &mut s,
+        &send_call(
+            1,
+            "charUnboundMgr",
+            "SelectCharacterID",
+            vec![PyRep::Integer(PILOT)],
+            vec![],
+        )
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let sel_rsp = MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    assert_eq!(sel_rsp.packet_type, MachoPacketType::CallRsp);
+    let _sel_sess = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+
+    // Helper: reads raw length-prefixed wire frames until CallRsp, returning (raw_frame_bytes, CallRsp).
+    async fn read_call_rsp_wire(stream: &mut TcpStream) -> (Vec<u8>, MachoPacket) {
+        loop {
+            let mut len_buf = [0u8; 4];
+            stream.read_exact(&mut len_buf).await.expect("frame len");
+            let frame_len = u32::from_le_bytes(len_buf) as usize;
+            let mut frame = vec![0u8; frame_len];
+            stream.read_exact(&mut frame).await.expect("frame body");
+            let rep = marshal::decode(&frame).expect("decode macho frame");
+            let pkt = MachoPacket::from_pyrep(&rep).expect("MachoPacket");
+            if pkt.packet_type == MachoPacketType::CallRsp {
+                return (frame, pkt);
+            }
+            assert_ne!(
+                pkt.packet_type,
+                MachoPacketType::ErrorResponse,
+                "unexpected ErrorResponse on machoNet call: {rep:?}"
+            );
+        }
+    }
+
+    let assert_no_bare_class_bytes = |wire: &[u8], bare: &[u8], full: &[u8]| {
+        let prefix = b"carbon.common.script.net.";
+        assert!(
+            wire.windows(full.len()).any(|w| w == full),
+            "wire bytes must contain full V24 class path {}",
+            String::from_utf8_lossy(full)
+        );
+        for (idx, w) in wire.windows(bare.len()).enumerate() {
+            if w == bare {
+                assert!(
+                    idx >= prefix.len() && &wire[idx - prefix.len()..idx] == prefix,
+                    "wire bytes contained unprefixed legacy class {} at offset {idx}",
+                    String::from_utf8_lossy(bare)
+                );
+            }
+        }
+    };
+
+    // 1. Initial marketProxy.GetOrders(34) with machoVersion=1 -> V24 CachedMethodCallResult
+    write_framed_pyrep(
+        &mut s,
+        &send_call(
+            2,
+            "marketProxy",
+            "GetOrders",
+            vec![PyRep::Integer(34)],
+            vec![(PyRep::String("machoVersion".into()), PyRep::Integer(1))],
+        )
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let (frame1, rsp1) = read_call_rsp_wire(&mut s).await;
+    assert_no_bare_class_bytes(
+        &frame1,
+        b"objectCaching.CachedMethodCallResult",
+        V24_CACHED_METHOD_CALL_RESULT_CLASS.as_bytes(),
+    );
+    let PyRep::Tuple(outer1) = &rsp1.payload else {
+        panic!("CallRsp payload tuple");
+    };
+    let PyRep::SubStream(sub1) = &outer1[0] else {
+        panic!("CallRsp SubStream");
+    };
+    let sub1_wire = marshal::encode(sub1);
+    assert_eq!(sub1_wire[5], MarshalOpcode::PyObject as u8);
+    assert_eq!(sub1_wire[6], MarshalOpcode::PyShortString as u8);
+    assert_eq!(sub1_wire[7] as usize, V24_CACHED_METHOD_CALL_RESULT_CLASS.len());
+
+    let PyRep::Object { type_name: t1, args: a1 } = sub1.as_ref() else {
+        panic!("expected CachedMethodCallResult Object");
+    };
+    assert_eq!(t1, V24_CACHED_METHOD_CALL_RESULT_CLASS);
+    let PyRep::Tuple(cmcr1) = a1.as_ref() else {
+        panic!("expected 3-tuple");
+    };
+    assert_eq!(
+        cmcr1[0].dict_get("versionCheck"),
+        Some(&PyRep::Tuple(vec![
+            PyRep::String("always".into()),
+            PyRep::None,
+            PyRep::None,
+        ]))
+    );
+    let PyRep::List(ver1) = &cmcr1[2] else {
+        panic!("expected 2-element version list");
+    };
+    let (ts1, crc1) = (ver1[0].as_i64().unwrap(), ver1[1].as_i64().unwrap());
+    let PyRep::SubStream(orders1_rep) = &cmcr1[1] else {
+        panic!("expected PySubStream result");
+    };
+    let PyRep::Tuple(orders1_pair) = orders1_rep.as_ref() else {
+        panic!("expected (sell_crowset, buy_crowset)");
+    };
+    let PyRep::ObjectEx { list: sell_rows1, .. } = &orders1_pair[0] else {
+        panic!("expected sell CRowset");
+    };
+    assert_eq!(sell_rows1.len(), 1);
+    assert_eq!(sell_rows1[0].dbrow_get("volRemaining").and_then(|v| v.as_f64()), Some(1_962.0));
+    assert_eq!(sell_rows1[0].dbrow_get("price").and_then(|v| v.as_f64()), Some(2.04));
+
+    // 2. PlaceBuyOrder for 1 Tritanium @ 2.04 ISK, then re-fetch GetOrders(34) with machoVersion=[ts1, crc1]
+    write_framed_pyrep(
+        &mut s,
+        &send_call(
+            3,
+            "marketProxy",
+            "PlaceBuyOrder",
+            vec![
+                PyRep::Integer(60_003_760),
+                PyRep::Integer(34),
+                PyRep::Real(2.04),
+                PyRep::Integer(1),
+                PyRep::Integer(-1),
+                PyRep::Integer(1),
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::None,
+            ],
+            vec![],
+        )
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let (_buy_frame, _buy_rsp) = read_call_rsp_wire(&mut s).await;
+
+    write_framed_pyrep(
+        &mut s,
+        &send_call(
+            4,
+            "marketProxy",
+            "GetOrders",
+            vec![PyRep::Integer(34)],
+            vec![(
+                PyRep::String("machoVersion".into()),
+                PyRep::List(vec![PyRep::Integer(ts1), PyRep::Integer(crc1)]),
+            )],
+        )
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let (frame2, rsp2) = read_call_rsp_wire(&mut s).await;
+    assert_no_bare_class_bytes(
+        &frame2,
+        b"objectCaching.CachedMethodCallResult",
+        V24_CACHED_METHOD_CALL_RESULT_CLASS.as_bytes(),
+    );
+    let PyRep::Tuple(outer2) = &rsp2.payload else { panic!() };
+    let PyRep::SubStream(sub2) = &outer2[0] else { panic!() };
+    let PyRep::Object { type_name: t2, args: a2 } = sub2.as_ref() else { panic!() };
+    assert_eq!(t2, V24_CACHED_METHOD_CALL_RESULT_CLASS);
+    let PyRep::Tuple(cmcr2) = a2.as_ref() else { panic!() };
+    let PyRep::List(ver2) = &cmcr2[2] else { panic!() };
+    let (ts2, crc2) = (ver2[0].as_i64().unwrap(), ver2[1].as_i64().unwrap());
+    assert!(ts2 > ts1, "version timestamp must advance: {ts2} > {ts1}");
+    assert_ne!(crc2, crc1, "RefreshOrderCache requires CRC32 version[1] change after fill");
+    let PyRep::SubStream(orders2_rep) = &cmcr2[1] else { panic!() };
+    let PyRep::Tuple(orders2_pair) = orders2_rep.as_ref() else { panic!() };
+    let PyRep::ObjectEx { list: sell_rows2, .. } = &orders2_pair[0] else { panic!() };
+    assert_eq!(sell_rows2[0].dbrow_get("volRemaining").and_then(|v| v.as_f64()), Some(1_961.0));
+
+    // 3. marketProxy.GetPlexOrders() also wraps in V24 CachedMethodCallResult
+    write_framed_pyrep(
+        &mut s,
+        &send_call(5, "marketProxy", "GetPlexOrders", vec![], vec![]).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let (plex_frame, plex_rsp) = read_call_rsp_wire(&mut s).await;
+    assert_no_bare_class_bytes(
+        &plex_frame,
+        b"objectCaching.CachedMethodCallResult",
+        V24_CACHED_METHOD_CALL_RESULT_CLASS.as_bytes(),
+    );
+    let PyRep::Tuple(plex_outer) = &plex_rsp.payload else { panic!() };
+    let PyRep::SubStream(plex_sub) = &plex_outer[0] else { panic!() };
+    let PyRep::Object { type_name: pt, args: pa } = plex_sub.as_ref() else { panic!() };
+    assert_eq!(pt, V24_CACHED_METHOD_CALL_RESULT_CLASS);
+    let PyRep::Tuple(pcmcr) = pa.as_ref() else { panic!() };
+    let PyRep::SubStream(plex_orders_rep) = &pcmcr[1] else { panic!() };
+    let PyRep::Tuple(plex_pair) = plex_orders_rep.as_ref() else { panic!() };
+    let PyRep::ObjectEx { list: plex_sells, .. } = &plex_pair[0] else { panic!() };
+    assert_eq!(plex_sells.len(), 1);
+    assert_eq!(plex_sells[0].dbrow_get("volRemaining").and_then(|v| v.as_f64()), Some(10.0));
+
+    // 4. objectCaching.GetCachableObject & machoNet.GetCachedObject emit V24 CachedObject (0x17)
+    for (call_id, svc, method, args) in [
+        (
+            6,
+            "objectCaching",
+            "GetCachableObject",
+            vec![
+                PyRep::Bool(false),
+                PyRep::String("config.Units".into()),
+                PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Integer(0)]),
+                PyRep::Integer(888_444),
+            ],
+        ),
+        (
+            7,
+            "machoNet",
+            "GetCachedObject",
+            vec![PyRep::String("config.Units".into())],
+        ),
+    ] {
+        write_framed_pyrep(&mut s, &send_call(call_id, svc, method, args, vec![]).to_pyrep())
+            .await
+            .unwrap();
+        let (co_frame, co_rsp) = read_call_rsp_wire(&mut s).await;
+        assert_no_bare_class_bytes(
+            &co_frame,
+            b"objectCaching.CachedObject",
+            V24_CACHED_OBJECT_CLASS.as_bytes(),
+        );
+        let PyRep::Tuple(co_outer) = &co_rsp.payload else { panic!() };
+        let PyRep::SubStream(co_sub) = &co_outer[0] else { panic!() };
+        let co_wire = marshal::encode(co_sub);
+        assert_eq!(co_wire[5], MarshalOpcode::PyObject as u8);
+        let PyRep::Object { type_name, args } = co_sub.as_ref() else {
+            panic!("expected CachedObject");
+        };
+        assert_eq!(type_name, V24_CACHED_OBJECT_CLASS);
+        let PyRep::Tuple(fields) = args.as_ref() else { panic!("7-tuple") };
+        assert_eq!(fields.len(), 7);
+        let PyRep::Buffer(inner_bytes) = &fields[4] else { panic!("Buffer") };
+        let inner = marshal::decode(inner_bytes).expect("decode CachedObject pickle");
+        assert!(matches!(inner, PyRep::IndexRowset { .. }));
+    }
+}

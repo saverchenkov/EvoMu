@@ -89,9 +89,9 @@ fn crc32_cache_keys_and_cached_record_wire_encodings() {
         payload: PyRep::Integer(77),
     };
     let PyRep::Object { type_name: co_type, args: co_args } = rec_unshared.to_cached_object_pyrep() else {
-        panic!("expected objectCaching.CachedObject");
+        panic!("expected V24 CachedObject");
     };
-    assert_eq!(co_type, "objectCaching.CachedObject");
+    assert_eq!(co_type, eve_proto::marshal::V24_CACHED_OBJECT_CLASS);
     let co_t = as_tuple(&co_args);
     assert_eq!(co_t.len(), 7);
     assert_eq!(co_t[0], PyRep::Tuple(vec![PyRep::Integer(13_300_000_000_000_0000), PyRep::Integer(123_456)]));
@@ -109,16 +109,18 @@ fn crc32_cache_keys_and_cached_record_wire_encodings() {
 
     let hint = rec_unshared.to_cache_hint_pyrep();
     let PyRep::Object { type_name: hint_type, args: hint_args } = &hint else { panic!() };
-    assert_eq!(hint_type, "util.CachedObject");
+    assert_eq!(hint_type, eve_proto::marshal::V24_CACHE_HINT_CLASS);
     let ht = as_tuple(hint_args);
+    assert_eq!(ht.len(), 4);
     assert_eq!(ht[0], oid);
     assert_eq!(ht[1], PyRep::Integer(888_444));
     assert_eq!(ht[2], PyRep::Tuple(vec![PyRep::Integer(13_300_000_000_000_0000), PyRep::Integer(123_456)]));
+    assert_eq!(ht[3], PyRep::Integer(0));
 
     let PyRep::Object { type_name: res_type, args: res_no_si } =
         rec_unshared.to_cached_method_call_result_pyrep("run", None)
     else { panic!() };
-    assert_eq!(res_type, "objectCaching.CachedMethodCallResult");
+    assert_eq!(res_type, eve_proto::marshal::V24_CACHED_METHOD_CALL_RESULT_CLASS);
     let rt0 = as_tuple(&res_no_si);
     assert_eq!(as_dict(&rt0[0]).len(), 1);
     assert_eq!(
@@ -138,7 +140,7 @@ fn crc32_cache_keys_and_cached_record_wire_encodings() {
     let PyRep::Object { type_name: hrt, args: hra } = rec_unshared.to_cached_method_call_hint_pyrep("run") else {
         panic!();
     };
-    assert_eq!(hrt, "objectCaching.CachedMethodCallResult");
+    assert_eq!(hrt, eve_proto::marshal::V24_CACHED_METHOD_CALL_RESULT_CLASS);
     let hrt_t = as_tuple(&hra);
     assert_eq!(hrt_t[0].dict_get("versionCheck"), Some(&PyRep::String("run".into())));
     assert_eq!(hrt_t[1], hint);

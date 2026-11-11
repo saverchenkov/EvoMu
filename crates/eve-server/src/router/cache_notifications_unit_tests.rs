@@ -41,10 +41,26 @@ fn crc32_cache_keys_and_object_caching_lifecycle_preserve_monotonic_timestamps()
     let ctx = test_ctx();
     let oid = ServerContext::method_call_object_id("stationSvc", "GetStation");
     let r1 = ctx.put_cached_object(oid.clone(), PyRep::Integer(100), true);
-    assert!(matches!(r1.to_cached_object_pyrep(), PyRep::Object { ref type_name, .. } if type_name == "objectCaching.CachedObject"));
-    assert!(matches!(r1.to_cache_hint_pyrep(), PyRep::Object { ref type_name, .. } if type_name == "util.CachedObject"));
-    assert!(matches!(r1.to_cached_method_call_result_pyrep("run", Some("solarsystemid2")), PyRep::Object { ref type_name, .. } if type_name == "objectCaching.CachedMethodCallResult"));
-    assert!(matches!(r1.to_cached_method_call_hint_pyrep("run"), PyRep::Object { ref type_name, .. } if type_name == "objectCaching.CachedMethodCallResult"));
+    assert!(matches!(
+        r1.to_cached_object_pyrep(),
+        PyRep::Object { ref type_name, .. }
+            if type_name == eve_proto::marshal::V24_CACHED_OBJECT_CLASS
+    ));
+    assert!(matches!(
+        r1.to_cache_hint_pyrep(),
+        PyRep::Object { ref type_name, .. }
+            if type_name == eve_proto::marshal::V24_CACHE_HINT_CLASS
+    ));
+    assert!(matches!(
+        r1.to_cached_method_call_result_pyrep("run", Some("solarsystemid2")),
+        PyRep::Object { ref type_name, .. }
+            if type_name == eve_proto::marshal::V24_CACHED_METHOD_CALL_RESULT_CLASS
+    ));
+    assert!(matches!(
+        r1.to_cached_method_call_hint_pyrep("run"),
+        PyRep::Object { ref type_name, .. }
+            if type_name == eve_proto::marshal::V24_CACHED_METHOD_CALL_RESULT_CLASS
+    ));
 
     // Invalidate and re-insert: timestamp must strictly advance (> r1.timestamp)
     assert!(ctx.invalidate_cached_method("stationSvc", "GetStation"));

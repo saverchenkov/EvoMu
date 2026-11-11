@@ -1,11 +1,16 @@
-//! Object caching (`objectCaching.CachedObject`, `util.CachedObject`, `objectCaching.CachedMethodCallResult`)
+//! Object caching (`carbon.common.script.net.objectCaching.CachedObject`,
+//! `carbon.common.script.net.cachedObject.CachedObject`,
+//! `carbon.common.script.net.objectCaching.CachedMethodCallResult`)
 //! and binary-marshaled `MachoPacket` client notification routing (`P-3`, `P-5`).
 
 #![forbid(unsafe_code)]
 
 use crate::router::context::ServerContext;
 use eve_machonet::{MachoAddress, MachoPacket, MachoPacketType};
-use eve_proto::{marshal, PyRep};
+use eve_proto::marshal::{
+    self, V24_CACHED_METHOD_CALL_RESULT_CLASS, V24_CACHED_OBJECT_CLASS, V24_CACHE_HINT_CLASS,
+};
+use eve_proto::PyRep;
 use std::collections::HashMap;
 
 /// Standard IEEE 802.3 CRC-32 (`0xEDB8_8320`) matching `CRC32::Generate` in `CachedObjectMgr.cpp:238`.
@@ -51,10 +56,10 @@ pub struct CachedObjectRecord {
 }
 
 impl CachedObjectRecord {
-    /// Encodes as `objectCaching.CachedObject` (`ObjectCaching.xmlp:5-31`).
+    /// Encodes as V24 `carbon.common.script.net.objectCaching.CachedObject` (`objectCaching.pyj:772`).
     pub fn to_cached_object_pyrep(&self) -> PyRep {
         PyRep::Object {
-            type_name: "objectCaching.CachedObject".into(),
+            type_name: V24_CACHED_OBJECT_CLASS.into(),
             args: Box::new(PyRep::Tuple(vec![
                 PyRep::Tuple(vec![
                     PyRep::Integer(self.timestamp),
@@ -70,22 +75,26 @@ impl CachedObjectRecord {
         }
     }
 
-    /// Encodes as a `util.CachedObject` cache specification hint (`ObjectCaching.xmlp:33-51`).
+    /// Encodes as V24 `carbon.common.script.net.cachedObject.CachedObject` (`cachedObject.pyj:12`).
     pub fn to_cache_hint_pyrep(&self) -> PyRep {
+        let mut fields = vec![
+            self.object_id.clone(),
+            PyRep::Integer(self.node_id),
+            PyRep::Tuple(vec![
+                PyRep::Integer(self.timestamp),
+                PyRep::Integer(self.version as i64),
+            ]),
+        ];
+        if !self.shared {
+            fields.push(PyRep::Integer(0));
+        }
         PyRep::Object {
-            type_name: "util.CachedObject".into(),
-            args: Box::new(PyRep::Tuple(vec![
-                self.object_id.clone(),
-                PyRep::Integer(self.node_id),
-                PyRep::Tuple(vec![
-                    PyRep::Integer(self.timestamp),
-                    PyRep::Integer(self.version as i64),
-                ]),
-            ])),
+            type_name: V24_CACHE_HINT_CLASS.into(),
+            args: Box::new(PyRep::Tuple(fields)),
         }
     }
 
-    /// Encodes as an inline `objectCaching.CachedMethodCallResult` (`ObjectCaching.xmlp:53-91`).
+    /// Encodes as an inline V24 `carbon.common.script.net.objectCaching.CachedMethodCallResult` (`objectCaching.pyj:837`).
     pub fn to_cached_method_call_result_pyrep(
         &self,
         client_when: &str,
@@ -103,7 +112,7 @@ impl CachedObjectRecord {
             details.push((PyRep::String("sessionInfo".into()), PyRep::String(si.into())));
         }
         PyRep::Object {
-            type_name: "objectCaching.CachedMethodCallResult".into(),
+            type_name: V24_CACHED_METHOD_CALL_RESULT_CLASS.into(),
             args: Box::new(PyRep::Tuple(vec![
                 PyRep::Dict(details),
                 PyRep::SubStream(Box::new(self.payload.clone())),
@@ -115,10 +124,10 @@ impl CachedObjectRecord {
         }
     }
 
-    /// Encodes as a hint-backed `objectCaching.CachedMethodCallResult` (`ObjectCaching.xmlp:93-112`).
+    /// Encodes as a hint-backed V24 `carbon.common.script.net.objectCaching.CachedMethodCallResult` (`objectCaching.pyj:837`).
     pub fn to_cached_method_call_hint_pyrep(&self, version_check: &str) -> PyRep {
         PyRep::Object {
-            type_name: "objectCaching.CachedMethodCallResult".into(),
+            type_name: V24_CACHED_METHOD_CALL_RESULT_CLASS.into(),
             args: Box::new(PyRep::Tuple(vec![
                 PyRep::Dict(vec![(
                     PyRep::String("versionCheck".into()),
@@ -304,7 +313,8 @@ impl ServerContext {
         self.invalidate_cached_object(&oid)
     }
 
-    /// Wraps a service method result in `objectCaching.CachedMethodCallResult` and registers it in `self.object_cache`.
+    /// Wraps a service method result in V24 `carbon.common.script.net.objectCaching.CachedMethodCallResult`
+    /// and registers it in `self.object_cache`.
     pub fn cache_method_call_result(
         &self,
         service: &str,

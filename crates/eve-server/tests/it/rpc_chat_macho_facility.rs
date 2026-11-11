@@ -238,8 +238,10 @@ async fn test_xmpp_chat_mgr_and_macho_net() {
         .await
         .expect("GetCachedObject");
     match cached_obj {
-        PyRep::Object { type_name, .. } => assert_eq!(type_name, "objectCaching.CachedObject"),
-        other => panic!("expected objectCaching.CachedObject, got {other:?}"),
+        PyRep::Object { type_name, .. } => {
+            assert_eq!(type_name, eve_proto::marshal::V24_CACHED_OBJECT_CLASS);
+        }
+        other => panic!("expected V24 CachedObject, got {other:?}"),
     }
     // Negative test: unknown objectID returns CachedObjectNotFound
     let unk_obj = rpc(&ctx, &mut sess1, "machoNet", "GetCachedObject", &[PyRep::String("nonexistent_obj_99".into())]).await;
