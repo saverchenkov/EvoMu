@@ -29,7 +29,7 @@ pub(super) fn authorize_service_binding(
                     ctx, session, char_id, object_id,
                 )
         }
-        "invbroker" => authorize_invbroker_binding(ctx, session, object_id),
+        "invbroker" => authorize_invbroker_binding(ctx, session, char_id, object_id),
         "station" | "stationSvc" | "corpStationMgr" | "repairSvc" | "reprocessingSvc"
         | "insuranceSvc" => {
             session.station_id == Some(object_id) || session.structure_id == Some(object_id)
@@ -133,7 +133,10 @@ pub(super) fn verify_service_binding_context(
             session.station_id == Some(entry.object_id)
                 || session.structure_id == Some(entry.object_id)
         }
-        "invbroker" => authorize_invbroker_binding(ctx, session, entry.object_id),
+        "invbroker" => {
+            Some(entry.character_id) == session.character_id
+                && authorize_invbroker_binding(ctx, session, entry.character_id, entry.object_id)
+        }
         "corpRegistry" | "corpmgr" => {
             entry.object_id > 0
                 && (session.corporation_id == Some(entry.object_id)
@@ -266,6 +269,12 @@ pub(super) fn should_invalidate_bound_object(
             )
         });
     let _ = dock_is_structure;
+    let inv_in_ctx = inv_in_ctx
+        || (entry.service == "invbroker"
+            && crate::services::fitting_containers_ships::resolve_missing_dynamic_ship_stub_type_id(
+                ctx, char_id, oid,
+            )
+            .is_some());
 
     if reason == "corp_change" {
         return match entry.service.as_str() {
@@ -365,7 +374,12 @@ pub(super) fn should_invalidate_bound_object(
     }
 }
 
-fn authorize_invbroker_binding(ctx: &ServerContext, session: &SessionState, object_id: i64) -> bool {
+fn authorize_invbroker_binding(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    object_id: i64,
+) -> bool {
     Some(object_id) == session.character_id
         || Some(object_id) == session.ship_id
         || Some(object_id) == session.station_id
@@ -391,6 +405,12 @@ fn authorize_invbroker_binding(ctx: &ServerContext, session: &SessionState, obje
                             && Some(it.location_id) == session.solar_system_id.map(i64::from))
                 })
         })
+        || (session.user_id.is_some()
+            && Some(char_id) == session.character_id
+            && crate::services::fitting_containers_ships::resolve_missing_dynamic_ship_stub_type_id(
+                ctx, char_id, object_id,
+            )
+            .is_some())
 }
 
 fn authorize_planet_binding(

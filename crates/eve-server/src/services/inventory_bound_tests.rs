@@ -576,3 +576,300 @@ fn issue_803_get_inventory_from_id_and_self_inv_item_on_destroyed_dynamic_ship()
     .expect("GetAvailableTurretSlots on destroyed dynamic ship");
     assert_eq!(free_turrets, PyRep::Integer(0));
 }
+
+fn extract_macho_bound_id(rep: &PyRep) -> u64 {
+    let sub_rep = match rep {
+        PyRep::Tuple(items) => items.first().unwrap_or(rep),
+        other => other,
+    };
+    let PyRep::SubStruct(sub) = sub_rep else {
+        panic!("expected SubStruct bound object ref, got {rep:?}");
+    };
+    let PyRep::SubStream(inner) = sub.as_ref() else {
+        panic!("expected SubStream bound object ref, got {sub:?}");
+    };
+    let PyRep::Tuple(items) = inner.as_ref() else {
+        panic!("expected Tuple bound object ref, got {inner:?}");
+    };
+    let oid_str = items
+        .first()
+        .and_then(|v| v.as_str())
+        .expect("bound oid string");
+    oid_str
+        .split(':')
+        .nth(1)
+        .and_then(|n| n.parse::<u64>().ok())
+        .expect("numeric bound id")
+}
+
+#[tokio::test]
+async fn issue_803_macho_dispatch_verify_bound_object_for_destroyed_ship_stub() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let other_char = 95_803_002_i64;
+    let sys_id = 30_000_142_u32;
+    let station_id = 60_003_760_i64;
+    let other_station_id = 60_008_494_i64;
+    let destroyed_ship_id = 200_246_015_i64;
+    let capsule_id = 200_294_811_i64;
+    let foreign_live_ship_id = 200_888_777_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = capsule_id;
+        }
+        let mut ch2 = snap.characters[&char_id].clone();
+        ch2.character_id = other_char;
+        ch2.user_id = other_char as u64;
+        ch2.name = "Other Pilot".into();
+        ch2.station_id = Some(other_station_id);
+        ch2.active_ship_id = foreign_live_ship_id;
+        snap.characters.insert(other_char, ch2);
+
+        snap.items.insert(
+            capsule_id,
+            InventoryItemRecord {
+                item_id: capsule_id,
+                type_id: 670,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            foreign_live_ship_id,
+            InventoryItemRecord {
+                item_id: foreign_live_ship_id,
+                type_id: 587,
+                owner_id: other_char,
+                location_id: other_station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.killmails.insert(
+            1,
+            eve_db::KillmailRecord {
+                kill_id: 1,
+                solar_system_id: sys_id,
+                killed_unix: 1_800_000_100,
+                victim_character_id: char_id,
+                victim_corp_id: 1_000_009,
+                ship_type_id: 587,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut sess = SessionState {
+        session_id: 8031,
+        user_id: Some(1),
+        character_id: Some(char_id),
+        corporation_id: Some(1_000_009),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(capsule_id),
+        ..Default::default()
+    };
+    let mut other_sess = SessionState {
+        session_id: 8032,
+        user_id: Some(other_char as u64),
+        character_id: Some(other_char),
+        corporation_id: Some(1_000_009),
+        solar_system_id: Some(sys_id),
+        station_id: Some(other_station_id),
+        ship_id: Some(foreign_live_ship_id),
+        ..Default::default()
+    };
+    let kw = HashMap::new();
+
+    // Pre-existing sub-object bound before ship loss survives `"ship_loss"` invalidation.
+    let pre_bound_stub = ctx
+        .bind_verified_sub_object(&sess, "invbroker", destroyed_ship_id)
+        .unwrap();
+    ctx.invalidate_bound_objects_for_session_transition(char_id, sys_id, None, "ship_loss");
+    assert!(ctx.verify_bound_object(&sess, pre_bound_stub).is_ok());
+
+    // Real MachoBindObject -> GetInventoryFromId(destroyed_ship_id, 0) -> verify_bound_object + GetSelfInvItem.
+    let bind_sys_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(i64::from(sys_id)), PyRep::None],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("bind invbroker to solar system");
+    let sys_bid = extract_macho_bound_id(&bind_sys_rep);
+
+    let inv_stub_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            Some(sys_bid),
+            "GetInventoryFromId",
+            &[PyRep::Integer(destroyed_ship_id), PyRep::Integer(0)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("GetInventoryFromId(destroyed_ship_id, 0)");
+    let stub_bid = extract_macho_bound_id(&inv_stub_rep);
+    assert!(ctx.verify_bound_object(&sess, stub_bid).is_ok());
+
+    let self_item_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            Some(stub_bid),
+            "GetSelfInvItem",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("stub_bid.GetSelfInvItem()");
+    assert_eq!(self_item_rep.dbrow_get("itemID"), Some(&PyRep::Integer(destroyed_ship_id)));
+    assert_eq!(self_item_rep.dbrow_get("typeID"), Some(&PyRep::Integer(587)));
+    assert_eq!(self_item_rep.dbrow_get("ownerID"), Some(&PyRep::Integer(char_id)));
+    assert_eq!(
+        self_item_rep.dbrow_get("locationID"),
+        Some(&PyRep::Integer(i64::from(sys_id)))
+    );
+
+    let list_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            Some(stub_bid),
+            "List",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("stub_bid.List()");
+    assert!(matches!(list_rep, PyRep::ObjectEx { .. }));
+
+    // Transition to docked at station (`InventoryStation` init): stub binding remains valid.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(station_id);
+        }
+    });
+    sess.station_id = Some(station_id);
+    ctx.invalidate_bound_objects_for_session_transition(char_id, sys_id, Some(station_id), "dock");
+    let docked_self = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            Some(stub_bid),
+            "GetSelfInvItem",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("stub_bid.GetSelfInvItem() after dock");
+    assert_eq!(
+        docked_self.dbrow_get("locationID"),
+        Some(&PyRep::Integer(station_id))
+    );
+
+    let bind_st_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(station_id), PyRep::None],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("bind invbroker to station");
+    let st_bid = extract_macho_bound_id(&bind_st_rep);
+
+    // Negative 1: Another character cannot verify or invoke GetSelfInvItem on char_id's stub bound object.
+    assert_eq!(
+        ctx.verify_bound_object(&other_sess, stub_bid)
+            .unwrap_err()
+            .code,
+        "BoundObjectOwnershipViolation"
+    );
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut other_sess,
+            "invbroker",
+            Some(stub_bid),
+            "GetSelfInvItem",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "BoundObjectOwnershipViolation"
+    );
+
+    // Negative 2: Bogus/non-stub IDs are still rejected by GetInventoryFromId and verify_bound_object.
+    for bogus_id in [199_999_999_i64, 999_999, 1_000_000_000_000] {
+        assert_eq!(
+            ctx.dispatch_rpc(
+                &mut sess,
+                "invbroker",
+                Some(st_bid),
+                "GetInventoryFromId",
+                &[PyRep::Integer(bogus_id), PyRep::Integer(0)],
+                &kw,
+                Some("machoNet:26000"),
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "FakeItemNotFound",
+            "bogus_id={bogus_id} must still raise FakeItemNotFound"
+        );
+        let bogus_bid = ctx
+            .bind_verified_sub_object(&sess, "invbroker", bogus_id)
+            .unwrap();
+        assert_eq!(
+            ctx.verify_bound_object(&sess, bogus_bid).unwrap_err().code,
+            "BoundObjectOwnershipViolation" // rpc-lint: allow error code assertion
+        );
+    }
+
+    // Negative 3: Foreign live dynamic ship at another location is rejected across bind/verify/GetInventoryFromId.
+    assert_eq!(
+        ctx.bind_object(&sess, "invbroker", foreign_live_ship_id)
+            .unwrap_err()
+            .code,
+        "BindAuthorizationDenied" // rpc-lint: allow error code assertion
+    );
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            Some(st_bid),
+            "GetInventoryFromId",
+            &[PyRep::Integer(foreign_live_ship_id), PyRep::Integer(0)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "InventoryNotAccessible"
+    );
+}
