@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 
-use crate::common;
 use crate::quasar_sov_equinox_hub::{drain, field, fields, id_req, idm, rpc, sess, structure, subscribe, varint};
 use eve_db::corp_roles;
 use eve_db::snapshot_ext::FwSystemOccupationRecord;
@@ -365,7 +364,6 @@ async fn test_skinr_sequencing_job_natural_completion_notice() {
 #[tokio::test]
 async fn test_payment_schedule_omega_purchase_and_faction_activity_admin() {
     let ctx = ServerContext::new();
-    common::seed_test_nes_store_catalog(&ctx);
     ctx.db.with_mut_snapshot(|snap| {
         let tokens = vec![
             eve_server::services::quasar_payment_store::PaymentTokenRecord {

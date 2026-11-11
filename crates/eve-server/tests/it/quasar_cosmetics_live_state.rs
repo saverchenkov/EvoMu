@@ -821,6 +821,8 @@ async fn test_cosmetics_skinr_designer_and_paragon_market() {
         let sk_map = s.skills.entry(seller_cid as i64).or_default();
         sk_map.insert(81044, TrainedSkillRecord { type_id: 81044, level: 4, skill_points: 45_255.0 });
         sk_map.insert(81040, TrainedSkillRecord { type_id: 81040, level: 5, skill_points: 256_000.0 });
+        sk_map.insert(81366, TrainedSkillRecord { type_id: 81366, level: 5, skill_points: 256_000.0 });
+        sk_map.insert(81375, TrainedSkillRecord { type_id: 81375, level: 5, skill_points: 256_000.0 });
 
         s.items.insert(
             ship_id,

@@ -60,6 +60,7 @@ fn opt_outs() -> PyRep {
         ("acceptsFleetWarp", PyRep::Bool(true)),
         ("acceptsConduitJumps", PyRep::Bool(true)),
         ("acceptsFleetRegroups", PyRep::Bool(true)),
+        ("acceptsRegroup", PyRep::Bool(true)),
     ])
 }
 

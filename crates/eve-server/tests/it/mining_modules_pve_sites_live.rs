@@ -13,6 +13,21 @@ use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
 use eve_server::sp6_lifecycle::tick_background_cluster;
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+
+fn fast_demo_ctx() -> ServerContext {
+    static BASE: OnceLock<(Arc<eve_sde::SdeRegistry>, eve_db::WorldStateSnapshot)> = OnceLock::new();
+    let (sde, snap) = BASE.get_or_init(|| {
+        let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
+        let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+        let _ = eve_server::world_seeder::seed_dual_anchor_markets(&db, &sde);
+        (sde, db.with_snapshot(Clone::clone))
+    });
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    db.with_mut_snapshot(|s| *s = snap.clone());
+    ServerContext::with_sde_and_repository(Arc::clone(sde), db)
+        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED)
+}
 
 const JITA_SYS: u32 = 30_000_142;
 const PERIMETER_SYS: u32 = 30_000_144;
@@ -26,7 +41,7 @@ const ORE_HOLD: i64 = 134;
 const FLEET_HANGAR: i64 = 155;
 
 fn paused_ctx() -> ServerContext {
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     common::pin_clock(&ctx);
     ctx
 }
@@ -95,12 +110,15 @@ async fn gm_pilot_fitted_in_space(
     for tid in stack {
         visit_prereqs(&ctx.sde, tid, &mut visited, &mut ordered_skills);
     }
-    for sid in ordered_skills {
-        common::slash_cmd(ctx, &mut sess, &format!("/giveskill {sid} 5")).await;
-    }
-    for &(sid, lvl) in extra_skills {
-        common::slash_cmd(ctx, &mut sess, &format!("/giveskill {sid} {lvl}")).await;
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        let entry = snap.skills.entry(char_id).or_default();
+        for sid in ordered_skills {
+            entry.insert(sid, eve_db::TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
+        }
+        for &(sid, lvl) in extra_skills {
+            entry.insert(sid, eve_db::TrainedSkillRecord { type_id: sid, level: lvl, skill_points: 256_000.0 });
+        }
+    });
     ctx.advance_secs(31);
     ok(ctx, &mut sess, "ship", "Board", &[int(ship_id)]).await;
 
@@ -554,20 +572,27 @@ async fn test_disruptive_lance_live_constraints_skills_neut_debuff_and_locks() {
         &[(3413, 5), (3417, 5), (3432, 5), (3451, 5), (3452, 5), (16_069, 5), (27_902, 5)],
         &[(rep_tid, HIGH_SLOT_0, None)],
     ).await;
+    let blaster_tid = ctx.sde.types.values().find(|t| t.name == "Neutron Blaster Cannon II").unwrap().type_id;
+    let void_l_tid = ctx.sde.types.values().find(|t| t.name == "Void L").unwrap().type_id;
+    let mag_stab_tid = ctx.sde.types.values().find(|t| t.name == "Magnetic Field Stabilizer II").unwrap().type_id;
     let (mut gunner, g_mods) = gm_pilot_fitted_in_space(
         &ctx, 71_015, 91_100_015, 17_740 /* Vindicator */, LOW_SYS,
-        &[(3300, 5), (3302, 5), (3308, 5), (3413, 5), (12_209, 5)],
+        &[(3300, 5), (3302, 5), (3307, 5), (3312, 5), (3336, 5), (3413, 5)],
         &[
-            (2929 /* 800mm Repeating Cannon II */, HIGH_SLOT_0, Some((21_894 /* Republic Fleet EMP L */, 120))),
-            (2929, HIGH_SLOT_0 + 1, Some((21_894, 120))),
-            (2929, HIGH_SLOT_0 + 2, Some((21_894, 120))),
-            (2929, HIGH_SLOT_0 + 3, Some((21_894, 120))),
-            (2929, HIGH_SLOT_0 + 4, Some((21_894, 120))),
-            (2929, HIGH_SLOT_0 + 5, Some((21_894, 120))),
-            (2929, HIGH_SLOT_0 + 6, Some((21_894, 120))),
-            (2929, HIGH_SLOT_0 + 7, Some((21_894, 120))),
+            (blaster_tid, HIGH_SLOT_0, Some((void_l_tid, 120))),
+            (blaster_tid, HIGH_SLOT_0 + 1, Some((void_l_tid, 120))),
+            (blaster_tid, HIGH_SLOT_0 + 2, Some((void_l_tid, 120))),
+            (blaster_tid, HIGH_SLOT_0 + 3, Some((void_l_tid, 120))),
+            (blaster_tid, HIGH_SLOT_0 + 4, Some((void_l_tid, 120))),
+            (blaster_tid, HIGH_SLOT_0 + 5, Some((void_l_tid, 120))),
+            (blaster_tid, HIGH_SLOT_0 + 6, Some((void_l_tid, 120))),
+            (blaster_tid, HIGH_SLOT_0 + 7, Some((void_l_tid, 120))),
+            (mag_stab_tid, LOW_SLOT_0, None),
+            (mag_stab_tid, LOW_SLOT_0 + 1, None),
+            (mag_stab_tid, LOW_SLOT_0 + 2, None),
         ],
     ).await;
+    let g_guns = &g_mods[..8];
     let rep_id = logi_mods[0];
 
     let low_h = ctx.systems.get_or_spawn(LOW_SYS);
@@ -577,28 +602,29 @@ async fn test_disruptive_lance_live_constraints_skills_neut_debuff_and_locks() {
     ok(&ctx, &mut gunner.sess, "dogmaIM", "AddTarget", &[int(far_ship.ship_id)]).await;
     ctx.advance_secs(15);
     low_h.step_manual(15.0).await.unwrap();
-    for _ in 0..160 {
-        for &m in &g_mods {
-            let _ = rpc(&ctx, &mut gunner.sess, "dogmaIM", "Activate", &[int(m), PyRep::String("targetAttack".into()), int(far_ship.ship_id)]).await;
-        }
+    for &m in g_guns {
+        let _ = rpc(&ctx, &mut gunner.sess, "dogmaIM", "Activate", &[int(m), PyRep::String("targetAttack".into()), int(far_ship.ship_id)]).await;
+    }
+    for _ in 0..80 {
         ctx.advance_secs(8);
         low_h.step_manual(8.0).await.unwrap();
         if low_h.get_combat_state(far_ship.ship_id).await.unwrap().unwrap().armor_hp < far_ar_full - 200.0 { break; }
     }
-    for &m in &g_mods { ok(&ctx, &mut gunner.sess, "dogmaIM", "Deactivate", &[int(m)]).await; }
+    for &m in g_guns { ok(&ctx, &mut gunner.sess, "dogmaIM", "Deactivate", &[int(m)]).await; }
 
     low_h.set_ball_position(far_ship.ship_id, DVec3::new(20_000.0, 15_000.0, 0.0)).await;
     low_h.set_ball_position(logi.ship_id, DVec3::new(20_000.0, 18_000.0, 0.0)).await;
     let far_ar_before = low_h.get_combat_state(far_ship.ship_id).await.unwrap().unwrap().armor_hp;
     assert!(far_ar_before < far_ar_full, "Gunner must damage far_ship armor before baseline remote repair");
     ok(&ctx, &mut logi.sess, "dogmaIM", "AddTarget", &[int(far_ship.ship_id)]).await;
-    for _ in 0..15 {
-        ctx.advance_secs(1);
-        low_h.step_manual(1.0).await.unwrap();
+    for _ in 0..5 {
+        ctx.advance_secs(5);
+        low_h.step_manual(5.0).await.unwrap();
         if low_h.get_target_locks(logi.ship_id).await.unwrap().iter().any(|l| l.target_id == far_ship.ship_id && l.locked) { break; }
     }
     ok(&ctx, &mut logi.sess, "dogmaIM", "Activate", &[int(rep_id), PyRep::String("shipModuleRemoteArmorRepairer".into()), int(far_ship.ship_id)]).await;
-    for _ in 0..8 { ctx.advance_secs(1); low_h.step_manual(1.0).await.unwrap(); }
+    ctx.advance_secs(8);
+    low_h.step_manual(8.0).await.unwrap();
     ok(&ctx, &mut logi.sess, "dogmaIM", "Deactivate", &[int(rep_id)]).await;
     let baseline_repped = low_h.get_combat_state(far_ship.ship_id).await.unwrap().unwrap().armor_hp - far_ar_before;
     assert!(baseline_repped > 0.0, "Baseline remote armor repair must restore armor HP");
@@ -629,13 +655,14 @@ async fn test_disruptive_lance_live_constraints_skills_neut_debuff_and_locks() {
     low_h.set_ball_position(logi.ship_id, DVec3::new(20_000.0, 3_000.0, 0.0)).await;
     let beam_ar_before = low_h.get_combat_state(beam_victim.ship_id).await.unwrap().unwrap().armor_hp;
     ok(&ctx, &mut logi.sess, "dogmaIM", "AddTarget", &[int(beam_victim.ship_id)]).await;
-    for _ in 0..15 {
-        ctx.advance_secs(1);
-        low_h.step_manual(1.0).await.unwrap();
+    for _ in 0..5 {
+        ctx.advance_secs(5);
+        low_h.step_manual(5.0).await.unwrap();
         if low_h.get_target_locks(logi.ship_id).await.unwrap().iter().any(|l| l.target_id == beam_victim.ship_id && l.locked) { break; }
     }
     ok(&ctx, &mut logi.sess, "dogmaIM", "Activate", &[int(rep_id), PyRep::String("shipModuleRemoteArmorRepairer".into()), int(beam_victim.ship_id)]).await;
-    for _ in 0..8 { ctx.advance_secs(1); low_h.step_manual(1.0).await.unwrap(); }
+    ctx.advance_secs(8);
+    low_h.step_manual(8.0).await.unwrap();
     let debuffed_repped = low_h.get_combat_state(beam_victim.ship_id).await.unwrap().unwrap().armor_hp - beam_ar_before;
     assert!((debuffed_repped - 0.5 * baseline_repped).abs() < 1e-2, "Debuffed remote armor repair must be exact 50% of baseline: got {debuffed_repped} vs {}", 0.5 * baseline_repped);
 
@@ -660,13 +687,13 @@ async fn test_disruptive_lance_live_constraints_skills_neut_debuff_and_locks() {
     low_h.set_ball_position(far_ship.ship_id, DVec3::new(20_000.0, 15_000.0, 0.0)).await;
     ok(&ctx, &mut lancer.sess, "dogmaIM", "AddTarget", &[int(far_ship.ship_id)]).await;
     let mut far_lock_ok = false;
-    for _ in 0..60 {
+    for _ in 0..15 {
         if low_h.get_target_locks(lancer.ship_id).await.unwrap().iter().any(|l| l.target_id == far_ship.ship_id && l.locked) {
             far_lock_ok = true;
             break;
         }
-        ctx.advance_secs(1);
-        low_h.step_manual(1.0).await.unwrap();
+        ctx.advance_secs(5);
+        low_h.step_manual(5.0).await.unwrap();
     }
     assert!(far_lock_ok, "Targeting must succeed after Level 5 150s lock timer expires");
     let fire_l5 = ok(&ctx, &mut lancer.sess, "dogmaIM", "Activate", &[int(lance_id), int(far_ship.ship_id)]).await;

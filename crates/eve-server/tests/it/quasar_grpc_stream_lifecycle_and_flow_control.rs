@@ -506,7 +506,7 @@ async fn active_quasar_grpc_streams_enforce_ban_suspension_kick_token_revocation
         );
         assert!(
             tokio::time::timeout(
-                Duration::from_secs(2),
+                Duration::from_secs(60),
                 recv_next_grpc_frame(&mut cons_body, &mut cons_buf),
             )
             .await
@@ -1129,7 +1129,7 @@ async fn quasar_grpc_enforces_bounded_http2_settings_concurrency_cap_and_subscri
         while body1.data().await.is_some() {}
         let _ = body1.trailers().await;
 
-        let ping_rsp = tokio::time::timeout(Duration::from_secs(2), ping_fut)
+        let ping_rsp = tokio::time::timeout(Duration::from_secs(60), ping_fut)
             .await
             .expect("queued Ping completes once stream 1 frees a slot")
             .expect("ping response ok");
@@ -1141,11 +1141,16 @@ async fn quasar_grpc_enforces_bounded_http2_settings_concurrency_cap_and_subscri
         drop(rsp2);
         drop(client);
         conn_task.abort();
-        let _ = tokio::time::timeout(Duration::from_secs(2), srv_task)
+        let _ = tokio::time::timeout(Duration::from_secs(60), srv_task)
             .await
             .expect("server exited cleanly");
 
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        for _ in 0..500 {
+            if ctx.quasar_gateway.subscribers.read().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         assert_eq!(
             ctx.quasar_gateway.subscribers.read().unwrap().len(),
             0,

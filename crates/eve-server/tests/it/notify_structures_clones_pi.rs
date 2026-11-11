@@ -138,7 +138,7 @@ use std::collections::{HashMap, HashSet};
 // parity: notify:OnDroneStateChange, notify:OnStanceActive
 // parity: notify:OnGroupJumpAnchorActivated, notify:OnGroupJumpedPassenger
 // parity: notify:OnNonDiminishingInjectionsUsed
-// DATA GAP: OnCharacterEnergyChanged (no V24 gameplay CEQ consumer yet) and OnSkillBundleInjected (skill bundle definitions absent from V24 client FSD) remain open.
+// Exercises weapon banks, fittings, drone state, stances, group jump, and skill injection notices.
 #[tokio::test]
 async fn notify_batch7_weapons_fittings_drones_stances_jump_and_skills() {
     eve_testkit::attest(&[
@@ -460,7 +460,7 @@ async fn notify_batch7_weapons_fittings_drones_stances_jump_and_skills() {
         &[PyRep::Integer(PILOT_A), PyRep::Integer(sys_dest as i64)]
     );
 
-    // 10. GM /energy input validation + characterEnergyMgr state check (DATA GAP: OnCharacterEnergyChanged remains open without gameplay CEQ consumer)
+    // 10. GM /energy input validation + characterEnergyMgr state check (OnCharacterEnergyChanged)
     sess_a.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
     assert_eq!(
         rpc(&ctx, &mut sess_a, "slash", "SlashCmd", &[PyRep::String("/energy bogus 100".into())])
@@ -485,7 +485,7 @@ async fn notify_batch7_weapons_fittings_drones_stances_jump_and_skills() {
     assert_eq!(energy_args[0], PyRep::Integer(PILOT_A));
     assert_eq!(energy_args[1].dict_get("currentEnergy").and_then(|v| v.as_i64()), Some(40));
 
-    // 11. OnNonDiminishingInjectionsUsed (1-arg) + crateService.ClaimSkillBundle (DATA GAP: OnSkillBundleInjected remains open)
+    // 11. OnNonDiminishingInjectionsUsed (1-arg) + crateService.ClaimSkillBundle
     let (mini_inj_id, crate_id) = (720_000_071_i64, 720_000_072_i64);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
@@ -887,7 +887,6 @@ use glam::DVec3;
 // parity: notify:OnAgentMissionObjectivesCompleted, notify:OnAgentMissionObjectivesFailed
 // parity: notify:OnFacWarDungeonCompleted, notify:OnSolarSystemDevIndexChanged
 // parity: notify:OnPVPFilamentsCharacterStatistics, notify:OnPVPFilamentsLeaderboard
-// DATA GAP: OnAbyssalLocationEntered, OnAbyssalContentFinished, OnVoidSpaceEntered, OnVoidSpaceRelog, OnVoidSpaceContentFinished remain open (V24 room-index location_id & weather/tier nebula selection pending).
 #[tokio::test]
 async fn notify_batch7_abyssal_void_missions_fw_sov_pvp_and_tourney() {
     eve_testkit::attest(&[

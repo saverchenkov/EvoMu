@@ -24,6 +24,26 @@ use eve_server::services::pve_special_sites::{
     classify_abyssal_filament, read_abyssal_state,
 };
 
+pub(crate) fn fast_ctx() -> ServerContext {
+    static WORLD: std::sync::OnceLock<(
+        std::sync::Arc<eve_sde::SdeRegistry>,
+        eve_db::WorldStateSnapshot,
+    )> = std::sync::OnceLock::new();
+    let (sde, base_snap) = WORLD.get_or_init(|| {
+        let sde = std::sync::Arc::new(
+            eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path())
+                .expect("open evomu_sde.sqlite"),
+        );
+        let db = eve_db::WorldRepository::with_demo_seed();
+        let snap = db.with_snapshot(|s| s.clone());
+        (sde, snap)
+    });
+    let db = std::sync::Arc::new(eve_db::WorldRepository::new_empty());
+    db.with_mut_snapshot(|s| *s = base_snap.clone());
+    ServerContext::with_sde_and_repository(sde.clone(), db)
+        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED)
+}
+
 const SYS_JITA: u32 = 30_000_142;
 const PILOT_HACKER: i64 = 90_000_001;
 const PILOT_ABYSS: i64 = 90_000_001;
@@ -104,7 +124,7 @@ async fn setup_pilot_session(
 #[tokio::test]
 // parity: feat:pve.hacking-minigame
 async fn test_pve_hacking_minigame_complete() {
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     let kw = HashMap::new();
     let ship_id = 91_000_501;
 
@@ -258,7 +278,7 @@ async fn test_pve_hacking_minigame_complete() {
 #[tokio::test]
 // parity: feat:pve.abyssal-gates, feat:pve.abyssal-tiers
 async fn test_pve_abyssal_gates_and_tiers_complete() {
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     let kw = HashMap::new();
     let ship_id = 91_000_502;
     let t1_fil_item_id = 1_400_000_101;
@@ -479,7 +499,7 @@ async fn test_pve_abyssal_gates_and_tiers_complete() {
 #[tokio::test]
 // parity: feat:pve.insurgency, feat:pve.pirate-strongholds
 async fn test_pve_insurgency_campaigns_and_strongholds_complete() {
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     let kw = HashMap::new();
     let ship_id = 91_000_503;
     let fob_sys = 30_002_048; // Bei
@@ -884,7 +904,7 @@ async fn test_pve_data_relic_loot_tables_container_inventory_and_combat_signatur
     // parity: feat:pve.combat-signatures, feat:pve.data-sites, feat:pve.relic-sites, feat:pve.loot-spew
     eve_testkit::attest(&["feat:pve.combat-signatures", "feat:pve.data-sites", "feat:pve.relic-sites", "feat:pve.loot-spew"]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     let kw = HashMap::new();
     let sys = 30_000_142_u32;
     let ship_id = 710_001_101_i64;
@@ -985,7 +1005,7 @@ async fn test_pve_ded_complexes_gating_overseer_wrecks_and_wormhole_sleepers() {
     // parity: feat:pve.ded-complexes, feat:pve.wormhole-sites
     eve_testkit::attest(&["feat:pve.ded-complexes", "feat:pve.wormhole-sites"]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     let sys = 30_000_142_u32;
     let ship_id = 710_001_102_i64;
     let mut sess = create_in_space_session(&ctx, 8202, sys, ship_id).await;
@@ -1226,7 +1246,7 @@ async fn setup_space_pilot(
 #[tokio::test]
 async fn test_crab_deployment_capital_link_drone_waves_loot_and_self_destruct() {
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let safe_pos = DVec3::new(350_000_000.0, 120_000_000.0, -240_000_000.0);
@@ -1497,7 +1517,7 @@ async fn test_crab_deployment_capital_link_drone_waves_loot_and_self_destruct() 
 #[tokio::test]
 async fn test_crab_ceq_pool_regeneration_and_system_signal_interference() {
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let base_pos = DVec3::new(400_000_000.0, 50_000_000.0, 100_000_000.0);
@@ -1661,7 +1681,7 @@ async fn test_crab_ceq_pool_regeneration_and_system_signal_interference() {
 #[tokio::test]
 async fn test_metaliminal_storm_core_periphery_movement_and_overlap() {
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     crate::common::pin_clock(&ctx);
     ensure_special_sites_spawned(&ctx).await;
 
@@ -1893,7 +1913,7 @@ async fn test_incursion_spawn_lifecycle_roles_and_map_rpcs() {
         "feat:pve.incursion-site-classes",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     crate::common::pin_clock(&ctx);
     ensure_special_sites_spawned(&ctx).await;
     let kw = HashMap::new();
@@ -2126,7 +2146,7 @@ async fn test_incursion_influence_regen_mothership_unlock_and_system_effects() {
         "feat:pve.incursion-system-effects",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     crate::common::pin_clock(&ctx);
     ensure_special_sites_spawned(&ctx).await;
 
@@ -2263,7 +2283,7 @@ async fn test_incursion_payout_on_grid_only_and_world_event_tales() {
     // parity: feat:pve.tales
     eve_testkit::attest(&["feat:pve.tales"]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     crate::common::pin_clock(&ctx);
     ensure_special_sites_spawned(&ctx).await;
     let kw = HashMap::new();
@@ -2594,7 +2614,7 @@ async fn test_incursion_sde_stargate_topology_roles_and_world_event_dict_shapes(
         "feat:pve.tales",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     crate::common::pin_clock(&ctx);
     ensure_special_sites_spawned(&ctx).await;
 
@@ -2691,7 +2711,7 @@ async fn test_incursion_sde_stargate_topology_roles_and_world_event_dict_shapes(
 #[tokio::test]
 async fn test_incursion_fleet_payout_optimal_overcap_and_hard_cap_cutoff() {
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     crate::common::pin_clock(&ctx);
     ensure_special_sites_spawned(&ctx).await;
     let kw = HashMap::new();
@@ -2852,7 +2872,7 @@ async fn test_incursion_fleet_payout_optimal_overcap_and_hard_cap_cutoff() {
 
 #[tokio::test]
 async fn test_incursion_boss_killed_before_final_wave_escorts_completes_on_last_escort() {
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     crate::common::pin_clock(&ctx);
     ensure_special_sites_spawned(&ctx).await;
 
@@ -2930,7 +2950,7 @@ async fn test_incursion_boss_killed_before_final_wave_escorts_completes_on_last_
 
 #[tokio::test]
 async fn test_incursion_hq_sites_5171_and_5175_have_disjoint_npc_ball_ids() {
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     crate::common::pin_clock(&ctx);
     ensure_special_sites_spawned(&ctx).await;
 
@@ -3123,7 +3143,7 @@ async fn setup_pilot(
 #[tokio::test]
 async fn test_crab_negative_exploits_subcap_11019_double_link_resonance_and_drone_jam() {
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let pos = DVec3::new(320_000_000.0, 20_000_000.0, 120_000_000.0);
@@ -3309,8 +3329,8 @@ async fn test_crab_negative_exploits_subcap_11019_double_link_resonance_and_dron
 #[tokio::test]
 async fn test_overlapping_storms_stack_effects_without_cross_context_leakage() {
 
-    let ctx1 = ServerContext::new();
-    let ctx2 = ServerContext::new();
+    let ctx1 = fast_ctx();
+    let ctx2 = fast_ctx();
     crate::common::pin_clock(&ctx1);
     crate::common::pin_clock(&ctx2);
 
@@ -3368,8 +3388,8 @@ async fn test_electrical_storm_grants_hacking_virus_coherence_per_context() {
     // parity: feat:pve.metaliminal-storms, 
     eve_testkit::attest(&["feat:pve.metaliminal-storms", ]);
 
-    let ctx1 = ServerContext::new();
-    let ctx2 = ServerContext::new();
+    let ctx1 = fast_ctx();
+    let ctx2 = fast_ctx();
     crate::common::pin_clock(&ctx1);
     crate::common::pin_clock(&ctx2);
 
@@ -3607,7 +3627,7 @@ async fn step_until_warp_landed(ctx: &ServerContext, sess: &mut SessionState, sy
 // ============================================================================
 #[tokio::test]
 async fn test_deadspace_pocket_rules_and_mwd_restriction() {
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let ship_id = 750_003_001i64;
@@ -3872,7 +3892,7 @@ async fn test_deadspace_pocket_rules_and_mwd_restriction() {
 // ============================================================================
 #[tokio::test]
 async fn test_dungeon_system_rooms_triggers_and_despawn_on_completion() {
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let ship_id = 750_004_001i64;
@@ -4139,7 +4159,7 @@ async fn test_pve_incursion_constellation_system_effects_and_tales() {
     // parity: feat:pve.incursion-system
     eve_testkit::attest(&["feat:pve.incursion-system"]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     ensure_special_sites_spawned(&ctx).await;
     let kw = HashMap::new();
 
@@ -4241,7 +4261,7 @@ async fn test_pve_incursion_constellation_system_effects_and_tales() {
 #[tokio::test]
 async fn test_pve_incursion_multiwave_fleet_payout_and_influence() {
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     ensure_special_sites_spawned(&ctx).await;
     let kw = HashMap::new();
 
@@ -4357,7 +4377,7 @@ async fn test_pve_incursion_mothership_hq_unlock_and_conclusion() {
     // parity: feat:pve.incursion-mothership
     eve_testkit::attest(&["feat:pve.incursion-mothership"]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     ensure_special_sites_spawned(&ctx).await;
 
     let (target_cid, hq_sys_id) = with_pve_special_reg(&ctx, |reg| {
@@ -4455,7 +4475,7 @@ async fn test_pve_incursion_mothership_hq_unlock_and_conclusion() {
 #[tokio::test]
 async fn test_pve_drifter_hives_multiroom_progression_and_loot() {
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     ensure_special_sites_spawned(&ctx).await;
     let kw = HashMap::new();
 
@@ -4580,7 +4600,7 @@ async fn test_pve_triglavian_sites_and_minor_victory_systems() {
         "rpc:map.GetTriglavianMinorVictorySystems",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     ensure_special_sites_spawned(&ctx).await;
     let kw = HashMap::new();
     let char_id = 90_000_001;
@@ -4696,8 +4716,8 @@ async fn test_pve_triglavian_sites_and_minor_victory_systems() {
 
 #[tokio::test]
 async fn test_p1_track_d_regressions_issues_12_55_56_57() {
-    let ctx1 = ServerContext::new();
-    let ctx2 = ServerContext::new();
+    let ctx1 = fast_ctx();
+    let ctx2 = fast_ctx();
     let kw = HashMap::new();
 
     // 1. Issue #55: ServerContext-scoped tactical and session-change timer state isolation
@@ -4823,7 +4843,6 @@ pub(crate) mod pve_dungeons_events_remediation {
 // - `feat:pve.milestones`
 
 use eve_db::d6_types::{PersistedMercenaryActivity, PersistedMercenaryDen};
-use eve_db::WorldRepository;
 use eve_destiny::MovementMode;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -4843,18 +4862,12 @@ use eve_server::services::season_manager::load_season_state_from_blobs;
 use eve_server::services::sov_gameplay::on_space_entity_destroyed_ext;
 use glam::DVec3;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 const JITA: u32 = 30_000_142;
 const PILOT_A: i64 = 90_000_001;
 
 fn new_ctx() -> ServerContext {
-    let sde = Arc::new(
-        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path())
-            .expect("open evomu_sde.sqlite"),
-    );
-    let db = Arc::new(WorldRepository::with_demo_seed());
-    ServerContext::with_sde_and_repository(sde, db)
+    fast_ctx()
 }
 
 fn hex_str(bytes: &[u8]) -> String {

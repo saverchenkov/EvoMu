@@ -232,9 +232,6 @@ async fn test_quasar_payment_and_store_catalog_live() {
     common::pin_clock(&ctx);
 
     let mut sess = docked_pilot(&ctx, 72_001, PILOT_1).await;
-    ctx.db.with_mut_snapshot(|s| {
-        s.quasar_commerce.nes_store_catalog = None;
-    });
     let uid = sess.user_id.unwrap_or(1) as u64;
     let mut rx = subscribe_notices(&ctx, &mut sess).await;
     let _ = drain_notices(&mut rx);
@@ -243,7 +240,9 @@ async fn test_quasar_payment_and_store_catalog_live() {
     encode_string_field(1, "Omega", &mut cat_attr);
     let mut cat_req = Vec::new();
     encode_bytes_field(1, &cat_attr, &mut cat_req);
-    assert_eq!(quasar_call(&ctx, &mut sess, "eve.store.admin.api.CreateCategoryRequest", cat_req, true).await.status_code, STATUS_OK);
+    let cat_create = quasar_call(&ctx, &mut sess, "eve.store.admin.api.CreateCategoryRequest", cat_req, true).await;
+    assert_eq!(cat_create.status_code, STATUS_OK);
+    let cat_id = wire_varint(&wire_field(&cat_create.payload.unwrap().value, 1).unwrap(), 1).expect("cat_id");
 
     let mut prod_attr = Vec::new();
     encode_string_field(1, "Skill Extractor", &mut prod_attr);
@@ -254,8 +253,11 @@ async fn test_quasar_payment_and_store_catalog_live() {
     let mut prod_req = Vec::new();
     encode_varint_field(1, 1, &mut prod_req);
     encode_bytes_field(2, &prod_attr, &mut prod_req);
-    assert_eq!(quasar_call(&ctx, &mut sess, "eve.store.admin.api.CreateProductRequest", prod_req, true).await.status_code, STATUS_OK);
+    let prod_create = quasar_call(&ctx, &mut sess, "eve.store.admin.api.CreateProductRequest", prod_req, true).await;
+    assert_eq!(prod_create.status_code, STATUS_OK);
+    let prod_id = wire_varint(&wire_field(&prod_create.payload.unwrap().value, 1).unwrap(), 1).expect("prod_id");
 
+    let mut off_ids = Vec::new();
     for (name, targeted) in [("30 Days Omega", false), ("Targeted Omega", true)] {
         let mut off_attr = Vec::new();
         encode_string_field(1, name, &mut off_attr);
@@ -272,22 +274,24 @@ async fn test_quasar_payment_and_store_catalog_live() {
         encode_string_field(16, "featured", &mut off_attr);
         encode_bytes_field(17, &id_msg(1, 1)[2..], &mut off_attr);
         let mut prod_ref = Vec::new();
-        encode_bytes_field(1, &id_msg(1, 101)[2..], &mut prod_ref);
+        encode_bytes_field(1, &id_msg(1, prod_id)[2..], &mut prod_ref);
         encode_bytes_field(18, &prod_ref, &mut off_attr);
         let mut off_req = Vec::new();
         encode_bytes_field(1, &off_attr, &mut off_req);
-        assert_eq!(quasar_call(&ctx, &mut sess, "eve.store.admin.api.CreateOfferRequest", off_req, true).await.status_code, STATUS_OK);
+        let off_create = quasar_call(&ctx, &mut sess, "eve.store.admin.api.CreateOfferRequest", off_req, true).await;
+        assert_eq!(off_create.status_code, STATUS_OK);
+        off_ids.push(wire_str(&wire_field(&off_create.payload.unwrap().value, 1).unwrap(), 1).expect("off_id"));
     }
 
     assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.store.category.api.GetAllRequest", Vec::new(), false).await.status_code, STATUS_OK);
-    assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.store.category.api.GetRequest", id_msg(1, 1), false).await.status_code, STATUS_OK);
-    let prod_rsp = quasar_call(&ctx, &mut sess, "eve_public.store.product.api.GetRequest", id_msg(1, 101), false).await;
+    assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.store.category.api.GetRequest", id_msg(1, cat_id), false).await.status_code, STATUS_OK);
+    let prod_rsp = quasar_call(&ctx, &mut sess, "eve_public.store.product.api.GetRequest", id_msg(1, prod_id), false).await;
     assert_eq!(prod_rsp.status_code, STATUS_OK);
     assert_eq!(wire_str(&wire_field(&prod_rsp.payload.unwrap().value, 1).unwrap(), 1).as_deref(), Some("Skill Extractor"));
 
     assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.store.offer.api.GetAllRequest", Vec::new(), false).await.status_code, STATUS_OK);
     let mut off_inner = Vec::new();
-    encode_string_field(1, "1001", &mut off_inner);
+    encode_string_field(1, &off_ids[0], &mut off_inner);
     let mut off_get = Vec::new();
     encode_bytes_field(1, &off_inner, &mut off_get);
     assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.store.offer.api.GetRequest", off_get, false).await.status_code, STATUS_OK);
@@ -300,13 +304,14 @@ async fn test_quasar_payment_and_store_catalog_live() {
 
     let (mut u_ident, mut c_ident, mut ta_ident, mut ta_get) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     encode_varint_field(1, uid, &mut u_ident);
-    encode_string_field(1, "1002", &mut c_ident);
+    encode_string_field(1, &off_ids[1], &mut c_ident);
     encode_bytes_field(1, &u_ident, &mut ta_ident);
     encode_bytes_field(2, &c_ident, &mut ta_ident);
     encode_bytes_field(1, &ta_ident, &mut ta_get);
     assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.store.targetaudience.offer.api.GetRequest", ta_get, false).await.status_code, STATUS_OK);
 
-    let cost_rsp = quasar_call(&ctx, &mut sess, "eve_public.payment.purchase.api.CostRequest", id_msg(1, 1001), false).await;
+    let off_num = off_ids[0].parse::<u64>().expect("off_num");
+    let cost_rsp = quasar_call(&ctx, &mut sess, "eve_public.payment.purchase.api.CostRequest", id_msg(1, off_num), false).await;
     assert_eq!(cost_rsp.status_code, STATUS_OK);
     assert_eq!(wire_varint(&wire_field(&cost_rsp.payload.unwrap().value, 1).unwrap(), 1), Some(1_999));
 
@@ -319,7 +324,7 @@ async fn test_quasar_payment_and_store_catalog_live() {
     let _ = drain_notices(&mut rx);
 
     let (mut order_off, mut order, mut tok_ident, mut tok_req) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    encode_string_field(1, "VEVC-1001", &mut order_off);
+    encode_string_field(1, &format!("VEVC-{}", off_ids[0]), &mut order_off);
     encode_bytes_field(1, &order_off, &mut order);
     encode_varint_field(2, 1, &mut order);
     encode_varint_field(1, 77, &mut tok_ident);
@@ -337,25 +342,15 @@ async fn test_quasar_payment_and_store_catalog_live() {
 
 #[tokio::test]
 async fn test_quasar_sov_hub_skyhook_mercden_and_space_cdn_live() {
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/fuel/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/notices_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/notices_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/admin/admin_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/notices_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/fuel/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/admin/admin_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/space/api/cdn/requests_pb2.pyj
     eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/fuel/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/admin/admin_pb2.pyj",
         "quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/requests_pb2.pyj",
@@ -418,10 +413,14 @@ async fn test_quasar_sov_hub_skyhook_mercden_and_space_cdn_live() {
     encode_varint_field(2, 500, &mut fuel_add);
     encode_bytes_field(3, &id_msg(1, hub_id as u64)[2..], &mut fuel_add);
     assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.hub.fuel.api.AddRequest", fuel_add, false).await.status_code, STATUS_OK);
-    assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.hub.fuel.api.GetRequest", id_msg(1, hub_id as u64), false).await.status_code, STATUS_OK);
+    let fuel_get = quasar_call(&ctx, &mut sess, "eve_public.sovereignty.hub.fuel.api.GetRequest", id_msg(1, hub_id as u64), false).await;
+    assert_eq!(fuel_get.status_code, STATUS_OK);
+    assert!(fuel_get.payload.unwrap().value.len() >= 2);
 
     // 2. Hub Upgrades & Notices
-    assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.hub.upgrade.api.GetDefinitionsRequest", Vec::new(), false).await.status_code, STATUS_OK);
+    let upg_defs = quasar_call(&ctx, &mut sess, "eve_public.sovereignty.hub.upgrade.api.GetDefinitionsRequest", Vec::new(), false).await;
+    assert_eq!(upg_defs.status_code, STATUS_OK);
+    assert!(upg_defs.payload.unwrap().value.len() >= 2);
     slash(&ctx, &mut sess, &format!("/createitem {TYPE_STABILITY_GEN} 1")).await;
     let upg_item = ctx.db.with_snapshot(|s| s.items.values().find(|i| i.location_id == ship_id && i.type_id == TYPE_STABILITY_GEN as u32).unwrap().item_id);
     let mut proc_req = id_msg(1, upg_item as u64);
@@ -431,35 +430,74 @@ async fn test_quasar_sov_hub_skyhook_mercden_and_space_cdn_live() {
     encode_bytes_field(2, &cfg, &mut proc_req);
     encode_bytes_field(3, &id_msg(1, hub_id as u64)[2..], &mut proc_req);
     assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationRequest", proc_req, false).await.status_code, STATUS_OK);
-    assert!(drain_notices(&mut rx).iter().any(|n| n.normalized_type_name() == "eve_public.sovereignty.hub.upgrade.api.HubUpgradesConfiguredNotice"));
-    assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.hub.upgrade.api.GetHubUpgradesRequest", id_msg(1, hub_id as u64), false).await.status_code, STATUS_OK);
+    assert!(drain_notices(&mut rx).iter().any(|n| n.normalized_type_name() == "eve_public.sovereignty.hub.upgrade.api.HubUpgradesConfiguredNotice" && n.value.len() >= 2));
+    let hub_upgs = quasar_call(&ctx, &mut sess, "eve_public.sovereignty.hub.upgrade.api.GetHubUpgradesRequest", id_msg(1, hub_id as u64), false).await;
+    assert_eq!(hub_upgs.status_code, STATUS_OK);
+    assert!(hub_upgs.payload.unwrap().value.len() >= 2);
     let mut upg_ident = Vec::new();
     encode_bytes_field(1, &id_msg(1, hub_id as u64)[2..], &mut upg_ident);
     encode_bytes_field(2, &id_msg(1, TYPE_STABILITY_GEN)[2..], &mut upg_ident);
     let mut get_upg = Vec::new();
     encode_bytes_field(1, &upg_ident, &mut get_upg);
-    assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.hub.upgrade.api.GetRequest", get_upg.clone(), false).await.status_code, STATUS_OK);
+    let get_upg_rsp = quasar_call(&ctx, &mut sess, "eve_public.sovereignty.hub.upgrade.api.GetRequest", get_upg.clone(), false).await;
+    assert_eq!(get_upg_rsp.status_code, STATUS_OK);
+    assert!(get_upg_rsp.payload.unwrap().value.len() >= 2);
     assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.hub.upgrade.api.UninstallRequest", get_upg, false).await.status_code, STATUS_OK);
-    assert!(drain_notices(&mut rx).iter().any(|n| n.normalized_type_name() == "eve_public.sovereignty.hub.upgrade.api.UninstalledNotice"));
+    assert!(drain_notices(&mut rx).iter().any(|n| n.normalized_type_name() == "eve_public.sovereignty.hub.upgrade.api.UninstalledNotice" && n.value.len() >= 2));
 
     // 3. Hub Workforce & Notices
     assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.hub.workforce.api.GetNetworkableHubsRequest", id_msg(1, hub_id as u64), false).await.status_code, STATUS_OK);
-    assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.hub.workforce.api.GetConfigurationRequest", id_msg(1, hub_id as u64), false).await.status_code, STATUS_OK);
+    let wf_cfg_rsp = quasar_call(&ctx, &mut sess, "eve_public.sovereignty.hub.workforce.api.GetConfigurationRequest", id_msg(1, hub_id as u64), false).await;
+    assert_eq!(wf_cfg_rsp.status_code, STATUS_OK);
+    assert!(wf_cfg_rsp.payload.unwrap().value.len() >= 2);
     let mut wf_cfg = Vec::new();
     encode_varint_field(1, 1, &mut wf_cfg);
     let mut wf_req = id_msg(1, hub_id as u64);
     encode_bytes_field(2, &wf_cfg, &mut wf_req);
     assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.hub.workforce.api.ConfigureRequest", wf_req, false).await.status_code, STATUS_OK);
-    assert!(drain_notices(&mut rx).iter().any(|n| n.normalized_type_name() == "eve_public.sovereignty.resource.transfer.workforce.api.ConfiguredNotice"));
-    assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.hub.workforce.api.GetStateRequest", id_msg(1, hub_id as u64), false).await.status_code, STATUS_OK);
+    assert!(drain_notices(&mut rx).iter().any(|n| n.normalized_type_name() == "eve_public.sovereignty.resource.transfer.workforce.api.ConfiguredNotice" && n.value.len() >= 2));
+    let wf_state = quasar_call(&ctx, &mut sess, "eve_public.sovereignty.hub.workforce.api.GetStateRequest", id_msg(1, hub_id as u64), false).await;
+    assert_eq!(wf_state.status_code, STATUS_OK);
+    assert!(wf_state.payload.unwrap().value.len() >= 2);
 
-    // 4. Mercenary Den & Planet Resources
-    assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.mercenaryden.api.GetAllOwnedRequest", Vec::new(), false).await.status_code, STATUS_OK);
-    assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.mercenaryden.api.GetMaximumForCharacterRequest", Vec::new(), false).await.status_code, STATUS_OK);
-    assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest", id_msg(1, mercden_id as u64), false).await.status_code, STATUS_OK);
-    assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.resource.planet.api.GetAllDefinitionsRequest", Vec::new(), false).await.status_code, STATUS_OK);
-    assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionRequest", Vec::new(), false).await.status_code, STATUS_OK);
-    assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.resource.planet.api.GetAllConfigurationsRequest", Vec::new(), false).await.status_code, STATUS_OK);
+    // 4. Hub Resources, Mercenary Den & Planet Resources
+    let hub_res = quasar_call(&ctx, &mut sess, "eve_public.sovereignty.hub.api.GetResourcesRequest", id_msg(1, hub_id as u64), false).await;
+    assert_eq!(hub_res.status_code, STATUS_OK);
+    assert!(hub_res.payload.unwrap().value.len() >= 2);
+    let md_owned = quasar_call(&ctx, &mut sess, "eve_public.sovereignty.mercenaryden.api.GetAllOwnedRequest", Vec::new(), false).await;
+    assert_eq!(md_owned.status_code, STATUS_OK);
+    assert!(md_owned.payload.unwrap().value.len() >= 2);
+    let md_max = quasar_call(&ctx, &mut sess, "eve_public.sovereignty.mercenaryden.api.GetMaximumForCharacterRequest", Vec::new(), false).await;
+    assert_eq!(md_max.status_code, STATUS_OK);
+    assert!(md_max.payload.unwrap().value.len() >= 2);
+    let md_owner = quasar_call(&ctx, &mut sess, "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest", id_msg(1, mercden_id as u64), false).await;
+    assert_eq!(md_owner.status_code, STATUS_OK);
+    assert!(md_owner.payload.unwrap().value.len() >= 2);
+    let mut md_dev = id_msg(1, mercden_id as u64);
+    encode_varint_field(2, 20, &mut md_dev);
+    assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.mercenaryden.api.admin.ModifyDevelopmentLevelRequest", md_dev, true).await.status_code, STATUS_OK);
+    ctx.advance_secs(3 * 86_400 + 1);
+    let md_acts = quasar_call(&ctx, &mut sess, "eve_public.sovereignty.mercenaryden.activity.api.GetForMercenaryDenRequest", id_msg(1, mercden_id as u64), false).await;
+    assert_eq!(md_acts.status_code, STATUS_OK);
+    let act_entry = wire_field(&md_acts.payload.unwrap().value, 1).expect("mercenary den activity entry");
+    let act_id_msg = wire_field(&act_entry, 1).expect("mercenary den activity id");
+    let mut start_act = Vec::new();
+    encode_bytes_field(1, &act_id_msg, &mut start_act);
+    assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.mercenaryden.activity.api.StartRequest", start_act, false).await.status_code, STATUS_OK);
+    let md_notices = drain_notices(&mut rx);
+    assert!(md_notices.iter().any(|n| n.normalized_type_name() == "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice" && n.value.len() >= 2));
+    assert!(md_notices.iter().any(|n| n.normalized_type_name() == "eve_public.sovereignty.mercenaryden.api.DefinitionsUpdatedNotice" && n.value.len() >= 2));
+    assert!(md_notices.iter().any(|n| n.normalized_type_name() == "eve_public.sovereignty.mercenaryden.activity.api.AddedNotice" && n.value.len() >= 2));
+    assert!(md_notices.iter().any(|n| n.normalized_type_name() == "eve_public.sovereignty.mercenaryden.activity.api.StartedNotice" && n.value.len() >= 2));
+    let pl_defs = quasar_call(&ctx, &mut sess, "eve_public.sovereignty.resource.planet.api.GetAllDefinitionsRequest", Vec::new(), false).await;
+    assert_eq!(pl_defs.status_code, STATUS_OK);
+    assert!(pl_defs.payload.unwrap().value.len() >= 2);
+    let pl_ver = quasar_call(&ctx, &mut sess, "eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionRequest", Vec::new(), false).await;
+    assert_eq!(pl_ver.status_code, STATUS_OK);
+    assert!(pl_ver.payload.unwrap().value.len() >= 2);
+    let pl_cfgs = quasar_call(&ctx, &mut sess, "eve_public.sovereignty.resource.planet.api.GetAllConfigurationsRequest", Vec::new(), false).await;
+    assert_eq!(pl_cfgs.status_code, STATUS_OK);
+    assert!(pl_cfgs.payload.unwrap().value.len() >= 2);
 
     // 5. Skyhook Admin, Requests & Notices
     let mut reag = Vec::new();
@@ -474,14 +512,18 @@ async fn test_quasar_sov_hub_skyhook_mercden_and_space_cdn_live() {
     encode_bytes_field(2, &id_msg(1, now + 3_600)[2..], &mut win_req);
     encode_bytes_field(3, &id_msg(1, now + 7_200)[2..], &mut win_req);
     assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.skyhook.api.admin.ScheduleTheftVulnerabilityWindowRequest", win_req, true).await.status_code, STATUS_OK);
-    assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.skyhook.api.GetRequest", id_msg(1, skyhook_id as u64), false).await.status_code, STATUS_OK);
-    assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.skyhook.api.GetAllByCorporationRequest", id_msg(1, corp_id as u64), false).await.status_code, STATUS_OK);
+    let sh_get = quasar_call(&ctx, &mut sess, "eve_public.sovereignty.skyhook.api.GetRequest", id_msg(1, skyhook_id as u64), false).await;
+    assert_eq!(sh_get.status_code, STATUS_OK);
+    assert!(sh_get.payload.unwrap().value.len() >= 2);
+    let sh_corp = quasar_call(&ctx, &mut sess, "eve_public.sovereignty.skyhook.api.GetAllByCorporationRequest", id_msg(1, corp_id as u64), false).await;
+    assert_eq!(sh_corp.status_code, STATUS_OK);
+    assert!(sh_corp.payload.unwrap().value.len() >= 2);
     assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.skyhook.api.DeactivateRequest", id_msg(1, skyhook_id as u64), false).await.status_code, STATUS_OK);
     assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.skyhook.api.ActivateRequest", id_msg(1, skyhook_id as u64), false).await.status_code, STATUS_OK);
     let sh_notices = drain_notices(&mut rx);
-    assert!(sh_notices.iter().any(|n| n.normalized_type_name() == "eve_public.sovereignty.skyhook.api.ReagentSimulationsNotice"));
-    assert!(sh_notices.iter().any(|n| n.normalized_type_name() == "eve_public.sovereignty.skyhook.api.TheftVulnerabilityWindowScheduledNotice"));
-    assert!(sh_notices.iter().any(|n| n.normalized_type_name() == "eve_public.sovereignty.skyhook.api.ActivationNotice"));
+    assert!(sh_notices.iter().any(|n| n.normalized_type_name() == "eve_public.sovereignty.skyhook.api.ReagentSimulationsNotice" && n.value.len() >= 2));
+    assert!(sh_notices.iter().any(|n| n.normalized_type_name() == "eve_public.sovereignty.skyhook.api.TheftVulnerabilityWindowScheduledNotice" && n.value.len() >= 2));
+    assert!(sh_notices.iter().any(|n| n.normalized_type_name() == "eve_public.sovereignty.skyhook.api.ActivationNotice" && n.value.len() >= 2));
 
     // 6. Space CDN
     let mut cdn_req = Vec::new();

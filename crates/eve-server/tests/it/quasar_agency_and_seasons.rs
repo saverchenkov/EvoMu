@@ -11,7 +11,6 @@
 
 use crate::quasar_sov_equinox_hub::rpc as quasar_rpc;
 use eve_db::d6_types::PersistedMercenaryDen;
-use eve_db::WorldRepository;
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
     encode_string_field, encode_varint_field, EvePublicEvent, GoogleAny, QuasarMessage,
@@ -31,19 +30,13 @@ use eve_server::services::season_manager::{
     fsd_challenge_definitions, load_season_state_from_blobs, save_season_state_to_blobs,
 };
 use std::collections::HashMap;
-use std::sync::Arc;
 
 const JITA: u32 = 30_000_142;
 const JITA_STATION: i64 = 60_003_760;
 const PILOT_A: i64 = 90_000_001;
 
 fn new_ctx() -> ServerContext {
-    let sde = Arc::new(
-        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path())
-            .expect("open evomu_sde.sqlite"),
-    );
-    let db = Arc::new(WorldRepository::with_demo_seed());
-    ServerContext::with_sde_and_repository(sde, db)
+    crate::seasons_and_campaigns::fast_real_sde_ctx()
 }
 
 async fn setup_pilot(ctx: &ServerContext, char_id: i64, sys_id: u32) -> (SessionState, i64) {

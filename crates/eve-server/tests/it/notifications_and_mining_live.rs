@@ -52,7 +52,7 @@ async fn login_select(ctx: &ServerContext, sess_id: u64, user: &str, pass: &str,
     if gm_role {
         sess.role = service_roles::ROLE_GM_DEFAULT;
     }
-    ctx.advance_secs(11);
+    ctx.clock().advance_secs(11);
     sess
 }
 
@@ -96,27 +96,27 @@ fn local_chat_payload(msg: &str) -> Vec<u8> {
 async fn warp_to_item(ctx: &ServerContext, sess: &mut SessionState, sys_id: u32, target_id: i64) {
     let h = ctx.systems.get_or_spawn(sys_id);
     let ship_id = sess.ship_id.unwrap();
-    for _ in 0..12 {
+    for _ in 0..6 {
         if let Ok(Some(cs)) = h.get_combat_state(ship_id).await {
             if cs.capacitor >= cs.max_capacitor * 0.99 {
                 break;
             }
         }
-        ctx.advance_secs(15);
-        h.step_manual(15.0).await.expect("recharge capacitor");
+        ctx.clock().advance_secs(30);
+        h.step_manual(30.0).await.expect("recharge capacitor");
     }
     rpc(ctx, sess, "beyonce", "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(target_id), PyRep::Real(0.0)])
         .await
         .expect("CmdWarpToStuff");
     let mut seen_warp = false;
-    for i in 0..300 {
-        ctx.advance_secs(5);
-        h.step_manual(5.0).await.expect("step warp");
+    for i in 0..150 {
+        ctx.clock().advance_secs(10);
+        h.step_manual(10.0).await.expect("step warp");
         if let Some((_, b)) = h.get_ball_snapshot(ship_id).await.unwrap() {
             let warping = matches!(b.mode, eve_destiny::MovementMode::Warp { .. });
             if warping {
                 seen_warp = true;
-            } else if seen_warp || i > 48 {
+            } else if seen_warp || i > 24 {
                 break;
             }
         }
@@ -135,7 +135,7 @@ async fn test_live_chat_bans_cluster_shutdown_and_bound_container_passwords() {
         "notify:OnInvalidateCacheForLocations",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     common::pin_clock(&ctx);
     let mut gm = login_select(&ctx, 97_101, "demo", "demo-secret", PILOT_1, true).await;
     let mut p2 = login_select(&ctx, 97_102, "other", "other-secret", PILOT_2, false).await;
@@ -225,7 +225,7 @@ async fn test_live_target_multievent_and_in_space_kill_notification() {
     // parity: notify:OnMultiEvent, notify:OnKillNotification
     eve_testkit::attest(&["notify:OnMultiEvent", "notify:OnKillNotification"]);
 
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     common::pin_clock(&ctx);
     let mut s1 = login_select(&ctx, 97_201, "demo", "demo-secret", PILOT_1, true).await;
     let mut s2 = login_select(&ctx, 97_202, "other", "other-secret", PILOT_2, false).await;
@@ -237,7 +237,7 @@ async fn test_live_target_multievent_and_in_space_kill_notification() {
     let (gun1, gun2) = (give_item(&ctx, &mut s1, 484, 1).await, give_item(&ctx, &mut s1, 484, 1).await);
     let (ammo1, ammo2) = (give_item(&ctx, &mut s1, 184, 200).await, give_item(&ctx, &mut s1, 184, 200).await);
     rpc(&ctx, &mut s1, "ship", "Board", &[PyRep::Integer(rifter_id)]).await.unwrap();
-    ctx.advance_secs(11);
+    ctx.clock().advance_secs(11);
     for (iid, flag) in [(gun1, InventoryFlag::HiSlot0), (gun2, InventoryFlag::HiSlot1), (ammo1, InventoryFlag::HiSlot0), (ammo2, InventoryFlag::HiSlot1)] {
         add_inv(&ctx, &mut s1, iid, rifter_id, flag).await;
     }
@@ -245,7 +245,7 @@ async fn test_live_target_multievent_and_in_space_kill_notification() {
     let ship_b = s2.ship_id.expect("PILOT_2 starter ship");
     rpc(&ctx, &mut s1, "stationSvc", "Undock", &[]).await.unwrap();
     rpc(&ctx, &mut s2, "stationSvc", "Undock", &[]).await.unwrap();
-    ctx.advance_secs(11);
+    ctx.clock().advance_secs(11);
     let _ = (drain_events(&ctx, &mut s1, PILOT_1), drain_events(&ctx, &mut s2, PILOT_2));
 
     // Extracts the `('OnTarget', sub, id, '')` entries carried by standalone `OnMultiEvent` payloads.
@@ -311,7 +311,7 @@ async fn test_live_target_multievent_and_in_space_kill_notification() {
 #[tokio::test]
 async fn test_live_excavator_drones_mining_goals_and_market_supply_chain() {
 
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     common::pin_clock(&ctx);
     let mut s1 = login_select(&ctx, 97_301, "demo", "demo-secret", PILOT_1, true).await;
     let mut s2 = login_select(&ctx, 97_302, "other", "other-secret", PILOT_2, false).await;
@@ -355,7 +355,7 @@ async fn test_live_excavator_drones_mining_goals_and_market_supply_chain() {
     let miner_mod = give_item(&ctx, &mut s1, 483, 1).await;
     let exc_non_rorq = give_item(&ctx, &mut s1, 41_030, 1).await;
     rpc(&ctx, &mut s1, "ship", "Board", &[PyRep::Integer(venture_id)]).await.unwrap();
-    ctx.advance_secs(11);
+    ctx.clock().advance_secs(11);
     add_inv(&ctx, &mut s1, miner_mod, venture_id, InventoryFlag::HiSlot0).await;
     let bay_args = [PyRep::Integer(exc_non_rorq), PyRep::Integer(venture_id), PyRep::Integer(InventoryFlag::DroneBay as i64)];
     assert_eq!(rpc(&ctx, &mut s1, "invbroker", "Add", &bay_args).await.unwrap_err().code, "NotEnoughDroneBaySpace");
@@ -364,7 +364,7 @@ async fn test_live_excavator_drones_mining_goals_and_market_supply_chain() {
     let core_id = give_item(&ctx, &mut s1, 28_583, 1).await;
     let (exc_ore, exc_ice) = (give_item(&ctx, &mut s1, 41_030, 1).await, give_item(&ctx, &mut s1, 43_681, 1).await);
     rpc(&ctx, &mut s1, "ship", "Board", &[PyRep::Integer(rorq_id)]).await.unwrap();
-    ctx.advance_secs(11);
+    ctx.clock().advance_secs(11);
     add_inv(&ctx, &mut s1, core_id, rorq_id, InventoryFlag::HiSlot0).await;
     add_inv(&ctx, &mut s1, exc_ore, rorq_id, InventoryFlag::DroneBay).await;
     add_inv(&ctx, &mut s1, exc_ice, rorq_id, InventoryFlag::DroneBay).await;
@@ -372,7 +372,7 @@ async fn test_live_excavator_drones_mining_goals_and_market_supply_chain() {
     let athanor_item = give_item(&ctx, &mut s1, 35_835, 1).await;
     add_inv(&ctx, &mut s1, athanor_item, rorq_id, InventoryFlag::Cargo).await;
     rpc(&ctx, &mut s1, "stationSvc", "Undock", &[]).await.unwrap();
-    ctx.advance_secs(11);
+    ctx.clock().advance_secs(11);
     slash(&ctx, &mut s1, &format!("/tr {JOSAMETO_SYS}")).await;
     let anchor_res = rpc(&ctx, &mut s1, "structureDeployment", "Anchor", &[PyRep::Integer(athanor_item), PyRep::String("Josameto Refinery".into())]).await.unwrap();
     let athanor_id = anchor_res.dict_get("structureID").and_then(|v| v.as_i64()).unwrap();
@@ -426,18 +426,18 @@ async fn test_live_excavator_drones_mining_goals_and_market_supply_chain() {
     slash(&ctx, &mut s1, &format!("/tr {JITA_SYS}")).await;
     warp_to_item(&ctx, &mut s1, JITA_SYS, JITA_STATION).await;
     rpc(&ctx, &mut s1, "beyonce", "CmdDock", &[PyRep::Integer(JITA_STATION)]).await.unwrap();
-    ctx.advance_secs(11);
+    ctx.clock().advance_secs(11);
     rpc(&ctx, &mut s1, "ship", "Board", &[PyRep::Integer(venture_id)]).await.unwrap();
-    ctx.advance_secs(11);
+    ctx.clock().advance_secs(11);
     rpc(&ctx, &mut s1, "stationSvc", "Undock", &[]).await.unwrap();
-    ctx.advance_secs(11);
+    ctx.clock().advance_secs(11);
     slash(&ctx, &mut s1, &format!("/tr {JOSAMETO_SYS}")).await;
     let jos_h = ctx.systems.get_or_spawn(JOSAMETO_SYS);
     let _ = jos_h.set_ball_position(venture_id, eve_destiny::DVec3::new(200_000.0, 0.0, 0.0)).await;
     warp_to_item(&ctx, &mut s1, JOSAMETO_SYS, veld_ast_id).await;
     rpc(&ctx, &mut s1, "dogmaIM", "AddTarget", &[PyRep::Integer(veld_ast_id)]).await.unwrap();
     for _ in 0..6 {
-        ctx.advance_secs(5);
+        ctx.clock().advance_secs(5);
         jos_h.step_manual(5.0).await.unwrap();
         if jos_h.get_target_locks(venture_id).await.unwrap().iter().any(|l| l.target_id == veld_ast_id && l.locked) {
             break;
@@ -453,24 +453,24 @@ async fn test_live_excavator_drones_mining_goals_and_market_supply_chain() {
 
     warp_to_item(&ctx, &mut s1, JOSAMETO_SYS, JOSAMETO_STATION).await;
     rpc(&ctx, &mut s1, "beyonce", "CmdDock", &[PyRep::Integer(JOSAMETO_STATION)]).await.unwrap();
-    ctx.advance_secs(11);
+    ctx.clock().advance_secs(11);
     let veld_stack_id = ctx.db.with_snapshot(|s| s.items.values().find(|i| i.location_id == venture_id && i.type_id == 1230 && i.quantity >= 100).unwrap().item_id);
     add_inv(&ctx, &mut s1, veld_stack_id, JOSAMETO_STATION, InventoryFlag::Hangar).await;
     rpc(&ctx, &mut s1, "reprocessingSvc", "Reprocess", &[PyRep::Integer(veld_stack_id)]).await.unwrap();
     let trit_id = ctx.db.with_snapshot(|s| s.items.values().find(|i| i.owner_id == PILOT_1 && i.location_id == JOSAMETO_STATION && i.type_id == 34 && i.quantity >= 100).unwrap().item_id);
     add_inv(&ctx, &mut s1, trit_id, venture_id, InventoryFlag::Cargo).await;
     rpc(&ctx, &mut s1, "stationSvc", "Undock", &[]).await.unwrap();
-    ctx.advance_secs(11);
+    ctx.clock().advance_secs(11);
 
     warp_to_item(&ctx, &mut s1, JOSAMETO_SYS, GATE_JOSAMETO_TO_NC).await;
     rpc(&ctx, &mut s1, "beyonce", "CmdStargateJump", &[PyRep::Integer(GATE_JOSAMETO_TO_NC), PyRep::Integer(GATE_NC_FROM_JOSAMETO), PyRep::Integer(venture_id)]).await.unwrap();
-    ctx.advance_secs(11);
+    ctx.clock().advance_secs(11);
     warp_to_item(&ctx, &mut s1, NEW_CALDARI_SYS, GATE_NC_TO_JITA).await;
     rpc(&ctx, &mut s1, "beyonce", "CmdStargateJump", &[PyRep::Integer(GATE_NC_TO_JITA), PyRep::Integer(GATE_JITA_FROM_NC), PyRep::Integer(venture_id)]).await.unwrap();
-    ctx.advance_secs(11);
+    ctx.clock().advance_secs(11);
     warp_to_item(&ctx, &mut s1, JITA_SYS, JITA_STATION).await;
     rpc(&ctx, &mut s1, "beyonce", "CmdDock", &[PyRep::Integer(JITA_STATION)]).await.unwrap();
-    ctx.advance_secs(11);
+    ctx.clock().advance_secs(11);
 
     add_inv(&ctx, &mut s1, trit_id, JITA_STATION, InventoryFlag::Hangar).await;
     let sell_item = PyRep::keyval([

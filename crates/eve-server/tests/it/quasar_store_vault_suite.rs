@@ -171,11 +171,15 @@ async fn test_unified_plex_vault_and_transactions() {
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.plex.vault.assetholding.operation.api.WithdrawRequest", with_payload).await.status_code, STATUS_OK);
     assert_eq!(ctx.db.with_snapshot(|snap| snap.plex_vault_balance(cid as i64)), 800);
 
-    // 4. NES Purchase via eve_public.plex.vault.api.PurchaseRequest: seed catalog, buy offer 2001 (450 PLEX -> 350 PLEX)
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.quasar_commerce.nes_store_catalog = None;
+    // 4. NES Purchase via eve_public.plex.vault.api.PurchaseRequest: buy offer 2001
+    let offer_2001_plex = ctx.db.with_snapshot(|snap| {
+        eve_server::services::quasar_payment_store::read_store_catalog(snap)
+            .offers
+            .iter()
+            .find(|o| o.id == 2001)
+            .expect("offer 2001")
+            .price_plex
     });
-    common::seed_test_nes_store_catalog(&ctx);
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.api.PurchaseRequest", make_str_id_request("9999")).await.status_code, STATUS_NOT_FOUND);
     let mut over_purch = make_str_id_request("1001");
     encode_varint_field(2, 10, &mut over_purch); // 10 * 500 = 5000 PLEX > 800
@@ -187,7 +191,7 @@ async fn test_unified_plex_vault_and_transactions() {
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.api.PurchaseRequest", bad_gift).await.status_code, STATUS_NOT_FOUND);
     assert_eq!(ctx.db.with_snapshot(|snap| snap.plex_vault_balance(cid as i64)), 800, "Missing gift recipient must not debit PLEX");
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.api.PurchaseRequest", make_str_id_request("2001")).await.status_code, STATUS_OK);
-    assert_eq!(ctx.db.with_snapshot(|snap| snap.plex_vault_balance(cid as i64)), 350, "PurchaseRequest deducts 450 PLEX");
+    assert_eq!(ctx.db.with_snapshot(|snap| snap.plex_vault_balance(cid as i64)), 800 - offer_2001_plex, "PurchaseRequest deducts offer 2001 PLEX");
 
     // 5. GetAllLoggedForUserRequest & GetLogRequest & operation.api.GetRequest & RecordInvoiceRequest
     let tx_all_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.transaction.api.GetAllLoggedForUserRequest", vec![]).await;
@@ -253,7 +257,9 @@ async fn test_quasar_store_catalog_products_and_offers() {
     assert!(empty_cats.payload.as_ref().unwrap().value.is_empty());
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.store.offer.api.GetRequest", make_str_id_request("1001")).await.status_code, STATUS_NOT_FOUND);
     common::pin_clock(&ctx);
-    common::seed_test_nes_store_catalog(&ctx);
+    ctx.db.with_mut_snapshot(|snap| {
+        eve_server::services::quasar_payment_store::ensure_store_catalog_seeded(snap, &ctx.sde);
+    });
 
     // 1. GetAllRequest (categories) & 2. GetRequest (category 1)
     let cat_all = quasar_rpc(&ctx, &mut sess, "eve_public.store.category.api.GetAllRequest", vec![]).await;
@@ -324,12 +330,11 @@ async fn test_quasar_store_catalog_products_and_offers() {
 
 #[tokio::test]
 async fn test_payment_schedules_tokens_and_user_license() {
-    // DATA GAP: Payment purchase offer catalog (`eve_public/payment/purchase/api_pb2.pyj`) is external store data not in V24 client FSD.
+    // Exercises payment purchase schedules, tokens, and user license activation notices.
     // parity: quasar:eveProto/generated/eve_public/user/license/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/user/license/api/notices_pb2.pyj
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
-    common::seed_test_nes_store_catalog(&ctx);
     let (uid, cid) = (1u64, 90_000_001);
     let mut sess = build_sess(3503, uid, cid);
     let mut notice_rx = ctx.quasar_gateway.subscribe_session(&sess, vec![], ctx.now_unix());

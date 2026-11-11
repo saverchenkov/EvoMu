@@ -320,11 +320,22 @@ async fn test_corporation_lifecycle_recruitment_and_aggression_notifications() {
     )
     .await
     .expect("RegisterNewAggressionSettings");
-    let expected_aggr = vec![PyRep::keyval([
-        ("corporationID", PyRep::Integer(corp_id)),
-        ("isFriendlyFireLegal", PyRep::Bool(true)),
-        ("changeAtTime", PyRep::Integer(now_ts + 86_400)),
-    ])];
+    let eff_ft = eve_server::sp6_lifecycle::unix_to_filetime((now_ts + 86_400) as u64);
+    let expected_aggr = vec![PyRep::Object {
+        type_name: "crimewatch.corp_aggression.settings.AggressionSettings".into(),
+        args: Box::new(PyRep::Dict(vec![
+            (PyRep::String("_enableAfter".into()), PyRep::Integer(eff_ft)),
+            (PyRep::String("_disableAfter".into()), PyRep::Integer(0)),
+            (PyRep::String("corporationID".into()), PyRep::Integer(corp_id)),
+            (PyRep::String("isFriendlyFireLegal".into()), PyRep::Bool(true)),
+            (PyRep::String("friendlyFireLegal".into()), PyRep::Bool(true)),
+            (
+                PyRep::String("pendingFriendlyFireLegal".into()),
+                PyRep::Bool(true),
+            ),
+            (PyRep::String("changeAtTime".into()), PyRep::Integer(eff_ft)),
+        ])),
+    }];
     assert_eq!(events(&ctx, P1, "OnCorpAggressionSettingsChange"), vec![expected_aggr.clone()]);
     assert_eq!(events(&ctx, P2, "OnCorpAggressionSettingsChange"), vec![expected_aggr]);
     assert!(events(&ctx, p3, "OnCorpAggressionSettingsChange").is_empty());
@@ -461,7 +472,7 @@ async fn test_corporation_governance_shares_titles_votes_and_medals_notification
         PyRep::Integer(corp_id),
         PyRep::Integer(2),
         PyRep::Dict(vec![
-            (PyRep::String(("titleName").into()), PyRep::Tuple(vec![PyRep::None, PyRep::String("Fleet Commander".into())])),
+            (PyRep::String(("titleName").into()), PyRep::Tuple(vec![PyRep::String("".into()), PyRep::String("Fleet Commander".into())])),
             (PyRep::String(("roles").into()), PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Integer(256)])),
         ]),
     ];

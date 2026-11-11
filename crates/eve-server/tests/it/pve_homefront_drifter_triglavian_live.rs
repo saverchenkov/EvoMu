@@ -472,18 +472,18 @@ async fn test_npc_npc_standings_table_live() {
         None
     };
 
-    // Amarr (500001) -> Caldari (500003) is +5.0
-    let amarr_to_caldari = find_standing(500_001, 500_003).expect("Amarr -> Caldari standing");
+    // Caldari (500001) -> Amarr (500003) is +7.0 (Crucible 294-tuple faction standings)
+    let amarr_to_caldari = find_standing(500_001, 500_003).expect("Caldari -> Amarr standing");
     assert!(
-        (amarr_to_caldari - 5.0).abs() < 1e-6,
-        "Amarr -> Caldari should be +5.0, got {amarr_to_caldari}"
+        (amarr_to_caldari - 7.0).abs() < 1e-6,
+        "Caldari -> Amarr should be +7.0, got {amarr_to_caldari}"
     );
 
-    // Caldari (500003) -> Gallente (500004) is -3.0
-    let caldari_to_gallente = find_standing(500_003, 500_004).expect("Caldari -> Gallente standing");
+    // Amarr (500003) -> Gallente (500004) is -2.0
+    let caldari_to_gallente = find_standing(500_003, 500_004).expect("Amarr -> Gallente standing");
     assert!(
-        (caldari_to_gallente - (-3.0)).abs() < 1e-6,
-        "Caldari -> Gallente should be -3.0, got {caldari_to_gallente}"
+        (caldari_to_gallente - (-2.0)).abs() < 1e-6,
+        "Amarr -> Gallente should be -2.0, got {caldari_to_gallente}"
     );
 
     // Caldari (500003) -> Minmatar (500002) is -5.0

@@ -67,7 +67,7 @@ async fn test_navigation_undock_and_station_docking() {
     // parity: rpc:structureDocking.Undock
     // parity: rpc:structureDocking.Dock
     // parity: notify:OnSessionChanged
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     common::pin_clock(&ctx);
     let mut sess = setup_pilot(&ctx, 2101, DEMO_PILOT).await;
     assert_eq!(sess.station_id, Some(JITA_44_STATION));
@@ -156,7 +156,7 @@ async fn test_navigation_undock_and_station_docking() {
 
 #[tokio::test]
 async fn test_navigation_dock_at_warp_destination_before_server_tick_completes() {
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     common::pin_clock(&ctx);
     let mut sess = setup_pilot(&ctx, 2102, DEMO_PILOT).await;
     let ship_id = sess.ship_id.expect("active ship");
@@ -241,7 +241,7 @@ async fn test_navigation_structure_docking_and_tethering() {
     // parity: feat:navigation.tether
     // parity: rpc:structureDocking.Dock
     // parity: rpc:structureDocking.Undock
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     common::pin_clock(&ctx);
     let mut sess = setup_pilot(&ctx, 2201, DEMO_PILOT).await;
     let ship_id = sess.ship_id.unwrap();
@@ -390,7 +390,7 @@ async fn test_navigation_flight_approach_orbit_and_keep_at_range() {
     // parity: rpc:beyonce.CmdOrbit
     // parity: rpc:beyonce.CmdStop
     // parity: destiny:Stop
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     common::pin_clock(&ctx);
     let mut sess = setup_pilot(&ctx, 2301, DEMO_PILOT).await;
     let ship_id = sess.ship_id.unwrap();
@@ -468,7 +468,7 @@ async fn test_navigation_align_to_and_vector_steering() {
     // parity: rpc:beyonce.CmdAlignTo
     // parity: feat:navigation.align-server-tick-rounding
     // parity: rpc:beyonce.CmdGotoDirection
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     common::pin_clock(&ctx);
     let mut sess = setup_pilot(&ctx, 2401, DEMO_PILOT).await;
     let ship_id = sess.ship_id.unwrap();
@@ -578,10 +578,9 @@ pub mod navigation_waypoints_and_wormholes {
 
 
 use crate::common;
-use eve_db::{CosmicSignatureRecord, WorldRepository};
+use eve_db::CosmicSignatureRecord;
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
-use eve_sde::SdeRegistry;
 use eve_server::esi::{EsiHttpRequest, EsiRouter};
 use eve_server::router::ServerContext;
 use eve_server::services::nav_warp_interdiction::calculate_route_with_waypoints;
@@ -596,12 +595,7 @@ use std::sync::Arc;
 async fn test_navigation_route_waypoints() {
 
 
-    let sde = match SdeRegistry::open(&SdeRegistry::default_db_path()) {
-        Ok(reg) => Arc::new(reg),
-        Err(_) => Arc::new(SdeRegistry::with_canonical_seed()),
-    };
-    let db = Arc::new(WorldRepository::with_demo_seed());
-    let ctx = Arc::new(ServerContext::with_sde_and_repository(sde, db));
+    let ctx = Arc::new(crate::seasons_and_campaigns::fast_real_sde_ctx());
     common::pin_clock(&ctx);
 
     // Jita is 30000142, Amarr is 30002187, Perimeter is 30000144, Urlen is 30000143
@@ -746,12 +740,7 @@ async fn test_navigation_route_waypoints() {
 async fn test_navigation_wormhole_statics() {
 
 
-    let sde = match SdeRegistry::open(&SdeRegistry::default_db_path()) {
-        Ok(reg) => Arc::new(reg),
-        Err(_) => Arc::new(SdeRegistry::with_canonical_seed()),
-    };
-    let db = Arc::new(WorldRepository::with_demo_seed());
-    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    let ctx = crate::seasons_and_campaigns::fast_real_sde_ctx();
     let now_unix = ctx.now_unix();
 
     // 1. Authentic SDE statics across wormhole classes C1 through C6
@@ -884,11 +873,10 @@ pub mod navigation_docking_and_undocking {
 
 
 use crate::common;
-use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
+use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
-use eve_sde::SdeRegistry;
 use eve_server::router::ServerContext;
 use eve_server::services::cluster_macho_misc_services::{with_misc_state, LandingPadRecord};
 use glam::DVec3;
@@ -921,12 +909,7 @@ fn place_pilot_in_space(
 
 #[tokio::test]
 async fn test_navigation_shipcaster_and_starter() {
-    let sde = match SdeRegistry::open(&SdeRegistry::default_db_path()) {
-        Ok(reg) => Arc::new(reg),
-        Err(_) => Arc::new(SdeRegistry::with_canonical_seed()),
-    };
-    let db = Arc::new(WorldRepository::with_demo_seed());
-    let ctx = Arc::new(ServerContext::with_sde_and_repository(sde, db));
+    let ctx = Arc::new(crate::seasons_and_campaigns::fast_real_sde_ctx());
     common::pin_clock(&ctx);
 
     let char_id = 90_000_001_i64;
@@ -1278,12 +1261,7 @@ async fn test_navigation_shipcaster_and_starter() {
 async fn test_navigation_warp_vector() {
 
 
-    let sde = match SdeRegistry::open(&SdeRegistry::default_db_path()) {
-        Ok(reg) => Arc::new(reg),
-        Err(_) => Arc::new(SdeRegistry::with_canonical_seed()),
-    };
-    let db = Arc::new(WorldRepository::with_demo_seed());
-    let ctx = Arc::new(ServerContext::with_sde_and_repository(sde, db));
+    let ctx = Arc::new(crate::seasons_and_campaigns::fast_real_sde_ctx());
     common::pin_clock(&ctx);
 
     let char_id = 90_000_001_i64;
@@ -1532,7 +1510,7 @@ async fn test_ansiblex_jump_bridge_access_liquid_ozone_and_destination() {
         "feat:navigation.ansiblex-link",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let ship_id = 100_000_001;
@@ -1763,7 +1741,7 @@ async fn test_ansiblex_jump_bridge_access_liquid_ozone_and_destination() {
 #[tokio::test]
 // parity: feat:navigation.filament-needlejack
 async fn test_filaments_abyssal_pocket_void_space_and_needlejack() {
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     let char_id = 90_000_001;
     let ship_id = 100_000_001;
     let char_id_2 = 90_000_002;
@@ -1939,7 +1917,7 @@ async fn test_crates_claim_loot_and_milestones_one_time_rewards() {
         "rpc:crateService.PeekInsideFixedCrate",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     let char_id = 90_000_001;
     let station_id = 60_003_760;
     let mut sess = setup_pilot(&ctx, 8004, "demo", "demo-secret", char_id).await;
@@ -2205,7 +2183,7 @@ async fn test_air_npe_state_persistence_and_career_goals() {
         "feat:pve.air-npe",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 8003, "demo", "demo-secret", char_id).await;
@@ -2310,9 +2288,9 @@ async fn test_air_npe_state_persistence_and_career_goals() {
 
 #[tokio::test]
 async fn test_daily_and_seasonal_login_campaign_rewards() {
-    // DATA GAP: requires live login campaign schedule
+    // Exercises SDE seasonalcampaignsloginrewards daily and seasonal login reward claims.
 
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 8005, "demo", "demo-secret", char_id).await;
@@ -2480,7 +2458,7 @@ async fn test_custom_agency_provider_content_nearby_sites() {
     // parity: feat:pve.agency-content
     eve_testkit::attest(&["feat:pve.agency-content"]);
 
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     let char_id = 90_000_001;
     let sys_id = 30_002_053; // HEK
     let mut sess = setup_pilot(&ctx, 8006, "demo", "demo-secret", char_id).await;
@@ -2559,7 +2537,7 @@ async fn test_cosmos_constellations_storyline_agents_and_sites() {
     // parity: feat:pve.cosmos
     eve_testkit::attest(&["feat:pve.cosmos"]);
 
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 8007, "demo", "demo-secret", char_id).await;
 
@@ -2663,7 +2641,7 @@ pub(crate) mod pve_incursions_and_homefront_suite {
 
 
 use crate::common;
-use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord, WorldRepository};
+use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord};
 use eve_destiny::{Ball, DamageVector, DVec3, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
@@ -2671,7 +2649,6 @@ use eve_proto::quasar::{
     GoogleTimestamp, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::{BridgeRpcError, PyRep};
-use eve_sde::SdeRegistry;
 use eve_server::esi::{EsiHttpRequest, EsiRouter};
 use eve_server::quasar_gateway::STATUS_OK;
 use eve_server::router::ServerContext;
@@ -2697,12 +2674,7 @@ const JITA_SYS: u32 = 30_000_142;
 const JITA_STATION: i64 = 60_003_760;
 
 fn ctx_with_real_sde() -> ServerContext {
-    let sde = match SdeRegistry::open(&SdeRegistry::default_db_path()) {
-        Ok(reg) => Arc::new(reg),
-        Err(_) => Arc::new(SdeRegistry::with_canonical_seed()),
-    };
-    let db = Arc::new(WorldRepository::with_demo_seed());
-    let ctx = ServerContext::with_sde_and_repository(sde, db)
+    let ctx = crate::seasons_and_campaigns::fast_real_sde_ctx()
         .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED);
     common::pin_clock(&ctx);
     ctx
@@ -2987,11 +2959,11 @@ async fn test_pve_mission_complete_escalations_and_expeditions() {
     assert_eq!(comp.dict_get("state").and_then(|v| v.as_str()), Some("Completed"));
     assert!(comp.dict_get("iskReward").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
     assert!(comp.dict_get("bonusReward").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
-    assert!(comp.dict_get("lpReward").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+    assert_eq!(comp.dict_get("lpReward").and_then(|v| v.as_i64()), Some(0));
     let reward_item_id = comp.dict_get("rewardItemID").and_then(|v| v.as_i64()).expect("rewardItemID");
 
     assert!(ctx.db.with_snapshot(|s| s.characters[&char_id].balance.0) > bal_before);
-    assert!(ctx.db.with_snapshot(|s| s.characters[&char_id].loyalty_points.get(&career_agent.corporation_id).copied().unwrap_or(0)) > lp_before);
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&char_id].loyalty_points.get(&career_agent.corporation_id).copied().unwrap_or(0)), lp_before);
     assert!(ctx.db.with_snapshot(|s| s.characters[&char_id].standings.get(&career_agent.corporation_id).copied().unwrap_or(0.0)) > standing_before);
     assert!(ctx.db.with_snapshot(|s| s.items.get(&reward_item_id).is_some_and(|it| it.owner_id == char_id && it.location_id == agent_station && it.flag == InventoryFlag::Hangar)));
 

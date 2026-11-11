@@ -253,7 +253,7 @@ async fn test_daily_goal_admin_and_events() {
             .collect(),
         _ => Vec::new(),
     };
-    assert_eq!(uuids.len(), 6, "Expected exact 6 canonical daily goals (5 daily + 1 daily bonus)");
+    assert_eq!(uuids.len(), 5, "Expected exact 5 canonical daily goals (4 rotating daily + 1 daily bonus)");
     let g1 = uuids[0];
     let g2 = uuids[1];
 
@@ -321,7 +321,7 @@ async fn test_daily_goal_admin_and_events() {
     let after_exp_rsp = quasar_rpc(&ctx, &mut admin_sess, "eve.dailygoal.api.GetAllRequest", Vec::new()).await;
     let after_exp_dyn = reg.decode_dynamic("eve.dailygoal.api.GetAllResponse", &after_exp_rsp.payload.unwrap().value).unwrap();
     let Some(DynamicValue::Repeated(rem_items)) = after_exp_dyn.get(1) else { panic!("expected repeated goals"); };
-    assert_eq!(rem_items.len(), 5, "Expired standard template goal must not be resurrected");
+    assert_eq!(rem_items.len(), 4, "Expired standard template goal must not be resurrected");
 }
 
 // ============================================================================
@@ -457,7 +457,10 @@ async fn test_loyalty_points_wallet_assetholding() {
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.loyaltypoints.assetholding.operation.api.WithdrawRequest", make_lp_op_req([0x55u8; 16], None, Some(corp_id), issuer_corp, 1_500)).await.status_code, STATUS_OK);
     let corp_lp_rep = ctx.dispatch_rpc(&mut sess, "LPSvc", None, "GetAllMyCorporationWalletLPBalances", &[eve_proto::PyRep::Integer(i64::from(corp_id))], &std::collections::HashMap::new(), None).await.expect("GetAllMyCorporationWalletLPBalances");
     let eve_proto::PyRep::List(entries) = corp_lp_rep else { panic!("expected List"); };
-    let lp_val = entries.iter().find_map(|e| e.dict_get("loyaltyPoints").and_then(|v| v.as_i64()));
+    let lp_val = entries.iter().find_map(|e| match e {
+        eve_proto::PyRep::Tuple(t) => t.get(1).and_then(|v| v.as_i64()),
+        _ => e.dict_get("loyaltyPoints").and_then(|v| v.as_i64()),
+    });
     assert_eq!(lp_val, Some(2_500));
 }
 

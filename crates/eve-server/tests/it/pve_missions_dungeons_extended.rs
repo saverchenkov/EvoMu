@@ -144,14 +144,17 @@ async fn test_mission_lp_isk_reward_formula() {
         .map(|s| s.security_status)
         .unwrap_or(1.0);
 
-    let (expected_isk, expected_lp, expected_bonus) =
-        compute_character_mission_rewards(
-            &ctx,
-            char_id,
-            agent.agent_id,
-            mission_id,
-            sys_id,
-        );
+    let CharacterMissionRewards {
+        isk_reward: expected_isk,
+        lp_reward: expected_lp,
+        bonus_reward: expected_bonus,
+    } = compute_character_mission_rewards(
+        &ctx,
+        char_id,
+        agent.agent_id,
+        mission_id,
+        sys_id,
+    );
 
     // Verify ISK has +15% negotiation multiplier
     let base_lp = ctx.sde.missions.get(&mission_id).map_or(100, |t| t.lp_omega.max(100));

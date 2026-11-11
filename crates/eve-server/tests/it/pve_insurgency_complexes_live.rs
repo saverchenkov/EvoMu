@@ -18,6 +18,20 @@ use eve_server::services::insurgency_complex_ops::{is_named_insurgency_roamer, i
 use eve_server::services::insurgency_services::{insurgency_system_corruption_stage, read_insurgency_runtime, step_system_insurgency_tick_delta, FACTION_ANGEL_CARTEL, FACTION_GURISTAS, FORECASTING_DURATION_SECS};
 use glam::DVec3;
 use std::collections::HashMap;
+use std::sync::Arc;
+
+fn fresh_ctx() -> ServerContext {
+    static BASE: std::sync::OnceLock<(Arc<eve_sde::SdeRegistry>, eve_db::WorldStateSnapshot)> = std::sync::OnceLock::new();
+    let (sde, base_snap) = BASE.get_or_init(|| {
+        let base_ctx = ServerContext::new();
+        (base_ctx.sde.clone(), base_ctx.db.with_snapshot(Clone::clone))
+    });
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    db.with_mut_snapshot(|s| *s = base_snap.clone());
+    let ctx = ServerContext::with_sde_and_repository(sde.clone(), db);
+    common::pin_clock(&ctx);
+    ctx
+}
 
 async fn rpc(ctx: &ServerContext, sess: &mut SessionState, svc: &str, method: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> { ctx.dispatch_rpc(sess, svc, None, method, args, &HashMap::new(), None).await }
 async fn rpc_bound(ctx: &ServerContext, sess: &mut SessionState, svc: &str, bound: u64, method: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> { ctx.dispatch_rpc(sess, svc, Some(bound), method, args, &HashMap::new(), None).await }
@@ -133,12 +147,11 @@ async fn warp_to_target(ctx: &ServerContext, p: &mut LivePilot, stuff: &str, ite
             res => res?,
         };
         let mut align_steps = 0;
-        for _ in 0..300 {
+        for _ in 0..100 {
             let snap = sys.get_ball_snapshot(p.ship_id).await.ok().flatten();
             let dt = match snap.as_ref().map(|(_, b)| &b.mode) {
-                Some(MovementMode::Warp { phase: eve_destiny::WarpPhase::Aligning, .. }) => { align_steps += 1; if align_steps > 25 { break; } 2.0 }
-                Some(MovementMode::Warp { phase: eve_destiny::WarpPhase::Cruising, destination, .. }) if snap.as_ref().is_some_and(|(_, b)| b.position.distance(*destination) > 5.0 * 149_597_870_700.0) => 10.0,
-                _ => 1.0,
+                Some(MovementMode::Warp { phase: eve_destiny::WarpPhase::Aligning, .. }) => { align_steps += 1; if align_steps > 10 { break; } 5.0 }
+                _ => 10.0,
             };
             sys.step_manual(dt).await.unwrap();
             if sys.get_ball_snapshot(p.ship_id).await.ok().flatten().is_some_and(|(_, b)| !matches!(b.mode, MovementMode::Warp { .. })) { break; }
@@ -153,9 +166,9 @@ async fn warp_to_target(ctx: &ServerContext, p: &mut LivePilot, stuff: &str, ite
                     let (nrm, want) = ((sb.position - nc.position).normalize_or_zero(), (dest - nc.position).normalize_or_zero());
                     if let Some(c2) = ctx.sde.celestials_in_system(sys_id).into_iter().filter(|c| c.celestial_id != nc.celestial_id && sb.position.distance(c.position) >= 200_000.0 && (c.position - sb.position).normalize_or_zero().dot(nrm) > 0.1).max_by(|a, b| (a.position - nc.position).normalize_or_zero().dot(want).total_cmp(&(b.position - nc.position).normalize_or_zero().dot(want))) {
                         if rpc_bound(ctx, &mut p.sess, "beyonce", p.beyonce, "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(c2.celestial_id), PyRep::Real(0.0)]).await.is_ok() {
-                            for _ in 0..300 {
+                            for _ in 0..100 {
                                 let m = sys.get_ball_snapshot(p.ship_id).await.ok().flatten().map(|(_, b)| b.mode);
-                                let dt2 = match m { Some(MovementMode::Warp { phase: eve_destiny::WarpPhase::Aligning, .. }) => 2.0, Some(MovementMode::Warp { phase: eve_destiny::WarpPhase::Cruising, destination, .. }) if sys.get_ball_snapshot(p.ship_id).await.ok().flatten().is_some_and(|(_, b)| b.position.distance(destination) > 5.0 * 149_597_870_700.0) => 10.0, Some(MovementMode::Warp { .. }) => 1.0, _ => break };
+                                let dt2 = match m { Some(MovementMode::Warp { phase: eve_destiny::WarpPhase::Aligning, .. }) => 5.0, Some(MovementMode::Warp { .. }) => 10.0, _ => break };
                                 sys.step_manual(dt2).await.unwrap();
                             }
                             let _ = rpc_bound(ctx, &mut p.sess, "beyonce", p.beyonce, "CmdStop", &[]).await;
@@ -284,7 +297,7 @@ async fn kill_npc_live(ctx: &ServerContext, p: &mut LivePilot, guns: &[i64], tar
         match rpc(ctx, &mut p.sess, "dogmaIM", "AddTarget", &[PyRep::Integer(target_id)]).await { Ok(_) => break, Err(e) if e.code == "TargetingFailed" && attempt < 9 => { sys.step_manual(2.0).await.unwrap(); } Err(e) => panic!("AddTarget: {e:?}"), }
     }
     for _ in 0..8 {
-        sys.step_manual(2.0).await.unwrap();
+        sys.step_manual(4.0).await.unwrap();
         if sys.get_target_locks(p.ship_id).await.unwrap().iter().any(|l| l.target_id == target_id && l.locked) { break; }
     }
     let (mut need_activate, mut cur_last) = (true, sys.get_ball_snapshot(target_id).await.ok().flatten()?.1.position);
@@ -307,8 +320,7 @@ async fn kill_npc_live(ctx: &ServerContext, p: &mut LivePilot, guns: &[i64], tar
                 }
             }
         }
-        sys.step_manual(2.0).await.unwrap();
-        if step == 0 { sys.step_manual(2.0).await.unwrap(); }
+        sys.step_manual(4.0).await.unwrap();
         if sys.get_ball_snapshot(target_id).await.unwrap().is_none() { eve_server::services::combat_npc_encounters::finalize_cycle_destroyed_npcs(ctx, sys_id).await; break; }
     }
     ctx.advance_secs(2);
@@ -425,8 +437,7 @@ async fn verify_war_hq_handin(ctx: &ServerContext, pilot: &mut LivePilot, wrong_
 
 #[tokio::test]
 async fn test_live_insurgency_laundering_roamers_and_war_hq_crates() {
-    let ctx = ServerContext::new();
-    common::pin_clock(&ctx);
+    let ctx = fresh_ctx();
     ctx.mechanic_rng.set_seed(Some(42));
     let (hurr, gun, gyro, mwd, ammo, rifter) = gear_type_ids(&ctx);
     let (caracal, rlml, bcs, light_msl) = (sde_type_id(&ctx, "Caracal"), sde_type_id(&ctx, "Rapid Light Missile Launcher II"), sde_type_id(&ctx, "Ballistic Control System II"), sde_type_id(&ctx, "Scourge Light Missile"));
@@ -483,7 +494,7 @@ async fn test_live_insurgency_laundering_roamers_and_war_hq_crates() {
     verify_war_hq_handin(&ctx, &mut p_gal, &mut p_cal, camp_id, fob_sys, HQ_SYSTEM_INTAKI, 1_891_200_001, TYPE_FEDERATION_CI_OUTPOST_HUB, 500_004, TYPE_GURISTAS_INSURGENCY_DATA_SEQ).await;
 
     // Angel Cartel campaign (`Mehatoor` Amarr & `Amo` Minmatar + Angel FOB Laundering Facility).
-    let ctx2 = ServerContext::new(); common::pin_clock(&ctx2); ctx2.mechanic_rng.set_seed(Some(42));
+    let ctx2 = fresh_ctx(); ctx2.mechanic_rng.set_seed(Some(42));
     let amamin_fl = ctx2.db.with_snapshot(|s| *compute_all_frontline_statuses(&ctx2, s).iter().find(|(&sys, &st)| st == STATUS_FRONTLINE && s.fw_system_occupations.get(&sys).is_some_and(|o| matches!(o.occupier_faction_id, 500_002 | 500_003))).unwrap().0);
     let (mut p_ang, _) = spawn_live_pilot(&ctx2, 71_101, 95_101_001, amamin_fl, hurr, gun, gyro, mwd, ammo).await;
     let (mut p_ama, _) = spawn_live_pilot(&ctx2, 71_102, 95_101_002, HQ_SYSTEM_MEHATOOR, rifter, 0, 0, 0, 0).await;
@@ -507,7 +518,7 @@ async fn test_live_insurgency_laundering_roamers_and_war_hq_crates() {
 
 #[tokio::test]
 async fn test_live_insurgency_mining_ambush_ransom_rescue_destroy_lp_split() {
-    let ctx = ServerContext::new(); common::pin_clock(&ctx);
+    let ctx = fresh_ctx();
     let (hurr, gun, gyro, mwd, ammo, rifter) = gear_type_ids(&ctx);
     let sys_id = 30_002_538_u32;
     let (mut pirates, mut pir_guns) = (Vec::new(), Vec::new());
@@ -584,8 +595,7 @@ fn test_live_insurgency_outpost_raid_sizes_gates_bc_bonus_and_respawn() {
 }
 
 async fn test_live_insurgency_outpost_raid_sizes_gates_bc_bonus_and_respawn_inner() {
-    let ctx = ServerContext::new();
-    common::pin_clock(&ctx);
+    let ctx = fresh_ctx();
 
     let (rifter, svipul, cormorant, caracal, hurr, tengu, raven, wcs, gun, sgun, gyro, mwd, smwd, ammo, sammo) = (
         sde_type_id(&ctx, "Rifter"), sde_type_id(&ctx, "Svipul"), sde_type_id(&ctx, "Cormorant"), sde_type_id(&ctx, "Caracal"), sde_type_id(&ctx, "Hurricane"),
@@ -631,7 +641,7 @@ async fn test_live_insurgency_outpost_raid_sizes_gates_bc_bonus_and_respawn_inne
         warp_to_item(&ctx, &mut p_cal_frig, station_id, 0.0).await.unwrap(); rpc(&ctx, &mut p_cal_frig.sess, "stationSvc", "Dock", &[PyRep::Integer(station_id)]).await.unwrap(); ctx.advance_secs(11);
         if dock_wcs { slash(&ctx, &mut p_cal_frig.sess, &format!("/fit me {wcs}")).await; } else { rpc(&ctx, &mut p_cal_frig.sess, "ship", "LeaveShip", &[]).await.unwrap(); ctx.advance_secs(11); }
         rpc(&ctx, &mut p_cal_frig.sess, "stationSvc", "Undock", &[]).await.unwrap(); p_cal_frig.ship_id = p_cal_frig.sess.ship_id.unwrap(); slash(&ctx, &mut p_cal_frig.sess, "/heal").await;
-        for _ in 0..32 { ctx.systems.get_or_spawn(p_cal_frig.sess.solar_system_id.unwrap()).step_manual(1.0).await.unwrap(); }
+        ctx.systems.get_or_spawn(p_cal_frig.sess.solar_system_id.unwrap()).step_manual(32.0).await.unwrap();
         travel_to(&ctx, &mut p_cal_frig, s0).await; warp_to_item(&ctx, &mut p_cal_frig, g_small, 0.0).await.unwrap();
         assert_eq!(rpc(&ctx, &mut p_cal_frig.sess, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(g_small)]).await.unwrap_err().code, if dock_wcs { "WarpCoreStabilizerRestricted" } else { "ShipRestrictedForComplex" });
     }

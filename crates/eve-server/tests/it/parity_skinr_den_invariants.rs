@@ -92,7 +92,7 @@ async fn test_skinr_sequencing_studio_and_paragon_hub_listing() {
 
         // Train SKINR sequencing skills + Paragon Hub skills on seller
         let sk_map = s.skills.entry(seller_cid as i64).or_default();
-        for sid in [81370u32, 81377, 81366, 84217, 84218, 81368] {
+        for sid in [81370u32, 81375, 81377, 81366, 84217, 84218, 81368] {
             sk_map.insert(
                 sid,
                 TrainedSkillRecord {

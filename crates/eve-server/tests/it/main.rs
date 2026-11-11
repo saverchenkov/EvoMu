@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 mod common;
+mod pve_agents_missions_combat_edge_coverage;
 mod abyssal_and_void_space_suite;
 mod air_npe_nodegraph_runner;
 mod abyssal_deadspace;
@@ -85,6 +86,7 @@ mod esi_full;
 mod esi_market_industry_pi;
 mod esi_routes;
 mod esi_routes_character;
+mod esi_routes_edge_coverage;
 mod esi_ui_and_features;
 mod esi_universe_character;
 mod esi_universe_fw_complete;
@@ -535,3 +537,14 @@ mod corp_rbac_and_market_acl_regressions;
 mod live_e2e_parity_unblock;
 mod notifications_arch_sync;
 mod quasar_grpc_stream_lifecycle_and_flow_control;
+mod server_core_coverage;
+mod rpc_error_and_edge_coverage;
+mod space_dogma_inv_edge_coverage;
+mod corp_fleet_social_edge_coverage;
+mod industry_pi_structures_fw_edge_coverage;
+mod wallet_skills_cosmetics_edge_coverage;
+mod drones_fighters_mining_npc_edge_coverage;
+mod quasar_grpc_protobuf_edge_coverage;
+mod xmpp_social_tourney_edge_coverage;
+mod remediate_flagged_fake_pve_econ;
+mod remediate_flagged_fake_quasar_cosmetics;

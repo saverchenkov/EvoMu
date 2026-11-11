@@ -856,6 +856,17 @@ async fn test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger() {
     assert!(corp_ledger.is_crowset());
     let obs_rows = decode_crowset_rows(&corp_ledger);
     assert!(obs_rows.iter().any(|r| r.first().and_then(|v| v.as_i64()) == Some(structure_id)));
+    let obs_struct_row = corp_ledger
+        .crowset_rows()
+        .unwrap()
+        .iter()
+        .find(|r| r.dbrow_get("itemID").and_then(PyRep::as_i64) == Some(structure_id))
+        .expect("GetObserversWithMiningEvents must emit itemID row for observer structure");
+    assert_eq!(obs_struct_row.dbrow_get("solarSystemID").and_then(PyRep::as_i64), Some(30_000_142));
+    assert_eq!(
+        obs_struct_row.dbrow_get("itemName").and_then(PyRep::as_str),
+        Some("Moon Mining Athanor (Jita High-Sec)")
+    );
 
     let entries = ctx
         .dispatch_rpc(&mut session, "corpMiningLedger", None, "GetObserverLedger", &[PyRep::Integer(structure_id)], &kw, None)
@@ -873,6 +884,23 @@ async fn test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger() {
         .collect();
     assert_eq!(matching_rows.len(), 1);
     assert_eq!(matching_rows[0].get(3).and_then(|v| v.as_i64()), Some(mined_moon_qty));
+    let matching_dbrow = entries
+        .crowset_rows()
+        .unwrap()
+        .iter()
+        .find(|r| {
+            r.dbrow_get("characterID").and_then(PyRep::as_i64) == Some(char_id)
+                && r.dbrow_get("typeID").and_then(PyRep::as_i64) == Some(first_ast_type as i64)
+        })
+        .expect("Matching GetObserverLedger DBRow");
+    assert_eq!(matching_dbrow.dbrow_get("corporationID").and_then(PyRep::as_i64), Some(char_corp_id));
+    assert!(
+        matching_dbrow
+            .dbrow_get("eventDate")
+            .and_then(PyRep::as_i64)
+            .is_some_and(|ft| ft > 116_444_736_000_000_000)
+    );
+    assert_eq!(matching_dbrow.dbrow_get("solarsystemID").and_then(PyRep::as_i64), Some(30_000_142));
 }
 
 #[tokio::test]

@@ -131,11 +131,40 @@ async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() 
         expected_titles.push(title_id);
     }
 
+    let day0_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetAllCurrentRequest", Vec::new()).await;
+    assert_eq!(day0_rsp.status_code, STATUS_OK);
+    let day0_wm = WireMessage::decode(&day0_rsp.payload.unwrap().value).expect("decode day0 GetAllCurrentResponse");
+    let day0_fields: Vec<&WireField> = day0_wm.fields.iter().filter(|f| f.field_number == 1).collect();
+    assert_eq!(day0_fields.len(), 5, "ServerContext must seed 4 rotating SDE daily goals + 1 daily bonus goal without manual setup");
+
+    let mut seen_title_ids = Vec::new();
+    for f in &day0_fields {
+        let goal_dyn = reg
+            .decode_dynamic("eve_public.dailygoal.api.GetAllCurrentResponse.Goal", f.value.as_bytes().unwrap())
+            .expect("decode Day 0 Goal");
+        let Some(DynamicValue::Message(id_dyn)) = goal_dyn.get(1) else { panic!("missing Goal.id"); };
+        let Some(DynamicValue::Bytes(b)) = id_dyn.get(1) else { panic!("missing uuid bytes"); };
+        let mut arr = [0u8; 16];
+        arr.copy_from_slice(b);
+        let get_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetRequest", make_uuid_request(arr)).await;
+        assert_eq!(get_rsp.status_code, STATUS_OK);
+        let get_dyn = reg.decode_dynamic("eve_public.dailygoal.api.GetResponse", &get_rsp.payload.unwrap().value).expect("decode GetResponse");
+        if let Some(DynamicValue::Message(attrs)) = get_dyn.get(1) {
+            if let Some(DynamicValue::Message(name_msg)) = attrs.get(1) {
+                if let Some(DynamicValue::Uint32(title_id)) = name_msg.get(1) {
+                    seen_title_ids.push(*title_id);
+                }
+            }
+        }
+    }
+
+    // Advance one day so SpaceJump (Day 0) + ScanSignature (Day 1) both appear across consecutive days
+    ctx.advance_virtual_clock(86_400);
     let all_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetAllCurrentRequest", Vec::new()).await;
     assert_eq!(all_rsp.status_code, STATUS_OK);
     let wm = WireMessage::decode(&all_rsp.payload.unwrap().value).expect("decode GetAllCurrentResponse");
     let goal_fields: Vec<&WireField> = wm.fields.iter().filter(|f| f.field_number == 1).collect();
-    assert_eq!(goal_fields.len(), 6, "ServerContext must seed 5 SDE daily goals + 1 daily bonus goal without manual setup");
+    assert_eq!(goal_fields.len(), 5, "ServerContext must seed 4 rotating SDE daily goals + 1 daily bonus goal without manual setup");
 
     let mut uuids = Vec::new();
     for f in &goal_fields {
@@ -157,7 +186,6 @@ async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() 
     }
 
     // Verify GetRequest decodes real SDE contributionmethods.fsdbinary titleIDs & Paragon assigner 1_000_419
-    let mut seen_title_ids = Vec::new();
     for uuid in &uuids {
         let get_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetRequest", make_uuid_request(*uuid)).await;
         assert_eq!(get_rsp.status_code, STATUS_OK);
@@ -178,7 +206,7 @@ async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() 
             panic!("missing assigner");
         };
         assert_eq!(assigner_msg.get(1), Some(&DynamicValue::Uint32(1_000_419)));
-        assert!(matches!(get_dyn.get(4), Some(DynamicValue::Repeated(v)) if v.len() == 2));
+        assert!(matches!(get_dyn.get(4), Some(DynamicValue::Repeated(v)) if v.len() == 1));
     }
     for expected_title in expected_titles {
         assert!(
@@ -360,13 +388,22 @@ async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() 
         let ch = &s.characters[&(char_id as i64)];
         (ch.balance.0, ch.free_skill_points)
     });
-    assert_eq!(after_isk, initial_isk + IskCents::from_isk(2_000_000).0);
-    assert!((after_sp - (initial_sp + 25_000.0)).abs() < 1e-6);
+    // 3 individual goals x 500,000 ISK = 1,500,000 ISK; DailyBonus awards 10,000 SP (0 ISK).
+    assert_eq!(after_isk, initial_isk + IskCents::from_isk(1_500_000).0);
+    assert!((after_sp - (initial_sp + 10_000.0)).abs() < 1e-6);
+    assert_eq!(
+        ctx.quasar_gateway
+            .progression
+            .daily_goals
+            .get_monthly_progress(char_id, ctx.db.clock().now_unix_secs())
+            .steps_completed,
+        1
+    );
 
     // 4. Advance virtual clock by 86,400s (next 11:00 UTC downtime bucket) -> daily goals reset cleanly
     ctx.advance_virtual_clock(86_400);
     let next_day_goals = ctx.quasar_gateway.progression.daily_goals.get_or_init_goals(char_id);
-    assert_eq!(next_day_goals.len(), 6);
+    assert_eq!(next_day_goals.len(), 5);
     assert!(next_day_goals
         .iter()
         .all(|g| g.current_progress == 0 && !g.completed && !g.claimed));
@@ -395,7 +432,7 @@ async fn test_daily_goals_reset_at_1100_utc_downtime_not_midnight() {
         .progression
         .daily_goals
         .get_or_init_goals_at(char_id, ctx.now_unix());
-    assert_eq!(goals_init.len(), 6);
+    assert_eq!(goals_init.len(), 5);
     let scan_uuid = goals_init.iter().find(|g| g.template.category == 3).unwrap().uuid;
 
     // Progress & claim ScanSignature at 23:59 UTC

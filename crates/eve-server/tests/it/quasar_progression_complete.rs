@@ -127,7 +127,7 @@ fn configure_test_daily_goals(ctx: &ServerContext) {
     use eve_server::services::quasar_daily_goals::DailyGoalTemplate;
     let specs = [
         ([0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], "DestroyNPC", 1u32, 3u32, 10u64, 500_000i64, None, None),
-        ([0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2], "MineAsteroid", 2, 2, 500, 500_000, Some(100_000), Some(2_500)),
+        ([0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2], "MineAsteroid", 2, 2, 500, 500_000, None, Some(2_500)),
         ([0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3], "ScanSignature", 3, 1, 2, 250_000, None, None),
         ([0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4], "JumpStargate", 4, 4, 5, 250_000, None, None),
         ([0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5], "ManufactureItem", 5, 2, 1, 500_000, None, None),
@@ -141,7 +141,7 @@ fn configure_test_daily_goals(ctx: &ServerContext) {
             career,
             target,
             isk_reward,
-            sp_reward: 5_000.0,
+            sp_reward: 0.0,
             completion_cost_isk,
             completion_cost_evermarks,
             name_message_id: 0,
@@ -197,7 +197,7 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
 
     let wm = WireMessage::decode(&payload.value).expect("decode WireMessage");
     let goal_entries: Vec<&WireField> = wm.fields.iter().filter(|f| f.field_number == 1).collect();
-    assert_eq!(goal_entries.len(), 11, "6 SDE + 5 configured daily goals should be returned");
+    assert_eq!(goal_entries.len(), 10, "5 active SDE (4 daily + 1 bonus) + 5 configured daily goals should be returned");
 
     // Target configured goal #1 ([0x44, 0x47, 0x01, ..., 1]) and verify its Identifier is present
     let target_uuid = [0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
@@ -221,7 +221,12 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
     let get_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetRequest", make_uuid_request(target_uuid)).await;
     assert_eq!(get_rsp.status_code, STATUS_OK);
     let get_dyn = reg.decode_dynamic("eve_public.dailygoal.api.GetResponse", &get_rsp.payload.unwrap().value).expect("decode GetResponse");
-    assert!(matches!(get_dyn.get(4), Some(eve_proto::quasar::DynamicValue::Repeated(items)) if items.len() == 2), "GetResponse must carry separate ISK and SP Earning entries");
+    assert!(matches!(get_dyn.get(4), Some(eve_proto::quasar::DynamicValue::Repeated(items)) if items.len() == 1), "Regular goal GetResponse carries ISK Earning entry");
+    let bonus_uuid = eve_server::services::quasar_daily_goals::default_daily_bonus_template().uuid;
+    let bonus_get_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetRequest", make_uuid_request(bonus_uuid)).await;
+    assert_eq!(bonus_get_rsp.status_code, STATUS_OK);
+    let bonus_dyn = reg.decode_dynamic("eve_public.dailygoal.api.GetResponse", &bonus_get_rsp.payload.unwrap().value).expect("decode bonus GetResponse");
+    assert!(matches!(bonus_dyn.get(4), Some(eve_proto::quasar::DynamicValue::Repeated(items)) if items.len() == 1), "DailyBonus GetResponse carries 10,000 SP Earning entry");
 
     // 2. PayForCompletionRequest on goal #1 (no completion cost configured) must return STATUS_PRECONDITION_FAILED
     let no_cost_pay = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.PayForCompletionRequest", make_uuid_request(target_uuid)).await;
@@ -284,17 +289,37 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
         (ch.balance.0, ch.free_skill_points, has_j)
     });
     assert_eq!(final_isk - initial_isk, eve_db::IskCents::from_isk(500_000).0, "Exact 500,000 ISK daily goal reward");
-    assert_eq!(final_free_sp - initial_free_sp, 5_000.0, "Exact 5,000 SP daily goal reward");
+    assert_eq!(final_free_sp - initial_free_sp, 0.0, "Individual daily goal awards ISK + EverMarks (SP comes from DailyBonus)");
     assert!(has_dg_journal, "DailyGoalReward wallet journal entry must be recorded");
 
-    // 6. Pay for completion on goal #2 (which has completion_cost_isk = Some(100_000))
+    // 6. Pay for completion on goal #2 (which has completion_cost_evermarks = Some(2_500))
     let second_uuid = [0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&90_000_001).unwrap().loyalty_points.insert(1_000_419, 2_500);
+    });
     let pay_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.PayForCompletionRequest", make_uuid_request(second_uuid)).await;
     assert_eq!(pay_rsp.status_code, STATUS_OK);
+    let (em_after_pay, isk_after_pay) = ctx.db.with_snapshot(|s| {
+        let ch = &s.characters[&90_000_001];
+        (ch.loyalty_points.get(&1_000_419).copied().unwrap_or(0), ch.balance.0)
+    });
+    assert_eq!(em_after_pay, 0, "PayForCompletionRequest must debit 2,500 EverMarks");
+    assert_eq!(isk_after_pay, final_isk, "PayForCompletionRequest must not debit ISK");
 
-    // 7. RedeemAll via eve_public.dailygoal.api.RedeemAllRequest
+    // 7. RedeemAll via eve_public.dailygoal.api.RedeemAllRequest (claims goal #2 ISK/EM + DailyBonus 10,000 SP)
     let redeem_all_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.RedeemAllRequest", Vec::new()).await;
     assert_eq!(redeem_all_rsp.status_code, STATUS_OK);
+    let after_bonus_sp = ctx.db.with_snapshot(|s| s.characters[&90_000_001].free_skill_points);
+    assert_eq!(after_bonus_sp - initial_free_sp, 10_000.0, "Completing 2 goals awards 10,000 SP via DailyBonus");
+    assert_eq!(
+        ctx.quasar_gateway
+            .progression
+            .daily_goals
+            .get_monthly_progress(90_000_001, ctx.now_unix())
+            .steps_completed,
+        1,
+        "Completing DailyBonus advances Monthly Progress Track by 1 step"
+    );
     let post_notices = drain_notices(&mut stream_rx);
     let red_notice = post_notices.iter().find(|n| n.payload.as_ref().map(|p| p.type_url.ends_with("eve_public.dailygoal.api.RedeemedNotice")).unwrap_or(false)).expect("RedeemedNotice");
     let red_dyn = reg.decode_dynamic("eve_public.dailygoal.api.RedeemedNotice", &red_notice.payload.as_ref().unwrap().value).expect("decode RedeemedNotice");
@@ -322,7 +347,7 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
 
 #[tokio::test]
 async fn quasar_career_goals_paths_and_milestones() {
-    // DATA GAP: Individual AIR Career Program goal UUIDs, targets, and rewards are server-authored and not shipped in V24 client FSD.
+    // Exercises AIR Career Program goal progression, career paths, and milestone rewards.
     // parity: quasar:eveProto/generated/eve_public/career/goal/api/admin/requests_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/career/goal/api/admin/requests_pb2.pyj",

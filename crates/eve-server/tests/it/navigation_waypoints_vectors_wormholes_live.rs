@@ -281,13 +281,12 @@ async fn test_navigation_warp_vector_live() {
         .expect("warpSpeedAuPerSec");
     assert!(warp_spd > 0.0);
 
-    // Verify OnWarpStarted notification
+    // OnWarpStarted is client_local and must not be emitted by the server
     let notifs = ctx.drain_notifications_for_char(char_id);
-    let warp_notif = notifs
-        .iter()
-        .find(|n| n.event == "OnWarpStarted")
-        .expect("OnWarpStarted must be emitted on warp vector activation");
-    assert_eq!(warp_notif.args[0], PyRep::Integer(p.ship_id));
+    assert!(
+        !notifs.iter().any(|n| n.event == "OnWarpStarted"),
+        "OnWarpStarted is client_local and must not be emitted by server"
+    );
 
     // Verify authentic destiny ballistic trajectory: ball mode is MovementMode::Warp (not instant teleport)
     let (_, warp_ball) = sys_handle

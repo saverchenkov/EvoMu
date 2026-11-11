@@ -229,23 +229,17 @@ async fn test_shard5_plan_q6_quasar_economy_industry_pi_end_to_end() {
         assert!(sell_res.dict_get("orderID").and_then(|v| v.as_i64()).is_some());
 
         let _rifter_bpo = buy(&ctx, &mut p1, 687, 1).await[0];
-        ctx.db.with_mut_snapshot(|s| {
-            let mut next_id = s.items.keys().copied().max().unwrap_or(1_500_000_000) + 1;
-            for (tid, qty) in [(TRITANIUM, 1_000_000_i64), (35_u32, 500_000), (36_u32, 200_000), (37_u32, 50_000), (38_u32, 20_000), (39_u32, 20_000), (40_u32, 20_000)] {
-                let id = next_id;
-                next_id += 1;
-                s.items.insert(id, eve_db::InventoryItemRecord {
-                    item_id: id,
-                    type_id: tid,
-                    owner_id: PILOT_1,
-                    location_id: JITA_STN,
-                    flag: eve_db::InventoryFlag::Hangar,
-                    quantity: qty as i32,
-                    singleton: false,
-                    ..Default::default()
-                });
-            }
-        });
+        for (tid, qty) in [
+            (TRITANIUM, 1_000_000_i64),
+            (35_u32, 500_000),
+            (36_u32, 200_000),
+            (37_u32, 50_000),
+            (38_u32, 20_000),
+            (39_u32, 20_000),
+            (40_u32, 20_000),
+        ] {
+            let _ = buy(&ctx, &mut p1, tid, qty).await;
+        }
         rpc(&ctx, &mut p1, "industryManager", "InstallJob", &[PyRep::Integer(687), PyRep::Integer(1), PyRep::Integer(1)]).await.unwrap();
 
         // Query live state through Q-6 Economy, Inventory, AssetHolding, Accounting, LP, Contracts, Industry, PI, Moon & Belt packages

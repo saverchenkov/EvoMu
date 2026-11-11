@@ -11,13 +11,28 @@ const JITA_SYS: u32 = 30000142;
 pub(crate) const JITA_STATION: i64 = 60003760;
 pub(crate) const NULL_SYS: u32 = 30004759;
 
+pub(crate) fn shared_tactical_world() -> &'static (std::sync::Arc<eve_sde::SdeRegistry>, eve_db::WorldStateSnapshot) {
+    static WORLD: std::sync::OnceLock<(
+        std::sync::Arc<eve_sde::SdeRegistry>,
+        eve_db::WorldStateSnapshot,
+    )> = std::sync::OnceLock::new();
+    WORLD.get_or_init(|| {
+        let sde = std::sync::Arc::new(
+            eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path())
+                .expect("open evomu_sde.sqlite"),
+        );
+        let db = eve_db::WorldRepository::with_demo_seed();
+        let snap = db.with_snapshot(|s| s.clone());
+        (sde, snap)
+    })
+}
+
 pub(crate) fn build_ctx() -> ServerContext {
-    let sde = std::sync::Arc::new(
-        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path())
-            .expect("open evomu_sde.sqlite"),
-    );
-    let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
-    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    let (sde, base_snap) = shared_tactical_world();
+    let db = std::sync::Arc::new(eve_db::WorldRepository::new_empty());
+    db.with_mut_snapshot(|snap| *snap = base_snap.clone());
+    let ctx = ServerContext::with_sde_and_repository(sde.clone(), db)
+        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED);
     ctx.set_clock_paused(true);
     ctx
 }
@@ -30,22 +45,27 @@ pub(crate) fn seed_pilot(
     sys_id: u32,
     docked: bool,
 ) -> SessionState {
-    let all_skills_l5: HashMap<u32, TrainedSkillRecord> = ctx
-        .sde
-        .types
-        .values()
-        .filter(|t| t.category_id == 16)
-        .map(|t| {
-            (
-                t.type_id,
-                TrainedSkillRecord {
-                    type_id: t.type_id,
-                    level: 5,
-                    skill_points: 256_000.0,
-                },
-            )
+    static ALL_SKILLS_L5: std::sync::OnceLock<HashMap<u32, TrainedSkillRecord>> =
+        std::sync::OnceLock::new();
+    let all_skills_l5 = ALL_SKILLS_L5
+        .get_or_init(|| {
+            ctx.sde
+                .types
+                .values()
+                .filter(|t| t.category_id == 16)
+                .map(|t| {
+                    (
+                        t.type_id,
+                        TrainedSkillRecord {
+                            type_id: t.type_id,
+                            level: 5,
+                            skill_points: 256_000.0,
+                        },
+                    )
+                })
+                .collect()
         })
-        .collect();
+        .clone();
     ctx.db.with_mut_snapshot(|snap| {
         let mut ch = snap.characters.values().next().cloned().expect("demo character");
         ch.character_id = char_id;
@@ -2767,6 +2787,36 @@ async fn test_probabilistic_heat_damage_propagation_and_nanite_paste() {
     let ship_a: i64 = 84_045;
     let mut sess_a = seed_pilot(&ctx, char_a, ship_a, 24_690, jita_sys, false); // Hyperion (19 total hi+med+low slots)
     let sys = ctx.systems.get_or_spawn(jita_sys);
+
+    // Keep only skills relevant to Hyperion / turrets / fitting / thermodynamics so per-tick
+    // dogma thermodynamics evaluation does not iterate all ~450 unrelated SDE skills.
+    let mut keep_skills: std::collections::HashSet<u32> = [
+        3300, 3301, 3302, 3310, 3311, 3312, 3316, 3318, 11_207, 3413, 3417, 3418, 3426, 28_164,
+    ]
+    .into_iter()
+    .collect();
+    let mut queue: Vec<u32> = vec![24_690, 3_170, 222, 12_058, 3_530, 1_319];
+    while let Some(tid) = queue.pop() {
+        if let Some(t) = ctx.sde.types.get(&tid) {
+            for sa in [
+                eve_sde::attr_ids::REQUIRED_SKILL_1,
+                eve_sde::attr_ids::REQUIRED_SKILL_2,
+                eve_sde::attr_ids::REQUIRED_SKILL_3,
+            ] {
+                if let Some(&req_f) = t.default_attributes.get(&sa) {
+                    let rsid = req_f as u32;
+                    if rsid > 0 && keep_skills.insert(rsid) {
+                        queue.push(rsid);
+                    }
+                }
+            }
+        }
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sk) = snap.skills.get_mut(&char_a) {
+            sk.retain(|sid, _| keep_skills.contains(sid));
+        }
+    });
 
     set_skill_level(&ctx, char_a, 28_164, 0); // Thermodynamics L0
     let mod_0: i64 = 76_101;

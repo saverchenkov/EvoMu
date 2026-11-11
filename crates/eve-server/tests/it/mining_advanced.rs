@@ -433,12 +433,32 @@ async fn test_mn15_corp_mining_ledger_service_and_observer_tracking() {
         .await
         .expect("GetObserversWithMiningEvents RPC");
     assert!(obs_list_res.is_crowset(), "GetObserversWithMiningEvents must return CRowset");
+    let obs_item_row = obs_list_res
+        .crowset_rows()
+        .unwrap()
+        .iter()
+        .find(|r| r.dbrow_get("itemID").and_then(PyRep::as_i64) == Some(observer_id))
+        .expect("Observer structure row in GetObserversWithMiningEvents");
+    assert_eq!(obs_item_row.dbrow_get("solarSystemID").and_then(PyRep::as_i64), Some(system_id as i64));
+    assert_eq!(obs_item_row.dbrow_get("itemName").and_then(PyRep::as_str), Some("Jita Mining Observer"));
 
     let ledger_res = ctx
         .dispatch_rpc(&mut sess, "corpMiningLedger", None, "GetObserverLedger", &[PyRep::Integer(observer_id)], &kw, None)
         .await
         .expect("GetObserverLedger RPC");
     assert!(ledger_res.is_crowset(), "GetObserverLedger must return CRowset");
+    let first_ledger_row = ledger_res
+        .crowset_rows()
+        .and_then(|rows| rows.first())
+        .expect("Expected observer ledger row");
+    assert_eq!(first_ledger_row.dbrow_get("corporationID").and_then(PyRep::as_i64), Some(corp_id));
+    assert!(
+        first_ledger_row
+            .dbrow_get("eventDate")
+            .and_then(PyRep::as_i64)
+            .is_some_and(|ft| ft > 116_444_736_000_000_000)
+    );
+    assert_eq!(first_ledger_row.dbrow_get("solarsystemID").and_then(PyRep::as_i64), Some(system_id as i64));
 
     let ledger = ctx.db.get_observer_mining_ledger(observer_id);
     assert_eq!(ledger.len(), 1, "Observer must track only the scoped moon-ore mining event");
@@ -1127,6 +1147,30 @@ async fn test_action_plan_mn13_to_mn16_moons_metenox_sites_ledgers() {
         .collect();
     assert_eq!(moon_obs_rows.len(), 1, "Both moon mining cycles aggregate into 1 observer ledger row");
     assert_eq!(moon_obs_rows[0].get(3).and_then(|v| v.as_i64()), Some(total_moon_mined));
+    let expected_latest_ts = ctx
+        .db
+        .get_observer_mining_ledger(moon_structure_id)
+        .into_iter()
+        .filter(|e| e.character_id == char_id && e.type_id == first_moon_type && e.timestamp_unix >= ctx.now_unix().saturating_sub(90 * 86_400))
+        .map(|e| e.timestamp_unix)
+        .max()
+        .unwrap_or(0);
+    let moon_dbrow = corp_ledger
+        .crowset_rows()
+        .unwrap()
+        .iter()
+        .find(|r| {
+            r.dbrow_get("characterID").and_then(PyRep::as_i64) == Some(char_id)
+                && r.dbrow_get("typeID").and_then(PyRep::as_i64) == Some(first_moon_type as i64)
+        })
+        .expect("Matching moon observer ledger DBRow");
+    assert_eq!(moon_dbrow.dbrow_get("corporationID").and_then(PyRep::as_i64), Some(char_corp_id));
+    assert_eq!(
+        moon_dbrow.dbrow_get("eventDate").and_then(PyRep::as_i64),
+        Some(eve_server::sp6_lifecycle::unix_to_filetime(expected_latest_ts))
+    );
+    assert!(expected_latest_ts > 0 && eve_server::sp6_lifecycle::unix_to_filetime(expected_latest_ts) > 116_444_736_000_000_000);
+    assert_eq!(moon_dbrow.dbrow_get("solarsystemID").and_then(PyRep::as_i64), Some(30_000_142));
 
     // Outsider character (different corporation) must be denied access to corp observer ledger
     let outsider_char = 90_000_002i64;

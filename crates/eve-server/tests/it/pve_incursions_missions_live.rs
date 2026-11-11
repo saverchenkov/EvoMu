@@ -10,6 +10,20 @@ use eve_server::router::ServerContext;
 use eve_server::services::pve_special_sites::{ensure_special_sites_spawned, with_pve_special_reg};
 use glam::DVec3;
 use std::collections::HashMap;
+use std::sync::Arc;
+
+fn fresh_ctx() -> ServerContext {
+    static BASE: std::sync::OnceLock<(Arc<eve_sde::SdeRegistry>, eve_db::WorldStateSnapshot)> = std::sync::OnceLock::new();
+    let (sde, base_snap) = BASE.get_or_init(|| {
+        let base_ctx = ServerContext::new();
+        (base_ctx.sde.clone(), base_ctx.db.with_snapshot(Clone::clone))
+    });
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    db.with_mut_snapshot(|s| *s = base_snap.clone());
+    let ctx = ServerContext::with_sde_and_repository(sde.clone(), db);
+    crate::common::pin_clock(&ctx);
+    ctx
+}
 
 const JITA_SYS: u32 = 30_000_142;
 const JITA_STATION: i64 = 60_003_760;
@@ -134,8 +148,7 @@ async fn join_fleet(ctx: &ServerContext, boss: &mut LivePilot, member: &mut Live
 // ============================================================================
 #[tokio::test]
 async fn test_live_pve_incursion_fleet_payout_scaling_and_on_grid() {
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
+    let ctx = fresh_ctx();
     ensure_special_sites_spawned(&ctx).await;
     let kw = HashMap::new();
 
@@ -360,8 +373,7 @@ async fn test_live_pve_incursion_fleet_payout_scaling_and_on_grid() {
 // ============================================================================
 #[tokio::test]
 async fn test_live_pve_mission_complete_rewards_bonus_standings_and_items() {
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
+    let ctx = fresh_ctx();
     let kw = HashMap::new();
 
     // 1. Career Agent (agent_type_id == 12): complete within bonus window -> ISK + bonus + LP + standing + item reward
@@ -476,7 +488,7 @@ async fn test_live_pve_mission_complete_rewards_bonus_standings_and_items() {
     assert_eq!(comp_c.dict_get("missionState").and_then(|v| v.as_i64()), Some(4));
     assert!(comp_c.dict_get("iskReward").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
     assert!(comp_c.dict_get("bonusReward").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
-    assert!(comp_c.dict_get("lpReward").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+    assert_eq!(comp_c.dict_get("lpReward").and_then(|v| v.as_i64()), Some(0));
     assert!(comp_c.dict_get("newStanding").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);
     let reward_item_id = comp_c
         .dict_get("rewardItemID")

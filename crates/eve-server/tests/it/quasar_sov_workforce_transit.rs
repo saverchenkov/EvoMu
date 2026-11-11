@@ -156,7 +156,8 @@ async fn test_sov_workforce_transit_relay_traversal_and_notices() {
 
 #[tokio::test]
 async fn test_sov_hub_mercenaryden_and_star_resources_descriptors() {
-    // DATA GAP: sovereignty/hub/api and sovereignty/resource/star/api remain untagged (`OPEN`) per docs/BLOCKERS.md §9.
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj
     let ctx = ServerContext::new();
     let sys_a = 30_000_142u32;
     seed_hub(&ctx, HUB_A, sys_a);

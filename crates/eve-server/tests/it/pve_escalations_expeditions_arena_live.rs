@@ -10,6 +10,20 @@ use eve_server::router::ServerContext;
 use eve_server::services::pvp_filament_mgr::get_pvp_filament_match_spec;
 use glam::DVec3;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+fn fresh_ctx() -> ServerContext {
+    static BASE: std::sync::OnceLock<(Arc<eve_sde::SdeRegistry>, eve_db::WorldStateSnapshot)> = std::sync::OnceLock::new();
+    let (sde, base_snap) = BASE.get_or_init(|| {
+        let base_ctx = ServerContext::new();
+        (base_ctx.sde.clone(), base_ctx.db.with_snapshot(Clone::clone))
+    });
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    db.with_mut_snapshot(|s| *s = base_snap.clone());
+    let ctx = ServerContext::with_sde_and_repository(sde.clone(), db);
+    pin_clock(&ctx);
+    ctx
+}
 
 const JITA_SYS: u32 = 30_000_142;
 const JITA_STATION: i64 = 60_003_760;
@@ -70,8 +84,8 @@ async fn fly_stargates_to(ctx: &ServerContext, p: &mut LivePilot, target_sys: u3
         p.beyonce = bind_oid(ctx, p, "beyonce", PyRep::Integer(i64::from(cur_sys))).await;
         for hop in 0..8 {
             let _ = ok(ctx, p, "beyonce", "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(gate_id), PyRep::Real(0.0)]).await;
-            for _ in 0..240 {
-                sys_h.step_manual(5.0).await.unwrap(); ctx.advance_secs(5);
+            for _ in 0..80 {
+                sys_h.step_manual(12.0).await.unwrap(); ctx.advance_secs(12);
                 if sys_h.get_ball_snapshot(p.ship_id).await.unwrap().is_some_and(|(_, b)| !matches!(b.mode, MovementMode::Warp { .. })) { break; }
             }
             let dist = match (sys_h.get_ball_snapshot(p.ship_id).await.unwrap(), sys_h.get_ball_snapshot(gate_id).await.unwrap()) {
@@ -79,17 +93,17 @@ async fn fly_stargates_to(ctx: &ServerContext, p: &mut LivePilot, target_sys: u3
                 _ => 0.0,
             };
             if dist <= 150_000.0 || hop == 7 { break; }
-            for _ in 0..12 { sys_h.step_manual(10.0).await.unwrap(); ctx.advance_secs(10); }
+            for _ in 0..6 { sys_h.step_manual(20.0).await.unwrap(); ctx.advance_secs(20); }
         }
         if let (Some((_, sb)), Some((_, gb))) = (sys_h.get_ball_snapshot(p.ship_id).await.unwrap(), sys_h.get_ball_snapshot(gate_id).await.unwrap()) {
             let mut d_surf = (sb.position.distance(gb.position) - gb.radius).max(0.0);
             if d_surf > 2_000.0 {
-                for step in 0..800 {
-                    if step % 10 == 0 {
+                for step in 0..400 {
+                    if step % 5 == 0 {
                         ok(ctx, p, "beyonce", "CmdGotoPoint", &[PyRep::Real(gb.position.x), PyRep::Real(gb.position.y), PyRep::Real(gb.position.z)]).await;
                     }
-                    sys_h.step_manual(2.0).await.unwrap();
-                    ctx.advance_secs(2);
+                    sys_h.step_manual(4.0).await.unwrap();
+                    ctx.advance_secs(4);
                     if let Some((_, b)) = sys_h.get_ball_snapshot(p.ship_id).await.unwrap() {
                         d_surf = (b.position.distance(gb.position) - gb.radius).max(0.0);
                         if d_surf <= 2_000.0 { break; }
@@ -102,7 +116,7 @@ async fn fly_stargates_to(ctx: &ServerContext, p: &mut LivePilot, target_sys: u3
         p.beyonce = bind_oid(ctx, p, "beyonce", PyRep::Integer(i64::from(next_sys))).await;
     }
     ctx.advance_secs(35);
-    for _ in 0..32 { ctx.systems.get_or_spawn(target_sys).step_manual(1.0).await.unwrap(); }
+    ctx.systems.get_or_spawn(target_sys).step_manual(32.0).await.unwrap();
 }
 
 fn find_t1_small_turret_and_ammo(sde: &eve_sde::SdeRegistry) -> (u32, u32) {
@@ -235,7 +249,7 @@ async fn provision_contract_player_in_space(
     }
     ctx.advance_secs(31);
     ok(ctx, &mut p, "stationSvc", "Undock", &[]).await;
-    for _ in 0..32 { ctx.systems.get_or_spawn(p_sys).step_manual(1.0).await.unwrap(); }
+    ctx.systems.get_or_spawn(p_sys).step_manual(32.0).await.unwrap();
     p.beyonce = bind_oid(ctx, &mut p, "beyonce", PyRep::Integer(i64::from(p_sys))).await;
     ctx.advance_secs(31);
     fly_stargates_to(ctx, &mut p, target_sys).await;
@@ -253,9 +267,9 @@ async fn warp_to_stuff_and_clear_site(
     pilot.beyonce = bind_oid(ctx, pilot, "beyonce", PyRep::Integer(i64::from(sys_id))).await;
     let sys = ctx.systems.get_or_spawn(sys_id);
     ok(ctx, pilot, "beyonce", "CmdWarpToStuff", &[PyRep::String(stuff_type.into()), warp_target]).await;
-    for _ in 0..240 {
-        sys.step_manual(5.0).await.unwrap();
-        ctx.advance_secs(5);
+    for _ in 0..80 {
+        sys.step_manual(12.0).await.unwrap();
+        ctx.advance_secs(12);
         if sys.get_ball_snapshot(pilot.ship_id).await.unwrap().is_some_and(|(_, b)| !matches!(b.mode, MovementMode::Warp { .. })) { break; }
     }
     let d_oid = bind_oid(ctx, pilot, "dogmaIM", PyRep::Integer(pilot.ship_id)).await;
@@ -317,8 +331,7 @@ async fn warp_to_stuff_and_clear_site(
 
 #[tokio::test]
 async fn test_live_escalations_and_multi_step_expeditions() {
-    let ctx = ServerContext::new();
-    pin_clock(&ctx);
+    let ctx = fresh_ctx();
 
     let mut gm = gm_pilot_in_space(&ctx, 51, 96_100_001, 16_242, JITA_SYS).await;
     let (mut pilot, guns, _) = provision_contract_player_in_space(&ctx, &mut gm, 52, "live_esc_player", "Esc Explorer", 16_242, true, &[], JITA_SYS).await;
@@ -427,8 +440,7 @@ async fn test_live_escalations_and_multi_step_expeditions() {
 
 #[tokio::test]
 async fn test_live_proving_grounds_validation_queue_and_sphere_hazard() {
-    let ctx = ServerContext::new();
-    pin_clock(&ctx);
+    let ctx = fresh_ctx();
 
     let (fil_2v2_tid, spec_2v2, tl_2v2) = ctx.sde.types.values()
         .filter(|t| (t.group_id == 4050 || t.group_id == 4743) && !t.name.starts_with("Expired"))
@@ -472,7 +484,7 @@ async fn test_live_proving_grounds_validation_queue_and_sphere_hazard() {
     let safe_origin = DVec3::new(10_000_000.0, 2_000_000.0, -5_000_000.0);
     for (idx, pl) in [&mut p1, &mut p2, &mut p3, &mut p4].iter_mut().enumerate() { jita_h.set_ball_position(pl.ship_id, safe_origin + DVec3::new((idx as f64) * 500.0, 0.0, 0.0)).await; }
     ctx.advance_secs(35);
-    for _ in 0..32 { jita_h.step_manual(1.0).await.unwrap(); }
+    jita_h.step_manual(32.0).await.unwrap();
 
     // Form Fleet A (p1 boss, p2 member) & test JoinPVPQueue restrictions.
     let fleet_a = ok(&ctx, &mut p1, "fleetObjectHandler", "CreateFleet", &[]).await.as_i64().unwrap();
@@ -501,7 +513,7 @@ async fn test_live_proving_grounds_validation_queue_and_sphere_hazard() {
     ok(&ctx, &mut p1, "stationSvc", "Undock", &[]).await;
     jita_h.set_ball_position(p1.ship_id, safe_origin).await;
     ctx.advance_secs(35);
-    for _ in 0..32 { jita_h.step_manual(1.0).await.unwrap(); }
+    jita_h.step_manual(32.0).await.unwrap();
 
     let bad_mod_id = stock_ship_bay(&ctx, &mut p1, disallowed_mod, 1, 5).await;
     assert_eq!(rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(fil_p1_b), PyRep::Integer(i64::from(fil_2v2_tid))]).await.unwrap_err().code, "InvalidModuleTierForFilament");
@@ -515,7 +527,7 @@ async fn test_live_proving_grounds_validation_queue_and_sphere_hazard() {
     ok(&ctx, &mut p1, "stationSvc", "Undock", &[]).await;
     jita_h.set_ball_position(p1.ship_id, safe_origin).await;
     ctx.advance_secs(35);
-    for _ in 0..32 { jita_h.step_manual(1.0).await.unwrap(); }
+    jita_h.step_manual(32.0).await.unwrap();
     assert_eq!(rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(fil_p1_b), PyRep::Integer(i64::from(fil_2v2_tid))]).await.unwrap_err().code, "InvalidImplantsForFilament");
     ok(&ctx, &mut p1, "dogmaIM", "DestroyImplant", &[PyRep::Integer(bad_imp_id)]).await;
 
@@ -569,7 +581,7 @@ async fn test_live_proving_grounds_validation_queue_and_sphere_hazard() {
         let mut p6 = gm_pilot_in_space(&ctx, 66, 96_200_006, allowed_hull, JITA_SYS).await;
         jita_h.set_ball_position(p5.ship_id, safe_origin + DVec3::new(1_000.0, 0.0, 0.0)).await;
         jita_h.set_ball_position(p6.ship_id, safe_origin + DVec3::new(1_500.0, 0.0, 0.0)).await;
-        for _ in 0..32 { jita_h.step_manual(1.0).await.unwrap(); }
+        jita_h.step_manual(32.0).await.unwrap();
         let (f5, f6) = (stock_ship_bay(&ctx, &mut p5, fil_1v1, 1, 5).await, stock_ship_bay(&ctx, &mut p6, fil_1v1, 1, 5).await);
         ok(&ctx, &mut p5, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f5), PyRep::Integer(i64::from(fil_1v1))]).await;
         ok(&ctx, &mut p6, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f6), PyRep::Integer(i64::from(fil_1v1))]).await;
@@ -623,8 +635,7 @@ async fn test_live_proving_grounds_validation_queue_and_sphere_hazard() {
 
 #[tokio::test]
 async fn test_live_proving_grounds_arena_timer_expiry_destruction() {
-    let ctx = ServerContext::new();
-    pin_clock(&ctx);
+    let ctx = fresh_ctx();
 
     let (fil_1v1_tid, spec_1v1) = ctx.sde.types.values().filter(|t| (t.group_id == 4050 || t.group_id == 4743) && !t.name.starts_with("Expired"))
         .filter_map(|t| { let sp = get_pvp_filament_match_spec(&ctx.sde, t.type_id); (sp.fleet_size == 1 && sp.number_of_fleets == 2).then_some((t.type_id, sp)) })

@@ -27,13 +27,35 @@ const PHOENIX_DREAD_TYPE: u32 = 19726;
 const PERIMETER: u32 = 30_000_144;
 const ZARZAKH: u32 = 30_100_000;
 
+fn fast_ctx() -> Arc<ServerContext> {
+    static WORLD: std::sync::OnceLock<(
+        Arc<eve_sde::SdeRegistry>,
+        eve_db::WorldStateSnapshot,
+    )> = std::sync::OnceLock::new();
+    let (sde, base_snap) = WORLD.get_or_init(|| {
+        let sde = Arc::new(
+            eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path())
+                .expect("open evomu_sde.sqlite"),
+        );
+        let db = eve_db::WorldRepository::with_demo_seed();
+        let snap = db.with_snapshot(|s| s.clone());
+        (sde, snap)
+    });
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    db.with_mut_snapshot(|s| *s = base_snap.clone());
+    Arc::new(
+        ServerContext::with_sde_and_repository(sde.clone(), db)
+            .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED),
+    )
+}
+
 // parity: feat:npc.mining-op-npc
 // parity: feat:npc.npc-hauler
 #[tokio::test]
 async fn test_e2e_npc_mining_op_fleet_escort_and_hauler_convoy_travel() {
     eve_testkit::attest(&["feat:npc.mining-op-npc", "feat:npc.npc-hauler"]);
 
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = fast_ctx();
     crate::common::pin_clock(&ctx);
 
     let mut pilot = spawn_player_combat_pilot(
@@ -183,7 +205,7 @@ async fn test_e2e_npc_mining_op_fleet_escort_and_hauler_convoy_travel() {
 async fn test_e2e_npc_navy_and_zarzakh_gate_guns_patrols() {
     eve_testkit::attest(&["feat:npc.navy-npc", "feat:npc.zarzakh-gate-guns-patrols"]);
 
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = fast_ctx();
     crate::common::pin_clock(&ctx);
 
     let mut pilot = spawn_player_combat_pilot(
@@ -388,7 +410,7 @@ async fn test_e2e_npc_sleeper_ewar_by_wh_class_and_pochven_hypnosian_sleepers() 
         "feat:npc.pochven-hypnosian-sleepers",
     ]);
 
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = fast_ctx();
     crate::common::pin_clock(&ctx);
 
     let mut pilot = spawn_player_combat_pilot(

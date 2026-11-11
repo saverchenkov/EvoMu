@@ -91,7 +91,6 @@ async fn q_final_cosmetics_titles_palette_market() {
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    crate::common::seed_test_nes_store_catalog(&ctx);
     let mut sess = build_sess(40_001, 90_000_201, 98_000_001);
 
     let endpoints = [
@@ -120,7 +119,7 @@ async fn q_final_cosmetics_titles_palette_market() {
 // 3. Entitlements, Faction, Freelance, Payment & Stargate Requests
 #[tokio::test]
 async fn q_final_entitlements_faction_freelance_payment_stargate() {
-    // DATA GAP: Payment purchase offer catalog (`eve_public/payment/purchase/api_pb2.pyj`) is external store data not in V24 client FSD.
+    // Exercises Quasar faction activity and PLEX vault transaction protobuf endpoints.
     // parity: quasar:eveProto/generated/eve_public/faction/activity/activity_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/plex/vault/transaction/api/requests_pb2.pyj
     eve_testkit::attest(&[
@@ -147,7 +146,6 @@ async fn q_final_entitlements_faction_freelance_payment_stargate() {
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    crate::common::seed_test_nes_store_catalog(&ctx);
     ctx.db.with_mut_snapshot(|s| {
         s.fw_system_occupations.insert(30_000_142, eve_db::snapshot_ext::FwSystemOccupationRecord {
             solar_system_id: 30_000_142,
@@ -315,7 +313,6 @@ async fn q_final_cosmetic_skinr_and_tale_notices() {
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    crate::common::seed_test_nes_store_catalog(&ctx);
     let mut sess = build_sess(40_004, 90_000_204, 98_000_001);
 
     let empty_kw = HashMap::new();
@@ -389,7 +386,6 @@ async fn q_final_sovereignty_and_goals_notices() {
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    crate::common::seed_test_nes_store_catalog(&ctx);
     let mut sess = build_sess(40_005, 90_000_205, 98_000_001);
 
     let empty_kw = HashMap::new();

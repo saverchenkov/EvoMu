@@ -130,7 +130,7 @@ async fn test_live_pve_daily_goals_and_air_career_program() {
         .progression
         .daily_goals
         .get_or_init_goals(char_id as u32);
-    assert!(goals_init.len() >= 6, "Must seed 5 category goals + 1 DailyBonus milestone");
+    assert_eq!(goals_init.len(), 5, "Must seed 4 rotating category goals + 1 DailyBonus milestone");
 
     let combat_goal = goals_init
         .iter()
@@ -266,7 +266,16 @@ async fn test_live_pve_daily_goals_and_air_career_program() {
     assert_eq!(claim_b.status_code, STATUS_OK);
 
     let sp_after = ctx.db.with_snapshot(|s| s.characters[&char_id].free_skill_points);
-    assert_eq!(sp_after, initial_sp + 20_000.0);
+    assert_eq!(sp_after, initial_sp + 10_000.0);
+    let (ch_em_after_bonus, corp_em_after_bonus) = ctx.db.with_snapshot(|s| {
+        let ch = &s.characters[&char_id];
+        (
+            ch.loyalty_points.get(&1_000_419).copied().unwrap_or(0),
+            s.corp_lp_balances.get(&(ch.corporation_id, 1_000_419)).copied().unwrap_or(0),
+        )
+    });
+    assert_eq!(ch_em_after_bonus, initial_evermarks + 1_000);
+    assert_eq!(corp_em_after_bonus, initial_corp_evermarks + 1_000);
 
     // Negative check: re-claiming claimed daily goal fails with STATUS_FORBIDDEN
     let re_claim = quasar_call(
@@ -587,8 +596,11 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
     let offer_lp = offer_rep.dict_get("lpReward").and_then(|v| v.as_i64()).unwrap();
     let offer_bonus = offer_rep.dict_get("bonusReward").and_then(|v| v.as_i64()).unwrap();
 
-    let (calc_isk, calc_lp, calc_bonus) =
-        compute_character_mission_rewards(&ctx, char_id, agent_id, mission_id, agent_sys);
+    let CharacterMissionRewards {
+        isk_reward: calc_isk,
+        lp_reward: calc_lp,
+        bonus_reward: calc_bonus,
+    } = compute_character_mission_rewards(&ctx, char_id, agent_id, mission_id, agent_sys);
     assert_eq!(offer_isk, calc_isk);
     assert_eq!(offer_lp, calc_lp);
     assert_eq!(offer_bonus, calc_bonus);

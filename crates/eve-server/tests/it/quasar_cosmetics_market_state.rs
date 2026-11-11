@@ -144,8 +144,7 @@ async fn paragon_hub_cosmetic_market_fees_and_component_listings() {
     assert_eq!(mkt.skin_tier_for_hex("custom_hex_4"), Some(4));
     assert_eq!(mkt.skin_tier_for_hex("nonexistent"), None);
 
-    // 4. Component listings GetAllRequest + InitiatePurchaseListingRequest (seeded via test helper).
-    crate::common::seed_test_cosmetics_component_listings(&ctx);
+    // 4. Component listings GetAllRequest + InitiatePurchaseListingRequest.
     let rsp_comp_all = quasar_rpc(&ctx, &mut buyer, "eve_public.cosmetic.market.component.listing.api.GetAllRequest", Vec::new()).await;
     assert_eq!(rsp_comp_all.status_code, STATUS_OK);
     let wm_comp = decode(&rsp_comp_all);

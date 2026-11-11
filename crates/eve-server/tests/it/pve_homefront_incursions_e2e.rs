@@ -15,12 +15,11 @@ use eve_server::services::pve_special_sites::{
 };
 use eve_server::services::pve_special_sites_combat::get_drifter_hive_for_system;
 use crate::pve_e2e_common::{
-    bind_service, buy_fit_combat_ship, buy_fit_combat_ship_with_ammo, buy_item_at_station,
+    bfs_hops, bind_service, buy_fit_combat_ship_with_ammo, buy_item_at_station,
     create_player_pilot, drain_all_notifications, ensure_skills_for_types,
-    fleet_warp_and_engage_ball, fly_stargates_to, fresh_player_ctx, fund_pilot_isk,
-    jump_through_wormhole_to, kv_get, login_existing_player, move_ship_to_ball,
-    reload_ctx_from_sqlite, rpc_ok, rpc_res, undock_from_station, wait_for_warp_end,
-    warp_and_engage_ball, JITA_STATION, JITA_SYS,
+    fleet_engage_targets_parallel, fleet_warp_and_engage_ball, fly_stargates_to, fresh_player_ctx,
+    fund_pilot_isk, jump_through_wormhole_to, kv_get, login_existing_player, move_ship_to_ball,
+    reload_ctx_from_sqlite, rpc_ok, rpc_res, undock_from_station, JITA_STATION, JITA_SYS,
 };
 
 fn dict_first_inner_id(rep: &PyRep) -> Option<i64> {
@@ -59,21 +58,24 @@ fn dict_first_inner_id(rep: &PyRep) -> Option<i64> {
 #[tokio::test]
 async fn test_homefront_drifter_triglavian_and_metaliminal_storms_e2e() {
     let ctx = fresh_player_ctx();
-    let (mut sess1, cid1, _) =
-        create_player_pilot(&ctx, 52_001, "hf_lead_u1", "Homefront Lead", JITA_SYS).await;
-    let (mut sess2, cid2, _) =
-        create_player_pilot(&ctx, 52_002, "hf_wing_u2", "Homefront Wing", JITA_SYS).await;
-
-    let (ship1, guns1) =
-        buy_fit_combat_ship_with_ammo(&ctx, &mut sess1, cid1, JITA_STATION, 28_665, 2929, 12_779, 4, 8_000).await;
-    let (ship2, guns2) =
-        buy_fit_combat_ship_with_ammo(&ctx, &mut sess2, cid2, JITA_STATION, 28_665, 2929, 12_779, 4, 8_000).await;
-    ensure_skills_for_types(&ctx, &mut sess1, cid1, JITA_STATION, &[33_400]).await;
-    ensure_skills_for_types(&ctx, &mut sess2, cid2, JITA_STATION, &[33_400]).await;
-    let bast1 = buy_item_at_station(&ctx, &mut sess1, cid1, JITA_STATION, 33_400, 1).await;
-    rpc_ok(&ctx, &mut sess1, "invbroker", "Add", &[PyRep::Integer(bast1), PyRep::Integer(ship1), PyRep::Integer(31)]).await;
-    let bast2 = buy_item_at_station(&ctx, &mut sess2, cid2, JITA_STATION, 33_400, 1).await;
-    rpc_ok(&ctx, &mut sess2, "invbroker", "Add", &[PyRep::Integer(bast2), PyRep::Integer(ship2), PyRep::Integer(31)]).await;
+    let ((mut sess1, cid1, ship1, guns1, bast1), (mut sess2, cid2, ship2, guns2, bast2)) = tokio::join!(
+        async {
+            let (mut s, cid, _) = create_player_pilot(&ctx, 52_001, "hf_lead_u1", "Homefront Lead", JITA_SYS).await;
+            let (ship, guns) = buy_fit_combat_ship_with_ammo(&ctx, &mut s, cid, JITA_STATION, 28_659, 3057, 262, 4, 40).await;
+            ensure_skills_for_types(&ctx, &mut s, cid, JITA_STATION, &[33_400]).await;
+            let bast = buy_item_at_station(&ctx, &mut s, cid, JITA_STATION, 33_400, 1).await;
+            rpc_ok(&ctx, &mut s, "invbroker", "Add", &[PyRep::Integer(bast), PyRep::Integer(ship), PyRep::Integer(31)]).await;
+            (s, cid, ship, guns, bast)
+        },
+        async {
+            let (mut s, cid, _) = create_player_pilot(&ctx, 52_002, "hf_wing_u2", "Homefront Wing", JITA_SYS).await;
+            let (ship, guns) = buy_fit_combat_ship_with_ammo(&ctx, &mut s, cid, JITA_STATION, 28_659, 3057, 262, 4, 40).await;
+            ensure_skills_for_types(&ctx, &mut s, cid, JITA_STATION, &[33_400]).await;
+            let bast = buy_item_at_station(&ctx, &mut s, cid, JITA_STATION, 33_400, 1).await;
+            rpc_ok(&ctx, &mut s, "invbroker", "Add", &[PyRep::Integer(bast), PyRep::Integer(ship), PyRep::Integer(31)]).await;
+            (s, cid, ship, guns, bast)
+        },
+    );
 
     let fleet_rep = rpc_ok(
         &ctx,
@@ -126,24 +128,21 @@ async fn test_homefront_drifter_triglavian_and_metaliminal_storms_e2e() {
         let (&sid, list) = reg
             .homefront_sites
             .iter()
-            .find(|(_, l)| l.iter().any(|s| !s.completed))
+            .filter(|(_, l)| l.iter().any(|s| !s.completed))
+            .min_by_key(|(&sid, _)| bfs_hops(&ctx.sde, JITA_SYS, sid))
             .expect("active homefront site");
         let s = list.iter().find(|s| !s.completed).unwrap();
         (sid, s.instance_id)
     });
 
-    undock_from_station(&ctx, &mut sess1, JITA_SYS).await;
-    undock_from_station(&ctx, &mut sess2, JITA_SYS).await;
-    fly_stargates_to(&ctx, &mut sess1, hf_sys).await;
-    fly_stargates_to(&ctx, &mut sess2, hf_sys).await;
-
-    let b_oid1 = bind_service(&ctx, &mut sess1, "beyonce", PyRep::Integer(i64::from(hf_sys))).await as u64;
-    let b_oid2 = bind_service(&ctx, &mut sess2, "beyonce", PyRep::Integer(i64::from(hf_sys))).await as u64;
-    let empty = HashMap::new();
-    let _ = ctx.dispatch_rpc(&mut sess1, "beyonce", Some(b_oid1), "CmdWarpToStuff", &[PyRep::String("dungeon".into()), PyRep::Integer(hf_inst_id)], &empty, None).await;
-    wait_for_warp_end(&ctx, hf_sys, ship1).await;
-    let _ = ctx.dispatch_rpc(&mut sess2, "beyonce", Some(b_oid2), "CmdWarpToStuff", &[PyRep::String("dungeon".into()), PyRep::Integer(hf_inst_id)], &empty, None).await;
-    wait_for_warp_end(&ctx, hf_sys, ship2).await;
+    tokio::join!(
+        undock_from_station(&ctx, &mut sess1, JITA_SYS),
+        undock_from_station(&ctx, &mut sess2, JITA_SYS),
+    );
+    tokio::join!(
+        fly_stargates_to(&ctx, &mut sess1, hf_sys),
+        fly_stargates_to(&ctx, &mut sess2, hf_sys),
+    );
 
     let bal1_before = ctx.db.get_character(cid1).map(|c| c.balance.raw_cents()).unwrap_or(0);
     for _pass in 0..6 {
@@ -154,7 +153,15 @@ async fn test_homefront_drifter_triglavian_and_metaliminal_storms_e2e() {
         if hf_sys_h.get_ball_snapshot(hf_boss).await.ok().flatten().is_none() {
             break;
         }
-        warp_and_engage_ball(&ctx, &mut sess1, hf_sys, ship1, &guns1, hf_boss, "dungeon", PyRep::Integer(hf_inst_id)).await;
+        fleet_warp_and_engage_ball(
+            &ctx,
+            &mut [(&mut sess1, ship1, &guns1), (&mut sess2, ship2, &guns2)],
+            hf_sys,
+            hf_boss,
+            "dungeon",
+            PyRep::Integer(hf_inst_id),
+        )
+        .await;
     }
     let hf_completed = read_pve_special_reg(&ctx, |reg| {
         reg.homefront_sites[&hf_sys]
@@ -175,7 +182,8 @@ async fn test_homefront_drifter_triglavian_and_metaliminal_storms_e2e() {
         let (&sid, list) = reg
             .triglavian_sites
             .iter()
-            .find(|(_, l)| l.iter().any(|s| !s.completed))
+            .filter(|(_, l)| l.iter().any(|s| !s.completed))
+            .min_by_key(|(&sid, _)| bfs_hops(&ctx.sde, hf_sys, sid) + bfs_hops(&ctx.sde, JITA_SYS, sid))
             .expect("active Triglavian site");
         let s = list.iter().find(|s| !s.completed).unwrap();
         (sid, s.instance_id, s.boss_npc_ball_id, s.escort_ball_ids.clone())
@@ -193,26 +201,33 @@ async fn test_homefront_drifter_triglavian_and_metaliminal_storms_e2e() {
         dict_first_inner_id(&trig_rep).is_some(),
         "GetTriglavianSiteInstances must return active Triglavian site instances"
     );
-    for ebid in trig_escorts {
-        warp_and_engage_ball(&ctx, &mut sess1, trig_sys, ship1, &guns1, ebid, "dungeon", PyRep::Integer(trig_inst_id)).await;
-    }
-    warp_and_engage_ball(&ctx, &mut sess1, trig_sys, ship1, &guns1, trig_boss, "dungeon", PyRep::Integer(trig_inst_id)).await;
+    let mut trig_targets = trig_escorts;
+    trig_targets.push(trig_boss);
+    fleet_engage_targets_parallel(&ctx, &mut [(&mut sess1, ship1, &guns1)], trig_sys, &trig_targets, "dungeon", PyRep::Integer(trig_inst_id)).await;
     let trig_completed = read_pve_special_reg(&ctx, |reg| {
         reg.triglavian_sites[&trig_sys].iter().any(|s| s.completed)
     });
     assert!(trig_completed, "destroying Triglavian boss must complete site");
 
     // 3. Sentinel Drifter Hive: jump into Drifter Wormhole, clear room NPCs & warden via turret combat, verify hive completion
-    let (mut sess3, cid3, _) = create_player_pilot(&ctx, 52_003, "hf_wing_u3", "Homefront Heavy 3", JITA_SYS).await;
-    let (mut sess4, cid4, _) = create_player_pilot(&ctx, 52_004, "hf_wing_u4", "Homefront Heavy 4", JITA_SYS).await;
-    let (ship3, guns3) = buy_fit_combat_ship_with_ammo(&ctx, &mut sess3, cid3, JITA_STATION, 28_665, 2929, 12_779, 4, 8_000).await;
-    let (ship4, guns4) = buy_fit_combat_ship_with_ammo(&ctx, &mut sess4, cid4, JITA_STATION, 28_665, 2929, 12_779, 4, 8_000).await;
-    ensure_skills_for_types(&ctx, &mut sess3, cid3, JITA_STATION, &[33_400]).await;
-    ensure_skills_for_types(&ctx, &mut sess4, cid4, JITA_STATION, &[33_400]).await;
-    let bast3 = buy_item_at_station(&ctx, &mut sess3, cid3, JITA_STATION, 33_400, 1).await;
-    rpc_ok(&ctx, &mut sess3, "invbroker", "Add", &[PyRep::Integer(bast3), PyRep::Integer(ship3), PyRep::Integer(31)]).await;
-    let bast4 = buy_item_at_station(&ctx, &mut sess4, cid4, JITA_STATION, 33_400, 1).await;
-    rpc_ok(&ctx, &mut sess4, "invbroker", "Add", &[PyRep::Integer(bast4), PyRep::Integer(ship4), PyRep::Integer(31)]).await;
+    let ((mut sess3, cid3, ship3, guns3, bast3), (mut sess4, cid4, ship4, guns4, bast4)) = tokio::join!(
+        async {
+            let (mut s, cid, _) = create_player_pilot(&ctx, 52_003, "hf_wing_u3", "Homefront Heavy 3", JITA_SYS).await;
+            let (ship, guns) = buy_fit_combat_ship_with_ammo(&ctx, &mut s, cid, JITA_STATION, 28_659, 3057, 262, 4, 40).await;
+            ensure_skills_for_types(&ctx, &mut s, cid, JITA_STATION, &[33_400]).await;
+            let bast = buy_item_at_station(&ctx, &mut s, cid, JITA_STATION, 33_400, 1).await;
+            rpc_ok(&ctx, &mut s, "invbroker", "Add", &[PyRep::Integer(bast), PyRep::Integer(ship), PyRep::Integer(31)]).await;
+            (s, cid, ship, guns, bast)
+        },
+        async {
+            let (mut s, cid, _) = create_player_pilot(&ctx, 52_004, "hf_wing_u4", "Homefront Heavy 4", JITA_SYS).await;
+            let (ship, guns) = buy_fit_combat_ship_with_ammo(&ctx, &mut s, cid, JITA_STATION, 28_659, 3057, 262, 4, 40).await;
+            ensure_skills_for_types(&ctx, &mut s, cid, JITA_STATION, &[33_400]).await;
+            let bast = buy_item_at_station(&ctx, &mut s, cid, JITA_STATION, 33_400, 1).await;
+            rpc_ok(&ctx, &mut s, "invbroker", "Add", &[PyRep::Integer(bast), PyRep::Integer(ship), PyRep::Integer(31)]).await;
+            (s, cid, ship, guns, bast)
+        },
+    );
     for (cap_cid, s_ref) in [(cid3, &mut sess3), (cid4, &mut sess4)] {
         let _ = rpc_res(&ctx, &mut sess1, "fleetMgr", "Invite", &[PyRep::Integer(cap_cid), PyRep::Integer(4)]).await;
         let _ = rpc_res(&ctx, s_ref, "fleetMgr", "AcceptInvite", &[PyRep::Integer(fleet_id)]).await;
@@ -221,15 +236,19 @@ async fn test_homefront_drifter_triglavian_and_metaliminal_storms_e2e() {
     eve_server::services::space_destiny::ensure_system_signatures_and_anomalies(&ctx, drifter_sys).await;
     ctx.advance_secs(3_601);
     eve_server::services::space_destiny::ensure_system_signatures_and_anomalies(&ctx, drifter_sys).await;
-    let cur_pos = glam::DVec3::from_array(ctx.sde.solar_systems[&JITA_SYS].galactic_pos_ly);
     let (k_drf_sys, drifter_sig) = ctx.db.with_snapshot(|s| {
         s.cosmic_signatures.iter()
             .filter(|(&ksys, _)| ksys < 31_000_000 && ctx.sde.solar_systems.get(&ksys).is_some_and(|sys| sys.region_id != 10_000_070))
             .filter_map(|(&ksys, sigs)| {
                 sigs.iter().find(|sig| sig.sig_group == "Wormhole" && !sig.collapsed && sig.destination_system_id == Some(drifter_sys) && sig.remaining_mass_kg > 0.0)
-                    .map(|sig| (ksys, sig.signature_id.clone(), ctx.sde.solar_systems.get(&ksys).map(|sys| glam::DVec3::from_array(sys.galactic_pos_ly).distance(cur_pos)).unwrap_or(f64::MAX)))
+                    .map(|sig| {
+                        let hops = bfs_hops(&ctx.sde, trig_sys, ksys)
+                            .max(bfs_hops(&ctx.sde, hf_sys, ksys))
+                            .max(bfs_hops(&ctx.sde, JITA_SYS, ksys));
+                        (ksys, sig.signature_id.clone(), hops)
+                    })
             })
-            .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+            .min_by_key(|a| a.2)
             .map(|(ksys, sid, _)| (ksys, sid))
     }).expect("materialized K-space entrance into Sentinel Drifter Hive");
     let _ = eve_server::services::space_destiny::ensure_system_signatures_and_anomalies(&ctx, k_drf_sys).await;
@@ -255,33 +274,55 @@ async fn test_homefront_drifter_triglavian_and_metaliminal_storms_e2e() {
             .unwrap_or_default();
         if _room == 3 {
             let tgt = PyRep::Integer(i64::from(drifter_sys));
+            tokio::join!(
+                move_ship_to_ball(&ctx, &mut sess1, drifter_sys, ship1, "dungeon", tgt.clone()),
+                move_ship_to_ball(&ctx, &mut sess2, drifter_sys, ship2, "dungeon", tgt.clone()),
+                move_ship_to_ball(&ctx, &mut sess3, drifter_sys, ship3, "dungeon", tgt.clone()),
+                move_ship_to_ball(&ctx, &mut sess4, drifter_sys, ship4, "dungeon", tgt),
+            );
             for (s_ref, sid, b_mod) in [
                 (&mut sess1, ship1, bast1),
                 (&mut sess2, ship2, bast2),
                 (&mut sess3, ship3, bast3),
                 (&mut sess4, ship4, bast4),
             ] {
-                move_ship_to_ball(&ctx, s_ref, drifter_sys, sid, "dungeon", tgt.clone()).await;
                 let d_oid = bind_service(&ctx, s_ref, "dogmaIM", PyRep::Integer(sid)).await as u64;
                 let _ = ctx.dispatch_rpc(s_ref, "dogmaIM", Some(d_oid), "Activate", &[PyRep::Integer(b_mod)], &HashMap::new(), None).await;
             }
         }
-        for nid in cur_npcs {
-            let tgt = PyRep::Integer(i64::from(drifter_sys));
-            fleet_warp_and_engage_ball(
-                &ctx,
-                &mut [
-                    (&mut sess1, ship1, &guns1),
-                    (&mut sess2, ship2, &guns2),
-                    (&mut sess3, ship3, &guns3),
-                    (&mut sess4, ship4, &guns4),
-                ],
-                drifter_sys,
-                nid,
-                "dungeon",
-                tgt,
-            )
-            .await;
+        let tgt = PyRep::Integer(i64::from(drifter_sys));
+        fleet_engage_targets_parallel(
+            &ctx,
+            &mut [
+                (&mut sess1, ship1, &guns1),
+                (&mut sess2, ship2, &guns2),
+                (&mut sess3, ship3, &guns3),
+                (&mut sess4, ship4, &guns4),
+            ],
+            drifter_sys,
+            &cur_npcs,
+            "dungeon",
+            tgt,
+        )
+        .await;
+        if _room == 3 {
+            let sys_h = ctx.systems.get_or_spawn(drifter_sys);
+            let mut any_bastion = false;
+            for (s_ref, sid, b_mod) in [
+                (&mut sess1, ship1, bast1),
+                (&mut sess2, ship2, bast2),
+                (&mut sess3, ship3, bast3),
+                (&mut sess4, ship4, bast4),
+            ] {
+                if sys_h.has_module_cycle(sid, b_mod).await {
+                    any_bastion = true;
+                    let d_oid = bind_service(&ctx, s_ref, "dogmaIM", PyRep::Integer(sid)).await as u64;
+                    let _ = ctx.dispatch_rpc(s_ref, "dogmaIM", Some(d_oid), "Deactivate", &[PyRep::Integer(b_mod)], &HashMap::new(), None).await;
+                }
+            }
+            if any_bastion {
+                let _ = sys_h.step_manual(62.0).await;
+            }
         }
     }
     let _ = rpc_res(&ctx, &mut sess1, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(i64::from(drifter_sys)), PyRep::Integer(1)]).await;
@@ -349,7 +390,7 @@ async fn fire_lance_at(ctx: &eve_server::router::ServerContext, titan_sess: &mut
         let orig = PyRep::Tuple(vec![PyRep::Real(sb.position.x), PyRep::Real(sb.position.y), PyRep::Real(sb.position.z)]);
         let dest = PyRep::Tuple(vec![PyRep::Real(tb.position.x), PyRep::Real(tb.position.y), PyRep::Real(tb.position.z)]);
         rpc_ok(ctx, titan_sess, "superWeaponMgr", "ActivateSlashModule", &[PyRep::Integer(dd_mod), orig, dest]).await;
-        for _ in 0..20 { let _ = sys_h.step_manual(1.0).await; }
+        let _ = sys_h.step_manual(20.0).await;
     }
 }
 
@@ -380,9 +421,9 @@ async fn clear_incursion_site(
                 let mut f_all: Vec<(&mut eve_machonet::SessionState, i64, &[i64])> = Vec::with_capacity(fleet.len() + 1);
                 for (s, id, g) in fleet.iter_mut() { f_all.push((&mut **s, *id, *g)); }
                 f_all.push((t_sess, t_id, t_guns));
-                for eid in e_ids { fleet_warp_and_engage_ball(ctx, &mut f_all, sys_id, eid, "dungeon", wt.clone()).await; }
+                fleet_engage_targets_parallel(ctx, &mut f_all, sys_id, &e_ids, "dungeon", wt.clone()).await;
             } else {
-                for eid in e_ids { fleet_warp_and_engage_ball(ctx, fleet, sys_id, eid, "dungeon", wt.clone()).await; }
+                fleet_engage_targets_parallel(ctx, fleet, sys_id, &e_ids, "dungeon", wt.clone()).await;
             }
             let _ = sys_h.step_manual(2.0).await;
             tokio::task::yield_now().await;
@@ -415,46 +456,67 @@ async fn clear_incursion_site(
 #[tokio::test]
 async fn test_incursion_fleet_payout_and_influence_tale_notifications_e2e() {
     let ctx = fresh_player_ctx();
-    let (mut sess1, cid1, _) = create_player_pilot(&ctx, 52_101, "inc_pilot_u1", "Incursion Runner", JITA_SYS).await;
-    let (mut sess2, cid2, _) = create_player_pilot(&ctx, 52_102, "inc_pilot_u2", "Incursion Wing", JITA_SYS).await;
-    let (mut titan_sess, titan_cid, _) = create_player_pilot(&ctx, 52_103, "inc_titan_u3", "Incursion Avatar", JITA_SYS).await;
-    fund_pilot_isk(&ctx, &mut sess1, 20).await;
-    fund_pilot_isk(&ctx, &mut sess2, 20).await;
-    fund_pilot_isk(&ctx, &mut titan_sess, 120).await;
-
-    let (ship1, guns1) = buy_fit_combat_ship_with_ammo(&ctx, &mut sess1, cid1, JITA_STATION, 28_665, 2929, 12_779, 4, 25_000).await;
-    ensure_skills_for_types(&ctx, &mut sess2, cid2, JITA_STATION, &[22_428, 21_096]).await;
-    let (ship2, _) = buy_fit_combat_ship(&ctx, &mut sess2, cid2, JITA_STATION, 22_428, 9327, 201, 2).await;
-    let cyno_mod = buy_item_at_station(&ctx, &mut sess2, cid2, JITA_STATION, 21_096, 1).await;
-    rpc_ok(&ctx, &mut sess2, "invbroker", "Add", &[PyRep::Integer(cyno_mod), PyRep::Integer(ship2), PyRep::Integer(30)]).await;
-    let ozone = buy_item_at_station(&ctx, &mut sess2, cid2, JITA_STATION, 16_273, 1_500).await;
-    rpc_ok(&ctx, &mut sess2, "invbroker", "Add", &[PyRep::Integer(ozone), PyRep::Integer(ship2), PyRep::Integer(5)]).await;
-
-    ensure_skills_for_types(&ctx, &mut titan_sess, titan_cid, JITA_STATION, &[11_567, 40_631]).await;
-    let (titan_id, titan_guns) = buy_fit_combat_ship_with_ammo(&ctx, &mut titan_sess, titan_cid, JITA_STATION, 11_567, 37_298, 17_686, 6, 5_000).await;
-    let dd_mod = buy_item_at_station(&ctx, &mut titan_sess, titan_cid, JITA_STATION, 40_631, 1).await;
-    rpc_ok(&ctx, &mut titan_sess, "invbroker", "Add", &[PyRep::Integer(dd_mod), PyRep::Integer(titan_id), PyRep::Integer(33)]).await;
-    let iso_bay = buy_item_at_station(&ctx, &mut titan_sess, titan_cid, JITA_STATION, 16_274, 200_000).await;
-    rpc_ok(&ctx, &mut titan_sess, "invbroker", "Add", &[PyRep::Integer(iso_bay), PyRep::Integer(titan_id), PyRep::Integer(133)]).await;
-    let iso_cargo = buy_item_at_station(&ctx, &mut titan_sess, titan_cid, JITA_STATION, 16_274, 1_500).await;
-    rpc_ok(&ctx, &mut titan_sess, "invbroker", "Add", &[PyRep::Integer(iso_cargo), PyRep::Integer(titan_id), PyRep::Integer(5)]).await;
-
-    let mut d_pilots = Vec::new();
-    for (uid, uname, cname) in [(52_104, "inc_dr1", "Incursion Dread 1"), (52_105, "inc_dr2", "Incursion Dread 2"), (52_106, "inc_dr3", "Incursion Dread 3")] {
-        let (mut ds, dcid, _) = create_player_pilot(&ctx, uid, uname, cname, JITA_SYS).await;
-        fund_pilot_isk(&ctx, &mut ds, 20).await;
-        let (did, dguns) = buy_fit_combat_ship_with_ammo(&ctx, &mut ds, dcid, JITA_STATION, 19_720, 37_298, 17_686, 3, 100).await;
-        ensure_skills_for_types(&ctx, &mut ds, dcid, JITA_STATION, &[20_280]).await;
-        let bay = buy_item_at_station(&ctx, &mut ds, dcid, JITA_STATION, 16_274, 30_000).await;
-        rpc_ok(&ctx, &mut ds, "invbroker", "Add", &[PyRep::Integer(bay), PyRep::Integer(did), PyRep::Integer(133)]).await;
-        let cargo_iso = buy_item_at_station(&ctx, &mut ds, dcid, JITA_STATION, 16_274, 1_000).await;
-        rpc_ok(&ctx, &mut ds, "invbroker", "Add", &[PyRep::Integer(cargo_iso), PyRep::Integer(did), PyRep::Integer(5)]).await;
-        let stront = buy_item_at_station(&ctx, &mut ds, dcid, JITA_STATION, 16_275, 550).await;
-        rpc_ok(&ctx, &mut ds, "invbroker", "Add", &[PyRep::Integer(stront), PyRep::Integer(did), PyRep::Integer(5)]).await;
-        let sm = buy_item_at_station(&ctx, &mut ds, dcid, JITA_STATION, 20_280, 1).await;
-        rpc_ok(&ctx, &mut ds, "invbroker", "Add", &[PyRep::Integer(sm), PyRep::Integer(did), PyRep::Integer(30)]).await;
-        d_pilots.push((ds, dcid, did, dguns, sm));
-    }
+    let ((mut sess1, cid1, ship1, guns1, bast1), (mut sess2, cid2, ship2, guns2, cyno_mod), (mut titan_sess, titan_cid, titan_id, titan_guns, dd_mod), (d1, d2, d3)) = tokio::join!(
+        async {
+            let (mut s, cid, _) = create_player_pilot(&ctx, 52_101, "inc_pilot_u1", "Incursion Runner", JITA_SYS).await;
+            fund_pilot_isk(&ctx, &mut s, 20).await;
+            let (ship, guns) = buy_fit_combat_ship_with_ammo(&ctx, &mut s, cid, JITA_STATION, 28_659, 3057, 262, 4, 40).await;
+            ensure_skills_for_types(&ctx, &mut s, cid, JITA_STATION, &[33_400]).await;
+            let bast = buy_item_at_station(&ctx, &mut s, cid, JITA_STATION, 33_400, 1).await;
+            rpc_ok(&ctx, &mut s, "invbroker", "Add", &[PyRep::Integer(bast), PyRep::Integer(ship), PyRep::Integer(31)]).await;
+            (s, cid, ship, guns, bast)
+        },
+        async {
+            let (mut s, cid, _) = create_player_pilot(&ctx, 52_102, "inc_pilot_u2", "Incursion Wing", JITA_SYS).await;
+            fund_pilot_isk(&ctx, &mut s, 20).await;
+            ensure_skills_for_types(&ctx, &mut s, cid, JITA_STATION, &[22_428, 21_096]).await;
+            let (ship, guns) = buy_fit_combat_ship_with_ammo(&ctx, &mut s, cid, JITA_STATION, 22_428, 3057, 262, 4, 40).await;
+            let cyno_mod = buy_item_at_station(&ctx, &mut s, cid, JITA_STATION, 21_096, 1).await;
+            rpc_ok(&ctx, &mut s, "invbroker", "Add", &[PyRep::Integer(cyno_mod), PyRep::Integer(ship), PyRep::Integer(31)]).await;
+            let ozone = buy_item_at_station(&ctx, &mut s, cid, JITA_STATION, 16_273, 1_500).await;
+            rpc_ok(&ctx, &mut s, "invbroker", "Add", &[PyRep::Integer(ozone), PyRep::Integer(ship), PyRep::Integer(5)]).await;
+            (s, cid, ship, guns, cyno_mod)
+        },
+        async {
+            let (mut s, cid, _) = create_player_pilot(&ctx, 52_103, "inc_titan_u3", "Incursion Avatar", JITA_SYS).await;
+            fund_pilot_isk(&ctx, &mut s, 120).await;
+            ensure_skills_for_types(&ctx, &mut s, cid, JITA_STATION, &[11_567, 40_631]).await;
+            let (titan_id, titan_guns) = buy_fit_combat_ship_with_ammo(&ctx, &mut s, cid, JITA_STATION, 11_567, 37_298, 17_686, 6, 5_000).await;
+            let dd_mod = buy_item_at_station(&ctx, &mut s, cid, JITA_STATION, 40_631, 1).await;
+            rpc_ok(&ctx, &mut s, "invbroker", "Add", &[PyRep::Integer(dd_mod), PyRep::Integer(titan_id), PyRep::Integer(33)]).await;
+            let iso_bay = buy_item_at_station(&ctx, &mut s, cid, JITA_STATION, 16_274, 200_000).await;
+            rpc_ok(&ctx, &mut s, "invbroker", "Add", &[PyRep::Integer(iso_bay), PyRep::Integer(titan_id), PyRep::Integer(133)]).await;
+            let iso_cargo = buy_item_at_station(&ctx, &mut s, cid, JITA_STATION, 16_274, 1_500).await;
+            rpc_ok(&ctx, &mut s, "invbroker", "Add", &[PyRep::Integer(iso_cargo), PyRep::Integer(titan_id), PyRep::Integer(5)]).await;
+            (s, cid, titan_id, titan_guns, dd_mod)
+        },
+        async {
+            let setup_dread = |uid: u64, uname: &'static str, cname: &'static str| {
+                let ctx_ref = &ctx;
+                async move {
+                    let (mut ds, dcid, _) = create_player_pilot(ctx_ref, uid, uname, cname, JITA_SYS).await;
+                    fund_pilot_isk(ctx_ref, &mut ds, 20).await;
+                    let (did, dguns) = buy_fit_combat_ship_with_ammo(ctx_ref, &mut ds, dcid, JITA_STATION, 19_720, 37_298, 17_686, 3, 100).await;
+                    ensure_skills_for_types(ctx_ref, &mut ds, dcid, JITA_STATION, &[20_280]).await;
+                    let bay = buy_item_at_station(ctx_ref, &mut ds, dcid, JITA_STATION, 16_274, 30_000).await;
+                    rpc_ok(ctx_ref, &mut ds, "invbroker", "Add", &[PyRep::Integer(bay), PyRep::Integer(did), PyRep::Integer(133)]).await;
+                    let cargo_iso = buy_item_at_station(ctx_ref, &mut ds, dcid, JITA_STATION, 16_274, 1_000).await;
+                    rpc_ok(ctx_ref, &mut ds, "invbroker", "Add", &[PyRep::Integer(cargo_iso), PyRep::Integer(did), PyRep::Integer(5)]).await;
+                    let stront = buy_item_at_station(ctx_ref, &mut ds, dcid, JITA_STATION, 16_275, 550).await;
+                    rpc_ok(ctx_ref, &mut ds, "invbroker", "Add", &[PyRep::Integer(stront), PyRep::Integer(did), PyRep::Integer(5)]).await;
+                    let sm = buy_item_at_station(ctx_ref, &mut ds, dcid, JITA_STATION, 20_280, 1).await;
+                    rpc_ok(ctx_ref, &mut ds, "invbroker", "Add", &[PyRep::Integer(sm), PyRep::Integer(did), PyRep::Integer(30)]).await;
+                    (ds, dcid, did, dguns, sm)
+                }
+            };
+            tokio::join!(
+                setup_dread(52_104, "inc_dr1", "Incursion Dread 1"),
+                setup_dread(52_105, "inc_dr2", "Incursion Dread 2"),
+                setup_dread(52_106, "inc_dr3", "Incursion Dread 3"),
+            )
+        },
+    );
+    let mut d_pilots = vec![d1, d2, d3];
 
     let inc_const: u32 = 20_000_124;
     let mid_sys: SolarSystemId = 30_001_385;
@@ -499,9 +561,10 @@ async fn test_incursion_fleet_payout_and_influence_tale_notifications_e2e() {
     let cyno1 = ctx.dispatch_rpc(&mut sess2, "dogmaIM", Some(cyno_d), "Activate", &[PyRep::Integer(cyno_mod), PyRep::String("cynosuralGeneration".into())], &HashMap::new(), None).await.unwrap();
     let beacon1 = kv_get(&cyno1, "beaconID").and_then(|v| v.as_i64()).expect("midpoint cyno beacon");
 
-    undock_from_station(&ctx, &mut titan_sess, JITA_SYS).await;
-    for (ds, _, _, _, _) in &mut d_pilots { undock_from_station(&ctx, ds, JITA_SYS).await; }
-    ctx.advance_secs(35);
+    rpc_ok(&ctx, &mut titan_sess, "stationSvc", "Undock", &[]).await;
+    for (ds, _, _, _, _) in &mut d_pilots { rpc_ok(&ctx, ds, "stationSvc", "Undock", &[]).await; }
+    let _ = ctx.systems.get_or_spawn(JITA_SYS).step_manual(2.0).await;
+    ctx.advance_secs(32);
     for s_ref in std::iter::once(&mut titan_sess).chain(d_pilots.iter_mut().map(|d| &mut d.0)) {
         let jita_b = bind_service(&ctx, s_ref, "beyonce", PyRep::Integer(i64::from(JITA_SYS))).await as u64;
         ctx.dispatch_rpc(s_ref, "beyonce", Some(jita_b), "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(cid2), PyRep::Integer(i64::from(mid_sys)), PyRep::Integer(beacon1)], &HashMap::new(), None).await.unwrap();
@@ -510,11 +573,11 @@ async fn test_incursion_fleet_payout_and_influence_tale_notifications_e2e() {
     for (ds, _, _, _, _) in &mut d_pilots { rpc_ok(&ctx, ds, "fleetMgr", "LeaveFleet", &[]).await; }
     let _ = rpc_res(&ctx, &mut sess2, "dogmaIM", "Deactivate", &[PyRep::Integer(cyno_mod)]).await;
     let _ = ctx.systems.get_or_spawn(mid_sys).step_manual(605.0).await;
-    ctx.advance_secs(605);
+    ctx.advance_secs(5_000);
 
     fly_stargates_to(&ctx, &mut sess2, vg_sys).await;
     move_ship_to_ball(&ctx, &mut sess2, vg_sys, ship2, "dungeon", PyRep::String(vg_site_id.clone())).await;
-    clear_incursion_site(&ctx, &mut [(&mut sess1, ship1, &guns1)], vg_sys, inc_const, &vg_site_id, None).await;
+    clear_incursion_site(&ctx, &mut [(&mut sess1, ship1, &guns1), (&mut sess2, ship2, &guns2)], vg_sys, inc_const, &vg_site_id, None).await;
     let bal2 = ctx.db.get_character(cid1).unwrap().balance.raw_cents();
     let isk_duo = bal2 - bal1;
     assert_eq!(isk_duo, isk_solo * 2, "2-pilot fleet on Vanguard grid must earn 2x solo payout per curve");
@@ -525,8 +588,16 @@ async fn test_incursion_fleet_payout_and_influence_tale_notifications_e2e() {
         fly_stargates_to(&ctx, &mut sess1, hq_sys),
         fly_stargates_to(&ctx, &mut sess2, hq_sys),
     );
-    for _ in 0..4 {
+    move_ship_to_ball(&ctx, &mut sess1, hq_sys, ship1, "dungeon", PyRep::String(hq_site_id.clone())).await;
+    let d1_oid = bind_service(&ctx, &mut sess1, "dogmaIM", PyRep::Integer(ship1)).await as u64;
+    let _ = ctx.dispatch_rpc(&mut sess1, "dogmaIM", Some(d1_oid), "Activate", &[PyRep::Integer(bast1)], &HashMap::new(), None).await;
+    for _hq_i in 0..4 {
         clear_incursion_site(&ctx, &mut [(&mut sess1, ship1, &guns1)], hq_sys, inc_const, &hq_site_id, None).await;
+    }
+    let hq_sys_h_deact = ctx.systems.get_or_spawn(hq_sys);
+    if hq_sys_h_deact.has_module_cycle(ship1, bast1).await {
+        let _ = ctx.dispatch_rpc(&mut sess1, "dogmaIM", Some(d1_oid), "Deactivate", &[PyRep::Integer(bast1)], &HashMap::new(), None).await;
+        let _ = hq_sys_h_deact.step_manual(62.0).await;
     }
     assert!(read_pve_special_reg(&ctx, |reg| reg.incursions[&inc_const].mothership_spawned));
 
@@ -538,25 +609,27 @@ async fn test_incursion_fleet_payout_and_influence_tale_notifications_e2e() {
     ctx.advance_secs(35);
     let cyno2 = ctx.dispatch_rpc(&mut sess2, "dogmaIM", Some(cyno_d), "Activate", &[PyRep::Integer(cyno_mod), PyRep::String("cynosuralGeneration".into())], &HashMap::new(), None).await.unwrap();
     let beacon2 = kv_get(&cyno2, "beaconID").and_then(|v| v.as_i64()).expect("HQ cyno beacon");
+    let hq_sys_h = ctx.systems.get_or_spawn(hq_sys);
     for s_ref in std::iter::once(&mut titan_sess).chain(d_pilots.iter_mut().map(|d| &mut d.0)) {
         let mid_b = bind_service(&ctx, s_ref, "beyonce", PyRep::Integer(i64::from(mid_sys))).await as u64;
         ctx.dispatch_rpc(s_ref, "beyonce", Some(mid_b), "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(cid2), PyRep::Integer(i64::from(hq_sys)), PyRep::Integer(beacon2)], &HashMap::new(), None).await.unwrap();
         assert_eq!(s_ref.solar_system_id, Some(hq_sys));
         let hq_b = bind_service(&ctx, s_ref, "beyonce", PyRep::Integer(i64::from(hq_sys))).await as u64;
         let _ = ctx.dispatch_rpc(s_ref, "beyonce", Some(hq_b), "CmdSetSpeedFraction", &[PyRep::Real(0.1)], &HashMap::new(), None).await;
-        let _ = ctx.systems.get_or_spawn(hq_sys).step_manual(2.0).await;
-        let _ = ctx.dispatch_rpc(s_ref, "beyonce", Some(hq_b), "CmdStop", &[], &HashMap::new(), None).await;
-        let _ = ctx.systems.get_or_spawn(hq_sys).step_manual(1.0).await;
     }
+    let _ = hq_sys_h.step_manual(2.0).await;
+    for s_ref in std::iter::once(&mut titan_sess).chain(d_pilots.iter_mut().map(|d| &mut d.0)) {
+        let hq_b = bind_service(&ctx, s_ref, "beyonce", PyRep::Integer(i64::from(hq_sys))).await as u64;
+        let _ = ctx.dispatch_rpc(s_ref, "beyonce", Some(hq_b), "CmdStop", &[], &HashMap::new(), None).await;
+    }
+    let _ = hq_sys_h.step_manual(1.0).await;
 
-    // 4. Vargur + Avatar clear Mothership escorts, Vargur pulls back, 3 Sieged Dreads + Avatar fire Doomsday & destroy Kundalini -> OnTaleRemove
+    // 4. Marauder + Black Ops + Avatar clear Mothership escorts, subcaps pull back, 3 Sieged Dreads + Avatar fire Doomsday & destroy Kundalini -> OnTaleRemove
     let _ = drain_all_notifications(&ctx, &mut sess1, cid1);
     let ms_escorts = read_pve_special_reg(&ctx, |reg| {
         reg.incursions[&inc_const].sites.iter().find(|s| s.site_id == ms_site_id).unwrap().escort_spawns.iter().filter(|e| !e.destroyed).map(|e| e.npc_ball_id).collect::<Vec<_>>()
     });
-    for eid in ms_escorts {
-        fleet_warp_and_engage_ball(&ctx, &mut [(&mut sess1, ship1, &guns1), (&mut titan_sess, titan_id, &titan_guns)], hq_sys, eid, "dungeon", PyRep::String(ms_site_id.clone())).await;
-    }
+    fleet_engage_targets_parallel(&ctx, &mut [(&mut sess1, ship1, &guns1), (&mut sess2, ship2, &guns2), (&mut titan_sess, titan_id, &titan_guns)], hq_sys, &ms_escorts, "dungeon", PyRep::String(ms_site_id.clone())).await;
     move_ship_to_ball(&ctx, &mut sess1, hq_sys, ship1, "dungeon", PyRep::String(hq_site_id.clone())).await;
     move_ship_to_ball(&ctx, &mut titan_sess, hq_sys, titan_id, "dungeon", PyRep::String(ms_site_id.clone())).await;
     for (ds, _, did, _, sm) in &mut d_pilots {

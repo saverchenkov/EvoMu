@@ -133,7 +133,7 @@ async fn setup_pilot_in_space(
 /// parity: notify:OnDeathzoneStateUpdate
 #[tokio::test]
 async fn batch10_abyssal_void_whiteout_and_deathzone_notifications() {
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     eve_server::services::serverops_cluster::set_scheduled_downtime_enabled(&ctx, false);
     let mut sess = setup_pilot_in_space(&ctx, PILOT_A, 700_001, 622, false).await;
 
@@ -214,7 +214,7 @@ async fn batch10_abyssal_void_whiteout_and_deathzone_notifications() {
         .unwrap();
     let notifs2 = drain_all(&ctx, &mut sess, PILOT_A);
     let finished = find_notif(&notifs2, "OnAbyssalContentFinished");
-    assert_eq!(finished, &[PyRep::Integer(content_id), PyRep::Integer(1)]);
+    assert_eq!(finished, &[PyRep::Integer(content_id), PyRep::Integer(11)]);
 
     // 2. OnSpaceWhiteOutStart on 20-minute Abyssal pocket collapse
     ctx.db.with_mut_snapshot(|snap| {
@@ -380,7 +380,7 @@ async fn batch10_abyssal_void_whiteout_and_deathzone_notifications() {
         .unwrap();
     let void_fin = drain_all(&ctx, &mut sess, PILOT_A);
     let void_fin_args = find_notif(&void_fin, "OnVoidSpaceContentFinished");
-    assert_eq!(void_fin_args, &[PyRep::Integer(vs_cid), PyRep::Integer(1)]);
+    assert_eq!(void_fin_args, &[PyRep::Integer(vs_cid), PyRep::Integer(16)]);
 }
 
 /// parity: notify:OnMatchMakingFailure
@@ -392,7 +392,7 @@ async fn batch10_abyssal_void_whiteout_and_deathzone_notifications() {
 /// parity: notify:OnLeaveTournamentSystem
 #[tokio::test]
 async fn batch10_proving_grounds_and_tournament_notifications() {
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     // Set clock inside SDE schedule 170 (2023-01-07T12:00:00Z, 2v2 Battleships Proving Filament 72984)
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_673_092_800)));
 
@@ -714,7 +714,7 @@ async fn setup_pilot_in_space(ctx: &ServerContext, char_id: i64, ship_id: i64, g
 /// parity: notify:OnDungeonValues
 #[tokio::test]
 async fn batch10_dungeon_editor_values_and_room_triggers() {
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     let mut gm_sess = setup_pilot_in_space(&ctx, PILOT_A, 700_201, true).await;
     let mut non_gm = setup_pilot_in_space(&ctx, PILOT_B, 700_202, false).await;
 
@@ -788,7 +788,7 @@ async fn batch10_dungeon_editor_values_and_room_triggers() {
 /// parity: notify:OnCosmicSignatureAdded
 #[tokio::test]
 async fn batch10_expedition_signatures_signal_tracker_and_probes() {
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     let mut sess = setup_pilot_in_space(&ctx, PILOT_A, 700_301, false).await;
 
     // 1. OnSignalTrackerFullState via scanMgr.SignalTrackerRegister
@@ -1141,7 +1141,7 @@ async fn setup_pilot_in_space(
 /// parity: notify:OnProgressionLeft
 #[tokio::test]
 async fn batch10_progression_and_conversations() {
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     let mut sess = setup_pilot_in_space(&ctx, PILOT_A, 700_401, false).await;
 
     // 1. Start an operation site via operationsManager.start_site (sets active_site_id)
@@ -1230,7 +1230,7 @@ async fn batch10_progression_and_conversations() {
 /// parity: notify:OnComponentRemovedSystemEnvironment
 #[tokio::test]
 async fn batch10_tales_storms_and_cosmic_anomalies() {
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     eve_server::services::serverops_cluster::set_scheduled_downtime_enabled(&ctx, false);
     let mut sess = setup_pilot_in_space(&ctx, PILOT_A, 700_410, false).await;
 
@@ -1706,7 +1706,7 @@ async fn setup_pilot_in_space(
 /// parity: notify:OnOreMinedByOther
 #[tokio::test]
 async fn batch10_ess_fw_hacking_security_dbs_and_mining() {
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     eve_server::services::serverops_cluster::set_scheduled_downtime_enabled(&ctx, false);
     let null_sys = ctx
         .sde
@@ -1757,8 +1757,8 @@ async fn batch10_ess_fw_hacking_security_dbs_and_mining() {
     rpc(&ctx, &mut sess_a, "dogmaIM", "AddTarget", &[PyRep::Integer(npc_ball_id)])
         .await
         .expect("AddTarget pirate NPC");
-    for _ in 0..25 {
-        null_handle.step_manual(1.0).await.unwrap();
+    for _ in 0..5 {
+        null_handle.step_manual(5.0).await.unwrap();
     }
     rpc(
         &ctx,
@@ -1769,8 +1769,8 @@ async fn batch10_ess_fw_hacking_security_dbs_and_mining() {
     )
     .await
     .expect("Activate weapon on pirate NPC");
-    for _ in 0..8 {
-        null_handle.step_manual(1.0).await.unwrap();
+    for _ in 0..4 {
+        null_handle.step_manual(3.0).await.unwrap();
         if null_handle.get_ball_snapshot(npc_ball_id).await.unwrap().is_none() {
             break;
         }
@@ -2003,8 +2003,8 @@ async fn batch10_ess_fw_hacking_security_dbs_and_mining() {
     ctx.invalidate_ship_fitting(700_570);
     let _ = rpc(&ctx, &mut sess_jita, "dogmaIM", "SetModuleOnline", &[PyRep::Integer(700_570), PyRep::Integer(700_580)]).await;
     rpc(&ctx, &mut sess_jita, "dogmaIM", "AddTarget", &[PyRep::Integer(rock_id)]).await.unwrap();
-    for _ in 0..25 {
-        jita_sys.step_manual(1.0).await.unwrap();
+    for _ in 0..5 {
+        jita_sys.step_manual(5.0).await.unwrap();
     }
     rpc(
         &ctx,
@@ -2193,7 +2193,7 @@ async fn setup_pilot_in_space(
 /// parity: notify:OnCharacterEnergyChanged
 #[tokio::test]
 async fn batch10_destiny_clock_esi_map_industry_energy_and_discovery() {
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx());
     let mut sess = setup_pilot_in_space(&ctx, PILOT_A, 700_701, 587, SYS_JITA).await;
 
     // 1. DoDestinyUpdates via live beyonce.CmdStop

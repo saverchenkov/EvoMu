@@ -8,8 +8,8 @@ use eve_destiny::DVec3;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
-use eve_server::sp6_lifecycle::tick_background_cluster;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 const JITA_SYS: u32 = 30_000_142;
 const NULL_SYS: u32 = 30_004_759; // 1DQ1-A
@@ -20,7 +20,14 @@ const HIGH_SLOT_2: i64 = 29;
 const HIGH_SLOT_3: i64 = 30;
 
 fn paused_ctx() -> ServerContext {
-    let ctx = ServerContext::new();
+    static BASE: std::sync::OnceLock<(Arc<eve_sde::SdeRegistry>, eve_db::WorldStateSnapshot)> = std::sync::OnceLock::new();
+    let (sde, base_snap) = BASE.get_or_init(|| {
+        let base_ctx = ServerContext::new();
+        (base_ctx.sde.clone(), base_ctx.db.with_snapshot(Clone::clone))
+    });
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    db.with_mut_snapshot(|s| *s = base_snap.clone());
+    let ctx = ServerContext::with_sde_and_repository(sde.clone(), db);
     common::pin_clock(&ctx);
     ctx
 }
@@ -119,9 +126,7 @@ async fn gm_pilot_fitted_in_space(
     let beyonce = bound[0].as_i64().unwrap() as u64;
     ctx.advance_secs(70);
     let h = ctx.systems.get_or_spawn(sys_id);
-    for _ in 0..7 {
-        h.step_manual(10.0).await.unwrap();
-    }
+    h.step_manual(10.0).await.unwrap();
     common::slash_cmd(ctx, &mut sess, "/heal").await;
     (LivePilot { sess, char_id, ship_id, beyonce }, fitted_ids)
 }
@@ -346,7 +351,6 @@ async fn test_crab_beacon_lifecycle_ceq_interference_and_cyno_jammer_live() {
     assert_eq!(ok(&ctx, &mut cap.sess, "solarsystemInterferenceMgr", "GetLocalInterferenceState", &[int(i64::from(NULL_SYS))]).await.dict_get("crabActivationsRemaining").and_then(|v| v.as_i64()), Some(11));
 
     ctx.advance_secs(241);
-    tick_background_cluster(&ctx).await;
     let restored_res = null_h.get_combat_state(cap.ship_id).await.unwrap().unwrap().shield_resonance;
     assert!((restored_res[0] - base_res[0]).abs() < 1e-4, "Ship resonances must restore after 4-minute CRAB link");
     let link_state = ok(&ctx, &mut cap.sess, "beyonce", "CallComponentFromClient", &[int(beacon_id), PyRep::String("linkWithShip".into()), PyRep::String("GetLinkState".into()), PyRep::List(vec![])]).await;
@@ -378,12 +382,10 @@ async fn test_crab_beacon_lifecycle_ceq_interference_and_cyno_jammer_live() {
         }
         if wave < 2 {
             ctx.advance_secs(2);
-            tick_background_cluster(&ctx).await;
         } else {
             let st = ok(&ctx, &mut cap.sess, "beyonce", "CallComponentFromClient", &[int(beacon_id), PyRep::String("linkWithShip".into()), PyRep::String("GetLinkState".into()), PyRep::List(vec![])]).await;
             let rem = st.dict_get("scanRemainingSeconds").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as u64;
             ctx.advance_secs(rem + 5);
-            tick_background_cluster(&ctx).await;
         }
     }
     let state_loot = ok(&ctx, &mut cap.sess, "beyonce", "CallComponentFromClient", &[int(beacon_id), PyRep::String("linkWithShip".into()), PyRep::String("GetLinkState".into()), PyRep::List(vec![])]).await;
@@ -393,7 +395,6 @@ async fn test_crab_beacon_lifecycle_ceq_interference_and_cyno_jammer_live() {
     assert_eq!(qty_of(&ctx, &mut cap.sess, beacon_id, 60_459, None).await, 15, "CRAB beacon must award 15x Rogue Drone Survey Data (60459)");
 
     ctx.advance_secs(125);
-    tick_background_cluster(&ctx).await;
     let state_done = ok(&ctx, &mut cap.sess, "beyonce", "CallComponentFromClient", &[int(beacon_id), PyRep::String("linkWithShip".into()), PyRep::String("GetLinkState".into()), PyRep::List(vec![])]).await;
     assert_eq!(state_done.dict_get("phase").and_then(|v| v.as_str()), Some("self_destructed"));
     let can_id = state_done.dict_get("openContainerID").and_then(|v| v.as_i64()).expect("open container after self-destruct");
@@ -408,7 +409,6 @@ async fn test_crab_beacon_lifecycle_ceq_interference_and_cyno_jammer_live() {
         null_h.set_ball_position(cap.ship_id, bp + DVec3::new(1_000.0, 0.0, 0.0)).await;
         ok(&ctx, &mut cap.sess, "beyonce", "CallComponentFromClient", &[int(bid), PyRep::String("linkWithShip".into()), PyRep::String("InitiateLinkQuick".into()), PyRep::List(vec![])]).await;
         ctx.advance_secs(241);
-        tick_background_cluster(&ctx).await;
     }
     let energy_after_3 = ok(&ctx, &mut cap.sess, "characterEnergyMgr", "GetMyEnergyState", &[]).await.dict_get("currentEnergy").and_then(|v| v.as_i64()).unwrap();
     assert!((10..=15).contains(&energy_after_3), "3x CRAB links must consume 90 CEQ (~10 remaining + natural regen), got {energy_after_3}");
@@ -427,7 +427,6 @@ async fn test_crab_beacon_lifecycle_ceq_interference_and_cyno_jammer_live() {
             null_h.set_ball_position(alt.ship_id, p + DVec3::new(1_000.0, 0.0, 0.0)).await;
             ok(&ctx, &mut alt.sess, "beyonce", "CallComponentFromClient", &[int(b), PyRep::String("linkWithShip".into()), PyRep::String("InitiateLinkQuick".into()), PyRep::List(vec![])]).await;
             ctx.advance_secs(241);
-            tick_background_cluster(&ctx).await;
         }
     }
     assert_eq!(ok(&ctx, &mut cap.sess, "solarsystemInterferenceMgr", "GetLocalInterferenceState", &[int(i64::from(NULL_SYS))]).await.dict_get("crabActivationsRemaining").and_then(|v| v.as_i64()), Some(0));
@@ -439,7 +438,6 @@ async fn test_crab_beacon_lifecycle_ceq_interference_and_cyno_jammer_live() {
     assert_eq!(rpc(&ctx, &mut cap_excess.sess, "beyonce", "CallComponentFromClient", &[int(b_ex), PyRep::String("linkWithShip".into()), PyRep::String("InitiateLink".into()), PyRep::List(vec![])]).await.unwrap_err().code, "ExcessInterference");
 
     ctx.advance_secs(25 * 3_600);
-    tick_background_cluster(&ctx).await;
     assert_eq!(ok(&ctx, &mut cap.sess, "characterEnergyMgr", "GetMyEnergyState", &[]).await.dict_get("currentEnergy").and_then(|v| v.as_i64()), Some(100));
     assert_eq!(ok(&ctx, &mut cap.sess, "solarsystemInterferenceMgr", "GetLocalInterferenceState", &[int(i64::from(NULL_SYS))]).await.dict_get("crabActivationsRemaining").and_then(|v| v.as_i64()), Some(12));
 
@@ -469,8 +467,6 @@ async fn test_metaliminal_storm_footprint_dogma_overlap_and_movement_live() {
         assert!(ctx.sde.solar_systems[&sid].security_status < 0.0, "Storm system {sid} must be in null-sec");
     }
     assert_eq!(centers_by_storm.len(), 8, "Cluster must maintain 8 roaming Metaliminal Storms");
-
-    tick_background_cluster(&ctx).await;
 
     let gamma_core = weather_rows.iter().find(|r| r.dict_get("weather").and_then(|v| v.as_str()) == Some("Gamma") && r.dict_get("isCore") == Some(&PyRep::Bool(true))).and_then(|r| r.dict_get("solarSystemID").and_then(|v| v.as_i64())).unwrap() as u32;
     let gamma_periph = weather_rows.iter().find(|r| r.dict_get("weather").and_then(|v| v.as_str()) == Some("Gamma") && r.dict_get("isCore") == Some(&PyRep::Bool(false))).and_then(|r| r.dict_get("solarSystemID").and_then(|v| v.as_i64())).unwrap() as u32;
@@ -516,7 +512,6 @@ async fn test_metaliminal_storm_footprint_dogma_overlap_and_movement_live() {
     let mut mid_centers: HashMap<i64, u32> = HashMap::new();
     for _ in 0..4 {
         ctx.advance_secs(12 * 3_600);
-        tick_background_cluster(&ctx).await;
         let PyRep::List(rows) = ok(&ctx, &mut pilot.sess, "map", "GetAllRoamingWeatherSystems", &[]).await else { panic!("mid rows") };
         for (sid_storm, sid) in extract_snapshot_centers(&rows) {
             if sid != centers_by_storm[&sid_storm] {
@@ -530,7 +525,6 @@ async fn test_metaliminal_storm_footprint_dogma_overlap_and_movement_live() {
     let mut final_centers: HashMap<i64, u32> = HashMap::new();
     for _ in 0..4 {
         ctx.advance_secs(12 * 3_600);
-        tick_background_cluster(&ctx).await;
         let PyRep::List(rows) = ok(&ctx, &mut pilot.sess, "map", "GetAllRoamingWeatherSystems", &[]).await else { panic!("moved rows") };
         for (sid_storm, sid) in extract_snapshot_centers(&rows) {
             if sid != mid_centers[&sid_storm] {

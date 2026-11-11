@@ -20,6 +20,26 @@ use eve_server::services::combat_crimewatch::{
 use eve_server::sp6_lifecycle::tick_background_cluster;
 use std::collections::HashMap;
 
+pub(crate) fn fast_ctx() -> ServerContext {
+    static WORLD: std::sync::OnceLock<(
+        std::sync::Arc<eve_sde::SdeRegistry>,
+        eve_db::WorldStateSnapshot,
+    )> = std::sync::OnceLock::new();
+    let (sde, base_snap) = WORLD.get_or_init(|| {
+        let sde = std::sync::Arc::new(
+            eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path())
+                .expect("open evomu_sde.sqlite"),
+        );
+        let db = eve_db::WorldRepository::with_demo_seed();
+        let snap = db.with_snapshot(|s| s.clone());
+        (sde, snap)
+    });
+    let db = std::sync::Arc::new(eve_db::WorldRepository::new_empty());
+    db.with_mut_snapshot(|s| *s = base_snap.clone());
+    ServerContext::with_sde_and_repository(sde.clone(), db)
+        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED)
+}
+
 pub(crate) async fn rpc(
     ctx: &ServerContext,
     sess: &mut SessionState,
@@ -253,8 +273,8 @@ pub(crate) async fn warp_lock_and_destroy_via_rpc(
                 None,
             )
             .await;
-        for _ in 0..35 {
-            let _ = handle.step_manual(1.0).await;
+        for _ in 0..10 {
+            let _ = handle.step_manual(15.0).await;
             if handle.get_ball_snapshot(ship_id).await.ok().flatten().is_some_and(|(_, b)| !matches!(b.mode, MovementMode::Warp { .. })) {
                 break;
             }
@@ -269,11 +289,11 @@ pub(crate) async fn warp_lock_and_destroy_via_rpc(
         return;
     }
     rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(target_id)]).await.expect("AddTarget");
-    for _ in 0..90 {
+    for _ in 0..20 {
         if handle.get_target_locks(ship_id).await.unwrap().iter().any(|l| l.target_id == target_id && l.locked) {
             break;
         }
-        let _ = handle.step_manual(1.0).await;
+        let _ = handle.step_manual(5.0).await;
     }
     // This helper verifies NPC destruction through real weapon RPCs, not attacker survival: live NPC AI
     // (officer / faction rat fire during rate-of-fire and capacitor waits) would otherwise destroy the
@@ -289,11 +309,11 @@ pub(crate) async fn warp_lock_and_destroy_via_rpc(
             }
             if !handle.get_target_locks(ship_id).await.unwrap().iter().any(|l| l.target_id == target_id && l.locked) {
                 let _ = rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(target_id)]).await;
-                for _ in 0..60 {
+                for _ in 0..15 {
                     if handle.get_target_locks(ship_id).await.unwrap().iter().any(|l| l.target_id == target_id && l.locked) {
                         break;
                     }
-                    let _ = handle.step_manual(1.0).await;
+                    let _ = handle.step_manual(5.0).await;
                 }
             }
         }
@@ -313,11 +333,11 @@ pub(crate) async fn warp_lock_and_destroy_via_rpc(
             if let Err(e) = rpc(ctx, sess, "dogmaIM", "Activate", &[PyRep::Integer(gid), PyRep::Integer(target_id)]).await {
                 if e.code == "TargetNotLocked" {
                     let _ = rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(target_id)]).await;
-                    for _ in 0..60 {
+                    for _ in 0..15 {
                         if handle.get_target_locks(ship_id).await.unwrap().iter().any(|l| l.target_id == target_id && l.locked) {
                             break;
                         }
-                        let _ = handle.step_manual(1.0).await;
+                        let _ = handle.step_manual(5.0).await;
                     }
                     if handle.get_ball_snapshot(target_id).await.unwrap().is_none() {
                         ctx.advance_secs(15);
@@ -355,7 +375,7 @@ async fn test_belt_rats_clone_soldier_mordu_and_officer_spawns() {
         "feat:npc.officer-npc",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     common::pin_clock(&ctx);
 
     // 1. Beltless High-Sec (`30_000_142` Jita): undocked pilot + cluster tick -> 0 belt rats, 0 Clone Soldiers, 0 Officers
@@ -411,7 +431,7 @@ async fn test_belt_rats_clone_soldier_mordu_and_officer_spawns() {
 
     tick_background_cluster(&ctx).await;
     assert!(!with_combat_runtime(&ctx, |rt| rt.npc_entities.values().any(|n| n.solar_system_id == low_sys && n.archetype == "CloneSoldier")), "Clone Soldier must respect 20m respawn cooldown");
-    let (paid_isk, _, _) = flush_npc_bounty_tick(&ctx, low_sys, 90_000_001, 0.0);
+    let paid_isk = flush_npc_bounty_tick(&ctx, low_sys, 90_000_001, 0.0).pilot_isk;
     assert!(paid_isk > 0.0, "20m bounty tick must pay pilot ISK for low-sec NPC kills");
     ctx.advance_secs(1_205);
     tick_background_cluster(&ctx).await;
@@ -419,7 +439,7 @@ async fn test_belt_rats_clone_soldier_mordu_and_officer_spawns() {
 
     // 4. True Null-Sec (`30_001_269` H-PA29, `-0.241` sec): Named Guristas Officer (`group 564`) + `meta_group 5` Officer module drop
     // Isolate in a fresh ServerContext so HashMap iteration order across prior systems cannot shift RNG draws
-    let ctx4 = ServerContext::new();
+    let ctx4 = fast_ctx();
     common::pin_clock(&ctx4);
     let null_sys = 30_001_269u32;
     let null_belt = ctx4.sde.celestials_in_system(null_sys).into_iter().find(|c| c.group_id == 9).unwrap();
@@ -449,7 +469,7 @@ async fn test_drifters_overshield_lux_kontos_doomsday_and_wreck() {
     // parity: feat:npc.drifters
     eve_testkit::attest(&["feat:npc.drifters"]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     common::pin_clock(&ctx);
     let wh_sys = 31_000_007u32;
     let anchor = ctx.sde.celestials_in_system(wh_sys).first().map(|c| c.position).unwrap_or(DVec3::ZERO) + DVec3::new(15_000.0, 0.0, 0.0);
@@ -537,7 +557,6 @@ use crate::npc_spawns_pve::{
 use eve_destiny::DVec3;
 use eve_proto::PyRep;
 use eve_server::living_world::NpcArchetype;
-use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::with_combat_runtime;
 use eve_server::services::insurgency_services::{
     ensure_stronghold_in_space, init_insurgency_campaign, FACTION_GURISTAS,
@@ -566,7 +585,7 @@ async fn test_npc_mining_ops_and_hauler_convoy_lifecycle() {
         "feat:mining.npc-mining-ops",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     common::pin_clock(&ctx);
     let sys_id = 30_000_001u32; // Tanoo (high-sec with asteroid belts, NPC station, and stargates)
     let stn_id = ctx.sde.solar_systems[&sys_id].stations[0].station_id;
@@ -659,10 +678,28 @@ async fn test_npc_mining_ops_and_hauler_convoy_lifecycle() {
         "Companion NPC Industrial hauler ball on belt grid"
     );
 
-    // Advance 80 more ticks (at >= 800 units/tick -> >= 64,000 units mined >= 50,000 ore hold & full haul)!
-    for _ in 0..80 {
+    // Advance up to 80 ticks until belt depletion >= 50,000 units and Veldspar sell volume replenishes >= +50,000!
+    for tick in 0..80 {
         ctx.advance_secs(60);
         tick_background_cluster(&ctx).await;
+        if tick % 10 == 9 || tick >= 63 {
+            let cur_asts = tanoo_handle.populate_asteroid_belt_entities().await.unwrap();
+            let cur_units: u64 = cur_asts.iter().map(|a| a.remaining_units).sum();
+            if init_total_units - cur_units >= 50_000 {
+                let cur_orders = rpc(
+                    &ctx,
+                    &mut sess,
+                    "marketProxy",
+                    "GetOrders",
+                    &[PyRep::Integer(1230)],
+                )
+                .await
+                .expect("GetOrders Veldspar after haul");
+                if sum_sell_order_volume(&cur_orders) >= init_sell_vol + 50_000.0 {
+                    break;
+                }
+            }
+        }
     }
     let post_asts = tanoo_handle.populate_asteroid_belt_entities().await.unwrap();
     let post_total_units: u64 = post_asts.iter().map(|a| a.remaining_units).sum();
@@ -776,7 +813,7 @@ async fn test_concord_response_and_faction_police_enforcement() {
         "feat:npc.concord-npc",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     common::pin_clock(&ctx);
     let jita = 30_000_142u32;
     let jita_stn = 60_003_760i64;
@@ -1014,7 +1051,7 @@ async fn test_sde_backed_pirate_strongholds_homefront_and_triglavian_sites() {
         "feat:pve.pirate-strongholds",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     common::pin_clock(&ctx);
     ensure_special_sites_spawned(&ctx).await;
 

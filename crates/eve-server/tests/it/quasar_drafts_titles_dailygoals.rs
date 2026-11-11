@@ -445,10 +445,15 @@ async fn quasar_daily_goals_configurable_and_admin_targeting() {
         target: 3,
         isk_reward: 1_000_000,
         sp_reward: 10_000.0,
-        completion_cost_isk: Some(50_000),
-        completion_cost_evermarks: Some(1_000),
+        completion_cost_isk: None,
+        completion_cost_evermarks: Some(2_500),
     };
     ctx.quasar_gateway.progression.daily_goals.configure_template(custom_tpl);
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&90_000_001) {
+            ch.loyalty_points.insert(1_000_419, 5_000);
+        }
+    });
 
     // Query current daily goals for session 2 -> verify custom goal template is present
     let current_rsp = quasar_rpc(&ctx, &mut sess2, "eve_public.dailygoal.api.GetAllCurrentRequest", Vec::new()).await;

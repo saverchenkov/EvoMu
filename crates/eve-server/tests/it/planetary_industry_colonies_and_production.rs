@@ -974,6 +974,12 @@ async fn test_wallet_evermarks_sde_paragon_catalog_and_redemption() {
         .expect("SDE SKINR coating");
     let (coating_item_type_id, _) = coating_comp.associated_types[0];
     let coating_item_id = ctx.db.with_mut_snapshot(|snap| {
+        for sid in [81366u32, 81375] {
+            snap.skills.entry(char_id).or_default().insert(
+                sid,
+                TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 },
+            );
+        }
         seed_item(snap, coating_item_type_id, char_id, 60_015_169, InventoryFlag::Hangar, 11)
     });
 

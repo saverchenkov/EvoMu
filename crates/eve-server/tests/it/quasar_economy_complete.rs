@@ -76,6 +76,7 @@ fn encode_uuid_field(tag: u32, uuid: &[u8], out: &mut Vec<u8>) {
     encode_bytes_field(tag, &id_val, out);
 }
 
+// parity: plan:Q-6
 #[tokio::test]
 async fn test_quasar_market_complete() {
     let ctx = ServerContext::new();
@@ -293,6 +294,7 @@ async fn test_quasar_market_complete() {
     assert!(received.payload.unwrap().type_url.ends_with("NewEntryNotice"));
 }
 
+// parity: plan:Q-6
 #[tokio::test]
 async fn test_quasar_inventory_asset_container_blueprint_ore() {
     let ctx = ServerContext::new();
@@ -458,6 +460,7 @@ async fn test_quasar_inventory_asset_container_blueprint_ore() {
     assert!(rsp.payload.unwrap().type_url.ends_with("GetShipAssetsResponse"));
 }
 
+// parity: plan:Q-6
 #[tokio::test]
 async fn test_quasar_assetholding_entitlements() {
     let ctx = ServerContext::new();
@@ -715,6 +718,7 @@ fn encode_uuid_field(tag: u32, uuid: &[u8], out: &mut Vec<u8>) {
     encode_bytes_field(tag, &id_val, out);
 }
 
+// parity: plan:Q-6
 #[tokio::test]
 async fn test_quasar_accounting_loyalty_contracts() {
     let ctx = ServerContext::new();
@@ -811,6 +815,7 @@ async fn test_quasar_accounting_loyalty_contracts() {
     assert!(rsp.payload.unwrap().type_url.ends_with("item_exchange.GetResponse"));
 }
 
+// parity: plan:Q-6
 #[tokio::test]
 async fn test_quasar_industry_planetary_moon_asteroidbelt() {
     let ctx = ServerContext::new();

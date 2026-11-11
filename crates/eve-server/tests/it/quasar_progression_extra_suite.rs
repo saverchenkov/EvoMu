@@ -501,6 +501,8 @@ async fn q9_ship_cosmetics_skinr_and_emblems() {
             ch.plex_balance = 5_000;
             s.characters.insert(90_000_105, ch);
         }
+        let sk_map = s.skills.entry(90_000_105).or_default();
+        sk_map.insert(81367, eve_db::TrainedSkillRecord { type_id: 81367, level: 2, skill_points: 10_000.0 });
     });
     for _ in 0..5 {
         let r = call_req(&ctx, &session, "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest", seq_init.clone(), true);

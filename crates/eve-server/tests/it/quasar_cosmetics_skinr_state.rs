@@ -279,6 +279,8 @@ async fn skinr_custom_skins_licenses_and_sequencing_jobs() {
         let sk_map = s.skills.entry(cid as i64).or_default();
         sk_map.insert(81370, TrainedSkillRecord { type_id: 81370, level: 4, skill_points: 45_255.0 });
         sk_map.insert(81377, TrainedSkillRecord { type_id: 81377, level: 5, skill_points: 256_000.0 });
+        sk_map.insert(81366, TrainedSkillRecord { type_id: 81366, level: 5, skill_points: 256_000.0 });
+        sk_map.insert(81375, TrainedSkillRecord { type_id: 81375, level: 5, skill_points: 256_000.0 });
         s.items.insert(ship_id, InventoryItemRecord {
             item_id: ship_id, type_id: rifter_type_id, owner_id: cid as i64, location_id: 60_003_760,
             flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1,
@@ -499,6 +501,11 @@ async fn test_skinr_admin_revoke_and_ship_repackage_strip_cosmetics_via_rpc() {
     sess.role |= eve_machonet::service_roles::ROLE_GM_DEFAULT
         | eve_machonet::service_roles::ROLE_GMH;
     let cid = 90_000_001_u32;
+    ctx.db.with_mut_snapshot(|s| {
+        let sk_map = s.skills.entry(cid as i64).or_default();
+        sk_map.insert(81366, TrainedSkillRecord { type_id: 81366, level: 5, skill_points: 256_000.0 });
+        sk_map.insert(81375, TrainedSkillRecord { type_id: 81375, level: 5, skill_points: 256_000.0 });
+    });
     let mut rx = subscribe(&ctx, &mut sess).await;
 
     // 1. Grant finite coating, sequence a tier-1 Rifter SKIN, complete early, activate (1 activated + 1 unactivated)
