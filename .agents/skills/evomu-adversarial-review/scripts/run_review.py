@@ -353,17 +353,36 @@ def code_patch_id(root, commit):
     return out.split()[0] if out.split() else ""
 
 
+def code_review_verdict(r):
+    """The code reviewer's own verdict for a claims review record. A review the code reviewer passed but the test
+    gate downgraded is recorded as FAIL; its code verdict is still PASS/PASS_WITH_ISSUES when the test gate was the
+    only blocking finding (result.json keeps the reviewer's structured verdict). Returns None when unknown."""
+    if r.get("verdict") in CARRY_VERDICTS:
+        return r["verdict"]
+    if r.get("verdict") != "FAIL" or not r.get("report"):
+        return None
+    try:
+        so = json.load(open(os.path.join(os.path.dirname(r["report"]), "result.json"))).get("structured", {})
+    except Exception:  # noqa: BLE001
+        return None
+    own = [f for f in so.get("blocking_findings", []) or [] if f.get("id") != "ORCHESTRATOR-POST-REVIEW-TEST-FAIL"]
+    if own or so.get("verdict") not in CARRY_VERDICTS:
+        return None
+    return so["verdict"]
+
+
 def find_carry_review(root, head, head_pid=None):
-    """Most recent non-FAIL, non-final claims review (any worktree) of a different commit whose code patch equals
-    `head`'s. Returns (review_dict, head_patch_id); review_dict is None when nothing qualifies."""
+    """Most recent non-final claims review (any worktree or the archive) of a different commit whose code patch
+    equals `head`'s and whose code review passed (PASS/PASS_WITH_ISSUES, including reviews the test gate alone turned
+    into FAIL). Returns (review_dict with 'code_verdict', head_patch_id); review_dict is None when nothing qualifies."""
     head_pid = head_pid if head_pid is not None else code_patch_id(root, head)
     if not head_pid:
         return None, head_pid
     cutoff = (datetime.datetime.now() - datetime.timedelta(days=CARRY_MAX_AGE_DAYS)).strftime("%Y%m%d-%H%M%S")
     cands = []
     for r in rl.all_review_records(root):
-        if (r.get("mode", "claims") == "claims" and r.get("verdict") in CARRY_VERDICTS
-                and not r.get("carried_from") and r.get("timestamp", "") >= cutoff):
+        if (r.get("mode", "claims") == "claims" and r.get("verdict") in CARRY_VERDICTS + ("FAIL",)
+                and not r.get("carried_from") and not r.get("final") and r.get("timestamp", "") >= cutoff):
             cands.append(r)
     cands.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
     for r in cands:
@@ -373,19 +392,22 @@ def find_carry_review(root, head, head_pid=None):
         # A recorded patch id was computed against an older main; it is still valid because the merge base of that
         # commit with today's main is the same commit (main is append-only). Recompute when none was recorded.
         pid = r.get("patch_id") or code_patch_id(root, commit)
-        if pid and pid == head_pid:
-            return r, head_pid
+        if not pid or pid != head_pid:
+            continue
+        cv = code_review_verdict(r)
+        if cv:
+            return dict(r, code_verdict=cv), head_pid
     return None, head_pid
 
 
 def carried_structured(r):
     """Structured reviewer output for a carried-over review: the original findings are listed, not re-judged."""
     return {
-        "verdict": r["verdict"],
+        "verdict": r.get("code_verdict", r["verdict"]),
         "summary": ("Code review carried over from review %s (%s, verdict %s) of commit %s, after a rebase that left "
                     "this track's code change byte-identical (git patch-id --verbatim). The code review was not "
                     "repeated; the test gate below ran on this rebased tree. Original report: %s"
-                    % (r.get("timestamp"), r.get("model"), r["verdict"],
+                    % (r.get("timestamp"), r.get("model"), "%s (recorded %s)" % (r.get("code_verdict", r["verdict"]), r["verdict"]),
                        (r.get("snapshot_commit") or r.get("head") or "")[:9], r.get("report"))),
         "blocking_findings": [],
         "non_blocking_findings": [],
@@ -1061,11 +1083,11 @@ def main():
             print("[review] this commit's code change is byte-identical to %s, reviewed %s (%s, %s): carrying that "
                   "verdict over; only the test gate runs." % ((carry.get("snapshot_commit") or carry.get("head"))[:9],
                                                               carry.get("timestamp"), carry.get("model"),
-                                                              carry["verdict"]), flush=True)
+                                                              carry["code_verdict"]), flush=True)
             extra_meta.update(carried_from=carry.get("timestamp"),
                               carried_from_head=carry.get("snapshot_commit") or carry.get("head"),
                               carried_from_report=carry.get("report"))
-            verdict, so, conv, model_used = carry["verdict"], carried_structured(carry), carry.get("conversation_id"), \
+            verdict, so, conv, model_used = carry["code_verdict"], carried_structured(carry), carry.get("conversation_id"), \
                 carry.get("model")
             if test_run is None:
                 # A carried verdict rests entirely on the test run; without one there is nothing to record.
