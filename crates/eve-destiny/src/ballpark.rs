@@ -453,7 +453,10 @@ impl Ballpark {
     }
 
     pub fn remove_ball(&mut self, ball_id: BallId) -> Option<Ball> {
-        let removed = self.balls.remove(&ball_id)?;
+        let Some(removed) = self.balls.remove(&ball_id) else {
+            self.combat_states.remove(&ball_id);
+            return None;
+        };
         self.warp_bubble_mgr.remove_bubble(ball_id);
         let old_grid_id = self.ball_grid_ids.remove(&ball_id);
         let was_static = self.static_ball_ids.remove(&ball_id)
@@ -613,10 +616,10 @@ impl Ballpark {
         ball_id: BallId,
         dmg: DamageVector,
     ) -> Option<(f64, bool, Option<Ball>)> {
-        let ball_snap = self.balls.get(&ball_id).cloned();
+        let ball_snap = self.balls.get(&ball_id).cloned()?;
         let grid_id = self.ball_grid_ids.get(&ball_id).copied();
         let (applied, destroyed, s_ratio, a_ratio, h_ratio) = {
-            let cs = self.combat_states.entry(ball_id).or_default();
+            let cs = self.combat_states.get_mut(&ball_id)?;
             let (applied, destroyed) = cs.apply_damage(dmg);
             let s = if cs.max_shield_hp > 0.0 { (cs.shield_hp / cs.max_shield_hp).clamp(0.0, 1.0) } else { 0.0 };
             let a = if cs.max_armor_hp > 0.0 { (cs.armor_hp / cs.max_armor_hp).clamp(0.0, 1.0) } else { 0.0 };
@@ -624,7 +627,7 @@ impl Ballpark {
             (applied, destroyed, s, a, h)
         };
         self.emit_damage_and_destruction_events(ball_id, grid_id, s_ratio, a_ratio, h_ratio, destroyed);
-        Some((applied, destroyed, ball_snap))
+        Some((applied, destroyed, Some(ball_snap)))
     }
 
     /// Applies resistance-ignoring true damage (e.g., Breacher Pod DoT, Arena hazard boundary) to `ball_id`
@@ -635,10 +638,10 @@ impl Ballpark {
         ball_id: BallId,
         amount: f64,
     ) -> Option<(f64, bool, Option<Ball>)> {
-        let ball_snap = self.balls.get(&ball_id).cloned();
+        let ball_snap = self.balls.get(&ball_id).cloned()?;
         let grid_id = self.ball_grid_ids.get(&ball_id).copied();
         let (applied, destroyed, s_ratio, a_ratio, h_ratio) = {
-            let cs = self.combat_states.entry(ball_id).or_default();
+            let cs = self.combat_states.get_mut(&ball_id)?;
             let (applied, destroyed) = cs.apply_true_damage(amount);
             let s = if cs.max_shield_hp > 0.0 { (cs.shield_hp / cs.max_shield_hp).clamp(0.0, 1.0) } else { 0.0 };
             let a = if cs.max_armor_hp > 0.0 { (cs.armor_hp / cs.max_armor_hp).clamp(0.0, 1.0) } else { 0.0 };
@@ -646,7 +649,7 @@ impl Ballpark {
             (applied, destroyed, s, a, h)
         };
         self.emit_damage_and_destruction_events(ball_id, grid_id, s_ratio, a_ratio, h_ratio, destroyed);
-        Some((applied, destroyed, ball_snap))
+        Some((applied, destroyed, Some(ball_snap)))
     }
 
     /// Applies unresisted direct structure/hull HP damage to `ball_id`, leaving shield and armor
@@ -659,7 +662,7 @@ impl Ballpark {
         let ball_snap = self.balls.get(&ball_id).cloned()?;
         let grid_id = self.ball_grid_ids.get(&ball_id).copied();
         let (applied, destroyed, s_ratio, a_ratio, h_ratio) = {
-            let cs = self.combat_states.entry(ball_id).or_default();
+            let cs = self.combat_states.get_mut(&ball_id)?;
             if cs.is_tethered
                 || cs.gate_cloak_remaining_ticks > 0
                 || cs.undock_invulnerable_remaining_ticks > 0

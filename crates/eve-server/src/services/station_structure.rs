@@ -522,6 +522,7 @@ pub async fn handle(
             ctx.db.with_mut_snapshot(|snap| {
                 snap.item_positions
                     .insert(ship.item_id, spawn_pos.to_array());
+                crate::sp6_lifecycle::enter_space_in_snap(snap, ship.item_id, ch.solar_system_id);
             });
             if ctx.feature_flags.enable_living_world {
                 let _ = ctx
@@ -789,6 +790,12 @@ pub async fn handle(
             if is_structure && handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
                 return Some(Err(BridgeRpcError { code: "ShipWarpScrambled".into(), message: "Cannot dock at an Upwell structure while ship is warp scrambled".into() }));
             }
+            let Some(taken) = handle.take_ball_for_docking(ship_id, dock_id, target_pos).await else {
+                return Some(Err(BridgeRpcError {
+                    code: "DockFailed".into(),
+                    message: format!("Ship {ship_id} is no longer in space in solar system {sys_id}"),
+                }));
+            };
             match ctx.db.dock_character_if_in_space(char_id, sys_id, dock_id, is_structure) {
                 Ok(_) => {
                     if arrived_at_warp_dest {
@@ -799,6 +806,13 @@ pub async fn handle(
                             .remove(&ship_id);
                     }
                     let active_mods: Vec<i64> = ctx.db.with_mut_snapshot(|snap| {
+                        crate::sp6_lifecycle::leave_space_in_snap(
+                            snap,
+                            ship_id,
+                            taken.combat_state.as_ref(),
+                            None,
+                            None,
+                        );
                         snap.item_positions.remove(&ship_id);
                         let mods: Vec<i64> = snap
                             .items
@@ -814,7 +828,6 @@ pub async fn handle(
                         }
                         mods
                     });
-                    let _ = handle.accept_docking(ship_id, dock_id, target_pos).await;
                     for mid in active_mods {
                         ctx.notify_godma_ship_effect(
                             crate::router::NotificationTarget::Character(char_id),
@@ -943,10 +956,13 @@ pub async fn handle(
                         ("isStructure", PyRep::Bool(is_structure)),
                     ])))
                 }
-                Err(e) => Some(Err(BridgeRpcError {
-                    code: "DockFailed".into(),
-                    message: e.to_string(),
-                })),
+                Err(e) => {
+                    let _ = handle.restore_ball(taken).await;
+                    Some(Err(BridgeRpcError {
+                        code: "DockFailed".into(),
+                        message: e.to_string(),
+                    }))
+                }
             }
         }
 

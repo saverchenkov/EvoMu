@@ -708,10 +708,11 @@ async fn activate_single_fighter_ability(
                 // Cenobite I: Energy neutralization (`feat:drones.support-fighter-abilities`)
                 let neut_gj = attr(2211).or_else(|| attr(2209)).unwrap_or(70.0) * squad_mult;
                 ewar_strength_applied = neut_gj;
-                if let Ok(Some(mut cs)) = sys_handle.get_combat_state(tid).await {
-                    cs.capacitor = (cs.capacitor - neut_gj).max(0.0);
-                    let _ = sys_handle.set_combat_state(tid, cs).await;
-                }
+                let _ = sys_handle
+                    .modify_combat_state(tid, move |cs| {
+                        cs.capacitor = (cs.capacitor - neut_gj).max(0.0);
+                    })
+                    .await;
                 let _ = sys_handle.apply_damage_with_attacker(tid, DamageVector::default(), Some(char_id)).await;
                 DamageVector::default()
             }

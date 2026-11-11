@@ -753,6 +753,102 @@ impl SystemRegistry {
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 let _ = reply.send(removed);
                             }
+                            SystemCommand::TakeBall {
+                                ball_id,
+                                accept_docking_target,
+                                reply,
+                            } => {
+                                if !ballpark.balls.contains_key(&ball_id) {
+                                    let _ = ballpark.remove_ball(ball_id);
+                                    let _ = reply.send(None);
+                                    return;
+                                }
+                                let tick = ballpark.current_tick;
+                                let before_cycles = active_module_cycles.len();
+                                crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
+                                    &mut ballpark,
+                                    &db_opt,
+                                    tactical_state,
+                                    ball_id,
+                                );
+                                let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
+                                remove_all_ship_module_cycles(
+                                    &mut ballpark,
+                                    active_module_cycles,
+                                    &base_scramble_strengths,
+                                    &base_core_strengths,
+                                    &db_opt,
+                                    ball_id,
+                                    deact_guard.as_ref(),
+                                );
+                                let cycles_cleared = before_cycles.saturating_sub(active_module_cycles.len());
+                                let lock_count = ballpark.clear_target_locks(ball_id);
+                                if lock_count > 0 {
+                                    on_target_unlocked_in_actor(
+                                        &mut ballpark,
+                                        active_module_cycles,
+                                        &base_scramble_strengths,
+                                        &base_core_strengths,
+                                        &db_opt,
+                                        ball_id,
+                                        None,
+                                        deact_guard.as_ref(),
+                                    );
+                                }
+                                base_scramble_strengths.remove(&ball_id);
+                                base_core_strengths.remove(&ball_id);
+                                asteroids.remove(&ball_id);
+                                let combat_state = ballpark.combat_states.get(&ball_id).cloned();
+                                let slim_meta = ballpark.ball_slim_meta.get(&ball_id).cloned();
+                                let removed = if let Some((station_id, station_pos)) = accept_docking_target {
+                                    if ballpark.balls.contains_key(&station_id) {
+                                        ballpark.accept_docking(ball_id, station_id)
+                                    } else {
+                                        ballpark.accept_docking_at(ball_id, station_id, station_pos)
+                                    }
+                                } else {
+                                    let docking_evs: Vec<DestinyEvent> = ballpark
+                                        .observer_events
+                                        .get(&ball_id)
+                                        .map(|evs| {
+                                            evs.iter()
+                                                .filter(|e| matches!(e, DestinyEvent::OnDockingAccepted { .. }))
+                                                .cloned()
+                                                .collect()
+                                        })
+                                        .unwrap_or_default();
+                                    let r = ballpark.remove_ball(ball_id);
+                                    if !docking_evs.is_empty() {
+                                        ballpark.observer_events.insert(ball_id, docking_evs);
+                                    }
+                                    r
+                                };
+                                sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
+                                let _ = reply.send(removed.map(|ball| TakenBall {
+                                    tick,
+                                    ball,
+                                    combat_state,
+                                    slim_meta,
+                                    cycles_cleared,
+                                }));
+                            }
+                            SystemCommand::RestoreBall { taken, reply } => {
+                                let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
+                                let tick = cycles_tackle::spawn_ball_with_combat_in_actor(
+                                    &mut ballpark,
+                                    active_module_cycles,
+                                    base_scramble_strengths,
+                                    base_core_strengths,
+                                    &sde_opt,
+                                    &db_opt,
+                                    deact_guard.as_ref(),
+                                    taken.ball,
+                                    taken.combat_state.unwrap_or_default(),
+                                    taken.slim_meta,
+                                );
+                                sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
+                                let _ = reply.send(Ok(tick));
+                            }
                             SystemCommand::EmitPackagedActions {
                                 ball_id,
                                 events,
@@ -999,7 +1095,17 @@ impl SystemRegistry {
                                         );
                                     }
                                     if let (Some(db), Some(cs)) = (&db_opt, ballpark.combat_states.get(&ball_id)) {
-                                        crate::sp6_lifecycle::persist_ship_combat_hp_in_db(db, ball_id, cs);
+                                        let not_stale = db.with_snapshot(|snap| {
+                                            !crate::sp6_lifecycle::is_ship_stale_for_in_space_write_in_snap(
+                                                snap,
+                                                ball_id,
+                                                Some(solar_system_id),
+                                                None,
+                                            )
+                                        });
+                                        if not_stale {
+                                            crate::sp6_lifecycle::persist_ship_combat_hp_in_db(db, ball_id, cs);
+                                        }
                                     }
                                     sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                     if let Some(ball_snap) = ball_opt {
@@ -1024,7 +1130,17 @@ impl SystemRegistry {
                                         );
                                     }
                                     if let (Some(db), Some(cs)) = (&db_opt, ballpark.combat_states.get(&ball_id)) {
-                                        crate::sp6_lifecycle::persist_ship_combat_hp_in_db(db, ball_id, cs);
+                                        let not_stale = db.with_snapshot(|snap| {
+                                            !crate::sp6_lifecycle::is_ship_stale_for_in_space_write_in_snap(
+                                                snap,
+                                                ball_id,
+                                                Some(solar_system_id),
+                                                None,
+                                            )
+                                        });
+                                        if not_stale {
+                                            crate::sp6_lifecycle::persist_ship_combat_hp_in_db(db, ball_id, cs);
+                                        }
                                     }
                                     sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                     if let Some(ball_snap) = ball_opt {
@@ -1097,13 +1213,35 @@ impl SystemRegistry {
                                 let _ = reply.send(count);
                             }
                             SystemCommand::SetCapacitor { ball_id, capacitor, reply } => {
-                                let cs = ballpark.combat_states.entry(ball_id).or_default();
+                                if !ballpark.balls.contains_key(&ball_id) {
+                                    let _ = reply.send(Err(format!("Ball {ball_id} is not in space")));
+                                    return;
+                                }
+                                let Some(cs) = ballpark.combat_states.get_mut(&ball_id) else {
+                                    let _ = reply.send(Err(format!("Ball {ball_id} has no combat state")));
+                                    return;
+                                };
                                 cs.capacitor = capacitor;
+                                if let Some(db) = &db_opt {
+                                    let cloned = cs.clone();
+                                    crate::sp6_lifecycle::persist_existing_ship_combat_hp_for_system_in_db(
+                                        db,
+                                        solar_system_id,
+                                        std::iter::once((ball_id, &cloned)),
+                                    );
+                                }
                                 let _ = reply.send(Ok(()));
                             }
                             SystemCommand::HealCombatState { ball_id, reply } => {
+                                if !ballpark.balls.contains_key(&ball_id) {
+                                    let _ = reply.send(Err(format!("Ball {ball_id} is not in space")));
+                                    return;
+                                }
                                 let grid_id = ballpark.ball_grid_ids.get(&ball_id).copied();
-                                let cs = ballpark.combat_states.entry(ball_id).or_default();
+                                let Some(cs) = ballpark.combat_states.get_mut(&ball_id) else {
+                                    let _ = reply.send(Err(format!("Ball {ball_id} has no combat state")));
+                                    return;
+                                };
                                 cs.shield_hp = cs.max_shield_hp;
                                 cs.armor_hp = cs.max_armor_hp;
                                 cs.structure_hp = cs.max_structure_hp;
@@ -1116,7 +1254,17 @@ impl SystemRegistry {
                                     ball_id, grid_id, 1.0, 1.0, 1.0, false,
                                 );
                                 if let Some(db) = &db_opt {
-                                    crate::sp6_lifecycle::persist_ship_combat_hp_in_db(db, ball_id, &cloned);
+                                    let not_stale = db.with_snapshot(|snap| {
+                                        !crate::sp6_lifecycle::is_ship_stale_for_in_space_write_in_snap(
+                                            snap,
+                                            ball_id,
+                                            Some(solar_system_id),
+                                            None,
+                                        )
+                                    });
+                                    if not_stale {
+                                        crate::sp6_lifecycle::persist_ship_combat_hp_in_db(db, ball_id, &cloned);
+                                    }
                                 }
                                 let _ = reply.send(Ok(cloned));
                             }
@@ -1139,6 +1287,39 @@ impl SystemRegistry {
                             SystemCommand::GetCombatState { ball_id, reply } => {
                                 let cs = ballpark.combat_states.get(&ball_id).cloned();
                                 let _ = reply.send(cs);
+                            }
+                            SystemCommand::ModifyCombatState { ball_id, f, reply } => {
+                                if !ballpark.balls.contains_key(&ball_id) {
+                                    let _ = reply.send(None);
+                                    return;
+                                }
+                                let Some(mut cs) = ballpark.combat_states.get(&ball_id).cloned() else {
+                                    let _ = reply.send(None);
+                                    return;
+                                };
+                                f(&mut cs);
+                                let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
+                                cycles_tackle::set_combat_state_in_actor(
+                                    &mut ballpark,
+                                    active_module_cycles,
+                                    base_scramble_strengths,
+                                    base_core_strengths,
+                                    &mut last_active_totals,
+                                    &db_opt,
+                                    deact_guard.as_ref(),
+                                    ball_id,
+                                    cs,
+                                );
+                                sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
+                                let updated = ballpark.combat_states.get(&ball_id).cloned();
+                                if let (Some(db), Some(ref ucs)) = (&db_opt, &updated) {
+                                    crate::sp6_lifecycle::persist_existing_ship_combat_hp_for_system_in_db(
+                                        db,
+                                        solar_system_id,
+                                        std::iter::once((ball_id, ucs)),
+                                    );
+                                }
+                                let _ = reply.send(updated);
                             }
                             SystemCommand::AddModuleCycle { cycle, reply } => {
                                 let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
@@ -1520,10 +1701,12 @@ impl SystemRegistry {
                                 );
                             }
                             if let Some(db) = &db_opt {
-                                crate::sp6_lifecycle::persist_existing_ship_combat_hp_batch_in_db(
+                                crate::sp6_lifecycle::persist_existing_ship_combat_hp_for_system_in_db(
                                     db,
+                                    solar_system_id,
                                     ballpark.combat_states.iter().filter_map(|(&bid, cs)| {
-                                        if !ballpark.is_static_ball(bid)
+                                        if ballpark.balls.contains_key(&bid)
+                                            && !ballpark.is_static_ball(bid)
                                             && ballpark.ball_slim_meta.get(&bid).is_none_or(|m| m.category_id != 11)
                                         {
                                             Some((bid, cs))

@@ -231,6 +231,16 @@ pub(crate) struct SystemActorState {
     pub notify_tx_opt: Option<tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
 }
 
+/// Atomic snapshot of a ball removed from a solar system (`#842`, `#917` E-2).
+#[derive(Debug, Clone)]
+pub struct TakenBall {
+    pub tick: u64,
+    pub ball: Ball,
+    pub combat_state: Option<CombatState>,
+    pub slim_meta: Option<SlimItemMeta>,
+    pub cycles_cleared: usize,
+}
+
 pub enum SystemCommand {
     SpawnBall {
         ball: Ball,
@@ -304,6 +314,15 @@ pub enum SystemCommand {
         station_id: BallId,
         station_pos: DVec3,
         reply: oneshot::Sender<Option<Ball>>,
+    },
+    TakeBall {
+        ball_id: BallId,
+        accept_docking_target: Option<(BallId, DVec3)>,
+        reply: oneshot::Sender<Option<TakenBall>>,
+    },
+    RestoreBall {
+        taken: TakenBall,
+        reply: oneshot::Sender<Result<u64, String>>,
     },
     EmitPackagedActions {
         ball_id: BallId,
@@ -449,6 +468,11 @@ pub enum SystemCommand {
     },
     GetCombatState {
         ball_id: BallId,
+        reply: oneshot::Sender<Option<CombatState>>,
+    },
+    ModifyCombatState {
+        ball_id: BallId,
+        f: Box<dyn FnOnce(&mut CombatState) + Send>,
         reply: oneshot::Sender<Option<CombatState>>,
     },
     AddModuleCycle {

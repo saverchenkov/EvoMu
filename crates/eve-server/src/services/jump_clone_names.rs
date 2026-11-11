@@ -1126,7 +1126,19 @@ pub(crate) async fn handle_qa_move_me_to(
     };
     if old_sys_id > 0 && old_sys_id != dest_sys_id && ship_id > 0 {
         let old_handle = ctx.systems.get_or_spawn(old_sys_id);
-        let existing_ball = old_handle.remove_ball(ship_id).await;
+        let taken = old_handle.take_ball(ship_id).await;
+        if let Some(ref t) = taken {
+            ctx.db.with_mut_snapshot(|snap| {
+                crate::sp6_lifecycle::leave_space_in_snap(
+                    snap,
+                    ship_id,
+                    t.combat_state.as_ref(),
+                    Some(dest_sys_id),
+                    None,
+                );
+            });
+        }
+        let existing_ball = taken.map(|t| t.ball);
         let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
         let ship_tid = ctx
             .db

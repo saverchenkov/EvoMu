@@ -1607,7 +1607,19 @@ async fn handle_slash_teleport(
                         ctx, target_cid, ship_id,
                     );
                 }
-                old_handle.remove_ball(ship_id).await
+                let taken = old_handle.take_ball(ship_id).await;
+                if let Some(ref t) = taken {
+                    ctx.db.with_mut_snapshot(|snap| {
+                        crate::sp6_lifecycle::leave_space_in_snap(
+                            snap,
+                            ship_id,
+                            t.combat_state.as_ref(),
+                            Some(dest_sys_id),
+                            None,
+                        );
+                    });
+                }
+                taken.map(|t| t.ball)
             } else {
                 None
             };

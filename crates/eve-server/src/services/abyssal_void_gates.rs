@@ -508,6 +508,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         });
 
     crate::sp6_lifecycle::clear_abyssal_session(ctx, char_id);
+    let taken_cs = abyss_handle.take_ball(ship_id).await.and_then(|t| t.combat_state);
     abyss_handle.try_remove_ball(ship_id);
     for &npc_id in &r3_npcs {
         abyss_handle.try_remove_ball(npc_id);
@@ -550,6 +551,13 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         origin_pos[2] + 1_000.0,
     ];
     let _ = ctx.db.try_with_mut_snapshot(|snap| {
+        crate::sp6_lifecycle::leave_space_in_snap(
+            snap,
+            ship_id,
+            taken_cs.as_ref(),
+            Some(origin_sys),
+            Some(exit_pos),
+        );
         let _ = crate::router::apply_character_transition_in_snap(
             snap,
             &ctx.sde,
@@ -841,7 +849,19 @@ pub(crate) async fn handle_void_space_player_jump(
     );
 
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, cur_sys);
+    let taken_void_cs = origin_handle.take_ball(ship_id).await.and_then(|t| t.combat_state);
     origin_handle.try_remove_ball(ship_id);
+    if taken_void_cs.is_some() {
+        ctx.db.with_mut_snapshot(|snap| {
+            crate::sp6_lifecycle::leave_space_in_snap(
+                snap,
+                ship_id,
+                taken_void_cs.as_ref(),
+                Some(VOID_SPACE_SYSTEM_ID),
+                Some([0.0, 0.0, 0.0]),
+            );
+        });
+    }
     let _ = crate::services::quasar_social_chat::on_character_leave_local_chat(
         &ctx.quasar_gateway,
         &ctx.db,
@@ -1034,6 +1054,7 @@ pub(crate) async fn handle_void_space_end_gate_activation(
         st.void_space_sessions.remove(&char_id);
     });
     crate::sp6_lifecycle::clear_abyssal_session(ctx, char_id);
+    let taken_exit_cs = void_handle.take_ball(ship_id).await.and_then(|t| t.combat_state);
     void_handle.try_remove_ball(ship_id);
 
     let origin_sys = vs.origin_solar_system_id;
@@ -1045,6 +1066,13 @@ pub(crate) async fn handle_void_space_end_gate_activation(
     let finished_content_id = ctx
         .db
         .try_with_mut_snapshot(|snap| {
+            crate::sp6_lifecycle::leave_space_in_snap(
+                snap,
+                ship_id,
+                taken_exit_cs.as_ref(),
+                Some(origin_sys),
+                Some(exit_pos),
+            );
             let _ = crate::router::apply_character_transition_in_snap(
                 snap,
                 &ctx.sde,

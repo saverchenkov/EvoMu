@@ -239,6 +239,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     ctx.db.with_mut_snapshot(|snap| {
                         snap.item_positions.insert(old_ship_id, old_pos.to_array());
                         snap.item_positions.insert(capsule_id, pod_pos.to_array());
+                        crate::sp6_lifecycle::enter_space_in_snap(snap, capsule_id, sys_id);
                     });
                     let (pod_ball, pod_cs) = build_ejected_capsule_ball_and_combat_state(
                         ctx,
@@ -554,7 +555,10 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                                 );
                                 let mut pkg_events = Vec::new();
                                 if was_capsule {
-                                    let _ = sys.remove_ball(prev).await;
+                                    let _ = sys.take_ball(prev).await;
+                                    ctx.db.with_mut_snapshot(|snap| {
+                                        snap.sp6_lifecycle.ship_combat_hp.remove(&(-prev));
+                                    });
                                 } else {
                                     let _ = sys
                                         .set_movement_mode(prev, eve_destiny::MovementMode::Stop)
@@ -591,6 +595,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                                 if let Ok(Some((_, sid_ball))) = sys.get_ball_snapshot(sid).await {
                                     ctx.db.with_mut_snapshot(|snap| {
                                         snap.item_positions.insert(sid, sid_ball.position.to_array());
+                                        crate::sp6_lifecycle::enter_space_in_snap(snap, sid, sys_id);
                                     });
                                 }
                                 let boarded_slim = ctx.build_ship_slim_meta(char_id, sid_type_id);

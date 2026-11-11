@@ -1232,7 +1232,20 @@ pub async fn handle_npcs_drones(
                                 tcs.armor_hp = (tcs.armor_hp + d.armor_repair_amount).min(tcs.max_armor_hp);
                                 total_repaired += (tcs.armor_hp - before).max(0.0);
                             }
-                            let _ = sys_handle.set_combat_state(target_id, tcs).await;
+                            let sh_rep = d.shield_repair_amount;
+                            let ar_rep = d.armor_repair_amount;
+                            let _ = sys_handle
+                                .modify_combat_state(target_id, move |live_cs| {
+                                    if sh_rep > 0.0 {
+                                        live_cs.shield_hp =
+                                            (live_cs.shield_hp + sh_rep).min(live_cs.max_shield_hp);
+                                    }
+                                    if ar_rep > 0.0 {
+                                        live_cs.armor_hp =
+                                            (live_cs.armor_hp + ar_rep).min(live_cs.max_armor_hp);
+                                    }
+                                })
+                                .await;
                         }
                     } else if matches!(d.group_id, 639 | 641 | 544 | 545) {
                         // EWAR drone (`feat:drones.ewar-drones`)
@@ -1251,20 +1264,35 @@ pub async fn handle_npcs_drones(
                                 this_drone_ewar = true;
                             }
                             if d.neut_amount > 0.0 {
-                                if let Ok(Some(mut tcs)) = sys_handle.get_combat_state(target_id).await {
-                                    tcs.capacitor = (tcs.capacitor - d.neut_amount).max(0.0);
-                                    let _ = sys_handle.set_combat_state(target_id, tcs).await;
+                                let neut = d.neut_amount;
+                                if sys_handle
+                                    .modify_combat_state(target_id, move |tcs| {
+                                        tcs.capacitor = (tcs.capacitor - neut).max(0.0);
+                                    })
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .is_some()
+                                {
                                     this_drone_ewar = true;
                                 }
                             }
                             if d.tp_sig_bonus_pct > 0.0 {
-                                if let Ok(Some(mut tcs)) = sys_handle.get_combat_state(target_id).await {
-                                    tcs.capture_missing_baselines(&target_ball);
-                                    let tp_mult = 1.0 + (d.tp_sig_bonus_pct.min(100.0) / 100.0);
-                                    tcs.tp_sig_multiplier = Some(
-                                        tcs.tp_sig_multiplier.map_or(tp_mult, |prev| prev.max(tp_mult)),
-                                    );
-                                    let _ = sys_handle.set_combat_state(target_id, tcs).await;
+                                let tp_pct = d.tp_sig_bonus_pct;
+                                let t_ball = target_ball.clone();
+                                if sys_handle
+                                    .modify_combat_state(target_id, move |tcs| {
+                                        tcs.capture_missing_baselines(&t_ball);
+                                        let tp_mult = 1.0 + (tp_pct.min(100.0) / 100.0);
+                                        tcs.tp_sig_multiplier = Some(
+                                            tcs.tp_sig_multiplier.map_or(tp_mult, |prev| prev.max(tp_mult)),
+                                        );
+                                    })
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .is_some()
+                                {
                                     this_drone_ewar = true;
                                 }
                             }

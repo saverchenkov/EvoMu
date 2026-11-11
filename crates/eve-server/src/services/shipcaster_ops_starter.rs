@@ -422,14 +422,27 @@ pub async fn execute_shipcaster_jump(
     launch_vector: DVec3,
 ) -> Result<(), BridgeRpcError> {
     let now_unix = ctx.now_unix();
-    let (_, ship_ball, pre_cs) =
+    let (_, _, pre_cs) =
         prevalidate_shipcaster_jump(ctx, char_id, ship_id, origin_sys).await?;
     let old_handle = ctx.systems.get_or_spawn(origin_sys);
+    let Some(taken) = old_handle.take_ball(ship_id).await else {
+        return Err(rpc_err(
+            "SystemTransitionFailed",
+            &format!("Ship {ship_id} is no longer in solar system {origin_sys}"),
+        ));
+    };
+    let live_cs = taken.combat_state.clone().or(pre_cs);
 
-    let updated_ch = ctx
+    let updated_ch = match ctx
         .db
         .set_character_solar_system(char_id, dest_sys, &ctx.sde)
-        .map_err(|e| rpc_err("SystemTransitionFailed", &e.to_string()))?;
+    {
+        Ok(ch) => ch,
+        Err(e) => {
+            let _ = old_handle.restore_ball(taken).await;
+            return Err(rpc_err("SystemTransitionFailed", &e.to_string()));
+        }
+    };
     crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
 
     let saved_heat = ctx
@@ -458,6 +471,13 @@ pub async fn execute_shipcaster_jump(
         if let Some(ship) = snap.items.get_mut(&ship_id) {
             ship.location_id = dest_sys as i64;
         }
+        crate::sp6_lifecycle::leave_space_in_snap(
+            snap,
+            ship_id,
+            live_cs.as_ref(),
+            Some(dest_sys),
+            None,
+        );
         if origin_sys == 30_100_000 {
             snap.zarzakh_gate_locks.remove(&char_id).map(|(gid, _)| gid)
         } else {
@@ -474,18 +494,6 @@ pub async fn execute_shipcaster_jump(
         );
     }
 
-    let live_cs = old_handle
-        .get_combat_state(ship_id)
-        .await
-        .ok()
-        .flatten()
-        .or(pre_cs);
-    if let Some(ref prev_cs) = live_cs {
-        if prev_cs.structure_hp.is_finite() && prev_cs.structure_hp > 0.0 {
-            crate::sp6_lifecycle::persist_ship_combat_hp_in_db(&ctx.db, ship_id, prev_cs);
-        }
-    }
-
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, origin_sys);
     crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(
         ctx, char_id, ship_id,
@@ -498,11 +506,10 @@ pub async fn execute_shipcaster_jump(
             }
         }
     }
-    let existing_ball = old_handle.remove_ball(ship_id).await;
     ctx.sync_character_local_chat(char_id, Some(origin_sys), dest_sys);
 
     let new_handle = ctx.systems.get_or_spawn(dest_sys);
-    let mut new_ball = existing_ball.unwrap_or(ship_ball);
+    let mut new_ball = taken.ball;
     new_ball.position = arrival_pos;
     new_ball.velocity = launch_vector * 100.0;
     new_ball.speed_fraction = 0.0;
