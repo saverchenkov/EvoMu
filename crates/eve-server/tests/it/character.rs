@@ -873,15 +873,15 @@ async fn test_p3_p4_p5_object_cache_config_service_and_notifications() {
         .await
         .expect("objectCaching.GetCachableObject(config.Units)");
 
-    // Verify wire round-trip of objectCaching.CachedObject and inner marshaled payload
+    // Verify wire round-trip of V24 CachedObject and inner marshaled payload
     let co_wire = marshal::encode(&cached_units_obj);
-    let co_decoded = marshal::decode(&co_wire).expect("decode objectCaching.CachedObject");
+    let co_decoded = marshal::decode(&co_wire).expect("decode V24 CachedObject");
     assert_eq!(co_decoded, cached_units_obj);
     let (ts1, ver1) = match &co_decoded {
         PyRep::Object { type_name, args } => {
-            assert_eq!(type_name, "objectCaching.CachedObject");
+            assert_eq!(type_name, marshal::V24_CACHED_OBJECT_CLASS);
             let PyRep::Tuple(items) = args.as_ref() else {
-                panic!("Expected 7-tuple in objectCaching.CachedObject");
+                panic!("Expected 7-tuple in V24 CachedObject");
             };
             assert_eq!(items.len(), 7);
             let PyRep::Tuple(ver_pair) = &items[0] else {

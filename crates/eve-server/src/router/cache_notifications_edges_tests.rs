@@ -61,7 +61,7 @@ fn crc32_cache_object_key_and_cached_object_record_encodings() {
     let PyRep::Object { ref type_name, ref args } = small.to_cached_object_pyrep() else {
         panic!("expected Object");
     };
-    assert_eq!(type_name, "objectCaching.CachedObject");
+    assert_eq!(type_name, eve_proto::marshal::V24_CACHED_OBJECT_CLASS);
     let PyRep::Tuple(ref fields) = **args else { panic!("expected Tuple") };
     assert_eq!(fields[3], PyRep::Integer(0)); // shared = 0
     assert_eq!(fields[5], PyRep::Integer(0)); // compressed = 0
@@ -98,9 +98,17 @@ fn crc32_cache_object_key_and_cached_object_record_encodings() {
     assert_eq!(d_some.len(), 2);
 
     let hint = updated.to_cache_hint_pyrep();
-    assert!(matches!(hint, PyRep::Object { ref type_name, .. } if type_name == "util.CachedObject"));
+    assert!(matches!(
+        hint,
+        PyRep::Object { ref type_name, .. }
+            if type_name == eve_proto::marshal::V24_CACHE_HINT_CLASS
+    ));
     let call_hint = updated.to_cached_method_call_hint_pyrep("run");
-    assert!(matches!(call_hint, PyRep::Object { ref type_name, .. } if type_name == "objectCaching.CachedMethodCallResult"));
+    assert!(matches!(
+        call_hint,
+        PyRep::Object { ref type_name, .. }
+            if type_name == eve_proto::marshal::V24_CACHED_METHOD_CALL_RESULT_CLASS
+    ));
 
     let wrapped = ctx.cache_method_call_result("svc", "meth", PyRep::Bool(false), "run", Some("sys"));
     assert!(matches!(wrapped, PyRep::Object { .. }));

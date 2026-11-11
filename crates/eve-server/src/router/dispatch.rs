@@ -361,7 +361,7 @@ impl ServerContext {
                     let already_cached = matches!(
                         &rep,
                         PyRep::Object { type_name, .. }
-                            if type_name == "objectCaching.CachedMethodCallResult"
+                            if type_name == eve_proto::marshal::V24_CACHED_METHOD_CALL_RESULT_CLASS
                     );
                     res = Ok(if already_cached {
                         rep

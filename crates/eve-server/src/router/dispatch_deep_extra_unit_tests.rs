@@ -947,7 +947,7 @@ async fn dispatch_box_fut_station_peer_notify_seq_filter_market_cache_and_wal_pr
     assert!(sess_a.drain_notifications().is_empty());
 
     // 3. machoNet:26000 marketProxy caching gate (L357-358):
-    //    `marketProxy.GetOrders` / `GetPlexOrders` wrapped in CachedMethodCallResult,
+    //    `marketProxy.GetOrders` / `GetPlexOrders` wrapped in V24 CachedMethodCallResult,
     //    while `marketProxy.StartupCheck` and `charMgr.GetPublicInfo` are NOT wrapped.
     let orders_rep = ctx
         .dispatch_rpc(
@@ -963,7 +963,8 @@ async fn dispatch_box_fut_station_peer_notify_seq_filter_market_cache_and_wal_pr
         .expect("marketProxy.GetOrders");
     assert!(matches!(
         &orders_rep,
-        PyRep::Object { type_name, .. } if type_name == "objectCaching.CachedMethodCallResult"
+        PyRep::Object { type_name, .. }
+            if type_name == eve_proto::marshal::V24_CACHED_METHOD_CALL_RESULT_CLASS
     ));
 
     let plex_rep = ctx
@@ -980,7 +981,8 @@ async fn dispatch_box_fut_station_peer_notify_seq_filter_market_cache_and_wal_pr
         .expect("marketProxy.GetPlexOrders");
     assert!(matches!(
         &plex_rep,
-        PyRep::Object { type_name, .. } if type_name == "objectCaching.CachedMethodCallResult"
+        PyRep::Object { type_name, .. }
+            if type_name == eve_proto::marshal::V24_CACHED_METHOD_CALL_RESULT_CLASS
     ));
 
     let startup_rep = ctx
@@ -997,7 +999,9 @@ async fn dispatch_box_fut_station_peer_notify_seq_filter_market_cache_and_wal_pr
         .expect("marketProxy.StartupCheck");
     assert!(!matches!(
         &startup_rep,
-        PyRep::Object { type_name, .. } if type_name == "objectCaching.CachedMethodCallResult"
+        PyRep::Object { type_name, .. }
+            if type_name == eve_proto::marshal::V24_CACHED_METHOD_CALL_RESULT_CLASS
+                || type_name == "objectCaching.CachedMethodCallResult"
     ));
 
     let pub_rep = ctx
@@ -1014,7 +1018,9 @@ async fn dispatch_box_fut_station_peer_notify_seq_filter_market_cache_and_wal_pr
         .expect("charMgr.GetPublicInfo");
     assert!(!matches!(
         &pub_rep,
-        PyRep::Object { type_name, .. } if type_name == "objectCaching.CachedMethodCallResult"
+        PyRep::Object { type_name, .. }
+            if type_name == eve_proto::marshal::V24_CACHED_METHOD_CALL_RESULT_CLASS
+                || type_name == "objectCaching.CachedMethodCallResult"
     ));
 
     // 4. WAL failure drops post-pre_seq notifications and retains <= pre_seq notifications (L213)

@@ -623,3 +623,66 @@ fn is_zlib_stream_header_and_marshal_decode_error_arms_exhaustive() {
     );
 }
 
+#[test]
+fn v24_object_caching_classic_classes_use_py_object_and_remap_legacy_names() {
+    let cmcr_state = PyRep::Tuple(vec![
+        PyRep::Dict(vec![(
+            PyRep::String("versionCheck".into()),
+            PyRep::Tuple(vec![PyRep::String("always".into()), PyRep::None, PyRep::None]),
+        )]),
+        PyRep::SubStream(Box::new(PyRep::Tuple(vec![PyRep::Integer(1)]))),
+        PyRep::List(vec![PyRep::Integer(100), PyRep::Integer(200)]),
+    ]);
+    let co_state = PyRep::Tuple(vec![
+        PyRep::Tuple(vec![PyRep::Integer(100), PyRep::Integer(200)]),
+        PyRep::None,
+        PyRep::Integer(888_444),
+        PyRep::Integer(1),
+        PyRep::Buffer(vec![MARSHAL_HEADER_BYTE, 0, 0, 0, 0, MarshalOpcode::PyNone as u8]),
+        PyRep::Integer(0),
+        PyRep::String("config.Units".into()),
+    ]);
+    let hint_state = PyRep::Tuple(vec![
+        PyRep::String("config.Units".into()),
+        PyRep::Integer(888_444),
+        PyRep::Tuple(vec![PyRep::Integer(100), PyRep::Integer(200)]),
+    ]);
+
+    for (legacy, v24, state) in [
+        (
+            "objectCaching.CachedMethodCallResult",
+            V24_CACHED_METHOD_CALL_RESULT_CLASS,
+            cmcr_state,
+        ),
+        ("objectCaching.CachedObject", V24_CACHED_OBJECT_CLASS, co_state),
+        ("util.CachedObject", V24_CACHE_HINT_CLASS, hint_state),
+    ] {
+        let canonical_rep = PyRep::Object {
+            type_name: v24.into(),
+            args: Box::new(state.clone()),
+        };
+        let wire = encode(&canonical_rep);
+        assert_eq!(wire[5], MarshalOpcode::PyObject as u8, "{v24} must encode as Op_PyObject (0x17)");
+        assert_eq!(wire[6], MarshalOpcode::PyShortString as u8, "{v24} class name must be plain string");
+        assert_eq!(decode(&wire).unwrap(), canonical_rep);
+
+        let legacy_rep = PyRep::Object {
+            type_name: legacy.into(),
+            args: Box::new(state),
+        };
+        let legacy_wire = encode(&legacy_rep);
+        assert_eq!(legacy_wire, wire, "{legacy} must remap to {v24} on the wire");
+        let prefix = b"carbon.common.script.net.";
+        for (idx, w) in legacy_wire.windows(legacy.len()).enumerate() {
+            if w == legacy.as_bytes() {
+                assert!(
+                    v24.starts_with("carbon.common.script.net.")
+                        && idx >= prefix.len()
+                        && &legacy_wire[idx - prefix.len()..idx] == prefix,
+                    "wire bytes contained unprefixed legacy class {legacy} at offset {idx}"
+                );
+            }
+        }
+    }
+}
+

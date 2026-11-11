@@ -506,7 +506,8 @@ fn unwrap_envelope(rep: &PyRep, preserve_cached_obj: bool) -> PyRep {
         }
         PyRep::ChecksumedStream { body, .. } => unwrap_envelope(body, preserve_cached_obj),
         PyRep::Object { type_name, args }
-            if type_name == "objectCaching.CachedMethodCallResult"
+            if type_name == eve_proto::marshal::V24_CACHED_METHOD_CALL_RESULT_CLASS
+                || type_name == "objectCaching.CachedMethodCallResult"
                 || type_name == "util.CachedMethodCallResult"
                 || type_name == "utillib.CachedMethodCallResult" =>
         {
@@ -519,7 +520,10 @@ fn unwrap_envelope(rep: &PyRep, preserve_cached_obj: bool) -> PyRep {
         }
         PyRep::Object { type_name, args }
             if !preserve_cached_obj
-                && (type_name == "objectCaching.CachedObject" || type_name == "util.CachedObject") =>
+                && (type_name == eve_proto::marshal::V24_CACHED_OBJECT_CLASS
+                    || type_name == eve_proto::marshal::V24_CACHE_HINT_CLASS
+                    || type_name == "objectCaching.CachedObject"
+                    || type_name == "util.CachedObject") =>
         {
             if let PyRep::Tuple(items) = args.as_ref() {
                 if let Some(PyRep::Buffer(bytes) | PyRep::Bytes(bytes)) = items.get(4) {
