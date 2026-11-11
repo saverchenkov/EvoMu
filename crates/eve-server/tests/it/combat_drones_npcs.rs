@@ -1323,8 +1323,8 @@ async fn test_c4_bounty_tick_dbs_ess_split_encounter_waves_and_sentry_guns() {
     assert_eq!(current_wave, 2, "Killing trigger NPC must spawn Wave 2");
 
     // Flush the 20-minute batched bounty tick (`flush_npc_bounty_tick`) with 10% corp tax
-    let (pilot_isk, main_ess, reserve_ess) =
-        flush_npc_bounty_tick(&ctx, nullsec_sys_id, char_id, 0.10);
+    let payout = flush_npc_bounty_tick(&ctx, nullsec_sys_id, char_id, 0.10);
+    let (pilot_isk, main_ess, reserve_ess) = (payout.pilot_isk, payout.main_ess_isk, payout.reserve_ess_isk);
     assert!(
         pilot_isk > 0.0 && main_ess > 0.0 && reserve_ess > 0.0,
         "Null-sec 20m bounty tick must credit pilot wallet and ESS Main/Reserve banks (pilot={pilot_isk}, main={main_ess}, reserve={reserve_ess})"

@@ -546,7 +546,7 @@ async fn test_journey_daily_goals_events() {
         target: 25,
         isk_reward: 500_000,
         sp_reward: 2_500.0,
-        completion_cost_isk: Some(100_000),
+        completion_cost_isk: None,
         completion_cost_evermarks: Some(2_500),
     };
     ctx.quasar_gateway.progression.daily_goals.configure_template(goal_target.clone());

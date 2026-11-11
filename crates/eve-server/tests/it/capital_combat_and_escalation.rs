@@ -20,6 +20,26 @@ use eve_server::sp6_lifecycle::cleanup_npc_wrecks_and_reset_missions_on_downtime
 use glam::DVec3;
 use std::collections::HashMap;
 
+pub(crate) fn fast_ctx() -> ServerContext {
+    static WORLD: std::sync::OnceLock<(
+        std::sync::Arc<eve_sde::SdeRegistry>,
+        eve_db::WorldStateSnapshot,
+    )> = std::sync::OnceLock::new();
+    let (sde, base_snap) = WORLD.get_or_init(|| {
+        let sde = match eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()) {
+            Ok(reg) => std::sync::Arc::new(reg),
+            Err(_) => std::sync::Arc::new(eve_sde::SdeRegistry::with_canonical_seed()),
+        };
+        let db = eve_db::WorldRepository::with_demo_seed();
+        let snap = db.with_snapshot(|s| s.clone());
+        (sde, snap)
+    });
+    let db = std::sync::Arc::new(eve_db::WorldRepository::new_empty());
+    db.with_mut_snapshot(|s| *s = base_snap.clone());
+    ServerContext::with_sde_and_repository(sde.clone(), db)
+        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED)
+}
+
 fn make_sess(char_id: i64, ship_id: i64, sys_id: u32, station_id: Option<i64>) -> SessionState {
     let mut sess = SessionState::default();
     sess.user_id = Some(char_id as u64);
@@ -102,13 +122,7 @@ async fn test_pochven_capital_and_cyno_restrictions() {
     // parity: feat:navigation.pochven-capital-cyno-restrictions
     eve_testkit::attest(&["feat:navigation.pochven-capital-cyno-restrictions"]);
 
-    let sde = match eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()) {
-        Ok(reg) => std::sync::Arc::new(reg),
-        Err(_) => std::sync::Arc::new(eve_sde::SdeRegistry::with_canonical_seed()),
-    };
-    let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
-    let ctx = ServerContext::with_sde_and_repository(sde, db)
-        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED);
+    let ctx = fast_ctx();
     pin_clock(&ctx);
     let char_id = 90_000_001i64;
     let dread_id = 104_000_001i64;
@@ -368,13 +382,7 @@ async fn test_pochven_capital_and_cyno_restrictions() {
 #[tokio::test]
 async fn test_wormhole_c5_c6_capital_escalations_and_cap() {
 
-    let sde = match eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()) {
-        Ok(reg) => std::sync::Arc::new(reg),
-        Err(_) => std::sync::Arc::new(eve_sde::SdeRegistry::with_canonical_seed()),
-    };
-    let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
-    let ctx = ServerContext::with_sde_and_repository(sde, db)
-        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED);
+    let ctx = fast_ctx();
     pin_clock(&ctx);
     let char_id = 90_000_001i64;
     let dread_id = 104_000_101i64;
@@ -565,13 +573,7 @@ async fn test_wormhole_c5_c6_capital_escalations_and_cap() {
 
 #[tokio::test]
 async fn test_pochven_60pct_loot_drop_vs_highsec_50pct() {
-    let sde = match eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()) {
-        Ok(reg) => std::sync::Arc::new(reg),
-        Err(_) => std::sync::Arc::new(eve_sde::SdeRegistry::with_canonical_seed()),
-    };
-    let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
-    let ctx = ServerContext::with_sde_and_repository(sde, db)
-        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED);
+    let ctx = fast_ctx();
     pin_clock(&ctx);
     let killer_id = 90_000_001i64;
     let victim_pochven_id = 90_000_002i64;
@@ -745,7 +747,7 @@ async fn seed_ship_in_space(
 
 #[tokio::test]
 async fn test_crimewatch_sec_status_loss_transactions_and_kill_rights() {
-    let ctx = ServerContext::new();
+    let ctx = super::fast_ctx();
     pin_clock(&ctx);
     let aggressor_id = 90_000_001i64;
     let victim_id = 90_000_002i64;
@@ -939,7 +941,7 @@ async fn test_crimewatch_sec_status_loss_transactions_and_kill_rights() {
 
 #[tokio::test]
 async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands() {
-    let ctx = ServerContext::new();
+    let ctx = super::fast_ctx();
     pin_clock(&ctx);
     let char_id = 90_000_001i64;
     let ship_id = 105_000_101i64;
@@ -1077,7 +1079,7 @@ async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands() {
 
 #[tokio::test]
 async fn test_npc_navy_police_hauler_convoy_and_serverops_downtime() {
-    let ctx = ServerContext::new();
+    let ctx = super::fast_ctx();
     ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_700_045_970))); // 10:59:30 UTC
     let char_id = 90_000_001i64;
     let ship_id = 105_000_201i64;
@@ -1147,13 +1149,7 @@ async fn test_npc_navy_police_hauler_convoy_and_serverops_downtime() {
 
 #[tokio::test]
 async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle() {
-    let sde = match eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()) {
-        Ok(reg) => std::sync::Arc::new(reg),
-        Err(_) => std::sync::Arc::new(eve_sde::SdeRegistry::with_canonical_seed()),
-    };
-    let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
-    let ctx = ServerContext::with_sde_and_repository(sde, db)
-        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED);
+    let ctx = super::fast_ctx();
     pin_clock(&ctx);
     let char_id = 90_000_001i64;
     let ship_id = 104_000_301i64;
@@ -1435,7 +1431,7 @@ async fn test_doomsday_bosonic_cone_and_gtfo_reaper() {
         "feat:modules.doomsday-gtfo-reaper",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = super::fast_ctx();
     pin_clock(&ctx);
     let highsec_sys = 30_000_142; // Jita (0.95 highsec)
     let lowsec_sys = 30_002_537; // Amamake (0.44 lowsec)
@@ -1688,7 +1684,7 @@ async fn test_insurgency_ice_heist_lifecycle() {
     // parity: feat:pve.insurgency-ice-heist
     eve_testkit::attest(&["feat:pve.insurgency-ice-heist"]);
 
-    let ctx = ServerContext::new();
+    let ctx = super::fast_ctx();
     pin_clock(&ctx);
     let sys_id = 30_002_537;
     let char_id = 90_001;
@@ -1826,7 +1822,7 @@ async fn test_deadspace_pocket_rules_and_mwd_disallowance() {
     // parity: feat:pve.deadspace-pocket-rules
     eve_testkit::attest(&["feat:pve.deadspace-pocket-rules"]);
 
-    let ctx = ServerContext::new();
+    let ctx = super::fast_ctx();
     pin_clock(&ctx);
     let sys_id = 30_000_142;
     let char_id = 90_001;
@@ -2090,7 +2086,7 @@ async fn test_pirate_fob_spawn_defense_scaling_and_loot_bounty() {
     // parity: feat:pve.pirate-fob-forward-operating-base
     eve_testkit::attest(&["feat:pve.pirate-fob-forward-operating-base"]);
 
-    let ctx = ServerContext::new();
+    let ctx = super::fast_ctx();
     pin_clock(&ctx);
     let sys_id = 30_002_537; // Amamake (low-sec 0.44 -> Blood Raiders Stronghold 46364)
     let char_id = 90_001;
@@ -2200,7 +2196,7 @@ async fn test_pochven_observatory_flashpoint_and_world_ark() {
     // parity: feat:pve.triglavian-world-ark-observatory
     eve_testkit::attest(&["feat:pve.triglavian-world-ark-observatory"]);
 
-    let ctx = ServerContext::new();
+    let ctx = super::fast_ctx();
     pin_clock(&ctx);
     let pochven_sys_id = 30_000_157; // Otela in Pochven (region 10000070)
     let highsec_sys_id = 30_000_142;
@@ -2344,7 +2340,7 @@ async fn test_pochven_observatory_flashpoint_and_world_ark() {
 
 #[tokio::test]
 async fn test_abyssal_weather_dogma_modifiers_all_five_storms() {
-    let ctx = ServerContext::new();
+    let ctx = super::fast_ctx();
     pin_clock(&ctx);
     let sys_id = 32_000_001;
     let char_id = 90_001;
@@ -2426,7 +2422,7 @@ async fn test_deathless_shipcaster_zarzakh_to_fob() {
     // parity: feat:navigation.deathless-shipcaster-fob
     eve_testkit::attest(&["feat:navigation.deathless-shipcaster-fob"]);
 
-    let ctx = ServerContext::new();
+    let ctx = super::fast_ctx();
     pin_clock(&ctx);
     let zarzakh_id = 30_100_000;
     let campaign_fob_sys = 30_002_813; // Tama

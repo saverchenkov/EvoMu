@@ -1910,7 +1910,6 @@ async fn test_lp_store_offers_exchange_rates_and_purchase_validation() {
     // parity: feat:lp.lp-balance, feat:lp.lp-corp-wallet, feat:lp.concord-lp, feat:lp.lp-reward-logs
     eve_testkit::attest(&["feat:lp.lp-balance", "feat:lp.lp-corp-wallet", "feat:lp.concord-lp", "feat:lp.lp-reward-logs"]);
     let ctx = ServerContext::new();
-    crate::common::seed_test_lp_store_offers(&ctx);
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 506, "demo", "demo-secret", char_id).await;
     sess.station_id = Some(JITA_STATION_ID);
@@ -1941,7 +1940,7 @@ async fn test_lp_store_offers_exchange_rates_and_purchase_validation() {
         "TakeOfferForCharacter",
         &[
             PyRep::Integer(CALDARI_NAVY_CORP_ID),
-            PyRep::Integer(1002),
+            PyRep::Integer(3417),
             PyRep::Integer(1),
         ],
     )
@@ -1962,31 +1961,31 @@ async fn test_lp_store_offers_exchange_rates_and_purchase_validation() {
         "TakeOfferForCharacter",
         &[
             PyRep::Integer(CALDARI_NAVY_CORP_ID),
-            PyRep::Integer(1002),
+            PyRep::Integer(3417),
             PyRep::Integer(2),
         ],
     )
     .await
-    .expect("TakeOfferForCharacter 2x offer 1002");
+    .expect("TakeOfferForCharacter 2x offer 3417");
     assert_eq!(
         purchase
             .dict_get("deliveredTypeID")
             .and_then(|v| v.as_i64()),
-        Some(27_361)
+        Some(13_287)
     );
     assert_eq!(
         purchase.dict_get("quantity").and_then(|v| v.as_i64()),
-        Some(2_000)
+        Some(2)
     );
     assert_eq!(
         purchase.dict_get("remainingLP").and_then(|v| v.as_i64()),
-        Some(49_000)
+        Some(48_500)
     );
 
-    // Offer 1004 requires 100x Tritanium (type 34) trade-in; clear any default Tritanium first
+    // Offer 3565 requires 5,000x type 210 trade-in; clear any default type 210 first
     ctx.db.with_mut_snapshot(|snap| {
         snap.items
-            .retain(|_, it| !(it.owner_id == char_id && it.type_id == 34));
+            .retain(|_, it| !(it.owner_id == char_id && it.type_id == 210));
     });
     let req_item_err = rpc_call(
         &ctx,
@@ -1995,19 +1994,19 @@ async fn test_lp_store_offers_exchange_rates_and_purchase_validation() {
         "TakeOfferForCharacter",
         &[
             PyRep::Integer(CALDARI_NAVY_CORP_ID),
-            PyRep::Integer(1004),
+            PyRep::Integer(3565),
             PyRep::Integer(1),
         ],
     )
     .await
-    .expect_err("Offer 1004 must fail without required trade-in item 34");
+    .expect_err("Offer 3565 must fail without required trade-in item 210");
     assert_eq!(req_item_err.code, "MissingRequiredItems");
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.next_entity_id += 1;
         let req_id = snap.next_entity_id;
         snap.items
-            .insert(req_id, make_item(req_id, 34, char_id, JITA_STATION_ID, 100, false));
+            .insert(req_id, make_item(req_id, 210, char_id, JITA_STATION_ID, 5_000, false));
     });
     let tradein_purchase = rpc_call(
         &ctx,
@@ -2016,17 +2015,17 @@ async fn test_lp_store_offers_exchange_rates_and_purchase_validation() {
         "TakeOfferForCharacter",
         &[
             PyRep::Integer(CALDARI_NAVY_CORP_ID),
-            PyRep::Integer(1004),
+            PyRep::Integer(3565),
             PyRep::Integer(1),
         ],
     )
     .await
-    .expect("Offer 1004 succeeds when required trade-in item 34 is in station hangar");
+    .expect("Offer 3565 succeeds when required trade-in item 210 is in station hangar");
     assert_eq!(
         tradein_purchase
             .dict_get("remainingLP")
             .and_then(|v| v.as_i64()),
-        Some(47_500)
+        Some(46_100)
     );
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -2052,7 +2051,7 @@ async fn test_lp_store_offers_exchange_rates_and_purchase_validation() {
     );
     assert_eq!(
         exch.dict_get("newTargetCorpLP").and_then(|v| v.as_i64()),
-        Some(48_300)
+        Some(46_900)
     );
 }
 }

@@ -119,11 +119,14 @@ async fn lock_target(ctx: &ServerContext, attacker: &mut LivePilot, sys_id: u32,
     ctx.dispatch_rpc(&mut attacker.sess, "dogmaIM", Some(d_oid), "AddTarget", &[PyRep::Integer(target_id)], &HashMap::new(), None)
         .await
         .expect("AddTarget");
-    for _ in 0..8 {
-        ctx.advance_secs(1);
-        sys.step_manual(1.0).await.unwrap();
-        slash_cmd(ctx, &mut attacker.sess, "/heal").await;
+    for _ in 0..4 {
+        if sys.get_target_locks(attacker.ship_id).await.unwrap().iter().any(|l| l.target_id == target_id && l.locked) {
+            break;
+        }
+        ctx.clock().advance_secs(2);
+        sys.step_manual(2.0).await.unwrap();
     }
+    slash_cmd(ctx, &mut attacker.sess, "/heal").await;
 }
 
 async fn shoot_and_destroy(ctx: &ServerContext, attacker: &mut LivePilot, sys_id: u32, guns: &[i64], target_id: i64) {
@@ -140,10 +143,8 @@ async fn shoot_and_destroy(ctx: &ServerContext, attacker: &mut LivePilot, sys_id
             }
             let _ = rpc(ctx, attacker, "dogmaIM", "Activate", &[PyRep::Integer(gid), PyRep::String("targetAttack".into()), PyRep::Integer(target_id)]).await;
         }
-        for _ in 0..5 {
-            sys.step_manual(1.0).await.unwrap();
-        }
-        ctx.advance_secs(5);
+        sys.step_manual(5.0).await.unwrap();
+        ctx.clock().advance_secs(5);
     }
     assert!(sys.get_ball_snapshot(target_id).await.unwrap().is_none(), "target {target_id} must be destroyed");
 }
@@ -166,7 +167,7 @@ async fn test_live_crimewatch_sec_status_loss_and_transactions() {
         "feat:crimewatch.sec-status-transactions",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     pin_clock(&ctx);
     let mut aggr = gm_pilot_in_space(&ctx, 11, 93_100_001, TYPE_CATALYST, ASABONA_SYS).await;
     let mut vict = gm_pilot_in_space(&ctx, 12, 93_100_002, TYPE_VELATOR, ASABONA_SYS).await;
@@ -272,7 +273,7 @@ async fn test_live_crimewatch_kill_rights_gain_sell_and_activate() {
         "feat:crimewatch.kill-rights-sell",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     pin_clock(&ctx);
     let mut killer = gm_pilot_in_space(&ctx, 21, 93_200_001, TYPE_CATALYST, ASABONA_SYS).await;
     let mut victim = gm_pilot_in_space(&ctx, 22, 93_200_002, TYPE_VELATOR, ASABONA_SYS).await;
@@ -388,7 +389,7 @@ async fn test_live_crimewatch_sec_gain_caps_and_tag_tier_bands() {
         "feat:crimewatch.sec-status-transactions",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     pin_clock(&ctx);
     let mut pilot = gm_pilot_in_space(&ctx, 31, 93_300_001, 24_700, ASABONA_SYS).await;
 
@@ -571,7 +572,7 @@ async fn test_live_fleet_boss_handover_formations_and_tagging() {
         "feat:fleet.stored-formations-and-warp-shapes",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     pin_clock(&ctx);
     let mut fc = gm_pilot_in_space(&ctx, 41, 93_400_001, TYPE_CATALYST, ASABONA_SYS).await;
     let mut sc = gm_pilot_in_space(&ctx, 42, 93_400_002, TYPE_VELATOR, ASABONA_SYS).await;
@@ -628,13 +629,14 @@ async fn test_live_fleet_boss_handover_formations_and_tagging() {
         assert_eq!(got.dict_get("formationName").and_then(|v| v.as_str()), Some(shape));
 
         ctx.dispatch_rpc(&mut fc.sess, "fleetObjectHandler", Some(f_oid), "FleetWarp", &[PyRep::Real(dest_pos.x), PyRep::Real(dest_pos.y), PyRep::Real(dest_pos.z), PyRep::Real(10_000.0)], &HashMap::new(), None).await.expect("FleetWarp");
-        for _ in 0..90 {
-            sys.step_manual(1.0).await.unwrap();
-            ctx.advance_secs(1);
+        for _ in 0..20 {
+            sys.step_manual(5.0).await.unwrap();
+            ctx.clock().advance_secs(5);
             if !matches!(sys.get_ball_snapshot(fc.ship_id).await.unwrap().unwrap().1.mode, eve_destiny::MovementMode::Warp { .. }) {
                 break;
             }
         }
+        ctx.advance_secs(1);
 
         let p_fc = sys.get_ball_snapshot(fc.ship_id).await.unwrap().unwrap().1.position;
         let p_sc = sys.get_ball_snapshot(sc.ship_id).await.unwrap().unwrap().1.position;

@@ -200,10 +200,19 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
     .await
     .expect("Fit 1MN Afterburner II into MedSlot0");
     let notes = sess.drain_notifications();
-    assert!(
-        notes.iter().any(|(n, _)| n == "OnModuleFitted"),
-        "Expected OnModuleFitted notification"
+    let (_, fit_args) = notes
+        .iter()
+        .find(|(n, _)| n == "OnModuleFitted")
+        .expect("Expected OnModuleFitted notification");
+    assert_eq!(
+        fit_args.len(),
+        4,
+        "OnModuleFitted must emit 4 args [char_id, flag, type_id, group_id]"
     );
+    assert_eq!(fit_args[0], PyRep::Integer(char_id));
+    assert_eq!(fit_args[1], PyRep::Integer(InventoryFlag::MedSlot0 as i64));
+    assert_eq!(fit_args[2], PyRep::Integer(438));
+    assert!(fit_args[3].as_i64().unwrap_or(0) > 0);
     assert!(
         notes.iter().any(|(n, _)| n == "OnModuleAttributeChanges"),
         "Expected OnModuleAttributeChanges notification"

@@ -342,7 +342,6 @@ async fn test_d6_lp_durable_and_atomic_failed_purchase_across_sqlite_restart() {
     // === RESTART SERVER FROM SQLITE ===
     {
         let ctx = open_ctx_at(&path, 1_750_100_060);
-        crate::common::seed_test_lp_store_offers(&ctx);
         let mut sess = login_select(&ctx, 7102, "demo", "demo-secret", P1).await;
 
         let corp_lp_after = call(&ctx, &mut sess, "LPSvc", "GetAllMyCorporationWalletLPBalances", &[]).await.unwrap();
@@ -362,24 +361,24 @@ async fn test_d6_lp_durable_and_atomic_failed_purchase_across_sqlite_restart() {
         };
         let before_fail = snap_state(&ctx);
 
-        // 1. Fail on missing required trade-in items (Offer 1004 requires 100x Tritanium, pilot has 50x)
-        let err_items = call(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(CALDARI_NAVY_CORP_ID), PyRep::Integer(1004), PyRep::Integer(1)]).await.unwrap_err();
+        // 1. Fail on missing required trade-in items (Offer 3565 requires 5000x type 210)
+        let err_items = call(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(CALDARI_NAVY_CORP_ID), PyRep::Integer(3565), PyRep::Integer(1)]).await.unwrap_err();
         assert_eq!(err_items.code, "MissingRequiredItems");
         assert_eq!(snap_state(&ctx), before_fail);
 
-        // 2. Fail on insufficient character LP (Offer 1003 costs 10,000 LP, pilot has 9,000 LP)
-        let err_lp = call(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(CALDARI_NAVY_CORP_ID), PyRep::Integer(1003), PyRep::Integer(1)]).await.unwrap_err();
+        // 2. Fail on insufficient character LP (Offer 3415 costs 65,000 LP, pilot has 9,000 LP)
+        let err_lp = call(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(CALDARI_NAVY_CORP_ID), PyRep::Integer(3415), PyRep::Integer(1)]).await.unwrap_err();
         assert_eq!(err_lp.code, "InsufficientLoyaltyPoints");
         assert_eq!(snap_state(&ctx), before_fail);
 
-        // 3. Fail on insufficient corporation LP (Offer 1003 costs 10,000 LP, corp has 6,000 LP)
-        let err_corp_lp = call(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCorporation", &[PyRep::Integer(CALDARI_NAVY_CORP_ID), PyRep::Integer(1003), PyRep::Integer(1)]).await.unwrap_err();
+        // 3. Fail on insufficient corporation LP (Offer 3415 costs 65,000 LP, corp has 6,000 LP)
+        let err_corp_lp = call(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCorporation", &[PyRep::Integer(CALDARI_NAVY_CORP_ID), PyRep::Integer(3415), PyRep::Integer(1)]).await.unwrap_err();
         assert_eq!(err_corp_lp.code, "InsufficientLoyaltyPoints");
         assert_eq!(snap_state(&ctx), before_fail);
 
         // 4. Fail on non-positive or overflowing quantity (`InvalidQuantity`)
         for bad_qty in [0i64, -5, i64::MAX] {
-            let err_qty = call(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(CALDARI_NAVY_CORP_ID), PyRep::Integer(1001), PyRep::Integer(bad_qty)]).await.unwrap_err();
+            let err_qty = call(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(CALDARI_NAVY_CORP_ID), PyRep::Integer(3414), PyRep::Integer(bad_qty)]).await.unwrap_err();
             assert_eq!(err_qty.code, "InvalidQuantity");
             assert_eq!(snap_state(&ctx), before_fail);
         }
@@ -395,7 +394,7 @@ async fn test_d6_lp_durable_and_atomic_failed_purchase_across_sqlite_restart() {
             }
         });
         let mut sess2 = login_select(&ctx, 7103, "other", "other-secret", P2).await;
-        let err_role_take = call(&ctx, &mut sess2, "LPStoreMgr", "TakeOfferForCorporation", &[PyRep::Integer(CALDARI_NAVY_CORP_ID), PyRep::Integer(1001), PyRep::Integer(1)]).await.unwrap_err();
+        let err_role_take = call(&ctx, &mut sess2, "LPStoreMgr", "TakeOfferForCorporation", &[PyRep::Integer(CALDARI_NAVY_CORP_ID), PyRep::Integer(3414), PyRep::Integer(1)]).await.unwrap_err();
         assert_eq!(err_role_take.code, "InsufficientCorporationRole");
         let err_role_xfer = call(&ctx, &mut sess2, "LPSvc", "TransferLPFromMyCorpWalletToOtherCorp", &[PyRep::Integer(CALDARI_NAVY_CORP_ID), PyRep::Integer(CALDARI_NAVY_CORP_ID), PyRep::Integer(100)]).await.unwrap_err();
         assert_eq!(err_role_xfer.code, "InsufficientCorporationRole");

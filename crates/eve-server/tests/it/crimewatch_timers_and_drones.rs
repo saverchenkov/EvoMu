@@ -59,7 +59,7 @@ fn spawn_ship(ctx: &ServerContext, owner_id: i64, sys_id: u32, type_id: u32, _po
 
 #[tokio::test]
 async fn test_crimewatch_sec_status_loss_and_kill_rights_lifecycle_e2e() {
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crimewatch_drones_lifecycle::fast_raw_ctx());
     crate::common::pin_clock(&ctx);
     let now = ctx.now_unix();
 
@@ -430,7 +430,7 @@ async fn test_crimewatch_sec_status_loss_and_kill_rights_lifecycle_e2e() {
 
 #[tokio::test]
 async fn test_crimewatch_npc_sec_gain_caps_intervals_and_tag_bands_e2e() {
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crimewatch_drones_lifecycle::fast_raw_ctx());
     crate::common::pin_clock(&ctx);
     let _now = ctx.now_unix();
 
@@ -688,8 +688,18 @@ use eve_server::sp6_lifecycle::tick_background_cluster;
 use glam::DVec3;
 use std::collections::HashMap;
 
+pub(crate) fn fast_raw_ctx() -> ServerContext {
+    static SDE: std::sync::OnceLock<std::sync::Arc<eve_sde::SdeRegistry>> =
+        std::sync::OnceLock::new();
+    let sde = SDE.get_or_init(|| std::sync::Arc::new(eve_sde::SdeRegistry::with_canonical_seed()));
+    let snap = crate::seasons_and_campaigns::fast_demo_snapshot();
+    let db = std::sync::Arc::new(eve_db::WorldRepository::new_empty());
+    db.with_mut_snapshot(|s| *s = snap.clone());
+    ServerContext::with_sde_and_repository(sde.clone(), db)
+}
+
 pub(crate) fn new_ctx() -> ServerContext {
-    let ctx = ServerContext::new();
+    let ctx = fast_raw_ctx();
     crate::common::pin_clock(&ctx);
     ctx
 }
@@ -776,8 +786,13 @@ pub(crate) fn fit_online(ctx: &ServerContext, char_id: i64, ship_id: i64, mod_id
 pub(crate) async fn lock_target(ctx: &ServerContext, sess: &mut SessionState, sys_id: u32, target_id: i64) {
     rpc(ctx, sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(target_id)]).await.expect("dogmaIM.AddTarget");
     let sys_h = ctx.systems.get_or_spawn(sys_id);
-    for _ in 0..60 {
-        let _ = sys_h.step_manual(1.0).await;
+    for _ in 0..15 {
+        if let Some(ship_id) = sess.ship_id {
+            if sys_h.get_target_locks(ship_id).await.is_ok_and(|ls| ls.iter().any(|l| l.target_id == target_id && l.locked)) {
+                break;
+            }
+        }
+        let _ = sys_h.step_manual(5.0).await;
     }
 }
 

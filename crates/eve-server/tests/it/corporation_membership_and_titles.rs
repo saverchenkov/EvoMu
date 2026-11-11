@@ -586,12 +586,12 @@ async fn test_corp_titles_and_role_bundling() {
     .await
     .expect("Create Title 2");
 
-    // 2. Query titles via GetTitles
+    // 2. Query titles via GetTitles (all 16 corporation title slots)
     let titles_rep = rpc(&ctx, &mut sess_ceo, "corpRegistry", "GetTitles", &[])
         .await
         .expect("GetTitles");
     let PyRep::Rowset { rows, .. } = titles_rep else { panic!("expected Rowset") };
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 16);
 
     // Non-director cannot UpdateTitle
     let err_title = rpc(
@@ -663,7 +663,8 @@ async fn test_corp_titles_and_role_bundling() {
         .await
         .expect("GetTitles after delete");
     let PyRep::Rowset { rows: rows_after, .. } = titles_after else { panic!("expected Rowset") };
-    assert_eq!(rows_after.len(), 1);
+    assert_eq!(rows_after.len(), 16);
+    assert_eq!(rows_after[1][1], PyRep::String("".into()));
 }
 
 #[tokio::test]
@@ -684,12 +685,16 @@ async fn npc_corporation_get_member_resolves_member_and_rejects_non_members() {
     assert_eq!(member_rep.dict_get("corporationID"), Some(&PyRep::Integer(npc_corp_id)));
     assert_eq!(member_rep.dict_get("roles"), Some(&PyRep::Integer(0)));
     assert_eq!(member_rep.dict_get("accountKey"), Some(&PyRep::Integer(1000)));
+    assert_eq!(member_rep.dict_get("blockRoles"), Some(&PyRep::Integer(0)));
+    assert_eq!(member_rep.dict_get("blocksRoles"), Some(&PyRep::Integer(0)));
 
     // Calling GetMember with no args resolves session viewer
     let self_rep = rpc(&ctx, &mut sess, "corpRegistry", "GetMember", &[])
         .await
         .expect("GetMember() with no args for NPC corp member must succeed");
     assert_eq!(self_rep.dict_get("characterID"), Some(&PyRep::Integer(pilot_id)));
+    assert_eq!(self_rep.dict_get("blockRoles"), Some(&PyRep::Integer(0)));
+    assert_eq!(self_rep.dict_get("blocksRoles"), Some(&PyRep::Integer(0)));
 
     // Negative: querying pilot from a different corporation returns NotCorpMember
     let not_mem_err = rpc(&ctx, &mut sess, "corpRegistry", "GetMember", &[PyRep::Integer(outsider_id)])
@@ -774,21 +779,27 @@ async fn get_titles_returns_deterministic_10col_rowset_and_live_client_dict_of_u
     setup_test_corp(&ctx, corp_id, "Title Shape Corp", "TSHP", ceo_id, &[ceo_id]);
     let mut sess = make_session(62_020, 30, ceo_id, corp_id, u64::MAX);
 
-    // Empty titles under live client trace returns empty Dict (safe for .itervalues()/.iteritems())
-    let empty_live = ctx
+    // Player corp always seeds all 16 power-of-two title slots (1..=32768) under live client trace
+    let seeded_live = ctx
         .dispatch_rpc(&mut sess, "corpRegistry", None, "GetTitles", &[], &HashMap::new(), Some("machoNet:26000"))
         .await
-        .expect("live GetTitles empty");
-    assert_eq!(empty_live, PyRep::Dict(vec![]));
+        .expect("live GetTitles seeded");
+    let PyRep::Dict(seeded_entries) = seeded_live else {
+        panic!("expected Dict of 16 seeded titles for live V24 GetTitles");
+    };
+    assert_eq!(seeded_entries.len(), 16);
+    for (i, (k, _)) in seeded_entries.iter().enumerate() {
+        assert_eq!(*k, PyRep::Integer(1i64 << i));
+    }
 
-    // Insert titles out of order (title 3 then title 1) with scoped & grantable roles
+    // Insert titles out of order (title 4 then title 1) with scoped & grantable roles
     rpc(
         &ctx,
         &mut sess,
         "corpRegistry",
         "UpdateTitle",
         &[
-            PyRep::Integer(3),
+            PyRep::Integer(4),
             PyRep::String("Brand Lead".into()),
             PyRep::Integer(corp_roles::ROLE_BRAND_MANAGER as i64),
             PyRep::Integer(corp_roles::ROLE_BRAND_MANAGER as i64),
@@ -801,7 +812,7 @@ async fn get_titles_returns_deterministic_10col_rowset_and_live_client_dict_of_u
         ],
     )
     .await
-    .expect("UpdateTitle 3");
+    .expect("UpdateTitle 4");
     rpc(
         &ctx,
         &mut sess,
@@ -816,7 +827,7 @@ async fn get_titles_returns_deterministic_10col_rowset_and_live_client_dict_of_u
     .await
     .expect("UpdateTitle 1");
 
-    // Internal caller receives sorted 10-column Rowset
+    // Internal caller receives sorted 10-column Rowset with all 16 power-of-two slots
     let internal_rs = rpc(&ctx, &mut sess, "corpRegistry", "GetTitles", &[])
         .await
         .expect("internal GetTitles");
@@ -824,11 +835,11 @@ async fn get_titles_returns_deterministic_10col_rowset_and_live_client_dict_of_u
         panic!("expected Rowset for internal GetTitles");
     };
     assert_eq!(columns.len(), 10);
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 16);
     assert_eq!(rows[0][0], PyRep::Integer(1));
-    assert_eq!(rows[1][0], PyRep::Integer(3));
+    assert_eq!(rows[2][0], PyRep::Integer(4));
 
-    // Live V24 client (machoNet:26000) receives Dict<titleID, util.Row>
+    // Live V24 client (machoNet:26000) receives Dict<titleID, util.Row> with all 16 power-of-two keys
     let live_rep = ctx
         .dispatch_rpc(&mut sess, "corpRegistry", None, "GetTitles", &[], &HashMap::new(), Some("machoNet:26000"))
         .await
@@ -836,11 +847,11 @@ async fn get_titles_returns_deterministic_10col_rowset_and_live_client_dict_of_u
     let PyRep::Dict(entries) = live_rep else {
         panic!("expected Dict for live V24 GetTitles");
     };
-    assert_eq!(entries.len(), 2);
+    assert_eq!(entries.len(), 16);
     assert_eq!(entries[0].0, PyRep::Integer(1));
-    assert_eq!(entries[1].0, PyRep::Integer(3));
+    assert_eq!(entries[2].0, PyRep::Integer(4));
 
-    let PyRep::Object { type_name, args } = &entries[1].1 else {
+    let PyRep::Object { type_name, args } = &entries[2].1 else {
         panic!("expected util.Row entry");
     };
     assert_eq!(type_name, "util.Row");
@@ -849,7 +860,7 @@ async fn get_titles_returns_deterministic_10col_rowset_and_live_client_dict_of_u
         panic!("expected header & line lists");
     };
     let map: HashMap<&str, &PyRep> = hdr.iter().zip(line.iter()).map(|(h, v)| (h.as_str().unwrap(), v)).collect();
-    assert_eq!(map["titleID"], &PyRep::Integer(3));
+    assert_eq!(map["titleID"], &PyRep::Integer(4));
     assert_eq!(map["titleName"], &PyRep::String("Brand Lead".into()));
     assert_eq!(map["roles"], &PyRep::Integer(corp_roles::ROLE_BRAND_MANAGER as i64));
     assert_eq!(map["grantableRoles"], &PyRep::Integer(corp_roles::ROLE_BRAND_MANAGER as i64));

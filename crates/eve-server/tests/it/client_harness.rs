@@ -260,7 +260,6 @@ async fn test_t6_client_harness_run_journeys_two_clients_and_log_hygiene() {
     let ctx = Arc::new(ctx);
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
-    crate::common::seed_test_nes_store_catalog(&ctx);
     ctx.db.provision_gm_account("other", "other-secret", 90_000_004, "ISD Other");
     let other_uid = ctx.db.authenticate("other", "other-secret").unwrap().user_id;
     ctx.db.with_mut_snapshot(|snap| {
@@ -515,7 +514,11 @@ async fn test_z1_to_z8_real_client_session_diff_and_journey_contract() {
         .join("evomu_site.py");
     let driver_src = std::fs::read_to_string(&driver_path).expect("read evomu_inclient_driver.py");
     let site_src = std::fs::read_to_string(&site_path).expect("read evomu_site.py");
-    assert!(site_src.contains("schedule_startup") && site_src.contains("_install_logmodule_hook"));
+    assert!(
+        site_src.contains("schedule_startup")
+            && site_src.contains("_install_logmodule_hook")
+            && site_src.contains("_install_xmpp_port_guard")
+    );
     for j in journeys {
         let jid = j["id"].as_str().expect("journey id string");
         assert!(

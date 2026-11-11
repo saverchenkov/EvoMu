@@ -137,24 +137,32 @@ fn sde_type_id_by_name(ctx: &ServerContext, name: &str) -> u32 {
 }
 
 async fn equip_abaddon_lasers(ctx: &ServerContext, sess: &mut SessionState) -> Vec<i64> {
-    let hull_tid = sde_type_id_by_name(ctx, "Abaddon");
-    let gun_tid = sde_type_id_by_name(ctx, "Mega Pulse Laser II");
-    let crystal_tid = sde_type_id_by_name(ctx, "Multifrequency L");
-    let cap_tid = sde_type_id_by_name(ctx, "Cap Recharger II");
-    let hs_tid = sde_type_id_by_name(ctx, "Heat Sink II");
-    let sig_tid = sde_type_id_by_name(ctx, "Signal Amplifier II");
+    static TIDS: std::sync::OnceLock<[u32; 6]> = std::sync::OnceLock::new();
+    let [hull_tid, gun_tid, crystal_tid, cap_tid, hs_tid, sig_tid] = *TIDS.get_or_init(|| {
+        [
+            sde_type_id_by_name(ctx, "Abaddon"),
+            sde_type_id_by_name(ctx, "Mega Pulse Laser II"),
+            sde_type_id_by_name(ctx, "Multifrequency L"),
+            sde_type_id_by_name(ctx, "Cap Recharger II"),
+            sde_type_id_by_name(ctx, "Heat Sink II"),
+            sde_type_id_by_name(ctx, "Signal Amplifier II"),
+        ]
+    });
+    let mut skill_ids: std::collections::BTreeSet<u32> =
+        [3428_u32, 3300, 3312, 3309, 3413, 3426, 3318, 11207, 3424, 3316].into_iter().collect();
     for tid in [hull_tid, gun_tid, crystal_tid, cap_tid, hs_tid, sig_tid] {
         if let Some(t) = ctx.sde.types.get(&tid) {
             for attr_id in [182_u16, 183, 184, 1285, 1289, 1290] {
                 if let Some(&sk) = t.default_attributes.get(&attr_id) {
-                    if sk.round() as u32 > 0 {
-                        slash(ctx, sess, &format!("/giveskill {} 5", sk.round() as u32)).await;
+                    let id = sk.round() as u32;
+                    if id > 0 {
+                        skill_ids.insert(id);
                     }
                 }
             }
         }
     }
-    for sk_id in [3428_u32, 3300, 3312, 3309, 3413, 3426, 3318, 11207, 3424, 3316] {
+    for sk_id in skill_ids {
         slash(ctx, sess, &format!("/giveskill {sk_id} 5")).await;
     }
     let ship_id = slash(ctx, sess, &format!("/createitem {hull_tid} 1")).await.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
@@ -180,8 +188,11 @@ async fn equip_abaddon_lasers(ctx: &ServerContext, sess: &mut SessionState) -> V
 
 async fn step_ticks(ctx: &ServerContext, sys_id: u32, n: usize) {
     let h = ctx.systems.get_or_spawn(sys_id);
-    for _ in 0..n {
-        h.step_manual(1.0).await.unwrap();
+    let mut rem = n;
+    while rem > 0 {
+        let dt = rem.min(5);
+        h.step_manual(dt as f64).await.unwrap();
+        rem -= dt;
     }
 }
 
@@ -196,30 +207,36 @@ async fn park_ship_at_offset(ctx: &ServerContext, sess: &mut SessionState, sys_i
 
 async fn lock_and_destroy(ctx: &ServerContext, sess: &mut SessionState, sys_id: u32, guns: &[i64], target_ball_id: i64) {
     let handle = ctx.systems.get_or_spawn(sys_id);
+    let ship_id = sess.ship_id.expect("active ship");
     step_ticks(ctx, sys_id, 10).await;
     slash(ctx, sess, "/heal").await;
     rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(target_ball_id)]).await.expect("dogmaIM.AddTarget");
-    step_ticks(ctx, sys_id, 35).await;
+    for _ in 0..12 {
+        if handle.get_target_locks(ship_id).await.unwrap().iter().any(|l| l.target_id == target_ball_id && l.locked) {
+            break;
+        }
+        handle.step_manual(3.0).await.unwrap();
+    }
     for &gid in guns {
         if handle.get_ball_snapshot(target_ball_id).await.unwrap().is_none() {
             break;
         }
         let mut res = Err(BridgeRpcError::user_error("NotAttempted"));
-        for _ in 0..20 {
+        for _ in 0..10 {
             res = rpc(ctx, sess, "dogmaIM", "Activate", &[PyRep::Integer(gid), PyRep::String("targetAttack".into()), PyRep::Integer(target_ball_id)]).await;
             if !matches!(&res, Err(e) if e.code == "ModuleAlreadyActive") {
                 break;
             }
-            handle.step_manual(1.0).await.unwrap();
-            ctx.advance_secs(1);
+            handle.step_manual(2.0).await.unwrap();
+            ctx.clock().advance_secs(2);
         }
         res.expect("dogmaIM.Activate weapon cycle");
     }
-    for tick in 0..160 {
-        if tick % 8 == 0 {
+    for tick in 0..40 {
+        if tick > 0 && tick % 2 == 0 {
             slash(ctx, sess, "/heal").await;
         }
-        handle.step_manual(1.0).await.unwrap();
+        handle.step_manual(4.0).await.unwrap();
         if handle.get_ball_snapshot(target_ball_id).await.unwrap().is_none() {
             break;
         }
@@ -238,23 +255,21 @@ async fn warp_to_item_and_stop(ctx: &ServerContext, sess: &mut SessionState, sys
     if ctx.dispatch_rpc(sess, "beyonce", Some(bid), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(dest_item_id), PyRep::Real(warp_dist)], &kw, None).await.is_ok() {
         let handle = ctx.systems.get_or_spawn(sys_id);
         let ship_id = sess.ship_id.expect("active ship");
-        for _ in 0..240 {
-            handle.step_manual(1.0).await.unwrap();
+        for _ in 0..48 {
+            handle.step_manual(5.0).await.unwrap();
             let (_, b) = handle.get_ball_snapshot(ship_id).await.unwrap().expect("ship ball");
             if !matches!(b.mode, MovementMode::Warp { .. }) {
                 break;
             }
         }
         let _ = ctx.dispatch_rpc(sess, "beyonce", Some(bid), "CmdStop", &[], &kw, None).await;
-        for _ in 0..10 {
-            handle.step_manual(1.0).await.unwrap();
-        }
+        handle.step_manual(10.0).await.unwrap();
     }
 }
 
 #[tokio::test]
 async fn test_illegal_pvp_sec_status_loss_formula_and_kill_rights_gain() {
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     common::pin_clock(&ctx);
     let mut gm = setup_gm_session(&ctx, 91_001).await;
     let (mut att_sess, att_id) = create_fresh_pilot(&ctx, &mut gm, 91_002, "cw_att_1", "Korsavik", (3, 19, 14), true).await;
@@ -351,7 +366,7 @@ async fn test_illegal_pvp_sec_status_loss_formula_and_kill_rights_gain() {
 
 #[tokio::test]
 async fn test_kill_rights_trading_and_activation() {
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     common::pin_clock(&ctx);
     let mut gm = setup_gm_session(&ctx, 92_001).await;
     let (mut agg_sess, agg_id) = create_fresh_pilot(&ctx, &mut gm, 92_002, "kr_agg", "Malakor", (3, 19, 14), true).await;
@@ -437,7 +452,7 @@ async fn test_kill_rights_trading_and_activation() {
 
 #[tokio::test]
 async fn test_security_status_gain_caps_tag_bands_and_transactions() {
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     common::pin_clock(&ctx);
     let mut gm = setup_gm_session(&ctx, 93_001).await;
     let (mut pilot_sess, pilot_id) = create_fresh_pilot(&ctx, &mut gm, 93_002, "tag_pilot", "Riven", (3, 19, 14), true).await;

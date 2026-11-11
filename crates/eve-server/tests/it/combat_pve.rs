@@ -1076,7 +1076,7 @@ async fn test_c3_ship_death_session_change_timer_and_wreck_owner_victim() {
     let bal_before = ctx.db.with_snapshot(|s| s.characters.get(&victim_id).unwrap().balance);
     assert!(execute_death_pipeline_sync(&ctx, sys_id, victim_id, outcome.wreck_item_id, attacker_id, DVec3::ZERO, now_unix).is_err());
     let (_, wreck_ball) = sys_handle.get_ball_snapshot(outcome.wreck_item_id).await.unwrap().unwrap();
-    let (_, inline_w_id, _, _) = handle_ship_or_npc_destruction(&ctx, &sys_handle, attacker_id, 610_001_002, 587, 2905, outcome.wreck_item_id, &wreck_ball, Some((victim_id, outcome.wreck_item_id)), sys_id, 500.0, now_unix).await;
+    let inline_w_id = handle_ship_or_npc_destruction(&ctx, &sys_handle, attacker_id, 610_001_002, 587, 2905, outcome.wreck_item_id, &wreck_ball, Some((victim_id, outcome.wreck_item_id)), sys_id, 500.0, now_unix).await.wreck_id;
     assert_eq!(inline_w_id, 0, "Destroying a wreck must not spawn another wreck or pod the owner");
     assert_eq!(ctx.db.with_snapshot(|s| (s.characters.get(&victim_id).unwrap().active_ship_id, s.characters.get(&victim_id).unwrap().balance)), (capsule_id, bal_before));
     let ship2_id = 610_001_099i64;
@@ -1086,7 +1086,7 @@ async fn test_c3_ship_death_session_change_timer_and_wreck_owner_victim() {
     });
     let ship2_ball = new_ball(ship2_id, 587, DVec3::new(1_200.0, 0.0, 0.0));
     let _ = sys_handle.spawn_ball_with_combat(ship2_ball.clone(), ctx.build_type_combat_state(587)).await;
-    let (_, inline_ship_wreck_id, _, _) = handle_ship_or_npc_destruction(&ctx, &sys_handle, attacker_id, 610_001_002, 587, 2905, ship2_id, &ship2_ball, Some((victim_id, ship2_id)), sys_id, 1000.0, now_unix).await;
+    let inline_ship_wreck_id = handle_ship_or_npc_destruction(&ctx, &sys_handle, attacker_id, 610_001_002, 587, 2905, ship2_id, &ship2_ball, Some((victim_id, ship2_id)), sys_id, 1000.0, now_unix).await.wreck_id;
     assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&inline_ship_wreck_id).unwrap().owner_id), victim_id);
 }
 
@@ -1996,10 +1996,22 @@ async fn test_feat_corporation_corp_project_contribution_methods_e2e() {
         .sde
         .blueprints
         .iter()
-        .find(|(_, b)| {
-            b.activities
-                .get("manufacturing")
-                .is_some_and(|a| !a.products.is_empty() && a.time <= 86_400)
+        .find(|(&tid, b)| {
+            ctx.sde.types.get(&tid).is_some_and(|t| t.group_id != 971)
+                && b.activities
+                    .get("manufacturing")
+                    .is_some_and(|a| {
+                        !a.products.is_empty()
+                            && a.time <= 86_400
+                            && a.products.iter().all(|p| {
+                                ctx.sde.types.get(&p.type_id).is_some_and(|pt| {
+                                    !matches!(
+                                        pt.group_id,
+                                        30 | 485 | 513 | 547 | 659 | 883 | 902 | 941 | 1538 | 4594
+                                    )
+                                })
+                            })
+                    })
         })
         .expect("SDE manufacturing blueprint");
     let mfg_act = &bp_def.activities["manufacturing"];

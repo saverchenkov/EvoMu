@@ -1575,24 +1575,26 @@ async fn test_corp_governance_divisions_ceo_placement_tax() {
     eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
         rt.pending_bounty_ticks.insert((sys_id, PILOT_2), 50_000.0);
     });
-    let (_, small_tax, _) = eve_server::services::combat_npc_encounters::flush_npc_bounty_tick(
+    let small_tax = eve_server::services::combat_npc_encounters::flush_npc_bounty_tick(
         &ctx,
         sys_id,
         PILOT_2,
         0.0,
-    );
+    )
+    .main_ess_isk;
     assert_eq!(small_tax, 0.0, "Bounties under 100k ISK must be tax exempt in NPC corp");
 
     // Large bounty >= 100k ISK: 11% NPC corp tax applied
     eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
         rt.pending_bounty_ticks.insert((sys_id, PILOT_2), 1_000_000.0);
     });
-    let (net_payout, _, _) = eve_server::services::combat_npc_encounters::flush_npc_bounty_tick(
+    let net_payout = eve_server::services::combat_npc_encounters::flush_npc_bounty_tick(
         &ctx,
         sys_id,
         PILOT_2,
         0.0,
-    );
+    )
+    .pilot_isk;
     assert!((net_payout - 890_000.0).abs() < 1e-3, "Net payout must reflect 11% tax deduction (1M gross - 110k tax)");
 
     let tax_entry = ctx.db.with_snapshot(|s| {

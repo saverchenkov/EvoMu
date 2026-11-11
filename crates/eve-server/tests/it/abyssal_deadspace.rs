@@ -12,6 +12,26 @@ use eve_server::router::ServerContext;
 use glam::DVec3;
 use std::collections::HashMap;
 
+pub(crate) fn fast_ctx() -> ServerContext {
+    static WORLD: std::sync::OnceLock<(
+        std::sync::Arc<eve_sde::SdeRegistry>,
+        eve_db::WorldStateSnapshot,
+    )> = std::sync::OnceLock::new();
+    let (sde, base_snap) = WORLD.get_or_init(|| {
+        let sde = std::sync::Arc::new(
+            eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path())
+                .expect("open evomu_sde.sqlite"),
+        );
+        let db = eve_db::WorldRepository::with_demo_seed();
+        let snap = db.with_snapshot(|s| s.clone());
+        (sde, snap)
+    });
+    let db = std::sync::Arc::new(eve_db::WorldRepository::new_empty());
+    db.with_mut_snapshot(|s| *s = base_snap.clone());
+    ServerContext::with_sde_and_repository(sde.clone(), db)
+        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED)
+}
+
 pub(crate) const SYS_10_MANIFEST: u32 = 30_100_032; // 1.0 high-sec
 pub(crate) const SYS_09_JITA: u32 = 30_000_142; // 0.9 high-sec
 pub(crate) const SYS_08_LASHESIH: u32 = 30_000_002; // 0.8 high-sec
@@ -126,7 +146,7 @@ async fn test_abyssal_highsec_tiers_suspect_and_activation_restrictions() {
         "feat:pve.abyssal-trace-suspect-flag",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     common::pin_clock(&ctx);
     let kw = HashMap::new();
     let char_id = 90_000_001_i64;
@@ -289,7 +309,7 @@ async fn test_abyssal_entry_ship_limits_coop_and_trace_lifecycle() {
         "feat:pve.abyssal-trace",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     common::pin_clock(&ctx);
     let kw = HashMap::new();
     let sys_id = SYS_08_LASHESIH;
@@ -460,7 +480,7 @@ async fn test_abyssal_entry_ship_limits_coop_and_trace_lifecycle() {
 
 #[tokio::test]
 async fn test_abyssal_coop_staggered_rooms_reentry_kinematics_and_pod_corpse() {
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     common::pin_clock(&ctx);
     let kw = HashMap::new();
     let sys_id = SYS_08_LASHESIH;
@@ -590,7 +610,7 @@ async fn test_abyssal_coop_staggered_rooms_reentry_kinematics_and_pod_corpse() {
 
 #[tokio::test]
 async fn test_abyssal_staggered_coop_r1_to_r2_preserves_conduit_cache_and_interactivity() {
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     common::pin_clock(&ctx);
     let kw = HashMap::new();
     let sys_id = SYS_08_LASHESIH;
@@ -676,7 +696,6 @@ use eve_proto::quasar::{
 };
 use eve_proto::PyRep;
 use eve_server::quasar_gateway::STATUS_FORBIDDEN;
-use eve_server::router::ServerContext;
 use eve_server::services::pve_special_sites::with_abyssal_state;
 use eve_server::services::pve_special_sites_abyssal::{
     evacuate_abyssal_pockets_for_downtime, evaluate_abyssal_spatial_clouds_for_ship,
@@ -701,7 +720,7 @@ async fn test_abyssal_in_pocket_restrictions_boundary_damage_and_clearing() {
         "feat:pve.abyssal-pocket-clearing-rules",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     common::pin_clock(&ctx);
     let kw = HashMap::new();
     let sys_id = SYS_08_LASHESIH;
@@ -995,7 +1014,7 @@ async fn test_abyssal_in_pocket_restrictions_boundary_damage_and_clearing() {
 // are reconciled in suppressor_radius_m; runtime pylon mechanics are verified below.
 #[tokio::test]
 async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     common::pin_clock(&ctx);
     let kw = HashMap::new();
     let abyss_sys = 32_000_005_u32;
@@ -1381,7 +1400,7 @@ async fn test_abyssal_frigate_destroyer_fleet_only_and_bound_fleet_id() {
         "feat:pve.abyssal-coop-frigate-destroyer",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     common::pin_clock(&ctx);
     let kw = HashMap::new();
     let sys_id = SYS_08_LASHESIH;
@@ -1495,7 +1514,7 @@ async fn test_abyssal_frigate_destroyer_fleet_only_and_bound_fleet_id() {
 async fn test_abyssal_downtime_evacuation_purges_abandoned_and_orphaned_drones() {
     eve_testkit::attest(&["feat:pve.abyssal-in-pocket-restrictions"]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     common::pin_clock(&ctx);
     let sec_init = ctx.now_unix() % 86_400;
     let target_pre_dt = 11 * 3_600 - 300;
@@ -1656,7 +1675,7 @@ async fn test_parity_abyssal_automated_pylons_tick_and_conduit() {
     // parity: feat:abyssal.automated-pylons
     eve_testkit::attest(&["feat:abyssal.automated-pylons"]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     common::pin_clock(&ctx);
     let kw = HashMap::new();
     let abyss_sys = 32_000_011_u32;
@@ -1853,7 +1872,7 @@ async fn test_parity_abyssal_spatial_hazard_clouds_tick_and_rpc() {
     // parity: feat:abyssal.spatial-hazard-clouds
     eve_testkit::attest(&["feat:abyssal.spatial-hazard-clouds"]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     common::pin_clock(&ctx);
     let abyss_sys = 32_000_012_u32;
     let sys_h = ctx.systems.get_or_spawn(abyss_sys);
@@ -1940,7 +1959,7 @@ async fn test_parity_abyssal_weather_effects_and_penalties_all_five() {
     // parity: feat:abyssal.weather-effects-and-penalties
     eve_testkit::attest(&["feat:abyssal.weather-effects-and-penalties"]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     common::pin_clock(&ctx);
     let kw = HashMap::new();
     let char1 = 90_000_001_i64;
@@ -2082,7 +2101,7 @@ async fn test_parity_abyssal_bioadaptive_cache_rewards() {
     // parity: feat:abyssal.bioadaptive-cache-rewards
     eve_testkit::attest(&["feat:abyssal.bioadaptive-cache-rewards"]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_ctx();
     common::pin_clock(&ctx);
     let kw = HashMap::new();
 

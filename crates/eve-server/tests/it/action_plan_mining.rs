@@ -17,6 +17,21 @@ use eve_server::services::mining_cycle::{process_mining_cycles, MiningStopReason
 use eve_server::system_actor::AsteroidState;
 use glam::DVec3;
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+
+fn fast_demo_ctx() -> ServerContext {
+    static BASE: OnceLock<(Arc<eve_sde::SdeRegistry>, eve_db::WorldStateSnapshot)> = OnceLock::new();
+    let (sde, snap) = BASE.get_or_init(|| {
+        let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
+        let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+        let _ = eve_server::world_seeder::seed_dual_anchor_markets(&db, &sde);
+        (sde, db.with_snapshot(Clone::clone))
+    });
+    let repo = Arc::new(eve_db::WorldRepository::new_empty());
+    repo.with_mut_snapshot(|s| *s = snap.clone());
+    ServerContext::with_sde_and_repository(sde.clone(), repo)
+        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED)
+}
 
 pub(crate) fn get_dict_val<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
     match rep {
@@ -58,7 +73,7 @@ async fn test_action_plan_c5_mn01_to_mn07_mining_data_belts_lasers_holds_crystal
     // parity: plan:MN-03, plan:MN-04, plan:MN-05, plan:MN-06, plan:MN-07
     eve_testkit::attest(&["plan:MN-03", "plan:MN-04", "plan:MN-05", "plan:MN-06", "plan:MN-07"]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     common::pin_clock(&ctx);
     let kw = HashMap::new();
     let char_id = 90_000_001i64;
@@ -137,9 +152,9 @@ async fn test_action_plan_c5_mn01_to_mn07_mining_data_belts_lasers_holds_crystal
 
     // Lock target and activate Miner I
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(rock_id)], &kw, None).await.expect("AddTarget");
-    for _ in 0..30 {
+    for _ in 0..10 {
         if jita.get_target_locks(ship_id).await.unwrap().iter().any(|l| l.target_id == rock_id && l.locked) { break; }
-        jita.step_manual(1.0).await.unwrap();
+        jita.step_manual(5.0).await.unwrap();
     }
 
     ctx.drain_notifications_for_char(char_id);
@@ -230,10 +245,10 @@ async fn test_action_plan_c5_mn01_to_mn07_mining_data_belts_lasers_holds_crystal
     ctx.drain_notifications_for_char(char_id);
     ctx.dispatch_rpc(&mut sess, "beyonce", Some(b_tup[0].as_i64().unwrap() as u64), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(first_belt_id), PyRep::Real(0.0)], &kw, None).await.expect("CmdWarpToStuff to belt");
     let notifs = ctx.drain_notifications_for_char(char_id);
-    assert!(notifs.iter().any(|n| n.event == "OnWarpStarted"), "Warping to belt must emit OnWarpStarted");
+    assert!(!notifs.iter().any(|n| n.event == "OnWarpStarted"), "OnWarpStarted is client_local and must not be emitted by server");
     assert!(!notifs.iter().any(|n| n.event == "OnWarpToAsteroidBelt"), "OnWarpToAsteroidBelt is client_local and must not be emitted by server");
-    for _ in 0..60 {
-        let _ = perim.step_manual(1.0).await.unwrap();
+    for _ in 0..12 {
+        let _ = perim.step_manual(15.0).await.unwrap();
         let (_, b) = perim.get_ball_snapshot(ship_id).await.unwrap().unwrap();
         if !matches!(b.mode, MovementMode::Warp { .. }) && b.position.distance(first_belt_cel.position) < 5_000.0 {
             break;
@@ -245,9 +260,9 @@ async fn test_action_plan_c5_mn01_to_mn07_mining_data_belts_lasers_holds_crystal
         let (_, ast_b) = perim.get_ball_snapshot(belt_ast_id).await.unwrap().expect("Belt asteroid ball spawned by CmdWarpToStuff");
         let _ = perim.set_ball_position(ship_id, ast_b.position + DVec3::new(500.0, 0.0, 0.0)).await;
         ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(belt_ast_id)], &kw, None).await.expect("Lock belt asteroid");
-        for _ in 0..120 {
+        for _ in 0..12 {
             if perim.get_target_locks(ship_id).await.unwrap().iter().any(|l| l.target_id == belt_ast_id && l.locked) { break; }
-            perim.step_manual(1.0).await.unwrap();
+            perim.step_manual(10.0).await.unwrap();
         }
         let _ = perim.set_capacitor(ship_id, 437.5).await;
         ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(miner_mod_id), PyRep::String("miningLaser".into()), PyRep::Integer(belt_ast_id)], &kw, None).await.expect("Activate Strip Miner I on belt asteroid");
@@ -362,7 +377,10 @@ async fn test_action_plan_c5_mn01_to_mn07_mining_data_belts_lasers_holds_crystal
     jita.set_capacitor(ship_id, max_cap).await.unwrap();
     jita.spawn_ball(Ball { id: ship_id, type_id: 17478, position: rock_pos + DVec3::new(1000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 130.0, inertia: 1.0, mass: 20e6, radius: 150.0, speed_fraction: 0.0, mode: MovementMode::Stop }).await.unwrap();
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(big_rock_id)], &kw, None).await.unwrap();
-    for _ in 0..30 { jita.step_manual(1.0).await.unwrap(); }
+    for _ in 0..10 {
+        if jita.get_target_locks(ship_id).await.unwrap().iter().any(|l| l.target_id == big_rock_id && l.locked) { break; }
+        jita.step_manual(5.0).await.unwrap();
+    }
     let act_burst = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(strip_id), PyRep::String("miningLaser".into()), PyRep::Integer(big_rock_id)], &kw, None).await.expect("Activate Strip Miner I under Mining Foreman Burst");
     assert_eq!(get_dict_val(&act_burst, "cycleTimeMs").and_then(|v| v.as_i64()), Some((45_000.0 * (1.0 - 0.15 * 1.25 * 1.5)) as i64), "Optimization burst (42830) reduces cycleTimeMs by 28.125%");
     assert_eq!(get_dict_val(&act_burst, "maxRange").and_then(|v| v.as_f64()), Some(15_000.0 * 1.75), "Field Enhancement burst (42829) increases maxRange by +75%");
@@ -424,7 +442,7 @@ async fn test_action_plan_c6_mn08_to_mn12_harvesting_drones_scan_compression_rep
     // parity: plan:C-6, plan:MN-08, plan:MN-09, plan:MN-10, plan:MN-11, plan:MN-12, notify:OnReprocessingMaterialsChanged
     eve_testkit::attest(&["plan:C-6", "plan:MN-08", "plan:MN-09", "plan:MN-10", "plan:MN-11", "plan:MN-12", "notify:OnReprocessingMaterialsChanged"]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     common::pin_clock(&ctx);
     let kw = HashMap::new();
     let char_id = 90_000_001i64;

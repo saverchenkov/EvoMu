@@ -855,7 +855,7 @@ async fn test_quasar_sovereignty_resource_planet_requests() {
             assert!(reagent_type_id > 0);
             let amt = field_msg(&r_def, 2).expect("reagent yield amount");
             let rate = varint(&amt, 1).expect("hourly yield");
-            assert_eq!(rate, eve_server::services::sov_gameplay::SKYHOOK_HOURLY_REAGENT_YIELD);
+            assert_eq!(rate, eve_server::services::quasar_sov_skyhook::planet_type_base_hourly_reagent_yield(type_id));
         }
     }
 
@@ -965,7 +965,15 @@ async fn test_quasar_sovereignty_resource_planet_requests() {
             assert!(reagent_type_id > 0);
 
             let harvest = field_msg(&r_cfg, 2).expect("HarvestConfiguration");
-            assert_eq!(varint(&harvest, 1), Some(eve_server::services::sov_gameplay::SKYHOOK_HOURLY_REAGENT_YIELD));
+            assert_eq!(
+                varint(&harvest, 1),
+                Some(eve_server::services::quasar_sov_skyhook::planet_hourly_reagent_yield(
+                    &ctx.sde,
+                    Some(planet_celestial_id as i64),
+                    Some(NULLSEC_SYSTEM),
+                    reagent_type_id as u32,
+                ))
+            );
             assert_eq!(varint(&harvest, 2), Some(3_600)); // hourly cycle
             assert_eq!(varint(&harvest, 4), Some(25_000)); // max storage capacity
 

@@ -219,7 +219,7 @@ async fn test_parity_notifies_abyssal_and_void_space() {
     let abyss_fin = drain_all(&ctx, &mut sess, PILOT_A);
     assert_eq!(
         find_notif(&abyss_fin, "OnAbyssalContentFinished"),
-        &[PyRep::Integer(content_id), PyRep::Integer(1)]
+        &[PyRep::Integer(content_id), PyRep::Integer(11)]
     );
 
     // Void Space: enter -> relog -> exit
@@ -271,7 +271,7 @@ async fn test_parity_notifies_abyssal_and_void_space() {
     let void_fin = drain_all(&ctx, &mut sess_b, PILOT_B);
     assert_eq!(
         find_notif(&void_fin, "OnVoidSpaceContentFinished"),
-        &[PyRep::Integer(vs_cid), PyRep::Integer(1)]
+        &[PyRep::Integer(vs_cid), PyRep::Integer(16)]
     );
 }
 

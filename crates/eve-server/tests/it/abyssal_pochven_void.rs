@@ -280,7 +280,7 @@ async fn test_void_space_player_jump_and_gate_activation() {
     );
     assert_eq!(
         entered_notif.args[0].dict_get("nebula_graphic_id"),
-        Some(&PyRep::Integer(200_001))
+        Some(&PyRep::Integer(25_126))
     );
 
     // Verify filament consumed from cargo
@@ -356,7 +356,9 @@ async fn test_void_space_player_jump_and_gate_activation() {
     let _ = jita_handle.set_ball_position(ship_id, DVec3::new(0.0, 2.0e9, 0.0)).await;
     ctx.advance_secs(15);
     let _ = ctx.dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(void_fil_iid)], &kw, None).await.expect("VoidSpacePlayerJump 3");
-    ctx.advance_secs(1_205); // background cluster tick expiry sweep also evacuates pilot cleanly to Jita
+    ctx.advance_secs(1_205); // at 20m (< 30m ENCOUNTER_LIFE_TIME = 1800s), Void Space session is still active
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&char_id].solar_system_id), VOID_SPACE_SYS_ID, "Void Space session remains active before 1800s ENCOUNTER_LIFE_TIME");
+    ctx.advance_secs(600); // past 1800s ENCOUNTER_LIFE_TIME, background cluster tick expiry sweep evacuates pilot cleanly to Jita
     assert_eq!(ctx.db.with_snapshot(|s| s.characters[&char_id].solar_system_id), JITA_SYS_ID, "Background Void Space expiry sweep evacuates pilot to Jita");
     assert!(jita_handle.get_ball_snapshot(ship_id).await.unwrap().is_some(), "Background Void Space expiry spawns ship ball in Jita");
     let _ = ctx.dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpaceEndGateActivation", &[PyRep::Integer(888_001)], &kw, None).await.expect_err("Post-sweep VoidSpaceEndGateActivation syncs stale session");
@@ -862,15 +864,11 @@ async fn test_warp_vector_mechanics_and_celestial_bookmark_targets() {
         ref other => panic!("Ship ball must be in Warp movement mode, got: {other:?}"),
     }
 
-    // Verify OnWarpStarted notification was emitted with 2 args [ship_id, type_id]
+    // OnWarpStarted is client_local and must not be emitted by the server
     let notifs = ctx.drain_notifications_for_char(char_id);
-    let warp_notif = notifs
-        .iter()
-        .find(|n| n.event == "OnWarpStarted")
-        .expect("OnWarpStarted notification must be emitted");
-    assert_eq!(
-        warp_notif.args,
-        vec![PyRep::Integer(ship_id), PyRep::Integer(587)]
+    assert!(
+        !notifs.iter().any(|n| n.event == "OnWarpStarted"),
+        "OnWarpStarted is client_local and must not be emitted by server"
     );
 }
 }

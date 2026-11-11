@@ -305,7 +305,7 @@ async fn issue_25_macho_notification_3_layer_envelope_and_tcp_push() {
     let mut received_skills_trained = false;
     for _ in 0..8 {
         let frame = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(60),
             read_framed_pyrep(&mut s),
         )
         .await

@@ -9,7 +9,6 @@
 //! - `feat:cosmetics.skinr-sequencing-studio`
 //! - `feat:cosmetics.skinr-paragon-hub-listing`
 //! - `feat:cosmetics.skinr-market`
-//! - `feat:economy.paragon-hub`
 
 #![forbid(unsafe_code)]
 
@@ -135,7 +134,7 @@ async fn test_cosmetics_skinr_designer_and_sequencing_studio_live() {
 
     let mut designer_sess = build_sess(65_101, designer_cid, 1_000_006);
     designer_sess.role = service_roles::ROLE_GM_DEFAULT;
-    for sid in [81377u32, 81370, 81366] {
+    for sid in [81377u32, 81370, 81366, 81375] {
         common::slash_cmd(&ctx, &mut designer_sess, &format!("/giveskill {sid} 5")).await;
     }
     designer_sess.role = 0;
@@ -351,7 +350,7 @@ async fn test_cosmetics_skinr_paragon_hub_market_and_skills_live() {
     // Total reduction = 15%, reducing public tax down to 5%!
     // Also train 81368 Hub Promotion (V -> +5) and 81369 Hub Algorithm Optimization (V -> +25)
     seller_sess.role = service_roles::ROLE_GM_DEFAULT;
-    for sid in [84217u32, 84218, 84220, 81368, 81369] {
+    for sid in [84217u32, 84218, 84220, 81368, 81369, 81375] {
         common::slash_cmd(&ctx, &mut seller_sess, &format!("/giveskill {sid} 5")).await;
     }
     seller_sess.role = 0;

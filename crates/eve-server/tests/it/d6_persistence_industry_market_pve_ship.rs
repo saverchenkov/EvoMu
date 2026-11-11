@@ -18,7 +18,18 @@ use glam::DVec3;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+fn shared_sde() -> Arc<eve_sde::SdeRegistry> {
+    static SDE: OnceLock<Arc<eve_sde::SdeRegistry>> = OnceLock::new();
+    Arc::clone(SDE.get_or_init(|| Arc::new(eve_sde::SdeRegistry::with_canonical_seed())))
+}
+
+fn shared_demo_snapshot() -> eve_db::WorldStateSnapshot {
+    static SNAP: OnceLock<eve_db::WorldStateSnapshot> = OnceLock::new();
+    SNAP.get_or_init(|| WorldRepository::with_demo_seed().with_snapshot(|s| s.clone()))
+        .clone()
+}
 
 const P1: i64 = 90_000_001;
 const P2: i64 = 90_000_002;
@@ -34,7 +45,7 @@ const ALSC_CONTAINER_TYPE_ID: u32 = 17_366;
 
 fn open_ctx_at(path: &Path, now_unix: u64) -> Arc<ServerContext> {
     let db = Arc::new(WorldRepository::open_sqlite(path).expect("open_sqlite"));
-    let ctx = Arc::new(ServerContext::with_repository(db));
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(shared_sde(), db));
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now_unix)));
     ctx
 }
@@ -117,7 +128,7 @@ async fn test_d6_industry_pi_and_market_wallet_history_durable_across_sqlite_res
 
     let path = std::env::temp_dir().join(format!("evomu_d6_ind_mkt_{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    let demo = WorldRepository::with_demo_seed().with_snapshot(|s| s.clone());
+    let demo = shared_demo_snapshot();
     let base_time: u64 = 1_800_000_000;
     let athanor_id = 1_045_000_000_101_i64;
     let metenox_id = 1_045_000_000_102_i64;
@@ -341,7 +352,7 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
 
     let path = std::env::temp_dir().join(format!("evomu_d6_pve_abyss_{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    let demo = WorldRepository::with_demo_seed().with_snapshot(|s| s.clone());
+    let demo = shared_demo_snapshot();
     let base_time: u64 = 1_760_093_700; // 10:55 UTC so Restart 1 (+300s) lands at 11:00 UTC downtime window
     let hack_sig_id = format!("DAT-{JITA_SYSTEM_ID}");
     let dat_pos = [-32_000_000.0, 28_000_000.0, -10_000_000.0];
@@ -539,7 +550,7 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
 
     let path = std::env::temp_dir().join(format!("evomu_d6_ship_acct_{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    let demo = WorldRepository::with_demo_seed().with_snapshot(|s| s.clone());
+    let demo = shared_demo_snapshot();
     let base_time: u64 = 1_760_200_000;
     let (struct_id, tower_id, mod1_id, mod2_id, ammo_id, svc_mod_id, svc_mod2_id) = (1_045_000_000_301_i64, 555_001_i64, 100_000_005_i64, 400_002_i64, 400_003_i64, 400_004_i64, 400_005_i64);
 

@@ -267,10 +267,20 @@ async fn test_phase_4_dg4_and_exit_gate_full_cycle_journey() {
     let env_ids = [t1_id, 90_000_001, ship_id, target_id].map(PyRep::Integer);
     assert_eq!(&env[..4], &env_ids, "ENV_IDX_SELF, CHAR, SHIP, TARGET");
     assert_eq!(env[6], PyRep::Integer(projectile_fired_id));
-    let t2889 = &ctx.sde.types[&2889].default_attributes;
-    let expected_duration = *t2889.get(&73).or_else(|| t2889.get(&51)).expect("cycle time attr");
+    let fit_after_act = ctx
+        .get_or_rebuild_ship_fitting(char_id, ship_id)
+        .expect("ship fitting after turret activation");
+    let expected_duration = {
+        let d = fit_after_act.get_module_effective_attribute(t1_id, 73, &ctx.sde);
+        if d > 0.0 {
+            d
+        } else {
+            fit_after_act.get_module_effective_attribute(t1_id, 51, &ctx.sde)
+        }
+    };
     assert!(expected_duration > 0.0);
     assert_eq!(a[7], PyRep::Real(expected_duration));
+    assert_eq!(a[8], PyRep::Integer(1000));
     assert!(act_notes.iter().all(|(n, _)| n != "OnModuleActivated"));
 
     let charges_after_init: Vec<i32> = ctx.db.with_snapshot(|s| {

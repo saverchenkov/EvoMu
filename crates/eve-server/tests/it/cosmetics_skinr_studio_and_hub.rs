@@ -87,9 +87,9 @@ async fn test_skinr_sequencing_studio_design_components_and_skills() {
         ch.station_id = Some(JITA_STATION_ID);
         s.characters.insert(designer_cid as i64, ch);
 
-        // Train SKINR sequencing skills: Basic Studio Induction (81377) V, Studio Management (81046) V
+        // Train SKINR sequencing skills: Basic Studio Induction (81377) V, Studio Management (81046) V, Batch Sequencing (81375) V
         let sk_map = s.skills.entry(designer_cid as i64).or_default();
-        for sid in [81377u32, 81046, 81366] {
+        for sid in [81375u32, 81377, 81046, 81366] {
             sk_map.insert(
                 sid,
                 TrainedSkillRecord {
@@ -336,11 +336,11 @@ async fn test_skinr_paragon_hub_listing_fees_and_purchase() {
         ch_b.loyalty_points.insert(PARAGON_CORP_ID as i64, 500_000);
         s.characters.insert(buyer_cid as i64, ch_b);
 
-        // Train Paragon Hub skills on seller:
+        // Train Paragon Hub skills + Batch Sequencing (81375) on seller:
         // Paragon Relations (84217) V (-5% tax), Paragon Partnership (84218) V (-5% tax) -> 10% tax reduction
         // Hub Promotion (81368) V (+5 listings)
         let sk_map = s.skills.entry(seller_cid as i64).or_default();
-        for sid in [84217u32, 84218, 81368] {
+        for sid in [81375u32, 84217, 84218, 81368] {
             sk_map.insert(
                 sid,
                 TrainedSkillRecord {

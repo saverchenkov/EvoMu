@@ -11,12 +11,15 @@ use crate::common;
 use crate::corp_member_audit_reinforce_and_quit::found_corp_with_member;
 use crate::fleet_boss_formations_corp_projects_live::{build_project_create_msg, quasar_call};
 use crate::industry_live_support::{
-    acquire, board_loaded_freighter, bom, buy, deploy_online_upwell, dock_station, fuel_cargo,
+    acquire, board_loaded_freighter, bom, buy, fuel_cargo,
     fund_pilots, install, int, items_at, login, move_item, nearest_system, rpc, train_skills,
-    travel, upwell_cargo, warp_to, JITA_STATION, PERIMETER_SYS, PILOT_1, PILOT_2,
+    upwell_cargo, JITA_STATION, PERIMETER_SYS, PILOT_1, PILOT_2,
+};
+use crate::industry_supercapital_tax_esi_e2e::{
+    deploy_online_upwell_fast, dock_station_fast, shared_market_base, travel_fast, warp_to_fast,
 };
 use crate::esi_live_e2e_support::{
-    assert_etag_304, cleanup_sqlite_files, destroy_target_live, esi_call, issue_token, reload_repo,
+    assert_etag_304, cleanup_sqlite_files, esi_call, issue_token, reload_repo,
     temp_db_path,
 };
 use eve_db::corp_roles;
@@ -29,7 +32,6 @@ use eve_server::router::ServerContext;
 use eve_server::services::agents_missions::load_mission_meta;
 use eve_server::services::social_corp_fleet::social_corp_projects::goal_uuid_to_project_id;
 use eve_server::services::station_structure::structure_lifecycle;
-use eve_server::world_seeder::seed_full_market_catalog;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -70,10 +72,11 @@ async fn test_shard1_live_corp_projects_methods_audit_and_reinforce_default() {
     let raitaru_id;
 
     {
+        let (sde, snap) = shared_market_base();
         let repo = reload_repo(&db_path);
-        let ctx = Arc::new(ServerContext::with_repository(repo));
+        repo.with_mut_snapshot(|s| *s = snap.clone());
+        let ctx = Arc::new(ServerContext::with_sde_and_repository(Arc::clone(sde), repo));
         common::pin_clock(&ctx);
-        seed_full_market_catalog(&ctx.db, &ctx.sde);
         fund_pilots(&ctx, &[(PILOT_1, 60_000_000_000.0), (PILOT_2, 2_000_000_000.0)]).await;
         let mut s1 = login(&ctx, 9421, "demo", PILOT_1).await;
         let mut s2 = login(&ctx, 9422, "other", PILOT_2).await;
@@ -225,7 +228,7 @@ async fn test_shard1_live_corp_projects_methods_audit_and_reinforce_default() {
         let fr = board_loaded_freighter(&ctx, &mut s1, &cargo).await;
         let gun_ids = items_at(&ctx, PILOT_1, fr, SMALL_AUTOCANNON);
         move_item(&ctx, &mut s1, gun_ids[0].0, JITA_STATION, 4).await;
-        let (rid, _) = deploy_online_upwell(&ctx, &mut s1, PERIMETER_SYS, RAITARU, &[MFG_PLANT], 1_500).await;
+        let (rid, _) = deploy_online_upwell_fast(&ctx, &mut s1, PERIMETER_SYS, RAITARU, &[MFG_PLANT], 1_500).await;
         raitaru_id = rid;
         let st_info = rpc(&ctx, &mut s1, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(raitaru_id)])
             .await
@@ -233,7 +236,7 @@ async fn test_shard1_live_corp_projects_methods_audit_and_reinforce_default() {
         assert_eq!(st_info.dict_get("reinforceHour").and_then(|v| v.as_i64()), Some(19));
 
         // D) DestroyNPCShips + EarnLoyaltyPoints: accept & run a Caldari L1 agent mission in space!
-        dock_station(&ctx, &mut s1, JITA_STATION).await;
+        dock_station_fast(&ctx, &mut s1, JITA_STATION).await;
         train_skills(&ctx, &mut s1, &[3300, 3301, 3303, 3306, 3327, 11_083, 3413, 3426], true).await;
         let corvette = buy(&ctx, &mut s1, 587, 1).await[0];
         rpc(&ctx, &mut s1, "ship", "AssembleShip", &[PyRep::Integer(corvette)]).await.unwrap();
@@ -267,7 +270,7 @@ async fn test_shard1_live_corp_projects_methods_audit_and_reinforce_default() {
             .map(|(id, a)| (id, a.station_id.unwrap()))
             .expect("High-sec Courier agent");
         if s1.station_id != Some(agent_st) {
-            dock_station(&ctx, &mut s1, agent_st).await;
+            dock_station_fast(&ctx, &mut s1, agent_st).await;
         }
         let offer = rpc(&ctx, &mut s1, "agentMgr", "DoAction", &[PyRep::Integer(1), PyRep::Integer(agent_id)])
             .await
@@ -281,7 +284,7 @@ async fn test_shard1_live_corp_projects_methods_audit_and_reinforce_default() {
                 move_item(&ctx, &mut s1, cid, corvette, 5).await;
             }
             if let Some(dest) = meta.destination_station_id.filter(|&d| d > 0 && d != s1.station_id.unwrap_or(0)) {
-                dock_station(&ctx, &mut s1, dest).await;
+                dock_station_fast(&ctx, &mut s1, dest).await;
             }
         }
         rpc(&ctx, &mut s1, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(mid)])
@@ -290,7 +293,7 @@ async fn test_shard1_live_corp_projects_methods_audit_and_reinforce_default() {
         assert!(ctx.db.with_snapshot(|s| s.corp_projects[&pid_lp].current_quantity) >= 1);
 
         // Travel to FW warzone complex gate, activate acceleration gate, and destroy spawned NPC guard in live combat
-        travel(&ctx, &mut s1, fw_sys).await;
+        travel_fast(&ctx, &mut s1, fw_sys).await;
         let _sys_h = ctx.systems.get_or_spawn(fw_sys);
         let gate_id = ctx.db.with_snapshot(|s| {
             let (&gid, _) = s
@@ -301,11 +304,11 @@ async fn test_shard1_live_corp_projects_methods_audit_and_reinforce_default() {
                 .unwrap();
             gid
         });
-        warp_to(&ctx, &mut s1, gate_id, 0.0).await;
+        warp_to_fast(&ctx, &mut s1, gate_id, 0.0).await;
         rpc(&ctx, &mut s1, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(gate_id)])
             .await
             .expect("ActivateAccelerationGate");
-        destroy_target_live(&ctx, &mut s1, fw_sys, corvette, &[turret], gate_id + 500_000_000).await;
+        crate::esi_live_e2e_support::destroy_target_live(&ctx, &mut s1, fw_sys, corvette, &[turret], gate_id + 500_000_000).await;
         assert_eq!(ctx.db.with_snapshot(|s| s.corp_projects[&pid_kill].current_quantity), 1);
 
         // Query ESI GET /v1/corporations/{corp_id}/projects/
@@ -326,7 +329,7 @@ async fn test_shard1_live_corp_projects_methods_audit_and_reinforce_default() {
     // SQLite persistence check across server restart
     {
         let repo2 = reload_repo(&db_path);
-        let ctx2 = Arc::new(ServerContext::with_repository(repo2));
+        let ctx2 = Arc::new(ServerContext::with_sde_and_repository(Arc::clone(&shared_market_base().0), repo2));
         let router2 = EsiRouter::new(Arc::clone(&ctx2));
         let spec2 = OpenApiSpec::pinned();
         let tok2 = issue_token(&ctx2, PILOT_2, &["esi-corporations.read_projects.v1", "esi-corporations.read_structures.v1"]);
@@ -371,10 +374,11 @@ async fn test_shard1_live_corp_governance_members_roles_bps_and_structures() {
     let raitaru_id;
 
     {
+        let (sde, snap) = shared_market_base();
         let repo = reload_repo(&db_path);
-        let ctx = Arc::new(ServerContext::with_repository(repo));
+        repo.with_mut_snapshot(|s| *s = snap.clone());
+        let ctx = Arc::new(ServerContext::with_sde_and_repository(Arc::clone(sde), repo));
         common::pin_clock(&ctx);
-        seed_full_market_catalog(&ctx.db, &ctx.sde);
         fund_pilots(&ctx, &[(PILOT_1, 60_000_000_000.0), (PILOT_2, 1_000_000_000.0)]).await;
 
         let mut s1 = login(&ctx, 9431, "demo", PILOT_1).await;
@@ -465,7 +469,7 @@ async fn test_shard1_live_corp_governance_members_roles_bps_and_structures() {
         cargo.extend(fuel_cargo());
         let fr = board_loaded_freighter(&ctx, &mut s1, &cargo).await;
         let bp_item = items_at(&ctx, PILOT_1, fr, RIFTER_BP)[0].0;
-        let (rid, _) = deploy_online_upwell(&ctx, &mut s1, PERIMETER_SYS, RAITARU, &[RESEARCH_LAB], 1_500).await;
+        let (rid, _) = deploy_online_upwell_fast(&ctx, &mut s1, PERIMETER_SYS, RAITARU, &[RESEARCH_LAB], 1_500).await;
         raitaru_id = rid;
         move_item(&ctx, &mut s1, bp_item, raitaru_id, 116).await;
         rpc(&ctx, &mut s1, "account", "GiveCash", &[PyRep::Integer(corp_id), PyRep::Real(100_000_000.0), PyRep::String("rd".into())])
@@ -506,7 +510,7 @@ async fn test_shard1_live_corp_governance_members_roles_bps_and_structures() {
     // Reopen SQLite repo and confirm persistence
     {
         let repo2 = reload_repo(&db_path);
-        let ctx2 = Arc::new(ServerContext::with_repository(repo2));
+        let ctx2 = Arc::new(ServerContext::with_sde_and_repository(Arc::clone(&shared_market_base().0), repo2));
         let router2 = EsiRouter::new(Arc::clone(&ctx2));
         let spec2 = OpenApiSpec::pinned();
         let tok2 = issue_token(

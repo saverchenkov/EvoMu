@@ -8,9 +8,9 @@ use crate::common;
 use crate::corp_member_audit_reinforce_and_quit::found_corp_with_member;
 use crate::fleet_boss_formations_corp_projects_live::quasar_call;
 use crate::industry_live_support::{
-    dock_station, fund_pilots, int, login, owned_qty, rpc, train_skills, JITA_STATION, PILOT_1,
-    PILOT_2,
+    fund_pilots, int, login, owned_qty, rpc, train_skills, JITA_STATION, PILOT_1, PILOT_2,
 };
+use crate::industry_supercapital_tax_esi_e2e::dock_station_fast as dock_station;
 use crate::quasar_progression_complete::build_sess;
 use crate::quasar_sov_equinox_hub::{field, fields, varint};
 use crate::wallet_hypernet_evermarks_store_live::seed_nes_store_via_quasar_admin;
@@ -24,6 +24,21 @@ use eve_server::services::quasar_cosmetics_market::BUYER_FEES_VERSION;
 use eve_server::services::quasar_cosmetics_skinr::{
     SkinrStaticCatalog, COMP_CAT_MATERIAL, COMP_CAT_METALLIC, COMP_CAT_PATTERN,
 };
+use std::sync::{Arc, OnceLock};
+
+fn fast_demo_ctx() -> ServerContext {
+    static BASE: OnceLock<(Arc<eve_sde::SdeRegistry>, eve_db::WorldStateSnapshot)> = OnceLock::new();
+    let (sde, snap) = BASE.get_or_init(|| {
+        let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
+        let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+        let _ = eve_server::world_seeder::seed_dual_anchor_markets(&db, &sde);
+        (sde, db.with_snapshot(Clone::clone))
+    });
+    let repo = Arc::new(eve_db::WorldRepository::new_empty());
+    repo.with_mut_snapshot(|s| *s = snap.clone());
+    ServerContext::with_sde_and_repository(Arc::clone(sde), repo)
+        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED)
+}
 
 const RIFTER_TYPE_ID: u32 = 587;
 const PLEX_TYPE_ID: u32 = 44_992;
@@ -111,7 +126,7 @@ async fn test_live_skinr_designer_and_sequencing_studio() {
         "feat:cosmetics.skinr-sequencing-studio",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     common::pin_clock(&ctx);
     let designer_id = 90_000_921_i64;
     ctx.db.provision_gm_account("gm_skinr1", "gm", designer_id, "SKINR Designer");
@@ -120,7 +135,7 @@ async fn test_live_skinr_designer_and_sequencing_studio() {
     s1.station_id = Some(JITA_STATION);
     s1.role = service_roles::ROLE_GM_DEFAULT;
 
-    train_skills(&ctx, &mut s1, &[81_377, 81_372, 81_040, 81_046, 81_366], true).await;
+    train_skills(&ctx, &mut s1, &[81_377, 81_372, 81_040, 81_046, 81_366, 81_375], true).await;
 
     let cat = SkinrStaticCatalog::load(&ctx.sde);
     let coat = cat.components.values().find(|c| c.category == COMP_CAT_MATERIAL && c.disallowed_slots.is_empty()).unwrap().component_id;
@@ -229,7 +244,7 @@ async fn test_live_skinr_paragon_hub_isk_plex_listings_and_market() {
         "feat:cosmetics.skinr-paragon-hub-listing",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     common::pin_clock(&ctx);
     let seller_id = 90_000_922_i64;
     let buyer_id = 90_000_923_i64;
@@ -256,9 +271,13 @@ async fn test_live_skinr_paragon_hub_isk_plex_listings_and_market() {
         }
         day_idx += 1;
         let goals = ctx.quasar_gateway.progression.daily_goals.get_or_init_goals(buyer_id as u32);
-        eve_server::services::space_mining_harvest::dispatch_mining_gameplay_events(&ctx, buyer_id, 2_000, 30_000_142, 1230);
-        ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(buyer_id as u32, 1, 25, &ctx.quasar_gateway);
-        for g in goals.into_iter().filter(|g| g.template.category == 1 || g.template.category == 2) {
+        let active_regs: Vec<_> = goals.into_iter().filter(|g| g.template.category != 6).take(2).collect();
+        for g in &active_regs {
+            if g.template.category == 2 {
+                eve_server::services::space_mining_harvest::dispatch_mining_gameplay_events(&ctx, buyer_id, g.template.target, 30_000_142, 1230);
+            } else {
+                ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(buyer_id as u32, g.template.category, g.template.target, &ctx.quasar_gateway);
+            }
             let mut u_m = Vec::new();
             encode_bytes_field(1, &g.uuid, &mut u_m);
             let mut claim_req = Vec::new();
@@ -268,7 +287,7 @@ async fn test_live_skinr_paragon_hub_isk_plex_listings_and_market() {
     }
 
     // 1. Train Paragon Hub broker skills (84217, 84218, 84220) and check GetTaxRateRequest (5%)
-    train_skills(&ctx, &mut seller, &[84_217, 84_218, 84_220, 81_368, 81_369], true).await;
+    train_skills(&ctx, &mut seller, &[84_217, 84_218, 84_220, 81_368, 81_369, 81_375], true).await;
     let tax_rsp = quasar_call(&ctx, &seller, "eve_public.cosmetic.market.api.GetTaxRateRequest", Vec::new());
     assert_eq!(tax_rsp.status_code, STATUS_OK);
     let tax_sub = sub_bytes(&tax_rsp.payload.unwrap().value, 1);
@@ -402,7 +421,7 @@ async fn test_live_hypernet_relay_node_sizing_and_72h_expiry_refund() {
         "feat:wallet.hypernet-hypercore-sizing-expiry",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     common::pin_clock(&ctx);
     let mut s1 = login(&ctx, 9205, "demo", PILOT_1).await;
     let mut s2 = login(&ctx, 9206, "other", PILOT_2).await;
@@ -509,7 +528,7 @@ async fn test_live_wallet_evermarks_gameplay_accrual_and_nes_store() {
     // parity: feat:wallet.evermarks, feat:wallet.nes-store
     eve_testkit::attest(&["feat:wallet.evermarks", "feat:wallet.nes-store"]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     common::pin_clock(&ctx);
     fund_pilots(&ctx, &[(PILOT_1, 5_000_000_000.0), (PILOT_2, 100_000_000.0)]).await;
     let mut s1 = login(&ctx, 9207, "demo", PILOT_1).await;
@@ -525,9 +544,13 @@ async fn test_live_wallet_evermarks_gameplay_accrual_and_nes_store() {
             ctx.advance_virtual_clock(86_405);
         }
         let goals = ctx.quasar_gateway.progression.daily_goals.get_or_init_goals(PILOT_1 as u32);
-        eve_server::services::space_mining_harvest::dispatch_mining_gameplay_events(&ctx, PILOT_1, 2_000, 30_000_142, 1230);
-        ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(PILOT_1 as u32, 1, 25, &ctx.quasar_gateway);
-        for g in goals.into_iter().filter(|g| g.template.category == 1 || g.template.category == 2) {
+        let active_regs: Vec<_> = goals.into_iter().filter(|g| g.template.category != 6).take(2).collect();
+        for g in &active_regs {
+            if g.template.category == 2 {
+                eve_server::services::space_mining_harvest::dispatch_mining_gameplay_events(&ctx, PILOT_1, g.template.target, 30_000_142, 1230);
+            } else {
+                ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(PILOT_1 as u32, g.template.category, g.template.target, &ctx.quasar_gateway);
+            }
             let mut u_m = Vec::new();
             encode_bytes_field(1, &g.uuid, &mut u_m);
             let mut claim_req = Vec::new();
@@ -568,9 +591,6 @@ async fn test_live_wallet_evermarks_gameplay_accrual_and_nes_store() {
     assert_eq!(int(&buy_emblem, "remainingLP"), em_char_earned - ecost);
 
     // 2. New Eden Store: create category, product, and offer via Quasar admin RPCs (no snapshot helper!)
-    ctx.db.with_mut_snapshot(|s| {
-        s.quasar_commerce.nes_store_catalog = None;
-    });
     dock_station(&ctx, &mut s1, JITA_STATION).await;
     s1.role = service_roles::ROLE_GM_DEFAULT;
     seed_nes_store_via_quasar_admin(&ctx, &mut s1).await;
@@ -579,7 +599,11 @@ async fn test_live_wallet_evermarks_gameplay_accrual_and_nes_store() {
     let PyRep::List(nes_offers) = rpc(&ctx, &mut s1, "storeManager", "get_offers", &[]).await.unwrap() else {
         panic!("expected NES offers");
     };
-    let nes_id = int(&nes_offers[0], "id");
+    let nes_id = nes_offers
+        .iter()
+        .find(|o| o.dict_get("name").and_then(PyRep::as_str) == Some("Paragon Rifter Bundle"))
+        .map(|o| int(o, "id"))
+        .unwrap_or_else(|| int(nes_offers.last().unwrap(), "id"));
     assert_eq!(
         rpc(&ctx, &mut s1, "storeManager", "can_purchase_offer", &[PyRep::Integer(nes_id), PyRep::String("PLX".into()), PyRep::Integer(2)]).await.unwrap(),
         PyRep::Bool(false)
