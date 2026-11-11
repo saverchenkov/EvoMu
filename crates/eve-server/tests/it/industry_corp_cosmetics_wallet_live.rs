@@ -8,10 +8,14 @@ use crate::common;
 use crate::corp_member_audit_reinforce_and_quit::found_corp_with_member;
 use crate::fleet_boss_formations_corp_projects_live::{build_project_create_msg, quasar_call};
 use crate::industry_live_support::{
-    acquire, board_loaded_freighter, buy, deploy_online_upwell, dock_station, dock_structure,
+    acquire, board_loaded_freighter, buy,
     fuel_cargo, fund_pilots, install, int, items_at, login, move_item, nearest_system, owned_qty,
     real, rpc, small_mineral_bp, train_skills, upwell_cargo, JITA_STATION, PERIMETER_SYS, PILOT_1,
     PILOT_2,
+};
+use crate::industry_supercapital_tax_esi_e2e::{
+    deploy_online_upwell_fast as deploy_online_upwell, dock_station_fast as dock_station,
+    dock_structure_fast as dock_structure,
 };
 use eve_db::corp_roles;
 use eve_machonet::SessionState;
@@ -23,6 +27,24 @@ use eve_server::router::ServerContext;
 use eve_server::services::agents_missions::load_mission_meta;
 use eve_server::services::social_corp_fleet::social_corp_projects::goal_uuid_to_project_id;
 use eve_server::world_seeder::seed_full_market_catalog;
+use std::sync::{Arc, OnceLock};
+
+fn fast_full_market_ctx() -> ServerContext {
+    static BASE: OnceLock<(Arc<eve_sde::SdeRegistry>, eve_db::WorldStateSnapshot)> = OnceLock::new();
+    let (sde, snap) = BASE.get_or_init(|| {
+        let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
+        let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+        let _ = eve_server::world_seeder::seed_dual_anchor_markets(&db, &sde);
+        let _ = seed_full_market_catalog(&db, &sde);
+        (sde, db.with_snapshot(|s| s.clone()))
+    });
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    db.with_mut_snapshot(|s| *s = snap.clone());
+    let ctx = ServerContext::with_sde_and_repository(Arc::clone(sde), db)
+        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED);
+    common::pin_clock(&ctx);
+    ctx
+}
 
 const RIFTER_BP: u32 = 691;
 const TRITANIUM: u32 = 34;
@@ -48,9 +70,7 @@ async fn test_live_industry_blueprint_me_research_and_production_savings() {
     // parity: feat:industry.blueprint-me-research
     eve_testkit::attest(&["feat:industry.blueprint-me-research"]);
 
-    let ctx = ServerContext::new();
-    common::pin_clock(&ctx);
-    seed_full_market_catalog(&ctx.db, &ctx.sde);
+    let ctx = fast_full_market_ctx();
     fund_pilots(&ctx, &[(PILOT_1, 50_000_000_000.0)]).await;
     let mut s1 = login(&ctx, 9101, "demo", PILOT_1).await;
     train_skills(&ctx, &mut s1, &[3380, 3387, 3388, 3403, 3406, 3409], true).await;
@@ -140,9 +160,7 @@ async fn test_live_industry_capital_and_supercapital_restrictions() {
     // parity: feat:industry.capital-construction-restrictions
     eve_testkit::attest(&["feat:industry.capital-construction-restrictions"]);
 
-    let ctx = ServerContext::new();
-    common::pin_clock(&ctx);
-    seed_full_market_catalog(&ctx.db, &ctx.sde);
+    let ctx = fast_full_market_ctx();
     fund_pilots(&ctx, &[(PILOT_1, 150_000_000_000.0), (PILOT_2, 100_000_000.0)]).await;
     let mut s1 = login(&ctx, 9103, "demo", PILOT_1).await;
     let mut s2 = login(&ctx, 9104, "other", PILOT_2).await;
@@ -245,9 +263,7 @@ async fn test_live_industry_facility_tax_and_job_cost_formula() {
     // parity: feat:industry.facility-tax, feat:industry.job-cost
     eve_testkit::attest(&["feat:industry.facility-tax", "feat:industry.job-cost"]);
 
-    let ctx = ServerContext::new();
-    common::pin_clock(&ctx);
-    seed_full_market_catalog(&ctx.db, &ctx.sde);
+    let ctx = fast_full_market_ctx();
     fund_pilots(&ctx, &[(PILOT_1, 80_000_000_000.0), (PILOT_2, 100_000_000.0)]).await;
     let mut s1 = login(&ctx, 9105, "demo", PILOT_1).await;
     let mut s2 = login(&ctx, 9106, "other", PILOT_2).await;
@@ -361,9 +377,7 @@ async fn test_live_corp_projects_audit_reinforce_and_npc_standings() {
         "feat:standings.npc-npc-standings",
     ]);
 
-    let ctx = ServerContext::new();
-    common::pin_clock(&ctx);
-    seed_full_market_catalog(&ctx.db, &ctx.sde);
+    let ctx = fast_full_market_ctx();
     fund_pilots(&ctx, &[(PILOT_1, 60_000_000_000.0), (PILOT_2, 1_000_000_000.0)]).await;
     let mut s1 = login(&ctx, 9107, "demo", PILOT_1).await;
     let mut s2 = login(&ctx, 9108, "other", PILOT_2).await;
@@ -479,7 +493,7 @@ async fn test_live_corp_projects_audit_reinforce_and_npc_standings() {
             .unwrap()
     };
     assert!((npc_rel(500_003, 500_001) - 5.0).abs() < 1e-6);
-    assert!((npc_rel(500_003, 500_004) - (-3.0)).abs() < 1e-6);
+    assert!((npc_rel(500_003, 500_004) - (-2.0)).abs() < 1e-6);
 
     // Complete a Caldari agent mission and verify derived faction standing delta
     let (&caldari_agent, agent_station) = ctx

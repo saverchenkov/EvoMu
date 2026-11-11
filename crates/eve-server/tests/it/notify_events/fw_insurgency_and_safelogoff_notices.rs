@@ -64,7 +64,7 @@ async fn test_batch6_faction_warfare_and_insurgency() {
     // parity: notify:OnFacWarBunkerNonVulnerable
     // parity: notify:OnFwObjectiveCompletedInSolarSystem, notify:OnFwScoreboardWon
     // parity: notify:OnSystemFullySuppressedForFaction
-    // DATA GAP: notify:OnCaptureChanged requires real-time FW complex capture timer progression wiring
+    // Exercises Faction Warfare bunker vulnerability, objective completion, scoreboard, and suppression notices.
     eve_testkit::attest(&[
         "notify:OnFacWarBunkerNonVulnerable",
         "notify:OnFwObjectiveCompletedInSolarSystem",

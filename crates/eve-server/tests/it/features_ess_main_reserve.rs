@@ -1,11 +1,92 @@
 //! Dedicated integration tests for open `feat:modules.*` parity rows (Batch 35, Part 4: Nanite Repair Paste & Industrial Cyno).
 
-use crate::modules_advanced_tactical::{build_ctx, seed_pilot, NULL_SYS};
+use crate::modules_advanced_tactical::{JITA_STATION, NULL_SYS};
 use crate::features_bounties_ess::{give_item, put_in_fleet, set_skill, spawn_ship_in_space, DEST_NULL_SYS};
-use eve_db::{InventoryFlag, IskCents, UpwellStructureRecord};
+use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord, UpwellStructureRecord};
 use eve_destiny::DVec3;
+use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use std::collections::HashMap;
+use std::sync::OnceLock;
+
+fn build_ctx() -> eve_server::router::ServerContext {
+    crate::seasons_and_campaigns::fast_real_sde_ctx()
+}
+
+fn seed_pilot(
+    ctx: &eve_server::router::ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    ship_type_id: u32,
+    sys_id: u32,
+    docked: bool,
+) -> SessionState {
+    static ALL_SKILLS: OnceLock<HashMap<u32, TrainedSkillRecord>> = OnceLock::new();
+    let all_skills_l5 = ALL_SKILLS
+        .get_or_init(|| {
+            ctx.sde
+                .types
+                .values()
+                .filter(|t| t.category_id == 16)
+                .map(|t| {
+                    (
+                        t.type_id,
+                        TrainedSkillRecord {
+                            type_id: t.type_id,
+                            level: 5,
+                            skill_points: 256_000.0,
+                        },
+                    )
+                })
+                .collect()
+        })
+        .clone();
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("demo character");
+        ch.character_id = char_id;
+        ch.clone_grade = 2;
+        ch.name = format!("Pilot {char_id}");
+        ch.corporation_id = 1000125;
+        ch.alliance_id = Some(99000001);
+        ch.solar_system_id = sys_id;
+        ch.station_id = if docked { Some(JITA_STATION) } else { None };
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+        ch.jump_cooldown_until_unix = 0;
+        ch.jump_fatigue_until_unix = 0;
+        snap.characters.insert(char_id, ch);
+        snap.skills.insert(char_id, all_skills_l5);
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: ship_type_id,
+                owner_id: char_id,
+                location_id: if docked { JITA_STATION } else { sys_id as i64 },
+                flag: if docked { InventoryFlag::Hangar } else { InventoryFlag::None },
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+    let mut sess = SessionState::new(char_id as u64);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(1000125);
+    sess.alliance_id = Some(99000001);
+    sess.solar_system_id = Some(sys_id);
+    sess.constellation_id = Some(20000020);
+    sess.region_id = Some(10000002);
+    sess.station_id = if docked { Some(JITA_STATION) } else { None };
+    sess.ship_id = Some(ship_id);
+    sess
+}
 
 #[tokio::test]
 async fn test_b35_04_nanite_repair_paste_in_space() {

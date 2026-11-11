@@ -15,17 +15,227 @@ use crate::industry_live_support::{
     PILOT_2,
 };
 use crate::esi_live_e2e_support::{
-    assert_etag_304, cleanup_sqlite_files, deploy_online_upwell_slow, dock_station_slow, esi_call,
-    issue_token, reload_repo, temp_db_path, travel_slow,
+    assert_etag_304, cleanup_sqlite_files, esi_call,
+    issue_token, reload_repo, temp_db_path,
 };
 use eve_db::corp_roles;
+use eve_destiny::{DVec3, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::esi::{EsiRouter, OpenApiSpec};
 use eve_server::router::ServerContext;
+use eve_server::services::station_structure::structure_lifecycle as life;
 use eve_server::world_seeder::seed_full_market_catalog;
 use serde_json::json;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, OnceLock};
+
+pub(crate) fn shared_market_base() -> &'static (Arc<eve_sde::SdeRegistry>, eve_db::WorldStateSnapshot) {
+    static BASE: OnceLock<(Arc<eve_sde::SdeRegistry>, eve_db::WorldStateSnapshot)> = OnceLock::new();
+    BASE.get_or_init(|| {
+        let _ = (
+            crate::esi_live_e2e_support::dock_station_slow,
+            crate::esi_live_e2e_support::deploy_online_upwell_slow,
+        );
+        let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
+        let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+        let _ = eve_server::world_seeder::seed_dual_anchor_markets(&db, &sde);
+        seed_full_market_catalog(&db, &sde);
+        (sde, db.with_snapshot(Clone::clone))
+    })
+}
+
+pub(crate) fn fast_full_market_ctx() -> ServerContext {
+    let (sde, snap) = shared_market_base();
+    let repo = Arc::new(eve_db::WorldRepository::new_empty());
+    repo.with_mut_snapshot(|s| *s = snap.clone());
+    ServerContext::with_sde_and_repository(Arc::clone(sde), repo)
+        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED)
+}
+
+pub(crate) async fn warp_to_fast(ctx: &ServerContext, sess: &mut SessionState, target: i64, dist: f64) {
+    let sys = sess.solar_system_id.unwrap();
+    let beyonce = ctx.bind_object(sess, "beyonce", sys as i64).ok();
+    match ctx
+        .dispatch_rpc(
+            sess,
+            "beyonce",
+            beyonce,
+            "CmdWarpToStuff",
+            &[PyRep::String("item".into()), PyRep::Integer(target), PyRep::Real(dist)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+    {
+        Ok(_) => {
+            let h = ctx.systems.get_or_spawn(sys);
+            let ship = sess.ship_id.unwrap();
+            for _ in 0..20 {
+                let _ = h.step_manual(60.0).await;
+                if let Ok(Some((_, b))) = h.get_ball_snapshot(ship).await {
+                    if !matches!(b.mode, MovementMode::Warp { .. }) {
+                        break;
+                    }
+                }
+            }
+            if let Ok(Some((_, tb))) = h.get_ball_snapshot(target).await {
+                if dist <= 1.0 {
+                    let _ = h.set_movement_mode(ship, MovementMode::Stop).await;
+                    let _ = h.set_ball_position(ship, tb.position).await;
+                }
+            }
+        }
+        Err(e) if e.code == "WarpDistanceTooShort" => {}
+        Err(e) => panic!("warp_to_fast {target}: {e:?}"),
+    }
+}
+
+pub(crate) async fn travel_fast(ctx: &ServerContext, sess: &mut SessionState, dest_sys: u32) {
+    if sess.structure_id.is_some() {
+        rpc(ctx, sess, "structureDocking", "Undock", &[]).await.expect("structure Undock");
+    } else if sess.station_id.is_some() {
+        rpc(ctx, sess, "stationSvc", "Undock", &[]).await.expect("station Undock");
+    }
+    ctx.advance_secs(15);
+    let ship_id = sess.ship_id.unwrap();
+    while sess.solar_system_id != Some(dest_sys) {
+        let cur = sess.solar_system_id.unwrap();
+        let mut prev: HashMap<u32, (u32, i64)> = HashMap::new();
+        let mut q = VecDeque::from([cur]);
+        let mut seen = HashSet::from([cur]);
+        while let Some(s) = q.pop_front() {
+            if s == dest_sys {
+                break;
+            }
+            let mut gates: Vec<(&i64, &eve_sde::StargateJump)> =
+                ctx.sde.jumps.iter().filter(|(_, j)| j.from_solar_system_id == s).collect();
+            gates.sort_by_key(|g| *g.0);
+            for (&gid, j) in gates {
+                if seen.insert(j.to_solar_system_id) {
+                    prev.insert(j.to_solar_system_id, (s, gid));
+                    q.push_back(j.to_solar_system_id);
+                }
+            }
+        }
+        let mut next_sys = dest_sys;
+        while prev[&next_sys].0 != cur {
+            next_sys = prev[&next_sys].0;
+        }
+        let gate = prev[&next_sys].1;
+        let h = ctx.systems.get_or_spawn(cur);
+        let _ = h.set_movement_mode(ship_id, MovementMode::Stop).await;
+        let _ = h.set_ball_position(ship_id, ctx.sde.stargates()[&gate].position).await;
+        let beyonce = ctx.bind_object(sess, "beyonce", cur as i64).ok();
+        ctx.dispatch_rpc(sess, "beyonce", beyonce, "CmdStargateJump", &[PyRep::Integer(gate)], &HashMap::new(), None)
+            .await
+            .unwrap_or_else(|e| panic!("jump {gate}: {e:?}"));
+        ctx.advance_secs(15);
+    }
+}
+
+pub(crate) async fn dock_station_fast(ctx: &ServerContext, sess: &mut SessionState, station_id: i64) {
+    let sys = ctx.sde.stations[&station_id].solar_system_id;
+    travel_fast(ctx, sess, sys).await;
+    let ship_id = sess.ship_id.unwrap();
+    let h = ctx.systems.get_or_spawn(sys);
+    let _ = h.set_movement_mode(ship_id, MovementMode::Stop).await;
+    let _ = h.set_ball_position(ship_id, ctx.sde.stations[&station_id].position).await;
+    rpc(ctx, sess, "stationSvc", "Dock", &[PyRep::Integer(station_id)])
+        .await
+        .unwrap_or_else(|e| panic!("Dock {station_id}: {e:?}"));
+    ctx.advance_secs(15);
+}
+
+pub(crate) async fn dock_structure_fast(ctx: &ServerContext, sess: &mut SessionState, structure_id: i64) {
+    let (sys, st_pos) = ctx.db.with_snapshot(|s| {
+        let st = &s.structures[&structure_id];
+        (st.solar_system_id, DVec3::from_array(st.position))
+    });
+    if sess.solar_system_id != Some(sys) || sess.station_id.is_some() || sess.structure_id.is_some() {
+        travel_fast(ctx, sess, sys).await;
+    }
+    let ship_id = sess.ship_id.unwrap();
+    let h = ctx.systems.get_or_spawn(sys);
+    let _ = h.set_movement_mode(ship_id, MovementMode::Stop).await;
+    let _ = h.set_ball_position(ship_id, st_pos).await;
+    ctx.advance_secs(15);
+    rpc(ctx, sess, "structureDocking", "Dock", &[PyRep::Integer(structure_id)])
+        .await
+        .unwrap_or_else(|e| panic!("Dock {structure_id}: {e:?}"));
+    ctx.advance_secs(15);
+}
+
+pub(crate) async fn deploy_online_upwell_fast(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    sys_id: u32,
+    hull_tid: u32,
+    services: &[u32],
+    fuel_qty: i64,
+) -> (i64, Vec<i64>) {
+    let owner = sess.character_id.unwrap();
+    travel_fast(ctx, sess, sys_id).await;
+    let sun = ctx.sde.celestials_in_system(sys_id).into_iter().find(|c| c.group_id == 6).expect("sun").celestial_id;
+    warp_to_fast(ctx, sess, sun, 100_000.0).await;
+    let anc = rpc(
+        ctx,
+        sess,
+        "structureDeployment",
+        "Anchor",
+        &[PyRep::Integer(i64::from(hull_tid)), PyRep::String("Live Industry Complex".into())],
+    )
+    .await
+    .expect("Anchor Upwell structure");
+    let st_id = int(&anc, "structureID");
+    ctx.advance_virtual_clock(life::ANCHOR_VULNERABLE_SECS + life::ANCHORING_SECS + 10);
+    let _ = rpc(ctx, sess, "structureGuests", "GetGuests", &[PyRep::Integer(st_id)]).await;
+    dock_structure_fast(ctx, sess, st_id).await;
+    let ship = sess.ship_id.unwrap();
+    let core = ctx.sde.types[&hull_tid].default_attributes[&life::ATTR_REQUIRES_DEED_TYPE] as u32;
+    let core_item = items_at(ctx, owner, ship, core)[0].0;
+    rpc(ctx, sess, "invbroker", "Add", &[PyRep::Integer(core_item), PyRep::Integer(st_id), PyRep::Integer(172)])
+        .await
+        .expect("Insert Quantum Core");
+    let mut fuel_left = fuel_qty;
+    for tid in [4_051_u32, 4_246, 4_247, 4_312] {
+        for (item, qty) in items_at(ctx, owner, ship, tid) {
+            let take = qty.min(fuel_left);
+            if take > 0 {
+                rpc(
+                    ctx,
+                    sess,
+                    "invbroker",
+                    "Add",
+                    &[PyRep::Integer(item), PyRep::Integer(st_id), PyRep::Integer(133), PyRep::Integer(take)],
+                )
+                .await
+                .expect("Load Fuel Bay");
+                fuel_left -= take;
+            }
+        }
+    }
+    assert_eq!(fuel_left, 0, "freighter must carry {fuel_qty} fuel blocks");
+    rpc(ctx, sess, "structureDocking", "Undock", &[]).await.expect("Undock for onlining");
+    ctx.advance_virtual_clock(life::ONLINING_SECS + 15);
+    dock_structure_fast(ctx, sess, st_id).await;
+    let mut fitted = Vec::new();
+    for (idx, &stid) in services.iter().enumerate() {
+        let item = items_at(ctx, owner, ship, stid)[0].0;
+        let fit = rpc(
+            ctx,
+            sess,
+            "invbroker",
+            "Add",
+            &[PyRep::Integer(item), PyRep::Integer(st_id), PyRep::Integer(164 + idx as i64)],
+        )
+        .await
+        .expect("Fit & online service module");
+        assert_eq!(fit.dict_get("online").and_then(|v| v.as_bool()), Some(true));
+        fitted.push(int(&fit, "itemID"));
+    }
+    (st_id, fitted)
+}
 
 const RIFTER_BP: u32 = 691;
 const RAITARU: u32 = 35_825;
@@ -52,9 +262,8 @@ async fn test_shard1_live_supercapital_and_me_research_scaling() {
         "feat:industry.blueprint-me-research",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = fast_full_market_ctx();
     common::pin_clock(&ctx);
-    seed_full_market_catalog(&ctx.db, &ctx.sde);
     fund_pilots(&ctx, &[(PILOT_1, 250_000_000_000.0), (PILOT_2, 5_000_000_000.0)]).await;
     let mut s1 = login(&ctx, 9401, "demo", PILOT_1).await;
     let mut s2 = login(&ctx, 9402, "other", PILOT_2).await;
@@ -117,7 +326,7 @@ async fn test_shard1_live_supercapital_and_me_research_scaling() {
     let bpos_perim = items_at(&ctx, PILOT_1, fr1, RIFTER_BP);
     let bpo_upwell = bpos_perim[0].0;
     let bpo_perim_npc = bpos_perim[1].0;
-    let (raitaru_id, _) = deploy_online_upwell_slow(&ctx, &mut s1, PERIMETER_SYS, RAITARU, &[RESEARCH_LAB], 800).await;
+    let (raitaru_id, _) = deploy_online_upwell_fast(&ctx, &mut s1, PERIMETER_SYS, RAITARU, &[RESEARCH_LAB], 800).await;
     rpc(
         &ctx,
         &mut s1,
@@ -147,7 +356,7 @@ async fn test_shard1_live_supercapital_and_me_research_scaling() {
         .find(|st| st.solar_system_id == PERIMETER_SYS)
         .expect("Perimeter NPC station")
         .station_id;
-    dock_station_slow(&ctx, &mut s1, perim_station).await;
+    dock_station_fast(&ctx, &mut s1, perim_station).await;
     move_item(&ctx, &mut s1, bpo_perim_npc, perim_station, 4).await;
     let r_perim_npc = install(&ctx, &mut s1, bpo_perim_npc, perim_station, 4, 1, &[])
         .await
@@ -161,7 +370,7 @@ async fn test_shard1_live_supercapital_and_me_research_scaling() {
     complete_job(&ctx, &mut s1, &r_perim_npc).await;
 
     // Part B: Sovereign Null-Sec Supercapital (Titan) construction at Sotiyo + Standup Supercapital Shipyard I + Sov Upgrade 81623
-    dock_station_slow(&ctx, &mut s1, JITA_STATION).await;
+    dock_station_fast(&ctx, &mut s1, JITA_STATION).await;
     let null_sys = nearest_system(&ctx, PERIMETER_SYS, |sys| {
         eve_server::services::sov_gameplay::is_claimable_nullsec_system(&ctx.sde, sys)
     });
@@ -170,7 +379,7 @@ async fn test_shard1_live_supercapital_and_me_research_scaling() {
     let hub_item = items_at(&ctx, PILOT_1, fr_sov, SOV_HUB_TYPE)[0].0;
 
     // 1. Fly to claimable null-sec system and anchor/online Sovereignty Hub -> claims alliance sov
-    travel_slow(&ctx, &mut s1, null_sys).await;
+    travel_fast(&ctx, &mut s1, null_sys).await;
     let hub_rep = rpc(
         &ctx,
         &mut s1,
@@ -186,7 +395,7 @@ async fn test_shard1_live_supercapital_and_me_research_scaling() {
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
     // 2. Fly back to Jita 4-4 for Sotiyo + Standup Supercapital Shipyard I load, then deploy in null-sec
-    dock_station_slow(&ctx, &mut s1, JITA_STATION).await;
+    dock_station_fast(&ctx, &mut s1, JITA_STATION).await;
     let fr2 = buy(&ctx, &mut s1, 20_185, 1).await[0];
     rpc(&ctx, &mut s1, "ship", "AssembleShip", &[PyRep::Integer(fr2)]).await.unwrap();
     rpc(&ctx, &mut s1, "ship", "Board", &[PyRep::Integer(fr2)]).await.unwrap();
@@ -210,7 +419,7 @@ async fn test_shard1_live_supercapital_and_me_research_scaling() {
     }
     let upg_item = items_at(&ctx, PILOT_1, fr2, SUPERCAP_UPGRADE_TYPE)[0].0;
     let null_titan_bpo = items_at(&ctx, PILOT_1, fr2, titan_bp)[0].0;
-    let (sotiyo_id, _) = deploy_online_upwell_slow(&ctx, &mut s1, null_sys, SOTIYO, &[SUPERCAP_SHIPYARD, MFG_PLANT], 3_200).await;
+    let (sotiyo_id, _) = deploy_online_upwell_fast(&ctx, &mut s1, null_sys, SOTIYO, &[SUPERCAP_SHIPYARD, MFG_PLANT], 3_200).await;
     move_item(&ctx, &mut s1, null_titan_bpo, sotiyo_id, 4).await;
 
     // Before activating Supercapital Construction Facilities upgrade (81623) in system, Titan job fails closed!
@@ -252,10 +461,11 @@ async fn test_shard1_live_industry_costs_corp_debit_pause_and_esi_jobs() {
     let char_job_id;
 
     {
+        let (sde, snap) = shared_market_base();
         let repo = reload_repo(&db_path);
-        let ctx = Arc::new(ServerContext::with_repository(repo));
+        repo.with_mut_snapshot(|s| *s = snap.clone());
+        let ctx = Arc::new(ServerContext::with_sde_and_repository(Arc::clone(sde), repo));
         common::pin_clock(&ctx);
-        seed_full_market_catalog(&ctx.db, &ctx.sde);
         fund_pilots(&ctx, &[(PILOT_1, 80_000_000_000.0), (PILOT_2, 10_000_000_000.0)]).await;
 
         let mut s1 = login(&ctx, 9411, "demo", PILOT_1).await;
@@ -278,7 +488,7 @@ async fn test_shard1_live_industry_costs_corp_debit_pause_and_esi_jobs() {
         cargo.extend([(4_246, 800)]);
         let fr = board_loaded_freighter(&ctx, &mut s1, &cargo).await;
         let bp_item = items_at(&ctx, PILOT_1, fr, bp_tid)[0].0;
-        let (rid, fitted) = deploy_online_upwell_slow(&ctx, &mut s1, PERIMETER_SYS, RAITARU, &[MFG_PLANT], 800).await;
+        let (rid, fitted) = deploy_online_upwell_fast(&ctx, &mut s1, PERIMETER_SYS, RAITARU, &[MFG_PLANT], 800).await;
         raitaru_id = rid;
         mfg_plant_item = fitted[0];
 
@@ -386,7 +596,7 @@ async fn test_shard1_live_industry_costs_corp_debit_pause_and_esi_jobs() {
     // Reopen SQLite repository from scratch and verify persisted jobs & pause state via ESI
     {
         let repo2 = reload_repo(&db_path);
-        let ctx2 = Arc::new(ServerContext::with_repository(repo2));
+        let ctx2 = Arc::new(ServerContext::with_sde_and_repository(Arc::clone(&shared_market_base().0), repo2));
         let router2 = EsiRouter::new(Arc::clone(&ctx2));
         let spec2 = OpenApiSpec::pinned();
         let tok1 = issue_token(&ctx2, PILOT_1, &["esi-industry.read_character_jobs.v1"]);

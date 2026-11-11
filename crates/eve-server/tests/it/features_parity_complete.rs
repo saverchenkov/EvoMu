@@ -944,12 +944,51 @@ async fn test_admin_slash_dispatcher_gm_commands_asset_safety_skins() {
     assert!(kill_kv.contains_key("killmailID"), "Kill must generate a killmail");
 
     // 12. GM Asset safety timer shift (feat:admin.gm-assetsafety-time)
+    let as_struct_id = 990_000_510i64;
+    let as_item_id = 990_000_511i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            as_struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: as_struct_id,
+                type_id: 35_832,
+                owner_corp_id: 98_000_001,
+                solar_system_id: 30_000_144,
+                name: "Perimeter Astrahus".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            as_item_id,
+            eve_db::InventoryItemRecord {
+                item_id: as_item_id,
+                type_id: 34,
+                owner_id: SEED_PILOT,
+                location_id: as_struct_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 100,
+                ..Default::default()
+            },
+        );
+    });
+    let wrap_rep = rpc(
+        &ctx,
+        &mut player_sess,
+        "structureAssetSafety",
+        "MovePersonalAssetsToSafety",
+        vec![PyRep::Integer(30_000_144), PyRep::Integer(as_struct_id)],
+    )
+    .await
+    .expect("MovePersonalAssetsToSafety");
+    let wrap_id = wrap_rep.dict_get("wrapID").and_then(|v| v.as_i64()).expect("wrapID");
+
     let as_non_gm = rpc(
         &ctx,
         &mut player_sess,
         "structureAssetSafety",
         "MoveEjectTimeGM",
-        vec![PyRep::Integer(1), PyRep::Integer(60)],
+        vec![PyRep::Integer(wrap_id), PyRep::Integer(60)],
     )
     .await;
     assert!(matches!(as_non_gm, Err(ref e) if e.code == "InsufficientRole"));
@@ -959,7 +998,7 @@ async fn test_admin_slash_dispatcher_gm_commands_asset_safety_skins() {
         &mut gm_sess,
         "structureAssetSafety",
         "MoveEjectTimeGM",
-        vec![PyRep::Integer(1), PyRep::Integer(60)],
+        vec![PyRep::Integer(wrap_id), PyRep::Integer(60)],
     )
     .await
     .expect("MoveEjectTimeGM GM");
@@ -4818,72 +4857,149 @@ async fn test_plan_q6_economy_and_industry_quasar_packages() {
     // 1. Market: Price for all types & station orders
     let price_rsp = send_quasar(&ctx, &mut sess, "eve.market.price.GetForAllTypesRequest", Vec::new(), b"q6-01").await;
     assert_eq!(price_rsp.internal_origin, "evomu.quasar.public_gateway");
-    assert!(price_rsp.payload.as_ref().unwrap().type_url.ends_with("GetForAllTypesResponse"));
+    let price_pl = price_rsp.payload.as_ref().expect("GetForAllTypesResponse payload");
+    assert!(price_pl.type_url.ends_with("GetForAllTypesResponse"));
+    assert!(!price_pl.value.is_empty(), "GetForAllTypesResponse must return SDE market prices");
 
     let mut sta_payload = Vec::new();
     encode_id_field(1, station_id as u64, &mut sta_payload);
     let orders_rsp = send_quasar(&ctx, &mut sess, "eve.market.orders.GetOpenInStationRequest", sta_payload, b"q6-02").await;
     assert_eq!(orders_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let orders_pl = orders_rsp.payload.as_ref().expect("GetOpenInStationResponse payload");
+    assert!(orders_pl.type_url.ends_with("GetOpenInStationResponse"));
+    let orders_wm = eve_proto::quasar::WireMessage::decode(&orders_pl.value).expect("decode station orders");
+    let order_entries: Vec<_> = orders_wm.fields.iter().filter(|f| f.field_number == 1).collect();
+    assert!(!order_entries.is_empty(), "GetOpenInStationResponse must contain seeded order 7101");
 
     // 2. Inventory: Category, Group, GenericItemType & GenericName
     let cat_rsp = send_quasar(&ctx, &mut sess, "eve.inventory.category.GetAllRequest", Vec::new(), b"q6-03").await;
     assert_eq!(cat_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let cat_pl = cat_rsp.payload.as_ref().expect("category payload");
+    assert!(cat_pl.type_url.ends_with("GetAllResponse"));
+    let cat_wm = eve_proto::quasar::WireMessage::decode(&cat_pl.value).expect("decode categories");
+    assert!(!cat_wm.fields.is_empty(), "categories must not be empty");
+
     let mut grp_payload = Vec::new();
     encode_id_field(1, 25, &mut grp_payload); // Group 25: Frigate
     let grp_rsp = send_quasar(&ctx, &mut sess, "eve.inventory.group.GetRequest", grp_payload, b"q6-04").await;
     assert_eq!(grp_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let grp_pl = grp_rsp.payload.as_ref().expect("group payload");
+    assert!(grp_pl.type_url.ends_with("eve.inventory.group.GetResponse"));
+    assert!(!grp_pl.value.is_empty(), "group GetResponse must be populated");
 
     let mut type_payload = Vec::new();
     encode_id_field(1, 587, &mut type_payload); // Type 587: Rifter
     let type_rsp = send_quasar(&ctx, &mut sess, "eve.inventory.genericitemtype.GetRequest", type_payload, b"q6-05").await;
     assert_eq!(type_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let type_pl = type_rsp.payload.as_ref().expect("genericitemtype payload");
+    assert!(type_pl.type_url.ends_with("genericitemtype.GetResponse"));
+    let type_wm = eve_proto::quasar::WireMessage::decode(&type_pl.value).expect("decode item type");
+    let type_attrs = crate::quasar_goal_tale_notices::sub(&type_wm, 1);
+    let type_name = type_attrs.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_bytes()).map(|b| String::from_utf8_lossy(b).into_owned());
+    assert_eq!(type_name.as_deref(), Some("Rifter"));
+    assert_eq!(crate::quasar_goal_tale_notices::varint(&crate::quasar_goal_tale_notices::sub(&type_attrs, 4), 1), Some(25));
 
     let mut name_payload = Vec::new();
     encode_id_field(1, sys_id as u64, &mut name_payload);
     let name_rsp = send_quasar(&ctx, &mut sess, "eve.inventory.genericname.GetNameByIDRequest", name_payload, b"q6-06").await;
     assert_eq!(name_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let name_pl = name_rsp.payload.as_ref().expect("genericname payload");
+    assert!(name_pl.type_url.ends_with("GetNameByIDResponse"));
+    let name_wm = eve_proto::quasar::WireMessage::decode(&name_pl.value).expect("decode genericname");
+    let resolved_name = name_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
+    assert!(resolved_name.contains(&sys_id.to_string()) || !resolved_name.is_empty(), "genericname response must contain non-empty name: {resolved_name}");
 
     // 3. Assets: Ship assets for character
     let mut char_payload = Vec::new();
     encode_id_field(1, char_id as u64, &mut char_payload);
     let asset_rsp = send_quasar(&ctx, &mut sess, "eve.asset.GetShipAssetsRequest", char_payload.clone(), b"q6-07").await;
     assert_eq!(asset_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let asset_pl = asset_rsp.payload.as_ref().expect("ship assets payload");
+    assert!(asset_pl.type_url.ends_with("GetShipAssetsResponse"));
+    let asset_wm = eve_proto::quasar::WireMessage::decode(&asset_pl.value).expect("decode ship assets");
+    let has_rifter = asset_wm.fields.iter().filter(|f| f.field_number == 1).any(|f| {
+        let entry = eve_proto::quasar::WireMessage::decode(f.value.as_bytes().unwrap_or(&[])).unwrap();
+        let ship_data = crate::quasar_goal_tale_notices::sub(&entry, 1);
+        crate::quasar_goal_tale_notices::varint(&crate::quasar_goal_tale_notices::sub(&ship_data, 1), 1) == Some(5501)
+            && crate::quasar_goal_tale_notices::varint(&crate::quasar_goal_tale_notices::sub(&ship_data, 2), 1) == Some(587)
+            && crate::quasar_goal_tale_notices::varint(&crate::quasar_goal_tale_notices::sub(&entry, 2), 1) == Some(station_id as u64)
+    });
+    assert!(has_rifter, "GetShipAssetsResponse must contain seeded ship item 5501 (Rifter type 587 at station)");
 
     // 4. Industry & Blueprints: Blueprint list, facility details, and system cost indices
     let bp_rsp = send_quasar(&ctx, &mut sess, "eve.character.industry.blueprints.GetRequest", char_payload.clone(), b"q6-08").await;
     assert_eq!(bp_rsp.internal_origin, "evomu.quasar.public_gateway");
+    assert!(bp_rsp.payload.as_ref().unwrap().type_url.ends_with("blueprints.GetResponse"));
     let fac_rsp = send_quasar(&ctx, &mut sess, "eve.industry.facility.GetRequest", Vec::new(), b"q6-09").await;
     assert_eq!(fac_rsp.internal_origin, "evomu.quasar.public_gateway");
+    assert!(fac_rsp.payload.as_ref().unwrap().type_url.ends_with("facility.GetResponse"));
     let sys_cost_rsp = send_quasar(&ctx, &mut sess, "eve.industry.system.GetCostIndicesRequest", Vec::new(), b"q6-10").await;
     assert_eq!(sys_cost_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let cost_pl = sys_cost_rsp.payload.as_ref().expect("cost indices payload");
+    assert!(cost_pl.type_url.ends_with("GetCostIndicesResponse"));
+    let cost_wm = eve_proto::quasar::WireMessage::decode(&cost_pl.value).expect("decode cost indices");
+    let cost_entry = crate::quasar_goal_tale_notices::sub(&cost_wm, 1);
+    assert_eq!(crate::quasar_goal_tale_notices::varint(&crate::quasar_goal_tale_notices::sub(&cost_entry, 1), 1), Some(u64::from(sys_id)));
 
     // 5. Accounting & Contracts
     let entry_type_rsp = send_quasar(&ctx, &mut sess, "eve.accounting.entrytype.GetAllRequest", Vec::new(), b"q6-11").await;
     assert_eq!(entry_type_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let et_pl = entry_type_rsp.payload.as_ref().expect("entrytype payload");
+    assert!(et_pl.type_url.ends_with("entrytype.GetAllResponse"));
+    assert!(!et_pl.value.is_empty(), "accounting entry types must be seeded");
     let journal_rsp = send_quasar(&ctx, &mut sess, "eve.accounting.character.journal.GetCharacterEntriesRequest", char_payload, b"q6-12").await;
     assert_eq!(journal_rsp.internal_origin, "evomu.quasar.public_gateway");
+    assert!(journal_rsp.payload.as_ref().unwrap().type_url.ends_with("GetCharacterEntriesResponse"));
 
     let mut contract_payload = Vec::new();
     encode_id_field(1, 1, &mut contract_payload);
     let contract_rsp = send_quasar(&ctx, &mut sess, "eve.contract.item_exchange.GetRequest", contract_payload, b"q6-13").await;
     assert_eq!(contract_rsp.internal_origin, "evomu.quasar.public_gateway");
+    assert!(contract_rsp.payload.as_ref().unwrap().type_url.ends_with("item_exchange.GetResponse"));
 
     // 6. Planetary, Moon & Asteroid Belt
     let mut sys_payload = Vec::new();
     encode_id_field(1, sys_id as u64, &mut sys_payload);
     let planets_rsp = send_quasar(&ctx, &mut sess, "eve.planet.GetPlanetsInSolarSystemRequest", sys_payload, b"q6-14").await;
     assert_eq!(planets_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let planets_pl = planets_rsp.payload.as_ref().expect("planets payload");
+    assert!(planets_pl.type_url.ends_with("GetPlanetsInSolarSystemResponse"));
+    let planets_wm = eve_proto::quasar::WireMessage::decode(&planets_pl.value).expect("decode planets list");
+    assert_eq!(planets_wm.fields.iter().filter(|f| f.field_number == 1).count(), 8);
 
     let mut pln_payload = Vec::new();
     encode_id_field(1, 40_000_001, &mut pln_payload);
     let pln_rsp = send_quasar(&ctx, &mut sess, "eve.planet.GetRequest", pln_payload.clone(), b"q6-15").await;
     assert_eq!(pln_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let pln_wm = eve_proto::quasar::WireMessage::decode(&pln_rsp.payload.as_ref().unwrap().value).expect("decode planet");
+    let pln_attrs = crate::quasar_goal_tale_notices::sub(&pln_wm, 1);
+    assert_eq!(crate::quasar_goal_tale_notices::varint(&crate::quasar_goal_tale_notices::sub(&pln_attrs, 1), 1), Some(u64::from(sys_id)));
+    assert_eq!(
+        pln_attrs.fields.iter().find(|f| f.field_number == 3).and_then(|f| f.value.as_bytes()).map(|b| String::from_utf8_lossy(b).into_owned()).as_deref(),
+        Some("Planet #40000001")
+    );
+
     let pi_schem_rsp = send_quasar(&ctx, &mut sess, "eve.planetinteraction.schematic.GetRequest", pln_payload.clone(), b"q6-16").await;
     assert_eq!(pi_schem_rsp.internal_origin, "evomu.quasar.public_gateway");
+    assert!(pi_schem_rsp.payload.as_ref().unwrap().type_url.ends_with("schematic.GetResponse"));
+
     let moon_rsp = send_quasar(&ctx, &mut sess, "eve.moon.GetRequest", pln_payload.clone(), b"q6-17").await;
     assert_eq!(moon_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let moon_wm = eve_proto::quasar::WireMessage::decode(&moon_rsp.payload.as_ref().unwrap().value).expect("decode moon");
+    let moon_attrs = crate::quasar_goal_tale_notices::sub(&moon_wm, 1);
+    assert_eq!(
+        moon_attrs.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()).map(|b| String::from_utf8_lossy(b).into_owned()).as_deref(),
+        Some("Moon #40000001")
+    );
+
     let belt_rsp = send_quasar(&ctx, &mut sess, "eve.asteroidbelt.GetRequest", pln_payload, b"q6-18").await;
     assert_eq!(belt_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let belt_wm = eve_proto::quasar::WireMessage::decode(&belt_rsp.payload.as_ref().unwrap().value).expect("decode belt");
+    let belt_attrs = crate::quasar_goal_tale_notices::sub(&belt_wm, 1);
+    assert_eq!(
+        belt_attrs.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()).map(|b| String::from_utf8_lossy(b).into_owned()).as_deref(),
+        Some("Asteroid Belt #40000001")
+    );
 }
 }
 
@@ -5291,7 +5407,6 @@ async fn test_plan_esi7_fleets_and_ui_navigation() {
 async fn test_plan_q9_cosmetics_and_app_infrastructure() {
     eve_testkit::attest(&["plan:Q-9"]);
     let ctx = ServerContext::new();
-    crate::common::seed_test_cosmetics_component_listings(&ctx);
     let mut sess = make_session(1, 1, 90_000_001, 1_000_009);
 
     // 1. Quasar cosmetic market fee endpoints

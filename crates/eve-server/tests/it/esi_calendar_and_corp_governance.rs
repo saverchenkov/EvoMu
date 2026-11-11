@@ -16,7 +16,28 @@ use glam::DVec3;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+fn shared_sde() -> Arc<eve_sde::SdeRegistry> {
+    static SDE: OnceLock<Arc<eve_sde::SdeRegistry>> = OnceLock::new();
+    Arc::clone(SDE.get_or_init(|| Arc::new(eve_sde::SdeRegistry::with_canonical_seed())))
+}
+
+fn fast_demo_ctx() -> ServerContext {
+    static BASE: OnceLock<(Arc<eve_sde::SdeRegistry>, eve_db::WorldStateSnapshot)> = OnceLock::new();
+    let (sde, snap) = BASE.get_or_init(|| {
+        let sde = shared_sde();
+        let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+        let _ = eve_server::world_seeder::seed_dual_anchor_markets(&db, &sde);
+        (sde, db.with_snapshot(|s| s.clone()))
+    });
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    db.with_mut_snapshot(|s| *s = snap.clone());
+    let ctx = ServerContext::with_sde_and_repository(Arc::clone(sde), db)
+        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED);
+    common::pin_clock(&ctx);
+    ctx
+}
 
 const CEO_ID: i64 = 90_000_001;
 const MEM_ID: i64 = 90_000_002;
@@ -158,8 +179,7 @@ async fn test_esi_calendar_machonet_roundtrip_and_sqlite_durability() {
     let spec = OpenApiSpec::pinned();
 
     let (id_1, id_2, id_3, ccp_id, corp_id, alliance_id) = {
-        let ctx1 = Arc::new(ServerContext::new());
-        common::pin_clock(&ctx1);
+        let ctx1 = Arc::new(fast_demo_ctx());
         ctx1.db.provision_gm_account("admin", "admin-secret", GM_ID, "ISD Event Marshal");
         let router1 = EsiRouter::new(Arc::clone(&ctx1));
 
@@ -274,7 +294,7 @@ async fn test_esi_calendar_machonet_roundtrip_and_sqlite_durability() {
 
     // Reopen fresh ServerContext from SQLite and verify full durability
     let repo2 = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open_sqlite"));
-    let ctx2 = Arc::new(ServerContext::with_repository(repo2));
+    let ctx2 = Arc::new(ServerContext::with_sde_and_repository(shared_sde(), repo2));
     common::pin_clock(&ctx2);
     eve_server::services::fleet_social::hydrate_social_state_from_db(&ctx2);
     let router2 = EsiRouter::new(Arc::clone(&ctx2));
@@ -304,8 +324,7 @@ async fn test_esi_corp_members_limit_roles_and_history_live_rpcs() {
         "feat:esi.corporation.roles",
     ]);
 
-    let ctx = Arc::new(ServerContext::new());
-    common::pin_clock(&ctx);
+    let ctx = Arc::new(fast_demo_ctx());
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
 
@@ -442,8 +461,7 @@ async fn test_esi_corp_structures_live_anchoring_services_fuel_and_profiles() {
         "feat:esi.corporations.structures-services-timers",
     ]);
 
-    let ctx = Arc::new(ServerContext::new());
-    common::pin_clock(&ctx);
+    let ctx = Arc::new(fast_demo_ctx());
     ctx.db.provision_gm_account("admin", "admin-secret", GM_ID, "ISD Logistics");
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();

@@ -4,12 +4,11 @@
 
 #![forbid(unsafe_code)]
 
-use std::{collections::{HashMap, HashSet}, sync::Arc};
-use eve_db::{CharacterRecord, CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents, UpwellStructureRecord, WorldRepository, corp_roles};
+use std::collections::{HashMap, HashSet};
+use eve_db::{CharacterRecord, CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents, UpwellStructureRecord, corp_roles};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::{SessionState, service_roles};
 use eve_proto::{BridgeRpcError, PyRep};
-use eve_sde::SdeRegistry;
 use eve_server::router::ServerContext;
 use eve_server::services::{
     account_services,
@@ -27,8 +26,7 @@ const AMARR_SYS: u32 = 30_002_187;
 const JITA_STATION: i64 = 60_003_760;
 
 fn new_ctx() -> ServerContext {
-    let sde = Arc::new(SdeRegistry::open(&SdeRegistry::default_db_path()).expect("open SDE"));
-    ServerContext::with_sde_and_repository(sde, Arc::new(WorldRepository::with_demo_seed()))
+    crate::seasons_and_campaigns::fast_real_sde_ctx()
 }
 
 async fn rpc(ctx: &ServerContext, sess: &mut SessionState, svc: &str, m: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
@@ -114,23 +112,28 @@ async fn seed_structure_with_services(ctx: &ServerContext, structure_id: i64, ow
 }
 
 fn pick_sde_type_matching(ctx: &ServerContext, conds: &HashMap<String, Vec<String>>, default_tid: u32) -> u32 {
+    static GROUP_CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<u32, Option<u32>>>> = std::sync::OnceLock::new();
     if let Some(tid) = conds.get("typeID").and_then(|v| v.first()).and_then(|s| s.parse::<u32>().ok()) { return tid; }
     if let Some(gid) = conds.get("groupID").and_then(|v| v.first()).and_then(|s| s.parse::<u32>().ok()) {
-        if let Some((&tid, _)) = ctx.sde.types.iter().find(|(_, t)| t.group_id == gid) { return tid; }
+        let mut cache = GROUP_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new())).lock().unwrap();
+        let found = *cache.entry(gid).or_insert_with(|| {
+            ctx.sde.types.iter().find(|(_, t)| t.group_id == gid).map(|(&tid, _)| tid)
+        });
+        if let Some(tid) = found { return tid; }
     }
     default_tid
 }
 
 async fn ensure_dock_state(ctx: &ServerContext, sess: &mut SessionState, want_dock: bool) {
     if want_dock && sess.station_id.is_none() {
-        ctx.advance_secs(15);
+        ctx.clock().advance_secs(15);
         let sid = sess.ship_id.unwrap();
         let sys = ctx.systems.get_or_spawn(JITA_SYS);
         let st_pos = sys.get_ball_snapshot(JITA_STATION).await.ok().flatten().map(|b| b.1.position).unwrap_or(DVec3::ZERO);
         let _ = sys.set_ball_position(sid, st_pos).await;
         rpc(ctx, sess, "stationSvc", "Dock", &[PyRep::Integer(JITA_STATION)]).await.unwrap();
     } else if !want_dock && sess.station_id.is_some() {
-        ctx.advance_secs(15);
+        ctx.clock().advance_secs(15);
         rpc(ctx, sess, "stationSvc", "Undock", &[]).await.unwrap();
     }
 }
@@ -160,7 +163,7 @@ async fn complete_op_authoritatively(ctx: &ServerContext, sess: &mut SessionStat
                 let stid = pick_sde_type_matching(ctx, &conds, 587);
                 ensure_dock_state(ctx, sess, true).await;
                 let sid = ctx.db.with_mut_snapshot(|s| { s.next_entity_id += 1; let id = s.next_entity_id; s.items.insert(id, InventoryItemRecord { item_id: id, type_id: stid, owner_id: char_id, location_id: JITA_STATION, flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default() }); id });
-                ctx.advance_secs(15);
+                ctx.clock().advance_secs(15);
                 rpc(ctx, sess, "ship", "Board", &[PyRep::Integer(sid)]).await.unwrap();
             }
             "dungeonEntered" => {
@@ -193,7 +196,7 @@ async fn complete_op_authoritatively(ctx: &ServerContext, sess: &mut SessionStat
                     }
                     if !fitted {
                         let bsid = ctx.db.with_mut_snapshot(|s| { s.next_entity_id += 1; let id = s.next_entity_id; s.items.insert(id, InventoryItemRecord { item_id: id, type_id: 587, owner_id: char_id, location_id: JITA_STATION, flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default() }); id });
-                        ctx.advance_secs(15);
+                        ctx.clock().advance_secs(15);
                         rpc(ctx, sess, "ship", "Board", &[PyRep::Integer(bsid)]).await.unwrap();
                         sid = sess.ship_id.unwrap();
                         for f in (27_i64..=34).chain(19..=26).chain(11..=18).chain(92..=94) {
@@ -277,11 +280,16 @@ async fn complete_tree_ops(ctx: &ServerContext, sess: &mut SessionState, char_id
     let PyRep::List(done_list) = rpc(ctx, sess, "operationsManager", "get_operations_completed_at_least_once", &[]).await.unwrap() else { panic!("List") };
     let mut done: HashSet<i64> = done_list.iter().filter_map(|x| x.as_i64()).collect();
     for _ in 0..tree_ops.len() {
+        let mut progressed = false;
         for &oid in &tree_ops {
             if !done.contains(&oid) && defs.are_prerequisites_met(oid, &done) {
                 complete_op_authoritatively(ctx, sess, char_id, cat_id, oid).await;
                 done.insert(oid);
+                progressed = true;
             }
+        }
+        if !progressed {
+            break;
         }
     }
 }

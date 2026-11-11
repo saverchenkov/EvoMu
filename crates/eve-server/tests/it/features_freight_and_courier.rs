@@ -21,11 +21,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 pub(crate) fn in_memory_ctx() -> ServerContext {
+    static FAST_SDE: std::sync::OnceLock<Arc<eve_sde::SdeRegistry>> = std::sync::OnceLock::new();
+    let sde = Arc::clone(FAST_SDE.get_or_init(|| Arc::new(eve_sde::SdeRegistry::with_canonical_seed())));
     let repo = eve_db::WorldRepository::with_demo_seed();
     repo.with_mut_snapshot(|snap| {
         snap.markets_seeded = true;
     });
-    let ctx = ServerContext::with_repository(Arc::new(repo));
+    let ctx = ServerContext::with_sde_and_repository(sde, Arc::new(repo));
     crate::common::pin_clock(&ctx);
     ctx
 }
@@ -276,8 +278,9 @@ pub(crate) async fn pulse_complex_60s(
     });
     place_ship_ball(ctx, sys_id, active_cid, active_ship, 22_456, beacon + DVec3::new(5_000.0, 0.0, 0.0)).await;
     let sys_h = ctx.systems.get_or_spawn(sys_id);
-    sys_h.step_manual(60.0).await.unwrap();
-    eve_server::sp6_lifecycle::tick_background_cluster(ctx).await;
+    sys_h.step_manual(0.1).await.unwrap();
+    fast_forward_secs(ctx, 60);
+    eve_server::services::insurgency_services::step_system_insurgency_tick_delta(ctx, sys_id, Some(60)).await;
     let _ = sys_h.set_ball_position(active_ship, off_grid).await;
 }
 
@@ -324,9 +327,7 @@ async fn measure_live_pvp_loot_drop_fraction(
     rpc_call(ctx, killer_sess, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::Integer(victim_ship)]).await.unwrap();
     let _ = rpc_call(ctx, killer_sess, "dogmaIM", "Deactivate", &[PyRep::Integer(gun_id)]).await;
     fast_forward_secs(ctx, 12);
-    for _ in 0..12 {
-        sys_h.step_manual(1.0).await.unwrap();
-    }
+    sys_h.step_manual(12.0).await.unwrap();
     let dropped = ctx.db.with_mut_snapshot(|s| {
         let cnt = (0..N_ITEMS).filter(|&k| s.items.contains_key(&(item_base_id + k))).count();
         for k in 0..N_ITEMS { s.items.remove(&(item_base_id + k)); }
@@ -743,17 +744,15 @@ async fn measure_live_npc_kill_bounty_and_sec_gain(
     rpc_call(ctx, sess, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::Integer(npc_ball_id)])
         .await
         .expect("live NPC rat kill via dogmaIM.Activate");
-    for _ in 0..30 {
-        sys_h.step_manual(3.0).await.unwrap();
+    for _ in 0..8 {
+        sys_h.step_manual(15.0).await.unwrap();
         if sys_h.get_ball_snapshot(npc_ball_id).await.unwrap().is_none() {
             break;
         }
     }
     let _ = rpc_call(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(gun_id)]).await;
     fast_forward_secs(ctx, 12);
-    for _ in 0..12 {
-        sys_h.step_manual(1.0).await.unwrap();
-    }
+    sys_h.step_manual(12.0).await.unwrap();
     assert!(sys_h.get_ball_snapshot(npc_ball_id).await.unwrap().is_none(), "NPC rat {npc_ball_id} must be destroyed by live turret cycles");
     let bounty = with_combat_runtime(ctx, |rt| rt.pending_bounty_ticks.get(&(sys_id, cid)).copied().unwrap_or(0.0));
     let sec_gain = ctx.db.with_snapshot(|s| s.characters[&cid].security_status);
@@ -831,9 +830,7 @@ async fn measure_live_militia_pvp_kill_lp(
         .expect("live militia PvP ship kill");
     let _ = rpc_call(ctx, killer_sess, "dogmaIM", "Deactivate", &[PyRep::Integer(gun_id)]).await;
     fast_forward_secs(ctx, 12);
-    for _ in 0..12 {
-        sys_h.step_manual(1.0).await.unwrap();
-    }
+    sys_h.step_manual(12.0).await.unwrap();
     let lp_after = ctx
         .db
         .with_snapshot(|s| s.characters[&killer_cid].loyalty_points.get(&militia_corp).copied().unwrap_or(0));

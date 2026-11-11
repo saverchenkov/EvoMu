@@ -16,6 +16,75 @@ use super::features_sovereignty_upwell_rpcs::{rpc, setup_pilot};
 const PILOT_1: i64 = 90_000_001;
 const STATE_PROTECTORATE_CORP: i64 = 1_000_180;
 
+fn fast_server_ctx() -> ServerContext {
+    static FAST_SDE: std::sync::OnceLock<std::sync::Arc<eve_sde::SdeRegistry>> =
+        std::sync::OnceLock::new();
+    let sde = std::sync::Arc::clone(
+        FAST_SDE.get_or_init(|| std::sync::Arc::new(eve_sde::SdeRegistry::with_canonical_seed())),
+    );
+    let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    common::pin_clock(&ctx);
+    ctx
+}
+
+fn fast_forward_secs(ctx: &ServerContext, secs: u64) {
+    ctx.clock().advance_secs(secs);
+    let cur = ctx.now_unix_secs();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs.insert("__server_now_unix".into(), cur.to_string());
+    });
+}
+
+async fn fast_lock_target(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    sys_id: u32,
+    ship_id: i64,
+    target_id: i64,
+) {
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    for _ in 0..10 {
+        if rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(target_id)])
+            .await
+            .is_ok()
+        {
+            break;
+        }
+        sys.step_manual(5.0).await.unwrap();
+    }
+    for _ in 0..10 {
+        if sys
+            .get_target_locks(ship_id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|l| l.target_id == target_id && l.locked)
+        {
+            return;
+        }
+        sys.step_manual(5.0).await.unwrap();
+    }
+    assert!(
+        sys.get_target_locks(ship_id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|l| l.target_id == target_id && l.locked),
+        "target {target_id} should be locked"
+    );
+}
+
+async fn fast_step_weapon_ticks(ctx: &ServerContext, sys_id: u32, target_id: i64) {
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    for _ in 0..3 {
+        sys.step_manual(15.0).await.unwrap();
+        if sys.get_ball_snapshot(target_id).await.ok().flatten().is_none() {
+            return;
+        }
+    }
+}
+
 fn fit_combat_frigate(ctx: &ServerContext, char_id: i64, ship_id: i64, base_id: i64) {
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(sh) = snap.items.get_mut(&ship_id) {
@@ -105,10 +174,7 @@ async fn kill_target_live(
     gun_base_id: i64,
     target_id: i64,
 ) {
-    crate::sovereignty_equinox_gameplay::lock_target_via_rpc(
-        ctx, sess, sys_id, ship_id, target_id,
-    )
-    .await;
+    fast_lock_target(ctx, sess, sys_id, ship_id, target_id).await;
     for _ in 0..40 {
         if ctx
             .systems
@@ -135,8 +201,8 @@ async fn kill_target_live(
             )
             .await;
         }
-        crate::sovereignty_equinox_gameplay::step_weapon_ticks(ctx, sys_id).await;
-        ctx.advance_secs(5);
+        fast_step_weapon_ticks(ctx, sys_id, target_id).await;
+        fast_forward_secs(ctx, 5);
     }
     assert!(
         ctx.systems
@@ -221,7 +287,7 @@ async fn capture_novice_complex_live(
     }
 
     eve_server::sp6_lifecycle::tick_background_cluster(ctx).await;
-    ctx.advance_secs(900);
+    fast_forward_secs(ctx, 900);
     eve_server::sp6_lifecycle::tick_background_cluster(ctx).await;
     assert!(
         ctx.db.with_snapshot(|s| {
@@ -246,8 +312,7 @@ async fn capture_novice_complex_live(
 #[tokio::test]
 async fn test_fw_lp_complexes_kills_status_scaling_and_militia_store() {
     // parity: feat:fw.fw-lp
-    let ctx = ServerContext::new();
-    common::pin_clock(&ctx);
+    let ctx = fast_server_ctx();
     let (enemy_sys, front_sys, cmd_sys, rear_sys) =
         crate::fw_warzone_insurgency::setup_warzone_chain(&ctx);
 
@@ -362,7 +427,7 @@ async fn test_fw_lp_complexes_kills_status_scaling_and_militia_store() {
     let p1_lp_pre_kill = ctx.db.with_snapshot(|s| s.characters[&PILOT_1].loyalty_points.get(&STATE_PROTECTORATE_CORP).copied().unwrap_or(0));
 
     // Wingman lands a single turret hit, then PILOT_1 destroys the enemy Tristan via live combat ticks
-    crate::sovereignty_equinox_gameplay::lock_target_via_rpc(&ctx, &mut sess_wing, front_sys, wing_ship, gal_ship).await;
+    fast_lock_target(&ctx, &mut sess_wing, front_sys, wing_ship, gal_ship).await;
     rpc(&ctx, &mut sess_wing, "dogmaIM", "Activate", &[
         PyRep::Integer(wing_guns), PyRep::String("targetAttack".into()), PyRep::Integer(gal_ship),
     ]).await.expect("wingman turret activate");
@@ -398,7 +463,7 @@ async fn test_fw_lp_complexes_kills_status_scaling_and_militia_store() {
 
     // 3. Offensive Novice complex captures across enemy-occupied Frontline (1.5x -> 15,000), Command (1.0x -> 10,000), Rearguard (0.01x -> 100)
     let _ = ctx.systems.get_or_spawn(front_sys).remove_ball(wing_ship).await;
-    ctx.advance_secs(1_900); // expire 30-min complex respawn cooldown
+    fast_forward_secs(&ctx, 1_900); // expire 30-min complex respawn cooldown
     ctx.db.with_mut_snapshot(|s| {
         s.fw_runtime.fw_complexes.clear();
         s.fw_runtime.complex_guards_cleared.clear();
@@ -551,8 +616,7 @@ async fn test_fw_lp_complexes_kills_status_scaling_and_militia_store() {
 #[tokio::test]
 async fn test_fw_offensive_lp_zero_when_vulnerable() {
     // parity: feat:fw.fw-lp
-    let ctx = ServerContext::new();
-    common::pin_clock(&ctx);
+    let ctx = fast_server_ctx();
     let (enemy_sys, _front_sys, _cmd_sys, _rear_sys) =
         crate::fw_warzone_insurgency::setup_warzone_chain(&ctx);
 

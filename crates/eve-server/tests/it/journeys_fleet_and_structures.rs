@@ -385,9 +385,10 @@ async fn test_journey_daily_goals_events() {
     assert_eq!(all_rsp.status_code, STATUS_OK);
     let wm = WireMessage::decode(&all_rsp.payload.unwrap().value).expect("decode GetAllCurrentResponse");
     let goal_fields: Vec<&WireField> = wm.fields.iter().filter(|f| f.field_number == 1).collect();
-    assert_eq!(goal_fields.len(), 6, "must return 6 SDE-seeded daily goals (5 daily + 1 daily bonus)");
+    assert_eq!(goal_fields.len(), 5, "must return 5 SDE-seeded daily goals (4 rotating daily + 1 daily bonus)");
 
-    // 2. Progress ScanSignature daily goal via real gameplay pathway & verify ProgressedNotice
+    // 2. Advance 1 day so ScanSignature is in today's rotating 4 goals & verify ProgressedNotice
+    ctx.advance_virtual_clock(86_400);
     for sig_id in 800_001..=800_005 {
         ctx.mark_signature_scanned(90_000_001, 30_000_142, sig_id);
     }

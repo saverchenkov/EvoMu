@@ -173,7 +173,7 @@ async fn test_load_service_config_stepping_stats_and_season_end_time_live() {
     ]);
 
     let db_tmp = TempSqlitePath::new("load_season");
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     common::pin_clock(&ctx);
     ctx.db.provision_gm_account("gm_load", "gm-pass", 90_000_010, "GM Load");
     let mut player = SessionState::new(10_001);
@@ -220,7 +220,7 @@ async fn test_load_service_config_stepping_stats_and_season_end_time_live() {
 async fn test_zarzakh_gravity_hazard_safe_zones_and_killmail_pipeline_live() {
     eve_testkit::attest(&["feat:navigation.gravity-hazard-safe-zones"]);
 
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     common::pin_clock(&ctx);
 
     let fulcrum_pos = ctx.sde.stations.get(&ZARZAKH_FULCRUM_STATION).map(|s| s.position).unwrap_or(DVec3::ZERO);
@@ -257,7 +257,7 @@ async fn test_zarzakh_gravity_hazard_safe_zones_and_killmail_pipeline_live() {
 
 #[tokio::test]
 async fn test_analysis_kredits_and_expedition_dungeon_instance_notifications_live() {
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     common::pin_clock(&ctx);
 
     let (ship_a, gun_a) = (810_200_001_i64, 810_200_010_i64);
@@ -302,7 +302,6 @@ async fn test_analysis_kredits_and_expedition_dungeon_instance_notifications_liv
         };
         if npcs.is_empty() { break; }
         for nid in npcs { destroy_npc_via_turrets(&ctx, &mut sess_a, &jita_space, nid, gun_a, 3).await; }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
 
     let added = ctx.drain_notifications_for_char(PILOT_B).into_iter().find(|n| n.event == "OnDungeonInstanceAdded").expect("OnDungeonInstanceAdded");
@@ -325,7 +324,6 @@ async fn test_analysis_kredits_and_expedition_dungeon_instance_notifications_liv
         };
         if npcs.is_empty() { break; }
         for nid in npcs { destroy_npc_via_turrets(&ctx, &mut sess_a_dest, &dest_space, nid, gun_a + 100, 3).await; }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
 
     let removed = ctx.drain_notifications_for_char(PILOT_B).into_iter().find(|n| n.event == "OnDungeonInstanceRemoved").expect("OnDungeonInstanceRemoved");
@@ -339,7 +337,7 @@ async fn test_analysis_kredits_and_expedition_dungeon_instance_notifications_liv
 async fn test_incursion_tale_influence_remove_and_insurgency_security_notifications_live() {
     eve_testkit::attest(&["notify:OnSecurityModified"]);
 
-    let inc_ctx = ServerContext::new();
+    let inc_ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     common::pin_clock(&inc_ctx);
     let (inc_ship, inc_gun) = (810_300_001_i64, 810_300_010_i64);
     fit_turret_and_skills(&inc_ctx, PILOT_A, inc_ship, inc_gun, 34_288, 20_783, 2);
@@ -411,7 +409,7 @@ async fn test_incursion_tale_influence_remove_and_insurgency_security_notificati
     let _ = rpc(&inc_ctx, &mut sess_inc, "taleMgr", "GetGlobalWorldEventTales", &[]).await;
 
     // Part B: Pirate Insurgency campaign Stage 5 -> OnSecurityModified via live grid progression
-    let fw_ctx = ServerContext::new();
+    let fw_ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     common::pin_clock(&fw_ctx);
     let (_enemy_sys, warzone_sys, _cmd_sys, _rear_sys) = crate::fw_warzone_insurgency::setup_warzone_chain(&fw_ctx);
     let fw_ship = 810_400_001_i64;
@@ -469,7 +467,7 @@ async fn test_esi_corp_blueprints_projects_and_structure_markets_live() {
         "plan:ESI-5",
     ]);
 
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx());
     common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
@@ -584,7 +582,7 @@ async fn test_quasar_payment_schedules_tokens_notices_and_domain_plans_live() {
 
     let db_tmp = TempSqlitePath::new("quasar_payment_plans");
     let reg = QuasarDescriptorRegistry::open_default().expect("quasar descriptors");
-    let seed_ctx = ServerContext::new();
+    let seed_ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     seed_ctx.db.save_to_sqlite(&db_tmp.0).expect("save seed");
     drop(seed_ctx);
     let ctx = ServerContext::from_sqlite(&db_tmp.0).expect("from_sqlite");

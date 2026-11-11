@@ -13,7 +13,63 @@ use eve_server::services::fw_services::{
 use eve_server::services::insurgency_services::{
     FORECASTING_DURATION_SECS, WINDDOWN_DURATION_SECS,
 };
+use eve_db::WorldRepository;
+use eve_server::router::ServerContext;
 use eve_server::sp6_lifecycle::tick_background_cluster;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
+
+fn cached_sde() -> Arc<eve_sde::SdeRegistry> {
+    static FAST_SDE: OnceLock<Arc<eve_sde::SdeRegistry>> = OnceLock::new();
+    Arc::clone(FAST_SDE.get_or_init(|| Arc::new(eve_sde::SdeRegistry::with_canonical_seed())))
+}
+
+fn fast_new_sqlite_ctx(label: &str) -> (PathBuf, Arc<ServerContext>) {
+    static TMPL_SQLITE: OnceLock<PathBuf> = OnceLock::new();
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let tmpl = TMPL_SQLITE.get_or_init(|| {
+        let p = std::env::temp_dir().join(format!("evomu_ins_tmpl_{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let repo = WorldRepository::open_sqlite(&p).expect("open sqlite template");
+        drop(repo);
+        p
+    });
+    let dir = std::env::temp_dir().join(format!(
+        "evomu_shard3_{label}_{}_{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let db_path = dir.join(format!("{label}.sqlite"));
+    std::fs::copy(tmpl, &db_path).expect("copy sqlite template");
+    let repo = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open sqlite"));
+    let ctx = Arc::new(
+        ServerContext::with_sde_and_repository(cached_sde(), repo)
+            .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED),
+    );
+    (db_path, ctx)
+}
+
+fn fast_reload_ctx_from_sqlite(ctx: &ServerContext, path: &Path) -> Arc<ServerContext> {
+    ctx.db.save_to_sqlite(path).expect("flush sqlite world");
+    let repo = Arc::new(WorldRepository::open_sqlite(path).expect("reopen sqlite world"));
+    let ctx2 = Arc::new(
+        ServerContext::with_sde_and_repository(cached_sde(), repo)
+            .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED),
+    );
+    crate::common::pin_clock(&ctx2);
+    ctx2
+}
+
+fn fast_forward_secs(ctx: &ServerContext, secs: u64) {
+    ctx.clock().advance_secs(secs);
+    let cur = ctx.now_unix_secs();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs
+            .insert("__server_now_unix".into(), cur.to_string());
+    });
+}
 use glam::DVec3;
 
 // parity: feat:fw.insurgency-lifecycle
@@ -31,7 +87,7 @@ async fn test_e2e_insurgency_lifecycle_fob_ambition_and_contribution_payout() {
         "feat:fw.insurgency-fob-ambition",
     ]);
 
-    let (db_path, ctx) = new_sqlite_ctx("insurgency");
+    let (db_path, ctx) = fast_new_sqlite_ctx("insurgency");
     crate::common::pin_clock(&ctx);
 
     let mut pirate =
@@ -73,7 +129,7 @@ async fn test_e2e_insurgency_lifecycle_fob_ambition_and_contribution_payout() {
     });
 
     // Advance past 48h Forecasting -> Active
-    ctx.advance_secs(FORECASTING_DURATION_SECS + 5);
+    fast_forward_secs(&ctx,FORECASTING_DURATION_SECS + 5);
     tick_background_cluster(&ctx).await;
 
     // Verify GetAllVisibleCampaigns reports isFobVulnerable == false when Suppression Stage 5 < 5
@@ -156,7 +212,7 @@ async fn test_e2e_insurgency_lifecycle_fob_ambition_and_contribution_payout() {
             } else {
                 sh.set_ball_position(emp.ship_id, spos).await;
             }
-            ctx.advance_secs(90);
+            fast_forward_secs(&ctx,90);
             tick_background_cluster(&ctx).await;
         }
     }
@@ -251,7 +307,7 @@ async fn test_e2e_insurgency_lifecycle_fob_ambition_and_contribution_payout() {
     .await
     .expect("FOB armor reinforcement");
     assert_eq!(reinf_res.dict_get("state").and_then(PyRep::as_str), Some("ArmorReinforced"));
-    ctx.advance_secs(FOB_ARMOR_REINFORCEMENT_BASE_SECS + 3_700);
+    fast_forward_secs(&ctx,FOB_ARMOR_REINFORCEMENT_BASE_SECS + 3_700);
     let kill_res = eve_server::services::fw_gameplay::apply_pirate_fob_structure_damage(
         &ctx,
         emp.char_id,
@@ -276,10 +332,10 @@ async fn test_e2e_insurgency_lifecycle_fob_ambition_and_contribution_payout() {
     assert_eq!(emp_amb_mod, 1, "Winner Ambition modifier increments by 1");
     assert!(bal_after > bal_before, "Winner pilot receives ISK + LP contribution payout");
 
-    ctx.advance_secs(WINDDOWN_DURATION_SECS + 5);
+    fast_forward_secs(&ctx,WINDDOWN_DURATION_SECS + 5);
     tick_background_cluster(&ctx).await;
 
-    let ctx2 = reload_ctx_from_sqlite(&ctx, &db_path);
+    let ctx2 = fast_reload_ctx_from_sqlite(&ctx, &db_path);
     assert_eq!(
         ctx2.db
             .with_snapshot(|s| s.insurgency_runtime.empire_ambition_modifier.get(&GURISTAS).copied()),

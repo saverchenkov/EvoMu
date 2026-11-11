@@ -6,10 +6,9 @@
 
 #![forbid(unsafe_code)]
 
-use crate::common;
 use crate::esi_fw_sov_incursions_live::{rpc, slash};
 use crate::fw_insurgency_campaign_lifecycle_live::{
-    boost_siege_guns, destroy_target_live, fire_one_volley, hold_complex_to_pts,
+    boost_siege_guns, destroy_target_live, fast_server_ctx, fire_one_volley, hold_complex_to_pts,
     lock_target_healed, move_near, setup_enlisted_pilot, CALDARI, GURISTAS,
 };
 use eve_machonet::SessionState;
@@ -23,7 +22,6 @@ use eve_server::services::insurgency_services::{
     read_insurgency_runtime, FORECASTING_DURATION_SECS, WINDDOWN_DURATION_SECS,
 };
 use eve_server::sp6_lifecycle::tick_background_cluster;
-use std::sync::Arc;
 
 async fn reinforce_fob_live(
     ctx: &ServerContext,
@@ -48,11 +46,8 @@ async fn reinforce_fob_live(
             for &gid in guns {
                 let _ = rpc(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(gid), PyRep::String("targetAttack".into())]).await;
             }
-            for _ in 0..8 {
-                sys.step_manual(1.0).await.unwrap();
-                slash(ctx, sess, "/heal").await;
-            }
-            ctx.advance_secs(8);
+            sys.step_manual(1.0).await.unwrap();
+            ctx.advance_secs(1);
             return;
         }
         let mut reloading = false;
@@ -61,11 +56,8 @@ async fn reinforce_fob_live(
                 for &g2 in guns {
                     let _ = rpc(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(g2), PyRep::String("targetAttack".into())]).await;
                 }
-                for _ in 0..8 {
-                    sys.step_manual(1.0).await.unwrap();
-                    slash(ctx, sess, "/heal").await;
-                }
-                ctx.advance_secs(8);
+                sys.step_manual(1.0).await.unwrap();
+                ctx.advance_secs(1);
                 return;
             }
             if let Err(e) = rpc(
@@ -89,10 +81,7 @@ async fn reinforce_fob_live(
             }
         }
         let step_secs = if reloading { 11 } else { 4 };
-        for _ in 0..step_secs {
-            sys.step_manual(1.0).await.unwrap();
-            slash(ctx, sess, "/heal").await;
-        }
+        sys.step_manual(step_secs as f64).await.unwrap();
         ctx.advance_secs(step_secs);
     }
     panic!("FOB {fob_id} did not enter ArmorReinforced");
@@ -104,8 +93,7 @@ async fn reinforce_fob_live(
 async fn test_live_insurgency_fob_docking_and_suppression_gate() {
     eve_testkit::attest(&["feat:fw.insurgency-fob", "feat:fw.insurgency-fob-ambition"]);
 
-    let ctx = Arc::new(ServerContext::new());
-    common::pin_clock(&ctx);
+    let ctx = fast_server_ctx();
 
     let hub_sys: u32 = 30_002_538;
     let (mut pir, guns_pir) = setup_enlisted_pilot(&ctx, 77_103, 91_000_103, GURISTAS, hub_sys).await;
@@ -266,8 +254,7 @@ async fn test_live_insurgency_ambition_victory_and_payouts() {
         "feat:fw.insurgency-contribution-payout",
     ]);
 
-    let ctx = Arc::new(ServerContext::new());
-    common::pin_clock(&ctx);
+    let ctx = fast_server_ctx();
 
     let hub_sys: u32 = 30_002_538;
     let (mut pir, _guns_pir) = setup_enlisted_pilot(&ctx, 77_105, 91_000_105, GURISTAS, hub_sys).await;

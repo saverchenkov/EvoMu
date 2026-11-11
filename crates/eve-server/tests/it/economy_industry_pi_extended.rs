@@ -1542,6 +1542,11 @@ pub(crate) mod pi_poco_gantry_deploy_reinforce {
             .expect("GetAllMyCharacterWalletLPBalances");
         if let PyRep::List(list) = lps {
             for entry in list {
+                if let PyRep::Tuple(t) = &entry {
+                    if t.first().and_then(|v| v.as_i64()) == Some(corp_id) {
+                        return t.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
+                    }
+                }
                 if entry.dict_get("corpID").and_then(|v| v.as_i64()) == Some(corp_id) {
                     return entry.dict_get("loyaltyPoints").and_then(|v| v.as_i64()).unwrap_or(0);
                 }
@@ -1663,6 +1668,12 @@ pub(crate) mod pi_poco_gantry_deploy_reinforce {
         let coating_item_id = ctx.db.with_mut_snapshot(|snap| {
             if let Some(ch) = snap.characters.get_mut(&char_id) {
                 ch.balance = IskCents::from_isk(1_000_000);
+            }
+            for sid in [81366u32, 81375] {
+                snap.skills.entry(char_id).or_default().insert(
+                    sid,
+                    eve_db::TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 },
+                );
             }
             seed_item(snap, coating_item_type_id, char_id, 60_015_169, InventoryFlag::Hangar, 10, false, false, None)
         });

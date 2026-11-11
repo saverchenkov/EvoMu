@@ -10,13 +10,34 @@
 
 use crate::common;
 use crate::industry_live_support::{
-    acquire, board_loaded_freighter, bom, buy, deploy_online_upwell, dock_station, fuel_cargo, fund_pilots, install, int,
+    acquire, board_loaded_freighter, bom, buy, fuel_cargo, fund_pilots, install, int,
     items_at, login, move_item, nearest_system, owned_qty, real, rpc, split_off, train_skills, upwell_cargo, JITA_STATION,
     PERIMETER_SYS, PILOT_1,
+};
+use crate::industry_supercapital_tax_esi_e2e::{
+    deploy_online_upwell_fast as deploy_online_upwell, dock_station_fast as dock_station,
 };
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::world_seeder::seed_full_market_catalog;
+use std::sync::{Arc, OnceLock};
+
+fn fast_full_market_ctx() -> ServerContext {
+    static BASE: OnceLock<(Arc<eve_sde::SdeRegistry>, eve_db::WorldStateSnapshot)> = OnceLock::new();
+    let (sde, snap) = BASE.get_or_init(|| {
+        let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
+        let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+        let _ = eve_server::world_seeder::seed_dual_anchor_markets(&db, &sde);
+        let _ = seed_full_market_catalog(&db, &sde);
+        (sde, db.with_snapshot(|s| s.clone()))
+    });
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    db.with_mut_snapshot(|s| *s = snap.clone());
+    let ctx = ServerContext::with_sde_and_repository(Arc::clone(sde), db)
+        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED);
+    common::pin_clock(&ctx);
+    ctx
+}
 
 const RIFTER_BP: u32 = 691;
 const RAITARU: u32 = 35_825;
@@ -35,9 +56,7 @@ async fn test_live_exponential_me_research_durations_costs_and_material_reductio
     // parity: plan:E-4
     eve_testkit::attest(&["plan:E-4"]);
 
-    let ctx = ServerContext::new();
-    common::pin_clock(&ctx);
-    seed_full_market_catalog(&ctx.db, &ctx.sde);
+    let ctx = fast_full_market_ctx();
     fund_pilots(&ctx, &[(PILOT_1, 100_000_000_000.0)]).await;
     let mut s1 = login(&ctx, 8801, "demo", PILOT_1).await;
     train_skills(&ctx, &mut s1, &[3363, 3380, 3387, 3402, 3403, 3406, 3409, 3388, 20_185, RAITARU, MFG_PLANT, RESEARCH_LAB], true).await;
@@ -121,9 +140,7 @@ async fn test_live_capital_and_jump_freighter_construction_matrix() {
     // parity: plan:E-4
     eve_testkit::attest(&["plan:E-4"]);
 
-    let ctx = ServerContext::new();
-    common::pin_clock(&ctx);
-    seed_full_market_catalog(&ctx.db, &ctx.sde);
+    let ctx = fast_full_market_ctx();
     fund_pilots(&ctx, &[(PILOT_1, 400_000_000_000.0)]).await;
     let mut s1 = login(&ctx, 8802, "demo", PILOT_1).await;
 

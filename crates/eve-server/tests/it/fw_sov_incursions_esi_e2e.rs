@@ -11,19 +11,22 @@
 use crate::common;
 use crate::industry_live_support::{
     board_loaded_freighter, buy, dock_station, fuel_cargo, fund_pilots, int, items_at, login,
-    move_item, nearest_system, rpc, train_skills, travel, warp_to, PERIMETER_SYS, PILOT_1, PILOT_2,
+    move_item, nearest_system, rpc, travel, warp_to, PERIMETER_SYS, PILOT_1, PILOT_2,
 };
 use crate::esi_live_e2e_support::{
-    assert_etag_304, cleanup_sqlite_files, destroy_target_live, esi_call, issue_token,
-    lock_target_live, reload_repo, temp_db_path, travel_slow, upgrade_omega_live,
+    assert_etag_304, cleanup_sqlite_files, esi_call, issue_token, temp_db_path, upgrade_omega_live,
 };
+use eve_db::WorldRepository;
+use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::esi::{EsiRouter, OpenApiSpec};
 use eve_server::router::ServerContext;
 use eve_server::world_seeder::seed_full_market_catalog;
+use glam::DVec3;
 use serde_json::json;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 const RIFTER_SHIP: u32 = 587;
 const SMALL_AUTOCANNON: u32 = 2_881;
@@ -31,10 +34,276 @@ const SOV_HUB_TYPE: u32 = 32_458;
 const ENTOSIS_LINK_I: u32 = 34_593;
 const STRONTIUM: u32 = 16_275;
 
+fn cached_sde() -> Arc<eve_sde::SdeRegistry> {
+    static FAST_SDE: OnceLock<Arc<eve_sde::SdeRegistry>> = OnceLock::new();
+    Arc::clone(FAST_SDE.get_or_init(|| Arc::new(eve_sde::SdeRegistry::with_canonical_seed())))
+}
+
+fn fast_seeded_ctx(db_path: &Path) -> Arc<ServerContext> {
+    static TMPL: OnceLock<PathBuf> = OnceLock::new();
+    let sde = cached_sde();
+    let tmpl = TMPL.get_or_init(|| {
+        let p = std::env::temp_dir().join(format!("evomu_esi_mkt_tmpl_{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let repo = WorldRepository::with_demo_seed();
+        seed_full_market_catalog(&repo, &sde);
+        repo.save_to_sqlite(&p).expect("save seeded market template");
+        p
+    });
+    if !db_path.exists() {
+        std::fs::copy(tmpl, db_path).expect("copy seeded market template");
+    }
+    let repo = Arc::new(WorldRepository::open_sqlite(db_path).expect("open sqlite repo"));
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(sde, repo));
+    common::pin_clock(&ctx);
+    ctx
+}
+
+fn fast_reload_ctx(db_path: &Path) -> Arc<ServerContext> {
+    let repo = Arc::new(WorldRepository::open_sqlite(db_path).expect("reopen sqlite repo"));
+    Arc::new(ServerContext::with_sde_and_repository(cached_sde(), repo))
+}
+
+fn fast_forward_secs(ctx: &ServerContext, secs: u64) {
+    ctx.clock().advance_secs(secs);
+    let cur = ctx.now_unix_secs();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs
+            .insert("__server_now_unix".into(), cur.to_string());
+    });
+    ctx.advance_skill_queues(secs as f64);
+}
+
+fn collect_skill_topo(sde: &eve_sde::SdeRegistry, tid: u32, seen: &mut HashSet<u32>, out: &mut Vec<u32>) {
+    if !seen.insert(tid) {
+        return;
+    }
+    if let Some(t) = sde.types.get(&tid) {
+        for attr in [182_u16, 183, 184, 1285, 1289, 1290] {
+            if let Some(&req) = t.default_attributes.get(&attr).filter(|v| **v > 0.0) {
+                collect_skill_topo(sde, req as u32, seen, out);
+            }
+        }
+        if t.category_id == 16 {
+            out.push(tid);
+        }
+    }
+}
+
+async fn fast_train_skills(ctx: &ServerContext, sess: &mut SessionState, type_ids: &[u32], strict: bool) {
+    let char_id = sess.character_id.unwrap();
+    let (mut seen, mut ordered) = (HashSet::new(), Vec::new());
+    for &tid in type_ids {
+        collect_skill_topo(&ctx.sde, tid, &mut seen, &mut ordered);
+    }
+    for sid in ordered {
+        let curr = ctx
+            .db
+            .with_snapshot(|s| s.skills.get(&char_id).and_then(|m| m.get(&sid)).map(|r| r.level).unwrap_or(0));
+        if curr >= 5 {
+            continue;
+        }
+        let _ = rpc(ctx, sess, "skillMgr2", "PurchaseSkills", &[PyRep::List(vec![PyRep::Integer(i64::from(sid))])]).await;
+        let mut queued = false;
+        for top in ((curr + 1)..=5).rev() {
+            let q: Vec<PyRep> = ((curr + 1)..=top)
+                .map(|l| PyRep::Tuple(vec![PyRep::Integer(i64::from(sid)), PyRep::Integer(i64::from(l))]))
+                .collect();
+            if rpc(ctx, sess, "skillMgr2", "SaveNewQueue", &[PyRep::List(q)]).await.is_ok() {
+                queued = true;
+                break;
+            }
+        }
+        assert!(queued || !strict, "SaveNewQueue skill {sid} failed");
+        fast_forward_secs(ctx, 90 * 86_400);
+        ctx.advance_skill_queues((90 * 86_400) as f64);
+        let _ = rpc(ctx, sess, "skillMgr2", "GetSkillQueueAndFreePoints", &[]).await;
+    }
+}
+
+async fn fast_lock_target_live(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    sys_id: u32,
+    ship_id: i64,
+    target_id: i64,
+    approach_dist_m: f64,
+) {
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    if let Some((_, tb)) = sys.get_ball_snapshot(target_id).await.unwrap() {
+        sys.set_ball_position(ship_id, tb.position + DVec3::new(approach_dist_m, 0.0, 0.0)).await;
+    }
+    let beyonce = ctx.bind_object(sess, "beyonce", sys_id as i64).ok();
+    let _ = ctx
+        .dispatch_rpc(
+            sess,
+            "beyonce",
+            beyonce,
+            "CmdSetSpeedFraction",
+            &[PyRep::Real(0.5)],
+            &HashMap::new(),
+            None,
+        )
+        .await;
+    for _ in 0..10 {
+        sys.step_manual(5.0).await.unwrap();
+        let ready = sys
+            .get_combat_state(ship_id)
+            .await
+            .ok()
+            .flatten()
+            .is_none_or(|cs| {
+                cs.gate_cloak_remaining_ticks == 0 && !cs.is_cloaked && cs.decloak_targeting_delay_remaining_s <= 0.0
+            });
+        if ready {
+            break;
+        }
+    }
+    ctx.dispatch_rpc(
+        sess,
+        "dogmaIM",
+        None,
+        "AddTarget",
+        &[PyRep::Integer(target_id)],
+        &HashMap::new(),
+        None,
+    )
+    .await
+    .expect("dogmaIM.AddTarget");
+    fast_forward_secs(ctx, 12);
+    for _ in 0..4 {
+        if sys
+            .get_target_locks(ship_id)
+            .await
+            .is_ok_and(|l| l.iter().any(|t| t.target_id == target_id && t.locked))
+        {
+            return;
+        }
+        sys.step_manual(5.0).await.unwrap();
+    }
+}
+
+async fn fast_destroy_target_live(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    sys_id: u32,
+    ship_id: i64,
+    guns: &[i64],
+    target_id: i64,
+) {
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    fast_lock_target_live(ctx, sess, sys_id, ship_id, target_id, 1_200.0).await;
+    for _ in 0..45 {
+        if sys.get_ball_snapshot(target_id).await.unwrap().is_none() {
+            return;
+        }
+        for &gid in guns {
+            if sys.get_ball_snapshot(target_id).await.unwrap().is_none() {
+                return;
+            }
+            let _ = ctx
+                .dispatch_rpc(
+                    sess,
+                    "dogmaIM",
+                    None,
+                    "Activate",
+                    &[PyRep::Integer(gid), PyRep::String("targetAttack".into()), PyRep::Integer(target_id)],
+                    &HashMap::new(),
+                    None,
+                )
+                .await;
+        }
+        sys.step_manual(5.0).await.unwrap();
+        fast_forward_secs(ctx, 5);
+    }
+    panic!("target {target_id} survived 45 live weapon volleys");
+}
+
+async fn fast_settle_slow(ctx: &ServerContext, sess: &SessionState, max_steps: usize) {
+    let (sys, ship) = (sess.solar_system_id.unwrap(), sess.ship_id.unwrap());
+    let h = ctx.systems.get_or_spawn(sys);
+    for _ in 0..max_steps {
+        let _ = h.step_manual(15.0).await;
+        let warping = matches!(
+            h.get_ball_snapshot(ship).await,
+            Ok(Some((_, ref b))) if matches!(b.mode, eve_destiny::MovementMode::Warp { .. })
+        );
+        if !warping {
+            break;
+        }
+    }
+    fast_forward_secs(ctx, 15);
+}
+
+async fn fast_warp_to_slow(ctx: &ServerContext, sess: &mut SessionState, target: i64, dist: f64) {
+    let sys = sess.solar_system_id.unwrap();
+    let beyonce = ctx.bind_object(sess, "beyonce", sys as i64).ok();
+    match ctx
+        .dispatch_rpc(
+            sess,
+            "beyonce",
+            beyonce,
+            "CmdWarpToStuff",
+            &[PyRep::String("item".into()), PyRep::Integer(target), PyRep::Real(dist)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+    {
+        Ok(_) => fast_settle_slow(ctx, sess, 240).await,
+        Err(e) if e.code == "WarpToRejectedAlreadyAtTarget" => {}
+        Err(e) => panic!("WarpToStuff {target}: {e:?}"),
+    }
+}
+
+async fn fast_travel_slow(ctx: &ServerContext, sess: &mut SessionState, dest_sys: u32) {
+    if sess.structure_id.is_some() {
+        rpc(ctx, sess, "structureDocking", "Undock", &[]).await.expect("structure Undock");
+    } else if sess.station_id.is_some() {
+        rpc(ctx, sess, "stationSvc", "Undock", &[]).await.expect("station Undock");
+    }
+    fast_forward_secs(ctx, 15);
+    while sess.solar_system_id != Some(dest_sys) {
+        let cur = sess.solar_system_id.unwrap();
+        let mut prev: HashMap<u32, (u32, i64)> = HashMap::new();
+        let mut q = VecDeque::from([cur]);
+        let mut seen = HashSet::from([cur]);
+        while let Some(s) = q.pop_front() {
+            if s == dest_sys {
+                break;
+            }
+            let mut gates: Vec<(&i64, &eve_sde::StargateJump)> = ctx
+                .sde
+                .jumps
+                .iter()
+                .filter(|(_, j)| j.from_solar_system_id == s)
+                .collect();
+            gates.sort_by_key(|g| *g.0);
+            for (&gid, j) in gates {
+                if seen.insert(j.to_solar_system_id) {
+                    prev.insert(j.to_solar_system_id, (s, gid));
+                    q.push_back(j.to_solar_system_id);
+                }
+            }
+        }
+        let mut next_sys = dest_sys;
+        while prev[&next_sys].0 != cur {
+            next_sys = prev[&next_sys].0;
+        }
+        let gate = prev[&next_sys].1;
+        fast_warp_to_slow(ctx, sess, gate, 0.0).await;
+        let beyonce = ctx.bind_object(sess, "beyonce", cur as i64).ok();
+        ctx.dispatch_rpc(sess, "beyonce", beyonce, "CmdStargateJump", &[PyRep::Integer(gate)], &HashMap::new(), None)
+            .await
+            .unwrap_or_else(|e| panic!("jump {gate}: {e:?}"));
+        fast_forward_secs(ctx, 15);
+    }
+}
+
 async fn arm_rifter_non_gm(ctx: &ServerContext, sess: &mut eve_machonet::SessionState, owner: i64) -> (i64, Vec<i64>) {
     let ship = buy(ctx, sess, RIFTER_SHIP, 1).await[0];
     rpc(ctx, sess, "ship", "AssembleShip", &[PyRep::Integer(ship)]).await.expect("AssembleShip");
-    ctx.advance_secs(12);
+    fast_forward_secs(ctx, 12);
     rpc(ctx, sess, "ship", "Board", &[PyRep::Integer(ship)]).await.expect("Board Rifter");
     let mut guns = Vec::with_capacity(3);
     for idx in 0..3 {
@@ -80,16 +349,13 @@ async fn test_shard1_live_fw_stats_leaderboards_and_systems_esi() {
     let target_sys;
 
     {
-        let repo = reload_repo(&db_path);
-        let ctx = Arc::new(ServerContext::with_repository(repo));
-        common::pin_clock(&ctx);
-        seed_full_market_catalog(&ctx.db, &ctx.sde);
+        let ctx = fast_seeded_ctx(&db_path);
         fund_pilots(&ctx, &[(PILOT_1, 5_000_000_000.0), (PILOT_2, 2_000_000_000.0)]).await;
 
         let mut s1 = login(&ctx, 9441, "demo", PILOT_1).await;
         let mut s2 = login(&ctx, 9442, "other", PILOT_2).await;
-        train_skills(&ctx, &mut s1, &[3300, 3301, 3303, 3306, 3327, 3363, 11_083, 3413, 3426, RIFTER_SHIP, SMALL_AUTOCANNON], true).await;
-        train_skills(&ctx, &mut s2, &[RIFTER_SHIP], false).await;
+        fast_train_skills(&ctx, &mut s1, &[3300, 3301, 3303, 3306, 3327, 3363, 11_083, 3413, 3426, RIFTER_SHIP, SMALL_AUTOCANNON], true).await;
+        fast_train_skills(&ctx, &mut s2, &[RIFTER_SHIP], false).await;
 
         let corp_rep = rpc(
             &ctx,
@@ -143,7 +409,7 @@ async fn test_shard1_live_fw_stats_leaderboards_and_systems_esi() {
         eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
         // Destroy opposing militia PILOT_2's Rifter in live space combat -> 1 FW kill!
-        destroy_target_live(&ctx, &mut s1, target_sys, ship_1, &guns_1, ship_2).await;
+        fast_destroy_target_live(&ctx, &mut s1, target_sys, ship_1, &guns_1, ship_2).await;
 
         // Activate Novice FW complex gate, clear guard NPC, hold bunker -> raises system VP & contested state
         let _sys_h = ctx.systems.get_or_spawn(target_sys);
@@ -160,8 +426,8 @@ async fn test_shard1_live_fw_stats_leaderboards_and_systems_esi() {
         rpc(&ctx, &mut s1, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(gate_id)])
             .await
             .expect("ActivateAccelerationGate");
-        destroy_target_live(&ctx, &mut s1, target_sys, ship_1, &guns_1, gate_id + 500_000_000).await;
-        ctx.advance_secs(605);
+        fast_destroy_target_live(&ctx, &mut s1, target_sys, ship_1, &guns_1, gate_id + 500_000_000).await;
+        fast_forward_secs(&ctx, 605);
         eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
         let tok_1 = issue_token(&ctx, PILOT_1, &["esi-characters.read_fw_stats.v1", "esi-corporations.read_fw_stats.v1"]);
@@ -199,8 +465,7 @@ async fn test_shard1_live_fw_stats_leaderboards_and_systems_esi() {
 
     // Reload SQLite and verify persisted FW stats & system contested state
     {
-        let repo2 = reload_repo(&db_path);
-        let ctx2 = Arc::new(ServerContext::with_repository(repo2));
+        let ctx2 = fast_reload_ctx(&db_path);
         let router2 = EsiRouter::new(Arc::clone(&ctx2));
         let spec2 = OpenApiSpec::pinned();
         let tok2 = issue_token(&ctx2, PILOT_1, &["esi-characters.read_fw_stats.v1"]);
@@ -236,17 +501,14 @@ async fn test_shard1_live_sovereignty_and_incursions_esi() {
     let def_ally;
 
     {
-        let repo = reload_repo(&db_path);
-        let ctx = Arc::new(ServerContext::with_repository(repo));
-        common::pin_clock(&ctx);
-        seed_full_market_catalog(&ctx.db, &ctx.sde);
+        let ctx = fast_seeded_ctx(&db_path);
         fund_pilots(&ctx, &[(PILOT_1, 30_000_000_000.0), (PILOT_2, 100_000_000_000.0)]).await;
 
         let mut s_atk = login(&ctx, 9451, "demo", PILOT_1).await;
         let mut s_def = login(&ctx, 9452, "other", PILOT_2).await;
 
-        train_skills(&ctx, &mut s_def, &[3449, 3453, 3456], false).await;
-        train_skills(&ctx, &mut s_atk, &[3300, 3301, 3327, 24_242, 3449, 3453, 3456, 3459, ENTOSIS_LINK_I, RIFTER_SHIP], true).await;
+        fast_train_skills(&ctx, &mut s_def, &[3449, 3453, 3456], false).await;
+        fast_train_skills(&ctx, &mut s_atk, &[3300, 3301, 3327, 24_242, 3449, 3453, 3456, 3459, ENTOSIS_LINK_I, RIFTER_SHIP], true).await;
         upgrade_omega_live(&ctx, &mut s_atk, &mut s_def).await;
 
         let c_def = rpc(&ctx, &mut s_def, "corpRegistry", "AddCorporation", &[PyRep::String("SovKeepers".into()), PyRep::String("SVKP".into())])
@@ -273,7 +535,7 @@ async fn test_shard1_live_sovereignty_and_incursions_esi() {
             .await
             .expect("CreateAlliance atk");
         s_atk.alliance_id = Some(int(&a_atk, "allianceID"));
-        ctx.advance_virtual_clock(8 * 86_400);
+        fast_forward_secs(&ctx, 8 * 86_400);
 
         null_sys = nearest_system(&ctx, PERIMETER_SYS, |sys| {
             eve_server::services::sov_gameplay::is_claimable_nullsec_system(&ctx.sde, sys)
@@ -282,12 +544,12 @@ async fn test_shard1_live_sovereignty_and_incursions_esi() {
         let fr_def = board_loaded_freighter(&ctx, &mut s_def, &[(SOV_HUB_TYPE, 1)]).await;
         let hub_item = items_at(&ctx, PILOT_2, fr_def, SOV_HUB_TYPE)[0].0;
 
-        travel_slow(&ctx, &mut s_def, null_sys).await;
+        fast_travel_slow(&ctx, &mut s_def, null_sys).await;
         let anc = rpc(&ctx, &mut s_def, "structureDeployment", "Anchor", &[PyRep::Integer(hub_item), PyRep::String("S1 Sov Hub".into())])
             .await
             .expect("Anchor Sovereignty Hub");
         hub_id = int(&anc, "structureID");
-        ctx.advance_secs(905);
+        fast_forward_secs(&ctx, 905);
         eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
         let router = EsiRouter::new(Arc::clone(&ctx));
@@ -319,13 +581,13 @@ async fn test_shard1_live_sovereignty_and_incursions_esi() {
         move_item(&ctx, &mut s_atk, stront, atk_ship, 5).await;
 
         let cur_sec = ctx.now_unix() % 86_400;
-        ctx.advance_secs((86_400 + 12 * 3_600 - cur_sec) % 86_400);
+        fast_forward_secs(&ctx, (86_400 + 12 * 3_600 - cur_sec) % 86_400);
         travel(&ctx, &mut s_atk, null_sys).await;
-        lock_target_live(&ctx, &mut s_atk, null_sys, atk_ship, hub_id, 2_500.0).await;
+        fast_lock_target_live(&ctx, &mut s_atk, null_sys, atk_ship, hub_id, 2_500.0).await;
         rpc(&ctx, &mut s_atk, "dogmaIM", "Activate", &[PyRep::Integer(entosis_mod), PyRep::String("default".into()), PyRep::Integer(hub_id)])
             .await
             .expect("Activate Entosis Link I");
-        ctx.advance_secs(1_600);
+        fast_forward_secs(&ctx, 1_600);
         eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
         assert_etag_304(&router, &spec, "/v1/sovereignty/campaigns/", None);
@@ -344,8 +606,7 @@ async fn test_shard1_live_sovereignty_and_incursions_esi() {
 
     // Reload SQLite and verify Sovereignty Hub, Map, Campaign & Incursions persist
     {
-        let repo2 = reload_repo(&db_path);
-        let ctx2 = Arc::new(ServerContext::with_repository(repo2));
+        let ctx2 = fast_reload_ctx(&db_path);
         let router2 = EsiRouter::new(Arc::clone(&ctx2));
         let spec2 = OpenApiSpec::pinned();
         let (map2, _) = esi_call(&router2, &spec2, "GET", "/v1/sovereignty/map/", None, None, 200);

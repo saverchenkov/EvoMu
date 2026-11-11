@@ -654,7 +654,6 @@ async fn test_journey_12_pve_combat() {
 async fn test_journey_13_missions() {
     let ctx = ServerContext::new();
     pin_clock(&ctx);
-    crate::common::seed_test_lp_store_offers(&ctx);
     let mut sess = SessionState::new(73_016);
     login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)]).await.unwrap();
@@ -898,7 +897,6 @@ async fn test_journey_24_daily_goals_events() {
 async fn test_journey_25_cosmetics_store() {
     let ctx = ServerContext::new();
     pin_clock(&ctx);
-    crate::common::seed_test_nes_store_catalog(&ctx);
     let mut sess = SessionState::new(73_028);
     login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)]).await.unwrap();

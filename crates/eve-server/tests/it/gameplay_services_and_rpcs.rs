@@ -25,7 +25,7 @@ fn as_list(rep: &PyRep) -> &[PyRep] {
 #[tokio::test]
 async fn test_rpc_lookup_svc_batch() {
     // parity: rpc:lookupSvc.LookupCharacters, rpc:lookupSvc.LookupCorporations, rpc:lookupSvc.LookupEvePlayerCharacters, rpc:lookupSvc.LookupFactions, rpc:lookupSvc.LookupKnownLocationsByGroup, rpc:lookupSvc.LookupLocationsByGroup, rpc:lookupSvc.LookupNoneNPCAccountOwners, rpc:lookupSvc.LookupOwners, rpc:lookupSvc.LookupPCOwners
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     ctx.seed_demo_world_fixtures();
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
@@ -476,7 +476,7 @@ async fn test_rpc_lookup_svc_batch() {
 #[tokio::test]
 async fn test_rpc_char_unbound_mgr_batch() {
     // parity: rpc:charUnboundMgr.CancelCharacterDeletePrepare, rpc:charUnboundMgr.DeleteCharacter, rpc:charUnboundMgr.GetCharOmegaDowngradeStatus, rpc:charUnboundMgr.GetCharacterLockType, rpc:charUnboundMgr.GetCohortsForUser, rpc:charUnboundMgr.GetNumCharacters, rpc:charUnboundMgr.GetQAStarterSystemIDs, rpc:charUnboundMgr.PrepareCharacterForDelete, rpc:charUnboundMgr.ToggleValidation, rpc:charUnboundMgr.UpdateCharacterBloodline, rpc:charUnboundMgr.UpdateCharacterGender
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     ctx.seed_demo_world_fixtures();
     let mut sess = SessionState::new(101);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -768,7 +768,7 @@ fn as_dict(rep: &PyRep) -> &[(PyRep, PyRep)] {
 #[tokio::test]
 async fn test_rpc_pvp_filament_mgr_batch() {
     // parity: rpc:pvpFilamentMgr.AbyssalPVPEndGateActivation, rpc:pvpFilamentMgr.GetActiveEvents, rpc:pvpFilamentMgr.GetAllEvents, rpc:pvpFilamentMgr.GetCharacterStatistics, rpc:pvpFilamentMgr.GetLeaderboard, rpc:pvpFilamentMgr.GetMostRecentEvent, rpc:pvpFilamentMgr.GetNextEventDate, rpc:pvpFilamentMgr.JoinPVPQueue, rpc:pvpFilamentMgr.LeavePVPQueue
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     ctx.seed_demo_world_fixtures();
     let mut sess = SessionState::new(101);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -1087,7 +1087,7 @@ async fn test_rpc_pvp_filament_mgr_batch() {
 #[tokio::test]
 async fn test_rpc_mailing_lists_mgr_batch() {
     // parity: rpc:mailingListsMgr.Delete, rpc:mailingListsMgr.GetInfo, rpc:mailingListsMgr.GetSettings, rpc:mailingListsMgr.Leave, rpc:mailingListsMgr.SendWelcomeMail, rpc:mailingListsMgr.SetDefaultAccess, rpc:mailingListsMgr.SetEntitiesAccess, rpc:mailingListsMgr.SetMembersClear
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     ctx.seed_demo_world_fixtures();
     let mut sess = SessionState::new(101);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -1332,7 +1332,7 @@ fn crowset_header_has_column(rep: &PyRep, col_name: &str) -> bool {
 #[tokio::test]
 async fn test_rpc_map_svc_beacons_sov_incursions() {
     // parity: rpc:map.GetBeaconCount, rpc:map.GetCurrentSovData, rpc:map.GetDeadspaceComplexMap, rpc:map.GetFacWarZoneInfo, rpc:map.GetIncursionGlobalReport
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     ctx.seed_demo_world_fixtures();
     ctx.db.with_mut_snapshot(|snap| {
         // Seed Pharolux Cyno Beacon structure (type 35840) in system 30000142
@@ -1598,7 +1598,7 @@ async fn test_rpc_map_svc_beacons_sov_incursions() {
 #[tokio::test]
 async fn test_rpc_map_svc_stations_history_visits() {
     // parity: rpc:map.GetIndustryJobsOverLast24Hours, rpc:map.GetMyExtraMapInfo, rpc:map.GetMyExtraMapInfoAgents, rpc:map.GetRecentSovActivity, rpc:map.GetSecurityModifiedSystems, rpc:map.GetSolarSystemVisits, rpc:map.GetStationCount, rpc:map.GetStationInfo, rpc:map.GetSystemsInIncursions
-    let mut sde = eve_sde::SdeRegistry::with_canonical_seed();
+    let mut sde = (*crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx().sde).clone();
     // Seed 300 stations across two regions (10000002 The Forge and 10000043 Domain) so we verify
     // map.GetStationInfo returns the full cluster station rowset without region filtering or 256-row truncation.
     for idx in 0..300i64 {
@@ -1629,7 +1629,11 @@ async fn test_rpc_map_svc_stations_history_visits() {
     let expected_total_stations = sde.stations.len();
     assert!(expected_total_stations > 300);
 
-    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let demo_snap = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx()
+        .db
+        .with_snapshot(|s| s.clone());
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    db.with_mut_snapshot(|s| *s = demo_snap);
     let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
     ctx.seed_demo_world_fixtures();
     let now = ctx.now_unix_secs();
@@ -1868,9 +1872,7 @@ async fn test_map_visited_systems_system_entry_tracking() {
     // parity: feat:ui.map-visited-systems
     eve_testkit::attest(&["feat:ui.map-visited-systems"]);
 
-    let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
-    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
-    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     ctx.seed_demo_world_fixtures();
 
     let mut sess = SessionState::new(102);
@@ -2023,7 +2025,7 @@ async fn test_rpc_utility_services_batch_complete() {
         "rpc:sharedSettingsMgr.GetStoredSharedSetting",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     common::pin_clock(&ctx);
     let kw = HashMap::new();
 
@@ -2624,7 +2626,7 @@ async fn test_parity_fast_checkout_offers_buy_and_mining_output() {
         "rpc:FastCheckoutService.RequestMiningCycleOutput",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     common::pin_clock(&ctx);
 
     // Unauthenticated FastCheckoutService calls fail
@@ -2915,7 +2917,7 @@ async fn test_parity_agent_plausible_missions_and_cache_rowset() {
         "rpc:agentMgr.GetPlausibleMissionIDs",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     let mut sess = login_and_select(&ctx, 91_101, "demo", "demo-secret", PILOT_1).await;
 
     // 1. agentMgr.GetPlausibleMissionIDs: pick two distinct SDE agents (level 1 vs level 4)
@@ -3049,7 +3051,7 @@ async fn test_parity_agent_plausible_missions_and_cache_rowset() {
 
 #[tokio::test]
 async fn test_parity_project_discovery_tasks_stats_xp_and_tutorial() {
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     let mut sess = login_and_select(&ctx, 91_201, "demo", "demo-secret", PILOT_1).await;
 
     // 1. get_total_needed_xp: default V24 analyst progression curve returns 500.0 at rank 1
@@ -3262,7 +3264,7 @@ async fn test_batch2_cache_setting_and_load_service() {
         "rpc:loadService.GetTotalStats",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     common::pin_clock(&ctx);
     let mut player = setup_pilot(&ctx, 41_001, "demo", "demo-secret", 90_000_001).await;
     let mut gm = setup_pilot(&ctx, 41_002, "other", "other-secret", 90_000_002).await;
@@ -3416,7 +3418,7 @@ async fn test_batch2_cache_setting_and_load_service() {
 async fn test_batch2_lookup_warable_and_sov_structures() {
     eve_testkit::attest(&[]);
 
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     common::pin_clock(&ctx);
     let mut sess = setup_pilot(&ctx, 41_003, "demo", "demo-secret", 90_000_001).await;
 
@@ -3537,7 +3539,7 @@ async fn test_batch2_lookup_warable_and_sov_structures() {
 
 #[tokio::test]
 async fn test_batch2_raffle_character_seeding_and_create() {
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     common::pin_clock(&ctx);
     let mut player = setup_pilot(&ctx, 41_004, "demo", "demo-secret", 90_000_001).await;
     let mut gm = setup_pilot(&ctx, 41_005, "other", "other-secret", 90_000_002).await;
@@ -3681,7 +3683,7 @@ async fn test_batch2_raffle_character_seeding_and_create() {
 
 #[tokio::test]
 async fn test_batch2_shipcaster_pads_launchers_and_travel() {
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     common::pin_clock(&ctx);
     let mut sess = setup_pilot(&ctx, 41_006, "demo", "demo-secret", 90_000_001).await;
     ctx.advance_secs(15);
@@ -3817,7 +3819,7 @@ const ERR_CHALLENGE_NOT_COMPLETED: &str = "ChallengeNotCompleted";
 const ERR_CHALLENGE_ALREADY_CLAIMED: &str = "ChallengeAlreadyClaimed";
 
 fn new_ctx() -> ServerContext {
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     ctx.set_clock_paused(true);
     ctx
 }
@@ -3892,7 +3894,9 @@ fn count_nested_instances(rep: &PyRep, expected_sys: u32) -> usize {
 
 #[tokio::test]
 async fn batch3_dungeon_instance_cache_homefront_and_triglavian() {
-    let ctx = new_ctx();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
+    ctx.set_clock_paused(true);
+    ctx.set_mechanic_rng_seed(Some(42));
     let mut unauth = SessionState::default();
     assert!(rpc(
         &ctx,
@@ -4029,7 +4033,9 @@ async fn batch3_dungeon_instance_cache_homefront_and_triglavian() {
 
 #[tokio::test]
 async fn batch3_season_manager_challenges_and_queries() {
-    let ctx = new_ctx();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
+    ctx.set_clock_paused(true);
+    ctx.set_mechanic_rng_seed(Some(42));
     let mut sess = login_char(&ctx, 103, PILOT_ID).await;
 
     let max_active = rpc(&ctx, &mut sess, "seasonManager", "get_max_active_challenges", &[])
@@ -4115,7 +4121,9 @@ async fn batch3_season_manager_challenges_and_queries() {
 
 #[tokio::test]
 async fn batch3_season_manager_events_claim_reload_and_npc_standings() {
-    let ctx = new_ctx();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
+    ctx.set_clock_paused(true);
+    ctx.set_mechanic_rng_seed(Some(42));
     let mut sess = login_char(&ctx, 104, PILOT_ID).await;
     sess.station_id = Some(JITA_STATION);
 
@@ -4317,7 +4325,7 @@ fn dict_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
 
 #[tokio::test]
 async fn test_batch4_seasonal_login_campaign_manager_rpcs() {
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     common::pin_clock(&ctx);
 
     let mut unauth = SessionState::new(94_001);
@@ -4397,7 +4405,7 @@ async fn test_batch4_seasonal_login_campaign_manager_rpcs() {
 
 #[tokio::test]
 async fn test_batch4_shipcaster_pads_launchers_and_travel_rpcs() {
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     common::pin_clock(&ctx);
     ctx.advance_secs(600);
 
@@ -4618,8 +4626,7 @@ async fn test_batch4_shipcaster_pads_launchers_and_travel_rpcs() {
 
 #[tokio::test]
 async fn test_batch4_store_manager_rpcs() {
-    let ctx = ServerContext::new();
-    common::seed_test_nes_store_catalog(&ctx);
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
 
     let mut unauth = SessionState::new(94_020);
     assert!(rpc(&ctx, &mut unauth, "storeManager", "get_categories", &[]).await.is_ok());
@@ -4735,7 +4742,7 @@ pub(crate) mod rpc_localization_qa {
 //  Runtime integration tests closing open `rpc:*` parity rows:
 //  - `rpc:localizationServer.UpdateLocalizationQAWrap`
 
-use crate::notify_structures_clones_pi::{new_ctx, rpc, JITA_STATION, PILOT_A, PILOT_B};
+use crate::notify_structures_clones_pi::{rpc, JITA_STATION, PILOT_A, PILOT_B};
 use crate::notify_space_corp_market::login_docked;
 use eve_db::OwnerNoteRecord;
 use eve_machonet::SessionState;
@@ -4748,7 +4755,9 @@ const LOCALIZATION_NOTE_ID: i64 = -8_960_000_000_000;
 async fn parity_rpc_localization_update_qa_wrap() {
     eve_testkit::attest(&["rpc:localizationServer.UpdateLocalizationQAWrap"]);
 
-    let ctx = new_ctx();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
+    ctx.set_clock_paused(true);
+    ctx.set_mechanic_rng_seed(Some(42));
 
     // 1. Unauthenticated caller is rejected.
     let mut unauth = SessionState::new(90_021);
@@ -4881,7 +4890,7 @@ const SYS_JITA: u32 = 30_000_142;
 const JITA_STATION: i64 = 60_003_760;
 
 fn new_ctx() -> ServerContext {
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     ctx.set_clock_paused(true);
     ctx
 }
@@ -4959,7 +4968,9 @@ async fn test_agent_plausible_missions_and_cache_rowset() {
         "rpc:agentMgr.GetPlausibleMissionIDs",
     ]);
 
-    let ctx = new_ctx();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
+    ctx.set_clock_paused(true);
+    ctx.set_mechanic_rng_seed(Some(42));
     let mut sess = SessionState::new(91_001);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_A)]).await.unwrap();
@@ -4991,7 +5002,9 @@ async fn test_agent_plausible_missions_and_cache_rowset() {
 
 #[tokio::test]
 async fn test_probe_scanning_lifecycle_notifications() {
-    let ctx = new_ctx();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
+    ctx.set_clock_paused(true);
+    ctx.set_mechanic_rng_seed(Some(42));
     let jita_pos = ctx.sde.stations[&JITA_STATION].position + DVec3::new(1_000.0, 0.0, 0.0);
     let (ship_id, launcher_id, probe_stack_id) = (630_000_001_i64, 630_000_010_i64, 630_000_011_i64);
     let mut sess = login_in_space(&ctx, 91_002, "demo", "demo-secret", PILOT_A, ship_id, 621, SYS_JITA, jita_pos).await;
@@ -5047,7 +5060,9 @@ async fn test_probe_scanning_lifecycle_notifications() {
 
 #[tokio::test]
 async fn test_campaign_enrollment_chat_bans_and_crimewatch_timers() {
-    let ctx = new_ctx();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
+    ctx.set_clock_paused(true);
+    ctx.set_mechanic_rng_seed(Some(42));
     let mut gm_sess = SessionState::new(91_003);
     common::login_pilot(&ctx, &mut gm_sess, "demo", "demo-secret").await;
     gm_sess.role = eve_db::service_roles::ROLE_GM_DEFAULT;
@@ -5200,7 +5215,9 @@ async fn test_corp_role_bit_values_match_v24_client() {
     assert_eq!(corp_roles::ROLE_TERRESTRIAL_LOGISTICS_OFFICER, 1 << 61);
     assert_eq!(corp_roles::ROLE_SKILL_PLAN_MANAGER, 1 << 62);
 
-    let ctx = new_ctx();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
+    ctx.set_clock_paused(true);
+    ctx.set_mechanic_rng_seed(Some(42));
     let mut sess = SessionState::new(91_007);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_A)]).await.unwrap();

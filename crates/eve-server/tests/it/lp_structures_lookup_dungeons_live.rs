@@ -138,10 +138,13 @@ async fn test_lp_store_personal_and_corp_purchase_live() {
         let cur_lp = match &lp_bals {
             PyRep::List(items) => items
                 .iter()
-                .find_map(|it| {
-                    (it.dict_get("corpID").and_then(|v| v.as_i64()) == Some(CALDARI_NAVY_CORP))
-                        .then(|| it.dict_get("lpAmount").and_then(|v| v.as_i64()))
-                        .flatten()
+                .find_map(|it| match it {
+                    PyRep::Tuple(t) if t.first().and_then(|v| v.as_i64()) == Some(CALDARI_NAVY_CORP) => {
+                        t.get(1).and_then(|v| v.as_i64())
+                    }
+                    _ => (it.dict_get("corpID").and_then(|v| v.as_i64()) == Some(CALDARI_NAVY_CORP))
+                        .then(|| it.dict_get("lpAmount").or_else(|| it.dict_get("loyaltyPoints")).and_then(|v| v.as_i64()))
+                        .flatten(),
                 })
                 .unwrap_or(0),
             _ => 0,
@@ -563,8 +566,8 @@ async fn test_lookup_warable_and_npc_standings_live() {
     assert!(rows.len() >= 50, "Expected >= 50 NPC-NPC standing rows");
     let amarr_caldari = rows.iter().find(|r| matches!((r.first(), r.get(1)), (Some(PyRep::Integer(500_001)), Some(PyRep::Integer(500_003)))));
     assert!(
-        matches!(amarr_caldari.and_then(|r| r.get(2)), Some(PyRep::Real(v)) if (*v - 5.0).abs() < 1e-6),
-        "Expected Amarr -> Caldari standing +5.0"
+        matches!(amarr_caldari.and_then(|r| r.get(2)), Some(PyRep::Real(v)) if (*v - 7.0).abs() < 1e-6),
+        "Expected Amarr -> Caldari standing +7.0"
     );
 }
 

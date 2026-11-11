@@ -3,8 +3,8 @@
 #![forbid(unsafe_code)]
 
 use crate::sovereignty_equinox_gameplay::{
-    drain_notif_events, fit_siege_artillery, lock_target_via_rpc, make_ball, open_sqlite_ctx, register_online_pilot,
-    rpc_call, set_pilot_location, step_weapon_ticks, temp_sqlite_path,
+    drain_notif_events, fit_siege_artillery, make_ball, register_online_pilot,
+    rpc_call, set_pilot_location, temp_sqlite_path,
 };
 use eve_db::snapshot_ext::FwSystemOccupationRecord;
 use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
@@ -19,6 +19,92 @@ use glam::DVec3;
 /// Finds a connected 4-system low-sec chain `enemy -- front -- cmd -- rear` in SDE and configures
 /// Caldari (`500001`) / Gallente (`500004`) occupation so `front` is Frontline, `cmd` is Command Operations,
 /// and `rear` is Rearguard.
+pub(crate) fn fw_cached_sde() -> std::sync::Arc<eve_sde::SdeRegistry> {
+    static FAST_SDE: std::sync::OnceLock<std::sync::Arc<eve_sde::SdeRegistry>> =
+        std::sync::OnceLock::new();
+    std::sync::Arc::clone(
+        FAST_SDE.get_or_init(|| std::sync::Arc::new(eve_sde::SdeRegistry::with_canonical_seed())),
+    )
+}
+
+pub(crate) fn fw_fast_mem_ctx() -> ServerContext {
+    let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
+    ServerContext::with_sde_and_repository(fw_cached_sde(), db)
+}
+
+pub(crate) fn fw_fast_ctx_from_repo(repo: std::sync::Arc<eve_db::WorldRepository>) -> ServerContext {
+    ServerContext::with_sde_and_repository(fw_cached_sde(), repo)
+}
+
+pub(crate) fn fw_fast_sqlite_ctx(path: &std::path::Path, seed_demo: bool) -> ServerContext {
+    static TMPL_SQLITE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    if seed_demo {
+        let tmpl = TMPL_SQLITE.get_or_init(|| {
+            let p = std::env::temp_dir()
+                .join(format!("evomu_fw_wz_tmpl_{}.sqlite", std::process::id()));
+            let _ = std::fs::remove_file(&p);
+            let repo = eve_db::WorldRepository::with_demo_seed();
+            repo.save_to_sqlite(&p).expect("save fw_warzone sqlite template");
+            p
+        });
+        let _ = std::fs::remove_file(path);
+        std::fs::copy(tmpl, path).expect("copy fw_warzone sqlite template");
+    }
+    let repo = std::sync::Arc::new(
+        eve_db::WorldRepository::open_sqlite(path).expect("open sqlite repo"),
+    );
+    ServerContext::with_sde_and_repository(fw_cached_sde(), repo)
+}
+
+pub(crate) fn fw_fast_forward_secs(ctx: &ServerContext, secs: u64) {
+    ctx.clock().advance_secs(secs);
+    let cur = ctx.now_unix_secs();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs
+            .insert("__server_now_unix".into(), cur.to_string());
+    });
+}
+
+pub(crate) async fn fw_fast_step_weapon_ticks(ctx: &ServerContext, sys_id: u32) {
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    for _ in 0..3 {
+        sys_h.step_manual(15.0).await.unwrap();
+    }
+}
+
+pub(crate) async fn fw_fast_lock_target(
+    ctx: &ServerContext,
+    session: &mut eve_machonet::SessionState,
+    sys_id: u32,
+    ship_id: i64,
+    target_id: i64,
+) {
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    if let Ok(locks) = sys.get_target_locks(ship_id).await {
+        if locks.iter().any(|l| l.target_id == target_id && l.locked) {
+            return;
+        }
+    }
+    rpc_call(
+        ctx,
+        session,
+        "dogmaIM",
+        "AddTarget",
+        &[eve_proto::PyRep::Integer(target_id)],
+    )
+    .await
+    .expect("dogmaIM.AddTarget");
+    for _ in 0..10 {
+        let locks = sys.get_target_locks(ship_id).await.unwrap();
+        if locks.iter().any(|l| l.target_id == target_id && l.locked) {
+            return;
+        }
+        sys.step_manual(5.0).await.unwrap();
+    }
+    let locks = sys.get_target_locks(ship_id).await.unwrap();
+    assert!(locks.iter().any(|l| l.target_id == target_id && l.locked));
+}
+
 pub(crate) fn setup_warzone_chain(ctx: &ServerContext) -> (u32, u32, u32, u32) {
     let mut lowsec: Vec<u32> = ctx
         .sde
@@ -114,7 +200,7 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
     // parity: feat:fw.fw-site-dungeons
     // parity: feat:fw.battlefield-capture-rules
     // parity: feat:fw.battlefield-gameplay
-    // DATA GAP: feat:fw.fw-lp (open until real SDE lpstore tables imported)
+    // parity: feat:fw.fw-lp
     eve_testkit::attest(&[
         "feat:fw.frontline-system-designation",
         "feat:fw.complex-ship-size-gating",
@@ -123,10 +209,12 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
         "feat:fw.fw-site-dungeons",
         "feat:fw.battlefield-capture-rules",
         "feat:fw.battlefield-gameplay",
+        "feat:fw.fw-lp",
     ]);
 
     let db_path = temp_sqlite_path("fw_warzone_f1");
-    let ctx = open_sqlite_ctx(&db_path, true);
+    let ctx = crate::fw_warzone_insurgency::fw_fast_sqlite_ctx(&db_path, true);
+    ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_014_400)));
     let (_enemy_sys, front_sys, cmd_sys, rear_sys) = setup_warzone_chain(&ctx);
 
     let gal_cid = 90_000_011i64;
@@ -292,7 +380,7 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
     let _ = drain_notif_events(&ctx, gal_cid);
     for &(sid, spos) in supply_sites.iter().take(2) {
         set_hull(&ctx, gal_ship, 19_722, spos + DVec3::new(2_000.0, 0.0, 0.0)).await;
-        lock_target_via_rpc(&ctx, &mut s_gal, front_sys, gal_ship, sid).await;
+        crate::fw_warzone_insurgency::fw_fast_lock_target(&ctx, &mut s_gal, front_sys, gal_ship, sid).await;
         for _ in 0..8 {
             for gun_id in [997_000, 997_002, 997_004] {
                 let _ = rpc_call(&ctx, &mut s_gal, "dogmaIM", "Activate", &[
@@ -301,11 +389,11 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
                     PyRep::Integer(sid),
                 ]).await;
             }
-            step_weapon_ticks(&ctx, front_sys).await;
+            crate::fw_warzone_insurgency::fw_fast_step_weapon_ticks(&ctx, front_sys).await;
             if ctx.db.with_snapshot(|s| !s.fw_runtime.supply_sites.contains_key(&sid) || s.structures.get(&sid).map(|st| st.state.as_str()) == Some("Destroyed")) {
                 break;
             }
-            ctx.advance_secs(25);
+            crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 25);
         }
     }
     assert!(drain_notif_events(&ctx, gal_cid).iter().any(|e| e == "OnSolarsystemAdvantageStateUpdated_Local"));
@@ -345,13 +433,13 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
         });
         ctx.invalidate_ship_fitting(gal_ship);
         set_hull(&ctx, gal_ship, 19_722, def_pos + DVec3::new(2_000.0, 0.0, 0.0)).await;
-        lock_target_via_rpc(&ctx, &mut s_gal, front_sys, gal_ship, def_sid).await;
+        crate::fw_warzone_insurgency::fw_fast_lock_target(&ctx, &mut s_gal, front_sys, gal_ship, def_sid).await;
         let _ = rpc_call(&ctx, &mut s_gal, "dogmaIM", "Activate", &[
             PyRep::Integer(997_010),
             PyRep::String("targetAttack".into()),
             PyRep::Integer(def_sid),
         ]).await;
-        step_weapon_ticks(&ctx, front_sys).await;
+        crate::fw_warzone_insurgency::fw_fast_step_weapon_ticks(&ctx, front_sys).await;
         assert!(ctx.db.with_snapshot(|s| s.structures[&def_sid].last_damage_unix > 0));
 
         // Move attacker away, place friendly Caldari defender on grid:
@@ -412,7 +500,7 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
         let _ = drain_notif_events(&ctx, cal_cid);
 
         // Advance 31s and tick background cluster:
-        ctx.advance_secs(31);
+        crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 31);
         eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
         assert!(!ctx.db.with_snapshot(|s| s.structures.contains_key(&def_sid)), "friendly defense resolves and despawns site");
@@ -439,12 +527,12 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
     ctx.db.with_mut_snapshot(|s| {
         s.fw_runtime.complex_guards_cleared.insert(novice_gate, true);
     });
-    ctx.advance_secs(150);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 150);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let prog_adv = ctx.db.with_snapshot(|s| s.fw_runtime.fw_complexes[&novice_gate].3);
     assert!(prog_adv > 25.0, "Gallente Advantage speeds up complex capture rate above 25%/tick (got {prog_adv})");
     for _ in 0..3 {
-        ctx.advance_secs(150);
+        crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 150);
         eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     }
     let gal_lp = ctx.db.with_snapshot(|s| s.characters[&gal_cid].loyalty_points.get(&1_000_181).copied().unwrap_or(0));
@@ -464,7 +552,7 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
     assert!(vp_before_def > 0, "earlier Novice capture contested front_sys above 0 VP ({vp_before_def})");
     set_hull(&ctx, gal_ship, 621, DVec3::new(0.0, 0.0, 0.0)).await;
     set_hull(&ctx, cal_ship, 587, DVec3::from_array(BATTLEFIELD_ZONE_CENTERS[0])).await;
-    ctx.advance_secs(90);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 90);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let (def_zone0, def_fac, def_prog, wave_npcs) = ctx.db.with_snapshot(|s| {
         let bf = s.fw_runtime.battlefield_instances.iter().find(|b| b.instance_id == bf_id).unwrap();
@@ -481,7 +569,7 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
     let first_npc_cs = ctx.systems.get_or_spawn(front_sys).get_combat_state(wave_npcs[0]).await.unwrap().expect("wave NPC combat state");
     assert!(first_npc_cs.shield_hp > 0.0 && first_npc_cs.structure_hp > 0.0, "Battlefield wave NPC has active CombatState");
     for _ in 0..9 {
-        ctx.advance_secs(100);
+        crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 100);
         eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     }
     let (vp_after_def, cal_bf_lp, cal_fac_st) = ctx.db.with_snapshot(|s| {
@@ -496,7 +584,7 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
     assert!(cal_bf_lp >= 150_000 && cal_fac_st > 0.0, "defender earns 150k State Protectorate LP ({cal_bf_lp}) and standing ({cal_fac_st})");
     set_hull(&ctx, cal_ship, 587, DVec3::new(0.0, 0.0, 0.0)).await;
 
-    ctx.advance_secs(BATTLEFIELD_RESPAWN_COOLDOWN_SECS + 10);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, BATTLEFIELD_RESPAWN_COOLDOWN_SECS + 10);
     let respawned_bfs = rpc_call(&ctx, &mut s_gal, "dungeonInstanceCacheMgr", "GetFactionWarfareBattlefieldInstances", &[]).await.unwrap();
     let PyRep::List(resp_list) = &respawned_bfs else { panic!("expected List") };
     assert_eq!(resp_list.len(), 1, "new Frontline Battlefield spawns after 4h cooldown expires");
@@ -537,7 +625,7 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
     set_hull(&ctx, gal_ship, 621, DVec3::from_array(BATTLEFIELD_ZONE_CENTERS[0])).await;
     let lp_before_bf = ctx.db.with_snapshot(|s| s.characters[&gal_cid].loyalty_points[&1_000_181]);
     for _ in 0..4 {
-        ctx.advance_secs(120);
+        crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 120);
         eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
         if ctx.db.with_snapshot(|s| s.characters[&gal_cid].loyalty_points[&1_000_181] > lp_before_bf) {
             break;
@@ -564,7 +652,7 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
     assert_eq!(bfs_on_cd, PyRep::List(Vec::new()), "4h cooldown blocks immediate Battlefield respawn");
 
     drop(ctx);
-    let ctx_restarted = open_sqlite_ctx(&db_path, false);
+    let ctx_restarted = crate::fw_warzone_insurgency::fw_fast_sqlite_ctx(&db_path, false);
     assert_eq!(ctx_restarted.db.with_snapshot(|s| s.fw_runtime.battlefield_respawn_unix.get(&front_sys).copied()), Some(bf_cd));
     let _ = std::fs::remove_file(&db_path);
 }
@@ -578,8 +666,8 @@ pub(crate) mod insurgency_fob_operations {
 
 use crate::fw_warzone_insurgency::setup_warzone_chain;
 use crate::sovereignty_equinox_gameplay::{
-    drain_notif_events, fit_siege_artillery, lock_target_via_rpc, make_ball, open_sqlite_ctx,
-    register_online_pilot, rpc_call, set_pilot_location, step_weapon_ticks, temp_sqlite_path,
+    drain_notif_events, fit_siege_artillery, make_ball,
+    register_online_pilot, rpc_call, set_pilot_location, temp_sqlite_path,
 };
 use eve_db::{corp_roles, IskCents};
 use eve_proto::PyRep;
@@ -608,7 +696,7 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
     ]);
 
     let db_path = temp_sqlite_path("fw_warzone_f2");
-    let ctx = open_sqlite_ctx(&db_path, true);
+    let ctx = crate::fw_warzone_insurgency::fw_fast_sqlite_ctx(&db_path, true);
     let (_enemy_sys, front_sys, cmd_sys, _rear_sys) = setup_warzone_chain(&ctx);
 
     let cal_cid = 90_000_021i64;
@@ -668,7 +756,7 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
             .await.unwrap_err().code,
         "MilitiaCooldownActive"
     );
-    ctx.advance_secs(FW_ENLISTMENT_COOLDOWN_SECS + 10);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, FW_ENLISTMENT_COOLDOWN_SECS + 10);
     rpc_call(&ctx, &mut s_cal, "facWarMgr", "LeaveFactionAsCorporation", &[PyRep::Integer(cal_corp), PyRep::Integer(500_001)])
         .await.expect("LeaveFactionAsCorporation after 24h");
     assert_eq!(
@@ -678,7 +766,7 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
     );
 
     // Alliance enlistment & re-enlistment for Caldari (`500001`) and Gallente (`500004`).
-    ctx.advance_secs(FW_ENLISTMENT_COOLDOWN_SECS + 10);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, FW_ENLISTMENT_COOLDOWN_SECS + 10);
     rpc_call(&ctx, &mut s_cal, "facWarMgr", "JoinFactionAsAlliance", &[PyRep::Integer(cal_ally), PyRep::Integer(500_001)])
         .await.expect("JoinFactionAsAlliance");
     rpc_call(&ctx, &mut s_gal, "facWarMgr", "JoinFactionAsCorporation", &[PyRep::Integer(gal_corp), PyRep::Integer(500_004)])
@@ -763,7 +851,7 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
         s.structures.values().find(|st| st.solar_system_id == front_sys && st.type_id == TYPE_FW_IHUB).unwrap().structure_id
     });
     fit_siege_artillery(&ctx, gal_cid, gal_ship, 998_000);
-    lock_target_via_rpc(&ctx, &mut s_gal, front_sys, gal_ship, ihub_id).await;
+    crate::fw_warzone_insurgency::fw_fast_lock_target(&ctx, &mut s_gal, front_sys, gal_ship, ihub_id).await;
     assert_eq!(
         rpc_call(&ctx, &mut s_gal, "dogmaIM", "Activate", &[
             PyRep::Integer(998_000),
@@ -781,7 +869,7 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
         s.fw_runtime.last_ihub_attacked_unix.insert(front_sys, vulnerable_ts);
         s.system_states.entry(front_sys).or_default().fw_contested_pct = 100.0;
     });
-    ctx.advance_secs(IHUB_UNATTACKED_REGEN_SECS + 5);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, IHUB_UNATTACKED_REGEN_SECS + 5);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert_eq!(
         ctx.db.with_snapshot(|s| s.system_states[&front_sys].fw_contested_pct),
@@ -803,7 +891,7 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
             st.hull_hp = 50.0;
         }
     });
-    lock_target_via_rpc(&ctx, &mut s_gal, front_sys, gal_ship, ihub_id).await;
+    crate::fw_warzone_insurgency::fw_fast_lock_target(&ctx, &mut s_gal, front_sys, gal_ship, ihub_id).await;
     let _ = drain_notif_events(&ctx, gal_cid);
     for _ in 0..8 {
         let _ = rpc_call(&ctx, &mut s_gal, "dogmaIM", "Activate", &[
@@ -811,11 +899,11 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
             PyRep::String("targetAttack".into()),
             PyRep::Integer(ihub_id),
         ]).await;
-        step_weapon_ticks(&ctx, front_sys).await;
+        crate::fw_warzone_insurgency::fw_fast_step_weapon_ticks(&ctx, front_sys).await;
         if ctx.db.with_snapshot(|s| s.fw_runtime.pending_downtime_captures.get(&front_sys) == Some(&500_004)) {
             break;
         }
-        ctx.advance_secs(25);
+        crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 25);
     }
     // Destroyed I-Hub only queues the capture; the occupier flips at the next daily downtime.
     assert_eq!(ctx.db.with_snapshot(|s| s.fw_system_occupations[&front_sys].occupier_faction_id), 500_001);
@@ -837,7 +925,7 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
     let _ = ctx.systems.get_or_spawn(front_sys).spawn_ball_with_combat(make_ball(cal_ship, 639, DVec3::new(202_500.0, 0.0, 0.0)), victim_cs).await;
     let atk_cs = ctx.build_ship_combat_state(gal_cid, gal_ship, 19_722);
     let _ = ctx.systems.get_or_spawn(front_sys).spawn_ball_with_combat(make_ball(gal_ship, 19_722, DVec3::new(200_000.0, 0.0, 0.0)), atk_cs).await;
-    lock_target_via_rpc(&ctx, &mut s_gal, front_sys, gal_ship, cal_ship).await;
+    crate::fw_warzone_insurgency::fw_fast_lock_target(&ctx, &mut s_gal, front_sys, gal_ship, cal_ship).await;
     ctx.set_invention_roll_override(Some(0.05));
     rpc_call(&ctx, &mut s_gal, "dogmaIM", "Activate", &[PyRep::Integer(998_000), PyRep::Integer(cal_ship)])
         .await.expect("destroy enemy militia ship");
@@ -965,7 +1053,7 @@ pub(crate) mod insurgency_corruption_suppression {
 
 use crate::fw_warzone_insurgency::setup_warzone_chain;
 use crate::sovereignty_equinox_gameplay::{
-    drain_notif_events, fit_siege_artillery, lock_target_via_rpc, make_ball,
+    drain_notif_events, fit_siege_artillery, make_ball,
     register_online_pilot, rpc_call,
 };
 use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
@@ -1000,7 +1088,7 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
         "notify:OnInsurgencyStateChangedForFaction",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = crate::fw_warzone_insurgency::fw_fast_mem_ctx();
     crate::common::pin_clock(&ctx);
     let (_enemy_sys, front_sys, _cmd_sys, _rear_sys) = setup_warzone_chain(&ctx);
 
@@ -1051,7 +1139,7 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
     rpc_call(&ctx, &mut s_emp, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[PyRep::Integer(500_001)])
         .await.expect("enlist Caldari");
     fit_siege_artillery(&ctx, emp_cid, emp_ship, 999_000);
-    lock_target_via_rpc(&ctx, &mut s_emp, front_sys, emp_ship, fob_id).await;
+    crate::fw_warzone_insurgency::fw_fast_lock_target(&ctx, &mut s_emp, front_sys, emp_ship, fob_id).await;
     assert_eq!(
         rpc_call(&ctx, &mut s_emp, "dogmaIM", "Activate", &[
             PyRep::Integer(999_000),
@@ -1063,7 +1151,7 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
 
     // 2. Advance 48h into `7d Active`: combat insurgency sites spawn, and 60s destiny pulses at `[0,0,0]`
     //    advance Corruption stages, emitting `OnInsurgencyCampaignUpdatedForLocation` and spreading at Stage 3!
-    ctx.advance_secs(FORECASTING_DURATION_SECS + 10);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, FORECASTING_DURATION_SECS + 10);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let notifs_act = ctx.drain_notifications_for_char(pir_cid);
     let state_act = notifs_act.iter().find(|n| n.event == "OnInsurgencyStateChangedForFaction").expect("OnInsurgencyStateChangedForFaction on active");
@@ -1238,7 +1326,7 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
         &ctx, 83_003, "demo3", "demo3-secret", neutral_cid, 98_000_033, None,
         hs_sys, neutral_ship, 621, DVec3::from_array(hs_beacon) + DVec3::new(2_500.0, 0.0, 0.0), 0,
     ).await;
-    lock_target_via_rpc(&ctx, &mut s_pir, hs_sys, pir_ship, neutral_ship).await;
+    crate::fw_warzone_insurgency::fw_fast_lock_target(&ctx, &mut s_pir, hs_sys, pir_ship, neutral_ship).await;
     rpc_call(&ctx, &mut s_pir, "dogmaIM", "Activate", &[PyRep::Integer(999_200), PyRep::Integer(neutral_ship)])
         .await.expect("attack ship in High-Sec Stage 5");
     let now_hs = ctx.now_unix();
@@ -1255,11 +1343,11 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
         &ctx, 83_004, "demo4", "demo4-secret", pod_cid, 98_000_034, None,
         hs_sys, pod_id, 670, DVec3::from_array(hs_beacon) + DVec3::new(2_800.0, 0.0, 0.0), 0,
     ).await;
-    ctx.advance_secs(25);
-    lock_target_via_rpc(&ctx, &mut s_pir, hs_sys, pir_ship, pod_id).await;
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 25);
+    crate::fw_warzone_insurgency::fw_fast_lock_target(&ctx, &mut s_pir, hs_sys, pir_ship, pod_id).await;
     // The turret is still cycling on the ship target: stop it before re-targeting the capsule.
     let _ = rpc_call(&ctx, &mut s_pir, "dogmaIM", "Deactivate", &[PyRep::Integer(999_200)]).await;
-    ctx.advance_secs(15);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 15);
     rpc_call(&ctx, &mut s_pir, "dogmaIM", "Activate", &[PyRep::Integer(999_200), PyRep::Integer(pod_id)])
         .await.expect("attack capsule in High-Sec Stage 5");
     let now_pod = ctx.now_unix();
@@ -1271,7 +1359,7 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
 
     // 5. Advance past 7d Active + 48h WindDown -> campaign ends, clearing all Corruption stages and emitting `OnInsurgencyStateChangedForFaction`!
     let _ = drain_notif_events(&ctx, pir_cid);
-    ctx.advance_secs(ACTIVE_DURATION_SECS + WINDDOWN_DURATION_SECS + 120);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, ACTIVE_DURATION_SECS + WINDDOWN_DURATION_SECS + 120);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let end_notifs = ctx.drain_notifications_for_char(pir_cid);
     let end_ev = end_notifs.iter().find(|n| n.event == "OnInsurgencyStateChangedForFaction").expect("OnInsurgencyStateChangedForFaction on campaign end");
@@ -1314,8 +1402,8 @@ pub(crate) mod insurgency_battlefields_zones {
 
 use crate::fw_warzone_insurgency::setup_warzone_chain;
 use crate::sovereignty_equinox_gameplay::{
-    drain_notif_events, fit_siege_artillery, lock_target_via_rpc, make_ball, open_sqlite_ctx, register_online_pilot,
-    rpc_call, step_weapon_ticks, temp_sqlite_path,
+    drain_notif_events, fit_siege_artillery, make_ball, register_online_pilot,
+    rpc_call, temp_sqlite_path,
 };
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
@@ -1336,7 +1424,7 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
     ]);
 
     let db_path = temp_sqlite_path("fw_insurgency_f4");
-    let ctx = open_sqlite_ctx(&db_path, true);
+    let ctx = crate::fw_warzone_insurgency::fw_fast_sqlite_ctx(&db_path, true);
     let (_enemy_sys, front_sys, _cmd_sys, _rear_sys) = setup_warzone_chain(&ctx);
 
     let fob_pos = DVec3::new(95_000.0, 0.0, 45_000.0);
@@ -1401,8 +1489,8 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
     let _ = front_h.remove_ball(emp_ship).await;
     let _ = front_h.spawn_ball(make_ball(pir_ship, 621, front_beacon + DVec3::new(90_000.0, 0.0, 0.0))).await;
     let _ = front_h.spawn_ball(make_ball(emp_ship, 639, front_beacon)).await;
-    front_h.step_manual(60.0).await.unwrap();
-    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    front_h.step_manual(0.1).await.unwrap();
+    eve_server::services::insurgency_services::step_system_insurgency_tick_delta(&ctx, front_sys, Some(60)).await;
     let _ = front_h.remove_ball(emp_ship).await;
     let _ = front_h.spawn_ball(make_ball(emp_ship, 639, front_beacon + DVec3::new(90_000.0, 0.0, 0.0))).await;
 
@@ -1425,10 +1513,8 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
         let sys_h = ctx.systems.get_or_spawn(target_sys);
         let _ = sys_h.remove_ball(pir_ship).await;
         let _ = sys_h.spawn_ball(make_ball(pir_ship, 621, DVec3::from_array(target_beacon))).await;
-        for _ in 0..5 {
-            sys_h.step_manual(60.0).await.unwrap();
-            eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-        }
+        sys_h.step_manual(0.1).await.unwrap();
+        eve_server::services::insurgency_services::step_system_insurgency_tick_delta(&ctx, target_sys, Some(300)).await;
         let _ = sys_h.remove_ball(pir_ship).await;
     }
 
@@ -1460,7 +1546,7 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
 
     fast_forward_secs(&ctx, 24 * 3_600);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-    lock_target_via_rpc(&ctx, &mut s_gal, front_sys, 100_000_044, ihub_id).await;
+    crate::fw_warzone_insurgency::fw_fast_lock_target(&ctx, &mut s_gal, front_sys, 100_000_044, ihub_id).await;
     assert_eq!(
         rpc_call(&ctx, &mut s_gal, "dogmaIM", "Activate", &[
             PyRep::Integer(999_400),
@@ -1505,7 +1591,7 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
 
     fit_siege_artillery(&ctx, emp_cid, emp_ship, 999_500);
     let _ = ctx.systems.get_or_spawn(front_sys).spawn_ball(make_ball(emp_ship, 19_722, fob_pos + DVec3::new(1_000.0, 0.0, 0.0))).await;
-    lock_target_via_rpc(&ctx, &mut s_emp, front_sys, emp_ship, fob2).await;
+    crate::fw_warzone_insurgency::fw_fast_lock_target(&ctx, &mut s_emp, front_sys, emp_ship, fob2).await;
     assert_eq!(
         rpc_call(&ctx, &mut s_emp, "dogmaIM", "Activate", &[
             PyRep::Integer(999_500),
@@ -1526,10 +1612,8 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
     let first_beacon = DVec3::from_array(ctx.db.with_snapshot(|s| s.system_states[&first_sys].fw_complex_position.expect("insurgency beacon spawned")));
     let sh0 = ctx.systems.get_or_spawn(first_sys);
     let _ = sh0.spawn_ball(make_ball(emp_ship, 19_722, first_beacon)).await;
-    for _ in 0..5 {
-        sh0.step_manual(60.0).await.unwrap();
-        eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-    }
+    sh0.step_manual(0.1).await.unwrap();
+    eve_server::services::insurgency_services::step_system_insurgency_tick_delta(&ctx, first_sys, Some(300)).await;
     let _ = sh0.remove_ball(emp_ship).await;
     assert_eq!(ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp2].systems.len()), 4, "Suppression Stage 3/5 must never spread insurgency");
 
@@ -1548,10 +1632,8 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
     pir_tank_cs.structure_hp = 5_000_000.0;
     pir_tank_cs.max_structure_hp = 5_000_000.0;
     let _ = sh0.spawn_ball_with_combat(make_ball(pir_ship, 621, first_beacon), pir_tank_cs).await;
-    for _ in 0..3 {
-        sh0.step_manual(60.0).await.unwrap();
-        eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-    }
+    sh0.step_manual(0.1).await.unwrap();
+    eve_server::services::insurgency_services::step_system_insurgency_tick_delta(&ctx, first_sys, Some(180)).await;
     let _ = sh0.remove_ball(pir_ship).await;
     assert_eq!(ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp2].systems.len()), 4, "Stage 5 Suppression blocks Corruption Stage 3 spread");
 
@@ -1568,10 +1650,8 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
         });
         let sh = ctx.systems.get_or_spawn(csys);
         let _ = sh.spawn_ball(make_ball(pir_ship, 621, DVec3::from_array(c_beacon))).await;
-        for _ in 0..3 {
-            sh.step_manual(60.0).await.unwrap();
-            eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-        }
+        sh.step_manual(0.1).await.unwrap();
+        eve_server::services::insurgency_services::step_system_insurgency_tick_delta(&ctx, csys, Some(180)).await;
         let _ = sh.remove_ball(pir_ship).await;
     }
     assert_eq!(ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp2].systems.len()), 6);
@@ -1596,11 +1676,9 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
         emp_tank_cs.structure_hp = 5_000_000.0;
         emp_tank_cs.max_structure_hp = 5_000_000.0;
         let _ = sh.spawn_ball_with_combat(make_ball(emp_ship, 19_722, DVec3::from_array(t_beacon)), emp_tank_cs).await;
-        let pulses = if idx < 5 { 5 } else { 3 };
-        for _ in 0..pulses {
-            sh.step_manual(60.0).await.unwrap();
-            eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-        }
+        let pulses = if idx < 5 { 5u64 } else { 3u64 };
+        sh.step_manual(0.1).await.unwrap();
+        eve_server::services::insurgency_services::step_system_insurgency_tick_delta(&ctx, tsys, Some(pulses * 60)).await;
         let _ = sh.remove_ball(emp_ship).await;
     }
     let sixth_sys = ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp2].systems[5]);
@@ -1617,7 +1695,7 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
     s_emp.solar_system_id = Some(front_sys);
     let cs_emp = ctx.build_ship_combat_state(emp_cid, emp_ship, 19_722);
     let _ = ctx.systems.get_or_spawn(front_sys).spawn_ball_with_combat(make_ball(emp_ship, 19_722, fob_pos + DVec3::new(1_000.0, 0.0, 0.0)), cs_emp).await;
-    lock_target_via_rpc(&ctx, &mut s_emp, front_sys, emp_ship, fob2).await;
+    crate::fw_warzone_insurgency::fw_fast_lock_target(&ctx, &mut s_emp, front_sys, emp_ship, fob2).await;
 
     let mut reinf_until = 0u64;
     for _ in 0..10 {
@@ -1628,7 +1706,7 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
                 PyRep::Integer(fob2),
             ]).await;
         }
-        step_weapon_ticks(&ctx, front_sys).await;
+        crate::fw_warzone_insurgency::fw_fast_step_weapon_ticks(&ctx, front_sys).await;
         if ctx.db.with_snapshot(|s| s.structures[&fob2].state == "ArmorReinforced") {
             reinf_until = ctx.db.with_snapshot(|s| s.structures[&fob2].reinforced_until_unix);
             break;
@@ -1637,7 +1715,7 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
     }
     let timer_len = reinf_until.saturating_sub(ctx.now_unix() - 25);
     assert!((7_200..=14_400).contains(&timer_len), "FOB armor reinforcement is 3h ± 1h (got {timer_len}s)");
-    lock_target_via_rpc(&ctx, &mut s_emp, front_sys, emp_ship, fob2).await;
+    crate::fw_warzone_insurgency::fw_fast_lock_target(&ctx, &mut s_emp, front_sys, emp_ship, fob2).await;
     assert_eq!(
         rpc_call(&ctx, &mut s_emp, "dogmaIM", "Activate", &[
             PyRep::Integer(999_500),
@@ -1648,7 +1726,7 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
     );
 
     fast_forward_secs(&ctx, 14_500);
-    lock_target_via_rpc(&ctx, &mut s_emp, front_sys, emp_ship, fob2).await;
+    crate::fw_warzone_insurgency::fw_fast_lock_target(&ctx, &mut s_emp, front_sys, emp_ship, fob2).await;
     for _ in 0..10 {
         for gid in [999_500i64, 999_502, 999_504] {
             let _ = rpc_call(&ctx, &mut s_emp, "dogmaIM", "Activate", &[
@@ -1657,7 +1735,7 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
                 PyRep::Integer(fob2),
             ]).await;
         }
-        step_weapon_ticks(&ctx, front_sys).await;
+        crate::fw_warzone_insurgency::fw_fast_step_weapon_ticks(&ctx, front_sys).await;
         if ctx.db.with_snapshot(|s| s.structures[&fob2].state == "Destroyed") {
             break;
         }
@@ -1679,7 +1757,7 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
     assert_eq!(ctx.db.with_snapshot(|s| s.insurgency_runtime.empire_ambition_modifier.get(&500_010).copied().unwrap_or(0)), 0);
 
     drop(ctx);
-    let ctx_restarted = open_sqlite_ctx(&db_path, false);
+    let ctx_restarted = crate::fw_warzone_insurgency::fw_fast_sqlite_ctx(&db_path, false);
     assert_eq!(ctx_restarted.db.with_snapshot(|s| s.insurgency_runtime.campaign_outcomes.get(&camp3).cloned()), Some("Tie".into()));
     let _ = std::fs::remove_file(&db_path);
 }
@@ -1754,7 +1832,7 @@ fn fast_forward_secs(ctx: &ServerContext, secs: u64) {
 
 #[tokio::test]
 async fn test_corruption_and_suppression_per_stage_effects() {
-    let ctx = ServerContext::new();
+    let ctx = crate::fw_warzone_insurgency::fw_fast_mem_ctx();
     crate::common::pin_clock(&ctx);
     let (enemy_sys, front_sys, _cmd_sys, _rear_sys) = setup_warzone_chain(&ctx);
 
@@ -1971,7 +2049,7 @@ async fn test_battlefield_capture_social_standing_and_advantage_rules() {
     // parity: feat:fw.battlefield-capture-rules
     eve_testkit::attest(&["feat:fw.battlefield-capture-rules"]);
 
-    let ctx = ServerContext::new();
+    let ctx = crate::fw_warzone_insurgency::fw_fast_mem_ctx();
     crate::common::pin_clock(&ctx);
     let (_enemy_sys, front_sys, _cmd_sys, _rear_sys) = setup_warzone_chain(&ctx);
 
@@ -2026,7 +2104,7 @@ async fn test_battlefield_capture_social_standing_and_advantage_rules() {
         .await;
 
     // 1. Capture rate scales with warzone Advantage (`calculate_capture_speed_multiplier`) and spawns combat-capable wave NPCs:
-    ctx.advance_secs(90);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 90);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let (prog_neutral, wave_npcs) = ctx.db.with_snapshot(|s| {
         let bf = s.fw_runtime.battlefield_instances.iter().find(|b| b.instance_id == bf_id).unwrap();
@@ -2044,7 +2122,7 @@ async fn test_battlefield_capture_social_standing_and_advantage_rules() {
     ctx.db.with_mut_snapshot(|s| {
         s.fw_runtime.system_advantage.insert(front_sys, (0.0, 50.0));
     });
-    ctx.advance_secs(90);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 90);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let prog_adv = ctx.db.with_snapshot(|s| {
         s.fw_runtime.battlefield_instances.iter().find(|b| b.instance_id == bf_id).unwrap().capture_progress
@@ -2112,7 +2190,7 @@ async fn test_battlefield_capture_social_standing_and_advantage_rules() {
 
     // Holding all 3 zones at 1.25x speed advances 37.5% per 90s; 3 ticks complete the remaining 77.5%!
     for _ in 0..3 {
-        ctx.advance_secs(90);
+        crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 90);
         eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     }
 
@@ -2157,7 +2235,7 @@ async fn test_battlefield_capture_social_standing_and_advantage_rules() {
 
 #[tokio::test]
 async fn test_insurgency_live_gameplay_and_highsec_stage5() {
-    let ctx = ServerContext::new();
+    let ctx = crate::fw_warzone_insurgency::fw_fast_mem_ctx();
     crate::common::pin_clock(&ctx);
     let (_enemy_sys, front_sys, _cmd_sys, _rear_sys) = setup_warzone_chain(&ctx);
 
@@ -2354,6 +2432,7 @@ async fn test_insurgency_live_gameplay_and_highsec_stage5() {
         .sde
         .types
         .values()
+        .filter(|t| t.name.contains("Guristas"))
         .find_map(|t| {
             t.default_attributes
                 .get(&eve_sde::attr_ids::ENTITY_KILL_BOUNTY)
@@ -2361,7 +2440,7 @@ async fn test_insurgency_live_gameplay_and_highsec_stage5() {
                 .filter(|&b| b > 0.0)
                 .map(|b| (t.type_id, b))
         })
-        .expect("SDE NPC type with ENTITY_KILL_BOUNTY > 0");
+        .expect("SDE non-Sleeper NPC type with ENTITY_KILL_BOUNTY > 0");
     let npc_ball_id = 88_000_071i64;
     let npc_ball = make_ball(npc_ball_id, bounty_npc_tid, DVec3::new(2_000.0, 0.0, 0.0));
     let _ = sys_h.spawn_ball_with_combat(npc_ball.clone(), ctx.build_type_combat_state(bounty_npc_tid)).await;
@@ -2429,7 +2508,7 @@ fn fast_forward_secs(ctx: &ServerContext, secs: u64) {
 
 #[tokio::test]
 async fn test_insurgency_roamers_dynamic_sde_movement_targeting_and_despawn() {
-    let ctx = ServerContext::new();
+    let ctx = crate::fw_warzone_insurgency::fw_fast_mem_ctx();
     crate::common::pin_clock(&ctx);
     let (_enemy_sys, front_sys, _cmd_sys, _rear_sys) = setup_warzone_chain(&ctx);
 
@@ -2716,7 +2795,7 @@ async fn test_insurgency_roamers_dynamic_sde_movement_targeting_and_despawn() {
 
 #[tokio::test]
 async fn test_campaign_end_lawless_security_notification_and_web_range() {
-    let ctx = ServerContext::new();
+    let ctx = crate::fw_warzone_insurgency::fw_fast_mem_ctx();
     crate::common::pin_clock(&ctx);
     let (enemy_sys, front_sys, _cmd_sys, _rear_sys) = setup_warzone_chain(&ctx);
 
@@ -2957,7 +3036,7 @@ async fn test_highsec_stage5_safety_levels_and_faction_police_suppression() {
     };
     use eve_server::services::combat_crimewatch::SafetyLevel;
 
-    let ctx = ServerContext::new();
+    let ctx = crate::fw_warzone_insurgency::fw_fast_mem_ctx();
     crate::common::pin_clock(&ctx);
     let (_enemy_sys, front_sys, _cmd_sys, _rear_sys) = setup_warzone_chain(&ctx);
     let hs_sys = 30_045_324u32; // Onnamon (0.5555 Highsec)
@@ -3081,7 +3160,7 @@ async fn lock_ball(ctx: &ServerContext, sys_id: u32, ship_id: i64, target_id: i6
 
 #[tokio::test]
 async fn test_highsec_stage5_vorton_weapons_yellow_safety_and_arc_capsule_concord() {
-    let ctx = ServerContext::new();
+    let ctx = crate::fw_warzone_insurgency::fw_fast_mem_ctx();
     crate::common::pin_clock(&ctx);
     let (_enemy_sys, front_sys, _cmd_sys, _rear_sys) = setup_warzone_chain(&ctx);
     let hs_sys = 30_045_324u32; // Onnamon (0.5555 Highsec)
@@ -3224,7 +3303,7 @@ async fn test_highsec_stage5_vorton_weapons_yellow_safety_and_arc_capsule_concor
         let mut bp = hs_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
         bp.set_ball_position(pod_ball, DVec3::new(3_500.0, 0.0, 0.0));
     }
-    ctx.advance_secs(10);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 10);
     ctx.db.with_mut_snapshot(|s| {
         s.module_active_states.remove(&vorton_id);
     });
@@ -3236,7 +3315,7 @@ async fn test_highsec_stage5_vorton_weapons_yellow_safety_and_arc_capsule_concor
     with_mut_combat_runtime(&ctx, |rt| {
         rt.safety_levels.insert(atk_cid, SafetyLevel::Red);
     });
-    ctx.advance_secs(10);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 10);
     ctx.db.with_mut_snapshot(|s| {
         s.module_active_states.remove(&vorton_id);
     });
@@ -3255,7 +3334,7 @@ async fn test_highsec_stage5_vorton_weapons_yellow_safety_and_arc_capsule_concor
         (true, true),
         "Vorton secondary arc hitting Capsule (670) in Highsec Stage 5 must escalate to Criminal + CONCORD"
     );
-    ctx.advance_secs(25);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 25);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let balls_after = hs_h.list_balls().await.unwrap();
     assert!(
@@ -3287,7 +3366,7 @@ async fn test_highsec_stage5_smartbomb_capsule_concord_and_corruption_reload_per
         repo.with_mut_snapshot(|snap| *snap = seed_snap);
         let clock = Arc::new(VirtualServerClock::with_fixed_base(t0));
         repo.set_clock(clock.clone());
-        let ctx1 = ServerContext::with_repository(repo);
+        let ctx1 = crate::fw_warzone_insurgency::fw_fast_ctx_from_repo(repo);
         ctx1.set_clock(clock);
 
         let (_enemy_sys, front_sys, _cmd_sys, _rear_sys) = setup_warzone_chain(&ctx1);
@@ -3373,7 +3452,7 @@ async fn test_highsec_stage5_smartbomb_capsule_concord_and_corruption_reload_per
         let repo2 = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open_sqlite 2"));
         let clock2 = Arc::new(VirtualServerClock::with_fixed_base(t0 + 30));
         repo2.set_clock(clock2.clone());
-        let ctx2 = ServerContext::with_repository(repo2);
+        let ctx2 = crate::fw_warzone_insurgency::fw_fast_ctx_from_repo(repo2);
         ctx2.set_clock(clock2);
 
         assert_eq!(
@@ -3440,7 +3519,7 @@ async fn test_highsec_stage5_smartbomb_capsule_concord_and_corruption_reload_per
             (true, true),
             "Smartbomb hitting Capsule (670) in Highsec Stage 5 must escalate to Criminal + CONCORD"
         );
-        ctx2.advance_secs(25);
+        crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx2, 25);
         eve_server::sp6_lifecycle::tick_background_cluster(&ctx2).await;
         let balls_after = hs_h2.list_balls().await.unwrap();
         assert!(
@@ -3454,7 +3533,7 @@ async fn test_highsec_stage5_smartbomb_capsule_concord_and_corruption_reload_per
 
 #[tokio::test]
 async fn test_ci_sentry_grid_targeting_destruction_and_lowsec_sentry_separation() {
-    let ctx = ServerContext::new();
+    let ctx = crate::fw_warzone_insurgency::fw_fast_mem_ctx();
     crate::common::pin_clock(&ctx);
     let (enemy_sys, front_sys, _cmd_sys, _rear_sys) = setup_warzone_chain(&ctx);
 
@@ -3579,7 +3658,7 @@ async fn test_ci_sentry_grid_targeting_destruction_and_lowsec_sentry_separation(
 
 #[tokio::test]
 async fn test_unscoped_corruption5_rejected_lowsec_sec_loss_and_vorton_arc_notifications() {
-    let ctx = ServerContext::new();
+    let ctx = crate::fw_warzone_insurgency::fw_fast_mem_ctx();
     crate::common::pin_clock(&ctx);
     let (_enemy_sys, front_sys, _cmd_sys, _rear_sys) = setup_warzone_chain(&ctx);
     let stale_ls_sys = 30_002_538u32; // Lowsec system NOT in any insurgency campaign
@@ -3695,8 +3774,8 @@ pub(crate) mod warzone_and_sovereignty_suite {
 
 use crate::quasar_sov_equinox_hub::{field, id_req, idm, rpc, varint};
 use crate::sovereignty_equinox_gameplay::{
-    fit_siege_artillery, fit_subcap_blasters, lock_target_via_rpc, open_sqlite_ctx,
-    place_ship_ball, register_online_pilot, rpc_call, set_pilot_location, step_weapon_ticks,
+    fit_siege_artillery, fit_subcap_blasters,
+    place_ship_ball, register_online_pilot, rpc_call, set_pilot_location,
     temp_sqlite_path, ALLIANCE, CORP, PILOT, PILOT_SHIP,
 };
 use eve_db::{corp_roles, InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
@@ -3815,7 +3894,7 @@ async fn anchor_and_online_hub(
     .await
     .expect("anchor Sov Hub");
     let hub_id = rep.dict_get("structureID").and_then(|v| v.as_i64()).unwrap();
-    ctx.advance_secs(905);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 905);
     eve_server::services::station_structure::structure_lifecycle::sync_all_structures(ctx);
     tick_background_cluster(ctx).await;
     let _ = ctx.systems.get_or_spawn(sys_id).get_ball_snapshot(hub_id).await;
@@ -3826,7 +3905,7 @@ async fn anchor_and_online_hub(
 #[tokio::test]
 async fn test_e2e_sov_entosis_counter_regen_and_command_nodes() {
     let db_path = temp_sqlite_path("e2e_sov_entosis_nodes");
-    let ctx = open_sqlite_ctx(&db_path, true);
+    let ctx = crate::fw_warzone_insurgency::fw_fast_sqlite_ctx(&db_path, true);
     let (null_sys, _) = find_claimable_nullsec_and_lava(&ctx);
     let hub_pos = DVec3::new(150_000.0, 0.0, 0.0);
 
@@ -3848,19 +3927,19 @@ async fn test_e2e_sov_entosis_counter_regen_and_command_nodes() {
     seed_entosis_ship(&ctx, PILOT, PILOT_SHIP, 981_010);
 
     // 1. Attacker links & accrues partial progress (300s warmup + 180s capture).
-    lock_target_via_rpc(&ctx, &mut s_att, null_sys, att_ship, hub_id).await;
+    crate::fw_warzone_insurgency::fw_fast_lock_target(&ctx, &mut s_att, null_sys, att_ship, hub_id).await;
     rpc_call(&ctx, &mut s_att, "dogmaIM", "Activate", &[PyRep::Integer(981_000), PyRep::String("default".into()), PyRep::Integer(hub_id)])
         .await.expect("attacker activate entosis");
-    ctx.advance_secs(480);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 480);
     tick_background_cluster(&ctx).await;
     let prog_after_180 = ctx.db.with_snapshot(|s| s.sov_runtime.entosis_capture_progress[&hub_id].3);
     assert!((prog_after_180 - 180.0).abs() < 1e-3);
 
     // 2. Defender counter-entosis pauses attacker progress while both link.
-    lock_target_via_rpc(&ctx, &mut s_def, null_sys, PILOT_SHIP, hub_id).await;
+    crate::fw_warzone_insurgency::fw_fast_lock_target(&ctx, &mut s_def, null_sys, PILOT_SHIP, hub_id).await;
     rpc_call(&ctx, &mut s_def, "dogmaIM", "Activate", &[PyRep::Integer(981_010), PyRep::String("default".into()), PyRep::Integer(hub_id)])
         .await.expect("defender counter-entosis");
-    ctx.advance_secs(360);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 360);
     tick_background_cluster(&ctx).await;
     let prog_paused = ctx.db.with_snapshot(|s| s.sov_runtime.entosis_capture_progress[&hub_id].3);
     assert!((prog_paused - 180.0).abs() < 1e-3, "defender link must pause attacker progress");
@@ -3868,14 +3947,14 @@ async fn test_e2e_sov_entosis_counter_regen_and_command_nodes() {
     // 3. Attacker deactivates -> defender link counts progress back down.
     rpc_call(&ctx, &mut s_att, "dogmaIM", "Deactivate", &[PyRep::Integer(981_000), PyRep::String("default".into())])
         .await.expect("attacker deactivate");
-    ctx.advance_secs(100);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 100);
     tick_background_cluster(&ctx).await;
     let prog_counted_down = ctx.db.with_snapshot(|s| s.sov_runtime.entosis_capture_progress[&hub_id].3);
     assert!((prog_counted_down - 80.0).abs() < 1e-3, "defender link must count progress back down");
     let _ = rpc_call(&ctx, &mut s_def, "dogmaIM", "Deactivate", &[PyRep::Integer(981_010), PyRep::String("default".into())]).await;
 
     // 4. Unattended partial capture regenerates toward 0 (50-min max).
-    ctx.advance_secs(1_500);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 1_500);
     tick_background_cluster(&ctx).await;
     let prog_regen = ctx.db.with_snapshot(|s| s.sov_runtime.entosis_capture_progress.get(&hub_id).map(|e| e.3).unwrap_or(0.0));
     assert!(prog_regen < prog_counted_down, "unattended capture progress must regenerate");
@@ -3883,12 +3962,12 @@ async fn test_e2e_sov_entosis_counter_regen_and_command_nodes() {
     // 5. Full hub entosis -> HullReinforced, 0 command nodes before 48h, spawns after 48h!
     rpc_call(&ctx, &mut s_att, "dogmaIM", "Activate", &[PyRep::Integer(981_000), PyRep::String("default".into()), PyRep::Integer(hub_id)])
         .await.expect("attacker re-activate");
-    ctx.advance_secs(300 + ENTOSIS_HUB_BASE_CAPTURE_SECS as u64 + 20);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 300 + ENTOSIS_HUB_BASE_CAPTURE_SECS as u64 + 20);
     tick_background_cluster(&ctx).await;
     assert_eq!(ctx.db.with_snapshot(|s| s.structures[&hub_id].state.clone()), "HullReinforced");
     assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.command_nodes.len()), 0, "no nodes before 48h");
 
-    ctx.advance_secs(48 * 3_600 + 1);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 48 * 3_600 + 1);
     tick_background_cluster(&ctx).await;
     assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.command_nodes.len()), 4, "nodes spawn after 48h");
 
@@ -3900,14 +3979,14 @@ async fn test_e2e_sov_entosis_counter_regen_and_command_nodes() {
     let _ = ctx.systems.get_or_spawn(null_sys).remove_ball(att_ship).await;
     set_pilot_location(&ctx, &mut s_att, nsys0, None);
     place_ship_ball(&ctx, nsys0, att_cid, att_ship, 621, DVec3::from_array(npos0) + DVec3::new(2_000.0, 0.0, 0.0)).await;
-    lock_target_via_rpc(&ctx, &mut s_att, nsys0, att_ship, nid0).await;
+    crate::fw_warzone_insurgency::fw_fast_lock_target(&ctx, &mut s_att, nsys0, att_ship, nid0).await;
     rpc_call(&ctx, &mut s_att, "dogmaIM", "Activate", &[PyRep::Integer(981_000), PyRep::String("default".into()), PyRep::Integer(nid0)]).await.unwrap();
-    ctx.advance_secs(300 + ENTOSIS_NODE_BASE_CAPTURE_SECS as u64 + 10);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 300 + ENTOSIS_NODE_BASE_CAPTURE_SECS as u64 + 10);
     tick_background_cluster(&ctx).await;
     let score_after_1 = ctx.db.with_snapshot(|s| s.sov_runtime.command_node_scores[&hub_id][0].1);
     assert!(score_after_1 < 0.60, "capturing 1 node must reduce defender score: {score_after_1}");
 
-    ctx.advance_secs(1_470);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 1_470);
     tick_background_cluster(&ctx).await;
     let score_regen = ctx.db.with_snapshot(|s| s.sov_runtime.command_node_scores[&hub_id][0].1);
     assert!(score_regen > score_after_1, "unattended nodes must regenerate in defender's favour: {score_regen}");
@@ -3920,7 +3999,7 @@ async fn test_e2e_sov_entosis_counter_regen_and_command_nodes() {
         }
         if ctx.db.get_online_session(3).is_none() {
             if ctx.cluster_state.read().is_ok_and(|c| c.shutdown_in_progress) {
-                ctx.advance_secs(15 * 60 + 1);
+                crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 15 * 60 + 1);
                 tick_background_cluster(&ctx).await;
             }
             crate::common::login_pilot(&ctx, &mut s_def, "def", "sec").await;
@@ -3936,9 +4015,9 @@ async fn test_e2e_sov_entosis_counter_regen_and_command_nodes() {
         }
         set_pilot_location(&ctx, &mut s_att, nsys, None);
         place_ship_ball(&ctx, nsys, att_cid, att_ship, 621, DVec3::from_array(npos) + DVec3::new(2_000.0, 0.0, 0.0)).await;
-        lock_target_via_rpc(&ctx, &mut s_att, nsys, att_ship, nid).await;
+        crate::fw_warzone_insurgency::fw_fast_lock_target(&ctx, &mut s_att, nsys, att_ship, nid).await;
         rpc_call(&ctx, &mut s_att, "dogmaIM", "Activate", &[PyRep::Integer(981_000), PyRep::String("default".into()), PyRep::Integer(nid)]).await.unwrap();
-        ctx.advance_secs(300 + ENTOSIS_NODE_BASE_CAPTURE_SECS as u64 + 10);
+        crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 300 + ENTOSIS_NODE_BASE_CAPTURE_SECS as u64 + 10);
         tick_background_cluster(&ctx).await;
     }
     assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&null_sys].sov_alliance_id), None);
@@ -3953,7 +4032,7 @@ async fn test_e2e_sov_entosis_counter_regen_and_command_nodes() {
 #[tokio::test]
 async fn test_e2e_sov_dev_indices_decay_adm_and_upgrade_sites() {
     let db_path = temp_sqlite_path("e2e_sov_indices_sites");
-    let ctx = open_sqlite_ctx(&db_path, true);
+    let ctx = crate::fw_warzone_insurgency::fw_fast_sqlite_ctx(&db_path, true);
     let (null_sys, _) = find_claimable_nullsec_and_lava(&ctx);
     let hub_pos = DVec3::new(150_000.0, 0.0, 0.0);
 
@@ -3970,7 +4049,7 @@ async fn test_e2e_sov_dev_indices_decay_adm_and_upgrade_sites() {
         });
         rpc_call(&ctx, &mut s_dir, "structureDeployment", "Anchor", &[PyRep::Integer(TYPE_ORBITAL_SKYHOOK as i64), PyRep::Integer(wp.celestial_id)]).await.unwrap();
     }
-    ctx.advance_secs(905);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 905);
     eve_server::services::station_structure::structure_lifecycle::sync_all_structures(&ctx);
     ctx.db.with_mut_snapshot(|s| {
         let ids: Vec<i64> = s.sov_runtime.skyhook_planets.keys().copied().collect();
@@ -4024,10 +4103,10 @@ async fn test_e2e_sov_dev_indices_decay_adm_and_upgrade_sites() {
     place_ship_ball(&ctx, null_sys, PILOT, PILOT_SHIP, 16_229, npc_pos + DVec3::new(2_500.0, 0.0, 0.0)).await;
     for _ in 0..5 {
         let nid = ctx.db.with_snapshot(|s| *s.sov_runtime.sov_upgrade_combat_npcs.iter().next().unwrap());
-        lock_target_via_rpc(&ctx, &mut s_dir, null_sys, PILOT_SHIP, nid).await;
+        crate::fw_warzone_insurgency::fw_fast_lock_target(&ctx, &mut s_dir, null_sys, PILOT_SHIP, nid).await;
         for _ in 0..6 {
             let _ = rpc_call(&ctx, &mut s_dir, "dogmaIM", "Activate", &[PyRep::Integer(987_000), PyRep::String("targetAttack".into()), PyRep::Integer(nid)]).await;
-            step_weapon_ticks(&ctx, null_sys).await;
+            crate::fw_warzone_insurgency::fw_fast_step_weapon_ticks(&ctx, null_sys).await;
             if !ctx.db.with_snapshot(|s| s.sov_runtime.sov_upgrade_combat_npcs.contains(&nid)) {
                 break;
             }
@@ -4076,14 +4155,14 @@ async fn test_e2e_sov_dev_indices_decay_adm_and_upgrade_sites() {
         null_sys, att_ship, 621, hub_pos + DVec3::new(3_000.0, 0.0, 0.0), 0,
     ).await;
     seed_entosis_ship(&ctx, att_cid, att_ship, 987_500);
-    lock_target_via_rpc(&ctx, &mut s_att, null_sys, att_ship, hub_id).await;
+    crate::fw_warzone_insurgency::fw_fast_lock_target(&ctx, &mut s_att, null_sys, att_ship, hub_id).await;
     rpc_call(&ctx, &mut s_att, "dogmaIM", "Activate", &[PyRep::Integer(987_500), PyRep::String("default".into()), PyRep::Integer(hub_id)]).await.unwrap();
-    ctx.advance_secs(300 + ENTOSIS_HUB_BASE_CAPTURE_SECS as u64 + 10);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 300 + ENTOSIS_HUB_BASE_CAPTURE_SECS as u64 + 10);
     tick_background_cluster(&ctx).await;
     assert_eq!(ctx.db.with_snapshot(|s| s.structures[&hub_id].state.clone()), "ShieldVulnerable", "ADM > 1.0 scales entosis capture time beyond base");
 
     // Advance 5 days with no activity -> Military Index decays!
-    ctx.advance_secs(5 * 86_400);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 5 * 86_400);
     tick_background_cluster(&ctx).await;
     let mil_decayed = ctx.db.with_snapshot(|s| s.system_states[&null_sys].military_index);
     assert!(mil_decayed < mil1, "Military Index must decay after 5 days of inactivity");
@@ -4092,7 +4171,7 @@ async fn test_e2e_sov_dev_indices_decay_adm_and_upgrade_sites() {
 #[tokio::test]
 async fn test_e2e_skyhook_reagent_maturity_and_theft() {
     let db_path = temp_sqlite_path("e2e_skyhook_maturity");
-    let ctx = open_sqlite_ctx(&db_path, true);
+    let ctx = crate::fw_warzone_insurgency::fw_fast_sqlite_ctx(&db_path, true);
     let (null_sys, lava_planet) = find_claimable_nullsec_and_lava(&ctx);
     let lava_pos = ctx.sde.celestials_in_system(null_sys).into_iter().find(|c| c.celestial_id == lava_planet).unwrap().position;
 
@@ -4121,7 +4200,7 @@ async fn test_e2e_skyhook_reagent_maturity_and_theft() {
     let skyhook_id = rep.dict_get("structureID").and_then(|v| v.as_i64()).unwrap();
 
     // Advance 1h (inside 2h theft window) + tick -> V24 planet-scaled Magmatic Gas harvested, split 50/50 between Secure and Surplus.
-    ctx.advance_secs(3_600);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 3_600);
     tick_background_cluster(&ctx).await;
     let expected_hourly = eve_server::services::quasar_sov_skyhook::planet_hourly_reagent_yield(
         &ctx.sde,
@@ -4143,12 +4222,12 @@ async fn test_e2e_skyhook_reagent_maturity_and_theft() {
         null_sys, thief_ship, 621, sky_pos + DVec3::new(4_000.0, 0.0, 0.0), 0,
     ).await;
     fit_siege_artillery(&ctx, thief_cid, thief_ship, 988_100);
-    lock_target_via_rpc(&ctx, &mut s_thief, null_sys, thief_ship, skyhook_id).await;
+    crate::fw_warzone_insurgency::fw_fast_lock_target(&ctx, &mut s_thief, null_sys, thief_ship, skyhook_id).await;
     for _ in 0..8 {
         for gid in [988_100, 988_102, 988_104] {
             let _ = rpc_call(&ctx, &mut s_thief, "dogmaIM", "Activate", &[PyRep::Integer(gid), PyRep::String("targetAttack".into()), PyRep::Integer(skyhook_id)]).await;
         }
-        step_weapon_ticks(&ctx, null_sys).await;
+        crate::fw_warzone_insurgency::fw_fast_step_weapon_ticks(&ctx, null_sys).await;
         if ctx.db.with_snapshot(|s| s.structures[&skyhook_id].shield_hp) <= 1_000.0 {
             break;
         }
@@ -4156,13 +4235,13 @@ async fn test_e2e_skyhook_reagent_maturity_and_theft() {
     let (tw_start, _) = ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_theft_windows[&skyhook_id]);
     let now_u = ctx.now_unix();
     if now_u < tw_start {
-        ctx.advance_secs(tw_start - now_u + 1);
+        crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, tw_start - now_u + 1);
         tick_background_cluster(&ctx).await;
     }
     let insec_before_theft = ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_reagent_bays[&skyhook_id].2);
     rpc_call(&ctx, &mut s_thief, "beyonce", "CallComponentFromClient", &[PyRep::Integer(skyhook_id), PyRep::String("linkWithShip".into()), PyRep::String("InitiateLink".into())])
         .await.expect("InitiateLink");
-    ctx.advance_secs(600);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 600);
     tick_background_cluster(&ctx).await;
 
     let (_, sec_after_theft, insec_after_theft, _) = ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_reagent_bays[&skyhook_id]);
@@ -4170,7 +4249,7 @@ async fn test_e2e_skyhook_reagent_maturity_and_theft() {
     assert!(insec_after_theft < insec_before_theft, "Surplus bay must be stolen");
 
     // Advance full maturity cycle -> Surplus reagents mature into Secure bay!
-    ctx.advance_secs(SKYHOOK_MATURITY_CYCLE_SECS);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, SKYHOOK_MATURITY_CYCLE_SECS);
     tick_background_cluster(&ctx).await;
     let sk_proto = rpc(&ctx, &mut s_dir, "eve_public.sovereignty.skyhook.api.GetRequest", id_req(1, skyhook_id as u64))
         .await.payload.unwrap().value;
@@ -4181,7 +4260,7 @@ async fn test_e2e_skyhook_reagent_maturity_and_theft() {
 #[tokio::test]
 async fn test_e2e_fw_system_capture_downtime_and_insurgency_fob_lifecycle() {
     let db_path = temp_sqlite_path("e2e_fw_insurgency");
-    let ctx = open_sqlite_ctx(&db_path, true);
+    let ctx = crate::fw_warzone_insurgency::fw_fast_sqlite_ctx(&db_path, true);
     let fw_sys = 30_002_537u32; // Huola (Amarr/Minmatar warzone)
 
     let mut s_min = register_online_pilot(
@@ -4199,7 +4278,7 @@ async fn test_e2e_fw_system_capture_downtime_and_insurgency_fob_lifecycle() {
     let _ = ctx.systems.get_or_spawn(fw_sys).remove_ball(PILOT_SHIP).await;
     place_ship_ball(&ctx, fw_sys, PILOT, PILOT_SHIP, 587, gate_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
     rpc_call(&ctx, &mut s_min, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(gate_id)]).await.unwrap();
-    ctx.advance_secs(600);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 600);
     eve_server::services::fw_gameplay::tick_fw_gameplay(&ctx, ctx.now_unix()).await;
     ctx.db.with_mut_snapshot(|s| {
         if let Some(ss) = s.system_states.get_mut(&fw_sys) {
@@ -4215,10 +4294,10 @@ async fn test_e2e_fw_system_capture_downtime_and_insurgency_fob_lifecycle() {
     let _ = ctx.systems.get_or_spawn(fw_sys).remove_ball(PILOT_SHIP).await;
     fit_siege_artillery(&ctx, PILOT, PILOT_SHIP, 989_000);
     place_ship_ball(&ctx, fw_sys, PILOT, PILOT_SHIP, 19_722, ihub_pos + DVec3::new(3_000.0, 0.0, 0.0)).await;
-    lock_target_via_rpc(&ctx, &mut s_min, fw_sys, PILOT_SHIP, ihub_id).await;
+    crate::fw_warzone_insurgency::fw_fast_lock_target(&ctx, &mut s_min, fw_sys, PILOT_SHIP, ihub_id).await;
     for i in 0..25 {
         if i > 0 {
-            ctx.advance_secs(30);
+            crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 30);
         }
         for gid in [989_000, 989_002, 989_004] {
             let r = rpc_call(&ctx, &mut s_min, "dogmaIM", "Activate", &[PyRep::Integer(gid), PyRep::String("targetAttack".into()), PyRep::Integer(ihub_id)]).await;
@@ -4226,7 +4305,7 @@ async fn test_e2e_fw_system_capture_downtime_and_insurgency_fob_lifecycle() {
                 r.expect("dogmaIM.Activate on FW I-Hub");
             }
         }
-        step_weapon_ticks(&ctx, fw_sys).await;
+        crate::fw_warzone_insurgency::fw_fast_step_weapon_ticks(&ctx, fw_sys).await;
         if ctx.db.with_snapshot(|s| s.structures[&ihub_id].state == "Destroyed") {
             break;
         }
@@ -4250,7 +4329,7 @@ async fn test_e2e_fw_system_capture_downtime_and_insurgency_fob_lifecycle() {
     );
 
     // Forecasting (48h) -> Active; 0 suppressed systems -> isFobVulnerable == false!
-    ctx.advance_secs(48 * 3_600 + 1);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 48 * 3_600 + 1);
     eve_server::services::fw_gameplay::tick_fw_gameplay(&ctx, ctx.now_unix()).await;
     let vis0 = rpc_call(&ctx, &mut s_min, "insurgencySolarsystem", "GetAllVisibleCampaigns", &[]).await.unwrap();
     assert!(!format!("{vis0:?}").contains("isFobVulnerable: Bool(true)"), "FOB must NOT be vulnerable with 0 suppressed systems");
@@ -4264,8 +4343,17 @@ async fn test_e2e_fw_system_capture_downtime_and_insurgency_fob_lifecycle() {
         let cur: Vec<u32> = eve_server::services::insurgency_services::read_insurgency_runtime(&ctx, |rt| {
             rt.campaigns[&camp_id].systems.clone()
         });
+        if cur.len() >= 5 {
+            break;
+        }
         for s in cur {
             let _ = eve_server::services::fw_gameplay::try_spread_insurgency_from_system(&ctx, camp_id, s);
+            let len = eve_server::services::insurgency_services::read_insurgency_runtime(&ctx, |rt| {
+                rt.campaigns[&camp_id].systems.len()
+            });
+            if len >= 5 {
+                break;
+            }
         }
     }
     let camp_systems: Vec<u32> = eve_server::services::insurgency_services::read_insurgency_runtime(&ctx, |rt| {
@@ -4285,7 +4373,7 @@ async fn test_e2e_fw_system_capture_downtime_and_insurgency_fob_lifecycle() {
     });
     let r1 = eve_server::services::fw_gameplay::apply_fw_or_insurgency_structure_damage(&ctx, PILOT, fob_id, 5_000.0).await.unwrap();
     assert_eq!(r1.dict_get("state").and_then(|v| v.as_str()), Some("ArmorReinforced"));
-    ctx.advance_secs(4 * 3_600 + 5);
+    crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 4 * 3_600 + 5);
     let r2 = eve_server::services::fw_gameplay::apply_fw_or_insurgency_structure_damage(&ctx, PILOT, fob_id, 10_000.0).await.unwrap();
     assert_eq!(r2.dict_get("state").and_then(|v| v.as_str()), Some("Destroyed"));
 }

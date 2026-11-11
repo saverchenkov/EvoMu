@@ -3325,7 +3325,15 @@ async fn test_batch_o_multi_merge_stack_all_auto_fit_and_bound_ship_add() {
     });
     let af_notifs = ctx.drain_notifications_for_char(char_id);
     assert_eq!(af_notifs.iter().filter(|n| n.event == "OnItemChange").count(), 2);
-    assert!(af_notifs.iter().any(|n| n.event == "OnModuleFitted"));
+    let fit_notif = af_notifs
+        .iter()
+        .find(|n| n.event == "OnModuleFitted")
+        .expect("OnModuleFitted notification");
+    assert_eq!(fit_notif.args.len(), 4);
+    assert_eq!(fit_notif.args[0], PyRep::Integer(char_id));
+    assert_eq!(fit_notif.args[1], PyRep::Integer(InventoryFlag::HiSlot0 as i64));
+    assert_eq!(fit_notif.args[2], PyRep::Integer(482));
+    assert_eq!(fit_notif.args[3], PyRep::Integer(54));
 
     // #691: Drag 2nd Miner I from remaining 4x stack via ship_inv.Add(miner_stack_id, station_id, qty=1, flag=28)
     let drag_fit = ctx

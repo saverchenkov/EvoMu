@@ -223,7 +223,6 @@ async fn test_journey_station_ui() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
-    crate::common::seed_test_nes_store_catalog(&ctx);
 
     let mut sess = SessionState::new(11);
     crate::common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;

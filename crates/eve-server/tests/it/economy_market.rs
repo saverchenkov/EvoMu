@@ -1484,7 +1484,6 @@ pub(crate) mod market_modify_relist_tick_size {
         // parity: feat:lp.lp-balance
         eve_testkit::attest(&["feat:lp.lp-balance"]);
         let ctx = ServerContext::new();
-        crate::common::seed_test_lp_store_offers(&ctx);
         let mut s1 = setup_pilot(&ctx, 601, "demo", "demo-secret", 90_000_001).await;
         let caldari_navy_corp_id = 1_000_035;
 
@@ -1492,12 +1491,15 @@ pub(crate) mod market_modify_relist_tick_size {
             .await.expect("GetAvailableOffersFromCorp");
         let PyRep::List(offers_list) = offers_rep else { panic!("Expected List"); };
         assert!(!offers_list.is_empty());
-        assert!(offers_list.iter().any(|o| matches!(o, PyRep::KeyVal(kv) if kv.get("offerID").and_then(|v| v.as_i64()) == Some(1002))));
+        assert!(offers_list.iter().any(|o| matches!(o, PyRep::KeyVal(kv) if kv.get("offerID").and_then(|v| v.as_i64()) == Some(3417))));
 
         let lps_rep = rpc(&ctx, &mut s1, "LPSvc", "GetAllMyCharacterWalletLPBalances", &[])
             .await.expect("GetAllMyCharacterWalletLPBalances");
         let PyRep::List(lps_list) = lps_rep else { panic!("Expected List"); };
         let cn_lp = lps_list.iter().find_map(|row| match row {
+            PyRep::Tuple(t) if t.first().and_then(|v| v.as_i64()) == Some(caldari_navy_corp_id) => {
+                t.get(1).and_then(|v| v.as_i64())
+            }
             PyRep::KeyVal(kv) if kv.get("corpID").and_then(|v| v.as_i64()) == Some(caldari_navy_corp_id) => {
                 kv.get("loyaltyPoints").and_then(|v| v.as_i64())
             }
@@ -1507,19 +1509,19 @@ pub(crate) mod market_modify_relist_tick_size {
 
         let s1_bal_before = ctx.db.get_character(90_000_001).unwrap().balance;
         let take_res = rpc(&ctx, &mut s1, "LPStoreMgr", "TakeOfferForCharacter", &[
-            PyRep::Integer(caldari_navy_corp_id), PyRep::Integer(1002), PyRep::Integer(1),
+            PyRep::Integer(caldari_navy_corp_id), PyRep::Integer(3417), PyRep::Integer(1),
         ]).await.expect("TakeOfferForCharacter");
 
         let PyRep::KeyVal(take_kv) = take_res else { panic!("Expected KeyVal"); };
-        assert_eq!(take_kv.get("remainingLP"), Some(&PyRep::Integer(4_500)));
+        assert_eq!(take_kv.get("remainingLP"), Some(&PyRep::Integer(4_250)));
         let delivered_missiles_id = take_kv.get("deliveredItemID").and_then(|v| v.as_i64()).unwrap();
 
         let s1_bal_after = ctx.db.get_character(90_000_001).unwrap().balance;
-        assert_eq!(s1_bal_before.0 - s1_bal_after.0, 50_000_000);
+        assert_eq!(s1_bal_before.0 - s1_bal_after.0, 75_000_000);
 
         let missile_item = ctx.db.with_snapshot(|snap| snap.items.get(&delivered_missiles_id).cloned()).unwrap();
-        assert_eq!(missile_item.type_id, 27361);
-        assert_eq!(missile_item.quantity, 1_000);
+        assert_eq!(missile_item.type_id, 13_287);
+        assert_eq!(missile_item.quantity, 1);
         assert_eq!(missile_item.location_id, JITA_STATION_ID);
         assert_eq!(missile_item.flag, InventoryFlag::Hangar);
 
@@ -1529,7 +1531,7 @@ pub(crate) mod market_modify_relist_tick_size {
         assert!(has_lp_journal);
 
         let insufficient_lp_err = rpc(&ctx, &mut s1, "LPStoreMgr", "TakeOfferForCharacter", &[
-            PyRep::Integer(caldari_navy_corp_id), PyRep::Integer(1003), PyRep::Integer(1),
+            PyRep::Integer(caldari_navy_corp_id), PyRep::Integer(3414), PyRep::Integer(1),
         ]).await.unwrap_err();
         assert_eq!(insufficient_lp_err.code, "InsufficientLoyaltyPoints");
     }

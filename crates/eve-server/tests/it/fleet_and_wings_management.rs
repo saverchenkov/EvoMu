@@ -158,6 +158,33 @@ async fn test_fleet_movement_optins_formations_and_setups() {
         assert!(!m2.accepts_conduit_jumps, "Member accepts_conduit_jumps must be false");
     });
 
+    // Verify GetInitState exposes V24 `acceptsFleetRegroups` (never legacy `acceptsRegroup`)
+    let init_state = rpc(&ctx, &mut sess2, "fleetObjectHandler", "GetInitState", &[])
+        .await
+        .expect("GetInitState");
+    let PyRep::Dict(member_entries) = field(&init_state, "members") else {
+        panic!("expected GetInitState.members Dict");
+    };
+    let member_opt_outs = |char_id: i64| -> PyRep {
+        let rec = member_entries
+            .iter()
+            .find(|(k, _)| k.as_i64() == Some(char_id))
+            .map(|(_, v)| v)
+            .expect("member entry in GetInitState");
+        field(rec, "memberOptOuts")
+    };
+    let boss_opt = member_opt_outs(PILOT_1);
+    assert_eq!(field(&boss_opt, "acceptsFleetWarp"), PyRep::Bool(true));
+    assert_eq!(field(&boss_opt, "acceptsConduitJumps"), PyRep::Bool(true));
+    assert_eq!(field(&boss_opt, "acceptsFleetRegroups"), PyRep::Bool(true));
+    assert_eq!(field(&boss_opt, "acceptsRegroup"), PyRep::Bool(true));
+
+    let p2_opt = member_opt_outs(PILOT_2);
+    assert_eq!(field(&p2_opt, "acceptsFleetWarp"), PyRep::Bool(false));
+    assert_eq!(field(&p2_opt, "acceptsConduitJumps"), PyRep::Bool(false));
+    assert_eq!(field(&p2_opt, "acceptsFleetRegroups"), PyRep::Bool(false));
+    assert_eq!(field(&p2_opt, "acceptsRegroup"), PyRep::Bool(false));
+
     // Set Arrow formation (id 3, spacing 5000m, size 10000m)
     let form_rep = rpc(
         &ctx,

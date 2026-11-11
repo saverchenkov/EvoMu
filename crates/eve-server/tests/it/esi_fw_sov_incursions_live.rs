@@ -169,22 +169,25 @@ pub(crate) async fn lock_and_destroy_target(
 ) {
     let sys = ctx.systems.get_or_spawn(sys_id);
     lock_target(ctx, sess, sys_id, ship_id, target_id, 1_000.0).await;
-    for _ in 0..40 {
+    for round in 0..40 {
         if sys.get_ball_snapshot(target_id).await.unwrap().is_none() {
+            if round > 0 {
+                ctx.advance_secs(5);
+            }
             return;
         }
         for &gid in guns {
             if sys.get_ball_snapshot(target_id).await.unwrap().is_none() {
+                if round > 0 {
+                    ctx.advance_secs(5);
+                }
                 return;
             }
             if let Err(e) = rpc(ctx, sess, "dogmaIM", "Activate", &[PyRep::Integer(gid), PyRep::String("targetAttack".into()), PyRep::Integer(target_id)]).await {
                 assert!(matches!(e.code.as_str(), "ModuleAlreadyActive" | "TargetNotFound" | "TargetNotLocked" | "TargetNotInSpace"), "Activate weapon {gid} failed: {} ({})", e.code, e.message);
             }
         }
-        for _ in 0..5 {
-            sys.step_manual(1.0).await.unwrap();
-        }
-        ctx.advance_secs(5);
+        sys.step_manual(5.0).await.unwrap();
     }
     panic!("target {target_id} was not destroyed after 40 volleys");
 }
@@ -214,7 +217,7 @@ async fn test_esi_fw_live_enlistment_kills_and_complex_captures() {
         "feat:esi.faction-warfare.systems",
     ]);
 
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::sovereignty_equinox_gameplay::fast_demo_ctx());
     crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
 
@@ -370,7 +373,7 @@ async fn test_esi_sovereignty_live_hub_adm_and_entosis_campaign() {
         "feat:esi.sovereignty.structures",
     ]);
 
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::sovereignty_equinox_gameplay::fast_demo_ctx());
     crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
 
@@ -522,7 +525,7 @@ async fn test_esi_incursions_live_spawn_and_influence_decay() {
     // parity: feat:esi.incursions.list
     eve_testkit::attest(&["feat:esi.incursions.list"]);
 
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::sovereignty_equinox_gameplay::fast_demo_ctx());
     crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
 

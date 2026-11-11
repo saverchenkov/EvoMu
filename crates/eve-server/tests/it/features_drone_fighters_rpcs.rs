@@ -892,7 +892,6 @@ async fn test_b30_market_order_expiry_and_lp_durability() {
     drop(ctx);
 
     let ctx2 = open_ctx_at(&db_path, base_u + 100);
-    common::seed_test_lp_store_offers(&ctx2);
     let mut s1_re = login_select(&ctx2, 9402, "demo", "demo-secret", P1).await;
     let cn_station = ctx2
         .sde
@@ -916,8 +915,8 @@ async fn test_b30_market_order_expiry_and_lp_durability() {
     assert_eq!(rpc(&ctx2, &mut s1_re, "rewardMgr", "GetRewardLPLogs", &[]).await.unwrap(), logs_before);
 
     let snap_before = ctx2.db.with_snapshot(|s| (s.characters[&P1].loyalty_points.clone(), s.corp_lp_balances.clone(), s.characters[&P1].balance, s.items[&720_002].quantity));
-    assert_eq!(rpc(&ctx2, &mut s1_re, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(1_000_035), PyRep::Integer(1004), PyRep::Integer(1)]).await.unwrap_err().code, "MissingRequiredItems");
-    assert_eq!(rpc(&ctx2, &mut s1_re, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(1_000_035), PyRep::Integer(1003), PyRep::Integer(1)]).await.unwrap_err().code, "InsufficientLoyaltyPoints");
+    assert_eq!(rpc(&ctx2, &mut s1_re, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(1_000_035), PyRep::Integer(3565), PyRep::Integer(1)]).await.unwrap_err().code, "MissingRequiredItems");
+    assert_eq!(rpc(&ctx2, &mut s1_re, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(1_000_035), PyRep::Integer(3415), PyRep::Integer(1)]).await.unwrap_err().code, "InsufficientLoyaltyPoints");
     let snap_after = ctx2.db.with_snapshot(|s| (s.characters[&P1].loyalty_points.clone(), s.corp_lp_balances.clone(), s.characters[&P1].balance, s.items[&720_002].quantity));
     assert_eq!(snap_after, snap_before);
     let _ = std::fs::remove_file(&db_path);

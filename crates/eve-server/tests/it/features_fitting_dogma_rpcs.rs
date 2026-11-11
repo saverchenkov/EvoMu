@@ -100,7 +100,6 @@ pub(crate) async fn setup_space_pilot(
     rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)])
         .await
         .expect("SelectCharacterID");
-    ctx.advance_secs(11);
 
     sess.solar_system_id = Some(sys_id);
     sess.ship_id = Some(ship_id);
@@ -167,7 +166,7 @@ pub(crate) async fn setup_space_pilot(
 #[tokio::test]
 async fn test_zarzakh_deathless_shipcaster_entry_beacons() {
     // parity: feat:navigation.deathless-shipcaster-zarzakh
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     let char_id = 90_000_001_i64;
     let ship_id = 100_000_001_i64;
     let beacon_pos = DVec3::new(250_000.0, 0.0, 0.0);
@@ -337,7 +336,7 @@ async fn test_zarzakh_deathless_shipcaster_entry_beacons() {
 #[tokio::test]
 async fn test_zarzakh_emanation_lock_lifecycle_and_exits() {
     // parity: feat:navigation.zarzakh-emanation-lock
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     let char_id = 90_000_001_i64;
     let ship_id = 100_000_001_i64;
 
@@ -509,7 +508,7 @@ async fn test_zarzakh_emanation_lock_lifecycle_and_exits() {
 #[tokio::test]
 async fn test_zarzakh_fulcrum_gates_dscan_size_bubbles_and_docking() {
     // parity: feat:navigation.zarzakh-fulcrum-gates
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     let char_id = 90_000_001_i64;
     let ship_id = 100_000_001_i64;
     let turnur_gate_pos = ctx.sde.jumps[&TURNUR_GATE_ID].position;
@@ -707,7 +706,7 @@ fn make_public_req(type_name: &str, value: Vec<u8>, now_unix: u64) -> EvePublicR
 #[tokio::test]
 async fn test_zarzakh_gate_toll_mass_scaling_decline_and_pirates() {
     // parity: feat:navigation.zarzakh-gate-toll
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     let char_id = 90_000_001_i64;
     let ship_id = 100_000_001_i64;
     let turnur_gate_pos = ctx.sde.jumps[&TURNUR_GATE_ID].position;
@@ -839,7 +838,7 @@ async fn test_zarzakh_gate_toll_mass_scaling_decline_and_pirates() {
 #[tokio::test]
 async fn test_zarzakh_local_horizon_siege_chat_anchoring_and_cyno() {
     // parity: feat:navigation.zarzakh-local-horizon-siege
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     let char_a = 90_000_001_i64;
     let char_b = 90_000_502_i64;
     let ship_a = 100_000_501_i64;

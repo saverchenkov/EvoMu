@@ -3,7 +3,10 @@
 #![allow(dead_code)]
 
 use crate::sov_and_insurgency_tail_helpers::*;
+use eve_db::WorldRepository;
+use eve_machonet::SessionState;
 use eve_proto::PyRep;
+use eve_server::router::ServerContext;
 use eve_server::services::fw_gameplay::{
     complex_base_capture_duration_seconds, complex_victory_points, pocket_pos_for_complex,
     TYPE_FW_IHUB,
@@ -13,13 +16,178 @@ use eve_server::services::fw_services::{
 };
 use eve_server::sp6_lifecycle::tick_background_cluster;
 use glam::DVec3;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
+
+fn cached_sde() -> Arc<eve_sde::SdeRegistry> {
+    static FAST_SDE: OnceLock<Arc<eve_sde::SdeRegistry>> = OnceLock::new();
+    Arc::clone(FAST_SDE.get_or_init(|| Arc::new(eve_sde::SdeRegistry::with_canonical_seed())))
+}
+
+fn fast_new_sqlite_ctx(label: &str) -> (PathBuf, Arc<ServerContext>) {
+    static TMPL_SQLITE: OnceLock<PathBuf> = OnceLock::new();
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let tmpl = TMPL_SQLITE.get_or_init(|| {
+        let p = std::env::temp_dir().join(format!("evomu_supply_tmpl_{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let repo = WorldRepository::open_sqlite(&p).expect("open sqlite template");
+        drop(repo);
+        p
+    });
+    let dir = std::env::temp_dir().join(format!(
+        "evomu_shard3_{label}_{}_{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let db_path = dir.join(format!("{label}.sqlite"));
+    std::fs::copy(tmpl, &db_path).expect("copy sqlite template");
+    let repo = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open sqlite"));
+    let ctx = Arc::new(
+        ServerContext::with_sde_and_repository(cached_sde(), repo)
+            .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED),
+    );
+    (db_path, ctx)
+}
+
+fn fast_reload_ctx_from_sqlite(ctx: &ServerContext, path: &Path) -> Arc<ServerContext> {
+    ctx.db.save_to_sqlite(path).expect("flush sqlite world");
+    let repo = Arc::new(WorldRepository::open_sqlite(path).expect("reopen sqlite world"));
+    let ctx2 = Arc::new(
+        ServerContext::with_sde_and_repository(cached_sde(), repo)
+            .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED),
+    );
+    crate::common::pin_clock(&ctx2);
+    ctx2
+}
+
+fn fast_forward_secs(ctx: &ServerContext, secs: u64) {
+    ctx.clock().advance_secs(secs);
+    let cur = ctx.now_unix_secs();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs
+            .insert("__server_now_unix".into(), cur.to_string());
+    });
+}
+
+async fn fast_lock_player_target(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    sys_id: u32,
+    ship_id: i64,
+    target_id: i64,
+) {
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let already = sys_h
+        .get_target_locks(ship_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|l| l.target_id == target_id);
+    if already.is_none() {
+        call_rpc(
+            ctx,
+            sess,
+            "dogmaIM",
+            "AddTarget",
+            &[PyRep::Integer(target_id)],
+        )
+        .await
+        .expect("dogmaIM.AddTarget");
+    }
+    for _ in 0..8 {
+        let locks = sys_h.get_target_locks(ship_id).await.unwrap_or_default();
+        if locks.iter().any(|l| l.target_id == target_id && l.locked) {
+            return;
+        }
+        let _ = sys_h.step_manual(5.0).await;
+        fast_forward_secs(ctx, 5);
+    }
+    panic!("Failed to complete target lock on {target_id}");
+}
+
+async fn fast_destroy_ball_with_player_weapons(
+    ctx: &ServerContext,
+    pilot: &mut PlayerPilot,
+    sys_id: u32,
+    target_id: i64,
+) {
+    move_player_near_ball(ctx, &mut pilot.sess, sys_id, pilot.ship_id, target_id, 1_000.0).await;
+    fast_lock_player_target(ctx, &mut pilot.sess, sys_id, pilot.ship_id, target_id).await;
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let guns: Vec<i64> = ctx.db.with_snapshot(|s| {
+        s.items
+            .values()
+            .filter(|i| {
+                i.location_id == pilot.ship_id
+                    && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 55)
+            })
+            .map(|i| i.item_id)
+            .collect()
+    });
+    for _ in 0..45 {
+        let destroyed_struct = ctx
+            .db
+            .with_snapshot(|s| s.structures.get(&target_id).is_some_and(|st| st.state == "Destroyed"));
+        let alive_ball = sys_h.get_ball_snapshot(target_id).await.ok().flatten().is_some();
+        if destroyed_struct || !alive_ball {
+            break;
+        }
+        let mut reloading = false;
+        for &gid in &guns {
+            let gone = ctx
+                .db
+                .with_snapshot(|s| s.structures.get(&target_id).is_some_and(|st| st.state == "Destroyed"))
+                || sys_h.get_ball_snapshot(target_id).await.ok().flatten().is_none();
+            if gone {
+                return;
+            }
+            if let Err(e) = call_rpc(
+                ctx,
+                &mut pilot.sess,
+                "dogmaIM",
+                "Activate",
+                &[
+                    PyRep::Integer(gid),
+                    PyRep::String("targetAttack".into()),
+                    PyRep::Integer(target_id),
+                ],
+            )
+            .await
+            {
+                match e.code.as_str() {
+                    "TargetNotFound"
+                    | "TargetNotInSpace"
+                    | "StructureAlreadyDestroyed"
+                    | "StructureDestroyed" => return,
+                    "ModuleIsReloading" => reloading = true,
+                    "ModuleAlreadyActive" => {}
+                    "TargetNotLocked" => {
+                        let still_alive = ctx.db.with_snapshot(|s| {
+                            !s.structures.get(&target_id).is_some_and(|st| st.state == "Destroyed")
+                        }) && sys_h.get_ball_snapshot(target_id).await.ok().flatten().is_some();
+                        if !still_alive {
+                            return;
+                        }
+                        fast_lock_player_target(ctx, &mut pilot.sess, sys_id, pilot.ship_id, target_id).await;
+                    }
+                    _ => panic!("Unexpected weapon Activate error on {target_id}: {e:?}"),
+                }
+            }
+        }
+        let step_secs = if reloading { 12 } else { 10 };
+        let _ = sys_h.step_manual(step_secs as f64).await;
+        fast_forward_secs(ctx, step_secs);
+    }
+}
 
 // parity: feat:fw.supply-caches-depots
 #[tokio::test]
 async fn test_e2e_fw_supply_caches_depots_and_advantage_persistence() {
     eve_testkit::attest(&["feat:fw.supply-caches-depots"]);
 
-    let (db_path, ctx) = new_sqlite_ctx("fw_supply");
+    let (db_path, ctx) = fast_new_sqlite_ctx("fw_supply");
     crate::common::pin_clock(&ctx);
 
     let mut pilot =
@@ -105,7 +273,7 @@ async fn test_e2e_fw_supply_caches_depots_and_advantage_persistence() {
     assert_eq!(fuel_qty, 0, "Supply cache must not carry Upwell fuel blocks");
 
     let _ = ctx.drain_notifications_for_char(pilot.char_id);
-    destroy_ball_with_player_weapons(&ctx, &mut pilot, sys_id, cache_id).await;
+    fast_destroy_ball_with_player_weapons(&ctx, &mut pilot, sys_id, cache_id).await;
 
     let (st_state, can_id, insignia_qty, supply_qty, caldari_adv) = ctx.db.with_snapshot(|s| {
         let state = s.structures[&cache_id].state.clone();
@@ -136,7 +304,7 @@ async fn test_e2e_fw_supply_caches_depots_and_advantage_persistence() {
     assert_eq!(supply_qty, 5, "Militia supply crates dropped inside container");
     assert_eq!(caldari_adv, 2.0, "Supply Cache destruction awards +2.0% Advantage");
 
-    let ctx2 = reload_ctx_from_sqlite(&ctx, &db_path);
+    let ctx2 = fast_reload_ctx_from_sqlite(&ctx, &db_path);
     let persisted_adv = ctx2
         .db
         .with_snapshot(|s| s.fw_runtime.system_advantage.get(&sys_id).map(|v| v.1).unwrap_or(0.0));
@@ -158,7 +326,7 @@ async fn test_e2e_fw_system_capture_ihub_siege_downtime_and_notifications() {
         "notify:OnVictoryPointStateUpdated",
     ]);
 
-    let (db_path, ctx) = new_sqlite_ctx("fw_capture");
+    let (db_path, ctx) = fast_new_sqlite_ctx("fw_capture");
     crate::common::pin_clock(&ctx);
 
     let mut pilot =
@@ -238,11 +406,11 @@ async fn test_e2e_fw_system_capture_ihub_siege_downtime_and_notifications() {
     )
     .await
     .expect("ActivateAccelerationGate");
-    destroy_ball_with_player_weapons(&ctx, &mut pilot, target, gate1 + 500_000_000).await;
+    fast_destroy_ball_with_player_weapons(&ctx, &mut pilot, target, gate1 + 500_000_000).await;
     sys_h.set_ball_position(pilot.ship_id, pocket_pos_for_complex(gate1)).await;
     let hold1 = complex_base_capture_duration_seconds(&tier1);
     let _ = ctx.drain_notifications_for_char(pilot.char_id);
-    ctx.advance_secs(hold1 + 5);
+    fast_forward_secs(&ctx, hold1 + 5);
     tick_background_cluster(&ctx).await;
 
     let vp_after_c1 = ctx.db.with_snapshot(|s| s.fw_system_occupations[&target].victory_points);
@@ -302,12 +470,12 @@ async fn test_e2e_fw_system_capture_ihub_siege_downtime_and_notifications() {
     );
 
     let advance_avoiding_downtime = |ctx: &eve_server::router::ServerContext, secs: u64| {
-        ctx.advance_secs(secs);
+        fast_forward_secs(ctx, secs);
         let dt_sec = ctx.systems.downtime_utc_secs_of_day();
         let mod_day = ctx.now_unix() % 86_400;
         let since_dt = (86_400 + mod_day - dt_sec) % 86_400;
         if since_dt <= 1_000 {
-            ctx.advance_secs(1_050 - since_dt);
+            fast_forward_secs(ctx, 1_050 - since_dt);
         }
     };
 
@@ -371,7 +539,7 @@ async fn test_e2e_fw_system_capture_ihub_siege_downtime_and_notifications() {
         sys_h.set_ball_position(pilot.ship_id, gpos + DVec3::new(1_000.0, 0.0, 0.0)).await;
         let _ = call_rpc(&ctx, &mut pilot.sess, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(gid)]).await;
         if sys_h.get_ball_snapshot(gid + 500_000_000).await.ok().flatten().is_some() {
-            destroy_ball_with_player_weapons(&ctx, &mut pilot, target, gid + 500_000_000).await;
+            fast_destroy_ball_with_player_weapons(&ctx, &mut pilot, target, gid + 500_000_000).await;
         }
         sys_h.set_ball_position(pilot.ship_id, pocket_pos_for_complex(gid)).await;
         let h_sec = complex_base_capture_duration_seconds(&tname);
@@ -411,7 +579,7 @@ async fn test_e2e_fw_system_capture_ihub_siege_downtime_and_notifications() {
             })
             .await;
     }
-    destroy_ball_with_player_weapons(&ctx, &mut pilot, target, ihub_id).await;
+    fast_destroy_ball_with_player_weapons(&ctx, &mut pilot, target, ihub_id).await;
     assert_eq!(ctx.db.with_snapshot(|s| s.fw_system_occupations[&target].occupier_faction_id), GALLENTE);
 
     let dt_sec = ctx.systems.downtime_utc_secs_of_day();
@@ -423,7 +591,7 @@ async fn test_e2e_fw_system_capture_ihub_siege_downtime_and_notifications() {
         "Occupier flips to Caldari after daily downtime"
     );
 
-    let ctx2 = reload_ctx_from_sqlite(&ctx, &db_path);
+    let ctx2 = fast_reload_ctx_from_sqlite(&ctx, &db_path);
     assert_eq!(
         ctx2.db.with_snapshot(|s| s.fw_system_occupations[&target].occupier_faction_id),
         CALDARI,

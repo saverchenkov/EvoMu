@@ -85,33 +85,37 @@ async fn give_type_prereqs(ctx: &ServerContext, sess: &mut eve_machonet::Session
     }
 }
 
+static NULLSEC_BELT_SYS: std::sync::OnceLock<(u32, i64, i64)> = std::sync::OnceLock::new();
+
 fn find_nullsec_system_with_power_and_belts(ctx: &ServerContext) -> (u32, i64, i64) {
-    let mut sys_ids: Vec<u32> = ctx
-        .sde
-        .solar_systems
-        .values()
-        .filter(|s| eve_server::services::sov_gameplay::is_claimable_nullsec_system(&ctx.sde, s.solar_system_id))
-        .map(|s| s.solar_system_id)
-        .collect();
-    sys_ids.sort_unstable();
-    for sys in sys_ids {
-        let cels = ctx.sde.celestials_in_system(sys);
-        let star_p: u64 = cels
-            .iter()
-            .filter(|c| c.group_id == 6)
-            .map(|c| eve_server::services::quasar_sov_hub::star_power(&ctx.sde, c.type_id))
-            .sum();
-        let temp = cels.iter().find(|c| c.type_id == 11).map(|c| c.celestial_id);
-        let lava = cels.iter().find(|c| c.type_id == 2015).map(|c| c.celestial_id);
-        let has_belts = cels.iter().any(|c| c.group_id == 9);
-        if star_p >= 700 && has_belts {
-            if let (Some(t), Some(l)) = (temp, lava) {
-                return (sys, t, l);
+    *NULLSEC_BELT_SYS.get_or_init(|| {
+        let mut sys_ids: Vec<u32> = ctx
+            .sde
+            .solar_systems
+            .values()
+            .filter(|s| eve_server::services::sov_gameplay::is_claimable_nullsec_system(&ctx.sde, s.solar_system_id))
+            .map(|s| s.solar_system_id)
+            .collect();
+        sys_ids.sort_unstable();
+        for sys in sys_ids {
+            let cels = ctx.sde.celestials_in_system(sys);
+            let star_p: u64 = cels
+                .iter()
+                .filter(|c| c.group_id == 6)
+                .map(|c| eve_server::services::quasar_sov_hub::star_power(&ctx.sde, c.type_id))
+                .sum();
+            let temp = cels.iter().find(|c| c.type_id == 11).map(|c| c.celestial_id);
+            let lava = cels.iter().find(|c| c.type_id == 2015).map(|c| c.celestial_id);
+            let has_belts = cels.iter().any(|c| c.group_id == 9);
+            if star_p >= 700 && has_belts {
+                if let (Some(t), Some(l)) = (temp, lava) {
+                    return (sys, t, l);
+                }
             }
         }
-    }
-    let (s, t, l, _, _) = crate::sovereignty_equinox_gameplay::find_nullsec_planets(ctx);
-    (s, t, l)
+        let (s, t, l, _, _) = crate::sovereignty_equinox_gameplay::find_nullsec_planets(ctx);
+        (s, t, l)
+    })
 }
 
 #[tokio::test]
@@ -131,7 +135,7 @@ async fn test_live_esi_fw_and_incursions_lifecycle() {
         "esi:GET /incursions",
     ]);
 
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::sovereignty_equinox_gameplay::fast_demo_ctx());
     crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
 
@@ -344,29 +348,29 @@ async fn test_live_esi_fw_and_incursions_lifecycle() {
     let boss_id = crate::common::clear_incursion_site_escort_waves(&ctx, vg_sys_id, &vg_site_id).await;
     let vg_sys = ctx.systems.get_or_spawn(vg_sys_id);
     lock_target(&ctx, &mut s1, vg_sys_id, tempest_id, boss_id, 1_500.0).await;
-    for _ in 0..120 {
+    for step in 0..120 {
         let Some((_, tb)) = vg_sys.get_ball_snapshot(boss_id).await.unwrap() else {
             break;
         };
-        vg_sys.set_ball_position(tempest_id, tb.position + DVec3::new(1_500.0, 0.0, 0.0)).await;
-        for &gid in &cannons {
-            if vg_sys.get_ball_snapshot(boss_id).await.unwrap().is_none() {
-                break;
-            }
-            if let Err(e) = rpc(&ctx, &mut s1, "dogmaIM", "Activate", &[PyRep::Integer(gid), PyRep::String("targetAttack".into()), PyRep::Integer(boss_id)]).await {
-                assert!(
-                    matches!(e.code.as_str(), "ModuleAlreadyActive" | "ModuleIsReloading" | "TargetNotFound" | "TargetNotLocked" | "TargetNotInSpace"),
-                    "Activate weapon {gid} failed: {} ({})",
-                    e.code,
-                    e.message
-                );
+        if step == 0 || step % 8 == 0 {
+            vg_sys.set_ball_position(tempest_id, tb.position + DVec3::new(1_500.0, 0.0, 0.0)).await;
+            for &gid in &cannons {
+                if vg_sys.get_ball_snapshot(boss_id).await.unwrap().is_none() {
+                    break;
+                }
+                if let Err(e) = rpc(&ctx, &mut s1, "dogmaIM", "Activate", &[PyRep::Integer(gid), PyRep::String("targetAttack".into()), PyRep::Integer(boss_id)]).await {
+                    assert!(
+                        matches!(e.code.as_str(), "ModuleAlreadyActive" | "ModuleIsReloading" | "TargetNotFound" | "TargetNotLocked" | "TargetNotInSpace"),
+                        "Activate weapon {gid} failed: {} ({})",
+                        e.code,
+                        e.message
+                    );
+                }
             }
         }
-        for _ in 0..6 {
-            vg_sys.step_manual(1.0).await.unwrap();
-        }
-        ctx.advance_secs(6);
+        vg_sys.step_manual(6.0).await.unwrap();
     }
+    ctx.advance_secs(6);
     assert!(vg_sys.get_ball_snapshot(boss_id).await.unwrap().is_none(), "incursion boss {boss_id} must be destroyed");
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
@@ -393,7 +397,7 @@ async fn test_live_sovereignty_hub_adm_upgrades_skyhook_and_esi_campaigns() {
         "rpc:sovMgr.GetSovStructuresInfoForSolarSystem",
     ]);
 
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::sovereignty_equinox_gameplay::fast_demo_ctx());
     crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let (sys_id, temp_planet, lava_planet) = find_nullsec_system_with_power_and_belts(&ctx);
@@ -497,12 +501,12 @@ async fn test_live_sovereignty_hub_adm_upgrades_skyhook_and_esi_campaigns() {
             if rpc(&ctx, &mut s_def, "dogmaIM", "Mine", &[PyRep::Integer(ast.asteroid_id)]).await.is_err() {
                 break;
             }
-            ctx.advance_secs(60);
             if ctx.db.with_snapshot(|s| s.system_states.get(&sys_id).is_some_and(|st| st.industrial_index >= 1)) {
                 break;
             }
         }
     }
+    ctx.advance_secs(60);
 
     let all_idx = rpc(&ctx, &mut s_def, "devIndexManager", "GetAllDevelopmentIndices", &[]).await.expect("GetAllDevelopmentIndices");
     if let PyRep::Dict(entries) = &all_idx {

@@ -533,13 +533,13 @@ async fn test_b22_corp_projects_and_npc_corp_rules() {
     eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
         rt.pending_bounty_ticks.insert((sys_id, PILOT_2), 50_000.0);
     });
-    let (small_net, _, _) = eve_server::services::combat_npc_encounters::flush_npc_bounty_tick(&ctx, sys_id, PILOT_2, 0.0);
+    let small_net = eve_server::services::combat_npc_encounters::flush_npc_bounty_tick(&ctx, sys_id, PILOT_2, 0.0).pilot_isk;
     assert!((small_net - 50_000.0).abs() < 1e-3, "Bounty under 100k ISK must be tax-exempt");
 
     eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
         rt.pending_bounty_ticks.insert((sys_id, PILOT_2), 1_000_000.0);
     });
-    let (large_net, _, _) = eve_server::services::combat_npc_encounters::flush_npc_bounty_tick(&ctx, sys_id, PILOT_2, 0.0);
+    let large_net = eve_server::services::combat_npc_encounters::flush_npc_bounty_tick(&ctx, sys_id, PILOT_2, 0.0).pilot_isk;
     assert!((large_net - 890_000.0).abs() < 1e-3, "11% NPC corp tax must apply above 100k ISK threshold");
     ctx.db.with_snapshot(|s| {
         assert!(

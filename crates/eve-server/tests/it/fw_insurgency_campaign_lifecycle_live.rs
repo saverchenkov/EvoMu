@@ -15,12 +15,21 @@ use eve_server::router::ServerContext;
 use eve_server::services::fw_gameplay::{SURRENDER_IHUB_VULNERABILITY_DELAY_SECS, TYPE_FW_IHUB};
 use eve_server::services::insurgency_complex_ops::{load_ops_state, OutpostRaidSize};
 use eve_server::services::insurgency_services::{
-    read_insurgency_runtime, step_system_insurgency_tick, FORECASTING_DURATION_SECS,
+    read_insurgency_runtime, step_system_insurgency_tick_delta, FORECASTING_DURATION_SECS,
 };
 use eve_server::sp6_lifecycle::tick_background_cluster;
 use glam::DVec3;
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+pub(crate) fn fast_server_ctx() -> Arc<ServerContext> {
+    static FAST_SDE: OnceLock<Arc<eve_sde::SdeRegistry>> = OnceLock::new();
+    let sde = Arc::clone(FAST_SDE.get_or_init(|| Arc::new(eve_sde::SdeRegistry::with_canonical_seed())));
+    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(sde, db));
+    common::pin_clock(&ctx);
+    ctx
+}
 
 pub(crate) const CALDARI: i64 = 500_001;
 pub(crate) const GALLENTE: i64 = 500_004;
@@ -219,8 +228,10 @@ pub(crate) async fn destroy_target_live(
             }
         }
         let step_secs = if reloading { 11 } else { 4 };
-        for _ in 0..step_secs {
-            sys.step_manual(1.0).await.unwrap();
+        sys.step_manual(step_secs as f64).await.unwrap();
+        if sys.get_combat_state(ship_id).await.ok().flatten().is_some_and(|cs| {
+            cs.shield_hp < cs.max_shield_hp * 0.5 || cs.armor_hp < cs.max_armor_hp * 0.8
+        }) {
             slash(ctx, sess, "/heal").await;
         }
         ctx.advance_secs(step_secs);
@@ -232,10 +243,9 @@ pub(crate) async fn lock_target_healed(ctx: &ServerContext, sess: &mut SessionSt
     let sys = ctx.systems.get_or_spawn(sys_id);
     if sys.get_target_locks(ship_id).await.unwrap_or_default().iter().any(|l| l.target_id == target_id && l.locked) { return; }
     rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(target_id)]).await.expect("AddTarget");
-    for _ in 0..45 {
+    for _ in 0..10 {
         if sys.get_target_locks(ship_id).await.unwrap().iter().any(|l| l.target_id == target_id && l.locked) { return; }
-        sys.step_manual(1.0).await.unwrap();
-        slash(ctx, sess, "/heal").await;
+        sys.step_manual(5.0).await.unwrap();
     }
     assert!(sys.get_target_locks(ship_id).await.unwrap().iter().any(|l| l.target_id == target_id && l.locked));
 }
@@ -247,7 +257,7 @@ pub(crate) async fn fire_one_volley(ctx: &ServerContext, sess: &mut SessionState
 }
 
 pub(crate) async fn boost_siege_guns(ctx: &ServerContext, sess: &mut SessionState, guns: &[i64]) {
-    for &gid in guns { slash(ctx, sess, &format!("/setattr {gid} 64 5000.0")).await; }
+    for &gid in guns { slash(ctx, sess, &format!("/setattr {gid} 64 50000.0")).await; }
 }
 
 pub(crate) async fn hold_complex_to_pts(ctx: &ServerContext, sess: &mut SessionState, campaign_id: i64, sys_id: u32, ship_id: i64, is_pirate: bool, target_pts: i64) {
@@ -258,11 +268,11 @@ pub(crate) async fn hold_complex_to_pts(ctx: &ServerContext, sess: &mut SessionS
     let beacon_pos = ctx.db.with_snapshot(|s| s.system_states[&sys_id].fw_complex_position.expect("fw_complex_position"));
     let sys = ctx.systems.get_or_spawn(sys_id);
     sys.set_ball_position(ship_id, DVec3::from_array(beacon_pos)).await;
+    sys.step_manual(0.1).await.unwrap();
     for _ in 0..30 {
         let cur_pts = read_insurgency_runtime(ctx, |rt| rt.campaigns.get(&campaign_id).map_or(0, |c| if is_pirate { c.corruption_points.get(&sys_id).copied().unwrap_or(0) } else { c.suppression_points.get(&sys_id).copied().unwrap_or(0) }));
         if cur_pts >= target_pts {
             sys.set_ball_position(ship_id, DVec3::ZERO).await;
-            slash(ctx, sess, "/heal").await;
             return;
         }
         let beacon_now = match ctx.db.with_snapshot(|s| s.system_states[&sys_id].fw_complex_position) {
@@ -271,10 +281,8 @@ pub(crate) async fn hold_complex_to_pts(ctx: &ServerContext, sess: &mut SessionS
         };
         let target_v = DVec3::from_array(beacon_now);
         if sys.get_ball_snapshot(ship_id).await.unwrap().is_none_or(|(_, b)| b.position.distance(target_v) > 500.0) { sys.set_ball_position(ship_id, target_v).await; }
-        slash(ctx, sess, "/heal").await;
-        for _ in 0..12 { sys.step_manual(5.0).await.unwrap(); slash(ctx, sess, "/heal").await; }
-        ctx.advance_virtual_clock(60);
-        step_system_insurgency_tick(ctx, sys_id).await;
+        ctx.clock().advance_secs(60);
+        step_system_insurgency_tick_delta(ctx, sys_id, Some(60)).await;
     }
     panic!("System {sys_id} did not reach {target_pts} insurgency points");
 }
@@ -343,8 +351,7 @@ pub(crate) async fn advance_system_insurgency_pts(
 async fn test_live_fw_supply_caches_depots_and_advantage() {
     eve_testkit::attest(&["feat:fw.supply-caches-depots"]);
 
-    let ctx = Arc::new(ServerContext::new());
-    common::pin_clock(&ctx);
+    let ctx = fast_server_ctx();
 
     let sys_id = ctx
         .db
@@ -432,8 +439,7 @@ async fn test_live_insurgency_campaign_lifecycle_and_stargate_spread() {
         "feat:fw.insurgency-spread",
     ]);
 
-    let ctx = Arc::new(ServerContext::new());
-    common::pin_clock(&ctx);
+    let ctx = fast_server_ctx();
 
     let hub_sys: u32 = 30_002_538;
     let (mut pilot, guns) = setup_enlisted_pilot(&ctx, 77_102, 91_000_102, GURISTAS, hub_sys).await;
@@ -542,8 +548,7 @@ async fn test_live_insurgency_campaign_lifecycle_and_stargate_spread() {
 
 #[tokio::test]
 async fn test_live_fw_system_capture_post_surrender_ihub_and_downtime() {
-    let ctx = Arc::new(ServerContext::new());
-    common::pin_clock(&ctx);
+    let ctx = fast_server_ctx();
 
     let hub_sys: u32 = 30_002_538;
     let orig_occ = ctx

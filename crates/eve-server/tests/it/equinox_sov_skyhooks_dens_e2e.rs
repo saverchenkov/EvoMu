@@ -103,6 +103,7 @@ fn drain_notices(rx: &mut Receiver<EvePublicNotice>) -> Vec<String> {
     let mut out = Vec::new();
     while let Ok(n) = rx.try_recv() {
         if let Some(p) = n.payload {
+            assert!(p.value.len() >= 2, "notice {} payload must not be empty", p.type_url);
             out.push(p.normalized_type_name().to_string());
         }
     }
@@ -281,11 +282,34 @@ async fn sovereignty_hub_startup_fuel_workforce_relay_and_planet_resources() {
     encode_bytes_field(2, &tr_mode, &mut tr_req);
     assert_eq!(qrpc(&ctx, &mut dir, "eve_public.sovereignty.hub.workforce.api.ConfigureRequest", tr_req).await.status_code, STATUS_OK);
 
-    assert_eq!(qrpc(&ctx, &mut dir, "eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionRequest", Vec::new()).await.status_code, STATUS_OK);
-    assert_eq!(qrpc(&ctx, &mut dir, "eve_public.sovereignty.hub.api.GetResourcesRequest", id_req(1, HUB_JITA as u64)).await.status_code, STATUS_OK);
+    let mut imp_src = Vec::new();
+    encode_bytes_field(1, &idm(u64::from(JITA)), &mut imp_src);
+    let mut imp_cfg = Vec::new();
+    encode_bytes_field(1, &imp_src, &mut imp_cfg);
+    let mut imp_mode = Vec::new();
+    encode_bytes_field(2, &imp_cfg, &mut imp_mode);
+    let mut imp_req = Vec::new();
+    encode_bytes_field(1, &idm(HUB_SOBAS as u64), &mut imp_req);
+    encode_bytes_field(2, &imp_mode, &mut imp_req);
+    assert_eq!(qrpc(&ctx, &mut dir, "eve_public.sovereignty.hub.workforce.api.ConfigureRequest", imp_req).await.status_code, STATUS_OK);
+    db.with_snapshot(|snap| {
+        assert_eq!(
+            eve_server::services::quasar_sov_workforce::imports(snap, &ctx.sde, HUB_SOBAS),
+            vec![(JITA, 500)],
+        );
+    });
+
+    let planet_ver = qrpc(&ctx, &mut dir, "eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionRequest", Vec::new()).await;
+    assert_eq!(planet_ver.status_code, STATUS_OK);
+    assert!(planet_ver.payload.unwrap().value.len() >= 2);
+    let hub_res = qrpc(&ctx, &mut dir, "eve_public.sovereignty.hub.api.GetResourcesRequest", id_req(1, HUB_JITA as u64)).await;
+    assert_eq!(hub_res.status_code, STATUS_OK);
+    assert!(hub_res.payload.unwrap().value.len() >= 2);
 
     let notices = drain_notices(&mut rx);
     assert!(notices.iter().any(|n| n.contains("sovereignty.hub.upgrade.api.")));
+    assert!(notices.iter().any(|n| n.contains("sovereignty.resource.transfer.workforce.api.ConfiguredNotice")));
+    assert!(notices.iter().any(|n| n.contains("sovereignty.resource.transfer.workforce.api.StateChangedNotice")));
 
     drop(ctx);
     drop(db);
@@ -395,7 +419,9 @@ async fn sovereignty_skyhook_reagent_scaling_and_mercenary_den() {
 
     assert_eq!(qrpc(&ctx, &mut outsider, "eve_public.sovereignty.skyhook.api.ActivateRequest", id_req(1, skyhook_id as u64)).await.status_code, STATUS_FORBIDDEN);
     assert_eq!(qrpc(&ctx, &mut dir, "eve_public.sovereignty.skyhook.api.ActivateRequest", id_req(1, skyhook_id as u64)).await.status_code, STATUS_OK);
-    assert_eq!(qrpc(&ctx, &mut dir, "eve_public.sovereignty.skyhook.api.GetRequest", id_req(1, skyhook_id as u64)).await.status_code, STATUS_OK);
+    let sky_get = qrpc(&ctx, &mut dir, "eve_public.sovereignty.skyhook.api.GetRequest", id_req(1, skyhook_id as u64)).await;
+    assert_eq!(sky_get.status_code, STATUS_OK);
+    assert!(sky_get.payload.unwrap().value.len() >= 2);
     assert_eq!(qrpc(&ctx, &mut dir, "eve_public.sovereignty.skyhook.api.DeactivateRequest", id_req(1, skyhook_id as u64)).await.status_code, STATUS_OK);
     assert_eq!(qrpc(&ctx, &mut dir, "eve_public.sovereignty.skyhook.api.admin.ModifyReagentsRequest", id_req(1, skyhook_id as u64)).await.status_code, STATUS_FORBIDDEN);
 
@@ -405,21 +431,26 @@ async fn sovereignty_skyhook_reagent_scaling_and_mercenary_den() {
         2
     );
 
-    assert_eq!(qrpc(&ctx, &mut dir, "eve_public.sovereignty.mercenaryden.api.GetAllOwnedRequest", Vec::new()).await.status_code, STATUS_OK);
+    let owned_dens = qrpc(&ctx, &mut dir, "eve_public.sovereignty.mercenaryden.api.GetAllOwnedRequest", Vec::new()).await;
+    assert_eq!(owned_dens.status_code, STATUS_OK);
+    assert!(owned_dens.payload.unwrap().value.len() >= 2);
     let acts_rsp = qrpc(&ctx, &mut dir, "eve_public.sovereignty.mercenaryden.activity.api.GetForMercenaryDenRequest", id_req(1, den_id as u64)).await;
     assert_eq!(acts_rsp.status_code, STATUS_OK);
     let acts_wm = WireMessage::decode(&acts_rsp.payload.unwrap().value).unwrap();
-    if let Some(act_uuid) = acts_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| {
+    let act_uuid = acts_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| {
         let entry = WireMessage::decode(f.value.as_bytes()?).ok()?;
         let id_m = WireMessage::decode(entry.fields.iter().find(|ef| ef.field_number == 1)?.value.as_bytes()?).ok()?;
         id_m.fields.first()?.value.as_bytes().map(|b| b.to_vec())
-    }) {
-        let mut s_act = Vec::new();
-        let mut uuid_m = Vec::new();
-        encode_bytes_field(1, &act_uuid, &mut uuid_m);
-        encode_bytes_field(1, &uuid_m, &mut s_act);
-        assert_eq!(qrpc(&ctx, &mut dir, "eve_public.sovereignty.mercenaryden.activity.api.StartRequest", s_act).await.status_code, STATUS_OK);
-    }
+    }).expect("mercenary den activity uuid");
+    let mut s_act = Vec::new();
+    let mut uuid_m = Vec::new();
+    encode_bytes_field(1, &act_uuid, &mut uuid_m);
+    encode_bytes_field(1, &uuid_m, &mut s_act);
+    assert_eq!(qrpc(&ctx, &mut dir, "eve_public.sovereignty.mercenaryden.activity.api.StartRequest", s_act).await.status_code, STATUS_OK);
+    let den_notices = drain_notices(&mut rx);
+    assert!(den_notices.iter().any(|n| n == "eve_public.sovereignty.mercenaryden.activity.api.AddedNotice"));
+    assert!(den_notices.iter().any(|n| n == "eve_public.sovereignty.mercenaryden.activity.api.StartedNotice"));
+    assert!(den_notices.iter().any(|n| n == "eve_public.sovereignty.mercenaryden.activity.api.ExpiryChangedNotice"));
 
     ctx.db.with_mut_snapshot(|snap| {
         let mut rem = 0u64;

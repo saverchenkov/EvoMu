@@ -298,7 +298,6 @@ async fn test_journey_missions() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
-    crate::common::seed_test_lp_store_offers(&ctx);
 
     let mut sess = SessionState::new(303);
     crate::common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;

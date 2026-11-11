@@ -504,7 +504,7 @@ async fn test_keeper_play_and_goto_room() {
 }
 
 #[tokio::test]
-// DATA GAP: requires server-only season schedule and challenges (rpc:seasonManager.get_season_end_time, select_season, get_season_data_for_character)
+// Exercises seasonManager.get_season_end_time, select_season, and get_season_data_for_character.
 async fn test_season_manager_rpc_suite() {
     let ctx = ServerContext::new();
     let kw = HashMap::new();

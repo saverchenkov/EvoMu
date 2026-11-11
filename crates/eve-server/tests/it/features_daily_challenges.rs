@@ -234,7 +234,9 @@ async fn test_b36_rnd_agent_access_rp_formula_and_datacore_purchase() {
         .collect();
     assert_eq!(extra_l1_agents.len(), 5);
 
-    let demo = WorldRepository::with_demo_seed().with_snapshot(|s| s.clone());
+    let demo = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx()
+        .db
+        .with_snapshot(|s| s.clone());
     ctx.db.with_mut_snapshot(|snap| {
         *snap = demo;
         snap.skills.entry(char_id).or_default().clear();
@@ -703,7 +705,7 @@ async fn complete_live_fw_mission(
 async fn test_b36_storyline_offer_counter() {
     // parity: feat:pve.storyline-offer-counter
     eve_testkit::attest(&["feat:pve.storyline-offer-counter"]);
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let char_id = 90_000_001_i64;
@@ -1177,8 +1179,8 @@ fn make_item(
 
 async fn step_until_stopped(ctx: &ServerContext, sys_id: u32, ship_id: i64) {
     let sys_h = ctx.systems.get_or_spawn(sys_id);
-    for _ in 0..120 {
-        let _ = sys_h.step_manual(1.0).await;
+    for _ in 0..24 {
+        let _ = sys_h.step_manual(5.0).await;
         if let Ok(Some((_, b))) = sys_h.get_ball_snapshot(ship_id).await {
             if matches!(b.mode, MovementMode::Stop) {
                 break;
@@ -1191,7 +1193,7 @@ async fn step_until_stopped(ctx: &ServerContext, sys_id: u32, ship_id: i64) {
 async fn test_b36_abyssal_activation_and_deadspace_pocket_rules() {
     // parity: feat:pve.abyssal-activation-restrictions
     eve_testkit::attest(&["feat:pve.abyssal-activation-restrictions"]);
-    let ctx = ServerContext::new();
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let char_id = 90_000_001_i64;
@@ -1323,8 +1325,8 @@ async fn test_b36_abyssal_activation_and_deadspace_pocket_rules() {
             .code,
         "ShipInvulnerable"
     );
-    for _ in 0..35 {
-        let _ = sys_h.step_manual(1.0).await;
+    for _ in 0..7 {
+        let _ = sys_h.step_manual(5.0).await;
     }
 
     // 3. Within 1,000 km of a Mobile Depot -> ProximityRestriction
@@ -1590,8 +1592,8 @@ async fn test_b36_abyssal_activation_and_deadspace_pocket_rules() {
         .await
         .unwrap();
     step_until_stopped(&ctx, jita_sys, rifter_id).await;
-    for _ in 0..35 {
-        let _ = jita_h.step_manual(1.0).await;
+    for _ in 0..7 {
+        let _ = jita_h.step_manual(5.0).await;
     }
 
     let entry_gate_id = jita_h
@@ -1783,8 +1785,8 @@ fn make_item(
 
 async fn step_until_stopped(ctx: &ServerContext, sys_id: u32, ship_id: i64) {
     let sys_h = ctx.systems.get_or_spawn(sys_id);
-    for _ in 0..120 {
-        let _ = sys_h.step_manual(1.0).await;
+    for _ in 0..24 {
+        let _ = sys_h.step_manual(5.0).await;
         if let Ok(Some((_, b))) = sys_h.get_ball_snapshot(ship_id).await {
             if matches!(b.mode, MovementMode::Stop) && b.velocity.length() < 0.5 {
                 break;
@@ -1797,7 +1799,7 @@ async fn step_until_stopped(ctx: &ServerContext, sys_id: u32, ship_id: i64) {
 async fn test_b36_ess_grid_warp_and_module_restrictions() {
     // parity: feat:pve.ess-grid-warp-mwd-restrictions
     eve_testkit::attest(&["feat:pve.ess-grid-warp-mwd-restrictions"]);
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx());
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
 
@@ -2319,7 +2321,7 @@ async fn test_b36_ess_main_autopayout_and_reserve_bank_key_tiers() {
         "feat:pve.ess-main-bank-autopayout",
         "feat:pve.ess-reserve-bank-key-tiers",
     ]);
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx());
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_014_400)));
     let kw = HashMap::new();
 
@@ -2539,19 +2541,19 @@ async fn test_b36_ess_main_autopayout_and_reserve_bank_key_tiers() {
             if sys_h.get_target_locks(attacker_sid).await.unwrap().iter().any(|l| l.target_id == npc_bid && l.locked) {
                 break;
             }
-            let _ = sys_h.step_manual(1.0).await;
+            let _ = sys_h.step_manual(5.0).await;
         }
         for _ in 0..20 {
             if sys_h.get_ball_snapshot(npc_bid).await.unwrap().is_none() {
                 break;
             }
             // Rate of fire: the weapon can only be re-activated once its running cycle has ended.
-            for _ in 0..30 {
+            for _ in 0..15 {
                 if !sys_h.has_module_cycle(attacker_sid, w_id).await && !ctx.is_module_in_reactivation_delay(attacker_sid, w_id) {
                     break;
                 }
-                let _ = sys_h.step_manual(1.0).await;
-                ctx.advance_secs(1);
+                let _ = sys_h.step_manual(2.0).await;
+                ctx.clock().advance_secs(2);
             }
             let r = kv_map(
                 &ctx.dispatch_rpc(s_ref, "dogmaIM", None, "Activate", &[PyRep::Integer(w_id), PyRep::Integer(npc_bid)], &kw, None)
@@ -2870,6 +2872,7 @@ async fn test_b36_ess_main_autopayout_and_reserve_bank_key_tiers() {
         if let Ok(rep) = ctx2.dispatch_rpc(&mut sess_a, "essMgr", None, "RequestUnlockReserveBank", &[PyRep::Integer(iid)], &kw, None).await {
             assert_eq!(kv_map(&rep)["durationMinutes"].as_i64(), Some(45));
             matched_45m = true;
+            break;
         } else {
             ctx2.db.with_mut_snapshot(|snap| {
                 snap.items.remove(&iid);

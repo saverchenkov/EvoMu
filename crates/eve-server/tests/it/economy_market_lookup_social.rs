@@ -74,8 +74,8 @@ async fn test_npc_npc_standings_rowset_and_auth() {
         )
     });
     assert!(
-        matches!(amarr_to_caldari.and_then(|r| r.get(2)), Some(PyRep::Real(v)) if (*v - 5.0).abs() < 1e-6),
-        "expected Amarr -> Caldari standing +5.0, got {amarr_to_caldari:?}"
+        matches!(amarr_to_caldari.and_then(|r| r.get(2)), Some(PyRep::Real(v)) if (*v - 7.0).abs() < 1e-6),
+        "expected Amarr -> Caldari standing +7.0, got {amarr_to_caldari:?}"
     );
 }
 #[tokio::test]

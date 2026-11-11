@@ -1070,9 +1070,14 @@ async fn test_b23_skinr_plex_pricing_and_sec_office_tag_remediation() {
 
     // Sequencing PLEX cost is not skill-discounted (Ship_SKINR.md:54), remaining constant at 25 PLEX
     ctx.db.with_mut_snapshot(|s| {
-        s.skills.entry(cid as i64).or_default().insert(
+        let sk = s.skills.entry(cid as i64).or_default();
+        sk.insert(
             81044,
             TrainedSkillRecord { type_id: 81044, level: 5, skill_points: 256_000.0 },
+        );
+        sk.insert(
+            81366,
+            TrainedSkillRecord { type_id: 81366, level: 1, skill_points: 1_000.0 },
         );
     });
     let init_rsp2 = quasar_rpc(

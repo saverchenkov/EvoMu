@@ -435,7 +435,7 @@ async fn notify_batch2_probe_scanning_abyssal_and_void_space() {
 
     rpc(&ctx, &mut sess, "abyssalMgr", "AbyssalEndGateActivation", &[PyRep::Integer(1_895_000_000 + pocket_id * 10 + 3)]).await.expect("Exit Abyss");
     let abyss_out_notifs = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&abyss_out_notifs, "OnAbyssalContentFinished"), &[PyRep::Integer(pocket_id), PyRep::Integer(1)]);
+    assert_eq!(find_notif(&abyss_out_notifs, "OnAbyssalContentFinished"), &[PyRep::Integer(pocket_id), PyRep::Integer(11)]);
     assert_eq!(find_notif(&abyss_out_notifs, "OnAbyssalLocationExited"), &[]);
 
     // 6. Void Space jump + relog ClientIsReady preserves effective_content_id (fil_id)
@@ -498,7 +498,7 @@ async fn notify_batch2_void_exit_seasons_expert_systems_and_node_graphs() {
     ctx.advance_secs(12);
     rpc(&ctx, &mut sess, "voidSpaceMgr", "VoidSpaceEndGateActivation", &[PyRep::Integer(888_001)]).await.expect("VoidSpaceEndGateActivation");
     let void_out_notifs = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&void_out_notifs, "OnVoidSpaceContentFinished"), &[PyRep::Integer(fil_id), PyRep::Integer(1)]);
+    assert_eq!(find_notif(&void_out_notifs, "OnVoidSpaceContentFinished"), &[PyRep::Integer(fil_id), PyRep::Integer(16)]);
     assert_eq!(sess.solar_system_id, Some(SYS_JITA));
 
     ctx.db.with_mut_snapshot(|snap| {

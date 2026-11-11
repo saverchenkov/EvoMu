@@ -81,10 +81,6 @@ async fn test_journey_cosmetics_store() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
-    ctx.db.with_mut_snapshot(|s| {
-        s.quasar_commerce.nes_store_catalog = None;
-    });
-    crate::common::seed_test_nes_store_catalog(&ctx);
 
     let mut sess = SessionState::new(506);
     crate::common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -102,13 +98,21 @@ async fn test_journey_cosmetics_store() {
     let bal_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.api.BalanceRequest", Vec::new()).await;
     assert_eq!(bal_rsp.status_code, STATUS_OK);
 
-    // Purchase offer 2001 (450 PLEX) from NES store
+    // Purchase offer 2001 from NES store
+    let offer_2001_plex = ctx.db.with_snapshot(|s| {
+        eve_server::services::quasar_payment_store::read_store_catalog(s)
+            .offers
+            .iter()
+            .find(|o| o.id == 2001)
+            .expect("offer 2001")
+            .price_plex
+    });
     let (mut b, mut purch_payload) = (Vec::new(), Vec::new());
     encode_string_field(1, "2001", &mut b);
     encode_bytes_field(1, &b, &mut purch_payload);
     let purch_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.api.PurchaseRequest", purch_payload).await;
     assert_eq!(purch_rsp.status_code, STATUS_OK);
-    assert_eq!(ctx.db.with_snapshot(|s| s.plex_vault_balance(90_000_001)), 50);
+    assert_eq!(ctx.db.with_snapshot(|s| s.plex_vault_balance(90_000_001)), 500 - offer_2001_plex);
 
     // 2. Apply ship SKIN via shipCosmeticsMgr
     let ship_id = sess.ship_id.expect("ship_id");

@@ -17,7 +17,33 @@ use eve_server::esi::{EsiHttpRequest, EsiRouter, OpenApiSpec};
 use eve_server::router::ServerContext;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+pub(crate) fn shared_sde() -> Arc<eve_sde::SdeRegistry> {
+    static SDE: OnceLock<Arc<eve_sde::SdeRegistry>> = OnceLock::new();
+    Arc::clone(SDE.get_or_init(|| Arc::new(eve_sde::SdeRegistry::with_canonical_seed())))
+}
+
+pub(crate) fn shared_demo_snapshot() -> eve_db::WorldStateSnapshot {
+    static SNAP: OnceLock<eve_db::WorldStateSnapshot> = OnceLock::new();
+    SNAP.get_or_init(|| eve_db::WorldRepository::with_demo_seed().with_snapshot(|s| s.clone()))
+        .clone()
+}
+
+pub(crate) fn fast_demo_ctx() -> ServerContext {
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    db.with_mut_snapshot(|s| *s = shared_demo_snapshot());
+    ServerContext::with_sde_and_repository(shared_sde(), db)
+}
+
+pub(crate) fn fast_with_repo(db: Arc<eve_db::WorldRepository>) -> ServerContext {
+    ServerContext::with_sde_and_repository(shared_sde(), db)
+}
+
+pub(crate) fn fast_from_sqlite(path: impl AsRef<std::path::Path>) -> Result<ServerContext, String> {
+    let db = Arc::new(eve_db::WorldRepository::open_sqlite(path)?);
+    Ok(ServerContext::with_sde_and_repository(shared_sde(), db))
+}
 
 const PKCE_VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 const PKCE_CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
@@ -229,7 +255,7 @@ async fn test_esi6_market_public_and_structure_routes() {
         "feat:esi.market.types",
     ]);
 
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::esi_market_industry_pi::fast_demo_ctx());
     crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
@@ -458,7 +484,7 @@ async fn test_esi6_market_public_and_structure_routes() {
 
 #[tokio::test]
 async fn test_esi6_industry_jobs_fields_and_completion() {
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::esi_market_industry_pi::fast_demo_ctx());
     crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
@@ -682,7 +708,7 @@ async fn test_esi_market_groups_sde_descriptions_and_structure_orders_acl_hub() 
         "feat:esi.market.groups",
     ]);
 
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::esi_market_industry_pi::fast_demo_ctx());
     crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
@@ -846,7 +872,7 @@ async fn test_esi_corp_endpoint_specific_role_gates_and_routes() {
         "esi:GET /corporations/{corporation_id}/orders/history",
     ]);
 
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::esi_market_industry_pi::fast_demo_ctx());
     crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
@@ -1230,7 +1256,7 @@ async fn test_esi6_contracts_character_corporation_and_public_routes() {
         "esi:GET /corporations/{corporation_id}/contracts/{contract_id}/bids",
     ]);
 
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::esi_market_industry_pi::fast_demo_ctx());
     crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
@@ -1473,7 +1499,7 @@ async fn test_esi_planetary_interaction_schematics_and_colonies() {
         "plan:ESI-6",
     ]);
 
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::esi_market_industry_pi::fast_demo_ctx());
     crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
@@ -1749,7 +1775,7 @@ async fn test_esi6_industry_and_mining_routes() {
         "feat:esi.industry.systems",
     ]);
 
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::esi_market_industry_pi::fast_demo_ctx());
     crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
@@ -2266,7 +2292,7 @@ async fn test_esi6_market_character_and_corporation_orders_routes() {
         "esi:GET /corporations/{corporation_id}/orders/history",
     ]);
 
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(crate::esi_market_industry_pi::fast_demo_ctx());
     crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
@@ -2447,7 +2473,6 @@ pub(crate) mod esi_market_groups_sde_descriptions {
     use eve_machonet::SessionState;
     use eve_proto::PyRep;
     use eve_server::esi::{EsiRouter, OpenApiSpec};
-    use eve_server::router::ServerContext;
     use eve_server::services::station_structure::structure_upwell_ops::{
         load_ext_state, save_ext_state, StructureAccessProfile,
     };
@@ -2465,7 +2490,7 @@ pub(crate) mod esi_market_groups_sde_descriptions {
             "feat:esi.market.groups",
         ]);
 
-        let ctx = Arc::new(ServerContext::new());
+        let ctx = Arc::new(crate::esi_market_industry_pi::fast_demo_ctx());
         crate::common::pin_clock(&ctx);
         let router = EsiRouter::new(Arc::clone(&ctx));
         let spec = OpenApiSpec::pinned();
@@ -2637,7 +2662,7 @@ pub(crate) mod esi_market_groups_sde_descriptions {
             "feat:esi.planetary-interaction.customs",
         ]);
 
-        let ctx = Arc::new(ServerContext::new());
+        let ctx = Arc::new(crate::esi_market_industry_pi::fast_demo_ctx());
         crate::common::pin_clock(&ctx);
         let router = EsiRouter::new(Arc::clone(&ctx));
         let spec = OpenApiSpec::pinned();
@@ -2993,7 +3018,6 @@ pub(crate) mod esi6_contracts_character_corporation_public {
     use eve_machonet::SessionState;
     use eve_proto::PyRep;
     use eve_server::esi::{EsiRouter, OpenApiSpec};
-    use eve_server::router::ServerContext;
     use serde_json::json;
     use std::sync::Arc;
 
@@ -3021,7 +3045,7 @@ pub(crate) mod esi6_contracts_character_corporation_public {
             "feat:esi.contracts.public",
         ]);
 
-        let ctx = Arc::new(ServerContext::new());
+        let ctx = Arc::new(crate::esi_market_industry_pi::fast_demo_ctx());
         crate::common::pin_clock(&ctx);
         let router = EsiRouter::new(Arc::clone(&ctx));
         let spec = OpenApiSpec::pinned();
@@ -3272,7 +3296,7 @@ pub(crate) mod esi6_contracts_character_corporation_public {
             "plan:ESI-6",
         ]);
 
-        let ctx = Arc::new(ServerContext::new());
+        let ctx = Arc::new(crate::esi_market_industry_pi::fast_demo_ctx());
         crate::common::pin_clock(&ctx);
         let router = EsiRouter::new(Arc::clone(&ctx));
         let spec = OpenApiSpec::pinned();
@@ -3529,7 +3553,6 @@ pub(crate) mod esi6_industry_mining_routes {
     use eve_machonet::SessionState;
     use eve_proto::PyRep;
     use eve_server::esi::{EsiRouter, OpenApiSpec};
-    use eve_server::router::ServerContext;
     use glam::DVec3;
     use serde_json::json;
     use std::sync::Arc;
@@ -3557,7 +3580,7 @@ pub(crate) mod esi6_industry_mining_routes {
             "feat:esi.industry.corp-observers",
         ]);
 
-        let ctx = Arc::new(ServerContext::new());
+        let ctx = Arc::new(crate::esi_market_industry_pi::fast_demo_ctx());
         crate::common::pin_clock(&ctx);
         let router = EsiRouter::new(Arc::clone(&ctx));
         let spec = OpenApiSpec::pinned();
@@ -4055,7 +4078,6 @@ pub(crate) mod esi_corp_role_gated_mining {
     use eve_proto::PyRep;
     use eve_server::esi::sample_routes::is_operation_implemented;
     use eve_server::esi::{EsiHttpRequest, EsiRouter};
-    use eve_server::router::ServerContext;
     use glam::DVec3;
     use serde_json::{json, Value};
     use std::collections::{HashMap, HashSet};
@@ -4090,7 +4112,7 @@ pub(crate) mod esi_corp_role_gated_mining {
         ));
         assert!(is_operation_implemented("GET", "/corporations/{corporation_id}/customs_offices"));
 
-        let ctx = Arc::new(ServerContext::new());
+        let ctx = Arc::new(crate::esi_market_industry_pi::fast_demo_ctx());
         crate::common::pin_clock(&ctx);
         let router = EsiRouter::new(Arc::clone(&ctx));
 
@@ -4438,7 +4460,7 @@ pub(crate) mod esi_corp_role_gated_mining {
             "feat:esi.market.history",
         ]);
 
-        let ctx = Arc::new(ServerContext::new());
+        let ctx = Arc::new(crate::esi_market_industry_pi::fast_demo_ctx());
         crate::common::pin_clock(&ctx);
         let router = EsiRouter::new(Arc::clone(&ctx));
 
@@ -4836,7 +4858,7 @@ pub(crate) mod esi_corp_mining_customs_offices {
             "esi:GET /corporations/{corporation_id}/customs_offices",
         ]);
 
-        let ctx = Arc::new(ServerContext::new());
+        let ctx = Arc::new(crate::esi_market_industry_pi::fast_demo_ctx());
         common::pin_clock(&ctx);
 
         let ceo_id = 90_000_001_i64;
@@ -5073,7 +5095,7 @@ pub(crate) mod esi_corp_mining_customs_offices {
             "esi:GET /characters/{character_id}/orders/history",
         ]);
 
-        let ctx = Arc::new(ServerContext::new());
+        let ctx = Arc::new(crate::esi_market_industry_pi::fast_demo_ctx());
         common::pin_clock(&ctx);
 
         let char_id = 90_000_001_i64;
@@ -5215,7 +5237,7 @@ pub(crate) mod esi_corp_mining_customs_offices {
             "esi:GET /corporations/{corporation_id}/orders/history",
         ]);
 
-        let ctx = Arc::new(ServerContext::new());
+        let ctx = Arc::new(crate::esi_market_industry_pi::fast_demo_ctx());
         common::pin_clock(&ctx);
 
         let ceo_id = 90_000_001_i64;
@@ -5559,7 +5581,7 @@ pub(crate) mod esi_fw_stats_systems_leaderboards {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", db_path.display()));
         }
-        let ctx = Arc::new(ServerContext::from_sqlite(&db_path).expect("sqlite ctx"));
+        let ctx = Arc::new(crate::esi_market_industry_pi::fast_from_sqlite(&db_path).expect("sqlite ctx"));
         common::pin_clock(&ctx);
 
         let (char_a, corp_a, mut sess_a) =
@@ -5798,7 +5820,7 @@ pub(crate) mod esi_fw_stats_systems_leaderboards {
         // 7. SQLite persistence across ServerContext reload
         drop(router);
         drop(ctx);
-        let ctx_reloaded = Arc::new(ServerContext::from_sqlite(&db_path).expect("reload sqlite"));
+        let ctx_reloaded = Arc::new(crate::esi_market_industry_pi::fast_from_sqlite(&db_path).expect("reload sqlite"));
         let reloaded_token = issue_token_with_scopes(
             &ctx_reloaded,
             "fw_pilot_a",
@@ -5826,7 +5848,7 @@ pub(crate) mod esi_fw_stats_systems_leaderboards {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", db_path.display()));
         }
-        let ctx = Arc::new(ServerContext::from_sqlite(&db_path).expect("sqlite ctx"));
+        let ctx = Arc::new(crate::esi_market_industry_pi::fast_from_sqlite(&db_path).expect("sqlite ctx"));
         common::pin_clock(&ctx);
 
         // 1. Seed live SDE-topology incursions via ensure_special_sites_spawned
@@ -5952,7 +5974,7 @@ pub(crate) mod esi_fw_stats_systems_leaderboards {
         // 3. SQLite persistence across reload
         drop(router);
         drop(ctx);
-        let ctx_reloaded = Arc::new(ServerContext::from_sqlite(&db_path).expect("reload sqlite"));
+        let ctx_reloaded = Arc::new(crate::esi_market_industry_pi::fast_from_sqlite(&db_path).expect("reload sqlite"));
         let router_reloaded = EsiRouter::new(ctx_reloaded);
         let (campaigns_after, _) = validate_and_json(
             &router_reloaded,
@@ -5976,7 +5998,7 @@ pub(crate) mod esi_fw_stats_systems_leaderboards {
         // parity: esi:GET /loyalty/stores/{corporation_id}/offers
         eve_testkit::attest(&["esi:GET /loyalty/stores/{corporation_id}/offers"]);
 
-        let ctx = Arc::new(ServerContext::new());
+        let ctx = Arc::new(crate::esi_market_industry_pi::fast_demo_ctx());
         common::pin_clock(&ctx);
         let router = EsiRouter::new(Arc::clone(&ctx));
         let spec = OpenApiSpec::pinned();
@@ -6064,8 +6086,8 @@ pub(crate) mod esi_char_public_contracts_live {
     fn open_seeded_sqlite_ctx(tag: &str) -> (std::path::PathBuf, Arc<ServerContext>) {
         let db_path = temp_sqlite_path(tag);
         let repo = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open sqlite"));
-        let ctx = Arc::new(ServerContext::with_repository(repo));
-        let demo = WorldRepository::with_demo_seed().with_snapshot(|s| s.clone());
+        let ctx = Arc::new(crate::esi_market_industry_pi::fast_with_repo(repo));
+        let demo = crate::esi_market_industry_pi::shared_demo_snapshot();
         ctx.db
             .try_with_mut_snapshot(|snap| {
                 *snap = demo;
@@ -6250,7 +6272,7 @@ pub(crate) mod esi_char_public_contracts_live {
         drop(router);
         drop(ctx);
         let repo2 = Arc::new(WorldRepository::open_sqlite(&db_path).expect("reopen sqlite"));
-        let ctx2 = Arc::new(ServerContext::with_repository(repo2));
+        let ctx2 = Arc::new(crate::esi_market_industry_pi::fast_with_repo(repo2));
         let router2 = EsiRouter::new(ctx2);
         let pub_bids2 = get_json(&router2, &spec, format!("/v1/contracts/public/bids/{cid}/"), None);
         assert_eq!(pub_bids2.as_array().unwrap().len(), 1);
@@ -6457,7 +6479,7 @@ pub(crate) mod esi_char_public_contracts_live {
         drop(router);
         drop(ctx);
         let repo2 = Arc::new(WorldRepository::open_sqlite(&db_path).expect("reopen sqlite"));
-        let ctx2 = Arc::new(ServerContext::with_repository(repo2));
+        let ctx2 = Arc::new(crate::esi_market_industry_pi::fast_with_repo(repo2));
         let router2 = EsiRouter::new(ctx2);
         let tok_member2 = issue_token_with_scopes(&router2.ctx, member_char, vec!["esi-contracts.read_corporation_contracts.v1"]);
         let corp_bids2 = get_json(
@@ -6655,7 +6677,7 @@ pub(crate) mod esi_char_public_contracts_live {
         drop(router);
         drop(ctx);
         let repo2 = Arc::new(WorldRepository::open_sqlite(&db_path).expect("reopen sqlite"));
-        let ctx2 = Arc::new(ServerContext::with_repository(repo2));
+        let ctx2 = Arc::new(crate::esi_market_industry_pi::fast_with_repo(repo2));
         let router2 = EsiRouter::new(ctx2);
         let tok_char2 = issue_token_with_scopes(&router2.ctx, char1, vec!["esi-industry.read_character_jobs.v1"]);
         let persisted = get_json(&router2, &spec, format!("/v1/characters/{char1}/industry/jobs/?include_completed=true"), Some(&tok_char2));
@@ -6754,8 +6776,8 @@ pub(crate) mod esi_char_contract_party_isolation {
     fn open_seeded_sqlite_ctx(tag: &str) -> (std::path::PathBuf, Arc<ServerContext>) {
         let db_path = temp_sqlite_path(tag);
         let repo = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open sqlite"));
-        let ctx = Arc::new(ServerContext::with_repository(repo));
-        let demo = WorldRepository::with_demo_seed().with_snapshot(|s| s.clone());
+        let ctx = Arc::new(crate::esi_market_industry_pi::fast_with_repo(repo));
+        let demo = crate::esi_market_industry_pi::shared_demo_snapshot();
         ctx.db
             .try_with_mut_snapshot(|snap| {
                 *snap = demo;
@@ -7328,7 +7350,7 @@ pub(crate) mod esi_char_contract_party_isolation {
         drop(router);
         drop(ctx);
         let repo2 = Arc::new(WorldRepository::open_sqlite(&db_path).expect("reopen sqlite"));
-        let ctx2 = Arc::new(ServerContext::with_repository(repo2));
+        let ctx2 = Arc::new(crate::esi_market_industry_pi::fast_with_repo(repo2));
         crate::common::pin_clock(&ctx2);
         ctx2.db.clock().advance_secs(31 * 86_400);
         let router2 = EsiRouter::new(ctx2);
@@ -7370,7 +7392,6 @@ pub(crate) mod esi_calendar_rpc_http_persistence {
     use eve_proto::PyRep;
     use eve_server::esi::router::EsiRouter;
     use eve_server::esi::{EsiHttpRequest, OpenApiSpec};
-    use eve_server::router::ServerContext;
     use eve_server::services::sov_services::claim_system_sovereignty;
     use serde_json::{json, Value};
     use std::collections::{HashMap, HashSet};
@@ -7402,7 +7423,7 @@ pub(crate) mod esi_calendar_rpc_http_persistence {
 
     #[tokio::test]
     async fn test_esi_calendar_rpc_and_http_persistence() {
-        let ctx = Arc::new(ServerContext::new());
+        let ctx = Arc::new(crate::esi_market_industry_pi::fast_demo_ctx());
         crate::common::pin_clock(&ctx);
         let router = EsiRouter::new(Arc::clone(&ctx));
         let spec = OpenApiSpec::pinned();
@@ -7547,7 +7568,7 @@ pub(crate) mod esi_calendar_rpc_http_persistence {
 
     #[tokio::test]
     async fn test_esi_contacts_labels_and_mail_lists() {
-        let ctx = Arc::new(ServerContext::new());
+        let ctx = Arc::new(crate::esi_market_industry_pi::fast_demo_ctx());
         crate::common::pin_clock(&ctx);
         let router = EsiRouter::new(Arc::clone(&ctx));
         let spec = OpenApiSpec::pinned();
@@ -7702,7 +7723,7 @@ pub(crate) mod esi_calendar_rpc_http_persistence {
 
     #[tokio::test]
     async fn test_esi_corp_governance_roles_limit_and_sov_map() {
-        let ctx = Arc::new(ServerContext::new());
+        let ctx = Arc::new(crate::esi_market_industry_pi::fast_demo_ctx());
         crate::common::pin_clock(&ctx);
         let router = EsiRouter::new(Arc::clone(&ctx));
         let spec = OpenApiSpec::pinned();
@@ -7935,7 +7956,6 @@ pub(crate) mod esi_corp_blueprints_structures_live {
     use eve_server::esi::router::EsiRouter;
     use eve_server::esi::{EsiHttpRequest, OpenApiSpec};
     use eve_server::quasar_gateway::{STATUS_OK, STATUS_UNAUTHORIZED};
-    use eve_server::router::ServerContext;
     use eve_server::services::quasar_payment_store_types::{
         save_store_catalog, PaymentTokenRecord, StoreCatalog, StoreCategory,
         StoreOffer, StoreProduct,
@@ -7960,7 +7980,7 @@ pub(crate) mod esi_corp_blueprints_structures_live {
 
     #[tokio::test]
     async fn test_esi_corp_blueprints_and_structures_live_rpcs() {
-        let ctx = Arc::new(ServerContext::new());
+        let ctx = Arc::new(crate::esi_market_industry_pi::fast_demo_ctx());
         crate::common::pin_clock(&ctx);
         let router = EsiRouter::new(Arc::clone(&ctx));
         let spec = OpenApiSpec::pinned();
@@ -8156,7 +8176,7 @@ pub(crate) mod esi_corp_blueprints_structures_live {
 
     #[tokio::test]
     async fn test_quasar_title_definitions_and_space_cdn() {
-        let ctx = Arc::new(ServerContext::new());
+        let ctx = Arc::new(crate::esi_market_industry_pi::fast_demo_ctx());
         crate::common::pin_clock(&ctx);
         let router = EsiRouter::new(Arc::clone(&ctx));
         let mut s = sess(70_202, 90_000_001, 98_000_001, 30_000_142, 0);
@@ -8231,7 +8251,7 @@ pub(crate) mod esi_corp_blueprints_structures_live {
 
     #[tokio::test]
     async fn test_quasar_freelance_projects_and_item_delivery() {
-        let ctx = ServerContext::new();
+        let ctx = crate::esi_market_industry_pi::fast_demo_ctx();
         crate::common::pin_clock(&ctx);
 
         let manager_id = 90_000_001_i64;
@@ -8396,7 +8416,7 @@ pub(crate) mod esi_corp_blueprints_structures_live {
 
     #[tokio::test]
     async fn test_quasar_payment_schedules_tokens_and_store() {
-        let ctx = ServerContext::new();
+        let ctx = crate::esi_market_industry_pi::fast_demo_ctx();
         crate::common::pin_clock(&ctx);
 
         ctx.db.with_mut_snapshot(|snap| {

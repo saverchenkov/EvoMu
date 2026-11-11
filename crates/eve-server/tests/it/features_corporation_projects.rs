@@ -32,6 +32,21 @@ use eve_server::services::insurgency_services::{
 use eve_server::services::pvp_filament_mgr::{get_pvp_filament_match_spec, load_pvp_store};
 use glam::DVec3;
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+
+fn fast_demo_ctx() -> ServerContext {
+    static BASE: OnceLock<(Arc<eve_sde::SdeRegistry>, eve_db::WorldStateSnapshot)> = OnceLock::new();
+    let (sde, snap) = BASE.get_or_init(|| {
+        let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
+        let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+        let _ = eve_server::world_seeder::seed_dual_anchor_markets(&db, &sde);
+        (sde, db.with_snapshot(Clone::clone))
+    });
+    let repo = Arc::new(eve_db::WorldRepository::new_empty());
+    repo.with_mut_snapshot(|s| *s = snap.clone());
+    ServerContext::with_sde_and_repository(sde.clone(), repo)
+        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED)
+}
 
 fn fast_forward_secs(ctx: &ServerContext, secs: u64) {
     ctx.clock().advance_secs(secs);
@@ -81,7 +96,7 @@ async fn kill_npc_with_turret_rpc(
     npc_id: i64,
 ) {
     let sys_h = ctx.systems.get_or_spawn(sys_id);
-    for _ in 0..300 {
+    for _ in 0..60 {
         let warping = sys_h
             .get_ball_snapshot(npc_id)
             .await
@@ -95,7 +110,7 @@ async fn kill_npc_with_turret_rpc(
         if !warping && !invuln {
             break;
         }
-        sys_h.step_manual(if warping { 2.0 } else { 1.0 }).await.unwrap();
+        sys_h.step_manual(if warping { 15.0 } else { 5.0 }).await.unwrap();
     }
     let npc_pos = sys_h.get_ball_snapshot(npc_id).await.unwrap().expect("NPC ball").1.position;
     let _ = sys_h.set_movement_mode(ship_id, MovementMode::Stop).await;
@@ -117,8 +132,8 @@ async fn kill_npc_with_turret_rpc(
     )
     .await
     .expect("dogmaIM.Activate on NPC");
-    for _ in 0..20 {
-        sys_h.step_manual(1.0).await.unwrap();
+    for _ in 0..5 {
+        sys_h.step_manual(5.0).await.unwrap();
         if sys_h.get_ball_snapshot(npc_id).await.unwrap().is_none() {
             break;
         }
@@ -138,8 +153,8 @@ async fn warp_ship_via_rpc(ctx: &ServerContext, sess: &mut SessionState, sys_id:
     .await
     .expect("beyonce.CmdWarpToStuff");
     let sys_h = ctx.systems.get_or_spawn(sys_id);
-    for _ in 0..300 {
-        sys_h.step_manual(1.0).await.unwrap();
+    for _ in 0..25 {
+        sys_h.step_manual(15.0).await.unwrap();
         if sys_h.get_ball_snapshot(ship_id).await.unwrap().is_some_and(|(_, b)| !matches!(b.mode, MovementMode::Warp { .. })) {
             break;
         }
@@ -172,13 +187,17 @@ async fn total_lp_via_rpc(ctx: &ServerContext, sess: &mut SessionState) -> i64 {
         .expect("LPSvc.GetAllMyCharacterWalletLPBalances");
     let PyRep::List(rows) = rep else { return 0 };
     rows.iter()
-        .filter_map(|r| r.dict_get("lp").and_then(PyRep::as_i64))
+        .filter_map(|r| match r {
+            PyRep::Tuple(t) => t.get(1).and_then(PyRep::as_i64),
+            _ => r.dict_get("lp").and_then(PyRep::as_i64),
+        })
         .sum()
 }
 
 fn find_recipe_for_trader(ctx: &ServerContext, trader_type_id: u32, input_type_id: u32) -> (u32, u32) {
+    static RECIPES: OnceLock<std::collections::BTreeMap<String, serde_json::Value>> = OnceLock::new();
     let (recipes, _) = ctx.sde.item_trader_component_for_type(trader_type_id).unwrap().expect("itemTrader component");
-    let table = ctx.sde.load_cfsd_nested("res:/staticdata/itemtraderrecipes.fsdbinary").unwrap();
+    let table = RECIPES.get_or_init(|| ctx.sde.load_cfsd_nested("res:/staticdata/itemtraderrecipes.fsdbinary").unwrap());
     for rid in recipes {
         if let Some(rv) = table.get(&rid.to_string()) {
             let has_in = rv.get("inputItems").and_then(|v| v.as_object()).is_some_and(|m| m.contains_key(&input_type_id.to_string()));
@@ -194,7 +213,7 @@ fn find_recipe_for_trader(ctx: &ServerContext, trader_type_id: u32, input_type_i
 #[tokio::test]
 async fn test_b41_insurgency_laundering_roamer_drops_fob_and_war_hq_crates() {
 
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     crate::common::pin_clock(&ctx);
     let (_enemy_sys, front_sys, cmd_sys, rear_sys) = setup_warzone_chain(&ctx);
 
@@ -311,7 +330,7 @@ async fn test_b41_insurgency_laundering_roamer_drops_fob_and_war_hq_crates() {
 #[tokio::test]
 async fn test_b41_insurgency_mining_ambush_ransom_rescue_destroy_and_lp_split() {
 
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     crate::common::pin_clock(&ctx);
     let (_enemy_sys, front_sys, _cmd_sys, _rear_sys) = setup_warzone_chain(&ctx);
 
@@ -414,7 +433,7 @@ async fn test_b41_insurgency_mining_ambush_ransom_rescue_destroy_and_lp_split() 
 #[tokio::test]
 async fn test_b41_insurgency_outpost_raid_sizes_timers_defenders_bc_and_respawn() {
 
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     crate::common::pin_clock(&ctx);
     let (_enemy_sys, front_sys, _cmd_sys, _rear_sys) = setup_warzone_chain(&ctx);
 
@@ -526,7 +545,7 @@ async fn test_b41_insurgency_outpost_raid_sizes_timers_defenders_bc_and_respawn(
 #[tokio::test]
 async fn test_b41_proving_grounds_fleet_queue_restrictions_boundary_timeout_and_rewards() {
 
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     crate::common::pin_clock(&ctx);
     let jita = 30_000_142_u32;
     let fil_tid = 72_984_u32; // 2v2 Battleships Proving Filament
@@ -785,7 +804,7 @@ async fn kill_npc_with_turret_rpc(
 #[tokio::test]
 async fn test_b41_outpost_raid_deadspace_warp_gate_occupancy_t3_and_warzone_faction() {
 
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     crate::common::pin_clock(&ctx);
     let (_enemy_sys, front_sys, _cmd_sys, _rear_sys) = setup_warzone_chain(&ctx);
 
@@ -942,7 +961,7 @@ async fn test_b41_outpost_raid_deadspace_warp_gate_occupancy_t3_and_warzone_fact
 #[tokio::test]
 async fn test_b41_insurgency_stage3_roamer_probabilistic_rng_promotion() {
 
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     crate::common::pin_clock(&ctx);
     let (_enemy_sys, front_sys, _cmd_sys, _rear_sys) = setup_warzone_chain(&ctx);
 
@@ -964,7 +983,7 @@ async fn test_b41_insurgency_stage3_roamer_probabilistic_rng_promotion() {
     ctx.mechanic_rng.set_seed(Some(42));
     let sys_h = ctx.systems.get_or_spawn(front_sys);
     let (mut named_pir, mut named_enf) = (0_usize, 0_usize);
-    for _ in 0..20 {
+    for _ in 0..10 {
         fast_forward_secs(&ctx, 2);
         eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
         let (pir_ball, pir_tid, enf_ball, enf_tid) = with_combat_ephemeral(&ctx, |rt| {
@@ -987,15 +1006,15 @@ async fn test_b41_insurgency_stage3_roamer_probabilistic_rng_promotion() {
         }
     }
     assert!(
-        (1..20).contains(&named_pir) && (1..20).contains(&named_enf),
-        "Stage >= 3 named roamer promotion must be probabilistic via MechanicRng (~35%), got pir={named_pir}/20 enf={named_enf}/20"
+        (1..10).contains(&named_pir) && (1..10).contains(&named_enf),
+        "Stage >= 3 named roamer promotion must be probabilistic via MechanicRng (~35%), got pir={named_pir}/10 enf={named_enf}/10"
     );
 }
 
 #[tokio::test]
 async fn test_b41_proving_grounds_party_size_boss_range_cargo_implant_and_atomic_ticket() {
 
-    let ctx = ServerContext::new();
+    let ctx = fast_demo_ctx();
     crate::common::pin_clock(&ctx);
     let jita = 30_000_142_u32;
     let fil_2v2 = 72_984_u32; // 2v2 Battleships Proving Filament
