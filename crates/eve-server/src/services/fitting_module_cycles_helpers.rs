@@ -1607,6 +1607,14 @@ async fn deactivate_repeating_cycle_after_action(
 /// cycle-start pulses queued by `step_ballpark_and_cycles` (`R-AOE-SALVAGE-CYCLE-01`).
 pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u32) {
     let actions = ctx.systems.take_pending_cycle_actions(sys_id);
+    execute_pending_cycle_actions_list(ctx, sys_id, actions).await;
+}
+
+pub(crate) async fn execute_pending_cycle_actions_list(
+    ctx: &ServerContext,
+    sys_id: u32,
+    actions: Vec<crate::system_actor::PendingCycleAction>,
+) {
     if actions.is_empty() {
         return;
     }

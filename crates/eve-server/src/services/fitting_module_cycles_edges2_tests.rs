@@ -571,7 +571,8 @@ async fn activate_auth_offline_burnout_nanite_reactivation_and_overload_edges() 
         );
     });
     let _ = ctx.drain_notifications(char_id);
-    ctx.systems.push_pending_cycle_actions(
+    crate::services::inventory_fitting::fitting_module_cycles::execute_pending_cycle_actions_list(
+        &ctx,
         sys_id,
         vec![crate::system_actor::PendingCycleAction::CycleWeaponDamage {
             attacker_char_id: Some(char_id),
@@ -583,9 +584,6 @@ async fn activate_auth_offline_burnout_nanite_reactivation_and_overload_edges() 
             applied_dmg: 25.0,
             notified: true,
         }],
-    );
-    crate::services::inventory_fitting::fitting_module_cycles::execute_pending_cycle_actions(
-        &ctx, sys_id,
     )
     .await;
     let notifs = ctx.drain_notifications(char_id);
