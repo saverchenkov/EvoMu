@@ -437,6 +437,24 @@ pub fn record_scooped_deployable_damage(
     });
 }
 
+fn is_non_disruptor_meta_in_system(
+    snap: &eve_db::WorldStateSnapshot,
+    sde: &eve_sde::SdeRegistry,
+    solar_system_id: u32,
+    item_id: i64,
+) -> bool {
+    let sys_loc = i64::from(solar_system_id);
+    if let Some(it) = snap.items.get(&item_id) {
+        it.location_id == sys_loc
+            && sde.types.get(&it.type_id).is_none_or(|t| t.group_id != 361)
+    } else {
+        snap.deployable_state
+            .deployables
+            .get(&item_id)
+            .is_some_and(|r| r.solar_system_id == solar_system_id)
+    }
+}
+
 /// Advances mobile deployable simulation in the solar system actor on each server tick (`feat:structures.mobile-tractor`, `feat:structures.mobile-tractor-rules`, `feat:structures.mobile-depot-lifetime-reinforce`).
 /// Executes automated expiry sweeps and MTU automated tractoring & hold-capacity looting.
 pub fn step_mobile_deployables_in_actor(
@@ -459,11 +477,14 @@ pub fn step_mobile_deployables_in_actor(
 
     // Single lightweight snapshot check to return early on idle ticks without repeated locks/JSON parses.
     let (needs_ext, expired_ids, has_timer_transition, active_mtus) = db.with_snapshot(|snap| {
-        let meta_due = snap.sp6_lifecycle.space_object_meta.values().any(|meta| {
+        let meta_due = snap.sp6_lifecycle.space_object_meta.iter().any(|(&iid, meta)| {
             !meta.anchor_completed
                 && meta
                     .anchor_start_unix
-                    .is_some_and(|start| now_unix >= start.saturating_add(meta.anchoring_delay_secs as u64))
+                    .is_some_and(|start| {
+                        now_unix >= start.saturating_add(meta.anchoring_delay_secs.ceil() as u64)
+                    })
+                && is_non_disruptor_meta_in_system(snap, sde, solar_system_id, iid)
         });
         let st = &snap.deployable_state;
         if st.deployables.is_empty() && st.mmju_spools.is_empty() {
@@ -589,14 +610,22 @@ pub fn step_mobile_deployables_in_actor(
                     }
                 });
             }
-            for meta in snap.sp6_lifecycle.space_object_meta.values_mut() {
-                if !meta.anchor_completed {
-                    if let Some(start) = meta.anchor_start_unix {
-                        let delay = meta.anchoring_delay_secs as u64;
-                        if now_unix >= start.saturating_add(delay) {
-                            meta.anchor_completed = true;
-                        }
-                    }
+            let meta_ids: Vec<i64> = snap
+                .sp6_lifecycle
+                .space_object_meta
+                .iter()
+                .filter_map(|(&iid, meta)| {
+                    (!meta.anchor_completed
+                        && meta.anchor_start_unix.is_some_and(|start| {
+                            now_unix >= start.saturating_add(meta.anchoring_delay_secs.ceil() as u64)
+                        })
+                        && is_non_disruptor_meta_in_system(snap, sde, solar_system_id, iid))
+                    .then_some(iid)
+                })
+                .collect();
+            for iid in meta_ids {
+                if let Some(meta) = snap.sp6_lifecycle.space_object_meta.get_mut(&iid) {
+                    meta.anchor_completed = true;
                 }
             }
         });

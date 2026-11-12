@@ -748,3 +748,107 @@ fn w5a_p2_0c_sp6_and_crimewatch_restore_guards_preserve_state_across_closure_pan
         );
     });
 }
+
+#[tokio::test]
+async fn bf04_reconnect_stops_outbound_emergency_warp_and_delivers_set_state() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let orig_pos = DVec3::new(15_000_000_000.0, 0.0, 0.0);
+
+    let ship_id = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.solar_system_id = sys_id;
+        snap.item_positions.insert(ch.active_ship_id, orig_pos.to_array());
+        ch.active_ship_id
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 606,
+            position: orig_pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+
+    // 1. Disconnecting starts an outbound ~1,000,000 km emergency warp.
+    let disc = handle_character_logoff_or_disconnect_sync(&ctx, char_id)
+        .expect("disconnected ship hold");
+    assert!(disc.pre_warp_position.is_some());
+    let (_, warp_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(matches!(warp_ball.mode, MovementMode::Warp { .. }));
+
+    // Reconnecting while still <= 10,000 m from `orig_pos` (no return warp started) must
+    // stop the outbound emergency warp and NEVER insert `ship_id` into `ctx.active_warps` (#843).
+    reconnect_character_in_space_sync(&ctx, char_id).expect("reconnect");
+    assert!(
+        !ctx.active_warps.lock().unwrap().contains_key(&ship_id),
+        "emergency warp must not be tracked in active_warps (#843)"
+    );
+    let (_, stop_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(
+        matches!(stop_ball.mode, MovementMode::Stop),
+        "outbound emergency warp within 10km must stop on reconnect"
+    );
+
+    // 2. Reconnecting after moving > 10 km away initiates return warp without entering
+    // `active_warps`, and `UpdateStateRequest` still delivers `SetState`.
+    let _ = handle_character_logoff_or_disconnect_sync(&ctx, char_id).expect("logoff again");
+    if let Ok(mut bp) = sys_handle.ballpark.write() {
+        if let Some(b) = bp.balls.get_mut(&ship_id) {
+            b.position = orig_pos + DVec3::new(50_000_000.0, 0.0, 0.0);
+        }
+    }
+    reconnect_character_in_space_sync(&ctx, char_id).expect("reconnect return warp");
+    assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+    let _ = sys_handle.drain_observer_updates(ship_id).await;
+
+    let mut sess = SessionState::new(991_001);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
+    let bnd = ctx.bind_object(&sess, "beyonce", i64::from(sys_id)).unwrap();
+    let res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(bnd),
+            "UpdateStateRequest",
+            &[],
+            &HashMap::new(),
+            None,
+        )
+        .await;
+    assert_eq!(res.unwrap(), PyRep::None);
+    let (_, obs_evs, _) = sys_handle.drain_observer_updates(ship_id).await.unwrap();
+    assert!(
+        obs_evs
+            .iter()
+            .any(|ev| matches!(ev, eve_destiny::DestinyEvent::SetState { .. })),
+        "UpdateStateRequest on reconnect must deliver SetState (#843)"
+    );
+    let (_, post_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(
+        ctx.return_warps.lock().unwrap().contains(&ship_id),
+        "SP-6 reconnect return-warp must remain tracked in return_warps across UpdateStateRequest (#843)"
+    );
+    assert!(
+        matches!(
+            post_ball.mode,
+            MovementMode::Warp { destination, .. } if destination.distance(orig_pos) < 1.0
+        ),
+        "UpdateStateRequest on reconnect must preserve return warp toward orig_pos (#843): {:?}",
+        post_ball.mode
+    );
+}

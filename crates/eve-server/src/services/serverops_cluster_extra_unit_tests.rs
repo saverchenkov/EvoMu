@@ -555,3 +555,92 @@ fn mutant_kill_downtime_persistence_maintenance_map_and_admin_cluster_rpcs() {
         assert_eq!(snap.cluster_and_runtime.cluster_service_states.get("market_node"), Some(&true));
     });
 }
+
+#[tokio::test]
+async fn downtime_shutdown_logs_off_headless_sessions_and_preserves_shutdown_notice() {
+    use crate::router::NotificationTarget;
+
+    let (ctx, _) = make_ctx(1_767_225_600);
+    let gm_uid = 700_011_u64;
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let (player_uid, ship_id) = ctx.db.with_mut_snapshot(|snap| {
+        snap.accounts.insert(
+            "dt_gm".into(),
+            AccountRecord {
+                user_id: gm_uid,
+                username: "dt_gm".into(),
+                password_token: "x".into(),
+                role: eve_db::service_roles::ROLE_GM_MASK,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.solar_system_id = sys_id;
+        let uid = ch.user_id;
+        let sid = ch.active_ship_id;
+        snap.item_positions.insert(sid, [1_000_000.0, 0.0, 0.0]);
+        (uid, sid)
+    });
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle
+        .spawn_ball_with_meta(
+            Ball {
+                id: ship_id,
+                type_id: 606,
+                position: DVec3::new(1_000_000.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+            SlimItemMeta {
+                owner_id: char_id,
+                char_id: Some(char_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+    ctx.db
+        .acquire_online_lock(gm_uid, 9101, None, true, 1_767_225_600)
+        .unwrap();
+    ctx.db
+        .acquire_online_lock(player_uid, 9102, Some(char_id), true, 1_767_225_600)
+        .unwrap();
+    let _ = crate::services::fleet_social::ensure_xmpp_auth_token(&ctx, char_id);
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnRemoteMessage",
+        "charid",
+        vec![PyRep::String("stale".into())],
+    );
+
+    let disconnected = initiate_cluster_downtime_shutdown(&ctx);
+    assert_eq!(disconnected, 1);
+
+    // Non-GM headless session must have executed `logoff_character_sync`:
+    // lock released, XMPP token revoked, ship moved into `disconnected_ships`,
+    // stale notifications cleared, and `OnClusterShutdownInitiated` preserved.
+    let online_after = ctx.db.online_sessions_snapshot();
+    assert!(online_after.iter().any(|&(u, s)| u == gm_uid && s == 9101));
+    assert!(!online_after.iter().any(|&(u, _)| u == player_uid));
+    assert!(crate::sp6_lifecycle::has_active_disconnected_ship(&ctx.db, char_id));
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap
+            .service_state_blobs
+            .contains_key(&format!("xmpp:token:{char_id}")));
+    });
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(notifs
+        .iter()
+        .any(|n| n.event == "OnClusterShutdownInitiated"));
+    assert!(!notifs.iter().any(|n| n.event == "OnRemoteMessage"));
+}

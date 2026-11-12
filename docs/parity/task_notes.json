@@ -440,12 +440,12 @@
     "note": ""
   },
   "Z-1": {
-    "assessment": "DONE",
-    "note": "All catalog RPC methods implemented and verified against V24 client identifier corpus."
+    "assessment": "PARTIAL",
+    "note": "Catalog RPC handlers wired across implemented services; 37 open rpc rows remain in the parity ledger."
   },
   "Z-2": {
-    "assessment": "DONE",
-    "note": "All client notification methods implemented and verified with live session delivery assertions."
+    "assessment": "PARTIAL",
+    "note": "Client notification emitters and live session delivery verified; 3 open notify rows remain in the parity ledger."
   },
   "Z-3": {
     "assessment": "DONE",
@@ -456,8 +456,8 @@
     "note": "All 213 SDE static data resources and Dogma effect rows loaded from V24 client files and verified."
   },
   "Z-5": {
-    "assessment": "DONE",
-    "note": "All non-NA feature parity rows implemented and verified with live server state assertions."
+    "assessment": "PARTIAL",
+    "note": "Implemented server features verified with live state assertions; 21 open feat rows remain in the parity ledger."
   },
   "Z-6": {
     "assessment": "NOT STARTED",

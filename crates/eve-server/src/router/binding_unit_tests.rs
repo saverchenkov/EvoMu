@@ -845,6 +845,80 @@ fn special_fx_guid_for_module_sde_covers_all_groups_effects_and_fallbacks() {
     assert_eq!(special_fx_guid_for_module_sde(&sde, 910_020, 0, Some("completelyUnknown")), None);
 }
 
+#[test]
+fn bf03_headless_disconnect_session_releases_online_lock_and_logs_off_sync() {
+    let ctx = test_ctx();
+    let user_id = 1_u64;
+    let char_id = 90_000_001_i64;
+    let sid = 777_001_u64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = 30_000_142;
+        }
+    });
+    ctx.db
+        .acquire_online_lock(user_id, sid, Some(char_id), false, ctx.now_unix())
+        .expect("acquire online lock");
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnAccountChange",
+        "charid",
+        vec![eve_proto::PyRep::Integer(1)],
+    );
+
+    // No closer registered and no Tokio reactor running -> headless/admin disconnect must still
+    // release online lock, purge notifications, and record DB hold without panicking (#851).
+    ctx.disconnect_session(sid, "EndAllGameSessions", "Headless admin session kill");
+
+    assert!(
+        ctx.db.get_online_session(user_id).is_none(),
+        "headless disconnect_session must release online lock (#851)"
+    );
+    assert!(
+        ctx.drain_notifications_for_char(char_id).is_empty(),
+        "headless disconnect_session must run logoff_character_sync and clear pending notifications (#881)"
+    );
+    assert!(
+        crate::sp6_lifecycle::has_active_disconnected_ship(&ctx.db, char_id),
+        "headless disconnect_session must register in-space ship hold synchronously (#851)"
+    );
+}
+
+#[tokio::test]
+async fn bf03_tokio_headless_disconnect_session_spawns_hold_and_logs_off_sync() {
+    let ctx = test_ctx();
+    let user_id = 1_u64;
+    let char_id = 90_000_001_i64;
+    let sid = 777_002_u64;
+
+    let ship_id = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.solar_system_id = 30_000_142;
+        ch.active_ship_id
+    });
+    ctx.db
+        .acquire_online_lock(user_id, sid, Some(char_id), false, ctx.now_unix())
+        .expect("acquire online lock");
+
+    ctx.disconnect_session(sid, "EndAllGameSessions", "Headless Tokio session kill");
+
+    assert!(ctx.db.get_online_session(user_id).is_none());
+    assert!(crate::sp6_lifecycle::has_active_disconnected_ship(&ctx.db, char_id));
+    let sys_handle = ctx
+        .systems
+        .get_handle(30_000_142)
+        .expect("Tokio disconnect_session must spawn SystemActor for active in-space ship hold");
+    assert!(
+        sys_handle.get_ball_position_sync(ship_id).is_some(),
+        "Tokio disconnect_session must materialize the held ship ball in Ballpark (#851)"
+    );
+}
+
 #[cfg(test)]
 #[path = "binding_auth_unit_tests.rs"]
 mod binding_auth_unit_tests;

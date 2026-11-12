@@ -113,7 +113,7 @@ async fn drifter_hive_lookup_and_notify_account_changes() {
     let q2 = ctx.drain_notifications_for_char(c2);
     assert_eq!(
         q1.len(),
-        crate::router::cache_notifications::MAX_PENDING_NOTIFICATIONS_PER_CHAR + 1
+        crate::router::cache_notifications::MAX_PENDING_NOTIFICATIONS_PER_CHAR
     );
     assert_eq!(q1.last().unwrap().event, "OnAccountChange");
     assert_eq!(q2.len(), 1);

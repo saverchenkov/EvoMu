@@ -654,7 +654,10 @@ fn emit_structure_left_space_and_spawn_drops(ctx: &ServerContext, snap: &WorldSt
             marshaled_packet,
             created_filetime: now_ft,
         };
-        queues.entry(*cid).or_default().push(notif.clone());
+        crate::router::cache_notifications::push_pending_notification_capped(
+            queues.entry(*cid).or_default(),
+            notif.clone(),
+        );
         let _ = ctx.notify_tx.send((*cid, notif));
     }
     let corp_args = vec![eve_proto::PyRep::Integer(st.structure_id)];
@@ -670,7 +673,10 @@ fn emit_structure_left_space_and_spawn_drops(ctx: &ServerContext, snap: &WorldSt
             marshaled_packet,
             created_filetime: now_ft,
         };
-        queues.entry(cid).or_default().push(notif.clone());
+        crate::router::cache_notifications::push_pending_notification_capped(
+            queues.entry(cid).or_default(),
+            notif.clone(),
+        );
         let _ = ctx.notify_tx.send((cid, notif));
     }
     if st.type_id == crate::services::sov_services::TYPE_SOVEREIGNTY_HUB {
@@ -689,7 +695,10 @@ fn emit_structure_left_space_and_spawn_drops(ctx: &ServerContext, snap: &WorldSt
             for (ev, args) in [("OnSovereigntyChanged", sov_args.clone()), ("OnSolarSystemSovStructuresUpdated", structs_args.clone())] {
                 let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(*cid, *uid, ev, "solarsystemid", args.clone());
                 let notif = crate::router::PendingMachoNotification { seq_id: crate::router::cache_notifications::next_notification_seq_id(), recipient_char_id: *cid, event: ev.into(), id_type: "solarsystemid".into(), args, packet, marshaled_packet, created_filetime: now_ft };
-                queues.entry(*cid).or_default().push(notif.clone());
+                crate::router::cache_notifications::push_pending_notification_capped(
+                    queues.entry(*cid).or_default(),
+                    notif.clone(),
+                );
                 let _ = ctx.notify_tx.send((*cid, notif));
             }
         }
@@ -729,10 +738,23 @@ fn push_char_notification(
     id_type: &str,
     args: Vec<eve_proto::PyRep>,
 ) {
-    let uid = snap.characters.get(&char_id).map(|c| c.user_id).filter(|&u| u != 0);
+    let Some(uid) = snap
+        .characters
+        .get(&char_id)
+        .map(|c| c.user_id)
+        .filter(|&u| {
+            u != 0
+                && snap
+                    .sessions
+                    .get(&u)
+                    .is_some_and(|os| os.character_id == Some(char_id))
+        })
+    else {
+        return;
+    };
     let now_ft = ctx.now_blueos_filetime_ticks();
     let (packet, marshaled_packet) =
-        ServerContext::build_macho_notification_packet(char_id, uid, event, id_type, args.clone());
+        ServerContext::build_macho_notification_packet(char_id, Some(uid), event, id_type, args.clone());
     let notif = crate::router::PendingMachoNotification {
         seq_id: crate::router::cache_notifications::next_notification_seq_id(),
         recipient_char_id: char_id,
@@ -743,12 +765,15 @@ fn push_char_notification(
         marshaled_packet,
         created_filetime: now_ft,
     };
-    ctx.pending_notifications
+    let mut queues = ctx
+        .pending_notifications
         .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .entry(char_id)
-        .or_default()
-        .push(notif.clone());
+        .unwrap_or_else(|e| e.into_inner());
+    crate::router::cache_notifications::push_pending_notification_capped(
+        queues.entry(char_id).or_default(),
+        notif.clone(),
+    );
+    drop(queues);
     let _ = ctx.notify_tx.send((char_id, notif));
 }
 

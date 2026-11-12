@@ -630,17 +630,22 @@ pub fn emit_incursion_completion_combat_notifications(
         snap.characters
             .values()
             .filter_map(|c| {
-                sde.solar_systems.get(&c.solar_system_id).and_then(|sys| {
-                    (sys.constellation_id == cid).then_some(c.character_id)
-                })
+                let in_constellation = sde
+                    .solar_systems
+                    .get(&c.solar_system_id)
+                    .is_some_and(|sys| sys.constellation_id == cid);
+                let is_online = db
+                    .get_online_session(c.user_id)
+                    .is_some_and(|os| os.character_id == Some(c.character_id));
+                (in_constellation && is_online).then_some((c.character_id, Some(c.user_id)))
             })
             .collect::<Vec<_>>()
     });
 
-    for target_char_id in chars {
+    for (target_char_id, target_user_id) in chars {
         let (packet, marshaled_packet) = crate::router::ServerContext::build_macho_notification_packet(
             target_char_id,
-            None,
+            target_user_id,
             "OnInfluenceUpdate",
             "solarsystemid",
             inf_args.clone(),
@@ -657,7 +662,10 @@ pub fn emit_incursion_completion_combat_notifications(
         };
         if let Some(pend) = pending_notifications {
             if let Ok(mut map) = pend.write() {
-                map.entry(target_char_id).or_default().push(notif.clone());
+                crate::router::cache_notifications::push_pending_notification_capped(
+                    map.entry(target_char_id).or_default(),
+                    notif.clone(),
+                );
             }
         }
         if let Some(tx) = notify_tx {
@@ -672,7 +680,7 @@ pub fn emit_incursion_completion_combat_notifications(
             ];
             let (packet_rem, marshaled_packet_rem) = crate::router::ServerContext::build_macho_notification_packet(
                 target_char_id,
-                None,
+                target_user_id,
                 "OnTaleRemove",
                 "solarsystemid",
                 rem_args.clone(),
@@ -689,7 +697,10 @@ pub fn emit_incursion_completion_combat_notifications(
             };
             if let Some(pend) = pending_notifications {
                 if let Ok(mut map) = pend.write() {
-                    map.entry(target_char_id).or_default().push(notif_rem.clone());
+                    crate::router::cache_notifications::push_pending_notification_capped(
+                        map.entry(target_char_id).or_default(),
+                        notif_rem.clone(),
+                    );
                 }
             }
             if let Some(tx) = notify_tx {

@@ -21,12 +21,16 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
-use tokio::time::timeout;
+use tokio::time::{timeout, timeout_at, Instant};
 use tracing::{error, info, warn};
 
 use eve_server::router::NEXT_TRANSPORT_SESSION_ID as NEXT_SESSION_ID;
 const MAX_CONCURRENT_CONNECTIONS: usize = 512;
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
+const XMPP_IDLE_READ_TIMEOUT: Duration = Duration::from_secs(300);
+const XMPP_STANZA_TIMEOUT: Duration = Duration::from_secs(15);
+const XMPP_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_XMPP_STANZA_BYTES: usize = 64 * 1024;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -195,30 +199,24 @@ async fn main() -> Result<()> {
         xmpp_port = bound_xmpp_port,
         "Listening on XMPP Chat TCP"
     );
-    let xmpp_limiter = Arc::clone(&conn_limiter);
+    let xmpp_conn_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    let xmpp_ctx = Arc::clone(&ctx);
     tokio::spawn(async move {
-        while let Ok((mut stream, _addr)) = xmpp_listener.accept().await {
-            let Ok(permit) = Arc::clone(&xmpp_limiter).try_acquire_owned() else {
+        while let Ok((stream, _addr)) = xmpp_listener.accept().await {
+            let Ok(permit) = Arc::clone(&xmpp_conn_semaphore).try_acquire_owned() else {
                 continue;
             };
+            let client_ctx = Arc::clone(&xmpp_ctx);
             tokio::spawn(async move {
                 let _permit = permit;
-                let mut buf = [0u8; 2048];
-                let mut stream_count = 0u32;
-                loop {
-                    let Ok(n) = stream.read(&mut buf).await else {
-                        break;
-                    };
-                    if n == 0 {
-                        break;
-                    }
-                    let chunk = String::from_utf8_lossy(&buf[..n]);
-                    if let Some(reply) = xmpp_stanza_reply(&chunk, &mut stream_count) {
-                        if stream.write_all(reply.as_bytes()).await.is_err() {
-                            break;
-                        }
-                    }
-                }
+                handle_xmpp_stream_with_timeouts(
+                    stream,
+                    Some(&client_ctx),
+                    XMPP_IDLE_READ_TIMEOUT,
+                    XMPP_WRITE_TIMEOUT,
+                    XMPP_STANZA_TIMEOUT,
+                )
+                .await;
             });
         }
     });
@@ -603,44 +601,389 @@ fn quasar_advertise_host(bind_address: &str) -> &str {
     }
 }
 
-fn xmpp_stanza_reply(chunk: &str, stream_count: &mut u32) -> Option<String> {
-    if chunk.contains("<stream:stream") {
-        *stream_count += 1;
-        let reply = if *stream_count == 1 {
-            "<?xml version='1.0'?><stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' from='chat.evomu.local' id='evomu1' version='1.0'><stream:features><mechanisms xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><mechanism>PLAIN</mechanism><mechanism>ANONYMOUS</mechanism></mechanisms></stream:features>"
-        } else {
-            "<?xml version='1.0'?><stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' from='chat.evomu.local' id='evomu2' version='1.0'><stream:features><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/><session xmlns='urn:ietf:params:xml:ns:xmpp-session'/></stream:features>"
+enum XmppFrameOutcome {
+    Stanza(String),
+    CloseStream,
+    NeedMore { has_partial_stanza: bool },
+    Invalid(&'static str),
+}
+
+fn extract_next_xmpp_stanza(buf: &mut Vec<u8>) -> XmppFrameOutcome {
+    loop {
+        let ws = buf.iter().take_while(|b| b.is_ascii_whitespace()).count();
+        if ws > 0 {
+            buf.drain(..ws);
+        }
+        if buf.is_empty() {
+            return XmppFrameOutcome::NeedMore {
+                has_partial_stanza: false,
+            };
+        }
+
+        let valid_str = match std::str::from_utf8(buf) {
+            Ok(s) => s,
+            Err(e) => {
+                if e.error_len().is_some() {
+                    return XmppFrameOutcome::Invalid("invalid UTF-8 in XMPP stream");
+                }
+                let valid_up_to = e.valid_up_to();
+                if valid_up_to == 0 {
+                    return XmppFrameOutcome::NeedMore {
+                        has_partial_stanza: true,
+                    };
+                }
+                std::str::from_utf8(&buf[..valid_up_to]).unwrap_or("")
+            }
         };
-        return Some(reply.to_string());
-    }
-    if chunk.contains("<auth") {
-        return Some("<success xmlns='urn:ietf:params:xml:ns:xmpp-sasl'/>".to_string());
-    }
-    if chunk.contains("<presence") {
-        if let Some(to_pos) = chunk.find("to='").or_else(|| chunk.find("to=\"")) {
-            let rest = &chunk[to_pos + 4..];
-            if let Some(end_pos) = rest.find(['\'', '"']) {
-                let room_jid = &rest[..end_pos];
-                let p_reply = if chunk.contains("unavailable") {
-                    format!("<presence from='{room_jid}' to='user@chat.evomu.local/eve' type='unavailable'><x xmlns='http://jabber.org/protocol/muc#user'><item affiliation='member' role='none'/><status code='110'/></x></presence>")
-                } else {
-                    format!("<presence from='{room_jid}' to='user@chat.evomu.local/eve'><x xmlns='http://jabber.org/protocol/muc#user'><item affiliation='member' role='participant'/><status code='110'/></x></presence>")
+
+        if !valid_str.starts_with('<') {
+            return XmppFrameOutcome::Invalid("expected '<' at start of XMPP stanza");
+        }
+        if valid_str.starts_with("<?") {
+            let Some(end_pi) = valid_str.find("?>") else {
+                return XmppFrameOutcome::NeedMore {
+                    has_partial_stanza: true,
                 };
-                return Some(p_reply);
+            };
+            buf.drain(..end_pi + 2);
+            continue;
+        }
+        if valid_str.starts_with("</stream:stream") {
+            let Some(gt) = valid_str.find('>') else {
+                return XmppFrameOutcome::NeedMore {
+                    has_partial_stanza: true,
+                };
+            };
+            buf.drain(..=gt);
+            return XmppFrameOutcome::CloseStream;
+        }
+        if valid_str.starts_with("<stream:stream") {
+            let after = "<stream:stream".len();
+            let bytes = valid_str.as_bytes();
+            if bytes.len() == after {
+                return XmppFrameOutcome::NeedMore {
+                    has_partial_stanza: true,
+                };
+            }
+            if matches!(
+                bytes[after],
+                b'>' | b'/' | b' ' | b'\t' | b'\r' | b'\n'
+            ) {
+                let mut in_quote: Option<u8> = None;
+                for (idx, &b) in bytes.iter().enumerate().skip(after) {
+                    if let Some(q) = in_quote {
+                        if b == q {
+                            in_quote = None;
+                        }
+                    } else if b == b'\'' || b == b'"' {
+                        in_quote = Some(b);
+                    } else if b == b'>' {
+                        let stanza = valid_str[..=idx].to_string();
+                        buf.drain(..=idx);
+                        return XmppFrameOutcome::Stanza(stanza);
+                    }
+                }
+                return XmppFrameOutcome::NeedMore {
+                    has_partial_stanza: true,
+                };
             }
         }
+
+        let bytes = valid_str.as_bytes();
+        let mut i = 0usize;
+        let mut depth = 0usize;
+        let mut in_tag = false;
+        let mut closing_tag = false;
+        let mut in_quote: Option<u8> = None;
+        let mut last_non_ws_in_tag = 0u8;
+
+        while i < bytes.len() {
+            if !in_tag {
+                if bytes[i] == b'<' {
+                    if bytes[i..].starts_with(b"<!--") {
+                        let Some(rel_end) = valid_str[i + 4..].find("-->") else {
+                            return XmppFrameOutcome::NeedMore {
+                                has_partial_stanza: true,
+                            };
+                        };
+                        i += 4 + rel_end + 3;
+                        continue;
+                    }
+                    if bytes[i..].starts_with(b"<![CDATA[") {
+                        let Some(rel_end) = valid_str[i + 9..].find("]]>") else {
+                            return XmppFrameOutcome::NeedMore {
+                                has_partial_stanza: true,
+                            };
+                        };
+                        i += 9 + rel_end + 3;
+                        continue;
+                    }
+                    if bytes.get(i + 1) == Some(&b'/') {
+                        in_tag = true;
+                        closing_tag = true;
+                        last_non_ws_in_tag = 0;
+                        i += 2;
+                    } else if bytes.get(i + 1) == Some(&b'?') {
+                        let Some(rel_end) = valid_str[i + 2..].find("?>") else {
+                            return XmppFrameOutcome::NeedMore {
+                                has_partial_stanza: true,
+                            };
+                        };
+                        i += 2 + rel_end + 2;
+                    } else {
+                        in_tag = true;
+                        closing_tag = false;
+                        last_non_ws_in_tag = 0;
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            } else if let Some(q) = in_quote {
+                if bytes[i] == q {
+                    in_quote = None;
+                }
+                last_non_ws_in_tag = bytes[i];
+                i += 1;
+            } else if bytes[i] == b'\'' || bytes[i] == b'"' {
+                in_quote = Some(bytes[i]);
+                last_non_ws_in_tag = bytes[i];
+                i += 1;
+            } else if bytes[i] == b'>' {
+                in_tag = false;
+                if closing_tag {
+                    if depth == 0 {
+                        return XmppFrameOutcome::Invalid("unmatched XMPP closing tag");
+                    }
+                    depth -= 1;
+                } else if last_non_ws_in_tag != b'/' {
+                    depth += 1;
+                }
+                if depth == 0 {
+                    let stanza = valid_str[..=i].to_string();
+                    buf.drain(..=i);
+                    return XmppFrameOutcome::Stanza(stanza);
+                }
+                i += 1;
+            } else {
+                if !bytes[i].is_ascii_whitespace() {
+                    last_non_ws_in_tag = bytes[i];
+                }
+                i += 1;
+            }
+        }
+
+        return XmppFrameOutcome::NeedMore {
+            has_partial_stanza: true,
+        };
+    }
+}
+
+async fn handle_xmpp_stream_with_timeouts<S>(
+    mut stream: S,
+    ctx: Option<&ServerContext>,
+    idle_read_timeout: Duration,
+    write_timeout: Duration,
+    stanza_timeout: Duration,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let mut read_buf = [0u8; 2048];
+    let mut stanza_buf: Vec<u8> = Vec::with_capacity(2048);
+    let mut stream_count = 0u32;
+    let mut auth = eve_server::services::fleet_social::XmppStreamAuth::default();
+    let mut stanza_deadline: Option<Instant> = None;
+
+    'conn: loop {
+        loop {
+            if stanza_buf.len() > MAX_XMPP_STANZA_BYTES {
+                break 'conn;
+            }
+            match extract_next_xmpp_stanza(&mut stanza_buf) {
+                XmppFrameOutcome::Stanza(stanza) => {
+                    stanza_deadline = None;
+                    if let Some(reply) = xmpp_stanza_reply_with_ctx_and_auth(
+                        ctx,
+                        Some(&mut auth),
+                        &stanza,
+                        &mut stream_count,
+                    ) {
+                        if timeout(write_timeout, stream.write_all(reply.as_bytes()))
+                            .await
+                            .map_or(true, |r| r.is_err())
+                        {
+                            break 'conn;
+                        }
+                    }
+                }
+                XmppFrameOutcome::CloseStream => {
+                    let _ = timeout(write_timeout, stream.write_all(b"</stream:stream>")).await;
+                    break 'conn;
+                }
+                XmppFrameOutcome::NeedMore { has_partial_stanza } => {
+                    if has_partial_stanza {
+                        if stanza_deadline.is_none() {
+                            stanza_deadline = Some(Instant::now() + stanza_timeout);
+                        }
+                    } else {
+                        stanza_deadline = None;
+                    }
+                    break;
+                }
+                XmppFrameOutcome::Invalid(reason) => {
+                    tracing::debug!(reason, "Closing invalid XMPP stream");
+                    break 'conn;
+                }
+            }
+        }
+
+        if stanza_buf.len() > MAX_XMPP_STANZA_BYTES {
+            break 'conn;
+        }
+
+        let read_res = if let Some(deadline) = stanza_deadline {
+            timeout_at(deadline, stream.read(&mut read_buf)).await
+        } else {
+            timeout(idle_read_timeout, stream.read(&mut read_buf)).await
+        };
+        let Ok(Ok(n)) = read_res else {
+            break 'conn;
+        };
+        if n == 0 {
+            break 'conn;
+        }
+        if stanza_buf.len().saturating_add(n) > MAX_XMPP_STANZA_BYTES {
+            break 'conn;
+        }
+        stanza_buf.extend_from_slice(&read_buf[..n]);
+    }
+}
+
+#[cfg(test)]
+fn xmpp_stanza_reply(chunk: &str, stream_count: &mut u32) -> Option<String> {
+    xmpp_stanza_reply_with_ctx_and_auth(None, None, chunk, stream_count)
+}
+
+fn xmpp_root_tag(stanza: &str) -> Option<&str> {
+    let mut s = stanza.trim_start();
+    while s.starts_with("<?") {
+        let end = s.find("?>")?;
+        s = s[end + 2..].trim_start();
+    }
+    if !s.starts_with('<') || s.starts_with("</") || s.starts_with("<!") {
         return None;
     }
-    if let Some(id_pos) = chunk.find("id='").or_else(|| chunk.find("id=\"")) {
-        let rest = &chunk[id_pos + 4..];
-        if let Some(end_pos) = rest.find(['\'', '"']) {
-            let stanza_id = &rest[..end_pos];
-            return Some(eve_server::services::fleet_social::xmpp_iq_reply(
-                chunk, stanza_id,
-            ));
+    let after_lt = &s[1..];
+    let end = after_lt
+        .find(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
+        .unwrap_or(after_lt.len());
+    let tag = &after_lt[..end];
+    (!tag.is_empty()).then_some(tag)
+}
+
+fn xmpp_extract_attr<'a>(xml: &'a str, name: &str) -> Option<&'a str> {
+    for q in ['\'', '"'] {
+        let needle = format!("{name}={q}");
+        let mut offset = 0usize;
+        while let Some(rel) = xml[offset..].find(&needle) {
+            let start = offset + rel;
+            let prev_ok = start == 0
+                || xml[..start]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_ascii_whitespace());
+            let val_start = start + needle.len();
+            if prev_ok {
+                if let Some(end_rel) = xml[val_start..].find(q) {
+                    return Some(&xml[val_start..val_start + end_rel]);
+                }
+            }
+            offset = val_start;
         }
     }
     None
+}
+
+fn xmpp_stanza_reply_with_ctx_and_auth(
+    ctx: Option<&ServerContext>,
+    mut auth: Option<&mut eve_server::services::fleet_social::XmppStreamAuth>,
+    chunk: &str,
+    stream_count: &mut u32,
+) -> Option<String> {
+    match xmpp_root_tag(chunk) {
+        Some("stream:stream") => {
+            *stream_count += 1;
+            let reply = if *stream_count == 1 {
+                if ctx.is_some() {
+                    "<?xml version='1.0'?><stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' from='chat.evomu.local' id='evomu1' version='1.0'><stream:features><mechanisms xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><mechanism>PLAIN</mechanism></mechanisms></stream:features>"
+                } else {
+                    "<?xml version='1.0'?><stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' from='chat.evomu.local' id='evomu1' version='1.0'><stream:features><mechanisms xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><mechanism>PLAIN</mechanism><mechanism>ANONYMOUS</mechanism></mechanisms></stream:features>"
+                }
+            } else if ctx.is_none() || auth.as_deref().is_some_and(|a| a.sasl_authenticated) {
+                "<?xml version='1.0'?><stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' from='chat.evomu.local' id='evomu2' version='1.0'><stream:features><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/><session xmlns='urn:ietf:params:xml:ns:xmpp-session'/></stream:features>"
+            } else {
+                "<?xml version='1.0'?><stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' from='chat.evomu.local' id='evomu1' version='1.0'><stream:features><mechanisms xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><mechanism>PLAIN</mechanism></mechanisms></stream:features>"
+            };
+            Some(reply.to_string())
+        }
+        Some("auth") => {
+            if let Some(c) = ctx {
+                let Some(a) = auth.as_deref_mut() else {
+                    return Some(
+                        "<failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><not-authorized/></failure>"
+                            .to_string(),
+                    );
+                };
+                return match eve_server::services::fleet_social::xmpp_authenticate_sasl_plain(
+                    c, chunk, a,
+                ) {
+                    Ok(()) => Some("<success xmlns='urn:ietf:params:xml:ns:xmpp-sasl'/>".to_string()),
+                    Err(failure) => Some(failure.to_string()),
+                };
+            }
+            Some("<success xmlns='urn:ietf:params:xml:ns:xmpp-sasl'/>".to_string())
+        }
+        Some("presence") => {
+            if let Some(room_jid) = xmpp_extract_attr(chunk, "to") {
+                if let Some(c) = ctx {
+                    if !eve_server::services::fleet_social::xmpp_can_join_room(
+                        c,
+                        auth.as_deref(),
+                        room_jid,
+                    ) {
+                        return Some(format!(
+                            "<presence from='{room_jid}' type='error'><error type='auth'><not-authorized xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/></error></presence>"
+                        ));
+                    }
+                }
+                let to_jid = auth
+                    .as_deref()
+                    .and_then(|a| a.bound_jid.as_deref())
+                    .unwrap_or("user@chat.evomu.local/eve");
+                let is_unavailable = xmpp_extract_attr(chunk, "type")
+                    .is_some_and(|t| t.eq_ignore_ascii_case("unavailable"));
+                let p_reply = if is_unavailable {
+                    format!("<presence from='{room_jid}' to='{to_jid}' type='unavailable'><x xmlns='http://jabber.org/protocol/muc#user'><item affiliation='member' role='none'/><status code='110'/></x></presence>")
+                } else {
+                    format!("<presence from='{room_jid}' to='{to_jid}'><x xmlns='http://jabber.org/protocol/muc#user'><item affiliation='member' role='participant'/><status code='110'/></x></presence>")
+                };
+                return Some(p_reply);
+            }
+            None
+        }
+        Some("iq") => {
+            let stanza_id = xmpp_extract_attr(chunk, "id")?;
+            Some(
+                eve_server::services::fleet_social::xmpp_iq_reply_with_auth_mut(
+                    ctx,
+                    auth.as_deref_mut(),
+                    chunk,
+                    stanza_id,
+                ),
+            )
+        }
+        _ => None,
+    }
 }
 
 fn build_session_changed_envelope(

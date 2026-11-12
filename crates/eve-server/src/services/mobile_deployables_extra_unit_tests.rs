@@ -590,3 +590,57 @@ async fn activate_micro_jump_unit_rejects_range_mass_warp_cloak_and_scram() {
     });
     assert_eq!(handle_activate_micro_jump_unit(&ctx, &sess, mju_id).await.unwrap_err().code, "InvalidDeployable");
 }
+
+#[tokio::test]
+async fn step_mobile_deployables_scopes_meta_to_system_and_skips_warp_disruptors() {
+    let ctx = test_ctx();
+    let sys_a = 30_000_142u32;
+    let sys_b = 30_004_608u32;
+    let now = ctx.now_unix();
+    let local_depot = 99_100_001i64;
+    let other_sys_depot = 99_100_002i64;
+    let same_sys_mwd = 99_100_003i64;
+    let other_sys_mwd = 99_100_004i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (iid, tid, sys) in [
+            (local_depot, TYPE_MOBILE_DEPOT, sys_a),
+            (other_sys_depot, TYPE_MOBILE_DEPOT, sys_b),
+            (same_sys_mwd, 12_198, sys_a),
+            (other_sys_mwd, 12_198, sys_b),
+        ] {
+            put_space_item(snap, iid, tid, 90_000_001, sys, [0.0, 0.0, 0.0]);
+            snap.sp6_lifecycle.space_object_meta.insert(
+                iid,
+                eve_db::PersistedSpaceObjectMeta {
+                    anchor_start_unix: Some(now),
+                    anchoring_delay_secs: 60.0,
+                    anchor_completed: false,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let mut ballpark = Ballpark::new(sys_a);
+    let mut cycles = Vec::new();
+    step_mobile_deployables_in_actor(
+        &mut ballpark,
+        &mut cycles,
+        &ctx.mechanic_rng,
+        None,
+        Some(&ctx.sde),
+        Some(&ctx.db),
+        Some(&ctx.mechanic_rng),
+        sys_a,
+        1.0,
+        now + 120,
+    );
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.sp6_lifecycle.space_object_meta[&local_depot].anchor_completed);
+        assert!(!snap.sp6_lifecycle.space_object_meta[&other_sys_depot].anchor_completed);
+        assert!(!snap.sp6_lifecycle.space_object_meta[&same_sys_mwd].anchor_completed);
+        assert!(!snap.sp6_lifecycle.space_object_meta[&other_sys_mwd].anchor_completed);
+    });
+}

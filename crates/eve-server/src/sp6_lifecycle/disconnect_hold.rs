@@ -8,9 +8,18 @@ use crate::system_actor::SystemHandle;
 
 /// Returns `true` if `ship_id` has active navigation-locking effects or immobilizing modules
 /// that must block emergency warp on ungraceful disconnect (`#498`).
+#[cfg(test)]
 pub(super) fn is_disconnect_emergency_warp_blocked(
     ctx: &ServerContext,
     sys_handle: &SystemHandle,
+    ship_id: i64,
+) -> bool {
+    is_disconnect_emergency_warp_blocked_opt(ctx, Some(sys_handle), ship_id)
+}
+
+pub(super) fn is_disconnect_emergency_warp_blocked_opt(
+    ctx: &ServerContext,
+    sys_handle: Option<&SystemHandle>,
     ship_id: i64,
 ) -> bool {
     if crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "emergency warp")
@@ -23,10 +32,12 @@ pub(super) fn is_disconnect_emergency_warp_blocked(
     {
         return true;
     }
-    sys_handle.actor_state.read().is_ok_and(|st| {
-        st.active_module_cycles
-            .iter()
-            .any(|c| c.ship_id == ship_id && (c.immobilize_self || c.self_disallow_assistance))
+    sys_handle.is_some_and(|h| {
+        h.actor_state.read().is_ok_and(|st| {
+            st.active_module_cycles
+                .iter()
+                .any(|c| c.ship_id == ship_id && (c.immobilize_self || c.self_disallow_assistance))
+        })
     })
 }
 
@@ -172,11 +183,11 @@ pub(super) fn finalize_expired_disconnected_ship(
     });
 }
 
-/// Evaluates logoff hold timers and emergency-warp vs mid-tunnel-warp preservation for an ungraceful disconnect.
+/// Evaluates logoff hold timers and emergency-warp vs mid-tunnel-warp preservation for an ungraceful disconnect (`#851` / `B13`).
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn build_disconnected_ship_entry(
+pub(super) fn build_disconnected_ship_entry_sync(
     ctx: &ServerContext,
-    sys_handle: &SystemHandle,
+    sys_handle: Option<&SystemHandle>,
     char_id: i64,
     ship_id: i64,
     ship_type_id: u32,
@@ -187,12 +198,14 @@ pub(super) async fn build_disconnected_ship_entry(
 ) -> DisconnectedShipEntry {
     let (weap_until, npc_until, pvp_until, crim_until) =
         super::active_timers_for_char(ctx, char_id, now_unix);
-    let has_active_combat_engagement = sys_handle.has_active_modules_or_cloak_sync(ship_id)
-        || !sys_handle
-            .get_target_locks(ship_id)
-            .await
-            .unwrap_or_default()
-            .is_empty()
+    let has_target_locks = sys_handle.is_some_and(|h| {
+        h.ballpark
+            .read()
+            .is_ok_and(|bp| bp.target_locks.get(&ship_id).is_some_and(|l| !l.is_empty()))
+    });
+    let has_active_combat_engagement = sys_handle
+        .is_some_and(|h| h.has_active_modules_or_cloak_sync(ship_id))
+        || has_target_locks
         || has_tactical_engagement_on_disconnect(ctx, ship_id);
     let base_remove_secs = if has_active_combat_engagement {
         NPC_TIMER_SECS
@@ -218,15 +231,15 @@ pub(super) async fn build_disconnected_ship_entry(
             .unwrap_or(0.5)
     });
     let in_abyssal = (32_000_000..=32_999_999).contains(&sys_id);
-    let is_ball_scrambled = sys_handle
-        .ballpark
-        .read()
-        .is_ok_and(|bp| bp.is_ball_scrambled(ship_id))
-        || ctx.systems.is_ball_scrambled_sync(sys_id, ship_id);
+    let is_ball_scrambled = sys_handle.is_some_and(|h| {
+        h.ballpark
+            .read()
+            .is_ok_and(|bp| bp.is_ball_scrambled(ship_id))
+    }) || ctx.systems.is_ball_scrambled_sync(sys_id, ship_id);
     let is_scrambled =
         in_abyssal || is_ball_scrambled || (sys_sec >= 0.45 && crim_until > now_unix);
 
-    let committed_warp_dest = sys_handle.committed_warp_destination_sync(ship_id);
+    let committed_warp_dest = sys_handle.and_then(|h| h.committed_warp_destination_sync(ship_id));
     if committed_warp_dest.is_none() {
         ctx.active_warps.lock().unwrap_or_else(|e| e.into_inner()).remove(&ship_id);
     }
@@ -239,21 +252,23 @@ pub(super) async fn build_disconnected_ship_entry(
         )
     } else if !is_scrambled
         && weap_until <= now_unix
-        && !is_disconnect_emergency_warp_blocked(ctx, sys_handle, ship_id)
+        && !is_disconnect_emergency_warp_blocked_opt(ctx, sys_handle, ship_id)
     {
         let raw_dest = super::compute_emergency_warp_destination(current_pos, char_id, ship_id);
         let mut dir = (raw_dest - current_pos).normalize_or_zero();
-        if let Ok(bp) = sys_handle.ballpark.read() {
-            let ship_r = bp.balls.get(&ship_id).map(|b| b.radius).unwrap_or(50.0);
-            for (&bid, b) in &bp.balls {
-                if bid != ship_id && bp.is_immobile_structure_or_static(bid) {
-                    let to_ship = current_pos - b.position;
-                    let dist = to_ship.length();
-                    if dist <= b.radius + ship_r + 2_500.0 && dist > 1.0 {
-                        let outward = to_ship / dist;
-                        let into_wall = dir.dot(outward);
-                        if into_wall < 0.1 {
-                            dir = (dir - outward * (2.0 * into_wall)).normalize_or_zero();
+        if let Some(h) = sys_handle {
+            if let Ok(bp) = h.ballpark.read() {
+                let ship_r = bp.balls.get(&ship_id).map(|b| b.radius).unwrap_or(50.0);
+                for (&bid, b) in &bp.balls {
+                    if bid != ship_id && bp.is_immobile_structure_or_static(bid) {
+                        let to_ship = current_pos - b.position;
+                        let dist = to_ship.length();
+                        if dist <= b.radius + ship_r + 2_500.0 && dist > 1.0 {
+                            let outward = to_ship / dist;
+                            let into_wall = dir.dot(outward);
+                            if into_wall < 0.1 {
+                                dir = (dir - outward * (2.0 * into_wall)).normalize_or_zero();
+                            }
                         }
                     }
                 }
@@ -264,24 +279,26 @@ pub(super) async fn build_disconnected_ship_entry(
         } else {
             raw_dest
         };
-        let _ = sys_handle
-            .modify_combat_state(ship_id, |cs| {
-                cs.is_emergency_warping = true;
-            })
-            .await;
-        let _ = sys_handle
-            .set_movement_mode(
-                ship_id,
-                eve_destiny::MovementMode::new_warp(current_pos, dest, warp_speed_au_s),
-            )
-            .await;
+        if let Some(h) = sys_handle {
+            if let Ok(mut bp) = h.ballpark.write() {
+                if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+                    cs.is_emergency_warping = true;
+                }
+                let _ = bp.set_mode(
+                    ship_id,
+                    eve_destiny::MovementMode::new_warp(current_pos, dest, warp_speed_au_s),
+                );
+            }
+        }
         (
             Some([dest.x, dest.y, dest.z]),
             Some([current_pos.x, current_pos.y, current_pos.z]),
         )
     } else {
-        if sys_handle.is_ball_aligning_warp_sync(ship_id) {
-            sys_handle.try_stop_ball(ship_id);
+        if let Some(h) = sys_handle {
+            if h.is_ball_aligning_warp_sync(ship_id) {
+                h.try_stop_ball(ship_id);
+            }
         }
         (None, None)
     };
@@ -298,6 +315,33 @@ pub(super) async fn build_disconnected_ship_entry(
         removed_from_space: false,
         pre_warp_position,
     }
+}
+
+/// Evaluates logoff hold timers and emergency-warp vs mid-tunnel-warp preservation for an ungraceful disconnect.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn build_disconnected_ship_entry(
+    ctx: &ServerContext,
+    sys_handle: &SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    ship_type_id: u32,
+    sys_id: u32,
+    current_pos: glam::DVec3,
+    warp_speed_au_s: f64,
+    now_unix: u64,
+) -> DisconnectedShipEntry {
+    build_disconnected_ship_entry_sync(
+        ctx,
+        Some(sys_handle),
+        char_id,
+        ship_id,
+        ship_type_id,
+        sys_id,
+        current_pos,
+        warp_speed_au_s,
+        now_unix,
+    )
 }
 
 #[cfg(test)]

@@ -436,24 +436,70 @@ async fn test_proving_grounds_matchmaking_combat_and_arena_hazards_e2e() {
     let _events = rpc_ok(&ctx, &mut sess1, "pvpFilamentMgr", "GetActiveEvents", &[]).await;
     undock_from_station(&ctx, &mut sess1, JITA_SYS).await;
     undock_from_station(&ctx, &mut sess2, JITA_SYS).await;
+    let jita_station_pos = ctx
+        .sde
+        .solar_systems
+        .get(&JITA_SYS)
+        .and_then(|sys| sys.stations.iter().find(|s| s.station_id == JITA_STATION))
+        .map(|s| s.position)
+        .unwrap_or(glam::DVec3::ZERO);
     let gate1 = ctx
         .sde
         .jumps
         .values()
-        .find(|j| j.from_solar_system_id == JITA_SYS)
+        .filter(|j| j.from_solar_system_id == JITA_SYS)
+        .max_by(|a, b| {
+            a.position
+                .distance_squared(jita_station_pos)
+                .total_cmp(&b.position.distance_squared(jita_station_pos))
+        })
         .map(|j| j.stargate_id)
         .expect("Jita stargate");
     rpc_ok(&ctx, &mut sess1, "beyonce", "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(gate1)]).await;
     rpc_ok(&ctx, &mut sess2, "beyonce", "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(gate1)]).await;
     let jita_h = ctx.systems.get_or_spawn(JITA_SYS);
-    for _ in 0..18 {
-        let _ = jita_h.step_manual(1.0).await;
+    let mut safe_bm1 = None;
+    let mut safe_bm2 = None;
+    for step in 0..90 {
+        let _ = jita_h.step_manual(0.5).await;
+        if step % 2 == 1 {
+            ctx.advance_secs(1);
+        }
+        if let (Some(p1), Some(p2)) = (
+            jita_h.get_ball_position_sync(ship1),
+            jita_h.get_ball_position_sync(ship2),
+        ) {
+            if p1.distance(jita_station_pos) > 2_000_000.0
+                && p2.distance(jita_station_pos) > 2_000_000.0
+                && eve_server::services::pve_abyssal_hazards::check_filament_1000km_proximity(&ctx, JITA_SYS, p1)
+                .await
+                .is_ok()
+                && eve_server::services::pve_abyssal_hazards::check_filament_1000km_proximity(&ctx, JITA_SYS, p2)
+                    .await
+                    .is_ok()
+            {
+                let bm1 = rpc_ok(&ctx, &mut sess1, "bookmark", "BookmarkLocation", &[PyRep::String("Safe1".into())]).await;
+                let bm2 = rpc_ok(&ctx, &mut sess2, "bookmark", "BookmarkLocation", &[PyRep::String("Safe2".into())]).await;
+                if let PyRep::KeyVal(kv) = bm1 {
+                    safe_bm1 = kv.get("bookmarkID").and_then(|v| v.as_i64());
+                }
+                if let PyRep::KeyVal(kv) = bm2 {
+                    safe_bm2 = kv.get("bookmarkID").and_then(|v| v.as_i64());
+                }
+                if safe_bm1.is_some() && safe_bm2.is_some() {
+                    break;
+                }
+            }
+        }
     }
-    ctx.advance_secs(18);
-    let b_oid1 = bind_service(&ctx, &mut sess1, "beyonce", PyRep::Integer(i64::from(JITA_SYS))).await as u64;
-    let b_oid2 = bind_service(&ctx, &mut sess2, "beyonce", PyRep::Integer(i64::from(JITA_SYS))).await as u64;
-    let _ = ctx.dispatch_rpc(&mut sess1, "beyonce", Some(b_oid1), "CmdStop", &[], &HashMap::new(), None).await;
-    let _ = ctx.dispatch_rpc(&mut sess2, "beyonce", Some(b_oid2), "CmdStop", &[], &HashMap::new(), None).await;
+    let _b_oid1 = bind_service(&ctx, &mut sess1, "beyonce", PyRep::Integer(i64::from(JITA_SYS))).await as u64;
+    let _b_oid2 = bind_service(&ctx, &mut sess2, "beyonce", PyRep::Integer(i64::from(JITA_SYS))).await as u64;
+    wait_for_warp_end(&ctx, JITA_SYS, ship1).await;
+    wait_for_warp_end(&ctx, JITA_SYS, ship2).await;
+    let bm1_id = safe_bm1.expect("mid-warp safe bookmark 1 (>1000km from Jita stations/gates)");
+    let bm2_id = safe_bm2.expect("mid-warp safe bookmark 2 (>1000km from Jita stations/gates)");
+    rpc_ok(&ctx, &mut sess1, "beyonce", "CmdGotoBookmark", &[PyRep::Integer(bm1_id)]).await;
+    rpc_ok(&ctx, &mut sess2, "beyonce", "CmdGotoBookmark", &[PyRep::Integer(bm2_id)]).await;
     wait_for_warp_end(&ctx, JITA_SYS, ship1).await;
     wait_for_warp_end(&ctx, JITA_SYS, ship2).await;
 

@@ -16,6 +16,7 @@ pub mod quasar_gateway;
 pub mod quasar_grpc;
 pub mod rng;
 pub mod macho_listener;
+pub mod outbound_sequencer;
 pub mod router;
 pub mod services;
 pub mod sp6_lifecycle;

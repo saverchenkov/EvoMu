@@ -620,7 +620,7 @@ async fn test_sp7_downtime_cleans_npc_wrecks_and_respawns_accepted_mission_waves
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(
         day_start + 11 * 3_600 - 5,
     )));
-    let (mut sess, sys_id, _ship_id) = setup_pilot_in_space(&ctx, 90_000_001).await;
+    let (_sess, sys_id, _ship_id) = setup_pilot_in_space(&ctx, 90_000_001).await;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
 
     let npc_wreck_id = 993_000_001_i64;
@@ -684,9 +684,22 @@ async fn test_sp7_downtime_cleans_npc_wrecks_and_respawns_accepted_mission_waves
         assert!(mission.spawned_npc_ball_ids.is_empty());
     });
 
-    // Pilot warps back to the mission pocket after downtime -> initial 4-NPC wave spawns on pocket entry
+    // Pilot reconnects after downtime and warps back to the mission pocket -> initial 4-NPC wave spawns on pocket entry
     ctx.advance_secs(905); // Advance past 11:00–11:15 UTC downtime window before warping
     tick_background_cluster(&ctx).await;
+    let mut sess = eve_machonet::SessionState::default();
+    login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &HashMap::new(),
+        None,
+    )
+    .await
+    .expect("SelectCharacterID after downtime");
     let beyonce_oid = ctx.bind_object(&sess, "beyonce", sys_id as i64).expect("bind beyonce");
     ctx.dispatch_rpc(
         &mut sess,

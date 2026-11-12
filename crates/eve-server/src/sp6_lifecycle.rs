@@ -1329,13 +1329,18 @@ pub(super) fn compute_emergency_warp_destination(current_pos: DVec3, char_id: i6
     current_pos + unit * EMERGENCY_WARP_DISTANCE_M
 }
 
-/// Handles ungraceful logoff (`authentication.Logout`, `userSvc.UserLogOffCharacter`) or dropped socket
-/// connection while in space (`plan:SP-6`):
+/// Returns `true` if `char_id` already has a persisted in-space `DisconnectedShipEntry` (`#851` / `B13`).
+pub fn has_active_disconnected_ship(db: &Arc<WorldRepository>, char_id: i64) -> bool {
+    with_sp6_state(db, |st| st.disconnected_ships.contains_key(&char_id))
+}
+
+/// Synchronously handles ungraceful logoff, kick, ban, downtime, or dropped/panicked socket
+/// connection while in space (`plan:SP-6`, `#851` / `B13`):
 /// - Initiates a single emergency warp to ~1,000,000 km unless the ship is warp-scrambled or criminal in high-sec.
 /// - Keeps the ship ball in the `Ballpark` for the active log-off timer (`60s` unaggressed/weapons, `300s` NPC, `900s` PvP/Criminal).
 /// - Persists `DisconnectedShipEntry` in SQLite so the ship remains vulnerable until `remove_at_unix` and
 ///   logs back into space at its final position on next login.
-pub async fn handle_character_logoff_or_disconnect(
+pub fn handle_character_logoff_or_disconnect_sync(
     ctx: &ServerContext,
     char_id: i64,
 ) -> Option<DisconnectedShipEntry> {
@@ -1361,40 +1366,45 @@ pub async fn handle_character_logoff_or_disconnect(
         Some((ch.solar_system_id, ship_id, ship_type_id, saved_pos))
     })?;
     let (sys_id, ship_id, ship_type_id, saved_pos) = char_info;
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let sys_handle_opt = ctx.systems.get_or_spawn_if_runtime(sys_id);
     let has_active_combat_timers = weap_until > now_unix
         || npc_until > now_unix
         || pvp_until > now_unix
         || crim_until > now_unix;
     if safe_entry.is_some_and(|e| e.completed)
         && !has_active_combat_timers
-        && sys_handle.get_ball_position_sync(ship_id).is_none()
+        && sys_handle_opt
+            .as_ref()
+            .is_none_or(|h| h.get_ball_position_sync(ship_id).is_none())
     {
         return None;
     }
     let (group_id, category_id, mass, radius, max_vel, inertia, warp_speed_au_s) =
         sde_ship_physics(&ctx.sde, ship_type_id);
 
-    // Ensure the ship ball exists in the ballpark if it wasn't spawned yet.
-    let current_pos = if let Some(pos) = sys_handle.get_ball_position_sync(ship_id) {
+    // Ensure the ship ball exists in the ballpark if it wasn't spawned yet (when a Tokio runtime/handle is active).
+    let current_pos = if let Some(pos) = sys_handle_opt
+        .as_ref()
+        .and_then(|h| h.get_ball_position_sync(ship_id))
+    {
         pos
     } else {
         let pos = DVec3::from_array(saved_pos);
-        let cs = ctx.build_ship_combat_state(char_id, ship_id, ship_type_id);
-        let (corp_id, alliance_id, sec_status) = ctx.db.with_snapshot(|snap| {
-            snap.characters
-                .get(&char_id)
-                .map(|c| {
-                    (
-                        c.corporation_id,
-                        c.alliance_id.unwrap_or(-1),
-                        c.security_status,
-                    )
-                })
-                .unwrap_or((1_000_009, -1, 0.0))
-        });
-        let _ = sys_handle
-            .spawn_ball_with_meta(
+        if let Some(ref sys_handle) = sys_handle_opt {
+            let cs = ctx.build_ship_combat_state(char_id, ship_id, ship_type_id);
+            let (corp_id, alliance_id, sec_status) = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&char_id)
+                    .map(|c| {
+                        (
+                            c.corporation_id,
+                            c.alliance_id.unwrap_or(-1),
+                            c.security_status,
+                        )
+                    })
+                    .unwrap_or((1_000_009, -1, 0.0))
+            });
+            sys_handle.try_spawn_ball_with_meta(
                 Ball {
                     id: ship_id,
                     type_id: ship_type_id,
@@ -1418,22 +1428,31 @@ pub async fn handle_character_logoff_or_disconnect(
                     security_status: sec_status,
                     is_cloaked: false, ..Default::default()
                 },
-            )
-            .await;
+            );
+        }
         pos
     };
 
-    if let Ok(Some(cs)) = sys_handle.get_combat_state(ship_id).await {
+    if let Some(cs) = sys_handle_opt.as_ref().and_then(|h| {
+        h.ballpark
+            .read()
+            .ok()
+            .and_then(|bp| bp.combat_states.get(&ship_id).cloned())
+    }) {
         persist_ship_combat_hp_in_db(&ctx.db, ship_id, &cs);
     }
     abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, sys_id);
+    ctx.return_warps
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&ship_id);
     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
         rt.authorized_shipping_storage.retain(|&(_, c)| c != char_id);
     });
 
-    let entry = disconnect_hold::build_disconnected_ship_entry(
+    let entry = disconnect_hold::build_disconnected_ship_entry_sync(
         ctx,
-        &sys_handle,
+        sys_handle_opt.as_ref(),
         char_id,
         ship_id,
         ship_type_id,
@@ -1441,8 +1460,7 @@ pub async fn handle_character_logoff_or_disconnect(
         current_pos,
         warp_speed_au_s,
         now_unix,
-    )
-    .await;
+    );
 
     with_mut_sp6_state(&ctx.db, |st, snap| {
         snap.item_positions
@@ -1460,6 +1478,19 @@ pub async fn handle_character_logoff_or_disconnect(
     });
 
     Some(entry)
+}
+
+/// Handles ungraceful logoff (`authentication.Logout`, `userSvc.UserLogOffCharacter`) or dropped socket
+/// connection while in space (`plan:SP-6`):
+/// - Initiates a single emergency warp to ~1,000,000 km unless the ship is warp-scrambled or criminal in high-sec.
+/// - Keeps the ship ball in the `Ballpark` for the active log-off timer (`60s` unaggressed/weapons, `300s` NPC, `900s` PvP/Criminal).
+/// - Persists `DisconnectedShipEntry` in SQLite so the ship remains vulnerable until `remove_at_unix` and
+///   logs back into space at its final position on next login.
+pub async fn handle_character_logoff_or_disconnect(
+    ctx: &ServerContext,
+    char_id: i64,
+) -> Option<DisconnectedShipEntry> {
+    handle_character_logoff_or_disconnect_sync(ctx, char_id)
 }
 
 /// Synchronously reconnects a character who logged off or disconnected in space (`plan:SP-6`).
@@ -1596,6 +1627,7 @@ pub fn reconnect_character_in_space_sync(
     let pre_warp_eligible =
         crate::services::space_nav_movement_guard::check_sync_pre_warp_eligibility(ctx, ship_id);
     if let Some(existing_pos) = sys_handle.get_ball_position_sync(ship_id) {
+        let mut started_return_warp = false;
         if let Ok(mut bp) = sys_handle.ballpark.write() {
             bp.observer_events.remove(&ship_id);
             bp.queue_set_state(ship_id);
@@ -1609,9 +1641,41 @@ pub fn reconnect_character_in_space_sync(
                     let orig_pos = DVec3::from_array(orig_arr);
                     if existing_pos.distance(orig_pos) > 10_000.0 {
                         let _ = bp.set_mode(ship_id, MovementMode::new_warp(existing_pos, orig_pos, warp_speed));
+                        started_return_warp = true;
                     }
                 }
             }
+            if pre_warp_pos_opt.is_some()
+                && !started_return_warp
+                && matches!(
+                    bp.balls.get(&ship_id).map(|b| &b.mode),
+                    Some(MovementMode::Warp { .. })
+                )
+            {
+                // Disconnected ship was still in its outbound 1,000,000 km emergency warp and
+                // cannot start a return warp (<= 10 km from orig_pos, or tackled/ineligible):
+                // stop the outbound warp immediately so reconnect never flings the ship off-grid (#843).
+                let _ = bp.force_stop_warp(ship_id);
+                bp.queue_set_state(ship_id);
+            }
+        }
+        if started_return_warp {
+            ctx.return_warps
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(ship_id);
+        } else {
+            ctx.return_warps
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&ship_id);
+        }
+        if keep_client_warp {
+            ctx.active_warps
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry(ship_id)
+                .or_insert(char_id);
         }
         let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {
             snap.item_positions
@@ -1651,6 +1715,7 @@ pub fn reconnect_character_in_space_sync(
             corp_id, alliance_id, security_status: sec_status, is_cloaked: false, ..Default::default()
         },
     );
+    let mut started_return_warp = false;
     if let Ok(mut bp) = sys_handle.ballpark.write() {
         bp.observer_events.remove(&ship_id);
         bp.queue_set_state(ship_id);
@@ -1661,9 +1726,21 @@ pub fn reconnect_character_in_space_sync(
                 let orig_pos = DVec3::from_array(orig_arr);
                 if final_pos.distance(orig_pos) > 10_000.0 {
                     let _ = bp.set_mode(ship_id, MovementMode::new_warp(final_pos, orig_pos, warp_speed));
+                    started_return_warp = true;
                 }
             }
         }
+    }
+    if started_return_warp {
+        ctx.return_warps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(ship_id);
+    } else {
+        ctx.return_warps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&ship_id);
     }
 
     Some((sys_id, ship_id, final_pos))

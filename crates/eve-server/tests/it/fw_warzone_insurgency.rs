@@ -218,6 +218,7 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
     let db_path = temp_sqlite_path("fw_warzone_f1");
     let ctx = crate::fw_warzone_insurgency::fw_fast_sqlite_ctx(&db_path, true);
     ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_014_400)));
+    eve_server::services::serverops_cluster::set_scheduled_downtime_enabled(&ctx, false);
     let (_enemy_sys, front_sys, cmd_sys, rear_sys) = setup_warzone_chain(&ctx);
 
     let gal_cid = 90_000_011i64;
@@ -700,6 +701,8 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
 
     let db_path = temp_sqlite_path("fw_warzone_f2");
     let ctx = crate::fw_warzone_insurgency::fw_fast_sqlite_ctx(&db_path, true);
+    crate::common::pin_clock(&ctx);
+    eve_server::services::serverops_cluster::set_scheduled_downtime_enabled(&ctx, false);
     let (_enemy_sys, front_sys, cmd_sys, _rear_sys) = setup_warzone_chain(&ctx);
 
     let cal_cid = 90_000_021i64;
@@ -1428,6 +1431,8 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
 
     let db_path = temp_sqlite_path("fw_insurgency_f4");
     let ctx = crate::fw_warzone_insurgency::fw_fast_sqlite_ctx(&db_path, true);
+    crate::common::pin_clock(&ctx);
+    eve_server::services::serverops_cluster::set_scheduled_downtime_enabled(&ctx, false);
     let (_enemy_sys, front_sys, _cmd_sys, _rear_sys) = setup_warzone_chain(&ctx);
 
     let fob_pos = DVec3::new(95_000.0, 0.0, 45_000.0);

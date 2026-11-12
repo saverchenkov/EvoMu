@@ -53,6 +53,35 @@ fn dispatch_rpc_inner_boxed<'a>(
     Box::pin(ctx.dispatch_rpc_inner(session, service, bound_id, method, args, kwargs, caller_trace))
 }
 
+struct CatchUnwindFuture<F>(F);
+
+impl<F: std::future::Future + Unpin> std::future::Future for CatchUnwindFuture<F> {
+    type Output = Result<F::Output, Box<dyn std::any::Any + Send>>;
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let inner = std::pin::Pin::into_inner(self);
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            std::pin::Pin::new(&mut inner.0).poll(cx)
+        })) {
+            Ok(std::task::Poll::Ready(v)) => std::task::Poll::Ready(Ok(v)),
+            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+            Err(e) => std::task::Poll::Ready(Err(e)),
+        }
+    }
+}
+
+fn format_panic_payload(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unexpected panic in RPC handler".to_string()
+    }
+}
+
 pub fn ensure_wal_error_hook_installed() {
     WAL_HOOK_ONCE.call_once(|| {
         eve_db::set_wal_error_hook(Arc::new(record_dispatch_wal_error));
@@ -180,11 +209,13 @@ impl ServerContext {
             .unwrap_or(0);
 
         let prev_station_id = session.station_id;
+        let initial_active_char_id = session.character_id;
         ensure_wal_error_hook_installed();
         let start_time = std::time::Instant::now();
-        let mut res = DISPATCH_WAL_ERROR
-            .scope(std::cell::RefCell::new(None), async {
-                let mut res = dispatch_rpc_inner_boxed(
+        let mut res = crate::router::cache_notifications::with_active_dispatch_char(
+            initial_active_char_id,
+            DISPATCH_WAL_ERROR.scope(std::cell::RefCell::new(None), async {
+                let mut res = match CatchUnwindFuture(dispatch_rpc_inner_boxed(
                     self,
                     session,
                     service,
@@ -193,32 +224,50 @@ impl ServerContext {
                     args,
                     kwargs,
                     caller_trace,
-                )
-                .await;
+                ))
+                .await
+                {
+                    Ok(r) => r,
+                    Err(panic_payload) => {
+                        let panic_msg = format_panic_payload(panic_payload.as_ref());
+                        warn!(
+                            session_id = session.session_id,
+                            service,
+                            method,
+                            panic_msg = %panic_msg,
+                            "Caught panic in RPC handler; converting to ErrorResponse (ORD-2)"
+                        );
+                        Err(BridgeRpcError {
+                            code: "InternalError".into(),
+                            message: format!("RPC handler panicked in {service}.{method}: {panic_msg}"),
+                        })
+                    }
+                };
                 let wal_err = DISPATCH_WAL_ERROR.with(|slot| slot.borrow().clone());
-        let wal_failed = wal_err.is_some();
-        if let Some(wal_err) = wal_err {
-            if res.is_ok() {
-                res = Err(BridgeRpcError {
-                    code: "DatabasePersistenceError".into(),
-                    message: wal_err,
-                });
-            }
-        }
-        if wal_failed {
-            self.rehydrate_runtime_from_db();
-            if let Some(cid) = session.character_id {
-                if let Ok(mut q) = self.pending_notifications.write() {
-                    if let Some(v) = q.get_mut(&cid) {
-                        v.retain(|n| n.seq_id <= pre_seq);
+                let wal_failed = wal_err.is_some();
+                if let Some(wal_err) = wal_err {
+                    if res.is_ok() {
+                        res = Err(BridgeRpcError {
+                            code: "DatabasePersistenceError".into(),
+                            message: wal_err,
+                        });
                     }
                 }
-            }
-        }
+                if wal_failed {
+                    self.rehydrate_runtime_from_db();
+                    if let Some(cid) = session.character_id {
+                        if let Ok(mut q) = self.pending_notifications.write() {
+                            if let Some(v) = q.get_mut(&cid) {
+                                v.retain(|n| n.seq_id <= pre_seq);
+                            }
+                        }
+                    }
+                }
                 let _ = DISPATCH_WAL_ERROR.with(|slot| slot.borrow_mut().take());
                 res
-            })
-            .await;
+            }),
+        )
+        .await;
         let duration = start_time.elapsed();
 
         let status_desc = match &res {
@@ -414,15 +463,11 @@ impl ServerContext {
         {
             self.release_session_bindings(session.session_id);
             self.quasar_gateway.unsubscribe_session(session.session_id);
-            if let Some(cid) = session.character_id {
-                services::campaigns_and_milestones::playtime::pause_milestone_playtime(
-                    &self.db,
-                    cid,
-                    self.now_unix(),
-                );
-            }
             if let Some(uid) = session.user_id {
                 let _ = self.db.release_online_lock(uid, session.session_id);
+            }
+            if let Some(cid) = session.character_id {
+                self.logoff_character_sync(cid, Some(session));
             }
             self.disconnect_session(
                 session.session_id,
@@ -454,14 +499,22 @@ impl ServerContext {
                             return Err(BridgeRpcError { code, message: msg });
                         }
                     } else {
-                        if let Some(cid) = session.character_id {
-                            services::campaigns_and_milestones::playtime::pause_milestone_playtime(
-                                &self.db,
-                                cid,
-                                self.now_unix(),
-                            );
-                        }
                         let _ = self.db.release_online_lock(uid, session.session_id);
+                        if let Some(cid) = session.character_id {
+                            if !self.is_character_online(cid, uid)
+                                && !crate::sp6_lifecycle::has_active_disconnected_ship(
+                                    &self.db, cid,
+                                )
+                            {
+                                self.logoff_character_sync(cid, Some(session));
+                            } else {
+                                services::campaigns_and_milestones::playtime::pause_milestone_playtime(
+                                    &self.db,
+                                    cid,
+                                    self.now_unix(),
+                                );
+                            }
+                        }
                         session.user_id = None;
                         session.role = 0;
                         session.character_id = None;
@@ -472,6 +525,11 @@ impl ServerContext {
                     }
                 }
             }
+        }
+
+        if method == "ClientHasReleasedTheseObjects" {
+            self.release_bound_objects_from_pyrep(session.session_id, &PyRep::List(args.to_vec()));
+            return Ok(PyRep::None);
         }
 
         // Synchronize active character's ship/station/structure/solar-system state from DB
@@ -754,12 +812,6 @@ impl ServerContext {
                     && session.station_id.is_none()
                     && session.structure_id.is_none()
                 {
-                    if let Some(ship_id) = session.ship_id {
-                        self.active_warps
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .remove(&ship_id);
-                    }
                     let _ = crate::services::space_destiny::handle_update_state_request(
                         self,
                         session,
