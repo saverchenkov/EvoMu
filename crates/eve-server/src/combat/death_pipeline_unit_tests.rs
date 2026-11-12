@@ -1287,6 +1287,7 @@ async fn b3_destruction_pipeline_idempotency_unpiloted_hull_kills_and_sqlite_rel
     sess.ship_id = Some(eject_ship);
 
     let kw = HashMap::new();
+    ctx.session_change_timers.write().unwrap().clear();
     let eject_resp = ctx
         .dispatch_rpc(&mut sess, "ship", None, "Eject", &[], &kw, None)
         .await
@@ -1325,6 +1326,7 @@ async fn b3_destruction_pipeline_idempotency_unpiloted_hull_kills_and_sqlite_rel
     restarted_sess.solar_system_id = Some(sys_id);
     restarted_sess.ship_id = Some(ejected_pod_id);
 
+    restarted_ctx.session_change_timers.write().unwrap().clear();
     restarted_ctx
         .dispatch_rpc(
             &mut restarted_sess,
@@ -1340,6 +1342,7 @@ async fn b3_destruction_pipeline_idempotency_unpiloted_hull_kills_and_sqlite_rel
     assert_eq!(restarted_sess.ship_id, Some(eject_ship));
 
     // Eject again on `restarted_ctx` so `eject_ship` is unpiloted in space, then destroy it via `on_ball_destroyed`
+    restarted_ctx.session_change_timers.write().unwrap().clear();
     let _ = restarted_ctx
         .dispatch_rpc(&mut restarted_sess, "ship", None, "Eject", &[], &kw, None)
         .await
