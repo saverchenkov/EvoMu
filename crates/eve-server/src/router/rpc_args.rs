@@ -76,6 +76,84 @@ fn parse_strict_str<'a>(rep: &'a PyRep, label: &str) -> Result<&'a str, BridgeRp
         .ok_or_else(|| invalid_arg(format!("Expected string for {label}")))
 }
 
+fn is_set_class_token(rep: &PyRep) -> bool {
+    matches!(
+        rep.as_str(),
+        Some("__builtin__.set" | "builtins.set" | "set" | "builtin.set")
+    )
+}
+
+fn extract_seq_or_set_items(rep: &PyRep) -> Option<&[PyRep]> {
+    match rep {
+        PyRep::List(v) | PyRep::Tuple(v) | PyRep::Set(v) | PyRep::PySet(v) => Some(v.as_slice()),
+        PyRep::Object { type_name, args }
+            if matches!(
+                type_name.as_str(),
+                "__builtin__.set" | "builtins.set" | "set" | "builtin.set"
+            ) =>
+        {
+            match args.as_ref() {
+                PyRep::List(elems) | PyRep::Set(elems) | PyRep::PySet(elems) => {
+                    Some(elems.as_slice())
+                }
+                PyRep::Tuple(elems) => {
+                    if elems.len() == 1 {
+                        if let Some(
+                            PyRep::List(inner)
+                            | PyRep::Tuple(inner)
+                            | PyRep::Set(inner)
+                            | PyRep::PySet(inner),
+                        ) = elems.first()
+                        {
+                            return Some(inner.as_slice());
+                        }
+                    }
+                    Some(elems.as_slice())
+                }
+                _ => None,
+            }
+        }
+        PyRep::ObjectEx {
+            is_type_2: false,
+            header,
+            list,
+            dict,
+        } if dict.is_empty() => {
+            let PyRep::Tuple(h_items) = header.as_ref() else {
+                return None;
+            };
+            if !h_items.first().is_some_and(is_set_class_token) {
+                return None;
+            }
+            if h_items.len() == 1 {
+                return Some(list.as_slice());
+            }
+            let third_is_empty_state = h_items.len() == 3
+                && (matches!(h_items[2], PyRep::None)
+                    || matches!(&h_items[2], PyRep::Dict(d) if d.is_empty()));
+            if h_items.len() == 2 || third_is_empty_state {
+                let PyRep::Tuple(ctor_args) = &h_items[1] else {
+                    return None;
+                };
+                if ctor_args.is_empty() {
+                    return Some(list.as_slice());
+                }
+                if ctor_args.len() == 1 && list.is_empty() {
+                    return match &ctor_args[0] {
+                        PyRep::List(elems)
+                        | PyRep::Tuple(elems)
+                        | PyRep::Set(elems)
+                        | PyRep::PySet(elems) => Some(elems.as_slice()),
+                        _ => None,
+                    };
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 /// Borrowed view over MachoNet positional `args` and keyword `kwargs` with checked extractors.
 #[derive(Debug, Clone, Copy)]
 pub struct RpcArgs<'a> {
@@ -483,15 +561,14 @@ impl<'a> RpcArgs<'a> {
         Ok(s)
     }
 
-    /// Extracts a required list/tuple/set of `i64` values.
+    /// Extracts a required list/tuple/set of `i64` values (including V24 `ObjectEx1` reduce sets).
     pub fn req_i64_list(&self, idx: usize, kw_name: &str) -> Result<Vec<i64>, BridgeRpcError> {
         let label = arg_label(idx, kw_name);
         let rep = self
             .get_raw(idx, kw_name)
             .ok_or_else(|| invalid_arg(format!("Missing required integer list {label}")))?;
-        let items = match rep {
-            PyRep::List(v) | PyRep::Tuple(v) | PyRep::Set(v) | PyRep::PySet(v) => v,
-            _ => return Err(invalid_arg(format!("Expected list/tuple of integers for {label}"))),
+        let Some(items) = extract_seq_or_set_items(rep) else {
+            return Err(invalid_arg(format!("Expected list/tuple of integers for {label}")));
         };
         items
             .iter()
@@ -506,9 +583,8 @@ impl<'a> RpcArgs<'a> {
             return Ok(Vec::new());
         };
         let label = arg_label(idx, kw_name);
-        let items = match rep {
-            PyRep::List(v) | PyRep::Tuple(v) | PyRep::Set(v) | PyRep::PySet(v) => v,
-            _ => return Err(invalid_arg(format!("Expected list/tuple of integers for {label}"))),
+        let Some(items) = extract_seq_or_set_items(rep) else {
+            return Err(invalid_arg(format!("Expected list/tuple of integers for {label}")));
         };
         items
             .iter()
@@ -525,14 +601,18 @@ impl<'a> RpcArgs<'a> {
             .ok_or_else(|| invalid_arg(format!("Missing required ID or ID list {label}")))?;
         match rep {
             PyRep::Integer(id) => Ok(vec![*id]),
-            PyRep::List(v) | PyRep::Tuple(v) | PyRep::Set(v) | PyRep::PySet(v) => v
-                .iter()
-                .enumerate()
-                .map(|(i, el)| parse_strict_i64(el, &format!("{label}[{i}]")))
-                .collect(),
-            _ => Err(invalid_arg(format!(
-                "Expected integer or list of integers for {label}"
-            ))),
+            other => {
+                let Some(items) = extract_seq_or_set_items(other) else {
+                    return Err(invalid_arg(format!(
+                        "Expected integer or list of integers for {label}"
+                    )));
+                };
+                items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, el)| parse_strict_i64(el, &format!("{label}[{i}]")))
+                    .collect()
+            }
         }
     }
 }
@@ -929,17 +1009,54 @@ mod tests {
                 .unwrap(),
             " ok "
         );
+        let obj_ex_set = PyRep::ObjectEx {
+            is_type_2: false,
+            header: Box::new(PyRep::Tuple(vec![
+                PyRep::Token("__builtin__.set".into()),
+                PyRep::Tuple(vec![PyRep::List(vec![PyRep::Integer(11), PyRep::Integer(12)])]),
+            ])),
+            list: vec![],
+            dict: vec![],
+        };
+        let obj_ex_set_3tuple = PyRep::ObjectEx {
+            is_type_2: false,
+            header: Box::new(PyRep::Tuple(vec![
+                PyRep::String("builtins.set".into()),
+                PyRep::Tuple(vec![PyRep::Tuple(vec![PyRep::Integer(21)])]),
+                PyRep::None,
+            ])),
+            list: vec![],
+            dict: vec![],
+        };
+        let non_set_obj_ex = PyRep::ObjectEx {
+            is_type_2: false,
+            header: Box::new(PyRep::Tuple(vec![
+                PyRep::Token("foo.CustomObj".into()),
+                PyRep::Tuple(vec![PyRep::List(vec![PyRep::Integer(99)])]),
+            ])),
+            list: vec![],
+            dict: vec![],
+        };
         let list_args = [
             PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2)]),
             PyRep::Set(vec![PyRep::Integer(3)]),
             PyRep::PySet(vec![PyRep::Integer(4), PyRep::Integer(5)]),
             PyRep::Integer(99),
             PyRep::String("not-list".into()),
+            obj_ex_set,
+            obj_ex_set_3tuple,
+            non_set_obj_ex,
         ];
         let lrpc = RpcArgs::positional(&list_args);
         assert_eq!(lrpc.req_i64_list(0, "").unwrap(), vec![1, 2]);
         assert_eq!(lrpc.req_i64_list(1, "").unwrap(), vec![3]);
         assert_eq!(lrpc.req_i64_list(2, "").unwrap(), vec![4, 5]);
+        assert_eq!(lrpc.req_i64_list(5, "").unwrap(), vec![11, 12]);
+        assert_eq!(lrpc.req_i64_list(6, "").unwrap(), vec![21]);
+        assert_eq!(
+            lrpc.req_i64_list(7, "").unwrap_err().code,
+            "InvalidArgument"
+        );
         assert_eq!(
             lrpc.req_i64_list(4, "").unwrap_err().code,
             "InvalidArgument"
@@ -947,6 +1064,8 @@ mod tests {
         assert_eq!(lrpc.opt_i64_list(0, "").unwrap(), vec![1, 2]);
         assert_eq!(lrpc.opt_i64_list(1, "").unwrap(), vec![3]);
         assert_eq!(lrpc.opt_i64_list(2, "").unwrap(), vec![4, 5]);
+        assert_eq!(lrpc.opt_i64_list(5, "").unwrap(), vec![11, 12]);
+        assert_eq!(lrpc.opt_i64_list(6, "").unwrap(), vec![21]);
         assert_eq!(
             lrpc.opt_i64_list(4, "").unwrap_err().code,
             "InvalidArgument"
@@ -956,6 +1075,12 @@ mod tests {
         assert_eq!(lrpc.req_id_or_id_list(0, "").unwrap(), vec![1, 2]);
         assert_eq!(lrpc.req_id_or_id_list(1, "").unwrap(), vec![3]);
         assert_eq!(lrpc.req_id_or_id_list(2, "").unwrap(), vec![4, 5]);
+        assert_eq!(lrpc.req_id_or_id_list(5, "").unwrap(), vec![11, 12]);
+        assert_eq!(lrpc.req_id_or_id_list(6, "").unwrap(), vec![21]);
+        assert_eq!(
+            lrpc.req_id_or_id_list(7, "").unwrap_err().code,
+            "InvalidArgument"
+        );
         assert_eq!(
             lrpc.req_id_or_id_list(4, "").unwrap_err().code,
             "InvalidArgument"

@@ -1246,7 +1246,7 @@ pub fn handle(
             let raw_ids: Vec<i64> = args
                 .first()
                 .map(|a| match a {
-                    PyRep::List(v) | PyRep::Tuple(v) | PyRep::Set(v) => v
+                    PyRep::List(v) | PyRep::Tuple(v) | PyRep::Set(v) | PyRep::PySet(v) => v
                         .iter()
                         .filter_map(|x| x.as_i64().filter(|&id| id > 0))
                         .collect(),

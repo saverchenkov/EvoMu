@@ -1211,11 +1211,6 @@ mod tests {
             named_payload: HashMap::new(),
         };
         write_bounded_frame(&mut m_stream, &marshal::encode(&call_pkt.to_pyrep())).await?;
-        let call_rsp_frame = read_bounded_frame(&mut m_stream).await?.expect("call rsp");
-        let call_rsp_pyrep = marshal::decode(&call_rsp_frame)?;
-        let parsed_rsp = MachoPacket::from_pyrep(&call_rsp_pyrep).expect("MachoPacket CallRsp");
-        assert_eq!(parsed_rsp.packet_type, MachoPacketType::CallRsp);
-
         let sess_notif_frame = read_bounded_frame(&mut m_stream)
             .await?
             .expect("session change notification");
@@ -1226,6 +1221,11 @@ mod tests {
             parsed_notif.packet_type,
             MachoPacketType::SessionChangeNotification
         );
+
+        let call_rsp_frame = read_bounded_frame(&mut m_stream).await?.expect("call rsp");
+        let call_rsp_pyrep = marshal::decode(&call_rsp_frame)?;
+        let parsed_rsp = MachoPacket::from_pyrep(&call_rsp_pyrep).expect("MachoPacket CallRsp");
+        assert_eq!(parsed_rsp.packet_type, MachoPacketType::CallRsp);
         drop(m_stream);
 
         let _ = bridge_task.await;

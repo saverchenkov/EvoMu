@@ -330,7 +330,7 @@ fn purchase_skills_direct(
     if let Some(rep) = src {
         match rep {
             PyRep::Integer(v) if *v > 0 => skill_ids.push(*v as u32),
-            PyRep::List(l) | PyRep::Tuple(l) | PyRep::Set(l) => {
+            PyRep::List(l) | PyRep::Tuple(l) | PyRep::Set(l) | PyRep::PySet(l) => {
                 for el in l {
                     if let Some(v) = el.as_i64().filter(|&x| x > 0) {
                         skill_ids.push(v as u32);

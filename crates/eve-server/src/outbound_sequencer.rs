@@ -1,10 +1,16 @@
-//! Per-session outbound wire sequencer (`OutboundSequencer`) and `DestinyStream` state machine (`C-3`).
+//! Per-session outbound wire sequencer (`OutboundSequencer`) and `DestinyStream` state machine (`C-3`, `C-4`).
 //!
-//! Enforces client-server wire ordering invariants (`ORD-1..ORD-8`, `#927`, `#844`, `#845`):
+//! Enforces client-server wire ordering invariants (`ORD-1..ORD-8`, `#927`, `#928`, `#883`, `#844`, `#845`):
 //! - `DestinyStream` explicitly tracks `Detached`, `AwaitingSetState { epoch }`, and
 //!   `Live { epoch, set_state_stamp, last_stamp }`.
 //! - Entering space or changing solar systems advances `epoch` and transitions to
 //!   `AwaitingSetState { epoch }`.
+//! - When leaving space (`DestinyDrain::Detach`), buffered ticks and pre-detach updates are
+//!   flushed while the space ballpark is still live before `SessionChangeNotification` and `CallRsp`.
+//! - `SessionChangeNotification` (when present) precedes `CallRsp` (`#883`, `#928`) so the
+//!   client's `MachoNetService.TransportReader` stamps `CallRsp` with the post-change
+//!   `receivedVersion`. On an in-space ship switch in the same system while `Live` (`#970`),
+//!   `DoDestinyUpdate(SetState)` precedes `SessionChangeNotification`, which precedes `CallRsp`.
 //! - In `AwaitingSetState { epoch }`, non-`SetState` batches are ignored without resetting back
 //!   to `Detached` (`#845`), while the first `SetState` batch for `epoch` transitions to
 //!   `Live { epoch, set_state_stamp, last_stamp }`.
@@ -311,13 +317,12 @@ pub fn sequence(state: &mut SessionWireState, done: RpcCompletion) -> Vec<OutFra
         2 + done.pending_tick_batches.len() + done.notifications.len(),
     );
 
-    // 1. ORD-2: CallRsp / ErrorResponse is always emitted first for the completed CallReq.
-    out.push(OutFrame::CallRsp {
+    let mut pending_call_rsp = Some(OutFrame::CallRsp {
         call_id: done.call_id,
         frame: done.response_frame,
     });
 
-    // 2. Pre-detach destiny updates (e.g. OnDockingAccepted when transitioning space -> station)
+    // 1. Pre-detach destiny updates (e.g. OnDockingAccepted when transitioning space -> station)
     //    must be flushed while the client ballpark is still live, before SessionChangeNotification
     //    tears down the space ballpark and transitions DestinyStream -> Detached.
     let mut pending_ticks = done.pending_tick_batches;
@@ -350,17 +355,24 @@ pub fn sequence(state: &mut SessionWireState, done: RpcCompletion) -> Vec<OutFra
         }
     }
 
-    // 3. SessionChangeNotification (if any session attributes changed).
-    // When an in-space ship switch occurs in the same solar system while `state.destiny` is
-    // already `Live` (`DestinyDrain::Updates(batch)` with `batch.has_set_state == true`, `#970`),
-    // emit `DoDestinyUpdate(SetState)` BEFORE `SessionChangeNotification` so `michelle` has the
-    // new capsule/ship ball and `ballpark.ego == new_ship_id` before `OnSessionChanged` handlers run.
+    // 2. SessionChangeNotification precedes CallRsp (#883, #928) so MachoNet's TransportReader
+    //    advances `receivedVersion` before stamping `CallRsp`.
+    //    Exception (#970): when an in-space ship switch occurs in the same solar system while
+    //    `state.destiny` is already `Live` (`DestinyDrain::Updates(batch)` with
+    //    `batch.has_set_state == true` and a session change), emit `DoDestinyUpdate(SetState)`
+    //    first so `michelle` has the new ball and `ego`, then `SessionChangeNotification`, then
+    //    `CallRsp`.
     let mut deferred_session_change = done.session_change_frame;
-    let in_space_ship_switch_set_state = state.destiny.is_live()
+    let in_space_ship_switch_set_state = deferred_session_change.is_some()
+        && state.destiny.is_live()
         && matches!(&destiny_drain, DestinyDrain::Updates(b) if b.has_set_state);
     if !in_space_ship_switch_set_state {
         if let Some(sess_frame) = deferred_session_change.take() {
             out.push(OutFrame::SessionChange { frame: sess_frame });
+        }
+        // 3. CallRsp / ErrorResponse follows any SessionChangeNotification (#883, #928).
+        if let Some(rsp) = pending_call_rsp.take() {
+            out.push(rsp);
         }
     }
 
@@ -409,6 +421,9 @@ pub fn sequence(state: &mut SessionWireState, done: RpcCompletion) -> Vec<OutFra
 
     if let Some(sess_frame) = deferred_session_change.take() {
         out.push(OutFrame::SessionChange { frame: sess_frame });
+    }
+    if let Some(rsp) = pending_call_rsp.take() {
+        out.push(rsp);
     }
 
     // 5. Post-RPC notifications in causal emission order (ORD-5, ORD-6).
@@ -585,7 +600,10 @@ mod tests {
                 }],
             },
         );
-        assert!(matches!(frames.first(), Some(OutFrame::CallRsp { call_id: 7, .. })));
+        assert!(
+            frames.iter().any(|f| matches!(f, OutFrame::CallRsp { call_id: 7, .. })),
+            "expected CallRsp for call_id 7"
+        );
         let dest_idx = frames
             .iter()
             .position(|f| matches!(f, OutFrame::DoDestinyUpdate { has_set_state: true, stamp: 11, .. }))
@@ -594,14 +612,102 @@ mod tests {
             .iter()
             .position(|f| matches!(f, OutFrame::SessionChange { .. }))
             .expect("SessionChange frame");
+        let rsp_idx = frames
+            .iter()
+            .position(|f| matches!(f, OutFrame::CallRsp { call_id: 7, .. }))
+            .expect("CallRsp frame");
         let notif_idx = frames
             .iter()
             .position(|f| matches!(f, OutFrame::Notification { .. }))
             .expect("Notification frame");
         assert!(
-            dest_idx < sess_idx && sess_idx < notif_idx,
-            "expected CallRsp -> DoDestinyUpdate(SetState) -> SessionChange -> Notification, got {dest_idx}, {sess_idx}, {notif_idx}"
+            dest_idx < sess_idx && sess_idx < rsp_idx && rsp_idx < notif_idx,
+            "expected DoDestinyUpdate(SetState) -> SessionChange -> CallRsp -> Notification, got {dest_idx}, {sess_idx}, {rsp_idx}, {notif_idx}"
         );
+    }
+
+    #[test]
+    fn session_change_precedes_call_rsp_and_docking_detach_precedes_session_change_928_883() {
+        // 1. Session-change RPC without detach (e.g. SelectCharacterID / Undock / Station Board):
+        //    SessionChangeNotification -> CallRsp -> optional Attach(SetState) -> Notification.
+        let mut wire = SessionWireState::new(88, 883);
+        let attach_ep = wire.enter_space(Some(30_000_142));
+        let frames = sequence(
+            &mut wire,
+            RpcCompletion {
+                call_id: 1,
+                response_frame: PyRep::Integer(1),
+                session_change_frame: Some(PyRep::String("undock_sess".into())),
+                pending_tick_batches: vec![],
+                destiny_drain: DestinyDrain::Attach {
+                    epoch: attach_ep,
+                    set_state: DestinyBatch::new(attach_ep, 20, true, dummy_updates("SetState", 20)),
+                },
+                notifications: vec![TypedNotification {
+                    event: "OnItemChange".into(),
+                    args: vec![],
+                }],
+            },
+        );
+        assert!(matches!(frames.first(), Some(OutFrame::SessionChange { .. })));
+        let sess_idx = frames.iter().position(|f| matches!(f, OutFrame::SessionChange { .. })).unwrap();
+        let rsp_idx = frames.iter().position(|f| matches!(f, OutFrame::CallRsp { call_id: 1, .. })).unwrap();
+        let dest_idx = frames.iter().position(|f| matches!(f, OutFrame::DoDestinyUpdate { .. })).unwrap();
+        let notif_idx = frames.iter().position(|f| matches!(f, OutFrame::Notification { .. })).unwrap();
+        assert!(sess_idx < rsp_idx && rsp_idx < dest_idx && dest_idx < notif_idx);
+
+        // 2. Docking detach (space -> station):
+        //    DoDestinyUpdate(OnDockingAccepted) -> SessionChangeNotification -> CallRsp -> Notification.
+        let dock_frames = sequence(
+            &mut wire,
+            RpcCompletion {
+                call_id: 2,
+                response_frame: PyRep::Integer(2),
+                session_change_frame: Some(PyRep::String("dock_sess".into())),
+                pending_tick_batches: vec![],
+                destiny_drain: DestinyDrain::Detach {
+                    pre_detach: Some(DestinyBatch::new(
+                        attach_ep,
+                        21,
+                        false,
+                        dummy_updates("OnDockingAccepted", 21),
+                    )),
+                },
+                notifications: vec![TypedNotification {
+                    event: "OnCharNowInStation".into(),
+                    args: vec![],
+                }],
+            },
+        );
+        assert_eq!(wire.destiny, DestinyStream::Detached);
+        let d_idx = dock_frames.iter().position(|f| matches!(f, OutFrame::DoDestinyUpdate { .. })).unwrap();
+        let s_idx = dock_frames.iter().position(|f| matches!(f, OutFrame::SessionChange { .. })).unwrap();
+        let r_idx = dock_frames.iter().position(|f| matches!(f, OutFrame::CallRsp { call_id: 2, .. })).unwrap();
+        let n_idx = dock_frames.iter().position(|f| matches!(f, OutFrame::Notification { .. })).unwrap();
+        assert!(d_idx < s_idx && s_idx < r_idx && r_idx < n_idx);
+
+        // 3. No-session-change UpdateStateRequest while already Live with SetState:
+        //    CallRsp still precedes DoDestinyUpdate(SetState).
+        let ep2 = wire.enter_space(Some(30_000_142));
+        assert!(sequence_tick(&mut wire, DestinyBatch::new(ep2, 30, true, dummy_updates("SetState", 30))).is_some());
+        let usr_frames = sequence(
+            &mut wire,
+            RpcCompletion {
+                call_id: 3,
+                response_frame: PyRep::None,
+                session_change_frame: None,
+                pending_tick_batches: vec![],
+                destiny_drain: DestinyDrain::Updates(DestinyBatch::new(
+                    ep2,
+                    31,
+                    true,
+                    dummy_updates("SetState", 31),
+                )),
+                notifications: vec![],
+            },
+        );
+        assert!(matches!(usr_frames.first(), Some(OutFrame::CallRsp { call_id: 3, .. })));
+        assert!(matches!(usr_frames.get(1), Some(OutFrame::DoDestinyUpdate { has_set_state: true, stamp: 31, .. })));
     }
 
     #[test]
@@ -662,8 +768,32 @@ mod tests {
                                 }],
                             },
                         );
-                        // ORD-2: CallRsp is first
-                        assert!(matches!(frames.first(), Some(OutFrame::CallRsp { call_id: cid, .. }) if *cid == call_id));
+                        // #883 / #928: SessionChangeNotification precedes CallRsp, followed by Attach SetState and Notifications.
+                        let sess_pos = frames
+                            .iter()
+                            .position(|f| matches!(f, OutFrame::SessionChange { .. }))
+                            .expect("SessionChange frame");
+                        let rsp_pos = frames
+                            .iter()
+                            .position(|f| matches!(f, OutFrame::CallRsp { call_id: cid, .. } if *cid == call_id))
+                            .expect("CallRsp frame");
+                        let notif_pos = frames
+                            .iter()
+                            .position(|f| matches!(f, OutFrame::Notification { .. }))
+                            .expect("Notification frame");
+                        assert!(
+                            sess_pos < rsp_pos && rsp_pos < notif_pos,
+                            "SessionChange ({sess_pos}) must precede CallRsp ({rsp_pos}) before Notification ({notif_pos})"
+                        );
+                        if let Some(dest_pos) = frames
+                            .iter()
+                            .position(|f| matches!(f, OutFrame::DoDestinyUpdate { .. }))
+                        {
+                            assert!(
+                                rsp_pos < dest_pos && dest_pos < notif_pos,
+                                "CallRsp ({rsp_pos}) must precede Attach DoDestinyUpdate ({dest_pos}) before Notification ({notif_pos})"
+                            );
+                        }
                         for f in &frames {
                             if let OutFrame::DoDestinyUpdate {
                                 epoch,
@@ -757,16 +887,25 @@ mod tests {
                             },
                         );
                         assert_eq!(wire.destiny, DestinyStream::Detached);
-                        // Pre-detach DoDestinyUpdate (if any) must precede SessionChange
+                        // Pre-detach DoDestinyUpdate (if any) must precede SessionChange, which must precede CallRsp (#883, #928).
                         let sess_pos = frames
                             .iter()
-                            .position(|f| matches!(f, OutFrame::SessionChange { .. }));
+                            .position(|f| matches!(f, OutFrame::SessionChange { .. }))
+                            .expect("Docking SessionChange frame");
+                        let rsp_pos = frames
+                            .iter()
+                            .position(|f| matches!(f, OutFrame::CallRsp { call_id: cid, .. } if *cid == call_id))
+                            .expect("Docking CallRsp frame");
                         let dest_pos = frames
                             .iter()
                             .position(|f| matches!(f, OutFrame::DoDestinyUpdate { .. }));
-                        if let (Some(dp), Some(sp)) = (dest_pos, sess_pos) {
-                            assert!(dp < sp, "Docking DoDestinyUpdate must precede SessionChange");
+                        if let Some(dp) = dest_pos {
+                            assert!(dp < sess_pos, "Docking DoDestinyUpdate must precede SessionChange");
                         }
+                        assert!(
+                            sess_pos < rsp_pos,
+                            "Docking SessionChange ({sess_pos}) must precede CallRsp ({rsp_pos})"
+                        );
                         for f in &frames {
                             if let OutFrame::DoDestinyUpdate {
                                 epoch,

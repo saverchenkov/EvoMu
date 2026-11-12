@@ -377,28 +377,29 @@ async fn ballpark_update_state_docking_flush_session_change_and_disconnect_sync(
     let _ = read_until_call_reply(&mut s).await;
     while tokio::time::timeout(std::time::Duration::from_millis(20), read_pkt(&mut s)).await.is_ok() {}
 
-    // Advance clock past 10s undock session-change timer so `Dock` succeeds & streams CallRsp + SessionChangeNotification (+ optional Notification)
+    // Advance clock past 10s undock session-change timer so `Dock` succeeds & streams
+    // optional pre-detach DoDestinyUpdate(s) -> SessionChangeNotification -> CallRsp (#883, #928)
     clock.advance_secs(15);
     write_framed_pyrep(&mut s, &call(6, "stationSvc", None, "Dock", vec![PyRep::Integer(60_003_760)]).to_pyrep()).await.unwrap();
-    let first_pkt = read_until_call_reply(&mut s).await;
-    assert_eq!(first_pkt.packet_type, MachoPacketType::CallRsp);
-    let mut tail_pkts = Vec::new();
-    loop {
-        let wait_ms = if tail_pkts.is_empty() { 10_000 } else { 100 };
-        let Ok(Ok(Some(raw))) = tokio::time::timeout(
-            std::time::Duration::from_millis(wait_ms),
-            read_framed_pyrep(&mut s),
-        )
-        .await
-        else {
-            break;
-        };
-        tail_pkts.push(MachoPacket::from_pyrep(&raw).unwrap().packet_type);
-        if tail_pkts.len() >= 2 {
-            break;
+    let mut dock_pkts = Vec::new();
+    let first_rsp = loop {
+        let pkt = MachoPacket::from_pyrep(&read_pkt(&mut s).await.unwrap()).unwrap();
+        let ptype = pkt.packet_type;
+        dock_pkts.push(ptype);
+        if matches!(ptype, MachoPacketType::CallRsp | MachoPacketType::ErrorResponse) {
+            break pkt;
         }
-    }
-    assert_eq!(tail_pkts.first().copied(), Some(MachoPacketType::SessionChangeNotification));
+    };
+    assert_eq!(first_rsp.packet_type, MachoPacketType::CallRsp);
+    let sess_pos = dock_pkts
+        .iter()
+        .position(|t| *t == MachoPacketType::SessionChangeNotification)
+        .expect("Dock must emit SessionChangeNotification before CallRsp");
+    let rsp_pos = dock_pkts
+        .iter()
+        .position(|t| *t == MachoPacketType::CallRsp)
+        .expect("Dock CallRsp");
+    assert!(sess_pos < rsp_pos);
 
     // Undock again, spawn + move ship ball, drop connection -> disconnect cleanup saves ball position
     clock.advance_secs(15);
@@ -1182,6 +1183,11 @@ async fn resolve_req_ping_list_corrupt_marshal_error_codes_and_revocation() {
         "charid",
         vec![PyRep::Integer(1)],
     );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = 30_000_144;
+        }
+    });
     ctx.notify(
         NotificationTarget::Character(90_000_001),
         "OnSessionChanged",

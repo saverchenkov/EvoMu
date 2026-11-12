@@ -1248,3 +1248,134 @@ fn test_t4_golden_wire_marshal_destiny_quasar_and_python_bridge_roundtrip() {
         Some(7)
     );
 }
+
+#[test]
+fn golden_set_object_ex1_bidirectional_wire_and_python_bridge_roundtrip() {
+    // Task C-4 (`#928`, `#884`): V24 `blue.marshal` represents `set` via `Op_PyObjectEx1` (`0x22`)
+    // reduce form `(Token("__builtin__.set"), (List(items),))` with empty list and dict slots.
+    let golden_empty_set_wire: Vec<u8> = vec![
+        126, 0, 0, 0, 0, 34, 44, 2, 15, b'_', b'_', b'b', b'u', b'i', b'l', b't', b'i', b'n',
+        b'_', b'_', b'.', b's', b'e', b't', 37, 38, 45, 45,
+    ];
+    let golden_int_set_wire: Vec<u8> = vec![
+        126, 0, 0, 0, 0, 34, 44, 2, 15, b'_', b'_', b'b', b'u', b'i', b'l', b't', b'i', b'n',
+        b'_', b'_', b'.', b's', b'e', b't', 37, 21, 2, 6, 10, 6, 20, 45, 45,
+    ];
+    let golden_mixed_set_wire: Vec<u8> = vec![
+        126, 0, 0, 0, 0, 34, 44, 2, 15, b'_', b'_', b'b', b'u', b'i', b'l', b't', b'i', b'n',
+        b'_', b'_', b'.', b's', b'e', b't', 37, 21, 2, 5, 75, 2, 46, 9, b'T', b'r', b'i', b't',
+        b'a', b'n', b'i', b'u', b'm', 45, 45,
+    ];
+
+    let empty_rep = PyRep::PySet(Vec::new());
+    let int_rep = PyRep::PySet(vec![PyRep::Integer(10), PyRep::Integer(20)]);
+    let mixed_rep = PyRep::PySet(vec![
+        PyRep::Integer(587),
+        PyRep::String("Tritanium".into()),
+    ]);
+
+    // Direction 1 (Encode): Rust PySet / Set -> exact V24 Op_PyObjectEx1 bytes (never Op_PyObject 0x17).
+    assert_eq!(marshal::encode(&empty_rep), golden_empty_set_wire);
+    assert_eq!(marshal::encode(&PyRep::Set(Vec::new())), golden_empty_set_wire);
+    assert_eq!(marshal::encode(&int_rep), golden_int_set_wire);
+    assert_eq!(
+        marshal::encode(&PyRep::Set(vec![PyRep::Integer(10), PyRep::Integer(20)])),
+        golden_int_set_wire
+    );
+    assert_eq!(marshal::encode(&mixed_rep), golden_mixed_set_wire);
+    assert_eq!(golden_int_set_wire[5], MarshalOpcode::PyObjectEx1 as u8);
+    assert_ne!(golden_int_set_wire[5], MarshalOpcode::PyObject as u8);
+
+    // Direction 2 (Decode): V24 Op_PyObjectEx1 bytes -> Rust PyRep::PySet.
+    assert_eq!(marshal::decode(&golden_empty_set_wire).unwrap(), empty_rep);
+    assert_eq!(marshal::decode(&golden_int_set_wire).unwrap(), int_rep);
+    assert_eq!(marshal::decode(&golden_mixed_set_wire).unwrap(), mixed_rep);
+
+    // Python 2 __reduce_ex__(2) 3-tuple form `(Token("__builtin__.set"), ([10, 20],), None)` decodes cleanly too.
+    let reduce_3tuple_wire = marshal::encode(&PyRep::ObjectEx {
+        is_type_2: false,
+        header: Box::new(PyRep::Tuple(vec![
+            PyRep::Token("__builtin__.set".into()),
+            PyRep::Tuple(vec![PyRep::List(vec![
+                PyRep::Integer(10),
+                PyRep::Integer(20),
+            ])]),
+            PyRep::None,
+        ])),
+        list: Vec::new(),
+        dict: Vec::new(),
+    });
+    assert_eq!(marshal::decode(&reduce_3tuple_wire).unwrap(), int_rep);
+
+    // Packet-shaped payload matching OnDotVictimUpdated(ball_id, PySet(apps)) round-trips losslessly.
+    let dot_payload = PyRep::Tuple(vec![
+        PyRep::Integer(100_000_001),
+        PyRep::PySet(vec![PyRep::Tuple(vec![
+            PyRep::Integer(100_000_002),
+            PyRep::Integer(20_000_001),
+            PyRep::Real(120.5),
+            PyRep::Integer(10_000),
+            PyRep::Integer(1_326_000_000_000_000_000),
+            PyRep::Integer(1_326_000_060_000_000_000),
+        ])]),
+    ]);
+    assert_eq!(
+        marshal::decode(&marshal::encode(&dot_payload)).unwrap(),
+        dot_payload
+    );
+
+    // Cross-language bidirectional verification against client-bridge/evomu_bridge.py.
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let bridge_dir = repo_root.join("client-bridge");
+    let py_script = r#"
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import evomu_bridge as b
+cases = json.loads(sys.argv[2])
+for c in cases:
+    raw = bytes(bytearray(c["wire"]))
+    dec = b.marshal_decode_pyrep(raw)
+    assert dec == c["pyrep"], (c["name"], dec, c["pyrep"])
+    enc = list(bytearray(b.marshal_encode_pyrep(c["pyrep"])))
+    assert enc == c["wire"], (c["name"], enc, c["wire"])
+    py_set = b.from_pyrep_json(dec)
+    assert isinstance(py_set, set), (c["name"], type(py_set))
+    assert b.marshal_encode_pyrep(b.to_pyrep_json(set())) == bytearray(cases[0]["wire"])
+"#;
+    let cases_json = serde_json::json!([
+        {
+            "name": "empty",
+            "wire": golden_empty_set_wire,
+            "pyrep": serde_json::to_value(&empty_rep).unwrap(),
+        },
+        {
+            "name": "ints",
+            "wire": golden_int_set_wire,
+            "pyrep": serde_json::to_value(&int_rep).unwrap(),
+        },
+        {
+            "name": "mixed",
+            "wire": golden_mixed_set_wire,
+            "pyrep": serde_json::to_value(&mixed_rep).unwrap(),
+        },
+    ])
+    .to_string();
+    let output = Command::new("/usr/bin/python3")
+        .arg("-c")
+        .arg(py_script)
+        .arg(&bridge_dir)
+        .arg(&cases_json)
+        .output()
+        .expect("run python3 set golden verification");
+    assert!(
+        output.status.success(),
+        "Python set golden round-trip failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
