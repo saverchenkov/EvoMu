@@ -826,14 +826,14 @@ fn test_t2_sde_control_tower_resources_raw_client_verification() {
 
     let mut raw_total_rows = 0usize;
     for rec in &ctr_raw.records {
-        let tower_type_id = u64_at(&ctr_raw.bytes, *rec) as u32;
+        let tower_type_id = u64_at(&ctr_raw.raw, *rec) as u32;
         assert!(
             sde.types.contains_key(&tower_type_id),
             "control tower type {tower_type_id} must exist in sde.types"
         );
-        let list_rel = u64_at(&ctr_raw.bytes, *rec + 8) as usize;
+        let list_rel = u64_at(&ctr_raw.raw, *rec + 8) as usize;
         let list_abs = 32 + list_rel;
-        let count = u64_at(&ctr_raw.bytes, list_abs - 8) as usize;
+        let count = u64_at(&ctr_raw.raw, list_abs - 8) as usize;
         let loaded_rows = ctr
             .get(&tower_type_id)
             .expect("control tower type in load_control_tower_resources");
@@ -842,12 +842,14 @@ fn test_t2_sde_control_tower_resources_raw_client_verification() {
 
         for (idx, row) in loaded_rows.iter().enumerate() {
             let e = list_abs + idx * 24;
-            let mask = u32_at(&ctr_raw.bytes, e + 20);
-            let expected_faction = ((mask & 1) != 0).then(|| u32_at(&ctr_raw.bytes, e));
-            let expected_min_sec = ((mask & 2) != 0).then(|| f32_at(&ctr_raw.bytes, e + 4));
-            let expected_purpose = u32_at(&ctr_raw.bytes, e + 8);
-            let expected_qty = u32_at(&ctr_raw.bytes, e + 12);
-            let expected_res_type = u32_at(&ctr_raw.bytes, e + 16);
+            let mask = u32_at(&ctr_raw.raw, e + 20);
+            let expected_faction = ((mask & 1) != 0).then(|| u32_at(&ctr_raw.raw, e));
+            let expected_min_sec = ((mask & 2) != 0).then(|| {
+                f32::from_le_bytes(ctr_raw.raw[e + 4..e + 8].try_into().expect("f32 slice"))
+            });
+            let expected_purpose = u32_at(&ctr_raw.raw, e + 8);
+            let expected_qty = u32_at(&ctr_raw.raw, e + 12);
+            let expected_res_type = u32_at(&ctr_raw.raw, e + 16);
 
             assert_eq!(row.resource_type_id, expected_res_type);
             assert_eq!(row.purpose, expected_purpose);

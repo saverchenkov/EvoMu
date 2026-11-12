@@ -243,12 +243,13 @@ fn handle_run_moon_process_cycle_for_tower(
         } else {
             12_235
         };
-        let (sys_sec, sys_faction) = ctx
+        let sys_sec = ctx
             .sde
             .solar_systems
             .get(&sys_id)
-            .map(|s| (s.security, s.faction_id))
-            .unwrap_or((0.0, None));
+            .map(|s| s.security_status)
+            .unwrap_or(0.0);
+        let sys_faction = ctx.sde.solar_system_faction_id(sys_id);
         let fuel_reqs = ctx
             .sde
             .control_tower_hourly_fuel_requirements(tower_type_id, sys_sec, sys_faction, factor)
