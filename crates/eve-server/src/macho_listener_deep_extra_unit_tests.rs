@@ -1183,6 +1183,11 @@ async fn resolve_req_ping_list_corrupt_marshal_error_codes_and_revocation() {
         "charid",
         vec![PyRep::Integer(1)],
     );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = 30_000_144;
+        }
+    });
     ctx.notify(
         NotificationTarget::Character(90_000_001),
         "OnSessionChanged",
