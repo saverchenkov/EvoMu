@@ -305,3 +305,106 @@ fn agents_npc_characters_corp_activities_divisions_and_contraband() {
         let _ = std::fs::remove_file(f);
     }
 }
+
+#[test]
+fn control_tower_resources_and_hourly_fuel_requirements() {
+    let mut sde = SdeRegistry::default();
+    let mut b_ctr = CfsdBuilder::new(&[vec![0u8; 16], vec![0u8; 16]]);
+
+    // Tower 12235 (Amarr Control Tower): 3 entries (stride 24)
+    b_ctr.buf.extend_from_slice(&3u64.to_le_bytes());
+    let list_abs = b_ctr.buf.len();
+    let list_rel = (list_abs - 32) as u64;
+    b_ctr.buf.extend_from_slice(&[0u8; 24 * 3]);
+
+    // Entry 0: Helium Fuel Block (4247), purpose 1, quantity 40, mask 0
+    b_ctr.write_u32(list_abs + 8, 1);
+    b_ctr.write_u32(list_abs + 12, 40);
+    b_ctr.write_u32(list_abs + 16, 4247);
+    b_ctr.write_u32(list_abs + 20, 0);
+
+    // Entry 1: Strontium Clathrates (16275), purpose 4, quantity 400, mask 0
+    let e1 = list_abs + 24;
+    b_ctr.write_u32(e1 + 8, 4);
+    b_ctr.write_u32(e1 + 12, 400);
+    b_ctr.write_u32(e1 + 16, 16_275);
+    b_ctr.write_u32(e1 + 20, 0);
+
+    // Entry 2: Amarr Empire Starbase Charter (24592), purpose 1, quantity 1, min_sec 0.45, faction 500003, mask 3
+    let e2 = list_abs + 48;
+    b_ctr.write_u32(e2, 500_003);
+    b_ctr.write_f32(e2 + 4, 0.45);
+    b_ctr.write_u32(e2 + 8, 1);
+    b_ctr.write_u32(e2 + 12, 1);
+    b_ctr.write_u32(e2 + 16, 24_592);
+    b_ctr.write_u32(e2 + 20, 3);
+
+    let r0 = CfsdBuilder::rec_offset(0, 16);
+    b_ctr.write_u64(r0, 12_235);
+    b_ctr.write_u64(r0 + 8, list_rel);
+
+    // Tower 16214 with empty list_rel == 0
+    let r1 = CfsdBuilder::rec_offset(1, 16);
+    b_ctr.write_u64(r1, 16_214);
+    b_ctr.write_u64(r1 + 8, 0);
+
+    let tmp_file = register_cfsd_resource(
+        &mut sde,
+        "res:/staticdata/controltowerresources.fsdbinary",
+        "ctr",
+        &b_ctr.buf,
+        2,
+    );
+
+    let ctr = load_control_tower_resources(&sde).expect("load_control_tower_resources");
+    let ids = load_control_tower_resource_ids(&sde).expect("load_control_tower_resource_ids");
+    assert_eq!(ids, vec![12_235, 16_214]);
+    assert_eq!(ctr[&16_214], Vec::<ControlTowerResourceEntry>::new());
+    assert_eq!(
+        ctr[&12_235],
+        vec![
+            ControlTowerResourceEntry {
+                resource_type_id: 4247,
+                purpose: 1,
+                quantity: 40,
+                min_security_level: None,
+                faction_id: None,
+            },
+            ControlTowerResourceEntry {
+                resource_type_id: 16_275,
+                purpose: 4,
+                quantity: 400,
+                min_security_level: None,
+                faction_id: None,
+            },
+            ControlTowerResourceEntry {
+                resource_type_id: 24_592,
+                purpose: 1,
+                quantity: 1,
+                min_security_level: Some(0.45),
+                faction_id: Some(500_003),
+            },
+        ]
+    );
+
+    let reinf = sde
+        .control_tower_resources_for_purpose(12_235, 4)
+        .expect("purpose 4");
+    assert_eq!(reinf.len(), 1);
+    assert_eq!(reinf[0].resource_type_id, 16_275);
+    assert_eq!(reinf[0].quantity, 400);
+
+    // Low-sec / null-sec with sov discount (0.75): 40 * 0.75 = 30 fuel blocks, no charter
+    let null_reqs = sde
+        .control_tower_hourly_fuel_requirements(12_235, -0.2, None, 0.75)
+        .expect("null_reqs");
+    assert_eq!(null_reqs, vec![(4247, 30)]);
+
+    // High-sec Amarr space (0.8, faction 500003) at factor 1.0: 40 fuel blocks + 1 charter
+    let hisec_reqs = sde
+        .control_tower_hourly_fuel_requirements(12_235, 0.8, Some(500_003), 1.0)
+        .expect("hisec_reqs");
+    assert_eq!(hisec_reqs, vec![(4247, 40), (24_592, 1)]);
+
+    let _ = std::fs::remove_file(tmp_file);
+}

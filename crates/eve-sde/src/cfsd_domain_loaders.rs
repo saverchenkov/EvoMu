@@ -143,6 +143,17 @@ pub struct GraphicLocationInfo {
     pub locators: Vec<GraphicLocatorInfo>,
 }
 
+/// Static definition of a control tower resource requirement entry from
+/// `res:/staticdata/controltowerresources.fsdbinary`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ControlTowerResourceEntry {
+    pub resource_type_id: TypeId,
+    pub purpose: u32,
+    pub quantity: u32,
+    pub min_security_level: Option<f32>,
+    pub faction_id: Option<u32>,
+}
+
 fn u32_le(buf: &[u8], pos: usize) -> u32 {
     pos.checked_add(4)
         .and_then(|end| buf.get(pos..end))
@@ -747,6 +758,124 @@ impl SdeRegistry {
         }
         Ok((raw.len(), out))
     }
+
+    /// Loads `res:/staticdata/controltowerresources.fsdbinary` (`44` control tower types, top-level
+    /// stride `16`, inner list stride `24` with `339` total resource rows), returning a map from
+    /// control tower `TypeId` to its list of [`ControlTowerResourceEntry`] requirements.
+    pub fn load_control_tower_resources(
+        &self,
+    ) -> Result<HashMap<TypeId, Vec<ControlTowerResourceEntry>>, SdeError> {
+        let (raw, recs) =
+            self.read_cfsd_bytes("res:/staticdata/controltowerresources.fsdbinary", 16)?;
+        let mut out = HashMap::with_capacity(recs.len());
+        for rec in recs {
+            let tower_type_id = u64_le(&raw, rec) as TypeId;
+            let list_rel = u64_le(&raw, rec + 8);
+            let mut entries = Vec::new();
+            if let Some(list_abs) = usize::try_from(list_rel)
+                .ok()
+                .filter(|&r| r > 0)
+                .and_then(|r| 32_usize.checked_add(r))
+            {
+                let count = list_abs
+                    .checked_sub(8)
+                    .and_then(|pos| usize::try_from(u64_le(&raw, pos)).ok())
+                    .unwrap_or(0);
+                for idx in 0..count {
+                    let Some(e) = idx
+                        .checked_mul(24)
+                        .and_then(|off| list_abs.checked_add(off))
+                        .filter(|&pos| pos.saturating_add(24) <= raw.len())
+                    else {
+                        break;
+                    };
+                    let mask = u32_le(&raw, e + 20);
+                    entries.push(ControlTowerResourceEntry {
+                        resource_type_id: u32_le(&raw, e + 16) as TypeId,
+                        purpose: u32_le(&raw, e + 8),
+                        quantity: u32_le(&raw, e + 12),
+                        min_security_level: ((mask & 2) != 0).then(|| f32_le(&raw, e + 4)),
+                        faction_id: ((mask & 1) != 0).then(|| u32_le(&raw, e)),
+                    });
+                }
+            }
+            out.insert(tower_type_id, entries);
+        }
+        Ok(out)
+    }
+
+    /// Loads sorted control tower `TypeId` keys from `res:/staticdata/controltowerresources.fsdbinary`.
+    pub fn load_control_tower_resource_ids(&self) -> Result<Vec<TypeId>, SdeError> {
+        let map = self.load_control_tower_resources()?;
+        let mut ids: Vec<TypeId> = map.into_keys().collect();
+        ids.sort_unstable();
+        Ok(ids)
+    }
+
+    /// Returns the [`ControlTowerResourceEntry`] rows for `tower_type_id` matching `purpose`
+    /// (`1` = Online/Fuel, `4` = Reinforced/Strontium Clathrates).
+    pub fn control_tower_resources_for_purpose(
+        &self,
+        tower_type_id: TypeId,
+        purpose: u32,
+    ) -> Result<Vec<ControlTowerResourceEntry>, SdeError> {
+        let map = self.load_control_tower_resources()?;
+        Ok(map
+            .get(&tower_type_id)
+            .map(|rows| {
+                rows.iter()
+                    .copied()
+                    .filter(|r| r.purpose == purpose)
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// Computes the hourly online (`purpose == 1`) fuel block and charter requirements
+    /// `(resource_type_id, hourly_quantity)` for `tower_type_id` given `system_security`,
+    /// `system_faction_id`, and sovereignty `consumption_factor`.
+    pub fn control_tower_hourly_fuel_requirements(
+        &self,
+        tower_type_id: TypeId,
+        system_security: f64,
+        system_faction_id: Option<u32>,
+        consumption_factor: f64,
+    ) -> Result<Vec<(TypeId, u32)>, SdeError> {
+        let rows = self.control_tower_resources_for_purpose(tower_type_id, 1)?;
+        let factor = consumption_factor.clamp(0.0, 10.0);
+        let mut reqs = Vec::new();
+        for entry in rows {
+            if let Some(min_sec) = entry.min_security_level {
+                if system_security < f64::from(min_sec) {
+                    continue;
+                }
+            }
+            if let Some(req_faction) = entry.faction_id {
+                if system_faction_id != Some(req_faction) {
+                    continue;
+                }
+            }
+            let adjusted_qty = if entry.min_security_level.is_some() || entry.faction_id.is_some() {
+                entry.quantity
+            } else {
+                ((f64::from(entry.quantity) * factor).ceil() as u32).max(1)
+            };
+            reqs.push((entry.resource_type_id, adjusted_qty));
+        }
+        Ok(reqs)
+    }
+}
+
+/// Free-function wrapper for [`SdeRegistry::load_control_tower_resources`].
+pub fn load_control_tower_resources(
+    sde: &SdeRegistry,
+) -> Result<HashMap<TypeId, Vec<ControlTowerResourceEntry>>, SdeError> {
+    sde.load_control_tower_resources()
+}
+
+/// Free-function wrapper for [`SdeRegistry::load_control_tower_resource_ids`].
+pub fn load_control_tower_resource_ids(sde: &SdeRegistry) -> Result<Vec<TypeId>, SdeError> {
+    sde.load_control_tower_resource_ids()
 }
 
 /// Decoded 152-byte record from `res:/staticdata/types.fsdbinary`.

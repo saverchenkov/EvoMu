@@ -803,3 +803,99 @@ fn test_t2_sde_fsdbinary_characters_economy_and_assets_verification() {
     ]);
 }
 
+#[test]
+fn test_t2_sde_control_tower_resources_raw_client_verification() {
+    // parity: sde:res:/staticdata/controltowerresources.fsdbinary
+    const CONTROL_TOWER_RESOURCES: (&str, &str, u64) = (
+        "res:/staticdata/controltowerresources.fsdbinary",
+        "1d600786c1c5de7c0d0703f2636ddf75",
+        9_600,
+    );
+
+    let sde = SdeRegistry::open(SdeRegistry::default_db_path()).expect("open real SDE SQLite DB");
+    let ctr_raw = load(&sde, CONTROL_TOWER_RESOURCES, 16);
+    let ctr = eve_sde::load_control_tower_resources(&sde).expect("load_control_tower_resources");
+    let ctr_ids =
+        eve_sde::load_control_tower_resource_ids(&sde).expect("load_control_tower_resource_ids");
+
+    assert_eq!(ctr_raw.records.len(), 44);
+    assert_eq!(ctr.len(), 44);
+    assert_eq!(ctr_ids.len(), 44);
+    assert_eq!(ctr_ids[0], 4_361); // QA Fuel Control Tower
+    assert_eq!(*ctr_ids.last().expect("last tower id"), 27_790);
+
+    let mut raw_total_rows = 0usize;
+    for rec in &ctr_raw.records {
+        let tower_type_id = u64_at(&ctr_raw.raw, *rec) as u32;
+        assert!(
+            sde.types.contains_key(&tower_type_id),
+            "control tower type {tower_type_id} must exist in sde.types"
+        );
+        let list_rel = u64_at(&ctr_raw.raw, *rec + 8) as usize;
+        let list_abs = 32 + list_rel;
+        let count = u64_at(&ctr_raw.raw, list_abs - 8) as usize;
+        let loaded_rows = ctr
+            .get(&tower_type_id)
+            .expect("control tower type in load_control_tower_resources");
+        assert_eq!(loaded_rows.len(), count);
+        raw_total_rows += count;
+
+        for (idx, row) in loaded_rows.iter().enumerate() {
+            let e = list_abs + idx * 24;
+            let mask = u32_at(&ctr_raw.raw, e + 20);
+            let expected_faction = ((mask & 1) != 0).then(|| u32_at(&ctr_raw.raw, e));
+            let expected_min_sec = ((mask & 2) != 0).then(|| {
+                f32::from_le_bytes(ctr_raw.raw[e + 4..e + 8].try_into().expect("f32 slice"))
+            });
+            let expected_purpose = u32_at(&ctr_raw.raw, e + 8);
+            let expected_qty = u32_at(&ctr_raw.raw, e + 12);
+            let expected_res_type = u32_at(&ctr_raw.raw, e + 16);
+
+            assert_eq!(row.resource_type_id, expected_res_type);
+            assert_eq!(row.purpose, expected_purpose);
+            assert_eq!(row.quantity, expected_qty);
+            assert_eq!(row.min_security_level, expected_min_sec);
+            assert_eq!(row.faction_id, expected_faction);
+            assert!(
+                sde.types.contains_key(&row.resource_type_id),
+                "resource type {} for tower {tower_type_id} must exist in sde.types",
+                row.resource_type_id
+            );
+        }
+    }
+    assert_eq!(raw_total_rows, 339);
+
+    // Amarr Control Tower (12235): Helium Fuel Block (4247, qty 40, purpose 1),
+    // Strontium Clathrates (16275, qty 400, purpose 4), and 6 empire starbase charters.
+    let amarr_tower = &ctr[&12_235];
+    assert_eq!(amarr_tower.len(), 8);
+    let helium = amarr_tower
+        .iter()
+        .find(|r| r.resource_type_id == 4_247)
+        .expect("Amarr Control Tower Helium Fuel Block");
+    assert_eq!(helium.purpose, 1);
+    assert_eq!(helium.quantity, 40);
+    let strontium = amarr_tower
+        .iter()
+        .find(|r| r.resource_type_id == 16_275)
+        .expect("Amarr Control Tower Strontium Clathrates");
+    assert_eq!(strontium.purpose, 4);
+    assert_eq!(strontium.quantity, 400);
+
+    // Minmatar Control Tower (16214) in null-sec with sov discount (0.75): 40 * 0.75 = 30 Hydrogen Fuel Blocks (4246).
+    let minmatar_null = sde
+        .control_tower_hourly_fuel_requirements(16_214, -0.4, None, 0.75)
+        .expect("minmatar null hourly fuel");
+    assert_eq!(minmatar_null, vec![(4_246, 30)]);
+
+    // Gallente Control Tower Small (20064) in high-sec Gallente space (0.7, faction 500004):
+    // 1 Gallente Federation Starbase Charter (24594) + 10 Oxygen Fuel Blocks (4312).
+    let gallente_hisec = sde
+        .control_tower_hourly_fuel_requirements(20_064, 0.7, Some(500_004), 1.0)
+        .expect("gallente hisec hourly fuel");
+    assert_eq!(gallente_hisec, vec![(24_594, 1), (4_312, 10)]);
+
+    eve_testkit::attest(&["sde:res:/staticdata/controltowerresources.fsdbinary"]);
+}
+
+
