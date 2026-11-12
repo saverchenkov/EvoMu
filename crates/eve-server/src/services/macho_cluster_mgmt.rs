@@ -461,13 +461,32 @@ pub fn handle(
                     message: "UserError: GM_InsufficientRole".into(),
                 }));
             }
+            let target_sessions: Vec<(u64, u64, Option<i64>)> = ctx.db.with_snapshot(|snap| {
+                snap.sessions
+                    .iter()
+                    .filter(|(_, os)| os.session_id != session.session_id)
+                    .map(|(&uid, os)| (uid, os.session_id, os.character_id))
+                    .collect()
+            });
+            let mut handled_sids = std::collections::BTreeSet::new();
+            for (uid, sid, cid_opt) in target_sessions {
+                let released = ctx.db.release_online_lock(uid, sid);
+                ctx.disconnect_session(sid, "EndAllGameSessions", "All game sessions ended by administrator");
+                ctx.release_session_bindings(sid);
+                handled_sids.insert(sid);
+                if released {
+                    if let Some(cid) = cid_opt {
+                        ctx.logoff_character_sync(cid, None);
+                    }
+                }
+            }
             let active_sessions: Vec<u64> = ctx
                 .session_closers
                 .read()
                 .map(|g| g.keys().copied().collect())
                 .unwrap_or_default();
             for sid in active_sessions {
-                if sid != session.session_id {
+                if sid != session.session_id && !handled_sids.contains(&sid) {
                     ctx.disconnect_session(sid, "EndAllGameSessions", "All game sessions ended by administrator");
                     ctx.release_session_bindings(sid);
                 }
@@ -506,9 +525,28 @@ pub fn handle(
                 Some(PyRep::Integer(sid)) => vec![*sid],
                 _ => Vec::new(),
             };
+            let target_sessions: Vec<(u64, u64, Option<i64>)> = ctx.db.with_snapshot(|snap| {
+                snap.sessions
+                    .iter()
+                    .filter(|(_, os)| session_ids.contains(&(os.session_id as i64)))
+                    .map(|(&uid, os)| (uid, os.session_id, os.character_id))
+                    .collect()
+            });
+            let mut handled_sids = std::collections::BTreeSet::new();
+            for (uid, sid, cid_opt) in target_sessions {
+                let released = ctx.db.release_online_lock(uid, sid);
+                ctx.disconnect_session(sid, "RemoveSession", "Session removed from server");
+                ctx.release_session_bindings(sid);
+                handled_sids.insert(sid);
+                if released {
+                    if let Some(cid) = cid_opt {
+                        ctx.logoff_character_sync(cid, None);
+                    }
+                }
+            }
             for sid in &session_ids {
                 if let Ok(u_sid) = u64::try_from(*sid) {
-                    if u_sid > 0 {
+                    if u_sid > 0 && !handled_sids.contains(&u_sid) {
                         ctx.disconnect_session(u_sid, "RemoveSession", "Session removed from server");
                         ctx.release_session_bindings(u_sid);
                     }
@@ -1029,14 +1067,34 @@ fn handle_macho_net(
                 state.termination_reason = Some(reason.clone());
             }
 
+            let target_sessions: Vec<(u64, u64, Option<i64>)> = ctx.db.with_snapshot(|snap| {
+                snap.sessions
+                    .iter()
+                    .filter(|(_, os)| os.session_id != session.session_id)
+                    .map(|(&uid, os)| (uid, os.session_id, os.character_id))
+                    .collect()
+            });
+            let mut handled_sids = std::collections::BTreeSet::new();
+            for (uid, sid, cid_opt) in target_sessions {
+                let released = ctx.db.release_online_lock(uid, sid);
+                ctx.disconnect_session(sid, "ClusterShutdown", &reason);
+                ctx.release_session_bindings(sid);
+                handled_sids.insert(sid);
+                if released {
+                    if let Some(cid) = cid_opt {
+                        ctx.logoff_character_sync(cid, None);
+                    }
+                }
+            }
             let active_sessions: Vec<u64> = ctx
                 .session_closers
                 .read()
                 .map(|g| g.keys().copied().collect())
                 .unwrap_or_default();
             for sid in active_sessions {
-                if sid != session.session_id {
+                if sid != session.session_id && !handled_sids.contains(&sid) {
                     ctx.disconnect_session(sid, "ClusterShutdown", &reason);
+                    ctx.release_session_bindings(sid);
                 }
             }
             Some(Ok(PyRep::None))

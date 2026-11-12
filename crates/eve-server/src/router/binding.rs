@@ -93,6 +93,8 @@ impl ServerContext {
 
     /// Actively signals an open TCP session (`session_id`) to send `GPSTransportClosed` and close its socket,
     /// releasing bound objects and unsubscribing any Quasar gateway notice stream/receiver.
+    /// When no live TCP closer is registered (or sending fails), releases any active online lock
+    /// for `session_id` and runs `logoff_character_sync` synchronously.
     pub fn disconnect_session(&self, session_id: u64, reason_code: &str, reason: &str) -> bool {
         self.release_session_bindings(session_id);
         self.quasar_gateway.unsubscribe_session(session_id);
@@ -101,13 +103,29 @@ impl ServerContext {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&session_id);
-        if let Some(sender) = tx {
-            sender
-                .send((reason_code.to_string(), reason.to_string()))
-                .is_ok()
-        } else {
-            false
+        let sent_to_live = tx
+            .map(|sender| {
+                sender
+                    .send((reason_code.to_string(), reason.to_string()))
+                    .is_ok()
+            })
+            .unwrap_or(false);
+        if !sent_to_live {
+            let active_for_session = self.db.with_snapshot(|snap| {
+                snap.sessions
+                    .values()
+                    .find(|os| os.session_id == session_id)
+                    .map(|os| (os.user_id, os.character_id))
+            });
+            if let Some((uid, char_opt)) = active_for_session {
+                if self.db.release_online_lock(uid, session_id) {
+                    if let Some(cid) = char_opt {
+                        self.logoff_character_sync(cid, None);
+                    }
+                }
+            }
         }
+        sent_to_live
     }
 
     /// Releases all bound objects associated with `session_id` (called on disconnect or re-login).
@@ -160,11 +178,12 @@ impl ServerContext {
                 })
             });
         if let Some((sys_id, ship_id)) = space_loc {
-            let handle = self.systems.get_or_spawn(sys_id);
-            if let Some(pos) = handle.get_ball_position_sync(ship_id) {
-                self.db.with_mut_snapshot(|snap| {
-                    snap.item_positions.insert(ship_id, [pos.x, pos.y, pos.z]);
-                });
+            if let Some(handle) = self.systems.get_handle(sys_id) {
+                if let Some(pos) = handle.get_ball_position_sync(ship_id) {
+                    self.db.with_mut_snapshot(|snap| {
+                        snap.item_positions.insert(ship_id, [pos.x, pos.y, pos.z]);
+                    });
+                }
             }
         }
         let _ = crate::sp6_lifecycle::handle_character_logoff_or_disconnect_sync(self, char_id);
@@ -173,6 +192,7 @@ impl ServerContext {
         crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(
             self, char_id,
         );
+        crate::services::fleet_social::revoke_xmpp_auth_token(self, char_id);
         self.clear_notifications_for_char(char_id);
     }
 
@@ -389,7 +409,7 @@ impl ServerContext {
     }
 
     /// Processes client-initiated bound object releases from `pkt.named_payload["OID-"]` and
-    /// `ClientHasReleasedTheseObjects` packets (`#882` / `C20`).
+    /// `ClientHasReleasedTheseObjects` notification/broadcast packets (`#882` / `C20`).
     /// Returns `(released_count, is_dedicated_release_notification)`.
     pub fn process_client_bound_object_releases(
         &self,
@@ -400,34 +420,67 @@ impl ServerContext {
         if let Some(oid_minus) = pkt.named_payload.get("OID-") {
             released += self.release_bound_objects_from_pyrep(session_id, oid_minus);
         }
+        if pkt.packet_type != eve_machonet::MachoPacketType::Notification {
+            return (released, false);
+        }
         let is_release_broadcast = matches!(
             &pkt.destination,
             eve_machonet::MachoAddress::Broadcast { broadcast_id, .. }
                 if broadcast_id == "ClientHasReleasedTheseObjects"
         );
-        let is_release_method = Self::pyrep_contains_method(&pkt.payload, "ClientHasReleasedTheseObjects");
-        if is_release_broadcast || is_release_method {
+        if is_release_broadcast {
             released += self.release_bound_objects_from_pyrep(session_id, &pkt.payload);
-            let is_notif = pkt.packet_type == eve_machonet::MachoPacketType::Notification
-                || is_release_broadcast;
-            return (released, is_notif);
+            return (released, true);
+        }
+        if let Some(release_args) = Self::extract_release_notification_args(&pkt.payload) {
+            for rep in release_args {
+                released += self.release_bound_objects_from_pyrep(session_id, rep);
+            }
+            return (released, true);
         }
         (released, false)
     }
 
-    fn pyrep_contains_method(rep: &PyRep, target: &str) -> bool {
-        if rep.as_str() == Some(target) {
-            return true;
-        }
-        match rep {
-            PyRep::List(items) | PyRep::Tuple(items) => {
-                items.iter().any(|i| Self::pyrep_contains_method(i, target))
+    fn extract_release_notification_args(payload: &PyRep) -> Option<&[PyRep]> {
+        let mut cur = payload;
+        for _ in 0..4 {
+            match cur {
+                PyRep::SubStream(inner) | PyRep::SubStruct(inner) => {
+                    cur = inner.as_ref();
+                }
+                PyRep::Tuple(items) if items.len() == 1 => {
+                    cur = &items[0];
+                }
+                PyRep::Tuple(items)
+                    if items.len() == 2
+                        && matches!(items[0], PyRep::Integer(_))
+                        && matches!(items[1], PyRep::SubStream(_) | PyRep::SubStruct(_) | PyRep::Tuple(_)) =>
+                {
+                    cur = &items[1];
+                }
+                _ => break,
             }
-            PyRep::SubStream(inner) | PyRep::SubStruct(inner) => {
-                Self::pyrep_contains_method(inner, target)
-            }
-            _ => false,
         }
+        let PyRep::Tuple(items) = cur else {
+            return None;
+        };
+        if items.first().and_then(|v| v.as_str()) == Some("ClientHasReleasedTheseObjects") {
+            let end = if items.len() > 2 && matches!(items.last(), Some(PyRep::Dict(_))) {
+                items.len() - 1
+            } else {
+                items.len()
+            };
+            return Some(&items[1..end]);
+        }
+        if items.len() >= 2 && items[1].as_str() == Some("ClientHasReleasedTheseObjects") {
+            let end = if items.len() > 3 && matches!(items.last(), Some(PyRep::Dict(_))) {
+                items.len() - 1
+            } else {
+                items.len()
+            };
+            return Some(&items[2..end]);
+        }
+        None
     }
 
     /// Wire form of a bound-object reference. The native client (`caller_trace == "machoNet:26000"`)
@@ -1414,6 +1467,7 @@ impl ServerContext {
             tactical_state,
             session_change_timers: std::sync::Mutex::new(std::collections::HashMap::new()),
             active_warps: std::sync::Mutex::new(std::collections::HashMap::new()),
+            return_warps: std::sync::Mutex::new(std::collections::HashSet::new()),
             location_change_invuln: std::sync::Mutex::new(std::collections::HashMap::new()),
             feature_flags: crate::config::FeatureFlagsConfig::default(),
             esi_port: 0,

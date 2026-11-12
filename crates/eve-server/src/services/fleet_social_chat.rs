@@ -12,7 +12,8 @@ mod fleet_social_chat_auth_ops;
 use fleet_social_chat_auth_ops::{
     build_initial_channel_record, check_channel_or_global_mute,
     handle_contacts_notifications_calendar, has_channel_operator_auth, has_channel_owner_auth,
-    is_system_or_org_channel, validate_channel_join_auth,
+    has_dynamic_org_operator_role, is_org_channel, is_system_channel, is_system_or_org_channel,
+    validate_channel_join_auth,
 };
 
 pub(crate) use super::fleet_social_persistence::{
@@ -1572,6 +1573,63 @@ pub(super) fn extract_id_list(arg: Option<&PyRep>) -> Vec<i64> {
     ids
 }
 
+fn generate_xmpp_auth_token() -> String {
+    let mut bytes = [0u8; 32];
+    if let Err(err) = getrandom::getrandom(&mut bytes) {
+        panic!("OS CSPRNG unavailable for XMPP token generation: {err}");
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    if a_bytes.len() != b_bytes.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (&x, &y) in a_bytes.iter().zip(b_bytes.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+pub fn mint_or_rotate_xmpp_auth_token(ctx: &ServerContext, char_id: i64) -> String {
+    let token = generate_xmpp_auth_token();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs
+            .insert(format!("xmpp:token:{char_id}"), token.clone());
+    });
+    token
+}
+
+pub fn ensure_xmpp_auth_token(ctx: &ServerContext, char_id: i64) -> String {
+    let key = format!("xmpp:token:{char_id}");
+    if let Some(existing) = ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs
+            .get(&key)
+            .filter(|t| !t.is_empty())
+            .cloned()
+    }) {
+        return existing;
+    }
+    let fresh = generate_xmpp_auth_token();
+    ctx.db.with_mut_snapshot(|snap| {
+        let entry = snap.service_state_blobs.entry(key).or_default();
+        if entry.is_empty() {
+            *entry = fresh.clone();
+        }
+        entry.clone()
+    })
+}
+
+pub fn revoke_xmpp_auth_token(ctx: &ServerContext, char_id: i64) {
+    let key = format!("xmpp:token:{char_id}");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs.remove(&key);
+    });
+}
+
 fn handle_get_chat_authentication_token(
     ctx: &ServerContext,
     session: &SessionState,
@@ -1580,12 +1638,7 @@ fn handle_get_chat_authentication_token(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let token = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get(&format!("xmpp:token:{char_id}"))
-            .cloned()
-            .unwrap_or_else(|| format!("evomu-xmpp-token-{char_id}"))
-    });
+    let token = ensure_xmpp_auth_token(ctx, char_id);
     Some(Ok(PyRep::String(token)))
 }
 
@@ -1675,36 +1728,679 @@ fn unescape_xml_attr(raw: &str) -> String {
         .replace("&amp;", "&")
 }
 
+/// Per-connection XMPP authentication & resource-bind identity tracked by the XMPP TCP loop (`#940`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct XmppStreamAuth {
+    pub user_id: Option<u64>,
+    pub character_id: Option<i64>,
+    pub bound_jid: Option<String>,
+    pub sasl_authenticated: bool,
+}
+
+fn xmpp_not_authorized_iq(stanza_id: &str) -> String {
+    let esc_id = escape_xml_attr(stanza_id);
+    format!(
+        "<iq type='error' id='{esc_id}'><error type='auth'><not-authorized xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/></error></iq>"
+    )
+}
+
+fn xmpp_item_not_found_iq(stanza_id: &str) -> String {
+    let esc_id = escape_xml_attr(stanza_id);
+    format!(
+        "<iq type='error' id='{esc_id}'><error type='cancel'><item-not-found xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/></error></iq>"
+    )
+}
+
+fn decode_xmpp_base64(input: &str) -> Option<Vec<u8>> {
+    fn val(b: u8) -> Option<u8> {
+        match b {
+            b'A'..=b'Z' => Some(b - b'A'),
+            b'a'..=b'z' => Some(b - b'a' + 26),
+            b'0'..=b'9' => Some(b - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let clean: Vec<u8> = input
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace())
+        .collect();
+    if clean.is_empty() || clean.len() % 4 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity((clean.len() / 4) * 3);
+    let chunks = clean.chunks_exact(4);
+    let total_chunks = chunks.len();
+    for (idx, chunk) in chunks.enumerate() {
+        let v0 = val(chunk[0])?;
+        let v1 = val(chunk[1])?;
+        let is_last = idx + 1 == total_chunks;
+        if chunk[2] == b'=' {
+            if !is_last || chunk[3] != b'=' {
+                return None;
+            }
+            out.push((v0 << 2) | (v1 >> 4));
+        } else if chunk[3] == b'=' {
+            if !is_last {
+                return None;
+            }
+            let v2 = val(chunk[2])?;
+            out.push((v0 << 2) | (v1 >> 4));
+            out.push(((v1 & 0x0f) << 4) | (v2 >> 2));
+        } else {
+            let v2 = val(chunk[2])?;
+            let v3 = val(chunk[3])?;
+            out.push((v0 << 2) | (v1 >> 4));
+            out.push(((v1 & 0x0f) << 4) | (v2 >> 2));
+            out.push(((v2 & 0x03) << 6) | v3);
+        }
+    }
+    Some(out)
+}
+
+fn extract_xml_elem_text(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}");
+    let mut offset = 0usize;
+    while let Some(rel) = xml[offset..].find(&open) {
+        let start = offset + rel;
+        let after = start + open.len();
+        let next = xml.as_bytes().get(after).copied();
+        if !matches!(
+            next,
+            Some(b'>') | Some(b'/') | Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')
+        ) {
+            offset = after;
+            continue;
+        }
+        let mut in_quote: Option<u8> = None;
+        let bytes = xml.as_bytes();
+        let mut gt = None;
+        let mut i = after;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if let Some(q) = in_quote {
+                if b == q {
+                    in_quote = None;
+                }
+            } else if b == b'\'' || b == b'"' {
+                in_quote = Some(b);
+            } else if b == b'>' {
+                gt = Some(i);
+                break;
+            }
+            i += 1;
+        }
+        let gt_idx = gt?;
+        if gt_idx > after && bytes[gt_idx - 1] == b'/' {
+            return None;
+        }
+        let close = format!("</{tag}>");
+        let end_rel = xml[gt_idx + 1..].find(&close)?;
+        return Some(unescape_xml_attr(xml[gt_idx + 1..gt_idx + 1 + end_rel].trim()));
+    }
+    None
+}
+
+fn parse_xmpp_char_id(raw: &str) -> Option<i64> {
+    let local = raw.split('@').next().unwrap_or(raw).trim();
+    let stripped = local
+        .strip_prefix("char_")
+        .or_else(|| local.strip_prefix("CHAR_"))
+        .unwrap_or(local);
+    stripped.parse::<i64>().ok().filter(|&cid| cid > 0)
+}
+
+/// Verifies SASL PLAIN `<auth>` credentials against server-issued CSPRNG character XMPP tokens
+/// (`xmpp:token:{cid}`) or `AccountRecord` credentials (`ctx.db.authenticate_at`) and records the
+/// authenticated `(user_id, character_id)` on `auth` (`#940`). Fails closed on invalid/banned/revoked auth.
+pub fn xmpp_authenticate_sasl_plain(
+    ctx: &ServerContext,
+    stanza: &str,
+    auth: &mut XmppStreamAuth,
+) -> Result<(), &'static str> {
+    auth.user_id = None;
+    auth.character_id = None;
+    auth.bound_jid = None;
+    auth.sasl_authenticated = false;
+
+    if let Some(mech) = extract_xml_attr(stanza, "mechanism") {
+        if !mech.eq_ignore_ascii_case("PLAIN") {
+            return Err("<failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><invalid-mechanism/></failure>");
+        }
+    }
+    let Some(b64_text) = extract_xml_elem_text(stanza, "auth") else {
+        return Err("<failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><not-authorized/></failure>");
+    };
+    let Some(raw) = decode_xmpp_base64(&b64_text) else {
+        return Err("<failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><not-authorized/></failure>");
+    };
+    let parts: Vec<&[u8]> = raw.split(|&b| b == b'\0').collect();
+    let (authzid_b, authcid_b, passwd_b) = match parts.as_slice() {
+        [z, c, p] => (*z, *c, *p),
+        [c, p] => (&[] as &[u8], *c, *p),
+        _ => return Err("<failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><not-authorized/></failure>"),
+    };
+    let Ok(authzid) = std::str::from_utf8(authzid_b) else {
+        return Err("<failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><not-authorized/></failure>");
+    };
+    let Ok(authcid) = std::str::from_utf8(authcid_b) else {
+        return Err("<failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><not-authorized/></failure>");
+    };
+    let Ok(passwd) = std::str::from_utf8(passwd_b) else {
+        return Err("<failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><not-authorized/></failure>");
+    };
+    if authcid.trim().is_empty() || passwd.is_empty() {
+        return Err("<failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><not-authorized/></failure>");
+    }
+
+    let now_unix = ctx.now_unix();
+    if let Some(cid) = parse_xmpp_char_id(authcid) {
+        if !authzid.trim().is_empty() && parse_xmpp_char_id(authzid) != Some(cid) {
+            return Err("<failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><not-authorized/></failure>");
+        }
+        let lookup = ctx.db.with_snapshot(|snap| {
+            let ch = snap.characters.get(&cid)?;
+            let acc = snap.accounts.values().find(|a| a.user_id == ch.user_id);
+            let restricted = acc.is_some_and(|a| a.check_active_restriction(now_unix).is_err());
+            let custom_token = snap
+                .service_state_blobs
+                .get(&format!("xmpp:token:{cid}"))
+                .cloned()
+                .filter(|t| !t.is_empty());
+            Some((ch.user_id, restricted, custom_token))
+        });
+        let Some((uid, restricted, custom_token)) = lookup else {
+            return Err("<failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><not-authorized/></failure>");
+        };
+        if restricted {
+            return Err("<failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><not-authorized/></failure>");
+        }
+        let token_ok = custom_token
+            .as_deref()
+            .is_some_and(|expected_tok| constant_time_eq(passwd, expected_tok));
+        if token_ok {
+            auth.user_id = Some(uid);
+            auth.character_id = Some(cid);
+            auth.sasl_authenticated = true;
+            return Ok(());
+        }
+        return Err("<failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><not-authorized/></failure>");
+    }
+
+    let uname = authcid.split('@').next().unwrap_or(authcid).trim();
+    let Ok(acc) = ctx.db.authenticate_at(uname, passwd, now_unix) else {
+        return Err("<failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><not-authorized/></failure>");
+    };
+    let explicit_cid = parse_xmpp_char_id(authzid);
+    let resolved_cid = ctx.db.with_snapshot(|snap| {
+        if let Some(cid) = explicit_cid {
+            if snap
+                .characters
+                .get(&cid)
+                .is_some_and(|c| c.user_id == acc.user_id)
+            {
+                return Some(cid);
+            }
+            return None;
+        }
+        snap.sessions
+            .get(&acc.user_id)
+            .and_then(|s| s.character_id)
+            .filter(|cid| snap.characters.get(cid).is_some_and(|c| c.user_id == acc.user_id))
+            .or_else(|| {
+                snap.characters
+                    .values()
+                    .filter(|c| c.user_id == acc.user_id)
+                    .map(|c| c.character_id)
+                    .min()
+            })
+    });
+    let Some(cid) = resolved_cid else {
+        return Err("<failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><not-authorized/></failure>");
+    };
+    auth.user_id = Some(acc.user_id);
+    auth.character_id = Some(cid);
+    auth.sasl_authenticated = true;
+    Ok(())
+}
+
+fn xmpp_social_block_snapshot(
+    ctx: &ServerContext,
+    caller_cid: i64,
+) -> (HashSet<String>, HashSet<i64>) {
+    let (blocked_in_channels, mut owners_blocking_caller) = ctx
+        .social_extras
+        .lock()
+        .map(|se| {
+            let chans: HashSet<String> = se
+                .blocked_in_channel
+                .iter()
+                .filter_map(|(chan_key, blocked_set)| {
+                    blocked_set.contains(&caller_cid).then(|| chan_key.clone())
+                })
+                .collect();
+            let owners: HashSet<i64> = se
+                .blocked
+                .iter()
+                .filter_map(|(&owner_cid, blocked_set)| {
+                    blocked_set.contains(&caller_cid).then_some(owner_cid)
+                })
+                .collect();
+            (chans, owners)
+        })
+        .unwrap_or_default();
+    if let Ok(esi_contacts) = ctx.esi_state.char_contacts.read() {
+        for (&owner_cid, list) in esi_contacts.iter() {
+            if list
+                .iter()
+                .any(|c| c.contact_id == caller_cid && c.is_blocked)
+            {
+                owners_blocking_caller.insert(owner_cid);
+            }
+        }
+    }
+    (blocked_in_channels, owners_blocking_caller)
+}
+
+fn xmpp_channel_visibility_for_caller(
+    snap: &eve_db::WorldStateSnapshot,
+    chan_key: &str,
+    chan: &ChatChannelRecord,
+    caller_cid: i64,
+    blocked_in_channels: &HashSet<String>,
+    owners_blocking_caller: &HashSet<i64>,
+) -> (bool, bool, bool) {
+    let is_owner = chan.owner_id == Some(caller_cid);
+    let is_op = chan.operators.contains(&caller_cid);
+    let is_member = chan.members.contains(&caller_cid);
+    let acl_opt = snap.chat_channel_acl.get(chan_key);
+    let is_allowed = acl_opt.is_some_and(|a| a.allow_list.contains(&caller_cid));
+    let is_denied_acl = !is_owner && acl_opt.is_some_and(|a| a.deny_list.contains(&caller_cid));
+    let is_blocked_in_chan = !is_owner && blocked_in_channels.contains(chan_key);
+    let is_blocked_owner = !is_owner
+        && chan.owner_id.is_some_and(|oid| {
+            owners_blocking_caller.contains(&oid)
+                || snap
+                    .char_contacts
+                    .get(&oid)
+                    .is_some_and(|list| list.iter().any(|c| c.contact_id == caller_cid && c.is_blocked))
+        });
+    let is_denied = is_denied_acl || is_blocked_in_chan || is_blocked_owner;
+    let has_membership = is_owner || is_op || is_member || is_allowed;
+    let has_password = chan.password.as_deref().is_some_and(|p| !p.is_empty());
+    let can_see_forme = !is_denied && has_membership;
+    let can_see_public_or_search =
+        !is_denied && (has_membership || (!chan.is_private && !has_password));
+    (can_see_forme, can_see_public_or_search, is_owner)
+}
+
+fn xmpp_authenticated_active_caller(
+    ctx: &ServerContext,
+    auth: Option<&XmppStreamAuth>,
+) -> Option<(Option<u64>, i64)> {
+    let a = auth?;
+    if !a.sasl_authenticated || a.bound_jid.is_none() {
+        return None;
+    }
+    let cid = a.character_id?;
+    let now_unix = ctx.now_unix();
+    let allowed = ctx.db.with_snapshot(|snap| {
+        let ch = snap.characters.get(&cid);
+        let target_uid = a.user_id.or_else(|| ch.map(|c| c.user_id));
+        let restricted = target_uid.is_some_and(|uid| {
+            snap.accounts
+                .values()
+                .find(|acc| acc.user_id == uid)
+                .is_some_and(|acc| acc.check_active_restriction(now_unix).is_err())
+        });
+        !restricted
+    });
+    allowed.then_some((a.user_id, cid))
+}
+
+fn xmpp_opening_tag_end(xml: &str) -> Option<usize> {
+    let bytes = xml.as_bytes();
+    let mut in_quote: Option<u8> = None;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = in_quote {
+            if b == q {
+                in_quote = None;
+            }
+        } else if b == b'\'' || b == b'"' {
+            in_quote = Some(b);
+        } else if b == b'>' {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn xmpp_is_service_jid(target_ref: &str) -> bool {
+    let trimmed = target_ref.trim();
+    !trimmed.contains('@')
+        && (trimmed.is_empty()
+            || trimmed.eq_ignore_ascii_case("conference.chat.evomu.local")
+            || trimmed.eq_ignore_ascii_case("chat.evomu.local"))
+}
+
+fn xmpp_alias_to_channel_key(localpart: &str) -> Option<String> {
+    let lower = localpart.to_ascii_lowercase();
+    if let Some(rest) = lower.strip_prefix("local_") {
+        if let Ok(id) = rest.parse::<u32>() {
+            return Some(format!("solarsystemid2:{id}"));
+        }
+    } else if let Some(rest) = lower.strip_prefix("corp_") {
+        if let Ok(id) = rest.parse::<i64>() {
+            return Some(format!("corpid:{id}"));
+        }
+    } else if let Some(rest) = lower.strip_prefix("alliance_") {
+        if let Ok(id) = rest.parse::<i64>() {
+            return Some(format!("allianceid:{id}"));
+        }
+    } else if let Some(rest) = lower.strip_prefix("fleet_") {
+        if let Ok(id) = rest.parse::<i64>() {
+            return Some(format!("fleetid:{id}"));
+        }
+    } else if let Some(rest) = lower.strip_prefix("faction_") {
+        if let Ok(id) = rest.parse::<i64>() {
+            return Some(format!("factionid:{id}"));
+        }
+    } else if let Some(rest) = lower.strip_prefix("constellation_") {
+        if let Ok(id) = rest.parse::<u32>() {
+            return Some(format!("constellationid:{id}"));
+        }
+    } else if let Some(rest) = lower.strip_prefix("region_") {
+        if let Ok(id) = rest.parse::<u32>() {
+            return Some(format!("regionid:{id}"));
+        }
+    }
+    None
+}
+
+fn xmpp_scoped_channel_allowed(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    caller_cid: i64,
+    target_ref: &str,
+    blocked_in_channels: &HashSet<String>,
+    owners_blocking_caller: &HashSet<i64>,
+    allow_service_jid: bool,
+) -> Result<Option<String>, ()> {
+    let trimmed = target_ref.trim();
+    if allow_service_jid && xmpp_is_service_jid(trimmed) {
+        return Ok(None);
+    }
+    let localpart = trimmed.split('@').next().unwrap_or(trimmed).trim();
+    if localpart.is_empty() {
+        return Err(());
+    }
+    let lower = localpart.to_ascii_lowercase();
+    let canonical_opt = xmpp_alias_to_channel_key(localpart);
+    let scope_key = canonical_opt.as_deref().unwrap_or(lower.as_str());
+    let ch_opt = snap.characters.get(&caller_cid);
+
+    let mut is_scoped = false;
+    if let Some(rest) = scope_key
+        .strip_prefix("solarsystemid2:")
+        .or_else(|| scope_key.strip_prefix("resourcewars:"))
+    {
+        is_scoped = true;
+        let req_sys = rest.parse::<u32>().map_err(|_| ())?;
+        if !ch_opt.is_some_and(|c| c.solar_system_id == req_sys) {
+            return Err(());
+        }
+    } else if let Some(rest) = scope_key.strip_prefix("constellationid:") {
+        is_scoped = true;
+        let req_cid = rest.parse::<u32>().map_err(|_| ())?;
+        if !ch_opt
+            .and_then(|c| ctx.sde.solar_systems.get(&c.solar_system_id))
+            .is_some_and(|s| s.constellation_id == req_cid)
+        {
+            return Err(());
+        }
+    } else if let Some(rest) = scope_key.strip_prefix("regionid:") {
+        is_scoped = true;
+        let req_rid = rest.parse::<u32>().map_err(|_| ())?;
+        if !ch_opt
+            .and_then(|c| ctx.sde.solar_systems.get(&c.solar_system_id))
+            .is_some_and(|s| s.region_id == req_rid)
+        {
+            return Err(());
+        }
+    } else if let Some(rest) = scope_key.strip_prefix("corpid:") {
+        is_scoped = true;
+        let req_corp = rest.parse::<i64>().map_err(|_| ())?;
+        if !ch_opt.is_some_and(|c| c.corporation_id == req_corp) {
+            return Err(());
+        }
+    } else if let Some(rest) = scope_key.strip_prefix("allianceid:") {
+        is_scoped = true;
+        let req_ally = rest.parse::<i64>().map_err(|_| ())?;
+        if ch_opt.and_then(|c| c.alliance_id) != Some(req_ally) {
+            return Err(());
+        }
+    } else if let Some(rest) = scope_key.strip_prefix("fleetid:") {
+        is_scoped = true;
+        let req_fleet = rest.parse::<i64>().map_err(|_| ())?;
+        if !snap
+            .fleets
+            .get(&req_fleet)
+            .is_some_and(|f| f.members.contains(&caller_cid))
+        {
+            return Err(());
+        }
+    } else if let Some(rest) = scope_key.strip_prefix("factionid:") {
+        is_scoped = true;
+        let req_fac = rest.parse::<i64>().map_err(|_| ())?;
+        if ch_opt.and_then(|c| c.war_faction_id) != Some(req_fac) {
+            return Err(());
+        }
+    }
+
+    let existing_key = find_existing_channel_key(snap, localpart).or_else(|| {
+        canonical_opt
+            .as_deref()
+            .and_then(|k| find_existing_channel_key(snap, k))
+    });
+    if let Some(key) = existing_key {
+        let Some(chan) = snap.chat_channels.get(&key) else {
+            return Err(());
+        };
+        let (can_see_forme, can_see_public_or_search, _) = xmpp_channel_visibility_for_caller(
+            snap,
+            &key,
+            chan,
+            caller_cid,
+            blocked_in_channels,
+            owners_blocking_caller,
+        );
+        let is_denied_only = snap
+            .chat_channel_acl
+            .get(&key)
+            .is_some_and(|a| a.deny_list.contains(&caller_cid))
+            || blocked_in_channels.contains(&key);
+        let allowed = if is_scoped {
+            !is_denied_only
+        } else if lower.starts_with("private:") || chan.is_private {
+            can_see_forme
+        } else {
+            can_see_public_or_search
+        };
+        return if allowed {
+            Ok(Some(chan.name.clone()))
+        } else {
+            Err(())
+        };
+    }
+
+    if lower.starts_with("private:")
+        || lower.starts_with("player_")
+        || lower.starts_with("channel:")
+    {
+        return Err(());
+    }
+    if is_scoped {
+        return Ok(None);
+    }
+    if lower.starts_with("help_")
+        || matches!(
+            lower.as_str(),
+            "rookie_help" | "global" | "local" | "corp_recruitment"
+        )
+    {
+        return Ok(None);
+    }
+    Err(())
+}
+
+/// Verifies whether an authenticated, bound XMPP caller is allowed to join/presence-sync `room_jid` (`#940`).
+pub fn xmpp_can_join_room(
+    ctx: &ServerContext,
+    auth: Option<&XmppStreamAuth>,
+    room_jid: &str,
+) -> bool {
+    let Some((_, caller_cid)) = xmpp_authenticated_active_caller(ctx, auth) else {
+        return false;
+    };
+    let (blocked_in_channels, owners_blocking_caller) =
+        xmpp_social_block_snapshot(ctx, caller_cid);
+    ctx.db.with_snapshot(|snap| {
+        xmpp_scoped_channel_allowed(
+            ctx,
+            snap,
+            caller_cid,
+            room_jid,
+            &blocked_in_channels,
+            &owners_blocking_caller,
+            false,
+        )
+        .is_ok()
+    })
+}
+
 /// Build an XMPP `<iq type='result'>` stanza matching the client's IQ query namespace.
 /// V24.01 `xmppchatsvc.GetChannels` reads `response.children[0].children` on `disco#items`,
 /// raising `IndexError` if the server returns an empty `<iq type='result' id='...'/>`.
 pub fn xmpp_iq_reply(chunk: &str, stanza_id: &str) -> String {
-    xmpp_iq_reply_with_ctx(None, chunk, stanza_id)
+    xmpp_iq_reply_with_auth(None, None, chunk, stanza_id)
 }
 
-/// Context-aware XMPP `<iq type='result'>` builder that populates `disco#items` (`byname/<displayName>`
-/// and `forme`) and `disco#info` from `snap.chat_channels` so V24.01 `XmppChatChannels` can discover
-/// and join player-created chat channels (`#940`).
+/// Context-aware XMPP `<iq>` builder without an authenticated stream identity.
+/// When `ctx.is_some()`, unauthenticated callers fail closed (`not-authorized`) so channel
+/// inventories and `node='owner'` flags are never leaked across the cluster (`#940`).
 pub fn xmpp_iq_reply_with_ctx(
     ctx: Option<&ServerContext>,
     chunk: &str,
     stanza_id: &str,
 ) -> String {
-    if chunk.contains("<bind") {
-        format!(
-            "<iq type='result' id='{stanza_id}'><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'><jid>user@chat.evomu.local/eve</jid></bind></iq>"
-        )
-    } else if chunk.contains("http://jabber.org/protocol/disco#items") {
-        let query_slice = chunk
-            .find("<query")
-            .map(|idx| &chunk[idx..])
-            .unwrap_or(chunk);
-        let node_opt = extract_xml_attr(query_slice, "node");
+    xmpp_iq_reply_with_auth(ctx, None, chunk, stanza_id)
+}
+
+/// Authenticated XMPP `<iq>` builder that enforces SASL + resource bind (`auth`) against
+/// `snap.chat_channels`, `snap.chat_channel_acl`, passwords, privacy flags, and `ctx.social_extras`
+/// blocklists (`#940`).
+pub fn xmpp_iq_reply_with_auth(
+    ctx: Option<&ServerContext>,
+    auth: Option<&XmppStreamAuth>,
+    chunk: &str,
+    stanza_id: &str,
+) -> String {
+    let mut cloned = auth.cloned();
+    xmpp_iq_reply_with_auth_mut(ctx, cloned.as_mut(), chunk, stanza_id)
+}
+
+/// Mutable-auth variant of [`xmpp_iq_reply_with_auth`] used by the XMPP stream loop so `<bind>`
+/// updates `auth.bound_jid` after SASL authentication succeeds (`#940`).
+pub fn xmpp_iq_reply_with_auth_mut(
+    ctx: Option<&ServerContext>,
+    auth: Option<&mut XmppStreamAuth>,
+    chunk: &str,
+    stanza_id: &str,
+) -> String {
+    let esc_stanza_id = escape_xml_attr(stanza_id);
+    let mut trimmed = chunk.trim_start();
+    while trimmed.starts_with("<?") {
+        let Some(pi_end) = trimmed.find("?>") else {
+            break;
+        };
+        trimmed = trimmed[pi_end + 2..].trim_start();
+    }
+    let (iq_open_tag, iq_body) = if trimmed.starts_with("<iq") {
+        if let Some(end) = xmpp_opening_tag_end(trimmed) {
+            (&trimmed[..=end], trimmed[end + 1..].trim_start())
+        } else {
+            (trimmed, "")
+        }
+    } else {
+        ("", trimmed)
+    };
+    let is_bind = iq_body.starts_with("<bind")
+        && matches!(
+            iq_body.as_bytes().get(5),
+            Some(b' ' | b'\t' | b'\r' | b'\n' | b'>' | b'/') | None
+        );
+    if is_bind {
+        let Some(_) = ctx else {
+            return format!(
+                "<iq type='result' id='{esc_stanza_id}'><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'><jid>user@chat.evomu.local/eve</jid></bind></iq>"
+            );
+        };
+        let Some(a) = auth else {
+            return xmpp_not_authorized_iq(stanza_id);
+        };
+        let Some(cid) = a.character_id.filter(|_| a.sasl_authenticated) else {
+            return xmpp_not_authorized_iq(stanza_id);
+        };
+        let res_raw = extract_xml_elem_text(iq_body, "resource").unwrap_or_else(|| "eve".to_string());
+        let res_clean: String = res_raw
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+            .take(64)
+            .collect();
+        let resource = if res_clean.is_empty() {
+            "eve".to_string()
+        } else {
+            res_clean
+        };
+        let jid = format!("char_{cid}@chat.evomu.local/{resource}");
+        a.bound_jid = Some(jid.clone());
+        let esc_jid = escape_xml_attr(&jid);
+        return format!(
+            "<iq type='result' id='{esc_stanza_id}'><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'><jid>{esc_jid}</jid></bind></iq>"
+        );
+    }
+
+    let caller_cid = if let Some(c) = ctx {
+        let Some((_, cid)) = xmpp_authenticated_active_caller(c, auth.as_deref()) else {
+            return xmpp_not_authorized_iq(stanza_id);
+        };
+        Some(cid)
+    } else {
+        None
+    };
+
+    let query_open_tag = if iq_body.starts_with("<query") {
+        xmpp_opening_tag_end(iq_body)
+            .map(|end| &iq_body[..=end])
+            .unwrap_or(iq_body)
+    } else {
+        ""
+    };
+    let query_xmlns = extract_xml_attr(query_open_tag, "xmlns").unwrap_or("");
+
+    if query_xmlns == "http://jabber.org/protocol/disco#items" {
+        let node_opt = extract_xml_attr(query_open_tag, "node");
         if let Some(node) = node_opt.filter(|n| n.starts_with("byname/")) {
             let target = unescape_xml_attr(&node["byname/".len()..]);
             let target_trimmed = target.trim();
             let mut items: Vec<(String, String)> = Vec::new();
-            if let Some(c) = ctx {
+            if let (Some(c), Some(cid)) = (ctx, caller_cid) {
+                let (blocked_in_channels, owners_blocking_caller) =
+                    xmpp_social_block_snapshot(c, cid);
                 c.db.with_snapshot(|snap| {
                     for (key, chan) in &snap.chat_channels {
                         let Some(slug) = key
@@ -1713,6 +2409,17 @@ pub fn xmpp_iq_reply_with_ctx(
                         else {
                             continue;
                         };
+                        let (_, can_see_public_or_search, _) = xmpp_channel_visibility_for_caller(
+                            snap,
+                            key,
+                            chan,
+                            cid,
+                            &blocked_in_channels,
+                            &owners_blocking_caller,
+                        );
+                        if !can_see_public_or_search {
+                            continue;
+                        }
                         let xmpp_room = format!("player_{slug}");
                         if chan.name.eq_ignore_ascii_case(target_trimmed)
                             || slug.eq_ignore_ascii_case(target_trimmed)
@@ -1735,12 +2442,14 @@ pub fn xmpp_iq_reply_with_ctx(
             }
             let esc_node = escape_xml_attr(node);
             format!(
-                "<iq type='result' id='{stanza_id}'><query xmlns='http://jabber.org/protocol/disco#items' node='{esc_node}'>{body}</query></iq>"
+                "<iq type='result' id='{esc_stanza_id}'><query xmlns='http://jabber.org/protocol/disco#items' node='{esc_node}'>{body}</query></iq>"
             )
         } else {
             let is_forme = node_opt == Some("forme");
-            let mut items: Vec<(String, String)> = Vec::new();
-            if let Some(c) = ctx {
+            let mut items: Vec<(String, String, bool)> = Vec::new();
+            if let (Some(c), Some(cid)) = (ctx, caller_cid) {
+                let (blocked_in_channels, owners_blocking_caller) =
+                    xmpp_social_block_snapshot(c, cid);
                 c.db.with_snapshot(|snap| {
                     for (key, chan) in &snap.chat_channels {
                         let Some(slug) = key
@@ -1749,65 +2458,159 @@ pub fn xmpp_iq_reply_with_ctx(
                         else {
                             continue;
                         };
+                        let (can_see_forme, can_see_public_or_search, is_owner) =
+                            xmpp_channel_visibility_for_caller(
+                                snap,
+                                key,
+                                chan,
+                                cid,
+                                &blocked_in_channels,
+                                &owners_blocking_caller,
+                            );
+                        let visible = if is_forme {
+                            can_see_forme
+                        } else {
+                            can_see_public_or_search
+                        };
+                        if !visible {
+                            continue;
+                        }
                         items.push((
                             format!("player_{slug}@conference.chat.evomu.local"),
                             chan.name.clone(),
+                            is_owner,
                         ));
                     }
                 });
             }
             items.sort_by(|a, b| a.0.cmp(&b.0));
             let mut body = String::new();
-            for (jid, display_name) in items {
+            for (jid, display_name, is_owner) in items {
                 let esc_jid = escape_xml_attr(&jid);
                 let esc_name = escape_xml_attr(&display_name);
-                body.push_str(&format!(
-                    "<item jid='{esc_jid}' name='{esc_name}' node='owner'/>"
-                ));
+                if is_owner {
+                    body.push_str(&format!(
+                        "<item jid='{esc_jid}' name='{esc_name}' node='owner'/>"
+                    ));
+                } else {
+                    body.push_str(&format!("<item jid='{esc_jid}' name='{esc_name}'/>"));
+                }
             }
             if is_forme {
                 format!(
-                    "<iq type='result' id='{stanza_id}'><query xmlns='http://jabber.org/protocol/disco#items' node='forme'>{body}</query></iq>"
+                    "<iq type='result' id='{esc_stanza_id}'><query xmlns='http://jabber.org/protocol/disco#items' node='forme'>{body}</query></iq>"
                 )
             } else {
                 format!(
-                    "<iq type='result' id='{stanza_id}'><query xmlns='http://jabber.org/protocol/disco#items'>{body}</query></iq>"
+                    "<iq type='result' id='{esc_stanza_id}'><query xmlns='http://jabber.org/protocol/disco#items'>{body}</query></iq>"
                 )
             }
         }
-    } else if chunk.contains("http://jabber.org/protocol/disco#info") {
+    } else if query_xmlns == "http://jabber.org/protocol/disco#info" {
         let mut display_name = "Conference".to_string();
-        if let Some(c) = ctx {
-            let target_ref = extract_xml_attr(chunk, "to")
-                .or_else(|| extract_xml_attr(chunk, "node"))
+        if let (Some(c), Some(cid)) = (ctx, caller_cid) {
+            let to_attr = extract_xml_attr(iq_open_tag, "to")
+                .or_else(|| extract_xml_attr(chunk, "to"))
                 .unwrap_or("");
-            let localpart = target_ref.split('@').next().unwrap_or(target_ref);
-            c.db.with_snapshot(|snap| {
-                if let Some(key) = find_existing_channel_key(snap, localpart) {
-                    if let Some(chan) = snap.chat_channels.get(&key) {
-                        display_name = chan.name.clone();
-                    }
-                }
+            let node_attr = extract_xml_attr(query_open_tag, "node");
+            let target_ref = if !xmpp_is_service_jid(to_attr) {
+                to_attr
+            } else {
+                node_attr.unwrap_or(to_attr)
+            };
+            let (blocked_in_channels, owners_blocking_caller) = xmpp_social_block_snapshot(c, cid);
+            let info_res = c.db.with_snapshot(|snap| {
+                xmpp_scoped_channel_allowed(
+                    c,
+                    snap,
+                    cid,
+                    target_ref,
+                    &blocked_in_channels,
+                    &owners_blocking_caller,
+                    true,
+                )
             });
+            match info_res {
+                Ok(Some(name)) => display_name = name,
+                Ok(None) => {}
+                Err(()) => return xmpp_item_not_found_iq(stanza_id),
+            }
         }
         let esc_name = escape_xml_attr(&display_name);
         format!(
-            "<iq type='result' id='{stanza_id}'><query xmlns='http://jabber.org/protocol/disco#info'><identity category='conference' type='text' name='{esc_name}'/><feature var='http://jabber.org/protocol/muc'/></query></iq>"
+            "<iq type='result' id='{esc_stanza_id}'><query xmlns='http://jabber.org/protocol/disco#info'><identity category='conference' type='text' name='{esc_name}'/><feature var='http://jabber.org/protocol/muc'/></query></iq>"
         )
-    } else if chunk.contains("http://jabber.org/protocol/muc#admin") {
+    } else if query_xmlns == "http://jabber.org/protocol/muc#admin" {
+        if let (Some(c), Some(cid)) = (ctx, caller_cid) {
+            let Some(target_ref) = extract_xml_attr(iq_open_tag, "to") else {
+                return xmpp_not_authorized_iq(stanza_id);
+            };
+            let localpart = target_ref.split('@').next().unwrap_or(target_ref).trim();
+            if localpart.is_empty() || xmpp_is_service_jid(target_ref) {
+                return xmpp_not_authorized_iq(stanza_id);
+            }
+            let allowed_admin = c.db.with_snapshot(|snap| {
+                let resolved_key = find_existing_channel_key(snap, localpart)
+                    .or_else(|| {
+                        xmpp_alias_to_channel_key(localpart)
+                            .and_then(|k| find_existing_channel_key(snap, &k))
+                    })
+                    .or_else(|| xmpp_alias_to_channel_key(localpart));
+                let Some(key) = resolved_key else {
+                    return false;
+                };
+                if is_system_channel(&key) {
+                    return false;
+                }
+                if is_org_channel(&key) {
+                    let dummy_sess = SessionState::new(0);
+                    return has_dynamic_org_operator_role(snap, &dummy_sess, cid, &key);
+                }
+                snap.chat_channels
+                    .get(&key)
+                    .is_some_and(|ch| ch.owner_id == Some(cid) || ch.operators.contains(&cid))
+            });
+            if !allowed_admin {
+                return xmpp_not_authorized_iq(stanza_id);
+            }
+        }
         format!(
-            "<iq type='result' id='{stanza_id}'><query xmlns='http://jabber.org/protocol/muc#admin'/></iq>"
+            "<iq type='result' id='{esc_stanza_id}'><query xmlns='http://jabber.org/protocol/muc#admin'/></iq>"
         )
-    } else if chunk.contains("http://jabber.org/protocol/muc#owner") {
+    } else if query_xmlns == "http://jabber.org/protocol/muc#owner" {
+        if let (Some(c), Some(cid)) = (ctx, caller_cid) {
+            let Some(target_ref) = extract_xml_attr(iq_open_tag, "to") else {
+                return xmpp_not_authorized_iq(stanza_id);
+            };
+            let localpart = target_ref.split('@').next().unwrap_or(target_ref).trim();
+            if localpart.is_empty() || xmpp_is_service_jid(target_ref) {
+                return xmpp_not_authorized_iq(stanza_id);
+            }
+            let allowed_owner = c.db.with_snapshot(|snap| {
+                let resolved_key = find_existing_channel_key(snap, localpart).or_else(|| {
+                    xmpp_alias_to_channel_key(localpart)
+                        .and_then(|k| find_existing_channel_key(snap, &k))
+                });
+                resolved_key
+                    .as_deref()
+                    .and_then(|k| snap.chat_channels.get(k))
+                    .is_some_and(|ch| {
+                        !is_system_or_org_channel(&ch.channel_id) && ch.owner_id == Some(cid)
+                    })
+            });
+            if !allowed_owner {
+                return xmpp_not_authorized_iq(stanza_id);
+            }
+        }
         format!(
-            "<iq type='result' id='{stanza_id}'><query xmlns='http://jabber.org/protocol/muc#owner'/></iq>"
+            "<iq type='result' id='{esc_stanza_id}'><query xmlns='http://jabber.org/protocol/muc#owner'/></iq>"
         )
-    } else if chunk.contains("urn:xmpp:expiring_record#search") {
+    } else if query_xmlns == "urn:xmpp:expiring_record#search" {
         format!(
-            "<iq type='result' id='{stanza_id}'><query xmlns='urn:xmpp:expiring_record#search'/></iq>"
+            "<iq type='result' id='{esc_stanza_id}'><query xmlns='urn:xmpp:expiring_record#search'/></iq>"
         )
     } else {
-        format!("<iq type='result' id='{stanza_id}'/>")
+        format!("<iq type='result' id='{esc_stanza_id}'/>")
     }
 }
 

@@ -787,14 +787,16 @@ pub async fn handle(
                         });
                         ctx.release_user_bindings(uid);
                         if let Some(ref s) = live_sess {
+                            let released = ctx.db.release_online_lock(uid, s.session_id);
                             ctx.disconnect_session(
                                 s.session_id,
                                 "UserBanned",
                                 &format!("Account banned until unix={until_unix}: {reason}"),
                             );
-                            let _ = ctx.db.release_online_lock(uid, s.session_id);
-                            if let Some(banned_cid) = s.character_id {
-                                ctx.logoff_character_sync(banned_cid, None);
+                            if released {
+                                if let Some(banned_cid) = s.character_id {
+                                    ctx.logoff_character_sync(banned_cid, None);
+                                }
                             }
                         }
                         Some(Ok(PyRep::keyval([
@@ -893,14 +895,16 @@ pub async fn handle(
                         });
                         ctx.release_user_bindings(uid);
                         if let Some(ref s) = live_sess {
+                            let released = ctx.db.release_online_lock(uid, s.session_id);
                             ctx.disconnect_session(
                                 s.session_id,
                                 "AccountSuspended",
                                 &format!("Account suspended until unix={until_unix}: {reason}"),
                             );
-                            let _ = ctx.db.release_online_lock(uid, s.session_id);
-                            if let Some(susp_cid) = s.character_id {
-                                ctx.logoff_character_sync(susp_cid, None);
+                            if released {
+                                if let Some(susp_cid) = s.character_id {
+                                    ctx.logoff_character_sync(susp_cid, None);
+                                }
                             }
                         }
                         Some(Ok(PyRep::keyval([

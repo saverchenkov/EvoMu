@@ -920,6 +920,23 @@ impl ServerContext {
             .remove(&char_id);
     }
 
+    /// Re-queues system shutdown/maintenance notifications after `logoff_character_sync` clears stale per-character queues.
+    pub fn restore_pending_notifications(&self, notifs: Vec<PendingMachoNotification>) {
+        if notifs.is_empty() {
+            return;
+        }
+        let mut queues = self
+            .pending_notifications
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        for notif in notifs {
+            let q = queues.entry(notif.recipient_char_id).or_default();
+            if !q.iter().any(|existing| existing.seq_id == notif.seq_id) {
+                push_pending_notification_capped(q, notif);
+            }
+        }
+    }
+
     /// Emits an `OnRemoteMessage` notification (`msg_key`, `dict`).
     pub fn notify_remote_message(
         &self,

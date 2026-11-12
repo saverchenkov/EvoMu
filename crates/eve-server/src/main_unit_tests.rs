@@ -387,20 +387,65 @@ async fn xmpp_stream_times_out_idle_connections_and_discovers_player_channels() 
     )
     .await
     .unwrap();
+    let owner_token = ctx
+        .dispatch_rpc(
+            &mut owner_sess,
+            "chatAuthenticationService",
+            None,
+            "GetAuthenticationToken",
+            &[],
+            &std::collections::HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap()
+        .as_str()
+        .expect("CSPRNG XMPP auth token")
+        .to_string();
+    assert!(owner_token.len() >= 32);
+    assert!(!owner_token.starts_with("evomu-xmpp-token-"));
 
-    // 1. Idle XMPP connection times out within `read_timeout` (#853)
+    // 1. Idle XMPP connection times out within `idle_read_timeout` (#853)
     let (client_io, server_io) = duplex(1024);
     handle_xmpp_stream_with_timeouts(
         server_io,
         Some(&ctx),
         Duration::from_millis(25),
         Duration::from_millis(25),
+        Duration::from_millis(25),
     )
     .await;
     drop(client_io);
 
-    // 2. XMPP IQ `byname/Playtest Room` over `handle_xmpp_stream_with_timeouts` returns player room JID (#940)
-    let (mut cli, srv) = duplex(4096);
+    // 2. XMPP slowloris / partial-stanza stream disconnects cleanly on `stanza_timeout` even when
+    // `idle_read_timeout` is much longer and partial bytes keep arriving (`BF-01`, #853/#880).
+    {
+        let (mut slow_cli, slow_srv) = duplex(1024);
+        let ctx_slow = ctx.clone();
+        let slow_task = tokio::spawn(async move {
+            handle_xmpp_stream_with_timeouts(
+                slow_srv,
+                Some(&ctx_slow),
+                Duration::from_secs(10),
+                Duration::from_millis(50),
+                Duration::from_millis(40),
+            )
+            .await;
+        });
+        slow_cli.write_all(b"<iq type='get' ").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        let _ = slow_cli.write_all(b"id='slow_1' ").await;
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        let _ = slow_cli.write_all(b"to='conference").await;
+        tokio::time::timeout(Duration::from_millis(300), slow_task)
+            .await
+            .expect("slowloris partial stanza must time out on stanza_timeout, not idle_read_timeout")
+            .unwrap();
+        drop(slow_cli);
+    }
+
+    // 3. Authenticated XMPP IQ `byname/Playtest Room` split across TCP writes >2048B returns room JID (#940, BF-01/BF-02)
+    let (mut cli, srv) = duplex(16384);
     let ctx_clone = ctx.clone();
     let srv_task = tokio::spawn(async move {
         handle_xmpp_stream_with_timeouts(
@@ -408,20 +453,126 @@ async fn xmpp_stream_times_out_idle_connections_and_discovers_player_channels() 
             Some(&ctx_clone),
             Duration::from_secs(2),
             Duration::from_secs(2),
+            Duration::from_secs(2),
         )
         .await;
     });
+    fn encode_xmpp_b64(input: &[u8]) -> String {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+        for chunk in input.chunks(3) {
+            let b0 = chunk[0] as u32;
+            let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+            let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+            let triple = (b0 << 16) | (b1 << 8) | b2;
+            out.push(TABLE[((triple >> 18) & 0x3f) as usize] as char);
+            out.push(TABLE[((triple >> 12) & 0x3f) as usize] as char);
+            out.push(if chunk.len() > 1 {
+                TABLE[((triple >> 6) & 0x3f) as usize] as char
+            } else {
+                '='
+            });
+            out.push(if chunk.len() > 2 {
+                TABLE[(triple & 0x3f) as usize] as char
+            } else {
+                '='
+            });
+        }
+        out
+    }
+
+    // Unauthenticated IQ fails closed before SASL + <bind>
     cli.write_all(
-        b"<iq type='get' id='disc_1' to='conference.chat.evomu.local'><query xmlns='http://jabber.org/protocol/disco#items' node='byname/Playtest Room'/></iq>",
+        b"<iq type='get' id='disc_0' to='conference.chat.evomu.local'><query xmlns='http://jabber.org/protocol/disco#items' node='byname/Playtest Room'/></iq>",
     )
     .await
     .unwrap();
-    let mut rbuf = [0u8; 1024];
+    let mut rbuf = [0u8; 4096];
+    let n0 = cli.read(&mut rbuf).await.unwrap();
+    let unauth_reply = String::from_utf8_lossy(&rbuf[..n0]);
+    assert!(unauth_reply.contains("not-authorized"));
+    assert!(!unauth_reply.contains("player_playtest_room"));
+
+    // Authenticate via SASL PLAIN + <bind>, rejecting deterministic fallback token and accepting CSPRNG token
+    cli.write_all(b"<?xml version='1.0'?><stream:stream to='chat.evomu.local'>")
+        .await
+        .unwrap();
+    let _ = cli.read(&mut rbuf).await.unwrap();
+    cli.write_all(
+        b"<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>AGNoYXJfOTAwMDAwMDEAZXZvbXUteG1wcC10b2tlbi05MDAwMDAwMQ==</auth>",
+    )
+    .await
+    .unwrap();
+    let n_bad_auth = cli.read(&mut rbuf).await.unwrap();
+    assert!(String::from_utf8_lossy(&rbuf[..n_bad_auth]).contains("<not-authorized/>"));
+
+    let sasl_b64 = encode_xmpp_b64(format!("\0char_90000001\0{owner_token}").as_bytes());
+    cli.write_all(
+        format!(
+            "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{sasl_b64}</auth>"
+        )
+        .as_bytes(),
+    )
+    .await
+    .unwrap();
+    let n_auth = cli.read(&mut rbuf).await.unwrap();
+    assert!(String::from_utf8_lossy(&rbuf[..n_auth]).contains("<success"));
+    cli.write_all(b"<stream:stream to='chat.evomu.local'>")
+        .await
+        .unwrap();
+    let _ = cli.read(&mut rbuf).await.unwrap();
+    cli.write_all(
+        b"<iq type='set' id='bind_1'><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'><resource>eve</resource></bind></iq>",
+    )
+    .await
+    .unwrap();
+    let n_bind = cli.read(&mut rbuf).await.unwrap();
+    assert!(
+        String::from_utf8_lossy(&rbuf[..n_bind]).contains("char_90000001@chat.evomu.local/eve")
+    );
+
+    let big_pad = " ".repeat(2200);
+    let big_iq = format!(
+        "<iq type='get' id='disc_1' to='conference.chat.evomu.local'{big_pad}><query xmlns='http://jabber.org/protocol/disco#items' node='byname/Playtest Room'/></iq>"
+    );
+    let mid = big_iq.len() / 2;
+    cli.write_all(&big_iq.as_bytes()[..mid]).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    cli.write_all(&big_iq.as_bytes()[mid..]).await.unwrap();
     let n = cli.read(&mut rbuf).await.unwrap();
     let reply = String::from_utf8_lossy(&rbuf[..n]);
     assert!(reply.contains(
         "<item jid='player_playtest_room@conference.chat.evomu.local' name='Playtest Room'/>"
     ));
+
+    // Embedded child/attribute `<auth`/`<stream:stream`/`<presence` substrings inside `<iq>` dispatch as `iq`.
+    let mut spoof_auth = eve_server::services::fleet_social::XmppStreamAuth {
+        user_id: Some(90_000_001),
+        character_id: Some(90_000_001),
+        bound_jid: Some("char_90000001@chat.evomu.local/eve".into()),
+        sasl_authenticated: true,
+    };
+    let mut dummy_sc = 2u32;
+    let spoof_reply = xmpp_stanza_reply_with_ctx_and_auth(
+        Some(&ctx),
+        Some(&mut spoof_auth),
+        "<iq type='get' id='disc_spoof' to='conference.chat.evomu.local'><query xmlns='http://jabber.org/protocol/disco#items' node='byname/&lt;auth xmlns=\"urn:ietf:params:xml:ns:xmpp-sasl\"/&gt;&lt;stream:stream'/></iq>",
+        &mut dummy_sc,
+    )
+    .expect("spoofed substring IQ reply");
+    assert!(spoof_reply.starts_with("<iq type='result' id='disc_spoof'"));
+    assert!(!spoof_reply.contains("xmpp-sasl"));
+    let raw_spoof_reply = xmpp_stanza_reply_with_ctx_and_auth(
+        Some(&ctx),
+        Some(&mut spoof_auth),
+        "<iq type='get' id='disc_raw_spoof' to='conference.chat.evomu.local'><query xmlns='http://jabber.org/protocol/disco#items' node='byname/<auth xmlns=\"x\"/><presence/>'/></iq>",
+        &mut dummy_sc,
+    )
+    .expect("raw spoofed substring IQ reply");
+    assert!(raw_spoof_reply.starts_with("<iq type='result' id='disc_raw_spoof'"));
+    assert!(!raw_spoof_reply.contains("xmpp-sasl"));
+
     drop(cli);
     srv_task.await.unwrap();
 }

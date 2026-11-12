@@ -496,7 +496,11 @@ pub fn rebalance_overloaded_worker_nodes(ctx: &ServerContext) -> usize {
     migrations.len()
 }
 
-fn emit_cluster_shutdown_initiated(ctx: &ServerContext, shutdown_when_unix: u64, duration_minutes: i64) {
+fn emit_cluster_shutdown_initiated(
+    ctx: &ServerContext,
+    shutdown_when_unix: u64,
+    duration_minutes: i64,
+) -> Vec<crate::router::cache_notifications::PendingMachoNotification> {
     // V24 client `OnClusterShutdownInitiated(explanationLabel, when, duration)` takes 3 arguments
     // and requires `when > blue.os.GetWallclockTime()` for `FormatTimeIntervalWritten`.
     let effective_when_unix = shutdown_when_unix.max(ctx.now_unix().saturating_add(60));
@@ -509,7 +513,7 @@ fn emit_cluster_shutdown_initiated(ctx: &ServerContext, shutdown_when_unix: u64,
             PyRep::Integer(unix_to_filetime(effective_when_unix)),
             PyRep::Integer(duration_minutes),
         ],
-    );
+    )
 }
 
 /// Checks countdown thresholds (`60m`, `15m`, `5m` before daily 11:00 UTC downtime) and broadcasts
@@ -599,7 +603,8 @@ pub fn has_downtime_countdown_armed_for_day(ctx: &ServerContext, now_unix: u64) 
 pub fn initiate_cluster_downtime_shutdown(ctx: &ServerContext) -> usize {
     let now = ctx.now_unix();
     let shutdown_when = now.saturating_add((DOWNTIME_DURATION_MINUTES.max(1) as u64) * 60);
-    emit_cluster_shutdown_initiated(ctx, shutdown_when, DOWNTIME_DURATION_MINUTES);
+    let shutdown_notifs =
+        emit_cluster_shutdown_initiated(ctx, shutdown_when, DOWNTIME_DURATION_MINUTES);
 
     if let Ok(mut cluster) = ctx.cluster_state.write() {
         cluster.shutdown_in_progress = true;
@@ -636,7 +641,7 @@ pub fn initiate_cluster_downtime_shutdown(ctx: &ServerContext) -> usize {
             }
         }
     }
-    ctx.db.with_mut_snapshot(|snap| {
+    ctx.db.with_snapshot(|snap| {
         for (&uid, os) in &snap.sessions {
             if gm_uids.contains(&uid) {
                 gm_session_ids.insert(os.session_id);
@@ -648,12 +653,6 @@ pub fn initiate_cluster_downtime_shutdown(ctx: &ServerContext) -> usize {
                 }
             }
         }
-        for cid in &non_gm_char_ids {
-            crate::services::campaigns_and_milestones::playtime::pause_milestone_playtime_in_snap(
-                snap, *cid, now_unix,
-            );
-        }
-        snap.sessions.retain(|&uid, _| gm_uids.contains(&uid));
     });
 
     let closer_sids: Vec<u64> = ctx
@@ -662,28 +661,44 @@ pub fn initiate_cluster_downtime_shutdown(ctx: &ServerContext) -> usize {
         .map(|g| g.keys().copied().collect())
         .unwrap_or_default();
 
+    // Disconnect non-GM live and headless sessions BEFORE purging `snap.sessions` so
+    // `disconnect_session` triggers `logoff_character_sync` for headless sessions too (`#851`).
     let mut disconnected = BTreeSet::new();
     for sid in closer_sids {
-        if gm_session_ids.contains(&sid) {
+        if gm_session_ids.contains(&sid) || !disconnected.insert(sid) {
             continue;
         }
         ctx.disconnect_session(sid, "ClusterShutdown", "Daily cluster downtime");
         ctx.release_session_bindings(sid);
         ctx.quasar_gateway.unsubscribe_session(sid);
-        disconnected.insert(sid);
     }
     for sid in &non_gm_session_ids {
+        if !disconnected.insert(*sid) {
+            continue;
+        }
         ctx.disconnect_session(*sid, "ClusterShutdown", "Daily cluster downtime");
         ctx.release_session_bindings(*sid);
         ctx.quasar_gateway.unsubscribe_session(*sid);
-        disconnected.insert(*sid);
     }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for cid in &non_gm_char_ids {
+            crate::services::campaigns_and_milestones::playtime::pause_milestone_playtime_in_snap(
+                snap, *cid, now_unix,
+            );
+        }
+        snap.sessions.retain(|&uid, _| gm_uids.contains(&uid));
+    });
     for uid in non_gm_users {
         let _ = ctx.db.release_online_lock(uid, 0);
     }
-    for cid in non_gm_char_ids {
-        ctx.logoff_character_sync(cid, None);
-    }
+
+    let preserved_shutdown_notifs: Vec<_> = shutdown_notifs
+        .into_iter()
+        .filter(|n| non_gm_char_ids.contains(&n.recipient_char_id))
+        .collect();
+    ctx.restore_pending_notifications(preserved_shutdown_notifs);
+
     disconnected.len()
 }
 

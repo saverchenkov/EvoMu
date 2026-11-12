@@ -356,9 +356,11 @@ pub fn abandon_drones_on_warp_sync(
         }
     });
     if !abandoned_balls.is_empty() {
-        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        let sys_handle_opt = ctx.systems.get_or_spawn_if_runtime(sys_id);
         for &bid in &abandoned_balls {
-            sys_handle.try_stop_ball(bid);
+            if let Some(ref sys_handle) = sys_handle_opt {
+                sys_handle.try_stop_ball(bid);
+            }
             ctx.notify(
                 NotificationTarget::Character(char_id),
                 "OnDroneControlLost",
@@ -392,12 +394,19 @@ pub fn abandon_drones_and_fighters_for_ship_sync(
         crate::services::space_probe_scanning::sync_scanner_probes_to_db(ctx);
     }
 
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let sys_handle_opt = ctx.systems.get_or_spawn_if_runtime(sys_id);
     let candidate_fighter_items: Vec<(i64, bool)> = if let Ok(fighters) = ctx.active_fighters.read() {
         fighters
             .values()
             .filter(|f| (f.owner_char_id == char_id || f.parent_ship_id == ship_id) && !f.is_abandoned)
-            .map(|f| (f.item_id, sys_handle.get_ball_position_sync(f.ball_id).is_some()))
+            .map(|f| {
+                (
+                    f.item_id,
+                    sys_handle_opt
+                        .as_ref()
+                        .is_some_and(|h| h.get_ball_position_sync(f.ball_id).is_some()),
+                )
+            })
             .collect()
     } else {
         Vec::new()
@@ -437,9 +446,11 @@ pub fn abandon_drones_and_fighters_for_ship_sync(
         }
         let mut pos_updates = Vec::new();
         for &(iid, bid, _) in &abandoned_fighters {
-            sys_handle.try_stop_ball(bid);
-            if let Some(pos) = sys_handle.get_ball_position_sync(bid) {
-                pos_updates.push((iid, bid, [pos.x, pos.y, pos.z]));
+            if let Some(ref sys_handle) = sys_handle_opt {
+                sys_handle.try_stop_ball(bid);
+                if let Some(pos) = sys_handle.get_ball_position_sync(bid) {
+                    pos_updates.push((iid, bid, [pos.x, pos.y, pos.z]));
+                }
             }
         }
         let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {

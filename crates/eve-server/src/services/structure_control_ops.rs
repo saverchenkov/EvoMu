@@ -348,7 +348,11 @@ fn precheck_saved_in_space_ball(ctx: &ServerContext, explicit_structure_id: Opti
         let saved_prev = ext.previous_ship_by_structure.get(&sid).copied().unwrap_or(0);
         (sys_id > 0 && saved_prev > 0).then_some((sys_id, saved_prev))
     });
-    query.map(|(sys_id, saved_prev)| ctx.systems.get_or_spawn(sys_id).get_ball_position_sync(saved_prev).is_some())
+    query.map(|(sys_id, saved_prev)| {
+        ctx.systems
+            .get_or_spawn_if_runtime(sys_id)
+            .is_some_and(|h| h.get_ball_position_sync(saved_prev).is_some())
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

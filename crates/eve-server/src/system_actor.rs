@@ -296,6 +296,16 @@ impl SystemRegistry {
             .insert((solar_system_id, anomaly_id.to_string()))
     }
 
+    /// Retrieves a running Solar System Actor handle, or spawns one only when a Tokio runtime
+    /// reactor is currently active (`None` on headless non-Tokio teardown/unit threads).
+    pub fn get_or_spawn_if_runtime(&self, solar_system_id: SolarSystemId) -> Option<SystemHandle> {
+        self.get_handle(solar_system_id).or_else(|| {
+            tokio::runtime::Handle::try_current()
+                .ok()
+                .map(|_| self.get_or_spawn(solar_system_id))
+        })
+    }
+
     /// Spawns or retrieves a running Solar System Actor for `solar_system_id`.
     /// Populates static SDE celestials, stargates, and stations (`SP-1`), re-materializes persisted
     /// space objects (`SP-7`), and hibernates (`LOD 0`) with zero timer wakes until dynamic balls exist.

@@ -43,6 +43,25 @@ pub const PREAUTH_HANDSHAKE_DEADLINE_SECS: u64 = 15;
 /// Maximum concurrent unauthenticated connections permitted per peer IP (`#853` / `B15`).
 pub const MAX_PREAUTH_CONNECTIONS_PER_IP: usize = 32;
 
+fn drain_sys_rx_discarding_lag<T: Clone>(
+    sys_rx: &mut tokio::sync::broadcast::Receiver<T>,
+) -> u64 {
+    let mut lagged_total = 0u64;
+    loop {
+        match sys_rx.try_recv() {
+            Ok(_) => {}
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
+                lagged_total = lagged_total.saturating_add(skipped);
+            }
+            Err(
+                tokio::sync::broadcast::error::TryRecvError::Empty
+                | tokio::sync::broadcast::error::TryRecvError::Closed,
+            ) => break,
+        }
+    }
+    lagged_total
+}
+
 pub use crate::router::NEXT_TRANSPORT_SESSION_ID as NEXT_MACHO_SESSION_ID;
 /// Global monotonic session-ID counter shared across `machoNet`, Python Bridge, and Quasar gRPC (`ORD-9`).
 pub use crate::router::NEXT_TRANSPORT_SESSION_ID as NEXT_SESSION_ID;
@@ -1160,7 +1179,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             // Drain any pre-bind 1Hz ticks buffered in `sys_rx` between `SelectCharacterID`
                             // and `beyonce.MachoBindObject` / `UpdateStateRequest` so stale ticks (e.g. tick N-1)
                             // are never flushed out-of-order after the synchronous post-bind `SetState` drain (tick N).
-                            while sys_rx.try_recv().is_ok() {}
+                            let _ = drain_sys_rx_discarding_lag(&mut sys_rx);
                             wire_state.ensure_in_space(session.solar_system_id);
                         }
 
@@ -1308,6 +1327,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
 
                         let mut pending_tick_batches = Vec::new();
                         let mut post_rpc_direct_batch = None;
+                        let mut effective_was_live = was_live;
                         if !matches!(wire_state.destiny, DestinyStream::Detached)
                             && !docking_transition
                             && (was_in_space || is_in_space)
@@ -1316,31 +1336,53 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 session.solar_system_id.or(prev_session.solar_system_id),
                                 session.ship_id.or(prev_session.ship_id),
                             ) {
-                                let ep = wire_state.current_epoch();
+                                let mut ep = wire_state.current_epoch();
                                 // Drain any buffered 1Hz tick broadcasts that occurred before this RPC's
                                 // synchronous observer drain so ticks older than the direct drain are
-                                // never discarded (`#844`).
-                                if was_live {
-                                    while let Ok(tick_out) = sys_rx.try_recv() {
-                                        if tick_out.solar_system_id == sys_id {
-                                            if let Some(updates_pyrep) =
-                                                tick_out.observer_updates_pyrep.get(&ship_id)
-                                            {
-                                                let evs = tick_out
-                                                    .observer_events
-                                                    .get(&ship_id)
-                                                    .map(Vec::as_slice)
-                                                    .unwrap_or(&tick_out.events);
-                                                if let Some(batch) = build_destiny_batch(
-                                                    &ctx,
-                                                    ep,
-                                                    tick_out.tick,
-                                                    evs,
-                                                    updates_pyrep.clone(),
-                                                ) {
-                                                    pending_tick_batches.push(batch);
+                                // never discarded (`#844`), and explicitly recover from `Lagged` (`ORD-5`).
+                                if effective_was_live {
+                                    loop {
+                                        match sys_rx.try_recv() {
+                                            Ok(tick_out) => {
+                                                if !effective_was_live {
+                                                    continue;
+                                                }
+                                                if tick_out.solar_system_id == sys_id {
+                                                    if let Some(updates_pyrep) =
+                                                        tick_out.observer_updates_pyrep.get(&ship_id)
+                                                    {
+                                                        let evs = tick_out
+                                                            .observer_events
+                                                            .get(&ship_id)
+                                                            .map(Vec::as_slice)
+                                                            .unwrap_or(&tick_out.events);
+                                                        if let Some(batch) = build_destiny_batch(
+                                                            &ctx,
+                                                            ep,
+                                                            tick_out.tick,
+                                                            evs,
+                                                            updates_pyrep.clone(),
+                                                        ) {
+                                                            pending_tick_batches.push(batch);
+                                                        }
+                                                    }
                                                 }
                                             }
+                                            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
+                                                warn!(
+                                                    session_id,
+                                                    skipped,
+                                                    "Destiny broadcast channel lagged during pre-RPC drain; discarding stale ticks and resyncing SetState (ORD-5)"
+                                                );
+                                                pending_tick_batches.clear();
+                                                wire_state.on_broadcast_lagged();
+                                                ep = wire_state.current_epoch();
+                                                effective_was_live = false;
+                                            }
+                                            Err(
+                                                tokio::sync::broadcast::error::TryRecvError::Empty
+                                                | tokio::sync::broadcast::error::TryRecvError::Closed,
+                                            ) => break,
                                         }
                                     }
                                 }
@@ -1352,11 +1394,11 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                     let mut has_set_state = obs_evs
                                         .iter()
                                         .any(|ev| matches!(ev, eve_destiny::DestinyEvent::SetState { .. }));
-                                    if !was_live && !has_set_state {
-                                        // Either this is a ballpark-init RPC or a concurrent 1Hz tick
-                                        // drained the pending `SetState` between `MachoBindObject` and
-                                        // this post-bind drain (`#845`): synthesize `SetState` so the
-                                        // stream transitions cleanly into `Live`.
+                                    if !effective_was_live && !has_set_state {
+                                        // Either this is a ballpark-init RPC, a `Lagged` resync (`ORD-5`), or a
+                                        // concurrent 1Hz tick drained `SetState` between `MachoBindObject` and
+                                        // this post-bind drain (`#845`): synthesize `SetState` so the stream
+                                        // transitions cleanly into `Live`.
                                         let _ = sys_handle.push_set_state(ship_id).await;
                                         if let Ok((retry_tick, retry_evs, retry_pyrep)) =
                                             sys_handle.drain_observer_updates(ship_id).await
@@ -1368,11 +1410,11 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                                 .iter()
                                                 .any(|ev| matches!(ev, eve_destiny::DestinyEvent::SetState { .. }));
                                         }
-                                        while sys_rx.try_recv().is_ok() {}
+                                        let _ = drain_sys_rx_discarding_lag(&mut sys_rx);
                                     }
                                     if !obs_evs.is_empty() {
-                                        if !was_live && has_set_state {
-                                            while sys_rx.try_recv().is_ok() {}
+                                        if !effective_was_live && has_set_state {
+                                            let _ = drain_sys_rx_discarding_lag(&mut sys_rx);
                                         }
                                         post_rpc_direct_batch =
                                             build_destiny_batch(&ctx, ep, tick, &obs_evs, updates_pyrep);
@@ -1435,7 +1477,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 pre_detach: pre_dock_destiny,
                             }
                         } else if let Some(batch) = post_rpc_direct_batch {
-                            if !was_live && batch.has_set_state {
+                            if !effective_was_live && batch.has_set_state {
                                 DestinyDrain::Attach {
                                     epoch: batch.epoch,
                                     set_state: batch,

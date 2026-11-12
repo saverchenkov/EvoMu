@@ -871,6 +871,10 @@ pub(crate) async fn handle_update_state_request(
         }
     };
     if matches!(ship_ball.mode, MovementMode::Stop) {
+        ctx.return_warps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&ship_id);
         let finished_warp = ctx
             .active_warps
             .lock()
@@ -903,15 +907,11 @@ pub(crate) async fn handle_update_state_request(
     if is_client_initiated_active_warp {
         return Ok(PyRep::None);
     }
-    if matches!(
-        ship_ball.mode,
-        MovementMode::Warp {
-            phase: eve_destiny::WarpPhase::Aligning,
-            ..
-        }
-    ) {
-        // Emergency logoff return-warp from a prior disconnected session has no entry in `active_warps`;
-        // stop the ship at its current coordinates before pushing `SetState` on reconnect.
+    let is_reconnect_return_warp = matches!(ship_ball.mode, MovementMode::Warp { .. })
+        && ctx.return_warps.lock().unwrap_or_else(|e| e.into_inner()).contains(&ship_id);
+    if matches!(ship_ball.mode, MovementMode::Warp { .. }) && !is_reconnect_return_warp {
+        // Untracked/orphan warp from a prior disconnected session has neither an active client warp
+        // nor an active SP-6 reconnect return-warp; stop at current coordinates before `SetState`.
         let _ = handle.force_stop_warp(ship_id);
     }
     if !ctx.db.with_snapshot(|s| s.dungeon_runtime.instances.is_empty()) {

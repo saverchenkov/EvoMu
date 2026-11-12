@@ -1329,6 +1329,67 @@ async fn wave5b_b4_session_wire_bound_objects_notifications_logoff_and_warp_regr
     }
 }
 
+#[test]
+fn bf06_call_req_args_mentioning_release_method_do_not_drop_bound_objects() {
+    let ctx = Arc::new(ServerContext::new().with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED));
+    let mut sess = SessionState::new(888_777);
+    sess.user_id = Some(1);
+    sess.character_id = Some(90_000_001);
+    sess.solar_system_id = Some(30_000_142);
+    let bid = ctx.bind_object(&sess, "beyonce", 30_000_142).expect("bind beyonce");
+
+    // A normal CallReq whose string argument happens to contain "ClientHasReleasedTheseObjects"
+    // (e.g., chat text or mail body) must NOT release the caller's bound objects (#882).
+    let call_pkt = MachoPacket {
+        packet_type: MachoPacketType::CallReq,
+        source: MachoAddress::Client {
+            client_id: 888_777,
+            call_id: 99,
+            service: None,
+        },
+        destination: MachoAddress::Node {
+            node_id: MACHO_PROXY_NODE_ID,
+            service: Some("chat".into()),
+            call_id: 99,
+        },
+        user_id: Some(1),
+        payload: PyRep::Tuple(vec![
+            PyRep::String("SendMessage".into()),
+            PyRep::Tuple(vec![
+                PyRep::Integer(bid as i64),
+                PyRep::String("ClientHasReleasedTheseObjects".into()),
+                PyRep::String(format!("N={MACHO_PROXY_NODE_ID}:{bid}")),
+            ]),
+        ]),
+        named_payload: HashMap::new(),
+    };
+    let (released, is_dedicated) = ctx.process_client_bound_object_releases(sess.session_id, &call_pkt);
+    assert_eq!(released, 0);
+    assert!(!is_dedicated);
+    assert!(
+        ctx.bound_objects.read().unwrap().contains_key(&bid),
+        "CallReq arguments mentioning ClientHasReleasedTheseObjects must not release bound objects (#882)"
+    );
+}
+
+#[test]
+fn bf05_drain_sys_rx_discarding_lag_clears_lagged_cursor_and_drains_buffer() {
+    let (tx, mut rx) = tokio::sync::broadcast::channel::<u32>(2);
+    for v in 1..=10 {
+        let _ = tx.send(v);
+    }
+    let lagged = drain_sys_rx_discarding_lag(&mut rx);
+    assert_eq!(lagged, 8, "must report skipped broadcast count on Lagged");
+    assert!(
+        matches!(
+            rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ),
+        "must drain all remaining buffered items past Lagged until Empty (#844/#845)"
+    );
+}
+
+
 
 
 

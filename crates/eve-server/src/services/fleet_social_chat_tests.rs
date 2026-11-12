@@ -15,6 +15,30 @@ use crate::services::fleet_social::fleet_social_fleet_ops::fleet_social_fleet_op
 use eve_machonet::SessionState;
 use std::collections::{HashMap, HashSet};
 
+fn encode_xmpp_base64_for_test(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((triple >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((triple >> 12) & 0x3f) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[((triple >> 6) & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(triple & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 #[test]
 fn chat_auth_help_rookie_prefs_resync_and_delayed_pruning() {
     let ctx = test_ctx_with_clock(1_800_005_000);
@@ -42,7 +66,14 @@ fn chat_auth_help_rookie_prefs_resync_and_delayed_pruning() {
     let tok = handle_chat_and_social(&ctx, &mut session, "chatAuthenticationService", "GetAuthenticationToken", &[], &kw)
         .unwrap()
         .unwrap();
-    assert_eq!(tok.as_str().unwrap(), "evomu-xmpp-token-90000001");
+    let tok_str = tok.as_str().unwrap();
+    assert!(tok_str.len() >= 32);
+    assert!(tok_str.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert!(!tok_str.starts_with("evomu-xmpp-token-"));
+    let tok_repeat = handle_chat_and_social(&ctx, &mut session, "chatAuthenticationService", "GetAuthenticationToken", &[], &kw)
+        .unwrap()
+        .unwrap();
+    assert_eq!(tok_repeat.as_str().unwrap(), tok_str);
     let host = handle_chat_and_social(&ctx, &mut session, "XmppChatMgr", "Hostname", &[], &kw)
         .unwrap()
         .unwrap();
@@ -340,6 +371,16 @@ fn xmpp_iq_reply_with_ctx_discovers_player_channels_by_name_forme_and_joins_by_x
     owner_sess.user_id = Some(90_000_001);
     owner_sess.character_id = Some(90_000_001);
 
+    // Seed a second pilot character for non-owner / private / ACL / blocklist assertions (#940)
+    let other_cid = 90_000_002_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let base = snap.characters.get(&90_000_001).cloned().unwrap();
+        let mut ch2 = base;
+        ch2.character_id = other_cid;
+        ch2.name = "Other Pilot".into();
+        snap.characters.insert(other_cid, ch2);
+    });
+
     let created = handle_chat_and_social(
         &ctx,
         &mut owner_sess,
@@ -358,9 +399,101 @@ fn xmpp_iq_reply_with_ctx_discovers_player_channels_by_name_forme_and_joins_by_x
         Some("channel:playtest_alpha")
     );
 
-    // 1. `disco#items` with `node="byname/Playtest Alpha"` returns `<item jid='player_playtest_alpha@conference.chat.evomu.local' name='Playtest Alpha'/>`
-    let byname = xmpp_iq_reply_with_ctx(
+    // Seed a private channel and a password-protected channel owned by 90_000_001.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.chat_channels.insert(
+            "channel:private_vault".into(),
+            ChatChannelRecord {
+                channel_id: "channel:private_vault".into(),
+                name: "Private Vault".into(),
+                motd: String::new(),
+                owner_id: Some(90_000_001),
+                members: std::collections::HashSet::from([90_000_001]),
+                is_system_local: false,
+                solar_system_id: None,
+                is_private: true,
+                operators: std::collections::HashSet::from([90_000_001]),
+                password: None,
+                is_delayed_local: false,
+            },
+        );
+        snap.chat_channels.insert(
+            "channel:secret_vault".into(),
+            ChatChannelRecord {
+                channel_id: "channel:secret_vault".into(),
+                name: "Secret Vault".into(),
+                motd: String::new(),
+                owner_id: Some(90_000_001),
+                members: std::collections::HashSet::from([90_000_001]),
+                is_system_local: false,
+                solar_system_id: None,
+                is_private: false,
+                operators: std::collections::HashSet::from([90_000_001]),
+                password: Some("hunter2".into()),
+                is_delayed_local: false,
+            },
+        );
+    });
+
+    // 0. Unauthenticated `xmpp_iq_reply_with_ctx` fails closed and leaks zero channels (#940).
+    let unauth_forme = xmpp_iq_reply_with_ctx(
         Some(&ctx),
+        "<iq type='get' id='iq-unauth' to='conference.chat.evomu.local'><query xmlns='http://jabber.org/protocol/disco#items' node='forme'/></iq>",
+        "iq-unauth",
+    );
+    assert!(unauth_forme.contains("type='error'"));
+    assert!(unauth_forme.contains("<not-authorized"));
+    assert!(!unauth_forme.contains("playtest_alpha"));
+    assert!(!unauth_forme.contains("private_vault"));
+
+    // Authenticate owner via SASL PLAIN + <bind>; reject unminted & deterministic fallback tokens (#940).
+    let mut owner_auth = XmppStreamAuth::default();
+    assert!(xmpp_authenticate_sasl_plain(
+        &ctx,
+        "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>AGNoYXJfOTAwMDAwMDEAd3JvbmctdG9rZW4=</auth>",
+        &mut owner_auth,
+    ).is_err());
+    let deterministic_b64 =
+        encode_xmpp_base64_for_test(b"\0char_90000001\0evomu-xmpp-token-90000001");
+    assert!(xmpp_authenticate_sasl_plain(
+        &ctx,
+        &format!("<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{deterministic_b64}</auth>"),
+        &mut owner_auth,
+    ).is_err());
+
+    let minted_tok = handle_chat_and_social(
+        &ctx,
+        &mut owner_sess,
+        "chatAuthenticationService",
+        "GetAuthenticationToken",
+        &[],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let owner_tok_str = minted_tok.as_str().unwrap();
+    assert!(owner_tok_str.len() >= 32);
+    assert!(!owner_tok_str.starts_with("evomu-xmpp-token-"));
+    let owner_sasl_b64 =
+        encode_xmpp_base64_for_test(format!("\0char_90000001\0{owner_tok_str}").as_bytes());
+    xmpp_authenticate_sasl_plain(
+        &ctx,
+        &format!("<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{owner_sasl_b64}</auth>"),
+        &mut owner_auth,
+    )
+    .expect("owner SASL PLAIN");
+    let bind_res = xmpp_iq_reply_with_auth_mut(
+        Some(&ctx),
+        Some(&mut owner_auth),
+        "<iq type='set' id='iq-bind'><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'><resource>eve</resource></bind></iq>",
+        "iq-bind",
+    );
+    assert!(bind_res.contains("<jid>char_90000001@chat.evomu.local/eve</jid>"));
+
+    // 1. Authenticated owner `disco#items` with `node="byname/Playtest Alpha"` returns room JID.
+    let byname = xmpp_iq_reply_with_auth(
+        Some(&ctx),
+        Some(&owner_auth),
         "<iq type='get' id='iq-byname' to='conference.chat.evomu.local'><query xmlns='http://jabber.org/protocol/disco#items' node=\"byname/Playtest Alpha\"/></iq>",
         "iq-byname",
     );
@@ -369,9 +502,10 @@ fn xmpp_iq_reply_with_ctx_discovers_player_channels_by_name_forme_and_joins_by_x
         "<item jid='player_playtest_alpha@conference.chat.evomu.local' name='Playtest Alpha'/>"
     ));
 
-    // 2. `disco#items` with `node='forme'` includes the player-created channel with `node='owner'`
-    let forme = xmpp_iq_reply_with_ctx(
+    // 2. Owner `disco#items` with `node='forme'` includes `Playtest Alpha` with `node='owner'`.
+    let forme = xmpp_iq_reply_with_auth(
         Some(&ctx),
+        Some(&owner_auth),
         "<iq type='get' id='iq-forme' to='conference.chat.evomu.local'><query xmlns='http://jabber.org/protocol/disco#items' node='forme'/></iq>",
         "iq-forme",
     );
@@ -379,18 +513,51 @@ fn xmpp_iq_reply_with_ctx_discovers_player_channels_by_name_forme_and_joins_by_x
         "<item jid='player_playtest_alpha@conference.chat.evomu.local' name='Playtest Alpha' node='owner'/>"
     ));
 
-    // 3. `disco#info` on `player_playtest_alpha@conference.chat.evomu.local` returns `name='Playtest Alpha'`
-    let info = xmpp_iq_reply_with_ctx(
+    // 3. Owner `disco#info` on `player_playtest_alpha@conference.chat.evomu.local` returns `name='Playtest Alpha'`.
+    let info = xmpp_iq_reply_with_auth(
         Some(&ctx),
+        Some(&owner_auth),
         "<iq type='get' id='iq-info' to='player_playtest_alpha@conference.chat.evomu.local'><query xmlns='http://jabber.org/protocol/disco#info'/></iq>",
         "iq-info",
     );
     assert!(info.contains("name='Playtest Alpha'"));
 
-    // 4. Joining via LSC using the XMPP room name `player_playtest_alpha` resolves to `channel:playtest_alpha`
+    // 4. Non-owner caller cannot see private/passworded channels and never receives `node='owner'` (#940).
+    let other_auth = XmppStreamAuth {
+        user_id: Some(1),
+        character_id: Some(other_cid),
+        bound_jid: Some("char_90000002@chat.evomu.local/eve".into()),
+        sasl_authenticated: true,
+    };
+    let other_forme_before = xmpp_iq_reply_with_auth(
+        Some(&ctx),
+        Some(&other_auth),
+        "<iq type='get' id='iq-o1' to='conference.chat.evomu.local'><query xmlns='http://jabber.org/protocol/disco#items' node='forme'/></iq>",
+        "iq-o1",
+    );
+    assert!(!other_forme_before.contains("playtest_alpha"));
+    assert!(!other_forme_before.contains("node='owner'"));
+
+    let other_byname_priv = xmpp_iq_reply_with_auth(
+        Some(&ctx),
+        Some(&other_auth),
+        "<iq type='get' id='iq-o2' to='conference.chat.evomu.local'><query xmlns='http://jabber.org/protocol/disco#items' node=\"byname/Private Vault\"/></iq>",
+        "iq-o2",
+    );
+    assert!(!other_byname_priv.contains("private_vault"));
+    let other_info_secret = xmpp_iq_reply_with_auth(
+        Some(&ctx),
+        Some(&other_auth),
+        "<iq type='get' id='iq-o3' to='player_secret_vault@conference.chat.evomu.local'><query xmlns='http://jabber.org/protocol/disco#info'/></iq>",
+        "iq-o3",
+    );
+    assert!(other_info_secret.contains("item-not-found"));
+    assert!(!other_info_secret.contains("Secret Vault"));
+
+    // 5. Joining via LSC using the XMPP room name `player_playtest_alpha` adds membership without owner node.
     let mut joiner_sess = SessionState::new(102);
     joiner_sess.user_id = Some(90_000_002);
-    joiner_sess.character_id = Some(90_000_002);
+    joiner_sess.character_id = Some(other_cid);
     let joined = handle_chat_and_social(
         &ctx,
         &mut joiner_sess,
@@ -408,6 +575,317 @@ fn xmpp_iq_reply_with_ctx_discovers_player_channels_by_name_forme_and_joins_by_x
         joined_kv.get("channelID").and_then(|v| v.as_str()),
         Some("channel:playtest_alpha")
     );
+    let other_forme_after = xmpp_iq_reply_with_auth(
+        Some(&ctx),
+        Some(&other_auth),
+        "<iq type='get' id='iq-o4' to='conference.chat.evomu.local'><query xmlns='http://jabber.org/protocol/disco#items' node='forme'/></iq>",
+        "iq-o4",
+    );
+    assert!(other_forme_after.contains("<item jid='player_playtest_alpha@conference.chat.evomu.local' name='Playtest Alpha'/>"));
+    assert!(!other_forme_after.contains("node='owner'"));
+
+    // 6. Channel ACL deny_list, social_extras blocklist, and owner block filter discovery (#940).
+    ctx.social_extras
+        .lock()
+        .unwrap()
+        .blocked_in_channel
+        .entry("channel:playtest_alpha".into())
+        .or_default()
+        .insert(other_cid);
+    let blocked_forme = xmpp_iq_reply_with_auth(
+        Some(&ctx),
+        Some(&other_auth),
+        "<iq type='get' id='iq-o5' to='conference.chat.evomu.local'><query xmlns='http://jabber.org/protocol/disco#items' node='forme'/></iq>",
+        "iq-o5",
+    );
+    assert!(!blocked_forme.contains("playtest_alpha"));
+
+    ctx.social_extras.lock().unwrap().blocked_in_channel.clear();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.chat_channel_acl
+            .entry("channel:playtest_alpha".into())
+            .or_default()
+            .deny_list
+            .insert(other_cid);
+    });
+    let acl_denied_byname = xmpp_iq_reply_with_auth(
+        Some(&ctx),
+        Some(&other_auth),
+        "<iq type='get' id='iq-o6' to='conference.chat.evomu.local'><query xmlns='http://jabber.org/protocol/disco#items' node=\"byname/Playtest Alpha\"/></iq>",
+        "iq-o6",
+    );
+    assert!(!acl_denied_byname.contains("playtest_alpha"));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.chat_channel_acl.clear();
+    });
+    ctx.social_extras
+        .lock()
+        .unwrap()
+        .blocked
+        .entry(90_000_001)
+        .or_default()
+        .insert(other_cid);
+    let owner_blocked_bare = xmpp_iq_reply_with_auth(
+        Some(&ctx),
+        Some(&other_auth),
+        "<iq type='get' id='iq-o7' to='conference.chat.evomu.local'><query xmlns='http://jabber.org/protocol/disco#items'/></iq>",
+        "iq-o7",
+    );
+    assert!(!owner_blocked_bare.contains("playtest_alpha"));
+}
+
+#[test]
+fn xmpp_acl_enforces_scoped_rooms_muc_admin_owner_and_token_revocation() {
+    let ctx = test_ctx_with_clock(1_800_005_500);
+    let kw = HashMap::new();
+    let owner_cid = 90_000_001i64;
+    let op_cid = 90_000_002i64;
+    let member_cid = 90_000_003i64;
+    let owner_uid = ctx.db.get_character(owner_cid).unwrap().user_id;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c1) = snap.characters.get_mut(&owner_cid) {
+            c1.solar_system_id = 30_000_142;
+            c1.corporation_id = 98_000_001;
+            c1.alliance_id = Some(99_000_001);
+            c1.war_faction_id = Some(500_001);
+        }
+        let mut c2 = clone_char_with(snap, op_cid, "OpPilot", 98_000_002, 30_002_187, 100_000_002);
+        c2.alliance_id = Some(99_000_002);
+        c2.war_faction_id = Some(500_002);
+        snap.characters.insert(op_cid, c2);
+
+        let mut c3 = clone_char_with(snap, member_cid, "MemPilot", 98_000_003, 30_002_510, 100_000_003);
+        c3.alliance_id = Some(99_000_003);
+        c3.war_faction_id = Some(500_003);
+        snap.characters.insert(member_cid, c3);
+
+        snap.chat_channels.insert(
+            "channel:playtest_alpha".into(),
+            ChatChannelRecord {
+                channel_id: "channel:playtest_alpha".into(),
+                name: "Playtest Alpha".into(),
+                motd: String::new(),
+                owner_id: Some(owner_cid),
+                members: HashSet::from([owner_cid, op_cid, member_cid]),
+                is_system_local: false,
+                solar_system_id: None,
+                is_private: false,
+                operators: HashSet::from([owner_cid, op_cid]),
+                password: None,
+                is_delayed_local: false,
+            },
+        );
+        snap.chat_channels.insert(
+            "private:vip_room".into(),
+            ChatChannelRecord {
+                channel_id: "private:vip_room".into(),
+                name: "VIP Room".into(),
+                motd: String::new(),
+                owner_id: Some(owner_cid),
+                members: HashSet::from([owner_cid, op_cid]),
+                is_system_local: false,
+                solar_system_id: None,
+                is_private: true,
+                operators: HashSet::from([owner_cid, op_cid]),
+                password: None,
+                is_delayed_local: false,
+            },
+        );
+    });
+
+    // 1. SelectCharacterID mints CSPRNG token (`BF-XMPP-AUTH-01`).
+    let mut sel_sess = SessionState::new(77);
+    sel_sess.user_id = Some(owner_uid);
+    crate::services::character_skills::character_gm_tools::handle_char_unbound(
+        &ctx,
+        &mut sel_sess,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        &[PyRep::Integer(owner_cid)],
+        &kw,
+    )
+    .unwrap()
+    .expect("SelectCharacterID");
+    // Seed active fleet after SelectCharacterID so `on_character_select` does not purge offline fleet state.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(
+            700_001,
+            eve_db::FleetRecord {
+                fleet_id: 700_001,
+                boss_id: owner_cid,
+                members: vec![owner_cid],
+                ..Default::default()
+            },
+        );
+    });
+    let tok_rep = handle_chat_and_social(
+        &ctx,
+        &mut sel_sess,
+        "chatAuthenticationService",
+        "GetAuthenticationToken",
+        &[],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let tok_1 = tok_rep.as_str().unwrap().to_string();
+    assert!(tok_1.len() >= 32);
+    assert!(!tok_1.starts_with("evomu-xmpp-token-"));
+
+    let valid_b64 = encode_xmpp_base64_for_test(format!("\0char_{owner_cid}\0{tok_1}").as_bytes());
+    let mut owner_auth = XmppStreamAuth::default();
+    xmpp_authenticate_sasl_plain(
+        &ctx,
+        &format!("<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{valid_b64}</auth>"),
+        &mut owner_auth,
+    )
+    .expect("minted CSPRNG token authenticates");
+    owner_auth.bound_jid = Some(format!("char_{owner_cid}@chat.evomu.local/eve"));
+    let op_auth = XmppStreamAuth {
+        user_id: Some(2),
+        character_id: Some(op_cid),
+        bound_jid: Some(format!("char_{op_cid}@chat.evomu.local/eve")),
+        sasl_authenticated: true,
+    };
+    let mem_auth = XmppStreamAuth {
+        user_id: Some(3),
+        character_id: Some(member_cid),
+        bound_jid: Some(format!("char_{member_cid}@chat.evomu.local/eve")),
+        sasl_authenticated: true,
+    };
+
+    // 2. Scoped rooms & private channels enforce caller scope/membership in presence & disco#info (`BF-XMPP-ACL-02`).
+    for own_room in [
+        "solarsystemid2:30000142@conference.chat.evomu.local",
+        "local_30000142@conference.chat.evomu.local",
+        "corpid:98000001@conference.chat.evomu.local",
+        "corp_98000001@conference.chat.evomu.local",
+        "allianceid:99000001@conference.chat.evomu.local",
+        "fleetid:700001@conference.chat.evomu.local",
+        "factionid:500001@conference.chat.evomu.local",
+        "private:vip_room@conference.chat.evomu.local",
+    ] {
+        assert!(
+            xmpp_can_join_room(&ctx, Some(&owner_auth), own_room),
+            "owner must be allowed in {own_room}"
+        );
+        let dinfo = xmpp_iq_reply_with_auth(
+            Some(&ctx),
+            Some(&owner_auth),
+            &format!("<iq type='get' id='di-ok' to='{own_room}'><query xmlns='http://jabber.org/protocol/disco#info'/></iq>"),
+            "di-ok",
+        );
+        assert!(dinfo.contains("type='result'"), "disco#info failed for {own_room}: {dinfo}");
+    }
+
+    for foreign_room in [
+        "solarsystemid2:30002187@conference.chat.evomu.local",
+        "local_30002187@conference.chat.evomu.local",
+        "corpid:98000002@conference.chat.evomu.local",
+        "corp_98000002@conference.chat.evomu.local",
+        "allianceid:99000002@conference.chat.evomu.local",
+        "fleetid:700002@conference.chat.evomu.local",
+        "factionid:500002@conference.chat.evomu.local",
+        "constellationid:99999999@conference.chat.evomu.local",
+        "regionid:99999999@conference.chat.evomu.local",
+        "private:vip_room@conference.chat.evomu.local",
+        "private:uncreated_room@conference.chat.evomu.local",
+        "player_uncreated@conference.chat.evomu.local",
+    ] {
+        assert!(
+            !xmpp_can_join_room(&ctx, Some(&mem_auth), foreign_room),
+            "non-member must be denied {foreign_room}"
+        );
+        let dinfo = xmpp_iq_reply_with_auth(
+            Some(&ctx),
+            Some(&mem_auth),
+            &format!("<iq type='get' id='di-deny' to='{foreign_room}'><query xmlns='http://jabber.org/protocol/disco#info'/></iq>"),
+            "di-deny",
+        );
+        assert!(
+            dinfo.contains("item-not-found"),
+            "disco#info leaked {foreign_room}: {dinfo}"
+        );
+    }
+    let node_bypass = xmpp_iq_reply_with_auth(
+        Some(&ctx),
+        Some(&mem_auth),
+        "<iq type='get' id='di-node' to='conference.chat.evomu.local'><query xmlns='http://jabber.org/protocol/disco#info' node='private:vip_room'/></iq>",
+        "di-node",
+    );
+    assert!(node_bypass.contains("item-not-found"));
+
+    // 3. `muc#owner` allows owner_id ONLY across both `player_` and canonical `channel:` / `private:` JIDs;
+    //    `muc#admin` allows owner_id + operators and rejects ordinary members / system channels / missing `to`.
+    for target in [
+        "player_playtest_alpha@conference.chat.evomu.local",
+        "channel:playtest_alpha@conference.chat.evomu.local",
+        "private:vip_room@conference.chat.evomu.local",
+    ] {
+        let owner_res = xmpp_iq_reply_with_auth(
+            Some(&ctx),
+            Some(&owner_auth),
+            &format!("<iq type='get' id='mo-1' to='{target}'><query xmlns='http://jabber.org/protocol/muc#owner'/></iq>"),
+            "mo-1",
+        );
+        assert!(owner_res.contains("type='result'"), "owner denied muc#owner on {target}: {owner_res}");
+
+        let op_owner_res = xmpp_iq_reply_with_auth(
+            Some(&ctx),
+            Some(&op_auth),
+            &format!("<iq type='get' id='mo-2' to='{target}'><query xmlns='http://jabber.org/protocol/muc#owner'/></iq>"),
+            "mo-2",
+        );
+        assert!(op_owner_res.contains("not-authorized"), "operator granted muc#owner on {target}: {op_owner_res}");
+
+        let op_admin_res = xmpp_iq_reply_with_auth(
+            Some(&ctx),
+            Some(&op_auth),
+            &format!("<iq type='get' id='ma-1' to='{target}'><query xmlns='http://jabber.org/protocol/muc#admin'/></iq>"),
+            "ma-1",
+        );
+        assert!(op_admin_res.contains("type='result'"), "operator denied muc#admin on {target}: {op_admin_res}");
+
+        let mem_admin_res = xmpp_iq_reply_with_auth(
+            Some(&ctx),
+            Some(&mem_auth),
+            &format!("<iq type='get' id='ma-2' to='{target}'><query xmlns='http://jabber.org/protocol/muc#admin'/></iq>"),
+            "ma-2",
+        );
+        assert!(mem_admin_res.contains("not-authorized"), "member granted muc#admin on {target}: {mem_admin_res}");
+    }
+
+    let missing_to_admin = xmpp_iq_reply_with_auth(
+        Some(&ctx),
+        Some(&owner_auth),
+        "<iq type='get' id='ma-no-to'><query xmlns='http://jabber.org/protocol/muc#admin'/></iq>",
+        "ma-no-to",
+    );
+    assert!(missing_to_admin.contains("not-authorized"));
+    let sys_admin = xmpp_iq_reply_with_auth(
+        Some(&ctx),
+        Some(&owner_auth),
+        "<iq type='get' id='ma-sys' to='solarsystemid2:30000142@conference.chat.evomu.local'><query xmlns='http://jabber.org/protocol/muc#admin'/></iq>",
+        "ma-sys",
+    );
+    assert!(sys_admin.contains("not-authorized"));
+
+    // 4. `logoff_character_sync` revokes the CSPRNG XMPP token (fail-closed) and clears fleet membership.
+    ctx.logoff_character_sync(owner_cid, None);
+    let mut post_logoff_auth = XmppStreamAuth::default();
+    assert!(xmpp_authenticate_sasl_plain(
+        &ctx,
+        &format!("<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{valid_b64}</auth>"),
+        &mut post_logoff_auth,
+    )
+    .is_err());
+    assert!(!xmpp_can_join_room(
+        &ctx,
+        Some(&owner_auth),
+        "fleetid:700001@conference.chat.evomu.local",
+    ));
 }
 
 #[test]
