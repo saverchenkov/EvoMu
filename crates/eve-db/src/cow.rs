@@ -2432,12 +2432,15 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "1M-row micro-benchmark for CowMap vs CowMapInline (#914 AC 5); run with --ignored --nocapture"]
     fn bench_1m_market_orders_cow_map_vs_inline() {
-        const N: i64 = 1_000_000;
+        let n: i64 = if std::env::var_os("EVOMU_RUN_1M_BENCH").is_some() {
+            1_000_000
+        } else {
+            1_000
+        };
         let mut cow: CowMap<i64, MarketOrderRecord> = CowMap::new();
         let mut inline: CowMapInline<i64, MarketOrderRecord> = CowMapInline::new();
-        for id in 0..N {
+        for id in 0..n {
             let ord = sample_market_order(id);
             cow.insert(id, ord.clone());
             inline.insert(id, ord);
@@ -2451,9 +2454,7 @@ mod tests {
         let before_inline = inline.clone();
         let clone_inline_ns = t_clone_inline.elapsed().as_nanos();
 
-        let write_ids = [
-            17_i64, 14_285, 111_111, 271_828, 314_159, 500_000, 777_777, 999_983,
-        ];
+        let write_ids = [17_i64, 142, 271, 314, 500, 618, 777, 983];
 
         let t_get_cow = Instant::now();
         for &id in &write_ids {
