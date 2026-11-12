@@ -107,21 +107,65 @@ pub fn resolve_decryptor_modifiers(
 
 pub fn format_industry_job_pyrep(j: &IndustryJobRecord, meta: &IndustryJobCostMeta) -> PyRep {
     let owner_id = if meta.owner_id > 0 { meta.owner_id } else { j.installer_id };
+    let end_unix = j.start_unix.saturating_add(j.duration_seconds);
+    let to_ft = |u: u64| ((u as i64).saturating_add(11_644_473_600)).saturating_mul(10_000_000);
+    let bp_loc_id = if j.blueprint_location_id > 0 {
+        j.blueprint_location_id
+    } else {
+        j.facility_id
+    };
+    let out_loc_id = if j.output_location_id > 0 {
+        j.output_location_id
+    } else {
+        j.facility_id
+    };
+    let completed_char_rep = j
+        .completed_character_id
+        .map(PyRep::Integer)
+        .unwrap_or_else(|| {
+            if j.status.eq_ignore_ascii_case("delivered") {
+                PyRep::Integer(j.installer_id)
+            } else {
+                PyRep::None
+            }
+        });
+    let prob = j.probability.map(f64::from).unwrap_or(1.0);
+    let job_cost = j.cost.unwrap_or(meta.total_cost_isk);
+    let lic_runs = j.licensed_runs.unwrap_or(j.runs) as i64;
     PyRep::keyval([
         ("jobID", PyRep::Integer(j.job_id)),
         ("installerID", PyRep::Integer(j.installer_id)),
         ("ownerID", PyRep::Integer(owner_id)),
         ("facilityID", PyRep::Integer(j.facility_id)),
+        ("stationID", PyRep::Integer(j.facility_id)),
+        ("solarSystemID", PyRep::Integer(30_000_142)),
+        ("blueprintID", PyRep::Integer(j.blueprint_item_id)),
         ("blueprintItemID", PyRep::Integer(j.blueprint_item_id)),
         ("blueprintTypeID", PyRep::Integer(j.blueprint_type_id as i64)),
+        ("blueprintCopy", PyRep::Integer(0)),
+        ("blueprintLocationID", PyRep::Integer(bp_loc_id)),
+        ("blueprintLocationFlagID", PyRep::Integer(4)),
         ("activityID", PyRep::Integer(j.activity_id as i64)),
         ("runs", PyRep::Integer(j.runs as i64)),
+        ("licensedRuns", PyRep::Integer(lic_runs)),
+        ("successfulRuns", PyRep::Integer(j.runs as i64)),
         ("productTypeID", PyRep::Integer(j.product_type_id as i64)),
+        ("optionalTypeID", PyRep::None),
+        ("optionalTypeID2", PyRep::None),
+        ("outputLocationID", PyRep::Integer(out_loc_id)),
+        ("outputFlagID", PyRep::Integer(4)),
+        ("completedCharacterID", completed_char_rep),
         ("status", PyRep::String(j.status.clone())),
         ("durationSeconds", PyRep::Integer(j.duration_seconds as i64)),
+        ("timeInSeconds", PyRep::Integer(j.duration_seconds as i64)),
         ("startUnix", PyRep::Integer(j.start_unix as i64)),
-        ("endUnix", PyRep::Integer(j.start_unix.saturating_add(j.duration_seconds) as i64)),
+        ("endUnix", PyRep::Integer(end_unix as i64)),
         ("pauseUnix", meta.paused_at_unix.map(|p| PyRep::Integer(p as i64)).unwrap_or(PyRep::None)),
+        ("startDate", PyRep::Integer(to_ft(j.start_unix))),
+        ("endDate", PyRep::Integer(to_ft(end_unix))),
+        ("pauseDate", meta.paused_at_unix.map(|p| PyRep::Integer(to_ft(p))).unwrap_or(PyRep::None)),
+        ("cost", PyRep::Real(job_cost)),
+        ("probability", PyRep::Real(prob)),
         ("estimatedItemValueISK", PyRep::Real(meta.eiv_isk)),
         ("baseJobCost", PyRep::Real(meta.base_job_cost_isk)),
         ("facilityTaxISK", PyRep::Real(meta.facility_tax_isk)),
@@ -851,7 +895,18 @@ pub(crate) fn handle_industry_job_queries(
                         message: format!("Industry job {job_id} does not belong to character {char_id}"),
                     });
                 }
-                Ok(format_industry_job_pyrep(j, &meta))
+                let mut rep = format_industry_job_pyrep(j, &meta);
+                let sys_id = ctx
+                    .sde
+                    .stations
+                    .get(&(j.facility_id as u32))
+                    .map(|st| st.solar_system_id)
+                    .or_else(|| snap.structures.get(&j.facility_id).map(|s| s.solar_system_id))
+                    .unwrap_or(30_000_142);
+                if let PyRep::KeyVal(ref mut entries) = rep {
+                    entries.insert("solarSystemID".to_string(), PyRep::Integer(sys_id as i64));
+                }
+                Ok(rep)
             });
             Some(res)
         }
@@ -896,7 +951,18 @@ pub(crate) fn handle_industry_job_queries(
                     })
                     .map(|j| {
                         let meta = load_job_cost_meta(snap, j.job_id).unwrap_or_default();
-                        format_industry_job_pyrep(j, &meta)
+                        let mut rep = format_industry_job_pyrep(j, &meta);
+                        let sys_id = ctx
+                            .sde
+                            .stations
+                            .get(&(j.facility_id as u32))
+                            .map(|st| st.solar_system_id)
+                            .or_else(|| snap.structures.get(&j.facility_id).map(|s| s.solar_system_id))
+                            .unwrap_or(30_000_142);
+                        if let PyRep::KeyVal(ref mut entries) = rep {
+                            entries.insert("solarSystemID".to_string(), PyRep::Integer(sys_id as i64));
+                        }
+                        rep
                     })
                     .collect::<Vec<_>>()
             });

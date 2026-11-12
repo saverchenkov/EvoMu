@@ -1068,4 +1068,94 @@ fn issue_771_and_776_get_members_paged_crowset_and_reprocess_list_compat() {
     assert!(subloc_attrs
         .iter()
         .any(|(k, v)| k.as_i64() == Some(805) && v.as_f64() == Some(120.0)));
+
+    // #897: OnNewProbe includes scanBonuses with strength/deviation -> modules/ship
+    let probe_norm = normalize_macho_notification(
+        "OnNewProbe",
+        vec![PyRep::keyval([
+            ("probeID", PyRep::Integer(900_001)),
+            ("typeID", PyRep::Integer(30_013)),
+        ])],
+    );
+    let Some(PyRep::Dict(scan_bonuses)) = probe_norm[0].dict_get("scanBonuses") else {
+        panic!("expected scanBonuses Dict on OnNewProbe");
+    };
+    assert!(scan_bonuses.iter().any(|(k, _)| k.as_str() == Some("strength")));
+    assert!(scan_bonuses.iter().any(|(k, _)| k.as_str() == Some("deviation")));
+
+    // #977: entity.CmdEngage / CmdReturnHome / CmdReturnBay normalize non-Dict replies to {}
+    // and DoDestinyUpdate strips OnDroneActivityChange
+    for cmd in ["CmdEngage", "CmdReturnHome", "CmdReturnAndOrbit", "CmdReturnBay"] {
+        let cmd_rep = normalize_macho_rpc_reply(
+            "entity",
+            cmd,
+            Ok(PyRep::keyval([("ok", PyRep::Bool(true))])),
+        )
+        .expect("normalize drone cmd");
+        assert_eq!(cmd_rep, PyRep::Dict(Vec::new()));
+    }
+    let destiny_norm = normalize_macho_notification(
+        "DoDestinyUpdate",
+        vec![
+            PyRep::List(vec![
+                PyRep::Tuple(vec![
+                    PyRep::Integer(2069),
+                    PyRep::Tuple(vec![
+                        PyRep::String("OnDroneActivityChange".into()),
+                        PyRep::Tuple(vec![
+                            PyRep::Integer(1_896_919_139),
+                            PyRep::Integer(1),
+                            PyRep::String("attack".into()),
+                        ]),
+                    ]),
+                ]),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(2070),
+                    PyRep::Tuple(vec![
+                        PyRep::String("OnDroneStateChange".into()),
+                        PyRep::Tuple(vec![PyRep::Integer(1_896_919_139)]),
+                    ]),
+                ]),
+            ]),
+            PyRep::Bool(false),
+        ],
+    );
+    let PyRep::List(ref d_items) = destiny_norm[0] else {
+        panic!("expected List in DoDestinyUpdate");
+    };
+    assert_eq!(d_items.len(), 1);
+
+    // #978: industryManager.GetJob / GetJobsByOwner normalize V24.01 JobData fields and integer status
+    let job_norm = normalize_macho_rpc_reply(
+        "industryManager",
+        "GetJob",
+        Ok(PyRep::keyval([
+            ("jobID", PyRep::Integer(501)),
+            ("installerID", PyRep::Integer(90_000_001)),
+            ("facilityID", PyRep::Integer(60_003_760)),
+            ("blueprintItemID", PyRep::Integer(200_123_456)),
+            ("blueprintTypeID", PyRep::Integer(967)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(3)),
+            ("status", PyRep::String("Active".into())),
+            ("durationSeconds", PyRep::Integer(600)),
+            ("startUnix", PyRep::Integer(1_700_000_000)),
+            ("endUnix", PyRep::Integer(1_700_000_600)),
+            ("totalJobCostISK", PyRep::Real(1_250.0)),
+        ])),
+    )
+    .expect("normalize industryManager.GetJob");
+    assert_eq!(job_norm.dict_get("blueprintID"), Some(&PyRep::Integer(200_123_456)));
+    assert_eq!(job_norm.dict_get("blueprintCopy"), Some(&PyRep::Integer(0)));
+    assert_eq!(job_norm.dict_get("blueprintLocationID"), Some(&PyRep::Integer(60_003_760)));
+    assert_eq!(job_norm.dict_get("blueprintLocationFlagID"), Some(&PyRep::Integer(4)));
+    assert_eq!(job_norm.dict_get("status"), Some(&PyRep::Integer(1)));
+    assert_eq!(job_norm.dict_get("licensedRuns"), Some(&PyRep::Integer(3)));
+    assert_eq!(job_norm.dict_get("successfulRuns"), Some(&PyRep::Integer(3)));
+    assert_eq!(job_norm.dict_get("timeInSeconds"), Some(&PyRep::Integer(600)));
+    assert_eq!(job_norm.dict_get("cost"), Some(&PyRep::Real(1_250.0)));
+    assert_eq!(job_norm.dict_get("outputLocationID"), Some(&PyRep::Integer(60_003_760)));
+    assert_eq!(job_norm.dict_get("outputFlagID"), Some(&PyRep::Integer(4)));
+    assert!(job_norm.dict_get("startDate").and_then(|v| v.as_i64()).unwrap_or(0) > 130_000_000_000_000_000);
+    assert!(job_norm.dict_get("endDate").and_then(|v| v.as_i64()).unwrap_or(0) > 130_000_000_000_000_000);
 }

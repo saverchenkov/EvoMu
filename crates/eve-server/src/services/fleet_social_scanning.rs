@@ -551,6 +551,22 @@ pub(super) async fn handle_scanning_and_wormholes(
                 }
             }
             let expiry_ft = ctx.now_blueos_filetime_ticks().saturating_add(3_600 * 10_000_000);
+            let scan_bonuses = PyRep::Dict(vec![
+                (
+                    PyRep::String("strength".into()),
+                    PyRep::Dict(vec![
+                        (PyRep::String("modules".into()), PyRep::Real(0.0)),
+                        (PyRep::String("ship".into()), PyRep::Real(0.0)),
+                    ]),
+                ),
+                (
+                    PyRep::String("deviation".into()),
+                    PyRep::Dict(vec![
+                        (PyRep::String("modules".into()), PyRep::Real(0.0)),
+                        (PyRep::String("ship".into()), PyRep::Real(0.0)),
+                    ]),
+                ),
+            ]);
             for (idx, pr) in pos_reps.iter().enumerate() {
                 let pt = match pr {
                     PyRep::List(c) if c.len() >= 3 => PyRep::Tuple(vec![c[0].clone(), c[1].clone(), c[2].clone()]),
@@ -564,6 +580,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                     ("pos", pt.clone()),
                     ("destination", pt),
                     ("state", PyRep::Integer(1)),
+                    ("scanBonuses", scan_bonuses.clone()),
                 ]);
                 ctx.notify(NotificationTarget::Character(char_id), "OnNewProbe", "charid", vec![probe_kv]);
             }

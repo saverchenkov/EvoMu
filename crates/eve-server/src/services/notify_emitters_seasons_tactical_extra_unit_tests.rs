@@ -751,6 +751,30 @@ fn issue_950_load_ammo_primes_sublocation_and_emits_fitting_item_change_deltas()
         !prime_attrs.iter().any(|(k, _)| k.as_i64() == Some(80)),
         "sublocation attributes must not emit speedBonus (80): {prime_attrs:?}"
     );
+    // #976: handle_load_ammo also emits OnModuleAttributeChanges (attributeQuantity = 805, 0 -> 109) for loaded_sublocs
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnModuleAttributeChanges"
+                && matches!(
+                    n.args.first(),
+                    Some(PyRep::List(entries))
+                        if entries.iter().any(|e| matches!(
+                            e,
+                            PyRep::Tuple(t)
+                                if t.get(2)
+                                    == Some(&PyRep::Tuple(vec![
+                                        PyRep::Integer(ship_id),
+                                        PyRep::Integer(27),
+                                        PyRep::Integer(222),
+                                    ]))
+                                    && t.get(3) == Some(&PyRep::Integer(805))
+                                    && t.get(5).and_then(|v| v.as_f64()) == Some(109.0)
+                                    && t.get(6).and_then(|v| v.as_f64()) == Some(0.0)
+                        ))
+                )
+        }),
+        "expected OnModuleAttributeChanges (0 -> 109) for newly loaded sublocation: {notifs:?}"
+    );
 
     // 2. Swap to oversized Iron Charge S x500 -> unloads Antimatter (222) to Cargo, splits 400 Iron (215) into slot 27
     let _ = ctx.drain_notifications_for_char(char_id);

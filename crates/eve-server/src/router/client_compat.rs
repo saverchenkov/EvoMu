@@ -1855,6 +1855,30 @@ pub fn normalize_macho_rpc_reply(
         if let Ok(rep) = rpc_res {
             return Ok(keyval_to_dict_recursive(rep));
         }
+    } else if service == "entity"
+        && matches!(
+            method,
+            "CmdEngage" | "CmdReturnHome" | "CmdReturnAndOrbit" | "CmdReturnBay"
+        )
+    {
+        if let Ok(rep) = rpc_res {
+            if matches!(rep, PyRep::Dict(_)) {
+                return Ok(rep);
+            }
+            return Ok(PyRep::Dict(Vec::new()));
+        }
+    } else if service == "industryManager" && method == "GetJob" {
+        if let Ok(rep) = rpc_res {
+            return Ok(normalize_industry_job_rep_with_sde(rep, sde));
+        }
+    } else if service == "industryManager" && method == "GetJobsByOwner" {
+        if let Ok(PyRep::List(jobs)) = rpc_res {
+            return Ok(PyRep::List(
+                jobs.into_iter()
+                    .map(|j| normalize_industry_job_rep_with_sde(j, sde))
+                    .collect(),
+            ));
+        }
     }
     rpc_res
 }
@@ -2563,6 +2587,148 @@ fn normalize_facility_rep(rep: PyRep) -> PyRep {
     PyRep::KeyVal(entries)
 }
 
+fn normalize_industry_job_rep_with_sde(rep: PyRep, sde: Option<&SdeRegistry>) -> PyRep {
+    let mut entries = match rep {
+        PyRep::KeyVal(m) => m,
+        PyRep::Dict(kvs) => kvs
+            .into_iter()
+            .filter_map(|(k, v)| k.as_str().map(|s| (s.to_string(), v)))
+            .collect(),
+        other => return other,
+    };
+    let facility_id = entries
+        .get("facilityID")
+        .and_then(PyRep::as_i64)
+        .unwrap_or(60_003_760);
+    let installer_id = entries
+        .get("installerID")
+        .and_then(PyRep::as_i64)
+        .unwrap_or(0);
+    let bp_item_id = entries
+        .get("blueprintID")
+        .or_else(|| entries.get("blueprintItemID"))
+        .and_then(PyRep::as_i64)
+        .unwrap_or(0);
+    let runs = entries
+        .get("runs")
+        .and_then(PyRep::as_i64)
+        .unwrap_or(1)
+        .max(1);
+    let dur_secs = entries
+        .get("timeInSeconds")
+        .or_else(|| entries.get("durationSeconds"))
+        .and_then(PyRep::as_i64)
+        .unwrap_or(60)
+        .max(1);
+    let start_unix = entries
+        .get("startUnix")
+        .and_then(PyRep::as_i64)
+        .unwrap_or(1_700_000_000);
+    let end_unix = entries
+        .get("endUnix")
+        .and_then(PyRep::as_i64)
+        .unwrap_or_else(|| start_unix.saturating_add(dur_secs));
+    let to_ft = |u: i64| (u.saturating_add(11_644_473_600)).saturating_mul(10_000_000);
+
+    let status_int = match entries.get("status") {
+        Some(PyRep::Integer(v)) => *v,
+        Some(PyRep::String(s)) => match s.to_ascii_lowercase().as_str() {
+            "active" | "installed" => 1,
+            "paused" => 2,
+            "ready" | "completed" => 3,
+            "delivered" => 101,
+            "cancelled" | "reverted" => 102,
+            _ => 1,
+        },
+        _ => 1,
+    };
+    entries.insert("status".into(), PyRep::Integer(status_int));
+    entries
+        .entry("blueprintID".into())
+        .or_insert(PyRep::Integer(bp_item_id));
+    entries
+        .entry("blueprintItemID".into())
+        .or_insert(PyRep::Integer(bp_item_id));
+    entries
+        .entry("blueprintCopy".into())
+        .or_insert(PyRep::Integer(0));
+    entries
+        .entry("blueprintLocationID".into())
+        .or_insert(PyRep::Integer(facility_id));
+    entries
+        .entry("blueprintLocationFlagID".into())
+        .or_insert(PyRep::Integer(4));
+    entries
+        .entry("stationID".into())
+        .or_insert(PyRep::Integer(facility_id));
+    let sde_sys = sde
+        .and_then(|s| s.stations.get(&(facility_id as u32)))
+        .map(|st| st.solar_system_id as i64);
+    if let Some(sys_id) = sde_sys {
+        entries.insert("solarSystemID".into(), PyRep::Integer(sys_id));
+    } else {
+        entries
+            .entry("solarSystemID".into())
+            .or_insert(PyRep::Integer(30_000_142));
+    }
+    entries
+        .entry("completedCharacterID".into())
+        .or_insert_with(|| {
+            if status_int == 101 {
+                PyRep::Integer(installer_id)
+            } else {
+                PyRep::None
+            }
+        });
+    entries
+        .entry("startDate".into())
+        .or_insert_with(|| PyRep::Integer(to_ft(start_unix)));
+    entries
+        .entry("endDate".into())
+        .or_insert_with(|| PyRep::Integer(to_ft(end_unix)));
+    if !entries.contains_key("pauseDate") {
+        let pause_rep = entries
+            .get("pauseUnix")
+            .and_then(PyRep::as_i64)
+            .map(|p| PyRep::Integer(to_ft(p)))
+            .unwrap_or(PyRep::None);
+        entries.insert("pauseDate".into(), pause_rep);
+    }
+    entries
+        .entry("licensedRuns".into())
+        .or_insert(PyRep::Integer(runs));
+    entries
+        .entry("successfulRuns".into())
+        .or_insert(PyRep::Integer(runs));
+    let cost_val = entries
+        .get("cost")
+        .or_else(|| entries.get("totalJobCostISK"))
+        .and_then(PyRep::as_f64)
+        .unwrap_or(0.0);
+    entries
+        .entry("cost".into())
+        .or_insert(PyRep::Real(cost_val));
+    entries
+        .entry("timeInSeconds".into())
+        .or_insert(PyRep::Integer(dur_secs));
+    entries
+        .entry("probability".into())
+        .or_insert(PyRep::Real(1.0));
+    entries
+        .entry("optionalTypeID".into())
+        .or_insert(PyRep::None);
+    entries
+        .entry("optionalTypeID2".into())
+        .or_insert(PyRep::None);
+    entries
+        .entry("outputLocationID".into())
+        .or_insert(PyRep::Integer(facility_id));
+    entries
+        .entry("outputFlagID".into())
+        .or_insert(PyRep::Integer(4));
+    PyRep::KeyVal(entries)
+}
+
 fn normalize_facility_location_rep(rep: PyRep) -> PyRep {
     if !matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)) {
         return rep;
@@ -2703,6 +2869,7 @@ fn normalize_destiny_payload_arg(rep: PyRep) -> PyRep {
                         let fname = destiny_entry_func_name(it);
                         fname != Some("OnDockingAccepted")
                             && fname != Some("OnClientControllerEvent")
+                            && fname != Some("OnDroneActivityChange")
                             && !(has_ball_add && fname == Some("OnSlimItemChange"))
                     })
                     .map(normalize_destiny_payload_arg)
@@ -3325,6 +3492,29 @@ pub fn normalize_macho_notification_with_sde(
                     })
                     .collect();
                 args[2] = PyRep::Dict(dict);
+            }
+            args
+        }
+        "OnNewProbe" => {
+            if let Some(PyRep::KeyVal(entries)) = args.first_mut() {
+                entries.entry("scanBonuses".to_string()).or_insert_with(|| {
+                    PyRep::Dict(vec![
+                        (
+                            PyRep::String("strength".into()),
+                            PyRep::Dict(vec![
+                                (PyRep::String("modules".into()), PyRep::Real(0.0)),
+                                (PyRep::String("ship".into()), PyRep::Real(0.0)),
+                            ]),
+                        ),
+                        (
+                            PyRep::String("deviation".into()),
+                            PyRep::Dict(vec![
+                                (PyRep::String("modules".into()), PyRep::Real(0.0)),
+                                (PyRep::String("ship".into()), PyRep::Real(0.0)),
+                            ]),
+                        ),
+                    ])
+                });
             }
             args
         }
