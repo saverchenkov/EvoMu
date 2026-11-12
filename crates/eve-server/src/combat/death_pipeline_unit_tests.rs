@@ -1157,6 +1157,9 @@ async fn b3_destruction_pipeline_idempotency_unpiloted_hull_kills_and_sqlite_rel
         Arc::clone(&base_ctx.sde)
     };
     let repo = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("open sqlite"));
+    repo.with_mut_snapshot(|snap| {
+        *snap = eve_db::WorldRepository::create_demo_snapshot();
+    });
     let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), repo)
         .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
     ctx.set_clock(Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(
