@@ -1052,8 +1052,8 @@ fn issue_961_cleartimers_resets_crimewatch_and_emits_timer_cleared_notices() {
     assert_eq!(res.dict_get("cleared"), Some(&PyRep::Bool(true)));
 
     {
-        let cw = ctx.crimewatch.read().unwrap();
-        let st = cw.states.get(&char_id).expect("crimewatch state");
+        let mut cw = ctx.crimewatch.write().unwrap();
+        let st = cw.get_or_create(char_id);
         assert_eq!(st.weapons_timer_expiry, 0);
         assert_eq!(st.pvp_timer_expiry, 0);
         assert_eq!(st.criminal_timer_expiry, 0);

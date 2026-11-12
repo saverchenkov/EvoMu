@@ -289,13 +289,17 @@ fn handle_item_get_info(
             let is_mod_active = ctx.db.with_snapshot(|s| s.module_active_states.contains(&raw_id))
                 || ctx
                     .ship_fittings
-                    .get(&mod_ship_id)
-                    .and_then(|f| {
-                        f.modules.get(&raw_id).map(|m| {
-                            matches!(
-                                m.state,
-                                eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
-                            )
+                    .read()
+                    .ok()
+                    .and_then(|sf| {
+                        sf.get(&mod_ship_id).and_then(|f| {
+                            f.modules.get(&raw_id).map(|m| {
+                                matches!(
+                                    m.state,
+                                    eve_dogma::ModuleState::Active
+                                        | eve_dogma::ModuleState::Overloaded
+                                )
+                            })
                         })
                     })
                     .unwrap_or(false);

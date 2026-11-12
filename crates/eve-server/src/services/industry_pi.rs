@@ -899,7 +899,7 @@ pub(crate) fn handle_industry_job_queries(
                 let sys_id = ctx
                     .sde
                     .stations
-                    .get(&(j.facility_id as u32))
+                    .get(&j.facility_id)
                     .map(|st| st.solar_system_id)
                     .or_else(|| snap.structures.get(&j.facility_id).map(|s| s.solar_system_id))
                     .unwrap_or(30_000_142);
@@ -955,7 +955,7 @@ pub(crate) fn handle_industry_job_queries(
                         let sys_id = ctx
                             .sde
                             .stations
-                            .get(&(j.facility_id as u32))
+                            .get(&j.facility_id)
                             .map(|st| st.solar_system_id)
                             .or_else(|| snap.structures.get(&j.facility_id).map(|s| s.solar_system_id))
                             .unwrap_or(30_000_142);
