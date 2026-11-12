@@ -1254,11 +1254,11 @@ pub fn handle_batch3_gm_slash_cmd(
                 now_unix,
             );
             for target_id in cleared_engagements {
-                crate::services::notify_emitters_fleet_combat::emit_crimewatch_engagement_ended(
-                    ctx,
-                    caller_cid,
-                    target_id,
-                    None,
+                ctx.notify(
+                    NotificationTarget::Character(caller_cid),
+                    "OnCrimewatchEngagementEnded",
+                    "charid",
+                    vec![PyRep::Integer(target_id), PyRep::None],
                 );
             }
             crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {

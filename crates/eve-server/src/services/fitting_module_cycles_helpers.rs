@@ -1488,7 +1488,7 @@ pub(crate) async fn run_pre_notify_instant_module_effects(
     mod_state: &DogmaItemState,
     is_overloaded: bool,
     target_id_opt: Option<i64>,
-    _duration_s: f64,
+    duration_s: f64,
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<Option<PyRep>, BridgeRpcError> {
     if matches!(mod_type.group_id, 201 | 80 | 353) {

@@ -867,11 +867,7 @@ pub fn normalize_macho_rpc_reply(
                 _ => false,
             };
             if ceo_missing && cid > 0 {
-                let fallback_ceo = sde
-                    .and_then(|s| s.npc_corporations.get(&cid))
-                    .and_then(|nc| nc.ceo_id.filter(|&id| id > 0))
-                    .unwrap_or(cid);
-                entries.insert("ceoID".into(), PyRep::Integer(fallback_ceo));
+                entries.insert("ceoID".into(), PyRep::Integer(cid));
             }
             let mut header = Vec::with_capacity(entries.len());
             let mut line = Vec::with_capacity(entries.len());
@@ -1885,13 +1881,13 @@ pub fn normalize_macho_rpc_reply(
         }
     } else if service == "industryManager" && method == "GetJob" {
         if let Ok(rep) = rpc_res {
-            return Ok(normalize_industry_job_rep_with_sde(rep, sde));
+            return Ok(normalize_industry_job_rep(rep));
         }
     } else if service == "industryManager" && method == "GetJobsByOwner" {
         if let Ok(PyRep::List(jobs)) = rpc_res {
             return Ok(PyRep::List(
                 jobs.into_iter()
-                    .map(|j| normalize_industry_job_rep_with_sde(j, sde))
+                    .map(normalize_industry_job_rep)
                     .collect(),
             ));
         }
@@ -2603,7 +2599,7 @@ fn normalize_facility_rep(rep: PyRep) -> PyRep {
     PyRep::KeyVal(entries)
 }
 
-fn normalize_industry_job_rep_with_sde(rep: PyRep, sde: Option<&SdeRegistry>) -> PyRep {
+fn normalize_industry_job_rep(rep: PyRep) -> PyRep {
     let mut entries = match rep {
         PyRep::KeyVal(m) => m,
         PyRep::Dict(kvs) => kvs
@@ -2677,16 +2673,9 @@ fn normalize_industry_job_rep_with_sde(rep: PyRep, sde: Option<&SdeRegistry>) ->
     entries
         .entry("stationID".into())
         .or_insert(PyRep::Integer(facility_id));
-    let sde_sys = sde
-        .and_then(|s| s.stations.get(&(facility_id as u32)))
-        .map(|st| st.solar_system_id as i64);
-    if let Some(sys_id) = sde_sys {
-        entries.insert("solarSystemID".into(), PyRep::Integer(sys_id));
-    } else {
-        entries
-            .entry("solarSystemID".into())
-            .or_insert(PyRep::Integer(30_000_142));
-    }
+    entries
+        .entry("solarSystemID".into())
+        .or_insert(PyRep::Integer(30_000_142));
     entries
         .entry("completedCharacterID".into())
         .or_insert_with(|| {
