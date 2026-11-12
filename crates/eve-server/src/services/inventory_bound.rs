@@ -700,6 +700,341 @@ pub(crate) fn validate_corp_source_item_take_access_in_snap(
     })
 }
 
+/// Re-verifies source ownership, corporation take roles, container locks/passwords, and destination
+/// ownership inside `invbroker.Add`'s write transaction (`#885`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn recheck_invbroker_add_auth_in_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    orig_item: &eve_db::InventoryItemRecord,
+    orig_source_snapshot: Option<&eve_db::InventoryItemRecord>,
+    new_loc: i64,
+    flag: InventoryFlag,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<(), BridgeRpcError> {
+    if let Some(prev) = orig_source_snapshot {
+        if orig_item.owner_id != prev.owner_id || orig_item.flag != prev.flag {
+            return Err(BridgeRpcError {
+                code: "ItemOwnershipViolation".into(),
+                message: format!(
+                    "Item {} ownership or flag changed concurrently (expected owner {} flag {:?}, found owner {} flag {:?})",
+                    orig_item.item_id, prev.owner_id, prev.flag, orig_item.owner_id, orig_item.flag
+                ),
+            });
+        }
+    }
+    let st = crate::services::fitting_containers_ships::read_container_ship_state_snap(snap);
+    if st.alsc_locked_items.contains(&orig_item.item_id) {
+        return Err(BridgeRpcError {
+            code: "ALSCItemLocked".into(),
+            message: format!("Item {} is locked in an Audit Log Secure Container", orig_item.item_id),
+        });
+    }
+    let live_corp_id = snap
+        .characters
+        .get(&char_id)
+        .map(|c| c.corporation_id)
+        .or(session.corporation_id)
+        .unwrap_or(0);
+    let is_struct_loc = snap.structures.contains_key(&orig_item.location_id);
+    let is_core_item = is_struct_loc
+        && (ctx
+            .sde
+            .types
+            .get(&orig_item.type_id)
+            .is_some_and(|t| t.group_id == 4086 || t.category_id == 66)
+            || snap
+                .structures
+                .get(&orig_item.location_id)
+                .and_then(|st_rec| {
+                    crate::services::station_structure::structure_lifecycle::structure_profile(
+                        ctx, st_rec.type_id,
+                    )
+                })
+                .and_then(|p| p.core_type_id)
+                .is_some_and(|c| c == orig_item.type_id));
+    let src_is_deed_bay = is_struct_loc
+        && (orig_item.flag == InventoryFlag::StructureDeedBay
+            || orig_item.flag as u16 == 180
+            || ((orig_item.flag == InventoryFlag::StructureFuel || orig_item.flag as u16 == 172)
+                && is_core_item));
+    let src_is_struct_fuel = is_struct_loc
+        && !is_core_item
+        && crate::services::structure_acl_defense_rules::is_structure_fuel_flag(orig_item.flag);
+    if src_is_deed_bay && !session.has_gm_role() {
+        return Err(BridgeRpcError {
+            code: "ItemLocked".into(),
+            message: "Quantum core cannot be removed from structure deed bay".into(),
+        });
+    } else if src_is_struct_fuel {
+        let st_owner_corp = snap
+            .structures
+            .get(&orig_item.location_id)
+            .map(|s| s.owner_corp_id)
+            .unwrap_or(0);
+        if st_owner_corp != live_corp_id && !session.has_gm_role() {
+            return Err(BridgeRpcError {
+                code: "StructureOwnershipViolation".into(),
+                message: format!(
+                    "Character {char_id} does not belong to structure owning corp {st_owner_corp}"
+                ),
+            });
+        }
+        if !session.has_gm_role()
+            && !crate::services::structure_acl_defense_rules::has_structure_fuel_bay_role(
+                snap,
+                session,
+                char_id,
+                live_corp_id,
+            )
+        {
+            return Err(BridgeRpcError {
+                code: "CorpRoleDenied".into(),
+                message: "Accessing the structure fuel bay requires Director, Station Manager, or Fuel Technician role".into(),
+            });
+        }
+    } else if orig_item.owner_id == live_corp_id && live_corp_id > 0 {
+        validate_corp_source_item_take_access_in_snap(
+            ctx,
+            snap,
+            char_id,
+            live_corp_id,
+            orig_item,
+        )?;
+    } else if orig_item.owner_id != char_id
+        && snap.corporations.contains_key(&orig_item.owner_id)
+        && orig_item.owner_id != live_corp_id
+    {
+        let src_is_public_wreck_or_free_cont = snap
+            .items
+            .get(&orig_item.location_id)
+            .is_some_and(|p| p.type_id == 23 || p.owner_id == 0);
+        if !src_is_public_wreck_or_free_cont && !session.has_gm_role() {
+            return Err(BridgeRpcError {
+                code: "ItemOwnershipViolation".into(),
+                message: format!(
+                    "Character {char_id} is no longer in corporation {} owning item {}",
+                    orig_item.owner_id, orig_item.item_id
+                ),
+            });
+        }
+    }
+    if orig_item.location_id != new_loc {
+        if let Some(src_cont) = snap.items.get(&orig_item.location_id) {
+            let src_grp = ctx.sde.types.get(&src_cont.type_id).map(|t| t.group_id).unwrap_or(0);
+            if crate::services::fitting_containers_ships::is_container_group(src_grp, src_cont.type_id) {
+                if src_cont.owner_id != char_id && !session.has_gm_role() {
+                    if let Some(req_pw) = st.container_passwords.get(&src_cont.item_id) {
+                        if !req_pw.is_empty()
+                            && !st.unlocked_containers.contains(&(src_cont.item_id, char_id))
+                            && !st.unlocked_containers.contains(&(char_id, src_cont.item_id))
+                        {
+                            let supplied_pw = kwargs
+                                .get("password")
+                                .and_then(|v| v.as_str())
+                                .or_else(|| args.iter().find_map(|a| a.as_str()));
+                            if supplied_pw != Some(req_pw.as_str()) {
+                                return Err(BridgeRpcError {
+                                    code: "ALSCPasswordNeededToOpen".into(),
+                                    message: format!(
+                                        "Password required to take items from secure container {}",
+                                        src_cont.item_id
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                }
+                let cont_corp = if src_cont.owner_id != char_id
+                    && snap.corporations.contains_key(&src_cont.owner_id)
+                {
+                    src_cont.owner_id
+                } else if (116..=122).contains(&(src_cont.flag as i64))
+                    && live_corp_id > 0
+                    && orig_item.owner_id == live_corp_id
+                {
+                    live_corp_id
+                } else {
+                    0
+                };
+                let is_auth_space_storage = (30_000_000..=39_999_999).contains(&src_cont.location_id)
+                    && crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                        rt.authorized_shipping_storage
+                            .contains(&(src_cont.item_id, char_id))
+                    });
+                if cont_corp > 0 && cont_corp != live_corp_id {
+                    if src_cont.type_id != 23 && !is_auth_space_storage && !session.has_gm_role() {
+                        return Err(BridgeRpcError {
+                            code: "CorpRoleDenied".into(),
+                            message: format!(
+                                "Character {char_id} is not in corporation {cont_corp} owning container {}",
+                                src_cont.item_id
+                            ),
+                        });
+                    }
+                } else if cont_corp > 0 && cont_corp == live_corp_id {
+                    let (is_ceo, roles) = get_effective_corp_roles_at_location_in_snap_at(
+                        snap,
+                        cont_corp,
+                        char_id,
+                        Some(src_cont.location_id),
+                        ctx.now_unix(),
+                    );
+                    let src_cont_flag = src_cont.flag as i64;
+                    let div_idx = if (116..=122).contains(&src_cont_flag) {
+                        (src_cont_flag - 116) as usize
+                    } else {
+                        0
+                    };
+                    let req_container_take_role =
+                        eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE[div_idx.min(6)];
+                    if !is_ceo
+                        && (roles & (eve_db::corp_roles::ROLE_DIRECTOR | req_container_take_role)) == 0
+                    {
+                        return Err(BridgeRpcError {
+                            code: "CorpRoleDenied".into(),
+                            message: format!(
+                                "Corporation container take role denied for division {}",
+                                div_idx + 1
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    let dest_is_core_item = ctx
+        .sde
+        .types
+        .get(&orig_item.type_id)
+        .is_some_and(|t| t.group_id == 4086 || t.category_id == 66);
+    let dest_flag_u16 = flag as u16;
+    let dest_is_deed_flag = dest_flag_u16 == 180
+        || flag == InventoryFlag::StructureDeedBay
+        || ((dest_flag_u16 == 172 || flag == InventoryFlag::StructureFuel) && dest_is_core_item);
+    let dest_is_fuel_flag = dest_flag_u16 == 133
+        || flag == InventoryFlag::SpecializedFuelBay
+        || ((dest_flag_u16 == 172 || flag == InventoryFlag::StructureFuel) && !dest_is_core_item);
+    if let Some(st_dest) = snap.structures.get(&new_loc) {
+        if st_dest.state == "Destroyed" {
+            return Err(BridgeRpcError {
+                code: "StructureDestroyed".into(),
+                message: format!("Structure {new_loc} is destroyed"),
+            });
+        }
+        if dest_is_deed_flag && !session.has_gm_role() {
+            if st_dest.owner_corp_id != live_corp_id {
+                return Err(BridgeRpcError {
+                    code: "StructureOwnershipViolation".into(),
+                    message: format!(
+                        "Character {char_id} does not belong to structure owning corp {}",
+                        st_dest.owner_corp_id
+                    ),
+                });
+            }
+            use eve_db::corp_roles::{ROLE_DIRECTOR, ROLE_STATION_MANAGER};
+            let (is_ceo, eff_roles) = get_effective_corp_roles_at_location_in_snap_at(
+                snap,
+                live_corp_id,
+                char_id,
+                Some(new_loc),
+                ctx.now_unix(),
+            );
+            if !is_ceo && (eff_roles & (ROLE_DIRECTOR | ROLE_STATION_MANAGER)) == 0 {
+                return Err(BridgeRpcError {
+                    code: "CorpRoleDenied".into(),
+                    message: "Installing a quantum core requires Director or Station Manager role"
+                        .into(),
+                });
+            }
+        } else if dest_is_fuel_flag && !session.has_gm_role() {
+            let is_player_corp = st_dest.owner_corp_id >= 98_000_000
+                || snap.corporations.contains_key(&st_dest.owner_corp_id);
+            if is_player_corp && st_dest.owner_corp_id != live_corp_id {
+                return Err(BridgeRpcError {
+                    code: "StructureOwnershipViolation".into(),
+                    message: format!(
+                        "Character {char_id} does not belong to structure owning corp {}",
+                        st_dest.owner_corp_id
+                    ),
+                });
+            }
+            if is_player_corp
+                && !crate::services::structure_acl_defense_rules::has_structure_fuel_bay_role(
+                    snap,
+                    session,
+                    char_id,
+                    live_corp_id,
+                )
+            {
+                return Err(BridgeRpcError {
+                    code: "CorpRoleDenied".into(),
+                    message: "Accessing the structure fuel bay requires Director, Station Manager, or Fuel Technician role".into(),
+                });
+            }
+        } else if st_dest.owner_corp_id != live_corp_id
+            && !session.has_gm_role()
+            && !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access(
+                ctx, snap, new_loc, char_id,
+            )
+        {
+            return Err(BridgeRpcError {
+                code: "DestinationAccessDenied".into(),
+                message: format!("Character {char_id} lacks structure access at {new_loc}"),
+            });
+        }
+    } else if let Some(dest) = snap.items.get(&new_loc) {
+        let d_grp = ctx.sde.types.get(&dest.type_id).map(|t| t.group_id).unwrap_or(0);
+        let d_cat = ctx.sde.types.get(&dest.type_id).map(|t| t.category_id).unwrap_or(0);
+        if dest.owner_id != char_id && !session.has_gm_role() {
+            if let Some(req_pw) = st.container_passwords.get(&dest.item_id) {
+                if !req_pw.is_empty()
+                    && !st.unlocked_containers.contains(&(dest.item_id, char_id))
+                    && !st.unlocked_containers.contains(&(char_id, dest.item_id))
+                {
+                    let supplied_pw = kwargs
+                        .get("password")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| args.iter().find_map(|a| a.as_str()));
+                    if supplied_pw != Some(req_pw.as_str()) {
+                        return Err(BridgeRpcError {
+                            code: "ALSCPasswordRequired".into(),
+                            message: format!(
+                                "Password required to move items into container {}",
+                                dest.item_id
+                            ),
+                        });
+                    }
+                }
+            }
+            let in_space_container = (30_000_000..=39_999_999).contains(&dest.location_id);
+            let dest_owner_ok = session.has_gm_role()
+                || dest.owner_id == char_id
+                || dest.owner_id == 0
+                || dest.type_id == 23
+                || (live_corp_id > 0 && dest.owner_id == live_corp_id)
+                || (crate::services::fitting_containers_ships::is_container_group(
+                    d_grp,
+                    dest.type_id,
+                ) && in_space_container)
+                || d_grp == 186
+                || (d_cat == 6 && matches!(flag as u16, 5 | 90 | 138 | 155));
+            if !dest_owner_ok {
+                return Err(BridgeRpcError {
+                    code: "DestinationAccessDenied".into(),
+                    message: format!(
+                        "Character {char_id} is not authorized to move items into {new_loc}"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Helper checking if an item or location is reachable and colocated with the character.
 pub(crate) fn is_inventory_location_colocated(
     snap: &eve_db::WorldStateSnapshot,

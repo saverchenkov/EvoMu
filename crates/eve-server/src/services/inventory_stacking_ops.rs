@@ -383,181 +383,302 @@ pub(in crate::services) fn handle_stack_ops(
                     message: "MultiMerge requires at least one (sourceItemID, destItemID, qty) merge operation".into(),
                 }));
             }
-            let mut updated_records = Vec::with_capacity(ops.len());
-            let cs_state_merge = fitting_containers_ships::read_container_ship_state(ctx);
+            enum MergeChangeEvent {
+                Partial {
+                    updated_src: eve_db::InventoryItemRecord,
+                    old_src_qty: i32,
+                    updated_dst: eve_db::InventoryItemRecord,
+                    old_dst_qty: i32,
+                },
+                Full {
+                    deleted_src: eve_db::InventoryItemRecord,
+                    updated_dst: eve_db::InventoryItemRecord,
+                    old_dst_qty: i32,
+                },
+            }
             let provided_pw = kwargs.get("password").and_then(|v| v.as_str());
-            for (mut src_id, dst_id, qty_opt) in ops {
-                if cs_state_merge.alsc_locked_items.contains(&src_id)
-                    || cs_state_merge.alsc_locked_items.contains(&dst_id)
-                {
-                    return Some(Err(BridgeRpcError {
-                        code: "ALSCItemLocked".into(),
-                        message: "Cannot merge items locked in an Audit Log Secure Container"
-                            .into(),
-                    }));
-                }
-                let pre_check = ctx.db.with_snapshot(|snap| {
-                    let is_courier = |id| {
-                        snap.item_custom_names
-                            .get(&id)
-                            .is_some_and(|s| s.starts_with("courier_cargo:"))
-                    };
-                    if is_courier(src_id) || is_courier(dst_id) {
-                        return Err("Cannot merge courier mission cargo".to_string());
-                    }
-                    if snap.is_item_locked_in_contract_or_job(src_id)
-                        || snap.is_item_locked_in_contract_or_job(dst_id)
+            let loaded_tube_items: HashSet<i64> = ctx
+                .fighter_tube_loads
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .values()
+                .copied()
+                .collect();
+            let tx_res = ctx.db.try_with_mut_snapshot(|guard| {
+                let cs_state_merge =
+                    fitting_containers_ships::read_container_ship_state_snap(guard);
+                let ext =
+                    crate::services::station_structure::structure_upwell_ops::load_ext_state(
+                        guard,
+                    );
+                let mut events = Vec::with_capacity(ops.len());
+                for &(src_id, dst_id, qty_opt) in &ops {
+                    if cs_state_merge.alsc_locked_items.contains(&src_id)
+                        || cs_state_merge.alsc_locked_items.contains(&dst_id)
                     {
-                        return Err("Cannot merge locked items".to_string());
+                        return Err(BridgeRpcError {
+                            code: "ALSCItemLocked".into(),
+                            message: "Cannot merge items locked in an Audit Log Secure Container"
+                                .into(),
+                        });
                     }
-                    let Some(src) = snap.items.get(&src_id) else {
-                        return Err(format!("Source item {src_id} not found"));
-                    };
-                    let Some(dst) = snap.items.get(&dst_id) else {
-                        return Err(format!("Destination item {dst_id} not found"));
-                    };
                     if src_id == dst_id {
-                        return Err("Cannot merge stack into itself".to_string());
+                        return Err(BridgeRpcError {
+                            code: "StackFailed".into(),
+                            message: "Cannot stack an item into itself".into(),
+                        });
                     }
-                    if src.owner_id != char_id || dst.owner_id != char_id {
-                        return Err("Stack ownership mismatch".to_string());
-                    }
-                    if src.type_id != dst.type_id
-                        || src.location_id != dst.location_id
-                        || src.flag != dst.flag
+                    if guard
+                        .item_custom_names
+                        .get(&src_id)
+                        .is_some_and(|s| s.starts_with("courier_cargo:"))
+                        || guard
+                            .item_custom_names
+                            .get(&dst_id)
+                            .is_some_and(|s| s.starts_with("courier_cargo:"))
                     {
-                        return Err("Incompatible stacks for merge".to_string());
+                        return Err(BridgeRpcError {
+                            code: "StackFailed".into(),
+                            message: "Cannot stack courier mission cargo".into(),
+                        });
                     }
-                    if src.singleton
-                        || dst.singleton
-                        || src.is_blueprint_copy
-                        || dst.is_blueprint_copy
+                    if guard.is_item_locked_in_contract_or_job(src_id)
+                        || guard.is_item_locked_in_contract_or_job(dst_id)
                     {
-                        return Err("Cannot merge singleton or BPC items".to_string());
+                        return Err(BridgeRpcError {
+                            code: "StackFailed".into(),
+                            message: "Cannot merge locked items".into(),
+                        });
                     }
-                    if !src.dynamic_attributes.is_empty()
-                        || !dst.dynamic_attributes.is_empty()
-                        || src.source_mutaplasmid_id.is_some()
-                        || dst.source_mutaplasmid_id.is_some()
+                    if loaded_tube_items.contains(&src_id) || loaded_tube_items.contains(&dst_id) {
+                        return Err(BridgeRpcError {
+                            code: "StackFailed".into(),
+                            message: "Cannot merge fighters loaded in a fighter tube".into(),
+                        });
+                    }
+                    let src = guard
+                        .items
+                        .get(&src_id)
+                        .ok_or_else(|| BridgeRpcError {
+                            code: "StackFailed".into(),
+                            message: format!("Source item {src_id} not found"),
+                        })?
+                        .clone();
+                    let tgt = guard
+                        .items
+                        .get(&dst_id)
+                        .ok_or_else(|| BridgeRpcError {
+                            code: "StackFailed".into(),
+                            message: format!("Destination item {dst_id} not found"),
+                        })?
+                        .clone();
+                    if src.owner_id != char_id || tgt.owner_id != char_id {
+                        return Err(BridgeRpcError {
+                            code: "StackFailed".into(),
+                            message: "Stack ownership mismatch".into(),
+                        });
+                    }
+                    if tgt.type_id != src.type_id
+                        || tgt.location_id != src.location_id
+                        || tgt.flag != src.flag
                     {
-                        return Err("Cannot merge mutated/dynamic items".to_string());
+                        return Err(BridgeRpcError {
+                            code: "StackFailed".into(),
+                            message: "Incompatible stacks for merge".into(),
+                        });
                     }
                     if matches!(src.flag, InventoryFlag::Locked | InventoryFlag::Impounded)
-                        || matches!(dst.flag, InventoryFlag::Locked | InventoryFlag::Impounded)
+                        || matches!(tgt.flag, InventoryFlag::Locked | InventoryFlag::Impounded)
                         || src.type_id == 3_468
-                        || dst.type_id == 3_468
+                        || tgt.type_id == 3_468
                     {
-                        return Err("Cannot merge locked, impounded, or wrapped items".to_string());
+                        return Err(BridgeRpcError {
+                            code: "StackFailed".into(),
+                            message: "Cannot merge locked, impounded, or wrapped items".into(),
+                        });
                     }
-                    let ext =
-                        crate::services::station_structure::structure_upwell_ops::load_ext_state(
-                            snap,
-                        );
+                    if eve_db::WorldStateSnapshot::is_fitted_slot_flag(src.flag)
+                        || guard.is_container_non_empty(src_id)
+                        || guard.is_container_non_empty(dst_id)
+                    {
+                        return Err(BridgeRpcError {
+                            code: "StackFailed".into(),
+                            message: "Cannot stack fitted modules or non-empty containers".into(),
+                        });
+                    }
+                    if src.singleton
+                        || src.is_blueprint_copy
+                        || !src.dynamic_attributes.is_empty()
+                        || src.source_mutaplasmid_id.is_some()
+                        || tgt.singleton
+                        || tgt.is_blueprint_copy
+                        || !tgt.dynamic_attributes.is_empty()
+                        || tgt.source_mutaplasmid_id.is_some()
+                    {
+                        return Err(BridgeRpcError {
+                            code: "StackFailed".into(),
+                            message: "Cannot stack singleton, blueprint copy, or mutated item"
+                                .into(),
+                        });
+                    }
                     if ext.asset_safety_wraps.values().any(|w| {
                         w.wrap_id == src.location_id
                             || w.item_ids.contains(&src_id)
                             || w.item_ids.contains(&dst_id)
                     }) {
-                        return Err("Cannot merge items inside an Asset Safety wrap".to_string());
+                        return Err(BridgeRpcError {
+                            code: "StackFailed".into(),
+                            message: "Cannot merge items inside an Asset Safety wrap".into(),
+                        });
                     }
                     let mut cur = src.location_id;
                     for _ in 0..8 {
-                        let Some(anc) = snap.items.get(&cur) else {
+                        let Some(anc) = guard.items.get(&cur) else {
                             break;
                         };
-                        if anc.type_id == 3_468
-                            || cs_state_merge.alsc_locked_items.contains(&anc.item_id)
-                        {
-                            return Err("Cannot merge items inside a sealed/locked container".into());
+                        if anc.type_id == 3_468 {
+                            return Err(BridgeRpcError {
+                                code: "StackFailed".into(),
+                                message: "Cannot merge items inside a sealed container".into(),
+                            });
+                        }
+                        if cs_state_merge.alsc_locked_items.contains(&anc.item_id) {
+                            return Err(BridgeRpcError {
+                                code: "ALSCItemLocked".into(),
+                                message: "Cannot merge items inside a locked ALSC container".into(),
+                            });
                         }
                         if let Some(req_pw) = cs_state_merge.container_passwords.get(&anc.item_id) {
                             if !req_pw.is_empty()
                                 && !cs_state_merge
                                     .unlocked_containers
                                     .contains(&(anc.item_id, char_id))
+                                && !cs_state_merge
+                                    .unlocked_containers
+                                    .contains(&(char_id, anc.item_id))
                                 && provided_pw != Some(req_pw.as_str())
                             {
-                                return Err("ALSCPasswordRequired".to_string());
+                                return Err(BridgeRpcError {
+                                    code: "ALSCPasswordRequired".into(),
+                                    message: format!(
+                                        "Password required to merge items inside container {}",
+                                        anc.item_id
+                                    ),
+                                });
                             }
                         }
                         cur = anc.location_id;
                     }
-                    if ctx
-                        .fighter_tube_loads
-                        .read()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .values()
-                        .any(|&fid| fid == src_id || fid == dst_id)
+                    if guard.is_item_or_ancestor_locked_or_impounded(dst_id)
+                        || guard.is_item_or_ancestor_locked_or_impounded(src_id)
                     {
-                        return Err("Cannot merge fighters loaded in a fighter tube".to_string());
-                    }
-                    Ok((src.clone(), dst.clone()))
-                });
-                let (src_rec, dst_rec) = match pre_check {
-                    Ok(pair) => pair,
-                    Err(msg) => {
-                        return Some(Err(BridgeRpcError {
+                        return Err(BridgeRpcError {
                             code: "StackFailed".into(),
-                            message: msg,
-                        }));
+                            message: "Item is locked or impounded".into(),
+                        });
                     }
-                };
-                let src_qty = src_rec.quantity;
-                let mut partial_orig: Option<(eve_db::InventoryItemRecord, i32)> = None;
-                if let Some(req_qty) = qty_opt {
-                    if req_qty <= 0 || req_qty > src_qty {
-                        return Some(Err(BridgeRpcError {
-                            code: "StackFailed".into(),
-                            message: format!(
-                                "Invalid merge quantity {req_qty} for source stack {src_id} (qty {src_qty})"
-                            ),
-                        }));
-                    }
-                    if req_qty < src_qty {
-                        match ctx.db.split_stack(char_id, src_id, req_qty) {
-                            Ok((orig, split_segment)) => {
-                                partial_orig = Some((orig, src_qty));
-                                src_id = split_segment.item_id;
-                            }
-                            Err(e) => {
-                                return Some(Err(BridgeRpcError {
+                    let merge_qty = match qty_opt {
+                        Some(req_qty) => {
+                            if req_qty <= 0 || req_qty > src.quantity {
+                                return Err(BridgeRpcError {
                                     code: "StackFailed".into(),
-                                    message: format!("Split before merge failed: {e}"),
-                                }));
+                                    message: format!(
+                                        "Invalid merge quantity {req_qty} for source stack {src_id} (qty {})",
+                                        src.quantity
+                                    ),
+                                });
                             }
+                            req_qty
                         }
+                        None => src.quantity,
+                    };
+                    let new_tgt_qty =
+                        tgt.quantity.checked_add(merge_qty).ok_or_else(|| BridgeRpcError {
+                            code: "StackFailed".into(),
+                            message: "Stack quantity overflow".into(),
+                        })?;
+                    let old_src_qty = src.quantity;
+                    let old_dst_qty = tgt.quantity;
+                    if merge_qty < old_src_qty {
+                        let updated_src = {
+                            let src_mut = guard.items.get_mut(&src_id).unwrap();
+                            src_mut.quantity -= merge_qty;
+                            src_mut.version += 1;
+                            src_mut.clone()
+                        };
+                        let updated_dst = {
+                            let tgt_mut = guard.items.get_mut(&dst_id).unwrap();
+                            tgt_mut.quantity = new_tgt_qty;
+                            tgt_mut.version += 1;
+                            tgt_mut.clone()
+                        };
+                        guard.mark_item_dirty(src_id);
+                        guard.mark_item_dirty(dst_id);
+                        events.push(MergeChangeEvent::Partial {
+                            updated_src,
+                            old_src_qty,
+                            updated_dst,
+                            old_dst_qty,
+                        });
+                    } else {
+                        guard.remove_system_cleanup_item(src_id);
+                        guard.mark_item_deleted(src_id);
+                        let updated_dst = {
+                            let tgt_mut = guard.items.get_mut(&dst_id).unwrap();
+                            tgt_mut.quantity = new_tgt_qty;
+                            tgt_mut.version += 1;
+                            tgt_mut.clone()
+                        };
+                        guard.mark_item_dirty(dst_id);
+                        events.push(MergeChangeEvent::Full {
+                            deleted_src: src,
+                            updated_dst,
+                            old_dst_qty,
+                        });
                     }
                 }
-                match ctx.db.stack_items(char_id, dst_id, src_id) {
-                    Ok(upd) => {
-                        if let Some((orig, old_src_qty)) = partial_orig {
-                            inventory_bound::emit_inv_item_change(
-                                ctx,
-                                char_id,
-                                &orig,
-                                vec![
-                                    // Omit ixQuantity (5): V24.01 invCache uses ixStackSize (9).
-                                    (9, PyRep::Integer(old_src_qty as i64)),
-                                ],
-                            );
-                        } else {
-                            inventory_bound::emit_inv_item_deleted(ctx, char_id, &src_rec);
-                        }
+                Ok(events)
+            });
+            let events = match tx_res {
+                Ok(ev) => ev,
+                Err(e) => return Some(Err(e)),
+            };
+            let mut updated_records = Vec::with_capacity(events.len());
+            for ev in events {
+                match ev {
+                    MergeChangeEvent::Partial {
+                        updated_src,
+                        old_src_qty,
+                        updated_dst,
+                        old_dst_qty,
+                    } => {
                         inventory_bound::emit_inv_item_change(
                             ctx,
                             char_id,
-                            &upd,
-                            vec![
-                                (9, PyRep::Integer(dst_rec.quantity as i64)),
-                            ],
+                            &updated_src,
+                            vec![(9, PyRep::Integer(old_src_qty as i64))],
                         );
-                        updated_records.push(upd);
+                        inventory_bound::emit_inv_item_change(
+                            ctx,
+                            char_id,
+                            &updated_dst,
+                            vec![(9, PyRep::Integer(old_dst_qty as i64))],
+                        );
+                        updated_records.push(updated_dst);
                     }
-                    Err(e) => {
-                        return Some(Err(BridgeRpcError {
-                            code: "StackFailed".into(),
-                            message: e.to_string(),
-                        }));
+                    MergeChangeEvent::Full {
+                        deleted_src,
+                        updated_dst,
+                        old_dst_qty,
+                    } => {
+                        inventory_bound::emit_inv_item_deleted(ctx, char_id, &deleted_src);
+                        inventory_bound::emit_inv_item_change(
+                            ctx,
+                            char_id,
+                            &updated_dst,
+                            vec![(9, PyRep::Integer(old_dst_qty as i64))],
+                        );
+                        updated_records.push(updated_dst);
                     }
                 }
             }

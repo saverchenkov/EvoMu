@@ -1177,3 +1177,111 @@ async fn ships_services_get_contracts_variants_assemble_version_and_set_label_ro
         assert_eq!(ok.dict_get("name").and_then(|v| v.as_str()), Some(new_name));
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn insurance_corp_lookup_prefers_live_character_corporation_over_session() {
+    let (ctx, mut sess, char_id, corp_id, station_id) = make_ctx_and_session();
+    let kw = HashMap::new();
+    let corp_ship = 96_900_001_i64;
+    let stale_corp_id = 98_999_999_i64;
+    let stale_corp_ship = 96_900_002_i64;
+    let other_ship = 96_900_003_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles.insert(char_id, corp_roles::ROLE_DIRECTOR);
+        }
+        snap.items.insert(
+            corp_ship,
+            make_item(corp_ship, 587, corp_id, station_id, InventoryFlag::Hangar, 1, true),
+        );
+        snap.items.insert(
+            stale_corp_ship,
+            make_item(stale_corp_ship, 587, stale_corp_id, station_id, InventoryFlag::Hangar, 1, true),
+        );
+        snap.items.insert(
+            other_ship,
+            make_item(other_ship, 587, 99_888_777, station_id, InventoryFlag::Hangar, 1, true),
+        );
+    });
+
+    sess.corporation_id = None;
+    assert!(handle_ships_and_services(
+        &ctx,
+        &mut sess,
+        None,
+        "insuranceSvc",
+        "GetInsurancePrice",
+        &[PyRep::Integer(corp_ship)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .is_ok());
+    assert_eq!(
+        handle_ships_and_services(
+            &ctx,
+            &mut sess,
+            None,
+            "insuranceSvc",
+            "GetContractForShip",
+            &[PyRep::Integer(corp_ship)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap(),
+        PyRep::None
+    );
+    assert!(matches!(
+        handle_ships_and_services(
+            &ctx,
+            &mut sess,
+            None,
+            "insuranceSvc",
+            "GetContracts",
+            &[PyRep::Bool(true)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap(),
+        PyRep::List(_)
+    ));
+
+    sess.corporation_id = Some(stale_corp_id);
+    for ship_arg in [stale_corp_ship, other_ship] {
+        assert_eq!(
+            handle_ships_and_services(
+                &ctx,
+                &mut sess,
+                None,
+                "insuranceSvc",
+                "GetInsurancePrice",
+                &[PyRep::Integer(ship_arg)],
+                &kw,
+            )
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "OwnershipViolation"
+        );
+        assert_eq!(
+            handle_ships_and_services(
+                &ctx,
+                &mut sess,
+                None,
+                "insuranceSvc",
+                "GetContractForShip",
+                &[PyRep::Integer(ship_arg)],
+                &kw,
+            )
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "OwnershipViolation"
+        );
+    }
+}

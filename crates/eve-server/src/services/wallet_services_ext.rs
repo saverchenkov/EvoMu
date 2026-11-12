@@ -63,6 +63,47 @@ fn trade_note_id(trade_id: i64) -> i64 {
     -(7_300_000_000_000_i64.saturating_add(trade_id.abs()))
 }
 
+pub fn cancel_open_trades_for_character_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+) -> Vec<(i64, i64, i64)> {
+    let mut removed = Vec::new();
+    let mut to_remove = Vec::new();
+    for (&nid, note) in &snap.owner_notes {
+        if note.character_id != -73 {
+            continue;
+        }
+        if let Ok(tr) = serde_json::from_str::<TradeSessionState>(&note.note) {
+            if tr.completed || tr.cancelled {
+                to_remove.push(nid);
+            } else if tr.char_a == char_id || tr.char_b == char_id {
+                to_remove.push(nid);
+                removed.push((tr.trade_id, tr.char_a, tr.char_b));
+            }
+        }
+    }
+    for nid in to_remove {
+        snap.owner_notes.remove(&nid);
+    }
+    removed
+}
+
+pub fn cancel_open_trades_for_character(ctx: &ServerContext, char_id: i64) {
+    let cancelled = ctx
+        .db
+        .with_mut_snapshot(|snap| cancel_open_trades_for_character_in_snap(snap, char_id));
+    for (trade_id, char_a, char_b) in cancelled {
+        for party in [char_a, char_b] {
+            ctx.notify(
+                NotificationTarget::Character(party),
+                "OnTradeCancel",
+                "charid",
+                vec![PyRep::Integer(trade_id)],
+            );
+        }
+    }
+}
+
 pub(super) fn bill_note_id(bill_id: i64) -> i64 {
     -(7_100_000_000_000_i64.saturating_add(bill_id.abs()))
 }
@@ -630,6 +671,11 @@ fn handle_trade_action(
     let mut added_item_id: Option<i64> = None;
     let mut item_diffs: Vec<(i64, Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>)> = Vec::new();
     let mut bal_updates: Vec<(i64, IskCents)> = Vec::new();
+    enum TradeActionOutcome {
+        Ok(TradeSessionState),
+        ClosedStale,
+        UndockedCancelled(TradeSessionState),
+    }
     let res = ctx.db.try_with_mut_snapshot(|snap| {
         let nid = if trade_id > 0 {
             trade_note_id(trade_id)
@@ -643,33 +689,37 @@ fn handle_trade_action(
                 .ok_or_else(|| rpc_err("TradeNotFound", "No active trade session found"))?
         };
         let Some(note) = snap.owner_notes.get(&nid) else {
-            return Err(rpc_err("TradeNotFound", "Trade session not found"));
+            return Err(rpc_err(
+                if trade_id > 0 { "TradeClosed" } else { "TradeNotFound" },
+                "Trade session is already closed or not found",
+            ));
         };
         let mut tr: TradeSessionState = serde_json::from_str(&note.note)
             .map_err(|_| rpc_err("TradeNotFound", "Corrupt trade session"))?;
         if tr.completed || tr.cancelled {
-            return Err(rpc_err("TradeClosed", "Trade session is already closed"));
+            snap.owner_notes.remove(&nid);
+            return Ok(TradeActionOutcome::ClosedStale);
         }
         let is_a = tr.char_a == char_id;
         if !is_a && tr.char_b != char_id {
             return Err(rpc_err("AccessDenied", "Character is not a participant in this trade"));
         }
-        if matches!(method, "AddItem" | "OfferMoney" | "MakeOffer") {
-            let docked_a = snap.characters.get(&tr.char_a).and_then(|c| c.station_id.or(c.structure_id));
-            let docked_b = snap.characters.get(&tr.char_b).and_then(|c| c.station_id.or(c.structure_id));
-            if docked_a != Some(tr.station_id) || docked_b != Some(tr.station_id) {
-                return Err(rpc_err(
-                    "NotDockedAtStation",
-                    "Both trade participants must remain docked at the trade station",
-                ));
+        let docked_a = snap.characters.get(&tr.char_a).and_then(|c| c.station_id.or(c.structure_id));
+        let docked_b = snap.characters.get(&tr.char_b).and_then(|c| c.station_id.or(c.structure_id));
+        if docked_a != Some(tr.station_id) || docked_b != Some(tr.station_id) {
+            tr.cancelled = true;
+            snap.owner_notes.remove(&nid);
+            if method != "Abort" {
+                return Ok(TradeActionOutcome::UndockedCancelled(tr));
             }
+            return Ok(TradeActionOutcome::Ok(tr));
         }
 
         match method {
             "List" => {}
             "Abort" => {
                 tr.cancelled = true;
-                save_json_note(snap, nid, -73, tr.trade_id, format!("trade:{}", tr.trade_id), &tr, now);
+                snap.owner_notes.remove(&nid);
             }
             "AddItem" => {
                 let item_id = args
@@ -924,10 +974,14 @@ fn handle_trade_action(
                         }
                     }
                     // Transfer ISK
-                    let net_to_b = tr.money_a_cents - tr.money_b_cents;
+                    let net_to_b = tr.money_a_cents.checked_sub(tr.money_b_cents).ok_or_else(|| {
+                        rpc_err("Overflow", "Trade ISK delta overflow")
+                    })?;
                     if net_to_b != 0 {
                         if let Some(ca) = snap.characters.get_mut(&tr.char_a) {
-                            ca.balance = IskCents(ca.balance.0 - net_to_b);
+                            ca.balance = IskCents(ca.balance.0.checked_sub(net_to_b).ok_or_else(|| {
+                                rpc_err("Overflow", "Wallet balance overflow during trade")
+                            })?);
                             let ba = ca.balance;
                             bal_updates.push((tr.char_a, ba));
                             snap.append_journal(
@@ -939,7 +993,9 @@ fn handle_trade_action(
                             );
                         }
                         if let Some(cb) = snap.characters.get_mut(&tr.char_b) {
-                            cb.balance = IskCents(cb.balance.0 + net_to_b);
+                            cb.balance = IskCents(cb.balance.0.checked_add(net_to_b).ok_or_else(|| {
+                                rpc_err("Overflow", "Wallet balance overflow during trade")
+                            })?);
                             let bb = cb.balance;
                             bal_updates.push((tr.char_b, bb));
                             snap.append_journal(
@@ -952,15 +1008,34 @@ fn handle_trade_action(
                         }
                     }
                     tr.completed = true;
+                    snap.owner_notes.remove(&nid);
+                } else {
+                    save_json_note(snap, nid, -73, tr.trade_id, format!("trade:{}", tr.trade_id), &tr, now);
                 }
-                save_json_note(snap, nid, -73, tr.trade_id, format!("trade:{}", tr.trade_id), &tr, now);
             }
             _ => {}
         }
-        Ok(tr)
+        Ok(TradeActionOutcome::Ok(tr))
     });
     match res {
-        Ok(tr) => {
+        Ok(TradeActionOutcome::ClosedStale) => {
+            Some(Err(rpc_err("TradeClosed", "Trade session is already closed")))
+        }
+        Ok(TradeActionOutcome::UndockedCancelled(tr)) => {
+            for party in [tr.char_a, tr.char_b] {
+                ctx.notify(
+                    NotificationTarget::Character(party),
+                    "OnTradeCancel",
+                    "charid",
+                    vec![PyRep::Integer(tr.trade_id)],
+                );
+            }
+            Some(Err(rpc_err(
+                "NotDockedAtStation",
+                "Both trade participants must remain docked at the trade station",
+            )))
+        }
+        Ok(TradeActionOutcome::Ok(tr)) => {
             if tr.completed {
                 for (fallback_char, pre, post) in item_diffs {
                     ctx.notify_item_mutation(fallback_char, pre.as_ref(), post.as_ref());

@@ -679,9 +679,39 @@ async fn send_h2c_quasar_request(
     bearer_token: Option<&str>,
     req: &EvePublicRequest,
 ) -> (Option<String>, Option<EvePublicResponse>) {
-    let tcp = tokio::net::TcpStream::connect(addr)
-        .await
-        .expect("connect to h2c Quasar gateway");
+    let tcp = {
+        let mut last_err = None;
+        let mut stream = None;
+        for attempt in 0..5_usize {
+            tokio::task::yield_now().await;
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                tokio::net::TcpStream::connect(addr),
+            )
+            .await
+            {
+                Ok(Ok(s)) => {
+                    stream = Some(s);
+                    break;
+                }
+                Ok(Err(e)) => {
+                    last_err = Some(e.to_string());
+                }
+                Err(_) => {
+                    last_err = Some("connect timed out after 5s".to_string());
+                }
+            }
+            if attempt + 1 < 5 {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        }
+        stream.unwrap_or_else(|| {
+            panic!(
+                "connect to h2c Quasar gateway {addr}: {}",
+                last_err.unwrap_or_else(|| "unknown error".into())
+            )
+        })
+    };
     let (mut client, conn) = h2::client::handshake(tcp).await.expect("h2 handshake");
     tokio::spawn(async move {
         let _ = conn.await;
@@ -2688,7 +2718,7 @@ async fn air_career_program_progression_milestones_and_reload() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn quasar_economy_industry_h2c_and_persistence_end_to_end() {
     // parity: plan:Q-6
     eve_testkit::attest(&["plan:Q-6"]);
@@ -2754,6 +2784,7 @@ async fn quasar_economy_industry_h2c_and_persistence_end_to_end() {
             });
         }
     });
+    tokio::task::yield_now().await;
 
     let uid = sess.user_id.expect("uid");
     let now = ctx.now_unix();

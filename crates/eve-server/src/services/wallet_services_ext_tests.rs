@@ -507,7 +507,58 @@ fn station_direct_trade_completes_when_current_trade_item_is_escrowed_and_emits_
     ctx.db.with_snapshot(|s| {
         assert_eq!(s.items[&item_id].owner_id, char_b);
         assert!(!s.is_item_locked_excluding_trade(item_id, None));
+        assert!(
+            !s.owner_notes.contains_key(&super::trade_note_id(trade_id)),
+            "completed trade must remove -73 trade owner note"
+        );
     });
     assert!(ctx.drain_notifications_for_char(char_a).iter().any(|n| n.event == "OnItemChange"));
     assert!(ctx.drain_notifications_for_char(char_b).iter().any(|n| n.event == "OnItemChange"));
+
+    // #848: Abort removes -73 trade note so List returns TradeNotFound
+    let init2 = handle(&ctx, &mut sess_a, "trademgr", "InitiateTrade", &[PyRep::Integer(char_b)], &HashMap::new())
+        .unwrap()
+        .unwrap();
+    let trade_id2 = init2.dict_get("tradeContainerID").unwrap().as_i64().unwrap();
+    assert!(handle(&ctx, &mut sess_a, "trademgr", "List", &[PyRep::Integer(trade_id2)], &HashMap::new()).unwrap().is_ok());
+    handle(&ctx, &mut sess_a, "trademgr", "Abort", &[PyRep::Integer(trade_id2)], &HashMap::new())
+        .unwrap()
+        .unwrap();
+    assert!(handle(&ctx, &mut sess_a, "trademgr", "List", &[PyRep::Integer(trade_id2)], &HashMap::new()).unwrap().is_err());
+    assert!(ctx.db.with_snapshot(|s| !s.owner_notes.contains_key(&super::trade_note_id(trade_id2))));
+
+    // #848: Logout cancels open trade, unlocks items, and emits OnTradeCancel
+    let init3 = handle(&ctx, &mut sess_a, "trademgr", "InitiateTrade", &[PyRep::Integer(char_b)], &HashMap::new())
+        .unwrap()
+        .unwrap();
+    let trade_id3 = init3.dict_get("tradeContainerID").unwrap().as_i64().unwrap();
+    handle(&ctx, &mut sess_b, "trademgr", "AddItem", &[PyRep::Integer(trade_id3), PyRep::Integer(item_id), PyRep::Integer(1)], &HashMap::new())
+        .unwrap()
+        .unwrap();
+    assert!(ctx.db.with_snapshot(|s| s.is_item_locked_excluding_trade(item_id, None)));
+    let _ = ctx.drain_notifications_for_char(char_b);
+    crate::services::fleet_social::fleet_social_notify::on_character_logout(&ctx, char_a);
+    assert!(!ctx.db.with_snapshot(|s| s.is_item_locked_excluding_trade(item_id, None)));
+    assert!(ctx.db.with_snapshot(|s| !s.owner_notes.contains_key(&super::trade_note_id(trade_id3))));
+    assert!(handle(&ctx, &mut sess_b, "trademgr", "List", &[PyRep::Integer(trade_id3)], &HashMap::new()).unwrap().is_err());
+    assert!(ctx.drain_notifications_for_char(char_b).iter().any(|n| n.event == "OnTradeCancel"));
+
+    // #848: Undocking mid-trade still commits -73 note removal & emits OnTradeCancel while returning NotDockedAtStation
+    let _ = ctx.drain_notifications_for_char(char_a);
+    let _ = ctx.drain_notifications_for_char(char_b);
+    let init4 = handle(&ctx, &mut sess_a, "trademgr", "InitiateTrade", &[PyRep::Integer(char_b)], &HashMap::new())
+        .unwrap()
+        .unwrap();
+    let trade_id4 = init4.dict_get("tradeContainerID").unwrap().as_i64().unwrap();
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(cb) = s.characters.get_mut(&char_b) {
+            cb.station_id = None;
+        }
+    });
+    let err = handle(&ctx, &mut sess_a, "trademgr", "OfferMoney", &[PyRep::Integer(trade_id4), PyRep::Real(100.0)], &HashMap::new())
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(err.code, "NotDockedAtStation");
+    assert!(ctx.db.with_snapshot(|s| !s.owner_notes.contains_key(&super::trade_note_id(trade_id4))));
+    assert!(ctx.drain_notifications_for_char(char_b).iter().any(|n| n.event == "OnTradeCancel"));
 }

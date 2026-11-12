@@ -2618,4 +2618,171 @@ fn add_or_stack_item_never_overwrites_existing_item_and_rejects_i32_overflow() {
     assert!(matches!(overflow_stack, Err(DbError::ValidationError(_))));
 }
 
+#[test]
+fn issue_887_and_849_merge_overflow_preserves_source_and_recursive_owner_transfer() {
+    let repo = WorldRepository::with_demo_seed();
+    let cid = 90_000_001_i64;
+    let corp_id = 98_000_001_i64;
+    let station_id = repo.get_character(cid).unwrap().station_id.unwrap();
+
+    let src_stack_id = 910_887_001_i64;
+    let dst_stack_id = 910_887_002_i64;
+    let ship_box_id = 910_849_001_i64;
+    let mod_child_id = 910_849_002_i64;
+    let nested_cont_id = 910_849_003_i64;
+    let deep_ammo_id = 910_849_004_i64;
+
+    repo.with_mut_snapshot(|snap| {
+        // Remove demo-seeded Tritanium (type 34) in cid's hangar so dst_stack_id is the sole merge target.
+        snap.items.retain(|_, it| {
+            !(it.owner_id == cid
+                && it.location_id == station_id
+                && it.flag == InventoryFlag::Hangar
+                && it.type_id == 34)
+        });
+        snap.items.insert(
+            src_stack_id,
+            InventoryItemRecord {
+                item_id: src_stack_id,
+                type_id: 34,
+                owner_id: cid,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 500,
+                singleton: false,
+                version: 1,
+                ..InventoryItemRecord::default()
+            },
+        );
+        snap.items.insert(
+            dst_stack_id,
+            InventoryItemRecord {
+                item_id: dst_stack_id,
+                type_id: 34,
+                owner_id: cid,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: i32::MAX - 100,
+                singleton: false,
+                version: 1,
+                ..InventoryItemRecord::default()
+            },
+        );
+
+        // #887: full-stack merge overflow must fail BEFORE removing src_stack_id
+        let mut full_spec = TransferItemSpec::move_whole(
+            Some(cid),
+            Some(cid),
+            None,
+            station_id,
+            InventoryFlag::Hangar,
+        );
+        full_spec.merge_at_destination = true;
+        assert!(snap.transfer_inventory_item(src_stack_id, full_spec).is_err());
+        assert_eq!(
+            snap.items.get(&src_stack_id).map(|i| i.quantity),
+            Some(500),
+            "full merge overflow must not remove source stack"
+        );
+        assert_eq!(
+            snap.items.get(&dst_stack_id).map(|i| i.quantity),
+            Some(i32::MAX - 100)
+        );
+
+        // #887: partial-stack merge overflow must fail BEFORE decrementing src_stack_id
+        let mut partial_spec = TransferItemSpec::move_whole(
+            Some(cid),
+            Some(cid),
+            None,
+            station_id,
+            InventoryFlag::Hangar,
+        );
+        partial_spec.quantity = Some(250);
+        partial_spec.merge_at_destination = true;
+        assert!(snap.transfer_inventory_item(src_stack_id, partial_spec).is_err());
+        assert_eq!(
+            snap.items.get(&src_stack_id).map(|i| i.quantity),
+            Some(500),
+            "partial merge overflow must not decrement source stack"
+        );
+
+        // #849: transferring a container/ship to a new owner recursively updates nested contents' owner_id
+        snap.items.insert(
+            ship_box_id,
+            InventoryItemRecord {
+                item_id: ship_box_id,
+                type_id: 587,
+                owner_id: cid,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..InventoryItemRecord::default()
+            },
+        );
+        snap.items.insert(
+            mod_child_id,
+            InventoryItemRecord {
+                item_id: mod_child_id,
+                type_id: 440,
+                owner_id: cid,
+                location_id: ship_box_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..InventoryItemRecord::default()
+            },
+        );
+        snap.items.insert(
+            nested_cont_id,
+            InventoryItemRecord {
+                item_id: nested_cont_id,
+                type_id: 3293,
+                owner_id: cid,
+                location_id: ship_box_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..InventoryItemRecord::default()
+            },
+        );
+        snap.items.insert(
+            deep_ammo_id,
+            InventoryItemRecord {
+                item_id: deep_ammo_id,
+                type_id: 222,
+                owner_id: cid,
+                location_id: nested_cont_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 100,
+                singleton: false,
+                version: 1,
+                ..InventoryItemRecord::default()
+            },
+        );
+
+        let corp_spec = TransferItemSpec::move_whole(
+            Some(cid),
+            Some(cid),
+            Some(corp_id),
+            station_id,
+            InventoryFlag::CorpSAG1,
+        );
+        let outcome = snap
+            .transfer_inventory_item(ship_box_id, corp_spec)
+            .expect("transfer ship to corp hangar");
+        assert_eq!(outcome.owner_id, corp_id);
+        for id in [ship_box_id, mod_child_id, nested_cont_id, deep_ammo_id] {
+            assert_eq!(
+                snap.items.get(&id).map(|i| i.owner_id),
+                Some(corp_id),
+                "nested descendant {id} must have owner_id updated to {corp_id}"
+            );
+        }
+    });
+}
+
 

@@ -1491,3 +1491,175 @@ async fn group_2b_container_contents_list_alsc_password_corp_role_and_space_rang
         .expect("space container handle_list within range");
 }
 
+#[test]
+fn issue_888_partial_multimerge_is_atomic_on_destination_failure() {
+    let ctx = test_ctx();
+    let char_id = 92_888_001_i64;
+    let corp_id = 98_888_001_i64;
+    let station_id = 60_003_760_i64;
+    let ship_id = 1_000_888_001_i64;
+    let src_stack = 1_000_888_002_i64;
+    let wrong_type_dst = 1_000_888_003_i64;
+    let overflow_dst = 1_000_888_004_i64;
+
+    ensure_char(&ctx, char_id, corp_id, Some(station_id), 30_000_142, ship_id);
+    insert_item(&ctx, ship_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, src_stack, 34, char_id, station_id, InventoryFlag::Hangar, 50, false);
+    insert_item(&ctx, wrong_type_dst, 35, char_id, station_id, InventoryFlag::Hangar, 20, false);
+    insert_item(
+        &ctx,
+        overflow_dst,
+        34,
+        char_id,
+        station_id,
+        InventoryFlag::Hangar,
+        i32::MAX - 5,
+        false,
+    );
+
+    let kw = HashMap::new();
+    let mut sess = make_session(char_id, corp_id, Some(station_id), None, Some(ship_id));
+    let station_bound = make_bound(station_id, char_id);
+    let item_count_before = ctx.db.with_snapshot(|snap| snap.items.len());
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. Partial MultiMerge into incompatible type fails atomically without splitting src_stack
+    let err1 = handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&station_bound),
+        "invbroker",
+        "MultiMerge",
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(src_stack),
+            PyRep::Integer(wrong_type_dst),
+            PyRep::Integer(10),
+        ])])],
+        &kw,
+    )
+    .expect("matched")
+    .expect_err("partial MultiMerge into mismatched type must fail");
+    assert_eq!(err1.code, "StackFailed");
+
+    // 2. Partial MultiMerge that would overflow destination i32::MAX fails atomically without splitting src_stack
+    let err2 = handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&station_bound),
+        "invbroker",
+        "MultiMerge",
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(src_stack),
+            PyRep::Integer(overflow_dst),
+            PyRep::Integer(10),
+        ])])],
+        &kw,
+    )
+    .expect("matched")
+    .expect_err("partial MultiMerge overflowing destination must fail");
+    assert_eq!(err2.code, "StackFailed");
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.items.len(),
+            item_count_before,
+            "failed partial MultiMerge must not leave behind an intermediate split item"
+        );
+        assert_eq!(
+            snap.items[&src_stack].quantity, 50,
+            "source stack quantity must remain untouched on failed partial MultiMerge"
+        );
+        assert_eq!(snap.items[&wrong_type_dst].quantity, 20);
+        assert_eq!(snap.items[&overflow_dst].quantity, i32::MAX - 5);
+    });
+    assert!(
+        ctx.drain_notifications_for_char(char_id).is_empty(),
+        "failed partial MultiMerge must not emit OnItemChange notifications"
+    );
+
+    // 3. Partial MultiMerge inside a password-protected / ALSC-locked container enforces locks inside write transaction
+    let cont_id = 1_000_888_010;
+    let cont_src = 1_000_888_011;
+    let cont_dst = 1_000_888_012;
+    insert_item(&ctx, cont_id, 17366, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, cont_src, 34, char_id, cont_id, InventoryFlag::Cargo, 40, false);
+    insert_item(&ctx, cont_dst, 34, char_id, cont_id, InventoryFlag::Cargo, 25, false);
+    {
+        let mut st = read_container_ship_state(&ctx);
+        st.container_passwords.insert(cont_id, "vaultpw".into());
+        save_container_ship_state(&ctx, &st);
+    }
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let pw_err = handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&station_bound),
+        "invbroker",
+        "MultiMerge",
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(cont_src),
+            PyRep::Integer(cont_dst),
+            PyRep::Integer(10),
+        ])])],
+        &kw,
+    )
+    .expect("matched")
+    .expect_err("partial MultiMerge inside password-locked container without password must fail");
+    assert_eq!(pw_err.code, "ALSCPasswordRequired");
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+
+    // ALSC-locked ancestor container rejects with ALSCItemLocked even when password is provided
+    {
+        let mut st = read_container_ship_state(&ctx);
+        st.alsc_locked_items.insert(cont_id);
+        save_container_ship_state(&ctx, &st);
+    }
+    let mut pw_kw = HashMap::new();
+    pw_kw.insert("password".into(), PyRep::String("vaultpw".into()));
+    let alsc_err = handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&station_bound),
+        "invbroker",
+        "MultiMerge",
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(cont_src),
+            PyRep::Integer(cont_dst),
+            PyRep::Integer(10),
+        ])])],
+        &pw_kw,
+    )
+    .expect("matched")
+    .expect_err("partial MultiMerge inside ALSC-locked container must return ALSCItemLocked");
+    assert_eq!(alsc_err.code, "ALSCItemLocked");
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+
+    // Unlock ALSC lock and supply password -> partial MultiMerge succeeds cleanly
+    {
+        let mut st = read_container_ship_state(&ctx);
+        st.alsc_locked_items.remove(&cont_id);
+        save_container_ship_state(&ctx, &st);
+    }
+    let ok_merge = handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&station_bound),
+        "invbroker",
+        "MultiMerge",
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(cont_src),
+            PyRep::Integer(cont_dst),
+            PyRep::Integer(10),
+        ])])],
+        &pw_kw,
+    )
+    .expect("matched")
+    .expect("partial MultiMerge with container password should succeed");
+    assert_eq!(ok_merge.dict_get("quantity"), Some(&PyRep::Integer(35)));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&cont_src].quantity, 30);
+        assert_eq!(snap.items[&cont_dst].quantity, 35);
+    });
+}
+
+

@@ -582,3 +582,387 @@ async fn break_gate_cloak_deployables_and_load_ammo_all_branches() {
     assert_eq!(cmd_res.dict_get("reloadTimeMs"), Some(&PyRep::Real(36_000.0)));
     emit_bank_ammo_changed_if_grouped(&ctx, char_id, ship_id, &[cmd_mod]);
 }
+
+#[test]
+fn issue_950_load_ammo_primes_sublocation_and_emits_fitting_item_change_deltas() {
+    let mut sde = SdeRegistry::default();
+    sde.types.insert(587, make_type(587, 25, 6, 2500.0, 400.0, &[(38, 400.0)]));
+    // Light Ion Blaster I (type 561, group 74) with capacity 0.0 on struct field but 5.0 in default_attributes[38]
+    sde.types.insert(
+        561,
+        make_type(561, 74, 7, 5.0, 0.0, &[(38, 5.0), (128, 1.0), (604, 86.0)]),
+    );
+    // Antimatter Charge S (type 222, group 86) with volume 0.0 on struct field but 0.0125 in default_attributes[161]
+    sde.types.insert(
+        222,
+        make_type(222, 86, 8, 0.0, 0.0, &[(161, 0.0125), (128, 1.0)]),
+    );
+    // Iron Charge S (type 215, group 86)
+    sde.types.insert(
+        215,
+        make_type(215, 86, 8, 0.0125, 0.0, &[(161, 0.0125), (128, 1.0)]),
+    );
+
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let char_id = 90_000_001;
+    let station_id = 60_000_394_i64;
+    let ship_id = 200_246_015_i64;
+    let blaster_id = 950_001_i64;
+    let antimatter_stack_id = 950_002_i64;
+    let iron_oversized_id = 950_003_i64;
+
+    db.acquire_online_lock(1, 501, Some(char_id), true, 1_800_000_000)
+        .expect("online lock");
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.station_id = Some(station_id);
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            blaster_id,
+            InventoryItemRecord {
+                item_id: blaster_id,
+                type_id: 561,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0, // slot 27
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            antimatter_stack_id,
+            InventoryItemRecord {
+                item_id: antimatter_stack_id,
+                type_id: 222,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 109,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            iron_oversized_id,
+            InventoryItemRecord {
+                item_id: iron_oversized_id,
+                type_id: 215,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 500,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut sess = SessionState::new(501);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.ship_id = Some(ship_id);
+    sess.station_id = Some(station_id);
+    sess.solar_system_id = Some(30_000_138);
+
+    // 1. Load Antimatter Charge S x109 (entire stack <= 400 cap_rounds) into slot 27
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let res = handle_load_ammo(
+        &ctx,
+        &sess,
+        &[
+            PyRep::Integer(ship_id),
+            PyRep::List(vec![PyRep::Integer(blaster_id)]),
+            PyRep::List(vec![PyRep::Integer(antimatter_stack_id)]),
+        ],
+    )
+    .expect("LoadAmmo Antimatter Charge S x109");
+    assert_eq!(res.dict_get("totalLoaded"), Some(&PyRep::Integer(109)));
+
+    // antimatter_stack_id moved in-place to (ship_id, HiSlot0) with quantity 109
+    let moved = ctx.db.get_item(antimatter_stack_id).expect("charge moved in-place");
+    assert_eq!(moved.location_id, ship_id);
+    assert_eq!(moved.flag, InventoryFlag::HiSlot0);
+    assert_eq!(moved.quantity, 109);
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    // OnItemChange must carry ixFlag = 5 (Cargo) so clientDogmaLocation.IsFitted(item, change) sees wasFitted=False -> isFitted=True
+    let item_chg = notifs
+        .iter()
+        .find(|n| n.event == "OnItemChange")
+        .expect("OnItemChange emitted");
+    assert_eq!(
+        item_chg.args[1],
+        PyRep::Dict(vec![(PyRep::Integer(4), PyRep::Integer(InventoryFlag::Cargo as i64))])
+    );
+    // OnGodmaPrimeItem emitted for sublocation (ship_id, 27, 222) with invItem = None and attributeQuantity (80) = 109.0
+    let prime_idx = notifs
+        .iter()
+        .position(|n| {
+            n.event == "OnGodmaPrimeItem"
+                && n.args.get(1).and_then(|info| info.dict_get("itemID"))
+                    == Some(&PyRep::Tuple(vec![
+                        PyRep::Integer(ship_id),
+                        PyRep::Integer(27),
+                        PyRep::Integer(222),
+                    ]))
+        })
+        .expect("OnGodmaPrimeItem emitted for loaded sublocation");
+    let loaded_idx = notifs
+        .iter()
+        .position(|n| n.event == "OnChargeLoadedToModule")
+        .expect("OnChargeLoadedToModule emitted");
+    assert!(prime_idx < loaded_idx, "OnGodmaPrimeItem must precede OnChargeLoadedToModule");
+    let prime = &notifs[prime_idx];
+    assert_eq!(prime.args[0], PyRep::Integer(ship_id));
+    assert_eq!(prime.args[1].dict_get("invItem"), Some(&PyRep::None));
+    let PyRep::Dict(ref prime_attrs) =
+        prime.args[1].dict_get("attributes").expect("prime attributes")
+    else {
+        panic!("expected Dict for OnGodmaPrimeItem attributes");
+    };
+    assert!(
+        prime_attrs
+            .iter()
+            .any(|(k, v)| k.as_i64() == Some(80) && v.as_f64() == Some(109.0)),
+        "expected attributeQuantity (80) = 109.0 in sublocation attributes: {prime_attrs:?}"
+    );
+
+    // 2. Swap to oversized Iron Charge S x500 -> unloads Antimatter (222) to Cargo, splits 400 Iron (215) into slot 27
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let res2 = handle_load_ammo(
+        &ctx,
+        &sess,
+        &[
+            PyRep::Integer(ship_id),
+            PyRep::List(vec![PyRep::Integer(blaster_id)]),
+            PyRep::List(vec![PyRep::Integer(iron_oversized_id)]),
+        ],
+    )
+    .expect("LoadAmmo Iron Charge S x500 capped to 400");
+    assert_eq!(res2.dict_get("totalLoaded"), Some(&PyRep::Integer(400)));
+    assert_eq!(ctx.db.get_item(iron_oversized_id).unwrap().quantity, 100);
+    assert_eq!(ctx.db.get_item(antimatter_stack_id).unwrap().flag, InventoryFlag::Cargo);
+
+    let notifs2 = ctx.drain_notifications_for_char(char_id);
+    // Split charge stack must have non-empty change dict (ixLocationID=0, ixFlag=Cargo)
+    assert!(notifs2.iter().any(|n| {
+        n.event == "OnItemChange"
+            && n.args.get(1)
+                == Some(&PyRep::Dict(vec![
+                    (PyRep::Integer(3), PyRep::Integer(0)),
+                    (PyRep::Integer(4), PyRep::Integer(InventoryFlag::Cargo as i64)),
+                ]))
+    }));
+    // Expelled Antimatter sublocation emits OnModuleAttributeChanges with attributeQuantity (80) -> 0.0 (from 109.0)
+    let mod_attr = notifs2
+        .iter()
+        .find(|n| n.event == "OnModuleAttributeChanges")
+        .expect("OnModuleAttributeChanges emitted for expelled sublocation");
+    let PyRep::List(ref entries) = mod_attr.args[0] else {
+        panic!("expected List in OnModuleAttributeChanges");
+    };
+    assert!(entries.iter().any(|e| matches!(
+        e,
+        PyRep::Tuple(t)
+            if t.get(2)
+                == Some(&PyRep::Tuple(vec![
+                    PyRep::Integer(ship_id),
+                    PyRep::Integer(27),
+                    PyRep::Integer(222),
+                ]))
+                && t.get(3) == Some(&PyRep::Integer(80))
+                && t.get(5).and_then(|v| v.as_f64()) == Some(0.0)
+                && t.get(6).and_then(|v| v.as_f64()) == Some(109.0)
+    )));
+    // Newly loaded Iron Charge S (215) sublocation primed with invItem = None and attributeQuantity (80) = 400.0
+    let prime2 = notifs2
+        .iter()
+        .find(|n| {
+            n.event == "OnGodmaPrimeItem"
+                && n.args.get(1).and_then(|info| info.dict_get("itemID"))
+                    == Some(&PyRep::Tuple(vec![
+                        PyRep::Integer(ship_id),
+                        PyRep::Integer(27),
+                        PyRep::Integer(215),
+                    ]))
+        })
+        .expect("OnGodmaPrimeItem emitted for replacement Iron Charge S sublocation");
+    assert_eq!(prime2.args[1].dict_get("invItem"), Some(&PyRep::None));
+    let PyRep::Dict(ref prime2_attrs) =
+        prime2.args[1].dict_get("attributes").expect("prime2 attributes")
+    else {
+        panic!("expected Dict for replacement OnGodmaPrimeItem attributes");
+    };
+    assert!(prime2_attrs
+        .iter()
+        .any(|(k, v)| k.as_i64() == Some(80) && v.as_f64() == Some(400.0)));
+}
+
+#[test]
+fn issue_950_load_ammo_unloaded_and_cargo_volume_uses_attr_161_fallback() {
+    let mut sde = SdeRegistry::default();
+    sde.types.insert(587, make_type(587, 25, 6, 2500.0, 400.0, &[(38, 400.0)]));
+    sde.types.insert(
+        561,
+        make_type(561, 74, 7, 5.0, 200.0, &[(38, 200.0), (128, 1.0), (604, 86.0)]),
+    );
+    // Charge A has field volume 0.0 and relies on default_attributes[161] = 1.0 m3/unit.
+    sde.types.insert(
+        222,
+        make_type(222, 86, 8, 0.0, 0.0, &[(161, 1.0), (128, 1.0)]),
+    );
+    sde.types.insert(
+        215,
+        make_type(215, 86, 8, 1.0, 0.0, &[(161, 1.0), (128, 1.0)]),
+    );
+
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let char_id = 90_000_001;
+    let station_id = 60_000_394_i64;
+    let ship_id = 200_246_016_i64;
+    let blaster_id = 950_101_i64;
+    let loaded_zero_vol_id = 950_102_i64;
+    let cargo_zero_vol_id = 950_103_i64;
+    let swap_in_id = 950_104_i64;
+
+    db.acquire_online_lock(1, 502, Some(char_id), true, 1_800_000_000)
+        .expect("online lock");
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.station_id = Some(station_id);
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            blaster_id,
+            InventoryItemRecord {
+                item_id: blaster_id,
+                type_id: 561,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        // 100 units loaded in slot = 100 m3 via attr 161 fallback
+        snap.items.insert(
+            loaded_zero_vol_id,
+            InventoryItemRecord {
+                item_id: loaded_zero_vol_id,
+                type_id: 222,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 100,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        // 310 units in Cargo = 310 m3 via attr 161 fallback
+        snap.items.insert(
+            cargo_zero_vol_id,
+            InventoryItemRecord {
+                item_id: cargo_zero_vol_id,
+                type_id: 222,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 310,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        // 50 units of replacement ammo in Cargo = 50 m3
+        snap.items.insert(
+            swap_in_id,
+            InventoryItemRecord {
+                item_id: swap_in_id,
+                type_id: 215,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 50,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut sess = SessionState::new(502);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.ship_id = Some(ship_id);
+    sess.station_id = Some(station_id);
+
+    // 310 (cargo attr-161) + 50 (swap-in) - 50 (removed) + 100 (unloaded attr-161) = 410 > 400 -> reject
+    let err = handle_load_ammo(
+        &ctx,
+        &sess,
+        &[
+            PyRep::Integer(ship_id),
+            PyRep::List(vec![PyRep::Integer(blaster_id)]),
+            PyRep::List(vec![PyRep::Integer(swap_in_id)]),
+        ],
+    )
+    .unwrap_err();
+    assert_eq!(err.code, "NotEnoughCargoSpace");
+
+    // Trim Cargo stack to 290 m3 -> 290 + 50 - 50 + 100 = 390 <= 400 -> succeeds
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&cargo_zero_vol_id).unwrap().quantity = 290;
+    });
+    let res = handle_load_ammo(
+        &ctx,
+        &sess,
+        &[
+            PyRep::Integer(ship_id),
+            PyRep::List(vec![PyRep::Integer(blaster_id)]),
+            PyRep::List(vec![PyRep::Integer(swap_in_id)]),
+        ],
+    )
+    .expect("swap succeeds once cargo space accounts for attr 161");
+    assert_eq!(res.dict_get("totalLoaded"), Some(&PyRep::Integer(50)));
+}
+

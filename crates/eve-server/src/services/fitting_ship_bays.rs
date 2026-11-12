@@ -299,6 +299,7 @@ pub(crate) async fn board_stored_ship(
             s_mut.flag = if dock_id.is_some() { InventoryFlag::Hangar } else { InventoryFlag::None };
             s_mut.version += 1;
         }
+        snap.set_owner_recursive(stored_id, char_id);
         let _ = crate::router::apply_character_transition_in_snap(
             snap,
             &ctx.sde,
@@ -817,6 +818,7 @@ pub(crate) async fn ship_drop(
                 it.singleton = orig_singleton || is_freight;
                 it.owner_id = drop_owner;
                 it.version += 1;
+                snap.set_owner_recursive(iid, drop_owner);
                 iid
             } else {
                 let it = snap.items.get_mut(&iid).unwrap();
@@ -1190,6 +1192,7 @@ pub(crate) async fn ship_scoop_and_store(
         it_mut.version += 1;
         if to_transfer {
             it_mut.owner_id = char_id;
+            snap.set_owner_recursive(item_id, char_id);
         }
         snap.item_positions.remove(&item_id);
         snap.sp6_lifecycle.space_object_meta.remove(&item_id);

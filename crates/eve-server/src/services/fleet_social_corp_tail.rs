@@ -722,13 +722,37 @@ pub(crate) fn emit_corp_role_session_changed(
     );
 }
 
+struct MemberRemovalOutcome {
+    npc_corp: i64,
+    old_role: u64,
+    old_alliance: Option<i64>,
+    closed: bool,
+    released: Vec<(i64, i64, u32, i64)>,
+    ceo_liquidation_wallet: Option<(i64, eve_db::IskCents)>,
+    item_mutations: Vec<(Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>)>,
+}
+
+fn emit_closure_liquidation_notifications(
+    ctx: &ServerContext,
+    tid: i64,
+    ceo_liquidation_wallet: Option<(i64, eve_db::IskCents)>,
+    item_mutations: &[(Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>)],
+) {
+    if let Some((wallet_char_id, new_bal)) = ceo_liquidation_wallet {
+        ctx.notify_wallet_balance(false, wallet_char_id, 1, new_bal);
+    }
+    for (pre, post) in item_mutations {
+        ctx.notify_item_mutation(tid, pre.as_ref(), post.as_ref());
+    }
+}
+
 fn remove_member_to_bloodline_npc_in_snap(
     ctx: &ServerContext,
     snap: &mut eve_db::WorldStateSnapshot,
     corp_id: i64,
     tid: i64,
     now_unix: u64,
-) -> (i64, u64, Option<i64>, bool, Vec<(i64, i64, u32, i64)>) {
+) -> MemberRemovalOutcome {
     let npc_corp = bloodline_default_npc_corp(ctx, snap, tid);
     let old_role = snap
         .corporations
@@ -741,10 +765,15 @@ fn remove_member_to_bloodline_npc_in_snap(
         .and_then(|c| c.alliance_id)
         .or_else(|| snap.characters.get(&tid).and_then(|c| c.alliance_id));
     let mut closed = false;
+    let mut ceo_liquidation_wallet = None;
+    let mut mutated_by_id: std::collections::HashMap<
+        i64,
+        (Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>),
+    > = std::collections::HashMap::new();
     if let Some(corp_mut) = snap.corporations.get_mut(&corp_id) {
         corp_mut.members.remove(&tid);
         corp_mut.member_roles.remove(&tid);
-        if corp_mut.members.is_empty() {
+        if corp_id >= 2_000_000 && corp_mut.members.is_empty() {
             closed = true;
         }
     }
@@ -783,11 +812,135 @@ fn remove_member_to_bloodline_npc_in_snap(
         })
         .members
         .insert(tid);
+    snap.mark_other_domains_dirty();
+    snap.mark_character_dirty(tid);
     if closed {
+        let corp_order_ids: Vec<i64> = snap
+            .market_orders
+            .values()
+            .filter(|o| o.owner_id == corp_id)
+            .map(|o| o.order_id)
+            .collect();
+        let mut escrow_refund_cents = 0_i64;
+        for oid in corp_order_ids {
+            if let Some(ord) = snap.market_orders.remove(&oid) {
+                snap.mark_market_order_deleted(oid);
+                snap.market_order_meta.remove(&oid);
+                if ord.is_bid {
+                    if ord.escrow.0 > 0 {
+                        escrow_refund_cents = escrow_refund_cents.saturating_add(ord.escrow.0);
+                    }
+                } else if ord.vol_remaining > 0 {
+                    let next_max = snap
+                        .next_entity_id
+                        .max(snap.items.keys().copied().max().unwrap_or(1_000_000));
+                    snap.next_entity_id = next_max + 1;
+                    let ret_id = snap.next_entity_id;
+                    let ret_item = eve_db::InventoryItemRecord {
+                        item_id: ret_id,
+                        type_id: ord.type_id,
+                        owner_id: tid,
+                        location_id: ord.station_id,
+                        flag: eve_db::InventoryFlag::Deliveries,
+                        quantity: ord.vol_remaining,
+                        singleton: false,
+                        version: 1,
+                        ..Default::default()
+                    };
+                    snap.items.insert(ret_id, ret_item.clone());
+                    snap.mark_item_dirty(ret_id);
+                    mutated_by_id.insert(ret_id, (None, Some(ret_item)));
+                }
+            }
+        }
+        let mut total_corp_cents = escrow_refund_cents;
+        if let Some(corp_rec) = snap.corporations.get_mut(&corp_id) {
+            corp_rec.ensure_wallet_divisions();
+            for d in 1..=7u8 {
+                let bal = corp_rec.division_balance(d);
+                if bal.0 > 0 {
+                    total_corp_cents = total_corp_cents.saturating_add(bal.0);
+                }
+                corp_rec.set_division_balance(d, eve_db::IskCents(0));
+            }
+        }
+        if total_corp_cents > 0 {
+            if let Some(ch) = snap.characters.get_mut(&tid) {
+                ch.balance = eve_db::IskCents(ch.balance.0.saturating_add(total_corp_cents));
+                let new_bal = ch.balance;
+                snap.mark_character_dirty(tid);
+                snap.append_journal(
+                    tid,
+                    "corporation_liquidation",
+                    eve_db::IskCents(total_corp_cents),
+                    new_bal,
+                    format!("Corporation {corp_id} closure liquidation to CEO"),
+                );
+                ceo_liquidation_wallet = Some((tid, new_bal));
+            }
+        }
+        let mut office_to_station: std::collections::HashMap<i64, i64> =
+            std::collections::HashMap::new();
         if let Some(g) = snap.corp_governance.remove(&corp_id) {
-            for (_station_id, office_id) in g.offices {
-                snap.items.remove(&office_id);
-                snap.items.retain(|_, it| it.location_id != office_id);
+            for (station_id, office_id) in g.offices {
+                office_to_station.insert(office_id, station_id);
+            }
+        }
+        for it in snap.items.values() {
+            if it.owner_id == corp_id && it.type_id == 27 {
+                office_to_station.entry(it.item_id).or_insert(it.location_id);
+            }
+        }
+        let rehome_ids: Vec<(i64, Option<i64>)> = snap
+            .items
+            .values()
+            .filter(|it| {
+                !office_to_station.contains_key(&it.item_id)
+                    && (office_to_station.contains_key(&it.location_id) || it.owner_id == corp_id)
+                    && !snap.structures.contains_key(&it.item_id)
+                    && !(snap.structures.contains_key(&it.location_id)
+                        && !matches!(it.flag as u16, 4 | 62 | 116..=122 | 173))
+                    && it.flag != eve_db::InventoryFlag::Locked
+                    && !snap.is_item_locked_in_contract_or_job(it.item_id)
+            })
+            .map(|it| (it.item_id, office_to_station.get(&it.location_id).copied()))
+            .collect();
+        for (item_id, station_opt) in rehome_ids {
+            if let Some(pre_it) = snap.items.get(&item_id).cloned() {
+                if let Some(it_mut) = snap.items.get_mut(&item_id) {
+                    if let Some(station_id) = station_opt {
+                        it_mut.location_id = station_id;
+                        it_mut.flag = eve_db::InventoryFlag::Deliveries;
+                    } else if (116..=122).contains(&(it_mut.flag as u16))
+                        || it_mut.flag == eve_db::InventoryFlag::CorpDeliveries
+                    {
+                        it_mut.flag = eve_db::InventoryFlag::Deliveries;
+                    }
+                    it_mut.owner_id = tid;
+                    it_mut.version += 1;
+                    let post_it = it_mut.clone();
+                    snap.mark_item_dirty(item_id);
+                    mutated_by_id
+                        .entry(item_id)
+                        .and_modify(|e| e.1 = Some(post_it.clone()))
+                        .or_insert((Some(pre_it), Some(post_it)));
+                }
+            }
+            for (c_pre, c_post) in snap.set_owner_recursive(item_id, tid) {
+                snap.mark_item_dirty(c_post.item_id);
+                mutated_by_id
+                    .entry(c_post.item_id)
+                    .and_modify(|e| e.1 = Some(c_post.clone()))
+                    .or_insert((Some(c_pre), Some(c_post)));
+            }
+        }
+        for (office_id, _) in office_to_station {
+            if let Some(removed_office) = snap.remove_system_cleanup_item(office_id) {
+                snap.mark_item_deleted(office_id);
+                mutated_by_id
+                    .entry(office_id)
+                    .and_modify(|e| e.1 = None)
+                    .or_insert((Some(removed_office), None));
             }
         }
         snap.corporations.remove(&corp_id);
@@ -803,7 +956,22 @@ fn remove_member_to_bloodline_npc_in_snap(
         ch.alliance_id = None;
     }
     let released = record_corp_join_in_snap(snap, tid, old_corp_id, npc_corp, now_unix);
-    (npc_corp, old_role, old_alliance, closed, released)
+    let mut item_mutations: Vec<_> = mutated_by_id.into_values().collect();
+    item_mutations.sort_by_key(|(pre, post)| {
+        post.as_ref()
+            .or(pre.as_ref())
+            .map(|it| it.item_id)
+            .unwrap_or(0)
+    });
+    MemberRemovalOutcome {
+        npc_corp,
+        old_role,
+        old_alliance,
+        closed,
+        released,
+        ceo_liquidation_wallet,
+        item_mutations,
+    }
 }
 
 fn emit_member_removed_notifications(
@@ -983,6 +1151,8 @@ pub(crate) fn handle_kick_out_members(
                 }
             }
         }
+        let solo_ceo_closing =
+            corp_id >= 2_000_000 && corp.members.len() == 1 && target_ids.contains(&corp.ceo_id);
         let has_active_war = snap.wars.values().any(|w| {
             w.active
                 && (w.aggressor_corp_id == corp_id
@@ -991,14 +1161,54 @@ pub(crate) fn handle_kick_out_members(
                         w.aggressor_corp_id == aid || w.defender_corp_id == aid
                     }))
         });
-        if corp.members.len() == 1 && target_ids.contains(&corp.ceo_id) && has_active_war {
+        if solo_ceo_closing && has_active_war {
             return Err(BridgeRpcError {
                 code: "ActiveWarsPreventClosure".into(),
                 message: "Corporation cannot close while active wars remain".into(),
             });
         }
+        if solo_ceo_closing {
+            let has_active_structure = snap
+                .structures
+                .values()
+                .any(|st| st.owner_corp_id == corp_id && st.state != "Destroyed");
+            if has_active_structure {
+                return Err(BridgeRpcError {
+                    code: "ActiveStructuresPreventClosure".into(),
+                    message: "Corporation cannot close while active owned structures remain"
+                        .into(),
+                });
+            }
+            let has_open_corp_contract = snap.contracts.values().any(|c| {
+                matches!(c.status.as_str(), "Outstanding" | "InProgress")
+                    && ((c.for_corp && c.issuer_corp_id == corp_id)
+                        || c.acceptor_id == Some(corp_id))
+            });
+            let has_open_corp_job = snap.industry_jobs.values().any(|j| {
+                matches!(j.status.as_str(), "Active" | "Paused")
+                    && (j.installer_id == corp_id
+                        || snap
+                            .items
+                            .get(&j.blueprint_item_id)
+                            .is_some_and(|b| b.owner_id == corp_id)
+                        || snap
+                            .items
+                            .get(&j.blueprint_location_id)
+                            .is_some_and(|loc| loc.owner_id == corp_id && loc.type_id == 27)
+                        || snap
+                            .items
+                            .get(&j.output_location_id)
+                            .is_some_and(|loc| loc.owner_id == corp_id && loc.type_id == 27))
+            });
+            if has_open_corp_contract || has_open_corp_job {
+                return Err(BridgeRpcError {
+                    code: "OpenCorpContractsOrJobsPreventClosure".into(),
+                    message: "Corporation cannot close while open corporate contracts or industry jobs remain".into(),
+                });
+            }
+        }
 
-        let mut removed_members: Vec<(i64, i64, u64, Option<i64>)> = Vec::new();
+        let mut removed_members: Vec<(i64, MemberRemovalOutcome)> = Vec::new();
         let mut queued_members: Vec<i64> = Vec::new();
         let mut released_controllers = Vec::new();
         let mut closed = false;
@@ -1016,13 +1226,13 @@ pub(crate) fn handle_kick_out_members(
                 queued_members.push(tid);
                 continue;
             }
-            let (npc_corp, old_role, old_alliance, corp_closed, released) =
+            let outcome =
                 remove_member_to_bloodline_npc_in_snap(ctx, snap, corp_id, tid, now_unix);
-            if corp_closed {
+            if outcome.closed {
                 closed = true;
             }
-            released_controllers.extend(released);
-            removed_members.push((tid, npc_corp, old_role, old_alliance));
+            released_controllers.extend(outcome.released.iter().copied());
+            removed_members.push((tid, outcome));
         }
         Ok((removed_members, queued_members, closed, released_controllers))
     });
@@ -1033,7 +1243,9 @@ pub(crate) fn handle_kick_out_members(
                 ctx,
                 &released_controllers,
             );
-            for &(tid, npc_corp, old_role, old_alliance) in &removed_members {
+            for (tid, outcome) in &removed_members {
+                let tid = *tid;
+                let npc_corp = outcome.npc_corp;
                 let (act_ship, m_sys, m_dock) = ctx.db.with_snapshot(|s| {
                     s.characters
                         .get(&tid)
@@ -1070,9 +1282,15 @@ pub(crate) fn handle_kick_out_members(
                     corp_id,
                     tid,
                     npc_corp,
-                    old_role,
-                    old_alliance,
+                    outcome.old_role,
+                    outcome.old_alliance,
                     now_unix,
+                );
+                emit_closure_liquidation_notifications(
+                    ctx,
+                    tid,
+                    outcome.ceo_liquidation_wallet,
+                    &outcome.item_mutations,
                 );
             }
             let first_tid = target_ids[0];
@@ -1111,14 +1329,15 @@ pub fn execute_pending_auto_kicks_for_docked_char(
         if !is_queued {
             return None;
         }
-        let (npc_corp, old_role, old_alliance, _, released) =
+        let outcome =
             remove_member_to_bloodline_npc_in_snap(ctx, snap, corp_id, char_id, now_unix);
-        Some((corp_id, npc_corp, old_role, old_alliance, released))
+        Some((corp_id, outcome))
     });
-    if let Some((corp_id, npc_corp, old_role, old_alliance, released)) = executed {
+    if let Some((corp_id, outcome)) = executed {
+        let npc_corp = outcome.npc_corp;
         crate::services::structure_control_ops::notify_released_structure_controllers(
             ctx,
-            &released,
+            &outcome.released,
         );
         if session.character_id == Some(char_id) {
             session.corporation_id = Some(npc_corp);
@@ -1159,9 +1378,15 @@ pub fn execute_pending_auto_kicks_for_docked_char(
             corp_id,
             char_id,
             npc_corp,
-            old_role,
-            old_alliance,
+            outcome.old_role,
+            outcome.old_alliance,
             now_unix,
+        );
+        emit_closure_liquidation_notifications(
+            ctx,
+            char_id,
+            outcome.ceo_liquidation_wallet,
+            &outcome.item_mutations,
         );
     }
 }
@@ -1180,10 +1405,10 @@ pub fn execute_pending_auto_kicks_on_downtime(ctx: &ServerContext) -> usize {
         let mut released_controllers = Vec::new();
         for (corp_id, tid) in due {
             if snap.corporations.get(&corp_id).is_some_and(|c| c.members.contains(&tid)) {
-                let (npc_corp, old_role, old_alliance, _, released) =
+                let outcome =
                     remove_member_to_bloodline_npc_in_snap(ctx, snap, corp_id, tid, now_unix);
-                released_controllers.extend(released);
-                out.push((corp_id, tid, npc_corp, old_role, old_alliance));
+                released_controllers.extend(outcome.released.iter().copied());
+                out.push((corp_id, tid, outcome));
             } else if let Some(g) = snap.corp_governance.get_mut(&corp_id) {
                 g.pending_auto_kicks.remove(&tid);
             }
@@ -1195,15 +1420,21 @@ pub fn execute_pending_auto_kicks_on_downtime(ctx: &ServerContext) -> usize {
         &released_controllers,
     );
     let count = removed.len();
-    for (corp_id, tid, npc_corp, old_role, old_alliance) in removed {
+    for (corp_id, tid, outcome) in removed {
         emit_member_removed_notifications(
             ctx,
             corp_id,
             tid,
-            npc_corp,
-            old_role,
-            old_alliance,
+            outcome.npc_corp,
+            outcome.old_role,
+            outcome.old_alliance,
             now_unix,
+        );
+        emit_closure_liquidation_notifications(
+            ctx,
+            tid,
+            outcome.ceo_liquidation_wallet,
+            &outcome.item_mutations,
         );
     }
     count

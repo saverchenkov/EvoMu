@@ -253,6 +253,8 @@ async fn test_d6_industry_pi_and_market_wallet_history_durable_across_sqlite_res
         let bill_id = eve_server::services::wallet_serverops::create_bill(&ctx, 2, CORP_ID, 1_000_035, 250_000.0, ctx.now_unix() + 86_400, 0.0, JITA_STATION_ID, 0);
         let trade_id = call(&ctx, &mut sess_p1, "trademgr", "InitiateTrade", &[PyRep::Integer(P2)]).await.expect("InitiateTrade").dict_get("tradeContainerID").and_then(|v| v.as_i64()).unwrap();
         call(&ctx, &mut sess_p1, "trademgr", "OfferMoney", &[PyRep::Integer(trade_id), PyRep::Real(125_000.0)]).await.expect("OfferMoney");
+        let tr_docked = call(&ctx, &mut sess_p1, "trademgr", "List", &[PyRep::Integer(trade_id)]).await.expect("trademgr.List while docked");
+        assert_eq!(tr_docked.dict_get("myMoney").and_then(|v| v.as_f64()), Some(125_000.0));
         let raffle_id = call(&ctx, &mut sess_p1, "raffleProxy", "CreateRaffle", &[PyRep::Dict(vec![(PyRep::String("item_id".into()), PyRep::Integer(910_009)), (PyRep::String("ticket_count".into()), PyRep::Integer(8)), (PyRep::String("ticket_price".into()), PyRep::Real(100_000.0))])]).await.expect("CreateRaffle").dict_get("raffle_id").and_then(|v| v.as_i64()).unwrap();
 
         (ctx.now_unix(), mine_res.ore_type_id, job_id, sell_oid, bill_id, trade_id, raffle_id, old_hist, rnd_rp_before)
@@ -326,8 +328,7 @@ async fn test_d6_industry_pi_and_market_wallet_history_durable_across_sqlite_res
         assert!(esi_corp_j.as_array().unwrap().iter().any(|e| e["description"] == "Corp dividend"));
         let bills = call(&ctx, &mut sess_p1, "billMgr", "GetCorporationBills", &[]).await.expect("GetCorporationBills");
         assert!(format!("{bills:?}").contains(&bill_id.to_string()));
-        let tr = call(&ctx, &mut sess_p1, "trademgr", "List", &[PyRep::Integer(trade_id)]).await.expect("trademgr.List");
-        assert_eq!(tr.dict_get("myMoney").and_then(|v| v.as_f64()), Some(125_000.0));
+        assert!(call(&ctx, &mut sess_p1, "trademgr", "List", &[PyRep::Integer(trade_id)]).await.is_err());
         let raf = call(&ctx, &mut sess_p1, "raffleProxy", "GetRaffle", &[PyRep::Integer(raffle_id)]).await.expect("GetRaffle");
         assert!(format!("{raf:?}").contains(&raffle_id.to_string()));
     }
