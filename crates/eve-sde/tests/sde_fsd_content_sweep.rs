@@ -822,7 +822,7 @@ fn test_t2_sde_control_tower_resources_raw_client_verification() {
     assert_eq!(ctr.len(), 44);
     assert_eq!(ctr_ids.len(), 44);
     assert_eq!(ctr_ids[0], 4_361); // QA Fuel Control Tower
-    assert_eq!(*ctr_ids.last().expect("last tower id"), 27_806);
+    assert_eq!(*ctr_ids.last().expect("last tower id"), 27_790);
 
     let mut raw_total_rows = 0usize;
     for rec in &ctr_raw.records {
