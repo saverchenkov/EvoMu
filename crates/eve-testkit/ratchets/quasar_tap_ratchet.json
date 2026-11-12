@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "allowed_violations": [
+    "MismatchedResponseType:eve.achievement.definition.version.api.admin.SetDefaultVersionRequest:expected=eve.achievement.definition.version.api.admin.SetDefaultVersionResponse:actual=google.protobuf.Empty",
+    "MismatchedResponseType:eve_public.achievement.api.admin.ResetAllRequest:expected=eve_public.achievement.api.admin.ResetAllResponse:actual=google.protobuf.Empty",
+    "UnknownFieldNumber:response(eve.accounting.entrytype.GetAllRequest).entry_types(#1).attributes(#2):eve.accounting.entrytype.Attributes:#2",
+    "UnknownFieldNumber:response(eve.character.implant.GetActiveImplantsByCharacterRequest).implants(#1):eve.character.implant.Attributes:#2",
+    "UnknownFieldNumber:response(eve.corporation.members.GetLimitRequest):eve.corporation.members.GetLimitResponse:#1",
+    "UnknownFieldNumber:response(eve.killmail.Attributes):eve.killmail.Attributes:#1",
+    "UnknownFieldNumber:response(eve.seasonalevent.challenge.GetChallengesForCharacterRequest).challenges(#1):eve.seasonalevent.challenge.Identifier:#2",
+    "UnknownFieldNumber:response(eve.seasonalevent.challenge.GetChallengesForCharacterRequest).challenges(#1):eve.seasonalevent.challenge.Identifier:#3",
+    "UnknownFieldNumber:response(eve.skillcategory.GetAllRequest).categories(#1):eve.skillcategory.Identifier:#2",
+    "UnknownFieldNumber:response(eve.vendors.epic.api.DeliverEntitlementRequest):eve.vendors.epic.api.DeliverEntitlementResponse:#1",
+    "UnknownFieldNumber:response(eve.vendors.epic.api.DeliverEntitlementRequest):eve.vendors.epic.api.DeliverEntitlementResponse:#2",
+    "UnknownFieldNumber:response(eve.vendors.steam.user.api.admin.LinkRequest):eve.vendors.steam.user.api.admin.LinkResponse:#1",
+    "UnknownFieldNumber:response(eve.vendors.steam.user.api.admin.LinkRequest):eve.vendors.steam.user.api.admin.LinkResponse:#2",
+    "UnknownFieldNumber:response(eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest).attributes(#2):eve_public.cosmetic.ship.skin.thirdparty.draft.Attributes:#4",
+    "UnknownFieldNumber:response(eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest).attributes(#2):eve_public.cosmetic.ship.skin.thirdparty.draft.Attributes:#5",
+    "UnknownFieldNumber:response(eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest).attributes(#2):eve_public.cosmetic.ship.skin.thirdparty.draft.Attributes:#6",
+    "UnknownFieldNumber:response(eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest).attributes(#2):eve_public.cosmetic.ship.skin.thirdparty.draft.Attributes:#7"
+  ]
+}

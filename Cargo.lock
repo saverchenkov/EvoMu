@@ -374,6 +374,7 @@ dependencies = [
  "eve-server",
  "glam",
  "proptest",
+ "rusqlite",
  "serde",
  "serde_json",
  "tokio",

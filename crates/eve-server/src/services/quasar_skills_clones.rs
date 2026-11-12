@@ -15,7 +15,7 @@ use crate::quasar_gateway::{
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
     encode_bytes_field, encode_string_field, encode_varint_field, DynamicQuasarMessage,
-    DynamicValue, GoogleAny, GoogleEmpty, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
+    DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -569,7 +569,10 @@ pub fn register_skill_handlers(
                 return Err((STATUS_NOT_FOUND, "Skill plan not found".into()));
             }
             mgr.save_to_db();
-            Ok(GoogleEmpty.to_any())
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.skill.plan.DeleteResponse"),
+                value: Vec::new(),
+            })
         }),
     );
 
@@ -621,7 +624,10 @@ pub fn register_skill_handlers(
                 mgr.clear_active_plan(cid);
             }
             mgr.save_to_db();
-            Ok(GoogleEmpty.to_any())
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.skill.plan.SetActiveResponse"),
+                value: Vec::new(),
+            })
         }),
     );
 
@@ -1114,7 +1120,10 @@ pub fn register_skill_handlers(
                 mgr.clear_active_plan(cid);
             }
             mgr.save_to_db();
-            Ok(GoogleEmpty.to_any())
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.character.skill.plan.SetActiveResponse"),
+                value: Vec::new(),
+            })
         }),
     );
 
@@ -1137,7 +1146,10 @@ pub fn register_skill_handlers(
             plan.name = new_name;
             drop(plans);
             mgr.save_to_db();
-            Ok(GoogleEmpty.to_any())
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.character.skill.plan.SetNameResponse"),
+                value: Vec::new(),
+            })
         }),
     );
 
@@ -1160,7 +1172,10 @@ pub fn register_skill_handlers(
             plan.description = new_desc;
             drop(plans);
             mgr.save_to_db();
-            Ok(GoogleEmpty.to_any())
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.character.skill.plan.SetDescriptionResponse"),
+                value: Vec::new(),
+            })
         }),
     );
 
@@ -1181,7 +1196,10 @@ pub fn register_skill_handlers(
             plan.requirements = reqs;
             drop(plans);
             mgr.save_to_db();
-            Ok(GoogleEmpty.to_any())
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.character.skill.plan.SetSkillRequirementsResponse"),
+                value: Vec::new(),
+            })
         }),
     );
 
@@ -1200,7 +1218,10 @@ pub fn register_skill_handlers(
             list.remove(pos);
             drop(plans);
             mgr.save_to_db();
-            Ok(GoogleEmpty.to_any())
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.character.skill.plan.DeleteResponse"),
+                value: Vec::new(),
+            })
         }),
     );
 
@@ -1365,7 +1386,10 @@ pub fn register_skill_handlers(
             }
             drop(plans);
             mgr.save_to_db();
-            Ok(GoogleEmpty.to_any())
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.character.skill.plan.milestone.DeleteResponse"),
+                value: Vec::new(),
+            })
         }),
     );
 
@@ -1397,7 +1421,10 @@ pub fn register_skill_handlers(
             }
             drop(plans);
             mgr.save_to_db();
-            Ok(GoogleEmpty.to_any())
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.character.skill.plan.milestone.SetDescriptionResponse"),
+                value: Vec::new(),
+            })
         }),
     );
 }

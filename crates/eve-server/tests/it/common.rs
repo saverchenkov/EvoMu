@@ -290,3 +290,36 @@ pub async fn fly_to(ctx: &ServerContext, p: &mut LivePilot, dest: glam::DVec3) -
     }
     sys.get_ball_snapshot(p.ship_id).await.unwrap().expect("ship ball").1.position
 }
+
+/// Runs world-state teardown invariants (`#908`, `#947`) and, when `EVOMU_PRE_CHECK=1` is set,
+/// Persist-Reload Equivalence (PRE) and `SnapshotDirtyHints` fast-path checks.
+#[allow(dead_code)]
+pub fn assert_teardown_invariants(ctx: &ServerContext) {
+    eve_testkit::pre_check::assert_world_and_pre_guards(&ctx.db, Some(&ctx.sde), false);
+}
+
+/// Unconditionally runs world-state teardown invariants, Persist-Reload Equivalence (PRE), and
+/// `SnapshotDirtyHints` fast-path equivalence checks (`#908`).
+#[allow(dead_code)]
+pub fn assert_pre_check_strict(ctx: &ServerContext) {
+    eve_testkit::pre_check::assert_world_and_pre_guards(&ctx.db, Some(&ctx.sde), true);
+}
+
+/// Runs the strict Quasar protobuf decode & PB-4 response-pairing tap (`#911`, `#893`, `#936`)
+/// on a public gateway request/response exchange and any drained notice payloads.
+#[allow(dead_code)]
+pub fn tap_quasar_exchange(
+    ctx: &ServerContext,
+    request_type: &str,
+    rsp: &eve_proto::quasar::EvePublicResponse,
+    notices: &[eve_proto::quasar::GoogleAny],
+) -> Vec<eve_testkit::quasar_tap::QuasarTapViolation> {
+    eve_testkit::quasar_tap::tap_exchange(
+        &ctx.quasar_gateway.descriptors,
+        request_type,
+        rsp.status_code,
+        rsp.payload.as_ref(),
+        notices,
+    )
+}
+
