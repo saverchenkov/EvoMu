@@ -381,7 +381,16 @@ async fn test_live_pve_mission_complete_rewards_bonus_standings_and_items() {
         .sde
         .agents
         .values()
-        .find(|a| a.agent_type_id == 12 && a.station_id.is_some() && a.solar_system_id.is_some())
+        .filter(|a| {
+            a.agent_type_id == 12
+                && a.station_id.is_some()
+                && a.solar_system_id.is_some()
+                && !matches!(
+                    a.corporation_id,
+                    1000121 | 1000147 | 1000085 | 1000009 | 1000179 | 1000180 | 1000181 | 1000182
+                )
+        })
+        .min_by_key(|a| a.agent_id)
         .expect("Career Agent in SDE")
         .clone();
     let career_station = career_agent.station_id.unwrap();
@@ -438,13 +447,13 @@ async fn test_live_pve_mission_complete_rewards_bonus_standings_and_items() {
         ctx.dispatch_rpc(&mut sess_c, "stationSvc", None, "Undock", &[], &kw, None)
             .await
             .expect("Undock");
-        let spawned_npcs = ctx.db.with_snapshot(|s| {
+        let (mission_c_sys, spawned_npcs) = ctx.db.with_snapshot(|s| {
             s.active_missions
                 .get(&(97_004_001, mission_c_id))
-                .map(|a| a.spawned_npc_ball_ids.clone())
-                .unwrap_or_default()
+                .map(|a| (a.solar_system_id, a.spawned_npc_ball_ids.clone()))
+                .unwrap_or((career_sys, Vec::new()))
         });
-        let sys_c = ctx.systems.get_or_spawn(career_sys);
+        let sys_c = ctx.systems.get_or_spawn(mission_c_sys);
         for npc_bid in spawned_npcs {
             sys_c
                 .apply_damage_with_attacker(
@@ -463,9 +472,11 @@ async fn test_live_pve_mission_complete_rewards_bonus_standings_and_items() {
         }
         slash_cmd(&ctx, &mut sess_c, &format!("/tr {career_sys}")).await;
         if let Some(st) = ctx.sde.stations.get(&career_station) {
-            sys_c.set_ball_position(ship_c_id, st.position + DVec3::new(500.0, 0.0, 0.0))
+            let dock_sys_c = ctx.systems.get_or_spawn(career_sys);
+            dock_sys_c
+                .set_ball_position(ship_c_id, st.position + DVec3::new(500.0, 0.0, 0.0))
                 .await;
-            sys_c.step_manual(0.1).await.unwrap();
+            dock_sys_c.step_manual(0.1).await.unwrap();
         }
         ctx.dispatch_rpc(
             &mut sess_c,
@@ -508,13 +519,18 @@ async fn test_live_pve_mission_complete_rewards_bonus_standings_and_items() {
         .sde
         .agents
         .values()
-        .find(|a| {
+        .filter(|a| {
             a.agent_type_id == 2
                 && a.division_id == 24
                 && a.level == 1
+                && !matches!(
+                    a.corporation_id,
+                    1000121 | 1000147 | 1000085 | 1000009 | 1000179 | 1000180 | 1000181 | 1000182
+                )
                 && a.station_id.is_some()
                 && a.solar_system_id.is_some()
         })
+        .min_by_key(|a| a.agent_id)
         .expect("Level 1 Security Agent in SDE")
         .clone();
     let sec_station = sec_agent.station_id.unwrap();
@@ -582,13 +598,13 @@ async fn test_live_pve_mission_complete_rewards_bonus_standings_and_items() {
         ctx.dispatch_rpc(&mut sess_s, "stationSvc", None, "Undock", &[], &kw, None)
             .await
             .expect("Undock");
-        let npcs_s = ctx.db.with_snapshot(|s| {
+        let (mission_s_sys, npcs_s) = ctx.db.with_snapshot(|s| {
             s.active_missions
                 .get(&(97_004_002, mission_s_id))
-                .map(|a| a.spawned_npc_ball_ids.clone())
-                .unwrap_or_default()
+                .map(|a| (a.solar_system_id, a.spawned_npc_ball_ids.clone()))
+                .unwrap_or((sec_sys, Vec::new()))
         });
-        let sys_s = ctx.systems.get_or_spawn(sec_sys);
+        let sys_s = ctx.systems.get_or_spawn(mission_s_sys);
         for npc_bid in npcs_s {
             sys_s
                 .apply_damage_with_attacker(
@@ -607,9 +623,11 @@ async fn test_live_pve_mission_complete_rewards_bonus_standings_and_items() {
         }
         slash_cmd(&ctx, &mut sess_s, &format!("/tr {sec_sys}")).await;
         if let Some(st) = ctx.sde.stations.get(&sec_station) {
-            sys_s.set_ball_position(ship_s_id, st.position + DVec3::new(500.0, 0.0, 0.0))
+            let dock_sys_s = ctx.systems.get_or_spawn(sec_sys);
+            dock_sys_s
+                .set_ball_position(ship_s_id, st.position + DVec3::new(500.0, 0.0, 0.0))
                 .await;
-            sys_s.step_manual(0.1).await.unwrap();
+            dock_sys_s.step_manual(0.1).await.unwrap();
         }
         ctx.dispatch_rpc(
             &mut sess_s,
