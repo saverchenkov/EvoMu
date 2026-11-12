@@ -658,7 +658,7 @@ pub fn apply_skyhook_weapon_damage_typed(
         NotificationTarget::SolarSystem(sys_id),
         "OnSkyhookSiloDamageUpdated",
         "solarsystemid",
-        vec![PyRep::Integer(skyhook_id), PyRep::Real(shield_pct)],
+        vec![PyRep::Real(shield_pct)],
     );
     if newly_hackable || hackable_now {
         crate::services::sov_services::emit_skyhook_can_be_hacked(ctx, sys_id, skyhook_id);

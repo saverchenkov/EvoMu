@@ -998,6 +998,7 @@ pub fn handle_season_manager(
                         );
                     }
                     if enqueued_redeem {
+                        ctx.notify(NotificationTarget::Character(char_id), "OnRedeemingQueueUpdated", "charid", vec![]);
                         ctx.notify(NotificationTarget::Character(char_id), "OnRedeemingTokensUpdated", "charid", vec![]);
                     }
                     ctx.notify(NotificationTarget::Character(char_id), "OnChallengeRewardsGranted", "charid", vec![PyRep::Integer(ch_id)]);

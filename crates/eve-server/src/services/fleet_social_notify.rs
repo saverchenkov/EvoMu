@@ -349,7 +349,7 @@ pub fn remove_character_from_chat_channels(
                 continue;
             }
         }
-        let left_args = vec![PyRep::String(chan_id), PyRep::Integer(char_id)];
+        let left_args = vec![PyRep::String(chan_id)];
         for mid in remaining_members {
             ctx.notify(
                 NotificationTarget::Character(mid),

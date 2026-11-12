@@ -206,11 +206,7 @@ pub fn update_system_advantage(ctx: &ServerContext, sys_id: u32, friendly_delta:
         NotificationTarget::SolarSystem(sys_id),
         "OnSolarsystemAdvantageStateUpdated_Local",
         "solarsystemid",
-        vec![
-            PyRep::Integer(i64::from(sys_id)),
-            PyRep::Real(friendly),
-            PyRep::Real(enemy),
-        ],
+        vec![],
     );
     (friendly, enemy)
 }

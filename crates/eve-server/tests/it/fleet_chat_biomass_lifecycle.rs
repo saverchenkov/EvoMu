@@ -216,7 +216,7 @@ async fn test_fleet_login_consistency_kick_session_invite_offline_and_restart() 
         });
         assert!(ctx.drain_notifications_for_char(P1).iter().any(|n| {
             n.event == "OnChannelLeft"
-                && n.args == vec![PyRep::String("solarsystemid2:30000142".into()), PyRep::Integer(P2)]
+                && n.args == vec![PyRep::String("solarsystemid2:30000142".into())]
         }));
 
         let mut s2 = login_select(&ctx, 7203, "other", "other-secret", P2).await;

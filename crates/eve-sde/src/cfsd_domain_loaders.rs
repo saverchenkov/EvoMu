@@ -120,6 +120,29 @@ pub struct SoundIdInfo {
     pub wwise_event: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DirectionalLocatorInfo {
+    pub category: String,
+    pub name: String,
+    pub direction: [f32; 3],
+    pub position: [f32; 3],
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GraphicLocatorInfo {
+    pub category: String,
+    pub name: String,
+    pub position: [f32; 3],
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GraphicLocationInfo {
+    pub graphic_location_id: u32,
+    pub sof_hull_name: String,
+    pub directional_locators: Vec<DirectionalLocatorInfo>,
+    pub locators: Vec<GraphicLocatorInfo>,
+}
+
 fn u32_le(buf: &[u8], pos: usize) -> u32 {
     pos.checked_add(4)
         .and_then(|end| buf.get(pos..end))
@@ -520,6 +543,166 @@ impl SdeRegistry {
                 )
             })
             .collect())
+    }
+
+    /// Loads `res:/staticdata/graphiclocations.fsdbinary` (`68` graphic location locator sets, stride `40`).
+    ///
+    /// parity: sde:res:/staticdata/graphiclocations.fsdbinary
+    pub fn load_graphic_locations(&self) -> Result<HashMap<u32, GraphicLocationInfo>, SdeError> {
+        let (raw, recs) = self.read_cfsd_bytes("res:/staticdata/graphiclocations.fsdbinary", 40)?;
+        let mut out = HashMap::with_capacity(recs.len());
+        for rec in recs {
+            let id = u64_le(&raw, rec) as u32;
+            let mask = u32_le(&raw, rec + 32);
+            let mut directional_locators = Vec::new();
+            if (mask & 1) != 0 {
+                let dl_rel = u64_le(&raw, rec + 8);
+                if dl_rel != 0 {
+                    let abs = 32 + dl_rel as usize;
+                    let cnt = u64_le(&raw, abs - 8) as usize;
+                    for i in 0..cnt {
+                        let base = abs + i * 40;
+                        directional_locators.push(DirectionalLocatorInfo {
+                            category: cfsd_str(&raw, u64_le(&raw, base)),
+                            name: cfsd_str(&raw, u64_le(&raw, base + 8)),
+                            direction: [
+                                f32_le(&raw, base + 16),
+                                f32_le(&raw, base + 20),
+                                f32_le(&raw, base + 24),
+                            ],
+                            position: [
+                                f32_le(&raw, base + 28),
+                                f32_le(&raw, base + 32),
+                                f32_le(&raw, base + 36),
+                            ],
+                        });
+                    }
+                }
+            }
+            let mut locators = Vec::new();
+            if (mask & 2) != 0 {
+                let loc_rel = u64_le(&raw, rec + 24);
+                if loc_rel != 0 {
+                    let abs = 32 + loc_rel as usize;
+                    let cnt = u64_le(&raw, abs - 8) as usize;
+                    for i in 0..cnt {
+                        let base = abs + i * 32;
+                        locators.push(GraphicLocatorInfo {
+                            category: cfsd_str(&raw, u64_le(&raw, base)),
+                            name: cfsd_str(&raw, u64_le(&raw, base + 8)),
+                            position: [
+                                f32_le(&raw, base + 16),
+                                f32_le(&raw, base + 20),
+                                f32_le(&raw, base + 24),
+                            ],
+                        });
+                    }
+                }
+            }
+            out.insert(
+                id,
+                GraphicLocationInfo {
+                    graphic_location_id: id,
+                    sof_hull_name: cfsd_str(&raw, u64_le(&raw, rec + 16)),
+                    directional_locators,
+                    locators,
+                },
+            );
+        }
+        Ok(out)
+    }
+
+    /// Loads the `graphicID -> graphicLocationID` mapping from `res:/staticdata/graphicids.fsdbinary`
+    /// (`234` station/structure graphics with optional bit `128` set at offset `+156`, value at `+148`).
+    pub fn load_graphic_location_ids(&self) -> Result<HashMap<u32, u32>, SdeError> {
+        let (raw, recs) = self.read_cfsd_bytes("res:/staticdata/graphicids.fsdbinary", 160)?;
+        let mut out = HashMap::new();
+        for rec in recs {
+            let mask = u32_le(&raw, rec + 156);
+            if (mask & 128) != 0 {
+                let gid = u64_le(&raw, rec) as u32;
+                let gloc_id = u32_le(&raw, rec + 148);
+                out.insert(gid, gloc_id);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Returns the directional undock locator categories and directions (`ballparkCommon/docking.pyj:GetUndockDirections`)
+    /// for a station or structure `type_id` via `types -> graphicids -> graphiclocations.fsdbinary`.
+    pub fn undock_directions_for_type(&self, type_id: TypeId) -> Vec<DirectionalLocatorInfo> {
+        static CACHE: std::sync::OnceLock<(HashMap<u32, u32>, HashMap<u32, GraphicLocationInfo>)> =
+            std::sync::OnceLock::new();
+        let (gid_to_gloc, glocs) = CACHE.get_or_init(|| {
+            (
+                self.load_graphic_location_ids().unwrap_or_default(),
+                self.load_graphic_locations().unwrap_or_default(),
+            )
+        });
+        let Some(gid) = self.types.get(&type_id).and_then(|t| t.graphic_id) else {
+            return Vec::new();
+        };
+        let Some(&gloc_id) = gid_to_gloc.get(&gid) else {
+            return Vec::new();
+        };
+        glocs
+            .get(&gloc_id)
+            .map(|g| g.directional_locators.clone())
+            .unwrap_or_default()
+    }
+
+    /// Evaluates `ballparkCommon/docking.pyj:CanDock(structureTypeID, shipTypeID)` against
+    /// `res:/staticdata/graphiclocations.fsdbinary` directional undock locators.
+    pub fn can_dock_by_graphic_locations(
+        &self,
+        structure_type_id: TypeId,
+        ship_type_id: TypeId,
+    ) -> Option<bool> {
+        let locators = self.undock_directions_for_type(structure_type_id);
+        if locators.is_empty() {
+            return None;
+        }
+        let ship_group_id = self.types.get(&ship_type_id).map(|t| t.group_id).unwrap_or(0);
+        // EXCLUDED_DOCKS_BY_STRUCTURE_TYPE: Pirate Insurgency FOBs (78260, 79172) exclude Freighters (513) & Jump Freighters (902).
+        if matches!(structure_type_id, 78_260 | 79_172) && matches!(ship_group_id, 513 | 902) {
+            return Some(false);
+        }
+        let has_cat = |cat: &str| locators.iter().any(|l| l.category == cat);
+        // ONE_WAY_UNDOCKS_BY_STRUCTURE_TYPE: Tatara (35836) capital undock is one-way except for Rorqual (883);
+        // Pirate FOBs (78260, 79172) capital & supercapital undocks are one-way.
+        let can_use_cat = |cat: &str| -> bool {
+            if !has_cat(cat) {
+                return false;
+            }
+            if structure_type_id == 35_836 && cat == "undockPointCapital" && ship_group_id != 883 {
+                return false;
+            }
+            if matches!(structure_type_id, 78_260 | 79_172)
+                && matches!(cat, "undockPointCapital" | "undockPointSupercapital")
+            {
+                return false;
+            }
+            true
+        };
+        if can_use_cat("undockPoint") {
+            return Some(true);
+        }
+        let group_cats: &[&str] = match ship_group_id {
+            30 | 659 => &["undockPointSupercapital"],
+            1538 | 547 | 485 | 4594 | 883 => &["undockPointCapital", "undockPointSupercapital"],
+            513 | 902 | 941 => &[
+                "undockPointLarge",
+                "undockPointCapital",
+                "undockPointSupercapital",
+            ],
+            _ => &[
+                "undockPointSmall",
+                "undockPointLarge",
+                "undockPointCapital",
+                "undockPointSupercapital",
+            ],
+        };
+        Some(group_cats.iter().any(|&c| can_use_cat(c)))
     }
 
     /// Directly decodes `res:/staticdata/types.fsdbinary` (`53,288` item types, stride `152`) from

@@ -705,6 +705,12 @@ fn handle_login_campaign_claim_reward(
         }
         ctx.notify(
             crate::router::NotificationTarget::Character(char_id),
+            "OnRedeemingQueueUpdated",
+            "charid",
+            vec![],
+        );
+        ctx.notify(
+            crate::router::NotificationTarget::Character(char_id),
             "OnRedeemingTokensUpdated",
             "charid",
             vec![],

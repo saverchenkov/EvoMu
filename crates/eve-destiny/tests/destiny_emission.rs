@@ -685,12 +685,13 @@ async fn test_ball_flags_harmonic_packaged_action_and_docking_accepted() {
 #[tokio::test]
 async fn test_sov_controller_fleet_ship_state_dbuff_dot_and_drone_state_emission() {
     // parity: destiny:OnSovereigntyChanged, destiny:OnClientControllerEvent
-    // parity: destiny:OnFleetDamageStateChange, destiny:OnShipStateUpdate
+    // parity: destiny:OnFleetDamageStateChange, destiny:OnFleetStateChange, destiny:OnShipStateUpdate
     // parity: destiny:OnDbuffUpdated, destiny:OnDotVictimUpdated, destiny:OnDroneStateChange
     eve_testkit::attest(&[
         "destiny:OnSovereigntyChanged",
         "destiny:OnClientControllerEvent",
         "destiny:OnFleetDamageStateChange",
+        "destiny:OnFleetStateChange",
         "destiny:OnShipStateUpdate",
         "destiny:OnDbuffUpdated",
         "destiny:OnDotVictimUpdated",
@@ -702,6 +703,7 @@ async fn test_sov_controller_fleet_ship_state_dbuff_dot_and_drone_state_emission
     park.set_sovereignty(99_000_001);
     assert!(park.emit_client_controller_event(SHIP_A, Some(SHIP_B), "GateActivate", 1, Some(0.25)));
     park.apply_damage_to_ball(SHIP_B, DamageVector::new(90.0, 0.0, 0.0, 0.0));
+    assert!(park.update_fleet_state(99_000_100, SHIP_A, 2));
     assert!(park.update_ship_module_states(SHIP_A, vec![(90_000_001, 12_345, 100, 133_000_000_000, 1.0, 0.0)]));
     assert!(park.update_dbuffs(SHIP_A, vec![(101, 1.25, 100), (102, 0.85, 200)]));
     assert!(park.apply_breacher_dot(SHIP_B, 150.0, 0.05, 5));
@@ -716,6 +718,11 @@ async fn test_sov_controller_fleet_ship_state_dbuff_dot_and_drone_state_emission
         &[PyRep::Integer(SHIP_A), PyRep::Integer(SHIP_B), PyRep::String("GateActivate".into()), PyRep::Integer(1), PyRep::Real(0.25)]
     );
     assert_eq!(args_of(&actions, "OnFleetDamageStateChange")[0], &[PyRep::Integer(SHIP_B), damage_tuple(0.8, 24_000.0, tick, 1.0, 1.0)]);
+    let fleet_state_args = args_of(&actions, "OnFleetStateChange");
+    assert_eq!(fleet_state_args.len(), 1);
+    assert_eq!(fleet_state_args[0].len(), 1);
+    assert_eq!(fleet_state_args[0][0].dict_get("fleetID"), Some(&PyRep::Integer(99_000_100)));
+    assert_eq!(fleet_state_args[0][0].dict_get("targetTags"), Some(&PyRep::Dict(Vec::new())));
     assert_eq!(args_of(&actions, "OnShipStateUpdate").len(), 1);
     assert_eq!(args_of(&actions, "OnDbuffUpdated")[0][0], PyRep::Integer(SHIP_A));
     assert_eq!(args_of(&actions, "OnDotVictimUpdated")[0][0], PyRep::Integer(SHIP_B));

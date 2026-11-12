@@ -664,19 +664,29 @@ pub(crate) fn resolve_upwell_dock_target(
     }) {
         return Err(e);
     }
-    // Freighters (513) and Jump Freighters (902) dock at every Upwell hull (SDE Raitaru/Astrahus text:
-    // "docking capabilities for subcapital ships and freighters"), so they are not capital-sized here.
+    // Freighters (513) and Jump Freighters (902) dock at standard Upwell hulls, while
+    // `ballparkCommon/docking.pyj:CanDock` (`res:/staticdata/graphiclocations.fsdbinary`)
+    // governs directional undock locator categories and Pirate FOB freighter exclusions.
+    // parity: sde:res:/staticdata/graphiclocations.fsdbinary
+    let ship_type_id = if ctx.sde.types.get(&ship_type_id).map(|t| t.group_id) == Some(ship_group_id) {
+        ship_type_id
+    } else {
+        ctx.db
+            .with_snapshot(|s| {
+                s.characters
+                    .get(&char_id)
+                    .and_then(|c| s.items.get(&c.active_ship_id))
+                    .map(|i| i.type_id)
+            })
+            .unwrap_or(ship_type_id)
+    };
     let is_capital_ship = matches!(ship_group_id, 30 | 485 | 547 | 659 | 883 | 1538 | 4594);
     let is_supercapital_ship = matches!(ship_group_id, 30 | 659);
     let is_rorqual = ship_type_id == 28_352 || ship_group_id == 883;
-    let hull_allowed = match st.type_id {
-        // Keepstar (35834) & Upwell Palatine Keepstar (40340): all ship classes including supercapitals
+    let hull_class_allowed = match st.type_id {
         35_834 | 40_340 => true,
-        // Fortizar (35833), Faction Fortizars (47512..=47516), & Sotiyo (35827): subcapitals + standard capitals (no supercapitals)
         35_833 | 47_512..=47_516 | 35_827 => !is_supercapital_ship,
-        // Tatara (35836): subcapitals + Rorquals only
         35_836 => !is_capital_ship || is_rorqual,
-        // Astrahus (35832), Raitaru (35825), Azbel (35826), Athanor (35835): subcapitals only
         35_832 | 35_825 | 35_826 | 35_835 => !is_capital_ship,
         _ => match structure_lifecycle::structure_profile(ctx, st.type_id).map(|p| p.hull_class) {
             Some(structure_lifecycle::HullClass::XLarge) if st_group_id == 1657 => true,
@@ -685,6 +695,11 @@ pub(crate) fn resolve_upwell_dock_target(
             _ => !is_capital_ship,
         },
     };
+    let hull_allowed = hull_class_allowed
+        && ctx
+            .sde
+            .can_dock_by_graphic_locations(st.type_id, ship_type_id)
+            .unwrap_or(true);
     if !hull_allowed {
         return Err(err(
             "ShipTooLargeForStructure",

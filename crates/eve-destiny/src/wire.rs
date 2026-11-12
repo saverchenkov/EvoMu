@@ -1197,17 +1197,19 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
                 target_id.map(PyRep::Integer).unwrap_or(PyRep::None),
             ]),
         ]),
+        // parity: destiny:OnFleetStateChange
         DestinyEvent::OnFleetStateChange {
             fleet_id,
             member_id,
             fleet_state,
         } => PyRep::Tuple(vec![
             PyRep::String("OnFleetStateChange".into()),
-            PyRep::Tuple(vec![
-                PyRep::Integer(*fleet_id),
-                PyRep::Integer(*member_id),
-                PyRep::Integer(*fleet_state),
-            ]),
+            PyRep::Tuple(vec![PyRep::keyval([
+                ("fleetID", PyRep::Integer(*fleet_id)),
+                ("characterID", PyRep::Integer(*member_id)),
+                ("fleetState", PyRep::Integer(*fleet_state)),
+                ("targetTags", PyRep::Dict(Vec::new())),
+            ])]),
         ]),
         DestinyEvent::ScatterEwars {
             ball_id,

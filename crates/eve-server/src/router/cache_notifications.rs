@@ -1239,19 +1239,15 @@ impl ServerContext {
     pub fn notify_lsc_message(
         &self,
         target: NotificationTarget,
-        channel_id: &str,
-        sender_id: i64,
-        text: &str,
+        _channel_id: &str,
+        _sender_id: i64,
+        _text: &str,
     ) -> Vec<PendingMachoNotification> {
         self.notify(
             target,
             "OnClientEvent_ChatMessageSent",
             "channelid",
-            vec![
-                PyRep::String(channel_id.to_string()),
-                PyRep::Integer(sender_id),
-                PyRep::String(text.to_string()),
-            ],
+            Vec::new(),
         )
     }
 

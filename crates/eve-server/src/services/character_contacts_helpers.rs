@@ -68,7 +68,19 @@ pub fn notify_watchlist_presence(ctx: &ServerContext, logged_on_char_id: i64, on
         })
         .unwrap_or_default();
 
+    // parity: notify:OnContactLoggedOn, notify:OnContactLoggedOff
+    let presence_event = if online {
+        "OnContactLoggedOn"
+    } else {
+        "OnContactLoggedOff"
+    };
     for watcher_id in watchers {
+        ctx.notify(
+            NotificationTarget::Character(watcher_id),
+            presence_event,
+            "charid",
+            vec![PyRep::Integer(logged_on_char_id)],
+        );
         ctx.notify(
             NotificationTarget::Character(watcher_id),
             "OnClientContactChange",

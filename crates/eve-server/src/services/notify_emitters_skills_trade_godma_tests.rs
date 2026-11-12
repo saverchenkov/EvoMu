@@ -628,7 +628,7 @@ fn rnd_datacores_all_error_and_default_qty_and_damaged_sell_and_qa_eviction_bran
         handle_misc_cluster_localization(&fresh_ctx, &auth_sess, "browserLockdownSvc", "GetFlaggedSitesHash", &[])
             .unwrap()
             .unwrap(),
-        PyRep::String("cbf29ce484222325".into())
+        PyRep::String("d751713988987e9331980363e24189ce".into())
     );
 
     // localizationServer: unauth, empty overrides -> None, RoleRequired, UnimplementedRPC, 256-entry eviction & disable

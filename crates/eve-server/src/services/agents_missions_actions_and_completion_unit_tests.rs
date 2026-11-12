@@ -395,4 +395,61 @@ async fn mission_completion_expiry_penalty_and_courier_delivery_branches() {
     assert_eq!(done.dict_get("state"), Some(&PyRep::String("Completed".into())));
     assert_eq!(done.dict_get("bonusReward"), Some(&PyRep::Integer(0)));
     ctx.db.with_snapshot(|snap| assert!(!snap.items.contains_key(&950_001)));
+
+    // 4. Issue #979: Remote Start Conversation (DoAction(None)) returns KeyVal dialogue
+    //    both when no mission is accepted ("NotCoLocated") and when an "Accepted" mission is active,
+    //    while explicit DoAction(1) / GetOffer from a remote system still returns AgentNotCoLocated.
+    let remote_sys_id = ctx
+        .sde
+        .solar_systems
+        .keys()
+        .copied()
+        .find(|&s| s != sys_id)
+        .unwrap_or(30_000_142);
+    let mut remote_sess = char_session(char_id, Some(remote_sys_id), None);
+    let mut kw_agent = HashMap::new();
+    kw_agent.insert("agentID".into(), PyRep::Integer(ag.agent_id));
+    let remote_greet = call_agent_mgr(&ctx, &mut remote_sess, "DoAction", &[PyRep::None], &kw_agent)
+        .await
+        .expect("remote DoAction(None) greeting should succeed");
+    assert_eq!(
+        remote_greet.dict_get("state"),
+        Some(&PyRep::String("NotCoLocated".into()))
+    );
+    assert_eq!(
+        remote_greet.dict_get("dialogue"),
+        Some(&PyRep::List(Vec::new()))
+    );
+    assert_eq!(
+        call_agent_mgr(
+            &ctx,
+            &mut remote_sess,
+            "DoAction",
+            &[PyRep::Integer(1), PyRep::Integer(ag.agent_id)],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "AgentNotCoLocated"
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.insert(
+            (char_id, mid),
+            make_active_mission(mid, char_id, ag.agent_id, sys_id, "Accepted", None),
+        );
+    });
+    let remote_accepted_greet =
+        call_agent_mgr(&ctx, &mut remote_sess, "DoAction", &[PyRep::None], &kw_agent)
+            .await
+            .expect("remote DoAction(None) with Accepted mission should return mission briefing");
+    assert_eq!(
+        remote_accepted_greet.dict_get("state"),
+        Some(&PyRep::String("Accepted".into()))
+    );
+    assert_eq!(
+        remote_accepted_greet.dict_get("missionState"),
+        Some(&PyRep::Integer(2))
+    );
 }

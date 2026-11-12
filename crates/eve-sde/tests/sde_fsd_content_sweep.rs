@@ -771,6 +771,19 @@ fn test_t2_sde_fsdbinary_characters_economy_and_assets_verification() {
     assert_eq!(resolved_type_icons, 23_088);
     assert_eq!(resolved_type_sounds, 5_091);
 
+    // 13. graphiclocations.fsdbinary (68 records, stride 40) + station/Upwell undock locators
+    let glocs = sde.load_graphic_locations().expect("load_graphic_locations");
+    let gid_glocs = sde.load_graphic_location_ids().expect("load_graphic_location_ids");
+    assert_eq!(glocs.len(), 68);
+    assert_eq!(gid_glocs.len(), 234);
+    assert_eq!(glocs[&2060].sof_hull_name, "jita");
+    assert!(glocs[&2060].directional_locators.iter().any(|l| l.category == "undockPointSupercapital"));
+    assert_eq!(sde.can_dock_by_graphic_locations(35_832, 587), Some(true));
+    assert_eq!(sde.can_dock_by_graphic_locations(35_832, 19_720), Some(false));
+    assert_eq!(sde.can_dock_by_graphic_locations(35_836, 28_352), Some(true));
+    assert_eq!(sde.can_dock_by_graphic_locations(35_836, 19_720), Some(false));
+    assert_eq!(sde.can_dock_by_graphic_locations(79_172, 20_185), Some(false));
+
     eve_testkit::attest(&[
         "sde:res:/staticdata/types.fsdbinary",
         "sde:res:/staticdata/fighterabilities.static",
@@ -784,6 +797,7 @@ fn test_t2_sde_fsdbinary_characters_economy_and_assets_verification() {
         "sde:res:/staticdata/accountingkeys.fsdbinary",
         "sde:res:/staticdata/metagroups.fsdbinary",
         "sde:res:/staticdata/graphicids.fsdbinary",
+        "sde:res:/staticdata/graphiclocations.fsdbinary",
         "sde:res:/staticdata/iconids.fsdbinary",
         "sde:res:/staticdata/soundids.fsdbinary",
     ]);

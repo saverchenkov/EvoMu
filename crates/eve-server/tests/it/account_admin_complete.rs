@@ -259,7 +259,11 @@ fn skill_levels(rows: &[Vec<PyRep>], skill_id: u32) -> (i64, i64) {
 #[tokio::test]
 async fn test_account_kiring_disabled_and_accrued_playtime() {
     // parity: feat:account.kiring-china, feat:account.underage-accrued-time, rpc:authentication.AccruedTime, rpc:authentication.AmUnderage, rpc:authentication.Logout, rpc:charUnboundMgr.SelectCharacterID, rpc:kiringMgr.GetEveGuardServerAddress, rpc:kiringMgr.GetKiringConfiguration, rpc:slash.SlashCmd, rpc:userSvc.GetSessionPlaytimeMinutes
-    eve_testkit::attest(&["feat:account.kiring-china", "feat:account.underage-accrued-time"]);
+    eve_testkit::attest(&[
+        "feat:account.kiring-china",
+        "feat:account.underage-accrued-time",
+        "rpc:kiringMgr.GetKiringConfiguration",
+    ]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();

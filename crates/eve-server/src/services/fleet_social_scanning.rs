@@ -354,7 +354,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                         NotificationTarget::Character(char_id),
                         "OnSystemScanDone",
                         "charid",
-                        vec![PyRep::Integer(char_id)],
+                        vec![],
                     );
                     Some(Ok(PyRep::rowset(
                         vec![
@@ -453,16 +453,26 @@ pub(super) async fn handle_scanning_and_wormholes(
                     PyRep::Real(ball.position.z),
                 ]);
             }
+            let result_rowset = PyRep::rowset(
+                vec!["ballID", "typeID", "distance", "x", "y", "z"],
+                rows,
+            );
             ctx.notify(
                 NotificationTarget::Character(char_id),
                 "OnDirectionalScanComplete",
                 "charid",
-                vec![PyRep::Integer(rows.len() as i64)],
+                vec![
+                    PyRep::Real(scan_angle.to_radians()),
+                    PyRep::Real(scan_range),
+                    PyRep::Tuple(vec![
+                        PyRep::Real(caller_dir.x),
+                        PyRep::Real(caller_dir.y),
+                        PyRep::Real(caller_dir.z),
+                    ]),
+                    result_rowset.clone(),
+                ],
             );
-            Some(Ok(PyRep::rowset(
-                vec!["ballID", "typeID", "distance", "x", "y", "z"],
-                rows,
-            )))
+            Some(Ok(result_rowset))
         }
 
         ("scanMgr", "LaunchProbes") => {

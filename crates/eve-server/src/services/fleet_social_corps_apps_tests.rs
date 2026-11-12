@@ -820,7 +820,7 @@ fn wave2_application_offer_guards_invitations_leave_kick_and_session_transitions
     assert_eq!(target_sess.corp_role, 0);
     let target_notes = ctx.drain_notifications_for_char(90_000_003);
     assert!(target_notes.iter().any(|n| n.event == "OnSessionChanged"));
-    assert!(target_notes.iter().any(|n| n.event == "OnNewMailReceived"));
+    assert!(target_notes.iter().any(|n| n.event == "OnMailSent"));
 
     // CanBeKickedOut & CanLeaveCurrentCorporation edge cases
     // Undocked member cannot be kicked
