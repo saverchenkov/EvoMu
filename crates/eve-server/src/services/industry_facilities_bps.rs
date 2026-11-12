@@ -644,6 +644,9 @@ pub fn handle_industry_facilities_bps(
                         let runs = if it.is_blueprint_copy { i64::from(it.blueprint_runs_remaining.unwrap_or(1)) } else { -1 };
                         let qty_code = if it.is_blueprint_copy { -2 } else if it.singleton { -1 } else { i64::from(it.quantity.max(1)) };
                         let flag_i64 = it.flag as u16 as i64;
+                        let resolved_sys_id = sys_opt
+                            .or_else(|| session.solar_system_id.map(i64::from))
+                            .unwrap_or(30_000_142);
                         bps.push(PyRep::keyval([
                             ("typeID", PyRep::Integer(bp.blueprint_type_id as i64)),
                             ("blueprintTypeID", PyRep::Integer(bp.blueprint_type_id as i64)),
@@ -656,10 +659,11 @@ pub fn handle_industry_facilities_bps(
                             ("locationTypeID", PyRep::Integer(loc_type_id)),
                             ("locationFlagID", PyRep::Integer(flag_i64)),
                             ("flagID", PyRep::Integer(flag_i64)),
-                            ("solarSystemID", sys_opt.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                            ("solarSystemID", PyRep::Integer(resolved_sys_id)),
                             ("materialEfficiency", PyRep::Integer(me)),
                             ("timeEfficiency", PyRep::Integer(te)),
                             ("original", PyRep::Bool(!it.is_blueprint_copy)),
+                            ("copy", PyRep::Bool(it.is_blueprint_copy)),
                             ("runs", PyRep::Integer(runs)),
                             ("runsRemaining", PyRep::Integer(runs)),
                             ("quantity", PyRep::Integer(qty_code)),
@@ -830,6 +834,27 @@ pub fn handle_industry_facilities_bps(
                 .get(&facility_id)
                 .map(|st| i64::from(st.station_type_id))
                 .unwrap_or(1529);
+            let solar_system_id = ctx
+                .sde
+                .stations
+                .get(&facility_id)
+                .map(|st| i64::from(st.solar_system_id))
+                .or_else(|| ctx.db.with_snapshot(|snap| resolve_bp_facility_loc(ctx, snap, facility_id).2))
+                .or_else(|| session.solar_system_id.map(i64::from))
+                .unwrap_or(30_000_142);
+            let active_job_id = ctx.db.with_snapshot(|snap| {
+                snap.industry_jobs
+                    .values()
+                    .find(|j| {
+                        j.blueprint_item_id == bp_item_id
+                            && !matches!(
+                                j.status.as_str(),
+                                "Delivered" | "Completed" | "Cancelled" | "Reverted" | "Failed"
+                            )
+                    })
+                    .map(|j| PyRep::Integer(j.job_id))
+                    .unwrap_or(PyRep::None)
+            });
             let res = PyRep::keyval([
                 ("blueprintID", PyRep::Integer(bp_item_id)),
                 ("itemID", PyRep::Integer(bp_item_id)),
@@ -842,6 +867,7 @@ pub fn handle_industry_facilities_bps(
                 ("locationTypeID", PyRep::Integer(loc_type_id)),
                 ("locationFlagID", PyRep::Integer(bp_flag_id)),
                 ("flagID", PyRep::Integer(bp_flag_id)),
+                ("solarSystemID", PyRep::Integer(solar_system_id)),
                 ("maxProductionLimit", PyRep::Integer(bp.max_production_limit as i64)),
                 ("manufacturingTime", PyRep::Integer(bp.manufacturing_time_sec as i64)),
                 ("researchMaterialTime", PyRep::Integer(bp.research_me_time_sec as i64)),
@@ -852,10 +878,11 @@ pub fn handle_industry_facilities_bps(
                 ("materialEfficiency", PyRep::Integer(me_lvl)),
                 ("timeEfficiency", PyRep::Integer(te_lvl)),
                 ("original", PyRep::Bool(!is_copy)),
+                ("copy", PyRep::Bool(is_copy)),
                 ("runsRemaining", PyRep::Integer(runs_rem)),
                 ("runs", PyRep::Integer(runs_rem)),
                 ("quantity", PyRep::Integer(qty_code)),
-                ("jobID", PyRep::None),
+                ("jobID", active_job_id),
                 ("isImpounded", PyRep::Bool(false)),
                 ("materials", PyRep::List(mats_rep.clone())),
                 ("skills", PyRep::List(skills_rep)),

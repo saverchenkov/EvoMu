@@ -945,69 +945,38 @@ pub fn normalize_macho_rpc_reply(
             ]));
         }
     } else if service == "blueprintManager" && method == "GetBlueprintDataByOwner" {
-        if let Ok(PyRep::List(bps)) = rpc_res {
-            let mut seen_locs = std::collections::HashSet::new();
-            let mut locs = Vec::new();
-            for bp in &bps {
-                if let Some(loc_id) = bp.dict_get("locationID").and_then(PyRep::as_i64) {
-                    if seen_locs.insert(loc_id) {
-                        locs.push((PyRep::Integer(loc_id), PyRep::Integer(loc_id)));
+        match rpc_res {
+            Ok(PyRep::List(bps)) => {
+                let norm_bps: Vec<PyRep> = bps
+                    .into_iter()
+                    .map(normalize_single_blueprint_keyval)
+                    .collect();
+                let mut seen_locs = std::collections::HashSet::new();
+                let mut locs = Vec::new();
+                for bp in &norm_bps {
+                    if let Some(loc_id) = bp.dict_get("locationID").and_then(PyRep::as_i64) {
+                        if seen_locs.insert(loc_id) {
+                            locs.push((PyRep::Integer(loc_id), PyRep::Integer(loc_id)));
+                        }
                     }
                 }
+                return Ok(PyRep::Tuple(vec![PyRep::List(norm_bps), PyRep::Dict(locs)]));
             }
-            return Ok(PyRep::Tuple(vec![PyRep::List(bps), PyRep::Dict(locs)]));
+            Ok(PyRep::Tuple(mut pair)) if pair.len() == 2 => {
+                if let PyRep::List(bps) = std::mem::replace(&mut pair[0], PyRep::None) {
+                    pair[0] = PyRep::List(
+                        bps.into_iter()
+                            .map(normalize_single_blueprint_keyval)
+                            .collect(),
+                    );
+                }
+                return Ok(PyRep::Tuple(pair));
+            }
+            other => return other,
         }
     } else if service == "blueprintManager" && method == "GetBlueprintData" {
-        if let Ok(PyRep::KeyVal(mut map)) = rpc_res {
-            let bp_id = map
-                .get("itemID")
-                .or_else(|| map.get("blueprintID"))
-                .cloned()
-                .unwrap_or(PyRep::Integer(0));
-            let type_id = map
-                .get("typeID")
-                .or_else(|| map.get("blueprintTypeID"))
-                .cloned()
-                .unwrap_or(PyRep::Integer(0));
-            let loc_id = map
-                .get("locationID")
-                .or_else(|| map.get("facilityID"))
-                .cloned()
-                .unwrap_or(PyRep::Integer(60_003_760));
-            let flag_id = map
-                .get("flagID")
-                .or_else(|| map.get("locationFlagID"))
-                .cloned()
-                .unwrap_or(PyRep::Integer(4));
-            let original = map
-                .get("original")
-                .and_then(PyRep::as_bool)
-                .unwrap_or(true);
-            let runs = map
-                .get("runs")
-                .or_else(|| map.get("runsRemaining"))
-                .cloned()
-                .unwrap_or(PyRep::Integer(if original { -1 } else { 1 }));
-            let qty = map
-                .get("quantity")
-                .cloned()
-                .unwrap_or(PyRep::Integer(if original { -1 } else { -2 }));
-            map.entry("itemID".into()).or_insert_with(|| bp_id.clone());
-            map.entry("blueprintID".into()).or_insert(bp_id);
-            map.entry("typeID".into()).or_insert_with(|| type_id.clone());
-            map.entry("blueprintTypeID".into()).or_insert(type_id);
-            map.entry("ownerID".into()).or_insert(PyRep::Integer(0));
-            map.entry("locationID".into()).or_insert_with(|| loc_id.clone());
-            map.entry("facilityID".into()).or_insert(loc_id);
-            map.entry("locationTypeID".into()).or_insert(PyRep::Integer(1529));
-            map.entry("locationFlagID".into()).or_insert_with(|| flag_id.clone());
-            map.entry("flagID".into()).or_insert(flag_id);
-            map.entry("runs".into()).or_insert_with(|| runs.clone());
-            map.entry("runsRemaining".into()).or_insert(runs);
-            map.entry("quantity".into()).or_insert(qty);
-            map.entry("jobID".into()).or_insert(PyRep::None);
-            map.entry("isImpounded".into()).or_insert(PyRep::Bool(false));
-            return Ok(PyRep::KeyVal(map));
+        if let Ok(rep) = rpc_res {
+            return Ok(normalize_single_blueprint_keyval(rep));
         }
     } else if service == "charMgr" && method == "GetOwnerNoteLabels" {
         if let Ok(PyRep::List(items)) = rpc_res {
@@ -2134,6 +2103,7 @@ fn normalize_agent_mission_objective_rep(rep: PyRep) -> PyRep {
     let agent_id = rep
         .dict_get("agentID")
         .and_then(|v| v.as_i64())
+        .filter(|&v| v >= 1_000_000)
         .unwrap_or(3_008_416);
     let sys_id = rep
         .dict_get("solarsystemID")
@@ -2162,12 +2132,22 @@ fn normalize_agent_mission_objective_rep(rep: PyRep) -> PyRep {
         ])
     };
     let origin_loc = make_loc_dict(origin_sid, "agenthomebase");
+    let pickup_owner_id = rep
+        .dict_get("pickupOwnerID")
+        .and_then(|v| v.as_i64())
+        .filter(|&v| v >= 1_000_000)
+        .unwrap_or(agent_id);
+    let dropoff_owner_id = rep
+        .dict_get("dropoffOwnerID")
+        .and_then(|v| v.as_i64())
+        .filter(|&v| v >= 1_000_000)
+        .unwrap_or(agent_id);
     let objectives = match rep.dict_get("objectives") {
         Some(PyRep::List(items)) if !items.is_empty() => PyRep::List(
             items
                 .iter()
                 .cloned()
-                .map(strip_none_location_coords_recursive)
+                .map(|it| normalize_mission_objective_entry(strip_none_location_coords_recursive(it), agent_id))
                 .collect(),
         ),
         _ => {
@@ -2197,9 +2177,9 @@ fn normalize_agent_mission_objective_rep(rep: PyRep) -> PyRep {
                 objs.push(PyRep::Tuple(vec![
                     PyRep::String("transport".into()),
                     PyRep::Tuple(vec![
-                        PyRep::Integer(1),
+                        PyRep::Integer(pickup_owner_id),
                         origin_loc.clone(),
-                        PyRep::Integer(2),
+                        PyRep::Integer(dropoff_owner_id),
                         dest_loc,
                         cargo_dict,
                     ]),
@@ -2224,25 +2204,36 @@ fn normalize_agent_mission_objective_rep(rep: PyRep) -> PyRep {
             PyRep::List(locs)
         }
     };
+    let default_dun_loc = make_loc_dict(origin_sid, "dungeon");
     let dungeons = match rep.dict_get("dungeons") {
-        Some(PyRep::List(items)) if !items.is_empty() => PyRep::List(items.clone()),
+        Some(PyRep::List(items)) if !items.is_empty() => PyRep::List(
+            items
+                .iter()
+                .cloned()
+                .map(|d| {
+                    normalize_mission_dungeon_dict(
+                        d,
+                        content_id.as_i64().unwrap_or(1).max(1),
+                        sys_id,
+                        origin_sid,
+                        agent_id,
+                        completion_status,
+                        &default_dun_loc,
+                    )
+                })
+                .collect(),
+        ),
         _ if dest_sid_opt.is_none() => {
             let mid_i64 = content_id.as_i64().unwrap_or(1).max(1);
-            PyRep::List(vec![PyRep::Dict(vec![
-                (PyRep::String("dungeonID".into()), PyRep::Integer(mid_i64)),
-                (PyRep::String("solarsystemID".into()), PyRep::Integer(sys_id)),
-                (PyRep::String("locationID".into()), PyRep::Integer(origin_sid)),
-                (PyRep::String("ownerID".into()), PyRep::Integer(agent_id)),
-                (PyRep::String("shipRestrictions".into()), PyRep::Integer(0)),
-                (
-                    PyRep::String("completed".into()),
-                    PyRep::Bool(completion_status > 0),
-                ),
-                (
-                    PyRep::String("completionStatus".into()),
-                    PyRep::Integer(completion_status),
-                ),
-            ])])
+            PyRep::List(vec![normalize_mission_dungeon_dict(
+                PyRep::Dict(Vec::new()),
+                mid_i64,
+                sys_id,
+                origin_sid,
+                agent_id,
+                completion_status,
+                &default_dun_loc,
+            )])
         }
         _ => PyRep::List(Vec::new()),
     };
@@ -2262,6 +2253,202 @@ fn normalize_agent_mission_objective_rep(rep: PyRep) -> PyRep {
         (PyRep::String("collateral".into()), PyRep::List(Vec::new())),
         (PyRep::String("contentID".into()), content_id),
     ])
+}
+
+fn normalize_single_blueprint_keyval(rep: PyRep) -> PyRep {
+    let mut map = match rep {
+        PyRep::KeyVal(m) => m,
+        PyRep::Dict(entries) => {
+            let mut m = HashMap::new();
+            for (k, v) in entries {
+                if let Some(ks) = k.as_str() {
+                    m.insert(ks.to_string(), v);
+                }
+            }
+            m
+        }
+        other => return other,
+    };
+    let bp_id = map
+        .get("itemID")
+        .or_else(|| map.get("blueprintID"))
+        .cloned()
+        .unwrap_or(PyRep::Integer(0));
+    let type_id = map
+        .get("typeID")
+        .or_else(|| map.get("blueprintTypeID"))
+        .cloned()
+        .unwrap_or(PyRep::Integer(0));
+    let loc_id = map
+        .get("locationID")
+        .and_then(PyRep::as_i64)
+        .filter(|&v| v > 0)
+        .or_else(|| map.get("facilityID").and_then(PyRep::as_i64).filter(|&v| v > 0))
+        .unwrap_or(60_003_760);
+    let fac_id = map
+        .get("facilityID")
+        .and_then(PyRep::as_i64)
+        .filter(|&v| v > 0)
+        .unwrap_or(loc_id);
+    let sys_id = map
+        .get("solarSystemID")
+        .or_else(|| map.get("solarsystemID"))
+        .and_then(PyRep::as_i64)
+        .filter(|&v| v > 0)
+        .unwrap_or(30_000_142);
+    let flag_id = map
+        .get("flagID")
+        .or_else(|| map.get("locationFlagID"))
+        .cloned()
+        .unwrap_or(PyRep::Integer(4));
+    let original = map
+        .get("original")
+        .and_then(PyRep::as_bool)
+        .unwrap_or_else(|| !map.get("copy").and_then(PyRep::as_bool).unwrap_or(false));
+    let runs = map
+        .get("runs")
+        .or_else(|| map.get("runsRemaining"))
+        .cloned()
+        .unwrap_or(PyRep::Integer(if original { -1 } else { 1 }));
+    let qty = map
+        .get("quantity")
+        .cloned()
+        .unwrap_or(PyRep::Integer(if original { -1 } else { -2 }));
+    map.entry("itemID".into()).or_insert_with(|| bp_id.clone());
+    map.entry("blueprintID".into()).or_insert(bp_id);
+    map.entry("typeID".into()).or_insert_with(|| type_id.clone());
+    map.entry("blueprintTypeID".into()).or_insert(type_id);
+    map.entry("ownerID".into()).or_insert(PyRep::Integer(0));
+    map.insert("locationID".into(), PyRep::Integer(loc_id));
+    if matches!(map.get("facilityID"), None | Some(PyRep::None)) {
+        map.insert("facilityID".into(), PyRep::Integer(fac_id));
+    }
+    map.insert("solarSystemID".into(), PyRep::Integer(sys_id));
+    map.entry("locationTypeID".into()).or_insert(PyRep::Integer(1529));
+    map.entry("locationFlagID".into()).or_insert_with(|| flag_id.clone());
+    map.entry("flagID".into()).or_insert(flag_id);
+    map.entry("original".into()).or_insert(PyRep::Bool(original));
+    map.entry("copy".into()).or_insert(PyRep::Bool(!original));
+    map.entry("materialEfficiency".into()).or_insert(PyRep::Integer(0));
+    map.entry("timeEfficiency".into()).or_insert(PyRep::Integer(0));
+    map.entry("runs".into()).or_insert_with(|| runs.clone());
+    map.entry("runsRemaining".into()).or_insert(runs);
+    map.entry("quantity".into()).or_insert(qty);
+    map.entry("jobID".into()).or_insert(PyRep::None);
+    map.entry("isImpounded".into()).or_insert(PyRep::Bool(false));
+    PyRep::KeyVal(map)
+}
+
+fn normalize_mission_objective_entry(entry: PyRep, default_owner_id: i64) -> PyRep {
+    let PyRep::Tuple(mut outer) = entry else {
+        return entry;
+    };
+    if outer.len() == 2 {
+        let kind = outer[0].as_str().unwrap_or_default().to_string();
+        if kind == "transport" {
+            if let PyRep::Tuple(ref mut inner) = outer[1] {
+                if inner.len() >= 3 {
+                    if inner[0].as_i64().unwrap_or(0) < 1_000_000 {
+                        inner[0] = PyRep::Integer(default_owner_id);
+                    }
+                    if inner[2].as_i64().unwrap_or(0) < 1_000_000 {
+                        inner[2] = PyRep::Integer(default_owner_id);
+                    }
+                }
+            }
+        } else if kind == "agent" {
+            if let PyRep::Tuple(ref mut inner) = outer[1] {
+                if !inner.is_empty() && inner[0].as_i64().unwrap_or(0) < 1_000_000 {
+                    inner[0] = PyRep::Integer(default_owner_id);
+                }
+            }
+        }
+    }
+    PyRep::Tuple(outer)
+}
+
+fn normalize_mission_dungeon_dict(
+    dun: PyRep,
+    default_dungeon_id: i64,
+    default_sys_id: i64,
+    default_station_id: i64,
+    default_owner_id: i64,
+    completion_status: i64,
+    default_location: &PyRep,
+) -> PyRep {
+    let dungeon_id = dun
+        .dict_get("dungeonID")
+        .and_then(PyRep::as_i64)
+        .filter(|&v| v > 0)
+        .unwrap_or(default_dungeon_id);
+    let sys_id = dun
+        .dict_get("solarsystemID")
+        .or_else(|| dun.dict_get("solarSystemID"))
+        .and_then(PyRep::as_i64)
+        .filter(|&v| v > 0)
+        .unwrap_or(default_sys_id);
+    let loc_id = dun
+        .dict_get("locationID")
+        .or_else(|| dun.dict_get("stationID"))
+        .and_then(PyRep::as_i64)
+        .filter(|&v| v > 0)
+        .unwrap_or(default_station_id);
+    let type_id = dun
+        .dict_get("typeID")
+        .and_then(PyRep::as_i64)
+        .filter(|&v| v > 0)
+        .unwrap_or(1529);
+    let owner_id = dun
+        .dict_get("ownerID")
+        .and_then(PyRep::as_i64)
+        .filter(|&v| v >= 1_000_000)
+        .unwrap_or(default_owner_id);
+    let optional = dun
+        .dict_get("optional")
+        .and_then(PyRep::as_bool)
+        .unwrap_or(false);
+    let ship_restrictions = dun
+        .dict_get("shipRestrictions")
+        .and_then(PyRep::as_i64)
+        .unwrap_or(0);
+    let completed = dun
+        .dict_get("completed")
+        .and_then(PyRep::as_bool)
+        .unwrap_or(completion_status > 0);
+    let obj_completed = match dun.dict_get("objectiveCompleted") {
+        Some(v) if !matches!(v, PyRep::None) => v.clone(),
+        _ if completed => PyRep::Integer(1),
+        _ => PyRep::None,
+    };
+    let loc_dict = match dun.dict_get("location") {
+        Some(v @ (PyRep::Dict(_) | PyRep::KeyVal(_))) => {
+            strip_none_location_coords_recursive(v.clone())
+        }
+        _ => default_location.clone(),
+    };
+    let mut out = vec![
+        (PyRep::String("dungeonID".into()), PyRep::Integer(dungeon_id)),
+        (PyRep::String("solarsystemID".into()), PyRep::Integer(sys_id)),
+        (PyRep::String("solarSystemID".into()), PyRep::Integer(sys_id)),
+        (PyRep::String("locationID".into()), PyRep::Integer(loc_id)),
+        (PyRep::String("stationID".into()), PyRep::Integer(loc_id)),
+        (PyRep::String("typeID".into()), PyRep::Integer(type_id)),
+        (PyRep::String("location".into()), loc_dict),
+        (PyRep::String("ownerID".into()), PyRep::Integer(owner_id)),
+        (PyRep::String("optional".into()), PyRep::Bool(optional)),
+        (PyRep::String("objectiveCompleted".into()), obj_completed),
+        (PyRep::String("shipRestrictions".into()), PyRep::Integer(ship_restrictions)),
+        (PyRep::String("completed".into()), PyRep::Bool(completed)),
+    ];
+    if let Some(bm) = dun.dict_get("briefingMessage") {
+        if !matches!(bm, PyRep::None) {
+            out.push((PyRep::String("briefingMessage".into()), bm.clone()));
+        }
+    }
+    if completed {
+        out.push((PyRep::String("completionStatus".into()), PyRep::Integer(1)));
+    }
+    PyRep::Dict(out)
 }
 
 fn strip_none_location_coords_recursive(rep: PyRep) -> PyRep {

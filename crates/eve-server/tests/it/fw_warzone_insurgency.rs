@@ -251,9 +251,9 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
     let c_state = rpc_call(&ctx, &mut s_gal, "fwWarzoneSolarsystem", "GetLocalOccupationState", &[]).await.unwrap();
     set_pilot_location(&ctx, &mut s_gal, rear_sys, None);
     let r_state = rpc_call(&ctx, &mut s_gal, "fwWarzoneSolarsystem", "GetLocalOccupationState", &[]).await.unwrap();
-    assert_eq!(occ_adj(&f_state), Some(STATUS_FRONTLINE));
-    assert_eq!(occ_adj(&c_state), Some(STATUS_COMMAND));
-    assert_eq!(occ_adj(&r_state), Some(STATUS_REARGUARD));
+    assert_eq!(occ_adj(&f_state), Some(eve_server::services::fw_services::ADJACENCY_STATE_FRONTLINE));
+    assert_eq!(occ_adj(&c_state), Some(eve_server::services::fw_services::ADJACENCY_STATE_COMMAND_OPERATIONS));
+    assert_eq!(occ_adj(&r_state), Some(eve_server::services::fw_services::ADJACENCY_STATE_REARGUARD));
     let _ = rpc_call(&ctx, &mut s_gal, "fwWarzoneSolarsystem", "GetAllWarzonesOccupationStates", &[]).await.unwrap();
 
     // Seed warzone sites across Rearguard, Command, and Frontline: Large/Open + Battlefields ONLY in Frontline!
@@ -920,7 +920,11 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
     set_pilot_location(&ctx, &mut s_gal, cmd_sys, None);
     let cmd_after = rpc_call(&ctx, &mut s_gal, "fwWarzoneSolarsystem", "GetLocalOccupationState", &[]).await.unwrap();
     let PyRep::Tuple(cmd_tup) = &cmd_after else { panic!("expected Tuple, got {cmd_after:?}") };
-    assert_eq!(cmd_tup[1].dict_get("adjacencyState").and_then(|v| v.as_i64()), Some(STATUS_FRONTLINE));
+    assert_eq!(
+        cmd_tup[1].dict_get("adjacencyState").and_then(|v| v.as_i64()),
+        Some(eve_server::services::fw_services::ADJACENCY_STATE_FRONTLINE)
+    );
+    assert_eq!(cmd_tup[1].dict_get("frontlineStatus").and_then(|v| v.as_i64()), Some(STATUS_FRONTLINE));
     set_pilot_location(&ctx, &mut s_gal, front_sys, None);
 
     // 5. Live militia PvP ship kill updates `facWarMgr.GetStats_TopAndAllKillsAndVPs`!

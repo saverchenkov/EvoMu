@@ -851,7 +851,7 @@ fn issue_771_and_776_get_members_paged_crowset_and_reprocess_list_compat() {
     assert_eq!(sys_bfs[0].dict_get("dungeonID"), Some(&PyRep::Integer(10_485)));
     assert_eq!(sys_bfs[0].dict_get("dungeonNameID"), Some(&PyRep::Integer(0)));
 
-    // #956: blueprintManager.GetBlueprintData populates typeID and BlueprintInstance fields
+    // #956: blueprintManager.GetBlueprintData & GetBlueprintDataByOwner populate solarSystemID, copy, typeID, and BlueprintInstance fields
     let bp_data = normalize_macho_rpc_reply(
         "blueprintManager",
         "GetBlueprintData",
@@ -866,13 +866,39 @@ fn issue_771_and_776_get_members_paged_crowset_and_reprocess_list_compat() {
     .expect("normalize GetBlueprintData");
     assert_eq!(bp_data.dict_get("typeID"), Some(&PyRep::Integer(683)));
     assert_eq!(bp_data.dict_get("itemID"), Some(&PyRep::Integer(9_001)));
+    assert_eq!(bp_data.dict_get("solarSystemID"), Some(&PyRep::Integer(30_000_142)));
+    assert_eq!(bp_data.dict_get("copy"), Some(&PyRep::Bool(false)));
     assert_eq!(bp_data.dict_get("locationTypeID"), Some(&PyRep::Integer(1529)));
     assert_eq!(bp_data.dict_get("flagID"), Some(&PyRep::Integer(4)));
     assert_eq!(bp_data.dict_get("runs"), Some(&PyRep::Integer(-1)));
     assert_eq!(bp_data.dict_get("quantity"), Some(&PyRep::Integer(-1)));
     assert_eq!(bp_data.dict_get("jobID"), Some(&PyRep::None));
 
-    // #957: agentMgr.GetMissionObjectiveInfo omits None coords and referringAgentID from location dicts
+    let bp_owner = normalize_macho_rpc_reply(
+        "blueprintManager",
+        "GetBlueprintDataByOwner",
+        Ok(PyRep::List(vec![PyRep::keyval([
+            ("blueprintID", PyRep::Integer(9_002)),
+            ("blueprintTypeID", PyRep::Integer(684)),
+            ("facilityID", PyRep::Integer(60_003_760)),
+            ("solarSystemID", PyRep::None),
+            ("original", PyRep::Bool(false)),
+            ("runsRemaining", PyRep::Integer(10)),
+        ])])),
+    )
+    .expect("normalize GetBlueprintDataByOwner");
+    let Some(PyRep::List(owner_bps)) = bp_owner.dict_get("bps") else {
+        panic!("expected bps list in GetBlueprintDataByOwner");
+    };
+    assert_eq!(owner_bps.len(), 1);
+    assert_eq!(owner_bps[0].dict_get("solarSystemID"), Some(&PyRep::Integer(30_000_142)));
+    assert_eq!(owner_bps[0].dict_get("copy"), Some(&PyRep::Bool(true)));
+    assert_eq!(owner_bps[0].dict_get("typeID"), Some(&PyRep::Integer(684)));
+    assert_eq!(owner_bps[0].dict_get("itemID"), Some(&PyRep::Integer(9_002)));
+    assert_eq!(owner_bps[0].dict_get("jobID"), Some(&PyRep::None));
+
+    // #957: agentMgr.GetMissionObjectiveInfo omits None coords and referringAgentID from location dicts,
+    // uses real NPC ownerID (>= 1_000_000) on transport pickup/dropoff, and populates dungeon optional/location keys.
     let obj_info = normalize_macho_rpc_reply(
         "agentMgr",
         "GetMissionObjectiveInfo",
@@ -892,6 +918,41 @@ fn issue_771_and_776_get_members_paged_crowset_and_reprocess_list_compat() {
     assert_eq!(locs.len(), 2);
     assert!(locs[0].dict_get("coords").is_none());
     assert!(locs[0].dict_get("referringAgentID").is_none());
+    let Some(PyRep::List(objs)) = obj_info.dict_get("objectives") else {
+        panic!("expected objectives list");
+    };
+    let PyRep::Tuple(obj0) = &objs[0] else {
+        panic!("expected objective tuple");
+    };
+    assert_eq!(obj0[0], PyRep::String("transport".into()));
+    let PyRep::Tuple(transport_vals) = &obj0[1] else {
+        panic!("expected transport 3-tuple");
+    };
+    assert_eq!(transport_vals[0].dict_get("ownerID"), Some(&PyRep::Integer(3_008_416)));
+    assert_eq!(transport_vals[1].dict_get("ownerID"), Some(&PyRep::Integer(3_008_416)));
+
+    let dungeon_obj_info = normalize_macho_rpc_reply(
+        "agentMgr",
+        "GetMissionObjectiveInfo",
+        Ok(PyRep::keyval([
+            ("missionID", PyRep::Integer(502)),
+            ("agentID", PyRep::Integer(3_008_416)),
+            ("solarSystemID", PyRep::Integer(30_000_142)),
+            ("originStationID", PyRep::Integer(60_003_760)),
+            ("missionState", PyRep::Integer(2)),
+            ("completionStatus", PyRep::Integer(0)),
+        ])),
+    )
+    .expect("normalize dungeon GetMissionObjectiveInfo");
+    let Some(PyRep::List(dungeons)) = dungeon_obj_info.dict_get("dungeons") else {
+        panic!("expected dungeons list");
+    };
+    assert_eq!(dungeons.len(), 1);
+    assert_eq!(dungeons[0].dict_get("optional"), Some(&PyRep::Bool(false)));
+    assert_eq!(dungeons[0].dict_get("objectiveCompleted"), Some(&PyRep::Bool(false)));
+    assert_eq!(dungeons[0].dict_get("ownerID"), Some(&PyRep::Integer(3_008_416)));
+    assert!(dungeons[0].dict_get("location").is_some());
+    assert!(dungeons[0].dict_get("completionStatus").is_none());
 
     // #958: agentMgr.GetMyJournalDetails converts KeyVal mission rows into V24 10-tuples
     let j_details = normalize_macho_rpc_reply(

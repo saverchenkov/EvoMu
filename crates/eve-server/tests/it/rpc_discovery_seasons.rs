@@ -684,7 +684,7 @@ async fn test_employment_history_and_transfers() {
 
     let emp_transfers = rpc(&ctx, &mut p1, "corporationSvc", "GetEmployementRecordAndCharacterTransfers", &[PyRep::Integer(P1)]).await.expect("GetEmployementRecordAndCharacterTransfers");
     let PyRep::Rowset { rows, .. } = emp_transfers else { panic!("expected Rowset") };
-    assert_eq!((rows.len(), &rows[0][1], &rows[1][1]), (2, &PyRep::Integer(1_000_170), &PyRep::Integer(new_corp_id)));
+    assert_eq!((rows.len(), &rows[0][1], &rows[1][1]), (2, &PyRep::Integer(new_corp_id), &PyRep::Integer(1_000_170)));
 
     let emp_record = rpc(&ctx, &mut p1, "corporationSvc", "GetEmploymentRecord", &[PyRep::Integer(P1)]).await.expect("GetEmploymentRecord");
     let PyRep::Rowset { rows: rec_rows, .. } = emp_record else { panic!("expected Rowset") };

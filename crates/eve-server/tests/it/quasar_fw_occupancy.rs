@@ -427,6 +427,10 @@ async fn test_fw_occupancy_warzone_scope_and_dynamic_threshold() {
             );
             assert_eq!(
                 fw_entry.dict_get("adjacencyState"),
+                Some(&PyRep::Integer(eve_server::services::fw_services::ADJACENCY_STATE_REARGUARD))
+            );
+            assert_eq!(
+                fw_entry.dict_get("frontlineStatus"),
                 Some(&PyRep::Integer(eve_server::services::fw_services::STATUS_REARGUARD))
             );
 

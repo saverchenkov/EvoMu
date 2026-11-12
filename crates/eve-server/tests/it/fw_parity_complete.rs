@@ -79,7 +79,10 @@ async fn test_fw_warzones_victory_points_and_system_capture() {
             assert_eq!(amo.dict_get("ownerFactionID"), Some(&PyRep::Integer(FACTION_MINMATAR)));
             assert_eq!(amo.dict_get("occupierID"), Some(&PyRep::Integer(FACTION_MINMATAR)));
             assert_eq!(amo.dict_get("occupierFactionID"), Some(&PyRep::Integer(FACTION_MINMATAR)));
-            assert_eq!(amo.dict_get("adjacencyState"), Some(&PyRep::Integer(STATUS_REARGUARD)));
+            assert_eq!(
+                amo.dict_get("adjacencyState"),
+                Some(&PyRep::Integer(eve_server::services::fw_services::ADJACENCY_STATE_REARGUARD))
+            );
             assert_eq!(amo.dict_get("frontlineStatus"), Some(&PyRep::Integer(STATUS_REARGUARD)));
             assert!(matches!(amo.dict_get("contestedPercentage"), Some(&PyRep::Real(_))));
 
