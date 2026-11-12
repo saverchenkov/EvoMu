@@ -232,9 +232,21 @@ fn encode_inner(rep: &PyRep, out: &mut Vec<u8>) {
             encode_inner(&PyRep::Tuple(vec![cols, row_list]), out);
         }
         PyRep::PySet(items) | PyRep::Set(items) => {
-            out.push(MarshalOpcode::PyObject as u8);
-            encode_inner(&PyRep::ascii_bytes("__builtin__.set"), out);
-            encode_inner(&PyRep::Tuple(vec![PyRep::List(items.clone())]), out);
+            // `set` is a builtin new-style type, so V24 `blue.marshal.Load` rejects `Op_PyObject`
+            // (`0x17`, old-style classes only) and requires `Op_PyObjectEx1` (`0x22`) reduce form
+            // `(Token("__builtin__.set"), (List(items),))` with empty list/dict slots.
+            encode_inner(
+                &PyRep::ObjectEx {
+                    is_type_2: false,
+                    header: Box::new(PyRep::Tuple(vec![
+                        PyRep::Token("__builtin__.set".into()),
+                        PyRep::Tuple(vec![PyRep::List(items.clone())]),
+                    ])),
+                    list: Vec::new(),
+                    dict: Vec::new(),
+                },
+                out,
+            );
         }
         PyRep::DBRow {
             header,
@@ -914,7 +926,11 @@ fn decode_inner(
                         args: Box::new(args),
                     }
                 }
-            } else if type_name == "__builtin__.set" || type_name == "builtins.set" || type_name == "set" {
+            } else if type_name == "__builtin__.set"
+                || type_name == "builtins.set"
+                || type_name == "set"
+                || type_name == "builtin.set"
+            {
                 if let PyRep::Tuple(items) = &args {
                     if let Some(PyRep::List(elems)) = items.first() {
                         PyRep::PySet(elems.clone())
@@ -1018,11 +1034,15 @@ fn decode_inner(
                 }
             }
 
-            PyRep::ObjectEx {
-                is_type_2,
-                header: Box::new(header),
-                list,
-                dict,
+            if let Some(elems) = try_extract_object_ex_set(is_type_2, &header, &list, &dict) {
+                PyRep::PySet(elems)
+            } else {
+                PyRep::ObjectEx {
+                    is_type_2,
+                    header: Box::new(header),
+                    list,
+                    dict,
+                }
             }
         }
         x if x == MarshalOpcode::PySubStruct as u8 => {
@@ -1178,6 +1198,54 @@ fn try_extract_rowset(args: &PyRep) -> Option<(Vec<String>, Vec<Vec<PyRep>>)> {
         }
     }
     Some((columns?, rows?))
+}
+
+fn is_set_class_name(rep: &PyRep) -> bool {
+    matches!(
+        rep.as_str(),
+        Some("__builtin__.set" | "builtins.set" | "set" | "builtin.set")
+    )
+}
+
+fn try_extract_object_ex_set(
+    is_type_2: bool,
+    header: &PyRep,
+    list: &[PyRep],
+    dict: &[(PyRep, PyRep)],
+) -> Option<Vec<PyRep>> {
+    if is_type_2 || !dict.is_empty() {
+        return None;
+    }
+    let PyRep::Tuple(h_items) = header else {
+        return None;
+    };
+    if !h_items.first().is_some_and(is_set_class_name) {
+        return None;
+    }
+    if h_items.len() == 1 {
+        return Some(list.to_vec());
+    }
+    let third_is_empty_state = h_items.len() == 3
+        && (matches!(h_items[2], PyRep::None)
+            || matches!(&h_items[2], PyRep::Dict(d) if d.is_empty()));
+    if h_items.len() == 2 || third_is_empty_state {
+        let PyRep::Tuple(ctor_args) = &h_items[1] else {
+            return None;
+        };
+        if ctor_args.is_empty() {
+            return Some(list.to_vec());
+        }
+        if ctor_args.len() == 1 && list.is_empty() {
+            return match &ctor_args[0] {
+                PyRep::List(elems)
+                | PyRep::Tuple(elems)
+                | PyRep::PySet(elems)
+                | PyRep::Set(elems) => Some(elems.clone()),
+                _ => None,
+            };
+        }
+    }
+    None
 }
 
 pub(crate) fn write_size_ex(out: &mut Vec<u8>, len: usize) {

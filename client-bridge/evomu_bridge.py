@@ -95,6 +95,8 @@ def to_pyrep_json(val):
         return {"$py": "Tuple", "val": [to_pyrep_json(x) for x in val]}
     if isinstance(val, list):
         return {"$py": "List", "val": [to_pyrep_json(x) for x in val]}
+    if isinstance(val, (set, frozenset)):
+        return {"$py": "PySet", "val": [to_pyrep_json(x) for x in val]}
     if isinstance(val, dict):
         return {
             "$py": "Dict",
@@ -157,6 +159,8 @@ def from_pyrep_json(node):
         return tuple(from_pyrep_json(x) for x in val)
     if tag == "List":
         return [from_pyrep_json(x) for x in val]
+    if tag in ("PySet", "Set"):
+        return set(from_pyrep_json(x) for x in val)
     if tag == "Dict":
         return {from_pyrep_json(k): from_pyrep_json(v) for k, v in val}
     if tag == "KeyVal":
@@ -173,6 +177,20 @@ def from_pyrep_json(node):
         dict_items = {from_pyrep_json(k): from_pyrep_json(v) for k, v in val.get("dict", [])}
         hdr = val.get("header")
         hdr_py = from_pyrep_json(hdr) if hdr is not None else None
+        if (
+            not val.get("is_type_2")
+            and not dict_items
+            and isinstance(hdr_py, tuple)
+            and len(hdr_py) >= 1
+            and hdr_py[0] in ("__builtin__.set", "builtins.set", "set", "builtin.set")
+        ):
+            if len(hdr_py) == 1:
+                return set(list_items)
+            if (len(hdr_py) == 2 or (len(hdr_py) == 3 and hdr_py[2] in (None, {}))) and isinstance(hdr_py[1], tuple):
+                if len(hdr_py[1]) == 0:
+                    return set(list_items)
+                if len(hdr_py[1]) == 1 and not list_items and isinstance(hdr_py[1][0], (list, tuple, set, frozenset)):
+                    return set(hdr_py[1][0])
         is_indexed = (
             isinstance(hdr_py, tuple)
             and len(hdr_py) > 0
@@ -993,6 +1011,25 @@ def _marshal_encode_inner(node, out):
         _tn_bytes = list(_tn.encode("latin-1")) if isinstance(_tn, str) else list(_tn)
         _marshal_encode_inner({"$py": "Bytes", "val": _tn_bytes}, out)
         _marshal_encode_inner(val["args"], out)
+    elif tag in ("PySet", "Set"):
+        _marshal_encode_inner(
+            {
+                "$py": "ObjectEx",
+                "val": {
+                    "is_type_2": False,
+                    "header": {
+                        "$py": "Tuple",
+                        "val": [
+                            {"$py": "Token", "val": "__builtin__.set"},
+                            {"$py": "Tuple", "val": [{"$py": "List", "val": val}]},
+                        ],
+                    },
+                    "list": [],
+                    "dict": [],
+                },
+            },
+            out,
+        )
     elif tag == "ObjectEx":
         out.append(0x23 if val.get("is_type_2") else 0x22)
         _marshal_encode_inner(val["header"], out)
@@ -1196,7 +1233,11 @@ def _marshal_decode_inner(ba, state):
             v = _marshal_decode_inner(ba, state)
             dct.append([k, v])
         state["pos"] += 1
-        val = {"$py": "ObjectEx", "val": {"is_type_2": is_type_2, "header": header, "list": lst, "dict": dct}}
+        extracted_set = _try_extract_object_ex_set(is_type_2, header, lst, dct)
+        if extracted_set is not None:
+            val = {"$py": "PySet", "val": extracted_set}
+        else:
+            val = {"$py": "ObjectEx", "val": {"is_type_2": is_type_2, "header": header, "list": lst, "dict": dct}}
     elif opcode == 0x19:
         val = {"$py": "SubStruct", "val": _marshal_decode_inner(ba, state)}
     elif opcode == 0x1C:
@@ -1233,12 +1274,66 @@ def _marshal_decode_inner(ba, state):
     return val
 
 
+def _node_as_str(node):
+    if not isinstance(node, dict):
+        return None
+    tag = node.get("$py")
+    val = node.get("val")
+    if tag in ("Token", "String", "AsciiString") and isinstance(val, _TEXT_TYPE):
+        return val
+    if tag == "Bytes":
+        try:
+            return bytes(bytearray(val)).decode("utf-8")
+        except Exception:
+            return None
+    return None
+
+
+def _try_extract_object_ex_set(is_type_2, header, lst, dct):
+    if is_type_2 or dct:
+        return None
+    if not isinstance(header, dict) or header.get("$py") != "Tuple":
+        return None
+    h_items = header.get("val", [])
+    if not h_items or _node_as_str(h_items[0]) not in (
+        "__builtin__.set",
+        "builtins.set",
+        "set",
+        "builtin.set",
+    ):
+        return None
+    if len(h_items) == 1:
+        return lst
+    third_empty = len(h_items) == 3 and (
+        h_items[2].get("$py") == "None"
+        or (h_items[2].get("$py") == "Dict" and len(h_items[2].get("val", [])) == 0)
+    )
+    if len(h_items) == 2 or third_empty:
+        ctor = h_items[1]
+        if not isinstance(ctor, dict) or ctor.get("$py") != "Tuple":
+            return None
+        ctor_args = ctor.get("val", [])
+        if len(ctor_args) == 0:
+            return lst
+        if len(ctor_args) == 1 and not lst:
+            arg0 = ctor_args[0]
+            if isinstance(arg0, dict) and arg0.get("$py") in ("List", "Tuple", "PySet", "Set"):
+                return arg0.get("val", [])
+    return None
+
+
 def _run_binary_codec_self_tests():
     raw_rle = rle_encode(b"\x00\x00\x00\x00\x2a\x00\x00\x00")
     assert rle_decode(raw_rle, 8) == b"\x00\x00\x00\x00\x2a\x00\x00\x00"
     sample = {"$py": "Tuple", "val": [{"$py": "Integer", "val": 30000142}, {"$py": "String", "val": "Jita"}]}
     encoded = marshal_encode_pyrep(sample)
     assert marshal_decode_pyrep(encoded) == sample
+    py_set = {"$py": "PySet", "val": [{"$py": "Integer", "val": 10}, {"$py": "Integer", "val": 20}]}
+    enc_set = marshal_encode_pyrep(py_set)
+    assert bytearray(enc_set)[5] == 0x22
+    assert marshal_decode_pyrep(enc_set) == py_set
+    assert from_pyrep_json(marshal_decode_pyrep(enc_set)) == set([10, 20])
+    assert to_pyrep_json(set()) == {"$py": "PySet", "val": []}
     cy_hdr = {
         "$py": "Tuple",
         "val": [

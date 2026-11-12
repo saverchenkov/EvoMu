@@ -661,9 +661,10 @@ async fn test_954_789_machonet_market_orders_and_cached_objects_use_v24_object_c
     )
     .await
     .unwrap();
+    let _sel_sess = MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    assert_eq!(_sel_sess.packet_type, MachoPacketType::SessionChangeNotification);
     let sel_rsp = MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
     assert_eq!(sel_rsp.packet_type, MachoPacketType::CallRsp);
-    let _sel_sess = read_framed_pyrep(&mut s).await.unwrap().unwrap();
 
     // Helper: reads raw length-prefixed wire frames until CallRsp, returning (raw_frame_bytes, CallRsp).
     async fn read_call_rsp_wire(stream: &mut TcpStream) -> (Vec<u8>, MachoPacket) {

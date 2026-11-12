@@ -286,12 +286,12 @@ async fn issue_25_macho_notification_3_layer_envelope_and_tcp_push() {
         named_payload: HashMap::new(),
     };
     write_framed_pyrep(&mut s, &sel_pkt.to_pyrep()).await.unwrap();
-    let sel_rsp =
-        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
-    assert_eq!(sel_rsp.packet_type, MachoPacketType::CallRsp);
     let sel_sess =
         MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
     assert_eq!(sel_sess.packet_type, MachoPacketType::SessionChangeNotification);
+    let sel_rsp =
+        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    assert_eq!(sel_rsp.packet_type, MachoPacketType::CallRsp);
 
     // Emit an async server notification to character 90_000_001 and verify it arrives on the TCP stream
     ctx.notify(

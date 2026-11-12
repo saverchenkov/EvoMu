@@ -120,9 +120,17 @@ fn high_level_projections_and_object_variants_roundtrip() {
         ])
     );
 
+    let empty_pyset = PyRep::PySet(Vec::new());
+    let enc_empty_pyset = encode(&empty_pyset);
+    assert_eq!(enc_empty_pyset[5], MarshalOpcode::PyObjectEx1 as u8);
+    assert_eq!(decode(&enc_empty_pyset).unwrap(), empty_pyset);
+
     let pyset = PyRep::PySet(vec![PyRep::Integer(10), PyRep::Integer(20)]);
-    assert_eq!(decode(&encode(&pyset)).unwrap(), pyset);
+    let enc_pyset = encode(&pyset);
+    assert_eq!(enc_pyset[5], MarshalOpcode::PyObjectEx1 as u8);
+    assert_eq!(decode(&enc_pyset).unwrap(), pyset);
     let set_alias = PyRep::Set(vec![PyRep::Integer(10), PyRep::Integer(20)]);
+    assert_eq!(encode(&set_alias), enc_pyset);
     assert_eq!(decode(&encode(&set_alias)).unwrap(), pyset);
 
     let util_row = PyRep::Object {
@@ -280,6 +288,76 @@ fn decoder_legacy_opcodes_varint_string_table_ucs2_and_object_fallbacks() {
     assert_eq!(
         decode(&encode(&set_from_tuple_scalars)).unwrap(),
         PyRep::PySet(vec![PyRep::Integer(6)])
+    );
+
+    // ObjectEx1 (`0x22`) Python reduce variants for `set` normalize to `PyRep::PySet`,
+    // including 3-tuple `(cls, (items,), None)`, populated `list` slot, and `SAVE_FLAG` reuse.
+    let set_reduce_3tuple = PyRep::ObjectEx {
+        is_type_2: false,
+        header: Box::new(PyRep::Tuple(vec![
+            PyRep::Token("__builtin__.set".into()),
+            PyRep::Tuple(vec![PyRep::List(vec![PyRep::Integer(7), PyRep::Integer(8)])]),
+            PyRep::None,
+        ])),
+        list: Vec::new(),
+        dict: Vec::new(),
+    };
+    assert_eq!(
+        decode(&encode(&set_reduce_3tuple)).unwrap(),
+        PyRep::PySet(vec![PyRep::Integer(7), PyRep::Integer(8)])
+    );
+
+    let set_in_objectex_list = PyRep::ObjectEx {
+        is_type_2: false,
+        header: Box::new(PyRep::Tuple(vec![
+            PyRep::Token("builtins.set".into()),
+            PyRep::Tuple(Vec::new()),
+        ])),
+        list: vec![PyRep::Integer(99)],
+        dict: Vec::new(),
+    };
+    assert_eq!(
+        decode(&encode(&set_in_objectex_list)).unwrap(),
+        PyRep::PySet(vec![PyRep::Integer(99)])
+    );
+
+    // ObjectEx2 or non-empty dict is NOT collapsed into PySet.
+    let obj_ex2_nonset = PyRep::ObjectEx {
+        is_type_2: true,
+        header: Box::new(PyRep::Tuple(vec![
+            PyRep::Token("__builtin__.set".into()),
+            PyRep::Tuple(vec![PyRep::List(vec![PyRep::Integer(1)])]),
+        ])),
+        list: Vec::new(),
+        dict: Vec::new(),
+    };
+    assert_eq!(decode(&encode(&obj_ex2_nonset)).unwrap(), obj_ex2_nonset);
+
+    let obj_ex1_with_dict = PyRep::ObjectEx {
+        is_type_2: false,
+        header: Box::new(PyRep::Tuple(vec![
+            PyRep::Token("__builtin__.set".into()),
+            PyRep::Tuple(vec![PyRep::List(vec![PyRep::Integer(1)])]),
+        ])),
+        list: Vec::new(),
+        dict: vec![(PyRep::String("extra".into()), PyRep::Integer(2))],
+    };
+    assert_eq!(decode(&encode(&obj_ex1_with_dict)).unwrap(), obj_ex1_with_dict);
+
+    // Saved stream element referencing an ObjectEx1 `__builtin__.set` preserves `PySet` + budget.
+    let mut saved_set_wire = vec![MARSHAL_HEADER_BYTE, 1, 0, 0, 0, MarshalOpcode::PyTwoTuple as u8];
+    let inner_set = encode(&PyRep::PySet(vec![PyRep::Integer(42)]));
+    saved_set_wire.push(inner_set[5] | SAVE_FLAG);
+    saved_set_wire.extend_from_slice(&inner_set[6..]);
+    saved_set_wire.push(MarshalOpcode::PySavedStreamElement as u8);
+    saved_set_wire.push(1);
+    saved_set_wire.extend_from_slice(&1u32.to_le_bytes());
+    assert_eq!(
+        decode(&saved_set_wire).unwrap(),
+        PyRep::Tuple(vec![
+            PyRep::PySet(vec![PyRep::Integer(42)]),
+            PyRep::PySet(vec![PyRep::Integer(42)]),
+        ])
     );
 }
 

@@ -759,13 +759,13 @@ async fn native_client_undock_and_space_entry_delivers_set_state_and_destiny_upd
         vec![],
     );
     write_framed_pyrep(&mut s, &sel_pkt.to_pyrep()).await.unwrap();
-    let sel_rsp = MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
-    assert_eq!(sel_rsp.packet_type, MachoPacketType::CallRsp);
     let sel_sess = MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
     assert_eq!(
         sel_sess.packet_type,
         MachoPacketType::SessionChangeNotification
     );
+    let sel_rsp = MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    assert_eq!(sel_rsp.packet_type, MachoPacketType::CallRsp);
 
     let ch = ctx.db.get_character(90_000_001).expect("character");
     let station_id = ch.station_id.expect("starts docked in Jita 4-4");
@@ -826,15 +826,15 @@ async fn native_client_undock_and_space_entry_delivers_set_state_and_destiny_upd
     write_framed_pyrep(&mut s, &undock_pkt.to_pyrep())
         .await
         .unwrap();
-    let undock_rsp =
-        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
-    assert_eq!(undock_rsp.packet_type, MachoPacketType::CallRsp);
     let undock_sess =
         MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
     assert_eq!(
         undock_sess.packet_type,
         MachoPacketType::SessionChangeNotification
     );
+    let undock_rsp =
+        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    assert_eq!(undock_rsp.packet_type, MachoPacketType::CallRsp);
 
     // Verify module was put online by `onlineModules=True` and character is now in space in Jita (`30000142`)
     let is_mod_online = ctx.db.with_snapshot(|snap| {

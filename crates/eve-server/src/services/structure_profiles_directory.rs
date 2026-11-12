@@ -93,7 +93,7 @@ fn handle_check_my_docking_access(
     life::sync_all_structures(ctx);
     sync_pending_profiles_in_ctx(ctx);
     let requested: Vec<i64> = match args.first() {
-        Some(PyRep::List(xs) | PyRep::Tuple(xs) | PyRep::Set(xs)) => {
+        Some(PyRep::List(xs) | PyRep::Tuple(xs) | PyRep::Set(xs) | PyRep::PySet(xs)) => {
             xs.iter().filter_map(|x| x.as_i64()).collect()
         }
         Some(PyRep::Integer(sid)) => vec![*sid],
