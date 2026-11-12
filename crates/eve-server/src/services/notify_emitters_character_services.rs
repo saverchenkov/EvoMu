@@ -1185,8 +1185,8 @@ pub fn handle_batch3_gm_slash_cmd(
                 .db
                 .with_snapshot(|s| s.characters.get(&caller_cid).map(|c| c.corporation_id))
                 .unwrap_or(0);
-            let completed_ids: Vec<i64> = ctx.db.with_mut_snapshot(|snap| {
-                let mut out = Vec::new();
+            let completed_jobs: Vec<(i64, i64, i64, i64, u32)> = ctx.db.with_mut_snapshot(|snap| {
+                let mut matched = Vec::new();
                 for job in snap.industry_jobs.values_mut() {
                     if job.status != "Active" {
                         continue;
@@ -1197,12 +1197,44 @@ pub fn handle_batch3_gm_slash_cmd(
                     };
                     if matches {
                         job.start_unix = now.saturating_sub(job.duration_seconds.max(1));
-                        out.push(job.job_id);
+                        matched.push((job.job_id, job.installer_id, job.blueprint_item_id, job.runs));
                     }
                 }
-                out.sort_unstable();
-                out
+                matched.sort_unstable_by_key(|(jid, _, _, _)| *jid);
+                matched
+                    .into_iter()
+                    .map(|(jid, installer_id, bp_iid, runs)| {
+                        let owner_id = crate::services::industry_pi::load_job_cost_meta(snap, jid)
+                            .map(|m| m.owner_id)
+                            .filter(|&id| id > 0)
+                            .unwrap_or(installer_id);
+                        (jid, installer_id, owner_id, bp_iid, runs)
+                    })
+                    .collect()
             });
+            for (jid, installer_id, owner_id, bp_iid, runs) in &completed_jobs {
+                crate::services::industry_pi::emit_industry_job(
+                    ctx,
+                    *installer_id,
+                    *owner_id,
+                    *jid,
+                    *bp_iid,
+                    3,
+                    *runs as i64,
+                );
+                if caller_cid != *installer_id {
+                    crate::services::industry_pi::emit_industry_job(
+                        ctx,
+                        caller_cid,
+                        *owner_id,
+                        *jid,
+                        *bp_iid,
+                        3,
+                        *runs as i64,
+                    );
+                }
+            }
+            let completed_ids: Vec<i64> = completed_jobs.into_iter().map(|(jid, _, _, _, _)| jid).collect();
             Some(Ok(PyRep::keyval([
                 ("command", PyRep::String(cmd.to_string())),
                 ("readyJobCount", PyRep::Integer(completed_ids.len() as i64)),

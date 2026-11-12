@@ -964,4 +964,111 @@ fn lifecycle_cancel_paused_ceo_refund_stacking_and_complete_edge_paths() {
         assert_eq!(copy.blueprint_runs_remaining, Some(1));
         assert_eq!(copy.dynamic_attributes.get(&crate::services::industry_pi::ATTR_BLUEPRINT_ME), Some(&10.0));
     });
+
+    // #956 & #982:
+    // - blueprintManager.GetBlueprintData & GetBlueprintDataByOwner always emit integer solarSystemID, copy, jobID
+    // - industryManager.InstallJob emits OnAccountChange
+    // - /completeindustry emits OnIndustryJob with status = 3 (STATUS_READY)
+    // - industryManager.CompleteJob delivers 1-run manufactured item with singleton == false and emits OnItemChange
+    let bp_data_svc = crate::services::industry_pi::handle_industry_facilities_bps(
+        &ctx,
+        &mut sess,
+        "blueprintManager",
+        "GetBlueprintData",
+        &[PyRep::Integer(74_001)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(bp_data_svc.dict_get("solarSystemID"), Some(&PyRep::Integer(30_000_142)));
+    assert_eq!(bp_data_svc.dict_get("copy"), Some(&PyRep::Bool(false)));
+
+    let bp_owner_svc = crate::services::industry_pi::handle_industry_facilities_bps(
+        &ctx,
+        &mut sess,
+        "blueprintManager",
+        "GetBlueprintDataByOwner",
+        &[PyRep::Integer(char_id)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let PyRep::List(ref owner_rows) = bp_owner_svc else {
+        panic!("expected List from service-level GetBlueprintDataByOwner");
+    };
+    assert!(owner_rows.iter().all(|r| r.dict_get("solarSystemID") == Some(&PyRep::Integer(30_000_142))));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(74_030, mk_item(74_030, 688, char_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(74_031, mk_item(74_031, 34, char_id, station_id, InventoryFlag::Hangar, 50_000, false));
+    });
+    let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    let _ = ctx
+        .db
+        .acquire_online_lock(uid, 101, Some(char_id), false, ctx.now_unix());
+    let _ = ctx.drain_notifications(char_id);
+    let mfg_1run = handle_industry_jobs(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintItemID", PyRep::Integer(74_030)),
+            ("blueprintTypeID", PyRep::Integer(688)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(1)),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let mfg_1run_jid = mfg_1run.dict_get("jobID").unwrap().as_i64().unwrap();
+    let install_notifs = ctx.drain_notifications(char_id);
+    assert!(
+        install_notifs.iter().any(|n| n.event == "OnAccountChange"),
+        "InstallJob must emit OnAccountChange for installation fee debit (#982)"
+    );
+
+    crate::services::notify_emitters_character_services::handle_batch3_gm_slash_cmd(
+        &ctx,
+        char_id,
+        Some(30_000_142),
+        &format!("/completeindustry {mfg_1run_jid}"),
+    )
+    .unwrap()
+    .unwrap();
+    let ready_notifs = ctx.drain_notifications(char_id);
+    assert!(
+        ready_notifs.iter().any(|n| {
+            n.event == "OnIndustryJob"
+                && n.args.first() == Some(&PyRep::Integer(mfg_1run_jid))
+                && n.args.get(4) == Some(&PyRep::Integer(3))
+        }),
+        "/completeindustry must emit OnIndustryJob with status = 3 (STATUS_READY) (#982)"
+    );
+
+    let comp_1run = handle_industry_jobs(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "CompleteJob",
+        &[PyRep::Integer(mfg_1run_jid)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let delivered_1run_id = comp_1run.dict_get("deliveredItemID").unwrap().as_i64().unwrap();
+    ctx.db.with_snapshot(|snap| {
+        let delivered = &snap.items[&delivered_1run_id];
+        assert!(
+            !delivered.singleton,
+            "1-run manufactured item must be delivered repackaged (singleton == false) (#982)"
+        );
+    });
+    let comp_notifs = ctx.drain_notifications(char_id);
+    let item_change_count = comp_notifs.iter().filter(|n| n.event == "OnItemChange").count();
+    assert!(
+        item_change_count >= 2,
+        "CompleteJob must emit OnItemChange for unlocked blueprint and delivered item (#982), got {item_change_count}"
+    );
 }

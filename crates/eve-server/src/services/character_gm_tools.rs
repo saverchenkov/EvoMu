@@ -1107,7 +1107,8 @@ pub async fn handle_gm_slash_ext(
                     mode: MovementMode::Stop,
                 };
                 let combat = ctx.build_type_combat_state(type_id);
-                let meta = ctx.build_ship_slim_meta(cid, type_id);
+                let mut meta = ctx.build_ship_slim_meta(cid, type_id);
+                meta.char_id = None;
                 let _ = handle.spawn_ball_with_meta(ball, combat, meta).await;
             }
             spawned_ids.push(entity_id);

@@ -203,7 +203,12 @@ pub fn handle_contacts(
                 };
                 if let Some(hist) = snap.employment_history.get(&cid) {
                     if !hist.is_empty() {
-                        for (idx, entry) in hist.iter().enumerate() {
+                        let mut indexed: Vec<(usize, &_)> =
+                            hist.iter().enumerate().collect();
+                        indexed.sort_by(|(idx_a, a), (idx_b, b)| {
+                            b.1.cmp(&a.1).then_with(|| idx_b.cmp(idx_a))
+                        });
+                        for (idx, entry) in indexed {
                             rows.push(vec![
                                 PyRep::Integer((idx + 1) as i64),
                                 PyRep::Integer(entry.0),

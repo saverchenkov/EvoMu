@@ -801,6 +801,31 @@ async fn gm_fit_enforces_hull_slots_and_hardpoints_and_spawn_asteroid_uses_syste
         assert!(!s.asteroids.contains_key(&ast_id), "/unspawn must remove snap.asteroids entry");
     });
 
+    // #983: /spawn <ship_type> creates an unpiloted hull in space (SlimItemMeta.char_id == None)
+    // so V24.01 menusvc offers 'Board Ship' on the spawned hull.
+    let sp_hull = handle_gm_slash_ext(&ctx, &mut sess, char_id, "/spawn 11567")
+        .await
+        .expect("handled")
+        .expect("/spawn ship hull ok");
+    let hull_id = sp_hull.dict_get("spawnedID").and_then(|v| v.as_i64()).unwrap();
+    let hull_meta = handle
+        .ballpark
+        .read()
+        .unwrap()
+        .ball_slim_meta
+        .get(&hull_id)
+        .cloned()
+        .expect("spawned ship SlimItemMeta in ballpark");
+    assert_eq!(hull_meta.owner_id, char_id);
+    assert_eq!(
+        hull_meta.char_id, None,
+        "/spawn hull must be unpiloted (char_id == None) so menusvc shows Board Ship (#983)"
+    );
+    let _ = handle_gm_slash_ext(&ctx, &mut sess, char_id, &format!("/unspawn {hull_id}"))
+        .await
+        .expect("handled")
+        .expect("/unspawn hull ok");
+
     // 3. /spawn <npc_type> registers live NPC AI in both npc_spawns and combat_ephemeral.npc_entities (#792).
     let npc_tid = ctx
         .sde

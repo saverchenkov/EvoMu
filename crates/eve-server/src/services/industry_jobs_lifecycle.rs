@@ -281,6 +281,9 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                         });
                     }
 
+                    let bp_pre = snap.items.get(&job.blueprint_item_id).cloned();
+                    let mut created_items: Vec<InventoryItemRecord> = Vec::new();
+
                     if job.activity_id == 8 {
                         let mut remove_bpc = true;
                         if let Some(bp_mut) = snap.items.get_mut(&job.blueprint_item_id) {
@@ -343,7 +346,8 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                             fail_meta.completed_unix = Some(now_unix);
                             fail_meta.completed_character_id = Some(char_id);
                             save_job_cost_meta(snap, job_id, &fail_meta);
-                            return Ok(Ok((0, 0, job)));
+                            let bp_post = snap.items.get(&job.blueprint_item_id).cloned();
+                            return Ok(Ok((0, 0, job, bp_pre, bp_post, created_items)));
                         }
                         if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) {
                             j_mut.status = "Delivered".into();
@@ -376,25 +380,25 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                                 out_owner_id,
                                 job.facility_id,
                             );
-                        snap.items.insert(
-                            bpc_item_id,
-                            InventoryItemRecord {
-                                item_id: bpc_item_id,
-                                type_id: t2_bpc_type_id,
-                                owner_id: out_owner_id,
-                                location_id: out_loc_id,
-                                flag: out_flag,
-                                quantity: 1,
-                                singleton: true,
-                                version: 1,
-                                dynamic_attributes: dyn_attrs,
-                                source_mutaplasmid_id: None,
-                                insured_payout_isk: 0.0,
-                                is_blueprint_copy: true,
-                                blueprint_runs_remaining: Some(out_runs),
-                            },
-                        );
-                        return Ok(Ok((bpc_item_id, t2_bpc_type_id, job)));
+                        let created_bpc = InventoryItemRecord {
+                            item_id: bpc_item_id,
+                            type_id: t2_bpc_type_id,
+                            owner_id: out_owner_id,
+                            location_id: out_loc_id,
+                            flag: out_flag,
+                            quantity: 1,
+                            singleton: true,
+                            version: 1,
+                            dynamic_attributes: dyn_attrs,
+                            source_mutaplasmid_id: None,
+                            insured_payout_isk: 0.0,
+                            is_blueprint_copy: true,
+                            blueprint_runs_remaining: Some(out_runs),
+                        };
+                        snap.items.insert(bpc_item_id, created_bpc.clone());
+                        created_items.push(created_bpc);
+                        let bp_post = snap.items.get(&job.blueprint_item_id).cloned();
+                        return Ok(Ok((bpc_item_id, t2_bpc_type_id, job, bp_pre, bp_post, created_items)));
                     }
 
                     if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) {
@@ -448,6 +452,7 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                     if remove_consumed_bpc {
                         snap.items.remove(&job.blueprint_item_id);
                     }
+                    let bp_post = snap.items.get(&job.blueprint_item_id).cloned();
                     let (out_loc_id, out_flag) =
                         crate::services::industry_pi::resolve_industry_delivery_target(
                             snap,
@@ -478,25 +483,24 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                         let total_out_qty = (job.runs as i32).saturating_mul(prod_qty_per_run);
                         snap.next_entity_id += 1;
                         let prod_item_id = snap.next_entity_id;
-                        snap.items.insert(
-                            prod_item_id,
-                            InventoryItemRecord {
-                                item_id: prod_item_id,
-                                type_id: job.product_type_id,
-                                owner_id: out_owner_id,
-                                location_id: out_loc_id,
-                                flag: out_flag,
-                                quantity: total_out_qty,
-                                singleton: total_out_qty == 1,
-                                version: 1,
-                                dynamic_attributes: HashMap::new(),
-                                source_mutaplasmid_id: None,
-                                insured_payout_isk: 0.0,
-                                is_blueprint_copy: false,
-                                blueprint_runs_remaining: None,
-                            },
-                        );
-                        Ok(Ok((prod_item_id, job.product_type_id, job)))
+                        let created_prod = InventoryItemRecord {
+                            item_id: prod_item_id,
+                            type_id: job.product_type_id,
+                            owner_id: out_owner_id,
+                            location_id: out_loc_id,
+                            flag: out_flag,
+                            quantity: total_out_qty,
+                            singleton: false,
+                            version: 1,
+                            dynamic_attributes: HashMap::new(),
+                            source_mutaplasmid_id: None,
+                            insured_payout_isk: 0.0,
+                            is_blueprint_copy: false,
+                            blueprint_runs_remaining: None,
+                        };
+                        snap.items.insert(prod_item_id, created_prod.clone());
+                        created_items.push(created_prod);
+                        Ok(Ok((prod_item_id, job.product_type_id, job, bp_pre, bp_post, created_items)))
                     } else if job.activity_id == 5 {
                         let copy_runs = i32::try_from(job.licensed_runs.unwrap_or(1).max(1))
                             .unwrap_or(i32::MAX);
@@ -508,32 +512,39 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                             if idx == 0 {
                                 first_copy_id = copy_item_id;
                             }
-                            snap.items.insert(
-                                copy_item_id,
-                                InventoryItemRecord {
-                                    item_id: copy_item_id,
-                                    type_id: job.blueprint_type_id,
-                                    owner_id: out_owner_id,
-                                    location_id: out_loc_id,
-                                    flag: out_flag,
-                                    quantity: 1,
-                                    singleton: true,
-                                    version: 1,
-                                    dynamic_attributes: parent_dyn_attrs.clone(),
-                                    source_mutaplasmid_id: None,
-                                    insured_payout_isk: 0.0,
-                                    is_blueprint_copy: true,
-                                    blueprint_runs_remaining: Some(copy_runs),
-                                },
-                            );
+                            let created_copy = InventoryItemRecord {
+                                item_id: copy_item_id,
+                                type_id: job.blueprint_type_id,
+                                owner_id: out_owner_id,
+                                location_id: out_loc_id,
+                                flag: out_flag,
+                                quantity: 1,
+                                singleton: true,
+                                version: 1,
+                                dynamic_attributes: parent_dyn_attrs.clone(),
+                                source_mutaplasmid_id: None,
+                                insured_payout_isk: 0.0,
+                                is_blueprint_copy: true,
+                                blueprint_runs_remaining: Some(copy_runs),
+                            };
+                            snap.items.insert(copy_item_id, created_copy.clone());
+                            created_items.push(created_copy);
                         }
-                        Ok(Ok((first_copy_id, job.blueprint_type_id, job)))
+                        Ok(Ok((first_copy_id, job.blueprint_type_id, job, bp_pre, bp_post, created_items)))
                     } else {
-                        Ok(Ok((job.blueprint_item_id, job.blueprint_type_id, job)))
+                        Ok(Ok((job.blueprint_item_id, job.blueprint_type_id, job, bp_pre, bp_post, created_items)))
                     }
                 });
                 match res {
-                    Ok(Ok((prod_item_id, prod_type, job))) => {
+                    Ok(Ok((prod_item_id, prod_type, job, bp_pre, bp_post, created_items))) => {
+                        ctx.notify_item_mutation(char_id, bp_pre.as_ref(), bp_post.as_ref());
+                        for created in &created_items {
+                            ctx.emit_item_change_routed(
+                                char_id,
+                                created,
+                                vec![(3, PyRep::Integer(6)), (4, PyRep::Integer(0))],
+                            );
+                        }
                         match finalize_completed_industry_job_response(
                             ctx,
                             char_id,

@@ -511,15 +511,43 @@ pub async fn handle_with_bound(
                 0_i64
             };
             let dungeons = if !is_courier && !is_trade {
-                vec![PyRep::Dict(vec![
-                    (PyRep::String("dungeonID".into()), PyRep::Integer(mission_id as i64)),
+                let sde_dungeon_id = ctx
+                    .sde
+                    .missions
+                    .get(&mission_id)
+                    .and_then(|mt| mt.dungeon_id)
+                    .filter(|did| ctx.sde.dungeons.contains_key(did))
+                    .or_else(|| {
+                        ctx.sde
+                            .dungeons
+                            .contains_key(&mission_id)
+                            .then_some(mission_id)
+                    })
+                    .unwrap_or(213) as i64;
+                let mut dun_entries = vec![
+                    (PyRep::String("dungeonID".into()), PyRep::Integer(sde_dungeon_id)),
                     (PyRep::String("solarsystemID".into()), PyRep::Integer(m.solar_system_id as i64)),
+                    (PyRep::String("solarSystemID".into()), PyRep::Integer(m.solar_system_id as i64)),
                     (PyRep::String("locationID".into()), PyRep::Integer(origin_sid)),
+                    (PyRep::String("stationID".into()), PyRep::Integer(origin_sid)),
+                    (PyRep::String("typeID".into()), PyRep::Integer(1529)),
+                    (PyRep::String("location".into()), make_loc(origin_sid, "dungeon")),
                     (PyRep::String("ownerID".into()), PyRep::Integer(m.agent_id)),
+                    (PyRep::String("optional".into()), PyRep::Bool(false)),
+                    (
+                        PyRep::String("objectiveCompleted".into()),
+                        PyRep::Bool(completion_status > 0),
+                    ),
                     (PyRep::String("shipRestrictions".into()), PyRep::Integer(0)),
                     (PyRep::String("completed".into()), PyRep::Bool(completion_status > 0)),
-                    (PyRep::String("completionStatus".into()), PyRep::Integer(completion_status)),
-                ])]
+                ];
+                if completion_status > 0 {
+                    dun_entries.push((
+                        PyRep::String("completionStatus".into()),
+                        PyRep::Integer(completion_status),
+                    ));
+                }
+                vec![PyRep::Dict(dun_entries)]
             } else {
                 Vec::new()
             };
