@@ -274,9 +274,10 @@ fn auth_sqlite_dedicated_connection_fail_closed_persistence_and_lock_ordering_83
     // never acquires `inner` while holding `auth_runtime`.
     let (locked_tx, locked_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let repo_ref = &repo;
     let fresh_bundle = std::thread::scope(|s| {
-        let holder = s.spawn(|| {
-            let _world_conn_guard = repo.sqlite_conn.lock().unwrap();
+        let holder = s.spawn(move || {
+            let _world_conn_guard = repo_ref.sqlite_conn.lock().unwrap();
             locked_tx.send(()).unwrap();
             release_rx.recv().unwrap();
         });
