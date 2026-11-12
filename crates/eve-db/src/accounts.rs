@@ -393,11 +393,8 @@ impl WorldRepository {
             ));
         }
         let key = sha256_bytes(raw_secret);
+        self.with_auth_sqlite_conn(|conn| sqlite_store::save_jwt_secret(conn, &key))?;
         let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
-        {
-            let conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
-            sqlite_store::save_jwt_secret(&conn, &key)?;
-        }
         rt.jwt_signing_secret = key;
         Ok(())
     }
@@ -513,7 +510,7 @@ impl WorldRepository {
         banned_until_unix: u64,
         reason: &str,
     ) -> Result<u64, DbError> {
-        let user_id = self.try_with_mut_snapshot(|snap| {
+        let (user_id, prev_until, prev_reason) = self.try_with_mut_snapshot(|snap| {
             let acc = snap
                 .accounts
                 .get_mut(username)
@@ -523,11 +520,22 @@ impl WorldRepository {
                     "Cannot ban administrator account '{username}'"
                 )));
             }
+            let prev_until = acc.banned_until_unix;
+            let prev_reason = acc.ban_reason.clone();
             acc.banned_until_unix = Some(banned_until_unix);
             acc.ban_reason = Some(reason.to_string());
-            Ok(acc.user_id)
+            Ok((acc.user_id, prev_until, prev_reason))
         })?;
-        let _ = self.kick_user(user_id, reason, self.now_unix_secs());
+        if let Err(e) = self.try_kick_user(user_id, reason, self.now_unix_secs()) {
+            let _ = self.try_with_mut_snapshot(|snap| {
+                if let Some(acc) = snap.accounts.get_mut(username) {
+                    acc.banned_until_unix = prev_until;
+                    acc.ban_reason = prev_reason;
+                }
+                Ok::<(), DbError>(())
+            });
+            return Err(e);
+        }
         Ok(user_id)
     }
 
@@ -542,7 +550,7 @@ impl WorldRepository {
     ) -> Result<u64, DbError> {
         let clean_reason = reason.strip_prefix("SUSPENDED:").unwrap_or(reason);
         let stored_reason = format!("SUSPENDED:{clean_reason}");
-        let user_id = self.try_with_mut_snapshot(|snap| {
+        let (user_id, prev_until, prev_reason) = self.try_with_mut_snapshot(|snap| {
             let acc = snap
                 .accounts
                 .get_mut(username)
@@ -552,36 +560,64 @@ impl WorldRepository {
                     "Cannot suspend administrator account '{username}'"
                 )));
             }
+            let prev_until = acc.banned_until_unix;
+            let prev_reason = acc.ban_reason.clone();
             acc.banned_until_unix = Some(suspended_until_unix);
             acc.ban_reason = Some(stored_reason);
-            Ok(acc.user_id)
+            Ok((acc.user_id, prev_until, prev_reason))
         })?;
-        let _ = self.kick_user(user_id, clean_reason, self.now_unix_secs());
+        if let Err(e) = self.try_kick_user(user_id, clean_reason, self.now_unix_secs()) {
+            let _ = self.try_with_mut_snapshot(|snap| {
+                if let Some(acc) = snap.accounts.get_mut(username) {
+                    acc.banned_until_unix = prev_until;
+                    acc.ban_reason = prev_reason;
+                }
+                Ok::<(), DbError>(())
+            });
+            return Err(e);
+        }
         Ok(user_id)
     }
 
     /// Lifts any active ban or suspension on `username` and persists the update to SQLite (`D-4`).
     pub fn unban_account(&self, username: &str) -> Result<u64, DbError> {
-        let user_id = self.try_with_mut_snapshot(|snap| {
+        let (user_id, prev_until, prev_reason) = self.try_with_mut_snapshot(|snap| {
             let acc = snap
                 .accounts
                 .get_mut(username)
                 .ok_or_else(|| DbError::ValidationError(format!("Unknown account '{username}'")))?;
-            acc.banned_until_unix = None;
-            acc.ban_reason = None;
-            Ok(acc.user_id)
+            let prev_until = acc.banned_until_unix.take();
+            let prev_reason = acc.ban_reason.take();
+            Ok((acc.user_id, prev_until, prev_reason))
         })?;
-        let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
-        if rt.kicked_users.remove(&user_id).is_some() {
-            let conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
-            let _ = sqlite_store::persist_clear_kicked_user(&conn, user_id);
+        let was_kicked = self
+            .auth_runtime
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .kicked_users
+            .contains_key(&user_id);
+        if was_kicked {
+            if let Err(e) =
+                self.with_auth_sqlite_conn(|conn| sqlite_store::persist_clear_kicked_user(conn, user_id))
+            {
+                let _ = self.try_with_mut_snapshot(|snap| {
+                    if let Some(acc) = snap.accounts.get_mut(username) {
+                        acc.banned_until_unix = prev_until;
+                        acc.ban_reason = prev_reason;
+                    }
+                    Ok::<(), DbError>(())
+                });
+                return Err(DbError::PersistenceFailure(e));
+            }
+            let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
+            rt.kicked_users.remove(&user_id);
         }
         Ok(user_id)
     }
 
     /// Lifts any active ban or suspension resolving target by either numeric `user_id` or string `username`.
     pub fn unban_account_by_id_or_username(&self, target: &str) -> Result<(u64, String), DbError> {
-        let (user_id, username) = self.try_with_mut_snapshot(|snap| {
+        let (user_id, username, prev_until, prev_reason) = self.try_with_mut_snapshot(|snap| {
             let target_trimmed = target.trim();
             let parsed_id = target_trimmed.parse::<u64>().ok();
             let acc = if let Some(uid) = parsed_id {
@@ -594,14 +630,31 @@ impl WorldRepository {
                     .get_mut(target_trimmed)
                     .ok_or_else(|| DbError::ValidationError(format!("Unknown account '{target_trimmed}'")))?
             };
-            acc.banned_until_unix = None;
-            acc.ban_reason = None;
-            Ok((acc.user_id, acc.username.clone()))
+            let prev_until = acc.banned_until_unix.take();
+            let prev_reason = acc.ban_reason.take();
+            Ok((acc.user_id, acc.username.clone(), prev_until, prev_reason))
         })?;
-        let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
-        if rt.kicked_users.remove(&user_id).is_some() {
-            let conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
-            let _ = sqlite_store::persist_clear_kicked_user(&conn, user_id);
+        let was_kicked = self
+            .auth_runtime
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .kicked_users
+            .contains_key(&user_id);
+        if was_kicked {
+            if let Err(e) =
+                self.with_auth_sqlite_conn(|conn| sqlite_store::persist_clear_kicked_user(conn, user_id))
+            {
+                let _ = self.try_with_mut_snapshot(|snap| {
+                    if let Some(acc) = snap.accounts.get_mut(&username) {
+                        acc.banned_until_unix = prev_until;
+                        acc.ban_reason = prev_reason;
+                    }
+                    Ok::<(), DbError>(())
+                });
+                return Err(DbError::PersistenceFailure(e));
+            }
+            let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
+            rt.kicked_users.remove(&user_id);
         }
         Ok((user_id, username))
     }
@@ -730,14 +783,34 @@ impl WorldRepository {
     }
 
     /// Clears prior kick/displacement revocation markers ONLY when `authentication.Login` succeeds
+    /// with verified credentials (`R36-P1-3`), failing closed if SQLite persistence fails (`#879`).
+    pub fn try_clear_revocation_on_fresh_login(
+        &self,
+        user_id: u64,
+        session_id: u64,
+    ) -> Result<(), DbError> {
+        let was_kicked = self
+            .auth_runtime
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .kicked_users
+            .contains_key(&user_id);
+        if was_kicked {
+            self.with_auth_sqlite_conn(|conn| {
+                sqlite_store::persist_clear_kicked_user(conn, user_id)
+            })
+            .map_err(DbError::PersistenceFailure)?;
+        }
+        let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
+        rt.kicked_users.remove(&user_id);
+        rt.displaced_sessions.remove(&session_id);
+        Ok(())
+    }
+
+    /// Clears prior kick/displacement revocation markers ONLY when `authentication.Login` succeeds
     /// with verified credentials (`R36-P1-3`).
     pub fn clear_revocation_on_fresh_login(&self, user_id: u64, session_id: u64) {
-        let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
-        if rt.kicked_users.remove(&user_id).is_some() {
-            let conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
-            let _ = sqlite_store::persist_clear_kicked_user(&conn, user_id);
-        }
-        rt.displaced_sessions.remove(&session_id);
+        let _ = self.try_clear_revocation_on_fresh_login(user_id, session_id);
     }
 
     /// Acquires the single-active-session online lock for `user_id` (`D-4`, `multiLoginBlocker`).
@@ -1025,6 +1098,89 @@ impl WorldRepository {
     }
 
     /// Kicks `user_id` from any active online session, records the kick timestamp/reason, and revokes
+    /// all active SSO refresh tokens for `user_id` (`D-4`, `#879`, `#907`).
+    /// Fails closed with `Err(DbError::PersistenceFailure(_))` if durable SQLite persistence fails.
+    pub fn try_kick_user(
+        &self,
+        user_id: u64,
+        reason: &str,
+        now_unix: u64,
+    ) -> Result<Option<OnlineSessionRecord>, DbError> {
+        {
+            let guard = self.read_state();
+            if let Some(acc) = guard.accounts.values().find(|a| a.user_id == user_id) {
+                if (acc.role & service_roles::ROLE_ADMIN) != 0 {
+                    return Ok(None);
+                }
+            }
+        }
+        let (revoked_token_hashes, jtis_to_revoke, last_auth_now_unix) = {
+            let rt = self.auth_runtime.read().unwrap_or_else(|e| e.into_inner());
+            let cutoff = rt.last_auth_now_unix.max(now_unix);
+            let mut hashes = Vec::new();
+            let mut jtis = Vec::new();
+            for (token_hash, rec) in &rt.refresh_tokens {
+                if rec.user_id == user_id
+                    && (rec.expires_at_unix == 0 || cutoff == 0 || cutoff <= rec.expires_at_unix)
+                {
+                    hashes.push(token_hash.clone());
+                    if !rec.last_access_token_jti.is_empty() {
+                        jtis.push((
+                            rec.last_access_token_jti.clone(),
+                            rec.last_access_token_exp_unix,
+                        ));
+                    }
+                }
+            }
+            (hashes, jtis, cutoff)
+        };
+
+        self.with_auth_sqlite_conn(|conn| {
+            sqlite_store::persist_kicked_user(
+                conn,
+                user_id,
+                now_unix,
+                reason,
+                &revoked_token_hashes,
+                &jtis_to_revoke,
+                last_auth_now_unix,
+            )
+        })
+        .map_err(DbError::PersistenceFailure)?;
+
+        let removed = {
+            let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
+            sqlite_store::prune_auth_runtime_locked(&mut rt, now_unix);
+            rt.kicked_users
+                .insert(user_id, (now_unix, reason.to_string()));
+            for (_token_hash, rec) in rt.refresh_tokens.iter_mut() {
+                if rec.user_id == user_id {
+                    rec.revoked = true;
+                }
+            }
+            for (jti, exp) in &jtis_to_revoke {
+                rt.revoked_jtis.insert(jti.clone());
+                if *exp > 0 {
+                    rt.revoked_jti_expiries.insert(jti.clone(), *exp);
+                }
+            }
+            let removed = rt.online_sessions.remove(&user_id);
+            rt.online_session_ips.remove(&user_id);
+            if let Some(ref prev) = removed {
+                rt.displaced_sessions
+                    .insert(prev.session_id, reason.to_string());
+            }
+            removed
+        };
+        if removed.is_some() {
+            self.with_mut_snapshot(|snap| {
+                snap.sessions.remove(&user_id);
+            });
+        }
+        Ok(removed)
+    }
+
+    /// Kicks `user_id` from any active online session, records the kick timestamp/reason, and revokes
     /// all active SSO refresh tokens for `user_id` (`D-4`). Refuses to kick accounts with `ROLE_ADMIN`.
     pub fn kick_user(
         &self,
@@ -1032,63 +1188,7 @@ impl WorldRepository {
         reason: &str,
         now_unix: u64,
     ) -> Option<OnlineSessionRecord> {
-        {
-            let guard = self.read_state();
-            if let Some(acc) = guard.accounts.values().find(|a| a.user_id == user_id) {
-                if (acc.role & service_roles::ROLE_ADMIN) != 0 {
-                    return None;
-                }
-            }
-        }
-        let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
-        sqlite_store::prune_auth_runtime_locked(&mut rt, now_unix);
-        rt.kicked_users
-            .insert(user_id, (now_unix, reason.to_string()));
-        let mut revoked_token_hashes = Vec::new();
-        let mut jtis_to_revoke: Vec<(String, u64)> = Vec::new();
-        for (token_hash, rec) in rt.refresh_tokens.iter_mut() {
-            if rec.user_id == user_id {
-                rec.revoked = true;
-                revoked_token_hashes.push(token_hash.clone());
-                if !rec.last_access_token_jti.is_empty() {
-                    jtis_to_revoke.push((
-                        rec.last_access_token_jti.clone(),
-                        rec.last_access_token_exp_unix,
-                    ));
-                }
-            }
-        }
-        for (jti, exp) in &jtis_to_revoke {
-            rt.revoked_jtis.insert(jti.clone());
-            if *exp > 0 {
-                rt.revoked_jti_expiries.insert(jti.clone(), *exp);
-            }
-        }
-        {
-            let mut conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
-            let _ = sqlite_store::persist_kicked_user(
-                &mut conn,
-                user_id,
-                now_unix,
-                reason,
-                &revoked_token_hashes,
-                &jtis_to_revoke,
-                rt.last_auth_now_unix,
-            );
-        }
-        let removed = rt.online_sessions.remove(&user_id);
-        rt.online_session_ips.remove(&user_id);
-        if let Some(ref prev) = removed {
-            rt.displaced_sessions
-                .insert(prev.session_id, reason.to_string());
-        }
-        drop(rt);
-        if removed.is_some() {
-            self.with_mut_snapshot(|snap| {
-                snap.sessions.remove(&user_id);
-            });
-        }
-        removed
+        self.try_kick_user(user_id, reason, now_unix).ok().flatten()
     }
 
     /// Returns the kick reason if `user_id` was kicked and has not yet re-authenticated.

@@ -82,13 +82,29 @@ async fn main() -> Result<()> {
             let mut physics_ticker = tokio::time::interval(Duration::from_secs(1));
             physics_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             physics_ticker.tick().await;
+            let mut panic_count = 0u64;
             loop {
                 physics_ticker.tick().await;
-                let elapsed = last_step.elapsed().as_secs().clamp(1, 10);
-                last_step += Duration::from_secs(elapsed);
+                let elapsed = eve_server::sp6_lifecycle::clamp_physics_ticker_backlog(
+                    last_step.elapsed().as_secs(),
+                );
+                last_step = std::time::Instant::now();
                 if !physics_ctx.is_clock_paused() {
-                    eve_server::sp6_lifecycle::step_active_systems_physics_tick(&physics_ctx, elapsed)
-                        .await;
+                    if let Err(panic_msg) = eve_server::sp6_lifecycle::catch_unwind_future(
+                        eve_server::sp6_lifecycle::step_active_systems_physics_tick(
+                            &physics_ctx,
+                            elapsed,
+                        ),
+                    )
+                    .await
+                    {
+                        panic_count += 1;
+                        error!(
+                            panic_count,
+                            panic = %panic_msg,
+                            "physics_ticker caught panic during tick; continuing loop"
+                        );
+                    }
                 }
             }
         });
@@ -102,12 +118,26 @@ async fn main() -> Result<()> {
             let mut ticker = tokio::time::interval(Duration::from_secs(1));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             ticker.tick().await;
+            let mut panic_count = 0u64;
             loop {
                 ticker.tick().await;
-                let advanced = tick_ctx.clock().tick_wall_second();
-                if advanced > 0 {
-                    eve_server::sp6_lifecycle::tick_background_cluster_with_step(&tick_ctx, advanced)
+                let res = eve_server::sp6_lifecycle::catch_unwind_future(async {
+                    let advanced = tick_ctx.clock().tick_wall_second();
+                    if advanced > 0 {
+                        eve_server::sp6_lifecycle::tick_background_cluster_with_step(
+                            &tick_ctx, advanced,
+                        )
                         .await;
+                    }
+                })
+                .await;
+                if let Err(panic_msg) = res {
+                    panic_count += 1;
+                    error!(
+                        panic_count,
+                        panic = %panic_msg,
+                        "cluster_tick caught panic during tick; continuing loop"
+                    );
                 }
             }
         });

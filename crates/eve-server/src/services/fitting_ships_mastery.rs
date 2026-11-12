@@ -1487,9 +1487,25 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                             None
                         };
                         let in_nearby_space = if let Some(ent_id) = space_entity_id {
-                            let sys_handle = ctx.systems.get_or_spawn(current_sys as u32);
-                            let ship_pos = sys_handle.get_ball_position_sync(active_ship_id).or_else(|| snap.item_positions.get(&active_ship_id).copied().map(glam::DVec3::from));
-                            let ent_pos = sys_handle.get_ball_position_sync(ent_id).or_else(|| snap.item_positions.get(&ent_id).copied().map(glam::DVec3::from));
+                            let sys_u32 = current_sys as u32;
+                            let ship_pos = ctx
+                                .systems
+                                .get_ball_position_sync(sys_u32, active_ship_id)
+                                .or_else(|| {
+                                    snap.item_positions
+                                        .get(&active_ship_id)
+                                        .copied()
+                                        .map(glam::DVec3::from)
+                                });
+                            let ent_pos = ctx
+                                .systems
+                                .get_ball_position_sync(sys_u32, ent_id)
+                                .or_else(|| {
+                                    snap.item_positions
+                                        .get(&ent_id)
+                                        .copied()
+                                        .map(glam::DVec3::from)
+                                });
                             match (ship_pos, ent_pos) {
                                 (Some(sp), Some(ep)) => sp.distance(ep) <= 2_500.0,
                                 _ => false,

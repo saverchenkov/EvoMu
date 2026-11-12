@@ -66,7 +66,7 @@ impl SocialExtrasState {
 }
 
 pub(crate) fn with_social_state<R>(ctx: &ServerContext, f: impl FnOnce(&mut SocialExtrasState) -> R) -> R {
-    let mut s = ctx.social_extras.lock().unwrap();
+    let mut s = ctx.social_extras.lock().unwrap_or_else(|e| e.into_inner());
     f(&mut s)
 }
 
@@ -319,7 +319,7 @@ pub fn is_blocked_by(ctx: &ServerContext, target_char_id: i64, sender_char_id: i
 
 pub(crate) fn ensure_social_extras_mailing_lists_seeded(ctx: &ServerContext) {
     let persisted_lists = ctx.db.with_snapshot(|snap| snap.mailing_lists.clone());
-    let mut se = ctx.social_extras.lock().unwrap();
+    let mut se = ctx.social_extras.lock().unwrap_or_else(|e| e.into_inner());
     se.mailing_lists.clear();
     for (&ml_id, ml) in &persisted_lists {
         se.next_id = se.next_id.max(ml_id);
@@ -343,7 +343,7 @@ pub(crate) fn ensure_social_extras_mailing_lists_seeded(ctx: &ServerContext) {
 
 pub(crate) fn sync_mailing_lists_to_db(ctx: &ServerContext) {
     let lists: HashMap<i64, eve_db::MailingListRecord> = {
-        let s = ctx.social_extras.lock().unwrap();
+        let s = ctx.social_extras.lock().unwrap_or_else(|e| e.into_inner());
         s.mailing_lists
             .iter()
             .map(|(&lid, ml)| {
@@ -381,7 +381,7 @@ pub fn persist_social_state(ctx: &ServerContext) {
 pub(crate) fn sync_calendar_events_to_db(ctx: &ServerContext) {
     let db_evs = ctx.db.with_snapshot(|snap| snap.calendar_events.clone());
     let events: HashMap<i64, eve_db::CalendarEventRecord> = {
-        let mut s = ctx.social_extras.lock().unwrap();
+        let mut s = ctx.social_extras.lock().unwrap_or_else(|e| e.into_inner());
         for (eid, ev) in db_evs {
             s.next_id = s.next_id.max(eid);
             let entry = s.calendar_events.entry(eid).or_insert_with(|| CalendarEventState {
@@ -674,7 +674,7 @@ pub fn hydrate_social_state_from_db(ctx: &ServerContext) {
         )
     });
     {
-        let mut ex = ctx.fleet_extras.lock().unwrap();
+        let mut ex = ctx.fleet_extras.lock().unwrap_or_else(|e| e.into_inner());
         ex.join_requests = join_reqs;
         ex.watchlist = watchlist;
         ex.watchlist_loaded = true;

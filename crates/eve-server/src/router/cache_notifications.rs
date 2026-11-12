@@ -635,31 +635,25 @@ impl ServerContext {
         &self,
         target: &NotificationTarget,
     ) -> Vec<(i64, Option<u64>)> {
-        self.db.with_snapshot(|snap| {
+        let candidates: Vec<(i64, u64)> = self.db.with_snapshot(|snap| {
             let mut out = Vec::new();
             match target {
                 NotificationTarget::Character(cid) => {
                     if let Some(c) = snap.characters.get(cid) {
-                        if self.is_character_online(c.character_id, c.user_id) {
-                            out.push((*cid, Some(c.user_id)));
-                        }
+                        out.push((*cid, c.user_id));
                     }
                 }
                 NotificationTarget::Corporation(corp_id) => {
                     for c in snap.characters.values() {
-                        if c.corporation_id == *corp_id
-                            && self.is_character_online(c.character_id, c.user_id)
-                        {
-                            out.push((c.character_id, Some(c.user_id)));
+                        if c.corporation_id == *corp_id {
+                            out.push((c.character_id, c.user_id));
                         }
                     }
                 }
                 NotificationTarget::Alliance(ally_id) => {
                     for c in snap.characters.values() {
-                        if c.alliance_id == Some(*ally_id)
-                            && self.is_character_online(c.character_id, c.user_id)
-                        {
-                            out.push((c.character_id, Some(c.user_id)));
+                        if c.alliance_id == Some(*ally_id) {
+                            out.push((c.character_id, c.user_id));
                         }
                     }
                 }
@@ -667,44 +661,43 @@ impl ServerContext {
                     if let Some(f) = snap.fleets.get(fleet_id) {
                         for &cid in &f.members {
                             if let Some(c) = snap.characters.get(&cid) {
-                                if self.is_character_online(c.character_id, c.user_id) {
-                                    out.push((cid, Some(c.user_id)));
-                                }
+                                out.push((cid, c.user_id));
                             }
                         }
                     }
                 }
                 NotificationTarget::SolarSystem(sys_id) => {
                     for c in snap.characters.values() {
-                        if c.solar_system_id == *sys_id
-                            && self.is_character_online(c.character_id, c.user_id)
-                        {
-                            out.push((c.character_id, Some(c.user_id)));
+                        if c.solar_system_id == *sys_id {
+                            out.push((c.character_id, c.user_id));
                         }
                     }
                 }
                 NotificationTarget::Station(station_id) => {
                     for c in snap.characters.values() {
-                        if (c.station_id == Some(*station_id)
-                            || c.structure_id == Some(*station_id))
-                            && self.is_character_online(c.character_id, c.user_id)
+                        if c.station_id == Some(*station_id)
+                            || c.structure_id == Some(*station_id)
                         {
-                            out.push((c.character_id, Some(c.user_id)));
+                            out.push((c.character_id, c.user_id));
                         }
                     }
                 }
                 NotificationTarget::All => {
                     for c in snap.characters.values() {
-                        if self.is_character_online(c.character_id, c.user_id) {
-                            out.push((c.character_id, Some(c.user_id)));
-                        }
+                        out.push((c.character_id, c.user_id));
                     }
                 }
             }
-            out.sort_by_key(|(cid, _)| *cid);
-            out.dedup_by_key(|(cid, _)| *cid);
             out
-        })
+        });
+        let mut out: Vec<(i64, Option<u64>)> = candidates
+            .into_iter()
+            .filter(|&(cid, uid)| self.is_character_online(cid, uid))
+            .map(|(cid, uid)| (cid, Some(uid)))
+            .collect();
+        out.sort_by_key(|(cid, _)| *cid);
+        out.dedup_by_key(|(cid, _)| *cid);
+        out
     }
 
     /// Constructs a `MachoPacket` (`Notification` = `12`) and encodes it into binary `eveMarshal` wire bytes.
@@ -1250,17 +1243,30 @@ impl ServerContext {
         old_sys: Option<u32>,
         new_sys: u32,
     ) {
+        let old_chan_opt = old_sys
+            .filter(|&old| old != new_sys)
+            .map(|old| format!("solarsystemid2:{old}"));
+        let candidate_speakers = old_chan_opt
+            .as_deref()
+            .map(|cid| {
+                crate::services::fleet_social::fleet_social_chat::get_delayed_local_speakers(
+                    self, cid,
+                )
+            })
+            .unwrap_or_default();
+        let mut dropped_speakers = Vec::new();
         let _ = self.db.try_with_mut_snapshot(|snap| {
-            if let Some(old) = old_sys {
-                if old != new_sys {
-                    let old_chan_id = format!("solarsystemid2:{}", old);
-                    if let Some(chan) = snap.chat_channels.get_mut(&old_chan_id) {
-                        chan.members.remove(&char_id);
-                        let rem_set = chan.members.clone();
-                        crate::services::fleet_social::fleet_social_chat::prune_delayed_local_speakers_on_leave(
-                            self, snap, &old_chan_id, char_id, &rem_set,
-                        );
-                    }
+            if let Some(ref old_chan_id) = old_chan_opt {
+                if let Some(chan) = snap.chat_channels.get_mut(old_chan_id) {
+                    chan.members.remove(&char_id);
+                    let rem_set = chan.members.clone();
+                    dropped_speakers = crate::services::fleet_social::fleet_social_chat::collect_wh_local_witness_speakers_to_drop_in_snap(
+                        snap,
+                        old_chan_id,
+                        char_id,
+                        &rem_set,
+                        &candidate_speakers,
+                    );
                 }
             }
             let new_chan_id = format!("solarsystemid2:{}", new_sys);
@@ -1273,6 +1279,13 @@ impl ServerContext {
             chan.members.insert(char_id);
             Ok::<(), std::convert::Infallible>(())
         });
+        if let Some(ref old_chan_id) = old_chan_opt {
+            crate::services::fleet_social::fleet_social_chat::remove_delayed_local_speakers(
+                self,
+                old_chan_id,
+                &dropped_speakers,
+            );
+        }
 
         if old_sys.is_none() {
             self.deliver_unprocessed_notifications_on_login(char_id);

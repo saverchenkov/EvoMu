@@ -523,6 +523,17 @@ async fn cluster_tick_catches_up_multi_second_warp_and_respects_dedicated_physic
     ctx.clock().advance_secs(35);
     crate::sp6_lifecycle::step_active_systems_physics_tick(&ctx, 35).await;
 
+    let tick_after_first_burst = sys_h.ballpark.read().unwrap().current_tick;
+    assert_eq!(
+        tick_after_first_burst,
+        tick_initial + 1 + crate::sp6_lifecycle::MAX_PHYSICS_BACKLOG_STEPS,
+        "step_active_systems_physics_tick must cap backlog replay at MAX_PHYSICS_BACKLOG_STEPS (#870)"
+    );
+    for _ in 0..11 {
+        ctx.clock().advance_secs(3);
+        crate::sp6_lifecycle::step_active_systems_physics_tick(&ctx, 3).await;
+    }
+
     let tick_after_catchup = sys_h.ballpark.read().unwrap().current_tick;
     assert!(
         tick_after_catchup >= tick_initial + 36,
@@ -954,4 +965,336 @@ async fn sweep_expired_cosmic_anomalies_and_execute_due_abyssal_collapse_sync_br
         ctx.db.with_snapshot(|s| s.characters[&90_000_001].solar_system_id),
         sys_id
     );
+}
+
+#[tokio::test]
+async fn engine_supervision_catch_unwind_system_actor_recovery_and_backlog_cap_841_870_909() {
+    use std::sync::atomic::Ordering;
+
+    // 1. `catch_unwind_future` catches panics across async poll steps (#841).
+    let ok_res = catch_unwind_future(async { 42_u32 }).await;
+    assert_eq!(ok_res.unwrap(), 42);
+    let panic_res = catch_unwind_future(async {
+        tokio::task::yield_now().await;
+        panic!("simulated tick loop panic");
+    })
+    .await;
+    assert!(panic_res
+        .unwrap_err()
+        .contains("simulated tick loop panic"));
+
+    // 2. `clamp_physics_ticker_backlog` caps backlog replay at MAX_PHYSICS_BACKLOG_STEPS = 3 (#870).
+    assert_eq!(clamp_physics_ticker_backlog(0), 1);
+    assert_eq!(clamp_physics_ticker_backlog(1), 1);
+    assert_eq!(clamp_physics_ticker_backlog(2), 2);
+    assert_eq!(clamp_physics_ticker_backlog(3), 3);
+    assert_eq!(clamp_physics_ticker_backlog(10), 3);
+
+    // 3. `SystemActor` catches per-command panics and stays alive for subsequent commands (#841).
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let sys_id = 30_000_142_u32;
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    assert_eq!(handle.command_panics.load(Ordering::SeqCst), 0);
+    handle
+        .panic_next_command_for_test
+        .store(true, Ordering::SeqCst);
+    // Trigger a command that will panic inside the actor's command handler.
+    let _ = handle.step_manual(0.1).await;
+    assert_eq!(handle.command_panics.load(Ordering::SeqCst), 1);
+    assert!(!handle.cmd_tx.is_closed());
+    // Subsequent command succeeds on the same actor!
+    let step_after = handle.step_manual(0.5).await.expect("actor recovers after command panic");
+    assert!(step_after.tick > 0);
+
+    // 4. `SystemRegistry::get_or_spawn` replaces a closed `SystemHandle` (#841).
+    let (closed_tx, closed_rx) = tokio::sync::mpsc::channel(1);
+    drop(closed_rx);
+    {
+        let mut reg = ctx
+            .systems
+            .systems
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut dead_handle = handle.clone();
+        dead_handle.cmd_tx = closed_tx;
+        reg.insert(sys_id, dead_handle);
+    }
+    assert!(ctx.systems.get_handle(sys_id).is_none());
+    let respawned = ctx.systems.get_or_spawn(sys_id);
+    assert!(ctx.systems.get_handle(sys_id).is_some());
+    assert!(!respawned.cmd_tx.is_closed());
+    let step_respawned = respawned
+        .step_manual(0.5)
+        .await
+        .expect("respawned actor handles commands");
+    assert!(step_respawned.tick > 0);
+
+    // 5. When `dedicated_physics_ticker_active` is true, `cluster_tick` does NOT double-step
+    // `disconnected_ships` systems (#870).
+    let dedicated_ctx =
+        ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    dedicated_ctx
+        .dedicated_physics_ticker_active
+        .store(true, Ordering::Relaxed);
+    let disc_sys = 30_002_187_u32;
+    let _disc_handle = dedicated_ctx.systems.get_or_spawn(disc_sys);
+    let sim_before = dedicated_ctx.systems.get_system_sim_elapsed(disc_sys);
+    let now_unix = dedicated_ctx.now_unix();
+    with_mut_sp6_state(&dedicated_ctx.db, |st, _snap| {
+        st.disconnected_ships.insert(
+            90_000_001,
+            DisconnectedShipEntry {
+                char_id: 90_000_001,
+                ship_id: 100_000_001,
+                ship_type_id: 606,
+                solar_system_id: disc_sys,
+                disconnected_at_unix: now_unix,
+                remove_at_unix: now_unix + 60,
+                last_position: [1_000.0, 0.0, 0.0],
+                pre_warp_position: Some([1_000.0, 0.0, 0.0]),
+                emergency_warp_dest: None,
+                removed_from_space: false,
+            },
+        );
+    });
+    tick_background_cluster_with_step(&dedicated_ctx, 1).await;
+    assert_eq!(
+        dedicated_ctx.systems.get_system_sim_elapsed(disc_sys),
+        sim_before,
+        "cluster_tick must not double-step disconnected_systems when dedicated_physics_ticker_active is true"
+    );
+}
+
+#[tokio::test]
+async fn committed_warp_mirror_non_blocking_under_ballpark_write_lock_831_909() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let sys_id = 30_000_142_u32;
+    let ship_id = 100_000_001_i64;
+    let handle = ctx.systems.get_or_spawn(sys_id);
+
+    handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: 587,
+            position: eve_destiny::DVec3::ZERO,
+            velocity: eve_destiny::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            radius: 50.0,
+            mass: 1_000_000.0,
+            mode: eve_destiny::MovementMode::Stop,
+            speed_fraction: 1.0,
+        })
+        .await
+        .unwrap();
+    // Start warp to a distant point (>150 km) in Accelerating phase (committed warp).
+    let dest = eve_destiny::DVec3::new(10_000_000.0, 0.0, 0.0);
+    handle
+        .set_movement_mode(
+            ship_id,
+            eve_destiny::MovementMode::Warp {
+                origin: eve_destiny::DVec3::ZERO,
+                destination: dest,
+                warp_speed_au_s: 3.0,
+                total_distance: 10_000_000.0,
+                phase: eve_destiny::WarpPhase::Accelerating,
+                elapsed_warp_time: 1.0,
+            },
+        )
+        .await
+        .unwrap();
+    let _ = handle.step_manual(0.5).await.unwrap();
+    assert!(ctx.systems.is_ball_in_committed_warp_sync(sys_id, ship_id));
+
+    // Hold `ballpark.write()` on the current thread and verify `is_ball_in_committed_warp_sync`
+    // and `committed_warp_destination_sync` read the leaf mirror lock without deadlocking (#831)!
+    let bp_write_guard = handle.ballpark.write().unwrap();
+    assert!(ctx.systems.is_ball_in_committed_warp_sync(sys_id, ship_id));
+    assert_eq!(
+        handle.committed_warp_destination_sync(ship_id),
+        Some(dest)
+    );
+    drop(bp_write_guard);
+}
+
+#[tokio::test]
+async fn skill_queue_invalidation_only_on_level_completion_and_single_system_sync_840_909() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let char_sys = 30_000_142_u32;
+    let other_sys = 30_002_187_u32;
+
+    // Put character in space in `char_sys` and spawn a second unrelated system `other_sys`.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = char_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        snap.skill_queues.insert(
+            char_id,
+            vec![eve_db::SkillQueueEntry {
+                type_id: 3300, // Gunnery (rank 1, L1 = 250 SP)
+                target_level: 1,
+                start_sp: 0.0,
+                end_sp: 250.0,
+                duration_seconds: 600.0,
+                started_at_unix: Some(1_700_000_000),
+            }],
+        );
+        snap.skills.entry(char_id).or_default().insert(
+            3300,
+            eve_db::TrainedSkillRecord {
+                type_id: 3300,
+                level: 0,
+                skill_points: 0.0,
+            },
+        );
+    });
+    let _ = ctx.get_or_rebuild_ship_fitting(char_id, ship_id);
+    assert!(ctx
+        .ship_fittings
+        .read()
+        .unwrap()
+        .contains_key(&ship_id));
+
+    // Partial SP advance (1 second -> < 250 SP): must NOT invalidate `ship_fittings` (#840).
+    ctx.advance_skill_queues(1.0);
+    assert!(
+        ctx.ship_fittings
+            .read()
+            .unwrap()
+            .contains_key(&ship_id),
+        "partial SP tick must not invalidate cached ship fitting"
+    );
+
+    // Spawn `other_sys` with a dummy ball of the same ID to verify `sync_ship_ballpark_stats`
+    // only updates `char_sys` and does NOT touch `other_sys` (#840).
+    let char_sys_handle = ctx.systems.get_or_spawn(char_sys);
+    let other_sys_handle = ctx.systems.get_or_spawn(other_sys);
+    char_sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: 587,
+            position: eve_destiny::DVec3::ZERO,
+            velocity: eve_destiny::DVec3::ZERO,
+            max_velocity: 111.0,
+            inertia: 3.0,
+            radius: 50.0,
+            mass: 1_000_000.0,
+            mode: eve_destiny::MovementMode::Stop,
+            speed_fraction: 1.0,
+        })
+        .await
+        .unwrap();
+    other_sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: 587,
+            position: eve_destiny::DVec3::ZERO,
+            velocity: eve_destiny::DVec3::ZERO,
+            max_velocity: 999.0,
+            inertia: 3.0,
+            radius: 50.0,
+            mass: 1_000_000.0,
+            mode: eve_destiny::MovementMode::Stop,
+            speed_fraction: 1.0,
+        })
+        .await
+        .unwrap();
+
+    // Complete the skill level: invalidates `ship_fittings` and syncs only `char_sys`.
+    ctx.advance_skill_queues(3_600.0);
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.skills[&char_id][&3300].level),
+        1
+    );
+    ctx.sync_ship_ballpark_stats(char_id, ship_id);
+    let other_max_speed = other_sys_handle
+        .ballpark
+        .read()
+        .unwrap()
+        .balls
+        .get(&ship_id)
+        .unwrap()
+        .max_velocity;
+    assert_eq!(
+        other_max_speed, 999.0,
+        "sync_ship_ballpark_stats must only sync the character's active solar system"
+    );
+}
+
+#[test]
+fn social_extras_leaf_lock_and_no_nested_world_snapshots_825_838_891_909() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let char_id = 90_000_001_i64;
+    let wh_sys = 31_000_005_u32;
+    let wh_chan = format!("solarsystemid2:{wh_sys}");
+
+    // 1. `#825`: `collect_wh_local_witness_speakers_to_drop_in_snap` mutates `wh_local_witnesses`
+    // without locking `ctx.social_extras` (even when `ctx.social_extras` is held on the current thread!).
+    ctx.social_extras
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .delayed_local_speakers
+        .entry(wh_chan.clone())
+        .or_default()
+        .insert(90_000_002);
+    let candidates =
+        crate::services::fleet_social::fleet_social_chat::get_delayed_local_speakers(&ctx, &wh_chan);
+    assert_eq!(candidates, vec![90_000_002]);
+
+    let social_guard = ctx.social_extras.lock().unwrap_or_else(|e| e.into_inner());
+    let dropped = ctx.db.with_mut_snapshot(|snap| {
+        snap.fleet_and_social_ops
+            .wh_local_witnesses
+            .insert(format!("{wh_chan}:90000002"), std::collections::HashSet::from([char_id]));
+        crate::services::fleet_social::fleet_social_chat::collect_wh_local_witness_speakers_to_drop_in_snap(
+            snap,
+            &wh_chan,
+            char_id,
+            &std::collections::HashSet::new(),
+            &candidates,
+        )
+    });
+    drop(social_guard);
+    assert_eq!(dropped, vec![90_000_002]);
+    crate::services::fleet_social::fleet_social_chat::remove_delayed_local_speakers(
+        &ctx, &wh_chan, &dropped,
+    );
+    assert!(
+        crate::services::fleet_social::fleet_social_chat::get_delayed_local_speakers(&ctx, &wh_chan)
+            .is_empty()
+    );
+
+    // 2. `#838` (server half): `prune_offline_fleets_and_channels` and `resolve_notification_recipients`
+    // complete cleanly and prune offline fleet/channel members.
+    crate::services::fleet_social::fleet_social_notify::prune_offline_fleets_and_channels(&ctx);
+    let recips = ctx.resolve_notification_recipients(&crate::router::NotificationTarget::All);
+    assert!(recips.is_empty());
+
+    // 3. `#891`: `resolve_agent_and_corp_for_system_with_preferred_station` does not call
+    // `ctx.db.get_character` inside `try_with_mut_snapshot`, so calling it while holding a
+    // mutable snapshot does not self-deadlock.
+    let preferred_station = ctx
+        .db
+        .get_character(char_id)
+        .ok()
+        .and_then(|c| c.station_id);
+    let resolved = ctx
+        .db
+        .try_with_mut_snapshot(|_snap| {
+            Ok::<_, std::convert::Infallible>(
+                crate::services::agents_missions::resolve_agent_and_corp_for_system_with_preferred_station(
+                    &ctx,
+                    30_000_142,
+                    preferred_station,
+                    false,
+                ),
+            )
+        })
+        .unwrap();
+    assert!(resolved.0 > 0);
 }

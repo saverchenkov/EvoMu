@@ -105,6 +105,25 @@ impl Default for FeatureFlagsConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageConfig {
+    /// World persistence backend (`"sqlite"` or `"memory"`).
+    #[serde(default = "default_storage_backend")]
+    pub backend: String,
+}
+
+fn default_storage_backend() -> String {
+    "sqlite".to_string()
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            backend: default_storage_backend(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerConfig {
     #[serde(default = "default_bind_address")]
     pub bind_address: String,
@@ -122,6 +141,8 @@ pub struct ServerConfig {
     pub sde_path: String,
     #[serde(default = "default_world_db_path")]
     pub world_db_path: String,
+    #[serde(default)]
+    pub storage: StorageConfig,
     #[serde(default)]
     pub admin_accounts: Vec<AdminAccountConfig>,
     #[serde(default)]
@@ -185,6 +206,7 @@ impl Default for ServerConfig {
             xmpp_port: default_xmpp_port(),
             sde_path: default_sde_path(),
             world_db_path: default_world_db_path(),
+            storage: StorageConfig::default(),
             admin_accounts: Vec::new(),
             player_accounts: Vec::new(),
             belt_respawn_interval_secs: default_belt_respawn_interval_secs(),
@@ -195,6 +217,33 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
+    /// Validates `[storage] backend` (`"sqlite"` or `"memory"`) and `world_db_path` extension (`#877`).
+    pub fn validate_storage_backend(&self) -> Result<&str, String> {
+        let backend = self.storage.backend.trim();
+        match backend {
+            "sqlite" => {
+                let db_path = self.world_db_path.trim();
+                if db_path.is_empty() {
+                    return Err("world_db_path in evomu.toml must not be empty".into());
+                }
+                let ext = Path::new(db_path)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_lowercase());
+                if !matches!(ext.as_deref(), Some("sqlite" | "sqlite3" | "db")) {
+                    return Err(format!(
+                        "world_db_path '{db_path}' must use a SQLite file extension (.sqlite, .sqlite3, or .db) when storage.backend = \"sqlite\""
+                    ));
+                }
+                Ok("sqlite")
+            }
+            "memory" => Ok("memory"),
+            other => Err(format!(
+                "Unsupported storage.backend '{other}' in evomu.toml (expected \"sqlite\" or \"memory\")"
+            )),
+        }
+    }
+
     /// Parses a `ServerConfig` from a TOML string (`D-5`).
     pub fn from_toml_str(toml_str: &str) -> Result<Self, String> {
         let cfg: Self = toml::from_str(toml_str).map_err(|e| format!("Invalid evomu.toml: {e}"))?;
@@ -207,6 +256,7 @@ impl ServerConfig {
         if cfg.world_db_path.trim().is_empty() {
             return Err("world_db_path in evomu.toml must not be empty".into());
         }
+        cfg.validate_storage_backend()?;
         if !(1..=604_800).contains(&cfg.belt_respawn_interval_secs) {
             return Err(
                 "belt_respawn_interval_secs in evomu.toml must be in 1..=604800".into(),
@@ -247,7 +297,7 @@ impl ServerConfig {
     }
 
     /// Loads `EVOMU_CONFIG_PATH` (or `evomu.toml` if present) and applies any environment variable
-    /// overrides (`EVOMU_SDE_PATH`, `EVOMU_DB_PATH`, `EVOMU_SNAPSHOT_PATH`, `EVOMU_ACCOUNTS`, `EVOMU_GM_ACCOUNT`).
+    /// overrides (`EVOMU_SDE_PATH`, `EVOMU_DB_PATH`, `EVOMU_SNAPSHOT_PATH`, `EVOMU_STORAGE_BACKEND`, `EVOMU_ACCOUNTS`, `EVOMU_GM_ACCOUNT`).
     pub fn load_default_or_env() -> Result<Self, String> {
         #[cfg(test)]
         let _env_read_guard = crate::lock_test_env_read();
@@ -278,6 +328,12 @@ impl ServerConfig {
                 cfg.world_db_path = snap_override.trim().to_string();
             }
         }
+        if let Ok(backend_override) = std::env::var("EVOMU_STORAGE_BACKEND") {
+            if !backend_override.trim().is_empty() {
+                cfg.storage.backend = backend_override.trim().to_string();
+            }
+        }
+        cfg.validate_storage_backend()?;
         if let Ok(accounts_spec) = std::env::var("EVOMU_ACCOUNTS") {
             for entry in accounts_spec.split(',') {
                 if let Some((user, pass)) = entry.trim().split_once(':') {

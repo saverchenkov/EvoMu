@@ -824,6 +824,14 @@ fn handle_oauth_token(
                         "error_description": format!("Account suspended until unix={until_unix}: {reason}")
                     }),
                 ),
+                Err(DbError::PersistenceFailure(msg)) => HttpResponse::json(
+                    500,
+                    "Internal Server Error",
+                    json!({
+                        "error": "server_error",
+                        "error_description": msg
+                    }),
+                ),
                 Err(e) => HttpResponse::json(
                     400,
                     "Bad Request",
@@ -875,6 +883,14 @@ fn handle_oauth_token(
                         "error_description": format!("Account suspended until unix={until_unix}: {reason}")
                     }),
                 ),
+                Err(DbError::PersistenceFailure(msg)) => HttpResponse::json(
+                    500,
+                    "Internal Server Error",
+                    json!({
+                        "error": "server_error",
+                        "error_description": msg
+                    }),
+                ),
                 Err(e) => HttpResponse::json(
                     400,
                     "Bad Request",
@@ -920,8 +936,17 @@ fn handle_oauth_revoke(
         );
     };
 
-    let revoked = ctx.db.revoke_sso_refresh_token(&token);
-    HttpResponse::json(200, "OK", json!({ "revoked": revoked }))
+    match ctx.db.try_revoke_sso_refresh_token(&token) {
+        Ok(revoked) => HttpResponse::json(200, "OK", json!({ "revoked": revoked })),
+        Err(e) => HttpResponse::json(
+            500,
+            "Internal Server Error",
+            json!({
+                "error": "server_error",
+                "error_description": e.to_string()
+            }),
+        ),
+    }
 }
 
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {

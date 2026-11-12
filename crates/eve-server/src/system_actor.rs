@@ -59,7 +59,7 @@ pub fn next_downtime_unix_secs(now_unix: u64, interval_secs: u64, downtime_utc_s
 }
 
 pub struct SystemRegistry {
-    systems: RwLock<HashMap<SolarSystemId, SystemHandle>>,
+    pub(crate) systems: RwLock<HashMap<SolarSystemId, SystemHandle>>,
     sde: Option<Arc<SdeRegistry>>,
     pub db: Option<Arc<eve_db::WorldRepository>>,
     belt_respawn_interval_secs: Arc<std::sync::atomic::AtomicU64>,
@@ -253,6 +253,14 @@ impl SystemRegistry {
         self.systems.read().unwrap_or_else(|e| e.into_inner()).len()
     }
 
+    pub fn get_handle(&self, solar_system_id: SolarSystemId) -> Option<SystemHandle> {
+        let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
+        guard
+            .get(&solar_system_id)
+            .filter(|h| !h.cmd_tx.is_closed())
+            .cloned()
+    }
+
     pub fn active_system_handles(&self) -> Vec<(SolarSystemId, SystemHandle)> {
         let mut handles: Vec<(SolarSystemId, SystemHandle)> = self
             .systems
@@ -298,7 +306,9 @@ impl SystemRegistry {
             .unwrap_or_else(|e| e.into_inner())
             .get(&solar_system_id)
         {
-            return existing.clone();
+            if !existing.cmd_tx.is_closed() {
+                return existing.clone();
+            }
         }
 
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<SystemCommand>(SYSTEM_MAILBOX_CAPACITY);
@@ -360,7 +370,9 @@ impl SystemRegistry {
         };
         let ball_positions = Arc::new(RwLock::new(HashMap::new()));
         let scrambled_balls = Arc::new(RwLock::new(std::collections::HashSet::new()));
+        let committed_warp_balls = Arc::new(RwLock::new(HashMap::new()));
         let active_module_ships = Arc::new(RwLock::new(std::collections::HashSet::new()));
+        register_committed_warp_cache(&ball_positions, &committed_warp_balls);
         sync_ball_positions(&initial_ballpark, &ball_positions, &scrambled_balls);
         let ball_positions_actor = ball_positions.clone();
         let scrambled_balls_actor = scrambled_balls.clone();
@@ -390,11 +402,22 @@ impl SystemRegistry {
             .unwrap_or(1.0).clamp(0.10, 1.0);
         let tidi_factor_bits = Arc::new(std::sync::atomic::AtomicU64::new(initial_tidi.to_bits()));
         let tidi_factor_bits_actor = tidi_factor_bits.clone();
+        let command_panics = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let command_panics_actor = command_panics.clone();
+        #[cfg(test)]
+        let panic_next_command_for_test = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        #[cfg(test)]
+        let panic_next_command_actor = panic_next_command_for_test.clone();
 
         tokio::spawn(async move {
             let mut last_active_totals: HashMap<BallId, (Option<i32>, Option<i32>)> = HashMap::new();
             // parity: feat:lifecycle.world-unobserved-system-sim, plan:SP-7
             while let Some(cmd) = cmd_rx.recv().await {
+                let cmd_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                #[cfg(test)]
+                if panic_next_command_actor.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    panic!("injected SystemActor command panic for #841 supervision test");
+                }
                 let mut ballpark = ballpark_actor.write().unwrap_or_else(|e| e.into_inner());
                 let mut actor_st = actor_state_actor.write().unwrap_or_else(|e| e.into_inner());
                 let SystemActorState {
@@ -532,7 +555,7 @@ impl SystemRegistry {
                                 let ball_id = asteroid.asteroid_id;
                                 if asteroids.contains_key(&ball_id) {
                                     let _ = reply.send(Ok(ball_id));
-                                    continue;
+                                    return;
                                 }
                                 let mut ast_ball = ball;
                                 ast_ball.mode = eve_destiny::MovementMode::Rigid;
@@ -1026,7 +1049,7 @@ impl SystemRegistry {
                             SystemCommand::AddTargetLock { source_id, lock, reply } => {
                                 if ballpark.combat_states.get(&lock.target_id).is_some_and(|tcs| tcs.is_tethered) {
                                     let _ = reply.send(Err("Target is tethered and invulnerable to target locks".into()));
-                                    continue;
+                                    return;
                                 }
                                 if let Some(cs) = ballpark.combat_states.get_mut(&source_id) {
                                     cs.undock_invulnerable_remaining_ticks = 0;
@@ -1534,6 +1557,21 @@ impl SystemRegistry {
                         }
                     }
                 }
+                }));
+                if let Err(panic_payload) = cmd_outcome {
+                    let panic_count = command_panics_actor.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    let msg = panic_payload
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| panic_payload.downcast_ref::<String>().map(String::as_str))
+                        .unwrap_or("non-string panic payload");
+                    tracing::error!(
+                        solar_system_id,
+                        panic_count,
+                        panic = %msg,
+                        "SystemActor caught panic while handling command; continuing actor loop"
+                    );
+                }
             }
         });
 
@@ -1543,11 +1581,15 @@ impl SystemRegistry {
             event_tx,
             ball_positions,
             scrambled_balls,
+            committed_warp_balls,
             active_module_ships,
             ballpark: ballpark_shared,
             actor_state: actor_state_shared,
             last_auto_stepped_unix,
             tidi_factor_bits,
+            command_panics,
+            #[cfg(test)]
+            panic_next_command_for_test,
             npc_death_hook: Arc::clone(&self.npc_death_hook),
             module_deactivation_hook: Arc::clone(&self.module_deactivation_hook),
             target_lock_completed_hook: Arc::clone(&self.target_lock_completed_hook),
@@ -1555,7 +1597,13 @@ impl SystemRegistry {
         };
         let mut guard = self.systems.write().unwrap_or_else(|e| e.into_inner());
         if let Some(existing) = guard.get(&solar_system_id) {
-            return existing.clone();
+            if !existing.cmd_tx.is_closed() {
+                return existing.clone();
+            }
+            tracing::warn!(
+                solar_system_id,
+                "replacing terminated SystemActor handle with freshly spawned actor"
+            );
         }
         if let Some(ref db) = self.db {
             register_db_system_ballpark(db, solar_system_id, &handle);

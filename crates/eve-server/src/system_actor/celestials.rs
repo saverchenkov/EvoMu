@@ -24,11 +24,15 @@ pub struct SystemHandle {
     pub(crate) event_tx: broadcast::Sender<TickBroadcast>,
     pub(crate) ball_positions: Arc<RwLock<HashMap<BallId, DVec3>>>,
     pub(crate) scrambled_balls: Arc<RwLock<std::collections::HashSet<BallId>>>,
+    pub(crate) committed_warp_balls: Arc<RwLock<HashMap<BallId, DVec3>>>,
     pub(crate) active_module_ships: Arc<RwLock<std::collections::HashSet<BallId>>>,
     pub ballpark: Arc<RwLock<Ballpark>>,
     pub(crate) actor_state: Arc<RwLock<super::SystemActorState>>,
     pub(crate) last_auto_stepped_unix: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) tidi_factor_bits: Arc<std::sync::atomic::AtomicU64>,
+    pub command_panics: Arc<std::sync::atomic::AtomicU64>,
+    #[cfg(test)]
+    pub(crate) panic_next_command_for_test: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) npc_death_hook: Arc<RwLock<Option<super::NpcDeathHook>>>,
     pub(crate) module_deactivation_hook: Arc<RwLock<Option<super::ModuleDeactivationHook>>>,
     pub(crate) target_lock_completed_hook: Arc<RwLock<Option<super::TargetLockCompletedHook>>>,
@@ -77,6 +81,7 @@ impl SystemHandle {
     pub fn try_stop_ball(&self, ball_id: BallId) {
         if let Ok(mut bp) = self.ballpark.write() {
             let _ = bp.force_stop_warp(ball_id);
+            super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
         }
     }
 
@@ -1608,7 +1613,7 @@ mod celestials_helpers;
 pub use celestials_helpers::try_remove_ball_for_db;
 pub(crate) use celestials_helpers::{
     fast_forward_clock_in_actor, persist_ball_positions_in_db, persist_landed_warps_in_db,
-    register_db_system_ballpark, sync_ball_positions,
+    register_committed_warp_cache, register_db_system_ballpark, sync_ball_positions,
 };
 
 #[cfg(test)] #[path = "celestials_unit_tests.rs"] mod celestials_unit_tests;

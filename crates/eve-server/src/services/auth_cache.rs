@@ -1096,7 +1096,15 @@ pub async fn handle(
                         message: format!("Cannot kick administrator account '{username}'"),
                     }));
                 }
-                let kicked_sess = ctx.db.kick_user(uid, reason, ctx.now_unix());
+                let kicked_sess = match ctx.db.try_kick_user(uid, reason, ctx.now_unix()) {
+                    Ok(sess) => sess,
+                    Err(e) => {
+                        return Some(Err(BridgeRpcError {
+                            code: "KickFailed".into(),
+                            message: e.to_string(),
+                        }));
+                    }
+                };
                 ctx.release_user_bindings(uid);
                 if let Some(ref s) = kicked_sess {
                     ctx.disconnect_session(s.session_id, "SessionKicked", reason);

@@ -452,14 +452,56 @@ impl ServerContext {
 
     /// Initializes a `ServerContext` backed by a SQLite world database at `path`.
     pub fn from_sqlite(path: impl AsRef<std::path::Path>) -> Result<Self, String> {
-        let db = Arc::new(WorldRepository::open_sqlite(path)?);
+        let p = path.as_ref();
+        let ext = p
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase());
+        if !matches!(ext.as_deref(), Some("sqlite" | "sqlite3" | "db")) {
+            return Err(format!(
+                "world_db_path '{}' must use a SQLite file extension (.sqlite, .sqlite3, or .db)",
+                p.display()
+            ));
+        }
+        let repo = WorldRepository::open_sqlite(p)?;
+        repo.ensure_auth_sqlite_connection()?;
+        let db = Arc::new(repo);
         Ok(Self::with_repository(db))
     }
 
-    /// Initializes a `ServerContext` from a [`crate::config::ServerConfig`] (`D-5`).
+    /// Initializes a `ServerContext` from a [`crate::config::ServerConfig`] (`D-5`, `#877`).
     pub fn from_config(cfg: &crate::config::ServerConfig) -> Result<Self, String> {
-        let sde = Arc::new(SdeRegistry::open(&cfg.sde_path).map_err(|e| e.to_string())?);
-        let db = Arc::new(WorldRepository::new_empty_with_snapshot_path(Some(std::path::PathBuf::from(&cfg.world_db_path)))?);
+        let backend = cfg.validate_storage_backend()?;
+        let sde = match SdeRegistry::open(&cfg.sde_path) {
+            Ok(s) => Arc::new(s),
+            #[cfg(test)]
+            Err(_) if cfg.sde_path == "data/evomu_sde.sqlite" => {
+                Arc::new(SdeRegistry::with_canonical_seed())
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+        let db = match backend {
+            "sqlite" => {
+                tracing::info!(
+                    storage_backend = "sqlite",
+                    world_db_path = %cfg.world_db_path,
+                    "opening SQLite world repository"
+                );
+                let repo = WorldRepository::open_sqlite(&cfg.world_db_path)?;
+                repo.ensure_auth_sqlite_connection()?;
+                Arc::new(repo)
+            }
+            "memory" => {
+                tracing::info!(
+                    storage_backend = "memory",
+                    "opening ephemeral in-memory world repository"
+                );
+                Arc::new(WorldRepository::new_empty_with_snapshot_path(None)?)
+            }
+            other => {
+                return Err(format!("Unsupported storage backend '{other}'"));
+            }
+        };
         for p in &cfg.player_accounts {
             if !p.username.trim().is_empty() && !p.password_token.trim().is_empty() {
                 db.provision_player_account(p.username.trim(), p.password_token.trim());
@@ -1265,13 +1307,17 @@ impl ServerContext {
                     }
                 }
                 snap.skill_queues.insert(char_id, remaining_queue);
+                let level_completed = !history_to_append.is_empty();
                 if !history_to_append.is_empty() {
                     snap.skill_history.entry(char_id).or_default().extend(history_to_append);
                 }
                 if total_sp_gained > 0.0 {
                     if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
                         ch_mut.skill_points += total_sp_gained;
-                        ships_to_invalidate.push((char_id, ch_mut.active_ship_id));
+                        if level_completed && ch_mut.active_ship_id > 0 {
+                            let in_space = ch_mut.station_id.is_none() && ch_mut.structure_id.is_none();
+                            ships_to_invalidate.push((char_id, ch_mut.active_ship_id, in_space));
+                        }
                     }
                 }
             }
@@ -1301,35 +1347,50 @@ impl ServerContext {
                 crate::services::jump_clone_names::skill_queue_rowset(self, cid),
             );
         }
-        for (cid, ship_id) in invalidated_ships {
-            self.sync_ship_ballpark_stats(cid, ship_id);
+        for (cid, ship_id, in_space) in invalidated_ships {
+            if in_space {
+                self.sync_ship_ballpark_stats(cid, ship_id);
+            } else {
+                self.invalidate_ship_fitting(ship_id);
+            }
         }
     }
 
     /// Invalidates cached Dogma fitting for `ship_id` and pushes recomputed kinematics and
-    /// `CombatState` baselines to any active `SystemActor` containing the ship (`#736`).
+    /// `CombatState` baselines to the active `SystemActor` containing the ship when in space (`#736`, `#840`).
     pub fn sync_ship_ballpark_stats(&self, char_id: i64, ship_id: i64) {
         if ship_id <= 0 {
             return;
         }
         self.invalidate_ship_fitting(ship_id);
-        let type_id = self
-            .db
-            .with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id))
-            .unwrap_or(0);
+        let (type_id, in_space_sys_id) = self.db.with_snapshot(|s| {
+            let Some(item) = s.items.get(&ship_id) else {
+                return (0, None);
+            };
+            let sys_id = if let Some(ch) = s.characters.get(&char_id) {
+                if ch.station_id.is_none() && ch.structure_id.is_none() {
+                    u32::try_from(ch.solar_system_id).ok()
+                } else {
+                    None
+                }
+            } else {
+                u32::try_from(item.location_id)
+                    .ok()
+                    .filter(|&loc| (30_000_000..40_000_000).contains(&loc))
+            };
+            (item.type_id, sys_id)
+        });
         if type_id == 0 {
             return;
         }
-        let handles = self.systems.active_system_handles();
-        if handles.is_empty() {
+        let Some(sys_id) = in_space_sys_id else {
             return;
-        }
+        };
+        let Some(handle) = self.systems.get_handle(sys_id) else {
+            return;
+        };
         let fresh = self.build_ship_combat_state(char_id, ship_id, type_id);
-        for (_, h) in handles {
-            if h.try_sync_ship_ballpark_stats(ship_id, &fresh) {
-                break;
-            }
-        }
+        let _ = handle.try_sync_ship_ballpark_stats(ship_id, &fresh);
     }
 
     pub fn invalidate_ship_fitting(&self, ship_id: i64) {

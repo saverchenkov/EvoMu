@@ -121,6 +121,20 @@ pub fn resolve_agent_and_corp_for_system(
             .ok()
             .map(|ch| ch.home_station_id)
     });
+    resolve_agent_and_corp_for_system_with_preferred_station(
+        ctx,
+        sys_id,
+        preferred_station,
+        is_storyline,
+    )
+}
+
+pub fn resolve_agent_and_corp_for_system_with_preferred_station(
+    ctx: &ServerContext,
+    sys_id: u32,
+    preferred_station: Option<i64>,
+    is_storyline: bool,
+) -> (i64, i64) {
     let cur_sys = ctx.sde.solar_systems.get(&sys_id);
     let cur_constellation = cur_sys.map(|s| s.constellation_id);
     let cur_region = cur_sys.map(|s| s.region_id);
@@ -164,7 +178,7 @@ pub fn resolve_agent_and_corp_for_system(
             !is_storyline_agent_type(a.agent_type_id)
                 && !is_unsupported_direct_agent_type(a.agent_type_id)
         };
-        station_id
+        preferred_station
             .and_then(|sid| {
                 ctx.sde.agents.values().filter(|a| {
                     a.solar_system_id == Some(sys_id)
@@ -604,11 +618,13 @@ pub async fn abandon_or_decline_mission(
                 .get(&m_agent_id)
                 .map(|a| a.corporation_id)
                 .unwrap_or_else(|| {
-                    resolve_agent_and_corp_for_system(
+                    let preferred_station = session
+                        .station_id
+                        .or_else(|| snap.characters.get(&char_id).map(|c| c.home_station_id));
+                    resolve_agent_and_corp_for_system_with_preferred_station(
                         ctx,
-                        char_id,
                         m_sys_id,
-                        session.station_id,
+                        preferred_station,
                         false,
                     )
                     .1
