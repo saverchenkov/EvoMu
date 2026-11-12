@@ -60,10 +60,11 @@ pub enum LockRankMode {
 mod imp {
     use super::{Location, LockRankMode, LOCK_RANK_RATCHET_RAW};
     use std::cell::RefCell;
-    use std::collections::{BTreeMap, BTreeSet, HashSet};
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
     use std::io::Write as _;
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
+    use std::thread::ThreadId;
 
     #[derive(Clone, Copy)]
     struct HeldEntry {
@@ -78,13 +79,22 @@ mod imp {
         entries: Vec<HeldEntry>,
     }
 
+    fn held_stacks() -> &'static Mutex<HashMap<ThreadId, HeldStack>> {
+        static HELD_BY_THREAD: OnceLock<Mutex<HashMap<ThreadId, HeldStack>>> = OnceLock::new();
+        HELD_BY_THREAD.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
     pub(crate) struct HeldToken {
         id: u64,
+        thread_id: Option<ThreadId>,
     }
 
     impl HeldToken {
         pub(crate) const fn none() -> Self {
-            Self { id: 0 }
+            Self {
+                id: 0,
+                thread_id: None,
+            }
         }
     }
 
@@ -93,18 +103,19 @@ mod imp {
             if self.id == 0 {
                 return;
             }
-            let _ = HELD.try_with(|cell| {
-                if let Ok(mut stack) = cell.try_borrow_mut() {
-                    if let Some(pos) = stack.entries.iter().rposition(|e| e.id == self.id) {
-                        stack.entries.remove(pos);
-                    }
+            let Some(tid) = self.thread_id else {
+                return;
+            };
+            let mut map = held_stacks().lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(stack) = map.get_mut(&tid) {
+                if let Some(pos) = stack.entries.iter().rposition(|e| e.id == self.id) {
+                    stack.entries.remove(pos);
                 }
-            });
+            }
         }
     }
 
     thread_local! {
-        static HELD: RefCell<HeldStack> = RefCell::new(HeldStack::default());
         #[cfg(test)]
         static TEST_CONFIG: RefCell<Option<(LockRankMode, Option<PathBuf>)>> = const { RefCell::new(None) };
     }
@@ -272,48 +283,64 @@ mod imp {
     }
 
     pub(crate) fn enter(rank: u16, site: &'static Location<'static>) -> HeldToken {
-        let violation = HELD.with(|cell| {
-            let stack = cell.borrow();
-            let violating = stack.entries.iter().rev().find(|e| e.rank >= rank).copied();
-            violating.map(|v| (v.rank, v.site, stack_summary(&stack.entries)))
-        });
+        let tid = std::thread::current().id();
+        let violation = {
+            let map = held_stacks().lock().unwrap_or_else(|e| e.into_inner());
+            map.get(&tid).and_then(|stack| {
+                stack
+                    .entries
+                    .iter()
+                    .rev()
+                    .find(|e| e.rank >= rank)
+                    .copied()
+                    .map(|v| (v.rank, v.site, stack_summary(&stack.entries)))
+            })
+        };
         if let Some((held_rank, held_site, summary)) = violation {
             report_violation(held_rank, held_site, rank, site, &summary, "out-of-order lock acquisition");
         }
-        HELD.with(|cell| {
-            let mut stack = cell.borrow_mut();
-            stack.next_id = stack.next_id.saturating_add(1).max(1);
-            let id = stack.next_id;
-            stack.entries.push(HeldEntry { id, rank, site });
-            HeldToken { id }
-        })
+        let mut map = held_stacks().lock().unwrap_or_else(|e| e.into_inner());
+        let stack = map.entry(tid).or_default();
+        stack.next_id = stack.next_id.saturating_add(1).max(1);
+        let id = stack.next_id;
+        stack.entries.push(HeldEntry { id, rank, site });
+        HeldToken {
+            id,
+            thread_id: Some(tid),
+        }
     }
 
     pub(crate) fn assert_no_locks_held(site: &'static Location<'static>) {
-        let violation = HELD.with(|cell| {
-            let stack = cell.borrow();
-            stack
-                .entries
-                .last()
-                .copied()
-                .map(|top| (top.rank, top.site, stack_summary(&stack.entries)))
-        });
+        let tid = std::thread::current().id();
+        let violation = {
+            let map = held_stacks().lock().unwrap_or_else(|e| e.into_inner());
+            map.get(&tid).and_then(|stack| {
+                stack
+                    .entries
+                    .last()
+                    .copied()
+                    .map(|top| (top.rank, top.site, stack_summary(&stack.entries)))
+            })
+        };
         if let Some((held_rank, held_site, summary)) = violation {
             report_violation(held_rank, held_site, 0, site, &summary, "assert_no_locks_held");
         }
     }
 
     pub(crate) fn assert_locks_below(max_rank: u16, site: &'static Location<'static>) {
-        let violation = HELD.with(|cell| {
-            let stack = cell.borrow();
-            stack
-                .entries
-                .iter()
-                .rev()
-                .find(|e| e.rank >= max_rank)
-                .copied()
-                .map(|v| (v.rank, v.site, stack_summary(&stack.entries)))
-        });
+        let tid = std::thread::current().id();
+        let violation = {
+            let map = held_stacks().lock().unwrap_or_else(|e| e.into_inner());
+            map.get(&tid).and_then(|stack| {
+                stack
+                    .entries
+                    .iter()
+                    .rev()
+                    .find(|e| e.rank >= max_rank)
+                    .copied()
+                    .map(|v| (v.rank, v.site, stack_summary(&stack.entries)))
+            })
+        };
         if let Some((held_rank, held_site, summary)) = violation {
             report_violation(
                 held_rank,
@@ -327,7 +354,11 @@ mod imp {
     }
 
     pub(crate) fn held_ranks() -> Vec<u16> {
-        HELD.with(|cell| cell.borrow().entries.iter().map(|e| e.rank).collect())
+        let tid = std::thread::current().id();
+        let map = held_stacks().lock().unwrap_or_else(|e| e.into_inner());
+        map.get(&tid)
+            .map(|stack| stack.entries.iter().map(|e| e.rank).collect())
+            .unwrap_or_default()
     }
 
     #[cfg(test)]

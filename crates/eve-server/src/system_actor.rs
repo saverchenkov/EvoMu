@@ -189,13 +189,8 @@ impl SystemRegistry {
         solar_system_id: SolarSystemId,
         ball_id: BallId,
     ) -> Option<DVec3> {
-        let handle = self
-            .systems
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&solar_system_id)
-            .cloned();
-        handle.and_then(|h| h.get_ball_position_sync(ball_id))
+        self.get_handle(solar_system_id)
+            .and_then(|h| h.get_ball_position_sync(ball_id))
     }
 
     pub fn is_ball_scrambled_sync(
@@ -203,13 +198,8 @@ impl SystemRegistry {
         solar_system_id: SolarSystemId,
         ball_id: BallId,
     ) -> bool {
-        let handle = self
-            .systems
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&solar_system_id)
-            .cloned();
-        handle.is_some_and(|h| h.is_ball_scrambled_sync(ball_id))
+        self.get_handle(solar_system_id)
+            .is_some_and(|h| h.is_ball_scrambled_sync(ball_id))
     }
 
     pub fn has_active_modules_or_cloak_sync(
@@ -217,24 +207,12 @@ impl SystemRegistry {
         solar_system_id: SolarSystemId,
         ball_id: BallId,
     ) -> bool {
-        let handle = self
-            .systems
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&solar_system_id)
-            .cloned();
-        handle.is_some_and(|h| h.has_active_modules_or_cloak_sync(ball_id))
+        self.get_handle(solar_system_id)
+            .is_some_and(|h| h.has_active_modules_or_cloak_sync(ball_id))
     }
 
     pub fn find_ball_position_sync(&self, ball_id: BallId) -> Option<DVec3> {
-        let handles: Vec<SystemHandle> = self
-            .systems
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .values()
-            .cloned()
-            .collect();
-        for handle in handles {
+        for (_, handle) in self.active_system_handles() {
             if let Some(pos) = handle.get_ball_position_sync(ball_id) {
                 return Some(pos);
             }
@@ -252,23 +230,13 @@ impl SystemRegistry {
     }
 
     pub fn get_system_sim_elapsed(&self, solar_system_id: SolarSystemId) -> f64 {
-        let handle = self
-            .systems
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&solar_system_id)
-            .cloned();
-        handle.map(|h| h.sim_elapsed_secs()).unwrap_or(0.0)
+        self.get_handle(solar_system_id)
+            .map(|h| h.sim_elapsed_secs())
+            .unwrap_or(0.0)
     }
 
     pub fn take_pending_cycle_actions(&self, solar_system_id: SolarSystemId) -> Vec<PendingCycleAction> {
-        let handle = self
-            .systems
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&solar_system_id)
-            .cloned();
-        handle
+        self.get_handle(solar_system_id)
             .map(|h| h.take_pending_cycle_actions())
             .unwrap_or_default()
     }
@@ -319,16 +287,9 @@ impl SystemRegistry {
     }
 
     pub fn cancel_nanite_repairs_for_ship_sync(&self, ship_id: BallId) -> Vec<ActiveNaniteRepair> {
-        let handles: Vec<SystemHandle> = self
-            .systems
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .values()
-            .cloned()
-            .collect();
-        handles
+        self.active_system_handles()
             .into_iter()
-            .flat_map(|h| h.cancel_nanite_repairs_for_ship_sync(ship_id))
+            .flat_map(|(_, h)| h.cancel_nanite_repairs_for_ship_sync(ship_id))
             .collect()
     }
 
@@ -361,15 +322,8 @@ impl SystemRegistry {
     /// Populates static SDE celestials, stargates, and stations (`SP-1`), re-materializes persisted
     /// space objects (`SP-7`), and hibernates (`LOD 0`) with zero timer wakes until dynamic balls exist.
     pub fn get_or_spawn(&self, solar_system_id: SolarSystemId) -> SystemHandle {
-        if let Some(existing) = self
-            .systems
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&solar_system_id)
-        {
-            if !existing.cmd_tx.is_closed() {
-                return existing.clone();
-            }
+        if let Some(existing) = self.get_handle(solar_system_id) {
+            return existing;
         }
 
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<SystemCommand>(SYSTEM_MAILBOX_CAPACITY);
@@ -388,44 +342,54 @@ impl SystemRegistry {
         if let Some(sde) = &sde_opt {
             populate_system_celestials(&mut initial_ballpark, solar_system_id, sde);
         }
-        crate::services::cluster_macho_misc_services::populate_shipcaster_balls_from_db(
-            solar_system_id,
-            &mut initial_ballpark,
-            db_opt.as_ref(),
-        );
+        let db_read_safe = db_opt.as_ref().is_some_and(|db| {
+            !db.is_write_locked_by_current_thread()
+                && !held_lock_ranks().iter().any(|&r| r >= eve_db::lock_rank::RANK_WORLD_INNER)
+        });
+        if db_read_safe {
+            crate::services::cluster_macho_misc_services::populate_shipcaster_balls_from_db(
+                solar_system_id,
+                &mut initial_ballpark,
+                db_opt.as_ref(),
+            );
+        }
         let mut initial_asteroids = HashMap::new();
         let mut initial_asteroid_templates = HashMap::new();
         let initial_pending_disruptors = if let (Some(sde), Some(db)) = (&sde_opt, &db_opt) {
-            let first_sde_belt_ast_id =
-                crate::system_actor::belts::belt_asteroid_base_id(solar_system_id);
-            let has_persisted_belt_asteroids =
-                db.with_snapshot(|s| s.asteroids.contains_key(&first_sde_belt_ast_id));
-            if has_persisted_belt_asteroids {
-                let spawned = populate_asteroid_belt_entities(&mut initial_ballpark, solar_system_id, sde);
-                let _ = reconcile_spawned_belt_asteroids(
+            if db_read_safe {
+                let first_sde_belt_ast_id =
+                    crate::system_actor::belts::belt_asteroid_base_id(solar_system_id);
+                let has_persisted_belt_asteroids =
+                    db.with_snapshot(|s| s.asteroids.contains_key(&first_sde_belt_ast_id));
+                if has_persisted_belt_asteroids {
+                    let spawned = populate_asteroid_belt_entities(&mut initial_ballpark, solar_system_id, sde);
+                    let _ = reconcile_spawned_belt_asteroids(
+                        &mut initial_ballpark,
+                        solar_system_id,
+                        spawned,
+                        &mut initial_asteroids,
+                        &mut initial_asteroid_templates,
+                        &db_opt,
+                        belt_interval_atomic.load(std::sync::atomic::Ordering::Relaxed),
+                        downtime_utc_atomic.load(std::sync::atomic::Ordering::Relaxed),
+                    );
+                }
+                let pending = crate::sp6_lifecycle::populate_persisted_space_objects(
                     &mut initial_ballpark,
                     solar_system_id,
-                    spawned,
-                    &mut initial_asteroids,
-                    &mut initial_asteroid_templates,
-                    &db_opt,
-                    belt_interval_atomic.load(std::sync::atomic::Ordering::Relaxed),
-                    downtime_utc_atomic.load(std::sync::atomic::Ordering::Relaxed),
+                    sde,
+                    db,
                 );
+                crate::services::cluster_macho_misc_services::populate_shipcaster_balls_with_sde(
+                    solar_system_id,
+                    &mut initial_ballpark,
+                    Some(sde),
+                    Some(db),
+                );
+                pending
+            } else {
+                Vec::new()
             }
-            let pending = crate::sp6_lifecycle::populate_persisted_space_objects(
-                &mut initial_ballpark,
-                solar_system_id,
-                sde,
-                db,
-            );
-            crate::services::cluster_macho_misc_services::populate_shipcaster_balls_with_sde(
-                solar_system_id,
-                &mut initial_ballpark,
-                Some(sde),
-                Some(db),
-            );
-            pending
         } else {
             Vec::new()
         };
@@ -1856,21 +1820,32 @@ impl SystemRegistry {
             target_lock_completed_hook: Arc::clone(&self.target_lock_completed_hook),
             system_step_hook: Arc::clone(&self.system_step_hook),
         };
-        let mut guard = self.systems.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(existing) = guard.get(&solar_system_id) {
-            if !existing.cmd_tx.is_closed() {
-                return existing.clone();
-            }
-            tracing::warn!(
-                solar_system_id,
-                "replacing terminated SystemActor handle with freshly spawned actor"
-            );
-        }
         if let Some(ref db) = self.db {
             register_db_system_ballpark(db, solar_system_id, &handle);
         }
-        guard.insert(solar_system_id, handle.clone());
-        handle
+        let insert_handle = |guard: &mut HashMap<SolarSystemId, SystemHandle>| -> SystemHandle {
+            if let Some(existing) = guard.get(&solar_system_id) {
+                if !existing.cmd_tx.is_closed() {
+                    return existing.clone();
+                }
+                tracing::warn!(
+                    solar_system_id,
+                    "replacing terminated SystemActor handle with freshly spawned actor"
+                );
+            }
+            guard.insert(solar_system_id, handle.clone());
+            handle.clone()
+        };
+        if held_lock_ranks().iter().any(|&r| r >= RANK_SYSTEM_REGISTRY) {
+            match self.systems.try_write_unranked() {
+                Ok(mut guard) => insert_handle(&mut guard),
+                Err(std::sync::TryLockError::Poisoned(e)) => insert_handle(&mut e.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) => handle,
+            }
+        } else {
+            let mut guard = self.systems.write().unwrap_or_else(|e| e.into_inner());
+            insert_handle(&mut guard)
+        }
     }
 }
 

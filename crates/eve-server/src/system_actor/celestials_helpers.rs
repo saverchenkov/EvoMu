@@ -103,15 +103,33 @@ pub(crate) fn sync_ball_positions(
             }
         }
     }
-    *cache.write().unwrap_or_else(|e| e.into_inner()) = positions;
-    *scrambled.write().unwrap_or_else(|e| e.into_inner()) = scram;
+    let leaf_held = eve_db::lock_rank::held_lock_ranks()
+        .iter()
+        .any(|&r| r >= RANK_LEAF);
+    if leaf_held {
+        if let Ok(mut g) = cache.try_write_unranked() {
+            *g = positions;
+        }
+        if let Ok(mut g) = scrambled.try_write_unranked() {
+            *g = scram;
+        }
+    } else {
+        *cache.write().unwrap_or_else(|e| e.into_inner()) = positions;
+        *scrambled.write().unwrap_or_else(|e| e.into_inner()) = scram;
+    }
     let warp_arc_opt = committed_warp_cache_map()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(&(cache as *const RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF> as usize))
         .and_then(|w| w.upgrade());
     if let Some(warp_arc) = warp_arc_opt {
-        *warp_arc.write().unwrap_or_else(|e| e.into_inner()) = warps;
+        if leaf_held {
+            if let Ok(mut g) = warp_arc.try_write_unranked() {
+                *g = warps;
+            }
+        } else {
+            *warp_arc.write().unwrap_or_else(|e| e.into_inner()) = warps;
+        }
     }
 }
 

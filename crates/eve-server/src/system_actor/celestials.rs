@@ -53,18 +53,39 @@ impl SystemHandle {
     }
 
     pub fn get_ball_position_sync(&self, ball_id: BallId) -> Option<DVec3> {
-        self.ball_positions
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&ball_id)
-            .copied()
+        if eve_db::lock_rank::held_lock_ranks()
+            .iter()
+            .any(|&r| r >= eve_db::lock_rank::RANK_LEAF)
+        {
+            self.ball_positions
+                .read_unranked()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&ball_id)
+                .copied()
+        } else {
+            self.ball_positions
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&ball_id)
+                .copied()
+        }
     }
 
     pub fn is_ball_scrambled_sync(&self, ball_id: BallId) -> bool {
-        self.scrambled_balls
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains(&ball_id)
+        if eve_db::lock_rank::held_lock_ranks()
+            .iter()
+            .any(|&r| r >= eve_db::lock_rank::RANK_LEAF)
+        {
+            self.scrambled_balls
+                .read_unranked()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&ball_id)
+        } else {
+            self.scrambled_balls
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&ball_id)
+        }
     }
 
     pub fn try_set_ball_position(&self, ball_id: BallId, position: DVec3) {
@@ -443,38 +464,75 @@ impl SystemHandle {
 
     pub fn try_remove_ball(&self, ball_id: BallId) {
         self.cancel_ship_nanite_repairs_sync(ball_id, true);
-        let (removed_cycles, fallback_slim_owner, db_opt, deact_guard) = {
-            let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            let deact_guard = self.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
-            let super::SystemActorState {
-                active_module_cycles,
-                base_scramble_strengths,
-                base_core_strengths,
-                db_opt,
-                ..
-            } = &mut *st;
-            let removed_cycles = super::cycles::remove_all_ship_module_cycles(
-                &mut bp,
-                active_module_cycles,
-                base_scramble_strengths,
-                base_core_strengths,
-                &None,
-                ball_id,
-                None,
-            );
-            let fallback_slim_owner = bp
-                .ball_slim_meta
-                .get(&ball_id)
-                .and_then(|m| (m.owner_id > 0).then_some(m.owner_id));
-            base_scramble_strengths.remove(&ball_id);
-            base_core_strengths.remove(&ball_id);
-            let _ = bp.remove_ball(ball_id);
-            super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-            (removed_cycles, fallback_slim_owner, db_opt.clone(), deact_guard)
-        };
+        let remove_from_bp_and_st =
+            |bp: &mut Ballpark, st: &mut super::SystemActorState| {
+                let deact_guard = if eve_db::lock_rank::held_lock_ranks()
+                    .iter()
+                    .any(|&r| r >= eve_db::lock_rank::RANK_LEAF)
+                {
+                    self.module_deactivation_hook
+                        .read_unranked()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone()
+                } else {
+                    self.module_deactivation_hook
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone()
+                };
+                let super::SystemActorState {
+                    active_module_cycles,
+                    base_scramble_strengths,
+                    base_core_strengths,
+                    db_opt,
+                    ..
+                } = st;
+                let removed_cycles = super::cycles::remove_all_ship_module_cycles(
+                    bp,
+                    active_module_cycles,
+                    base_scramble_strengths,
+                    base_core_strengths,
+                    &None,
+                    ball_id,
+                    None,
+                );
+                let fallback_slim_owner = bp
+                    .ball_slim_meta
+                    .get(&ball_id)
+                    .and_then(|m| (m.owner_id > 0).then_some(m.owner_id));
+                base_scramble_strengths.remove(&ball_id);
+                base_core_strengths.remove(&ball_id);
+                let _ = bp.remove_ball(ball_id);
+                super::sync_ball_positions(bp, &self.ball_positions, &self.scrambled_balls);
+                (removed_cycles, fallback_slim_owner, db_opt.clone(), deact_guard)
+            };
+        let (removed_cycles, fallback_slim_owner, db_opt, deact_guard) =
+            if eve_db::lock_rank::held_lock_ranks()
+                .iter()
+                .any(|&r| r >= eve_db::lock_rank::RANK_BALLPARK)
+            {
+                let mut bp = match self.ballpark.try_write_unranked() {
+                    Ok(g) => g,
+                    Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => return,
+                };
+                let mut st = match self.actor_state.try_write_unranked() {
+                    Ok(g) => g,
+                    Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => return,
+                };
+                remove_from_bp_and_st(&mut bp, &mut st)
+            } else {
+                let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+                let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+                remove_from_bp_and_st(&mut bp, &mut st)
+            };
         if let Some(db_ref) = db_opt {
-            if !db_ref.is_write_locked_by_current_thread() {
+            if !db_ref.is_write_locked_by_current_thread()
+                && !eve_db::lock_rank::held_lock_ranks()
+                    .iter()
+                    .any(|&r| r >= eve_db::lock_rank::RANK_WORLD_INNER)
+            {
                 db_ref.with_mut_snapshot(|snap| {
                     let ship_mod_ids: Vec<i64> = snap
                         .items
@@ -574,8 +632,7 @@ impl SystemHandle {
     }
 
     pub fn cancel_ship_nanite_repairs_sync(&self, ship_id: BallId, refund_paste: bool) {
-        let (cancelled, db_opt, sde_opt) = {
-            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+        let drain_fn = |st: &mut super::SystemActorState| {
             let mut cancelled = Vec::new();
             st.active_nanite_repairs.retain(|r| {
                 if r.ship_id == ship_id {
@@ -592,6 +649,19 @@ impl SystemHandle {
                 }
             });
             (cancelled, st.db_opt.clone(), st.sde_opt.clone())
+        };
+        let (cancelled, db_opt, sde_opt) = if eve_db::lock_rank::held_lock_ranks()
+            .iter()
+            .any(|&r| r >= eve_db::lock_rank::RANK_ACTOR_STATE)
+        {
+            match self.actor_state.try_write_unranked() {
+                Ok(mut st) => drain_fn(&mut st),
+                Err(std::sync::TryLockError::Poisoned(e)) => drain_fn(&mut e.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) => return,
+            }
+        } else {
+            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+            drain_fn(&mut st)
         };
         if !cancelled.is_empty() {
             if let Some(db) = db_opt {
@@ -698,29 +768,43 @@ impl SystemHandle {
         combat_state: CombatState,
         slim_meta: SlimItemMeta,
     ) {
-        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        let ball_id = ball.id;
-        if bp.balls.contains_key(&ball_id) {
-            let _ = bp.remove_ball(ball_id);
-        }
-        if matches!(ball.mode, eve_destiny::MovementMode::Rigid) {
-            bp.add_static_ball_with_meta(ball.clone(), slim_meta);
-            bp.combat_states.insert(ball_id, combat_state);
-            bp.pending_events
-                .push(eve_destiny::DestinyEvent::AddBall { ball: ball.clone() });
-            bp.queue_event_for_all_grid_observers(
-                Some(ball_id),
-                &eve_destiny::DestinyEvent::AddBalls2 { balls: vec![ball] },
-            );
-        } else {
-            if super::should_pin_stationary_ball(&ball, Some(&slim_meta)) {
-                bp.mark_ball_non_free(ball_id, false);
+        let apply_spawn = |bp: &mut Ballpark| {
+            let ball_id = ball.id;
+            if bp.balls.contains_key(&ball_id) {
+                let _ = bp.remove_ball(ball_id);
             }
-            bp.set_ball_slim_meta(ball_id, slim_meta);
-            bp.add_ball(ball);
-            bp.combat_states.insert(ball_id, combat_state);
+            if matches!(ball.mode, eve_destiny::MovementMode::Rigid) {
+                bp.add_static_ball_with_meta(ball.clone(), slim_meta);
+                bp.combat_states.insert(ball_id, combat_state);
+                bp.pending_events
+                    .push(eve_destiny::DestinyEvent::AddBall { ball: ball.clone() });
+                bp.queue_event_for_all_grid_observers(
+                    Some(ball_id),
+                    &eve_destiny::DestinyEvent::AddBalls2 { balls: vec![ball] },
+                );
+            } else {
+                if super::should_pin_stationary_ball(&ball, Some(&slim_meta)) {
+                    bp.mark_ball_non_free(ball_id, false);
+                }
+                bp.set_ball_slim_meta(ball_id, slim_meta);
+                bp.add_ball(ball);
+                bp.combat_states.insert(ball_id, combat_state);
+            }
+            super::sync_ball_positions(bp, &self.ball_positions, &self.scrambled_balls);
+        };
+        if eve_db::lock_rank::held_lock_ranks()
+            .iter()
+            .any(|&r| r >= eve_db::lock_rank::RANK_BALLPARK)
+        {
+            match self.ballpark.try_write_unranked() {
+                Ok(mut bp) => apply_spawn(&mut bp),
+                Err(std::sync::TryLockError::Poisoned(e)) => apply_spawn(&mut e.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) => {}
+            }
+        } else {
+            let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+            apply_spawn(&mut bp);
         }
-        super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
     }
 
     pub fn try_push_set_state(&self, observer_ball_id: BallId) -> bool {
