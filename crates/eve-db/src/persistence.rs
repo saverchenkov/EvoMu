@@ -209,6 +209,7 @@ impl WorldStateWalDelta {
             && old.quasar_commerce == new.quasar_commerce
             && old.fleet_and_social_ops == new.fleet_and_social_ops
             && old.cluster_and_runtime == new.cluster_and_runtime
+            && old.entity_kv == new.entity_kv
             && old.bookmark_subfolder_parents == new.bookmark_subfolder_parents
             && new.wallet_journal.len() >= old.wallet_journal.len()
             && new.wallet_journal[..old.wallet_journal.len()] == old.wallet_journal[..]
@@ -939,6 +940,7 @@ impl WorldRepository {
                 .store(valid_count, std::sync::atomic::Ordering::SeqCst);
         }
         snap.fold_legacy_plex_balances();
+        snap.migrate_legacy_service_state();
         snap.reconcile_id_counters();
         snap.backfill_fw_system_occupations();
         for (&sid, st) in &mut snap.system_states {

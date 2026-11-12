@@ -56,9 +56,13 @@ pub(crate) fn collect_all_warzone_systems(ctx: &ServerContext) -> Vec<(u32, f64,
 
 fn dynamic_resource_settings_from_db(ctx: &ServerContext) -> PyRep {
     let overrides: HashMap<String, serde_json::Value> = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get("dynamic_resource_settings")
-            .and_then(|raw| serde_json::from_str(raw).ok())
+        snap.kv(eve_db::Ns::DynamicResourceSettings)
+            .get::<HashMap<String, serde_json::Value>>(0, "")
+            .or_else(|| {
+                snap.service_state_blobs
+                    .get("dynamic_resource_settings")
+                    .and_then(|raw| serde_json::from_str(raw).ok())
+            })
             .unwrap_or_default()
     });
     let real = |key: &str, default: f64| -> PyRep {

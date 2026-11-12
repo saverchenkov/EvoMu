@@ -396,9 +396,18 @@ fn pop_escrowed_item_orig_flag(
     cid: i64,
     iid: i64,
 ) -> InventoryFlag {
-    snap.service_state_blobs
-        .remove(&format!("contract_orig_flag:{cid}:{iid}"))
-        .and_then(|s| s.parse::<u16>().ok())
+    let iid_sub = iid.to_string();
+    let kv_flag = snap
+        .kv(eve_db::Ns::ContractOrigFlag)
+        .get::<u16>(cid, &iid_sub);
+    snap.kv_mut(eve_db::Ns::ContractOrigFlag)
+        .remove(cid, &iid_sub);
+    kv_flag
+        .or_else(|| {
+            snap.service_state_blobs
+                .remove(&format!("contract_orig_flag:{cid}:{iid}"))
+                .and_then(|s| s.parse::<u16>().ok())
+        })
         .map(InventoryFlag::from_u16)
         .filter(|f| *f != InventoryFlag::Locked)
         .unwrap_or(InventoryFlag::Hangar)
@@ -834,11 +843,9 @@ pub fn handle(
                         item.version += 1;
                     }
                     if for_corp {
-                        snap.set_service_state_blob(
-                            format!("contract_orig_flag:{id}:{iid}"),
-                            (orig_flag as u16).to_string(),
-                        )
-                        .map_err(|e| rpc_err("ServiceStateLimitExceeded", e))?;
+                        snap.kv_mut(eve_db::Ns::ContractOrigFlag)
+                            .set_with_unix(id, iid.to_string(), &(orig_flag as u16), now_unix)
+                            .map_err(|e| rpc_err("ServiceStateLimitExceeded", e))?;
                     }
                     escrowed_items.push(iid);
                 }
@@ -1115,7 +1122,7 @@ pub fn handle(
 
                     let mut transferred_ids = Vec::new();
                     for iid in &c.item_ids {
-                        snap.service_state_blobs.remove(&format!("contract_orig_flag:{cid}:{iid}"));
+                        let _ = pop_escrowed_item_orig_flag(snap, cid, *iid);
                         if let Some(item) = snap.items.get_mut(iid) {
                             if item.owner_id != acceptor_entity_id {
                                 transferred_ids.push(*iid);
@@ -1146,7 +1153,7 @@ pub fn handle(
                     flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default()
                 });
                 for iid in &c.item_ids {
-                    snap.service_state_blobs.remove(&format!("contract_orig_flag:{cid}:{iid}"));
+                    let _ = pop_escrowed_item_orig_flag(snap, cid, *iid);
                     if let Some(item) = snap.items.get_mut(iid) {
                         item.location_id = wrap_id;
                         item.flag = InventoryFlag::Locked;
@@ -1331,11 +1338,19 @@ pub fn handle(
                 let prev_bidder_opt = c.current_bidder_id;
                 if let Some(prev_bidder) = prev_bidder_opt {
                     if c.current_bid.0 > 0 {
+                        let prev_sub = prev_bidder.to_string();
+                        let kv_div = snap
+                            .kv(eve_db::Ns::ContractBidDiv)
+                            .get::<u8>(cid, &prev_sub);
+                        snap.kv_mut(eve_db::Ns::ContractBidDiv)
+                            .remove(cid, &prev_sub);
+                        let legacy_div = snap
+                            .service_state_blobs
+                            .remove(&format!("contract_bid_div:{cid}:{prev_bidder}"))
+                            .and_then(|s| s.parse::<u8>().ok());
                         if let Some(prev_corp) = snap.corporations.get_mut(&prev_bidder) {
-                            let prev_div = snap
-                                .service_state_blobs
-                                .remove(&format!("contract_bid_div:{cid}:{prev_bidder}"))
-                                .and_then(|s| s.parse::<u8>().ok())
+                            let prev_div = kv_div
+                                .or(legacy_div)
                                 .filter(|&d| (1..=7).contains(&d))
                                 .unwrap_or(1);
                             let refunded = prev_corp.division_balance(prev_div).checked_add(c.current_bid).unwrap_or(prev_corp.division_balance(prev_div));
@@ -1351,11 +1366,14 @@ pub fn handle(
 
                 if bid_for_corp {
                     if snap.corporations.contains_key(&effective_caller_corp) {
-                        snap.set_service_state_blob(
-                            format!("contract_bid_div:{cid}:{effective_caller_corp}"),
-                            bidder_div_num.to_string(),
-                        )
-                        .map_err(|e| rpc_err("ServiceStateLimitExceeded", e))?;
+                        snap.kv_mut(eve_db::Ns::ContractBidDiv)
+                            .set_with_unix(
+                                cid,
+                                effective_caller_corp.to_string(),
+                                &bidder_div_num,
+                                now_unix,
+                            )
+                            .map_err(|e| rpc_err("ServiceStateLimitExceeded", e))?;
                         let corp = snap.corporations.get_mut(&effective_caller_corp).unwrap();
                         let new_bal = corp.division_balance(bidder_div_num).checked_sub(effective_bid).unwrap_or(IskCents(0));
                         corp.set_division_balance(bidder_div_num, new_bal);
@@ -1383,7 +1401,7 @@ pub fn handle(
                     let win_flag = if bid_for_corp { InventoryFlag::CorpDeliveries } else { InventoryFlag::Hangar };
                     let mut transferred_ids = Vec::new();
                     for iid in &c.item_ids {
-                        snap.service_state_blobs.remove(&format!("contract_orig_flag:{cid}:{iid}"));
+                        let _ = pop_escrowed_item_orig_flag(snap, cid, *iid);
                         if let Some(item) = snap.items.get_mut(iid) {
                             if item.owner_id != bidder_entity_id {
                                 transferred_ids.push(*iid);

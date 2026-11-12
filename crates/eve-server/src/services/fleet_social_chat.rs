@@ -1596,9 +1596,13 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 
 pub fn mint_or_rotate_xmpp_auth_token(ctx: &ServerContext, char_id: i64) -> String {
     let token = generate_xmpp_auth_token();
+    let now_unix = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
         snap.service_state_blobs
-            .insert(format!("xmpp:token:{char_id}"), token.clone());
+            .remove(&format!("xmpp:token:{char_id}"));
+        let _ = snap
+            .kv_mut(eve_db::Ns::XmppAuthToken)
+            .set_with_unix(char_id, "", &token, now_unix);
     });
     token
 }
@@ -1606,20 +1610,38 @@ pub fn mint_or_rotate_xmpp_auth_token(ctx: &ServerContext, char_id: i64) -> Stri
 pub fn ensure_xmpp_auth_token(ctx: &ServerContext, char_id: i64) -> String {
     let key = format!("xmpp:token:{char_id}");
     if let Some(existing) = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get(&key)
+        snap.kv(eve_db::Ns::XmppAuthToken)
+            .get::<String>(char_id, "")
             .filter(|t| !t.is_empty())
-            .cloned()
+            .or_else(|| {
+                snap.service_state_blobs
+                    .get(&key)
+                    .filter(|t| !t.is_empty())
+                    .cloned()
+            })
     }) {
         return existing;
     }
     let fresh = generate_xmpp_auth_token();
+    let now_unix = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
-        let entry = snap.service_state_blobs.entry(key).or_default();
-        if entry.is_empty() {
-            *entry = fresh.clone();
+        if let Some(existing) = snap
+            .kv(eve_db::Ns::XmppAuthToken)
+            .get::<String>(char_id, "")
+            .filter(|t| !t.is_empty())
+            .or_else(|| {
+                snap.service_state_blobs
+                    .get(&key)
+                    .filter(|t| !t.is_empty())
+                    .cloned()
+            })
+        {
+            return existing;
         }
-        entry.clone()
+        let _ = snap
+            .kv_mut(eve_db::Ns::XmppAuthToken)
+            .set_with_unix(char_id, "", &fresh, now_unix);
+        fresh.clone()
     })
 }
 
@@ -1627,6 +1649,8 @@ pub fn revoke_xmpp_auth_token(ctx: &ServerContext, char_id: i64) {
     let key = format!("xmpp:token:{char_id}");
     ctx.db.with_mut_snapshot(|snap| {
         snap.service_state_blobs.remove(&key);
+        snap.kv_mut(eve_db::Ns::XmppAuthToken)
+            .remove(char_id, "");
     });
 }
 
@@ -1669,9 +1693,13 @@ fn handle_get_help_channel(
         _ => "help_en",
     };
     let chan = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get(&format!("xmpp:help_channel:{lang}"))
-            .cloned()
+        snap.kv(eve_db::Ns::XmppHelpChannel)
+            .get::<String>(0, &lang)
+            .or_else(|| {
+                snap.service_state_blobs
+                    .get(&format!("xmpp:help_channel:{lang}"))
+                    .cloned()
+            })
             .unwrap_or_else(|| default_chan.to_string())
     });
     Some(Ok(PyRep::String(chan)))
@@ -1679,9 +1707,9 @@ fn handle_get_help_channel(
 
 fn handle_xmpp_hostname(ctx: &ServerContext) -> Option<Result<PyRep, BridgeRpcError>> {
     let host = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get("xmpp:hostname")
-            .cloned()
+        snap.kv(eve_db::Ns::XmppHostname)
+            .get::<String>(0, "")
+            .or_else(|| snap.service_state_blobs.get("xmpp:hostname").cloned())
             .unwrap_or_else(|| "chat.evomu.local".to_string())
     });
     Some(Ok(PyRep::String(host)))
@@ -1904,10 +1932,15 @@ pub fn xmpp_authenticate_sasl_plain(
             let acc = snap.accounts.values().find(|a| a.user_id == ch.user_id);
             let restricted = acc.is_some_and(|a| a.check_active_restriction(now_unix).is_err());
             let custom_token = snap
-                .service_state_blobs
-                .get(&format!("xmpp:token:{cid}"))
-                .cloned()
-                .filter(|t| !t.is_empty());
+                .kv(eve_db::Ns::XmppAuthToken)
+                .get::<String>(cid, "")
+                .filter(|t| !t.is_empty())
+                .or_else(|| {
+                    snap.service_state_blobs
+                        .get(&format!("xmpp:token:{cid}"))
+                        .cloned()
+                        .filter(|t| !t.is_empty())
+                });
             Some((ch.user_id, restricted, custom_token))
         });
         let Some((uid, restricted, custom_token)) = lookup else {

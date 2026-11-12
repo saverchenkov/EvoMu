@@ -163,10 +163,9 @@ async fn test_r4_188_character_transfer_blocks_paused_jobs_corp_orders_and_conse
     ctx.db.with_mut_snapshot(|snap| {
         snap.market_orders.remove(&918_802);
         snap.market_order_meta.remove(&918_802);
-        snap.service_state_blobs.insert(
-            "char_transfer_consent_token:2".into(),
-            "secret-consent-2".into(),
-        );
+        let _ = snap
+            .kv_mut(eve_db::Ns::CharTransferConsentToken)
+            .set(2, "", &"secret-consent-2");
     });
     let consent_err = ctx.quasar_gateway.handle_public_request(
         &sess,

@@ -403,8 +403,9 @@ fn character_transfer_validation_guards_and_execution_branches() {
     // Unban destination account, test consent token mismatch
     db.with_mut_snapshot(|snap| {
         snap.accounts.get_mut("dst_acc").unwrap().banned_until_unix = None;
-        snap.service_state_blobs
-            .insert(format!("char_transfer_consent_token:{dst_uid}"), "expected_secret".into());
+        let _ = snap
+            .kv_mut(eve_db::Ns::CharTransferConsentToken)
+            .set(dst_uid as i64, "", &"expected_secret");
     });
     assert_eq!(
         validate_fn(
@@ -597,8 +598,9 @@ fn federated_and_transfer_handlers_registration_and_exact_1000_plex_fee() {
         ch.plex_balance = 0;
         snap.characters.insert(char_id, ch);
         assert_eq!(snap.adjust_unified_plex(char_id, 999), Some(999));
-        snap.service_state_blobs
-            .insert(format!("char_transfer_consent_token:{dst_uid}"), "tok_ok".into());
+        let _ = snap
+            .kv_mut(eve_db::Ns::CharTransferConsentToken)
+            .set(dst_uid as i64, "", &"tok_ok");
     });
 
     let src_ctx = user_ctx(Some(src_uid as i32), Some(char_id), false);
@@ -633,8 +635,9 @@ fn federated_and_transfer_handlers_registration_and_exact_1000_plex_fee() {
         assert_eq!(ch.user_id, dst_uid);
         assert_eq!(snap.unified_plex_balance_for_user(src_uid), 500);
         assert!(snap
-            .service_state_blobs
-            .contains_key(&format!("char_transfer_last_unix:{char_id}")));
+            .kv(eve_db::Ns::CharTransferLastUnix)
+            .get::<u64>(char_id, "")
+            .is_some());
         assert!(snap
             .wallet_journal
             .iter()

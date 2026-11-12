@@ -342,17 +342,19 @@ async fn mutant_killers_load_slot_online_sort_db_blob_horizon_fallback_and_full_
     assert!(validate_and_consume_offered_load_slot(&ctx, cid, chosen_alt, &slot_key));
     assert!(!validate_and_consume_offered_load_slot(&ctx, cid, chosen_alt, &slot_key));
 
-    // 2. is_zarzakh_horizon_siege_active falls back to DB blob `zarzakh_horizon_siege_active` when in-memory phase is Normal
+    // 2. is_zarzakh_horizon_siege_active falls back to DB entity_kv / blob `zarzakh_horizon_siege_active` when in-memory phase is Normal
     set_zarzakh_horizon_siege_active(&ctx, false);
     assert!(!is_zarzakh_horizon_siege_active(&ctx));
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs
-            .insert("zarzakh_horizon_siege_active".into(), "true".into());
+        let _ = snap
+            .kv_mut(eve_db::Ns::ZarzakhHorizonSiegeActive)
+            .set(0, "", &true);
     });
     assert!(is_zarzakh_horizon_siege_active(&ctx));
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs
-            .insert("zarzakh_horizon_siege_active".into(), "false".into());
+        let _ = snap
+            .kv_mut(eve_db::Ns::ZarzakhHorizonSiegeActive)
+            .set(0, "", &false);
     });
     assert!(!is_zarzakh_horizon_siege_active(&ctx));
 

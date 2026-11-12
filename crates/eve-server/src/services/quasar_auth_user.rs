@@ -954,7 +954,11 @@ fn register_federated_and_transfer_handlers(
                     }
                     let consent_key = format!("char_transfer_consent_token:{dest_uid}");
                     if dest_uid != caller_uid && !is_admin {
-                        if let Some(expected_tok) = snap.service_state_blobs.get(&consent_key) {
+                        let expected_tok_opt = snap
+                            .kv(eve_db::Ns::CharTransferConsentToken)
+                            .get::<String>(dest_uid as i64, "")
+                            .or_else(|| snap.service_state_blobs.get(&consent_key).cloned());
+                        if let Some(expected_tok) = expected_tok_opt {
                             if expected_tok.trim().is_empty()
                                 || dest_consent_token.as_deref() != Some(expected_tok.as_str())
                             {
@@ -1024,9 +1028,13 @@ fn register_federated_and_transfer_handlers(
                         ));
                     }
                     if let Some(last_u) = snap
-                        .service_state_blobs
-                        .get(&cooldown_key)
-                        .and_then(|s| s.parse::<u64>().ok())
+                        .kv(eve_db::Ns::CharTransferLastUnix)
+                        .get::<u64>(char_id, "")
+                        .or_else(|| {
+                            snap.service_state_blobs
+                                .get(&cooldown_key)
+                                .and_then(|s| s.parse::<u64>().ok())
+                        })
                     {
                         if now_unix < last_u.saturating_add(10 * 86_400) {
                             return Err((
@@ -1068,10 +1076,11 @@ fn register_federated_and_transfer_handlers(
                             ch_mut.version = ch_mut.version.wrapping_add(1);
                         }
                         snap.service_state_blobs.remove(&consent_key);
-                        snap.service_state_blobs.insert(
-                            format!("char_transfer_evict_session:{char_id}"),
-                            now_unix.to_string(),
-                        );
+                        snap.kv_mut(eve_db::Ns::CharTransferConsentToken)
+                            .remove(dest_uid as i64, "");
+                        let _ = snap
+                            .kv_mut(eve_db::Ns::CharTransferEvictSession)
+                            .set_with_unix(char_id, "", &now_unix, now_unix);
                         snap.employment_history
                             .entry(char_id)
                             .or_default()
@@ -1087,8 +1096,10 @@ fn register_federated_and_transfer_handlers(
                             reason: format!("Paid character transfer from account {} to {}", ch.user_id, dest_uid),
                         });
                         snap.wallet_journal_timestamps.insert(jid, now_unix);
-                        snap.service_state_blobs
-                            .insert(cooldown_key, now_unix.to_string());
+                        snap.service_state_blobs.remove(&cooldown_key);
+                        let _ = snap
+                            .kv_mut(eve_db::Ns::CharTransferLastUnix)
+                            .set_with_unix(char_id, "", &now_unix, now_unix);
                     }
                     Ok(())
                 });

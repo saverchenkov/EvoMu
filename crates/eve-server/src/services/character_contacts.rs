@@ -1254,12 +1254,23 @@ pub fn handle_contacts(
                         return Err(BridgeRpcError { code: "MustBeDockedAtTargetStation".into(), message: format!("Station {new_home_id} is not a remote candidate") });
                     }
                     let cd_key = -10_000_099 - char_id;
-                    let next_allowed = snap.owner_notes.get(&cd_key).and_then(|n| n.note.parse::<u64>().ok()).unwrap_or(0);
+                    let next_allowed = snap
+                        .kv(eve_db::Ns::HomeStationRemoteCooldown)
+                        .get::<u64>(char_id, "")
+                        .or_else(|| {
+                            snap.owner_notes
+                                .get(&cd_key)
+                                .and_then(|n| n.note.parse::<u64>().ok())
+                        })
+                        .unwrap_or(0);
                     if now_unix < next_allowed {
                         return Err(BridgeRpcError { code: "HomeStationRemoteCooldownActive".into(), message: format!("Remote home station change on cooldown until {next_allowed}") });
                     }
                     let next_time = now_unix + 365 * 86_400;
-                    snap.owner_notes.insert(cd_key, eve_db::OwnerNoteRecord { note_id: cd_key, character_id: -char_id, item_id: new_home_id, label: "home_station_remote_cooldown".into(), note: next_time.to_string(), timestamp_unix: next_time });
+                    snap.owner_notes.remove(&cd_key);
+                    let _ = snap
+                        .kv_mut(eve_db::Ns::HomeStationRemoteCooldown)
+                        .set_with_unix(char_id, "", &next_time, now_unix);
                 }
                 let ch = snap.characters.get_mut(&char_id).unwrap();
                 ch.home_station_id = new_home_id;
@@ -1321,7 +1332,15 @@ pub fn handle_contacts(
         ("home_station", "get_next_remote_change_time") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let next_time = ctx.db.with_snapshot(|snap| {
-                snap.owner_notes.get(&(-10_000_099 - char_id)).and_then(|n| n.note.parse::<i64>().ok()).unwrap_or(0)
+                snap.kv(eve_db::Ns::HomeStationRemoteCooldown)
+                    .get::<u64>(char_id, "")
+                    .map(|t| t as i64)
+                    .or_else(|| {
+                        snap.owner_notes
+                            .get(&(-10_000_099 - char_id))
+                            .and_then(|n| n.note.parse::<i64>().ok())
+                    })
+                    .unwrap_or(0)
             });
             let rep = if next_time <= 0 {
                 PyRep::None
@@ -1344,6 +1363,8 @@ pub fn handle_contacts(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let _ = ctx.db.try_with_mut_snapshot(|snap| {
                 snap.owner_notes.remove(&(-10_000_099 - char_id));
+                snap.kv_mut(eve_db::Ns::HomeStationRemoteCooldown)
+                    .remove(char_id, "");
                 Ok::<(), std::convert::Infallible>(())
             });
             Some(Ok(PyRep::Integer(0)))

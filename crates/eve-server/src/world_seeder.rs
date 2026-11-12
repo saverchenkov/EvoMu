@@ -175,9 +175,14 @@ pub fn seed_dual_anchor_markets(db: &WorldRepository, sde: &SdeRegistry) -> usiz
         if !snap.markets_seeded {
             false
         } else if is_persistent {
-            snap.service_state_blobs
-                .get(MARKET_SEEDER_VERSION_KEY)
-                .map(|s| s.as_str())
+            snap.kv(eve_db::Ns::MarketSeederVersion)
+                .get::<String>(0, "")
+                .or_else(|| {
+                    snap.service_state_blobs
+                        .get(MARKET_SEEDER_VERSION_KEY)
+                        .cloned()
+                })
+                .as_deref()
                 == Some(MARKET_SEEDER_VERSION_V2)
         } else {
             true
@@ -267,10 +272,10 @@ fn seed_market_catalog_internal(
     db.try_with_mut_snapshot::<_, usize, String>(|snap| {
         snap.markets_seeded = true;
         if full_jita_catalog {
-            snap.service_state_blobs.insert(
-                MARKET_SEEDER_VERSION_KEY.to_string(),
-                MARKET_SEEDER_VERSION_V2.to_string(),
-            );
+            snap.service_state_blobs.remove(MARKET_SEEDER_VERSION_KEY);
+            let _ = snap
+                .kv_mut(eve_db::Ns::MarketSeederVersion)
+                .set(0, "", &MARKET_SEEDER_VERSION_V2);
         }
         let mut inserted = 0usize;
         let mut existing: std::collections::HashSet<(i64, i64, TypeId, bool)> = snap

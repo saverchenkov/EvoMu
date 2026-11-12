@@ -1302,12 +1302,15 @@ fn handle_community_track_change_qa_mode(
         _ => return Err(err("InvalidArgument", "mode must be a boolean or integer")),
     };
 
+    let now_unix = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
         ext.community_track_qa_mode = qa_mode;
         save_cosmetics_ui_state(snap, &ext);
-        snap.service_state_blobs
-            .insert("community_track_qa_mode".to_string(), qa_mode.to_string());
+        snap.service_state_blobs.remove("community_track_qa_mode");
+        let _ = snap
+            .kv_mut(eve_db::Ns::CommunityTrackQaMode)
+            .set_with_unix(0, "", &qa_mode, now_unix);
     });
 
     Ok(PyRep::Bool(true))

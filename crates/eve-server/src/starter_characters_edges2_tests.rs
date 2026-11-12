@@ -150,16 +150,20 @@ fn grant_starter_plex_in_snapshot_clamps_negative_next_entity_id_and_is_idempote
     grant_starter_plex_in_snapshot(&mut snap, 7001, 90_000_001, -10, 1_850_000_000);
     assert!(snap.account_plex_vault.get(&7001).is_none());
     assert_eq!(snap.next_entity_id, -5);
-    assert!(!snap
-        .service_state_blobs
-        .contains_key(STARTER_PLEX_GRANTED_USERS_BLOB));
+    assert_eq!(
+        snap.kv(eve_db::Ns::StarterPlexGranted)
+            .get::<bool>(7001, ""),
+        None
+    );
 
     grant_starter_plex_in_snapshot(&mut snap, 7001, 90_000_001, 250, 1_850_000_000);
     assert_eq!(snap.account_plex_vault.get(&7001).copied(), Some(250));
     assert_eq!(snap.next_entity_id, -4);
-    assert!(snap
-        .service_state_blobs
-        .contains_key(STARTER_PLEX_GRANTED_USERS_BLOB));
+    assert_eq!(
+        snap.kv(eve_db::Ns::StarterPlexGranted)
+            .get::<bool>(7001, ""),
+        Some(true)
+    );
 
     let txs_after_first: Vec<_> =
         crate::services::quasar_payment_store::get_plex_transactions(&snap)
@@ -185,8 +189,13 @@ fn grant_starter_plex_in_snapshot_clamps_negative_next_entity_id_and_is_idempote
     assert_eq!(txs_after_second.len(), 1);
 
     // Corrupted JSON marker recovers cleanly; minimal positive grant (1) is applied and advances tx_id.
-    snap.service_state_blobs
-        .insert(STARTER_PLEX_GRANTED_USERS_BLOB.to_string(), "{not-json".to_string());
+    snap.entity_kv.insert(
+        eve_db::EntityKvKey::new(eve_db::Ns::StarterPlexGranted, 7002, ""),
+        eve_db::EntityKvRow {
+            value_json: "{not-json".to_string(),
+            updated_unix: 0,
+        },
+    );
     snap.next_entity_id = 40;
     grant_starter_plex_in_snapshot(&mut snap, 7002, 999_123_456, 1, 1_850_000_020);
     assert_eq!(snap.account_plex_vault.get(&7002).copied(), Some(1));

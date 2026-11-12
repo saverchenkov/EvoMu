@@ -6,12 +6,24 @@ use rusqlite::{params, Connection, Transaction};
 use serde::{de::DeserializeOwned, Serialize};
 
 pub const SERVICE_DOMAINS_SCHEMA_VERSION: i64 = 6;
+pub const ENTITY_KV_SCHEMA_VERSION: i64 = 7;
 
 const SERVICE_DOMAINS_SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS service_domain_state (
     domain_key TEXT PRIMARY KEY,
     payload_json TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS entity_kv (
+    ns           TEXT    NOT NULL,
+    entity_id    INTEGER NOT NULL,
+    sub_key      TEXT    NOT NULL DEFAULT '',
+    value        BLOB    NOT NULL,
+    updated_unix INTEGER NOT NULL,
+    PRIMARY KEY (ns, entity_id, sub_key)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS entity_kv_by_entity ON entity_kv(entity_id, ns);
 "#;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -33,6 +45,8 @@ pub struct ServiceDomainsFingerprints {
     pub quasar_commerce: u64,
     pub fleet_and_social_ops: u64,
     pub cluster_and_runtime: u64,
+    pub entity_kv_fp: u64,
+    pub entity_kv_rows: std::collections::BTreeMap<crate::service_domains::EntityKvKey, u64>,
 }
 
 pub fn apply_service_domains_migration(conn: &Connection) -> Result<(), String> {
@@ -46,6 +60,11 @@ pub fn apply_service_domains_migration(conn: &Connection) -> Result<(), String> 
             "0006_service_domain_state",
             now_unix
         ],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations (version, name, applied_unix) VALUES (?1, ?2, ?3)",
+        params![ENTITY_KV_SCHEMA_VERSION, "0007_entity_kv", now_unix],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -189,7 +208,169 @@ pub fn compute_service_domains_fingerprints(
         };
     }
     for_each_service_domain!(compute_one);
+    fp.entity_kv_fp = fp_domain(&snap.entity_kv);
+    for (k, v) in &snap.entity_kv {
+        let rfp = canonical_fp(v);
+        fp.entity_kv_rows.insert(k.clone(), if rfp == 0 { 1 } else { rfp });
+    }
     fp
+}
+
+fn load_entity_kv_checked(
+    conn: &Connection,
+    snap: &mut WorldStateSnapshot,
+    ctx: &mut super::quarantine::LoadContext,
+) -> Result<(), String> {
+    snap.entity_kv.clear();
+    let mut stmt = match conn
+        .prepare("SELECT ns, entity_id, sub_key, value, updated_unix FROM entity_kv")
+    {
+        Ok(s) => s,
+        Err(_) => return Ok(()),
+    };
+    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+    let mut quarantined_pks: Vec<(rusqlite::types::Value, rusqlite::types::Value, rusqlite::types::Value)> =
+        Vec::new();
+    while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+        let key_display = format!(
+            "{}/{}/{}",
+            super::quarantine::row_col_string(r, 0),
+            super::quarantine::row_col_string(r, 1),
+            super::quarantine::row_col_string(r, 2)
+        );
+        let raw_payload = super::quarantine::row_col_string(r, 3);
+        let parsed_res = (|| -> Result<
+            (
+                crate::service_domains::EntityKvKey,
+                crate::service_domains::EntityKvRow,
+            ),
+            String,
+        > {
+            let ns_str: String = r.get(0).map_err(|e| e.to_string())?;
+            let entity_id: i64 = r.get(1).map_err(|e| e.to_string())?;
+            let sub_key: String = r.get(2).map_err(|e| e.to_string())?;
+            let value_json = match r.get_ref(3).map_err(|e| e.to_string())? {
+                rusqlite::types::ValueRef::Blob(b) | rusqlite::types::ValueRef::Text(b) => {
+                    std::str::from_utf8(b)
+                        .map(|s| s.to_owned())
+                        .map_err(|e| format!("entity_kv value is not valid UTF-8: {e}"))?
+                }
+                other => {
+                    return Err(format!(
+                        "entity_kv value has unexpected SQLite column type {:?}",
+                        other.data_type()
+                    ));
+                }
+            };
+            let updated_unix_i64: i64 = r.get(4).map_err(|e| e.to_string())?;
+            let ns = crate::service_domains::Ns::from_str_name(&ns_str)
+                .ok_or_else(|| format!("unknown entity_kv namespace '{ns_str}'"))?;
+            crate::service_domains::validate_entity_kv_value(ns, &value_json)?;
+            Ok((
+                crate::service_domains::EntityKvKey {
+                    ns,
+                    entity_id,
+                    sub_key,
+                },
+                crate::service_domains::EntityKvRow {
+                    value_json,
+                    updated_unix: updated_unix_i64.max(0) as u64,
+                },
+            ))
+        })();
+        match parsed_res {
+            Ok((k, v)) => {
+                snap.entity_kv.insert(k, v);
+            }
+            Err(err) => {
+                ctx.record_bad_row("entity_kv", "entity_kv", key_display, raw_payload, err, None)?;
+                if let (Ok(c0), Ok(c1), Ok(c2)) = (
+                    r.get::<_, rusqlite::types::Value>(0),
+                    r.get::<_, rusqlite::types::Value>(1),
+                    r.get::<_, rusqlite::types::Value>(2),
+                ) {
+                    quarantined_pks.push((c0, c1, c2));
+                }
+            }
+        }
+    }
+    drop(rows);
+    drop(stmt);
+    if !quarantined_pks.is_empty() && ctx.quarantine_unreadable && ctx.persist_quarantine && conn.is_autocommit() {
+        for (c0, c1, c2) in quarantined_pks {
+            let _ = conn.execute(
+                "DELETE FROM entity_kv WHERE ns IS ?1 AND entity_id IS ?2 AND sub_key IS ?3",
+                params![c0, c1, c2],
+            );
+        }
+    }
+    Ok(())
+}
+
+pub fn sync_entity_kv(
+    tx: &Transaction,
+    snap: &WorldStateSnapshot,
+    fp: &mut TableFingerprints,
+) -> Result<bool, String> {
+    let cur_fp = fp_domain(&snap.entity_kv);
+    if cur_fp == fp.service_domains.entity_kv_fp
+        && snap.entity_kv.len() == fp.service_domains.entity_kv_rows.len()
+    {
+        return Ok(false);
+    }
+    let mut changed = false;
+    let mut new_rows = std::collections::BTreeMap::new();
+    for (k, row) in &snap.entity_kv {
+        let rfp = {
+            let h = canonical_fp(row);
+            if h == 0 { 1 } else { h }
+        };
+        if fp.service_domains.entity_kv_rows.get(k).copied() != Some(rfp) {
+            crate::service_domains::validate_entity_kv_value(k.ns, &row.value_json)?;
+            tx.execute(
+                "INSERT OR REPLACE INTO entity_kv (ns, entity_id, sub_key, value, updated_unix) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    k.ns.as_str(),
+                    k.entity_id,
+                    k.sub_key,
+                    row.value_json.as_bytes(),
+                    row.updated_unix as i64
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+            changed = true;
+        }
+        new_rows.insert(k.clone(), rfp);
+    }
+    for old_k in fp.service_domains.entity_kv_rows.keys() {
+        if !snap.entity_kv.contains_key(old_k) {
+            tx.execute(
+                "DELETE FROM entity_kv WHERE ns = ?1 AND entity_id = ?2 AND sub_key = ?3",
+                params![old_k.ns.as_str(), old_k.entity_id, old_k.sub_key],
+            )
+            .map_err(|e| e.to_string())?;
+            changed = true;
+        }
+    }
+    fp.service_domains.entity_kv_fp = cur_fp;
+    fp.service_domains.entity_kv_rows = new_rows;
+    Ok(changed)
+}
+
+fn rollback_entity_kv(
+    conn: &Connection,
+    snap: &mut WorldStateSnapshot,
+    fp: &TableFingerprints,
+) {
+    if fp_domain(&snap.entity_kv) != fp.service_domains.entity_kv_fp
+        || snap.entity_kv.len() != fp.service_domains.entity_kv_rows.len()
+    {
+        let _ = load_entity_kv_checked(
+            conn,
+            snap,
+            &mut super::quarantine::LoadContext::quarantine_in_memory(),
+        );
+    }
 }
 
 pub fn load_service_domains_checked(
@@ -266,6 +447,8 @@ pub fn load_service_domains_checked(
         }
     }
 
+    load_entity_kv_checked(conn, snap, ctx)?;
+
     Ok(())
 }
 
@@ -294,6 +477,7 @@ pub fn sync_service_domains(
         };
     }
     for_each_service_domain!(sync_one);
+    changed |= sync_entity_kv(tx, snap, fp)?;
     Ok(changed)
 }
 
@@ -310,4 +494,5 @@ pub fn rollback_service_domains(
         };
     }
     for_each_service_domain!(rollback_one);
+    rollback_entity_kv(conn, snap, fp);
 }

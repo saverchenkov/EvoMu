@@ -1046,7 +1046,10 @@ pub fn tick_zarzakh_horizon_siege(ctx: &ServerContext, now_unix: u64) -> Zarzakh
         let is_active = state.phase == HorizonSiegePhase::Active;
         ctx.db.with_mut_snapshot(|snap| {
             snap.service_state_blobs
-                .insert("zarzakh_horizon_siege_active".into(), is_active.to_string());
+                .remove("zarzakh_horizon_siege_active");
+            let _ = snap
+                .kv_mut(eve_db::Ns::ZarzakhHorizonSiegeActive)
+                .set_with_unix(0, "", &is_active, now_unix);
         });
         persist_misc_state(ctx);
         emit_zarzakh_horizon_siege_changed(ctx, &state);
@@ -1088,11 +1091,13 @@ pub fn schedule_zarzakh_horizon_siege(
         }
         st.zarzakh_horizon_siege.clone()
     });
+    let is_active = state.phase == HorizonSiegePhase::Active;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(
-            "zarzakh_horizon_siege_active".into(),
-            (state.phase == HorizonSiegePhase::Active).to_string(),
-        );
+        snap.service_state_blobs
+            .remove("zarzakh_horizon_siege_active");
+        let _ = snap
+            .kv_mut(eve_db::Ns::ZarzakhHorizonSiegeActive)
+            .set_with_unix(0, "", &is_active, now);
     });
     persist_misc_state(ctx);
     emit_zarzakh_horizon_siege_changed(ctx, &state);
@@ -1124,7 +1129,10 @@ pub fn trigger_zarzakh_horizon_siege(
     });
     ctx.db.with_mut_snapshot(|snap| {
         snap.service_state_blobs
-            .insert("zarzakh_horizon_siege_active".into(), "true".into());
+            .remove("zarzakh_horizon_siege_active");
+        let _ = snap
+            .kv_mut(eve_db::Ns::ZarzakhHorizonSiegeActive)
+            .set_with_unix(0, "", &true, now);
     });
     persist_misc_state(ctx);
     emit_zarzakh_horizon_siege_changed(ctx, &state);
@@ -1137,9 +1145,13 @@ pub fn is_zarzakh_horizon_siege_active(ctx: &ServerContext) -> bool {
         return true;
     }
     ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get("zarzakh_horizon_siege_active")
-            .and_then(|v| v.parse::<bool>().ok())
+        snap.kv(eve_db::Ns::ZarzakhHorizonSiegeActive)
+            .get::<bool>(0, "")
+            .or_else(|| {
+                snap.service_state_blobs
+                    .get("zarzakh_horizon_siege_active")
+                    .and_then(|v| v.parse::<bool>().ok())
+            })
             .unwrap_or(false)
     })
 }
@@ -1164,7 +1176,10 @@ pub fn set_zarzakh_horizon_siege_active(ctx: &ServerContext, active: bool) {
         });
         ctx.db.with_mut_snapshot(|snap| {
             snap.service_state_blobs
-                .insert("zarzakh_horizon_siege_active".into(), "false".into());
+                .remove("zarzakh_horizon_siege_active");
+            let _ = snap
+                .kv_mut(eve_db::Ns::ZarzakhHorizonSiegeActive)
+                .set_with_unix(0, "", &false, now);
         });
         persist_misc_state(ctx);
         emit_zarzakh_horizon_siege_changed(ctx, &state);

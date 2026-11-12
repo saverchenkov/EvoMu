@@ -1236,10 +1236,15 @@ fn handle_inner(
                 .filter(|s| !s.is_empty())
                 .or_else(|| {
                     ctx.db.with_snapshot(|snap| {
-                        snap.service_state_blobs
-                            .get("kiring:eveguard_server_address")
+                        snap.kv(eve_db::Ns::KiringConfig)
+                            .get::<String>(0, "eveguard_server_address")
                             .filter(|s| !s.is_empty())
-                            .cloned()
+                            .or_else(|| {
+                                snap.service_state_blobs
+                                    .get("kiring:eveguard_server_address")
+                                    .filter(|s| !s.is_empty())
+                                    .cloned()
+                            })
                     })
                 });
             Ok(Some(configured_addr.map(PyRep::String).unwrap_or(PyRep::None)))

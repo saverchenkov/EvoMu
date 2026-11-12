@@ -55,6 +55,7 @@ pub fn sync_dirty_to_sqlite(
         if snap.dirty_hints.crimewatch_dirty {
             cold_changed |= super::corp_crimewatch_store::sync_d6_corp_crimewatch(tx, snap, fp)?;
         }
+        cold_changed |= super::service_domains_store::sync_entity_kv(tx, snap, fp)?;
     } else {
     cold_changed |= sync_part1_hot_tables(tx, snap, fp, &mut delta)?;
     cold_changed |= sync_part2_activity_tables(tx, snap, fp, &mut delta)?;
@@ -1577,7 +1578,8 @@ pub fn replace_sqlite_from_snapshot(
          DELETE FROM char_notes;
          DELETE FROM d6_corp_crimewatch_kv;
          DELETE FROM world_kv_blobs;
-         DELETE FROM service_domain_state;",
+         DELETE FROM service_domain_state;
+         DELETE FROM entity_kv;",
     )
     .map_err(|e| e.to_string())?;
     let mut fp = TableFingerprints::default();
