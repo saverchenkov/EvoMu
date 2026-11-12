@@ -1140,11 +1140,18 @@ async fn death_pipeline_escape_bay_pod_implants_insurance_kill_rights_and_struct
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn b3_destruction_pipeline_idempotency_unpiloted_hull_kills_and_sqlite_reload() {
-    use crate::router::SessionState;
+    use eve_db::SessionState;
     use eve_proto::PyRep;
 
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let db_path = tmp.path().join("b3_destruction.sqlite");
+    let db_path = std::env::temp_dir().join(format!(
+        "b3_destruction_{}_{}.sqlite",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&db_path);
     let sde = {
         let base_ctx = test_ctx();
         Arc::clone(&base_ctx.sde)
@@ -1374,7 +1381,7 @@ async fn b3_destruction_pipeline_idempotency_unpiloted_hull_kills_and_sqlite_rel
         }
     });
     let kms_before = restarted_ctx.db.with_snapshot(|s| s.killmails.len());
-    crate::services::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(
+    crate::services::combat_crimewatch::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(
         &restarted_ctx,
         sys_id,
         attacker,
@@ -1413,4 +1420,5 @@ async fn b3_destruction_pipeline_idempotency_unpiloted_hull_kills_and_sqlite_rel
             pod_after_second_eject
         );
     });
+    let _ = std::fs::remove_file(&db_path);
 }
