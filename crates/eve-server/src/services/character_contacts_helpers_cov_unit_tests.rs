@@ -301,13 +301,13 @@ fn watchlist_presence_filters_unwatched_self_watch_and_target_block() {
 
     let ok_notifs = ctx.drain_notifications_for_char(watcher_ok);
     assert_eq!(ok_notifs.len(), 2);
-    assert_eq!(ok_notifs[0].event, "OnClientContactChange");
+    assert_eq!(ok_notifs[0].event, "OnContactLoggedOff");
+    assert_eq!(ok_notifs[0].args, vec![PyRep::Integer(target)]);
+    assert_eq!(ok_notifs[1].event, "OnClientContactChange");
     assert_eq!(
-        ok_notifs[0].args,
+        ok_notifs[1].args,
         vec![PyRep::Integer(target), PyRep::Bool(false)]
     );
-    assert_eq!(ok_notifs[1].event, "OnContactLoggedOff");
-    assert_eq!(ok_notifs[1].args, vec![PyRep::Integer(target)]);
 
     assert!(ctx.drain_notifications_for_char(target).is_empty());
     assert!(ctx.drain_notifications_for_char(unwatched).is_empty());
@@ -321,12 +321,12 @@ fn watchlist_presence_filters_unwatched_self_watch_and_target_block() {
     notify_watchlist_logon(&ctx, target);
     let logon_notifs = ctx.drain_notifications_for_char(watcher_ok);
     assert_eq!(logon_notifs.len(), 2);
+    assert_eq!(logon_notifs[0].event, "OnContactLoggedOn");
+    assert_eq!(logon_notifs[0].args, vec![PyRep::Integer(target)]);
     assert_eq!(
-        logon_notifs[0].args,
+        logon_notifs[1].args,
         vec![PyRep::Integer(target), PyRep::Bool(true)]
     );
-    assert_eq!(logon_notifs[1].event, "OnContactLoggedOn");
-    assert_eq!(logon_notifs[1].args, vec![PyRep::Integer(target)]);
 }
 
 #[test]
