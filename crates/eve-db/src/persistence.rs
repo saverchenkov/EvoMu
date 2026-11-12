@@ -1069,10 +1069,10 @@ impl WorldRepository {
         let mut arc_guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
         let _write_depth_guard = DbWriteLockDepthGuard::enter();
         let guard = std::sync::Arc::make_mut(&mut *arc_guard);
-        let mut conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
-        let mut fp = self.sqlite_fp.lock().unwrap_or_else(|e| e.into_inner());
         guard.dirty_hints.clear();
         let closure_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(guard)));
+        let mut conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut fp = self.sqlite_fp.lock().unwrap_or_else(|e| e.into_inner());
         let should_commit = match closure_res {
             Ok(commit) => commit,
             Err(panic_payload) => {
@@ -1213,8 +1213,8 @@ impl WorldRepository {
     {
         let mut arc_guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
         let guard = std::sync::Arc::make_mut(&mut *arc_guard);
-        let mut fp = self.sqlite_fp.lock().unwrap_or_else(|e| e.into_inner());
         let out = f(guard);
+        let mut fp = self.sqlite_fp.lock().unwrap_or_else(|e| e.into_inner());
         *fp = sqlite_store::compute_fingerprints(guard);
         out
     }

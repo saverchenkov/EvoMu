@@ -21,7 +21,8 @@ use belts::{
     reconcile_spawned_belt_asteroids, respawn_due_asteroids,
 };
 use eve_db::lock_rank::{
-    AnyRwLock, RankedMutex, RankedRwLock, RANK_ACTOR_STATE, RANK_BALLPARK, RANK_LEAF,
+    held_lock_ranks, AnyRwLock, RankedMutex, RankedRwLock, RANK_ACTOR_STATE, RANK_BALLPARK,
+    RANK_LEAF, RANK_SERVICE_STATE, RANK_SYSTEM_REGISTRY,
 };
 use eve_destiny::wire::{
     encode_destiny_updates, encode_set_state_payload, encode_set_state_update,
@@ -62,7 +63,7 @@ pub fn next_downtime_unix_secs(now_unix: u64, interval_secs: u64, downtime_utc_s
 }
 
 pub struct SystemRegistry {
-    pub(crate) systems: RankedRwLock<HashMap<SolarSystemId, SystemHandle>, RANK_LEAF>,
+    pub(crate) systems: RankedRwLock<HashMap<SolarSystemId, SystemHandle>, RANK_SYSTEM_REGISTRY>,
     sde: Option<Arc<SdeRegistry>>,
     pub db: Option<Arc<eve_db::WorldRepository>>,
     belt_respawn_interval_secs: Arc<std::sync::atomic::AtomicU64>,
@@ -82,7 +83,7 @@ pub struct SystemRegistry {
     pub tactical_state: Arc<RankedRwLock<crate::services::tactical_modules::TacticalModulesState, RANK_LEAF>>,
     pending_notifications_opt: Option<Arc<RankedRwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>, RANK_LEAF>>>,
     notify_tx_opt: Option<broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
-    pub cluster_nodes: RankedRwLock<ClusterNodeRegistry, RANK_LEAF>,
+    pub cluster_nodes: RankedRwLock<ClusterNodeRegistry, RANK_SERVICE_STATE>,
 }
 
 impl Default for SystemRegistry {
@@ -273,25 +274,46 @@ impl SystemRegistry {
     }
 
     pub fn active_systems_count(&self) -> usize {
-        self.systems.read().unwrap_or_else(|e| e.into_inner()).len()
+        if held_lock_ranks().iter().any(|&r| r >= RANK_SYSTEM_REGISTRY) {
+            self.systems.read_unranked().unwrap_or_else(|e| e.into_inner()).len()
+        } else {
+            self.systems.read().unwrap_or_else(|e| e.into_inner()).len()
+        }
     }
 
     pub fn get_handle(&self, solar_system_id: SolarSystemId) -> Option<SystemHandle> {
-        let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
-        guard
-            .get(&solar_system_id)
-            .filter(|h| !h.cmd_tx.is_closed())
-            .cloned()
+        if held_lock_ranks().iter().any(|&r| r >= RANK_SYSTEM_REGISTRY) {
+            let guard = self.systems.read_unranked().unwrap_or_else(|e| e.into_inner());
+            guard
+                .get(&solar_system_id)
+                .filter(|h| !h.cmd_tx.is_closed())
+                .cloned()
+        } else {
+            let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
+            guard
+                .get(&solar_system_id)
+                .filter(|h| !h.cmd_tx.is_closed())
+                .cloned()
+        }
     }
 
     pub fn active_system_handles(&self) -> Vec<(SolarSystemId, SystemHandle)> {
-        let mut handles: Vec<(SolarSystemId, SystemHandle)> = self
-            .systems
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .map(|(&id, h)| (id, h.clone()))
-            .collect();
+        let mut handles: Vec<(SolarSystemId, SystemHandle)> =
+            if held_lock_ranks().iter().any(|&r| r >= RANK_SYSTEM_REGISTRY) {
+                self.systems
+                    .read_unranked()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter()
+                    .map(|(&id, h)| (id, h.clone()))
+                    .collect()
+            } else {
+                self.systems
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter()
+                    .map(|(&id, h)| (id, h.clone()))
+                    .collect()
+            };
         handles.sort_by_key(|(id, _)| *id);
         handles
     }

@@ -5,7 +5,7 @@ use crate::system_actor::SystemRegistry;
 use crate::world_seeder;
 use eve_db::lock_rank::{
     AnyRwLock, RankedMutex, RankedRwLock, RankedRwLockReadGuard, RankedRwLockWriteGuard,
-    RANK_CLOCK, RANK_LEAF,
+    RANK_CLOCK, RANK_LEAF, RANK_NPC_SPAWNS,
 };
 use eve_db::WorldRepository;
 use eve_dogma::ShipFittingEngine;
@@ -97,7 +97,7 @@ pub struct ServerContext {
     pub alert_telemetry: RankedMutex<crate::services::client_login::AlertTelemetryState, RANK_LEAF>,
     pub flight_recorder: Arc<crate::flight_recorder::FlightRecorder>,
     pub bug_reporting: Arc<crate::bug_reporting::BugReportingRuntime>,
-    pub npc_spawns: RankedRwLock<HashMap<u32, crate::combat::npc_ai::NpcSpawnManager>, RANK_LEAF>,
+    pub npc_spawns: RankedRwLock<HashMap<u32, crate::combat::npc_ai::NpcSpawnManager>, RANK_NPC_SPAWNS>,
     pub combat_rng_seq: AtomicU64,
     pub cluster_tick_last_unix: AtomicU64,
     pub cluster_tick_persisted_unix: AtomicU64,

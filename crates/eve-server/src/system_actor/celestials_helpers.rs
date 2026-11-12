@@ -130,9 +130,17 @@ pub fn try_remove_ball_for_db(
         if let (Some(bp_arc), Some(pos_arc), Some(scram_arc)) =
             (bp_w.upgrade(), pos_w.upgrade(), scram_w.upgrade())
         {
-            let mut bp = bp_arc.write().unwrap_or_else(|e| e.into_inner());
-            let _ = bp.remove_ball(ball_id);
-            sync_ball_positions(&bp, &pos_arc, &scram_arc);
+            if eve_db::lock_rank::held_lock_ranks().contains(&eve_db::lock_rank::RANK_BALLPARK) {
+                eve_db::lock_rank::assert_locks_below(eve_db::lock_rank::RANK_BALLPARK + 1);
+                if let Ok(mut bp) = bp_arc.try_write_unranked() {
+                    let _ = bp.remove_ball(ball_id);
+                    sync_ball_positions(&bp, &pos_arc, &scram_arc);
+                }
+            } else {
+                let mut bp = bp_arc.write().unwrap_or_else(|e| e.into_inner());
+                let _ = bp.remove_ball(ball_id);
+                sync_ball_positions(&bp, &pos_arc, &scram_arc);
+            }
         }
     }
 }

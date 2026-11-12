@@ -10,12 +10,20 @@ use std::ops::{Deref, DerefMut};
 use std::panic::Location;
 use std::sync::{LockResult, Mutex, PoisonError, RwLock, TryLockError, TryLockResult};
 
+/// Rank `5`: per-system NPC spawner map (`ServerContext::npc_spawns`), outer to
+/// `SystemRegistry::systems` (`10`), `Ballpark` (`20`), and `WorldRepository::inner` (`40`).
+pub const RANK_NPC_SPAWNS: u16 = 5;
+/// Rank `10`: solar system actor registry (`SystemRegistry::systems`), outer to
+/// `Ballpark` (`20`), `ActorState` (`21`), `Crimewatch` (`30`), and `WorldRepository::inner` (`40`).
+pub const RANK_SYSTEM_REGISTRY: u16 = 10;
 /// Rank `20`: per-system `Ballpark` (`SystemHandle::ballpark`).
 pub const RANK_BALLPARK: u16 = 20;
 /// Rank `21`: per-system `ActorState` (`SystemHandle::actor_state`).
 pub const RANK_ACTOR_STATE: u16 = 21;
 /// Rank `30`: transitional CrimeWatch coordinator lock (`CrimeWatchLock::lock`).
 pub const RANK_CRIMEWATCH: u16 = 30;
+/// Rank `35`: service-level registries (`SystemRegistry::cluster_nodes`) that read `WorldRepository` (`40`).
+pub const RANK_SERVICE_STATE: u16 = 35;
 /// Rank `40`: `WorldRepository::inner` snapshot lock.
 pub const RANK_WORLD_INNER: u16 = 40;
 /// Rank `41`: `WorldRepository::sqlite_conn`.
@@ -24,8 +32,8 @@ pub const RANK_SQLITE_CONN: u16 = 41;
 pub const RANK_SQLITE_FP: u16 = 42;
 /// Rank `43`: `WorldRepository::wal_lock`.
 pub const RANK_WAL_LOCK: u16 = 43;
-/// Rank `60`: leaf locks (`SystemRegistry::systems`, runtime maps, mirrors, notification queues,
-/// `bound_objects`, `fleet_extras`, `social_extras`, `auth_runtime`, `esi_state.*`, and Quasar meta).
+/// Rank `60`: leaf locks (`WorldRepository::auth_runtime`, `DedicatedAuthConn::conn`, `SystemHandle`
+/// caches, runtime maps, notification queues, `bound_objects`, `esi_state.*`, and Quasar meta).
 pub const RANK_LEAF: u16 = 60;
 /// Rank `70`: terminal clock pointer lock (`WorldRepository::clock`, `ServerContext::clock`);
 /// never acquires any inner lock while held, so leaf locks may read the clock.
@@ -591,6 +599,19 @@ impl<T: ?Sized, const RANK: u16> Ranked<RwLock<T>, RANK> {
         })
     }
 
+    /// Acquires shared read access on the underlying `RwLock` without pushing `RANK` onto the
+    /// thread's held-rank stack (used only for brief clone-and-drop leaf reads of handle tables).
+    pub fn read_unranked(&self) -> LockResult<std::sync::RwLockReadGuard<'_, T>> {
+        self.0.read()
+    }
+
+    /// Attempts non-blocking exclusive write access on the underlying `RwLock` without pushing
+    /// `RANK` onto the thread's held-rank stack (used only with an explicit rank bound check for
+    /// cross-system non-blocking cleanup).
+    pub fn try_write_unranked(&self) -> TryLockResult<std::sync::RwLockWriteGuard<'_, T>> {
+        self.0.try_write()
+    }
+
     /// Returns whether the underlying `RwLock` is currently poisoned.
     pub fn is_poisoned(&self) -> bool {
         self.0.is_poisoned()
@@ -938,7 +959,7 @@ mod tests {
     }
 
     #[test]
-    fn ratchet_file_is_empty_and_record_enforce_roundtrip() {
+    fn committed_ratchet_policy_and_record_enforce_roundtrip() {
         let non_comment_lines = LOCK_RANK_RATCHET_RAW
             .lines()
             .filter(|l| {
@@ -951,6 +972,22 @@ mod tests {
             parsed.len(),
             non_comment_lines,
             "every non-comment line in crates/eve-db/lock_rank_ratchet.txt must parse as a unique triple"
+        );
+        assert!(
+            parsed
+                .iter()
+                .all(|(h, a, _)| !(*h == RANK_BALLPARK && *a == RANK_BALLPARK)),
+            "committed ratchet must never allow same-rank Ballpark (20 -> 20) re-entry"
+        );
+        assert!(
+            parsed.iter().all(|(h, _, _)| *h != RANK_SQLITE_FP),
+            "committed ratchet must never allow RANK_SQLITE_FP (42) outer inversions"
+        );
+        assert!(
+            parsed.iter().all(|(h, a, _)| {
+                !(*h == RANK_LEAF && (*a == RANK_BALLPARK || *a == RANK_ACTOR_STATE))
+            }),
+            "committed ratchet must never allow RANK_LEAF (60) -> Ballpark (20) / ActorState (21) inversions"
         );
 
         let path = temp_ratchet_path("roundtrip");

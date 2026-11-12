@@ -1062,36 +1062,10 @@ pub fn on_advance_secs_internal(
         if step_active_npc_ai_sync && !dedicated_physics_active {
             for &sys_id in active_systems.keys() {
                 crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync(ctx, sys_id);
-                let mut maybe_mgr = {
-                    let mut guard = ctx.npc_spawns.write().unwrap_or_else(|e| e.into_inner());
-                    if guard.get(&sys_id).is_some_and(|m| !m.entities.is_empty()) {
-                        guard.remove(&sys_id)
-                    } else {
-                        None
-                    }
-                };
-                if let Some(ref mut mgr) = maybe_mgr {
-                    let tick = ctx.systems.get_or_spawn(sys_id).ballpark.try_read().map(|b| b.current_tick).unwrap_or(0);
-                    mgr.step_ai_sync(ctx, sys_id, tick, 1.0);
-                }
-                if let Some(mgr) = maybe_mgr {
-                    let mut guard = ctx.npc_spawns.write().unwrap_or_else(|e| e.into_inner());
-                    match guard.entry(sys_id) {
-                        std::collections::hash_map::Entry::Vacant(v) => {
-                            v.insert(mgr);
-                        }
-                        std::collections::hash_map::Entry::Occupied(mut o) => {
-                            let cur = o.get_mut();
-                            for (k, v) in mgr.entities {
-                                cur.entities.entry(k).or_insert(v);
-                            }
-                            for (k, v) in mgr.respawn_timers {
-                                cur.respawn_timers.entry(k).or_insert(v);
-                            }
-                            for (k, v) in mgr.clone_soldier_respawn_timers {
-                                cur.clone_soldier_respawn_timers.entry(k).or_insert(v);
-                            }
-                        }
+                if let Some(mgr) = ctx.npc_spawns.write().unwrap_or_else(|e| e.into_inner()).get_mut(&sys_id) {
+                    if !mgr.entities.is_empty() {
+                        let tick = ctx.systems.get_or_spawn(sys_id).ballpark.try_read().map(|b| b.current_tick).unwrap_or(0);
+                        mgr.step_ai_sync(ctx, sys_id, tick, 1.0);
                     }
                 }
             }
@@ -1965,33 +1939,15 @@ async fn step_single_system_physics_step(
         crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai(ctx, sys_id),
     )
     .await;
-    let maybe_mgr = ctx
+    if let Some(mgr) = ctx
         .npc_spawns
         .write()
         .unwrap_or_else(|e| e.into_inner())
-        .remove(&sys_id);
-    if let Some(mut mgr) = maybe_mgr {
+        .get_mut(&sys_id)
+    {
         let tick = handle.ballpark.try_read().map(|b| b.current_tick).unwrap_or(0);
         let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, sys_id);
         mgr.step_ai_sync(ctx, sys_id, tick, 1.0 * tidi);
-        let mut guard = ctx.npc_spawns.write().unwrap_or_else(|e| e.into_inner());
-        match guard.entry(sys_id) {
-            std::collections::hash_map::Entry::Vacant(v) => {
-                v.insert(mgr);
-            }
-            std::collections::hash_map::Entry::Occupied(mut o) => {
-                let cur = o.get_mut();
-                for (k, v) in mgr.entities {
-                    cur.entities.entry(k).or_insert(v);
-                }
-                for (k, v) in mgr.respawn_timers {
-                    cur.respawn_timers.entry(k).or_insert(v);
-                }
-                for (k, v) in mgr.clone_soldier_respawn_timers {
-                    cur.clone_soldier_respawn_timers.entry(k).or_insert(v);
-                }
-            }
-        }
     }
 }
 
