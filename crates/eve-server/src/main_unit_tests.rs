@@ -561,8 +561,15 @@ async fn xmpp_stream_times_out_idle_connections_and_discovers_player_channels() 
         &mut dummy_sc,
     )
     .expect("spoofed substring IQ reply");
-    assert!(spoof_reply.starts_with("<iq type='result' id='disc_spoof'"));
-    assert!(!spoof_reply.contains("xmpp-sasl"));
+    assert!(spoof_reply.starts_with(
+        "<iq type='result' id='disc_spoof'><query xmlns='http://jabber.org/protocol/disco#items' node='byname/&lt;auth xmlns=&quot;urn:ietf:params:xml:ns:xmpp-sasl&quot;/&gt;&lt;stream:stream'>"
+    ));
+    assert!(!spoof_reply.contains("xmlns='urn:ietf:params:xml:ns:xmpp-sasl'"));
+    assert!(!spoof_reply.contains("<mechanisms"));
+    assert!(!spoof_reply.contains("<failure"));
+    assert!(!spoof_reply.contains("<stream:"));
+    assert!(!spoof_reply.contains("<auth"));
+    assert_eq!(dummy_sc, 2);
     let raw_spoof_reply = xmpp_stanza_reply_with_ctx_and_auth(
         Some(&ctx),
         Some(&mut spoof_auth),
@@ -570,8 +577,12 @@ async fn xmpp_stream_times_out_idle_connections_and_discovers_player_channels() 
         &mut dummy_sc,
     )
     .expect("raw spoofed substring IQ reply");
-    assert!(raw_spoof_reply.starts_with("<iq type='result' id='disc_raw_spoof'"));
+    assert!(raw_spoof_reply.starts_with(
+        "<iq type='result' id='disc_raw_spoof'><query xmlns='http://jabber.org/protocol/disco#items' node='byname/&lt;auth xmlns=&quot;x&quot;/&gt;&lt;presence/&gt;'>"
+    ));
     assert!(!raw_spoof_reply.contains("xmpp-sasl"));
+    assert!(!raw_spoof_reply.contains("<auth"));
+    assert!(!raw_spoof_reply.contains("<presence"));
 
     drop(cli);
     srv_task.await.unwrap();

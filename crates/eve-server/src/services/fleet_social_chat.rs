@@ -2440,7 +2440,7 @@ pub fn xmpp_iq_reply_with_auth_mut(
                 let esc_name = escape_xml_attr(&display_name);
                 body.push_str(&format!("<item jid='{esc_jid}' name='{esc_name}'/>"));
             }
-            let esc_node = escape_xml_attr(node);
+            let esc_node = escape_xml_attr(&unescape_xml_attr(node));
             format!(
                 "<iq type='result' id='{esc_stanza_id}'><query xmlns='http://jabber.org/protocol/disco#items' node='{esc_node}'>{body}</query></iq>"
             )
